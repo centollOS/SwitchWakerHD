@@ -67,6 +67,10 @@ endif()
 # ---- vendored Cemu GPU pieces (MPL-2.0): address library + shader decompiler
 set(CEMU_DIR ${CMAKE_SOURCE_DIR}/runtime/third_party/cemu)
 file(GLOB_RECURSE CEMU_SOURCES CONFIGURE_DEPENDS ${CEMU_DIR}/*.cpp)
+if(NOT WWHD_HAS_METAL)
+  # the MSL emitter needs metal-cpp (Objective-C runtime); Vulkan uses the GLSL emitter
+  list(FILTER CEMU_SOURCES EXCLUDE REGEX "LatteDecompilerEmitMSL[^/]*\\.cpp$")
+endif()
 add_library(cemu_latte STATIC ${CEMU_SOURCES})
 target_include_directories(cemu_latte PUBLIC ${CEMU_DIR} ${CEMU_DIR}/Cafe ${CMAKE_SOURCE_DIR}/runtime/third_party/metal-cpp
                                              ${CMAKE_SOURCE_DIR}/runtime/third_party/fmt/include)
