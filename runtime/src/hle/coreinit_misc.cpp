@@ -1,4 +1,5 @@
 // coreinit: logging, dynamic loading, system info, and small odds and ends.
+#include "../crashrec.h"
 #include <cstdlib>
 #include "../true60.h"
 #include <filesystem>
@@ -161,6 +162,12 @@ static void write_crash_log(Cpu* c, const std::string& file, uint32_t line, cons
         fprintf(f, "  <- %08X %s\n", ra, name(ra).c_str());
         sp = prev;
     }
+    static FILE* out_file;
+    out_file = f;
+    auto out = [](int, const char* t, size_t n) { fwrite(t, 1, n, out_file); };
+    crashrec::crash_note(0, out);
+    fputs("\n--- last log lines ---\n", f);
+    log_ring_write(0, out);
     fclose(f);
     fprintf(stderr, "[crash] wrote %s\n", path);
 }

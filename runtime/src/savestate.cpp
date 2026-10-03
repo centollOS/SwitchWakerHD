@@ -50,6 +50,7 @@
 #include <unordered_map>
 
 #include "runtime.h"
+#include "crashrec.h"
 
 // module sections
 bool threads_ss_save(ss::Writer& w, std::string& why);
@@ -199,7 +200,14 @@ std::string state_dir() {
     }();
     return dir;
 }
-std::string slot_path(int slot, const char* ext = "bin") { return state_dir() + "/slot" + std::to_string(slot) + "." + ext; }
+bool is_auto(int slot) { return slot > crashrec::kAutoBase && slot <= crashrec::kAutoBase + crashrec::kAutoSlots; }
+std::string slot_label(int slot) {
+    return is_auto(slot) ? "Automatic state " + std::to_string(slot - crashrec::kAutoBase) : "Slot " + std::to_string(slot);
+}
+std::string slot_path(int slot, const char* ext = "bin") {
+    if (is_auto(slot)) return state_dir() + "/auto/auto" + std::to_string(slot - crashrec::kAutoBase) + "." + ext;  // crashrec.cpp
+    return state_dir() + "/slot" + std::to_string(slot) + "." + ext;
+}
 
 void build_uuid(uint8_t out[16]) {
     memset(out, 0, 16);
@@ -475,7 +483,7 @@ bool do_save(int slot) {
     if (!threads::quiesce(250, busy, 1, 30)) {
         threads::thaw();
         if (++g_attempts < 30) return false;
-        message("Slot %d: not saved (game busy:%s)", slot, busy.c_str());
+        if (!is_auto(slot)) message("Slot %d: not saved (game busy:%s)", slot, busy.c_str());
         return true;
     }
     gx2_ss_drain();
@@ -483,7 +491,7 @@ bool do_save(int slot) {
     if (!threads_ss_save(threads_w, why)) {
         threads::thaw();
         if (++g_attempts < 30) return false;
-        message("Slot %d: not saved (%s)", slot, why.c_str());
+        if (!is_auto(slot)) message("Slot %d: not saved (%s)", slot, why.c_str());
         return true;
     }
     auto payload = std::make_shared<Writer>();
@@ -527,7 +535,8 @@ bool do_save(int slot) {
     threads::thaw();
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     LOG("[savestate] slot %d: captured %.1f MB in %.1f ms (stage %s)", slot, payload->b.size() / 1048576.0, ms, stage.c_str());
-    render::request_tv_dump(slot_path(slot, "png"), 0);
+    if (!is_auto(slot)) render::request_tv_dump(slot_path(slot, "png"), 0);
+    else crashrec::on_auto_saved(slot - crashrec::kAutoBase);
     // compress and write in the background; the game continues
     std::thread([slot, h, payload, stage] {
         auto t1 = std::chrono::steady_clock::now();
@@ -540,6 +549,7 @@ bool do_save(int slot) {
         struct stat st{};
         stat(slot_path(slot).c_str(), &st);
         LOG("[savestate] slot %d: %s (%.1f MB on disk, %.0f ms)", slot, ok ? "written" : "WRITE FAILED", st.st_size / 1048576.0, ms);
+        if (is_auto(slot)) return;  // automatic states stay quiet
         std::lock_guard<std::mutex> lk(g_mu);
         g_message = ok ? "Saved to slot " + std::to_string(slot) + (stage.empty() ? "" : " (" + area_label(stage.c_str()) + ")")
                        : "Slot " + std::to_string(slot) + ": write failed";
@@ -555,7 +565,7 @@ bool do_load(const std::shared_ptr<Snapshot>& s) {
     if (!threads::quiesce(250, busy, 2, 0)) {
         threads::thaw();
         if (++g_attempts < 30) return false;
-        message("Slot %d: not loaded (game busy:%s)", s->slot, busy.c_str());
+        message("%s: not loaded (game busy:%s)", slot_label(s->slot).c_str(), busy.c_str());
         return true;
     }
     gx2_ss_drain();
@@ -573,7 +583,7 @@ bool do_load(const std::shared_ptr<Snapshot>& s) {
             if (g_attempts == 1) LOG("[savestate] slot %d: waiting for the game threads (%s)", s->slot, why.c_str());
             return false;
         }
-        message("Slot %d: cannot load here (%s)", s->slot, why.c_str());
+        message("%s: cannot load here (%s)", slot_label(s->slot).c_str(), why.c_str());
         return true;
     }
     restore_memory(*s);
@@ -594,7 +604,7 @@ bool do_load(const std::shared_ptr<Snapshot>& s) {
     threads::thaw();
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     std::string area = s->h.area[0] ? " (" + area_label(s->h.area) + ")" : "";
-    message("Loaded slot %d%s", s->slot, area.c_str());
+    message("Loaded %s%s", is_auto(s->slot) ? slot_label(s->slot).c_str() : ("slot " + std::to_string(s->slot)).c_str(), area.c_str());
     LOG("[savestate] slot %d: restored in %.1f ms", s->slot, ms);
     return true;
 }
@@ -658,12 +668,12 @@ SlotInfo slot_info(int slot) {
 }
 
 void request_save(int slot) {
-    if (slot < 1 || slot > kSlots) return;
+    if ((slot < 1 || slot > kSlots) && !is_auto(slot)) return;
     g_save_req = slot;
 }
 
 void request_load(int slot) {
-    if (slot < 1 || slot > kSlots) return;
+    if ((slot < 1 || slot > kSlots) && !is_auto(slot)) return;
     if (g_loading.exchange(true)) return;
     std::thread([slot] {
         auto t0 = std::chrono::steady_clock::now();
@@ -674,7 +684,7 @@ void request_load(int slot) {
             s = read_slot(slot, why);
         }
         if (!s) {
-            message("Slot %d: %s", slot, why.c_str());
+            message("%s: %s", slot_label(slot).c_str(), why.c_str());
             g_loading = false;
             return;
         }
@@ -697,8 +707,11 @@ uint32_t last_load_counter() { return g_last_load_counter.load(); }
 uint64_t last_load_frame() { return g_last_load_frame.load(); }
 uint64_t last_load_step() { return g_last_load_step.load(); }
 
+std::string states_dir() { return state_dir(); }
+
 void service(Cpu* c) {
     (void)c;
+    crashrec::service();
     static const std::vector<Timed> save_at = parse_timed("WWHD_STATE_SAVE_AT"), load_at = parse_timed("WWHD_STATE_LOAD_AT");
     if (!save_at.empty() || !load_at.empty()) {
         static uint64_t last = 0;

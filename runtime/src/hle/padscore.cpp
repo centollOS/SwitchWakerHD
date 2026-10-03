@@ -1,6 +1,7 @@
 // padscore: Wii Remote / Pro Controller (WPAD, KPAD). Only a Pro Controller on channel 0 exists,
 // and only while the keyboard/host controllers are set to act as one (Input menu). Struct layouts
 // and constants follow Cemu's padscore.
+#include "../crashrec.h"
 #include "../runtime.h"
 #include "../input.h"
 
@@ -62,7 +63,7 @@ HLE(padscore, KPADReadEx) {
     static uint32_t last = 0;
     static input::PadState last_p;
     const bool repeat = interp::repeat_input();
-    input::PadState p = repeat ? last_p : input::read();  // see interp.cpp
+    input::PadState p = repeat ? last_p : crashrec::read(1);  // see interp.cpp; crash recovery records/replays it
     if (repeat && interp::fresh_sticks()) {  // true 60: sticks every pass, buttons on full passes
         input::PadState f = input::read();
         p.lx = f.lx; p.ly = f.ly; p.rx = f.rx; p.ry = f.ry;

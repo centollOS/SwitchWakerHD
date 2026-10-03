@@ -1,9 +1,17 @@
 // Wind Waker HD recompiled: entry point.
 #ifndef _WIN32
 #include <execinfo.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#else
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
 #endif
+#include <ctime>
+#include <filesystem>
 #include "platform/host.h"
 
 #include <cstring>
@@ -13,6 +21,7 @@
 #include "gfx/renderer.h"
 #include "gx2/gx2.h"
 #include "recomp_table.h"
+#include "crashrec.h"
 #include "runtime.h"
 
 #ifdef WWHD_HAS_VULKAN
@@ -27,32 +36,73 @@ void trace_dump(FILE* f, unsigned last);
 void mem_init_data_imports(uint32_t alloc_slot, uint32_t alloc_ex_slot, uint32_t free_slot);
 
 #ifndef _WIN32
+// Memory crashes (SIGSEGV/SIGBUS/...): the report goes to the terminal and to
+// captures/crash-<time>.log (registers, guest return chain, host backtrace, crash recovery's
+// automatic state, the last log lines). Only write() and preformatted text after the crash.
+static int g_crash_fd = -1;
+static void crash_out(int fd, const char* s, size_t n) {
+    if (write(2, s, n) < 0) {}
+    if (fd >= 0 && write(fd, s, n) < 0) {}
+}
+static void crash_log_only(int fd, const char* s, size_t n) {
+    if (fd >= 0 && write(fd, s, n) < 0) {}
+}
 static void crash_handler(int sig, siginfo_t* si, void*) {
     uintptr_t a = (uintptr_t)si->si_addr;
     uintptr_t base = (uintptr_t)PPC_MEM_BASE;
+    char path[96];
+    {
+        mkdir("captures", 0755);
+        time_t t = time(nullptr);
+        struct tm tmv;
+        localtime_r(&t, &tmv);
+        strftime(path, sizeof path, "captures/crash-%Y%m%d-%H%M%S.log", &tmv);
+        g_crash_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    }
+    const int fd = g_crash_fd;
     char buf[256];
     int n;
     if (a >= base && a < base + 0x100000000ull)
         n = snprintf(buf, sizeof buf, "\nCRASH: signal %d at guest address %08X\n", sig, (unsigned)(a - base));
     else
         n = snprintf(buf, sizeof buf, "\nCRASH: signal %d at host address %p\n", sig, si->si_addr);
-    write(2, buf, n);
+    crash_out(fd, buf, n);
     Cpu* c = threads::current();
     if (c) {
         n = snprintf(buf, sizeof buf, "  guest lr=%08X ctr=%08X cr=%08X\n", c->lr, c->ctr, ppc_mfcr(c));
-        write(2, buf, n);
+        crash_out(fd, buf, n);
         for (int i = 0; i < 32; i += 8) {
             n = snprintf(buf, sizeof buf, "  r%-2d %08X %08X %08X %08X %08X %08X %08X %08X\n", i, c->r[i], c->r[i + 1],
                          c->r[i + 2], c->r[i + 3], c->r[i + 4], c->r[i + 5], c->r[i + 6], c->r[i + 7]);
-            write(2, buf, n);
+            crash_out(fd, buf, n);
         }
+        // guest return chain (back-chain words on the guest stack; names: build/names.tsv)
+        crash_out(fd, "  guest call chain:", 19);
+        uint32_t sp = c->r[1];
+        for (int i = 0; i < 24 && sp >= 0x10000000u && sp < 0xF0000000u; i++) {
+            uint32_t prev = ld32(sp);
+            if (!prev || prev <= sp || prev - sp > 0x100000u) break;
+            n = snprintf(buf, sizeof buf, " %08X", ld32(prev + 4));
+            crash_out(fd, buf, n);
+            sp = prev;
+        }
+        crash_out(fd, "\n", 1);
     }
     void* frames[64];
     int nf = backtrace(frames, 64);
     backtrace_symbols_fd(frames, nf, 2);
+    if (fd >= 0) backtrace_symbols_fd(frames, nf, fd);
+    crashrec::crash_note(fd, crash_out);
+    if (fd >= 0) {
+        crash_log_only(fd, "\n--- last log lines ---\n", 24);
+        log_ring_write(fd, crash_log_only);
+        close(fd);
+        n = snprintf(buf, sizeof buf, "[crash] wrote %s\n", path);
+        crash_out(-1, buf, n);
+    }
     if (g_ppc_trace) {
         FILE* f = fopen("trace_dump.txt", "w");
-        if (f) { trace_dump(f, 3000); fclose(f); write(2, "[trace] wrote trace_dump.txt\n", 29); }
+        if (f) { trace_dump(f, 3000); fclose(f); if (write(2, "[trace] wrote trace_dump.txt\n", 29) < 0) {} }
     }
     _exit(128 + sig);
 }
@@ -73,10 +123,22 @@ static void install_crash_handler() {
 }
 
 #else
+static void win_crash_out(int fd, const char* s, size_t n) {
+    fwrite(s, 1, n, stderr);
+    if (fd >= 0) _write(fd, s, (unsigned)n);
+}
+static void win_crash_log_only(int fd, const char* s, size_t n) { if (fd >= 0) _write(fd, s, (unsigned)n); }
 static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ex) {
     auto code=ex->ExceptionRecord->ExceptionCode;
-    fprintf(stderr,"CRASH: Windows exception %08lX at %p\n",code,ex->ExceptionRecord->ExceptionAddress);
-    if(Cpu* c=threads::current())fprintf(stderr,"guest lr=%08X ctr=%08X\n",c->lr,c->ctr);
+    std::error_code ec; std::filesystem::create_directories("captures",ec);
+    char path[96]; time_t t=time(nullptr); struct tm tmv; localtime_s(&tmv,&t);
+    strftime(path,sizeof path,"captures/crash-%Y%m%d-%H%M%S.log",&tmv);
+    int fd=_open(path,_O_WRONLY|_O_CREAT|_O_TRUNC|_O_BINARY,_S_IREAD|_S_IWRITE);
+    char buf[256]; int n;
+    n=snprintf(buf,sizeof buf,"CRASH: Windows exception %08lX at %p\n",code,ex->ExceptionRecord->ExceptionAddress); win_crash_out(fd,buf,n);
+    if(Cpu* c=threads::current()){n=snprintf(buf,sizeof buf,"guest lr=%08X ctr=%08X\n",c->lr,c->ctr); win_crash_out(fd,buf,n);}
+    crashrec::crash_note(fd,win_crash_out);
+    if(fd>=0){win_crash_log_only(fd,"\n--- last log lines ---\n",24); log_ring_write(fd,win_crash_log_only); _close(fd); fprintf(stderr,"[crash] wrote %s\n",path);}
     if(g_ppc_trace) { FILE* f=fopen("trace_dump.txt","w"); if(f){trace_dump(f,3000);fclose(f);} }
     return EXCEPTION_EXECUTE_HANDLER;
 }

@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <shared_mutex>
@@ -28,13 +29,34 @@ std::string save_dir = "save";
 
 static std::mutex g_log_mutex;
 
+// the last log lines, kept for crash logs (crash handlers read them without the lock)
+static constexpr int kLogRing = 200, kLogLine = 240;
+static char g_log_ring[kLogRing][kLogLine];
+static std::atomic<uint32_t> g_log_next{0};
+
 void log_msg(const char* fmt, ...) {
     std::lock_guard<std::mutex> lk(g_log_mutex);
     va_list ap;
     va_start(ap, fmt);
+    char* line = g_log_ring[g_log_next.load() % kLogRing];
+    va_list ap2;
+    va_copy(ap2, ap);
+    vsnprintf(line, kLogLine, fmt, ap2);
+    va_end(ap2);
+    g_log_next++;
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
+}
+
+void log_ring_write(int fd, void (*out)(int, const char*, size_t)) {
+    uint32_t n = g_log_next.load();
+    uint32_t first = n > (uint32_t)kLogRing ? n - kLogRing : 0;
+    for (uint32_t i = first; i < n; i++) {
+        const char* l = g_log_ring[i % kLogRing];
+        out(fd, l, strnlen(l, kLogLine));
+        out(fd, "\n", 1);
+    }
 }
 
 void fatal(const char* fmt, ...) {

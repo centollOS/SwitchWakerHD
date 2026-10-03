@@ -3,6 +3,7 @@
 #include <SDL3/SDL.h>
 #include "settings.h"
 #include "../../savestate.h"
+#include "../../crashrec.h"
 #include <cmath>
 namespace interp { int mode(); void set_mode(int); }
 static constexpr float scales[]={1,1.5f,2,3};
@@ -11,6 +12,8 @@ static constexpr float scales[]={1,1.5f,2,3};
 @implementation WWVulkanStateMenu
 - (void)save:(NSMenuItem*)item { ss::request_save((int)item.tag); }
 - (void)load:(NSMenuItem*)item { ss::request_load((int)item.tag); }
+- (void)toggleCrashRecovery:(NSMenuItem*)item { crashrec::set_enabled(!crashrec::enabled()); }
+- (void)loadAuto:(NSMenuItem*)item { crashrec::request_load((int)item.tag); }
 - (void)menuNeedsUpdate:(NSMenu*)menu {
     [menu removeAllItems];
     ss::SlotInfo slots[ss::kSlots + 1];
@@ -35,6 +38,17 @@ static constexpr float scales[]={1,1.5f,2,3};
         item.target=self;item.tag=slot;
         item.enabled=slots[slot].used&&slots[slot].compatible;
         item.toolTip=[NSString stringWithFormat:@"Shortcut in game: F%d",slot];
+    }
+    [menu addItem:NSMenuItem.separatorItem];  // crash recovery (crashrec.cpp)
+    NSMenuItem* cr=[menu addItemWithTitle:[NSString stringWithFormat:@"Crash Recovery (automatic state every %d min)",
+        (crashrec::interval_seconds()+30)/60] action:@selector(toggleCrashRecovery:) keyEquivalent:@""];
+    cr.target=self;cr.state=crashrec::enabled()?NSControlStateValueOn:NSControlStateValueOff;
+    for(int i=1;i<=crashrec::kAutoSlots;++i){
+        crashrec::AutoInfo a=crashrec::auto_info(i);
+        NSString* d=a.used?[NSString stringWithFormat:@"%s%s%s",a.when.c_str(),a.area.empty()?"":" · ",a.area.c_str()]:@"empty";
+        NSMenuItem* item=[menu addItemWithTitle:[NSString stringWithFormat:@"Load automatic state %d (%@)",i,d]
+            action:@selector(loadAuto:) keyEquivalent:@""];
+        item.target=self;item.tag=i;item.enabled=a.used;
     }
 }
 @end

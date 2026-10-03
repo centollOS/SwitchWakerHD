@@ -219,6 +219,12 @@ The **Save States** menu saves the whole running game to one of 5 slots and load
 `~/Library/Application Support/wwhd/states/` (about 270 MB each) and survive restarts; a slot
 made by an incompatible build is refused. Loading works once the game has reached gameplay.
 
+**Crash Recovery** (Save States menu, off by default, or `WWHD_CRASH_RECOVERY=1`): every 2 minutes the
+game is saved into one of three automatic states (`states/auto/`, about 260 MB each; the save
+freezes the game for about 0.1 s), and the controller input since the latest one is recorded. After a
+crash, the crash log names them, and `WWHD_REPLAY=<n> ./build/cmake/wwhd` loads automatic state n and
+plays the recorded input back to reproduce the crash. Automatic states can also be loaded from the menu.
+
 Game controllers (Xbox, PlayStation, Switch Pro, MFi) work too; by default buttons map by
 position (the bottom face button is the Wii U's B), and they can be remapped in the Controls window.
 The **Input** menu switches whether keyboard and controllers act as the Wii U GamePad (default)
@@ -246,8 +252,9 @@ and the renderer are remembered in `~/Library/Application Support/wwhd/display.p
   `WWHD_FXAA=0|1`, `WWHD_INTERP=1`, `WWHD_TRUE60=1` (start values for the Graphics menu);
   `WWHD_SHADOW_SCALE=n` gives the shadow maps their own resolution factor; `WWHD_STATE_DIR=<dir>`
   stores save states elsewhere.
-- A game halt writes `captures/crash-<time>.log` with the guest call chain (useful for bug reports;
-  it contains only addresses and function names).
+- Crashes and game halts write `captures/crash-<time>.log` (crash address, registers, the guest call
+  chain, a host backtrace and the last log lines; useful for bug reports, it contains only addresses,
+  function names and log text).
 - Debugging aids (frame/draw dumps, traces, scheduler statistics) are documented next to their
   code: grep for `WWHD_` in `runtime/src`.
 

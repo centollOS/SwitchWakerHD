@@ -63,9 +63,10 @@ struct SlotInfo {
     std::string when;  // local time of the save
     std::string area;  // stage name, if known
 };
-SlotInfo slot_info(int slot);           // 1..5
+SlotInfo slot_info(int slot);           // 1..5 (101..103: crash recovery's automatic states, crashrec.h)
 void request_save(int slot);
 void request_load(int slot);
+std::string states_dir();               // where slots live (created on first use)
 std::string last_message();             // short status for the title bar ("" when stale)
 
 // ---- game thread: call at the frame boundary (top of the per-frame function) ----

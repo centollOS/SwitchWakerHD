@@ -7,6 +7,7 @@
 #include <ctime>
 
 #include "../savestate.h"
+#include "../crashrec.h"
 #include "../aspect.h"
 #include "renderer.h"
 #include "runtime.h"
@@ -102,6 +103,8 @@ static void choose_renderer(render::Api a) {
 @implementation WWStateMenu
 - (void)save:(NSMenuItem*)item { ss::request_save((int)item.tag); }
 - (void)load:(NSMenuItem*)item { ss::request_load((int)item.tag); }
+- (void)toggleCrashRecovery:(NSMenuItem*)item { crashrec::set_enabled(!crashrec::enabled()); }
+- (void)loadAuto:(NSMenuItem*)item { crashrec::request_load((int)item.tag); }
 - (void)menuNeedsUpdate:(NSMenu*)m {
     [m removeAllItems];
     ss::SlotInfo info[ss::kSlots + 1];
@@ -125,6 +128,24 @@ static void choose_renderer(render::Api a) {
         it.tag = i;
         it.enabled = info[i].used && info[i].compatible;
         it.toolTip = [NSString stringWithFormat:@"Shortcut in game: F%d", i];
+    }
+    // crash recovery (crashrec.cpp): automatic states every few minutes + recorded input
+    [m addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* cr = [m addItemWithTitle:[NSString stringWithFormat:@"Crash Recovery (automatic state every %d min)",
+                                                                    (crashrec::interval_seconds() + 30) / 60]
+                                  action:@selector(toggleCrashRecovery:) keyEquivalent:@""];
+    cr.target = self;
+    cr.state = crashrec::enabled() ? NSControlStateValueOn : NSControlStateValueOff;
+    cr.toolTip = @"Saves the game into automatic states in the background and records the controller input since the "
+                 @"latest one. After a crash, the crash log in captures/ says how to load it and replay the input. "
+                 @"Saving freezes the game for a moment.";
+    for (int i = 1; i <= crashrec::kAutoSlots; i++) {
+        crashrec::AutoInfo a = crashrec::auto_info(i);
+        NSString* d = a.used ? [NSString stringWithFormat:@"%s%s%s", a.when.c_str(), a.area.empty() ? "" : " · ", a.area.c_str()] : @"empty";
+        NSMenuItem* it = [m addItemWithTitle:[NSString stringWithFormat:@"Load automatic state %d  (%@)", i, d] action:@selector(loadAuto:) keyEquivalent:@""];
+        it.target = self;
+        it.tag = i;
+        it.enabled = a.used;
     }
 }
 @end
