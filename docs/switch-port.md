@@ -10,8 +10,9 @@ Status as of 2026-10-03. All changes below are on the `feature/switch-port` bran
 | Toolchain | devkitPro devkitA64 (GCC 15.2, libnx, switch-mesa 20.1) in the `devkitpro/devkita64` container |
 | Graphics | OpenGL 4.3 core on Mesa nouveau (switch-mesa) through EGL + glad |
 | Build | Works: `tools/switch/build.sh` → `build/switch/wwhd.nro` (~52 MB) |
-| Boot on hardware | Works: the game runs with sound and controller input, about 22–25 fps |
-| Picture on hardware | **Black screen — unresolved.** A build with a new present path and diagnostics is ready for testing |
+| Boot on hardware | Works: picture, sound and controller input (as a Wii U Pro Controller, so everything is on one screen) |
+| Performance on hardware | 20–30 fps in light scenes, 8–12 fps in gameplay with 3,000–6,000 draws per frame (log of 2026-10-03, before the draw-path optimizations below). The render thread is the limit |
+| On-screen FPS counter | Top-left corner; `WWHD_FPS=0` hides it, `WWHD_FPS=2` adds render-thread load, draws per frame and GPU lag |
 | Desktop reproduction | Works: a headless Linux build of the same GL renderer (Mesa llvmpipe) renders the game correctly |
 
 ## History of decisions
@@ -128,9 +129,14 @@ Total backed memory is 1448 MiB, so hbmenu must run in title-takeover mode, not 
 
 ### Input (`runtime/src/platform/input_switch.cpp`)
 
-- libnx `pad` maps to the GamePad (VPAD) buttons:
+- The controller acts as a **Wii U Pro Controller** by default: the game reads it through WPAD/KPAD
+  (`hle/padscore.cpp`), the GamePad stays connected but idle, and HUD, map and menus all go on the
+  TV picture (the only screen shown on the Switch). At the controller question, choose the Pro
+  Controller. `WWHD_PRO_CONTROLLER=0` in `env.txt` makes it act as the GamePad instead (VPAD), as
+  in earlier builds; the log says which mode is active (`[input] Switch controller acts as …`).
+- libnx `pad` buttons map by position, the same in both modes:
 
-  | Switch | GamePad |
+  | Switch | Wii U |
   |---|---|
   | A / B / X / Y | A / B / X / Y |
   | L / R, ZL / ZR | L / R, ZL / ZR |
@@ -168,7 +174,8 @@ Key conventions:
   - Otherwise: `GL_LOWER_LEFT`, y = `yo-ys`, height `2ys`, inverted front face.
   - Depth uses `ZERO_TO_ONE` when `DX_CLIP_SPACE_DEF` is set, else `NEGATIVE_ONE_TO_ONE`.
 - **Scissor** uses memory rows directly.
-- **Streaming.** There are 4 × 32 MB buffers, rotated and orphaned, written through unsynchronized `glMapBufferRange`.
+- **Streaming.** There are 4 × 32 MB buffers, persistently mapped (`glBufferStorage`, coherent) with a fence per buffer, or orphaned and written through unsynchronized `glMapBufferRange` without `GL_ARB_buffer_storage`.
+- **GL state cache** (`draw.cpp`, `gs`). A draw only issues the GL calls whose values changed since the previous draw. Code outside `draw()` that changes GL state (clears, blits, presentation, program links, texture deletion) calls `forget_gl_state()`, and the next draw sets everything again.
 - **Scan out.** `copy_to_scan` handles only TV target 1; the GamePad image is not shown. It blits the guest color buffer into `R.tvScan`.
 - **Present** (rewritten this session):
   - Draws a full-window triangle that samples `tvScan`, using a linear, clamped sampler that skips sRGB decode, like a blit. Guest row 0 appears at the top, and the image is fitted to 16:9.
@@ -181,15 +188,14 @@ Key conventions:
 | Feature | Where | Notes |
 |---|---|---|
 | Extension report at startup | `wwhd.log` | `GL_ARB_clip_control`, `GL_ARB_texture_view`, `GL_ARB_copy_image`, `GL_EXT_texture_sRGB_decode`, `GL_ARB_buffer_storage`, `GL_ARB_viewport_array`: yes/NO |
-| Stats every 5 s | `wwhd.log` | `[gl] frames a-b: draws, skipped, scan copies, GL errors (first), TV mean r g b, window mean r g b` |
-| FPS every 5 s | `wwhd.log` | `[gl] <fps> fps, <draws> draws` |
-| GL debug output | `wwhd.log` | first 200 non-notification messages |
-| Heartbeat square | screen (Switch only) | 16×16 in the top-left corner, alternating green/magenta about twice a second |
-| Frame dumps | `/switch/wwhd/` | **Default on Switch: frames 600 and 1800** (`frame_N.png` = TV image, `frame_N_window.png` = presented window). `WWHD_DUMP_FRAMES=0` in `env.txt` disables them. |
+| FPS counter | screen, top-left | Frame rate over the last half second. `WWHD_FPS=0` hides it; `WWHD_FPS=2` adds `RT <busy>% DR <draws/frame>` and `GPU LAG <ms>` (updated with the 5 s stats) |
+| Stats every 5 s | `wwhd.log` | See [Reading the stats line](#reading-the-stats-line) |
+| GL debug output | `wwhd.log` | `WWHD_GL_DEBUG=1`: first 200 non-notification messages |
+| Frame dumps | `/switch/wwhd/` | `WWHD_DUMP_FRAMES=N[,M]` (`frame_N.png` = TV image, `frame_N_window.png` = presented window, with the FPS counter) |
 | Render-target dumps | `/switch/wwhd/` | `WWHD_DUMP_TARGETS=N[,M]`: every GPU-written color target, `target_<frame>_<addr>_<w>x<h>_f<fmt>.png` |
 | Headless exit | headless only | `WWHD_EXIT_AT_FRAME=N` |
 
-The heartbeat square and the default frame dumps are temporary aids for finding the black-screen cause. Remove them once the picture is confirmed.
+The heartbeat square and the default frame dumps were black-screen aids; they have been removed.
 
 ## Issues fixed during the port
 
@@ -236,12 +242,67 @@ The fix below was confirmed by `logs-switch/graphics_works_but_slow`: the log sh
 
 Headless check (llvmpipe): rendering is unchanged with persistent buffers, at about 955 draws and 17 MB streamed per frame on the title screen. The Switch's GL driver reports `program binary formats: 1` on desktop Mesa; the Switch value is logged at startup. If it is non-zero there too, compiled shaders can be cached on the SD card.
 
+### Hardware log of 2026-10-03 (`logs-switch/wwhd.log`, before round 2)
+
+Overclocked console (CPU ≈1.7 GHz, GPU ≈900 MHz, RAM 1600 MHz), Pro Controller mode, shader cache loaded at boot (536 shaders, 298 programs in 35 s, no compiles in game).
+
+| Scene | fps | draws/frame | render thread ms/s in draws | streamed MB/s |
+|---|---|---|---|---|
+| Title / menus | 19–30 | 200–950 | 164–741 | 2–168 |
+| Gameplay | 8–12 | 3,200–5,900 | 790–830 | 155–308 |
+
+- The render thread spent 80–83% of every second inside `draw()`, about 16–25 µs per draw. That alone caps gameplay at 11–13 fps, so it is the limit; `present` was only 20–35 ms/s.
+- About 27 MB were copied into stream buffers per gameplay frame (308 MB/s at 11.5 fps).
+- Shader compiles no longer happen in game (the cache works).
+
+### Round 2: the draw path (current build)
+
+Findings from reading the code and the headless renderer:
+
+- **64 KB uniform copies.** Skinned vertex shaders declare their bone palette as `vec4 uf_blockVS1[4096]` (64 KB). When the guest's block was smaller than the declared size, every draw zero-filled and copied the full 64 KB. On the busy headless scene that was 15.9 MB per frame, most of the streamed data.
+- **Shader lookup on every draw.** Each draw hashed about 200 registers twice (vertex and pixel shader keys) and did 4–6 hash-map lookups, even when nothing shader-relevant had changed.
+- **About 80 GL calls per draw regardless of changes**: 8 colour masks, 8 blend enables, blend functions, stencil, depth, cull, polygon offset, clip control, viewport, scissor, all texture/sampler/UBO bindings, vertex formats and the program. Mesa runs each call through context lookup, vertex flush and dirty-flag work even when the value is the same, and nouveau revalidates what was flagged.
+- **Indices** were converted one by one through a lambda with a switch, pushed into a vector, scanned again for the maximum, and always widened to 32 bits.
+
+| Change | Effect / why | Off switch (in `env.txt`) |
+|---|---|---|
+| Uniform blocks copy and bind only the guest's bytes (rounded to 16), not the declared size; a shared zero buffer replaces per-draw zero blocks | Busy headless scene: uniform data 15.9 → 0.3 MB per frame. Reads past a bound range return zero on NVIDIA hardware and in llvmpipe, as the zero-filled copy did | `WWHD_GL_FULL_UBO=1` |
+| Shader lookup memo: the previous draw's fetch shader, shaders and program are reused while `g_shader_state_gen`, the frame, the primitive type and the shader epoch are unchanged (as the Metal and Vulkan renderers do) | 21% of draws on the title screen, 71–75% in busy scenes skip the lookup | `WWHD_GL_NO_MEMO=1` |
+| GL state cache: only changed state is sent; blend/mask state only for attached colour targets; blend colour only when a constant blend factor is used | Removes most per-draw GL calls when consecutive draws share state | `WWHD_GL_NO_STATE_CACHE=1` |
+| Loose uniforms (`uf_remapped*`, register files, point size, alpha ref, window-to-clip) are uploaded only when the program's last values differ | Each upload makes nouveau re-upload the constant buffer | `WWHD_GL_NO_UNIFORM_SHADOW=1` |
+| Index conversion: one tight loop per guest index type, maximum computed in the same pass, 16-bit output for 16-bit lists (restart index 0xFFFF) | Half the index bytes; no second pass | `WWHD_GL_WIDE_INDICES=1` |
+| Converted index lists reused within a frame (same address, count, type, primitive, restart) until guest buffers may have changed | Shadow and reflection passes draw the same meshes again | `WWHD_GL_NO_INDEX_CACHE=1` |
+| Sampler cache keyed by a 16-byte struct instead of a heap-built string | Less work per texture per draw | — |
+| On-screen FPS counter (one shader, 3×5 pixel font) | Requested; also shows load and GPU lag with `WWHD_FPS=2` | `WWHD_FPS=0` |
+| New stats: render-thread busy time, GPU lag (timestamp queries), the draw time split into lookup / indices / resources / state / submit, shader-memo hit rate, uniform/index/vertex MB per frame | To tell CPU-bound from GPU-bound, and where draw time goes, from the next hardware log | — |
+
+#### Tests (headless, llvmpipe, title screen to frame 405)
+
+- Rendering compared against a baseline build of the previous commit. The title animation follows real time, so frames are compared visually as well as numerically: frames 100 and 200 are pixel-identical, frames 300 and 400 match (including the King of Red Lions, skinned with the 64 KB palette).
+- A bisection during this round found a bug in the new polygon-offset caching (a missing brace kept stale offset units, so the boat failed the depth test). It is fixed, and that check is how it was caught.
+- No GL errors and no skipped draws.
+- In the busy scene (~6,800 draws/frame) the data copied per frame fell from 26.4 to 6.6 MB (uniforms 15.9 → 0.3 MB). Lookup, index, resource and state work now take about 125 ms/s together. On llvmpipe the rest, about 750 ms/s, is the software rasterizer working inside the draw calls ("submit"), so desktop fps does not predict the Switch's. The GL calls this round removes are driver work on nouveau.
+
+#### Reading the stats line
+
+```
+[gl] 10.6 fps, 6856 draws/frame, 0 skipped, GL errors 0 (first 0x0); render thread busy 907 ms/s, GPU lag 0.2 ms;
+draws 878 ms/s (lookup 45, indices 6, resources 37, state 38, submit 750; 75% shader memo hits; shaders 26: ...;
+texture uploads 6, 11), present 1; streamed 69.9 MB/s (reused 209.7; per frame: uniforms 0.3 MB, indices 0.3 MB,
+vertices 25.8 MB); 126 surfaces, heap ...
+```
+
+- **render thread busy** (ms per second): near 1000 means the GX2 render thread is the limit. Well below 1000 with low fps means the game's own CPU threads (or the GPU) are the limit.
+- **GPU lag**: how long after a frame's commands are submitted the GPU reaches them. Near 0 means the GPU waits for the CPU. A frame time or more (more than 33 ms) means GPU-bound. Not shown if the driver has no GPU clock.
+- **draws … (lookup, indices, resources, state, submit)**: where the draw time goes. *resources* covers render targets, texture checks and uploads, and uniform blocks; *state* covers the GL state and vertex buffers; *submit* is the `glDraw*` call (driver validation).
+- **per frame**: bytes the draws referenced (before per-frame reuse); **streamed** is what was actually copied.
+
 ### Next steps
 
-- Decide from the hardware stats line whether the render thread or the guest is the limit. `WWHD_SCHED_STATS=1` adds per-guest-thread core use.
-- Cache compiled shader programs on the SD card (`glGetProgramBinary`) if the driver supports it, and/or compile shaders asynchronously.
-- Stream less data per frame: vertex buffers are copied in full on every draw.
-- Find the crash after the intro using the Atmosphère crash report, symbolized against `build/switch/wwhd.elf` with the `[boot] code at` base address.
+- Hardware test of round 2: compare `render thread busy`, `submit` and `GPU lag` in gameplay against the 2026-10-03 log. If the render thread stays saturated, go after the remaining submit cost: keep static vertex buffers in GPU buffers across frames (fewer vertex-buffer rebinds and copies), and sort or skip redundant texture rebinds.
+- If GPU lag grows to a frame or more, the GPU is the limit. The game renders the TV picture at its native 1920×1080; a lower internal resolution would be the next step.
+- If the render thread is no longer busy but fps stays low, profile the guest threads (`WWHD_SCHED_STATS=1`).
+- Find the crash after the intro (if it still happens) using the Atmosphère crash report, symbolized against `build/switch/wwhd.elf` with the `[boot] code at` base address.
 
 ## Black screen on Switch: diagnosis
 
@@ -298,9 +359,8 @@ Added:
 
 ## Known limitations and follow-ups
 
-- The GamePad (second-screen) picture is not shown; only the TV image is presented.
+- The GamePad (second-screen) picture is not shown; only the TV image is presented. The controller acts as a Pro Controller by default, so the game puts its HUD, map and menus on the TV picture.
 - Renderer features that are no-ops on GL: resolution scale, AO, anisotropic filtering, FXAA, aspect-ratio adjustment, renderer restart, capture.
-- Performance is about 22–25 fps; the shader cache and stream-buffer strategy are not tuned for the Tegra X1.
+- Performance: see [Performance](#performance-in-progress). Gameplay ran at 8–12 fps before round 2.
 - Mods that need a mouse or keyboard are inactive.
-- Remove the temporary diagnostics (heartbeat square, default frame dumps, per-5 s full-framebuffer readbacks) once the picture works.
-- Nothing is committed yet. The work should be committed in logical steps: platform, renderer, build, fixes.
+- All of the above is committed on `feature/switch-port`; round 2 is waiting for a hardware test.

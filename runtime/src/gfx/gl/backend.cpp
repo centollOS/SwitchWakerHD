@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "gfx/renderer.h"
+#include "gx2/gx2.h"
 #include "input.h"
 #include "platform/host.h"
 #include "platform/input_switch.h"
@@ -186,6 +187,60 @@ void frame_dumps(uint64_t frame) {
     }
 }
 
+// How far the GPU runs behind the render thread: at each swap the GPU clock is read (the time the
+// commands are submitted) and a timestamp query records when the GPU reaches that point. A lag near
+// zero means the GPU waits for the CPU (CPU-bound); a lag of a frame or more means it is GPU-bound.
+struct GpuLag {
+    static constexpr int kQueries = 8;
+    GLuint query[kQueries] = {};
+    GLint64 submitted[kQueries] = {};
+    bool pending[kQueries] = {};
+    bool supported = true;
+    double totalMs = 0;
+    uint64_t samples = 0;
+    void frame() {
+        if (!supported) return;
+        if (!query[0]) glGenQueries(kQueries, query);
+        for (int i = 0; i < kQueries; i++) {
+            if (!pending[i]) continue;
+            GLint available = 0;
+            glGetQueryObjectiv(query[i], GL_QUERY_RESULT_AVAILABLE, &available);
+            if (!available) continue;
+            GLuint64 reached = 0;
+            glGetQueryObjectui64v(query[i], GL_QUERY_RESULT, &reached);
+            pending[i] = false;
+            if (reached >= GLuint64(submitted[i])) {
+                totalMs += double(reached - GLuint64(submitted[i])) / 1e6;
+                samples++;
+            }
+        }
+        for (int i = 0; i < kQueries; i++)
+            if (!pending[i]) {
+                GLint64 now = 0;
+                glGetInteger64v(GL_TIMESTAMP, &now);
+                if (!now) {  // no GPU clock: report nothing
+                    supported = false;
+                    return;
+                }
+                submitted[i] = now;
+                glQueryCounter(query[i], GL_TIMESTAMP);
+                pending[i] = true;
+                return;
+            }
+    }
+    // mean lag since the last call, or -1 without samples
+    double take() {
+        double mean = samples ? totalMs / double(samples) : -1;
+        totalMs = 0;
+        samples = 0;
+        return mean;
+    }
+} gpuLag;
+
+struct OverlayStats {
+    double fps = 0, renderBusy = -1, gpuLagMs = -1, draws = 0;
+} overlayStats;
+
 // every 5 s: frames, draws, GL errors and where the render thread spent its time (ms per second).
 // WWHD_GL_STATS=1 adds the mean colour of the TV picture and the window (full GPU readbacks).
 void frame_stats() {
@@ -207,14 +262,30 @@ void frame_stats() {
     struct mallinfo heap = mallinfo();
     memory = ", heap " + std::to_string(size_t(heap.uordblks) >> 20) + "/" + std::to_string(size_t(heap.arena) >> 20) + " MiB";
 #endif
-    LOG("[gl] %.1f fps, %.0f draws/frame, %llu skipped, GL errors %u (first 0x%X); render thread ms/s: draws %.0f "
-        "(shaders %.0f: %llu new states, %llu compiled, %llu linked; texture uploads %.0f, %llu), present %.0f; "
-        "streamed %.1f MB/s (reused %.1f); %zu surfaces%s",
-        double(R.frame - lastFrame) / secs, R.frame > lastFrame ? double(R.drawCount - lastDraws) / double(R.frame - lastFrame) : 0.0,
-        (unsigned long long)R.skippedDraws, errors, firstError, ms(p.drawNs), ms(p.shaderNs), (unsigned long long)p.shaders,
+    static uint64_t lastWait = 0;
+    uint64_t wait = gx2::render_thread_wait_ns();
+    double busy = 1000.0 - ms(wait - lastWait);
+    lastWait = wait;
+    double lag = gpuLag.take();
+    uint64_t draws = R.drawCount - lastDraws;
+    double perFrame = R.frame > lastFrame ? double(draws) / double(R.frame - lastFrame) : 0.0;
+    LOG("[gl] %.1f fps, %.0f draws/frame, %llu skipped, GL errors %u (first 0x%X); render thread busy %.0f ms/s, "
+        "GPU lag %.1f ms; draws %.0f ms/s (lookup %.0f, indices %.0f, resources %.0f, state %.0f, submit %.0f; "
+        "%.0f%% shader memo hits; shaders %.0f: %llu new states, %llu compiled, %llu linked; texture uploads %.0f, %llu), "
+        "present %.0f; streamed %.1f MB/s (reused %.1f; per frame: uniforms %.1f MB, indices %.1f MB, vertices %.1f MB); "
+        "%zu surfaces%s",
+        double(R.frame - lastFrame) / secs, perFrame, (unsigned long long)R.skippedDraws, errors, firstError, busy, lag,
+        ms(p.drawNs), ms(p.lookupNs), ms(p.indexNs), ms(p.resourceNs), ms(p.stateNs), ms(p.submitNs),
+        draws ? 100.0 * double(p.memoHits) / double(draws) : 0.0, ms(p.shaderNs), (unsigned long long)p.shaders,
         (unsigned long long)p.compiled, (unsigned long long)p.linked, ms(p.uploadNs), (unsigned long long)p.uploads,
-        ms(p.presentNs), double(p.streamBytes) / 1e6 / secs, double(p.reusedBytes) / 1e6 / secs, R.surfaces.size(),
+        ms(p.presentNs), double(p.streamBytes) / 1e6 / secs, double(p.reusedBytes) / 1e6 / secs,
+        R.frame > lastFrame ? double(p.uboBytes) / 1e6 / double(R.frame - lastFrame) : 0.0,
+        R.frame > lastFrame ? double(p.indexBytes) / 1e6 / double(R.frame - lastFrame) : 0.0,
+        R.frame > lastFrame ? double(p.vertexBytes) / 1e6 / double(R.frame - lastFrame) : 0.0, R.surfaces.size(),
         memory.c_str());
+    overlayStats.renderBusy = busy;
+    overlayStats.gpuLagMs = lag;
+    overlayStats.draws = perFrame;
     p = {};
     static const bool means = getenv("WWHD_GL_STATS") != nullptr;
     if (means) {
@@ -295,8 +366,149 @@ GLuint present_sampler() {
     return s;
 }
 
+// ---- performance overlay in the top-left corner: WWHD_FPS=0 hides it, 1 (default) shows the frame
+// rate, 2 adds render-thread load, GPU lag and draws per frame. A 3x5 pixel font; the text is drawn
+// by one fragment shader from a bitmask per character.
+int overlay_mode() {
+    static const int mode = [] {
+        const char* e = getenv("WWHD_FPS");
+        return e && *e ? atoi(e) : 1;
+    }();
+    return mode;
+}
+
+uint32_t glyph_bits(char c) {
+    static const struct { char c; const char* rows; } kFont[] = {
+        {'0', "111101101101111"}, {'1', "010110010010111"}, {'2', "111001111100111"}, {'3', "111001111001111"},
+        {'4', "101101111001001"}, {'5', "111100111001111"}, {'6', "111100111101111"}, {'7', "111001001001001"},
+        {'8', "111101111101111"}, {'9', "111101111001111"}, {'A', "010101111101101"}, {'B', "110101110101110"},
+        {'C', "011100100100011"}, {'D', "110101101101110"}, {'E', "111100110100111"}, {'F', "111100110100100"},
+        {'G', "011100101101011"}, {'H', "101101111101101"}, {'I', "111010010010111"}, {'J', "001001001101010"},
+        {'K', "101101110101101"}, {'L', "100100100100111"}, {'M', "101111111101101"}, {'N', "110101101101101"},
+        {'O', "010101101101010"}, {'P', "110101110100100"}, {'Q', "010101101110011"}, {'R', "110101110101101"},
+        {'S', "011100010001110"}, {'T', "111010010010010"}, {'U', "101101101101111"}, {'V', "101101101101010"},
+        {'W', "101101111111101"}, {'X', "101101010101101"}, {'Y', "101101010010010"}, {'Z', "111001010100111"},
+        {'%', "101001010100101"}, {':', "000010000010000"}, {'/', "001001010100100"}, {'-', "000000111000000"},
+        {'.', "000000000000010"},
+    };
+    for (auto& g : kFont)
+        if (g.c == c) {
+            uint32_t bits = 0;
+            for (int i = 0; i < 15; i++) bits = bits << 1 | uint32_t(g.rows[i] == '1');
+            return bits;
+        }
+    return 0;  // space and anything else
+}
+
+constexpr int kOverlayColumns = 16, kOverlayRows = 3;
+
+GLuint overlay_program() {
+    static GLuint prog = [] {
+        static const char* vsText =
+            "#version 330 core\n"
+            "void main() {\n"
+            "    vec2 p = vec2(float((gl_VertexID & 1) * 4 - 1), float((gl_VertexID & 2) * 2 - 1));\n"
+            "    gl_Position = vec4(p, 0.0, 1.0);\n"
+            "}\n";
+        // glyph bits: row 0 (top) in bits 14-12, column 0 (left) the highest bit of a row
+        static const char* fsText =
+            "#version 330 core\n"
+            "uniform int glyph[48];\n"
+            "uniform ivec2 grid;\n"   // columns, rows
+            "uniform vec3 box;\n"     // left, top (window coordinates), pixels per font pixel
+            "out vec4 color;\n"
+            "void main() {\n"
+            "    ivec2 p = ivec2(floor(vec2(gl_FragCoord.x - box.x, box.y - gl_FragCoord.y) / box.z)) - ivec2(1);\n"
+            "    bool on = false;\n"
+            "    if (p.x >= 0 && p.y >= 0) {\n"
+            "        ivec2 cell = p / ivec2(4, 6), sub = p - cell * ivec2(4, 6);\n"
+            "        if (cell.x < grid.x && cell.y < grid.y && sub.x < 3 && sub.y < 5)\n"
+            "            on = ((glyph[cell.y * grid.x + cell.x] >> ((4 - sub.y) * 3 + (2 - sub.x))) & 1) != 0;\n"
+            "    }\n"
+            "    color = on ? vec4(1.0, 0.95, 0.35, 1.0) : vec4(0.0, 0.0, 0.0, 0.6);\n"
+            "}\n";
+        auto compile = [](GLenum type, const char* text) {
+            GLuint s = glCreateShader(type);
+            glShaderSource(s, 1, &text, nullptr);
+            glCompileShader(s);
+            GLint ok = 0;
+            glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+            if (!ok) {
+                char log[1024] = {};
+                glGetShaderInfoLog(s, sizeof log, nullptr, log);
+                LOG("[gl] overlay shader: %s", log);
+            }
+            return s;
+        };
+        GLuint p = glCreateProgram();
+        glAttachShader(p, compile(GL_VERTEX_SHADER, vsText));
+        glAttachShader(p, compile(GL_FRAGMENT_SHADER, fsText));
+        glLinkProgram(p);
+        GLint ok = 0;
+        glGetProgramiv(p, GL_LINK_STATUS, &ok);
+        if (!ok) {
+            LOG("[gl] overlay program does not link; no FPS counter");
+            return 0u;
+        }
+        return p;
+    }();
+    return prog;
+}
+
+void draw_overlay(int ww, int wh) {
+    const int mode = overlay_mode();
+    if (mode <= 0) return;
+    // the frame rate over the last half second
+    static uint64_t windowStart = now_ns(), windowFrame = R.frame;
+    static double fps = 0;
+    uint64_t now = now_ns();
+    if (now - windowStart >= 500'000'000) {
+        fps = double(R.frame - windowFrame) * 1e9 / double(now - windowStart);
+        windowStart = now;
+        windowFrame = R.frame;
+    }
+    GLuint prog = overlay_program();
+    if (!prog) return;
+    char lines[kOverlayRows][kOverlayColumns + 1] = {};
+    int rows = 1;
+    snprintf(lines[0], sizeof lines[0], "%.1f FPS", fps);
+    if (mode >= 2) {
+        auto& s = overlayStats;
+        if (s.renderBusy >= 0) snprintf(lines[rows++], sizeof lines[0], "RT %.0f%% DR %.0f", s.renderBusy / 10, s.draws);
+        if (s.gpuLagMs >= 0) snprintf(lines[rows++], sizeof lines[0], "GPU LAG %.1fMS", s.gpuLagMs);
+    }
+    int columns = 0;
+    for (int r = 0; r < rows; r++) columns = std::max(columns, int(strlen(lines[r])));
+    GLint glyphs[kOverlayColumns * kOverlayRows] = {};
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; lines[r][c]; c++) glyphs[r * columns + c] = GLint(glyph_bits(lines[r][c]));
+    const int scale = std::max(2, wh / 180);  // 4 window pixels per font pixel at 720p
+    const int margin = std::max(4, wh / 90);
+    const int w = (columns * 4 + 1) * scale, h = (rows * 6 + 1) * scale;
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_COLOR_LOGIC_OP);
+    glDisable(GL_FRAMEBUFFER_SRGB);
+    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    if (auto cc = clip_control()) cc(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
+    glViewportIndexedf(0, float(margin), float(wh - margin - h), float(w), float(h));
+    glEnablei(GL_BLEND, 0);
+    glBlendFuncSeparatei(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+    glBlendEquationSeparatei(0, GL_FUNC_ADD, GL_FUNC_ADD);
+    glUseProgram(prog);
+    glUniform1iv(glGetUniformLocation(prog, "glyph"), columns * rows, glyphs);
+    glUniform2i(glGetUniformLocation(prog, "grid"), columns, rows);
+    glUniform3f(glGetUniformLocation(prog, "box"), float(margin), float(wh - margin), float(scale));
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisablei(GL_BLEND, 0);
+    (void)ww;
+}
+
 // TV scan buffer -> window: fit 16:9, flip rows (guest images keep row 0 at the top)
 void present() {
+    forget_gl_state();
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, R.windowFbo);
 #ifdef __SWITCH__
     glDrawBuffer(GL_BACK);
@@ -347,6 +559,7 @@ void present() {
             attach(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, nullptr, 0, 0);
         }
     }
+    draw_overlay(ww, wh);
     frame_dumps(R.frame + 1);
     frame_stats();
 #ifdef __SWITCH__
@@ -358,6 +571,7 @@ void present() {
 
 // startup: a bar filling while the shader cache compiles (the game has not drawn anything yet)
 void shader_cache_progress(size_t done, size_t total) {
+    forget_gl_state();
 #ifdef __SWITCH__
     static uint64_t last = 0;
     uint64_t now = now_ns();
@@ -432,6 +646,7 @@ void copy_to_scan(uint32_t cb, uint32_t target) {
 void swap() {
     make_current();
     uint64_t start = now_ns();
+    gpuLag.frame();
     present();
     R.perf.presentNs += now_ns() - start;
     R.streamGen++;

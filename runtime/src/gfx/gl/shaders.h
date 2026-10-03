@@ -1,7 +1,9 @@
 #pragma once
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
 #include "gl.h"
@@ -26,6 +28,9 @@ struct Program {
     GLint windowToClip = -1, alphaRef = -1, pointSize = -1, fragCoordScale = -1;
     std::array<GLint, LATTE_NUM_MAX_TEX_UNITS> texScale{};
     std::array<GLint, 64> blockSize{};  // uniform block data size by binding point (VS 0-15, PS 32-47)
+    // the values last given to the program's loose uniforms (draw.cpp skips unchanged uploads)
+    std::vector<uint8_t> shadowVS, shadowPS, registerShadowVS, registerShadowPS;
+    float lastPointSize = NAN, lastAlphaRef = NAN, lastWindowToClip[2] = {NAN, NAN};
 };
 // frame: program bytes are rehashed once per frame
 LatteFetchShader* get_fetch_shader(const uint32_t* regs, uint64_t* keyOut, uint64_t frame);

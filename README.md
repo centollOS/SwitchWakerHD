@@ -116,8 +116,12 @@ tools/switch/build.sh          # devkitpro/devkita64 container -> build/switch/w
 On the SD card: `/switch/wwhd/wwhd.nro` and the extracted game as `/switch/wwhd/game/` (`code/`,
 `content/`, `meta/`). Start hbmenu with full RAM (hold R while launching a game), not from the album.
 Saves go to `/switch/wwhd/save/`, the log to `/switch/wwhd/wwhd.log` (startup, crashes, shader
-errors; failing shaders are written as `shaderfail_*.glsl`). Controllers act as the Wii U GamePad;
-the GamePad screen is not shown yet, and there are no graphics options, save states or mods menus.
+errors; failing shaders are written as `shaderfail_*.glsl`). Controllers act as a Wii U Pro
+Controller, so the game draws everything on the one screen (pick the Pro Controller when it asks);
+`WWHD_PRO_CONTROLLER=0` in `/switch/wwhd/env.txt` makes them act as the GamePad, whose screen is not
+shown. A frame-rate counter sits in the top-left corner (`WWHD_FPS=0` in `env.txt` hides it,
+`WWHD_FPS=2` adds render-thread load and draws per frame). There are no graphics options, save states
+or mods menus.
 
 ## Playing
 

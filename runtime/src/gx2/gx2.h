@@ -14,6 +14,7 @@ struct ShaderKeyDirtyStats {
     uint64_t avoidedBumps = 0, maskedWords = 0;
 };
 ShaderKeyDirtyStats shader_key_dirty_stats(); // Render-thread diagnostics.
+uint64_t render_thread_wait_ns();  // total time the GX2 render thread has waited for commands
 uint32_t color_buffer_address(const GX2::GX2ColorBuffer* cb);
 LatteFetchShader* build_fetch_shader(uint32_t program);  // from our encoded fetch "program"
 }  // namespace gx2

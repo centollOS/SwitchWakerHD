@@ -73,9 +73,13 @@ struct Renderer {
     uint64_t drawCount = 0, skippedDraws = 0, scanCopies = 0;
     GLuint windowFbo = 0;  // presentation target: the EGL window (0) or the headless stand-in
     int windowW = 1280, windowH = 720;
-    // render-thread time since the last 5 s report
+    uint64_t stateEpoch = 1;   // advances when code outside draw() changes GL state (forget_gl_state)
+    uint64_t shaderEpoch = 1;  // advances when shader lookups must be redone (reset_shader_memoization)
+    // render-thread time since the last 5 s report; draw time is split into its stages
     struct Perf {
         uint64_t drawNs = 0, shaderNs = 0, uploadNs = 0, presentNs = 0, shaders = 0, uploads = 0, streamBytes = 0, reusedBytes = 0, compiled = 0, linked = 0;
+        uint64_t lookupNs = 0, indexNs = 0, resourceNs = 0, stateNs = 0, submitNs = 0, uboBytes = 0, indexBytes = 0,
+                 vertexBytes = 0, memoHits = 0;
     } perf;
 };
 extern Renderer R;
@@ -92,6 +96,9 @@ struct ScopedTime {
 };
 
 void make_current();  // GX2 render thread: binds the context on first use
+// draw() skips GL calls that would set state it set before; anything else that changes GL state
+// (clears, blits, presentation, deleting textures) calls this so the next draw sets everything again
+inline void forget_gl_state() { R.stateEpoch++; }
 uint64_t next_write_seq();
 inline void mark_gpu_written(Surface* s) {
     s->gpuWritten = true;

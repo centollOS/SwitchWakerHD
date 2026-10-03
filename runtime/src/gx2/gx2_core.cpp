@@ -7,6 +7,7 @@
 // GX2 core: command execution, display lists, context states, draws, clears,
 // copies and presentation.
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -176,6 +177,8 @@ static std::condition_variable g_q_cv, g_q_done_cv;
 static std::vector<uint32> g_q_pending, g_q_work;
 static bool g_q_waiting = false;
 static uint64_t g_fence_issued = 0, g_fence_done = 0;
+static std::atomic<uint64_t> g_render_wait_ns{0};
+uint64_t render_thread_wait_ns() { return g_render_wait_ns.load(std::memory_order_relaxed); }
 
 static void render_thread_main() {
     host::set_thread_name("GX2 render");
@@ -187,7 +190,11 @@ static void render_thread_main() {
         {
             std::unique_lock<std::mutex> lk(g_q_mutex);
             g_q_waiting = true;
+            auto waitStart = std::chrono::steady_clock::now();
             g_q_cv.wait(lk, [] { return !g_q_pending.empty(); });
+            g_render_wait_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - waitStart).count()),
+                                       std::memory_order_relaxed);
             g_q_waiting = false;
             g_q_work.swap(g_q_pending);
         }

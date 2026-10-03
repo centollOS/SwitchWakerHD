@@ -187,6 +187,7 @@ void create_surface_texture(Surface* s) {
 }
 
 void destroy_surface_texture(Surface* s) {
+    forget_gl_state();  // a deleted texture may be bound to a draw unit
     for (auto& [key, view] : s->views) glDeleteTextures(1, &view);
     s->views.clear();
     if (s->tex) glDeleteTextures(1, &s->tex);
@@ -478,6 +479,7 @@ void attach(GLenum fbTarget, GLenum attachment, Surface* s, uint32_t level, uint
 
 void blit(Surface* src, uint32_t srcLevel, uint32_t srcLayer, uint32_t sw, uint32_t sh, Surface* dst, uint32_t dstLevel,
           uint32_t dstLayer, uint32_t dw, uint32_t dh) {
+    forget_gl_state();
     glBindFramebuffer(GL_READ_FRAMEBUFFER, R.readFbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, R.blitFbo);
     GLbitfield mask;
@@ -514,6 +516,7 @@ void clear_color(const uint32_t*, uint32_t cb, const float rgba[4]) {
     uint32_t first, num;
     auto* s = surface_from_color_buffer(cb, &first, &num);
     if (!s || s->fmt.depth || s->fmt.compressed) return;
+    forget_gl_state();
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, R.blitFbo);
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_FRAMEBUFFER_SRGB);  // like a Vulkan clear: the value is linear, sRGB targets encode it
@@ -545,6 +548,7 @@ void clear_depth_stencil(const uint32_t*, uint32_t db, float depth, uint32_t ste
     if (!s) return;
     bool d = flags & 1, st = (flags & 2) && s->fmt.stencil;
     if (!d && !st) return;
+    forget_gl_state();
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, R.blitFbo);
     glDisable(GL_SCISSOR_TEST);
     glDepthMask(GL_TRUE);

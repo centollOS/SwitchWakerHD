@@ -207,6 +207,7 @@ std::unique_ptr<Program> link(GLuint vsObj, GLuint psObj, uint64_t key) {
     }
     // the GLSL sets every binding with layout(binding = n); the program applies uniforms set later
     glUseProgram(prog);
+    forget_gl_state();
     if (p->fragCoordScale >= 0) glUniform2f(p->fragCoordScale, 1.0f, 1.0f);
     for (GLint loc : p->texScale)
         if (loc >= 0) glUniform2f(loc, 1.0f, 1.0f);
@@ -375,6 +376,9 @@ void load_shader_cache(void (*progress)(size_t done, size_t total)) {
     if (!cacheFile) LOG("[gl] shader cache: cannot write %s", kCachePath);
 }
 
-void reset_shader_memoization() { programHashes.clear(); }
+void reset_shader_memoization() {
+    programHashes.clear();
+    R.shaderEpoch++;
+}
 
 }  // namespace gfxgl
