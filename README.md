@@ -9,6 +9,22 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
 
 ## What's new in this update
 
+- **Linux and Windows builds** (Vulkan renderer with an SDL3 host), with automatic CI builds for both.
+  Fixes from the first Linux reports: game paths are resolved case-insensitively (the game asks for
+  `Audiores`, the disc folder is `AudioRes`; this crashed the game right after startup), build fixes
+  for newer compilers, `WWHD_NO_GAMEPAD` only hides the GamePad window (`WWHD_NO_CONTROLLERS` turns
+  off controllers), and a hint where to type when the game asks for text.
+- **Crash logs and Crash Recovery**: every crash writes `captures/crash-<time>.log`. Crash Recovery
+  (Save States menu, off by default) keeps automatic save states plus the recorded input, so a crash
+  can be reproduced with `WWHD_REPLAY=<n>`.
+- **`wudextract.py`**: the disc key file can be 16 raw bytes or 32 hex digits, with clear errors for
+  a missing or non-matching key.
+- **True 60 (key 7, experimental)**: every 30 Hz step is now exactly the 30 fps game's step (game
+  logic, saves and quests stay as in the original); hookshot crash fixed. For smooth 60 fps,
+  interpolation (key 6) is the recommended mode.
+
+## Earlier updates
+
 - **Vulkan renderer** (by OpenAI Codex), built into the same app next to Metal. Pick one in
   **Graphics › Renderer**; the choice is saved and used from the next start ("Restart Now"
   relaunches right away). Both share the same windows, menus, display modes, controls and mods.
@@ -24,8 +40,6 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
 - **Fixes**: misplaced Yes/No cursor in text boxes at 16:10, quitting with ⌘Q could hang, garbled
   characters in the window title. Community fixes from pull requests #1 and #2 (Miiverse manager
   throttling, shared shader-cache memory) are included.
-
-## Earlier updates
 
 - **60 fps.** Two modes in the Graphics menu:
   - **60 fps (key 6)**: frame interpolation. The game logic keeps its original 30 steps per second;
