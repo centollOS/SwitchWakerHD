@@ -1,0 +1,45 @@
+# Windows build check: builds the Vulkan/SDL3 runtime with MSYS2's CLANG64 toolchain against
+# placeholder guest code (tools/recomp/stubgen.py; no game files involved) and runs the unit
+# tests. The runner has no Vulkan driver, so the renderer smoke test is not run here.
+name: windows
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-python
+            mingw-w64-clang-x86_64-vulkan-headers
+            mingw-w64-clang-x86_64-vulkan-loader
+            mingw-w64-clang-x86_64-glslang
+            mingw-w64-clang-x86_64-sdl3
+            mingw-w64-clang-x86_64-lz4
+            mingw-w64-clang-x86_64-zlib
+
+      - name: Configure
+        run: |
+          python tools/recomp/stubgen.py build/gen-stub
+          cmake -S . -B build/windows -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DGEN_DIR="$PWD/build/gen-stub"
+
+      - name: Build
+        run: cmake --build build/windows
+
+      - name: Unit tests
+        run: ctest --test-dir build/windows --output-on-failure

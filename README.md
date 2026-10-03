@@ -120,6 +120,24 @@ To check the build without the game, `python3 tools/recomp/stubgen.py build/gen-
 placeholder guest code and `-DGEN_DIR=$PWD/build/gen-stub` builds against it (the result cannot
 run the game).
 
+### Windows
+
+The Windows build uses the same Vulkan renderer and SDL3 host as Linux. Build it with Clang from
+[MSYS2](https://www.msys2.org/) in the **CLANG64** shell (MSVC is not supported: the recompiled game
+needs Clang):
+
+```sh
+pacman -S mingw-w64-clang-x86_64-{clang,cmake,ninja,python,vulkan-headers,vulkan-loader,glslang,sdl3,lz4,zlib}
+cmake -S . -B build/windows -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build/windows
+./build/windows/wwhd.exe --renderer-smoke   # checks the Vulkan renderer, no game files needed
+```
+
+Run it from the CLANG64 shell, or copy the DLLs it needs (`SDL3.dll`, `libc++.dll`,
+`libunwind.dll`, zlib) from `C:\msys64\clang64\bin` next to `wwhd.exe`; `vulkan-1.dll` comes with
+your GPU driver. Settings, controls and save states live in `%APPDATA%\WWHD`. Python for the
+extraction and recompiler steps can be the MSYS2 one (`pip install pycryptodome`).
+
 The build fails with a clear message if `build/gen` has not been generated. The runtime checks at
 startup that `game/code/cking.rpx` matches the recompiled code.
 
