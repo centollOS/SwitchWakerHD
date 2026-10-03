@@ -74,4 +74,7 @@ void service(Cpu* c);
 // guest memory reader used while validating a snapshot (reads the snapshot's memory, not the live one)
 uint32_t snap_ld32(uint32_t ea);
 
+uint64_t last_load_frame();
+uint64_t last_load_step();
+uint32_t last_load_counter();  // g_Counter.mTimer right after the last load   // logic step (interp::logic_steps) of the last completed load  // TV frame of the last completed load (0: none); test scenarios start from it
 }  // namespace ss

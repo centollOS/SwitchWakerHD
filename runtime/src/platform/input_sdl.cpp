@@ -149,7 +149,8 @@ static PadState keyboard_state(bool host){bool keys[256];for(int i=0;i<256;i++)k
 static void open_controller(SDL_JoystickID id){if(!g_controllers.contains(id))if(auto* pad=SDL_OpenGamepad(id))g_controllers[id]=pad;}
 void init(){
  input_map::load_startup();
- if(!getenv("WWHD_NO_GAMEPAD")) {
+ // WWHD_NO_GAMEPAD only hides the GamePad screen window; WWHD_NO_CONTROLLERS turns off host controllers
+ if(!getenv("WWHD_NO_CONTROLLERS")) {
   if(!SDL_InitSubSystem(SDL_INIT_GAMEPAD)){LOG("[input] SDL gamepad initialization: %s",SDL_GetError());return;}
   int count=0;auto* ids=SDL_GetGamepads(&count);for(int i=0;i<count;i++)open_controller(ids[i]);SDL_free(ids);
  }
@@ -172,7 +173,7 @@ static void finish_prompt(bool ok){
 }
 void handle_event(const SDL_Event& event){
  if(mods::handle_mouse_event(event))return;
- if(event.type==SDL_EVENT_GAMEPAD_ADDED&&!getenv("WWHD_NO_GAMEPAD"))open_controller(event.gdevice.which);
+ if(event.type==SDL_EVENT_GAMEPAD_ADDED&&!getenv("WWHD_NO_CONTROLLERS"))open_controller(event.gdevice.which);
  if(event.type==SDL_EVENT_GAMEPAD_REMOVED){auto i=g_controllers.find(event.gdevice.which);if(i!=g_controllers.end()){SDL_CloseGamepad(i->second);g_controllers.erase(i);}}
  if(event.type==SDL_EVENT_WINDOW_FOCUS_LOST)release_keys();
  if(g_done){
@@ -219,7 +220,7 @@ void handle_event(const SDL_Event& event){
 void update(){
  mods::update_mouse();
  std::function<void(bool,std::u16string)> cancelled;
- {std::lock_guard lk(g_mu);if(g_pending&&!g_done){g_done=std::move(g_pending);g_text=std::move(g_initial);g_max_len=g_pending_max_len;memset(g_keys,0,sizeof g_keys);if(!g_prompt_window)g_prompt_window=SDL_GetKeyboardFocus();if(g_prompt_window){g_previous_title=SDL_GetWindowTitle(g_prompt_window);if(SDL_StartTextInput(g_prompt_window))show_prompt();else cancelled=std::move(g_done);}else cancelled=std::move(g_done);}}
+ {std::lock_guard lk(g_mu);if(g_pending&&!g_done){g_done=std::move(g_pending);g_text=std::move(g_initial);g_max_len=g_pending_max_len;memset(g_keys,0,sizeof g_keys);if(!g_prompt_window)g_prompt_window=SDL_GetKeyboardFocus();if(g_prompt_window){g_previous_title=SDL_GetWindowTitle(g_prompt_window);if(SDL_StartTextInput(g_prompt_window)){show_prompt();LOG("[input] the game asks for text: type it in the game window (shown in the window title), Enter confirms, Escape cancels; WWHD_SWKBD_TEXT=<text> answers automatically");}else{LOG("[input] text input unavailable (%s); set WWHD_SWKBD_TEXT=<text>",SDL_GetError());cancelled=std::move(g_done);}}else{LOG("[input] text input: no window to type in; set WWHD_SWKBD_TEXT=<text>");cancelled=std::move(g_done);}}}
  if(cancelled)cancelled(false,{});
  float v[input_map::kPadCount]={};using namespace input_map;
  auto put=[&](int p,float x){v[p]=std::max(v[p],x);};

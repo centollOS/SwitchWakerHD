@@ -72,6 +72,7 @@ namespace interp { void ss_reset(); }
 namespace aspect { void ss_reset(); }
 namespace dispatch { std::vector<std::pair<uint32_t, std::string>> host_functions(); }
 
+namespace interp { uint64_t logic_steps(); }
 namespace ss {
 namespace {
 
@@ -690,6 +691,12 @@ std::string last_message() {
     return g_message;
 }
 
+std::atomic<uint64_t> g_last_load_frame{0}, g_last_load_step{0};
+std::atomic<uint32_t> g_last_load_counter{0};
+uint32_t last_load_counter() { return g_last_load_counter.load(); }
+uint64_t last_load_frame() { return g_last_load_frame.load(); }
+uint64_t last_load_step() { return g_last_load_step.load(); }
+
 void service(Cpu* c) {
     (void)c;
     static const std::vector<Timed> save_at = parse_timed("WWHD_STATE_SAVE_AT"), load_at = parse_timed("WWHD_STATE_LOAD_AT");
@@ -719,6 +726,9 @@ void service(Cpu* c) {
         s = g_load_ready;
     }
     if (s && do_load(s)) {
+        g_last_load_frame = render::frame_count();
+        g_last_load_step = interp::logic_steps();
+        g_last_load_counter = ld32(0x101FF560);  // g_Counter.mTimer: the game's own step counter, part of the state
         {
             std::lock_guard<std::mutex> lk(g_mu);
             g_load_ready.reset();

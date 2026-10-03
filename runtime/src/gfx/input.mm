@@ -15,6 +15,8 @@
 #include "input_map.h"
 #include "renderer.h"
 #include "../runtime.h"
+#include "../savestate.h"
+#include "../true60.h"
 
 #include <vector>
 
@@ -240,16 +242,45 @@ struct Scenario {
 }  // namespace
 }  // namespace input
 namespace interp { void set_mode(int m); uint64_t logic_steps(); }
+namespace true60_test { void tick(double t, bool ended); void set_origin_step(uint64_t s); }
 namespace input {
+// WWHD_TEST_TOUCH=t0-t1:x:y,...: touches the GamePad screen at (x, y) (0..1) during scenario times
+static bool g_test_touch = false;
+static float g_test_tx = 0, g_test_ty = 0;
 static void apply_scenario(PadState& s) {
-    static const Scenario sc;
-    if (!sc.origin || render::frame_count() < sc.origin) return;
+    static Scenario sc;
+    // WWHD_TEST_ORIGIN_LOAD=n: the scenario starts n logic steps after the last save-state load (a
+    // load completes asynchronously, so a fixed frame can fall a step apart between two runs)
+    static const char* ol = getenv("WWHD_TEST_ORIGIN_LOAD");
+    uint64_t ol_step = 0;
+    // (the clock is the number of Link's full-pass executes since the load, true60::link_steps: the
+    // pass at which a load lands differs between runs, and the steps after it are the game's)
+    if (ol) {
+        if (!true60::state_loaded()) return;
+        static uint64_t found = 0;
+        if (!found) {
+            int64_t past = (int64_t)true60::link_steps() - (int64_t)strtoull(ol, nullptr, 10);
+            if (past < 0) return;
+            found = interp::logic_steps() - (uint64_t)past;  // the logic step at which the count reached it
+        }
+        ol_step = found;
+        sc.origin = 1;
+    }
+    if (!sc.origin || (!ol && render::frame_count() < sc.origin)) return;
     // scenario time = game time: full logic steps / 30 (frame-time hitches don't shift the input)
-    static const uint64_t s0 = [] {
+    static const uint64_t s0 = [ol_step] {
+        if (ol_step) {
+            LOG("[test] origin at logic step %llu (load + WWHD_TEST_ORIGIN_LOAD), logic step %llu", (unsigned long long)ol_step,
+                (unsigned long long)ol_step);
+            true60_test::set_origin_step(ol_step);
+            return ol_step;
+        }
         LOG("[test] origin at guest time %.4f s, logic step %llu", (double)timebase::now() / timebase::kTicksPerSec,
             (unsigned long long)interp::logic_steps());
+        true60_test::set_origin_step(interp::logic_steps());
         return interp::logic_steps();
     }();
+    // (with WWHD_TEST_ORIGIN_LOAD: the game's own step counter, which the load restores, is the clock)
     double t = (double)(interp::logic_steps() - s0) / 30.0;
     static std::atomic<bool> mode_set{false}, ended{false};
     static std::atomic<int> dbg{0};
@@ -258,6 +289,26 @@ static void apply_scenario(PadState& s) {
         LOG("[test] t=%.3f s: 60 fps mode %d", t, sc.mode);
         interp::set_mode(sc.mode);
     }
+    // WWHD_TEST_MODES=m@t,m@t,...: further mode switches (0 off, 1 interpolation, 2 true 60)
+    static std::vector<std::pair<double, int>> modes = [] {
+        std::vector<std::pair<double, int>> v;
+        for (const char* e = getenv("WWHD_TEST_MODES"); e && *e;) {
+            int m; double at; int n;
+            if (sscanf(e, "%d@%lf%n", &m, &at, &n) != 2) break;
+            v.push_back({at, m});
+            e += n;
+            if (*e != ',') break;
+            e++;
+        }
+        return v;
+    }();
+    for (auto& [at, m] : modes)
+        if (m >= 0 && t >= at) {
+            LOG("[test] t=%.3f s: 60 fps mode %d", t, m);
+            interp::set_mode(m);
+            m = -1;
+        }
+    true60_test::tick(t, sc.end > 0 && t >= sc.end);  // test aids (true60_test.cpp)
     if (sc.end > 0 && t >= sc.end && !ended.exchange(true)) {
         LOG("[test] t=%.3f s: end", t);
         if (FILE* f = fopen("test_done", "w")) fclose(f);
@@ -268,6 +319,21 @@ static void apply_scenario(PadState& s) {
         if (t >= p.from && t < p.to) { s.rx = p.x; s.ry = p.y; }
     for (auto& p : sc.presses)
         if (t >= p.from && t < p.to) s.buttons |= p.bits;
+    static std::vector<TimedStick> touches = [] {
+        std::vector<TimedStick> v;
+        const char* e = getenv("WWHD_TEST_TOUCH");
+        double a, b; float x, y; int n;
+        while (e && sscanf(e, "%lf-%lf:%f:%f%n", &a, &b, &x, &y, &n) == 4) {
+            v.push_back({a, b, x, y});
+            e += n;
+            if (*e != ',') break;
+            e++;
+        }
+        return v;
+    }();
+    g_test_touch = false;
+    for (auto& p : touches)
+        if (t >= p.from && t < p.to) g_test_touch = true, g_test_tx = p.x, g_test_ty = p.y;
 }
 
 static std::atomic<bool> g_pro{getenv("WWHD_PRO_CONTROLLER") != nullptr};
@@ -303,6 +369,7 @@ PadState read() {
     s.touch = g_touch;
     s.tx = g_tx;
     s.ty = g_ty;
+    if (g_test_touch) s.touch = true, s.tx = g_test_tx, s.ty = g_test_ty;
     // debug: WWHD_LOG_BUTTONS=1 logs every change of the merged button bits
     static const bool log_buttons = getenv("WWHD_LOG_BUTTONS") != nullptr;
     static uint32_t last_buttons = 0;

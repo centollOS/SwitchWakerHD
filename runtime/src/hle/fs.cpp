@@ -6,6 +6,9 @@
 #include "../platform/filesystem.h"
 
 #include <cstdio>
+#ifndef _WIN32
+#include <strings.h>
+#endif
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -41,7 +44,7 @@ std::unordered_map<uint32_t, OpenFile> g_files;
 std::unordered_map<uint32_t, OpenDir> g_dirs;
 uint32_t g_next_handle = 1;
 
-std::string host_path(const std::string& guest) {
+std::string host_path_exact(const std::string& guest) {
     std::string p = guest;
     auto map = [&](const char* prefix, const std::string& root) -> bool {
         size_t n = strlen(prefix);
@@ -57,6 +60,55 @@ std::string host_path(const std::string& guest) {
     if (map("/vol/save", config::save_dir)) return p;
     if (!p.empty() && p[0] != '/') return config::game_dir + "/content/" + p;  // relative to cwd (/vol/content)
     return config::game_dir + p;
+}
+
+#ifndef _WIN32
+// Wii U volumes are case-insensitive (the game asks for Common/Audiores, the disc folder is AudioRes);
+// case-sensitive host file systems (Linux, case-sensitive APFS) need the path resolved one component
+// at a time. Exact matches cost one stat(); resolved directories are cached. Components that don't
+// exist yet (new save files) keep the guest's spelling.
+std::string resolve_case(const std::string& p) {
+    struct stat st;
+    if (stat(p.c_str(), &st) == 0) return p;
+    static std::mutex mu;
+    static std::unordered_map<std::string, std::string> dirs;  // lower-cased dir path -> host dir path
+    std::lock_guard<std::mutex> lk(mu);
+    auto lower = [](std::string s) { for (char& ch : s) ch = (char)tolower((unsigned char)ch); return s; };
+    std::string cur = p.compare(0, 1, "/") == 0 ? "/" : "";
+    size_t pos = cur.size();
+    while (pos <= p.size()) {
+        size_t e = p.find('/', pos);
+        if (e == std::string::npos) e = p.size();
+        std::string comp = p.substr(pos, e - pos);
+        pos = e + 1;
+        if (comp.empty()) { if (e == p.size()) break; continue; }
+        std::string base = cur.empty() ? "" : (cur == "/" ? "/" : cur + "/");
+        std::string cand = base + comp;
+        std::string key = lower(cand);
+        if (auto it = dirs.find(key); it != dirs.end()) { cur = it->second; continue; }
+        if (stat(cand.c_str(), &st) != 0) {
+            std::string found;
+            if (DIR* d = opendir(cur.empty() ? "." : cur.c_str())) {
+                while (dirent* de = readdir(d))
+                    if (!strcasecmp(de->d_name, comp.c_str())) { found = de->d_name; break; }
+                closedir(d);
+            }
+            if (found.empty()) return cand + (e < p.size() ? p.substr(e) : "");  // not there: keep the rest as asked
+            cand = base + found;
+        }
+        if (e < p.size()) dirs[key] = cand;  // only directories are cached
+        cur = cand;
+    }
+    return cur;
+}
+#endif
+
+std::string host_path(const std::string& guest) {
+#ifdef _WIN32
+    return host_path_exact(guest);  // Windows file systems are case-insensitive
+#else
+    return resolve_case(host_path_exact(guest));
+#endif
 }
 
 void make_parent_dirs(const std::string& path) {

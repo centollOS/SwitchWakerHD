@@ -79,7 +79,8 @@ You also need, from your own console and disc:
 - its disc key (16 bytes) in a `.key` file next to the image, with the same base name;
 - the Wii U common key, either in a file `common.key` (16 raw bytes or 32 hex digits) next to
   the image or in the current directory, or in the `WIIU_COMMON_KEY` environment variable
-  (32 hex digits).
+  (32 hex digits). As a text file it is one line of 32 hex digits, nothing else; a wrong or
+  malformed common key also makes the extraction fail with a decryption error.
 
 None of these are included or will be provided.
 
@@ -114,6 +115,19 @@ cmake -S . -B build/linux -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER
 cmake --build build/linux
 ./build/linux/wwhd --renderer-smoke     # checks the Vulkan renderer, no game files needed
 ```
+
+On Arch-based systems (Arch, CachyOS, Manjaro):
+
+```sh
+sudo pacman -S clang cmake ninja sdl3 vulkan-headers vulkan-icd-loader glslang shaderc python-pycryptodome
+# plus the Vulkan driver for your GPU, e.g. vulkan-radeon (AMD) or vulkan-intel
+```
+
+Wii U volumes are case-insensitive and the game asks for paths in a different case than the
+extracted folders (e.g. `Audiores` vs `AudioRes`); the runtime resolves such paths itself on
+case-sensitive file systems. When the game asks for text (your name), type it into the game
+window: the text appears in the window title, Enter confirms, Escape cancels
+(`WWHD_SWKBD_TEXT=<name>` answers automatically).
 
 Settings, controls and save states live under `~/.config/wwhd` (or `$XDG_CONFIG_HOME/wwhd`).
 To check the build without the game, `python3 tools/recomp/stubgen.py build/gen-stub` writes
@@ -190,6 +204,10 @@ cycles; the game renders at 1280x720, 2x renders at 2560x1440), edge smoothing (
 ambient-occlusion mode (**O** cycles), full-size occlusion depth (**M**), 16x anisotropic
 filtering (**N**), the aspect ratio, the renderer (Metal or Vulkan), and a frame capture for debugging (**P** or fn+F12, written to `captures/`;
 captures contain game imagery, so keep them to yourself).
+True 60 (**7**) computes Link and the camera at 60 Hz while the game state after every 30 Hz step
+stays bit-identical to the 30 fps game, except the random-number sequence, which drifts because
+drawing code draws random numbers too (later drops and ambient behaviour differ like in any other
+session; see docs/decomp-notes.md, "True 60 fps").
 
 The **Gameplay** menu has optional changes to how the game plays, all off by default: climb any
 wall (with a stamina wheel; B or A lets go), a direct right-stick camera (no easing, adjustable
@@ -222,7 +240,7 @@ and the renderer are remembered in `~/Library/Application Support/wwhd/display.p
 
 - Shaders are translated on first use and cached in `~/Library/Caches/wwhd/shaders.bin`; later
   runs replay that cache at startup.
-- Useful environment variables: `WWHD_NO_AUDIO=1`, `WWHD_NO_GAMEPAD=1` (no second window),
+- Useful environment variables: `WWHD_NO_AUDIO=1`, `WWHD_NO_GAMEPAD=1` (no second window), `WWHD_NO_CONTROLLERS=1` (SDL builds: ignore host game controllers),
   `WWHD_DRC_MODE=window|pip|auto|off`, `WWHD_ASPECT=16:9|window|16:10|21:9|32:9|<w:h>`,
   `WWHD_AUDIO_VOLUME=0..1`, `WWHD_SHADER_CACHE=<file>|0`, `WWHD_AO_MODE=0..2`, `WWHD_AO_HIRES=0|1`, `WWHD_ANISO=0|1`, `WWHD_RES_SCALE=1|1.5|2|3`,
   `WWHD_FXAA=0|1`, `WWHD_INTERP=1`, `WWHD_TRUE60=1` (start values for the Graphics menu);

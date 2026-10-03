@@ -3,7 +3,7 @@
 #include "../runtime.h"
 #include "../input.h"
 
-namespace interp { bool repeat_input(); bool fresh_sticks(); void trace_read(const char*); }
+namespace interp { bool repeat_input(); bool fresh_sticks(); void trace_read(const char*); uint64_t logic_steps(); }
 
 // nn::Result: bit 31 set = failure
 static constexpr uint32_t kResultOk = 0;
@@ -123,6 +123,10 @@ HLE(vpad, VPADRead) {
     st32(st + 0x04, hold & ~last_hold);   // trig
     st32(st + 0x08, last_hold & ~hold);   // release
     last_hold = hold;
+    {  // debug: WWHD_PAD_TRACE=path logs each read: logic step, repeated, buttons, trigger
+        static FILE* pt = getenv("WWHD_PAD_TRACE") ? fopen(getenv("WWHD_PAD_TRACE"), "w") : nullptr;
+        if (pt) { fprintf(pt, "%llu %d %08X %08X\n", (unsigned long long)interp::logic_steps(), (int)repeat, hold, ld32(st + 4)); fflush(pt); }
+    }
     stf32(st + 0x0C, p.lx); stf32(st + 0x10, p.ly);
     stf32(st + 0x14, p.rx); stf32(st + 0x18, p.ry);
     stf32(st + 0x30, 1.0f);                                    // accXY
