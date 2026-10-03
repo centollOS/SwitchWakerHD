@@ -1,11 +1,13 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#ifndef _WIN32  // the boot-crash debug aids below are POSIX-only (macOS, Linux)
 #include <execinfo.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 // Test aids for the true 60 fps conversions (debug only; nothing here runs unless its env var is set).
 //
 //   WWHD_TEST_POKE=t:ADDR:HEX,...   at scenario time t (s, game time; see input.mm) writes the bytes
@@ -363,6 +365,9 @@ extern "C" void hook_027B8904(Cpu* c) {
 // array's host page is write-protected; every write fault logs the writing thread and backtrace (the
 // page is re-protected 0.2 ms later), to find who corrupts it
 namespace {
+#ifdef _WIN32
+void wp_arm(uint32_t, uint32_t) { LOG("[wp] WWHD_BOOTDBG_PROT is not available on Windows"); }
+#else
 std::atomic<uintptr_t> g_wp_lo{0}, g_wp_hi{0};
 std::atomic<bool> g_wp_armed{false};
 struct sigaction g_wp_old_segv, g_wp_old_bus;
@@ -410,6 +415,7 @@ void wp_arm(uint32_t guest_lo, uint32_t size) {
     }).detach();
     LOG("[wp] armed %08X..%08X", (unsigned)(lo - (uintptr_t)PPC_MEM_BASE), (unsigned)(hi - (uintptr_t)PPC_MEM_BASE));
 }
+#endif
 }  // namespace
 extern "C" void f_027B82B8_orig(Cpu* c);
 extern "C" void hook_027B82B8(Cpu* c) {
@@ -437,7 +443,9 @@ extern "C" void hook_02753D6C(Cpu* c) {
         std::lock_guard<std::mutex> lk(m);
         if (seen.insert({h, t}).second) {
             char name[64] = "";
+#ifndef _WIN32
             pthread_getname_np(pthread_self(), name, sizeof name);
+#endif
             LOG("[heaplog] heap %08X (flags %08X, %08X..%08X) first alloc by \"%s\" (%08X) size %X lr %08X", h, ld32(h + 0x90),
                 ld32(h + 0x20), ld32(h + 0x20) + ld32(h + 0x24), name, t, c->r[4], c->lr);
         }
