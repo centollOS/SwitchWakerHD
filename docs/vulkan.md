@@ -372,9 +372,12 @@ invariance prevents multipass depth artifacts on Link. All 195 captured vertex
 shader variants passed SPIR-V compilation with invariant position outputs.
 Earlier validation runs reported unused fragment outputs during depth-only passes;
 the final gameplay validation run above reported no warnings.
-Broader gameplay and devices remain to be validated. Windows/Linux runtime and renderer files
-compile to target objects; executable linking and device execution there remain
-unverified.
+Broader gameplay and devices remain to be validated. On Linux (Ubuntu 24.04, Clang 18) the
+executable builds without warnings and links against placeholder guest code
+(`tools/recomp/stubgen.py`), the unit tests pass and `--renderer-smoke` passes on Mesa lavapipe with
+the Khronos validation layer reporting nothing (`.github/workflows/linux.yml`); gameplay on Linux
+needs your own recompiled game and remains to be tested. Windows linking and device execution
+remain unverified.
 
 For an isolated capture, set `WWHD_CAPTURE_PATH` to the PNG output path and
 `WWHD_CAPTURE` to the renderer frame number (default120). Keep these artifacts

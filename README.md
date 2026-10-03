@@ -101,6 +101,25 @@ python3 tools/recomp/recomp.py game/code/cking.rpx build/gen
 cmake -S . -B build/cmake && make -C build/cmake -j$(sysctl -n hw.ncpu) wwhd
 ```
 
+### Linux
+
+The Linux build uses the Vulkan renderer with the SDL3 host (windows, input, audio). On Ubuntu 24.04:
+
+```sh
+sudo apt install clang cmake ninja-build zlib1g-dev liblz4-dev libvulkan-dev glslang-dev \
+  mesa-vulkan-drivers libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+  libxfixes-dev libxkbcommon-dev libwayland-dev libasound2-dev libpulse-dev libudev-dev libdbus-1-dev
+# SDL3 is not packaged in 24.04: build it from source (https://github.com/libsdl-org/SDL, release-3.2.x)
+cmake -S . -B build/linux -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build/linux
+./build/linux/wwhd --renderer-smoke     # checks the Vulkan renderer, no game files needed
+```
+
+Settings, controls and save states live under `~/.config/wwhd` (or `$XDG_CONFIG_HOME/wwhd`).
+To check the build without the game, `python3 tools/recomp/stubgen.py build/gen-stub` writes
+placeholder guest code and `-DGEN_DIR=$PWD/build/gen-stub` builds against it (the result cannot
+run the game).
+
 The build fails with a clear message if `build/gen` has not been generated. The runtime checks at
 startup that `game/code/cking.rpx` matches the recompiled code.
 

@@ -294,19 +294,26 @@ input::PadState controller_state(const Mapping& m, const float values[kPadCount]
 // ---- JSON (just enough for this file: objects, arrays, strings, numbers, booleans, null)
 
 namespace {
+struct JsonMember;
 struct Json {
     enum Type { Null, Bool, Num, Str, Arr, Obj } type = Null;
     bool b = false;
     double n = 0;
     std::string s;
     std::vector<Json> arr;
-    std::vector<std::pair<std::string, Json>> obj;
-    const Json* get(const char* k) const {
-        for (auto& [key, v] : obj)
-            if (key == k) return &v;
-        return nullptr;
-    }
+    // not std::pair<std::string, Json>: libstdc++ rejects a pair of an incomplete type
+    std::vector<JsonMember> obj;
+    const Json* get(const char* k) const;
 };
+struct JsonMember {
+    std::string key;
+    Json value;
+};
+const Json* Json::get(const char* k) const {
+    for (auto& [key, v] : obj)
+        if (key == k) return &v;
+    return nullptr;
+}
 
 struct Parser {
     const char* p;
@@ -372,7 +379,7 @@ struct Parser {
                 if (p >= end || *p++ != ':') return fail("expected ':'");
                 Json c;
                 if (!value(c, depth + 1)) return false;
-                v.obj.emplace_back(std::move(k), std::move(c));
+                v.obj.push_back({std::move(k), std::move(c)});
                 ws();
                 if (p < end && *p == ',') { p++; continue; }
                 if (p < end && *p == '}') { p++; return true; }
