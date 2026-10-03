@@ -186,7 +186,7 @@ if(WWHD_HAS_OPENGL)
   if(WWHD_SWITCH)
     # Mesa (nouveau) EGL/OpenGL and glad, from the switch-mesa and switch-glad portlibs
     target_link_libraries(wwhd PRIVATE ${LZ4_LIBRARY} glad EGL glapi drm_nouveau)
-    nx_generate_nacp(OUTPUT wwhd.nacp NAME "Wind Waker HD" AUTHOR "WWHD recomp" VERSION "0.1.0")
+    nx_generate_nacp(OUTPUT wwhd.nacp NAME "SwitchWakerHD" AUTHOR "WWHD recomp" VERSION "0.1.0")
     nx_create_nro(wwhd NACP wwhd.nacp)
   else()
     target_compile_definitions(wwhd PRIVATE WWHD_HEADLESS_GL=1)

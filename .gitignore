@@ -36,6 +36,7 @@ headstart.bin
 # GameCube decompilation (zeldaret/tww), reference only
 /tww/
 # logs and dumps (may contain game text or imagery)
+/logs-switch/
 *.log
 *.metal
 *.tsv
