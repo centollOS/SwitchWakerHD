@@ -5,6 +5,9 @@
 #ifdef WWHD_HAS_METAL
 #include "Cafe/HW/Latte/Renderer/Metal/MetalRenderer.h"
 #endif
+#ifdef WWHD_HAS_OPENGL
+#include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
+#endif
 #include "gfx/renderer.h"
 #include "runtime.h"
 
@@ -12,6 +15,8 @@
 // Vulkan cannot start and the game falls back to Metal), before any shader is translated.
 #ifdef WWHD_HAS_METAL
 std::unique_ptr<Renderer> g_renderer = std::make_unique<MetalRenderer>();
+#elif defined(WWHD_HAS_OPENGL)
+std::unique_ptr<Renderer> g_renderer = std::make_unique<OpenGLRenderer>();
 #else
 std::unique_ptr<Renderer> g_renderer = std::make_unique<VulkanRenderer>();
 #endif
@@ -19,6 +24,12 @@ void select_decompiler_api(render::Api api) {
 #ifdef WWHD_HAS_VULKAN
     if (api == render::Api::Vulkan) {
         g_renderer = std::make_unique<VulkanRenderer>();
+        return;
+    }
+#endif
+#ifdef WWHD_HAS_OPENGL
+    if (api == render::Api::OpenGL) {
+        g_renderer = std::make_unique<OpenGLRenderer>();
         return;
     }
 #endif

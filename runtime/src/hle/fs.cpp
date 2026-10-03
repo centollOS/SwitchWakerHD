@@ -41,12 +41,53 @@ std::unordered_map<uint32_t, OpenFile> g_files;
 std::unordered_map<uint32_t, OpenDir> g_dirs;
 uint32_t g_next_handle = 1;
 
+// The game names some paths with a different case than the disc (Audiores vs AudioRes). Case-sensitive
+// host file systems resolve each missing component by a case-insensitive directory search.
+std::string fold_case(const std::string& root, const std::string& rest) {
+#ifdef __linux__
+    static std::mutex m;
+    static std::unordered_map<std::string, std::string> cache;
+    std::string key = root + rest;
+    struct stat st;
+    if (stat(key.c_str(), &st) == 0) return key;
+    std::lock_guard<std::mutex> lk(m);
+    if (auto it = cache.find(key); it != cache.end()) return it->second;
+    std::string path = root;
+    size_t pos = 0;
+    while (pos < rest.size()) {
+        size_t next = rest.find('/', pos + 1);
+        std::string part = rest.substr(pos + 1, next == std::string::npos ? std::string::npos : next - pos - 1);
+        pos = next == std::string::npos ? rest.size() : next;
+        if (part.empty()) continue;
+        std::string exact = path + "/" + part;
+        if (stat(exact.c_str(), &st) == 0) {
+            path = exact;
+            continue;
+        }
+        std::string found;
+        if (DIR* d = opendir(path.c_str())) {
+            while (dirent* de = readdir(d))
+                if (!strcasecmp(de->d_name, part.c_str())) {
+                    found = de->d_name;
+                    break;
+                }
+            closedir(d);
+        }
+        path += "/" + (found.empty() ? part : found);
+    }
+    cache[key] = path;
+    return path;
+#else
+    return root + rest;
+#endif
+}
+
 std::string host_path(const std::string& guest) {
     std::string p = guest;
     auto map = [&](const char* prefix, const std::string& root) -> bool {
         size_t n = strlen(prefix);
         if (p.compare(0, n, prefix) == 0) {
-            p = root + p.substr(n);
+            p = fold_case(root, p.substr(n));
             return true;
         }
         return false;

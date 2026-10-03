@@ -499,7 +499,7 @@ HLE(snd_core, AXInit) {
     init_buffers();
     audio::init();
     g_running = true;
-    std::thread(frame_thread).detach();
+    host::start_thread(frame_thread, 4 << 20);
     LOG("[ax] initialized, %d voices", kMaxVoices);
 }
 HLE(snd_core, AXQuit) { g_running = false; }

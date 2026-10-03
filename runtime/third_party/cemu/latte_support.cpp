@@ -3,7 +3,10 @@
 #include "Cafe/HW/Latte/Core/LatteCachedFBO.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
+#include "Cafe/HW/Latte/Renderer/Renderer.h"
+#ifdef ENABLE_METAL
 #include "Cafe/HW/Latte/Renderer/Metal/LatteToMtl.h"
+#endif
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
 #include "Cafe/HW/Latte/Core/FetchShader.h"
 
@@ -119,6 +122,7 @@ Latte::E_GX2SURFFMT LatteMRT::GetDepthBufferFormat(const LatteContextRegister& l
 	return Latte::E_GX2SURFFMT::D16_UNORM;
 }
 
+#ifdef ENABLE_METAL
 MTL::VertexFormat GetMtlVertexFormat(Latte::E_HWFMT format)
 {
     switch (format)
@@ -222,6 +226,7 @@ uint32 GetMtlVertexFormatSize(Latte::E_HWFMT format)
 		return 0;
 	}
 }
+#endif  // ENABLE_METAL
 
 // LatteFetchShader: we build fetch shaders directly from GX2 attribute descriptions,
 // so the cache machinery of Cemu's FetchShader.cpp is not needed.
@@ -413,7 +418,9 @@ LatteDecompilerShader* FinishDecompiledShader(LatteDecompilerOutput_t& decompile
 {
 	LatteDecompilerShader* shader = decompilerOutput.shader;
 	shader->resourceMapping = g_renderer->GetType() == RendererAPI::Vulkan
-        ? decompilerOutput.resourceMappingVK : decompilerOutput.resourceMappingMTL;
+        ? decompilerOutput.resourceMappingVK
+        : g_renderer->GetType() == RendererAPI::OpenGL ? decompilerOutput.resourceMappingGL
+                                                       : decompilerOutput.resourceMappingMTL;
 	shader->textureUnitMask2 = decompilerOutput.textureUnitMask;
 	shader->streamoutBufferWriteMask = decompilerOutput.streamoutBufferWriteMask;
 	shader->hasStreamoutBufferWrite = decompilerOutput.streamoutBufferWriteMask.any();

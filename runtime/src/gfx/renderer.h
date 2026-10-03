@@ -16,9 +16,9 @@
 
 namespace render {
 
-enum class Api : int { Metal = 0, Vulkan = 1 };
-const char* api_name(Api a);      // "Metal", "Vulkan"
-const char* api_key(Api a);       // "metal", "vulkan" (setting / command line value)
+enum class Api : int { Metal = 0, Vulkan = 1, OpenGL = 2 };
+const char* api_name(Api a);      // "Metal", "Vulkan", "OpenGL"
+const char* api_key(Api a);       // "metal", "vulkan", "opengl" (setting / command line value)
 bool compiled(Api a);             // built into this executable
 bool can_choose();                // more than one renderer built in (the Graphics menu offers the choice)
 
@@ -72,6 +72,9 @@ const Backend& metal_backend();   // gfx/metal_backend.mm
 #endif
 #ifdef WWHD_HAS_VULKAN
 const Backend& vulkan_backend();  // gfx/vulkan/backend_table.cpp
+#endif
+#ifdef WWHD_HAS_OPENGL
+const Backend& opengl_backend();  // gfx/gl/backend.cpp (Switch)
 #endif
 
 // ---- start-up (main.cpp)

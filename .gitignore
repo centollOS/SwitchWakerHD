@@ -1,5 +1,6 @@
 # game data (copyrighted, user-supplied)
 /game/
+/Rom/
 game.wux
 game.key
 *.rpx
@@ -19,6 +20,7 @@ compile_commands.json
 .cache/
 frame_*.png
 failed_shader_*.metal
+shaderfail_*.glsl
 shaders/
 draw_*.png
 captures/

@@ -12,7 +12,20 @@
 extern "C" {
 #endif
 
+#ifdef __SWITCH__
+/* Horizon has no fixed-address mappings and a 39-bit address space: the window is placed at
+ * start-up (core.cpp). The asm read has no memory dependencies, so the compiler keeps the base in
+ * a register across guest stores instead of reloading a global after each one. */
+extern uint8_t* ppc_mem_base_var;
+static inline __attribute__((always_inline)) uint8_t* ppc_mem_base(void) {
+    uint8_t* p;
+    __asm__("adrp %0, ppc_mem_base_var\n\tldr %0, [%0, :lo12:ppc_mem_base_var]" : "=r"(p));
+    return p;
+}
+#define PPC_MEM_BASE (ppc_mem_base())
+#else
 #define PPC_MEM_BASE ((uint8_t*)0x200000000000ull)
+#endif
 
 typedef struct Cpu {
     uint32_t r[32];

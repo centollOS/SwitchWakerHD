@@ -179,6 +179,7 @@ static uint64_t g_fence_issued = 0, g_fence_done = 0;
 
 static void render_thread_main() {
     host::set_thread_name("GX2 render");
+    host::set_thread_core(2);
 #ifdef __APPLE__
     if (!getenv("WWHD_NO_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
@@ -200,7 +201,7 @@ static void render_thread_main() {
 
 static void enqueue(Op op, const uint32* payload, uint32 n) {
     static std::once_flag once;
-    std::call_once(once, [] { std::thread(render_thread_main).detach(); });
+    std::call_once(once, [] { host::start_thread(render_thread_main, 8 << 20); });
     std::lock_guard<std::mutex> lk(g_q_mutex);
     g_q_pending.push_back(op | (n << 8));
     g_q_pending.insert(g_q_pending.end(), payload, payload + n);

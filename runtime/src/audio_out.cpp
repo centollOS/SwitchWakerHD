@@ -5,6 +5,12 @@
 
 #if defined(__APPLE__) && !defined(WWHD_SDL_HOST)
 #include <AudioToolbox/AudioToolbox.h>
+#elif defined(__SWITCH__)
+#include <switch.h>
+#include <thread>
+#elif defined(WWHD_HEADLESS_GL)
+#include <chrono>
+#include <thread>
 #else
 #include <SDL3/SDL.h>
 #endif
@@ -16,6 +22,7 @@
 #include <mutex>
 #include <vector>
 
+#include "platform/host.h"
 #include "runtime.h"
 
 namespace audio {
@@ -30,6 +37,8 @@ std::atomic<bool> g_started{false};
 std::atomic<bool> g_flush{false};  // consumer skips everything queued
 #if defined(__APPLE__) && !defined(WWHD_SDL_HOST)
 AudioComponentInstance g_unit = nullptr;
+#elif defined(__SWITCH__) || defined(WWHD_HEADLESS_GL)
+bool g_unit = false;
 #else
 SDL_AudioStream* g_unit = nullptr;
 #endif
@@ -81,6 +90,40 @@ void pull(int16_t* out,uint32_t frames) {
 #if defined(__APPLE__) && !defined(WWHD_SDL_HOST)
 OSStatus render(void*,AudioUnitRenderActionFlags*,const AudioTimeStamp*,UInt32,UInt32 frames,AudioBufferList* io) {
     pull((int16_t*)io->mBuffers[0].mData,frames);return noErr;
+}
+#elif defined(__SWITCH__)
+// audout plays 48 kHz stereo s16 natively: a thread keeps four page-aligned buffers queued
+constexpr uint32_t kBufferFrames = 1024;
+void audout_thread() {
+    host::raise_thread_priority();
+    AudioOutBuffer bufs[4]{};
+    for (auto& b : bufs) {
+        b.buffer = aligned_alloc(0x1000, kBufferFrames * 4);
+        b.buffer_size = kBufferFrames * 4;
+        b.data_size = kBufferFrames * 4;
+        pull((int16_t*)b.buffer, kBufferFrames);
+        armDCacheFlush(b.buffer, b.buffer_size);
+        audoutAppendAudioOutBuffer(&b);
+    }
+    for (;;) {
+        AudioOutBuffer* released = nullptr;
+        u32 count = 0;
+        if (R_FAILED(audoutWaitPlayFinish(&released, &count, UINT64_MAX)) || !released) continue;
+        pull((int16_t*)released->buffer, kBufferFrames);
+        armDCacheFlush(released->buffer, released->buffer_size);
+        audoutAppendAudioOutBuffer(released);
+    }
+}
+#elif defined(WWHD_HEADLESS_GL)
+// a silent device: the game's audio pacing sees samples consumed in real time
+void null_device_thread() {
+    static int16_t buffer[1024 * 2];
+    auto next = std::chrono::steady_clock::now();
+    for (;;) {
+        next += std::chrono::microseconds(1024 * 1000000 / kRate);
+        std::this_thread::sleep_until(next);
+        pull(buffer, 1024);
+    }
 }
 #else
 void SDLCALL render(void*,SDL_AudioStream* stream,int additional,int) {
@@ -136,6 +179,18 @@ void init() {
         return;
     }
     LOG("[audio] CoreAudio output started (48 kHz stereo)");
+#elif defined(__SWITCH__)
+    if (R_FAILED(audoutInitialize()) || R_FAILED(audoutStartAudioOut())) {
+        LOG("[audio] audout unavailable");
+        return;
+    }
+    g_unit = true;
+    std::thread(audout_thread).detach();
+    LOG("[audio] audout started (%u Hz, %u channels)", audoutGetSampleRate(), audoutGetChannelCount());
+#elif defined(WWHD_HEADLESS_GL)
+    g_unit = true;
+    std::thread(null_device_thread).detach();
+    LOG("[audio] headless build: silent output");
 #else
     if(!SDL_InitSubSystem(SDL_INIT_AUDIO)){LOG("[audio] SDL audio initialization: %s",SDL_GetError());return;}
     SDL_AudioSpec spec{SDL_AUDIO_S16,2,kRate};

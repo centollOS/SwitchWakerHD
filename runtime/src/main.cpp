@@ -1,5 +1,5 @@
 // Wind Waker HD recompiled: entry point.
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__SWITCH__)
 #include <execinfo.h>
 #include <signal.h>
 #include <unistd.h>
@@ -9,6 +9,13 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#ifdef __SWITCH__
+#include <sys/stat.h>
+
+#include <cstdlib>
+#include <exception>
+#include <vector>
+#endif
 
 #include "gfx/renderer.h"
 #include "gx2/gx2.h"
@@ -26,7 +33,55 @@ void mem_setup_heaps(uint32_t data_end);
 void trace_dump(FILE* f, unsigned last);
 void mem_init_data_imports(uint32_t alloc_slot, uint32_t alloc_ex_slot, uint32_t free_slot);
 
-#ifndef _WIN32
+#if defined(__SWITCH__)
+// CPU exceptions go to the loader (hbl), not to the NRO: Atmosphere writes them to
+// /atmosphere/crash_reports. Uncaught C++ exceptions are logged here.
+static void install_crash_handler() {
+    std::set_terminate([] {
+        try {
+            if (auto e = std::current_exception()) std::rethrow_exception(e);
+            fprintf(stderr, "FATAL: std::terminate\n");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "FATAL: uncaught exception: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "FATAL: uncaught exception\n");
+        }
+        fflush(stderr);
+        abort();
+    });
+}
+// hbmenu passes no options: env.txt next to the log holds KEY=VALUE environment settings (the
+// WWHD_* switches) and command-line options (lines starting with --)
+static void load_switch_options(int& argc, char**& argv) {
+    static std::vector<std::string> tokens;
+    static std::vector<char*> args;
+    FILE* f = fopen("env.txt", "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        std::string s(line);
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+        if (s.empty() || s[0] == '#') continue;
+        if (s.rfind("--", 0) == 0) {
+            size_t space = s.find(' ');
+            tokens.push_back(s.substr(0, space));
+            if (space != std::string::npos) tokens.push_back(s.substr(space + 1));
+        } else if (size_t eq = s.find('='); eq != std::string::npos) {
+            setenv(s.substr(0, eq).c_str(), s.substr(eq + 1).c_str(), 1);
+            LOG("[boot] env %s", s.c_str());
+        }
+    }
+    fclose(f);
+    args.assign(argv, argv + argc);
+    for (auto& t : tokens) {
+        args.push_back(t.data());
+        LOG("[boot] option %s", t.c_str());
+    }
+    argc = (int)args.size();
+    args.push_back(nullptr);
+    argv = args.data();
+}
+#elif !defined(_WIN32)
 static void crash_handler(int sig, siginfo_t* si, void*) {
     uintptr_t a = (uintptr_t)si->si_addr;
     uintptr_t base = (uintptr_t)PPC_MEM_BASE;
@@ -98,6 +153,16 @@ static void init_data_imports() {
 }
 
 int main(int argc, char** argv) {
+#ifdef __SWITCH__
+    // everything lives in sdmc:/switch/wwhd: game/ (extracted dump), save/, shader cache, wwhd.log
+    mkdir(host::config_dir().c_str(), 0777);
+    chdir(host::config_dir().c_str());
+    freopen("wwhd.log", "w", stderr);
+    setvbuf(stderr, nullptr, _IOLBF, 0);
+    host::set_thread_core(0);
+    LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
+    load_switch_options(argc, argv);
+#endif
     bool warm_shaders = false;
 #ifdef WWHD_HAS_VULKAN
     bool renderer_smoke = false;

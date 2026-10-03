@@ -51,11 +51,64 @@ void fatal(const char* fmt, ...) {
 }
 
 // ---------------------------------------------------------------- memory
+#ifdef __SWITCH__
+extern "C" { uint8_t* ppc_mem_base_var = nullptr; }
+// libnx implements no pthread_detach hook (it returns ENOSYS, which makes std::thread::detach throw).
+// Detached host threads here run for the whole session, so not reclaiming them on exit is fine.
+struct __pthread_t;
+extern "C" int __syscall_thread_detach(struct __pthread_t*) { return 0; }
+#endif
 namespace mem {
 static std::atomic<uint32_t> g_runtime_top{kRuntimeStart};
 
+#ifdef __SWITCH__
+// Horizon commits every mapping, so only the guest ranges the game and the runtime use are backed:
+// heap pages are aliased into a reserved 4 GiB window (code-memory region, read/write). Everything the
+// desktop builds can touch (all of it is mapped there) except the large gaps is backed.
+struct GuestRange { uint32_t start, size; };
+static constexpr GuestRange kGuestRanges[] = {
+    {0x00010000, 0x04000000 - 0x00010000},  // low memory and .text / .rodata of cking.rpx
+    {kMem2Start, kMem2End - kMem2Start},
+    {kRuntimeStart, kRuntimeEnd - kRuntimeStart},
+    {0xC0000000, 0x02100000},          // import slots, data imports, host function addresses
+    {kFgBucket, kFgBucketSize},
+    {kMem1, kMem1Size},
+};
+static void init_switch() {
+    if (!envIsSyscallHinted(0x77) || !envIsSyscallHinted(0x73))
+        fatal("guest memory needs svcMapProcessCodeMemory/svcSetProcessMemoryPermission (run from hbmenu over a game, "
+              "not the album applet)");
+    Handle self = envGetOwnProcessHandle();
+    virtmemLock();
+    void* window = virtmemFindCodeMemory(0x100000000ull, 0x10000);
+    if (!window || !virtmemAddReservation(window, 0x100000000ull)) {
+        virtmemUnlock();
+        fatal("cannot reserve a 4 GiB guest address window");
+    }
+    virtmemUnlock();
+    uint64_t total = 0;
+    for (const auto& r : kGuestRanges) {
+        void* backing = aligned_alloc(0x1000, r.size);
+        if (!backing)
+            fatal("out of memory backing guest range %08X (+%X); start the game with full RAM (hold R on a title)",
+                  r.start, r.size);
+        memset(backing, 0, r.size);
+        uint8_t* dst = (uint8_t*)window + r.start;
+        Result rc = svcMapProcessCodeMemory(self, (u64)dst, (u64)backing, r.size);
+        if (R_FAILED(rc)) fatal("svcMapProcessCodeMemory %08X failed (0x%X)", r.start, rc);
+        rc = svcSetProcessMemoryPermission(self, (u64)dst, r.size, Perm_Rw);
+        if (R_FAILED(rc)) fatal("svcSetProcessMemoryPermission %08X failed (0x%X)", r.start, rc);
+        total += r.size;
+    }
+    ppc_mem_base_var = (uint8_t*)window;
+    LOG("[mem] guest window at %p, %llu MiB backed", window, (unsigned long long)(total >> 20));
+}
+#endif
+
 void init() {
-#ifdef __APPLE__
+#ifdef __SWITCH__
+    init_switch();
+#elif defined(__APPLE__)
     mach_vm_address_t addr = (mach_vm_address_t)PPC_MEM_BASE;
     kern_return_t kr = mach_vm_allocate(mach_task_self(), &addr, 0x100000000ull, VM_FLAGS_FIXED);
     if (kr != KERN_SUCCESS) fatal("cannot reserve guest address space at %p (kr=%d)", PPC_MEM_BASE, kr);

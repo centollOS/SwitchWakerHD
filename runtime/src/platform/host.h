@@ -13,6 +13,10 @@
 #endif
 #include <windows.h>
 #include <psapi.h>
+#elif defined(__SWITCH__)
+#include <switch.h>
+#include <pthread.h>
+#include <unistd.h>
 #else
 #include <pthread.h>
 #include <sys/mman.h>
@@ -48,6 +52,8 @@ inline void set_thread_name(const char* name) {
  using SetDescription=HRESULT(WINAPI*)(HANDLE,PCWSTR);
  auto f=(SetDescription)GetProcAddress(GetModuleHandleW(L"Kernel32.dll"),"SetThreadDescription");
  if(f) { std::wstring text; for(unsigned char c:thread_label)text.push_back(c); f(GetCurrentThread(),text.c_str()); }
+#elif defined(__SWITCH__)
+ (void)name;
 #else
  pthread_setname_np(pthread_self(),thread_label.substr(0,15).c_str());
 #endif
@@ -65,6 +71,10 @@ inline uintptr_t executable_base() {
  return (uintptr_t)&_mh_execute_header;
 #elif defined(_WIN32)
  return (uintptr_t)GetModuleHandleW(nullptr);
+#elif defined(__SWITCH__)
+ // the NRO's code segment: the mapping containing this function
+ MemoryInfo info{}; u32 page=0;
+ return R_SUCCEEDED(svcQueryMemory(&info,&page,(u64)(uintptr_t)&executable_base))?(uintptr_t)info.addr:0;
 #else
  static int anchor;
  Dl_info info{}; return dladdr(&anchor,&info)?(uintptr_t)info.dli_fbase:0;
@@ -73,7 +83,7 @@ inline uintptr_t executable_base() {
 inline std::string executable_path() {
 #ifdef _WIN32
  char path[32768]; DWORD n=GetModuleFileNameA(nullptr,path,sizeof path);return std::string(path,n);
-#elif !defined(__APPLE__)
+#elif !defined(__APPLE__) && !defined(__SWITCH__)
  char path[4096];ssize_t n=readlink("/proc/self/exe",path,sizeof path);return n>0?std::string(path,n):std::string();
 #else
  return {};
@@ -82,6 +92,8 @@ inline std::string executable_path() {
 inline size_t page_size() {
 #ifdef _WIN32
  SYSTEM_INFO info;GetSystemInfo(&info);return info.dwPageSize;
+#elif defined(__SWITCH__)
+ return 0x1000;
 #else
  return (size_t)getpagesize();
 #endif
@@ -109,7 +121,39 @@ inline bool replace_file(const std::string& from,const std::string& to) {
 #ifdef _WIN32
  return MoveFileExA(from.c_str(),to.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
 #else
+#ifdef __SWITCH__
+ remove(to.c_str());  // the SD card file system does not replace an existing target
+#endif
  return rename(from.c_str(),to.c_str())==0;
+#endif
+}
+// Horizon starts every thread on the process's default core; let the scheduler use the three
+// application cores, preferring `core` (the emulated Espresso core, or any host thread's choice).
+inline void set_thread_core(uint32_t core) {
+#ifdef __SWITCH__
+ svcSetThreadCoreMask(threadGetCurHandle(),(s32)(core%3),0x7);
+#else
+ (void)core;
+#endif
+}
+// libnx creates every pthread at priority 59, the only one Horizon time-slices (10 ms) on cores 0-2.
+// Host service threads (GX2 render, audio, alarms) move above the guest threads so they run as soon
+// as they have work instead of waiting for a busy guest thread's slice to end.
+inline void raise_thread_priority() {
+#ifdef __SWITCH__
+ svcSetThreadPriority(threadGetCurHandle(),0x2C);
+#endif
+}
+// A detached host thread. Horizon commits a small default stack for std::thread, so threads that run
+// guest code or the shader compilers ask for `stack` bytes there.
+inline void start_thread(void (*fn)(), size_t stack) {
+#ifdef __SWITCH__
+ pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setstacksize(&attr,stack);
+ pthread_t t;
+ if(pthread_create(&t,&attr,[](void* f)->void* { raise_thread_priority(); ((void(*)())f)(); return nullptr; },(void*)fn)==0) pthread_detach(t);
+ pthread_attr_destroy(&attr);
+#else
+ (void)stack; std::thread(fn).detach();
 #endif
 }
 inline std::string config_dir() {
@@ -117,6 +161,8 @@ inline std::string config_dir() {
  const char* home=getenv("HOME");return std::string(home?home:".")+"/Library/Application Support/WWHD";
 #elif defined(_WIN32)
  const char* root=getenv("APPDATA");return std::string(root?root:".")+"/WWHD";
+#elif defined(__SWITCH__)
+ return "sdmc:/switch/wwhd";
 #else
  if(const char* xdg=getenv("XDG_CONFIG_HOME"))return std::string(xdg)+"/wwhd";
  const char* home=getenv("HOME");return std::string(home?home:".")+"/.config/wwhd";

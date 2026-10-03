@@ -294,19 +294,26 @@ input::PadState controller_state(const Mapping& m, const float values[kPadCount]
 // ---- JSON (just enough for this file: objects, arrays, strings, numbers, booleans, null)
 
 namespace {
+struct JsonMember;
 struct Json {
     enum Type { Null, Bool, Num, Str, Arr, Obj } type = Null;
     bool b = false;
     double n = 0;
     std::string s;
     std::vector<Json> arr;
-    std::vector<std::pair<std::string, Json>> obj;
-    const Json* get(const char* k) const {
-        for (auto& [key, v] : obj)
-            if (key == k) return &v;
-        return nullptr;
-    }
+    std::vector<JsonMember> obj;  // std::pair<std::string, Json> would need Json complete here
+    const Json* get(const char* k) const;
 };
+struct JsonMember {
+    std::string key;
+    Json value;
+    JsonMember(std::string k, Json v) : key(std::move(k)), value(std::move(v)) {}
+};
+const Json* Json::get(const char* k) const {
+    for (auto& [key, v] : obj)
+        if (key == k) return &v;
+    return nullptr;
+}
 
 struct Parser {
     const char* p;

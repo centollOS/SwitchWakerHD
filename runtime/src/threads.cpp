@@ -1,7 +1,7 @@
 // Guest threads run on host pthreads. OS synchronization objects live in guest
 // memory (the game allocates them) and are backed by host objects keyed by
 // their guest address.
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__SWITCH__)
 #include <dlfcn.h>
 #endif
 #ifdef __APPLE__
@@ -284,6 +284,7 @@ static void mem_watch_thread() {
 }
 static void sched_tick_thread() {
     host::set_thread_name("sched tick");
+    host::raise_thread_priority();
     static const bool timed_stats = getenv("WWHD_SCHED_STATS") && atoi(getenv("WWHD_SCHED_STATS")) == 2;
     auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     for (;;) {
@@ -421,7 +422,7 @@ static uint32_t classify_ra(uintptr_t ra) {
     auto it = g_ra_cache.find(ra);
     if (it != g_ra_cache.end()) return it->second;
     uint32_t v = 0;
- #ifndef _WIN32
+ #if !defined(_WIN32) && !defined(__SWITCH__)
     Dl_info di;
     if (dladdr((void*)ra, &di) && di.dli_sname) {
         const char* n = di.dli_sname;
@@ -450,9 +451,10 @@ __attribute__((noinline)) static void try_entry_park(HostThread* t, Cpu* c) {
         if (!g_frozen || t == g_frz_owner) return;
     }
     if (mode == 2 && (!t->has_target || c->r[1] != t->tgt_r1 || c->lr != t->tgt_lr)) return;
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__SWITCH__)
     // Entry parking requires host-frame symbol classification; Windows stack unwinding needs
-    // a dedicated implementation. Ordinary waits remain saveable; never guess a safe frame.
+    // a dedicated implementation (Horizon has no dladdr). Ordinary waits remain saveable; never
+    // guess a safe frame.
     return;
     uintptr_t hi=0,lo=0;
 #elif defined(__APPLE__)
@@ -473,7 +475,7 @@ __attribute__((noinline)) static void try_entry_park(HostThread* t, Cpu* c) {
             static const bool dbg = getenv("WWHD_STATE_DEBUG") != nullptr;
             static std::atomic<int> logged{0};
             if (dbg && logged++ < 20) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__SWITCH__)
                 const char* n = "?";
 #else
                 Dl_info di;
@@ -542,6 +544,7 @@ static void* thread_main(void* p) {
     t_cpu = &ht->cpu;
     std::string name = mem::read_cstr(ld32(ht->guest + osthread::kName));
     host::set_thread_name(name.empty() ? "guest" : name.c_str());
+    host::set_thread_core(ht->core);
 #ifdef __APPLE__
     ht->mach = pthread_mach_thread_np(pthread_self());
 #endif
@@ -582,7 +585,12 @@ static void start_host_thread(HostThread* ht) {
 #else
     pthread_attr_t attr;
     pthread_attr_init(&attr);
+#ifdef __SWITCH__
+    // Horizon commits thread stacks: 64 MiB each would exhaust the console's memory
+    pthread_attr_setstacksize(&attr, 16 << 20);
+#else
     pthread_attr_setstacksize(&attr, 64 << 20);  // deep guest call chains recurse on the host stack
+#endif
     pthread_create(&ht->pt, &attr, thread_main, ht);
     pthread_attr_destroy(&attr);
 #endif
@@ -1101,7 +1109,7 @@ static void arm_alarm(uint32_t alarm, uint64_t when, uint64_t period, uint32_t c
     std::lock_guard<std::mutex> lk(g_alarm_mutex);
     if (!g_alarm_thread_started) {
         g_alarm_thread_started = true;
-        std::thread(alarm_thread).detach();
+        host::start_thread(alarm_thread, 4 << 20);
     }
     uint64_t s = g_next_serial++;
     g_alarm_serial[alarm] = s;
@@ -1570,7 +1578,7 @@ void threads_ss_load(ss::Reader& r) {
         }
         if (!g_alarm_queue.empty() && !g_alarm_thread_started) {
             g_alarm_thread_started = true;
-            std::thread(alarm_thread).detach();
+            host::start_thread(alarm_thread, 4 << 20);
         }
     }
     g_alarm_cv.notify_all();

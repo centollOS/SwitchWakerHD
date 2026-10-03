@@ -9,7 +9,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__SWITCH__)
 #include <unistd.h>
 #endif
 #ifdef __APPLE__
@@ -44,6 +44,7 @@ bool parse(const char* s, Api& out) {
     if (!s) return false;
     if (!strcasecmp(s, "metal")) { out = Api::Metal; return true; }
     if (!strcasecmp(s, "vulkan") || !strcasecmp(s, "vk") || !strcasecmp(s, "moltenvk")) { out = Api::Vulkan; return true; }
+    if (!strcasecmp(s, "opengl") || !strcasecmp(s, "gl")) { out = Api::OpenGL; return true; }
     return false;
 }
 
@@ -54,20 +55,25 @@ const Backend* backend_for(Api a) {
 #ifdef WWHD_HAS_VULKAN
     if (a == Api::Vulkan) return &vulkan_backend();
 #endif
+#ifdef WWHD_HAS_OPENGL
+    if (a == Api::OpenGL) return &opengl_backend();
+#endif
     return nullptr;
 }
 
 Api default_api() {
 #ifdef WWHD_HAS_METAL
     return Api::Metal;
+#elif defined(WWHD_HAS_OPENGL)
+    return Api::OpenGL;
 #else
     return Api::Vulkan;
 #endif
 }
 }  // namespace
 
-const char* api_name(Api a) { return a == Api::Vulkan ? "Vulkan" : "Metal"; }
-const char* api_key(Api a) { return a == Api::Vulkan ? "vulkan" : "metal"; }
+const char* api_name(Api a) { return a == Api::Vulkan ? "Vulkan" : a == Api::OpenGL ? "OpenGL" : "Metal"; }
+const char* api_key(Api a) { return a == Api::Vulkan ? "vulkan" : a == Api::OpenGL ? "opengl" : "metal"; }
 bool compiled(Api a) { return backend_for(a) != nullptr; }
 bool can_choose() { return compiled(Api::Metal) && compiled(Api::Vulkan); }
 Api active() { return g_backend ? g_backend->api : g_requested; }
@@ -169,7 +175,7 @@ void shutdown() {
 }
 
 bool restart() {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__SWITCH__)
     return false;
 #else
     std::string exe;
