@@ -16,6 +16,15 @@ namespace mods { void filter_pad(input::PadState&){} bool mouse_camera(){return 
 namespace interp { void set_mode(int){} uint64_t logic_steps(){return 0;} }
 namespace timebase { uint64_t now(){return 0;} }
 void log_msg(const char*,...){}
+// The runtime reads the C runtime's environment (getenv). On Windows SDL_setenv_unsafe only
+// changes the Win32 environment block, which the CRT copy does not see.
+static void set_env(const char* name,const char* value){
+#ifdef _WIN32
+ _putenv_s(name,value?value:"");
+#else
+ if(value)setenv(name,value,1);else unsetenv(name);
+#endif
+}
 int main(){
  SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy");
  assert(SDL_Init(SDL_INIT_EVENTS|SDL_INIT_VIDEO));
@@ -62,7 +71,7 @@ int main(){
   graphicsEvent(code,game,true);graphicsEvent(code,game,false,SDL_EVENT_KEY_UP);graphicsEvent(code,controls);graphicsEvent(code,game,false,SDL_EVENT_KEY_DOWN,SDL_KMOD_CTRL);assert(graphicsRequests==before+1);
  }
  assert(graphicsKey=='7');input::release_keys();
- SDL_setenv_unsafe("WWHD_NO_HOST_INPUT","1",1);graphicsEvent(SDL_SCANCODE_R,game);assert(graphicsRequests==7);SDL_unsetenv_unsafe("WWHD_NO_HOST_INPUT");
+ set_env("WWHD_NO_HOST_INPUT","1");graphicsEvent(SDL_SCANCODE_R,game);assert(graphicsRequests==7);set_env("WWHD_NO_HOST_INPUT",nullptr);
  SDL_DestroyWindow(controls);SDL_DestroyWindow(game);input::set_prompt_window(nullptr);
  SDL_Quit();puts("input_sdl_test: keyboard mapping, focus, touch, Pro mode, guarded save-state shortcuts passed");
 }

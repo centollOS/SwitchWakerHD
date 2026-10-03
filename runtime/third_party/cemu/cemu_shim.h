@@ -61,6 +61,9 @@ inline sint32 _swapEndianS32(sint32 v) { return (sint32)__builtin_bswap32((uint3
 using DWORD = uint32_t;
 #endif
 
+#ifdef DEFINE_ENUM_FLAG_OPERATORS // winnt.h's version: same operators
+#undef DEFINE_ENUM_FLAG_OPERATORS
+#endif
 #define DEFINE_ENUM_FLAG_OPERATORS(T)                                                                                          \
     inline T operator~(T a) { return static_cast<T>(~static_cast<std::underlying_type_t<T>>(a)); }                              \
     inline T operator|(T a, T b) { return static_cast<T>(static_cast<std::underlying_type_t<T>>(a) | static_cast<std::underlying_type_t<T>>(b)); } \

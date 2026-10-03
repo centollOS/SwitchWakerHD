@@ -376,8 +376,11 @@ Broader gameplay and devices remain to be validated. On Linux (Ubuntu 24.04, Cla
 executable builds without warnings and links against placeholder guest code
 (`tools/recomp/stubgen.py`), the unit tests pass and `--renderer-smoke` passes on Mesa lavapipe with
 the Khronos validation layer reporting nothing (`.github/workflows/linux.yml`); gameplay on Linux
-needs your own recompiled game and remains to be tested. Windows linking and device execution
-remain unverified.
+needs your own recompiled game and remains to be tested. On Windows (x86_64, Clang/MinGW: llvm-mingw
+or MSYS2 CLANG64) the executable builds and links, the unit
+tests pass, and `--renderer-smoke` passes under Wine with lavapipe (`.github/workflows/windows.yml`
+builds and runs the tests natively); a run on Windows hardware with a GPU and gameplay remain to be
+tested.
 
 For an isolated capture, set `WWHD_CAPTURE_PATH` to the PNG output path and
 `WWHD_CAPTURE` to the renderer frame number (default120). Keep these artifacts
