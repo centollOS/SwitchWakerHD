@@ -96,6 +96,25 @@ static void report(const std::string& s) {
     LOG("[game] %s", t.c_str());
 }
 
+// Console language for UCReadSysConfig("cafe.language"): WWHD_LANGUAGE=<Wii U code> (0 ja, 1 en,
+// 2 fr, 3 de, 4 it, 5 es, 6 zh, 7 ko, 8 nl, 9 pt, 10 ru, 11 zh-TW). The USA/Asia disc carries en/fr/es.
+// Unset, out of range or not a number: English, as before.
+static uint32_t console_language() {
+    static const uint32_t lang = [] {
+        const char* e = getenv("WWHD_LANGUAGE");
+        if (!e || !*e) return 1u;
+        char* end = nullptr;
+        long v = strtol(e, &end, 10);
+        if (*end || v < 0 || v > 11) {
+            LOG("[config] WWHD_LANGUAGE=%s is not a language code 0..11; using English", e);
+            return 1u;
+        }
+        LOG("[config] console language %ld (WWHD_LANGUAGE)", v);
+        return (uint32_t)v;
+    }();
+    return lang;
+}
+
 HLE(coreinit, OSReport) {
     GuestArgs a;
     a.c = c;
@@ -266,7 +285,7 @@ HLE(coreinit, UCReadSysConfig) {
         std::string name = mem::read_cstr(e);
         uint32_t size = ld32(e + 0x4C), data = ld32(e + 0x50);
         uint32_t value = 0;
-        if (name == "cafe.language") value = 1;          // English
+        if (name == "cafe.language") value = console_language();  // WWHD_LANGUAGE, default 1 (English)
         else if (name == "cafe.cntry_reg") value = 49;   // USA
         else if (name == "cafe.eula_agree") value = 1;
         else if (name == "cafe.initial_launch") value = 2;

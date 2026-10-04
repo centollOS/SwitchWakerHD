@@ -143,6 +143,11 @@ case-sensitive file systems. When the game asks for text (your name), type it in
 window: the text appears in the window title, Enter confirms, Escape cancels
 (`WWHD_SWKBD_TEXT=<name>` answers automatically).
 
+On Linux and Windows, **F11** or **Alt+Enter** switches the focused window (TV or GamePad) to full
+screen and back, and clicking/dragging with the left mouse button in the GamePad window uses the
+touch screen. The macOS menus (Graphics, Display, Input, Save States) don't exist in these builds
+yet; their settings are available as environment variables (below) and the number-key shortcuts.
+
 Settings, controls and save states live under `~/.config/wwhd` (or `$XDG_CONFIG_HOME/wwhd`).
 To check the build without the game, `python3 tools/recomp/stubgen.py build/gen-stub` writes
 placeholder guest code and `-DGEN_DIR=$PWD/build/gen-stub` builds against it (the result cannot
@@ -265,7 +270,7 @@ and the renderer are remembered in `~/Library/Application Support/wwhd/display.p
 
 - Shaders are translated on first use and cached in `~/Library/Caches/wwhd/shaders.bin`; later
   runs replay that cache at startup.
-- Useful environment variables: `WWHD_NO_AUDIO=1`, `WWHD_NO_GAMEPAD=1` (no second window), `WWHD_NO_CONTROLLERS=1` (SDL builds: ignore host game controllers),
+- Useful environment variables: `WWHD_NO_AUDIO=1`, `WWHD_NO_GAMEPAD=1` (no second window), `WWHD_NO_CONTROLLERS=1` (SDL builds: ignore host game controllers), `WWHD_LANGUAGE=<code>` (console language: 1 English, 2 French, 5 Spanish, … — the USA/Asia disc carries English, French and Spanish),
   `WWHD_DRC_MODE=window|pip|auto|off`, `WWHD_ASPECT=16:9|window|16:10|21:9|32:9|<w:h>`,
   `WWHD_AUDIO_VOLUME=0..1`, `WWHD_SHADER_CACHE=<file>|0`, `WWHD_AO_MODE=0..2`, `WWHD_AO_HIRES=0|1`, `WWHD_ANISO=0|1`, `WWHD_RES_SCALE=1|1.5|2|3`,
   `WWHD_FXAA=0|1`, `WWHD_INTERP=1`, `WWHD_TRUE60=1` (start values for the Graphics menu);
