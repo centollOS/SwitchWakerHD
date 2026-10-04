@@ -627,6 +627,15 @@ HLE(gx2, GX2SwapScanBuffers) {
         g_swap_count++;
         g_pending_flips.push_back({vsync_index(), g_swap_count});
     }
+    // debug: WWHD_LOG_SLOW_SWAP=ms logs swaps that came more than ms after the previous one
+    static const double slow_ms = getenv("WWHD_LOG_SLOW_SWAP") ? atof(getenv("WWHD_LOG_SLOW_SWAP")) : 0;
+    if (slow_ms > 0) {
+        static auto prev = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(now - prev).count();
+        prev = now;
+        if (ms > slow_ms) LOG("[gx2] slow swap %llu: %.1f ms", (unsigned long long)g_swap_count, ms);
+    }
     if (g_swap_count % 300 == 1) {
         static auto last = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
