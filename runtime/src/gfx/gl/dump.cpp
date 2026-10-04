@@ -1,4 +1,6 @@
 // Debugging pictures of the OpenGL renderer: surfaces and framebuffers as PNG files.
+#include <algorithm>
+#include <cmath>
 #include <zlib.h>
 
 #include <cstdio>
@@ -54,6 +56,7 @@ void write_png(const std::string& path, int w, int h, const std::vector<uint8_t>
     LOG("[gl] wrote %s (%dx%d)", path.c_str(), w, h);
 }
 bool read_surface(Surface* s, std::vector<uint8_t>& rgba) {
+    flush_draws();
     if (!s || !s->tex || s->fmt.depth || s->fmt.compressed || s->fmt.kind != FormatInfo::FLOAT) return false;
     glBindFramebuffer(GL_READ_FRAMEBUFFER, R.readFbo);
     attach(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, s, 0, 0);
@@ -67,12 +70,28 @@ bool read_surface(Surface* s, std::vector<uint8_t>& rgba) {
 }
 }  // namespace
 
-void dump_surface(Surface* s, const std::string& path) {
+void dump_surface(Surface* s, const std::string& path, bool encodeSrgb) {
     std::vector<uint8_t> rgba;
-    if (read_surface(s, rgba)) write_png(path, s->width, s->height, rgba, false);
+    if (!read_surface(s, rgba)) return;
+    if (encodeSrgb) {  // as the display shows it (see Renderer::tvSrgb)
+        static uint8_t table[256];
+        static bool built = false;
+        if (!built) {
+            for (int i = 0; i < 256; i++) {
+                double c = i / 255.0;
+                c = c <= 0.0031308 ? c * 12.92 : 1.055 * std::pow(c, 1.0 / 2.4) - 0.055;
+                table[i] = uint8_t(std::lround(std::clamp(c, 0.0, 1.0) * 255.0));
+            }
+            built = true;
+        }
+        for (size_t i = 0; i < rgba.size(); i++)
+            if ((i & 3) != 3) rgba[i] = table[rgba[i]];
+    }
+    write_png(path, s->width, s->height, rgba, false);
 }
 
 void dump_framebuffer(GLuint fbo, int width, int height, const std::string& path) {
+    flush_draws();
     std::vector<uint8_t> rgba(size_t(width) * height * 4);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
     glReadBuffer(fbo ? GL_COLOR_ATTACHMENT0 : GL_BACK);
@@ -83,6 +102,7 @@ void dump_framebuffer(GLuint fbo, int width, int height, const std::string& path
 }
 
 void framebuffer_mean(GLuint fbo, int width, int height, float out[4]) {
+    flush_draws();
     std::vector<uint8_t> rgba(size_t(width) * height * 4);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
     glReadBuffer(fbo ? GL_COLOR_ATTACHMENT0 : GL_BACK);

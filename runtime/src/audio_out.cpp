@@ -15,6 +15,7 @@
 #include <SDL3/SDL.h>
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -29,7 +30,18 @@ namespace audio {
 namespace {
 
 constexpr int kCapacity = 1 << 15;  // frames (~680 ms)
-constexpr int kTarget = kRate * 40 / 1000;
+// how much sound the AX frame thread keeps queued for the device: a frame that stalls the game's
+// audio threads for longer than this is heard as a gap. WWHD_AUDIO_LATENCY_MS sets it (20-300);
+// 80 ms on the Switch, where a frame now and then takes 60-100 ms, 40 ms elsewhere.
+const int kTarget = [] {
+#ifdef __SWITCH__
+    int ms = 80;
+#else
+    int ms = 40;
+#endif
+    if (const char* e = getenv("WWHD_AUDIO_LATENCY_MS"); e && atoi(e) > 0) ms = std::clamp(atoi(e), 20, 300);
+    return kRate * ms / 1000;
+}();
 
 int16_t g_ring[kCapacity * 2];
 std::atomic<uint32_t> g_read{0}, g_write{0};

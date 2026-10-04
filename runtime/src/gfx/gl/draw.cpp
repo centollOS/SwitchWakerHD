@@ -19,6 +19,7 @@
 
 using namespace Latte;
 extern "C" uint64_t g_shader_state_gen;  // gx2_core.cpp: bumped by shader-relevant register changes
+extern "C" uint64_t g_shader_regs_gen;   // the same, except for changes of shader program registers
 namespace gfxgl {
 PFNGLCLIPCONTROLPROC_WWHD clip_control() {
     static auto fn = (PFNGLCLIPCONTROLPROC_WWHD)eglGetProcAddress("glClipControl");
@@ -151,25 +152,51 @@ enum Cap { kScissor, kDepthClamp, kCull, kPolyOffset, kDepthTest, kStencilTest, 
 constexpr GLenum kCapEnums[kCapCount] = {GL_SCISSOR_TEST, GL_DEPTH_CLAMP, GL_CULL_FACE, GL_POLYGON_OFFSET_FILL, GL_DEPTH_TEST,
                                          GL_STENCIL_TEST, GL_FRAMEBUFFER_SRGB, GL_COLOR_LOGIC_OP,
                                          GL_PRIMITIVE_RESTART_FIXED_INDEX};
+// a GL state change: the draws recorded for one multi-draw (flush_draws) need the state as it was
+#define FLUSHED(f) (flush_draws(), f)
 constexpr int kTexUnits = 96, kUboBindings = 64, kAttribs = 32, kVertexBindings = 16;
 
+// Compared field by field: a memcmp of a struct just written on the stack stalls on store
+// forwarding. Floats compare by bits, so the cache's "unknown" fill (all-ones: NaN) never matches.
+inline bool same(float a, float b) {
+    uint32_t x, y;
+    memcpy(&x, &a, 4);
+    memcpy(&y, &b, 4);
+    return x == y;
+}
 struct Viewport {
     GLenum origin, depthMode;
     float rect[4], range[2];
+    bool operator==(const Viewport& o) const {
+        return origin == o.origin && depthMode == o.depthMode && same(rect[0], o.rect[0]) && same(rect[1], o.rect[1]) &&
+               same(rect[2], o.rect[2]) && same(rect[3], o.rect[3]) && same(range[0], o.range[0]) && same(range[1], o.range[1]);
+    }
 };
 struct Raster {
     GLenum cullFace, frontFace;
     float offset[2];
+    bool operator==(const Raster& o) const {
+        return cullFace == o.cullFace && frontFace == o.frontFace && same(offset[0], o.offset[0]) && same(offset[1], o.offset[1]);
+    }
 };
 struct DepthState {
     GLenum func;
     GLboolean mask;
+    bool operator==(const DepthState& o) const { return func == o.func && mask == o.mask; }
 };
 struct StencilState {
     uint32_t v[12];
+    bool operator==(const StencilState& o) const {
+        for (int i = 0; i < 10; i++)  // entries 10, 11 are unused
+            if (v[i] != o.v[i]) return false;
+        return true;
+    }
 };
 struct BlendState {
     uint32_t on, src, dst, srcA, dstA, op, opA;
+    bool operator==(const BlendState& o) const {
+        return on == o.on && src == o.src && dst == o.dst && srcA == o.srcA && dstA == o.dstA && op == o.op && opA == o.opA;
+    }
 };
 struct TexState {
     GLuint tex;
@@ -180,17 +207,24 @@ struct UboState {
     GLuint buffer;
     GLintptr offset;
     GLsizeiptr size;
+    bool operator==(const UboState& o) const { return buffer == o.buffer && offset == o.offset && size == o.size; }
 };
 struct AttribState {
     GLint comps;
     GLenum type;
     GLuint offset, binding;
+    bool operator==(const AttribState& o) const {
+        return comps == o.comps && type == o.type && offset == o.offset && binding == o.binding;
+    }
 };
 struct VertexBindingState {
     GLuint buffer;
     GLintptr offset;
     GLsizei stride;
     GLuint divisor;
+    bool operator==(const VertexBindingState& o) const {
+        return buffer == o.buffer && offset == o.offset && stride == o.stride && divisor == o.divisor;
+    }
 };
 struct StateCache {
     uint64_t epoch = 0;
@@ -220,21 +254,15 @@ void sync_cache() {
     gs.epoch = R.stateEpoch;
 }
 template <class T> bool changed(T& cached, const T& value) {
-    if (!memcmp(&cached, &value, sizeof(T))) return false;
-    memcpy(&cached, &value, sizeof(T));
+    if (cached == value) return false;
+    cached = value;
     return true;
 }
 void cap(Cap c, bool on) {
     if (gs.cap[c] == int8_t(on)) return;
     gs.cap[c] = int8_t(on);
-    if (on) glEnable(kCapEnums[c]);
-    else glDisable(kCapEnums[c]);
-}
-// value structs are zeroed first so padding never makes equal states compare different
-template <class T> T zeroed() {
-    T v;
-    memset(&v, 0, sizeof v);
-    return v;
+    if (on) FLUSHED(glEnable)(kCapEnums[c]);
+    else FLUSHED(glDisable)(kCapEnums[c]);
 }
 
 // a snapshot of a surface that this draw also renders to (sampling an attached texture is undefined)
@@ -256,6 +284,8 @@ Surface* feedback_copy(Surface* s) {
         seq = 0;
     }
     if (seq != s->writeSeq) {
+        flush_draws();  // the copy must include what recorded draws render into s
+        R.perf.feedbackCopies++;
         glCopyImageSubData(s->tex, s->target, 0, 0, 0, 0, copy->tex, copy->target, 0, 0, 0, 0, s->width, s->height,
                            s->target == GL_TEXTURE_2D ? 1 : s->layers);
         seq = s->writeSeq;
@@ -267,11 +297,143 @@ struct TextureBinding {
     GLuint unit, texture, sampler;
     GLenum target;
 };
+struct TextureCacheEntry {
+    uint64_t epoch = 0;  // R.surfaceEpoch when filled; 0: not reusable
+    uint32_t words[7], sampler[3];
+    bool compare = false;
+    Surface* s = nullptr;
+    GLenum target = 0;
+    GLuint view = 0, smp = 0;
+};
+TextureCacheEntry textureCache[2][LATTE_NUM_MAX_TEX_UNITS];  // pixel, vertex
+const bool textureCacheOn = getenv("WWHD_GL_NO_TEXTURE_CACHE") == nullptr;
 struct UboBinding {
     GLuint binding;
     StreamSlice slice;
     GLsizeiptr size;
 };
+
+// ---- ARB_multi_bind (core in 4.4; glad is generated for 4.3): one call binds a range of texture
+// units, samplers, uniform buffers or vertex buffers. Slots inside the range that this draw does not
+// use get their cached binding again (or 0 when unknown). WWHD_GL_NO_MULTIBIND=1 binds one by one.
+struct MultiBind {
+    void(APIENTRYP textures)(GLuint first, GLsizei count, const GLuint* textures) = nullptr;
+    void(APIENTRYP samplers)(GLuint first, GLsizei count, const GLuint* samplers) = nullptr;
+    void(APIENTRYP buffersRange)(GLenum target, GLuint first, GLsizei count, const GLuint* buffers,
+                                 const GLintptr* offsets, const GLsizeiptr* sizes) = nullptr;
+    void(APIENTRYP vertexBuffers)(GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets,
+                                  const GLsizei* strides) = nullptr;
+    bool on = false;
+    MultiBind() {
+        if (getenv("WWHD_GL_NO_MULTIBIND")) return;
+        textures = (decltype(textures))eglGetProcAddress("glBindTextures");
+        samplers = (decltype(samplers))eglGetProcAddress("glBindSamplers");
+        buffersRange = (decltype(buffersRange))eglGetProcAddress("glBindBuffersRange");
+        vertexBuffers = (decltype(vertexBuffers))eglGetProcAddress("glBindVertexBuffers");
+        on = textures && samplers && buffersRange && vertexBuffers;
+    }
+};
+const MultiBind& multi_bind() {
+    static const MultiBind m;  // first used on the render thread, with the context current
+    return m;
+}
+constexpr uint32_t kUnknown = 0xFFFFFFFFu;  // a state-cache value after forget_gl_state()
+
+// a dirty range [lo, hi] within one group of slots
+struct Range {
+    uint32_t lo = ~0u, hi = 0;
+    void add(uint32_t i) { lo = std::min(lo, i); hi = std::max(hi, i); }
+    bool empty() const { return lo > hi; }
+};
+
+void bind_textures(const std::vector<TextureBinding>& textures) {
+    const auto& mb = multi_bind();
+    Range tex[2], smp[2];  // pixel units 0-31, vertex units 32+
+    bool texChanged = false, smpChanged = false;
+    for (auto& t : textures) {
+        if (t.unit >= (GLuint)kTexUnits) {
+            FLUSHED(glActiveTexture)(GL_TEXTURE0 + t.unit);
+            FLUSHED(glBindTexture)(t.target, t.texture);
+            FLUSHED(glBindSampler)(t.unit, t.sampler);
+            continue;
+        }
+        TexState& cached = gs.tex[t.unit];
+        const int group = t.unit >= 32;
+        if (cached.tex != t.texture || cached.target != t.target) {
+            texChanged = true;
+            if (mb.on) tex[group].add(t.unit);
+            else {
+                FLUSHED(glActiveTexture)(GL_TEXTURE0 + t.unit);
+                FLUSHED(glBindTexture)(t.target, t.texture);
+            }
+            cached.tex = t.texture;
+            cached.target = t.target;
+        }
+        if (cached.sampler != t.sampler) {
+            smpChanged = true;
+            if (mb.on) smp[group].add(t.unit);
+            else FLUSHED(glBindSampler)(t.unit, t.sampler);
+            cached.sampler = t.sampler;
+        }
+    }
+    R.perf.chgTextures += texChanged;
+    R.perf.chgSamplers += smpChanged;
+    if (!mb.on) return;
+    GLuint names[kTexUnits];
+    for (int g = 0; g < 2; g++) {
+        if (!tex[g].empty()) {
+            for (uint32_t u = tex[g].lo; u <= tex[g].hi; u++) {
+                if (gs.tex[u].tex == kUnknown) gs.tex[u].tex = gs.tex[u].target = 0;  // unbinds every target
+                names[u - tex[g].lo] = gs.tex[u].tex;
+            }
+            FLUSHED(mb.textures)(tex[g].lo, GLsizei(tex[g].hi - tex[g].lo + 1), names);
+        }
+        if (!smp[g].empty()) {
+            for (uint32_t u = smp[g].lo; u <= smp[g].hi; u++) {
+                if (gs.tex[u].sampler == kUnknown) gs.tex[u].sampler = 0;
+                names[u - smp[g].lo] = gs.tex[u].sampler;
+            }
+            FLUSHED(mb.samplers)(smp[g].lo, GLsizei(smp[g].hi - smp[g].lo + 1), names);
+        }
+    }
+}
+
+void bind_ubos(const std::vector<UboBinding>& ubos) {
+    const auto& mb = multi_bind();
+    Range dirty[2];  // vertex bindings 0-15, pixel bindings 32-47
+    bool any = false;
+    for (auto& u : ubos) {
+        UboState v = UboState{};
+        v.buffer = u.slice.buffer;
+        v.offset = u.slice.offset;
+        v.size = u.size;
+        if (u.binding >= (GLuint)kUboBindings) {
+            FLUSHED(glBindBufferRange)(GL_UNIFORM_BUFFER, u.binding, v.buffer, v.offset, v.size);
+            continue;
+        }
+        if (!changed(gs.ubo[u.binding], v)) continue;
+        any = true;
+        if (mb.on) dirty[u.binding >= 32].add(u.binding);
+        else FLUSHED(glBindBufferRange)(GL_UNIFORM_BUFFER, u.binding, v.buffer, v.offset, v.size);
+    }
+    R.perf.chgUbos += any;
+    if (!mb.on) return;
+    GLuint buffers[32];
+    GLintptr offsets[32];
+    GLsizeiptr sizes[32];
+    for (auto& d : dirty) {
+        if (d.empty()) continue;
+        for (uint32_t b = d.lo; b <= d.hi; b++) {
+            UboState& c = gs.ubo[b];
+            if (c.buffer == kUnknown) c = UboState{};  // unbound
+            buffers[b - d.lo] = c.buffer;
+            offsets[b - d.lo] = c.offset;
+            sizes[b - d.lo] = c.buffer ? c.size : 0;
+        }
+        FLUSHED(mb.buffersRange)(GL_UNIFORM_BUFFER, d.lo, GLsizei(d.hi - d.lo + 1), buffers, offsets, sizes);
+    }
+}
+
 
 // A program's uniform blocks are declared as large as its highest possible index (skinning palettes
 // as vec4[4096], 64 KB), while the guest block is usually a fraction of that. Only the guest's bytes
@@ -310,8 +472,11 @@ void prepare_stage(const uint32_t* r, Shader* sh, Program* p, const std::array<S
         else if (size >= need)
             slice = stream_guest(addr, need, R.uboAlignment);
         else if (!fullUbo) {
-            bound = (size + 15) & ~15u;
-            slice = stream_guest(addr, bound, R.uboAlignment);
+            // the guest's bytes, then zeros up to a 256-byte multiple: shaders must read zeros past
+            // the guest's data (as with the full zero-filled copy), and nouveau rounds a constant
+            // buffer's bound size up to 256 bytes, so unpadded it would read the next upload's data
+            bound = std::min<GLsizeiptr>((size + 255) & ~255u, std::max<GLsizeiptr>(need, size));
+            slice = stream_guest(addr, size, R.uboAlignment, size_t(bound) - size);
         } else {
             scratch.assign(need, 0);
             memcpy(scratch.data(), mem::ptr(addr), size);
@@ -328,23 +493,113 @@ void prepare_stage(const uint32_t* r, Shader* sh, Program* p, const std::array<S
         uint32_t samplerId = sh->dec->textureUnitSamplerAssignment[unit];
         if (binding < 0 || samplerId >= 18) continue;
         const uint32_t* words = r + texbase + unit * 7;
-        Surface* s = sampled_texture(words, sh->dec->textureUsesDepthCompare[unit]);
-        if (!s) continue;
+        const uint32_t* samplerWords = r + REGADDR::SQ_TEX_SAMPLER_WORD0_0 + ((sh->vertex ? 18 : 0) + samplerId) * 3;
+        const bool compare = sh->dec->textureUsesDepthCompare[unit];
+        // the last lookup for this unit, reused while its words and the surface set are unchanged
+        TextureCacheEntry& cached = textureCache[sh->vertex ? 1 : 0][unit];
+        R.perf.textureLookups++;
+        Surface* s;
+        GLenum target;
+        GLuint view, smp;
+        if (textureCacheOn && cached.epoch == R.surfaceEpoch && cached.compare == compare &&
+            !memcmp(cached.words, words, sizeof cached.words) && !memcmp(cached.sampler, samplerWords, sizeof cached.sampler)) {
+            R.perf.textureCacheHits++;
+            s = cached.s;
+            upload_surface(s);  // once per frame: CPU changes to the texture
+            target = cached.target;
+            view = cached.view;
+            smp = cached.smp;
+        } else {
+            bool unique = false;
+            s = sampled_texture(words, compare, &unique);
+            if (!s) continue;
+            view = sampled_view(s, words, target);
+            smp = sampler(samplerWords, compare, s->fmt.kind != FormatInfo::FLOAT);
+            cached.epoch = unique ? R.surfaceEpoch : 0;  // several surfaces at one address: chosen by recency
+            memcpy(cached.words, words, sizeof cached.words);
+            memcpy(cached.sampler, samplerWords, sizeof cached.sampler);
+            cached.compare = compare;
+            cached.s = s;
+            cached.target = target;
+            cached.view = view;
+            cached.smp = smp;
+        }
         bool aliases = depth && s == depth;
         for (auto* c : colors)
             if (c && c == s) aliases = true;
-        if (aliases) s = feedback_copy(s);
-        GLenum target;
-        GLuint view = sampled_view(s, words, target);
-        const uint32_t* samplerWords = r + REGADDR::SQ_TEX_SAMPLER_WORD0_0 + ((sh->vertex ? 18 : 0) + samplerId) * 3;
-        GLuint smp = sampler(samplerWords, sh->dec->textureUsesDepthCompare[unit], s->fmt.kind != FormatInfo::FLOAT);
+        if (aliases) {
+            s = feedback_copy(s);
+            view = sampled_view(s, words, target);
+            smp = sampler(samplerWords, compare, s->fmt.kind != FormatInfo::FLOAT);
+        }
         textures.push_back({(GLuint)binding, view, smp, target});
     }
 }
 
 // loose uniforms, skipped when the program already holds the same values (glUniform* writes the
 // bound program's storage, which keeps its values across program switches)
+// a stage's uniform-variable block (shaders.h UniformVarBlock): the same values set_uniforms gives
+// the loose uniforms, written into the block's copy; a changed copy goes to the stream buffer
+void set_uniform_block(const uint32_t* r, Shader* sh, UniformVarBlock& b, bool deferred) {
+    auto* dec = sh->dec;
+    const uint32_t aluBase = mmSQ_ALU_CONSTANT0_0 + (sh->vertex ? 0x400 : 0);
+    const uint32_t blockBase = sh->vertex ? mmSQ_VTX_UNIFORM_BLOCK_START : mmSQ_PS_UNIFORM_BLOCK_START;
+    const size_t size = b.data.size();
+    uint8_t* data = b.data.data();
+    bool dirty = false;
+    auto put = [&](GLint offset, const void* src, size_t bytes) {
+        if (offset < 0 || size_t(offset) + bytes > size || !memcmp(data + offset, src, bytes)) return;
+        memcpy(data + offset, src, bytes);
+        dirty = true;
+    };
+    if (b.remapped >= 0) {
+        static const uint8_t zeros[16] = {};
+        for (const auto& e : dec->list_remappedUniformEntries_register)
+            put(b.remapped + GLint(e.mappedIndexOffset), r + aluBase + e.indexOffset / 4, 16);
+        for (const auto& g : dec->list_remappedUniformEntries_bufferGroups) {
+            uint32_t address = r[blockBase + g.kcacheBankIdOffset / 4];
+            for (const auto& e : g.entries)
+                put(b.remapped + GLint(e.mappedIndexOffset), address ? ppc_ptr(address + e.indexOffset) : zeros, 16);
+        }
+    }
+    if (b.registers >= 0 && sh->registerCount) put(b.registers, r + aluBase, size_t(sh->registerCount) * 16);
+    if (sh->vertex) {
+        if (b.pointSize >= 0) {
+            float point = float(r[REGADDR::PA_SU_POINT_SIZE] & 0xFFFF) / 8.0f;
+            point = point == 0 ? 0.125f : point;
+            put(b.pointSize, &point, 4);
+        }
+        if (b.windowToClip >= 0) {
+            float width = 2.0f * f32(r[REGADDR::PA_CL_VPORT_XSCALE]), height = -2.0f * f32(r[REGADDR::PA_CL_VPORT_YSCALE]);
+            float v[2] = {width != 0 ? 2.0f / width : 0, height != 0 ? 2.0f / height : 0};
+            put(b.windowToClip, v, 8);
+        }
+    } else if (b.alphaRef >= 0) {
+        float ref = f32(r[REGADDR::SX_ALPHA_REF]);
+        put(b.alphaRef, &ref, 4);
+    }
+    if (deferred) return;  // the multi-draw uploads every recorded draw's copy (flush_draws)
+    if (dirty || b.gen != R.streamGen) {
+        b.slice = stream_upload(data, size, R.uboAlignment);
+        b.gen = R.streamGen;
+        R.perf.uboBytes += size;
+    }
+    const GLuint binding = sh->vertex ? kUniformVarBindingVS : kUniformVarBindingPS;
+    UboState v = UboState{};
+    v.buffer = b.slice.buffer;
+    v.offset = b.slice.offset;
+    v.size = GLsizeiptr(size);
+    if (changed(gs.ubo[binding], v)) {
+        glBindBufferRange(GL_UNIFORM_BUFFER, binding, v.buffer, v.offset, v.size);
+        R.perf.chgUniformBlocks++;
+    }
+}
+
 void set_uniforms(const uint32_t* r, Shader* sh, Program* p) {
+    if (UniformVarBlock& block = sh->vertex ? p->blockVS : p->blockPS; block.size > 0) {
+        set_uniform_block(r, sh, block, p->batchable);
+        return;
+    }
     static const bool noShadow = getenv("WWHD_GL_NO_UNIFORM_SHADOW") != nullptr;
     if (noShadow) {
         p->shadowVS.clear(); p->shadowPS.clear(); p->registerShadowVS.clear(); p->registerShadowPS.clear();
@@ -356,21 +611,22 @@ void set_uniforms(const uint32_t* r, Shader* sh, Program* p) {
     auto& shadow = sh->vertex ? p->shadowVS : p->shadowPS;
     GLint remapped = sh->vertex ? p->remappedVS : p->remappedPS;
     if (remapped >= 0 && !dec->list_remappedUniformEntries.empty()) {
-        static std::vector<uint8_t> data;
-        data.assign(dec->list_remappedUniformEntries.size() * 16, 0);
-        auto copy = [&](uint32_t offset, const void* src) {
-            if (offset + 16 <= data.size()) memcpy(data.data() + offset, src, 16);
+        // each entry is compared with the program's copy and written there only if it differs
+        const size_t bytes = dec->list_remappedUniformEntries.size() * 16;
+        bool dirty = shadow.size() != bytes;
+        if (dirty) shadow.assign(bytes, 0);
+        auto put = [&](uint32_t offset, const void* src) {
+            if (offset + 16 > bytes || !memcmp(shadow.data() + offset, src, 16)) return;
+            memcpy(shadow.data() + offset, src, 16);
+            dirty = true;
         };
-        for (const auto& e : dec->list_remappedUniformEntries_register) copy(e.mappedIndexOffset, r + aluBase + e.indexOffset / 4);
+        static const uint8_t zeros[16] = {};
+        for (const auto& e : dec->list_remappedUniformEntries_register) put(e.mappedIndexOffset, r + aluBase + e.indexOffset / 4);
         for (const auto& g : dec->list_remappedUniformEntries_bufferGroups) {
             uint32_t address = r[blockBase + g.kcacheBankIdOffset / 4];
-            if (!address) continue;
-            for (const auto& e : g.entries) copy(e.mappedIndexOffset, ppc_ptr(address + e.indexOffset));
+            for (const auto& e : g.entries) put(e.mappedIndexOffset, address ? ppc_ptr(address + e.indexOffset) : zeros);
         }
-        if (shadow.size() != data.size() || memcmp(shadow.data(), data.data(), data.size())) {
-            shadow = data;
-            glUniform4iv(remapped, (GLsizei)dec->list_remappedUniformEntries.size(), (const GLint*)data.data());
-        }
+        if (dirty) glUniform4iv(remapped, (GLsizei)dec->list_remappedUniformEntries.size(), (const GLint*)shadow.data());
     }
     GLint registers = sh->vertex ? p->registersVS : p->registersPS;
     if (registers >= 0 && sh->registerCount) {
@@ -503,26 +759,19 @@ template <int Type> IndexList convert_typed(const uint8_t* src, uint32_t count, 
 
 IndexList index_list(uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr, bool restart, uint32_t restartIndex) {
     struct Entry {
-        uint64_t gen;
-        uint32_t addr, count, type, prim, restartIndex;
-        bool restart;
+        uint64_t key = 0, stamp = ~0ull, gen = 0;
+        uint32_t addr = 0, count = 0, type = 0, prim = 0, restartIndex = 0;
+        bool restart = false;
         IndexList list;
     };
-    static std::unordered_map<uint64_t, Entry> cache;
-    static uint64_t clearedFrame = ~0ull;
-    if (clearedFrame != R.frame) {
-        cache.clear();
-        clearedFrame = R.frame;
-    }
+    static FrameTable<Entry> cache;
     const uint64_t key = (uint64_t(indexAddr) << 32 | count) ^ (uint64_t(prim) << 56 | uint64_t(indexType) << 48) ^
                          (restart ? 0x5bd1e995ull * (restartIndex + 1) : 0);
     static const bool noCache = getenv("WWHD_GL_NO_INDEX_CACHE") != nullptr;
-    auto it = noCache ? cache.end() : cache.find(key);
-    if (it != cache.end()) {
-        const Entry& e = it->second;
-        if (e.gen == R.streamGen && e.addr == indexAddr && e.count == count && e.type == indexType && e.prim == prim &&
-            e.restart == restart && e.restartIndex == restartIndex)
-            return e.list;
+    if (const Entry* e = cache.find(key, R.frame); !noCache && e->stamp == R.frame) {
+        if (e->gen == R.streamGen && e->addr == indexAddr && e->count == count && e->type == indexType && e->prim == prim &&
+            e->restart == restart && e->restartIndex == restartIndex)
+            return e->list;
     }
     const uint8_t* src = indexAddr ? mem::ptr(indexAddr) : nullptr;
     IndexList list;
@@ -535,7 +784,7 @@ IndexList index_list(uint32_t prim, uint32_t count, uint32_t indexType, uint32_t
     default: list = convert_typed<-1>(src, count, prim, false, 0); break;
     }
     // after the upload: moving to the next stream buffer advances the generation
-    cache[key] = {R.streamGen, indexAddr, count, indexType, prim, restartIndex, restart, list};
+    cache.put({key, R.frame, R.streamGen, indexAddr, count, indexType, prim, restartIndex, restart, list});
     return list;
 }
 
@@ -552,15 +801,130 @@ struct ShaderMemo {
     Shader *vs = nullptr, *ps = nullptr;
     Program* p = nullptr;
 } memo;
+
+// ---- multi-draw batching (shaders.h draw_batching_on). The state code above calls flush_draws()
+// before any GL state call (FLUSHED), so while draws are recorded the GL state is theirs; what may
+// differ between them is in the indirect commands (index range, base vertex) and in each draw's copy
+// of the shader-constant blocks. A draw's index is its baseInstance: the vertex shader reads it
+// through attribute kDrawIndexAttrib from a buffer of 0, 1, 2... whose divisor is so large that
+// instancing never advances it.
+struct PendingDraws {
+    Program* program = nullptr;
+    GLenum mode = 0, indexType = 0;  // indexType 0: glDrawArrays
+    uint32_t count = 0, capacity = 1;
+    std::vector<uint32_t> commands;  // DrawElementsIndirectCommand (5 words) or DrawArraysIndirectCommand (4)
+    std::vector<uint8_t> constantsVS, constantsPS;
+} pending;
+
+GLuint draw_index_buffer() {
+    static GLuint buffer = [] {
+        std::vector<uint32_t> iota(4096);
+        for (uint32_t i = 0; i < iota.size(); i++) iota[i] = i;
+        GLuint b;
+        glGenBuffers(1, &b);
+        glBindBuffer(GL_COPY_WRITE_BUFFER, b);
+        glBufferData(GL_COPY_WRITE_BUFFER, GLsizeiptr(iota.size() * 4), iota.data(), GL_STATIC_DRAW);
+        return b;
+    }();
+    return buffer;
+}
+
+void bind_constants(GLuint binding, const std::vector<uint8_t>& data) {
+    StreamSlice slice = stream_upload(data.data(), data.size(), R.uboAlignment);
+    UboState v = UboState{};
+    v.buffer = slice.buffer;
+    v.offset = slice.offset;
+    v.size = GLsizeiptr(data.size());
+    if (changed(gs.ubo[binding], v)) {
+        glBindBufferRange(GL_UNIFORM_BUFFER, binding, v.buffer, v.offset, v.size);
+        R.perf.chgUniformBlocks++;
+    }
+    R.perf.uboBytes += data.size();
+}
 }  // namespace
+
+void flush_draws() {
+    if (!pending.count) return;
+    PendingDraws& d = pending;
+    const uint32_t n = d.count;
+    d.count = 0;  // nothing below records draws
+    if (!d.constantsVS.empty()) bind_constants(kUniformVarBindingVS, d.constantsVS);
+    if (!d.constantsPS.empty()) bind_constants(kUniformVarBindingPS, d.constantsPS);
+    const uint32_t* c = d.commands.data();
+    if (n == 1) {  // baseInstance 0: a plain draw
+        if (d.indexType)
+            glDrawElementsInstancedBaseVertex(d.mode, GLsizei(c[0]), d.indexType,
+                                              (const void*)(uintptr_t(c[2]) * (d.indexType == GL_UNSIGNED_INT ? 4 : 2)),
+                                              GLsizei(c[1]), GLint(c[3]));
+        else
+            glDrawArraysInstanced(d.mode, GLint(c[2]), GLsizei(c[0]), GLsizei(c[1]));
+    } else {
+        StreamSlice slice = stream_upload(d.commands.data(), d.commands.size() * 4, 16);
+        static GLuint boundIndirect = 0;
+        static uint64_t boundEpoch = 0;
+        if (boundIndirect != slice.buffer || boundEpoch != R.stateEpoch) {
+            glBindBuffer(GL_DRAW_INDIRECT_BUFFER, slice.buffer);
+            boundIndirect = slice.buffer;
+            boundEpoch = R.stateEpoch;
+        }
+        if (d.indexType) glMultiDrawElementsIndirect(d.mode, d.indexType, (const void*)slice.offset, GLsizei(n), 0);
+        else glMultiDrawArraysIndirect(d.mode, (const void*)slice.offset, GLsizei(n), 0);
+    }
+    R.perf.batches++;
+    R.perf.batchedDraws += n;
+    d.commands.clear();
+    d.constantsVS.clear();
+    d.constantsPS.clear();
+}
+
+namespace {
+// records a draw of a batchable program; instanced draws go alone (their baseInstance must be 0)
+void record_draw(Program* p, GLenum mode, GLenum indexType, uint32_t count, uint32_t first, uint32_t baseVertex,
+                 uint32_t instances, bool instanced) {
+    PendingDraws& d = pending;
+    if (d.count && (d.program != p || d.mode != mode || d.indexType != indexType || d.count >= d.capacity || instanced))
+        flush_draws();
+    if (!d.count) {
+        d.program = p;
+        d.mode = mode;
+        d.indexType = indexType;
+        d.capacity = std::max<uint32_t>(1, p->batchCapacity);
+    }
+    if (indexType) d.commands.insert(d.commands.end(), {count, instances, first, baseVertex, d.count});
+    else d.commands.insert(d.commands.end(), {count, instances, baseVertex, d.count});
+    if (p->blockVS.size > 0) d.constantsVS.insert(d.constantsVS.end(), p->blockVS.data.begin(), p->blockVS.data.end());
+    if (p->blockPS.size > 0) d.constantsPS.insert(d.constantsPS.end(), p->blockPS.data.begin(), p->blockPS.data.end());
+    d.count++;
+    if (instanced) flush_draws();
+}
+}  // namespace
+
+namespace {
+void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
+               uint32_t baseVertex, uint32_t instances);
+}
 
 void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr, uint32_t baseVertex,
           uint32_t instances) {
+    draw_impl(r, prim, count, indexType, indexAddr, baseVertex, instances);
+}
+
+namespace {
+void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
+               uint32_t baseVertex, uint32_t instances) {
     make_current();
-    ScopedTime timer{R.perf.drawNs};
+    static uint32_t drawSample = 0;
+    const bool timed = R.timedDraw = (++drawSample % kDrawTimeSample) == 0;
+    SampledTime timer{R.perf.drawNs, timed};
     if (!count || !instances || ((prim == 0x13 || prim == 0x14) && count < 4)) return;
     if (r[REGADDR::PA_CL_CLIP_CNTL] & (1 << 22)) return;  // rasterization disabled
-    uint64_t t0 = now_ns();
+    uint64_t lapAt = timed ? now_ns() : 0;
+    auto lap = [&](uint64_t& total) {
+        if (!timed) return;
+        const uint64_t now = now_ns();
+        total += (now - lapAt) * kDrawTimeSample;
+        lapAt = now;
+    };
     ((uint32_t*)r)[REGADDR::VGT_PRIMITIVE_TYPE] = prim;
     Shader *vs, *ps;
     Program* p;
@@ -573,11 +937,53 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
         p = memo.p;
         R.perf.memoHits++;
     } else {
-        uint64_t fsKey = 0;
-        fs = get_fetch_shader(r, &fsKey, R.frame);
-        vs = fs ? translate(r, true, fs, fsKey, R.frame) : nullptr;
-        ps = fs ? translate(r, false, fs, fsKey, R.frame) : nullptr;
-        p = vs && ps && vs->ready() && ps->ready() ? program(vs, ps) : nullptr;
+        // the register part of the shader keys, kept while only programs change
+        static struct { uint64_t gen = 0; uint32_t prim = ~0u; uint64_t vs = 0, ps = 0, vsCore = 0, psCore = 0; } stateHash;
+        if (noMemo || stateHash.gen != g_shader_regs_gen || stateHash.prim != prim) {
+            stateHash.vs = shader_state_hash(r, true, &stateHash.vsCore);
+            stateHash.ps = shader_state_hash(r, false, &stateHash.psCore);
+            stateHash.gen = g_shader_regs_gen;
+            stateHash.prim = prim;
+        }
+        // recent (programs, register state) combinations of this frame: a draw that goes back to one
+        // skips the program hashing and the shader and program maps (program memory may change
+        // between frames, so entries last one frame, like the program hashes)
+        struct Combo {
+            uint64_t frame = ~0ull, epoch = 0, vsState = 0, psState = 0;
+            uint32_t programs[6] = {};
+            LatteFetchShader* fs = nullptr;
+            Shader *vs = nullptr, *ps = nullptr;
+            Program* p = nullptr;
+        };
+        static Combo combos[256];
+        const uint32_t programs[6] = {r[mmSQ_PGM_START_FS], r[mmSQ_PGM_START_FS + 1], r[mmSQ_PGM_START_VS],
+                                      r[mmSQ_PGM_START_VS + 1], r[mmSQ_PGM_START_PS], r[mmSQ_PGM_START_PS + 1]};
+        uint64_t h = stateHash.vs * 31 + stateHash.ps;
+        for (uint32_t v : programs) h = (h ^ v) * 0x100000001B3ull;
+        Combo& c = combos[(h ^ (h >> 29)) & 255];
+        if (!noMemo && c.frame == R.frame && c.epoch == R.shaderEpoch && c.vsState == stateHash.vs &&
+            c.psState == stateHash.ps && !memcmp(c.programs, programs, sizeof programs)) {
+            R.perf.comboHits++;
+            fs = c.fs;
+            vs = c.vs;
+            ps = c.ps;
+            p = c.p;
+        } else {
+            uint64_t fsKey = 0;
+            fs = get_fetch_shader(r, &fsKey, R.frame);
+            vs = fs ? translate(r, true, fs, fsKey, R.frame, stateHash.vsCore) : nullptr;
+            ps = fs ? translate(r, false, fs, fsKey, R.frame, stateHash.psCore) : nullptr;
+            p = vs && ps && vs->ready() && ps->ready() ? program(vs, ps) : nullptr;
+            c.frame = R.frame;
+            c.epoch = R.shaderEpoch;
+            c.vsState = stateHash.vs;
+            c.psState = stateHash.ps;
+            memcpy(c.programs, programs, sizeof programs);
+            c.fs = fs;
+            c.vs = vs;
+            c.ps = ps;
+            c.p = p;
+        }
         memo = {g_shader_state_gen, R.frame, R.shaderEpoch, prim, fs, vs, ps, p};
     }
     if (!fs) return;
@@ -591,8 +997,7 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
         R.skippedDraws++;
         return;
     }
-    uint64_t t1 = now_ns();
-    R.perf.lookupNs += t1 - t0;
+    lap(R.perf.lookupNs);
 
     // ---- indices
     const bool stripRestart = indexAddr && (prim == 3 || prim == 6) && (r[REGADDR::VGT_MULTI_PRIM_IB_RESET_EN] & 1);
@@ -612,8 +1017,7 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
     IndexList indices;
     if (indexAddr || generated) indices = index_list(prim, count, indexType, indexAddr, stripRestart, restartIndex);
     uint64_t maxVertex = indices.type ? uint64_t(indices.maxIndex) + baseVertex : uint64_t(baseVertex) + count - 1;
-    uint64_t t2 = now_ns();
-    R.perf.indexNs += t2 - t1;
+    lap(R.perf.indexNs);
 
     // ---- render targets
     const auto& lcr = *reinterpret_cast<const LatteContextRegister*>(r);
@@ -644,13 +1048,12 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
     ubos.clear();
     prepare_stage(r, vs, p, colors, depth, textures, ubos);
     prepare_stage(r, ps, p, colors, depth, textures, ubos);
-    uint64_t t3 = now_ns();
-    R.perf.resourceNs += t3 - t2;
+    lap(R.perf.resourceNs);
 
     // ---- framebuffer
     sync_cache();
     if (gs.fbo != R.drawFbo) {
-        glBindFramebuffer(GL_FRAMEBUFFER, R.drawFbo);
+        FLUSHED(glBindFramebuffer)(GL_FRAMEBUFFER, R.drawFbo);
         gs.fbo = R.drawFbo;
     }
     struct Attachment { Surface* s = nullptr; uint32_t slice = 0; };
@@ -658,21 +1061,27 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
     static bool dirty = true;
     for (int i = 0; i < 8; i++)
         if (bound[i].s != colors[i] || bound[i].slice != slices[i]) {
-            attach(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, colors[i], 0, slices[i]);
+            FLUSHED(attach)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, colors[i], 0, slices[i]);
             bound[i] = {colors[i], slices[i]};
             dirty = true;
         }
     if (bound[8].s != depth || bound[8].slice != depthSlice) {
-        glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, 0, 0);
-        if (depth) attach(GL_FRAMEBUFFER, depth_attachment(depth), depth, 0, depthSlice);
+        FLUSHED(glFramebufferTexture)(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, 0, 0);
+        if (depth) FLUSHED(attach)(GL_FRAMEBUFFER, depth_attachment(depth), depth, 0, depthSlice);
         bound[8] = {depth, depthSlice};
         dirty = true;
     }
     if (dirty) {
         GLenum bufs[8];
         for (int i = 0; i < 8; i++) bufs[i] = colors[i] ? GL_COLOR_ATTACHMENT0 + i : GL_NONE;
-        glDrawBuffers(8, bufs);
-        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        FLUSHED(glDrawBuffers)(8, bufs);
+        // attachment sets already found complete are not asked again (a status query waits for
+        // Mesa's GL thread, when that is on); surfaces are never freed, so the pointers stay valid
+        static std::unordered_set<uint64_t> complete;
+        uint64_t setKey = 0xcbf29ce484222325ull;
+        for (auto& a : bound) setKey = (setKey ^ (uint64_t(uintptr_t(a.s)) * 31 + a.slice)) * 0x100000001b3ull;
+        GLenum status = complete.count(setKey) ? GL_FRAMEBUFFER_COMPLETE : glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status == GL_FRAMEBUFFER_COMPLETE) complete.insert(setKey);
         if (status != GL_FRAMEBUFFER_COMPLETE) {
             log_once(0xFB000000u | status, "[gl] incomplete framebuffer (%s)", std::to_string(status));
             bound = {};
@@ -681,37 +1090,13 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
         }
         dirty = false;
     }
-    for (auto& t : textures) {
-        if (t.unit >= (GLuint)kTexUnits) {
-            glActiveTexture(GL_TEXTURE0 + t.unit);
-            glBindTexture(t.target, t.texture);
-            glBindSampler(t.unit, t.sampler);
-            continue;
-        }
-        TexState& cached = gs.tex[t.unit];
-        if (cached.tex != t.texture || cached.target != t.target) {
-            glActiveTexture(GL_TEXTURE0 + t.unit);
-            glBindTexture(t.target, t.texture);
-            cached.tex = t.texture;
-            cached.target = t.target;
-        }
-        if (cached.sampler != t.sampler) {
-            glBindSampler(t.unit, t.sampler);
-            cached.sampler = t.sampler;
-        }
-    }
-    for (auto& u : ubos) {
-        UboState v = zeroed<UboState>();
-        v.buffer = u.slice.buffer;
-        v.offset = u.slice.offset;
-        v.size = u.size;
-        if (u.binding >= (GLuint)kUboBindings || changed(gs.ubo[u.binding], v))
-            glBindBufferRange(GL_UNIFORM_BUFFER, u.binding, v.buffer, v.offset, v.size);
-    }
+    bind_textures(textures);
+    bind_ubos(ubos);
 
     // ---- program and uniforms
     if (gs.program != p->prog) {
-        glUseProgram(p->prog);
+        FLUSHED(glUseProgram)(p->prog);
+        R.perf.chgProgram++;
         gs.program = p->prog;
     }
     set_uniforms(r, vs, p);
@@ -726,7 +1111,7 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
     const bool dxClip = clip.get_DX_CLIP_SPACE_DEF();
     const bool upper = ys < 0;
     {
-        Viewport v = zeroed<Viewport>();
+        Viewport v = Viewport{};
         v.origin = upper ? GL_UPPER_LEFT : GL_LOWER_LEFT;
         v.depthMode = dxClip ? GL_ZERO_TO_ONE : GL_NEGATIVE_ONE_TO_ONE;
         v.rect[0] = xo - std::fabs(xs);
@@ -738,9 +1123,9 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
         Viewport old = gs.viewport;
         if (changed(gs.viewport, v)) {
             if (old.origin != v.origin || old.depthMode != v.depthMode)
-                if (auto cc = clip_control()) cc(v.origin, v.depthMode);
-            if (memcmp(old.rect, v.rect, sizeof v.rect)) glViewportIndexedf(0, v.rect[0], v.rect[1], v.rect[2], v.rect[3]);
-            if (memcmp(old.range, v.range, sizeof v.range)) glDepthRangef(v.range[0], v.range[1]);
+                if (auto cc = clip_control()) FLUSHED(cc)(v.origin, v.depthMode);
+            if (memcmp(old.rect, v.rect, sizeof v.rect)) FLUSHED(glViewportIndexedf)(0, v.rect[0], v.rect[1], v.rect[2], v.rect[3]);
+            if (memcmp(old.range, v.range, sizeof v.range)) FLUSHED(glDepthRangef)(v.range[0], v.range[1]);
         }
     }
     cap(kDepthClamp, clip.get_ZCLIP_FAR_DISABLE());
@@ -752,10 +1137,10 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
     if (ex <= x || ey <= y) return;
     cap(kScissor, true);
     {
-        GLint sc[4] = {GLint(x), GLint(y), GLint(ex - x), GLint(ey - y)};
-        if (memcmp(gs.scissor, sc, sizeof sc)) {
-            memcpy(gs.scissor, sc, sizeof sc);
-            glScissor(sc[0], sc[1], sc[2], sc[3]);
+        const GLint sc[4] = {GLint(x), GLint(y), GLint(ex - x), GLint(ey - y)};
+        if (gs.scissor[0] != sc[0] || gs.scissor[1] != sc[1] || gs.scissor[2] != sc[2] || gs.scissor[3] != sc[3]) {
+            for (int i = 0; i < 4; i++) gs.scissor[i] = sc[i];
+            FLUSHED(glScissor)(sc[0], sc[1], sc[2], sc[3]);
         }
     }
 
@@ -766,7 +1151,7 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
     // Latte decides facing in y-down window space; GL with a lower-left origin sees it mirrored
     bool ccw = pm.get_FRONT_FACE() == LATTE_PA_SU_SC_MODE_CNTL::E_FRONTFACE::CCW;
     {
-        Raster v = zeroed<Raster>();
+        Raster v = Raster{};
         Raster old = gs.raster;
         v.cullFace = cullFront && cullBack ? GL_FRONT_AND_BACK : cullFront ? GL_FRONT : GL_BACK;
         v.frontFace = (upper ? ccw : !ccw) ? GL_CCW : GL_CW;
@@ -780,9 +1165,9 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
         }
         if (!(cullFront || cullBack)) v.cullFace = old.cullFace;
         if (changed(gs.raster, v)) {
-            if (old.cullFace != v.cullFace) glCullFace(v.cullFace);
-            if (old.frontFace != v.frontFace) glFrontFace(v.frontFace);
-            if (offset && memcmp(old.offset, v.offset, sizeof v.offset)) glPolygonOffset(v.offset[0], v.offset[1]);
+            if (old.cullFace != v.cullFace) FLUSHED(glCullFace)(v.cullFace);
+            if (old.frontFace != v.frontFace) FLUSHED(glFrontFace)(v.frontFace);
+            if (offset && memcmp(old.offset, v.offset, sizeof v.offset)) FLUSHED(glPolygonOffset)(v.offset[0], v.offset[1]);
         }
         cap(kCull, cullFront || cullBack);
         cap(kPolyOffset, offset);
@@ -793,13 +1178,13 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
     memcpy(&dc, r + REGADDR::DB_DEPTH_CONTROL, 4);
     if (depth && dc.get_Z_ENABLE()) {
         cap(kDepthTest, true);
-        DepthState v = zeroed<DepthState>();
+        DepthState v = DepthState{};
         DepthState old = gs.depth;
         v.func = GL_NEVER + uint32_t(dc.get_Z_FUNC());
         v.mask = dc.get_Z_WRITE_ENABLE() ? GL_TRUE : GL_FALSE;
         if (changed(gs.depth, v)) {
-            if (old.func != v.func) glDepthFunc(v.func);
-            if (old.mask != v.mask) glDepthMask(v.mask);
+            if (old.func != v.func) FLUSHED(glDepthFunc)(v.func);
+            if (old.mask != v.mask) FLUSHED(glDepthMask)(v.mask);
         }
     } else
         cap(kDepthTest, false);
@@ -808,7 +1193,7 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
         uint32_t f = r[REGADDR::DB_STENCILREFMASK];
         bool separate = dc.get_BACK_STENCIL_ENABLE();
         uint32_t b = separate ? r[REGADDR::DB_STENCILREFMASK_BF] : f;
-        StencilState v = zeroed<StencilState>();
+        StencilState v = StencilState{};
         v.v[0] = GL_NEVER + uint32_t(dc.get_STENCIL_FUNC_F());
         v.v[1] = f;
         v.v[2] = stencil_op(uint32_t(dc.get_STENCIL_FAIL_F()));
@@ -820,12 +1205,12 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
         v.v[8] = stencil_op(uint32_t(separate ? dc.get_STENCIL_ZFAIL_B() : dc.get_STENCIL_ZFAIL_F()));
         v.v[9] = stencil_op(uint32_t(separate ? dc.get_STENCIL_ZPASS_B() : dc.get_STENCIL_ZPASS_F()));
         if (changed(gs.stencil, v)) {
-            glStencilFuncSeparate(GL_FRONT, v.v[0], f & 255, (f >> 8) & 255);
-            glStencilOpSeparate(GL_FRONT, v.v[2], v.v[3], v.v[4]);
-            glStencilMaskSeparate(GL_FRONT, (f >> 16) & 255);
-            glStencilFuncSeparate(GL_BACK, v.v[5], b & 255, (b >> 8) & 255);
-            glStencilOpSeparate(GL_BACK, v.v[7], v.v[8], v.v[9]);
-            glStencilMaskSeparate(GL_BACK, (b >> 16) & 255);
+            FLUSHED(glStencilFuncSeparate)(GL_FRONT, v.v[0], f & 255, (f >> 8) & 255);
+            FLUSHED(glStencilOpSeparate)(GL_FRONT, v.v[2], v.v[3], v.v[4]);
+            FLUSHED(glStencilMaskSeparate)(GL_FRONT, (f >> 16) & 255);
+            FLUSHED(glStencilFuncSeparate)(GL_BACK, v.v[5], b & 255, (b >> 8) & 255);
+            FLUSHED(glStencilOpSeparate)(GL_BACK, v.v[7], v.v[8], v.v[9]);
+            FLUSHED(glStencilMaskSeparate)(GL_BACK, (b >> 16) & 255);
         }
     } else
         cap(kStencilTest, false);
@@ -837,11 +1222,11 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
         if (!colors[i]) continue;
         uint32_t m = (r[REGADDR::CB_TARGET_MASK] >> (4 * i)) & 15;
         if (gs.colorMask[i] != m) {
-            glColorMaski(i, m & 1, (m >> 1) & 1, (m >> 2) & 1, (m >> 3) & 1);
+            FLUSHED(glColorMaski)(i, m & 1, (m >> 1) & 1, (m >> 2) & 1, (m >> 3) & 1);
             gs.colorMask[i] = m;
         }
         bool on = colors[i]->fmt.kind == FormatInfo::FLOAT && ((r[REGADDR::CB_COLOR_CONTROL] >> (8 + i)) & 1);
-        BlendState v = zeroed<BlendState>();
+        BlendState v = BlendState{};
         BlendState old = gs.blend[i];
         v.on = on;
         if (on) {
@@ -864,33 +1249,78 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
         }
         if (changed(gs.blend[i], v)) {
             if (old.on != v.on) {
-                if (on) glEnablei(GL_BLEND, i);
-                else glDisablei(GL_BLEND, i);
+                if (on) FLUSHED(glEnablei)(GL_BLEND, i);
+                else FLUSHED(glDisablei)(GL_BLEND, i);
             }
             if (on && (old.src != v.src || old.dst != v.dst || old.srcA != v.srcA || old.dstA != v.dstA))
-                glBlendFuncSeparatei(i, v.src, v.dst, v.srcA, v.dstA);
-            if (on && (old.op != v.op || old.opA != v.opA)) glBlendEquationSeparatei(i, v.op, v.opA);
+                FLUSHED(glBlendFuncSeparatei)(i, v.src, v.dst, v.srcA, v.dstA);
+            if (on && (old.op != v.op || old.opA != v.opA)) FLUSHED(glBlendEquationSeparatei)(i, v.op, v.opA);
         }
     }
     if (constantColor) {
         const float* constant = reinterpret_cast<const float*>(r + REGADDR::CB_BLEND_RED);
         if (memcmp(gs.blendColor, constant, sizeof gs.blendColor)) {
             memcpy(gs.blendColor, constant, sizeof gs.blendColor);
-            glBlendColor(constant[0], constant[1], constant[2], constant[3]);
+            FLUSHED(glBlendColor)(constant[0], constant[1], constant[2], constant[3]);
         }
     }
     uint32_t rop = (r[REGADDR::CB_COLOR_CONTROL] >> 16) & 255;
     if (rop != 0xCC) {
         cap(kLogicOp, true);
         GLenum op = logic_op(rop);
-        if (gs.logicOp != op) glLogicOp(gs.logicOp = op);
+        if (gs.logicOp != op) FLUSHED(glLogicOp)(gs.logicOp = op);
     } else
         cap(kLogicOp, false);
 
     // ---- vertex buffers (guest bytes as stored)
     static uint32_t enabledAttribs = 0;
     uint32_t wantAttribs = 0;
+    bool attribChanged = false, instanceData = false;
+    const auto& mb = multi_bind();
+    Range vbDirty;
+    if (p->batchable) {
+        // the draw index (multi-draw batching): attribute kDrawIndexAttrib from binding kDrawIndexBinding
+        AttribState v = AttribState{};
+        v.comps = 1;
+        v.type = GL_UNSIGNED_INT;
+        v.offset = 0;
+        v.binding = kDrawIndexBinding;
+        AttribState old = gs.attrib[kDrawIndexAttrib];
+        if (changed(gs.attrib[kDrawIndexAttrib], v)) {
+            attribChanged = true;
+            if (old.comps != v.comps || old.type != v.type || old.offset != v.offset)
+                FLUSHED(glVertexAttribIFormat)(kDrawIndexAttrib, 1, GL_UNSIGNED_INT, 0);
+            if (old.binding != v.binding) FLUSHED(glVertexAttribBinding)(kDrawIndexAttrib, kDrawIndexBinding);
+        }
+        VertexBindingState b = VertexBindingState{};
+        b.buffer = draw_index_buffer();
+        b.offset = 0;
+        b.stride = 4;
+        b.divisor = 0x7FFFFFFF;  // instancing never advances it: the value is the draw's baseInstance
+        VertexBindingState oldb = gs.binding[kDrawIndexBinding];
+        if (changed(gs.binding[kDrawIndexBinding], b)) {
+            if (oldb.buffer != b.buffer || oldb.offset != b.offset || oldb.stride != b.stride)
+                FLUSHED(glBindVertexBuffer)(kDrawIndexBinding, b.buffer, b.offset, b.stride);
+            if (oldb.divisor != b.divisor) FLUSHED(glVertexBindingDivisor)(kDrawIndexBinding, b.divisor);
+        }
+        wantAttribs |= 1u << kDrawIndexAttrib;
+    }
+    // Vertex rebasing (WWHD_GL_VERTEX_REBASE, on unless =0, with batching): a draw with one vertex
+    // buffer gets its data at a multiple of the stride in the stream buffer and binds the buffer at
+    // offset 0; the difference goes into the base vertex. Consecutive draws of different meshes
+    // then keep the same binding and can share a multi-draw.
+    static const bool rebaseOn = [] {
+        const char* e = getenv("WWHD_GL_VERTEX_REBASE");
+        return !(e && *e == '0');
+    }();
+    uint32_t vertexGroups = 0;
+    for (auto& g : fs->bufferGroups)
+        if (r[mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.attributeBufferIndex * 7]) vertexGroups++;
+    uint32_t rebase = 0;  // added to the draw's base vertex
     for (auto& g : fs->bufferGroups) {
+        if (p->batchable && g.attributeBufferIndex == kDrawIndexBinding)
+            log_once(0xD1D00000u, "[gl] vertex buffer %u is also the draw-index binding: batched draws may break",
+                     std::to_string(g.attributeBufferIndex));
         uint32_t addr = r[mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.attributeBufferIndex * 7];
         uint32_t size = r[mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.attributeBufferIndex * 7 + 1] + 1;
         uint32_t stride = (r[mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.attributeBufferIndex * 7 + 2] >> 11) & 0xFFFF;
@@ -901,68 +1331,120 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
             auto& a = g.attrib[j];
             int loc = vs->mapping.attributeMapping[a.semanticId];
             if (loc < 0 || loc >= kAttribs) continue;
-            AttribState v = zeroed<AttribState>();
+            AttribState v = AttribState{};
             uint32_t bytes;
             if (!vertex_format(a.format, v.comps, v.type, bytes)) continue;
             v.offset = a.offset;
             v.binding = g.attributeBufferIndex;
             AttribState old = gs.attrib[loc];
             if (changed(gs.attrib[loc], v)) {
+                attribChanged = true;
                 if (old.comps != v.comps || old.type != v.type || old.offset != v.offset)
-                    glVertexAttribIFormat(loc, v.comps, v.type, v.offset);
-                if (old.binding != v.binding) glVertexAttribBinding(loc, v.binding);
+                    FLUSHED(glVertexAttribIFormat)(loc, v.comps, v.type, v.offset);
+                if (old.binding != v.binding) FLUSHED(glVertexAttribBinding)(loc, v.binding);
             }
             wantAttribs |= 1u << loc;
             attributeEnd = std::max<uint64_t>(attributeEnd, uint64_t(a.offset) + bytes);
             if (a.fetchType == LatteConst::VertexFetchType2::INSTANCE_DATA) instance = true;
         }
+        instanceData |= instance;
         uint64_t last = instance ? instances - 1 : maxVertex;
         uint64_t copied = std::min<uint64_t>(size, last * stride + std::max<uint64_t>(attributeEnd, stride));
-        auto slice = stream_guest(addr, (size_t)std::max<uint64_t>(copied, 4), 16);
+        const bool rebased = rebaseOn && p->batchable && vertexGroups == 1 && !instance && stride && stride % 4 == 0;
+        auto slice = stream_guest(addr, (size_t)std::max<uint64_t>(copied, 4), rebased ? stride : 16);
         R.perf.vertexBytes += copied;
-        VertexBindingState v = zeroed<VertexBindingState>();
+        VertexBindingState v = VertexBindingState{};
         v.buffer = slice.buffer;
         v.offset = slice.offset;
+        if (rebased) {
+            rebase = uint32_t(slice.offset / stride);
+            v.offset = 0;
+            R.perf.rebasedDraws++;
+        }
         v.stride = GLsizei(stride);
         v.divisor = instance ? 1 : 0;
         uint32_t index = g.attributeBufferIndex;
         if (index >= (uint32_t)kVertexBindings) {
-            glBindVertexBuffer(index, v.buffer, v.offset, v.stride);
-            glVertexBindingDivisor(index, v.divisor);
+            FLUSHED(glBindVertexBuffer)(index, v.buffer, v.offset, v.stride);
+            FLUSHED(glVertexBindingDivisor)(index, v.divisor);
             continue;
         }
         VertexBindingState old = gs.binding[index];
         if (changed(gs.binding[index], v)) {
-            if (old.buffer != v.buffer || old.offset != v.offset || old.stride != v.stride)
-                glBindVertexBuffer(index, v.buffer, v.offset, v.stride);
-            if (old.divisor != v.divisor) glVertexBindingDivisor(index, v.divisor);
+            if (old.buffer != v.buffer || old.offset != v.offset || old.stride != v.stride) {
+                if (mb.on) vbDirty.add(index);
+                else FLUSHED(glBindVertexBuffer)(index, v.buffer, v.offset, v.stride);
+            }
+            if (old.divisor != v.divisor) FLUSHED(glVertexBindingDivisor)(index, v.divisor);
         }
+    }
+    R.perf.chgAttribFormats += attribChanged || enabledAttribs != wantAttribs;
+    R.perf.chgVertexBuffers += !vbDirty.empty();
+    if (!vbDirty.empty()) {
+        GLuint buffers[kVertexBindings];
+        GLintptr offsets[kVertexBindings];
+        GLsizei strides[kVertexBindings];
+        for (uint32_t b = vbDirty.lo; b <= vbDirty.hi; b++) {
+            VertexBindingState& c = gs.binding[b];
+            if (c.buffer == kUnknown) {  // unbound; the divisor stays unknown
+                c.buffer = 0;
+                c.offset = 0;
+                c.stride = 16;
+            }
+            buffers[b - vbDirty.lo] = c.buffer;
+            offsets[b - vbDirty.lo] = c.offset;
+            strides[b - vbDirty.lo] = c.stride;
+        }
+        FLUSHED(mb.vertexBuffers)(vbDirty.lo, GLsizei(vbDirty.hi - vbDirty.lo + 1), buffers, offsets, strides);
     }
     for (uint32_t change = enabledAttribs ^ wantAttribs; change; change &= change - 1) {
         uint32_t loc = __builtin_ctz(change);
-        if (wantAttribs & (1u << loc)) glEnableVertexAttribArray(loc);
-        else glDisableVertexAttribArray(loc);
+        if (wantAttribs & (1u << loc)) FLUSHED(glEnableVertexAttribArray)(loc);
+        else FLUSHED(glDisableVertexAttribArray)(loc);
     }
     enabledAttribs = wantAttribs;
-    uint64_t t4 = now_ns();
-    R.perf.stateNs += t4 - t3;
+    lap(R.perf.stateNs);
 
     // ---- draw
     if (indices.type) {
         cap(kRestart, stripRestart);
         if (gs.elementBuffer != indices.slice.buffer) {
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indices.slice.buffer);
+            FLUSHED(glBindBuffer)(GL_ELEMENT_ARRAY_BUFFER, indices.slice.buffer);
             gs.elementBuffer = indices.slice.buffer;
         }
+    }
+    if (p->batchable) {
+        const uint32_t indexSize = indices.type == GL_UNSIGNED_INT ? 4 : 2;
+        record_draw(p, mode, indices.type, indices.type ? uint32_t(indices.count) : count,
+                    indices.type ? uint32_t(indices.slice.offset / indexSize) : 0, baseVertex + rebase, instances,
+                    instances > 1 || instanceData);
+    } else if (indices.type) {
+        flush_draws();
         glDrawElementsInstancedBaseVertex(mode, indices.count, indices.type, (const void*)indices.slice.offset, instances,
                                           (GLint)baseVertex);
-    } else
+    } else {
+        flush_draws();
         glDrawArraysInstanced(mode, (GLint)baseVertex, count, instances);
-    R.perf.submitNs += now_ns() - t4;
+    }
+    lap(R.perf.submitNs);
+    auto tally = [](Surface* s) {
+        if (s->drawFrame != R.frame) {
+            s->drawFrame = R.frame;
+            s->frameDraws = 0;
+        }
+        s->frameDraws++;
+    };
     for (auto* c : colors)
-        if (c) mark_gpu_written(c);
-    if (depth) mark_gpu_written(depth);
+        if (c) {
+            mark_gpu_written(c);
+            tally(c);
+        }
+    if (depth) {
+        mark_gpu_written(depth);
+        tally(depth);
+    }
     R.drawCount++;
 }
+}  // namespace
 
 }  // namespace gfxgl

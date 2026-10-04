@@ -11,6 +11,9 @@
 #include <thread>
 #ifdef __SWITCH__
 #include <sys/stat.h>
+#include <dirent.h>
+#include <ctime>
+#include <algorithm>
 
 #include <cstdlib>
 #include <exception>
@@ -38,6 +41,7 @@ void mem_init_data_imports(uint32_t alloc_slot, uint32_t alloc_ex_slot, uint32_t
 // /atmosphere/crash_reports. Uncaught C++ exceptions are logged here.
 static void install_crash_handler() {
     std::set_terminate([] {
+        log_flush();
         try {
             if (auto e = std::current_exception()) std::rethrow_exception(e);
             fprintf(stderr, "FATAL: std::terminate\n");
@@ -49,6 +53,47 @@ static void install_crash_handler() {
         fflush(stderr);
         abort();
     });
+}
+// Session logs: each session writes wwhd.log and the same lines to logs/wwhd_<date>_<time>.log
+// (the console clock at startup), so the newest file in logs/ is always the latest session; the
+// newest kMaxSessionLogs stay there. A wwhd.log from a build before this (or one whose session file
+// is missing) is moved into logs/ first.
+void log_set_session_file(FILE* f);  // core.cpp
+static void start_session_logs() {
+    constexpr size_t kMaxSessionLogs = 30;
+    mkdir("logs", 0777);
+    if (FILE* f = fopen("wwhd.log", "r")) {
+        char first[128] = {};
+        if (!fgets(first, sizeof first, f)) first[0] = 0;
+        fclose(f);
+        int y, mo, d, h, mi, se;
+        char name[96];
+        if (sscanf(first, "[session] %d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &se) == 6)
+            snprintf(name, sizeof name, "logs/wwhd_%04d-%02d-%02d_%02d-%02d-%02d.log", y, mo, d, h, mi, se);
+        else
+            snprintf(name, sizeof name, "logs/wwhd_earlier_build_%ld.log", (long)time(nullptr));
+        struct stat st;
+        if (stat(name, &st) != 0) rename("wwhd.log", name);
+    }
+    std::vector<std::string> logs;
+    if (DIR* dir = opendir("logs")) {
+        while (dirent* e = readdir(dir))
+            if (!strncmp(e->d_name, "wwhd_", 5)) logs.push_back(e->d_name);
+        closedir(dir);
+    }
+    std::sort(logs.begin(), logs.end());  // dated names sort by time
+    for (size_t i = 0; i + kMaxSessionLogs <= logs.size(); i++) remove(("logs/" + logs[i]).c_str());
+}
+static void log_session_header() {
+    time_t now = time(nullptr);
+    struct tm t{};
+    localtime_r(&now, &t);
+    char name[96];
+    snprintf(name, sizeof name, "logs/wwhd_%04d-%02d-%02d_%02d-%02d-%02d.log", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+             t.tm_hour, t.tm_min, t.tm_sec);
+    if (FILE* f = fopen(name, "w")) log_set_session_file(f);
+    LOG("[session] %04d-%02d-%02d %02d:%02d:%02d (build %s %s); also written to %s", t.tm_year + 1900, t.tm_mon + 1,
+        t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, __DATE__, __TIME__, name);
 }
 // hbmenu passes no options: env.txt next to the log holds KEY=VALUE environment settings (the
 // WWHD_* switches) and command-line options (lines starting with --)
@@ -157,9 +202,14 @@ int main(int argc, char** argv) {
     // everything lives in sdmc:/switch/wwhd: game/ (extracted dump), save/, shader cache, wwhd.log
     mkdir(host::config_dir().c_str(), 0777);
     chdir(host::config_dir().c_str());
+    start_session_logs();
     freopen("wwhd.log", "w", stderr);
     setvbuf(stderr, nullptr, _IOLBF, 0);
-    host::set_thread_core(0);
+    log_session_header();
+    // which round of docs/switch-port.md this runtime is (to tell builds apart in the logs)
+    LOG("[boot] recompiled code: %s; runtime: round 15 (shader cache written in the background, message ring without malloc)",
+        g_recomp_variant);
+    host::place_thread(0);
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
     load_switch_options(argc, argv);
 #endif

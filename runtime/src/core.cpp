@@ -28,6 +28,74 @@ std::string save_dir = "save";
 
 static std::mutex g_log_mutex;
 
+#ifdef __SWITCH__
+// The log is a file on the SD card: a write can take milliseconds, and the thread that logs (render,
+// audio, the game's main thread) would stall for it. Lines go to a buffer that a writer thread
+// writes out four times a second. fatal() and log_flush() write it at once.
+static std::string g_log_pending;
+static constexpr size_t kLogPendingMax = 1 << 20;  // dropped beyond this (a flood must not eat memory)
+static uint64_t g_log_dropped = 0;
+
+static FILE* g_session_log = nullptr;  // logs/wwhd_<date>_<time>.log, the same lines as wwhd.log
+void log_set_session_file(FILE* f) { g_session_log = f; }
+
+void log_flush() {
+    std::string out;
+    {
+        std::lock_guard<std::mutex> lk(g_log_mutex);
+        out.swap(g_log_pending);
+    }
+    if (!out.empty()) {
+        fwrite(out.data(), 1, out.size(), stderr);
+        fflush(stderr);
+        if (g_session_log) {
+            fwrite(out.data(), 1, out.size(), g_session_log);
+            fflush(g_session_log);
+        }
+    }
+}
+
+static void log_writer_start() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        pthread_t t;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, 64 << 10);
+        if (pthread_create(&t, &attr, [](void*) -> void* {
+                // above the game's threads (59), like the other host service threads: the log keeps
+                // reaching the SD card while game threads are busy or stuck
+                host::raise_thread_priority();  // and off the main thread's core
+                for (;;) {
+                    svcSleepThread(250'000'000ll);
+                    log_flush();
+                }
+                return nullptr;
+            }, nullptr) == 0)
+            pthread_detach(t);
+        pthread_attr_destroy(&attr);
+    });
+}
+
+void log_msg(const char* fmt, ...) {
+    char line[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof line - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    n = std::min<int>(n, sizeof line - 2);
+    line[n++] = '\n';
+    {
+        std::lock_guard<std::mutex> lk(g_log_mutex);
+        if (g_log_pending.size() + n <= kLogPendingMax) g_log_pending.append(line, n);
+        else g_log_dropped++;
+    }
+    log_writer_start();
+}
+#else
+void log_flush() { fflush(stderr); }
+
 void log_msg(const char* fmt, ...) {
     std::lock_guard<std::mutex> lk(g_log_mutex);
     va_list ap;
@@ -36,16 +104,25 @@ void log_msg(const char* fmt, ...) {
     va_end(ap);
     fputc('\n', stderr);
 }
+#endif
 
 void fatal(const char* fmt, ...) {
+    log_flush();
     {
         std::lock_guard<std::mutex> lk(g_log_mutex);
         va_list ap;
         va_start(ap, fmt);
-        fprintf(stderr, "FATAL: ");
-        vfprintf(stderr, fmt, ap);
+        char msg[1024];
+        vsnprintf(msg, sizeof msg, fmt, ap);
         va_end(ap);
-        fputc('\n', stderr);
+        fprintf(stderr, "FATAL: %s\n", msg);
+        fflush(stderr);
+#ifdef __SWITCH__
+        if (g_session_log) {
+            fprintf(g_session_log, "FATAL: %s\n", msg);
+            fflush(g_session_log);
+        }
+#endif
     }
     abort();
 }
@@ -57,6 +134,32 @@ extern "C" { uint8_t* ppc_mem_base_var = nullptr; }
 // Detached host threads here run for the whole session, so not reclaiming them on exit is fine.
 struct __pthread_t;
 extern "C" int __syscall_thread_detach(struct __pthread_t*) { return 0; }
+// libnx gives a thread created without attributes a 128 KiB stack. Mesa creates its GL thread
+// (WWHD_GL_THREAD) that way, and that thread runs the GLSL compiler, which needs far more.
+// The link wraps pthread_create (CMakeLists.txt) so such threads get 4 MiB.
+extern "C" int __real_pthread_create(pthread_t*, const pthread_attr_t*, void* (*)(void*), void*);
+extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*fn)(void*), void* arg) {
+    size_t size = 0;
+    if (attr && pthread_attr_getstacksize(attr, &size) == 0 && size) return __real_pthread_create(thread, attr, fn, arg);
+    pthread_attr_t big;
+    if (attr) big = *attr;
+    else pthread_attr_init(&big);
+    pthread_attr_setstacksize(&big, 4 << 20);
+    int r = __real_pthread_create(thread, &big, fn, arg);
+    if (!attr) pthread_attr_destroy(&big);
+    if (r) LOG("[boot] pthread_create with a 4 MiB stack failed (%d)", r);
+    return r;
+}
+// newlib's C11 threads define thrd_success as 4; Mesa (switch-mesa, built against newlib's <threads.h>
+// but with its own success test, `if (ret) fail`) treats that as a failure. Its util_queue then frees
+// the queue of a thread that is already running, and Mesa's GL thread (WWHD_GL_THREAD) never starts.
+// Mesa is the only caller of thrd_create, and it only tests for zero: success becomes 0 here.
+extern "C" int __real_thrd_create(void* thread, int (*fn)(void*), void* arg);
+extern "C" int __wrap_thrd_create(void* thread, int (*fn)(void*), void* arg) {
+    int r = __real_thrd_create(thread, fn, arg);
+    if (r != 4 /* newlib thrd_success */) LOG("[boot] thrd_create failed (%d)", r);
+    return r == 4 ? 0 : (r ? r : 2);
+}
 #endif
 namespace mem {
 static std::atomic<uint32_t> g_runtime_top{kRuntimeStart};
@@ -285,10 +388,32 @@ uint32_t register_host(PpcFunc fn, const char* name) {
 }
 }  // namespace dispatch
 
+// checking build of the recompiler's CR liveness pass (WWHD_RECOMP_CR_CHECK=1): a dropped CR bit was read
+extern "C" void ppc_cr_poisoned(Cpu* c, int bit, uint32_t addr) {
+    fatal("CR liveness: bit %d read at %08X without a live store (lr=%08X)", bit, addr, c->lr);
+}
+
+// checking build of the recompiler's register locals (WWHD_RECOMP_NONLEAF_CHECK=1): a callee changed
+// a callee-saved register (reg 32+n: f n), which the Switch build assumes never happens
+extern "C" void ppc_keep_failed(Cpu* c, int reg, uint32_t fn) {
+    fatal("callee-saved %s%d changed across a call in %08X (lr=%08X)", reg < 32 ? "r" : "f", reg % 32, fn, c->lr);
+}
+
 extern "C" void ppc_dispatch(Cpu* c) {
     PpcFunc f = dispatch::lookup(c->pc);
     if (!f) fatal("indirect branch to unknown address %08X (lr=%08X ctr=%08X)", c->pc, c->lr, c->ctr);
     MUSTTAIL return f(c);
+}
+
+// PPC_ICALL's slow path: look the target up, remember it in the call site's entry, call it
+extern "C" void ppc_icall_miss(Cpu* c, uint64_t* slot) {
+    const uint32_t pc = c->pc;
+    PpcFunc f = dispatch::lookup(pc);
+    if (!f) fatal("indirect branch to unknown address %08X (lr=%08X ctr=%08X)", pc, c->lr, c->ctr);
+    const intptr_t off = (intptr_t)f - (intptr_t)&ppc_dispatch;
+    if (off == (intptr_t)(int32_t)off)
+        __atomic_store_n(slot, (uint64_t)pc << 32 | (uint32_t)(int32_t)off, __ATOMIC_RELAXED);
+    f(c);
 }
 
 uint32_t guest_call(Cpu* c, uint32_t fn, std::initializer_list<uint32_t> args) {

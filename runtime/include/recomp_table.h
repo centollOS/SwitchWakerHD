@@ -10,3 +10,4 @@ extern const unsigned g_recomp_func_count;
 extern const RecompImport g_recomp_imports[];
 extern const unsigned g_recomp_import_count;
 extern const uint32_t g_recomp_entry_point;
+extern const char g_recomp_variant[];  /* the recompiler options this code was generated with (for the log) */

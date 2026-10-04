@@ -86,6 +86,11 @@ target_compile_options(gamecode PRIVATE -O3 -ffp-contract=off -fno-strict-aliasi
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
   target_compile_options(gamecode PRIVATE -mcpu=apple-m1)
 endif()
+if(WWHD_SWITCH)
+  # no frame-pointer setup in each of the ~40,000 recompiled functions (code size: the Switch's
+  # caches are small and the game code is ~38 MB)
+  target_compile_options(gamecode PRIVATE -fomit-frame-pointer)
+endif()
 
 
 # ---- vendored Cemu GPU pieces (MPL-2.0): address library + shader decompiler
@@ -186,6 +191,13 @@ if(WWHD_HAS_OPENGL)
   if(WWHD_SWITCH)
     # Mesa (nouveau) EGL/OpenGL and glad, from the switch-mesa and switch-glad portlibs
     target_link_libraries(wwhd PRIVATE ${LZ4_LIBRARY} glad EGL glapi drm_nouveau)
+    # threads created without attributes (Mesa's GL thread) get a large stack, and Mesa's checks of
+    # newlib's C11 thrd_create results are fixed: see core.cpp
+    target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create)
+    # timers around Mesa's GL-thread queue and nouveau's GPU submission (gfx/gl/mesa_probe.cpp)
+    target_link_options(wwhd PRIVATE -Wl,--wrap=_mesa_glthread_flush_batch -Wl,--wrap=_mesa_glthread_finish
+                        -Wl,--wrap=_mesa_glthread_finish_before -Wl,--wrap=nouveau_pushbuf_kick
+                        -Wl,--wrap=nouveau_pushbuf_space -Wl,--wrap=nouveau_fence_wait -Wl,--wrap=nouveau_bo_wait)
     nx_generate_nacp(OUTPUT wwhd.nacp NAME "SwitchWakerHD" AUTHOR "WWHD recomp" VERSION "0.1.0")
     nx_create_nro(wwhd NACP wwhd.nacp)
   else()

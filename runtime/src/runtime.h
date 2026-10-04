@@ -1,5 +1,6 @@
 // Internal runtime API shared by the loader, dispatcher, threads and HLE libraries.
 #pragma once
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -75,12 +76,16 @@ bool ensure_core();   // service threads entering guest code; true if the core w
 void release_core();
 void set_service_core(uint32_t core);
 void report_sched();  // log per-thread core usage
+void dump_state();    // log every guest thread's state and guest call stack, and each core's owner (watchdog)
 }  // namespace threads
 struct BlockingScope {
     BlockingScope() { threads::block_begin(); }
     ~BlockingScope() { threads::block_end(); }
     BlockingScope(const BlockingScope&) = delete;
 };
+
+// host file system calls made for the game so far and their total time (hle/fs.cpp)
+void fs_stats(uint64_t& calls, uint64_t& ns);
 
 namespace threads {
 void init(const LoadedModule& m);
@@ -129,10 +134,28 @@ struct HleReg {
 PpcFunc hle_find(const char* lib, const char* name);  // null if not implemented
 PpcFunc hle_find_any(const char* name);
 
+// the runtime function the game's main thread is in (null: guest code), for the main-thread sampler
+// (threads.cpp hle_sampler): where its time goes, waits that keep its emulated core included
+extern std::atomic<const char*> g_main_hle;
+extern thread_local bool t_is_main_thread;
+struct HleMark {
+    const char* prev = nullptr;
+    bool on;
+    explicit HleMark(const char* name) : on(t_is_main_thread) {
+        if (on) prev = g_main_hle.exchange(name, std::memory_order_relaxed);
+    }
+    ~HleMark() {
+        if (on) g_main_hle.store(prev, std::memory_order_relaxed);
+    }
+};
 #define HLE(lib, name)                                                        \
-    extern "C" void imp_##lib##_##name(Cpu* c);                                \
+    static void hle_body_##lib##_##name(Cpu* c);                               \
+    extern "C" void imp_##lib##_##name(Cpu* c) {                               \
+        HleMark hle_mark_(#name);                                              \
+        hle_body_##lib##_##name(c);                                            \
+    }                                                                          \
     static HleReg hle_reg_##lib##_##name(#lib, #name, imp_##lib##_##name);   \
-    extern "C" void imp_##lib##_##name(Cpu* c)
+    static void hle_body_##lib##_##name(Cpu* c)
 
 // argument helpers (PPC SysV ABI)
 inline uint32_t arg(Cpu* c, int i) { return c->r[3 + i]; }
@@ -143,6 +166,7 @@ inline void ret64(Cpu* c, uint64_t v) { c->r[3] = (uint32_t)(v >> 32); c->r[4] =
 // ---- logging ----
 extern bool g_trace_hle;
 void log_msg(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void log_flush();  // writes out buffered log lines (the Switch logs through a writer thread)
 [[noreturn]] void fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 #define LOG(...) log_msg(__VA_ARGS__)
 #define TRACE(...) do { if (g_trace_hle) log_msg(__VA_ARGS__); } while (0)

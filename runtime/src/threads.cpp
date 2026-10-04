@@ -73,6 +73,11 @@ struct HostThread {
     Cpu cpu{};
     std::mutex m;
     std::condition_variable cv;
+    // waiting for its emulated core (core_acquire, with the core's mutex): a release wakes only the
+    // thread that runs next, not every waiter (they all sat on the main thread's host core, each
+    // waking for nothing at every release)
+    std::condition_variable sched_cv;
+    bool is_main = false;  // the game's main thread (run_main)
     int suspend = 1;
     bool started = false;
     bool exited = false;
@@ -97,6 +102,10 @@ struct HostThread {
 #ifdef __APPLE__
     mach_port_t mach = 0;     // for CPU time statistics
     uint64_t last_cpu_us = 0;
+#endif
+#ifdef __SWITCH__
+    Handle nx = INVALID_HANDLE;  // for CPU time statistics (svcGetInfo ThreadTickCount)
+    uint64_t last_cpu_ticks = 0;
 #endif
     // save states: whether the thread is parked at a point where its whole state is its Cpu plus
     // guest memory plus the HLE objects (see park_wait)
@@ -133,9 +142,8 @@ uint32_t current_thread() { return t_self ? t_self->guest : 0; }
 
 // ---------------------------------------------------------------- per-core scheduling
 // Each emulated core runs one guest thread at a time; a ready thread with a higher priority than
-// the running one sets g_core_preempt, and the running thread yields at its next function entry.
+// the running one sets its Cpu's preempt flag, and the running thread yields at its next function entry.
 // WWHD_NO_SCHED=1 lets all threads run freely (the old behaviour).
-volatile int g_core_preempt[3];
 static const bool g_sched_on = getenv("WWHD_NO_SCHED") == nullptr;
 
 struct CoreSched {
@@ -154,6 +162,7 @@ static HostThread* best_ready(CoreSched& k) {  // k.m held
 }
 
 static void sched_tick_thread();
+static void flush_deferred_wakes();
 static void mem_watch_thread();
 
 static void core_acquire(HostThread* t) {
@@ -167,13 +176,13 @@ static void core_acquire(HostThread* t) {
     CoreSched& k = g_sched[core];
     std::unique_lock<std::mutex> lk(k.m);
     k.ready.push_back(t);
-    if (k.owner && t->prio < k.owner->prio) g_core_preempt[core] = 1;
+    if (k.owner && t->prio < k.owner->prio) k.owner->cpu.preempt = 1;
     auto start = std::chrono::steady_clock::now();
     t->acquired = start;
     t->ready_since = start;
     bool warned = false;
     while (k.owner || best_ready(k) != t) {
-        k.cv.wait_for(lk, std::chrono::seconds(2));
+        t->sched_cv.wait_for(lk, std::chrono::seconds(2));
         if (!warned && std::chrono::steady_clock::now() - start > std::chrono::seconds(10)) {
             warned = true;
             std::string a = mem::read_cstr(ld32(t->guest + osthread::kName));
@@ -192,20 +201,24 @@ static void core_acquire(HostThread* t) {
     t->acquired = now;
     t->cpu.core = core;
     HostThread* next = best_ready(k);
-    g_core_preempt[core] = next && next->prio < t->prio;
+    t->cpu.preempt = next && next->prio < t->prio;
 }
 
 static void core_release(HostThread* t) {
     if (!g_sched_on || !t->holds_core) return;
     CoreSched& k = g_sched[t->held_core];
+    HostThread* next;
     {
         std::lock_guard<std::mutex> lk(k.m);
         if (k.owner == t) k.owner = nullptr;
         t->holds_core = false;
         t->held_ns += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t->acquired).count();
-        g_core_preempt[t->held_core] = 0;
+        t->cpu.preempt = 0;
+        next = best_ready(k);
     }
-    k.cv.notify_all();
+    // the waiter that takes the core next (it checks again under the core's mutex before sleeping, so
+    // a wake between its check and its wait is not lost)
+    if (next) next->sched_cv.notify_one();
 }
 
 // Like Cafe OS (and Cemu): strict priority, and equal-priority threads round-robin every time slice
@@ -232,7 +245,8 @@ extern "C" void ppc_preempt(Cpu* c) {
     {
         CoreSched& k = g_sched[t->held_core];
         std::lock_guard<std::mutex> lk(k.m);
-        g_core_preempt[t->held_core] = 0;
+        t->cpu.preempt = 0;
+        c->preempt = 0;
         if (!should_yield(k, t)) return;
     }
     core_release(t);
@@ -289,6 +303,7 @@ static void sched_tick_thread() {
     auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     for (;;) {
         std::this_thread::sleep_for(std::chrono::microseconds(500));
+        flush_deferred_wakes();
         if (timed_stats && std::chrono::steady_clock::now() >= next_report) {
             next_report += std::chrono::seconds(5);
             threads::report_sched();
@@ -296,7 +311,7 @@ static void sched_tick_thread() {
         for (int core = 0; core < 3; core++) {
             CoreSched& k = g_sched[core];
             std::lock_guard<std::mutex> lk(k.m);
-            if (k.owner && !k.ready.empty() && should_yield(k, k.owner)) g_core_preempt[core] = 1;
+            if (k.owner && !k.ready.empty() && should_yield(k, k.owner)) k.owner->cpu.preempt = 1;
         }
     }
 }
@@ -332,6 +347,16 @@ void report_sched() {
             }
         }
  #endif
+#ifdef __SWITCH__
+        if (t->nx != INVALID_HANDLE) {
+            u64 ticks = 0;
+            if (R_SUCCEEDED(svcGetInfo(&ticks, InfoType_ThreadTickCount, t->nx, UINT64_MAX))) {
+                if (t->last_cpu_ticks)
+                    cpu = 100.0 * double(ticks - t->last_cpu_ticks) * 1e9 / double(armGetSystemTickFreq()) / span;
+                t->last_cpu_ticks = ticks;
+            }
+        }
+#endif
         char buf[192];
         snprintf(buf, sizeof buf, " [%s c%u p%d run %.0f%% cpu %.0f%% wait %.0f%%]", name.empty() ? "main" : name.c_str(), t->core,
                  t->prio, 100.0 * h / span, cpu, 100.0 * w / span);
@@ -339,7 +364,55 @@ void report_sched() {
     }
     LOG("[sched]%s", out.c_str());
 }
+// for a hang: what every guest thread is doing. Locks are only tried (a hang may hold them), so the
+// values can be a little inconsistent; a thread that runs has stale registers in its Cpu.
+void dump_state() {
+    static const char* kWait[] = {"running", "mutex", "event", "message send", "message receive", "sleep queue",
+                                  "join", "rendezvous", "sleep", "service", "entry"};
+    std::unique_lock<std::mutex> lk(g_threads_mutex, std::defer_lock);
+    for (int i = 0; i < 50 && !lk.try_lock(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    LOG("[watchdog] guest threads%s:", lk.owns_lock() ? "" : " (thread list locked: read anyway)");
+    auto guest_ok = [](uint32_t a) { return a >= 0x01000000u && a < 0xF0000000u && !(a & 3); };
+    for (auto& [g, t] : g_threads) {
+        if (t->exited) continue;
+        std::string name = mem::read_cstr(ld32(t->guest + osthread::kName));
+        const Cpu& c = t->cpu;
+        char buf[512];
+        int n = snprintf(buf, sizeof buf, "[watchdog]   \"%s\" core %u prio %d %s%s, %s", name.empty() ? "main" : name.c_str(),
+                         t->core, t->prio, t->holds_core ? "holds core " : "no core",
+                         t->holds_core ? std::to_string(t->held_core).c_str() : "",
+                         t->wst.load() == kParked ? (t->wait_kind < 11 ? kWait[t->wait_kind] : "parked") : "running");
+        if (t->wst.load() == kParked && t->wait_obj) n += snprintf(buf + n, sizeof buf - n, " %08X", t->wait_obj);
+        n += snprintf(buf + n, sizeof buf - n, "; lr %08X r1 %08X r3 %08X; stack", c.lr, c.r[1], c.r[3]);
+        uint32_t sp = c.r[1];
+        for (int f = 0; f < 10 && guest_ok(sp) && n < (int)sizeof buf - 12; f++) {
+            uint32_t prev = ld32(sp);
+            if (!guest_ok(prev) || prev <= sp) break;
+            n += snprintf(buf + n, sizeof buf - n, " %08X", ld32(prev + 4));
+            sp = prev;
+        }
+        LOG("%s", buf);
+    }
+    for (int core = 0; core < 3; core++) {
+        CoreSched& k = g_sched[core];
+        std::unique_lock<std::mutex> kl(k.m, std::defer_lock);
+        bool locked = kl.try_lock();
+        std::string owner = "none";
+        if (k.owner) {
+            owner = mem::read_cstr(ld32(k.owner->guest + osthread::kName));
+            if (owner.empty()) owner = "main";
+        }
+        std::string ready;
+        for (HostThread* t : k.ready) {
+            std::string nm = mem::read_cstr(ld32(t->guest + osthread::kName));
+            ready += " \"" + (nm.empty() ? std::string("main") : nm) + "\"";
+        }
+        LOG("[watchdog]   core %d: owner \"%s\", waiting:%s%s", core, owner.c_str(), ready.empty() ? " none" : ready.c_str(),
+            locked ? "" : " (core locked)");
+    }
+}
 void block_begin() {
+    flush_deferred_wakes();  // a thread about to wait may be waiting for what it just sent
     if (g_log_longwait) t_block_start = std::chrono::steady_clock::now();
     if (t_self) core_release(t_self);
 }
@@ -538,15 +611,115 @@ void service_end() {
 }
 }  // namespace threads
 
+std::atomic<const char*> g_main_hle{nullptr};
+thread_local bool t_is_main_thread = false;
+
+// What the main thread's sends cost (WWHD_MAIN_SAMPLER logs it every 5 s): the clock is read only on
+// the slow paths (lock taken, queue full, receiver woken at once).
+struct SendStats {
+    std::atomic<uint64_t> sends{0}, contended{0}, contendedNs{0}, full{0}, fullNs{0}, wakes{0}, wakeNs{0},
+        deferred{0}, dropped{0};
+};
+static SendStats g_send_stats;
+static inline uint64_t mono_ns() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+static void add_stat(std::atomic<uint64_t>& a, uint64_t v) { a.fetch_add(v, std::memory_order_relaxed); }
+
+// Main-thread sampler: 1,000 times a second, which runtime function the game's main thread is in
+// (HleMark); every 5 s the shares of wall time, waits that keep its emulated core included.
+static void hle_sampler_thread() {
+    host::set_thread_name("main sampler");
+    host::raise_thread_priority();
+    std::unordered_map<const char*, uint32_t> counts;
+    uint32_t total = 0;
+    auto next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const char* name = g_main_hle.load(std::memory_order_relaxed);
+        total++;
+        if (name) counts[name]++;
+        if (std::chrono::steady_clock::now() < next) continue;
+        next += std::chrono::seconds(5);
+        std::vector<std::pair<uint32_t, const char*>> top;
+        uint32_t inside = 0;
+        for (auto& [n, k] : counts) {
+            top.push_back({k, n});
+            inside += k;
+        }
+        std::sort(top.rbegin(), top.rend());
+        std::string out;
+        for (size_t i = 0; i < top.size() && i < 8; i++) {
+            char item[96];
+            snprintf(item, sizeof item, "%s%s %.1f%%", i ? ", " : "", top[i].second, 100.0 * top[i].first / total);
+            out += item;
+        }
+        LOG("[main] in runtime calls %.1f%% of the time: %s", total ? 100.0 * inside / total : 0.0, out.c_str());
+        auto take = [](std::atomic<uint64_t>& a) { return a.exchange(0, std::memory_order_relaxed); };
+        auto& s = g_send_stats;
+        const uint64_t sends = take(s.sends), contended = take(s.contended), contendedNs = take(s.contendedNs),
+                       full = take(s.full), fullNs = take(s.fullNs), wakes = take(s.wakes), wakeNs = take(s.wakeNs),
+                       deferred = take(s.deferred), dropped = take(s.dropped);
+        LOG("[main] OSSendMessage per second: %.0f sends; queue lock taken %.0f (%.1f ms), queue full: waited %.0f "
+            "(%.1f ms), not sent %.0f; receiver woken at once %.0f (%.1f ms), wakes deferred %.0f", sends / 5.0,
+            contended / 5.0, contendedNs / 5e6, full / 5.0, fullNs / 5e6, dropped / 5.0, wakes / 5.0, wakeNs / 5e6,
+            deferred / 5.0);
+        counts.clear();
+        total = 0;
+    }
+}
+
+#ifdef __SWITCH__
+// guest threads (by name) that run above the render thread on the host like the audio threads:
+// WWHD_BOOST_THREADS, comma-separated, default "update_ubo"; empty turns it off
+static bool boosted_thread(const std::string& name) {
+    static const std::vector<std::string> names = [] {
+        const char* e = getenv("WWHD_BOOST_THREADS");
+        std::string list = e ? e : "update_ubo";
+        std::vector<std::string> out;
+        for (size_t start = 0; start <= list.size();) {
+            size_t end = list.find(',', start);
+            if (end == std::string::npos) end = list.size();
+            if (end > start) out.push_back(list.substr(start, end - start));
+            start = end + 1;
+        }
+        return out;
+    }();
+    return !name.empty() && std::find(names.begin(), names.end(), name) != names.end();
+}
+#endif
+
 static void* thread_main(void* p) {
     HostThread* ht = (HostThread*)p;
     t_self = ht;
     t_cpu = &ht->cpu;
+    t_is_main_thread = ht->is_main;
+    if (ht->is_main && getenv("WWHD_MAIN_SAMPLER") && *getenv("WWHD_MAIN_SAMPLER") != '0')
+        host::start_thread(hle_sampler_thread, 256 << 10);
     std::string name = mem::read_cstr(ld32(ht->guest + osthread::kName));
     host::set_thread_name(name.empty() ? "guest" : name.c_str());
-    host::set_thread_core(ht->core);
+    host::place_thread(ht->core);
+#ifdef __SWITCH__
+    // the game's audio threads (guest priority <= 8: JASThread 2-3, nw::snd 3-4) run above the
+    // render and GL threads on the host: they are light and mostly wait for messages, and when the
+    // render thread delayed them, the sound thread's queue filled and the main thread (~800 sends a
+    // frame) waited for room (WWHD_CORE_LAYOUT)
+    // The same for the threads the main thread hands work to (boosted_thread): "update_ubo" takes
+    // ~17,000 uniform-buffer jobs a second from it through a 32-message queue. At the guest threads'
+    // host priority the render and GL threads preempted it, also while it held the queue's lock (the
+    // main thread then waited with its core: OSSendMessage 12-23% of its time), and when the queue
+    // was full the main thread ran the job itself.
+    if (host::core_layout_on() && (ht->prio <= 8 || boosted_thread(name))) {
+        svcSetThreadPriority(threadGetCurHandle(), 0x2B);
+        if (ht->prio > 8) LOG("[thread] \"%s\" runs above the render thread (WWHD_BOOST_THREADS)", name.c_str());
+    }
+#endif
 #ifdef __APPLE__
     ht->mach = pthread_mach_thread_np(pthread_self());
+#endif
+#ifdef __SWITCH__
+    ht->nx = threadGetCurHandle();
 #endif
     // keep guest threads on performance cores: the default QoS lets macOS park them on efficiency
     // cores, which showed up as the main thread holding its core without getting CPU time
@@ -657,6 +830,7 @@ void run_main(const LoadedModule& m, int argc, uint32_t argv) {
     uint32_t t = mem::runtime_alloc(osthread::kSize, 8);
     HostThread* ht = create_thread(t, m.entry, argc, argv, stack + stack_size, stack_size, 16, 0x2 /* core 1 */);
     mem::write_cstr(mem::runtime_alloc(16), "{ Main thread }", 16);
+    ht->is_main = true;
     ht->suspend = 0;
     ht->started = true;
     start_host_thread(ht);
@@ -764,7 +938,7 @@ HLE(coreinit, OSRestoreInterrupts) {
     int prev = t_self ? (t_self->irq_off ? 0 : 1) : 1;
     if (t_self && arg(c, 0)) {
         t_self->irq_off = 0;
-        if (t_self->holds_core && g_core_preempt[t_self->held_core]) ppc_preempt(c);
+        if (t_self->holds_core && t_self->cpu.preempt) ppc_preempt(c);
     }
     ret(c, prev);
 }
@@ -776,17 +950,50 @@ template <typename T>
 struct ObjTable {
     std::mutex m;
     std::unordered_map<uint32_t, T*> map;  // objects are never deleted (waiters may hold them)
+    // Lookups go through a lock-free cache first. The table's mutex was shared by every mutex,
+    // event and message-queue call of every guest thread: when a thread holding it (often an audio
+    // thread on host core 0 or 2) was preempted by the render or GL thread, the game's main thread
+    // waited for it while keeping its core (OSSendMessage took 17-19% of its time in busy views).
+    // Entries are only added (an object is never freed), so a reader can follow a slot without a lock.
+    static constexpr uint32_t kSlots = 8192, kProbes = 32;
+    struct Slot {
+        std::atomic<uint32_t> key{0};
+        std::atomic<T*> val{nullptr};
+    };
+    Slot slots[kSlots];
+    static uint32_t hash(uint32_t addr) { return (addr * 0x9E3779B1u) >> 19; }  // 13 bits
     T* get(uint32_t addr) {
+        if (addr) {
+            for (uint32_t i = 0, h = hash(addr); i < kProbes; i++) {
+                Slot& sl = slots[(h + i) & (kSlots - 1)];
+                uint32_t k = sl.key.load(std::memory_order_acquire);
+                if (k == addr) return sl.val.load(std::memory_order_acquire);
+                if (!k) break;
+            }
+        }
         std::lock_guard<std::mutex> lk(m);
         T*& p = map[addr];
         if (!p) p = new T();
+        cache(addr, p);
         return p;
+    }
+    void cache(uint32_t addr, T* p) {  // m held
+        if (!addr) return;
+        for (uint32_t i = 0, h = hash(addr); i < kProbes; i++) {
+            Slot& sl = slots[(h + i) & (kSlots - 1)];
+            uint32_t k = sl.key.load(std::memory_order_relaxed);
+            if (k == addr || !k) {
+                sl.val.store(p, std::memory_order_release);
+                if (!k) sl.key.store(addr, std::memory_order_release);
+                return;
+            }
+        }
     }
     void reset(uint32_t addr) {
         std::lock_guard<std::mutex> lk(m);
         T*& p = map[addr];
-        delete p;
-        p = new T();
+        p = new T();  // the old object stays allocated: a lock-free reader may still hold it
+        cache(addr, p);
     }
 };
 
@@ -935,13 +1142,117 @@ HLE(coreinit, OSWaitEventWithTimeout) {
 }
 
 // OSMessageQueue: messages are 16 bytes
+// OSMessageQueue. Receivers wait on notEmpty, senders on notFull, and a call wakes one thread of the
+// other side only when one is waiting: each send used to wake every waiter of both kinds (a kernel
+// call per waiter, then all of them taking the queue's mutex again).
+// The messages sit in a ring of the queue's capacity, allocated at OSInitMessageQueue: the std::deque
+// before it allocated or freed a block every 32 messages, and malloc's lock is shared with Mesa's
+// threads (~800 sends a frame on the main thread).
+struct MsgRing {
+    using Msg = std::array<uint32_t, 4>;
+    std::vector<Msg> slots;
+    uint32_t head = 0, count = 0;
+    void reset(uint32_t capacity) {
+        slots.assign(std::min<uint32_t>(capacity, 1u << 16), Msg{});
+        head = count = 0;
+    }
+    uint32_t size() const { return count; }
+    bool empty() const { return count == 0; }
+    bool full() const { return count >= slots.size(); }
+    const Msg& at(uint32_t i) const { return slots[(head + i) % slots.size()]; }
+    const Msg& front() const { return slots[head]; }
+    void push_back(const Msg& m) { slots[(head + count++) % slots.size()] = m; }
+    void push_front(const Msg& m) {
+        head = (head + uint32_t(slots.size()) - 1) % slots.size();
+        slots[head] = m;
+        count++;
+    }
+    void pop_front() {
+        head = (head + 1) % slots.size();
+        count--;
+    }
+    void clear() { head = count = 0; }
+};
 struct HQueue {
     std::mutex m;
-    std::condition_variable cv;
-    std::deque<std::array<uint32_t, 4>> msgs;
+    std::condition_variable notEmpty, notFull;
+    uint32_t receivers = 0, senders = 0;  // threads waiting (m held)
+    bool receiverWoken = false;  // a wake is on its way to a receiver: further sends need none
+    bool wakeDeferred = false;   // in g_deferred_wakes: the next flush wakes a receiver
+    MsgRing msgs;
     uint32_t capacity = 0;
 };
 static ObjTable<HQueue> g_queues;
+
+// A queue's mutex is held for a few instructions at a time: a thread that finds it taken spins a
+// little before sleeping in the kernel (on the Switch a contended lock and its hand-over are two
+// kernel calls, and the main thread waits through them holding its core).
+static inline void cpu_relax() {
+#if defined(__aarch64__)
+    asm volatile("yield");
+#elif defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#endif
+}
+static bool lock_spinning(std::mutex& m) {  // true: it was taken (contended)
+    if (m.try_lock()) return false;
+    for (int i = 0; i < 256; i++) {
+        cpu_relax();
+        if (m.try_lock()) return true;
+    }
+    m.lock();
+    return true;
+}
+
+
+// Deferred receiver wakes (WWHD_DEFER_WAKES, on unless =0). The game's main thread sends ~800
+// messages a frame, mostly to the sound thread, which handles each and sleeps again: every send
+// paid a kernel call to wake it (~20% of the main thread's time on the Switch). A send to a queue
+// with a sleeping receiver now only marks the queue; the scheduler tick (every 0.5 ms, cores 0/2)
+// and any thread about to block deliver one wake for everything queued meanwhile. A queue half
+// full is woken at once, so it never fills because of the delay.
+static const bool g_defer_wakes = [] {
+    const char* e = getenv("WWHD_DEFER_WAKES");
+    return !(e && *e == '0');
+}();
+static std::mutex g_deferred_mutex;
+static std::vector<HQueue*> g_deferred_wakes = [] {
+    std::vector<HQueue*> v;
+    v.reserve(256);
+    return v;
+}();
+static std::atomic<bool> g_deferred_any{false};
+static void flush_deferred_wakes() {
+    if (!g_deferred_any.load(std::memory_order_acquire)) return;
+    // taken off the list in place: swapping the vector out left the senders an empty one, which the
+    // main thread's next deferred send allocated again (malloc ~2,000 times a second)
+    for (bool more = true; more;) {
+        HQueue* list[32];
+        size_t n = 0;
+        {
+            lock_spinning(g_deferred_mutex);
+            std::lock_guard<std::mutex> lk(g_deferred_mutex, std::adopt_lock);
+            while (n < 32 && !g_deferred_wakes.empty()) {
+                list[n++] = g_deferred_wakes.back();
+                g_deferred_wakes.pop_back();
+            }
+            more = !g_deferred_wakes.empty();
+            if (!more) g_deferred_any.store(false, std::memory_order_release);
+        }
+        for (size_t i = 0; i < n; i++) {
+            HQueue* q = list[i];
+            bool wake;
+            {
+                lock_spinning(q->m);
+                std::lock_guard<std::mutex> lk(q->m, std::adopt_lock);
+                wake = q->wakeDeferred && q->receivers != 0 && !q->receiverWoken;
+                q->wakeDeferred = false;
+                if (wake) q->receiverWoken = true;
+            }
+            if (wake) q->notEmpty.notify_one();
+        }
+    }
+}
 
 HLE(coreinit, OSInitMessageQueue) {
     uint32_t q = arg(c, 0);
@@ -949,10 +1260,12 @@ HLE(coreinit, OSInitMessageQueue) {
     HQueue* hq = g_queues.get(q);
     {
         std::lock_guard<std::mutex> lk(hq->m);
-        hq->msgs.clear();
         hq->capacity = arg(c, 2);
+        hq->msgs.reset(hq->capacity);
+        hq->receiverWoken = false;
     }
-    hq->cv.notify_all();
+    hq->notEmpty.notify_all();
+    hq->notFull.notify_all();
     st32(q, 0x6D536751);  // "mSgQ"
 }
 HLE(coreinit, OSSendMessage) {
@@ -960,32 +1273,92 @@ HLE(coreinit, OSSendMessage) {
     uint32_t m = arg(c, 1), flags = arg(c, 2);
     std::array<uint32_t, 4> msg{ld32(m), ld32(m + 4), ld32(m + 8), ld32(m + 12)};
     if (g_trace_msg) LOG("[msg] send q=%08X msg=%08X %08X flags=%X lr=%08X", arg(c, 0), msg[0], msg[1], flags, c->lr);
+    const bool stats = t_is_main_thread;
+    if (stats) add_stat(g_send_stats.sends, 1);
+    bool wake;
     {
-        std::unique_lock<std::mutex> lk(q->m);
-        if (q->msgs.size() >= q->capacity) {
-            if (!(flags & 1)) { ret(c, 0); return; }
-            park_wait(lk, q->cv, [&] { return q->msgs.size() < q->capacity; }, W_MSG_SEND, arg(c, 0));
+        const uint64_t lockStart = stats ? mono_ns() : 0;
+        const bool contended = lock_spinning(q->m);
+        std::unique_lock<std::mutex> lk(q->m, std::adopt_lock);
+        if (stats && contended) {
+            add_stat(g_send_stats.contended, 1);
+            add_stat(g_send_stats.contendedNs, mono_ns() - lockStart);
+        }
+        if (q->msgs.full()) {
+            if (!(flags & 1)) {
+                if (stats) add_stat(g_send_stats.dropped, 1);
+                if (g_trace_msg)
+                    LOG("[msg] full q=%08X: not sent (thread \"%s\" prio %d, caller %08X)", arg(c, 0),
+                        t_self ? mem::read_cstr(ld32(t_self->guest + osthread::kName)).c_str() : "?",
+                        t_self ? t_self->prio : -1, ld32(c->r[1] + 0x1C));
+                ret(c, 0);
+                return;
+            }
+            const uint64_t fullStart = stats ? mono_ns() : 0;
+            q->senders++;
+            park_wait(lk, q->notFull, [&] { return !q->msgs.full(); }, W_MSG_SEND, arg(c, 0));
+            q->senders--;
+            if (stats) {
+                add_stat(g_send_stats.full, 1);
+                add_stat(g_send_stats.fullNs, mono_ns() - fullStart);
+            }
         }
         if (flags & 2) q->msgs.push_front(msg); else q->msgs.push_back(msg);  // OS_MESSAGE_FLAG_HIGH_PRIORITY
+        // the game's main thread sends ~800 messages a frame, mostly to the sound thread
+        wake = q->receivers != 0 && !q->receiverWoken;
+        // (the scheduler tick that delivers them runs only with the emulated-core scheduler)
+        if (wake && g_defer_wakes && g_sched_on && q->msgs.size() < std::max<uint32_t>(1, q->capacity / 2)) {
+            wake = false;
+            if (stats) add_stat(g_send_stats.deferred, 1);
+            if (!q->wakeDeferred) {
+                q->wakeDeferred = true;
+                lock_spinning(g_deferred_mutex);
+                std::lock_guard<std::mutex> dl(g_deferred_mutex, std::adopt_lock);
+                g_deferred_wakes.push_back(q);
+                g_deferred_any.store(true, std::memory_order_release);
+            }
+        }
+        if (wake) q->receiverWoken = true;
     }
-    q->cv.notify_all();
+    if (wake) {
+        const uint64_t wakeStart = stats ? mono_ns() : 0;
+        q->notEmpty.notify_one();
+        if (stats) {
+            add_stat(g_send_stats.wakes, 1);
+            add_stat(g_send_stats.wakeNs, mono_ns() - wakeStart);
+        }
+    }
     ret(c, 1);
 }
 HLE(coreinit, OSReceiveMessage) {
     HQueue* q = g_queues.get(arg(c, 0));
     uint32_t m = arg(c, 1), flags = arg(c, 2);
     std::array<uint32_t, 4> msg;
-    if (g_trace_msg) LOG("[msg] recv q=%08X flags=%X lr=%08X thread=%08X", arg(c, 0), flags, c->lr, threads::current_thread());
+    if (g_trace_msg)
+        LOG("[msg] recv q=%08X flags=%X lr=%08X thread=%08X \"%s\" prio %d", arg(c, 0), flags, c->lr,
+            threads::current_thread(), t_self ? mem::read_cstr(ld32(t_self->guest + osthread::kName)).c_str() : "?",
+            t_self ? t_self->prio : -1);
+    bool wake, passOn;
     {
-        std::unique_lock<std::mutex> lk(q->m);
+        lock_spinning(q->m);
+        std::unique_lock<std::mutex> lk(q->m, std::adopt_lock);
         if (q->msgs.empty()) {
             if (!(flags & 1)) { ret(c, 0); return; }
-            park_wait(lk, q->cv, [&] { return !q->msgs.empty(); }, W_MSG_RECV, arg(c, 0));
+            q->receivers++;
+            // each check (under the mutex, also after every wake) takes the pending wake: a receiver that
+            // finds the queue empty again and sleeps leaves no wake marked, so the next send wakes it
+            park_wait(lk, q->notEmpty, [&] { q->receiverWoken = false; return !q->msgs.empty(); }, W_MSG_RECV, arg(c, 0));
+            q->receivers--;
         }
         msg = q->msgs.front();
         q->msgs.pop_front();
+        wake = q->senders != 0;
+        // more messages and another receiver asleep: pass the wake on
+        passOn = !q->msgs.empty() && q->receivers != 0 && !q->receiverWoken;
+        if (passOn) q->receiverWoken = true;
     }
-    q->cv.notify_all();
+    if (wake) q->notFull.notify_one();
+    if (passOn) q->notEmpty.notify_one();
     for (int i = 0; i < 4; i++) st32(m + 4 * i, msg[i]);
     ret(c, 1);
 }
@@ -1196,7 +1569,10 @@ bool quiesce(int timeout_ms, std::string& busy, int entry_mode, int entry_after_
     for (;;) {
         if (entry_mode && std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(entry_after_ms)) {
             g_entry_parks = entry_mode;
-            for (int k = 0; k < 3; k++) g_core_preempt[k] = 1;  // running threads look at their next function entry
+            for (int k = 0; k < 3; k++) {  // running threads look at their next function entry
+                std::lock_guard<std::mutex> lk(g_sched[k].m);
+                if (g_sched[k].owner) g_sched[k].owner->cpu.preempt = 1;
+            }
         }
         busy.clear();
         {
@@ -1340,7 +1716,7 @@ bool threads_ss_save(ss::Writer& w, std::string& why) {
         w.u32(a);
         w.u32(q->capacity);
         w.u32((uint32_t)q->msgs.size());
-        for (auto& m : q->msgs) w.pod(m);
+        for (uint32_t k = 0; k < q->msgs.size(); k++) w.pod(q->msgs.at(k));
     }
     auto sq = sorted<HSleep>(g_sleepq);
     w.u32((uint32_t)sq.size());
@@ -1521,7 +1897,11 @@ void threads_ss_load(ss::Reader& r) {
         HQueue* q = g_queues.get(a);
         std::lock_guard<std::mutex> l(q->m);
         q->capacity = cap;
-        for (uint32_t k = 0; k < nm && r.ok; k++) q->msgs.push_back(r.pod<std::array<uint32_t, 4>>());
+        q->msgs.reset(cap);
+        for (uint32_t k = 0; k < nm && r.ok; k++) {
+            auto m = r.pod<std::array<uint32_t, 4>>();
+            if (!q->msgs.full()) q->msgs.push_back(m);
+        }
     }
     cnt = r.u32();
     for (auto& [a, q] : sorted<HSleep>(g_sleepq)) {
@@ -1588,7 +1968,11 @@ void threads_ss_load(ss::Reader& r) {
         for (auto& [a, o] : table.map)
             if (o) {
                 { std::lock_guard<std::mutex> l(o->m); }
-                o->cv.notify_all();
+                if constexpr (requires { o->cv; }) o->cv.notify_all();
+                else {  // HQueue
+                    o->notEmpty.notify_all();
+                    o->notFull.notify_all();
+                }
             }
     };
     wake(g_mutexes);

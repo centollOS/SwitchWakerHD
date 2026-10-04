@@ -88,6 +88,7 @@ void run_main_loop();
 
 Api active();
 inline bool vulkan() { return g_backend && g_backend->api == Api::Vulkan; }
+inline bool opengl() { return g_backend && g_backend->api == Api::OpenGL; }
 Api requested();                  // what was asked for at start-up (differs from active() after a fallback)
 std::string fallback_reason();    // why the requested renderer did not start ("" if it did)
 Api preferred();                  // saved setting: the renderer the next start uses

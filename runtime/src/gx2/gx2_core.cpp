@@ -18,8 +18,8 @@
 #include "gx2_cmd.h"
 #include "gx2_regs.h"
 #include "gx2_texture_regs.h"
-#ifdef WWHD_HAS_VULKAN
 #include "shader_key_dirty.h"
+#ifdef WWHD_HAS_VULKAN
 #include "gfx/vulkan/api.h"
 #endif
 #include "runtime.h"
@@ -42,6 +42,14 @@ uint32* regs() { return g_regs; }
 // renderer reuses its last shader lookup while it is unchanged. Uniforms, uniform/vertex buffer
 // addresses and rewrites of an identical value don't count.
 extern "C" { uint64_t g_shader_state_gen = 1; }
+// Like g_shader_state_gen, but not bumped when only shader program registers change (start address,
+// size, resources, exports: none of them is in the renderer's state hash), so the OpenGL renderer can
+// keep its hash of the other registers when a draw just switches programs.
+extern "C" { uint64_t g_shader_regs_gen = 1; }
+static bool program_reg(uint32 reg) {
+    return (reg >= mmSQ_PGM_START_PS && reg <= mmSQ_PGM_RESOURCES_VS) || (reg >= mmSQ_PGM_START_FS && reg <= mmSQ_PGM_RESOURCES_FS) ||
+           (reg >= mmSQ_PGM_CF_OFFSET_PS && reg <= mmSQ_PGM_CF_OFFSET_FS);
+}
 
 static bool shader_irrelevant(uint32 reg) {
 #ifdef WWHD_HAS_VULKAN
@@ -69,6 +77,38 @@ static bool shader_irrelevant(uint32 reg) {
     }
     return false;
 }
+// How a register change counts for the shader-state counters, looked up per register (the game sets
+// millions of registers per second): 0 = not at all, else counted; kRegMasked: only changes of the
+// bits in mask[reg]; kRegProgram: a program register (not counted by g_shader_regs_gen).
+// OpenGL: like WWHD_VK_SHADER_KEY_DIRTY, register fields that its shader key ignores (texture
+// addresses, viewport, blend, scissor, the alpha-test reference...) don't count, so consecutive draws
+// that only change those reuse the shader lookup. WWHD_GL_SHADER_KEY_DIRTY=0 counts every change.
+enum : uint8 { kRegCounted = 1, kRegMasked = 2, kRegProgram = 4 };
+struct RegClasses {
+    std::vector<uint8> kind = std::vector<uint8>(kNumRegs);
+    std::vector<uint32> mask = std::vector<uint32>(kNumRegs);
+};
+static const RegClasses& reg_classes() {
+    static const RegClasses classes = [] {
+        const char* e = getenv("WWHD_GL_SHADER_KEY_DIRTY");
+        const bool glKeyMask = render::opengl() && (!e || strcmp(e, "0") != 0);
+        RegClasses c;
+        for (uint32 reg = 0; reg < kNumRegs; reg++) {
+            uint32 mask = ~0u;
+            uint8 kind = shader_irrelevant(reg) ? 0 : kRegCounted;
+            if (kind && glKeyMask) {
+                if (reg == REGADDR::SX_ALPHA_REF) kind = 0;  // a uniform (uf_alphaTestRef)
+                else if (vulkan_shader_key_mask(reg, mask)) kind = mask ? kRegCounted | kRegMasked : 0;
+            }
+            if (kind && program_reg(reg)) kind |= kRegProgram;
+            c.kind[reg] = kind;
+            c.mask[reg] = mask;
+        }
+        return c;
+    }();
+    return classes;
+}
+
 static ShaderKeyDirtyStats shaderKeyDirtyStats;
 ShaderKeyDirtyStats shader_key_dirty_stats() { return shaderKeyDirtyStats; }
 
@@ -98,7 +138,7 @@ static void apply_small_regs(uint32 first, const uint32* v, uint32 n) {
         // primitive type directly, and context setup initializes only shadow.
         if (g_shadow) g_shadow[reg] = value;
     }
-    if (actualBump) ++g_shader_state_gen;
+    if (actualBump) { ++g_shader_state_gen; ++g_shader_regs_gen; }
     if (changed && collectStats) {
         ++shaderKeyDirtyStats.changedBatches;
         shaderKeyDirtyStats.baselineWouldBumps += baselineBump;
@@ -143,7 +183,7 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
                 } else actualBump = true;
                 if(actualBump && !collectStats) break;
             }
-            if(actualBump) ++g_shader_state_gen;
+            if(actualBump) { ++g_shader_state_gen; ++g_shader_regs_gen; }
             if(collectStats) {
                 ++shaderKeyDirtyStats.changedBatches;
                 shaderKeyDirtyStats.baselineWouldBumps += baselineBump;
@@ -153,8 +193,23 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
             }
         } else
 #endif
-        for (uint32 i = 0; i < n; i++)
-            if (g_regs[first + i] != v[i] && !shader_irrelevant(first + i)) { g_shader_state_gen++; break; }
+        // uniform register uploads (often hundreds of words) never count: no per-register check
+        if (first < (uint32)mmSQ_ALU_CONSTANT0_0 || first + n > (uint32)mmSQ_ALU_CONSTANT0_0 + 0x1000) {
+            const RegClasses& classes = reg_classes();
+            bool bumped = false;
+            for (uint32 i = 0; i < n; i++) {
+                const uint32 reg = first + i, old = g_regs[reg];
+                if (old == v[i]) continue;
+                const uint8 c = classes.kind[reg];
+                if (!c || ((c & kRegMasked) && !((old ^ v[i]) & classes.mask[reg]))) continue;
+                if (!bumped) g_shader_state_gen++;
+                bumped = true;
+                if (!(c & kRegProgram)) {
+                    g_shader_regs_gen++;
+                    break;
+                }
+            }
+        }
         memcpy(&g_regs[first], v, n * 4);
     }
     if (g_shadow) memcpy(&g_shadow[first], v, n * 4);
@@ -180,9 +235,14 @@ static uint64_t g_fence_issued = 0, g_fence_done = 0;
 static std::atomic<uint64_t> g_render_wait_ns{0};
 uint64_t render_thread_wait_ns() { return g_render_wait_ns.load(std::memory_order_relaxed); }
 
+std::atomic<const char*> g_render_stage{nullptr};
+static std::atomic<uint32> g_render_op{0xFF};       // command being executed (0xFF: none)
+static std::atomic<bool> g_render_idle{true};       // waiting for commands
+static std::atomic<uint64_t> g_render_commands{0};  // commands executed so far
+
 static void render_thread_main() {
     host::set_thread_name("GX2 render");
-    host::set_thread_core(2);
+    host::place_thread(2);  // the render thread: host core 2, or 0 and 2 with WWHD_CORE_LAYOUT
 #ifdef __APPLE__
     if (!getenv("WWHD_NO_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
@@ -190,8 +250,10 @@ static void render_thread_main() {
         {
             std::unique_lock<std::mutex> lk(g_q_mutex);
             g_q_waiting = true;
+            g_render_idle.store(true, std::memory_order_relaxed);
             auto waitStart = std::chrono::steady_clock::now();
             g_q_cv.wait(lk, [] { return !g_q_pending.empty(); });
+            g_render_idle.store(false, std::memory_order_relaxed);
             g_render_wait_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                            std::chrono::steady_clock::now() - waitStart).count()),
                                        std::memory_order_relaxed);
@@ -216,8 +278,20 @@ static void enqueue(Op op, const uint32* payload, uint32 n) {
 }
 
 // block the game thread until the render thread has executed everything queued so far
+static std::atomic<uint64_t> g_sync_wait_ns{0}, g_syncs{0};
+uint64_t game_sync_wait_ns() { return g_sync_wait_ns.load(std::memory_order_relaxed); }
+uint64_t game_syncs() { return g_syncs.load(std::memory_order_relaxed); }
 static void render_sync() {
     if (!g_render_thread) return;
+    struct Timed {
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+        ~Timed() {
+            g_sync_wait_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now() - start).count()),
+                                     std::memory_order_relaxed);
+            g_syncs.fetch_add(1, std::memory_order_relaxed);
+        }
+    } timed;
     uint64_t id;
     {
         std::lock_guard<std::mutex> lk(g_q_mutex);
@@ -293,7 +367,10 @@ void execute(const uint32* words, uint32 count) {
             LOG("[gx2] corrupt display list command %08X", hdr);
             return;
         }
+        g_render_op.store(op, std::memory_order_relaxed);
+        g_render_commands.fetch_add(1, std::memory_order_relaxed);
         execute_one(op, &words[i + 1], n);
+        g_render_op.store(0xFF, std::memory_order_relaxed);
         i += 1 + n;
     }
 }
@@ -311,6 +388,7 @@ static void set_context(uint32 ctx) {
     g_shadow = it->second.data();
     memcpy(g_regs, g_shadow, sizeof(g_regs));
     g_shader_state_gen++;
+    g_shader_regs_gen++;
 }
 
 constexpr uint32 kColorBufferWords = 0x9C / 4, kDepthBufferWords = 0xAC / 4, kSurfaceWords = 0x74 / 4;
@@ -441,6 +519,52 @@ using namespace gx2;
 // flip executes on the first vsync that is at least `swap interval` vsyncs after the previous flip.
 // Games pace themselves by waiting for vsync until their flips have executed.
 static uint64_t g_swap_count = 0, g_flip_count = 0;
+
+// Hang watchdog: when no frame has been swapped for 3 s, log what the render thread and every guest
+// thread are doing (again every 15 s, at most 6 times), and write the log out at once.
+static std::atomic<uint64_t> g_watch_swaps{0};
+static void watchdog_thread() {
+    host::set_thread_name("watchdog");
+    uint64_t lastSwaps = 0, lastCommands = 0;
+    auto lastChange = std::chrono::steady_clock::now();
+    auto nextReport = lastChange;
+    int reports = 0;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        const auto now = std::chrono::steady_clock::now();
+        const uint64_t swaps = g_watch_swaps.load(std::memory_order_relaxed);
+        if (swaps != lastSwaps) {
+            lastSwaps = swaps;
+            lastChange = now;
+            nextReport = now + std::chrono::seconds(3);
+            continue;
+        }
+        if (now < nextReport || reports >= 6) continue;
+        reports++;
+        nextReport = now + std::chrono::seconds(15);
+        const uint64_t commands = g_render_commands.load(std::memory_order_relaxed);
+        const char* stage = g_render_stage.load(std::memory_order_relaxed);
+        const uint32 op = g_render_op.load(std::memory_order_relaxed);
+        size_t pending = 0;
+        uint64_t issued = 0, done = 0;
+        {
+            std::unique_lock<std::mutex> lk(g_q_mutex, std::defer_lock);
+            if (lk.try_lock()) {
+                pending = g_q_pending.size();
+                issued = g_fence_issued;
+                done = g_fence_done;
+            }
+        }
+        LOG("[watchdog] no frame for %.1f s (frame %llu). Render thread: %s%s, command %u, %llu commands since the last "
+            "report; queued words %zu, game syncs issued %llu done %llu",
+            std::chrono::duration<double>(now - lastChange).count(), (unsigned long long)swaps,
+            g_render_idle.load() ? "waiting for commands" : "executing", stage ? (std::string(" (") + stage + ")").c_str() : "",
+            op, (unsigned long long)(commands - lastCommands), pending, (unsigned long long)issued, (unsigned long long)done);
+        lastCommands = commands;
+        threads::dump_state();
+        log_flush();
+    }
+}
 namespace gx2 { uint64_t flips_presented() { return __atomic_load_n(&g_flip_count, __ATOMIC_RELAXED); } }  // live fps in the title
 static uint32 g_swap_interval = 1;  // as set by the game (frame interpolation halves it)
 namespace interp { uint32_t effective_swap_interval(uint32_t game); }
@@ -456,6 +580,27 @@ static uint64_t g_last_flip_time = 0;  // timebase
 static int64_t g_count_offset = 0;     // guest-visible swap/flip counts minus ours (set by a loaded save state)
 
 static uint64_t vsync_index() { return (std::chrono::steady_clock::now() - g_vsync_epoch) / kVsyncPeriod; }
+
+// WWHD_RELAXED_VSYNC (on by default on the Switch, =0 for the hardware's timing): as on the Wii U, a
+// frame flips at the first vblank after its swap and at least swap-interval vblanks after the
+// previous flip, and the game waits for that flip (vblank by vblank) before it starts the next
+// frame. So a frame that takes a little longer than two vblanks costs three: 30 fps drops straight
+// to 20, and the game (whose logic runs per frame) plays at two thirds of its speed. Relaxed: a
+// frame that missed its vblank flips as soon as it is rendered, and GX2WaitForVsync returns then,
+// so a 35 ms frame gives ~28 fps. Frames are still at least a swap interval apart.
+static bool relaxed_vsync() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_RELAXED_VSYNC");
+#ifdef __SWITCH__
+        return !(e && *e == '0');
+#else
+        return e && *e == '1';
+#endif
+    }();
+    return on;
+}
+static uint64_t g_late_flips = 0;  // flips the relaxed timing let through before their vblank (for the log)
+static std::chrono::steady_clock::time_point g_last_flip_tp = g_vsync_epoch;
 #ifdef WWHD_HAS_VULKAN
 // Vulkan diagnostics (docs/vulkan.md); never with the Metal renderer
 static bool uncapped_benchmark() {
@@ -470,15 +615,28 @@ static bool uncapped_benchmark() {
 static void update_flips() {  // g_flip_mutex held
     uint64_t now = vsync_index();
     while (!g_pending_flips.empty()) {
-        uint64_t at = std::max(g_pending_flips.front().vsync + 1, g_last_flip_vsync + interp::effective_swap_interval(g_swap_interval));
+        const uint64_t interval = interp::effective_swap_interval(g_swap_interval);
+        uint64_t at = std::max(g_pending_flips.front().vsync + 1, g_last_flip_vsync + interval);
+        // relaxed: a rendered frame flips once a whole swap interval has passed since the previous
+        // flip, on a vblank or not (a frame on time is rendered before then and flips at that moment,
+        // as on its vblank; a late one flips as soon as it is rendered)
+        bool late = false;
+        if (relaxed_vsync()) {
+            const auto since = std::chrono::steady_clock::now() - g_last_flip_tp;
+            if (since + std::chrono::microseconds(500) < kVsyncPeriod * interval) break;
+            late = at > now;
+            at = now;
+        }
 #ifdef WWHD_HAS_VULKAN
         if ((!uncapped_benchmark() && at > now) || render::frames_completed() < g_pending_flips.front().swap) break;
 #else
         if (at > now || render::frames_completed() < g_pending_flips.front().swap) break;
 #endif
+        g_late_flips += late;
         at = now;
         g_pending_flips.pop_front();
         g_last_flip_vsync = at;
+        g_last_flip_tp = std::chrono::steady_clock::now();
         g_last_flip_time = timebase::now();
         g_flip_count++;
     }
@@ -628,6 +786,12 @@ HLE(gx2, GX2SwapScanBuffers) {
     float a = aspect::on_swap();  // aspect ratio of the next frame (game projections, render targets)
     uint32 ab;
     memcpy(&ab, &a, 4);
+    // debug: WWHD_DEBUG_FRAME_MS=n adds n ms of work to every frame on the game thread (frame pacing tests
+    // on a fast machine, e.g. WWHD_RELAXED_VSYNC with frames just over two vblanks)
+    if (static const int d = getenv("WWHD_DEBUG_FRAME_MS") ? atoi(getenv("WWHD_DEBUG_FRAME_MS")) : 0; d) {
+        auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(d);
+        while (std::chrono::steady_clock::now() < until) {}
+    }
     emit_host(OP_SWAP, {ab});
     {
         std::lock_guard<std::mutex> lk(g_flip_mutex);
@@ -635,13 +799,25 @@ HLE(gx2, GX2SwapScanBuffers) {
         g_swap_count++;
         g_pending_flips.push_back({vsync_index(), g_swap_count});
     }
+    g_watch_swaps.store(g_swap_count, std::memory_order_relaxed);
+    static std::once_flag watchdog;
+    std::call_once(watchdog, [] {
+        if (!getenv("WWHD_NO_WATCHDOG")) host::start_thread(watchdog_thread, 256 << 10);
+    });
     if (g_swap_count % 300 == 1) {
         static auto last = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
         double s = std::chrono::duration<double>(now - last).count();
         last = now;
-        LOG("[gx2] frame %llu, %.1f swaps/s, swap interval %u", (unsigned long long)g_swap_count, 300 / s, g_swap_interval);
-        if (getenv("WWHD_SCHED_STATS")) threads::report_sched();
+        static uint64_t lastLate = 0;
+        LOG("[gx2] frame %llu, %.1f swaps/s, swap interval %u, late frames flipped at once %llu (WWHD_RELAXED_VSYNC %s)",
+            (unsigned long long)g_swap_count, 300 / s, g_swap_interval, (unsigned long long)(g_late_flips - lastLate),
+            relaxed_vsync() ? "on" : "off");
+        lastLate = g_late_flips;
+        // WWHD_SCHED_STATS=1: report here, every 300 frames; =2: the scheduler thread reports every 5 s
+        // (not both: two reporters split each other's measuring spans)
+        static const char* sched = getenv("WWHD_SCHED_STATS");
+        if (sched && atoi(sched) != 2) threads::report_sched();
     }
 }
 HLE(gx2, GX2GetSwapStatus) {
@@ -707,6 +883,39 @@ HLE(gx2, GX2WaitForVsync) {
 #endif
     }();
     const auto deadline = g_vsync_epoch + kVsyncPeriod * (vsync_index() + 1);
+    if (relaxed_vsync()) {
+        // a late frame's flip happens when the renderer finishes it: return then instead of at the
+        // next vblank (the game's wait loop checks the flip count after each call)
+        // a flip since the previous call returned: the game's flip wait is over (a late frame often
+        // flips before the game asks); without one, a real vblank wait as before
+        static uint64_t flipsSeen = 0;
+        bool pending;
+        uint64_t flips;
+        {
+            std::lock_guard<std::mutex> lk(g_flip_mutex);
+            update_flips();
+            pending = !g_pending_flips.empty();
+            flips = g_flip_count;
+            if (flips != flipsSeen) {
+                flipsSeen = flips;
+                return;
+            }
+        }
+        if (pending) {
+            for (;;) {
+                const std::chrono::steady_clock::time_point limit = deadline,
+                                                            soon = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);
+                const auto step = std::min(limit, soon);
+                threads::park_sleep_until(step, false);
+                std::lock_guard<std::mutex> lk(g_flip_mutex);
+                update_flips();
+                if (g_flip_count != flips || g_pending_flips.empty() || std::chrono::steady_clock::now() >= deadline) {
+                    flipsSeen = g_flip_count;
+                    return;
+                }
+            }
+        }
+    }
 #ifdef WWHD_HAS_VULKAN
     static const bool readyFlipPark = [] {
         const char* value = getenv("WWHD_VK_READY_FLIP_PARK");
@@ -729,7 +938,8 @@ HLE(gx2, GX2WaitForVsync) {
 // the renderer presents whatever was copied to the TV target.
 // (buffer, size, mode, surfaceFormat, bufferingMode): an sRGB format means scan-out applies the encoding
 HLE(gx2, GX2SetTVBuffer) {
-    LOG("[gx2] TV buffer format %X", arg(c, 3));
+    // mode: GX2TVRenderMode (1/2 = 480p, 3 = 720p, 5 = 1080p)
+    LOG("[gx2] TV buffer format %X, mode %u", arg(c, 3), arg(c, 2));
     render::set_tv_format(arg(c, 3), true);
 }
 HLE(gx2, GX2SetDRCBuffer) { render::set_tv_format(arg(c, 3), false); }
@@ -825,6 +1035,7 @@ void gx2_ss_load(ss::Reader& r) {
     auto it = g_contexts.find(active);
     g_shadow = active && it != g_contexts.end() ? it->second.data() : nullptr;
     g_shader_state_gen++;
+    g_shader_regs_gen++;
     g_swap_interval = std::max<uint32>(r.u32(), 1);
     uint64_t guest_swaps = r.u64();
     {

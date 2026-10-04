@@ -6,6 +6,8 @@ Ctx callbacks: `branch(target)` returns C for a jump, `call(target)` for a call.
 
 Semantics follow Cemu's interpreter (src/Cafe/HW/Espresso/Interpreter).
 """
+import sys
+
 
 
 def sext16(v):
@@ -76,7 +78,7 @@ def translate(addr, w, ctx):
     if op == 18:  # b / ba / bl / bla
         tgt = (sext(w & 0x03FFFFFC, 26) + (0 if w & 2 else addr)) & 0xFFFFFFFF
         if w & 1:
-            return "c->lr = 0x%08Xu; %s" % (addr + 4, ctx.call(addr, tgt))
+            return ctx.link(addr, tgt) + ctx.call(addr, tgt)
         return ctx.branch(addr, tgt)
 
     if op == 16:  # bc
@@ -85,7 +87,7 @@ def translate(addr, w, ctx):
         pre = "" if bo & 0x04 else "c->ctr--; "
         cond = cond_expr(bo, bi)
         if w & 1:
-            body = "c->lr = 0x%08Xu; %s" % (addr + 4, ctx.call(addr, tgt))
+            body = ctx.link(addr, tgt) + ctx.call(addr, tgt)
         else:
             body = ctx.branch(addr, tgt)
         return pre + ("if (%s) { %s }" % (cond, body) if cond else body)
@@ -100,7 +102,7 @@ def translate(addr, w, ctx):
             cond = cond_expr(bo, bi)
             src = "c->lr" if xo == 16 else "c->ctr"
             if w & 1:
-                body = "{ uint32_t t = %s; c->lr = 0x%08Xu; c->pc = t; ppc_dispatch(c); }" % (src, addr + 4)
+                body = "{ uint32_t t = %s; c->lr = 0x%08Xu; c->pc = t; PPC_ICALL(c, t); }" % (src, addr + 4)
             elif xo == 16:
                 body = ctx.ret()
             else:
@@ -502,6 +504,7 @@ def translate63(w, d, a, b, cc):
     if xo == 136:
         return "%s = -fabs(%s);%s" % (F0(d), fb, fp_rc(w))
     if xo == 583:  # mffs
+        _fpcc_reader("mffs", w)
         return "%s = u64_as_f64(0xFFF8000000000000ull | c->fpscr);" % F0(d)
     if xo == 711:  # mtfsf
         fm = (w >> 17) & 0xFF
@@ -520,11 +523,22 @@ def translate63(w, d, a, b, cc):
     if xo == 70:  # mtfsb0
         return "c->fpscr &= ~0x%08Xu;" % (0x80000000 >> d)
     if xo == 64:  # mcrfs
+        _fpcc_reader("mcrfs", w)
         fd, fs = d >> 2, a >> 2
         sh = 28 - 4 * fs
         return "{ uint32_t v = (c->fpscr >> %d) & 0xF; c->cr[%d] = v >> 3; c->cr[%d] = (v >> 2) & 1; c->cr[%d] = (v >> 1) & 1; c->cr[%d] = v & 1; }" % (
             sh, 4 * fd, 4 * fd + 1, 4 * fd + 2, 4 * fd + 3)
     raise Unhandled("op63 xo=%d" % xo)
+
+
+_fpcc_warned = set()
+
+
+def _fpcc_reader(name, w):
+    """fcmpu/fcmpo do not keep FPSCR's FPCC field (ppc.h cr_set_f): a game that reads it needs that back"""
+    if w not in _fpcc_warned:
+        _fpcc_warned.add(w)
+        sys.stderr.write("warning: %s (%08X) reads FPSCR, whose FPCC field the FP compares do not update (ppc.h cr_set_f)\n" % (name, w))
 
 
 def translate4(w, d, a, b, cc):

@@ -60,6 +60,8 @@ static inline void vm_dispatch(Cpu* c) { vm_call(c, c->pc, VM_CALL_INDIRECT); }
 #define ppc_stwcx vm_stwcx
 #define ppc_dcbz vm_dcbz
 #define ppc_dispatch vm_dispatch
+#undef PPC_ICALL
+#define PPC_ICALL(c, t) vm_dispatch(c)
 #define ppc_unimplemented vm_trap
 #define ppc_trap(c, a) vm_trap(c, a, 0)
 #define VM_COV(f, b) vm_cov(f, b)

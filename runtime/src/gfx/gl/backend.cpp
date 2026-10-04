@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -20,6 +21,7 @@
 #include <thread>
 #include <vector>
 
+#include "audio_out.h"
 #include "gfx/renderer.h"
 #include "gx2/gx2.h"
 #include "input.h"
@@ -30,11 +32,29 @@
 
 namespace gx2 { uint64_t flips_presented(); }
 
+#ifdef __SWITCH__
+// Mesa's GL thread (glthread) is built into switch-mesa, but its EGL never starts it (desktop Mesa does
+// that through DRI config). These are Mesa's own functions in the static libraries.
+extern "C" {
+void* _glapi_get_context(void);
+void _mesa_glthread_init(void* ctx);
+void _mesa_glthread_finish(void* ctx);
+}
+#endif
+
 namespace gfxgl {
 Renderer R;
 
 namespace {
 constexpr size_t kStreamSize = 32u << 20;
+void finish_gl_thread();
+#ifdef __SWITCH__
+}  // namespace
+std::string mesa_probe_report(double secs);  // mesa_probe.cpp
+namespace {
+#endif
+uint64_t g_hitches = 0;      // frames over 55 ms (check_hitch)
+Renderer::Perf g_hitchBase;  // R.perf after the previous present
 
 // ARB_buffer_storage (core in 4.4; glad is generated for 4.3)
 typedef void(APIENTRYP PFNGLBUFFERSTORAGEPROC_WWHD)(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags);
@@ -170,10 +190,21 @@ void frame_dumps(uint64_t frame) {
     static const std::vector<uint64_t> targets = frame_list("WWHD_DUMP_TARGETS", nullptr);
     if (std::find(frames.begin(), frames.end(), frame) != frames.end()) {
         std::string n = std::to_string(frame);
-        if (R.tvScan) dump_surface(R.tvScan.get(), "frame_" + n + ".png");
+        if (R.tvScan) dump_surface(R.tvScan.get(), "frame_" + n + ".png", R.tvSrgb);
         dump_framebuffer(R.windowFbo, R.windowW, R.windowH, "frame_" + n + "_window.png");
     }
     if (std::find(targets.begin(), targets.end(), frame) != targets.end()) {
+        // every surface this frame's draws rendered to (depth included), biggest pixel count first
+        std::vector<Surface*> drawn;
+        for (Surface* s : R.surfaceList)
+            if (s->drawFrame == R.frame) drawn.push_back(s);
+        std::sort(drawn.begin(), drawn.end(), [](Surface* a, Surface* b) {
+            return uint64_t(a->width) * a->height * a->slices > uint64_t(b->width) * b->height * b->slices;
+        });
+        for (Surface* s : drawn)
+            LOG("[gl] frame %llu target %08X: %ux%u%s, GX2 format %03X%s, %u draws", (unsigned long long)frame, s->addr,
+                s->width, s->height, s->slices > 1 ? (" x" + std::to_string(s->slices)).c_str() : "", s->format,
+                s->isDepth ? " (depth)" : "", s->frameDraws);
         int count = 0;
         for (auto& [addr, s] : R.surfaces) {
             if (!s->gpuWritten || s->fmt.depth || s->fmt.compressed) continue;
@@ -187,58 +218,100 @@ void frame_dumps(uint64_t frame) {
     }
 }
 
-// How far the GPU runs behind the render thread: at each swap the GPU clock is read (the time the
-// commands are submitted) and a timestamp query records when the GPU reaches that point. A lag near
-// zero means the GPU waits for the CPU (CPU-bound); a lag of a frame or more means it is GPU-bound.
-struct GpuLag {
-    static constexpr int kQueries = 8;
-    GLuint query[kQueries] = {};
-    GLint64 submitted[kQueries] = {};
-    bool pending[kQueries] = {};
-    bool supported = true;
-    double totalMs = 0;
-    uint64_t samples = 0;
-    void frame() {
-        if (!supported) return;
-        if (!query[0]) glGenQueries(kQueries, query);
-        for (int i = 0; i < kQueries; i++) {
-            if (!pending[i]) continue;
-            GLint available = 0;
-            glGetQueryObjectiv(query[i], GL_QUERY_RESULT_AVAILABLE, &available);
-            if (!available) continue;
-            GLuint64 reached = 0;
-            glGetQueryObjectui64v(query[i], GL_QUERY_RESULT, &reached);
-            pending[i] = false;
-            if (reached >= GLuint64(submitted[i])) {
-                totalMs += double(reached - GLuint64(submitted[i])) / 1e6;
-                samples++;
-            }
+// Whether the GPU keeps up: a fence after each frame's commands, checked (without waiting) when the
+// next frame is presented. If it has not signalled, the GPU is still on the previous frame: GPU-bound.
+// (switch-mesa has no GPU clock, so timestamp queries cannot measure this.)
+// One fence per frame, created at present right after the GL thread has caught up (so creating and
+// polling them adds no wait). They tell how far the GPU got (R.gpuDoneFrame: stream buffers last
+// written in that frame or earlier can be reused without a GL call) and whether it keeps up.
+struct GpuBusy {
+    std::deque<std::pair<uint64_t, GLsync>> fences;  // frame, fence after its commands
+    uint64_t frames = 0, behind = 0;
+    void poll() {
+        while (!fences.empty()) {
+            GLint status = GL_SIGNALED;
+            glGetSynciv(fences.front().second, GL_SYNC_STATUS, sizeof status, nullptr, &status);
+            if (status != GL_SIGNALED) break;
+            R.gpuDoneFrame = fences.front().first;
+            glDeleteSync(fences.front().second);
+            fences.pop_front();
         }
-        for (int i = 0; i < kQueries; i++)
-            if (!pending[i]) {
-                GLint64 now = 0;
-                glGetInteger64v(GL_TIMESTAMP, &now);
-                if (!now) {  // no GPU clock: report nothing
-                    supported = false;
-                    return;
-                }
-                submitted[i] = now;
-                glQueryCounter(query[i], GL_TIMESTAMP);
-                pending[i] = true;
-                return;
-            }
     }
-    // mean lag since the last call, or -1 without samples
+    void frame() {
+        poll();
+        if (!fences.empty()) {
+            frames++;
+            if (fences.back().first + 1 >= R.frame) behind++;  // the previous frame is not done
+        }
+        fences.push_back({R.frame, glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)});
+        while (fences.size() > 6) {  // never seen: the GPU is six frames behind
+            Stage stage("waiting for the GPU: six frames behind");
+            glClientWaitSync(fences.front().second, GL_SYNC_FLUSH_COMMANDS_BIT, 1'000'000'000ull);
+            poll();
+        }
+    }
+    // wait until the GPU has finished `frame` (stream buffer reuse); rare
+    void wait_for(uint64_t frame) {
+        while (R.gpuDoneFrame < frame && !fences.empty() && fences.front().first <= frame) {
+            Stage stage("waiting for the GPU: stream buffer of an earlier frame");
+            glClientWaitSync(fences.front().second, GL_SYNC_FLUSH_COMMANDS_BIT, 1'000'000'000ull);
+            poll();
+        }
+    }
+    // percentage of frames since the last call at which the GPU was still busy, or -1
     double take() {
-        double mean = samples ? totalMs / double(samples) : -1;
-        totalMs = 0;
-        samples = 0;
-        return mean;
+        double pct = frames ? 100.0 * double(behind) / double(frames) : -1;
+        frames = behind = 0;
+        return pct;
     }
-} gpuLag;
+} gpuBusy;
+
+// CPU load per core (Switch). Horizon reports a core's idle time only to a thread running on that core,
+// so a small thread visits cores 0-2 in turn every 5 s. The render thread's own CPU time comes from
+// svcGetInfo on itself (the wall-clock "busy" figure also counts time it was preempted).
+struct CpuLoad {
+    std::atomic<int> pct[3] = {-1, -1, -1};
+#ifdef __SWITCH__
+    static uint64_t thread_ticks() {
+        u64 t = 0;
+        if (R_FAILED(svcGetInfo(&t, InfoType_ThreadTickCount, CUR_THREAD_HANDLE, UINT64_MAX)))
+            svcGetInfo(&t, InfoType_ThreadTickCountDeprecated, CUR_THREAD_HANDLE, UINT64_MAX);
+        return t;
+    }
+    void start();
+#else
+    static uint64_t thread_ticks() { return 0; }
+    void start() {}
+#endif
+} cpuLoad;
+#ifdef __SWITCH__
+void CpuLoad::start() {
+    host::start_thread([] {
+        auto& self = cpuLoad;
+        u64 lastIdle[3] = {}, lastTick[3] = {};
+        for (;;) {
+            for (int core = 0; core < 3; core++) {
+                svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core);
+                svcSleepThread(1'000'000);  // lets the scheduler move this thread
+                if (int(svcGetCurrentProcessorNumber()) != core) continue;
+                u64 idle = 0;
+                if (R_FAILED(svcGetInfo(&idle, InfoType_IdleTickCount, INVALID_HANDLE, UINT64_MAX))) continue;
+                u64 tick = armGetSystemTick();
+                if (lastTick[core] && tick > lastTick[core]) {
+                    double busy = 1.0 - double(idle - lastIdle[core]) / double(tick - lastTick[core]);
+                    self.pct[core] = int(std::clamp(busy, 0.0, 1.0) * 100 + 0.5);
+                }
+                lastIdle[core] = idle;
+                lastTick[core] = tick;
+            }
+            svcSleepThread(5'000'000'000ll);
+        }
+    }, 64 << 10);
+}
+#endif
 
 struct OverlayStats {
-    double fps = 0, renderBusy = -1, gpuLagMs = -1, draws = 0;
+    double fps = 0, renderBusy = -1, gpuBusyPct = -1, draws = 0;
 } overlayStats;
 
 // every 5 s: frames, draws, GL errors and where the render thread spent its time (ms per second).
@@ -250,41 +323,128 @@ void frame_stats() {
     if (now - last < std::chrono::seconds(5)) return;
     double secs = std::chrono::duration<double>(now - last).count();
     last = now;
+    // glGetError waits for Mesa's GL thread to run everything queued: only with WWHD_GL_DEBUG
     uint32_t errors = 0;
     GLenum firstError = GL_NO_ERROR;
-    for (GLenum e; errors < 64 && (e = glGetError()) != GL_NO_ERROR; errors++)
-        if (!firstError) firstError = e;
+    static const bool checkErrors = getenv("WWHD_GL_DEBUG") != nullptr;
+    if (checkErrors)
+        for (GLenum e; errors < 64 && (e = glGetError()) != GL_NO_ERROR; errors++)
+            if (!firstError) firstError = e;
     auto& p = R.perf;
     auto ms = [&](uint64_t ns) { return double(ns) / 1e6 / secs; };
     std::string memory;
 #ifdef __SWITCH__
-    // the process's heap is reserved up front: what malloc has handed out is the real use
-    struct mallinfo heap = mallinfo();
-    memory = ", heap " + std::to_string(size_t(heap.uordblks) >> 20) + "/" + std::to_string(size_t(heap.arena) >> 20) + " MiB";
+    // the process's heap is reserved up front: what malloc has handed out is the real use. mallinfo
+    // walks the whole heap holding malloc's lock, which stalls every thread that allocates (the
+    // audio ones too) for a visible moment: only with WWHD_GL_DEBUG, every 60 s
+    static std::string heapText;
+    static auto heapAt = now - std::chrono::seconds(60);
+    if (checkErrors && now - heapAt >= std::chrono::seconds(60)) {
+        heapAt = now;
+        struct mallinfo heap = mallinfo();
+        heapText = ", heap " + std::to_string(size_t(heap.uordblks) >> 20) + "/" + std::to_string(size_t(heap.arena) >> 20) + " MiB";
+    }
+    memory = heapText;
 #endif
+    static uint64_t lastSyncWait = 0, lastSyncs = 0, lastHitches = 0;
+    const uint64_t syncWait = gx2::game_sync_wait_ns(), syncs = gx2::game_syncs();
+    const double gameWaitMs = ms(syncWait - lastSyncWait);
+    const uint64_t syncCount = syncs - lastSyncs;
+    lastSyncWait = syncWait;
+    lastSyncs = syncs;
     static uint64_t lastWait = 0;
     uint64_t wait = gx2::render_thread_wait_ns();
     double busy = 1000.0 - ms(wait - lastWait);
     lastWait = wait;
-    double lag = gpuLag.take();
+    double gpuPct = gpuBusy.take();
+    static uint64_t lastTicks = 0;
+    uint64_t ticks = CpuLoad::thread_ticks();
+#ifdef __SWITCH__
+    double cpuMs = lastTicks ? double(ticks - lastTicks) * 1000.0 / double(armGetSystemTickFreq()) / secs : -1;
+#else
+    double cpuMs = -1;
+#endif
+    lastTicks = ticks;
+    char cpu[160];
+#ifdef __SWITCH__
+    // Mesa's GL thread: its own CPU time (it turns every GL call into GPU commands)
+    double glMs = -1;
+    {
+        extern Handle g_glThreadHandle;
+        static uint64_t lastGl = 0;
+        u64 t = 0;
+        if (g_glThreadHandle != INVALID_HANDLE &&
+            R_SUCCEEDED(svcGetInfo(&t, InfoType_ThreadTickCount, g_glThreadHandle, UINT64_MAX))) {
+            if (lastGl) glMs = double(t - lastGl) * 1000.0 / double(armGetSystemTickFreq()) / secs;
+            lastGl = t;
+        }
+    }
+    char glCpu[48] = "";
+    if (glMs >= 0) snprintf(glCpu, sizeof glCpu, ", Mesa GL thread %.0f ms/s", glMs);
+#else
+    const char* glCpu = "";
+#endif
+    snprintf(cpu, sizeof cpu, "; CPU: render thread %.0f ms/s%s, cores %d/%d/%d%%", cpuMs, glCpu, cpuLoad.pct[0].load(),
+             cpuLoad.pct[1].load(), cpuLoad.pct[2].load());
+    // the game's file reads (music streams from the SD card every few seconds) and the sound the
+    // audio device lacked (an audible gap)
+    static uint64_t lastFsCalls = 0, lastFsNs = 0, lastUnderrun = 0;
+    uint64_t fsCalls, fsNs, underrun, dropped;
+    fs_stats(fsCalls, fsNs);
+    audio::stats(underrun, dropped);
+    char io[128];
+    snprintf(io, sizeof io, "; files %llu (%.0f ms), audio gaps %.0f ms", (unsigned long long)(fsCalls - lastFsCalls),
+             double(fsNs - lastFsNs) / 1e6, double(underrun - lastUnderrun) * 1000.0 / audio::kRate);
+    lastFsCalls = fsCalls;
+    lastFsNs = fsNs;
+    lastUnderrun = underrun;
+    memory += io;
     uint64_t draws = R.drawCount - lastDraws;
     double perFrame = R.frame > lastFrame ? double(draws) / double(R.frame - lastFrame) : 0.0;
-    LOG("[gl] %.1f fps, %.0f draws/frame, %llu skipped, GL errors %u (first 0x%X); render thread busy %.0f ms/s, "
-        "GPU lag %.1f ms; draws %.0f ms/s (lookup %.0f, indices %.0f, resources %.0f, state %.0f, submit %.0f; "
-        "%.0f%% shader memo hits; shaders %.0f: %llu new states, %llu compiled, %llu linked; texture uploads %.0f, %llu), "
-        "present %.0f; streamed %.1f MB/s (reused %.1f; per frame: uniforms %.1f MB, indices %.1f MB, vertices %.1f MB); "
-        "%zu surfaces%s",
-        double(R.frame - lastFrame) / secs, perFrame, (unsigned long long)R.skippedDraws, errors, firstError, busy, lag,
-        ms(p.drawNs), ms(p.lookupNs), ms(p.indexNs), ms(p.resourceNs), ms(p.stateNs), ms(p.submitNs),
-        draws ? 100.0 * double(p.memoHits) / double(draws) : 0.0, ms(p.shaderNs), (unsigned long long)p.shaders,
+    const uint64_t opsNs = p.clearNs + p.surfaceCopyNs + p.invalidateNs + p.scanNs;
+    auto perFrameOf = [&](uint64_t n) { return R.frame > lastFrame ? double(n) / double(R.frame - lastFrame) : 0.0; };
+    LOG("[gl] %.1f fps, %.0f draws/frame, %llu skipped, GL errors %u (first 0x%X); render thread busy %.0f ms/s "
+        "(GX2 commands %.0f, flushes %.0f: %.0f per frame), game waited for it %.0f ms/s (%.1f times per frame), %llu hitches, GPU busy at %.0f%% of swaps; draws %.0f ms/s (lookup %.0f, indices %.0f, resources %.0f, "
+        "state %.0f, submit %.0f; stream copies %.0f, fence waits %.0f; %.0f%% shader memo hits (+%.0f%% recent combinations), %.0f%% texture cache hits, "
+        "%llu feedback copies; shaders %.0f: %llu new states (%llu of programs seen before), %llu compiled, %llu linked; texture uploads %.0f, %llu), "
+        "clears %.0f (%.0f/frame), surface copies %.0f (%.0f/frame, %.0f on the CPU), invalidates %.0f (%.0f/frame), scan "
+        "copies %.0f, present %.0f (waiting for the GL thread %.0f); streamed %.1f MB/s (reused %.1f; per frame: uniforms %.1f MB, "
+        "indices %.1f MB, vertices %.1f MB); %zu surfaces%s%s",
+        double(R.frame - lastFrame) / secs, perFrame, (unsigned long long)R.skippedDraws, errors, firstError, busy,
+        busy - ms(p.drawNs) - ms(opsNs) - ms(p.presentNs) - ms(p.flushNs), ms(p.flushNs),
+        R.frame > lastFrame ? double(p.flushes) / double(R.frame - lastFrame) : 0.0, gameWaitMs,
+        R.frame > lastFrame ? double(syncCount) / double(R.frame - lastFrame) : 0.0,
+        (unsigned long long)(g_hitches - lastHitches), gpuPct,
+        ms(p.drawNs), ms(p.lookupNs), ms(p.indexNs), ms(p.resourceNs), ms(p.stateNs), ms(p.submitNs), ms(p.copyNs),
+        ms(p.fenceWaitNs), draws ? 100.0 * double(p.memoHits) / double(draws) : 0.0,
+        draws ? 100.0 * double(p.comboHits) / double(draws) : 0.0,
+        p.textureLookups ? 100.0 * double(p.textureCacheHits) / double(p.textureLookups) : 0.0,
+        (unsigned long long)p.feedbackCopies, ms(p.shaderNs), (unsigned long long)p.shaders,
+        (unsigned long long)p.knownProgramShaders,
         (unsigned long long)p.compiled, (unsigned long long)p.linked, ms(p.uploadNs), (unsigned long long)p.uploads,
-        ms(p.presentNs), double(p.streamBytes) / 1e6 / secs, double(p.reusedBytes) / 1e6 / secs,
+        ms(p.clearNs), perFrameOf(p.clears), ms(p.surfaceCopyNs), perFrameOf(p.surfaceCopies), perFrameOf(p.cpuSurfaceCopies),
+        ms(p.invalidateNs), perFrameOf(p.invalidates), ms(p.scanNs), ms(p.presentNs), ms(p.glThreadWaitNs),
+        double(p.streamBytes) / 1e6 / secs, double(p.reusedBytes) / 1e6 / secs,
         R.frame > lastFrame ? double(p.uboBytes) / 1e6 / double(R.frame - lastFrame) : 0.0,
         R.frame > lastFrame ? double(p.indexBytes) / 1e6 / double(R.frame - lastFrame) : 0.0,
         R.frame > lastFrame ? double(p.vertexBytes) / 1e6 / double(R.frame - lastFrame) : 0.0, R.surfaces.size(),
-        memory.c_str());
+        memory.c_str(), cpuMs >= 0 ? cpu : "");
+    if (draws) {
+        auto pct = [&](uint64_t n) { return 100.0 * double(n) / double(draws); };
+        LOG("[gl] GL state changed per draw: program %.0f%%, vertex buffers %.0f%%, attribute formats %.0f%%, "
+            "textures %.0f%%, samplers %.0f%%, game uniform blocks %.0f%%, shader-constant blocks %.0f%% (of draws); "
+            "driver draw calls %.0f%% of draws (%llu batched draws in %llu multi-draws, WWHD_GL_BATCH; vertex buffers "
+            "rebased for %.0f%% of draws)",
+            pct(p.chgProgram), pct(p.chgVertexBuffers), pct(p.chgAttribFormats), pct(p.chgTextures), pct(p.chgSamplers),
+            pct(p.chgUbos), pct(p.chgUniformBlocks),
+            pct(draws - p.batchedDraws + p.batches), (unsigned long long)p.batchedDraws, (unsigned long long)p.batches,
+            pct(p.rebasedDraws));
+    }
+#ifdef __SWITCH__
+    LOG("[gl] %s", mesa_probe_report(secs).c_str() + 2);  // its own line: the log cuts lines at 2 KB
+#endif
     overlayStats.renderBusy = busy;
-    overlayStats.gpuLagMs = lag;
+    overlayStats.gpuBusyPct = gpuPct;
     overlayStats.draws = perFrame;
     p = {};
     static const bool means = getenv("WWHD_GL_STATS") != nullptr;
@@ -295,6 +455,7 @@ void frame_stats() {
         LOG("[gl] TV mean %.3f %.3f %.3f, window mean %.3f %.3f %.3f", mean[0], mean[1], mean[2], window[0], window[1],
             window[2]);
     }
+    lastHitches = g_hitches;
     lastFrame = R.frame;
     lastDraws = R.drawCount;
 }
@@ -318,9 +479,25 @@ GLuint present_program() {
         static const char* fsText =
             "#version 330 core\n"
             "uniform sampler2D scan;\n"
+            "uniform int encodeSrgb;\n"
+            "uniform vec4 grade;\n"  // exposure, contrast, saturation, gamma (picture_grade())
             "in vec2 uv;\n"
             "out vec4 color;\n"
-            "void main() { color = vec4(texture(scan, uv).rgb, 1.0); }\n";
+            "void main() {\n"
+            "    vec3 c = texture(scan, uv).rgb;\n"
+            "    if (encodeSrgb != 0) {\n"
+            "        c = clamp(c * grade.x, 0.0, 1.0);\n"
+            "        c = mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));\n"
+            "    } else\n"
+            "        c = clamp(c * grade.x, 0.0, 1.0);\n"
+            "    if (grade.y != 1.0) c = clamp(mix(c, c * c * (3.0 - 2.0 * c), grade.y - 1.0), 0.0, 1.0);\n"
+            "    if (grade.z != 1.0) {\n"
+            "        float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));\n"
+            "        c = clamp(mix(vec3(luma), c, grade.z), 0.0, 1.0);\n"
+            "    }\n"
+            "    if (grade.w != 1.0) c = pow(c, vec3(grade.w));\n"
+            "    color = vec4(c, 1.0);\n"
+            "}\n";
         auto compile = [](GLenum type, const char* text) {
             GLuint s = glCreateShader(type);
             glShaderSource(s, 1, &text, nullptr);
@@ -475,7 +652,7 @@ void draw_overlay(int ww, int wh) {
     if (mode >= 2) {
         auto& s = overlayStats;
         if (s.renderBusy >= 0) snprintf(lines[rows++], sizeof lines[0], "RT %.0f%% DR %.0f", s.renderBusy / 10, s.draws);
-        if (s.gpuLagMs >= 0) snprintf(lines[rows++], sizeof lines[0], "GPU LAG %.1fMS", s.gpuLagMs);
+        if (s.gpuBusyPct >= 0) snprintf(lines[rows++], sizeof lines[0], "GPU BUSY %.0f%%", s.gpuBusyPct);
     }
     int columns = 0;
     for (int r = 0; r < rows; r++) columns = std::max(columns, int(strlen(lines[r])));
@@ -498,16 +675,46 @@ void draw_overlay(int ww, int wh) {
     glBlendFuncSeparatei(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
     glBlendEquationSeparatei(0, GL_FUNC_ADD, GL_FUNC_ADD);
     glUseProgram(prog);
-    glUniform1iv(glGetUniformLocation(prog, "glyph"), columns * rows, glyphs);
-    glUniform2i(glGetUniformLocation(prog, "grid"), columns, rows);
-    glUniform3f(glGetUniformLocation(prog, "box"), float(margin), float(wh - margin), float(scale));
+    // looked up once: a query would wait for Mesa's GL thread every frame
+    static const GLint glyphLoc = glGetUniformLocation(prog, "glyph"), gridLoc = glGetUniformLocation(prog, "grid"),
+                       boxLoc = glGetUniformLocation(prog, "box");
+    glUniform1iv(glyphLoc, columns * rows, glyphs);
+    glUniform2i(gridLoc, columns, rows);
+    glUniform3f(boxLoc, float(margin), float(wh - margin), float(scale));
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glDisablei(GL_BLEND, 0);
     (void)ww;
 }
 
+// Picture adjustments from env.txt, applied when presenting (neutral = 1):
+//   WWHD_EXPOSURE   scales the linear picture before sRGB encoding (< 1 tames bright areas)
+//   WWHD_CONTRAST   S-curve around mid-grey; black and white stay put, so nothing clips (> 1 = more)
+//   WWHD_SATURATION colour intensity (0 = grey, > 1 = more vivid)
+//   WWHD_GAMMA      > 1 deepens mid-tones and shadows, < 1 lifts them
+struct Grade {
+    float exposure = 1, contrast = 1, saturation = 1, gamma = 1;
+};
+const Grade& picture_grade() {
+    static const Grade g = [] {
+        Grade g;
+        auto read = [](const char* name, float& v, float lo, float hi) {
+            const char* e = getenv(name);
+            if (!e || !*e) return;
+            v = std::clamp(strtof(e, nullptr), lo, hi);
+            LOG("[gl] %s=%.2f", name, v);
+        };
+        read("WWHD_EXPOSURE", g.exposure, 0.25f, 4.0f);
+        read("WWHD_CONTRAST", g.contrast, 0.0f, 2.0f);
+        read("WWHD_SATURATION", g.saturation, 0.0f, 3.0f);
+        read("WWHD_GAMMA", g.gamma, 0.5f, 2.0f);
+        return g;
+    }();
+    return g;
+}
+
 // TV scan buffer -> window: fit 16:9, flip rows (guest images keep row 0 at the top)
 void present() {
+    flush_draws();
     forget_gl_state();
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, R.windowFbo);
 #ifdef __SWITCH__
@@ -545,6 +752,20 @@ void present() {
             glViewportIndexedf(0, float(x), float(y), float(w), float(h));
             glDepthRangef(0, 1);
             glUseProgram(prog);
+            static const GLint encodeLoc = glGetUniformLocation(prog, "encodeSrgb");
+            static const bool graded = [&] {
+                const Grade& g = picture_grade();
+                glUniform4f(glGetUniformLocation(prog, "grade"), g.exposure, g.contrast, g.saturation, g.gamma);
+                return true;
+            }();
+            (void)graded;
+            static int encoded = -1;
+            const int encode = R.tvSrgb.load(std::memory_order_relaxed) ? 1 : 0;
+            if (encode != encoded) {
+                glUniform1i(encodeLoc, encode);
+                encoded = encode;
+                LOG("[gl] presenting with %s", encode ? "sRGB encoding (sRGB TV format)" : "no encoding");
+            }
             glActiveTexture(GL_TEXTURE0 + R.scratchUnit);
             glBindTexture(GL_TEXTURE_2D, scan->tex);
             glBindSampler(R.scratchUnit, present_sampler());
@@ -564,6 +785,14 @@ void present() {
     frame_stats();
 #ifdef __SWITCH__
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    {
+        Stage stage("present: waiting for the GL thread");
+        finish_gl_thread();  // switch-mesa's eglSwapBuffers flushes the driver from this thread
+    }
+#endif
+    gpuBusy.frame();  // its fence queries wait for the GL thread too: right after the wait above
+#ifdef __SWITCH__
+    Stage stage("present: eglSwapBuffers");
     eglSwapBuffers(R.display, R.surface);
 #endif
     glBindFramebuffer(GL_FRAMEBUFFER, R.drawFbo);
@@ -597,10 +826,68 @@ void shader_cache_progress(size_t done, size_t total) {
 #endif
 }
 
+// ---- WWHD_GL_THREAD=1 (Switch): Mesa's GL thread. Our GL calls are recorded and a second thread runs
+// Mesa and the nouveau driver, so the render thread's own work overlaps the driver's.
+// Starting it needs st_manager::set_background_context, which switch-mesa's EGL leaves empty (the
+// worker thread calls it first). Its address is taken from this build's st_set_background_context:
+//   ldr x0, [ctx, #0x22E88]  (gl_context::st)   ldr x2, [x0]  (st_context_private: the st_manager)
+//   ldr x2, [x2, #24]        (set_background_context)
+#ifdef __SWITCH__
+void* g_glThreadCtx = nullptr;  // the context whose GL thread is running
+constexpr size_t kGlContextSt = 0x22E88, kManagerSetBackgroundContext = 24, kGlContextGlThreadEnabled = 0x50 + 176;
+
+Handle g_glThreadHandle = INVALID_HANDLE;  // Mesa's GL thread, for its CPU time in the stats
+
+void gl_thread_started(void*, void*) {  // on Mesa's worker thread, before it runs any GL command
+    // above the game's threads (0x3B), just below audio and the render thread (0x2C): a long driver
+    // batch must not delay audio
+    g_glThreadHandle = threadGetCurHandle();
+    svcSetThreadPriority(threadGetCurHandle(), 0x2E);
+    host::place_thread(0);  // preferring core 0 (the render thread prefers 2); never the main thread's core 1 with WWHD_CORE_LAYOUT
+    LOG("[gl] GL thread running (priority 0x2E)");
+}
+
+void start_gl_thread() {
+    const char* e = getenv("WWHD_GL_THREAD");
+    if (!e || !*e || !strcmp(e, "0")) return;
+    auto* ctx = static_cast<uint8_t*>(_glapi_get_context());
+    auto* st = ctx ? *reinterpret_cast<uint8_t**>(ctx + kGlContextSt) : nullptr;
+    auto* manager = st ? *reinterpret_cast<uint8_t**>(st) : nullptr;
+    auto** slot = manager ? reinterpret_cast<void**>(manager + kManagerSetBackgroundContext) : nullptr;
+    // the manager's first field is the pipe_screen: a pointer, as a sanity check of the offsets
+    if (!slot || !*reinterpret_cast<void**>(manager)) {
+        LOG("[gl] GL thread: Mesa's context layout is not the expected one; not started");
+        return;
+    }
+    if (!*slot) *slot = reinterpret_cast<void*>(&gl_thread_started);
+    _mesa_glthread_init(ctx);
+    if (!ctx[kGlContextGlThreadEnabled]) {
+        LOG("[gl] GL thread: could not be started (Mesa's queue or dispatch table was not created)");
+        return;
+    }
+    g_glThreadCtx = ctx;
+    LOG("[gl] GL thread started (WWHD_GL_THREAD)");
+}
+#endif
+
+// waits until the GL thread has run every recorded command (before calls that use the driver directly)
+void finish_gl_thread() {
+#ifdef __SWITCH__
+    if (g_glThreadCtx) {
+        ScopedTime wait{R.perf.glThreadWaitNs};
+        _mesa_glthread_finish(g_glThreadCtx);
+    }
+#endif
+}
+
 void init() {
     init_egl();
     init_objects();
     load_shader_cache(shader_cache_progress);
+    cpuLoad.start();
+#ifdef __SWITCH__
+    start_gl_thread();  // last: the render thread takes the context next
+#endif
     // the GX2 render thread takes the context (make_current)
     eglMakeCurrent(R.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     input::init();
@@ -624,7 +911,10 @@ void run_main_loop() {
 }
 
 void copy_to_scan(uint32_t cb, uint32_t target) {
+    flush_draws();
     make_current();
+    ScopedTime timer{R.perf.scanNs};
+    R.perf.scans++;
     if (target != 1) return;  // the GamePad picture has no screen on the Switch yet
     Surface* src = surface_from_color_buffer(cb);
     if (!src || src->fmt.depth) return;
@@ -643,12 +933,57 @@ void copy_to_scan(uint32_t cb, uint32_t target) {
     blit(src, 0, 0, src->width, src->height, scan.get(), 0, 0, scan->width, scan->height);
 }
 
+// Frames that took much longer than the game's 33 ms are logged with what the render thread did in
+// them ([hitch]), to find periodic stalls. R.perf is reset only inside present() (frame_stats), so
+// the difference to the copy taken after the previous present covers exactly this frame.
+void check_hitch(uint64_t now) {
+    static uint64_t lastSwap = 0, lastDraws = 0, lastGameWait = 0, lastRenderWait = 0, lastFsCalls = 0, lastFsNs = 0,
+                    lastUnderrun = 0;
+    const Renderer::Perf& base = g_hitchBase;
+    static int logged = 0;
+    const uint64_t gameWait = gx2::game_sync_wait_ns(), renderWait = gx2::render_thread_wait_ns();
+    uint64_t fsCalls, fsNs, underrun, dropped;
+    fs_stats(fsCalls, fsNs);
+    audio::stats(underrun, dropped);
+    if (lastSwap && now - lastSwap > 55'000'000ull) {
+        g_hitches++;
+        if (logged < 300) {
+            logged++;
+            const auto& p = R.perf;
+            const double frameMs = double(now - lastSwap) / 1e6;
+            LOG("[hitch] frame %llu took %.0f ms: render thread busy %.0f ms, %llu draws (%.0f ms), game waited %.0f ms; "
+                "stream wraps %llu, fence waits %.1f ms, shaders compiled %llu linked %llu (%.0f ms), texture uploads %llu "
+                "(%.0f ms), clears/copies/invalidates %.1f ms, flushes %.1f ms, new shader states %llu; files %llu "
+                "(%.0f ms), audio gap %.0f ms",
+                (unsigned long long)R.frame, frameMs, frameMs - double(renderWait - lastRenderWait) / 1e6,
+                (unsigned long long)(R.drawCount - lastDraws), double(p.drawNs - base.drawNs) / 1e6,
+                double(gameWait - lastGameWait) / 1e6, (unsigned long long)(p.streamWraps - base.streamWraps),
+                double(p.fenceWaitNs - base.fenceWaitNs) / 1e6, (unsigned long long)(p.compiled - base.compiled),
+                (unsigned long long)(p.linked - base.linked), double(p.shaderNs - base.shaderNs) / 1e6,
+                (unsigned long long)(p.uploads - base.uploads), double(p.uploadNs - base.uploadNs) / 1e6,
+                double((p.clearNs + p.surfaceCopyNs + p.invalidateNs + p.scanNs) -
+                       (base.clearNs + base.surfaceCopyNs + base.invalidateNs + base.scanNs)) / 1e6,
+                double(p.flushNs - base.flushNs) / 1e6, (unsigned long long)(p.shaders - base.shaders),
+                (unsigned long long)(fsCalls - lastFsCalls), double(fsNs - lastFsNs) / 1e6,
+                double(underrun - lastUnderrun) * 1000.0 / audio::kRate);
+        }
+    }
+    lastFsCalls = fsCalls;
+    lastFsNs = fsNs;
+    lastUnderrun = underrun;
+    lastSwap = now;
+    lastDraws = R.drawCount;
+    lastGameWait = gameWait;
+    lastRenderWait = renderWait;
+}
+
 void swap() {
     make_current();
     uint64_t start = now_ns();
-    gpuLag.frame();
+    check_hitch(start);
     present();
     R.perf.presentNs += now_ns() - start;
+    g_hitchBase = R.perf;
     R.streamGen++;
     R.completed = std::atomic_ref<uint64_t>(R.frame).fetch_add(1) + 1;
 }
@@ -662,21 +997,44 @@ void make_current() {
     current = true;
 }
 
-StreamSlice stream_upload(const void* data, size_t size, size_t alignment) {
-    GLintptr offset = (R.streamOffset + GLintptr(alignment) - 1) & ~GLintptr(alignment - 1);
+namespace {
+struct UploadEntry {
+    uint64_t key = 0, stamp = ~0ull, gen = 0;
+    size_t size = 0;
+    StreamSlice slice;
+};
+FrameTable<UploadEntry> uploadTable;
+}  // namespace
+
+StreamSlice stream_upload(const void* data, size_t size, size_t alignment, size_t zeroTail) {
+    // alignment: a power of two, or (vertex rebasing in draw.cpp) a vertex stride
+    GLintptr offset = (alignment & (alignment - 1)) == 0
+                          ? (R.streamOffset + GLintptr(alignment) - 1) & ~GLintptr(alignment - 1)
+                          : (R.streamOffset + GLintptr(alignment) - 1) / GLintptr(alignment) * GLintptr(alignment);
     if (size > kStreamSize) size = kStreamSize;
+    if (zeroTail > kStreamSize - size) zeroTail = kStreamSize - size;
+    const size_t total = size + zeroTail;
     const bool persistent = R.streamPtr[0] != nullptr;
-    if (offset + GLintptr(size) > GLintptr(kStreamSize)) {
+    if (offset + GLintptr(total) > GLintptr(kStreamSize)) {
         // next buffer: slices already bound for this draw stay in the previous one
         R.streamGen++;
         if (persistent) {
-            // the GPU may still read the next buffer: wait for the fence set when it was left
-            R.streamFence[R.streamIndex] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            // the GPU may still read the next buffer. Each buffer remembers the last frame that wrote
+            // to it; the per-frame fences (GpuBusy) say which frames the GPU finished, so normally
+            // nothing waits. (A fence created here would make the render thread wait for Mesa's GL
+            // thread to run everything queued: a stall several times a second.)
             R.streamIndex = (R.streamIndex + 1) % R.streams.size();
-            if (GLsync fence = R.streamFence[R.streamIndex]) {
-                glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 10'000'000'000ull);
-                glDeleteSync(fence);
-                R.streamFence[R.streamIndex] = nullptr;
+            const uint64_t lastUse = R.streamLastFrame[R.streamIndex];
+            R.perf.streamWraps++;
+            if (lastUse != ~0ull && lastUse > R.gpuDoneFrame) {
+                ScopedTime wait{R.perf.fenceWaitNs};
+                if (lastUse >= R.frame) {  // used earlier in this very frame: no frame fence yet
+                    Stage stage("waiting for the GPU: stream buffer of this frame");
+                    GLsync f = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                    glClientWaitSync(f, GL_SYNC_FLUSH_COMMANDS_BIT, 10'000'000'000ull);
+                    glDeleteSync(f);
+                } else
+                    gpuBusy.wait_for(lastUse);
             }
         } else {
             // orphaning gives the next buffer fresh storage while the GPU finishes reading the old one
@@ -687,45 +1045,40 @@ StreamSlice stream_upload(const void* data, size_t size, size_t alignment) {
         offset = 0;
     }
     GLuint buffer = R.streams[R.streamIndex];
-    if (persistent)
+    R.streamLastFrame[R.streamIndex] = R.frame;
+    if (persistent) {
+        SampledTime copy{R.perf.copyNs, R.timedDraw};
         memcpy(R.streamPtr[R.streamIndex] + offset, data, size);
-    else {
+        if (zeroTail) memset(R.streamPtr[R.streamIndex] + offset + size, 0, zeroTail);
+    } else {
+        SampledTime copy{R.perf.copyNs, R.timedDraw};
         glBindBuffer(GL_COPY_WRITE_BUFFER, buffer);
-        void* p = glMapBufferRange(GL_COPY_WRITE_BUFFER, offset, size,
+        void* p = glMapBufferRange(GL_COPY_WRITE_BUFFER, offset, total,
                                    GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
         if (p) {
             memcpy(p, data, size);
+            if (zeroTail) memset(static_cast<uint8_t*>(p) + size, 0, zeroTail);
             glUnmapBuffer(GL_COPY_WRITE_BUFFER);
         }
     }
-    R.streamOffset = offset + GLintptr(size);
-    R.perf.streamBytes += size;
+    R.streamOffset = offset + GLintptr(total);
+    R.perf.streamBytes += total;
     return {buffer, offset};
 }
 
 // Guest vertex and uniform data may not change between GX2Invalidate calls (or GX2DrawDone) while
 // a frame's draws can still read it, so an address uploaded once this frame is reused.
-StreamSlice stream_guest(uint32_t addr, size_t size, size_t alignment) {
-    struct Entry {
-        uint64_t gen = 0;
-        size_t size = 0;
-        StreamSlice slice;
-    };
-    static std::unordered_map<uint64_t, Entry> uploaded;
-    static uint64_t clearedFrame = ~0ull;
+StreamSlice stream_guest(uint32_t addr, size_t size, size_t alignment, size_t zeroTail) {
     static const bool enabled = !getenv("WWHD_GL_NO_DEDUP");
-    const uint64_t key = uint64_t(addr) | uint64_t(alignment) << 32;
-    if (clearedFrame != R.frame) {
-        uploaded.clear();
-        clearedFrame = R.frame;
-    }
-    if (auto it = uploaded.find(key);
-        enabled && it != uploaded.end() && it->second.gen == R.streamGen && it->second.size >= size) {
+    const uint64_t key = uint64_t(addr) | uint64_t(alignment) << 32 | uint64_t(zeroTail) << 48;
+    // a frame's entries are told apart by stamp, so nothing is freed or allocated per frame
+    const auto* e = uploadTable.find(key, R.frame);
+    if (enabled && e->stamp == R.frame && e->gen == R.streamGen && e->size >= size) {
         R.perf.reusedBytes += size;
-        return it->second.slice;
+        return e->slice;
     }
-    StreamSlice slice = stream_upload(mem::ptr(addr), size, alignment);
-    uploaded[key] = {R.streamGen, size, slice};  // after the upload: moving to the next buffer advances the generation
+    StreamSlice slice = stream_upload(mem::ptr(addr), size, alignment, zeroTail);
+    uploadTable.put({key, R.frame, R.streamGen, size, slice});  // after the upload: a buffer switch advances the generation
     return slice;
 }
 }  // namespace gfxgl
@@ -773,10 +1126,14 @@ const Backend& opengl_backend() {
         };
         b.frames_completed = [] { return gfxgl::R.completed.load(); };
         b.with_autorelease_pool = [](void (*fn)()) { fn(); };
-        b.set_tv_format = [](uint32_t, bool) {};
+        b.set_tv_format = [](uint32_t format, bool tv) {
+            if (tv) gfxgl::R.tvSrgb = (format & 0x400) != 0;
+        };
         b.invalidate = gfxgl::invalidate;
         b.guest_flush = [] {
             gfxgl::make_current();
+            gfxgl::ScopedTime t{gfxgl::R.perf.flushNs};
+            gfxgl::R.perf.flushes++;
             glFlush();
         };
         // GX2DrawDone: the game only needs the commands executed (guest memory is read when they run);
@@ -784,6 +1141,8 @@ const Backend& opengl_backend() {
         b.wait_idle = [] {
             gfxgl::make_current();
             gfxgl::R.streamGen++;
+            gfxgl::ScopedTime t{gfxgl::R.perf.flushNs};
+            gfxgl::R.perf.flushes++;
             glFlush();
         };
         b.ss_reset = [] {

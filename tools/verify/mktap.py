@@ -43,6 +43,7 @@ def tap_body(text, addr, imports):
         ln = re.sub(r"(?<![\w>])f_([0-9A-F]{8})\(c\);", lambda m: "tap_call(c, f_%s, 0x%sU);" % (m.group(1), m.group(1)), ln)
         ln = ln.replace("MUSTTAIL return ppc_dispatch(c);", "{ tap_dispatch(c); return; }")
         ln = re.sub(r"(?<![\w>])ppc_dispatch\(c\);", "tap_dispatch(c);", ln)
+        ln = re.sub(r"\bPPC_ICALL\(c, t\);", "tap_dispatch(c);", ln)
         ln = re.sub(r"MUSTTAIL return (imp_\w+)\(c\);", lambda m: "{ tap_call(c, %s, 0x%08XU); return; }" % (m.group(1), imports.get(m.group(1), 0)), ln)
         ln = re.sub(r"(?<![\w>])(imp_\w+)\(c\);", lambda m: "tap_call(c, %s, 0x%08XU);" % (m.group(1), imports.get(m.group(1), 0)), ln)
         out.append(ln)

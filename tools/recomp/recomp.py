@@ -21,6 +21,38 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from analyze import Program, sext
 from ppc2c import translate, Unhandled
+import crlive
+import leaflocal
+
+# condition-register liveness (crlive.py): on unless WWHD_RECOMP_CRLIVE=0; WWHD_RECOMP_CR_CHECK=1
+# generates a checking build that poisons the dropped bits and aborts if one is ever read
+CRLIVE = os.environ.get("WWHD_RECOMP_CRLIVE", "1") != "0"
+CR_CHECK = os.environ.get("WWHD_RECOMP_CR_CHECK", "0") == "1"
+# leaf functions keep guest registers in locals (leaflocal.py): on unless WWHD_RECOMP_LEAF=0
+LEAF = os.environ.get("WWHD_RECOMP_LEAF", "1") != "0"
+# hot functions first (hot_functions.txt, from profiles) in their own files, in that order: on unless
+# WWHD_RECOMP_HOT=0
+HOT = os.environ.get("WWHD_RECOMP_HOT", "1") != "0"
+# small hot leaf functions get an always-inline copy that hot callers use (inline_leaves.h): off unless
+# WWHD_RECOMP_INLINE=1 (an experiment: it removes the call overhead but makes the hot code 15% larger)
+INLINE = os.environ.get("WWHD_RECOMP_INLINE", "0") == "1"  # experimental: +15% hot code size
+INLINE_MAX_INSNS = 24
+# functions with calls keep guest registers in locals too (leaflocal.transform_nonleaf): on unless
+# WWHD_RECOMP_NONLEAF=0
+NONLEAF = os.environ.get("WWHD_RECOMP_NONLEAF", "1") != "0"
+# return-address stores of direct calls to ordinary functions through PPC_SET_LR (nothing on the
+# Switch): on unless WWHD_RECOMP_LR=0
+LR_ELIDE = os.environ.get("WWHD_RECOMP_LR", "1") != "0"
+# checking build: abort if a callee changes a callee-saved register (ppc.h PPC_KEEP_R)
+NONLEAF_CHECK = os.environ.get("WWHD_RECOMP_NONLEAF_CHECK", "0") == "1"
+
+
+def load_hot_functions():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hot_functions.txt")
+    if not HOT or not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return [int(l.strip(), 16) for l in f if l.strip() and not l.startswith("#")]
 from rpx import R_PPC_ADDR16_HA, R_PPC_ADDR16_LO, R_PPC_ADDR16_HI
 
 
@@ -132,6 +164,16 @@ class Recompiler:
             return "MUSTTAIL return f_%08X(c);" % tgt
         return "c->pc = 0x%08Xu; MUSTTAIL return ppc_dispatch(c);" % tgt
 
+    def link(self, addr, tgt):
+        """The return-address store of a bl. A direct call to an ordinary game function uses
+        PPC_SET_LR (ppc.h: nothing on the Switch): returns are C returns, so the value only reaches
+        the guest stack through the callee's mflr. Calls into hooks, the runtime and other code
+        keep the store (they may read it)."""
+        if (tgt in self.entries and tgt not in self.hooks and tgt != addr + 4 and addr not in self.p.import_calls
+                and addr not in self.p.undef_calls and LR_ELIDE):
+            return "PPC_SET_LR(c, 0x%08Xu); " % (addr + 4)
+        return "c->lr = 0x%08Xu; " % (addr + 4)
+
     def call(self, addr, tgt):
         if addr in self.p.import_calls:
             lib, name, slot = self.p.import_calls[addr]
@@ -164,7 +206,55 @@ class Recompiler:
         return "imp_%s_%s" % (c_ident(lib.replace(".rpl", "")), c_ident(name))
 
     # --- emission ---
+    def find_saved_clobbers(self):
+        """Functions that leave a callee-saved register (r14-r31, f14-f31) changed when they return:
+        the compiler's register save/restore helpers (stores and loads through r11, the save helper
+        also puts the return address in r31, and the frame helpers that push or pop the caller's
+        stack frame for it). A function that does not both push and pop a stack frame and that sets
+        such a register, itself or in the code it falls or jumps into, counts as one: callers read
+        every register again after calling it (leaflocal.transform_nonleaf)."""
+        saved_set = re.compile(r"c->r\[(1[4-9]|2\d|3[01])\]\s*(=(?!=)|\|=)|c->f\[(1[4-9]|2\d|3[01])\]\.ps[01]\s*=(?!=)"
+                               r"|psq_load\(c, (1[4-9]|2\d|3[01]),")
+        tail = re.compile(r"MUSTTAIL return f_([0-9A-F]{8})\(c\)")
+        frame, sets, nexts = {}, {}, {}
+        for start in self.sorted_entries:
+            end = self.func_end(start)
+            self.cur_start, self.cur_end = start, end
+            self.labels = set()
+            push = pop = assigns = False
+            targets = set()
+            for a in range(start, end, 4):
+                w = self.p.word(a)
+                op, rd, ra = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+                if op == 37 and rd == 1 and ra == 1:  # stwu r1, d(r1): a frame is pushed
+                    push = True
+                if (op == 14 and rd == 1 and ra == 1 and not w & 0x8000) or (op == 32 and rd == 1 and ra == 1):
+                    pop = True  # addi r1, r1, +d / lwz r1, d(r1): and popped again
+                if op == 31 and rd == 1 and ra == 1 and ((w >> 1) & 0x3FF) == 183:  # stwux r1, r1, rB
+                    push = True
+                try:
+                    st = translate(a, w, self)
+                except Unhandled:
+                    continue
+                if saved_set.search(st):
+                    assigns = True
+                targets.update(int(t, 16) for t in tail.findall(st))
+            if end < self.p.text_hi:
+                targets.add(end)
+            # the frame helpers that push or pop the caller's frame have only one of the two
+            frame[start], sets[start], nexts[start] = push and pop, assigns, targets
+        clobbers = {f for f in self.sorted_entries if not frame[f] and sets[f]}
+        changed = True
+        while changed:
+            changed = False
+            for f in self.sorted_entries:
+                if f not in clobbers and not frame[f] and any(t in clobbers for t in nexts[f]):
+                    clobbers.add(f)
+                    changed = True
+        return clobbers
+
     def emit_function(self, start):
+        self.emitted_leaf = False
         self.cur_start, self.cur_end = start, self.func_end(start)
         self.labels = set()
         body = []
@@ -176,6 +266,12 @@ class Recompiler:
                 self.unhandled[str(e)] += 1
                 s = "ppc_unimplemented(c, 0x%08Xu, 0x%08Xu);" % (a, w)
             body.append((a, w, s))
+        if CRLIVE:
+            live_after, fields = crlive.analyze(body, self.cur_start, self.cur_end, self.p.jump_tables, branch_target,
+                                                self.sites)
+            body = [(a, w, crlive.rewrite(s, fields[i], live_after[i], CR_CHECK, a)) for i, (a, w, s) in enumerate(body)]
+            self.cr_stats[0] += sum(1 for f in fields if f is not None)
+            self.cr_stats[1] += sum(1 for i, f in enumerate(fields) if f is not None and (live_after[i] >> (4 * f)) & 0xF == 0)
         # restrict: guest memory never aliases the register file, so the compiler may keep
         # registers in host registers across guest loads/stores
         hooked = start in self.hooks
@@ -185,49 +281,129 @@ class Recompiler:
             # runtime hook: callers reach hook_X, which may call the original code (f_X_orig)
             out.append("void f_%08X(Cpu* __restrict c) { hook_%08X(c); }\n" % (start, start))
         out += ["void %s(Cpu* __restrict c) {" % fname, "    PPC_ENTER(0x%08Xu);" % start]
+        tail_wb = ""
+        stmts = [s for _, _, s in body]
+        sites_done = False
+        if LEAF and not hooked and not any(a in self.sites for a, _, _ in body) and leaflocal.eligible(stmts):
+            prologue, stmts, tail_wb = leaflocal.transform(stmts)
+            body = [(a, w, s) for (a, w, _), s in zip(body, stmts)]
+            out += ["    %s" % p for p in prologue]
+            self.leaf_count += 1
+            self.emitted_leaf = True
+        elif NONLEAF and not hooked:
+            # instruction hooks become part of their statement, so they get the call treatment
+            with_sites = [("site_%08X(c); " % a if a in self.sites else "") + s for a, _, s in body]
+            done = leaflocal.transform_nonleaf(with_sites, start, [a for a, _, _ in body], self.saved_clobbers)
+            if done:
+                prologue, stmts, tail_wb = done
+                body = [(a, w, s) for (a, w, _), s in zip(body, stmts)]
+                out += ["    %s" % p for p in prologue]
+                self.nonleaf_count += 1
+                sites_done = True
         for a, w, s in body:
             if a in self.labels:
                 out.append("L_%08X: ;" % a)
-            if a in self.sites:
+            if a in self.sites and not sites_done:
                 out.append("    site_%08X(c);" % a)
             out.append("    %s /* %08X: %08X */" % (s, a, w))
         # fall through into the next function
         if self.cur_end < self.p.text_hi:
             # code falling into a hooked function continues with its original code
             nxt = "f_%08X_orig" % self.cur_end if self.cur_end in self.hooks else "f_%08X" % self.cur_end
-            out.append("    MUSTTAIL return %s(c);" % nxt)
+            out.append("    %sMUSTTAIL return %s(c);" % (tail_wb + " " if tail_wb else "", nxt))
         else:
             out.append("    ppc_unimplemented(c, 0x%08Xu, 0); /* fell off end of text */" % self.cur_end)
         out.append("}")
+        # an inline copy is possible for a leaf that ends in an unconditional return and has no other
+        # tail jumps (the fall-through into the next function after it is unreachable)
+        self.inlinable = (self.emitted_leaf and not hooked and len(body) <= INLINE_MAX_INSNS and body
+                          and body[-1][1] == 0x4E800020 and not any("MUSTTAIL" in s for _, _, s in body)
+                          and not any(a in self.sites for a, _, _ in body))
         return "\n".join(out), len(body)
 
     def run(self, outdir, per_file):
         os.makedirs(outdir, exist_ok=True)
         self.unhandled = collections.Counter()
+        self.cr_stats = [0, 0]  # CR writers, writers with no live bit
+        self.leaf_count = 0
+        self.nonleaf_count = 0
         self.used_imports = set()
         self.imm_override = self.imm_override
-        files, cur, n = [], [], 0
+        self.saved_clobbers = self.find_saved_clobbers() if NONLEAF else set()
+        self.used_imports = set()  # the analysis pass translated everything once
+        entries = set(self.sorted_entries)
+        hot_rank = {}
+        for a in load_hot_functions():
+            if a in entries and a not in hot_rank:
+                hot_rank[a] = len(hot_rank)
+        hot_src = {}
+
+        def split(items):
+            groups, cur, n = [], [], 0
+            for src, count in items:
+                cur.append(src)
+                n += count
+                if n >= per_file:
+                    groups.append(cur)
+                    cur, n = [], 0
+            if cur:
+                groups.append(cur)
+            return groups
+
+        normal = []
+        inline_src = {}
         for start in self.sorted_entries:
             src, count = self.emit_function(start)
-            cur.append(src)
-            n += count
-            if n >= per_file:
-                files.append(cur)
-                cur, n = [], 0
-        if cur:
-            files.append(cur)
-        for i, funcs in enumerate(files):
-            with open(os.path.join(outdir, "code_%03d.c" % i), "w") as f:
-                f.write('#include "funcs.h"\n\n')
-                f.write("\n\n".join(funcs))
-                f.write("\n")
+            if INLINE and self.inlinable and start in hot_rank:
+                inline_src[start] = src
+            if start in hot_rank:
+                hot_src[start] = (src, count)
+            else:
+                normal.append((src, count))
+        # always-inline copies of the small hot leaves; every call of one (not tail jumps) uses the copy
+        inline_names = {"f_%08X" % a for a in inline_src}
+        with open(os.path.join(outdir, "inline_leaves.h"), "w") as f:
+            f.write("/* small hot leaf functions, inlined into their callers (recomp.py INLINE); the out-of-line\n"
+                    " * f_X stays for indirect calls and the dispatch table */\n#pragma once\n\n")
+            for a in sorted(inline_src):
+                text = inline_src[a].replace("void f_%08X(Cpu* __restrict c) {" % a,
+                                             "static inline __attribute__((always_inline)) void fi_%08X(Cpu* __restrict c) {" % a, 1)
+                lines = text.split("\n")
+                for i in range(len(lines) - 1, -1, -1):  # the unreachable fall-through
+                    if "MUSTTAIL return" in lines[i]:
+                        lines[i] = "    __builtin_unreachable();"
+                        break
+                f.write("\n".join(lines) + "\n\n")
+        call = re.compile(r"(?<!MUSTTAIL return )\b(f_[0-9A-F]{8})\(c\);")
+
+        def use_inline(src):
+            return call.sub(lambda m: ("fi_" + m.group(1)[2:] + "(c);") if m.group(1) in inline_names else m.group(0), src)
+
+        # only in the hot callers: cold code would grow for nothing (the instruction cache is small)
+        hot_src = {a: (use_inline(src), count) for a, (src, count) in hot_src.items()}
+        self.inline_count = len(inline_src)
+        files = split(normal)
+        hot_files = split([hot_src[a] for a in sorted(hot_src, key=hot_rank.get)])
+        for name in os.listdir(outdir):  # a smaller split must not leave old files behind
+            if re.match(r"code_(hot_)?\d{3}\.c$", name):
+                os.remove(os.path.join(outdir, name))
+        for prefix, groups in (("code_%03d.c", files), ("code_hot_%03d.c", hot_files)):
+            for i, funcs in enumerate(groups):
+                with open(os.path.join(outdir, prefix % i), "w") as f:
+                    f.write('#include "funcs.h"\n\n')
+                    f.write("\n\n".join(funcs))
+                    f.write("\n")
+        self.hot_count = len(hot_src)
+        files += hot_files
         self.write_headers(outdir)
         self.write_report(outdir, len(files))
 
     def write_headers(self, outdir):
         func_slots = sorted(s for s, (lib, name, kind) in self.imports.items() if kind == "f")
         with open(os.path.join(outdir, "funcs.h"), "w") as f:
-            f.write('#pragma once\n#include "ppc.h"\n\n')
+            f.write('#pragma once\n%s%s%s#include "ppc.h"\n\n' % ("#define PPC_CR_CHECK 1\n" if CR_CHECK else "",
+                                                                "#define PPC_NONLEAF_CHECK 1\n" if NONLEAF_CHECK else "",
+                                                                "#define PPC_ELIDE_LR 1\n" if NONLEAF_CHECK else ""))
             for e in self.sorted_entries:
                 f.write("void f_%08X(Cpu* __restrict c);\n" % e)
             f.write("\n/* hooked functions: hook_X is implemented in the runtime, f_X_orig is the game's code */\n")
@@ -239,8 +415,12 @@ class Recompiler:
             f.write("\n/* imported functions */\n")
             for s in func_slots:
                 f.write("void %s(Cpu* c);\n" % self.imp_name(s))
+            f.write('\n#include "inline_leaves.h"\n')
         with open(os.path.join(outdir, "table.c"), "w") as f:
             f.write('#include "funcs.h"\n#include "recomp_table.h"\n\n')
+            variant = ", ".join(n for n, on in (("cr liveness", CRLIVE), ("leaf locals", LEAF), ("nonleaf locals", NONLEAF),
+                                                 ("hot layout", HOT), ("inline leaves", INLINE), ("lr elision", LR_ELIDE)) if on)
+            f.write('const char g_recomp_variant[] = "%s";\n\n' % variant)
             f.write("const RecompEntry g_recomp_funcs[] = {\n")
             for e in self.sorted_entries:
                 f.write("    {0x%08Xu, f_%08X},\n" % (e, e))
@@ -264,7 +444,14 @@ class Recompiler:
     def write_report(self, outdir, nfiles):
         with open(os.path.join(outdir, "report.txt"), "w") as f:
             f.write("functions: %d\nfiles: %d\nfixpoint rounds: %d\n" % (len(self.sorted_entries), nfiles, self.fixpoint_rounds))
+            f.write("hot functions (hot_functions.txt) in code_hot_*.c: %d\n" % getattr(self, "hot_count", 0))
             f.write("imports used: %d of %d\n" % (len(self.used_imports), len(self.imports)))
+            f.write("CR writers: %d, %d with no live bit (liveness %s%s)\n" % (
+                self.cr_stats[0], self.cr_stats[1], "on" if CRLIVE else "off", ", check build" if CR_CHECK else ""))
+            f.write("leaf functions with registers in locals: %d\n" % self.leaf_count)
+            f.write("functions with calls with registers in locals: %d\n" % self.nonleaf_count)
+            f.write("functions that change callee-saved registers (save/restore helpers): %d\n" % len(self.saved_clobbers))
+            f.write("small hot leaves inlined into callers: %d\n" % getattr(self, "inline_count", 0))
             f.write("unhandled instruction kinds:\n")
             for k, v in self.unhandled.most_common():
                 f.write("  %6d  %s\n" % (v, k))

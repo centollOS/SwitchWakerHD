@@ -1,5 +1,6 @@
 // Internal interfaces between the GX2 layer and the renderer.
 #pragma once
+#include <atomic>
 #include <cstdint>
 
 struct LatteFetchShader;
@@ -15,6 +16,11 @@ struct ShaderKeyDirtyStats {
 };
 ShaderKeyDirtyStats shader_key_dirty_stats(); // Render-thread diagnostics.
 uint64_t render_thread_wait_ns();  // total time the GX2 render thread has waited for commands
+uint64_t game_sync_wait_ns();      // total time game threads waited for the render thread (GX2DrawDone...)
+uint64_t game_syncs();             // how many times they did
+// what the render thread is doing, for the hang watchdog: the renderer names its blocking steps
+// (GPU fence waits, buffer swaps, shader compiles); null while it runs ordinary commands
+extern std::atomic<const char*> g_render_stage;
 uint32_t color_buffer_address(const GX2::GX2ColorBuffer* cb);
 LatteFetchShader* build_fetch_shader(uint32_t program);  // from our encoded fetch "program"
 }  // namespace gx2

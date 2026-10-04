@@ -33,6 +33,10 @@ typedef struct Cpu {
     uint8_t cr[32];         /* one byte per CR bit; bit 4n+0 = crN.lt, +1 gt, +2 eq, +3 so */
     uint8_t xer_so, xer_ov, xer_ca;
     uint8_t xer_bc;
+    /* the scheduler asks the thread holding this core to yield at its next function entry
+     * (threads.cpp); in what was padding, so the layout (and save states) stay the same */
+    volatile uint8_t preempt;
+    uint8_t pad_[3];
     struct { double ps0, ps1; } f[32];
     uint32_t fpscr;
     uint32_t gqr[8];
@@ -46,6 +50,19 @@ typedef void (*PpcFunc)(Cpu*);
 
 /* runtime entry points */
 void ppc_dispatch(Cpu* c);                       /* call/jump to c->pc */
+/* Indirect call (bctrl/blrl) with a one-entry cache per call site: most are virtual calls that
+ * always reach the same function, and the dispatch table (32 MB) costs a cache miss per lookup.
+ * The entry packs the guest address (high half) and the host function as a 32-bit offset from
+ * ppc_dispatch, so one 64-bit load reads a consistent pair; the table never changes once filled. */
+void ppc_icall_miss(Cpu* c, uint64_t* slot);
+#define PPC_ICALL(c, t) do {                                                                       \
+        static uint64_t ic_;                                                                       \
+        uint64_t e_ = __atomic_load_n(&ic_, __ATOMIC_RELAXED);                                     \
+        if (__builtin_expect((uint32_t)(e_ >> 32) == (t), 1))                                      \
+            ((PpcFunc)((uintptr_t)ppc_dispatch + (intptr_t)(int32_t)(uint32_t)e_))(c);             \
+        else                                                                                       \
+            ppc_icall_miss(c, &ic_);                                                               \
+    } while (0)
 void ppc_unimplemented(Cpu* c, uint32_t addr, uint32_t insn);
 void ppc_trap(Cpu* c, uint32_t addr);
 uint64_t ppc_timebase(void);
@@ -58,12 +75,48 @@ double ppc_frsqrte(double x);
 extern int g_ppc_trace;
 void ppc_trace_enter(uint32_t addr);
 /* per-core scheduling: a higher-priority thread on this core is ready, yield at the next function entry */
-extern volatile int g_core_preempt[3];
+
 void ppc_preempt(Cpu* c);
+#ifdef __SWITCH__
+/* no guest trace on the console: saves a load and a branch on every guest function call */
+#define PPC_ENTER(a) do {                                                     \
+        if (__builtin_expect(c->preempt, 0)) ppc_preempt(c);                  \
+    } while (0)
+#else
 #define PPC_ENTER(a) do {                                                     \
         if (__builtin_expect(g_ppc_trace, 0)) ppc_trace_enter(a);             \
-        if (__builtin_expect(g_core_preempt[c->core], 0)) ppc_preempt(c);     \
+        if (__builtin_expect(c->preempt, 0)) ppc_preempt(c);                  \
     } while (0)
+#endif
+
+/* Callee-saved registers held in C locals across a call (tools/recomp/leaflocal.py
+ * transform_nonleaf). The Switch trusts the PowerPC EABI: callees preserve r1, r14-r31 and f14-f31.
+ * Desktop builds read them again (a save state may replace a thread's registers while it waits
+ * inside a call). PPC_NONLEAF_CHECK (WWHD_RECOMP_NONLEAF_CHECK=1) aborts if a callee changed one. */
+#if defined(PPC_NONLEAF_CHECK)
+void ppc_keep_failed(Cpu* c, int reg, uint32_t fn);
+#define PPC_KEEP_R(c, n, v, fn) do { if ((c)->r[n] != (v)) ppc_keep_failed(c, n, fn); } while (0)
+#define PPC_KEEP_F(c, n, v0, v1, fn) do {                                                                 \
+        double a_ = (c)->f[n].ps0, b_ = (c)->f[n].ps1, x_ = (v0), y_ = (v1);                             \
+        if (memcmp(&a_, &x_, 8) || memcmp(&b_, &y_, 8)) ppc_keep_failed(c, 32 + (n), fn);              \
+    } while (0)
+#elif defined(__SWITCH__)
+#define PPC_KEEP_R(c, n, v, fn) ((void)0)
+#define PPC_KEEP_F(c, n, v0, v1, fn) ((void)0)
+#else
+#define PPC_KEEP_R(c, n, v, fn) ((v) = (c)->r[n])
+#define PPC_KEEP_F(c, n, v0, v1, fn) ((v0) = (c)->f[n].ps0, (v1) = (c)->f[n].ps1)
+#endif
+
+/* the return address of a direct call to an ordinary game function (tools/recomp/recomp.py link):
+ * the recompiled code returns with C returns, so the value matters only to guest code that reads
+ * its saved copy on the stack (stack walkers: the watchdog's traces, desktop save states). The
+ * Switch build leaves it out: one store, and building the constant, less per call. */
+#if defined(__SWITCH__) || defined(PPC_ELIDE_LR)  /* PPC_ELIDE_LR: a desktop test of the Switch's form */
+#define PPC_SET_LR(c, v) ((void)0)
+#else
+#define PPC_SET_LR(c, v) ((c)->lr = (v))
+#endif
 
 /* ---- memory ---- */
 static inline uint8_t* ppc_ptr(uint32_t ea) { return PPC_MEM_BASE + ea; }
@@ -97,6 +150,32 @@ static inline void cr_set_u(Cpu* c, int f, uint32_t a, uint32_t b) {
     c->cr[4 * f + 0] = a < b; c->cr[4 * f + 1] = a > b; c->cr[4 * f + 2] = a == b; c->cr[4 * f + 3] = c->xer_so;
 }
 static inline void cr0_rc(Cpu* c, uint32_t v) { cr_set_s(c, 0, (int32_t)v, 0); }
+/* The recompiler's condition-register liveness pass (tools/recomp/crlive.py) stores only the bits
+ * that are read later: m has bit 0 = lt, 1 = gt, 2 = eq, 3 = so of the field. With PPC_CR_CHECK, the
+ * dropped bits get a poison value that ppc_cr_read() refuses (a check build of the recompiler). */
+#ifdef PPC_CR_CHECK
+#define PPC_CR_DEAD(c, i) ((c)->cr[i] = 0x55)
+void ppc_cr_poisoned(Cpu* c, int bit, uint32_t addr);
+static inline uint8_t ppc_cr_read(Cpu* c, int bit, uint32_t addr) {
+    if (__builtin_expect(c->cr[bit] == 0x55, 0)) ppc_cr_poisoned(c, bit, addr);
+    return c->cr[bit];
+}
+#else
+#define PPC_CR_DEAD(c, i) ((void)0)
+#endif
+static inline __attribute__((always_inline)) void cr_set_s_m(Cpu* c, int f, int32_t a, int32_t b, int m) {
+    if (m & 1) c->cr[4 * f + 0] = a < b; else PPC_CR_DEAD(c, 4 * f + 0);
+    if (m & 2) c->cr[4 * f + 1] = a > b; else PPC_CR_DEAD(c, 4 * f + 1);
+    if (m & 4) c->cr[4 * f + 2] = a == b; else PPC_CR_DEAD(c, 4 * f + 2);
+    if (m & 8) c->cr[4 * f + 3] = c->xer_so; else PPC_CR_DEAD(c, 4 * f + 3);
+}
+static inline __attribute__((always_inline)) void cr_set_u_m(Cpu* c, int f, uint32_t a, uint32_t b, int m) {
+    if (m & 1) c->cr[4 * f + 0] = a < b; else PPC_CR_DEAD(c, 4 * f + 0);
+    if (m & 2) c->cr[4 * f + 1] = a > b; else PPC_CR_DEAD(c, 4 * f + 1);
+    if (m & 4) c->cr[4 * f + 2] = a == b; else PPC_CR_DEAD(c, 4 * f + 2);
+    if (m & 8) c->cr[4 * f + 3] = c->xer_so; else PPC_CR_DEAD(c, 4 * f + 3);
+}
+static inline __attribute__((always_inline)) void cr0_rc_m(Cpu* c, uint32_t v, int m) { cr_set_s_m(c, 0, (int32_t)v, 0, m); }
 
 static inline uint32_t ppc_divw(uint32_t a, uint32_t b) {
     if (b == 0 || (a == 0x80000000u && b == 0xFFFFFFFFu)) return ((int32_t)a < 0) ? 0xFFFFFFFFu : 0;
@@ -104,10 +183,14 @@ static inline uint32_t ppc_divw(uint32_t a, uint32_t b) {
 }
 static inline uint32_t ppc_divwu(uint32_t a, uint32_t b) { return b ? a / b : 0; }
 
-static inline uint32_t ppc_mfcr(const Cpu* c) {
-    uint32_t v = 0;
-    for (int i = 0; i < 32; i++) v |= (uint32_t)(c->cr[i] & 1) << (31 - i);
-    return v;
+/* eight CR bytes (0/1, little-endian host) to eight bits, the first byte in the top bit */
+static inline uint32_t ppc_cr_pack8(const uint8_t* p) {
+    uint64_t x;
+    memcpy(&x, p, 8);
+    return (uint32_t)(((x & 0x0101010101010101ull) * 0x8040201008040201ull) >> 56);
+}
+static inline __attribute__((always_inline)) uint32_t ppc_mfcr(const Cpu* c) {
+    return ppc_cr_pack8(c->cr) << 24 | ppc_cr_pack8(c->cr + 8) << 16 | ppc_cr_pack8(c->cr + 16) << 8 | ppc_cr_pack8(c->cr + 24);
 }
 static inline void ppc_mtcrf(Cpu* c, uint32_t crm, uint32_t v) {
     for (int f = 0; f < 8; f++)
@@ -148,12 +231,62 @@ static inline double round25(double d) {
 }
 static inline double to_single(double d) { return (double)(float)d; }
 
+/* fcmpu / fcmpo. IEEE comparisons with a NaN are false, so lt/gt/eq need no NaN test; un is the
+ * fourth outcome. FPSCR's FPCC field (which fcmp also sets) is not kept: only mffs and mcrfs read
+ * it, and this game has neither (ppc2c warns when it translates one). */
 static inline void cr_set_f(Cpu* c, int f, double a, double b) {
-    int un = isnan(a) || isnan(b);
-    c->cr[4 * f + 0] = !un && a < b; c->cr[4 * f + 1] = !un && a > b;
-    c->cr[4 * f + 2] = !un && a == b; c->cr[4 * f + 3] = (uint8_t)un;
-    c->fpscr = (c->fpscr & ~0xF000u) | ((uint32_t)(c->cr[4 * f] << 3 | c->cr[4 * f + 1] << 2 | c->cr[4 * f + 2] << 1 | un) << 12);
+    c->cr[4 * f + 0] = a < b; c->cr[4 * f + 1] = a > b;
+    c->cr[4 * f + 2] = a == b; c->cr[4 * f + 3] = (uint8_t)__builtin_isunordered(a, b);
 }
+/* cr_set_f storing only the bits in m (see cr_set_s_m) */
+static inline __attribute__((always_inline)) void cr_set_f_m(Cpu* c, int f, double a, double b, int m) {
+    if (m & 1) c->cr[4 * f + 0] = a < b; else PPC_CR_DEAD(c, 4 * f + 0);
+    if (m & 2) c->cr[4 * f + 1] = a > b; else PPC_CR_DEAD(c, 4 * f + 1);
+    if (m & 4) c->cr[4 * f + 2] = a == b; else PPC_CR_DEAD(c, 4 * f + 2);
+    if (m & 8) c->cr[4 * f + 3] = (uint8_t)__builtin_isunordered(a, b); else PPC_CR_DEAD(c, 4 * f + 3);
+}
+
+/* The same compares for leaf functions that keep CR bits in C locals (tools/recomp/leaflocal.py):
+ * lt, gt, eq, so point at the field's four locals. */
+#ifdef PPC_CR_CHECK
+#define PPC_CRL_DEAD(p) (*(p) = 0x55)
+static inline uint8_t ppc_crl_read(Cpu* c, uint8_t v, int bit, uint32_t addr) {
+    if (__builtin_expect(v == 0x55, 0)) ppc_cr_poisoned(c, bit, addr);
+    return v;
+}
+#else
+#define PPC_CRL_DEAD(p) ((void)0)
+#endif
+static inline __attribute__((always_inline)) void crl_set_s_m(uint8_t* lt, uint8_t* gt, uint8_t* eq, uint8_t* so,
+                                                              const Cpu* c, int32_t a, int32_t b, int m) {
+    if (m & 1) *lt = a < b; else PPC_CRL_DEAD(lt);
+    if (m & 2) *gt = a > b; else PPC_CRL_DEAD(gt);
+    if (m & 4) *eq = a == b; else PPC_CRL_DEAD(eq);
+    if (m & 8) *so = c->xer_so; else PPC_CRL_DEAD(so);
+}
+static inline __attribute__((always_inline)) void crl_set_u_m(uint8_t* lt, uint8_t* gt, uint8_t* eq, uint8_t* so,
+                                                              const Cpu* c, uint32_t a, uint32_t b, int m) {
+    if (m & 1) *lt = a < b; else PPC_CRL_DEAD(lt);
+    if (m & 2) *gt = a > b; else PPC_CRL_DEAD(gt);
+    if (m & 4) *eq = a == b; else PPC_CRL_DEAD(eq);
+    if (m & 8) *so = c->xer_so; else PPC_CRL_DEAD(so);
+}
+static inline __attribute__((always_inline)) void crl_set_f_m(uint8_t* lt, uint8_t* gt, uint8_t* eq, uint8_t* so,
+                                                              const Cpu* c, double a, double b, int m) {
+    (void)c;
+    if (m & 1) *lt = a < b; else PPC_CRL_DEAD(lt);
+    if (m & 2) *gt = a > b; else PPC_CRL_DEAD(gt);
+    if (m & 4) *eq = a == b; else PPC_CRL_DEAD(eq);
+    if (m & 8) *so = (uint8_t)__builtin_isunordered(a, b); else PPC_CRL_DEAD(so);
+}
+static inline __attribute__((always_inline)) void crl0_rc_m(uint8_t* lt, uint8_t* gt, uint8_t* eq, uint8_t* so,
+                                                            const Cpu* c, uint32_t v, int m) {
+    crl_set_s_m(lt, gt, eq, so, c, (int32_t)v, 0, m);
+}
+#define crl_set_s(lt, gt, eq, so, c, a, b) crl_set_s_m(lt, gt, eq, so, c, a, b, 15)
+#define crl_set_u(lt, gt, eq, so, c, a, b) crl_set_u_m(lt, gt, eq, so, c, a, b, 15)
+#define crl_set_f(lt, gt, eq, so, c, a, b) crl_set_f_m(lt, gt, eq, so, c, a, b, 15)
+#define crl0_rc(lt, gt, eq, so, c, v) crl0_rc_m(lt, gt, eq, so, c, v, 15)
 
 static inline uint64_t ppc_fctiwz(double d) {
     int32_t r;
@@ -199,26 +332,52 @@ static inline uint32_t psq_quant(float v, uint32_t type, uint32_t scale) {
     default: return f32_as_u32(v);
     }
 }
-static inline void psq_load(Cpu* c, int fd, uint32_t ea, int w, int i) {
+/* quantized formats (GQR type 4-7): out of line, so the float case below stays small and inline.
+ * The _l forms take the two halves of the FPR separately (the recompiler keeps a leaf function's
+ * registers in locals, tools/recomp/leaflocal.py). */
+static __attribute__((noinline)) void psq_load_slow_l(Cpu* c, double* p0, double* p1, uint32_t ea, int w, int i) {
     uint32_t g = c->gqr[i], type = (g >> 16) & 7, scale = (g >> 24) & 0x3F;
     int sz = (type == 4 || type == 6) ? 1 : (type == 5 || type == 7) ? 2 : 4;
     uint32_t d0 = sz == 1 ? ld8(ea) : sz == 2 ? ld16(ea) : ld32(ea);
-    c->f[fd].ps0 = psq_dequant(d0, type, scale);
-    if (w) c->f[fd].ps1 = 1.0;
+    *p0 = psq_dequant(d0, type, scale);
+    if (w) *p1 = 1.0;
     else {
         uint32_t d1 = sz == 1 ? ld8(ea + 1) : sz == 2 ? ld16(ea + 2) : ld32(ea + 4);
-        c->f[fd].ps1 = psq_dequant(d1, type, scale);
+        *p1 = psq_dequant(d1, type, scale);
     }
 }
-static inline void psq_store(Cpu* c, int fs, uint32_t ea, int w, int i) {
+static __attribute__((noinline)) void psq_store_slow_l(Cpu* c, double v0, double v1, uint32_t ea, int w, int i) {
     uint32_t g = c->gqr[i], type = g & 7, scale = (g >> 8) & 0x3F;
     int sz = (type == 4 || type == 6) ? 1 : (type == 5 || type == 7) ? 2 : 4;
-    uint32_t d0 = psq_quant((float)c->f[fs].ps0, type, scale);
+    uint32_t d0 = psq_quant((float)v0, type, scale);
     if (sz == 1) st8(ea, d0); else if (sz == 2) st16(ea, d0); else st32(ea, d0);
     if (!w) {
-        uint32_t d1 = psq_quant((float)c->f[fs].ps1, type, scale);
+        uint32_t d1 = psq_quant((float)v1, type, scale);
         if (sz == 1) st8(ea + 1, d1); else if (sz == 2) st16(ea + 2, d1); else st32(ea + 4, d1);
     }
+}
+/* paired-single loads and stores: plain floats (GQR type 0-3) are nearly all of them */
+static inline __attribute__((always_inline)) void psq_load_l(Cpu* c, double* p0, double* p1, uint32_t ea, int w, int i) {
+    if (__builtin_expect(((c->gqr[i] >> 16) & 7) < 4, 1)) {
+        *p0 = u32_as_f32(ld32(ea));
+        *p1 = w ? 1.0 : (double)u32_as_f32(ld32(ea + 4));
+        return;
+    }
+    psq_load_slow_l(c, p0, p1, ea, w, i);
+}
+static inline __attribute__((always_inline)) void psq_store_l(Cpu* c, double v0, double v1, uint32_t ea, int w, int i) {
+    if (__builtin_expect((c->gqr[i] & 7) < 4, 1)) {
+        st32(ea, f32_as_u32((float)v0));
+        if (!w) st32(ea + 4, f32_as_u32((float)v1));
+        return;
+    }
+    psq_store_slow_l(c, v0, v1, ea, w, i);
+}
+static inline __attribute__((always_inline)) void psq_load(Cpu* c, int fd, uint32_t ea, int w, int i) {
+    psq_load_l(c, &c->f[fd].ps0, &c->f[fd].ps1, ea, w, i);
+}
+static inline __attribute__((always_inline)) void psq_store(Cpu* c, int fs, uint32_t ea, int w, int i) {
+    psq_store_l(c, c->f[fs].ps0, c->f[fs].ps1, ea, w, i);
 }
 
 #ifdef __cplusplus

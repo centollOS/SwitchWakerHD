@@ -60,27 +60,31 @@ GuestLayout& layout(Surface* s) {
     return *s->guest;
 }
 
+// four independent lanes: one multiply chain is latency-bound (the A57 hashes ~4x faster this way)
 uint64_t fnv(const uint8_t* p, size_t n) {
-    uint64_t h = 0x9E3779B97F4A7C15ull;
+    uint64_t h[4] = {0x9E3779B97F4A7C15ull, 0xC2B2AE3D27D4EB4Full, 0x165667B19E3779F9ull, 0x27D4EB2F165667C5ull};
     size_t i = 0;
-    for (; n - i >= sizeof(uint64_t); i += sizeof(uint64_t)) {
-        uint64_t word;
-        memcpy(&word, p + i, sizeof(word));
-        h = (h ^ word) * 0xFF51AFD7ED558CCDull;
-        h ^= h >> 32;
-    }
-    for (; i < n; ++i) h = (h ^ p[i]) * 0x100000001B3ull;
-    return h ^ (h >> 29) ^ uint64_t(n);
+    for (; n - i >= 32; i += 32)
+        for (int l = 0; l < 4; l++) {
+            uint64_t word;
+            memcpy(&word, p + i + l * 8, sizeof(word));
+            h[l] = (h[l] ^ word) * 0xFF51AFD7ED558CCDull;
+            h[l] ^= h[l] >> 32;
+        }
+    uint64_t r = h[0] ^ (h[1] * 31) ^ (h[2] * 1009) ^ (h[3] * 65537);
+    for (; i < n; ++i) r = (r ^ p[i]) * 0x100000001B3ull;
+    return r ^ (r >> 29) ^ uint64_t(n);
 }
 
-// 256 words sampled per level: CPU changes show up immediately, periodic full checks catch the rest
+// 64 words sampled per level (each is usually a cache miss): CPU changes show up within a few
+// frames, periodic full checks catch the rest
 uint64_t sparse_hash(Surface* s) {
     auto& g = layout(s);
     uint64_t h = 0xcbf29ce484222325ull;
     for (uint32_t level = 0; level < s->mips; ++level) {
         if (level && !s->mipAddr) break;
         const auto* bytes = mem::ptr(g.address[level]);
-        size_t size = size_t(g.info[level].surfSize), step = std::max<size_t>((size / 256) & ~size_t(7), 8);
+        size_t size = size_t(g.info[level].surfSize), step = std::max<size_t>((size / 64) & ~size_t(7), 8);
         size_t offset = 0;
         for (; offset < size && size - offset >= 8; offset += step) {
             uint64_t value;
@@ -188,6 +192,7 @@ void create_surface_texture(Surface* s) {
 
 void destroy_surface_texture(Surface* s) {
     forget_gl_state();  // a deleted texture may be bound to a draw unit
+    R.surfaceEpoch++;   // and its views may be in the draw caches
     for (auto& [key, view] : s->views) glDeleteTextures(1, &view);
     s->views.clear();
     if (s->tex) glDeleteTextures(1, &s->tex);
@@ -243,8 +248,15 @@ void upload_surface(Surface* s) {
     if (!s || !s->tex || s->gpuWritten) return;
     if (s->lastCheckedFrame == R.frame) return;
     s->lastCheckedFrame = R.frame;
+    // Textures the game changes without GX2Invalidate are found by sampling: every frame for one that
+    // changed in the last 64 frames, else every 4th frame. Invalidated ones (dirty) are checked fully
+    // at once, and every texture fully every 256 frames. The schedule is staggered by a hash of the
+    // address: textures often sit at aligned addresses, and staggering by address bits made many of
+    // them come due in the same frame (a burst of hashing every few seconds).
+    const uint64_t phase = R.frame + ((uint32_t(s->addr) * 0x9E3779B1u) >> 20);
+    bool full = s->dirty || !s->dataSize || (phase & 255) == 0;
+    if (!full && R.frame - s->changedFrame >= 64 && (phase & 3) != 0) return;
     ScopedTime timer{R.perf.uploadNs};
-    bool full = s->dirty || !s->dataSize || ((R.frame + (s->addr >> 12)) & 63) == 0;
     uint64_t sparse = sparse_hash(s);
     if (!full && sparse == s->sparseHash) return;
     auto& g = layout(s);
@@ -256,6 +268,7 @@ void upload_surface(Surface* s) {
     }
     s->sparseHash = sparse;
     if (!s->dirty && hash == s->contentHash) return;
+    flush_draws();  // recorded draws may sample this texture's old contents
     R.perf.uploads++;
     bind_scratch(s);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -290,6 +303,7 @@ void upload_surface(Surface* s) {
     s->contentHash = hash;
     s->writeSeq = next_write_seq();
     s->dirty = false;
+    s->changedFrame = R.frame;
 }
 
 // ---------------------------------------------------------------- lookup
@@ -330,12 +344,40 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
     create_surface_texture(s.get());
     auto* raw = s.get();
     R.surfaces.emplace(d.addr, std::move(s));
+    R.surfaceList.push_back(raw);
+    R.surfaceEpoch++;
     return raw;
 }
+
+namespace {
+// the last render-target lookup of each slot, reused while its registers and the surface set are unchanged
+struct TargetCache {
+    uint64_t epoch = 0;
+    uint32_t regs[6] = {};
+    Surface* s = nullptr;
+    uint32_t slice = 0;
+    bool hit(const uint32_t* r, uint32_t* outSlice) const {
+        if (epoch != R.surfaceEpoch || memcmp(regs, r, sizeof regs)) return false;
+        if (outSlice) *outSlice = slice;
+        return true;
+    }
+    Surface* fill(const uint32_t* r, Surface* surface, const uint32_t* outSlice) {
+        epoch = R.surfaceEpoch;  // after the lookup, which may have created the surface
+        memcpy(regs, r, sizeof regs);
+        s = surface;
+        slice = outSlice ? *outSlice : 0;
+        return surface;
+    }
+};
+TargetCache colorCache[8], depthCache;
+}  // namespace
 
 Surface* color_target(const uint32_t* regs, int i, uint32_t* slice) {
     uint32_t base = regs[mmCB_COLOR0_BASE + i];
     if (!base) return nullptr;
+    const uint32_t key[6] = {base, regs[mmCB_COLOR0_SIZE + i], regs[mmCB_COLOR0_INFO + i], regs[mmCB_COLOR0_TILE + i],
+                             regs[mmCB_COLOR0_FRAG + i], regs[mmCB_COLOR0_VIEW + i]};
+    if (colorCache[i].hit(key, slice)) return colorCache[i].s;
     uint32_t size = regs[mmCB_COLOR0_SIZE + i], info = regs[mmCB_COLOR0_INFO + i];
     uint32_t pitch = ((size & 0x3FF) + 1) * 8;
     uint32_t height = (((size >> 10) & 0xFFFFF) + 1) * 64 / pitch;
@@ -353,12 +395,15 @@ Surface* color_target(const uint32_t* regs, int i, uint32_t* slice) {
     d.tileMode = (info >> 8) & 0xF;
     d.slices = slices;
     d.dim = slices > 1 ? kDim2DArray : kDim2D;
-    return find_or_create_surface(d, true);
+    return colorCache[i].fill(key, find_or_create_surface(d, true), slice);
 }
 
 Surface* depth_target(const uint32_t* regs, uint32_t* slice) {
     uint32_t base = regs[mmDB_DEPTH_BASE];
     if (!base) return nullptr;
+    const uint32_t key[6] = {base, regs[gx2::kDepthSlicesReg], regs[mmDB_DEPTH_VIEW], regs[mmDB_DEPTH_SIZE],
+                             regs[mmDB_DEPTH_INFO], regs[mmDB_HTILE_DATA_BASE]};
+    if (depthCache.hit(key, slice)) return depthCache.s;
     uint32_t slices = std::max<uint32_t>(regs[gx2::kDepthSlicesReg], 1);
     if (slice) *slice = slices > 1 ? std::min<uint32_t>(regs[mmDB_DEPTH_VIEW] & 0x7FF, slices - 1) : 0;
     uint32_t size = regs[mmDB_DEPTH_SIZE], info = regs[mmDB_DEPTH_INFO];
@@ -375,7 +420,7 @@ Surface* depth_target(const uint32_t* regs, uint32_t* slice) {
     d.isDepth = true;
     d.slices = slices;
     d.dim = slices > 1 ? kDim2DArray : kDim2D;
-    return find_or_create_surface(d, true);
+    return depthCache.fill(key, find_or_create_surface(d, true), slice);
 }
 
 Surface* surface_from_color_buffer(uint32_t addr, uint32_t* firstSlice, uint32_t* numSlices) {
@@ -415,7 +460,7 @@ Surface* surface_from_depth_buffer(uint32_t addr, uint32_t* firstSlice, uint32_t
     return find_or_create_surface(d, true);
 }
 
-Surface* sampled_texture(const uint32_t* w, bool isDepthSampler) {
+Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
     Latte::LATTE_SQ_TEX_RESOURCE_WORD0_N w0;
     Latte::LATTE_SQ_TEX_RESOURCE_WORD1_N w1;
     Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N w4;
@@ -460,6 +505,7 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler) {
     d.swizzle = swizzle;
     d.isDepth = isDepthSampler;
     Surface* s = find_or_create_surface(d, false);
+    if (unique) *unique = R.surfaces.count(d.addr) == 1;
     upload_surface(s);
     return s;
 }
@@ -512,7 +558,10 @@ void blit(Surface* src, uint32_t srcLevel, uint32_t srcLayer, uint32_t sw, uint3
 
 // ---------------------------------------------------------------- clears and copies
 void clear_color(const uint32_t*, uint32_t cb, const float rgba[4]) {
+    flush_draws();
     make_current();
+    ScopedTime timer{R.perf.clearNs};
+    R.perf.clears++;
     uint32_t first, num;
     auto* s = surface_from_color_buffer(cb, &first, &num);
     if (!s || s->fmt.depth || s->fmt.compressed) return;
@@ -542,7 +591,10 @@ void clear_color(const uint32_t*, uint32_t cb, const float rgba[4]) {
 }
 
 void clear_depth_stencil(const uint32_t*, uint32_t db, float depth, uint32_t stencil, uint32_t flags) {
+    flush_draws();
     make_current();
+    ScopedTime timer{R.perf.clearNs};
+    R.perf.clears++;
     uint32_t first, num;
     auto* s = surface_from_depth_buffer(db, &first, &num);
     if (!s) return;
@@ -568,7 +620,10 @@ void clear_depth_stencil(const uint32_t*, uint32_t db, float depth, uint32_t ste
 }
 
 void copy_surface(uint32_t srcAddr, uint32_t srcMip, uint32_t srcSlice, uint32_t dstAddr, uint32_t dstMip, uint32_t dstSlice) {
+    flush_draws();
     make_current();
+    ScopedTime timer{R.perf.surfaceCopyNs};
+    R.perf.surfaceCopies++;
     auto* s = reinterpret_cast<GX2Surface*>(mem::ptr(srcAddr));
     auto* d = reinterpret_cast<GX2Surface*>(mem::ptr(dstAddr));
     if (srcMip >= uint32_t(s->numLevels) || dstMip >= uint32_t(d->numLevels)) return;
@@ -579,13 +634,14 @@ void copy_surface(uint32_t srcAddr, uint32_t srcMip, uint32_t srcSlice, uint32_t
     // GPU-written source: copy on the GPU
     Surface* gpuSrc = nullptr;
     uint32_t gpuLevel = 0;
-    for (auto& [addr, image] : R.surfaces) {
+    for (Surface* image : R.surfaceList) {
         if (!image->gpuWritten) continue;
+        uint32_t addr = image->addr;
         if (addr == sbase && image->width == w && image->height == h) {
-            if (!gpuSrc || image->writeSeq > gpuSrc->writeSeq) { gpuSrc = image.get(); gpuLevel = 0; }
+            if (!gpuSrc || image->writeSeq > gpuSrc->writeSeq) { gpuSrc = image; gpuLevel = 0; }
         } else if (addr == uint32_t(s->imagePtr) && image->mips > srcMip && std::max(image->width >> srcMip, 1u) == w &&
                    std::max(image->height >> srcMip, 1u) == h)
-            if (!gpuSrc || image->writeSeq > gpuSrc->writeSeq) { gpuSrc = image.get(); gpuLevel = srcMip; }
+            if (!gpuSrc || image->writeSeq > gpuSrc->writeSeq) { gpuSrc = image; gpuLevel = srcMip; }
     }
     if (gpuSrc) {
         if (gpuSrc->target == GL_TEXTURE_3D) return;
@@ -617,6 +673,7 @@ void copy_surface(uint32_t srcAddr, uint32_t srcMip, uint32_t srcSlice, uint32_t
         return;
     }
     // CPU copy between guest layouts
+    R.perf.cpuSurfaceCopies++;
     auto sf = format_info(uint32_t(s->format.value()), bool(uint32_t(s->format.value()) & 0x800));
     auto df = format_info(uint32_t(d->format.value()), bool(uint32_t(d->format.value()) & 0x800));
     if (!sf.internal || !df.internal || sf.bytesPerBlock != df.bytesPerBlock || sf.compressed != df.compressed) {
@@ -647,37 +704,75 @@ void copy_surface(uint32_t srcAddr, uint32_t srcMip, uint32_t srcSlice, uint32_t
         for (uint32_t x = 0; x < bw; ++x)
             memcpy(mem::ptr(dbase + element_offset(di, dtm, x, y, dstSlice, bpp, &dci, ddepth)),
                    rows.data() + (size_t(y) * bw + x) * sf.bytesPerBlock, sf.bytesPerBlock);
-    for (auto& [address, image] : R.surfaces)
-        if (address == dbase) {
+    for (Surface* image : R.surfaceList)
+        if (image->addr == dbase) {
+            if (image->gpuWritten) R.surfaceEpoch++;
             image->gpuWritten = false;
             image->dirty = true;
             image->lastCheckedFrame = ~0ull;
         }
 }
 
+namespace {
+// Guest byte ranges of every surface (base level, and the mip chain when it is elsewhere), sorted by
+// start, with the running maximum of the ends: an invalidated range only visits the surfaces it can
+// touch. Rebuilt when surfaces are added.
+struct GuestRanges {
+    struct Range {
+        uint64_t start, end;
+        Surface* s;
+    };
+    std::vector<Range> ranges;
+    std::vector<uint64_t> maxEnd;  // maxEnd[i] = max(ranges[0..i].end)
+    size_t built = ~size_t(0);
+    void update() {
+        if (built == R.surfaceList.size()) return;
+        built = R.surfaceList.size();
+        ranges.clear();
+        for (Surface* s : R.surfaceList) {
+            if (s->addr >= 0xF4000000 && s->addr < 0xF6000000) continue;  // render targets in MEM1
+            auto& g = layout(s);
+            uint64_t bytes = std::max<uint64_t>(g.info[0].surfSize, uint64_t(s->pitch) * s->height * s->fmt.bytesPerBlock);
+            ranges.push_back({s->addr, uint64_t(s->addr) + bytes, s});
+            if (s->mipAddr && s->mips > 1) {
+                uint64_t lo = ~0ull, hi = 0;
+                for (uint32_t level = 1; level < s->mips; ++level) {
+                    lo = std::min<uint64_t>(lo, g.address[level]);
+                    hi = std::max<uint64_t>(hi, uint64_t(g.address[level]) + g.info[level].surfSize);
+                }
+                if (lo < hi) ranges.push_back({lo, hi, s});
+            }
+        }
+        std::sort(ranges.begin(), ranges.end(), [](const Range& a, const Range& b) { return a.start < b.start; });
+        maxEnd.resize(ranges.size());
+        uint64_t m = 0;
+        for (size_t i = 0; i < ranges.size(); i++) maxEnd[i] = m = std::max(m, ranges[i].end);
+    }
+} guestRanges;
+}  // namespace
+
 void invalidate(uint32_t flags, uint32_t addr, uint32_t size) {
+    flush_draws();
+    ScopedTime timer{R.perf.invalidateNs};
+    R.perf.invalidates++;
     if (flags & 0x5) R.streamGen++;  // attribute buffers or uniform blocks
     if (!(flags & 2) || size >= 0x10000000) return;
-    uint64_t end = uint64_t(addr) + size;
-    for (auto& [base, s] : R.surfaces) {
-        if (s->gpuWritten || (base >= 0xF4000000 && base < 0xF6000000)) continue;
-        if (s->dirty && s->lastCheckedFrame == ~0ull) continue;
-        uint64_t bytes = std::max<uint64_t>(s->dataSize, uint64_t(s->pitch) * s->height * s->fmt.bytesPerBlock);
-        bool hit = uint64_t(base) < end && uint64_t(addr) < uint64_t(base) + bytes;
-        if (!hit && s->mipAddr && s->mips > 1) {
-            auto& g = layout(s.get());
-            for (uint32_t level = 1; level < s->mips && !hit; ++level)
-                hit = uint64_t(g.address[level]) < end && uint64_t(addr) < uint64_t(g.address[level]) + g.info[level].surfSize;
-        }
-        if (hit) {
-            s->dirty = true;
-            s->lastCheckedFrame = ~0ull;
-        }
+    const uint64_t begin = addr, end = uint64_t(addr) + size;
+    guestRanges.update();
+    auto& rs = guestRanges.ranges;
+    // first range whose running maximum end passes the start; stop at ranges starting past the end
+    size_t i = size_t(std::upper_bound(guestRanges.maxEnd.begin(), guestRanges.maxEnd.end(), begin) - guestRanges.maxEnd.begin());
+    for (; i < rs.size() && rs[i].start < end; i++) {
+        if (rs[i].end <= begin) continue;
+        Surface* s = rs[i].s;
+        if (s->gpuWritten || (s->dirty && s->lastCheckedFrame == ~0ull)) continue;
+        s->dirty = true;
+        s->lastCheckedFrame = ~0ull;
     }
 }
 
 void ss_reset_surfaces() {
-    for (auto& [addr, s] : R.surfaces) {
+    for (Surface* s : R.surfaceList) {
         s->dirty = true;
         s->lastCheckedFrame = ~0ull;
     }

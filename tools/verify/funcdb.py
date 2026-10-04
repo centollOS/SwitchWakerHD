@@ -297,7 +297,7 @@ class Cfg:
                     pd.add(("f", int(m.group(1))))
                 d |= pd
             self.calls.append([int(cm.group(1), 16) for cm in CALL_RE.finditer(s)])
-            self.indirect.append("ppc_dispatch(c)" in s or bool(re.search(r"\bimp_\w+\(c\)", s)))
+            self.indirect.append("ppc_dispatch(c)" in s or "PPC_ICALL(c" in s or bool(re.search(r"\bimp_\w+\(c\)", s)))
             nx = []
             for gm in re.finditer(r"goto L_([0-9A-F]{8})", s):
                 t = int(gm.group(1), 16)

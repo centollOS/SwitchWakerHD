@@ -5,6 +5,8 @@
 //   /vol/save/...     -> <save dir>/...
 #include "../platform/filesystem.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -40,6 +42,19 @@ std::mutex g_fs_mutex;
 std::unordered_map<uint32_t, OpenFile> g_files;
 std::unordered_map<uint32_t, OpenDir> g_dirs;
 uint32_t g_next_handle = 1;
+
+// host file system calls and their time (fs_stats: the renderer's stats and hitch reports). Each
+// call releases the caller's emulated core while the host works: on the Switch an SD card access
+// can take milliseconds, and another guest thread of that core (the audio ones on core 0) runs.
+std::atomic<uint64_t> g_fs_calls{0}, g_fs_ns{0};
+struct HostFsCall : BlockingScope {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    ~HostFsCall() {
+        g_fs_calls.fetch_add(1, std::memory_order_relaxed);
+        g_fs_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count(),
+                          std::memory_order_relaxed);
+    }
+};
 
 // The game names some paths with a different case than the disc (Audiores vs AudioRes). Case-sensitive
 // host file systems resolve each missing component by a case-insensitive directory search.
@@ -118,7 +133,11 @@ int32_t open_file(const std::string& gpath, const std::string& mode, uint32_t ou
     if (mode.find_first_of("wa") != std::string::npos) make_parent_dirs(hp);
     std::string m = mode;
     if (m.find('b') == std::string::npos) m += "b";
-    FILE* f = fopen(hp.c_str(), m.c_str());
+    FILE* f;
+    {
+        HostFsCall call;
+        f = fopen(hp.c_str(), m.c_str());
+    }
     TRACE("[fs] open %s (%s) -> %s", gpath.c_str(), mode.c_str(), f ? "ok" : "not found");
     if (!f) return FS_NOT_FOUND;
     std::lock_guard<std::mutex> lk(g_fs_mutex);
@@ -136,7 +155,12 @@ FILE* file(uint32_t h) {
 
 int32_t stat_path(const std::string& gpath, uint32_t out) {
     struct stat st;
-    if (stat(host_path(gpath).c_str(), &st) != 0) return FS_NOT_FOUND;
+    int result;
+    {
+        HostFsCall call;
+        result = stat(host_path(gpath).c_str(), &st);
+    }
+    if (result != 0) return FS_NOT_FOUND;
     fill_stat(out, st);
     return FS_OK;
 }
@@ -153,6 +177,11 @@ int32_t open_dir(const std::string& gpath, uint32_t out_handle) {
 }
 
 }  // namespace
+
+void fs_stats(uint64_t& calls, uint64_t& ns) {
+    calls = g_fs_calls.load(std::memory_order_relaxed);
+    ns = g_fs_ns.load(std::memory_order_relaxed);
+}
 
 // ---------------------------------------------------------------- FS
 HLE(coreinit, FSInit) {}
@@ -187,7 +216,7 @@ HLE(coreinit, FSReadFile) {
     if (!f || size == 0) { ret(c, 0); return; }
     size_t n;
     {
-        BlockingScope b;  // the calling thread waits for the disc; others on its core run
+        HostFsCall call;  // the calling thread waits for the disc; others on its core run
         n = fread(mem::ptr(dst), 1, (size_t)size * count, f);
     }
     ret(c, (uint32_t)(n / size));
@@ -199,7 +228,7 @@ HLE(coreinit, FSWriteFile) {
     if (!f || size == 0) { ret(c, 0); return; }
     size_t n;
     {
-        BlockingScope b;
+        HostFsCall call;
         n = fwrite(mem::ptr(src), 1, (size_t)size * count, f);
         fflush(f);
     }
