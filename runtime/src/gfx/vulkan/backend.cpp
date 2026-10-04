@@ -1672,7 +1672,7 @@ void run_main_loop() {
     input::update();
     auto now = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(now - titleTime).count();
-    if (elapsed >= 0.5) {
+    if (elapsed >= 0.5 && !input::text_prompt_active()) {
       uint64_t frames = gx2::flips_presented();
       if (exitFrame && frame_count() >= exitFrame) {
         SDL_Event quit{};quit.type=SDL_EVENT_QUIT;SDL_PushEvent(&quit);
