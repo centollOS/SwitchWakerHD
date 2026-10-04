@@ -25,7 +25,7 @@ void present_screens();
 void request_present_dump(const std::string& path);
 
 // enhancement, toggled in game (Graphics menu or 8; WWHD_FXAA=1 starts with it on)
-static std::atomic<bool> g_fxaa{getenv("WWHD_FXAA") != nullptr};
+static std::atomic<bool> g_fxaa{[] { const char* e = getenv("WWHD_FXAA"); return e && atoi(e) != 0; }()};
 bool fxaa_enabled() { return g_fxaa.load(std::memory_order_relaxed); }
 void set_fxaa(bool v) { g_fxaa = v; LOG("[gfx] edge smoothing (FXAA) %s", v ? "on" : "off"); }
 
