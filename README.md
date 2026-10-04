@@ -228,6 +228,10 @@ The **Gameplay** menu has optional changes to how the game plays, all off by def
 wall (with a stamina wheel; B or A lets go), a direct right-stick camera (no easing, adjustable
 speed), a mouse camera (click the picture to capture the pointer, Esc releases it), first person
 on the mouse wheel, quick doors and fast scene changes.
+It also has cheats: all items, the full-power Master Sword and Mirror Shield, 20 hearts / double
+magic / 5000 rupees, and infinite health, magic or ammo. Story cheats (all songs, Triforce shards,
+dungeon map/compass/boss key, a small key) can change or break story events, so use a spare save
+file. Cheats edit the live save data; save in game to keep them.
 
 The **Save States** menu saves the whole running game to one of 5 slots and loads it back
 (**Shift+F1–F5** save, **F1–F5** load); each slot shows its time and area. Slots are kept in
