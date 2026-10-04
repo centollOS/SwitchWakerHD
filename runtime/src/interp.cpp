@@ -488,10 +488,13 @@ void ss_reset() {
 }
 }  // namespace interp
 
+namespace mods { void cheats_service(); }  // mods/cheats.cpp
+
 extern "C" void hook_0203593C(Cpu* c) {
     using namespace interp;
     fx_pass_start();
     ss::service(c);  // save states: exact values are back in guest memory, all other threads idle
+    mods::cheats_service();
     // test aid: WWHD_INTERP_AT_STEP=n switches interpolation on after n frames
     static uint64_t passes = 0;
     static const uint64_t at = getenv("WWHD_INTERP_AT_STEP") ? strtoull(getenv("WWHD_INTERP_AT_STEP"), nullptr, 10) : 0;

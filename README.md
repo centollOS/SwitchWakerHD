@@ -222,7 +222,8 @@ window title shows what is active and the current frame rate): 60 fps by frame i
 cycles; the game renders at 1280x720, 2x renders at 2560x1440), edge smoothing (FXAA, **8**),
 ambient-occlusion mode (**O** cycles), full-size occlusion depth (**M**), 16x anisotropic
 filtering (**N**), the aspect ratio, the renderer (Metal or Vulkan), and a frame capture for debugging (**P** or fn+F12, written to `captures/`;
-captures contain game imagery, so keep them to yourself).
+captures contain game imagery, so keep them to yourself). The Graphics choices are remembered
+between launches (macOS preferences; `defaults delete wwhd` resets them).
 True 60 (**7**) computes Link and the camera at 60 Hz while the game state after every 30 Hz step
 stays bit-identical to the 30 fps game, except the random-number sequence, which drifts because
 drawing code draws random numbers too (later drops and ambient behaviour differ like in any other
@@ -232,6 +233,10 @@ The **Gameplay** menu has optional changes to how the game plays, all off by def
 wall (with a stamina wheel; B or A lets go), a direct right-stick camera (no easing, adjustable
 speed), a mouse camera (click the picture to capture the pointer, Esc releases it), first person
 on the mouse wheel, quick doors and fast scene changes.
+It also has cheats: all items, the full-power Master Sword and Mirror Shield, 20 hearts / double
+magic / 5000 rupees, and infinite health, magic or ammo. Story cheats (all songs, Triforce shards,
+dungeon map/compass/boss key, a small key) can change or break story events, so use a spare save
+file. Cheats edit the live save data; save in game to keep them.
 
 The **Save States** menu saves the whole running game to one of 5 slots and loads it back
 (**Shift+F1–F5** save, **F1–F5** load); each slot shows its time and area. Slots are kept in
@@ -270,10 +275,13 @@ and the renderer are remembered in `~/Library/Application Support/wwhd/display.p
 
 - Shaders are translated on first use and cached in `~/Library/Caches/wwhd/shaders.bin`; later
   runs replay that cache at startup.
+- [docs/performance.md](docs/performance.md) covers how to profile the port, measured fixes and
+  open performance leads.
 - Useful environment variables: `WWHD_NO_AUDIO=1`, `WWHD_NO_GAMEPAD=1` (no second window), `WWHD_NO_CONTROLLERS=1` (SDL builds: ignore host game controllers), `WWHD_LANGUAGE=<code>` (console language: 1 English, 2 French, 5 Spanish, … — the USA/Asia disc carries English, French and Spanish),
   `WWHD_DRC_MODE=window|pip|auto|off`, `WWHD_ASPECT=16:9|window|16:10|21:9|32:9|<w:h>`,
   `WWHD_AUDIO_VOLUME=0..1`, `WWHD_SHADER_CACHE=<file>|0`, `WWHD_AO_MODE=0..2`, `WWHD_AO_HIRES=0|1`, `WWHD_ANISO=0|1`, `WWHD_RES_SCALE=1|1.5|2|3`,
-  `WWHD_FXAA=0|1`, `WWHD_INTERP=1`, `WWHD_TRUE60=1` (start values for the Graphics menu);
+  `WWHD_FXAA=0|1`, `WWHD_INTERP=1`, `WWHD_TRUE60=1` (start values for the Graphics menu; they
+  override the remembered choices);
   `WWHD_SHADOW_SCALE=n` gives the shadow maps their own resolution factor; `WWHD_STATE_DIR=<dir>`
   stores save states elsewhere; `WWHD_RUMBLE=0` (SDL builds) leaves the controller motors alone.
 - Crashes and game halts write `captures/crash-<time>.log` (crash address, registers, the guest call

@@ -136,7 +136,10 @@ if(WWHD_HAS_VULKAN)
   if(WWHD_HAS_METAL)
     # One app, two renderers: the Vulkan loader and glslang are weak imports, so the game still
     # starts (with Metal) on a Mac without them; the renderer checks for them before using Vulkan.
-    target_include_directories(wwhd PRIVATE $<TARGET_PROPERTY:Vulkan::Vulkan,INTERFACE_INCLUDE_DIRECTORIES>
+    # SYSTEM: searched after the project's own -I paths, so a Homebrew boost/fmt in the same prefix
+    # (/opt/homebrew/include) can't replace the vendored ones (cemu_latte is built with those; a
+    # different boost changed LatteDecompilerShader's layout and crashed the first shader translation)
+    target_include_directories(wwhd SYSTEM PRIVATE $<TARGET_PROPERTY:Vulkan::Vulkan,INTERFACE_INCLUDE_DIRECTORIES>
                                             $<TARGET_PROPERTY:glslang::glslang,INTERFACE_INCLUDE_DIRECTORIES>)
     foreach(lib Vulkan::Vulkan glslang::glslang glslang::SPIRV glslang::glslang-default-resource-limits)
       target_link_options(wwhd PRIVATE "LINKER:-weak_library,$<TARGET_FILE:${lib}>")

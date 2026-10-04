@@ -1,0 +1,172 @@
+# Performance notes
+
+Measurements and fixes from profiling the port on an Apple Silicon Mac, plus open leads.
+
+## How to profile
+
+Run a scripted session, then sample it with macOS `sample` (1 ms stacks for every thread):
+
+```sh
+# copy the save and shader cache so the test can't touch your real ones
+cp -R save /tmp/wwhd-save; cp ~/Library/Caches/wwhd/shaders.bin /tmp/shaders.bin
+WWHD_SHADER_CACHE=/tmp/shaders.bin \
+WWHD_PRESS=600-610:8000,900-910:8000,1200-1210:8000,1500-1510:8000 \
+WWHD_STATE_LOAD_AT=1800:2 WWHD_DUMP_FRAMES=2400 \
+./build/cmake/wwhd --save /tmp/wwhd-save > run.log 2>&1 &
+sleep 45; sample $! 20 -file sample.txt; kill $!
+```
+
+`WWHD_PRESS` presses A to get past the title screen, `WWHD_STATE_LOAD_AT=1800:2` loads save-state
+slot 2 at TV frame 1800, and `WWHD_DUMP_FRAMES=2400` writes `frame_2400.png` (in the working
+directory) to check that the run still renders correctly. The "Sort by top of stack" section of
+`sample.txt` shows where the CPU time goes. `run.log` prints the shader and pipeline counts every
+few seconds.
+
+## Where the time goes
+
+Busy (non-waiting) samples in one 20 s in-game run with 60 fps interpolation on, after all the fixes
+below (Apple M4):
+
+| | Metal | Vulkan |
+|---|---|---|
+| Recompiled game code (`f_XXXXXXXX`) | ~3,600 | ~3,400 |
+| Renderer (`gfx::`/`gfxvk::`, `gx2::`, driver) | ~2,300 | ~3,300 |
+| Other (memcpy, clocks, malloc, objc, …) | ~2,900 | ~3,100 |
+
+The recompiled code is about 17% of one core, and the GX2 render thread is about 30% busy, so the
+CPU translation isn't the bottleneck on this machine; the renderer work matters more on slower CPUs
+(upstream issue #7).
+
+## Fixes
+
+### Both-renderer build crashed at the first shader with Homebrew boost installed
+
+With Metal and Vulkan in one app, `CMakeLists.txt` added Vulkan's and glslang's include directory
+(`/opt/homebrew/include`) to `wwhd` as a normal `-I` path, ahead of the vendored Cemu headers. With
+Homebrew's `boost` installed, `metal_draw.mm` compiled against Homebrew's `static_vector` while
+`cemu_latte` used the vendored one, so `LatteDecompilerShader` was 968 bytes on one side and 920 on
+the other, and the first translated shader read a garbage `strBuf_shaderSource` (both renderers
+crashed at boot). Those directories are now added as `SYSTEM`, which is searched after the project's
+own paths. A Metal-only build never had the problem. With the fix, the 2,241 shaders of a test run
+are byte-identical to the Metal-only build's.
+
+### Pipeline queue scanned every frame (`build_pending_pipelines`)
+
+At startup the shader cache and the head start queue ~250–280k pipeline recipes. A recipe is built
+in the background once both of its shaders have compiled. `cache_warm_step` runs once per frame
+inside `gfx::swap()` with a budget of 16 builds, but the budget only limited builds, not checks. So
+every frame walked the whole queue, doing three hash lookups per recipe against a table of ~260k
+shaders.
+
+Each per-frame call now checks at most 2,048 recipes and resumes from a cursor on the next frame.
+`--warm-shaders` passes an unlimited budget and still scans the whole queue.
+
+| same 20 s run | before | after |
+|---|---|---|
+| `build_pending_pipelines` self time (render thread) | 6,086 samples (~40%) | 29 |
+| whole-process CPU | 94% | 62–67% |
+| pipelines built by the end of the run | 20,241 | 28,909 |
+| draws skipped while a pipeline compiles | 373 | 247 |
+
+### Pipeline recipes appended to the cache again
+
+Pipelines built from the queue aren't recorded (they're already in the file). But when the game
+needed a pipeline before its queued recipe was built, the normal path recorded it again. About 20% of
+the pipeline records in a long-used `shaders.bin` were exact duplicates (33k of 170k), and the file
+grew every session.
+
+`g_known_pipelines` holds a hash of every recipe loaded from the cache file and the head start.
+Recipes already in it aren't queued twice or written again. In the test run the cache grew 0 bytes
+(it grew ~157 KB per run before), and startup queues 136k pipelines instead of 165k.
+
+### Texture-coordinate snapping rewrote each shader 32 times (`snap_texcoords`)
+
+Before compiling, every shader source is rewritten to snap 2D texture coordinates to the 1/256 texel
+grid. The old code searched the whole source once per texture slot (32 slots) and inserted text in
+place. Background compiles from `cache_warm_step` ran this on the render thread. It now makes one
+pass over the declarations and one over the sample calls, then builds the output once.
+
+The output must not change: the system Metal cache is keyed by the source, so any byte difference
+would recompile every shader. Old and new produce identical output for 4,292 shaders dumped from a
+play session (`WWHD_DUMP_SHADERS=1`), plus hand-written edge cases (nested calls, two-digit slots,
+non-2D textures, unbalanced parentheses). The new version is 25× faster (301 ms → 12 ms for that
+set). In the 20 s run, memchr/memcmp under `compile_msl` dropped from ~670 samples to ~160.
+
+### Render thread polled for compiles (`wait_compiled`)
+
+When a draw needs a shader or pipeline that's still compiling, the render thread waits up to 25 ms
+per frame (`WWHD_COMPILE_WAIT_MS`) before skipping the draw. It used to poll: `usleep(100)` plus a
+clock read in a loop. Metal's completion handlers now publish the result through `compile_done`,
+which signals a condition variable that `wait_compiled` sleeps on until the result arrives or the
+time runs out.
+
+| same 20 s run | before | after |
+|---|---|---|
+| clock reads (`mach_continuous_time`) | 423 samples | 24 |
+| draws skipped while a pipeline compiles | 247 | 0 |
+
+The render thread now wakes as soon as a compile finishes instead of up to 0.1 ms (plus timer
+slack) later, so fewer waits run out of time. Busy samples for the whole process went from ~10,400
+to ~9,900 with both of these changes.
+
+### Vulkan: fixed 2 ms spin before every vsync (`park_sleep_until`)
+
+With the Vulkan renderer on macOS, the game thread's vsync wait slept until 2 ms before the vsync and
+busy-waited the rest, because sleep timers wake late. Measured in game, they wake 0.25–1 ms late (rarely
+1.75 ms), so most of the 2 ms was spent spinning: ~1,700 samples, 15% of Vulkan's busy CPU. The window
+now follows the measured lateness: the largest of the last 120 wakes plus 250 µs, kept within
+0.5–2 ms; a wake past the vsync puts it straight back at 2 ms. `WWHD_VSYNC_SPIN_US=n` fixes the window.
+
+| Vulkan, same 20 s run | fixed 2 ms | adaptive |
+|---|---|---|
+| clock reads in the vsync wait | 1,844 samples | 768 |
+| busy samples, whole process | 11,393 | 9,806 |
+
+Over a 60 s run, 20 of ~3,200 waits woke after the vsync (none with the fixed window), all by under a
+millisecond of a 33 ms frame. Swaps slower than 36 ms were the same in both: 2.
+
+### Metal: shader key rehashed on every state change (`stage_state_hash`)
+
+A draw re-derives its shaders whenever a shader-relevant register changed (`g_shader_state_gen`):
+~2,950 lookups per frame with 60 fps interpolation, ~60% of which gathered exactly the same ~400 words
+as the previous lookup for that stage (the generation also moves for registers that aren't in the key,
+and vertex and pixel shaders share it). Each lookup hashed all of them in a serial multiply chain. The
+last gathered words and result are now kept per stage (two buffers, swapped on a change); an identical
+gather returns the previous result after a `memcmp`. Same input, same key, by construction.
+
+### Metal: index conversion (`build_indices`)
+
+Indices were converted with a switch on the index format for every index and `insert` calls for every
+triangle, into a vector allocated per draw. The format is now resolved once per draw (a template over
+the reader), output is written into a presized buffer, and the draw reuses one vector (render thread
+only; the one nested `draw` call, the full-size occlusion redraw, comes after the indices are
+submitted). Old and new produce identical output for 12,675 cases (every primitive type, index format,
+with and without an index buffer, counts 0–64); the new one is ~5× faster on large lists.
+
+| Metal, same 20 s run | before | after |
+|---|---|---|
+| `get_shader_uncached` self time | 626 samples | 336 |
+| `build_indices` self time | 291 | 57 |
+| renderer samples | 2,701 | 2,262 |
+| busy samples, whole process | 9,242 | 8,812 |
+
+## Open leads
+
+Ranked by expected payoff. Sample counts are from the 20 s run above.
+
+1. **Boot time: shader cache replay (~6.2 s + 1.6 s head start).** `cache_load` decompiles all
+   ~260k cached shaders on the render thread before the first draw. They're only 2,344 distinct
+   programs: the key (`stage_state_hash`) includes render-target and texture state, so each program
+   averages ~111 translations, and `shaders.bin` reaches ~290 MB. Options:
+   - spread the decompiles across worker threads (the decompiler would need to be checked for
+     shared state first);
+   - store the translated MSL, so replay skips the decompile;
+   - narrow the key. That is a correctness risk: every register in it changes the generated code
+     somewhere.
+2. **`OSSendMessage` (~300 samples, measured, not worth changing).** One job queue carries ~26,000
+   messages a second (sender `0276035C`, one worker receiving). The `notify_all` almost always wakes
+   a worker that is really waiting, which is necessary; macOS already skips the kernel call when no
+   thread waits, so waking only on waiters would save next to nothing.
+3. **Recompiled code (small).** `PPC_ENTER` checks the trace flag and the preemption flag on every
+   function call; compiling the trace check out of release builds saves a little. Keep
+   `-ffp-contract=off` and the exact rounding: they are what makes the results correct.

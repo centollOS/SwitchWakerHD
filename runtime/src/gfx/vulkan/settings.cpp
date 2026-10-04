@@ -11,7 +11,7 @@ struct Settings {
     std::atomic<int> ao{std::getenv("WWHD_AO_MODE") ? normalize(std::atoi(std::getenv("WWHD_AO_MODE"))) : std::getenv("WWHD_NO_AO_QUIRK") ? 0 : 2};
     std::atomic<bool> hires{!std::getenv("WWHD_AO_HIRES") || std::atoi(std::getenv("WWHD_AO_HIRES")) != 0};
     std::atomic<bool> aniso{std::getenv("WWHD_ANISO") && std::atoi(std::getenv("WWHD_ANISO")) != 0};
-    std::atomic<bool> fxaa{std::getenv("WWHD_FXAA") != nullptr};
+    std::atomic<bool> fxaa{std::getenv("WWHD_FXAA") && std::atoi(std::getenv("WWHD_FXAA")) != 0};
     std::atomic<int> filter{[] { const char* e = std::getenv("WWHD_SCALE_FILTER"); return e && !std::strcmp(e,"sharp") ? 1 : e && !std::strcmp(e,"integer") ? 2 : 0; }()};
     std::atomic<bool> available[static_cast<int>(GraphicsFeature::Count)]{};
 };
