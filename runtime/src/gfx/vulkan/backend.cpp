@@ -1584,6 +1584,61 @@ void save_renderer_caches() {
   save_pipeline_cache();
 }
 #ifdef WWHD_SDL_HOST
+// GamePad touch screen: left mouse button in the GamePad window, mapped through the centred picture
+// (the same fit as present.cpp's present_rect) to 0..1 touch coordinates
+static bool gamepad_touch(const SDL_Event& event) {
+  if (!R.drc.window) return false;
+  const SDL_WindowID id = SDL_GetWindowID(R.drc.window);
+  static bool held = false;
+  float x = 0, y = 0;
+  bool down = false;
+  switch (event.type) {
+  case SDL_EVENT_MOUSE_BUTTON_DOWN:
+  case SDL_EVENT_MOUSE_BUTTON_UP:
+    if (event.button.windowID != id || event.button.button != SDL_BUTTON_LEFT) return false;
+    x = event.button.x; y = event.button.y; down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+    break;
+  case SDL_EVENT_MOUSE_MOTION:
+    if (event.motion.windowID != id || !held) return false;
+    x = event.motion.x; y = event.motion.y; down = true;
+    break;
+  case SDL_EVENT_WINDOW_FOCUS_LOST:
+    if (event.window.windowID == id && held) { held = false; input::set_touch(false, 0, 0); }
+    return false;
+  default:
+    return false;
+  }
+  int pw = 0, ph = 0;
+  SDL_GetWindowSizeInPixels(R.drc.window, &pw, &ph);
+  const float density = SDL_GetWindowPixelDensity(R.drc.window);
+  x *= density; y *= density;
+  const float sw = R.drc.scan ? float(R.drc.scan->extent.width) : 854.0f;
+  const float sh = R.drc.scan ? float(R.drc.scan->extent.height) : 480.0f;
+  float scale = std::min(float(pw) / sw, float(ph) / sh);
+  if (scale_filter() == 2 && scale >= 1) scale = std::floor(scale + 1e-3f);
+  const float w = sw * scale, h = sh * scale, ox = (pw - w) * 0.5f, oy = (ph - h) * 0.5f;
+  const float tx = (x - ox) / w, ty = (y - oy) / h;
+  if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && (tx < 0 || tx > 1 || ty < 0 || ty > 1)) return true;  // outside the picture
+  held = down;
+  input::set_touch(down, std::clamp(tx, 0.0f, 1.0f), std::clamp(ty, 0.0f, 1.0f));
+  return true;
+}
+
+// full screen: F11 or Alt+Enter toggles the focused window (TV or GamePad)
+static bool fullscreen_key(const SDL_Event& event) {
+  if (event.type != SDL_EVENT_KEY_DOWN || event.key.repeat) return false;
+  const bool f11 = event.key.scancode == SDL_SCANCODE_F11 && !(event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI));
+  const bool altEnter = (event.key.scancode == SDL_SCANCODE_RETURN || event.key.scancode == SDL_SCANCODE_KP_ENTER) &&
+                        (event.key.mod & SDL_KMOD_ALT);
+  if (!f11 && !altEnter) return false;
+  SDL_Window* window = SDL_GetWindowFromID(event.key.windowID);
+  if (!window) window = R.tv.window;
+  const bool full = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
+  SDL_SetWindowFullscreen(window, !full);
+  LOG("[display] %s %s", window == R.drc.window ? "GamePad window" : "TV window", full ? "windowed" : "full screen");
+  return true;
+}
+
 void run_main_loop() {
   auto titleTime = std::chrono::steady_clock::now();
   uint64_t titleFrames = gx2::flips_presented();
@@ -1597,6 +1652,8 @@ void run_main_loop() {
         gx2::checkpoint_vulkan_caches();
         std::_Exit(0);
       }
+      if (fullscreen_key(event)) continue;
+      if (gamepad_touch(event)) continue;
       input::handle_event(event);
       for (Screen *s : {&R.tv, &R.drc})
         if (s->window && event.window.windowID == SDL_GetWindowID(s->window)) {
