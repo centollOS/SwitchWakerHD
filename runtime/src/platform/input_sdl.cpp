@@ -13,6 +13,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <utility>
 #include <vector>
 namespace render { uint64_t frame_count(); }
 namespace gfxvk { bool graphics_hotkey(char key, bool activate); }
@@ -30,6 +31,7 @@ static std::u16string g_initial,g_text;
 static int g_max_len=0,g_pending_max_len=0;
 static std::string g_previous_title;
 void set_prompt_window(SDL_Window* window){g_prompt_window=window;}
+bool text_prompt_active(){return (bool)g_done;}
 static int keycode(SDL_Scancode code) {
  switch(code) {
  case SDL_SCANCODE_A: return kVK_ANSI_A;
@@ -166,8 +168,10 @@ static std::string utf8(const std::u16string& text){
  }return out;
 }
 static void show_prompt(){if(g_prompt_window)SDL_SetWindowTitle(g_prompt_window,("Enter text (Enter confirms, Escape cancels): "+utf8(g_text)).c_str());}
+// std::exchange, not std::move: libc++ leaves a moved-from std::function set, which kept the
+// prompt "active" after the first text (keys swallowed, later prompts never opened).
 static void finish_prompt(bool ok){
- auto done=std::move(g_done);auto text=std::move(g_text);
+ auto done=std::exchange(g_done,nullptr);auto text=std::move(g_text);
  if(g_prompt_window){SDL_StopTextInput(g_prompt_window);SDL_SetWindowTitle(g_prompt_window,g_previous_title.c_str());}
  release_keys();if(done)done(ok,std::move(text));
 }
@@ -220,7 +224,7 @@ void handle_event(const SDL_Event& event){
 void update(){
  mods::update_mouse();
  std::function<void(bool,std::u16string)> cancelled;
- {std::lock_guard lk(g_mu);if(g_pending&&!g_done){g_done=std::move(g_pending);g_text=std::move(g_initial);g_max_len=g_pending_max_len;memset(g_keys,0,sizeof g_keys);if(!g_prompt_window)g_prompt_window=SDL_GetKeyboardFocus();if(g_prompt_window){g_previous_title=SDL_GetWindowTitle(g_prompt_window);if(SDL_StartTextInput(g_prompt_window)){show_prompt();LOG("[input] the game asks for text: type it in the game window (shown in the window title), Enter confirms, Escape cancels; WWHD_SWKBD_TEXT=<text> answers automatically");}else{LOG("[input] text input unavailable (%s); set WWHD_SWKBD_TEXT=<text>",SDL_GetError());cancelled=std::move(g_done);}}else{LOG("[input] text input: no window to type in; set WWHD_SWKBD_TEXT=<text>");cancelled=std::move(g_done);}}}
+ {std::lock_guard lk(g_mu);if(g_pending&&!g_done){g_done=std::exchange(g_pending,nullptr);g_text=std::move(g_initial);g_max_len=g_pending_max_len;memset(g_keys,0,sizeof g_keys);if(!g_prompt_window)g_prompt_window=SDL_GetKeyboardFocus();if(g_prompt_window){g_previous_title=SDL_GetWindowTitle(g_prompt_window);if(SDL_StartTextInput(g_prompt_window)){show_prompt();LOG("[input] the game asks for text: type it in the game window (shown in the window title), Enter confirms, Escape cancels; WWHD_SWKBD_TEXT=<text> answers automatically");}else{LOG("[input] text input unavailable (%s); set WWHD_SWKBD_TEXT=<text>",SDL_GetError());cancelled=std::exchange(g_done,nullptr);}}else{LOG("[input] text input: no window to type in; set WWHD_SWKBD_TEXT=<text>");cancelled=std::exchange(g_done,nullptr);}}}
  if(cancelled)cancelled(false,{});
  float v[input_map::kPadCount]={};using namespace input_map;
  auto put=[&](int p,float x){v[p]=std::max(v[p],x);};
