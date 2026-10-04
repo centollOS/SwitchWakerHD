@@ -13,6 +13,9 @@
 #include <ctime>
 #include <filesystem>
 #include "platform/host.h"
+#ifdef _WIN32
+#include <timeapi.h>
+#endif
 
 #include <cstring>
 #include <string>
@@ -160,6 +163,12 @@ static void init_data_imports() {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // Windows sleeps in steps of the system timer (15.6 ms by default): sleep_for(1 ms) took
+    // 15.7 ms, the 3 ms AX frame loop ran in bursts and vsync waits alternated 15.7 / 31.5 ms.
+    // 1 ms resolution for the whole process; Windows restores it when the process exits.
+    timeBeginPeriod(1);
+#endif
     bool warm_shaders = false;
 #ifdef WWHD_HAS_VULKAN
     bool renderer_smoke = false;
