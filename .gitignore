@@ -1,5 +1,5 @@
-# game data (copyrighted, user-supplied)
-/game/
+# game data (copyrighted, user-supplied); no trailing slash, so a symlinked game/ is ignored too
+/game
 game.wux
 game.key
 *.rpx
