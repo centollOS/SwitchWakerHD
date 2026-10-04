@@ -509,12 +509,26 @@ void park_sleep_until(std::chrono::steady_clock::time_point tp, bool precise,
     }
     block_begin();
     if (precise) {
-        // macOS sleep timers can resume about 1 ms after the requested vsync.
-        // Keep the guest core released during this bounded final interval.
-        constexpr auto spinWindow = std::chrono::milliseconds(2);
-        const auto sleepDeadline = tp - spinWindow;
-        if (std::chrono::steady_clock::now() < sleepDeadline)
+        // macOS sleep timers can resume about 1 ms after the requested vsync, so the last part is
+        // spun with the guest core released. The spin window follows the measured lateness: the
+        // largest of the last 120 wakes plus a margin, 0.5..2 ms; a wake past the deadline goes
+        // straight back to 2 ms. (A fixed 2 ms window spun ~1.5 ms per vsync, 15% of Vulkan's CPU.)
+        // WWHD_VSYNC_SPIN_US=n fixes the window at n microseconds.
+        using us = std::chrono::microseconds;
+        static const long fixedUs = getenv("WWHD_VSYNC_SPIN_US") ? atol(getenv("WWHD_VSYNC_SPIN_US")) : -1;
+        static thread_local us window{fixedUs >= 0 ? fixedUs : 2000}, peak{0};
+        static thread_local int wakes = 0;
+        const auto sleepDeadline = tp - window;
+        if (std::chrono::steady_clock::now() < sleepDeadline) {
             std::this_thread::sleep_until(sleepDeadline);
+            const auto woke = std::chrono::steady_clock::now();
+            peak = std::max(peak, std::chrono::duration_cast<us>(woke - sleepDeadline));
+            if (fixedUs < 0 && (woke >= tp || ++wakes == 120)) {
+                window = woke >= tp ? us{2000} : std::clamp(peak + us{250}, us{500}, us{2000});
+                peak = us{0};
+                wakes = 0;
+            }
+        }
         while (std::chrono::steady_clock::now() < tp) {}
     } else {
         std::this_thread::sleep_until(tp);
