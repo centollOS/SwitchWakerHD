@@ -246,6 +246,11 @@ or as a Wii U Pro Controller (`WWHD_PRO_CONTROLLER=1` starts in that mode); with
 Controller, the GamePad window keeps its screen and touch input.
 When the game asks for text (e.g. your name), a macOS text field opens.
 
+Rumble works too (SDL hosts): what the game asks its controller's motor to do is passed to the
+connected controllers that have one, which includes the Pro Controller's (`WWHD_RUMBLE=0` turns
+it off). A host controller has a single motor, so a rumble pattern becomes its average strength
+for the length of one pass.
+
 The **Display** menu: full screen for the TV window (**⌘F**, **⌃⌘F** or the green button; the
 pointer hides after 2 s without movement), picture scaling (smooth, sharp, or integer scale) and
 where the GamePad screen goes: a separate window (which can be put on another display, also in
@@ -265,7 +270,7 @@ and the renderer are remembered in `~/Library/Application Support/wwhd/display.p
   `WWHD_AUDIO_VOLUME=0..1`, `WWHD_SHADER_CACHE=<file>|0`, `WWHD_AO_MODE=0..2`, `WWHD_AO_HIRES=0|1`, `WWHD_ANISO=0|1`, `WWHD_RES_SCALE=1|1.5|2|3`,
   `WWHD_FXAA=0|1`, `WWHD_INTERP=1`, `WWHD_TRUE60=1` (start values for the Graphics menu);
   `WWHD_SHADOW_SCALE=n` gives the shadow maps their own resolution factor; `WWHD_STATE_DIR=<dir>`
-  stores save states elsewhere.
+  stores save states elsewhere; `WWHD_RUMBLE=0` (SDL builds) leaves the controller motors alone.
 - Crashes and game halts write `captures/crash-<time>.log` (crash address, registers, the guest call
   chain, a host backtrace and the last log lines; useful for bug reports, it contains only addresses,
   function names and log text).
