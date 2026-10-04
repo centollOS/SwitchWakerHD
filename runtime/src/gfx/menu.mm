@@ -47,9 +47,44 @@ static NSWindow* g_tv;
 static double g_fps = 0;  // frames presented per second, measured over the last half second
 static NSString* const kTitle = @"The Legend of Zelda: The Wind Waker HD (recompiled)";
 
+// Graphics options are kept across launches (macOS user defaults, domain "wwhd"); an option's WWHD_*
+// environment variable overrides the saved value for that run and is not saved. Scripted test runs
+// (WWHD_NO_HOST_INPUT) neither read nor write them.
+static const bool g_prefs = getenv("WWHD_NO_HOST_INPUT") == nullptr;
+static bool g_prefs_loaded = false;  // nothing is saved before the saved values were applied
+static bool env_set(std::initializer_list<const char*> env) {
+    for (const char* e : env)
+        if (getenv(e)) return true;
+    return false;
+}
+static void load_prefs() {
+    g_prefs_loaded = true;
+    if (!g_prefs) return;
+    NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+    auto saved = [&](NSString* key, std::initializer_list<const char*> env) { return !env_set(env) && [d objectForKey:key] != nil; };
+    if (saved(@"resScale", {"WWHD_RES_SCALE"})) set_res([d floatForKey:@"resScale"]);
+    if (saved(@"aoMode", {"WWHD_AO_MODE", "WWHD_NO_AO_QUIRK"})) render::set_ao_mode((int)[d integerForKey:@"aoMode"]);
+    if (saved(@"aoHires", {"WWHD_AO_HIRES"})) render::set_ao_hires([d boolForKey:@"aoHires"]);
+    if (saved(@"aniso", {"WWHD_ANISO"})) render::set_aniso([d boolForKey:@"aniso"]);
+    if (saved(@"fxaa", {"WWHD_FXAA"})) render::set_fxaa([d boolForKey:@"fxaa"]);
+    if (saved(@"fps60", {"WWHD_INTERP", "WWHD_TRUE60"})) interp::set_mode((int)[d integerForKey:@"fps60"]);
+}
+static void save_prefs() {
+    if (!g_prefs || !g_prefs_loaded) return;
+    NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+    if (!env_set({"WWHD_RES_SCALE"})) [d setFloat:current_res_scale() forKey:@"resScale"];
+    if (!env_set({"WWHD_AO_MODE", "WWHD_NO_AO_QUIRK"})) [d setInteger:render::ao_mode() forKey:@"aoMode"];
+    if (!env_set({"WWHD_AO_HIRES"})) [d setBool:render::ao_hires() forKey:@"aoHires"];
+    if (!env_set({"WWHD_ANISO"})) [d setBool:render::aniso() forKey:@"aniso"];
+    if (!env_set({"WWHD_FXAA"})) [d setBool:render::fxaa() forKey:@"fxaa"];
+    if (!env_set({"WWHD_INTERP", "WWHD_TRUE60"})) [d setInteger:interp::mode() forKey:@"fps60"];
+}
+
 // the TV title summarises the active options so a key press is visible without opening the menu;
-// it starts with the renderer in use (and notes a fallback or a choice waiting for a restart)
+// it starts with the renderer in use (and notes a fallback or a choice waiting for a restart).
+// Every option change ends here, so this also saves them
 static void update_title() {
+    save_prefs();
     static const char* ao[3] = {"original", "centre fix", "centre + noise fix"};
     NSString* res = current_res_scale() != 1.0f ? [NSString stringWithFormat:@" \u00b7 %gx res", current_res_scale()] : @"";
     if (aspect::mode() != aspect::kOriginal) res = [res stringByAppendingFormat:@" \u00b7 %s", aspect::mode_name(aspect::mode())];
@@ -352,6 +387,12 @@ void install_menu(NSWindow* tv) {
 
     NSApp.mainMenu = bar;
     update_title();
+    // apply the saved options once the renderer is settled: the menu is installed with the windows,
+    // before a Vulkan start can still fail and fall back to Metal; the main queue runs after that
+    dispatch_async(dispatch_get_main_queue(), ^{
+        load_prefs();
+        update_title();
+    });
     // live frame rate: presented frames over the last half second
     [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer*) {
         static uint64_t last = gx2::flips_presented();

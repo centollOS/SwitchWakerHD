@@ -217,7 +217,8 @@ window title shows what is active and the current frame rate): 60 fps by frame i
 cycles; the game renders at 1280x720, 2x renders at 2560x1440), edge smoothing (FXAA, **8**),
 ambient-occlusion mode (**O** cycles), full-size occlusion depth (**M**), 16x anisotropic
 filtering (**N**), the aspect ratio, the renderer (Metal or Vulkan), and a frame capture for debugging (**P** or fn+F12, written to `captures/`;
-captures contain game imagery, so keep them to yourself).
+captures contain game imagery, so keep them to yourself). The Graphics choices are remembered
+between launches (macOS preferences; `defaults delete wwhd` resets them).
 True 60 (**7**) computes Link and the camera at 60 Hz while the game state after every 30 Hz step
 stays bit-identical to the 30 fps game, except the random-number sequence, which drifts because
 drawing code draws random numbers too (later drops and ambient behaviour differ like in any other
