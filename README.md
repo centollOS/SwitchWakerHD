@@ -130,6 +130,17 @@ cmake --build build/linux
 ./build/linux/wwhd --renderer-smoke     # checks the Vulkan renderer, no game files needed
 ```
 
+If linking fails with unwinder errors (missing `_Unwind_*` symbols or `-lunwind`), your clang is set up to
+use LLVM's libunwind. Configure with the GCC unwinder instead:
+
+```sh
+cmake -S . -B build/linux -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_EXE_LINKER_FLAGS="--unwindlib=libgcc"
+```
+
+Closing the TV window ends the game; closing the GamePad window only hides it. F11 or Alt+Enter toggles
+full screen for the focused window.
+
 On Arch-based systems (Arch, CachyOS, Manjaro):
 
 ```sh

@@ -1634,8 +1634,29 @@ static bool fullscreen_key(const SDL_Event& event) {
   SDL_Window* window = SDL_GetWindowFromID(event.key.windowID);
   if (!window) window = R.tv.window;
   const bool full = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
-  SDL_SetWindowFullscreen(window, !full);
-  LOG("[display] %s %s", window == R.drc.window ? "GamePad window" : "TV window", full ? "windowed" : "full screen");
+  const char* which = window == R.drc.window ? "GamePad window" : "TV window";
+  if (!SDL_SetWindowFullscreen(window, !full))
+    LOG("[display] %s: switching to %s failed: %s", which, full ? "windowed" : "full screen", SDL_GetError());
+  else
+    LOG("[display] %s %s", which, full ? "windowed" : "full screen");
+  return true;
+}
+
+// Closing the TV window ends the game. SDL only sends SDL_EVENT_QUIT once every window is closed, so
+// with the GamePad window open the close button of the TV window did nothing. Closing the GamePad
+// window only hides it (WWHD_NO_GAMEPAD=1 starts without it).
+static void quit_game() {
+  gx2::checkpoint_vulkan_caches();
+  std::_Exit(0);
+}
+static bool close_request(const SDL_Event& event) {
+  if (event.type != SDL_EVENT_WINDOW_CLOSE_REQUESTED) return false;
+  if (event.window.windowID == SDL_GetWindowID(R.tv.window)) quit_game();
+  if (R.drc.window && event.window.windowID == SDL_GetWindowID(R.drc.window)) {
+    SDL_HideWindow(R.drc.window);
+    R.drc.visible = false;
+    LOG("[display] GamePad window closed (hidden); the game keeps running");
+  }
   return true;
 }
 
@@ -1648,10 +1669,8 @@ void run_main_loop() {
   for (;;) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
-      if (event.type == SDL_EVENT_QUIT) {
-        gx2::checkpoint_vulkan_caches();
-        std::_Exit(0);
-      }
+      if (event.type == SDL_EVENT_QUIT) quit_game();
+      if (close_request(event)) continue;
       if (fullscreen_key(event)) continue;
       if (gamepad_touch(event)) continue;
       input::handle_event(event);
