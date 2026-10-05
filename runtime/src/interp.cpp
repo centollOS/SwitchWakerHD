@@ -13,6 +13,7 @@
 // eye +0xDC, center +0xE8, up +0xF4, bank (s16) +0x100.
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -202,6 +203,11 @@ bool g_cam_blended = false; // camera_draw is drawing the blended (halfway) came
 bool g_logic_pass = false;  // logic pass with interpolation on: camera drawn halfway
 bool g_hold_next = false;   // the next pass is a hold pass
 bool g_hold_frame = false;  // inside the per-frame function on a hold pass
+// paced interpolation: a logic pass that does not follow an in-between pass draws its step exactly.
+// The previous states the halfway frames blend from (camera, model joints, effects) are recorded on
+// the in-between pass; without one they are steps old (camera trailing behind Link, models jumping,
+// a head blended from another step than its body).
+bool g_exact_step = false;
 // last camera state that was drawn normally, per camera process
 struct Prev { uint32_t cam = 0; CamState s{}; bool valid = false; };
 Prev g_prev[4];
@@ -374,7 +380,7 @@ void blend_mtx(const float* a, const float* b, float* out) {
 extern "C" void hook_027F55FC(Cpu* c) {
     using namespace interp;
     static const bool off = getenv("WWHD_INTERP_MODELS") && !atoi(getenv("WWHD_INTERP_MODELS"));  // debug
-    if (!enabled() || off || (!g_hold && true60::drawing_60())) {
+    if (!enabled() || off || (!g_hold && (true60::drawing_60() || g_exact_step))) {
         f_027F55FC_orig(c);
         return;
     }
@@ -486,6 +492,69 @@ void ss_reset() {
     fx_ss_reset();
     true60::ss_reset();
 }
+// Paced interpolation (WWHD_INTERP_PACED=1, the default on Android): the in-between pass is drawn
+// only when it fits before the next logic step is due (33.3 ms after the last one, measured with
+// the passes' recent durations); otherwise it is dropped and the next step waits for its time. The
+// game then always advances 30 steps a second, and the picture gets 60 frames a second where the
+// device draws them fast enough and fewer where it does not. Without pacing, every logic step is
+// followed by an in-between pass, and a device that draws fewer than 60 frames a second runs the
+// whole game slower than real time.
+static bool paced() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_INTERP_PACED");
+#ifdef __ANDROID__
+        return !e || atoi(e) != 0;
+#else
+        return e && atoi(e) != 0;
+#endif
+    }();
+    return on;
+}
+bool paced_interpolation() { return paced(); }
+// The decision is taken at the end of each logic pass, before the frame's controller read: that
+// read repeats the previous sample when an in-between pass follows (repeat_input), so deciding later
+// left every read a repeat while all in-between passes were dropped (the controller stopped).
+using pace_clock = std::chrono::steady_clock;
+static pace_clock::time_point g_last_logic{}, g_last_entry{};
+static pace_clock::duration g_slept{}, g_pass_avg = std::chrono::milliseconds(16);
+static bool g_wait_step = false;  // no in-between pass: the next logic pass waits for its time
+static uint64_t g_paced_dropped = 0, g_paced_holds = 0;
+constexpr auto kPacedStep = std::chrono::nanoseconds(33'333'333);
+// start of every pass: the last pass's own duration, and the wait before a logic pass that follows
+// another logic pass directly
+static void paced_pass_start() {
+    static bool previousHold = false;
+    if (!paced() || !interp_on()) { g_exact_step = false; previousHold = false; return; }
+    if (!g_hold_next) g_exact_step = !previousHold;  // this logic pass: blend only after a hold
+    previousHold = g_hold_next;
+    const auto now = pace_clock::now();
+    if (g_last_entry != pace_clock::time_point{})
+        g_pass_avg = (g_pass_avg * 3 + (now - g_last_entry - g_slept)) / 4;
+    g_last_entry = now;
+    g_slept = {};
+    if (g_hold_next) return;
+    if (g_wait_step && now < g_last_logic + kPacedStep) {
+        threads::park_sleep_until(g_last_logic + kPacedStep);  // the game keeps 30 steps a second
+        g_slept = pace_clock::now() - now;
+    }
+    g_wait_step = false;
+    g_last_logic = pace_clock::now();
+}
+// end of a logic pass: an in-between pass follows only if it fits before the next step is due
+static void paced_after_logic() {
+    if (!paced() || !interp_on()) { g_hold_next = true; return; }
+    const auto elapsed = pace_clock::now() - g_last_logic;
+    const bool fits = elapsed + g_pass_avg <= kPacedStep + std::chrono::milliseconds(2);
+    g_hold_next = fits;
+    g_wait_step = !fits;
+    (fits ? g_paced_holds : g_paced_dropped)++;
+    if (g_paced_dropped + g_paced_holds >= 300) {
+        LOG("[interp] paced: %.0f%% of in-between frames drawn (pass %.1f ms)",
+            100.0 * g_paced_holds / double(g_paced_dropped + g_paced_holds),
+            std::chrono::duration<double, std::milli>(g_pass_avg).count());
+        g_paced_dropped = g_paced_holds = 0;
+    }
+}
 }  // namespace interp
 
 namespace mods { void cheats_service(); }  // mods/cheats.cpp
@@ -502,6 +571,7 @@ extern "C" void hook_0203593C(Cpu* c) {
     static uint64_t at60 = getenv("WWHD_TRUE60_AT_STEP") ? strtoull(getenv("WWHD_TRUE60_AT_STEP"), nullptr, 10) : 0;
     static uint64_t passes60 = 0;
     if (at60 && ++passes60 == at60) set_mode(2);
+    paced_pass_start();
     true60::new_pass();
     true60::pass_begin(!enabled() || !g_hold_next);  // full pass: take back Link's half-pass preview
     if (!enabled() || !g_hold_next) g_logic_steps++;
@@ -527,7 +597,7 @@ extern "C" void hook_0203593C(Cpu* c) {
         g_ubo.clear();  // not updated last time (not drawn)
     }
     f_0203593C_orig(c);  // logic pass (the loop body hook marks it)
-    g_hold_next = true;
+    paced_after_logic();  // g_hold_next: an in-between pass follows (always, unless paced)
     static uint64_t n = 0, t0 = timebase::now();
     if (++n % 300 == 0) {
         uint64_t t = timebase::now();
@@ -549,7 +619,7 @@ extern "C" void hook_025F172C(Cpu* c) {
         f_025D42EC(c);
         return;
     }
-    g_logic_pass = enabled();
+    g_logic_pass = enabled() && !g_exact_step;  // (an exact step draws like interpolation off)
     f_025F172C_orig(c);
     g_logic_pass = false;
 
