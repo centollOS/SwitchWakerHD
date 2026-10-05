@@ -2,6 +2,50 @@
 
 Measurements and fixes from profiling the port on an Apple Silicon Mac, plus open leads.
 
+## Native Windows checkpoint (2026-10-05)
+
+Use `-DCMAKE_BUILD_TYPE=Release` with native LLVM/Ninja. The previous Windows
+build cache selected Debug, leaving runtime/renderer code at `-O0`; Release now
+uses `-O3 -DNDEBUG`. Exact guest FP settings remain unchanged.
+
+Compared with the Windows port's performance notes, this renderer already has
+asynchronous submission slots, mapped upload arenas,
+grouped render passes, packed shader state, and descriptor reuse. Three missing
+optimizations have been adapted:
+
+- Windows guest deadline sleeps use SDL's high-resolution timer, including the
+  sleep phase of precise vsync waits. Guest core release, freeze gates and
+  completion callbacks retain their existing order.
+- Index conversion retains thread-local scratch capacity. Immutable GPU uploads
+  are copied before that scratch can be reused, including recursive AO replay.
+- Full texture content checks use BSD-licensed xxHash v0.8.3. Every mip and byte
+  is still checked; sparse-check cadence and disk cache formats are unchanged.
+
+Swapchains now prefer mailbox when advertised, with FIFO fallback. The existing
+override in **this** checkout is `WWHD_VK_PRESENT_MODE` (the other checkout uses
+`WWHD_VULKAN_PRESENT_MODE`). To test presentation throttling separately:
+
+```powershell
+$env:WWHD_VK_PRESENT_MODE = 'immediate'
+./build/windows/wwhd.exe
+```
+
+Immediate mode may tear. Remove the variable to restore mailbox/FIFO selection.
+This setting retains guest GX2 pacing and does not guarantee 60 fps.
+
+The Release timer probe (`build/windows/sleep_test.exe`) compares 80 five-ms
+deadlines with `timeBeginPeriod(1)`, matching the game. One local run measured
+standard-library mean/p95 lateness of 0.639/1.011 ms and SDL mean/p95 lateness of
+0.249/0.532 ms. These are timer measurements, not gameplay FPS results. All five
+CTest checks and the GPU renderer smoke test with synchronization validation
+passed on the RX 9070 XT, with no reported validation errors.
+
+Steady 60 fps at 3x resolution and full-resolution AO remains
+unverified. Compare the same scene, camera and settings with warm caches;
+disable validation and detailed profiling for FPS comparisons. Frame
+interpolation increases displayed frames but still needs each rendered frame
+to fit its budget.
+
 ## How to profile
 
 Run a scripted session, then sample it with macOS `sample` (1 ms stacks for every thread):

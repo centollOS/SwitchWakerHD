@@ -8,6 +8,7 @@
 #include <mach/mach.h>
 #endif
 #include "platform/host.h"
+#include "platform/sleep.h"
 #ifdef __APPLE__
 #include <pthread/qos.h>
 #endif
@@ -520,7 +521,7 @@ void park_sleep_until(std::chrono::steady_clock::time_point tp, bool precise,
         static thread_local int wakes = 0;
         const auto sleepDeadline = tp - window;
         if (std::chrono::steady_clock::now() < sleepDeadline) {
-            std::this_thread::sleep_until(sleepDeadline);
+            host::sleep_until(sleepDeadline);
             const auto woke = std::chrono::steady_clock::now();
             peak = std::max(peak, std::chrono::duration_cast<us>(woke - sleepDeadline));
             if (fixedUs < 0 && (woke >= tp || ++wakes == 120)) {
@@ -531,7 +532,7 @@ void park_sleep_until(std::chrono::steady_clock::time_point tp, bool precise,
         }
         while (std::chrono::steady_clock::now() < tp) {}
     } else {
-        std::this_thread::sleep_until(tp);
+        host::sleep_until(tp);
     }
     if (t) park_gate(t);
     // The freeze gate marks the thread busy before host-only completion work.

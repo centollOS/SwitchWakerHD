@@ -423,7 +423,7 @@ void draw_mod_overlay(Surface& scan) {
 // chain, then a linear reduction of the first level at least 32 wide; read back after the frame's fence.
 namespace {
 struct Signature {
- VkImage mip=VK_NULL_HANDLE,small=VK_NULL_HANDLE;VkDeviceMemory mipMemory=VK_NULL_HANDLE,smallMemory=VK_NULL_HANDLE;
+ VkImage mip=VK_NULL_HANDLE,signatureImage=VK_NULL_HANDLE;VkDeviceMemory mipMemory=VK_NULL_HANDLE,smallMemory=VK_NULL_HANDLE;
  uint32_t width=0,height=0,levels=0;Buffer buffer{};bool pending=false,linear=false;
 };
 Signature signatures[2];
@@ -452,8 +452,8 @@ bool record_signature(int slot,Surface& source,bool sourceLinear) {
   uint32_t levels=1;while((w>>levels)>=uint32_t(gfx::kSignatureW)&&(h>>levels)>=1)levels++;
   make_image(g.mip,g.mipMemory,w,h,levels);g.width=w;g.height=h;g.levels=levels;
  }
- if(!g.small) {
-  make_image(g.small,g.smallMemory,gfx::kSignatureW,gfx::kSignatureH,1);
+ if(!g.signatureImage) {
+  make_image(g.signatureImage,g.smallMemory,gfx::kSignatureW,gfx::kSignatureH,1);
   g.buffer=create_buffer(gfx::kSignatureW*gfx::kSignatureH*4,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
  }
  transition_image(&source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
@@ -472,13 +472,13 @@ bool record_signature(int slot,Surface& source,bool sourceLinear) {
  }
  const uint32_t last=g.levels-1;
  level_barrier(cmd,g.mip,last,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,W,Rd);
- level_barrier(cmd,g.small,0,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,W);
+ level_barrier(cmd,g.signatureImage,0,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,W);
  VkImageBlit b{};b.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,last,0,1};b.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
  b.srcOffsets[1]={int(std::max(w>>last,1u)),int(std::max(h>>last,1u)),1};b.dstOffsets[1]={int(gfx::kSignatureW),int(gfx::kSignatureH),1};
- vkCmdBlitImage(cmd,g.mip,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,g.small,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&b,VK_FILTER_LINEAR);
- level_barrier(cmd,g.small,0,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,W,Rd);
+ vkCmdBlitImage(cmd,g.mip,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,g.signatureImage,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&b,VK_FILTER_LINEAR);
+ level_barrier(cmd,g.signatureImage,0,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,W,Rd);
  VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={gfx::kSignatureW,gfx::kSignatureH,1};
- vkCmdCopyImageToBuffer(cmd,g.small,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,g.buffer.buffer,1,&copy);
+ vkCmdCopyImageToBuffer(cmd,g.signatureImage,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,g.buffer.buffer,1,&copy);
  VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};host.srcAccessMask=W;host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
  host.srcQueueFamilyIndex=host.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;host.buffer=g.buffer.buffer;host.size=VK_WHOLE_SIZE;
  vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&host,0,nullptr);
@@ -504,7 +504,7 @@ std::vector<float> read_signature(int slot) {
 void reset_signatures() {
  for(auto& g:signatures) {
   if(g.mip){vkDestroyImage(R.device,g.mip,nullptr);vkFreeMemory(R.device,g.mipMemory,nullptr);}
-  if(g.small){vkDestroyImage(R.device,g.small,nullptr);vkFreeMemory(R.device,g.smallMemory,nullptr);}
+  if(g.signatureImage){vkDestroyImage(R.device,g.signatureImage,nullptr);vkFreeMemory(R.device,g.smallMemory,nullptr);}
   if(g.buffer.buffer)defer_buffer(g.buffer);
   g=Signature{};
  }

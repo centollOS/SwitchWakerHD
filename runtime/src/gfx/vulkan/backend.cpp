@@ -845,18 +845,22 @@ static void make_swapchain(Screen &s) {
       break;
     }
   ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+  uint32_t modeCount = 0;
+  vk_check(vkGetPhysicalDeviceSurfacePresentModesKHR(R.physicalDevice,
+      s.surface, &modeCount, nullptr), "presentation mode count");
+  std::vector<VkPresentModeKHR> modes(modeCount);
+  vk_check(vkGetPhysicalDeviceSurfacePresentModesKHR(R.physicalDevice,
+      s.surface, &modeCount, modes.data()), "presentation modes");
+  // Prefer the latest ready frame without tearing when the driver supports it.
+  // FIFO remains the fallback; guest GX2 pacing still controls game flips.
+  if (std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_MAILBOX_KHR) != modes.end())
+    ci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
   // Diagnostic override keeps guest GX2 pacing intact while measuring host
   // presentation waits. Never select a mode the surface does not advertise.
   if (const char *mode = std::getenv("WWHD_VK_PRESENT_MODE")) {
     VkPresentModeKHR requested = !std::strcmp(mode, "immediate")
         ? VK_PRESENT_MODE_IMMEDIATE_KHR : !std::strcmp(mode, "mailbox")
         ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
-    uint32_t modeCount = 0;
-    vk_check(vkGetPhysicalDeviceSurfacePresentModesKHR(R.physicalDevice,
-        s.surface, &modeCount, nullptr), "presentation mode count");
-    std::vector<VkPresentModeKHR> modes(modeCount);
-    vk_check(vkGetPhysicalDeviceSurfacePresentModesKHR(R.physicalDevice,
-        s.surface, &modeCount, modes.data()), "presentation modes");
     if (std::find(modes.begin(), modes.end(), requested) != modes.end())
       ci.presentMode = requested;
     LOG("[vulkan] requested presentation mode %s, selected %d", mode,

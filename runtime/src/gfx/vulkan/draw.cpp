@@ -610,7 +610,7 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
       if (i >= 0)
         b.push_back(
             {uint32_t(i), t, 1,
-             st ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT,
+             VkShaderStageFlags(st ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT),
              nullptr});
     };
     add(m.uniformVarsBufferBindingPoint, uniformType);
@@ -1648,7 +1648,10 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
       ((prim != 3 && prim != 6) ||
        (indexType == 0 ? stripRestart && restartIndex == UINT16_MAX
                        : !stripRestart || restartIndex == UINT32_MAX));
-  std::vector<uint32_t> indices;
+  // Draw uploads copy the converted bytes before the optional AO replay calls
+  // draw again. Retain CPU capacity; queued GPU work owns separate arena slices.
+  static thread_local std::vector<uint32_t> indices;
+  indices.clear();
   // Conversion emits a known number of indices. Allocate once rather than
   // repeatedly growing and copying the vector for every indexed draw.
   size_t convertedCount = indexAddr ? size_t(count) : 0;

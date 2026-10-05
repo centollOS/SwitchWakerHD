@@ -9,6 +9,11 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#define strcasecmp _stricmp
+#else
+#include <strings.h>
+#endif
 #ifndef _WIN32
 #include <unistd.h>
 #endif

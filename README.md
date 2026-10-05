@@ -189,8 +189,29 @@ run the game).
 
 ### Windows
 
-The Windows build uses the same Vulkan renderer and SDL3 host as Linux. Build it with Clang from
-[MSYS2](https://www.msys2.org/) in the **CLANG64** shell (MSVC is not supported: the recompiled game
+The Windows build uses the same Vulkan renderer and SDL3 host as Linux. For a native build without
+MSYS2, install LLVM (with `clang` and `clang++`), CMake, Ninja, Visual Studio's **Desktop development
+with C++** workload (for the Windows headers and runtime libraries), and the Vulkan SDK. Ensure
+`clang`, `clang++`, `cmake` and `ninja` are on `PATH`, and `VULKAN_SDK` points to the SDK installation.
+After generating `build/gen` as described above, run from PowerShell:
+
+```powershell
+cmake -S . -B build/windows -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build/windows
+ctest --test-dir build/windows --output-on-failure
+./build/windows/wwhd.exe --renderer-smoke
+```
+
+CMake uses installed native dependency packages where available and downloads pinned source
+releases of missing glslang, SDL3, zlib and LZ4 dependencies into the build directory. The first
+configure therefore needs internet access. SDL3's DLL is copied next to the executable. To use
+an existing zlib installation, set `ZLIB_ROOT` or the standard `ZLIB_INCLUDE_DIR`,
+`ZLIB_LIBRARY_RELEASE` and `ZLIB_LIBRARY_DEBUG` cache variables. Use separate build directories
+for native LLVM and MSYS2 toolchains. Microsoft's `cl.exe` compiler is not supported because
+the recompiled game requires Clang's `musttail` support.
+
+Alternatively, build with Clang from
+[MSYS2](https://www.msys2.org/) in the **CLANG64** shell (Microsoft's `cl.exe` is not supported: the recompiled game
 needs Clang):
 
 ```sh

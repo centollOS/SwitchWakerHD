@@ -2,6 +2,8 @@
 #include "backend.h"
 #include "settings.h"
 #include "sparse_hash_memo.h"
+#define XXH_INLINE_ALL
+#include "../../../third_party/xxhash/xxhash.h"
 #include "Cafe/HW/Latte/ISA/LatteReg.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/LatteAddrLib/LatteAddrLib.h"
@@ -65,19 +67,10 @@ static const LatteAddrLib::AddrSurfaceInfo_OUT& guest_info(const Surface* s, uin
 static void check_vk(VkResult result, const char* what) {
     if (result != VK_SUCCESS) throw std::runtime_error(std::string("Vulkan surfaces: ")+what+" failed ("+std::to_string(result)+")");
 }
-static uint64_t fnv(const uint8_t* p, size_t n) {
-    uint64_t h = 0x9E3779B97F4A7C15ull;
-    size_t i = 0;
-    // Full coverage with one mixing dependency per word. memcpy permits guest
-    // addresses with any alignment; the remaining bytes never read past n.
-    for (; n - i >= sizeof(uint64_t); i += sizeof(uint64_t)) {
-        uint64_t word;
-        memcpy(&word, p + i, sizeof(word));
-        h = (h ^ word) * 0xFF51AFD7ED558CCDull;
-        h ^= h >> 32;
-    }
-    for (; i < n; ++i) h = (h ^ p[i]) * 0x100000001B3ull;
-    return h ^ (h >> 29) ^ uint64_t(n);
+static uint64_t content_hash(const uint8_t* p, size_t n) {
+    // Full-byte coverage, including unaligned guest ranges and the final tail.
+    // Only transient surface hashes use XXH3; disk cache checksums stay stable.
+    return XXH3_64bits(p, n);
 }
 uint64_t next_write_seq() { static uint64_t seq=0; return ++seq; }
 static float parse_scale(const char* e) {
@@ -495,7 +488,7 @@ void create_surface_image(Surface* s, bool forRendering, VkExtent3D explicitExte
         check_vk(vkBindImageMemory(R.device,s->image,s->memory,0),"bind image memory");
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};viewInfo.image=s->image;
         viewInfo.viewType=s->viewType;viewInfo.format=s->fmt.pixel;
-        viewInfo.subresourceRange={s->fmt.depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT,0,s->mips,0,s->arrayLayers};
+        viewInfo.subresourceRange={VkImageAspectFlags(s->fmt.depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT),0,s->mips,0,s->arrayLayers};
         check_vk(vkCreateImageView(R.device,&viewInfo,nullptr,&s->view),"create sampling image view");
         s->layout=VK_IMAGE_LAYOUT_UNDEFINED;
     } catch(...) {
@@ -555,7 +548,7 @@ VkImageView sampled_texture_view(Surface* s,const uint32_t* texWords) {
     // Comparison samplers require a depth-only, identity-component view.
     if(!s->fmt.depth)info.components={mapping[selectors[0]],mapping[selectors[1]],mapping[selectors[2]],mapping[selectors[3]]};
     uint32_t layers=(type==VK_IMAGE_VIEW_TYPE_1D||type==VK_IMAGE_VIEW_TYPE_2D||threeD)?1:type==VK_IMAGE_VIEW_TYPE_CUBE?6:s->arrayLayers;
-    info.subresourceRange={s->fmt.depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT,0,s->mips,0,layers};
+    info.subresourceRange={VkImageAspectFlags(s->fmt.depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT),0,s->mips,0,layers};
     VkImageView view=VK_NULL_HANDLE;check_vk(vkCreateImageView(R.device,&info,nullptr,&view),"create sampled texture view");s->sampledViews.emplace(key,view);return view;
 }
 void resample(Surface* src,Surface* dst,uint32_t slices,float uMax,float vMax,uint32_t dstW,uint32_t dstH) {
@@ -573,7 +566,7 @@ void resample(Surface* src,Surface* dst,uint32_t slices,float uMax,float vMax,ui
         throw std::runtime_error("Invalid Vulkan resample extent");
     end_encoder();transition_image(src,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
     transition_image(dst,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
-    VkImageBlit region{};region.srcSubresource={src->fmt.depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT,0,0,slices};
+    VkImageBlit region{};region.srcSubresource={VkImageAspectFlags(src->fmt.depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT),0,0,slices};
     region.dstSubresource=region.srcSubresource;
     region.srcOffsets[1]={int32_t(std::max(1u,uint32_t(std::lround(src->extent.width*uMax)))),int32_t(std::max(1u,uint32_t(std::lround(src->extent.height*vMax)))),int32_t(src->extent.depth)};
     region.dstOffsets[1]={int32_t(dstW),int32_t(dstH),int32_t(dst->extent.depth)};
@@ -654,7 +647,7 @@ void upload_surface(Surface* s) {
     for(uint32_t level=0;level<s->mips;++level) {
         const auto& info = guest_info(s, level);
         if(!level)s->dataSize=uint32_t(info.surfSize);
-        hash=(hash^fnv(mem::ptr(mip_base(s,level)),size_t(info.surfSize)))*1099511628211ull;
+        hash=(hash^content_hash(mem::ptr(mip_base(s,level)),size_t(info.surfSize)))*1099511628211ull;
     }
     s->sparseHash = sparse;
     if(!s->dirty&&hash==s->contentHash)return;
