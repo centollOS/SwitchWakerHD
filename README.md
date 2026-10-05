@@ -9,6 +9,31 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
 
 ## What's new in this update
 
+- **Settings overlay** (Dear ImGui): an in-game menu for everything in one place — save states and
+  Crash Recovery, graphics (renderer, frame rate, resolution, aspect ratio, AO, filtering, FXAA,
+  performance overlay), display, gameplay mods and cheats, controls and language. Open it with
+  **F1** (Fn+F1 on most Mac keyboards), **Cmd+,** / *Settings…* on macOS, or hold **Select** / press
+  **Home** on a controller; it works with mouse, keyboard and controller on every platform and
+  renderer. The Controls tab shows the controller drawing with live feedback of pressed buttons.
+  Shift+F1 still saves state slot 1; slot 1 now loads from the overlay.
+- **Performance pass** (PR #15 by Sean13128): much less render-thread CPU on Metal (no more stutter
+  while the shader cache warms up), a lighter vsync wait on Vulkan, and a fix for the both-renderer
+  build crashing with Homebrew boost installed.
+- **Cheats** (Gameplay menu / overlay, PR #15): all items, best sword and shield, 20 hearts, double
+  magic, 5000 rupees, infinite health/magic/ammo, and story cheats (songs, Triforce shards, dungeon
+  items, keys) — use a spare save file for those.
+- **Graphics options are remembered** between launches (macOS since PR #15; Linux/Windows in
+  `settings.ini`).
+- **Controller rumble** (PR #13 by arcadematicas).
+- **Linux/Windows**: GamePad touch with the mouse in the GamePad window, F11 / Alt+Enter full
+  screen, closing the TV window quits (closing the GamePad window hides it), the name-entry text
+  prompt works again (PR #14 by rhemfur), 1 ms timer resolution on Windows for smoother frame pacing
+  (PR #12 by rhemfur), and a `--unwindlib=libgcc` build note for clang setups with libunwind.
+- **Console language**: `WWHD_LANGUAGE=<code>` (or the overlay's Language tab) picks the game's
+  language from those on the disc.
+
+## Earlier updates
+
 - **Linux and Windows builds** (Vulkan renderer with an SDL3 host), with automatic CI builds for both.
   Fixes from the first Linux reports: game paths are resolved case-insensitively (the game asks for
   `Audiores`, the disc folder is `AudioRes`; this crashed the game right after startup), build fixes
@@ -22,8 +47,6 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
 - **True 60 (key 7, experimental)**: every 30 Hz step is now exactly the 30 fps game's step (game
   logic, saves and quests stay as in the original); hookshot crash fixed. For smooth 60 fps,
   interpolation (key 6) is the recommended mode.
-
-## Earlier updates
 
 - **Vulkan renderer** (by OpenAI Codex), built into the same app next to Metal. Pick one in
   **Graphics › Renderer**; the choice is saved and used from the next start ("Restart Now"
