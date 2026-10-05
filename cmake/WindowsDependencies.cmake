@@ -1,5 +1,7 @@
 # Native LLVM targets the MSVC ABI. Build missing dependencies with that same
 # compiler instead of requiring MSYS2 or a separately configured package manager.
+# Also used by release builds (WWHD_BUNDLED_DEPS, any platform): there glslang, zlib and LZ4 are always
+# built from source, so no system copy compiled by a different toolchain ends up in the release.
 include(FetchContent)
 if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW)
@@ -7,7 +9,9 @@ endif()
 
 if(WWHD_HAS_VULKAN)
   find_package(Vulkan 1.3 REQUIRED)
-  find_package(glslang CONFIG QUIET)
+  if(NOT WWHD_BUNDLED_DEPS)
+    find_package(glslang CONFIG QUIET)
+  endif()
   if(NOT TARGET glslang::glslang)
     set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
     set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
@@ -16,6 +20,12 @@ if(WWHD_HAS_VULKAN)
       URL https://github.com/KhronosGroup/glslang/archive/refs/tags/16.0.0.tar.gz
       URL_HASH SHA256=172385478520335147d3b03a1587424af0935398184095f24beab128a254ecc7)
     FetchContent_MakeAvailable(glslang)
+    # The runtime includes <glslang/SPIRV/GlslangToSpv.h> (the installed layout); in glslang's source
+    # tree the header is SPIRV/GlslangToSpv.h, so give the build tree the installed spelling too.
+    set(GLSLANG_SHIM "${CMAKE_BINARY_DIR}/glslang-include")
+    file(COPY "${glslang_SOURCE_DIR}/SPIRV/" DESTINATION "${GLSLANG_SHIM}/glslang/SPIRV"
+         FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
+    target_include_directories(SPIRV INTERFACE "$<BUILD_INTERFACE:${GLSLANG_SHIM}>")
   endif()
 endif()
 
@@ -25,7 +35,12 @@ if(WWHD_SDL_HOST)
     set(SDL_TESTS OFF CACHE BOOL "" FORCE)
     set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
     set(SDL_SHARED ON CACHE BOOL "" FORCE)
-    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    # the graphical installer links SDL3 statically (one self-contained setup program)
+    if(WWHD_SETUP_GUI)
+      set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    else()
+      set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    endif()
     FetchContent_Declare(SDL3
       URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-3.4.18.tar.gz
       URL_HASH SHA256=9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3)
@@ -34,7 +49,9 @@ if(WWHD_SDL_HOST)
 endif()
 
 set(ZLIB_USE_STATIC_LIBS ON)
-find_package(ZLIB QUIET)
+if(NOT WWHD_BUNDLED_DEPS)
+  find_package(ZLIB QUIET)
+endif()
 if(NOT TARGET ZLIB::ZLIB)
   set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
   FetchContent_Declare(zlib
@@ -46,8 +63,10 @@ if(NOT TARGET ZLIB::ZLIB)
 endif()
 
 if(WWHD_SDL_HOST)
-  find_path(LZ4_INCLUDE_DIR lz4.h)
-  find_library(LZ4_LIBRARY NAMES lz4)
+  if(NOT WWHD_BUNDLED_DEPS)
+    find_path(LZ4_INCLUDE_DIR lz4.h)
+    find_library(LZ4_LIBRARY NAMES lz4)
+  endif()
   if(NOT LZ4_INCLUDE_DIR OR NOT LZ4_LIBRARY)
     set(LZ4_BUILD_CLI OFF CACHE BOOL "" FORCE)
     set(LZ4_BUILD_LEGACY_LZ4C OFF CACHE BOOL "" FORCE)

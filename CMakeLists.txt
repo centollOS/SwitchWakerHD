@@ -55,8 +55,14 @@ if(NOT GEN_SOURCES)
   message(FATAL_ERROR "no generated code in ${GEN_DIR}; run tools/recomp/recomp.py first")
 endif()
 
-if(WIN32 AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+# WWHD_BUNDLED_DEPS: build glslang, zlib, LZ4 (and SDL3 if not found) from pinned sources with the
+# project's own compiler. Release builds use it so the prebuilt runtime and its dependencies all
+# come from the toolchain the installer later links with (llvm-mingw, zig).
+option(WWHD_BUNDLED_DEPS "build missing dependencies from pinned sources" OFF)
+if(WIN32 AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC" OR WWHD_BUNDLED_DEPS)
   include(cmake/WindowsDependencies.cmake)
+endif()
+if(WIN32 AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
   add_compile_definitions(NOMINMAX _CRT_SECURE_NO_WARNINGS)
 endif()
 
@@ -196,6 +202,11 @@ target_compile_options(shadertest PRIVATE "SHELL:-include ${CEMU_DIR}/cemu_shim.
 
 endif()
 
+option(WWHD_SETUP_GUI "build the graphical installer (wwhd-setup)" OFF)
+if(WWHD_SETUP_GUI)
+  include(cmake/SetupGui.cmake)
+endif()
+
 # controls mapping unit tests (runtime/src/input_map.cpp)
 add_executable(input_map_test runtime/tools/input_map_test.cpp runtime/src/input_map.cpp)
 target_include_directories(input_map_test PRIVATE runtime/src)
@@ -231,6 +242,19 @@ if(WWHD_SDL_HOST)
   target_link_libraries(mouse_sdl_test PRIVATE SDL3::Headers)
 endif()
 
+# disc extractor used by the installer (tools/wudextract; no Python or pycryptodome needed) and its tests
+add_library(wudcrypto STATIC tools/wudextract/crypto.cpp)
+target_include_directories(wudcrypto PUBLIC tools/wudextract)
+add_executable(wwhd-extract tools/wudextract/wwhd_extract.cpp)
+target_link_libraries(wwhd-extract PRIVATE wudcrypto)
+if(WIN32)
+  target_link_libraries(wwhd-extract PRIVATE shell32)
+endif()
+add_executable(extract_crypto_test tools/wudextract/crypto_test.cpp)
+target_link_libraries(extract_crypto_test PRIVATE wudcrypto)
+add_executable(extract_test tools/wudextract/extract_test.cpp)
+target_link_libraries(extract_test PRIVATE wudcrypto)
+
 enable_testing()
 if(WIN32 AND WWHD_SDL_HOST)
   get_target_property(SDL3_LIBRARY_TYPE SDL3::SDL3 TYPE)
@@ -243,6 +267,8 @@ if(WIN32 AND WWHD_SDL_HOST)
   endif()
 endif()
 add_test(NAME input_mapping COMMAND input_map_test)
+add_test(NAME extract_crypto COMMAND extract_crypto_test)
+add_test(NAME extract_synthetic COMMAND extract_test $<TARGET_FILE:wwhd-extract> ${CMAKE_BINARY_DIR}/extract_test_work)
 if(WWHD_SDL_HOST)
   add_test(NAME sdl_input COMMAND input_sdl_test)
   set_tests_properties(sdl_input PROPERTIES ENVIRONMENT "WWHD_CONTROLS=${CMAKE_BINARY_DIR}/test-controls.json")

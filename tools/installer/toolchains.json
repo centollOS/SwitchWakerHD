@@ -1,0 +1,36 @@
+{
+  "_comment": "Pinned downloads. The release workflow builds the runtime with exactly these toolchains and the installer downloads the same ones on the player's machine, so the prebuilt runtime and the locally compiled game code always match. Change a pin only together with a new release.",
+  "toolchains": {
+    "xcode-clt": {
+      "kind": "xcode-clt",
+      "min_macos": "14.0"
+    },
+    "llvm-mingw-20260922": {
+      "kind": "llvm-mingw",
+      "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260922/llvm-mingw-20260922-ucrt-x86_64.zip",
+      "sha256": "e3ad77d117a4bea19a7a3b333341824d79a5a371004a10e25b8504e7b3047666",
+      "size": 190725905,
+      "dir": "llvm-mingw-20260922-ucrt-x86_64"
+    },
+    "zig-0.16.0": {
+      "kind": "zig",
+      "url": "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
+      "sha256": "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00",
+      "size": 55478392,
+      "dir": "zig-x86_64-linux-0.16.0",
+      "target": "x86_64-linux-gnu.2.35"
+    }
+  },
+  "python": {
+    "windows": {
+      "url": "https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip",
+      "sha256": "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297",
+      "dir": "python-3.13.16-embed-amd64"
+    },
+    "linux": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.13.16%2B20261003-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "0a0272910b10417c659a9312fb3f2d7a6d774da7bd510999be7a3ba83273dc1f",
+      "dir": "python"
+    }
+  }
+}

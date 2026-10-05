@@ -304,7 +304,14 @@ static std::string snap_texcoords(const char* src) {
 
 static void compile_msl(Shader* sh, const char* rawSrc, uint64_t key) {
     MTLCompileOptions* opt = [MTLCompileOptions new];
-    opt.mathMode = MTLMathModeSafe;
+    if (@available(macOS 15.0, *)) {
+        opt.mathMode = MTLMathModeSafe;
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        opt.fastMathEnabled = NO;  // the pre-15 spelling of MTLMathModeSafe
+#pragma clang diagnostic pop
+    }
     opt.languageVersion = MTLLanguageVersion3_0;
     std::string snapped = snap_texcoords(rawSrc);
     const char* src = snapped.c_str();

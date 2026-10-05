@@ -110,13 +110,80 @@ and console. Everything game-specific (the extracted files, the recompiled code 
 shader caches) is generated locally on your machine from your dump, and must not be
 redistributed. The `.gitignore` keeps all of it out of the repository.
 
-## Requirements
+## Install (releases)
+
+The easiest way to play: download a release, run its installer and point it at your own dump.
+Releases contain only this project's runtime, tools and installer: **no game files, no game code
+and no keys**. The installer builds the game from your dump on your machine.
+
+1. Download the zip for your system from the
+   [Releases](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp/releases) page and unzip it anywhere:
+   - **macOS**: Apple Silicon, macOS 14 or newer (Metal renderer)
+   - **Windows**: x86-64, Windows 10 or 11, a GPU with Vulkan 1.3 drivers
+   - **Linux**: x86-64, glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch, SteamOS 3),
+     a GPU with Vulkan 1.3 drivers
+2. Run **Wind Waker HD Setup**, the graphical installer (`Wind Waker HD Setup.app` on macOS,
+   `Wind Waker HD Setup.exe` on Windows, `wwhd-setup` on Linux). It walks you through choosing your
+   dump and keys, shows the progress of each step, offers to bring in a save, and starts the game.
+   The Terminal installer next to it (`Install Wind Waker HD.command`, `Install Wind Waker HD.bat`,
+   `install.sh`) does the same in a text window and stays as the fallback.
+   - **macOS**: the release is not signed by Apple, so the first time macOS says the app "cannot be
+     opened" / is from an "unidentified developer". On macOS 14: right-click (Ctrl-click) the app,
+     choose **Open**, then **Open** again. On macOS 15 and newer: click **Done**, then **System
+     Settings › Privacy & Security › Open Anyway**. If Apple's Command Line Tools (the free compiler)
+     are missing, Setup offers Apple's installer: click **Install** there; Setup continues by itself
+     afterwards.
+   - **Windows**: the release is not code-signed, so SmartScreen may say "Windows protected your
+     PC": click **More info › Run anyway**. Setup downloads its own Python (11 MB) and compiler
+     (llvm-mingw, 190 MB) once, checks their SHA-256 and needs no administrator rights.
+   - **Linux**: double-click `wwhd-setup` (or `Wind Waker HD Setup.desktop`; some desktops ask to
+     allow launching it first), or run `./wwhd-setup` in a terminal. It uses your Python 3 and
+     downloads its compiler (zig, 55 MB) once, SHA-256 checked; no root needed.
+3. Setup asks for:
+   - your **disc image** (`.wux` or `.wud`), or an already **extracted game folder** (with `code`,
+     `content` and `meta` inside, e.g. from dumpling or Cemu);
+   - for a disc image, its **disc key** (16 bytes; a `.key` file with the image's name next to it is
+     used automatically) and the **Wii U common key** (16 bytes, the same on every console; a
+     `common.key` next to the image is used automatically). Choose a key file or paste the 32 hex
+     digits (the input is hidden). Keys are checked before anything is extracted, are never stored,
+     and are not part of any log.
+   Only the USA version (title 00050000-10143500) is supported.
+   Optionally it imports a save: a Wind Waker HD `cking.sav` folder (Cemu or Wii U) or a GameCube
+   `.gci`, converted to HD.
+4. Setup extracts the game (about a minute), translates its code to C (seconds), compiles it (the
+   longest step: 1–2 minutes on an 8-core machine, up to 10–15 minutes on a slow one) and starts the
+   game. The first start compiles shaders while you play, as before.
+
+Where things end up:
+
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| game files and saves | `~/Library/Application Support/wwhd` | `%LOCALAPPDATA%\WWHD` | `~/.local/share/wwhd` |
+| the game (built by setup) | `~/Applications/Wind Waker HD.app` | `%LOCALAPPDATA%\WWHD\bin\wwhd.exe`, Start menu and desktop shortcuts | `~/.local/share/wwhd/bin/wwhd`, applications menu, `~/.local/share/wwhd/play.sh` |
+| settings, controls, save states | `~/Library/Application Support/wwhd` | `%APPDATA%\WWHD` | `~/.config/wwhd` |
+
+Saves are in `save/` inside the game folder above. Setup never changes an existing save; on the
+first install it offers to copy one in (a folder with `cking.sav`, e.g. from Cemu's
+`mlc01/usr/save/00050000/10143500/user/80000001/`).
+
+Run Setup again to **play**, to **repair** (rebuild the game code from the installed game
+files) or to **reinstall** from a disc image. After downloading a newer release, its installer
+**updates** the installation: it rebuilds the game code with the new runtime and keeps your game
+files and saves (no keys needed). `setup.log` in the game folder records each run. To uninstall,
+delete the folders above (back up `save/` first) and the app or shortcuts.
+
+How the installer works, its options and the protocol between the graphical front end and
+`setup.py`: [tools/installer/README.md](tools/installer/README.md). Scripted use: `tools/installer/setup.py --help` (for example `--yes --image game.wux --common-key
+common.key --no-launch`).
+
+## Requirements (building from source)
 
 - **macOS** on Apple Silicon, **Linux** (x86-64, Vulkan) or **Windows** (x86-64, Vulkan); the
   platform-specific build steps are under "Building" below
 - macOS: Xcode command line tools (`xcode-select --install`)
 - CMake 3.20 or newer
-- Python 3 with `pycryptodome` (disc extraction): `pip3 install pycryptodome`
+- Python 3 with `pycryptodome` for `tools/wudextract.py` (`pip3 install pycryptodome`); the native
+  `wwhd-extract` built with the project (`build/cmake/wwhd-extract --help`) needs neither
 - optional: `capstone` (`pip3 install capstone`) for the disassembler helper `tools/ppcdis.py`
 - optional, decompilation tools only: `ninja` and the requirements of the zeldaret/tww build
   (see below)
