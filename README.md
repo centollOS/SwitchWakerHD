@@ -1,9 +1,9 @@
-# The Legend of Zelda: The Wind Waker HD — native macOS port
+# The Legend of Zelda: The Wind Waker HD — native PC port (macOS, Linux, Windows)
 
-A static recompilation of the Wii U version (USA) for Apple Silicon Macs. The game's PowerPC
-code is translated to C ahead of time, the Cafe OS libraries the game uses are reimplemented
-natively, and GX2 graphics are implemented directly on Metal or Vulkan (no Cemu runtime, no GPU
-command emulation).
+A static recompilation of the Wii U version (USA) that runs natively on **macOS** (Apple Silicon),
+**Linux** and **Windows**. The game's PowerPC code is translated to C ahead of time, the Cafe OS
+libraries the game uses are reimplemented natively, and GX2 graphics are implemented directly on
+Metal (macOS) or Vulkan (all three platforms), with no Cemu runtime and no GPU command emulation.
 
 How it works and how it differs from running the game in Cemu: [docs/how-it-works.md](docs/how-it-works.md).
 
@@ -102,8 +102,9 @@ redistributed. The `.gitignore` keeps all of it out of the repository.
 
 ## Requirements
 
-- macOS on Apple Silicon
-- Xcode command line tools (`xcode-select --install`)
+- **macOS** on Apple Silicon, **Linux** (x86-64, Vulkan) or **Windows** (x86-64, Vulkan); the
+  platform-specific build steps are under "Building" below
+- macOS: Xcode command line tools (`xcode-select --install`)
 - CMake 3.20 or newer
 - Python 3 with `pycryptodome` (disc extraction): `pip3 install pycryptodome`
 - optional: `capstone` (`pip3 install capstone`) for the disassembler helper `tools/ppcdis.py`
