@@ -206,8 +206,34 @@ static void enqueue(Op op, const uint32* payload, uint32 n) {
 }
 
 // block the game thread until the render thread has executed everything queued so far
-static void render_sync() {
+// debug: WWHD_SYNC_STATS=1 logs, every 5 s, how often each caller waited for the render thread to
+// catch up (render_sync) and for how long
+enum SyncSite { kSyncShutdown, kSyncFlip, kSyncDrawDone, kSyncVsyncUncapped, kSyncVsyncFlip, kSyncSaveState, kSyncSites };
+static void sync_stat(int site, std::chrono::steady_clock::duration waited) {
+    static const bool on = getenv("WWHD_SYNC_STATS") != nullptr;
+    if (!on) return;
+    static std::mutex mu;
+    static uint64_t count[kSyncSites], ns[kSyncSites];
+    static auto t0 = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(mu);
+    count[site]++;
+    ns[site] += std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - t0 < std::chrono::seconds(5)) return;
+    const double secs = std::chrono::duration<double>(now - t0).count();
+    static const char* names[kSyncSites] = {"shutdown", "flip", "DrawDone", "vsync-uncapped", "vsync-flip", "savestate"};
+    char buf[400];
+    int k = snprintf(buf, sizeof buf, "[gx2] render_sync per second:");
+    for (int i = 0; i < kSyncSites; i++)
+        if (count[i]) k += snprintf(buf + k, sizeof buf - k, " %s %.1f x %.2f ms", names[i], count[i] / secs, ns[i] / 1e6 / count[i]);
+    LOG("%s", buf);
+    memset(count, 0, sizeof count); memset(ns, 0, sizeof ns);
+    t0 = now;
+}
+static void render_sync(int site = kSyncShutdown) {
     if (!g_render_thread) return;
+    const auto started = std::chrono::steady_clock::now();
+    struct Done { int site; std::chrono::steady_clock::time_point t; ~Done() { sync_stat(site, std::chrono::steady_clock::now() - t); } } done{site, started};
     uint64_t id;
     {
         std::lock_guard<std::mutex> lk(g_q_mutex);
@@ -314,6 +340,18 @@ static uint32 unpack_struct(const uint32* words, uint32 count, int slot) {
     return addr;
 }
 
+static bool lazy_draw_done() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_VK_LAZY_DRAW_DONE");
+#ifdef __ANDROID__
+        return render::vulkan() && (!e || atoi(e) != 0);
+#else
+        return render::vulkan() && e && atoi(e) != 0;
+#endif
+    }();
+    return on;
+}
+
 static void execute_one(Op op, const uint32* p, uint32 n) {
     switch (op) {
     case OP_NOP: break;
@@ -353,7 +391,14 @@ static void execute_one(Op op, const uint32* p, uint32 n) {
     case OP_INVALIDATE: render::invalidate(p[0], p[1], p[2]); break;
     case OP_EXPAND_COLOR: case OP_EXPAND_DEPTH: break;  // MSAA/HiZ decompression: nothing to do on the host
     case OP_FLUSH: render::guest_flush(); break;  // Vulkan: asynchronous submission
-    case OP_DRAW_DONE: render::wait_idle(); break;
+    case OP_DRAW_DONE:
+        // The Vulkan renderer never writes GPU results back to guest memory (guest data is copied
+        // into fenced upload slices when work is recorded), so GX2DrawDone needs this op executed
+        // (render_sync in the HLE), not an idle GPU. WWHD_VK_LAZY_DRAW_DONE=1 (the default in the
+        // Android port) queues the work instead of waiting for the whole device every frame.
+        if (lazy_draw_done()) render::guest_flush();
+        else render::wait_idle();
+        break;
     case OP_SWAP:
         if (n) render::set_frame_aspect(gx2::bitsf(p[0]));  // aspect ratio from the next frame on (aspect.cpp)
         render::swap();
@@ -485,7 +530,7 @@ static void ready_flip_before_resume() {
         if(at > vsync_index()) return;
         needsSync = render::frames_completed() < front.swap;
     }
-    if(needsSync) render_sync(); // Core already released; no flip lock held.
+    if(needsSync) render_sync(kSyncFlip); // Core already released; no flip lock held.
     std::lock_guard<std::mutex> lk(g_flip_mutex);
     update_flips();
 }
@@ -596,7 +641,7 @@ HLE(gx2, GX2Flush) { emit_host(OP_FLUSH, {}); }
 HLE(gx2, GX2DrawDone) {
     BlockingScope b;
     emit_host(OP_DRAW_DONE, {});
-    render_sync();
+    render_sync(kSyncDrawDone);
     ret(c, 1);
 }
 HLE(gx2, GX2SwapScanBuffers) {
@@ -658,7 +703,7 @@ HLE(gx2, GX2WaitForVsync) {
         BlockingScope b;
         // The queue fence follows earlier swaps, whose presentation path waits
         // for GPU completion. Never wait while holding the flip mutex.
-        render_sync();
+        render_sync(kSyncVsyncUncapped);
         std::lock_guard<std::mutex> lk(g_flip_mutex);
         update_flips();
         return;
@@ -682,7 +727,7 @@ HLE(gx2, GX2WaitForVsync) {
         if(eligible) {
             if(needsSync) {
                 BlockingScope b;
-                render_sync(); // Queued swap completion; never hold flip mutex.
+                render_sync(kSyncVsyncFlip); // Queued swap completion; never hold flip mutex.
             }
             std::lock_guard<std::mutex> lk(g_flip_mutex);
             update_flips(); // Retains minimum interval and FIFO GPU guards.
@@ -768,7 +813,7 @@ HLE(gx2, GX2SampleBottomGPUCycle) { if (arg(c, 0)) st64(arg(c, 0), timebase::gue
 // command reads guest memory while it is replaced and the swap/flip counts agree
 void gx2_ss_drain() {
     emit_host(OP_DRAW_DONE, {});
-    render_sync();
+    render_sync(kSyncSaveState);
     for (int i = 0; i < 300; i++) {
         {
             std::lock_guard<std::mutex> lk(g_flip_mutex);

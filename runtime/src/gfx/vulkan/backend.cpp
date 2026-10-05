@@ -889,6 +889,32 @@ static void make_swapchain(Screen &s) {
   prepare_present_screen(s,shaderPresentation,captureTransfer);
   s.resize = false;
 }
+// Asynchronous presentation (WWHD_VK_ASYNC_PRESENT=1): the presentation submission goes into the
+// four-slot ring like GX2Flush work instead of waiting for the GPU, and the SDL host's swap() does not
+// drain the queue, so the render thread records frame N+1 while the GPU draws frame N. Each frame in
+// flight has its own acquire semaphore (reused only after the submission that waited on it retired)
+// and each swapchain image its own render-finished semaphore. Captures keep the waiting path.
+static bool async_present() {
+  static const bool on = [] {
+    const char *e = std::getenv("WWHD_VK_ASYNC_PRESENT");
+    return e && std::atoi(e) != 0;
+  }();
+  return on;
+}
+struct AsyncPresentState {
+  std::array<VkSemaphore, 3> acquire{};
+  std::array<uint64_t, 3> serial{};  // submission that waited on acquire[k]
+  std::array<size_t, 3> slot{};
+  unsigned next = 0;
+  std::vector<VkSemaphore> finished;  // per swapchain image
+};
+static AsyncPresentState asyncPresent[2];  // TV, GamePad
+static VkSemaphore new_semaphore() {
+  VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+  VkSemaphore sem;
+  vk_check(vkCreateSemaphore(R.device, &si, nullptr, &sem), "create presentation semaphore");
+  return sem;
+}
 static void present(Screen &s) {
   // Presentation changed (settings overlay): a new swapchain, as for a resize (also for a window that
   // is not shown right now, so the next frame it shows uses the new mode)
@@ -918,9 +944,24 @@ static void present(Screen &s) {
     make_swapchain(s);
   uint32_t index;
   auto& timing = screenTiming[&s == &R.tv ? 0 : 1];
+  const bool async = async_present() && !present_capture_requested();
+  AsyncPresentState &ap = asyncPresent[&s == &R.tv ? 0 : 1];
+  VkSemaphore acquireSemaphore = s.acquired;
+  unsigned acquireIndex = 0;
+  if (async) {
+    acquireIndex = ap.next;
+    ap.next = (ap.next + 1) % ap.acquire.size();
+    if (!ap.acquire[acquireIndex])
+      ap.acquire[acquireIndex] = new_semaphore();
+    // the submission that last waited on this semaphore must be done with it
+    auto &previous = R.submissions[ap.slot[acquireIndex]];
+    if (ap.serial[acquireIndex] && previous.pending && previous.serial == ap.serial[acquireIndex])
+      retire_submission(previous);
+    acquireSemaphore = ap.acquire[acquireIndex];
+  }
   VkResult ar = timed_call(timing.acquire, [&] {
     return vkAcquireNextImageKHR(R.device, s.swapchain, UINT64_MAX,
-                                s.acquired, VK_NULL_HANDLE, &index);
+                                acquireSemaphore, VK_NULL_HANDLE, &index);
   });
   if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
     s.resize = true;
@@ -978,11 +1019,28 @@ static void present(Screen &s) {
     s.layouts[index] = b.newLayout;
   }
   record_present_capture(s,index);
-  submit(s.acquired, s.finished);
+  VkSemaphore finishedSemaphore = s.finished;
+  if (async) {
+    if (ap.finished.size() != s.images.size()) {  // new swapchain
+      vk_check(vkDeviceWaitIdle(R.device), "presentation semaphores idle");
+      for (VkSemaphore f : ap.finished)
+        vkDestroySemaphore(R.device, f, nullptr);
+      ap.finished.clear();
+      for (size_t i = 0; i < s.images.size(); i++)
+        ap.finished.push_back(new_semaphore());
+    }
+    finishedSemaphore = ap.finished[index];
+    const size_t slot = R.activeSubmission;
+    submit(acquireSemaphore, finishedSemaphore, true);
+    ap.slot[acquireIndex] = slot;
+    ap.serial[acquireIndex] = R.submissions[slot].serial;
+  } else {
+    submit(s.acquired, s.finished);
+  }
   finish_present_capture(s);
   VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
   pi.waitSemaphoreCount = 1;
-  pi.pWaitSemaphores = &s.finished;
+  pi.pWaitSemaphores = &finishedSemaphore;
   pi.swapchainCount = 1;
   pi.pSwapchains = &s.swapchain;
   pi.pImageIndices = &index;
@@ -993,8 +1051,9 @@ static void present(Screen &s) {
     s.resize = true;
   else
     vk_check(pr, "present scan buffer");
-  vk_check(timed_call(timing.idle, [&] { return vkQueueWaitIdle(R.queue); }),
-           "present completion");
+  if (!async)
+    vk_check(timed_call(timing.idle, [&] { return vkQueueWaitIdle(R.queue); }),
+             "present completion");
 }
 void copy_to_scan(uint32_t cb, uint32_t target) {
   Surface *src = surface_from_color_buffer(cb);
@@ -1137,7 +1196,10 @@ void swap() {
   set_overlay_draw(overlay::frame(float(R.tv.width.load()), float(R.tv.height.load()), overlay_renderer_init));
   present(R.tv);
   present(R.drc);
-  flush();
+  if (async_present())
+    flush_async();  // queued like GX2Flush work; the ring's fences retire it
+  else
+    flush();
   write_present_dumps();
 #endif
   std::atomic_ref<uint64_t>(R.frame).fetch_add(1);
