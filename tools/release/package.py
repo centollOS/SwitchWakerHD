@@ -124,7 +124,7 @@ def link_command(build):
     cmd = lines[-1].strip()
     # CMake wraps link rules (": && CMD && :" on POSIX hosts, 'cmd.exe /C "cd . && CMD && ..."' on
     # Windows) and may chain post-build steps (copying SDL3.dll): keep the part that writes wwhd
-    m = re.match(r'^cmd(?:\.exe)? /C "(.*)"$', cmd)
+    m = re.match(r'^(?:\S*[\\/])?cmd(?:\.exe)? /C "(.*)"$', cmd, re.I)
     if m:
         cmd = m.group(1)
     parts = [p.strip() for p in cmd.split(" && ")]

@@ -127,11 +127,16 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          # SDL3's build needs the X11/Wayland/audio headers; libvulkan1 is only linked against
+          # SDL3's documented Linux build dependencies (SDL3 docs/README-linux.md, Ubuntu 22.04+ set), so
+          # the shipped SDL3 has every backend (X11, Wayland, PipeWire/PulseAudio/ALSA, input, IME);
+          # libvulkan1 is only linked against (players use their own Vulkan loader)
           sudo apt-get install -y build-essential cmake ninja-build pkg-config xz-utils libvulkan1 \
-            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev \
-            libxkbcommon-dev libwayland-dev wayland-protocols libasound2-dev libpulse-dev libudev-dev \
-            libdbus-1-dev libdrm-dev libgbm-dev libegl-dev mesa-vulkan-drivers xvfb
+            libasound2-dev libpulse-dev libaudio-dev libfribidi-dev libjack-dev libsndio-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev \
+            libxtst-dev libxkbcommon-dev libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev \
+            libegl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev libthai-dev libusb-1.0-0-dev \
+            libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev wayland-protocols \
+            mesa-vulkan-drivers xvfb
 
       - name: Pinned zig toolchain (tools/installer/toolchains.json)
         run: |
@@ -247,7 +252,9 @@ jobs:
           unzip -q "$T/llvm-mingw.zip" -d "$T"
           echo "LLVM_MINGW=$T/$DIR" >> "$GITHUB_ENV"
           echo "$T/$DIR/bin" >> "$GITHUB_PATH"
+          "$T/$DIR/bin/x86_64-w64-mingw32-clang.exe" --version
           pip install ninja
+          ninja --version
 
       - name: Vulkan headers and import library
         run: |
@@ -257,14 +264,16 @@ jobs:
           mkdir -p "$T/vulkan" && tar -xzf vh.tar.gz -C "$T/vulkan" --strip-components=1
           curl -fsSL -o vulkan-1.def "$VULKAN_DEF_URL"
           echo "$VULKAN_DEF_SHA256  vulkan-1.def" | sha256sum -c -
-          llvm-dlltool -m i386:x86-64 -d vulkan-1.def -l "$T/vulkan/libvulkan-1.a"
+          "$LLVM_MINGW/bin/llvm-dlltool.exe" -m i386:x86-64 -d vulkan-1.def -l "$T/vulkan/libvulkan-1.a"
           echo "VULKAN_DIR=$T/vulkan" >> "$GITHUB_ENV"
 
       - name: Build runtime (Release, Vulkan + SDL3) with llvm-mingw against placeholder guest code
         run: |
           python tools/recomp/stubgen.py build/gen-stub
           cmake -S . -B build/rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DGEN_DIR="$(cygpath -m "$PWD/build/gen-stub")" \
-            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-clang -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-clang++ \
+            -DCMAKE_C_COMPILER="$LLVM_MINGW/bin/x86_64-w64-mingw32-clang.exe" \
+            -DCMAKE_CXX_COMPILER="$LLVM_MINGW/bin/x86_64-w64-mingw32-clang++.exe" \
+            -DCMAKE_RC_COMPILER="$LLVM_MINGW/bin/x86_64-w64-mingw32-windres.exe" \
             -DCMAKE_EXE_LINKER_FLAGS=-static -DWWHD_BUNDLED_DEPS=ON -DWWHD_SETUP_GUI=ON \
             -DVulkan_INCLUDE_DIR="$VULKAN_DIR/include" -DVulkan_LIBRARY="$VULKAN_DIR/libvulkan-1.a"
           ninja -C build/rel -d keeprsp
@@ -314,6 +323,7 @@ jobs:
           $env:SDL_VIDEO_DRIVER = 'offscreen'
           $g = Start-Process -FilePath (Join-Path $pkg 'Wind Waker HD Setup.exe') `
             -ArgumentList '--self-test', '--data-dir', $data -PassThru
+          $null = $g.Handle  # keeps the process handle so ExitCode is available after it exits
           if (-not $g.WaitForExit(600000)) { $g.Kill(); throw "the setup program did not finish its self-test" }
           if ($g.ExitCode -ne 0) { throw "setup program self-test failed ($($g.ExitCode))" }
 
