@@ -12,7 +12,9 @@
 
     <application android:label="@string/app_name"
         android:icon="${appIcon}"
-        android:allowBackup="false"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/full_backup_content"
         android:theme="@style/AppTheme"
         android:enableOnBackInvokedCallback="false"
         android:isGame="true"
@@ -36,6 +38,23 @@
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity>
+
+        <!-- save export/import (launcher shortcuts); own process, so they can stop the game's -->
+        <activity android:name=".ExportSaveActivity"
+            android:label="@string/save_export"
+            android:process=":tools"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:exported="true" />
+        <activity android:name=".ImportSaveActivity"
+            android:label="@string/save_import"
+            android:process=":tools"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:exported="true" />
     </application>
 </manifest>

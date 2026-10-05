@@ -1,0 +1,11 @@
+<resources>
+    <string name="save_export">Exportar save</string>
+    <string name="save_import">Importar save</string>
+    <string name="save_share">Enviar o save para…</string>
+    <string name="save_none">Ainda não há save</string>
+    <string name="save_exported">Save exportado para Downloads</string>
+    <string name="save_export_failed">Não foi possível exportar o save: %1$s</string>
+    <string name="save_not_a_save">Este zip não tem save do Wind Waker HD (user/cking.sav)</string>
+    <string name="save_imported">Save importado (o anterior está em %1$s)</string>
+    <string name="save_import_failed">Não foi possível importar o save: %1$s</string>
+</resources>

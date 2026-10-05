@@ -1,3 +1,12 @@
 <resources>
     <string name="app_name">Wind Waker HD</string>
+    <string name="save_export">Export save</string>
+    <string name="save_import">Import save</string>
+    <string name="save_share">Send the save to…</string>
+    <string name="save_none">There is no save yet</string>
+    <string name="save_exported">Save exported to Downloads</string>
+    <string name="save_export_failed">Could not export the save: %1$s</string>
+    <string name="save_not_a_save">This zip has no Wind Waker HD save (user/cking.sav)</string>
+    <string name="save_imported">Save imported (the previous one is in %1$s)</string>
+    <string name="save_import_failed">Could not import the save: %1$s</string>
 </resources>
