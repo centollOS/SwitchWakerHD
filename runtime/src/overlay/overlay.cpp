@@ -22,6 +22,9 @@
 #include "../aspect.h"
 #include "../crashrec.h"
 #include "../gfx/renderer.h"
+#ifdef WWHD_HAS_VULKAN
+#include "../gfx/vulkan/settings.h"
+#endif
 #include "../input.h"
 #include "../input_map.h"
 #include "../mods/climb.h"
@@ -526,6 +529,38 @@ void tab_graphics() {
     ImGui::SameLine(0, 30);
     if (check("Edge smoothing (FXAA)", render::fxaa(), &v, render::feature_available(render::kFeatureFXAA)))
         post_changed([v] { render::set_fxaa(v); });
+    heading("Presentation (Vulkan)");
+#ifdef WWHD_HAS_VULKAN
+    {
+        const bool vk = render::vulkan(), env = gfxvk::present_mode_from_env();
+        static const char* const names[] = {"Vsync (smooth)", "Low latency", "Off (may tear)"};
+        static const char* const tips[] = {"FIFO: every frame waits for the display's refresh; no tearing (default)",
+                                           "MAILBOX: the newest finished frame is shown at the next refresh; no tearing, less delay",
+                                           "IMMEDIATE: frames are shown at once; lowest delay, may tear"};
+        // the mode in use: the setting, or vsync when this driver does not offer it
+        const int in_use = gfxvk::present_mode_offered(gfxvk::present_mode()) ? gfxvk::present_mode() : gfxvk::kPresentFifo;
+        for (int i = 0; i < gfxvk::kPresentModes; i++) {
+            if (i) ImGui::SameLine();
+            const bool offered = gfxvk::present_mode_offered(i);
+            if (radio(names[i], in_use == i, vk && !env && offered)) post_changed([i] { gfxvk::set_present_mode(i); });
+            if (vk && !offered) help("not offered by this driver");
+            else help(tips[i]);
+        }
+        if (!vk) note("Used by the Vulkan renderer only (Metal always presents with vsync).");
+        else if (env) note("WWHD_VK_PRESENT_MODE=%s is set for this start and takes precedence.", getenv("WWHD_VK_PRESENT_MODE"));
+        else {
+            std::string missing;
+            for (int i = 1; i < gfxvk::kPresentModes; i++)
+                if (!gfxvk::present_mode_offered(i)) missing += std::string(missing.empty() ? "" : ", ") + names[i];
+            if (!missing.empty()) note("Not offered by this driver: %s.", missing.c_str());
+        }
+    }
+#else
+    ImGui::BeginDisabled();
+    radio("Vsync (smooth)", true);
+    ImGui::EndDisabled();
+    note("This build has no Vulkan renderer.");
+#endif
     heading("Overlay");
     if (check("Performance overlay (FPS, frame time)", perf_shown(), &v)) set_perf_shown(v);
 }
@@ -1029,6 +1064,21 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
         if (test.perf) g_perf = true;
         LOG("[overlay] test switch: %s", getenv("WWHD_TEST_OVERLAY"));
     }
+#ifdef WWHD_HAS_VULKAN
+    // debug: WWHD_TEST_PRESENT_MODE=mailbox@330 picks Graphics > Presentation at TV frame 330, as the
+    // radio button does (the swapchains are recreated)
+    static const char* tpm = getenv("WWHD_TEST_PRESENT_MODE");
+    if (tpm) {
+        const char* at = strchr(tpm, '@');
+        if (render::frame_count() + 1 >= (at ? strtoull(at + 1, nullptr, 10) : 1)) {
+            std::string m(tpm, at ? at - tpm : strlen(tpm));
+            int mode = m == "mailbox" ? gfxvk::kPresentMailbox : m == "immediate" ? gfxvk::kPresentImmediate : gfxvk::kPresentFifo;
+            LOG("[overlay] test: presentation %s", m.c_str());
+            post_changed([mode] { gfxvk::set_present_mode(mode); });
+            tpm = nullptr;
+        }
+    }
+#endif
     const double t = now_s();
     if (U.last_present > 0) {
         U.frame_ms[U.frame_i] = (float)((t - U.last_present) * 1000.0);

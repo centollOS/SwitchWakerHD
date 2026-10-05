@@ -11,7 +11,7 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
 
 - **Settings overlay** (Dear ImGui): an in-game menu for everything in one place — save states and
   Crash Recovery, graphics (renderer, frame rate, resolution, aspect ratio, AO, filtering, FXAA,
-  performance overlay), display, gameplay mods and cheats, controls and language. Open it with
+  performance overlay), display, gameplay mods and cheats (Graphics also has the Vulkan presentation mode), controls and language. Open it with
   **F1** (Fn+F1 on most Mac keyboards), **Cmd+,** / *Settings…* on macOS, or hold **Select** / press
   **Home** on a controller; it works with mouse, keyboard and controller on every platform and
   renderer. The Controls tab shows the controller drawing with live feedback of pressed buttons.
@@ -247,13 +247,20 @@ startup that `game/code/cking.rpx` matches the recompiled code.
 `--renderer=metal` or `--renderer=vulkan` (or `WWHD_RENDERER_RUNTIME=metal|vulkan`) overrides the
 saved renderer choice for one start.
 
+**Vulkan presentation** (settings overlay › Graphics › Presentation): *Vsync (smooth)* (FIFO, the
+default), *Low latency* (MAILBOX: the newest frame at each refresh, no tearing) or *Off (may tear)*
+(IMMEDIATE). Only modes the driver offers can be chosen (MoltenVK on macOS offers vsync and
+immediate, no mailbox); a change applies at once and is saved with the other graphics options.
+`WWHD_VK_PRESENT_MODE=fifo|mailbox|immediate` overrides it for one start (not saved). The log says
+which mode is in use and which the driver offers (`[vulkan] TV present mode fifo (available: …)`).
+
 Two windows open: the TV and the GamePad screen (map, items, menus). Click and drag in the
 GamePad window to use the touch screen. Saves go to `save/`.
 
 **Settings overlay:** press **F1** in the game window, or **Cmd+,** on macOS (also *Settings…* in the app
 menu; most Mac keyboards send F1 only with **Fn+F1** unless "Use F1, F2, etc. keys as standard
 function keys" is on), or hold Select / Minus for half a second, or press Home, on a controller, for an in-game menu over the picture: save states, graphics, display,
-gameplay mods and cheats, controls (the same controller drawing as Input > Controls…: select a
+gameplay mods and cheats (Graphics also has the Vulkan presentation mode), controls (the same controller drawing as Input > Controls…: select a
 button or chip and press the key or controller input to use; also on Windows and Linux) and the
 console language.
 Mouse, keyboard (arrows, Enter, Esc) and controller (D-pad / stick, A, B; L / R switch tabs) all work.

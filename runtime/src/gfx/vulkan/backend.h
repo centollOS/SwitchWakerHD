@@ -43,6 +43,7 @@ struct Screen {
  VkSemaphore acquired=VK_NULL_HANDLE,finished=VK_NULL_HANDLE;
  std::unique_ptr<Surface> scan;
  std::atomic<bool> visible{true},srgb{false},resize{false};
+ int presentMode=-1,presentWanted=-1; // present mode of the swapchain, and the setting it was made for
  std::atomic<int> width{1280},height{720};
 };
 struct GpuScopeMetadata {

@@ -16,7 +16,23 @@ struct Settings {
     std::atomic<bool> available[static_cast<int>(GraphicsFeature::Count)]{};
 };
 Settings& settings() { static Settings s; return s; }
+int env_present_mode() {
+    const char* e = std::getenv("WWHD_VK_PRESENT_MODE");
+    if (!e || !*e) return -1;
+    return !std::strcmp(e, "mailbox") ? kPresentMailbox : !std::strcmp(e, "immediate") ? kPresentImmediate : kPresentFifo;
 }
+std::atomic<int> g_present{env_present_mode() >= 0 ? env_present_mode() : kPresentFifo};
+std::atomic<unsigned> g_offered{1u << kPresentFifo};  // FIFO is always available
+}
+int present_mode() { return g_present.load(std::memory_order_relaxed); }
+void set_present_mode(int m) {
+    if (m < 0 || m >= kPresentModes) m = kPresentFifo;
+    if (g_present.exchange(m) != m) LOG("[vulkan] present mode %s requested", present_mode_name(m));
+}
+bool present_mode_from_env() { return env_present_mode() >= 0; }
+bool present_mode_offered(int m) { return m >= 0 && m < kPresentModes && (g_offered.load() >> m & 1); }
+void set_present_modes_offered(unsigned mask) { g_offered = mask | 1u << kPresentFifo; }
+const char* present_mode_name(int m) { return m == kPresentMailbox ? "mailbox" : m == kPresentImmediate ? "immediate" : "fifo"; }
 int ao_mode() { return settings().ao.load(std::memory_order_relaxed); }
 void set_ao_mode(int v) { settings().ao.store(normalize(v),std::memory_order_relaxed); LOG("[gfx] AO mode %d",ao_mode()); }
 bool ao_hires_enabled() { return settings().hires.load(std::memory_order_relaxed); }

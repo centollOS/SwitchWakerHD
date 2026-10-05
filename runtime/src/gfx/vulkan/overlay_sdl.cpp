@@ -113,6 +113,7 @@ void graphics_changed() {
     put("fxaa", {"WWHD_FXAA"}, gfxvk::fxaa_enabled() ? "1" : "0");
     put("fps60", {"WWHD_INTERP", "WWHD_TRUE60"}, std::to_string(interp::mode()));
     put("scaleFilter", {"WWHD_SCALE_FILTER"}, std::to_string(gfxvk::scale_filter()));
+    put("vkPresentMode", {"WWHD_VK_PRESENT_MODE"}, std::to_string(gfxvk::present_mode()));
     save_locked();
 }
 // start-up (backend.cpp init): the saved graphics options
@@ -132,6 +133,7 @@ void load_saved_options() {
     if (saved("fxaa", {"WWHD_FXAA"})) gfxvk::set_fxaa(num("fxaa") != 0);
     if (saved("fps60", {"WWHD_INTERP", "WWHD_TRUE60"})) interp::set_mode((int)num("fps60"));
     if (saved("scaleFilter", {"WWHD_SCALE_FILTER"})) gfxvk::set_scale_filter((int)num("scaleFilter"));
+    if (saved("vkPresentMode", {"WWHD_VK_PRESENT_MODE"})) gfxvk::set_present_mode((int)num("vkPresentMode"));
 }
 
 int scale_filter() { return gfxvk::scale_filter(); }

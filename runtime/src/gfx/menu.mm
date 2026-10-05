@@ -10,6 +10,9 @@
 #include "../crashrec.h"
 #include "../aspect.h"
 #include "renderer.h"
+#ifdef WWHD_HAS_VULKAN
+#include "vulkan/settings.h"  // Presentation (present mode), kept with the other graphics options
+#endif
 #include "runtime.h"
 
 // graphics options and capture go to the renderer in use (Metal or Vulkan: renderer.h)
@@ -69,6 +72,9 @@ static void load_prefs() {
     if (saved(@"aniso", {"WWHD_ANISO"})) render::set_aniso([d boolForKey:@"aniso"]);
     if (saved(@"fxaa", {"WWHD_FXAA"})) render::set_fxaa([d boolForKey:@"fxaa"]);
     if (saved(@"fps60", {"WWHD_INTERP", "WWHD_TRUE60"})) interp::set_mode((int)[d integerForKey:@"fps60"]);
+#ifdef WWHD_HAS_VULKAN
+    if (saved(@"vkPresentMode", {"WWHD_VK_PRESENT_MODE"})) gfxvk::set_present_mode((int)[d integerForKey:@"vkPresentMode"]);
+#endif
 }
 static void save_prefs() {
     if (!g_prefs || !g_prefs_loaded) return;
@@ -79,6 +85,9 @@ static void save_prefs() {
     if (!env_set({"WWHD_ANISO"})) [d setBool:render::aniso() forKey:@"aniso"];
     if (!env_set({"WWHD_FXAA"})) [d setBool:render::fxaa() forKey:@"fxaa"];
     if (!env_set({"WWHD_INTERP", "WWHD_TRUE60"})) [d setInteger:interp::mode() forKey:@"fps60"];
+#ifdef WWHD_HAS_VULKAN
+    if (!env_set({"WWHD_VK_PRESENT_MODE"})) [d setInteger:gfxvk::present_mode() forKey:@"vkPresentMode"];
+#endif
 }
 
 // the TV title summarises the active options so a key press is visible without opening the menu;

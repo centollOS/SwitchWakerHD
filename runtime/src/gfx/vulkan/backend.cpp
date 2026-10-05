@@ -844,28 +844,33 @@ static void make_swapchain(Screen &s) {
       ci.compositeAlpha = flag;
       break;
     }
-  ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
   uint32_t modeCount = 0;
   vk_check(vkGetPhysicalDeviceSurfacePresentModesKHR(R.physicalDevice,
       s.surface, &modeCount, nullptr), "presentation mode count");
   std::vector<VkPresentModeKHR> modes(modeCount);
   vk_check(vkGetPhysicalDeviceSurfacePresentModesKHR(R.physicalDevice,
       s.surface, &modeCount, modes.data()), "presentation modes");
-  // Prefer the latest ready frame without tearing when the driver supports it.
-  // FIFO remains the fallback; guest GX2 pacing still controls game flips.
-  if (std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_MAILBOX_KHR) != modes.end())
-    ci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
-  // Diagnostic override keeps guest GX2 pacing intact while measuring host
-  // presentation waits. Never select a mode the surface does not advertise.
-  if (const char *mode = std::getenv("WWHD_VK_PRESENT_MODE")) {
-    VkPresentModeKHR requested = !std::strcmp(mode, "immediate")
-        ? VK_PRESENT_MODE_IMMEDIATE_KHR : !std::strcmp(mode, "mailbox")
-        ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
-    if (std::find(modes.begin(), modes.end(), requested) != modes.end())
-      ci.presentMode = requested;
-    LOG("[vulkan] requested presentation mode %s, selected %d", mode,
-        int(ci.presentMode));
-  }
+  // Presentation (Graphics > Presentation in the settings overlay, WWHD_VK_PRESENT_MODE): FIFO (vsync)
+  // by default; mailbox (low latency) or immediate (may tear) when chosen and the surface offers them.
+  // Guest GX2 pacing still controls game flips in every mode.
+  static const VkPresentModeKHR kModes[kPresentModes] = {VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_MAILBOX_KHR,
+                                                         VK_PRESENT_MODE_IMMEDIATE_KHR};
+  unsigned offered = 0;
+  std::string offeredNames;
+  for (int m = 0; m < kPresentModes; m++)
+    if (std::find(modes.begin(), modes.end(), kModes[m]) != modes.end()) {
+      offered |= 1u << m;
+      offeredNames += std::string(offeredNames.empty() ? "" : ", ") + present_mode_name(m);
+    }
+  if (&s == &R.tv) set_present_modes_offered(offered);
+  const int wanted = present_mode();
+  const int chosen = offered >> wanted & 1 ? wanted : kPresentFifo;
+  ci.presentMode = kModes[chosen];
+  if (chosen != s.presentMode || wanted != s.presentWanted)
+    LOG("[vulkan] %s present mode %s (available: %s)%s", &s == &R.tv ? "TV" : "GamePad", present_mode_name(chosen),
+        offeredNames.c_str(), chosen != wanted ? " - the requested mode is not offered" : "");
+  s.presentMode = chosen;
+  s.presentWanted = wanted;
   ci.clipped = VK_TRUE;
   ci.oldSwapchain = s.swapchain;
   VkSwapchainKHR sc;
@@ -885,6 +890,10 @@ static void make_swapchain(Screen &s) {
   s.resize = false;
 }
 static void present(Screen &s) {
+  // Presentation changed (settings overlay): a new swapchain, as for a resize (also for a window that
+  // is not shown right now, so the next frame it shows uses the new mode)
+  if (s.window && s.swapchain && s.presentWanted != present_mode())
+    make_swapchain(s);
   if (!s.window || !s.visible || s.width <= 0 || s.height <= 0 || !s.scan ||
       !s.scan->image)
     return;
