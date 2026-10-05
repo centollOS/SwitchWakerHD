@@ -372,6 +372,23 @@ and the renderer are remembered in `~/Library/Application Support/wwhd/display.p
 - Debugging aids (frame/draw dumps, traces, scheduler statistics) are documented next to their
   code: grep for `WWHD_` in `runtime/src`.
 
+## Optional: bring your GameCube save to HD
+
+`tools/savegame/gc2hd.py` converts a GameCube Wind Waker save (`.gci`, USA GZLE01 or Japanese GZLJ01,
+e.g. from a memory-card dump or Dolphin) into a Wind Waker HD save (`cking.sav`), all three files
+with their progress, items, songs, charts and story state. It works for this port and for Cemu.
+
+```sh
+python3 tools/savegame/gc2hd.py "My Save.gci" -o converted     # writes converted/cking.sav
+python3 tools/savegame/hd_save_info.py converted/cking.sav      # shows what is in it
+```
+
+Back up your old `cking.sav`, then put the new one in `save/user/` (Cemu:
+`mlc01/usr/save/00050000/10143500/user/80000001/` for the USA game). The Tingle Tuner becomes the
+Tingle Bottle (HD's item in the same slot); Picto Box photos and HD-only statistics are not carried
+over; Japanese player names become "Link". Details and options: [tools/savegame/README.md](tools/savegame/README.md).
+Tested with 167 GameCube saves across the whole story (100% and Any% routes).
+
 ## Optional: shader head start
 
 The first time a shader is needed it is translated and compiled, which can cause short hitches.
