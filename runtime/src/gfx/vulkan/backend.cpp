@@ -1574,6 +1574,34 @@ static bool hidden_windows() {
   static const bool hidden = [] { const char* e = getenv("WWHD_HIDDEN_WINDOWS"); return e && *e && strcmp(e, "0"); }();
   return hidden;
 }
+// The game's own icon on the windows (title bar, taskbar): meta/iconTex.tga of the game folder, an
+// uncompressed 32-bit TGA (128x128 in Wind Waker HD). Nothing happens without it.
+static void set_window_icons() {
+  FILE *f = std::fopen((config::game_dir + "/meta/iconTex.tga").c_str(), "rb");
+  if (!f)
+    return;
+  std::vector<uint8_t> d;
+  uint8_t buf[65536];
+  for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;)
+    d.insert(d.end(), buf, buf + n);
+  std::fclose(f);
+  if (d.size() < 18 || d[1] != 0 || d[2] != 2 || d[16] != 32)  // no colour map, true colour, 32 bpp
+    return;
+  const uint32_t w = d[12] | d[13] << 8, h = d[14] | d[15] << 8, start = 18 + d[0];
+  if (!w || !h || w > 1024 || h > 1024 || d.size() < start + size_t(w) * h * 4)
+    return;
+  SDL_Surface *icon = SDL_CreateSurface(int(w), int(h), SDL_PIXELFORMAT_BGRA32);
+  if (!icon)
+    return;
+  const bool topDown = d[17] & 0x20;  // otherwise the first row is the bottom one
+  for (uint32_t y = 0; y < h; y++)
+    std::memcpy(static_cast<uint8_t *>(icon->pixels) + size_t(y) * icon->pitch,
+                d.data() + start + size_t(topDown ? y : h - 1 - y) * w * 4, size_t(w) * 4);
+  for (Screen *s : {&R.tv, &R.drc})
+    if (s->window)
+      SDL_SetWindowIcon(s->window, icon);
+  SDL_DestroySurface(icon);
+}
 // SDL host (Vulkan-only builds): SDL windows, input and audio
 void init() {
   // hidden test runs: no Dock icon, no activation (the app never takes the focus from the user)
@@ -1595,6 +1623,7 @@ void init() {
   }
   if (hidden_windows())
     R.tv.visible = R.drc.visible = false;  // no drawables: pictures only reach frame / present dumps
+  set_window_icons();
   uint32_t n;
   const char *const *se = SDL_Vulkan_GetInstanceExtensions(&n);
   if (!se)

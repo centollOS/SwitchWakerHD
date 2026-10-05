@@ -31,11 +31,13 @@ import re
 import shutil
 import subprocess
 import sys
+import struct
 import tarfile
 import threading
 import time
 import urllib.request
 import zipfile
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -823,6 +825,48 @@ def mac_app(app_path, exe_src, data_dir, version):
     replace_dir(tmp, app_path)
 
 
+def game_icon_png(data_dir):
+    """The game's own icon (game/meta/iconTex.tga, uncompressed 32-bit) as PNG bytes, or None."""
+    try:
+        with open(os.path.join(data_dir, "game", "meta", "iconTex.tga"), "rb") as f:
+            d = f.read()
+    except OSError:
+        return None
+    if len(d) < 18 or d[1] != 0 or d[2] != 2 or d[16] != 32:
+        return None
+    w, h = struct.unpack("<HH", d[12:16])
+    start = 18 + d[0]
+    if not w or not h or len(d) < start + w * h * 4:
+        return None
+    rows = []
+    for y in range(h):  # BGRA, bottom row first unless the descriptor says top-down
+        src = y if d[17] & 0x20 else h - 1 - y
+        row = bytearray(d[start + src * w * 4:start + (src + 1) * w * 4])
+        row[0::4], row[2::4] = row[2::4], row[0::4]  # -> RGBA
+        rows.append(b"\0" + bytes(row))
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b""))
+
+
+def write_game_icon(data_dir, ico):
+    """wwhd.ico (a PNG-compressed icon) or wwhd.png in the data folder, from the game's own icon."""
+    png = game_icon_png(data_dir)
+    if not png:
+        return None
+    path = os.path.join(data_dir, "wwhd.ico" if ico else "wwhd.png")
+    with open(path, "wb") as f:
+        if ico:
+            w, h = struct.unpack(">II", png[16:24])
+            f.write(struct.pack("<HHH", 0, 1, 1)
+                    + struct.pack("<BBBBHHII", w % 256, h % 256, 0, 0, 1, 32, len(png), 22) + png)
+        else:
+            f.write(png)
+    return path
+
+
 def linux_launchers(data_dir, exe):
     play = os.path.join(data_dir, "play.sh")
     with open(play, "w") as f:
@@ -834,14 +878,20 @@ def linux_launchers(data_dir, exe):
     with open(os.path.join(apps, "wwhd.desktop"), "w") as f:
         f.write("[Desktop Entry]\nType=Application\nName=%s\nComment=The Wind Waker HD, native PC port\n"
                 "Exec=\"%s\"\nPath=%s\nTerminal=false\nCategories=Game;\n" % (APP_NAME, play, data_dir))
+        icon = write_game_icon(data_dir, ico=False)
+        if icon:
+            f.write("Icon=%s\n" % icon)
     return play
 
 
 def windows_shortcuts(data_dir, exe):
+    icon = write_game_icon(data_dir, ico=True)
+    icon_set = "$l.IconLocation='%s';" % icon.replace("'", "''") if icon else ""
     ps = ("$s=(New-Object -ComObject WScript.Shell);"
           "foreach($d in @([Environment]::GetFolderPath('Programs'),[Environment]::GetFolderPath('Desktop'))){"
           "$l=$s.CreateShortcut((Join-Path $d '%s.lnk'));$l.TargetPath='%s';$l.Arguments='--game game --save save';"
-          "$l.WorkingDirectory='%s';$l.Save()}" % (APP_NAME, exe.replace("'", "''"), data_dir.replace("'", "''")))
+          "$l.WorkingDirectory='%s';%s$l.Save()}" % (APP_NAME, exe.replace("'", "''"), data_dir.replace("'", "''"),
+                                                    icon_set))
     subprocess.run(["powershell", "-NoProfile", "-Command", ps], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
