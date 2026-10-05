@@ -136,6 +136,9 @@ void set_fps60_chosen(bool on) {
 // The cores with the highest maximum clock (a Snapdragon 8 Elite has two at 4.47 GHz next to six at
 // 3.53 GHz). The scheduler kept the render thread and the game thread on the slower cores while the
 // fast ones idled at 1 GHz; the render thread's CPU time limits the frame rate in the open world.
+// At least two cores: a Snapdragon 8 Gen 3 has one 3.3 GHz core, and with every game thread on it
+// the boot crash of docs/decomp-notes.md ("intermittent boot crash") happened on every start; the
+// next clock steps are added until there are two or more.
 static cpu_set_t fastest_cores(int& count) {
     cpu_set_t set;
     CPU_ZERO(&set);
@@ -153,8 +156,19 @@ static cpu_set_t fastest_cores(int& count) {
         freq.push_back(v);
         best = std::max(best, v);
     }
+    long floor = best;
+    for (;;) {
+        int n = 0;
+        long next = 0;
+        for (long v : freq) {
+            if (v >= floor) n++;
+            else next = std::max(next, v);
+        }
+        if (n >= 2 || next <= 0) break;
+        floor = next;
+    }
     for (size_t cpu = 0; cpu < freq.size(); cpu++)
-        if (best > 0 && freq[cpu] == best) { CPU_SET(cpu, &set); count++; }
+        if (best > 0 && freq[cpu] >= floor) { CPU_SET(cpu, &set); count++; }
     return set;
 }
 
