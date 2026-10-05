@@ -284,18 +284,18 @@ printed LR/SP values do not establish that deeper guest stack frames match. Load
 later can succeed if the worker threads reach compatible waits. Failed loads do not
 bypass these checks or establish a valid benchmark starting point.
 
-## Windows draw batching
+## Draw batching (all platforms)
 
-Windows defaults to submitting after 2,048 guest draws, with at most two
-mid-frame submissions. Each submission retains its upload slices, descriptor
+Every platform defaults to submitting after 2,048 guest draws, with at most three
+mid-frame submissions (measured on macOS and Windows; Linux uses the same defaults). Each submission retains its upload slices, descriptor
 pool and deferred resources until its fence completes. The next draw reopens
 attachments with `LOAD`, preserving draw order and contents. This uses the
 existing asynchronous submission path.
 
 Set `WWHD_VK_DRAW_BATCH=0` to disable mid-frame batching, or set an explicit
 positive draw count to tune it. Empty or invalid values disable batching.
-`WWHD_VK_DRAW_BATCH_CAP=1|2|3` sets the maximum mid-frame submissions; the Windows
-default remains two. See `docs/performance.md` for the local Windows comparison.
+`WWHD_VK_DRAW_BATCH_CAP=1|2|3` sets the maximum mid-frame submissions (default three).
+See `docs/performance.md` for the local Windows comparison.
 
 ## macOS defaults and tuning
 
@@ -310,8 +310,8 @@ reuse remains an opt-in experiment on every platform.
 | --- | --- |
 | `WWHD_VSYNC_PRECISE` | macOS defaults to enabled: sleep to near the vsync deadline, then spin for the final portion (up to 2 ms). Set `0` to disable. Other platforms keep the previous off default. Precise sleeping increases CPU use. |
 | `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS` | macOS defaults to `3`; an explicit MoltenVK override, including `0`, is respected. Normal macOS render batches use an autorelease pool. Other platforms receive no application override. |
-| `WWHD_VK_DRAW_BATCH` | macOS defaults to `2048` when unset; other platforms default to off. Set `0` to disable. Positive decimal values up to 1,048,576 select the batch size; malformed or out-of-range values disable batching. |
-| `WWHD_VK_DRAW_BATCH_CAP` | Accepts `1`, `2`, or `3`. When unset, macOS defaults to `3` and other platforms to `2`. An explicitly invalid value falls back to `2`. Has no effect with batching disabled. |
+| `WWHD_VK_DRAW_BATCH` | Defaults to `2048` when unset, on every platform. Set `0` to disable. Positive decimal values up to 1,048,576 select the batch size; malformed or out-of-range values disable batching. |
+| `WWHD_VK_DRAW_BATCH_CAP` | Accepts `1`, `2`, or `3`. When unset, defaults to `3`. An explicitly invalid value falls back to `2`. Has no effect with batching disabled. |
 | `WWHD_VK_REUSE_VERTEX_SNAPSHOTS=1` | Reuse a bounded vertex snapshot only after exact guest-byte comparison within the same fenced submission generation. Off by default; comparison overhead can outweigh saved copies. |
 
 Draw batching keeps the four-slot fence retirement contract. More submissions can

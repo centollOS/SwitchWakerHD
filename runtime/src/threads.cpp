@@ -560,11 +560,10 @@ static void* thread_main(void* p) {
 #ifdef __APPLE__
     ht->mach = pthread_mach_thread_np(pthread_self());
 #endif
-    // keep guest threads on performance cores: the default QoS lets macOS park them on efficiency
-    // cores, which showed up as the main thread holding its core without getting CPU time
-#ifdef __APPLE__
-    if (!getenv("WWHD_NO_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-#endif
+    // keep guest threads on performance cores (see host::boost_thread_priority): the default QoS
+    // let macOS park them on efficiency cores, which showed up as the main thread holding its core
+    // without getting CPU time
+    host::boost_thread_priority();
     LOG("[thread] start \"%s\" core %d prio %d affinity %X", name.c_str(), ht->core, (int)ld32(ht->guest + osthread::kBasePrio),
         ld32(ht->guest + osthread::kAffinity));
     uint32_t rv = 0;
@@ -689,9 +688,7 @@ Cpu* make_service_cpu(const char* name, uint32_t stack_size) {
     ht->started = true;
     ht->wait_kind = W_SERVICE;
     ht->wst.store(kParked);  // idle until service_begin
-#ifdef __APPLE__
-    if (!getenv("WWHD_NO_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-#endif
+    host::boost_thread_priority();
     return &ht->cpu;
 }
 }  // namespace threads

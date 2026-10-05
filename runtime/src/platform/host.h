@@ -21,6 +21,10 @@
 #endif
 #ifdef __APPLE__
 #include <mach-o/ldsyms.h>
+#include <pthread/qos.h>
+#elif !defined(_WIN32)
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #endif
 namespace host {
 #if defined(__APPLE__) && defined(WWHD_HAS_VULKAN)
@@ -50,6 +54,29 @@ inline void set_thread_name(const char* name) {
  if(f) { std::wstring text; for(unsigned char c:thread_label)text.push_back(c); f(GetCurrentThread(),text.c_str()); }
 #else
  pthread_setname_np(pthread_self(),thread_label.substr(0,15).c_str());
+#endif
+}
+// Game and render threads: keep them on fast cores and ahead of background work. macOS: QoS
+// user-interactive (the default QoS let macOS park them on efficiency cores). Windows: above-normal
+// priority and no power throttling (hybrid P/E-core CPUs otherwise move busy threads to E-cores).
+// Linux: a small nice boost where the process may raise priority (needs CAP_SYS_NICE; otherwise a
+// no-op). WWHD_NO_QOS=1 leaves the thread untouched on every platform.
+inline void boost_thread_priority() {
+ if(getenv("WWHD_NO_QOS")) return;
+#ifdef __APPLE__
+ pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
+#elif defined(_WIN32)
+ SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_ABOVE_NORMAL);
+ // SetThreadInformation(ThreadPowerThrottling) exists from Windows 10 1709; looked up at run time
+ struct PowerThrottling { ULONG Version, ControlMask, StateMask; };
+ using SetInfo=BOOL(WINAPI*)(HANDLE,int,LPVOID,DWORD);
+ static const auto set_info=(SetInfo)GetProcAddress(GetModuleHandleW(L"Kernel32.dll"),"SetThreadInformation");
+ if(set_info) {
+  PowerThrottling state{1 /* THREAD_POWER_THROTTLING_CURRENT_VERSION */,1 /* EXECUTION_SPEED */,0 /* off */};
+  set_info(GetCurrentThread(),3 /* ThreadPowerThrottling */,&state,sizeof state);
+ }
+#else
+ setpriority(PRIO_PROCESS,(id_t)syscall(SYS_gettid),-5);  // EPERM without CAP_SYS_NICE: ignored
 #endif
 }
 inline void get_thread_name(char* out,size_t size) {

@@ -30,12 +30,11 @@ bool preparation_stats_enabled() {
   static const bool enabled=std::getenv("WWHD_VK_STATS")!=nullptr;
   return enabled;
 }
-// Bounded overlap: measured macOS/Windows default; zero/invalid disables it.
+// Bounded overlap: the default on every platform (measured on macOS and Windows); an explicit
+// zero/invalid WWHD_VK_DRAW_BATCH disables it.
 uint32_t parse_draw_batch(const char* text) {
-#if defined(__APPLE__) || defined(_WIN32)
   if (!text) return 2048;
-#endif
-  if (!text || !*text) return 0;
+  if (!*text) return 0;
   uint32_t value = 0;
   for (const char* p = text; *p; ++p) {
     if (*p < '0' || *p > '9') return 0;
@@ -46,9 +45,7 @@ uint32_t parse_draw_batch(const char* text) {
   return value;
 }
 uint32_t parse_draw_batch_cap(const char* text) {
-#ifdef __APPLE__
   if (!text) return 3;
-#endif
   // Explicit invalid caps retain the original conservative fallback.
   const uint32_t value = parse_draw_batch(text);
   return value >= 1 && value <= 3 ? value : 2;

@@ -179,9 +179,7 @@ static uint64_t g_fence_issued = 0, g_fence_done = 0;
 
 static void render_thread_main() {
     host::set_thread_name("GX2 render");
-#ifdef __APPLE__
-    if (!getenv("WWHD_NO_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-#endif
+    host::boost_thread_priority();
     for (;;) {
         {
             std::unique_lock<std::mutex> lk(g_q_mutex);
