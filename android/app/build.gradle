@@ -1,0 +1,36 @@
+// The native libraries are built by android/build_native.sh into app/libs/arm64-v8a (libmain.so is
+// the recompiled game: build it from your own game, and keep the APK to yourself).
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace = "org.wwhdrecomp.wwhd"
+    compileSdk 36
+    defaultConfig {
+        applicationId "org.wwhdrecomp.wwhd"
+        minSdk 33
+        targetSdk 36
+        versionCode 1
+        versionName "0.1"
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug  // personal sideloaded build
+        }
+    }
+    sourceSets.main.jniLibs.srcDirs = ['libs']
+    // the game's own icon (android/make_icon.py, from your game files; git-ignored), else SDL's
+    def gameIcon = file('local-res').exists()
+    if (gameIcon) sourceSets.main.res.srcDirs += ['local-res']
+    defaultConfig.manifestPlaceholders = [appIcon: gameIcon ? '@mipmap/ic_game' : '@mipmap/ic_launcher']
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false  // stored uncompressed, mapped straight from the APK
+            keepDebugSymbols += ['**/libmain.so']  // stripped by build_native.sh already
+        }
+    }
+    lint { abortOnError = false }
+}
