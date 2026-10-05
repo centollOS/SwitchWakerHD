@@ -245,7 +245,7 @@ jobs:
         run: |
           read -r URL SUM DIR < <(python -c "
           import json; t=json.load(open('tools/installer/toolchains.json'))['toolchains']['llvm-mingw-20260922']
-          print(t['url'], t['sha256'], t['dir'])")
+          print(t['url'], t['sha256'], t['dir'])" | tr -d '\r')  # Windows Python ends lines with CR LF
           T="$(cygpath -m "$RUNNER_TEMP")"
           curl -fsSL -o "$T/llvm-mingw.zip" "$URL"
           echo "$SUM  $T/llvm-mingw.zip" | sha256sum -c -
