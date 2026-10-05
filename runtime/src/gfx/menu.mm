@@ -39,6 +39,8 @@ static void cycle_res() {
 namespace interp {
 int mode();  // 0 off, 1 frame interpolation, 2 true 60 (logic at 60 steps per second)
 void set_mode(int m);
+bool paced_interpolation();  // frame interpolation keeps the game's speed (settings overlay)
+void set_paced_interpolation(bool on);
 }
 
 namespace gx2 { uint64_t flips_presented(); }
@@ -72,6 +74,7 @@ static void load_prefs() {
     if (saved(@"aniso", {"WWHD_ANISO"})) render::set_aniso([d boolForKey:@"aniso"]);
     if (saved(@"fxaa", {"WWHD_FXAA"})) render::set_fxaa([d boolForKey:@"fxaa"]);
     if (saved(@"fps60", {"WWHD_INTERP", "WWHD_TRUE60"})) interp::set_mode((int)[d integerForKey:@"fps60"]);
+    if (saved(@"fps60Paced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation([d boolForKey:@"fps60Paced"]);
 #ifdef WWHD_HAS_VULKAN
     if (saved(@"vkPresentMode", {"WWHD_VK_PRESENT_MODE"})) gfxvk::set_present_mode((int)[d integerForKey:@"vkPresentMode"]);
 #endif
@@ -85,6 +88,7 @@ static void save_prefs() {
     if (!env_set({"WWHD_ANISO"})) [d setBool:render::aniso() forKey:@"aniso"];
     if (!env_set({"WWHD_FXAA"})) [d setBool:render::fxaa() forKey:@"fxaa"];
     if (!env_set({"WWHD_INTERP", "WWHD_TRUE60"})) [d setInteger:interp::mode() forKey:@"fps60"];
+    if (!env_set({"WWHD_INTERP_PACED"})) [d setBool:interp::paced_interpolation() forKey:@"fps60Paced"];
 #ifdef WWHD_HAS_VULKAN
     if (!env_set({"WWHD_VK_PRESENT_MODE"})) [d setInteger:gfxvk::present_mode() forKey:@"vkPresentMode"];
 #endif

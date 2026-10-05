@@ -499,18 +499,24 @@ void ss_reset() {
 // device draws them fast enough and fewer where it does not. Without pacing, every logic step is
 // followed by an in-between pass, and a device that draws fewer than 60 frames a second runs the
 // whole game slower than real time.
-static bool paced() {
-    static const bool on = [] {
-        const char* e = getenv("WWHD_INTERP_PACED");
+// The settings overlay switches it ("Keep game speed", saved with the graphics options); the
+// variable sets it at start and wins over the saved value.
+static std::atomic<bool> g_paced{[] {
+    const char* e = getenv("WWHD_INTERP_PACED");
 #ifdef __ANDROID__
-        return !e || atoi(e) != 0;
+    return !e || atoi(e) != 0;
 #else
-        return e && atoi(e) != 0;
+    return e && atoi(e) != 0;
 #endif
-    }();
-    return on;
-}
+}()};
+static bool paced() { return g_paced.load(std::memory_order_relaxed); }
 bool paced_interpolation() { return paced(); }
+void set_paced_interpolation(bool on) {
+    if (g_paced.exchange(on) != on) LOG("[interp] paced interpolation %s", on ? "on (keeps the game's speed)" : "off");
+}
+// share of in-between frames drawn over the last 60 decisions (performance overlay), -1 before any
+static std::atomic<float> g_paced_share{-1};
+float paced_drawn_share() { return paced() && interp_on() ? g_paced_share.load(std::memory_order_relaxed) : -1; }
 // The decision is taken at the end of each logic pass, before the frame's controller read: that
 // read repeats the previous sample when an in-between pass follows (repeat_input), so deciding later
 // left every read a repeat while all in-between passes were dropped (the controller stopped).
@@ -542,12 +548,18 @@ static void paced_pass_start() {
 }
 // end of a logic pass: an in-between pass follows only if it fits before the next step is due
 static void paced_after_logic() {
-    if (!paced() || !interp_on()) { g_hold_next = true; return; }
+    if (!paced() || !interp_on()) { g_hold_next = true; g_wait_step = false; return; }
     const auto elapsed = pace_clock::now() - g_last_logic;
     const bool fits = elapsed + g_pass_avg <= kPacedStep + std::chrono::milliseconds(2);
     g_hold_next = fits;
     g_wait_step = !fits;
     (fits ? g_paced_holds : g_paced_dropped)++;
+    static unsigned recentHolds = 0, recentN = 0;
+    recentHolds += fits;
+    if (++recentN == 60) {
+        g_paced_share.store(recentHolds / 60.0f, std::memory_order_relaxed);
+        recentHolds = recentN = 0;
+    }
     if (g_paced_dropped + g_paced_holds >= 300) {
         LOG("[interp] paced: %.0f%% of in-between frames drawn (pass %.1f ms)",
             100.0 * g_paced_holds / double(g_paced_dropped + g_paced_holds),

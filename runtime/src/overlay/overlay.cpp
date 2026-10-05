@@ -33,7 +33,13 @@
 #include "../runtime.h"
 #include "../savestate.h"
 
-namespace interp { int mode(); void set_mode(int m); }  // 0 off, 1 frame interpolation, 2 true 60
+namespace interp {
+int mode();  // 0 off, 1 frame interpolation, 2 true 60
+void set_mode(int m);
+bool paced_interpolation();  // 60 fps frame interpolation keeps the game's speed (skips in-between frames)
+void set_paced_interpolation(bool on);
+float paced_drawn_share();  // share of in-between frames drawn lately (paced and on), -1 otherwise
+}
 namespace gx2 { uint64_t flips_presented(); }
 
 namespace overlay {
@@ -495,6 +501,13 @@ void tab_graphics() {
     ImGui::SameLine();
     if (radio("True 60 (experimental)", m == 2)) post_changed([] { interp::set_mode(2); });
     help("True 60 runs the game logic at 60 steps per second");
+    if (m == 1) {
+        bool paced;
+        if (check("Keep game speed", interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))
+            post_changed([paced] { interp::set_paced_interpolation(paced); });
+        help("When the computer cannot draw 60 frames a second, skip in-between frames instead of\n"
+             "slowing the whole game down. The performance overlay shows how many are drawn.");
+    }
 
     heading("Internal resolution");
     static const float scales[] = {1.0f, 1.5f, 2.0f, 3.0f};
@@ -922,6 +935,8 @@ void perf_window(bool menu_open) {
         ImGui::PlotLines("##ft", U.frame_ms, 120, U.frame_i, nullptr, 0.0f, 50.0f, ImVec2(220, 36));
         ImGui::TextDisabled("%s  %gx  %s", render::api_name(render::active()), hostui::res_scale(),
                             interp::mode() == 2 ? "true 60" : interp::mode() == 1 ? "60 fps" : "30 fps");
+        if (float share = interp::paced_drawn_share(); share >= 0)
+            ImGui::TextDisabled("60 fps frames drawn: %.0f%%", share * 100.0f);
     }
     ImGui::End();
     (void)menu_open;
