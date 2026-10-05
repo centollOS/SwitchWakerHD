@@ -46,6 +46,37 @@ disable validation and detailed profiling for FPS comparisons. Frame
 interpolation increases displayed frames but still needs each rendered frame
 to fit its budget.
 
+## Windows draw batching default (2026-10-05)
+
+Windows now enables the existing bounded 2,048-draw asynchronous batching by
+default, with a maximum of two mid-frame submissions. Explicit values of
+`WWHD_VK_DRAW_BATCH` and `WWHD_VK_DRAW_BATCH_CAP` retain their existing behavior.
+
+An isolated saved Outset scene at 3x resolution, AO mode 2, high-resolution AO
+and anisotropy compared the same native Release executable with batching enabled
+and disabled. VulkanProfiler and validation were disabled, implicit Vulkan
+layers were disabled equally, presentation was immediate, and GamePad/input
+were disabled. Each run restored the same state at renderer frame 1,200 and
+measured frames 2,401–3,600 after warming. All runs averaged 6,210 draws/frame.
+
+| Draw batch | FPS | Renderer CPU ms/frame |
+| --- | ---: | ---: |
+| 2,048 draws, trial A | 48.96 | 10.6511 |
+| 2,048 draws, trial B | 51.09 | 10.3646 |
+| Disabled (`0`), trial A | 33.39 | 10.5077 |
+
+Keeping batching enabled was about 47–53% faster in this local fixture, with
+similar renderer CPU time. That suggests improved overlap or pacing rather
+than cheaper CPU draw preparation. There is only one unbatched sample, and
+this does not establish a universal gain or sustained 60 FPS.
+
+These comparisons used a local experimental build with bounded CPU caches and
+pass-state preservation enabled equally in every run, and dynamic depth/raster
+state disabled. They isolate the batching toggle in that build; they are not
+a benchmark of an otherwise unmodified upstream checkout. Those experiments
+are excluded from this change. A separate synchronization-validation game run
+and the actual-device renderer smoke test passed in the local build.
+
 ## How to profile
 
 Run a scripted session, then sample it with macOS `sample` (1 ms stacks for every thread):
