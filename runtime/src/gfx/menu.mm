@@ -40,8 +40,9 @@ void set_mode(int m);
 
 namespace gx2 { uint64_t flips_presented(); }
 #include "../mods/mods.h"
+#include "../overlay/overlay.h"
 namespace ax { void start_sound_trace(const char* path, double seconds); }
-namespace gfx { bool menu_hotkey(uint16_t code); NSMenuItem* controls_menu_item(); /* controls_ui.mm */ }
+namespace gfx { bool menu_hotkey(uint16_t code); NSMenuItem* controls_menu_item(); /* controls_ui.mm */ void install_overlay_input(); }
 
 static NSWindow* g_tv;
 static double g_fps = 0;  // frames presented per second, measured over the last half second
@@ -162,7 +163,7 @@ static void choose_renderer(render::Api a) {
         it.target = self;
         it.tag = i;
         it.enabled = info[i].used && info[i].compatible;
-        it.toolTip = [NSString stringWithFormat:@"Shortcut in game: F%d", i];
+        it.toolTip = i == 1 ? @"In game: F1 (or \u2318,) opens the settings overlay (Saves)" : [NSString stringWithFormat:@"Shortcut in game: F%d", i];
     }
     // crash recovery (crashrec.cpp): automatic states every few minutes + recorded input
     [m addItem:[NSMenuItem separatorItem]];
@@ -193,6 +194,7 @@ static WWStateMenu* g_state_menu;
 - (void)setAO:(NSMenuItem*)item { render::set_ao_mode((int)item.tag); update_title(); }
 - (void)toggleAniso:(NSMenuItem*)item { render::set_aniso(!render::aniso()); update_title(); }
 - (void)capture:(NSMenuItem*)item { render::request_capture(); }
+- (void)openSettings:(NSMenuItem*)item { overlay::set_open(!overlay::is_open()); }  // Cmd+, toggles
 - (void)setRenderer:(NSMenuItem*)item { choose_renderer((render::Api)item.tag); }
 - (void)recordSound:(NSMenuItem*)item { gfx::menu_hotkey(kVK_ANSI_9); }
 - (void)setController:(NSMenuItem*)item {
@@ -295,6 +297,12 @@ void install_menu(NSWindow* tv) {
 
     NSMenuItem* appItem = [bar addItemWithTitle:@"" action:nil keyEquivalent:@""];
     NSMenu* app = [NSMenu new];
+    // the settings overlay (overlay/overlay.h), at the place and with the shortcut macOS apps use;
+    // F1 also works (Fn+F1 unless the top row sends standard function keys)
+    NSMenuItem* settings = [app addItemWithTitle:@"Settings\u2026" action:@selector(openSettings:) keyEquivalent:@","];
+    settings.target = g_target;
+    settings.toolTip = @"In-game settings overlay over the picture (F1, or \u2318, in the game window)";
+    [app addItem:[NSMenuItem separatorItem]];
     [app addItemWithTitle:@"Quit Wind Waker HD" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = app;
 
@@ -406,6 +414,7 @@ void install_menu(NSWindow* tv) {
     ssItem.submenu = sm;
 
     NSApp.mainMenu = bar;
+    install_overlay_input();  // settings overlay (F1): mouse in the TV window (overlay_appkit.mm)
     update_title();
     // apply the saved options once the renderer is settled: the menu is installed with the windows,
     // before a Vulkan start can still fail and fall back to Metal; the main queue runs after that
@@ -426,6 +435,11 @@ void install_menu(NSWindow* tv) {
     }];
 }
 
+// settings overlay (overlay_appkit.mm): the same internal resolution value and title / saved options
+float menu_res_scale() { return current_res_scale(); }
+void menu_set_res_scale(float f) { set_res(f); }
+void menu_options_changed() { update_title(); }
+
 // single-key shortcuts from the game window; true if the key was used
 bool menu_hotkey(uint16_t code) {
     switch (code) {
@@ -440,7 +454,7 @@ bool menu_hotkey(uint16_t code) {
     case kVK_F1: case kVK_F2: case kVK_F3: case kVK_F4: case kVK_F5: {
         int slot = code == kVK_F1 ? 1 : code == kVK_F2 ? 2 : code == kVK_F3 ? 3 : code == kVK_F4 ? 4 : 5;
         if ([NSEvent modifierFlags] & NSEventModifierFlagShift) ss::request_save(slot);
-        else ss::request_load(slot);
+        else if (slot != 1) ss::request_load(slot);  // F1: the settings overlay (overlay_appkit.mm)
         return true;
     }
     case kVK_ANSI_9: {

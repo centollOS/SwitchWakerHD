@@ -10,6 +10,8 @@
 #include "gx2/gx2.h"
 #include "input.h"
 #include "mods/mods.h"
+#include "overlay/hostui.h"
+#include "overlay/overlay.h"
 #ifdef WWHD_SDL_HOST
 #include "platform/input_sdl.h"
 #include <SDL3/SDL_vulkan.h>
@@ -1018,6 +1020,25 @@ static void dump_scan(Screen &s, const std::string &path) {
     LOG("[gfx] cannot write %s: %s", path.c_str(), e.what());
   }
 }
+#ifdef WWHD_SDL_HOST
+// SDL host: the composed TV window (what present() puts on the screen), written after the frame
+static std::vector<std::string> presentDumps;
+static void request_present_dump(const std::string& path) { presentDumps.push_back(path); }
+static void write_present_dumps() {
+  for (auto& path : std::exchange(presentDumps, {})) {
+    if (!R.tv.scan || !R.tv.scan->image) continue;
+    const uint32_t w = uint32_t(std::max(1, R.tv.width.load())), h = uint32_t(std::max(1, R.tv.height.load()));
+    try {
+      write_rgba_png(path, w, h, compose_offscreen(R.tv, w, h, R.tv.srgb.load()));
+      LOG("[gfx] wrote %s (%ux%u, TV window)", path.c_str(), w, h);
+    } catch (const std::exception& e) {
+      LOG("[gfx] present dump %s failed: %s", path.c_str(), e.what());
+    }
+  }
+}
+#else
+static void request_present_dump(const std::string& path) { gfx::request_present_dump(path); }
+#endif
 static std::atomic<bool> captureRequested{false};
 void request_capture() { captureRequested = true; }
 static void frame_dumps(uint64_t frame) {
@@ -1033,10 +1054,8 @@ static void frame_dumps(uint64_t frame) {
   if (std::find(frames.begin(), frames.end(), frame) != frames.end()) {
     dump_scan(R.tv, "frame_" + std::to_string(frame) + ".png");
     dump_scan(R.drc, "frame_" + std::to_string(frame) + "_drc.png");
-#ifndef WWHD_SDL_HOST
     if (getenv("WWHD_DUMP_PRESENT"))
-      gfx::request_present_dump("frame_" + std::to_string(frame) + "_present.png");
-#endif
+      request_present_dump("frame_" + std::to_string(frame) + "_present.png");
   }
   // P / F12 (Graphics menu): the pictures of this frame in captures/<time>/ (WWHD_CAPTURE=<frame>
   // scripts it when WWHD_CAPTURE_PATH is not used); the Metal renderer also writes a draw log
@@ -1050,9 +1069,7 @@ static void frame_dumps(uint64_t frame) {
     std::filesystem::create_directories(dir, ec);
     dump_scan(R.tv, std::string(dir) + "/tv.png");
     dump_scan(R.drc, std::string(dir) + "/gamepad.png");
-#ifndef WWHD_SDL_HOST
-    gfx::request_present_dump(std::string(dir) + "/present.png");
-#endif
+    request_present_dump(std::string(dir) + "/present.png");
     LOG("[gfx] capture of frame %llu written to %s", (unsigned long long)frame, dir);
   }
 }
@@ -1068,6 +1085,9 @@ void swap() {
       drcScan, drcScan ? float(drcScan->extent.width) : 0, drcScan ? float(drcScan->extent.height) : 0,
       float(R.tv.swapExtent.width), float(R.tv.swapExtent.height), R.frame + 1);
   set_present_plan(&plan);
+  // settings overlay: built once, drawn into the TV window and its present dumps
+  set_overlay_draw(overlay::frame(plan.dw > 0 ? plan.dw : float(R.tv.swapExtent.width),
+                                  plan.dh > 0 ? plan.dh : float(R.tv.swapExtent.height), overlay_renderer_init));
   bool sampled[2] = {};
   if (plan.sample_auto && drcScan) {
     sampled[0] = record_signature(0, *drcScan, R.drc.srgb.load());
@@ -1101,9 +1121,11 @@ void swap() {
   }
   set_present_plan(nullptr);
 #else
+  set_overlay_draw(overlay::frame(float(R.tv.width.load()), float(R.tv.height.load()), overlay_renderer_init));
   present(R.tv);
   present(R.drc);
   flush();
+  write_present_dumps();
 #endif
   std::atomic_ref<uint64_t>(R.frame).fetch_add(1);
   R.completed = R.frame;
@@ -1535,20 +1557,31 @@ static void init_device(std::vector<const char *> extensions,
 }
 
 #ifdef WWHD_SDL_HOST
+static bool hidden_windows() {
+  static const bool hidden = [] { const char* e = getenv("WWHD_HIDDEN_WINDOWS"); return e && *e && strcmp(e, "0"); }();
+  return hidden;
+}
 // SDL host (Vulkan-only builds): SDL windows, input and audio
 void init() {
+  // hidden test runs: no Dock icon, no activation (the app never takes the focus from the user)
+  if (hidden_windows())
+    SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO))
     throw std::runtime_error(SDL_GetError());
-  R.tv.window = SDL_CreateWindow("Wind Waker HD — Vulkan", 1280, 720,
-                                 SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+  // test runs: WWHD_HIDDEN_WINDOWS=1 never puts the windows on screen (nothing pops up or takes the
+  // focus); the swapchains still exist, so frame dumps and present dumps work as with visible windows
+  const SDL_WindowFlags windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE |
+                                      (hidden_windows() ? SDL_WINDOW_HIDDEN : 0);
+  R.tv.window = SDL_CreateWindow("Wind Waker HD — Vulkan", 1280, 720, windowFlags);
   if (!R.tv.window)
     throw std::runtime_error(SDL_GetError());
   if (!getenv("WWHD_NO_GAMEPAD")) {
-    R.drc.window = SDL_CreateWindow("GamePad — Vulkan", 854, 480,
-                                    SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    R.drc.window = SDL_CreateWindow("GamePad — Vulkan", 854, 480, windowFlags);
     if (!R.drc.window)
       throw std::runtime_error(SDL_GetError());
   }
+  if (hidden_windows())
+    R.tv.visible = R.drc.visible = false;  // no drawables: pictures only reach frame / present dumps
   uint32_t n;
   const char *const *se = SDL_Vulkan_GetInstanceExtensions(&n);
   if (!se)
@@ -1573,6 +1606,7 @@ void init() {
   input::set_prompt_window(R.tv.window);
   input::init();
   install_graphics_menu(R.tv.window);
+  ::hostui::load_saved_options();  // graphics options saved by the settings overlay (settings.ini)
 }
 #endif
 void save_renderer_caches() {
@@ -1689,6 +1723,8 @@ void run_main_loop() {
         }
     }
     input::update();
+    ::hostui::run_posted();  // option changes from the settings overlay (render thread)
+    overlay::set_density(SDL_GetWindowPixelDensity(R.tv.window));
     auto now = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(now - titleTime).count();
     if (elapsed >= 0.5 && !input::text_prompt_active()) {

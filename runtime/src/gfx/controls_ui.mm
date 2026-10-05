@@ -1438,6 +1438,8 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
     [self reloadFromModel];
     [self startTimer];
     [self poll];
+    const char* hidden = getenv("WWHD_HIDDEN_WINDOWS");
+    if (hidden && *hidden && strcmp(hidden, "0")) return;  // test runs: never on screen (snapshots still work)
     if (takeFocus) [self.window makeKeyAndOrderFront:nil];
     else [self.window orderFront:nil];
 }

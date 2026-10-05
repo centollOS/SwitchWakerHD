@@ -1,4 +1,5 @@
 // coreinit: logging, dynamic loading, system info, and small odds and ends.
+#include "../overlay/hostui.h"
 #include "../crashrec.h"
 #include <cstdlib>
 #include "../true60.h"
@@ -97,19 +98,26 @@ static void report(const std::string& s) {
 }
 
 // Console language for UCReadSysConfig("cafe.language"): WWHD_LANGUAGE=<Wii U code> (0 ja, 1 en,
-// 2 fr, 3 de, 4 it, 5 es, 6 zh, 7 ko, 8 nl, 9 pt, 10 ru, 11 zh-TW). The USA/Asia disc carries en/fr/es.
-// Unset, out of range or not a number: English, as before.
+// 2 fr, 3 de, 4 it, 5 es, 6 zh, 7 ko, 8 nl, 9 pt, 10 ru, 11 zh-TW), else the setting saved by the
+// settings overlay (Language tab, hostui "language"; read once at start). The USA/Asia disc carries
+// en/fr/es. Unset, out of range or not a number: English, as before.
 static uint32_t console_language() {
     static const uint32_t lang = [] {
+        const char* why = "WWHD_LANGUAGE";
+        std::string saved;
         const char* e = getenv("WWHD_LANGUAGE");
+        if ((!e || !*e) && hostui::get("language", saved)) {
+            e = saved.c_str();
+            why = "saved setting";
+        }
         if (!e || !*e) return 1u;
         char* end = nullptr;
         long v = strtol(e, &end, 10);
         if (*end || v < 0 || v > 11) {
-            LOG("[config] WWHD_LANGUAGE=%s is not a language code 0..11; using English", e);
+            LOG("[config] language %s (%s) is not a language code 0..11; using English", e, why);
             return 1u;
         }
-        LOG("[config] console language %ld (WWHD_LANGUAGE)", v);
+        LOG("[config] console language %ld (%s)", v, why);
         return (uint32_t)v;
     }();
     return lang;

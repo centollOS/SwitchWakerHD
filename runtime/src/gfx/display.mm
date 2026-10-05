@@ -51,6 +51,9 @@
 #ifdef WWHD_HAS_VULKAN
 #include "vulkan/api.h"
 #endif
+#include "imgui.h"
+#include "backends/imgui_impl_metal.h"
+#include "../overlay/overlay.h"
 
 namespace mods { bool mouse_captured(); }
 
@@ -785,6 +788,10 @@ static void draw_solid(id<MTLRenderCommandEncoder> e, MTLPixelFormat fmt, float 
     [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 }
 
+// this frame's settings overlay (null: nothing shown)
+static ImDrawData* g_overlay_draw = nullptr;
+static void overlay_metal_init() { ImGui_ImplMetal_Init(R.device); }
+
 // the TV window's picture: TV image scaled to fit, GamePad overlay on top
 static void compose_tv(id<MTLTexture> target, const Layout& L) {
     MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -801,6 +808,12 @@ static void compose_tv(id<MTLTexture> target, const Layout& L) {
         float frame[4] = {0, 0, 0, 0.6f * op};
         draw_solid(e, fmt, dw, dh, {L.pip.x - bw, L.pip.y - bw, L.pip.w + 2 * bw, L.pip.h + 2 * bw}, frame);
         draw_image(e, fmt, dw, dh, R.drc.tex, R.drc.srgb, L.pip, op);
+    }
+    // settings overlay (overlay/overlay.h) on top: Dear ImGui's Metal backend in the same pass
+    if (g_overlay_draw) {
+        if (is_srgb(fmt)) overlay::linearize_colors(g_overlay_draw);
+        ImGui_ImplMetal_NewFrame(rp);
+        ImGui_ImplMetal_RenderDrawData(g_overlay_draw, command_buffer(), e);
     }
     [e endEncoding];
 }
@@ -1100,6 +1113,7 @@ void present_screens() {
     L.scale = P.scale;
     float dw = P.dw, dh = P.dh;
     bool pip = P.pip_wanted;
+    g_overlay_draw = overlay::frame(dw, dh, overlay_metal_init);  // settings overlay, drawn by compose_tv
     if (P.sim) {
         present_to_layer(R.tv, ^(id<MTLTexture> t) {
             CGSize ds = R.tv.layer.drawableSize;
@@ -1129,6 +1143,18 @@ void present_screens() {
         display_log_present_dump(path, P, R.tv.tex.width, R.tv.tex.height);
     }
 }
+
+// settings overlay (overlay_appkit.mm): the Display menu's options
+int display_filter() { return g_filter; }
+void display_set_filter(int f) {
+    g_filter = std::clamp(f, 0, 2);
+    save_options();
+}
+int display_drc_mode() { return g_mode; }
+void display_set_tv_fullscreen(bool on) {
+    if (g_tv_window && is_fullscreen(g_tv_window) != on) [g_tv_window toggleFullScreen:nil];
+}
+void* display_tv_window() { return (__bridge void*)g_tv_window; }
 
 // mouse camera (mods/mouse.mm): a click on the GamePad overlay is a touch, not a capture
 bool drc_overlay_hit(void* window, double wx, double wy) {

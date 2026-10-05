@@ -7,6 +7,8 @@
 #include "../runtime.h"
 #include "../savestate.h"
 #include "../gfx/vulkan/settings.h"
+#include "../overlay/hostui.h"
+#include "../overlay/overlay.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -149,6 +151,42 @@ void set_touch(bool down,float x,float y){std::lock_guard lk(g_mu);g_touch=down;
 void release_keys(){std::lock_guard lk(g_mu);memset(g_keys,0,sizeof g_keys);g_touch=false;}
 void held_keys(bool* keys){std::lock_guard lk(g_mu);for(int i=0;i<256;i++)keys[i]=g_keys[i]||g_script_keys[i];}
 void controller_values(float* out){std::lock_guard lk(g_mu);std::copy(std::begin(g_values),std::end(g_values),out);}
+void host_controller_values(float* out){controller_values(out);}
+// settings overlay (overlay/overlay.h): keys, mouse and wheel of the TV window. True = the overlay took
+// the event (F1, or anything while it is open).
+static int overlay_mods(SDL_Keymod m){
+ return (m&SDL_KMOD_SHIFT?overlay::kShift:0)|(m&SDL_KMOD_CTRL?overlay::kCtrl:0)|(m&SDL_KMOD_ALT?overlay::kAlt:0)|(m&SDL_KMOD_GUI?overlay::kSuper:0);
+}
+static bool overlay_event(const SDL_Event& event){
+ if(!g_prompt_window)return false;
+ const SDL_WindowID tv=SDL_GetWindowID(g_prompt_window);
+ switch(event.type){
+ case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:{
+  if(event.key.windowID!=tv)return false;
+  int code=keycode(event.key.scancode);
+  return code>=0&&overlay::key(code,event.type==SDL_EVENT_KEY_DOWN,event.key.repeat,overlay_mods(event.key.mod));
+ }
+ case SDL_EVENT_MOUSE_MOTION:{
+  if(event.motion.windowID!=tv)return false;
+  int w=1,h=1;SDL_GetWindowSize(g_prompt_window,&w,&h);
+  return overlay::mouse_move(event.motion.x/std::max(1,w),event.motion.y/std::max(1,h));
+ }
+ case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:{
+  if(event.button.windowID!=tv)return false;
+  int b=event.button.button==SDL_BUTTON_LEFT?0:event.button.button==SDL_BUTTON_RIGHT?1:event.button.button==SDL_BUTTON_MIDDLE?2:-1;
+  if(b<0)return overlay::is_open();
+  int w=1,h=1;SDL_GetWindowSize(g_prompt_window,&w,&h);
+  overlay::mouse_move(event.button.x/std::max(1,w),event.button.y/std::max(1,h));
+  return overlay::mouse_button(b,event.type==SDL_EVENT_MOUSE_BUTTON_DOWN);
+ }
+ case SDL_EVENT_MOUSE_WHEEL:{
+  if(event.wheel.windowID!=tv)return false;
+  float y=event.wheel.y,x=event.wheel.x;if(event.wheel.direction==SDL_MOUSEWHEEL_FLIPPED){x=-x;y=-y;}
+  return overlay::mouse_wheel(x,y);
+ }
+ default:return false;
+ }
+}
 static PadState keyboard_state(bool host){bool keys[256];for(int i=0;i<256;i++)keys[i]=(host&&g_keys[i])||g_script_keys[i];return input_map::keyboard_state(input_map::current(),keys);}
 // ---- rumble -----------------------------------------------------------------------------------
 // The game drives the motor from a guest thread (VPADControlMotor / WPADControlMotor in
@@ -215,7 +253,8 @@ static void finish_prompt(bool ok){
  release_keys();if(done)done(ok,std::move(text));
 }
 void handle_event(const SDL_Event& event){
- if(mods::handle_mouse_event(event))return;
+ if(overlay::is_open())mods::update_mouse();
+ else if(mods::handle_mouse_event(event))return;
  if(event.type==SDL_EVENT_GAMEPAD_ADDED&&!getenv("WWHD_NO_CONTROLLERS"))open_controller(event.gdevice.which);
  if(event.type==SDL_EVENT_GAMEPAD_REMOVED){auto i=g_controllers.find(event.gdevice.which);if(i!=g_controllers.end()){SDL_CloseGamepad(i->second);g_controllers.erase(i);}g_rumble_controllers.erase(event.gdevice.which);}
  if(event.type==SDL_EVENT_WINDOW_FOCUS_LOST)release_keys();
@@ -234,6 +273,7 @@ void handle_event(const SDL_Event& event){
   }return;
  }
  if(getenv("WWHD_NO_HOST_INPUT"))return;
+ if(overlay_event(event))return;
  // Save states belong to the game window, not auxiliary controls/text windows.
  if((event.type==SDL_EVENT_KEY_DOWN||event.type==SDL_EVENT_KEY_UP) &&
     g_prompt_window && event.key.windowID==SDL_GetWindowID(g_prompt_window) &&
@@ -256,7 +296,8 @@ void handle_event(const SDL_Event& event){
    case SDL_SCANCODE_8: action='8';break; case SDL_SCANCODE_6: action='6';break;
    case SDL_SCANCODE_7: action='7';break; default:break;
   }
-  if(action && gfxvk::graphics_hotkey(action,event.type==SDL_EVENT_KEY_DOWN&&!event.key.repeat))return;
+  const bool activate=event.type==SDL_EVENT_KEY_DOWN&&!event.key.repeat;
+  if(action && gfxvk::graphics_hotkey(action,activate)){if(activate)hostui::graphics_changed();return;}
  }
  if(event.type==SDL_EVENT_KEY_DOWN||event.type==SDL_EVENT_KEY_UP){int code=keycode(event.key.scancode);if(code>=0){std::lock_guard lk(g_mu);g_keys[code]=event.type==SDL_EVENT_KEY_DOWN;}}
 }
@@ -460,6 +501,7 @@ PadState read() {
         last_buttons = s.buttons;
     }
     mods::filter_pad(s);  // gameplay mods: mouse camera, wheel -> R3
+    if (overlay::blocks_input()) s = PadState{};  // the settings overlay has the input
     return s;
 }
 

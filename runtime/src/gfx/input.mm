@@ -17,7 +17,10 @@
 #include "../runtime.h"
 #include "../savestate.h"
 #include "../true60.h"
+#include "../overlay/overlay.h"
 
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace gfx { void request_capture(); bool menu_hotkey(uint16_t keyCode); bool controls_window_is_key(); }
@@ -74,10 +77,11 @@ void controller_values(float* v) {
     }
 }
 
-static PadState controller_state() {
-    float v[input_map::kPadCount];
-    controller_values(v);
-    return input_map::controller_state(input_map::current(), v);
+// the latest controller_values (the timer below), for the settings overlay's navigation
+static float g_host_values[input_map::kPadCount];
+void host_controller_values(float* v) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    std::copy(g_host_values, g_host_values + input_map::kPadCount, v);
 }
 
 void held_keys(bool* keys) {
@@ -111,16 +115,88 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f) {
     }
 }
 
+// debug: WWHD_TEST_POST_KEYS=300:F1,400:Cmd+Comma,410:Down,420:Return,430:K/30 (held 30 frames) posts key presses (down, then up) at TV frames
+// into the app's event queue, so they take the real path (event monitors, menu key equivalents) even
+// in hidden test runs. Only the settings overlay and the menus react to them, not the game.
+static const NSTimeInterval kTestKeyTimestamp = 4242.0;
+static void start_test_keys() {
+    const char* e = getenv("WWHD_TEST_POST_KEYS");
+    if (!e || !*e) return;
+    struct Press { uint64_t frame; uint16_t code; NSEventModifierFlags flags; NSString* chars; uint64_t hold; };
+    auto presses = std::make_shared<std::vector<Press>>();
+    for (const char* p = e; *p;) {
+        char* end;
+        uint64_t f = strtoull(p, &end, 10);
+        if (*end != ':') break;
+        p = end + 1;
+        size_t len = strcspn(p, ",");
+        std::string k(p, len);
+        p += len + (p[len] == ',');
+        Press pr{f, 0, 0, @"", 0};
+        if (size_t sl = k.find('/'); sl != std::string::npos) {  // Key/<frames>: held that many frames
+            pr.hold = strtoull(k.c_str() + sl + 1, nullptr, 10);
+            k.resize(sl);
+        }
+        if (k.rfind("Cmd+", 0) == 0) { pr.flags = NSEventModifierFlagCommand; k = k.substr(4); }
+        if (k == "F1") { pr.code = kVK_F1; pr.chars = [NSString stringWithFormat:@"%C", (unichar)NSF1FunctionKey]; pr.flags |= NSEventModifierFlagFunction; }
+        else if (k == "Comma") { pr.code = kVK_ANSI_Comma; pr.chars = @","; }
+        else if (k == "Escape") { pr.code = kVK_Escape; pr.chars = @"\x1b"; }
+        else if (int c = input_map::key_from_id(k); c != input_map::kNoKey) pr.code = (uint16_t)c;  // controls.json key names
+        else { LOG("[input] WWHD_TEST_POST_KEYS: unknown key %s", k.c_str()); continue; }
+        presses->push_back(pr);
+    }
+    // a held key: its key up as a separate entry, later
+    for (size_t i = 0, n = presses->size(); i < n; i++)
+        if ((*presses)[i].hold) {
+            Press up = (*presses)[i];
+            up.frame += up.hold;
+            up.hold = ~0ull;  // marks the release
+            presses->push_back(up);
+        }
+    std::stable_sort(presses->begin(), presses->end(), [](const Press& a, const Press& b) { return a.frame < b.frame; });
+    [NSTimer scheduledTimerWithTimeInterval:1.0 / 120 repeats:YES block:^(NSTimer* t) {
+        uint64_t frame = render::frame_count();
+        while (!presses->empty() && frame >= presses->front().frame) {
+            Press pr = presses->front();
+            presses->erase(presses->begin());
+            LOG("[input] test key %s%u %s at frame %llu", pr.flags & NSEventModifierFlagCommand ? "Cmd+" : "", pr.code,
+                pr.hold == ~0ull ? "up" : pr.hold ? "down" : "press", (unsigned long long)frame);
+            std::vector<NSEventType> types = pr.hold == ~0ull ? std::vector<NSEventType>{NSEventTypeKeyUp}
+                                             : pr.hold         ? std::vector<NSEventType>{NSEventTypeKeyDown}
+                                                               : std::vector<NSEventType>{NSEventTypeKeyDown, NSEventTypeKeyUp};
+            for (NSEventType type : types) {
+                NSEvent* ev = [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:pr.flags timestamp:kTestKeyTimestamp
+                                           windowNumber:0 context:nil characters:pr.chars charactersIgnoringModifiers:pr.chars
+                                              isARepeat:NO keyCode:pr.code];
+                [NSApp postEvent:ev atStart:NO];
+            }
+        }
+        if (presses->empty()) [t invalidate];
+    }];
+}
+
 void init() {
     input_map::load_startup();
+    start_test_keys();
     NSEventMask mask = NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged;
     [NSEvent addLocalMonitorForEventsMatchingMask:mask handler:^NSEvent*(NSEvent* e) {
         if (e.modifierFlags & NSEventModifierFlagCommand) return e;  // keep Cmd-Q etc.
         if (NSApp.keyWindow.sheetParent || NSApp.modalWindow) return e;  // text prompt has focus
         if (gfx::controls_window_is_key()) return e;  // Controls window: keys go to it, not the game
-        std::lock_guard<std::mutex> lk(g_mu);
         uint16_t code = e.keyCode & 0xFF;
-        if (getenv("WWHD_NO_HOST_INPUT")) return e;
+        const bool posted = e.timestamp == kTestKeyTimestamp;  // WWHD_TEST_POST_KEYS
+        if (getenv("WWHD_NO_HOST_INPUT") && !posted) return e;
+        {
+            // settings overlay (overlay/overlay.h): F1 opens and closes it; while open it has the keyboard
+            NSEventModifierFlags f = e.modifierFlags;
+            int m = (f & NSEventModifierFlagShift ? overlay::kShift : 0) | (f & NSEventModifierFlagControl ? overlay::kCtrl : 0) |
+                    (f & NSEventModifierFlagOption ? overlay::kAlt : 0) | (f & NSEventModifierFlagCommand ? overlay::kSuper : 0);
+            bool down = e.type == NSEventTypeKeyDown || (e.type == NSEventTypeFlagsChanged && modifier_down(code, f));
+            bool repeat = e.type != NSEventTypeFlagsChanged && e.isARepeat;
+            if (overlay::key(code, down, repeat, m)) return nil;
+            if (posted) return nil;  // test keys only reach the overlay
+        }
+        std::lock_guard<std::mutex> lk(g_mu);
         if (e.type == NSEventTypeKeyDown && !e.isARepeat && mods::host_key_down(code)) return nil;  // e.g. Esc releases the mouse
         if (e.type == NSEventTypeKeyDown && !e.isARepeat && gfx::menu_hotkey(code)) return nil;
         if (e.type == NSEventTypeKeyDown) g_keys[code] = true;
@@ -137,9 +213,12 @@ void init() {
     [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
     // GameController values are polled on the main thread
     [NSTimer scheduledTimerWithTimeInterval:1.0 / 240 repeats:YES block:^(NSTimer*) {
-        PadState s = controller_state();
+        float v[input_map::kPadCount];
+        controller_values(v);
+        PadState s = input_map::controller_state(input_map::current(), v);
         std::lock_guard<std::mutex> lk(g_mu);
         g_pad = s;
+        std::copy(v, v + input_map::kPadCount, g_host_values);
     }];
 }
 
@@ -385,6 +464,7 @@ PadState read() {
         last_buttons = s.buttons;
     }
     mods::filter_pad(s);  // gameplay mods: mouse camera, wheel -> R3
+    if (overlay::blocks_input()) s = PadState{};  // the settings overlay has the input
     return s;
 }
 

@@ -16,6 +16,10 @@ namespace mods { void filter_pad(input::PadState&){} bool mouse_camera(){return 
 namespace interp { void set_mode(int){} uint64_t logic_steps(){return 0;} }
 namespace timebase { uint64_t now(){return 0;} }
 void log_msg(const char*,...){}
+// settings overlay: closed (keys reach the game and its shortcuts as before)
+namespace overlay { bool key(int,bool,bool,int){return false;} bool is_open(){return false;} bool blocks_input(){return false;}
+ bool mouse_move(float,float){return false;} bool mouse_button(int,bool){return false;} bool mouse_wheel(float,float){return false;} }
+namespace hostui { void graphics_changed(){} }
 // The runtime reads the C runtime's environment (getenv). On Windows SDL_setenv_unsafe only
 // changes the Win32 environment block, which the CRT copy does not see.
 static void set_env(const char* name,const char* value){

@@ -197,6 +197,17 @@ saved renderer choice for one start.
 Two windows open: the TV and the GamePad screen (map, items, menus). Click and drag in the
 GamePad window to use the touch screen. Saves go to `save/`.
 
+**Settings overlay:** press **F1** in the game window, or **Cmd+,** on macOS (also *Settings…* in the app
+menu; most Mac keyboards send F1 only with **Fn+F1** unless "Use F1, F2, etc. keys as standard
+function keys" is on), or hold Select / Minus for half a second, or press Home, on a controller, for an in-game menu over the picture: save states, graphics, display,
+gameplay mods and cheats, controls (the same controller drawing as Input > Controls…: select a
+button or chip and press the key or controller input to use; also on Windows and Linux) and the
+console language.
+Mouse, keyboard (arrows, Enter, Esc) and controller (D-pad / stick, A, B; L / R switch tabs) all work.
+The game keeps running but gets no input while it is open; Esc, F1 or B closes it. On macOS it shows
+the same options as the menu bar, and both stay in sync. Shift+F1 still saves state slot 1; slot 1 is
+loaded from the overlay (F1 used to load it).
+
 ### Controls
 
 Default keyboard layout:
@@ -250,7 +261,7 @@ dungeon map/compass/boss key, a small key) can change or break story events, so 
 file. Cheats edit the live save data; save in game to keep them.
 
 The **Save States** menu saves the whole running game to one of 5 slots and loads it back
-(**Shift+F1–F5** save, **F1–F5** load); each slot shows its time and area. Slots are kept in
+(**Shift+F1–F5** save, **F2–F5** load; slot 1 loads from the F1 settings overlay); each slot shows its time and area. Slots are kept in
 `~/Library/Application Support/wwhd/states/` (about 270 MB each) and survive restarts; a slot
 made by an incompatible build is refused. Loading works once the game has reached gameplay.
 
@@ -357,7 +368,7 @@ the game are untested.
 ## License
 
 The code of this project is licensed under the Mozilla Public License 2.0 (see `LICENSE`).
-Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0) and {fmt} (MIT); see Credits. The game itself is Nintendo's property and is not included.
+Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0), {fmt} (MIT) and Dear ImGui (MIT); see Credits. The game itself is Nintendo's property and is not included.
 
 ## Credits
 
@@ -366,5 +377,6 @@ GPU address library, shader decompiler and a few reference structures are vendor
 `tools/wudextract.py`, `runtime/src/espresso_fp.c` and parts of the OS layer are ported from or
 follow Cemu as noted in those files (in the Vulkan renderer: the vertex-format table and the
 shader parser glue). Also vendored: [metal-cpp](https://developer.apple.com/metal/cpp/)
-(Apache-2.0, `runtime/third_party/metal-cpp/LICENSE.txt`) and [{fmt}](https://github.com/fmtlib/fmt)
-(MIT, `runtime/third_party/fmt/LICENSE`).
+(Apache-2.0, `runtime/third_party/metal-cpp/LICENSE.txt`), [{fmt}](https://github.com/fmtlib/fmt)
+(MIT, `runtime/third_party/fmt/LICENSE`) and [Dear ImGui](https://github.com/ocornut/imgui) v1.92.9b by
+Omar Cornut and contributors, for the settings overlay (MIT, `runtime/third_party/imgui/LICENSE.txt`).
