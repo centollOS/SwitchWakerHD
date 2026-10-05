@@ -285,14 +285,15 @@ jobs:
 
       - name: Package
         run: |
+          W="$(cygpath -m "$PWD")"  # native Windows Python cannot open /d/a/... paths
           python tools/release/package.py --build build/rel --platform windows-x86_64 --version "$VERSION" \
             --out dist --toolchain llvm-mingw-20260922 --setup-gui build/rel/wwhd-setup.exe \
             --runtime-file build/rel/SDL3.dll \
-            --license "SDL3 (zlib)=$PWD/build/rel/_deps/sdl3-src/LICENSE.txt" \
+            --license "SDL3 (zlib)=$W/build/rel/_deps/sdl3-src/LICENSE.txt" \
             --license "Vulkan-Headers (Apache-2.0)=$VULKAN_DIR/LICENSE.md" \
-            --license "glslang (BSD-3-Clause and others)=$PWD/build/rel/_deps/glslang-src/LICENSE.txt" \
-            --license "zlib (zlib)=$PWD/build/rel/_deps/zlib-src/LICENSE" \
-            --license "LZ4 (BSD-2-Clause)=$PWD/build/rel/_deps/lz4-src/lib/LICENSE" \
+            --license "glslang (BSD-3-Clause and others)=$W/build/rel/_deps/glslang-src/LICENSE.txt" \
+            --license "zlib (zlib)=$W/build/rel/_deps/zlib-src/LICENSE" \
+            --license "LZ4 (BSD-2-Clause)=$W/build/rel/_deps/lz4-src/lib/LICENSE" \
             --license "LLVM libc++ (Apache-2.0 WITH LLVM-exception)=$LLVM_MINGW/LICENSE.TXT"
 
       - name: Guard (no game code, game files or keys)

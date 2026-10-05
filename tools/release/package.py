@@ -344,6 +344,8 @@ def main():
     index = ["Third-party software in this package and its license files:\n"]
     for k, v in sorted(entries.items()):
         src = v if os.path.isabs(v) else os.path.join(ROOT, v)
+        if not os.path.isfile(src):
+            sys.exit("license file for %s not found: %s" % (k, src))
         fn = re.sub(r"[^A-Za-z0-9]+", "-", k.split(" (")[0]).strip("-") + ".txt"
         copy(src, os.path.join(licdir, fn))
         index.append("  %-28s %s\n" % (k, fn))
