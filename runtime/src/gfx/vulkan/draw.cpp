@@ -30,9 +30,9 @@ bool preparation_stats_enabled() {
   static const bool enabled=std::getenv("WWHD_VK_STATS")!=nullptr;
   return enabled;
 }
-// Bounded overlap: measured macOS default; explicit zero/invalid disables it.
+// Bounded overlap: measured macOS/Windows default; zero/invalid disables it.
 uint32_t parse_draw_batch(const char* text) {
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
   if (!text) return 2048;
 #endif
   if (!text || !*text) return 0;

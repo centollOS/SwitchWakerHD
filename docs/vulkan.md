@@ -284,6 +284,19 @@ printed LR/SP values do not establish that deeper guest stack frames match. Load
 later can succeed if the worker threads reach compatible waits. Failed loads do not
 bypass these checks or establish a valid benchmark starting point.
 
+## Windows draw batching
+
+Windows defaults to submitting after 2,048 guest draws, with at most two
+mid-frame submissions. Each submission retains its upload slices, descriptor
+pool and deferred resources until its fence completes. The next draw reopens
+attachments with `LOAD`, preserving draw order and contents. This uses the
+existing asynchronous submission path.
+
+Set `WWHD_VK_DRAW_BATCH=0` to disable mid-frame batching, or set an explicit
+positive draw count to tune it. Empty or invalid values disable batching.
+`WWHD_VK_DRAW_BATCH_CAP=1|2|3` sets the maximum mid-frame submissions; the Windows
+default remains two. See `docs/performance.md` for the local Windows comparison.
+
 ## macOS defaults and tuning
 
 Mac/MoltenVK gameplay and correctness tests are the current priority. The macOS
