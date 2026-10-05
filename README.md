@@ -31,6 +31,16 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
   (PR #12 by rhemfur), and a `--unwindlib=libgcc` build note for clang setups with libunwind.
 - **Console language**: `WWHD_LANGUAGE=<code>` (or the overlay's Language tab) picks the game's
   language from those on the disc.
+- **Native Windows LLVM builds** (PR #17 by resadent): build with clang and Visual Studio's Windows
+  SDK, without MSYS2 (missing dependencies are built from pinned sources); smoother Vulkan frame
+  pacing on Windows via SDL's high-resolution sleeps.
+- **Vulkan presentation mode** (overlay → Graphics): *Vsync* (FIFO, default), *Low latency*
+  (MAILBOX, where the driver offers it) or *Off* (IMMEDIATE); switches live and is remembered.
+  `WWHD_VK_PRESENT_MODE` overrides it.
+- **Faster Vulkan on Windows/Linux** (PR #18 by resadent): bounded draw batching and a higher
+  game/render thread priority are now on by default, as on macOS.
+- **GameCube save converter** (`tools/savegame`): bring your GameCube save file into HD — see
+  [Optional: bring your GameCube save to HD](#optional-bring-your-gamecube-save-to-hd).
 
 ## Earlier updates
 
