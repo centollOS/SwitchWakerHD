@@ -1171,6 +1171,9 @@ struct FeedbackScratch {
 };
 std::array<FeedbackScratch, kFeedbackUnitsPerStage * 2> feedbackScratch;
 VkDeviceSize feedbackRetainedBytes = 0;
+// the draw (R.drawCount while it is prepared) that last used each retained slot
+std::array<uint64_t, kFeedbackUnitsPerStage * 2> feedbackUseDraw = [] {
+  std::array<uint64_t, kFeedbackUnitsPerStage * 2> a; a.fill(UINT64_MAX); return a; }();
 bool feedback_compatible(const Surface& copy, const Surface& source) {
   return copy.image && copy.fmt.pixel == source.fmt.pixel &&
          copy.aspect == source.aspect && copy.imageType == source.imageType &&
@@ -1295,6 +1298,32 @@ VkImageView feedback_view(Surface *source, const uint32_t *textureWords,
   // Device recreation is not a supported lifecycle today; refuse to reuse or
   // retire foreign handles if a caller nevertheless changes the device.
   if (slot && slot->surface.image && slot->device != R.device) slot = nullptr;
+  // The game samples render targets of several sizes through the same unit, so one retained
+  // image per slot was destroyed and recreated on almost every draw (an expensive kernel memory
+  // allocation per draw on Android drivers). Look for a compatible retained image in the other
+  // slots that this draw does not use (a draw's units always get distinct copies) and swap it in.
+  if (slot && !feedback_compatible(slot->surface, *source)) {
+    const size_t mine = slot - feedbackScratch.data();
+    for (size_t i = 0; i < feedbackScratch.size(); ++i) {
+      auto& other = feedbackScratch[i];
+      if (i == mine || other.device != R.device || !feedback_compatible(other.surface, *source)) continue;
+      if (feedbackUseDraw[i] == R.drawCount) continue;  // another unit of this draw
+      std::swap(*slot, other);
+      break;
+    }
+    // None retained: keep this slot's image for later draws by parking it in an empty slot
+    // (draws alternate a few kinds, e.g. the 1280x720 colour and depth copies, through unit 0).
+    if (!feedback_compatible(slot->surface, *source) && slot->surface.image) {
+      for (size_t i = 0; i < feedbackScratch.size(); ++i) {
+        auto& other = feedbackScratch[i];
+        if (i == mine || other.surface.image || feedbackUseDraw[i] == R.drawCount) continue;
+        std::swap(*slot, other);
+        std::swap(feedbackUseDraw[i], feedbackUseDraw[mine]);
+        break;
+      }
+    }
+  }
+  if (slot) feedbackUseDraw[slot - feedbackScratch.data()] = R.drawCount;
   if (slot && feedback_compatible(slot->surface, *source)) {
     copy = &slot->surface;
   } else {
@@ -1305,6 +1334,26 @@ VkImageView feedback_view(Surface *source, const uint32_t *textureWords,
       *slot = {};
     }
     make_feedback_image(temporary, *source);
+    // debug: WWHD_VK_FEEDBACK_ALLOC_LOG=1 reports feedback image creations every 120 frames
+    static const bool allocLog = getenv("WWHD_VK_FEEDBACK_ALLOC_LOG") != nullptr;
+    if (allocLog) {
+      static uint64_t creates = 0, unslotted = 0, overBudget = 0, lastFrame = 0;
+      ++creates;
+      if (!slot) ++unslotted;
+      if (R.frame - lastFrame >= 120) {
+        LOG("[vulkan feedback allocs] %.1f/frame (%.1f without a slot: unit %u, %.1f over budget), retained %.1f MiB, last %ux%u fmt %d mips %u",
+            creates / double(R.frame - lastFrame), unslotted / double(R.frame - lastFrame), unit,
+            overBudget / double(R.frame - lastFrame), feedbackRetainedBytes / 1048576.0, source->extent.width,
+            source->extent.height, int(source->fmt.pixel), source->mips);
+        creates = unslotted = overBudget = 0;
+        lastFrame = R.frame;
+      }
+      if (slot) {
+        VkMemoryRequirements rq{};
+        vkGetImageMemoryRequirements(R.device, temporary.image, &rq);
+        if (rq.size > kFeedbackRetainedBudget - feedbackRetainedBytes) ++overBudget;
+      }
+    }
     if (slot) {
       VkMemoryRequirements requirements{};
       vkGetImageMemoryRequirements(R.device, temporary.image, &requirements);
