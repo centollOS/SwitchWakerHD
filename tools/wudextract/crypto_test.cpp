@@ -82,12 +82,12 @@ int main() {
         };
         uint8_t d[32];
         sha256((const uint8_t*)"abc", 3, d);
-        check("SHA-256 abc", d, hex("ba7816bf8f01cfea414140de5dae2223" "b00361a396177a9cb410ff61f20015ad"));
+        check("SHA-256 abc", d, hex("ba7816bf8f01cfea" "414140de5dae2223" "b00361a396177a9c" "b410ff61f20015ad"));
         const char* m = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
         sha256((const uint8_t*)m, strlen(m), d);
-        check("SHA-256 448-bit message", d, hex("248d6a61d20638b8e5c026930c3e6039" "a33ce45964ff2167f6ecedd419db06c1"));
+        check("SHA-256 448-bit message", d, hex("248d6a61d20638b8" "e5c026930c3e6039" "a33ce45964ff2167" "f6ecedd419db06c1"));
         sha256((const uint8_t*)"", 0, d);
-        check("SHA-256 empty", d, hex("e3b0c44298fc1c149afbf4c8996fb924" "27ae41e4649b934ca495991b7852b855"));
+        check("SHA-256 empty", d, hex("e3b0c44298fc1c14" "9afbf4c8996fb924" "27ae41e4649b934c" "a495991b7852b855"));
         // a million 'a' in uneven pieces (streaming across block boundaries)
         Sha256 s;
         std::vector<uint8_t> a(1000000, 'a');
@@ -98,7 +98,7 @@ int main() {
             off += n, piece = piece * 3 % 997 + 1;
         }
         s.final(d);
-        check("SHA-256 million a (streamed)", d, hex("cdc76e5c9914fb9281a1c7e284d73e67" "f1809a48a497200e046d39ccc7112cd0"));
+        check("SHA-256 million a (streamed)", d, hex("cdc76e5c9914fb92" "81a1c7e284d73e67" "f1809a48a497200e" "046d39ccc7112cd0"));
     }
     printf(failures ? "%d FAILED\n" : "all passed\n", failures);
     return failures ? 1 : 0;
