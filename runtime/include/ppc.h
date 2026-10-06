@@ -12,8 +12,9 @@
 extern "C" {
 #endif
 
-#ifdef __ANDROID__
-/* Android arm64 kernels often have a 39-bit user address space (512 GiB): stay well below it */
+#if defined(__ANDROID__) || (defined(__linux__) && defined(__aarch64__))
+/* arm64 Linux kernels (Android, Raspberry Pi OS and other 4K-page configurations) often have a 39-bit
+   user address space (512 GiB), where 32 TiB is out of reach: stay well below it (64 GiB) */
 #define PPC_MEM_BASE ((uint8_t*)0x1000000000ull)
 #else
 #define PPC_MEM_BASE ((uint8_t*)0x200000000000ull)

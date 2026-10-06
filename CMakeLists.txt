@@ -41,6 +41,13 @@ if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
   message(FATAL_ERROR "The recompiled game requires Clang (musttail support); select clang/clang++")
 endif()
 
+# Linux on arm64: plain char is unsigned in that ABI, but signed on x86-64 and Apple arm64, where the
+# runtime and the recompiled game code are tested. Keep it signed everywhere (also reaches the game
+# code the installer compiles: its flags come from this build).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+  add_compile_options(-fsigned-char)
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)

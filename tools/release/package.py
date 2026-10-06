@@ -286,7 +286,7 @@ def make_zip(src_dir, zip_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", required=True)
-    ap.add_argument("--platform", required=True, help="macos-arm64, linux-x86_64 or windows-x86_64")
+    ap.add_argument("--platform", required=True, help="macos-arm64, linux-x86_64, linux-aarch64 or windows-x86_64")
     ap.add_argument("--version", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--toolchain", required=True, help="toolchain id from tools/installer/toolchains.json")

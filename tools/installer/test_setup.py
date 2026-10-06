@@ -99,6 +99,20 @@ class Recipe(unittest.TestCase):
         self.assertGreaterEqual(setup.default_jobs(), 1)
 
 
+class Arch(unittest.TestCase):
+    def test_normalize(self):
+        for a, want in (("x86_64", "x86_64"), ("AMD64", "x86_64"), ("aarch64", "aarch64"), ("arm64", "aarch64")):
+            self.assertEqual(setup.normalize_arch(a), want)
+        self.assertIn(setup.host_arch(), ("x86_64", "aarch64"))
+
+    def test_linux_pins_per_arch(self):
+        tcs = setup.load_toolchains()
+        self.assertEqual(tcs["toolchains"]["zig-0.16.0"]["target"].split("-")[0], "x86_64")
+        self.assertEqual(tcs["toolchains"]["zig-0.16.0-aarch64"]["target"].split("-")[0], "aarch64")
+        self.assertIn("aarch64", tcs["toolchains"]["zig-0.16.0-aarch64"]["url"])
+        self.assertIn("aarch64", tcs["python"]["linux-aarch64"]["url"])
+
+
 class NonInteractive(unittest.TestCase):
     def test_ui_refuses_to_prompt(self):
         ui = setup.UI(False)

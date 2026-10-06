@@ -67,6 +67,21 @@ statically on macOS and Windows (pinned source, release toolchain); Linux uses t
 release ships in `sdk/runtime`. The ImGui SDL3 and SDL_Renderer backends are the unmodified ones of
 the vendored ImGui release.
 
+## Linux on x86-64 and arm64
+
+There are two Linux releases, `linux-x86_64` and `linux-aarch64`, built by the same release job on
+an x86-64 and an arm64 runner. Each records its toolchain in `sdk/manifest.json`: `zig-0.16.0`
+(x86-64 host, target `x86_64-linux-gnu.2.35`) or `zig-0.16.0-aarch64` (arm64 host, target
+`aarch64-linux-gnu.2.35`), both pinned with their SHA-256 in `toolchains.json`, so the game code a
+player compiles always matches the prebuilt runtime. `setup.py` refuses a release for the other
+architecture (`uname -m`), and the terminal setup fetches the matching standalone Python
+(`python.linux` or `python.linux-aarch64`) when the system has no Python 3.8+.
+
+On Linux arm64 the runtime reserves the guest's 4 GB at 64 GiB instead of 32 TiB (`PPC_MEM_BASE`,
+as on Android): many arm64 kernels (Raspberry Pi OS and other 4K-page configurations) give processes
+only a 39-bit (512 GiB) address space. Plain `char` is built signed there (`-fsigned-char`, also
+for the player-compiled game code), as on x86-64 and Apple arm64.
+
 Options: arguments it does not know are passed to `setup.py` (`--data-dir DIR`, `--app-dir DIR`,
 `--jobs N`). For tests: `--self-test` (start setup.py, wait for its hello, render the first screen,
 exit 0), `--automate SCRIPT.json` (scripted clicks, see the comment in `setup_gui.cpp`) and

@@ -13,8 +13,9 @@ done
 if [ -f "$DIR/portable.txt" ]; then DATA="$DIR/data"; else DATA="${XDG_DATA_HOME:-$HOME/.local/share}/wwhd"; fi
 PYDIR="$DATA/python"
 if [ ! -x "$PYDIR/bin/python3" ]; then
-  URL=$(sed -n '/"linux": {/,/}/s/.*"url": "\([^"]*\)".*/\1/p' "$DIR/tools/installer/toolchains.json" | tail -1)
-  SUM=$(sed -n '/"linux": {/,/}/s/.*"sha256": "\([^"]*\)".*/\1/p' "$DIR/tools/installer/toolchains.json" | tail -1)
+  case "$(uname -m)" in aarch64|arm64) KEY=linux-aarch64 ;; *) KEY=linux ;; esac
+  URL=$(sed -n "/\"$KEY\": {/,/}/s/.*\"url\": \"\([^\"]*\)\".*/\1/p" "$DIR/tools/installer/toolchains.json" | tail -1)
+  SUM=$(sed -n "/\"$KEY\": {/,/}/s/.*\"sha256\": \"\([^\"]*\)\".*/\1/p" "$DIR/tools/installer/toolchains.json" | tail -1)
   echo "Python 3 was not found; downloading a private copy for the setup (about 75 MB)."
   mkdir -p "$DATA" || exit 1
   TMP="$DATA/python.tar.gz"

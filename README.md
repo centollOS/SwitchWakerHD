@@ -147,8 +147,10 @@ computer (about two minutes); every later start launches the game directly.
    (a games folder, an external drive):
    - **macOS**: Apple Silicon, macOS 14 or newer (Metal renderer)
    - **Windows**: x86-64, Windows 10 or 11, a GPU with Vulkan 1.3 drivers
-   - **Linux**: x86-64, glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch, SteamOS 3),
-     a GPU with Vulkan 1.3 drivers
+   - **Linux**: x86-64 (`linux-x86_64`) or arm64 (`linux-aarch64`, e.g. Raspberry Pi 5, Asahi Linux
+     on Apple Silicon, other ARM boards and laptops), glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+,
+     Fedora 36+, Arch, SteamOS 3, Raspberry Pi OS 12), a GPU with Vulkan 1.3 drivers. Take the zip
+     that matches `uname -m` (`x86_64` or `aarch64`); setup says so if it doesn't.
 2. Start **Wind Waker HD** (`Wind Waker HD.app`, `Wind Waker HD.exe`, or `wind-waker-hd` /
    `Wind Waker HD.desktop` on Linux). The first start asks for:
    - your **disc image** (`.wux` or `.wud`), or an already **extracted game folder** (with `code`,
@@ -178,7 +180,8 @@ First start, per system:
   190 MB) into the release folder, SHA-256 checked, no administrator rights; at the end you can remove
   the compiler again (it is only needed to repair, and downloaded again then).
 - **Linux**: start `wind-waker-hd` (or `Wind Waker HD.desktop`; some desktops ask to allow launching
-  it first). It uses your Python 3 and downloads the compiler (zig, 55 MB) into the release folder;
+  it first). It uses your Python 3 and downloads the compiler (zig, 55 MB; the x86-64 or arm64 build
+  matching your system) into the release folder;
   you can remove it at the end.
 
 **Everything stays in the release folder** (in `data/`): the built game, the extracted game files,
@@ -199,7 +202,7 @@ Source builds (below) are not portable: they keep using `~/Library/Application S
 
 ## Requirements (building from source)
 
-- **macOS** on Apple Silicon, **Linux** (x86-64, Vulkan) or **Windows** (x86-64, Vulkan); the
+- **macOS** on Apple Silicon, **Linux** (x86-64 or arm64, Vulkan) or **Windows** (x86-64, Vulkan); the
   platform-specific build steps are under "Building" below
 - macOS: Xcode command line tools (`xcode-select --install`)
 - CMake 3.20 or newer

@@ -31,7 +31,8 @@ Everything stays in that folder.
 - macOS (Apple Silicon, macOS 14+): `Wind Waker HD.app`. The release is not signed by Apple:
   macOS 15+: System Settings > Privacy & Security > Open Anyway; macOS 14: right-click > Open
 - Windows (x86-64): `Wind Waker HD.exe` (SmartScreen: "More info" > "Run anyway")
-- Linux (x86-64, glibc 2.35+, Vulkan): `wind-waker-hd`
+- Linux (glibc 2.35+, Vulkan): `wind-waker-hd`; `linux-x86_64` for x86-64, `linux-aarch64` for arm64
+  (Raspberry Pi 5, Asahi Linux, ARM laptops)
 
 See "Install (releases)" in the README for details.
 

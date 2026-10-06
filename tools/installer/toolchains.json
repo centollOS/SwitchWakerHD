@@ -19,6 +19,14 @@
       "size": 55478392,
       "dir": "zig-x86_64-linux-0.16.0",
       "target": "x86_64-linux-gnu.2.35"
+    },
+    "zig-0.16.0-aarch64": {
+      "kind": "zig",
+      "url": "https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz",
+      "sha256": "ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17",
+      "size": 51211944,
+      "dir": "zig-aarch64-linux-0.16.0",
+      "target": "aarch64-linux-gnu.2.35"
     }
   },
   "python": {
@@ -30,6 +38,11 @@
     "linux": {
       "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.13.16%2B20261003-x86_64-unknown-linux-gnu-install_only.tar.gz",
       "sha256": "0a0272910b10417c659a9312fb3f2d7a6d774da7bd510999be7a3ba83273dc1f",
+      "dir": "python"
+    },
+    "linux-aarch64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.13.16%2B20261003-aarch64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "6477121f22904963a066ac8ff89983baae781510815590e894daa3c11ce86652",
       "dir": "python"
     }
   }

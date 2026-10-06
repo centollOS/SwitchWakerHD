@@ -1137,7 +1137,22 @@ def load_manifest():
     plat = {"darwin": "macos", "win32": "windows"}.get(sys.platform, "linux")
     if not m["platform"].startswith(plat):
         raise SetupError("this release is for %s; download the one for your system" % m["platform"])
+    arch = m["platform"].split("-", 1)[1] if "-" in m["platform"] else ""
+    if IS_LINUX and arch and normalize_arch(arch) != host_arch():
+        raise SetupError("this release is for %s, but this computer is %s: download the %s release instead"
+                         % (m["platform"], host_arch(), "linux-" + host_arch()))
     return m
+
+
+def normalize_arch(a):
+    a = a.lower()
+    return {"amd64": "x86_64", "x64": "x86_64", "arm64": "aarch64"}.get(a, a)
+
+
+def host_arch():
+    """x86_64 or aarch64 (uname -m), which picks the Linux release, its pinned zig and Python."""
+    import platform
+    return normalize_arch(platform.machine())
 
 
 def read_state(data_dir):

@@ -117,10 +117,25 @@ jobs:
 
   linux:
     needs: version
-    # glibc 2.35: the oldest base the release supports (Ubuntu 22.04, Debian 12, Fedora 36, SteamOS 3)
-    runs-on: ubuntu-22.04
+    # x86-64 and arm64 (aarch64), each built and tested on its own architecture's runner.
+    # glibc 2.35: the oldest base the release supports (Ubuntu 22.04, Debian 12, Fedora 36, SteamOS 3,
+    # Raspberry Pi OS 12 64-bit)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+            toolchain: zig-0.16.0
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+            toolchain: zig-0.16.0-aarch64
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+      TOOLCHAIN: ${{ matrix.toolchain }}
     steps:
       - uses: actions/checkout@v4
 
@@ -141,8 +156,9 @@ jobs:
       - name: Pinned zig toolchain (tools/installer/toolchains.json)
         run: |
           read -r URL SUM DIR TARGET < <(python3 -c "
-          import json; t=json.load(open('tools/installer/toolchains.json'))['toolchains']['zig-0.16.0']
+          import json, os; t=json.load(open('tools/installer/toolchains.json'))['toolchains'][os.environ['TOOLCHAIN']]
           print(t['url'], t['sha256'], t['dir'], t['target'])")
+          echo "ZIG_DIR=$RUNNER_TEMP/$DIR" >> "$GITHUB_ENV"
           curl -fsSL -o "$RUNNER_TEMP/zig.tar.xz" "$URL"
           echo "$SUM  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
           tar -xf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
@@ -180,7 +196,7 @@ jobs:
             -DCMAKE_AR="$ZBIN/zar" -DCMAKE_RANLIB="$ZBIN/zranlib" \
             -DWWHD_BUNDLED_DEPS=ON -DCMAKE_PREFIX_PATH="$HOME/sdl3" -DWWHD_SETUP_GUI=ON \
             -DVulkan_INCLUDE_DIR="$HOME/vulkan/include" \
-            -DVulkan_LIBRARY=/usr/lib/x86_64-linux-gnu/libvulkan.so.1
+            -DVulkan_LIBRARY="/usr/lib/$ARCH-linux-gnu/libvulkan.so.1"
           cmake --build build/rel
 
       - name: Unit tests
@@ -191,16 +207,16 @@ jobs:
 
       - name: Package
         run: |
-          python3 tools/release/package.py --build build/rel --platform linux-x86_64 --version "$VERSION" \
-            --out dist --toolchain zig-0.16.0 --setup-gui build/rel/wwhd-setup \
+          python3 tools/release/package.py --build build/rel --platform "linux-$ARCH" --version "$VERSION" \
+            --out dist --toolchain "$TOOLCHAIN" --setup-gui build/rel/wwhd-setup \
             --runtime-file "$HOME/sdl3/lib/libSDL3.so.0" \
-            --linkonly-lib /usr/lib/x86_64-linux-gnu/libvulkan.so.1 \
+            --linkonly-lib "/usr/lib/$ARCH-linux-gnu/libvulkan.so.1" \
             --license "SDL3 (zlib)=$PWD/SDL3-3.4.18/LICENSE.txt" \
             --license "Vulkan-Headers (Apache-2.0)=$HOME/vulkan/LICENSE.md" \
             --license "glslang (BSD-3-Clause and others)=$PWD/build/rel/_deps/glslang-src/LICENSE.txt" \
             --license "zlib (zlib)=$PWD/build/rel/_deps/zlib-src/LICENSE" \
             --license "LZ4 (BSD-2-Clause)=$PWD/build/rel/_deps/lz4-src/lib/LICENSE" \
-            --license "LLVM libc++ (Apache-2.0 WITH LLVM-exception)=$RUNNER_TEMP/$(ls $RUNNER_TEMP | grep '^zig-x86_64')/lib/libcxx/LICENSE.TXT"
+            --license "LLVM libc++ (Apache-2.0 WITH LLVM-exception)=$ZIG_DIR/lib/libcxx/LICENSE.TXT"
 
       - name: Guard (no game code, game files or keys)
         run: python3 tools/release/guard.py dist/*.zip
@@ -210,6 +226,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/unz" && cd "$RUNNER_TEMP/unz" && unzip -q "$GITHUB_WORKSPACE"/dist/*.zip
           cd WindWakerHD-*
           ./tools/setup-in-terminal.sh --yes --no-launch --gen-dir "$GITHUB_WORKSPACE/build/gen-stub" --data-dir "$RUNNER_TEMP/data"
+          # the right architecture: the game the installer linked and the program a player starts
+          want=$([ "$ARCH" = aarch64 ] && echo "ARM aarch64" || echo "x86-64")
+          file "$RUNNER_TEMP/data/bin/wwhd" ./wind-waker-hd
+          file "$RUNNER_TEMP/data/bin/wwhd" | grep -q "$want"
+          file ./wind-waker-hd | grep -q "$want"
           ldd "$RUNNER_TEMP/data/bin/wwhd"
           "$RUNNER_TEMP/data/bin/wwhd" --game "$RUNNER_TEMP/nogame" > run.log 2>&1 || true
           cat run.log
@@ -226,7 +247,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-linux-x86_64
+          name: release-linux-${{ matrix.arch }}
           path: dist/*.zip
           if-no-files-found: error
 
