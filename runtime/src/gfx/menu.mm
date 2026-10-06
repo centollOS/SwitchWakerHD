@@ -22,6 +22,7 @@ bool drc_window_available();
 bool drc_window_shown();
 void show_drc_window(bool on);
 void install_display_menu(NSMenu* bar);
+void set_host_setting(const char* key, const std::string& value);  // display.mm
 }  // namespace gfx
 
 // internal resolution steps (Graphics menu; R cycles)
@@ -234,6 +235,7 @@ static WWStateMenu* g_state_menu;
 - (void)setController:(NSMenuItem*)item {
     input::set_pro_controller(item.tag == 1);
     gfx::show_drc_window(item.tag == 0);  // the GamePad window follows the controller choice
+    gfx::set_host_setting("proController", item.tag == 1 ? "1" : "0");  // as the settings overlay saves it
 }
 - (void)toggleInterp:(NSMenuItem*)item { interp::set_mode(interp::mode() == item.tag ? 0 : (int)item.tag); update_title(); }
 - (void)toggleDrcWindow:(NSMenuItem*)item { gfx::show_drc_window(!gfx::drc_window_shown()); }

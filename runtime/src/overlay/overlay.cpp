@@ -827,9 +827,12 @@ void tab_controls() {
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Keyboard and controllers act as");
     ImGui::SameLine();
-    if (radio("Wii U GamePad", !pro)) hostui::post([] { hostui::set_pro_controller(false); });
+    // the choice is saved (issue #26: every start went back to the GamePad and showed its screen)
+    if (radio("Wii U GamePad", !pro))
+        hostui::post([] { hostui::set_pro_controller(false); hostui::set("proController", "0"); });
     ImGui::SameLine();
-    if (radio("Wii U Pro Controller", pro)) hostui::post([] { hostui::set_pro_controller(true); });
+    if (radio("Wii U Pro Controller", pro))
+        hostui::post([] { hostui::set_pro_controller(true); hostui::set("proController", "1"); });
     ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - ImGui::CalcTextSize("List view").x -
                     ImGui::GetFrameHeight() - ImGui::GetStyle().ItemInnerSpacing.x);
     ImGui::Checkbox("List view", &U.list_view);
@@ -1107,6 +1110,9 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
         prefs_read = true;
         std::string v;
         if (hostui::get("perfOverlay", v)) g_perf = v == "1";
+        // the saved controller choice (WWHD_PRO_CONTROLLER wins); it also hides or shows the GamePad screen
+        if (!getenv("WWHD_PRO_CONTROLLER") && hostui::get("proController", v))
+            hostui::post([pro = v == "1"] { hostui::set_pro_controller(pro); });
     }
     if (!test.done && render::frame_count() + 1 >= test.at) {
         test.done = true;
