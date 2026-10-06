@@ -196,6 +196,15 @@ bool overlay_hit(float nx, float ny, float* tx, float* ty, bool clamp_outside) {
     return true;
 }
 
+bool main_picture(float* x, float* y, float* w, float* h) {
+    std::lock_guard<std::mutex> lk(g_layout_mu);
+    const Layout& L = g_tv_layout;
+    const Box& b = L.drc_only ? L.pip : L.tv;
+    if (g_tv_dw <= 0 || g_tv_dh <= 0 || b.w <= 0 || b.h <= 0) return false;
+    *x = b.x / g_tv_dw, *y = b.y / g_tv_dh, *w = b.w / g_tv_dw, *h = b.h / g_tv_dh;
+    return true;
+}
+
 // ---------------------------------------------------------------- view button (touch screens)
 bool view_button_enabled() {
     static const bool on = [] {

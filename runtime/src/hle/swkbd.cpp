@@ -23,6 +23,8 @@ struct State {
     bool pending = false;           // host prompt finished, not yet applied on a guest thread
     bool pending_ok = false;
     std::u16string pending_text;
+    bool live_pending = false;      // the prompt's text changed: the game's receiver is told on a guest thread
+    std::u16string live_text;
     std::u16string text;
     int max_len = kMaxForm - 1;
     std::u16string hint;            // input form: the guide text in the empty field
@@ -64,7 +66,7 @@ void read_config(uint32_t a) {
 }
 
 void start_prompt() {
-    S.decided = S.cancelled = S.pending = false;
+    S.decided = S.cancelled = S.pending = S.live_pending = false;
     if (const char* t = getenv("WWHD_SWKBD_TEXT")) {
         S.pending_text.assign(t, t + strlen(t));
         if ((int)S.pending_text.size() > S.max_len) S.pending_text.resize(S.max_len);
@@ -83,6 +85,11 @@ void start_prompt() {
     r.max_len = S.max_len;
     r.mode = S.mode;
     r.language = S.language;
+    r.changed = [](const std::u16string& text) {
+        std::lock_guard<std::mutex> lk(S.mu);
+        S.live_text = text;
+        S.live_pending = true;
+    };
     // the overlay's prompt; the host's own (window title, macOS sheet) where the overlay can't show
     if (!text_entry::start(r, done)) input::prompt_text(S.text, S.max_len, done);
 }
@@ -169,6 +176,14 @@ SWKBD(SwkbdDisappearKeyboard__3RplFv) { S.active = false; text_entry::dismiss();
 // The game polls this every frame: apply a finished prompt here, on a guest thread.
 SWKBD(SwkbdCalc__3RplFRCQ3_2nn5swkbd14ControllerInfo) {
     std::unique_lock<std::mutex> lk(S.mu);
+    // while typing: the receiver gets each change, so the game's name field shows the text in its font
+    if (S.live_pending && !S.pending && S.active) {
+        S.live_pending = false;
+        S.text = S.live_text;
+        lk.unlock();
+        text_changed(c);
+        return;
+    }
     if (!S.pending || !S.active) return;
     S.pending = false;
     if (S.pending_ok) {

@@ -20,6 +20,8 @@
 #include "../platform/keycodes.h"
 #include "../runtime.h"
 
+namespace gfx { bool main_picture(float* x, float* y, float* w, float* h); }  // display_modes.h
+
 namespace text_entry {
 namespace {
 
@@ -152,11 +154,25 @@ struct Ui {
     double full_since = -1;  // the field is full: the counter flashes
     int result = 0;          // 1 OK, 2 Cancel
     double last_draw = 0;
+    std::shared_ptr<const game_font::Glyphs> glyphs;  // the game's name font; null: everything
+    std::string note;        // a typed character the font lacks
+    double note_since = -1;
+    std::u16string reported; // the text the game was last told (Request::changed)
+    float scale = 1.0f;      // window scale that fits below the game's name field
+    float win_h = 0;         // the window's height last frame
 };
 Ui U;
 
+bool in_font(uint32_t c) { return !U.glyphs || U.glyphs->count(c); }
+// the character a key types: Shift's form only where the font has it
+uint32_t key_char(uint32_t c) {
+    const uint32_t s = U.shift ? shifted(c) : c;
+    return in_font(s) ? s : c;
+}
+
 bool allowed(uint32_t c) {
     if (c < 0x20 || c == 0x7F || (c >= 0x80 && c < 0xA0)) return false;  // control characters
+    if (!in_font(c)) return false;
     switch (U.req.mode) {
     case 1: return c >= '0' && c <= '9';
     case 3: return (c < 0x80 && isalnum((int)c)) || c == '-' || c == '_' || c == '.';  // Nintendo Network ID
@@ -171,7 +187,8 @@ void build_grid() {
         std::vector<Cell> row;
         for (int i = 0; i < (int)r.size(); i++) {
             auto cp = code_points(r[i]);
-            row.push_back({kChar, cp.empty() ? 0 : cp[0], i, 1});
+            // keys the game's font can't draw are left out (a gap)
+            row.push_back({kChar, cp.empty() || !in_font(cp[0]) ? 0 : cp[0], i, 1});
         }
         U.grid.push_back(row);
     }
@@ -186,6 +203,9 @@ void build_grid() {
 
 void begin(const Request& r) {
     U.req = r;
+    U.glyphs = r.glyphs;
+    U.note.clear();
+    U.reported = r.initial;
     U.text = r.initial;
     U.caret = U.text.size();
     U.preedit.clear();
@@ -208,6 +228,12 @@ void begin(const Request& r) {
 
 // ---------------------------------------------------------------- editing
 void insert(uint32_t c) {
+    if (c >= 0x20 && !in_font(c)) {  // typed: say why nothing appears
+        U.note = "\"" + utf8(c > 0xFFFF ? std::u16string{(char16_t)(0xD800 + ((c - 0x10000) >> 10)), (char16_t)(0xDC00 + (c & 1023))}
+                                         : std::u16string{(char16_t)c}) + "\" is not available in the game's font";
+        U.note_since = now_s();
+        return;
+    }
     if (!allowed(c)) return;
     std::u16string units;
     if (c > 0xFFFF) c -= 0x10000, units = {(char16_t)(0xD800 + (c >> 10)), (char16_t)(0xDC00 + (c & 1023))};
@@ -242,7 +268,7 @@ void press(const Cell& c) {
     switch (c.kind) {
     case kChar:
         if (!c.ch) return;
-        insert(U.shift ? shifted(c.ch) : c.ch);
+        insert(key_char(c.ch));
         if (U.shift == 1 && shifted(c.ch) != c.ch) U.shift = 0;
         break;
     case kShift: U.shift = (U.shift + 1) % 3; break;
@@ -351,7 +377,7 @@ const ImVec4 kGold(1.0f, 0.85f, 0.35f, 1.0f);
 void field(float width) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float fs = ImGui::GetFontSize();
-    const ImVec2 pad(12, 8);
+    const ImVec2 pad(fs * 0.5f, fs * 0.3f);
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const ImVec2 size(width, fs + pad.y * 2);
     ImGui::InvisibleButton("##field", size);
@@ -398,7 +424,7 @@ const char* special_label(const Cell& c, char* buf, size_t n) {
     case kOk: return "OK";
     default: break;
     }
-    uint32_t ch = U.shift ? shifted(c.ch) : c.ch;
+    uint32_t ch = key_char(c.ch);
     std::u16string s;
     if (ch > 0xFFFF) ch -= 0x10000, s = {(char16_t)(0xD800 + (ch >> 10)), (char16_t)(0xDC00 + (ch & 1023))};
     else s = {(char16_t)ch};
@@ -406,8 +432,7 @@ const char* special_label(const Cell& c, char* buf, size_t n) {
     return buf;
 }
 
-void keyboard(float unit, float key_h) {
-    const float sp = ImGui::GetStyle().ItemSpacing.x * 0.6f;
+void keyboard(float unit, float key_h, float sp) {
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(sp, sp));
     const int sel = cell_at(U.row, U.col);
     const ImVec2 origin = ImGui::GetCursorPos();
@@ -449,46 +474,81 @@ void keyboard(float unit, float key_h) {
     ImGui::PopStyleVar();
 }
 
+// Where the window goes: under the game's own name field, so the name shows there in the game's font
+// as it is typed (the name screen's field ends at 40% of the picture's height, TV and GamePad picture
+// alike), centred on the picture the window shows (the TV picture, or the GamePad picture in
+// GamePad-only mode). It scales down until it fits between that line and the picture's bottom; where
+// even that is too tall (small windows) it moves up over the field.
+constexpr float kBelowField = 0.40f;
+
 void window() {
     const ImVec2 ds = ImGui::GetIO().DisplaySize;
-    const float sp = ImGui::GetStyle().ItemSpacing.x * 0.6f;
-    // ten keys across, at most ~620 points wide, smaller on narrow pictures
-    const float inner = std::min(620.0f, ds.x * 0.92f - 32.0f);
+    float px = 0, py = 0, pw = ds.x, ph = ds.y;
+    if (float x, y, w, h; gfx::main_picture(&x, &y, &w, &h) && w > 0 && h > 0)
+        px = x * ds.x, py = y * ds.y, pw = w * ds.x, ph = h * ds.y;
+    const float k = U.scale, margin = 6.0f;
+    const float base = ImGui::GetStyle().FontSizeBase;
+    ImGui::PushFont(nullptr, base * k);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14 * k, 10 * k));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(9 * k, 5 * k));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10 * k, 6 * k));
+    const float sp = 6 * k;
+    // ten keys across: at most 620 points (scaled), never wider than the picture
+    const float inner = std::min(620.0f * k, std::min(pw, ds.x) - 28 * k - 2 * margin);
     const float unit = (inner - sp * 9) / 10.0f;
-    const float key_h = std::clamp(unit * 0.78f, 26.0f, 44.0f);
-    ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(inner + 32.0f, 0), ImGuiCond_Always);
+    const float key_h = std::clamp(unit * 0.78f, 18.0f * k, 44.0f * k);
+    const float top = py + ph * kBelowField, bottom = std::min(py + ph, ds.y) - margin;
+    float y = top;
+    if (U.win_h > 0 && y + U.win_h > bottom) y = std::max(margin, bottom - U.win_h);
+    ImGui::SetNextWindowPos(ImVec2(std::clamp(px + pw * 0.5f, 0.0f, ds.x), y), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    // the height its content took last frame (measured below: the cursor-placed keys made ImGui's own
+    // auto-fit come out short on small windows, clipping the bottom rows)
+    ImGui::SetNextWindowSize(ImVec2(inner + 28 * k, U.win_h), ImGuiCond_Always);
     if (U.first) ImGui::SetNextWindowFocus();
-    const ImGuiWindowFlags fl = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize;
-    if (ImGui::Begin("Enter text##text_entry", nullptr, fl)) {
-        const float base = ImGui::GetFontSize();
+    const ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+                                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    if (ImGui::Begin("##text_entry", nullptr, fl)) {
+        const float fsz = ImGui::GetFontSize();
         ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
         if (!U.req.hint.empty()) ImGui::TextWrapped("%s", utf8(U.req.hint).c_str());
-        else if (U.req.max_len == 1) ImGui::TextUnformatted("The game asks for one character");
-        else ImGui::Text("The game asks for text (up to %d characters)", U.req.max_len);
+        else if (U.req.max_len == 1) ImGui::TextUnformatted("Enter one character");
+        else ImGui::Text("Enter text (up to %d characters)", U.req.max_len);
         ImGui::PopStyleColor();
-        ImGui::PushFont(nullptr, base * 1.45f);
+        ImGui::PushFont(nullptr, fsz * 1.35f);
         field(inner);
         ImGui::PopFont();
-        // counter: flashes when the field is full and another character was refused
+        // a refused character's note on the left; the counter on the right, flashing when the field is full
+        const float x0 = ImGui::GetCursorPosX();
+        if (U.note_since >= 0 && now_s() - U.note_since < 2.5) {
+            ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.45f, 1.0f), "%s", U.note.c_str());
+            ImGui::SameLine();
+        }
         const bool flash = U.full_since >= 0 && now_s() - U.full_since < 0.6;
         char count[32];
         snprintf(count, sizeof count, "%d / %d", (int)U.text.size(), U.req.max_len);
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + inner - ImGui::CalcTextSize(count).x);
+        ImGui::SetCursorPosX(x0 + inner - ImGui::CalcTextSize(count).x);
         ImGui::TextColored(flash ? ImVec4(1.0f, 0.45f, 0.40f, 1.0f) : ImVec4(0.70f, 0.78f, 0.84f, 1.0f), "%s", count);
-        ImGui::PushFont(nullptr, base * 1.25f);
-        keyboard(unit, key_h);
+        ImGui::PushFont(nullptr, fsz * 1.2f);
+        keyboard(unit, key_h, sp);
         ImGui::PopFont();
-        ImGui::Spacing();
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.78f, 0.84f, 1.0f));
+        ImGui::PushFont(nullptr, fsz * 0.9f);
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + inner);
-        ImGui::TextWrapped("Keyboard: type, Enter = OK, Esc = Cancel.   Controller: A types, B deletes, X space, Y shift, "
-                           "L / R key pages, Start = OK.");
+        ImGui::TextWrapped("Enter OK, Esc Cancel  |  A type, B delete, X space, Y shift, L / R pages, Start OK");
         ImGui::PopTextWrapPos();
+        ImGui::PopFont();
         ImGui::PopStyleColor();
+        U.win_h = ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y + ImGui::GetStyle().WindowPadding.y;
     }
     ImGui::End();
+    ImGui::PopStyleVar(3);
+    ImGui::PopFont();
+    // next frame's scale: what fits below the field (the size is linear in the scale)
+    if (U.win_h > 0) {
+        const float want = std::clamp(k * (bottom - top) / U.win_h, 0.45f, 1.0f);
+        if (std::fabs(want - k) > 0.015f) U.scale = want;
+    }
 }
 
 }  // namespace
@@ -496,9 +556,11 @@ void window() {
 // ---------------------------------------------------------------- API
 bool start(const Request& r, Done done) {
     if (!overlay::alive()) return false;
+    auto glyphs = game_font::name_glyphs(r.language);  // read once per language (a few ms)
     {
         std::lock_guard<std::mutex> lk(g_mu);
         g_req = r;
+        g_req.glyphs = std::move(glyphs);
         if ((int)g_req.initial.size() > g_req.max_len) g_req.initial.resize(std::max(0, g_req.max_len));
         g_done = std::move(done);
         g_serial++;
@@ -568,6 +630,10 @@ bool draw(const float* pad) {
     if (!U.result) controller(pad);
     window();
     U.first = false;
+    if (U.text != U.reported && !U.result) {  // the game's own field follows the typing
+        U.reported = U.text;
+        if (U.req.changed) U.req.changed(U.text);
+    }
     if (!U.result) return false;
     Done done;
     {

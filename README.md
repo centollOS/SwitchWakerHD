@@ -395,9 +395,13 @@ the same options as the menu bar, and both stay in sync. Shift+F1 still saves st
 loaded from the overlay (F1 used to load it).
 
 **Entering text (the name screen):** when the game asks for text — your name when you start a new
-file — a text window appears over the game picture (also in the GamePad-only and picture-in-picture
-modes) with the field, a character counter (the name takes up to 8 characters) and an on-screen
-keyboard. Type on the keyboard (any layout, accents and dead keys, input methods), **Enter** = OK,
+file — a text window appears under the game's own name field (also in the GamePad-only and
+picture-in-picture modes; it scales down to fit, and on very small windows moves up over the field),
+with a field, a character counter (the name takes up to 8 characters) and an on-screen keyboard. The
+game's field shows the name in the game's font as you type. Only characters the game's font can draw
+are offered: the keys and typed characters are checked against the font the name is drawn with
+(`CKingMsg.bffnt`, read from your own game files at run time); a missing one is refused with a short
+note. Type on the keyboard (any layout, accents and dead keys, input methods), **Enter** = OK,
 **Esc** = Cancel, Backspace / Delete / arrows edit. With a controller: D-pad or left stick choose a
 key, **A** types it, **B** deletes, **X** adds a space, **Y** is Shift (once, then Caps), **L / R**
 switch between letters, accented letters and symbols (kana on a Japanese game), **ZL / ZR** move the

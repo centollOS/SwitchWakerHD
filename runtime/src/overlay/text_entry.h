@@ -21,7 +21,10 @@
 //   WWHD_TEST_POST_KEYS=1600:Text=Tetra,1650:Return   typed text and keys through the host's real path
 #pragma once
 #include <functional>
+#include <memory>
 #include <string>
+
+#include "game_font.h"
 
 namespace text_entry {
 
@@ -32,10 +35,15 @@ struct Request {
     int max_len = 0;         // in UTF-16 units, as the game counts
     int mode = 0;            // swkbd keyboard mode: 0 full, 1 numbers only, 2 UTF-8, 3 Nintendo Network ID
     int language = 1;        // swkbd language: 0 Japanese (kana pages), 1 English, 2 French, ...
+    // called (render thread) with the text after each edit, so the game's own name field shows it
+    // as it is typed, in the game's font (the real keyboard tells the game's receiver the same way)
+    std::function<void(const std::u16string&)> changed;
+    std::shared_ptr<const game_font::Glyphs> glyphs;  // set by start(): the name font's characters
 };
 using Done = std::function<void(bool ok, std::u16string text)>;
 
-// Any thread. Shows the prompt; false when the overlay cannot show it (the caller falls back).
+// Any thread. Shows the prompt; false when the overlay cannot show it (the caller falls back). Only
+// characters the game's name font has (game_font.h) are offered and taken.
 bool start(const Request& r, Done done);
 // Any thread. The game took its keyboard away: close without an answer.
 void dismiss();

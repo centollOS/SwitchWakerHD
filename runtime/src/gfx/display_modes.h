@@ -65,6 +65,10 @@ Layout layout(float dw, float dh, float tw, float th, float pw, float ph, bool p
 // a point in the TV window (0..1 from top left) on the GamePad picture -> touch position (0..1),
 // from the last display_plan; clamp_outside: a drag that left the picture keeps touching its edge
 bool overlay_hit(float nx, float ny, float* tx, float* ty, bool clamp_outside = false);
+// the main picture of the last TV layout (the TV picture, or the GamePad picture in GamePad-only
+// mode), 0..1 of the TV window from the top left; false before the first layout (the settings
+// overlay's text prompt places itself on it)
+bool main_picture(float* x, float* y, float* w, float* h);
 
 // Touch screens (Android; WWHD_VIEW_BUTTON=1 elsewhere for tests): a button in the TV window's top
 // left corner. A tap cycles the views offered there (picture-in-picture, GamePad only, TV only);
