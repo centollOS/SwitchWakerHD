@@ -908,6 +908,10 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
       std::chrono::steady_clock::now()-pipelineStarted).count();
   ++R.pipelineCreates;
   if (result == VK_ERROR_UNKNOWN) {
+    // WORKAROUND (PR #30, see TODO.md): patches the GLSL text after the driver
+    // refused the pipeline. The proper fix is to link the pixel shader's inputs
+    // to the vertex shader's outputs in the shader translation, so inputs
+    // without an output read as zero up front on every driver.
     // Pixel shader inputs that this vertex shader does not write (the Latte
     // translation declares every input of the pixel shader): read as zero.
     std::string glsl = ps->glsl;
@@ -954,7 +958,8 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
     p.pipeline = VK_NULL_HANDLE;
     LOG("[vulkan] graphics pipeline failed (Vulkan result %d): vs %016llX ps %016llX; its draws are skipped",
         int(result), (unsigned long long)vs->key, (unsigned long long)ps->key);
-    std::filesystem::create_directories("captures");
+    std::error_code captureDirError;  // this path must not throw: it replaces a crash
+    std::filesystem::create_directories("captures", captureDirError);
     for (auto *shader : shaders) {
       char name[96];
       snprintf(name, sizeof name, "captures/pipeline-failed-%s-%016llX",
