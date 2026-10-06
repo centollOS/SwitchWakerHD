@@ -26,6 +26,12 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
   Shift+F1 still saves state slot 1; slot 1 now loads from the overlay.
 - **On-screen text entry** (issue #29): the name screen now shows a text window over the game, with an
   on-screen keyboard for controllers and the mouse; typing on the keyboard goes straight into it.
+- **v0.2.1: Cemu archives (`.wua`)** (issue #27): the setup now also takes a Cemu `.wua` file; it is
+  already decrypted, so no keys are needed. Every source (disc image, `.wua`, extracted folder) is
+  checked for the right game version first (USA, version 0), with a clear message if an update is
+  merged in or the region is different.
+- **Linux on arm64** (aarch64): a separate `linux-aarch64` download (Raspberry Pi 5, Asahi Linux, ARM
+  laptops).
 - **Boot crash fixed:** the rare crash right after start ("Prepare Thread", agl shader setup) is gone.
   GX2CopySurface now completes before it returns, as the game expects; before, a late render thread
   could write into memory the game had already reused (about every 15th start under load, every start

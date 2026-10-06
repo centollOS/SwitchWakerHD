@@ -22,8 +22,8 @@ def main():
     print("""**The Wind Waker HD, native PC port, %s**
 
 This release contains **no game files, no game code and no keys**. You need your own disc dump
-(.wux/.wud with its disc key, plus the Wii U common key from your console), or an already
-extracted game folder. The installer builds the game from it on your machine.
+(.wux/.wud with its disc key, plus the Wii U common key from your console), a Cemu .wua archive
+(no keys needed), or an already extracted game folder. The installer builds the game from it on your machine.
 
 **Install:** download the zip for your system, unzip it anywhere and start **Wind Waker HD**. The
 first start prepares the game once from your dump (about two minutes); later starts launch it directly.
