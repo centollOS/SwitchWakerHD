@@ -23,6 +23,7 @@
 #include "shaders.h"
 #include "settings.h"
 #include "sparse_hash_memo.h"
+#include "write_watch.h"
 #include <algorithm>
 #include <functional>
 #include <array>
@@ -1387,6 +1388,17 @@ void swap() {
           (unsigned long long)ss.diskSaves,ss.diskSaveNs/1e6,ss.diskSavedBytes/double(1<<20),ss.diskSnapshotNs/1e6);
       LOG("[vulkan pipelines] creates %llu total %.1f ms",
           (unsigned long long)R.pipelineCreates,R.pipelineCreateNs/1e6);
+      {
+        // texture change detection (surfaces.cpp upload_surface, write_watch.h)
+        extern uint64_t g_stat_full_checks, g_stat_uploads;
+        static uint64_t checks=0, uploads=0;
+        uint64_t faults, protectedPages;
+        wwatch::take_stats(faults, protectedPages);
+        LOG("[vulkan textures] %llu full checks, %llu uploads, %llu page write faults, %llu pages protected",
+            (unsigned long long)(g_stat_full_checks-checks),(unsigned long long)(g_stat_uploads-uploads),
+            (unsigned long long)faults,(unsigned long long)protectedPages);
+        checks=g_stat_full_checks;uploads=g_stat_uploads;
+      }
       // CPU-only reports leave per-draw counters/comparison clocks disabled.
       if (perf_enabled()) {
       double frames = double(R.frame-frame);

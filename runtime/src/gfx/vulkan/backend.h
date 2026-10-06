@@ -25,6 +25,8 @@ struct Surface {
  uint32_t addr=0,mipAddr=0,width=0,height=0,slices=1,pitch=0,mips=1,format=0,dim=1,tileMode=0,swizzle=0;
  bool isDepth=false,gpuWritten=false,dirty=true;
  uint64_t writeSeq=0,contentHash=0,lastCheckedFrame=~0ull,sparseHash=0;
+ // CPU textures: write stamp (write_watch.h) of all levels' pages at the last full check
+ uint64_t watchStamp=0; bool watched=false;
  uint32_t dataSize=0; FormatInfo fmt;
  mutable std::shared_ptr<CachedGuestLayout> guestLayout;
  float scale=1,sx=1,sy=1;

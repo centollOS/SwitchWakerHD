@@ -79,7 +79,12 @@ packets, rebuilds GPU register state, and translates draws to a host graphics AP
 2. A render thread turns the commands into Metal work, like the GPU running asynchronously to the
    CPU. Concretely, it:
    - picks and caches pipeline, depth/stencil and sampler states from the registers;
-   - detiles textures from guest memory with Cemu's AddrLib;
+   - detiles textures from guest memory with Cemu's AddrLib, and uploads them again when the CPU
+     changes them: the host pages of every uploaded texture (all mip levels) are write-protected, so
+     the first write to one faults once and marks it (`runtime/src/write_watch.h`); the next use of
+     the texture hashes all of its bytes and re-uploads it if they differ. The game does not announce
+     every such write (GX2Invalidate mostly comes in its "everything" form), and a sampled check
+     showed changed textures up to 64 frames late;
    - tracks which memory the GPU has written;
    - renders into Metal textures, including texture-array targets for shadow cascades.
 3. Shaders (Latte microcode) are translated to Metal Shading Language with Cemu's decompiler. Every

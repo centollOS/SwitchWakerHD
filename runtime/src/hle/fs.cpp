@@ -14,6 +14,7 @@
 #include <unordered_map>
 
 #include "../runtime.h"
+#include "../write_watch.h"
 
 namespace {
 
@@ -199,6 +200,9 @@ HLE(coreinit, FSReadFile) {
     size_t n;
     {
         BlockingScope b;  // the calling thread waits for the disc; others on its core run
+        // the kernel writes guest memory here: write-protected texture pages would fail the read
+        // (EFAULT) instead of faulting into the write tracker (write_watch.h)
+        wwatch::HostWrite w(dst, (uint32_t)std::min<uint64_t>((uint64_t)size * count, 0x100000000ull - dst));
         n = fread(mem::ptr(dst), 1, (size_t)size * count, f);
     }
     ret(c, (uint32_t)(n / size));

@@ -5,6 +5,7 @@
 #include <mach-o/ldsyms.h>
 #endif
 #include "platform/host.h"
+#include "write_watch.h"
 #include <zlib.h>
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -111,6 +112,8 @@ void init() {
     if(p != PPC_MEM_BASE) { if(p!=MAP_FAILED)munmap(p,0x100000000ull); fatal("cannot reserve guest address space at %p",PPC_MEM_BASE); }
     if(mprotect(PPC_MEM_BASE,0x10000,PROT_NONE))fatal("cannot protect guest null page");
 #endif
+    // texture change detection (write_watch.h): after the crash handler, which it chains to
+    if (!wwatch::init(PPC_MEM_BASE, 0x100000000ull)) LOG("[mem] write tracking unavailable: textures use sampled change checks");
 }
 
 static std::mutex g_alloc_log_m;

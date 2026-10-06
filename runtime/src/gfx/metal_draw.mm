@@ -12,6 +12,7 @@ extern "C" uint64_t g_shader_state_gen;  // gx2_core.cpp: bumped by shader-relev
 #include "Cafe/HW/Latte/Renderer/Metal/LatteToMtl.h"
 #include "gx2/gx2.h"
 #include "gx2/gx2_cmd.h"
+#include "write_watch.h"
 #include "metal.h"
 #include "runtime.h"
 #include "util/helpers/StringBuf.h"
@@ -1410,10 +1411,15 @@ void report_skips() {
     LOG("[gfx] %zu shaders, %zu pipelines; ms decompile %.0f, msl %.0f, pipeline %.0f", g_shaders.size(), g_pipelines.size(),
         g_t_decompile, g_t_msl, g_t_pipeline);
     extern uint64_t g_stat_full_checks, g_stat_uploads, g_stat_invalidates, g_stat_invalidated_surfaces;
-    LOG("[gfx] last 300 frames: %llu full texture checks, %llu uploads, %llu invalidates marking %llu surfaces",
-        (unsigned long long)g_stat_full_checks, (unsigned long long)g_stat_uploads, (unsigned long long)g_stat_invalidates,
-        (unsigned long long)g_stat_invalidated_surfaces);
-    g_stat_full_checks = g_stat_uploads = g_stat_invalidates = g_stat_invalidated_surfaces = 0;
+    extern uint64_t g_stat_hashed_bytes;
+    uint64_t faults, protectedPages;
+    wwatch::take_stats(faults, protectedPages);
+    LOG("[gfx] last 300 frames: %llu full texture checks (%.1f MiB hashed), %llu uploads, %llu invalidates marking %llu surfaces, "
+        "%llu texture page write faults, %llu pages protected",
+        (unsigned long long)g_stat_full_checks, g_stat_hashed_bytes / 1048576.0, (unsigned long long)g_stat_uploads,
+        (unsigned long long)g_stat_invalidates, (unsigned long long)g_stat_invalidated_surfaces, (unsigned long long)faults,
+        (unsigned long long)protectedPages);
+    g_stat_full_checks = g_stat_uploads = g_stat_invalidates = g_stat_invalidated_surfaces = g_stat_hashed_bytes = 0;
 }
 
 void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr, uint32_t baseVertex,

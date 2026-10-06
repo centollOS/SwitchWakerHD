@@ -421,8 +421,14 @@ void swap() {
         flush();
     }
     if (R.frame % 300 == 1) {
-        LOG("[gfx] frame %llu, %llu draws so far, GPU %.1f ms/frame", (unsigned long long)R.frame, (unsigned long long)R.drawCount,
-            g_gpu_ns.exchange(0) / 1e6 / 300.0);
+        // render thread CPU time (excludes sleeping and GPU waits), for performance comparisons
+        timespec ts{};
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+        static uint64_t lastCpu = 0;
+        uint64_t cpu = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+        LOG("[gfx] frame %llu, %llu draws so far, GPU %.1f ms/frame, render thread CPU %.2f ms/frame", (unsigned long long)R.frame,
+            (unsigned long long)R.drawCount, g_gpu_ns.exchange(0) / 1e6 / 300.0, lastCpu ? (cpu - lastCpu) / 1e6 / 300.0 : 0.0);
+        lastCpu = cpu;
         void report_skips();
         report_skips();
     }
@@ -438,12 +444,19 @@ void invalidate(uint32_t flags, uint32_t addr, uint32_t size) {
     // range on next use. Uniform/attribute/shader invalidations need nothing here.
     if (!(flags & 0x2)) return;
     // "invalidate everything" (sent several times per frame) carries no information about CPU writes;
-    // changed textures are still caught by the per-frame sparse check and the periodic full check
+    // changed textures are caught by the write tracking (write_watch.h, metal_surfaces.mm check_texture)
     if (size >= 0x10000000) return;
+    uint64_t end = (uint64_t)addr + size;
+    auto hits = [&](Surface* s) {
+        // every level once known (after the first check), else the base level estimate
+        if (s->levelRanges.empty()) return addr < (uint64_t)s->addr + std::max<uint32_t>(s->dataSize, s->pitch * s->height * 4) && s->addr < end;
+        for (auto& [b, n] : s->levelRanges)
+            if (addr < (uint64_t)b + n && b < end) return true;
+        return false;
+    };
     for (auto& [a, s] : R.surfaces)
         // MEM1 holds render targets; CPU-side surfaces there are views of GPU data, not CPU uploads
-        if (!s->gpuWritten && !(a >= 0xF4000000 && a < 0xF6000000) && a < addr + size &&
-            addr < a + std::max<uint32_t>(s->dataSize, s->pitch * s->height * 4)) {
+        if (!s->gpuWritten && !(a >= 0xF4000000 && a < 0xF6000000) && hits(s.get())) {
             s->lastCheckedFrame = ~0ull;
             s->dirty = true;
             g_stat_invalidated_surfaces++;

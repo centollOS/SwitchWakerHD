@@ -20,6 +20,8 @@ optimizations have been adapted:
   are copied before that scratch can be reused, including recursive AO replay.
 - Full texture content checks use BSD-licensed xxHash v0.8.3. Every mip and byte
   is still checked; sparse-check cadence and disk cache formats are unchanged.
+  (Since 2026-10-06 both renderers decide when to check by page write tracking,
+  see "Texture change detection" below; the sparse check is only the fallback.)
 
 Swapchains now prefer mailbox when advertised, with FIFO fallback. The existing
 override in **this** checkout is `WWHD_VK_PRESENT_MODE` (the other checkout uses
@@ -245,3 +247,24 @@ Ranked by expected payoff. Sample counts are from the 20 s run above.
 3. **Recompiled code (small).** `PPC_ENTER` checks the trace flag and the preemption flag on every
    function call; compiling the trace check out of release builds saves a little. Keep
    `-ffp-contract=off` and the exact rounding: they are what makes the results correct.
+
+## Texture change detection (2026-10-06)
+
+The renderers used to re-hash a CPU texture in full only when it was new, invalidated by an exact
+GX2Invalidate range, or every 64 frames (phased by frame and address); in between they compared 256
+sampled words (Metal: of the base level only). The game changes textures in place without announcing
+it, so a change between the samples showed up to 63 frames late, and two runs reaching the same scene
+at different frame counts could render it differently (Mirror Shield in the Wind Temple: 668 pixels).
+
+Now both renderers use page write tracking (`runtime/src/write_watch.cpp`): each full check
+write-protects the host pages of all the texture's levels and records a stamp; the first CPU write to
+such a page faults once, the handler stamps the page and makes it writable. A lookup re-hashes (every
+byte, every level, xxHash) only when a page carries a newer stamp, or when the game signalled a change
+(GX2Invalidate on the range, GX2CopySurface into it, a loaded save state). Unchanged textures cost a
+stamp comparison per page and no hashing. Kernel writes into guest memory (FSReadFile's `fread`)
+are bracketed with `wwatch::HostWrite`, since a protected page would make the read fail with EFAULT
+instead of faulting. The sampled check remains only for hosts where page protection is unavailable.
+The 300-frame `[gfx]` report (Metal) and the `[vulkan textures]` line (`WWHD_VK_CPU_ONLY_STATS=1`) show
+full checks, hashed bytes (Metal), uploads, page write faults and pages protected;
+`WWHD_LOG_TEXCHECK=1` (Metal) logs which textures were re-checked because of a write.
+

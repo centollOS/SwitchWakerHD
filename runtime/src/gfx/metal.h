@@ -26,11 +26,16 @@ struct Surface {
     bool isDepth = false;
     bool gpuWritten = false;   // contents produced by the GPU; never reload from guest memory
     uint64_t writeSeq = 0;     // when the GPU last wrote it (several surfaces can alias one address)
-    uint64_t contentHash = 0;  // hash of guest data at last upload
+    uint64_t contentHash = 0;  // hash of all guest bytes (every level) at the last check
     uint64_t lastCheckedFrame = ~0ull;
-    uint64_t sparseHash = 0;   // cheap per-frame change check (a few hundred samples)
+    uint64_t sparseHash = 0;   // fallback without write tracking: cheap per-frame sampled check
     uint32_t dataSize = 0;     // base level size in guest memory
     bool dirty = true;         // new, or invalidated by the game: do a full check
+    // CPU textures: guest ranges of all levels (base first) and the write stamp (write_watch.h) they
+    // were armed with at the last full check; no newer stamp on their pages = unchanged
+    std::vector<std::pair<uint32_t, uint32_t>> levelRanges;
+    uint64_t watchStamp = 0;
+    bool watched = false;
     FormatInfo fmt;
     // internal resolution: width/height above are the guest's (logical) size, used for every lookup and
     // guest-memory computation; the texture may be larger. sx/sy = texture size / logical size.

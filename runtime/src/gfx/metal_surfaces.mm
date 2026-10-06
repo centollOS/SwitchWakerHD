@@ -11,18 +11,14 @@
 #include "gx2_texture_regs.h"
 #include "metal.h"
 #include "runtime.h"
+#include "write_watch.h"
+#define XXH_INLINE_ALL
+#include "../../third_party/xxhash/xxhash.h"
 
 Latte::E_GX2SURFFMT LatteTexture_ReconstructGX2Format(const Latte::LATTE_SQ_TEX_RESOURCE_WORD1_N&, const Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N&);
 
 namespace gfx {
 
-static uint64_t fnv(const uint8_t* p, size_t n) {
-    uint64_t h = 1469598103934665603ull;
-    // sample the data sparsely for large surfaces; enough to notice CPU updates
-    size_t step = n > (1 << 16) ? 61 : 1;
-    for (size_t i = 0; i < n; i += step) h = (h ^ p[i]) * 1099511628211ull;
-    return h ^ n;
-}
 
 static MTLTextureType texture_type(uint32_t dim, uint32_t slices) {
     switch ((Latte::E_DIM)dim) {
@@ -432,6 +428,7 @@ Surface* surface_from_depth_buffer(uint32_t addr, uint32_t* firstSlice, uint32_t
 
 // ---------------------------------------------------------------- sampled textures
 static uint64_t sparse_hash(Surface* s);
+static void check_texture(Surface* s);
 uint64_t g_stat_full_checks, g_stat_uploads, g_stat_invalidates, g_stat_invalidated_surfaces;
 
 Surface* sampled_texture(const uint32_t* w, bool isDepthSampler) {
@@ -481,20 +478,78 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler) {
     Surface* s = find_or_create_surface(d, false);
     if (s && !s->gpuWritten && s->lastCheckedFrame != R.frame) {
         s->lastCheckedFrame = R.frame;
-        // full hash only when new, invalidated, every 64 frames, or when a sparse sample changed
-        bool full = s->dirty || !s->dataSize || ((R.frame + (s->addr >> 12)) & 63) == 0;
-        if (!full) {
-            uint64_t h = sparse_hash(s);
-            if (h != s->sparseHash) full = true;
-        }
-        if (full) {
-            g_stat_full_checks++;
-            upload_surface(s);
-            s->sparseHash = sparse_hash(s);
-            s->dirty = false;
-        }
+        check_texture(s);
     }
     return s;
+}
+
+// Guest ranges of every level the upload reads (base first), computed once: a Surface's geometry
+// never changes after creation.
+static const std::vector<std::pair<uint32_t, uint32_t>>& level_ranges(Surface* s) {
+    if (!s->levelRanges.empty()) return s->levelRanges;
+    for (uint32_t level = 0; level < s->mips; level++) {
+        uint32_t base;
+        if (level == 0) base = s->addr;
+        else if (!s->mipAddr) break;
+        else if (level == 1) base = s->mipAddr;
+        else {
+            // mip offsets relative to the mip chain start
+            uint32_t sliceOffset = 0, sliceSize = 0;
+            sint32 sub = 0;
+            LatteAddrLib::CalculateMipAndSliceAddr(s->addr, s->mipAddr, (Latte::E_GX2SURFFMT)s->format, s->width, s->height,
+                                                   s->slices, (Latte::E_DIM)s->dim, (Latte::E_HWTILEMODE)s->tileMode,
+                                                   s->swizzle, 0, level, 0, &sliceOffset, &sliceSize, &sub);
+            base = sliceOffset;
+        }
+        LatteAddrLib::AddrSurfaceInfo_OUT info{};
+        LatteAddrLib::GX2CalculateSurfaceInfo((Latte::E_GX2SURFFMT)s->format, s->width, s->height, s->slices, (Latte::E_DIM)s->dim,
+                                              Latte::MakeGX2TileMode((Latte::E_HWTILEMODE)s->tileMode), 0, level, &info);
+        // clamp to the 4 GiB guest space (a bogus descriptor must not make the hash read past it)
+        uint32_t size = (uint32_t)std::min<uint64_t>(info.surfSize, 0x100000000ull - base);
+        s->levelRanges.push_back({base, size});
+    }
+    s->dataSize = s->levelRanges[0].second;
+    return s->levelRanges;
+}
+
+// Has the CPU changed this texture since its last check? Exact with write tracking (write_watch.h):
+// its pages were write-protected at that check, so any write since has stamped them. Changes the
+// game announces (GX2Invalidate on the range, GX2CopySurface into it, a loaded save state) set dirty.
+// Then every byte of every level is hashed and the texture re-uploaded if the hash differs.
+// Without write tracking (page protection unavailable on the host): the old sampled check, 256 words
+// per level every frame plus a full check every 64 frames, which can show a changed texture late.
+static void check_texture(Surface* s) {
+    const auto& ranges = level_ranges(s);
+    bool full = s->dirty || !s->watched;
+    if (wwatch::active()) {
+        if (!full)
+            for (auto& [a, n] : ranges)
+                if (wwatch::written_since(a, n, s->watchStamp)) {
+                    full = true;
+                    // debug: WWHD_LOG_TEXCHECK=1 logs textures re-checked because their pages were written
+                    static const bool log = getenv("WWHD_LOG_TEXCHECK") != nullptr;
+                    static int logged = 0;
+                    if (log && logged++ < 400)
+                        LOG("[texcheck] frame %llu %08X %ux%u fmt %X mips %u: write at %08X+%X", (unsigned long long)R.frame, s->addr,
+                            s->width, s->height, s->format, s->mips, a, n);
+                    break;
+                }
+        if (!full) return;
+        // arm before reading: a write from now on faults and stamps the pages after this stamp
+        uint64_t stamp = ~0ull;
+        for (auto& [a, n] : ranges) stamp = std::min(stamp, wwatch::arm(a, n));
+        s->watchStamp = stamp;
+    } else {
+        full = full || ((R.frame + (s->addr >> 12)) & 63) == 0;
+        uint64_t h = sparse_hash(s);
+        if (h != s->sparseHash) full = true;
+        s->sparseHash = h;
+        if (!full) return;
+    }
+    s->watched = true;
+    g_stat_full_checks++;
+    upload_surface(s);
+    s->dirty = false;
 }
 
 // ---------------------------------------------------------------- upload (detile + convert)
@@ -544,15 +599,27 @@ static void decode_level(Surface* s, uint32_t level, uint32_t base, std::vector<
     }
 }
 
-// samples 256 words spread over the base level
+// fallback without write tracking: 256 words spread over each level
 static uint64_t sparse_hash(Surface* s) {
-    if (!s->dataSize) return 0;
     uint64_t h = 0xcbf29ce484222325ull;
-    uint32_t step = std::max<uint32_t>((s->dataSize / 256) & ~7u, 8);
-    for (uint32_t o = 0; o + 8 <= s->dataSize; o += step) {
-        uint64_t v;
-        memcpy(&v, mem::ptr(s->addr + o), 8);
-        h = (h ^ v) * 0x100000001b3ull;
+    for (auto& [a, n] : level_ranges(s)) {
+        uint32_t step = std::max<uint32_t>((n / 256) & ~7u, 8);
+        for (uint32_t o = 0; o + 8 <= n; o += step) {
+            uint64_t v;
+            memcpy(&v, mem::ptr(a + o), 8);
+            h = (h ^ v) * 0x100000001b3ull;
+        }
+    }
+    return h;
+}
+
+// every byte of every level the upload reads
+uint64_t g_stat_hashed_bytes;
+static uint64_t content_hash(Surface* s) {
+    uint64_t h = 0;
+    for (auto& [a, n] : level_ranges(s)) {
+        h = XXH3_64bits_withSeed(mem::ptr(a), n, h);
+        g_stat_hashed_bytes += n;
     }
     return h;
 }
@@ -560,13 +627,9 @@ static uint64_t sparse_hash(Surface* s) {
 void upload_surface(Surface* s) {
     if (!s->tex || s->gpuWritten) return;
     const FormatInfo& f = s->fmt;
-    // cheap change detection on the base level
-    LatteAddrLib::AddrSurfaceInfo_OUT info{};
-    LatteAddrLib::GX2CalculateSurfaceInfo((Latte::E_GX2SURFFMT)s->format, s->width, s->height, s->slices, (Latte::E_DIM)s->dim,
-                                          Latte::MakeGX2TileMode((Latte::E_HWTILEMODE)s->tileMode), 0, 0, &info);
-    s->dataSize = (uint32_t)info.surfSize;
-    uint64_t hash = fnv(mem::ptr(s->addr), (size_t)info.surfSize);
-    if (hash == s->contentHash) return;
+    const auto& ranges = level_ranges(s);
+    uint64_t hash = content_hash(s);
+    if (hash == s->contentHash && s->writeSeq) return;
     s->contentHash = hash;
     s->writeSeq = next_write_seq();  // fresh CPU data is now the newest version of this memory
     g_stat_uploads++;
@@ -575,20 +638,8 @@ void upload_surface(Surface* s) {
     id<MTLBuffer> staging = nil;
     end_encoder();
     id<MTLBlitCommandEncoder> blit = [command_buffer() blitCommandEncoder];
-    for (uint32_t level = 0; level < s->mips; level++) {
-        uint32_t base;
-        if (level == 0) base = s->addr;
-        else if (!s->mipAddr) break;
-        else if (level == 1) base = s->mipAddr;
-        else {
-            // mip offsets relative to the mip chain start
-            uint32_t sliceOffset = 0, sliceSize = 0;
-            sint32 sub = 0;
-            LatteAddrLib::CalculateMipAndSliceAddr(s->addr, s->mipAddr, (Latte::E_GX2SURFFMT)s->format, s->width, s->height,
-                                                   s->slices, (Latte::E_DIM)s->dim, (Latte::E_HWTILEMODE)s->tileMode,
-                                                   s->swizzle, 0, level, 0, &sliceOffset, &sliceSize, &sub);
-            base = sliceOffset;
-        }
+    for (uint32_t level = 0; level < ranges.size(); level++) {
+        uint32_t base = ranges[level].first;
         uint32_t w, h, slices;
         decode_level(s, level, base, data, w, h, slices);
         uint32_t bw = f.compressed ? (w + 3) / 4 : w, bh = f.compressed ? (h + 3) / 4 : h;
@@ -694,7 +745,10 @@ void copy_surface_impl(uint32_t srcAddr, uint32_t srcMip, uint32_t srcSlice, uin
         }
     // force re-upload of any texture made from the destination
     auto dr = R.surfaces.equal_range(dbase);
-    for (auto it = dr.first; it != dr.second; ++it) it->second->lastCheckedFrame = ~0ull;
+    for (auto it = dr.first; it != dr.second; ++it) {
+        it->second->lastCheckedFrame = ~0ull;
+        it->second->dirty = true;
+    }
 }
 
 }  // namespace gfx

@@ -369,6 +369,28 @@ int renderer_smoke_test() {
     rgba_is(read_image(*cached,VK_IMAGE_ASPECT_COLOR_BIT,4,1,layer),changedMip,"invalidated mip guest upload differs");
    }
    fprintf(stderr,"[renderer smoke] upload cache and interior mip invalidation/readback passed\n");
+   {
+    // A texel changed in place, unannounced, between the 256 words the former sampled check read
+    // (step 1 KiB here): page write tracking must still upload it on the next frame.
+    SurfaceDesc bigDesc;bigDesc.addr=mem::host_alloc(256*256*4,256);
+    bigDesc.width=256;bigDesc.height=256;bigDesc.pitch=256;bigDesc.slices=1;bigDesc.mips=1;bigDesc.format=0x1a;bigDesc.dim=1;
+    for(uint32_t i=0;i<256*256*4;++i)mem::ptr(bigDesc.addr)[i]=rgba[i%4];
+    auto* big=find_or_create_surface(bigDesc,false);
+    upload_surface(big);
+    ++R.frame;
+    if(((R.frame+(big->addr>>12))&63)==0)++R.frame;
+    upload_surface(big);
+    uint64_t bigUploads=g_stat_uploads;
+    const uint8_t texel[4]={200,10,20,255};
+    memcpy(mem::ptr(bigDesc.addr)+(256+5)*4,texel,4);  // texel (5,1): bytes 1044..1047, not sampled
+    ++R.frame;
+    if(((R.frame+(big->addr>>12))&63)==0)++R.frame;
+    upload_surface(big);
+    require(g_stat_uploads==bigUploads+1,"unannounced in-place texel change was not uploaded");
+    auto px=read_image(*big,VK_IMAGE_ASPECT_COLOR_BIT,4);
+    require(!memcmp(px.data()+(256+5)*4,texel,4)&&!memcmp(px.data(),rgba,4),"unannounced texel change readback differs");
+    fprintf(stderr,"[renderer smoke] unannounced in-place texel change between sampled words uploaded next frame\n");
+   }
    Image color(16,16,0x1a);const float green[4]={0,1,0,1};const uint8_t greenBytes[4]={0,255,0,255};clear_image(color.s,green);rgba_is(read_image(color.s,VK_IMAGE_ASPECT_COLOR_BIT,4),greenBytes,"color clear differs");
    Image scaled(32,32,0x1a);resample(&color.s,&scaled.s,1);rgba_is(read_image(scaled.s,VK_IMAGE_ASPECT_COLOR_BIT,4),greenBytes,"scaled blit differs");
    // Retire an image while its commands are pending; replacement must not destroy it early.

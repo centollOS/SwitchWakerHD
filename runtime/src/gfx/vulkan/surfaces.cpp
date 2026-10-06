@@ -2,6 +2,7 @@
 #include "backend.h"
 #include "settings.h"
 #include "sparse_hash_memo.h"
+#include "write_watch.h"
 #define XXH_INLINE_ALL
 #include "../../../third_party/xxhash/xxhash.h"
 #include "Cafe/HW/Latte/ISA/LatteReg.h"
@@ -337,6 +338,7 @@ static void decode_level(Surface* s, uint32_t level, uint32_t base, std::vector<
 
 static uint32_t mip_base(Surface* s, uint32_t level);
 
+// Fallback change check when write tracking (write_watch.h) is unavailable.
 // Sample every mip so CPU changes confined to the mip chain get the same
 // immediate detection as base-level changes. Periodic full checks catch writes
 // outside these samples when guest code omits a texture invalidation.
@@ -639,17 +641,39 @@ void upload_surface(Surface* s) {
     // check. Invalidation resets lastCheckedFrame for writes within a frame.
     if (s->lastCheckedFrame == R.frame) return;
     s->lastCheckedFrame = R.frame;
-    bool full = s->dirty || !s->dataSize || ((R.frame + (s->addr >> 12)) & 63) == 0;
-    uint64_t sparse = sparse_hash(s);
-    if (!full && sparse == s->sparseHash) return;
+    // Has the CPU changed it since the last check? Exact with write tracking (write_watch.h): the
+    // pages of every level were write-protected at that check, so any write since (guest code, HLE
+    // copies, a save-state restore) has stamped them. Changes the game announces (GX2Invalidate on the
+    // range, GX2CopySurface into it, save-state loads) set dirty. Without write tracking (page
+    // protection unavailable on the host): sampled words of every level each frame plus a full check
+    // every 64 frames, which can show a changed texture late.
+    uint32_t levels=s->mips;
+    std::array<std::pair<uint32_t,uint32_t>,16> ranges{};
+    if(levels>ranges.size())throw std::runtime_error("GX2 texture has too many mip levels");
+    for(uint32_t level=0;level<levels;++level) {
+        uint32_t base=mip_base(s,level);
+        ranges[level]={base,uint32_t(std::min<uint64_t>(guest_info(s,level).surfSize,0x100000000ull-base))};
+    }
+    s->dataSize=ranges[0].second;
+    bool full = s->dirty || !s->watched;
+    if (wwatch::active()) {
+        for(uint32_t level=0;level<levels&&!full;++level)full=wwatch::written_since(ranges[level].first,ranges[level].second,s->watchStamp);
+        if (!full) return;
+        // arm before reading: a write from now on faults and stamps the pages after this stamp
+        uint64_t stamp=~0ull;
+        for(uint32_t level=0;level<levels;++level)stamp=std::min(stamp,wwatch::arm(ranges[level].first,ranges[level].second));
+        s->watchStamp=stamp;
+    } else {
+        full = full || ((R.frame + (s->addr >> 12)) & 63) == 0;
+        uint64_t sparse = sparse_hash(s);
+        if (!full && sparse == s->sparseHash) return;
+        s->sparseHash = sparse;
+    }
+    s->watched = true;
     ++g_stat_full_checks;
     uint64_t hash=1469598103934665603ull;
-    for(uint32_t level=0;level<s->mips;++level) {
-        const auto& info = guest_info(s, level);
-        if(!level)s->dataSize=uint32_t(info.surfSize);
-        hash=(hash^content_hash(mem::ptr(mip_base(s,level)),size_t(info.surfSize)))*1099511628211ull;
-    }
-    s->sparseHash = sparse;
+    for(uint32_t level=0;level<levels;++level)
+        hash=(hash^content_hash(mem::ptr(ranges[level].first),size_t(ranges[level].second)))*1099511628211ull;
     if(!s->dirty&&hash==s->contentHash)return;
     end_encoder();transition_image(s,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
     for(uint32_t level=0;level<s->mips;++level) {
