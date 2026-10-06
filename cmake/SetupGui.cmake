@@ -37,7 +37,10 @@ target_include_directories(wwhd-setup PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends
 target_link_libraries(wwhd-setup PRIVATE imgui ${WWHD_SETUP_SDL})
 set_source_files_properties(${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer3.cpp
   PROPERTIES COMPILE_OPTIONS "-w")
+if(APPLE)
+  target_link_libraries(wwhd-setup PRIVATE "-framework CoreGraphics")  # Shift held at start: the setup
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  # the release puts wwhd-setup at the top of the folder and SDL3 in sdk/runtime
+  # the release puts the program (wind-waker-hd) at the top of the folder and SDL3 in sdk/runtime
   set_target_properties(wwhd-setup PROPERTIES INSTALL_RPATH "\$ORIGIN/sdk/runtime;\$ORIGIN" BUILD_WITH_INSTALL_RPATH TRUE)
 endif()

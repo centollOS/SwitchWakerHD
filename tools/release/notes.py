@@ -25,14 +25,15 @@ This release contains **no game files, no game code and no keys**. You need your
 (.wux/.wud with its disc key, plus the Wii U common key from your console), or an already
 extracted game folder. The installer builds the game from it on your machine.
 
-**Install:** download the zip for your system, unzip it, and run **Wind Waker HD Setup** (the
-Terminal installer next to it is the fallback):
-- macOS (Apple Silicon, macOS 14+): `Wind Waker HD Setup.app`. The release is not signed by Apple:
+**Install:** download the zip for your system, unzip it anywhere and start **Wind Waker HD**. The
+first start prepares the game once from your dump (about two minutes); later starts launch it directly.
+Everything stays in that folder.
+- macOS (Apple Silicon, macOS 14+): `Wind Waker HD.app`. The release is not signed by Apple:
   macOS 15+: System Settings > Privacy & Security > Open Anyway; macOS 14: right-click > Open
-- Windows (x86-64): `Wind Waker HD Setup.exe` (SmartScreen: "More info" > "Run anyway")
-- Linux (x86-64, glibc 2.35+, Vulkan): `wwhd-setup`
+- Windows (x86-64): `Wind Waker HD.exe` (SmartScreen: "More info" > "Run anyway")
+- Linux (x86-64, glibc 2.35+, Vulkan): `wind-waker-hd`
 
-Setup takes a few minutes; see "Install (releases)" in the README for details.
+See "Install (releases)" in the README for details.
 
 ## What's new
 

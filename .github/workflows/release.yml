@@ -94,13 +94,13 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/unz" && cd "$RUNNER_TEMP/unz" && unzip -q "$GITHUB_WORKSPACE"/dist/*.zip
           cd WindWakerHD-*
-          bash "./Install Wind Waker HD.command" --yes --no-launch --gen-dir "$GITHUB_WORKSPACE/build/gen-stub" \
+          bash "./tools/Setup in Terminal.command" --yes --no-launch --gen-dir "$GITHUB_WORKSPACE/build/gen-stub" \
             --data-dir "$RUNNER_TEMP/data"
           "$RUNNER_TEMP/data/bin/wwhd" --game "$RUNNER_TEMP/nogame" > run.log 2>&1 || true
           cat run.log
           grep -q "cannot load" run.log
           # the graphical installer: starts setup.py through the launcher and renders its first screen
-          SDL_VIDEO_DRIVER=offscreen "./Wind Waker HD Setup.app/Contents/MacOS/wwhd-setup" --self-test \
+          SDL_VIDEO_DRIVER=offscreen "./Wind Waker HD.app/Contents/MacOS/wind-waker-hd" --self-test \
             --screenshots "$RUNNER_TEMP" --data-dir "$RUNNER_TEMP/data"
           mkdir -p "$GITHUB_WORKSPACE/gui-shots" && cp "$RUNNER_TEMP"/selftest-*.png "$GITHUB_WORKSPACE/gui-shots/"
 
@@ -209,13 +209,13 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/unz" && cd "$RUNNER_TEMP/unz" && unzip -q "$GITHUB_WORKSPACE"/dist/*.zip
           cd WindWakerHD-*
-          ./install.sh --yes --no-launch --gen-dir "$GITHUB_WORKSPACE/build/gen-stub" --data-dir "$RUNNER_TEMP/data"
+          ./tools/setup-in-terminal.sh --yes --no-launch --gen-dir "$GITHUB_WORKSPACE/build/gen-stub" --data-dir "$RUNNER_TEMP/data"
           ldd "$RUNNER_TEMP/data/bin/wwhd"
           "$RUNNER_TEMP/data/bin/wwhd" --game "$RUNNER_TEMP/nogame" > run.log 2>&1 || true
           cat run.log
           grep -q "cannot load" run.log
-          ldd ./wwhd-setup
-          SDL_VIDEO_DRIVER=offscreen ./wwhd-setup --self-test --data-dir "$RUNNER_TEMP/data"
+          ldd ./wind-waker-hd
+          SDL_VIDEO_DRIVER=offscreen ./wind-waker-hd --self-test --data-dir "$RUNNER_TEMP/data"
 
       - name: Renderer smoke test of the installed executable (lavapipe)
         # the 22.04 runner's Mesa is old; a failure here is reported but does not block the release
@@ -322,7 +322,7 @@ jobs:
           if (-not (Select-String -Path run.log, out.log -Pattern 'cannot load' -Quiet)) { throw "the installed executable did not start" }
           # the graphical installer (GUI subsystem: wait for it explicitly)
           $env:SDL_VIDEO_DRIVER = 'offscreen'
-          $g = Start-Process -FilePath (Join-Path $pkg 'Wind Waker HD Setup.exe') `
+          $g = Start-Process -FilePath (Join-Path $pkg 'Wind Waker HD.exe') `
             -ArgumentList '--self-test', '--data-dir', $data -PassThru
           $null = $g.Handle  # keeps the process handle so ExitCode is available after it exits
           if (-not $g.WaitForExit(600000)) { $g.Kill(); throw "the setup program did not finish its self-test" }

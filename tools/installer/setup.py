@@ -42,6 +42,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.normpath(os.path.join(HERE, "..", ".."))
+# Portable release (portable.txt in the release folder): everything setup and the game create stays
+# in <release folder>/data. Without the marker: the per-user locations of earlier releases.
+PORTABLE = os.path.isfile(os.path.join(PKG, "portable.txt"))
+# no __pycache__ anywhere (Apple's Python would put it under ~/Library/Caches)
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
 IS_LINUX = not IS_MAC and not IS_WIN
@@ -358,6 +364,13 @@ def ask_key(ui, what, hint):
 
 
 def default_data_dir():
+    if PORTABLE:
+        return os.path.join(PKG, "data")
+    return legacy_data_dir()
+
+
+def legacy_data_dir():
+    """Where releases before 0.2 installed (and where a non-portable setup still does)."""
     if IS_MAC:
         return os.path.expanduser("~/Library/Application Support/wwhd")
     if IS_WIN:
@@ -902,11 +915,60 @@ def launch(state, data_dir):
         subprocess.Popen(["open", state["app"]])
         return
     exe = state["exe"]
-    args = [exe, "--game", "game", "--save", "save"]
+    args = [exe, "--game", state.get("game_dir") or os.path.join(data_dir, "game"), "--save", os.path.join(data_dir, "save")]
     if IS_WIN:
         subprocess.Popen(args, cwd=data_dir, creationflags=0x00000008 | 0x00000200)  # DETACHED_PROCESS | NEW_GROUP
     else:
         subprocess.Popen(args, cwd=data_dir, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# ---------------------------------------------------------------------------------------------
+# portable release: the launcher, an optional shortcut, the compiler download
+
+
+LAUNCHER = {"darwin": "Wind Waker HD.app", "win32": "Wind Waker HD.exe"}.get(sys.platform, "wind-waker-hd")
+
+
+def create_shortcut():
+    """Optional (portable release): a shortcut to the release folder's launcher. Returns its path."""
+    target = os.path.join(PKG, LAUNCHER)
+    if IS_MAC:
+        apps = os.path.expanduser("~/Applications")
+        os.makedirs(apps, exist_ok=True)
+        link = os.path.join(apps, APP_NAME + ".app")
+        if os.path.islink(link):
+            os.remove(link)
+        if os.path.exists(link):
+            raise SetupError("%s already exists" % link)
+        os.symlink(target, link)
+    elif IS_LINUX:
+        apps = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "applications")
+        os.makedirs(apps, exist_ok=True)
+        link = os.path.join(apps, "wwhd.desktop")
+        with open(link, "w") as f:
+            f.write("[Desktop Entry]\nType=Application\nName=%s\nExec=\"%s\"\nPath=%s\nTerminal=false\nCategories=Game;\n"
+                    "Actions=setup;\n\n[Desktop Action setup]\nName=Setup (repair, update, change game)\n"
+                    "Exec=\"%s\" --setup\n" % (APP_NAME, target, PKG, target))
+    else:
+        link = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs", APP_NAME + ".lnk")
+        ps = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%s');$s.TargetPath='%s';$s.WorkingDirectory='%s';"
+              "$s.Save()" % (link.replace("'", "''"), target.replace("'", "''"), PKG.replace("'", "''")))
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    say("  Shortcut: %s" % link)
+    return link
+
+
+def toolchain_dir(data_dir):
+    return os.path.join(data_dir, "toolchain")
+
+
+def remove_toolchain(data_dir):
+    """Deletes the downloaded compiler (it is needed again only to repair; then it is downloaded again)."""
+    d = toolchain_dir(data_dir)
+    n = folder_size(d) if os.path.isdir(d) else 0
+    shutil.rmtree(d, ignore_errors=True)
+    say("  Removed the downloaded compiler (%s)" % human(n))
+    return n
 
 
 # ---------------------------------------------------------------------------------------------
@@ -965,6 +1027,71 @@ def import_save(kind, path, data_dir, replace=False):
     return msg
 
 
+def legacy_config_dirs():
+    """Settings folders the game used before portable releases (and still uses in source builds)."""
+    if IS_MAC:
+        return [os.path.expanduser("~/Library/Application Support/WWHD"),
+                os.path.expanduser("~/Library/Application Support/wwhd")]
+    if IS_WIN:
+        return [os.path.join(os.environ.get("APPDATA", ""), "WWHD")]
+    return [os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "wwhd")]
+
+
+SETTINGS_ITEMS = ["controls.json", "settings.ini", "display.plist", "states", "shadercache"]
+
+
+def import_sources(path=None):
+    """(save folder or None, [(source, name)] settings items) of an earlier installation (path=None)
+    or of another release folder."""
+    items = []
+    if path:
+        root = os.path.join(path, "data") if os.path.isdir(os.path.join(path, "data")) else path
+        save = os.path.join(root, "save", "user")
+        cfg = [os.path.join(root, "user")]
+    else:
+        save = os.path.join(legacy_data_dir(), "save", "user")
+        cfg = legacy_config_dirs()
+    seen = set()
+    for d in cfg:
+        for name in SETTINGS_ITEMS + ["shaders.bin", "graphics.plist"]:
+            src = os.path.join(d, name)
+            if name not in seen and os.path.exists(src):
+                seen.add(name)
+                items.append((src, name))
+    if not path and IS_MAC and "shaders.bin" not in seen and os.path.isfile(os.path.expanduser("~/Library/Caches/wwhd/shaders.bin")):
+        items.append((os.path.expanduser("~/Library/Caches/wwhd/shaders.bin"), "shaders.bin"))
+    has_save = os.path.isfile(os.path.join(save, "cking.sav"))
+    return (save if has_save else None), items
+
+
+def import_existing(data_dir, path=None, replace=False):
+    """Copies (never moves) saves and settings of an earlier installation or another release folder."""
+    if path and os.path.realpath(path) in (os.path.realpath(PKG), os.path.realpath(data_dir)):
+        raise SetupError("that is this folder")
+    save, items = import_sources(path)
+    if not save and not items:
+        raise SetupError("no saves or settings found there")
+    msgs = []
+    if save:
+        msgs.append(import_save("hd", save, data_dir, replace))
+    user = os.path.join(data_dir, "user")
+    os.makedirs(user, exist_ok=True)
+    copied = []
+    for src, name in items:
+        dst = os.path.join(user, name)
+        if os.path.exists(dst):
+            continue  # this folder's own settings win
+        if os.path.isdir(src):
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+        copied.append(name)
+    if copied:
+        msgs.append("Copied settings: %s" % ", ".join(copied))
+        say("  Copied settings to %s: %s" % (user, ", ".join(copied)))
+    return "; ".join(msgs)
+
+
 def maybe_import_save(ui, data_dir):
     """Offers to copy an existing save into the port's save folder; never overwrites without asking."""
     user = save_user_dir(data_dir)
@@ -973,14 +1100,22 @@ def maybe_import_save(ui, data_dir):
     if have_save(data_dir):
         say("  Your existing save in %s is kept." % user)
         return
-    i = ui.choose("Do you want to use an existing save?", [
-        "no, start with a new save",
-        "a Wind Waker HD save (a folder with cking.sav, e.g. from Cemu or a Wii U)",
-        "a GameCube Wind Waker save (.gci, converted to HD)"])
+    options = ["no, start with a new save",
+               "a Wind Waker HD save (a folder with cking.sav, e.g. from Cemu or a Wii U)",
+               "a GameCube Wind Waker save (.gci, converted to HD)",
+               "copy saves and settings from another Wind Waker HD folder"]
+    legacy = PORTABLE and any(import_sources())
+    if legacy:
+        options.append("copy saves and settings from my earlier installation (copied, not moved)")
+    i = ui.choose("Do you want to use an existing save?", options)
     if i == 0:
         return
     try:
-        if i == 1:
+        if i == 3:
+            import_existing(data_dir, ui.pick_path("Choose the other Wind Waker HD folder", folder=True))
+        elif i == 4:
+            import_existing(data_dir)
+        elif i == 1:
             import_save("hd", ui.pick_path("Choose the folder that contains cking.sav", folder=True), data_dir)
         else:
             import_save("gc", ui.pick_path("Choose the GameCube save (.gci)",
@@ -1008,14 +1143,44 @@ def load_manifest():
 def read_state(data_dir):
     try:
         with open(os.path.join(data_dir, "install.json")) as f:
-            return json.load(f)
+            return resolved_state(json.load(f), data_dir)
     except (OSError, ValueError):
         return {}
 
 
+def rel_to_data(path, data_dir):
+    """Portable release: paths inside the data folder are stored relative to it, so the release folder
+    can be moved or renamed; paths outside (an extracted game folder used in place) stay absolute."""
+    if not PORTABLE or not path:
+        return path
+    try:
+        rel = os.path.relpath(path, data_dir)
+    except ValueError:  # another drive (Windows)
+        return path
+    return path if rel.startswith("..") else rel.replace(os.sep, "/")
+
+
+def abs_from_data(path, data_dir):
+    return os.path.normpath(path if not path or os.path.isabs(path) else os.path.join(data_dir, path))
+
+
+def resolved_state(state, data_dir):
+    st = dict(state)
+    for k in ("exe", "game_dir"):
+        if st.get(k):
+            st[k] = abs_from_data(st[k], data_dir)
+    return st
+
+
 def write_state(data_dir, state):
+    st = dict(state)
+    for k in ("exe", "game_dir", "data_dir"):
+        if st.get(k):
+            st[k] = rel_to_data(st[k], data_dir)
+    if PORTABLE:
+        st.pop("data_dir", None)  # it is where install.json is
     with open(os.path.join(data_dir, "install.json"), "w") as f:
-        json.dump(state, f, indent=1)
+        json.dump(st, f, indent=1)
 
 
 class Ctx:
@@ -1027,11 +1192,11 @@ class Ctx:
         self.version = self.manifest["version"]
         self.data_dir = os.path.abspath(args.data_dir or default_data_dir())
         self.app_dir = os.path.abspath(args.app_dir or os.path.expanduser("~/Applications"))
-        self.game_dir = os.path.join(self.data_dir, "game")
         self.exe_dir = os.path.join(self.data_dir, "bin")
         self.exe = os.path.join(self.exe_dir, self.manifest["exe"])
         os.makedirs(self.data_dir, exist_ok=True)
         LOG.open(os.path.join(self.data_dir, "setup.log"))
+        self.game_dir = self.state().get("game_dir") or os.path.join(self.data_dir, "game")
 
     def state(self):
         return read_state(self.data_dir)
@@ -1055,7 +1220,7 @@ STEP_TITLES = {
 
 def plan_steps(kind):
     return {"image": ["keys", "compiler", "extract", "translate", "compile", "app"],
-            "folder": ["folder", "compiler", "copy", "translate", "compile", "app"],
+            "folder": ["folder", "compiler"] + ([] if PORTABLE else ["copy"]) + ["translate", "compile", "app"],
             "installed": ["compiler", "translate", "compile", "app"],
             "gen": ["compiler", "compile", "app"]}[kind]
 
@@ -1101,14 +1266,24 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
     tc = get_toolchain(manifest["toolchain"], data_dir, ui)
     say("  Using %s." % tc.desc)
 
-    if kind in ("image", "folder"):
-        begin("extract" if kind == "image" else "copy")
+    game_dir = ctx.game_dir
+    if kind == "image":
+        begin("extract")
         t0 = time.time()
-        if kind == "image":
-            extract_game(source[1], keys, info, data_dir)
+        extract_game(source[1], keys, info, data_dir)
+        game_dir = os.path.join(data_dir, "game")
+        say("  Game files are in %s (%d s)" % (game_dir, time.time() - t0))
+    elif kind == "folder":
+        if PORTABLE:  # use the extracted game where it is: no copy
+            game_dir = os.path.abspath(source[1])
+            say("  Using the game files in %s (not copied)" % game_dir)
         else:
+            begin("copy")
+            t0 = time.time()
             copy_game_folder(source[1], data_dir)
-        say("  Game files are in %s (%d s)" % (ctx.game_dir, time.time() - t0))
+            game_dir = os.path.join(data_dir, "game")
+            say("  Game files are in %s (%d s)" % (game_dir, time.time() - t0))
+    ctx.game_dir = game_dir
     keys = None
 
     work = os.path.join(data_dir, "work")
@@ -1143,9 +1318,18 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
     say("  Built %s" % exe)
 
     state = {"version": ctx.version, "platform": manifest["platform"], "exe": exe, "data_dir": data_dir,
+             "game_dir": ctx.game_dir, "portable": PORTABLE,
              "installed": time.strftime("%Y-%m-%d %H:%M:%S"), "toolchain": manifest["toolchain"],
              "placeholder_code": kind == "gen"}
-    if not args.no_shortcuts and kind != "gen":
+    if PORTABLE:
+        # the game keeps its settings, save states and caches in data/user (runtime: host::portable_user_dir)
+        with open(os.path.join(exe_dir, "portable.txt"), "w") as f:
+            f.write("Portable mode: this game keeps its settings, controls, save states and shader caches in\n"
+                    "../user (next to this folder) instead of your user folders. Delete this file to use those.\n")
+        os.makedirs(os.path.join(data_dir, "user"), exist_ok=True)
+        if args.shortcuts and kind != "gen":
+            state["shortcut"] = create_shortcut()
+    elif not args.no_shortcuts and kind != "gen":
         if IS_MAC:
             app = os.path.join(ctx.app_dir, APP_NAME + ".app")
             mac_app(app, exe, data_dir, ctx.version)
@@ -1184,6 +1368,8 @@ def main():
     ap.add_argument("--yes", action="store_true", help="non-interactive (also WWHD_SETUP_NONINTERACTIVE=1)")
     ap.add_argument("--no-launch", action="store_true", help="do not start the game at the end")
     ap.add_argument("--no-shortcuts", action="store_true", help="no app bundle / menu entries")
+    ap.add_argument("--shortcuts", action="store_true",
+                    help="portable release: also add a shortcut (Applications / Start menu / applications menu)")
     ap.add_argument("--keep-work", action="store_true", help="keep the generated code and objects")
     ap.add_argument("--gui-protocol", action="store_true",
                     help="machine interface for the graphical installer (JSON lines; see tools/installer/README.md)")
@@ -1289,6 +1475,15 @@ def run(args, ui):
     state = install(ctx, source, ui=ui, check_keys=lambda image: get_disc_keys(image, ui, args))
     if source[0] != "gen":
         maybe_import_save(ui, data_dir)
+    if PORTABLE and ui.interactive and source[0] != "gen":
+        if not args.shortcuts and ui.yesno("Add a shortcut to %s?" % {"darwin": "your Applications folder", "win32": "the Start menu"}
+                                           .get(sys.platform, "your applications menu"), False):
+            state["shortcut"] = create_shortcut()
+            write_state(data_dir, state)
+        tdir = toolchain_dir(data_dir)
+        if os.path.isdir(tdir) and ui.yesno("Remove the downloaded compiler (%s)? It is only needed to repair the game "
+                                            "and is downloaded again then." % human(folder_size(tdir)), True):
+            remove_toolchain(data_dir)
     say("")
     say("Done. Saves are in %s" % os.path.join(data_dir, "save"))
     if source[0] == "gen":
@@ -1359,11 +1554,14 @@ def gui_main(args):
 
     def hello():
         st = ctx.state()
+        legacy_save, legacy_items = import_sources() if PORTABLE else (None, [])
         GUI.emit({"event": "hello", "version": ctx.version, "platform": ctx.manifest["platform"],
                   "data_dir": ctx.data_dir, "app_dir": ctx.app_dir if IS_MAC else "",
-                  "log": LOG.f.name if LOG.f else "",
+                  "log": LOG.f.name if LOG.f else "", "portable": PORTABLE, "package": PKG,
                   "installed": st if ctx.installed() else None, "game_files": valid_game_folder(ctx.game_dir),
-                  "save_exists": have_save(ctx.data_dir), "toolchain": ctx.manifest["toolchain"]})
+                  "game_dir": ctx.game_dir, "save_exists": have_save(ctx.data_dir),
+                  "legacy": bool(legacy_save or legacy_items), "free_bytes": free_space(ctx.data_dir),
+                  "toolchain": ctx.manifest["toolchain"]})
 
     def reply(req, ok=True, **kw):
         kw.update({"event": "reply", "id": req.get("id"), "cmd": req.get("cmd"), "ok": ok})
@@ -1384,7 +1582,8 @@ def gui_main(args):
                     check_title(tid)
                 except SetupError as e:
                     return fail(req, "wrong_title", str(e))
-            return reply(req, kind="folder", path=folder, title="The Wind Waker HD (USA)")
+            return reply(req, kind="folder", path=folder, title="The Wind Waker HD (USA)", in_place=PORTABLE,
+                         bytes=folder_size(folder))
         if not os.path.isfile(p):
             return fail(req, "invalid", "File not found.")
         if not p.lower().endswith((".wux", ".wud")):
@@ -1447,8 +1646,10 @@ def gui_main(args):
             return fail(req, "install", str(e))
         finally:
             session.update(keys=None, info=None)
+        tdir = toolchain_dir(ctx.data_dir)
         reply(req, app=state.get("app", ""), exe=state.get("exe", ""), data_dir=ctx.data_dir,
-              save_exists=have_save(ctx.data_dir))
+              game_dir=state.get("game_dir", ""), save_exists=have_save(ctx.data_dir),
+              toolchain_bytes=folder_size(tdir) if os.path.isdir(tdir) else 0)
 
     def save(req):
         try:
@@ -1456,6 +1657,24 @@ def gui_main(args):
         except SetupError as e:
             return fail(req, "exists" if have_save(ctx.data_dir) and not req.get("replace") else "save", str(e))
         reply(req, message=msg)
+
+    def do_import_existing(req):
+        try:
+            msg = import_existing(ctx.data_dir, req.get("path") or None, bool(req.get("replace")))
+        except SetupError as e:
+            if have_save(ctx.data_dir) and not req.get("replace") and "already exists" in str(e):
+                return fail(req, "exists", str(e))
+            return fail(req, "import", str(e))
+        reply(req, message=msg)
+
+    def do_remove_toolchain(req):
+        reply(req, freed=remove_toolchain(ctx.data_dir))
+
+    def do_shortcut(req):
+        try:
+            reply(req, path=create_shortcut())
+        except (SetupError, OSError) as e:
+            fail(req, "shortcut", str(e))
 
     def do_launch(req):
         st = ctx.state()
@@ -1465,7 +1684,8 @@ def gui_main(args):
         reply(req)
 
     handlers = {"probe": probe, "check_keys": check, "install": do_install, "import_save": save,
-                "launch": do_launch, "hello": lambda req: hello()}
+                "import_existing": do_import_existing, "remove_toolchain": do_remove_toolchain,
+                "shortcut": do_shortcut, "launch": do_launch, "hello": lambda req: hello()}
     hello()
     for line in sys.stdin:
         line = line.strip()

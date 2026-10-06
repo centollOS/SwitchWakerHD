@@ -1,6 +1,7 @@
-# Wind Waker HD setup for Windows (started by "Install Wind Waker HD.bat").
+# Wind Waker HD setup for Windows (started by "Wind Waker HD.exe", or "tools\Setup in a console window.bat").
 # Gets the pinned embeddable Python from python.org (SHA-256 checked, no installation, no admin
-# rights) into %LOCALAPPDATA%\WWHD\python, then runs tools\installer\setup.py with it.
+# rights) into the release folder's data\python (portable release) or %LOCALAPPDATA%\WWHD\python, then
+# runs tools\installer\setup.py with it.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is very slow with its progress bar
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -10,7 +11,11 @@ Get-ChildItem -Path $pkg -Recurse -File | Unblock-File -ErrorAction SilentlyCont
 
 $pins = Get-Content -Raw (Join-Path $PSScriptRoot 'toolchains.json') | ConvertFrom-Json
 $py = $pins.python.windows
-$data = if ($env:WWHD_DATA_DIR) { $env:WWHD_DATA_DIR } else { Join-Path $env:LOCALAPPDATA 'WWHD' }
+# portable release (portable.txt): Python goes into the release folder like everything else
+$data = if ($env:WWHD_DATA_DIR) { $env:WWHD_DATA_DIR } `
+        elseif (Test-Path (Join-Path $pkg 'portable.txt')) { Join-Path $pkg 'data' } `
+        else { Join-Path $env:LOCALAPPDATA 'WWHD' }
+$env:PYTHONDONTWRITEBYTECODE = '1'
 $pydir = Join-Path $data (Join-Path 'python' $py.dir)
 $pyexe = Join-Path $pydir 'python.exe'
 try {

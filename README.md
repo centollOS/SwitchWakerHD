@@ -9,6 +9,13 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
 
 ## What's new in this update
 
+- **v0.2.0: portable releases.** Unzip anywhere and start **Wind Waker HD**: the first start prepares
+  the game once from your own dump (releases never contain game code, so it is built on your computer);
+  later starts launch the game directly. Everything — the built game, the game files, saves,
+  settings, save states, shader caches, logs and the downloaded compiler — stays in the release
+  folder; nothing goes to your user folders unless you ask for a shortcut. An extracted game folder is
+  used where it is instead of being copied. Saves and settings can be copied over from an earlier
+  installation. Hold Shift while starting (or `--setup`) to repair, update or change the game.
 - **Settings overlay** (Dear ImGui): an in-game menu for everything in one place — save states and
   Crash Recovery, graphics (renderer, frame rate, resolution, aspect ratio, AO, filtering, FXAA,
   performance overlay), display, gameplay mods and cheats (Graphics also has the Vulkan presentation mode), controls and language. Open it with
@@ -112,69 +119,65 @@ redistributed. The `.gitignore` keeps all of it out of the repository.
 
 ## Install (releases)
 
-The easiest way to play: download a release, run its installer and point it at your own dump.
-Releases contain only this project's runtime, tools and installer: **no game files, no game code
-and no keys**. The installer builds the game from your dump on your machine.
+Releases are portable: unzip, start **Wind Waker HD**, choose your dump. Releases contain only this
+project's runtime, tools and setup: **no game files, no game code and no keys**. The game's code can
+only exist once it is built from your own dump, so the first start prepares the game once, on your
+computer (about two minutes); every later start launches the game directly.
 
 1. Download the zip for your system from the
-   [Releases](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp/releases) page and unzip it anywhere:
+   [Releases](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp/releases) page and unzip it anywhere
+   (a games folder, an external drive):
    - **macOS**: Apple Silicon, macOS 14 or newer (Metal renderer)
    - **Windows**: x86-64, Windows 10 or 11, a GPU with Vulkan 1.3 drivers
    - **Linux**: x86-64, glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch, SteamOS 3),
      a GPU with Vulkan 1.3 drivers
-2. Run **Wind Waker HD Setup**, the graphical installer (`Wind Waker HD Setup.app` on macOS,
-   `Wind Waker HD Setup.exe` on Windows, `wwhd-setup` on Linux). It walks you through choosing your
-   dump and keys, shows the progress of each step, offers to bring in a save, and starts the game.
-   The Terminal installer next to it (`Install Wind Waker HD.command`, `Install Wind Waker HD.bat`,
-   `install.sh`) does the same in a text window and stays as the fallback.
-   - **macOS**: the release is not signed by Apple, so the first time macOS says the app "cannot be
-     opened" / is from an "unidentified developer". On macOS 14: right-click (Ctrl-click) the app,
-     choose **Open**, then **Open** again. On macOS 15 and newer: click **Done**, then **System
-     Settings › Privacy & Security › Open Anyway**. If Apple's Command Line Tools (the free compiler)
-     are missing, Setup offers Apple's installer: click **Install** there; Setup continues by itself
-     afterwards.
-   - **Windows**: the release is not code-signed, so SmartScreen may say "Windows protected your
-     PC": click **More info › Run anyway**. Setup downloads its own Python (11 MB) and compiler
-     (llvm-mingw, 190 MB) once, checks their SHA-256 and needs no administrator rights.
-   - **Linux**: double-click `wwhd-setup` (or `Wind Waker HD Setup.desktop`; some desktops ask to
-     allow launching it first), or run `./wwhd-setup` in a terminal. It uses your Python 3 and
-     downloads its compiler (zig, 55 MB) once, SHA-256 checked; no root needed.
-3. Setup asks for:
+2. Start **Wind Waker HD** (`Wind Waker HD.app`, `Wind Waker HD.exe`, or `wind-waker-hd` /
+   `Wind Waker HD.desktop` on Linux). The first start asks for:
    - your **disc image** (`.wux` or `.wud`), or an already **extracted game folder** (with `code`,
-     `content` and `meta` inside, e.g. from dumpling or Cemu);
-   - for a disc image, its **disc key** (16 bytes; a `.key` file with the image's name next to it is
-     used automatically) and the **Wii U common key** (16 bytes, the same on every console; a
-     `common.key` next to the image is used automatically). Choose a key file or paste the 32 hex
-     digits (the input is hidden). Keys are checked before anything is extracted, are never stored,
-     and are not part of any log.
-   Only the USA version (title 00050000-10143500) is supported.
-   Optionally it imports a save: a Wind Waker HD `cking.sav` folder (Cemu or Wii U) or a GameCube
-   `.gci`, converted to HD.
-4. Setup extracts the game (about a minute), translates its code to C (seconds), compiles it (the
-   longest step: 1–2 minutes on an 8-core machine, up to 10–15 minutes on a slow one) and starts the
-   game. The first start compiles shaders while you play, as before.
+     `content` and `meta`, e.g. from dumpling or Cemu). An extracted folder is used where it is,
+     nothing is copied; a disc image is extracted into the release folder (about 1.7 GB);
+   - for a disc image, its **disc key** (a `.key` file with the image's name next to it is used
+     automatically) and the **Wii U common key** (16 bytes, the same on every console; choose a key
+     file or paste the 32 hex digits into the hidden field; a `common.key` next to the image or in the
+     release folder is used automatically). Keys are checked before anything is extracted, never
+     stored, and not part of any log.
 
-Where things end up:
+   Then it prepares the game (extract, translate the code to C, compile with a pinned compiler) and
+   offers to bring in a save: a Wind Waker HD `cking.sav` folder (Cemu, Wii U), a GameCube `.gci`
+   (converted to HD), or the saves and settings of an earlier installation or another Wind Waker HD
+   folder (copied, never moved). Only the USA version (title 00050000-10143500) is supported.
+3. That's it: start Wind Waker HD to play. To repair, update or change the game, hold **Shift** while
+   starting it (macOS, Windows) or start it with `--setup` (Linux; also the "Setup" action of its
+   menu entry).
 
-| | macOS | Windows | Linux |
-|---|---|---|---|
-| game files and saves | `~/Library/Application Support/wwhd` | `%LOCALAPPDATA%\WWHD` | `~/.local/share/wwhd` |
-| the game (built by setup) | `~/Applications/Wind Waker HD.app` | `%LOCALAPPDATA%\WWHD\bin\wwhd.exe`, Start menu and desktop shortcuts | `~/.local/share/wwhd/bin/wwhd`, applications menu, `~/.local/share/wwhd/play.sh` |
-| settings, controls, save states | `~/Library/Application Support/wwhd` | `%APPDATA%\WWHD` | `~/.config/wwhd` |
+First start, per system:
+- **macOS**: the release is not signed by Apple, so the first time macOS says the app "cannot be
+  opened". macOS 14: right-click (Ctrl-click) the app, **Open**, **Open**. macOS 15 and newer: click
+  **Done**, then **System Settings › Privacy & Security › Open Anyway**. If Apple's Command Line Tools
+  (the free compiler, which also brings Python) are missing, Wind Waker HD offers Apple's installer.
+- **Windows**: the release is not code-signed, so SmartScreen may say "Windows protected your PC":
+  **More info › Run anyway**. The first start downloads Python (11 MB) and the compiler (llvm-mingw,
+  190 MB) into the release folder, SHA-256 checked, no administrator rights; at the end you can remove
+  the compiler again (it is only needed to repair, and downloaded again then).
+- **Linux**: start `wind-waker-hd` (or `Wind Waker HD.desktop`; some desktops ask to allow launching
+  it first). It uses your Python 3 and downloads the compiler (zig, 55 MB) into the release folder;
+  you can remove it at the end.
 
-Saves are in `save/` inside the game folder above. Setup never changes an existing save; on the
-first install it offers to copy one in (a folder with `cking.sav`, e.g. from Cemu's
-`mlc01/usr/save/00050000/10143500/user/80000001/`).
+**Everything stays in the release folder** (in `data/`): the built game, the extracted game files,
+saves (`data/save`), settings, controls, save states and shader caches (`data/user`), crash logs
+(`data/captures`), the setup log and the downloaded compiler. Nothing is written to your user folders
+(Application Support, AppData, .config, Applications, Start menu) unless you tick "add a shortcut" at
+the end. To remove everything, delete the folder. Starting a newer release: unzip it next to the old
+one, start it, choose your game (the old folder's `data/game` can be used in place) and copy your saves
+and settings from the old folder.
 
-Run Setup again to **play**, to **repair** (rebuild the game code from the installed game
-files) or to **reinstall** from a disc image. After downloading a newer release, its installer
-**updates** the installation: it rebuilds the game code with the new runtime and keeps your game
-files and saves (no keys needed). `setup.log` in the game folder records each run. To uninstall,
-delete the folders above (back up `save/` first) and the app or shortcuts.
+The setup also runs in a terminal (the fallback): `tools/Setup in Terminal.command` (macOS),
+`tools/Setup in a console window.bat` (Windows), `tools/setup-in-terminal.sh` (Linux). How it works
+and the interface between the window and `tools/installer/setup.py`:
+[tools/installer/README.md](tools/installer/README.md). Scripted use: `tools/installer/setup.py --help`.
 
-How the installer works, its options and the protocol between the graphical front end and
-`setup.py`: [tools/installer/README.md](tools/installer/README.md). Scripted use: `tools/installer/setup.py --help` (for example `--yes --image game.wux --common-key
-common.key --no-launch`).
+Source builds (below) are not portable: they keep using `~/Library/Application Support/wwhd`,
+`%APPDATA%\WWHD` or `~/.config/wwhd`, as before.
 
 ## Requirements (building from source)
 

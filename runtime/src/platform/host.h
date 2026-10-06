@@ -21,6 +21,8 @@
 #endif
 #ifdef __APPLE__
 #include <mach-o/ldsyms.h>
+#include <mach-o/dyld.h>
+#include <climits>
 #include <pthread/qos.h>
 #elif !defined(_WIN32)
 #include <sys/resource.h>
@@ -139,7 +141,41 @@ inline bool replace_file(const std::string& from,const std::string& to) {
  return rename(from.c_str(),to.c_str())==0;
 #endif
 }
+// Portable mode (release packages): a file "portable.txt" next to the executable keeps every
+// per-user file (settings, controls, save states, shader caches) in "user" next to the executable's
+// folder (<folder>/bin/wwhd -> <folder>/user) instead of the user's Library / AppData / .config.
+// Without the marker (source builds) nothing changes.
+inline std::string exe_dir() {
+ static const std::string dir=[]{
+  std::string p;
+#if defined(__APPLE__)
+  char buf[4096]; uint32_t n=sizeof buf;
+  if(_NSGetExecutablePath(buf,&n)==0){ char real[PATH_MAX]; p=realpath(buf,real)?real:buf; }
+#elif defined(_WIN32)
+  char buf[MAX_PATH*4]; DWORD n=GetModuleFileNameA(nullptr,buf,sizeof buf); if(n>0&&n<sizeof buf) p.assign(buf,n);
+#else
+  char buf[4096]; ssize_t n=readlink("/proc/self/exe",buf,sizeof buf-1); if(n>0) p.assign(buf,(size_t)n);
+#endif
+  size_t s=p.find_last_of("/\\");
+  return s==std::string::npos?std::string():p.substr(0,s);
+ }();
+ return dir;
+}
+inline const std::string& portable_user_dir() {
+ static const std::string dir=[]{
+  std::string e=exe_dir();
+  if(e.empty()) return std::string();
+  FILE* f=fopen((e+"/portable.txt").c_str(),"rb");
+  if(!f) return std::string();
+  fclose(f);
+  size_t s=e.find_last_of("/\\");
+  return (s==std::string::npos?e:e.substr(0,s))+"/user";
+ }();
+ return dir;
+}
+inline bool portable() { return !portable_user_dir().empty(); }
 inline std::string config_dir() {
+ if(portable()) return portable_user_dir();
 #ifdef __APPLE__
  const char* home=getenv("HOME");return std::string(home?home:".")+"/Library/Application Support/WWHD";
 #elif defined(_WIN32)

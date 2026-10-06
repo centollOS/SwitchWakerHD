@@ -46,14 +46,30 @@ INSTALLER_FILES = [
     "tools/installer/toolchains.json",
     "tools/installer/README.md",
 ]
-SETUP_APP = "Wind Waker HD Setup"
+SETUP_APP = "Wind Waker HD"
+PORTABLE_TXT = """Wind Waker HD (native PC port), portable release.
+
+Start "Wind Waker HD". The first start prepares the game once from your own disc dump (releases never
+contain game code, so it is built here); later starts launch the game directly.
+
+Everything the setup and the game create stays in this folder (in "data"): the built game, the game
+files extracted from a disc image (an extracted game folder is used where it is), saves, settings,
+save states, shader caches, logs and the downloaded compiler. Nothing goes to your user folders
+unless you ask for a shortcut. To remove everything, delete this folder.
+
+Hold Shift while starting Wind Waker HD (macOS, Windows), or start it with --setup, to repair,
+update, change the game or import saves. The same setup in a terminal: tools/Setup in Terminal.command
+(macOS), tools/Setup in a console window.bat (Windows), tools/setup-in-terminal.sh (Linux).
+
+This file marks the folder as portable; without it, setup uses the per-user folders of earlier releases.
+"""
 MAC_SETUP_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Wind Waker HD Setup</string>
-  <key>CFBundleDisplayName</key><string>Wind Waker HD Setup</string>
-  <key>CFBundleIdentifier</key><string>io.github.zeldawwhdrecomp.setup</string>
-  <key>CFBundleExecutable</key><string>wwhd-setup</string>
+  <key>CFBundleName</key><string>Wind Waker HD</string>
+  <key>CFBundleDisplayName</key><string>Wind Waker HD</string>
+  <key>CFBundleIdentifier</key><string>io.github.zeldawwhdrecomp.wwhd</string>
+  <key>CFBundleExecutable</key><string>wind-waker-hd</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>%s</string>
   <key>CFBundleVersion</key><string>%s</string>
@@ -63,19 +79,24 @@ MAC_SETUP_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 """
 LINUX_SETUP_DESKTOP = """[Desktop Entry]
 Type=Application
-Name=Wind Waker HD Setup
-Comment=Install The Wind Waker HD (native PC port) from your own disc dump
-Exec=sh -c 'cd "$(dirname "%k")" && exec ./wwhd-setup'
+Name=Wind Waker HD
+Comment=The Wind Waker HD (native PC port); the first start prepares the game from your own disc dump
+Exec=sh -c 'cd "$(dirname "%k")" && exec ./wind-waker-hd'
 Terminal=false
 Categories=Game;
+Actions=setup;
+
+[Desktop Action setup]
+Name=Setup (repair, update, change the game)
+Exec=sh -c 'cd "$(dirname "%k")" && exec ./wind-waker-hd --setup'
 """
 
 
 def add_setup_gui(pkg, platform, exe, version):
-    """The graphical installer next to the Terminal launcher."""
+    """The program a release starts: the first start prepares the game, later starts launch it."""
     if platform.startswith("macos"):
         app = os.path.join(pkg, SETUP_APP + ".app", "Contents")
-        copy(exe, os.path.join(app, "MacOS", "wwhd-setup"))
+        copy(exe, os.path.join(app, "MacOS", "wind-waker-hd"))
         v = re.sub(r"[^0-9.]", "", version.lstrip("v")) or "0"
         with open(os.path.join(app, "Info.plist"), "w") as f:
             f.write(MAC_SETUP_PLIST % (v, v))
@@ -84,8 +105,8 @@ def add_setup_gui(pkg, platform, exe, version):
     elif platform.startswith("windows"):
         copy(exe, os.path.join(pkg, SETUP_APP + ".exe"))
     else:
-        copy(exe, os.path.join(pkg, "wwhd-setup"))
-        os.chmod(os.path.join(pkg, "wwhd-setup"), 0o755)
+        copy(exe, os.path.join(pkg, "wind-waker-hd"))
+        os.chmod(os.path.join(pkg, "wind-waker-hd"), 0o755)
         with open(os.path.join(pkg, SETUP_APP + ".desktop"), "w") as f:
             f.write(LINUX_SETUP_DESKTOP)
         os.chmod(os.path.join(pkg, SETUP_APP + ".desktop"), 0o755)
@@ -316,15 +337,18 @@ def main():
             copy(os.path.join(ROOT, "tools", "recomp", hp), os.path.join(pkg, "tools", "recomp", hp))
     copy(os.path.join(build, "wwhd-extract" + exe_suffix), os.path.join(pkg, "tools", "bin", "wwhd-extract" + exe_suffix))
 
-    # the launcher the player double-clicks
+    # the setup in a terminal (the fallback for the program above), in tools/
     inst = os.path.join(ROOT, "tools", "installer")
     if a.platform.startswith("macos"):
-        copy(os.path.join(inst, "install-macos.command"), os.path.join(pkg, "Install Wind Waker HD.command"))
+        copy(os.path.join(inst, "install-macos.command"), os.path.join(pkg, "tools", "Setup in Terminal.command"))
     elif a.platform.startswith("windows"):
-        copy(os.path.join(inst, "install-windows.bat"), os.path.join(pkg, "Install Wind Waker HD.bat"))
+        copy(os.path.join(inst, "install-windows.bat"), os.path.join(pkg, "tools", "Setup in a console window.bat"))
         copy(os.path.join(inst, "bootstrap-windows.ps1"), os.path.join(pkg, "tools", "installer", "bootstrap-windows.ps1"))
     else:
-        copy(os.path.join(inst, "install-linux.sh"), os.path.join(pkg, "install.sh"))
+        copy(os.path.join(inst, "install-linux.sh"), os.path.join(pkg, "tools", "setup-in-terminal.sh"))
+    # portable release: everything stays in this folder (setup.py and the game look for this file)
+    with open(os.path.join(pkg, "portable.txt"), "w") as f:
+        f.write(PORTABLE_TXT)
 
     if a.setup_gui:
         add_setup_gui(pkg, a.platform, a.setup_gui, a.version)

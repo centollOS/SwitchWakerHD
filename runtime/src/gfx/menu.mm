@@ -3,6 +3,7 @@
 #import <Cocoa/Cocoa.h>
 #include <Carbon/Carbon.h>  // kVK_* key codes
 #include "../input.h"
+#include "../platform/host.h"
 #include <sys/stat.h>
 #include <ctime>
 
@@ -63,35 +64,55 @@ static bool env_set(std::initializer_list<const char*> env) {
         if (getenv(e)) return true;
     return false;
 }
+// Saved graphics options: NSUserDefaults, or in portable mode a plist in the folder (portable.txt).
+static NSString* portable_prefs_path() {
+    return host::portable() ? @((host::portable_user_dir() + "/graphics.plist").c_str()) : nil;
+}
+static NSMutableDictionary* g_portable_prefs;
+static id pref(NSString* key) {
+    if (NSString* p = portable_prefs_path()) {
+        if (!g_portable_prefs)
+            g_portable_prefs = [[NSDictionary dictionaryWithContentsOfFile:p] mutableCopy] ?: [NSMutableDictionary new];
+        return g_portable_prefs[key];
+    }
+    return [NSUserDefaults.standardUserDefaults objectForKey:key];
+}
+static void set_pref(NSString* key, id value) {
+    if (portable_prefs_path()) {
+        pref(key);  // loads the file
+        g_portable_prefs[key] = value;
+    } else {
+        [NSUserDefaults.standardUserDefaults setObject:value forKey:key];
+    }
+}
 static void load_prefs() {
     g_prefs_loaded = true;
     if (!g_prefs) return;
-    NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
-    auto saved = [&](NSString* key, std::initializer_list<const char*> env) { return !env_set(env) && [d objectForKey:key] != nil; };
-    if (saved(@"resScale", {"WWHD_RES_SCALE"})) set_res([d floatForKey:@"resScale"]);
-    if (saved(@"aoMode", {"WWHD_AO_MODE", "WWHD_NO_AO_QUIRK"})) render::set_ao_mode((int)[d integerForKey:@"aoMode"]);
-    if (saved(@"aoHires", {"WWHD_AO_HIRES"})) render::set_ao_hires([d boolForKey:@"aoHires"]);
-    if (saved(@"aniso", {"WWHD_ANISO"})) render::set_aniso([d boolForKey:@"aniso"]);
-    if (saved(@"fxaa", {"WWHD_FXAA"})) render::set_fxaa([d boolForKey:@"fxaa"]);
-    if (saved(@"fps60", {"WWHD_INTERP", "WWHD_TRUE60"})) interp::set_mode((int)[d integerForKey:@"fps60"]);
-    if (saved(@"fps60Paced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation([d boolForKey:@"fps60Paced"]);
+    auto saved = [&](NSString* key, std::initializer_list<const char*> env) { return !env_set(env) && pref(key) != nil; };
+    if (saved(@"resScale", {"WWHD_RES_SCALE"})) set_res([pref(@"resScale") floatValue]);
+    if (saved(@"aoMode", {"WWHD_AO_MODE", "WWHD_NO_AO_QUIRK"})) render::set_ao_mode([pref(@"aoMode") intValue]);
+    if (saved(@"aoHires", {"WWHD_AO_HIRES"})) render::set_ao_hires([pref(@"aoHires") boolValue]);
+    if (saved(@"aniso", {"WWHD_ANISO"})) render::set_aniso([pref(@"aniso") boolValue]);
+    if (saved(@"fxaa", {"WWHD_FXAA"})) render::set_fxaa([pref(@"fxaa") boolValue]);
+    if (saved(@"fps60", {"WWHD_INTERP", "WWHD_TRUE60"})) interp::set_mode([pref(@"fps60") intValue]);
+    if (saved(@"fps60Paced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation([pref(@"fps60Paced") boolValue]);
 #ifdef WWHD_HAS_VULKAN
-    if (saved(@"vkPresentMode", {"WWHD_VK_PRESENT_MODE"})) gfxvk::set_present_mode((int)[d integerForKey:@"vkPresentMode"]);
+    if (saved(@"vkPresentMode", {"WWHD_VK_PRESENT_MODE"})) gfxvk::set_present_mode([pref(@"vkPresentMode") intValue]);
 #endif
 }
 static void save_prefs() {
     if (!g_prefs || !g_prefs_loaded) return;
-    NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
-    if (!env_set({"WWHD_RES_SCALE"})) [d setFloat:current_res_scale() forKey:@"resScale"];
-    if (!env_set({"WWHD_AO_MODE", "WWHD_NO_AO_QUIRK"})) [d setInteger:render::ao_mode() forKey:@"aoMode"];
-    if (!env_set({"WWHD_AO_HIRES"})) [d setBool:render::ao_hires() forKey:@"aoHires"];
-    if (!env_set({"WWHD_ANISO"})) [d setBool:render::aniso() forKey:@"aniso"];
-    if (!env_set({"WWHD_FXAA"})) [d setBool:render::fxaa() forKey:@"fxaa"];
-    if (!env_set({"WWHD_INTERP", "WWHD_TRUE60"})) [d setInteger:interp::mode() forKey:@"fps60"];
-    if (!env_set({"WWHD_INTERP_PACED"})) [d setBool:interp::paced_interpolation() forKey:@"fps60Paced"];
+    if (!env_set({"WWHD_RES_SCALE"})) set_pref(@"resScale", @(current_res_scale()));
+    if (!env_set({"WWHD_AO_MODE", "WWHD_NO_AO_QUIRK"})) set_pref(@"aoMode", @(render::ao_mode()));
+    if (!env_set({"WWHD_AO_HIRES"})) set_pref(@"aoHires", @(render::ao_hires()));
+    if (!env_set({"WWHD_ANISO"})) set_pref(@"aniso", @(render::aniso()));
+    if (!env_set({"WWHD_FXAA"})) set_pref(@"fxaa", @(render::fxaa()));
+    if (!env_set({"WWHD_INTERP", "WWHD_TRUE60"})) set_pref(@"fps60", @(interp::mode()));
+    if (!env_set({"WWHD_INTERP_PACED"})) set_pref(@"fps60Paced", @(interp::paced_interpolation()));
 #ifdef WWHD_HAS_VULKAN
-    if (!env_set({"WWHD_VK_PRESENT_MODE"})) [d setInteger:gfxvk::present_mode() forKey:@"vkPresentMode"];
+    if (!env_set({"WWHD_VK_PRESENT_MODE"})) set_pref(@"vkPresentMode", @(gfxvk::present_mode()));
 #endif
+    if (NSString* p = portable_prefs_path()) [g_portable_prefs writeToFile:p atomically:YES];
 }
 
 // the TV title summarises the active options so a key press is visible without opening the menu;

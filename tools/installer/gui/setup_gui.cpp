@@ -1,4 +1,9 @@
-// Wind Waker HD Setup: the graphical installer (SDL3 + Dear ImGui).
+// Wind Waker HD: the program a release starts (SDL3 + Dear ImGui).
+//
+// The release contains no game code, so the first start prepares the game once (choose the dump,
+// keys, then extract/translate/compile); later starts launch the built game directly, without a
+// window of their own. Holding Shift while starting (macOS, Windows) or --setup opens the setup
+// screens again (repair, update, change the game, import saves).
 //
 // Only a front end. Everything the installation does (keys, extraction, recompiling, compiling,
 // the app, save import) is tools/installer/setup.py, which this program runs as a child process
@@ -28,6 +33,15 @@
 #include <mutex>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+#ifdef __APPLE__
+#include <CoreGraphics/CoreGraphics.h>
+#endif
 
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
@@ -290,6 +304,49 @@ static bool run_quick(const std::vector<std::string>& args) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// starting the built game
+
+static std::string g_exe, g_game_dir, g_data_dir;  // set when the game is ready to start
+
+// Replaces this process with the game (macOS, Linux; the Dock keeps showing "Wind Waker HD") or starts
+// it and returns (Windows). The game runs in the data folder (its crash logs go to data/captures).
+static bool launch_game() {
+    std::string save = g_data_dir + "/save";
+#ifdef _WIN32
+    auto wide = [](const std::string& u) {
+        int n = MultiByteToWideChar(CP_UTF8, 0, u.c_str(), -1, nullptr, 0);
+        std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+        if (n > 1) MultiByteToWideChar(CP_UTF8, 0, u.c_str(), -1, w.data(), n);
+        return w;
+    };
+    std::wstring cmd = L"\"" + wide(g_exe) + L"\" --game \"" + wide(g_game_dir) + L"\" --save \"" + wide(save) + L"\"";
+    STARTUPINFOW si = {sizeof si};
+    PROCESS_INFORMATION pi = {};
+    std::wstring cwd = wide(g_data_dir);
+    if (!CreateProcessW(wide(g_exe).c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, cwd.c_str(), &si, &pi))
+        return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+#else
+    if (chdir(g_data_dir.c_str()) != 0) return false;
+    const char* argv[] = {g_exe.c_str(), "--game", g_game_dir.c_str(), "--save", save.c_str(), nullptr};
+    execv(g_exe.c_str(), (char* const*)argv);
+    return false;  // only reached when exec failed
+#endif
+}
+
+static bool shift_held() {
+#if defined(__APPLE__)
+    return (CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState) & kCGEventFlagMaskShift) != 0;
+#elif defined(_WIN32)
+    return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+#else
+    return false;  // Linux: start with --setup (also a menu action of the shortcut)
+#endif
+}
+
+// ---------------------------------------------------------------------------------------------
 // state
 
 enum class Screen { Starting, NeedCLT, Menu, Welcome, Source, Keys, Installing, Error, Save, Done, Fatal };
@@ -351,8 +408,17 @@ struct App {
     std::string error_msg, error_back;  // error_back: screen name for Retry
     std::string result_app;
 
+    // portable release
+    bool portable = false, legacy = false;
+    std::string package, game_dir;
+    double free_bytes = 0, source_bytes = 0, toolchain_bytes = 0;
+    bool opt_remove_toolchain = true, opt_shortcut = false;
+    std::deque<std::pair<std::string, std::string>> queue;  // requests to send one after another
+    std::string after;                                       // then: play | quit | open
+    bool exec_game = false;                                  // start the game when the window has closed
+
     // save import
-    int save_kind = 0;  // 0 none, 1 HD folder, 2 GameCube .gci
+    int save_kind = 0;  // 0 none, 1 HD folder, 2 GameCube .gci, 3 earlier installation, 4 another folder
     std::string save_path, save_msg;
     bool confirm_replace = false;
 
@@ -551,6 +617,13 @@ static bool radio(const char* label, int* v, int value) {
     return r;
 }
 
+static bool checkbox(const char* label, bool* v) {
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 3));
+    bool r = ImGui::Checkbox(label, v);
+    ImGui::PopStyleVar();
+    return r;
+}
+
 static float button_w(const char* label) {
     return ImGui::CalcTextSize(label, nullptr, true).x + ImGui::GetStyle().FramePadding.x * 2 + 24;
 }
@@ -722,7 +795,13 @@ static void handle_reply(const J& ev) {
         A.source_path = ev.str("path", A.source_path);
         A.disc_key_found = ev.str("disc_key");
         A.common_key_found = ev.str("common_key");
-        A.probe_msg = A.source_kind == "folder" ? "Extracted game folder: The Wind Waker HD (USA)" : "Wii U disc image";
+        A.source_bytes = ev.num("bytes");
+        if (A.source_kind == "folder")
+            A.probe_msg = ev.boolean("in_place") ? "Extracted game folder: The Wind Waker HD (USA). It is used where it is; "
+                                                   "nothing is copied."
+                                                 : "Extracted game folder: The Wind Waker HD (USA)";
+        else
+            A.probe_msg = "Wii U disc image. The game files are extracted from it into this folder (about 1.7 GB).";
     } else if (cmd == "check_keys") {
         if (ok) {
             A.keys_msg.clear();
@@ -736,6 +815,9 @@ static void handle_reply(const J& ev) {
                 if (s.state != 3) s.state = 2;
             A.result_app = ev.str("app");
             A.save_exists = ev.boolean("save_exists");
+            A.toolchain_bytes = ev.num("toolchain_bytes");
+            A.game_dir = ev.str("game_dir", A.game_dir);
+            g_exe = ev.str("exe"), g_game_dir = A.game_dir, g_data_dir = ev.str("data_dir", A.data_dir);
             A.installed = true;
             addlog("Setup finished.");
             go(A.save_exists ? Screen::Done : Screen::Save);
@@ -745,7 +827,9 @@ static void handle_reply(const J& ev) {
             A.error_back = A.install_source == "installed" ? "menu" : "source";
             go(Screen::Error);
         }
-    } else if (cmd == "import_save") {
+    } else if (cmd == "remove_toolchain" || cmd == "shortcut") {
+        if (!ok) addlog(ev.str("message"));
+    } else if (cmd == "import_save" || cmd == "import_existing") {
         if (ok) {
             A.save_msg = ev.str("message");
             A.save_exists = true;
@@ -755,8 +839,6 @@ static void handle_reply(const J& ev) {
         } else {
             A.save_msg = ev.str("message");
         }
-    } else if (cmd == "launch") {
-        A.exit_code = 0;  // the game is starting: the installer can close
     }
 }
 
@@ -773,10 +855,18 @@ static void handle_event(const J& ev) {
         A.platform = ev.str("platform");
         A.game_files = ev.boolean("game_files");
         A.save_exists = ev.boolean("save_exists");
+        A.portable = ev.boolean("portable");
+        A.legacy = ev.boolean("legacy");
+        A.package = ev.str("package");
+        A.game_dir = ev.str("game_dir");
+        A.free_bytes = ev.num("free_bytes");
         const J* inst = ev.get("installed");
         A.installed = inst && inst->t == J::Obj;
         A.installed_version = A.installed ? inst->str("version") : "";
-        if (A.installed) A.result_app = inst->str("app");
+        if (A.installed) {
+            A.result_app = inst->str("app");
+            g_exe = inst->str("exe"), g_game_dir = inst->str("game_dir"), g_data_dir = A.data_dir;
+        }
         go(A.installed ? Screen::Menu : Screen::Welcome);
     } else if (e == "log") {
         addlog(ev.str("text"));
@@ -808,7 +898,33 @@ static void handle_event(const J& ev) {
     }
 }
 
+static std::string format_size(double b) {
+    char t[32];
+    if (b >= 1e9) snprintf(t, sizeof t, "%.1f GB", b / 1e9);
+    else snprintf(t, sizeof t, "%.0f MB", b / 1e6);
+    return t;
+}
+
+static void run_queue() {
+    if (busy()) return;
+    if (!A.queue.empty()) {
+        auto r = A.queue.front();
+        A.queue.pop_front();
+        request(r.first, r.second);
+        return;
+    }
+    if (A.after.empty()) return;
+    std::string a = A.after;
+    A.after.clear();
+    if (a == "play" && (!A.portable || g_exe.empty())) {
+        request("launch", "");  // setup.py starts the game (non-portable installs)
+        A.after = "quit";
+    } else if (a == "play") A.exec_game = true, A.exit_code = 0;
+    else if (a == "quit") A.exit_code = 0;
+}
+
 static void pump_child() {
+    run_queue();
     A.child.poll();
     while (!A.child.lines.empty()) {
         std::string l = A.child.lines.front();
@@ -854,7 +970,7 @@ static void log_pane(float height) {
 }
 
 static void screen_starting() {
-    page_header("Wind Waker HD Setup");
+    page_header("Wind Waker HD");
     ImGui::Spacing();
     mark(1);
     ImGui::TextUnformatted("Preparing the installer...");
@@ -890,22 +1006,47 @@ static void screen_clt() {
     }
 }
 
+static std::string home_folder() { return A.portable && !A.package.empty() ? A.package : A.data_dir; }
+
 static void screen_welcome() {
     page_header("Welcome", "The Legend of Zelda: The Wind Waker HD, native PC port " + A.version);
-    ImGui::TextWrapped("This installer builds the game on your computer from your own disc dump. The download "
-                       "contains no game files, no game code and no keys.");
+    if (A.portable) {
+        ImGui::TextWrapped("The first start prepares the game once: it reads your own disc dump and builds the game for "
+                           "this computer (about two minutes). Releases never contain game code, so this happens here, "
+                           "once. After that, starting Wind Waker HD starts the game directly.");
+    } else {
+        ImGui::TextWrapped("This installer builds the game on your computer from your own disc dump. The download "
+                           "contains no game files, no game code and no keys.");
+    }
     ImGui::Spacing();
     ImGui::TextUnformatted("You need:");
     ImGui::Bullet();
     ImGui::TextWrapped("your Wind Waker HD (USA) disc image (.wux or .wud) with its disc key, or an extracted game "
                        "folder (code, content, meta);");
     ImGui::Bullet();
-    ImGui::TextWrapped("for a disc image, the Wii U common key (from your console);");
-    ImGui::Bullet();
-    ImGui::TextWrapped("about 4 GB of free disk space and a few minutes.");
+    ImGui::TextWrapped("for a disc image, the Wii U common key (from your console).");
     ImGui::Spacing();
-    muted("The game will be installed in " + A.data_dir + ". Your saves and settings there are never changed "
-          "without asking.");
+    if (A.portable) {
+        ImGui::TextUnformatted("Space, all of it in this folder:");
+        ImGui::Bullet();
+        ImGui::TextWrapped("an extracted game folder is used where it is: nothing is copied;");
+        ImGui::Bullet();
+        ImGui::TextWrapped("a disc image is extracted into the folder: about 1.7 GB;");
+        ImGui::Bullet();
+        ImGui::TextWrapped("while preparing, about 1 GB more (removed afterwards)%s.",
+#if defined(_WIN32) || (!defined(__APPLE__))
+                           ", plus the compiler download, which you can remove at the end"
+#else
+                           ""
+#endif
+        );
+        ImGui::Spacing();
+        muted("Everything stays in " + home_folder() + " (free: " + format_size(A.free_bytes) +
+              "). Nothing is written to your user folders unless you ask for a shortcut.");
+    } else {
+        muted("The game will be installed in " + A.data_dir + ". Your saves and settings there are never changed "
+              "without asking.");
+    }
     int b = footer({"Quit", "Continue"}, 1);
     if (b == 0) A.exit_code = 0;
     if (b == 1) go(Screen::Source);
@@ -913,21 +1054,20 @@ static void screen_welcome() {
 
 static void screen_menu() {
     bool update = A.installed_version != A.version;
-    page_header("Wind Waker HD is installed", update ? "Installed: " + A.installed_version + ". This release: " + A.version + "."
-                                                     : "Version " + A.version + ", in " + A.data_dir);
+    page_header(A.portable ? "Wind Waker HD" : "Wind Waker HD is installed",
+                update ? "Prepared with " + A.installed_version + ". This release: " + A.version + "."
+                       : "Version " + A.version + ", in " + home_folder());
     float w = 520;
     if (update) {
         if (button("Update to this release", ImVec2(w, 0), true)) start_install("installed");
         muted("Rebuilds the game with this release. Your game files and saves are kept; no keys needed.");
     }
-    if (button("Play", ImVec2(w, 0), !update)) {
-        request("launch", "");
-    }
+    if (button("Play", ImVec2(w, 0), !update)) A.after = "play";
     if (button("Repair", ImVec2(w, 0))) start_install("installed");
     muted("Rebuilds the game code from the installed game files.");
-    if (button("Reinstall from a disc image or game folder", ImVec2(w, 0))) go(Screen::Source);
-    if (button("Import a save...", ImVec2(w, 0))) go(Screen::Save);
-    if (button("Open the game folder", ImVec2(w, 0))) open_folder(A.data_dir);
+    if (button("Change the game (disc image or game folder)", ImVec2(w, 0))) go(Screen::Source);
+    if (button("Import saves or settings...", ImVec2(w, 0))) go(Screen::Save);
+    if (button("Open the folder", ImVec2(w, 0))) open_folder(home_folder());
     if (footer({"Quit"}) == 0) A.exit_code = 0;
 }
 
@@ -1031,7 +1171,8 @@ static double step_weight(const std::string& id) {
 }
 
 static void screen_installing() {
-    page_header("Installing", "This takes a few minutes. You can keep using your computer.");
+    if (A.portable) page_header("Preparing the game", "One time, about two minutes. You can keep using your computer.");
+    else page_header("Installing", "This takes a few minutes. You can keep using your computer.");
     double tw = 0, dw = 0;
     for (auto& s : A.steps) {
         double w = step_weight(s.id);
@@ -1096,6 +1237,14 @@ static void screen_error() {
     }
 }
 
+static void send_import(bool replace) {
+    std::string r = replace ? ",\"replace\":true" : "";
+    if (A.save_kind == 3) request("import_existing", r.empty() ? "" : r.substr(1));
+    else if (A.save_kind == 4) request("import_existing", "\"path\":" + jstr(A.save_path) + r);
+    else request("import_save", std::string("\"kind\":") + (A.save_kind == 2 ? "\"gc\"" : "\"hd\"") + ",\"path\":" +
+                                    jstr(A.save_path) + r);
+}
+
 static void screen_save() {
     page_header("Your save (optional)", "Use a save you already have, or start a new game.");
     static const SDL_DialogFileFilter gci[] = {{"GameCube save (.gci)", "gci"}, {"All files", "*"}};
@@ -1110,12 +1259,21 @@ static void screen_save() {
         ImGui::Unindent();
     }
     radio("GameCube Wind Waker save (.gci), converted to HD", &kind, 2);
+    if (A.legacy) radio("Copy saves and settings from my earlier installation (copied, not moved)", &kind, 3);
+    radio("Copy saves and settings from another Wind Waker HD folder", &kind, 4);
     set_save_kind(kind);
     if (A.save_kind == 2) {
         ImGui::Indent();
         if (button("Choose .gci file...##gc")) choose_file("save", gci, 2);
         if (!A.save_path.empty()) ImGui::SameLine(), ImGui::TextUnformatted(base_name(A.save_path).c_str());
         muted("Items, progress, songs and charts are carried over (tools/savegame/gc2hd.py).");
+        ImGui::Unindent();
+    }
+    if (A.save_kind == 4) {
+        ImGui::Indent();
+        if (button("Choose folder...##other")) choose_folder("save");
+        if (!A.save_path.empty()) ImGui::SameLine(), ImGui::TextUnformatted(base_name(A.save_path).c_str());
+        muted("The folder of an earlier Wind Waker HD release (it has a data folder).");
         ImGui::Unindent();
     }
     if (!A.save_msg.empty()) colored(BAD, A.save_msg);
@@ -1127,44 +1285,73 @@ static void screen_save() {
         ImGui::TextUnformatted("A save is already installed.");
         ImGui::TextUnformatted("Replace it? The current save is moved to a backup folder first.");
         if (button("Replace", ImVec2(160, 0), true)) {
-            request("import_save", std::string("\"kind\":") + (A.save_kind == 2 ? "\"gc\"" : "\"hd\"") +
-                                       ",\"path\":" + jstr(A.save_path) + ",\"replace\":true");
+            send_import(true);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (button("Keep my save", ImVec2(160, 0))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
-    bool can = A.save_kind == 0 || !A.save_path.empty();
+    bool can = A.save_kind == 0 || A.save_kind == 3 || !A.save_path.empty();
     int b = footer({A.save_kind == 0 ? "Continue" : "Import"}, 0, (can && !busy()) ? 0 : 1);
     if (b == 0) {
         if (A.save_kind == 0) go(Screen::Done);
-        else
-            request("import_save", std::string("\"kind\":") + (A.save_kind == 2 ? "\"gc\"" : "\"hd\"") + ",\"path\":" +
-                                       jstr(A.save_path));
+        else send_import(false);
     }
 }
 
 static void screen_done() {
     page_header("Ready to play");
     mark(2);
-    ImGui::TextWrapped("The Wind Waker HD is installed.");
+    ImGui::TextWrapped(A.portable ? "The game is prepared." : "The Wind Waker HD is installed.");
     ImGui::Spacing();
-#ifdef __APPLE__
-    if (!A.result_app.empty()) muted("The game: " + A.result_app + " (also in Launchpad and Spotlight).");
-#elif defined(_WIN32)
-    muted("The game: Start menu and desktop shortcut \"Wind Waker HD\".");
+    if (A.portable) {
+        muted("Everything is in " + home_folder() + ".");
+        muted("To play, start Wind Waker HD again: it starts the game directly. To repair, update or change the "
+#ifdef __linux__
+              "game, start it with --setup (or use the shortcut's Setup action)."
 #else
-    muted("The game: your applications menu, or " + A.data_dir + "/play.sh.");
+              "game, hold Shift while starting it."
 #endif
-    muted("Game files and saves: " + A.data_dir);
+        );
+    } else {
+#ifdef __APPLE__
+        if (!A.result_app.empty()) muted("The game: " + A.result_app + " (also in Launchpad and Spotlight).");
+#elif defined(_WIN32)
+        muted("The game: Start menu and desktop shortcut \"Wind Waker HD\".");
+#else
+        muted("The game: your applications menu, or " + A.data_dir + "/play.sh.");
+#endif
+        muted("Game files and saves: " + A.data_dir);
+    }
     if (!A.save_msg.empty()) muted(A.save_msg);
-    ImGui::Spacing();
-    muted("Run Setup again to repair, update or reinstall.");
-    int b = footer({"Quit", "Open folder", "Play"}, 2);
-    if (b == 0) A.exit_code = 0;
-    if (b == 1) open_folder(A.data_dir);
-    if (b == 2) request("launch", "");
+    if (A.portable) {
+        ImGui::Spacing();
+        if (A.toolchain_bytes > 0) {
+            checkbox(("Remove the downloaded compiler (" + format_size(A.toolchain_bytes) + ")").c_str(),
+                            &A.opt_remove_toolchain);
+            muted("It is only needed to repair the game, and is downloaded again then.");
+        }
+        checkbox(
+#if defined(__APPLE__)
+            "Add Wind Waker HD to my Applications folder (a link)",
+#elif defined(_WIN32)
+            "Add Wind Waker HD to the Start menu",
+#else
+            "Add Wind Waker HD to my applications menu",
+#endif
+            &A.opt_shortcut);
+        muted("Off by default: then nothing is written outside this folder.");
+    }
+    int b = footer({"Quit", "Open folder", "Play"}, 2, busy() || !A.after.empty() ? 7 : 0);
+    auto queue_options = [] {
+        if (A.portable && A.toolchain_bytes > 0 && A.opt_remove_toolchain) A.queue.push_back({"remove_toolchain", ""});
+        if (A.portable && A.opt_shortcut) A.queue.push_back({"shortcut", ""});
+        A.toolchain_bytes = 0, A.opt_shortcut = false;  // once
+    };
+    if (b == 0) queue_options(), A.after = "quit";
+    if (b == 1) open_folder(home_folder());
+    if (b == 2) queue_options(), A.after = "play";
 }
 
 static void screen_fatal() {
@@ -1241,12 +1428,12 @@ static std::string package_version() {
 static void start_child() {
     std::vector<std::string> args;
 #if defined(__APPLE__)
-    args = {"/bin/bash", A.pkg + "Install Wind Waker HD.command"};
+    args = {"/bin/bash", A.pkg + "tools/Setup in Terminal.command"};
 #elif defined(_WIN32)
     args = {"powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
             A.pkg + "tools\\installer\\bootstrap-windows.ps1"};
 #else
-    args = {"/bin/sh", A.pkg + "install.sh"};
+    args = {"/bin/sh", A.pkg + "tools/setup-in-terminal.sh"};
 #endif
     args.push_back("--gui-protocol");
     for (auto& a : A.passthru) args.push_back(a);
@@ -1262,7 +1449,7 @@ static void start_child() {
 //   {"screen": "keys", "set": {"common_mode": "file", "common_key_file": "..."}, "when_step": "compile",
 //    "idle": true, "shot": "03-keys.png", "click": "Check keys and install"}
 // "set" fields: source (as if chosen in the dialog), disc_key_file, common_key_file, common_mode
-// (file|paste), save_kind (none|hd|gc), save_path, open_details (true). Screenshots are PNG files
+// (file|paste), save_kind (none|hd|gc|legacy|other), save_path, open_details (true). Screenshots are PNG files
 // of the window. The run ends (exit 0) after the last step, or with exit 2 on a 45-minute timeout.
 
 
@@ -1294,7 +1481,8 @@ static void automation_frame() {
             else if (k == "disc_key_file") set_disc_key_file(v);
             else if (k == "common_key_file") set_common_key_file(v);
             else if (k == "common_mode") set_common_mode(v == "paste" ? 1 : 0);
-            else if (k == "save_kind") set_save_kind(v == "hd" ? 1 : v == "gc" ? 2 : 0);
+            else if (k == "save_kind")
+                set_save_kind(v == "hd" ? 1 : v == "gc" ? 2 : v == "legacy" ? 3 : v == "other" ? 4 : 0);
             else if (k == "save_path") set_save_path(v);
             else if (k == "open_details") details_open = true;
         }
@@ -1328,13 +1516,38 @@ static void save_shot(SDL_Renderer* r, const std::string& name) {
     SDL_DestroySurface(s);
 }
 
+// The game in this folder is built for this release and its game files are there: start it directly.
+static bool game_ready(const std::string& pkg, const std::vector<std::string>& passthru) {
+    SDL_PathInfo info;
+    if (!SDL_GetPathInfo((pkg + "portable.txt").c_str(), &info)) return false;  // only portable releases
+    std::string data = pkg + "data";
+    for (size_t i = 0; i + 1 < passthru.size(); i++)
+        if (passthru[i] == "--data-dir") data = passthru[i + 1];
+    J st, man;
+    if (!parse_json(read_file(data + "/install.json"), st) || !parse_json(read_file(pkg + "sdk/manifest.json"), man))
+        return false;
+    if (st.str("version") != man.str("version") || st.boolean("placeholder_code")) return false;
+    auto resolve = [&](std::string p) {  // install.json keeps paths inside data/ relative to it
+        bool abs = !p.empty() && (p[0] == '/' || p[0] == '\\' || (p.size() > 1 && p[1] == ':'));
+        return p.empty() || abs ? p : data + "/" + p;
+    };
+    std::string exe = resolve(st.str("exe")), game = resolve(st.str("game_dir"));
+    if (exe.empty() || game.empty() || !SDL_GetPathInfo(exe.c_str(), &info) ||
+        !SDL_GetPathInfo((game + "/code/cking.rpx").c_str(), &info))
+        return false;
+    g_exe = exe, g_game_dir = game, g_data_dir = data;
+    return true;
+}
+
 int main(int argc, char** argv) {
     std::string automate;
+    bool want_setup = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--automate" && i + 1 < argc) automate = argv[++i];
         else if (a == "--screenshots" && i + 1 < argc) A.shots_dir = argv[++i];
         else if (a == "--self-test") A.self_test = true;
+        else if (a == "--setup") want_setup = true;
         else if (a.rfind("-psn_", 0) == 0) continue;  // macOS Finder's process serial number
         else A.passthru.push_back(a);
     }
@@ -1348,7 +1561,13 @@ int main(int argc, char** argv) {
         }
     }
 
-    SDL_SetHint(SDL_HINT_APP_NAME, "Wind Waker HD Setup");
+    // prepared already: start the game right away, no window of our own (Shift / --setup: the setup)
+    if (!want_setup && automate.empty() && !A.self_test && !shift_held()) {
+        std::string pkg = find_package();
+        if (!pkg.empty() && game_ready(pkg, A.passthru) && launch_game()) return 0;
+    }
+
+    SDL_SetHint(SDL_HINT_APP_NAME, "Wind Waker HD");
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("SDL_Init: %s", SDL_GetError());
         return 1;
@@ -1359,7 +1578,7 @@ int main(int argc, char** argv) {
     if (scale <= 0) scale = 1.0f;
     {
         SDL_PropertiesID wp = SDL_CreateProperties();
-        SDL_SetStringProperty(wp, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "Wind Waker HD Setup");
+        SDL_SetStringProperty(wp, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "Wind Waker HD");
         SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, (int)(960 * scale));
         SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, (int)(640 * scale));
         SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER,
@@ -1396,7 +1615,7 @@ int main(int argc, char** argv) {
     A.pkg = find_package();
     if (!A.pkg.empty()) {
         A.version = package_version();
-        if (!A.version.empty()) SDL_SetWindowTitle(g_window, ("Wind Waker HD Setup " + A.version).c_str());
+        if (!A.version.empty()) SDL_SetWindowTitle(g_window, ("Wind Waker HD " + A.version).c_str());
     }
     if (A.pkg.empty()) {
         A.fatal = "This program must stay in the unpacked release folder (next to tools/installer/setup.py).";
@@ -1517,5 +1736,9 @@ int main(int argc, char** argv) {
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(g_window);
     SDL_Quit();
+    if (A.exec_game && !launch_game()) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Wind Waker HD", ("Could not start " + g_exe).c_str(), nullptr);
+        return 1;
+    }
     return A.exit_code;
 }

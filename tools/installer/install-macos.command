@@ -1,9 +1,11 @@
 #!/bin/bash
-# Wind Waker HD setup for macOS: double-click this file (the first time: right-click > Open).
-cd "$(dirname "$0")" || exit 1
+# Wind Waker HD setup in Terminal (macOS): the fallback for the "Wind Waker HD" app next to tools/.
+# Double-click it (the first time: right-click > Open), or run it in Terminal.
+cd "$(dirname "$0")/.." || exit 1
 DIR="$(pwd)"
+export PYTHONDONTWRITEBYTECODE=1
 # This release folder was downloaded, so macOS marks every file in it as quarantined. You opened this
-# script, so its helper tools are allowed to run too.
+# script (or the app), so its helper tools are allowed to run too.
 /usr/bin/xattr -dr com.apple.quarantine "$DIR" 2>/dev/null
 clt_ok() { xcode-select -p >/dev/null 2>&1 && xcrun --find clang >/dev/null 2>&1; }
 if ! clt_ok; then

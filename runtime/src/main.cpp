@@ -167,7 +167,30 @@ static void init_data_imports() {
     mem_init_data_imports(alloc, alloc_ex, free_);
 }
 
+// Portable mode (portable.txt next to the executable, see host::portable_user_dir): the macOS paths
+// that do not go through host::config_dir() get their existing overrides pointed into the folder.
+static void apply_portable_mode() {
+    if (!host::portable()) return;
+    const std::string u = host::portable_user_dir();
+    std::error_code ec;
+    std::filesystem::create_directories(u, ec);
+    auto set = [](const char* k, const std::string& v) {
+        if (getenv(k)) return;  // an explicit override wins
+#ifdef _WIN32
+        _putenv_s(k, v.c_str());
+#else
+        setenv(k, v.c_str(), 0);
+#endif
+    };
+    set("WWHD_STATE_DIR", u + "/states");
+#ifdef __APPLE__
+    set("WWHD_DISPLAY_SETTINGS", u + "/display.plist");
+    set("WWHD_SHADER_CACHE", u + "/shaders.bin");
+#endif
+}
+
 int main(int argc, char** argv) {
+    apply_portable_mode();
 #ifdef _WIN32
     // Windows sleeps in steps of the system timer (15.6 ms by default): sleep_for(1 ms) took
     // 15.7 ms, the 3 ms AX frame loop ran in bursts and vsync waits alternated 15.7 / 31.5 ms.
