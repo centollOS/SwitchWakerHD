@@ -1,7 +1,7 @@
 // Wind Waker HD: the program a release starts (SDL3 + Dear ImGui).
 //
 // The release contains no game code, so the first start prepares the game once (choose the dump,
-// keys, then extract/translate/compile); later starts launch the built game directly, without a
+// keys for a disc image, then extract/translate/compile); later starts launch the built game directly, without a
 // window of their own. Holding Shift while starting (macOS, Windows) or --setup opens the setup
 // screens again (repair, update, change the game, import saves).
 //
@@ -393,7 +393,7 @@ struct App {
     std::string pending_cmd;
 
     // source and keys
-    std::string source_path, source_kind;  // kind: image | folder
+    std::string source_path, source_kind;  // kind: image | archive (Cemu .wua, no keys) | folder
     std::string probe_msg;
     bool probe_ok = false;
     std::string disc_key_found, disc_key_file, common_key_found, common_key_file;
@@ -796,7 +796,9 @@ static void handle_reply(const J& ev) {
         A.disc_key_found = ev.str("disc_key");
         A.common_key_found = ev.str("common_key");
         A.source_bytes = ev.num("bytes");
-        if (A.source_kind == "folder")
+        if (A.source_kind == "archive")  // setup.py says which title is used and why
+            A.probe_msg = ev.str("message");
+        else if (A.source_kind == "folder")
             A.probe_msg = ev.boolean("in_place") ? "Extracted game folder: The Wind Waker HD (USA). It is used where it is; "
                                                    "nothing is copied."
                                                  : "Extracted game folder: The Wind Waker HD (USA)";
@@ -1011,27 +1013,28 @@ static std::string home_folder() { return A.portable && !A.package.empty() ? A.p
 static void screen_welcome() {
     page_header("Welcome", "The Legend of Zelda: The Wind Waker HD, native PC port " + A.version);
     if (A.portable) {
-        ImGui::TextWrapped("The first start prepares the game once: it reads your own disc dump and builds the game for "
+        ImGui::TextWrapped("The first start prepares the game once: it reads your own dump of the game and builds it for "
                            "this computer (about two minutes). Releases never contain game code, so this happens here, "
                            "once. After that, starting Wind Waker HD starts the game directly.");
     } else {
-        ImGui::TextWrapped("This installer builds the game on your computer from your own disc dump. The download "
-                           "contains no game files, no game code and no keys.");
+        ImGui::TextWrapped("This installer builds the game on your computer from your own dump of the game. The "
+                           "download contains no game files, no game code and no keys.");
     }
     ImGui::Spacing();
     ImGui::TextUnformatted("You need:");
     ImGui::Bullet();
-    ImGui::TextWrapped("your Wind Waker HD (USA) disc image (.wux or .wud) with its disc key, or an extracted game "
+    ImGui::TextWrapped("your Wind Waker HD (USA): a disc image (.wud/.wux), a Cemu archive (.wua), or an extracted "
                        "folder (code, content, meta);");
     ImGui::Bullet();
-    ImGui::TextWrapped("for a disc image, the Wii U common key (from your console).");
+    ImGui::TextWrapped("for a disc image, its disc key and the Wii U common key (from your console). A Cemu archive "
+                       "or an extracted folder needs no keys.");
     ImGui::Spacing();
     if (A.portable) {
         ImGui::TextUnformatted("Space, all of it in this folder:");
         ImGui::Bullet();
         ImGui::TextWrapped("an extracted game folder is used where it is: nothing is copied;");
         ImGui::Bullet();
-        ImGui::TextWrapped("a disc image is extracted into the folder: about 1.7 GB;");
+        ImGui::TextWrapped("a disc image or Cemu archive is extracted into the folder: about 1.7 GB;");
         ImGui::Bullet();
         ImGui::TextWrapped("while preparing, about 1 GB more (removed afterwards)%s.",
 #if defined(_WIN32) || (!defined(__APPLE__))
@@ -1065,16 +1068,21 @@ static void screen_menu() {
     if (button("Play", ImVec2(w, 0), !update)) A.after = "play";
     if (button("Repair", ImVec2(w, 0))) start_install("installed");
     muted("Rebuilds the game code from the installed game files.");
-    if (button("Change the game (disc image or game folder)", ImVec2(w, 0))) go(Screen::Source);
+    if (button("Change the game (disc image, Cemu archive or game folder)", ImVec2(w, 0))) go(Screen::Source);
     if (button("Import saves or settings...", ImVec2(w, 0))) go(Screen::Save);
     if (button("Open the folder", ImVec2(w, 0))) open_folder(home_folder());
     if (footer({"Quit"}) == 0) A.exit_code = 0;
 }
 
 static void screen_source() {
-    page_header("Choose your game", "A Wii U disc image (.wux or .wud) or an already extracted game folder.");
-    static const SDL_DialogFileFilter filters[] = {{"Wii U disc image (.wux, .wud)", "wux;wud"}, {"All files", "*"}};
-    if (button("Choose disc image...", ImVec2(280, 0), A.source_path.empty())) choose_file("source", filters, 2);
+    page_header("Choose your game",
+                "A Wii U disc image (.wux or .wud), a Cemu archive (.wua) or an already extracted game folder.");
+    static const SDL_DialogFileFilter filters[] = {{"Wii U disc image or Cemu archive (.wux, .wud, .wua)", "wux;wud;wua"},
+                                                   {"Wii U disc image (.wux, .wud)", "wux;wud"},
+                                                   {"Cemu Wii U archive (.wua)", "wua"},
+                                                   {"All files", "*"}};
+    if (button("Choose disc image or archive...", ImVec2(320, 0), A.source_path.empty()))
+        choose_file("source", filters, 4);
     ImGui::SameLine();
     if (button("Choose extracted game folder...", ImVec2(320, 0))) choose_folder("source");
     ImGui::Spacing();
@@ -1089,7 +1097,7 @@ static void screen_source() {
     int b = footer({"Back", "Next"}, 1, (A.probe_ok && !busy()) ? 0 : 2);
     if (b == 0) go(A.installed ? Screen::Menu : Screen::Welcome);
     if (b == 1) {
-        if (A.source_kind == "folder") start_install("folder");
+        if (A.source_kind == "folder" || A.source_kind == "archive") start_install(A.source_kind);  // no keys
         else go(Screen::Keys);
     }
 }
@@ -1164,8 +1172,9 @@ static void screen_keys() {
 }
 
 static double step_weight(const std::string& id) {
-    static const std::map<std::string, double> w = {{"keys", 1},      {"folder", 1},     {"compiler", 3}, {"extract", 15},
-                                                    {"copy", 8},      {"translate", 8},  {"compile", 60}, {"app", 4}};
+    static const std::map<std::string, double> w = {{"keys", 1},      {"archive", 1},   {"folder", 1},
+                                                    {"compiler", 3},  {"extract", 15},  {"copy", 8},
+                                                    {"translate", 8}, {"compile", 60},  {"app", 4}};
     auto it = w.find(id);
     return it == w.end() ? 1 : it->second;
 }

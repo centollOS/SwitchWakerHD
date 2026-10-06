@@ -77,6 +77,61 @@ class Titles(unittest.TestCase):
             setup.check_title("000500001010ec00")
 
 
+def _title(tid, version, files=10, size=1000):
+    return {"id": tid, "version": version, "folder": "%s_v%d" % (tid, version), "files": files, "bytes": size}
+
+
+class ArchiveTitles(unittest.TestCase):
+    """Which title of a Cemu archive (.wua) is used (info as wwhd-extract --title 0005000010143500 info prints it)."""
+
+    BASE, UPDATE = _title("0005000010143500", 0), _title("0005000e10143500", 16)
+
+    def info(self, titles, selected=None):
+        i = {"format": "wua", "titles": titles}
+        if selected:
+            i.update(selected=selected["folder"], title_id=selected["id"], version=str(selected["version"]),
+                     files=str(selected["files"]), bytes=str(selected["bytes"]))
+        return i
+
+    def test_base_only(self):
+        self.assertEqual(setup.archive_choice(self.info([self.BASE], self.BASE)), ("0005000010143500_v0", []))
+
+    def test_update_not_used(self):
+        folder, notes = setup.archive_choice(self.info([self.UPDATE, self.BASE, _title("0005000c10143500", 3)], self.BASE))
+        self.assertEqual(folder, "0005000010143500_v0")
+        self.assertEqual(len(notes), 2)
+        self.assertIn("the update for The Wind Waker HD (USA), version 16", notes[0])
+        self.assertIn("version 0", notes[0])
+        self.assertIn("downloadable content", notes[1])
+
+    def test_update_without_game(self):
+        with self.assertRaisesRegex(setup.SetupError, "only the update"):
+            setup.archive_choice(self.info([self.UPDATE]))
+
+    def test_other_region(self):
+        with self.assertRaisesRegex(setup.SetupError, "archive contains the Europe version"):
+            setup.archive_choice(self.info([_title("0005000010143600", 0), _title("0005000e10143600", 16)]))
+
+    def test_other_game(self):
+        with self.assertRaisesRegex(setup.SetupError, "does not contain The Wind Waker HD.*title 00050000-1010EC00"):
+            setup.archive_choice(self.info([_title("000500001010ec00", 0)]))
+        with self.assertRaisesRegex(setup.SetupError, "no Wii U titles"):
+            setup.archive_choice(self.info([]))
+
+    def test_other_version(self):
+        v2 = _title("0005000010143500", 2)
+        with self.assertRaisesRegex(setup.SetupError, "version 2.*built for version 0"):
+            setup.archive_choice(self.info([v2], v2))
+
+    def test_title_desc(self):
+        self.assertEqual(setup.title_desc("0005000010143500", 0), "The Wind Waker HD (USA), version 0")
+        self.assertEqual(setup.title_desc("0005000E10143400"), "the update for The Wind Waker HD (Japan)")
+
+    def test_plan(self):
+        self.assertEqual(setup.plan_steps("archive"), ["archive", "compiler", "extract", "translate", "compile", "app"])
+        self.assertEqual(setup.EXTRACT_ERRORS[10], "wrong_title")
+
+
 class Recipe(unittest.TestCase):
     def test_substitution(self):
         m = {"sdk": "/p/sdk", "gamecode": "/w/libgamecode.a", "out": "/d/bin/wwhd"}

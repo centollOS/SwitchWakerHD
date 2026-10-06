@@ -153,14 +153,20 @@ computer (about two minutes); every later start launches the game directly.
      that matches `uname -m` (`x86_64` or `aarch64`); setup says so if it doesn't.
 2. Start **Wind Waker HD** (`Wind Waker HD.app`, `Wind Waker HD.exe`, or `wind-waker-hd` /
    `Wind Waker HD.desktop` on Linux). The first start asks for:
-   - your **disc image** (`.wux` or `.wud`), or an already **extracted game folder** (with `code`,
-     `content` and `meta`, e.g. from dumpling or Cemu). An extracted folder is used where it is,
-     nothing is copied; a disc image is extracted into the release folder (about 1.7 GB);
+   - your **disc image** (`.wux` or `.wud`), a **Cemu archive** (`.wua`), or an already **extracted
+     game folder** (with `code`, `content` and `meta`, e.g. from dumpling or Cemu). An extracted folder
+     is used where it is, nothing is copied; a disc image or Cemu archive is extracted into the
+     release folder (about 1.7 GB);
    - for a disc image, its **disc key** (a `.key` file with the image's name next to it is used
      automatically) and the **Wii U common key** (16 bytes, the same on every console; choose a key
      file or paste the 32 hex digits into the hidden field; a `common.key` next to the image or in the
      release folder is used automatically). Keys are checked before anything is extracted, never
-     stored, and not part of any log.
+     stored, and not part of any log. A Cemu archive or an extracted folder needs no keys.
+   - A Cemu archive (Cemu's "Convert to compressed Wii U archive (.wua)") often holds the game, its
+     update and DLC together. Setup uses the game itself, title 00050000-10143500 version 0, and says
+     so in its log; an update in the archive is not used: the port is built for the code of version 0,
+     and the update's files belong to its newer code. The archive's checksum is verified before
+     anything is extracted.
 
    Then it prepares the game (extract, translate the code to C, compile with a pinned compiler) and
    offers to bring in a save: a Wind Waker HD `cking.sav` folder (Cemu, Wii U), a GameCube `.gci`
@@ -214,7 +220,8 @@ Source builds (below) are not portable: they keep using `~/Library/Application S
 
 You also need, from your own console and disc:
 
-- a disc image of The Wind Waker HD (USA) in `.wud` or `.wux` format;
+- a disc image of The Wind Waker HD (USA) in `.wud` or `.wux` format (or a Cemu archive, `.wua`:
+  `build/cmake/wwhd-extract --title 0005000010143500 extract game.wua game`, no keys);
 - its disc key (16 bytes) in a `.key` file next to the image, with the same base name;
 - the Wii U common key, either in a file `common.key` (16 raw bytes or 32 hex digits) next to
   the image or in the current directory, or in the `WIIU_COMMON_KEY` environment variable
@@ -608,7 +615,7 @@ the game are untested.
 ## License
 
 The code of this project is licensed under the Mozilla Public License 2.0 (see `LICENSE`).
-Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0), {fmt} (MIT) and Dear ImGui (MIT); see Credits. The game itself is Nintendo's property and is not included.
+Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0), {fmt} (MIT) and Dear ImGui (MIT); see Credits. The extractor links zstd (BSD-3-Clause), built from its pinned release source. The game itself is Nintendo's property and is not included.
 
 ## Credits
 
@@ -624,3 +631,8 @@ shader parser glue). Also vendored: [metal-cpp](https://developer.apple.com/meta
 (Apache-2.0, `runtime/third_party/metal-cpp/LICENSE.txt`), [{fmt}](https://github.com/fmtlib/fmt)
 (MIT, `runtime/third_party/fmt/LICENSE`) and [Dear ImGui](https://github.com/ocornut/imgui) v1.92.9b by
 Omar Cornut and contributors, for the settings overlay (MIT, `runtime/third_party/imgui/LICENSE.txt`).
+The Cemu archive (`.wua`) reader in `tools/wudextract/zarchive.cpp` is written from the format of
+[ZArchive](https://github.com/Exzap/ZArchive) by Exzap (MIT No Attribution; nothing of it is
+vendored); [zstd](https://github.com/facebook/zstd) by Meta Platforms (BSD-3-Clause) decompresses
+it, downloaded at build time from its pinned 1.5.7 release (URL + SHA-256 in `cmake/Zstd.cmake`) and
+compiled into `wwhd-extract`; releases include its license in `third-party-licenses/`.

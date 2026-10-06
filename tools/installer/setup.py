@@ -4,7 +4,8 @@
 The release contains no game files. This program builds the game on your machine from your own
 disc dump:
 
-  1. asks for the disc image (.wux/.wud) and its keys, or an already extracted game folder;
+  1. asks for the disc image (.wux/.wud) and its keys, a Cemu Wii U archive (.wua; no keys), or an
+     already extracted game folder;
   2. extracts the game files (tools/bin/wwhd-extract);
   3. translates the game's PowerPC code to C (tools/recomp/recomp.py);
   4. compiles that code with a C compiler (Apple's Command Line Tools on macOS, a pinned llvm-mingw
@@ -16,6 +17,7 @@ Saves are never changed without asking.
 
 Non-interactive use (tests, scripts):
   setup.py --yes --image DISC.wux [--disc-key FILE] --common-key FILE [--data-dir DIR] [--no-launch]
+  setup.py --yes --archive GAME.wua [...]
   setup.py --yes --game-dir EXTRACTED_GAME [...]
   setup.py --yes --gen-dir GENERATED_C --no-launch   (build check with placeholder code, no game)
 Keys can also come from the WIIU_COMMON_KEY environment variable / IMAGE.key next to the image.
@@ -59,6 +61,10 @@ TITLE_IDS = {
     "0005000010143400": "Japan",
 }
 SUPPORTED_TITLE = "0005000010143500"
+# The translated code (tools/recomp, the hooks in tools/recomp/hooks*.txt, the runtime) is made for
+# the code of this version of the game: version 0, the disc and eShop release. Its update
+# (0005000E-10143500) brings other code, and its data files go with that code.
+SUPPORTED_VERSION = 0
 
 EXTRACT_ERRORS = {
     3: "disc_key_bad",
@@ -68,6 +74,7 @@ EXTRACT_ERRORS = {
     7: "image_bad",
     8: "image_damaged",
     9: "write_failed",
+    10: "wrong_title",
 }
 
 
@@ -542,6 +549,81 @@ def check_title(title_id):
         raise SetupError("this disc is not The Wind Waker HD (title id %s)" % title_id)
 
 
+def title_desc(tid, version=None):
+    """'The Wind Waker HD (USA), version 0', 'the update for The Wind Waker HD (USA), version 16', ..."""
+    tid = tid.lower()
+    region = TITLE_IDS.get("00050000" + tid[8:])
+    name = "The Wind Waker HD (%s)" % region if region else "title %s-%s" % (tid[:8].upper(), tid[8:].upper())
+    kind = tid[:8]
+    v = "" if version is None else ", version %d" % version
+    if kind == "0005000e":
+        return "the update for %s%s" % (name, v)
+    if kind == "0005000c":
+        return "downloadable content for %s%s" % (name, v)
+    return name + v
+
+
+def archive_info(path):
+    """wwhd-extract info on a Cemu archive, asking for the supported title. Returns (problem, message, info);
+    info: {"titles": [{id, version, folder, files, bytes}], "selected", "title_id", "version", "files", "bytes"}
+    (also for problem "wrong_title": what the archive does contain)."""
+    p = subprocess.run([extractor(), "--title", SUPPORTED_TITLE, "info", path], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    err = p.stderr.decode("utf-8", "replace").strip()
+    LOG.write("wwhd-extract info (archive): exit %d %s" % (p.returncode, err))
+    info = {"titles": []}
+    for line in p.stdout.decode("utf-8", "replace").splitlines():
+        k, _, v = line.partition(" ")
+        if k == "title":
+            f = v.split(" ")
+            if len(f) == 5 and f[1].isdigit():
+                info["titles"].append({"id": f[0], "version": int(f[1]), "folder": f[2], "files": int(f[3]),
+                                       "bytes": int(f[4])})
+        else:
+            info[k] = v
+    if p.returncode != 0:
+        return EXTRACT_ERRORS.get(p.returncode, "image_bad"), err.replace("error: ", "", 1), info
+    if info.get("format") != "wua":
+        return "image_bad", "not a Cemu Wii U archive", info
+    return None, "", info
+
+
+def archive_choice(info):
+    """Which title of a Cemu archive the port uses, and why. Returns (folder, notes) or raises SetupError
+    with the reason the archive cannot be used."""
+    titles = info.get("titles", [])
+    found = ", ".join("%s (%s)" % (title_desc(t["id"], t["version"]), t["folder"]) for t in titles) or "no Wii U titles"
+    if not info.get("selected"):
+        games = [t for t in titles if t["id"][:8] == "00050000"]
+        for t in games:
+            if t["id"] in TITLE_IDS:
+                try:
+                    check_title(t["id"])
+                except SetupError as e:
+                    raise SetupError("this archive contains %s" % str(e)[len("this is "):])
+        if any(t["id"] == "0005000e" + SUPPORTED_TITLE[8:] for t in titles):
+            raise SetupError("this archive contains only the update for The Wind Waker HD (USA), not the game itself "
+                             "(title 00050000-10143500). In Cemu, make the archive with the game included "
+                             "(it contains: %s)." % found)
+        raise SetupError("this archive does not contain The Wind Waker HD (USA), title 00050000-10143500 "
+                         "(it contains: %s)." % found)
+    version = int(info.get("version", -1))
+    if version != SUPPORTED_VERSION:
+        raise SetupError("the game in this archive is version %d; the port is built for version %d of The Wind Waker "
+                         "HD (USA), the disc and eShop release (folder %s)." % (version, SUPPORTED_VERSION, info["selected"]))
+    notes = []
+    for t in titles:
+        if t["folder"] == info["selected"]:
+            continue
+        if t["id"] == "0005000e" + SUPPORTED_TITLE[8:]:
+            notes.append("Not used: %s (%s). The port is built for the game's own code (version %d); the update "
+                         "replaces that code, and its data files belong to the updated code, so the game is set up "
+                         "from the base game alone." % (title_desc(t["id"], t["version"]), t["folder"], SUPPORTED_VERSION))
+        else:
+            notes.append("Not used: %s (%s), not needed for this game." % (title_desc(t["id"], t["version"]), t["folder"]))
+    return info["selected"], notes
+
+
 def game_folder_title(path):
     meta = os.path.join(path, "meta", "meta.xml")
     try:
@@ -618,7 +700,8 @@ def get_disc_keys(image, ui, args):
             raise SetupError("cannot read the disc image: %s" % err)
 
 
-def extract_game(image, keys, info, data_dir):
+def extract_game(image, keys, info, data_dir, title=None):
+    """Extracts a disc image (keys) or one title folder of a Cemu archive (title, no keys) into data_dir/game."""
     dst = os.path.join(data_dir, "game")
     tmp = os.path.join(data_dir, "game.partial")
     shutil.rmtree(tmp, ignore_errors=True)
@@ -627,17 +710,29 @@ def extract_game(image, keys, info, data_dir):
     if free_space(data_dir) < need:
         raise SetupError("not enough free disk space in %s: %s needed" % (data_dir, human(need)))
     pr = Progress("extracting")
-    p = subprocess.Popen([extractor(), "--keys-stdin", "--progress", "extract", image, tmp], stdin=subprocess.PIPE,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if title:
+        cmd = [extractor(), "--title", title, "--progress", "extract", image, tmp]
+    else:
+        cmd = [extractor(), "--keys-stdin", "--progress", "extract", image, tmp]
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     errbuf = []
     t = threading.Thread(target=lambda: errbuf.append(p.stderr.read()))
     t.start()
-    p.stdin.write(keys.stdin_blob())
+    if keys:
+        p.stdin.write(keys.stdin_blob())
     p.stdin.close()
+    what, verifying = "", False
     for line in p.stdout:
         parts = line.decode().split()
-        if len(parts) == 3 and parts[0] == "progress":
-            pr.update(int(parts[1]), int(parts[2]) or 1, "%s of %s" % (human(int(parts[1])), human(int(parts[2]))))
+        if parts == ["phase", "verify"]:  # an archive: its SHA-256 is checked before anything is written
+            pr, verifying = Progress("checking the archive"), True
+            what = "checking the archive: " if GUI else ""  # the window shows only the detail text
+        elif parts == ["phase", "extract"]:
+            if verifying:
+                pr.done()
+            pr, what, verifying = Progress("extracting"), "", False
+        elif len(parts) == 3 and parts[0] == "progress":
+            pr.update(int(parts[1]), int(parts[2]) or 1, "%s%s of %s" % (what, human(int(parts[1])), human(int(parts[2]))))
     rc = p.wait()
     t.join()
     err = b"".join(errbuf).decode("utf-8", "replace").strip()
@@ -1223,6 +1318,7 @@ class Ctx:
 
 STEP_TITLES = {
     "keys": "Checking the disc image and keys",
+    "archive": "Checking the Cemu archive",
     "folder": "Checking the game folder",
     "compiler": "Getting the compiler",
     "extract": "Extracting the game files",
@@ -1235,14 +1331,15 @@ STEP_TITLES = {
 
 def plan_steps(kind):
     return {"image": ["keys", "compiler", "extract", "translate", "compile", "app"],
+            "archive": ["archive", "compiler", "extract", "translate", "compile", "app"],
             "folder": ["folder", "compiler"] + ([] if PORTABLE else ["copy"]) + ["translate", "compile", "app"],
             "installed": ["compiler", "translate", "compile", "app"],
             "gen": ["compiler", "compile", "app"]}[kind]
 
 
 def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
-    """The whole build for one source: ("image", path) | ("folder", path) | ("installed", game_dir) |
-    ("gen", generated C). check_keys(image) -> (keys, info) is called for an image without keys.
+    """The whole build for one source: ("image", path) | ("archive", path) | ("folder", path) |
+    ("installed", game_dir) | ("gen", generated C). check_keys(image) -> (keys, info) is called for an image without keys.
     Returns the new install state."""
     ui = ui or UI(False)
     args, manifest, data_dir = ctx.args, ctx.manifest, ctx.data_dir
@@ -1254,6 +1351,8 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
     def begin(sid):
         step(next(counter), total, STEP_TITLES[sid], sid)
 
+    archive_title = None
+
     if kind == "image":
         begin("keys")
         if not os.path.isfile(source[1]):
@@ -1262,6 +1361,19 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
             keys, info = check_keys(source[1])
         check_title(info.get("title_id", ""))
         say("  OK: The Wind Waker HD (USA), %s files, %s" % (info.get("files"), human(int(info.get("bytes", 0)))))
+    elif kind == "archive":
+        begin("archive")
+        if not os.path.isfile(source[1]):
+            raise SetupError("Cemu archive not found: %s" % source[1])
+        problem, err, info = archive_info(source[1])
+        if problem and problem != "wrong_title":
+            raise SetupError("cannot read the Cemu archive: %s" % err)
+        archive_title, notes = archive_choice(info)
+        say("  Using %s from the archive (folder %s): %s files, %s. A Cemu archive needs no keys." %
+            (title_desc(info["title_id"], int(info["version"])), archive_title, info.get("files"),
+             human(int(info.get("bytes", 0)))))
+        for n in notes:
+            say("  " + n)
     elif kind == "folder":
         begin("folder")
         if not valid_game_folder(source[1]):
@@ -1282,10 +1394,10 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
     say("  Using %s." % tc.desc)
 
     game_dir = ctx.game_dir
-    if kind == "image":
+    if kind in ("image", "archive"):
         begin("extract")
         t0 = time.time()
-        extract_game(source[1], keys, info, data_dir)
+        extract_game(source[1], keys, info, data_dir, archive_title if kind == "archive" else None)
         game_dir = os.path.join(data_dir, "game")
         say("  Game files are in %s (%d s)" % (game_dir, time.time() - t0))
     elif kind == "folder":
@@ -1371,7 +1483,8 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
 def main():
     ap = argparse.ArgumentParser(description="Wind Waker HD setup", formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog=__doc__)
-    ap.add_argument("--image", help="disc image (.wux or .wud)")
+    ap.add_argument("--image", help="disc image (.wux or .wud; a .wua is taken as --archive)")
+    ap.add_argument("--archive", help="Cemu Wii U archive (.wua): no keys needed")
     ap.add_argument("--disc-key", help="disc key file (default: IMAGE.key)")
     ap.add_argument("--common-key", help="Wii U common key file (or WIIU_COMMON_KEY)")
     ap.add_argument("--game-dir", help="an already extracted game folder (code/, content/, meta/) instead of an image")
@@ -1420,14 +1533,16 @@ def run(args, ui):
     ctx = Ctx(args)
     version, data_dir, game_dir = ctx.version, ctx.data_dir, ctx.game_dir
     say("The Legend of Zelda: The Wind Waker HD - native PC port, setup %s" % version)
-    say("This release contains no game files. Setup builds the game from your own disc dump.")
+    say("This release contains no game files. Setup builds the game from your own dump of the game.")
     say("Install folder: %s" % data_dir)
     state = ctx.state()
     installed = ctx.installed()
 
-    source = None  # ("image", path) | ("folder", path) | ("installed", game_dir) | ("gen", dir)
+    source = None  # ("image", path) | ("archive", path) | ("folder", path) | ("installed", game_dir) | ("gen", dir)
     if args.gen_dir:
         source = ("gen", os.path.abspath(args.gen_dir))
+    elif args.archive or (args.image and args.image.lower().endswith(".wua")):
+        source = ("archive", os.path.abspath(args.archive or args.image))
     elif args.image:
         source = ("image", os.path.abspath(args.image))
     elif args.game_dir:
@@ -1451,7 +1566,7 @@ def run(args, ui):
         else:
             i = ui.choose("The game is installed (%s). What do you want to do?" % version,
                           ["play", "repair (rebuild the game code; keeps game files and saves)",
-                           "reinstall from a disc image or game folder", "quit"])
+                           "reinstall from a disc image, Cemu archive or game folder", "quit"])
             if i == 0:
                 launch(state, data_dir)
                 return 0
@@ -1472,10 +1587,15 @@ def run(args, ui):
         else:
             say("")
             i = ui.choose("What do you have?", ["a disc image (.wux or .wud) with its keys",
+                                                 "a Cemu Wii U archive (.wua; no keys needed)",
                                                  "an already extracted game folder (with code, content and meta folders)"])
-            if i == 0:
-                source = ("image", ui.pick_path("Choose your Wind Waker HD disc image (.wux or .wud)",
-                                                filetypes=[("Wii U disc image (*.wux;*.wud)", "*.wux;*.wud")]))
+            if i in (0, 1):
+                p = ui.pick_path("Choose your Wind Waker HD disc image (.wux or .wud)" if i == 0 else
+                                 "Choose your Wind Waker HD Cemu archive (.wua)",
+                                 filetypes=[("Wii U disc image (*.wux;*.wud)", "*.wux;*.wud")] if i == 0 else
+                                 [("Cemu Wii U archive (*.wua)", "*.wua")])
+                # the file decides: a .wua chosen as a disc image is still an archive
+                source = ("archive" if p.lower().endswith(".wua") else "image", p)
             else:
                 while True:
                     p = ui.pick_path("Choose the extracted game folder (it contains code, content and meta)", folder=True)
@@ -1517,13 +1637,14 @@ def run(args, ui):
 #   hello      {version, platform, data_dir, app_dir, log, installed: {...}|null, game_files: bool,
 #               save_exists: bool, toolchain}
 #   log        {text}                       progress  {label, done, total, detail}
-#   step       {n, total, title, id}        (ids: keys folder compiler extract copy translate compile app)
+#   step       {n, total, title, id}        (ids: keys archive folder compiler extract copy translate compile app)
 #   reply      {id, ok, ...} for each request below; ok=false carries "problem" and "message"
 # Requests (stdin):
-#   probe        {path}                  -> kind image|folder|invalid, disc_key, common_key, title
+#   probe        {path}                  -> kind image|archive|folder|invalid, disc_key, common_key, title;
+#                                           archive: title, folder, bytes, message (which title, why)
 #   check_keys   {image, disc_key_file?, common_key_file?, common_key_hex?}
 #                                        -> title_id, files, bytes  (keys stay in memory for install)
-#   install      {source: image|folder|installed, path?, jobs?}  -> streams step/progress/log, then
+#   install      {source: image|archive|folder|installed, path?, jobs?}  -> streams step/progress/log, then
 #                                           reply {app, exe, data_dir}
 #   import_save  {kind: hd|gc, path, replace?}  -> message; problem "exists" if a save is there
 #   launch       {}                      -> starts the installed game
@@ -1553,6 +1674,7 @@ KEY_MESSAGES = {
     "common_key_bad": "That is not a Wii U common key: it must be 16 raw bytes or 32 hex digits.",
     "common_key_wrong": "The Wii U common key is not correct (it is the same 16 bytes on every Wii U).",
     "image_bad": "This file is not a readable Wii U disc image (.wux or .wud).",
+    "archive_bad": "This file is not a readable Cemu Wii U archive (.wua).",
     "image_damaged": "The disc image is damaged.",
 }
 
@@ -1601,8 +1723,22 @@ def gui_main(args):
                          bytes=folder_size(folder))
         if not os.path.isfile(p):
             return fail(req, "invalid", "File not found.")
+        if p.lower().endswith(".wua"):
+            problem, err, info = archive_info(p)
+            if problem and problem != "wrong_title":
+                return fail(req, problem, "%s %s" % (KEY_MESSAGES["archive_bad"], err))
+            try:
+                folder, notes = archive_choice(info)
+            except SetupError as e:
+                return fail(req, "wrong_title", str(e)[0].upper() + str(e)[1:])
+            msg = ("Cemu Wii U archive: %s (folder %s), no keys needed. The game files are extracted from it into "
+                   "this folder (about %s)." % (title_desc(info["title_id"], int(info["version"])), folder,
+                                                human(int(info.get("bytes", 0)))))
+            return reply(req, kind="archive", path=p, title=title_desc(info["title_id"], int(info["version"])),
+                         folder=folder, bytes=int(info.get("bytes", 0)), message=" ".join([msg] + notes))
         if not p.lower().endswith((".wux", ".wud")):
-            return fail(req, "invalid", "Choose a .wux or .wud disc image, or an extracted game folder.")
+            return fail(req, "invalid", "Choose a .wux or .wud disc image, a .wua Cemu archive, or an extracted game "
+                        "folder.")
         src, _ = find_common_key(p)
         reply(req, kind="image", path=p, disc_key=find_sidecar_disc_key(p), common_key=src)
 
@@ -1647,6 +1783,8 @@ def gui_main(args):
             if not session["keys"] or session["image"] != req.get("path"):
                 return fail(req, "keys", "Check the keys first.")
             source = ("image", req["path"])
+        elif kind == "archive":
+            source = ("archive", req.get("path") or "")
         elif kind == "folder":
             source = ("folder", req.get("path") or "")
         elif kind == "installed":

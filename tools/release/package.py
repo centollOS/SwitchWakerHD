@@ -362,6 +362,8 @@ def main():
     licdir = os.path.join(pkg, "third-party-licenses")
     os.makedirs(licdir)
     entries = dict(VENDORED_LICENSES)
+    # zstd: compiled into tools/bin/wwhd-extract on every platform (pinned source, cmake/Zstd.cmake)
+    entries["Zstandard (BSD-3-Clause)"] = os.path.join(build, "_deps", "zstd-src", "LICENSE")
     for spec in a.license:
         k, _, v = spec.partition("=")
         entries[k] = v
