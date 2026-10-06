@@ -26,6 +26,21 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
   Shift+F1 still saves state slot 1; slot 1 now loads from the overlay.
 - **On-screen text entry** (issue #29): the name screen now shows a text window over the game, with an
   on-screen keyboard for controllers and the mouse; typing on the keyboard goes straight into it.
+- **Boot crash fixed:** the rare crash right after start ("Prepare Thread", agl shader setup) is gone.
+  GX2CopySurface now completes before it returns, as the game expects; before, a late render thread
+  could write into memory the game had already reused (about every 15th start under load, every start
+  on some phones).
+- **GamePad screen modes on Windows/Linux** (overlay → Display): separate window, picture-in-picture,
+  automatic overlay, off, or GamePad only, as on macOS; clicks on the GamePad picture reach the game.
+  The GamePad / Pro Controller choice is now saved (issue #26).
+- **60 fps "Keep game speed"** (overlay → Graphics → Frame rate, PR #21 by rhemfur): skips in-between
+  frames instead of slowing the game down when the machine can't draw 60 frames a second; off by
+  default. The performance overlay shows the share of in-between frames drawn.
+- **Android: build it yourself** (rhemfur's port): see
+  [Android (build it yourself)](#android-build-it-yourself). Also by rhemfur (PRs #19–#22, #24, #30,
+  #31): the game's own icon for windows and shortcuts, name typing in every game window, optional
+  Vulkan paths for slow devices, and pipelines a driver refuses no longer close the game.
+- **Cheats** now also work on saves with heart pieces (PR #25 by Sean13128).
 - **Performance pass** (PR #15 by Sean13128): much less render-thread CPU on Metal (no more stutter
   while the shader cache warms up), a lighter vsync wait on Vulkan, and a fix for the both-renderer
   build crashing with Homebrew boost installed.
