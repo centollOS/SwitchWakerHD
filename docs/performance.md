@@ -268,3 +268,9 @@ The 300-frame `[gfx]` report (Metal) and the `[vulkan textures]` line (`WWHD_VK_
 full checks, hashed bytes (Metal), uploads, page write faults and pages protected;
 `WWHD_LOG_TEXCHECK=1` (Metal) logs which textures were re-checked because of a write.
 
+Cost, Outset beach (states slot 4, 45 s explore walk), render-thread CPU ms/frame, two runs each,
+devel vs this change. Indicative only: measured while the machine ran other long jobs (load 5-9 on
+16 cores). Metal 5.50 / 5.53 before, 5.31 / 5.69 after; Vulkan (AppKit) 6.73 / 7.02 before,
+6.79 / 6.52 after: within run-to-run noise. About 2 write faults and 2 full checks of small
+textures per frame in steady play (0.1-1.5 MiB hashed per 300 frames); an idle re-measure is open.
+

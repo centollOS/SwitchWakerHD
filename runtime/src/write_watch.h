@@ -20,6 +20,10 @@
 // ERROR_NOACCESS): host code that lets the kernel write guest memory brackets the call with
 // HostWrite (fs.cpp's FSReadFile does).
 //
+// Debugging: the faults are expected. lldb stops on each one unless told otherwise
+// (`process handle -p true -s false -n false SIGBUS SIGSEGV`, and on macOS
+// `settings set platform.plugin.darwin.ignored-exceptions EXC_BAD_ACCESS`).
+//
 // Not covered: GPU writes into guest memory (neither renderer has any: render targets stay in GPU
 // textures, marked gpuWritten). If page protection is unavailable, active() is false and the renderers
 // keep their sampling fallback.
