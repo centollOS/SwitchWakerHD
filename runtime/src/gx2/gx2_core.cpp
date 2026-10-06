@@ -210,7 +210,7 @@ static void enqueue(Op op, const uint32* payload, uint32 n) {
 // block the game thread until the render thread has executed everything queued so far
 // debug: WWHD_SYNC_STATS=1 logs, every 5 s, how often each caller waited for the render thread to
 // catch up (render_sync) and for how long
-enum SyncSite { kSyncShutdown, kSyncFlip, kSyncDrawDone, kSyncVsyncUncapped, kSyncVsyncFlip, kSyncSaveState, kSyncSites };
+enum SyncSite { kSyncShutdown, kSyncFlip, kSyncDrawDone, kSyncVsyncUncapped, kSyncVsyncFlip, kSyncSaveState, kSyncCopySurface, kSyncSites };
 static void sync_stat(int site, std::chrono::steady_clock::duration waited) {
     static const bool on = getenv("WWHD_SYNC_STATS") != nullptr;
     if (!on) return;
@@ -223,7 +223,7 @@ static void sync_stat(int site, std::chrono::steady_clock::duration waited) {
     const auto now = std::chrono::steady_clock::now();
     if (now - t0 < std::chrono::seconds(5)) return;
     const double secs = std::chrono::duration<double>(now - t0).count();
-    static const char* names[kSyncSites] = {"shutdown", "flip", "DrawDone", "vsync-uncapped", "vsync-flip", "savestate"};
+    static const char* names[kSyncSites] = {"shutdown", "flip", "DrawDone", "vsync-uncapped", "vsync-flip", "savestate", "CopySurface"};
     char buf[400];
     int k = snprintf(buf, sizeof buf, "[gx2] render_sync per second:");
     for (int i = 0; i < kSyncSites; i++)
@@ -380,6 +380,10 @@ static void execute_one(Op op, const uint32* p, uint32 n) {
         break;
     }
     case OP_COPY_SURFACE: {
+        // debug: WWHD_GX2_DELAY_COPY=ms stalls the render thread before each surface copy (a slow
+        // or busy render thread; reproduced the agl boot crash every time before GX2CopySurface waited)
+        static const int delay = getenv("WWHD_GX2_DELAY_COPY") ? atoi(getenv("WWHD_GX2_DELAY_COPY")) : 0;
+        if (delay) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         uint32 src = unpack_struct(p, kSurfaceWords, 0);
         const uint32* q = p + kSurfaceWords;
         uint32 dst = unpack_struct(q + 2, kSurfaceWords, 1);
@@ -621,12 +625,26 @@ HLE(gx2, GX2SetClearDepthStencil) {
     db->clearStencil = arg(c, 1) & 0xFF;
 }
 HLE(gx2, GX2CopySurface) {
+    // debug: WWHD_COPYDBG=1 logs each copy as issued (thread, caller, source and destination images)
+    static const bool dbg = getenv("WWHD_COPYDBG") != nullptr;
+    if (dbg)
+        LOG("[copydbg] issue t=%.3f thread %08X lr %08X src %08X img %08X dst %08X img %08X size %X", timebase::now() / (double)timebase::kTicksPerSec,
+            threads::current_thread(), c->lr, arg(c, 0), ld32(arg(c, 0) + 0x24), arg(c, 3), ld32(arg(c, 3) + 0x24), ld32(arg(c, 3) + 0x20));
     std::vector<uint32> p;
     put_struct(p, arg(c, 0), kSurfaceWords);
     p.insert(p.end(), {arg(c, 1), arg(c, 2)});
     put_struct(p, arg(c, 3), kSurfaceWords);
     p.insert(p.end(), {arg(c, 4), arg(c, 5)});
     emit(OP_COPY_SURFACE, p.data(), (uint32)p.size());
+    // The copy is complete when GX2CopySurface returns: the game uses the result (and frees the
+    // surfaces) right away. agl's tile-mode conversion (027B5EEC) copies into a temporary surface,
+    // OSBlockMoves it back and frees it at once; executed later on the render thread, the copy
+    // wrote into the freed memory after the heap had reused it (boot crash: agl shader program
+    // array 21EFE28C, program 0's +0x7c zeroed). Not for display lists (they run when called).
+    if (!t_rec.start) {
+        BlockingScope b;
+        render_sync(kSyncCopySurface);
+    }
 }
 HLE(gx2, GX2CopyColorBufferToScanBuffer) {
     std::vector<uint32> p;

@@ -681,6 +681,11 @@ void copy_surface_impl(uint32_t srcAddr, uint32_t srcMip, uint32_t srcSlice, uin
         LatteAddrLib::SetupCachedSurfaceAddrInfo(&sci, srcSlice, 0, bpp, si.pitch, si.height, si.depth, 1, stm, false, (sswz >> 8) & 1, (sswz >> 9) & 3);
     if (Latte::TM_IsMacroTiled(dtm))
         LatteAddrLib::SetupCachedSurfaceAddrInfo(&dci, dstSlice, 0, bpp, di.pitch, di.height, di.depth, 1, dtm, false, (dswz >> 8) & 1, (dswz >> 9) & 3);
+    // debug: WWHD_COPYDBG=1 logs each CPU-path copy (destination range, time); see GX2CopySurface
+    static const bool dbg = getenv("WWHD_COPYDBG") != nullptr;
+    if (dbg)
+        LOG("[copydbg] exec cpu copy t=%.3f src %08X dst %08X..%08X (%ux%u fmt %X tm %u->%u)", timebase::now() / (double)timebase::kTicksPerSec,
+            sbase, dbase, dbase + (uint32_t)di.surfSize, w, h, (uint32_t)s->format.value(), (uint32_t)stm, (uint32_t)dtm);
     for (uint32_t y = 0; y < bh; y++)
         for (uint32_t x = 0; x < bw; x++) {
             uint32_t so = element_offset(si, stm, x, y, srcSlice, bpp, sswz, &sci);

@@ -385,52 +385,56 @@ Most active files (score = primitive calls + 5 × counters + pos/speed stores):
 | d_a_bb.cpp | 23 | 46 | s16-0x49A, s16+0x4C6, s16+0x4C8 | 44 | — |
 | d_a_bl.cpp | 21 | 26 | s16+0x422 | 69 | — |
 
-## Known issue: intermittent boot crash (agl shader archive setup)
+## Fixed: intermittent boot crash (agl shader archive setup)
 
-Not caused by true 60 and not fixed yet. The crash also happens in the main build (6649e10) with true
-60 off, with the same registers.
+**Cause: a late GX2CopySurface write from the render thread into freed and reused guest memory.**
+Fixed on fix-boot-race: GX2CopySurface now waits for the render thread (`render_sync`) before it returns.
+This is likely also the root cause of the Android (Snapdragon 8 Gen 3) boot crash that PR #31 works around
+by pinning all threads to one core: with one core the render thread runs late every time.
 
-- **Signature.** SIGBUS at a guest address of 4 or 8, about 0.5 s after `[thread] start "Prepare
-  Thread"`, on the Prepare Thread. The thread entry is 0274A7A4, the delegate created at 02748E9C.
-  - Call path: 0274A7A4 → 0203EE2C → 0203EA88 (game resource init) → 027B59F4 → 02786520 (agl
-    shader program setup for `agl_resource_cafe_dev.sarc`).
-  - Two forms seen:
-    - lr=027B8E90, ctr=027BC094 in 027B8904: 027BBCA0 reads `*(*(prog+0x7c)+8)`.
-    - lr=02786700 in 02786520's second loop, after 027B90AC.
-  - The registers are identical in every crash run: program-archive object 226FE868, program
-    array 21EFE28C, 56 entries of 0x84 bytes, end 21EFFF6C.
-- **What goes wrong.** 027B8904 sets up the program array for agl_common (from agl_common.sharcfb
-  and .sharc, both present in the archive). Every program's +0x7c pointer is filled: 21F13190 for
-  program 0. The loop at 027B8BB8 uses each one. Later, program 0's +0x7c reads as 0.
-  - In the lr=02786700 form, `[bootdbg]` shows the whole setup of 226FE868 finished correctly.
-    The value is lost afterwards, while the Prepare Thread sets up the next archives. So something
-    overwrites memory that belongs to the array.
-  - A polling watch (`WWHD_WATCH_MEM=21EFE308`) in a crash run never saw 21F13190 there.
-- **Heaps.** The array comes from heap 21EFE15C, a sead::ExpHeap with locking on (+0x90 bit 0).
-  The heap header sits right below the array. With `WWHD_HEAPLOG=1`, only the Prepare Thread
-  allocates from it.
-  - A write-protect watch on the array's page in a good run (`WWHD_BOOTDBG_PROT=1`) saw only
-    Prepare Thread writes, all to that heap's free-list header (21EFE1F4/1F8, from 027536F4 /
-    02752EE4 under 02753D6C).
-  - Several lock-less sead heaps (+0x90 bit 0 clear) are shared between threads, for example
-    44212E68 (main and Prepare), 19EFD834 (main, Prepare, LayoutResMgr) and 39D9FE18 (Prepare,
-    ResMgrPackLoadThread). These are the next suspects: an unlocked allocation or free racing
-    across threads could hand out or clear memory that overlaps the array.
-  - The heap locks themselves are real OSLockMutex imports.
-- **Rate.** About 1 in 12 boots with 8 instances at once. About 1 in 88 with 2 instances (F44 in a
-  2-at-a-time hunt). 0 of 8 with `WWHD_NO_SCHED=1`.
-  - Stalling the Prepare Thread for 20 or 100 ms in each archive setup (`WWHD_BOOTDBG_SLOW=ms`)
-    did not trigger it. So it's not a timeout in the Prepare Thread's own work.
-- **Debug aids (all off by default, true60_test.cpp).**
-  - `WWHD_BOOTDBG=1`: logs 02786520, 027B8904 and 027B82B8 (archive, files, array, program 0's +0x7c).
-  - `WWHD_BOOTDBG_SLOW=ms`: stalls each archive setup.
-  - `WWHD_BOOTDBG_PROT=1`: write-protects the first array's host page and logs each writing thread
-    with a backtrace.
-  - `WWHD_HEAPLOG=1`: logs the first allocation by each thread from each sead::ExpHeap
-    (02753D6C), with the heap's lock flag.
-  - a local hunt script boots 2 instances at a time until one crashes.
-- **Next step.** Hook the ExpHeap free path and log frees whose block overlaps 21EFE28C..21EFFF6C,
-  with the thread. Then look for an unlocked allocation from a shared heap that touches the array.
+- **Signature.** SIGBUS at guest address 4 about 0.5 s after `[thread] start "Prepare Thread"`.
+  - Call path: Prepare Thread 0274A7A4 → 0203EE2C → 0203EA88 → 027B59F4 → 02786520 (agl shader program
+    setup for `agl_resource_cafe_dev.sarc`).
+  - The crash is in 027B90AC, called from 02786520's second loop (lr 02786700). It reads
+    `*(*(prog+0x7c)+4)` with program 0's +0x7c = 0. Program array 21EFE28C (56 × 0x84, object 226FE868).
+  - The first archive setup (027B8904) had filled +0x7c correctly (21F13190). The value was lost afterwards.
+- **Writer.** `gfx::copy_surface_impl`'s CPU re-tile path on the "GX2 render" thread wrote
+  21EFE300..21EFE4FF. Found with a write-protect watch (`WWHD_BOOTDBG_PROT=1`) and confirmed with `WWHD_COPYDBG=1`.
+- **Cause.** agl's tile-mode conversion 027B5EEC (called from the Prepare Thread) does five things:
+  1. allocates a temporary surface from the heap (here at 21EFE300, 0x200 bytes);
+  2. calls `GX2CopySurface` (linear source → temporary, call site lr 027B5FD4);
+  3. immediately calls `OSBlockMove`, copying the temporary back over the source;
+  4. calls `DCFlushRangeNoSync`;
+  5. frees the temporary.
+
+  So the game treats the copy as finished when GX2CopySurface returns. The port only queued it for the render
+  thread. When that thread ran late, the copy landed after the heap had reused the temporary's memory for the
+  program array. It zeroed program 0's +0x7c whenever it landed between the array setup and the second loop.
+  The port also lost the copy's result: the game had already read the temporary.
+- **Fix.** `HLE(gx2, GX2CopySurface)` calls `render_sync` after queueing the copy, unless a display list is
+  being recorded (display lists run when called). This applies to both backends.
+  - Cost: about 50 syncs at boot (agl resource setup), in the first 5 s. None in steady gameplay or after
+    state loads in Outset, on the sea (Windfall pier) or in Dragon Roost Cavern (`WWHD_SYNC_STATS=1`, site
+    "CopySurface").
+  - The per-sync ms cost is to be measured on an idle machine (TODO.md).
+- **Evidence (h6, 2026-10-06, strictly one boot at a time, load average 6 to 8 on 16 cores).**
+  - Stressed with `WWHD_GX2_DELAY_COPY` (the render thread stalls before each copy):
+    - unfixed, 15 or 30 ms: 14 of 14 boots crash with the identical signature;
+    - unfixed, 45 ms: 0 of 4 (the write then lands after the second loop's read);
+    - fixed, 15 or 30 ms: 0 of 28.
+  - Not stressed: unfixed 0 of 30, fixed 0 of 60. With one instance on a lightly loaded machine the natural
+    rate is too low to tell the two apart. Earlier rates were about 1 in 12 with 8 instances and 1 in 15 to
+    1 in 88 with 2, and on Android with all threads on one core every boot crashed.
+- **Debug aids (all off by default).**
+  - `WWHD_GX2_DELAY_COPY=ms` (gx2_core.cpp): the regression repro.
+  - `WWHD_COPYDBG=1`: logs each GX2CopySurface issue (thread, lr, images) and each CPU-path execution (range,
+    time).
+  - In true60_test.cpp:
+    - `WWHD_BOOTDBG=1` (02786520 / 027B8904 / 027B82B8 logs);
+    - `WWHD_BOOTDBG_SLOW=ms`;
+    - `WWHD_BOOTDBG_PROT=1` (write-protect the first program array's page and log the writing thread with a
+      backtrace);
+    - `WWHD_HEAPLOG=1`.
 
 ## Effects interpolation (runtime/src/interp_fx.cpp)
 
