@@ -53,6 +53,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
+#include <fcntl.h>
+#include <io.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -720,6 +722,10 @@ int run(const std::vector<std::string>& args) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // info/list/--progress output is read by the setup: plain \n line endings on every platform
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     try {
         return run(get_args(argc, argv));
     } catch (const Fail& f) {
