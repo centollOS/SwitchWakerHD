@@ -2113,6 +2113,8 @@ void run_main_loop() {
     input::update();
     ::hostui::run_posted();  // option changes from the settings overlay (render thread)
     test_drc_key();
+    if (const int m = gfx::display_test_mode(frame_count()); m >= 0)
+      ::hostui::set_drc_mode(m);
     overlay::set_density(SDL_GetWindowPixelDensity(R.tv.window));
     auto now = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(now - titleTime).count();

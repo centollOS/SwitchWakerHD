@@ -431,6 +431,12 @@ static void create_windows() {
             hidden = true;
         }
     }];
+    // debug: WWHD_TEST_DRC_MODE (display_modes.cpp) switches the mode as the Display menu does
+    if (getenv("WWHD_TEST_DRC_MODE"))
+        [NSTimer scheduledTimerWithTimeInterval:1.0 / 120 repeats:YES block:^(NSTimer*) {
+            const int m = display_test_mode(render::frame_count());
+            if (m >= 0) set_drc_mode(m);
+        }];
     // debug: simulated Cmd+G presses
     if (const char* e = getenv("WWHD_TEST_DRC_KEY")) {
         static std::vector<uint64_t> frames;
@@ -1008,6 +1014,8 @@ void install_display_menu(NSMenu* bar) {
     add(m, @"    Automatic picture-in-picture", @selector(setMode:), kDrcAuto).toolTip =
         @"The overlay appears for a few seconds when the GamePad picture changes a lot (a menu opens); Cmd+G keeps it up";
     add(m, @"    Off", @selector(setMode:), kDrcOff).toolTip = @"Not shown; the game keeps drawing it";
+    add(m, @"    GamePad only", @selector(setMode:), kDrcGamePad).toolTip =
+        @"Only the GamePad picture in the TV window (click it to touch); in the game, Minus switches to Off-TV Play";
     add(m, @"Show GamePad screen", @selector(toggleDrc:), 0, @"g");
     NSMenuItem* pipItem = [m addItemWithTitle:@"Picture-in-picture" action:nil keyEquivalent:@""];
     NSMenu* pm = [[NSMenu alloc] initWithTitle:@"Picture-in-picture"];

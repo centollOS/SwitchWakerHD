@@ -590,8 +590,8 @@ void tab_display() {
         if (radio(f[i], hostui::scale_filter() == i, fok)) hostui::post([i] { hostui::set_scale_filter(i); });
     }
     heading("GamePad screen");
-    // the modes of display_modes.h; a host offers those it can show (Android: no separate window, but
-    // "GamePad only")
+    // the modes of display_modes.h; a host offers those it can show (no "Separate window" without one,
+    // as on Android)
     const int mode = hostui::drc_mode();
     if (hostui::drc_modes() >= 4) {
         static const char* const modes[] = {"Separate window", "Picture-in-picture", "Automatic picture-in-picture", "Off",

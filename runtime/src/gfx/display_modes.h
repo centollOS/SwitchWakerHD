@@ -11,8 +11,8 @@
 //   auto     picture-in-picture for a few seconds when the GamePad picture changes a lot
 //   off      not shown (the game keeps drawing it)
 //   gamepad  only the GamePad picture, fitted to the TV window, like a Wii U played without a TV
-//            (Wind Waker HD's Off-TV Play, Minus, puts the game itself on it). Offered on Android,
-//            where the app has one surface; elsewhere only as a start-up test override.
+//            (Wind Waker HD's Off-TV Play, Minus, puts the game itself on it); a click or touch on
+//            it touches the GamePad
 #pragma once
 #include <atomic>
 #include <cstdint>
@@ -41,10 +41,13 @@ extern std::atomic<bool> g_has_drc_window; // the host made a GamePad window (wi
 
 int find_name(const char* const* names, int n, const char* s, int def);  // index of s, def if absent
 double display_now();  // seconds, monotonic (the automatic overlay's clock)
-bool drc_mode_offered(int m);  // window: the host has a GamePad window; gamepad: Android only
+bool drc_mode_offered(int m);  // window: the host has a GamePad window
 // start-up overrides for tests, after the saved options were read (not saved):
 // WWHD_DRC_MODE, WWHD_DRC_PIP=br:0.25[:0.85], WWHD_SCALE_FILTER
 void display_env_overrides();
+// debug: WWHD_TEST_DRC_MODE=3400:gamepad,3600:pip switches the mode at those frames (as the settings
+// overlay does); the mode to switch to at this frame, -1 for none (host main thread)
+int display_test_mode(uint64_t frame);
 
 // state changes of the modes (the hosts then show or hide their GamePad window and save)
 bool drc_window_wanted();          // window mode and shown

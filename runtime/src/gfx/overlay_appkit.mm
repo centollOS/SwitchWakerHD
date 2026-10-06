@@ -45,8 +45,8 @@ void set_scale_filter(int f) { gfx::display_set_filter(f); }
 bool scale_filter_available() { return true; }
 bool fullscreen() { return gfx::tv_fullscreen(); }
 void set_fullscreen(bool on) { gfx::display_set_tv_fullscreen(on); }
-int drc_modes() { return 4; }
-bool drc_mode_offered(int m) { return m >= 0 && m < 4; }  // as the Display menu (window: greyed there without one)
+int drc_modes() { return gfx::kDrcModeCount; }
+bool drc_mode_offered(int m) { return m >= 0 && m < gfx::kDrcModeCount; }  // as the Display menu (window: greyed there without one)
 int drc_mode() { return gfx::display_drc_mode(); }
 void set_drc_mode(int m) { gfx::set_drc_mode(m); }
 int pip_corner() { return gfx::g_corner; }

@@ -259,8 +259,8 @@ On Linux and Windows, **F11** or **Alt+Enter** switches the focused window (TV o
 screen and back, and clicking/dragging with the left mouse button in the GamePad window uses the
 touch screen. The GamePad screen has the macOS modes (settings overlay, *Display*): a separate
 window, a picture-in-picture overlay in a corner of the TV window (corner, size and opacity
-selectable; click it to touch), the automatic overlay, or off; **Ctrl+G** shows/hides it, and the
-choices are saved in `settings.ini`. The macOS menus (Graphics, Display, Input, Save States) don't exist in these builds
+selectable; click it to touch), the automatic overlay, off, or the GamePad picture alone in the TV
+window (click it to touch); **Ctrl+G** shows/hides it, and the choices are saved in `settings.ini`. The macOS menus (Graphics, Display, Input, Save States) don't exist in these builds
 yet; their settings are available as environment variables (below) and the number-key shortcuts.
 
 Settings, controls and save states live under `~/.config/wwhd` (or `$XDG_CONFIG_HOME/wwhd`).
@@ -429,7 +429,9 @@ pointer hides after 2 s without movement), picture scaling (smooth, sharp, or in
 where the GamePad screen goes: a separate window (which can be put on another display, also in
 full screen there), a picture-in-picture overlay in a corner of the TV picture (size, corner and
 opacity selectable; click it to touch), an automatic overlay that appears for a few seconds when
-the GamePad picture changes a lot (a page or menu switches; **⌘G** keeps it up), or off.
+the GamePad picture changes a lot (a page or menu switches; **⌘G** keeps it up), off, or *GamePad
+only* (the GamePad picture alone in the TV window, click it to touch; Minus in the game switches to
+Off-TV Play).
 **⌘G** shows/hides the GamePad screen in any mode. Window positions, full screen, these choices
 and the renderer are remembered in `~/Library/Application Support/wwhd/display.plist`
 (delete it to reset).
@@ -441,7 +443,7 @@ and the renderer are remembered in `~/Library/Application Support/wwhd/display.p
 - [docs/performance.md](docs/performance.md) covers how to profile the port, measured fixes and
   open performance leads.
 - Useful environment variables: `WWHD_NO_AUDIO=1`, `WWHD_NO_GAMEPAD=1` (no second window), `WWHD_NO_CONTROLLERS=1` (SDL builds: ignore host game controllers), `WWHD_LANGUAGE=<code>` (console language: 1 English, 2 French, 5 Spanish, … — the USA/Asia disc carries English, French and Spanish),
-  `WWHD_DRC_MODE=window|pip|auto|off`, `WWHD_ASPECT=16:9|window|16:10|21:9|32:9|<w:h>`,
+  `WWHD_DRC_MODE=window|pip|auto|off|gamepad`, `WWHD_ASPECT=16:9|window|16:10|21:9|32:9|<w:h>`,
   `WWHD_AUDIO_VOLUME=0..1`, `WWHD_SHADER_CACHE=<file>|0`, `WWHD_AO_MODE=0..2`, `WWHD_AO_HIRES=0|1`, `WWHD_ANISO=0|1`, `WWHD_RES_SCALE=1|1.5|2|3`,
   `WWHD_FXAA=0|1`, `WWHD_INTERP=1`, `WWHD_INTERP_PACED=0|1`, `WWHD_TRUE60=1` (start values for the Graphics menu; they
   override the remembered choices);

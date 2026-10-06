@@ -13,6 +13,7 @@
 //                                        TV frames 3400..3410; mapped through the overlay like a real click
 //   WWHD_DRC_AUTO=0.12:4                 automatic mode: changed-area threshold and hold time in seconds
 //   WWHD_DRC_AUTO_LOG=1                  log the automatic mode's change measurements
+//   WWHD_TEST_DRC_MODE=3400:gamepad,3600:pip   switch the mode at those TV frames (as the settings overlay)
 //   WWHD_VIEW_BUTTON=0|1                 the touch screens' view button (on by default on Android only)
 #include "display_modes.h"
 
@@ -66,11 +67,7 @@ double display_now() {
 bool drc_mode_offered(int m) {
     if (m < 0 || m >= kDrcModeCount) return false;
     if (m == kDrcWindow) return g_has_drc_window;
-#ifdef __ANDROID__
     return true;
-#else
-    return m != kDrcGamePad;  // a desktop has the GamePad window for that (test override only)
-#endif
 }
 
 void display_env_overrides() {
@@ -85,6 +82,28 @@ void display_env_overrides() {
         }
     }
     if (const char* e = getenv("WWHD_SCALE_FILTER")) g_filter = find_name(kFilterNames, 3, e, g_filter);
+}
+
+int display_test_mode(uint64_t frame) {
+    struct Switch { uint64_t at; int mode; };
+    static const std::vector<Switch> script = [] {
+        std::vector<Switch> v;
+        if (const char* e = getenv("WWHD_TEST_DRC_MODE")) {
+            unsigned long long at; char name[16]; int n;
+            while (sscanf(e, "%llu:%15[a-z]%n", &at, name, &n) == 2) {
+                v.push_back({at, find_name(kModeNames, kDrcModeCount, name, -1)});
+                e += n;
+                if (*e != ',') break;
+                e++;
+            }
+        }
+        return v;
+    }();
+    static size_t i = 0;
+    if (i >= script.size() || frame < script[i].at) return -1;
+    LOG("[display] test: GamePad screen mode %s at frame %llu", script[i].mode >= 0 ? kModeNames[script[i].mode] : "?",
+        (unsigned long long)frame);
+    return script[i++].mode;
 }
 
 // ---------------------------------------------------------------- mode state
