@@ -57,7 +57,6 @@ extern Renderer R;
 void install_menu(NSWindow* tv);  // menu.mm
 bool fxaa_enabled();
 void dump_texture(id<MTLTexture> src, const char* name, bool async, bool srgbEncode);
-uint64_t frame_count();
 
 // ---------------------------------------------------------------- options
 // (the option state itself: display_modes.cpp)
@@ -441,9 +440,10 @@ static void create_windows() {
         }
         [NSTimer scheduledTimerWithTimeInterval:1.0 / 120 repeats:YES block:^(NSTimer*) {
             static size_t i = 0;
-            if (i < frames.size() && frame_count() >= frames[i]) {
+            // the active renderer's frames (gfx::frame_count is the Metal renderer's: 0 with Vulkan)
+            if (i < frames.size() && render::frame_count() >= frames[i]) {
                 i++;
-                LOG("[display] test: Cmd+G at frame %llu", (unsigned long long)frame_count());
+                LOG("[display] test: Cmd+G at frame %llu", (unsigned long long)render::frame_count());
                 toggle_drc_screen();
             }
         }];
