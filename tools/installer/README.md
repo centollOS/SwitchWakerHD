@@ -143,3 +143,19 @@ SHA-256 ("phase verify", the step's bar shows "checking the archive"), then writ
 (exit 7) and a missing title (exit 10) are reported before anything is written. The space check is
 the selected title's size plus 1 GB, as for a disc image. Tests: `extract_wua` (ctest, a synthetic
 archive written by the test) and `ArchiveTitles` in `test_setup.py`.
+
+## Game version check
+
+The translated code and its hooks (`tools/recomp/hooks*.txt`) are made for one file: `code/cking.rpx`
+of The Wind Waker HD (USA), title 00050000-10143500, version 0. `setup.py` keeps its SHA-256
+(`SUPPORTED_RPX_SHA256`, a checksum only: it identifies the file and contains nothing of it;
+`guard.py` flags 32-digit, key-shaped strings, not 64-digit sums) and `check_game_version` compares
+it for every source before anything is translated: an extracted folder at the "folder" step (and
+already when the window probes it), a disc image or Cemu archive right after extracting (into
+`game.partial`, which is then removed, so an earlier `game/` stays), a repair or update with the
+installed files. On a mismatch the message says what was found (another title, "an update merged in"
+when `code/app.xml` or `meta/meta.xml` give a version above 0 or the update's title id, otherwise
+"not the expected file" with the start of its SHA-256), what is needed and how to get it. Tests:
+`GameVersion` in `test_setup.py` (synthetic files; `WWHD_GAME_DIR=game` also checks your own copy).
+The recompiler reads only `code/cking.rpx` (the runtime checks at start that it matches the translated
+code); the other files in `code/` (`app.xml`, `cos.xml`) are metadata and are not checked.

@@ -65,6 +65,11 @@ SUPPORTED_TITLE = "0005000010143500"
 # the code of this version of the game: version 0, the disc and eShop release. Its update
 # (0005000E-10143500) brings other code, and its data files go with that code.
 SUPPORTED_VERSION = 0
+# SHA-256 of code/cking.rpx of that version (The Wind Waker HD, USA, 00050000-10143500, v0). A checksum
+# only: it identifies the file the port is built for and contains nothing of it (64 hex digits;
+# tools/release/guard.py flags only 32-digit, key-shaped strings). Every source is checked against
+# it before the code is translated (check_game_version).
+SUPPORTED_RPX_SHA256 = "c4f0ab300542e0bfc462696850534e71db2ad02288a7eb55e5a4cd4062f16153"
 
 EXTRACT_ERRORS = {
     3: "disc_key_bad",
@@ -634,6 +639,66 @@ def game_folder_title(path):
         return None
 
 
+def code_title_version(path):
+    """(title id, title version) from code/app.xml (the code's own metadata), else from meta/meta.xml;
+    None where it cannot be read."""
+    for rel, base in ((("code", "app.xml"), 16), (("meta", "meta.xml"), 10)):
+        try:
+            with open(os.path.join(path, *rel), "rb") as f:
+                d = f.read(65536)
+        except OSError:
+            continue
+        tid = re.search(rb"<title_id[^>]*>\s*([0-9A-Fa-f]{16})\s*<", d)
+        ver = re.search(rb"<title_version[^>]*>\s*([0-9A-Fa-f]+)\s*<", d)
+        if tid or ver:
+            try:
+                v = int(ver.group(1), base) if ver else None
+            except ValueError:
+                v = None
+            return (tid.group(1).decode().lower() if tid else None), v
+    return None, None
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+GAME_VERSION_FIX = ("Use the game's own files: a disc image (.wud/.wux), a Cemu archive (.wua; setup takes the game from it "
+                    "and leaves an update out), or the game's folder exactly as dumped (in Cemu: "
+                    "mlc01/usr/title/00050000/10143500, not the update in 0005000e/10143500), without update files "
+                    "copied over it.")
+
+
+def check_game_version(path):
+    """Raises SetupError unless code/cking.rpx is the one the port is built for (USA, version 0). The
+    translated code and its hooks are made for exactly that file, so this runs before translating."""
+    rpx = os.path.join(path, "code", "cking.rpx")
+    try:
+        digest = file_sha256(rpx)
+    except OSError as e:
+        raise SetupError("cannot read %s: %s" % (rpx, e))
+    if digest == SUPPORTED_RPX_SHA256:
+        return
+    tid, ver = code_title_version(path)
+    update = "0005000e" + SUPPORTED_TITLE[8:]
+    if tid and tid not in (SUPPORTED_TITLE, update):
+        found = "the game code (code/cking.rpx) is from %s (title %s-%s)" % (title_desc(tid, ver), tid[:8].upper(),
+                                                                            tid[8:].upper())
+    elif tid == update or ver:
+        found = ("the game code (code/cking.rpx) is %s (per the folder's app.xml/meta.xml): this looks like the "
+                 "game with an update merged in" % ("version %d of the game" % ver if ver else "from the update"))
+    else:
+        found = ("the game code (code/cking.rpx) is not the expected file (SHA-256 %s...): not version 0 of the USA "
+                 "game, or a modified or damaged copy" % digest[:16])
+    LOG.write("cking.rpx SHA-256 %s, expected %s" % (digest, SUPPORTED_RPX_SHA256))
+    raise SetupError("%s. The port needs The Wind Waker HD (USA), title 00050000-10143500, version 0 (the disc or "
+                     "eShop release, without the update). %s" % (found, GAME_VERSION_FIX))
+
+
 def valid_game_folder(path):
     return (os.path.isfile(os.path.join(path, "code", "cking.rpx")) and os.path.isdir(os.path.join(path, "content"))
             and os.path.isfile(os.path.join(path, "meta", "meta.xml")))
@@ -743,6 +808,11 @@ def extract_game(image, keys, info, data_dir, title=None):
     pr.done()
     if not valid_game_folder(tmp):
         raise SetupError("the extracted files are incomplete (no code/cking.rpx)")
+    try:
+        check_game_version(tmp)
+    except SetupError:
+        shutil.rmtree(tmp, ignore_errors=True)  # keeps the game files of an earlier setup
+        raise
     replace_dir(tmp, dst)
 
 
@@ -1381,13 +1451,15 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
         tid = game_folder_title(source[1])
         if tid:
             check_title(tid)
-        say("  OK: %s" % source[1])
+        check_game_version(source[1])
+        say("  OK: %s (USA, version 0)" % source[1])
     elif kind == "installed":
         if not valid_game_folder(ctx.game_dir):
             raise SetupError("no installed game files in %s; run setup with your disc image" % ctx.game_dir)
         tid = game_folder_title(ctx.game_dir)
         if tid:
             check_title(tid)
+        check_game_version(ctx.game_dir)
 
     begin("compiler")
     tc = get_toolchain(manifest["toolchain"], data_dir, ui)
@@ -1719,6 +1791,10 @@ def gui_main(args):
                     check_title(tid)
                 except SetupError as e:
                     return fail(req, "wrong_title", str(e))
+            try:
+                check_game_version(folder)
+            except SetupError as e:
+                return fail(req, "wrong_version", str(e)[0].upper() + str(e)[1:])
             return reply(req, kind="folder", path=folder, title="The Wind Waker HD (USA)", in_place=PORTABLE,
                          bytes=folder_size(folder))
         if not os.path.isfile(p):

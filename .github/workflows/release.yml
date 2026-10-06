@@ -74,7 +74,8 @@ jobs:
         run: |
           python3 tools/recomp/stubgen.py build/gen-stub
           cmake -S . -B build/rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DWWHD_RENDERER=METAL \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DGEN_DIR="$PWD/build/gen-stub" -DWWHD_SETUP_GUI=ON
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DGEN_DIR="$PWD/build/gen-stub" -DWWHD_SETUP_GUI=ON \
+            -DWWHD_BUNDLED_ZSTD=ON
           cmake --build build/rel
 
       - name: Unit tests

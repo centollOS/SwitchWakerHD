@@ -171,7 +171,10 @@ computer (about two minutes); every later start launches the game directly.
    Then it prepares the game (extract, translate the code to C, compile with a pinned compiler) and
    offers to bring in a save: a Wind Waker HD `cking.sav` folder (Cemu, Wii U), a GameCube `.gci`
    (converted to HD), or the saves and settings of an earlier installation or another Wind Waker HD
-   folder (copied, never moved). Only the USA version (title 00050000-10143500) is supported.
+   folder (copied, never moved). Only the USA version (title 00050000-10143500), version 0 (the disc
+   or eShop release, without the update) is supported: before translating, setup checks the game's
+   code (`code/cking.rpx`) against the SHA-256 of that version and explains what to use instead when
+   it differs (e.g. a game folder with an update copied over it).
 3. That's it: start Wind Waker HD to play. To repair, update or change the game, hold **Shift** while
    starting it (macOS, Windows) or start it with `--setup` (Linux; also the "Setup" action of its
    menu entry).
@@ -211,6 +214,9 @@ Source builds (below) are not portable: they keep using `~/Library/Application S
 - **macOS** on Apple Silicon, **Linux** (x86-64 or arm64, Vulkan) or **Windows** (x86-64, Vulkan); the
   platform-specific build steps are under "Building" below
 - macOS: Xcode command line tools (`xcode-select --install`)
+- zstd for the extractor's `.wua` support: a system one if installed (`brew install zstd`, `apt install
+  libzstd-dev`; found through its CMake package or pkg-config), otherwise CMake downloads the pinned
+  source (`-DWWHD_BUNDLED_ZSTD=ON` always does, as release builds do)
 - CMake 3.20 or newer
 - Python 3 with `pycryptodome` for `tools/wudextract.py` (`pip3 install pycryptodome`); the native
   `wwhd-extract` built with the project (`build/cmake/wwhd-extract --help`) needs neither
@@ -615,7 +621,7 @@ the game are untested.
 ## License
 
 The code of this project is licensed under the Mozilla Public License 2.0 (see `LICENSE`).
-Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0), {fmt} (MIT) and Dear ImGui (MIT); see Credits. The extractor links zstd (BSD-3-Clause), built from its pinned release source. The game itself is Nintendo's property and is not included.
+Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0), {fmt} (MIT) and Dear ImGui (MIT); see Credits. The extractor links zstd (BSD-3-Clause); releases build it from its pinned release source. The game itself is Nintendo's property and is not included.
 
 ## Credits
 
@@ -634,5 +640,6 @@ Omar Cornut and contributors, for the settings overlay (MIT, `runtime/third_part
 The Cemu archive (`.wua`) reader in `tools/wudextract/zarchive.cpp` is written from the format of
 [ZArchive](https://github.com/Exzap/ZArchive) by Exzap (MIT No Attribution; nothing of it is
 vendored); [zstd](https://github.com/facebook/zstd) by Meta Platforms (BSD-3-Clause) decompresses
-it, downloaded at build time from its pinned 1.5.7 release (URL + SHA-256 in `cmake/Zstd.cmake`) and
-compiled into `wwhd-extract`; releases include its license in `third-party-licenses/`.
+it: release builds compile its pinned 1.5.7 release (URL + SHA-256 in `cmake/Zstd.cmake`) statically
+into `wwhd-extract` and include its license in `third-party-licenses/`; source builds use a system
+zstd when there is one.

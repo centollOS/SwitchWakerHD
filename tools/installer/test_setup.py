@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for the installer's helpers (no game files, no network): python3 test_setup.py"""
+import hashlib
 import os
 import sys
 import tempfile
@@ -130,6 +131,65 @@ class ArchiveTitles(unittest.TestCase):
     def test_plan(self):
         self.assertEqual(setup.plan_steps("archive"), ["archive", "compiler", "extract", "translate", "compile", "app"])
         self.assertEqual(setup.EXTRACT_ERRORS[10], "wrong_title")
+
+
+class GameVersion(unittest.TestCase):
+    """code/cking.rpx must be the file the port is built for (USA v0); synthetic files, made-up bytes."""
+
+    def make(self, d, rpx=b"made-up rpx", app_tid="0005000010143500", app_ver="0000"):
+        os.makedirs(os.path.join(d, "code"), exist_ok=True)
+        with open(os.path.join(d, "code", "cking.rpx"), "wb") as f:
+            f.write(rpx)
+        with open(os.path.join(d, "code", "app.xml"), "w") as f:
+            f.write('<app><title_id type="hexBinary" length="8">%s</title_id>\n'
+                    '<title_version type="hexBinary" length="2">%s</title_version></app>' % (app_tid, app_ver))
+
+    def setUp(self):
+        self.saved = setup.SUPPORTED_RPX_SHA256
+        setup.SUPPORTED_RPX_SHA256 = hashlib.sha256(b"made-up rpx").hexdigest()
+
+    def tearDown(self):
+        setup.SUPPORTED_RPX_SHA256 = self.saved
+
+    def test_expected_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.make(d)
+            setup.check_game_version(d)
+
+    def test_update_merged_in(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.make(d, rpx=b"other code", app_ver="0010")
+            with self.assertRaisesRegex(setup.SetupError, "version 16 of the game.*update merged in.*"
+                                                          "00050000-10143500, version 0.*Use the game's own files"):
+                setup.check_game_version(d)
+            self.make(d, rpx=b"other code", app_tid="0005000E10143500", app_ver="0000")
+            with self.assertRaisesRegex(setup.SetupError, "from the update.*merged in"):
+                setup.check_game_version(d)
+
+    def test_unknown_build(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.make(d, rpx=b"damaged")
+            with self.assertRaisesRegex(setup.SetupError, "not the expected file \\(SHA-256 [0-9a-f]{16}\\.\\.\\.\\)"):
+                setup.check_game_version(d)
+            os.remove(os.path.join(d, "code", "app.xml"))
+            with self.assertRaisesRegex(setup.SetupError, "not the expected file"):
+                setup.check_game_version(d)
+
+    def test_other_region(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.make(d, rpx=b"eu", app_tid="0005000010143600")
+            with self.assertRaisesRegex(setup.SetupError, "The Wind Waker HD \\(Europe\\)"):
+                setup.check_game_version(d)
+
+    def test_missing(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(setup.SetupError, "cannot read"):
+                setup.check_game_version(d)
+
+    @unittest.skipUnless(os.environ.get("WWHD_GAME_DIR"), "WWHD_GAME_DIR (your own extracted game) not set")
+    def test_real_game(self):
+        setup.SUPPORTED_RPX_SHA256 = self.saved
+        setup.check_game_version(os.environ["WWHD_GAME_DIR"])  # read only
 
 
 class Recipe(unittest.TestCase):

@@ -335,6 +335,15 @@ def main():
     for hp in sorted(os.listdir(os.path.join(ROOT, "tools", "recomp"))):
         if re.match(r"hooks.*\.txt$", hp):
             copy(os.path.join(ROOT, "tools", "recomp", hp), os.path.join(pkg, "tools", "recomp", hp))
+    # the extractor must be self-contained: zstd from the pinned source, linked statically (cmake/Zstd.cmake)
+    try:
+        with open(os.path.join(build, "wwhd-zstd.txt")) as f:
+            kind, _, zstd_license = f.read().strip().partition(" ")
+    except OSError:
+        kind, zstd_license = "", ""
+    if kind != "bundled":
+        sys.exit("wwhd-extract in %s uses a system zstd; configure release builds with -DWWHD_BUNDLED_ZSTD=ON "
+                 "(on by default with -DWWHD_BUNDLED_DEPS=ON)" % build)
     copy(os.path.join(build, "wwhd-extract" + exe_suffix), os.path.join(pkg, "tools", "bin", "wwhd-extract" + exe_suffix))
 
     # the setup in a terminal (the fallback for the program above), in tools/
@@ -363,7 +372,7 @@ def main():
     os.makedirs(licdir)
     entries = dict(VENDORED_LICENSES)
     # zstd: compiled into tools/bin/wwhd-extract on every platform (pinned source, cmake/Zstd.cmake)
-    entries["Zstandard (BSD-3-Clause)"] = os.path.join(build, "_deps", "zstd-src", "LICENSE")
+    entries["Zstandard (BSD-3-Clause)"] = zstd_license
     for spec in a.license:
         k, _, v = spec.partition("=")
         entries[k] = v
