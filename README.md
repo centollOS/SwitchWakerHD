@@ -1,9 +1,10 @@
-# The Legend of Zelda: The Wind Waker HD — native PC port (macOS, Linux, Windows)
+# The Legend of Zelda: The Wind Waker HD — native port (macOS, Linux, Windows, Android)
 
 A static recompilation of the Wii U version (USA) that runs natively on **macOS** (Apple Silicon),
-**Linux** and **Windows**. The game's PowerPC code is translated to C ahead of time, the Cafe OS
-libraries the game uses are reimplemented natively, and GX2 graphics are implemented directly on
-Metal (macOS) or Vulkan (all three platforms), with no Cemu runtime and no GPU command emulation.
+**Linux**, **Windows** and **Android** (arm64; [build it yourself](#android-build-it-yourself)). The
+game's PowerPC code is translated to C ahead of time, the Cafe OS libraries the game uses are
+reimplemented natively, and GX2 graphics are implemented directly on Metal (macOS) or Vulkan (all
+platforms), with no Cemu runtime and no GPU command emulation.
 
 How it works and how it differs from running the game in Cemu: [docs/how-it-works.md](docs/how-it-works.md).
 
