@@ -151,6 +151,14 @@ static void apply_small_regs(uint32 first, const uint32* v, uint32 n) {
 
 static void apply_regs(uint32 first, const uint32* v, uint32 n) {
     if (first + n > kNumRegs) return;
+    // uniform registers (often hundreds of words a call) never move the shader-state counters, so
+    // the comparison that decides those is skipped: compared and then copied, they were ~15% of the
+    // render thread on the desktop
+    if (first >= (uint32)mmSQ_ALU_CONSTANT0_0 && first + n <= (uint32)mmSQ_ALU_CONSTANT0_0 + 0x1000) {
+        memcpy(&g_regs[first], v, n * 4);
+        if (g_shadow) memcpy(&g_shadow[first], v, n * 4);
+        return;
+    }
 #ifdef WWHD_HAS_VULKAN
     // Vulkan renderer only (the Metal renderer keeps the original bulk path)
     static const bool fusedSmall = [] {
@@ -236,9 +244,16 @@ static std::atomic<uint64_t> g_render_wait_ns{0};
 uint64_t render_thread_wait_ns() { return g_render_wait_ns.load(std::memory_order_relaxed); }
 
 std::atomic<const char*> g_render_stage{nullptr};
-static std::atomic<uint32> g_render_op{0xFF};       // command being executed (0xFF: none)
-static std::atomic<bool> g_render_idle{true};       // waiting for commands
-static std::atomic<uint64_t> g_render_commands{0};  // commands executed so far
+// The render thread's progress for the watchdog, on a cache line of its own: these are written for
+// every command, and next to the queue's mutex and vectors (which the game's main thread writes for
+// every GX2 call) each write took the line away from the main thread. Only the render thread writes
+// them, so the count is a plain load and store (the locked increment was ~12% of the render thread).
+struct alignas(64) RenderProgress {
+    std::atomic<uint32> op{0xFF};          // command being executed (0xFF: none)
+    std::atomic<bool> idle{true};          // waiting for commands
+    std::atomic<uint64_t> commands{0};     // commands executed so far
+};
+static RenderProgress g_progress;
 
 static void render_thread_main() {
     host::set_thread_name("GX2 render");
@@ -250,10 +265,10 @@ static void render_thread_main() {
         {
             std::unique_lock<std::mutex> lk(g_q_mutex);
             g_q_waiting = true;
-            g_render_idle.store(true, std::memory_order_relaxed);
+            g_progress.idle.store(true, std::memory_order_relaxed);
             auto waitStart = std::chrono::steady_clock::now();
             g_q_cv.wait(lk, [] { return !g_q_pending.empty(); });
-            g_render_idle.store(false, std::memory_order_relaxed);
+            g_progress.idle.store(false, std::memory_order_relaxed);
             g_render_wait_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                            std::chrono::steady_clock::now() - waitStart).count()),
                                        std::memory_order_relaxed);
@@ -268,9 +283,58 @@ static void render_thread_main() {
     }
 }
 
+// Staged commands (WWHD_GX2_STAGING, on unless =0). Every GX2 call of the game's main thread took the
+// queue's mutex to append its command (tens of thousands a frame), and the vectors' cache lines
+// moved between it and the render thread. The guest threads of emulated core 1 (the main thread and
+// the game's Prepare Thread, the only ones that issue GX2 commands) now collect commands in a buffer
+// of their own and hand them over in blocks: when the block is large, when the render thread has
+// run out of work, at commands that wait for or present the GPU's work, and whenever the thread gives
+// up its emulated core (threads.cpp core_release). Two threads of one core never run at once, so
+// the commands keep the order they were issued in. Threads of other cores append directly as before.
+namespace {
+constexpr size_t kStageWords = 1024;
+struct Staging {
+    std::vector<uint32> words;
+    int eligible = -1;  // -1: not decided yet
+};
+thread_local Staging t_stage;
+bool staging_on() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_GX2_STAGING");
+        return !(e && *e == '0');
+    }();
+    return on;
+}
+}  // namespace
+
+void publish_staged() {
+    Staging& s = t_stage;
+    if (s.words.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(g_q_mutex);
+        g_q_pending.insert(g_q_pending.end(), s.words.begin(), s.words.end());
+        if (g_q_waiting) g_q_cv.notify_one();
+    }
+    s.words.clear();
+}
+
 static void enqueue(Op op, const uint32* payload, uint32 n) {
     static std::once_flag once;
     std::call_once(once, [] { host::start_thread(render_thread_main, 8 << 20); });
+    Staging& s = t_stage;
+    if (s.eligible < 0) {
+        s.eligible = staging_on() && threads::current_core() == 1;
+        if (s.eligible) s.words.reserve(kStageWords + 1024);
+    }
+    if (s.eligible) {
+        s.words.push_back(op | (n << 8));
+        s.words.insert(s.words.end(), payload, payload + n);
+        if (s.words.size() >= kStageWords || (op >= OP_FLUSH && op <= OP_FENCE) ||
+            g_progress.idle.load(std::memory_order_relaxed))
+            publish_staged();
+        return;
+    }
+    publish_staged();  // (a thread that stages never gets here)
     std::lock_guard<std::mutex> lk(g_q_mutex);
     g_q_pending.push_back(op | (n << 8));
     g_q_pending.insert(g_q_pending.end(), payload, payload + n);
@@ -367,10 +431,10 @@ void execute(const uint32* words, uint32 count) {
             LOG("[gx2] corrupt display list command %08X", hdr);
             return;
         }
-        g_render_op.store(op, std::memory_order_relaxed);
-        g_render_commands.fetch_add(1, std::memory_order_relaxed);
+        g_progress.op.store(op, std::memory_order_relaxed);
+        g_progress.commands.store(g_progress.commands.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         execute_one(op, &words[i + 1], n);
-        g_render_op.store(0xFF, std::memory_order_relaxed);
+        g_progress.op.store(0xFF, std::memory_order_relaxed);
         i += 1 + n;
     }
 }
@@ -542,9 +606,9 @@ static void watchdog_thread() {
         if (now < nextReport || reports >= 6) continue;
         reports++;
         nextReport = now + std::chrono::seconds(15);
-        const uint64_t commands = g_render_commands.load(std::memory_order_relaxed);
+        const uint64_t commands = g_progress.commands.load(std::memory_order_relaxed);
         const char* stage = g_render_stage.load(std::memory_order_relaxed);
-        const uint32 op = g_render_op.load(std::memory_order_relaxed);
+        const uint32 op = g_progress.op.load(std::memory_order_relaxed);
         size_t pending = 0;
         uint64_t issued = 0, done = 0;
         {
@@ -558,7 +622,7 @@ static void watchdog_thread() {
         LOG("[watchdog] no frame for %.1f s (frame %llu). Render thread: %s%s, command %u, %llu commands since the last "
             "report; queued words %zu, game syncs issued %llu done %llu",
             std::chrono::duration<double>(now - lastChange).count(), (unsigned long long)swaps,
-            g_render_idle.load() ? "waiting for commands" : "executing", stage ? (std::string(" (") + stage + ")").c_str() : "",
+            g_progress.idle.load() ? "waiting for commands" : "executing", stage ? (std::string(" (") + stage + ")").c_str() : "",
             op, (unsigned long long)(commands - lastCommands), pending, (unsigned long long)issued, (unsigned long long)done);
         lastCommands = commands;
         threads::dump_state();
@@ -810,9 +874,13 @@ HLE(gx2, GX2SwapScanBuffers) {
         double s = std::chrono::duration<double>(now - last).count();
         last = now;
         static uint64_t lastLate = 0;
-        LOG("[gx2] frame %llu, %.1f swaps/s, swap interval %u, late frames flipped at once %llu (WWHD_RELAXED_VSYNC %s)",
+        static uint64_t lastCommands = 0;
+        const uint64_t commands = g_progress.commands.load(std::memory_order_relaxed);
+        LOG("[gx2] frame %llu, %.1f swaps/s, swap interval %u, late frames flipped at once %llu (WWHD_RELAXED_VSYNC %s); "
+            "%.0f GX2 commands per frame",
             (unsigned long long)g_swap_count, 300 / s, g_swap_interval, (unsigned long long)(g_late_flips - lastLate),
-            relaxed_vsync() ? "on" : "off");
+            relaxed_vsync() ? "on" : "off", double(commands - lastCommands) / 300.0);
+        lastCommands = commands;
         lastLate = g_late_flips;
         // WWHD_SCHED_STATS=1: report here, every 300 frames; =2: the scheduler thread reports every 5 s
         // (not both: two reporters split each other's measuring spans)

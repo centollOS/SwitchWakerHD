@@ -16,6 +16,9 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
+#ifdef __SWITCH__
+#include <unistd.h>
+#endif
 
 #include "recomp_table.h"
 #include "runtime.h"
@@ -33,7 +36,8 @@ static std::mutex g_log_mutex;
 // audio, the game's main thread) would stall for it. Lines go to a buffer that a writer thread
 // writes out four times a second. fatal() and log_flush() write it at once.
 static std::string g_log_pending;
-static constexpr size_t kLogPendingMax = 1 << 20;  // dropped beyond this (a flood must not eat memory)
+static constexpr size_t kLogPendingMax = 4 << 20;  // dropped beyond this (a flood must not eat memory; a capture
+                                                   // frame's per-draw trace is ~1.5 MB)
 static uint64_t g_log_dropped = 0;
 
 static FILE* g_session_log = nullptr;  // logs/wwhd_<date>_<time>.log, the same lines as wwhd.log
@@ -52,6 +56,34 @@ void log_flush() {
             fwrite(out.data(), 1, out.size(), g_session_log);
             fflush(g_session_log);
         }
+    }
+}
+
+// the heap malloc has never grown into, in MiB (libnx's heap end against malloc's break; no lock).
+// Freed blocks inside the used part come on top of it.
+extern "C" char* fake_heap_end;
+size_t heap_never_used_mib() {
+    char* top = static_cast<char*>(sbrk(0));
+    if (!fake_heap_end || !top || top == reinterpret_cast<char*>(-1)) return 0;
+    return size_t(fake_heap_end - top) >> 20;
+}
+void log_heap(const char* when) { LOG("[mem] %s: %zu MiB of heap never used", when, heap_never_used_mib()); }
+
+// From the CPU exception handler (main.cpp): the pending lines and then text, written straight to the
+// files' descriptors. Nothing waits for a lock: the thread that crashed may hold the log's or stdio's.
+void log_crash_write(const char* text, size_t n) {
+    std::string out;
+    if (g_log_mutex.try_lock()) {
+        out.swap(g_log_pending);
+        g_log_mutex.unlock();
+    }
+    for (FILE* f : {stderr, g_session_log}) {
+        if (!f) continue;
+        const int fd = fileno(f);
+        if (fd < 0) continue;
+        if (!out.empty()) (void)!write(fd, out.data(), out.size());
+        (void)!write(fd, text, n);
+        fsync(fd);
     }
 }
 
@@ -105,6 +137,16 @@ void log_msg(const char* fmt, ...) {
     fputc('\n', stderr);
 }
 #endif
+
+// check builds of the recompiler's single-precision tracking (ppc.h ppc_single_check)
+extern "C" void ppc_single_failed(uint32_t at, double v) {
+    static std::mutex m;
+    static std::unordered_map<uint32_t, uint64_t> seen;
+    std::lock_guard<std::mutex> lk(m);
+    if (seen[at]++ == 0 && seen.size() <= 100)
+        LOG("[single check] %08X: multiplier %.17g (%016llX) is not single precision", at, v,
+            (unsigned long long)f64_as_u64(v));
+}
 
 void fatal(const char* fmt, ...) {
     log_flush();
@@ -205,6 +247,7 @@ static void init_switch() {
     }
     ppc_mem_base_var = (uint8_t*)window;
     LOG("[mem] guest window at %p, %llu MiB backed", window, (unsigned long long)(total >> 20));
+    log_heap("after the guest memory");
 }
 #endif
 
@@ -405,18 +448,48 @@ extern "C" void ppc_dispatch(Cpu* c) {
     MUSTTAIL return f(c);
 }
 
+// PPC_IJUMP's slow path: look the target up and remember it in the jump site's entry
+extern "C" PpcFunc ppc_ijump_resolve(Cpu* c, uint64_t* slot) {
+    const uint32_t pc = c->pc;
+    PpcFunc f = dispatch::lookup(pc);
+    if (!f) fatal("indirect branch to unknown address %08X (lr=%08X ctr=%08X)", pc, c->lr, c->ctr);
+    const intptr_t off = (intptr_t)f - (intptr_t)&ppc_dispatch;
+    if (off == (intptr_t)(int32_t)off) {  // the newest target first, the previous one second (ppc.h)
+        __atomic_store_n(&slot[1], __atomic_load_n(&slot[0], __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+        __atomic_store_n(&slot[0], (uint64_t)pc << 32 | (uint32_t)(int32_t)off, __ATOMIC_RELAXED);
+    }
+    return f;
+}
+
 // PPC_ICALL's slow path: look the target up, remember it in the call site's entry, call it
 extern "C" void ppc_icall_miss(Cpu* c, uint64_t* slot) {
     const uint32_t pc = c->pc;
     PpcFunc f = dispatch::lookup(pc);
     if (!f) fatal("indirect branch to unknown address %08X (lr=%08X ctr=%08X)", pc, c->lr, c->ctr);
     const intptr_t off = (intptr_t)f - (intptr_t)&ppc_dispatch;
-    if (off == (intptr_t)(int32_t)off)
-        __atomic_store_n(slot, (uint64_t)pc << 32 | (uint32_t)(int32_t)off, __ATOMIC_RELAXED);
+    if (off == (intptr_t)(int32_t)off) {  // the newest target first, the previous one second (ppc.h)
+        __atomic_store_n(&slot[1], __atomic_load_n(&slot[0], __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+        __atomic_store_n(&slot[0], (uint64_t)pc << 32 | (uint32_t)(int32_t)off, __ATOMIC_RELAXED);
+    }
     f(c);
 }
 
+#if defined(__SWITCH__) && defined(PPC_BASE_REG)
+// WWHD_SWITCH_BASE_REG: game code finds the guest memory base in x28 (ppc.h). Every way from host
+// code into game code passes here (thread entries, alarms, audio and other callbacks, mods); the
+// previous x28 comes back afterwards, also when an exception (GuestExit) leaves, so a library that
+// calls the runtime back gets its own value again.
+struct GuestBaseScope {
+    uint64_t old;
+    GuestBaseScope() { __asm__ volatile("mov %0, x28\n\tmov x28, %1" : "=&r"(old) : "r"(ppc_mem_base_var)); }
+    ~GuestBaseScope() { __asm__ volatile("mov x28, %0" : : "r"(old)); }
+};
+#else
+struct GuestBaseScope {};
+#endif
+
 uint32_t guest_call(Cpu* c, uint32_t fn, std::initializer_list<uint32_t> args) {
+    GuestBaseScope base;
     uint32_t save_lr = c->lr, save_ctr = c->ctr, save_sp = c->r[1];
     // open a minimal frame so the callee's LR save slot doesn't clobber our caller's frame
     c->r[1] -= 0x40;

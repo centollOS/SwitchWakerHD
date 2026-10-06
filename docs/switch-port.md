@@ -677,10 +677,355 @@ Checks: `WWHD_RECOMP_CR_CHECK=1` (dropped CR bits poisoned; leaves now check the
 - **Camera turns where the cache already has the view: no translations** (3,285 loaded). The turn hitches left are first-time texture uploads (7-8 uploads, 16-31 ms). A new area still translates at ~0.2 ms each (238 in 43 ms).
 - The SD card's cost, from the writer thread: 2-20 ms per write of 0.5-5 KB (what the render thread paid per translation in round 14).
 
+### Round 16: less work for the render thread (not yet tested on hardware)
+
+The round 15 log shows both threads at their limit at the top of the island: the main thread runs 95-97% of the time, and the render thread is busy 880-905 ms/s at 28.5 fps (~945 would be needed for 30), copying 320 MB/s of vertices (31.7 MB a frame) and spending 3.4-4.7% of the main thread's time in `GX2DrawDone` waits. A desktop profile of the current build (scripted gameplay, `perf`): render thread 22% in `memmove`, 15% decoding GX2 commands, ~14% in the per-draw shader lookup; main thread spread over game code (the paired-single matrix library at `028E8D4C`-`028E9108` the largest group, ~7%).
+
+- **Vertex range trimming (`WWHD_GL_VERTEX_TRIM`, on unless =0).** A draw copied its vertex buffer from vertex 0 up to the highest index it uses. A model's parts share one vertex buffer and each draws its own range, so every part copied all parts below it again, and the copy made for an earlier part was too short to be reused. Draws with vertex rebasing (97-99% of them) now copy from their lowest vertex (`IndexList::minIndex`, found in the same pass as the highest); the base vertex becomes slice / stride - first vertex (negative for GL when the first vertex lies past the slice's start). Desktop gameplay: streamed data 242 → 110 MB/s, vertices 20 → 11.6 MB a frame, stream copies 43 → 23 ms/s, render thread ~5% less busy; geometry correct.
+- **The GamePad picture skipped (`WWHD_GL_SKIP_GAMEPAD`, on unless =0).** With the Pro Controller too, the game draws the Wii U GamePad's picture every frame into two 854x480 buffers and hands them to `GX2CopyColorBufferToScanBuffer(target 4)`, which the Switch never shows (`copy_to_scan` ignores it). A color buffer that went to the GamePad within 60 frames, never to the TV, and was never read by any other draw or copy is GamePad-only (also a texture only GamePad draws sample: none in this game); its draws and color clears are skipped. Outset: 26-48 draws a frame, 3-6 ms/s of the desktop render thread. The TV picture is pixel-identical (four runs, on/off pairs at frames 1500 and 2500: 0 pixels differ where the runs reached the same game state). The log has `[gl] GamePad picture: N draws/frame ..., skipped`.
+- **Staged GX2 commands (`WWHD_GX2_STAGING`, on unless =0).** ~45,000 commands a frame went one by one through the queue's mutex. The guest threads of emulated core 1 (the main thread and the Prepare Thread, the only ones that issue commands) now collect them in a buffer of their own and hand them over in blocks of up to 1,024 words, at once when the render thread is idle, at present/flush/fence commands, and whenever the thread gives up its emulated core (`core_release`; two threads of one core never run at once, so the order is kept). Desktop: within noise (main thread 43.1 vs 43.5%); on the Switch the locked operations cost more.
+- **The render thread's watchdog counter.** It was incremented with a locked instruction for every command, next to the queue's mutex and vectors that the main thread writes for every GX2 call: ~12% of the render thread's samples on the desktop were on that instruction. The counters now have a cache line of their own, and the count is a plain load and store.
+- **Batched draws' constants** are written without comparing each 16-byte entry first (a batched draw's copy is always taken).
+- The 300-frame `[gx2]` line counts GX2 commands per frame. `[boot]` ends with `runtime: round 16 (...)`.
+- Desktop gameplay with everything on (3,700 frames): 30 fps, no audio gaps, no GL errors, renders correctly.
+
+**Tried and dropped:**
+- *Vertex and uniform data kept across frames until the game invalidates it.* The game calls `GX2Invalidate(0xF, 0, 0xFFFFFFFF)` (everything) twice a frame and targeted invalidates only while loading, so nothing could stay; checking the data instead costs as much as copying it.
+- *Moving the jobs the main thread runs itself (`update_ubo` queue full) to the worker*: the job body is ~0.05% of the main thread on the desktop; at most ~2% on the Switch, with a backlog risk. Not done.
+
+### Round 17: cheaper float math, fewer lookups and kernel calls (not yet tested on hardware)
+
+Both threads stay the limit at the top of the island. A frame-pointer profile with call graphs (desktop, `build/headless-prof`, `perf record -g`) and the Switch's own code (devkitA64 objdump of the generated files) gave these:
+
+- **Single-precision tracking in the recompiler (`WWHD_RECOMP_SINGLE`, on unless =0 when generating).** `fmuls`, `fmadds` and the paired-single multiplies round their multiplier operand to 25 bits (`round25`, the Espresso's behaviour). On the Switch that moved every such operand from a floating-point register to an integer register and back (five instructions, two of them slow register-file crossings). A value that is already single precision (from `lfs`/`psq_l` or a single-precision result) is unchanged by `round25`, so `recomp.py` now follows which register halves hold such values through each function (forward dataflow over its branches, intersected where paths meet; f14-f31 survive calls except to the register save/restore helpers and hooks; instruction hooks and unreachable code start empty) and `ppc2c.py` leaves `round25` out for them: 16,022 of 35,886 multiplier operands. The paired-single matrix library (`028E8D4C`-`028E9108`, the largest group of the main thread's time) gets about half as long on the Switch: the 4x3 matrix product 803 → 411 instructions, others 296 → 120, 134 → 55, 189 → 90. Results are identical by construction (`round25` is the identity on single-precision values, including NaN, infinity and denormals); the checking build (`WWHD_RECOMP_SINGLE_CHECK=1`: every operand left as it is goes through `ppc_single_check`) ran the gameplay script (3,700 frames) and the title flyover without a single report.
+- **Static GQRs (`WWHD_RECOMP_GQR`, on unless =0 when generating).** Every paired-single load and store read the GQR register from `Cpu` and branched on its type, re-reading it after each guest store; the branches also broke the code into small blocks. The game writes only GQR2-5 (`mtspr` scan of the whole code at generation time) and threads start with GQR0/1 = 0, so the generated `funcs.h` defines `PPC_GQR_STATIC_FLOAT 0x03` and `psq_load_l`/`psq_store_l` need no check for them: 2,082 of the game's 2,106 paired loads and stores.
+- **Shader combinations across frames (`WWHD_GL_COMBO_FRAMES`, on unless =0).** A draw whose (programs, shader-relevant registers) combination was seen recently skips the shader and program maps, but combinations lasted one frame (program memory can change between frames), so each one's first draw of every frame did the full lookup: a quarter of all draws. A combination now keeps references to its programs' hash entries and is used again in a later frame when the vertex and pixel programs still have the same per-frame-checked hash and the fetch shader is the same. Desktop gameplay: draws served without a lookup 75% → 97-98%, lookup time 59 → 41 ms/s, frames identical (the on/off runs reached the same game state: 0 pixels differ). The table also grew from 256 to 4,096 entries.
+- **Uniform registers without the comparison.** `apply_regs` compared every register block with the current values before copying it, to decide whether shader keys must be recomputed; uniform registers (blocks of hundreds of words) never count for that. Comparing and copying them was ~15% of the render thread on the desktop; they are now just copied.
+- **The main-thread sampler's marker.** Every runtime call of the main thread swapped the marker with an atomic exchange (2.6% of the main thread on the desktop; on the Switch a load-exclusive/store-exclusive loop) and read a thread_local to know it was the main thread (on the Switch, with `-mtp=soft`, a function call per access). The flag is now in `Cpu` (`main_thread`, in former padding), the marker is a plain load and store, and nothing happens without `WWHD_MAIN_SAMPLER`.
+- **Wakes only when someone waits.** An `OSUnlockMutex` signalled the mutex's condition variable every time, and `OSSignalEvent`/`OSWakeupThread` too, waiters or not; on the Switch a condition-variable signal is a kernel call (`svcSignalProcessWideKey`) in any case (the round 15 log: `OSUnlockMutex` 0.7-1.2% of the main thread, more than `OSLockMutex`). Mutexes count their waiters, events and sleep queues their non-guest waiters, and they signal only then. The mutex owner comes from `Cpu::thread` instead of two thread_local reads.
+- **Fewer waits for Mesa's GL thread when textures are made.** Every new texture called `glGenTextures` and `glGetError` twice, every new texture view `glGenTextures`, every new sampler `glGenSamplers`: each one waits for the GL thread to run everything queued (the round 14 log: `GetError` 181 calls, 59 ms, in the 5 s with a camera turn into a new area). Texture and sampler names now come from pools filled 256 (64) at a time, and allocation errors are checked once at the end of a frame that made textures (`[gl] GL error ... in a frame that made N textures`; at once, as before, with `WWHD_GL_DEBUG`). Targets the hitches of first-time textures in a turn.
+- Desktop gameplay with everything (3,700 frames): 30 fps, no audio gaps, no GL errors, no translations; render thread 280 ms/s (round 16: 289). With a cache without saved translations (2,464 translations, all textures new): no GL errors either. The desktop main thread does not show the ARM-specific gains (register-file crossings, kernel calls, thread_local calls).
+- `[boot]` ends with `runtime: round 17 (...)`; `recompiled code:` lists `single-precision tracking, static GQRs`.
+
+**Looked at and left:** the guest memory base is loaded again in every basic block that touches guest memory (1,470 times in the hottest file; GCC does not reuse the inline-asm load across blocks): keeping it in a reserved register would need every way into game code from foreign threads and callbacks to set it first. Indirect tail jumps (`bctr`, ~1% of the main thread on the desktop: cache misses in the 20 MB dispatch table) could get the per-site cache `PPC_ICALL` has, but their text is what the register-locals passes recognize as exits. The remaining 19,864 `round25` operands mostly come from function arguments: removing them needs the callers' states (whole-program analysis).
+
+### Round 18: whole-program float analysis, jump-site caches, the base in a register (prepared, not yet tested on hardware)
+
+Built separately from rounds 16/17, so that build can be tested first: `build/switch-r18/wwhd.nro` (round 18) and `build/switch-r18x28/wwhd.nro` (round 18 with the experimental register base), copied next to env.txt as `build/switch/wwhd_r18.nro` and `build/switch/wwhd_r18_x28.nro` (any of the three .nro files uses the same sdmc:/switch/wwhd folder, env.txt and shader cache). `build/switch/wwhd.nro` stays round 17 (copy in `build/wwhd_round17.nro`); `build/gen-r17` is round 17's generated code, `build/gen` is round 18's.
+
+- **Single precision across functions (`tools/recomp/singleflow.py`, `WWHD_RECOMP_SINGLE_IP`, on unless =0 when generating).** Round 17's per-function analysis knew nothing at a function's entry or after a call (except f14-f31). Now each function has an entry state (what holds at all its direct calls, tail branches and the fall-through into it) and a return summary (the halves it always returns as single precision, whatever it was given). Open functions start with nothing known: those whose address is taken (relocations: vtables, function pointers), the program entry, hooked functions, functions with no known caller, and any game address written in the runtime's sources (`guest_call` by address, e.g. `mods/climb.cpp`). After an ordinary call the caller keeps f14-f31 and takes the volatile halves from the callee's summary; after a register save/restore helper it keeps every half the helper never writes; after an indirect call or an import, f14-f31; after a hooked function, nothing. Solved as a greatest fixpoint (118,000 function analyses, 16 s). 16,022 → 16,405 multiplier operands without `round25`; in the hot code 514 → 405 left (the rest are values the callers do not know either). The checking build (`WWHD_RECOMP_SINGLE_CHECK=1`) ran the gameplay script and the title flyover without a report.
+- **Jump-site caches (`WWHD_RECOMP_IJUMP`, on unless =0 when generating).** Indirect jumps (`bctr`: mostly virtual tail calls) went through `ppc_dispatch`, a lookup in a table of 8 bytes per instruction of the game (cache misses). They now remember their targets per site like `PPC_ICALL` (`MUSTTAIL return PPC_IJUMP(c)(c)`, ppc.h; `ppc_ijump_resolve`). Both kinds of site cache now keep two entries, the latest target first: a virtual call site often alternates between a few object types. Desktop: `dispatch::lookup` 0.39% → 0.22% of all samples.
+- **The guest memory base in x28 (`-DWWHD_SWITCH_BASE_REG=ON`, experimental, Switch only).** The generated code read the base with an asm load that GCC repeats in every basic block touching guest memory (1,468 times in the hottest file). With the option, everything the project compiles for the Switch leaves x28 alone (`-ffixed-x28`), the generated code reads the base from x28 (a GCC global register variable, C only; the runtime keeps the load), and `guest_call` (every way from host code into game code: thread entries, alarms, audio and swkbd callbacks, mods) sets x28 and restores the previous value afterwards (`GuestBaseScope`, also when an exception leaves). x28 is callee-saved, so library code (libnx, newlib, Mesa) gives it back unchanged. Hottest file: 0 base loads, 0 writes to x28, 115,997 → 113,119 instructions (`f_0200B380` 308 → 277). It cannot run on the desktop (fixed base there, and clang has no global register variables): a mistake shows on the console at once, so it is a separate build.
+- Desktop gameplay with round 18 (3,700 frames): 30 fps, no audio gaps, no GL errors, renders correctly.
+- `[boot]` ends with `runtime: round 18 (...)`; `recompiled code:` lists `whole-program single precision, ... jump-site caches`.
+
+#### Hardware test of round 17 (`logs-switch/wwdh_round17_912.log`, GPU at 912 MHz; the 768 MHz file is a launch without full RAM)
+
+- The CPU side got much faster: at the forest entrance (~7,000 draws) the main thread holds its core only 49% of the time (round 15, top of the island: 96%). The GPU is now the limit there: 27.3 fps at 912 MHz (23-24 at 768, reported), "GPU busy at 100% of swaps", and the render thread waits 430 ms/s in present for Mesa's GL thread (`finishes 27 (428 ms)`). The frame rate follows the GPU clock (27.3/23.5 ≈ 912/768).
+- Not new: the round 8-9 logs show the same ~7,000-draw forest views GPU-bound (19-22 fps, present waits 200-420 ms/s); round 9 reached 29.5-30 there (probably at 921 MHz). Whether the GPU now does ~8% more there, or the view differed, the logs cannot say (the GPU clock and time were not logged).
+- Desktop check of rounds 16-17: the GPU's work per frame (pipeline statistics: vertex and fragment shader invocations, primitives, every 50 frames) is identical with vertex trimming, the GamePad skip and the GX2 staging on or off (four of five runs reached the same game state). The views are heavy: ~11-12 million fragment shader invocations a frame (~12x the 1280x720 pixels: shadow map, reflections, effects).
+- Feedback copies (a draw sampling its own render target) are one depth and one color copy (1280x720) a frame: ~15 MB of copies, under 1 ms of GPU time.
+
+### Round 19: where the GPU's time goes, and the whole GamePad picture skipped
+
+`build/switch/wwhd.nro` (round 18's code and runtime plus these) and `build/switch/wwhd_x28.nro` (the same with the register base).
+
+- **GPU time per frame** (`GL_TIME_ELAPSED` from one present to the next, read 8 frames later right after present's wait for the GL thread): `[gl] GPU time per frame N ms` every 5 s.
+- **GPU time per render pass (`WWHD_GL_GPU_PASSES`, on unless =0).** Every 30th frame a `GL_TIMESTAMP` query goes where the render targets change (draw.cpp), at clears, copies and present; the next sampled frame reads them, and every 5 s `[gl] GPU passes:` lists the passes that took the most GPU time (target size and formats, draws, ms a frame). On the desktop the GPU waits for the CPU most of the frame, so its figures mean little there; on the Switch, where the GPU is the limit, they say what to make cheaper. `WWHD_GL_PIPESTATS=1` (desktop drivers) logs the shader invocations of every 50th frame.
+- **Clocks** (Switch): `[gl] clocks: CPU, GPU, memory MHz` every 5 s (clkrst, or pcv before 8.0.0).
+- **The whole GamePad picture skipped.** It is 117 draws a frame at Outset (not 26-48): one read of the GamePad buffer at the save load (a GamePad-sized capture for the transition) had kept it drawn for the rest of the session, and the first frame's reads, before the first GamePad copy, had kept its textures drawn. A buffer read by another draw now stays drawn for 300 frames after the read (one the TV reads every frame never qualifies), and reads from before a texture became a GamePad source do not count. Desktop, four runs: 117 draws skipped a frame (12 ms/s of the desktop render thread), the TV picture identical where the runs reached the same game state.
+- `[boot]` ends with `runtime: round 19 (...)`.
+
+#### Hardware test of round 19 (`logs-switch/wwhd_r19.log`, `wwhd_r19_x28.log`; CPU 1785, GPU 768, memory 1600 MHz)
+
+- **Top of the island: 29.8-29.9 fps** at ~6,500 draws (round 17 at 912 MHz: 29.4-29.6). The main thread holds its core 93% of the time there: the CPU is the next limit.
+- **Forest entrance: 27.2 fps at 768 MHz**, the same as round 17 at 912 MHz (same view: ~6,900 draws, the same feedback copies, the same data per frame). Not a regression: round 17 needed 16% more GPU clock for it (23-24 fps at 768 MHz, reported). The x28 run held a heavier view of the forest (main scene pass +20%: 24.6 fps); x28 itself costs the same per frame (main thread 1.8% per fps in both runs).
+- **The forest is GPU-bound.** The render thread waits 433 ms/s in present for Mesa's GL thread, but that thread runs only 234 ms/s of CPU and the three cores are ~50% idle: it is held back by the GPU (none of the wrapped Mesa wait functions shows it: libdrm's own internal waits are not wrapped). "GPU busy at 100% of swaps".
+- **The GPU timestamps run slow.** Every `GPU time per frame` is 0.60× the frame time in all three logs (33.3 ms → 20.0, 36.8 → 22.0, 40.7 → 24.5): the Tegra X1's GPU timer runs at 19.2 MHz and is read as if it ran at 31.25 MHz. Real time = logged × 1.63. Corrected, the forest's passes fill the whole frame: main scene (1280x720, ~2,660 draws) 18.4 ms, shadow cascades (1024x1024, ~4,020 draws) 5.4 ms, the rest (post-processing, present) ~13 ms. 30 fps there needs 10% (this view) to 17% (the x28 view) less GPU time.
+- **The pass split was approximate.** nouveau's timestamp is written when the commands before it pass the geometry stages, not when their pixels are done, so a full-screen pass's cost landed in the next pass's time (a 1-draw 480x270 pass showed 2 ms). The totals are right.
+- **The frame (desktop trace, `WWHD_GL_TRACE_FRAMES=2500`, Outset):**
+  - Three shadow cascades into the 1024x1024 array (534 draws each).
+  - A 1280x720 scene buffer (561 draws) with the scene depth.
+  - Effects: a 640x360 depth reduction, the 960x540 screen-space shadow buffers (they sample the scene depth and the shadow map) and their blurs (960x540, 240x135), and a 640x360 half-resolution effects pass (32 draws).
+  - The main scene into the TV buffer with an R8 mask (143 + 596 draws).
+  - DOF and fog (960x540, 480x270; a feedback copy of the depth), the bloom chain (480x270 → 60x33, R11G11B10F), the bloom composite (a feedback copy of the TV buffer).
+  - The HUD (66 draws, no depth, only the game's own textures) into the same TV buffer.
+  - The TV scan copy.
+
+### Round 20: dynamic resolution, the HUD at full resolution, the TV picture presented directly, exact pass times
+
+`build/switch/wwhd.nro` and `build/switch/wwhd_x28.nro` (the same with the register base), round 18's generated code.
+
+- **Internal resolution in the GL renderer (`WWHD_RES_SCALE`, surfaces.cpp).** Ported from the Metal/Vulkan renderers (which scale up), for factors below 1:
+  - Screen-shaped render targets (16:9 ±3%: 1280x720 and its reductions down to 60x33; not the GamePad's 854x480 chain, the shadow maps, mip chains or arrays) are allocated at the factor times their guest size (`Surface::pw/ph`).
+  - Everything that talks to the game keeps the guest size; draws scale the viewport, scissor and point size.
+  - Shaders sample with normalized coordinates: none of the 555 Outset shaders uses `texelFetch`, `gl_FragCoord`, `textureSize` or window-space positions. For any that does, `uf_fragCoordScale` and `uf_texNScale` are now set per draw, as Cemu's decompiler expects.
+  - A render target takes a new factor when a draw, clear or copy next writes to it: its contents are resampled, and a whole clear skips that. Guest data uploads go through the guest size.
+  - Copies between targets of different factors are scaled blits; feedback copies and the TV picture take their source's factor.
+- **Dynamic resolution (`WWHD_DYNAMIC_RES`, on unless =0; =0.x sets the lowest factor, default 0.75), backend.cpp `DynamicRes`.**
+  - **Steps down:** when a half second runs below 29 fps with the GPU still on the previous frame at more than half the presents. It takes what the frame rate says is missing (75-85% of the GPU's time grows with the pixels), in steps of 0.05, at most two at a time.
+  - **Steps up:** by 0.05 when three sampled frames in a row show enough idle GPU time at their start for the larger picture (all of the busy time grown by the pixel ratio, plus 3 ms).
+  - **Backing off:** a step up that does not hold within 4 s is undone, and the next try waits twice as long (4 s up to 64 s).
+  - **Logging:** each change is logged (`[gl] dynamic resolution 1.00 -> 0.90 (GPU-bound: 27.2 fps, ...)`), and the 5 s report gives the factor in use.
+  - **Desktop test:** with an artificial GPU load proportional to the pixels (`WWHD_GL_TEST_GPU_LOAD=60000`), 1.0 → 0.9 → 0.8, back up to 0.85, then stable for the rest of the 100 s gameplay script. Without load it stays at 1.0.
+  - It is separate from the game's own 1080p/720p switch (see "Rendering resolution"), which stays at 720p.
+- **The HUD at full resolution.** The game draws the HUD into the same buffer as the scene, last. At a factor below 1, the first draw into the TV picture's buffer that comes after something read that buffer this frame (the post-processing), has no depth buffer, has one color target and samples only the game's own textures, switches the buffer to a full-size texture with the scene scaled up into it (one blit). The next frame's clear switches it back (both textures are kept: no allocation). A 3D draw into it afterwards also switches it back. Desktop at 0.75: one switch a frame, the HUD's text and icons as sharp as at full resolution.
+- **The TV picture presented directly.** `GX2CopyColorBufferToScanBuffer` only notes its buffer; present reads that buffer unless something writes to it first (then the copy is made: `scan_flush`). This saves a 1280x720 copy a frame. Desktop: copied in 0-1% of frames. Present also skips the window clear when the picture covers the window.
+- **GPU times in real time, and exact pass times.**
+  - The GPU timer's factor is measured over the session: GPU timestamps of the sampled frames' starts against the CPU clock. It is logged once after 30 s (`[gl] GPU timer: ... real ns per GPU ns`; 1.000-1.007 on the desktop, 1.63 expected on the Switch), and every GPU time in the log is converted.
+  - Each pass timestamp of a sampled frame is preceded by `glMemoryBarrier(GL_FRAMEBUFFER_BARRIER_BIT)`: a wait for idle on nouveau, so a pass's pixel work is counted in that pass.
+  - Dynamic resolution keeps the sampling on even with `WWHD_GL_GPU_PASSES=0`.
+- **Frame trace (`WWHD_GL_TRACE_FRAMES=n,...`, testing).** Logs every pass of those frames (`[trace]`): its render targets, draws and the surfaces it samples, plus the clears, copies, feedback copies and scan copies.
+- `[boot]` ends with `runtime: round 20 (...)`.
+
+#### Hardware test of round 20 (`logs-switch/wwhd_2026-10-05_18-19-38.log`; GPU clock varied from 768 down to 307 MHz)
+
+- **"That did wonders."** GPU timer measured at 1.6271 real ns per GPU ns (expected 31.25/19.2 = 1.6276).
+- **768 and 614 MHz (memory 1600):** the island at 30 fps at full resolution (up to ~7,300 draws).
+- **The forest:** 30 fps at 614 MHz with the resolution at 0.75 (also with memory at 1331 MHz). At 537 MHz 26-29 fps, at 384-460 MHz 24-30 fps, all at the 0.75 floor.
+- **Stock handheld clocks (CPU 1020, GPU 307, memory 1331):** 23-30 fps on the island. There the main thread holds its core 91-97% of the time: the CPU is the limit at stock clocks.
+- **Dynamic resolution** followed the scene as intended: 1.0 → 0.9 → 0.8 on entering heavy views, back up to 1.0 step by step (0.75 → 0.8 → 0.85 → 0.9 → 0.95 → 1.0) on leaving them, with one step up undone and backed off.
+- **Every change cost a hitch:** 55-106 ms on the frame of the change, often a second slow frame (73-99 ms) after a step down. About 25 render targets got new textures at once.
+- **The GamePad picture came back for ~10 s after area changes** (854x480 passes with 92-121 draws, 2-3 ms of GPU time at 384-460 MHz, exactly in pairs of 5 s reports). The desktop trace (frames 650-720 of the gameplay script) shows why. At an area change the game captures the GamePad picture into a buffer of its own (`21568800`, 854x480) for the GamePad's fade, and that capture draw is not one of the GamePad picture's draws. Its read of the GamePad buffer counted as a read by the TV picture, which keeps a buffer drawn for 300 frames.
+- Pass costs in the forest at 614 MHz, 0.75: main scene 14.9 ms, shadow cascades 7.5 ms (~4,020 draws; the shadow maps are not scaled), the HUD pass with the switch to full resolution 2.0 ms.
+
+### Round 21: the GamePad picture skipped after area changes, render-target textures reused (not yet tested on hardware)
+
+`build/switch/wwhd.nro` and `build/switch/wwhd_x28.nro`.
+
+- **GamePad captures.**
+  - A draw that is not the GamePad picture's and samples a GamePad-only surface now marks what it renders as derived from that surface (`Surface::derivedFrom`) instead of counting a read. A GPU copy from one does the same.
+  - A read of the derived surface counts as a read of the original (`note_read`), and so does a TV scan copy of it. A whole clear ends the derivation.
+  - Desktop gameplay script: no 854x480 pass at all (before: 13 reports with one, after the save load). The TV picture with the skip on and off differs only in animation timing (wind streaks, clouds).
+- **Render-target textures reused between resolutions.**
+  - A rescale's old texture (with its views) goes to a pool, up to 128 MB, least recently released first out. A later rescale to the same format and size takes it from there.
+  - New textures are limited to 4 a frame: a pass whose render targets all still share their old scale keeps it until a later frame. Mixed scales in one draw are always fixed at once.
+  - Feedback copies follow their source through the same path.
+  - Desktop, 1.0 → 0.8 → 0.9 → 0.8 → 0.9: the second visits to 0.8 and 0.9 took all 27 textures from the pool. The 5 s report gives `N render targets resampled, M from kept textures`.
+- **Dynamic resolution steps down up to three steps at once** (was two), so entering a heavy view takes one change instead of two.
+- `[boot]` ends with `runtime: round 21 (...)`.
+
+### Round 22: graphics glitches (lines in shadows, black shapes on characters, missing shore) (not yet tested on hardware)
+
+`build/switch/wwhd.nro` and `build/switch/wwhd_x28.nro`. The user's report and screenshots are in `logs-switch/screenshots/glitches/` (a save at Tetra's beach in `go_to_tetra_and_shore_glitches/save`, Quest Log 1). All three glitches were there since the first build.
+
+| Glitch | Seen on | Cause | Fix | Off switch (`env.txt`) |
+|---|---|---|---|---|
+| Line pattern (and grainy bands) in shadows on grass and sand | Switch and the desktop GL build; not the Vulkan renderer | The game's ambient-occlusion pass (VS `44BDF900`, PS `44BDFD00`) point-samples its centre depth from a 640x360 depth copy while drawing 960x540, so every third row and column is half a texel off. The Wii U draws the same lines; the Metal and Vulkan renderers carry a fix, the GL renderer did not | As in those renderers: the centre fetch is bilinear (mode 1), and the 4x4 noise is tiled per 960x540 pixel (the vertex shader's first remapped constant `.w` x1.5) so the game's blur averages it out (mode 2, default) | `WWHD_AO_MODE=0` (or `1`); `WWHD_NO_AO_QUIRK=1` = 0 |
+| Black triangles flickering on Tetra and Sturgeon; shore water losing its foam below a straight line at some camera angles | Switch only (not reproduced on the desktop GL or Vulkan builds) | Most of the scene is drawn in several passes over the same mesh with a less-or-equal depth test and no depth writes (desktop trace at Tetra: 1,855 + 118 such draws a frame), so a later pass must compute the same depth bit for bit. The GL renderer did not declare `gl_Position` invariant (the Vulkan renderer does; Cemu's Metal emitter uses `[[invariant]]`). Maxwell's FFMA rounds once, and nouveau fuses multiply-adds depending on the rest of each shader, so two programs can round a vertex differently; where the later pass loses, the earlier pass shows through on whole triangles, which is how the screenshots look (pure black regions bounded by triangle edges). AMD's `v_mad_f32` rounds like separate operations, which is why the desktop never shows it | `invariant gl_Position;` in every vertex shader, added at compile time (so it also applies to sources from the shader cache). Mesa propagates it to the contributing operations as `precise`. If the driver rejected the declaration, the shader is compiled without it and the log says so once | `WWHD_GL_INVARIANT=0` |
+
+- **How the shadow lines were found.** The headless GL build on the AMD GPU shows the lines on the sand in shadow (gameplay script, frame 1900). The frame trace showed the 960x540 shadow mask built from two draws: the occlusion draw (red and green) and the shadow-map draw. The red channel ramps and resets every 12 pixels (the 4-pixel noise tile against the 3-row texel cycle), and the Metal renderer's comments describe exactly this. After the fix the occlusion term is flat (255) on open ground and the sand matches the Vulkan reference.
+- **Ruled out for the Switch-only glitches:** internal resolution (the shore is unchanged at a fixed 0.8), a race with the game's `update_ubo` thread (the game calls no GX2 timestamps and waits for the render thread twice a frame), and vertex trimming (an edge-of-screen green triangle seen once turned out to be a grass patch at the camera's position of that frame).
+- **Regression check (desktop, Tetra route):** new defaults against `WWHD_GL_INVARIANT=0 WWHD_AO_MODE=0` differ only in shadowed areas and wave animation (mean 0.6-0.8 levels); 0 GL errors, 0 skipped draws, no shader failures.
+- **Test tooling.**
+  - `WWHD_GL_TRACE_DRAWS=1` (with `WWHD_GL_TRACE_FRAMES`) logs every draw of a traced frame: targets, program addresses and GLSL hashes, depth function and writes, stencil, polygon offset, blend, and each texture with its sampler words. The GLSL of a hash is in `shadercache_gl.bin` (record 1: `{1, vertex, hash, packed size, size, zlib GLSL}`).
+  - The trace now lists a draw's sampled surfaces under its own pass (they were listed under the previous pass, since textures are resolved before the render targets are bound).
+  - The Vulkan reference follows the same scripted route: the SDL host reads `WWHD_PRESS` (hex buttons: A `8000`, RIGHT `0400`), `WWHD_STICK` and `WWHD_RSTICK` (`from-to:x:y`) instead of `WWHD_SCRIPT_INPUT`; add `WWHD_NO_HOST_INPUT=1`.
+  - Route to Tetra with the user's save (Pro Controller): the menu presses of the gameplay script, then `1200-1217:RX=1,1300-1700:LY=1,1701-1745:LX=-0.45+LY=1,1770-1774:A` (on the beach next to her at 1735-1765, her dialogue from 1780).
+- The log says `[gl] vertex positions invariant: on (WWHD_GL_INVARIANT); ambient occlusion mode 2 (WWHD_AO_MODE)` after the shader cache line, and `[boot]` ends with `runtime: round 22 (...)`.
+
+#### Hardware test of round 22 (`logs-switch/wwhd_with_crash.log`, 2026-10-05; CPU 1785, GPU 614, memory 1331 MHz)
+
+- **Fixed on hardware:** the lines in shadows, and the black shapes on Tetra. 30 fps on the island; the log says `vertex positions invariant: on`.
+- **Still there:** the shore water losing its foam at some camera angles (backlog, see Next steps).
+- **New: the game froze, then closed, on entering the pirate ship's hold** (frame 21884):
+  - The watchdog: `Render thread: executing (linking a program)`, the game waiting on its sync. No frame for 3 s; the log ends a few seconds later.
+  - No new translations near the freeze: the pair being linked was two shaders compiled at startup (from the cache) that had never been linked together. Mesa 20.1's nouveau compiles a pair's GPU code inside `glLinkProgram` (`nvc0_sp_state_create` calls `nvc0_program_translate`), so a driver compile that never finishes stops the render thread there.
+  - Earlier, at frame 15485, two pairs failed to link: `fragment shader input 'passParameterSem254' with explicit location has no matching output`. Their draws were skipped from then on (~31 a frame, the `skipped` count).
+
+### Round 23: unmatched pixel-shader inputs, and the shader pair named while linking (not yet tested on hardware)
+
+`build/switch/wwhd.nro` and `build/switch/wwhd_x28.nro`.
+
+- **Pixel-shader inputs the vertex shader does not write (`varyings.h`).** The game paired a pixel shader that reads semantic 254 with a vertex shader that does not export it; the hardware gives such an input its default value. Vulkan allows the mismatch and Cemu's GL renderer links its stages separately, but a GL program with explicit varying locations fails to link. When a link fails with "no matching output", the vertex shader's source (`glGetShaderSource`) gets an output for each missing input (same location and qualifiers, written as zero, `DEFAULT_VAL` 0) and the pair is linked again. The log says `[gl] program ...: its pixel shader reads passParameterSem254, which the vertex shader does not write; linked with them set to zero`.
+  - Tested with a standalone GL program on desktop Mesa (radeonsi): a real decompiled vertex shader with one output and a real pixel shader with two inputs give the same link error as the Switch; with the added output they link; a matching pair is left unchanged.
+- **The pair named while linking.** The render thread's stage during an in-game link is now `linking vertex shader <hash> with pixel shader <hash>`, so a freeze inside the driver names the pair in the watchdog line at no cost per link (a log line per link would be an SD card write each). Failed links and links over 100 ms are logged.
+  - Desktop check with the test aid `WWHD_GL_TEST_LINK_STALL=5000` (holds the first in-game link): `[watchdog] no frame for 3.0 s (frame 676). Render thread: executing (linking vertex shader 7e0d4961b0852bcb with pixel shader ac9d51224a1f69b4)`.
+- **`tools/switch/extract_shadercache.py`** writes every GLSL source of a `shadercache_gl.bin` as `<hash>_vs.glsl` / `<hash>_ps.glsl`, the hashes the log uses. With the Switch's cache file, the pair a freeze names can be compiled offline.
+- Regression (desktop, Tetra route): 0 GL errors, 0 skipped draws.
+- `[boot]` ends with `runtime: round 23 (...)`.
+
+#### Hardware test of round 23 (`logs-switch/wwhd_r23.log`, `logs-switch/screenshots/glitches/sudden_black_sky.jpg`; CPU 1785, GPU 614, memory 1331 MHz)
+
+- **Black sky** on the way up to the top of the island (the path between the cliffs from Link's house): the rest of the picture correct, the sky black (the scene buffer's clear colour where the sky should be).
+- **Crash entering the forest**, ~13 s after the area change (frame ~2550): the log just stops. No watchdog line (not a freeze), no link failure, 0 skipped draws. The session's dynamic resolution had gone 1.00 → 0.90 → 0.95 → 1.00 on the way up (26 textures taken back from round 21's pool).
+- The forest worked in round 20 (18:19 session, at 0.75): rounds 21-23 are the suspects.
+- **Why the crash left nothing:** on the Switch the log is a memory buffer that a thread writes out four times a second (round 14), so a crash loses its last quarter second; and CPU exceptions went to Atmosphère's crash report only.
+
+### Round 24: crashes reported in the log, a capture button, the round 21 GamePad and pool changes made safe (not yet tested on hardware)
+
+`build/switch/wwhd.nro` and `build/switch/wwhd_x28.nro`; their ELFs are kept as `build/switch/wwhd_r24.elf` and `wwhd_x28_r24.elf` for the crash addresses.
+
+| Change | Why |
+|---|---|
+| **CPU exception handler** (`main.cpp`, `__libnx_exception_handler`). hbloader passes a CPU exception to the NRO's entry point (nx-hbloader `trampoline.s`), whose crt0 calls libnx's handler on its own 64 KB stack. It writes the waiting log lines and then `[crash]` lines straight to the files' descriptors (no lock): the kind (bad memory access, bad jump, trap...), thread, frame, pc/lr as `code+0x...`, the fault address, the registers, the frame-pointer chain, the code addresses on the stack, the render thread's stage, the guest thread's lr/r1/r3/r4, and the heap left. Then libnx raises `svcBreak` and Atmosphère writes its report as before. The old comment that exceptions never reach the NRO was wrong | Both crashes so far left nothing in the log |
+| **`abort()` wrapped** (`-Wl,--wrap=abort`, 42 call sites including Mesa's): the same report, caller as pc, then the real `abort` | `abort` raises `svcBreak`, which the exception handler does not see |
+| **Heap left in every stats line** (`heap never used N MiB`: libnx's heap end minus malloc's break, no lock); below 256 MiB it is logged and the texture pool is emptied | Running out of memory in Mesa/nouveau crashes instead of failing; GPU memory comes out of the same heap |
+| **Texture pool (round 21) bounded:** 64 MB instead of 128, and a texture unused for 600 frames (20 s) is deleted | Round 21 kept up to 128 MB of old render-target textures after resolution steps (in the crash session, two sets: 0.90 and 0.95) |
+| **GamePad skip (round 21) narrowed.** A draw that is not the GamePad picture's and samples a GamePad-only surface counted as "derived" (not a read) for every such surface, so a texture the TV also needs could stay GamePad-only for good: its draws skipped, the TV showing what it held. Now that applies only to the GamePad picture's own buffer (its area-change capture, round 21's case). A GamePad-picture texture that anything else reads after the GamePad started sampling it is shared for good (`Surface::tvShared`). The first skipped draw into each surface is logged (`draws into ... skipped from frame N`) | One way to a sky that stops being drawn; on the desktop only the GamePad's 854x480 buffers are skipped, and all 117-121 GamePad draws a frame still are |
+| **AO fix (round 22) by contents, not only address:** the occlusion programs must also have their size and hash (pixel 1,584 bytes `26870ca3f2e34dfa`, vertex 384 bytes `36e37317f62658e9`); the log says once whether the fix applies | Another area could load another program at those addresses; the fix would then change that program's constant |
+| **Capture with both sticks:** clicking both sticks at once traces the next frame into the log and writes its TV picture and render targets as PNGs next to `wwhd.log` (`[input] both sticks clicked`, `[gl] capture of frame N`) | For pictures that go wrong where the desktop cannot reproduce them (the black sky) |
+| Desktop testing: `-DWWHD_SANITIZE=address` (CMake) builds the runtime, GX2 layer, renderer and Cemu's decompiler with AddressSanitizer (the generated game code is left out); the headless script knows `LS` and `RS` (stick clicks) | |
+
+- **Tests (desktop):**
+  - AddressSanitizer build, no errors: the Tetra route with 8 forced resolution changes and her dialogue (to frame 2400), and the gameplay route with 15 changes of up to three steps (0.75-1.0, to frame 3300).
+  - No black sky after the crash session's sequence (1.00 → 0.90 → 0.95 → 1.00, 26 textures from the pool) nor on the path between the cliffs (route: from the Tetra save, `1300-1307:LX=-0.3+LY=1,1308-1490:L+LY=1,1491-1515:LX=-0.7+LY=0.7,1516-1640:LY=1`).
+  - The forest itself was not reached on the desktop (the path past Link's house leads down to the village; the forest path starts near Aryll's lookout and crosses the wooden bridge at the top).
+  - Capture: a scripted click of both sticks at frame 1850 traced frame 1852 (63 lines) and wrote 33 targets and the TV picture.
+- `[boot]` ends with `runtime: round 24 (...)`.
+
+#### Hardware test of round 24 (`logs-switch/wwhd_r24.log`; CPU 1785, GPU 614, memory 1331 MHz)
+
+- The sky stayed right on the way up; the forest was entered, then the game crashed while the camera turned.
+- **The crash report worked** (`[crash]` lines at the end of the log), decoded with `wwhd_r24.elf`: a data abort at address 0 in the GX2 render thread, `translating a vertex shader`: `StringBuf::add` in Cemu's `LatteDecompiler_emitGLSLShader`, which had just asked `malloc` for **12 MB** for the generated source and got null. `heap never used: 5 MiB`.
+- **The heap was nearly full from the start:** 89 MiB never used after startup, then 87 → 58 → 26 → 15 → 5 MiB through the session (texture pool 0-28 MiB, emptied when low).
+- **Where it went (measured on the desktop with the game's GLSL, malloc in-use bytes):** Mesa keeps a compiled shader object's whole intermediate code until the object is deleted, ~460 KB each (789 objects: +354 MB; deleting them after linking: -349 MB). Linked programs keep ~59 KB each without their shaders. The renderer compiled every cached source at startup and kept its object for the session (to link new pairs): with the Switch's cache at 1,902 sources, ~870 MB. The cache grows with every session (round 20: 1,429 sources; round 23: 1,902), which is why each session had less memory.
+
+### Round 25: shader objects freed after linking, no 12 MB block per translation (not yet tested on hardware)
+
+`build/switch/wwhd.nro` and `build/switch/wwhd_x28.nro`; ELFs `wwhd_r25.elf`, `wwhd_x28_r25.elf`.
+
+- **Shader sources instead of shader objects (`shaders.cpp`).** Each GLSL source is kept compressed in memory (as stored in the cache file, ~1.5 KB each). Its GL shader object is compiled when a link needs it (`object_for`), and at most 32 recently used objects are kept (256 during startup). A link detaches its shaders, so deleting them frees their memory. At startup the cache's sources are kept without compiling, then the cached pairs are linked in order: each source is compiled when a pair first needs it and deleted after its last pair. A source no cached pair uses is not compiled at all. `Shader::compiled` replaces the object in `Shader`.
+- **1 MB instead of 12 MB for a translation's source** (Cemu's `LatteDecompiler_emitGLSLShader`; the game's largest shader is ~52 KB of GLSL). `StringBuf` no longer crashes when `malloc` or `realloc` fails: the shader comes out empty and fails to compile (its draws are skipped and logged) instead.
+- **Memory in the log:** `[mem] ...: N MiB of heap never used` after the guest memory, the GL setup and the shader cache; every 5 s `[gl] memory: heap never used ...; textures ... MiB in ... surfaces (render targets ..., pool ...); shaders: ... sources (... KB), ... compiled objects, ... programs`.
+- **Tests (desktop):**
+  - Cache with 789 sources and 455 pairs: startup links all 455 (789 compiles, 2.6 s); 0 objects kept afterwards; malloc in use 134 MiB for the whole process (the objects alone were ~350 MB). Sources and 2,975 translations: 6 MiB. Tetra route: 0 compiles in game, 0 skipped draws, same picture.
+  - AddressSanitizer, smaller cache (555 sources), Tetra route: 282 compiles and 144 links in game (about a dozen were recompiles of evicted objects), 0 errors, 0 skipped draws.
+
+#### Hardware test of round 25 (`logs-switch/wwhd_r25.log`, `logs-switch/screenshots/glitches/r25/`, save `Saves/Forsaken Fortress`)
+
+- **No crash:** forest, the pirate ship and on to the Forsaken Fortress (~16 min). Heap never used: 1,691 MiB after the guest memory, 1,562 after the GL setup, **986 after the shader cache** (round 24: 89), lowest 203 MiB late in the session (textures 198 MiB in 826 surfaces, 2,191 sources, 1,346 programs).
+- The startup's 576 MiB are mostly the 1,346 linked programs (~340 KB each on nouveau) plus the startup's peak of kept objects: the next memory target if needed.
+- **Long black screens at doors:** a door's first visit compiles the new place's shaders. One frame took **18.7 s** (273 compiles, 137 links; ~250 programs never seen before); others 0.3-3.6 s. Some were round 25's recompiles: "6 compiled, 2 linked, 0 new states" is a new pair of two known sources, both recompiled (887 ms).
+- **Spotlights at the Forsaken Fortress** flicker and show as hard-edged bands across the walls. Not on the desktop (GL and Vulkan match there, same save and camera, 60 frames compared): Switch only.
+
+### Round 26: depth copies by the 3D engine, env.txt before static initialisation, quick doors and fast scenes (not yet tested on hardware)
+
+`build/switch/wwhd.nro` and `wwhd_x28.nro`; ELFs `wwhd_r26.elf`, `wwhd_x28_r26.elf`.
+
+| Change | Why | Off switch |
+|---|---|---|
+| **Depth copies with `glBlitFramebuffer`** (the feedback copies of an attached depth buffer, and GX2 surface copies of depth) instead of `glCopyImageSubData` | Mesa 20.1's nouveau gives 32-bit float depth a compressed memory kind (`nvc0_mt_choose_storage_type`: 0x86 when `drm->version >= 1.1.1`), and `glCopyImageSubData` of equal formats is a raw memory-to-memory copy (`nvc0_resource_copy_region` → m2mf): the copy gets compressed tiles without their compression state, and a shader reading it sees wrong depth in blocks. Effects that read a depth copy: the shore foam (round 22: cut off along straight lines, Switch only) and a full-screen composite after the spotlights. A blit goes through the 3D engine, which reads compressed depth correctly (resolution changes already copied depth that way). Colour targets are compressed only with multisampling | `WWHD_GL_DEPTH_COPY=0` |
+| **env.txt read before the static initialisers** (`main.cpp`, a constructor of priority 101: libnx mounts the SD card before `__libc_init_array`, and `switch.ld` sorts `.init_array` by priority; checked: first entry) | Switches read into globals at static initialisation never took effect from env.txt on the Switch: draw.cpp's off switches, `WWHD_AO_MODE`, `WWHD_GL_INVARIANT`, the gameplay mods' switches... | — |
+| **Quick doors and fast scene changes** (the original project's mods, `mods/turbo.cpp`) on in the shipped env.txt; `[mods] quick doors on` at startup | Asked for as a test. Doors and fades run extra logic steps per frame; nothing is skipped. They do not shorten a first visit's shader compiling. Desktop, save load: black 20 frames sooner, the room 10 frames sooner | comment out `WWHD_MOD_QUICK_DOORS` / `WWHD_MOD_FAST_SCENES` |
+| **96 shader objects kept** (was 32), and after startup the 96 sources in the most cached pairs keep theirs | A new pair of known sources compiled both again (round 25) | — |
+
+- Desktop: depth copies by blit give pixel-identical frames (FF route, frames 1300 and 1420: mean difference 0.00). AddressSanitizer, Tetra route with both mods: 0 errors, 0 skipped draws.
+- `[boot]` ends with `runtime: round 26 (...)`; the log says `[gl] depth copies: 3D-engine blits (WWHD_GL_DEPTH_COPY)`.
+
+#### Hardware test of round 26 (`logs-switch/wwhd_r26.log`, `logs-switch/screenshots/glitches/r26/`)
+
+- **env.txt now reaches the static switches:** the log shows `[mods] quick doors on`, `[mods] fast scene changes on` and `[gl] depth copies: 3D-engine blits`.
+- **The searchlights still go wrong** when a beam comes near Link: the pool of light is missing or drawn as slabs across the walls, and the haze of the beam is gone. Three captures (frames 1788, 1856 and 2751; each capture frame takes ~8.8 s to write its PNGs, which is expected). One caught a correct frame. So the depth copies were not the cause.
+- **Quick doors crashed the game:** a door played sped up, then the game stopped on its own check:
+  ```
+  Source File: J3DPacket.cpp
+  Line Number: 157
+  Description: mEntryPtr == (0)
+  ```
+  followed by `OSPanic` and the `[crash]` lines (abort in the guest thread, frame 13,300). Quick doors runs every process's logic step (`fpcEx_Handler`) up to 3 more times per frame without a draw in between; a model packet entered during one step is entered again before the draw list is reset, which this check forbids. It is the mod, not the port.
+- Memory: 824 MiB of heap never used after the shader cache, lowest 237 MiB late in the session.
+
+### Round 27: near-plane clip distance for the searchlights, quick doors off (not yet tested on hardware)
+
+`build/switch/wwhd.nro` and `wwhd_x28.nro`; ELFs `wwhd_r27.elf`, `wwhd_x28_r27.elf`.
+
+| Change | Why | Off switch |
+|---|---|---|
+| **Every game vertex shader writes `gl_ClipDistance[0] = z + w`** (`shaders.cpp` `with_near_clip`: the declaration goes into Cemu's `gl_PerVertex` block and the write into its `SET_POSITION` macro), and `GL_CLIP_DISTANCE0` is enabled for each draw unless the game turned near clipping off (`PA_CL_CLIP_CNTL.ZCLIP_NEAR_DISABLE`; the shadow maps do) | The searchlights are light volumes: back faces drawn with depth GREATER into a 640x360 light buffer (`vs 44461600`, `ps 44461F00`, cull front). When a beam comes near Link the camera is inside the cone, and its triangles reach behind the camera. Mesa 20.1's nouveau programs the hardware to clip geometry at w = 0 only (`VIEW_VOLUME_CLIP_CTRL` with the guard band) and leaves the near plane to a per-pixel depth test, so those triangles are drawn from vertices just in front of the camera at huge screen coordinates. A user clip distance is always clipped as geometry, at the plane. With the game's clip space (-1..1), z + w = 0 is exactly the near plane, so other drivers draw the same picture | `WWHD_GL_NEAR_CLIP=0` |
+| A program gets the plane only if its vertex shader really writes it (`link()` reads the linked vertex shader's source back) | An enabled clip distance that the shader does not write is undefined | — |
+| A vertex shader that does not compile with the clip write is compiled without it (logged once) | A driver that rejects it then draws as before instead of skipping draws | — |
+| **Quick doors off** in the shipped env.txt; fast scene changes stay on | The J3DPacket crash above. Fast scene changes only reruns the transition machinery (scene loading, the fade's timers, scene requests), not the actors' logic | `WWHD_MOD_QUICK_DOORS=1` turns it back on |
+| `[mods] door event done: N extra logic steps` and `[mods] scene change done: N extra transition steps` | The log shows which mod ran just before a problem | — |
+| The per-draw trace (`WWHD_GL_TRACE_DRAWS=1`, and the capture's frame) gives each draw's culling, front face, viewport direction, depth range, clip convention, near/far clipping and whether the near clip plane is on | For the next capture | — |
+
+- nouveau (Mesa 20.1 sources): a vertex shader that writes a clip distance is marked as not needing generated user clip planes (`genUserClip = -1`), so enabling the plane costs no shader rebuilds. The hardware gets `CLIP_DISTANCE_ENABLE = 1` for those draws only.
+- The internal draws (the overlay, the present and the `WWHD_GL_TEST_GPU_LOAD` test pass) turn `GL_CLIP_DISTANCE0` off.
+- The shader cache file is unchanged: it stores Cemu's GLSL, and the clip write is added when a source is compiled.
+- **Tests (desktop):**
+  - Forsaken Fortress route: 455 programs linked at startup, 0 without the clip write. The 12 searchlight draws into the light buffer have the plane on. The 444 draws without it are shadow-map passes where the game turned near clipping off. The beam and its haze look the same as before, 0 GL errors, 0 skipped draws. Gameplay frames of two runs cannot be compared pixel by pixel (they drift by a few frames), so the check is by eye.
+  - A first version put the two edits at the wrong offsets (Cemu's macro comes before the block): every vertex shader failed to compile. The order is fixed, and the compile fallback above now guards against this kind of failure.
+  - AddressSanitizer, Forsaken Fortress route with the per-draw trace: 0 errors, to the end of the route.
+  - Fast scene changes alone, Forsaken Fortress and Tetra routes: three scene changes each (171, 66 and 174-195 extra transition steps), no halt.
+- `[boot]` ends with `runtime: round 27 (...)`; the log says `near-plane clip distance: on (WWHD_GL_NEAR_CLIP)`, and the shader cache line ends with `0 programs without the near-plane clip distance`.
+
+#### Hardware test of round 27 (`logs-switch/wwhd_r27.log`, `logs-switch/wwhd_r26_2.log`, `logs-switch/screenshots/glitches/r27/`)
+
+- **The searchlights still go wrong.** The console's own screenshots (`r27_real_capture*.jpg`) show the real symptom: the beam leaving the lamp is a few thin, hard-edged rays instead of a soft cone. The capture (frame 9053) caught one ray. Its 640x360 light buffer is nearly black, where the desktop has an orange glow at a similar view.
+- **Two runs:**
+  - `wwhd_r27.log` ran at stock clocks: CPU 1020 MHz and GPU 307 MHz, against 1785 and 614 in round 26. Startup linking took 261 s instead of 171 s, about what the clock ratio predicts. The overclock was not applied in that run; the port only reads the clocks.
+  - `wwhd_r26_2.log` is the same round 27 build at 1785/614 MHz. Startup took 171.7 s, the same as round 26.
+- **Microstutters: a round 27 regression.** Both round 27 runs stall at texture uploads. Each upload first waits for Mesa's GL thread to finish its queued work (`_mesa_glthread_finish_before`):
+
+  | Wait | Rounds 24-26 | Round 27 |
+  |---|---|---|
+  | `CompressedTexSubImage2D` | 0.10 ms each | 4.9-6.6 ms each |
+  | `CheckFramebufferStatus` | 0.1-0.3 ms each | 48-70 ms each |
+  | Same scene load, 78-79 uploads | 354 ms | 4,459 ms |
+
+  The waits at the end of each frame (`GetQueryObjectui64v`, `GetSynciv`) stayed at 0 ms, and the GPU's own time per draw did not grow (main pass 14 µs/draw in round 26, 8 µs in round 27). So the driver's CPU side waits at loads, not the GPU. Round 27's only change on that path is the near-plane clip distance; nouveau's sources show no shader rebuild for it, so the exact mechanism is not known. It is off by default in round 28.
+
+### Round 28: near-plane clip off, the searchlight beam found, probe frames for the Switch (not yet tested on hardware)
+
+`build/switch/wwhd.nro` and `wwhd_x28.nro`; ELFs `wwhd_r28.elf`, `wwhd_x28_r28.elf`.
+
+- **The beam's draws.** A desktop test aid (below) read the main picture back after every draw. The beam is two draws per searchlight into the 1280x720 scene buffer:
+  - vertex shader `BB5B9D69776570A0`, pixel shader `BCB22BAD319DC0BD`;
+  - a 234-index cone, no culling, alpha blending (`05040504`), depth test LEQUAL without writes, polygon offset (-0.5, -2).
+
+  Its pixel shader computes the alpha from three factors:
+  - the vertex alpha;
+  - a facing term, the absolute cosine between the interpolated view-space normal and the view vector, which softens the cone's edges;
+  - a depth fade, the scene's linear depth from the 640x360 R32F buffer (`F40E8000`) minus the fragment's depth, which fades the beam where it meets geometry.
+
+  The light buffer pass (`F415B800`) is the glow on surfaces, not the beam.
+- **Ruled out on the desktop:**
+  - Dynamic resolution: `WWHD_RES_SCALE=0.75` and `0.85` draw the beam correctly.
+  - The desktop shows no invalid values in the broad-beam view. In one edge-on view, a few hundred pixels have a NaN facing term and alpha, and AMD's blending leaves them invisible.
+- **Probe frames (draw.cpp, shaders.cpp).** After a capture (both sticks), each of the next 16 frames draws the beam with one diagnostic output in place of its color. The draw's target is written to `probe_<first frame>_m<mode>_<n>.png` right after each beam draw; mode 0 is also written before it. Opaque outputs show the value itself where the cone is drawn. Modes:
+  - 0 original;
+  - 1 coverage;
+  - 2 normal (|N|; magenta NaN, cyan infinite);
+  - 3 facing (recomputed);
+  - 4 depth (R scene depth, G fragment depth, B 0.5 + 4 x difference; magenta where the sky is behind);
+  - 5 screen position;
+  - 6 final alpha;
+  - 7 final color;
+  - 8 gradient texture;
+  - 9 vertex alpha;
+  - 10 the game's own facing term;
+  - 11 the game's own depth fade;
+  - 12 the beam without the depth fade;
+  - 13 NaN map (R facing NaN, G alpha NaN);
+  - 14 NaN source (R zero or infinite normal length, G NaN normal, B zero or bad view vector);
+  - 15 depth source (R infinite scene depth, G NaN scene depth).
+
+  Flag modes draw dark gray where the cone is drawn, and a channel goes to 1 where its flag is set. The beam is found by its pixel shader's GLSL hash, or by its draw state if the hash differs on the Switch (logged). `WWHD_GL_PROBE_PS=hash,...` probes other pixel shaders. `WWHD_GL_PROBE_FRAME=n` starts the probes at a frame on the desktop.
+- **A capture also traces every draw of its frame** (as `WWHD_GL_TRACE_DRAWS=1`). The log buffer is now 4 MB instead of 1 MB: a capture frame's per-draw trace is about 1.5 MB, and none of it is dropped.
+- **Near-plane clip distance off by default.** `WWHD_GL_NEAR_CLIP=1` turns it on. The shader cache line mentions it only when it is on.
+- **Desktop test aids:**
+  - `WWHD_GL_TEST_SKIP=frame:first-last,...` leaves out those draws of a frame (counted in trace order).
+  - `WWHD_GL_TRACE_PIXELS=1` (desktop only, with the per-draw trace) logs the pixels each draw changed in its first color target.
+- **Tests (desktop):**
+  - The capture flow scripted (both sticks at frame 1395): the capture frame traced 2,311 draws. The beam's draw-state signature matched exactly its 4 draws. All 16 probe modes linked. A 16-mode run writes 68 PNGs: 4 beam draws per frame, plus the "before" pictures of mode 0.
+  - AddressSanitizer, the same flow: 0 errors, and the game ran on after the probes.
+- `[boot]` ends with `runtime: round 28 (...)`. The log says `near-plane clip distance: off (WWHD_GL_NEAR_CLIP)` and `capture of frame N requested: ... probe frames from N+1`, then one `probe frame` line per mode.
+
 ### Next steps
 
-- The main thread is the limit at the top of the island (CPU-bound, ~29 fps): let a non-blocking send to a full `update_ubo` queue grow it instead of failing (moves 5,000-10,000 jobs a second to cores 0/2), and keep shrinking the recompiled code's cost.
-- First-time texture uploads (16-31 ms in a turn, 216 ms when the save loads) remain: decoding on another thread is the option.
+- Hardware test of round 28:
+  - Are the stutters gone? The `synchronous calls` in the `[gl] Mesa per second` lines should be back near 0.1 ms per `CompressedTexSubImage2D`. If they are not, another part of round 27 is the cause.
+  - At a broken searchlight, one capture. Keep the beam on screen and wait about a minute. Send `probe_*.png`, `frame_*.png`, `target_*.png` and the log.
+- First visits still compile every new shader while the screen is black. Spreading the compiles over frames (drawing the place without the not-yet-compiled objects for a moment) is the option; a second GL context compiling on another core is risky with nouveau in Mesa 20.1.
+- Programs: ~340 KB each on the Switch; linking the cached pairs at first use instead of at startup would trade memory for short stalls.
+- Hardware test of round 25: the forest. Expected: `[mem] after the shader cache` several hundred MiB higher than round 24's 89 MiB. Startup may take somewhat longer or shorter (each cached source compiled once, as before; the unused ones not at all).
+- Hardware test of round 24: the forest and the top of the island. A crash now ends the log with `[crash]` lines: `addr2line -f -C -e build/switch/wwhd_r24.elf 0x<offset>` names each `code+0x<offset>`. If the sky goes black, click both sticks while it is on screen and send the PNGs with the log. If the forest crashes again, a run with `WWHD_GL_INVARIANT=0` and one with `WWHD_DYNAMIC_RES=0` separate rounds 22 and 20-21.
+- Hardware test of round 23: enter the pirate ship's hold. If it freezes again, the watchdog line names the shader pair. Then the same with `WWHD_GL_INVARIANT=0` (if that enters fine, the invariant positions trigger the driver problem for that pair). Needed from the SD card: the log, `sdmc:/switch/wwhd/shadercache_gl.bin`, and any report in `sdmc:/atmosphere/crash_reports/`.
+- The skipped draws should be gone (`0 skipped` after the place where the two pairs failed).
+- Backlog: the shore water losing its foam below a straight line at some camera angles (Switch only; round 22 did not fix it). Not reproduced on the desktop.
+- Hardware test of round 21: hitches at resolution changes (the `[hitch]` lines next to `[gl] dynamic resolution`), the forest and area changes.
+- Stock clocks: the main thread is the limit at 1020 MHz (91-97%): the CPU side comes next. The shadow cascades (~4,000 draws, unscaled) are the largest fixed GPU cost at low GPU clocks.
+- First-time texture uploads (16-31 ms in a turn) remain: decoding on another thread is the option.
 
 ## Rendering resolution
 
@@ -727,6 +1072,7 @@ The CPU cost (draw count, the render thread) does not depend on the resolution: 
 - **Lowering the resolution** (patch the low size at `+0x167C`, e.g. 960×540 or 1152×648).
   - Saves GPU fill and bandwidth in proportion (960×540 is 0.56× the pixels of 720p), with a softer picture.
   - Gains fps only while the GPU is the limit. Today the render thread (CPU) is, so it would gain nothing yet. It becomes useful if `GPU busy` is high, or at stock GPU clocks (307–460 MHz handheld, a third to a half of 921 MHz).
+  - Round 20 does this in the renderer instead, only when the GPU is the limit (dynamic resolution, `WWHD_DYNAMIC_RES`), and keeps the HUD at full resolution.
 - **Pinning 720p explicitly.** Rather than relying on the invalid timestamps, the samples could report a constant GPU time, so a future change to the stub cannot silently switch the game to 1080p. Not done yet.
 
 ## Black screen on Switch: diagnosis
@@ -785,7 +1131,7 @@ Added:
 ## Known limitations and follow-ups
 
 - The GamePad (second-screen) picture is not shown; only the TV image is presented. The controller acts as a Pro Controller by default, so the game puts its HUD, map and menus on the TV picture.
-- Renderer features that are no-ops on GL: resolution scale, AO, anisotropic filtering, FXAA, aspect-ratio adjustment, renderer restart, capture.
+- Renderer features that are no-ops on GL: the in-game AO toggle and the full-size occlusion depth (`WWHD_AO_HIRES` in the Vulkan/Metal renderers; the AO line fix itself is on, `WWHD_AO_MODE`), anisotropic filtering, FXAA, aspect-ratio adjustment, renderer restart, capture. Resolution scale works below 1 (round 20).
 - Performance: see [Performance](#performance-in-progress). Gameplay ran at 8–12 fps before round 2 and 14–19 fps after it.
 - Mods that need a mouse or keyboard are inactive.
-- Rounds 1–15 are committed on `feature/switch-port`.
+- Rounds 1–15 are committed on `feature/switch-port`; rounds 16-26 are not committed yet.

@@ -17,10 +17,13 @@ import json
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from analyze import Program, sext
 from ppc2c import translate, Unhandled
+import ppc2c
+import singleflow
 import crlive
 import leaflocal
 
@@ -43,6 +46,12 @@ NONLEAF = os.environ.get("WWHD_RECOMP_NONLEAF", "1") != "0"
 # return-address stores of direct calls to ordinary functions through PPC_SET_LR (nothing on the
 # Switch): on unless WWHD_RECOMP_LR=0
 LR_ELIDE = os.environ.get("WWHD_RECOMP_LR", "1") != "0"
+# paired-single loads and stores through GQRs the game never writes skip the GQR check
+# (static_float_gqrs): on unless WWHD_RECOMP_GQR=0
+GQR_STATIC = os.environ.get("WWHD_RECOMP_GQR", "1") != "0"
+# indirect jumps (bctr) remember their last target per site (ppc.h PPC_IJUMP): on unless WWHD_RECOMP_IJUMP=0
+IJUMP = os.environ.get("WWHD_RECOMP_IJUMP", "1") != "0"
+IJUMP_CALL = "PPC_IJUMP(c)(c)" if IJUMP else "ppc_dispatch(c)"
 # checking build: abort if a callee changes a callee-saved register (ppc.h PPC_KEEP_R)
 NONLEAF_CHECK = os.environ.get("WWHD_RECOMP_NONLEAF_CHECK", "0") == "1"
 
@@ -198,8 +207,8 @@ class Recompiler:
                 if self.cur_start <= slot < self.cur_end:
                     self.labels.add(slot)
                     cases.append("case 0x%08Xu: goto L_%08X;" % (slot, slot))
-            return "switch (c->ctr) { %s } c->pc = c->ctr; MUSTTAIL return ppc_dispatch(c);" % " ".join(cases)
-        return "c->pc = c->ctr; MUSTTAIL return ppc_dispatch(c);"
+            return "switch (c->ctr) { %%s } c->pc = c->ctr; MUSTTAIL return %s;" % IJUMP_CALL % " ".join(cases)
+        return "c->pc = c->ctr; MUSTTAIL return %s;" % IJUMP_CALL
 
     def imp_name(self, slot):
         lib, name, kind = self.imports[slot]
@@ -253,13 +262,82 @@ class Recompiler:
                     changed = True
         return clobbers
 
+    def single_dataflow(self, start, end):
+        """For each instruction of the function: the FPR halves known to hold single-precision values
+        before it (ppc2c.fp_transfer), as a bit mask. Forward dataflow over the function's branches:
+        where paths meet, a half counts only if it does on all of them. Nothing is known at the
+        entry, at instruction hooks (they may change registers) or in code no path reaches."""
+        n = (end - start) // 4
+        words = [self.p.word(start + 4 * i) for i in range(n)]
+        succ = []
+        for i, w in enumerate(words):
+            a = start + 4 * i
+            op, lk = w >> 26, w & 1
+            nxt = [i + 1] if i + 1 < n else []
+            if op == 18 and not lk:
+                t = branch_target(a, w)
+                out = [(t - start) // 4] if start <= t < end else []
+            elif op == 16 and not lk:
+                t = branch_target(a, w)
+                always = ((w >> 21) & 0x14) == 0x14
+                out = ([] if always else nxt) + ([(t - start) // 4] if start <= t < end else [])
+            elif op == 19 and ((w >> 1) & 0x3FF) in (16, 528) and not lk:
+                always = ((w >> 21) & 0x14) == 0x14
+                out = [] if always else list(nxt)
+                jt = self.p.jump_tables.get(a)
+                if jt:
+                    out += [(jt[0] + 4 * k - start) // 4 for k in range(jt[1]) if start <= jt[0] + 4 * k < end]
+            else:
+                out = nxt
+            succ.append(out)
+
+        def keeps_saved(i, w):
+            """a call whose callee restores f14-f31: not a register save/restore helper or a hook"""
+            a = start + 4 * i
+            if (w >> 26) == 19:
+                return True  # indirect: the calling convention
+            if a in self.p.import_calls or a in self.p.undef_calls:
+                return True
+            t = (sext(w & 0x03FFFFFC, 26) + (0 if w & 2 else a)) & 0xFFFFFFFF if (w >> 26) == 18 else \
+                (sext(w & 0xFFFC, 16) + (0 if w & 2 else a)) & 0xFFFFFFFF
+            return t not in self.saved_clobbers and t not in self.hooks
+
+        TOP = (1 << 64) - 1
+        state = [TOP] * n
+        state[0] = 0
+        sites = {(s - start) // 4 for s in self.sites if start <= s < end}
+        for i in sites:
+            state[i] = 0
+        reached = [False] * n
+        reached[0] = True
+        work = [0]
+        while work:
+            i = work.pop()
+            w = words[i]
+            out = ppc2c.fp_transfer(state[i], w, keeps_saved(i, w))
+            for j in succ[i]:
+                new = 0 if j in sites else state[j] & out
+                if not reached[j] or new != state[j]:
+                    reached[j] = True
+                    state[j] = new
+                    work.append(j)
+        return [state[i] if reached[i] else 0 for i in range(n)]
+
     def emit_function(self, start):
         self.emitted_leaf = False
         self.cur_start, self.cur_end = start, self.func_end(start)
         self.labels = set()
         body = []
-        for a in range(start, self.cur_end, 4):
+        if not ppc2c.SINGLE:
+            single_in = None
+        elif self.singleflow:
+            single_in = self.singleflow.states(start)
+        else:
+            single_in = self.single_dataflow(start, self.cur_end)
+        for i, a in enumerate(range(start, self.cur_end, 4)):
             w = self.p.word(a)
+            ppc2c.fp_state = single_in[i] if single_in else 0
+            ppc2c.cur_addr = a
             try:
                 s = translate(a, w, self)
             except Unhandled as e:
@@ -329,7 +407,14 @@ class Recompiler:
         self.nonleaf_count = 0
         self.used_imports = set()
         self.imm_override = self.imm_override
-        self.saved_clobbers = self.find_saved_clobbers() if NONLEAF else set()
+        self.saved_clobbers = self.find_saved_clobbers() if NONLEAF or ppc2c.SINGLE else set()
+        # single-precision halves across functions (singleflow.py): entry states and return summaries
+        self.singleflow = None
+        if ppc2c.SINGLE and singleflow.INTERPROC:
+            t0 = time.time()
+            self.singleflow = singleflow.Solver(self).solve()
+            sys.stderr.write("single-precision summaries: %d function analyses, %.1f s\n" %
+                             (self.singleflow.rounds, time.time() - t0))
         self.used_imports = set()  # the analysis pass translated everything once
         entries = set(self.sorted_entries)
         hot_rank = {}
@@ -398,12 +483,28 @@ class Recompiler:
         self.write_headers(outdir)
         self.write_report(outdir, len(files))
 
+    def static_float_gqrs(self):
+        """GQRs (bit n: GQRn) that no mtspr in the game's code writes. The runtime starts every
+        thread with GQR0, GQR1, GQR6 and GQR7 at 0 (threads.cpp) and GQR2-5 at quantized formats,
+        so only GQR0 and GQR1 can count."""
+        written = set()
+        for a in range(self.p.text_lo, self.p.text_hi, 4):
+            w = self.p.word(a)
+            if w >> 26 == 31 and (w >> 1) & 0x3FF == 467:  # mtspr
+                spr = ((w >> 16) & 31) | (((w >> 11) & 31) << 5)
+                if 912 <= spr <= 919 or 896 <= spr <= 903:
+                    written.add((spr - 912) if spr >= 912 else (spr - 896))
+        return sum(1 << n for n in (0, 1) if n not in written)
+
     def write_headers(self, outdir):
         func_slots = sorted(s for s, (lib, name, kind) in self.imports.items() if kind == "f")
         with open(os.path.join(outdir, "funcs.h"), "w") as f:
-            f.write('#pragma once\n%s%s%s#include "ppc.h"\n\n' % ("#define PPC_CR_CHECK 1\n" if CR_CHECK else "",
-                                                                "#define PPC_NONLEAF_CHECK 1\n" if NONLEAF_CHECK else "",
-                                                                "#define PPC_ELIDE_LR 1\n" if NONLEAF_CHECK else ""))
+            # GQRs no instruction of the game writes keep their initial value (0: plain floats), so paired-
+            # single loads and stores through them need no check of the GQR (ppc.h psq_load_l)
+            gqr = "#define PPC_GQR_STATIC_FLOAT 0x%02X\n" % self.static_float_gqrs() if GQR_STATIC else ""
+            f.write('#pragma once\n%s%s%s%s#include "ppc.h"\n\n' % ("#define PPC_CR_CHECK 1\n" if CR_CHECK else "",
+                                                                  "#define PPC_NONLEAF_CHECK 1\n" if NONLEAF_CHECK else "",
+                                                                  "#define PPC_ELIDE_LR 1\n" if NONLEAF_CHECK else "", gqr))
             for e in self.sorted_entries:
                 f.write("void f_%08X(Cpu* __restrict c);\n" % e)
             f.write("\n/* hooked functions: hook_X is implemented in the runtime, f_X_orig is the game's code */\n")
@@ -419,7 +520,10 @@ class Recompiler:
         with open(os.path.join(outdir, "table.c"), "w") as f:
             f.write('#include "funcs.h"\n#include "recomp_table.h"\n\n')
             variant = ", ".join(n for n, on in (("cr liveness", CRLIVE), ("leaf locals", LEAF), ("nonleaf locals", NONLEAF),
-                                                 ("hot layout", HOT), ("inline leaves", INLINE), ("lr elision", LR_ELIDE)) if on)
+                                                 ("hot layout", HOT), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
+                                                 ("single-precision tracking", ppc2c.SINGLE),
+                                                 ("whole-program single precision", ppc2c.SINGLE and singleflow.INTERPROC),
+                                                 ("static GQRs", GQR_STATIC), ("jump-site caches", IJUMP)) if on)
             f.write('const char g_recomp_variant[] = "%s";\n\n' % variant)
             f.write("const RecompEntry g_recomp_funcs[] = {\n")
             for e in self.sorted_entries:
@@ -452,6 +556,7 @@ class Recompiler:
             f.write("functions with calls with registers in locals: %d\n" % self.nonleaf_count)
             f.write("functions that change callee-saved registers (save/restore helpers): %d\n" % len(self.saved_clobbers))
             f.write("small hot leaves inlined into callers: %d\n" % getattr(self, "inline_count", 0))
+            f.write("single-precision multiplier operands: %d rounded (round25), %d known single\n" % tuple(ppc2c.single_stats))
             f.write("unhandled instruction kinds:\n")
             for k, v in self.unhandled.most_common():
                 f.write("  %6d  %s\n" % (v, k))

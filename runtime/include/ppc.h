@@ -17,11 +17,20 @@ extern "C" {
  * start-up (core.cpp). The asm read has no memory dependencies, so the compiler keeps the base in
  * a register across guest stores instead of reloading a global after each one. */
 extern uint8_t* ppc_mem_base_var;
+#if defined(PPC_BASE_REG) && !defined(__cplusplus)
+/* WWHD_SWITCH_BASE_REG (experimental): the generated code reads the base from x28. Every file of the
+ * program is compiled not to use x28 (-ffixed-x28); it is callee-saved, so the libraries keep it;
+ * guest_call sets it before game code runs (core.cpp GuestBaseScope). The asm read below was repeated
+ * in every basic block that touches guest memory (1,470 times in the hottest file). */
+register uint8_t* ppc_mem_base_reg __asm__("x28");
+static inline __attribute__((always_inline)) uint8_t* ppc_mem_base(void) { return ppc_mem_base_reg; }
+#else
 static inline __attribute__((always_inline)) uint8_t* ppc_mem_base(void) {
     uint8_t* p;
     __asm__("adrp %0, ppc_mem_base_var\n\tldr %0, [%0, :lo12:ppc_mem_base_var]" : "=r"(p));
     return p;
 }
+#endif
 #define PPC_MEM_BASE (ppc_mem_base())
 #else
 #define PPC_MEM_BASE ((uint8_t*)0x200000000000ull)
@@ -36,7 +45,10 @@ typedef struct Cpu {
     /* the scheduler asks the thread holding this core to yield at its next function entry
      * (threads.cpp); in what was padding, so the layout (and save states) stay the same */
     volatile uint8_t preempt;
-    uint8_t pad_[3];
+    /* the game's main thread (the runtime-call marker of the main-thread sampler reads it here: a
+     * thread_local is a function call per access on the Switch) */
+    uint8_t main_thread;
+    uint8_t pad_[2];
     struct { double ps0, ps1; } f[32];
     uint32_t fpscr;
     uint32_t gqr[8];
@@ -55,14 +67,32 @@ void ppc_dispatch(Cpu* c);                       /* call/jump to c->pc */
  * The entry packs the guest address (high half) and the host function as a 32-bit offset from
  * ppc_dispatch, so one 64-bit load reads a consistent pair; the table never changes once filled. */
 void ppc_icall_miss(Cpu* c, uint64_t* slot);
+/* Two entries per site, the latest target first: a virtual call site often alternates between a few
+ * object types (one entry missed each time it changed). */
+#define PPC_SITE_FN(e) ((PpcFunc)((uintptr_t)ppc_dispatch + (intptr_t)(int32_t)(uint32_t)(e)))
 #define PPC_ICALL(c, t) do {                                                                       \
-        static uint64_t ic_;                                                                       \
-        uint64_t e_ = __atomic_load_n(&ic_, __ATOMIC_RELAXED);                                     \
+        static uint64_t ic_[2];                                                                    \
+        uint64_t e_ = __atomic_load_n(&ic_[0], __ATOMIC_RELAXED);                                  \
         if (__builtin_expect((uint32_t)(e_ >> 32) == (t), 1))                                      \
-            ((PpcFunc)((uintptr_t)ppc_dispatch + (intptr_t)(int32_t)(uint32_t)e_))(c);             \
+            PPC_SITE_FN(e_)(c);                                                                    \
+        else if ((uint32_t)((e_ = __atomic_load_n(&ic_[1], __ATOMIC_RELAXED)) >> 32) == (t))       \
+            PPC_SITE_FN(e_)(c);                                                                    \
         else                                                                                       \
-            ppc_icall_miss(c, &ic_);                                                               \
+            ppc_icall_miss(c, ic_);                                                                \
     } while (0)
+/* Indirect jumps (bctr: mostly virtual tail calls) remember their last target the same way:
+ * PPC_IJUMP(c) is the function for c->pc, for "MUSTTAIL return PPC_IJUMP(c)(c);". Through
+ * ppc_dispatch every one looked the target up in a table of 8 bytes per instruction of the game
+ * (cache misses: ~1% of the main thread on the desktop). */
+PpcFunc ppc_ijump_resolve(Cpu* c, uint64_t* slot);
+#define PPC_IJUMP(c) ({                                                                            \
+        static uint64_t ij_[2];                                                                    \
+        uint64_t e_ = __atomic_load_n(&ij_[0], __ATOMIC_RELAXED), f_;                              \
+        __builtin_expect((uint32_t)(e_ >> 32) == (c)->pc, 1) ? PPC_SITE_FN(e_)                     \
+        : (uint32_t)((f_ = __atomic_load_n(&ij_[1], __ATOMIC_RELAXED)) >> 32) == (c)->pc           \
+            ? PPC_SITE_FN(f_)                                                                      \
+            : ppc_ijump_resolve((c), ij_);                                                         \
+    })
 void ppc_unimplemented(Cpu* c, uint32_t addr, uint32_t insn);
 void ppc_trap(Cpu* c, uint32_t addr);
 uint64_t ppc_timebase(void);
@@ -230,6 +260,13 @@ static inline double round25(double d) {
     return u64_as_f64(v);
 }
 static inline double to_single(double d) { return (double)(float)d; }
+/* check builds (WWHD_RECOMP_SINGLE_CHECK=1): a multiplier operand the recompiler found to be single
+ * precision, so round25 was left out (tools/recomp/ppc2c.py M), must come back unchanged from it */
+void ppc_single_failed(uint32_t at, double v);
+static inline double ppc_single_check(double v, uint32_t at) {
+    if (f64_as_u64(round25(v)) != f64_as_u64(v)) ppc_single_failed(at, v);
+    return v;
+}
 
 /* fcmpu / fcmpo. IEEE comparisons with a NaN are false, so lt/gt/eq need no NaN test; un is the
  * fourth outcome. FPSCR's FPCC field (which fcmp also sets) is not kept: only mffs and mcrfs read
@@ -356,9 +393,15 @@ static __attribute__((noinline)) void psq_store_slow_l(Cpu* c, double v0, double
         if (sz == 1) st8(ea + 1, d1); else if (sz == 2) st16(ea + 2, d1); else st32(ea + 4, d1);
     }
 }
-/* paired-single loads and stores: plain floats (GQR type 0-3) are nearly all of them */
+/* paired-single loads and stores: plain floats (GQR type 0-3) are nearly all of them. The generated
+ * code (funcs.h) sets bit n of PPC_GQR_STATIC_FLOAT when the game never writes GQRn, which then stays
+ * 0 (plain floats): with the constant GQR index of every call the check disappears (2,082 of the
+ * game's 2,106 paired loads and stores use GQR0 or GQR1). */
+#ifndef PPC_GQR_STATIC_FLOAT
+#define PPC_GQR_STATIC_FLOAT 0
+#endif
 static inline __attribute__((always_inline)) void psq_load_l(Cpu* c, double* p0, double* p1, uint32_t ea, int w, int i) {
-    if (__builtin_expect(((c->gqr[i] >> 16) & 7) < 4, 1)) {
+    if (((PPC_GQR_STATIC_FLOAT >> i) & 1) || __builtin_expect(((c->gqr[i] >> 16) & 7) < 4, 1)) {
         *p0 = u32_as_f32(ld32(ea));
         *p1 = w ? 1.0 : (double)u32_as_f32(ld32(ea + 4));
         return;
@@ -366,7 +409,7 @@ static inline __attribute__((always_inline)) void psq_load_l(Cpu* c, double* p0,
     psq_load_slow_l(c, p0, p1, ea, w, i);
 }
 static inline __attribute__((always_inline)) void psq_store_l(Cpu* c, double v0, double v1, uint32_t ea, int w, int i) {
-    if (__builtin_expect((c->gqr[i] & 7) < 4, 1)) {
+    if (((PPC_GQR_STATIC_FLOAT >> i) & 1) || __builtin_expect((c->gqr[i] & 7) < 4, 1)) {
         st32(ea, f32_as_u32((float)v0));
         if (!w) st32(ea + 4, f32_as_u32((float)v1));
         return;

@@ -126,11 +126,18 @@ void after_execute(Cpu* c, uint32_t execute_fn) {
     if (door != g_door_event) {
         g_door_event = door;
         trace("door event %s", door ? "running" : "done");
+        // (the log shows which mod ran just before a problem)
+        static uint64_t doorStart = 0;
+        if (door) doorStart = g_extra_door;
+        else if (quick_doors()) LOG("[mods] door event done: %llu extra logic steps", (unsigned long long)(g_extra_door - doorStart));
     }
     static bool ovl = false;
     if (overlap_active() != ovl) {
         ovl = !ovl;
         trace("overlap (fade) %s", ovl ? "starts" : "ends");
+        static uint64_t sceneStart = 0;
+        if (ovl) sceneStart = g_extra_scene;
+        else if (fast_scenes()) LOG("[mods] scene change done: %llu extra transition steps", (unsigned long long)(g_extra_scene - sceneStart));
     }
     uint32_t lr = c->lr, r3 = c->r[3];
     // quick doors: whole logic steps

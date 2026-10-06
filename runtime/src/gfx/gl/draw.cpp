@@ -124,8 +124,7 @@ GLuint sampler(const uint32_t* words, bool compare, bool integer) {
     GLint minFilter = mip == 0   ? (min ? GL_LINEAR : GL_NEAREST)
                       : mip == 2 ? (min ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR)
                                  : (min ? GL_LINEAR_MIPMAP_NEAREST : GL_NEAREST_MIPMAP_NEAREST);
-    GLuint s = 0;
-    glGenSamplers(1, &s);
+    GLuint s = gen_sampler_name();
     glSamplerParameteri(s, GL_TEXTURE_MAG_FILTER, mag ? GL_LINEAR : GL_NEAREST);
     glSamplerParameteri(s, GL_TEXTURE_MIN_FILTER, minFilter);
     glSamplerParameteri(s, GL_TEXTURE_WRAP_S, wrap(uint32_t(w.get_CLAMP_X())));
@@ -148,10 +147,10 @@ GLuint sampler(const uint32_t* words, bool compare, bool integer) {
 // ---- GL state the draws set, so a draw only issues the calls whose values changed. Mesa runs
 // every call (context lookup, vertex flush, dirty flags) even when the value is the same, and on
 // the Switch that driver time is most of a draw. Code outside draw() calls forget_gl_state().
-enum Cap { kScissor, kDepthClamp, kCull, kPolyOffset, kDepthTest, kStencilTest, kSrgb, kLogicOp, kRestart, kCapCount };
+enum Cap { kScissor, kDepthClamp, kCull, kPolyOffset, kDepthTest, kStencilTest, kSrgb, kLogicOp, kRestart, kNearClip, kCapCount };
 constexpr GLenum kCapEnums[kCapCount] = {GL_SCISSOR_TEST, GL_DEPTH_CLAMP, GL_CULL_FACE, GL_POLYGON_OFFSET_FILL, GL_DEPTH_TEST,
                                          GL_STENCIL_TEST, GL_FRAMEBUFFER_SRGB, GL_COLOR_LOGIC_OP,
-                                         GL_PRIMITIVE_RESTART_FIXED_INDEX};
+                                         GL_PRIMITIVE_RESTART_FIXED_INDEX, GL_CLIP_DISTANCE0};
 // a GL state change: the draws recorded for one multi-draw (flush_draws) need the state as it was
 #define FLUSHED(f) (flush_draws(), f)
 constexpr int kTexUnits = 96, kUboBindings = 64, kAttribs = 32, kVertexBindings = 16;
@@ -269,6 +268,10 @@ void cap(Cap c, bool on) {
 Surface* feedback_copy(Surface* s) {
     static std::unordered_map<Surface*, std::pair<uint64_t, std::unique_ptr<Surface>>> copies;
     auto& [seq, copy] = copies[s];
+    if (copy && copy->scale != s->scale) {  // s was rescaled
+        rescale_surface(copy.get(), s->scale, false);
+        seq = 0;
+    }
     if (!copy) {
         copy = std::make_unique<Surface>();
         copy->width = s->width;
@@ -280,14 +283,20 @@ Surface* feedback_copy(Surface* s) {
         copy->fmt = s->fmt;
         copy->mips = 1;
         copy->gpuWritten = true;
+        copy->scale = s->scale;
         create_surface_texture(copy.get());
         seq = 0;
     }
     if (seq != s->writeSeq) {
         flush_draws();  // the copy must include what recorded draws render into s
         R.perf.feedbackCopies++;
-        glCopyImageSubData(s->tex, s->target, 0, 0, 0, 0, copy->tex, copy->target, 0, 0, 0, 0, s->width, s->height,
-                           s->target == GL_TEXTURE_2D ? 1 : s->layers);
+        if (g_traceFrame) trace_event("feedback copy of %s", trace_name(s).c_str());
+        if (s->fmt.depth && depth_copy_by_blit())
+            for (uint32_t layer = 0; layer < (s->target == GL_TEXTURE_2D ? 1u : s->layers); layer++)
+                blit(s, 0, layer, s->width, s->height, copy.get(), 0, layer, s->width, s->height);
+        else
+            glCopyImageSubData(s->tex, s->target, 0, 0, 0, 0, copy->tex, copy->target, 0, 0, 0, 0, s->pw, s->ph,
+                               s->target == GL_TEXTURE_2D ? 1 : s->layers);
         seq = s->writeSeq;
     }
     return copy.get();
@@ -451,7 +460,79 @@ GLuint zero_buffer() {
     return buffer;
 }
 
+// Ambient-occlusion quirks, as in the Metal and Vulkan renderers (WWHD_AO_MODE=0..2 chooses one;
+// WWHD_NO_AO_QUIRK=1 means 0). The game downsamples the scene depth to 640x360 and computes ambient
+// occlusion from it at 960x540 (vertex shader 44BDF900, pixel shader 44BDFD00), then blurs it into
+// the shadow mask:
+//   0 = as the hardware renders it: the occlusion pass point-samples its centre depth, and every
+//       third row and column lands half a texel off, which shows as screen-fixed lines (and, with
+//       the noise below, grainy bands) on sloped ground in shadow
+//   1 = that one fetch is bilinear, like the pass's neighbour fetches: the lines go
+//   2 = (default) 1, and the 4x4 noise texture is tiled per 960x540 pixel instead of per 640x360
+//       pixel, so the game's blur averages it out and no uneven bands remain
+constexpr uint32_t kOcclusionVS = 0x44BDF900, kOcclusionPS = 0x44BDFD00;
+const int g_aoMode = [] {
+    if (const char* e = getenv("WWHD_AO_MODE")) return ((atoi(e) % 3) + 3) % 3;
+    return getenv("WWHD_NO_AO_QUIRK") ? 0 : 2;
+}();
+}  // namespace
+int ao_mode() { return g_aoMode; }
+namespace {
+// The occlusion pass's program in this stage: at its address and with its contents (size and hash of
+// the guest program). Another area could load another program at that address; it is left as it is.
+constexpr uint32_t kOcclusionSize[2] = {1584, 384};  // pixel, vertex (Outset, US v0)
+constexpr uint64_t kOcclusionHash[2] = {0x26870ca3f2e34dfaull, 0x36e37317f62658e9ull};
+bool is_occlusion(const uint32_t* r, bool vertex) {
+    const uint32_t reg = vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS;
+    const uint32_t addr = r[reg] << 8, size = r[reg + 1] << 3;
+    if (addr != (vertex ? kOcclusionVS : kOcclusionPS)) return false;
+    static uint64_t frame[2] = {~0ull, ~0ull};
+    static uint32_t sizeSeen[2] = {};
+    static bool result[2] = {};
+    if (frame[vertex] == R.frame && sizeSeen[vertex] == size) return result[vertex];
+    const uint64_t h = program_hash_of(program_hash_ref(addr, size), addr, size, R.frame);
+    const bool match = size == kOcclusionSize[vertex] && h == kOcclusionHash[vertex];
+    if (match != result[vertex] || frame[vertex] == ~0ull)
+        LOG("[gl] %s program at %08X (size %u, hash %016llx): %s", vertex ? "vertex" : "pixel", addr, size,
+            (unsigned long long)h, match ? "the occlusion pass, AO fix applied" : "not the occlusion pass, AO fix not applied");
+    frame[vertex] = R.frame;
+    sizeSeen[vertex] = size;
+    result[vertex] = match;
+    return match;
+}
+// AO mode 2: the occlusion vertex shader's first remapped constant, .w (the noise tiling) x1.5. src is
+// the constant's 16 bytes; the patched copy goes to tmp.
+inline const void* ao_noise_constant(const Shader* sh, const uint32_t* r, uint32_t mappedOffset, const void* src,
+                                     uint8_t (&tmp)[16]) {
+    if (mappedOffset != 0 || g_aoMode != 2 || !sh->vertex || !is_occlusion(r, true)) return src;
+    memcpy(tmp, src, 16);
+    float w;
+    memcpy(&w, tmp + 12, 4);
+    w *= 1.5f;
+    memcpy(tmp + 12, &w, 4);
+    return tmp;
+}
+
+// WWHD_GL_TRACE_DRAWS=1 (testing, with WWHD_GL_TRACE_FRAMES): every draw of a traced frame in the log,
+// with its shaders' GLSL hashes (sources: shadercache_gl.bin), depth state and textures
+const bool g_traceDraws = [] {
+    const char* e = getenv("WWHD_GL_TRACE_DRAWS");
+    return e && *e && strcmp(e, "0") != 0;
+}();
+std::string g_traceTextures;  // the textures of the draw being prepared (g_traceDraws)
 // uniform blocks and textures of one stage; textures are resolved (and uploaded) before any is bound
+bool g_gamepadDrawing = false;  // the draw being prepared renders the GamePad picture (draw_impl)
+// internal resolution of the draw being prepared: its render targets' scale, and each texture unit's
+// texture pixels per guest pixel (programs with uf_fragCoordScale / uf_texNScale only)
+float g_drawScale = 1.0f;
+auto g_unitScale = [] {
+    std::array<std::array<std::array<float, 2>, LATTE_NUM_MAX_TEX_UNITS>, 2> a;
+    for (auto& stage : a)
+        for (auto& unit : stage) unit = {1.0f, 1.0f};
+    return a;
+}();
+bool g_drawSamplesRendered = false;  // the draw samples a texture the GPU rendered
+
 void prepare_stage(const uint32_t* r, Shader* sh, Program* p, const std::array<Surface*, 8>& colors, Surface* depth,
                    std::vector<TextureBinding>& textures, std::vector<UboBinding>& ubos) {
     static const bool fullUbo = getenv("WWHD_GL_FULL_UBO") != nullptr;
@@ -494,6 +575,13 @@ void prepare_stage(const uint32_t* r, Shader* sh, Program* p, const std::array<S
         if (binding < 0 || samplerId >= 18) continue;
         const uint32_t* words = r + texbase + unit * 7;
         const uint32_t* samplerWords = r + REGADDR::SQ_TEX_SAMPLER_WORD0_0 + ((sh->vertex ? 18 : 0) + samplerId) * 3;
+        uint32_t aoSampler[3];
+        if (g_aoMode >= 1 && unit == 0 && !sh->vertex && is_occlusion(r, false)) {
+            // AO quirk 1: the occlusion pass's centre depth fetch, bilinear (XY mag/min filter)
+            memcpy(aoSampler, samplerWords, sizeof aoSampler);
+            aoSampler[0] = (aoSampler[0] & ~0x7E00u) | (1u << 9) | (1u << 12);
+            samplerWords = aoSampler;
+        }
         const bool compare = sh->dec->textureUsesDepthCompare[unit];
         // the last lookup for this unit, reused while its words and the surface set are unchanged
         TextureCacheEntry& cached = textureCache[sh->vertex ? 1 : 0][unit];
@@ -524,6 +612,27 @@ void prepare_stage(const uint32_t* r, Shader* sh, Program* p, const std::array<S
             cached.view = view;
             cached.smp = smp;
         }
+        if (g_gamepadDrawing) {  // a texture of the GamePad picture
+            if (!s->gamepadSource) s->gamepadSourceSince = R.frame;
+            s->gamepadSource = true;
+        } else if (s->drcScanFrame != ~0ull && gamepad_only(s)) {
+            // the GamePad picture itself read by another draw: at an area change the game captures it into
+            // a buffer of its own for the GamePad's fade, which only GamePad-picture draws then sample. It
+            // counts as a read once something else reads what this draw renders. (Round 21 did this for
+            // every GamePad-only surface: a texture the TV also needs could then stay GamePad-only.)
+            for (auto* c : colors)
+                if (c && c != s) c->derivedFrom = s;
+        } else
+            note_read(s);
+        if (g_traceFrame) {
+            trace_draw(s);
+            if (g_traceDraws || g_captureDraws) {
+                char t[160];
+                snprintf(t, sizeof t, " %s%u=%s(smp %08X %08X %08X%s)", sh->vertex ? "vt" : "t", unit, trace_name(s).c_str(),
+                         samplerWords[0], samplerWords[1], samplerWords[2], compare ? " cmp" : "");
+                g_traceTextures += t;
+            }
+        }
         bool aliases = depth && s == depth;
         for (auto* c : colors)
             if (c && c == s) aliases = true;
@@ -531,6 +640,11 @@ void prepare_stage(const uint32_t* r, Shader* sh, Program* p, const std::array<S
             s = feedback_copy(s);
             view = sampled_view(s, words, target);
             smp = sampler(samplerWords, compare, s->fmt.kind != FormatInfo::FLOAT);
+        }
+        if (s->gpuWritten) g_drawSamplesRendered = true;
+        if (p->scaleUniforms) {
+            g_unitScale[sh->vertex][unit][0] = float(s->pw) / float(s->width);
+            g_unitScale[sh->vertex][unit][1] = float(s->ph) / float(s->height);
         }
         textures.push_back({(GLuint)binding, view, smp, target});
     }
@@ -547,26 +661,32 @@ void set_uniform_block(const uint32_t* r, Shader* sh, UniformVarBlock& b, bool d
     const size_t size = b.data.size();
     uint8_t* data = b.data.data();
     bool dirty = false;
+    // a batched draw's copy is always taken (record_draw), so its values are written without comparing
     auto put = [&](GLint offset, const void* src, size_t bytes) {
-        if (offset < 0 || size_t(offset) + bytes > size || !memcmp(data + offset, src, bytes)) return;
+        if (offset < 0 || size_t(offset) + bytes > size) return;
+        if (!deferred && !memcmp(data + offset, src, bytes)) return;
         memcpy(data + offset, src, bytes);
         dirty = true;
     };
     if (b.remapped >= 0) {
         static const uint8_t zeros[16] = {};
+        uint8_t ao[16];
         for (const auto& e : dec->list_remappedUniformEntries_register)
-            put(b.remapped + GLint(e.mappedIndexOffset), r + aluBase + e.indexOffset / 4, 16);
+            put(b.remapped + GLint(e.mappedIndexOffset),
+                ao_noise_constant(sh, r, e.mappedIndexOffset, r + aluBase + e.indexOffset / 4, ao), 16);
         for (const auto& g : dec->list_remappedUniformEntries_bufferGroups) {
             uint32_t address = r[blockBase + g.kcacheBankIdOffset / 4];
             for (const auto& e : g.entries)
-                put(b.remapped + GLint(e.mappedIndexOffset), address ? ppc_ptr(address + e.indexOffset) : zeros, 16);
+                put(b.remapped + GLint(e.mappedIndexOffset),
+                    ao_noise_constant(sh, r, e.mappedIndexOffset, address ? ppc_ptr(address + e.indexOffset) : zeros, ao),
+                    16);
         }
     }
     if (b.registers >= 0 && sh->registerCount) put(b.registers, r + aluBase, size_t(sh->registerCount) * 16);
     if (sh->vertex) {
         if (b.pointSize >= 0) {
             float point = float(r[REGADDR::PA_SU_POINT_SIZE] & 0xFFFF) / 8.0f;
-            point = point == 0 ? 0.125f : point;
+            point = (point == 0 ? 0.125f : point) * g_drawScale;
             put(b.pointSize, &point, 4);
         }
         if (b.windowToClip >= 0) {
@@ -578,6 +698,12 @@ void set_uniform_block(const uint32_t* r, Shader* sh, UniformVarBlock& b, bool d
         float ref = f32(r[REGADDR::SX_ALPHA_REF]);
         put(b.alphaRef, &ref, 4);
     }
+    if (!sh->vertex && b.fragCoordScale >= 0) {  // gl_FragCoord in guest pixels
+        const float v[2] = {1.0f / g_drawScale, 1.0f / g_drawScale};
+        put(b.fragCoordScale, v, 8);
+    }
+    for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++)
+        if (b.texScale[t] >= 0) put(b.texScale[t], g_unitScale[sh->vertex][t].data(), 8);
     if (deferred) return;  // the multi-draw uploads every recorded draw's copy (flush_draws)
     if (dirty || b.gen != R.streamGen) {
         b.slice = stream_upload(data, size, R.uboAlignment);
@@ -621,10 +747,14 @@ void set_uniforms(const uint32_t* r, Shader* sh, Program* p) {
             dirty = true;
         };
         static const uint8_t zeros[16] = {};
-        for (const auto& e : dec->list_remappedUniformEntries_register) put(e.mappedIndexOffset, r + aluBase + e.indexOffset / 4);
+        uint8_t ao[16];
+        for (const auto& e : dec->list_remappedUniformEntries_register)
+            put(e.mappedIndexOffset, ao_noise_constant(sh, r, e.mappedIndexOffset, r + aluBase + e.indexOffset / 4, ao));
         for (const auto& g : dec->list_remappedUniformEntries_bufferGroups) {
             uint32_t address = r[blockBase + g.kcacheBankIdOffset / 4];
-            for (const auto& e : g.entries) put(e.mappedIndexOffset, address ? ppc_ptr(address + e.indexOffset) : zeros);
+            for (const auto& e : g.entries)
+                put(e.mappedIndexOffset,
+                    ao_noise_constant(sh, r, e.mappedIndexOffset, address ? ppc_ptr(address + e.indexOffset) : zeros, ao));
         }
         if (dirty) glUniform4iv(remapped, (GLsizei)dec->list_remappedUniformEntries.size(), (const GLint*)shadow.data());
     }
@@ -640,7 +770,7 @@ void set_uniforms(const uint32_t* r, Shader* sh, Program* p) {
     if (sh->vertex) {
         if (p->pointSize >= 0) {
             float point = float(r[REGADDR::PA_SU_POINT_SIZE] & 0xFFFF) / 8.0f;
-            point = point == 0 ? 0.125f : point;
+            point = (point == 0 ? 0.125f : point) * g_drawScale;
             if (point != p->lastPointSize) glUniform1f(p->pointSize, p->lastPointSize = point);
         }
         if (p->windowToClip >= 0) {
@@ -657,6 +787,12 @@ void set_uniforms(const uint32_t* r, Shader* sh, Program* p) {
             p->lastAlphaRef = ref;
             glUniform1f(p->alphaRef, ref);
         }
+    }
+    if (p->scaleUniforms) {  // loose uniforms (rare): set each draw
+        if (!sh->vertex && p->fragCoordScale >= 0) glUniform2f(p->fragCoordScale, 1.0f / g_drawScale, 1.0f / g_drawScale);
+        if (!sh->vertex)  // (a program's loose uf_texNScale are shared by its stages: the pixel stage's)
+            for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++)
+                if (p->texScale[t] >= 0) glUniform2f(p->texScale[t], g_unitScale[0][t][0], g_unitScale[0][t][1]);
     }
 }
 
@@ -675,18 +811,19 @@ struct IndexList {
     StreamSlice slice;
     GLsizei count = 0;
     GLenum type = 0;  // 0: no index list (glDrawArrays)
-    uint32_t maxIndex = 0;
+    uint32_t minIndex = 0, maxIndex = 0;  // the vertices the list reads (restart index excluded)
 };
 
 template <int Type, class Out>
 void build_indices(const uint8_t* src, uint32_t count, uint32_t prim, bool restart, uint32_t restartIndex,
-                   std::vector<Out>& out, uint32_t& maxIndex) {
+                   std::vector<Out>& out, uint32_t& minIndex, uint32_t& maxIndex) {
     constexpr Out kRestart = Out(~Out(0));
-    uint32_t m = 0;
+    uint32_t m = 0, lo = ~0u;
     auto get = [&](uint32_t i) -> Out {
         uint32_t v = read_index<Type>(src, i);
         if (restart && v == restartIndex) return kRestart;
         m = std::max(m, v);
+        lo = std::min(lo, v);
         return Out(v);
     };
     switch (prim) {
@@ -723,6 +860,7 @@ void build_indices(const uint8_t* src, uint32_t count, uint32_t prim, bool resta
             for (uint32_t i = 0; i < count; i++) {
                 uint32_t v = read_index<Type>(src, i);
                 m = std::max(m, v);
+                lo = std::min(lo, v);
                 out[i] = Out(v);
             }
         } else
@@ -730,6 +868,7 @@ void build_indices(const uint8_t* src, uint32_t count, uint32_t prim, bool resta
         break;
     }
     maxIndex = m;
+    minIndex = lo == ~0u ? 0 : std::min(lo, m);
 }
 
 template <int Type> IndexList convert_typed(const uint8_t* src, uint32_t count, uint32_t prim, bool restart, uint32_t restartIndex) {
@@ -741,14 +880,14 @@ template <int Type> IndexList convert_typed(const uint8_t* src, uint32_t count, 
     bool narrow = !wide && (Type < 0 ? count < 0xFFFF : source16 && (!restart || restartIndex == 0xFFFF));
     if (narrow) {
         static std::vector<uint16_t> out;
-        build_indices<Type>(src, count, prim, restart, restartIndex, out, list.maxIndex);
+        build_indices<Type>(src, count, prim, restart, restartIndex, out, list.minIndex, list.maxIndex);
         list.count = GLsizei(out.size());
         list.type = GL_UNSIGNED_SHORT;
         list.slice = stream_upload(out.data(), out.size() * 2, 4);
         R.perf.indexBytes += out.size() * 2;
     } else {
         static std::vector<uint32_t> out;
-        build_indices<Type>(src, count, prim, restart, restartIndex, out, list.maxIndex);
+        build_indices<Type>(src, count, prim, restart, restartIndex, out, list.minIndex, list.maxIndex);
         list.count = GLsizei(out.size());
         list.type = GL_UNSIGNED_INT;
         list.slice = stream_upload(out.data(), out.size() * 4, 4);
@@ -904,6 +1043,116 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
                uint32_t baseVertex, uint32_t instances);
 }
 
+// The GamePad picture (WWHD_GL_SKIP_GAMEPAD). The game draws a second picture every frame for the
+// Wii U GamePad's screen and hands it over with GX2CopyColorBufferToScanBuffer(target 4); the Switch
+// shows only the TV picture (copy_to_scan ignores the GamePad copy). A color buffer that went to the
+// GamePad within the last 60 frames, was never copied to the TV and was never read by a draw or a
+// copy is GamePad-only (so is a texture only GamePad-picture draws sample): its draws and color
+// clears are skipped (depth clears are kept: a depth buffer may also serve the TV picture). A buffer
+// read once by anything else (a draw samples it, a copy reads it, it reaches the TV) is never
+// skipped again. Measured at Outset: 26-48 draws a frame, the TV picture pixel-identical.
+bool skip_gamepad() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_GL_SKIP_GAMEPAD");
+        return !(e && *e == '0');
+    }();
+    return on;
+}
+bool gamepad_only(const Surface* s) {
+    // a read by another draw or a copy keeps a buffer drawn, for 300 frames: the game reads the GamePad
+    // picture now and then for a GamePad-sized capture (a loading transition: one read at the save
+    // load), and that read kept all 117 draws a frame of the GamePad picture drawn for the session
+    constexpr uint64_t kReadWindow = 300;
+    const bool unread = s->readFrame == ~0ull || R.frame - s->readFrame > kReadWindow;
+    if (s->tvScanFrame != ~0ull) return false;
+    if (s->drcScanFrame != ~0ull && R.frame - s->drcScanFrame <= 60) return unread;
+    // A texture of the GamePad picture: reads from before a GamePad-picture draw first sampled it do not
+    // count (until the first GamePad copy, at the end of the first frame, the draws that compose the
+    // GamePad picture count as the TV's); one read by anything else since then shares it for good
+    return s->gamepadSource && !s->tvShared && (unread || s->readFrame < s->gamepadSourceSince);
+}
+
+// ---- probe frames (round 28): diagnostics for a pixel shader that goes wrong only on the Switch.
+// After a capture (both sticks), each following frame redraws the probed pixel shaders' draws with one
+// diagnostic output instead of their color (mode 0: unchanged) and writes the draw's target to
+// probe_<first probe frame>_m<mode>_<n>[_before].png right after each such draw (n: the draw's order in
+// the frame; mode 0 also before it). The default probe is
+// the Forsaken Fortress searchlight beam (the cone drawn into the main picture with alpha blending);
+// WWHD_GL_PROBE_PS=hash,... (hex, as the trace prints them) chooses others. Opaque outputs (alpha 1) show
+// the value itself where the cone is drawn; NaN shows as magenta, infinity as cyan.
+struct ProbeMode {
+    const char* name;
+    const char* expr;  // "$": the original output
+};
+const ProbeMode kProbeModes[] = {
+    {"original", nullptr},
+    {"coverage", "vec4(1.0, 1.0, 1.0, 1.0)"},
+    {"normal", "(any(isnan(passParameterSem4.xyz)) ? vec4(1.0, 0.0, 1.0, 1.0) : any(isinf(passParameterSem4.xyz)) ? "
+               "vec4(0.0, 1.0, 1.0, 1.0) : vec4(abs(normalize(passParameterSem4.xyz)), 1.0))"},
+    {"facing", "vec4(vec3(abs(dot(normalize(passParameterSem5.xyz), normalize(passParameterSem4.xyz)))), 1.0)"},
+    {"depth", "vec4(texture(textureUnitPS0, passParameterSem7.xy / passParameterSem7.z).x, "
+              "clamp(passParameterSem5.w, 0.0, 1.0), 0.5 + 4.0 * (texture(textureUnitPS0, passParameterSem7.xy / "
+              "passParameterSem7.z).x - clamp(passParameterSem5.w, 0.0, 1.0)), 1.0)"},
+    {"screen", "vec4(fract(passParameterSem7.xy / passParameterSem7.z), passParameterSem7.z > 0.0 ? 0.0 : 1.0, 1.0)"},
+    {"alpha", "(isnan(($).w) ? vec4(1.0, 0.0, 1.0, 1.0) : isinf(($).w) ? vec4(0.0, 1.0, 1.0, 1.0) : "
+              "vec4(vec3(clamp(($).w, 0.0, 1.0)), 1.0))"},
+    {"color", "vec4(clamp(($).xyz, 0.0, 1.0), 1.0)"},
+    {"gradient", "vec4(texture(textureUnitPS3, passParameterSem8.xy).xyz, 1.0)"},
+    {"vertex alpha", "vec4(vec3(clamp(passParameterSem1.w, 0.0, 1.0)), 1.0)"},
+    // the beam shader's own intermediate values at its output (its registers): facing term (R123f.w),
+    // depth fade (R0f.w / R126f.x), and the beam without the depth fade (alpha R126f.x)
+    {"game facing", "(isnan(R123f.w) ? vec4(1.0, 0.0, 1.0, 1.0) : vec4(vec3(clamp(R123f.w, 0.0, 1.0)), 1.0))"},
+    {"game depth fade", "(isnan(R0f.w / R126f.x) ? vec4(1.0, 0.0, 1.0, 1.0) : vec4(vec3(clamp(R0f.w / R126f.x, 0.0, 1.0)), "
+                        "1.0))"},
+    {"no depth fade", "vec4(R0f.xyz, R126f.x)"},
+    // flags (dark gray where drawn, a channel at 1 where its flag is set)
+    {"nan map", "vec4(max(vec3(isnan(R123f.w) ? 1.0 : 0.0, isnan(($).w) ? 1.0 : 0.0, 0.0), vec3(0.2)), 1.0)"},
+    {"nan source", "vec4(max(vec3((dot(passParameterSem4.xyz, passParameterSem4.xyz) == 0.0 || "
+                   "isinf(inversesqrt(dot(passParameterSem4.xyz, passParameterSem4.xyz)))) ? 1.0 : 0.0, "
+                   "any(isnan(passParameterSem4)) ? 1.0 : 0.0, (dot(passParameterSem5.xyz, passParameterSem5.xyz) == "
+                   "0.0 || any(isnan(passParameterSem5)) || any(isinf(passParameterSem5))) ? 1.0 : 0.0), vec3(0.2)), 1.0)"},
+    {"depth source", "vec4(max(vec3(isinf(texture(textureUnitPS0, passParameterSem7.xy / passParameterSem7.z).x) ? 1.0 : "
+                     "0.0, isnan(texture(textureUnitPS0, passParameterSem7.xy / passParameterSem7.z).x) ? 1.0 : 0.0, "
+                     "0.0), vec3(0.2)), 1.0)"},
+};
+constexpr int kProbeModeCount = int(sizeof kProbeModes / sizeof *kProbeModes);
+// the probe mode of the frame being built, or -1
+int probe_mode() {
+    if (g_probeStart == ~0ull || R.frame < g_probeStart || R.frame >= g_probeStart + kProbeModeCount) return -1;
+    return int(R.frame - g_probeStart);
+}
+bool probed_ps(uint64_t hash) {
+    static const std::vector<uint64_t> list = [] {
+        std::vector<uint64_t> out;
+        const char* e = getenv("WWHD_GL_PROBE_PS");
+        if (!e) return std::vector<uint64_t>{0xBCB22BAD319DC0BDull};  // the searchlight beam
+        for (const char* q = e; *q;) {
+            char* end = nullptr;
+            const unsigned long long v = strtoull(q, &end, 16);
+            if (end == q) break;
+            out.push_back(v);
+            q = *end ? end + 1 : end;
+        }
+        return out;
+    }();
+    return std::find(list.begin(), list.end(), hash) != list.end();
+}
+void probe_dump(Surface* target, int mode, const char* suffix) {
+    static uint64_t frame = ~0ull;
+    static int n = 0;
+    if (frame != R.frame) {
+        frame = R.frame;
+        n = 0;
+    }
+    if (!*suffix) n++;
+    char name[96];
+    snprintf(name, sizeof name, "probe_%llu_m%d_%d%s.png", (unsigned long long)g_probeStart, mode, n + (*suffix ? 1 : 0),
+             suffix);
+    flush_draws();
+    dump_surface(target, name);
+    forget_gl_state();
+}
+
 void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr, uint32_t baseVertex,
           uint32_t instances) {
     draw_impl(r, prim, count, indexType, indexAddr, baseVertex, instances);
@@ -919,6 +1168,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     if (!count || !instances || ((prim == 0x13 || prim == 0x14) && count < 4)) return;
     if (r[REGADDR::PA_CL_CLIP_CNTL] & (1 << 22)) return;  // rasterization disabled
     uint64_t lapAt = timed ? now_ns() : 0;
+    const uint64_t drawStart = lapAt;
     auto lap = [&](uint64_t& total) {
         if (!timed) return;
         const uint64_t now = now_ns();
@@ -945,24 +1195,44 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             stateHash.gen = g_shader_regs_gen;
             stateHash.prim = prim;
         }
-        // recent (programs, register state) combinations of this frame: a draw that goes back to one
-        // skips the program hashing and the shader and program maps (program memory may change
-        // between frames, so entries last one frame, like the program hashes)
+        // recent (programs, register state) combinations: a draw that goes back to one skips the
+        // shader and program maps. Program memory may change between frames, so a combination made in
+        // an earlier frame is used again only if its programs still have the hashes they had (checked
+        // once per frame, as for the shader lookup itself) and the fetch shader is the same: before,
+        // each combination's first draw of every frame (a quarter of all draws) did the full lookup.
         struct Combo {
             uint64_t frame = ~0ull, epoch = 0, vsState = 0, psState = 0;
             uint32_t programs[6] = {};
             LatteFetchShader* fs = nullptr;
             Shader *vs = nullptr, *ps = nullptr;
             Program* p = nullptr;
+            void *vsRef = nullptr, *psRef = nullptr;  // program_hash_ref
+            uint64_t vsHash = 0, psHash = 0;
         };
-        static Combo combos[256];
+        static const bool comboAcrossFrames = [] {
+            const char* e = getenv("WWHD_GL_COMBO_FRAMES");
+            return !(e && *e == '0');
+        }();
+        auto stillValid = [&](Combo& c) {
+            if (c.frame == R.frame) return true;
+            if (!comboAcrossFrames || !c.vsRef || !c.psRef) return false;
+            uint64_t fsKey = 0;
+            if (get_fetch_shader(r, &fsKey, R.frame) != c.fs ||
+                program_hash_of(c.vsRef, c.programs[2] << 8, c.programs[3] << 3, R.frame) != c.vsHash ||
+                program_hash_of(c.psRef, c.programs[4] << 8, c.programs[5] << 3, R.frame) != c.psHash)
+                return false;
+            c.frame = R.frame;
+            return true;
+        };
+        // (4,096: a busy view has several hundred combinations a frame, and 256 slots kept evicting them)
+        static Combo combos[4096];
         const uint32_t programs[6] = {r[mmSQ_PGM_START_FS], r[mmSQ_PGM_START_FS + 1], r[mmSQ_PGM_START_VS],
                                       r[mmSQ_PGM_START_VS + 1], r[mmSQ_PGM_START_PS], r[mmSQ_PGM_START_PS + 1]};
         uint64_t h = stateHash.vs * 31 + stateHash.ps;
         for (uint32_t v : programs) h = (h ^ v) * 0x100000001B3ull;
-        Combo& c = combos[(h ^ (h >> 29)) & 255];
-        if (!noMemo && c.frame == R.frame && c.epoch == R.shaderEpoch && c.vsState == stateHash.vs &&
-            c.psState == stateHash.ps && !memcmp(c.programs, programs, sizeof programs)) {
+        Combo& c = combos[(h ^ (h >> 29)) & 4095];
+        if (!noMemo && c.epoch == R.shaderEpoch && c.vsState == stateHash.vs && c.psState == stateHash.ps &&
+            !memcmp(c.programs, programs, sizeof programs) && stillValid(c)) {
             R.perf.comboHits++;
             fs = c.fs;
             vs = c.vs;
@@ -982,6 +1252,13 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             c.fs = fs;
             c.vs = vs;
             c.ps = ps;
+            const uint32_t vsAddr = programs[2] << 8, vsSize = programs[3] << 3, psAddr = programs[4] << 8,
+                           psSize = programs[5] << 3;
+            const bool hashable = vsAddr && vsSize && psAddr && psSize;  // (what translate checks first)
+            c.vsRef = hashable ? program_hash_ref(vsAddr, vsSize) : nullptr;
+            c.psRef = hashable ? program_hash_ref(psAddr, psSize) : nullptr;
+            c.vsHash = hashable ? program_hash_of(c.vsRef, vsAddr, vsSize, R.frame) : 0;
+            c.psHash = hashable ? program_hash_of(c.psRef, psAddr, psSize, R.frame) : 0;
             c.p = p;
         }
         memo = {g_shader_state_gen, R.frame, R.shaderEpoch, prim, fs, vs, ps, p};
@@ -1017,6 +1294,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     IndexList indices;
     if (indexAddr || generated) indices = index_list(prim, count, indexType, indexAddr, stripRestart, restartIndex);
     uint64_t maxVertex = indices.type ? uint64_t(indices.maxIndex) + baseVertex : uint64_t(baseVertex) + count - 1;
+    const uint64_t firstVertex = indices.type ? uint64_t(indices.minIndex) + baseVertex : uint64_t(baseVertex);
     lap(R.perf.indexNs);
 
     // ---- render targets
@@ -1027,6 +1305,23 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     for (int i = 0; i < 8; i++)
         if (mask & (1 << i)) colors[i] = color_target(r, i, &slices[i]);
     Surface* depth = LatteMRT::GetActiveDepthBufferMask(lcr) ? depth_target(r, &depthSlice) : nullptr;
+    // each render target at the internal resolution it should have now (rescale_surface keeps contents);
+    // the TV picture's buffer back from full resolution if 3D drawing follows the HUD's
+    fit_scale(depth, true);
+    float shared = depth ? depth->scale : 0.0f;
+    bool mixed = false;
+    for (auto* c : colors)
+        if (c) {
+            before_write(c);
+            if (c->hudFull && depth) c->hudFull = false;
+            fit_scale(c, true);
+            if (shared == 0.0f) shared = c->scale;
+            mixed |= c->scale != shared;
+        }
+    if (mixed) {  // some took the new scale, some wait for an allocation: all of them now
+        fit_scale(depth, true, true);
+        for (auto* c : colors) fit_scale(c, true, true);
+    }
     Surface* target = depth;
     for (auto* c : colors)
         if (c) {
@@ -1037,6 +1332,56 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         R.skippedDraws++;
         return;
     }
+    g_drawScale = target->scale;
+    if (depth && depth->scale != g_drawScale)
+        log_once(0x5CA1E000u, "[gl] render targets with different internal resolutions (depth %s)",
+                 std::to_string(depth->scale) + ", color " + std::to_string(g_drawScale));
+    // test aid: WWHD_GL_TEST_SKIP=frame:first-last,... leaves out those draws of that frame (counted from 0,
+    // in the order the trace lists them): which draws make a part of the picture
+    {
+        struct SkipRange { uint64_t frame; uint32_t first, last; };
+        static const std::vector<SkipRange> skips = [] {
+            std::vector<SkipRange> out;
+            const char* e = getenv("WWHD_GL_TEST_SKIP");
+            for (const char* q = e; q && *q;) {
+                unsigned long long f = 0;
+                unsigned a = 0, b = 0;
+                if (sscanf(q, "%llu:%u-%u", &f, &a, &b) == 3) out.push_back({f, a, b});
+                q = strchr(q, ',');
+                if (q) q++;
+            }
+            return out;
+        }();
+        if (!skips.empty() && target != depth && !gamepad_only(target)) {  // (as traced: color draws)
+            static uint64_t frame = ~0ull;
+            static uint32_t index = 0;
+            if (frame != R.frame) {
+                frame = R.frame;
+                index = 0;
+            }
+            const uint32_t i = index++;
+            for (const auto& k : skips)
+                if (k.frame == R.frame && i >= k.first && i <= k.last) return;
+        }
+    }
+    bool gamepadDraw = target != depth;  // (a draw without a color target is not classified)
+    for (auto* c : colors)
+        if (c && !gamepad_only(c)) gamepadDraw = false;
+    if (gamepadDraw) {
+        R.perf.gamepadDraws++;
+        if (skip_gamepad()) {
+            R.perf.gamepadSkipped++;
+            // each surface's first skipped draw is logged: anything but the GamePad picture's own buffers
+            // (854x480 and its parts) being skipped is a misclassification to look into
+            for (auto* c : colors)
+                if (c && !c->skipLogged) {
+                    c->skipLogged = true;
+                    LOG("[gl] draws into %s skipped from frame %llu: GamePad picture only (WWHD_GL_SKIP_GAMEPAD)",
+                        trace_name(c).c_str(), (unsigned long long)R.frame);
+                }
+            return;
+        }
+    }
     for (auto* c : colors)
         if (c) upload_surface(c);
     if (depth) upload_surface(depth);
@@ -1046,8 +1391,59 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     static std::vector<UboBinding> ubos;
     textures.clear();
     ubos.clear();
+    g_gamepadDrawing = gamepadDraw;
+    g_drawSamplesRendered = false;
+    g_traceTextures.clear();
+    // ---- probe frames: the probed pixel shader's draws with a diagnostic output
+    const int probeMode = probe_mode();
+    bool probed = probeMode >= 0 && colors[0] && probed_ps(ps->glslHash);
+    if (probeMode >= 0 && colors[0] && !probed && !getenv("WWHD_GL_PROBE_PS")) {
+        // the searchlight beam by its draw state, should its GLSL hash differ: a 234-index triangle list
+        // drawn with alpha blending, no culling and no depth writes into a 1280x720 target
+        LATTE_DB_DEPTH_CONTROL dc;
+        memcpy(&dc, r + REGADDR::DB_DEPTH_CONTROL, 4);
+        LATTE_PA_SU_SC_MODE_CNTL pm;
+        memcpy(&pm, r + REGADDR::PA_SU_SC_MODE_CNTL, 4);
+        probed = prim == 4 && count == 234 && r[REGADDR::CB_BLEND0_CONTROL] == 0x05040504 && !pm.get_CULL_FRONT() &&
+                 !pm.get_CULL_BACK() && !dc.get_Z_WRITE_ENABLE() && colors[0]->width == 1280 && colors[0]->height == 720;
+        if (probed) {
+            char hex[20];
+            snprintf(hex, sizeof hex, "%016llx", (unsigned long long)ps->glslHash);
+            log_once(0x9B0BE000u, "[gl] probe: the beam found by its draw state, pixel shader %s", hex);
+        }
+    }
+    if (probed) {
+        if (probeMode == 0) probe_dump(colors[0], 0, "_before");
+        if (const char* expr = kProbeModes[probeMode].expr) {
+            if (Program* v = probe_program(vs, ps, probeMode, expr)) p = v;
+        }
+        static uint64_t logged = ~0ull;
+        if (logged != R.frame) {
+            logged = R.frame;
+            LOG("[gl] probe frame %llu: mode %d (%s), pixel shader %016llx into %s", (unsigned long long)R.frame,
+                probeMode, kProbeModes[probeMode].name, (unsigned long long)ps->glslHash, trace_name(colors[0]).c_str());
+        }
+    }
+
     prepare_stage(r, vs, p, colors, depth, textures, ubos);
     prepare_stage(r, ps, p, colors, depth, textures, ubos);
+    // The HUD at full resolution: the game draws it into the same buffer as the scene, last, after the
+    // post-processing that reads the scene. At a lower internal resolution, the first draw into the TV
+    // picture's buffer that comes after a read of it this frame, has no depth buffer and samples only the
+    // game's own textures (nothing rendered) switches that buffer to its full-size texture, the scene
+    // scaled up into it; the next frame's clear (or 3D drawing) switches back.
+    if (target->scale < 1.0f && target == R.tvSource && !depth && !g_drawSamplesRendered && colors[0] == target &&
+        target->readFrame == R.frame) {
+        bool single = true;
+        for (int i = 1; i < 8; i++)
+            if (colors[i]) single = false;
+        if (single) {
+            target->hudFull = true;
+            fit_scale(target, true, true);
+            g_drawScale = target->scale;
+            R.perf.hudSwitches++;
+        }
+    }
     lap(R.perf.resourceNs);
 
     // ---- framebuffer
@@ -1059,6 +1455,11 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     struct Attachment { Surface* s = nullptr; uint32_t slice = 0; };
     static std::array<Attachment, 9> bound;
     static bool dirty = true;
+    static uint64_t boundTextures = 0;
+    if (boundTextures != R.textureEpoch) {  // a surface got a new texture: attach everything again
+        boundTextures = R.textureEpoch;
+        for (auto& a : bound) a = {reinterpret_cast<Surface*>(uintptr_t(1)), ~0u};
+    }
     for (int i = 0; i < 8; i++)
         if (bound[i].s != colors[i] || bound[i].slice != slices[i]) {
             FLUSHED(attach)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, colors[i], 0, slices[i]);
@@ -1071,7 +1472,14 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         bound[8] = {depth, depthSlice};
         dirty = true;
     }
+    if (dirty && g_traceFrame) trace_pass(colors, depth);
     if (dirty) {
+        if (g_gpuPassSampling) {
+            const Surface* first = nullptr;
+            for (auto* c : colors)
+                if (c && !first) first = c;
+            gpu_pass_mark("draw", first, depth);
+        }
         GLenum bufs[8];
         for (int i = 0; i < 8; i++) bufs[i] = colors[i] ? GL_COLOR_ATTACHMENT0 + i : GL_NONE;
         FLUSHED(glDrawBuffers)(8, bufs);
@@ -1114,10 +1522,10 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         Viewport v = Viewport{};
         v.origin = upper ? GL_UPPER_LEFT : GL_LOWER_LEFT;
         v.depthMode = dxClip ? GL_ZERO_TO_ONE : GL_NEGATIVE_ONE_TO_ONE;
-        v.rect[0] = xo - std::fabs(xs);
-        v.rect[1] = upper ? yo + ys : yo - ys;
-        v.rect[2] = 2 * std::fabs(xs);
-        v.rect[3] = 2 * std::fabs(ys);
+        v.rect[0] = (xo - std::fabs(xs)) * g_drawScale;
+        v.rect[1] = (upper ? yo + ys : yo - ys) * g_drawScale;
+        v.rect[2] = 2 * std::fabs(xs) * g_drawScale;
+        v.rect[3] = 2 * std::fabs(ys) * g_drawScale;
         v.range[0] = dxClip ? zo : zo - zs;
         v.range[1] = zo + zs;
         Viewport old = gs.viewport;
@@ -1129,12 +1537,21 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         }
     }
     cap(kDepthClamp, clip.get_ZCLIP_FAR_DISABLE());
+    // the vertex shaders' near-plane clip distance (shaders.cpp with_near_clip), unless the game turned
+    // near clipping off
+    cap(kNearClip, p->nearClip && !clip.get_ZCLIP_NEAR_DISABLE());
 
     uint32_t width = target->width, height = target->height;
     uint32_t tl = r[REGADDR::PA_SC_GENERIC_SCISSOR_TL], br = r[REGADDR::PA_SC_GENERIC_SCISSOR_BR];
     uint32_t x = std::min(tl & 0x7fff, width), y = std::min((tl >> 16) & 0x7fff, height);
     uint32_t ex = std::min(br & 0x7fff, width), ey = std::min((br >> 16) & 0x7fff, height);
     if (ex <= x || ey <= y) return;
+    if (g_drawScale != 1.0f) {  // texture pixels: outward
+        x = uint32_t(float(x) * g_drawScale);
+        y = uint32_t(float(y) * g_drawScale);
+        ex = std::min(scaled_size(ex, g_drawScale), target->pw);
+        ey = std::min(scaled_size(ey, g_drawScale), target->ph);
+    }
     cap(kScissor, true);
     {
         const GLint sc[4] = {GLint(x), GLint(y), GLint(ex - x), GLint(ey - y)};
@@ -1316,6 +1733,14 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     uint32_t vertexGroups = 0;
     for (auto& g : fs->bufferGroups)
         if (r[mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.attributeBufferIndex * 7]) vertexGroups++;
+    // Vertex range trimming (WWHD_GL_VERTEX_TRIM, on unless =0, rebased draws): only the vertices
+    // from the lowest one the draw reads are copied. A model's parts share one vertex buffer and each
+    // draws its own range, so copying from vertex 0 copied every part below it again (and the copy
+    // of the buffer made for an earlier part was too short to reuse).
+    static const bool trimOn = [] {
+        const char* e = getenv("WWHD_GL_VERTEX_TRIM");
+        return !(e && *e == '0');
+    }();
     uint32_t rebase = 0;  // added to the draw's base vertex
     for (auto& g : fs->bufferGroups) {
         if (p->batchable && g.attributeBufferIndex == kDrawIndexBinding)
@@ -1351,13 +1776,17 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         uint64_t last = instance ? instances - 1 : maxVertex;
         uint64_t copied = std::min<uint64_t>(size, last * stride + std::max<uint64_t>(attributeEnd, stride));
         const bool rebased = rebaseOn && p->batchable && vertexGroups == 1 && !instance && stride && stride % 4 == 0;
-        auto slice = stream_guest(addr, (size_t)std::max<uint64_t>(copied, 4), rebased ? stride : 16);
-        R.perf.vertexBytes += copied;
+        // with rebasing the base vertex absorbs the skipped vertices: it becomes slice / stride - first
+        // (negative for GL when the first vertex lies past the slice's start; indices >= it keep the
+        // vertex numbers non-negative)
+        const uint64_t skip = rebased && trimOn && firstVertex * stride < copied ? firstVertex * stride : 0;
+        auto slice = stream_guest(addr + uint32_t(skip), (size_t)std::max<uint64_t>(copied - skip, 4), rebased ? stride : 16);
+        R.perf.vertexBytes += copied - skip;
         VertexBindingState v = VertexBindingState{};
         v.buffer = slice.buffer;
         v.offset = slice.offset;
         if (rebased) {
-            rebase = uint32_t(slice.offset / stride);
+            rebase = uint32_t(slice.offset / stride) - uint32_t(skip / stride);
             v.offset = 0;
             R.perf.rebasedDraws++;
         }
@@ -1427,6 +1856,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         glDrawArraysInstanced(mode, (GLint)baseVertex, count, instances);
     }
     lap(R.perf.submitNs);
+    if (probed) probe_dump(colors[0], probeMode, "");
     auto tally = [](Surface* s) {
         if (s->drawFrame != R.frame) {
             s->drawFrame = R.frame;
@@ -1443,6 +1873,74 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         mark_gpu_written(depth);
         tally(depth);
     }
+    if (gamepadDraw && timed) R.perf.gamepadDrawNs += (now_ns() - drawStart) * kDrawTimeSample;
+    if (g_traceFrame) {
+        trace_draw(nullptr);
+        if (g_traceDraws || g_captureDraws) {
+            LATTE_DB_DEPTH_CONTROL tdc;
+            memcpy(&tdc, r + REGADDR::DB_DEPTH_CONTROL, 4);
+            LATTE_PA_SU_SC_MODE_CNTL tpm;
+            memcpy(&tpm, r + REGADDR::PA_SU_SC_MODE_CNTL, 4);
+            LATTE_PA_CL_CLIP_CNTL tcl;
+            memcpy(&tcl, r + REGADDR::PA_CL_CLIP_CNTL, 4);
+            LOG("[trace]   draw raster: cull %s%s, front %s, viewport y %s, z %g..%g, clip %s, z clip near %s far %s, near clip plane %s",
+                tpm.get_CULL_FRONT() ? "F" : "", tpm.get_CULL_BACK() ? "B" : (tpm.get_CULL_FRONT() ? "" : "none"),
+                tpm.get_FRONT_FACE() == LATTE_PA_SU_SC_MODE_CNTL::E_FRONTFACE::CCW ? "ccw" : "cw",
+                f32(r[REGADDR::PA_CL_VPORT_YSCALE]) < 0 ? "down (upper-left)" : "up (lower-left)",
+                f32(r[REGADDR::PA_CL_VPORT_ZOFFSET]) - (tcl.get_DX_CLIP_SPACE_DEF() ? 0.0f : f32(r[REGADDR::PA_CL_VPORT_ZSCALE])),
+                f32(r[REGADDR::PA_CL_VPORT_ZOFFSET]) + f32(r[REGADDR::PA_CL_VPORT_ZSCALE]),
+                tcl.get_DX_CLIP_SPACE_DEF() ? "0..1" : "-1..1", tcl.get_ZCLIP_NEAR_DISABLE() ? "off" : "on",
+                tcl.get_ZCLIP_FAR_DISABLE() ? "off" : "on",
+                p->nearClip && !tcl.get_ZCLIP_NEAR_DISABLE() ? "on" : "off");
+            LOG("[trace]   draw c0=%s d=%s vs %08X/%016llX ps %08X/%016llX prim %u count %u inst %u; depth %s func %u write %u, "
+                "stencil %u, poly offset %u (%g, %g), blend %08X, mask %08X;%s",
+                trace_name(colors[0]).c_str(), trace_name(depth).c_str(), r[mmSQ_PGM_START_VS] << 8,
+                (unsigned long long)vs->glslHash, r[mmSQ_PGM_START_PS] << 8, (unsigned long long)ps->glslHash, prim, count,
+                instances, depth && tdc.get_Z_ENABLE() ? "on" : "off",
+                uint32_t(tdc.get_Z_FUNC()), uint32_t(tdc.get_Z_WRITE_ENABLE()), uint32_t(tdc.get_STENCIL_ENABLE()),
+                (r[REGADDR::PA_SU_SC_MODE_CNTL] >> 11) & 1, f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE]) / 16,
+                f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET]), r[REGADDR::CB_BLEND0_CONTROL],
+                r[REGADDR::CB_TARGET_MASK], g_traceTextures.c_str());
+#ifndef __SWITCH__
+            // test aid (desktop): WWHD_GL_TRACE_PIXELS=1 also gives the pixels each traced draw changed in its
+            // first color target (read back after the draw): which draws make a part of the picture
+            static const bool tracePixels = getenv("WWHD_GL_TRACE_PIXELS") != nullptr;
+            if (tracePixels && colors[0] && colors[0]->tex && !colors[0]->fmt.depth) {
+                flush_draws();
+                Surface* c = colors[0];
+                GLint w = 0, h = 0;
+                glGetTextureLevelParameteriv(c->tex, 0, GL_TEXTURE_WIDTH, &w);
+                glGetTextureLevelParameteriv(c->tex, 0, GL_TEXTURE_HEIGHT, &h);
+                static std::unordered_map<GLuint, std::vector<uint8_t>> before;
+                std::vector<uint8_t> now(size_t(w) * h * 4 * std::max<uint32_t>(c->slices, 1));
+                glGetTextureImage(c->tex, 0, GL_RGBA, GL_UNSIGNED_BYTE, GLsizei(now.size()), now.data());
+                auto& old = before[c->tex];
+                if (old.size() == now.size()) {
+                    size_t changed = 0;
+                    int x0 = w, y0 = h, x1 = -1, y1 = -1;
+                    double sum[3] = {};
+                    for (int y = 0; y < h; y++)
+                        for (int x = 0; x < w; x++) {
+                            const uint8_t* a = &old[(size_t(y) * w + x) * 4];
+                            const uint8_t* b = &now[(size_t(y) * w + x) * 4];
+                            if (std::abs(a[0] - b[0]) + std::abs(a[1] - b[1]) + std::abs(a[2] - b[2]) <= 6) continue;
+                            changed++;
+                            for (int k = 0; k < 3; k++) sum[k] += b[k] - a[k];
+                            x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
+                        }
+                    if (changed)
+                        LOG("[trace]   draw pixels: %zu of %dx%d changed in %d,%d-%d,%d (upper-left origin flipped: GL rows "
+                            "from the bottom), mean change %+.0f %+.0f %+.0f",
+                            changed, w, h, x0, y0, x1, y1, sum[0] / changed, sum[1] / changed, sum[2] / changed);
+                    else
+                        LOG("[trace]   draw pixels: none changed");
+                }
+                old = std::move(now);
+            }
+#endif
+        }
+    }
+    g_traceTextures.clear();
     R.drawCount++;
 }
 }  // namespace

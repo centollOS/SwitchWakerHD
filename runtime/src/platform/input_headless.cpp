@@ -20,6 +20,7 @@ void mouse_release() {}
 void mouse_init(void*) {}
 bool host_key_down(uint16_t) { return false; }
 }
+namespace gfxgl { void request_capture(); }
 namespace input {
 void init() {}
 void update() {}
@@ -51,7 +52,8 @@ const std::vector<ScriptStep>& script() {
         if (!e) return out;
         static const struct { const char* name; uint32_t bit; } kButtons[] = {
             {"A", kA}, {"B", kB}, {"X", kX}, {"Y", kY}, {"L", kL}, {"R", kR}, {"ZL", kZL}, {"ZR", kZR},
-            {"PLUS", kPlus}, {"MINUS", kMinus}, {"UP", kUp}, {"DOWN", kDown}, {"LEFT", kLeft}, {"RIGHT", kRight}};
+            {"PLUS", kPlus}, {"MINUS", kMinus}, {"UP", kUp}, {"DOWN", kDown}, {"LEFT", kLeft}, {"RIGHT", kRight},
+            {"LS", kStickL}, {"RS", kStickR}};
         static const char* kAxes[] = {"LX", "LY", "RX", "RY"};
         std::string all(e);
         size_t pos = 0;
@@ -103,6 +105,11 @@ PadState read() {
                 if (st.hasAxis[i]) *axes[i] = st.axis[i];
         }
     }
+    // both sticks clicked: a capture of the next frame, as on the Switch (input_switch.cpp)
+    static bool was = false;
+    const bool combo = (s.buttons & kStickL) && (s.buttons & kStickR);
+    if (combo && !was) gfxgl::request_capture();
+    was = combo;
     mods::filter_pad(s);
     return s;
 }

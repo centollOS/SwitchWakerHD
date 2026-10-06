@@ -21,6 +21,7 @@ void mouse_release() {}
 void mouse_init(void*) {}
 bool host_key_down(uint16_t) { return false; }
 }
+namespace gfxgl { void request_capture(); }
 namespace input {
 namespace {
 std::mutex g_mu;
@@ -111,6 +112,17 @@ void update() {
     PadState s;
     for (auto& m : kMap)
         if (held & m.hid) s.buttons |= m.vpad;
+    // both sticks clicked together: a capture of the next frame (its passes in the log, its pictures on the
+    // SD card) for a picture that goes wrong; the game gets the clicks as usual
+    {
+        static bool was = false;
+        const bool combo = (held & HidNpadButton_StickL) && (held & HidNpadButton_StickR);
+        if (combo && !was) {
+            LOG("[input] both sticks clicked: capturing the next frame");
+            gfxgl::request_capture();
+        }
+        was = combo;
+    }
     HidAnalogStickState l = padGetStickPos(&pad, 0), r = padGetStickPos(&pad, 1);
     s.lx = l.x / (float)JOYSTICK_MAX;
     s.ly = l.y / (float)JOYSTICK_MAX;

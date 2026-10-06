@@ -3,6 +3,7 @@
 #include "shaders.h"
 
 #include <zlib.h>
+#include <malloc.h>
 
 #include <algorithm>
 #include <array>
@@ -14,6 +15,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <type_traits>
 #include <vector>
 
@@ -26,6 +28,7 @@
 #include "ppc.h"
 #include "runtime.h"
 #include "util/helpers/StringBuf.h"
+#include "varyings.h"
 
 LatteDecompilerShader* FinishDecompiledShader(LatteDecompilerOutput_t& output);
 LatteFetchShader* LatteShaderRecompiler_createFetchShader(LatteFetchShader::CacheHash hash, uint32* regs, uint32* code,
@@ -36,8 +39,30 @@ using Latte::REGADDR;
 namespace {
 std::unordered_map<uint64_t, std::unique_ptr<Shader>> shaders;
 std::unordered_map<uint64_t, LatteFetchShader*> fetchShaders;
-std::unordered_map<uint64_t, GLuint> objects;                   // GLSL hash -> compiled shader object
 std::unordered_map<uint64_t, std::unique_ptr<Program>> linked;  // vertex and pixel GLSL hashes -> program
+// Shader sources and objects (round 25). Mesa keeps a compiled shader object's whole intermediate code
+// until the object is deleted: ~460 KB each for these shaders (measured on desktop Mesa with the
+// game's GLSL), and the renderer kept one per source for the session so that new pairs could be linked.
+// With the shader cache at ~1,900 sources that was ~870 MB of the Switch's heap: 89 MiB were left after
+// startup and the forest ran out (round 24 crash report). Now each source is kept compressed (~2 KB),
+// its object is compiled when a link needs it and deleted after (a few recent ones are kept), and a
+// link detaches its shaders, so deleting them frees the memory.
+struct Source {
+    std::vector<uint8_t> packed;  // zlib GLSL, as in the cache file
+    uint32_t size = 0;
+    bool vertex = false;
+};
+std::unordered_map<uint64_t, Source> sources;  // GLSL hash -> source
+struct LiveObject {
+    GLuint obj = 0;
+    uint64_t used = 0;
+};
+std::unordered_map<uint64_t, LiveObject> live;  // GLSL hash -> compiled object, the most recently used
+uint64_t liveClock = 0;
+size_t liveLimit = 256;   // during startup's links; then kLiveObjects
+// (round 26: 96, was 32: a new pair of known shaders recompiled both, and doors stalled for it)
+constexpr size_t kLiveObjects = 96;
+size_t objectCompiles = 0;  // compiles of sources into objects (startup and links)
 struct ProgramHash { uint64_t hash = 0, frame = ~uint64_t{0}, sample = 0; };
 std::unordered_map<uint64_t, ProgramHash> programHashes;
 std::unordered_map<uint64_t, uint32_t> textureUnits;  // program hash -> texture units it samples (bit t: unit t)
@@ -77,8 +102,7 @@ uint64_t sample_words(const uint8_t* p, uint32_t size) {
 
 // Program memory can be reused for another program between frames, so a program's hash is checked
 // once per frame: by 32 sampled words, and fully every 64 frames (staggered by address)
-uint64_t program_hash(uint32_t address, uint32_t size, uint64_t frame) {
-    auto& entry = programHashes[(uint64_t(address) << 32) | size];
+uint64_t program_hash_at(ProgramHash& entry, uint32_t address, uint32_t size, uint64_t frame) {
     if (entry.frame != frame) {
         const uint8_t* bytes = ppc_ptr(address);
         uint64_t sample = sample_words(bytes, size);
@@ -88,6 +112,9 @@ uint64_t program_hash(uint32_t address, uint32_t size, uint64_t frame) {
         entry.frame = frame;
     }
     return entry.hash;
+}
+uint64_t program_hash(uint32_t address, uint32_t size, uint64_t frame) {
+    return program_hash_at(programHashes[(uint64_t(address) << 32) | size], address, size, frame);
 }
 
 // four independent multiply chains (one chain is latency-bound); for in-memory keys only (the shader
@@ -316,13 +343,12 @@ bool load_translation(const uint8_t* payload, uint32_t size) {
     const bool vertex = r.get<uint8_t>() != 0;
     const uint64_t key = r.get<uint64_t>(), base = r.get<uint64_t>(), glslHash = r.get<uint64_t>();
     const uint32_t units = r.get<uint32_t>();
-    auto obj = objects.find(glslHash);
-    if (!r.ok || obj == objects.end() || shaders.count(key)) return false;
+    if (!r.ok || !sources.count(glslHash) || shaders.count(key)) return false;
     auto sh = std::make_unique<Shader>();
     sh->key = key;
     sh->vertex = vertex;
     sh->glslHash = glslHash;
-    sh->obj = obj->second;
+    sh->compiled = true;  // (it compiled when it was recorded; a link that cannot compile it fails)
     sh->registerCount = r.get<uint32_t>();
     auto* d = new LatteDecompilerShader(vertex ? LatteConst::ShaderType::Vertex : LatteConst::ShaderType::Pixel);
     d->pixelColorOutputMask = r.get<uint32_t>();
@@ -482,9 +508,64 @@ std::string uniform_vars_to_block(const std::string& glsl, bool vertex) {
 
 size_t g_blockShaders = 0;  // compiled with their uniforms in a block (for the log)
 
-GLuint compile(bool vertex, const std::string& source, std::string* error) {
-    const std::string glsl = uniform_blocks_on() ? uniform_vars_to_block(source, vertex) : source;
-    if (glsl.find(vertex ? "uniform ufBlockVS" : "uniform ufBlockPS") != std::string::npos) g_blockShaders++;
+// Vertex positions are declared invariant, as the Vulkan (invariant gl_Position) and Metal
+// ([[invariant]]) renderers do. The game draws the same mesh with several programs (depth passes,
+// then shading with an EQUAL or LEQUAL depth test, decals, outlines); without invariance the GLSL
+// compiler may evaluate each program's position differently (fused multiply-adds, reordering), so
+// the depths differ in the last bits and the later pass loses the depth test on whole triangles or
+// in stripes. WWHD_GL_INVARIANT=0 turns it off (for comparison).
+bool g_invariantPosition = [] {
+    const char* e = getenv("WWHD_GL_INVARIANT");
+    return !(e && strcmp(e, "0") == 0);
+}();
+
+// Near-plane clipping by a user clip distance (round 27; off unless WWHD_GL_NEAR_CLIP=1 since round 28: it
+// did not fix the searchlights, and the round 27 runs on the Switch stalled at texture uploads, waiting for
+// Mesa's GL thread up to 50 times longer than rounds 24-26). Mesa 20.1's nouveau has the hardware clip
+// geometry at w = 0 only (VIEW_VOLUME_CLIP_CTRL without frustum clipping) and leaves the near plane to
+// a per-pixel depth test, so a triangle reaching behind the camera is drawn from vertices just in front
+// of it, at huge screen coordinates. The Forsaken Fortress searchlights are light volumes the camera
+// stands inside when a beam comes near Link: on the Switch they came out as long slabs or missing
+// pools of light. A clip distance (z + w: the near plane of the GL clip space, and just behind the one
+// of the DX clip space) makes the hardware cut those triangles at the plane. draw.cpp enables it unless
+// the game turned near clipping off.
+uint32_t g_nearClipMissing = 0;  // linked programs whose vertex shader does not write it (logged)
+bool near_clip_on_impl() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_GL_NEAR_CLIP");
+        return e && *e == '1';
+    }();
+    return on;
+}
+constexpr const char* kNearClipWrite = "gl_ClipDistance[0] = gl_Position.z + gl_Position.w";
+std::string with_near_clip(std::string glsl) {
+    // Cemu's vertex shaders redeclare gl_PerVertex and set the position through SET_POSITION
+    // (both edits or neither: link() enables the plane only for vertex shaders that write it)
+    const size_t block = glsl.find("out gl_PerVertex");
+    const size_t pos = block == std::string::npos ? std::string::npos : glsl.find("vec4 gl_Position;", block);
+    const size_t define = glsl.find("#define SET_POSITION(_v) ");
+    const size_t lineEnd = define == std::string::npos ? std::string::npos : glsl.find_first_of("\r\n", define);
+    if (pos == std::string::npos || lineEnd == std::string::npos || glsl.find("gl_ClipDistance") != std::string::npos)
+        return glsl;
+    // the later edit first, so the earlier offset stays right (Cemu puts the define before the block)
+    const std::string decl = "\r\n\tfloat gl_ClipDistance[1];", write = "; " + std::string(kNearClipWrite);
+    if (lineEnd > pos) {
+        glsl.insert(lineEnd, write);
+        glsl.insert(pos + 17, decl);
+    } else {
+        glsl.insert(pos + 17, decl);
+        glsl.insert(lineEnd, write);
+    }
+    return glsl;
+}
+
+std::string with_invariant_position(std::string glsl) {
+    const size_t main = glsl.find("void main()");
+    if (main != std::string::npos) glsl.insert(main, "invariant gl_Position;\r\n");
+    return glsl;
+}
+
+GLuint compile_glsl(bool vertex, const std::string& glsl, std::string* error) {
     R.perf.compiled++;
     GLuint obj = glCreateShader(vertex ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER);
     const char* text = glsl.c_str();
@@ -500,23 +581,196 @@ GLuint compile(bool vertex, const std::string& source, std::string* error) {
     return 0;
 }
 
+GLuint compile_vertex(const std::string& glsl, std::string* error);
+GLuint compile(bool vertex, const std::string& source, std::string* error) {
+    std::string glsl = uniform_blocks_on() ? uniform_vars_to_block(source, vertex) : source;
+    if (glsl.find(vertex ? "uniform ufBlockVS" : "uniform ufBlockPS") != std::string::npos) g_blockShaders++;
+    if (vertex && near_clip_on_impl()) {
+        std::string clipped = with_near_clip(glsl);
+        if (clipped.size() != glsl.size()) {
+            std::string log;
+            if (GLuint obj = compile_vertex(clipped, &log)) return obj;
+            // a shader the clip distance breaks: compiled as it was (link() then leaves the plane off
+            // for its programs), said once
+            static bool said = false;
+            if (!said) {
+                said = true;
+                LOG("[gl] a vertex shader does not compile with the near-plane clip distance; compiling it "
+                    "without: %s", log.c_str());
+            }
+        }
+    }
+    return vertex ? compile_vertex(glsl, error) : compile_glsl(false, glsl, error);
+}
+GLuint compile_vertex(const std::string& glsl, std::string* error) {
+    if (g_invariantPosition) {
+        std::string log;
+        if (GLuint obj = compile_glsl(true, with_invariant_position(glsl), &log)) return obj;
+        // a driver that rejects the declaration: without it from now on (as before), said once
+        GLuint obj = compile_glsl(true, glsl, error);
+        if (obj) {
+            g_invariantPosition = false;
+            LOG("[gl] the driver rejects invariant vertex positions; compiling without them: %s", log.c_str());
+        }
+        return obj;
+    }
+    return compile_glsl(true, glsl, error);
+}
+
+std::vector<uint8_t> pack_glsl(const std::string& glsl) {
+    uLongf packed = compressBound(glsl.size());
+    std::vector<uint8_t> out(packed);
+    if (compress2(out.data(), &packed, (const Bytef*)glsl.data(), glsl.size(), 6) != Z_OK) return {};
+    out.resize(packed);
+    return out;
+}
+void keep_source(uint64_t hash, bool vertex, std::vector<uint8_t> packed, uint32_t size) {
+    Source& src = sources[hash];
+    src.packed = std::move(packed);
+    src.size = size;
+    src.vertex = vertex;
+}
+size_t store_bytes() {
+    size_t n = 0;
+    for (auto& [hash, src] : sources) n += src.packed.size();
+    return n;
+}
+void delete_live(std::unordered_map<uint64_t, LiveObject>::iterator it) {
+    glDeleteShader(it->second.obj);
+    live.erase(it);
+}
+// the least recently used objects beyond limit go
+void trim_live(size_t limit) {
+    while (live.size() > limit) {
+        auto oldest = live.begin();
+        for (auto it = live.begin(); it != live.end(); ++it)
+            if (it->second.used < oldest->second.used) oldest = it;
+        delete_live(oldest);
+    }
+}
+void keep_live(uint64_t hash, GLuint obj) {
+    live[hash] = {obj, ++liveClock};
+    trim_live(liveLimit);
+}
+// the compiled object of a source: a kept one, or compiled now (0: unknown source or a compile error)
+// the stored GLSL of a source
+bool source_text(uint64_t hash, std::string& glsl, std::string* error) {
+    auto src = sources.find(hash);
+    if (src == sources.end()) {
+        if (error) *error = "its GLSL is not in the shader store";
+        return false;
+    }
+    glsl.assign(src->second.size, '\0');
+    uLongf size = src->second.size;
+    if (uncompress((Bytef*)glsl.data(), &size, src->second.packed.data(), src->second.packed.size()) != Z_OK ||
+        size != src->second.size) {
+        if (error) *error = "its stored GLSL does not decompress";
+        return false;
+    }
+    return true;
+}
+
+GLuint object_for(uint64_t hash, std::string* error) {
+    if (auto it = live.find(hash); it != live.end()) {
+        it->second.used = ++liveClock;
+        return it->second.obj;
+    }
+    auto src = sources.find(hash);
+    std::string glsl;
+    if (!source_text(hash, glsl, error)) return 0;
+    objectCompiles++;
+    GLuint obj = compile(src->second.vertex, glsl, error);
+    if (obj) {
+        // (keep_live may trim: this one is the newest, so it stays)
+        live[hash] = {obj, ++liveClock};
+        trim_live(std::max<size_t>(liveLimit, 2));
+    }
+    return obj;
+}
+
 // a failed link leaves prog at 0
-std::unique_ptr<Program> link(GLuint vsObj, GLuint psObj, uint64_t key) {
+// stage: what the watchdog reports while the render thread is in here
+std::unique_ptr<Program> link(GLuint vsObj, GLuint psObj, uint64_t key, const char* stage = "linking a program") {
     R.perf.linked++;
     auto p = std::make_unique<Program>();
     GLuint prog = glCreateProgram();
     glAttachShader(prog, vsObj);
     glAttachShader(prog, psObj);
-    Stage linking("linking a program");
+    Stage linking(stage);
+    // test aid: WWHD_GL_TEST_LINK_STALL=ms holds the first in-game link that long (the watchdog's report)
+    if (static int stall = getenv("WWHD_GL_TEST_LINK_STALL") ? atoi(getenv("WWHD_GL_TEST_LINK_STALL")) : 0;
+        stall > 0 && strcmp(stage, "linking a program") != 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(stall));
+        stall = 0;
+    }
     glLinkProgram(prog);
     GLint ok = 0;
     glGetProgramiv(prog, GL_LINK_STATUS, &ok);
     if (!ok) {
         char log[4096] = {};
         glGetProgramInfoLog(prog, sizeof log, nullptr, log);
-        dump_failure("program", key, "", log);
         glDeleteProgram(prog);
-        return p;
+        prog = 0;
+        // inputs of the pixel shader the vertex shader does not write (varyings.h): again with a
+        // vertex shader that writes them as zero
+        if (strstr(log, "no matching output")) {
+            auto source = [](GLuint obj) {
+                GLint length = 0;
+                glGetShaderiv(obj, GL_SHADER_SOURCE_LENGTH, &length);
+                std::string text(size_t(std::max(length, 1)), '\0');
+                glGetShaderSource(obj, length, nullptr, text.data());
+                text.resize(strlen(text.c_str()));
+                return text;
+            };
+            std::vector<std::string> added;
+            const std::string patched = add_missing_outputs(source(vsObj), source(psObj), &added);
+            std::string error;
+            if (GLuint vs2 = patched.empty() ? 0 : compile_glsl(true, patched, &error)) {
+                prog = glCreateProgram();
+                glAttachShader(prog, vs2);
+                glAttachShader(prog, psObj);
+                glLinkProgram(prog);
+                glDeleteShader(vs2);  // (kept while the program uses it)
+                glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+                std::string names;
+                for (auto& n : added) names += " " + n;
+                if (ok) {
+                    LOG("[gl] program %016llx: its pixel shader reads%s, which the vertex shader does not write; "
+                        "linked with them set to zero", (unsigned long long)key, names.c_str());
+                } else {
+                    glGetProgramInfoLog(prog, sizeof log, nullptr, log);
+                    glDeleteProgram(prog);
+                    prog = 0;
+                }
+            } else if (!patched.empty())
+                snprintf(log, sizeof log, "vertex shader with the missing outputs: %s", error.c_str());
+        }
+        if (!prog) {
+            dump_failure("program", key, "", log);
+            return p;
+        }
+    }
+    // a linked program needs its shaders no more: detached, deleting them frees their intermediate code
+    {
+        GLuint attached[4] = {};
+        GLsizei count = 0;
+        glGetAttachedShaders(prog, 4, &count, attached);
+        for (GLsizei i = 0; i < count; i++) {
+            // does the vertex shader write the near-plane clip distance (with_near_clip)? draw.cpp
+            // enables the plane only then (an enabled clip distance that is not written is undefined)
+            GLint type = 0, length = 0;
+            glGetShaderiv(attached[i], GL_SHADER_TYPE, &type);
+            if (type == GL_VERTEX_SHADER && near_clip_on_impl()) {
+                glGetShaderiv(attached[i], GL_SHADER_SOURCE_LENGTH, &length);
+                std::string text(size_t(std::max(length, 1)), '\0');
+                glGetShaderSource(attached[i], length, nullptr, text.data());
+                p->nearClip = text.find(kNearClipWrite) != std::string::npos;
+                if (!p->nearClip && g_nearClipMissing++ == 0)
+                    LOG("[gl] program %016llx: its vertex shader has no near-plane clip distance (drawn without "
+                        "it; later ones are counted in the shader cache line)", (unsigned long long)key);
+            }
+            glDetachShader(prog, attached[i]);
+        }
     }
     p->prog = prog;
     p->remappedVS = glGetUniformLocation(prog, "uf_remappedVS");
@@ -584,9 +838,12 @@ std::unique_ptr<Program> link(GLuint vsObj, GLuint psObj, uint64_t key) {
         if (stage[0] == 'V') {
             b.windowToClip = offset("uf_windowSpaceToClipSpaceTransform");
             b.pointSize = offset("uf_pointSize");
-        } else
+        } else {
             b.alphaRef = offset("uf_alphaTestRef");
-        // values that stay as set: no resolution scaling (1, 1)
+            b.fragCoordScale = offset("uf_fragCoordScale");
+        }
+        for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++) b.texScale[t] = offset("uf_tex" + std::to_string(t) + "Scale");
+        // (1, 1) until a draw on a scaled target or texture sets them
         b.data.assign(size_t(b.stride), 0);
         const float one[2] = {1.0f, 1.0f};
         for (size_t i = 5; i < names.size(); i++)
@@ -594,6 +851,9 @@ std::unique_ptr<Program> link(GLuint vsObj, GLuint psObj, uint64_t key) {
     };
     var_block("ufBlockVS", "VS", p->blockVS);
     var_block("ufBlockPS", "PS", p->blockPS);
+    p->scaleUniforms = p->fragCoordScale >= 0 || p->blockPS.fragCoordScale >= 0;
+    for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++)
+        if (p->texScale[t] >= 0 || p->blockVS.texScale[t] >= 0 || p->blockPS.texScale[t] >= 0) p->scaleUniforms = true;
     p->batchable = draw_batching_on() && glGetAttribLocation(prog, "wwhd_drawIndex") == GLint(kDrawIndexAttrib);
     p->batchCapacity = 256;
     for (auto* b : {&p->blockVS, &p->blockPS})
@@ -635,6 +895,8 @@ LatteFetchShader* get_fetch_shader(const uint32_t* regs, uint64_t* keyOut, uint6
     fetchShaders.emplace(key, fetch);
     return fetch;
 }
+
+bool near_clip_on() { return near_clip_on_impl(); }
 
 bool uniform_blocks_on() {
     static const bool on = uniform_blocks_on_impl();
@@ -775,8 +1037,8 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     delete shader->dec->strBuf_shaderSource;  // tens of KB per variant, never read again
     shader->dec->strBuf_shaderSource = nullptr;
     shader->glslHash = hash_bytes(glsl.data(), glsl.size(), vertex ? 0x1111 : 0x2222);
-    if (auto it = objects.find(shader->glslHash); it != objects.end()) {
-        shader->obj = it->second;
+    if (sources.count(shader->glslHash)) {
+        shader->compiled = true;
         cache_translation(shader, base, units);
         return shader;
     }
@@ -788,9 +1050,11 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         dump_failure(vertex ? "vertex shader" : "pixel shader", key, glsl, error);
         return shader;
     }
-    objects.emplace(shader->glslHash, obj);
+    objectCompiles++;
+    keep_source(shader->glslHash, vertex, pack_glsl(glsl), uint32_t(glsl.size()));
+    keep_live(shader->glslHash, obj);  // (the link that follows needs it)
     cache_shader(shader->glslHash, vertex, glsl);
-    shader->obj = obj;
+    shader->compiled = true;
     cache_translation(shader, base, units);
     return shader;
 }
@@ -799,10 +1063,57 @@ Program* program(Shader* vs, Shader* ps) {
     uint64_t key = pair_key(vs->glslHash, ps->glslHash);
     if (auto it = linked.find(key); it != linked.end()) return it->second->prog ? it->second.get() : nullptr;
     ScopedTime timer{R.perf.shaderNs};
-    auto owned = link(vs->obj, ps->obj, key);
+    // The driver compiles the pair's GPU code inside the link (nouveau: nvc0_sp_state_create). The
+    // watchdog names the pair if the render thread stays in there (the sources are in
+    // shadercache_gl.bin); a failed or slow link is logged.
+    static char stage[96];
+    snprintf(stage, sizeof stage, "linking vertex shader %016llx with pixel shader %016llx",
+             (unsigned long long)vs->glslHash, (unsigned long long)ps->glslHash);
+    const uint64_t linkStart = now_ns();
+    std::string error;
+    const GLuint vsObj = object_for(vs->glslHash, &error), psObj = vsObj ? object_for(ps->glslHash, &error) : 0;
+    if (!vsObj || !psObj) {
+        LOG("[gl] %s: a shader does not compile (%s)", stage, error.c_str());
+        linked.emplace(key, std::make_unique<Program>());
+        return nullptr;
+    }
+    auto owned = link(vsObj, psObj, key, stage);
+    if (const double ms = double(now_ns() - linkStart) / 1e6; !owned->prog || ms >= 100)
+        LOG("[gl] %s: %s in %.0f ms", stage, owned->prog ? "linked" : "failed", ms);
     Program* p = owned->prog ? owned.get() : nullptr;
     linked.emplace(key, std::move(owned));
     if (p) cache_program(vs->glslHash, ps->glslHash);
+    return p;
+}
+
+Program* probe_program(Shader* vs, Shader* ps, int mode, const std::string& expr) {
+    static std::unordered_map<uint64_t, std::unique_ptr<Program>> probes;
+    const uint64_t key = pair_key(vs->glslHash, ps->glslHash) ^ (0x9E3779B97F4A7C15ull * uint64_t(mode + 1));
+    if (auto it = probes.find(key); it != probes.end()) return it->second->prog ? it->second.get() : nullptr;
+    std::string error, glsl;
+    GLuint psObj = 0;
+    if (source_text(ps->glslHash, glsl, &error)) {
+        const size_t at = glsl.find("passPixelColor0 = ");
+        const size_t end = at == std::string::npos ? at : glsl.find(';', at);
+        if (end == std::string::npos) {
+            error = "no passPixelColor0 output";
+        } else {
+            const std::string original = glsl.substr(at + 18, end - at - 18);
+            std::string e = expr;
+            for (size_t d = e.find('$'); d != std::string::npos; d = e.find('$', d + original.size()))
+                e.replace(d, 1, "(" + original + ")");
+            glsl.replace(at, end - at, "passPixelColor0 = " + e);
+            psObj = compile(false, glsl, &error);
+        }
+    }
+    const GLuint vsObj = psObj ? object_for(vs->glslHash, &error) : 0;
+    std::unique_ptr<Program> owned = vsObj ? link(vsObj, psObj, key, "linking a probe program") : std::make_unique<Program>();
+    if (psObj) glDeleteShader(psObj);  // (link detached it: the program keeps its code)
+    LOG("[gl] probe mode %d of pixel shader %016llx: %s%s", mode, (unsigned long long)ps->glslHash,
+        owned->prog ? "linked" : "failed: ", owned->prog ? "" : error.c_str());
+    Program* p = owned->prog ? owned.get() : nullptr;
+    probes.emplace(key, std::move(owned));
+    forget_gl_state();
     return p;
 }
 
@@ -838,7 +1149,13 @@ void load_shader_cache(void (*progress)(size_t done, size_t total)) {
         valid += length;
     }
     const uint64_t start = now_ns();
-    size_t compiledShaders = 0, linkedPrograms = 0, loadedTranslations = 0;
+    size_t linkedPrograms = 0, loadedTranslations = 0;
+#ifndef __SWITCH__
+    const size_t mallocBefore = mallinfo2().uordblks;
+#endif
+    // first the sources (kept compressed, as stored), the translations and the pairs; then the pairs are
+    // linked, each source compiled when a pair first needs it and its object deleted after its last pair
+    std::vector<std::pair<uint64_t, uint64_t>> pairs;
     for (size_t i = 0; i < records.size(); i++) {
         const uint8_t* r = data.data() + records[i];
         if (r[0] == 1) {
@@ -846,15 +1163,7 @@ void load_shader_cache(void (*progress)(size_t done, size_t total)) {
             uint32_t sizes[2];
             memcpy(&hash, r + 2, 8);
             memcpy(sizes, r + 10, 8);
-            if (!objects.count(hash)) {
-                std::string glsl(sizes[1], '\0');
-                uLongf size = sizes[1];
-                if (uncompress((Bytef*)glsl.data(), &size, r + 18, sizes[0]) == Z_OK && size == sizes[1])
-                    if (GLuint obj = compile(r[1] != 0, glsl, nullptr)) {
-                        objects.emplace(hash, obj);
-                        compiledShaders++;
-                    }
-            }
+            if (!sources.count(hash)) keep_source(hash, r[1] != 0, std::vector<uint8_t>(r + 18, r + 18 + sizes[0]), sizes[1]);
         } else if (r[0] == 3) {
             uint32_t size;
             memcpy(&size, r + 1, 4);
@@ -863,19 +1172,65 @@ void load_shader_cache(void (*progress)(size_t done, size_t total)) {
             uint64_t vs, ps;
             memcpy(&vs, r + 1, 8);
             memcpy(&ps, r + 9, 8);
-            uint64_t key = pair_key(vs, ps);
-            auto v = objects.find(vs), p = objects.find(ps);
-            if (!linked.count(key) && v != objects.end() && p != objects.end()) {
-                linked.emplace(key, link(v->second, p->second, key));
+            pairs.push_back({vs, ps});
+        }
+    }
+#ifndef __SWITCH__
+    const size_t mallocLoaded = mallinfo2().uordblks;
+#endif
+    std::unordered_map<uint64_t, size_t> lastUse, uses;
+    for (size_t i = 0; i < pairs.size(); i++) {
+        lastUse[pairs[i].first] = lastUse[pairs[i].second] = i;
+        uses[pairs[i].first]++;
+        uses[pairs[i].second]++;
+    }
+    // the sources in the most cached pairs keep their objects after startup: a new pair in the game most
+    // often combines one of them with another shader, and then needs one compile instead of two
+    std::unordered_set<uint64_t> keep;
+    {
+        std::vector<std::pair<size_t, uint64_t>> ranked;
+        for (auto& [h, n] : uses) ranked.push_back({n, h});
+        std::sort(ranked.begin(), ranked.end(), std::greater<>());
+        for (size_t i = 0; i < ranked.size() && i < kLiveObjects; i++) keep.insert(ranked[i].second);
+    }
+    for (size_t i = 0; i < pairs.size(); i++) {
+        const auto [vs, ps] = pairs[i];
+        const uint64_t key = pair_key(vs, ps);
+        if (!linked.count(key) && sources.count(vs) && sources.count(ps)) {
+            const GLuint v = object_for(vs, nullptr), p = v ? object_for(ps, nullptr) : 0;
+            if (v && p) {
+                linked.emplace(key, link(v, p, key));
                 linkedPrograms++;
             }
         }
-        if (progress) progress(i + 1, records.size());
+        for (uint64_t h : {vs, ps})
+            if (lastUse[h] == i && !keep.count(h))
+                if (auto it = live.find(h); it != live.end()) delete_live(it);
+        if (progress) progress(i + 1, pairs.size());
     }
+    for (auto it = live.begin(); it != live.end();) {
+        auto next = std::next(it);
+        if (!keep.count(it->first)) delete_live(it);
+        it = next;
+    }
+    liveLimit = kLiveObjects;
+    trim_live(liveLimit);
     if (!records.empty())
-        LOG("[gl] shader cache: %zu shaders and %zu programs compiled in %.1f s; %zu shaders with uniform blocks "
-            "(WWHD_GL_UNIFORM_BLOCKS); %zu translations loaded", compiledShaders, linkedPrograms,
-            double(now_ns() - start) / 1e9, g_blockShaders, loadedTranslations);
+        LOG("[gl] shader cache: %zu sources kept (%zu KB compressed), %zu programs linked in %.1f s (%zu shader "
+            "compiles); %zu shaders with uniform blocks (WWHD_GL_UNIFORM_BLOCKS); %zu translations loaded%s", sources.size(),
+            store_bytes() >> 10, linkedPrograms, double(now_ns() - start) / 1e9, objectCompiles, g_blockShaders,
+            loadedTranslations,
+            near_clip_on_impl() ? ("; " + std::to_string(g_nearClipMissing) + " programs without the near-plane clip "
+                                   "distance").c_str() : "");
+#ifdef __SWITCH__
+    log_heap("after the shader cache");
+#else
+    LOG("[gl] shader cache memory: sources and translations %zu MiB, programs %zu MiB (malloc)",
+        (mallocLoaded - mallocBefore) >> 20, (size_t(mallinfo2().uordblks) - mallocLoaded) >> 20);
+#endif
+    LOG("[gl] vertex positions invariant: %s (WWHD_GL_INVARIANT); ambient occlusion mode %d (WWHD_AO_MODE); "
+        "near-plane clip distance: %s (WWHD_GL_NEAR_CLIP)", g_invariantPosition ? "on" : "off", ao_mode(),
+        near_clip_on() ? "on" : "off");
     // a new file, or one whose last record was cut short, is rewritten before appending
     if (fresh || valid < data.size()) {
         if (FILE* f = fopen(kCachePath, "wb")) {
@@ -887,6 +1242,22 @@ void load_shader_cache(void (*progress)(size_t done, size_t total)) {
     cacheFile = fopen(kCachePath, "ab");
     if (!cacheFile) LOG("[gl] shader cache: cannot write %s", kCachePath);
     else host::start_thread(cache_writer, 128 << 10);
+}
+
+void shader_memory(size_t& sourceCount, size_t& storeBytes, size_t& objects, size_t& programs) {
+    sourceCount = sources.size();
+    storeBytes = store_bytes();
+    objects = live.size();
+    programs = linked.size();
+}
+
+// a program's entry in programHashes (draw.cpp's combinations keep it: map nodes do not move, and
+// reset_shader_memoization, which clears the map, also advances R.shaderEpoch, which drops them)
+void* program_hash_ref(uint32_t address, uint32_t size) {
+    return &programHashes[(uint64_t(address) << 32) | size];
+}
+uint64_t program_hash_of(void* ref, uint32_t address, uint32_t size, uint64_t frame) {
+    return program_hash_at(*static_cast<ProgramHash*>(ref), address, size, frame);
 }
 
 void reset_shader_memoization() {

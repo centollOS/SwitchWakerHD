@@ -92,6 +92,7 @@ void init(const LoadedModule& m);
 void run_main(const LoadedModule& m, int argc, uint32_t argv);  // does not return until the game exits
 Cpu* current();          // Cpu of the calling host thread (null if not a guest thread)
 uint32_t current_thread();  // guest OSThread* of the calling thread
+int current_core();         // emulated core of the calling guest thread (-1: not a guest thread)
 // a Cpu + guest stack for host-created threads that need to call guest code (alarms, audio)
 Cpu* make_service_cpu(const char* name, uint32_t stack_size = 0x10000);
 // service threads bracket their guest work (callbacks, guest memory access) with these, so a save
@@ -137,12 +138,18 @@ PpcFunc hle_find_any(const char* name);
 // the runtime function the game's main thread is in (null: guest code), for the main-thread sampler
 // (threads.cpp hle_sampler): where its time goes, waits that keep its emulated core included
 extern std::atomic<const char*> g_main_hle;
+extern bool g_main_sampler_on;  // WWHD_MAIN_SAMPLER
 extern thread_local bool t_is_main_thread;
+// Only the main thread writes g_main_hle, so a plain load and store do (the atomic exchange was
+// 2.6% of the main thread on the desktop), and only while the sampler runs.
 struct HleMark {
     const char* prev = nullptr;
     bool on;
-    explicit HleMark(const char* name) : on(t_is_main_thread) {
-        if (on) prev = g_main_hle.exchange(name, std::memory_order_relaxed);
+    HleMark(const Cpu* c, const char* name) : on(g_main_sampler_on && c->main_thread) {
+        if (on) {
+            prev = g_main_hle.load(std::memory_order_relaxed);
+            g_main_hle.store(name, std::memory_order_relaxed);
+        }
     }
     ~HleMark() {
         if (on) g_main_hle.store(prev, std::memory_order_relaxed);
@@ -151,7 +158,7 @@ struct HleMark {
 #define HLE(lib, name)                                                        \
     static void hle_body_##lib##_##name(Cpu* c);                               \
     extern "C" void imp_##lib##_##name(Cpu* c) {                               \
-        HleMark hle_mark_(#name);                                              \
+        HleMark hle_mark_(c, #name);                                           \
         hle_body_##lib##_##name(c);                                            \
     }                                                                          \
     static HleReg hle_reg_##lib##_##name(#lib, #name, imp_##lib##_##name);   \
@@ -169,6 +176,10 @@ void log_msg(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void log_flush();  // writes out buffered log lines (the Switch logs through a writer thread)
 [[noreturn]] void fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 #define LOG(...) log_msg(__VA_ARGS__)
+#ifdef __SWITCH__
+size_t heap_never_used_mib();  // core.cpp
+void log_heap(const char* when);
+#endif
 #define TRACE(...) do { if (g_trace_hle) log_msg(__VA_ARGS__); } while (0)
 
 // ---- configuration ----

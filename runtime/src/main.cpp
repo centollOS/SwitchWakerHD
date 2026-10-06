@@ -18,12 +18,15 @@
 #include <cstdlib>
 #include <exception>
 #include <vector>
+#include <atomic>
+#include <unistd.h>
 #endif
 
 #include "gfx/renderer.h"
 #include "gx2/gx2.h"
 #include "recomp_table.h"
 #include "runtime.h"
+#include "mods/mods.h"
 
 #ifdef WWHD_HAS_VULKAN
 namespace gfxvk { int renderer_smoke_test(); }
@@ -37,8 +40,116 @@ void trace_dump(FILE* f, unsigned last);
 void mem_init_data_imports(uint32_t alloc_slot, uint32_t alloc_ex_slot, uint32_t free_slot);
 
 #if defined(__SWITCH__)
-// CPU exceptions go to the loader (hbl), not to the NRO: Atmosphere writes them to
-// /atmosphere/crash_reports. Uncaught C++ exceptions are logged here.
+// CPU exceptions (a bad memory access, a jump to a bad address, abort's trap): the kernel sends them
+// to the process's entry point, which is hbloader's; hbloader passes them to the NRO's entry point
+// (nx-hbloader trampoline.s), and libnx's crt0 calls __libnx_exception_handler on the stack below.
+// It writes into wwhd.log (and the session log) the log lines still waiting for the writer thread,
+// what crashed and where, the registers, and the return addresses found on the stack. Code
+// addresses are given as code+offset: `addr2line -f -C -e build/switch/wwhd.elf 0x<offset>` names
+// the function (the ELF of the same build). When the handler returns, libnx raises svcBreak and
+// Atmosphere writes its crash report as before.
+void log_crash_write(const char* text, size_t n);  // core.cpp
+extern "C" {
+alignas(16) u8 __nx_exception_stack[0x10000];
+u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
+extern char* fake_heap_end;  // libnx: the heap malloc grows into (sbrk)
+void __libnx_exception_handler(ThreadExceptionDump* ctx);
+}
+namespace render { uint64_t frame_count(); }
+// what crashed and where, into the logs (CPU exception handler, abort): kind, pc/lr/sp/fp, the fault
+// address, the registers when known, the frame-pointer chain and the code addresses on the stack
+static void crash_report(const char* kind, uint64_t pc, uint64_t lr, uint64_t sp, uint64_t fp, uint64_t far,
+                         const ThreadExceptionDump* ctx) {
+    static std::atomic<int> entered{0};
+    if (entered.fetch_add(1)) return;  // a second thread crashing meanwhile: the first one reports
+    static char buf[16384];
+    size_t n = 0;
+    auto put = [&](const char* fmt, auto... a) {
+        if (n >= sizeof buf - 1) return;
+        int w = snprintf(buf + n, sizeof buf - n, fmt, a...);
+        if (w > 0) n = std::min(sizeof buf - 1, n + size_t(w));
+    };
+    const uint64_t base = host::executable_base();
+    uint64_t textEnd = base;
+    {
+        MemoryInfo mi{};
+        u32 page = 0;
+        if (R_SUCCEEDED(svcQueryMemory(&mi, &page, base))) textEnd = mi.addr + mi.size;
+    }
+    char names[3][40];
+    auto where = [&](int slot, uint64_t a) -> const char* {
+        if (a >= base && a < textEnd) snprintf(names[slot], sizeof names[slot], "code+0x%llx", (unsigned long long)(a - base));
+        else snprintf(names[slot], sizeof names[slot], "0x%llx", (unsigned long long)a);
+        return names[slot];
+    };
+    put("\n[crash] %s in thread \"%s\", frame %llu\n", kind, host::thread_label.c_str(),
+        (unsigned long long)render::frame_count());
+    put("[crash] pc %s, lr %s, sp 0x%llx, fault address 0x%llx\n", where(0, pc), where(1, lr), (unsigned long long)sp,
+        (unsigned long long)far);
+    const char* stage = gx2::g_render_stage.load(std::memory_order_relaxed);
+    put("[crash] render thread: %s\n", stage ? stage : "waiting");
+    if (Cpu* c = threads::current())
+        put("[crash] guest thread %08x: lr %08x, r1 %08x, r3 %08x, r4 %08x\n", threads::current_thread(), c->lr, c->r[1],
+            c->r[3], c->r[4]);
+    if (ctx) {
+        for (int i = 0; i < 29; i += 4) {
+            put("[crash]");
+            for (int j = i; j < i + 4 && j < 29; j++) put(" x%d %llx", j, (unsigned long long)ctx->cpu_gprs[j].x);
+            put("\n");
+        }
+    }
+    put("[crash] fp %llx\n", (unsigned long long)fp);
+    // the stack the thread was on: frame-pointer chain, then every word that is a code address
+    MemoryInfo st{};
+    u32 page = 0;
+    if (R_SUCCEEDED(svcQueryMemory(&st, &page, sp)) && (st.perm & Perm_R)) {
+        const uint64_t lo = sp, hi = st.addr + st.size;
+        put("[crash] frames:");
+        for (int i = 0; i < 32 && fp >= lo && fp + 16 <= hi && !(fp & 7); i++) {
+            const uint64_t* f = reinterpret_cast<const uint64_t*>(fp);
+            put(" %s", where(2, f[1]));
+            if (f[0] <= fp) break;
+            fp = f[0];
+        }
+        put("\n[crash] code addresses on the stack:");
+        int found = 0;
+        for (uint64_t a = lo; a + 8 <= hi && a < lo + 0x10000 && found < 48; a += 8) {
+            const uint64_t v = *reinterpret_cast<const uint64_t*>(a);
+            if (v >= base && v < textEnd) {
+                put(" %s", where(2, v));
+                found++;
+            }
+        }
+        put("\n");
+    }
+    char* top = static_cast<char*>(sbrk(0));
+    if (fake_heap_end && top && top != reinterpret_cast<char*>(-1))
+        put("[crash] heap never used: %llu MiB\n", (unsigned long long)((fake_heap_end - top) >> 20));
+    put("[crash] build %s %s; symbols: addr2line -f -C -e wwhd.elf <offset> with the ELF of this build\n", __DATE__, __TIME__);
+    log_crash_write(buf, n);
+}
+void __libnx_exception_handler(ThreadExceptionDump* ctx) {
+    const uint32_t ec = ctx->esr >> 26;
+    const char* what = ec == 0x24 || ec == 0x25 ? "data abort (bad memory access)"
+                       : ec == 0x20 || ec == 0x21 ? "instruction abort (jump to a bad address)"
+                       : ec == 0x22 ? "misaligned pc" : ec == 0x26 ? "misaligned stack pointer"
+                       : ec == 0x3C ? "breakpoint (a trap instruction)"
+                       : ec == 0x00 ? "undefined instruction" : "other";
+    char kind[128];
+    snprintf(kind, sizeof kind, "CPU exception: %s (desc 0x%x, esr 0x%08x)", what, ctx->error_desc, ctx->esr);
+    crash_report(kind, ctx->pc.x, ctx->lr.x, ctx->sp.x, ctx->fp.x, ctx->far.x, ctx);
+}
+// abort() from anywhere in the NRO (Mesa included: -Wl,--wrap=abort) raises svcBreak, which the exception
+// handler does not see: the caller goes into the log first
+extern "C" void __real_abort(void);
+extern "C" void __wrap_abort(void) {
+    crash_report("abort() called", reinterpret_cast<uint64_t>(__builtin_return_address(0)), 0,
+                 reinterpret_cast<uint64_t>(__builtin_frame_address(0)), reinterpret_cast<uint64_t>(__builtin_frame_address(0)),
+                 0, nullptr);
+    __real_abort();
+    for (;;) {}
+}
+// Uncaught C++ exceptions are logged here.
 static void install_crash_handler() {
     std::set_terminate([] {
         log_flush();
@@ -94,6 +205,27 @@ static void log_session_header() {
     if (FILE* f = fopen(name, "w")) log_set_session_file(f);
     LOG("[session] %04d-%02d-%02d %02d:%02d:%02d (build %s %s); also written to %s", t.tm_year + 1900, t.tm_mon + 1,
         t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, __DATE__, __TIME__, name);
+}
+// env.txt's KEY=VALUE lines go into the environment before any static initialiser runs (round 26).
+// Many switches are read into globals at static initialisation (draw.cpp's off switches, the AO mode,
+// the invariant positions, the gameplay mods...), which ran before main() read env.txt: on the Switch
+// those settings never took effect. libnx mounts the SD card (__appInit) before __libc_init_array runs
+// the constructors, and this one runs first (priority 101: switch.ld sorts .init_array by priority).
+// main() reads the file again to log the settings and take the --options.
+__attribute__((constructor(101))) static void early_env_txt() {
+    FILE* f = fopen("sdmc:/switch/wwhd/env.txt", "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = 0;
+        if (!n || line[0] == '#' || line[0] == '-') continue;
+        if (char* eq = strchr(line, '=')) {
+            *eq = 0;
+            setenv(line, eq + 1, 1);
+        }
+    }
+    fclose(f);
 }
 // hbmenu passes no options: env.txt next to the log holds KEY=VALUE environment settings (the
 // WWHD_* switches) and command-line options (lines starting with --)
@@ -207,7 +339,7 @@ int main(int argc, char** argv) {
     setvbuf(stderr, nullptr, _IOLBF, 0);
     log_session_header();
     // which round of docs/switch-port.md this runtime is (to tell builds apart in the logs)
-    LOG("[boot] recompiled code: %s; runtime: round 15 (shader cache written in the background, message ring without malloc)",
+    LOG("[boot] recompiled code: %s; runtime: round 28 (round 27 with the near-plane clip distance off, searchlight probe frames after a capture, per-draw trace in captures)",
         g_recomp_variant);
     host::place_thread(0);
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
@@ -227,6 +359,7 @@ int main(int argc, char** argv) {
 #endif
     }
     install_crash_handler();
+    mods::log_startup();
     // Metal or Vulkan: --renderer=, WWHD_RENDERER_RUNTIME, Graphics > Renderer (gfx/renderer.h)
     render::choose(argc, argv);
 #ifdef WWHD_HAS_VULKAN

@@ -3817,7 +3817,10 @@ void LatteDecompiler_emitAttributeImport(LatteDecompilerShaderContext* shaderCon
 
 void LatteDecompiler_emitGLSLShader(LatteDecompilerShaderContext* shaderContext, LatteDecompilerShader* shader)
 {
-	StringBuf* src = new StringBuf(1024*1024*12); // reserve 12MB for generated source (we resize-to-fit at the end)
+	// reserve 1 MB for generated source (we resize-to-fit at the end). Cemu reserves 12 MB; on the Switch a
+	// 12 MB block per translation failed when the heap was nearly full (round 24 crash). Wind Waker's
+	// largest shader is ~52 KB of GLSL; a longer one is cut off and fails to compile instead.
+	StringBuf* src = new StringBuf(1024*1024);
 	shaderContext->shaderSource = src;
 	// GLSL shader header
 	src->add("#version 430" _CRLF); // 430 is required for shader storage (Vulkan alternative TF path)

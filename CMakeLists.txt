@@ -160,6 +160,24 @@ if(WWHD_SDL_HOST)
 endif()
 set_source_files_properties(${GX2_SOURCES} ${GFX_SOURCES} PROPERTIES COMPILE_OPTIONS "-include;${CEMU_DIR}/cemu_shim.h")
 add_executable(wwhd ${RUNTIME_SOURCES} ${GX2_SOURCES} ${GFX_SOURCES} ${MOD_GFX_SOURCES})
+# Experimental (Switch): the guest memory base stays in the reserved register x28 (runtime/include/ppc.h,
+# core.cpp guest_call). Off by default.
+option(WWHD_SWITCH_BASE_REG "Switch: keep the guest memory base in x28" OFF)
+if(WWHD_SWITCH AND WWHD_SWITCH_BASE_REG)
+  target_compile_options(gamecode PRIVATE -ffixed-x28)
+  target_compile_definitions(gamecode PRIVATE PPC_BASE_REG=1)
+  target_compile_options(wwhd PRIVATE -ffixed-x28)
+  target_compile_definitions(wwhd PRIVATE PPC_BASE_REG=1)
+endif()
+# Testing (desktop): sanitizers for the runtime, GX2 and renderer code and Cemu's decompiler, e.g.
+# -DWWHD_SANITIZE=address. The generated game code is left out (too large; it only touches guest memory).
+set(WWHD_SANITIZE "" CACHE STRING "sanitizers for the runtime (desktop testing), e.g. address or address,undefined")
+if(WWHD_SANITIZE AND NOT WWHD_SWITCH)
+  foreach(t wwhd cemu_latte)
+    target_compile_options(${t} PRIVATE -fsanitize=${WWHD_SANITIZE} -fno-omit-frame-pointer)
+  endforeach()
+  target_link_options(wwhd PRIVATE -fsanitize=${WWHD_SANITIZE})
+endif()
 target_include_directories(wwhd PRIVATE runtime/include runtime/src runtime/src/gx2)
 target_compile_options(wwhd PRIVATE -Wall -Wno-unused-function -Wno-unused-variable -ffp-contract=off)
 find_package(ZLIB REQUIRED)
@@ -192,8 +210,8 @@ if(WWHD_HAS_OPENGL)
     # Mesa (nouveau) EGL/OpenGL and glad, from the switch-mesa and switch-glad portlibs
     target_link_libraries(wwhd PRIVATE ${LZ4_LIBRARY} glad EGL glapi drm_nouveau)
     # threads created without attributes (Mesa's GL thread) get a large stack, and Mesa's checks of
-    # newlib's C11 thrd_create results are fixed: see core.cpp
-    target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create)
+    # newlib's C11 thrd_create results are fixed: see core.cpp. abort() logs its caller first (main.cpp).
+    target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create -Wl,--wrap=abort)
     # timers around Mesa's GL-thread queue and nouveau's GPU submission (gfx/gl/mesa_probe.cpp)
     target_link_options(wwhd PRIVATE -Wl,--wrap=_mesa_glthread_flush_batch -Wl,--wrap=_mesa_glthread_finish
                         -Wl,--wrap=_mesa_glthread_finish_before -Wl,--wrap=nouveau_pushbuf_kick

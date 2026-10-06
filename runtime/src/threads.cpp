@@ -138,7 +138,9 @@ static uint16_t g_next_id = 1;
 namespace threads {
 Cpu* current() { return t_cpu; }
 uint32_t current_thread() { return t_self ? t_self->guest : 0; }
+int current_core() { return t_self ? int(t_self->core) : -1; }
 }  // namespace threads
+namespace gx2 { void publish_staged(); }
 
 // ---------------------------------------------------------------- per-core scheduling
 // Each emulated core runs one guest thread at a time; a ready thread with a higher priority than
@@ -205,6 +207,9 @@ static void core_acquire(HostThread* t) {
 }
 
 static void core_release(HostThread* t) {
+    // GX2 commands this thread staged go to the render thread before another thread of the core can
+    // run and issue its own (gx2_core.cpp enqueue)
+    if (t == t_self) gx2::publish_staged();
     if (!g_sched_on || !t->holds_core) return;
     CoreSched& k = g_sched[t->held_core];
     HostThread* next;
@@ -612,6 +617,7 @@ void service_end() {
 }  // namespace threads
 
 std::atomic<const char*> g_main_hle{nullptr};
+bool g_main_sampler_on = getenv("WWHD_MAIN_SAMPLER") && *getenv("WWHD_MAIN_SAMPLER") != '0';
 thread_local bool t_is_main_thread = false;
 
 // What the main thread's sends cost (WWHD_MAIN_SAMPLER logs it every 5 s): the clock is read only on
@@ -695,7 +701,8 @@ static void* thread_main(void* p) {
     t_self = ht;
     t_cpu = &ht->cpu;
     t_is_main_thread = ht->is_main;
-    if (ht->is_main && getenv("WWHD_MAIN_SAMPLER") && *getenv("WWHD_MAIN_SAMPLER") != '0')
+    ht->cpu.main_thread = ht->is_main;
+    if (ht->is_main && g_main_sampler_on)
         host::start_thread(hle_sampler_thread, 256 << 10);
     std::string name = mem::read_cstr(ld32(ht->guest + osthread::kName));
     host::set_thread_name(name.empty() ? "guest" : name.c_str());
@@ -1003,21 +1010,30 @@ struct HMutex {
     std::condition_variable cv;
     const void* owner = nullptr;
     int count = 0;
+    uint32_t waiters = 0;  // threads waiting for it: an unlock wakes one only if there are any (on the
+                           // Switch a condition-variable signal is a kernel call even with no waiter)
 };
 static ObjTable<HMutex> g_mutexes;
 
-static void mutex_lock(uint32_t addr) {
+// a mutex owner: the guest thread (Cpu::thread, the same as t_self), or for a host service thread its
+// own Cpu (no thread_local read: on the Switch each one is a function call)
+static inline const void* mutex_self(const Cpu* c) { return c->thread ? c->thread : (const void*)c; }
+static void mutex_lock(Cpu* c, uint32_t addr) {
     HMutex* mx = g_mutexes.get(addr);
-    const void* self = t_self ? (const void*)t_self : (const void*)&t_cpu;
+    const void* self = mutex_self(c);
     std::unique_lock<std::mutex> lk(mx->m);
     if (mx->owner == self) { mx->count++; return; }
-    park_wait(lk, mx->cv, [&] { return mx->owner == nullptr; }, W_MUTEX, addr);
+    if (mx->owner) {
+        mx->waiters++;
+        park_wait(lk, mx->cv, [&] { return mx->owner == nullptr; }, W_MUTEX, addr);
+        mx->waiters--;
+    }
     mx->owner = self;
     mx->count = 1;
 }
-static bool mutex_trylock(uint32_t addr) {
+static bool mutex_trylock(Cpu* c, uint32_t addr) {
     HMutex* mx = g_mutexes.get(addr);
-    const void* self = t_self ? (const void*)t_self : (const void*)&t_cpu;
+    const void* self = mutex_self(c);
     std::lock_guard<std::mutex> lk(mx->m);
     if (mx->owner == self) { mx->count++; return true; }
     if (mx->owner) return false;
@@ -1027,13 +1043,15 @@ static bool mutex_trylock(uint32_t addr) {
 }
 static void mutex_unlock(uint32_t addr) {
     HMutex* mx = g_mutexes.get(addr);
+    bool wake;
     {
         std::lock_guard<std::mutex> lk(mx->m);
         if (--mx->count > 0) return;
         mx->owner = nullptr;
         mx->count = 0;
+        wake = mx->waiters != 0;
     }
-    mx->cv.notify_one();
+    if (wake) mx->cv.notify_one();
 }
 
 // Init functions reinitialize the host object in place: replacing it would strand threads already
@@ -1048,19 +1066,19 @@ HLE(coreinit, OSInitMutex) {
     mx->cv.notify_all();
     st32(arg(c, 0), 0x6D557458);  // "mUtX"
 }
-HLE(coreinit, OSLockMutex) { mutex_lock(arg(c, 0)); }
-HLE(coreinit, OSTryLockMutex) { ret(c, mutex_trylock(arg(c, 0))); }
+HLE(coreinit, OSLockMutex) { mutex_lock(c, arg(c, 0)); }
+HLE(coreinit, OSTryLockMutex) { ret(c, mutex_trylock(c, arg(c, 0))); }
 HLE(coreinit, OSUnlockMutex) { mutex_unlock(arg(c, 0)); }
 
 // GHS C library locks
 static uint32_t g_ghs_lock = 0xC0FFEE00;
-HLE(coreinit, __ghsLock) { mutex_lock(g_ghs_lock); }
+HLE(coreinit, __ghsLock) { mutex_lock(c, g_ghs_lock); }
 HLE(coreinit, __ghsUnlock) { mutex_unlock(g_ghs_lock); }
 HLE(coreinit, __ghs_mtx_init) { /* arg: void** handle */ st32(arg(c, 0), mem::runtime_alloc(8)); }
 HLE(coreinit, __ghs_mtx_dst) {}
-HLE(coreinit, __ghs_mtx_lock) { mutex_lock(ld32(arg(c, 0))); }
+HLE(coreinit, __ghs_mtx_lock) { mutex_lock(c, ld32(arg(c, 0))); }
 HLE(coreinit, __ghs_mtx_unlock) { mutex_unlock(ld32(arg(c, 0))); }
-HLE(coreinit, __ghs_flock_file) { mutex_lock(0xC0FFEE10); }
+HLE(coreinit, __ghs_flock_file) { mutex_lock(c, 0xC0FFEE10); }
 HLE(coreinit, __ghs_funlock_file) { mutex_unlock(0xC0FFEE10); }
 HLE(coreinit, __ghs_flock_ptr) { ret(c, mem::runtime_alloc(4)); }
 HLE(coreinit, __ghs_flock_destroy) {}
@@ -1074,6 +1092,7 @@ struct HEvent {
     bool signaled = false;
     bool auto_reset = false;
     std::deque<HostThread*> waiters;
+    uint32_t hostWaiters = 0;  // waiting threads that are not guest threads (not in waiters)
 };
 static ObjTable<HEvent> g_events;
 
@@ -1086,7 +1105,9 @@ static bool event_wait(uint32_t addr, const std::chrono::steady_clock::time_poin
         return true;
     }
     if (!t) {  // not a guest thread
+        ev->hostWaiters++;
         bool ok = park_wait(lk, ev->cv, [&] { return ev->signaled; }, W_EVENT, addr, deadline);
+        ev->hostWaiters--;
         if (ok && ev->auto_reset) ev->signaled = false;
         return ok;
     }
@@ -1113,8 +1134,10 @@ HLE(coreinit, OSInitEvent) {
 HLE(coreinit, OSSignalEvent) {
     if (g_trace_msg) LOG("[evt] signal %08X lr=%08X thread=%08X", arg(c, 0), c->lr, threads::current_thread());
     HEvent* ev = g_events.get(arg(c, 0));
+    bool wake;  // only when a thread waits (a condition-variable signal is a kernel call on the Switch)
     {
         std::lock_guard<std::mutex> lk(ev->m);
+        wake = !ev->waiters.empty() || ev->hostWaiters != 0;
         if (ev->auto_reset && !ev->waiters.empty()) {
             ev->waiters.front()->woken = true;
             ev->waiters.pop_front();
@@ -1124,7 +1147,7 @@ HLE(coreinit, OSSignalEvent) {
             ev->waiters.clear();
         }
     }
-    ev->cv.notify_all();
+    if (wake) ev->cv.notify_all();
 }
 HLE(coreinit, OSResetEvent) {
     if (g_trace_msg) LOG("[evt] reset %08X lr=%08X", arg(c, 0), c->lr);
@@ -1273,7 +1296,7 @@ HLE(coreinit, OSSendMessage) {
     uint32_t m = arg(c, 1), flags = arg(c, 2);
     std::array<uint32_t, 4> msg{ld32(m), ld32(m + 4), ld32(m + 8), ld32(m + 12)};
     if (g_trace_msg) LOG("[msg] send q=%08X msg=%08X %08X flags=%X lr=%08X", arg(c, 0), msg[0], msg[1], flags, c->lr);
-    const bool stats = t_is_main_thread;
+    const bool stats = c->main_thread;
     if (stats) add_stat(g_send_stats.sends, 1);
     bool wake;
     {
@@ -1370,6 +1393,7 @@ struct HSleep {
     std::condition_variable cv;
     std::vector<HostThread*> waiters;
     uint64_t gen = 0;  // for sleepers that are not guest threads
+    uint32_t hostSleepers = 0;  // those sleepers (a wakeup signals the condition only if anyone sleeps)
 };
 static ObjTable<HSleep> g_sleepq;
 HLE(coreinit, OSInitThreadQueue) { g_sleepq.get(arg(c, 0)); }  // sleepers (if any) keep waiting for a wakeup
@@ -1379,7 +1403,9 @@ HLE(coreinit, OSSleepThread) {
     HostThread* t = t_self;
     if (!t) {
         uint64_t g = q->gen;
+        q->hostSleepers++;
         park_wait(lk, q->cv, [&] { return q->gen != g; }, W_SLEEPQ, arg(c, 0));
+        q->hostSleepers--;
         return;
     }
     t->woken = false;
@@ -1388,13 +1414,15 @@ HLE(coreinit, OSSleepThread) {
 }
 void os_wakeup_thread_queue(uint32_t queue) {
     HSleep* q = g_sleepq.get(queue);
+    bool wake;
     {
         std::lock_guard<std::mutex> lk(q->m);
+        wake = !q->waiters.empty() || q->hostSleepers != 0;
         q->gen++;
         for (HostThread* t : q->waiters) t->woken = true;
         q->waiters.clear();
     }
-    q->cv.notify_all();
+    if (wake) q->cv.notify_all();
 }
 
 // OSRendezvous
@@ -1840,6 +1868,7 @@ void threads_ss_load(ss::Reader& r) {
             void* self = t->cpu.thread;
             t->cpu = s.cpu;
             t->cpu.thread = t;
+            t->cpu.main_thread = t->is_main;
             t->cpu.core = t->holds_core ? t->held_core : s.core;
             t->suspend = s.suspend;
             t->prio = s.prio;

@@ -62,8 +62,8 @@ bool read_surface(Surface* s, std::vector<uint8_t>& rgba) {
     attach(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, s, 0, 0);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    rgba.assign(size_t(s->width) * s->height * 4, 0);
-    glReadPixels(0, 0, s->width, s->height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    rgba.assign(size_t(s->pw) * s->ph * 4, 0);
+    glReadPixels(0, 0, s->pw, s->ph, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     attach(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, nullptr, 0, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, R.drawFbo);
     return true;
@@ -87,7 +87,7 @@ void dump_surface(Surface* s, const std::string& path, bool encodeSrgb) {
         for (size_t i = 0; i < rgba.size(); i++)
             if ((i & 3) != 3) rgba[i] = table[rgba[i]];
     }
-    write_png(path, s->width, s->height, rgba, false);
+    write_png(path, s->pw, s->ph, rgba, false);
 }
 
 void dump_framebuffer(GLuint fbo, int width, int height, const std::string& path) {

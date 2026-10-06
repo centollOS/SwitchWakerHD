@@ -2,8 +2,10 @@
 // Switch: EGL on the default NWindow, libnx applet loop and controllers.
 // Elsewhere (WWHD_HEADLESS_GL, a debugging aid): a surfaceless Mesa EGL context renders into an
 // offscreen "window"; WWHD_DUMP_FRAMES / WWHD_DUMP_TARGETS write PNGs, WWHD_EXIT_AT_FRAME quits.
-#ifdef __SWITCH__
 #include <malloc.h>
+#ifdef __SWITCH__
+#include <unistd.h>
+extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into (sbrk)
 #include <switch.h>
 #endif
 
@@ -14,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <cstdarg>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -55,6 +58,7 @@ namespace {
 #endif
 uint64_t g_hitches = 0;      // frames over 55 ms (check_hitch)
 Renderer::Perf g_hitchBase;  // R.perf after the previous present
+bool g_pipelineStats = false;  // GL_ARB_pipeline_statistics_query (GpuTiming)
 
 // ARB_buffer_storage (core in 4.4; glad is generated for 4.3)
 typedef void(APIENTRYP PFNGLBUFFERSTORAGEPROC_WWHD)(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags);
@@ -105,6 +109,9 @@ void init_egl() {
     u32 nw = 0, nh = 0;
     nwindowGetDimensions(nwindowGetDefault(), &nw, &nh);
     LOG("[gl] window: EGL surface %dx%d, native window %ux%u", ew, eh, nw, nh);
+#ifdef __SWITCH__
+    log_heap("after the GL setup");
+#endif
 #endif
 }
 
@@ -133,6 +140,7 @@ void init_objects() {
     for (const char* e : {"GL_ARB_clip_control", "GL_ARB_texture_view", "GL_ARB_copy_image", "GL_EXT_texture_sRGB_decode",
                           "GL_ARB_buffer_storage", "GL_ARB_viewport_array"})
         LOG("[gl] %s: %s", e, has(e) ? "yes" : "NO");
+    g_pipelineStats = has("GL_ARB_pipeline_statistics_query");
     glGenVertexArrays(1, &R.vao);
     glBindVertexArray(R.vao);
     GLuint fbos[3];
@@ -172,6 +180,8 @@ void init_objects() {
 #endif
 }
 
+Surface* g_presented = nullptr;  // the TV picture presented last (frame dumps, WWHD_GL_STATS)
+
 std::vector<uint64_t> frame_list(const char* var, const char* fallback) {
     std::vector<uint64_t> frames;
     const char* e = getenv(var);
@@ -184,16 +194,23 @@ std::vector<uint64_t> frame_list(const char* var, const char* fallback) {
     return frames;
 }
 
+// A capture on request (request_capture: both sticks clicked on the Switch): the next frame is traced
+// into the log (WWHD_GL_TRACE_FRAMES) and its TV picture and render targets are written as PNGs, as
+// WWHD_DUMP_FRAMES and WWHD_DUMP_TARGETS would. For pictures that go wrong where the desktop cannot go.
+std::atomic<bool> g_captureRequested{false};
+uint64_t g_captureFrame = ~0ull;
+
 // WWHD_DUMP_FRAMES=n,...: the TV picture and the window; WWHD_DUMP_TARGETS=n,...: every color target
 void frame_dumps(uint64_t frame) {
     static const std::vector<uint64_t> frames = frame_list("WWHD_DUMP_FRAMES", nullptr);
     static const std::vector<uint64_t> targets = frame_list("WWHD_DUMP_TARGETS", nullptr);
-    if (std::find(frames.begin(), frames.end(), frame) != frames.end()) {
+    const bool capture = frame == g_captureFrame;
+    if (capture || std::find(frames.begin(), frames.end(), frame) != frames.end()) {
         std::string n = std::to_string(frame);
-        if (R.tvScan) dump_surface(R.tvScan.get(), "frame_" + n + ".png", R.tvSrgb);
+        if (g_presented) dump_surface(g_presented, "frame_" + n + ".png", R.tvSrgb);
         dump_framebuffer(R.windowFbo, R.windowW, R.windowH, "frame_" + n + "_window.png");
     }
-    if (std::find(targets.begin(), targets.end(), frame) != targets.end()) {
+    if (capture || std::find(targets.begin(), targets.end(), frame) != targets.end()) {
         // every surface this frame's draws rendered to (depth included), biggest pixel count first
         std::vector<Surface*> drawn;
         for (Surface* s : R.surfaceList)
@@ -216,6 +233,8 @@ void frame_dumps(uint64_t frame) {
         }
         LOG("[gl] frame %llu: dumped %d render targets", (unsigned long long)frame, count);
     }
+    if (capture) LOG("[gl] capture of frame %llu done (frame_%llu.png, target_%llu_*.png)", (unsigned long long)frame,
+                     (unsigned long long)frame, (unsigned long long)frame);
 }
 
 // Whether the GPU keeps up: a fence after each frame's commands, checked (without waiting) when the
@@ -227,6 +246,7 @@ void frame_dumps(uint64_t frame) {
 struct GpuBusy {
     std::deque<std::pair<uint64_t, GLsync>> fences;  // frame, fence after its commands
     uint64_t frames = 0, behind = 0;
+    bool lastBehind = false;  // at this present, the GPU had not finished the previous frame
     void poll() {
         while (!fences.empty()) {
             GLint status = GL_SIGNALED;
@@ -239,10 +259,9 @@ struct GpuBusy {
     }
     void frame() {
         poll();
-        if (!fences.empty()) {
-            frames++;
-            if (fences.back().first + 1 >= R.frame) behind++;  // the previous frame is not done
-        }
+        frames++;
+        lastBehind = !fences.empty() && fences.back().first + 1 >= R.frame;  // the previous frame is not done
+        behind += lastBehind;
         fences.push_back({R.frame, glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)});
         while (fences.size() > 6) {  // never seen: the GPU is six frames behind
             Stage stage("waiting for the GPU: six frames behind");
@@ -265,6 +284,423 @@ struct GpuBusy {
         return pct;
     }
 } gpuBusy;
+
+// Dynamic resolution (WWHD_DYNAMIC_RES, on unless =0; =0.x sets the lowest factor, default 0.75): when the
+// GPU is the limit (frames below 30 per second with the GPU still on the previous frame at present),
+// screen-shaped render targets drop to a lower internal resolution, in steps of 0.05, by what the frame
+// rate says is missing; with GPU time to spare at the start of frames (GpuPasses) it steps back up. A
+// step up that the GPU cannot hold is undone, and the next try waits twice as long (up to a minute).
+// The HUD is drawn into the same buffer as the scene, so it is scaled too.
+bool dynamic_res_requested() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_DYNAMIC_RES");
+        return !(e && atof(e) == 0.0 && *e == '0');
+    }();
+    return on;
+}
+struct DynamicRes {
+    bool on = false, ready = false;
+    float lo = 0.75f, hi = 1.0f, scale = 1.0f;
+    uint64_t windowStart = 0, frames = 0, behind = 0;
+    uint64_t lastDown = 0, lastUp = 0, backoff = 4'000'000'000ull, calmSince = 0;
+    uint32_t idleSamples = 0;  // sampled frames in a row with enough GPU time to spare
+    bool settle = false;
+    uint64_t idleSeen = 0;     // GpuPasses frames already looked at
+    void setup() {
+        ready = true;
+        hi = res_scale();
+        const char* e = getenv("WWHD_DYNAMIC_RES");
+        on = dynamic_res_requested();
+        if (e && atof(e) > 0) lo = std::clamp(float(atof(e)), 0.5f, 1.0f);
+        lo = std::min(lo, hi);
+        scale = hi;
+        if (on) LOG("[gl] dynamic resolution: %.2f to %.2f when the GPU is the limit (WWHD_DYNAMIC_RES)", lo, hi);
+    }
+    static float step_down(float s) { return std::floor(s * 20.0f - 0.01f) / 20.0f; }
+    void apply(float s, const char* why, double fps, double behindPct) {
+        s = std::clamp(s, lo, hi);
+        if (s == scale) return;
+        LOG("[gl] dynamic resolution %.2f -> %.2f (%s: %.1f fps, GPU still busy at %.0f%% of presents)", scale, s, why, fps,
+            behindPct);
+        scale = s;
+        set_res_scale(s);
+        settle = true;
+    }
+    // once a frame at present, after GpuBusy::frame
+    void frame(uint64_t now, bool gpuBehind, double idleMs, double busyMs, uint64_t passFrames) {
+        if (!ready) setup();
+        if (!on) return;
+        if (!windowStart) windowStart = now;
+        frames++;
+        behind += gpuBehind;
+        // GPU time to spare: the idle start of a sampled frame, enough for one step up with a margin
+        if (passFrames != idleSeen && idleMs >= 0 && busyMs > 0) {
+            // as if all of the GPU's work grew with the pixel count, plus 3 ms to spare
+            idleSeen = passFrames;
+            const float next = std::min(hi, scale + 0.05f);
+            const double grow = double(next * next) / double(scale * scale) - 1.0;
+            idleSamples = idleMs >= 3.0 + busyMs * grow ? idleSamples + 1 : 0;
+        }
+        if (now - windowStart < 500'000'000ull) return;
+        const double secs = double(now - windowStart) / 1e9, fps = double(frames) / secs;
+        const double behindPct = 100.0 * double(behind) / double(frames);
+        windowStart = now;
+        frames = behind = 0;
+        if (settle) {  // the window after a change (render targets resampled, the GPU's queue draining)
+            settle = false;
+            return;
+        }
+        if (fps < 29.0 && behindPct >= 50) {
+            // the share of GPU time to cut (to 31.5 ms frames), most of it scales with the pixel count;
+            // at most three steps at a time (each step costs the render targets a resample)
+            const double cut = 1.0 - 31.5 / (1000.0 / fps), pixels = std::max(0.5, 1.0 - cut / 0.85);
+            float s = std::min(step_down(scale), std::floor(float(scale * std::sqrt(pixels)) * 20.0f) / 20.0f);
+            s = std::max(s, std::floor(scale * 20.0f - 0.01f) / 20.0f - 0.10f);
+            if (lastUp && now - lastUp < 4'000'000'000ull) backoff = std::min<uint64_t>(backoff * 2, 64'000'000'000ull);
+            lastDown = calmSince = now;
+            lastUp = 0;
+            idleSamples = 0;
+            apply(s, "GPU-bound", fps, behindPct);
+            return;
+        }
+        if (behindPct > 10) {
+            calmSince = now;
+            idleSamples = 0;
+        }
+        if (now - calmSince > 30'000'000'000ull) backoff = 4'000'000'000ull;
+        if (scale < hi && idleSamples >= 3 && fps >= 29.7 && now - lastDown >= backoff && now - calmSince >= 2'000'000'000ull) {
+            lastUp = now;
+            idleSamples = 0;
+            apply(std::min(hi, scale + 0.05f), "GPU time to spare", fps, behindPct);
+        }
+    }
+} dynamicRes;
+
+#ifdef __SWITCH__
+// The clocks the console runs at (CPU, GPU, memory), for the logs: overclocking tools change them, and
+// a log of a GPU-bound view means little without the GPU clock. clkrst (8.0.0+) or pcv; nothing if the
+// game may use neither.
+std::string clock_report() {
+    static int state = 0;  // 0: not tried, 1: clkrst, 2: pcv, -1: unavailable
+    static ClkrstSession sessions[3];
+    static const PcvModuleId ids[3] = {PcvModuleId_CpuBus, PcvModuleId_GPU, PcvModuleId_EMC};
+    static const PcvModule modules[3] = {PcvModule_CpuBus, PcvModule_GPU, PcvModule_EMC};
+    if (state == 0) {
+        state = -1;
+        if (hosversionAtLeast(8, 0, 0)) {
+            if (R_SUCCEEDED(clkrstInitialize())) {
+                bool ok = true;
+                for (int i = 0; i < 3 && ok; i++) ok = R_SUCCEEDED(clkrstOpenSession(&sessions[i], ids[i], 3));
+                if (ok) state = 1;
+            }
+        } else if (R_SUCCEEDED(pcvInitialize()))
+            state = 2;
+        if (state < 0) LOG("[gl] clocks: the clock services (clkrst, pcv) cannot be used: not logged");
+    }
+    if (state < 0) return "";
+    u32 hz[3] = {};
+    for (int i = 0; i < 3; i++) {
+        if (state == 1) clkrstGetClockRate(&sessions[i], &hz[i]);
+        else pcvGetClockRate(modules[i], &hz[i]);
+    }
+    char b[96];
+    snprintf(b, sizeof b, "CPU %u MHz, GPU %u MHz, memory %u MHz", hz[0] / 1000000, hz[1] / 1000000, hz[2] / 1000000);
+    return b;
+}
+#endif
+
+// The GPU's timestamps do not count real nanoseconds on the Switch: the Tegra X1's GPU timer runs at
+// 19.2 MHz and is read as if it ran at 31.25 MHz (times x0.614). The factor is measured: the GPU
+// timestamps of the sampled frames' starts against the CPU clock when they were queued, over the
+// whole session (the queueing delay, under a frame, vanishes against minutes).
+struct GpuClock {
+    bool have = false;
+    uint64_t cpu0 = 0, gpu0 = 0;
+    double factor =
+#ifdef __SWITCH__
+        31.25 / 19.2;
+#else
+        1.0;
+#endif
+    bool logged = false;
+    void sample(uint64_t cpuNs, uint64_t gpuTs) {
+        if (!have) {
+            have = true;
+            cpu0 = cpuNs;
+            gpu0 = gpuTs;
+            return;
+        }
+        if (gpuTs <= gpu0 || cpuNs - cpu0 < 4'000'000'000ull) return;
+        factor = double(cpuNs - cpu0) / double(gpuTs - gpu0);
+        if (!logged && cpuNs - cpu0 > 30'000'000'000ull) {
+            logged = true;
+            LOG("[gl] GPU timer: %.4f real ns per GPU ns (measured over %.0f s); GPU times in this log are real time",
+                factor, double(cpuNs - cpu0) / 1e9);
+        }
+    }
+} gpuClock;
+
+// GPU time per frame: a GL_TIME_ELAPSED query from the end of one present to the start of the next,
+// read 8 frames later right after present's wait for the GL thread (with Mesa's GL thread, reading a
+// query waits for it: there it costs nothing more). The span includes any time the GPU waited for
+// commands, so it is the GPU's frame time when the GPU is the limit. WWHD_GL_PIPESTATS=1 (drivers with
+// ARB_pipeline_statistics_query) also counts the vertex and fragment shader invocations and the
+// primitives of every 50th frame: the GPU's work, to compare builds or settings at the same frame.
+constexpr GLenum kVsInvocations = 0x82F0, kFsInvocations = 0x82F4, kPrimitivesSubmitted = 0x82EF;
+struct GpuTiming {
+    static constexpr int kSlots = 8;
+    GLuint time[kSlots] = {}, vs[kSlots] = {}, fs[kSlots] = {}, prims[kSlots] = {};
+    uint64_t frameOf[kSlots];
+    bool ready = false, active = false, stats = false;
+    double sumMs = 0;
+    uint64_t samples = 0;
+    void setup() {
+        ready = true;
+        for (auto& f : frameOf) f = ~0ull;
+        glGenQueries(kSlots, time);
+        stats = g_pipelineStats && getenv("WWHD_GL_PIPESTATS");
+        if (stats) {
+            glGenQueries(kSlots, vs);
+            glGenQueries(kSlots, fs);
+            glGenQueries(kSlots, prims);
+        }
+    }
+    void begin(uint64_t frame) {
+        if (!ready) setup();
+        const int k = int(frame % kSlots);
+        if (frameOf[k] != ~0ull) {
+            GLuint64 ns = 0;
+            glGetQueryObjectui64v(time[k], GL_QUERY_RESULT, &ns);
+            sumMs += double(ns) * gpuClock.factor / 1e6;
+            samples++;
+            if (stats && frameOf[k] % 50 == 0) {
+                GLuint64 v = 0, f = 0, p = 0;
+                glGetQueryObjectui64v(vs[k], GL_QUERY_RESULT, &v);
+                glGetQueryObjectui64v(fs[k], GL_QUERY_RESULT, &f);
+                glGetQueryObjectui64v(prims[k], GL_QUERY_RESULT, &p);
+                LOG("[gl] GPU work of frame %llu: %.2f ms, vertex shaders %llu, fragment shaders %llu, primitives %llu",
+                    (unsigned long long)frameOf[k], double(ns) / 1e6, (unsigned long long)v, (unsigned long long)f,
+                    (unsigned long long)p);
+            }
+        }
+        glBeginQuery(GL_TIME_ELAPSED, time[k]);
+        if (stats) {
+            glBeginQuery(kVsInvocations, vs[k]);
+            glBeginQuery(kFsInvocations, fs[k]);
+            glBeginQuery(kPrimitivesSubmitted, prims[k]);
+        }
+        frameOf[k] = frame;
+        active = true;
+    }
+    void end() {
+        if (!active) return;
+        glEndQuery(GL_TIME_ELAPSED);
+        if (stats) {
+            glEndQuery(kVsInvocations);
+            glEndQuery(kFsInvocations);
+            glEndQuery(kPrimitivesSubmitted);
+        }
+        active = false;
+    }
+    double take() {
+        double v = samples ? sumMs / double(samples) : -1;
+        sumMs = 0;
+        samples = 0;
+        return v;
+    }
+} gpuTiming;
+
+}  // namespace
+// GPU time per render pass (WWHD_GL_GPU_PASSES, on unless =0). Every 30th frame, a GL_TIMESTAMP query
+// goes where the frame's render targets change, at clears and at present; the next sampled frame
+// reads them (right after present's wait for the GL thread, like GpuTiming) and the 5 s report lists
+// the passes that took the most GPU time: what the GPU spends a frame on when it is the limit.
+bool g_gpuPassSampling = false;
+namespace {
+
+struct GpuPasses {
+    struct Mark {
+        GLuint query;
+        std::string label;
+        uint64_t draws;
+    };
+    bool on = false, ready = false;
+    uint64_t startCpu = 0;  // when the sampled frame's start was queued (GpuClock)
+    double lastIdleMs = -1, lastBusyMs = -1;  // the last sampled frame: GPU idle at its start, and the rest
+    uint64_t collected = 0;                   // sampled frames read
+    std::vector<GLuint> pool;
+    std::vector<Mark> marks;  // of the sampled frame whose results are pending
+    std::string open;         // the pass being recorded
+    struct Total {
+        double ms = 0;
+        uint64_t draws = 0;
+    };
+    std::unordered_map<std::string, Total> totals;
+    uint64_t frames = 0;
+    void setup() {
+        ready = true;
+        const char* e = getenv("WWHD_GL_GPU_PASSES");
+        on = !(e && *e == '0') || dynamic_res_requested();  // dynamic resolution steps up by the sampled idle time
+    }
+    GLuint query() {
+        if (pool.empty()) {
+            pool.resize(64);
+            glGenQueries(GLsizei(pool.size()), pool.data());
+        }
+        GLuint q = pool.back();
+        pool.pop_back();
+        return q;
+    }
+    void collect() {  // the previous sampled frame's results
+        if (marks.size() < 2) return;
+        std::vector<GLuint64> t(marks.size());
+        for (size_t i = 0; i < marks.size(); i++) glGetQueryObjectui64v(marks[i].query, GL_QUERY_RESULT, &t[i]);
+        gpuClock.sample(startCpu, t[0]);
+        const double k = gpuClock.factor / 1e6;
+        for (size_t i = 0; i + 1 < marks.size(); i++) {
+            Total& x = totals[marks[i].label];
+            x.ms += double(t[i + 1] - t[i]) * k;
+            x.draws += marks[i + 1].draws - marks[i].draws;
+        }
+        lastIdleMs = double(t[1] - t[0]) * k;
+        lastBusyMs = double(t.back() - t[1]) * k;
+        collected++;
+        frames++;
+        for (auto& m : marks) pool.push_back(m.query);
+        marks.clear();
+    }
+    void frame_start(uint64_t frame) {  // after present
+        if (!ready) setup();
+        if (!on) return;
+        g_gpuPassSampling = false;
+        if (frame % 30) return;
+        collect();
+        g_gpuPassSampling = true;
+        startCpu = now_ns();
+        mark("frame start", nullptr, nullptr);
+    }
+    void mark(const char* kind, const Surface* color, const Surface* depth) {
+        flush_draws();  // the batched draws of the pass before go first
+        char label[96];
+        if (color || depth) {
+            const Surface* s = color ? color : depth;
+            snprintf(label, sizeof label, "%s %ux%u%s%s", kind, s->width, s->height,
+                     color ? (" color " + std::to_string(color->format)).c_str() : "",
+                     depth ? (" depth " + std::to_string(depth->format)).c_str() : "");
+        } else
+            snprintf(label, sizeof label, "%s", kind);
+        // the GPU finishes everything before first (nouveau: a wait for idle): a timestamp alone is
+        // written when the commands before it pass the geometry stages, so a pass's pixel work landed
+        // in the next pass's time (a 1-draw pass after the scene took 2 ms)
+        glMemoryBarrier(GL_FRAMEBUFFER_BARRIER_BIT);
+        GLuint q = query();
+        glQueryCounter(q, GL_TIMESTAMP);
+        marks.push_back({q, label, R.drawCount});
+    }
+    void frame_end() {  // before the swap
+        if (!g_gpuPassSampling) return;
+        mark("frame end", nullptr, nullptr);
+        g_gpuPassSampling = false;
+    }
+    std::string report() {
+        if (!frames) return "";
+        std::vector<std::pair<double, std::string>> v;
+        double sum = 0;
+        for (auto& [label, t] : totals) {
+            v.push_back({t.ms / double(frames), label});
+            sum += t.ms;
+        }
+        std::sort(v.rbegin(), v.rend());
+        char head[96];
+        snprintf(head, sizeof head, "%.1f ms a frame in %zu kinds of passes (%llu sampled frames):", sum / double(frames),
+                 totals.size(), (unsigned long long)frames);
+        std::string out = head;
+        for (size_t i = 0; i < v.size() && i < 10; i++) {
+            char item[160];
+            snprintf(item, sizeof item, " %s%s %.1f ms (%.0f draws)", i ? ";" : "", v[i].second.c_str(), v[i].first,
+                     double(totals[v[i].second].draws) / double(frames));
+            out += item;
+        }
+        totals.clear();
+        frames = 0;
+        return out;
+    }
+} gpuPasses;
+}  // namespace
+void gpu_pass_mark(const char* kind, const Surface* color, const Surface* depth) {
+    if (g_gpuPassSampling) gpuPasses.mark(kind, color, depth);
+}
+
+// ---- WWHD_GL_TRACE_FRAMES (gl.h)
+bool g_traceFrame = false;
+bool g_captureDraws = false;
+uint64_t g_probeStart = [] {
+    const char* e = getenv("WWHD_GL_PROBE_FRAME");
+    return e ? uint64_t(strtoull(e, nullptr, 10)) : ~0ull;
+}();
+namespace {
+struct PassTrace {
+    std::string pass, last;  // the open pass's targets, the last pass's
+    uint64_t draws = 0;
+    std::vector<const Surface*> sampled;
+    void close() {
+        if (pass.empty()) return;
+        std::string s;
+        for (const Surface* t : sampled) s += " " + trace_name(t);
+        LOG("[trace] frame %llu pass %s: %llu draws, samples%s", (unsigned long long)(R.frame + 1), pass.c_str(),
+            (unsigned long long)draws, s.empty() ? " nothing" : s.c_str());
+        pass.clear();
+        draws = 0;
+        sampled.clear();
+    }
+} passTrace;
+}  // namespace
+std::string trace_name(const Surface* s) {
+    if (!s) return "-";
+    char b[96];
+    snprintf(b, sizeof b, "%08X:%ux%u/f%X%s%s", s->addr, s->width, s->height, s->format, s->isDepth ? "/depth" : "",
+             s->gpuWritten ? "" : "/cpu");
+    std::string n = b;
+    // GamePad-picture state (gamepad_only): frames since its GamePad copy and its last read
+    if (s->drcScanFrame != ~0ull) n += "/drc-" + std::to_string(R.frame - s->drcScanFrame);
+    if (s->drcScanFrame != ~0ull || s->gamepadSource)
+        n += s->readFrame == ~0ull ? "/unread" : "/read-" + std::to_string(R.frame - s->readFrame);
+    if (s->gamepadSource) n += "/gpsrc";
+    return n;
+}
+void trace_pass(const std::array<Surface*, 8>& colors, const Surface* depth) {
+    passTrace.close();
+    std::string p;
+    for (int i = 0; i < 8; i++)
+        if (colors[i]) p += " c" + std::to_string(i) + "=" + trace_name(colors[i]);
+    p += " d=" + trace_name(depth);
+    passTrace.pass = passTrace.last = p;
+}
+// A draw's textures are resolved before its render targets are bound (and a new pass traced), so its
+// samples wait in pending until the draw is counted, in the pass it belongs to.
+void trace_draw(const Surface* sampled) {
+    static std::vector<const Surface*> pending;
+    if (sampled) {
+        if (std::find(pending.begin(), pending.end(), sampled) == pending.end()) pending.push_back(sampled);
+        return;
+    }
+    if (passTrace.pass.empty()) passTrace.pass = passTrace.last + " (continued)";
+    passTrace.draws++;
+    for (const Surface* t : pending)
+        if (std::find(passTrace.sampled.begin(), passTrace.sampled.end(), t) == passTrace.sampled.end())
+            passTrace.sampled.push_back(t);
+    pending.clear();
+}
+void trace_event(const char* fmt, ...) {
+    passTrace.close();
+    char b[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    LOG("[trace] frame %llu %s", (unsigned long long)(R.frame + 1), b);
+}
+namespace {
 
 // CPU load per core (Switch). Horizon reports a core's idle time only to a thread running on that core,
 // so a small thread visits cores 0-2 in turn every 5 s. The render thread's own CPU time comes from
@@ -344,7 +780,25 @@ void frame_stats() {
         struct mallinfo heap = mallinfo();
         heapText = ", heap " + std::to_string(size_t(heap.uordblks) >> 20) + "/" + std::to_string(size_t(heap.arena) >> 20) + " MiB";
     }
-    memory = heapText;
+    // the heap malloc has never grown into (its break against the end libnx gave it): cheap, no lock.
+    // Freed blocks inside the used part are not counted, so this is the floor of what is left.
+    {
+        char* top = static_cast<char*>(sbrk(0));
+        if (fake_heap_end && top && top != reinterpret_cast<char*>(-1)) {
+            const size_t mib = heap_never_used_mib();
+            memory = ", heap never used " + std::to_string(mib) + " MiB" + heapText;
+            static size_t lowest = SIZE_MAX;
+            if (mib < 256) {
+                if (mib + 32 < lowest) {
+                    lowest = mib;
+                    LOG("[gl] memory is getting low: %zu MiB of heap never used; texture pool %zu MiB (emptied)", mib,
+                        texture_pool_bytes() >> 20);
+                }
+                texture_pool_clear();
+            }
+        } else
+            memory = heapText;
+    }
 #endif
     static uint64_t lastSyncWait = 0, lastSyncs = 0, lastHitches = 0;
     const uint64_t syncWait = gx2::game_sync_wait_ns(), syncs = gx2::game_syncs();
@@ -443,6 +897,37 @@ void frame_stats() {
 #ifdef __SWITCH__
     LOG("[gl] %s", mesa_probe_report(secs).c_str() + 2);  // its own line: the log cuts lines at 2 KB
 #endif
+    {
+        // where the memory goes (round 25): the heap left, textures, the shader store and GL objects
+        size_t texBytes, targetBytes, texCount, srcCount, storeBytes, objects, programs;
+        texture_memory(texBytes, targetBytes, texCount);
+        shader_memory(srcCount, storeBytes, objects, programs);
+        char heap[48] = "";
+#ifdef __SWITCH__
+        snprintf(heap, sizeof heap, "heap never used %zu MiB; ", heap_never_used_mib());
+#else
+        snprintf(heap, sizeof heap, "malloc in use %zu MiB; ", size_t(mallinfo2().uordblks) >> 20);
+#endif
+        LOG("[gl] memory: %stextures %zu MiB in %zu surfaces (render targets %zu MiB, pool %zu MiB); shaders: %zu "
+            "sources (%zu KB), %zu compiled objects, %zu programs", heap, texBytes >> 20, texCount, targetBytes >> 20,
+            texture_pool_bytes() >> 20, srcCount, storeBytes >> 10, objects, programs);
+    }
+    if (double gpuMs = gpuTiming.take(); gpuMs >= 0)
+        LOG("[gl] GPU time per frame %.1f ms (from one present to the next; the GPU's own time when it is the limit); "
+            "internal resolution %.2f (%llu render targets resampled, %llu from kept textures; HUD at full resolution in %.0f%% of frames); "
+            "TV picture copied in %.0f%% of frames",
+            gpuMs, double(res_scale()), (unsigned long long)p.rescales, (unsigned long long)p.poolHits,
+            100.0 * perFrameOf(p.hudSwitches),
+            100.0 * perFrameOf(p.scanBlits));
+    if (std::string passes = gpuPasses.report(); !passes.empty()) LOG("[gl] GPU passes: %s", passes.c_str());
+#ifdef __SWITCH__
+    if (std::string clocks = clock_report(); !clocks.empty()) LOG("[gl] clocks: %s", clocks.c_str());
+#endif
+    if (p.gamepadDraws || p.gamepadClearsSkipped)
+        LOG("[gl] GamePad picture: %.0f draws/frame into its own buffers (%.0f ms/s), %s (%.0f draws, %.0f clears per frame; "
+            "WWHD_GL_SKIP_GAMEPAD)",
+            perFrameOf(p.gamepadDraws), ms(p.gamepadDrawNs), skip_gamepad() ? "skipped" : "drawn", perFrameOf(p.gamepadSkipped),
+            perFrameOf(p.gamepadClearsSkipped));
     overlayStats.renderBusy = busy;
     overlayStats.gpuBusyPct = gpuPct;
     overlayStats.draws = perFrame;
@@ -450,7 +935,7 @@ void frame_stats() {
     static const bool means = getenv("WWHD_GL_STATS") != nullptr;
     if (means) {
         float mean[4] = {}, window[4] = {};
-        if (R.tvScan) surface_mean(R.tvScan.get(), mean);
+        if (g_presented) surface_mean(g_presented, mean);
         framebuffer_mean(R.windowFbo, R.windowW, R.windowH, window);
         LOG("[gl] TV mean %.3f %.3f %.3f, window mean %.3f %.3f %.3f", mean[0], mean[1], mean[2], window[0], window[1],
             window[2]);
@@ -526,6 +1011,61 @@ GLuint present_program() {
         return p;
     }();
     return prog;
+}
+
+// test aid: WWHD_GL_TEST_GPU_LOAD=n adds n loop iterations per pixel of a screen-sized target at the
+// internal resolution each frame: GPU work that shrinks with the resolution, to watch dynamic resolution
+// work on a GPU that otherwise keeps up
+void test_gpu_load() {
+    static const int n = getenv("WWHD_GL_TEST_GPU_LOAD") ? atoi(getenv("WWHD_GL_TEST_GPU_LOAD")) : 0;
+    if (n <= 0) return;
+    static GLuint prog = 0, fbo = 0, tex = 0;
+    static GLint iterLoc = -1;
+    static uint32_t w = 0, h = 0;
+    if (!prog) {
+        const char* vs = "#version 330 core\nvoid main() { vec2 p = vec2(float((gl_VertexID & 1) * 4 - 1), "
+                         "float((gl_VertexID & 2) * 2 - 1)); gl_Position = vec4(p, 0.0, 1.0); }\n";
+        const char* fs = "#version 330 core\nuniform int n; out vec4 c; void main() { float a = gl_FragCoord.x * 0.001 + "
+                         "gl_FragCoord.y; for (int i = 0; i < n; i++) a = fract(sin(a * 12.9898 + float(i)) * 43758.5453); "
+                         "c = vec4(a); }\n";
+        prog = glCreateProgram();
+        for (auto [type, text] : {std::pair<GLenum, const char*>{GL_VERTEX_SHADER, vs}, {GL_FRAGMENT_SHADER, fs}}) {
+            GLuint sh = glCreateShader(type);
+            glShaderSource(sh, 1, &text, nullptr);
+            glCompileShader(sh);
+            glAttachShader(prog, sh);
+        }
+        glLinkProgram(prog);
+        iterLoc = glGetUniformLocation(prog, "n");
+        glGenFramebuffers(1, &fbo);
+        LOG("[gl] test GPU load: %d iterations per pixel (WWHD_GL_TEST_GPU_LOAD)", n);
+    }
+    const uint32_t tw = scaled_size(1280, res_scale()), th = scaled_size(720, res_scale());
+    forget_gl_state();
+    if (tw != w || th != h) {
+        if (tex) glDeleteTextures(1, &tex);
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, tw, th);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+        glFramebufferTexture(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0);
+        w = tw;
+        h = th;
+    }
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CLIP_DISTANCE0);  // (draw.cpp: the game's near-plane clip distance)
+    glDisablei(GL_BLEND, 0);
+    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    if (auto cc = clip_control()) cc(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
+    glViewportIndexedf(0, 0, 0, float(w), float(h));
+    glUseProgram(prog);
+    glUniform1i(iterLoc, n);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindFramebuffer(GL_FRAMEBUFFER, R.drawFbo);
 }
 
 GLuint present_sampler() {
@@ -665,6 +1205,7 @@ void draw_overlay(int ww, int wh) {
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CLIP_DISTANCE0);  // (draw.cpp: the game's near-plane clip distance)
     glDisable(GL_CULL_FACE);
     glDisable(GL_COLOR_LOGIC_OP);
     glDisable(GL_FRAMEBUFFER_SRGB);
@@ -715,6 +1256,11 @@ const Grade& picture_grade() {
 // TV scan buffer -> window: fit 16:9, flip rows (guest images keep row 0 at the top)
 void present() {
     flush_draws();
+    if (g_traceFrame) trace_event("present");
+    test_gpu_load();
+    gpu_pass_mark("present", nullptr, nullptr);
+    gpuTiming.end();
+    check_texture_errors();
     forget_gl_state();
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, R.windowFbo);
 #ifdef __SWITCH__
@@ -724,8 +1270,6 @@ void present() {
     glDisable(GL_FRAMEBUFFER_SRGB);
     glDisable(GL_RASTERIZER_DISCARD);
     glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glClearColor(0, 0, 0, 1);
-    glClear(GL_COLOR_BUFFER_BIT);
     EGLint ww = R.windowW, wh = R.windowH;
 #ifdef __SWITCH__
     // switch-mesa leaves the EGL surface size at 0x0: ask the native window
@@ -735,17 +1279,24 @@ void present() {
         wh = EGLint(nh);
     }
 #endif
-    if (Surface* scan = R.tvScan.get()) {
+    // the TV picture: its buffer itself when nothing wrote to it since the game copied it
+    Surface* const presented = R.scanSrc ? R.scanSrc : R.tvScan.get();
+    if (Surface* scan = presented) {
         float a = float(scan->width) / scan->height;
         int w = ww, h = int(ww / a);
         if (h > wh) { h = wh; w = int(wh * a); }
         int x = (ww - w) / 2, y = (wh - h) / 2;
+        if (x != 0 || y != 0 || w != ww || h != wh) {  // bars around the picture (else every pixel is drawn)
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
         GLuint prog = scan->target == GL_TEXTURE_2D ? present_program() : 0;
         if (prog) {
             glDisablei(GL_BLEND, 0);
             glDisable(GL_COLOR_LOGIC_OP);
             glDisable(GL_DEPTH_TEST);
             glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CLIP_DISTANCE0);  // (draw.cpp: the game's near-plane clip distance)
             glDisable(GL_CULL_FACE);
             glDisable(GL_POLYGON_OFFSET_FILL);
             if (auto cc = clip_control()) cc(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
@@ -780,9 +1331,17 @@ void present() {
             attach(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, nullptr, 0, 0);
         }
     }
+    if (!presented) {
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
     draw_overlay(ww, wh);
+    g_presented = presented;
     frame_dumps(R.frame + 1);
     frame_stats();
+    // the next frame draws into the buffer again: it gets its own copy only if the game copies it
+    R.scanSrc = nullptr;
+    if (R.tvSource) R.tvSource->hudFull = false;  // the scene's resolution again (at its next clear or draw)
 #ifdef __SWITCH__
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     {
@@ -790,11 +1349,18 @@ void present() {
         finish_gl_thread();  // switch-mesa's eglSwapBuffers flushes the driver from this thread
     }
 #endif
+    gpuPasses.frame_end();
     gpuBusy.frame();  // its fence queries wait for the GL thread too: right after the wait above
+    dynamicRes.frame(now_ns(), gpuBusy.lastBehind, gpuPasses.lastIdleMs, gpuPasses.lastBusyMs, gpuPasses.collected);
 #ifdef __SWITCH__
-    Stage stage("present: eglSwapBuffers");
-    eglSwapBuffers(R.display, R.surface);
+    {
+        Stage stage("present: eglSwapBuffers");
+        eglSwapBuffers(R.display, R.surface);
+    }
 #endif
+    gpuTiming.begin(R.frame + 1);
+    gpuPasses.frame_start(R.frame + 1);
+    latch_res_scale();
     glBindFramebuffer(GL_FRAMEBUFFER, R.drawFbo);
 }
 
@@ -915,12 +1481,34 @@ void copy_to_scan(uint32_t cb, uint32_t target) {
     make_current();
     ScopedTime timer{R.perf.scanNs};
     R.perf.scans++;
-    if (target != 1) return;  // the GamePad picture has no screen on the Switch yet
     Surface* src = surface_from_color_buffer(cb);
+    if (g_traceFrame && target != 1) trace_event("GamePad scan copy of %s", trace_name(src).c_str());
+    if (src && target != 1) {  // the GamePad picture has no screen on the Switch yet
+        if (src->drcScanFrame == ~0ull)
+            LOG("[gl] GamePad picture: buffer %08X, %ux%u, format %X", src->addr, src->width, src->height, src->format);
+        src->drcScanFrame = R.frame;
+    }
+    if (target != 1) return;
     if (!src || src->fmt.depth) return;
+    src->tvScanFrame = R.frame;
+    if (src->derivedFrom) src->derivedFrom->readFrame = R.frame;  // the TV shows what it was made from
     R.scanCopies++;
+    if (g_traceFrame) trace_event("TV scan copy of %s", trace_name(src).c_str());
+    // noted only: presenting reads src itself unless something writes to it first (scan_flush)
+    R.tvSource = R.scanSrc = src;
+}
+
+}  // namespace
+
+// the noted TV picture copied after all: src is about to change before the picture is shown
+void scan_flush() {
+    Surface* src = R.scanSrc;
+    if (!src) return;
+    R.scanSrc = nullptr;
+    R.perf.scanBlits++;
     auto& scan = R.tvScan;
-    if (!scan || scan->width != src->width || scan->height != src->height || scan->fmt.internal != src->fmt.internal) {
+    if (!scan || scan->width != src->width || scan->height != src->height || scan->pw != src->pw || scan->ph != src->ph ||
+        scan->fmt.internal != src->fmt.internal) {
         if (scan) destroy_surface_texture(scan.get());
         scan = std::make_unique<Surface>();
         scan->width = src->width;
@@ -928,10 +1516,12 @@ void copy_to_scan(uint32_t cb, uint32_t target) {
         scan->format = src->format;
         scan->fmt = src->fmt;
         scan->gpuWritten = true;
+        scan->scale = src->scale;  // presenting scales it to the window
         create_surface_texture(scan.get());
     }
     blit(src, 0, 0, src->width, src->height, scan.get(), 0, 0, scan->width, scan->height);
 }
+namespace {
 
 // Frames that took much longer than the game's 33 ms are logged with what the render thread did in
 // them ([hitch]), to find periodic stalls. R.perf is reset only inside present() (frame_stats), so
@@ -986,8 +1576,20 @@ void swap() {
     g_hitchBase = R.perf;
     R.streamGen++;
     R.completed = std::atomic_ref<uint64_t>(R.frame).fetch_add(1) + 1;
+    static const std::vector<uint64_t> traced = frame_list("WWHD_GL_TRACE_FRAMES", nullptr);
+    if (g_captureRequested.exchange(false)) {
+        g_captureFrame = R.frame + 1;
+        g_probeStart = g_captureFrame + 1;  // then the probe frames (draw.cpp)
+        LOG("[gl] capture of frame %llu requested: its passes follow, its pictures go to the SD card; probe frames "
+            "from %llu", (unsigned long long)g_captureFrame, (unsigned long long)g_probeStart);
+    }
+    g_traceFrame = (!traced.empty() && std::find(traced.begin(), traced.end(), R.frame + 1) != traced.end()) ||
+                   R.frame + 1 == g_captureFrame;
+    g_captureDraws = R.frame + 1 == g_captureFrame;
 }
 }  // namespace
+
+void request_capture() { g_captureRequested = true; }
 
 void make_current() {
     static thread_local bool current = false;

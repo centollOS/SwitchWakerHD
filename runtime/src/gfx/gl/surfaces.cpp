@@ -160,6 +160,9 @@ uint32_t element_offset(const LatteAddrLib::AddrSurfaceInfo_OUT& info, Latte::E_
 }  // namespace
 
 // ---------------------------------------------------------------- textures
+// formats of the textures allocated this frame, for check_texture_errors
+static std::vector<uint32_t> g_framesTextures;
+
 void create_surface_texture(Surface* s) {
     if (!s->fmt.internal) throw std::runtime_error("unsupported GX2 surface format " + std::to_string(s->format));
     auto dim = static_cast<Latte::E_DIM>(s->dim);
@@ -174,29 +177,77 @@ void create_surface_texture(Surface* s) {
     uint32_t maxDim = std::max({s->width, oneD ? 1u : s->height, threeD ? s->slices : 1u}), maxMips = 1;
     while (maxDim > 1) { maxDim >>= 1; ++maxMips; }
     s->mips = std::min(s->mips, maxMips);
-    glGenTextures(1, &s->tex);
+    if (s->target != GL_TEXTURE_2D || s->mips != 1) s->scale = 1.0f;
+    s->pw = scaled_size(s->width, s->scale);
+    s->ph = scaled_size(s->height, s->scale);
+    s->tex = gen_texture_name();
     bind_scratch(s);
-    while (glGetError() != GL_NO_ERROR) {}  // report only this allocation's failure below
+    // glGetError waits for Mesa's GL thread to run everything queued: two of them for each new texture
+    // made a camera turn into a new area wait hundreds of times (59 ms in one log). Allocation errors
+    // are now checked once at the end of the frame (check_texture_errors), at once with WWHD_GL_DEBUG.
+    static const bool immediate = getenv("WWHD_GL_DEBUG") != nullptr;
+    if (immediate)
+        while (glGetError() != GL_NO_ERROR) {}  // report only this allocation's failure below
     switch (s->target) {
     case GL_TEXTURE_1D: glTexStorage1D(s->target, s->mips, s->fmt.internal, s->width); break;
     case GL_TEXTURE_1D_ARRAY: glTexStorage2D(s->target, s->mips, s->fmt.internal, s->width, s->slices); break;
-    case GL_TEXTURE_2D:
+    case GL_TEXTURE_2D: glTexStorage2D(s->target, s->mips, s->fmt.internal, s->pw, s->ph); break;
     case GL_TEXTURE_CUBE_MAP: glTexStorage2D(s->target, s->mips, s->fmt.internal, s->width, s->height); break;
     default: glTexStorage3D(s->target, s->mips, s->fmt.internal, s->width, s->height, s->slices); break;
     }
     glTexParameteri(s->target, GL_TEXTURE_MAX_LEVEL, (GLint)s->mips - 1);
+    if (!immediate) {
+        g_framesTextures.push_back(s->format);
+        return;
+    }
     if (GLenum e = glGetError())
         throw std::runtime_error("texture storage failed (GL error " + std::to_string(e) + ", format " +
                                  std::to_string(s->format) + ")");
 }
 
+GLuint gen_texture_name() {
+    static std::vector<GLuint> pool;
+    if (pool.empty()) {
+        pool.resize(256);
+        glGenTextures(GLsizei(pool.size()), pool.data());
+    }
+    GLuint name = pool.back();
+    pool.pop_back();
+    return name;
+}
+GLuint gen_sampler_name() {
+    static std::vector<GLuint> pool;
+    if (pool.empty()) {
+        pool.resize(64);
+        glGenSamplers(GLsizei(pool.size()), pool.data());
+    }
+    GLuint name = pool.back();
+    pool.pop_back();
+    return name;
+}
+void check_texture_errors() {
+    if (g_framesTextures.empty()) return;
+    if (GLenum e = glGetError()) {
+        std::string formats;
+        for (uint32_t f : g_framesTextures) formats += " " + std::to_string(f);
+        LOG("[gl] GL error 0x%X in a frame that made %zu textures (formats%s)", e, g_framesTextures.size(), formats.c_str());
+        while (glGetError() != GL_NO_ERROR) {}
+    }
+    g_framesTextures.clear();
+}
+
 void destroy_surface_texture(Surface* s) {
     forget_gl_state();  // a deleted texture may be bound to a draw unit
     R.surfaceEpoch++;   // and its views may be in the draw caches
+    before_write(s);
     for (auto& [key, view] : s->views) glDeleteTextures(1, &view);
     s->views.clear();
     if (s->tex) glDeleteTextures(1, &s->tex);
     s->tex = 0;
+    for (auto& [key, view] : s->twinViews) glDeleteTextures(1, &view);
+    s->twinViews.clear();
+    if (s->twinTex) glDeleteTextures(1, &s->twinTex);
+    s->twinTex = 0;
 }
 
 GLuint sampled_view(Surface* s, const uint32_t* texWords, GLenum& outTarget) {
@@ -227,8 +278,7 @@ GLuint sampled_view(Surface* s, const uint32_t* texWords, GLenum& outTarget) {
     uint32_t key = target << 12;
     for (unsigned i = 0; i < 4; ++i) key |= (s->fmt.depth ? i : sel[i]) << (i * 3);
     if (auto it = s->views.find(key); it != s->views.end()) return it->second;
-    GLuint view = 0;
-    glGenTextures(1, &view);
+    GLuint view = gen_texture_name();
     uint32_t layers = target == GL_TEXTURE_2D || target == GL_TEXTURE_1D || target == GL_TEXTURE_3D ? 1
                       : target == GL_TEXTURE_CUBE_MAP                                                ? 6
                                                                                                       : s->layers;
@@ -270,6 +320,11 @@ void upload_surface(Surface* s) {
     if (!s->dirty && hash == s->contentHash) return;
     flush_draws();  // recorded draws may sample this texture's old contents
     R.perf.uploads++;
+    // a scaled render target (its first contents, or a CPU copy into it): the guest data at the guest
+    // size, then resampled to the internal resolution
+    before_write(s);
+    const float scale = s->scale;
+    if (scale != 1.0f) rescale_surface(s, 1.0f, false);
     bind_scratch(s);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
@@ -304,6 +359,240 @@ void upload_surface(Surface* s) {
     s->writeSeq = next_write_seq();
     s->dirty = false;
     s->changedFrame = R.frame;
+    if (scale != 1.0f) rescale_surface(s, scale, true);
+}
+
+// ---------------------------------------------------------------- internal resolution
+// Render targets the shape of the screen (1280x720 and its reductions down to 60x33, not the GamePad's
+// 854x480 ones, shadow maps, mip chains or arrays) get res_scale() x their guest size. Shaders sample
+// with normalized coordinates and draws scale their viewport and scissor (draw.cpp), so they render the
+// same picture at fewer (or more) pixels. A surface takes a new scale the next time it is looked up as
+// a render target (its contents resampled), and the guest size again when guest data is uploaded to it.
+namespace {
+float g_resRequested = [] {
+    const char* e = getenv("WWHD_RES_SCALE");
+    float f = e ? float(atof(e)) : 1.0f;
+    return f > 0 ? std::clamp(f, 0.5f, 2.0f) : 1.0f;
+}();
+float g_resFrame = g_resRequested;
+bool screen_shaped(const Surface* s) {
+    if (s->fmt.compressed || s->mips > 1 || s->slices > 1 || s->width < 32 || s->target != GL_TEXTURE_2D) return false;
+    for (uint32_t w = 854, h = 480; w >= 32; w >>= 1, h >>= 1)
+        if ((s->width == w || s->width == w + 1) && s->height == h) return false;
+    float r = float(s->width) * 9.0f / (float(s->height) * 16.0f);
+    return r > 0.97f && r < 1.03f;
+}
+float wanted_scale(const Surface* s) {
+    if (s->tex) return s->hudFull ? 1.0f : s->scalable ? g_resFrame : 1.0f;
+    if (g_resFrame == 1.0f) return 1.0f;
+    // before its texture exists the target is unknown: a 2D one unless the description says otherwise
+    {
+        Surface t = Surface{};
+        t.width = s->width;
+        t.height = s->height;
+        t.mips = s->mips;
+        t.slices = s->slices;
+        t.fmt = s->fmt;
+        auto dim = static_cast<Latte::E_DIM>(s->dim);
+        t.target = dim == Latte::E_DIM::DIM_2D || dim == Latte::E_DIM::DIM_2D_MSAA ? GL_TEXTURE_2D : GL_TEXTURE_3D;
+        return screen_shaped(&t) ? g_resFrame : 1.0f;
+    }
+}
+}  // namespace
+
+// Textures a rescale let go, kept for the next rescale to the same size: dynamic resolution steps back
+// and forth between a few factors, and allocating a whole render-target set at once (~25 textures) cost
+// the Switch 55-180 ms (one or two hitches per step). Up to 128 MB, the least recently released go first.
+namespace {
+struct PooledTexture {
+    GLuint tex;
+    GLenum internal;
+    uint32_t w, h;
+    size_t bytes;
+    std::unordered_map<uint32_t, GLuint> views;
+    uint64_t released;
+    uint64_t frame;  // R.frame when released (unused for kPoolFrames: deleted)
+};
+std::vector<PooledTexture> g_pool;
+size_t g_poolBytes = 0;
+uint64_t g_poolClock = 0;
+// (round 23: 128 MB and no age limit; a texture the steps have not needed for 20 s is memory the
+// Switch may need for an area's textures)
+constexpr size_t kPoolLimit = size_t(64) << 20;
+constexpr uint64_t kPoolFrames = 600;
+void pool_delete(PooledTexture& p) {
+    for (auto& [key, view] : p.views) glDeleteTextures(1, &view);
+    glDeleteTextures(1, &p.tex);
+    g_poolBytes -= p.bytes;
+}
+// new textures a rescale may allocate this frame (the rest wait for the next frames, latch_res_scale)
+int g_allocBudget = 4;
+size_t texture_bytes(const Surface* s, uint32_t w, uint32_t h) {
+    return size_t(w) * h * std::max<uint32_t>(s->fmt.bytesPerBlock, 1);
+}
+int pool_find(GLenum internal, uint32_t w, uint32_t h) {
+    for (size_t i = 0; i < g_pool.size(); i++)
+        if (g_pool[i].internal == internal && g_pool[i].w == w && g_pool[i].h == h) return int(i);
+    return -1;
+}
+void pool_release(const Surface* s, GLuint tex, uint32_t w, uint32_t h, std::unordered_map<uint32_t, GLuint>&& views) {
+    g_pool.push_back({tex, s->fmt.internal, w, h, texture_bytes(s, w, h), std::move(views), ++g_poolClock, R.frame});
+    g_poolBytes += g_pool.back().bytes;
+    while (g_poolBytes > kPoolLimit && !g_pool.empty()) {
+        auto oldest = std::min_element(g_pool.begin(), g_pool.end(),
+                                       [](const PooledTexture& a, const PooledTexture& b) { return a.released < b.released; });
+        pool_delete(*oldest);
+        g_pool.erase(oldest);
+    }
+}
+// whether giving s that scale needs a new texture (neither its twin nor a pooled one fits)
+bool needs_allocation(const Surface* s, float scale) {
+    if (s->twinTex && s->twinScale == scale) return false;
+    return pool_find(s->fmt.internal, scaled_size(s->width, scale), scaled_size(s->height, scale)) < 0;
+}
+}  // namespace
+
+bool fit_scale(Surface* s, bool keepContents, bool force) {
+    if (!s || !s->renderTarget) return true;
+    const float want = wanted_scale(s);
+    if (want == s->scale) return true;
+    if (!force && needs_allocation(s, want)) {
+        if (g_allocBudget <= 0) return false;  // a later frame (or a draw that needs it now)
+        g_allocBudget--;
+    }
+    rescale_surface(s, want, keepContents, s == R.tvSource);
+    return true;
+}
+
+size_t texture_pool_bytes() { return g_poolBytes; }
+// the host memory of every surface's texture (its mips, layers and a twin), roughly
+void texture_memory(size_t& total, size_t& targets, size_t& count) {
+    total = targets = count = 0;
+    for (const Surface* s : R.surfaceList) {
+        if (!s->tex) continue;
+        const uint32_t bpb = std::max<uint32_t>(s->fmt.hostBytesPerBlock ? s->fmt.hostBytesPerBlock : s->fmt.bytesPerBlock, 1);
+        auto level = [&](uint32_t w, uint32_t h) {
+            return s->fmt.compressed ? size_t((w + 3) / 4) * ((h + 3) / 4) * bpb : size_t(w) * h * bpb;
+        };
+        const uint32_t w = s->pw ? s->pw : s->width, h = s->ph ? s->ph : s->height;
+        size_t bytes = 0;
+        for (uint32_t m = 0; m < std::max(s->mips, 1u); m++) bytes += level(std::max(w >> m, 1u), std::max(h >> m, 1u));
+        bytes *= std::max(s->layers, s->slices);
+        if (s->twinTex) bytes += level(s->twinPw, s->twinPh);
+        total += bytes;
+        if (s->renderTarget || s->gpuWritten) targets += bytes;
+        count++;
+    }
+}
+void texture_pool_clear() {
+    if (g_pool.empty()) return;
+    forget_gl_state();
+    for (auto& p : g_pool) pool_delete(p);
+    g_pool.clear();
+}
+float res_scale() { return g_resFrame; }
+void set_res_scale(float scale) { g_resRequested = std::clamp(scale, 0.5f, 2.0f); }
+void latch_res_scale() {
+    // test aid: WWHD_RES_SCALE_AT=frame:factor,... switches the factor after those frames
+    static const std::vector<std::pair<uint64_t, float>> at = [] {
+        std::vector<std::pair<uint64_t, float>> v;
+        if (const char* e = getenv("WWHD_RES_SCALE_AT"))
+            for (char* p = const_cast<char*>(e); *p;) {
+                uint64_t f = strtoull(p, &p, 10);
+                if (*p++ != ':') break;
+                v.push_back({f, float(strtod(p, &p))});
+                while (*p == ',') p++;
+            }
+        return v;
+    }();
+    for (auto& [f, v] : at)
+        if (R.frame == f) set_res_scale(v);
+    g_allocBudget = 4;
+    // pooled textures unused for kPoolFrames go (one a frame: deleting is not free either)
+    for (size_t i = 0; i < g_pool.size(); i++)
+        if (R.frame - g_pool[i].frame > kPoolFrames) {
+            forget_gl_state();
+            pool_delete(g_pool[i]);
+            g_pool.erase(g_pool.begin() + i);
+            break;
+        }
+    if (g_resRequested == g_resFrame) return;
+    g_resFrame = g_resRequested;
+    R.surfaceEpoch++;  // render-target lookups again: each takes the new scale at its next use
+}
+
+void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
+    if (!s->tex || s->scale == scale) return;
+    before_write(s);
+    flush_draws();
+    forget_gl_state();
+    const GLuint oldTex = s->tex;
+    const uint32_t ow = s->pw, oh = s->ph;
+    const float oldScale = s->scale;
+    auto oldViews = std::move(s->views);
+    s->views.clear();
+    if (s->twinTex && s->twinScale == scale) {  // the kept texture of that scale
+        s->tex = s->twinTex;
+        s->pw = s->twinPw;
+        s->ph = s->twinPh;
+        s->scale = scale;
+        s->views = std::move(s->twinViews);
+        s->twinViews.clear();
+        s->twinTex = 0;
+    } else {
+        if (s->twinTex) {  // a twin of another scale: to the pool
+            pool_release(s, s->twinTex, s->twinPw, s->twinPh, std::move(s->twinViews));
+            s->twinViews.clear();
+            s->twinTex = 0;
+        }
+        s->scale = scale;
+        const uint32_t w = scaled_size(s->width, scale), h = scaled_size(s->height, scale);
+        if (int i = s->target == GL_TEXTURE_2D && s->mips == 1 ? pool_find(s->fmt.internal, w, h) : -1; i >= 0) {
+            s->tex = g_pool[size_t(i)].tex;
+            s->views = std::move(g_pool[size_t(i)].views);
+            s->pw = w;
+            s->ph = h;
+            g_poolBytes -= g_pool[size_t(i)].bytes;
+            g_pool.erase(g_pool.begin() + i);
+            R.perf.poolHits++;
+        } else
+            create_surface_texture(s);
+    }
+    if (keepContents) {
+        // the old picture resampled into the new texture
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, R.readFbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, R.blitFbo);
+        const GLenum a = s->fmt.depth ? depth_attachment(s) : GL_COLOR_ATTACHMENT0;
+        glFramebufferTexture(GL_READ_FRAMEBUFFER, a, oldTex, 0);
+        glFramebufferTexture(GL_DRAW_FRAMEBUFFER, a, s->tex, 0);
+        if (!s->fmt.depth) {
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        }
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_FRAMEBUFFER_SRGB);
+        const GLbitfield mask = s->fmt.depth ? GL_DEPTH_BUFFER_BIT | (s->fmt.stencil ? GL_STENCIL_BUFFER_BIT : 0) : GL_COLOR_BUFFER_BIT;
+        const bool linear = !s->fmt.depth && s->fmt.kind == FormatInfo::FLOAT;
+        glBlitFramebuffer(0, 0, ow, oh, 0, 0, s->pw, s->ph, mask, linear ? GL_LINEAR : GL_NEAREST);
+        glFramebufferTexture(GL_READ_FRAMEBUFFER, a, 0, 0);
+        glFramebufferTexture(GL_DRAW_FRAMEBUFFER, a, 0, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, R.drawFbo);
+    }
+    if (keepOld) {
+        s->twinTex = oldTex;
+        s->twinPw = ow;
+        s->twinPh = oh;
+        s->twinScale = oldScale;
+        s->twinViews = std::move(oldViews);
+    } else if (s->target == GL_TEXTURE_2D && s->mips == 1) {
+        pool_release(s, oldTex, ow, oh, std::move(oldViews));
+    } else {
+        for (auto& [key, view] : oldViews) glDeleteTextures(1, &view);
+        glDeleteTextures(1, &oldTex);
+    }
+    R.surfaceEpoch++;  // views and lookups cached by the draws
+    R.textureEpoch++;  // attachments
+    R.perf.rescales++;
 }
 
 // ---------------------------------------------------------------- lookup
@@ -319,7 +608,10 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
         if (s->isDepth != d.isDepth) continue;
         if (s->width == d.width && s->height == d.height && s->format == d.format && s->slices == d.slices &&
             (forRendering || s->mips >= d.mips || s->gpuWritten)) {
-            if (forRendering) return s;
+            if (forRendering) {
+                s->renderTarget = true;
+                return s;
+            }
             if (!exact || s->writeSeq > exact->writeSeq) exact = s;
         } else if (!forRendering && s->gpuWritten && (s->format & 0x3f) == (d.format & 0x3f))
             consider(s);
@@ -341,7 +633,10 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
     s->swizzle = d.swizzle;
     s->isDepth = d.isDepth;
     s->fmt = format_info(d.format, d.isDepth);
+    s->renderTarget = forRendering;
+    s->scale = forRendering ? wanted_scale(s.get()) : 1.0f;
     create_surface_texture(s.get());
+    s->scalable = screen_shaped(s.get());
     auto* raw = s.get();
     R.surfaces.emplace(d.addr, std::move(s));
     R.surfaceList.push_back(raw);
@@ -523,9 +818,28 @@ void attach(GLenum fbTarget, GLenum attachment, Surface* s, uint32_t level, uint
         glFramebufferTextureLayer(fbTarget, attachment, s->tex, level, layer);
 }
 
+bool depth_copy_by_blit() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_GL_DEPTH_COPY");
+        const bool blit = !(e && *e == '0');
+        LOG("[gl] depth copies: %s (WWHD_GL_DEPTH_COPY)", blit ? "3D-engine blits" : "glCopyImageSubData");
+        return blit;
+    }();
+    return on;
+}
+
 void blit(Surface* src, uint32_t srcLevel, uint32_t srcLayer, uint32_t sw, uint32_t sh, Surface* dst, uint32_t dstLevel,
           uint32_t dstLayer, uint32_t dw, uint32_t dh) {
     forget_gl_state();
+    // (masks are reset with the rest of the state at the next draw)
+    glDepthMask(GL_TRUE);
+    glStencilMask(0xFF);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    // guest sizes -> texture pixels (scaled surfaces have one level)
+    sw = scaled_size(sw, src->scale);
+    sh = scaled_size(sh, src->scale);
+    dw = scaled_size(dw, dst->scale);
+    dh = scaled_size(dh, dst->scale);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, R.readFbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, R.blitFbo);
     GLbitfield mask;
@@ -565,6 +879,16 @@ void clear_color(const uint32_t*, uint32_t cb, const float rgba[4]) {
     uint32_t first, num;
     auto* s = surface_from_color_buffer(cb, &first, &num);
     if (!s || s->fmt.depth || s->fmt.compressed) return;
+    if (skip_gamepad() && gamepad_only(s)) {
+        R.perf.gamepadClearsSkipped++;
+        return;
+    }
+    before_write(s);
+    s->hudFull = false;
+    s->derivedFrom = nullptr;
+    fit_scale(s, false);  // cleared whole: nothing to keep
+    gpu_pass_mark("clear", s, nullptr);
+    if (g_traceFrame) trace_event("clear %s", trace_name(s).c_str());
     forget_gl_state();
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, R.blitFbo);
     glDisable(GL_SCISSOR_TEST);
@@ -600,6 +924,9 @@ void clear_depth_stencil(const uint32_t*, uint32_t db, float depth, uint32_t ste
     if (!s) return;
     bool d = flags & 1, st = (flags & 2) && s->fmt.stencil;
     if (!d && !st) return;
+    fit_scale(s, !(d && (st || !s->fmt.stencil)));  // what the clear leaves is kept
+    gpu_pass_mark("clear", nullptr, s);
+    if (g_traceFrame) trace_event("clear %s", trace_name(s).c_str());
     forget_gl_state();
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, R.blitFbo);
     glDisable(GL_SCISSOR_TEST);
@@ -644,6 +971,9 @@ void copy_surface(uint32_t srcAddr, uint32_t srcMip, uint32_t srcSlice, uint32_t
             if (!gpuSrc || image->writeSeq > gpuSrc->writeSeq) { gpuSrc = image; gpuLevel = srcMip; }
     }
     if (gpuSrc) {
+        const bool fromGamepad = gpuSrc->drcScanFrame != ~0ull && gamepad_only(gpuSrc);  // (see prepare_stage)
+        if (!fromGamepad) note_read(gpuSrc);
+        gpu_pass_mark("copy", gpuSrc, nullptr);
         if (gpuSrc->target == GL_TEXTURE_3D) return;
         SurfaceDesc dd;
         dd.addr = dbase;
@@ -658,22 +988,29 @@ void copy_surface(uint32_t srcAddr, uint32_t srcMip, uint32_t srcSlice, uint32_t
         dd.slices = std::max<uint32_t>(d->depth, 1);
         if (dd.dim == uint32_t(Latte::E_DIM::DIM_2D) || dd.dim == uint32_t(Latte::E_DIM::DIM_1D)) dd.slices = 1;
         auto* dst = find_or_create_surface(dd, true);
+        before_write(dst);
+        fit_scale(dst, true);
         if (!dst || dst->fmt.internal != gpuSrc->fmt.internal) {
             LOG("[gl] GX2CopySurface with format conversion is not supported (%u -> %u)", gpuSrc->format, dd.format);
             return;
         }
         if (srcSlice >= gpuSrc->layers || dstSlice >= dst->layers) return;
         if (gpuSrc == dst && gpuLevel == 0 && srcSlice == dstSlice) return;
-        if (gpuSrc != dst)
+        if (fromGamepad) dst->derivedFrom = gpuSrc;
+        if (g_traceFrame)
+            trace_event("copy %s level %u -> %s", trace_name(gpuSrc).c_str(), gpuLevel, trace_name(dst).c_str());
+        if (gpuSrc != dst && gpuSrc->scale == dst->scale && !(gpuSrc->fmt.depth && depth_copy_by_blit()))
             glCopyImageSubData(gpuSrc->tex, gpuSrc->target, gpuLevel, 0, 0, gpuSrc->target == GL_TEXTURE_2D ? 0 : srcSlice,
-                               dst->tex, dst->target, 0, 0, 0, dst->target == GL_TEXTURE_2D ? 0 : dstSlice, cw, ch, 1);
-        else
+                               dst->tex, dst->target, 0, 0, 0, dst->target == GL_TEXTURE_2D ? 0 : dstSlice,
+                               scaled_size(cw, dst->scale), scaled_size(ch, dst->scale), 1);
+        else  // the same texture, or resampled between internal resolutions
             blit(gpuSrc, gpuLevel, srcSlice, cw, ch, dst, 0, dstSlice, cw, ch);
         mark_gpu_written(dst);
         return;
     }
     // CPU copy between guest layouts
     R.perf.cpuSurfaceCopies++;
+    if (g_traceFrame) trace_event("CPU copy %08X -> %08X", sbase, dbase);
     auto sf = format_info(uint32_t(s->format.value()), bool(uint32_t(s->format.value()) & 0x800));
     auto df = format_info(uint32_t(d->format.value()), bool(uint32_t(d->format.value()) & 0x800));
     if (!sf.internal || !df.internal || sf.bytesPerBlock != df.bytesPerBlock || sf.compressed != df.compressed) {

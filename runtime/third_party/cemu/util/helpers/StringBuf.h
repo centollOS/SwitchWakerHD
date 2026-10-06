@@ -9,6 +9,14 @@ public:
 		this->allocated = true;
 		this->length = 0;
 		this->limit = bufferSize;
+		if (!this->str)
+		{
+			// out of memory: nothing is written (the shader comes out empty and fails to compile)
+			static uint8 empty[8];
+			this->str = empty;
+			this->allocated = false;
+			this->limit = 0;
+		}
 	}
 
 	~StringBuf()
@@ -45,8 +53,9 @@ public:
 	void add(std::string_view appendedStr)
 	{
 		size_t copyLen = appendedStr.size();
-		if (this->length + copyLen + 1 >= this->limit)
-			_reserve(std::max<uint32>(this->length + copyLen + 64, this->limit + this->limit / 2));
+		if (this->length + copyLen + 1 >= this->limit &&
+			!_reserve(std::max<uint32>(this->length + copyLen + 64, this->limit + this->limit / 2)))
+			return;  // out of memory: dropped (the shader fails to compile)
 		char* outputStart = (char*)(this->str + this->length);
 		std::copy(appendedStr.data(), appendedStr.data() + copyLen, outputStart);
 		length += copyLen;
@@ -74,16 +83,25 @@ public:
 		if (!this->allocated)
 			return;
 		uint32 newLimit = this->length;
-		this->str = (uint8*)realloc(this->str, newLimit + 4);
-		this->limit = newLimit;
+		if (uint8* shrunk = (uint8*)realloc(this->str, newLimit + 4))
+		{
+			this->str = shrunk;
+			this->limit = newLimit;
+		}
 	}
 
 private:
-	void _reserve(uint32 newLimit)
+	bool _reserve(uint32 newLimit)
 	{
 		cemu_assert_debug(newLimit > length);
-		this->str = (uint8*)realloc(this->str, newLimit + 4);
+		if (!this->allocated)
+			return false;
+		uint8* grown = (uint8*)realloc(this->str, newLimit + 4);
+		if (!grown)
+			return false;
+		this->str = grown;
 		this->limit = newLimit;
+		return true;
 	}
 
 	uint8*	str;

@@ -22,6 +22,7 @@ float mouse_sensitivity();  // degrees per mouse point
 void set_mouse_sensitivity(float s);
 bool first_person_wheel();
 void set_first_person_wheel(bool on);
+void log_startup();  // a line for each mod switched on at startup
 bool quick_doors();
 void set_quick_doors(bool on);
 bool fast_scenes();
