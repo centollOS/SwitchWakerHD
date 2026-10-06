@@ -311,6 +311,12 @@ void handle_event(const SDL_Event& event){
   const bool activate=event.type==SDL_EVENT_KEY_DOWN&&!event.key.repeat;
   if(action && gfxvk::graphics_hotkey(action,activate)){if(activate)hostui::graphics_changed();return;}
  }
+ #ifdef __ANDROID__
+ // phones: the controller is the GamePad. Keys only type text (above): controllers such as the
+ // GameSir also show up as a keyboard and would press keyboard-mapped GamePad buttons twice.
+ static const bool keyboardPad=getenv("WWHD_ANDROID_KEYBOARD")!=nullptr;
+ if(!keyboardPad&&(event.type==SDL_EVENT_KEY_DOWN||event.type==SDL_EVENT_KEY_UP))return;
+ #endif
  if(event.type==SDL_EVENT_KEY_DOWN||event.type==SDL_EVENT_KEY_UP){int code=keycode(event.key.scancode);if(code>=0){std::lock_guard lk(g_mu);g_keys[code]=event.type==SDL_EVENT_KEY_DOWN;}}
 }
 void update(){

@@ -24,6 +24,7 @@
 #include "runtime.h"
 #include "../aspect.h"
 #include "gfx/renderer.h"
+#include "platform/perf_hint.h"
 
 using namespace Latte;
 
@@ -180,6 +181,7 @@ static uint64_t g_fence_issued = 0, g_fence_done = 0;
 static void render_thread_main() {
     host::set_thread_name("GX2 render");
     host::boost_thread_priority();
+    perf_hint::add_current_thread();
     for (;;) {
         {
             std::unique_lock<std::mutex> lk(g_q_mutex);

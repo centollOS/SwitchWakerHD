@@ -12,7 +12,12 @@
 extern "C" {
 #endif
 
+#ifdef __ANDROID__
+/* Android arm64 kernels often have a 39-bit user address space (512 GiB): stay well below it */
+#define PPC_MEM_BASE ((uint8_t*)0x1000000000ull)
+#else
 #define PPC_MEM_BASE ((uint8_t*)0x200000000000ull)
+#endif
 
 typedef struct Cpu {
     uint32_t r[32];

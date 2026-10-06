@@ -28,6 +28,7 @@
 
 #include "runtime.h"
 #include "savestate.h"
+#include "platform/perf_hint.h"
 
 // ---------------------------------------------------------------- time
 namespace timebase {
@@ -557,6 +558,11 @@ static void* thread_main(void* p) {
     t_cpu = &ht->cpu;
     std::string name = mem::read_cstr(ld32(ht->guest + osthread::kName));
     host::set_thread_name(name.empty() ? "guest" : name.c_str());
+    {
+        // the game's main thread (the first, unnamed one) builds every frame's GX2 commands
+        static std::atomic<bool> hinted{false};
+        if (name.empty() && !hinted.exchange(true)) perf_hint::add_current_thread();
+    }
 #ifdef __APPLE__
     ht->mach = pthread_mach_thread_np(pthread_self());
 #endif

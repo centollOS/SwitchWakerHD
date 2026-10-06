@@ -26,6 +26,11 @@
 #include "recomp_table.h"
 #include "crashrec.h"
 #include "runtime.h"
+#ifdef __ANDROID__
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>  // main() becomes SDL_main, called by SDLActivity
+namespace interp { void set_mode(int); }
+#endif
 
 #ifdef WWHD_HAS_VULKAN
 namespace gfxvk { int renderer_smoke_test(); }
@@ -168,6 +173,44 @@ int main(int argc, char** argv) {
     // 15.7 ms, the 3 ms AX frame loop ran in bursts and vsync waits alternated 15.7 / 31.5 ms.
     // 1 ms resolution for the whole process; Windows restores it when the process exits.
     timeBeginPeriod(1);
+#endif
+#ifdef __ANDROID__
+    // Everything lives in the app's external files folder (Android/data/<package>/files), which a
+    // computer can reach over USB: game/ (the extracted game: code, content, meta), save/, and the
+    // settings and shader caches in config/. Relative paths (captures/) resolve there too.
+    if (const char* dir = SDL_GetAndroidExternalStoragePath()) {
+        if (chdir(dir) != 0) fprintf(stderr, "cannot enter %s\n", dir);
+        setenv("XDG_CONFIG_HOME", (std::string(dir) + "/config").c_str(), 1);
+        // Phones: the Vulkan renderer's validated opt-in CPU paths (docs/vulkan.md, "Opt-in CPU
+        // experiments") and draw batching are on; measured on a Galaxy S25 Ultra, Outset Island,
+        // they took the render thread from about 40 to 30 ms per frame. env.txt can turn any off.
+        for (const char* name : {"WWHD_VK_REUSE_UNIFORM_SNAPSHOTS", "WWHD_VK_REUSE_FEEDBACK_IMAGES",
+                                 "WWHD_VK_SKIP_REDUNDANT_BINDS", "WWHD_VK_DESCRIPTOR_RANKS",
+                                 "WWHD_VK_PIPELINE_LOOKASIDE", "WWHD_VK_SHADER_ADDRESS_MEMO",
+                                 "WWHD_VK_FETCH_MEMO", "WWHD_VK_SPECIALIZE_INDICES",
+                                 "WWHD_VK_SHADER_STATE_MEMO", "WWHD_VK_SKIP_VERTEX_BINDS",
+                                 "WWHD_VK_SAMPLER_MEMO", "WWHD_VK_SPARSE_HASH_MEMO",
+                                 "WWHD_VK_SHADER_KEY_DIRTY", "WWHD_VK_REUSE_VERTEX_SNAPSHOTS",
+                                 "WWHD_VK_VERTEX_HISTORY_REUSE"})
+            setenv(name, "1", 0);
+        setenv("WWHD_VK_DRAW_BATCH", "2048", 0);
+        // 60 fps (frame interpolation) is on unless chosen otherwise (settings.ini, read when the
+        // renderer starts); platform/perf_hint.cpp pauses it where the phone cannot keep up
+        if (!getenv("WWHD_INTERP") && !getenv("WWHD_TRUE60")) interp::set_mode(1);
+        // env.txt there: one NAME=value per line (the WWHD_ options of the README); # comments
+        if (FILE* f = fopen("env.txt", "r")) {
+            char line[512];
+            while (fgets(line, sizeof line, f)) {
+                line[strcspn(line, "\r\n")] = 0;
+                char* eq = strchr(line, '=');
+                if (line[0] == '#' || !eq || eq == line) continue;
+                *eq = 0;
+                setenv(line, eq + 1, 1);
+                LOG("[boot] env.txt: %s=%s", line, eq + 1);
+            }
+            fclose(f);
+        }
+    }
 #endif
     bool warm_shaders = false;
 #ifdef WWHD_HAS_VULKAN

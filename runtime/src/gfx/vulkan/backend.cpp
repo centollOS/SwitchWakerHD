@@ -18,6 +18,7 @@
 #include <SDL3/SDL_vulkan.h>
 #endif
 #include "platform/host.h"
+#include "platform/perf_hint.h"
 #include "runtime.h"
 #include "shaders.h"
 #include "settings.h"
@@ -813,6 +814,28 @@ static void make_swapchain(Screen &s) {
               std::clamp<uint32_t>(std::max(s.height.load(), 1),
                                    caps.minImageExtent.height,
                                    caps.maxImageExtent.height)};
+#ifdef __ANDROID__
+  // Phones report the extent in the display's natural (portrait) orientation together with a 90°
+  // or 270° current transform. The pictures are laid out for the landscape window, so the
+  // swapchain gets the window's own size and an identity transform: the compositor rotates it.
+  // (The window can also still be portrait while the activity turns to landscape: its size
+  // changes then and the swapchain is made again for the new size.)
+  {
+    int pw = 0, ph = 0;
+    if (s.window && SDL_GetWindowSizeInPixels(s.window, &pw, &ph) && pw > 0 && ph > 0)
+      extent = {uint32_t(pw), uint32_t(ph)};
+    else if (caps.currentTransform & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR |
+                                      VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR))
+      std::swap(extent.width, extent.height);
+  }
+  const VkSurfaceTransformFlagBitsKHR transform =
+      (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+          ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform;
+  LOG("[vulkan] swapchain %ux%u (surface reports %ux%u, transform %u)", extent.width, extent.height,
+      caps.currentExtent.width, caps.currentExtent.height, unsigned(caps.currentTransform));
+#else
+  const VkSurfaceTransformFlagBitsKHR transform = caps.currentTransform;
+#endif
   if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
     throw std::runtime_error("Swapchain cannot receive scan-buffer blits");
   VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
@@ -835,7 +858,7 @@ static void make_swapchain(Screen &s) {
       (shaderPresentation ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0) |
       (captureTransfer ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
   ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  ci.preTransform = caps.currentTransform;
+  ci.preTransform = transform;
   ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
   for (auto flag : {VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
                     VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
@@ -890,15 +913,63 @@ static void make_swapchain(Screen &s) {
   prepare_present_screen(s,shaderPresentation,captureTransfer);
   s.resize = false;
 }
-// Asynchronous presentation (WWHD_VK_ASYNC_PRESENT=1): the presentation submission goes into the
-// four-slot ring like GX2Flush work instead of waiting for the GPU, and the SDL host's swap() does not
-// drain the queue, so the render thread records frame N+1 while the GPU draws frame N. Each frame in
-// flight has its own acquire semaphore (reused only after the submission that waited on it retired)
-// and each swapchain image its own render-finished semaphore. Captures keep the waiting path.
+#ifdef __ANDROID__
+// Android destroys an app's surface when it goes to the background (Home, another app) and gives
+// it a new one when it comes back. Meanwhile nothing is presented (the game keeps running); then
+// the Vulkan surface and swapchain are created again for the window's new native surface.
+static std::atomic<bool> surfaceLost{false}, surfaceRecreate{false};
+static void recreate_surface(Screen &s) {
+  if (!SDL_GetPointerProperty(SDL_GetWindowProperties(s.window),
+                              SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr)) {
+    surfaceRecreate = true;  // the new native surface is not there yet: next frame
+    return;
+  }
+  vk_check(vkDeviceWaitIdle(R.device), "surface recreation idle");
+  reset_present_screen(s);
+  if (s.swapchain)
+    vkDestroySwapchainKHR(R.device, s.swapchain, nullptr);
+  s.swapchain = VK_NULL_HANDLE;
+  if (s.surface)
+    vkDestroySurfaceKHR(R.instance, s.surface, nullptr);
+  s.surface = VK_NULL_HANDLE;
+  if (!SDL_Vulkan_CreateSurface(s.window, R.instance, nullptr, &s.surface)) {
+    LOG("[vulkan] surface recreation: %s (retrying)", SDL_GetError());
+    s.surface = VK_NULL_HANDLE;
+    surfaceRecreate = true;
+    return;
+  }
+  surfaceLost = false;
+  s.resize = true;
+  LOG("[vulkan] presentation surface recreated");
+}
+// App lifecycle: called by SDL as the events happen, on the thread that sends them; SDL's
+// documentation asks for an event watch here (the queue is not read while the app is paused).
+static bool SDLCALL lifecycle_watch(void *, SDL_Event *event) {
+  if (event->type == SDL_EVENT_WILL_ENTER_BACKGROUND || event->type == SDL_EVENT_DID_ENTER_BACKGROUND) {
+    if (!surfaceLost.exchange(true))
+      LOG("[vulkan] app in the background: presentation paused");
+  } else if (event->type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+    LOG("[vulkan] app in the foreground: new presentation surface");
+    R.tv.visible = true;  // (the window may have reported itself minimized meanwhile)
+    surfaceRecreate = true;
+  }
+  return true;
+}
+#endif
+// Asynchronous presentation (WWHD_VK_ASYNC_PRESENT=1, the default on Android): the presentation
+// submission goes into the four-slot ring like GX2Flush work instead of waiting for the GPU, and the
+// SDL host's swap() does not drain the queue, so the render thread records frame N+1 while the GPU
+// draws frame N. Each frame in flight has its own acquire semaphore (reused only after the submission
+// that waited on it retired) and each swapchain image its own render-finished semaphore. Captures
+// keep the waiting path.
 static bool async_present() {
   static const bool on = [] {
     const char *e = std::getenv("WWHD_VK_ASYNC_PRESENT");
+#ifdef __ANDROID__
+    return !e || std::atoi(e) != 0;
+#else
     return e && std::atoi(e) != 0;
+#endif
   }();
   return on;
 }
@@ -917,6 +988,14 @@ static VkSemaphore new_semaphore() {
   return sem;
 }
 static void present(Screen &s) {
+#ifdef __ANDROID__
+  if (&s == &R.tv && s.window) {
+    if (surfaceRecreate.exchange(false))
+      recreate_surface(s);
+    if (surfaceLost || !s.surface)
+      return;
+  }
+#endif
   // Presentation changed (settings overlay): a new swapchain, as for a resize (also for a window that
   // is not shown right now, so the next frame it shows uses the new mode)
   if (s.window && s.swapchain && s.presentWanted != present_mode())
@@ -941,8 +1020,22 @@ static void present(Screen &s) {
   if (s.swapchain && (s.swapFormat == VK_FORMAT_B8G8R8A8_SRGB) != s.srgb.load())
     s.resize = true;  // the scan buffer's encoding changed (GX2SetTVBuffer)
 #endif
+#ifdef __ANDROID__
+  if (s.resize || !s.swapchain) {
+    try {
+      make_swapchain(s);
+    } catch (const std::exception &e) {
+      if (&s != &R.tv)
+        throw;
+      LOG("[vulkan] no swapchain (%s); waiting for a new surface", e.what());
+      surfaceLost = true;  // the surface went away while the app is in the background
+      return;
+    }
+  }
+#else
   if (s.resize || !s.swapchain)
     make_swapchain(s);
+#endif
   uint32_t index;
   auto& timing = screenTiming[&s == &R.tv ? 0 : 1];
   const bool async = async_present() && !present_capture_requested();
@@ -968,6 +1061,12 @@ static void present(Screen &s) {
     s.resize = true;
     return;
   }
+#ifdef __ANDROID__
+  if (ar == VK_ERROR_SURFACE_LOST_KHR) {
+    surfaceLost = true;
+    return;
+  }
+#endif
   if (ar != VK_SUBOPTIMAL_KHR)
     vk_check(ar, "acquire scan image");
   if (!draw_present_screen(s,index)) {
@@ -1048,10 +1147,22 @@ static void present(Screen &s) {
   VkResult pr = timed_call(timing.present, [&] {
     return vkQueuePresentKHR(R.queue, &pi);
   });
+#ifdef __ANDROID__
+  // SUBOPTIMAL here only says the compositor rotates the picture (identity pre-transform, see
+  // make_swapchain); size changes come as window events. Rebuilding would happen every frame.
+  if (pr == VK_ERROR_OUT_OF_DATE_KHR)
+    s.resize = true;
+  else if (pr == VK_SUBOPTIMAL_KHR) {
+  } else if (pr == VK_ERROR_SURFACE_LOST_KHR)
+    surfaceLost = true;
+  else
+    vk_check(pr, "present scan buffer");
+#else
   if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR)
     s.resize = true;
   else
     vk_check(pr, "present scan buffer");
+#endif
   if (!async)
     vk_check(timed_call(timing.idle, [&] { return vkQueueWaitIdle(R.queue); }),
              "present completion");
@@ -1199,6 +1310,7 @@ void swap() {
   std::atomic_ref<uint64_t>(R.frame).fetch_add(1);
   R.completed = R.frame;
   report_gpu_timestamps();
+  perf_hint::frame_done();
   checkpoint_pipeline_cache();
   vk::checkpoint_shader_cache(R.frame);
   latch_res_scale();
@@ -1660,15 +1772,23 @@ static void set_window_icons() {
 }
 // SDL host (Vulkan-only builds): SDL windows, input and audio
 void init() {
+#ifdef __ANDROID__
+  SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+#endif
   // hidden test runs: no Dock icon, no activation (the app never takes the focus from the user)
   if (hidden_windows())
     SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO))
     throw std::runtime_error(SDL_GetError());
+#ifdef __ANDROID__
+  SDL_AddEventWatch(lifecycle_watch, nullptr);
+  const SDL_WindowFlags windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN;
+#else
   // test runs: WWHD_HIDDEN_WINDOWS=1 never puts the windows on screen (nothing pops up or takes the
   // focus); the swapchains still exist, so frame dumps and present dumps work as with visible windows
   const SDL_WindowFlags windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE |
                                       (hidden_windows() ? SDL_WINDOW_HIDDEN : 0);
+#endif
   R.tv.window = SDL_CreateWindow("Wind Waker HD — Vulkan", 1280, 720, windowFlags);
   if (!R.tv.window)
     throw std::runtime_error(SDL_GetError());

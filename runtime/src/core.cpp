@@ -6,6 +6,9 @@
 #endif
 #include "platform/host.h"
 #include <zlib.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -44,9 +47,14 @@ void log_msg(const char* fmt, ...) {
     vsnprintf(line, kLogLine, fmt, ap2);
     va_end(ap2);
     g_log_next++;
+#ifdef __ANDROID__
+    __android_log_vprint(ANDROID_LOG_INFO, "wwhd", fmt, ap);  // adb logcat -s wwhd
+    va_end(ap);
+#else
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
+#endif
 }
 
 void log_ring_write(int fd, void (*out)(int, const char*, size_t)) {
@@ -64,10 +72,14 @@ void fatal(const char* fmt, ...) {
         std::lock_guard<std::mutex> lk(g_log_mutex);
         va_list ap;
         va_start(ap, fmt);
+#ifdef __ANDROID__
+        __android_log_vprint(ANDROID_LOG_FATAL, "wwhd", fmt, ap);
+#else
         fprintf(stderr, "FATAL: ");
         vfprintf(stderr, fmt, ap);
-        va_end(ap);
         fputc('\n', stderr);
+#endif
+        va_end(ap);
     }
     abort();
 }
@@ -90,7 +102,12 @@ void init() {
 #else
     // Never replace existing mappings: requesting a hint and checking the result is safe on
     // systems whose headers lack MAP_FIXED_NOREPLACE.
+#ifdef __ANDROID__
+    // phones have little RAM and strict commit accounting: pages are committed on first touch
+    void* p = mmap(PPC_MEM_BASE,0x100000000ull,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
+#else
     void* p = mmap(PPC_MEM_BASE,0x100000000ull,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+#endif
     if(p != PPC_MEM_BASE) { if(p!=MAP_FAILED)munmap(p,0x100000000ull); fatal("cannot reserve guest address space at %p",PPC_MEM_BASE); }
     if(mprotect(PPC_MEM_BASE,0x10000,PROT_NONE))fatal("cannot protect guest null page");
 #endif
