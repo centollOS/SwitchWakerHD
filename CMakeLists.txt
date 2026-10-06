@@ -68,7 +68,8 @@ endif()
 # Linux and Android on arm64: plain char is unsigned in that ABI, but signed on x86-64 and Apple
 # arm64, where the runtime and the recompiled game code are tested. Keep it signed everywhere (also
 # reaches the game code the installer compiles: its flags come from this build).
-if(CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android)$" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+# The Switch (devkitA64, aarch64-none-elf) follows the same arm64 ABI: unsigned plain char.
+if(WWHD_SWITCH OR (CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android)$" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$"))
   add_compile_options(-fsigned-char)
 endif()
 
