@@ -52,7 +52,7 @@ bool save_loaded(uint32_t s) {
     std::string st = stage();
     if (st.empty() || st == "sea_T" || st == "Name") return false;  // title, file select
     uint16_t max = ld16(s + kMaxLife), life = ld16(s + kLife);
-    if (max < 12 || max > 80 || max % 4 || life > max || ld16(s + kRupee) > 5000 || ld8(s + kWallet) > 2) return false;
+    if (max < 12 || max > 80 || life > max || ld16(s + kRupee) > 5000 || ld8(s + kWallet) > 2) return false;
     // the return stage: a NUL-terminated name in 8 bytes, at least 3 characters ("sea", "sea_T", "M_NewD2")
     int n = 0;
     for (; n < 8; n++) {
