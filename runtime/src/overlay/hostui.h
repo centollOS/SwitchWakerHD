@@ -26,9 +26,17 @@ bool scale_filter_available();
 // display
 bool fullscreen();
 void set_fullscreen(bool on);
-int drc_modes();                   // GamePad screen modes offered: 4 (window, picture-in-picture, auto, off) or 0
+int drc_modes();                   // GamePad screen modes (gfx/display_modes.h): 4 (window, picture-in-picture,
+                                   // auto, off), 5 (and GamePad only) or 0
+bool drc_mode_offered(int m);      // the host can show this mode (no separate window on Android)
 int drc_mode();
 void set_drc_mode(int m);
+int pip_corner();                  // picture-in-picture: 0 top left, 1 top right, 2 bottom left, 3 bottom right
+void set_pip_corner(int c);
+float pip_size();                  // fraction of the TV picture's width
+void set_pip_size(float s);
+float pip_opacity();
+void set_pip_opacity(float o);
 bool drc_available();              // there is a GamePad screen to show or hide
 bool drc_shown();
 void show_drc(bool on);
@@ -38,6 +46,8 @@ const char* name();                // "AppKit" or "SDL"
 
 // SDL host only (gfx/vulkan/overlay_sdl.cpp, called by its main loop)
 void run_posted();                 // the functions post()ed since the last call
-void load_saved_options();         // start-up: graphics options saved in settings.ini
+void load_saved_options();         // start-up: graphics and GamePad screen options saved in settings.ini
+void toggle_drc();                 // Ctrl+G: show / hide the GamePad screen in the current mode
+void drc_window_closed();          // the GamePad window's close button (window mode: hidden until shown again)
 
 }  // namespace hostui

@@ -590,16 +590,52 @@ void tab_display() {
         if (radio(f[i], hostui::scale_filter() == i, fok)) hostui::post([i] { hostui::set_scale_filter(i); });
     }
     heading("GamePad screen");
-    if (hostui::drc_modes() == 4) {
-        static const char* const modes[] = {"Separate window", "Picture-in-picture", "Automatic picture-in-picture", "Off"};
-        for (int i = 0; i < 4; i++) {
-            if (i) ImGui::SameLine();
-            if (radio(modes[i], hostui::drc_mode() == i)) hostui::post([i] { hostui::set_drc_mode(i); });
+    // the modes of display_modes.h; a host offers those it can show (Android: no separate window, but
+    // "GamePad only")
+    const int mode = hostui::drc_mode();
+    if (hostui::drc_modes() >= 4) {
+        static const char* const modes[] = {"Separate window", "Picture-in-picture", "Automatic picture-in-picture", "Off",
+                                            "GamePad only"};
+        bool first = true;
+        for (int i = 0; i < hostui::drc_modes() && i < 5; i++) {
+            if (!hostui::drc_mode_offered(i)) continue;
+            if (!first) ImGui::SameLine();
+            first = false;
+            if (radio(modes[i], mode == i)) hostui::post([i] { hostui::set_drc_mode(i); });
         }
-        if (hostui::drc_mode() == 2) note("The overlay appears for a few seconds when the GamePad picture changes a lot (a menu opens).");
+        if (mode == 2) note("The overlay appears for a few seconds when the GamePad picture changes a lot (a menu opens).");
+        if (mode == 4) note("Only the GamePad picture. In the game, Minus switches to Off-TV Play (the game on the GamePad).");
     }
-    if (check("Show GamePad screen", hostui::drc_shown(), &v, hostui::drc_available() && !(hostui::drc_modes() == 4 && hostui::drc_mode() == 3)))
+    if (check("Show GamePad screen", hostui::drc_shown(), &v,
+              hostui::drc_available() && !(hostui::drc_modes() >= 4 && (mode == 3 || mode == 4))))
         hostui::post([v] { hostui::show_drc(v); });
+    if (hostui::drc_modes() >= 4 && (mode == 1 || mode == 2)) {
+        // the overlay's corner, size and opacity (also in the Display menu on macOS)
+        static const char* const corners[] = {"Top left", "Top right", "Bottom left", "Bottom right"};
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Picture-in-picture corner:");
+        for (int i = 0; i < 4; i++) {
+            ImGui::SameLine();
+            if (radio(corners[i], hostui::pip_corner() == i)) hostui::post([i] { hostui::set_pip_corner(i); });
+        }
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Size (of the TV picture's width):");
+        for (int s : {20, 25, 33, 40}) {
+            ImGui::SameLine();
+            char l[16];
+            snprintf(l, sizeof l, "%d%%##size", s);
+            if (radio(l, std::fabs(hostui::pip_size() * 100 - s) < 0.5f)) hostui::post([s] { hostui::set_pip_size(s / 100.0f); });
+        }
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Opacity:");
+        for (int o : {100, 85, 70, 50}) {
+            ImGui::SameLine();
+            char l[16];
+            snprintf(l, sizeof l, "%d%%##opacity", o);
+            if (radio(l, std::fabs(hostui::pip_opacity() * 100 - o) < 0.5f)) hostui::post([o] { hostui::set_pip_opacity(o / 100.0f); });
+        }
+        note("A click (or touch) on the GamePad picture touches the GamePad screen.");
+    }
 }
 
 void tab_mods() {

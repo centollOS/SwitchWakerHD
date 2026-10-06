@@ -257,7 +257,10 @@ window: the text appears in the window title, Enter confirms, Escape cancels
 
 On Linux and Windows, **F11** or **Alt+Enter** switches the focused window (TV or GamePad) to full
 screen and back, and clicking/dragging with the left mouse button in the GamePad window uses the
-touch screen. The macOS menus (Graphics, Display, Input, Save States) don't exist in these builds
+touch screen. The GamePad screen has the macOS modes (settings overlay, *Display*): a separate
+window, a picture-in-picture overlay in a corner of the TV window (corner, size and opacity
+selectable; click it to touch), the automatic overlay, or off; **Ctrl+G** shows/hides it, and the
+choices are saved in `settings.ini`. The macOS menus (Graphics, Display, Input, Save States) don't exist in these builds
 yet; their settings are available as environment variables (below) and the number-key shortcuts.
 
 Settings, controls and save states live under `~/.config/wwhd` (or `$XDG_CONFIG_HOME/wwhd`).

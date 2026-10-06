@@ -13,21 +13,15 @@
 // The Display menu holds the rest. Choices are kept in ~/Library/Application Support/wwhd/display.plist
 // (test runs with WWHD_NO_HOST_INPUT neither read nor write it unless WWHD_DISPLAY_SETTINGS names a file).
 //
+// The modes, the layout of the TV window, the automatic overlay and the overlay's touch mapping are
+// shared with the SDL host (display_modes.cpp, which lists their test variables: WWHD_DRC_MODE,
+// WWHD_DRC_PIP, WWHD_SCALE_FILTER, WWHD_SIM_SCREEN, WWHD_TEST_TOUCH, WWHD_DRC_AUTO, WWHD_DRC_AUTO_LOG).
+//
 // Debug / test environment:
-//   WWHD_DRC_MODE=window|pip|auto|off   GamePad screen mode at start (not saved)
-//   WWHD_DRC_PIP=br:0.25[:0.85]          overlay corner (tl, tr, bl, br), size (fraction of the TV picture
-//                                        width) and opacity at start (not saved)
-//   WWHD_SCALE_FILTER=smooth|sharp|integer
 //   WWHD_FULLSCREEN=1                    TV window enters full screen at start (takes over the screen!)
-//   WWHD_SIM_SCREEN=3024x1964            lay the TV picture out for a target of that size (present dumps and
-//                                        touch mapping), e.g. to check a full-screen layout without going full screen
 //   WWHD_DUMP_PRESENT=1                  with WWHD_DUMP_FRAMES: also write frame_<n>_present.png (the composed
 //                                        TV window) and frame_<n>_present_drc.png (GamePad window, window mode)
-//   WWHD_TEST_TOUCH=3400-3410:0.9:0.85   a mouse press at (x, y) in the TV window (0..1 from top left) during
-//                                        TV frames 3400..3410; mapped through the overlay like a real click
 //   WWHD_TEST_DRC_KEY=3500,3700          frames at which Cmd+G (show/hide GamePad screen) is simulated
-//   WWHD_DRC_AUTO=0.12:4                 automatic mode: changed-area threshold and hold time in seconds
-//   WWHD_DRC_AUTO_LOG=1                  log the automatic mode's change measurements
 //   WWHD_HIDDEN_WINDOWS=1                test runs: the windows are never put on screen (nothing pops up;
 //                                        frame / present dumps still work, the drawables are not presented)
 #import <AppKit/AppKit.h>
@@ -43,6 +37,7 @@
 
 #include "../aspect.h"
 #include "display.h"
+#include "display_modes.h"
 #include "gx2/gx2.h"
 #include "input.h"
 #include "metal.h"
@@ -65,28 +60,10 @@ void dump_texture(id<MTLTexture> src, const char* name, bool async, bool srgbEnc
 uint64_t frame_count();
 
 // ---------------------------------------------------------------- options
-enum DrcMode { kDrcWindow, kDrcPip, kDrcAuto, kDrcOff };
-enum Filter { kSmooth, kSharp, kInteger };
-static const char* kModeNames[] = {"window", "pip", "auto", "off"};
-static const char* kCornerNames[] = {"tl", "tr", "bl", "br"};  // bit 0: right, bit 1: bottom
-static const char* kFilterNames[] = {"smooth", "sharp", "integer"};
-
-static std::atomic<int> g_mode{kDrcWindow};
-static std::atomic<int> g_corner{3};
-static std::atomic<float> g_pip_size{0.25f};
-static std::atomic<float> g_pip_opacity{1.0f};
-static std::atomic<int> g_filter{kSmooth};
-static std::atomic<bool> g_shown{true};       // window / pip modes: GamePad screen shown (Cmd+G, Pro Controller)
-static std::atomic<bool> g_auto_pin{false};   // auto mode: Cmd+G keeps the overlay up
-static std::atomic<double> g_auto_until{0};   // auto mode: overlay up until this time (after a change)
-static std::atomic<float> g_drc_aspect{854.0f / 480.0f};  // of the GamePad image, for the GamePad window's touch
-
+// (the option state itself: display_modes.cpp)
 static int find_name(const char* const* names, int n, NSString* s, int def) {
-    for (int i = 0; i < n; i++)
-        if (s && [s isEqualToString:@(names[i])]) return i;
-    return def;
+    return find_name(names, n, [s isKindOfClass:[NSString class]] ? s.UTF8String : nullptr, def);
 }
-static double now_s() { return CACurrentMediaTime(); }
 static bool hidden_windows() {
     static const bool h = [] { const char* e = getenv("WWHD_HIDDEN_WINDOWS"); return e && *e && strcmp(e, "0"); }();
     return h;
@@ -135,78 +112,13 @@ static void save_options() {
     save_settings();
 }
 static void load_options() {
-    g_mode = find_name(kModeNames, 4, g_settings[@"drcMode"], kDrcWindow);
+    g_mode = find_name(kModeNames, kDrcModeCount, g_settings[@"drcMode"], kDrcWindow);
+    if (!drc_mode_offered(g_mode)) g_mode = kDrcWindow;
     g_corner = find_name(kCornerNames, 4, g_settings[@"pipCorner"], 3);
     g_filter = find_name(kFilterNames, 3, g_settings[@"scaleFilter"], kSmooth);
     if (NSNumber* n = g_settings[@"pipSize"]) g_pip_size = std::clamp(n.floatValue, 0.1f, 0.5f);
     if (NSNumber* n = g_settings[@"pipOpacity"]) g_pip_opacity = std::clamp(n.floatValue, 0.2f, 1.0f);
-    // start-up overrides for tests (not saved)
-    if (const char* e = getenv("WWHD_DRC_MODE")) g_mode = find_name(kModeNames, 4, @(e), g_mode);
-    if (const char* e = getenv("WWHD_DRC_PIP")) {
-        char c[8] = {};
-        float sz = g_pip_size, op = g_pip_opacity;
-        if (sscanf(e, "%2[a-z]:%f:%f", c, &sz, &op) >= 1) {
-            g_corner = find_name(kCornerNames, 4, @(c), g_corner);
-            g_pip_size = std::clamp(sz, 0.1f, 0.5f);
-            g_pip_opacity = std::clamp(op, 0.2f, 1.0f);
-        }
-    }
-    if (const char* e = getenv("WWHD_SCALE_FILTER")) g_filter = find_name(kFilterNames, 3, @(e), g_filter);
-}
-
-// ---------------------------------------------------------------- layout
-// pixel rectangles in the target (drawable), top-left origin (Box: display.h)
-struct Layout { Box tv, pip; bool pip_on = false; float scale = 1; };
-
-static Layout layout(float dw, float dh, float tw, float th, float pw, float ph, bool pip_on) {
-    Layout L;
-    if (tw <= 0 || th <= 0 || dw <= 0 || dh <= 0) return L;
-    float s = std::min(dw / tw, dh / th);  // scale to fit: bars only when the aspect ratios differ
-    if (g_filter == kInteger && s >= 1) s = floorf(s + 1e-3f);
-    L.scale = s;
-    float w = roundf(tw * s), h = roundf(th * s);
-    L.tv = {floorf((dw - w) / 2), floorf((dh - h) / 2), w, h};
-    if (pip_on && pw > 0 && ph > 0) {
-        // the GamePad picture in a corner of the TV picture
-        float ow = roundf(L.tv.w * g_pip_size), oh = roundf(ow * ph / pw);
-        float m = roundf(std::min(L.tv.w, L.tv.h) * 0.02f);
-        int c = g_corner;
-        L.pip = {(c & 1) ? L.tv.x + L.tv.w - ow - m : L.tv.x + m, (c & 2) ? L.tv.y + L.tv.h - oh - m : L.tv.y + m, ow, oh};
-        L.pip_on = true;
-    }
-    return L;
-}
-
-// the last TV composition, for mapping clicks into the overlay (main thread reads, GPU thread writes)
-static std::mutex g_layout_mu;
-static Layout g_tv_layout;
-static float g_tv_dw = 0, g_tv_dh = 0;
-
-Box display_layout(float dw, float dh, float tw, float th) { return layout(dw, dh, tw, th, 0, 0, false).tv; }
-
-static bool sim_screen(float* w, float* h) {
-    static float sw = 0, sh = 0;
-    static bool parsed = [] {
-        if (const char* e = getenv("WWHD_SIM_SCREEN")) sscanf(e, "%fx%f", &sw, &sh);
-        return true;
-    }();
-    (void)parsed;
-    if (sw <= 0 || sh <= 0) return false;
-    *w = sw;
-    *h = sh;
-    return true;
-}
-
-// a point in the TV window (0..1 from top left) on the overlay -> GamePad touch position (0..1)
-static bool overlay_hit(float nx, float ny, float* tx, float* ty, bool clamp_outside = false) {
-    std::lock_guard<std::mutex> lk(g_layout_mu);
-    const Layout& L = g_tv_layout;
-    if (!L.pip_on || L.pip.w <= 0) return false;
-    float x = (nx * g_tv_dw - L.pip.x) / L.pip.w, y = (ny * g_tv_dh - L.pip.y) / L.pip.h;
-    if (!clamp_outside && (x < 0 || x > 1 || y < 0 || y > 1)) return false;
-    *tx = std::clamp(x, 0.0f, 1.0f);
-    *ty = std::clamp(y, 0.0f, 1.0f);
-    return true;
+    display_env_overrides();  // start-up overrides for tests (not saved)
 }
 
 }  // namespace gfx
@@ -252,7 +164,7 @@ static bool overlay_hit(float nx, float ny, float* tx, float* ty, bool clamp_out
     if ([self map:e x:&x y:&y clamp:false]) {
         self.touching = true;
         input::set_touch(true, x, y);
-        gfx::g_auto_until = std::max<double>(gfx::g_auto_until, gfx::now_s() + 2.0);
+        gfx::display_touched();
     } else {
         [super mouseDown:e];
     }
@@ -267,7 +179,7 @@ static bool overlay_hit(float nx, float ny, float* tx, float* ty, bool clamp_out
     self.touching = false;
     if (![self map:e x:&x y:&y clamp:true]) x = y = 0;
     input::set_touch(false, x, y);
-    gfx::g_auto_until = std::max<double>(gfx::g_auto_until, gfx::now_s() + 2.0);
+    gfx::display_touched();
 }
 @end
 
@@ -393,8 +305,6 @@ static void track_window(NSWindow* win, NSRect* normal, NSString* frameKey, NSSt
                                                   usingBlock:^(NSNotification*) { set_setting(fsKey, @NO); }];
 }
 
-static bool drc_window_wanted() { return g_mode == kDrcWindow && g_shown; }
-
 // show or hide the GamePad window to match the mode (main thread)
 static void apply_drc_window() {
     if (!g_drc_window) return;
@@ -413,24 +323,11 @@ static void apply_drc_window() {
 
 // GamePad window, shown/hidden from the Input menu (the game keeps rendering its image either way)
 bool drc_window_available() { return g_drc_window != nil || g_mode == kDrcPip || g_mode == kDrcAuto; }
-static bool pip_shown_now() {
-    if (g_mode == kDrcPip) return g_shown;
-    if (g_mode == kDrcAuto) return g_auto_pin || now_s() < g_auto_until;
-    return false;
-}
-bool drc_window_shown() {
-    if (g_mode == kDrcWindow) return g_drc_window.visible;
-    return pip_shown_now();
-}
+bool drc_window_shown() { return drc_screen_shown(g_drc_window.visible); }
 // Show / hide the GamePad screen in the current mode (Cmd+G, Input menu, Pro Controller choice)
 void show_drc_window(bool on) {
     auto apply = [on] {
-        if (g_mode == kDrcAuto) {
-            g_auto_pin = on;
-            if (!on) g_auto_until = 0;
-        } else {
-            g_shown = on;
-        }
+        display_show_drc(on);
         apply_drc_window();
         LOG("[display] GamePad screen %s (%s)", on ? "shown" : "hidden", kModeNames[g_mode]);
     };
@@ -440,9 +337,7 @@ void show_drc_window(bool on) {
 void toggle_drc_screen() { show_drc_window(!drc_window_shown()); }
 
 void set_drc_mode(int m) {
-    g_mode = m;
-    if (m == kDrcAuto) g_auto_pin = false;
-    else if (m != kDrcOff) g_shown = true;
+    display_set_mode(m);
     apply_drc_window();
     save_options();
     LOG("[display] GamePad screen mode: %s", kModeNames[m]);
@@ -489,6 +384,7 @@ static void create_windows() {
         NSWindow* drc = make_window(1, @"GamePad", [[WWDrcView alloc] initWithFrame:NSMakeRect(0, 0, 427, 240)], 427, 240,
                                     NSMakePoint(NSMaxX(f) + 8, NSMinY(f)));
         g_drc_window = drc;
+        g_has_drc_window = true;
         drc.releasedWhenClosed = NO;  // closing only hides it; the Input / Display menu can bring it back
         NSRect ds = NSRectFromString(g_settings[@"drcFrame"] ?: @"");
         NSScreen* want = screen_named(g_settings[@"drcScreen"]);
@@ -529,9 +425,9 @@ static void create_windows() {
         static double moved = 0;
         static bool hidden = false;
         NSPoint p = [NSEvent mouseLocation];
-        if (!NSEqualPoints(p, last)) { last = p; moved = now_s(); hidden = false; }
+        if (!NSEqualPoints(p, last)) { last = p; moved = display_now(); hidden = false; }
         if (!hidden && is_fullscreen(g_tv_window) && NSApp.active && g_tv_window.keyWindow && !mods::mouse_captured() &&
-            now_s() - moved > 2.0) {
+            display_now() - moved > 2.0) {
             [NSCursor setHiddenUntilMouseMoves:YES];
             hidden = true;
         }
@@ -804,7 +700,7 @@ static void compose_tv(id<MTLTexture> target, const Layout& L) {
     MTLPixelFormat fmt = target.pixelFormat;
     draw_image(e, fmt, dw, dh, R.tv.tex, R.tv.srgb, L.tv, 1.0f);
     if (L.pip_on && R.drc.tex) {
-        float op = g_pip_opacity, bw = std::max(1.0f, roundf(L.pip.w / 200.0f));
+        float op = L.drc_only ? 1.0f : g_pip_opacity.load(), bw = std::max(1.0f, roundf(L.pip.w / 200.0f));
         float frame[4] = {0, 0, 0, 0.6f * op};
         draw_solid(e, fmt, dw, dh, {L.pip.x - bw, L.pip.y - bw, L.pip.w + 2 * bw, L.pip.h + 2 * bw}, frame);
         draw_image(e, fmt, dw, dh, R.drc.tex, R.drc.srgb, L.pip, op);
@@ -832,12 +728,7 @@ static void compose_drc(id<MTLTexture> target) {
 
 // ---------------------------------------------------------------- automatic overlay
 // Every 4th frame both pictures are reduced to 32x18 (mipmapped copy, then a trilinear draw, display-
-// encoded RGBA8) and read back. The overlay comes up for a few seconds when a large part of the GamePad
-// picture changes between two samples (a menu opens, the screen switches). Not counted:
-//  - small changes (the map's position marker, blinking cursors),
-//  - fades to or from black and plain brightness shifts (scene changes),
-//  - a GamePad picture that mirrors the TV (title screen and other moments where the game shows the
-//    same picture on both screens; nothing to look at on the GamePad).
+// encoded RGBA8) and read back; display_auto_signature (display_modes.cpp) decides.
 namespace {
 const uint32_t kSigW = 32, kSigH = 18, kSigN = kSigW * kSigH;
 struct Sig {
@@ -901,57 +792,6 @@ struct Sig {
 };
 }  // namespace
 
-// the decision, from the 32x18 display-encoded luma signatures of both pictures (either renderer)
-void display_auto_signature(const std::vector<float>& cur_in, const std::vector<float>* tv, uint64_t frame) {
-    static std::mutex mu;
-    static std::vector<float> prev;
-    std::lock_guard<std::mutex> lk(mu);
-    if (g_mode != kDrcAuto) { prev.clear(); return; }
-    static float thresh = 0.12f, hold = 4.0f;
-    static bool parsed = [] {
-        if (const char* e = getenv("WWHD_DRC_AUTO")) sscanf(e, "%f:%f", &thresh, &hold);
-        return true;
-    }();
-    (void)parsed;
-    static const bool log = getenv("WWHD_DRC_AUTO_LOG") != nullptr;
-    std::vector<float> cur = cur_in;
-    if (cur.size() != kSigN) return;
-    float mean = 0, mirror_diff = 1;
-    for (float x : cur) mean += x;
-    mean /= kSigN;
-    if (tv && tv->size() == kSigN) {
-        const std::vector<float>& t = *tv;
-        mirror_diff = 0;
-        for (uint32_t i = 0; i < kSigN; i++) mirror_diff += fabsf(t[i] - cur[i]);
-        mirror_diff /= kSigN;
-    }
-    if (prev.size() == kSigN) {
-        float pmean = 0;
-        uint32_t changed = 0;
-        for (uint32_t i = 0; i < kSigN; i++) {
-            pmean += prev[i];
-            if (fabsf(cur[i] - prev[i]) > 0.08f) changed++;
-        }
-        pmean /= kSigN;
-        float shift = mean - pmean, frac = (float)changed / kSigN;
-        uint32_t against = 0;  // cells that changed other than by the overall brightness shift
-        for (uint32_t i = 0; i < kSigN; i++)
-            if (fabsf((cur[i] - prev[i]) - shift) > 0.08f) against++;
-        float content = (float)against / kSigN;
-        bool dark = mean < 0.04f || pmean < 0.04f;
-        bool mirror = mirror_diff < 0.06f;
-        bool event = frac > thresh && content > thresh && !dark && !mirror;
-        if (event) {
-            double until = now_s() + hold;
-            if (until > g_auto_until) g_auto_until = until;
-        }
-        if (log && (frac > 0.01f || event))
-            LOG("[display] auto: frame %llu changed %.3f (content %.3f) mean %.3f vs TV %.3f%s%s%s", (unsigned long long)frame, frac,
-                content, mean, mirror_diff, dark ? " dark" : "", mirror ? " mirror" : "", event ? " -> show" : "");
-    }
-    prev = std::move(cur);
-}
-
 // Metal: reduce on the GPU, decide when the command buffer completed
 static void sample_screens() {
     static std::atomic<bool> busy{false};
@@ -973,115 +813,7 @@ static void sample_screens() {
     }];
 }
 
-// ---------------------------------------------------------------- scripted touch (tests)
-struct TestTouch { uint64_t from, to; float x, y; };
-static void test_touch(uint64_t frame) {
-    static const std::vector<TestTouch> script = [] {
-        std::vector<TestTouch> v;
-        if (const char* e = getenv("WWHD_TEST_TOUCH")) {
-            unsigned long long a, b; float x, y; int n;
-            while (sscanf(e, "%llu-%llu:%f:%f%n", &a, &b, &x, &y, &n) == 4) {
-                v.push_back({a, b, x, y});
-                e += n;
-                if (*e != ',') break;
-                e++;
-            }
-        }
-        return v;
-    }();
-    static bool down = false;
-    bool any = false;
-    for (auto& t : script)
-        if (frame >= t.from && frame <= t.to) {
-            float tx, ty;
-            any = true;
-            if (overlay_hit(t.x, t.y, &tx, &ty)) {
-                if (!down) LOG("[display] test touch: window (%.3f, %.3f) -> GamePad (%.3f, %.3f) = pixel (%.0f, %.0f) at frame %llu",
-                               t.x, t.y, tx, ty, tx * 854, ty * 480, (unsigned long long)frame);
-                input::set_touch(true, tx, ty);
-                down = true;
-            } else if (!down) {
-                LOG("[display] test touch: window (%.3f, %.3f) misses the GamePad overlay at frame %llu", t.x, t.y,
-                    (unsigned long long)frame);
-                down = true;  // log once
-                input::set_touch(false, 0, 0);
-            }
-        }
-    if (!any && down) {
-        input::set_touch(false, 0, 0);
-        down = false;
-    }
-}
-
 // ---------------------------------------------------------------- present
-static std::mutex g_dump_mu;
-static std::vector<std::string> g_present_dumps;
-// write the composed TV window picture (and, in window mode, the GamePad window's) at the next present
-void request_present_dump(const std::string& path) {
-    std::lock_guard<std::mutex> lk(g_dump_mu);
-    g_present_dumps.push_back(path);
-}
-std::vector<std::string> display_take_present_dumps() {
-    std::vector<std::string> dumps;
-    std::lock_guard<std::mutex> lk(g_dump_mu);
-    dumps.swap(g_present_dumps);
-    return dumps;
-}
-
-static PresentPlan plan_from(const Layout& L, float dw, float dh) {
-    PresentPlan p;
-    p.dw = dw;
-    p.dh = dh;
-    p.tv = L.tv;
-    p.pip = L.pip;
-    p.pip_on = L.pip_on;
-    p.scale = L.scale;
-    p.pip_opacity = g_pip_opacity;
-    p.filter = g_filter;
-    p.drc_window = g_mode == kDrcWindow && g_drc_window && g_shown;
-    return p;
-}
-
-// start of a present (render thread): everything both renderers share
-PresentPlan display_plan(bool have_tv, float tw, float th, bool have_drc, float pw, float ph, float layer_w, float layer_h,
-                         uint64_t frame) {
-    test_touch(frame);
-    if (have_drc) g_drc_aspect = pw / ph;
-    bool pip = (g_mode == kDrcPip || g_mode == kDrcAuto) && pip_shown_now() && have_drc;
-    float dw = 0, dh = 0;
-    bool sim = sim_screen(&dw, &dh);
-    if (!sim) dw = layer_w, dh = layer_h;
-    if (dw >= 1 && dh >= 1) aspect::set_window_aspect(dw / dh);  // "Match window" (aspect.cpp): the TV window / screen shape
-    Layout L;
-    if (have_tv) L = layout(dw, dh, tw, th, have_drc ? pw : 0, have_drc ? ph : 0, pip);
-    {
-        std::lock_guard<std::mutex> lk(g_layout_mu);
-        g_tv_layout = L;
-        g_tv_dw = dw;
-        g_tv_dh = dh;
-    }
-    PresentPlan p = plan_from(L, dw, dh);
-    p.sim = sim;
-    p.pip_wanted = pip;
-    p.sample_auto = g_mode == kDrcAuto && have_drc && frame % 4 == 0;
-    return p;
-}
-
-PresentPlan display_plan_for(const PresentPlan& p, float dw, float dh, float tw, float th, float pw, float ph) {
-    PresentPlan q = plan_from(layout(dw, dh, tw, th, pw, ph, p.pip_wanted), dw, dh);
-    q.sim = p.sim;
-    q.pip_wanted = p.pip_wanted;
-    q.sample_auto = p.sample_auto;
-    q.drc_window = p.drc_window;
-    return q;
-}
-
-void display_log_present_dump(const std::string& path, const PresentPlan& p, float tw, float th) {
-    LOG("[display] present dump %s: target %.0fx%.0f, TV %.0fx%.0f at %.0f,%.0f %.0fx%.0f (scale %.3f, %s)%s", path.c_str(), p.dw, p.dh,
-        tw, th, p.tv.x, p.tv.y, p.tv.w, p.tv.h, p.scale, kFilterNames[p.filter],
-        p.pip_on ? [NSString stringWithFormat:@", GamePad overlay at %.0f,%.0f %.0fx%.0f", p.pip.x, p.pip.y, p.pip.w, p.pip.h].UTF8String : "");
-}
-
 static id<MTLTexture> offscreen(NSUInteger w, NSUInteger h, bool srgb) {
     MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:srgb ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm
                                                                                  width:w height:h mipmapped:NO];
@@ -1110,15 +842,16 @@ void present_screens() {
     L.tv = P.tv;
     L.pip = P.pip;
     L.pip_on = P.pip_on;
+    L.drc_only = P.drc_only;
     L.scale = P.scale;
     float dw = P.dw, dh = P.dh;
-    bool pip = P.pip_wanted;
+    bool pip = P.pip_wanted, drc_only = P.drc_only;
     g_overlay_draw = overlay::frame(dw, dh, overlay_metal_init);  // settings overlay, drawn by compose_tv
     if (P.sim) {
         present_to_layer(R.tv, ^(id<MTLTexture> t) {
             CGSize ds = R.tv.layer.drawableSize;
             compose_tv(t, layout(ds.width, ds.height, R.tv.tex.width, R.tv.tex.height, R.drc.tex ? R.drc.tex.width : 0,
-                                 R.drc.tex ? R.drc.tex.height : 0, pip));
+                                 R.drc.tex ? R.drc.tex.height : 0, pip, drc_only));
         });
     } else {
         present_to_layer(R.tv, ^(id<MTLTexture> t) { compose_tv(t, L); });
@@ -1151,6 +884,13 @@ void display_set_filter(int f) {
     save_options();
 }
 int display_drc_mode() { return g_mode; }
+// settings overlay: the Display menu's picture-in-picture choices
+void display_set_pip(int corner, float size, float opacity) {
+    g_corner = std::clamp(corner, 0, 3);
+    g_pip_size = std::clamp(size, 0.1f, 0.5f);
+    g_pip_opacity = std::clamp(opacity, 0.2f, 1.0f);
+    save_options();
+}
 void display_set_tv_fullscreen(bool on) {
     if (g_tv_window && is_fullscreen(g_tv_window) != on) [g_tv_window toggleFullScreen:nil];
 }

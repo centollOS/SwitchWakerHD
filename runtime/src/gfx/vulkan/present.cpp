@@ -318,9 +318,8 @@ std::vector<ComposeQuad> screen_quads(Screen& screen,VkExtent2D target,int& filt
  std::vector<ComposeQuad> quads;
  filter=scale_filter();
  if(!screen.scan||!screen.scan->image)return quads;
- #ifndef WWHD_SDL_HOST
  if(currentPlan) {
-  // AppKit windows (display.mm): the same layout as the Metal renderer
+  // both window hosts (gfx/display_modes.cpp): the same layout as the Metal renderer
   filter=currentPlan->filter;
   if(&screen==&R.drc) {
    ComposeQuad q;q.image=R.drc.scan.get();q.sourceLinear=R.drc.srgb.load();
@@ -339,10 +338,24 @@ std::vector<ComposeQuad> screen_quads(Screen& screen,VkExtent2D target,int& filt
    frame.box={p.pip.x-bw,p.pip.y-bw,p.pip.w+2*bw,p.pip.h+2*bw};quads.push_back(frame);
    ComposeQuad pip;pip.image=drc;pip.sourceLinear=R.drc.srgb.load();pip.box=p.pip;pip.alpha=op;quads.push_back(pip);
   }
+  if(p.button.w>0) {
+   // touch screens' view button (display_modes.h): a dark square with two light "screens" (rhemfur's
+   // Android design) and the host's state dot (Android: 60 fps on / paused)
+   const gfx::Box& t=p.button;
+   ComposeQuad b;b.solid=true;b.color[3]=0.45f;b.box={t.x,t.y,t.w,t.h};quads.push_back(b);
+   for(int i=0;i<2;i++) {
+    ComposeQuad s;s.solid=true;s.color[0]=s.color[1]=s.color[2]=0.9f;s.color[3]=0.8f;
+    s.box={t.x+t.w*(i?0.45f:0.15f),t.y+t.h*(i?0.45f:0.2f),t.w*0.4f,t.h*0.32f};quads.push_back(s);
+   }
+   if(p.button_dot) {
+    const bool on=p.button_dot==1;
+    ComposeQuad d;d.solid=true;d.color[0]=on?0.2f:0.95f;d.color[1]=on?0.85f:0.8f;d.color[2]=on?0.3f:0.15f;d.color[3]=0.95f;
+    d.box={t.x+t.w*0.72f,t.y+t.h*0.06f,t.w*0.22f,t.h*0.22f};quads.push_back(d);
+   }
+  }
   return quads;
  }
-#endif
- // SDL host: the picture scaled to fit (Codex's presentation)
+ // no plan (outside swap): the picture scaled to fit (Codex's presentation)
  const auto rect=present_rect(screen.scan->extent,target,filter);
  ComposeQuad q;q.image=screen.scan.get();q.sourceLinear=screen.srgb.load();q.box={rect.x,rect.y,rect.width,rect.height};quads.push_back(q);
  return quads;

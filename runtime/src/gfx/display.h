@@ -1,5 +1,6 @@
-// The AppKit display (display.mm) as seen by a renderer: window layers, and how the finished TV and
-// GamePad pictures are laid out in the windows each frame. Plain C++ so the Vulkan renderer can use it.
+// The display as seen by a renderer: how the finished TV and GamePad pictures are laid out in the
+// windows each frame (display_modes.cpp, shared by the AppKit host in display.mm and the SDL host).
+// Plain C++ so the Vulkan renderer can use it.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -22,6 +23,9 @@ struct PresentPlan {
     bool drc_window = false;   // the GamePad window is shown: present the GamePad picture there
     int filter = 0;            // picture scaling: 0 smooth, 1 sharp, 2 integer
     bool sample_auto = false;  // automatic overlay mode wants this frame's 32x18 signatures
+    bool drc_only = false;     // GamePad-only mode: pip is the GamePad picture fitted to the window, no TV picture
+    Box button;                // touch screens: the view button (display_modes.h), empty when not shown
+    int button_dot = 0;        // the host's state dot on the button: 0 none, 1 on (green), 2 paused (yellow)
 };
 constexpr uint32_t kSignatureW = 32, kSignatureH = 18;
 

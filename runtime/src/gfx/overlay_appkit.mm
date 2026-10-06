@@ -7,6 +7,7 @@
 #include "../overlay/hostui.h"
 #include "../overlay/overlay.h"
 #include "../runtime.h"
+#include "display_modes.h"
 
 namespace gfx {
 // menu.mm
@@ -20,6 +21,7 @@ int display_filter();
 void display_set_filter(int f);
 int display_drc_mode();
 void set_drc_mode(int m);
+void display_set_pip(int corner, float size, float opacity);
 bool tv_fullscreen();
 void display_set_tv_fullscreen(bool on);
 void* display_tv_window();
@@ -44,8 +46,15 @@ bool scale_filter_available() { return true; }
 bool fullscreen() { return gfx::tv_fullscreen(); }
 void set_fullscreen(bool on) { gfx::display_set_tv_fullscreen(on); }
 int drc_modes() { return 4; }
+bool drc_mode_offered(int m) { return m >= 0 && m < 4; }  // as the Display menu (window: greyed there without one)
 int drc_mode() { return gfx::display_drc_mode(); }
 void set_drc_mode(int m) { gfx::set_drc_mode(m); }
+int pip_corner() { return gfx::g_corner; }
+void set_pip_corner(int c) { gfx::display_set_pip(c, gfx::g_pip_size, gfx::g_pip_opacity); }
+float pip_size() { return gfx::g_pip_size; }
+void set_pip_size(float s) { gfx::display_set_pip(gfx::g_corner, s, gfx::g_pip_opacity); }
+float pip_opacity() { return gfx::g_pip_opacity; }
+void set_pip_opacity(float o) { gfx::display_set_pip(gfx::g_corner, gfx::g_pip_size, o); }
 bool drc_available() { return gfx::drc_window_available(); }
 bool drc_shown() { return gfx::drc_window_shown(); }
 void show_drc(bool on) { gfx::show_drc_window(on); }

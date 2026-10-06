@@ -7,6 +7,7 @@
 #include "backend.h"
 #include "present.h"
 #include "gfx/display.h"
+#include "gfx/display_modes.h"
 #include "gx2/gx2.h"
 #include "input.h"
 #include "mods/mods.h"
@@ -1092,25 +1093,8 @@ static void dump_scan(Screen &s, const std::string &path) {
     LOG("[gfx] cannot write %s: %s", path.c_str(), e.what());
   }
 }
-#ifdef WWHD_SDL_HOST
-// SDL host: the composed TV window (what present() puts on the screen), written after the frame
-static std::vector<std::string> presentDumps;
-static void request_present_dump(const std::string& path) { presentDumps.push_back(path); }
-static void write_present_dumps() {
-  for (auto& path : std::exchange(presentDumps, {})) {
-    if (!R.tv.scan || !R.tv.scan->image) continue;
-    const uint32_t w = uint32_t(std::max(1, R.tv.width.load())), h = uint32_t(std::max(1, R.tv.height.load()));
-    try {
-      write_rgba_png(path, w, h, compose_offscreen(R.tv, w, h, R.tv.srgb.load()));
-      LOG("[gfx] wrote %s (%ux%u, TV window)", path.c_str(), w, h);
-    } catch (const std::exception& e) {
-      LOG("[gfx] present dump %s failed: %s", path.c_str(), e.what());
-    }
-  }
-}
-#else
+// the composed windows (what present() puts on the screen), written after the frame (swap)
 static void request_present_dump(const std::string& path) { gfx::request_present_dump(path); }
-#endif
 static std::atomic<bool> captureRequested{false};
 void request_capture() { captureRequested = true; }
 static void frame_dumps(uint64_t frame) {
@@ -1148,18 +1132,23 @@ static void frame_dumps(uint64_t frame) {
 void swap() {
   service_captures();
   frame_dumps(R.frame + 1);
-#ifndef WWHD_SDL_HOST
-  // AppKit windows: the layout of both pictures comes from display.mm, as for the Metal renderer
+  // the layout of both pictures (GamePad window, picture-in-picture, automatic overlay, GamePad only)
+  // comes from gfx/display_modes.cpp, which both window hosts and the Metal renderer share
   Surface *tvScan = R.tv.scan && R.tv.scan->image ? R.tv.scan.get() : nullptr;
   Surface *drcScan = R.drc.scan && R.drc.scan->image ? R.drc.scan.get() : nullptr;
-  const gfx::PresentPlan plan = gfx::display_plan(
+#ifdef WWHD_SDL_HOST
+  gfx::g_filter = scale_filter();  // the SDL host keeps the scaling filter with the Vulkan settings
+  const float layerW = float(R.tv.width.load()), layerH = float(R.tv.height.load());
+#else
+  const float layerW = float(R.tv.swapExtent.width), layerH = float(R.tv.swapExtent.height);
+#endif
+  gfx::PresentPlan plan = gfx::display_plan(
       tvScan, tvScan ? float(tvScan->extent.width) : 0, tvScan ? float(tvScan->extent.height) : 0,
       drcScan, drcScan ? float(drcScan->extent.width) : 0, drcScan ? float(drcScan->extent.height) : 0,
-      float(R.tv.swapExtent.width), float(R.tv.swapExtent.height), R.frame + 1);
+      layerW, layerH, R.frame + 1);
   set_present_plan(&plan);
   // settings overlay: built once, drawn into the TV window and its present dumps
-  set_overlay_draw(overlay::frame(plan.dw > 0 ? plan.dw : float(R.tv.swapExtent.width),
-                                  plan.dh > 0 ? plan.dh : float(R.tv.swapExtent.height), overlay_renderer_init));
+  set_overlay_draw(overlay::frame(plan.dw > 0 ? plan.dw : layerW, plan.dh > 0 ? plan.dh : layerH, overlay_renderer_init));
   bool sampled[2] = {};
   if (plan.sample_auto && drcScan) {
     sampled[0] = record_signature(0, *drcScan, R.drc.srgb.load());
@@ -1168,7 +1157,16 @@ void swap() {
   present(R.tv);
   if (plan.drc_window)
     present(R.drc);
+#ifdef WWHD_SDL_HOST
+  // asynchronous presentation: queued like GX2Flush work, the ring's fences retire it (the automatic
+  // overlay's signatures are read back right away, so those frames wait)
+  if (async_present() && !sampled[0])
+    flush_async();
+  else
+    flush();
+#else
   flush();
+#endif
   if (sampled[0]) {
     std::vector<float> d = read_signature(0), t = sampled[1] ? read_signature(1) : std::vector<float>{};
     gfx::display_auto_signature(d, sampled[1] ? &t : nullptr, R.frame + 1);
@@ -1179,12 +1177,18 @@ void swap() {
     try {
       write_rgba_png(path, uint32_t(plan.dw), uint32_t(plan.dh),
                      compose_offscreen(R.tv, uint32_t(plan.dw), uint32_t(plan.dh), R.tv.srgb.load()));
-      if (plan.drc_window && drcScan && R.drc.swapchain) {
+      // the GamePad window's size: its swapchain, or (SDL host test runs with hidden windows, which
+      // present nothing) the window's pixel size
+      uint32_t drcW = R.drc.swapchain ? R.drc.swapExtent.width : 0, drcH = R.drc.swapchain ? R.drc.swapExtent.height : 0;
+#ifdef WWHD_SDL_HOST
+      if (!R.drc.swapchain && R.drc.window)
+        drcW = uint32_t(std::max(0, R.drc.width.load())), drcH = uint32_t(std::max(0, R.drc.height.load()));
+#endif
+      if (plan.drc_window && drcScan && drcW && drcH) {
         std::string p = path;
         size_t dot = p.rfind(".png");
         p.insert(dot == std::string::npos ? p.size() : dot, "_drc");
-        write_rgba_png(p, R.drc.swapExtent.width, R.drc.swapExtent.height,
-                       compose_offscreen(R.drc, R.drc.swapExtent.width, R.drc.swapExtent.height, R.drc.srgb.load()));
+        write_rgba_png(p, drcW, drcH, compose_offscreen(R.drc, drcW, drcH, R.drc.srgb.load()));
       }
       gfx::display_log_present_dump(path, plan, float(tvScan->extent.width), float(tvScan->extent.height));
     } catch (const std::exception &e) {
@@ -1192,16 +1196,6 @@ void swap() {
     }
   }
   set_present_plan(nullptr);
-#else
-  set_overlay_draw(overlay::frame(float(R.tv.width.load()), float(R.tv.height.load()), overlay_renderer_init));
-  present(R.tv);
-  present(R.drc);
-  if (async_present())
-    flush_async();  // queued like GX2Flush work; the ring's fences retire it
-  else
-    flush();
-  write_present_dumps();
-#endif
   std::atomic_ref<uint64_t>(R.frame).fetch_add(1);
   R.completed = R.frame;
   report_gpu_timestamps();
@@ -1679,9 +1673,13 @@ void init() {
   if (!R.tv.window)
     throw std::runtime_error(SDL_GetError());
   if (!getenv("WWHD_NO_GAMEPAD")) {
-    R.drc.window = SDL_CreateWindow("GamePad — Vulkan", 854, 480, windowFlags);
+    // made hidden: the GamePad screen mode (load_saved_options below) shows it in window mode only;
+    // the other modes draw the GamePad picture into the TV window (gfx/display_modes.h)
+    R.drc.window = SDL_CreateWindow("GamePad — Vulkan", 854, 480, windowFlags | SDL_WINDOW_HIDDEN);
     if (!R.drc.window)
       throw std::runtime_error(SDL_GetError());
+    R.drc.visible = false;
+    gfx::g_has_drc_window = true;
   }
   if (hidden_windows())
     R.tv.visible = R.drc.visible = false;  // no drawables: pictures only reach frame / present dumps
@@ -1710,7 +1708,7 @@ void init() {
   input::set_prompt_window(R.tv.window);
   input::init();
   install_graphics_menu(R.tv.window);
-  ::hostui::load_saved_options();  // graphics options saved by the settings overlay (settings.ini)
+  ::hostui::load_saved_options();  // graphics and GamePad screen options saved by the settings overlay (settings.ini)
 }
 #endif
 void save_renderer_caches() {
@@ -1722,44 +1720,110 @@ void save_renderer_caches() {
   save_pipeline_cache();
 }
 #ifdef WWHD_SDL_HOST
-// GamePad touch screen: left mouse button in the GamePad window, mapped through the centred picture
-// (the same fit as present.cpp's present_rect) to 0..1 touch coordinates
+// GamePad touch screen: the left mouse button on the GamePad picture, in the GamePad window (window
+// mode; the picture fitted as display_layout fits it) or inside the TV window (picture-in-picture,
+// GamePad only: display_modes.cpp maps the point as on macOS), mapped to 0..1 touch coordinates. A
+// press that starts on the picture keeps touching while it is dragged, clamped to the picture's edge.
+// The settings overlay keeps its clicks in the TV window.
+enum class TouchIn { None, DrcWindow, TvWindow };
+static TouchIn touchHeld = TouchIn::None;
+static bool drc_window_point(float x, float y, float &tx, float &ty) {
+  int pw = 0, ph = 0;
+  SDL_GetWindowSizeInPixels(R.drc.window, &pw, &ph);
+  const float density = SDL_GetWindowPixelDensity(R.drc.window);
+  const float sw = R.drc.scan ? float(R.drc.scan->extent.width) : 854.0f;
+  const float sh = R.drc.scan ? float(R.drc.scan->extent.height) : 480.0f;
+  const gfx::Box b = gfx::display_layout(float(pw), float(ph), sw, sh);
+  if (b.w <= 0 || b.h <= 0) return false;
+  tx = (x * density - b.x) / b.w;
+  ty = (y * density - b.y) / b.h;
+  return tx >= 0 && tx <= 1 && ty >= 0 && ty <= 1;
+}
+// a point of the TV window (window coordinates) as 0..1 from its top left
+static void tv_window_point(float x, float y, float &nx, float &ny) {
+  int w = 0, h = 0;
+  SDL_GetWindowSize(R.tv.window, &w, &h);
+  nx = w > 0 ? x / float(w) : 0;
+  ny = h > 0 ? y / float(h) : 0;
+}
 static bool gamepad_touch(const SDL_Event& event) {
-  if (!R.drc.window) return false;
-  const SDL_WindowID id = SDL_GetWindowID(R.drc.window);
-  static bool held = false;
-  float x = 0, y = 0;
-  bool down = false;
+  const SDL_WindowID drcId = R.drc.window ? SDL_GetWindowID(R.drc.window) : 0;
+  const SDL_WindowID tvId = SDL_GetWindowID(R.tv.window);
+  float tx = 0, ty = 0;
   switch (event.type) {
   case SDL_EVENT_MOUSE_BUTTON_DOWN:
-  case SDL_EVENT_MOUSE_BUTTON_UP:
-    if (event.button.windowID != id || event.button.button != SDL_BUTTON_LEFT) return false;
-    x = event.button.x; y = event.button.y; down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-    break;
+    if (event.button.button != SDL_BUTTON_LEFT) return false;
+    if (drcId && event.button.windowID == drcId) {
+      if (!drc_window_point(event.button.x, event.button.y, tx, ty)) return true;  // outside the picture
+      touchHeld = TouchIn::DrcWindow;
+    } else if (event.button.windowID == tvId && !overlay::is_open()) {
+      float nx, ny;
+      tv_window_point(event.button.x, event.button.y, nx, ny);
+      if (!gfx::overlay_hit(nx, ny, &tx, &ty)) return false;  // the game's window: mouse camera etc.
+      touchHeld = TouchIn::TvWindow;
+      gfx::display_touched();
+    } else {
+      return false;
+    }
+    input::set_touch(true, tx, ty);
+    return true;
   case SDL_EVENT_MOUSE_MOTION:
-    if (event.motion.windowID != id || !held) return false;
-    x = event.motion.x; y = event.motion.y; down = true;
-    break;
+  case SDL_EVENT_MOUSE_BUTTON_UP: {
+    const bool up = event.type == SDL_EVENT_MOUSE_BUTTON_UP;
+    if (touchHeld == TouchIn::None || (up && event.button.button != SDL_BUTTON_LEFT)) return false;
+    const float x = up ? event.button.x : event.motion.x, y = up ? event.button.y : event.motion.y;
+    if (touchHeld == TouchIn::DrcWindow) {
+      drc_window_point(x, y, tx, ty);
+      tx = std::clamp(tx, 0.0f, 1.0f);
+      ty = std::clamp(ty, 0.0f, 1.0f);
+    } else {
+      float nx, ny;
+      tv_window_point(x, y, nx, ny);
+      if (!gfx::overlay_hit(nx, ny, &tx, &ty, true)) tx = ty = 0;
+      gfx::display_touched();
+    }
+    if (up) touchHeld = TouchIn::None;
+    input::set_touch(!up, tx, ty);
+    return true;
+  }
   case SDL_EVENT_WINDOW_FOCUS_LOST:
-    if (event.window.windowID == id && held) { held = false; input::set_touch(false, 0, 0); }
+    if (touchHeld != TouchIn::None) { touchHeld = TouchIn::None; input::set_touch(false, 0, 0); }
     return false;
   default:
     return false;
   }
-  int pw = 0, ph = 0;
-  SDL_GetWindowSizeInPixels(R.drc.window, &pw, &ph);
-  const float density = SDL_GetWindowPixelDensity(R.drc.window);
-  x *= density; y *= density;
-  const float sw = R.drc.scan ? float(R.drc.scan->extent.width) : 854.0f;
-  const float sh = R.drc.scan ? float(R.drc.scan->extent.height) : 480.0f;
-  float scale = std::min(float(pw) / sw, float(ph) / sh);
-  if (scale_filter() == 2 && scale >= 1) scale = std::floor(scale + 1e-3f);
-  const float w = sw * scale, h = sh * scale, ox = (pw - w) * 0.5f, oy = (ph - h) * 0.5f;
-  const float tx = (x - ox) / w, ty = (y - oy) / h;
-  if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && (tx < 0 || tx > 1 || ty < 0 || ty > 1)) return true;  // outside the picture
-  held = down;
-  input::set_touch(down, std::clamp(tx, 0.0f, 1.0f), std::clamp(ty, 0.0f, 1.0f));
+}
+
+// Ctrl+G (Cmd+G on macOS, as the AppKit host's Display menu): show / hide the GamePad screen in the
+// current mode (the GamePad window, or the picture-in-picture overlay; auto mode: keep it up)
+static bool drc_key(const SDL_Event& event) {
+  if (event.type != SDL_EVENT_KEY_DOWN || event.key.repeat || event.key.scancode != SDL_SCANCODE_G) return false;
+#ifdef __APPLE__
+  const SDL_Keymod want = SDL_KMOD_GUI;
+#else
+  const SDL_Keymod want = SDL_KMOD_CTRL;
+#endif
+  if (!(event.key.mod & want) || (event.key.mod & (SDL_KMOD_ALT | SDL_KMOD_SHIFT))) return false;
+  ::hostui::toggle_drc();
   return true;
+}
+// debug: WWHD_TEST_DRC_KEY=3500,3700 simulates Ctrl+G at those frames (as display.mm's Cmd+G)
+static void test_drc_key() {
+  static const std::vector<uint64_t> frames = [] {
+    std::vector<uint64_t> f;
+    if (const char *e = getenv("WWHD_TEST_DRC_KEY"))
+      for (const char *p = e; *p;) {
+        f.push_back(strtoull(p, (char **)&p, 10));
+        while (*p == ',') p++;
+      }
+    return f;
+  }();
+  static size_t i = 0;
+  if (i < frames.size() && frame_count() >= frames[i]) {
+    i++;
+    LOG("[display] test: Ctrl+G at frame %llu", (unsigned long long)frame_count());
+    ::hostui::toggle_drc();
+  }
 }
 
 // full screen: F11 or Alt+Enter toggles the focused window (TV or GamePad)
@@ -1791,8 +1855,7 @@ static bool close_request(const SDL_Event& event) {
   if (event.type != SDL_EVENT_WINDOW_CLOSE_REQUESTED) return false;
   if (event.window.windowID == SDL_GetWindowID(R.tv.window)) quit_game();
   if (R.drc.window && event.window.windowID == SDL_GetWindowID(R.drc.window)) {
-    SDL_HideWindow(R.drc.window);
-    R.drc.visible = false;
+    ::hostui::drc_window_closed();  // hidden until Ctrl+G or the settings overlay shows it again
     LOG("[display] GamePad window closed (hidden); the game keeps running");
   }
   return true;
@@ -1810,6 +1873,7 @@ void run_main_loop() {
       if (event.type == SDL_EVENT_QUIT) quit_game();
       if (close_request(event)) continue;
       if (fullscreen_key(event)) continue;
+      if (drc_key(event)) continue;
       if (gamepad_touch(event)) continue;
       input::handle_event(event);
       for (Screen *s : {&R.tv, &R.drc})
@@ -1828,6 +1892,7 @@ void run_main_loop() {
     }
     input::update();
     ::hostui::run_posted();  // option changes from the settings overlay (render thread)
+    test_drc_key();
     overlay::set_density(SDL_GetWindowPixelDensity(R.tv.window));
     auto now = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(now - titleTime).count();

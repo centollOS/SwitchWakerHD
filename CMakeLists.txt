@@ -107,8 +107,9 @@ target_compile_options(imgui PRIVATE -w -O2)
 file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS runtime/src/*.cpp runtime/src/*.c runtime/src/hle/*.cpp runtime/src/mods/*.cpp
                                             runtime/src/overlay/*.cpp)
 file(GLOB GX2_SOURCES CONFIGURE_DEPENDS runtime/src/gx2/*.cpp)
-# renderer selection / dispatch (runtime/src/gfx/renderer.cpp): every configuration
-set(GFX_SOURCES runtime/src/gfx/renderer.cpp)
+# renderer selection / dispatch (runtime/src/gfx/renderer.cpp) and the GamePad screen modes / TV window
+# layout both window hosts share (display_modes.cpp): every configuration
+set(GFX_SOURCES runtime/src/gfx/renderer.cpp runtime/src/gfx/display_modes.cpp)
 set(MOD_GFX_SOURCES)
 if(WWHD_HAS_METAL)
   # Metal renderer and the AppKit host (windows, menus, input, controls window, display modes)

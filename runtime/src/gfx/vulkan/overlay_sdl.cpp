@@ -1,14 +1,18 @@
-// Settings overlay on the SDL host (Vulkan-only builds: Windows, Linux): hostui.h on top of the SDL
-// windows and the Vulkan renderer's settings. Options are kept in <config dir>/settings.ini
+// Settings overlay on the SDL host (Vulkan-only builds: Windows, Linux, Android): hostui.h on top of
+// the SDL windows and the Vulkan renderer's settings. Options are kept in <config dir>/settings.ini
 // (key=value lines; WWHD_SETTINGS names another file; test runs with WWHD_NO_HOST_INPUT use none).
+// The GamePad screen modes are the AppKit host's (gfx/display_modes.cpp): the GamePad window is shown
+// in window mode and hidden in the others, which draw the GamePad picture into the TV window.
 #ifdef WWHD_SDL_HOST
 #include "backend.h"
+#include "gfx/display_modes.h"
 #include "settings.h"
 #include "input.h"
 #include "overlay/hostui.h"
 #include "platform/host.h"
 #include "runtime.h"
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -62,6 +66,41 @@ bool env_set(std::initializer_list<const char*> env) {
     for (const char* e : env)
         if (getenv(e)) return true;
     return false;
+}
+// the GamePad screen options, as the AppKit host keeps them in display.plist (same keys; the mode's
+// WWHD_DRC_MODE and the overlay's WWHD_DRC_PIP win and are not saved)
+void save_display_locked() {
+    using namespace gfx;
+    if (!env_set({"WWHD_DRC_MODE"})) g_values["drcMode"] = kModeNames[g_mode];
+    if (!env_set({"WWHD_DRC_PIP"})) {
+        char v[16];
+        g_values["pipCorner"] = kCornerNames[g_corner];
+        snprintf(v, sizeof v, "%g", g_pip_size.load());
+        g_values["pipSize"] = v;
+        snprintf(v, sizeof v, "%g", g_pip_opacity.load());
+        g_values["pipOpacity"] = v;
+    }
+    save_locked();
+}
+void save_display() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    load_locked();
+    save_display_locked();
+}
+// show or hide the GamePad window to match the mode (main thread)
+void apply_drc_window() {
+    SDL_Window* w = gfxvk::R.drc.window;
+    if (!w) return;
+    const bool want = gfx::drc_window_wanted();
+    const bool shown = !(SDL_GetWindowFlags(w) & SDL_WINDOW_HIDDEN);
+    if (want && !shown && !getenv("WWHD_HIDDEN_WINDOWS")) {
+        SDL_ShowWindow(w);
+        gfxvk::R.drc.visible = true;
+    } else if (!want && shown) {
+        if (SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN) SDL_SetWindowFullscreen(w, false);
+        SDL_HideWindow(w);
+        gfxvk::R.drc.visible = false;
+    }
 }
 }  // namespace
 
@@ -136,6 +175,20 @@ void load_saved_options() {
     if (saved("fps60Paced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation(num("fps60Paced") != 0);
     if (saved("scaleFilter", {"WWHD_SCALE_FILTER"})) gfxvk::set_scale_filter((int)num("scaleFilter"));
     if (saved("vkPresentMode", {"WWHD_VK_PRESENT_MODE"})) gfxvk::set_present_mode((int)num("vkPresentMode"));
+    // GamePad screen (display_modes.h); the start-up test overrides after the saved choices
+    using namespace gfx;
+    if (v.count("drcMode")) {
+        const int m = find_name(kModeNames, kDrcModeCount, v["drcMode"].c_str(), g_mode);
+        if (drc_mode_offered(m)) g_mode = m;
+    }
+    if (v.count("pipCorner")) g_corner = find_name(kCornerNames, 4, v["pipCorner"].c_str(), g_corner);
+    if (v.count("pipSize")) g_pip_size = std::clamp((float)num("pipSize"), 0.1f, 0.5f);
+    if (v.count("pipOpacity")) g_pip_opacity = std::clamp((float)num("pipOpacity"), 0.2f, 1.0f);
+    display_env_overrides();
+    if (!drc_mode_offered(g_mode) && g_mode == kDrcWindow) g_mode = kDrcOff;  // no GamePad window (WWHD_NO_GAMEPAD, Android)
+    g_shown = !input::pro_controller();  // Pro Controller: GamePad screen starts hidden (as on macOS)
+    apply_drc_window();
+    LOG("[display] GamePad screen mode: %s%s", kModeNames[g_mode], g_shown ? "" : " (hidden)");
 }
 
 int scale_filter() { return gfxvk::scale_filter(); }
@@ -150,20 +203,55 @@ void set_fullscreen(bool on) {
     if (!gfxvk::R.tv.window) return;
     if (!SDL_SetWindowFullscreen(gfxvk::R.tv.window, on)) LOG("[display] TV window: full screen %s failed: %s", on ? "on" : "off", SDL_GetError());
 }
-// one GamePad window, shown or hidden (no picture-in-picture on this host)
-int drc_modes() { return 0; }
-int drc_mode() { return 0; }
-void set_drc_mode(int) {}
-bool drc_available() { return gfxvk::R.drc.window != nullptr; }
-bool drc_shown() { return gfxvk::R.drc.window && !(SDL_GetWindowFlags(gfxvk::R.drc.window) & SDL_WINDOW_HIDDEN); }
-void show_drc(bool on) {
-    if (!gfxvk::R.drc.window) return;
-    if (on) SDL_ShowWindow(gfxvk::R.drc.window);
-    else SDL_HideWindow(gfxvk::R.drc.window);
-    gfxvk::R.drc.visible = on;
-    LOG("[display] GamePad window %s", on ? "shown" : "hidden");
+// the GamePad screen modes of display_modes.h (as the AppKit host's Display menu)
+int drc_modes() { return gfx::kDrcModeCount; }
+bool drc_mode_offered(int m) { return gfx::drc_mode_offered(m); }
+int drc_mode() { return gfx::g_mode; }
+void set_drc_mode(int m) {
+    if (!gfx::drc_mode_offered(m)) return;
+    gfx::display_set_mode(m);
+    apply_drc_window();
+    save_display();
+    LOG("[display] GamePad screen mode: %s", gfx::kModeNames[m]);
 }
-void set_pro_controller(bool on) { input::set_pro_controller(on); }
+int pip_corner() { return gfx::g_corner; }
+void set_pip_corner(int c) {
+    gfx::g_corner = std::clamp(c, 0, 3);
+    save_display();
+}
+float pip_size() { return gfx::g_pip_size; }
+void set_pip_size(float s) {
+    gfx::g_pip_size = std::clamp(s, 0.1f, 0.5f);
+    save_display();
+}
+float pip_opacity() { return gfx::g_pip_opacity; }
+void set_pip_opacity(float o) {
+    gfx::g_pip_opacity = std::clamp(o, 0.2f, 1.0f);
+    save_display();
+}
+bool drc_available() {
+    return gfxvk::R.drc.window != nullptr || gfx::g_mode == gfx::kDrcPip || gfx::g_mode == gfx::kDrcAuto;
+}
+bool drc_shown() {
+    SDL_Window* w = gfxvk::R.drc.window;
+    return gfx::drc_screen_shown(w && !(SDL_GetWindowFlags(w) & SDL_WINDOW_HIDDEN));
+}
+// show / hide the GamePad screen in the current mode (overlay, Ctrl+G, Pro Controller choice)
+void show_drc(bool on) {
+    gfx::display_show_drc(on);
+    apply_drc_window();
+    LOG("[display] GamePad screen %s (%s)", on ? "shown" : "hidden", gfx::kModeNames[gfx::g_mode]);
+}
+void toggle_drc() { show_drc(!drc_shown()); }
+void drc_window_closed() {
+    if (gfx::g_mode == gfx::kDrcWindow) gfx::g_shown = false;
+    apply_drc_window();
+}
+void set_pro_controller(bool on) {
+    // as on macOS: the GamePad screen follows the choice
+    input::set_pro_controller(on);
+    show_drc(!on);
+}
 const char* name() { return "SDL"; }
 
 }  // namespace hostui
