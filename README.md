@@ -319,6 +319,46 @@ supported because the recompiled game requires Clang's `musttail` support.
 The build fails with a clear message if `build/gen` has not been generated. The runtime checks at
 startup that `game/code/cking.rpx` matches the recompiled code.
 
+### Android (build it yourself)
+
+The Android port is by [rhemfur](https://github.com/rhemfur) (issue #23): the Vulkan renderer on
+an arm64 phone through SDL3's Android activity, measured at 30–32 fps in the heaviest scenes on a
+Galaxy S25 Ultra (Snapdragon 8 Elite). There is no download: **releases never contain an APK,
+`libmain.so` or anything derived from the game files**, and they never will. You build the APK
+yourself from your own dump, and since it contains your recompiled game, it is for your own phone
+only: don't share it. (CI builds the APK only with placeholder code, to check that it compiles.)
+
+You need:
+- a phone with arm64, Android 13 or newer and Vulkan 1.3;
+- **a game controller** (Bluetooth or USB). It is the GamePad's buttons and sticks; the touch
+  screen is only the GamePad's touch screen (no on-screen buttons). Keyboards only type text
+  (`WWHD_ANDROID_KEYBOARD=1` in `env.txt` makes them a GamePad too);
+- on the computer: the Android SDK (platform 36, build tools 35.0.0), NDK 30.0.16248370, JDK 17
+  or newer, CMake 3.20+ and Ninja, Python 3, and your own `build/gen` (steps 1 and 2 under
+  Building).
+
+```sh
+android/build_native.sh            # libmain.so, libSDL3.so, libc++_shared.so -> android/app/libs
+#   CPU=generic (default): any arm64 phone; CPU=oryon-1: tuned for the Snapdragon 8 Elite (e.g.
+#   Galaxy S25), runs only there. ANDROID_SDK, NDK_VERSION, GEN_DIR, JOBS: see the script.
+python3 android/make_icon.py       # optional: the launcher icon from your game/meta/iconTex.tga (Pillow)
+cd android && ./gradlew assembleRelease
+adb install -r app/build/outputs/apk/release/app-release.apk
+```
+
+Start the app once: it creates `Android/data/org.wwhdrecomp.wwhd/files/` on the phone's storage
+(reachable over USB). Copy your extracted game there as `game/` (`code/`, `content/`, `meta/`);
+`save/` takes a save (`user/cking.sav`, the same layout as on the computer); `config/wwhd/` holds
+`settings.ini` and the shader caches; an optional `env.txt` takes `WWHD_` options, one `NAME=value`
+per line. Long-press the app icon to export or import the save as a zip.
+
+In the game, the button in the top left corner switches the view: a tap cycles TV with the GamePad
+picture in a corner, the GamePad picture alone (Minus in the game switches to Off-TV Play, the game
+on the GamePad) and the TV alone; a long press switches 60 fps (its dot: green on, yellow while the
+phone pauses it because it is too slow or too hot). Touches on the GamePad picture touch the
+GamePad. The settings overlay (hold Select or press Home) has the other GamePad screen modes and
+the graphics options.
+
 ## Playing
 
 ```sh
@@ -531,6 +571,10 @@ The code of this project is licensed under the Mozilla Public License 2.0 (see `
 Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0), {fmt} (MIT) and Dear ImGui (MIT); see Credits. The game itself is Nintendo's property and is not included.
 
 ## Credits
+
+The Android port (`android/`, the Android parts of the runtime, the single-screen view) is by
+[rhemfur](https://github.com/rhemfur), who also contributed the paced frame interpolation, the
+Vulkan presentation and feedback-image work, and Linux/Windows fixes.
 
 GPU address library, shader decompiler and a few reference structures are vendored from
 [Cemu](https://github.com/cemu-project/Cemu) (MPL-2.0, see `runtime/third_party/cemu/LICENSE.txt`);
