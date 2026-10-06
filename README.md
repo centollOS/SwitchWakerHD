@@ -10,7 +10,29 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
 
 ## What's new in this update
 
-- **v0.2.0: portable releases.** Unzip anywhere and start **Wind Waker HD**: the first start prepares
+### v0.2.1
+
+- **Cemu archives (`.wua`)** (issue #27): the setup now also takes a Cemu `.wua` file; it is
+  already decrypted, so no keys are needed. Every source (disc image, `.wua`, extracted folder) is
+  checked for the right game version first (USA, version 0), with a clear message if an update is
+  merged in or the region is different.
+- **Linux on arm64** (aarch64): a separate `linux-aarch64` download (Raspberry Pi 5, Asahi Linux, ARM
+  laptops).
+- **On-screen text entry** (issue #29): the name screen now shows a text window over the game, with an
+  on-screen keyboard for controllers and the mouse; typing on the keyboard goes straight into it.
+- **Boot crash fixed:** the rare crash right after start ("Prepare Thread", agl shader setup) is gone.
+  GX2CopySurface now completes before it returns, as the game expects; before, a late render thread
+  could write into memory the game had already reused (about every 15th start under load, every start
+  on some phones).
+- **GamePad / Pro Controller choice is saved** between launches (issue #26).
+- **Cheats** now also work on saves with heart pieces (PR #25 by Sean13128).
+- **Android** (rhemfur, PRs #30, #31): pipelines the Adreno driver refuses no longer close the game,
+  the game threads use at least two fast cores, and arm64 builds treat `char` as signed, as on the
+  console.
+
+### v0.2.0
+
+- **Portable releases.** Unzip anywhere and start **Wind Waker HD**: the first start prepares
   the game once from your own dump (releases never contain game code, so it is built on your computer);
   later starts launch the game directly. Everything — the built game, the game files, saves,
   settings, save states, shader caches, logs and the downloaded compiler — stays in the release
@@ -24,29 +46,14 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
   **Home** on a controller; it works with mouse, keyboard and controller on every platform and
   renderer. The Controls tab shows the controller drawing with live feedback of pressed buttons.
   Shift+F1 still saves state slot 1; slot 1 now loads from the overlay.
-- **On-screen text entry** (issue #29): the name screen now shows a text window over the game, with an
-  on-screen keyboard for controllers and the mouse; typing on the keyboard goes straight into it.
-- **v0.2.1: Cemu archives (`.wua`)** (issue #27): the setup now also takes a Cemu `.wua` file; it is
-  already decrypted, so no keys are needed. Every source (disc image, `.wua`, extracted folder) is
-  checked for the right game version first (USA, version 0), with a clear message if an update is
-  merged in or the region is different.
-- **Linux on arm64** (aarch64): a separate `linux-aarch64` download (Raspberry Pi 5, Asahi Linux, ARM
-  laptops).
-- **Boot crash fixed:** the rare crash right after start ("Prepare Thread", agl shader setup) is gone.
-  GX2CopySurface now completes before it returns, as the game expects; before, a late render thread
-  could write into memory the game had already reused (about every 15th start under load, every start
-  on some phones).
 - **GamePad screen modes on Windows/Linux** (overlay → Display): separate window, picture-in-picture,
   automatic overlay, off, or GamePad only, as on macOS; clicks on the GamePad picture reach the game.
-  The GamePad / Pro Controller choice is now saved (issue #26).
 - **60 fps "Keep game speed"** (overlay → Graphics → Frame rate, PR #21 by rhemfur): skips in-between
   frames instead of slowing the game down when the machine can't draw 60 frames a second; off by
   default. The performance overlay shows the share of in-between frames drawn.
 - **Android: build it yourself** (rhemfur's port): see
-  [Android (build it yourself)](#android-build-it-yourself). Also by rhemfur (PRs #19–#22, #24, #30,
-  #31): the game's own icon for windows and shortcuts, name typing in every game window, optional
-  Vulkan paths for slow devices, and pipelines a driver refuses no longer close the game.
-- **Cheats** now also work on saves with heart pieces (PR #25 by Sean13128).
+  [Android (build it yourself)](#android-build-it-yourself). Also by rhemfur (PRs #19–#22, #24): the game's own icon for windows and shortcuts, name typing in every game window and optional
+  Vulkan paths for slow devices.
 - **Performance pass** (PR #15 by Sean13128): much less render-thread CPU on Metal (no more stutter
   while the shader cache warms up), a lighter vsync wait on Vulkan, and a fix for the both-renderer
   build crashing with Homebrew boost installed.

@@ -2,6 +2,9 @@
 """Release notes from README.md: install instructions + the "What's new" section + checksums.
 
 usage: notes.py README.md VERSION SHA256SUMS.txt > notes.md
+
+"What's new" has one "### vX.Y.Z" block per release; the notes take the block for VERSION (or the
+whole section when there is none).
 """
 import re
 import sys
@@ -17,6 +20,10 @@ def main():
     with open(readme, encoding="utf-8") as f:
         text = f.read()
     new = section(text, "What's new")
+    # only this release's own changes: the "### vX.Y.Z" block of "What's new"
+    m = re.search(r"^### %s\s*$\n(.*?)(?=^### |\Z)" % re.escape(version), new, re.S | re.M)
+    if m:
+        new = m.group(1).strip()
     with open(sums) as f:
         checksums = f.read().strip()
     print("""**The Wind Waker HD, native PC port, %s**
