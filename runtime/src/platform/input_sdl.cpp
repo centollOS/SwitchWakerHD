@@ -264,6 +264,21 @@ static void finish_prompt(bool ok){
  other_windows_text_input(false);
  release_keys();if(done)done(ok,std::move(text));
 }
+// Some controllers (GameSir) also register a virtual touch screen and a keyboard with Android and
+// send touches and keys for their buttons (mapping modes of the maker's app). Touches only count
+// from touch devices that are not a connected controller.
+bool touch_from_controller(SDL_TouchID id){
+#ifdef __ANDROID__
+ static std::map<SDL_TouchID,bool> known;
+ if(auto it=known.find(id);it!=known.end())return it->second;
+ const char* name=SDL_GetTouchDeviceName(id);bool fromPad=false;
+ if(name)for(auto [pid,pad]:g_controllers)if(const char* pn=SDL_GetGamepadName(pad))if(*pn&&!strncmp(name,pn,strlen(pn)))fromPad=true;
+ LOG("[input] touch device %s%s",name?name:"?",fromPad?": a controller's, ignored":"");
+ known[id]=fromPad;return fromPad;
+#else
+ (void)id;return false;
+#endif
+}
 void handle_event(const SDL_Event& event){
  if(overlay::is_open())mods::update_mouse();
  else if(mods::handle_mouse_event(event))return;

@@ -1257,6 +1257,11 @@ void swap() {
       tvScan, tvScan ? float(tvScan->extent.width) : 0, tvScan ? float(tvScan->extent.height) : 0,
       drcScan, drcScan ? float(drcScan->extent.width) : 0, drcScan ? float(drcScan->extent.height) : 0,
       layerW, layerH, R.frame + 1);
+#ifdef __ANDROID__
+  // the view button's dot: 60 fps chosen (long press), green while drawn, yellow while paused
+  if (perf_hint::fps60_chosen())
+    plan.button_dot = interp::mode() != 0 ? 1 : 2;
+#endif
   set_present_plan(&plan);
   // settings overlay: built once, drawn into the TV window and its present dumps
   set_overlay_draw(overlay::frame(plan.dw > 0 ? plan.dw : layerW, plan.dh > 0 ? plan.dh : layerH, overlay_renderer_init));
@@ -1792,6 +1797,10 @@ void init() {
   R.tv.window = SDL_CreateWindow("Wind Waker HD — Vulkan", 1280, 720, windowFlags);
   if (!R.tv.window)
     throw std::runtime_error(SDL_GetError());
+#ifdef __ANDROID__
+  // one surface: the GamePad picture is drawn into it (display_modes.h: picture-in-picture, GamePad
+  // only), never a window of its own
+#else
   if (!getenv("WWHD_NO_GAMEPAD")) {
     // made hidden: the GamePad screen mode (load_saved_options below) shows it in window mode only;
     // the other modes draw the GamePad picture into the TV window (gfx/display_modes.h)
@@ -1801,6 +1810,7 @@ void init() {
     R.drc.visible = false;
     gfx::g_has_drc_window = true;
   }
+#endif
   if (hidden_windows())
     R.tv.visible = R.drc.visible = false;  // no drawables: pictures only reach frame / present dumps
   set_window_icons();
@@ -1866,13 +1876,99 @@ static void tv_window_point(float x, float y, float &nx, float &ny) {
   nx = w > 0 ? x / float(w) : 0;
   ny = h > 0 ? y / float(h) : 0;
 }
+//
+// Touch screens (display_modes.h's view button, on by default on Android): a tap on the button
+// switches to the next view (picture-in-picture, GamePad only, TV only), a long press (0.6 s)
+// switches 60 fps on Android. On Android fingers are read as fingers (several at once, one of them
+// touching the GamePad); the mouse events SDL makes from them only reach the settings overlay.
+static uint64_t buttonDown = 0;  // SDL_GetTicks() of the press on the view button, 0: none
+static void view_button_released() {
+  if (SDL_GetTicks() - buttonDown >= 600) {
+#ifdef __ANDROID__
+    // the choice only: platform/perf_hint.cpp switches interpolation where the phone keeps up
+    perf_hint::set_fps60_chosen(!perf_hint::fps60_chosen());
+    ::hostui::graphics_changed();  // saved with the graphics options (fps60)
+#endif
+  } else {
+    ::hostui::set_drc_mode(gfx::next_view());
+  }
+  buttonDown = 0;
+}
+#ifdef __ANDROID__
+static bool synthHeld = false;                 // a mouse press SDL made from a finger, kept from the game
+static SDL_FingerID touchFinger = 0, buttonFinger = 0;  // 0: none
+static bool finger_touch(const SDL_Event& event) {
+  const SDL_TouchFingerEvent& f = event.tfinger;
+  if (f.windowID != SDL_GetWindowID(R.tv.window)) return false;
+  float tx = 0, ty = 0;
+  switch (event.type) {
+  case SDL_EVENT_FINGER_DOWN:
+    if (input::touch_from_controller(f.touchID)) return true;  // a controller's own touch pad / buttons
+    if (overlay::is_open()) return false;
+    if (!buttonFinger && gfx::view_button_hit(f.x, f.y)) {
+      buttonFinger = f.fingerID;
+      buttonDown = std::max<uint64_t>(SDL_GetTicks(), 1);
+      return true;
+    }
+    if (touchFinger || !gfx::overlay_hit(f.x, f.y, &tx, &ty)) return false;
+    touchFinger = f.fingerID;
+    gfx::display_touched();
+    input::set_touch(true, tx, ty);
+    return true;
+  case SDL_EVENT_FINGER_MOTION:
+    if (!touchFinger || f.fingerID != touchFinger) return f.fingerID == buttonFinger && buttonFinger;
+    if (!gfx::overlay_hit(f.x, f.y, &tx, &ty, true)) tx = ty = 0;
+    input::set_touch(true, tx, ty);
+    return true;
+  case SDL_EVENT_FINGER_UP:
+  case SDL_EVENT_FINGER_CANCELED:
+    if (buttonFinger && f.fingerID == buttonFinger) {
+      buttonFinger = 0;
+      if (event.type == SDL_EVENT_FINGER_UP) view_button_released();
+      buttonDown = 0;
+      return true;
+    }
+    if (!touchFinger || f.fingerID != touchFinger) return false;
+    touchFinger = 0;
+    if (!gfx::overlay_hit(f.x, f.y, &tx, &ty, true)) tx = ty = 0;
+    input::set_touch(false, tx, ty);
+    gfx::display_touched();
+    return true;
+  default:
+    return false;
+  }
+}
+#endif
 static bool gamepad_touch(const SDL_Event& event) {
   const SDL_WindowID drcId = R.drc.window ? SDL_GetWindowID(R.drc.window) : 0;
   const SDL_WindowID tvId = SDL_GetWindowID(R.tv.window);
   float tx = 0, ty = 0;
+#ifdef __ANDROID__
+  if (finger_touch(event)) return true;
+  // the mouse events SDL makes from fingers: those on the GamePad picture or the button are the
+  // fingers' (above) and kept from the game's mouse camera; the settings overlay gets them all
+  if ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+      event.button.which == SDL_TOUCH_MOUSEID) {
+    if (overlay::is_open() || event.button.windowID != tvId) return false;
+    if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) return std::exchange(synthHeld, false);
+    float nx, ny;
+    tv_window_point(event.button.x, event.button.y, nx, ny);
+    synthHeld = gfx::view_button_hit(nx, ny) || gfx::overlay_hit(nx, ny, &tx, &ty);
+    return synthHeld;
+  }
+  if (event.type == SDL_EVENT_MOUSE_MOTION && event.motion.which == SDL_TOUCH_MOUSEID) return synthHeld;
+#endif
   switch (event.type) {
   case SDL_EVENT_MOUSE_BUTTON_DOWN:
     if (event.button.button != SDL_BUTTON_LEFT) return false;
+    if (event.button.windowID == tvId && !overlay::is_open() && gfx::view_button_enabled()) {
+      float nx, ny;
+      tv_window_point(event.button.x, event.button.y, nx, ny);
+      if (gfx::view_button_hit(nx, ny)) {
+        buttonDown = std::max<uint64_t>(SDL_GetTicks(), 1);
+        return true;
+      }
+    }
     if (drcId && event.button.windowID == drcId) {
       if (!drc_window_point(event.button.x, event.button.y, tx, ty)) return true;  // outside the picture
       touchHeld = TouchIn::DrcWindow;
@@ -1890,6 +1986,10 @@ static bool gamepad_touch(const SDL_Event& event) {
   case SDL_EVENT_MOUSE_MOTION:
   case SDL_EVENT_MOUSE_BUTTON_UP: {
     const bool up = event.type == SDL_EVENT_MOUSE_BUTTON_UP;
+    if (buttonDown && up && event.button.button == SDL_BUTTON_LEFT) {
+      view_button_released();
+      return true;
+    }
     if (touchHeld == TouchIn::None || (up && event.button.button != SDL_BUTTON_LEFT)) return false;
     const float x = up ? event.button.x : event.motion.x, y = up ? event.button.y : event.motion.y;
     if (touchHeld == TouchIn::DrcWindow) {

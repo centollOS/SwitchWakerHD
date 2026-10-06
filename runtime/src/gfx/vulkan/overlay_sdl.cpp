@@ -10,6 +10,7 @@
 #include "input.h"
 #include "overlay/hostui.h"
 #include "platform/host.h"
+#include "platform/perf_hint.h"
 #include "runtime.h"
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -150,7 +151,12 @@ void graphics_changed() {
     put("aoHires", {"WWHD_AO_HIRES"}, gfxvk::ao_hires_enabled() ? "1" : "0");
     put("aniso", {"WWHD_ANISO"}, gfxvk::aniso_enabled() ? "1" : "0");
     put("fxaa", {"WWHD_FXAA"}, gfxvk::fxaa_enabled() ? "1" : "0");
+#ifdef __ANDROID__
+    // the player's choice: the phone pauses interpolation by itself (platform/perf_hint.cpp)
+    put("fps60", {"WWHD_INTERP", "WWHD_TRUE60"}, interp::mode() == 2 ? "2" : perf_hint::fps60_chosen() ? "1" : "0");
+#else
     put("fps60", {"WWHD_INTERP", "WWHD_TRUE60"}, std::to_string(interp::mode()));
+#endif
     put("fps60Paced", {"WWHD_INTERP_PACED"}, interp::paced_interpolation() ? "1" : "0");
     put("scaleFilter", {"WWHD_SCALE_FILTER"}, std::to_string(gfxvk::scale_filter()));
     put("vkPresentMode", {"WWHD_VK_PRESENT_MODE"}, std::to_string(gfxvk::present_mode()));
