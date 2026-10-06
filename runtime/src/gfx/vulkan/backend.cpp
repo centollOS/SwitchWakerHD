@@ -119,7 +119,10 @@ void init_pipeline_cache() try {
              !shaderPath || std::strcmp(shaderPath,"0")) {
     char ids[32];
     std::snprintf(ids,sizeof ids,"vulkan-%08x-%08x-",R.properties.vendorID,R.properties.deviceID);
-    pipelineCachePath=host::config_dir()+"/shadercache/"+ids;
+    // a WWHD_SHADER_CACHE file (test runs, separate setups) keeps the pipeline cache next to it,
+    // so such runs never write the user's own cache in the config folder
+    pipelineCachePath=shaderPath ? std::string(shaderPath)+"."+ids
+                                 : host::config_dir()+"/shadercache/"+ids;
     for (uint8_t byte : R.properties.pipelineCacheUUID) {
       char hex[3]; std::snprintf(hex,sizeof hex,"%02x",byte); pipelineCachePath+=hex;
     }
