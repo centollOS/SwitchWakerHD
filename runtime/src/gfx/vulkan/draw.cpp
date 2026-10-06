@@ -19,6 +19,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -906,8 +907,69 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
   R.pipelineCreateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now()-pipelineStarted).count();
   ++R.pipelineCreates;
+  if (result == VK_ERROR_UNKNOWN) {
+    // Pixel shader inputs that this vertex shader does not write (the Latte
+    // translation declares every input of the pixel shader): read as zero.
+    std::string glsl = ps->glsl;
+    size_t replaced = 0;
+    for (size_t at = 0; (at = glsl.find("layout(location = ", at)) != std::string::npos;) {
+      size_t end = glsl.find(';', at);
+      size_t name = glsl.find("in vec4 passParameterSem", at);
+      if (end == std::string::npos || name == std::string::npos || name > end) { at++; continue; }
+      std::string var = glsl.substr(name + 8, end - name - 8);
+      if (vs->glsl.find("out vec4 " + var + ";") == std::string::npos) {
+        std::string zero = "const vec4 " + var + " = vec4(0.0)";
+        glsl.replace(at, end - at, zero);
+        at += zero.size();
+        replaced++;
+      } else {
+        at = end;
+      }
+    }
+    std::string error;
+    auto spirv = replaced ? vk::compile_glsl(glsl, false, &error) : std::vector<uint32_t>{};
+    VkShaderModule zeroed = VK_NULL_HANDLE;
+    if (!spirv.empty()) {
+      VkShaderModuleCreateInfo mc{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+      mc.codeSize = spirv.size() * 4;
+      mc.pCode = spirv.data();
+      if (vkCreateShaderModule(R.device, &mc, nullptr, &zeroed) == VK_SUCCESS) {
+        stages[1].module = zeroed;
+        result = vkCreateGraphicsPipelines(R.device, R.pipelineCache, 1, &ci, nullptr, &p.pipeline);
+        vkDestroyShaderModule(R.device, zeroed, nullptr);
+      }
+    }
+    LOG("[vulkan] graphics pipeline vs %016llX ps %016llX: VK_ERROR_UNKNOWN; %zu pixel shader inputs without a vertex output read as zero: %s",
+        (unsigned long long)vs->key, (unsigned long long)ps->key, replaced,
+        result == VK_SUCCESS ? "built" : error.empty() ? "still fails" : error.c_str());
+  }
   for (auto m : modules)
     vkDestroyShaderModule(R.device, m, nullptr);
+  if (result != VK_SUCCESS && result != VK_ERROR_OUT_OF_HOST_MEMORY &&
+      result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_DEVICE_LOST) {
+    // A driver that cannot build one pipeline (Adreno: VK_ERROR_UNKNOWN on the
+    // boat ride after the sword and shield) used to end the game. The pipeline
+    // stays empty, its draws are skipped, and the two shaders go to captures/
+    // (GLSL and SPIR-V) to look at.
+    p.pipeline = VK_NULL_HANDLE;
+    LOG("[vulkan] graphics pipeline failed (Vulkan result %d): vs %016llX ps %016llX; its draws are skipped",
+        int(result), (unsigned long long)vs->key, (unsigned long long)ps->key);
+    std::filesystem::create_directories("captures");
+    for (auto *shader : shaders) {
+      char name[96];
+      snprintf(name, sizeof name, "captures/pipeline-failed-%s-%016llX",
+               shader->vertex ? "vs" : "ps", (unsigned long long)shader->key);
+      if (FILE *f = fopen((std::string(name) + ".glsl").c_str(), "wb")) {
+        fwrite(shader->glsl.data(), 1, shader->glsl.size(), f);
+        fclose(f);
+      }
+      if (FILE *f = fopen((std::string(name) + ".spv").c_str(), "wb")) {
+        fwrite(shader->spirv.data(), 4, shader->spirv.size(), f);
+        fclose(f);
+      }
+    }
+    return remember(pipelines.emplace(std::move(key), p).first->second);
+  }
   vk_check(result, "graphics pipeline");
   R.pipelineCacheDirty = true;
   R.pipelineCacheChangedFrame = R.frame;
@@ -1849,6 +1911,8 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   if (depth && (depth->extent.width < width || depth->extent.height < height))
     depth = nullptr;
   auto &p = pipeline(r, vs, ps, fs, topology, colors, depth);
+  if (!p.pipeline)
+    return;  // the driver could not build it (logged once in pipeline())
   if(feedback_stats_enabled()) report_feedback_stats();
   if(vertex_window_stats_enabled()) report_vertex_window_stats();
   FeedbackStatsProbe feedbackProbe;
