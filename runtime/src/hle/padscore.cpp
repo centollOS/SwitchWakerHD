@@ -1,8 +1,10 @@
 // padscore: Wii Remote / Pro Controller (WPAD, KPAD). Only a Pro Controller on channel 0 exists,
 // and only while the keyboard/host controllers are set to act as one (Input menu). Struct layouts
 // and constants follow Cemu's padscore.
+#include "../crashrec.h"
 #include "../runtime.h"
 #include "../input.h"
+#include "../rumble.h"
 
 namespace interp { bool repeat_input(); bool fresh_sticks(); }
 
@@ -35,7 +37,16 @@ HLE(padscore, KPADSetMplsWorkarea) {}
 HLE(padscore, WPADEnableURCC) {}
 HLE(padscore, WPADEnableWiiRemote) {}
 HLE(padscore, WPADDisconnect) {}
-HLE(padscore, WPADControlMotor) {}
+// The Pro Controller motor: cmd 0 stops it, 1 runs it until the game stops it. The Pro
+// Controller is only connected while the keyboard/controllers act as one (see connected).
+HLE(padscore, WPADControlMotor) {
+    uint32_t chan = arg(c, 0), cmd = arg(c, 1);
+    if (connected(chan)) {
+        TRACE("[pad] WPADControlMotor(%u, %u) -> %s", chan, cmd, cmd ? "rumble" : "stop");
+        rumble::pro_motor(chan, cmd != 0);
+    }
+    ret(c, (uint32_t)kWpadErrNone);
+}
 HLE(padscore, WPADGetBatteryLevel) { ret(c, 4); }  // full
 HLE(padscore, WPADCanSendStreamData) { ret(c, 0); }
 HLE(padscore, WPADSendStreamData) { ret(c, (uint32_t)kWpadErrNoController); }
@@ -62,7 +73,7 @@ HLE(padscore, KPADReadEx) {
     static uint32_t last = 0;
     static input::PadState last_p;
     const bool repeat = interp::repeat_input();
-    input::PadState p = repeat ? last_p : input::read();  // see interp.cpp
+    input::PadState p = repeat ? last_p : crashrec::read(1);  // see interp.cpp; crash recovery records/replays it
     if (repeat && interp::fresh_sticks()) {  // true 60: sticks every pass, buttons on full passes
         input::PadState f = input::read();
         p.lx = f.lx; p.ly = f.ly; p.rx = f.rx; p.ry = f.ry;

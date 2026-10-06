@@ -12,10 +12,13 @@ extern "C" uint64_t g_shader_state_gen;  // gx2_core.cpp: bumped by shader-relev
 #include "Cafe/HW/Latte/Renderer/Metal/LatteToMtl.h"
 #include "gx2/gx2.h"
 #include "gx2/gx2_cmd.h"
+#include "write_watch.h"
 #include "metal.h"
 #include "runtime.h"
 #include "util/helpers/StringBuf.h"
 
+#include <condition_variable>
+#include <mutex>
 #include <set>
 #include <cstdarg>
 #include <ctime>
@@ -207,6 +210,18 @@ static LatteFetchShader* get_fetch_shader(const uint32_t* regs, uint64_t* keyOut
 static const bool g_sync_shaders = getenv("WWHD_SYNC_SHADERS") != nullptr;
 enum CompileState { CS_PENDING, CS_READY, CS_FAILED, CS_DEFERRED };  // deferred: translated from the cache, not compiled yet
 
+// Metal's completion handlers publish results through compile_done, which wakes the render thread
+// if it's blocked in wait_compiled
+static std::mutex g_compile_mu;
+static std::condition_variable g_compile_cv;
+static void compile_done(std::atomic<int>& st, int v) {
+    {
+        std::lock_guard<std::mutex> lk(g_compile_mu);
+        st.store(v, std::memory_order_release);
+    }
+    g_compile_cv.notify_all();
+}
+
 struct Shader {
     uint64_t key = 0;
     LatteDecompilerShader* dec = nullptr;
@@ -237,40 +252,67 @@ static std::string snap_texcoords(const char* src) {
     static const bool off = getenv("WWHD_NO_UV_SNAP") != nullptr;
     std::string s = src;
     if (off) return s;
-    bool any = false;
-    for (int t = 0; t < 32; t++) {
-        char decl[48], call[48];
-        snprintf(decl, sizeof decl, "texture2d<float> tex%d [[", t);
-        if (s.find(decl) == std::string::npos) continue;
-        snprintf(call, sizeof call, "tex%d.sample(samplr%d, float2(", t, t);
-        size_t pos = 0;
-        while ((pos = s.find(call, pos)) != std::string::npos) {
-            size_t arg = pos + strlen(call) - 7;  // start of "float2("
-            int depth = 0;
-            size_t e = arg + 6;
-            for (; e < s.size(); e++) {
-                if (s[e] == '(') depth++;
-                else if (s[e] == ')' && --depth == 0) break;
-            }
-            if (e >= s.size()) break;
-            char pre[32];
-            snprintf(pre, sizeof pre, "wwhd_snap(tex%d, ", t);
-            s.insert(e + 1, ")");
-            s.insert(arg, pre);
-            pos = arg + strlen(pre);
-            any = true;
-        }
+    // one pass each over the declarations and the sample calls (this runs on the render thread for
+    // every compile); the output is byte-identical to wrapping each texture slot in turn, which keeps
+    // the system Metal cache (keyed by source) valid
+    static const char kDecl[] = "texture2d<float> tex", kCall[] = ".sample(samplr";
+    uint32_t is2d = 0;
+    for (size_t p = s.find(kDecl); p != std::string::npos; p = s.find(kDecl, p + 1)) {
+        char* end;
+        long t = strtol(s.c_str() + p + strlen(kDecl), &end, 10);
+        if (end != s.c_str() + p + strlen(kDecl) && t >= 0 && t < 32 && !strncmp(end, " [[", 3)) is2d |= 1u << t;
     }
-    if (!any) return s;
-    return "#include <metal_stdlib>\nusing namespace metal;\n"
-           "static inline float2 wwhd_snap(texture2d<float> t, float2 uv) {\n"
-           "    float2 sz = float2(t.get_width(), t.get_height()) * 256.0;\n"
-           "    return rint(uv * sz) / sz;\n}\n" + s;
+    if (!is2d) return s;
+    // insertion points in the original text: "wwhd_snap(texN, " before float2(, ")" after its close
+    std::vector<std::pair<size_t, int>> ins;  // (position, slot), slot < 0: closing paren
+    uint32_t broken = 0;
+    for (size_t p = s.find(kCall); p != std::string::npos; p = s.find(kCall, p + 1)) {
+        size_t d = p;
+        while (d > 0 && isdigit((unsigned char)s[d - 1])) d--;
+        if (d == p || d < 3 || s.compare(d - 3, 3, "tex")) continue;
+        int t = atoi(s.c_str() + d);
+        if (t >= 32 || !(is2d >> t & 1) || (broken >> t & 1)) continue;
+        char call[32];
+        int n = snprintf(call, sizeof call, "%d.sample(samplr%d, float2(", t, t);
+        if (s.compare(d, n, call)) continue;
+        size_t arg = d + n - 7, e = arg + 6;
+        for (int depth = 0; e < s.size(); e++) {
+            if (s[e] == '(') depth++;
+            else if (s[e] == ')' && --depth == 0) break;
+        }
+        if (e >= s.size()) { broken |= 1u << t; continue; }
+        ins.push_back({arg, t});
+        ins.push_back({e + 1, -1});
+    }
+    if (ins.empty()) return s;
+    std::stable_sort(ins.begin(), ins.end(), [](auto& x, auto& y) { return x.first < y.first || (x.first == y.first && x.second < y.second); });
+    std::string out =
+        "#include <metal_stdlib>\nusing namespace metal;\n"
+        "static inline float2 wwhd_snap(texture2d<float> t, float2 uv) {\n"
+        "    float2 sz = float2(t.get_width(), t.get_height()) * 256.0;\n"
+        "    return rint(uv * sz) / sz;\n}\n";
+    out.reserve(out.size() + s.size() + ins.size() * 16);
+    size_t at = 0;
+    for (auto& [pos, t] : ins) {
+        out.append(s, at, pos - at);
+        at = pos;
+        if (t < 0) out += ')';
+        else out += "wwhd_snap(tex" + std::to_string(t) + ", ";
+    }
+    out.append(s, at, std::string::npos);
+    return out;
 }
 
 static void compile_msl(Shader* sh, const char* rawSrc, uint64_t key) {
     MTLCompileOptions* opt = [MTLCompileOptions new];
-    opt.mathMode = MTLMathModeSafe;
+    if (@available(macOS 15.0, *)) {
+        opt.mathMode = MTLMathModeSafe;
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        opt.fastMathEnabled = NO;  // the pre-15 spelling of MTLMathModeSafe
+#pragma clang diagnostic pop
+    }
     opt.languageVersion = MTLLanguageVersion3_0;
     std::string snapped = snap_texcoords(rawSrc);
     const char* src = snapped.c_str();
@@ -298,15 +340,21 @@ static void compile_msl(Shader* sh, const char* rawSrc, uint64_t key) {
     g_compiles_in_flight++;
     [R.device newLibraryWithSource:source options:opt completionHandler:^(id<MTLLibrary> lib, NSError* err) {
         g_compiles_in_flight--;
-        if (!lib) { report_compile_error(copy.c_str(), key, err); sh->state = CS_FAILED; return; }
+        if (!lib) { report_compile_error(copy.c_str(), key, err); compile_done(sh->state, CS_FAILED); return; }
         sh->fn = [lib newFunctionWithName:entry];
-        sh->state.store(sh->fn ? CS_READY : CS_FAILED, std::memory_order_release);
+        compile_done(sh->state, sh->fn ? CS_READY : CS_FAILED);
     }];
 }
 
 // registers that influence how a shader stage is translated (gathered, then hashed in one pass)
 static uint64_t stage_state_hash(const uint32_t* regs, uint64_t h, uint32_t texBase) {
-    uint32_t buf[400];
+    // most lookups gather the same words as the previous one for this stage (the state generation
+    // also moves for registers that don't end up here): gather into the spare buffer and compare
+    // instead of rehashing. Render thread only.
+    struct Last { uint64_t in = 0, out = 0; uint32_t n = 0, cur = 0; uint32_t buf[2][400]; };
+    static Last last[2];
+    Last& L = last[texBase == REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS ? 0 : 1];
+    uint32_t* buf = L.buf[L.cur ^ 1];
     uint32_t n = 0;
     auto put = [&](uint32_t first, uint32_t count) { memcpy(&buf[n], &regs[first], count * 4); n += count; };
     put(mmSQ_VTX_SEMANTIC_0, 32);
@@ -345,7 +393,11 @@ static uint64_t stage_state_hash(const uint32_t* regs, uint64_t h, uint32_t texB
     }
     // depth-compare samplers
     for (int i = 0; i < 18 * 3; i++) buf[n++] = regs[REGADDR::SQ_TEX_SAMPLER_WORD0_0 + i * 3] & 0xF8000000;
-    return hash_bytes(buf, n * 4, h);
+    if (L.n == n && L.in == h && !memcmp(L.buf[L.cur], buf, n * 4)) return L.out;
+    L.cur ^= 1;
+    L.in = h;
+    L.n = n;
+    return L.out = hash_bytes(buf, n * 4, h);
 }
 
 static Shader* get_shader_uncached(const uint32_t* regs, bool vertex, LatteFetchShader* fs, uint64_t fsKey);
@@ -498,10 +550,13 @@ static bool wait_compiled(const std::atomic<int>& st) {
     static uint64_t frame = ~0ull;
     static double spent = 0;
     if (frame != R.frame) { frame = R.frame; spent = 0; }
+    if (st.load(std::memory_order_acquire) != CS_PENDING) return st.load(std::memory_order_acquire) == CS_READY;
+    if (spent >= budgetMs) return false;
     double t0 = now_ms();
-    while (st.load(std::memory_order_acquire) == CS_PENDING) {
-        if (spent + (now_ms() - t0) >= budgetMs) break;
-        usleep(100);
+    {
+        std::unique_lock<std::mutex> lk(g_compile_mu);
+        g_compile_cv.wait_for(lk, std::chrono::duration<double, std::milli>(budgetMs - spent),
+                              [&] { return st.load(std::memory_order_acquire) != CS_PENDING; });
     }
     spent += now_ms() - t0;
     return st.load(std::memory_order_acquire) == CS_READY;
@@ -616,7 +671,7 @@ static id<MTLRenderPipelineState> get_pipeline(const uint32_t* regs, Shader* vs,
         g_compiles_in_flight--;
         if (!p) LOG("[gfx] pipeline creation failed: %s", err.localizedDescription.UTF8String);
         pl->state = p;
-        pl->status.store(p ? CS_READY : CS_FAILED, std::memory_order_release);
+        compile_done(pl->status, p ? CS_READY : CS_FAILED);
     }];
     return wait_compiled(pl->status) ? pl->state : nil;
 }
@@ -1034,19 +1089,12 @@ static bool ensure_pass(Surface* const* colors, const uint32_t* colorSlices, Sur
 // ---------------------------------------------------------------- indices
 // Converts guest indices (possibly big-endian, possibly a primitive type Metal lacks)
 // into a 32-bit little-endian index list. Returns the Metal primitive type.
-static bool build_indices(uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr, std::vector<uint32_t>& out,
-                          MTLPrimitiveType& type) {
-    auto idx = [&](uint32_t i) -> uint32_t {
-        if (!indexAddr) return i;
-        switch (indexType) {
-        case 0: return ((const uint16_t*)mem::ptr(indexAddr))[i];
-        case 1: return ((const uint32_t*)mem::ptr(indexAddr))[i];
-        case 4: return ld16(indexAddr + 2 * i);
-        case 9: return ld32(indexAddr + 4 * i);
-        default: return ld16(indexAddr + 2 * i);
-        }
-    };
+// one pass into a presized buffer; the index format is resolved once per draw, not per index
+template <class Idx>
+static bool expand_indices(uint32_t prim, uint32_t count, bool indexed, Idx idx, std::vector<uint32_t>& out,
+                           MTLPrimitiveType& type) {
     out.clear();
+    uint32_t* o;
     switch (prim) {
     case 1: type = MTLPrimitiveTypePoint; break;
     case 2: type = MTLPrimitiveTypeLine; break;
@@ -1055,31 +1103,58 @@ static bool build_indices(uint32_t prim, uint32_t count, uint32_t indexType, uin
     case 6: type = MTLPrimitiveTypeTriangleStrip; break;
     case 5:  // triangle fan -> list
         type = MTLPrimitiveTypeTriangle;
-        for (uint32_t i = 2; i < count; i++) out.insert(out.end(), {idx(0), idx(i - 1), idx(i)});
+        out.resize(count > 2 ? size_t(count - 2) * 3 : 0);
+        o = out.data();
+        for (uint32_t i = 2; i < count; i++) { *o++ = idx(0); *o++ = idx(i - 1); *o++ = idx(i); }
         return true;
     case 0x13:  // quads -> list
         type = MTLPrimitiveTypeTriangle;
-        for (uint32_t q = 0; q + 3 < count; q += 4)
-            out.insert(out.end(), {idx(q), idx(q + 1), idx(q + 2), idx(q), idx(q + 2), idx(q + 3)});
+        out.resize(size_t(count / 4) * 6);
+        o = out.data();
+        for (uint32_t q = 0; q + 3 < count; q += 4) {
+            uint32_t a = idx(q), b = idx(q + 1), c = idx(q + 2), d = idx(q + 3);
+            *o++ = a; *o++ = b; *o++ = c; *o++ = a; *o++ = c; *o++ = d;
+        }
         return true;
     case 0x14:  // quad strip -> list
         type = MTLPrimitiveTypeTriangle;
-        for (uint32_t q = 0; q + 3 < count; q += 2)
-            out.insert(out.end(), {idx(q), idx(q + 1), idx(q + 3), idx(q), idx(q + 3), idx(q + 2)});
+        out.resize(count >= 4 ? size_t((count - 4) / 2 + 1) * 6 : 0);
+        o = out.data();
+        for (uint32_t q = 0; q + 3 < count; q += 2) {
+            uint32_t a = idx(q), b = idx(q + 1), c = idx(q + 2), d = idx(q + 3);
+            *o++ = a; *o++ = b; *o++ = d; *o++ = a; *o++ = d; *o++ = c;
+        }
         return true;
     case 0x12:  // line loop
         type = MTLPrimitiveTypeLineStrip;
-        for (uint32_t i = 0; i < count; i++) out.push_back(idx(i));
-        if (count) out.push_back(idx(0));
+        out.resize(count ? count + 1 : 0);
+        for (uint32_t i = 0; i < count; i++) out[i] = idx(i);
+        if (count) out[count] = idx(0);
         return true;
     default:
         return false;  // rects and adjacency primitives: not supported yet
     }
-    if (indexAddr) {
+    if (indexed) {
         out.resize(count);
         for (uint32_t i = 0; i < count; i++) out[i] = idx(i);
     }
     return true;
+}
+
+static bool build_indices(uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr, std::vector<uint32_t>& out,
+                          MTLPrimitiveType& type) {
+    if (!indexAddr) return expand_indices(prim, count, false, [](uint32_t i) { return i; }, out, type);
+    const uint8_t* p = mem::ptr(indexAddr);
+    switch (indexType) {
+    case 0: return expand_indices(prim, count, true, [p](uint32_t i) -> uint32_t { return ((const uint16_t*)p)[i]; }, out, type);
+    case 1: return expand_indices(prim, count, true, [p](uint32_t i) -> uint32_t { return ((const uint32_t*)p)[i]; }, out, type);
+    case 9:
+        return expand_indices(prim, count, true, [p](uint32_t i) { uint32_t v; memcpy(&v, p + 4 * i, 4); return __builtin_bswap32(v); },
+                              out, type);
+    default:  // 4 and anything else: big-endian 16-bit
+        return expand_indices(prim, count, true, [p](uint32_t i) -> uint32_t { uint16_t v; memcpy(&v, p + 2 * i, 2); return __builtin_bswap16(v); },
+                              out, type);
+    }
 }
 
 // ---------------------------------------------------------------- draw
@@ -1102,6 +1177,9 @@ struct PipelineRecipe {
     uint32_t blend[8], colorControl, targetMask, strides[16];
 };
 std::vector<PipelineRecipe> g_pending_pipelines;
+// hashes of the pipeline recipes already in the cache file or head start, so a pipeline the game asks
+// for before its queued recipe is built isn't appended again
+std::unordered_set<uint64_t> g_known_pipelines;
 
 std::string cache_path() {
     if (const char* e = getenv("WWHD_SHADER_CACHE")) return e;
@@ -1178,6 +1256,7 @@ static void cache_record_pipeline(const uint32_t* regs, Shader* vs, Shader* ps, 
     for (int i = 0; i < 16; i++) r.strides[i] = regs[mmSQ_VTX_ATTRIBUTE_BLOCK_START + i * 7 + 2];
     std::vector<uint8_t> v;
     put(v, r);
+    if (!g_known_pipelines.insert(hash_bytes(v.data(), v.size())).second) return;
     cache_write(kRecPipeline, v);
 }
 
@@ -1210,7 +1289,10 @@ static void cache_load() {
             const uint8_t* end = p + raw.size();
             if (hdr[0] == kRecPipeline) {
                 PipelineRecipe r;
-                if (get(p, end, r)) { g_pending_pipelines.push_back(r); pipelines++; }
+                if (get(p, end, r) && g_known_pipelines.insert(hash_bytes(raw.data(), raw.size())).second) {
+                    g_pending_pipelines.push_back(r);
+                    pipelines++;
+                }
                 continue;
             }
             if (hdr[0] != kRecShader) continue;
@@ -1262,7 +1344,12 @@ static void build_pending_pipelines(int budget, int maxInFlight) {
     static std::vector<uint32_t> regs(0x10000);
     g_cache_replaying = true;
     g_building_ahead = true;
-    for (size_t i = 0; i < g_pending_pipelines.size() && budget > 0 && g_compiles_in_flight < maxInFlight;) {
+    // the queue holds ~10^5 recipes at startup; per-frame calls check a window of it and resume from a
+    // cursor next frame instead of rescanning everything (`--warm-shaders` passes INT_MAX: full scan)
+    static size_t cursor = 0;
+    size_t scan = budget == INT_MAX ? SIZE_MAX : 2048;
+    size_t i = scan != SIZE_MAX && cursor < g_pending_pipelines.size() ? cursor : 0;
+    for (; i < g_pending_pipelines.size() && scan > 0 && budget > 0 && g_compiles_in_flight < maxInFlight; scan--) {
         PipelineRecipe& r = g_pending_pipelines[i];
         auto vi = g_shaders.find(r.vsKey), pi = g_shaders.find(r.psKey);
         auto fi = g_fetch.find(r.fsKey);
@@ -1284,6 +1371,7 @@ static void build_pending_pipelines(int budget, int maxInFlight) {
         g_recipes_built++;
         budget--;
     }
+    cursor = i;
     g_building_ahead = false;
     g_cache_replaying = false;
 }
@@ -1323,10 +1411,15 @@ void report_skips() {
     LOG("[gfx] %zu shaders, %zu pipelines; ms decompile %.0f, msl %.0f, pipeline %.0f", g_shaders.size(), g_pipelines.size(),
         g_t_decompile, g_t_msl, g_t_pipeline);
     extern uint64_t g_stat_full_checks, g_stat_uploads, g_stat_invalidates, g_stat_invalidated_surfaces;
-    LOG("[gfx] last 300 frames: %llu full texture checks, %llu uploads, %llu invalidates marking %llu surfaces",
-        (unsigned long long)g_stat_full_checks, (unsigned long long)g_stat_uploads, (unsigned long long)g_stat_invalidates,
-        (unsigned long long)g_stat_invalidated_surfaces);
-    g_stat_full_checks = g_stat_uploads = g_stat_invalidates = g_stat_invalidated_surfaces = 0;
+    extern uint64_t g_stat_hashed_bytes;
+    uint64_t faults, protectedPages;
+    wwatch::take_stats(faults, protectedPages);
+    LOG("[gfx] last 300 frames: %llu full texture checks (%.1f MiB hashed), %llu uploads, %llu invalidates marking %llu surfaces, "
+        "%llu texture page write faults, %llu pages protected",
+        (unsigned long long)g_stat_full_checks, g_stat_hashed_bytes / 1048576.0, (unsigned long long)g_stat_uploads,
+        (unsigned long long)g_stat_invalidates, (unsigned long long)g_stat_invalidated_surfaces, (unsigned long long)faults,
+        (unsigned long long)protectedPages);
+    g_stat_full_checks = g_stat_uploads = g_stat_invalidates = g_stat_invalidated_surfaces = g_stat_hashed_bytes = 0;
 }
 
 void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr, uint32_t baseVertex,
@@ -1399,7 +1492,7 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
     g_target_ky = ky;
 
     // textures must be uploaded before the render encoder opens
-    std::vector<uint32_t> indices;
+    static std::vector<uint32_t> indices;  // render thread only; keeps its capacity between draws
     MTLPrimitiveType ptype;
     if (!build_indices(prim, count, indexType, indexAddr, indices, ptype)) { g_skip[SK_PRIM]++; return; }
     for (Shader* sh : {vs, ps}) {
@@ -1650,7 +1743,7 @@ bool headstart_queue_pipeline(const uint8_t* raw, size_t size) {
     if (size != sizeof(PipelineRecipe)) return false;
     PipelineRecipe r;
     memcpy(&r, raw, size);
-    g_pending_pipelines.push_back(r);
+    if (g_known_pipelines.insert(hash_bytes(raw, size)).second) g_pending_pipelines.push_back(r);
     return true;
 }
 

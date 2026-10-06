@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- long-press the app icon: export the save as a zip / import one (from another phone or the PC
+     version's save/ folder) -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="export_save"
+        android:enabled="true"
+        android:shortcutShortLabel="@string/save_export">
+        <intent android:action="android.intent.action.VIEW"
+            android:targetPackage="org.wwhdrecomp.wwhd"
+            android:targetClass="org.wwhdrecomp.wwhd.ExportSaveActivity" />
+    </shortcut>
+    <shortcut android:shortcutId="import_save"
+        android:enabled="true"
+        android:shortcutShortLabel="@string/save_import">
+        <intent android:action="android.intent.action.VIEW"
+            android:targetPackage="org.wwhdrecomp.wwhd"
+            android:targetClass="org.wwhdrecomp.wwhd.ImportSaveActivity" />
+    </shortcut>
+</shortcuts>

@@ -1,5 +1,5 @@
 #pragma once
-#include <vulkan/vulkan.h>
+#include "loader.h"
 #ifdef WWHD_SDL_HOST
 #include <SDL3/SDL.h>
 #endif
@@ -25,6 +25,8 @@ struct Surface {
  uint32_t addr=0,mipAddr=0,width=0,height=0,slices=1,pitch=0,mips=1,format=0,dim=1,tileMode=0,swizzle=0;
  bool isDepth=false,gpuWritten=false,dirty=true;
  uint64_t writeSeq=0,contentHash=0,lastCheckedFrame=~0ull,sparseHash=0;
+ // CPU textures: write stamp (write_watch.h) of all levels' pages at the last full check
+ uint64_t watchStamp=0; bool watched=false;
  uint32_t dataSize=0; FormatInfo fmt;
  mutable std::shared_ptr<CachedGuestLayout> guestLayout;
  float scale=1,sx=1,sy=1;
@@ -43,6 +45,7 @@ struct Screen {
  VkSemaphore acquired=VK_NULL_HANDLE,finished=VK_NULL_HANDLE;
  std::unique_ptr<Surface> scan;
  std::atomic<bool> visible{true},srgb{false},resize{false};
+ int presentMode=-1,presentWanted=-1; // present mode of the swapchain, and the setting it was made for
  std::atomic<int> width{1280},height{720};
 };
 struct GpuScopeMetadata {
@@ -59,6 +62,7 @@ struct GpuScopeToken { uint64_t generation=0; uint32_t index=UINT32_MAX; };
 struct Renderer {
  VkInstance instance=VK_NULL_HANDLE; VkPhysicalDevice physicalDevice=VK_NULL_HANDLE; VkDevice device=VK_NULL_HANDLE;
  VkPhysicalDeviceFeatures enabledFeatures{};
+ bool dynamicRenderingKHR=false; // VK_KHR_dynamic_rendering (device older than Vulkan 1.3)
  bool portabilitySubset=false,imageViewSwizzle=true,imageViewReinterpretation=true;
  bool samplerMipLodBias=true,separateStencilMaskRef=true,constantAlphaColorBlendFactors=true,vertexAttributeAccessBeyondStride=true,samplerMirrorClampToEdge=false;
  VkPhysicalDeviceProperties properties{}; VkQueue queue=VK_NULL_HANDLE; uint32_t queueFamily=0;

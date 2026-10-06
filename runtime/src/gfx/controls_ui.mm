@@ -25,6 +25,7 @@
 #include "../input.h"
 #include "../input_map.h"
 #include "../runtime.h"
+#include "../platform/host.h"
 
 namespace gfx { void show_drc_window(bool on); }
 
@@ -980,7 +981,8 @@ static NSTextField* label(NSString* s) {
     w.delegate = self;
     w.releasedWhenClosed = NO;
     w.contentMinSize = NSMakeSize(960, 570);
-    if (!getenv("WWHD_NO_HOST_INPUT")) w.frameAutosaveName = @"WWHDControls2";  // test runs: always the default size
+    // remembered window frame (NSUserDefaults); not in portable mode, which keeps nothing outside its folder
+    if (!getenv("WWHD_NO_HOST_INPUT") && !host::portable()) w.frameAutosaveName = @"WWHDControls2";  // test runs: always the default size
     self.window = w;
     WWRootView* root = [[WWRootView alloc] init];
     w.contentView = root;
@@ -1438,6 +1440,8 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
     [self reloadFromModel];
     [self startTimer];
     [self poll];
+    const char* hidden = getenv("WWHD_HIDDEN_WINDOWS");
+    if (hidden && *hidden && strcmp(hidden, "0")) return;  // test runs: never on screen (snapshots still work)
     if (takeFocus) [self.window makeKeyAndOrderFront:nil];
     else [self.window orderFront:nil];
 }

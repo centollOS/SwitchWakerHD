@@ -1,3 +1,4 @@
+#include "mods/packages.h"
 // Frame interpolation (60 fps output, game logic unchanged at 30 steps per second).
 //
 // With interpolation on, the main loop body runs every vsync (swap interval halved) but the game
@@ -11,7 +12,9 @@
 // Main loop functions in WWHD: see tools/recomp/hooks.txt and docs/decomp-notes.md.
 // Camera layout (camera_draw, 024FFC40): near +0xCC, far +0xD0, fovy +0xD4, aspect +0xD8,
 // eye +0xDC, center +0xE8, up +0xF4, bank (s16) +0x100.
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -201,6 +204,11 @@ bool g_cam_blended = false; // camera_draw is drawing the blended (halfway) came
 bool g_logic_pass = false;  // logic pass with interpolation on: camera drawn halfway
 bool g_hold_next = false;   // the next pass is a hold pass
 bool g_hold_frame = false;  // inside the per-frame function on a hold pass
+// paced interpolation: a logic pass that does not follow an in-between pass draws its step exactly.
+// The previous states the halfway frames blend from (camera, model joints, effects) are recorded on
+// the in-between pass; without one they are steps old (camera trailing behind Link, models jumping,
+// a head blended from another step than its body).
+bool g_exact_step = false;
 // last camera state that was drawn normally, per camera process
 struct Prev { uint32_t cam = 0; CamState s{}; bool valid = false; };
 Prev g_prev[4];
@@ -233,6 +241,38 @@ extern "C" void hook_024FFC40(Cpu* c) {
     }
     p->s = read_cam(cam);  // exact step: remember it for the next halfway frame
     p->valid = true;
+    if (g_hold && true60::enabled()) {  // true 60: the half pass's camera is a preview (true60.cpp)
+        true60::camera_draw_preview(true);
+        f_024FFC40_orig(c);
+        true60::camera_draw_preview(false);
+        return;
+    }
+    static const bool dbg = getenv("WWHD_T60_CAMDRAWLOG") != nullptr;  // debug: statics camera_draw writes
+    if (dbg && g_hold) {
+        static std::vector<uint32_t> before;
+        static std::unordered_map<uint32_t, int> cnt;
+        static int n = 0;
+        const uint32_t lo = 0x10100000, hi = 0x10500000;
+        before.assign((uint32_t*)ppc_ptr(lo), (uint32_t*)ppc_ptr(hi));
+        f_024FFC40_orig(c);
+        const uint32_t* cur = (const uint32_t*)ppc_ptr(lo);
+        for (size_t i = 0; i < before.size(); i++)
+            if (cur[i] != before[i]) cnt[lo + 4 * (uint32_t)i]++;
+        if (++n % 200 == 0) {
+            std::vector<std::pair<uint32_t, int>> v(cnt.begin(), cnt.end());
+            std::sort(v.begin(), v.end());
+            std::string o;
+            uint32_t start = 0, last = 0; int c0 = 0;
+            for (auto& [a, k] : v) {
+                if (start && a == last + 4) { last = a; continue; }
+                if (start) { char t[48]; snprintf(t, sizeof t, " %08X-%08X:%d", start, last + 3, c0); o += t; }
+                start = last = a; c0 = k;
+            }
+            if (start) { char t[48]; snprintf(t, sizeof t, " %08X-%08X:%d", start, last + 3, c0); o += t; }
+            LOG("[camdrawlog]%s", o.c_str());
+        }
+        return;
+    }
     f_024FFC40_orig(c);
 }
 
@@ -341,7 +381,7 @@ void blend_mtx(const float* a, const float* b, float* out) {
 extern "C" void hook_027F55FC(Cpu* c) {
     using namespace interp;
     static const bool off = getenv("WWHD_INTERP_MODELS") && !atoi(getenv("WWHD_INTERP_MODELS"));  // debug
-    if (!enabled() || off || (!g_hold && true60::drawing_60())) {
+    if (!enabled() || off || (!g_hold && (true60::drawing_60() || g_exact_step))) {
         f_027F55FC_orig(c);
         return;
     }
@@ -453,12 +493,90 @@ void ss_reset() {
     fx_ss_reset();
     true60::ss_reset();
 }
+// Paced interpolation (WWHD_INTERP_PACED=1, the default on Android): the in-between pass is drawn
+// only when it fits before the next logic step is due (33.3 ms after the last one, measured with
+// the passes' recent durations); otherwise it is dropped and the next step waits for its time. The
+// game then always advances 30 steps a second, and the picture gets 60 frames a second where the
+// device draws them fast enough and fewer where it does not. Without pacing, every logic step is
+// followed by an in-between pass, and a device that draws fewer than 60 frames a second runs the
+// whole game slower than real time.
+// The settings overlay switches it ("Keep game speed", saved with the graphics options); the
+// variable sets it at start and wins over the saved value.
+static std::atomic<bool> g_paced{[] {
+    const char* e = getenv("WWHD_INTERP_PACED");
+#ifdef __ANDROID__
+    return !e || atoi(e) != 0;
+#else
+    return e && atoi(e) != 0;
+#endif
+}()};
+static bool paced() { return g_paced.load(std::memory_order_relaxed); }
+bool paced_interpolation() { return paced(); }
+void set_paced_interpolation(bool on) {
+    if (g_paced.exchange(on) != on) LOG("[interp] paced interpolation %s", on ? "on (keeps the game's speed)" : "off");
+}
+// share of in-between frames drawn over the last 60 decisions (performance overlay), -1 before any
+static std::atomic<float> g_paced_share{-1};
+float paced_drawn_share() { return paced() && interp_on() ? g_paced_share.load(std::memory_order_relaxed) : -1; }
+// The decision is taken at the end of each logic pass, before the frame's controller read: that
+// read repeats the previous sample when an in-between pass follows (repeat_input), so deciding later
+// left every read a repeat while all in-between passes were dropped (the controller stopped).
+using pace_clock = std::chrono::steady_clock;
+static pace_clock::time_point g_last_logic{}, g_last_entry{};
+static pace_clock::duration g_slept{}, g_pass_avg = std::chrono::milliseconds(16);
+static bool g_wait_step = false;  // no in-between pass: the next logic pass waits for its time
+static uint64_t g_paced_dropped = 0, g_paced_holds = 0;
+constexpr auto kPacedStep = std::chrono::nanoseconds(33'333'333);
+// start of every pass: the last pass's own duration, and the wait before a logic pass that follows
+// another logic pass directly
+static void paced_pass_start() {
+    static bool previousHold = false;
+    if (!paced() || !interp_on()) { g_exact_step = false; previousHold = false; return; }
+    if (!g_hold_next) g_exact_step = !previousHold;  // this logic pass: blend only after a hold
+    previousHold = g_hold_next;
+    const auto now = pace_clock::now();
+    if (g_last_entry != pace_clock::time_point{})
+        g_pass_avg = (g_pass_avg * 3 + (now - g_last_entry - g_slept)) / 4;
+    g_last_entry = now;
+    g_slept = {};
+    if (g_hold_next) return;
+    if (g_wait_step && now < g_last_logic + kPacedStep) {
+        threads::park_sleep_until(g_last_logic + kPacedStep);  // the game keeps 30 steps a second
+        g_slept = pace_clock::now() - now;
+    }
+    g_wait_step = false;
+    g_last_logic = pace_clock::now();
+}
+// end of a logic pass: an in-between pass follows only if it fits before the next step is due
+static void paced_after_logic() {
+    if (!paced() || !interp_on()) { g_hold_next = true; g_wait_step = false; return; }
+    const auto elapsed = pace_clock::now() - g_last_logic;
+    const bool fits = elapsed + g_pass_avg <= kPacedStep + std::chrono::milliseconds(2);
+    g_hold_next = fits;
+    g_wait_step = !fits;
+    (fits ? g_paced_holds : g_paced_dropped)++;
+    static unsigned recentHolds = 0, recentN = 0;
+    recentHolds += fits;
+    if (++recentN == 60) {
+        g_paced_share.store(recentHolds / 60.0f, std::memory_order_relaxed);
+        recentHolds = recentN = 0;
+    }
+    if (g_paced_dropped + g_paced_holds >= 300) {
+        LOG("[interp] paced: %.0f%% of in-between frames drawn (pass %.1f ms)",
+            100.0 * g_paced_holds / double(g_paced_dropped + g_paced_holds),
+            std::chrono::duration<double, std::milli>(g_pass_avg).count());
+        g_paced_dropped = g_paced_holds = 0;
+    }
+}
 }  // namespace interp
+
+namespace mods { void cheats_service(); }  // mods/cheats.cpp
 
 extern "C" void hook_0203593C(Cpu* c) {
     using namespace interp;
     fx_pass_start();
     ss::service(c);  // save states: exact values are back in guest memory, all other threads idle
+    mods::cheats_service();
     // test aid: WWHD_INTERP_AT_STEP=n switches interpolation on after n frames
     static uint64_t passes = 0;
     static const uint64_t at = getenv("WWHD_INTERP_AT_STEP") ? strtoull(getenv("WWHD_INTERP_AT_STEP"), nullptr, 10) : 0;
@@ -466,7 +584,9 @@ extern "C" void hook_0203593C(Cpu* c) {
     static uint64_t at60 = getenv("WWHD_TRUE60_AT_STEP") ? strtoull(getenv("WWHD_TRUE60_AT_STEP"), nullptr, 10) : 0;
     static uint64_t passes60 = 0;
     if (at60 && ++passes60 == at60) set_mode(2);
+    paced_pass_start();
     true60::new_pass();
+    true60::pass_begin(!enabled() || !g_hold_next);  // full pass: take back Link's half-pass preview
     if (!enabled() || !g_hold_next) g_logic_steps++;
     if (!enabled()) {
         g_hold_next = false;
@@ -490,7 +610,7 @@ extern "C" void hook_0203593C(Cpu* c) {
         g_ubo.clear();  // not updated last time (not drawn)
     }
     f_0203593C_orig(c);  // logic pass (the loop body hook marks it)
-    g_hold_next = true;
+    paced_after_logic();  // g_hold_next: an in-between pass follows (always, unless paced)
     static uint64_t n = 0, t0 = timebase::now();
     if (++n % 300 == 0) {
         uint64_t t = timebase::now();
@@ -512,7 +632,7 @@ extern "C" void hook_025F172C(Cpu* c) {
         f_025D42EC(c);
         return;
     }
-    g_logic_pass = enabled();
+    g_logic_pass = enabled() && !g_exact_step;  // (an exact step draws like interpolation off)
     f_025F172C_orig(c);
     g_logic_pass = false;
 
@@ -580,7 +700,26 @@ extern "C" void hook_0255E854(Cpu* c) {
             for (int i = 0; i < 3 && st; i++) st32(st + 4 * i, s.pos[i]);
         }
     }
+    // true 60: the hold pass ran with the preview camera; the next full pass continues from the
+    // state the logic pass left, as the 30 fps game's next step does
+    static SetLightState after_logic;
+    if (true60::enabled() && called_from_frame_function() && !interp::g_hold_frame && after_logic.step + 1 == interp::g_logic_steps) {
+        uint32_t st2 = ld32(kLightStatusPt);
+        if (after_logic.status == st2) {
+            st32(kSetLightTarget, after_logic.target);
+            st32(kSetLightEfTarget, after_logic.ef_target);
+            for (int i = 0; i < 3 && st2; i++) st32(st2 + 4 * i, after_logic.pos[i]);
+        }
+    }
     f_0255E854_orig(c);
+    if (true60::enabled() && called_from_frame_function() && !interp::g_hold_frame) {
+        uint32_t st2 = ld32(kLightStatusPt);
+        after_logic.step = interp::g_logic_steps;
+        after_logic.target = ld32(kSetLightTarget);
+        after_logic.ef_target = ld32(kSetLightEfTarget);
+        after_logic.status = st2;
+        for (int i = 0; i < 3; i++) after_logic.pos[i] = st2 ? ld32(st2 + 4 * i) : 0;
+    }
     uint32_t st = ld32(0x101E8CC8);  // lightStatusPt
     interp::light_trace_add(" setLight t%.2f r%u p(%.1f,%.1f,%.1f)", ldf32(0x101E8EC8), st ? ld8(st + 0x18) : 0, st ? ldf32(st) : 0.0,
                             st ? ldf32(st + 4) : 0.0, st ? ldf32(st + 8) : 0.0);
@@ -614,6 +753,7 @@ extern "C" void hook_025DE788(Cpu* c) {
     uint32_t execute_fn = c->r[3];
     f_025DE788_orig(c);
     mods::after_execute(c, execute_fn);  // quick doors / fast scene changes: extra steps (full passes only)
+    if (!interp::g_hold_frame) mods::packages::frame(interp::g_logic_steps);
     g_in_execute = false;
 }
 extern "C" void hook_025DE024(Cpu* c) { if (!skip(2)) f_025DE024_orig(c); }
@@ -655,8 +795,18 @@ bool repeat_input() {
 
 // Sound effect starts (JAIZelBasic::seStart core and the mDoAud_* start wrappers). Some sounds are
 // started from drawing code (animation-linked effects); an in-between frame only redraws, so a
-// sound started there would play a second time. Suppressed while the hold pass draws.
+// sound started there would play a second time. Suppressed while the hold pass draws, and with true
+// 60 on the whole half pass: its executes are previews that the next full pass takes back and runs
+// again (true60.cpp), so every sound starts once, on the full pass of the 30 fps game's step.
 // debug: WWHD_SE_STATS=1 logs calls per second by frame phase every 5 s
+// debug: WWHD_SE_TRACE=path logs every start that is not suppressed: logic step, full pass (1/0),
+// wrapper index, r4 (the sound id for the seStart wrappers), caller (true60 comparisons)
+static void se_trace(int fn, Cpu* c) {
+    static FILE* f = getenv("WWHD_SE_TRACE") ? fopen(getenv("WWHD_SE_TRACE"), "w") : nullptr;
+    if (!f || interp::g_hold) return;
+    fprintf(f, "%llu %d %d %08X %08X\n", (unsigned long long)interp::g_logic_steps, interp::g_hold ? 0 : 1, fn, c->r[4], c->lr);
+    fflush(f);
+}
 static void se_stat(int fn) {
     static const bool on = getenv("WWHD_SE_STATS") != nullptr;
     if (!on) return;
@@ -677,13 +827,13 @@ static void se_stat(int fn) {
         t0 = t;
     }
 }
-extern "C" void hook_0201EBA0(Cpu* c) { se_stat(0); if (interp::g_hold && true60::dt() >= 1.0f) { c->r[3] = 0; return; } f_0201EBA0_orig(c); }
-extern "C" void hook_025E1988(Cpu* c) { se_stat(1); if (interp::g_hold && true60::dt() >= 1.0f) { c->r[3] = 0; return; } f_025E1988_orig(c); }
-extern "C" void hook_025E19CC(Cpu* c) { se_stat(2); if (interp::g_hold && true60::dt() >= 1.0f) { c->r[3] = 0; return; } f_025E19CC_orig(c); }
-extern "C" void hook_025E1A04(Cpu* c) { se_stat(3); if (interp::g_hold && true60::dt() >= 1.0f) { c->r[3] = 0; return; } f_025E1A04_orig(c); }
-extern "C" void hook_025E1A40(Cpu* c) { se_stat(4); if (interp::g_hold && true60::dt() >= 1.0f) { c->r[3] = 0; return; } f_025E1A40_orig(c); }
-extern "C" void hook_025E1A7C(Cpu* c) { se_stat(5); if (interp::g_hold && true60::dt() >= 1.0f) { c->r[3] = 0; return; } f_025E1A7C_orig(c); }
-extern "C" void hook_025E1AA4(Cpu* c) { se_stat(6); if (interp::g_hold && true60::dt() >= 1.0f) { c->r[3] = 0; return; } f_025E1AA4_orig(c); }
+extern "C" void hook_0201EBA0(Cpu* c) { se_stat(0); se_trace(0, c); if (interp::g_hold) { c->r[3] = 0; return; } f_0201EBA0_orig(c); }
+extern "C" void hook_025E1988(Cpu* c) { se_stat(1); se_trace(1, c); if (interp::g_hold) { c->r[3] = 0; return; } f_025E1988_orig(c); }
+extern "C" void hook_025E19CC(Cpu* c) { se_stat(2); se_trace(2, c); if (interp::g_hold) { c->r[3] = 0; return; } f_025E19CC_orig(c); }
+extern "C" void hook_025E1A04(Cpu* c) { se_stat(3); se_trace(3, c); if (interp::g_hold) { c->r[3] = 0; return; } f_025E1A04_orig(c); }
+extern "C" void hook_025E1A40(Cpu* c) { se_stat(4); se_trace(4, c); if (interp::g_hold) { c->r[3] = 0; return; } f_025E1A40_orig(c); }
+extern "C" void hook_025E1A7C(Cpu* c) { se_stat(5); se_trace(5, c); if (interp::g_hold) { c->r[3] = 0; return; } f_025E1A7C_orig(c); }
+extern "C" void hook_025E1AA4(Cpu* c) { se_stat(6); se_trace(6, c); if (interp::g_hold) { c->r[3] = 0; return; } f_025E1AA4_orig(c); }
 
 // The sound engine takes its listener from camera_draw. Feeding it the halfway camera as well as the
 // exact one makes the listener hop every frame (Doppler/panning wobble: doubled-sounding effects),

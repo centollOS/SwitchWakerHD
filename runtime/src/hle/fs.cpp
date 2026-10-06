@@ -8,11 +8,15 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#ifndef _WIN32
+#include <strings.h>
+#endif
 #include <mutex>
 #include <string>
 #include <unordered_map>
 
 #include "../runtime.h"
+#include "../write_watch.h"
 
 namespace {
 
@@ -56,53 +60,12 @@ struct HostFsCall : BlockingScope {
     }
 };
 
-// The game names some paths with a different case than the disc (Audiores vs AudioRes). Case-sensitive
-// host file systems resolve each missing component by a case-insensitive directory search.
-std::string fold_case(const std::string& root, const std::string& rest) {
-#ifdef __linux__
-    static std::mutex m;
-    static std::unordered_map<std::string, std::string> cache;
-    std::string key = root + rest;
-    struct stat st;
-    if (stat(key.c_str(), &st) == 0) return key;
-    std::lock_guard<std::mutex> lk(m);
-    if (auto it = cache.find(key); it != cache.end()) return it->second;
-    std::string path = root;
-    size_t pos = 0;
-    while (pos < rest.size()) {
-        size_t next = rest.find('/', pos + 1);
-        std::string part = rest.substr(pos + 1, next == std::string::npos ? std::string::npos : next - pos - 1);
-        pos = next == std::string::npos ? rest.size() : next;
-        if (part.empty()) continue;
-        std::string exact = path + "/" + part;
-        if (stat(exact.c_str(), &st) == 0) {
-            path = exact;
-            continue;
-        }
-        std::string found;
-        if (DIR* d = opendir(path.c_str())) {
-            while (dirent* de = readdir(d))
-                if (!strcasecmp(de->d_name, part.c_str())) {
-                    found = de->d_name;
-                    break;
-                }
-            closedir(d);
-        }
-        path += "/" + (found.empty() ? part : found);
-    }
-    cache[key] = path;
-    return path;
-#else
-    return root + rest;
-#endif
-}
-
-std::string host_path(const std::string& guest) {
+std::string host_path_exact(const std::string& guest) {
     std::string p = guest;
     auto map = [&](const char* prefix, const std::string& root) -> bool {
         size_t n = strlen(prefix);
         if (p.compare(0, n, prefix) == 0) {
-            p = fold_case(root, p.substr(n));
+            p = root + p.substr(n);
             return true;
         }
         return false;
@@ -113,6 +76,55 @@ std::string host_path(const std::string& guest) {
     if (map("/vol/save", config::save_dir)) return p;
     if (!p.empty() && p[0] != '/') return config::game_dir + "/content/" + p;  // relative to cwd (/vol/content)
     return config::game_dir + p;
+}
+
+#ifndef _WIN32
+// Wii U volumes are case-insensitive (the game asks for Common/Audiores, the disc folder is AudioRes);
+// case-sensitive host file systems (Linux, case-sensitive APFS) need the path resolved one component
+// at a time. Exact matches cost one stat(); resolved directories are cached. Components that don't
+// exist yet (new save files) keep the guest's spelling.
+std::string resolve_case(const std::string& p) {
+    struct stat st;
+    if (stat(p.c_str(), &st) == 0) return p;
+    static std::mutex mu;
+    static std::unordered_map<std::string, std::string> dirs;  // lower-cased dir path -> host dir path
+    std::lock_guard<std::mutex> lk(mu);
+    auto lower = [](std::string s) { for (char& ch : s) ch = (char)tolower((unsigned char)ch); return s; };
+    std::string cur = p.compare(0, 1, "/") == 0 ? "/" : "";
+    size_t pos = cur.size();
+    while (pos <= p.size()) {
+        size_t e = p.find('/', pos);
+        if (e == std::string::npos) e = p.size();
+        std::string comp = p.substr(pos, e - pos);
+        pos = e + 1;
+        if (comp.empty()) { if (e == p.size()) break; continue; }
+        std::string base = cur.empty() ? "" : (cur == "/" ? "/" : cur + "/");
+        std::string cand = base + comp;
+        std::string key = lower(cand);
+        if (auto it = dirs.find(key); it != dirs.end()) { cur = it->second; continue; }
+        if (stat(cand.c_str(), &st) != 0) {
+            std::string found;
+            if (DIR* d = opendir(cur.empty() ? "." : cur.c_str())) {
+                while (dirent* de = readdir(d))
+                    if (!strcasecmp(de->d_name, comp.c_str())) { found = de->d_name; break; }
+                closedir(d);
+            }
+            if (found.empty()) return cand + (e < p.size() ? p.substr(e) : "");  // not there: keep the rest as asked
+            cand = base + found;
+        }
+        if (e < p.size()) dirs[key] = cand;  // only directories are cached
+        cur = cand;
+    }
+    return cur;
+}
+#endif
+
+std::string host_path(const std::string& guest) {
+#ifdef _WIN32
+    return host_path_exact(guest);  // Windows file systems are case-insensitive
+#else
+    return resolve_case(host_path_exact(guest));
+#endif
 }
 
 void make_parent_dirs(const std::string& path) {
@@ -217,6 +229,9 @@ HLE(coreinit, FSReadFile) {
     size_t n;
     {
         HostFsCall call;  // the calling thread waits for the disc; others on its core run
+        // the kernel writes guest memory here: write-protected texture pages would fail the read
+        // (EFAULT) instead of faulting into the write tracker (write_watch.h)
+        wwatch::HostWrite w(dst, (uint32_t)std::min<uint64_t>((uint64_t)size * count, 0x100000000ull - dst));
         n = fread(mem::ptr(dst), 1, (size_t)size * count, f);
     }
     ret(c, (uint32_t)(n / size));

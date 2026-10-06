@@ -1,9 +1,11 @@
 // Libraries the game uses for system integration and online features.
 // Online services (Miiverse, SpotPass, accounts) report "unavailable".
+#include "../crashrec.h"
 #include "../runtime.h"
 #include "../input.h"
+#include "../rumble.h"
 
-namespace interp { bool repeat_input(); bool fresh_sticks(); void trace_read(const char*); }
+namespace interp { bool repeat_input(); bool fresh_sticks(); void trace_read(const char*); uint64_t logic_steps(); }
 
 // nn::Result: bit 31 set = failure
 static constexpr uint32_t kResultOk = 0;
@@ -97,7 +99,7 @@ HLE(vpad, VPADRead) {
     // frame interpolation: the read after a logic pass repeats the last sample (interp.cpp)
     static input::PadState last_p;
     const bool repeat = interp::repeat_input();
-    input::PadState p = repeat ? last_p : input::read();
+    input::PadState p = repeat ? last_p : crashrec::read(0);  // live input, recorded/replayed by crash recovery
     if (repeat && interp::fresh_sticks()) {  // true 60: sticks every pass, buttons on full passes
         input::PadState f = input::read();
         p.lx = f.lx; p.ly = f.ly; p.rx = f.rx; p.ry = f.ry;
@@ -123,6 +125,10 @@ HLE(vpad, VPADRead) {
     st32(st + 0x04, hold & ~last_hold);   // trig
     st32(st + 0x08, last_hold & ~hold);   // release
     last_hold = hold;
+    {  // debug: WWHD_PAD_TRACE=path logs each read: logic step, repeated, buttons, trigger
+        static FILE* pt = getenv("WWHD_PAD_TRACE") ? fopen(getenv("WWHD_PAD_TRACE"), "w") : nullptr;
+        if (pt) { fprintf(pt, "%llu %d %08X %08X\n", (unsigned long long)interp::logic_steps(), (int)repeat, hold, ld32(st + 4)); fflush(pt); }
+    }
     stf32(st + 0x0C, p.lx); stf32(st + 0x10, p.ly);
     stf32(st + 0x14, p.rx); stf32(st + 0x18, p.ry);
     stf32(st + 0x30, 1.0f);                                    // accXY
@@ -157,8 +163,19 @@ HLE(vpad, VPADGetTPCalibratedPointEx) {
     int res = (int)arg(c, 1);  // 0 = 1920x1080, 1 = 1280x720, 2 = 854x480
     tp_to_screen(arg(c, 2), arg(c, 3), res == 0 ? 1920 : res == 2 ? 854 : 1280, res == 0 ? 1080 : res == 2 ? 480 : 720);
 }
-HLE(vpad, VPADControlMotor) { ret(c, 0); }
-HLE(vpad, VPADStopMotor) {}
+// The GamePad motor: the game sends a pattern of up to 120 bits (not bytes), played at 120 bits a
+// second; it stops by itself at the end, and an empty pattern or VPADStopMotor stops it at once.
+// rumble.h turns that into what the host controllers' motors do.
+HLE(vpad, VPADControlMotor) {
+    // (chan, uint8* pattern, uint8 length in bits) -> int32 error
+    uint32_t chan = arg(c, 0), pattern = arg(c, 1), nbits = std::min<uint32_t>(arg(c, 2) & 0xFF, rumble::Motor::kMaxBits);
+    uint8_t bits[rumble::Motor::kMaxBits / 8] = {};
+    for (uint32_t i = 0; pattern && i < (nbits + 7) / 8; i++) bits[i] = ld8(pattern + i);
+    TRACE("[pad] VPADControlMotor(%u, %u bits)", chan, nbits);
+    rumble::gamepad_pattern(chan, pattern ? bits : nullptr, nbits);
+    ret(c, 0);
+}
+HLE(vpad, VPADStopMotor) { rumble::gamepad_stop(arg(c, 0)); }
 HLE(vpadbase, VPADBASEGetHeadphoneStatus) { ret(c, 0); }
 
 // ---- padscore (Wii Remote / Pro Controller): see padscore.cpp

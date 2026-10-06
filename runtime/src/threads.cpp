@@ -8,6 +8,7 @@
 #include <mach/mach.h>
 #endif
 #include "platform/host.h"
+#include "platform/sleep.h"
 #ifdef __APPLE__
 #include <pthread/qos.h>
 #endif
@@ -27,6 +28,7 @@
 
 #include "runtime.h"
 #include "savestate.h"
+#include "platform/perf_hint.h"
 
 // ---------------------------------------------------------------- time
 namespace timebase {
@@ -589,15 +591,29 @@ void park_sleep_until(std::chrono::steady_clock::time_point tp, bool precise,
     }
     block_begin();
     if (precise) {
-        // macOS sleep timers can resume about 1 ms after the requested vsync.
-        // Keep the guest core released during this bounded final interval.
-        constexpr auto spinWindow = std::chrono::milliseconds(2);
-        const auto sleepDeadline = tp - spinWindow;
-        if (std::chrono::steady_clock::now() < sleepDeadline)
-            std::this_thread::sleep_until(sleepDeadline);
+        // macOS sleep timers can resume about 1 ms after the requested vsync, so the last part is
+        // spun with the guest core released. The spin window follows the measured lateness: the
+        // largest of the last 120 wakes plus a margin, 0.5..2 ms; a wake past the deadline goes
+        // straight back to 2 ms. (A fixed 2 ms window spun ~1.5 ms per vsync, 15% of Vulkan's CPU.)
+        // WWHD_VSYNC_SPIN_US=n fixes the window at n microseconds.
+        using us = std::chrono::microseconds;
+        static const long fixedUs = getenv("WWHD_VSYNC_SPIN_US") ? atol(getenv("WWHD_VSYNC_SPIN_US")) : -1;
+        static thread_local us window{fixedUs >= 0 ? fixedUs : 2000}, peak{0};
+        static thread_local int wakes = 0;
+        const auto sleepDeadline = tp - window;
+        if (std::chrono::steady_clock::now() < sleepDeadline) {
+            host::sleep_until(sleepDeadline);
+            const auto woke = std::chrono::steady_clock::now();
+            peak = std::max(peak, std::chrono::duration_cast<us>(woke - sleepDeadline));
+            if (fixedUs < 0 && (woke >= tp || ++wakes == 120)) {
+                window = woke >= tp ? us{2000} : std::clamp(peak + us{250}, us{500}, us{2000});
+                peak = us{0};
+                wakes = 0;
+            }
+        }
         while (std::chrono::steady_clock::now() < tp) {}
     } else {
-        std::this_thread::sleep_until(tp);
+        host::sleep_until(tp);
     }
     if (t) park_gate(t);
     // The freeze gate marks the thread busy before host-only completion work.
@@ -722,17 +738,21 @@ static void* thread_main(void* p) {
         if (ht->prio > 8) LOG("[thread] \"%s\" runs above the render thread (WWHD_BOOST_THREADS)", name.c_str());
     }
 #endif
+    {
+        // the game's main thread (the first, unnamed one) builds every frame's GX2 commands
+        static std::atomic<bool> hinted{false};
+        if (name.empty() && !hinted.exchange(true)) perf_hint::add_current_thread();
+    }
 #ifdef __APPLE__
     ht->mach = pthread_mach_thread_np(pthread_self());
 #endif
 #ifdef __SWITCH__
     ht->nx = threadGetCurHandle();
 #endif
-    // keep guest threads on performance cores: the default QoS lets macOS park them on efficiency
-    // cores, which showed up as the main thread holding its core without getting CPU time
-#ifdef __APPLE__
-    if (!getenv("WWHD_NO_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-#endif
+    // keep guest threads on performance cores (see host::boost_thread_priority): the default QoS
+    // let macOS park them on efficiency cores, which showed up as the main thread holding its core
+    // without getting CPU time
+    host::boost_thread_priority();
     LOG("[thread] start \"%s\" core %d prio %d affinity %X", name.c_str(), ht->core, (int)ld32(ht->guest + osthread::kBasePrio),
         ld32(ht->guest + osthread::kAffinity));
     uint32_t rv = 0;
@@ -863,9 +883,7 @@ Cpu* make_service_cpu(const char* name, uint32_t stack_size) {
     ht->started = true;
     ht->wait_kind = W_SERVICE;
     ht->wst.store(kParked);  // idle until service_begin
-#ifdef __APPLE__
-    if (!getenv("WWHD_NO_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-#endif
+    host::boost_thread_priority();
     return &ht->cpu;
 }
 }  // namespace threads

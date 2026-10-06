@@ -4,6 +4,7 @@
 #include <vector>
 #include <vulkan/vulkan.h>
 #include "gfx/display.h"
+struct ImDrawData;
 namespace gfxvk {
 struct Screen;
 struct Surface;
@@ -12,7 +13,7 @@ struct ComposeQuad {
  Surface* image=nullptr; bool sourceLinear=false; gfx::Box box; float alpha=1;
  bool solid=false; float color[4]{};
 };
-// AppKit host: this frame's layout from display.mm (null: SDL host's centred picture)
+// this frame's layout from gfx/display_modes.cpp, set by swap() (null: the picture scaled to fit)
 void set_present_plan(const gfx::PresentPlan* plan);
 std::vector<ComposeQuad> screen_quads(Screen& screen,VkExtent2D target,int& filter);
 // the composition of a window into an offscreen image, read back as display-encoded RGBA8
@@ -38,6 +39,13 @@ void record_present_capture(Screen& screen, uint32_t imageIndex);
 void finish_present_capture(Screen& screen);
 void write_rgba_png(const std::string& path, uint32_t width, uint32_t height,
                     const std::vector<uint8_t>& rgba);
+// settings overlay (overlay.cpp): this frame's Dear ImGui draw data, drawn on top of the TV window's
+// composition (swap image and present dumps); null when the overlay shows nothing
+void set_overlay_draw(ImDrawData* draw);
+void overlay_renderer_init();
+void overlay_prepare(ImDrawData* draw);  // texture uploads (outside rendering)
+void overlay_draw(ImDrawData* draw,VkCommandBuffer cmd,VkFormat format,VkExtent2D extent,bool linear);
+void reset_overlay_resources();
 // Device shutdown/recreation only: drain submissions before destroying these.
 void reset_present_resources();
 }

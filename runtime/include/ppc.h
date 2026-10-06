@@ -32,6 +32,10 @@ static inline __attribute__((always_inline)) uint8_t* ppc_mem_base(void) {
 }
 #endif
 #define PPC_MEM_BASE (ppc_mem_base())
+#elif defined(__ANDROID__) || (defined(__linux__) && defined(__aarch64__))
+/* arm64 Linux kernels (Android, Raspberry Pi OS and other 4K-page configurations) often have a 39-bit
+   user address space (512 GiB), where 32 TiB is out of reach: stay well below it (64 GiB) */
+#define PPC_MEM_BASE ((uint8_t*)0x1000000000ull)
 #else
 #define PPC_MEM_BASE ((uint8_t*)0x200000000000ull)
 #endif

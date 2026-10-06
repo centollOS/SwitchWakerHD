@@ -3,12 +3,17 @@
 #import <Cocoa/Cocoa.h>
 #include <Carbon/Carbon.h>  // kVK_* key codes
 #include "../input.h"
+#include "../platform/host.h"
 #include <sys/stat.h>
 #include <ctime>
 
 #include "../savestate.h"
+#include "../crashrec.h"
 #include "../aspect.h"
 #include "renderer.h"
+#ifdef WWHD_HAS_VULKAN
+#include "vulkan/settings.h"  // Presentation (present mode), kept with the other graphics options
+#endif
 #include "runtime.h"
 
 // graphics options and capture go to the renderer in use (Metal or Vulkan: renderer.h)
@@ -17,6 +22,7 @@ bool drc_window_available();
 bool drc_window_shown();
 void show_drc_window(bool on);
 void install_display_menu(NSMenu* bar);
+void set_host_setting(const char* key, const std::string& value);  // display.mm
 }  // namespace gfx
 
 // internal resolution steps (Graphics menu; R cycles)
@@ -35,20 +41,86 @@ static void cycle_res() {
 namespace interp {
 int mode();  // 0 off, 1 frame interpolation, 2 true 60 (logic at 60 steps per second)
 void set_mode(int m);
+bool paced_interpolation();  // frame interpolation keeps the game's speed (settings overlay)
+void set_paced_interpolation(bool on);
 }
 
 namespace gx2 { uint64_t flips_presented(); }
 #include "../mods/mods.h"
+#include "../overlay/overlay.h"
 namespace ax { void start_sound_trace(const char* path, double seconds); }
-namespace gfx { bool menu_hotkey(uint16_t code); NSMenuItem* controls_menu_item(); /* controls_ui.mm */ }
+namespace gfx { bool menu_hotkey(uint16_t code); NSMenuItem* controls_menu_item(); /* controls_ui.mm */ void install_overlay_input(); }
 
 static NSWindow* g_tv;
 static double g_fps = 0;  // frames presented per second, measured over the last half second
 static NSString* const kTitle = @"The Legend of Zelda: The Wind Waker HD (recompiled)";
 
+// Graphics options are kept across launches (macOS user defaults, domain "wwhd"); an option's WWHD_*
+// environment variable overrides the saved value for that run and is not saved. Scripted test runs
+// (WWHD_NO_HOST_INPUT) neither read nor write them.
+static const bool g_prefs = getenv("WWHD_NO_HOST_INPUT") == nullptr;
+static bool g_prefs_loaded = false;  // nothing is saved before the saved values were applied
+static bool env_set(std::initializer_list<const char*> env) {
+    for (const char* e : env)
+        if (getenv(e)) return true;
+    return false;
+}
+// Saved graphics options: NSUserDefaults, or in portable mode a plist in the folder (portable.txt).
+static NSString* portable_prefs_path() {
+    return host::portable() ? @((host::portable_user_dir() + "/graphics.plist").c_str()) : nil;
+}
+static NSMutableDictionary* g_portable_prefs;
+static id pref(NSString* key) {
+    if (NSString* p = portable_prefs_path()) {
+        if (!g_portable_prefs)
+            g_portable_prefs = [[NSDictionary dictionaryWithContentsOfFile:p] mutableCopy] ?: [NSMutableDictionary new];
+        return g_portable_prefs[key];
+    }
+    return [NSUserDefaults.standardUserDefaults objectForKey:key];
+}
+static void set_pref(NSString* key, id value) {
+    if (portable_prefs_path()) {
+        pref(key);  // loads the file
+        g_portable_prefs[key] = value;
+    } else {
+        [NSUserDefaults.standardUserDefaults setObject:value forKey:key];
+    }
+}
+static void load_prefs() {
+    g_prefs_loaded = true;
+    if (!g_prefs) return;
+    auto saved = [&](NSString* key, std::initializer_list<const char*> env) { return !env_set(env) && pref(key) != nil; };
+    if (saved(@"resScale", {"WWHD_RES_SCALE"})) set_res([pref(@"resScale") floatValue]);
+    if (saved(@"aoMode", {"WWHD_AO_MODE", "WWHD_NO_AO_QUIRK"})) render::set_ao_mode([pref(@"aoMode") intValue]);
+    if (saved(@"aoHires", {"WWHD_AO_HIRES"})) render::set_ao_hires([pref(@"aoHires") boolValue]);
+    if (saved(@"aniso", {"WWHD_ANISO"})) render::set_aniso([pref(@"aniso") boolValue]);
+    if (saved(@"fxaa", {"WWHD_FXAA"})) render::set_fxaa([pref(@"fxaa") boolValue]);
+    if (saved(@"fps60", {"WWHD_INTERP", "WWHD_TRUE60"})) interp::set_mode([pref(@"fps60") intValue]);
+    if (saved(@"fps60Paced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation([pref(@"fps60Paced") boolValue]);
+#ifdef WWHD_HAS_VULKAN
+    if (saved(@"vkPresentMode", {"WWHD_VK_PRESENT_MODE"})) gfxvk::set_present_mode([pref(@"vkPresentMode") intValue]);
+#endif
+}
+static void save_prefs() {
+    if (!g_prefs || !g_prefs_loaded) return;
+    if (!env_set({"WWHD_RES_SCALE"})) set_pref(@"resScale", @(current_res_scale()));
+    if (!env_set({"WWHD_AO_MODE", "WWHD_NO_AO_QUIRK"})) set_pref(@"aoMode", @(render::ao_mode()));
+    if (!env_set({"WWHD_AO_HIRES"})) set_pref(@"aoHires", @(render::ao_hires()));
+    if (!env_set({"WWHD_ANISO"})) set_pref(@"aniso", @(render::aniso()));
+    if (!env_set({"WWHD_FXAA"})) set_pref(@"fxaa", @(render::fxaa()));
+    if (!env_set({"WWHD_INTERP", "WWHD_TRUE60"})) set_pref(@"fps60", @(interp::mode()));
+    if (!env_set({"WWHD_INTERP_PACED"})) set_pref(@"fps60Paced", @(interp::paced_interpolation()));
+#ifdef WWHD_HAS_VULKAN
+    if (!env_set({"WWHD_VK_PRESENT_MODE"})) set_pref(@"vkPresentMode", @(gfxvk::present_mode()));
+#endif
+    if (NSString* p = portable_prefs_path()) [g_portable_prefs writeToFile:p atomically:YES];
+}
+
 // the TV title summarises the active options so a key press is visible without opening the menu;
-// it starts with the renderer in use (and notes a fallback or a choice waiting for a restart)
+// it starts with the renderer in use (and notes a fallback or a choice waiting for a restart).
+// Every option change ends here, so this also saves them
 static void update_title() {
+    save_prefs();
     static const char* ao[3] = {"original", "centre fix", "centre + noise fix"};
     NSString* res = current_res_scale() != 1.0f ? [NSString stringWithFormat:@" \u00b7 %gx res", current_res_scale()] : @"";
     if (aspect::mode() != aspect::kOriginal) res = [res stringByAppendingFormat:@" \u00b7 %s", aspect::mode_name(aspect::mode())];
@@ -102,6 +174,8 @@ static void choose_renderer(render::Api a) {
 @implementation WWStateMenu
 - (void)save:(NSMenuItem*)item { ss::request_save((int)item.tag); }
 - (void)load:(NSMenuItem*)item { ss::request_load((int)item.tag); }
+- (void)toggleCrashRecovery:(NSMenuItem*)item { crashrec::set_enabled(!crashrec::enabled()); }
+- (void)loadAuto:(NSMenuItem*)item { crashrec::request_load((int)item.tag); }
 - (void)menuNeedsUpdate:(NSMenu*)m {
     [m removeAllItems];
     ss::SlotInfo info[ss::kSlots + 1];
@@ -124,7 +198,25 @@ static void choose_renderer(render::Api a) {
         it.target = self;
         it.tag = i;
         it.enabled = info[i].used && info[i].compatible;
-        it.toolTip = [NSString stringWithFormat:@"Shortcut in game: F%d", i];
+        it.toolTip = i == 1 ? @"In game: F1 (or \u2318,) opens the settings overlay (Saves)" : [NSString stringWithFormat:@"Shortcut in game: F%d", i];
+    }
+    // crash recovery (crashrec.cpp): automatic states every few minutes + recorded input
+    [m addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* cr = [m addItemWithTitle:[NSString stringWithFormat:@"Crash Recovery (automatic state every %d min)",
+                                                                    (crashrec::interval_seconds() + 30) / 60]
+                                  action:@selector(toggleCrashRecovery:) keyEquivalent:@""];
+    cr.target = self;
+    cr.state = crashrec::enabled() ? NSControlStateValueOn : NSControlStateValueOff;
+    cr.toolTip = @"Saves the game into automatic states in the background and records the controller input since the "
+                 @"latest one. After a crash, the crash log in captures/ says how to load it and replay the input. "
+                 @"Saving freezes the game for a moment.";
+    for (int i = 1; i <= crashrec::kAutoSlots; i++) {
+        crashrec::AutoInfo a = crashrec::auto_info(i);
+        NSString* d = a.used ? [NSString stringWithFormat:@"%s%s%s", a.when.c_str(), a.area.empty() ? "" : " · ", a.area.c_str()] : @"empty";
+        NSMenuItem* it = [m addItemWithTitle:[NSString stringWithFormat:@"Load automatic state %d  (%@)", i, d] action:@selector(loadAuto:) keyEquivalent:@""];
+        it.target = self;
+        it.tag = i;
+        it.enabled = a.used;
     }
 }
 @end
@@ -137,11 +229,13 @@ static WWStateMenu* g_state_menu;
 - (void)setAO:(NSMenuItem*)item { render::set_ao_mode((int)item.tag); update_title(); }
 - (void)toggleAniso:(NSMenuItem*)item { render::set_aniso(!render::aniso()); update_title(); }
 - (void)capture:(NSMenuItem*)item { render::request_capture(); }
+- (void)openSettings:(NSMenuItem*)item { overlay::set_open(!overlay::is_open()); }  // Cmd+, toggles
 - (void)setRenderer:(NSMenuItem*)item { choose_renderer((render::Api)item.tag); }
 - (void)recordSound:(NSMenuItem*)item { gfx::menu_hotkey(kVK_ANSI_9); }
 - (void)setController:(NSMenuItem*)item {
     input::set_pro_controller(item.tag == 1);
     gfx::show_drc_window(item.tag == 0);  // the GamePad window follows the controller choice
+    gfx::set_host_setting("proController", item.tag == 1 ? "1" : "0");  // as the settings overlay saves it
 }
 - (void)toggleInterp:(NSMenuItem*)item { interp::set_mode(interp::mode() == item.tag ? 0 : (int)item.tag); update_title(); }
 - (void)toggleDrcWindow:(NSMenuItem*)item { gfx::show_drc_window(!gfx::drc_window_shown()); }
@@ -239,6 +333,12 @@ void install_menu(NSWindow* tv) {
 
     NSMenuItem* appItem = [bar addItemWithTitle:@"" action:nil keyEquivalent:@""];
     NSMenu* app = [NSMenu new];
+    // the settings overlay (overlay/overlay.h), at the place and with the shortcut macOS apps use;
+    // F1 also works (Fn+F1 unless the top row sends standard function keys)
+    NSMenuItem* settings = [app addItemWithTitle:@"Settings\u2026" action:@selector(openSettings:) keyEquivalent:@","];
+    settings.target = g_target;
+    settings.toolTip = @"In-game settings overlay over the picture (F1, or \u2318, in the game window)";
+    [app addItem:[NSMenuItem separatorItem]];
     [app addItemWithTitle:@"Quit Wind Waker HD" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = app;
 
@@ -318,6 +418,26 @@ void install_menu(NSWindow* tv) {
            @"Door events (walk-in, opening, closing) run at 4x speed");
     toggle(gp, @"Fast scene changes", ^BOOL { return mods::fast_scenes(); }, ^(BOOL on) { mods::set_fast_scenes(on); },
            @"Fades and loading between areas run at 4x speed; the scenes themselves are not sped up");
+    [gp addItem:[NSMenuItem separatorItem]];
+    [gp addItemWithTitle:@"Cheats (save in game to keep them)" action:nil keyEquivalent:@""].enabled = NO;
+    toggle(gp, @"    Give all items", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatItems); },
+           @"Every inventory item, light arrows, deluxe picto box, power bracelets, 4 bottles, 99 arrows and bombs");
+    toggle(gp, @"    Master Sword (full power) and Mirror Shield", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatSword); });
+    toggle(gp, @"    20 hearts, double magic, 5000 rupees", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatStats); },
+           @"Also refills hearts and magic");
+    for (auto [title, which] : {std::pair{@"    Infinite health", mods::kInfHealth}, {@"    Infinite magic", mods::kInfMagic},
+                                {@"    Infinite arrows and bombs", mods::kInfAmmo}}) {
+        int bit = which;  // (blocks cannot capture structured bindings)
+        toggle(gp, title, ^BOOL { return mods::infinite(bit); }, ^(BOOL on) { mods::set_infinite(bit, on); });
+    }
+    [gp addItem:[NSMenuItem separatorItem]];
+    NSString* story = @"Can change or break story events: the game may skip or repeat scenes that teach or check this. "
+                      @"Save to a different file first.";
+    [gp addItemWithTitle:@"⚠️ Story cheats (can break story events; use a spare save file)" action:nil keyEquivalent:@""].enabled = NO;
+    toggle(gp, @"    All songs", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatSongs); }, story);
+    toggle(gp, @"    All Triforce shards", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatTriforce); }, story);
+    toggle(gp, @"    Map, compass and boss key (this dungeon)", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatDungeon); }, story);
+    toggle(gp, @"    Add a small key (this dungeon)", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatKey); }, story);
     gpItem.submenu = gp;
     mods::mouse_init((__bridge void*)tv);
 
@@ -330,7 +450,14 @@ void install_menu(NSWindow* tv) {
     ssItem.submenu = sm;
 
     NSApp.mainMenu = bar;
+    install_overlay_input();  // settings overlay (F1): mouse in the TV window (overlay_appkit.mm)
     update_title();
+    // apply the saved options once the renderer is settled: the menu is installed with the windows,
+    // before a Vulkan start can still fail and fall back to Metal; the main queue runs after that
+    dispatch_async(dispatch_get_main_queue(), ^{
+        load_prefs();
+        update_title();
+    });
     // live frame rate: presented frames over the last half second
     [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer*) {
         static uint64_t last = gx2::flips_presented();
@@ -343,6 +470,11 @@ void install_menu(NSWindow* tv) {
         update_title();
     }];
 }
+
+// settings overlay (overlay_appkit.mm): the same internal resolution value and title / saved options
+float menu_res_scale() { return current_res_scale(); }
+void menu_set_res_scale(float f) { set_res(f); }
+void menu_options_changed() { update_title(); }
 
 // single-key shortcuts from the game window; true if the key was used
 bool menu_hotkey(uint16_t code) {
@@ -358,7 +490,7 @@ bool menu_hotkey(uint16_t code) {
     case kVK_F1: case kVK_F2: case kVK_F3: case kVK_F4: case kVK_F5: {
         int slot = code == kVK_F1 ? 1 : code == kVK_F2 ? 2 : code == kVK_F3 ? 3 : code == kVK_F4 ? 4 : 5;
         if ([NSEvent modifierFlags] & NSEventModifierFlagShift) ss::request_save(slot);
-        else ss::request_load(slot);
+        else if (slot != 1) ss::request_load(slot);  // F1: the settings overlay (overlay_appkit.mm)
         return true;
     }
     case kVK_ANSI_9: {

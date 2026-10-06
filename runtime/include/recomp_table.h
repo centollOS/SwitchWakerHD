@@ -5,9 +5,15 @@
 typedef struct { uint32_t addr; PpcFunc fn; } RecompEntry;
 typedef struct { uint32_t slot; uint32_t addr; const char* lib; const char* name; int is_func; PpcFunc fn; } RecompImport;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern const RecompEntry g_recomp_funcs[];
 extern const unsigned g_recomp_func_count;
 extern const RecompImport g_recomp_imports[];
 extern const unsigned g_recomp_import_count;
 extern const uint32_t g_recomp_entry_point;
 extern const char g_recomp_variant[];  /* the recompiler options this code was generated with (for the log) */
+#ifdef __cplusplus
+}
+#endif

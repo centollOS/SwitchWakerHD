@@ -5,12 +5,17 @@
 #include <mach-o/ldsyms.h>
 #endif
 #include "platform/host.h"
+#include "write_watch.h"
 #include <zlib.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
 #include <cstdarg>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <shared_mutex>
@@ -30,6 +35,11 @@ std::string save_dir = "save";
 }  // namespace config
 
 static std::mutex g_log_mutex;
+
+// the last log lines, kept for crash logs (crash handlers read them without the lock)
+static constexpr int kLogRing = 200, kLogLine = 240;
+static char g_log_ring[kLogRing][kLogLine];
+static std::atomic<uint32_t> g_log_next{0};
 
 #ifdef __SWITCH__
 // The log is a file on the SD card: a write can take milliseconds, and the thread that logs (render,
@@ -122,6 +132,11 @@ void log_msg(const char* fmt, ...) {
         std::lock_guard<std::mutex> lk(g_log_mutex);
         if (g_log_pending.size() + n <= kLogPendingMax) g_log_pending.append(line, n);
         else g_log_dropped++;
+        char* ring = g_log_ring[g_log_next.load() % kLogRing];  // for the crash log ring (log_ring_write)
+        const size_t k = std::min<size_t>(size_t(n) - 1, kLogLine - 1);
+        memcpy(ring, line, k);
+        ring[k] = 0;
+        g_log_next++;
     }
     log_writer_start();
 }
@@ -132,11 +147,33 @@ void log_msg(const char* fmt, ...) {
     std::lock_guard<std::mutex> lk(g_log_mutex);
     va_list ap;
     va_start(ap, fmt);
+    char* line = g_log_ring[g_log_next.load() % kLogRing];
+    va_list ap2;
+    va_copy(ap2, ap);
+    vsnprintf(line, kLogLine, fmt, ap2);
+    va_end(ap2);
+    g_log_next++;
+#ifdef __ANDROID__
+    __android_log_vprint(ANDROID_LOG_INFO, "wwhd", fmt, ap);  // adb logcat -s wwhd
+    va_end(ap);
+#else
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
-}
 #endif
+}
+
+#endif
+
+void log_ring_write(int fd, void (*out)(int, const char*, size_t)) {
+    uint32_t n = g_log_next.load();
+    uint32_t first = n > (uint32_t)kLogRing ? n - kLogRing : 0;
+    for (uint32_t i = first; i < n; i++) {
+        const char* l = g_log_ring[i % kLogRing];
+        out(fd, l, strnlen(l, kLogLine));
+        out(fd, "\n", 1);
+    }
+}
 
 // check builds of the recompiler's single-precision tracking (ppc.h ppc_single_check)
 extern "C" void ppc_single_failed(uint32_t at, double v) {
@@ -157,8 +194,12 @@ void fatal(const char* fmt, ...) {
         char msg[1024];
         vsnprintf(msg, sizeof msg, fmt, ap);
         va_end(ap);
+#ifdef __ANDROID__
+        __android_log_print(ANDROID_LOG_FATAL, "wwhd", "%s", msg);
+#else
         fprintf(stderr, "FATAL: %s\n", msg);
         fflush(stderr);
+#endif
 #ifdef __SWITCH__
         if (g_session_log) {
             fprintf(g_session_log, "FATAL: %s\n", msg);
@@ -267,10 +308,17 @@ void init() {
 #else
     // Never replace existing mappings: requesting a hint and checking the result is safe on
     // systems whose headers lack MAP_FIXED_NOREPLACE.
+#ifdef __ANDROID__
+    // phones have little RAM and strict commit accounting: pages are committed on first touch
+    void* p = mmap(PPC_MEM_BASE,0x100000000ull,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
+#else
     void* p = mmap(PPC_MEM_BASE,0x100000000ull,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+#endif
     if(p != PPC_MEM_BASE) { if(p!=MAP_FAILED)munmap(p,0x100000000ull); fatal("cannot reserve guest address space at %p",PPC_MEM_BASE); }
     if(mprotect(PPC_MEM_BASE,0x10000,PROT_NONE))fatal("cannot protect guest null page");
 #endif
+    // texture change detection (write_watch.h): after the crash handler, which it chains to
+    if (!wwatch::init(PPC_MEM_BASE, 0x100000000ull)) LOG("[mem] write tracking unavailable: textures use sampled change checks");
 }
 
 static std::mutex g_alloc_log_m;

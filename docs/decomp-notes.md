@@ -118,178 +118,169 @@ matrices produced by `calc` and the camera inputs of `camera_draw`. For the in-b
 replay the frame's GX2 command list with draw matrices recomputed from blended world matrices and
 the blended camera. Models without a previous tick (spawned, teleported) use the current matrices.
 
-## True 60 fps (runtime/src/true60.cpp)
+## True 60 fps (runtime/src/true60.cpp, true60_link.cpp)
 
-Game logic at 60 steps per second ("true 60", Graphics menu / key 7 / `WWHD_TRUE60=1`; exclusive
-with interpolation). Experimental, off by default.
+Link and the camera at 60 steps per second ("true 60", Graphics menu / key 7 / `WWHD_TRUE60=1`;
+exclusive with interpolation). Experimental, off by default.
 
-### Design
+### Design: the full pass is the 30 fps step, the half pass a preview
 
-- **Passes.** The interpolation pass structure is reused: the per-frame function runs every vsync
-  (swap interval halved). *Full passes* run everything as a normal 30 Hz frame. *Half passes*
-  (interpolation's hold passes) skip scene management, counters, process creation/deletion and the
-  HD menus, but now also run `fpcEx_Handler`.
-- **Per-process gate.** `fpcM_Execute` (`025DF940`) classifies every process before its execute:
-  - *60 Hz processes* execute on every pass with the step length `dt = 0.5`.
-  - *30 Hz processes* execute on full passes only (`dt = 1`). They are drawn interpolated with
-    interpolation's camera and model blending (`fpcM_Draw` `025DF904` tracks the drawing process;
-    models and the camera of 60 Hz processes are not blended).
-- **Conversion per process and per state.** Link runs at 60 Hz only in the procedures in
-  `kDefault` (`true60.cpp`); every other procedure stays at 30 Hz and is interpolated, so
-  unconverted actions keep their exact original behaviour. The camera runs at 60 Hz while it uses
-  the follow camera.
-- **Units.** Every quantity keeps its per-30-Hz-step unit (speeds, rates, thresholds), so the game's
-  own comparisons stay valid. Only the places that *accumulate* per step are scaled by `dt`:
-  - *Shared primitives* are hooked: they read the step length of the execute in progress
-    (`true60::dt()`, thread-local, 1 outside a 60 Hz execute).
-  - *Inline per-step code* in converted functions is patched with instruction-level hooks:
-    `@ADDR` in `hooks.txt` → `site_ADDR(c)` runs before the instruction at ADDR. This is new in the
-    recompiler.
-- **Integer per-step amounts** (s16 angle steps, chase steps) are split so that the two half steps
-  add up to exactly one original step: the half pass takes the rounded-up half.
-- **Step counters** are held: a field counted down (Link) or up/down (camera) by exactly one on a
-  half pass is put back. So timers count on full passes only.
-- **Input.** Buttons change on full passes only, so every press reaches the 30 Hz processes and the
-  menus. Sticks are read on every pass: 60 Hz processes get fresh analog input, and a stick change
-  takes effect at the same time as in the 30 fps game.
-- **Sounds.** Sound starts on half passes are allowed only inside a 60 Hz execute; drawing code
-  stays suppressed as in interpolation. Animation sounds track the frame themselves (each key plays
-  once).
+The interpolation pass structure is reused: the per-frame function runs every vsync. *Full
+passes* run everything as a normal 30 Hz frame. *Half passes* (interpolation's hold passes) run
+only the converted processes, Link and the follow camera, and draw.
 
-### Hooked functions
+The rule that makes true 60 exact: **every full pass is exactly the 30 fps game's step.** A
+half pass computes a *preview* of the next step for Link and the camera (dt = 0.5: animation
+frame + rate/2, movement by half the speed with gravity and root motion, collision correction,
+model and item matrices, camera smoothing with 1-(1-r)^0.5). It is drawn, so Link and the camera
+move at 60 Hz on screen, and then **taken back**: at the start of the next full pass
+(`pass_begin`) Link and the camera are restored to the state the last full pass left, and the
+full pass runs the whole 30 Hz step with dt = 1. Game state after each full pass is therefore
+bit-identical to the 30 fps game's state after the same step.
 
-All are hooks in `true60.cpp` / `true60_link.cpp`, active only while `dt < 1`.
+What a preview does not do (fences, `true60_link.cpp`):
+- **No decisions.** Link's procedure is not called (the bctrl at execute 0240D6D8/0240D6F8 gets a
+  no-op), nor the decision functions before it (changeDemoProc, changeDeadProc,
+  changeAutoJumpProc, changeSwimProc, changeDamageProc, changeBoomerangCatchProc,
+  checkItemAction, setGetDemo) or startRestartRoom / deleteEquipItem. Per-step outputs of the
+  procedure that the rest of the execute uses are replayed from the last full pass: the
+  root-motion mode m34C2 (+0x68DE) and the "sword attack active" reset flag (+0x3C0 bit 0x2).
+- **No lasting effects.** Process creation (fpcSCtRq_Request, fpcM_FastCreate), particle emitters
+  (JPAEmitterManager::createSimpleEmitterID), collision registration (cCcS::Set: a hit found on
+  a full pass stays for the next full step, as at 30 fps), events and fades
+  (dEvt_control_c::order/orderOld, mDoGph_gInf_c::fadeOut), save-data writes
+  (dSv_event_c::setEventReg, setBottleItemIn), sound starts (none on any half pass), random
+  numbers (cM_rnd's seeds 101FF9D4.. are put back after each preview execute and each draw-time
+  call on a half pass).
 
-| WWHD | Function | Conversion |
+What is taken back at the next full pass:
+- Link: his process (0x8284 bytes), every word his preview execute changed in his actor heap
+  (from the heap object fopAc_ac_c::heap +0xF4: allocation state, model joint matrices, old-frame
+  pose blocks, animation buffers), in the d_a_player statics 1046CD10..1046CD54 (his kept
+  position) and in the play state 10473FE8..10474C68 (player position/status words, the do/A/R
+  button statuses). Taken back word by word where the *execute* changed them: the actor heap also
+  holds the models' draw packets, which the draw links into the frame's draw lists (taking those
+  back broke the lists).
+- The camera: its process (0xB28 bytes, from its profile) and the play-state words its preview
+  execute changed (1046F0B0..10485000).
+- Draw state the half pass's previews changed, which the full pass's draws use before its own
+  camera_draw: view matrix 104B45F8, clipper 1048CFF0, the camera slots' draw data 1047E720 and
+  104846B0, Link's lighting position 10474DE0. Not the scene-lighting block g_env_light: it holds
+  packet pointers (restoring it made J3DDrawBuffer assert after scene changes).
+- For 30 Hz actors drawn on a half pass: words their draw changed in their own memory and their
+  culling matrix (+0x348) are put back right after the draw (draw-time counters such as daItem's).
+
+Other parts that only step on full passes in true 60: the HUD update (02593B10, it ran twice per
+step in both 60 fps modes), Link's checkItemAction and playTextureAnime, J3DFrameCtrl::checkPass
+(key frames are found on full passes only), the world systems in the play scene's draw
+(site_025B00B0), particles.
+
+Converted, per group (`WWHD_TRUE60_GROUPS=+name,-name`, or a plain list; `all`, `none`):
+
+| Group | Default | Contents |
 |---|---|---|
-| `025DF940` | `fpcM_Execute` | per-process gate, dt, timer and counter hold |
-| `025DF904` | `fpcM_Draw` | drawing process (interpolation only for 30 Hz processes) |
-| `0200ECD4`…`0200F268` | `cLib_addCalc`, `addCalc2`, `addCalc0`, `addCalcPos(XZ)(2)` | ratio `1-(1-s)^dt`, max/min step × dt |
-| `0200F378` / `0200F428` / `0200F474` | `cLib_addCalcAngleS` / `S2` / `L` | native re-implementation: fraction `1-(1-1/scale)^dt`, split integer steps |
-| `0200F4FC`…`0200F8D0` | `cLib_chaseUC/S/F/Pos/PosXZ/AngleS` | step × dt (integer steps split) |
-| `027F2FC4` | `J3DFrameCtrl::update` | frame += rate × dt |
-| `025E3EC8` | `mDoExt_MtxCalcOldFrame::decOldFrameMorfCounter` | counter −= dt (blend from the previous pose stays linear in time) |
-| `025D67A8` / `025D6800` | `fopAcM_calcSpeed` / `fopAcM_posMove` | gravity × dt; pos += speed × dt + Δv·(1−dt)/2, where Δv is the gravity the actor's own calcSpeed just applied (see below) |
-| `0207A9A0`, `022ED850`, `02055B64`, `0211D2F8`, `025AAE08` | `cLib_calcTimer<u8/u8/s16/s32/s32>` | count on full passes only |
-| `02416230` | `daPy_lk_c::setNormalSpeedF` | acceleration argument × dt |
-| `025028B8` | `dCamera_c::followCamera` | marks the camera as following (60 Hz) |
-| `0282167C` | `JPAEmitterManager::calc` | counted only (statistics) |
+| `loco` | on | Link: WAIT, FREE_WAIT, MOVE, ATN_MOVE, SIDE_STEP, FRONT_ROLL, BACK_JUMP, BACK_JUMP_LAND, AUTO_JUMP, LAND, FALL |
+| `sword` | on | Link: CUT_A/F/R/L, CUT_EA/EB (combo finishers), CUT_EX_A/EX_B (parry attacks), CUT_KESA, CUT_TURN (spin attack), CUT_TURN_CHARGE, CUT_TURN_MOVE, CUT_REVERSE |
+| `camera` | on | the follow camera (other camera modes stay at 30 Hz) |
+| `items` | off | Link: boomerang, hookshot and bow aiming/throwing (not yet gated) |
+| `swim`, `sail`, `bk`, `mo2`, `cc`, `ki` | — | reserved, nothing converted |
 
-The exact-arc term: the 30 Hz game integrates `v += g; p += v`. With half steps,
-`p += v·dt + g·dt·(1−dt)/2` (v after the half step's gravity) lands exactly on the 30 Hz positions
-at every full step, so jump heights and lengths match. For Link the same is done inline (below).
+Everything else (other Link procedures, swimming, the ship, enemies, NPCs, objects) stays at
+30 Hz and is drawn interpolated. Link drops to 30 Hz while moving collision carries him.
+`WWHD_TRUE60_LINK=list` (decimal/0x hex procedure numbers) overrides the procedure list for tests.
+
+### Gates (measured; scripted runs, 30 fps vs true 60 at every full step)
+
+Test tools (local scripts, not in the repository): a pair script runs one scenario at 30 fps and with true
+60 and compares Link dumps, camera, sounds, random numbers and the save-info block. Scenarios start
+from save states made with the current build and run on the game's own step clock (Link's executes
+after a confirmed state load: a load lands on a different pass from run to run).
+
+| Scenario (8.5 s) | Procedures | Position | Animation frame | Sound starts | Random numbers | Save info |
+|---|---|---|---|---|---|---|
+| sword: single cut, 4-hit combo, spin attack (charge, move, release) | identical (11 changes) | 0.00 | 0.000 | 548 / 548, identical | 3 of 440 steps differ (from t=3.2 s) | identical |
+| locomotion: run, roll, roll into a wall, turn | identical (11 changes) | 0.00 | 0.000 | 522 / 522; 2 random ambient ids differ | drift from t=1.6 s | identical |
+| bomb put down, then a cut: hit mid-swing (LARGE_DAMAGE) | identical (8 changes) | 0.00 | 0.000 | 676 / 678; a random voice variant and ambient ids differ | drift from t=3.57 s | identical (life 11, bombs 9) |
+| save-state load mid-swing | identical timeline, no crash | — | — | — | — | — |
+| scene change (stage re-entered) mid-swing / mid-roll | identical until the change, no crash | 0.00 | — | — | — | identical |
+
+The camera matches to 0.0000 in the sword scenario. The sound differences all come from randomly
+chosen sounds and follow from the random-number deviation below.
+
+- **True 60 off (gate 1)**: against the main build (6649e10), 30 fps: Link and camera traces
+  identical (2615 lines), frames pixel-identical; interpolation mode: traces identical, frames
+  differ in about 300 pixels of water sparkles.
+- **Game save (gate 4)**: a save written through the pause menu after the same actions: cking.sav
+  differs from the 30 fps one only at 0x1C..0x1F and 0xA8C..0xA97 (save time and play time), which
+  also differ between two 30 fps runs; cking_playlog.sav identical.
+- **Stability**: a 5-minute soak with random buttons and stick (sword, rolls, bombs, damage,
+  swimming), mode switches (off, true 60, interpolation, true 60), a scene change and a state load:
+  no crash, NaN or soft-lock.
+- After a scene change the new scene starts at a different game step than at 30 fps: loading takes
+  real time, and the game counts its frames while it waits.
+
+### Known deviation: random-number sequence
+
+Accepted by the user (2026-10-03). **The converted logic consumes exactly the random numbers of
+the 30 fps game, and the game state after every full pass is bit-identical; random numbers drawn
+by drawing code are not.**
+
+- **Cause.** Drawing code also draws from the shared generator cM_rnd: every object drawn with a
+  point light (dScnKy_env_light_c::settingTevStruct_plightcol_plus) takes one value for the light
+  flicker. With true 60 some objects at the edge of view are culled one step earlier by
+  fopAcM_cullingCheck than at 30 fps (the 60 Hz rendering leaves state behind that the next full
+  pass's culling uses; the inputs we could identify are restored and identical, the remaining one
+  was not found). One object fewer drawn takes one value fewer, and from then on the sequence is
+  shifted. In the tests it starts within seconds (running: t=1.6 s; after a bomb explosion).
+- **What it affects.** Later random outcomes differ from what the 30 fps game would have
+  produced, like in any differently played session: item drops, enemy decisions and timing, ambient
+  sounds and animals, randomised minigame layouts. Quest and event logic is not random and is not
+  affected. Tricks that manipulate the random sequence (speedrun RNG manipulation) may behave
+  differently.
+- **What it does not affect.** Link's and the camera's positions, procedures, timers, animation,
+  hits, and the save data: all bit-identical at every full step (see the gates).
+- Interpolation mode (key 6) has the same kind of drift, earlier (t=0.67 s in the same test):
+  its half passes draw too.
+
+### Hooked functions and sites
+
+| WWHD | Function | Purpose |
+|---|---|---|
+| `025DF940` | fpcM_Execute | per-process gate, step length, preview snapshot, random-number hold |
+| `025DF904` | fpcM_Draw | drawing process (no interpolation for 60 Hz processes); half-pass draw state of 30 Hz actors put back |
+| `0203593C` (interp.cpp) | per-frame function | `pass_begin`: takes the previews back on full passes |
+| `0200ECD4`…`0200F8D0` | cLib_addCalc*/chase* | ratio 1-(1-s)^dt, steps × dt (previews) |
+| `027F2FC4` | J3DFrameCtrl::update | frame += rate × dt; whole step on full passes |
+| `027F2BF8` | J3DFrameCtrl::checkPass | key frames on full passes only |
+| `025E3EC8`, `025D67A8`, `025D6800` | morf counter, fopAcM_calcSpeed, fopAcM_posMove | × dt |
+| `@023FCEB0`…`@023FD39C` | posMoveFromFootPos | foot speed, gravity, exact-arc position (previews) |
+| `@0240D6D8`, `@0240D6F8`, `@0240D6FC` | Link's procedure call | skipped in previews; outputs recorded on full passes |
+| `023F695C`…`023FB230`, `023FBCEC`, `023DBDD0`, `023FD4E4`, `023DC7AC` | Link's decision functions | fenced in previews |
+| `025E14A8`, `025DFAB8`, `02821448`, `0200E240`, `0253EC0C`, `0253ED80`, `025F0658`, `025B8AF4`, `025B51DC` | creation, emitters, colliders, events, fade, save data | fenced in previews |
+| `02593B10` | d_meter update | full passes only |
+| `025028B8` | dCamera_c::followCamera | marks the camera as following (60 Hz) |
+| `024EF968` | dBgS::MoveBgCrrPos | Link riding moving collision: 30 Hz |
+| `02018D40` | cM3dGSph::SetC | NaN centre in a camera step: skipped, step undone |
+
+Debug aids: `WWHD_LINK_TRACE`, `WWHD_CAM_TRACE`, `WWHD_ACTOR_DUMP=path:FN|link:SIZE`,
+`WWHD_RNG_TRACE`, `WWHD_RND_LOG`, `WWHD_SE_TRACE`, `WWHD_PAD_TRACE`, `WWHD_CULLLOG`, `WWHD_TEVLOG`,
+`WWHD_LIGHT_TRACE`, `WWHD_WATCH_LINK` / `WWHD_WATCH_ADDR`, `WWHD_T60_MEMDIFF`, `WWHD_T60_REGIONLOG`,
+`WWHD_T60_DRAWWRITE`, `WWHD_T60_PAGEHASH`; test scenarios: `WWHD_TEST_ORIGIN_LOAD`, `WWHD_TEST_POKE`
+(e.g. `0.1:*101F84DC+2E:383B` equips sword and shield), `WWHD_TEST_MODES`, `WWHD_TEST_LOAD`,
+`WWHD_TEST_SCENECHANGE`, `WWHD_TEST_TOUCH`, `WWHD_SAVEINFO_DUMP`. All are inactive unless set.
 
 ### Layouts used (WWHD; generated code)
 
 | Structure | Field | Offset | Evidence |
 |---|---|---|---|
-| J3DFrameCtrl (no vtable in WWHD) | rate, frame, start s16, end s16, loop s16, attribute u8, state u8 | +0x0, +0x4, +0x8, +0xA, +0xC, +0xE, +0xF | `027F2FC4` loads rate +0 / frame +4, switches on +0xE, writes state +0xF, sets the rate to 0 on stop |
-| mDoExt_MtxCalcOldFrame | counter, 1/morf, rate, +0x10, +0x14 | as on GameCube (+0x4 … +0x14) | `025E3EC8` |
-| fopAc_ac_c | `sub_method` | +0xF0 (GameCube 0xEC) | `fpcM_Execute` → method table +8 = execute |
-| daPy_lk_c | `mFrameCtrlUnder[0]` / `mNormalSpeed` / `mCurProc` | +0x5898 / +0x6A14 / +0x65F0 | layout.py; traces |
-| daPy_lk_c | `m3522` (combo timer) | +0x6972 | execute `0240D638`: `if (m3522 > 0) m3522--` |
-| daPy_lk_c | HD-only s32 countdown, clamped at 0 | +0x8260 | execute `0240CE60` |
-| camera_class | `mpMtd` | +0x228 (GameCube 0x224) | method table +8 = `camera_execute` `024FFA3C` |
-| camera_process_class | `mCamera` (dCamera_c) | +0x248 | notes above |
-| dCamera_c | follow-camera work (`mWork.follow`) | +0x37C | followCamera `02502A44`: `addi r30, r31, 0x37C` |
-| dCamera_c | follow work: bezier counter (GameCube m388), turn counter (m38C), charge counter (m392) | +0x380 s32, +0x384 s32, +0x38A s16 | followCamera `0250316C` (m388++ then /80) |
-| daPy_lk_c execute | `daPy_Execute` | `0240EBB0` | tail-calls `daPy_lk_c::execute` `0240CDD0` |
-| process manager | `fpcM_Execute` → `fpcEx_Execute` | `025DF940` → `025DE58C` | `fpcM_Management` passes `025DF940` to `fpcEx_Handler` |
+| daPy_lk_c | process size | 0x8284 | profile g_profile_PLAYER (101CEC74 method table) |
+| daPy_lk_c | mCurProc / proc member pointer | +0x65F0 / +0x65F4 | commonProcInit; execute 0240D6B4 |
+| daPy_lk_c | m34C2 / mResetFlg0 / m3700 / m_old_fdata | +0x68DE / +0x3C0 / +0x7308 / +0x65CC | execute 0240D370, 0240D300; posMove 023FDF9C |
+| fopAc_ac_c | heap / culling matrix | +0xF4 / +0x348 | fopAcM_cullingCheck 025D6D08 |
+| camera process | size | 0xB28 | profile (name 0x1DC) |
+| save info | pointer | *101F84DC | dComIfGs_setSelectEquip; status A at +0x20, select equip +0x2E, items +0x5C, item record +0x86 |
+| play state | g_dComIfG_gameInfo.play | 1046F0B0 | select items +0x5BBB (X, Y, Z), start/next stage +0x5134/+0x5140 |
 
-### Link (`true60_link.cpp`)
-
-Instruction hooks in `daPy_lk_c::posMoveFromFootPos` (`023FCB9C`, GameCube d_a_player_main.cpp:2352):
-
-| Site | Code | Conversion |
-|---|---|---|
-| `023FCEB0` | `f31_2 = |toe movement|` (f1, from PSVECSquareMag+sqrt) | ÷ dt (the animation advanced dt frames) |
-| `023FD338` | `speed.y += gravity * 2.25f` (heavy boots, fmadds) | gravity (f9) × dt |
-| `023FD35C` | `speed.y += gravity` | gravity (f9) × dt |
-| `023FD39C` | `current.pos += speed` (PSVECAdd) | speed × dt + Δv·(1−dt)/2 (exact arc) |
-
-Timers held on half passes (s16 unless noted): the per-procedure union `m34D0..m34DA`
-(+0x6916…+0x6920), `m3522` +0x6972, `m3526` +0x6976, `mTinkleHoverTimer` +0x699C, `m355C` +0x69AC,
-`m355E` +0x69AE, HD s32 +0x8260; eye timers through `cLib_calcTimer<u8>` (`0207A9A0`).
-
-Procedures at 60 Hz by default (measured): WAIT, FREE_WAIT, MOVE, ATN_MOVE, SIDE_STEP,
-FRONT_ROLL, BACK_JUMP, BACK_JUMP_LAND, AUTO_JUMP, LAND, FALL.
-
-While `dBgS::MoveBgCrrPos` (`024EF968`) carries Link on moving collision (platforms, rafts), Link
-runs at 30 Hz together with the platform, for 8 passes after the last carry.
-`WWHD_TRUE60_LINK=audited` adds 101 more:
-- `tools/true60/proc_audit.py` finds them free of inline per-step code in the GameCube source of
-  the procedure itself, or with only timer countdowns.
-- Ship, rope, hookshot, carrying and swimming procedures are left out.
-- Measured with it: side hop and Z-target movement match; SWIM_UP did not (27.5 steps instead of
-  35), so swimming stays at 30 Hz.
-
-`WWHD_TRUE60_LINK=all|none|n,n,..` is for testing.
-
-### Camera (`tools/true60/sites_camera.txt`)
-
-- **Inline smoothing.** `tools/true60/smooth_sites.py` finds per-step smoothing `x += (t - x) * r`
-  in the generated code:
-  - an `fsubs` feeding an `fmadds` (or an `fmuls`+`fadds`);
-  - the addend loaded from, and the result stored back to, the same object field.
-  
-  `gen_sites.py` turns the list into instruction hooks that use `1-(1-r)^dt` for that instruction
-  (and restore the register after it).
-- **Converted sites:**
-  - 26 sites in `dCamera_c::followCamera`;
-  - 12 vector/angle smoothing calls through `cXyz::operator*` (`0201AE48`) and
-    `cSAngle::operator*(f32)` (`0200693C`). For these, f1 is the per-step ratio, recognised by the
-    `__mi` → `__ml` → add/`PSVECAdd` call pattern;
-  - 2 calls in `dCamera_c::Run` (m148 forward-check angle, bank decay).
-- **Step counters.** The camera's step counters (`m07C`, `m080`, `m108`, `m118`, `m11C`,
-  `mForceLockTimer`, and the follow-work counters) are held on half passes.
-- **Other camera modes** (lock-on, talk, event, …) run at 30 Hz. All of d_camera.cpp has 134 inline
-  smoothing sites by the same scan.
-
-### Measured against the 30 fps game
-
-Setup:
-- Copy of the user's save, Outset pier.
-- Scripted input on *game time*: `WWHD_TEST_*` env vars. Scenario time is full logic steps / 30,
-  so frame-time hitches don't shift the input.
-- Traces: `WWHD_LINK_TRACE`, `WWHD_CAM_TRACE`.
-- The 30 fps and interpolation runs are deterministic: interpolation reproduces the 30 fps
-  trajectory to 0.00 units.
-
-| Quantity | 30 fps | true 60 | Notes |
-|---|---|---|---|
-| Running speed (steady) | 16.98 units/step (509 units/s) | 8.496 per half step (509 units/s) | identical |
-| Start of a run (2 s) | — | Link ≤ 1.8 units from the 30 fps path | |
-| Run animation cycle | 14.0 steps | 14.0 steps | |
-| Auto jump off the pier | peak 67.8, 26 steps | peak 67.9, 26 steps | height profile within 1 unit (takeoff point differs by half a step) |
-| Side hop (Z-target) | heights 14.4 26.4 36.0 43.2 48.0 50.4 … | identical to 0.1 unit | 16 steps in both |
-| Back flip (Z-target + back + A) | heights 16 29 39 46 50 51 49 44 36 25 11, lands after 12 steps | identical heights, lands after 11.5 steps | the landing is found half a step earlier, so the flip ends 10 units shorter (266.6 vs 256.8): the 30 Hz step overshoots into the ground |
-| Fall | speedF −1.0 per step | −1.0 per step | |
-| Front roll | 16 steps, 22.09 units/step | 15.5 steps, 22.09 units/step | ends half a step earlier |
-| Follow camera | — | eye ≤ 4.7, center ≤ 3.9 units from 30 fps while running | with the camera at 30 Hz: ≤ 1.9. Sampling a moving target at 60 Hz changes a discrete smoothing lag by about half a step of motion |
-| Logic rates | — | Link 59.9 steps/s; camera 60 while following; ≈5050 executes/s of the other ≈170 processes at 30 Hz | `[true60]` log line every 10 s |
-| Pause menu | — | opens and closes; walking afterwards works | |
-
-### Known differences and limits
-
-- **Phase.** A converted action that starts on a half pass ends half a step earlier than at 30 fps
-  (roll: 15.5 vs 16 steps). Per-step changes are applied in halves, so ramps lag or lead by up to
-  half a step.
-- **30 Hz processes are drawn 1/60 s behind** (interpolated between their last two steps), while
-  Link and the camera are current. Constant offsets don't jitter. Where Link rides or carries a 30 Hz
-  actor (ship, carried objects, moving platforms), he must stay at 30 Hz: those procedures are
-  excluded, and Link drops to 30 Hz while moving collision carries him.
-- **Collisions with 30 Hz actors** are only checked on full passes: their colliders are only set in
-  their execute.
-- **Random chances per step** (`cM_rnd() < p` in converted code, e.g. procWait's demo voice) fire
-  twice as often.
-- **Not converted inside Link's 60 Hz procedures:**
-  - wind, whirlpool, ice and conveyor pushes (`m3644`, `m3610`, `m36A0`, `m3730` in `posMove`);
-  - the CC push (`mStts.GetCCMoveP`), a per-step correction.
-- **Particles** are not converted. Emitters step wherever the game steps them; the rate is in the
-  `[true60]` log line.
-- **Camera:** only the follow camera is converted; the other modes stay at 30 Hz.
-- **Integer angle smoothing** (`cLib_addCalcAngleS` with small divisors) cannot be split exactly.
-  Link's heading after a turn differed by ≤ 44 units (0.24°).
 
 ### Plan for the rest (estimates for one person with these tools)
 
@@ -393,6 +384,57 @@ Most active files (score = primitive calls + 5 × counters + pos/speed stores):
 | d_a_ks.cpp | 14 | 17 | s16-0x43A, s16+0x56C, s16-0x57C, s16+0x57C, s16+0x57E, s16+0x69EE, s32+0xFFFF8840, s32-0xF… | 49 | — |
 | d_a_bb.cpp | 23 | 46 | s16-0x49A, s16+0x4C6, s16+0x4C8 | 44 | — |
 | d_a_bl.cpp | 21 | 26 | s16+0x422 | 69 | — |
+
+## Fixed: intermittent boot crash (agl shader archive setup)
+
+**Cause: a late GX2CopySurface write from the render thread into freed and reused guest memory.**
+Fixed on fix-boot-race: GX2CopySurface now waits for the render thread (`render_sync`) before it returns.
+This is likely also the root cause of the Android (Snapdragon 8 Gen 3) boot crash that PR #31 works around
+by pinning all threads to one core: with one core the render thread runs late every time.
+
+- **Signature.** SIGBUS at guest address 4 about 0.5 s after `[thread] start "Prepare Thread"`.
+  - Call path: Prepare Thread 0274A7A4 → 0203EE2C → 0203EA88 → 027B59F4 → 02786520 (agl shader program
+    setup for `agl_resource_cafe_dev.sarc`).
+  - The crash is in 027B90AC, called from 02786520's second loop (lr 02786700). It reads
+    `*(*(prog+0x7c)+4)` with program 0's +0x7c = 0. Program array 21EFE28C (56 × 0x84, object 226FE868).
+  - The first archive setup (027B8904) had filled +0x7c correctly (21F13190). The value was lost afterwards.
+- **Writer.** `gfx::copy_surface_impl`'s CPU re-tile path on the "GX2 render" thread wrote
+  21EFE300..21EFE4FF. Found with a write-protect watch (`WWHD_BOOTDBG_PROT=1`) and confirmed with `WWHD_COPYDBG=1`.
+- **Cause.** agl's tile-mode conversion 027B5EEC (called from the Prepare Thread) does five things:
+  1. allocates a temporary surface from the heap (here at 21EFE300, 0x200 bytes);
+  2. calls `GX2CopySurface` (linear source → temporary, call site lr 027B5FD4);
+  3. immediately calls `OSBlockMove`, copying the temporary back over the source;
+  4. calls `DCFlushRangeNoSync`;
+  5. frees the temporary.
+
+  So the game treats the copy as finished when GX2CopySurface returns. The port only queued it for the render
+  thread. When that thread ran late, the copy landed after the heap had reused the temporary's memory for the
+  program array. It zeroed program 0's +0x7c whenever it landed between the array setup and the second loop.
+  The port also lost the copy's result: the game had already read the temporary.
+- **Fix.** `HLE(gx2, GX2CopySurface)` calls `render_sync` after queueing the copy, unless a display list is
+  being recorded (display lists run when called). This applies to both backends.
+  - Cost: about 50 syncs at boot (agl resource setup), in the first 5 s. None in steady gameplay or after
+    state loads in Outset, on the sea (Windfall pier) or in Dragon Roost Cavern (`WWHD_SYNC_STATS=1`, site
+    "CopySurface").
+  - The per-sync ms cost is to be measured on an idle machine (TODO.md).
+- **Evidence (h6, 2026-10-06, strictly one boot at a time, load average 6 to 8 on 16 cores).**
+  - Stressed with `WWHD_GX2_DELAY_COPY` (the render thread stalls before each copy):
+    - unfixed, 15 or 30 ms: 14 of 14 boots crash with the identical signature;
+    - unfixed, 45 ms: 0 of 4 (the write then lands after the second loop's read);
+    - fixed, 15 or 30 ms: 0 of 28.
+  - Not stressed: unfixed 0 of 30, fixed 0 of 60. With one instance on a lightly loaded machine the natural
+    rate is too low to tell the two apart. Earlier rates were about 1 in 12 with 8 instances and 1 in 15 to
+    1 in 88 with 2, and on Android with all threads on one core every boot crashed.
+- **Debug aids (all off by default).**
+  - `WWHD_GX2_DELAY_COPY=ms` (gx2_core.cpp): the regression repro.
+  - `WWHD_COPYDBG=1`: logs each GX2CopySurface issue (thread, lr, images) and each CPU-path execution (range,
+    time).
+  - In true60_test.cpp:
+    - `WWHD_BOOTDBG=1` (02786520 / 027B8904 / 027B82B8 logs);
+    - `WWHD_BOOTDBG_SLOW=ms`;
+    - `WWHD_BOOTDBG_PROT=1` (write-protect the first program array's page and log the writing thread with a
+      backtrace);
+    - `WWHD_HEAPLOG=1`.
 
 ## Effects interpolation (runtime/src/interp_fx.cpp)
 

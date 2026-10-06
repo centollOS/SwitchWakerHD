@@ -25,6 +25,7 @@
 #include "runtime.h"
 #include "../aspect.h"
 #include "gfx/renderer.h"
+#include "platform/perf_hint.h"
 
 using namespace Latte;
 
@@ -258,9 +259,8 @@ static RenderProgress g_progress;
 static void render_thread_main() {
     host::set_thread_name("GX2 render");
     host::place_thread(2);  // the render thread: host core 2, or 0 and 2 with WWHD_CORE_LAYOUT
-#ifdef __APPLE__
-    if (!getenv("WWHD_NO_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-#endif
+    host::boost_thread_priority();
+    perf_hint::add_current_thread();
     for (;;) {
         {
             std::unique_lock<std::mutex> lk(g_q_mutex);
@@ -345,7 +345,31 @@ static void enqueue(Op op, const uint32* payload, uint32 n) {
 static std::atomic<uint64_t> g_sync_wait_ns{0}, g_syncs{0};
 uint64_t game_sync_wait_ns() { return g_sync_wait_ns.load(std::memory_order_relaxed); }
 uint64_t game_syncs() { return g_syncs.load(std::memory_order_relaxed); }
-static void render_sync() {
+// debug: WWHD_SYNC_STATS=1 logs, every 5 s, how often each caller waited for the render thread to
+// catch up (render_sync) and for how long
+enum SyncSite { kSyncShutdown, kSyncFlip, kSyncDrawDone, kSyncVsyncUncapped, kSyncVsyncFlip, kSyncSaveState, kSyncCopySurface, kSyncSites };
+static void sync_stat(int site, std::chrono::steady_clock::duration waited) {
+    static const bool on = getenv("WWHD_SYNC_STATS") != nullptr;
+    if (!on) return;
+    static std::mutex mu;
+    static uint64_t count[kSyncSites], ns[kSyncSites];
+    static auto t0 = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(mu);
+    count[site]++;
+    ns[site] += std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - t0 < std::chrono::seconds(5)) return;
+    const double secs = std::chrono::duration<double>(now - t0).count();
+    static const char* names[kSyncSites] = {"shutdown", "flip", "DrawDone", "vsync-uncapped", "vsync-flip", "savestate", "CopySurface"};
+    char buf[400];
+    int k = snprintf(buf, sizeof buf, "[gx2] render_sync per second:");
+    for (int i = 0; i < kSyncSites; i++)
+        if (count[i]) k += snprintf(buf + k, sizeof buf - k, " %s %.1f x %.2f ms", names[i], count[i] / secs, ns[i] / 1e6 / count[i]);
+    LOG("%s", buf);
+    memset(count, 0, sizeof count); memset(ns, 0, sizeof ns);
+    t0 = now;
+}
+static void render_sync(int site = kSyncShutdown) {
     if (!g_render_thread) return;
     struct Timed {
         std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
@@ -356,6 +380,8 @@ static void render_sync() {
             g_syncs.fetch_add(1, std::memory_order_relaxed);
         }
     } timed;
+    const auto started = std::chrono::steady_clock::now();
+    struct Done { int site; std::chrono::steady_clock::time_point t; ~Done() { sync_stat(site, std::chrono::steady_clock::now() - t); } } done{site, started};
     uint64_t id;
     {
         std::lock_guard<std::mutex> lk(g_q_mutex);
@@ -466,6 +492,18 @@ static uint32 unpack_struct(const uint32* words, uint32 count, int slot) {
     return addr;
 }
 
+static bool lazy_draw_done() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_VK_LAZY_DRAW_DONE");
+#ifdef __ANDROID__
+        return render::vulkan() && (!e || atoi(e) != 0);
+#else
+        return render::vulkan() && e && atoi(e) != 0;
+#endif
+    }();
+    return on;
+}
+
 static void execute_one(Op op, const uint32* p, uint32 n) {
     switch (op) {
     case OP_NOP: break;
@@ -492,6 +530,10 @@ static void execute_one(Op op, const uint32* p, uint32 n) {
         break;
     }
     case OP_COPY_SURFACE: {
+        // debug: WWHD_GX2_DELAY_COPY=ms stalls the render thread before each surface copy (a slow
+        // or busy render thread; reproduced the agl boot crash every time before GX2CopySurface waited)
+        static const int delay = getenv("WWHD_GX2_DELAY_COPY") ? atoi(getenv("WWHD_GX2_DELAY_COPY")) : 0;
+        if (delay) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         uint32 src = unpack_struct(p, kSurfaceWords, 0);
         const uint32* q = p + kSurfaceWords;
         uint32 dst = unpack_struct(q + 2, kSurfaceWords, 1);
@@ -505,7 +547,14 @@ static void execute_one(Op op, const uint32* p, uint32 n) {
     case OP_INVALIDATE: render::invalidate(p[0], p[1], p[2]); break;
     case OP_EXPAND_COLOR: case OP_EXPAND_DEPTH: break;  // MSAA/HiZ decompression: nothing to do on the host
     case OP_FLUSH: render::guest_flush(); break;  // Vulkan: asynchronous submission
-    case OP_DRAW_DONE: render::wait_idle(); break;
+    case OP_DRAW_DONE:
+        // The Vulkan renderer never writes GPU results back to guest memory (guest data is copied
+        // into fenced upload slices when work is recorded), so GX2DrawDone needs this op executed
+        // (render_sync in the HLE), not an idle GPU. WWHD_VK_LAZY_DRAW_DONE=1 (the default in the
+        // Android port) queues the work instead of waiting for the whole device every frame.
+        if (lazy_draw_done()) render::guest_flush();
+        else render::wait_idle();
+        break;
     case OP_SWAP:
         if (n) render::set_frame_aspect(gx2::bitsf(p[0]));  // aspect ratio from the next frame on (aspect.cpp)
         render::swap();
@@ -717,7 +766,7 @@ static void ready_flip_before_resume() {
         if(at > vsync_index()) return;
         needsSync = render::frames_completed() < front.swap;
     }
-    if(needsSync) render_sync(); // Core already released; no flip lock held.
+    if(needsSync) render_sync(kSyncFlip); // Core already released; no flip lock held.
     std::lock_guard<std::mutex> lk(g_flip_mutex);
     update_flips();
 }
@@ -806,12 +855,26 @@ HLE(gx2, GX2SetClearDepthStencil) {
     db->clearStencil = arg(c, 1) & 0xFF;
 }
 HLE(gx2, GX2CopySurface) {
+    // debug: WWHD_COPYDBG=1 logs each copy as issued (thread, caller, source and destination images)
+    static const bool dbg = getenv("WWHD_COPYDBG") != nullptr;
+    if (dbg)
+        LOG("[copydbg] issue t=%.3f thread %08X lr %08X src %08X img %08X dst %08X img %08X size %X", timebase::now() / (double)timebase::kTicksPerSec,
+            threads::current_thread(), c->lr, arg(c, 0), ld32(arg(c, 0) + 0x24), arg(c, 3), ld32(arg(c, 3) + 0x24), ld32(arg(c, 3) + 0x20));
     std::vector<uint32> p;
     put_struct(p, arg(c, 0), kSurfaceWords);
     p.insert(p.end(), {arg(c, 1), arg(c, 2)});
     put_struct(p, arg(c, 3), kSurfaceWords);
     p.insert(p.end(), {arg(c, 4), arg(c, 5)});
     emit(OP_COPY_SURFACE, p.data(), (uint32)p.size());
+    // The copy is complete when GX2CopySurface returns: the game uses the result (and frees the
+    // surfaces) right away. agl's tile-mode conversion (027B5EEC) copies into a temporary surface,
+    // OSBlockMoves it back and frees it at once; executed later on the render thread, the copy
+    // wrote into the freed memory after the heap had reused it (boot crash: agl shader program
+    // array 21EFE28C, program 0's +0x7c zeroed). Not for display lists (they run when called).
+    if (!t_rec.start) {
+        BlockingScope b;
+        render_sync(kSyncCopySurface);
+    }
 }
 HLE(gx2, GX2CopyColorBufferToScanBuffer) {
     std::vector<uint32> p;
@@ -828,7 +891,7 @@ HLE(gx2, GX2Flush) { emit_host(OP_FLUSH, {}); }
 HLE(gx2, GX2DrawDone) {
     BlockingScope b;
     emit_host(OP_DRAW_DONE, {});
-    render_sync();
+    render_sync(kSyncDrawDone);
     ret(c, 1);
 }
 HLE(gx2, GX2SwapScanBuffers) {
@@ -868,6 +931,15 @@ HLE(gx2, GX2SwapScanBuffers) {
     std::call_once(watchdog, [] {
         if (!getenv("WWHD_NO_WATCHDOG")) host::start_thread(watchdog_thread, 256 << 10);
     });
+    // debug: WWHD_LOG_SLOW_SWAP=ms logs swaps that came more than ms after the previous one
+    static const double slow_ms = getenv("WWHD_LOG_SLOW_SWAP") ? atof(getenv("WWHD_LOG_SLOW_SWAP")) : 0;
+    if (slow_ms > 0) {
+        static auto prev = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(now - prev).count();
+        prev = now;
+        if (ms > slow_ms) LOG("[gx2] slow swap %llu: %.1f ms", (unsigned long long)g_swap_count, ms);
+    }
     if (g_swap_count % 300 == 1) {
         static auto last = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
@@ -903,7 +975,7 @@ HLE(gx2, GX2WaitForVsync) {
         BlockingScope b;
         // The queue fence follows earlier swaps, whose presentation path waits
         // for GPU completion. Never wait while holding the flip mutex.
-        render_sync();
+        render_sync(kSyncVsyncUncapped);
         std::lock_guard<std::mutex> lk(g_flip_mutex);
         update_flips();
         return;
@@ -927,7 +999,7 @@ HLE(gx2, GX2WaitForVsync) {
         if(eligible) {
             if(needsSync) {
                 BlockingScope b;
-                render_sync(); // Queued swap completion; never hold flip mutex.
+                render_sync(kSyncVsyncFlip); // Queued swap completion; never hold flip mutex.
             }
             std::lock_guard<std::mutex> lk(g_flip_mutex);
             update_flips(); // Retains minimum interval and FIFO GPU guards.
@@ -1047,7 +1119,7 @@ HLE(gx2, GX2SampleBottomGPUCycle) { if (arg(c, 0)) st64(arg(c, 0), timebase::gue
 // command reads guest memory while it is replaced and the swap/flip counts agree
 void gx2_ss_drain() {
     emit_host(OP_DRAW_DONE, {});
-    render_sync();
+    render_sync(kSyncSaveState);
     for (int i = 0; i < 300; i++) {
         {
             std::lock_guard<std::mutex> lk(g_flip_mutex);

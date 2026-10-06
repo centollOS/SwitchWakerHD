@@ -180,6 +180,8 @@ void log_flush();  // writes out buffered log lines (the Switch logs through a w
 size_t heap_never_used_mib();  // core.cpp
 void log_heap(const char* when);
 #endif
+// writes the last ~200 log lines through out(fd, text, len) (used by crash logs; no locking)
+void log_ring_write(int fd, void (*out)(int, const char*, size_t));
 #define TRACE(...) do { if (g_trace_hle) log_msg(__VA_ARGS__); } while (0)
 
 // ---- configuration ----

@@ -247,6 +247,7 @@ void reset_present_resources() {
  if(resources.layout)vkDestroyPipelineLayout(resources.device,resources.layout,nullptr);
  if(resources.descriptors)vkDestroyDescriptorSetLayout(resources.device,resources.descriptors,nullptr);
  resources={};
+ reset_overlay_resources();
 }
 // ---------------------------------------------------------------- composition
 namespace {
@@ -261,8 +262,9 @@ bool sampleable(const Surface& source) {
 }
 // draw the quads into `view` (cleared to black first); `layout` is the target image's current layout
 void compose(VkImage image,VkImageView view,VkImageLayout& layout,VkExtent2D extent,VkFormat format,
-             const std::vector<ComposeQuad>& quads,VkImageLayout finalLayout,int filter,bool fxaa) {
+             const std::vector<ComposeQuad>& quads,VkImageLayout finalLayout,int filter,bool fxaa,ImDrawData* overlay=nullptr) {
  end_encoder();
+ if(overlay)overlay_prepare(overlay);
  for(auto& q:quads)
   if(q.image)transition_image(q.image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT);
  auto cmd=command_buffer();VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};barrier.oldLayout=layout;barrier.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -300,6 +302,7 @@ void compose(VkImage image,VkImageView view,VkImageLayout& layout,VkExtent2D ext
   auto params=present_params(fxaa&&linear,filter,scale,sourceLinear,targetLinear);params.alpha=q.alpha;
   vkCmdPushConstants(cmd,resources.layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(params),&params);vkCmdDraw(cmd,3,1,0,0);
  }
+ if(overlay)overlay_draw(overlay,cmd,format,extent,targetLinear);  // settings overlay on top
  vkCmdEndRendering(cmd);
  barrier.oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;barrier.newLayout=finalLayout;barrier.srcAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;barrier.dstAccessMask=0;
  vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,nullptr,0,nullptr,1,&barrier);layout=finalLayout;
@@ -308,14 +311,15 @@ void compose(VkImage image,VkImageView view,VkImageLayout& layout,VkExtent2D ext
 }  // namespace
 
 void set_present_plan(const gfx::PresentPlan* plan) { currentPlan=plan; }
+namespace { ImDrawData* overlayDraw=nullptr; }
+void set_overlay_draw(ImDrawData* draw) { overlayDraw=draw; }
 
 std::vector<ComposeQuad> screen_quads(Screen& screen,VkExtent2D target,int& filter) {
  std::vector<ComposeQuad> quads;
  filter=scale_filter();
  if(!screen.scan||!screen.scan->image)return quads;
- #ifndef WWHD_SDL_HOST
  if(currentPlan) {
-  // AppKit windows (display.mm): the same layout as the Metal renderer
+  // both window hosts (gfx/display_modes.cpp): the same layout as the Metal renderer
   filter=currentPlan->filter;
   if(&screen==&R.drc) {
    ComposeQuad q;q.image=R.drc.scan.get();q.sourceLinear=R.drc.srgb.load();
@@ -334,10 +338,24 @@ std::vector<ComposeQuad> screen_quads(Screen& screen,VkExtent2D target,int& filt
    frame.box={p.pip.x-bw,p.pip.y-bw,p.pip.w+2*bw,p.pip.h+2*bw};quads.push_back(frame);
    ComposeQuad pip;pip.image=drc;pip.sourceLinear=R.drc.srgb.load();pip.box=p.pip;pip.alpha=op;quads.push_back(pip);
   }
+  if(p.button.w>0) {
+   // touch screens' view button (display_modes.h): a dark square with two light "screens" (rhemfur's
+   // Android design) and the host's state dot (Android: 60 fps on / paused)
+   const gfx::Box& t=p.button;
+   ComposeQuad b;b.solid=true;b.color[3]=0.45f;b.box={t.x,t.y,t.w,t.h};quads.push_back(b);
+   for(int i=0;i<2;i++) {
+    ComposeQuad s;s.solid=true;s.color[0]=s.color[1]=s.color[2]=0.9f;s.color[3]=0.8f;
+    s.box={t.x+t.w*(i?0.45f:0.15f),t.y+t.h*(i?0.45f:0.2f),t.w*0.4f,t.h*0.32f};quads.push_back(s);
+   }
+   if(p.button_dot) {
+    const bool on=p.button_dot==1;
+    ComposeQuad d;d.solid=true;d.color[0]=on?0.2f:0.95f;d.color[1]=on?0.85f:0.8f;d.color[2]=on?0.3f:0.15f;d.color[3]=0.95f;
+    d.box={t.x+t.w*0.72f,t.y+t.h*0.06f,t.w*0.22f,t.h*0.22f};quads.push_back(d);
+   }
+  }
   return quads;
  }
-#endif
- // SDL host: the picture scaled to fit (Codex's presentation)
+ // no plan (outside swap): the picture scaled to fit (Codex's presentation)
  const auto rect=present_rect(screen.scan->extent,target,filter);
  ComposeQuad q;q.image=screen.scan.get();q.sourceLinear=screen.srgb.load();q.box={rect.x,rect.y,rect.width,rect.height};quads.push_back(q);
  return quads;
@@ -370,7 +388,7 @@ bool draw_present_screen(Screen& screen,uint32_t imageIndex) {
  if(fxaa_enabled()&&!linear)throw std::runtime_error("FXAA requires linear scan-buffer filtering");
  int filter=0;auto quads=screen_quads(screen,screen.swapExtent,filter);
  compose(screen.images.at(imageIndex),found->second.views.at(imageIndex),screen.layouts.at(imageIndex),screen.swapExtent,screen.swapFormat,
-         quads,VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,filter,fxaa_enabled());
+         quads,VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,filter,fxaa_enabled(),&screen==&R.tv?overlayDraw:nullptr);
  return true;
 }
 
@@ -383,7 +401,7 @@ std::vector<uint8_t> compose_offscreen(Screen& screen,uint32_t width,uint32_t he
  try {
   int filter=0;auto quads=screen_quads(screen,VkExtent2D{width,height},filter);
   compose(target.image,target.view,target.layout,VkExtent2D{width,height},target.fmt.pixel,quads,
-          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,filter,fxaa_enabled());
+          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,filter,fxaa_enabled(),&screen==&R.tv?overlayDraw:nullptr);
   rgba=read_surface_rgba(target,false);  // display-encoded already (sRGB target, or encoded values)
  }catch(...){destroy_surface_image(&target);throw;}
  destroy_surface_image(&target);
@@ -418,7 +436,7 @@ void draw_mod_overlay(Surface& scan) {
 // chain, then a linear reduction of the first level at least 32 wide; read back after the frame's fence.
 namespace {
 struct Signature {
- VkImage mip=VK_NULL_HANDLE,small=VK_NULL_HANDLE;VkDeviceMemory mipMemory=VK_NULL_HANDLE,smallMemory=VK_NULL_HANDLE;
+ VkImage mip=VK_NULL_HANDLE,signatureImage=VK_NULL_HANDLE;VkDeviceMemory mipMemory=VK_NULL_HANDLE,smallMemory=VK_NULL_HANDLE;
  uint32_t width=0,height=0,levels=0;Buffer buffer{};bool pending=false,linear=false;
 };
 Signature signatures[2];
@@ -447,8 +465,8 @@ bool record_signature(int slot,Surface& source,bool sourceLinear) {
   uint32_t levels=1;while((w>>levels)>=uint32_t(gfx::kSignatureW)&&(h>>levels)>=1)levels++;
   make_image(g.mip,g.mipMemory,w,h,levels);g.width=w;g.height=h;g.levels=levels;
  }
- if(!g.small) {
-  make_image(g.small,g.smallMemory,gfx::kSignatureW,gfx::kSignatureH,1);
+ if(!g.signatureImage) {
+  make_image(g.signatureImage,g.smallMemory,gfx::kSignatureW,gfx::kSignatureH,1);
   g.buffer=create_buffer(gfx::kSignatureW*gfx::kSignatureH*4,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
  }
  transition_image(&source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
@@ -467,13 +485,13 @@ bool record_signature(int slot,Surface& source,bool sourceLinear) {
  }
  const uint32_t last=g.levels-1;
  level_barrier(cmd,g.mip,last,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,W,Rd);
- level_barrier(cmd,g.small,0,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,W);
+ level_barrier(cmd,g.signatureImage,0,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,W);
  VkImageBlit b{};b.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,last,0,1};b.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
  b.srcOffsets[1]={int(std::max(w>>last,1u)),int(std::max(h>>last,1u)),1};b.dstOffsets[1]={int(gfx::kSignatureW),int(gfx::kSignatureH),1};
- vkCmdBlitImage(cmd,g.mip,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,g.small,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&b,VK_FILTER_LINEAR);
- level_barrier(cmd,g.small,0,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,W,Rd);
+ vkCmdBlitImage(cmd,g.mip,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,g.signatureImage,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&b,VK_FILTER_LINEAR);
+ level_barrier(cmd,g.signatureImage,0,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,W,Rd);
  VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={gfx::kSignatureW,gfx::kSignatureH,1};
- vkCmdCopyImageToBuffer(cmd,g.small,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,g.buffer.buffer,1,&copy);
+ vkCmdCopyImageToBuffer(cmd,g.signatureImage,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,g.buffer.buffer,1,&copy);
  VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};host.srcAccessMask=W;host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
  host.srcQueueFamilyIndex=host.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;host.buffer=g.buffer.buffer;host.size=VK_WHOLE_SIZE;
  vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&host,0,nullptr);
@@ -499,7 +517,7 @@ std::vector<float> read_signature(int slot) {
 void reset_signatures() {
  for(auto& g:signatures) {
   if(g.mip){vkDestroyImage(R.device,g.mip,nullptr);vkFreeMemory(R.device,g.mipMemory,nullptr);}
-  if(g.small){vkDestroyImage(R.device,g.small,nullptr);vkFreeMemory(R.device,g.smallMemory,nullptr);}
+  if(g.signatureImage){vkDestroyImage(R.device,g.signatureImage,nullptr);vkFreeMemory(R.device,g.smallMemory,nullptr);}
   if(g.buffer.buffer)defer_buffer(g.buffer);
   g=Signature{};
  }

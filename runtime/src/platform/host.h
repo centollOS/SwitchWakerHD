@@ -25,6 +25,12 @@
 #endif
 #ifdef __APPLE__
 #include <mach-o/ldsyms.h>
+#include <mach-o/dyld.h>
+#include <climits>
+#include <pthread/qos.h>
+#elif !defined(_WIN32) && !defined(__SWITCH__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #endif
 namespace host {
 #if defined(__APPLE__) && defined(WWHD_HAS_VULKAN)
@@ -56,6 +62,31 @@ inline void set_thread_name(const char* name) {
  (void)name;
 #else
  pthread_setname_np(pthread_self(),thread_label.substr(0,15).c_str());
+#endif
+}
+// Game and render threads: keep them on fast cores and ahead of background work. macOS: QoS
+// user-interactive (the default QoS let macOS park them on efficiency cores). Windows: above-normal
+// priority and no power throttling (hybrid P/E-core CPUs otherwise move busy threads to E-cores).
+// Linux: a small nice boost where the process may raise priority (needs CAP_SYS_NICE; otherwise a
+// no-op). WWHD_NO_QOS=1 leaves the thread untouched on every platform.
+inline void boost_thread_priority() {
+ if(getenv("WWHD_NO_QOS")) return;
+#ifdef __APPLE__
+ pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
+#elif defined(_WIN32)
+ SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_ABOVE_NORMAL);
+ // SetThreadInformation(ThreadPowerThrottling) exists from Windows 10 1709; looked up at run time
+ struct PowerThrottling { ULONG Version, ControlMask, StateMask; };
+ using SetInfo=BOOL(WINAPI*)(HANDLE,int,LPVOID,DWORD);
+ static const auto set_info=(SetInfo)GetProcAddress(GetModuleHandleW(L"Kernel32.dll"),"SetThreadInformation");
+ if(set_info) {
+  PowerThrottling state{1 /* THREAD_POWER_THROTTLING_CURRENT_VERSION */,1 /* EXECUTION_SPEED */,0 /* off */};
+  set_info(GetCurrentThread(),3 /* ThreadPowerThrottling */,&state,sizeof state);
+ }
+#elif defined(__SWITCH__)
+ // nothing: Horizon priorities and cores are set by raise_thread_priority / place_thread
+#else
+ setpriority(PRIO_PROCESS,(id_t)syscall(SYS_gettid),-5);  // EPERM without CAP_SYS_NICE: ignored
 #endif
 }
 inline void get_thread_name(char* out,size_t size) {
@@ -188,7 +219,41 @@ inline void start_thread(void (*fn)(), size_t stack) {
  (void)stack; std::thread(fn).detach();
 #endif
 }
+// Portable mode (release packages): a file "portable.txt" next to the executable keeps every
+// per-user file (settings, controls, save states, shader caches) in "user" next to the executable's
+// folder (<folder>/bin/wwhd -> <folder>/user) instead of the user's Library / AppData / .config.
+// Without the marker (source builds) nothing changes.
+inline std::string exe_dir() {
+ static const std::string dir=[]{
+  std::string p;
+#if defined(__APPLE__)
+  char buf[4096]; uint32_t n=sizeof buf;
+  if(_NSGetExecutablePath(buf,&n)==0){ char real[PATH_MAX]; p=realpath(buf,real)?real:buf; }
+#elif defined(_WIN32)
+  char buf[MAX_PATH*4]; DWORD n=GetModuleFileNameA(nullptr,buf,sizeof buf); if(n>0&&n<sizeof buf) p.assign(buf,n);
+#elif !defined(__SWITCH__)  // the Switch has no portable mode: everything is in sdmc:/switch/wwhd
+  char buf[4096]; ssize_t n=readlink("/proc/self/exe",buf,sizeof buf-1); if(n>0) p.assign(buf,(size_t)n);
+#endif
+  size_t s=p.find_last_of("/\\");
+  return s==std::string::npos?std::string():p.substr(0,s);
+ }();
+ return dir;
+}
+inline const std::string& portable_user_dir() {
+ static const std::string dir=[]{
+  std::string e=exe_dir();
+  if(e.empty()) return std::string();
+  FILE* f=fopen((e+"/portable.txt").c_str(),"rb");
+  if(!f) return std::string();
+  fclose(f);
+  size_t s=e.find_last_of("/\\");
+  return (s==std::string::npos?e:e.substr(0,s))+"/user";
+ }();
+ return dir;
+}
+inline bool portable() { return !portable_user_dir().empty(); }
 inline std::string config_dir() {
+ if(portable()) return portable_user_dir();
 #ifdef __APPLE__
  const char* home=getenv("HOME");return std::string(home?home:".")+"/Library/Application Support/WWHD";
 #elif defined(_WIN32)

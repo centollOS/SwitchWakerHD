@@ -21,8 +21,8 @@ forward to the renderer chosen once at start-up:
 
 If Vulkan cannot start, the game falls back to Metal and shows why (log, a sheet on the TV window,
 the window title says "Metal (Vulkan unavailable)"): no Vulkan loader or glslang installed (both are
-weak imports, so the app still starts without them), no driver (MoltenVK), no device with Vulkan 1.3
-dynamic rendering. `WWHD_VK_FORCE_INIT_FAIL=1` forces this path for testing.
+weak imports, so the app still starts without them), no driver (MoltenVK), no device with dynamic
+rendering. `WWHD_VK_FORCE_INIT_FAIL=1` forces this path for testing.
 
 Both renderers use the same AppKit host (`gfx/display.mm`, `menu.mm`, `input.mm`,
 `controls_ui.mm`, `mods/mouse.mm`): TV and GamePad windows, full screen, GamePad screen modes
@@ -56,8 +56,16 @@ logs the window title.
 ## Build
 
 Use Clang/clang++ with CMake, Vulkan 1.3 headers and loader, glslang and zlib (and SDL3 and, on
-Windows/Linux, LZ4 for the SDL host). A GPU/driver supporting Vulkan 1.3 dynamic rendering is
-required. Dependencies must match the target architecture.
+Windows/Linux, LZ4 for the SDL host). A GPU/driver with dynamic rendering is required: Vulkan 1.3,
+or Vulkan 1.1 / 1.2 with `VK_KHR_dynamic_rendering`. Dependencies must match the target architecture.
+
+The executable imports no Vulkan functions (`VK_NO_PROTOTYPES`): `gfx/vulkan/loader.h` loads them
+at run time through the loader's `vkGetInstanceProcAddr` / `vkGetDeviceProcAddr` (SDL host:
+`SDL_Vulkan_LoadLibrary`; macOS app: the weakly linked Homebrew loader). On Windows and Linux the
+Vulkan loader is not linked at all, so a missing loader or an older one (Vulkan 1.2 drivers on
+Windows lack `vkCmdBeginRendering`) no longer stops the program before it starts. Without a usable
+GPU, the SDL host shows a message box naming the GPU, its Vulkan and driver versions and what is
+missing, and exits.
 
 On macOS:
 
@@ -88,6 +96,10 @@ immutable upload payloads and deferred-buffer retirement by GPU readback.
 To enable Khronos validation, install the Vulkan validation layers and set
 `WWHD_VK_VALIDATION=1`. On Homebrew, set `VK_LAYER_PATH` to
 `/opt/homebrew/opt/vulkan-validationlayers/share/vulkan/explicit_layer.d`.
+Test aids for older drivers: `WWHD_VK_FORCE_API=1.2` (or `1.1`) makes the renderer treat every GPU as
+if it reported that Vulkan version, so a Vulkan 1.3 GPU takes the `VK_KHR_dynamic_rendering` path;
+`WWHD_VK_HIDE_EXTENSIONS=VK_KHR_dynamic_rendering` (comma-separated names) hides device extensions,
+which together with `WWHD_VK_FORCE_API=1.2` shows the "missing features" error.
 If the loader does not discover MoltenVK, set `VK_DRIVER_FILES` to its installed
 `MoltenVK_icd.json` (Homebrew places it below `$(brew --prefix molten-vk)/etc/vulkan/icd.d`).
 
@@ -188,7 +200,7 @@ wait timers disabled. CPU time excludes sleeping and GPU waits.
 | `WWHD_VK_SHADER_STATE_MEMO` | Retains four exact gathered-state hash entries per shader stage. Every lookup freshly gathers all existing masked words and compares every active byte, count, and program hash seed. Misses use the identical hash mixer; save-state and sentinel calls clear the memo. |
 | `WWHD_VK_SKIP_VERTEX_BINDS` | Omits only identical host vertex buffer/offset bindings after fresh snapshot preparation. Sixteen binding slots are guarded by command buffer, submission generation, and pass resets. Index bindings remain fresh. Combine with exact vertex snapshot reuse to make unchanged slice identities available. |
 | `WWHD_VK_SAMPLER_MEMO` | Reuses immutable sampler handles after exact device, fresh sampler-word, compare/integer, and effective anisotropy matching. Texture preparation still runs before lookup. |
-| `WWHD_VK_SPARSE_HASH_MEMO` | Compares all freshly read, ordered sparse texture samples before reusing their hash. Full texture checks, invalidation, and uploads remain unchanged. Retains 64 entries by default; `WWHD_VK_SPARSE_HASH_ENTRIES=256` selects a bounded 16 MiB sample store. Oversized sample sets stream through the original mixer. |
+| `WWHD_VK_SPARSE_HASH_MEMO` | Only used where page write tracking is unavailable (texture changes are detected by `runtime/src/write_watch.h`; the sparse check is its fallback). Compares all freshly read, ordered sparse texture samples before reusing their hash. Full texture checks, invalidation, and uploads remain unchanged. Retains 64 entries by default; `WWHD_VK_SPARSE_HASH_ENTRIES=256` selects a bounded 16 MiB sample store. Oversized sample sets stream through the original mixer. |
 | `WWHD_VK_SHADER_KEY_DIRTY` | Avoids shader-generation bumps only for explicitly classified register bits absent from the current Vulkan shader key. Program headers, fetch strides, unknown registers, and context/save-state invalidation remain conservative. |
 | `WWHD_VK_VERTEX_HISTORY_REUSE` | Adds a second distinct vertex snapshot key per binding, requiring `WWHD_VK_REUSE_VERTEX_SNAPSHOTS=1`. Every candidate receives a fresh full payload comparison within the same device/submission generation; changed bytes allocate a fresh slice. |
 
@@ -284,6 +296,19 @@ printed LR/SP values do not establish that deeper guest stack frames match. Load
 later can succeed if the worker threads reach compatible waits. Failed loads do not
 bypass these checks or establish a valid benchmark starting point.
 
+## Draw batching (all platforms)
+
+Every platform defaults to submitting after 2,048 guest draws, with at most three
+mid-frame submissions (measured on macOS and Windows; Linux uses the same defaults). Each submission retains its upload slices, descriptor
+pool and deferred resources until its fence completes. The next draw reopens
+attachments with `LOAD`, preserving draw order and contents. This uses the
+existing asynchronous submission path.
+
+Set `WWHD_VK_DRAW_BATCH=0` to disable mid-frame batching, or set an explicit
+positive draw count to tune it. Empty or invalid values disable batching.
+`WWHD_VK_DRAW_BATCH_CAP=1|2|3` sets the maximum mid-frame submissions (default three).
+See `docs/performance.md` for the local Windows comparison.
+
 ## macOS defaults and tuning
 
 Mac/MoltenVK gameplay and correctness tests are the current priority. The macOS
@@ -297,8 +322,8 @@ reuse remains an opt-in experiment on every platform.
 | --- | --- |
 | `WWHD_VSYNC_PRECISE` | macOS defaults to enabled: sleep to near the vsync deadline, then spin for the final portion (up to 2 ms). Set `0` to disable. Other platforms keep the previous off default. Precise sleeping increases CPU use. |
 | `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS` | macOS defaults to `3`; an explicit MoltenVK override, including `0`, is respected. Normal macOS render batches use an autorelease pool. Other platforms receive no application override. |
-| `WWHD_VK_DRAW_BATCH` | macOS defaults to `2048` when unset; other platforms default to off. Set `0` to disable. Positive decimal values up to 1,048,576 select the batch size; malformed or out-of-range values disable batching. |
-| `WWHD_VK_DRAW_BATCH_CAP` | Accepts `1`, `2`, or `3`. When unset, macOS defaults to `3` and other platforms to `2`. An explicitly invalid value falls back to `2`. Has no effect with batching disabled. |
+| `WWHD_VK_DRAW_BATCH` | Defaults to `2048` when unset, on every platform. Set `0` to disable. Positive decimal values up to 1,048,576 select the batch size; malformed or out-of-range values disable batching. |
+| `WWHD_VK_DRAW_BATCH_CAP` | Accepts `1`, `2`, or `3`. When unset, defaults to `3`. An explicitly invalid value falls back to `2`. Has no effect with batching disabled. |
 | `WWHD_VK_REUSE_VERTEX_SNAPSHOTS=1` | Reuse a bounded vertex snapshot only after exact guest-byte comparison within the same fenced submission generation. Off by default; comparison overhead can outweigh saved copies. |
 
 Draw batching keeps the four-slot fence retirement contract. More submissions can
@@ -372,9 +397,15 @@ invariance prevents multipass depth artifacts on Link. All 195 captured vertex
 shader variants passed SPIR-V compilation with invariant position outputs.
 Earlier validation runs reported unused fragment outputs during depth-only passes;
 the final gameplay validation run above reported no warnings.
-Broader gameplay and devices remain to be validated. Windows/Linux runtime and renderer files
-compile to target objects; executable linking and device execution there remain
-unverified.
+Broader gameplay and devices remain to be validated. On Linux (Ubuntu 24.04, Clang 18) the
+executable builds without warnings and links against placeholder guest code
+(`tools/recomp/stubgen.py`), the unit tests pass and `--renderer-smoke` passes on Mesa lavapipe with
+the Khronos validation layer reporting nothing (`.github/workflows/linux.yml`); gameplay on Linux
+needs your own recompiled game and remains to be tested. On Windows (x86_64, Clang/MinGW: llvm-mingw
+or MSYS2 CLANG64) the executable builds and links, the unit
+tests pass, and `--renderer-smoke` passes under Wine with lavapipe (`.github/workflows/windows.yml`
+builds and runs the tests natively); a run on Windows hardware with a GPU and gameplay remain to be
+tested.
 
 For an isolated capture, set `WWHD_CAPTURE_PATH` to the PNG output path and
 `WWHD_CAPTURE` to the renderer frame number (default120). Keep these artifacts

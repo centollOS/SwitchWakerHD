@@ -150,7 +150,8 @@ const char* reserved_key(int code) {
     case kVK_ANSI_8: return "Graphics › FXAA";
     case kVK_ANSI_9: return "Graphics › Record sound activity";
     case kVK_ANSI_P: case kVK_F12: return "Graphics › Capture frame";
-    case kVK_F1: case kVK_F2: case kVK_F3: case kVK_F4: case kVK_F5: return "Save States (F1-F5 load, Shift+F1-F5 save)";
+    case kVK_F1: return "the settings overlay (F1; Shift+F1 saves slot 1)";
+    case kVK_F2: case kVK_F3: case kVK_F4: case kVK_F5: return "Save States (F2-F5 load, Shift+F1-F5 save)";
     case kVK_Escape: return "cancelling a key assignment";
     case kVK_Command: case kVK_RightCommand: return "menu shortcuts (⌘)";
     default: return nullptr;
@@ -301,13 +302,13 @@ struct Json {
     double n = 0;
     std::string s;
     std::vector<Json> arr;
-    std::vector<JsonMember> obj;  // std::pair<std::string, Json> would need Json complete here
+    // not std::pair<std::string, Json>: libstdc++ rejects a pair of an incomplete type
+    std::vector<JsonMember> obj;
     const Json* get(const char* k) const;
 };
 struct JsonMember {
     std::string key;
     Json value;
-    JsonMember(std::string k, Json v) : key(std::move(k)), value(std::move(v)) {}
 };
 const Json* Json::get(const char* k) const {
     for (auto& [key, v] : obj)
@@ -379,7 +380,7 @@ struct Parser {
                 if (p >= end || *p++ != ':') return fail("expected ':'");
                 Json c;
                 if (!value(c, depth + 1)) return false;
-                v.obj.emplace_back(std::move(k), std::move(c));
+                v.obj.push_back({std::move(k), std::move(c)});
                 ws();
                 if (p < end && *p == ',') { p++; continue; }
                 if (p < end && *p == '}') { p++; return true; }

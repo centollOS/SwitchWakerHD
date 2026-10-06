@@ -63,9 +63,10 @@ struct SlotInfo {
     std::string when;  // local time of the save
     std::string area;  // stage name, if known
 };
-SlotInfo slot_info(int slot);           // 1..5
+SlotInfo slot_info(int slot);           // 1..5 (101..103: crash recovery's automatic states, crashrec.h)
 void request_save(int slot);
 void request_load(int slot);
+std::string states_dir();               // where slots live (created on first use)
 std::string last_message();             // short status for the title bar ("" when stale)
 
 // ---- game thread: call at the frame boundary (top of the per-frame function) ----
@@ -74,4 +75,7 @@ void service(Cpu* c);
 // guest memory reader used while validating a snapshot (reads the snapshot's memory, not the live one)
 uint32_t snap_ld32(uint32_t ea);
 
+uint64_t last_load_frame();
+uint64_t last_load_step();
+uint32_t last_load_counter();  // g_Counter.mTimer right after the last load   // logic step (interp::logic_steps) of the last completed load  // TV frame of the last completed load (0: none); test scenarios start from it
 }  // namespace ss

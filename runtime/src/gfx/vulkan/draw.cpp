@@ -19,6 +19,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -30,12 +31,11 @@ bool preparation_stats_enabled() {
   static const bool enabled=std::getenv("WWHD_VK_STATS")!=nullptr;
   return enabled;
 }
-// Bounded overlap: measured macOS default; explicit zero/invalid disables it.
+// Bounded overlap: the default on every platform (measured on macOS and Windows); an explicit
+// zero/invalid WWHD_VK_DRAW_BATCH disables it.
 uint32_t parse_draw_batch(const char* text) {
-#ifdef __APPLE__
   if (!text) return 2048;
-#endif
-  if (!text || !*text) return 0;
+  if (!*text) return 0;
   uint32_t value = 0;
   for (const char* p = text; *p; ++p) {
     if (*p < '0' || *p > '9') return 0;
@@ -46,9 +46,7 @@ uint32_t parse_draw_batch(const char* text) {
   return value;
 }
 uint32_t parse_draw_batch_cap(const char* text) {
-#ifdef __APPLE__
   if (!text) return 3;
-#endif
   // Explicit invalid caps retain the original conservative fallback.
   const uint32_t value = parse_draw_batch(text);
   return value >= 1 && value <= 3 ? value : 2;
@@ -610,7 +608,7 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
       if (i >= 0)
         b.push_back(
             {uint32_t(i), t, 1,
-             st ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT,
+             VkShaderStageFlags(st ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT),
              nullptr});
     };
     add(m.uniformVarsBufferBindingPoint, uniformType);
@@ -909,8 +907,74 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
   R.pipelineCreateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now()-pipelineStarted).count();
   ++R.pipelineCreates;
+  if (result == VK_ERROR_UNKNOWN) {
+    // WORKAROUND (PR #30, see TODO.md): patches the GLSL text after the driver
+    // refused the pipeline. The proper fix is to link the pixel shader's inputs
+    // to the vertex shader's outputs in the shader translation, so inputs
+    // without an output read as zero up front on every driver.
+    // Pixel shader inputs that this vertex shader does not write (the Latte
+    // translation declares every input of the pixel shader): read as zero.
+    std::string glsl = ps->glsl;
+    size_t replaced = 0;
+    for (size_t at = 0; (at = glsl.find("layout(location = ", at)) != std::string::npos;) {
+      size_t end = glsl.find(';', at);
+      size_t name = glsl.find("in vec4 passParameterSem", at);
+      if (end == std::string::npos || name == std::string::npos || name > end) { at++; continue; }
+      std::string var = glsl.substr(name + 8, end - name - 8);
+      if (vs->glsl.find("out vec4 " + var + ";") == std::string::npos) {
+        std::string zero = "const vec4 " + var + " = vec4(0.0)";
+        glsl.replace(at, end - at, zero);
+        at += zero.size();
+        replaced++;
+      } else {
+        at = end;
+      }
+    }
+    std::string error;
+    auto spirv = replaced ? vk::compile_glsl(glsl, false, &error) : std::vector<uint32_t>{};
+    VkShaderModule zeroed = VK_NULL_HANDLE;
+    if (!spirv.empty()) {
+      VkShaderModuleCreateInfo mc{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+      mc.codeSize = spirv.size() * 4;
+      mc.pCode = spirv.data();
+      if (vkCreateShaderModule(R.device, &mc, nullptr, &zeroed) == VK_SUCCESS) {
+        stages[1].module = zeroed;
+        result = vkCreateGraphicsPipelines(R.device, R.pipelineCache, 1, &ci, nullptr, &p.pipeline);
+        vkDestroyShaderModule(R.device, zeroed, nullptr);
+      }
+    }
+    LOG("[vulkan] graphics pipeline vs %016llX ps %016llX: VK_ERROR_UNKNOWN; %zu pixel shader inputs without a vertex output read as zero: %s",
+        (unsigned long long)vs->key, (unsigned long long)ps->key, replaced,
+        result == VK_SUCCESS ? "built" : error.empty() ? "still fails" : error.c_str());
+  }
   for (auto m : modules)
     vkDestroyShaderModule(R.device, m, nullptr);
+  if (result != VK_SUCCESS && result != VK_ERROR_OUT_OF_HOST_MEMORY &&
+      result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_DEVICE_LOST) {
+    // A driver that cannot build one pipeline (Adreno: VK_ERROR_UNKNOWN on the
+    // boat ride after the sword and shield) used to end the game. The pipeline
+    // stays empty, its draws are skipped, and the two shaders go to captures/
+    // (GLSL and SPIR-V) to look at.
+    p.pipeline = VK_NULL_HANDLE;
+    LOG("[vulkan] graphics pipeline failed (Vulkan result %d): vs %016llX ps %016llX; its draws are skipped",
+        int(result), (unsigned long long)vs->key, (unsigned long long)ps->key);
+    std::error_code captureDirError;  // this path must not throw: it replaces a crash
+    std::filesystem::create_directories("captures", captureDirError);
+    for (auto *shader : shaders) {
+      char name[96];
+      snprintf(name, sizeof name, "captures/pipeline-failed-%s-%016llX",
+               shader->vertex ? "vs" : "ps", (unsigned long long)shader->key);
+      if (FILE *f = fopen((std::string(name) + ".glsl").c_str(), "wb")) {
+        fwrite(shader->glsl.data(), 1, shader->glsl.size(), f);
+        fclose(f);
+      }
+      if (FILE *f = fopen((std::string(name) + ".spv").c_str(), "wb")) {
+        fwrite(shader->spirv.data(), 4, shader->spirv.size(), f);
+        fclose(f);
+      }
+    }
+    return remember(pipelines.emplace(std::move(key), p).first->second);
+  }
   vk_check(result, "graphics pipeline");
   R.pipelineCacheDirty = true;
   R.pipelineCacheChangedFrame = R.frame;
@@ -1174,6 +1238,9 @@ struct FeedbackScratch {
 };
 std::array<FeedbackScratch, kFeedbackUnitsPerStage * 2> feedbackScratch;
 VkDeviceSize feedbackRetainedBytes = 0;
+// the draw (R.drawCount while it is prepared) that last used each retained slot
+std::array<uint64_t, kFeedbackUnitsPerStage * 2> feedbackUseDraw = [] {
+  std::array<uint64_t, kFeedbackUnitsPerStage * 2> a; a.fill(UINT64_MAX); return a; }();
 bool feedback_compatible(const Surface& copy, const Surface& source) {
   return copy.image && copy.fmt.pixel == source.fmt.pixel &&
          copy.aspect == source.aspect && copy.imageType == source.imageType &&
@@ -1298,6 +1365,32 @@ VkImageView feedback_view(Surface *source, const uint32_t *textureWords,
   // Device recreation is not a supported lifecycle today; refuse to reuse or
   // retire foreign handles if a caller nevertheless changes the device.
   if (slot && slot->surface.image && slot->device != R.device) slot = nullptr;
+  // The game samples render targets of several sizes through the same unit, so one retained
+  // image per slot was destroyed and recreated on almost every draw (an expensive kernel memory
+  // allocation per draw on Android drivers). Look for a compatible retained image in the other
+  // slots that this draw does not use (a draw's units always get distinct copies) and swap it in.
+  if (slot && !feedback_compatible(slot->surface, *source)) {
+    const size_t mine = slot - feedbackScratch.data();
+    for (size_t i = 0; i < feedbackScratch.size(); ++i) {
+      auto& other = feedbackScratch[i];
+      if (i == mine || other.device != R.device || !feedback_compatible(other.surface, *source)) continue;
+      if (feedbackUseDraw[i] == R.drawCount) continue;  // another unit of this draw
+      std::swap(*slot, other);
+      break;
+    }
+    // None retained: keep this slot's image for later draws by parking it in an empty slot
+    // (draws alternate a few kinds, e.g. the 1280x720 colour and depth copies, through unit 0).
+    if (!feedback_compatible(slot->surface, *source) && slot->surface.image) {
+      for (size_t i = 0; i < feedbackScratch.size(); ++i) {
+        auto& other = feedbackScratch[i];
+        if (i == mine || other.surface.image || feedbackUseDraw[i] == R.drawCount) continue;
+        std::swap(*slot, other);
+        std::swap(feedbackUseDraw[i], feedbackUseDraw[mine]);
+        break;
+      }
+    }
+  }
+  if (slot) feedbackUseDraw[slot - feedbackScratch.data()] = R.drawCount;
   if (slot && feedback_compatible(slot->surface, *source)) {
     copy = &slot->surface;
   } else {
@@ -1308,6 +1401,26 @@ VkImageView feedback_view(Surface *source, const uint32_t *textureWords,
       *slot = {};
     }
     make_feedback_image(temporary, *source);
+    // debug: WWHD_VK_FEEDBACK_ALLOC_LOG=1 reports feedback image creations every 120 frames
+    static const bool allocLog = getenv("WWHD_VK_FEEDBACK_ALLOC_LOG") != nullptr;
+    if (allocLog) {
+      static uint64_t creates = 0, unslotted = 0, overBudget = 0, lastFrame = 0;
+      ++creates;
+      if (!slot) ++unslotted;
+      if (R.frame - lastFrame >= 120) {
+        LOG("[vulkan feedback allocs] %.1f/frame (%.1f without a slot: unit %u, %.1f over budget), retained %.1f MiB, last %ux%u fmt %d mips %u",
+            creates / double(R.frame - lastFrame), unslotted / double(R.frame - lastFrame), unit,
+            overBudget / double(R.frame - lastFrame), feedbackRetainedBytes / 1048576.0, source->extent.width,
+            source->extent.height, int(source->fmt.pixel), source->mips);
+        creates = unslotted = overBudget = 0;
+        lastFrame = R.frame;
+      }
+      if (slot) {
+        VkMemoryRequirements rq{};
+        vkGetImageMemoryRequirements(R.device, temporary.image, &rq);
+        if (rq.size > kFeedbackRetainedBudget - feedbackRetainedBytes) ++overBudget;
+      }
+    }
     if (slot) {
       VkMemoryRequirements requirements{};
       vkGetImageMemoryRequirements(R.device, temporary.image, &requirements);
@@ -1648,7 +1761,10 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
       ((prim != 3 && prim != 6) ||
        (indexType == 0 ? stripRestart && restartIndex == UINT16_MAX
                        : !stripRestart || restartIndex == UINT32_MAX));
-  std::vector<uint32_t> indices;
+  // Draw uploads copy the converted bytes before the optional AO replay calls
+  // draw again. Retain CPU capacity; queued GPU work owns separate arena slices.
+  static thread_local std::vector<uint32_t> indices;
+  indices.clear();
   // Conversion emits a known number of indices. Allocate once rather than
   // repeatedly growing and copying the vector for every indexed draw.
   size_t convertedCount = indexAddr ? size_t(count) : 0;
@@ -1800,6 +1916,8 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   if (depth && (depth->extent.width < width || depth->extent.height < height))
     depth = nullptr;
   auto &p = pipeline(r, vs, ps, fs, topology, colors, depth);
+  if (!p.pipeline)
+    return;  // the driver could not build it (logged once in pipeline())
   if(feedback_stats_enabled()) report_feedback_stats();
   if(vertex_window_stats_enabled()) report_vertex_window_stats();
   FeedbackStatsProbe feedbackProbe;

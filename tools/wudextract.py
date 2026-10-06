@@ -174,14 +174,18 @@ class FST:
 
 
 def open_disc(path):
-    key = open(os.path.splitext(path)[0] + ".key", "rb").read(16)
+    key_path = os.path.splitext(path)[0] + ".key"
+    if not os.path.isfile(key_path):
+        sys.exit("disc key not found: expected %s (16 raw bytes or 32 hex digits)" % key_path)
+    key = parse_key(open(key_path, "rb").read(), key_path)
     wud = Wud(path)
     if struct.unpack(">I", wud.read(SECTOR * 2, 4))[0] != 0xCC549EB9:
         raise ValueError("not a Wii U disc image")
     pt = aes_dec(key, bytes(16), wud.read(SECTOR * 3, SECTOR))
     magic, bsize, = struct.unpack_from(">II", pt, 0)
     if magic != 0xCCA6E67B:
-        raise ValueError("partition table decryption failed (wrong disc key)")
+        raise ValueError("partition table decryption failed: %s does not match this image (it must be "
+                         "this disc's key, 16 raw bytes or one line of 32 hex digits)" % key_path)
     nparts, = struct.unpack_from(">I", pt, 0x1C)
     parts = []
     for i in range(nparts):
