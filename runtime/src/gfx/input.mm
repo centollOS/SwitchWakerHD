@@ -23,7 +23,7 @@
 #include <string>
 #include <vector>
 
-namespace gfx { void request_capture(); bool menu_hotkey(uint16_t keyCode); bool controls_window_is_key(); }
+namespace gfx { void request_capture(); bool menu_hotkey(uint16_t keyCode); bool controls_window_is_key(); bool text_input_key(void* event); }
 namespace mods { void filter_pad(input::PadState& s); bool host_key_down(uint16_t code); }  // mods/
 
 namespace input {
@@ -118,6 +118,7 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f) {
 // debug: WWHD_TEST_POST_KEYS=300:F1,400:Cmd+Comma,410:Down,420:Return,430:K/30 (held 30 frames) posts key presses (down, then up) at TV frames
 // into the app's event queue, so they take the real path (event monitors, menu key equivalents) even
 // in hidden test runs. Only the settings overlay and the menus react to them, not the game.
+// 500:Text=Tetra types text (one key press per character, carrying it) into the game's text prompt.
 static const NSTimeInterval kTestKeyTimestamp = 4242.0;
 static void start_test_keys() {
     const char* e = getenv("WWHD_TEST_POST_KEYS");
@@ -133,6 +134,12 @@ static void start_test_keys() {
         std::string k(p, len);
         p += len + (p[len] == ',');
         Press pr{f, 0, 0, @"", 0};
+        if (k.rfind("Text=", 0) == 0) {  // one press per character (key code: the A key; the characters count)
+            NSString* t = [NSString stringWithUTF8String:k.c_str() + 5];
+            for (NSUInteger i = 0; i < t.length; i++)
+                presses->push_back({f + i * 2, kVK_ANSI_A, 0, [t substringWithRange:NSMakeRange(i, 1)], 0});
+            continue;
+        }
         if (size_t sl = k.find('/'); sl != std::string::npos) {  // Key/<frames>: held that many frames
             pr.hold = strtoull(k.c_str() + sl + 1, nullptr, 10);
             k.resize(sl);
@@ -193,13 +200,16 @@ void init() {
                     (f & NSEventModifierFlagOption ? overlay::kAlt : 0) | (f & NSEventModifierFlagCommand ? overlay::kSuper : 0);
             bool down = e.type == NSEventTypeKeyDown || (e.type == NSEventTypeFlagsChanged && modifier_down(code, f));
             bool repeat = e.type != NSEventTypeFlagsChanged && e.isARepeat;
+            if (gfx::text_input_key((__bridge void*)e)) return nil;  // the game's text prompt: typed text
             if (overlay::key(code, down, repeat, m)) return nil;
             if (posted) return nil;  // test keys only reach the overlay
         }
         std::lock_guard<std::mutex> lk(g_mu);
         if (e.type == NSEventTypeKeyDown && !e.isARepeat && mods::host_key_down(code)) return nil;  // e.g. Esc releases the mouse
         if (e.type == NSEventTypeKeyDown && !e.isARepeat && gfx::menu_hotkey(code)) return nil;
-        if (e.type == NSEventTypeKeyDown) g_keys[code] = true;
+        // a repeat never presses a key: one held down while the overlay or the text prompt had the keyboard
+        // (Enter that confirmed a name) stays out of the game until pressed again
+        if (e.type == NSEventTypeKeyDown) g_keys[code] = g_keys[code] || !e.isARepeat;
         else if (e.type == NSEventTypeKeyUp) g_keys[code] = false;
         else g_keys[code] = modifier_down(code, e.modifierFlags);
         return nil;  // swallow, no system beep

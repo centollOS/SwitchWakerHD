@@ -85,7 +85,7 @@ void install_overlay_input() {
                        NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp | NSEventMaskRightMouseDown | NSEventMaskRightMouseUp |
                        NSEventMaskOtherMouseDown | NSEventMaskOtherMouseUp | NSEventMaskScrollWheel;
     [NSEvent addLocalMonitorForEventsMatchingMask:mask handler:^NSEvent*(NSEvent* e) {
-        if (!overlay::is_open() || e.window != tv) return e;
+        if (!overlay::captures() || e.window != tv) return e;
         NSView* v = tv.contentView;
         NSPoint p = [v convertPoint:e.locationInWindow fromView:nil];
         NSSize sz = v.bounds.size;

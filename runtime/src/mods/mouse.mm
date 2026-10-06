@@ -60,7 +60,7 @@ void mouse_init(void* tv_window) {
                        NSEventMaskOtherMouseDragged | NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp |
                        NSEventMaskRightMouseDown | NSEventMaskRightMouseUp | NSEventMaskOtherMouseDown | NSEventMaskScrollWheel;
     [NSEvent addLocalMonitorForEventsMatchingMask:mask handler:^NSEvent*(NSEvent* e) {
-        if (overlay::is_open()) return e;  // the settings overlay has the mouse (gfx/overlay_appkit.mm)
+        if (overlay::captures()) return e;  // the settings overlay (or the text prompt) has the mouse (gfx/overlay_appkit.mm)
         if (e.type == NSEventTypeScrollWheel) {
             if (first_person_wheel() && (in_tv(e) || mouse_captured())) {
                 // a wheel notch is about 1 line; trackpads send many small precise deltas

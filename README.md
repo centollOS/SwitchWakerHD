@@ -24,6 +24,8 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
   **Home** on a controller; it works with mouse, keyboard and controller on every platform and
   renderer. The Controls tab shows the controller drawing with live feedback of pressed buttons.
   Shift+F1 still saves state slot 1; slot 1 now loads from the overlay.
+- **On-screen text entry** (issue #29): the name screen now shows a text window over the game, with an
+  on-screen keyboard for controllers and the mouse; typing on the keyboard goes straight into it.
 - **Performance pass** (PR #15 by Sean13128): much less render-thread CPU on Metal (no more stutter
   while the shader cache warms up), a lighter vsync wait on Vulkan, and a fix for the both-renderer
   build crashing with Homebrew boost installed.
@@ -255,9 +257,8 @@ sudo pacman -S clang cmake ninja sdl3 vulkan-headers vulkan-icd-loader glslang s
 
 Wii U volumes are case-insensitive and the game asks for paths in a different case than the
 extracted folders (e.g. `Audiores` vs `AudioRes`); the runtime resolves such paths itself on
-case-sensitive file systems. When the game asks for text (your name), type it into the game
-window: the text appears in the window title, Enter confirms, Escape cancels
-(`WWHD_SWKBD_TEXT=<name>` answers automatically).
+case-sensitive file systems. When the game asks for text (your name), a text window appears over
+the game (see *Entering text* under Playing).
 
 On Linux and Windows, **F11** or **Alt+Enter** switches the focused window (TV or GamePad) to full
 screen and back, and clicking/dragging with the left mouse button in the GamePad window uses the
@@ -392,6 +393,19 @@ Mouse, keyboard (arrows, Enter, Esc) and controller (D-pad / stick, A, B; L / R 
 The game keeps running but gets no input while it is open; Esc, F1 or B closes it. On macOS it shows
 the same options as the menu bar, and both stay in sync. Shift+F1 still saves state slot 1; slot 1 is
 loaded from the overlay (F1 used to load it).
+
+**Entering text (the name screen):** when the game asks for text — your name when you start a new
+file — a text window appears over the game picture (also in the GamePad-only and picture-in-picture
+modes) with the field, a character counter (the name takes up to 8 characters) and an on-screen
+keyboard. Type on the keyboard (any layout, accents and dead keys, input methods), **Enter** = OK,
+**Esc** = Cancel, Backspace / Delete / arrows edit. With a controller: D-pad or left stick choose a
+key, **A** types it, **B** deletes, **X** adds a space, **Y** is Shift (once, then Caps), **L / R**
+switch between letters, accented letters and symbols (kana on a Japanese game), **ZL / ZR** move the
+caret, **Start** or the OK key confirms. The mouse clicks keys too; on Android the system keyboard
+also opens. The game gets no input while the window is open, and none after it closes until the
+button that confirmed is released. `WWHD_SWKBD_TEXT=<name>` answers automatically (test runs); only
+where the overlay can't show does the old prompt remain (the typed text in the window title on
+Windows/Linux, a dialog on macOS).
 
 ### Controls
 

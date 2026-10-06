@@ -1907,7 +1907,7 @@ static bool finger_touch(const SDL_Event& event) {
   switch (event.type) {
   case SDL_EVENT_FINGER_DOWN:
     if (input::touch_from_controller(f.touchID)) return true;  // a controller's own touch pad / buttons
-    if (overlay::is_open()) return false;
+    if (overlay::captures()) return false;
     if (!buttonFinger && gfx::view_button_hit(f.x, f.y)) {
       buttonFinger = f.fingerID;
       buttonDown = std::max<uint64_t>(SDL_GetTicks(), 1);
@@ -1952,7 +1952,7 @@ static bool gamepad_touch(const SDL_Event& event) {
   // fingers' (above) and kept from the game's mouse camera; the settings overlay gets them all
   if ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
       event.button.which == SDL_TOUCH_MOUSEID) {
-    if (overlay::is_open() || event.button.windowID != tvId) return false;
+    if (overlay::captures() || event.button.windowID != tvId) return false;
     if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) return std::exchange(synthHeld, false);
     float nx, ny;
     tv_window_point(event.button.x, event.button.y, nx, ny);
@@ -1964,7 +1964,7 @@ static bool gamepad_touch(const SDL_Event& event) {
   switch (event.type) {
   case SDL_EVENT_MOUSE_BUTTON_DOWN:
     if (event.button.button != SDL_BUTTON_LEFT) return false;
-    if (event.button.windowID == tvId && !overlay::is_open() && gfx::view_button_enabled()) {
+    if (event.button.windowID == tvId && !overlay::captures() && gfx::view_button_enabled()) {
       float nx, ny;
       tv_window_point(event.button.x, event.button.y, nx, ny);
       if (gfx::view_button_hit(nx, ny)) {
@@ -1975,7 +1975,7 @@ static bool gamepad_touch(const SDL_Event& event) {
     if (drcId && event.button.windowID == drcId) {
       if (!drc_window_point(event.button.x, event.button.y, tx, ty)) return true;  // outside the picture
       touchHeld = TouchIn::DrcWindow;
-    } else if (event.button.windowID == tvId && !overlay::is_open()) {
+    } else if (event.button.windowID == tvId && !overlay::captures()) {
       float nx, ny;
       tv_window_point(event.button.x, event.button.y, nx, ny);
       if (!gfx::overlay_hit(nx, ny, &tx, &ty)) return false;  // the game's window: mouse camera etc.

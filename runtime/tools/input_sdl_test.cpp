@@ -4,6 +4,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include "input.h"
 #include "input_map.h"
 #include "platform/input_sdl.h"
@@ -16,9 +17,13 @@ namespace mods { void filter_pad(input::PadState&){} bool mouse_camera(){return 
 namespace interp { void set_mode(int){} uint64_t logic_steps(){return 0;} }
 namespace timebase { uint64_t now(){return 0;} }
 void log_msg(const char*,...){}
-// settings overlay: closed (keys reach the game and its shortcuts as before)
-namespace overlay { bool key(int,bool,bool,int){return false;} bool is_open(){return false;} bool blocks_input(){return false;}
+// settings overlay: closed (keys reach the game and its shortcuts as before); the game's text prompt
+// (overlay/text_entry.h) shows while promptShown: overlay::key takes every key then, as the real one does
+static bool promptShown=false;static int promptKeys=0;static std::string promptText;
+namespace overlay { bool key(int,bool,bool,int){if(promptShown)++promptKeys;return promptShown;} bool is_open(){return false;} bool blocks_input(){return promptShown;}
+ bool captures(){return promptShown;}
  bool mouse_move(float,float){return false;} bool mouse_button(int,bool){return false;} bool mouse_wheel(float,float){return false;} }
+namespace text_entry { bool active(){return promptShown;} void text(const char* s){promptText+=s;} void preedit(const char*){} }
 namespace hostui { void graphics_changed(){} }
 // The runtime reads the C runtime's environment (getenv). On Windows SDL_setenv_unsafe only
 // changes the Win32 environment block, which the CRT copy does not see.
@@ -76,6 +81,15 @@ int main(){
  }
  assert(graphicsKey=='7');input::release_keys();
  set_env("WWHD_NO_HOST_INPUT","1");graphicsEvent(SDL_SCANCODE_R,game);assert(graphicsRequests==7);set_env("WWHD_NO_HOST_INPUT",nullptr);
+ // the text prompt: typed text goes to it, keys of every game window to overlay::key, none to the game
+ promptShown=true;input::update();
+ SDL_Event typed{};typed.type=SDL_EVENT_TEXT_INPUT;typed.text.text="Link";input::handle_event(typed);assert(promptText=="Link");
+ key(SDL_SCANCODE_K,true);graphicsEvent(SDL_SCANCODE_RETURN,controls);assert(promptKeys==2);
+ input::held_keys(held);assert(!held[input_map::key_from_id("K")]&&!(input::read().buttons&input::kA));
+ promptShown=false;input::update();
+ // the key that confirmed is still held: its repeats don't press it in the game
+ graphicsEvent(SDL_SCANCODE_RETURN,game,true);input::held_keys(held);assert(!held[input_map::key_from_id("Return")]);
+ graphicsEvent(SDL_SCANCODE_RETURN,game,false,SDL_EVENT_KEY_UP);
  SDL_DestroyWindow(controls);SDL_DestroyWindow(game);input::set_prompt_window(nullptr);
- SDL_Quit();puts("input_sdl_test: keyboard mapping, focus, touch, Pro mode, guarded save-state shortcuts passed");
+ SDL_Quit();puts("input_sdl_test: keyboard mapping, focus, touch, Pro mode, guarded save-state shortcuts, text prompt routing passed");
 }

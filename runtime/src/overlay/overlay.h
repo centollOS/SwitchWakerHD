@@ -5,6 +5,7 @@
 // Home. While it is open the game sees no buttons (it keeps running) and the overlay takes keyboard,
 // mouse and controller. Tabs: Saves, Graphics, Display, Mods, Controls, Language / About. Every option
 // calls the same functions as the macOS menu bar (which stays in sync) or the SDL host's shortcuts.
+// When the game asks for text, the overlay shows its text prompt (text_entry.h) with the same input rules.
 //
 // Threads: hosts feed input on their main thread; the renderer builds and draws the UI on its render
 // thread once per TV present (frame()); option changes go back to the main thread (hostui::post).
@@ -24,6 +25,11 @@ bool is_open();             // any thread
 void set_open(bool open);   // any thread
 // the game sees no input: the overlay is open, or was just closed and buttons are still held
 bool blocks_input();
+// the overlay has keyboard, mouse and controller: the menu is open or the game's text prompt shows
+// (text_entry.h); hosts route the pointer by this
+bool captures();
+// the renderer draws the overlay (frame() ran within the last second): the text prompt can show
+bool alive();
 bool perf_shown();          // performance overlay (FPS, frame time) on
 void set_perf_shown(bool on);
 

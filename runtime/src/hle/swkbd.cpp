@@ -1,11 +1,13 @@
-// swkbd: the system software keyboard. Text is entered through a host dialog
-// (or WWHD_SWKBD_TEXT for unattended runs) instead of the GamePad keyboard.
+// swkbd: the system software keyboard. Text is entered in the settings overlay's text prompt
+// (overlay/text_entry.h: field, on-screen keyboard for controllers), where the overlay can't show in a
+// host dialog (input::prompt_text), or WWHD_SWKBD_TEXT for unattended runs, instead of the GamePad keyboard.
 #include <atomic>
 #include <mutex>
 #include <chrono>
 #include <thread>
 
 #include "../input.h"
+#include "../overlay/text_entry.h"
 #include "../runtime.h"
 
 namespace {
@@ -23,6 +25,8 @@ struct State {
     std::u16string pending_text;
     std::u16string text;
     int max_len = kMaxForm - 1;
+    std::u16string hint;            // input form: the guide text in the empty field
+    int language = 1, mode = 0;     // ConfigArg: swkbd language and keyboard mode (0 full, 1 numbers, 2 UTF-8, 3 NNID)
     uint32_t receiver[6] = {};      // ReceiverArg: IEventReceiver*, stringBuf, stringBufSize, fixedCharLimit, cursorPos, selectFrom
     uint32_t form_buf = 0;          // guest copy for SwkbdGetInputFormString
     uint32_t change_param = 0;
@@ -51,6 +55,14 @@ void read_receiver(uint32_t arg) {
     for (int i = 0; i < 6; i++) S.receiver[i] = ld32(arg + i * 4);
 }
 
+// ConfigArg, at the start of both KeyboardArg and AppearArg (layout as wut / Cemu): language +0x00,
+// controller type +0x04, keyboard mode +0x08. The name screen asks with English 1, mode 0 (full).
+void read_config(uint32_t a) {
+    S.language = (int)ld32(a + 0x00);
+    S.mode = (int)ld32(a + 0x08);
+    if (S.mode < 0 || S.mode > 3) S.mode = 0;
+}
+
 void start_prompt() {
     S.decided = S.cancelled = S.pending = false;
     if (const char* t = getenv("WWHD_SWKBD_TEXT")) {
@@ -59,12 +71,20 @@ void start_prompt() {
         S.pending_ok = S.pending = true;
         return;
     }
-    input::prompt_text(S.text, S.max_len, [](bool ok, std::u16string text) {
+    auto done = [](bool ok, std::u16string text) {
         std::lock_guard<std::mutex> lk(S.mu);
         S.pending_text = std::move(text);
         S.pending_ok = ok;
         S.pending = true;
-    });
+    };
+    text_entry::Request r;
+    r.initial = S.text;
+    r.hint = S.hint;
+    r.max_len = S.max_len;
+    r.mode = S.mode;
+    r.language = S.language;
+    // the overlay's prompt; the host's own (window title, macOS sheet) where the overlay can't show
+    if (!text_entry::start(r, done)) input::prompt_text(S.text, S.max_len, done);
 }
 
 // Push the text into the app's receiver buffer and notify its IEventReceiver.
@@ -103,7 +123,7 @@ SWKBD(SwkbdCreate__3RplFPUcQ3_2nn5swkbd10RegionTypeUiP8FSClient) {
     g_need_predict = 3;
     ret(c, 1);
 }
-SWKBD(SwkbdDestroy__3RplFv) { S.active = false; }
+SWKBD(SwkbdDestroy__3RplFv) { S.active = false; text_entry::dismiss(); }
 
 SWKBD(SwkbdGetStateKeyboard__3RplFv) { ret(c, S.active ? kStateDisplayed : kStateBlank); }
 SWKBD(SwkbdGetStateInputForm__3RplFv) { ret(c, S.active ? kStateDisplayed : kStateBlank); }
@@ -116,9 +136,11 @@ SWKBD(SwkbdAppearInputForm__3RplFRCQ3_2nn5swkbd9AppearArg) {
     int32_t max = (int32_t)ld32(a + 0xD0);
     S.max_len = max <= 0 ? kMaxForm - 1 : std::min(max, kMaxForm - 1);
     S.text = read_u16(ld32(a + 0xC8), S.max_len);
+    S.hint = read_u16(ld32(a + 0xCC), 256);  // InputFormArg (at +0xC0): initial text +0x08, hint +0x0C, max +0x10
+    read_config(a);
     S.active = true;
     S.keyboard_only = false;
-    LOG("[swkbd] input form (max %d, initial \"%s\")", S.max_len, narrow(S.text).c_str());
+    LOG("[swkbd] input form (max %d, initial \"%s\", hint \"%s\", language %d, mode %d)", S.max_len, narrow(S.text).c_str(), narrow(S.hint).c_str(), S.language, S.mode);
     start_prompt();
     ret(c, 1);
 }
@@ -129,16 +151,20 @@ SWKBD(SwkbdAppearKeyboard__3RplFRCQ3_2nn5swkbd11KeyboardArg) {
     read_receiver(a + 0xA8);
     uint32_t size = S.receiver[2];
     S.max_len = size > 1 ? std::min<int>(size - 1, kMaxForm - 1) : 0;
+    if ((int32_t)S.receiver[3] > 0) S.max_len = std::min<int>(S.max_len, (int32_t)S.receiver[3]);  // fixedCharLimit
     S.text.clear();
+    S.hint.clear();
+    read_config(a);
     S.active = true;
     S.keyboard_only = true;
-    LOG("[swkbd] keyboard (max %d)", S.max_len);
+    LOG("[swkbd] keyboard (max %d, language %d, mode %d)", S.max_len, S.language, S.mode);
     start_prompt();
     ret(c, 1);
 }
 
-SWKBD(SwkbdDisappearInputForm__3RplFv) { S.active = false; ret(c, 1); }
-SWKBD(SwkbdDisappearKeyboard__3RplFv) { S.active = false; ret(c, 1); }
+// the game takes the keyboard away (e.g. leaves the screen): the overlay's prompt closes with it
+SWKBD(SwkbdDisappearInputForm__3RplFv) { S.active = false; text_entry::dismiss(); ret(c, 1); }
+SWKBD(SwkbdDisappearKeyboard__3RplFv) { S.active = false; text_entry::dismiss(); ret(c, 1); }
 
 // The game polls this every frame: apply a finished prompt here, on a guest thread.
 SWKBD(SwkbdCalc__3RplFRCQ3_2nn5swkbd14ControllerInfo) {
