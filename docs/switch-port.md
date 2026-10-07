@@ -1,18 +1,19 @@
 # Switch port — current state
 
-Status as of 2026-10-03. All changes below are on the `feature/switch-port` branch.
+Status as of 2026-10-07 (runtime round 30, branch `dev`, merged with upstream devel v0.2.2).
 
 ## Summary
 
 | Area | State |
 |---|---|
-| Target | Horizon OS homebrew (`.nro`, launched from hbmenu via Atmosphère) |
-| Toolchain | devkitPro devkitA64 (GCC 15.2, libnx, switch-mesa 20.1) in the `devkitpro/devkita64` container |
-| Graphics | OpenGL 4.3 core on Mesa nouveau (switch-mesa) through EGL + glad |
-| Build | Works: `tools/switch/build.sh` → `build/switch/wwhd.nro` (~52 MB) |
+| Target | Horizon OS homebrew (`.nro`, launched from hbmenu in title mode via Atmosphère) |
+| Toolchain | devkitPro devkitA64 (GCC 15.2, libnx) in the `devkitpro/devkita64` container; Mesa 20.1 rebuilt with a persistent shader cache (`tools/switch/mesa`) |
+| Graphics | OpenGL 4.3 core on Mesa nouveau through EGL + glad |
+| Build | Works: `tools/switch/mesa/build_mesa.sh` once, then `tools/switch/build.sh` → `build/switch/wwhd.nro` (~42 MB) |
 | Boot on hardware | Works: picture, sound and controller input (as a Wii U Pro Controller, so everything is on one screen) |
-| Performance on hardware | Round 2: 29.5 fps in menus (the game's cap), 18–19 fps at ~3,200 draws per frame, 14–15 fps at 5,000–7,400 (overclocked: CPU 1785 MHz, GPU 921 MHz, RAM 1600 MHz). The render thread is the limit. Round 3 is built, not yet tested |
-| On-screen FPS counter | Top-left corner; `WWHD_FPS=0` hides it, `WWHD_FPS=2` adds render-thread load, draws per frame and how often the GPU was busy |
+| Performance on hardware | Stock CPU 1020 MHz. Handheld with the official GPU profile (GPU 460.8 MHz, memory 1600 MHz, round 29): median 29.5 fps, 72% of reports at 28 fps or more in views over 2,000 draws; dynamic resolution 0.75-1.00 (1.00 in 38% of reports). At the system's 307 MHz the same play was 26.9 fps |
+| Settings | In-game menu (hold Minus, round 30): GPU profile, picture adjustments, frame-rate counter, save states, mods, language. Saved in `settings.ini`; `env.txt` values win at start |
+| On-screen FPS counter | Top-left corner; menu or `WWHD_FPS=0/1/2` |
 | Desktop reproduction | Works: a headless Linux build of the same GL renderer (Mesa llvmpipe) renders the game correctly |
 
 ## History of decisions
@@ -1026,6 +1027,58 @@ Built separately from rounds 16/17, so that build can be tested first: `build/sw
 - Hardware test of round 21: hitches at resolution changes (the `[hitch]` lines next to `[gl] dynamic resolution`), the forest and area changes.
 - Stock clocks: the main thread is the limit at 1020 MHz (91-97%): the CPU side comes next. The shadow cascades (~4,000 draws, unscaled) are the largest fixed GPU cost at low GPU clocks.
 - First-time texture uploads (16-31 ms in a turn) remain: decoding on another thread is the option.
+
+### Upstream merge (2026-10-07): devel v0.2.2
+
+Upstream `devel` (c3fb7ce, 100 commits: mod manager, native mod SDK, crash logs, Linux build) was merged
+into the port (b63b189). The Switch keeps its own paths: write tracking off, `crash_addr.cpp` left out
+(the Switch has its own handler in `main.cpp`), native mod libraries refused, the true60 POSIX aids skipped,
+and `platform/hostui_switch.cpp` keeps settings in `sdmc:/switch/wwhd/settings.ini`. Plain `char` is signed
+on the Switch (`-fsigned-char`), as upstream builds on Linux and Android arm64 (0776035).
+
+### Round 29: official GPU profile in handheld (hardware-tested)
+
+`apmSetPerformanceConfiguration` for handheld (`ApmPerformanceMode_Normal`) with Nintendo's own
+configurations for games; the CPU stays at 1020 MHz and docked is left to the system:
+
+| Configuration | CPU | GPU | Memory |
+|---|---|---|---|
+| 0x00020003 (system default) | 1020 | 307.2 | 1331.2 |
+| 0x00020004 | 1020 | 384.0 | 1331.2 |
+| 0x92220008 | 1020 | 460.8 | 1331.2 |
+| 0x92220007 | 1020 | 460.8 | 1600.0 |
+
+`0x92220007` is accepted in handheld (`rc 0x0`, `[gl] clocks: CPU 1020 MHz, GPU 460 MHz, memory 1600 MHz`).
+Same play, ~4 min each (`logs-switch/wwhd_2026-10-07_11-25-47.log` at 307 MHz, `..._11-47-37.log` with 0x92220007):
+
+| | GPU 307 / memory 1331 | GPU 460 / memory 1600 |
+|---|---|---|
+| median fps | 26.9 | 29.5 |
+| median fps, views over 2,000 draws | 26.5 | 29.3 |
+| reports at 28 fps or more | 33% | 71% |
+| worst report | 6.6 fps | 17.1 fps |
+| internal resolution 1.00 | 2 of 48 reports | 18 of 48 |
+
+The main thread's wait moved from `GX2DrawDone` (GPU) to `GX2WaitForVsync`. The configuration found at start
+is restored at exit; apm needs title mode (in applet mode the profile is skipped and logged).
+
+### Round 30: settings menu, Mesa shader cache (not yet tested on hardware)
+
+- **Settings menu.** Upstream's Dear ImGui overlay (`overlay/overlay.cpp`), drawn by a new OpenGL renderer
+  (`gfx/gl/overlay_gl.cpp`: ImGui 1.92 texture protocol, its own vertex array and buffers) at the end of
+  `present()`. Hold Minus half a second to open; B or Minus closes; L / R change tabs; the game keeps running
+  without buttons. Tabs on the Switch: Saves, Switch, Mods, Language / About (Graphics, Display and Controls
+  are desktop options). The Switch tab (`platform/settings_switch.cpp`) sets the GPU profile live (default
+  `0x92220007`, falling back to `0x92220008` and `0x00020004`), the picture adjustments (sliders; Original
+  and Vivid) and the frame-rate counter, saved as `switch*` keys in `settings.ini`. Changes made by the menu
+  run on the host loop's thread (`hostui::run_posted`). Font: the system's shared font.
+- **Mesa's persistent shader cache.** devkitPro's Mesa 20.1 has no disk cache, so every program in
+  `shadercache_gl.bin` was compiled and linked again at every start (171-261 s with a full cache).
+  `tools/switch/mesa/build_mesa.sh` rebuilds the same package with centollOS's patches (single-file disk
+  cache on Horizon, nvc0 machine code through it, compile counters); there a cached program loaded in
+  11-13 ms instead of 144-209 ms. Cache: `sdmc:/switch/wwhd/cache/`; `WWHD_MESA_CACHE=0|reset`; log lines
+  `[mesa] shader cache:` and `[mesa] shader compile:`.
+- The GPU timer correction (×1.63, round 20) also applies to the `WWHD_GL_PIPESTATS` line now.
 
 ## Rendering resolution
 
