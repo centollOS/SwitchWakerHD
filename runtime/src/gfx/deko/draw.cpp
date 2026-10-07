@@ -26,6 +26,7 @@
 #include "dk_capture.h"
 #include "dk_shaders.h"
 #include "dk_surfaces.h"
+#include "dk_sync.h"
 #include "runtime.h"
 
 using namespace Latte;
@@ -188,6 +189,8 @@ uint32_t g_frameDraws = 0;    // draws executed in the frame being recorded: the
 bool g_gamepadDrawing = false;
 float g_drawScale = 1.0f;
 bool g_drawSamplesRendered = false;  // it samples a texture the GPU rendered
+bool g_drawDepthWrites = false;      // it writes its depth buffer (depth writes or a stencil test on)
+bool g_drawSamplesBoundDepth = false;  // it samples its bound depth buffer in place (dk_sync.h)
 // each stage's texture units: texture pixels per guest pixel (programs with uf_texNScale; gfx/gl g_unitScale)
 float g_unitScale[2][LATTE_NUM_MAX_TEX_UNITS][2];
 const bool g_unitScaleInit = [] {
@@ -364,15 +367,26 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
                 g_traceTextures += t;
             }
         }
-        bool aliases = depth && s == depth;
+        bool aliases = false;
         for (auto* c : colors)
             if (c && c == s) aliases = true;
+        // the bound depth buffer, sampled by a draw that does not write it (a depth test reads it too): read in
+        // place after the barrier the earlier draws' writes need (sync_draw_check), as a Vulkan read-only
+        // depth attachment (WWHD_DK_DEPTH_SAMPLE_BOUND); else a snapshot as for a color target
+        if (depth && s == depth && !aliases) {
+            if (sync_depth_sample_bound() && !g_drawDepthWrites) {
+                g_drawSamplesBoundDepth = true;
+                sync_note_bound_depth_sample();
+            } else
+                aliases = true;
+        }
         if (g_capture) capture_note_texture(s, sh->vertex, unit, words, samplerWords, compare, aliases);
         if (aliases) {  // sampling a bound render target is undefined: a snapshot
             s = feedback_copy(s);
             view = sampled_view_id(s, words);
             smp = sampler_id(samplerWords, compare, s->fmt.kind != FormatInfo::FLOAT);
         }
+        sync_draw_sample(s);
         if (s->gpuWritten) g_drawSamplesRendered = true;
         if (sh->scaleUniforms) {
             g_unitScale[stage][unit][0] = float(s->img.pw) / float(s->width);
@@ -620,7 +634,7 @@ void draw_frame_start() {
             "pass %s, GamePad skip %s, front face %s, submit every %s draws; trace draws %s",
             getenv("WWHD_DK_NO_STATE_CACHE") ? "off" : "on", env_switch("NO_MEMO", false) ? "off" : "on",
             textureCacheOn ? "on" : "off", env_switch("NO_INDEX_CACHE", false) ? "off" : "on",
-            env_switch("VERTEX_TRIM", true) ? "on" : "off", env_switch("PASS_BARRIER", true) ? "on" : "off",
+            env_switch("VERTEX_TRIM", true) ? "on" : "off", env_switch("PASS_BARRIER", true) && !sync_lazy_barriers() ? "on" : "off (see GPU sync)",
             skip_gamepad() ? "on" : "off", env_switch("FLIP_FRONT", false) ? "FLIPPED (test)" : "as Latte",
             submit && *submit ? submit : "256", g_traceDraws ? "on" : "off");
         static const char* const kAo[] = {"0, off: as the hardware renders it",
@@ -630,8 +644,10 @@ void draw_frame_start() {
         static const char* const kProvoking[] = {"the last vertex, as gfx/gl", "the FIRST vertex (test)",
                                                  "Latte's PROVOKING_VTX_LAST bit (test)"};
         LOG("[dk] flat varyings: %s (WWHD_DK_PROVOKING_VERTEX=last|first|latte)", kProvoking[provoking_mode()]);
-        LOG("[dk] zcull: on (queue), dropped at every depth-target bind and after copies, uploads or new images of "
-            "a depth buffer; depth clears reset it");
+        LOG("[dk] zcull: on (queue), dropped after copies, uploads or new images of a depth buffer and %s; depth "
+            "clears reset it", sync_zcull_keep() ? "when another depth buffer or layer was bound since"
+                                                 : "at every depth-target bind");
+        sync_log_switches();
     }
 }
 
@@ -939,6 +955,15 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     static StageBindings stages[2];
     g_gamepadDrawing = gamepadDraw;
     g_drawSamplesRendered = false;
+    g_drawSamplesBoundDepth = false;
+    {
+        LATTE_DB_DEPTH_CONTROL dc;
+        memcpy((void*)&dc, r + REGADDR::DB_DEPTH_CONTROL, 4);
+        // (as the depth/stencil state below: depth writes need the depth test; a stencil test may write)
+        g_drawDepthWrites = depth && ((dc.get_Z_ENABLE() && dc.get_Z_WRITE_ENABLE()) ||
+                                      (depth->fmt.stencil && dc.get_STENCIL_ENABLE()));
+    }
+    sync_draw_begin();
     g_traceTextures.clear();
     if (g_capture) capture_draw_begin();
     if (!prepare_stage(r, vs, colors, depth, stages[kVertexStage]) || !prepare_stage(r, ps, colors, depth, stages[kPixelStage])) {
@@ -982,6 +1007,10 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     commit_descriptors();  // the descriptors this draw's textures were given
     lap(R.perf.resourceNs);
 
+    // ---- GPU ordering (dk_sync.h): the barrier this draw's reads and writes need against earlier draws and
+    // clears (with hazard tracking; the old path has one at every change of targets, below)
+    sync_draw_check(colors, depth, g_drawDepthWrites, g_drawSamplesBoundDepth);
+
     // ---- render targets: bound when they change (deko3d binds color targets 0..n-1 without gaps: a gap gets
     // the first color target's view with its writes masked off below)
     sync_cache();
@@ -990,15 +1019,17 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         bool same = gs.targetsKnown && gs.depth == depth && gs.depthSlice == depthSlice;
         for (int i = 0; i < 8 && same; i++) same = gs.colors[i] == colors[i] && gs.slices[i] == slices[i];
         if (!same) {
-            static const bool passBarrier = env_switch("PASS_BARRIER", true);
-            // what earlier passes rendered becomes visible to this pass's texture reads (plan section 6.3:
-            // conservative, one barrier per change of targets), and the depth buffer's zcull data is
-            // dropped whenever a depth buffer is bound (conservative too: deko3d drops it itself only when the
-            // depth target's address changes; copies, uploads and reused heap memory keep the address)
+            static const bool passBarrier = env_switch("PASS_BARRIER", true) && !sync_lazy_barriers();
+            // the old path (WWHD_DK_LAZY_BARRIERS=0): what earlier passes rendered becomes visible to this pass's
+            // texture reads (plan section 6.3: conservative, one barrier per change of targets). zcull: deko3d
+            // drops it itself only when the depth target's address changes; copies, uploads and reused heap
+            // memory keep the address (R.zcullEpoch), and with WWHD_DK_ZCULL_KEEP=0 it is dropped at every bind
+            const bool dropZcull = sync_zcull_bind(depth, depthSlice);
+            if (dropZcull) sync_zcull_dropped();
             if (passBarrier)
-                dkCmdBufBarrier(R.cmd, DkBarrier_Fragments,
-                                DkInvalidateFlags_Image | (depth ? DkInvalidateFlags_Zcull : 0u));
-            else if (depth)
+                sync_barrier(DkBarrier_Fragments, DkInvalidateFlags_Image | (dropZcull ? DkInvalidateFlags_Zcull : 0u),
+                             SyncWhy::PassChange);
+            else if (dropZcull)
                 dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Zcull);
             if (depth) g_zcullSeen = R.zcullEpoch;
             int n = 0, first = -1;
@@ -1033,7 +1064,9 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     if (depth && g_zcullSeen != R.zcullEpoch) {
         dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Zcull);
         g_zcullSeen = R.zcullEpoch;
+        sync_zcull_reset(depth, depthSlice);
     }
+    sync_draw_mark(colors, depth, g_drawDepthWrites);
 
     // ---- shaders, textures, uniform blocks
     if (gs.vs != &vs->dk || gs.ps != &ps->dk) {

@@ -138,6 +138,9 @@ struct Surface {
     bool hudFull = false;       // the TV picture's buffer at full resolution for the HUD (draw.cpp)
     SurfaceImage twin;          // the TV picture's other image (scaled scene / full-resolution HUD)
     float twinScale = 0;
+    // GPU ordering (dk_sync.h): the barrier epoch of its last GPU read (sampled by a draw) and write (a draw
+    // or clear rendered it); 0: none
+    uint64_t syncRead = 0, syncWrite = 0;
     FormatInfo fmt;
     std::shared_ptr<GuestLayout> guest;
 };
