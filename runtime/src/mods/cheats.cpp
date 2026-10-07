@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <mutex>
 #include <string>
 
 #include "mods.h"
@@ -127,6 +128,41 @@ std::atomic<int> g_pending{parse_env("WWHD_CHEAT", {{"items", kCheatItems}, {"sw
 std::atomic<int> g_infinite{parse_env("WWHD_CHEAT_INFINITE", {{"health", kInfHealth}, {"magic", kInfMagic}, {"ammo", kInfAmmo}})};
 }  // namespace
 
+namespace {
+// the next stage request in the play state (dStage_nextStage_c: name[8], s16 point, s8 room, s8 layer,
+// s8 enabled, u8 wipe), the same fields WWHD_TEST_SCENECHANGE writes (true60_test.cpp)
+constexpr uint32_t kNextStage = 0x1046F0B0 + 0x5140;
+std::mutex g_warpMu;
+char g_warpStage[8] = {};
+int g_warpRoom = 0, g_warpPoint = 0;
+std::atomic<bool> g_warpPending{false};
+
+void warp_service() {
+    if (ld8(kNextStage + 12)) return;  // a scene change is already on its way: after it
+    std::lock_guard<std::mutex> lk(g_warpMu);
+    for (uint32_t i = 0; i < 8; i++) st8(kNextStage + i, uint8_t(g_warpStage[i]));
+    st16(kNextStage + 8, uint16_t(int16_t(g_warpPoint)));
+    st8(kNextStage + 10, uint8_t(int8_t(g_warpRoom)));
+    st8(kNextStage + 11, 0xFF);  // layer: the stage's own choice
+    st8(kNextStage + 13, 0);     // wipe: the default fade
+    st8(kNextStage + 12, 1);     // enabled: the game starts the change
+    g_warpPending = false;
+    LOG("[cheats] warp from %s to %.8s room %d point %d", stage().c_str(), g_warpStage, g_warpRoom, g_warpPoint);
+}
+}  // namespace
+
+void request_warp(const char* name, int room, int point) {
+    {
+        std::lock_guard<std::mutex> lk(g_warpMu);
+        memset(g_warpStage, 0, sizeof g_warpStage);
+        strncpy(g_warpStage, name, sizeof g_warpStage);
+        g_warpRoom = room;
+        g_warpPoint = point;
+    }
+    g_warpPending = true;
+}
+bool warp_pending() { return g_warpPending.load(std::memory_order_relaxed); }
+
 void request_cheat(int which) { g_pending |= which; }
 bool infinite(int which) { return g_infinite.load(std::memory_order_relaxed) & which; }
 void set_infinite(int which, bool on) {
@@ -137,9 +173,11 @@ void set_infinite(int which, bool on) {
 
 void cheats_service() {
     int inf = g_infinite.load(std::memory_order_relaxed);
-    if (!g_pending.load(std::memory_order_relaxed) && !inf) return;
+    const bool warp = g_warpPending.load(std::memory_order_relaxed);
+    if (!g_pending.load(std::memory_order_relaxed) && !inf && !warp) return;
     uint32_t s = save_addr();
     if (!save_loaded(s)) return;  // stays pending until a file is loaded
+    if (warp) warp_service();
     // ponytail: topped up once per frame, so a single hit bigger than your whole health still kills
     if (inf & kInfHealth) st16(s + kLife, ld16(s + kMaxLife));
     if (inf & kInfMagic) st8(s + kMagic, ld8(s + kMaxMagic));

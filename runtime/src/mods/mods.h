@@ -58,6 +58,11 @@ enum Infinite { kInfHealth = 1, kInfMagic = 2, kInfAmmo = 4 };
 bool infinite(int which);
 void set_infinite(int which, bool on);
 void cheats_service();          // game main thread, frame start (interp.cpp)
+// teleport (settings overlay, mods/warps.h): the game's own scene change request (dComIfGp_setNextStage)
+// to stage / room / spawn point, written by cheats_service once a file is loaded and no other scene
+// change is pending
+void request_warp(const char* stage, int room, int point);  // any thread
+bool warp_pending();
 
 // shared helpers (mods.cpp)
 uint64_t step();    // full logic steps so far (interp::logic_steps)

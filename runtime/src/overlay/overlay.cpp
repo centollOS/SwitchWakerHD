@@ -43,6 +43,7 @@
 #include <switch.h>
 #include "../gfx/gl/settings.h"
 #include "../platform/settings_switch.h"
+#include "../mods/warps.h"
 #endif
 
 namespace interp {
@@ -126,9 +127,9 @@ ImGuiKey imgui_key(int code) {
 // ---------------------------------------------------------------- UI state (render thread)
 #ifdef __SWITCH__
 // the Switch renderer has its own options (Switch tab); one screen, and the controller maps by position
-enum Tab { kSaves, kSwitch, kMods, kAbout, kTabs, kGraphics = 100, kDisplay, kControls };
-const char* const kTabNames[kTabs] = {"Saves", "Switch", "Mods", "Language / About"};
-const char* const kTabIds[kTabs] = {"saves", "switch", "mods", "about"};
+enum Tab { kSaves, kSwitch, kWarp, kMods, kAbout, kTabs, kGraphics = 100, kDisplay, kControls };
+const char* const kTabNames[kTabs] = {"Saves", "Switch", "Warp", "Mods", "Language / About"};
+const char* const kTabIds[kTabs] = {"saves", "switch", "warp", "mods", "about"};
 #else
 enum Tab { kSaves, kGraphics, kDisplay, kMods, kControls, kAbout, kTabs };
 const char* const kTabNames[kTabs] = {"Saves", "Graphics", "Display", "Mods", "Controls", "Language / About"};
@@ -684,6 +685,29 @@ void tab_graphics() {
 }
 
 #ifdef __SWITCH__
+// Teleport (mods/warps.h): the game's own scene change to the chosen stage, room and spawn point
+void tab_warp() {
+    const char* cur = reinterpret_cast<const char*>(mem::ptr(0x1046F0B0 + 0x5134));  // the start stage
+    note("Now in: %.8s%s", cur, mods::warp_pending() ? "   (a warp is waiting for a loaded file or the current scene change)" : "");
+    warn("Going somewhere before the story gets there can break events in that file. Try it on a copy of your save.");
+    auto go = [](const mods::Warp& w) {
+        mods::request_warp(w.stage, w.room, w.point);
+        set_open(false);  // the game takes over: fade, load, spawn
+    };
+    heading("Main places");
+    for (const mods::Warp& w : mods::kMainWarps) {
+        char label[96];
+        snprintf(label, sizeof label, "%s##main%s%d", w.label, w.stage, w.room);
+        if (ImGui::Selectable(label)) go(w);
+    }
+    heading("Every stage");
+    for (const mods::Warp& w : mods::kAllWarps) {
+        char label[64];
+        snprintf(label, sizeof label, "%s  (room %d, point %d)##all", w.stage, w.room, w.point);
+        if (ImGui::Selectable(label)) go(w);
+    }
+}
+
 // Switch: handheld GPU profile, picture adjustments and the corner counter (platform/settings_switch.h)
 void tab_switch() {
     using namespace switch_settings;
@@ -1362,6 +1386,7 @@ void settings_window() {
                     case kSaves: tab_saves(); break;
 #ifdef __SWITCH__
                     case kSwitch: tab_switch(); break;
+                    case kWarp: tab_warp(); break;
 #else
                     case kGraphics: tab_graphics(); break;
                     case kDisplay: tab_display(); break;
