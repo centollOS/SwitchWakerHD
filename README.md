@@ -169,7 +169,8 @@ Boots and plays on a Switch in handheld mode, with sound, controllers, saves, sa
 options menu and mods. Played by hand mostly on the opening island and in a few other areas
 reached with the Warp tab. In handheld at stock CPU and the
 460.8 MHz GPU profile it holds about 30 fps (median 29.9 on the test route), with dips in the
-busiest views. Docked (1080p output) is implemented but not yet tested on hardware. Known issues and
+busiest views. Docked it renders at 1080p (picture profile per mode in the Switch tab: handheld 1x,
+docked 1.5x, with dynamic resolution), tested on a TV at a median of 29.9 fps. Known issues and
 open work: [docs/deko3d-plan.md](docs/deko3d-plan.md) and [docs/switch-port.md](docs/switch-port.md).
 
 ## License

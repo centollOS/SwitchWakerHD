@@ -11,7 +11,7 @@ código o logs; **[S]** = supuesto a confirmar. Estado: **P5 hecho, deko3d por d
 shaders nuevos (warp tour headless) hay que recuperar esa build; la consola sigue añadiendo los shaders que ve
 a `shadercache_gl.bin` y `tools/switch/dksh_cache` los compila.
 
-**Picto Box (2026-10-07; compilado, probado en escritorio con Vulkan, SIN probar en hardware):** las fotos
+**Picto Box (2026-10-07; probado en escritorio con Vulkan y en hardware el 2026-10-08):** las fotos
 salían negras. Causas y cambios en `docs/switch-port.md` ("Picto Box: black pictures"):
 - búfer de color 3D dibujado por capas y una copia 3D para muestrearlo (`volume_source`);
 - RGBA8 y su gemelo sRGB comparten superficie (`srgb_twins`), con vistas en el otro formato;
@@ -504,7 +504,7 @@ Ahorro esperado frente a GL: ~320 MiB de programas Mesa y gran parte de los ~140
 
 - Swapchain de 3 imágenes RGBA8 sobre `nwindowGetDefault()` a 1280×720, intervalo 1; relaxed vsync sigue en
   `gx2_core.cpp`. Docked 1080p en P4.
-- **Docked 1080p (carril `p4-docked`, compilado; SIN probar en hardware).** El host loop lee `appletGetOperationMode`
+- **Docked 1080p (carril `p4-docked`; probado en hardware el 2026-10-07: salida 1920x1080 en la TV; con los perfiles por modo, 1.5x = 1080p internos en dock, mediana 29,9 fps).** El host loop lee `appletGetOperationMode`
   (libnx lo actualiza con `AppletMessage_OperationModeChanged`) y registra cada cambio (`[dk] operation mode changed`);
   el siguiente present recrea el swapchain a 1920×1080 docked y 1280×720 handheld (`dkQueueWaitIdle`, destruir el
   swapchain, que libera los buffers de la ventana; imágenes nuevas y swapchain nuevo, que fija las dimensiones de la

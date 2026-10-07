@@ -1104,7 +1104,7 @@ is restored at exit; apm needs title mode (in applet mode the profile is skipped
   `[mesa] shader cache:` and `[mesa] shader compile:`.
 - The GPU timer correction (×1.63, round 20) also applies to the `WWHD_GL_PIPESTATS` line now.
 
-### Picto Box: black pictures (deko3d and Vulkan; desktop-tested, not yet tested on hardware)
+### Picto Box: black pictures (deko3d and Vulkan; desktop-tested, hardware-tested 2026-10-08)
 
 Report: with deko3d, a picture taken with the Picto Box is black, sometimes with glitches. Reproduced on the desktop
 Vulkan build (Outset save with the Deluxe Picto Box on X, `WWHD_PRESS` X then A, then A on "Save this pictograph?"
