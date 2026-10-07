@@ -179,6 +179,37 @@ sale en la línea `[dk] resources (P4): ...` al arrancar.
   `WWHD_DK_TEX_TABLE=0`, `WWHD_DK_UBO_MEMO=0` en `env.txt`. Si algo sale mal dibujado con el modo 2 (matrices o
   constantes de otro objeto), probar `WWHD_DK_UF_CACHE=1` y luego `=0`.
 
+**P4, carril `p4-prims` (primitivas, índices y memo; compilado, SIN probar en hardware).** Cada cambio con su
+interruptor (`=0` vuelve al camino de P3) y anunciado al arrancar en `[dk] P4 lookup and indices: ...`; cada 5 s la
+línea `[dk] lookup per frame: ...` desglosa lo que cambia.
+- **Diagnóstico del memo:** con el log release de Outset (18-49-11) memo + combinaciones suman 99-100 % de los
+  draws (las búsquedas completas son ~1 %); GL tiene los mismos porcentajes (41-70 % de memo en las mismas
+  vistas). El coste de `lookup` es casi constante por frame (~2-2,5 ms/frame tanto con 1400 como con 5900 draws):
+  no son fallos, es lo que cuesta cada acierto de combinación (rehash del estado al cambiar registros y validación
+  de cada combinación en su primer uso del frame).
+- `WWHD_DK_MEMO_PRIM_CLASS`: el memo y las combinaciones usan la clase de primitiva (puntos / el resto; exacta
+  con GS) en vez del tipo: la traducción solo lee si son puntos. Un strip tras una lista con los mismos programas
+  ya no rehace los hashes.
+- `WWHD_DK_COMBO_KEY`: un único hash de los registros de las dos etapas (`shader_combo_state_hash`: cada palabra
+  común una vez, las unidades de textura de dos en dos, cuatro cadenas en paralelo) en vez de dos `state_hash` y
+  dos cadenas dependientes de 18 unidades; los hashes por etapa que necesita `translate` solo al fallar la
+  combinación. Las claves de los shaders no cambian (`state_hash` reescrito sobre `gather_state`, mismas palabras).
+- `WWHD_DK_COMBO_FAST_VALIDATE`: una combinación de un frame anterior valida su fetch shader por la entrada de
+  hash que guarda (sin `get_fetch_shader`: dos búsquedas en tablas hash menos por combinación y frame).
+- `WWHD_DK_INDEX_GEN`: las listas de índices convertidas caducan solo con GX2Invalidate de attribute buffers
+  (flag 1) y GX2DrawDone, no con los de uniform blocks (flag 4, la mayoría): `R.streamGen` sigue igual para
+  vértices y UBOs.
+- `WWHD_DK_NATIVE_PRIMS`: fans, quads, quad strips y line loops con las primitivas nativas de deko3d
+  (`dkCmdBufDraw*` pasa la primitiva tal cual a `VERTEX_BEGIN_GL` de Maxwell, que las ensambla; nouveau nvc0 las
+  usa igual). Sin índices los no indexados; los indexados solo cambian el orden de bytes (4 índices por quad en vez
+  de 6). Mismos triángulos que la conversión; las varyings flat: un quad usa su último vértice en sus dos
+  triángulos (la conversión, c y d), así que un quad cuyo PS lee una varying flat (`SPI_PS_INPUT_CNTL_n` bit 10)
+  sigue convertido. Las rect lists siguen sin dibujarse (como GL).
+- Ganancia esperada (estimación, sin hardware): `lookup` de ~1,2 a ~0,7-0,9 us/draw (rehash ~50 % más barato, sin
+  rehash al cambiar solo la primitiva, validaciones sin búsquedas en mapas); `indices` de ~0,5 a ~0,3 us/draw si
+  la mayoría de invalidates son de uniforms (la línea nueva lo dice: `invalidates: attributes X, uniforms Y` y
+  `hits`). En total ~0,4-0,7 us por draw del render thread; la GPU no cambia salvo por menos bytes de índices.
+
 ## P2: carriles (interfaces en la rama `deko3d`)
 
 Tres ramas (`p2-surf`, `p2-shader`, `p2-draw`) parten de `deko3d` (`git merge deko3d`) y trabajan en paralelo, cada

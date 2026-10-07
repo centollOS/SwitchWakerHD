@@ -890,6 +890,7 @@ void frame_stats() {
             kib(p.reusedBytes), ms(p.copyNs), perFrame(p.flushes), perFrame(p.midFrameSubmits), ms(p.flushNs),
             perFrame(p.gamepadDraws));
         log_resource_stats(executed, frames);
+        log_lookup_stats(frames);
         const ShaderStats sh = shader_stats_take();
         LOG("[dk] shaders: %llu translated, %llu DKSH in RAM, %llu from cache files, %llu queued, %llu compiled (%.0f ms in "
             "uam), %llu failed, %llu pending now, %llu draws skipped for them; loads %.1f ms, render thread %.1f ms/s "
@@ -1343,6 +1344,7 @@ const Backend& deko3d_backend() {
             if (tv) R.tvSrgb = (format & 0x400) != 0;
         };
         b.invalidate = [](uint32_t flags, uint32_t addr, uint32_t size) {
+            gfxdk::note_invalidate(flags);  // (P4 index lists)
             guarded("invalidate", [&] { gfxdk::invalidate(flags, addr, size); });
         };
         // GX2Flush / GX2DrawDone: what is recorded goes to the GPU (dk_draw.h submit_commands); nothing the GPU
@@ -1354,6 +1356,7 @@ const Backend& deko3d_backend() {
         b.wait_idle = [] {
             R.counts.waits++;
             R.streamGen++;  // guest data the game changes after GX2DrawDone is uploaded again
+            gfxdk::note_wait_idle();
             guarded("wait", [] { gfxdk::submit_commands("GX2DrawDone"); });
         };
         b.ss_reset = [] {

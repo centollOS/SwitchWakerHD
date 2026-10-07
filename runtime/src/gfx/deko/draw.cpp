@@ -634,6 +634,26 @@ template <int Type> IndexList convert_typed(const uint8_t* src, uint32_t count, 
     return list;
 }
 
+// ---- P4 counters of the lookup and index stages (log_lookup_stats, every 5 s from backend.cpp)
+struct LookupStats {
+    // shader lookup: memo misses by cause, state rehashes, combinations validated in a new frame, full lookups
+    uint64_t memoMisses = 0, missFrame = 0, missPrograms = 0, missRegisters = 0, missPrimitive = 0;
+    uint64_t stateHashes = 0, stateHashNs = 0;  // (times: sampled draws, scaled as the per-draw timers)
+    uint64_t validations = 0, validateNs = 0, comboMisses = 0;
+    // indices: draws that needed an index list, cache hits, conversions (indices read), conversion time
+    uint64_t indexLists = 0, indexHits = 0, conversions = 0, convertedIndices = 0, convertNs = 0;
+    uint64_t indexGenBumps = 0, streamGenBumps = 0, invalidatesAttrib = 0, invalidatesUniform = 0;
+    // primitives drawn natively (fans, quads, quad strips, line loops) and converted on the CPU
+    uint64_t nativeFans = 0, nativeQuads = 0, nativeQuadStrips = 0, nativeLineLoops = 0, convertedPrims = 0,
+             flatKeptConverted = 0;
+} g_lookup;
+
+// Index lists are reused within a frame while their guest bytes cannot have changed. WWHD_DK_INDEX_GEN (on
+// unless 0): only GX2Invalidate of attribute buffers (index buffers are those; GX2 flag 1) and GX2DrawDone
+// make them stale; =0: R.streamGen, which also advances at every invalidate of uniform blocks (flag 4).
+const bool g_indexGenOn = env_switch("INDEX_GEN", true);
+uint64_t g_indexGen = 1;
+
 IndexList index_list(uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr, bool restart, uint32_t restartIndex) {
     struct Entry {
         uint64_t key = 0, stamp = ~0ull, gen = 0;
@@ -646,11 +666,18 @@ IndexList index_list(uint32_t prim, uint32_t count, uint32_t indexType, uint32_t
     const uint64_t key = (uint64_t(indexAddr) << 32 | count) ^ (uint64_t(prim) << 56 | uint64_t(indexType) << 48) ^
                          (restart ? 0x5bd1e995ull * (restartIndex + 1) : 0);
     static const bool noCache = env_switch("NO_INDEX_CACHE", false);
+    const uint64_t gen = g_indexGenOn ? g_indexGen : R.streamGen;
+    g_lookup.indexLists++;
     if (const Entry* e = cache.find(key, stamp); !noCache && e->stamp == stamp) {
-        if (e->gen == R.streamGen && e->addr == indexAddr && e->count == count && e->type == indexType && e->prim == prim &&
-            e->restart == restart && e->restartIndex == restartIndex)
+        if (e->gen == gen && e->addr == indexAddr && e->count == count && e->type == indexType && e->prim == prim &&
+            e->restart == restart && e->restartIndex == restartIndex) {
+            g_lookup.indexHits++;
             return e->list;
+        }
     }
+    g_lookup.conversions++;
+    g_lookup.convertedIndices += count;
+    SampledTime convertTimer{g_lookup.convertNs, R.timedDraw};
     const uint8_t* src = indexAddr ? mem::ptr(indexAddr) : nullptr;
     IndexList list;
     switch (indexAddr ? indexType : ~0u) {
@@ -660,7 +687,7 @@ IndexList index_list(uint32_t prim, uint32_t count, uint32_t indexType, uint32_t
     case 9: list = convert_typed<9>(src, count, prim, restart, restartIndex); break;
     default: list = convert_typed<-1>(src, count, prim, false, 0); break;
     }
-    if (list.slice) cache.put({key, stamp, R.streamGen, indexAddr, count, indexType, prim, restartIndex, restart, list});
+    if (list.slice) cache.put({key, stamp, gen, indexAddr, count, indexType, prim, restartIndex, restart, list});
     return list;
 }
 
@@ -688,10 +715,29 @@ DkProvokingVertex provoking_vertex(const uint32_t* r) {
 // the previous draw's shader lookup, reused while no shader-relevant register changed
 struct ShaderMemo {
     uint64_t gen = 0, frame = ~0ull, epoch = 0;
-    uint32_t prim = ~0u;
+    uint32_t prim = ~0u;  // the primitive key (prim_key)
     LatteFetchShader* fs = nullptr;
     Shader *vs = nullptr, *ps = nullptr;
+    uint64_t regsGen = 0;  // (the miss counters: programs or other registers changed)
 } memo;
+
+// P4 lookup switches (each =0 restores the P3 path)
+// WWHD_DK_MEMO_PRIM_CLASS: the shader translation reads the primitive type only to know whether it draws
+// points (LatteDecompilerAnalyzer isPointsPrimitive: gl_PointSize output) and, for geometry shaders (which
+// deko3d does not run), the input primitive; the memo and the combinations key on that class instead of the
+// type, so a strip after a list with the same programs and state reuses the lookup without rehashing.
+const bool g_primClass = env_switch("MEMO_PRIM_CLASS", true);
+// WWHD_DK_COMBO_KEY: a combination's state key is one hash of both stages' registers (shader_combo_state_hash:
+// each shared word once, texture units two to a word); the per-stage core hashes translate needs are made
+// only when the combination is not found (P3: two state hashes and two texture hash chains at every change).
+const bool g_comboKey = env_switch("COMBO_KEY", true);
+// WWHD_DK_COMBO_FAST_VALIDATE: a combination made in an earlier frame checks its fetch shader through the
+// program-hash entry it keeps (no hash-map lookups) instead of a full get_fetch_shader.
+const bool g_fastValidate = env_switch("COMBO_FAST_VALIDATE", true);
+uint32_t prim_key(const uint32_t* r, uint32_t prim) {
+    if (!g_primClass || (r[REGADDR::VGT_GS_MODE] & 3)) return prim;
+    return prim == 1 ? 1u : 4u;  // points, or any other primitive
+}
 
 }  // namespace
 DrawSkips g_drawSkips;
@@ -704,6 +750,41 @@ void skip(uint64_t& reason) {
 }  // namespace
 
 int ao_mode() { return g_aoMode; }
+
+void note_invalidate(uint32_t flags) {
+    if (flags & 1) {
+        g_lookup.invalidatesAttrib++;
+        g_indexGen++;
+        g_lookup.indexGenBumps++;
+    }
+    if (flags & 4) g_lookup.invalidatesUniform++;
+    if (flags & 5) g_lookup.streamGenBumps++;
+}
+void note_wait_idle() {
+    g_indexGen++;
+    g_lookup.indexGenBumps++;
+    g_lookup.streamGenBumps++;
+}
+
+void log_lookup_stats(uint64_t frames) {
+    const LookupStats l = g_lookup;
+    g_lookup = {};
+    auto perFrame = [&](uint64_t n) { return frames ? double(n) / double(frames) : 0.0; };
+    auto usEach = [](uint64_t ns, uint64_t n) { return n ? double(ns) / 1e3 / double(n) : 0.0; };
+    LOG("[dk] lookup per frame: memo misses %.0f (new frame %.0f, programs %.0f, other registers %.0f, primitive "
+        "%.0f), state hashes %.0f (%.2f us each), combinations validated %.0f (%.2f us each), full lookups %.1f; "
+        "indices: lists %.0f, hits %.0f%%, conversions %.0f (%.0f indices, %.2f us each), index gen bumps %.1f, "
+        "stream gen bumps %.1f (invalidates: attributes %.1f, uniforms %.1f); primitives: native fans %.1f, quads "
+        "%.1f, quad strips %.1f, line loops %.1f, converted %.1f (%.1f for flat varyings)",
+        perFrame(l.memoMisses), perFrame(l.missFrame), perFrame(l.missPrograms), perFrame(l.missRegisters),
+        perFrame(l.missPrimitive), perFrame(l.stateHashes), usEach(l.stateHashNs, l.stateHashes),
+        perFrame(l.validations), usEach(l.validateNs, l.validations), perFrame(l.comboMisses), perFrame(l.indexLists),
+        l.indexLists ? 100.0 * double(l.indexHits) / double(l.indexLists) : 0.0, perFrame(l.conversions),
+        perFrame(l.convertedIndices), usEach(l.convertNs, l.conversions), perFrame(l.indexGenBumps),
+        perFrame(l.streamGenBumps), perFrame(l.invalidatesAttrib), perFrame(l.invalidatesUniform),
+        perFrame(l.nativeFans), perFrame(l.nativeQuads), perFrame(l.nativeQuadStrips), perFrame(l.nativeLineLoops),
+        perFrame(l.convertedPrims), perFrame(l.flatKeptConverted));
+}
 
 DrawSkips draw_skips_take() {
     const DrawSkips s = g_drawSkips;
@@ -734,6 +815,12 @@ void draw_frame_start() {
     if (!logged) {
         logged = true;
         const char* submit = getenv("WWHD_DK_SUBMIT_DRAWS");
+        LOG("[dk] P4 lookup and indices: memo by primitive class %s (WWHD_DK_MEMO_PRIM_CLASS), one combination "
+            "state hash %s (WWHD_DK_COMBO_KEY), fast combination check %s (WWHD_DK_COMBO_FAST_VALIDATE), index lists "
+            "stale at %s (WWHD_DK_INDEX_GEN), native fans/quads/quad strips/line loops %s (WWHD_DK_NATIVE_PRIMS)",
+            g_primClass ? "on" : "off", g_comboKey ? "on" : "off", g_fastValidate ? "on" : "off",
+            g_indexGenOn ? "attribute-buffer invalidates and GX2DrawDone" : "every attribute or uniform invalidate (P3)",
+            env_switch("NATIVE_PRIMS", true) ? "on" : "off (converted on the CPU)");
         LOG("[dk] draw path: state cache %s, memo %s, texture cache %s, index cache %s, vertex trim %s, barrier per "
             "pass %s, GamePad skip %s, front face %s, submit every %s draws; trace draws %s",
             getenv("WWHD_DK_NO_STATE_CACHE") ? "off" : "on", env_switch("NO_MEMO", false) ? "off" : "on",
@@ -829,6 +916,37 @@ void set_viewport(const uint32_t* r, float scale) {
     }
 }
 
+// P4, WWHD_DK_NATIVE_PRIMS (on unless 0): triangle fans, quads, quad strips and line loops drawn with
+// deko3d's primitives of the same name (dkCmdBufDraw* passes the DkPrimitive to Maxwell's VERTEX_BEGIN_GL
+// unchanged; the 3D engine assembles all four itself, as nouveau's nvc0 driver uses them) instead of index
+// lists generated on the CPU: a non-indexed draw needs no index list at all, an indexed one only its byte
+// order changed, and quads read 4 indices per quad instead of 6. The triangles are the CPU conversion's
+// (quad a b c d: a b c and a c d). Flat varyings: a fan's and a line loop's provoking vertices with the last-
+// vertex convention are the conversion's; a quad's (and a quad strip's) is its last vertex for both of its
+// triangles where the conversion's lists give c then d, so a quad draw whose pixel shader reads a flat
+// varying (SPI_PS_INPUT_CNTL_n FLAT_SHADE, bit 10) stays converted, as do fans when flat varyings use
+// another convention (WWHD_DK_PROVOKING_VERTEX).
+bool native_primitive(const uint32_t* r, uint32_t prim, DkPrimitive& mode) {
+    static const bool on = env_switch("NATIVE_PRIMS", true);
+    if (!on) return false;
+    const uint32_t inputs = std::min<uint32_t>(r[mmSPI_PS_IN_CONTROL_0] & 0x3F, 32);
+    bool flat = false;
+    for (uint32_t i = 0; i < inputs && !flat; i++) flat = (r[mmSPI_PS_INPUT_CNTL_0 + i] >> 10) & 1;
+    const bool lastVertex = provoking_vertex(r) == DkProvokingVertex_Last;
+    if (flat && (prim == 0x13 || prim == 0x14 || !lastVertex)) {
+        g_lookup.flatKeptConverted++;
+        return false;
+    }
+    switch (prim) {
+    case 5: mode = DkPrimitive_TriangleFan; g_lookup.nativeFans++; break;
+    case 0x12: mode = DkPrimitive_LineLoop; g_lookup.nativeLineLoops++; break;
+    case 0x13: mode = DkPrimitive_Quads; g_lookup.nativeQuads++; break;
+    case 0x14: mode = DkPrimitive_QuadStrip; g_lookup.nativeQuadStrips++; break;
+    default: return false;
+    }
+    return true;
+}
+
 void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
                uint32_t baseVertex, uint32_t instances);
 }  // namespace
@@ -866,19 +984,40 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     LatteFetchShader* fs;
     static const bool noMemo = env_switch("NO_MEMO", false);
     const uint64_t frame = R.frame + 1;  // the frame being recorded
-    if (!noMemo && memo.gen == g_shader_state_gen && memo.frame == frame && memo.epoch == R.shaderEpoch && memo.prim == prim) {
+    const uint32_t primKey = prim_key(r, prim);
+    if (!noMemo && memo.gen == g_shader_state_gen && memo.frame == frame && memo.epoch == R.shaderEpoch && memo.prim == primKey) {
         fs = memo.fs;
         vs = memo.vs;
         ps = memo.ps;
         R.perf.memoHits++;
     } else {
-        // the register part of the shader keys, kept while only programs change
-        static struct { uint64_t gen = 0; uint32_t prim = ~0u; uint64_t vs = 0, ps = 0, vsCore = 0, psCore = 0; } stateHash;
-        if (noMemo || stateHash.gen != g_shader_regs_gen || stateHash.prim != prim) {
-            stateHash.vs = shader_state_hash(r, true, &stateHash.vsCore);
-            stateHash.ps = shader_state_hash(r, false, &stateHash.psCore);
+        g_lookup.memoMisses++;
+        if (memo.frame != frame || memo.epoch != R.shaderEpoch) g_lookup.missFrame++;
+        else if (memo.gen != g_shader_state_gen) (memo.regsGen != g_shader_regs_gen ? g_lookup.missRegisters : g_lookup.missPrograms)++;
+        else g_lookup.missPrimitive++;
+        // the register part of the shader keys, kept while only programs change. With WWHD_DK_COMBO_KEY one
+        // hash of both stages (vs; ps unused), and the per-stage cores only when translate needs them
+        static struct {
+            uint64_t gen = 0;
+            uint32_t prim = ~0u;
+            uint64_t vs = 0, ps = 0, vsCore = 0, psCore = 0;
+            bool cores = false;
+        } stateHash;
+        if (noMemo || stateHash.gen != g_shader_regs_gen || stateHash.prim != primKey) {
+            const uint64_t t0 = R.timedDraw ? now_ns() : 0;
+            if (g_comboKey && !noMemo) {
+                stateHash.vs = shader_combo_state_hash(r, primKey);
+                stateHash.ps = 0;
+                stateHash.cores = false;
+            } else {
+                stateHash.vs = shader_state_hash(r, true, &stateHash.vsCore);
+                stateHash.ps = shader_state_hash(r, false, &stateHash.psCore);
+                stateHash.cores = true;
+            }
             stateHash.gen = g_shader_regs_gen;
-            stateHash.prim = prim;
+            stateHash.prim = primKey;
+            g_lookup.stateHashes++;
+            if (R.timedDraw) g_lookup.stateHashNs += (now_ns() - t0) * kDrawTimeSample;
         }
         // recent (programs, register state) combinations (gfx/gl): one made in an earlier frame is used again
         // only if its programs still have the hashes they had (checked once per frame) and the fetch shader
@@ -890,16 +1029,29 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             Shader *vs = nullptr, *ps = nullptr;
             void *vsRef = nullptr, *psRef = nullptr;  // program_hash_ref
             uint64_t vsHash = 0, psHash = 0;
+            void* fsRef = nullptr;  // WWHD_DK_COMBO_FAST_VALIDATE: the fetch shader's hash entry, range and key
+            uint32_t fsAddr = 0, fsSize = 0;
+            uint64_t fsKey = 0;
         };
         static const bool comboAcrossFrames = env_switch("COMBO_FRAMES", true);
         auto stillValid = [&](Combo& c) {
             if (c.frame == frame) return true;
             if (!comboAcrossFrames || !c.vsRef || !c.psRef) return false;
-            uint64_t fsKey = 0;
-            if (get_fetch_shader(r, &fsKey, frame) != c.fs ||
-                program_hash_of(c.vsRef, c.programs[2] << 8, c.programs[3] << 3, frame) != c.vsHash ||
-                program_hash_of(c.psRef, c.programs[4] << 8, c.programs[5] << 3, frame) != c.psHash)
-                return false;
+            g_lookup.validations++;
+            const uint64_t t0 = R.timedDraw ? now_ns() : 0;
+            bool valid;
+            if (g_fastValidate && c.fsRef) {
+                uint32_t fsAddr, fsSize;
+                valid = fetch_shader_range(r, fsAddr, fsSize) && fsAddr == c.fsAddr && fsSize == c.fsSize &&
+                        program_hash_of(c.fsRef, fsAddr, fsSize, frame) == c.fsKey;
+            } else {
+                uint64_t fsKey = 0;
+                valid = get_fetch_shader(r, &fsKey, frame) == c.fs;
+            }
+            valid = valid && program_hash_of(c.vsRef, c.programs[2] << 8, c.programs[3] << 3, frame) == c.vsHash &&
+                    program_hash_of(c.psRef, c.programs[4] << 8, c.programs[5] << 3, frame) == c.psHash;
+            if (R.timedDraw) g_lookup.validateNs += (now_ns() - t0) * kDrawTimeSample;
+            if (!valid) return false;
             c.frame = frame;
             return true;
         };
@@ -916,6 +1068,12 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             vs = c.vs;
             ps = c.ps;
         } else {
+            g_lookup.comboMisses++;
+            if (!stateHash.cores) {  // (WWHD_DK_COMBO_KEY) the per-stage hashes translate keys shaders by
+                shader_state_hash(r, true, &stateHash.vsCore);
+                shader_state_hash(r, false, &stateHash.psCore);
+                stateHash.cores = true;
+            }
             uint64_t fsKey = 0;
             fs = get_fetch_shader(r, &fsKey, frame);
             vs = fs ? translate(r, true, fs, fsKey, frame, stateHash.vsCore) : nullptr;
@@ -935,12 +1093,17 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             c.psRef = hashable ? program_hash_ref(psAddr, psSize) : nullptr;
             c.vsHash = hashable ? program_hash_of(c.vsRef, vsAddr, vsSize, frame) : 0;
             c.psHash = hashable ? program_hash_of(c.psRef, psAddr, psSize, frame) : 0;
+            c.fsRef = nullptr;
+            if (fs && fetch_shader_range(r, c.fsAddr, c.fsSize)) {
+                c.fsRef = program_hash_ref(c.fsAddr, c.fsSize);
+                c.fsKey = fsKey;
+            }
             if (!(vs && ps && vs->ready() && ps->ready())) {  // looked up again next time
                 c.frame = ~0ull;
                 c.vsRef = c.psRef = nullptr;
             }
         }
-        memo = {g_shader_state_gen, frame, R.shaderEpoch, prim, fs, vs, ps};
+        memo = {g_shader_state_gen, frame, R.shaderEpoch, primKey, fs, vs, ps, g_shader_regs_gen};
     }
     if (!fs) {
         skip(g_drawSkips.noFetchShader);
@@ -980,10 +1143,14 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         skip(g_drawSkips.unsupported);
         return;
     }
-    const bool generated = prim == 5 || prim == 0x12 || prim == 0x13 || prim == 0x14;
+    bool generated = prim == 5 || prim == 0x12 || prim == 0x13 || prim == 0x14;
+    if (generated && native_primitive(r, prim, mode)) generated = false;  // (P4, WWHD_DK_NATIVE_PRIMS)
+    else if (generated) g_lookup.convertedPrims++;
     IndexList indices;
     if (indexAddr || generated) {
-        indices = index_list(prim, count, indexType, indexAddr, stripRestart, restartIndex);
+        // a native primitive's guest indices only change byte order (index_list's list conversion, prim 4)
+        indices = index_list(generated ? prim : (prim == 5 || prim >= 0x12 ? 4u : prim), count, indexType, indexAddr,
+                             stripRestart, restartIndex);
         if (!indices.count) return;  // (a fan or quad list too short for one primitive)
         if (!indices.slice) {
             R.perf.streamFullSkips++;
