@@ -486,7 +486,7 @@ struct GpuTiming {
                 glGetQueryObjectui64v(fs[k], GL_QUERY_RESULT, &f);
                 glGetQueryObjectui64v(prims[k], GL_QUERY_RESULT, &p);
                 LOG("[gl] GPU work of frame %llu: %.2f ms, vertex shaders %llu, fragment shaders %llu, primitives %llu",
-                    (unsigned long long)frameOf[k], double(ns) / 1e6, (unsigned long long)v, (unsigned long long)f,
+                    (unsigned long long)frameOf[k], double(ns) * gpuClock.factor / 1e6, (unsigned long long)v, (unsigned long long)f,
                     (unsigned long long)p);
             }
         }
