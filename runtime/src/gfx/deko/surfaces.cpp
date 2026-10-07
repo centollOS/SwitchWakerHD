@@ -385,9 +385,8 @@ bool is_layered(DkImageType t) {
     return t == DkImageType_2DArray || t == DkImageType_Cubemap || t == DkImageType_CubemapArray;
 }
 
-// the image of s at pw x ph pixels (its mips and layers) and its default descriptor; staging: an image of the
-// same shape for the 2D engine only (no compression, no descriptor: upload_surface's way into a compressed one)
-void make_image(Surface* s, SurfaceImage& img, uint32_t pw, uint32_t ph, bool staging = false) {
+// the image of s at pw x ph pixels (its mips and layers) and its default descriptor
+void make_image(Surface* s, SurfaceImage& img, uint32_t pw, uint32_t ph) {
     if (s->fmt.image == DkImageFormat_None)
         throw std::runtime_error("[dk] unsupported GX2 surface format 0x" + std::to_string(s->format) + " (" + describe(s) + ")");
     DkImageType viewType;
@@ -400,8 +399,7 @@ void make_image(Surface* s, SurfaceImage& img, uint32_t pw, uint32_t ph, bool st
     DkImageLayoutMaker m;
     dkImageLayoutMakerDefaults(&m, R.device);
     m.type = img.type;
-    m.flags = staging ? uint32_t(DkImageFlags_Usage2DEngine) : image_flags(s->fmt, img.type, s->renderTarget);
-    img.hwCompression = (m.flags & DkImageFlags_HwCompression) != 0;
+    m.flags = image_flags(s->fmt, img.type, s->renderTarget);
     m.format = s->fmt.image;
     m.dimensions[0] = pw;
     m.dimensions[1] = ph;
@@ -416,7 +414,6 @@ void make_image(Surface* s, SurfaceImage& img, uint32_t pw, uint32_t ph, bool st
     img.mem = image_alloc(uint32_t(size), dkImageLayoutGetAlignment(&img.layout));
     dkImageInitialize(&img.image, &img.layout, img.mem.block, img.mem.offset);
     img.valid = true;
-    if (staging) return;
     DkImageView v;
     dkImageViewDefaults(&v, &img.image);
     v.type = viewType;
@@ -441,41 +438,10 @@ DkImageView transfer_view(SurfaceImage& img, uint32_t level) {
     return v;
 }
 
-// Images with hardware compression (color render targets, WWHD_DK_RT_COMPRESSION) are copied by the 2D engine:
-// in deko3d 0.5.0 only the 3D and 2D engines handle compressed images (gpu_transfer.cpp Blit2DEngine sets the 2D
-// engine's SetCompressionEnable; a compressed image is decompressed by the 3D engine, Queue::decompressSurface,
-// before the display reads it), while BlitCopyEngine (dkCmdBufCopyImage) programs the copy engine with nothing
-// about compression. A feedback copy or GX2CopySurface of a compressed render target read by the copy engine
-// could be compressed tiles taken as texels. WWHD_DK_CE_COMPRESSED=1 copies them with the copy engine again.
-bool copy_engine_for_compressed() {
-    static const bool on = [] {
-        const bool v = env_flag("WWHD_DK_CE_COMPRESSED", false);
-        LOG("[dk] copies from or to compressed render targets: %s (WWHD_DK_CE_COMPRESSED)",
-            v ? "copy engine" : "2D engine (1:1, nearest)");
-        return v;
-    }();
-    return on;
-}
-
-// copy engine: same bytes per texel, no scaling (w, h: pixels of the images; compressed: texels); the 2D engine
-// for compressed render targets (above)
+// copy engine: same bytes per texel, no scaling (w, h: pixels of the images; compressed: texels)
 void copy_image(Surface* src, uint32_t srcLevel, uint32_t srcLayer, Surface* dst, uint32_t dstLevel, uint32_t dstLayer,
                 uint32_t w, uint32_t h, uint32_t layers) {
     DkImageView sv = transfer_view(src->img, srcLevel), dv = transfer_view(dst->img, dstLevel);
-    if ((src->img.hwCompression || dst->img.hwCompression) && !copy_engine_for_compressed()) {
-        if (src->fmt.image == dst->fmt.image && format_can_2d(src->fmt.image) && !src->fmt.compressed &&
-            src->img.type != DkImageType_3D && dst->img.type != DkImageType_3D) {
-            // (dkCmdBufBlitImage adds both rectangles' z: layers of 2D-typed images are always 0)
-            const DkImageRect sr = {0, 0, src->img.type == DkImageType_2D ? 0 : srcLayer, w, h, layers};
-            const DkImageRect dr = {0, 0, dst->img.type == DkImageType_2D ? 0 : dstLayer, w, h, layers};
-            dkCmdBufBlitImage(R.cmd, &sv, &sr, &dv, &dr, DkBlitFlag_FilterNearest, 0);
-            return;
-        }
-        static int logged = 0;
-        if (logged++ < 20)
-            LOG("[dk] copy_image %s -> %s: a compressed render target with no 2D-engine path (formats %d -> %d): "
-                "copy engine", describe(src).c_str(), describe(dst).c_str(), int(src->fmt.image), int(dst->fmt.image));
-    }
     // (dkCmdBufCopyImage takes compressed rectangles in blocks)
     if (src->fmt.compressed) {
         w = (w + 3) / 4;
@@ -612,40 +578,17 @@ void upload_surface(Surface* s) {
     before_write(s);
     // (internal resolution, P3: a scaled render target gets the guest data at the guest size, then
     // resampled; until then every surface has scale 1)
-    // An image with hardware compression (a color render target's first contents, or a CPU copy into one) is
-    // not written by the copy engine (see copy_image): the levels go into an uncompressed image of the same shape,
-    // then the 2D engine copies them over.
-    SurfaceImage plain;
-    const bool via2d = s->img.hwCompression && !copy_engine_for_compressed() && format_can_2d(s->fmt.image) &&
-                       !s->fmt.compressed && s->img.type != DkImageType_3D;
-    if (via2d) {
-        make_image(s, plain, s->img.pw, s->img.ph, true);
-        static int logged = 0;
-        if (logged++ < 10)
-            LOG("[dk] upload into a compressed render target through the 2D engine: %s", describe(s).c_str());
-    }
-    SurfaceImage& into = via2d ? plain : s->img;
     transfer_begin();
     for (uint32_t level = 0; level < levels; ++level) {
         const LevelGeom lg = level_geom(s, level);
         if (!lg.bytes) continue;
         const Staging st = staging_alloc(uint32_t(lg.bytes));
         decode_level(s, level, st.cpu);
-        DkImageView v = transfer_view(into, level);
+        DkImageView v = transfer_view(s->img, level);
         const DkCopyBuf src = {st.gpu, uint32_t(lg.rowBytes), uint32_t(lg.rowBytes * lg.bh)};
         const DkImageRect rect = {0, 0, 0, lg.w, lg.h, lg.slices};
         dkCmdBufCopyBufferToImage(R.cmd, &src, &v, &rect, 0);
         R.perf.uploadBytes += lg.bytes;
-    }
-    if (via2d) {
-        dkCmdBufBarrier(R.cmd, DkBarrier_Full, DkInvalidateFlags_Image);  // the copy engine's writes, then the 2D engine
-        for (uint32_t level = 0; level < levels; ++level) {
-            const LevelGeom lg = level_geom(s, level);
-            DkImageView sv = transfer_view(plain, level), dv = transfer_view(s->img, level);
-            const DkImageRect rect = {0, 0, 0, lg.w, lg.h, lg.slices};
-            dkCmdBufBlitImage(R.cmd, &sv, &rect, &dv, &rect, DkBlitFlag_FilterNearest, 0);
-        }
-        free_image(plain);  // (its memory is reused once the GPU has finished this frame)
     }
     transfer_end();
     s->contentHash = hash;
