@@ -74,7 +74,9 @@ constexpr char kOfflinePath[] = "shadercache_dksh.bin";
 constexpr char kLocalPath[] = "shadercache_dksh_local.bin";
 constexpr uint8_t kGlCacheMagic[4] = {'W', 'G', 'S', '1'};
 constexpr size_t kWorkerStack = 8u << 20;  // Mesa's GLSL parser and nv50_ir recurse deeply (uam_api.h)
-constexpr int kWorkerPriority = 0x3C;      // below the game's threads (59): it takes the time they leave
+// 0x3B (59), the game's own threads' priority: an application's NPDM allows 0x1C-0x3B, and 0x3C (one below
+// them) failed with 0xE001 (invalid priority) on the console, ending both P2 builds at start
+constexpr int kWorkerPriority = 0x3B;
 constexpr int kLoggedFailures = 32;
 
 std::unordered_map<uint64_t, std::unique_ptr<Shader>> shaders;  // translation key -> shader
