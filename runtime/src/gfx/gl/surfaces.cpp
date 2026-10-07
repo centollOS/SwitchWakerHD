@@ -205,16 +205,16 @@ void create_surface_texture(Surface* s) {
                                  std::to_string(s->format) + ")");
 }
 
-// texture uploads through a pixel unpack buffer (the stream buffer): with the Mesa of tools/switch/mesa,
-// whose GL thread queues them (patch 0006); WWHD_GL_PBO_UPLOADS=0 uploads from client memory as before
+// texture uploads through a pixel unpack buffer (the stream buffer), which the GL thread of the Mesa of
+// tools/switch/mesa queues (patch 0006). OFF by default since round 35: a round 34 session crashed on
+// Mesa's GL thread inside such an upload (compressed: st_CompressedTexSubImage maps the whole stream
+// buffer for reading, st_bufferobj_unmap -> free() hit a damaged heap; logs-switch/
+// wwhd_2026-10-07_13-43-15.log). The stream buffer is also persistently mapped and written by the render
+// thread at the same time; the exact mechanism is not known. WWHD_GL_PBO_UPLOADS=1 turns it on.
 bool pbo_uploads() {
     static const bool on = [] {
-#if defined(WWHD_MESA_STATS)
         const char* e = getenv("WWHD_GL_PBO_UPLOADS");
-        const bool v = !(e && *e == '0');
-#else
-        const bool v = getenv("WWHD_GL_PBO_UPLOADS") && *getenv("WWHD_GL_PBO_UPLOADS") == '1';
-#endif
+        const bool v = e && *e == '1';
         LOG("[gl] texture uploads: %s (WWHD_GL_PBO_UPLOADS)", v ? "through the stream buffer (queued)" : "from client memory");
         return v;
     }();
