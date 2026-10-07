@@ -3,10 +3,11 @@
 // overlay; GX2 draws, clears and copies are counted but not executed yet (the game runs behind the
 // pattern). Namespace gfxdk; one render thread (GX2's) records and submits everything.
 //
-// Device conventions [S] (to be confirmed on hardware with the test pattern, plan section 2):
-// DkDeviceFlags_OriginUpperLeft | DkDeviceFlags_DepthZeroToOne, Vulkan's: window row 0 at the top,
-// normalized y = -1 at the top (deko3d 0.5 has no separate y-axis flag; with an upper-left origin its
-// viewport transform is Vulkan's), clip-space z from 0 to 1.
+// Device conventions (plan section 2): DkDeviceFlags_OriginUpperLeft | DkDeviceFlags_DepthZeroToOne: window
+// and image row 0 at the top, clip-space z from 0 to 1, but clip-space y points UP as in OpenGL (deko3d 0.5.0
+// Primer.md; its viewport transform has scaleY = -height/2 with this origin, so normalized y = +1 is row 0;
+// the YAxisPointsDown flag came after 0.5.0). The renderer's vertex shaders take y-down positions (Vulkan's,
+// row 0 at y = -1) and negate y; P2's SET_POSITION does the same. The test pattern shows it.
 #pragma once
 #include <deko3d.h>
 
@@ -27,7 +28,7 @@ namespace gfxdk {
 constexpr uint32_t kFrames = 4;
 constexpr uint32_t kStreamSliceSize = 32u << 20;   // per frame: vertices, indices, uniforms, uploads
 constexpr uint32_t kCmdSliceSize = 4u << 20;       // per frame: command memory
-constexpr uint32_t kCmdChunk = 64u << 10;          // fed to the command buffer as it asks (usage in 64 KB steps)
+constexpr uint32_t kCmdChunk = 64u << 10;          // fed to the command buffer at frame_begin, then as it asks
 constexpr uint32_t kImageChunkSize = 64u << 20;    // image heap chunks
 constexpr uint32_t kCodeSize = 32u << 20;          // shader code (DKSH), bump allocated
 constexpr uint32_t kImageDescriptors = 8192, kSamplerDescriptors = 1024;
@@ -72,7 +73,6 @@ struct Renderer {
     uint64_t frame = 0;      // frames presented (GX2 swaps)
     std::atomic<uint64_t> completed{0};
     std::atomic<bool> tvSrgb{false};
-    bool queueError = false;
     // GX2 commands this phase does not execute (counted for the stats)
     struct Counts {
         uint64_t draws = 0, clears = 0, copies = 0, scans = 0, invalidates = 0, flushes = 0, waits = 0;

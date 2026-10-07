@@ -16,7 +16,6 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -47,6 +46,11 @@ Renderer R;
 
 namespace {
 constexpr uint32_t kWidth = 1280, kHeight = 720, kSwapImages = 3;
+#ifdef WWHD_DEKO3D_DEBUG_LIB
+constexpr bool kDebugLib = true;  // linked against libdeko3dd (CMakeLists.txt)
+#else
+constexpr bool kDebugLib = false;
+#endif
 
 DkSwapchain g_swapchain = nullptr;
 DkImage g_swapImages[kSwapImages];
@@ -55,11 +59,28 @@ DkShader g_shaders[kShaderCount];
 bool g_shaderOk[kShaderCount] = {};
 std::atomic<int> g_debugMessages{0};
 
-// deko3d's error and debug messages (libdeko3dd adds checks of every call)
+// deko3d's messages. Only the debug library (libdeko3dd, WWHD_DEKO3D_DEBUG_LIB) calls this: its checks of
+// every call, warnings (result DkResult_Success) and errors, after which it traps. The release library calls
+// nothing on an error: it aborts with result 2359-xxxx (diagAbortWithResult), the log writer thread's last
+// lines lost; hence the log_flush() before each creation and the queue checks in present().
 void debug_message(void*, const char* context, DkResult result, const char* message) {
+    if (result != DkResult_Success)  // a trap follows: the error ends the process here, readably
+        fatal("[dk] deko3d error in %s: result %d: %s (frame %llu)", context ? context : "?", int(result),
+              message ? message : "", (unsigned long long)R.frame + 1);
     const int n = g_debugMessages.fetch_add(1);
-    if (n < 200) LOG("[dk] deko3d %s: result %d: %s", context ? context : "?", int(result), message ? message : "");
+    if (n < 200) LOG("[dk] deko3d %s: %s", context ? context : "?", message ? message : "");
     else if (n == 200) LOG("[dk] deko3d: more messages, not logged");
+}
+
+// deko3d aborts on any call that touches a queue in an error state (a GPU fault: submit, acquire, present,
+// flush): checked before each, the error ends the process with the frame and the counts in the log
+void check_queue(const char* before, uint64_t frame) {
+    if (!dkQueueIsInErrorState(R.queue)) return;
+    const Renderer::Counts& c = R.counts;
+    fatal("[dk] the deko3d queue is in an error state (a GPU fault) before %s of frame %llu; deko3d messages %d; "
+          "GX2 so far: %llu draws, %llu clears, %llu surface copies, %llu scan copies (not executed in P1)",
+          before, (unsigned long long)frame, g_debugMessages.load(), (unsigned long long)c.draws,
+          (unsigned long long)c.clears, (unsigned long long)c.copies, (unsigned long long)c.scans);
 }
 
 void load_shaders() {
@@ -111,8 +132,9 @@ void init_swapchain() {
                "test pattern depth buffer (Z24S8)");
     DkSwapchainMaker m;
     dkSwapchainMakerDefaults(&m, R.device, nwindowGetDefault(), images, kSwapImages);
+    LOG("[dk] creating the swapchain on the default window");
+    log_flush();  // a failed creation aborts (debug_message)
     g_swapchain = dkSwapchainCreate(&m);
-    if (!g_swapchain) throw std::runtime_error("deko3d: no swapchain on the default window");
     dkSwapchainSetSwapInterval(g_swapchain, 1);
     u32 nw = 0, nh = 0;
     nwindowGetDimensions(nwindowGetDefault(), &nw, &nh);
@@ -223,8 +245,8 @@ void draw_text(int left, int top, int scale, const std::vector<std::string>& lin
     dkCmdBufDraw(R.cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
 }
 
-// ---- the orientation / depth test pattern. Positions in normalized device coordinates; with the
-// assumed conventions (dk.h) y = -1 is the top of the screen and clip-space z runs from 0 to 1.
+// ---- the orientation / depth test pattern. Positions in normalized device coordinates with y down (y = -1
+// is the top of the screen; pattern_vsh negates y, dk.h) and clip-space z from 0 to 1.
 struct PatternVertex {
     float x, y, z;
     float r, g, b, a;
@@ -289,7 +311,7 @@ void draw_pattern(uint64_t frame) {
     static const float fg[4] = {1, 1, 1, 1}, bg[4] = {0, 0, 0, 0.55f};
     draw_text(330, 36, 3,
               {"DEKO3D P1 TEST PATTERN", status, "", "THIS TEXT UPRIGHT: WINDOW ORIGIN TOP LEFT",
-               "RED BOX TOP LEFT, GREEN BOTTOM RIGHT: Y DOWN", "CYAN IN FRONT OF MAGENTA: DEPTH TEST",
+               "RED BOX TOP LEFT, GREEN BOTTOM RIGHT: Y NEGATED", "CYAN IN FRONT OF MAGENTA: DEPTH TEST",
                "GRAY SQUARE EMPTY (NO ORANGE): DEPTH 0 TO 1", "BAR: BLACK LEFT TO WHITE RIGHT",
                "BACKGROUND: BLUE TOP, DARK BOTTOM", "HOLD MINUS: SETTINGS"},
               fg, bg);
@@ -400,7 +422,7 @@ std::string clock_report() {
     return b;
 }
 
-// ---- captures (both sticks clicked, or the queue entering an error state): the next frame's present
+// ---- captures (both sticks clicked): the next frame's present
 // pass is logged step by step
 std::atomic<bool> g_captureRequested{false};
 uint64_t g_captureFrame = ~0ull;
@@ -446,7 +468,7 @@ void frame_stats() {
         "ms/s (frame fence %.0f, swapchain image %.0f, submit %.0f); GPU behind at %.0f%% of presents; command memory "
         "per frame %.0f KiB (max %llu KiB, %llu frames over the %u MiB slice); stream %.1f KiB/frame (%llu full); "
         "heap never used %zu MiB; image heap %llu KiB in %llu chunks, shader code %llu KiB; files %llu (%.0f ms), audio "
-        "gaps %.0f ms; deko3d messages %d; queue %s",
+        "gaps %.0f ms; deko3d messages %d",
         double(frames) / secs, perFrame(c.draws - last.draws), perFrame(c.clears - last.clears),
         perFrame(c.copies - last.copies), perFrame(c.scans - last.scans), perFrame(c.invalidates - last.invalidates),
         perFrame(c.flushes - last.flushes), perFrame(c.waits - last.waits), busy, cpuMs, ms(g_times.presentNs),
@@ -456,8 +478,7 @@ void frame_stats() {
         m.frames ? double(m.streamBytesSum) / 1024.0 / double(m.frames) : 0.0, (unsigned long long)m.streamFull,
         heap_never_used_mib(), (unsigned long long)(m.imageBytes >> 10), (unsigned long long)m.imageChunks,
         (unsigned long long)(m.codeBytes >> 10), (unsigned long long)(fsCalls - lastFsCalls), double(fsNs - lastFsNs) / 1e6,
-        double(underrun - lastUnderrun) * 1000.0 / audio::kRate, g_debugMessages.load(),
-        R.queueError ? "IN AN ERROR STATE" : "ok");
+        double(underrun - lastUnderrun) * 1000.0 / audio::kRate, g_debugMessages.load());
     if (std::string clocks = clock_report(); !clocks.empty()) LOG("[dk] clocks: %s", clocks.c_str());
     overlayStats.renderBusy = busy;
     overlayStats.gpuBusyPct = behindPct;
@@ -477,6 +498,7 @@ void present() {
     const uint64_t frame = R.frame + 1;
     const bool capture = capturing();
     const uint64_t t0 = now_ns();
+    check_queue("the frame fence", frame);
     g_times.presents++;
     g_times.behind += !frame_done(R.frame);  // the previous frame's commands are still running
     frame_begin(frame);
@@ -484,6 +506,7 @@ void present() {
     int slot;
     {
         Stage stage("deko3d: acquiring a swapchain image");
+        check_queue("acquiring a swapchain image", frame);
         slot = dkQueueAcquireImage(R.queue, g_swapchain);
     }
     const uint64_t t2 = now_ns();
@@ -521,20 +544,16 @@ void present() {
     if (ImDrawData* ui = overlay::frame(float(kWidth), float(kHeight), overlay_renderer_init)) overlay_draw(ui, kWidth, kHeight);
     frame_end();
     const uint64_t t3 = now_ns();
+    check_queue("the submit", frame);
     dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(R.cmd));
     {
         Stage stage("deko3d: present");
+        check_queue("the present", frame);
         dkQueuePresentImage(R.queue, g_swapchain, slot);
     }
     const uint64_t t4 = now_ns();
     if (capture) LOG("[dk] capture frame %llu: recorded in %.2f ms, submitted and presented in %.2f ms", (unsigned long long)frame,
                      double(t3 - t2) / 1e6, double(t4 - t3) / 1e6);
-    if (!R.queueError && dkQueueIsInErrorState(R.queue)) {
-        R.queueError = true;
-        LOG("[dk] ERROR: the deko3d queue is in an error state after frame %llu (deko3d messages so far: %d); "
-            "capturing the next frame", (unsigned long long)frame, g_debugMessages.load());
-        g_captureRequested = true;
-    }
     g_times.fenceNs += t1 - t0;
     g_times.acquireNs += t2 - t1;
     g_times.submitNs += t4 - t3;
@@ -561,19 +580,21 @@ void init() {
     DkDeviceMaker dm;
     dkDeviceMakerDefaults(&dm);
     dm.cbDebug = debug_message;
-    // Vulkan's conventions [S] (dk.h): the test pattern shows whether they hold
+    // window origin top left, depth 0 to 1; clip-space y up (dk.h): the test pattern shows them
     dm.flags = DkDeviceFlags_OriginUpperLeft | DkDeviceFlags_DepthZeroToOne;
+    LOG("[dk] creating the device (deko3d %s library)", kDebugLib ? "debug" : "release");
+    log_flush();  // deko3d aborts when a creation fails, without returning (debug_message)
     R.device = dkDeviceCreate(&dm);
-    if (!R.device) throw std::runtime_error("deko3d: no device");
-    LOG("[dk] device created: flags 0x%X (origin upper left, depth 0 to 1; assumed y down, to be confirmed with the "
-        "test pattern)", dm.flags);
+    LOG("[dk] device created: flags 0x%X (origin upper left, depth 0 to 1, clip-space y up: the renderer's shaders "
+        "negate y)", dm.flags);
     DkQueueMaker qm;
     dkQueueMakerDefaults(&qm, R.device);
     qm.flags = DkQueueFlags_Graphics | DkQueueFlags_MediumPrio | DkQueueFlags_EnableZcull;
     qm.commandMemorySize = 1u << 20;
     qm.flushThreshold = qm.commandMemorySize / 8;
+    LOG("[dk] creating the queue");
+    log_flush();
     R.queue = dkQueueCreate(&qm);
-    if (!R.queue) throw std::runtime_error("deko3d: no queue");
     LOG("[dk] queue created: graphics, command memory %u KiB", qm.commandMemorySize >> 10);
     memory_init();
     load_shaders();

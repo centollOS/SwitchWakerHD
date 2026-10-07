@@ -359,8 +359,16 @@ if(WWHD_HAS_DEKO3D)
     list(APPEND _dksh dksh_${_name})
   endforeach()
   dkp_add_embedded_binary_library(deko_shaders ${_dksh})
-  # libdeko3dd: deko3d's checks and debug messages (Debug builds)
-  target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} $<IF:$<CONFIG:Debug>,deko3dd,deko3d>)
+  # libdeko3dd: deko3d's checks of every call and its messages (gfx/deko/backend.cpp debug_message: a misuse
+  # or failure is logged before the process ends). Release libdeko3d aborts with only a 2359-xxxx result.
+  # On while the backend is new (also in Release builds); off for performance measurements.
+  option(WWHD_DEKO3D_DEBUG_LIB "deko3d: link the debug library libdeko3dd (also in Release builds)" ON)
+  if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(wwhd PRIVATE WWHD_DEKO3D_DEBUG_LIB=1)
+    target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3dd)
+  else()
+    target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3d)
+  endif()
   # as the OpenGL build: threads created without attributes get a large stack, newlib's C11 thrd_create
   # results are fixed (core.cpp), and abort() logs its caller first (main.cpp)
   target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create -Wl,--wrap=abort)

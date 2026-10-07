@@ -47,7 +47,8 @@ OPENGL)
 DEKO3D)
     dir=build/switch-dk
     out=wwhd_dk.nro
-    options="-DWWHD_RENDERER=DEKO3D"
+    # deko3d's debug library (checks and readable errors) unless WWHD_DEKO3D_DEBUG_LIB=OFF
+    options="-DWWHD_RENDERER=DEKO3D -DWWHD_DEKO3D_DEBUG_LIB=${WWHD_DEKO3D_DEBUG_LIB:-ON}"
     ;;
 *)
     echo "WWHD_RENDERER must be OPENGL or DEKO3D" >&2

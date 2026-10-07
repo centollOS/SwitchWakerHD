@@ -116,7 +116,8 @@ void overlay_draw(ImDrawData* d, int ww, int wh) {
         vOff += size_t(l->VtxBuffer.Size) * sizeof(ImDrawVert);
         iOff += size_t(l->IdxBuffer.Size) * sizeof(ImDrawIdx);
     }
-    // ImGui's pixels to normalized coordinates; y grows downwards in both (dk.h)
+    // ImGui's pixels to normalized coordinates with y down; imgui_vsh negates y (deko3d's clip-space y is up, dk.h).
+    // The scissor rects stay in window coordinates from the top left (the device origin).
     const float xform[4] = {2.0f / d->DisplaySize.x, 2.0f / d->DisplaySize.y, -1.0f - d->DisplayPos.x * 2.0f / d->DisplaySize.x,
                             -1.0f - d->DisplayPos.y * 2.0f / d->DisplaySize.y};
     memcpy(ubo.cpu, xform, sizeof xform);

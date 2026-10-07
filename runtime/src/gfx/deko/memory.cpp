@@ -13,14 +13,16 @@
 namespace gfxdk {
 namespace {
 
+// deko3d aborts the process when a creation fails (release library: diagAbortWithResult, 2359-xxxx; the debug
+// one: debug_message, then a trap) and never returns null: the line before names what was being created
 DkMemBlock make_block(uint32_t size, uint32_t flags, const char* what) {
+    LOG("[dk] creating a memory block: %s, %u KiB (flags 0x%X)", what, size >> 10, flags);
+    log_flush();
     DkMemBlockMaker m;
     dkMemBlockMakerDefaults(&m, R.device, size);
     m.flags = flags;
     DkMemBlock b = dkMemBlockCreate(&m);
-    if (!b) fatal("[dk] cannot create the %s memory block (%u MiB)", what, size >> 20);
-    LOG("[dk] memory block: %s, %u KiB (flags 0x%X), GPU address 0x%llX", what, size >> 10, flags,
-        (unsigned long long)dkMemBlockGetGpuAddr(b));
+    LOG("[dk] memory block: %s at GPU address 0x%llX", what, (unsigned long long)dkMemBlockGetGpuAddr(b));
     return b;
 }
 
@@ -32,7 +34,10 @@ struct Slot {
     bool fenced = false;          // the fence was signalled once (an unused DkFence is not waited for)
     uint32_t streamUsed = 0;
     uint32_t cmdUsed = 0;         // command memory fed from the slice
-    std::vector<DkMemBlock> cmdOverflow;  // blocks created when the slice ran out (freed with the slot)
+    // blocks created when the slice ran out; the slot keeps them and feeds them again the next time it
+    // runs out (only after its fence, like the slice)
+    std::vector<std::pair<DkMemBlock, uint32_t>> cmdOverflow;  // block, size
+    size_t cmdOverflowUsed = 0;
     std::vector<ImageAlloc> retired;      // image memory freed while the slot's frame was recorded
 };
 Slot g_slots[kFrames];
@@ -45,7 +50,8 @@ uint32_t g_codeUsed = 0;
 uint64_t g_cmdFedThisFrame = 0;
 MemoryStats g_stats;
 
-// the command buffer asks for memory: the next 64 KB of this frame's slice, then blocks of its own
+// the command buffer asks for memory during a frame (frame_begin feeds the first 64 KB): the next 64 KB of
+// this frame's slice, then the slot's overflow blocks
 void add_cmd_memory(void*, DkCmdBuf cmd, size_t minReqSize) {
     Slot& s = g_slots[g_slot];
     const uint32_t want = align_up(uint32_t(std::max<size_t>(minReqSize, kCmdChunk)), DK_MEMBLOCK_ALIGNMENT);
@@ -55,20 +61,26 @@ void add_cmd_memory(void*, DkCmdBuf cmd, size_t minReqSize) {
         g_cmdFedThisFrame += want;
         return;
     }
+    if (s.cmdOverflowUsed == 0) g_stats.cmdOverflows++;  // the frame's first overflow
+    while (s.cmdOverflowUsed < s.cmdOverflow.size()) {
+        auto [block, size] = s.cmdOverflow[s.cmdOverflowUsed++];
+        if (size < want) continue;
+        dkCmdBufAddMemory(cmd, block, 0, size);
+        g_cmdFedThisFrame += size;
+        return;
+    }
     const uint32_t size = std::max<uint32_t>(want, 1u << 20);
-    static int logged = 0;
-    if (logged++ < 20)
-        LOG("[dk] command memory: frame %llu needs more than its %u MiB slice; a %u KiB block is added",
-            (unsigned long long)R.frame + 1, kCmdSliceSize >> 20, size >> 10);
+    LOG("[dk] command memory: frame %llu needs more than its %u MiB slice; creating a %u KiB block for slot %u",
+        (unsigned long long)R.frame + 1, kCmdSliceSize >> 20, size >> 10, g_slot);
+    log_flush();  // a failed creation aborts (make_block)
     DkMemBlockMaker m;
     dkMemBlockMakerDefaults(&m, R.device, size);
     m.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
     DkMemBlock b = dkMemBlockCreate(&m);
-    if (!b) fatal("[dk] out of memory for command memory (%u KiB)", size >> 10);
-    s.cmdOverflow.push_back(b);
+    s.cmdOverflow.push_back({b, size});
+    s.cmdOverflowUsed = s.cmdOverflow.size();
     dkCmdBufAddMemory(cmd, b, 0, size);
     g_cmdFedThisFrame += size;
-    g_stats.cmdOverflows++;
 }
 
 // ---- image heap
@@ -107,8 +119,9 @@ void memory_init() {
     DkCmdBufMaker cm;
     dkCmdBufMakerDefaults(&cm, R.device);
     cm.cbAddMem = add_cmd_memory;
+    LOG("[dk] creating the command buffer");
+    log_flush();
     R.cmd = dkCmdBufCreate(&cm);
-    if (!R.cmd) fatal("[dk] cannot create a command buffer");
     g_cmdMem = make_block(kFrames * kCmdSliceSize, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached,
                           "command memory ring (4 frames)");
     g_stream = make_block(kFrames * kStreamSliceSize, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached,
@@ -141,16 +154,18 @@ void frame_begin(uint64_t frame) {
             }
         }
     }
-    for (DkMemBlock b : s.cmdOverflow) dkMemBlockDestroy(b);
-    s.cmdOverflow.clear();
     for (const ImageAlloc& a : s.retired)
         if (a.chunk >= 0) chunk_free(g_chunks[size_t(a.chunk)], a.offset, a.size);
     s.retired.clear();
     s.streamUsed = 0;
-    s.cmdUsed = 0;
-    g_cmdFedThisFrame = 0;
-    // a cleared command buffer has no memory: the first command asks for some (add_cmd_memory)
+    // dkCmdBufClear rewinds to the start of the memory fed last (deko3d 0.5.0 CmdBuf::clear keeps it), which
+    // belongs to the previous frame: feed this slot's first chunk explicitly (as deko_examples' CCmdMemRing);
+    // the command buffer then no longer points into another slot's memory or an overflow block
     dkCmdBufClear(R.cmd);
+    dkCmdBufAddMemory(R.cmd, g_cmdMem, g_slot * kCmdSliceSize, kCmdChunk);
+    s.cmdUsed = kCmdChunk;
+    s.cmdOverflowUsed = 0;
+    g_cmdFedThisFrame = kCmdChunk;
     g_inFrame = true;
 }
 
