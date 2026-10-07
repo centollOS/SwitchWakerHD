@@ -302,7 +302,7 @@ Ahorro esperado frente a GL: ~320 MiB de programas Mesa y gran parte de los ~140
   muestra `window WxH, N resizes`. Interruptores: `WWHD_DK_DOCKED_1080=0` (1280×720 siempre, el camino anterior: el
   sistema escala a la TV), `WWHD_DK_WINDOW=WxH` (fuerza un tamaño hasta 1920×1080 en ambos modos, para A/B en
   handheld). Coste esperado docked: el pase de present escribe 2,07 MP en vez de 0,92 MP (~+0,1-0,2 ms de GPU por
-  frame, visible en el pase `present` de los timestamps) y +~16 MiB de imágenes (3 RGBA8 + Z24S8 de 1080p); en
+  frame, visible en el pase `present` de los timestamps) y +~18 MiB de imágenes (3 RGBA8 + Z24S8 de 1080p); en
   handheld nada cambia. CPU: una lectura atómica por present.
 - Present = port de `present_program()` (sRGB + ajustes de imagen). Shaders internos (present, FPS, ImGui)
   compilados offline con el `uam` de devkitPro y embebidos.
