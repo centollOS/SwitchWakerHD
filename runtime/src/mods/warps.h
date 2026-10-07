@@ -31,7 +31,6 @@ inline constexpr Warp kMainWarps[] = {
     {"M_Dai", 0, 0, "Earth Temple (Templo de la Tierra)"},
     {"sea", 4, 0, "Gale Isle (Isla del Vendaval)"},
     {"kaze", 15, 15, "Wind Temple (Templo del Viento)"},
-    {"GanonK", 0, 0, "Ganon's Tower (Torre de Ganon)"},
 };
 
 inline constexpr Warp kAllWarps[] = {
@@ -75,7 +74,6 @@ inline constexpr Warp kAllWarps[] = {
     {"GanonD", 0, 0, nullptr},
     {"GanonE", 0, 0, nullptr},
     {"GanonJ", 1, 0, nullptr},
-    {"GanonK", 0, 0, nullptr},
     {"GanonL", 0, 0, nullptr},
     {"GanonM", 0, 0, nullptr},
     {"GanonN", 0, 0, nullptr},
