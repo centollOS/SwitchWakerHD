@@ -13,15 +13,25 @@
 // Test switch: WWHD_CHEAT=items,sword,stats,songs,triforce,dungeon,key applies those once a save
 // file is loaded; WWHD_CHEAT_INFINITE=health,magic,ammo switches those on.
 // WWHD_CHEAT_SAVE_ADDR=hex overrides the address (another game version).
+//
+// Test switch: WWHD_WARP_TOUR=all|main[,dwell_seconds[,start_index]] warps through the destinations
+// of mods/warps.h one after another once a file is loaded ("all": kMainWarps then kAllWarps), stays
+// dwell_seconds of game time (default 6) in each, logs "[tour] ..." and quits at the end, or with
+// status 3 when a destination is not reached within 45 s of game time (restart from the next one). It harvests
+// the GL shader cache on the desktop (docs/switch-port.md, "Harvesting the shader cache").
 #include <atomic>
+#include <chrono>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "mods.h"
 #include "runtime.h"
+#include "warps.h"
 
 namespace mods {
 namespace {
@@ -163,6 +173,85 @@ void request_warp(const char* name, int room, int point) {
 }
 bool warp_pending() { return g_warpPending.load(std::memory_order_relaxed); }
 
+namespace {
+// WWHD_WARP_TOUR (see the top of the file); game main thread, from cheats_service with a file loaded
+struct Tour {
+    std::vector<Warp> list;
+    double dwell = 6.0;
+    size_t index = 0;
+    enum { kSettle, kRequested, kDwell } state = kSettle;
+    double since = 0;
+    size_t arrived = 0;
+};
+Tour* tour() {
+    static Tour* t = [] () -> Tour* {
+        const char* e = getenv("WWHD_WARP_TOUR");
+        if (!e || !*e) return nullptr;
+        auto* t = new Tour;
+        t->list.assign(std::begin(kMainWarps), std::end(kMainWarps));
+        if (strncmp(e, "main", 4) != 0) t->list.insert(t->list.end(), std::begin(kAllWarps), std::end(kAllWarps));
+        if (const char* c = strchr(e, ',')) {
+            t->dwell = atof(c + 1);
+            if (const char* c2 = strchr(c + 1, ',')) t->index = strtoul(c2 + 1, nullptr, 10);
+        }
+        LOG("[tour] %zu destinations from %zu, %.1f s each", t->list.size(), t->index, t->dwell);
+        return t;
+    }();
+    return t;
+}
+constexpr uint32_t kOverlapRequest = 0x101F36CC;  // as turbo.cpp's kOverlap: a scene change's fade is running
+
+void tour_service() {
+    Tour* t = tour();
+    if (!t) return;
+    const double now = game_time();
+    auto next = [&] {
+        t->index++;
+        if (t->index >= t->list.size()) {
+            LOG("[tour] done: %zu arrived", t->arrived);
+            fflush(stderr);
+            std::this_thread::sleep_for(std::chrono::seconds(3));  // the shader cache writer's last batch
+            std::_Exit(0);
+        }
+        t->state = Tour::kSettle;
+        t->since = now;
+    };
+    switch (t->state) {
+    case Tour::kSettle:
+        if (t->since == 0) t->since = now;
+        if (now - t->since < 2.0) return;
+        {
+            const Warp& w = t->list[t->index];
+            LOG("[tour] %zu/%zu: %s room %d point %d", t->index, t->list.size(), w.stage, w.room, w.point);
+            request_warp(w.stage, w.room, w.point);
+        }
+        t->state = Tour::kRequested;
+        t->since = now;
+        return;
+    case Tour::kRequested: {
+        const Warp& w = t->list[t->index];
+        if (!g_warpPending && !ld8(kNextStage + 12) && !ld32(kOverlapRequest) && stage() == w.stage) {
+            LOG("[tour] %zu: arrived in %s after %.1f s", t->index, w.stage, now - t->since);
+            t->arrived++;
+            t->state = Tour::kDwell;
+            t->since = now;
+        } else if (now - t->since > 45.0) {
+            // (the game is then often stuck in that scene change, and later warps would wait for it):
+            // quit, so that a driver restarts the tour from the next destination
+            LOG("[tour] %zu: %s not reached after 45 s (stage %s): quitting", t->index, w.stage, stage().c_str());
+            fflush(stderr);
+            std::this_thread::sleep_for(std::chrono::seconds(3));  // the shader cache writer's last batch
+            std::_Exit(3);
+        }
+        return;
+    }
+    case Tour::kDwell:
+        if (now - t->since >= t->dwell) next();
+        return;
+    }
+}
+}  // namespace
+
 void request_cheat(int which) { g_pending |= which; }
 bool infinite(int which) { return g_infinite.load(std::memory_order_relaxed) & which; }
 void set_infinite(int which, bool on) {
@@ -174,10 +263,12 @@ void set_infinite(int which, bool on) {
 void cheats_service() {
     int inf = g_infinite.load(std::memory_order_relaxed);
     const bool warp = g_warpPending.load(std::memory_order_relaxed);
-    if (!g_pending.load(std::memory_order_relaxed) && !inf && !warp) return;
+    static const bool touring = getenv("WWHD_WARP_TOUR") != nullptr;
+    if (!g_pending.load(std::memory_order_relaxed) && !inf && !warp && !touring) return;
     uint32_t s = save_addr();
     if (!save_loaded(s)) return;  // stays pending until a file is loaded
     if (warp) warp_service();
+    if (touring) tour_service();
     // ponytail: topped up once per frame, so a single hit bigger than your whole health still kills
     if (inf & kInfHealth) st16(s + kLife, ld16(s + kMaxLife));
     if (inf & kInfMagic) st8(s + kMagic, ld8(s + kMaxMagic));

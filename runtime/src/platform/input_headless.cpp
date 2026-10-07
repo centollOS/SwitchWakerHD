@@ -34,6 +34,9 @@ bool pro_controller() { return g_pro; }
 void set_pro_controller(bool on) { g_pro = on; }
 void release_keys() {}
 void controller_values(float* v) { memset(v, 0, sizeof(float) * input_map::kPadCount); }
+void host_controller_values(float* v) { controller_values(v); }
+bool has_rumble() { return false; }
+void stop_rumble_now() {}
 void held_keys(bool* keys) { memset(keys, 0, 256); }
 void prompt_text(const std::u16string& initial, int, std::function<void(bool ok, std::u16string text)> done) {
     done(true, initial);
