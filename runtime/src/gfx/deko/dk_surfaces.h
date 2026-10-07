@@ -73,6 +73,9 @@ void image_descriptor_free_later(uint32_t id);
 // the two flags; compare: a depth-compare sampler; integer: an integer texture (nearest filtering only).
 // When the cache is full the least recently used slot that no in-flight frame uses is rewritten.
 uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer);
+// 16x anisotropic filtering (WWHD_ANISO, the overlay's Effects): any thread; samplers follow from the next frame
+bool aniso_enabled();
+void set_aniso(bool on);
 // the barrier that makes this frame's descriptor writes visible (nothing when none since the last one)
 void commit_descriptors();
 // the image descriptor of a 1x1 transparent black texture (shaders sampling a unit that has no surface)

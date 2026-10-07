@@ -1016,11 +1016,11 @@ const Backend& deko3d_backend() {
         b.set_ao_mode = [](int) {};
         b.ao_hires = [] { return false; };
         b.set_ao_hires = [](bool) {};
-        b.aniso = [] { return false; };
-        b.set_aniso = [](bool) {};
+        b.aniso = gfxdk::aniso_enabled;
+        b.set_aniso = gfxdk::set_aniso;
         b.fxaa = [] { return false; };
         b.set_fxaa = [](bool) {};
-        b.feature_available = [](int) { return false; };
+        b.feature_available = [](int f) { return f == render::kFeatureAniso; };
         return b;
     }();
     return b;
