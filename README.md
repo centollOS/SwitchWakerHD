@@ -396,14 +396,16 @@ startup that `game/code/cking.rpx` matches the recompiled code.
 
 ### Switch (homebrew, experimental; see docs/switch-port.md)
 
-An OpenGL renderer on the Switch's Mesa (nouveau) driver, built as an `.nro` for hbmenu. After steps
-1 and 2 above (on a PC; needs podman or docker):
+A deko3d renderer (the Switch's own GPU API; an OpenGL fallback on Mesa nouveau is built with
+`WWHD_RENDERER=OPENGL` as `wwhd_gl.nro`), built as an `.nro` for hbmenu. After steps 1 and 2 above
+(on a PC; needs podman or docker):
 
 ```sh
-tools/switch/build.sh          # devkitpro/devkita64 container -> build/switch/wwhd.nro
+tools/switch/build.sh          # devkitpro/devkita64 container -> build/switch-dk/wwhd.nro
 ```
 
-On the SD card: `/switch/wwhd/wwhd.nro` and the extracted game as `/switch/wwhd/game/` (`code/`,
+On the SD card: `/switch/wwhd/wwhd.nro`, `/switch/wwhd/shadercache_dksh.bin` (the compiled shaders,
+made by `tools/switch/dksh_cache`, docs/deko3d-plan.md) and the extracted game as `/switch/wwhd/game/` (`code/`,
 `content/`, `meta/`). Start hbmenu with full RAM (hold R while launching a game), not from the album.
 Saves go to `/switch/wwhd/save/`, the log to `/switch/wwhd/wwhd.log` (startup, crashes, shader
 errors; failing shaders are written as `shaderfail_*.glsl`). Controllers act as a Wii U Pro

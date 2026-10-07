@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Build the Switch homebrew in the devkitPro devkitA64 container.
-#   tools/switch/build.sh                        OpenGL renderer: build/switch/wwhd.nro (the default)
-#   WWHD_RENDERER=DEKO3D tools/switch/build.sh   deko3d renderer (docs/deko3d-plan.md, work in progress):
-#                                                build/switch-dk/wwhd_dk.nro
+#   tools/switch/build.sh                        deko3d renderer (the default): build/switch-dk/wwhd.nro
+#                                                (WWHD_DEKO3D_DEBUG_LIB=ON: deko3d's debug library,
+#                                                build/switch-dk/wwhd_dk_debug.nro)
+#   WWHD_RENDERER=OPENGL tools/switch/build.sh   OpenGL fallback: build/switch/wwhd_gl.nro
+# The console also needs sdmc:/switch/wwhd/shadercache_dksh.bin (tools/switch/dksh_cache, docs/deko3d-plan.md).
 # Needs podman or docker, and build/gen from tools/recomp/recomp.py (generated from your own game dump).
 # Mesa (OpenGL only): build/switch-mesa/prefix (tools/switch/mesa/build_mesa.sh: Mesa with the persistent
 # shader cache) when it exists, else devkitPro's switch-mesa package; WWHD_STOCK_MESA=1 forces the package.
@@ -22,8 +24,9 @@ if [[ -z "$engine" ]]; then
 fi
 image=docker.io/devkitpro/devkita64:latest
 # each generated file needs a lot of compiler memory at -O3: WWHD_JOBS limits parallel compiles
-jobs=${WWHD_JOBS:-$(( $(nproc) / 2 > 0 ? $(nproc) / 2 : 1 ))}
-renderer=$(echo "${WWHD_RENDERER:-OPENGL}" | tr '[:lower:]' '[:upper:]')
+cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)  # (macOS has no nproc)
+jobs=${WWHD_JOBS:-$(( cpus / 2 > 0 ? cpus / 2 : 1 ))}
+renderer=$(echo "${WWHD_RENDERER:-DEKO3D}" | tr '[:lower:]' '[:upper:]')
 mounts=(-v "$PWD":/src:Z)
 for link in build/gen build/switch-mesa; do
     if [[ -L $link ]]; then
@@ -34,7 +37,7 @@ done
 case "$renderer" in
 OPENGL)
     dir=build/switch
-    out=wwhd.nro
+    out=wwhd_gl.nro
     mesa=""
     if [[ ${WWHD_STOCK_MESA:-0} != 1 && -f build/switch-mesa/prefix/lib/libEGL.a ]]; then
         mesa=/src/build/switch-mesa/prefix
@@ -46,9 +49,11 @@ OPENGL)
     ;;
 DEKO3D)
     dir=build/switch-dk
-    out=wwhd_dk.nro
-    # deko3d's debug library (checks and readable errors) unless WWHD_DEKO3D_DEBUG_LIB=OFF
-    options="-DWWHD_RENDERER=DEKO3D -DWWHD_DEKO3D_DEBUG_LIB=${WWHD_DEKO3D_DEBUG_LIB:-ON}"
+    # deko3d's release library unless WWHD_DEKO3D_DEBUG_LIB=ON (checks every call, readable errors)
+    debuglib=${WWHD_DEKO3D_DEBUG_LIB:-OFF}
+    out=wwhd.nro
+    [[ $debuglib == ON ]] && out=wwhd_dk_debug.nro
+    options="-DWWHD_RENDERER=DEKO3D -DWWHD_DEKO3D_DEBUG_LIB=$debuglib"
     ;;
 *)
     echo "WWHD_RENDERER must be OPENGL or DEKO3D" >&2

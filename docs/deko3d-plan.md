@@ -2,9 +2,18 @@
 
 Plan redactado el 2026-10-07 por un agente de planificación (Fable) a partir del código (`dev` 30fd148,
 round 36), del prototipo de uam (`~/Documents/uam-proto`) y de los logs de hardware. **[V]** = verificado en
-código o logs; **[S]** = supuesto a confirmar. Estado: P0 y P1 hechos y confirmados en hardware; P2 probado en hardware (llega a Outset); P3 parte A (capturas, contador FPS, texturas, features) integrada, pendiente de prueba en hardware; P3 en hardware con rendimiento igual o algo mejor que GL; P4 (cuatro carriles) integrado, compilado y SIN probar en hardware; ver Estado.
+código o logs; **[S]** = supuesto a confirmar. Estado: **P5 hecho, deko3d por defecto**; P0 y P1 hechos y confirmados en hardware; P2 probado en hardware (llega a Outset); P3 parte A (capturas, contador FPS, texturas, features) integrada, pendiente de prueba en hardware; P3 en hardware con rendimiento igual o algo mejor que GL; P4 (cuatro carriles) integrado, compilado y SIN probar en hardware; ver Estado.
 
 ## Estado (2026-10-07, rama `deko3d`)
+
+**P5 hecho (2026-10-07): deko3d es el renderer por defecto en Switch.** `tools/switch/build.sh` →
+`build/switch-dk/wwhd.nro` (hbmenu: "SwitchWakerHD", librería release; `WWHD_DEKO3D_DEBUG_LIB=ON` →
+`wwhd_dk_debug.nro`, "SwitchWakerHD (deko3d debug)"). GL queda como respaldo: `WWHD_RENDERER=OPENGL` →
+`build/switch/wwhd_gl.nro` ("SwitchWakerHD (OpenGL)"), en su propia carpeta de la SD. Confirmado por el dueño antes
+del cambio: sin motas (parche 7 de uam), texturas y contador bien, mismo recorrido a 1020/460 con mediana 29,9 fps
+(GL 28,1-29,4), caché de 7680 shaders cargada en 0,29 s. Pendiente: dock 1080p en hardware y el objetivo de
+≤4,7 µs por draw en el hilo de render (hoy 5,6-7,2).
+
 
 **fix-grass2 (2026-10-07; compilado, SIN probar en hardware): NRO de bisección de las motas 4x8.** Motas que
 parpadean en bloques de 4x8 píxeles alineados (x%4 = 0, y%8 = 0) en exteriores de islas (hierba, arena) y en la

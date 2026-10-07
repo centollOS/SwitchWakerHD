@@ -17,7 +17,8 @@ if(NOT WWHD_RENDERER)
   if(APPLE)
     set(WWHD_RENDERER BOTH)
   elseif(WWHD_SWITCH)
-    set(WWHD_RENDERER OPENGL)
+    # deko3d is the Switch's default since P5 (docs/deko3d-plan.md); OPENGL builds the fallback wwhd_gl.nro
+    set(WWHD_RENDERER DEKO3D)
   else()
     set(WWHD_RENDERER VULKAN)
   endif()
@@ -330,8 +331,9 @@ if(WWHD_HAS_OPENGL)
     target_link_options(wwhd PRIVATE -Wl,--wrap=_mesa_glthread_flush_batch -Wl,--wrap=_mesa_glthread_finish
                         -Wl,--wrap=_mesa_glthread_finish_before -Wl,--wrap=nouveau_pushbuf_kick
                         -Wl,--wrap=nouveau_pushbuf_space -Wl,--wrap=nouveau_fence_wait -Wl,--wrap=nouveau_bo_wait)
-    nx_generate_nacp(OUTPUT wwhd.nacp NAME "SwitchWakerHD" AUTHOR "WWHD recomp" VERSION "0.1.0")
-    nx_create_nro(wwhd NACP wwhd.nacp)
+    # the OpenGL fallback (deko3d is the default renderer): its own name, next to wwhd.nro
+    nx_generate_nacp(OUTPUT wwhd_gl.nacp NAME "SwitchWakerHD (OpenGL)" AUTHOR "WWHD recomp" VERSION "0.1.0")
+    nx_create_nro(wwhd NACP wwhd_gl.nacp OUTPUT wwhd_gl.nro)
   else()
     target_compile_definitions(wwhd PRIVATE WWHD_HEADLESS_GL=1)
     target_include_directories(wwhd PRIVATE runtime/src/gfx/gl/desktop)
@@ -367,7 +369,7 @@ if(WWHD_HAS_DEKO3D)
   # libdeko3dd: deko3d's checks of every call and its messages (gfx/deko/backend.cpp debug_message: a misuse
   # or failure is logged before the process ends). Release libdeko3d aborts with only a 2359-xxxx result.
   # On while the backend is new (also in Release builds); off for performance measurements.
-  option(WWHD_DEKO3D_DEBUG_LIB "deko3d: link the debug library libdeko3dd (also in Release builds)" ON)
+  option(WWHD_DEKO3D_DEBUG_LIB "deko3d: link the debug library libdeko3dd (also in Release builds)" OFF)
   if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(wwhd PRIVATE WWHD_DEKO3D_DEBUG_LIB=1)
     target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3dd)
@@ -379,15 +381,15 @@ if(WWHD_HAS_DEKO3D)
   # as the OpenGL build: threads created without attributes get a large stack, newlib's C11 thrd_create
   # results are fixed (core.cpp), and abort() logs its caller first (main.cpp)
   target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create -Wl,--wrap=abort)
-  # its own name and title: it can sit next to the OpenGL build's wwhd.nro in sdmc:/switch/wwhd
-  # (the debug-library build says so in hbmenu: both builds can sit side by side)
+  # the default build is wwhd.nro (what the HOME-menu forwarder starts); the debug-library build says so in
+  # hbmenu and is named wwhd_dk_debug.nro, so it can sit in its own folder next to it
   if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(_dk_title "SwitchWakerHD (deko3d debug)")
+    nx_generate_nacp(OUTPUT wwhd_dk.nacp NAME "SwitchWakerHD (deko3d debug)" AUTHOR "WWHD recomp" VERSION "0.1.0")
+    nx_create_nro(wwhd NACP wwhd_dk.nacp OUTPUT wwhd_dk_debug.nro)
   else()
-    set(_dk_title "SwitchWakerHD (deko3d)")
+    nx_generate_nacp(OUTPUT wwhd_dk.nacp NAME "SwitchWakerHD" AUTHOR "WWHD recomp" VERSION "0.1.0")
+    nx_create_nro(wwhd NACP wwhd_dk.nacp OUTPUT wwhd.nro)
   endif()
-  nx_generate_nacp(OUTPUT wwhd_dk.nacp NAME "${_dk_title}" AUTHOR "WWHD recomp" VERSION "0.1.0")
-  nx_create_nro(wwhd NACP wwhd_dk.nacp OUTPUT wwhd_dk.nro)
 endif()
 if(WWHD_SDL_HOST)
   target_compile_definitions(wwhd PRIVATE WWHD_SDL_HOST=1)
