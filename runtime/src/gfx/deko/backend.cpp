@@ -8,6 +8,9 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include <switch.h>
 
 #include "dk.h"
+#include "dk_draw.h"
+#include "dk_shaders.h"
+#include "dk_surfaces.h"
 
 #include <algorithm>
 #include <atomic>
@@ -493,25 +496,18 @@ void frame_stats() {
     lastFsNs = fsNs;
 }
 
-// GX2 swap: the present pass into the next swapchain image
-void present() {
+}  // namespace
+
+// The frame's commands start here (dk.h): at the first GX2 command that records after a present, or at the
+// present itself when none did
+void begin_commands() {
+    if (frame_open()) return;
     const uint64_t frame = R.frame + 1;
-    const bool capture = capturing();
     const uint64_t t0 = now_ns();
     check_queue("the frame fence", frame);
-    g_times.presents++;
     g_times.behind += !frame_done(R.frame);  // the previous frame's commands are still running
     frame_begin(frame);
-    const uint64_t t1 = now_ns();
-    int slot;
-    {
-        Stage stage("deko3d: acquiring a swapchain image");
-        check_queue("acquiring a swapchain image", frame);
-        slot = dkQueueAcquireImage(R.queue, g_swapchain);
-    }
-    const uint64_t t2 = now_ns();
-    if (capture) LOG("[dk] capture frame %llu: frame fence %.2f ms, swapchain image %d after %.2f ms", (unsigned long long)frame,
-                     double(t1 - t0) / 1e6, slot, double(t2 - t1) / 1e6);
+    g_times.fenceNs += now_ns() - t0;
     // conservative (plan section 6.3): the texture, uniform and descriptor caches forget what the CPU
     // rewrote in this slot's stream slice four frames ago
     dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Image | DkInvalidateFlags_Shader | DkInvalidateFlags_Descriptors);
@@ -530,6 +526,32 @@ void present() {
         dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Descriptors);
         samplersWritten = true;
     }
+    // the lanes' per-frame work (docs/deko3d-plan.md, "P2 lanes")
+    surfaces_frame_start();
+    shaders_frame_start();
+    draw_frame_start();
+}
+
+namespace {
+
+// GX2 swap: the present pass into the next swapchain image
+void present() {
+    const uint64_t frame = R.frame + 1;
+    const bool capture = capturing();
+    const uint64_t t0 = now_ns();
+    g_times.presents++;
+    begin_commands();  // (already open when a GX2 command recorded in this frame)
+    const uint64_t t1 = now_ns();
+    int slot;
+    {
+        Stage stage("deko3d: acquiring a swapchain image");
+        check_queue("acquiring a swapchain image", frame);
+        slot = dkQueueAcquireImage(R.queue, g_swapchain);
+    }
+    const uint64_t t2 = now_ns();
+    if (capture) LOG("[dk] capture frame %llu: frame open (fence) %.2f ms, swapchain image %d after %.2f ms",
+                     (unsigned long long)frame, double(t1 - t0) / 1e6, slot, double(t2 - t1) / 1e6);
+    forget_state();  // the present pass binds its own targets and state
     DkImageView color, depth;
     dkImageViewDefaults(&color, &g_swapImages[slot]);
     dkImageViewDefaults(&depth, &g_depth);
@@ -554,7 +576,6 @@ void present() {
     const uint64_t t4 = now_ns();
     if (capture) LOG("[dk] capture frame %llu: recorded in %.2f ms, submitted and presented in %.2f ms", (unsigned long long)frame,
                      double(t3 - t2) / 1e6, double(t4 - t3) / 1e6);
-    g_times.fenceNs += t1 - t0;
     g_times.acquireNs += t2 - t1;
     g_times.submitNs += t4 - t3;
     frame_stats();
@@ -599,6 +620,7 @@ void init() {
     memory_init();
     load_shaders();
     init_swapchain();
+    shaders_init();  // the game shaders' worker and caches (dk_shaders.h)
     log_heap("after the deko3d setup");
     input::init();
 }
@@ -637,6 +659,19 @@ void request_capture() { gfxdk::g_captureRequested = true; }
 }  // namespace gfxsw
 
 namespace render {
+namespace {
+// a GX2 command the renderer cannot handle is skipped (and reported) rather than ending the game, as gfx/gl;
+// deko3d's own errors end it through debug_message / check_queue (fatal)
+template <class F> void guarded(const char* what, F&& f) {
+    try {
+        gfxdk::begin_commands();
+        f();
+    } catch (const std::exception& e) {
+        static int reported = 0;
+        if (reported++ < 50) LOG("[dk] %s skipped: %s", what, e.what());
+    }
+}
+}  // namespace
 const Backend& deko3d_backend() {
     using gfxdk::R;
     static const Backend b = [] {
@@ -644,12 +679,24 @@ const Backend& deko3d_backend() {
         b.api = Api::Deko3D;
         b.init = gfxdk::init;
         b.run_main_loop = gfxdk::run_main_loop;
-        // P1: the GX2 commands are counted only (render thread)
-        b.draw = [](const uint32_t*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) { R.counts.draws++; };
-        b.clear_color = [](const uint32_t*, uint32_t, const float*) { R.counts.clears++; };
-        b.clear_depth_stencil = [](const uint32_t*, uint32_t, float, uint32_t, uint32_t) { R.counts.clears++; };
-        b.copy_surface = [](uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) { R.counts.copies++; };
-        b.copy_to_scan = [](uint32_t, uint32_t) { R.counts.scans++; };
+        // GX2 render thread: P2's lanes behind dk_draw.h / dk_surfaces.h (counted no-ops until they land)
+        b.draw = [](const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
+                    uint32_t baseVertex, uint32_t instances) {
+            guarded("draw", [&] { gfxdk::draw(regs, prim, count, indexType, indexAddr, baseVertex, instances); });
+        };
+        b.clear_color = [](const uint32_t* regs, uint32_t cb, const float rgba[4]) {
+            guarded("color clear", [&] { gfxdk::clear_color(regs, cb, rgba); });
+        };
+        b.clear_depth_stencil = [](const uint32_t* regs, uint32_t db, float depth, uint32_t stencil, uint32_t flags) {
+            guarded("depth clear", [&] { gfxdk::clear_depth_stencil(regs, db, depth, stencil, flags); });
+        };
+        b.copy_surface = [](uint32_t src, uint32_t srcMip, uint32_t srcSlice, uint32_t dst, uint32_t dstMip,
+                            uint32_t dstSlice) {
+            guarded("surface copy", [&] { gfxdk::copy_surface(src, srcMip, srcSlice, dst, dstMip, dstSlice); });
+        };
+        b.copy_to_scan = [](uint32_t cb, uint32_t target) {
+            guarded("scan copy", [&] { gfxdk::copy_to_scan(cb, target); });
+        };
         b.swap = gfxdk::swap;
         b.set_frame_aspect = [](float) {};
         b.target_aspect_factors = [](uint32_t, uint32_t, float& kx, float& ky) {
@@ -661,14 +708,28 @@ const Backend& deko3d_backend() {
         b.set_tv_format = [](uint32_t format, bool tv) {
             if (tv) R.tvSrgb = (format & 0x400) != 0;
         };
-        b.invalidate = [](uint32_t, uint32_t, uint32_t) { R.counts.invalidates++; };
-        b.guest_flush = [] { R.counts.flushes++; };
-        b.wait_idle = [] { R.counts.waits++; };
-        b.ss_reset = [] {};
+        b.invalidate = [](uint32_t flags, uint32_t addr, uint32_t size) {
+            guarded("invalidate", [&] { gfxdk::invalidate(flags, addr, size); });
+        };
+        // GX2Flush / GX2DrawDone: what is recorded goes to the GPU (dk_draw.h submit_commands); nothing the GPU
+        // renders is written back to guest memory, so the GPU itself is not waited for (as gfx/gl)
+        b.guest_flush = [] {
+            R.counts.flushes++;
+            guarded("flush", [] { gfxdk::submit_commands("GX2Flush"); });
+        };
+        b.wait_idle = [] {
+            R.counts.waits++;
+            R.streamGen++;  // guest data the game changes after GX2DrawDone is uploaded again
+            guarded("wait", [] { gfxdk::submit_commands("GX2DrawDone"); });
+        };
+        b.ss_reset = [] {
+            gfxdk::ss_reset_surfaces();
+            gfxdk::reset_shader_memoization();
+        };
         b.frame_count = [] { return std::atomic_ref<uint64_t>(R.frame).load(); };
         b.request_tv_dump = [](const std::string&, int) {};
         b.request_capture = [] { gfxsw::request_capture(); };
-        b.shutdown = [] {};  // the queue belongs to the render thread; nothing is cached on the SD card yet
+        b.shutdown = [] { gfxdk::save_shader_cache(); };  // the queue belongs to the render thread
         b.res_scale = [] { return 1.0f; };
         b.set_res_scale = [](float) {};
         b.ao_mode = [] { return 0; };

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "runtime.h"
@@ -185,6 +186,8 @@ bool frame_done(uint64_t frame) {
     return frame == 0 || !s.fenced || dkFenceWait(&s.fence, 0) == DkResult_Success;
 }
 
+bool frame_open() { return g_inFrame; }
+
 StreamAlloc stream_alloc(uint32_t size, uint32_t alignment) {
     Slot& s = g_slots[g_slot];
     const uint32_t offset = align_up(s.streamUsed, std::max<uint32_t>(alignment, 4));
@@ -199,6 +202,43 @@ StreamAlloc stream_alloc(uint32_t size, uint32_t alignment) {
     s.streamUsed = offset + size;
     const uint32_t at = g_slot * kStreamSliceSize + offset;
     return {g_streamCpu + at, g_streamGpu + at};
+}
+
+StreamSlice stream_upload(const void* data, uint32_t size, uint32_t alignment, uint32_t zeroTail) {
+    const StreamAlloc a = stream_alloc(size + zeroTail, alignment);
+    if (!a) return {};
+    {
+        SampledTime copy{R.perf.copyNs, R.timedDraw};
+        if (size) memcpy(a.cpu, data, size);
+        if (zeroTail) memset(static_cast<uint8_t*>(a.cpu) + size, 0, zeroTail);
+    }
+    R.perf.streamBytes += size + zeroTail;
+    return {a.gpu, size + zeroTail};
+}
+
+namespace {
+struct UploadEntry {
+    uint64_t key = 0, stamp = ~0ull, gen = 0;
+    uint32_t size = 0;
+    StreamSlice slice;
+};
+FrameTable<UploadEntry> g_uploads;
+}  // namespace
+
+// Guest vertex and uniform data may not change between GX2Invalidate calls (or GX2DrawDone) while a
+// frame's draws can still read it, so an address uploaded once this frame is reused (gfx/gl)
+StreamSlice stream_guest(uint32_t addr, uint32_t size, uint32_t alignment, uint32_t zeroTail) {
+    static const bool enabled = !getenv("WWHD_DK_NO_DEDUP");
+    const uint64_t key = uint64_t(addr) | uint64_t(alignment) << 32 | uint64_t(zeroTail) << 48;
+    const uint64_t stamp = R.frame + 1;  // the frame being recorded
+    const UploadEntry* e = g_uploads.find(key, stamp);
+    if (enabled && e->stamp == stamp && e->gen == R.streamGen && e->size >= size) {
+        R.perf.reusedBytes += size;
+        return e->slice;
+    }
+    const StreamSlice slice = stream_upload(mem::ptr(addr), size, alignment, zeroTail);
+    if (slice) g_uploads.put({key, stamp, R.streamGen, size, slice});
+    return slice;
 }
 
 ImageAlloc image_alloc(uint32_t size, uint32_t alignment) {

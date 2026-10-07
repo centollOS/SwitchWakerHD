@@ -2,14 +2,18 @@
 
 Plan redactado el 2026-10-07 por un agente de planificación (Fable) a partir del código (`dev` 30fd148,
 round 36), del prototipo de uam (`~/Documents/uam-proto`) y de los logs de hardware. **[V]** = verificado en
-código o logs; **[S]** = supuesto a confirmar. Estado: P0 y P1 hechos y compilados (rama `deko3d`), sin probar en hardware; ver Estado.
+código o logs; **[S]** = supuesto a confirmar. Estado: P0 y P1 hechos y confirmados en hardware (rama `deko3d`); interfaces de P2 definidas; ver Estado y «P2: carriles».
 
 ## Estado (2026-10-07, rama `deko3d`)
 
 Integrados `dk-uam`, `dk-convert`, `dk-tools` y `dk-p1` sin conflictos. Compilan `build/switch/wwhd.nro` (GL, por
 defecto, sin cambios de comportamiento), `build/switch-dk/wwhd_dk.nro` (`WWHD_RENDERER=DEKO3D tools/switch/build.sh`,
 con libdeko3dd), `build/uamtest2/uamtest2.nro` (`tools/switch/uamtest/build.sh`) y la herramienta de host
-`build/dksh_cache/dksh_cache` (`tools/switch/dksh_cache/build.sh`). **Nada de deko3d se ha ejecutado aún en consola.**
+`build/dksh_cache/dksh_cache` (`tools/switch/dksh_cache/build.sh`).
+
+**Confirmado en hardware (2026-10-07):** uamtest2 1561/1561 DKSH idénticos al Mac (media 70 ms, heap +24 KB por
+compile); `wwhd_dk.nro`: patrón, orientación, test de profundidad y overlay correctos; el juego corre detrás a 30 fps
+con GX2 sin ejecutar y llega a Outset (por el sonido).
 
 **P0 (hecho en el Mac):**
 - uam 1.1.0 vendorizado (`runtime/third_party/uam`, target `uamlib`, API `uam_api.h`, parches en `PATCHES.md`): log por
@@ -48,6 +52,54 @@ de cada creación, `dkQueueIsInErrorState` antes de acquire/submit/present → `
    pulsados registran el tiempo de un frame. `wwhd_dk.nro` va con libdeko3dd (más lento): no medir rendimiento con él.
 3. `wwhd.nro` (GL, de esta rama) solo como control de no regresión: debe comportarse igual que el de `dev`.
 
+
+## P2: carriles (interfaces en la rama `deko3d`)
+
+Tres ramas (`p2-surf`, `p2-shader`, `p2-draw`) parten de `deko3d` (`git merge deko3d`) y trabajan en paralelo, cada
+una en sus ficheros. Las interfaces están en `gfx/deko/dk_surfaces.h`, `dk_shaders.h` y `dk_draw.h`; los `.cpp`
+son stubs que compilan y mantienen el comportamiento de P1 (GX2 contado, no ejecutado; lo que tendría que devolver un
+recurso real hace `fatal()` legible). Cambiar una cabecera ajena: solo añadir, y avisarlo al integrar.
+
+| Carril | Ficheros (propios) | Qué implementa |
+|---|---|---|
+| `p2-surf` | `surfaces.cpp`, `formats.cpp`, `descriptors.cpp` (+ nuevos con prefijo `surf_`) | `dk_surfaces.h`: formatos (port de `vulkan/formats.cpp`), surfaces/DkImage/views, detiling y uploads por el stream ring, targets, clears, copias/blit, scan (`copy_to_scan`, `scan_flush`, `present_source`), GuestRanges/`invalidate`, slots de descriptores y cache de samplers, escala interna (stubs a 1 hasta P3) |
+| `p2-shader` | `shaders_dk.cpp` (+ nuevos con prefijo `shader_`; `glsl_convert.*`, `shader_files.*` si hace falta) | `dk_shaders.h`: fetch shader, hashes, `translate` con memo (port de `gl/shaders.cpp`), worker uam, caches WDK1/WGS1, mapas de bindings por recurso GX2, `pack_uniforms` (port de `vulkan pack_uniforms_into`), stats |
+| `p2-draw` | `draw.cpp`, `backend.cpp`, `shaders/present_*.glsl` (+ nuevos con prefijo `draw_`) | `dk_draw.h`: `draw()` completo (memo/combos, índices, cache de estado → structs `Dk*State`, vértices, texturas, UBOs), `submit_commands`, pase de presentación del juego (sRGB, grade), stats/hitch/trace, GamePad skip |
+
+Ficheros comunes (`dk.h`, `memory.cpp`, `overlay_dk.cpp`, `glsl_convert.h`, `shader_files.h`): solo en la integración.
+`R.perf` (dk.h) ya tiene los campos de los tres carriles; cada uno suma solo a los suyos.
+
+**Contratos:**
+- **Hilos.** El render thread (el de GX2) es el único que graba comandos deko3d, toca `R`, las surfaces, los `Shader`,
+  la memoria de código y la memoria del guest. El worker de uam (uno, pila 8 MB, prioridad por debajo del juego) recibe
+  GLSL ya convertido por `glsl_to_deko` y devuelve bytes DKSH o un error; nunca toca objetos deko3d.
+  `shaders_init` (hilo principal, en `init` tras `memory_init`) arranca el worker y carga las caches;
+  `save_shader_cache` en `shutdown`.
+- **Frame.** `begin_commands()` (dk.h, backend.cpp) abre el frame si no está abierto: fence del slot, stream y memoria
+  de comandos, barrier, sets de descriptores, y luego `surfaces_frame_start`, `shaders_frame_start` (carga los DKSH
+  terminados), `draw_frame_start`. La tabla `Backend` la llama antes de cada entrada GX2 (`guarded`), y `present()`
+  por si ninguna grabó. `present()` cierra el frame (`frame_end`, submit, present). `submit_commands(why)` envía lo
+  grabado a mitad de frame (GX2Flush, GX2DrawDone, memoria de comandos grande) y se sigue grabando en el mismo frame.
+- **Stream.** `stream_upload` / `stream_guest` (dk.h, memory.cpp, ya implementados): slice por frame de 32 MB, sin
+  wrap; `stream_guest` deduplica por dirección mientras `R.streamGen` no cambie (GX2DrawDone, `invalidate` de
+  atributos/uniforms). Slice vacío (gpu 0) = lleno y logueado: el llamador salta el draw (`perf.streamFullSkips`).
+- **Descriptores.** Los asigna y recicla solo `p2-surf` (`descriptors.cpp`): imágenes 64..8191, samplers 16..1023;
+  0..63 / 0..15 son del renderer (overlay 1-63 y sampler 0; present: imagen 0 y samplers 1-2). Se escriben con
+  `dkCmdBufPushData` (ordenado con los comandos; nunca la CPU sobre un descriptor que la GPU puede leer); un slot
+  liberado vuelve a usarse cuando la GPU termina el frame. `commit_descriptors()` antes del draw que los usa.
+- **Texturas en el draw.** Por unidad: `sampled_texture(words)` → `upload_surface` → `sampled_view_id` +
+  `sampler_id(samplerWords, compare, integer)` (cache del draw por palabras y `R.surfaceEpoch`, como GL);
+  `feedback_copy` si la textura es un target del draw; `commit_descriptors`; `dkCmdBufBindTextures(stage,
+  sh->textureSlot[unit], dkMakeTextureHandle(view, sampler))`. Unidad sin surface: `null_image_id()`.
+- **UBOs y shaders en el draw.** `translate(VS)`, `translate(PS)`; no `ready()` → `shader_wanted` y skip (el memo de
+  combos no recuerda el fallo). Bloques del guest con `stream_guest` en `sh->uboSlot[i]` (tamaño `sh->uboBytes[i]`, o
+  el del guest hasta 64 KiB con cola de ceros redondeada a 256); el ufBlock con `pack_uniforms(stage, *sh, regs,
+  scale)` en `sh->bindings.ufBlockSlot`. `dkCmdBufBindShaders` con `&sh->dk`.
+- **Estado.** Todo lo que fuera de `draw()` ata targets, shaders, viewports/scissors o estado 3D (clears, present,
+  overlay) llama a `forget_state()` (dk_draw.h). Las copias del motor 2D no. Uploads y copias dejan su resultado
+  visible con su propio barrier; el draw no añade ninguno por ellos. Los clears ponen su scissor a todo el target.
+- **Errores.** Cada fallo con línea `[dk] ...` que nombre el recurso (dirección, formato, hash); `fatal()` para lo que no
+  puede continuar; `log_flush()` antes de cada creación deko3d; `check_queue` antes de submit/acquire/present.
 
 ## 0. Hechos que condicionan el diseño
 
