@@ -178,6 +178,10 @@ uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer) {
         g_stats.samplerEvictions++;
         // the draw path's texture caches may still hold the evicted slot for these words: looked up again
         R.surfaceEpoch++;
+        static int evictLogged = 0;
+        if (evictLogged++ < 5)
+            LOG("[dk] sampler descriptors: all %u slots used; slot %u rewritten (least recently used)",
+                kSamplerDescriptors - kReservedSamplerIds, id);
     }
     SamplerSlot& slot = g_samplerSlots[id];
     slot.key = key;
