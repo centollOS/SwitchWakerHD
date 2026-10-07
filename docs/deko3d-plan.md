@@ -2,7 +2,52 @@
 
 Plan redactado el 2026-10-07 por un agente de planificación (Fable) a partir del código (`dev` 30fd148,
 round 36), del prototipo de uam (`~/Documents/uam-proto`) y de los logs de hardware. **[V]** = verificado en
-código o logs; **[S]** = supuesto a confirmar. Estado: propuesta, no empezado.
+código o logs; **[S]** = supuesto a confirmar. Estado: P0 y P1 hechos y compilados (rama `deko3d`), sin probar en hardware; ver Estado.
+
+## Estado (2026-10-07, rama `deko3d`)
+
+Integrados `dk-uam`, `dk-convert`, `dk-tools` y `dk-p1` sin conflictos. Compilan `build/switch/wwhd.nro` (GL, por
+defecto, sin cambios de comportamiento), `build/switch-dk/wwhd_dk.nro` (`WWHD_RENDERER=DEKO3D tools/switch/build.sh`,
+con libdeko3dd), `build/uamtest2/uamtest2.nro` (`tools/switch/uamtest/build.sh`) y la herramienta de host
+`build/dksh_cache/dksh_cache` (`tools/switch/dksh_cache/build.sh`). **Nada de deko3d se ha ejecutado aún en consola.**
+
+**P0 (hecho en el Mac):**
+- uam 1.1.0 vendorizado (`runtime/third_party/uam`, target `uamlib`, API `uam_api.h`, parches en `PATCHES.md`): log por
+  callback, sin `exit/abort`, DKSH a memoria, frontend residente (~20 % más rápido) y arreglo de una lectura sin
+  inicializar en el scheduler GM107 de nv50_ir (antes 88/1561 DKSH dependían del heap). 1561/1561 idénticos al CLI;
+  valgrind limpio. Switch: 2,0 MB de texto.
+- `glsl_to_deko` (`gfx/deko/glsl_convert.cpp`, `kConvertRevision`): 7680/7680 de la cosecha convierten y compilan;
+  los 2654 VS conservan el `SET_POSITION` z 0..1; máximo 4 UBOs y 8 samplers por stage. Cache de consola 1561/1561.
+- `dksh_cache` (WGS1 → `WDK1`, `gfx/deko/shader_files.cpp`): cosecha 7680/7680 en 37 s, uam host p50 2,8 ms, p99 26 ms;
+  `shadercache_dksh.bin` 13,2 MiB (uamId `007b6d8c06ba645b`), determinista. **Cobertura (riesgo 1):** la cosecha sin
+  la cache de la consola cubre 96,2 % de las fuentes de la consola (1501/1561) y 95,7 % de los pares; se espera que
+  falte ~4-5 % → compilación en consola para ese resto.
+
+**P1 (compilado):** `gfx/switch_renderer.h` (`gfxsw`) para los hooks Switch (GL los reenvía, sin cambios);
+`Api::Deko3D` por defecto cuando está compilado; dispositivo, cola, memblocks (stream ring 4 × 32 MB, comandos
+4 × 4 MB con primer trozo explícito por frame, heap de imágenes en chunks de 64 MB, código 32 MB, descriptores),
+swapchain 3 × RGBA8 1280×720, patrón de orientación/profundidad, contador FPS y overlay ImGui. Todas las entradas GX2
+existen pero solo cuentan (el juego corre, la pantalla muestra solo el patrón). Errores: `[dk]` + `log_flush()` antes
+de cada creación, `dkQueueIsInErrorState` antes de acquire/submit/present → `fatal()` legible.
+
+**Pruebas en hardware para el propietario** (ficheros listos en `build/deko3d-out/` del checkout principal):
+1. `uamtest2.nro` → `sdmc:/switch/uamtest/uamtest2.nro`, con `shadercache_dksh.bin` → `sdmc:/switch/uamtest/` (para la
+   comparación bit a bit). Usa `sdmc:/switch/wwhd/shadercache_gl.bin` de la consola. Ejecutar a reloj stock, esperar
+   al final (~2,5 min para ~1561 shaders; `+` sale). Traer `sdmc:/switch/uamtest/uamtest2.log` y
+   `shadercache_dksh_switch.bin`. Mirar: `ok`/fallos (esperado 1561/1561), media/p50/p99 por shader (antes 95/77/403
+   ms; el frontend residente debería bajarla), crecimiento del heap por compile y ausencia de `LEAK?`, mayor arena
+   (cota de memoria de uam), y 0 diferencias de DKSH y mapas de bindings frente al Mac.
+2. `wwhd_dk.nro` → `sdmc:/switch/wwhd/` junto a `wwhd.nro` (título propio "SwitchWakerHD (deko3d)"; comparte carpeta,
+   `settings.ini`, `env.txt`; `wwhd.log` se sobrescribe, cada sesión queda en `logs/`). Arrancar, dejar 10 min, abrir el
+   menú con `-`, cambiar perfiles. Hacer una foto con el botón de captura del mando. El patrón debe verse como dice su
+   leyenda: texto derecho, caja roja arriba a la izquierda y verde abajo a la derecha, fondo azul arriba, barra negro →
+   blanco, cian delante de magenta, cuadro gris vacío (sin naranja). Si se ve espejado en vertical, el convenio de y
+   está mal (sección 2). Log: líneas `[dk]` de creación del dispositivo, memblocks, swapchain y heap; cada 5 s fps
+   (esperado ~60 en el patrón; los recuentos GX2 por frame muestran que el juego avanza), memoria de comandos por frame,
+   stream y heap estables. Cualquier `FATAL`/mensaje `deko3d ...` en las últimas líneas es el fallo; los dos sticks
+   pulsados registran el tiempo de un frame. `wwhd_dk.nro` va con libdeko3dd (más lento): no medir rendimiento con él.
+3. `wwhd.nro` (GL, de esta rama) solo como control de no regresión: debe comportarse igual que el de `dev`.
+
 
 ## 0. Hechos que condicionan el diseño
 
