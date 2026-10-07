@@ -270,18 +270,20 @@ bool staging_fits(uint32_t size, uint32_t& at) {
         return size <= kStagingSize;
     }
     const uint32_t tail = g_stagingUsed.front().begin;
+    // head == tail with ranges in flight would read as an empty, unwrapped ring: a wrapped head stays
+    // strictly below the tail (one byte short of full), so head >= tail always means "not wrapped"
     if (g_stagingHead >= tail) {
         if (g_stagingHead + size <= kStagingSize) {
             at = g_stagingHead;
             return true;
         }
-        if (size <= tail) {  // wrap: the end of the ring stays unused until the ranges before it retire
+        if (size < tail) {  // wrap: the end of the ring stays unused until the ranges before it retire
             at = 0;
             return true;
         }
         return false;
     }
-    if (g_stagingHead + size <= tail) {
+    if (g_stagingHead + size < tail) {
         at = g_stagingHead;
         return true;
     }
@@ -289,7 +291,7 @@ bool staging_fits(uint32_t size, uint32_t& at) {
 }
 
 Staging staging_alloc(uint32_t size) {
-    size = (size + 255) & ~255u;
+    size = std::max((size + 255) & ~255u, 256u);  // never empty: a zero-size range would make head == tail
     if (!g_staging) {
         LOG("[dk] creating a memory block: upload staging ring, %u KiB", kStagingSize >> 10);
         log_flush();  // deko3d aborts when a creation fails
@@ -445,7 +447,20 @@ void copy_image(Surface* src, uint32_t srcLevel, uint32_t srcLayer, Surface* dst
         w = (w + 3) / 4;
         h = (h + 3) / 4;
     }
-    const DkImageRect sr = {0, 0, srcLayer, w, h, layers}, dr = {0, 0, dstLayer, w, h, layers};
+    // deko3d 0.5.0's dkCmdBufCopyImage ignores srcRect->z (source/dk_image.cpp: `srcZ = z`, only the
+    // destination adds its rectangle's z), so the source layer is selected by the view's layerOffset and
+    // the source rectangle starts at z 0. Only layered images take a layerOffset (deko3d rejects it on 3D
+    // images), so a 3D image's slices > 0 cannot be read here.
+    if (srcLayer && !is_layered(src->img.type)) {
+        static int logged = 0;
+        if (logged++ < 20)
+            LOG("[dk] copy_image %s slice %u level %u -> %s skipped: the copy engine reads slice > 0 only from a layered "
+                "image (this one is type %d)", describe(src).c_str(), srcLayer, srcLevel, describe(dst).c_str(),
+                int(src->img.type));
+        return;
+    }
+    if (srcLayer) sv.layerOffset = uint16_t(srcLayer);
+    const DkImageRect sr = {0, 0, 0, w, h, layers}, dr = {0, 0, dstLayer, w, h, layers};
     dkCmdBufCopyImage(R.cmd, &sv, &sr, &dv, &dr, 0);
 }
 }  // namespace
