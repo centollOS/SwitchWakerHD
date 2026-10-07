@@ -38,6 +38,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "imgui.h"
 #include "overlay/hostui.h"
 #include "overlay/overlay.h"
+#include "platform/mesa_cache_switch.h"
 #endif
 
 namespace gx2 { uint64_t flips_presented(); }
@@ -929,6 +930,7 @@ void frame_stats() {
     if (std::string passes = gpuPasses.report(); !passes.empty()) LOG("[gl] GPU passes: %s", passes.c_str());
 #ifdef __SWITCH__
     if (std::string clocks = clock_report(); !clocks.empty()) LOG("[gl] clocks: %s", clocks.c_str());
+    if (std::string mesa = mesa_cache::report(); !mesa.empty()) LOG("%s", mesa.c_str());
 #endif
     if (p.gamepadDraws || p.gamepadClearsSkipped)
         LOG("[gl] GamePad picture: %.0f draws/frame into its own buffers (%.0f ms/s), %s (%.0f draws, %.0f clears per frame; "

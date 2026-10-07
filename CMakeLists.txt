@@ -188,7 +188,7 @@ if(WWHD_HAS_OPENGL)
   list(APPEND GFX_SOURCES ${GL_SOURCES})
   if(WWHD_SWITCH)
     list(APPEND GFX_SOURCES runtime/src/platform/input_switch.cpp runtime/src/platform/hostui_switch.cpp
-                            runtime/src/platform/settings_switch.cpp)
+                            runtime/src/platform/settings_switch.cpp runtime/src/platform/mesa_cache_switch.cpp)
   else()
     list(APPEND GFX_SOURCES runtime/src/platform/input_headless.cpp)
   endif()
@@ -280,7 +280,28 @@ if(WWHD_HAS_OPENGL)
   target_include_directories(wwhd PRIVATE ${LZ4_INCLUDE_DIR})
   if(WWHD_SWITCH)
     # Mesa (nouveau) EGL/OpenGL and glad, from the switch-mesa and switch-glad portlibs
-    target_link_libraries(wwhd PRIVATE ${LZ4_LIBRARY} glad EGL glapi drm_nouveau)
+    # Mesa: by default the one tools/switch/mesa/build_mesa.sh builds (WWHD_SWITCH_MESA_DIR, set by
+    # tools/switch/build.sh: devkitPro's switch-mesa 20.1.0-5 recipe plus the persistent shader cache
+    # patches); empty, the devkitPro package's libraries in portlibs. libdrm_nouveau is the package's.
+    set(WWHD_SWITCH_MESA_DIR "" CACHE PATH "Mesa prefix with the shader cache (lib/, include/); empty: devkitPro's switch-mesa")
+    if(WWHD_SWITCH_MESA_DIR)
+      foreach(_lib EGL glapi)
+        if(NOT EXISTS "${WWHD_SWITCH_MESA_DIR}/lib/lib${_lib}.a")
+          message(FATAL_ERROR "WWHD_SWITCH_MESA_DIR has no lib/lib${_lib}.a")
+        endif()
+      endforeach()
+      target_link_libraries(wwhd PRIVATE ${LZ4_LIBRARY} glad "${WWHD_SWITCH_MESA_DIR}/lib/libEGL.a"
+                            "${WWHD_SWITCH_MESA_DIR}/lib/libglapi.a" drm_nouveau)
+      if(EXISTS "${WWHD_SWITCH_MESA_DIR}/include/mesa_switch.h")
+        set_source_files_properties(runtime/src/platform/mesa_cache_switch.cpp PROPERTIES
+                                    COMPILE_DEFINITIONS WWHD_MESA_STATS=1
+                                    INCLUDE_DIRECTORIES "${WWHD_SWITCH_MESA_DIR}/include")
+      endif()
+      message(STATUS "Mesa: ${WWHD_SWITCH_MESA_DIR}")
+    else()
+      target_link_libraries(wwhd PRIVATE ${LZ4_LIBRARY} glad EGL glapi drm_nouveau)
+      message(STATUS "Mesa: devkitPro's switch-mesa (portlibs)")
+    endif()
     # threads created without attributes (Mesa's GL thread) get a large stack, and Mesa's checks of
     # newlib's C11 thrd_create results are fixed: see core.cpp. abort() logs its caller first (main.cpp).
     target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create -Wl,--wrap=abort)

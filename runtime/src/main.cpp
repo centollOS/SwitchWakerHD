@@ -21,6 +21,7 @@
 #include <string>
 #include <thread>
 #ifdef __SWITCH__
+#include "platform/mesa_cache_switch.h"
 #include "platform/settings_switch.h"
 #include <sys/stat.h>
 #include <dirent.h>
@@ -478,6 +479,7 @@ int main(int argc, char** argv) {
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
     load_switch_options(argc, argv);
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
+    mesa_cache::setup();  // Mesa's persistent shader cache, before EGL starts
 #endif
     apply_portable_mode();
 #ifdef _WIN32
