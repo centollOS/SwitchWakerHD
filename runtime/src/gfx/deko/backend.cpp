@@ -1,7 +1,8 @@
 // The deko3d renderer's device, presentation and host loop, and its entry in the renderer table (dk.h).
-// Phase P1 (docs/deko3d-plan.md): every GX2 swap presents a test pattern that shows the device's
-// conventions (origin, y direction, depth range, depth test) in one screenshot, the FPS counter and the
-// settings overlay (hold Minus). GX2 draws, clears and copies are counted, not executed.
+// Every GX2 swap presents the game's TV picture (present_source, dk_surfaces.h) with the picture adjustments,
+// the FPS counter and the settings overlay (hold Minus). Until the game has a picture, the P1 test pattern
+// shows the device's conventions (origin, y direction, depth range, depth test) instead. The draw lane's
+// share (docs/deko3d-plan.md, "P2 lanes"): submits, the present pass, the statistics, hitch log and trace.
 #include <malloc.h>
 #include <unistd.h>
 extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into (sbrk)
@@ -41,6 +42,8 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "imgui_vsh_dksh.h"
 #include "pattern_fsh_dksh.h"
 #include "pattern_vsh_dksh.h"
+#include "present_fsh_dksh.h"
+#include "present_vsh_dksh.h"
 #include "text_fsh_dksh.h"
 #include "text_vsh_dksh.h"
 
@@ -60,6 +63,8 @@ DkImage g_swapImages[kSwapImages];
 DkImage g_depth;
 DkShader g_shaders[kShaderCount];
 bool g_shaderOk[kShaderCount] = {};
+DkShader g_presentShaders[2];  // the present pass of the game's picture (vertex, fragment)
+bool g_presentOk = false;
 std::atomic<int> g_debugMessages{0};
 
 // deko3d's messages. Only the debug library (libdeko3dd, WWHD_DEKO3D_DEBUG_LIB) calls this: its checks of
@@ -81,9 +86,10 @@ void check_queue(const char* before, uint64_t frame) {
     if (!dkQueueIsInErrorState(R.queue)) return;
     const Renderer::Counts& c = R.counts;
     fatal("[dk] the deko3d queue is in an error state (a GPU fault) before %s of frame %llu; deko3d messages %d; "
-          "GX2 so far: %llu draws, %llu clears, %llu surface copies, %llu scan copies (not executed in P1)",
+          "GX2 so far: %llu draws (%llu executed), %llu clears, %llu surface copies, %llu scan copies",
           before, (unsigned long long)frame, g_debugMessages.load(), (unsigned long long)c.draws,
-          (unsigned long long)c.clears, (unsigned long long)c.copies, (unsigned long long)c.scans);
+          (unsigned long long)R.drawCount, (unsigned long long)c.clears, (unsigned long long)c.copies,
+          (unsigned long long)c.scans);
 }
 
 void load_shaders() {
@@ -103,7 +109,11 @@ void load_shaders() {
         ok += g_shaderOk[i];
         bytes += kEmbedded[i].size;
     }
-    LOG("[dk] embedded shaders: %d of %d loaded (%zu bytes of DKSH)", ok, int(kShaderCount), bytes);
+    g_presentOk = code_load(g_presentShaders[0], present_vsh_dksh, uint32_t(present_vsh_dksh_size), "present_vsh") &&
+                  code_load(g_presentShaders[1], present_fsh_dksh, uint32_t(present_fsh_dksh_size), "present_fsh");
+    bytes += present_vsh_dksh_size + present_fsh_dksh_size;
+    LOG("[dk] embedded shaders: %d of %d loaded, present pass %s (%zu bytes of DKSH)", ok, int(kShaderCount),
+        g_presentOk ? "loaded" : "NOT loaded: the game's picture cannot be shown", bytes);
 }
 
 ImageAlloc g_swapMem[kSwapImages], g_depthMem;
@@ -310,10 +320,10 @@ void draw_pattern(uint64_t frame) {
     dkCmdBufDraw(R.cmd, DkPrimitive_Triangles, uint32_t(v.size()), 1, 0, 0);
     // the legend (window coordinates from the top left)
     char status[64];
-    snprintf(status, sizeof status, "FRAME %llu, GX2 DRAWS NOT EXECUTED", (unsigned long long)frame);
+    snprintf(status, sizeof status, "FRAME %llu, NO PICTURE FROM THE GAME YET", (unsigned long long)frame);
     static const float fg[4] = {1, 1, 1, 1}, bg[4] = {0, 0, 0, 0.55f};
     draw_text(330, 36, 3,
-              {"DEKO3D P1 TEST PATTERN", status, "", "THIS TEXT UPRIGHT: WINDOW ORIGIN TOP LEFT",
+              {"DEKO3D TEST PATTERN", status, "", "THIS TEXT UPRIGHT: WINDOW ORIGIN TOP LEFT",
                "RED BOX TOP LEFT, GREEN BOTTOM RIGHT: Y NEGATED", "CYAN IN FRONT OF MAGENTA: DEPTH TEST",
                "GRAY SQUARE EMPTY (NO ORANGE): DEPTH 0 TO 1", "BAR: BLACK LEFT TO WHITE RIGHT",
                "BACKGROUND: BLUE TOP, DARK BOTTOM", "HOLD MINUS: SETTINGS"},
@@ -395,6 +405,56 @@ gfxsw::PictureGrade picture_grade() {
     return g;
 }
 
+// ---- the game's TV picture into the window: fit 16:9 (bars around other shapes), row 0 at the top, with
+// the picture adjustments and, for an sRGB TV format, sRGB encoding (as gfx/gl present)
+struct PresentUbo {  // present_fsh.glsl, std140
+    float grade[4];
+    int32_t encode[4];
+};
+bool draw_picture(const PresentSource& src, bool capture) {
+    if (!g_presentOk || !src.surface || !src.width || !src.height) return false;
+    commit_descriptors();  // present_source wrote the picture's view into kPresentImageId
+    const float a = float(src.width) / float(src.height);
+    int w = int(kWidth), h = int(float(kWidth) / a);
+    if (h > int(kHeight)) {
+        h = int(kHeight);
+        w = int(float(kHeight) * a);
+    }
+    const int x = (int(kWidth) - w) / 2, y = (int(kHeight) - h) / 2;
+    constexpr uint32_t kUboSize = (sizeof(PresentUbo) + 255) & ~255u;
+    StreamAlloc u = stream_alloc(kUboSize, DK_UNIFORM_BUF_ALIGNMENT);
+    if (!u) return false;
+    const gfxsw::PictureGrade g = picture_grade();
+    const bool encode = R.tvSrgb.load(std::memory_order_relaxed);
+    PresentUbo p{{g.exposure, g.contrast, g.saturation, g.gamma}, {encode ? 1 : 0, 0, 0, 0}};
+    memcpy(u.cpu, &p, sizeof p);
+    static int encoded = -1;
+    if (int(encode) != encoded) {
+        encoded = int(encode);
+        LOG("[dk] presenting the game's picture (%ux%u, GX2 format %03X%s) with %s", src.width, src.height,
+            src.surface->format, src.srgb ? ", sRGB" : "", encode ? "sRGB encoding (sRGB TV format)" : "no encoding");
+    }
+    // a picture of the window's size is copied pixel for pixel; others are filtered
+    const bool exact = src.pw == uint32_t(w) && src.ph == uint32_t(h);
+    const bool integer = src.surface->fmt.kind != FormatInfo::FLOAT;
+    const DkResHandle tex =
+        dkMakeTextureHandle(src.imageId, exact || integer ? kPresentNearestSamplerId : kPresentLinearSamplerId);
+    bind_pass_state(false, false);
+    set_view(uint32_t(x), uint32_t(y), uint32_t(w), uint32_t(h));
+    const DkShader* sh[] = {&g_presentShaders[0], &g_presentShaders[1]};
+    dkCmdBufBindShaders(R.cmd, DkStageFlag_GraphicsMask, sh, 2);
+    const DkBufExtents ubo = {u.gpu, kUboSize};
+    dkCmdBufBindUniformBuffers(R.cmd, DkStage_Fragment, 0, &ubo, 1);
+    dkCmdBufBindTextures(R.cmd, DkStage_Fragment, 0, &tex, 1);
+    dkCmdBufBindVtxAttribState(R.cmd, nullptr, 0);
+    dkCmdBufBindVtxBufferState(R.cmd, nullptr, 0);
+    dkCmdBufDraw(R.cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
+    if (capture)
+        LOG("[dk] capture frame %llu: presented %s (image %ux%u, descriptor %u) at %d,%d %dx%d", (unsigned long long)R.frame + 1,
+            trace_name(src.surface).c_str(), src.pw, src.ph, src.imageId, x, y, w, h);
+    return true;
+}
+
 // The clocks the console runs at (CPU, GPU, memory), as the OpenGL renderer reports them: clkrst
 // (8.0.0+) or pcv; nothing if the game may use neither.
 std::string clock_report() {
@@ -445,6 +505,9 @@ uint64_t thread_ticks() {
     return t;
 }
 
+uint64_t g_hitches = 0;      // frames over 55 ms (check_hitch)
+Renderer::Perf g_hitchBase;  // R.perf after the previous present
+
 void frame_stats() {
     static uint64_t lastFrame = 0, lastWait = 0, lastTicks = 0, lastUnderrun = 0, lastFsCalls = 0, lastFsNs = 0;
     static Renderer::Counts last;
@@ -466,7 +529,7 @@ void frame_stats() {
     uint64_t fsCalls, fsNs, underrun, dropped;
     fs_stats(fsCalls, fsNs);
     audio::stats(underrun, dropped);
-    LOG("[dk] %.1f fps; GX2 counted, not executed (per frame): %.0f draws, %.0f clears, %.0f surface copies, %.0f scan "
+    LOG("[dk] %.1f fps; GX2 per frame: %.0f draws, %.0f clears, %.0f surface copies, %.0f scan "
         "copies, %.0f invalidates, %.0f flushes, %.0f waits; render thread busy %.0f ms/s (CPU %.0f ms/s), present %.0f "
         "ms/s (frame fence %.0f, swapchain image %.0f, submit %.0f); GPU behind at %.0f%% of presents; command memory "
         "per frame %.0f KiB (max %llu KiB, %llu frames over the %u MiB slice); stream %.1f KiB/frame (%llu full); "
@@ -482,6 +545,53 @@ void frame_stats() {
         heap_never_used_mib(), (unsigned long long)(m.imageBytes >> 10), (unsigned long long)m.imageChunks,
         (unsigned long long)(m.codeBytes >> 10), (unsigned long long)(fsCalls - lastFsCalls), double(fsNs - lastFsNs) / 1e6,
         double(underrun - lastUnderrun) * 1000.0 / audio::kRate, g_debugMessages.load());
+    // the draw path: what was executed or skipped and why, time per executed draw by stage (sampled), the
+    // caches, bytes streamed and submits
+    {
+        static uint64_t lastDrawCount = 0;
+        const Renderer::Perf& p = R.perf;
+        const DrawSkips k = draw_skips_take();
+        const uint64_t executed = R.drawCount - lastDrawCount;
+        lastDrawCount = R.drawCount;
+        auto us = [&](uint64_t ns) { return executed ? double(ns) / 1e3 / double(executed) : 0.0; };
+        auto pct = [](uint64_t a, uint64_t b) { return b ? 100.0 * double(a) / double(b) : 0.0; };
+        auto kib = [&](uint64_t bytes) { return perFrame(bytes) / 1024.0; };
+        const uint64_t lookups = executed + k.noFetchShader + k.shaderPending + k.shaderFailed;
+        LOG("[dk] draws per frame: %.0f executed; skipped %.1f shader pending, %.1f shader failed, %.1f no fetch shader, "
+            "%.1f no target, %.1f empty scissor, %.1f stream full, %.1f unsupported, %.1f GamePad; us per draw: total %.1f "
+            "= lookup %.1f + indices %.1f + resources %.1f + state %.1f + submit %.1f; memo %.0f%% combos %.0f%% texture "
+            "cache %.0f%% of %.0f lookups/frame; KiB/frame: vertices %.0f, indices %.0f, uniforms %.0f, stream %.0f "
+            "(%.0f reused, copy %.1f ms/s); submits %.1f/frame (%.1f for draws, %.1f ms/s); GamePad draws %.1f/frame",
+            perFrame(executed), perFrame(k.shaderPending), perFrame(k.shaderFailed), perFrame(k.noFetchShader),
+            perFrame(k.noTarget), perFrame(k.scissorEmpty), perFrame(k.streamFull), perFrame(k.unsupported),
+            perFrame(p.gamepadSkipped), us(p.drawNs), us(p.lookupNs), us(p.indexNs), us(p.resourceNs), us(p.stateNs),
+            us(p.submitNs), pct(p.memoHits, lookups), pct(p.comboHits, lookups), pct(p.textureCacheHits, p.textureLookups),
+            perFrame(p.textureLookups), kib(p.vertexBytes), kib(p.indexBytes), kib(p.uboBytes), kib(p.streamBytes),
+            kib(p.reusedBytes), ms(p.copyNs), perFrame(p.flushes), perFrame(p.midFrameSubmits), ms(p.flushNs),
+            perFrame(p.gamepadDraws));
+        const ShaderStats sh = shader_stats_take();
+        LOG("[dk] shaders: %llu translated, %llu DKSH in RAM, %llu from cache files, %llu queued, %llu compiled (%.0f ms in "
+            "uam), %llu failed, %llu pending now, %llu draws skipped for them; loads %.1f ms, render thread %.1f ms/s "
+            "(%llu loads), code %llu KiB",
+            (unsigned long long)sh.translations, (unsigned long long)sh.memoryHits, (unsigned long long)sh.cacheHits,
+            (unsigned long long)sh.queued, (unsigned long long)sh.compiled, double(sh.compileNs) / 1e6,
+            (unsigned long long)sh.failed, (unsigned long long)sh.pendingNow, (unsigned long long)sh.skippedDraws,
+            double(sh.loadNs) / 1e6, ms(p.shaderNs), (unsigned long long)p.dkshLoads, (unsigned long long)(sh.codeBytes >> 10));
+        const DescriptorStats ds = descriptor_stats_take();
+        size_t surfBytes = 0, targetBytes = 0, surfCount = 0;
+        surface_memory(surfBytes, targetBytes, surfCount);
+        LOG("[dk] surfaces: %zu (%zu MiB, render targets %zu MiB); uploads %.1f/frame (%.0f KiB/frame, %.1f ms/s); clears "
+            "%.1f ms/s, copies %.1f ms/s (%llu, %llu on the CPU), invalidates %.1f ms/s, scans %.1f ms/s (%llu blits), "
+            "feedback copies %llu, rescales %llu; descriptors: %u images, %u samplers in use, %llu + %llu written, sampler "
+            "cache %llu hits %llu evictions; hitches %llu",
+            surfCount, surfBytes >> 20, targetBytes >> 20, perFrame(p.uploads), kib(p.uploadBytes), ms(p.uploadNs),
+            ms(p.clearNs), ms(p.surfaceCopyNs), (unsigned long long)p.surfaceCopies, (unsigned long long)p.cpuSurfaceCopies,
+            ms(p.invalidateNs), ms(p.scanNs), (unsigned long long)p.scanBlits, (unsigned long long)p.feedbackCopies,
+            (unsigned long long)p.rescales, ds.imagesUsed, ds.samplersUsed, (unsigned long long)ds.imageWrites,
+            (unsigned long long)ds.samplerWrites, (unsigned long long)ds.samplerHits,
+            (unsigned long long)ds.samplerEvictions, (unsigned long long)g_hitches);
+        R.perf = {};  // (swap() takes the hitch base after present)
+    }
     if (std::string clocks = clock_report(); !clocks.empty()) LOG("[dk] clocks: %s", clocks.c_str());
     overlayStats.renderBusy = busy;
     overlayStats.gpuBusyPct = behindPct;
@@ -515,14 +625,18 @@ void begin_commands() {
     dkCmdBufBindSamplerDescriptorSet(R.cmd, sampler_descriptors(), kSamplerDescriptors);
     static bool samplersWritten = false;
     if (!samplersWritten) {
-        // sampler 0: linear, clamped (the settings overlay's textures)
-        DkSampler s;
-        dkSamplerDefaults(&s);
-        s.minFilter = s.magFilter = DkFilter_Linear;
-        s.wrapMode[0] = s.wrapMode[1] = s.wrapMode[2] = DkWrapMode_ClampToEdge;
-        DkSamplerDescriptor d;
-        dkSamplerDescriptorInitialize(&d, &s);
-        dkCmdBufPushData(R.cmd, sampler_descriptors(), &d, sizeof d);
+        // the renderer's samplers (dk_surfaces.h): 0 linear, clamped (the settings overlay's textures);
+        // 1 linear and 2 nearest, clamped (kPresentLinearSamplerId, kPresentNearestSamplerId: the present pass)
+        DkSamplerDescriptor d[3];
+        for (int i = 0; i < 3; i++) {
+            DkSampler s;
+            dkSamplerDefaults(&s);
+            s.minFilter = s.magFilter = i == 2 ? DkFilter_Nearest : DkFilter_Linear;
+            s.wrapMode[0] = s.wrapMode[1] = s.wrapMode[2] = DkWrapMode_ClampToEdge;
+            dkSamplerDescriptorInitialize(&d[i], &s);
+        }
+        static_assert(kPresentLinearSamplerId == 1 && kPresentNearestSamplerId == 2, "sampler slots");
+        dkCmdBufPushData(R.cmd, sampler_descriptors(), d, sizeof d);
         dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Descriptors);
         samplersWritten = true;
     }
@@ -530,6 +644,30 @@ void begin_commands() {
     surfaces_frame_start();
     shaders_frame_start();
     draw_frame_start();
+}
+
+// The commands recorded so far go to the GPU (dk_draw.h): GX2Flush, GX2DrawDone and every few hundred draws
+// (draw.cpp), so the GPU starts on a frame before it is complete. Recording continues in the same frame.
+void submit_commands(const char* why) {
+    if (!frame_open()) return;
+    // nothing recorded since the last submit: nothing to send
+    static uint64_t lastWork = ~0ull;
+    const uint64_t work = R.drawCount + R.counts.clears + R.counts.copies + R.counts.scans + R.perf.uploads +
+                          R.perf.feedbackCopies + R.perf.flushes;
+    if (work == lastWork) return;
+    const uint64_t t0 = now_ns();
+    {
+        Stage stage("deko3d: submitting commands");
+        check_queue(why, R.frame + 1);
+        dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(R.cmd));
+        dkQueueFlush(R.queue);
+    }
+    R.perf.flushes++;
+    if (!strcmp(why, "draws")) R.perf.midFrameSubmits++;
+    R.perf.flushNs += now_ns() - t0;
+    lastWork = R.drawCount + R.counts.clears + R.counts.copies + R.counts.scans + R.perf.uploads +
+               R.perf.feedbackCopies + R.perf.flushes;
+    if (g_traceFrame) trace_event("submit (%s)", why);
 }
 
 namespace {
@@ -551,16 +689,29 @@ void present() {
     const uint64_t t2 = now_ns();
     if (capture) LOG("[dk] capture frame %llu: frame open (fence) %.2f ms, swapchain image %d after %.2f ms",
                      (unsigned long long)frame, double(t1 - t0) / 1e6, slot, double(t2 - t1) / 1e6);
+    if (g_traceFrame) trace_event("present");
     forget_state();  // the present pass binds its own targets and state
+    // state the game's draws set that the passes below do not: back to the defaults
+    static const DkViewportSwizzle kIdentity = {DkSwizzle_PositiveX, DkSwizzle_PositiveY, DkSwizzle_PositiveZ,
+                                                DkSwizzle_PositiveW};
+    dkCmdBufSetViewportSwizzles(R.cmd, 0, &kIdentity, 1);
+    dkCmdBufSetPrimitiveRestart(R.cmd, false, 0);
+    // what the frame's passes rendered is complete before the picture is sampled
+    dkCmdBufBarrier(R.cmd, DkBarrier_Fragments, DkInvalidateFlags_Image);
+    const PresentSource src = present_source();
     DkImageView color, depth;
     dkImageViewDefaults(&color, &g_swapImages[slot]);
     dkImageViewDefaults(&depth, &g_depth);
     const DkImageView* colors[] = {&color};
     dkCmdBufBindRenderTargets(R.cmd, colors, 1, &depth);
     set_view(0, 0, kWidth, kHeight);
-    dkCmdBufClearColorFloat(R.cmd, 0, DkColorMask_RGBA, 0.08f, 0.08f, 0.10f, 1.0f);
+    if (src.surface) dkCmdBufClearColorFloat(R.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);  // the bars
+    else dkCmdBufClearColorFloat(R.cmd, 0, DkColorMask_RGBA, 0.08f, 0.08f, 0.10f, 1.0f);
     dkCmdBufClearDepthStencil(R.cmd, true, 1.0f, 0xFF, 0);
-    draw_pattern(frame);
+    if (!draw_picture(src, capture)) draw_pattern(frame);
+    // the next frame draws into the buffer again: it gets its own copy only if the game copies it (gfx/gl)
+    S.scanSrc = nullptr;
+    if (S.tvSource) S.tvSource->hudFull = false;
     draw_fps();
     // the settings overlay (Minus held, overlay/overlay.h), over the pattern and the FPS counter
     if (ImDrawData* ui = overlay::frame(float(kWidth), float(kHeight), overlay_renderer_init)) overlay_draw(ui, kWidth, kHeight);
@@ -581,19 +732,75 @@ void present() {
     frame_stats();
 }
 
+// WWHD_DK_TRACE_FRAMES=n,... (or WWHD_GL_TRACE_FRAMES): those frames' passes in the log, as gfx/gl's
+std::vector<uint64_t> frame_list(const char* var, const char* fallbackVar) {
+    std::vector<uint64_t> frames;
+    const char* e = getenv(var);
+    if (!e && fallbackVar) e = getenv(fallbackVar);
+    if (e)
+        for (const char* p = e; *p;) {
+            char* end = nullptr;
+            const unsigned long long v = strtoull(p, &end, 10);
+            if (end == p) break;
+            frames.push_back(v);
+            p = end;
+            while (*p == ',' || *p == ' ') p++;
+        }
+    return frames;
+}
+
+// Frames that took much longer than the game's 33 ms are logged with what the render thread did in them
+// ([hitch], as gfx/gl): R.perf minus its copy taken after the previous present covers exactly this frame
+void check_hitch(uint64_t now) {
+    static uint64_t lastSwap = 0, lastDraws = 0, lastSkipped = 0, lastRenderWait = 0;
+    static int logged = 0;
+    const uint64_t renderWait = gx2::render_thread_wait_ns();
+    if (lastSwap && now - lastSwap > 55'000'000ull) {
+        g_hitches++;
+        if (logged < 300) {
+            logged++;
+            const Renderer::Perf& p = R.perf;
+            const Renderer::Perf& b = g_hitchBase;
+            auto ms = [](uint64_t ns) { return double(ns) / 1e6; };
+            const double frameMs = ms(now - lastSwap);
+            LOG("[hitch] frame %llu took %.0f ms: render thread busy %.0f ms, %llu draws (%.0f ms; %llu skipped), "
+                "shaders %.1f ms (%llu DKSH loads), texture uploads %llu (%.1f ms), clears/copies/invalidates/scans "
+                "%.1f ms, submits %llu (%.1f ms), present %.1f ms",
+                (unsigned long long)R.frame, frameMs, frameMs - ms(renderWait - lastRenderWait),
+                (unsigned long long)(R.drawCount - lastDraws), ms(p.drawNs - b.drawNs),
+                (unsigned long long)(R.skippedDraws - lastSkipped), ms(p.shaderNs - b.shaderNs),
+                (unsigned long long)(p.dkshLoads - b.dkshLoads), (unsigned long long)(p.uploads - b.uploads),
+                ms(p.uploadNs - b.uploadNs),
+                ms((p.clearNs + p.surfaceCopyNs + p.invalidateNs + p.scanNs) - (b.clearNs + b.surfaceCopyNs + b.invalidateNs + b.scanNs)),
+                (unsigned long long)(p.flushes - b.flushes), ms(p.flushNs - b.flushNs), ms(p.presentNs - b.presentNs));
+        }
+    }
+    lastSwap = now;
+    lastDraws = R.drawCount;
+    lastSkipped = R.skippedDraws;
+    lastRenderWait = renderWait;
+}
+
 void swap() {
     const uint64_t start = now_ns();
+    check_hitch(start);
     present();
+    R.perf.presentNs += now_ns() - start;
     g_times.presentNs += now_ns() - start;
+    g_hitchBase = R.perf;
     R.completed = std::atomic_ref<uint64_t>(R.frame).fetch_add(1) + 1;
     if (g_captureRequested.exchange(false)) {
         g_captureFrame = R.frame + 1;
         const Renderer::Counts& c = R.counts;
-        LOG("[dk] capture of frame %llu requested: its present pass follows; GX2 so far: %llu draws, %llu clears, "
-            "%llu surface copies, %llu scan copies (not executed in P1)", (unsigned long long)g_captureFrame,
-            (unsigned long long)c.draws, (unsigned long long)c.clears, (unsigned long long)c.copies,
-            (unsigned long long)c.scans);
+        LOG("[dk] capture of frame %llu requested: its passes and present pass follow; GX2 so far: %llu draws (%llu "
+            "executed), %llu clears, %llu surface copies, %llu scan copies", (unsigned long long)g_captureFrame,
+            (unsigned long long)c.draws, (unsigned long long)R.drawCount, (unsigned long long)c.clears,
+            (unsigned long long)c.copies, (unsigned long long)c.scans);
     }
+    static const std::vector<uint64_t> traced = frame_list("WWHD_DK_TRACE_FRAMES", "WWHD_GL_TRACE_FRAMES");
+    g_traceFrame = (!traced.empty() && std::find(traced.begin(), traced.end(), R.frame + 1) != traced.end()) ||
+                   R.frame + 1 == g_captureFrame;
+    g_captureDraws = R.frame + 1 == g_captureFrame;
 }
 
 // start-up: a bar filling while shaders_init loads the DKSH caches (as gfx/gl shader_cache_progress), with its

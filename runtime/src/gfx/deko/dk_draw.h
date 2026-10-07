@@ -44,6 +44,13 @@ void draw_frame_start();
 // continues in the same frame (same fence, stream slice and descriptor sets).
 void submit_commands(const char* why);
 
+// draws skipped since the last call, by reason (backend.cpp's stats line; R.skippedDraws counts them all)
+struct DrawSkips {
+    uint64_t noFetchShader = 0, shaderPending = 0, shaderFailed = 0, noTarget = 0, scissorEmpty = 0, streamFull = 0,
+             unsupported = 0;
+};
+DrawSkips draw_skips_take();
+
 // GamePad-only surfaces (WWHD_DK_SKIP_GAMEPAD, as gfx/gl draw.cpp)
 bool gamepad_only(const Surface* s);
 bool skip_gamepad();
