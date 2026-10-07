@@ -1,0 +1,22 @@
+# uamtest2 (Switch homebrew): glsl_to_deko + uamlib over the console's shadercache_gl.bin, heap and times
+# logged (uamtest.cpp). Built by build.sh with devkitPro's toolchain file; needs nothing of the game.
+cmake_minimum_required(VERSION 3.20)
+project(uamtest2 C CXX)
+if(NOT DEFINED NX_ROOT)
+  message(FATAL_ERROR "uamtest2 is a Switch program: configure with -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake")
+endif()
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+set(WWHD_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
+add_subdirectory(${WWHD_ROOT}/runtime/third_party/uam ${CMAKE_BINARY_DIR}/uam EXCLUDE_FROM_ALL)
+find_package(ZLIB REQUIRED)
+add_executable(uamtest2 uamtest.cpp ${WWHD_ROOT}/runtime/src/gfx/deko/glsl_convert.cpp
+                        ${WWHD_ROOT}/runtime/src/gfx/deko/shader_files.cpp)
+target_include_directories(uamtest2 PRIVATE ${WWHD_ROOT}/runtime/src/gfx/deko)
+set_target_properties(uamtest2 PROPERTIES CXX_STANDARD 17)
+target_compile_options(uamtest2 PRIVATE -Wall -Wextra)
+target_link_libraries(uamtest2 PRIVATE uamlib ZLIB::ZLIB)
+target_link_options(uamtest2 PRIVATE -Wl,--gc-sections)
+nx_generate_nacp(OUTPUT uamtest2.nacp NAME "uamtest2" AUTHOR "SwitchWakerHD" VERSION "0.2.0")
+nx_create_nro(uamtest2 NACP uamtest2.nacp)
