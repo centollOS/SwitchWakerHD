@@ -758,13 +758,14 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
     LOG("[dk] resources us per draw: targets %.2f + uniform blocks %.2f + textures %.2f (misses %.2f: %.1f/frame, "
         "%.2f us each; table %.0f%% of %.0f/frame) + ufBlock %.2f + descriptors %.2f; binds (in state) %.2f us: "
         "textures %.2f calls %.2f handles of %.2f slots, uniform blocks %.2f calls %.2f buffers of %.2f slots; guest "
-        "uniform blocks %.2f/draw (%.0f%% already in the stream, %.0f%% by the memo); ufBlock mode %d: %.0f/frame, %.0f%% unchanged, %.0f "
-        "slices (%.0f KiB) + %.0f pushes (%.1f KiB) per frame",
+        "uniform blocks %.2f/draw (%.0f%% already in the stream, %.0f%% by the memo); ufBlock mode %d: %.0f/frame, "
+        "%.0f%% unchanged, %.0f slices (%.0f KiB) + %.0f pushes (%.1f KiB) per frame",
         us(p.targetNs), us(p.uboNs), us(p.textureNs), us(p.textureMissNs), perFrame(p.textureMisses),
         p.textureMisses ? double(p.textureMissNs) / 1e3 / double(p.textureMisses) : 0.0,
         pct(p.tableHits, p.tableLookups), perFrame(p.tableLookups), us(p.uniformNs), us(p.descriptorNs), us(p.bindNs),
         perDraw(p.texBindCalls), perDraw(p.texHandles), perDraw(p.texWanted), perDraw(p.uboBindCalls),
-        perDraw(p.uboBuffers), perDraw(p.uboWanted), perDraw(p.uboBlocks), pct(p.uboReused, p.uboBlocks), pct(p.uboMemoHits, p.uboBlocks), g_ufMode,
+        perDraw(p.uboBuffers), perDraw(p.uboWanted), perDraw(p.uboBlocks), pct(p.uboReused, p.uboBlocks),
+        pct(p.uboMemoHits, p.uboBlocks), g_ufMode,
         perFrame(u.blocks), pct(u.unchanged, u.blocks), perFrame(u.slices), perFrame(u.sliceBytes) / 1024.0,
         perFrame(u.pushes), perFrame(u.pushBytes) / 1024.0);
 }
@@ -1100,8 +1101,9 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         if (slot < 0 || slot >= kMaxUniformBuffers) continue;
         const bool aoNoise = g_aoMode == 2 && sh->vertex && is_occlusion(r, true);
         const float(*texScale)[2] = g_unitScale[sh->vertex ? kVertexStage : kPixelStage];
-        const StreamSlice u = g_ufMode ? pack_uniforms_cached(g_ufMode, sh->vertex, *sh, r, g_drawScale, g_drawScale, texScale, aoNoise)
-                                       : pack_uniforms(sh->vertex, *sh, r, g_drawScale, g_drawScale, texScale, aoNoise);
+        const StreamSlice u =
+            g_ufMode ? pack_uniforms_cached(g_ufMode, sh->vertex, *sh, r, g_drawScale, g_drawScale, texScale, aoNoise)
+                     : pack_uniforms(sh->vertex, *sh, r, g_drawScale, g_drawScale, texScale, aoNoise);
         if (!u) {
             R.perf.streamFullSkips++;
             skip(g_drawSkips.streamFull);

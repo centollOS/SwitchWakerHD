@@ -127,6 +127,36 @@ cambios, deko3d debug y release). `kConvertRevision` no cambió: `shadercache_dk
    `[dk] GPU passes`, `[dk] internal resolution`).
 Si algo se cierra: el log tiene las últimas líneas (`FATAL`, `[dk] deko3d error in ...`, `queue is in an error state`).
 
+**P4, carril `p4-resources` (compilado; SIN probar en hardware).** Objetivo: la etapa "resources" del draw (3,1-3,5 µs
+por draw en la primera medida release) a ≤ 1,5 µs. Cada cambio tiene su interruptor (`=0` vuelve al camino anterior) y
+sale en la línea `[dk] resources (P4): ...` al arrancar.
+- **Medida:** nueva línea cada 5 s `[dk] resources us per draw: targets + uniform blocks + textures (misses: n/frame,
+  µs cada uno; table %) + ufBlock + descriptors; binds (in state) µs: textures calls/handles of slots, uniform blocks
+  calls/buffers of slots; guest uniform blocks /draw (% ya en el stream, % por la memo); ufBlock mode N: /frame,
+  % unchanged, slices (KiB) + pushes (KiB) per frame`. Las partes suman el `resources` de la línea `draws per frame`.
+- **Tabla de texturas** (`WWHD_DK_TEX_TABLE`, activa): detrás de la entrada por unidad (la última búsqueda de la unidad),
+  1024 entradas por (7 palabras de recurso, 3 de sampler, compare) con las mismas reglas de validez (`R.surfaceEpoch`,
+  `R.textureEpoch`). Los fallos (15-23 % de ~2700-3900 búsquedas/frame) rehacían `find_or_create_surface` (multimap),
+  `sampled_view_id` y `sampler_id` (unordered_map). Esperado: −0,2..0,5 µs/draw; acierto de la cache de texturas > 95 %.
+- **ufBlock por shader** (`WWHD_DK_UF_CACHE=0|1|2`, 2 por defecto): una lista de operaciones por shader (sin recorrer las
+  listas del decompilador por draw) y una copia de los valores; cada valor se compara con la copia. Modo 2: un slice por
+  shader y frame escrito entero por la CPU en su primer draw del frame; después solo los trozos de 16 bytes que cambian
+  van por `dkCmdBufPushConstants` (7 palabras + datos; en deko3d todo UBO tiene semántica de push constants: los draws
+  anteriores conservan sus valores) y la dirección no cambia, así que el rebind se salta. Modo 1: slice nuevo solo si
+  algo cambió. Modo 0: el `pack_uniforms` de P2 (bloque entero a un slice nuevo y rebind en cada draw y etapa).
+  Esperado: −0,3..0,6 µs/draw en ufBlock y algo menos de memoria de comandos y binds de UBO en state.
+- **Memo de bloques uniform del guest** (`WWHD_DK_UBO_MEMO`, activa): mismo bloque (dirección, tamaño) que el último de
+  la etapa en el mismo frame y `R.streamGen` → mismo slice, sin la sonda de la tabla de `stream_guest`. Esperado: poco
+  (−0,05..0,15 µs/draw; pocos draws usan bloques del guest, ~130 B/draw).
+- **Revisado sin cambio:** los binds de texturas y UBOs ya se emitían solo para los slots cambiados (`bind_runs`, cache
+  invalidada por `forget_state` y al empezar el frame; la línea nueva cuenta llamadas y handles). Escrituras de
+  descriptores con `dkCmdBufPushData`: ~3-4 por segundo en el log, nada que agrupar. Memo + combos de shaders ya suman
+  ~100 % (lo que queda es el coste del camino de combos, del carril de lookup).
+- **Total esperado:** resources de ~3,1-3,5 a ~2,2-2,6 µs/draw; el siguiente log dice qué parte queda (si son los
+  targets o fallos de cache de la CPU, el siguiente paso es otro). A/B en hardware: `WWHD_DK_UF_CACHE=0`,
+  `WWHD_DK_TEX_TABLE=0`, `WWHD_DK_UBO_MEMO=0` en `env.txt`. Si algo sale mal dibujado con el modo 2 (matrices o
+  constantes de otro objeto), probar `WWHD_DK_UF_CACHE=1` y luego `=0`.
+
 ## P2: carriles (interfaces en la rama `deko3d`)
 
 Tres ramas (`p2-surf`, `p2-shader`, `p2-draw`) parten de `deko3d` (`git merge deko3d`) y trabajan en paralelo, cada
