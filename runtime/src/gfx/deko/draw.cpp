@@ -1394,7 +1394,5 @@ void trace_event(const char* fmt, ...) {
     va_end(ap);
     LOG("[trace] frame %llu %s", (unsigned long long)(R.frame + 1), b);
 }
-// GPU time per render pass: P3 (dkCmdBufReportCounter timestamps)
-void gpu_pass_mark(const char*, const Surface*, const Surface*) {}
 
 }  // namespace gfxdk

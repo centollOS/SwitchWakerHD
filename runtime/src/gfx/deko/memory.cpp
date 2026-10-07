@@ -290,6 +290,10 @@ bool code_load(DkShader& shader, const void* dksh, uint32_t size, const char* na
     return true;
 }
 
+QueryMemory query_memory() {
+    return {static_cast<uint8_t*>(dkMemBlockGetCpuAddr(g_queries)), dkMemBlockGetGpuAddr(g_queries)};
+}
+
 DkGpuAddr image_descriptors() { return dkMemBlockGetGpuAddr(g_descriptors); }
 DkGpuAddr sampler_descriptors() { return dkMemBlockGetGpuAddr(g_descriptors) + kImageDescriptors * 32; }
 

@@ -57,6 +57,12 @@ void image_free_later(const ImageAlloc& a);  // freed when the GPU is done with 
 bool code_load(DkShader& shader, const void* dksh, uint32_t size, const char* name);
 DkGpuAddr image_descriptors();
 DkGpuAddr sampler_descriptors();
+// kQuerySize bytes for counters and timestamps (dkCmdBufReportCounter), CPU-uncached (backend.cpp GPU passes)
+struct QueryMemory {
+    uint8_t* cpu = nullptr;
+    DkGpuAddr gpu = 0;
+};
+QueryMemory query_memory();
 struct MemoryStats {
     uint64_t cmdBytesMax = 0, cmdBytesSum = 0;  // command memory fed per frame (64 KB steps)
     uint64_t cmdOverflows = 0;                  // frames that needed more than kCmdSliceSize

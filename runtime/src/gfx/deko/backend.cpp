@@ -22,6 +22,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "audio_out.h"
@@ -491,6 +492,190 @@ std::atomic<bool> g_captureRequested{false};
 uint64_t g_captureFrame = ~0ull;
 bool capturing() { return R.frame + 1 == g_captureFrame; }
 
+// WWHD_DYNAMIC_RES (on unless =0; gfx/gl's semantics): dynamic resolution needs the GPU passes' idle time
+bool dynamic_res_requested() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_DYNAMIC_RES");
+        return !(e && atof(e) == 0.0 && *e == '0');
+    }();
+    return on;
+}
+
+// ---- GPU time per render pass (as gfx/gl's GpuPasses; WWHD_DK_GPU_PASSES, or WWHD_GL_GPU_PASSES, on unless =0).
+// Every 30th frame, a timestamp (dkCmdBufReportCounter DkCounter_Timestamp: written when the work before it
+// has passed the ROP, so a pass's pixel work counts in that pass) goes at the frame's start, where its render
+// targets change, at clears, copies and present; the next sampled frame reads them (30 frames later: frame_begin
+// waited for that frame's fence long before) and the 5 s report lists the passes that took the most GPU time.
+
+// The GPU's timestamps do not count real nanoseconds on the Switch: the Tegra X1's GPU timer runs at 19.2 MHz
+// and is read as if it ran at 31.25 MHz (deko3d's dkTimestampToNs: x625/384, the starting factor). The factor
+// is measured as gfx/gl GpuClock does: the sampled frames' first timestamps against the CPU clock when they were
+// submitted, over the whole session.
+struct GpuClock {
+    bool have = false;
+    uint64_t cpu0 = 0, gpu0 = 0;
+    double factor = 31.25 / 19.2;
+    bool logged = false;
+    void sample(uint64_t cpuNs, uint64_t gpuTs) {
+        if (!have) {
+            have = true;
+            cpu0 = cpuNs;
+            gpu0 = gpuTs;
+            return;
+        }
+        if (gpuTs <= gpu0 || cpuNs - cpu0 < 4'000'000'000ull) return;
+        factor = double(cpuNs - cpu0) / double(gpuTs - gpu0);
+        if (!logged && cpuNs - cpu0 > 30'000'000'000ull) {
+            logged = true;
+            LOG("[dk] GPU timer: %.4f real ns per GPU ns (measured over %.0f s); GPU times in this log are real time",
+                factor, double(cpuNs - cpu0) / 1e9);
+        }
+    }
+} gpuClock;
+
+bool g_gpuPassSampling = false;  // the frame being recorded is sampled
+
+struct GpuPasses {
+    static constexpr uint32_t kSlots = kQuerySize / 16;  // 16 bytes per report: counter value, timestamp
+    struct Mark {
+        uint32_t slot;
+        std::string label;
+        uint64_t draws;
+        uint64_t cpuNs;  // when it was recorded
+    };
+    // the GPU idle at a sampled frame's start, against the CPU time from the frame's start to the first pass
+    // being recorded: equal when the GPU waits for the game to send the frame (not for its own work)
+    double idleSumMs = 0, queueSumMs = 0;
+    bool on = false, ready = false, fullLogged = false;
+    uint64_t startCpu = 0;                    // when the sampled frame's start was submitted (GpuClock)
+    double lastIdleMs = -1, lastBusyMs = -1;  // the last sampled frame: GPU idle at its start, and the rest
+    uint64_t collected = 0;                   // sampled frames read
+    uint64_t incomplete = 0;                  // sampled frames whose timestamps were not all written (skipped)
+    std::vector<Mark> marks;                  // of the sampled frame whose results are pending
+    struct Total {
+        double ms = 0;
+        uint64_t draws = 0;
+    };
+    std::unordered_map<std::string, Total> totals;
+    uint64_t frames = 0;
+    void setup() {
+        ready = true;
+        const char* e = getenv("WWHD_DK_GPU_PASSES");
+        if (!e) e = getenv("WWHD_GL_GPU_PASSES");
+        on = !(e && *e == '0') || dynamic_res_requested();  // dynamic resolution steps up by the sampled idle time
+        LOG("[dk] GPU passes: %s", on ? "timestamps every 30th frame ('[dk] GPU passes' every 5 s; WWHD_DK_GPU_PASSES=0 "
+                                        "turns them off unless dynamic resolution is on)"
+                                      : "off (WWHD_DK_GPU_PASSES=0)");
+    }
+    uint64_t timestamp(uint32_t slot) const {
+        uint64_t t;
+        memcpy(&t, query_memory().cpu + size_t(slot) * 16 + 8, 8);
+        return t;
+    }
+    void collect() {  // the previous sampled frame's results
+        if (marks.size() < 2) {
+            marks.clear();
+            return;
+        }
+        std::vector<uint64_t> t(marks.size());
+        for (size_t i = 0; i < marks.size(); i++) {
+            t[i] = timestamp(marks[i].slot);
+            // (cleared when recorded: a zero, or time going backwards, is a report the GPU did not write)
+            if (!t[i] || (i && t[i] < t[i - 1])) {
+                incomplete++;
+                marks.clear();
+                return;
+            }
+        }
+        gpuClock.sample(startCpu, t[0]);
+        const double k = gpuClock.factor / 1e6;
+        for (size_t i = 0; i + 1 < marks.size(); i++) {
+            Total& x = totals[marks[i].label];
+            x.ms += double(t[i + 1] - t[i]) * k;
+            x.draws += marks[i + 1].draws - marks[i].draws;
+        }
+        lastIdleMs = double(t[1] - t[0]) * k;
+        idleSumMs += lastIdleMs;
+        queueSumMs += double(marks[1].cpuNs - marks[0].cpuNs) / 1e6;
+        lastBusyMs = double(t.back() - t[1]) * k;
+        collected++;
+        frames++;
+        marks.clear();
+    }
+    // begin_commands of `frame`, before anything of the frame is recorded
+    void frame_start(uint64_t frame) {
+        if (!ready) setup();
+        g_gpuPassSampling = false;
+        if (!on || frame % 30) return;
+        collect();
+        g_gpuPassSampling = true;
+        startCpu = now_ns();
+        mark("frame start", nullptr, nullptr);
+        // sent now: the GPU writes it when it is done with the previous frame's work, not when the first pass
+        // is submitted (what lies between is the GPU idle at the frame's start)
+        check_queue("the GPU pass sampling's frame start", frame);
+        dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(R.cmd));
+        dkQueueFlush(R.queue);
+    }
+    void mark(const char* kind, const Surface* color, const Surface* depth) {
+        if (marks.size() >= kSlots) {
+            if (!fullLogged) {
+                fullLogged = true;
+                LOG("[dk] GPU passes: more than %u marks in frame %llu; the rest of it is not timed", kSlots,
+                    (unsigned long long)R.frame + 1);
+            }
+            return;
+        }
+        char label[96];
+        if (color || depth) {
+            const Surface* s = color ? color : depth;
+            snprintf(label, sizeof label, "%s %ux%u%s%s", kind, s->width, s->height,
+                     color ? (" color " + std::to_string(color->format)).c_str() : "",
+                     depth ? (" depth " + std::to_string(depth->format)).c_str() : "");
+        } else
+            snprintf(label, sizeof label, "%s", kind);
+        const uint32_t slot = uint32_t(marks.size());
+        memset(query_memory().cpu + size_t(slot) * 16, 0, 16);
+        dkCmdBufReportCounter(R.cmd, DkCounter_Timestamp, query_memory().gpu + DkGpuAddr(slot) * 16);
+        marks.push_back({slot, label, R.drawCount, now_ns()});
+    }
+    void frame_end() {  // present, before the frame's fence
+        if (!g_gpuPassSampling) return;
+        mark("frame end", nullptr, nullptr);
+        g_gpuPassSampling = false;
+    }
+    std::string report() {
+        if (!frames) return "";
+        std::vector<std::pair<double, std::string>> v;
+        double sum = 0;
+        for (auto& [label, t] : totals) {
+            v.push_back({t.ms / double(frames), label});
+            sum += t.ms;
+        }
+        std::sort(v.rbegin(), v.rend());
+        char head[128];
+        snprintf(head, sizeof head, "%.1f ms a frame in %zu kinds of passes (%llu sampled frames%s):", sum / double(frames),
+                 totals.size(), (unsigned long long)frames,
+                 incomplete ? (", " + std::to_string(incomplete) + " incomplete skipped").c_str() : "");
+        std::string out = head;
+        for (size_t i = 0; i < v.size() && i < 10; i++) {
+            char item[160];
+            snprintf(item, sizeof item, " %s%s %.1f ms (%.0f draws)", i ? ";" : "", v[i].second.c_str(), v[i].first,
+                     double(totals[v[i].second].draws) / double(frames));
+            out += item;
+        }
+        char tail[160];
+        snprintf(tail, sizeof tail, "; frame start: GPU idle %.1f ms, first pass recorded %.1f ms after the frame's start (CPU)",
+                 idleSumMs / double(frames), queueSumMs / double(frames));
+        out += tail;
+        idleSumMs = queueSumMs = 0;
+        totals.clear();
+        frames = 0;
+        incomplete = 0;
+        return out;
+    }
+} gpuPasses;
+
 // ---- statistics every 5 s: frames, the GX2 commands counted, where the render thread spent its time,
 // command and stream memory per frame, the heap, the clocks
 struct FrameTimes {
@@ -592,6 +777,7 @@ void frame_stats() {
             (unsigned long long)ds.samplerEvictions, (unsigned long long)g_hitches);
         R.perf = {};  // (swap() takes the hitch base after present)
     }
+    if (std::string passes = gpuPasses.report(); !passes.empty()) LOG("[dk] GPU passes: %s", passes.c_str());
     if (std::string clocks = clock_report(); !clocks.empty()) LOG("[dk] clocks: %s", clocks.c_str());
     overlayStats.renderBusy = busy;
     overlayStats.gpuBusyPct = behindPct;
@@ -607,6 +793,11 @@ void frame_stats() {
 }
 
 }  // namespace
+
+// GPU time per render pass (dk_draw.h): a timestamp in sampled frames
+void gpu_pass_mark(const char* kind, const Surface* color, const Surface* depth) {
+    if (g_gpuPassSampling) gpuPasses.mark(kind, color, depth);
+}
 
 // The frame's commands start here (dk.h): at the first GX2 command that records after a present, or at the
 // present itself when none did
@@ -643,6 +834,7 @@ void begin_commands() {
         dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Descriptors);
         samplersWritten = true;
     }
+    gpuPasses.frame_start(frame);  // (every 30th frame: its start's timestamp, sent to the GPU at once)
     // the lanes' per-frame work (docs/deko3d-plan.md, "P2 lanes")
     surfaces_frame_start();
     shaders_frame_start();
@@ -693,6 +885,7 @@ void present() {
     if (capture) LOG("[dk] capture frame %llu: frame open (fence) %.2f ms, swapchain image %d after %.2f ms",
                      (unsigned long long)frame, double(t1 - t0) / 1e6, slot, double(t2 - t1) / 1e6);
     if (g_traceFrame) trace_event("present");
+    gpu_pass_mark("present", nullptr, nullptr);
     forget_state();  // the present pass binds its own targets and state
     // state the game's draws set that the passes below do not: back to the defaults
     static const DkViewportSwizzle kIdentity = {DkSwizzle_PositiveX, DkSwizzle_PositiveY, DkSwizzle_PositiveZ,
@@ -738,6 +931,7 @@ void present() {
     draw_fps();
     // the settings overlay (Minus held, overlay/overlay.h), over the pattern and the FPS counter
     if (ImDrawData* ui = overlay::frame(float(kWidth), float(kHeight), overlay_renderer_init)) overlay_draw(ui, kWidth, kHeight);
+    gpuPasses.frame_end();
     frame_end();
     const uint64_t t3 = now_ns();
     check_queue("the submit", frame);
