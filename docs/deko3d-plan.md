@@ -11,6 +11,13 @@ código o logs; **[S]** = supuesto a confirmar. Estado: **P5 hecho, deko3d por d
 shaders nuevos (warp tour headless) hay que recuperar esa build; la consola sigue añadiendo los shaders que ve
 a `shadercache_gl.bin` y `tools/switch/dksh_cache` los compila.
 
+**Picto Box (2026-10-07; compilado, probado en escritorio con Vulkan, SIN probar en hardware):** las fotos
+salían negras. Causas y cambios en `docs/switch-port.md` ("Picto Box: black pictures"):
+- búfer de color 3D dibujado por capas y una copia 3D para muestrearlo (`volume_source`);
+- RGBA8 y su gemelo sRGB comparten superficie (`srgb_twins`), con vistas en el otro formato;
+- superficies lineales escritas por la GPU que se copian a la memoria del juego (`guest_writeback`), en
+  GX2DrawDone o antes de que vuelva GX2CopySurface.
+
 **P5 hecho (2026-10-07): deko3d es el renderer por defecto en Switch.** `tools/switch/build.sh` →
 `build/switch-dk/wwhd.nro` (hbmenu: "SwitchWakerHD", librería release; `WWHD_DEKO3D_DEBUG_LIB=ON` →
 `wwhd_dk_debug.nro`, "SwitchWakerHD (deko3d debug)"). GL queda como respaldo: `WWHD_RENDERER=OPENGL` →

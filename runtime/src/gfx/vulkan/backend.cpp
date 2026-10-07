@@ -758,6 +758,7 @@ void flush() {
   drain_submissions();
 }
 void wait_idle() {
+  guest_writeback();  // (CPU-read targets: their pixels into guest memory)
   flush();
   vk_check(vkDeviceWaitIdle(R.device), "device idle");
 }
