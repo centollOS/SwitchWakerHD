@@ -106,6 +106,8 @@ struct SurfaceImage {
     DkImageType type = DkImageType_2D;
     uint32_t pw = 0, ph = 0;      // pixels (the guest size times the surface's scale)
     uint32_t layers = 1;          // array layers (1 for 3D: depth is `slices`)
+    uint32_t flags = 0;           // its DkImageFlags and format (an image kept for a rescale is reused only with
+    DkImageFormat format = DkImageFormat_None;  // the same)
     uint32_t imageId = 0;         // descriptor of the default view (all mips and layers, identity swizzle); 0: none
     // sampled views by (view type, format, swizzle, first mip, mip count) key: their descriptor slots
     std::unordered_map<uint64_t, uint32_t> views;
@@ -216,17 +218,21 @@ struct PresentSource {
 // game copied it (gfx/gl present); writes its view into kPresentImageId (commit_descriptors() follows)
 PresentSource present_source();
 
-// ---- internal resolution (P3; scale 1 until then)
+// ---- internal resolution (gfx/gl's, surfaces.cpp): screen-shaped render targets get res_scale() x their guest
+// size (WWHD_RES_SCALE, 0.5..2; dynamic resolution, backend.cpp, lowers it while the GPU is the limit)
 inline uint32_t scaled_size(uint32_t v, float scale) {
     return scale == 1.0f ? v : std::max<uint32_t>(1, uint32_t(v * scale + 0.99f));
 }
-float res_scale();                // the factor render targets get this frame
-void set_res_scale(float scale);  // from the next frame on
-void latch_res_scale();           // present: apply a requested change
+float res_scale();                // the factor render targets get this frame (render thread)
+float requested_res_scale();      // the factor asked for (any thread)
+float res_scale_shown();          // the factor in use, for the settings overlay (any thread)
+void set_res_scale(float scale);  // from the next frame on (any thread)
+void latch_res_scale();           // present: apply a requested change; the frame's allocation budget
 void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld = false);
 // a render target about to be written: the scale it should have unless that needs a new image and this
 // frame's allocations are used up (false: still at its old scale); force: in any case
 bool fit_scale(Surface* s, bool keepContents, bool force = false);
+size_t rescale_pool_bytes();      // images a rescale let go, kept for the next one (stats)
 
 // once per frame from begin_commands: retire freed descriptor slots and images the GPU is done with
 void surfaces_frame_start();

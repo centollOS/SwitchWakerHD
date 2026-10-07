@@ -16,6 +16,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
@@ -501,6 +502,91 @@ bool dynamic_res_requested() {
     return on;
 }
 
+// ---- dynamic resolution (as gfx/gl's DynamicRes; WWHD_DYNAMIC_RES, on unless =0; =0.x sets the lowest factor,
+// default 0.75): when the GPU is the limit (frames below 30 per second with the GPU still on the previous frame
+// at present), screen-shaped render targets drop to a lower internal resolution, in steps of 0.05, by what the
+// frame rate says is missing; with GPU time to spare at the start of frames (GpuPasses, below) it steps back up.
+// A step up that the GPU cannot hold is undone, and the next try waits twice as long (up to a minute). The HUD
+// stays at full resolution (draw.cpp). Starts at the requested factor (WWHD_RES_SCALE, at most 1 by default).
+struct DynamicRes {
+    bool on = false, ready = false;
+    float lo = 0.75f, hi = 1.0f, scale = 1.0f;
+    uint64_t windowStart = 0, frames = 0, behind = 0;
+    uint64_t lastDown = 0, lastUp = 0, backoff = 4'000'000'000ull, calmSince = 0;
+    uint32_t idleSamples = 0;  // sampled frames in a row with enough GPU time to spare
+    bool settle = false;
+    uint64_t idleSeen = 0;     // GpuPasses frames already looked at
+    void setup() {
+        ready = true;
+        hi = res_scale();
+        const char* e = getenv("WWHD_DYNAMIC_RES");
+        on = dynamic_res_requested();
+        if (e && atof(e) > 0) lo = std::clamp(float(atof(e)), 0.5f, 1.0f);
+        lo = std::min(lo, hi);
+        scale = hi;
+        if (on) LOG("[dk] dynamic resolution: %.2f to %.2f when the GPU is the limit (WWHD_DYNAMIC_RES)", lo, hi);
+        else LOG("[dk] dynamic resolution: off (WWHD_DYNAMIC_RES=0); internal resolution stays %.2f", hi);
+    }
+    static float step_down(float s) { return std::floor(s * 20.0f - 0.01f) / 20.0f; }
+    void apply(float s, const char* why, double fps, double behindPct) {
+        s = std::clamp(s, lo, hi);
+        if (s == scale) return;
+        LOG("[dk] dynamic resolution %.2f -> %.2f (%s: %.1f fps, GPU still busy at %.0f%% of presents)", scale, s, why, fps,
+            behindPct);
+        scale = s;
+        set_res_scale(s);
+        settle = true;
+    }
+    // once a frame at present
+    void frame(uint64_t now, bool gpuBehind, double idleMs, double busyMs, uint64_t passFrames) {
+        if (!ready) setup();
+        if (!on) return;
+        if (!windowStart) windowStart = now;
+        frames++;
+        behind += gpuBehind;
+        // GPU time to spare: the idle start of a sampled frame, enough for one step up with a margin
+        if (passFrames != idleSeen && idleMs >= 0 && busyMs > 0) {
+            // as if all of the GPU's work grew with the pixel count, plus 3 ms to spare
+            idleSeen = passFrames;
+            const float next = std::min(hi, scale + 0.05f);
+            const double grow = double(next * next) / double(scale * scale) - 1.0;
+            idleSamples = idleMs >= 3.0 + busyMs * grow ? idleSamples + 1 : 0;
+        }
+        if (now - windowStart < 500'000'000ull) return;
+        const double secs = double(now - windowStart) / 1e9, fps = double(frames) / secs;
+        const double behindPct = 100.0 * double(behind) / double(frames);
+        windowStart = now;
+        frames = behind = 0;
+        if (settle) {  // the window after a change (render targets resampled, the GPU's queue draining)
+            settle = false;
+            return;
+        }
+        if (fps < 29.0 && behindPct >= 50) {
+            // the share of GPU time to cut (to 31.5 ms frames), most of it scales with the pixel count;
+            // at most three steps at a time (each step costs the render targets a resample)
+            const double cut = 1.0 - 31.5 / (1000.0 / fps), pixels = std::max(0.5, 1.0 - cut / 0.85);
+            float s = std::min(step_down(scale), std::floor(float(scale * std::sqrt(pixels)) * 20.0f) / 20.0f);
+            s = std::max(s, std::floor(scale * 20.0f - 0.01f) / 20.0f - 0.10f);
+            if (lastUp && now - lastUp < 4'000'000'000ull) backoff = std::min<uint64_t>(backoff * 2, 64'000'000'000ull);
+            lastDown = calmSince = now;
+            lastUp = 0;
+            idleSamples = 0;
+            apply(s, "GPU-bound", fps, behindPct);
+            return;
+        }
+        if (behindPct > 10) {
+            calmSince = now;
+            idleSamples = 0;
+        }
+        if (now - calmSince > 30'000'000'000ull) backoff = 4'000'000'000ull;
+        if (scale < hi && idleSamples >= 3 && fps >= 29.7 && now - lastDown >= backoff && now - calmSince >= 2'000'000'000ull) {
+            lastUp = now;
+            idleSamples = 0;
+            apply(std::min(hi, scale + 0.05f), "GPU time to spare", fps, behindPct);
+        }
+    }
+} dynamicRes;
+
 // ---- GPU time per render pass (as gfx/gl's GpuPasses; WWHD_DK_GPU_PASSES, or WWHD_GL_GPU_PASSES, on unless =0).
 // Every 30th frame, a timestamp (dkCmdBufReportCounter DkCounter_Timestamp: written when the work before it
 // has passed the ROP, so a pass's pixel work counts in that pass) goes at the frame's start, where its render
@@ -775,6 +861,10 @@ void frame_stats() {
             (unsigned long long)p.rescales, ds.imagesUsed, ds.samplersUsed, (unsigned long long)ds.imageWrites,
             (unsigned long long)ds.samplerWrites, (unsigned long long)ds.samplerHits,
             (unsigned long long)ds.samplerEvictions, (unsigned long long)g_hitches);
+        LOG("[dk] internal resolution %.2f (requested %.2f; dynamic %s); %llu render targets resampled, %llu from kept "
+            "images (%zu MiB kept); HUD at full resolution in %.0f%% of frames",
+            double(res_scale()), double(requested_res_scale()), dynamicRes.on ? "on" : "off", (unsigned long long)p.rescales,
+            (unsigned long long)p.poolHits, rescale_pool_bytes() >> 20, 100.0 * perFrame(p.hudSwitches));
         R.perf = {};  // (swap() takes the hitch base after present)
     }
     if (std::string passes = gpuPasses.report(); !passes.empty()) LOG("[dk] GPU passes: %s", passes.c_str());
@@ -873,6 +963,7 @@ void present() {
     const bool capture = capturing();
     const uint64_t t0 = now_ns();
     g_times.presents++;
+    const bool gpuBehind = !frame_done(R.frame);  // the GPU is still on the previous frame (dynamic resolution)
     begin_commands();  // (already open when a GX2 command recorded in this frame)
     const uint64_t t1 = now_ns();
     int slot;
@@ -947,6 +1038,8 @@ void present() {
     g_times.acquireNs += t2 - t1;
     g_times.submitNs += t4 - t3;
     frame_stats();
+    dynamicRes.frame(now_ns(), gpuBehind, gpuPasses.lastIdleMs, gpuPasses.lastBusyMs, gpuPasses.collected);
+    latch_res_scale();  // a new internal resolution from the next frame on
 }
 
 // WWHD_DK_TRACE_FRAMES=n,... (or WWHD_GL_TRACE_FRAMES): those frames' passes in the log, as gfx/gl's
@@ -1127,7 +1220,7 @@ void set_picture_grade(const PictureGrade& g) {
 }
 int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }
-float dynamic_res_scale() { return 1.0f; }  // no dynamic resolution before the game's picture is drawn (P3)
+float dynamic_res_scale() { return gfxdk::res_scale_shown(); }  // the internal resolution in use (dynamic or not)
 std::string clock_report_now() { return gfxdk::clock_report(); }
 void request_capture() { gfxdk::g_captureRequested = true; }
 }  // namespace gfxsw
@@ -1204,8 +1297,8 @@ const Backend& deko3d_backend() {
         b.request_tv_dump = [](const std::string&, int) {};
         b.request_capture = [] { gfxsw::request_capture(); };
         b.shutdown = [] { gfxdk::save_shader_cache(); };  // the queue belongs to the render thread
-        b.res_scale = [] { return 1.0f; };
-        b.set_res_scale = [](float) {};
+        b.res_scale = gfxdk::requested_res_scale;
+        b.set_res_scale = gfxdk::set_res_scale;
         b.ao_mode = gfxdk::ao_mode;  // (read-only, as gfx/gl: env.txt chooses it)
         b.set_ao_mode = [](int) {};
         b.ao_hires = [] { return false; };

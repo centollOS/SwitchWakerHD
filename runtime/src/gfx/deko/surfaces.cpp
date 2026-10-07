@@ -13,6 +13,7 @@
 // Render thread only.
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -414,6 +415,8 @@ void make_image(Surface* s, SurfaceImage& img, uint32_t pw, uint32_t ph) {
                       : img.type == DkImageType_Cubemap      ? 6
                                                              : s->slices;
     m.mipLevels = s->mips;
+    img.flags = m.flags;
+    img.format = m.format;
     dkImageLayoutInitialize(&img.layout, &m);
     const uint64_t size = dkImageLayoutGetSize(&img.layout);
     if (size >= (1ull << 31)) throw std::runtime_error("[dk] surface too large for the image heap: " + describe(s));
@@ -584,8 +587,10 @@ void upload_surface(Surface* s) {
     if (!s->dirty && hash == s->contentHash) return;
     R.perf.uploads++;
     before_write(s);
-    // (internal resolution, P3: a scaled render target gets the guest data at the guest size, then
-    // resampled; until then every surface has scale 1)
+    // a scaled render target (its first contents, or a CPU copy into it): the guest data at the guest size,
+    // then resampled to the internal resolution (gfx/gl)
+    const float scale = s->scale;
+    if (scale != 1.0f) rescale_surface(s, 1.0f, false);
     transfer_begin();
     for (uint32_t level = 0; level < levels; ++level) {
         const LevelGeom lg = level_geom(s, level);
@@ -604,31 +609,206 @@ void upload_surface(Surface* s) {
     s->writeSeq = next_write_seq();
     s->dirty = false;
     s->changedFrame = R.frame;
+    if (scale != 1.0f) rescale_surface(s, scale, true);
 }
 
-// ---------------------------------------------------------------- internal resolution (P3)
-// Scale stays 1 in P2: render targets keep their guest size. The fields (scale, scalable, hudFull, twin)
-// and these hooks are in place for the port of gfx/gl's dynamic resolution.
+// ---------------------------------------------------------------- internal resolution
+// As gfx/gl: render targets the shape of the screen (1280x720 and its reductions down to 60x33, not the
+// GamePad's 854x480 ones, shadow maps, mip chains or arrays) get res_scale() x their guest size. Shaders sample
+// with normalized coordinates and draws scale their viewport and scissor (draw.cpp), so they render the same
+// picture at fewer (or more) pixels; uf_fragCoordScale / uf_texNScale give programs that need them the factors.
+// A surface takes a new scale the next time it is looked up as a render target (its contents resampled by the
+// 2D engine), and the guest size again while guest data is uploaded to it. The TV picture's buffer keeps its
+// other image (twin): the HUD goes to a full-resolution one (draw.cpp) and the next frame's scene back.
 namespace {
+std::atomic<float> g_resRequested{[] {
+    const char* e = getenv("WWHD_RES_SCALE");
+    float f = e ? float(atof(e)) : 1.0f;
+    return f > 0 ? std::clamp(f, 0.5f, 2.0f) : 1.0f;
+}()};
+float g_resFrame = g_resRequested.load();
+std::atomic<float> g_resShown{g_resFrame};
 bool screen_shaped(const Surface* s) {
     if (s->fmt.compressed || s->mips > 1 || s->slices > 1 || s->width < 32 || s->img.type != DkImageType_2D) return false;
+    if (!format_can_2d(s->fmt.image)) return false;  // (its contents could not be resampled: kept at the guest size)
     for (uint32_t w = 854, h = 480; w >= 32; w >>= 1, h >>= 1)
         if ((s->width == w || s->width == w + 1) && s->height == h) return false;
     float r = float(s->width) * 9.0f / (float(s->height) * 16.0f);
     return r > 0.97f && r < 1.03f;
 }
-}  // namespace
-float res_scale() { return 1.0f; }
-void set_res_scale(float scale) {
-    static bool logged = false;
-    if (scale != 1.0f && !logged) {
-        logged = true;
-        LOG("[dk] internal resolution %.2f requested: not implemented before P3 (render targets stay at 1.0)", scale);
+float wanted_scale(const Surface* s) {
+    if (s->img.valid) return s->hudFull ? 1.0f : s->scalable ? g_resFrame : 1.0f;
+    if (g_resFrame == 1.0f) return 1.0f;
+    // before its image exists: a 2D one unless the description says otherwise
+    Surface t;
+    t.width = s->width;
+    t.height = s->height;
+    t.mips = s->mips;
+    t.slices = s->slices;
+    t.fmt = s->fmt;
+    const auto dim = static_cast<Latte::E_DIM>(s->dim);
+    t.img.type = dim == Latte::E_DIM::DIM_2D || dim == Latte::E_DIM::DIM_2D_MSAA ? DkImageType_2D : DkImageType_3D;
+    return screen_shaped(&t) ? g_resFrame : 1.0f;
+}
+
+// Images a rescale let go, kept for the next rescale to the same size and kind (gfx/gl's texture pool):
+// dynamic resolution steps back and forth between a few factors, and a whole render-target set at once is
+// many allocations. Up to 64 MB, the least recently released go first; one unused for 600 frames goes.
+struct PooledImage {
+    SurfaceImage img;
+    uint64_t released, frame;  // release order; R.frame when released
+};
+std::vector<PooledImage> g_pool;
+size_t g_poolBytes = 0;
+uint64_t g_poolClock = 0;
+constexpr size_t kPoolLimit = size_t(64) << 20;
+constexpr uint64_t kPoolFrames = 600;
+int g_allocBudget = 4;  // new images a rescale may allocate this frame (the rest wait, latch_res_scale)
+void pool_delete(PooledImage& p) {
+    g_poolBytes -= p.img.mem.size;
+    free_image(p.img);  // (descriptors and memory return once the GPU is done with this frame)
+}
+// a kept image for s at w x h: same format, flags and size (2D, one level, one layer)
+int pool_find(const Surface* s, uint32_t w, uint32_t h) {
+    const uint32_t flags = image_flags(s->fmt, DkImageType_2D, s->renderTarget);
+    for (size_t i = 0; i < g_pool.size(); i++) {
+        const SurfaceImage& p = g_pool[i].img;
+        if (p.pw == w && p.ph == h && p.flags == flags && p.format == s->fmt.image && p.type == DkImageType_2D &&
+            p.layers == 1)
+            return int(i);
+    }
+    return -1;
+}
+void pool_release(SurfaceImage&& img) {
+    if (!img.valid) return;
+    g_pool.push_back({std::move(img), ++g_poolClock, R.frame});
+    img = SurfaceImage{};
+    g_poolBytes += g_pool.back().img.mem.size;
+    while (g_poolBytes > kPoolLimit && !g_pool.empty()) {
+        auto oldest = std::min_element(g_pool.begin(), g_pool.end(),
+                                       [](const PooledImage& a, const PooledImage& b) { return a.released < b.released; });
+        pool_delete(*oldest);
+        g_pool.erase(oldest);
     }
 }
-void latch_res_scale() {}
-void rescale_surface(Surface*, float, bool, bool) {}  // P3 (gfx/gl rescale_surface: twin image, pool, blit)
-bool fit_scale(Surface*, bool, bool) { return true; }
+// whether giving s that scale needs a new image (neither its twin nor a kept one fits)
+bool needs_allocation(const Surface* s, float scale) {
+    if (s->twin.valid && s->twinScale == scale) return false;
+    return pool_find(s, scaled_size(s->width, scale), scaled_size(s->height, scale)) < 0;
+}
+// the old picture resampled into the new image (2D engine; linear for float color, else nearest)
+void resample(Surface* s, SurfaceImage& from, SurfaceImage& to) {
+    if (!format_can_2d(s->fmt.image)) {
+        static int logged = 0;
+        if (logged++ < 10)
+            LOG("[dk] rescale of %s: format 0x%X has no 2D-engine path, contents not kept", describe(s).c_str(), s->format);
+        return;
+    }
+    transfer_begin();
+    DkImageView sv, dv;
+    dkImageViewDefaults(&sv, &from.image);
+    dkImageViewDefaults(&dv, &to.image);
+    const DkImageRect sr = {0, 0, 0, from.pw, from.ph, 1}, dr = {0, 0, 0, to.pw, to.ph, 1};
+    const bool linear = !s->fmt.depth && s->fmt.kind == FormatInfo::FLOAT;
+    dkCmdBufBlitImage(R.cmd, &sv, &sr, &dv, &dr, linear ? DkBlitFlag_FilterLinear : DkBlitFlag_FilterNearest, 0);
+    transfer_end();
+}
+}  // namespace
+
+bool fit_scale(Surface* s, bool keepContents, bool force) {
+    if (!s || !s->renderTarget || !s->img.valid) return true;
+    const float want = wanted_scale(s);
+    if (want == s->scale) return true;
+    if (!force && needs_allocation(s, want)) {
+        if (g_allocBudget <= 0) return false;  // a later frame (or a draw that needs it now)
+        g_allocBudget--;
+    }
+    rescale_surface(s, want, keepContents, s == S.tvSource);
+    return true;
+}
+
+float res_scale() { return g_resFrame; }
+float requested_res_scale() { return g_resRequested.load(std::memory_order_relaxed); }
+float res_scale_shown() { return g_resShown.load(std::memory_order_relaxed); }
+void set_res_scale(float scale) { g_resRequested.store(std::clamp(scale, 0.5f, 2.0f), std::memory_order_relaxed); }
+size_t rescale_pool_bytes() { return g_poolBytes; }
+
+void latch_res_scale() {
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        LOG("[dk] internal resolution: %.2f (WWHD_RES_SCALE, 0.5..2) for screen-shaped render targets; the HUD at full "
+            "resolution when it is lower; rescaled images kept up to %zu MiB", double(g_resFrame), kPoolLimit >> 20);
+    }
+    // test aid: WWHD_RES_SCALE_AT=frame:factor,... switches the factor after those frames (gfx/gl)
+    static const std::vector<std::pair<uint64_t, float>> at = [] {
+        std::vector<std::pair<uint64_t, float>> v;
+        if (const char* e = getenv("WWHD_RES_SCALE_AT"))
+            for (char* p = const_cast<char*>(e); *p;) {
+                uint64_t f = strtoull(p, &p, 10);
+                if (*p++ != ':') break;
+                v.push_back({f, float(strtod(p, &p))});
+                while (*p == ',') p++;
+            }
+        return v;
+    }();
+    for (auto& [f, v] : at)
+        if (R.frame == f) set_res_scale(v);
+    g_allocBudget = 4;
+    // kept images unused for kPoolFrames go (one a frame)
+    for (size_t i = 0; i < g_pool.size(); i++)
+        if (R.frame - g_pool[i].frame > kPoolFrames) {
+            pool_delete(g_pool[i]);
+            g_pool.erase(g_pool.begin() + long(i));
+            break;
+        }
+    const float want = g_resRequested.load(std::memory_order_relaxed);
+    if (want == g_resFrame) return;
+    LOG("[dk] internal resolution %.2f -> %.2f from frame %llu", double(g_resFrame), double(want),
+        (unsigned long long)R.frame + 2);
+    g_resFrame = want;
+    g_resShown.store(want, std::memory_order_relaxed);
+    R.surfaceEpoch++;  // render-target lookups again: each takes the new scale at its next use
+}
+
+void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
+    if (!s->img.valid || s->scale == scale) return;
+    if (s->img.type != DkImageType_2D || s->mips != 1 || s->img.layers != 1) return;  // (never scaled)
+    before_write(s);
+    SurfaceImage old = std::move(s->img);
+    s->img = SurfaceImage{};
+    const float oldScale = s->scale;
+    if (s->twin.valid && s->twinScale == scale) {  // the kept image of that scale
+        s->img = std::move(s->twin);
+        s->twin = SurfaceImage{};
+        s->scale = scale;
+    } else {
+        pool_release(std::move(s->twin));  // a twin of another scale (if any): kept for later
+        s->twin = SurfaceImage{};
+        s->scale = scale;
+        const uint32_t w = scaled_size(s->width, scale), h = scaled_size(s->height, scale);
+        if (const int i = pool_find(s, w, h); i >= 0) {
+            s->img = std::move(g_pool[size_t(i)].img);
+            g_poolBytes -= s->img.mem.size;
+            g_pool.erase(g_pool.begin() + i);
+            R.perf.poolHits++;
+        } else
+            make_image(s, s->img, w, h);
+    }
+    if (keepContents) resample(s, old, s->img);
+    if (keepOld) {
+        s->twin = std::move(old);
+        s->twinScale = oldScale;
+    } else
+        pool_release(std::move(old));
+    depth_changed(s);
+    R.surfaceEpoch++;  // views and lookups cached by the draws
+    R.textureEpoch++;  // render targets bound again
+    R.perf.rescales++;
+    if (g_traceFrame)
+        trace_event("rescale %s %.2f -> %.2f (%ux%u)%s", trace_name(s).c_str(), double(oldScale), double(scale), s->img.pw,
+                    s->img.ph, keepContents ? ", contents kept" : "");
+}
 
 // ---------------------------------------------------------------- lookup
 Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
@@ -669,7 +849,7 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
     s->isDepth = d.isDepth;
     s->fmt = format_info(d.format, d.isDepth);
     s->renderTarget = forRendering;
-    s->scale = 1.0f;
+    s->scale = forRendering ? wanted_scale(s.get()) : 1.0f;
     create_surface_image(s.get());  // (throws for an unsupported format: the GX2 command is skipped and logged)
     s->scalable = screen_shaped(s.get());
     auto* raw = s.get();

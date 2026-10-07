@@ -186,6 +186,13 @@ std::string g_traceTextures;  // the textures of the draw being prepared
 bool g_gamepadDrawing = false;
 float g_drawScale = 1.0f;
 bool g_drawSamplesRendered = false;  // it samples a texture the GPU rendered
+// each stage's texture units: texture pixels per guest pixel (programs with uf_texNScale; gfx/gl g_unitScale)
+float g_unitScale[2][LATTE_NUM_MAX_TEX_UNITS][2];
+const bool g_unitScaleInit = [] {
+    for (auto& stage : g_unitScale)
+        for (auto& unit : stage) unit[0] = unit[1] = 1.0f;
+    return true;
+}();
 uint64_t g_zcullSeen = 0;            // R.zcullEpoch when zcull data was last dropped
 
 // ---- per stage: the textures and uniform blocks of a draw, in deko3d slots (resolved before any binding)
@@ -364,6 +371,10 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             smp = sampler_id(samplerWords, compare, s->fmt.kind != FormatInfo::FLOAT);
         }
         if (s->gpuWritten) g_drawSamplesRendered = true;
+        if (sh->scaleUniforms) {
+            g_unitScale[stage][unit][0] = float(s->img.pw) / float(s->width);
+            g_unitScale[stage][unit][1] = float(s->img.ph) / float(s->height);
+        }
         out.tex[slot] = dkMakeTextureHandle(view, smp);
         out.texMask |= 1u << slot;
     }
@@ -844,7 +855,8 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     for (int i = 0; i < 8; i++)
         if (mask & (1 << i)) colors[i] = color_target(r, i, &slices[i]);
     Surface* depth = LatteMRT::GetActiveDepthBufferMask(lcr) ? depth_target(r, &depthSlice) : nullptr;
-    // each render target at the internal resolution it should have now (scale 1 until P3)
+    // each render target at the internal resolution it should have now (rescale_surface keeps contents); when
+    // some could take it but others wait for an allocation budget, all of them take it now
     if (depth) {
         before_write(depth);
         fit_scale(depth, true);
@@ -875,6 +887,9 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         return;
     }
     g_drawScale = target->scale;
+    if (depth && depth->scale != g_drawScale)
+        log_once(0x5CA1E000u ^ depth->addr, "[dk] draw with targets at different internal resolutions: %s",
+                 trace_name(depth) + " at " + std::to_string(depth->scale) + ", color at " + std::to_string(g_drawScale));
     bool gamepadDraw = target != depth;  // (a draw without a color target is not classified)
     for (auto* c : colors)
         if (c && !gamepad_only(c)) gamepadDraw = false;
@@ -926,7 +941,11 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         skip(g_drawSkips.streamFull);
         return;
     }
-    // The HUD at full resolution (gfx/gl draw.cpp; only at an internal resolution below 1, P3)
+    // The HUD at full resolution (gfx/gl draw.cpp): the game draws it into the same buffer as the scene, last,
+    // after the post-processing that reads the scene. At a lower internal resolution, the first draw into the TV
+    // picture's buffer that comes after a read of it this frame, has no depth buffer and samples only the game's
+    // own textures (nothing rendered) switches that buffer to its full-size image, the scene scaled up into it;
+    // the next frame's clear (or 3D drawing) switches back
     if (target->scale < 1.0f && target == S.tvSource && !depth && !g_drawSamplesRendered && colors[0] == target &&
         target->readFrame == R.frame) {
         bool single = true;
@@ -936,6 +955,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             target->hudFull = true;
             fit_scale(target, true, true);
             g_drawScale = target->scale;
+            R.perf.hudSwitches++;
         }
     }
     // the loose uniforms (ufBlock) of each stage, packed at the targets' scale
@@ -943,7 +963,8 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         const int slot = sh->bindings.ufBlockSlot;
         if (slot < 0 || slot >= kMaxUniformBuffers) continue;
         const bool aoNoise = g_aoMode == 2 && sh->vertex && is_occlusion(r, true);
-        const StreamSlice u = pack_uniforms(sh->vertex, *sh, r, g_drawScale, g_drawScale, nullptr, aoNoise);
+        const StreamSlice u = pack_uniforms(sh->vertex, *sh, r, g_drawScale, g_drawScale,
+                                            g_unitScale[sh->vertex ? kVertexStage : kPixelStage], aoNoise);
         if (!u) {
             R.perf.streamFullSkips++;
             skip(g_drawSkips.streamFull);
