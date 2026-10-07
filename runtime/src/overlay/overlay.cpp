@@ -771,6 +771,7 @@ void tab_warp() {
 }
 
 // Switch: handheld GPU profile, picture adjustments and the corner counter (platform/settings_switch.h)
+void save_gyro(const motion::Settings& g);
 void tab_switch() {
     using namespace switch_settings;
     // one picture profile per mode (as SwitchWaker): the one shown starts as the active mode's
@@ -884,6 +885,35 @@ void tab_switch() {
     }
     if (fps_counter_env()) note("env.txt sets WWHD_FPS: it is used at every start.");
 
+    // gyro aiming with the controller's own motion sensors (input_switch.cpp feeds motion.h); the
+    // Cemuhook and mouse sources of the desktop Controls tab make no sense on the console
+    heading("Gyro aiming");
+    {
+        motion::Settings g = motion::settings(), before = g;
+        bool v;
+        if (check("Aim with the controller's gyro", g.source == motion::kController, &v))
+            g.source = v ? motion::kController : motion::kOff;
+        help("First-person aiming (bow, hookshot, boomerang, telescope, Picto Box, grappling hook) follows\n"
+             "the Joy-Con, the Pro Controller or the console in handheld mode, as with the Wii U GamePad.\n"
+             "The game's own Options > Gyro switch still applies.");
+        if (motion::env_override()) note("WWHD_GYRO=%s overrides the saved source.", getenv("WWHD_GYRO"));
+        // the game reads the gyro only from a GamePad (docs/gyro.md: not in "Pro Controller only" mode)
+        if (g.source == motion::kController && input::pro_controller())
+            note("The controller acts as a Wii U Pro Controller, which has no gyro: the game only aims with it "
+                 "when the controller acts as the GamePad (WWHD_PRO_CONTROLLER=0 in env.txt).");
+        ImGui::SetNextItemWidth(220);
+        ImGui::SliderFloat("Sensitivity left/right", &g.tuning.sensitivity_x, 0.1f, 5.0f, "%.2fx");
+        ImGui::SameLine(0, 16);
+        if (check("Invert##gyrox", g.tuning.invert_x, &v)) g.tuning.invert_x = v;
+        ImGui::SetNextItemWidth(220);
+        ImGui::SliderFloat("Sensitivity up/down", &g.tuning.sensitivity_y, 0.1f, 5.0f, "%.2fx");
+        ImGui::SameLine(0, 16);
+        if (check("Invert##gyroy", g.tuning.invert_y, &v)) g.tuning.invert_y = v;
+        if (ImGui::Button("Recenter now")) motion::recenter();
+        ImGui::SameLine();
+        ImGui::TextUnformatted(motion::status().c_str());
+        if (!(g == before)) save_gyro(g);
+    }
     heading("Menu");
     note("Minus opens this menu; B or Minus closes it. L / R change tabs.");
 }

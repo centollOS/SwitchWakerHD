@@ -4,6 +4,7 @@
 // Wii U's labels. Text prompts go through the system software keyboard.
 #include <switch.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -11,6 +12,7 @@
 
 #include "../input.h"
 #include "../input_map.h"
+#include "../motion/motion.h"
 #include "../overlay/overlay.h"
 #include "../runtime.h"
 #include "../gfx/switch_renderer.h"
@@ -88,6 +90,81 @@ void show_keyboard() {
     if (max_len >= 0 && text.size() > (size_t)max_len) text.resize((size_t)max_len);
     done(ok, text);
 }
+// ---- gyro: the controller's six-axis sensor feeds motion.h (the virtual GamePad's motion) while the
+// controller source is chosen (Settings > Switch > Gyro aiming); the sensors run only then
+struct Gyro {
+    bool started = false;
+    HidSixAxisSensorHandle handles[4];  // handheld, Pro Controller (full key), Joy-Con pair: left, right
+    int current = -1;                   // the handle read now
+    u64 last_sampling = 0;
+    uint64_t t_ns = 0;                  // sensor time, from the samples' delta times
+};
+Gyro g_gyro;
+
+void gyro_start(bool on) {
+    if (on == g_gyro.started) return;
+    if (on && !g_gyro.t_ns) {
+        hidGetSixAxisSensorHandles(&g_gyro.handles[0], 1, HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld);
+        hidGetSixAxisSensorHandles(&g_gyro.handles[1], 1, HidNpadIdType_No1, HidNpadStyleTag_NpadFullKey);
+        hidGetSixAxisSensorHandles(&g_gyro.handles[2], 2, HidNpadIdType_No1, HidNpadStyleTag_NpadJoyDual);
+        g_gyro.t_ns = 1;
+    }
+    for (auto& h : g_gyro.handles) {
+        const Result rc = on ? hidStartSixAxisSensor(h) : hidStopSixAxisSensor(h);
+        if (R_FAILED(rc)) LOG("[gyro] six-axis sensor %s: rc 0x%x", on ? "start" : "stop", rc);
+    }
+    g_gyro.started = on;
+    g_gyro.current = -1;
+    LOG("[gyro] Switch motion sensors %s", on ? "on" : "off");
+}
+
+// HOS axes (x right, y forward, z up; rotations per second, g) -> SDL's (x right, y up, z toward the
+// player; rad/s, m/s^2), which motion.cpp expects; at rest, lying flat, HOS reads acceleration (0, 0, -1)
+void gyro_sample(int device, const HidSixAxisSensorState& st) {
+    constexpr float kTau = 6.28318531f, kG = 9.80665f;
+    const float gyro[3] = {st.angular_velocity.x * kTau, st.angular_velocity.z * kTau, -st.angular_velocity.y * kTau};
+    const float accel[3] = {-st.acceleration.x * kG, -st.acceleration.z * kG, st.acceleration.y * kG};
+    // delta_time is in ns (200 Hz: ~5 ms); clamped against a missing or bogus value
+    g_gyro.t_ns += std::clamp<u64>(st.delta_time, 1000000, 50000000);
+    motion::controller_sample(0x5357000 + device, g_gyro.t_ns, gyro, accel);
+}
+
+void update_gyro(::PadState& pad) {
+    gyro_start(motion::wants_controller_sensors());
+    const u32 style = padGetStyleSet(&pad);
+    int which = -1;
+    if (style & HidNpadStyleTag_NpadHandheld) which = 0;
+    else if (style & HidNpadStyleTag_NpadFullKey) which = 1;
+    else if (style & HidNpadStyleTag_NpadJoyDual)  // the right Joy-Con when there is one (it aims)
+        which = (padGetAttributes(&pad) & HidNpadAttribute_IsRightConnected) ? 3 : 2;
+    static int controllers = -1;
+    if (const int n = which >= 0; n != controllers) motion::set_gyro_controllers(controllers = n);
+    if (!g_gyro.started || which < 0) return;
+    if (which != g_gyro.current) {
+        g_gyro.current = which;
+        g_gyro.last_sampling = 0;
+        LOG("[gyro] reading the %s", which == 0 ? "handheld Joy-Con" : which == 1 ? "Pro Controller" : which == 3 ? "right Joy-Con" : "left Joy-Con");
+    }
+    // the samples since the last read (200 Hz, ~7 per 30 fps frame), oldest first
+    HidSixAxisSensorState states[16];
+    const size_t n = hidGetSixAxisSensorStates(g_gyro.handles[which], states, 16);
+    for (size_t i = n; i-- > 0;) {
+        if (states[i].sampling_number <= g_gyro.last_sampling && g_gyro.last_sampling) continue;
+        if (!(states[i].attributes & HidSixAxisSensorAttribute_IsConnected)) continue;
+        gyro_sample(which, states[i]);
+        g_gyro.last_sampling = states[i].sampling_number;
+    }
+    // the first sample after a start: one raw line to check the axes on hardware
+    static bool logged = false;
+    if (n && !logged) {
+        logged = true;
+        const auto& st = states[0];
+        LOG("[gyro] first sample: accel %.2f %.2f %.2f g, gyro %.3f %.3f %.3f rot/s (HOS axes)",
+            st.acceleration.x, st.acceleration.y, st.acceleration.z,
+            st.angular_velocity.x, st.angular_velocity.y, st.angular_velocity.z);
+    }
+}
+
 }  // namespace
 
 void init() {
@@ -102,6 +179,7 @@ void update() {
     static const bool initialized = [] { padInitializeDefault(&pad); return true; }();
     (void)initialized;
     padUpdate(&pad);
+    update_gyro(pad);
     u64 held = padGetButtons(&pad);
     static const struct { u64 hid; uint32_t vpad; } kMap[] = {
         {HidNpadButton_A, kA},         {HidNpadButton_B, kB},          {HidNpadButton_X, kX},
