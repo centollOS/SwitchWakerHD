@@ -630,8 +630,9 @@ void draw_frame_start() {
         static const char* const kProvoking[] = {"the last vertex, as gfx/gl", "the FIRST vertex (test)",
                                                  "Latte's PROVOKING_VTX_LAST bit (test)"};
         LOG("[dk] flat varyings: %s (WWHD_DK_PROVOKING_VERTEX=last|first|latte)", kProvoking[provoking_mode()]);
-        LOG("[dk] zcull: on (queue), dropped at every depth-target bind and after copies, uploads or new images of "
-            "a depth buffer; depth clears reset it");
+        if (R.zcull)
+            LOG("[dk] zcull: on (queue), dropped at every depth-target bind and after copies, uploads or new images of "
+                "a depth buffer; depth clears reset it");
     }
 }
 

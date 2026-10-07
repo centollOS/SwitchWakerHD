@@ -101,6 +101,10 @@ Síntomas: el mar plano azul saturado (sin olas ni espuma) y cuadraditos grises 
   slot en uso) y una expulsión invalida las caches; el slot del present compara también el tamaño de la imagen.
 - **Zcull:** se descarta en cada bind de depth (también con `WWHD_DK_PASS_BARRIER=0`) y tras subidas, copias, blits o
   imágenes nuevas de un depth (`R.zcullEpoch`): deko3d solo lo hace si cambia la dirección del target.
+  **Apagado por defecto desde 2026-10-07** (`DkQueueFlags_DisableZcull`; `WWHD_DK_ZCULL=1` lo vuelve a encender): la
+  hierba de Outset mostraba bloques de 4x8 px alineados (x%4, y%8) con el color base del suelo sin las capas de decal
+  (draws con polygon offset -0.5/-2, depth LEQUAL sin escritura), parpadeando; GL (Mesa nouveau, que nunca usa zcull)
+  sale limpio con el mismo estado. Pendiente de confirmar en consola con A/B de `WWHD_DK_ZCULL`.
 - **GPU passes:** timestamps (`dkCmdBufReportCounter`) cada 30 frames como `GpuPasses` de GL; cada 5 s `[dk] GPU passes:
   ...; frame start: GPU idle X ms`. `WWHD_DK_GPU_PASSES=0` las quita (salvo con resolución dinámica).
 - **Escala interna y resolución dinámica:** port de GL (screen_shaped, twin del buffer de TV con el HUD a resolución
