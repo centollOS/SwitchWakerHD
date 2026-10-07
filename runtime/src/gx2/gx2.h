@@ -22,6 +22,8 @@ uint64_t game_syncs();             // how many times they did
 // (GPU fence waits, buffer swaps, shader compiles); null while it runs ordinary commands
 extern std::atomic<const char*> g_render_stage;
 uint32_t color_buffer_address(const GX2::GX2ColorBuffer* cb);
+// the layers a color buffer is drawn as: a 2D array's slices, a 3D buffer's depth slices at its view's level, else 1
+uint32_t color_buffer_slices(const GX2::GX2ColorBuffer* cb);
 LatteFetchShader* build_fetch_shader(uint32_t program);  // from our encoded fetch "program"
 }  // namespace gx2
 

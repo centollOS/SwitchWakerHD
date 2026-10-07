@@ -43,6 +43,12 @@ uint32 color_buffer_address(const GX2::GX2ColorBuffer* cb) {
     if (TM_IsMacroTiled(cb->surface.tileMode) && mip < ((swizzle >> 16) & 0xFF)) base ^= (swizzle & 0xFFFF);
     return base;
 }
+uint32 color_buffer_slices(const GX2::GX2ColorBuffer* cb) {
+    const auto dim = cb->surface.dim.value();
+    if (dim == Latte::E_DIM::DIM_2D_ARRAY) return std::max<uint32>(cb->surface.depth, 1);
+    if (dim == Latte::E_DIM::DIM_3D) return std::max<uint32>(uint32(cb->surface.depth) >> cb->viewMip, 1);
+    return 1;
+}
 }  // namespace gx2
 
 HLE(gx2, GX2SetColorBuffer) {
@@ -52,8 +58,10 @@ HLE(gx2, GX2SetColorBuffer) {
     set_reg(mmCB_COLOR0_SIZE + target, cb->reg_size);
     set_reg(mmCB_COLOR0_VIEW + target, cb->reg_view);
     set_reg(mmCB_COLOR0_INFO + target, cb->reg_info);
-    // our convention: the unused TILE/FRAG registers carry the view's real width (| array slices << 16) and height
-    uint32 slices = cb->surface.dim.value() == Latte::E_DIM::DIM_2D_ARRAY ? std::max<uint32>(cb->surface.depth, 1) : 1;
+    // our convention: the unused TILE/FRAG registers carry the view's real width (| array slices << 16) and height.
+    // A 3D buffer's depth slices count as array slices: the renderers draw each one into a layer and sample a 3D
+    // copy of the layers (the Picto Box renders its 8x8x8 colour table slice by slice, caller 027B9E14)
+    uint32 slices = gx2::color_buffer_slices(cb);
     set_reg(mmCB_COLOR0_TILE + target, std::max<uint32>(cb->surface.width >> cb->viewMip, 1) | (slices << 16));
     set_reg(mmCB_COLOR0_FRAG + target, std::max<uint32>(cb->surface.height >> cb->viewMip, 1));
 }

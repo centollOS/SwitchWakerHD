@@ -372,6 +372,11 @@ void depth_changed(const Surface* s) {
 }
 
 // ---------------------------------------------------------------- images
+// the deko3d format of a view in the other format of an sRGB twin pair (srgb_twins: RGBA8 only)
+DkImageFormat srgb_twin_format(DkImageFormat f) {
+    return f == DkImageFormat_RGBA8_Unorm_sRGB ? DkImageFormat_RGBA8_Unorm : DkImageFormat_RGBA8_Unorm_sRGB;
+}
+
 DkImageType image_type(const Surface* s, DkImageType* viewType) {
     const auto dim = static_cast<Latte::E_DIM>(s->dim);
     const bool oneD = dim == Latte::E_DIM::DIM_1D || dim == Latte::E_DIM::DIM_1D_ARRAY;
@@ -516,9 +521,13 @@ void destroy_surface_image(Surface* s) {
 uint32_t sampled_view_id(Surface* s, const uint32_t* texWords) {
     if (!s || !s->img.valid) return null_image_id();
     Latte::LATTE_SQ_TEX_RESOURCE_WORD0_N w0;
+    Latte::LATTE_SQ_TEX_RESOURCE_WORD1_N w1;
     Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N w4;
     memcpy(static_cast<void*>(&w0), texWords, 4);
+    memcpy(static_cast<void*>(&w1), texWords + 1, 4);
     memcpy(static_cast<void*>(&w4), texWords + 4, 4);
+    // the words ask for the sRGB twin of the surface's format (srgb_twins): a view in that format
+    const bool srgbView = srgb_twins(s->format, uint32_t(LatteTexture_ReconstructGX2Format(w1, w4)));
     DkImageType own;
     const DkImageType imageType = image_type(s, &own);
     if (own == DkImageType_None) own = imageType;  // the view type the default descriptor has
@@ -541,9 +550,9 @@ uint32_t sampled_view_id(Surface* s, const uint32_t* texWords) {
     const uint32_t sel[4] = {uint32_t(w4.get_DST_SEL_X()), uint32_t(w4.get_DST_SEL_Y()), uint32_t(w4.get_DST_SEL_Z()),
                              uint32_t(w4.get_DST_SEL_W())};
     const bool identity = s->fmt.depth || (sel[0] == 0 && sel[1] == 1 && sel[2] == 2 && sel[3] == 3);
-    if (identity && type == own) return s->img.imageId;
-    // key: view type, swizzle; (format, first mip and mip count: the image's own, as gfx/gl's views)
-    uint64_t key = uint64_t(type) << 12;
+    if (identity && type == own && !srgbView) return s->img.imageId;
+    // key: view type, swizzle, sRGB twin; (first mip and mip count: the image's own, as gfx/gl's views)
+    uint64_t key = uint64_t(type) << 12 | uint64_t(srgbView) << 32;
     for (unsigned i = 0; i < 4; ++i) key |= uint64_t(s->fmt.depth ? i : sel[i] & 7) << (i * 3);
     if (auto it = s->img.views.find(key); it != s->img.views.end()) return it->second;
     static const DkImageSwizzle map[8] = {DkImageSwizzle_Red,  DkImageSwizzle_Green, DkImageSwizzle_Blue,
@@ -552,6 +561,7 @@ uint32_t sampled_view_id(Surface* s, const uint32_t* texWords) {
     DkImageView v;
     dkImageViewDefaults(&v, &s->img.image);
     v.type = type;
+    if (srgbView) v.format = srgb_twin_format(s->fmt.image);
     if (!s->fmt.depth)
         for (int i = 0; i < 4; i++) v.swizzle[i] = map[sel[i] & 7];
     const uint32_t id = image_descriptor_alloc();
@@ -560,11 +570,12 @@ uint32_t sampled_view_id(Surface* s, const uint32_t* texWords) {
     return id;
 }
 
-void target_view(Surface* s, uint32_t level, uint32_t layer, DkImageView* out) {
+void target_view(Surface* s, uint32_t level, uint32_t layer, DkImageView* out, bool srgbView) {
     if (!s || !s->img.valid) throw std::runtime_error("[dk] render target without an image");
     if (!format_can_render(s->fmt.image))
         throw std::runtime_error("[dk] render target format cannot render: " + describe(s));
     dkImageViewDefaults(out, &s->img.image);
+    if (srgbView) out->format = srgb_twin_format(s->fmt.image);
     out->mipLevelOffset = uint8_t(std::min(level, s->mips - 1));
     if (s->img.type == DkImageType_3D) {
         if (layer) throw std::runtime_error("[dk] rendering into slice " + std::to_string(layer) + " of a 3D surface: " + describe(s));
@@ -852,7 +863,9 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
         auto* s = it->second.get();
         if (!forRendering && s->isDepth && !d.isDepth && s->gpuWritten && s->width == d.width && s->height == d.height) consider(s);
         if (s->isDepth != d.isDepth) continue;
-        if (s->width == d.width && s->height == d.height && s->format == d.format && s->slices == d.slices &&
+        if (forRendering && s->img.type == DkImageType_3D) continue;  // (a 3D color buffer renders into layers)
+        if (s->width == d.width && s->height == d.height && (s->format == d.format || srgb_twins(s->format, d.format)) &&
+            s->slices == d.slices &&
             (forRendering || s->mips >= d.mips || s->gpuWritten)) {
             if (forRendering) {
                 s->renderTarget = true;
@@ -911,14 +924,10 @@ struct TargetCache {
     }
 };
 TargetCache colorCache[8], depthCache;
-}  // namespace
 
-Surface* color_target(const uint32_t* regs, int i, uint32_t* slice) {
+// the surface the color registers of slot i describe (format: theirs), created when new
+Surface* color_target_lookup(const uint32_t* regs, int i, uint32_t* slice, uint32_t format, const uint32_t* key) {
     uint32_t base = regs[mmCB_COLOR0_BASE + i];
-    if (!base) return nullptr;
-    const uint32_t key[6] = {base, regs[mmCB_COLOR0_SIZE + i], regs[mmCB_COLOR0_INFO + i], regs[mmCB_COLOR0_TILE + i],
-                             regs[mmCB_COLOR0_FRAG + i], regs[mmCB_COLOR0_VIEW + i]};
-    if (colorCache[i].hit(key, slice)) return colorCache[i].s;
     uint32_t size = regs[mmCB_COLOR0_SIZE + i], info = regs[mmCB_COLOR0_INFO + i];
     uint32_t pitch = ((size & 0x3FF) + 1) * 8;
     uint32_t height = (((size >> 10) & 0xFFFFF) + 1) * 64 / pitch;
@@ -926,17 +935,30 @@ Surface* color_target(const uint32_t* regs, int i, uint32_t* slice) {
     uint32_t w = regs[mmCB_COLOR0_TILE + i] & 0xFFFF, h = regs[mmCB_COLOR0_FRAG + i];
     uint32_t slices = std::max<uint32_t>(regs[mmCB_COLOR0_TILE + i] >> 16, 1);
     if (slice) *slice = slices > 1 ? std::min<uint32_t>(regs[mmCB_COLOR0_VIEW + i] & 0x7FF, slices - 1) : 0;
-    static const uint32_t numberBits[8] = {0, 0x200, 0, 0, 0x100, 0x300, 0x400, 0x800};
     SurfaceDesc d;
     d.addr = base;
     d.width = w ? w : pitch;
     d.height = h ? h : height;
     d.pitch = pitch;
-    d.format = ((info >> 2) & 0x3F) | numberBits[(info >> 12) & 7];
+    d.format = format;
     d.tileMode = (info >> 8) & 0xF;
     d.slices = slices;
     d.dim = slices > 1 ? kDim2DArray : kDim2D;
     return colorCache[i].fill(key, find_or_create_surface(d, true), slice);
+}
+}  // namespace
+
+Surface* color_target(const uint32_t* regs, int i, uint32_t* slice, bool* srgbView) {
+    if (srgbView) *srgbView = false;
+    const uint32_t base = regs[mmCB_COLOR0_BASE + i];
+    if (!base) return nullptr;
+    static const uint32_t numberBits[8] = {0, 0x200, 0, 0, 0x100, 0x300, 0x400, 0x800};
+    const uint32_t info = regs[mmCB_COLOR0_INFO + i], format = ((info >> 2) & 0x3F) | numberBits[(info >> 12) & 7];
+    const uint32_t key[6] = {base, regs[mmCB_COLOR0_SIZE + i], info, regs[mmCB_COLOR0_TILE + i], regs[mmCB_COLOR0_FRAG + i],
+                             regs[mmCB_COLOR0_VIEW + i]};
+    Surface* s = colorCache[i].hit(key, slice) ? colorCache[i].s : color_target_lookup(regs, i, slice, format, key);
+    if (srgbView && s) *srgbView = srgb_twins(s->format, format);
+    return s;
 }
 
 Surface* depth_target(const uint32_t* regs, uint32_t* slice) {
@@ -967,7 +989,7 @@ Surface* depth_target(const uint32_t* regs, uint32_t* slice) {
 Surface* surface_from_color_buffer(uint32_t addr, uint32_t* firstSlice, uint32_t* numSlices) {
     auto* cb = (GX2::GX2ColorBuffer*)mem::ptr(addr);
     SurfaceDesc d;
-    uint32_t slices = cb->surface.dim.value() == Latte::E_DIM::DIM_2D_ARRAY ? std::max<uint32_t>(cb->surface.depth, 1) : 1;
+    uint32_t slices = gx2::color_buffer_slices(cb);  // (a 3D buffer's slices as layers)
     d.slices = slices;
     d.dim = slices > 1 ? kDim2DArray : kDim2D;
     if (firstSlice) *firstSlice = std::min<uint32_t>(cb->viewFirstSlice, slices - 1);
@@ -1136,6 +1158,171 @@ Surface* feedback_copy(Surface* s) {
     return copy.get();
 }
 
+Surface* volume_source(Surface* s, const uint32_t* texWords) {
+    Latte::LATTE_SQ_TEX_RESOURCE_WORD0_N w0;
+    memcpy(static_cast<void*>(&w0), texWords, 4);
+    if (w0.get_DIM() != Latte::E_DIM::DIM_3D || !s || !s->img.valid || !s->gpuWritten || s->img.type != DkImageType_2DArray)
+        return s;
+    static std::unordered_map<Surface*, std::pair<uint64_t, std::unique_ptr<Surface>>> copies;
+    auto& [seq, copy] = copies[s];
+    if (copy && (copy->img.pw != s->img.pw || copy->img.ph != s->img.ph || copy->slices != s->img.layers ||
+                 copy->fmt.image != s->fmt.image)) {
+        destroy_surface_image(copy.get());
+        copy.reset();
+    }
+    if (!copy) {
+        copy = std::make_unique<Surface>();
+        copy->width = s->img.pw;
+        copy->height = s->img.ph;
+        copy->slices = s->img.layers;
+        copy->dim = uint32_t(Latte::E_DIM::DIM_3D);
+        copy->format = s->format;
+        copy->isDepth = s->isDepth;
+        copy->fmt = s->fmt;
+        copy->mips = 1;
+        copy->gpuWritten = true;
+        create_surface_image(copy.get());
+        seq = 0;
+        LOG("[dk] %s is sampled as a 3D texture: its %u layers are copied into one (%s)", describe(s).c_str(),
+            s->img.layers, describe(copy.get()).c_str());
+    }
+    if (seq != s->writeSeq) {
+        if (g_traceFrame) trace_event("3D copy of %s", trace_name(s).c_str());
+        // (the copy engine: layer z of the array -> slice z of the 3D image)
+        transfer_begin();
+        copy_image(s, 0, 0, copy.get(), 0, 0, s->img.pw, s->img.ph, s->img.layers);
+        transfer_end();
+        copy->writeSeq = next_write_seq();
+        seq = s->writeSeq;
+    }
+    return copy.get();
+}
+
+// ---------------------------------------------------------------- CPU reads (dk_surfaces.h cpu_read_surface)
+namespace {
+std::vector<Surface*> g_writebacks;
+// the copy engine's destination (CPU-cached, grown as needed) and the commands that fill it
+struct WritebackMemory {
+    static constexpr uint32_t kCmdSize = 64u << 10;
+    DkMemBlock mem = nullptr, cmdMem = nullptr;
+    DkCmdBuf cmd = nullptr;
+    uint32_t size = 0;
+    bool fit(uint32_t bytes) {
+        if (!cmd) {
+            DkMemBlockMaker m;
+            dkMemBlockMakerDefaults(&m, R.device, kCmdSize);
+            m.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+            cmdMem = dkMemBlockCreate(&m);
+            DkCmdBufMaker cm;
+            dkCmdBufMakerDefaults(&cm, R.device);
+            cmd = dkCmdBufCreate(&cm);
+        }
+        if (bytes <= size) return true;
+        if (mem) dkMemBlockDestroy(mem);  // (idle: every use waits for the queue)
+        size = (bytes + (1u << 20) - 1) & ~((1u << 20) - 1);
+        LOG("[dk] creating memory block: CPU-read surfaces' writeback (%u MiB, CPU-cached)", size >> 20);
+        log_flush();  // deko3d aborts when a creation fails
+        DkMemBlockMaker m;
+        dkMemBlockMakerDefaults(&m, R.device, size);
+        m.flags = DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuUncached;
+        mem = dkMemBlockCreate(&m);
+        dkMemBlockFlushCpuCache(mem, 0, size);  // no CPU line of it left to be written back over the GPU's data
+        return true;
+    }
+} g_wbMem;
+// the guest-size images that scaled surfaces are resampled into before they are read
+std::unordered_map<Surface*, std::unique_ptr<Surface>> g_wbSized;
+}  // namespace
+
+void queue_guest_writeback(Surface* s) {
+    s->writebackPending = true;
+    g_writebacks.push_back(s);
+}
+
+void guest_writeback() {
+    if (g_writebacks.empty()) return;
+    std::vector<Surface*> list;
+    list.swap(g_writebacks);
+    begin_commands();
+    struct Item {
+        Surface *s, *src;
+        uint32_t offset;
+    };
+    std::vector<Item> items;
+    uint32_t total = 0;
+    for (Surface* s : list) {
+        s->writebackPending = false;
+        if (!s->img.valid || s->fmt.compressed || s->fmt.convert != Convert::NONE || s->img.type != DkImageType_2D) {
+            static int logged = 0;
+            if (logged++ < 10)
+                LOG("[dk] %s is not written back to guest memory for the CPU (its format or shape)", describe(s).c_str());
+            continue;
+        }
+        Surface* src = s;
+        if (s->img.pw != s->width || s->img.ph != s->height) {  // at an internal resolution: the guest size first
+            auto& sized = g_wbSized[s];
+            if (sized && sized->fmt.image != s->fmt.image) {
+                destroy_surface_image(sized.get());
+                sized.reset();
+            }
+            if (!sized) {
+                sized = std::make_unique<Surface>();
+                sized->width = s->width;
+                sized->height = s->height;
+                sized->format = s->format;
+                sized->fmt = s->fmt;
+                sized->gpuWritten = true;
+                create_surface_image(sized.get());
+            }
+            blit(s, 0, 0, s->width, s->height, sized.get(), 0, 0, s->width, s->height);
+            src = sized.get();
+        }
+        items.push_back({s, src, total});
+        total += (s->width * s->height * s->fmt.bytesPerBlock + 255) & ~255u;
+    }
+    if (items.empty()) return;
+    R.perf.writebacks += items.size();
+    const uint64_t t0 = now_ns();
+    submit_commands("CPU-read surfaces");  // what wrote them (and the resampling)
+    if (dkQueueIsInErrorState(R.queue) || !g_wbMem.fit(total)) return;
+    DkCmdBuf cmd = g_wbMem.cmd;
+    dkCmdBufClear(cmd);
+    dkCmdBufAddMemory(cmd, g_wbMem.cmdMem, 0, WritebackMemory::kCmdSize);
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image);
+    for (const Item& it : items) {
+        DkImageView v;
+        dkImageViewDefaults(&v, &it.src->img.image);
+        const DkImageRect rect = {0, 0, 0, it.s->width, it.s->height, 1};
+        const DkCopyBuf dst = {dkMemBlockGetGpuAddr(g_wbMem.mem) + it.offset, 0, 0};
+        dkCmdBufCopyImageToBuffer(cmd, &v, &rect, &dst, 0);
+    }
+    // the copies' writes out of the GPU's L2 into memory before the CPU reads them
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
+    {
+        Stage stage("deko3d: CPU-read surfaces' writeback");
+        dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(cmd));
+        dkQueueWaitIdle(R.queue);
+    }
+    if (dkQueueIsInErrorState(R.queue)) {
+        LOG("[dk] the deko3d queue went into an error state during the CPU-read surfaces' writeback");
+        return;
+    }
+    dkMemBlockFlushCpuCache(g_wbMem.mem, 0, total);  // the CPU's view of the block: what the GPU wrote
+    const uint8_t* cpu = static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(g_wbMem.mem));
+    for (const Item& it : items) {
+        // linear guest layout: row y at y * pitch texels
+        const Surface* s = it.s;
+        const uint32_t bpb = s->fmt.bytesPerBlock, pitch = std::max(s->pitch, s->width);
+        const size_t rowBytes = size_t(s->width) * bpb;
+        for (uint32_t y = 0; y < s->height; y++)
+            memcpy(mem::ptr(s->addr + uint32_t(size_t(y) * pitch * bpb)), cpu + it.offset + y * rowBytes, rowBytes);
+        static int logged = 0;
+        if (logged++ < 20)
+            LOG("[dk] %s written back to guest memory for the CPU (%.2f ms with the GPU wait)%s", describe(s).c_str(),
+                double(now_ns() - t0) / 1e6, logged == 20 ? " (no more of these lines)" : "");
+    }
+}
+
 // ---------------------------------------------------------------- clears
 namespace {
 void bind_whole(uint32_t pw, uint32_t ph) {
@@ -1177,9 +1364,10 @@ void clear_color(const uint32_t*, uint32_t cb, const float rgba[4]) {
     if (g_traceFrame) trace_event("clear %s", trace_name(s).c_str());
     sync_clear_begin(s);
     bind_whole(s->img.pw, s->img.ph);
+    const bool srgbView = srgb_twins(s->format, uint32_t(reinterpret_cast<GX2::GX2ColorBuffer*>(mem::ptr(cb))->surface.format.value()));
     for (uint32_t slice = first; slice < first + num; slice++) {
         DkImageView v;
-        target_view(s, 0, slice, &v);
+        target_view(s, 0, slice, &v, srgbView);  // (a linear clear value: an sRGB view encodes it)
         const DkImageView* colors[] = {&v};
         dkCmdBufBindRenderTargets(R.cmd, colors, 1, nullptr);
         // like a Vulkan clear: the value is linear, sRGB targets encode it
@@ -1268,7 +1456,7 @@ void copy_surface(uint32_t srcAddr, uint32_t srcMip, uint32_t srcSlice, uint32_t
         if (!dst || !dst->img.valid) return;
         before_write(dst);
         fit_scale(dst, true);
-        if (dst->fmt.image != gpuSrc->fmt.image) {
+        if (dst->fmt.image != gpuSrc->fmt.image && !srgb_twins(dst->format, gpuSrc->format)) {  // (twins: the same bytes)
             static int logged = 0;
             if (logged++ < 20)
                 LOG("[dk] GX2CopySurface with format conversion is not supported (0x%X -> 0x%X)", gpuSrc->format, dd.format);
@@ -1288,6 +1476,7 @@ void copy_surface(uint32_t srcAddr, uint32_t srcMip, uint32_t srcSlice, uint32_t
         } else  // depth (2D engine), the same image, or resampled between internal resolutions
             blit(gpuSrc, gpuLevel, srcSlice, cw, ch, dst, 0, dstSlice, cw, ch);
         mark_gpu_written(dst);
+        if (dst->writebackPending) guest_writeback();  // the game reads it when GX2CopySurface returns
         return;
     }
     // CPU copy between guest layouts

@@ -55,7 +55,10 @@ const Backend& vulkan_backend() {
         b.with_autorelease_pool = gfxvk::with_autorelease_pool;
         b.set_tv_format = gfxvk::set_tv_format;
         b.invalidate = gfxvk::invalidate;
-        b.guest_flush = gfxvk::flush_async;
+        b.guest_flush = [] {
+            gfxvk::guest_writeback();  // (GX2DrawDone with WWHD_VK_LAZY_DRAW_DONE comes here too)
+            gfxvk::flush_async();
+        };
         b.wait_idle = gfxvk::wait_idle;
         b.ss_reset = [] {
             gfxvk::ss_reset_surfaces();

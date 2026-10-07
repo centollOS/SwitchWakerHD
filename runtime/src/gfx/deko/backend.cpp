@@ -1080,7 +1080,7 @@ void submit_commands(const char* why) {
     // nothing recorded since the last submit: nothing to send
     static uint64_t lastWork = ~0ull;
     const uint64_t work = R.drawCount + R.counts.clears + R.counts.copies + R.counts.scans + R.perf.uploads +
-                          R.perf.feedbackCopies + R.perf.flushes;
+                          R.perf.feedbackCopies + R.perf.writebacks + R.perf.flushes;
     if (work == lastWork) return;
     const uint64_t t0 = now_ns();
     {
@@ -1093,7 +1093,7 @@ void submit_commands(const char* why) {
     if (!strcmp(why, "draws")) R.perf.midFrameSubmits++;
     R.perf.flushNs += now_ns() - t0;
     lastWork = R.drawCount + R.counts.clears + R.counts.copies + R.counts.scans + R.perf.uploads +
-               R.perf.feedbackCopies + R.perf.flushes;
+               R.perf.feedbackCopies + R.perf.writebacks + R.perf.flushes;
     if (g_traceFrame) trace_event("submit (%s)", why);
 }
 
@@ -1461,8 +1461,8 @@ const Backend& deko3d_backend() {
             gfxdk::note_invalidate(flags);  // (P4 index lists)
             guarded("invalidate", [&] { gfxdk::invalidate(flags, addr, size); });
         };
-        // GX2Flush / GX2DrawDone: what is recorded goes to the GPU (dk_draw.h submit_commands); nothing the GPU
-        // renders is written back to guest memory, so the GPU itself is not waited for (as gfx/gl)
+        // GX2Flush / GX2DrawDone: what is recorded goes to the GPU (dk_draw.h submit_commands). The GPU itself is
+        // waited for only when it wrote a surface the CPU reads (guest_writeback, dk_surfaces.h)
         b.guest_flush = [] {
             R.counts.flushes++;
             guarded("flush", [] { gfxdk::submit_commands("GX2Flush"); });
@@ -1471,7 +1471,10 @@ const Backend& deko3d_backend() {
             R.counts.waits++;
             R.streamGen++;  // guest data the game changes after GX2DrawDone is uploaded again
             gfxdk::note_wait_idle();
-            guarded("wait", [] { gfxdk::submit_commands("GX2DrawDone"); });
+            guarded("wait", [] {
+                gfxdk::guest_writeback();  // the CPU-read surfaces the GPU wrote (rare: then the GPU is waited for)
+                gfxdk::submit_commands("GX2DrawDone");
+            });
         };
         b.ss_reset = [] {
             gfxdk::ss_reset_surfaces();

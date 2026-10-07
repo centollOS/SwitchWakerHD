@@ -137,6 +137,7 @@ struct StateCache {
     uint64_t targetsTextureEpoch = 0;
     std::array<Surface*, kMaxColor> colors{};
     uint32_t slices[kMaxColor]{};
+    bool srgbViews[kMaxColor]{};  // (color_target)
     Surface* depth = nullptr;
     uint32_t depthSlice = 0;
     const DkShader *vs = nullptr, *ps = nullptr;
@@ -483,6 +484,10 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             s = feedback_copy(s);
             view = sampled_view_id(s, words);
             smp = sampler_id(samplerWords, compare, s->fmt.kind != FormatInfo::FLOAT);
+        }
+        if (Surface* v = volume_source(s, words); v != s) {  // the layers of a 3D color buffer, sampled as 3D
+            s = v;
+            view = sampled_view_id(s, words);
         }
         sync_draw_sample(s);
         if (s->gpuWritten) g_drawSamplesRendered = true;
@@ -1170,9 +1175,10 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     const auto& lcr = *reinterpret_cast<const LatteContextRegister*>(r);
     std::array<Surface*, 8> colors{};
     uint32_t slices[8]{}, depthSlice = 0;
+    bool srgbViews[8]{};  // a target bound in the sRGB twin of its surface's format
     const auto mask = LatteMRT::GetActiveColorBufferMask(ps->dec, lcr);
     for (int i = 0; i < 8; i++)
-        if (mask & (1 << i)) colors[i] = color_target(r, i, &slices[i]);
+        if (mask & (1 << i)) colors[i] = color_target(r, i, &slices[i], &srgbViews[i]);
     Surface* depth = LatteMRT::GetActiveDepthBufferMask(lcr) ? depth_target(r, &depthSlice) : nullptr;
     // each render target at the internal resolution it should have now (rescale_surface keeps contents); when
     // some could take it but others wait for an allocation budget, all of them take it now
@@ -1322,7 +1328,8 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     {
         if (gs.targetsTextureEpoch != R.textureEpoch) gs.targetsKnown = false;
         bool same = gs.targetsKnown && gs.depth == depth && gs.depthSlice == depthSlice;
-        for (int i = 0; i < 8 && same; i++) same = gs.colors[i] == colors[i] && gs.slices[i] == slices[i];
+        for (int i = 0; i < 8 && same; i++)
+            same = gs.colors[i] == colors[i] && gs.slices[i] == slices[i] && gs.srgbViews[i] == srgbViews[i];
         if (!same) {
             static const bool passBarrier = env_switch("PASS_BARRIER", true) && !sync_lazy_barriers();
             // the old path (WWHD_DK_LAZY_BARRIERS=0): what earlier passes rendered becomes visible to this pass's
@@ -1347,13 +1354,14 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             const DkImageView* viewPtrs[8];
             for (int i = 0; i < n; i++) {
                 const int c = colors[i] ? i : first;
-                target_view(colors[c], 0, slices[c], &views[i]);
+                target_view(colors[c], 0, slices[c], &views[i], srgbViews[c]);
                 viewPtrs[i] = &views[i];
             }
             if (depth) target_view(depth, 0, depthSlice, &depthView);
             dkCmdBufBindRenderTargets(R.cmd, viewPtrs, uint32_t(n), depth ? &depthView : nullptr);
             gs.colors = colors;
             memcpy(gs.slices, slices, sizeof slices);
+            memcpy(gs.srgbViews, srgbViews, sizeof srgbViews);
             gs.depth = depth;
             gs.depthSlice = depthSlice;
             gs.targetsKnown = true;

@@ -135,6 +135,7 @@ struct Renderer {
         uint64_t uploadNs = 0, uploads = 0, uploadBytes = 0;
         uint64_t clearNs = 0, clears = 0, surfaceCopyNs = 0, surfaceCopies = 0, cpuSurfaceCopies = 0;
         uint64_t invalidateNs = 0, invalidates = 0, scanNs = 0, scans = 0, scanBlits = 0, feedbackCopies = 0;
+        uint64_t writebacks = 0;   // surfaces written back to guest memory for the CPU (guest_writeback)
         uint64_t rescales = 0, imageDescriptorWrites = 0, samplerDescriptorWrites = 0;
         uint64_t poolHits = 0;     // rescales that reused a kept image (internal resolution)
         uint64_t hudSwitches = 0;  // frames whose HUD went to the TV buffer's full-resolution image (draw.cpp)

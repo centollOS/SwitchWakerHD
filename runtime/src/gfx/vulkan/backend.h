@@ -20,7 +20,7 @@ struct Surface {
  VkImage image=VK_NULL_HANDLE; VkDeviceMemory memory=VK_NULL_HANDLE; VkImageView view=VK_NULL_HANDLE;
  VkImageType imageType=VK_IMAGE_TYPE_2D; VkImageViewType viewType=VK_IMAGE_VIEW_TYPE_2D;
  VkExtent3D extent{}; VkImageLayout layout=VK_IMAGE_LAYOUT_UNDEFINED; VkImageAspectFlags aspect=VK_IMAGE_ASPECT_COLOR_BIT; VkImageUsageFlags usage=0;
- uint32_t arrayLayers=1; std::vector<VkImageView> layerViews;
+ uint32_t arrayLayers=1; std::vector<VkImageView> layerViews,twinLayerViews; // (twin: in the sRGB twin format)
  std::unordered_map<uint32_t,VkImageView> sampledViews;
  uint32_t addr=0,mipAddr=0,width=0,height=0,slices=1,pitch=0,mips=1,format=0,dim=1,tileMode=0,swizzle=0;
  bool isDepth=false,gpuWritten=false,dirty=true;
@@ -31,6 +31,7 @@ struct Surface {
  mutable std::shared_ptr<CachedGuestLayout> guestLayout;
  float scale=1,sx=1,sy=1;
  float ax=1,ay=1; // aspect-ratio factors of screen-shaped targets (surfaces.cpp)
+ bool writebackPending=false; // a CPU-read target written since the last GX2DrawDone (guest_writeback)
 };
 struct SurfaceDesc { uint32_t addr=0,mipAddr=0,width=0,height=0,slices=1,pitch=0,mips=1,format=0,dim=1,tileMode=0,swizzle=0; bool isDepth=false; };
 struct Screen {
@@ -94,6 +95,7 @@ struct Renderer {
  uint64_t pipelineCreates=0,pipelineCreateNs=0;
  std::array<Surface*,8> passColors{};
  std::array<uint32_t,8> passSlices{};
+ std::array<bool,8> passSrgbViews{};
  Surface* passDepth=nullptr;
  uint32_t passDepthSlice=0,passWidth=0,passHeight=0;
  bool passTracked=false;
@@ -165,10 +167,17 @@ void request_tv_dump(const std::string&, int);
 void create_surface_image(Surface*,bool forRendering,VkExtent3D explicitExtent = {});
 void reset_ao_private_cache();
 void destroy_surface_image(Surface*);
-VkImageView layer_view(Surface*,uint32_t slice);
+// RGBA8 with and without the sRGB bit describe the same memory, as on the GPU: one surface (one image, created
+// with a mutable format), whose views take the other format where the registers or texture words ask for it. The
+// Picto Box clears its 800x450 picture as RGBA8, draws it through an sRGB view, writes alpha through the RGBA8
+// one and copies that to the album.
+inline bool srgb_twins(uint32_t a,uint32_t b){return (a^b)==0x400&&(a&0x3F)==0x1A;}
+inline VkFormat srgb_twin_pixel(VkFormat f){return f==VK_FORMAT_R8G8B8A8_SRGB?VK_FORMAT_R8G8B8A8_UNORM:VK_FORMAT_R8G8B8A8_SRGB;}
+VkImageView layer_view(Surface*,uint32_t slice,bool srgbView=false);
 VkImageView sampled_texture_view(Surface*,const uint32_t* texWords);
+Surface* volume_source(Surface*,const uint32_t* texWords); // a 3D sampler of a layered target: its 3D copy
 Surface* find_or_create_surface(const SurfaceDesc&,bool forRendering);
-Surface* color_target(const uint32_t*,int,uint32_t* slice=nullptr);
+Surface* color_target(const uint32_t*,int,uint32_t* slice=nullptr,bool* srgbView=nullptr); // (srgbView: srgb_twins)
 Surface* depth_target(const uint32_t*,uint32_t* slice=nullptr);
 Surface* surface_from_color_buffer(uint32_t,uint32_t* firstSlice=nullptr,uint32_t* numSlices=nullptr);
 Surface* surface_from_depth_buffer(uint32_t,uint32_t* firstSlice=nullptr,uint32_t* numSlices=nullptr);
@@ -177,7 +186,14 @@ void upload_surface(Surface*);
 void resample(Surface*,Surface*,uint32_t slices,float uMax=1,float vMax=1,uint32_t dstW=0,uint32_t dstH=0);
 float res_scale();void set_res_scale(float);void latch_res_scale();
 uint64_t next_write_seq();
-inline void mark_gpu_written(Surface* s){s->gpuWritten=true;s->writeSeq=next_write_seq();}
+// Color surfaces with linear tiling that the GPU wrote are written back to guest memory, where the game's CPU reads
+// them (the Picto Box's picture for the album): at the next GX2DrawDone, or at once for a GX2CopySurface destination
+// (surfaces.cpp guest_writeback). 1: linear-aligned (a render target's or a surface's mode), 16: GX2's linear-special
+inline bool cpu_read_surface(const Surface* s){return (s->tileMode==1||s->tileMode==16)&&!s->isDepth&&s->addr;} // (not a private copy)
+void queue_guest_writeback(Surface*);
+void guest_writeback();
+inline void mark_gpu_written(Surface* s){s->gpuWritten=true;s->writeSeq=next_write_seq();
+    if(cpu_read_surface(s)&&!s->writebackPending)queue_guest_writeback(s);}
 }
 
 namespace gfxvk { void reset_feedback_images(); } // Call before device teardown, then drain retirements.

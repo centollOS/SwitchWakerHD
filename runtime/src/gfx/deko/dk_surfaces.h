@@ -141,6 +141,7 @@ struct Surface {
     // GPU ordering (dk_sync.h): the barrier epoch of its last GPU read (sampled by a draw) and write (a draw
     // or clear rendered it); 0: none
     uint64_t syncRead = 0, syncWrite = 0;
+    bool writebackPending = false;  // a CPU-read surface written since the last guest_writeback
     FormatInfo fmt;
     std::shared_ptr<GuestLayout> guest;
 };
@@ -156,12 +157,24 @@ struct SurfaceSet {
 extern SurfaceSet S;
 
 uint64_t next_write_seq();
+// Color surfaces with linear tiling are read by the game's CPU: the Picto Box copies the picture it keeps
+// (GX2CopySurface, caller 027B6BCC) into a linear-special surface and the album takes the pixels from guest memory
+// (black, with leftover lines, while nothing wrote them there); its 800x450 linear-aligned target is the other one.
+// Cemu reads linear targets back too. What the GPU wrote into them goes to guest memory at the next GX2DrawDone, or
+// before GX2CopySurface returns for a copy's destination: guest_writeback, which waits for the GPU (only then).
+// Tile modes: 1 linear-aligned (a render target's and a surface's), 16 GX2's linear-special (a surface's)
+inline bool cpu_read_surface(const Surface* s) {
+    return (s->tileMode == 1 || s->tileMode == 16) && !s->isDepth && s->addr;  // (not a private copy)
+}
+void queue_guest_writeback(Surface* s);
+void guest_writeback();
 inline void mark_gpu_written(Surface* s) {
     if (!s->gpuWritten) {
         s->gpuWritten = true;
         R.surfaceEpoch++;
     }
     s->writeSeq = next_write_seq();
+    if (!s->writebackPending && cpu_read_surface(s)) queue_guest_writeback(s);
 }
 // s is read by something other than the GamePad picture (gamepad_only)
 inline void note_read(Surface* s) {
@@ -176,9 +189,14 @@ inline void before_write(const Surface* s) {
     if (s && s == S.scanSrc) scan_flush();
 }
 
+// RGBA8 with and without the sRGB bit describe the same memory, as on the GPU: one surface (one image), whose views
+// take the other format where the registers or texture words ask for it. The Picto Box clears its 800x450 picture
+// as RGBA8, draws it through an sRGB view, writes alpha through the RGBA8 one and copies that to the album.
+inline bool srgb_twins(uint32_t a, uint32_t b) { return (a ^ b) == 0x400 && (a & 0x3F) == 0x1A; }
 Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering);
 // the render targets the registers describe (CB_COLORn_*, DB_*), created when new; *slice: the layer
-Surface* color_target(const uint32_t* regs, int i, uint32_t* slice);
+// srgbView: the registers ask for the surface's sRGB twin format (srgb_twins): its views take that format
+Surface* color_target(const uint32_t* regs, int i, uint32_t* slice, bool* srgbView = nullptr);
 Surface* depth_target(const uint32_t* regs, uint32_t* slice);
 Surface* surface_from_color_buffer(uint32_t addr, uint32_t* firstSlice = nullptr, uint32_t* numSlices = nullptr);
 Surface* surface_from_depth_buffer(uint32_t addr, uint32_t* firstSlice = nullptr, uint32_t* numSlices = nullptr);
@@ -191,12 +209,17 @@ void upload_surface(Surface* s);
 // the image descriptor slot of the view the texture words select (dimension, format, swizzle, mips)
 uint32_t sampled_view_id(Surface* s, const uint32_t* texWords);
 // a view of one level/layer of the surface's image for dkCmdBufBindRenderTargets (draw.cpp, clears)
-void target_view(Surface* s, uint32_t level, uint32_t layer, DkImageView* out);
+// (srgbView: in the sRGB twin of the surface's format, srgb_twins)
+void target_view(Surface* s, uint32_t level, uint32_t layer, DkImageView* out, bool srgbView = false);
 void create_surface_image(Surface* s);   // the image at the surface's scale (and its default descriptor)
 void destroy_surface_image(Surface* s);  // image memory and descriptors freed once the GPU is done
 // a snapshot of a surface the draw also renders to (sampling a bound target is undefined): a copy made
 // when the surface was written since the last one
 Surface* feedback_copy(Surface* s);
+// the surface a draw samples for texture words that ask for a 3D texture: s itself, or for a layered render
+// target (a 3D color buffer is drawn slice by slice into layers: deko3d renders into no 3D image) a 3D copy of
+// its layers, made again when the layers were written since the last one (the Picto Box's colour table)
+Surface* volume_source(Surface* s, const uint32_t* texWords);
 // copy (scaled) between two surfaces' levels/layers; depth always through dkCmdBufBlitImage (plan section 3)
 void blit(Surface* src, uint32_t srcLevel, uint32_t srcLayer, uint32_t sw, uint32_t sh, Surface* dst,
           uint32_t dstLevel, uint32_t dstLayer, uint32_t dw, uint32_t dh);

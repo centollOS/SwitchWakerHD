@@ -1104,6 +1104,30 @@ is restored at exit; apm needs title mode (in applet mode the profile is skipped
   `[mesa] shader cache:` and `[mesa] shader compile:`.
 - The GPU timer correction (×1.63, round 20) also applies to the `WWHD_GL_PIPESTATS` line now.
 
+### Picto Box: black pictures (deko3d and Vulkan; desktop-tested, not yet tested on hardware)
+
+Report: with deko3d, a picture taken with the Picto Box is black, sometimes with glitches. Reproduced on the desktop
+Vulkan build (Outset save with the Deluxe Picto Box on X, `WWHD_PRESS` X then A, then A on "Save this pictograph?"
+and ZR for the album). There were three causes, all in surface handling. The first one also crashed Vulkan when the
+shutter was pressed.
+
+| Finding | Change | Off switch |
+|---|---|---|
+| At the shutter the game builds an 8x8x8 colour table (R11G11B10) by drawing its 8 depth slices one at a time into a **3D** color buffer (`GX2SetColorBuffer` from 027B9E14, `viewFirstSlice` 0..7), then samples it as a 3D texture. `GX2SetColorBuffer` passed layers only for 2D arrays, so every slice went into one 8x8 2D image. deko3d then sampled a 2D descriptor with a 3D sampler (garbage or black); Vulkan threw "sampled texture dimension does not match". | A 3D color buffer's slices are passed as layers (`gx2::color_buffer_slices`; also for clears). deko3d cannot render into a 3D image, so both renderers draw into a 2D-array image. A draw that samples it as 3D gets a 3D copy of the layers (`volume_source`), made again whenever the layers change. | none |
+| The picture buffer (800x450, `20D01000`) is used through **two formats**: cleared as RGBA8 (0x1A), the picture drawn through an **sRGB** view (0x41A, RGB mask), alpha written through the RGBA8 view, then copied as RGBA8 to the album. The renderers kept one image per format, so the RGBA8 image never held the picture (black, alpha 255). | RGBA8 and sRGB-RGBA8 at the same address and size are one surface (`srgb_twins`). Render-target, texture and clear views take the other format where the registers or texture words ask for it (deko3d: `DkImageView.format`; Vulkan: mutable-format views and pipeline formats). In a title → Outset → Picto Box session this is the only such pair. | none |
+| The album takes the pixels from **guest memory**. On "Yes" the game calls `GX2CopySurface` (027B6BCC) from that buffer into a linear-special surface (`221CC9CC`, GX2 tile mode 16) and reads it as soon as the call returns. At the shutter it also renders an 800x450 linear-aligned target (`3E9D0000`). The renderers never wrote GPU results back, so the album showed whatever was in memory: black with leftover lines. | Color surfaces with linear tiling (tile mode 1 or 16) that the GPU wrote are copied back to guest memory (`guest_writeback`): at the next GX2DrawDone, or before GX2CopySurface returns for a copy destination. Scaled targets are first resampled to the guest size. This waits for the GPU, but only these surfaces trigger it (two per picture). Cemu reads linear targets back too. | none |
+
+- Desktop result (Vulkan, same route): the preview and the album both show the picture. The writeback logs
+  `[vulkan] linear surface 3E9D0000 800x450 format 0x1A written back ...` and the same for `221CC9CC`. The white
+  streaks in some pictures are the game's wind effect; they also show in the live viewfinder.
+- deko3d (`build/switch-dk/wwhd.nro`): the same three changes. It compiles and links, but deko3d cannot run on the
+  desktop. On hardware the log should show `[dk] ... is sampled as a 3D texture: its 8 layers are copied into one`
+  at the first picture. Each kept picture should then log
+  `[dk] creating memory block: CPU-read surfaces' writeback (2 MiB, CPU-cached)` (once) and
+  `[dk] ... written back to guest memory for the CPU (N ms with the GPU wait)`.
+- Metal: only the GX2 convention changed (a 3D buffer is drawn as layers). Its 3D sampling and writeback are
+  unchanged and untested.
+
 ## Rendering resolution
 
 Measured on the headless build (title screen, busy scene) with `WWHD_DUMP_TARGETS=500`, which now also logs every surface that frame's draws rendered to (`[gl] frame N target ...`, depth included, with its draw count). `GX2SetTVBuffer` now logs the TV render mode.

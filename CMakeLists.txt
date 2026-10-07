@@ -314,10 +314,10 @@ if(WWHD_HAS_DEKO3D)
   # the default build is wwhd.nro (what the HOME-menu forwarder starts); the debug-library build says so in
   # hbmenu and is named wwhd_dk_debug.nro, so it can sit in its own folder next to it
   if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")
-    nx_generate_nacp(OUTPUT wwhd_dk.nacp NAME "SwitchWakerHD (deko3d debug)" AUTHOR "WWHD recomp" VERSION "0.1.0")
+    nx_generate_nacp(OUTPUT wwhd_dk.nacp NAME "SwitchWakerHD (deko3d debug)" AUTHOR "centollOS" VERSION "0.1.0")
     nx_create_nro(wwhd NACP wwhd_dk.nacp OUTPUT wwhd_dk_debug.nro)
   else()
-    nx_generate_nacp(OUTPUT wwhd_dk.nacp NAME "SwitchWakerHD" AUTHOR "WWHD recomp" VERSION "0.1.0")
+    nx_generate_nacp(OUTPUT wwhd_dk.nacp NAME "SwitchWakerHD" AUTHOR "centollOS" VERSION "0.1.0")
     nx_create_nro(wwhd NACP wwhd_dk.nacp OUTPUT wwhd.nro)
   endif()
 endif()
