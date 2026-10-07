@@ -13,6 +13,7 @@
 #include "../input_map.h"
 #include "../overlay/overlay.h"
 #include "../runtime.h"
+#include "../gfx/switch_renderer.h"
 #include "input_switch.h"
 
 namespace mods {
@@ -22,7 +23,6 @@ void mouse_release() {}
 void mouse_init(void*) {}
 bool host_key_down(uint16_t) { return false; }
 }
-namespace gfxgl { void request_capture(); }
 namespace input {
 namespace {
 std::mutex g_mu;
@@ -121,7 +121,7 @@ void update() {
         const bool combo = (held & HidNpadButton_StickL) && (held & HidNpadButton_StickR);
         if (combo && !was) {
             LOG("[input] both sticks clicked: capturing the next frame");
-            gfxgl::request_capture();
+            gfxsw::request_capture();
         }
         was = combo;
     }

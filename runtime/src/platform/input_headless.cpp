@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "gfx/renderer.h"
+#include "gfx/switch_renderer.h"
 
 #include "../input.h"
 #include "../input_map.h"
@@ -20,7 +21,6 @@ void mouse_release() {}
 void mouse_init(void*) {}
 bool host_key_down(uint16_t) { return false; }
 }
-namespace gfxgl { void request_capture(); }
 namespace input {
 void init() {}
 void update() {}
@@ -111,7 +111,7 @@ PadState read() {
     // both sticks clicked: a capture of the next frame, as on the Switch (input_switch.cpp)
     static bool was = false;
     const bool combo = (s.buttons & kStickL) && (s.buttons & kStickR);
-    if (combo && !was) gfxgl::request_capture();
+    if (combo && !was) gfxsw::request_capture();
     was = combo;
     mods::filter_pad(s);
     return s;

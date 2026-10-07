@@ -41,7 +41,7 @@
 #include "../savestate.h"
 #ifdef __SWITCH__
 #include <switch.h>
-#include "../gfx/gl/settings.h"
+#include "../gfx/switch_renderer.h"
 #include "../platform/settings_switch.h"
 #include "../mods/warps.h"
 #endif
@@ -736,13 +736,13 @@ void tab_switch() {
     static std::string clocks;
     if (now_s() - clocks_t >= 1.0) {
         clocks_t = now_s();
-        clocks = gfxgl::clock_report_now();
+        clocks = gfxsw::clock_report_now();
     }
     if (!clocks.empty()) note("Now: %s (%s).", clocks.c_str(), gpu_profile_status().c_str());
-    note("Internal resolution: %.2f (dynamic resolution lowers it while the GPU is the limit).", gfxgl::dynamic_res_scale());
+    note("Internal resolution: %.2f (dynamic resolution lowers it while the GPU is the limit).", gfxsw::dynamic_res_scale());
 
     heading("Picture");
-    gfxgl::PictureGrade g = gfxgl::picture_grade_now();
+    gfxsw::PictureGrade g = gfxsw::picture_grade_now();
     bool changed = false, done = false;
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
     changed |= ImGui::SliderFloat("Exposure", &g.exposure, 0.5f, 1.5f, "%.2f");
@@ -756,14 +756,14 @@ void tab_switch() {
     done |= ImGui::IsItemDeactivatedAfterEdit();
     help("Above 1 deepens mid-tones and shadows, below 1 lifts them");
     ImGui::PopItemWidth();
-    if (changed) gfxgl::set_picture_grade(g);
+    if (changed) gfxsw::set_picture_grade(g);
     if (ImGui::Button("Original colours")) {
-        gfxgl::set_picture_grade(gfxgl::PictureGrade{});
+        gfxsw::set_picture_grade(gfxsw::PictureGrade{});
         done = true;
     }
     ImGui::SameLine();
     if (ImGui::Button("Vivid")) {
-        gfxgl::set_picture_grade(gfxgl::PictureGrade{0.85f, 1.3f, 1.1f, 1.0f});
+        gfxsw::set_picture_grade(gfxsw::PictureGrade{0.85f, 1.3f, 1.1f, 1.0f});
         done = true;
     }
     if (done) hostui::post([] { save_picture(); });
@@ -772,11 +772,11 @@ void tab_switch() {
 
     heading("Frame rate counter (top left)");
     static const char* const modes[] = {"Off", "Frame rate", "Frame rate and load"};
-    const int fm = gfxgl::fps_overlay_mode();
+    const int fm = gfxsw::fps_overlay_mode();
     for (int i = 0; i < 3; i++) {
         if (i) ImGui::SameLine();
         if (radio(modes[i], fm == i)) {
-            gfxgl::set_fps_overlay_mode(i);
+            gfxsw::set_fps_overlay_mode(i);
             hostui::post([i] { hostui::set(kKeyFpsCounter, std::to_string(i)); });
         }
     }

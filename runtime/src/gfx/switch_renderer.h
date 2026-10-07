@@ -1,18 +1,17 @@
-// What the OpenGL renderer lets the settings overlay change while the game runs (Switch: the
-// "Switch" tab, platform/settings_switch.cpp), and draws it with (overlay_gl.cpp). The code outside
-// gfx/gl reaches these through gfx/switch_renderer.h (switch_renderer_gl.cpp forwards).
+// What the Switch renderer (OpenGL, gfx/gl; or deko3d, gfx/deko) offers the code around it: the
+// settings overlay's Switch tab (overlay/overlay.cpp), the saved options (platform/settings_switch.cpp)
+// and the capture combo (platform/input_switch.cpp). One Switch renderer is built into an executable
+// (CMake WWHD_RENDERER=OPENGL or DEKO3D), and it defines these functions.
 #pragma once
 #include <string>
 
-#include "gfx/switch_renderer.h"
-
-struct ImDrawData;
-
-namespace gfxgl {
+namespace gfxsw {
 
 // picture adjustments applied when presenting (neutral = 1; env.txt: WWHD_EXPOSURE, WWHD_CONTRAST,
 // WWHD_SATURATION, WWHD_GAMMA)
-using PictureGrade = gfxsw::PictureGrade;
+struct PictureGrade {
+    float exposure = 1, contrast = 1, saturation = 1, gamma = 1;
+};
 PictureGrade picture_grade_now();
 void set_picture_grade(const PictureGrade& g);
 // the counter in the top-left corner: 0 off, 1 frame rate, 2 with render-thread load and draws (WWHD_FPS)
@@ -22,10 +21,7 @@ float dynamic_res_scale();  // the internal resolution dynamic resolution has ch
 #ifdef __SWITCH__
 std::string clock_report_now();  // "CPU x MHz, GPU y MHz, memory z MHz", or "" if unavailable
 #endif
+// any thread: the next frame is captured (both sticks clicked on the Switch)
 void request_capture();
 
-// render thread, inside present()
-void overlay_renderer_init();
-void overlay_draw(ImDrawData* d, int ww, int wh);
-
-}  // namespace gfxgl
+}  // namespace gfxsw
