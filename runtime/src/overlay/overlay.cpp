@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "imgui_internal.h"  // ClearActiveID (text_field on the Switch)
 #include "hostui.h"
 #include "controls_view.h"
 #include "text_entry.h"
@@ -448,6 +449,67 @@ bool check(const char* label, bool value, bool* out, bool enabled = true) {
     return changed;
 }
 
+// A text field. On the Switch there is no keyboard: the field is read-only and choosing it opens the
+// system's software keyboard (input::prompt_text, shown by the host loop); the text arrives in a later
+// frame, and the call that receives it returns true (as Enter does with ImGuiInputTextFlags_EnterReturnsTrue).
+bool text_field(const char* label, char* buf, size_t size, ImGuiInputTextFlags flags = 0) {
+#ifdef __SWITCH__
+    struct Pending {
+        std::mutex mu;
+        ImGuiID id = 0;
+        std::string text;
+        bool ready = false;
+    };
+    static Pending pending;
+    const ImGuiID id = ImGui::GetID(label);
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(pending.mu);
+        if (pending.ready && pending.id == id) {
+            snprintf(buf, size, "%s", pending.text.c_str());
+            pending.ready = false;
+            changed = true;
+        }
+    }
+    ImGui::InputText(label, buf, size, (flags & ~ImGuiInputTextFlags_EnterReturnsTrue) | ImGuiInputTextFlags_ReadOnly);
+    if (ImGui::IsItemActivated()) {
+        std::u16string initial;
+        for (const char* c = buf; *c;) {  // UTF-8 -> UTF-16
+            uint32_t cp = 0;
+            const ssize_t n = decode_utf8(&cp, reinterpret_cast<const uint8_t*>(c));
+            if (n <= 0) break;
+            c += n;
+            if (cp >= 0x10000) {
+                cp -= 0x10000;
+                initial.push_back(char16_t(0xD800 + (cp >> 10)));
+                initial.push_back(char16_t(0xDC00 + (cp & 0x3FF)));
+            } else {
+                initial.push_back(char16_t(cp));
+            }
+        }
+        input::prompt_text(initial, int(size) - 1, [id](bool ok, std::u16string text) {
+            if (!ok) return;
+            std::string out;  // UTF-16 -> UTF-8
+            for (size_t i = 0; i < text.size(); i++) {
+                uint32_t c = text[i];
+                if (c >= 0xD800 && c < 0xDC00 && i + 1 < text.size()) c = 0x10000 + ((c - 0xD800) << 10) + (text[++i] - 0xDC00);
+                uint8_t b[4];
+                const ssize_t n = encode_utf8(b, c);
+                if (n > 0) out.append(reinterpret_cast<const char*>(b), size_t(n));
+            }
+            std::lock_guard<std::mutex> lk(pending.mu);
+            pending.id = id;
+            pending.text = std::move(out);
+            pending.ready = true;
+        });
+        ImGui::ClearActiveID();
+    }
+    return changed;
+#else
+    return ImGui::InputText(label, buf, size, flags);
+#endif
+}
+
 // ---------------------------------------------------------------- tabs
 void refresh_slots(bool force) {
     double t = now_s();
@@ -781,7 +843,7 @@ void package_controls() {
             if (ImGui::Selectable(name.c_str(), name == current)) select_profile(name, error);
         ImGui::EndCombo();
     }
-    ImGui::InputText("New profile", new_profile, sizeof new_profile);
+    text_field("New profile", new_profile, sizeof new_profile);
     ImGui::SameLine();
     if (ImGui::Button("Clone current") && create_profile(new_profile, error)) new_profile[0] = 0;
     static std::string delete_choice;
@@ -809,7 +871,7 @@ void package_controls() {
     });
 #endif
     ImGui::SetNextItemWidth(-140);
-    ImGui::InputText("Package path", source, sizeof source);
+    text_field("Package path", source, sizeof source);
     if (ImGui::Button("Install package")) install(source, error);
     ImGui::SameLine();
     if (ImGui::Button("Refresh packages")) refresh(error);
@@ -853,7 +915,7 @@ void package_controls() {
                     }
                 } else {
                     char value[1025]; snprintf(value, sizeof value, "%s", option.value.text.c_str());
-                    if (ImGui::InputText(option.name.c_str(), value, sizeof value, ImGuiInputTextFlags_EnterReturnsTrue))
+                    if (text_field(option.name.c_str(), value, sizeof value, ImGuiInputTextFlags_EnterReturnsTrue))
                         configure(mod.id, option.id, std::string(value), error);
                 }
                 if (!option.description.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", option.description.c_str());
