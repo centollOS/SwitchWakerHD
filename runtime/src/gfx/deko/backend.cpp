@@ -59,6 +59,68 @@ constexpr uint32_t kSwapImages = 3;
 // the window (swapchain images): 1280x720 handheld, 1920x1080 docked (window_wanted below); the game's picture is
 // scaled into it by the present pass. Render thread only once the device exists.
 uint32_t g_winW = 1280, g_winH = 720;
+uint64_t g_windowResizes = 0;  // swapchains recreated for a new window size (the stats line)
+// the console's operation mode as the host loop last read it (run_main_loop: appletGetOperationMode, which libnx
+// updates on AppletMessage_OperationModeChanged): 1 docked (TV), 0 handheld, -1 not read yet
+std::atomic<int> g_opMode{-1};
+
+// WWHD_DK_DOCKED_1080 (on unless =0): docked, the window is 1920x1080 (the TV's output); handheld 1280x720 (the
+// screen). =0: 1280x720 always (the old path; the system scales it to the TV). WWHD_DK_WINDOW=WxH (at most
+// 1920x1080) forces that size in both modes, for A/B tests in handheld. The game still renders its 1280x720
+// picture (internal and dynamic resolution as before): the present pass scales it into the window.
+struct WindowConfig {
+    int mode = 1;  // 0 always 1280x720, 1 by the operation mode, 2 forced
+    uint32_t w = 0, h = 0;
+};
+const WindowConfig& window_config() {
+    static const WindowConfig c = [] {
+        WindowConfig c;
+        if (const char* e = getenv("WWHD_DK_WINDOW"); e && *e) {
+            unsigned w = 0, h = 0;
+            if (sscanf(e, "%ux%u", &w, &h) == 2 && w >= 320 && h >= 180 && w <= 1920 && h <= 1080) {
+                c.mode = 2;
+                c.w = w;
+                c.h = h;
+            } else
+                LOG("[dk] WWHD_DK_WINDOW=%s ignored: WxH from 320x180 to 1920x1080", e);
+        }
+        if (c.mode != 2)
+            if (const char* e = getenv("WWHD_DK_DOCKED_1080"); e && *e == '0') c.mode = 0;
+        if (c.mode == 2)
+            LOG("[dk] window: %ux%u in both modes (WWHD_DK_WINDOW); the game's 1280x720 picture is scaled into it", c.w, c.h);
+        else if (c.mode == 1)
+            LOG("[dk] window: docked 1920x1080, handheld 1280x720, the swapchain recreated when the mode changes; the game's "
+                "1280x720 picture is scaled into it (WWHD_DK_DOCKED_1080=0: 1280x720 always, the old path)");
+        else
+            LOG("[dk] window: 1280x720 in both modes (WWHD_DK_DOCKED_1080=0, the old path; docked the system scales it)");
+        return c;
+    }();
+    return c;
+}
+void window_wanted(uint32_t& w, uint32_t& h) {
+    const WindowConfig& c = window_config();
+    if (c.mode == 2) {
+        w = c.w;
+        h = c.h;
+        return;
+    }
+    const bool big = c.mode == 1 && g_opMode.load(std::memory_order_relaxed) == 1;
+    w = big ? 1920 : 1280;
+    h = big ? 1080 : 720;
+}
+// the host loop: the operation mode, logged when it changes (appletMainLoop handled the applet message)
+void poll_operation_mode() {
+    const int docked = appletGetOperationMode() == AppletOperationMode_Console ? 1 : 0;
+    const int before = g_opMode.exchange(docked, std::memory_order_relaxed);
+    if (before == docked) return;
+    uint32_t w, h;
+    window_wanted(w, h);
+    if (before < 0)
+        LOG("[dk] operation mode: %s; window %ux%u", docked ? "docked (TV)" : "handheld", w, h);
+    else
+        LOG("[dk] operation mode changed (AppletMessage_OperationModeChanged): now %s; window %ux%u from the next present",
+            docked ? "docked (TV)" : "handheld", w, h);
+}
 #ifdef WWHD_DEKO3D_DEBUG_LIB
 constexpr bool kDebugLib = true;  // linked against libdeko3dd (CMakeLists.txt)
 #else
@@ -160,6 +222,29 @@ void init_swapchain() {
     nwindowGetDimensions(nwindowGetDefault(), &nw, &nh);
     LOG("[dk] swapchain: %u RGBA8 images of %ux%u on the default window (%ux%u), swap interval 1", kSwapImages, g_winW,
         g_winH, nw, nh);
+}
+
+// a new window size (the operation mode changed): the GPU finishes what was submitted (the previous present
+// passes into the old images), the old swapchain releases the window's buffers (nwindowReleaseBuffers), and new
+// images and a new swapchain of the new size take their place (deko3d sets the window's dimensions from them,
+// nwindowSetDimensions). The old images' memory is freed once the GPU is done with this frame. Same swap
+// interval (1); relaxed vsync is gx2_core's own pacing (steady clock, 59.94 Hz), the same in both modes.
+void resize_window(uint32_t w, uint32_t h, uint64_t frame) {
+    const uint64_t t0 = now_ns();
+    const uint32_t ow = g_winW, oh = g_winH;
+    check_queue("recreating the swapchain", frame);
+    dkQueueWaitIdle(R.queue);
+    const uint64_t t1 = now_ns();
+    dkSwapchainDestroy(g_swapchain);
+    g_swapchain = nullptr;
+    for (uint32_t i = 0; i < kSwapImages; i++) image_free_later(g_swapMem[i]);
+    image_free_later(g_depthMem);
+    g_winW = w;
+    g_winH = h;
+    init_swapchain();
+    g_windowResizes++;
+    LOG("[dk] frame %llu: window %ux%u -> %ux%u: swapchain recreated in %.1f ms (GPU idle wait %.1f ms), swap interval 1",
+        (unsigned long long)frame, ow, oh, w, h, double(now_ns() - t0) / 1e6, double(t1 - t0) / 1e6);
 }
 
 // ---- state for the renderer's own passes
@@ -850,14 +935,15 @@ void frame_stats() {
     audio::stats(underrun, dropped);
     LOG("[dk] %.1f fps; GX2 per frame: %.0f draws, %.0f clears, %.0f surface copies, %.0f scan "
         "copies, %.0f invalidates, %.0f flushes, %.0f waits; render thread busy %.0f ms/s (CPU %.0f ms/s), present %.0f "
-        "ms/s (frame fence %.0f, swapchain image %.0f, submit %.0f); GPU behind at %.0f%% of presents; command memory "
+        "ms/s (frame fence %.0f, swapchain image %.0f, submit %.0f; window %ux%u, %llu resizes); GPU behind at %.0f%% of presents; command memory "
         "per frame %.0f KiB (max %llu KiB, %llu frames over the %u MiB slice); stream %.1f KiB/frame (%llu full); "
         "heap never used %zu MiB; image heap %llu KiB in %llu chunks, shader code %llu KiB; files %llu (%.0f ms), audio "
         "gaps %.0f ms; deko3d messages %d",
         double(frames) / secs, perFrame(c.draws - last.draws), perFrame(c.clears - last.clears),
         perFrame(c.copies - last.copies), perFrame(c.scans - last.scans), perFrame(c.invalidates - last.invalidates),
         perFrame(c.flushes - last.flushes), perFrame(c.waits - last.waits), busy, cpuMs, ms(g_times.presentNs),
-        ms(g_times.fenceNs), ms(g_times.acquireNs), ms(g_times.submitNs), behindPct,
+        ms(g_times.fenceNs), ms(g_times.acquireNs), ms(g_times.submitNs), g_winW, g_winH,
+        (unsigned long long)g_windowResizes, behindPct,
         m.frames ? double(m.cmdBytesSum) / 1024.0 / double(m.frames) : 0.0, (unsigned long long)(m.cmdBytesMax >> 10),
         (unsigned long long)m.cmdOverflows, kCmdSliceSize >> 20,
         m.frames ? double(m.streamBytesSum) / 1024.0 / double(m.frames) : 0.0, (unsigned long long)m.streamFull,
@@ -1013,6 +1099,14 @@ void present() {
     g_times.presents++;
     const bool gpuBehind = !frame_done(R.frame);  // the GPU is still on the previous frame (dynamic resolution)
     begin_commands();  // (already open when a GX2 command recorded in this frame)
+    {
+        uint32_t ww, wh;
+        window_wanted(ww, wh);
+        if (ww != g_winW || wh != g_winH) {
+            Stage stage("deko3d: recreating the swapchain");
+            resize_window(ww, wh, frame);
+        }
+    }
     const uint64_t t1 = now_ns();
     int slot;
     {
@@ -1254,6 +1348,8 @@ void init() {
     memory_init();
     load_shaders();
     text_self_test();
+    poll_operation_mode();
+    window_wanted(g_winW, g_winH);  // the first swapchain at the current mode's size
     init_swapchain();
     shaders_init(shader_cache_progress);  // the game shaders' worker and caches (dk_shaders.h)
     log_heap("after the deko3d setup");
@@ -1263,6 +1359,7 @@ void init() {
 void run_main_loop() {
     while (appletMainLoop()) {
         input::update();
+        poll_operation_mode();    // docked / handheld: the window size (present recreates the swapchain)
         hostui::run_posted();     // the settings overlay's changes, on this thread as on the desktop hosts
         switch_settings::tick();  // CPU / GPU clock overrides set again when the system changed them
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
