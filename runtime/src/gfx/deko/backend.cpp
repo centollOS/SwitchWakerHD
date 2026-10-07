@@ -1,8 +1,8 @@
 // The deko3d renderer's device, presentation and host loop, and its entry in the renderer table (dk.h).
 // Every GX2 swap presents the game's TV picture (present_source, dk_surfaces.h) with the picture adjustments,
-// the FPS counter and the settings overlay (hold Minus). Until the game has a picture, the P1 test pattern
-// shows the device's conventions (origin, y direction, depth range, depth test) instead. The draw lane's
-// share (docs/deko3d-plan.md, "P2 lanes"): submits, the present pass, the statistics, hitch log and trace.
+// the FPS counter and the settings overlay (hold Minus); black until the game has copied a picture to the TV
+// scan buffer. WWHD_DK_TEST_PATTERN=1 shows P1's test pattern of the device's conventions (origin, y direction,
+// depth range, depth test) instead of the picture. Also here: submits, the statistics, hitch log and trace.
 #include <malloc.h>
 #include <unistd.h>
 extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into (sbrk)
@@ -320,7 +320,7 @@ void draw_pattern(uint64_t frame) {
     dkCmdBufDraw(R.cmd, DkPrimitive_Triangles, uint32_t(v.size()), 1, 0, 0);
     // the legend (window coordinates from the top left)
     char status[64];
-    snprintf(status, sizeof status, "FRAME %llu, NO PICTURE FROM THE GAME YET", (unsigned long long)frame);
+    snprintf(status, sizeof status, "FRAME %llu, WWHD_DK_TEST_PATTERN=1", (unsigned long long)frame);
     static const float fg[4] = {1, 1, 1, 1}, bg[4] = {0, 0, 0, 0.55f};
     draw_text(330, 36, 3,
               {"DEKO3D TEST PATTERN", status, "", "THIS TEXT UPRIGHT: WINDOW ORIGIN TOP LEFT",
@@ -409,7 +409,7 @@ gfxsw::PictureGrade picture_grade() {
 // the picture adjustments and, for an sRGB TV format, sRGB encoding (as gfx/gl present)
 struct PresentUbo {  // present_fsh.glsl, std140
     float grade[4];
-    int32_t encode[4];
+    int32_t encode[4];  // x: encode as sRGB (sRGB TV format); y: the image is sRGB (sampling decoded it)
 };
 bool draw_picture(const PresentSource& src, bool capture) {
     if (!g_presentOk || !src.surface || !src.width || !src.height) return false;
@@ -426,11 +426,11 @@ bool draw_picture(const PresentSource& src, bool capture) {
     if (!u) return false;
     const gfxsw::PictureGrade g = picture_grade();
     const bool encode = R.tvSrgb.load(std::memory_order_relaxed);
-    PresentUbo p{{g.exposure, g.contrast, g.saturation, g.gamma}, {encode ? 1 : 0, 0, 0, 0}};
+    PresentUbo p{{g.exposure, g.contrast, g.saturation, g.gamma}, {encode ? 1 : 0, src.srgb ? 1 : 0, 0, 0}};
     memcpy(u.cpu, &p, sizeof p);
     static int encoded = -1;
-    if (int(encode) != encoded) {
-        encoded = int(encode);
+    if (int(encode) * 2 + int(src.srgb) != encoded) {
+        encoded = int(encode) * 2 + int(src.srgb);
         LOG("[dk] presenting the game's picture (%ux%u, GX2 format %03X%s) with %s", src.width, src.height,
             src.surface->format, src.srgb ? ", sRGB" : "", encode ? "sRGB encoding (sRGB TV format)" : "no encoding");
     }
@@ -619,8 +619,11 @@ void begin_commands() {
     frame_begin(frame);
     g_times.fenceNs += now_ns() - t0;
     // conservative (plan section 6.3): the texture, uniform and descriptor caches forget what the CPU
-    // rewrote in this slot's stream slice four frames ago
-    dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Image | DkInvalidateFlags_Shader | DkInvalidateFlags_Descriptors);
+    // rewrote in this slot's stream slice four frames ago; and the previous frame's present pass, which may
+    // sample the game's TV buffer itself (present_source), finishes before this frame's clears and draws
+    // write to it
+    dkCmdBufBarrier(R.cmd, DkBarrier_Fragments,
+                    DkInvalidateFlags_Image | DkInvalidateFlags_Shader | DkInvalidateFlags_Descriptors);
     dkCmdBufBindImageDescriptorSet(R.cmd, image_descriptors(), kImageDescriptors);
     dkCmdBufBindSamplerDescriptorSet(R.cmd, sampler_descriptors(), kSamplerDescriptors);
     static bool samplersWritten = false;
@@ -705,10 +708,30 @@ void present() {
     const DkImageView* colors[] = {&color};
     dkCmdBufBindRenderTargets(R.cmd, colors, 1, &depth);
     set_view(0, 0, kWidth, kHeight);
-    if (src.surface) dkCmdBufClearColorFloat(R.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);  // the bars
-    else dkCmdBufClearColorFloat(R.cmd, 0, DkColorMask_RGBA, 0.08f, 0.08f, 0.10f, 1.0f);
+    // WWHD_DK_TEST_PATTERN=1: P1's test pattern instead of the game's picture (the game runs behind it)
+    static const bool testPattern = [] {
+        const char* e = getenv("WWHD_DK_TEST_PATTERN");
+        const bool on = e && *e && *e != '0';
+        LOG("[dk] present: %s", on ? "the TEST PATTERN (WWHD_DK_TEST_PATTERN=1), not the game's picture"
+                                   : "the game's TV picture (WWHD_DK_TEST_PATTERN=1 shows the test pattern)");
+        return on;
+    }();
+    dkCmdBufClearColorFloat(R.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);  // the bars, or no picture yet
     dkCmdBufClearDepthStencil(R.cmd, true, 1.0f, 0xFF, 0);
-    if (!draw_picture(src, capture)) draw_pattern(frame);
+    static int shown = -1;  // the last frame's: 1 the game's picture, 0 black (logged when it changes)
+    if (testPattern) draw_pattern(frame);
+    else if (draw_picture(src, capture)) {
+        if (shown != 1) LOG("[dk] frame %llu: presenting the game's TV picture", (unsigned long long)frame);
+        shown = 1;
+    } else {
+        // black until the game copies a picture to the TV scan buffer
+        if (shown != 0)
+            LOG("[dk] frame %llu: no TV picture to present (%s): black", (unsigned long long)frame,
+                !g_presentOk ? "the present shaders did not load"
+                : !src.surface ? "no scan copy yet"
+                               : "the picture has no size");
+        shown = 0;
+    }
     // the next frame draws into the buffer again: it gets its own copy only if the game copies it (gfx/gl)
     S.scanSrc = nullptr;
     if (S.tvSource) S.tvSource->hudFull = false;
@@ -936,7 +959,7 @@ const Backend& deko3d_backend() {
         b.api = Api::Deko3D;
         b.init = gfxdk::init;
         b.run_main_loop = gfxdk::run_main_loop;
-        // GX2 render thread: P2's lanes behind dk_draw.h / dk_surfaces.h (counted no-ops until they land)
+        // GX2 render thread: the draw path (dk_draw.h) and the surfaces (dk_surfaces.h)
         b.draw = [](const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
                     uint32_t baseVertex, uint32_t instances) {
             guarded("draw", [&] { gfxdk::draw(regs, prim, count, indexType, indexAddr, baseVertex, instances); });

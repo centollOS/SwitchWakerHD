@@ -1,9 +1,7 @@
-// The deko3d renderer (Switch), docs/deko3d-plan.md. Phase P1: the device, its memory, the swapchain
-// and a present pass that draws an orientation / depth test pattern, the FPS counter and the settings
-// overlay; GX2 draws, clears and copies are counted but not executed yet (the game runs behind the
-// pattern). Namespace gfxdk; one render thread (GX2's) records and submits everything.
-// Phase P2 (the game's picture) is built in three lanes behind dk_surfaces.h, dk_shaders.h and dk_draw.h
-// (plan, "P2 lanes").
+// The deko3d renderer (Switch), docs/deko3d-plan.md. P1: the device, its memory, the swapchain, the present
+// pass with the FPS counter and the settings overlay (and the test pattern, WWHD_DK_TEST_PATTERN=1). P2: the
+// game's picture: surfaces (dk_surfaces.h), game shaders (dk_shaders.h) and the draw path (dk_draw.h).
+// Namespace gfxdk; one render thread (GX2's) records and submits everything.
 //
 // Device conventions (plan section 2): DkDeviceFlags_OriginUpperLeft | DkDeviceFlags_DepthZeroToOne: window
 // and image row 0 at the top, clip-space z from 0 to 1, but clip-space y points UP as in OpenGL (deko3d 0.5.0
@@ -89,7 +87,7 @@ struct Renderer {
     uint64_t frame = 0;      // frames presented (GX2 swaps)
     std::atomic<uint64_t> completed{0};
     std::atomic<bool> tvSrgb{false};
-    // GX2 commands this phase does not execute (counted for the stats)
+    // GX2 commands received (the stats; R.drawCount counts the draws executed)
     struct Counts {
         uint64_t draws = 0, clears = 0, copies = 0, scans = 0, invalidates = 0, flushes = 0, waits = 0;
     } counts;

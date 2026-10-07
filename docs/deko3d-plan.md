@@ -2,63 +2,86 @@
 
 Plan redactado el 2026-10-07 por un agente de planificación (Fable) a partir del código (`dev` 30fd148,
 round 36), del prototipo de uam (`~/Documents/uam-proto`) y de los logs de hardware. **[V]** = verificado en
-código o logs; **[S]** = supuesto a confirmar. Estado: P0 y P1 hechos y confirmados en hardware (rama `deko3d`); interfaces de P2 definidas; ver Estado y «P2: carriles».
+código o logs; **[S]** = supuesto a confirmar. Estado: P0 y P1 hechos y confirmados en hardware; P2 integrado en `deko3d`, pendiente de prueba en hardware; ver Estado.
 
 ## Estado (2026-10-07, rama `deko3d`)
 
-Integrados `dk-uam`, `dk-convert`, `dk-tools` y `dk-p1` sin conflictos. Compilan `build/switch/wwhd.nro` (GL, por
-defecto, sin cambios de comportamiento), `build/switch-dk/wwhd_dk.nro` (`WWHD_RENDERER=DEKO3D tools/switch/build.sh`,
-con libdeko3dd), `build/uamtest2/uamtest2.nro` (`tools/switch/uamtest/build.sh`) y la herramienta de host
-`build/dksh_cache/dksh_cache` (`tools/switch/dksh_cache/build.sh`).
+Integrados `dk-uam`, `dk-convert`, `dk-tools`, `dk-p1` y los tres carriles de P2 (`p2-surf`, `p2-shader`, `p2-draw`,
+sin conflictos). Compilan `build/switch/wwhd.nro` (GL, por defecto, sin cambios), `build/switch-dk/wwhd_dk.nro`
+(`WWHD_RENDERER=DEKO3D tools/switch/build.sh`, con libdeko3dd; `WWHD_DEKO3D_DEBUG_LIB=OFF` enlaza la librería release),
+`build/uamtest2/uamtest2.nro` y la herramienta de host `build/dksh_cache/dksh_cache`.
 
-**Confirmado en hardware (2026-10-07):** uamtest2 1561/1561 DKSH idénticos al Mac (media 70 ms, heap +24 KB por
-compile); `wwhd_dk.nro`: patrón, orientación, test de profundidad y overlay correctos; el juego corre detrás a 30 fps
-con GX2 sin ejecutar y llega a Outset (por el sonido).
+**P0 y P1 confirmados en hardware (2026-10-07):** uamtest2 1561/1561 DKSH idénticos al Mac (media 70 ms, heap +24 KB
+por compile); `wwhd_dk.nro` de P1: patrón, orientación, test de profundidad y overlay correctos; el juego corría detrás
+a 30 fps con GX2 sin ejecutar y llegaba a Outset (por el sonido).
+- P0: uam 1.1.0 vendorizado (`runtime/third_party/uam`, `uam_api.h`: un solo hilo, pila 8 MB); `glsl_to_deko`
+  (`gfx/deko/glsl_convert.cpp`, 7680/7680 de la cosecha); formato `WDK1` (`gfx/deko/shader_files.*`). Cobertura de la
+  cache offline: 96,2 % de las fuentes de una consola (riesgo 1: el ~4 % restante se compila en la consola).
+- P1: dispositivo `OriginUpperLeft | DepthZeroToOne` (la y del clip apunta ARRIBA: los VS niegan y), anillos con
+  fences por frame (`memory.cpp`), swapchain 3 × RGBA8 1280×720, contador FPS, overlay ImGui. El patrón de prueba
+  queda tras `WWHD_DK_TEST_PATTERN=1`.
 
-**P0 (hecho en el Mac):**
-- uam 1.1.0 vendorizado (`runtime/third_party/uam`, target `uamlib`, API `uam_api.h`, parches en `PATCHES.md`): log por
-  callback, sin `exit/abort`, DKSH a memoria, frontend residente (~20 % más rápido) y arreglo de una lectura sin
-  inicializar en el scheduler GM107 de nv50_ir (antes 88/1561 DKSH dependían del heap). 1561/1561 idénticos al CLI;
-  valgrind limpio. Switch: 2,0 MB de texto.
-- `glsl_to_deko` (`gfx/deko/glsl_convert.cpp`, `kConvertRevision`): 7680/7680 de la cosecha convierten y compilan;
-  los 2654 VS conservan el `SET_POSITION` z 0..1; máximo 4 UBOs y 8 samplers por stage. Cache de consola 1561/1561.
-- `dksh_cache` (WGS1 → `WDK1`, `gfx/deko/shader_files.cpp`): cosecha 7680/7680 en 37 s, uam host p50 2,8 ms, p99 26 ms;
-  `shadercache_dksh.bin` 13,2 MiB (uamId `007b6d8c06ba645b`), determinista. **Cobertura (riesgo 1):** la cosecha sin
-  la cache de la consola cubre 96,2 % de las fuentes de la consola (1501/1561) y 95,7 % de los pares; se espera que
-  falte ~4-5 % → compilación en consola para ese resto.
+**P2 (integrado y compilado; SIN probar en hardware):** el juego dibuja con deko3d. Objetivo: pantalla de título y
+menús correctos (el juego en sí es P3).
+- **Shaders** (`shaders_dk.cpp`): port de `gl/shaders.cpp` (mismas claves y hashes, memo, `shadercache_gl.bin`) →
+  `glsl_to_deko` → uam en un worker (pila 8 MB, prioridad 0x3C, núcleos 0 y 2; autoprueba al arrancar: línea
+  `[dk] shader worker: uam ready` o `SELF-TEST FAILED`) → DKSH a la memoria de código en el render thread (64 cargas
+  por frame, `WWHD_DK_SHADER_BUDGET`; 0 = el draw espera al compilador). Mientras un shader está pendiente sus draws
+  se saltan (como GL sin shader). Al arrancar, barra de progreso mientras `shadercache_dksh.bin` (offline) y
+  `shadercache_dksh_local.bin` (lo compilado en esta consola) se cargan enteras. `kConvertRevision` 2 (SET_POSITION
+  niega y): **uamId nuevo `c6088028d9e60f00`**; la cache vieja (`007b6d8c06ba645b`) se rechaza con una línea `[dk]`.
+  `pack_uniforms` es el port de `vulkan pack_uniforms_into`.
+- **Surfaces** (`surfaces.cpp`, `formats.cpp`, `descriptors.cpp`): port de `gl/surfaces.cpp` (búsqueda, caches de
+  targets, detiling, hash disperso, GuestRanges, copias, `ss_reset`) con imágenes, vistas y formatos de Vulkan. Subidas
+  por un anillo de staging de 32 MiB; clears con viewport/scissor completos; copias por el motor de copia o el 2D (depth,
+  escaladas); compresión HW en los targets de color (`WWHD_DK_RT_COMPRESSION=0` la quita; la de depth está apagada,
+  `WWHD_DK_DEPTH_COMPRESSION=1`). Autocomprobación de los layouts de todos los formatos en el primer frame. Escala
+  interna fija a 1 (P3). Barriers completos en cada subida/copia (correcto pero caro: afinarlos es P4).
+- **Draw** (`draw.cpp`): port de `gl/draw.cpp` (memo y combos, índices convertidos en CPU con cache por frame, recorte
+  de vértices, caches de targets y texturas, feedback copies, GamePad skip, trace) a los structs `Dk*State` con cache
+  de estado; un submit cada 256 draws (`WWHD_DK_SUBMIT_DRAWS`). Viewport: con `PA_CL_VPORT_YSCALE` < 0 (lo normal) un
+  swizzle NegativeY deshace la negación del VS; la cara frontal es la de Latte (`WWHD_DK_FLIP_FRONT=1` la invierte, por
+  si el culling sale al revés). Barrier `Fragments` en cada cambio de targets (`WWHD_DK_PASS_BARRIER=0` lo quita).
+  Las variables `WWHD_DK_*` aceptan también el nombre `WWHD_GL_*` de GL (`TRACE_FRAMES`, `TRACE_DRAWS`, `SKIP_GAMEPAD`...).
+- **Presentación** (`backend.cpp`): cada swap presenta el buffer de TV que el juego copió (`copy_to_scan`: el propio
+  buffer si nada lo reescribió, si no la copia) ajustado a 16:9, con el grade de imagen y la codificación sRGB de
+  `gl present_program` (si la imagen es sRGB, el shader deshace la decodificación del muestreo: mismos bytes que GL con
+  `GL_SKIP_DECODE_EXT`), y encima el contador FPS y el overlay. Negro mientras no haya imagen. GX2Flush y GX2DrawDone
+  envían lo grabado (`dkQueueSubmitCommands` + `dkQueueFlush`) sin esperar a la GPU, como GL.
+- **Logs** cada 5 s: `[dk] <fps> fps; GX2 per frame...`, `[dk] draws per frame: N executed; skipped ...` (motivos),
+  `[dk] shaders: ...` (traducidos, en RAM, de las caches, compilados, fallidos, pendientes, draws saltados),
+  `[dk] surfaces: ...` (superficies, memoria, subidas, copias, descriptores), `[hitch]` para frames de más de 55 ms.
+- **No portado aún:** escala interna / resolución dinámica, AO, FXAA, aniso, timestamps de GPU por pase, dumps PNG,
+  probes, rect lists (GL tampoco las dibuja), registros 2 de `shadercache_gl.bin`.
 
-**P1 (compilado):** `gfx/switch_renderer.h` (`gfxsw`) para los hooks Switch (GL los reenvía, sin cambios);
-`Api::Deko3D` por defecto cuando está compilado; dispositivo, cola, memblocks (stream ring 4 × 32 MB, comandos
-4 × 4 MB con primer trozo explícito por frame, heap de imágenes en chunks de 64 MB, código 32 MB, descriptores),
-swapchain 3 × RGBA8 1280×720, patrón de orientación/profundidad, contador FPS y overlay ImGui. Todas las entradas GX2
-existen pero solo cuentan (el juego corre, la pantalla muestra solo el patrón). Errores: `[dk]` + `log_flush()` antes
-de cada creación, `dkQueueIsInErrorState` antes de acquire/submit/present → `fatal()` legible.
-
-**Pruebas en hardware para el propietario** (ficheros listos en `build/deko3d-out/` del checkout principal):
-1. `uamtest2.nro` → `sdmc:/switch/uamtest/uamtest2.nro`, con `shadercache_dksh.bin` → `sdmc:/switch/uamtest/` (para la
-   comparación bit a bit). Usa `sdmc:/switch/wwhd/shadercache_gl.bin` de la consola. Ejecutar a reloj stock, esperar
-   al final (~2,5 min para ~1561 shaders; `+` sale). Traer `sdmc:/switch/uamtest/uamtest2.log` y
-   `shadercache_dksh_switch.bin`. Mirar: `ok`/fallos (esperado 1561/1561), media/p50/p99 por shader (antes 95/77/403
-   ms; el frontend residente debería bajarla), crecimiento del heap por compile y ausencia de `LEAK?`, mayor arena
-   (cota de memoria de uam), y 0 diferencias de DKSH y mapas de bindings frente al Mac.
-2. `wwhd_dk.nro` → `sdmc:/switch/wwhd/` junto a `wwhd.nro` (título propio "SwitchWakerHD (deko3d)"; comparte carpeta,
-   `settings.ini`, `env.txt`; `wwhd.log` se sobrescribe, cada sesión queda en `logs/`). Arrancar, dejar 10 min, abrir el
-   menú con `-`, cambiar perfiles. Hacer una foto con el botón de captura del mando. El patrón debe verse como dice su
-   leyenda: texto derecho, caja roja arriba a la izquierda y verde abajo a la derecha, fondo azul arriba, barra negro →
-   blanco, cian delante de magenta, cuadro gris vacío (sin naranja). Si se ve espejado en vertical, el convenio de y
-   está mal (sección 2). Log: líneas `[dk]` de creación del dispositivo, memblocks, swapchain y heap; cada 5 s fps
-   (esperado ~60 en el patrón; los recuentos GX2 por frame muestran que el juego avanza), memoria de comandos por frame,
-   stream y heap estables. Cualquier `FATAL`/mensaje `deko3d ...` en las últimas líneas es el fallo; los dos sticks
-   pulsados registran el tiempo de un frame. `wwhd_dk.nro` va con libdeko3dd (más lento): no medir rendimiento con él.
-3. `wwhd.nro` (GL, de esta rama) solo como control de no regresión: debe comportarse igual que el de `dev`.
-
+**Pruebas en hardware para el propietario (P2)** (ficheros en `build/deko3d-out/` del checkout principal):
+1. **Copiar** `wwhd_dk.nro` (libdeko3dd: validación, más lento) y `wwhd_dk_release.nro` (librería release, para medir)
+   a `sdmc:/switch/wwhd/`, y **`shadercache_dksh.bin` a `sdmc:/switch/wwhd/shadercache_dksh.bin`** (sustituye a la de
+   P1, que ya no vale: uamId distinto). `wwhd.nro` es el GL de esta rama, para comparar. Todas comparten `settings.ini`,
+   `env.txt`, `shadercache_gl.bin`; `wwhd.log` se sobrescribe (cada sesión queda en `logs/`).
+2. **wwhd_dk.nro primero.** Arranque: barra de progreso de la cache (unos segundos), luego la pantalla de título.
+   Mirar: logo y título derechos (no espejados en vertical), colores como en GL (ni lavados ni oscuros: sRGB), agua y
+   cielo animados, texto del menú legible; entrar en los menús (selección de partida, opciones) y volver. Hacer fotos
+   con el botón de captura en los mismos momentos con `wwhd_dk.nro` y con `wwhd.nro` (GL) para comparar. Al principio
+   faltarán objetos durante unos segundos mientras se compilan shaders que no están en la cache (se saltan sus draws);
+   deben aparecer solos. Si todo va bien, cargar partida e ir a Outset (P3 lo afinará; anotar lo que falle).
+3. **Si la imagen está espejada o faltan caras:** probar `WWHD_DK_FLIP_FRONT=1` en `env.txt`. Si hay basura/bloques en
+   los targets: `WWHD_DK_RT_COMPRESSION=0`. Si no se ve nada pero el juego suena: `WWHD_DK_TEST_PATTERN=1` comprueba que
+   la presentación funciona; mandar el log.
+4. **wwhd_dk_release.nro** después, en el mismo recorrido, para tiempos (fps, `[hitch]`, `render thread busy`).
+5. **Log** (`sdmc:/switch/wwhd/wwhd.log`): las últimas líneas ante cualquier cierre (`FATAL`, `[dk] deko3d error in ...`,
+   `queue is in an error state`); `[dk] shader worker: uam ready` (o `SELF-TEST FAILED`); la carga de las caches
+   (`shadercache_dksh.bin`: N DKSH, uamId); `[dk] surfaces self-check passed`; `[dk] TV picture: buffer ...` y
+   `presenting the game's TV picture`; cada 5 s las líneas `draws per frame` (executed alto, skipped bajando a 0),
+   `shaders` (pending bajando a 0, failed = 0) y `surfaces`; líneas `[dk] draws with the failed ... shader` o
+   `unsupported`. Los dos sticks pulsados registran un frame completo con sus pases (`[trace]`).
 
 ## P2: carriles (interfaces en la rama `deko3d`)
 
 Tres ramas (`p2-surf`, `p2-shader`, `p2-draw`) parten de `deko3d` (`git merge deko3d`) y trabajan en paralelo, cada
-una en sus ficheros. Las interfaces están en `gfx/deko/dk_surfaces.h`, `dk_shaders.h` y `dk_draw.h`; los `.cpp`
-son stubs que compilan y mantienen el comportamiento de P1 (GX2 contado, no ejecutado; lo que tendría que devolver un
-recurso real hace `fatal()` legible). Cambiar una cabecera ajena: solo añadir, y avisarlo al integrar.
+una en sus ficheros. Las interfaces están en `gfx/deko/dk_surfaces.h`, `dk_shaders.h` y `dk_draw.h`. Integrados
+el 2026-10-07 (ver Estado); los contratos siguen valiendo para P3. Diferencias con lo escrito abajo: el worker de uam
+hace él mismo `glsl_to_deko`, y la cache local va a `shadercache_dksh_local.bin`.
 
 | Carril | Ficheros (propios) | Qué implementa |
 |---|---|---|
