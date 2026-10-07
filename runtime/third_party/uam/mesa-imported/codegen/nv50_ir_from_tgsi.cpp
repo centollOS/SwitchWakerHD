@@ -29,6 +29,7 @@
 
 #include "codegen/nv50_ir.h"
 #include "codegen/nv50_ir_util.h"
+#include "uam_log.h" // SwitchWakerHD patch 4
 #include "codegen/nv50_ir_build_util.h"
 
 namespace tgsi {
@@ -3846,8 +3847,8 @@ Converter::handleInstruction(const struct tgsi_full_instruction *insn)
       break;
    case TGSI_OPCODE_SWITCH:
    case TGSI_OPCODE_CASE:
-      ERROR("switch/case opcode encountered, should have been lowered\n");
-      abort();
+      // SwitchWakerHD patch 4: fail the compile, not the process
+      uam_fatal("ERROR: switch/case opcode encountered, should have been lowered\n");
       break;
    case TGSI_OPCODE_LOAD:
       handleLOAD(dst0);

@@ -590,6 +590,12 @@ void Instruction::init()
    predSrc = -1;
    flagsDef = -1;
    flagsSrc = -1;
+
+   // SwitchWakerHD patch 6: SchedDataCalculatorGM107::setDelay reads the wait mask of the next block's
+   // first instruction before that block's visit sets it; uninitialised, the output depended on what
+   // the heap held (stale data from an earlier compile in the same process). 0x7e0 is the value the
+   // scheduler starts every instruction with (no barriers, nothing to wait on).
+   sched = 0x7e0;
 }
 
 Instruction::Instruction()

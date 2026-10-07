@@ -27,6 +27,7 @@ extern "C"
 }
 
 #include "glsl_frontend.h"
+#include "uam_log.h"
 
 class dead_variable_visitor : public ir_hierarchical_visitor {
 public:
@@ -143,7 +144,7 @@ new_program(UNUSED struct gl_context *ctx, GLenum target,
 		return prog;
 	}
 	default:
-		printf("bad target in new_program\n");
+		uam_logf("bad target in new_program\n");
 		return NULL;
 	}
 }
@@ -403,9 +404,9 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 	_mesa_glsl_compile_shader(&gl_ctx, shader, false, false, true);
 	if (shader->CompileStatus != COMPILE_SUCCESS)
 	{
-		fprintf(stderr, "Shader failed to compile.\n");
+		uam_logf("Shader failed to compile.\n");
 		if (shader->InfoLog && shader->InfoLog[0])
-			fprintf(stderr, "%s\n", shader->InfoLog);
+			uam_logf("%s\n", shader->InfoLog);
 		goto _fail;
 	}
 	_mesa_clear_shader_program_data(&gl_ctx, prg);
@@ -414,9 +415,9 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 	link_shaders(&gl_ctx, prg);
 	if (prg->data->LinkStatus != LINKING_SUCCESS)
 	{
-		fprintf(stderr, "Shader failed to link.\n");
+		uam_logf("Shader failed to link.\n");
 		if (prg->data->InfoLog && prg->data->InfoLog[0])
-			fprintf(stderr, "%s\n", prg->data->InfoLog);
+			uam_logf("%s\n", prg->data->InfoLog);
 		goto _fail;
 	}
 	else
@@ -437,18 +438,18 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 		// Do the TGSI conversion
 		if (!st_link_shader(&gl_ctx, prg))
 		{
-			fprintf(stderr, "st_link_shader failed\n");
+			uam_logf("st_link_shader failed\n");
 			goto _fail;
 		}
 
 		// Force OriginUpperLeft
 		if (linked_shader->Program->OriginUpperLeft)
-			fprintf(stderr, "warning: origin_upper_left has no effect\n");
+			uam_logf("warning: origin_upper_left has no effect\n");
 		linked_shader->Program->OriginUpperLeft = GL_TRUE;
 
 		// Check for PixelCenterInteger (unsupported)
 		if (linked_shader->Program->PixelCenterInteger == GL_TRUE) {
-			fprintf(stderr, "error: pixel_center_integer is not supported\n");
+			uam_logf("error: pixel_center_integer is not supported\n");
 			goto _fail;
 		}
 
@@ -476,13 +477,13 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 				rc = tgsi_translate_compute(&gl_ctx, linked_shader->Program);
 				break;
 			default:
-				fprintf(stderr, "Unsupported stage\n");
+				uam_logf("Unsupported stage\n");
 				goto _fail;
 		}
 
 		if (!rc)
 		{
-			fprintf(stderr, "Translation failed\n");
+			uam_logf("Translation failed\n");
 			goto _fail;
 		}
 
@@ -501,7 +502,7 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 			if (location != last_location)
 			{
 				last_location = location;
-				fprintf(stderr, "error: uniform '%s' in driver constbuf (c[0x1][0x%03x]) not supported\n",
+				uam_logf("error: uniform '%s' in driver constbuf (c[0x1][0x%03x]) not supported\n",
 					p->Name,
 					// "(type=%d dim=%ux%u size=%u)"
 					//storage->type->base_type,

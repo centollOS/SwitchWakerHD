@@ -28,6 +28,8 @@
 
 #include "glsl/glcpp/glcpp.h" // fincs-edit
 #include "glsl/glcpp/glcpp-parse.h" // fincs-edit
+#include "uam_log.h" // SwitchWakerHD patch 4: flex fails the compile, not the process
+#define YY_FATAL_ERROR(msg) uam_fatal("flex: %s\n", msg)
 
 /* Flex annoyingly generates some functions without making them
  * static. Let's declare them here. */

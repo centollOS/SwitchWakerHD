@@ -35,6 +35,7 @@
 #include "util/ralloc.h"
 #include "util/strtod.h"
 #include "main/mtypes.h"
+#include "uam_log.h" // SwitchWakerHD patch 3
 
 void
 _mesa_warning(struct gl_context *ctx, const char *fmt, ...)
@@ -44,12 +45,10 @@ _mesa_warning(struct gl_context *ctx, const char *fmt, ...)
 
     va_start(vargs, fmt);
 
-    /* This output is not thread-safe, but that's good enough for the
-     * standalone compiler.
-     */
-    fprintf(stderr, "Mesa warning: ");
-    vfprintf(stderr, fmt, vargs);
-    fprintf(stderr, "\n");
+    /* SwitchWakerHD patch 3: one message to the log callback */
+    char msg[1024];
+    vsnprintf(msg, sizeof(msg), fmt, vargs);
+    uam_logf("Mesa warning: %s\n", msg);
 
     va_end(vargs);
 }
@@ -58,7 +57,7 @@ _mesa_warning(struct gl_context *ctx, const char *fmt, ...)
 void
 _mesa_error_no_memory(const char *caller)
 {
-    fprintf(stderr, "Mesa error: out of memory in %s\n", caller);
+    uam_logf("Mesa error: out of memory in %s\n", caller); // SwitchWakerHD patch 3
 }
 
 void

@@ -28,6 +28,8 @@
 #include "glsl/ast.h" // fincs-edit
 #include "glsl/glsl_parser_extras.h" // fincs-edit
 #include "glsl/glsl_parser.h" // fincs-edit
+#include "uam_log.h" // SwitchWakerHD patch 4: flex fails the compile, not the process
+#define YY_FATAL_ERROR(msg) uam_fatal("flex: %s\n", msg)
 
 static int classify_identifier(struct _mesa_glsl_parse_state *, const char *,
 			       unsigned name_len, YYSTYPE *output);

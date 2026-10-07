@@ -64,6 +64,7 @@
  * \author Ian Romanick <ian.d.romanick@intel.com>
  */
 
+#include "uam_log.h" // SwitchWakerHD patch 3
 #include <ctype.h>
 #include "util/strndup.h"
 #include "glsl_symbol_table.h"
@@ -4263,7 +4264,7 @@ is_top_level_shader_storage_block_member(const char* name,
    int name_length = strlen(interface_name) + 1 + strlen(field_name) + 1;
    char *full_instanced_name = (char *) calloc(name_length, sizeof(char));
    if (!full_instanced_name) {
-      fprintf(stderr, "%s: Cannot allocate space for name\n", __func__);
+      uam_logf("%s: Cannot allocate space for name\n", __func__); // SwitchWakerHD patch 3
       return false;
    }
 

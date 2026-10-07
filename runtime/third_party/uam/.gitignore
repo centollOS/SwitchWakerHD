@@ -9,3 +9,5 @@ build/
 *.tgsi
 *.dksh
 *.txt
+# SwitchWakerHD: the CMake build of uamlib
+!CMakeLists.txt

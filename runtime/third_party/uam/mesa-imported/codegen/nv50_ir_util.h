@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <memory>
 #include <map>
+#include "uam_log.h" // SwitchWakerHD patch 4
 
 #ifndef NDEBUG
 # include <typeinfo>
@@ -36,7 +37,8 @@
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 
-#define ERROR(args...) debug_printf("ERROR: " args)
+// SwitchWakerHD patch 3: errors reach the log callback in release builds too (debug_printf is DEBUG-only)
+#define ERROR(args...) _debug_printf("ERROR: " args)
 #define WARN(args...) debug_printf("WARNING: " args)
 #define INFO(args...) debug_printf(args)
 
@@ -46,11 +48,8 @@
          debug_printf(args);             \
    } while(0)
 
-#define FATAL(args...)          \
-   do {                         \
-      fprintf(stderr, args);    \
-      abort();                  \
-   } while(0)
+// SwitchWakerHD patch 4: fail the compile, not the process
+#define FATAL(args...) uam_fatal(args)
 
 
 #define NV50_IR_FUNC_ALLOC_OBJ_DEF(obj, f, args...)               \

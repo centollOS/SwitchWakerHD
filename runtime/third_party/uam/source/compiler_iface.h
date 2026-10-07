@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>
 
 #include "tgsi/tgsi_text.h"
 #include "tgsi/tgsi_dump.h"
@@ -32,6 +33,7 @@ class DekoCompiler
 
 	void RetrieveAndPadCode();
 	void GenerateHeaders();
+	bool CompileGlslUnguarded(const char* glsl);
 
 public:
 	DekoCompiler(pipeline_stage stage, int optLevel = 3);
@@ -39,6 +41,11 @@ public:
 
 	bool CompileGlsl(const char* glsl);
 	void OutputDksh(const char* dkshFile);
+	void WriteDksh(std::vector<uint8_t>& out) const; // SwitchWakerHD patch 2: OutputDksh's bytes, in memory
+
+	// SwitchWakerHD patch 5: true keeps Mesa's built-in functions and type tables between compilers
+	// (built once, on the first compile) instead of releasing them in every destructor
+	static void SetFrontendResident(bool resident);
 	void OutputRawCode(const char* rawFile);
 	void OutputTgsi(const char* tgsiFile);
 };

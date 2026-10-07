@@ -31,6 +31,7 @@
  */
 
 #include "st_glsl_to_tgsi.h"
+#include "uam_log.h" // SwitchWakerHD patch 4
 
 #include "glsl/glsl_parser_extras.h" // fincs-edit
 #include "glsl/ir_optimization.h" // fincs-edit
@@ -1487,10 +1488,9 @@ glsl_to_tgsi_visitor::visit(ir_expression *ir)
       this->result.file = PROGRAM_UNDEFINED;
       ir->operands[operand]->accept(this);
       if (this->result.file == PROGRAM_UNDEFINED) {
-         printf("Failed to get tree for expression operand:\n");
-         ir->operands[operand]->print();
-         printf("\n");
-         exit(1);
+         // SwitchWakerHD patch 4: fail the compile, not the process
+         uam_fatal("Failed to get tree for expression operand (%s)\n",
+                   ir_expression_operation_strings[ir->operation]);
       }
       op[operand] = this->result;
 
@@ -2732,8 +2732,8 @@ glsl_to_tgsi_visitor::visit(ir_dereference_variable *ir)
       }
 
       if (!entry) {
-         printf("Failed to make storage for %s\n", var->name);
-         exit(1);
+         // SwitchWakerHD patch 4: fail the compile, not the process
+         uam_fatal("Failed to make storage for %s\n", var->name);
       }
    }
 

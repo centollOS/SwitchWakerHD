@@ -1,4 +1,5 @@
 #include "compiler_iface.h"
+#include "uam_log.h"
 
 namespace
 {
@@ -26,6 +27,20 @@ namespace
 		long pos = ftell(f);
 		FileWritePadding(f, Align256(pos) - pos);
 	}
+
+	// WriteDksh's counterparts of fwrite and FileAlign256 (padding is zero bytes, as above)
+	void VecWrite(std::vector<uint8_t>& v, const void* p, size_t n)
+	{
+		const uint8_t* b = static_cast<const uint8_t*>(p);
+		v.insert(v.end(), b, b + n);
+	}
+
+	void VecAlign256(std::vector<uint8_t>& v)
+	{
+		v.resize(Align256(v.size()), 0);
+	}
+
+	bool s_frontendResident = false;
 }
 
 /* NOTE: Using a[0x270] in FP may cause an error even if we're using less than
@@ -286,10 +301,34 @@ DekoCompiler::~DekoCompiler()
 	if (m_glsl)
 		glsl_program_free(m_glsl);
 
-	glsl_frontend_exit();
+	if (!s_frontendResident)
+		glsl_frontend_exit();
 }
 
+void DekoCompiler::SetFrontendResident(bool resident)
+{
+	s_frontendResident = resident;
+}
+
+// SwitchWakerHD patch 4: a uam_fatal() anywhere below (Mesa, nv50_ir, flex) lands here and fails this
+// compile instead of exiting the process; what the aborted compile had allocated is leaked
 bool DekoCompiler::CompileGlsl(const char* glsl)
+{
+	jmp_buf fatal;
+	jmp_buf* const outer = uam_fatal_jmp;
+	if (setjmp(fatal))
+	{
+		uam_fatal_jmp = outer;
+		uam_logf("error: compile aborted by the fatal error above\n");
+		return false;
+	}
+	uam_fatal_jmp = &fatal;
+	const bool ok = CompileGlslUnguarded(glsl);
+	uam_fatal_jmp = outer;
+	return ok;
+}
+
+bool DekoCompiler::CompileGlslUnguarded(const char* glsl)
 {
 	m_glsl = glsl_program_create(glsl, m_stage);
 	if (!m_glsl) return false;
@@ -301,14 +340,14 @@ bool DekoCompiler::CompileGlsl(const char* glsl)
 	int ret = nv50_ir_generate_code(&m_info);
 	if (ret < 0)
 	{
-		fprintf(stderr, "Error compiling program: %d\n", ret);
+		uam_logf("Error compiling program: %d\n", ret);
 		return false;
 	}
 
 	if (m_info.io.fp64_rcprsq)
-		fprintf(stderr, "warning: program uses 64-bit floating point reciprocal/square root, for which only a rough approximation with 20 bits of mantissa is supported by hardware\n");
+		uam_logf("warning: program uses 64-bit floating point reciprocal/square root, for which only a rough approximation with 20 bits of mantissa is supported by hardware\n");
 	if (m_info.io.int_divmod)
-		fprintf(stderr, "warning: program uses non-constant integer division/modulo, which is unsupported by hardware; floating point emulation with resulting loss of precision has been applied\n");
+		uam_logf("warning: program uses non-constant integer division/modulo, which is unsupported by hardware; floating point emulation with resulting loss of precision has been applied\n");
 
 	m_data = glsl_program_get_constant_buffer(m_glsl, m_dataSize);
 	RetrieveAndPadCode();
@@ -656,6 +695,39 @@ void DekoCompiler::OutputDksh(const char* dkshFile)
 		}
 
 		fclose(f);
+	}
+}
+
+void DekoCompiler::WriteDksh(std::vector<uint8_t>& out) const
+{
+	DkshHeader hdr = {};
+	hdr.magic        = DKSH_MAGIC;
+	hdr.header_sz    = sizeof(DkshHeader);
+	hdr.control_sz   = Align256(sizeof(DkshHeader) + sizeof(DkshProgramHeader));
+	hdr.code_sz      = Align256((m_stage != pipeline_stage_compute ? 0x80 : 0x00) + m_codeSize) + Align256(m_dataSize);
+	hdr.programs_off = sizeof(DkshHeader);
+	hdr.num_programs = 1;
+
+	out.clear();
+	out.reserve(hdr.control_sz + hdr.code_sz);
+	VecWrite(out, &hdr, sizeof(hdr));
+	VecWrite(out, &m_dkph, sizeof(m_dkph));
+	VecAlign256(out);
+
+	if (m_stage != pipeline_stage_compute)
+	{
+		static const char s_padding[s_shaderStartOffset] = "lol nvidia why did you make us waste space here";
+		VecWrite(out, s_padding, sizeof(s_padding));
+		VecWrite(out, &m_nvsh, sizeof(m_nvsh));
+	}
+
+	VecWrite(out, m_code, m_codeSize);
+	VecAlign256(out);
+
+	if (m_dataSize)
+	{
+		VecWrite(out, m_data, m_dataSize);
+		VecAlign256(out);
 	}
 }
 

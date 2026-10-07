@@ -32,6 +32,7 @@
  */
 
 #include "ir.h"
+#include "uam_log.h" // SwitchWakerHD patch 4
 #include "ir_expression_flattening.h"
 #include "compiler/glsl_types.h"
 
@@ -427,9 +428,9 @@ ir_mat_op_to_vec_visitor::visit_leave(ir_assignment *orig_assign)
       break;
 
    default:
-      printf("FINISHME: Handle matrix operation for %s\n",
-	     ir_expression_operation_strings[orig_expr->operation]);
-      abort();
+      // SwitchWakerHD patch 4: fail the compile, not the process
+      uam_fatal("FINISHME: Handle matrix operation for %s\n",
+                ir_expression_operation_strings[orig_expr->operation]);
    }
    orig_assign->remove();
    this->made_progress = true;
