@@ -51,8 +51,25 @@ menús correctos (el juego en sí es P3).
 - **Logs** cada 5 s: `[dk] <fps> fps; GX2 per frame...`, `[dk] draws per frame: N executed; skipped ...` (motivos),
   `[dk] shaders: ...` (traducidos, en RAM, de las caches, compilados, fallidos, pendientes, draws saltados),
   `[dk] surfaces: ...` (superficies, memoria, subidas, copias, descriptores), `[hitch]` para frames de más de 55 ms.
-- **No portado aún:** escala interna / resolución dinámica, AO, FXAA, aniso, timestamps de GPU por pase, dumps PNG,
-  probes, rect lists (GL tampoco las dibuja), registros 2 de `shadercache_gl.bin`.
+- **No portado aún:** FXAA, dumps PNG, probes, rect lists (GL tampoco las dibuja), registros 2 de
+  `shadercache_gl.bin`. (Escala interna, resolución dinámica, AO, aniso y timestamps por pase: carril P3 `p3-features`, abajo.)
+
+**P3 `p3-features` (compilado; SIN probar en hardware):** cada punto con su línea `[dk]` al arrancar.
+- **AO** (`draw.cpp`, `pack_uniforms` aoNoise): el arreglo de GL tal cual, `WWHD_AO_MODE` / `WWHD_NO_AO_QUIRK`, modo 2 por
+  defecto (`[dk] AO quirk fix: mode N`; la tabla del renderer informa del modo, solo lectura como GL).
+- **Varyings flat** con el último vértice, como GL (que nunca llama a `glProvokingVertex`); `WWHD_DK_PROVOKING_VERTEX=latte|first`
+  para probar.
+- **Aniso 16x** opcional (`WWHD_ANISO=1` o el overlay, Effects; apagado por defecto: GL no tiene) con la condición de Vulkan;
+  **LOD** como GL/Mesa: un MIN_LOD mayor que el máximo se intercambia (deko3d subía el máximo al mínimo).
+- **Descriptores:** los aciertos de la cache de texturas del draw marcan su sampler como usado (el LRU podía reescribir un
+  slot en uso) y una expulsión invalida las caches; el slot del present compara también el tamaño de la imagen.
+- **Zcull:** se descarta en cada bind de depth (también con `WWHD_DK_PASS_BARRIER=0`) y tras subidas, copias, blits o
+  imágenes nuevas de un depth (`R.zcullEpoch`): deko3d solo lo hace si cambia la dirección del target.
+- **GPU passes:** timestamps (`dkCmdBufReportCounter`) cada 30 frames como `GpuPasses` de GL; cada 5 s `[dk] GPU passes:
+  ...; frame start: GPU idle X ms`. `WWHD_DK_GPU_PASSES=0` las quita (salvo con resolución dinámica).
+- **Escala interna y resolución dinámica:** port de GL (screen_shaped, twin del buffer de TV con el HUD a resolución
+  completa, pool de 64 MB, 4 imágenes nuevas por frame, `uf_texNScale`); `WWHD_RES_SCALE`, `WWHD_DYNAMIC_RES` (activa por
+  defecto como GL: 0.75..1; `=0` la apaga). El overlay muestra la escala en uso. Cada 5 s `[dk] internal resolution ...`.
 
 **Pruebas en hardware para el propietario (P2)** (ficheros en `build/deko3d-out/` del checkout principal):
 1. **Copiar** `wwhd_dk.nro` (libdeko3dd: validación, más lento) y `wwhd_dk_release.nro` (librería release, para medir)
