@@ -8,8 +8,11 @@
 //   frame_<n>_tv_source.png    the buffer the game copied to the TV scan buffer, when the present pass read
 //                              its copy instead
 //   target_<addr>_<w>x<h>_f<gx2 format>[_s<layer>][_depth].png   every render target of the frame's draws
-//   tex_<addr>_<w>x<h>_f<gx2 format>[_<dim>].png                every texture the frame's draws sampled, as
-//                              the GPU holds it (level 0, layer 0)
+//   tex_<addr>_<w>x<h>_f<gx2 format>[_<dim>].png                a texture the frame's draws sampled, as
+//                              the GPU holds it (level 0, layer 0). Textures of CPU data are compared byte for
+//                              byte with their upload data after the readback and written (with their
+//                              _upload.png) only when they differ; WWHD_DK_CAPTURE_ALL_TEXTURES=1 writes all.
+//                              GPU-written textures are always written.
 //   tex_..._upload.png         the same texture's guest data as the CPU decodes it for its upload (detiled
 //                              and converted, before the GPU): a wrong picture in both is a wrong format or
 //                              decode; right here and wrong in the GPU's is a wrong upload, view or sampling
@@ -17,7 +20,9 @@
 // (numbered as the frame's '[trace]   draw #n' lines) that used it, with each use's unit, view swizzle,
 // texture-word format and sampler. GPU images are copied (dkCmdBufCopyImageToBuffer: the copy engine
 // de-swizzles the block-linear layout) into a CPU-cached memory block after the frame is presented, in
-// batches of up to 16 MiB; a worker thread converts to RGBA8 and writes the PNGs.
+// batches of up to 16 MiB; a worker thread converts to RGBA8 and writes the PNGs (zlib level 1). The render
+// thread never waits for the writer: past 128 MiB queued a file is dropped with a log line. The end:
+// '[dk] capture of frame N done in X s: ...'.
 //
 // Triggers: both sticks clicked (request_capture: everything, plus the frame's passes and draws in the log),
 // WWHD_DUMP_FRAMES=n,... (the pictures), WWHD_DUMP_TARGETS=n,... (the render targets), WWHD_DUMP_TEXTURES=n,...

@@ -37,16 +37,21 @@ namespace {
 void put32(std::vector<uint8_t>& v, uint32_t x) {
     for (int i = 3; i >= 0; i--) v.push_back(uint8_t(x >> (i * 8)));
 }
-void chunk(FILE* f, const char* type, const std::vector<uint8_t>& data) {
-    std::vector<uint8_t> out;
-    put32(out, (uint32_t)data.size());
-    out.insert(out.end(), type, type + 4);
-    out.insert(out.end(), data.begin(), data.end());
-    uLong crc = crc32(0, out.data() + 4, (uInt)(out.size() - 4));
-    put32(out, (uint32_t)crc);
-    fwrite(out.data(), 1, out.size(), f);
+void chunk(FILE* f, const char* type, const uint8_t* data, size_t size) {
+    std::vector<uint8_t> head;
+    put32(head, (uint32_t)size);
+    head.insert(head.end(), type, type + 4);
+    uLong crc = crc32(0, reinterpret_cast<const Bytef*>(type), 4);
+    if (size) crc = crc32(crc, data, (uInt)size);
+    std::vector<uint8_t> tail;
+    put32(tail, (uint32_t)crc);
+    fwrite(head.data(), 1, head.size(), f);
+    if (size) fwrite(data, 1, size, f);
+    fwrite(tail.data(), 1, tail.size(), f);
 }
-// rgba: rows top to bottom. Fast compression: a capture writes dozens of files on the console's CPU.
+void chunk(FILE* f, const char* type, const std::vector<uint8_t>& data) { chunk(f, type, data.data(), data.size()); }
+// rgba: rows top to bottom. zlib level 1 (Z_BEST_SPEED): a capture writes dozens of files on the console's CPU;
+// written through a 512 KiB stdio buffer (the SD card is slow with small writes).
 bool write_png(const std::string& path, uint32_t w, uint32_t h, const std::vector<uint8_t>& rgba) {
     std::vector<uint8_t> raw;
     raw.reserve(size_t(h) * (w * 4 + 1));
@@ -61,6 +66,8 @@ bool write_png(const std::string& path, uint32_t w, uint32_t h, const std::vecto
     z.resize(size);
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) return false;
+    static char buffer[512u << 10];  // (the worker thread only)
+    setvbuf(f, buffer, _IOFBF, sizeof buffer);
     static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
     fwrite(sig, 1, 8, f);
     std::vector<uint8_t> ihdr;
@@ -405,16 +412,28 @@ struct Job {
     std::vector<uint8_t> data;
 };
 std::mutex g_jobMutex;
-std::condition_variable g_jobCv, g_doneCv;
+std::condition_variable g_jobCv;
 std::deque<Job> g_jobs;
 size_t g_jobBytes = 0;  // data bytes queued or being written
-// the capture being written: files queued and done; final once capture_present has queued all of them
+// the capture being written: files queued, done (written or failed), written, dropped (queue full), textures
+// not written because the GPU holds exactly their upload data; final once capture_present has queued all
 uint64_t g_filesFrame = ~0ull;
-uint32_t g_filesQueued = 0, g_filesDone = 0;
+uint32_t g_filesQueued = 0, g_filesDone = 0, g_filesWritten = 0, g_filesDropped = 0, g_texturesIdentical = 0;
+uint64_t g_filesStart = 0;  // now_ns() when the capture began (the render thread's readback included)
 bool g_filesFinal = false;
 bool g_workerStarted = false;
 Thread g_worker;
-constexpr size_t kMaxQueuedBytes = 24u << 20;  // the render thread waits above this (heap)
+// Data bytes the writer may have queued. The render thread never waits for the writer: a file that does not
+// fit is dropped with a log line (the console has ~1.4 GiB of heap left after the setup; RGBA conversions of
+// the worker come on top of this).
+constexpr size_t kMaxQueuedBytes = 128u << 20;
+
+void log_capture_done(uint64_t frame) {  // (g_jobMutex held)
+    LOG("[dk] capture of frame %llu done in %.1f s: %u files written to captures/%llu/, %u failed, %u dropped (writer "
+        "queue full), %u sampled textures identical to their upload data not written",
+        (unsigned long long)frame, double(now_ns() - g_filesStart) / 1e9, g_filesWritten, (unsigned long long)frame,
+        g_filesDone - g_filesWritten, g_filesDropped, g_texturesIdentical);
+}
 
 void worker_main(void*) {
     for (;;) {
@@ -429,6 +448,7 @@ void worker_main(void*) {
         std::vector<uint8_t> rgba;
         std::string note;
         const size_t bytes = job.data.size();
+        bool ok = false;
         if (!to_rgba8(job.format, job.data.data(), job.w, job.h, rgba, note))
             LOG("[dk] capture %s NOT written: no CPU conversion for %s; %s", job.path.c_str(), dk_name(job.format).c_str(),
                 job.meta.c_str());
@@ -438,49 +458,44 @@ void worker_main(void*) {
                 srgb_encode(rgba);
                 note += "; sRGB-encoded as the display shows it";
             }
-            const bool ok = write_png(job.path, job.w, job.h, rgba);
+            ok = write_png(job.path, job.w, job.h, rgba);
             LOG("[dk] capture %s%s: %s%s (%.0f ms)", job.path.c_str(), ok ? "" : " NOT WRITTEN (cannot write the file)",
                 job.meta.c_str(), note.c_str(), double(now_ns() - t0) / 1e6);
         }
-        bool last = false;
-        uint32_t files = 0;
         {
             std::lock_guard<std::mutex> lk(g_jobMutex);
             g_jobBytes -= bytes;
-            if (job.frame == g_filesFrame) last = ++g_filesDone == g_filesQueued && g_filesFinal;
-            files = g_filesQueued;
+            if (job.frame == g_filesFrame) {
+                g_filesWritten += ok;
+                if (++g_filesDone == g_filesQueued && g_filesFinal) log_capture_done(job.frame);
+            }
         }
-        g_doneCv.notify_all();
-        if (last)
-            LOG("[dk] capture of frame %llu: all %u files done (captures/%llu/)", (unsigned long long)job.frame, files,
-                (unsigned long long)job.frame);
     }
 }
 
-void queue_job(Job&& job) {
+// false: dropped (no writer, or its queue full)
+bool queue_job(Job&& job) {
     if (!g_workerStarted) {
         // priority 0x3B (the game's own; an application may not go lower, shaders_dk.cpp), core 2
         const Result rc = threadCreate(&g_worker, worker_main, nullptr, nullptr, 256u << 10, 0x3B, 2);
         if (R_FAILED(rc) || R_FAILED(threadStart(&g_worker))) {
             LOG("[dk] capture: cannot start the PNG writer thread (result 0x%X): nothing written", unsigned(rc));
-            return;
+            return false;
         }
         g_workerStarted = true;
     }
     std::unique_lock<std::mutex> lk(g_jobMutex);
-    if (g_jobBytes > kMaxQueuedBytes) {
-        Stage stage("deko3d: capture waiting for the PNG writer");
-        g_doneCv.wait(lk, [] { return g_jobBytes <= kMaxQueuedBytes; });
+    if (g_jobBytes && g_jobBytes + job.data.size() > kMaxQueuedBytes) {
+        if (job.frame == g_filesFrame) g_filesDropped++;
+        LOG("[dk] capture %s dropped: the PNG writer has %.1f MiB queued (at most %u MiB; the render thread does not "
+            "wait for it)", job.path.c_str(), double(g_jobBytes) / 1048576.0, unsigned(kMaxQueuedBytes >> 20));
+        return false;
     }
     g_jobBytes += job.data.size();
-    if (job.frame != g_filesFrame) {
-        g_filesFrame = job.frame;
-        g_filesQueued = g_filesDone = 0;
-        g_filesFinal = false;
-    }
-    g_filesQueued++;
+    if (job.frame == g_filesFrame) g_filesQueued++;
     g_jobs.push_back(std::move(job));
     g_jobCv.notify_one();
+    return true;
 }
 
 // ---------------------------------------------------------------- what the frame's draws used
@@ -564,7 +579,37 @@ struct Readback {
     DkImageFormat format;
     uint32_t w, h, layer;
     Job job;  // path, meta, size, format (data filled from the block)
+    // a sampled texture of CPU data: compared with its upload data after the readback; both written when they
+    // differ (or always with WWHD_DK_CAPTURE_ALL_TEXTURES=1), neither when the GPU holds exactly that data
+    Surface* uploadOf = nullptr;
+    std::string uploadPath, uploadMeta;
 };
+// WWHD_DK_CAPTURE_ALL_TEXTURES=1: every sampled texture and its upload picture, as before (slow: ~200 files)
+bool all_textures() {
+    static const bool all = [] {
+        const char* e = getenv("WWHD_DK_CAPTURE_ALL_TEXTURES");
+        return e && *e && *e != '0';
+    }();
+    return all;
+}
+// units (texels, or 4x4 blocks) of a w x h image whose bytes differ; first: the first one's unit coordinates
+uint32_t count_differences(DkImageFormat f, uint32_t w, uint32_t h, const uint8_t* a, const uint8_t* b, uint32_t& units,
+                           uint32_t first[2]) {
+    const DkFmt d = dk_fmt(f);
+    const uint32_t uw = (w + d.block - 1) / d.block, uh = (h + d.block - 1) / d.block;
+    units = uw * uh;
+    uint32_t n = 0;
+    for (uint32_t y = 0; y < uh; y++) {
+        const size_t row = size_t(y) * uw * d.bpb;
+        if (!memcmp(a + row, b + row, size_t(uw) * d.bpb)) continue;
+        for (uint32_t x = 0; x < uw; x++)
+            if (memcmp(a + row + size_t(x) * d.bpb, b + row + size_t(x) * d.bpb, d.bpb)) {
+                if (!n) first[0] = x, first[1] = y;
+                n++;
+            }
+    }
+    return n;
+}
 
 struct ReadbackBlock {
     // kMaxCopies: dkCmdBufCopyImageToBuffer records 28 words per layer; the command memory is not grown
@@ -641,8 +686,45 @@ bool run_batch(ReadbackBlock& rb, std::vector<Readback*>& batch, uint64_t& bytes
     for (size_t i = 0; i < batch.size(); i++) {
         Readback* r = batch[i];
         const size_t n = linear_bytes(r->format, r->w, r->h);
-        r->job.data.assign(cpu + offsets[i], cpu + offsets[i] + n);
+        const uint8_t* gpu = cpu + offsets[i];
         bytesRead += n;
+        if (r->uploadOf) {
+            Job up;
+            bool changed = false;
+            if (!capture_upload_data(r->uploadOf, up.data, changed) || up.data.size() != n) {
+                LOG("[dk] capture %s: no upload data to compare (%zu bytes decoded, %zu expected)", r->uploadPath.c_str(),
+                    up.data.size(), n);
+            } else {
+                uint32_t units = 0, first[2] = {0, 0};
+                const uint32_t diff = count_differences(r->format, r->w, r->h, gpu, up.data.data(), units, first);
+                const bool block = dk_fmt(r->format).block > 1;
+                if (!diff && !all_textures()) {
+                    std::lock_guard<std::mutex> lk(g_jobMutex);
+                    g_texturesIdentical++;
+                    continue;
+                }
+                char b[200];
+                if (diff)
+                    snprintf(b, sizeof b, "; DIFFERS from its upload data in %u of %u %s (the first at %s %u,%u)%s", diff,
+                             units, block ? "4x4 blocks" : "texels", block ? "block" : "texel", first[0], first[1],
+                             changed ? "; the guest data changed since the last upload" : "");
+                else
+                    snprintf(b, sizeof b, "; identical to its upload data");
+                r->job.meta += b;
+                up.path = r->uploadPath;
+                up.meta = r->uploadMeta + (changed ? "; the guest data CHANGED since the last upload (the GPU has older data)"
+                                                   : "; guest data as last uploaded") + b;
+                up.w = r->job.w;
+                up.h = r->job.h;
+                up.format = r->format;
+                up.frame = r->job.frame;
+                r->job.data.assign(gpu, gpu + n);
+                queue_job(std::move(r->job));
+                queue_job(std::move(up));
+                continue;
+            }
+        }
+        r->job.data.assign(gpu, gpu + n);
         queue_job(std::move(r->job));
     }
     batch.clear();
@@ -719,25 +801,32 @@ void capture_present(const DkImage& window, uint32_t ww, uint32_t wh, const Pres
     if (!what || g_armedFrame != frame) return;
     g_capture = 0;
     const uint64_t t0 = now_ns();
+    {
+        std::lock_guard<std::mutex> lk(g_jobMutex);
+        g_filesFrame = frame;
+        g_filesQueued = g_filesDone = g_filesWritten = g_filesDropped = g_texturesIdentical = 0;
+        g_filesFinal = false;
+        g_filesStart = t0;
+    }
     const std::string dir = "captures/" + std::to_string(frame);
     make_dir("captures");
     make_dir(dir);
     const std::string n = std::to_string(frame);
     std::deque<Readback> reads;  // (stable addresses)
-    uint32_t uploads = 0, skipped = 0;
+    uint32_t compared = 0, skipped = 0;
     auto add = [&](const DkImage* image, DkImageFormat f, uint32_t w, uint32_t h, uint32_t layer, std::string path,
                    std::string meta, bool encode) {
         if (!dk_fmt(f).name) {
             LOG("[dk] capture %s skipped: no CPU conversion for deko3d format %s; %s", path.c_str(), dk_name(f).c_str(),
                 meta.c_str());
             skipped++;
-            return;
+            return static_cast<Readback*>(nullptr);
         }
         if (linear_bytes(f, w, h) > ReadbackBlock::kSize) {
             LOG("[dk] capture %s skipped: %ux%u %s is larger than the %u MiB readback block; %s", path.c_str(), w, h,
                 dk_name(f).c_str(), ReadbackBlock::kSize >> 20, meta.c_str());
             skipped++;
-            return;
+            return static_cast<Readback*>(nullptr);
         }
         Readback r{image, f, w, h, layer, {}};
         r.job.path = dir + "/" + path;
@@ -748,6 +837,7 @@ void capture_present(const DkImage& window, uint32_t ww, uint32_t wh, const Pres
         r.job.encodeSrgb = encode;
         r.job.frame = frame;
         reads.push_back(std::move(r));
+        return &reads.back();
     };
     // ---- the pictures
     if (what & kCapturePictures) {
@@ -789,28 +879,15 @@ void capture_present(const DkImage& window, uint32_t ww, uint32_t wh, const Pres
             snprintf(name, sizeof name, "tex_%08X_%ux%u_f%03X%s%s", s->addr, s->width, s->height, s->format,
                      s->dim != 1 ? "_" : "", s->dim != 1 ? dim_name(s->dim) : "");
         const std::string base = name;
-        add(&s->img.image, s->fmt.image, s->img.pw, s->img.ph, layer, base + ".png",
-            "GPU image level 0 layer " + std::to_string(layer) + ", " + surface_meta(s) + uses, false);
-        // the guest data as the upload decodes it (textures the CPU wrote)
-        if (asTexture && !s->gpuWritten) {
-            Job job;
-            bool changed = false;
-            if (capture_upload_data(s, job.data, changed)) {
-                job.path = dir + "/" + base + "_upload.png";
-                job.meta = "CPU-decoded upload data (detiled, converted; before the GPU) level 0 layer 0, " + surface_meta(s) +
-                           (changed ? "; the guest data CHANGED since the last upload (the GPU has older data)"
-                                    : "; guest data as last uploaded") + uses;
-                job.w = s->width;
-                job.h = s->height;
-                job.format = s->fmt.image;
-                job.frame = frame;
-                if (job.data.size() == linear_bytes(job.format, job.w, job.h)) {
-                    queue_job(std::move(job));
-                    uploads++;
-                } else
-                    LOG("[dk] capture %s_upload.png skipped: %zu bytes decoded, %zu expected for %ux%u %s", base.c_str(),
-                        job.data.size(), linear_bytes(job.format, job.w, job.h), job.w, job.h, dk_name(job.format).c_str());
-            }
+        Readback* r = add(&s->img.image, s->fmt.image, s->img.pw, s->img.ph, layer, base + ".png",
+                          "GPU image level 0 layer " + std::to_string(layer) + ", " + surface_meta(s) + uses, false);
+        // a texture the CPU wrote: compared after the readback with its guest data as the upload decodes it
+        // (at the guest size: a texture of CPU data is not scaled)
+        if (r && asTexture && !s->gpuWritten && s->img.pw == s->width && s->img.ph == s->height) {
+            r->uploadOf = s;
+            r->uploadPath = dir + "/" + base + "_upload.png";
+            r->uploadMeta = "CPU-decoded upload data (detiled, converted; before the GPU) level 0 layer 0, " + surface_meta(s) + uses;
+            compared++;
         }
     }
     // ---- the GPU's images, in batches through the readback block
@@ -838,27 +915,31 @@ void capture_present(const DkImage& window, uint32_t ww, uint32_t wh, const Pres
         rb.destroy();
     }
     forget_state();  // (another command buffer ran on the queue)
-    LOG("[dk] capture of frame %llu: %zu GPU images (%.1f MiB in %d readback batches%s) and %u upload pictures queued to "
-        "%s/, %u skipped; %zu render targets, %zu sampled surfaces noted; render thread %.0f ms (the PNG writer goes on)",
-        (unsigned long long)frame, reads.size(), double(bytesRead) / 1048576.0, batches, ok ? "" : ", FAILED", uploads,
-        dir.c_str(), skipped,
+    uint32_t queued = 0, identical = 0, dropped = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_jobMutex);
+        queued = g_filesQueued;
+        identical = g_texturesIdentical;
+        dropped = g_filesDropped;
+    }
+    LOG("[dk] capture of frame %llu: %zu GPU images read back (%.1f MiB in %d readback batches%s), %u textures compared "
+        "with their upload data (%u identical, not written%s), %u files queued to %s/, %u dropped, %u skipped; %zu render "
+        "targets, %zu sampled surfaces noted; render thread %.0f ms (the PNG writer goes on)",
+        (unsigned long long)frame, reads.size(), double(bytesRead) / 1048576.0, batches, ok ? "" : ", FAILED", compared,
+        identical, all_textures() ? "" : "; WWHD_DK_CAPTURE_ALL_TEXTURES=1 writes them", queued, dir.c_str(), dropped,
+        skipped,
         size_t(std::count_if(g_order.begin(), g_order.end(), [](Noted* x) { return x->target; })),
         size_t(std::count_if(g_order.begin(), g_order.end(), [](Noted* x) { return x->sampled; })),
         double(now_ns() - t0) / 1e6);
     g_noted.clear();
     g_order.clear();
-    bool done = false;
-    uint32_t files = 0;
     {
         std::lock_guard<std::mutex> lk(g_jobMutex);
         if (g_filesFrame == frame) {
             g_filesFinal = true;
-            files = g_filesQueued;
-            done = g_filesDone == g_filesQueued;
+            if (g_filesDone == g_filesQueued) log_capture_done(frame);
         }
     }
-    if (done)
-        LOG("[dk] capture of frame %llu: all %u files done (%s/)", (unsigned long long)frame, files, dir.c_str());
 }
 
 }  // namespace gfxdk
