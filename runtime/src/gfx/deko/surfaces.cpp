@@ -358,6 +358,12 @@ void transfer_end() {
     g_transferWork = work_counter();
 }
 
+// zcull: deko3d drops its data only when the bound depth target's address changes; contents a transfer
+// wrote (or a new image at a reused address) make the draw path drop it (R.zcullEpoch, draw.cpp)
+void depth_changed(const Surface* s) {
+    if (s->fmt.depth) R.zcullEpoch++;
+}
+
 // ---------------------------------------------------------------- images
 DkImageType image_type(const Surface* s, DkImageType* viewType) {
     const auto dim = static_cast<Latte::E_DIM>(s->dim);
@@ -414,6 +420,7 @@ void make_image(Surface* s, SurfaceImage& img, uint32_t pw, uint32_t ph) {
     img.mem = image_alloc(uint32_t(size), dkImageLayoutGetAlignment(&img.layout));
     dkImageInitialize(&img.image, &img.layout, img.mem.block, img.mem.offset);
     img.valid = true;
+    depth_changed(s);
     DkImageView v;
     dkImageViewDefaults(&v, &img.image);
     v.type = viewType;
@@ -462,6 +469,7 @@ void copy_image(Surface* src, uint32_t srcLevel, uint32_t srcLayer, Surface* dst
     if (srcLayer) sv.layerOffset = uint16_t(srcLayer);
     const DkImageRect sr = {0, 0, 0, w, h, layers}, dr = {0, 0, dstLayer, w, h, layers};
     dkCmdBufCopyImage(R.cmd, &sv, &sr, &dv, &dr, 0);
+    depth_changed(dst);
 }
 }  // namespace
 
@@ -591,6 +599,7 @@ void upload_surface(Surface* s) {
         R.perf.uploadBytes += lg.bytes;
     }
     transfer_end();
+    depth_changed(s);
     s->contentHash = hash;
     s->writeSeq = next_write_seq();
     s->dirty = false;
@@ -862,6 +871,7 @@ void blit(Surface* src, uint32_t srcLevel, uint32_t srcLayer, uint32_t sw, uint3
         const DkImageRect dr = {0, 0, dst->img.type == DkImageType_2D ? 0 : dstLayer, dw, dh, 1};
         const bool linear = (sw != dw || sh != dh) && !src->fmt.depth && src->fmt.kind == FormatInfo::FLOAT;
         dkCmdBufBlitImage(R.cmd, &sv, &sr, &dv, &dr, linear ? DkBlitFlag_FilterLinear : DkBlitFlag_FilterNearest, 0);
+        depth_changed(dst);
     } else if (sw == dw && sh == dh && src->fmt.hostBytesPerBlock == dst->fmt.hostBytesPerBlock &&
                src->fmt.compressed == dst->fmt.compressed && src->fmt.depth == dst->fmt.depth) {
         copy_image(src, srcLevel, srcLayer, dst, dstLevel, dstLayer, sw, sh, 1);

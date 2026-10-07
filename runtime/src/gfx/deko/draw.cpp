@@ -186,6 +186,7 @@ std::string g_traceTextures;  // the textures of the draw being prepared
 bool g_gamepadDrawing = false;
 float g_drawScale = 1.0f;
 bool g_drawSamplesRendered = false;  // it samples a texture the GPU rendered
+uint64_t g_zcullSeen = 0;            // R.zcullEpoch when zcull data was last dropped
 
 // ---- per stage: the textures and uniform blocks of a draw, in deko3d slots (resolved before any binding)
 constexpr int kVertexStage = 0, kPixelStage = 1;
@@ -614,6 +615,8 @@ void draw_frame_start() {
         static const char* const kProvoking[] = {"the last vertex, as gfx/gl", "the FIRST vertex (test)",
                                                  "Latte's PROVOKING_VTX_LAST bit (test)"};
         LOG("[dk] flat varyings: %s (WWHD_DK_PROVOKING_VERTEX=last|first|latte)", kProvoking[provoking_mode()]);
+        LOG("[dk] zcull: on (queue), dropped at every depth-target bind and after copies, uploads or new images of "
+            "a depth buffer; depth clears reset it");
     }
 }
 
@@ -964,10 +967,14 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             static const bool passBarrier = env_switch("PASS_BARRIER", true);
             // what earlier passes rendered becomes visible to this pass's texture reads (plan section 6.3:
             // conservative, one barrier per change of targets), and the depth buffer's zcull data is
-            // dropped (its contents may have changed by copies or uploads)
+            // dropped whenever a depth buffer is bound (conservative too: deko3d drops it itself only when the
+            // depth target's address changes; copies, uploads and reused heap memory keep the address)
             if (passBarrier)
                 dkCmdBufBarrier(R.cmd, DkBarrier_Fragments,
                                 DkInvalidateFlags_Image | (depth ? DkInvalidateFlags_Zcull : 0u));
+            else if (depth)
+                dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Zcull);
+            if (depth) g_zcullSeen = R.zcullEpoch;
             int n = 0, first = -1;
             for (int i = 0; i < 8; i++)
                 if (colors[i]) {
@@ -993,6 +1000,13 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             if (g_traceFrame) trace_pass(colors, depth);
             gpu_pass_mark("draw", first >= 0 ? colors[first] : nullptr, depth);
         }
+    }
+
+    // the bound depth buffer's contents changed outside the 3D engine since its zcull data was gathered (a copy
+    // or upload into it, R.zcullEpoch): dropped, as at a change of targets
+    if (depth && g_zcullSeen != R.zcullEpoch) {
+        dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Zcull);
+        g_zcullSeen = R.zcullEpoch;
     }
 
     // ---- shaders, textures, uniform blocks

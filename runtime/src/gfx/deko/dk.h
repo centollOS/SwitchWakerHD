@@ -99,6 +99,10 @@ struct Renderer {
     uint64_t stateEpoch = 1;    // code outside draw() changed command buffer state (forget_state, dk_draw.h)
     uint64_t shaderEpoch = 1;   // shader lookups must be redone (reset_shader_memoization, dk_shaders.h)
     uint64_t streamGen = 1;     // guest data in the stream slice may be stale (GX2DrawDone, GX2Invalidate)
+    // a depth image's contents changed other than by the 3D engine (an upload, a copy or blit into it, a new
+    // image possibly in the heap memory of an earlier one): the zcull data deko3d keeps for the bound depth
+    // target (invalidated by deko3d only when the target's address changes) is dropped before the next draw
+    uint64_t zcullEpoch = 1;
     uint64_t drawCount = 0, skippedDraws = 0, scanCopies = 0;
     bool timedDraw = true;      // this draw is one the per-draw timers measure (SampledTime)
     // render-thread time and work since the last 5 s report. Each lane adds to its own fields only.
