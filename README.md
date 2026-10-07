@@ -70,6 +70,11 @@ Be aware of this before you use or build on this repository:
 
 ## Build for the Switch
 
+**The short way** (step-by-step guide for players: [INSTALL.md](INSTALL.md)):
+`python3 tools/switch/make_sd.py --image game.wux` (or `--game-dir <extracted game>`) checks the
+game version, recompiles, builds the NRO in Docker and lays out `build/sd/switch/wwhd/` for the SD
+card. The steps it runs, by hand:
+
 Requirements: Python 3 with `pycryptodome` (for the extractor), and Docker or Podman (the Switch
 toolchain runs in the `devkitpro/devkita64` image). On the Mac also the Xcode command line tools.
 
@@ -137,8 +142,9 @@ and copy the files.
 - Or install the HOME-screen icon (forwarder), which always starts it in title mode:
   [tools/switch/forwarder/INSTALL.md](tools/switch/forwarder/INSTALL.md).
 - Controllers act as a Wii U Pro Controller, so the game draws everything on one screen: pick the
-  Pro Controller when the game asks. `WWHD_PRO_CONTROLLER=0` in `env.txt` makes them the GamePad,
-  whose screen is not shown.
+  Pro Controller when the game asks. The menu's Switch tab makes them the GamePad instead (choose it
+  in the game's options too): **ZL + ZR + Minus** then switches between the TV picture and the
+  GamePad screen (items, map; the touch screen works on it), and gyro aiming can be turned on.
 
 ### Saves, settings and updates
 
@@ -150,16 +156,18 @@ and copy the files.
 
 ## Options
 
-- In-game options menu: **Minus**; B or Minus closes it, L / R change tabs. Tabs: Saves (save
-  states), Switch (CPU clock, GPU profile, picture, frame-rate counter), Warp (teleport to any
-  stage), Mods, Language / About.
+- In-game options menu: **Minus held half a second** (a short Minus goes to the game); B or Minus
+  closes it, L / R change tabs. Tabs: Saves (save states), Switch (CPU clock, GPU profile, picture,
+  frame-rate counter, controller, gyro aiming, debug options), Warp (teleport to any stage), Mods,
+  Language / About.
 - **Performance**: the CPU runs at 1224 MHz by default; the menu offers every step of the console's
   CPU table from the stock 1020 up to 1785 MHz. The handheld GPU uses Nintendo's official profiles
   (460.8 MHz with memory 1600 MHz by default), plus a 614 MHz overclock. Higher clocks drain the
   battery faster and warm the console; if sys-clk has its own profile for this title, the two
   fight over the clocks.
-- **Frame captures** for bug reports: **L3 + R3** writes the frame and its render targets as PNG
-  files to `captures/<frame>/` (they contain game imagery: keep them to yourself).
+- **Frame captures** for bug reports: turn on *Capture a frame with both sticks clicked* in the
+  Switch tab's Debug section; **L3 + R3** then writes the frame and its render targets as PNG files
+  to `captures/<frame>/` (they contain game imagery: keep them to yourself).
 - `WWHD_*` options in `env.txt`: [docs/switch-port.md](docs/switch-port.md) and the comments next to
   their code (grep for `WWHD_` in `runtime/src`).
 

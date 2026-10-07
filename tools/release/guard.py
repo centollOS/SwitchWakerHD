@@ -42,9 +42,17 @@ KEYLIKE = re.compile(rb"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 GEN_CODE = re.compile(rb"void f_[0-9A-F]{8}\(Cpu\* __restrict c\) \{\n")
 
 
+# vendored third-party sources may use the generated code's file names (uam's Mesa has a main/imports.c):
+# the name rules for generated code skip them; every content check still applies
+VENDORED = re.compile(r"(^|/)runtime/third_party/")
+
+
 def check_entry(name, data, problems):
     n = name.replace("\\", "/")
+    vendored = VENDORED.search(n)
     for rx, why in BAD_NAME:
+        if vendored and why.startswith("generated"):
+            continue
         if rx.search(n):
             problems.append("%s: %s" % (name, why))
     ext = os.path.splitext(n)[1].lower()
