@@ -290,6 +290,20 @@ Ahorro esperado frente a GL: ~320 MiB de programas Mesa y gran parte de los ~140
 
 - Swapchain de 3 imágenes RGBA8 sobre `nwindowGetDefault()` a 1280×720, intervalo 1; relaxed vsync sigue en
   `gx2_core.cpp`. Docked 1080p en P4.
+- **Docked 1080p (carril `p4-docked`, compilado; SIN probar en hardware).** El host loop lee `appletGetOperationMode`
+  (libnx lo actualiza con `AppletMessage_OperationModeChanged`) y registra cada cambio (`[dk] operation mode changed`);
+  el siguiente present recrea el swapchain a 1920×1080 docked y 1280×720 handheld (`dkQueueWaitIdle`, destruir el
+  swapchain, que libera los buffers de la ventana; imágenes nuevas y swapchain nuevo, que fija las dimensiones de la
+  ventana; intervalo 1 de nuevo; línea `[dk] frame N: window A -> B: swapchain recreated in X ms`). El primer swapchain
+  ya nace con el tamaño del modo actual. El juego sigue dibujando su imagen de 1280×720 (escala interna y resolución
+  dinámica sin cambios): el present la escala a la ventana (filtro lineal). Contador FPS, patrón, barra de arranque,
+  overlay ImGui (`overlay::frame` recibe el tamaño real) y el PNG `window` de las capturas usan el tamaño real. El
+  relaxed vsync es el ritmo propio de `gx2_core` (reloj, 59,94 Hz): igual en ambos modos. La línea de stats de 5 s
+  muestra `window WxH, N resizes`. Interruptores: `WWHD_DK_DOCKED_1080=0` (1280×720 siempre, el camino anterior: el
+  sistema escala a la TV), `WWHD_DK_WINDOW=WxH` (fuerza un tamaño hasta 1920×1080 en ambos modos, para A/B en
+  handheld). Coste esperado docked: el pase de present escribe 2,07 MP en vez de 0,92 MP (~+0,1-0,2 ms de GPU por
+  frame, visible en el pase `present` de los timestamps) y +~16 MiB de imágenes (3 RGBA8 + Z24S8 de 1080p); en
+  handheld nada cambia. CPU: una lectura atómica por present.
 - Present = port de `present_program()` (sRGB + ajustes de imagen). Shaders internos (present, FPS, ImGui)
   compilados offline con el `uam` de devkitPro y embebidos.
 - Overlay: port de `overlay_gl.cpp`, llamado desde `present()` como hoy. Dumps/capturas por
