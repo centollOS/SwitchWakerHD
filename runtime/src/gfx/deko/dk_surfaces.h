@@ -100,6 +100,7 @@ struct SurfaceImage {
     ImageAlloc mem;               // memory.cpp: freed with image_free_later
     bool valid = false;           // image initialized
     DkImageType type = DkImageType_2D;
+    bool hwCompression = false;   // DkImageFlags_HwCompression: copies go through the 2D engine (copy_image)
     uint32_t pw = 0, ph = 0;      // pixels (the guest size times the surface's scale)
     uint32_t layers = 1;          // array layers (1 for 3D: depth is `slices`)
     uint32_t imageId = 0;         // descriptor of the default view (all mips and layers, identity swizzle); 0: none
