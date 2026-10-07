@@ -33,7 +33,6 @@ Bisect read_switches() {
     b.shaderInvalidate = env_int("WWHD_DK_SHADER_INVALIDATE", b.shaderInvalidate) != 0;
     b.descWfi = env_int("WWHD_DK_DESC_WFI", b.descWfi) != 0;
     b.tiledOff = env_int("WWHD_DK_TILED_OFF", b.tiledOff) != 0;
-    b.shadowBarrier = env_int("WWHD_DK_SHADOW_BARRIER", b.shadowBarrier) != 0;
     return b;
 }
 
@@ -164,9 +163,6 @@ void bisect_log() {
     LOG("[dk] grass bisect: WWHD_DK_SHADER_INVALIDATE=%d (shader caches after mid-frame code loads); "
         "WWHD_DK_DESC_WFI=%d (wait for idle before descriptor cache invalidates); WWHD_DK_TILED_OFF=%d (tiled cache "
         "disabled explicitly each frame)", b.shaderInvalidate, b.descWfi, b.tiledOff);
-    LOG("[dk] grass bisect: WWHD_DK_SHADOW_BARRIER=%d (a draw sampling a target written since the last barrier: %s)",
-        b.shadowBarrier, b.shadowBarrier ? "Full barrier + image/shader/descriptor/L2 invalidate"
-                                         : "Fragments barrier + image invalidate (P4)");
 }
 
 }  // namespace gfxdk

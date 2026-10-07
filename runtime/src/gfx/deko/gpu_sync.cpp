@@ -177,12 +177,7 @@ void sync_draw_check(const std::array<Surface*, 8>& colors, Surface* depth, bool
         if (depthWrites) war |= hazard_write(depth);
     } else  // (a bound depth buffer sampled directly: rendered into by this pass's earlier draws)
         raw = hazard_read(depth);
-    if (raw && bisect().shadowBarrier)  // WWHD_DK_SHADOW_BARRIER (dk_bisect.h): everything idle, every cache dropped
-        sync_barrier(DkBarrier_Full,
-                     DkInvalidateFlags_Image | DkInvalidateFlags_Shader | DkInvalidateFlags_Descriptors |
-                         DkInvalidateFlags_L2Cache,
-                     SyncWhy::ReadAfterWrite);
-    else if (raw) sync_barrier(DkBarrier_Fragments, DkInvalidateFlags_Image, SyncWhy::ReadAfterWrite);
+    if (raw) sync_barrier(DkBarrier_Fragments, DkInvalidateFlags_Image, SyncWhy::ReadAfterWrite);
     else if (war) sync_barrier(DkBarrier_Fragments, DkInvalidateFlags_Image, SyncWhy::WriteAfterRead);
 }
 
