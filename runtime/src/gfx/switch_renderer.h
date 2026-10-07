@@ -17,6 +17,9 @@ void set_picture_grade(const PictureGrade& g);
 int fps_overlay_mode();
 void set_fps_overlay_mode(int mode);
 float dynamic_res_scale();  // the internal resolution dynamic resolution has chosen (1 when off)
+// any thread: the internal resolution (the most dynamic resolution may use) and whether dynamic resolution
+// may lower it, from the next frame on (the handheld / docked profiles, platform/settings_switch.h)
+void set_resolution_profile(float scale, bool dynamic);
 #ifdef __SWITCH__
 std::string clock_report_now();  // "CPU x MHz, GPU y MHz, memory z MHz", or "" if unavailable
 #endif

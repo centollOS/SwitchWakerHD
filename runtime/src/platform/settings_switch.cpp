@@ -55,6 +55,13 @@ constexpr u32 kGpu614Hz = 614400000;
 int g_cpu = kCpuDefault;
 bool g_cpu_env = false;
 
+// picture profiles per mode (g_mu); the mode whose profile the renderer has (-1: none yet)
+const char* const kModeIds[kModes] = {"handheld", "docked"};
+const char* const kModeLabels[kModes] = {"Handheld", "Docked"};
+ResProfile g_res[kModes] = {{1.0f, true}, {1.5f, true}};
+int g_res_mode = -1;
+bool g_res_scale_env = false, g_dynamic_env = false;
+
 // clkrst sessions for setting clocks (sys-clk's way), opened on first use
 bool g_clk_tried = false, g_clk_ok = false;
 ClkrstSession g_clk_cpu, g_clk_gpu;
@@ -73,6 +80,16 @@ bool clk_ready() {
     return g_clk_ok;
 }
 bool docked() { return appletGetOperationMode() == AppletOperationMode_Console; }
+
+// the active mode's picture profile to the renderer (mutex held)
+void apply_res_profile(const char* why) {
+    g_res_mode = docked() ? kDocked : kHandheld;
+    const ResProfile& p = g_res[g_res_mode];
+    gfxsw::set_resolution_profile(p.scale, p.dynamic);
+    LOG("[switch] picture profile %s (%s): internal resolution %.2f, dynamic resolution %s", kModeIds[g_res_mode], why,
+        p.scale, p.dynamic ? "on" : "off");
+}
+std::string mode_key(const char* key, int m) { return std::string(key) + "." + kModeIds[m]; }
 
 // the clock overrides wanted now (0: none)
 u32 wanted_cpu_hz() { return g_cpu != kCpu1020 ? kCpuHz[g_cpu] : 0; }
@@ -229,7 +246,28 @@ void tick() {
     std::lock_guard<std::mutex> lk(g_mu);
     // leaving GPU 614 for the docked clocks: nothing to do (apm sets docked); back in handheld it is set again
     enforce(false);
+    if (g_res_mode != (docked() ? kDocked : kHandheld)) apply_res_profile("mode changed");
 }
+
+const char* mode_label(int m) { return m >= 0 && m < kModes ? kModeLabels[m] : "?"; }
+int active_mode() { return docked() ? kDocked : kHandheld; }
+ResProfile res_profile(int m) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return g_res[std::clamp(m, 0, kModes - 1)];
+}
+void set_res_profile(int m, ResProfile p) {
+    if (m < 0 || m >= kModes) return;
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_res_scale_env) g_res[m].scale = std::clamp(p.scale, 0.5f, 2.0f);
+    if (!g_dynamic_env) g_res[m].dynamic = p.dynamic;
+    char b[16];
+    snprintf(b, sizeof b, "%.2f", g_res[m].scale);
+    hostui::set(mode_key(kKeyResScale, m).c_str(), b);
+    hostui::set(mode_key(kKeyDynamicRes, m).c_str(), g_res[m].dynamic ? "1" : "0");
+    if (m == active_mode()) apply_res_profile("menu");
+}
+bool res_scale_env() { return g_res_scale_env; }
+bool dynamic_res_env() { return g_dynamic_env; }
 
 void save_picture() {
     const gfxsw::PictureGrade g = gfxsw::picture_grade_now();
@@ -293,6 +331,26 @@ void apply_at_start() {
         LOG("[switch] cpu clock %s MHz (%s)", kCpuIds[g_cpu], g_cpu_env ? "env.txt" : c.empty() ? "default" : "settings");
         apm_ready();  // the exit hook that puts the stock clocks back
         enforce(true);
+    }
+    // picture profiles per mode: env.txt fixes a value in both modes, else what the menu saved, else the defaults
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        const char* rs = getenv("WWHD_RES_SCALE");
+        const char* dr = getenv("WWHD_DYNAMIC_RES");
+        g_res_scale_env = rs && *rs && atof(rs) > 0;
+        g_dynamic_env = dr && *dr;
+        for (int m = 0; m < kModes; m++) {
+            if (g_res_scale_env)
+                g_res[m].scale = std::clamp(float(atof(rs)), 0.5f, 2.0f);
+            else
+                saved_float(mode_key(kKeyResScale, m).c_str(), g_res[m].scale, 0.5f, 2.0f);
+            std::string v;
+            if (g_dynamic_env)
+                g_res[m].dynamic = !(atof(dr) == 0.0 && *dr == '0');  // gfx/deko's reading of WWHD_DYNAMIC_RES
+            else if (hostui::get(mode_key(kKeyDynamicRes, m).c_str(), v) && !v.empty())
+                g_res[m].dynamic = v != "0";
+        }
+        apply_res_profile("start");
     }
     // picture adjustments and the counter: env.txt wins, else what the menu saved
     if (!picture_env()) {
