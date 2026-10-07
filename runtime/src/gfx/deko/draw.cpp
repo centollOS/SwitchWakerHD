@@ -530,6 +530,27 @@ IndexList index_list(uint32_t prim, uint32_t count, uint32_t indexType, uint32_t
     return list;
 }
 
+// The vertex flat (non-interpolated) varyings take: gfx/gl's convention, the last vertex of each primitive.
+// WWHD_DK_PROVOKING_VERTEX=latte follows Latte's PA_SU_SC_MODE_CNTL.PROVOKING_VTX_LAST (bit 19; first when
+// clear, as gfx/vulkan) and =first always takes the first (test aids).
+enum ProvokingMode { kProvokingLast, kProvokingFirst, kProvokingLatte };
+ProvokingMode provoking_mode() {
+    static const ProvokingMode mode = [] {
+        const char* e = getenv("WWHD_DK_PROVOKING_VERTEX");
+        return !e || !*e ? kProvokingLast : !strcmp(e, "latte") ? kProvokingLatte : !strcmp(e, "first") ? kProvokingFirst
+                                                                                                     : kProvokingLast;
+    }();
+    return mode;
+}
+DkProvokingVertex provoking_vertex(const uint32_t* r) {
+    switch (provoking_mode()) {
+    case kProvokingFirst: return DkProvokingVertex_First;
+    case kProvokingLatte:
+        return (r[REGADDR::PA_SU_SC_MODE_CNTL] >> 19) & 1 ? DkProvokingVertex_Last : DkProvokingVertex_First;
+    default: return DkProvokingVertex_Last;
+    }
+}
+
 // the previous draw's shader lookup, reused while no shader-relevant register changed
 struct ShaderMemo {
     uint64_t gen = 0, frame = ~0ull, epoch = 0;
@@ -589,6 +610,9 @@ void draw_frame_start() {
                                           "1, the occlusion pass's centre depth fetch bilinear",
                                           "2, the centre fetch bilinear and the noise tiled per 960x540 pixel"};
         LOG("[dk] AO quirk fix: mode %s (WWHD_AO_MODE=0..2, WWHD_NO_AO_QUIRK=1 for 0)", kAo[g_aoMode]);
+        static const char* const kProvoking[] = {"the last vertex, as gfx/gl", "the FIRST vertex (test)",
+                                                 "Latte's PROVOKING_VTX_LAST bit (test)"};
+        LOG("[dk] flat varyings: %s (WWHD_DK_PROVOKING_VERTEX=last|first|latte)", kProvoking[provoking_mode()]);
     }
 }
 
@@ -1007,8 +1031,9 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         rs.cullMode = cullFront && cullBack ? DkFace_FrontAndBack : cullFront ? DkFace_Front : cullBack ? DkFace_Back : DkFace_None;
         const bool ccw = pm.get_FRONT_FACE() == LATTE_PA_SU_SC_MODE_CNTL::E_FRONTFACE::CCW;
         rs.frontFace = ccw != flipFront ? DkFrontFace_CCW : DkFrontFace_CW;  // (set_viewport: Latte's facing)
-        // flat shading's vertex: Latte's PROVOKING_VTX_LAST (bit 19), else the first (as Vulkan's)
-        rs.provokingVertex = (r[REGADDR::PA_SU_SC_MODE_CNTL] >> 19) & 1 ? DkProvokingVertex_Last : DkProvokingVertex_First;
+        // flat varyings' vertex: the last, as gfx/gl (it never calls glProvokingVertex: GL's default
+        // GL_LAST_VERTEX_CONVENTION, and the triangle lists both make of fans and quads have the same order)
+        rs.provokingVertex = provoking_vertex(r);
         const bool offset = pm.get_OFFSET_FRONT_ENABLED();
         rs.depthBiasEnableMask = offset ? DkPolygonFlag_All : 0;
         if (!gs.rasterKnown || !same_bytes(gs.raster, rs)) {
