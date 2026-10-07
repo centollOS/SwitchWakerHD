@@ -109,10 +109,11 @@ void save_shader_cache();
 // the loose uniforms of one stage (ufBlock, uniformOffsetsVK layout) packed from the registers as
 // gfx/vulkan pack_uniforms_into does, into this frame's stream slice (DK_UNIFORM_BUF_ALIGNMENT). scale: the
 // render targets' internal resolution (uf_fragCoordScale, point size); texScale (null: all 1): per texture
-// unit, texture pixels per guest pixel (uf_texNScale, as gfx/gl's g_unitScale). Empty (gpu 0) when the shader
-// has no ufBlock or the stream slice is full.
+// unit, texture pixels per guest pixel (uf_texNScale, as gfx/gl's g_unitScale). aoNoise: the AO quirk fix's
+// mode 2 (gfx/gl draw.cpp ao_noise_constant): the first remapped constant's .w (the occlusion pass's noise
+// tiling) x1.5. Empty (gpu 0) when the shader has no ufBlock or the stream slice is full.
 StreamSlice pack_uniforms(bool vertex, const Shader& sh, const uint32_t* regs, float scaleX = 1.0f,
-                          float scaleY = 1.0f, const float (*texScale)[2] = nullptr);
+                          float scaleY = 1.0f, const float (*texScale)[2] = nullptr, bool aoNoise = false);
 
 // ---- statistics (backend.cpp's 5 s line and the hitch log)
 struct ShaderStats {

@@ -51,6 +51,9 @@ struct DrawSkips {
 };
 DrawSkips draw_skips_take();
 
+// the AO quirk fix's mode (WWHD_AO_MODE / WWHD_NO_AO_QUIRK, read once at start-up as gfx/gl's): 0..2
+int ao_mode();
+
 // GamePad-only surfaces (WWHD_DK_SKIP_GAMEPAD, as gfx/gl draw.cpp)
 bool gamepad_only(const Surface* s);
 bool skip_gamepad();

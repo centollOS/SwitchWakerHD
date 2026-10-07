@@ -1106,7 +1106,7 @@ void save_shader_cache() {
 
 // ---- uniforms (gfx/vulkan/shaders.cpp pack_uniforms_into, with the per-unit texture scale of gfx/gl)
 StreamSlice pack_uniforms(bool vertex, const Shader& sh, const uint32_t* regs, float scaleX, float scaleY,
-                          const float (*texScale)[2]) {
+                          const float (*texScale)[2], bool aoNoise) {
     if (sh.bindings.ufBlockSlot < 0 || !sh.dec) return {};
     ScopedTime timer{R.perf.uniformPackNs};
     const auto& offsets = sh.uniforms;
@@ -1131,6 +1131,14 @@ StreamSlice pack_uniforms(bool vertex, const Shader& sh, const uint32_t* regs, f
             if (!address) continue;
             for (const auto& entry : group.entries)
                 copy(offsets.offset_remapped + entry.mappedIndexOffset, ppc_ptr(address + entry.indexOffset), 16);
+        }
+        // AO mode 2 (the occlusion vertex shader): the constant at remapped offset 0, .w x1.5 (as gfx/gl, whose
+        // patch also leaves a constant that is not there at zero)
+        if (aoNoise && size_t(offsets.offset_remapped) + 16 <= data.size()) {
+            float w;
+            memcpy(&w, data.data() + offsets.offset_remapped + 12, 4);
+            w *= 1.5f;
+            memcpy(data.data() + offsets.offset_remapped + 12, &w, 4);
         }
     }
     if (offsets.offset_uniformRegister >= 0)

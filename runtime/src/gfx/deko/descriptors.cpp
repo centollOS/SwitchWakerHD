@@ -4,6 +4,9 @@
 // handed out here. Every write is recorded with dkCmdBufPushData (ordered with the commands: the CPU never
 // writes a descriptor the GPU may be reading); a freed slot is reused once the GPU has finished the frame
 // that freed it. Render thread only.
+#include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <unordered_map>
@@ -48,13 +51,22 @@ std::unordered_map<SamplerKey, uint32_t, SamplerKeyHash> g_samplers;
 std::vector<SamplerSlot> g_samplerSlots(kSamplerDescriptors);
 uint32_t g_nextSampler = kReservedSamplerIds;
 
+// 16x anisotropic filtering (WWHD_ANISO=1, or the settings overlay's Effects; off by default as in gfx/vulkan;
+// gfx/gl has none): set from the overlay's thread, taken by the render thread at a frame's start
+std::atomic<bool> g_anisoWanted{[] {
+    const char* e = getenv("WWHD_ANISO");
+    return e && atoi(e) != 0;
+}()};
+bool g_anisoFrame = false;  // this frame's (render thread)
+bool g_anisoLogged = false;
+
 // the frame being recorded (begin_commands opened it)
 uint64_t recording() { return R.frame + 1; }
 // no frame in flight still reads what frame `f` used: it ended and the GPU finished it
 bool frame_retired(uint64_t f) { return f <= R.frame && frame_done(f); }
 
-// GX2 sampler words -> DkSampler (gfx/gl/draw.cpp sampler())
-DkSampler make_sampler(const uint32_t* words, bool compare, bool integer) {
+// GX2 sampler words -> DkSampler (gfx/gl/draw.cpp sampler(), with gfx/vulkan's 16x anisotropy option)
+DkSampler make_sampler(const uint32_t* words, bool compare, bool integer, bool aniso) {
     Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0 w;
     Latte::LATTE_SQ_TEX_SAMPLER_WORD1_0 w1;
     memcpy(static_cast<void*>(&w), words, 4);
@@ -80,9 +92,17 @@ DkSampler make_sampler(const uint32_t* words, bool compare, bool integer) {
     s.wrapMode[0] = wrap(uint32_t(w.get_CLAMP_X()));
     s.wrapMode[1] = wrap(uint32_t(w.get_CLAMP_Y()));
     s.wrapMode[2] = wrap(uint32_t(w.get_CLAMP_Z()));
+    // the LOD as gfx/gl gives it to Mesa: bias, min LOD, max LOD (0 without mipmapping); Mesa's state
+    // tracker (st_convert_sampler) swaps a min LOD above the max LOD, where deko3d would raise the max to
+    // the min: a sampler without mipmapping and a min LOD above 0 clamps to 0..min in GL, not to min
     s.lodBias = float(w1.get_LOD_BIAS()) / 64.f;
-    s.lodClampMin = w1.get_MIN_LOD() / 64.f;
-    s.lodClampMax = uint32_t(w.get_MIP_FILTER()) ? w1.get_MAX_LOD() / 64.f : 0.f;
+    const float minLod = w1.get_MIN_LOD() / 64.f, maxLod = uint32_t(w.get_MIP_FILTER()) ? w1.get_MAX_LOD() / 64.f : 0.f;
+    s.lodClampMin = std::min(minLod, maxLod);
+    s.lodClampMax = std::max(minLod, maxLod);
+    // 16x anisotropy (gfx/vulkan's condition): mipmapped, linear minification, no depth compare; GL applies
+    // none, and neither does this renderer when the option is off (Latte's MAX_ANISO_RATIO is ignored, as GL)
+    if (aniso && !integer && mip != 0 && min && !compare && uint32_t(w.get_DEPTH_COMPARE_FUNCTION()) == 0)
+        s.maxAnisotropy = 16.0f;
     const uint32_t border = uint32_t(w.get_BORDER_COLOR_TYPE());
     static const float colors[3][4] = {{0, 0, 0, 0}, {0, 0, 0, 1}, {1, 1, 1, 1}};
     for (int i = 0; i < 4; i++) s.borderColor[i].value_f = colors[border < 3 ? border : 0][i];
@@ -126,7 +146,8 @@ void image_descriptor_free_later(uint32_t id) {
 }
 
 uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer) {
-    const SamplerKey key{samplerWords[0], samplerWords[1], samplerWords[2], uint32_t(compare) | uint32_t(integer) << 1};
+    const SamplerKey key{samplerWords[0], samplerWords[1], samplerWords[2],
+                         uint32_t(compare) | uint32_t(integer) << 1 | uint32_t(g_anisoFrame) << 2};
     if (auto it = g_samplers.find(key); it != g_samplers.end()) {
         g_samplerSlots[it->second].lastFrame = recording();
         g_stats.samplerHits++;
@@ -155,13 +176,15 @@ uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer) {
         }
         g_samplers.erase(g_samplerSlots[id].key);
         g_stats.samplerEvictions++;
+        // the draw path's texture caches may still hold the evicted slot for these words: looked up again
+        R.surfaceEpoch++;
     }
     SamplerSlot& slot = g_samplerSlots[id];
     slot.key = key;
     slot.lastFrame = recording();
     slot.used = true;
     g_samplers.emplace(key, id);
-    const DkSampler s = make_sampler(samplerWords, compare, integer);
+    const DkSampler s = make_sampler(samplerWords, compare, integer, g_anisoFrame);
     DkSamplerDescriptor d;
     dkSamplerDescriptorInitialize(&d, &s);
     dkCmdBufPushData(R.cmd, sampler_descriptors() + DkGpuAddr(id) * sizeof(DkSamplerDescriptor), &d, sizeof d);
@@ -171,13 +194,31 @@ uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer) {
     return id;
 }
 
+void sampler_used(uint32_t id) {
+    if (id >= kReservedSamplerIds && id < kSamplerDescriptors) g_samplerSlots[id].lastFrame = recording();
+}
+
 void commit_descriptors() {
     if (!g_dirty) return;
     dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Descriptors);
     g_dirty = false;
 }
 
+bool aniso_enabled() { return g_anisoWanted.load(std::memory_order_relaxed); }
+void set_aniso(bool on) {
+    if (g_anisoWanted.exchange(on) != on) LOG("[dk] 16x anisotropic filtering %s (from the next frame)", on ? "on" : "off");
+}
+
 void descriptors_frame_start() {
+    // the anisotropy option: samplers are looked up again under the new setting (their cache keys include it)
+    const bool aniso = g_anisoWanted.load(std::memory_order_relaxed);
+    if (!g_anisoLogged || aniso != g_anisoFrame) {
+        LOG("[dk] anisotropic filtering: %s (WWHD_ANISO=1 or the overlay's Effects); sampler LOD as gfx/gl",
+            aniso ? "16x on mipmapped linear samplers" : "off (as gfx/gl)");
+        g_anisoLogged = true;
+        g_anisoFrame = aniso;
+        R.surfaceEpoch++;  // the draw path's texture caches hold sampler slots of the old setting
+    }
     while (!g_retiredImages.empty() && frame_retired(g_retiredImages.front().frame)) {
         g_freeImages.push_back(g_retiredImages.front().id);
         g_retiredImages.pop_front();

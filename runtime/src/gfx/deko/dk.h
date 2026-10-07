@@ -57,6 +57,12 @@ void image_free_later(const ImageAlloc& a);  // freed when the GPU is done with 
 bool code_load(DkShader& shader, const void* dksh, uint32_t size, const char* name);
 DkGpuAddr image_descriptors();
 DkGpuAddr sampler_descriptors();
+// kQuerySize bytes for counters and timestamps (dkCmdBufReportCounter), CPU-uncached (backend.cpp GPU passes)
+struct QueryMemory {
+    uint8_t* cpu = nullptr;
+    DkGpuAddr gpu = 0;
+};
+QueryMemory query_memory();
 struct MemoryStats {
     uint64_t cmdBytesMax = 0, cmdBytesSum = 0;  // command memory fed per frame (64 KB steps)
     uint64_t cmdOverflows = 0;                  // frames that needed more than kCmdSliceSize
@@ -99,6 +105,10 @@ struct Renderer {
     uint64_t stateEpoch = 1;    // code outside draw() changed command buffer state (forget_state, dk_draw.h)
     uint64_t shaderEpoch = 1;   // shader lookups must be redone (reset_shader_memoization, dk_shaders.h)
     uint64_t streamGen = 1;     // guest data in the stream slice may be stale (GX2DrawDone, GX2Invalidate)
+    // a depth image's contents changed other than by the 3D engine (an upload, a copy or blit into it, a new
+    // image possibly in the heap memory of an earlier one): the zcull data deko3d keeps for the bound depth
+    // target (invalidated by deko3d only when the target's address changes) is dropped before the next draw
+    uint64_t zcullEpoch = 1;
     uint64_t drawCount = 0, skippedDraws = 0, scanCopies = 0;
     bool timedDraw = true;      // this draw is one the per-draw timers measure (SampledTime)
     // render-thread time and work since the last 5 s report. Each lane adds to its own fields only.
@@ -115,6 +125,8 @@ struct Renderer {
         uint64_t clearNs = 0, clears = 0, surfaceCopyNs = 0, surfaceCopies = 0, cpuSurfaceCopies = 0;
         uint64_t invalidateNs = 0, invalidates = 0, scanNs = 0, scans = 0, scanBlits = 0, feedbackCopies = 0;
         uint64_t rescales = 0, imageDescriptorWrites = 0, samplerDescriptorWrites = 0;
+        uint64_t poolHits = 0;     // rescales that reused a kept image (internal resolution)
+        uint64_t hudSwitches = 0;  // frames whose HUD went to the TV buffer's full-resolution image (draw.cpp)
         // shader lane (shaders_dk.cpp; the worker's own figures are in ShaderStats)
         uint64_t shaderNs = 0, shaders = 0, dkshLoads = 0, uniformPackNs = 0;
     } perf;
