@@ -56,7 +56,72 @@ namespace gfxdk {
 Renderer R;
 
 namespace {
-constexpr uint32_t kWidth = 1280, kHeight = 720, kSwapImages = 3;
+constexpr uint32_t kSwapImages = 3;
+// the window (swapchain images): 1280x720 handheld, 1920x1080 docked (window_wanted below); the game's picture is
+// scaled into it by the present pass. Render thread only once the device exists.
+uint32_t g_winW = 1280, g_winH = 720;
+uint64_t g_windowResizes = 0;  // swapchains recreated for a new window size (the stats line)
+// the console's operation mode as the host loop last read it (run_main_loop: appletGetOperationMode, which libnx
+// updates on AppletMessage_OperationModeChanged): 1 docked (TV), 0 handheld, -1 not read yet
+std::atomic<int> g_opMode{-1};
+
+// WWHD_DK_DOCKED_1080 (on unless =0): docked, the window is 1920x1080 (the TV's output); handheld 1280x720 (the
+// screen). =0: 1280x720 always (the old path; the system scales it to the TV). WWHD_DK_WINDOW=WxH (at most
+// 1920x1080) forces that size in both modes, for A/B tests in handheld. The game still renders its 1280x720
+// picture (internal and dynamic resolution as before): the present pass scales it into the window.
+struct WindowConfig {
+    int mode = 1;  // 0 always 1280x720, 1 by the operation mode, 2 forced
+    uint32_t w = 0, h = 0;
+};
+const WindowConfig& window_config() {
+    static const WindowConfig c = [] {
+        WindowConfig c;
+        if (const char* e = getenv("WWHD_DK_WINDOW"); e && *e) {
+            unsigned w = 0, h = 0;
+            if (sscanf(e, "%ux%u", &w, &h) == 2 && w >= 320 && h >= 180 && w <= 1920 && h <= 1080) {
+                c.mode = 2;
+                c.w = w;
+                c.h = h;
+            } else
+                LOG("[dk] WWHD_DK_WINDOW=%s ignored: WxH from 320x180 to 1920x1080", e);
+        }
+        if (c.mode != 2)
+            if (const char* e = getenv("WWHD_DK_DOCKED_1080"); e && *e == '0') c.mode = 0;
+        if (c.mode == 2)
+            LOG("[dk] window: %ux%u in both modes (WWHD_DK_WINDOW); the game's 1280x720 picture is scaled into it", c.w, c.h);
+        else if (c.mode == 1)
+            LOG("[dk] window: docked 1920x1080, handheld 1280x720, the swapchain recreated when the mode changes; the game's "
+                "1280x720 picture is scaled into it (WWHD_DK_DOCKED_1080=0: 1280x720 always, the old path)");
+        else
+            LOG("[dk] window: 1280x720 in both modes (WWHD_DK_DOCKED_1080=0, the old path; docked the system scales it)");
+        return c;
+    }();
+    return c;
+}
+void window_wanted(uint32_t& w, uint32_t& h) {
+    const WindowConfig& c = window_config();
+    if (c.mode == 2) {
+        w = c.w;
+        h = c.h;
+        return;
+    }
+    const bool big = c.mode == 1 && g_opMode.load(std::memory_order_relaxed) == 1;
+    w = big ? 1920 : 1280;
+    h = big ? 1080 : 720;
+}
+// the host loop: the operation mode, logged when it changes (appletMainLoop handled the applet message)
+void poll_operation_mode() {
+    const int docked = appletGetOperationMode() == AppletOperationMode_Console ? 1 : 0;
+    const int before = g_opMode.exchange(docked, std::memory_order_relaxed);
+    if (before == docked) return;
+    uint32_t w, h;
+    window_wanted(w, h);
+    if (before < 0)
+        LOG("[dk] operation mode: %s; window %ux%u", docked ? "docked (TV)" : "handheld", w, h);
+    else
+        LOG("[dk] operation mode changed (AppletMessage_OperationModeChanged): now %s; window %ux%u from the next present",
+            docked ? "docked (TV)" : "handheld", w, h);
+}
 #ifdef WWHD_DEKO3D_DEBUG_LIB
 constexpr bool kDebugLib = true;  // linked against libdeko3dd (CMakeLists.txt)
 #else
@@ -128,13 +193,13 @@ void init_image(DkImage& image, ImageAlloc& mem, DkImageFormat format, uint32_t 
     dkImageLayoutMakerDefaults(&m, R.device);
     m.flags = flags;
     m.format = format;
-    m.dimensions[0] = kWidth;
-    m.dimensions[1] = kHeight;
+    m.dimensions[0] = g_winW;
+    m.dimensions[1] = g_winH;
     DkImageLayout layout;
     dkImageLayoutInitialize(&layout, &m);
     mem = image_alloc(uint32_t(dkImageLayoutGetSize(&layout)), dkImageLayoutGetAlignment(&layout));
     dkImageInitialize(&image, &layout, mem.block, mem.offset);
-    LOG("[dk] %s: %ux%u, %u KiB at image heap offset 0x%X", what, kWidth, kHeight, mem.size >> 10, mem.offset);
+    LOG("[dk] %s: %ux%u, %u KiB at image heap offset 0x%X", what, g_winW, g_winH, mem.size >> 10, mem.offset);
 }
 
 void init_swapchain() {
@@ -156,8 +221,31 @@ void init_swapchain() {
     dkSwapchainSetSwapInterval(g_swapchain, 1);
     u32 nw = 0, nh = 0;
     nwindowGetDimensions(nwindowGetDefault(), &nw, &nh);
-    LOG("[dk] swapchain: %u RGBA8 images of %ux%u on the default window (%ux%u), swap interval 1", kSwapImages, kWidth,
-        kHeight, nw, nh);
+    LOG("[dk] swapchain: %u RGBA8 images of %ux%u on the default window (%ux%u), swap interval 1", kSwapImages, g_winW,
+        g_winH, nw, nh);
+}
+
+// a new window size (the operation mode changed): the GPU finishes what was submitted (the previous present
+// passes into the old images), the old swapchain releases the window's buffers (nwindowReleaseBuffers), and new
+// images and a new swapchain of the new size take their place (deko3d sets the window's dimensions from them,
+// nwindowSetDimensions). The old images' memory is freed once the GPU is done with this frame. Same swap
+// interval (1); relaxed vsync is gx2_core's own pacing (steady clock, 59.94 Hz), the same in both modes.
+void resize_window(uint32_t w, uint32_t h, uint64_t frame) {
+    const uint64_t t0 = now_ns();
+    const uint32_t ow = g_winW, oh = g_winH;
+    check_queue("recreating the swapchain", frame);
+    dkQueueWaitIdle(R.queue);
+    const uint64_t t1 = now_ns();
+    dkSwapchainDestroy(g_swapchain);
+    g_swapchain = nullptr;
+    for (uint32_t i = 0; i < kSwapImages; i++) image_free_later(g_swapMem[i]);
+    image_free_later(g_depthMem);
+    g_winW = w;
+    g_winH = h;
+    init_swapchain();
+    g_windowResizes++;
+    LOG("[dk] frame %llu: window %ux%u -> %ux%u: swapchain recreated in %.1f ms (GPU idle wait %.1f ms), swap interval 1",
+        (unsigned long long)frame, ow, oh, w, h, double(now_ns() - t0) / 1e6, double(t1 - t0) / 1e6);
 }
 
 // ---- state for the renderer's own passes
@@ -295,8 +383,8 @@ void draw_text(int left, int top, int scale, const std::vector<std::string>& lin
     memcpy(u.cpu, &t, sizeof t);
     const int w = (columns * 4 + 1) * scale, h = (rows * 6 + 1) * scale;
     bind_pass_state(true, false);
-    set_view(uint32_t(left), uint32_t(top), uint32_t(std::min<int>(w, int(kWidth) - left)),
-             uint32_t(std::min<int>(h, int(kHeight) - top)));
+    set_view(uint32_t(left), uint32_t(top), uint32_t(std::min<int>(w, int(g_winW) - left)),
+             uint32_t(std::min<int>(h, int(g_winH) - top)));
     const DkBufExtents ubo = {u.gpu, kUboSize};
     dkCmdBufBindUniformBuffers(R.cmd, DkStage_Fragment, 0, &ubo, 1);
     dkCmdBufBindVtxAttribState(R.cmd, nullptr, 0);
@@ -353,7 +441,7 @@ void draw_pattern(uint64_t frame) {
     if (!s) return;
     memcpy(s.cpu, v.data(), bytes);
     bind_pass_state(false, true);
-    set_view(0, 0, kWidth, kHeight);
+    set_view(0, 0, g_winW, g_winH);
     static const DkVtxAttribState attribs[] = {
         DkVtxAttribState{0, 0, offsetof(PatternVertex, x), DkVtxAttribSize_3x32, DkVtxAttribType_Float, 0},
         DkVtxAttribState{0, 0, offsetof(PatternVertex, r), DkVtxAttribSize_4x32, DkVtxAttribType_Float, 0},
@@ -368,7 +456,9 @@ void draw_pattern(uint64_t frame) {
     char status[64];
     snprintf(status, sizeof status, "FRAME %llu, WWHD_DK_TEST_PATTERN=1", (unsigned long long)frame);
     static const float fg[4] = {1, 1, 1, 1}, bg[4] = {0, 0, 0, 0.55f};
-    draw_text(330, 36, 3,
+    // laid out for 1280x720, scaled with the window
+    const float k = float(g_winH) / 720.0f;
+    draw_text(int(330 * float(g_winW) / 1280.0f), int(36 * k), std::max(1, int(3 * k)),
               {"DEKO3D TEST PATTERN", status, "", "THIS TEXT UPRIGHT: WINDOW ORIGIN TOP LEFT",
                "RED BOX TOP LEFT, GREEN BOTTOM RIGHT: Y NEGATED", "CYAN IN FRONT OF MAGENTA: DEPTH TEST",
                "GRAY SQUARE EMPTY (NO ORANGE): DEPTH 0 TO 1", "BAR: BLACK LEFT TO WHITE RIGHT",
@@ -420,7 +510,7 @@ void draw_fps() {
         }
     }
     static const float fg[4] = {1.0f, 0.95f, 0.35f, 1.0f}, bg[4] = {0, 0, 0, 0.6f};
-    const int scale = std::max(2, int(kHeight) / 180), margin = std::max(4, int(kHeight) / 90);
+    const int scale = std::max(2, int(g_winH) / 180), margin = std::max(4, int(g_winH) / 90);  // 4 and 8 at 720, 6 and 12 at 1080
     draw_text(margin, margin, scale, lines, fg, bg);
 }
 
@@ -461,12 +551,12 @@ bool draw_picture(const PresentSource& src, bool capture) {
     if (!g_presentOk || !src.surface || !src.width || !src.height) return false;
     commit_descriptors();  // present_source wrote the picture's view into kPresentImageId
     const float a = float(src.width) / float(src.height);
-    int w = int(kWidth), h = int(float(kWidth) / a);
-    if (h > int(kHeight)) {
-        h = int(kHeight);
-        w = int(float(kHeight) * a);
+    int w = int(g_winW), h = int(float(g_winW) / a);
+    if (h > int(g_winH)) {
+        h = int(g_winH);
+        w = int(float(g_winH) * a);
     }
-    const int x = (int(kWidth) - w) / 2, y = (int(kHeight) - h) / 2;
+    const int x = (int(g_winW) - w) / 2, y = (int(g_winH) - h) / 2;
     constexpr uint32_t kUboSize = (sizeof(PresentUbo) + 255) & ~255u;
     StreamAlloc u = stream_alloc(kUboSize, DK_UNIFORM_BUF_ALIGNMENT);
     if (!u) return false;
@@ -851,14 +941,15 @@ void frame_stats() {
     audio::stats(underrun, dropped);
     LOG("[dk] %.1f fps; GX2 per frame: %.0f draws, %.0f clears, %.0f surface copies, %.0f scan "
         "copies, %.0f invalidates, %.0f flushes, %.0f waits; render thread busy %.0f ms/s (CPU %.0f ms/s), present %.0f "
-        "ms/s (frame fence %.0f, swapchain image %.0f, submit %.0f); GPU behind at %.0f%% of presents; command memory "
+        "ms/s (frame fence %.0f, swapchain image %.0f, submit %.0f; window %ux%u, %llu resizes); GPU behind at %.0f%% of presents; command memory "
         "per frame %.0f KiB (max %llu KiB, %llu frames over the %u MiB slice); stream %.1f KiB/frame (%llu full); "
         "heap never used %zu MiB; image heap %llu KiB in %llu chunks, shader code %llu KiB; files %llu (%.0f ms), audio "
         "gaps %.0f ms; deko3d messages %d",
         double(frames) / secs, perFrame(c.draws - last.draws), perFrame(c.clears - last.clears),
         perFrame(c.copies - last.copies), perFrame(c.scans - last.scans), perFrame(c.invalidates - last.invalidates),
         perFrame(c.flushes - last.flushes), perFrame(c.waits - last.waits), busy, cpuMs, ms(g_times.presentNs),
-        ms(g_times.fenceNs), ms(g_times.acquireNs), ms(g_times.submitNs), behindPct,
+        ms(g_times.fenceNs), ms(g_times.acquireNs), ms(g_times.submitNs), g_winW, g_winH,
+        (unsigned long long)g_windowResizes, behindPct,
         m.frames ? double(m.cmdBytesSum) / 1024.0 / double(m.frames) : 0.0, (unsigned long long)(m.cmdBytesMax >> 10),
         (unsigned long long)m.cmdOverflows, kCmdSliceSize >> 20,
         m.frames ? double(m.streamBytesSum) / 1024.0 / double(m.frames) : 0.0, (unsigned long long)m.streamFull,
@@ -1016,6 +1107,14 @@ void present() {
     g_times.presents++;
     const bool gpuBehind = !frame_done(R.frame);  // the GPU is still on the previous frame (dynamic resolution)
     begin_commands();  // (already open when a GX2 command recorded in this frame)
+    {
+        uint32_t ww, wh;
+        window_wanted(ww, wh);
+        if (ww != g_winW || wh != g_winH) {
+            Stage stage("deko3d: recreating the swapchain");
+            resize_window(ww, wh, frame);
+        }
+    }
     const uint64_t t1 = now_ns();
     int slot;
     {
@@ -1043,7 +1142,7 @@ void present() {
     dkImageViewDefaults(&depth, &g_depth);
     const DkImageView* colors[] = {&color};
     dkCmdBufBindRenderTargets(R.cmd, colors, 1, &depth);
-    set_view(0, 0, kWidth, kHeight);
+    set_view(0, 0, g_winW, g_winH);
     // WWHD_DK_TEST_PATTERN=1: P1's test pattern instead of the game's picture (the game runs behind it)
     static const bool testPattern = [] {
         const char* e = getenv("WWHD_DK_TEST_PATTERN");
@@ -1073,7 +1172,8 @@ void present() {
     if (S.tvSource) S.tvSource->hudFull = false;
     draw_fps();
     // the settings overlay (Minus held, overlay/overlay.h), over the pattern and the FPS counter
-    if (ImDrawData* ui = overlay::frame(float(kWidth), float(kHeight), overlay_renderer_init)) overlay_draw(ui, kWidth, kHeight);
+    // (the window's real size: the UI grows with it, overlay.cpp)
+    if (ImDrawData* ui = overlay::frame(float(g_winW), float(g_winH), overlay_renderer_init)) overlay_draw(ui, int(g_winW), int(g_winH));
     gpuPasses.frame_end();
     frame_end();
     const uint64_t t3 = now_ns();
@@ -1088,7 +1188,7 @@ void present() {
     if (capture) LOG("[dk] capture frame %llu: recorded in %.2f ms, submitted and presented in %.2f ms", (unsigned long long)frame,
                      double(t3 - t2) / 1e6, double(t4 - t3) / 1e6);
     // the frame's pictures to PNG files (both sticks, WWHD_DUMP_*): waits for the GPU, copies its images back
-    if (g_capture) capture_present(g_swapImages[slot], kWidth, kHeight, src);
+    if (g_capture) capture_present(g_swapImages[slot], g_winW, g_winH, src);
     g_times.acquireNs += t2 - t1;
     g_times.submitNs += t4 - t3;
     frame_stats();
@@ -1208,17 +1308,20 @@ void shader_cache_progress(size_t done, size_t total) {
     dkImageViewDefaults(&color, &g_swapImages[slot]);
     const DkImageView* colors[] = {&color};
     dkCmdBufBindRenderTargets(cmd, colors, 1, nullptr);
-    const DkViewport vp = {0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f};
+    const DkViewport vp = {0.0f, 0.0f, float(g_winW), float(g_winH), 0.0f, 1.0f};
     dkCmdBufSetViewports(cmd, 0, &vp, 1);
+    // the bar laid out for 1280x720, scaled with the window
+    auto sx = [](uint32_t v) { return v * g_winW / 1280; };
+    auto sy = [](uint32_t v) { return v * g_winH / 720; };
     auto fill = [&](uint32_t x, uint32_t y, uint32_t w, uint32_t h, float v) {
         const DkScissor sc = {x, y, w, h};
         dkCmdBufSetScissors(cmd, 0, &sc, 1);
         dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA, v, v, v, 1.0f);
     };
-    fill(0, 0, kWidth, kHeight, 0.0f);
-    fill(240, 344, 800, 32, 0.2f);
-    const uint32_t w = uint32_t(800 * done / std::max<size_t>(total, 1));
-    if (w) fill(240, 344, std::min<uint32_t>(w, 800), 32, 0.9f);
+    fill(0, 0, g_winW, g_winH, 0.0f);
+    fill(sx(240), sy(344), sx(800), sy(32), 0.2f);
+    const uint32_t w = uint32_t(sx(800) * done / std::max<size_t>(total, 1));
+    if (w) fill(sx(240), sy(344), std::min<uint32_t>(w, sx(800)), sy(32), 0.9f);
     dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(cmd));
     dkQueuePresentImage(R.queue, g_swapchain, slot);
     dkQueueWaitIdle(R.queue);  // (the command memory is reused by the next bar)
@@ -1254,6 +1357,8 @@ void init() {
     memory_init();
     load_shaders();
     text_self_test();
+    poll_operation_mode();
+    window_wanted(g_winW, g_winH);  // the first swapchain at the current mode's size
     init_swapchain();
     shaders_init(shader_cache_progress);  // the game shaders' worker and caches (dk_shaders.h)
     log_heap("after the deko3d setup");
@@ -1263,6 +1368,7 @@ void init() {
 void run_main_loop() {
     while (appletMainLoop()) {
         input::update();
+        poll_operation_mode();    // docked / handheld: the window size (present recreates the swapchain)
         hostui::run_posted();     // the settings overlay's changes, on this thread as on the desktop hosts
         switch_settings::tick();  // CPU / GPU clock overrides set again when the system changed them
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
