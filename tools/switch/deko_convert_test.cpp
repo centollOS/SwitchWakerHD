@@ -7,8 +7,9 @@
 //     ./deko_convert_test src/ out/ path/to/uam [max shaders]
 //
 // Checks: no gl_VertexIndex/gl_InstanceIndex, no `set =`; every vertex shader keeps the Vulkan SET_POSITION
-// (z remapped to 0..1 unless the shader's clip space is already 0..1) and the invariant gl_Position; then uam
-// must compile it. Prints N ok / N total, failures grouped by their first error line and uam's times.
+// (z remapped to 0..1 unless the shader's clip space is already 0..1) with y negated (kNegateY) and the
+// invariant gl_Position; then uam must compile it. Prints N ok / N total, failures grouped by their first error
+// line and uam's times.
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -138,7 +139,8 @@ int main(int argc, char** argv) {
             vs++;
             const std::string want = vulkan_set_position(src);
             if (want.empty()) bad = "check: original has no Vulkan SET_POSITION";
-            else if (glsl.find(want + "\r") == std::string::npos && glsl.find(want + "\n") == std::string::npos)
+            else if (glsl.find(want + gfxdk::kNegateY + "\r") == std::string::npos &&
+                     glsl.find(want + gfxdk::kNegateY + "\n") == std::string::npos)
                 bad = "check: converted VS lost the Vulkan SET_POSITION";
             else if (glsl.find(plain + "\r") != std::string::npos && want != plain)
                 bad = "check: converted VS has the OpenGL SET_POSITION";

@@ -9,6 +9,7 @@ void ConvertedBindings::clear() {
     memset(sampler, -1, sizeof sampler);
     uboCount = samplerCount = 0;
     ufBlockSlot = ufBlockVkBinding = -1;
+    negatedY = false;
     error.clear();
 }
 
@@ -160,6 +161,12 @@ struct Converter {
                 if (t == "#define gl_VertexID gl_VertexIndex" || t == "#define gl_InstanceID gl_InstanceIndex" ||
                     starts_with(t, "#define UNIFORM_BUFFER_LAYOUT(") || starts_with(t, "#define TEXTURE_LAYOUT("))
                     continue;
+                // deko3d's clip-space y points up (dk.h): the position is given y-down as in Vulkan, negated
+                if (starts_with(t, "#define SET_POSITION(")) {
+                    if (t.find("gl_Position.y") != std::string::npos) { fail("unexpected SET_POSITION: " + t); return {}; }
+                    line.insert(line.find_last_not_of("\r\n") + 1, kNegateY);
+                    out->negatedY = true;
+                }
             }
             if (starts_with(t, "#version")) {
                 if (version) { fail("two #version lines"); return {}; }
@@ -176,6 +183,7 @@ struct Converter {
         if (branch != Outside || foreignDepth) { fail("unterminated #if block"); return {}; }
         if (!version) { fail("no #version line"); return {}; }
         if (vertex && res.find("invariant gl_Position;") == std::string::npos) { fail("no void main()"); return {}; }
+        if (vertex && !out->negatedY) { fail("no SET_POSITION in the #ifdef VULKAN block"); return {}; }
         // the renames dropped above must not be needed by anything that is left
         if (res.find("gl_VertexIndex") != std::string::npos || res.find("gl_InstanceIndex") != std::string::npos) {
             fail("gl_VertexIndex/gl_InstanceIndex left after the conversion");
