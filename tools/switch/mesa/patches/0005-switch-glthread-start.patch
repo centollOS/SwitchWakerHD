@@ -1,0 +1,67 @@
+diff --git a/include/mesa_switch.h b/include/mesa_switch.h
+index 33676d5..774e8ef 100644
+--- a/include/mesa_switch.h
++++ b/include/mesa_switch.h
+@@ -7,6 +7,7 @@
+ #ifndef MESA_SWITCH_H
+ #define MESA_SWITCH_H
+ 
++#include <stdbool.h>
+ #include <stdint.h>
+ 
+ #ifdef __cplusplus
+@@ -65,6 +66,15 @@ const char *mesa_switch_shader_cache_status(void);
+  * thread, see disk_cache_switch.c), or "" if none yet. Changes at most once per run. */
+ const char *mesa_switch_shader_cache_maintenance(void);
+ 
++/* Starts the current context's GL thread (glthread), which switch-mesa's EGL never does.
++ * set_background_context (st_manager's hook, called first on the worker thread with the
++ * st_context_iface and the queue's monitoring info) is used when the EGL left it empty.
++ * Returns whether the GL thread runs. Not part of the shader cache's key (no compiled code changes). */
++struct st_context_iface;
++struct util_queue_monitoring;
++bool mesa_switch_glthread_start(void (*set_background_context)(struct st_context_iface *,
++                                                               struct util_queue_monitoring *));
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/mesa/state_tracker/st_context.c b/src/mesa/state_tracker/st_context.c
+index 848d075..4e3bdf6 100644
+--- a/src/mesa/state_tracker/st_context.c
++++ b/src/mesa/state_tracker/st_context.c
+@@ -40,6 +40,7 @@
+ #include "glapi/glapi.h"
+ #include "st_manager.h"
+ #include "st_context.h"
++#include "mesa_switch.h"
+ #include "st_debug.h"
+ #include "st_cb_bitmap.h"
+ #include "st_cb_blit.h"
+@@ -871,6 +872,26 @@ st_set_background_context(struct gl_context *ctx,
+    smapi->set_background_context(&st->iface, queue_info);
+ }
+ 
++/* Switch (SwitchWakerHD, include/mesa_switch.h): start the current context's GL thread. switch-mesa's
++ * EGL never starts it and leaves st_manager::set_background_context empty, which the worker calls
++ * first; the application passes its own (it names the worker thread, sets its priority). */
++bool
++mesa_switch_glthread_start(void (*set_background_context)(struct st_context_iface *,
++                                                          struct util_queue_monitoring *))
++{
++   GET_CURRENT_CONTEXT(ctx);
++   if (!ctx || !ctx->st)
++      return false;
++   if (ctx->GLThread.enabled)
++      return true;
++   struct st_manager *smapi =
++      (struct st_manager *) ctx->st->iface.st_context_private;
++   if (!smapi->set_background_context)
++      smapi->set_background_context = set_background_context;
++   _mesa_glthread_init(ctx);
++   return ctx->GLThread.enabled;
++}
++
+ 
+ static void
+ st_get_device_uuid(struct gl_context *ctx, char *uuid)

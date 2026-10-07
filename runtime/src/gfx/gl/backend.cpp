@@ -51,6 +51,9 @@ void* _glapi_get_context(void);
 void _mesa_glthread_init(void* ctx);
 void _mesa_glthread_finish(void* ctx);
 }
+#if defined(WWHD_MESA_STATS)
+#include <mesa_switch.h>  // the Mesa of tools/switch/mesa: mesa_switch_glthread_start
+#endif
 #endif
 
 namespace gfxgl {
@@ -1420,7 +1423,10 @@ void shader_cache_progress(size_t done, size_t total) {
 // ---- WWHD_GL_THREAD=1 (Switch): Mesa's GL thread. Our GL calls are recorded and a second thread runs
 // Mesa and the nouveau driver, so the render thread's own work overlaps the driver's.
 // Starting it needs st_manager::set_background_context, which switch-mesa's EGL leaves empty (the
-// worker thread calls it first). Its address is taken from this build's st_set_background_context:
+// worker thread calls it first). The Mesa of tools/switch/mesa starts it itself (mesa_switch_glthread_start,
+// patch 0005): its structures differ from the package's (gl_context::st at 0x22E78, not 0x22E88), and a
+// fixed offset left the GL thread off in round 30's first build (every GL call on the render thread).
+// devkitPro's package: the address is taken from that build's st_set_background_context:
 //   ldr x0, [ctx, #0x22E88]  (gl_context::st)   ldr x2, [x0]  (st_context_private: the st_manager)
 //   ldr x2, [x2, #24]        (set_background_context)
 #ifdef __SWITCH__
@@ -1441,6 +1447,15 @@ void gl_thread_started(void*, void*) {  // on Mesa's worker thread, before it ru
 void start_gl_thread() {
     const char* e = getenv("WWHD_GL_THREAD");
     if (!e || !*e || !strcmp(e, "0")) return;
+#if defined(WWHD_MESA_STATS)
+    if (!mesa_switch_glthread_start(reinterpret_cast<void (*)(st_context_iface*, util_queue_monitoring*)>(&gl_thread_started))) {
+        LOG("[gl] GL thread: could not be started (mesa_switch_glthread_start)");
+        return;
+    }
+    g_glThreadCtx = _glapi_get_context();
+    LOG("[gl] GL thread started (WWHD_GL_THREAD, mesa_switch_glthread_start)");
+    return;
+#endif
     auto* ctx = static_cast<uint8_t*>(_glapi_get_context());
     auto* st = ctx ? *reinterpret_cast<uint8_t**>(ctx + kGlContextSt) : nullptr;
     auto* manager = st ? *reinterpret_cast<uint8_t**>(st) : nullptr;

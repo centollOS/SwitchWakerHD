@@ -293,9 +293,10 @@ if(WWHD_HAS_OPENGL)
       target_link_libraries(wwhd PRIVATE ${LZ4_LIBRARY} glad "${WWHD_SWITCH_MESA_DIR}/lib/libEGL.a"
                             "${WWHD_SWITCH_MESA_DIR}/lib/libglapi.a" drm_nouveau)
       if(EXISTS "${WWHD_SWITCH_MESA_DIR}/include/mesa_switch.h")
-        set_source_files_properties(runtime/src/platform/mesa_cache_switch.cpp PROPERTIES
-                                    COMPILE_DEFINITIONS WWHD_MESA_STATS=1
-                                    INCLUDE_DIRECTORIES "${WWHD_SWITCH_MESA_DIR}/include")
+        # mesa_switch.h: the cache's counters (platform/mesa_cache_switch.cpp) and starting the GL thread
+        # without fixed offsets (gfx/gl/backend.cpp start_gl_thread)
+        target_compile_definitions(wwhd PRIVATE WWHD_MESA_STATS=1)
+        target_include_directories(wwhd PRIVATE "${WWHD_SWITCH_MESA_DIR}/include")
       endif()
       message(STATUS "Mesa: ${WWHD_SWITCH_MESA_DIR}")
     else()
