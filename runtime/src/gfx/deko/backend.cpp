@@ -9,6 +9,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include <switch.h>
 
 #include "dk.h"
+#include "dk_capture.h"
 #include "dk_draw.h"
 #include "dk_shaders.h"
 #include "dk_surfaces.h"
@@ -527,8 +528,8 @@ std::string clock_report() {
     return b;
 }
 
-// ---- captures (both sticks clicked): the next frame's present
-// pass is logged step by step
+// ---- captures (both sticks clicked): the next frame's passes, draws and present pass in the log, and its
+// pictures, render targets and textures as PNG files (dk_capture.h, capture.cpp)
 std::atomic<bool> g_captureRequested{false};
 uint64_t g_captureFrame = ~0ull;
 bool capturing() { return R.frame + 1 == g_captureFrame; }
@@ -792,6 +793,8 @@ void present() {
     const uint64_t t4 = now_ns();
     if (capture) LOG("[dk] capture frame %llu: recorded in %.2f ms, submitted and presented in %.2f ms", (unsigned long long)frame,
                      double(t3 - t2) / 1e6, double(t4 - t3) / 1e6);
+    // the frame's pictures to PNG files (both sticks, WWHD_DUMP_*): waits for the GPU, copies its images back
+    if (g_capture) capture_present(g_swapImages[slot], kWidth, kHeight, src);
     g_times.acquireNs += t2 - t1;
     g_times.submitNs += t4 - t3;
     frame_stats();
@@ -866,6 +869,19 @@ void swap() {
     g_traceFrame = (!traced.empty() && std::find(traced.begin(), traced.end(), R.frame + 1) != traced.end()) ||
                    R.frame + 1 == g_captureFrame;
     g_captureDraws = R.frame + 1 == g_captureFrame;
+    // the next frame's PNG files: a capture writes everything; WWHD_DUMP_FRAMES=n,... the pictures (as gfx/gl:
+    // frame_<n>.png, frame_<n>_window.png), WWHD_DUMP_TARGETS=n,... the render targets, WWHD_DUMP_TEXTURES=n,...
+    // the sampled textures and their upload data (captures/<n>/)
+    static const std::vector<uint64_t> dumpFrames = frame_list("WWHD_DUMP_FRAMES", nullptr);
+    static const std::vector<uint64_t> dumpTargets = frame_list("WWHD_DUMP_TARGETS", nullptr);
+    static const std::vector<uint64_t> dumpTextures = frame_list("WWHD_DUMP_TEXTURES", nullptr);
+    auto listed = [](const std::vector<uint64_t>& v) { return std::find(v.begin(), v.end(), R.frame + 1) != v.end(); };
+    uint32_t what = 0;
+    if (listed(dumpFrames)) what |= kCapturePictures;
+    if (listed(dumpTargets)) what |= kCaptureTargets;
+    if (listed(dumpTextures)) what |= kCaptureTextures;
+    if (g_captureDraws) what = kCaptureAll;
+    if (what || g_capture) capture_arm(what, g_captureDraws ? "both sticks" : "WWHD_DUMP_*");
 }
 
 // start-up: a bar filling while shaders_init loads the DKSH caches (as gfx/gl shader_cache_progress), with its

@@ -26,6 +26,7 @@
 #include "Cafe/HW/Latte/ISA/LatteReg.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/LatteAddrLib/LatteAddrLib.h"
+#include "dk_capture.h"
 #include "dk_draw.h"
 #include "dk_surfaces.h"
 #include "gx2/gx2.h"
@@ -595,6 +596,24 @@ void upload_surface(Surface* s) {
     s->writeSeq = next_write_seq();
     s->dirty = false;
     s->changedFrame = R.frame;
+}
+
+// dk_capture.h: level 0, layer 0 of the guest data as upload_surface stages it, for a capture's upload picture
+bool capture_upload_data(Surface* s, std::vector<uint8_t>& out, bool& changed) {
+    if (!s || !s->img.valid || s->gpuWritten || s->fmt.image == DkImageFormat_None) return false;
+    const LevelGeom lg = level_geom(s, 0);
+    if (!lg.bytes) return false;
+    std::vector<uint8_t> all(lg.bytes);
+    decode_level(s, 0, all.data());
+    out.assign(all.begin(), all.begin() + ptrdiff_t(lg.rowBytes * lg.bh));
+    // upload_surface's hash of the guest data (every level it uploads)
+    auto& g = layout(s);
+    const uint32_t levels = s->mipAddr ? s->mips : 1;
+    uint64_t hash = 1469598103934665603ull;
+    for (uint32_t level = 0; level < levels; ++level)
+        hash = (hash ^ fnv(mem::ptr(g.address[level]), size_t(g.info[level].surfSize))) * 1099511628211ull;
+    changed = hash != s->contentHash;
+    return true;
 }
 
 // ---------------------------------------------------------------- internal resolution (P3)

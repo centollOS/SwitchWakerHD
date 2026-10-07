@@ -51,8 +51,28 @@ menús correctos (el juego en sí es P3).
 - **Logs** cada 5 s: `[dk] <fps> fps; GX2 per frame...`, `[dk] draws per frame: N executed; skipped ...` (motivos),
   `[dk] shaders: ...` (traducidos, en RAM, de las caches, compilados, fallidos, pendientes, draws saltados),
   `[dk] surfaces: ...` (superficies, memoria, subidas, copias, descriptores), `[hitch]` para frames de más de 55 ms.
-- **No portado aún:** escala interna / resolución dinámica, AO, FXAA, aniso, timestamps de GPU por pase, dumps PNG,
+- **No portado aún:** escala interna / resolución dinámica, AO, FXAA, aniso, timestamps de GPU por pase,
   probes, rect lists (GL tampoco las dibuja), registros 2 de `shadercache_gl.bin`.
+
+**P3, carril `p3-capture` (capturas sin fotos del propietario):**
+- **Capturas PNG** (`gfx/deko/capture.cpp`, `dk_capture.h`): los dos sticks pulsados capturan el frame siguiente
+  entero en `sdmc:/switch/wwhd/captures/<frame>/`: `frame_<n>.png` (la imagen de TV que muestrea el present, con la
+  codificación sRGB como GL), `frame_<n>_window.png` (la imagen del swapchain: barras, contador FPS, overlay),
+  `frame_<n>_tv_source.png` (el buffer que el juego copió a scan, si el present leyó la copia), `target_*.png` (cada
+  render target de los draws del frame, depth incluido, estirado a gris) y `tex_*.png` (cada textura muestreada, nivel 0
+  capa 0, tal como la tiene la GPU) con su `tex_*_upload.png` (los datos del guest decodificados por la CPU como los
+  sube `upload_surface`, antes de la GPU: bien aquí y mal en `tex_*.png` = subida, vista o muestreo; mal en los dos =
+  formato o decodificación). Una línea `[dk] capture <fichero>: ...` por fichero con formato GX2 y deko3d, tamaño,
+  mips/capas, tile mode, y los draws que la usaron (`#n`, la misma numeración que `[trace]   draw #n`) con unidad,
+  swizzle de la vista (DST_SEL), formato/num/comp/degamma/endian de las palabras de textura y sampler. Las imágenes se
+  copian con `dkCmdBufCopyImageToBuffer` a un bloque CPU-cached de 16 MiB (lotes) tras el present; un hilo convierte a
+  RGBA8 (BC1-5, half/float, packed, depth) y escribe el PNG. `WWHD_DUMP_FRAMES=n,...` (imágenes),
+  `WWHD_DUMP_TARGETS=n,...` (targets) y `WWHD_DUMP_TEXTURES=n,...` (texturas) hacen lo mismo en frames fijos.
+- **Contador FPS:** `text_fsh` leía `glyphs[i >> 2][i & 3]`; uam (glsl_to_tgsi de Mesa) pierde el índice dinámico de
+  componente de un vector de UBO y lee siempre `.x` (TGSI: `MOV CONST[1][ADDR+4].xxxx`): cada grupo de cuatro
+  caracteres salía con el glifo del primero ("30.0 FPS" → "3333"). Ahora elige la componente con selects. Al arrancar,
+  líneas `[dk] FPS counter self-test` (bits de los glifos, offsets de `TextUbo` frente a std140, lectura de prueba).
+  El GLSL convertido del juego no usa ese patrón (comprobado en las 7680 conversiones de la cosecha).
 
 **Pruebas en hardware para el propietario (P2)** (ficheros en `build/deko3d-out/` del checkout principal):
 1. **Copiar** `wwhd_dk.nro` (libdeko3dd: validación, más lento) y `wwhd_dk_release.nro` (librería release, para medir)

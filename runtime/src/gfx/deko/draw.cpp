@@ -23,6 +23,7 @@
 #include "Cafe/HW/Latte/Core/LatteCachedFBO.h"
 #include "Cafe/HW/Latte/ISA/LatteReg.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
+#include "dk_capture.h"
 #include "dk_shaders.h"
 #include "dk_surfaces.h"
 #include "runtime.h"
@@ -181,6 +182,7 @@ void sync_cache() {
 // ---- trace switches (as gfx/gl): WWHD_DK_TRACE_DRAWS (or WWHD_GL_TRACE_DRAWS) logs every draw of a traced frame
 const bool g_traceDraws = env_switch("TRACE_DRAWS", false);
 std::string g_traceTextures;  // the textures of the draw being prepared
+uint32_t g_frameDraws = 0;    // draws executed in the frame being recorded: the trace's and captures' #n
 
 // the draw being prepared: renders the GamePad picture; its targets' internal resolution
 bool g_gamepadDrawing = false;
@@ -311,6 +313,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         bool aliases = depth && s == depth;
         for (auto* c : colors)
             if (c && c == s) aliases = true;
+        if (g_capture) capture_note_texture(s, sh->vertex, unit, words, samplerWords, compare, aliases);
         if (aliases) {  // sampling a bound render target is undefined: a snapshot
             s = feedback_copy(s);
             view = sampled_view_id(s, words);
@@ -527,6 +530,7 @@ bool gamepad_only(const Surface* s) {
 void draw_frame_start() {
     // a new command list: whatever earlier frames bound is not relied upon
     forget_state();
+    g_frameDraws = 0;
     static bool logged = false;
     if (!logged) {
         logged = true;
@@ -842,6 +846,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     g_gamepadDrawing = gamepadDraw;
     g_drawSamplesRendered = false;
     g_traceTextures.clear();
+    if (g_capture) capture_draw_begin();
     if (!prepare_stage(r, vs, colors, depth, stages[kVertexStage]) || !prepare_stage(r, ps, colors, depth, stages[kPixelStage])) {
         R.perf.streamFullSkips++;
         skip(g_drawSkips.streamFull);
@@ -1209,23 +1214,25 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         mark_gpu_written(depth);
         tally(depth);
     }
+    const uint32_t drawIndex = g_frameDraws++;
+    if (g_capture) capture_note_draw(drawIndex, colors, slices, depth, depthSlice);
     if (gamepadDraw && timed) R.perf.gamepadDrawNs += (now_ns() - drawStart) * kDrawTimeSample;
     if (g_traceFrame) {
         trace_draw(nullptr);
         if (g_traceDraws || g_captureDraws) {
             LATTE_DB_DEPTH_CONTROL tdc;
             memcpy((void*)&tdc, r + REGADDR::DB_DEPTH_CONTROL, 4);
-            LOG("[trace]   draw raster: cull %s%s, front %s, viewport y %s, z %g..%g, clip %s, z clip near %s far %s",
-                pm.get_CULL_FRONT() ? "F" : "", pm.get_CULL_BACK() ? "B" : (pm.get_CULL_FRONT() ? "" : "none"),
+            LOG("[trace]   draw #%u raster: cull %s%s, front %s, viewport y %s, z %g..%g, clip %s, z clip near %s far %s",
+                drawIndex, pm.get_CULL_FRONT() ? "F" : "", pm.get_CULL_BACK() ? "B" : (pm.get_CULL_FRONT() ? "" : "none"),
                 pm.get_FRONT_FACE() == LATTE_PA_SU_SC_MODE_CNTL::E_FRONTFACE::CCW ? "ccw" : "cw",
                 f32(r[REGADDR::PA_CL_VPORT_YSCALE]) < 0 ? "down (swizzled)" : "up",
                 f32(r[REGADDR::PA_CL_VPORT_ZOFFSET]) - (clip.get_DX_CLIP_SPACE_DEF() ? 0.0f : f32(r[REGADDR::PA_CL_VPORT_ZSCALE])),
                 f32(r[REGADDR::PA_CL_VPORT_ZOFFSET]) + f32(r[REGADDR::PA_CL_VPORT_ZSCALE]),
                 clip.get_DX_CLIP_SPACE_DEF() ? "0..1" : "-1..1", clip.get_ZCLIP_NEAR_DISABLE() ? "off" : "on",
                 clip.get_ZCLIP_FAR_DISABLE() ? "off" : "on");
-            LOG("[trace]   draw c0=%s d=%s vs %08X/%016llX ps %08X/%016llX prim %u count %u inst %u%s; depth %s func %u "
+            LOG("[trace]   draw #%u c0=%s d=%s vs %08X/%016llX ps %08X/%016llX prim %u count %u inst %u%s; depth %s func %u "
                 "write %u, stencil %u, poly offset %u (%g, %g), blend %08X, mask %08X, trim %u;%s",
-                trace_name(colors[0]).c_str(), trace_name(depth).c_str(), r[mmSQ_PGM_START_VS] << 8,
+                drawIndex, trace_name(colors[0]).c_str(), trace_name(depth).c_str(), r[mmSQ_PGM_START_VS] << 8,
                 (unsigned long long)vs->glslHash, r[mmSQ_PGM_START_PS] << 8, (unsigned long long)ps->glslHash, prim, count,
                 instances, indexed ? (indices.format == DkIdxFormat_Uint16 ? " idx16" : " idx32") : "",
                 depth && tdc.get_Z_ENABLE() ? "on" : "off", uint32_t(tdc.get_Z_FUNC()), uint32_t(tdc.get_Z_WRITE_ENABLE()),
