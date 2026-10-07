@@ -39,6 +39,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "overlay/hostui.h"
 #include "overlay/overlay.h"
 #include "platform/mesa_cache_switch.h"
+#include "platform/settings_switch.h"
 #endif
 
 namespace gx2 { uint64_t flips_presented(); }
@@ -1511,6 +1512,7 @@ void run_main_loop() {
         input::update();
 #ifdef __SWITCH__
         hostui::run_posted();  // the settings overlay's changes, on this thread as on the desktop hosts
+        switch_settings::tick();  // CPU / GPU clock overrides set again when the system changed them
 #endif
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
     }

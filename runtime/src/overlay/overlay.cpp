@@ -629,10 +629,22 @@ void tab_switch() {
     const int gp = gpu_profile();
     for (int i = 0; i < kGpuProfiles; i++)
         if (radio(gpu_profile_label(i), gp == i)) hostui::post([i] { set_gpu_profile(i); });
-    help("Nintendo's own performance profiles for games: the CPU stays at 1020 MHz.\n"
+    help("The first four are Nintendo's own performance profiles for games.\n"
+         "GPU 614 MHz is an overclock set as sys-clk does (handheld only).\n"
          "Docked, the console uses its docked clocks (GPU 768 MHz).");
     if (gpu_profile_env())
         note("env.txt sets WWHD_GPU_PROFILE: it is used at every start; a change here lasts until the game closes.");
+    heading("CPU");
+    const int cc = cpu_clock();
+    for (int i = 0; i < kCpuClocks; i++) {
+        if (i) ImGui::SameLine();
+        if (radio(cpu_clock_label(i), cc == i)) hostui::post([i] { set_cpu_clock(i); });
+    }
+    help("1785 MHz is the clock games get during loading screens, set here for the whole game as sys-clk does.\n"
+         "It drains the battery faster and the console runs warmer.");
+    if (cpu_clock_env()) note("env.txt sets WWHD_CPU_CLOCK: it is used at every start.");
+    if (cc != kCpu1020 || gp == kGpu614)
+        warn("Overclock: more heat and battery use. If sys-clk has its own profile for this game, the two fight over the clocks.");
     // the clocks, asked at most once a second (clkrst)
     static double clocks_t = -10;
     static std::string clocks;

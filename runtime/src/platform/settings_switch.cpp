@@ -10,8 +10,15 @@
 // on dock/undock, so a choice is set once. apm needs title mode (an application); in applet mode the
 // profile is skipped. A choice falls back to the next lower one when apm refuses it. The handheld
 // configuration found at start is restored at exit.
-// WWHD_GPU_PROFILE (env.txt) = default | 384 | 460 | 1600 (460 with memory 1600) | 0x<configuration id>;
+// WWHD_GPU_PROFILE (env.txt) = default | 384 | 460 | 1600 (460 with memory 1600) | 614 | 0x<configuration id>;
 // without it, the menu's saved choice; without that, 1600.
+//
+// Beyond apm (a teammate's sys-clk setup, asked for 2026-10-07): CPU 1785 MHz (WWHD_CPU_CLOCK=1785, or the
+// menu) and GPU 614.4 MHz in handheld (profile 614) are set through clkrst, as sys-clk does, on top of
+// apm's configuration (memory 1600 comes from 0x92220007). The system sets its own clocks again on
+// dock / undock, sleep and apm changes, so tick() sets them again (once a second, when they differ);
+// at exit the CPU goes back to 1020 MHz and the handheld configuration found at start is restored.
+// sys-clk, when it runs with a profile of its own for this title, fights over the same clocks.
 #include "settings_switch.h"
 
 #include <switch.h>
@@ -35,11 +42,60 @@ bool g_profile_env = false;
 bool g_apm_ready = false, g_apm_failed = false;
 u32 g_apm_saved = 0x00020003, g_apm_now = 0;
 
-const char* const kIds[kGpuProfiles] = {"default", "384", "460", "1600"};
+const char* const kIds[kGpuProfiles] = {"default", "384", "460", "1600", "614"};
 const char* const kLabels[kGpuProfiles] = {"System default (GPU 307 MHz)", "GPU 384 MHz", "GPU 460 MHz",
-                                           "GPU 460 MHz + memory 1600 MHz"};
+                                           "GPU 460 MHz + memory 1600 MHz",
+                                           "GPU 614 MHz + memory 1600 MHz (overclock, as sys-clk)"};
+const char* const kCpuIds[kCpuClocks] = {"1020", "1785"};
+const char* const kCpuLabels[kCpuClocks] = {"CPU 1020 MHz (stock)", "CPU 1785 MHz (overclock, as sys-clk)"};
+constexpr u32 kCpuHz[kCpuClocks] = {1020000000, 1785000000};
+constexpr u32 kGpu614Hz = 614400000;
+int g_cpu = kCpu1020;
+bool g_cpu_env = false;
+
+// clkrst sessions for setting clocks (sys-clk's way), opened on first use
+bool g_clk_tried = false, g_clk_ok = false;
+ClkrstSession g_clk_cpu, g_clk_gpu;
+bool clk_ready() {
+    if (g_clk_tried) return g_clk_ok;
+    g_clk_tried = true;
+    if (!hosversionAtLeast(8, 0, 0)) {
+        LOG("[switch] clocks: clkrst needs system 8.0.0 or later; CPU / GPU overrides off");
+        return false;
+    }
+    Result rc = clkrstInitialize();
+    if (R_SUCCEEDED(rc)) rc = clkrstOpenSession(&g_clk_cpu, PcvModuleId_CpuBus, 3);
+    if (R_SUCCEEDED(rc)) rc = clkrstOpenSession(&g_clk_gpu, PcvModuleId_GPU, 3);
+    g_clk_ok = R_SUCCEEDED(rc);
+    if (!g_clk_ok) LOG("[switch] clocks: clkrst unavailable (rc 0x%x); CPU / GPU overrides off", (unsigned)rc);
+    return g_clk_ok;
+}
+bool docked() { return appletGetOperationMode() == AppletOperationMode_Console; }
+
+// the clock overrides wanted now (0: none)
+u32 wanted_cpu_hz() { return g_cpu == kCpu1785 ? kCpuHz[kCpu1785] : 0; }
+u32 wanted_gpu_hz() { return g_profile == kGpu614 && !docked() ? kGpu614Hz : 0; }
+bool g_overridden = false;  // an override was set (at exit: put the stock clocks back)
+
+void set_clock(ClkrstSession* s, const char* what, u32 hz) {
+    Result rc = clkrstSetClockRate(s, hz);
+    u32 now = 0;
+    clkrstGetClockRate(s, &now);
+    LOG("[switch] clocks: %s %u MHz: rc 0x%x, now %u MHz", what, hz / 1000000, (unsigned)rc, now / 1000000);
+    g_overridden = true;
+}
+// sets what differs from the wanted clocks (mutex held)
+void enforce(bool log_same) {
+    const u32 cpu = wanted_cpu_hz(), gpu = wanted_gpu_hz();
+    if (!cpu && !gpu) return;
+    if (!clk_ready()) return;
+    u32 now = 0;
+    if (cpu && R_SUCCEEDED(clkrstGetClockRate(&g_clk_cpu, &now)) && (now != cpu || log_same)) set_clock(&g_clk_cpu, "CPU", cpu);
+    if (gpu && R_SUCCEEDED(clkrstGetClockRate(&g_clk_gpu, &now)) && (now != gpu || log_same)) set_clock(&g_clk_gpu, "GPU", gpu);
+}
 
 void restore_at_exit() {
+    if (g_overridden && g_clk_ok) clkrstSetClockRate(&g_clk_cpu, kCpuHz[kCpu1020]);
     Result rc = apmSetPerformanceConfiguration(ApmPerformanceMode_Normal, g_apm_saved);
     LOG("[switch] gpu profile: handheld configuration 0x%08x restored: rc 0x%x", (unsigned)g_apm_saved, (unsigned)rc);
 }
@@ -75,6 +131,7 @@ void chain_for(int p, u32* out) {
         {0x00020004, 0, 0, 0},
         {0x92220008, 0x00020004, 0, 0},
         {0x92220007, 0x92220008, 0x00020004, 0},
+        {0x92220007, 0x92220008, 0x00020004, 0},  // 614: memory 1600 from apm, the GPU clock from clkrst
     };
     memcpy(out, kChains[p], sizeof kChains[p]);
 }
@@ -131,11 +188,45 @@ std::string gpu_profile_status() {
 void set_gpu_profile(int p) {
     if (p < 0 || p >= kGpuProfiles) return;
     std::lock_guard<std::mutex> lk(g_mu);
+    const int before = g_profile;
     g_profile = p;
     u32 chain[4];
     chain_for(p, chain);
     apply(kIds[p], chain);
+    // leaving 614 for a profile apm may consider already set (0x92220007 again): the GPU clock of
+    // the new profile directly, as apm would set it
+    if (before == kGpu614 && p != kGpu614 && !docked() && clk_ready()) {
+        static const u32 kGpuHz[kGpuProfiles] = {307200000, 384000000, 460800000, 460800000, kGpu614Hz};
+        set_clock(&g_clk_gpu, "GPU", kGpuHz[p]);
+    }
+    enforce(true);  // after apm: the GPU 614 / CPU 1785 overrides on top
     hostui::set(kKeyGpuProfile, kIds[p]);
+}
+
+const char* cpu_clock_label(int c) { return c >= 0 && c < kCpuClocks ? kCpuLabels[c] : "?"; }
+int cpu_clock() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return g_cpu;
+}
+bool cpu_clock_env() { return g_cpu_env; }
+void set_cpu_clock(int c) {
+    if (c < 0 || c >= kCpuClocks) return;
+    std::lock_guard<std::mutex> lk(g_mu);
+    const int before = g_cpu;
+    g_cpu = c;
+    if (c == kCpu1020 && before != kCpu1020 && clk_ready()) set_clock(&g_clk_cpu, "CPU", kCpuHz[kCpu1020]);
+    enforce(true);
+    hostui::set(kKeyCpuClock, kCpuIds[c]);
+}
+
+void tick() {
+    static uint64_t last = 0;
+    const uint64_t now = armTicksToNs(armGetSystemTick());
+    if (now - last < 1'000'000'000ull) return;
+    last = now;
+    std::lock_guard<std::mutex> lk(g_mu);
+    // leaving GPU 614 for the docked clocks: nothing to do (apm sets docked); back in handheld it is set again
+    enforce(false);
 }
 
 void save_picture() {
@@ -183,6 +274,21 @@ void apply_at_start() {
         }
         LOG("[switch] gpu profile %s (%s)", id.c_str(), g_profile_env ? "env.txt" : "settings");
         if (p != kGpuDefault) apply(id.c_str(), chain);
+    }
+    // CPU clock: env.txt (WWHD_CPU_CLOCK=1020|1785), else the saved choice, else stock
+    {
+        std::string c;
+        if (const char* e = getenv("WWHD_CPU_CLOCK"); e && *e) {
+            c = e;
+            g_cpu_env = true;
+        } else {
+            hostui::get(kKeyCpuClock, c);
+        }
+        std::lock_guard<std::mutex> lk(g_mu);
+        g_cpu = c == kCpuIds[kCpu1785] ? kCpu1785 : kCpu1020;
+        if (g_cpu != kCpu1020) LOG("[switch] cpu clock %s (%s)", kCpuIds[g_cpu], g_cpu_env ? "env.txt" : "settings");
+        apm_ready();  // the exit hook that puts the stock clocks back
+        enforce(true);
     }
     // picture adjustments and the counter: env.txt wins, else what the menu saved
     if (!picture_env()) {
