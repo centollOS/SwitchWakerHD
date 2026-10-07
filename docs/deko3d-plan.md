@@ -27,6 +27,15 @@ sin WFI (Mesa usa TIC_FLUSH/TSC_FLUSH con espera), código de shader cargado a m
 de shader (deko3d solo lo hace en `dkQueueFlush`), tiled cache nunca escrito, perf knob de subtiling (uam 0x087F6080,
 Mesa 0x20164010), early/late Z.
 
+**Pista del dueño: las motas salen en cualquier superficie (muros, suelos) pero solo donde da el sol; nunca en
+sombra.** En el frame 1968 la luz del sol pasa por una máscara de sombra en pantalla: #1654 (960x540, `F415B800`)
+muestrea el depth principal y el shadow map 1024x1024 (`218FC800`, D16, sampler con compare), #1655/#1656 la
+difuminan, y casi todos los draws del pase principal (#1711-2258, decals incluidos) la muestrean (`yzwx`); en el
+decal entra en el término de sol (dos `textureLod` y un `log2/exp2`), no en el alfa. Una caché de textura obsoleta
+sobre esa máscara daría bloques en el espacio de la máscara (3x6 texels = bloques de ~4x8 sin alinear en pantalla); las
+motas están alineadas exactamente a 4x8 de la pantalla de 1280x720, o sea al warp del pase principal: refuerza un
+fallo por warp al sombrear el término de sol (planificación) más que datos viejos. Aun así se prueba la barrera.
+
 Interruptores (`gfx/deko/dk_bisect.h`, `bisect.cpp`; cada uno en una línea `[dk] grass bisect:` al arrancar):
 
 | Interruptor | Por defecto | Valores |
@@ -36,6 +45,7 @@ Interruptores (`gfx/deko/dk_bisect.h`, `bisect.cpp`; cada uno en una línea `[dk
 | `WWHD_DK_DESC_WFI` | **1** | 1 espera a idle antes de invalidar descriptores; 0 como antes |
 | `WWHD_DK_SHADER_INVALIDATE` | **1** | 1 invalida cachés de shader tras cargar código a mitad de frame; 0 como antes |
 | `WWHD_DK_TILED_OFF` | **1** | 1 tiled cache apagado explícitamente cada frame; 0 sin tocarlo (lo de antes) |
+| `WWHD_DK_SHADOW_BARRIER` | **1** | 1 el draw que muestrea un target escrito desde el último barrier (máscara de sombra del sol 960x540 de #1654-1656, shadow map, depth) recibe un barrier Full que invalida imagen, shader, descriptores y L2; 0 Fragments + imagen (P4). Solo con `LAZY_BARRIERS` (por defecto) |
 | `WWHD_DK_DECAL_BARRIER` | 0 | 1 barrier Fragments antes de cada draw con depth bias (y tras la tanda); 2 barrier Full |
 | `WWHD_DK_EARLY_Z` | 0 | 1 early Z forzado (shaders sin kill ni escritura de depth); 2 late Z en todos (bit KillsPixels del SPH) |
 | `WWHD_DK_PS_KNOB` | 0 | mesa: perf knob de subtiling de Mesa en los fragment shaders |
@@ -48,7 +58,7 @@ Siguen valiendo `WWHD_DK_LAZY_BARRIERS=0`, `WWHD_DK_ZCULL_KEEP=0`, `WWHD_DK_DEPT
 `env.txt` cada vez**; anotar motas sí/no y fps:
 1. sin `env.txt` (defaults de arriba). Se espera limpio; `SHADER_SCHED=2` puede costar fps.
 2. Si 1 está limpio, para saber cuál lo arregla: `WWHD_DK_SHADER_SCHED=1`, luego `WWHD_DK_SHADER_SCHED=0`,
-   `WWHD_DK_DESC_WFI=0`, `WWHD_DK_SHADER_INVALIDATE=0`, `WWHD_DK_DEPTH_BIAS=latte`, `WWHD_DK_TILED_OFF=0`. La que
+   `WWHD_DK_SHADOW_BARRIER=0`, `WWHD_DK_DESC_WFI=0`, `WWHD_DK_SHADER_INVALIDATE=0`, `WWHD_DK_DEPTH_BIAS=latte`, `WWHD_DK_TILED_OFF=0`. La que
    devuelva las motas es la causa (si es `SHADER_SCHED=0` y `=1` limpio: el dual issue de uam).
 3. Si 1 aún tiene motas: `WWHD_DK_SHADER_SCHED=3`, `WWHD_DK_DECAL_BARRIER=2`, `WWHD_DK_EARLY_Z=2`,
    `WWHD_DK_EARLY_Z=1`, `WWHD_DK_PS_KNOB=mesa`, `WWHD_DK_DEPTH_BIAS=off` (los decals desaparecen; mira si las motas

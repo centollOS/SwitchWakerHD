@@ -16,6 +16,9 @@
 //   WWHD_DK_DESC_WFI=0|1           descriptor writes committed with a wait for idle before the header/sampler cache
 //                                  invalidate (Mesa's TIC_FLUSH/TSC_FLUSH wait; deko3d's are NoWfi)
 //   WWHD_DK_TILED_OFF=0|1          the tiled cache explicitly disabled at every frame start (deko3d never writes it)
+//   WWHD_DK_SHADOW_BARRIER=0|1     a draw that samples a target written since the last barrier (the sun-shadow
+//                                  mask 960x540 after #1654-1656, the shadow map, depth) gets a Full barrier that
+//                                  invalidates image, shader, descriptor and L2 caches instead of a Fragments one
 #pragma once
 #include <deko3d.h>
 
@@ -34,6 +37,7 @@ struct Bisect {
     bool shaderInvalidate = true;
     bool descWfi = true;
     bool tiledOff = true;
+    bool shadowBarrier = true;
 };
 const Bisect& bisect();
 void bisect_log();  // the startup lines (draw_frame_start)
