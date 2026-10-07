@@ -885,6 +885,24 @@ void tab_switch() {
     }
     if (fps_counter_env()) note("env.txt sets WWHD_FPS: it is used at every start.");
 
+    // which Wii U controller the Switch controller is: the game's own control mode must match it (with
+    // the Pro Controller chosen here the GamePad lies on the table and sends nothing, system_stubs.cpp)
+    heading("Controller");
+    {
+        const bool pro = input::pro_controller(), env = getenv("WWHD_PRO_CONTROLLER") != nullptr;
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("The controller acts as");
+        ImGui::SameLine();
+        if (radio("Wii U Pro Controller", pro, !env))
+            hostui::post([] { hostui::set_pro_controller(true); hostui::set("proController", "1"); });
+        ImGui::SameLine();
+        if (radio("Wii U GamePad", !pro, !env))
+            hostui::post([] { hostui::set_pro_controller(false); hostui::set("proController", "0"); });
+        help("Pick the same controller as the game's own options: if they differ, the game reads a\n"
+             "controller nobody holds and no button works. The gyro needs the GamePad.");
+        if (env) note("env.txt sets WWHD_PRO_CONTROLLER: it is used at every start.");
+    }
+
     // gyro aiming with the controller's own motion sensors (input_switch.cpp feeds motion.h); the
     // Cemuhook and mouse sources of the desktop Controls tab make no sense on the console
     heading("Gyro aiming");
@@ -899,8 +917,8 @@ void tab_switch() {
         if (motion::env_override()) note("WWHD_GYRO=%s overrides the saved source.", getenv("WWHD_GYRO"));
         // the game reads the gyro only from a GamePad (docs/gyro.md: not in "Pro Controller only" mode)
         if (g.source == motion::kController && input::pro_controller())
-            note("The controller acts as a Wii U Pro Controller, which has no gyro: the game only aims with it "
-                 "when the controller acts as the GamePad (WWHD_PRO_CONTROLLER=0 in env.txt).");
+            note("The controller acts as a Wii U Pro Controller, which has no gyro: choose the GamePad above "
+                 "(and in the game's own options) to aim with it.");
         ImGui::SetNextItemWidth(220);
         ImGui::SliderFloat("Sensitivity left/right", &g.tuning.sensitivity_x, 0.1f, 5.0f, "%.2fx");
         ImGui::SameLine(0, 16);
