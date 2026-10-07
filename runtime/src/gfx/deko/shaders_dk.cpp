@@ -158,26 +158,28 @@ uint64_t hash_words4(const uint32_t* w, size_t count, uint64_t seed) {
 }
 
 // the registers the GLSL translation of one stage reads, other than the texture units' (gfx/gl/shaders.cpp
-// state_hash says which reader needs which)
-uint64_t state_hash(const uint32_t* regs, uint64_t hash, bool vertex) {
-    std::array<uint32_t, 112> state;
-    size_t count = 0;
+// state_hash says which reader needs which), appended to out from count on: the part both stages read
+// (shared) and this stage's own part (own). primitive: the primitive-type word as hashed.
+size_t gather_state(const uint32_t* regs, bool vertex, uint32_t primitive, bool shared, bool own, uint32_t* out,
+                    size_t count) {
     auto append = [&](const uint32_t* words, size_t length) {
-        memcpy(state.data() + count, words, length * sizeof(uint32_t));
+        memcpy(out + count, words, length * sizeof(uint32_t));
         count += length;
     };
     auto put = [&](uint32_t first, uint32_t length) { append(regs + first, length); };
-    put(mmSPI_PS_IN_CONTROL_0, 2);
-    put(mmSPI_PS_INPUT_CNTL_0, std::min<uint32_t>(regs[mmSPI_PS_IN_CONTROL_0] & 0x3F, 32));
-    uint32_t primitiveState[] = {regs[REGADDR::VGT_PRIMITIVE_TYPE] & 0x3F, regs[mmSPI_INTERP_CONTROL_0] & (1u << 1),
-                                 regs[mmVGT_STRMOUT_EN]};
-    append(primitiveState, 3);
-    if (regs[mmVGT_STRMOUT_EN])
-        for (uint32_t buffer = 0; buffer < 4; ++buffer) put(mmVGT_STRMOUT_VTX_STRIDE_0 + buffer * 4, 1);
-    put(REGADDR::VGT_GS_MODE, 1);
-    put(REGADDR::SQ_CONFIG, 1);
-    uint32_t transformState[] = {regs[REGADDR::PA_CL_VTE_CNTL] & 0x3F, regs[REGADDR::PA_CL_CLIP_CNTL] & (1u << 19)};
-    append(transformState, 2);
+    if (shared) {
+        put(mmSPI_PS_IN_CONTROL_0, 2);
+        put(mmSPI_PS_INPUT_CNTL_0, std::min<uint32_t>(regs[mmSPI_PS_IN_CONTROL_0] & 0x3F, 32));
+        uint32_t primitiveState[] = {primitive, regs[mmSPI_INTERP_CONTROL_0] & (1u << 1), regs[mmVGT_STRMOUT_EN]};
+        append(primitiveState, 3);
+        if (regs[mmVGT_STRMOUT_EN])
+            for (uint32_t buffer = 0; buffer < 4; ++buffer) put(mmVGT_STRMOUT_VTX_STRIDE_0 + buffer * 4, 1);
+        put(REGADDR::VGT_GS_MODE, 1);
+        put(REGADDR::SQ_CONFIG, 1);
+        uint32_t transformState[] = {regs[REGADDR::PA_CL_VTE_CNTL] & 0x3F, regs[REGADDR::PA_CL_CLIP_CNTL] & (1u << 19)};
+        append(transformState, 2);
+    }
+    if (!own) return count;
     if (vertex) {
         put(mmSQ_VTX_SEMANTIC_0, 32);
         put(mmSPI_VS_OUT_ID_0, 10);
@@ -195,6 +197,13 @@ uint64_t state_hash(const uint32_t* regs, uint64_t hash, bool vertex) {
         put(REGADDR::CB_TARGET_MASK, 1);
         put(mmCB_COLOR0_INFO, 8);
     }
+    return count;
+}
+constexpr size_t kStateWords = 112;  // one stage: at most 2 + 32 + 3 + 4 + 2 + 2 + 44 (vertex)
+
+uint64_t state_hash(const uint32_t* regs, uint64_t hash, bool vertex) {
+    std::array<uint32_t, kStateWords> state;
+    const size_t count = gather_state(regs, vertex, regs[REGADDR::VGT_PRIMITIVE_TYPE] & 0x3F, true, true, state.data(), 0);
     return hash_words4(state.data(), count, hash);
 }
 
@@ -766,15 +775,23 @@ void log_total() {
 }  // namespace
 
 // ---- lookup
+bool fetch_shader_range(const uint32_t* regs, uint32_t& address, uint32_t& size, bool* compactOut) {
+    address = regs[mmSQ_PGM_START_FS] << 8;
+    if (!address) return false;
+    const bool compact = ld32(address) == 0x57574653;
+    const uint32_t count = compact ? ld32(address + 4) : 0;
+    if (compact && count > 64) return false;
+    size = compact ? 16 + count * 16 : regs[mmSQ_PGM_START_FS + 1] << 3;
+    if (!size || size > 0x1000 || uint64_t(address) + size > 0x100000000ull) return false;
+    if (compactOut) *compactOut = compact;
+    return true;
+}
+
 LatteFetchShader* get_fetch_shader(const uint32_t* regs, uint64_t* keyOut, uint64_t frame) {
     if (keyOut) *keyOut = 0;
-    uint32_t address = regs[mmSQ_PGM_START_FS] << 8;
-    if (!address) return nullptr;
-    bool compact = ld32(address) == 0x57574653;
-    uint32_t count = compact ? ld32(address + 4) : 0;
-    if (compact && count > 64) return nullptr;
-    uint32_t size = compact ? 16 + count * 16 : regs[mmSQ_PGM_START_FS + 1] << 3;
-    if (!size || size > 0x1000 || uint64_t(address) + size > 0x100000000ull) return nullptr;
+    uint32_t address, size;
+    bool compact = false;
+    if (!fetch_shader_range(regs, address, size, &compact)) return nullptr;
     uint64_t key = program_hash(address, size, frame);
     if (keyOut) *keyOut = key;
     if (auto it = fetchShaders.find(key); it != fetchShaders.end()) return it->second;
@@ -795,6 +812,16 @@ uint64_t program_hash_of(void* ref, uint32_t address, uint32_t size, uint64_t fr
 uint64_t shader_state_hash(const uint32_t* regs, bool vertex, uint64_t* core) {
     *core = state_hash(regs, vertex ? 0x1111 : 0x2222, vertex);
     return *core ^ texture_state_hash(regs, vertex, (1u << LATTE_NUM_MAX_TEX_UNITS) - 1) * 0x9E3779B97F4A7C15ull;
+}
+
+uint64_t shader_combo_state_hash(const uint32_t* regs, uint32_t primitive) {
+    // the shared words once, each stage's own words, then both stages' texture unit states two to a word
+    std::array<uint32_t, 2 * kStateWords + LATTE_NUM_MAX_TEX_UNITS> state;
+    size_t count = gather_state(regs, true, primitive & 0x3F, true, true, state.data(), 0);
+    count = gather_state(regs, false, 0, false, true, state.data(), count);
+    for (uint32_t t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++)
+        state[count++] = texture_unit_state(regs, true, t) << 16 | texture_unit_state(regs, false, t);
+    return hash_words4(state.data(), count, 0x3333);
 }
 
 Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, uint64_t fsKey, uint64_t frame,
