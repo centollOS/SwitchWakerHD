@@ -341,3 +341,60 @@ Total: ~6-9 semanas de trabajo efectivo, más ciclos de prueba en hardware.
 regresa, el cache offline falla ≤ ~20 % y la memoria de uam es estable. Parar (GL + budget A + cache offline) si uam
 fuga o pide > 150 MB por compile, el ahorro por draw es < 15 %, o las convenciones de profundidad/orientación no se
 igualan tras dos semanas extra de P2.
+
+## P4, carril `p4-gpu` (lado GPU: barriers, zcull, depth, tiled cache; compilado, SIN probar en hardware)
+
+Medida de partida (log `wwhd_2026-10-07_18-49-11`, Outset): `GPU passes` ~33 ms por frame, de los que 5-7 ms son la
+GPU parada al principio del frame esperando a la CPU (`frame start`): la GPU trabaja ~26-27 ms de 33. Los dos frames
+trazados del log `18-46-28` (683 y 1444) tienen 47 barriers `Fragments` por frame (uno por cambio de targets y otro
+tras cada clear), 12 invalidaciones de zcull (una por bind de depth: el zcull del pase principal se tiraba en el primer
+draw tras su propio clear) y una feedback copy del depth 1280x720 por blit (el compuesto de DOF/niebla, draw #5450:
+test de depth sin escritura y muestrea el depth atado) con sus dos barriers `Full`.
+
+Coste real de cada cosa en deko3d 0.5.0 (fuente): `DkBarrier_Fragments` = `FragmentBarrier` + invalidación de
+texturas con WFI (el pipeline se vacía entre los dos pases); `DkBarrier_Full` = `SetReference` del gpfifo + entrada
+nueva con `NoPrefetch` (el host espera a que 3D, 2D y copia estén parados y deja de precargar comandos);
+`DkInvalidateFlags_Zcull` tira los datos de zcull del depth atado (deko3d solo lo hace si cambia la dirección);
+`dkQueueFlush` ya invalida imagen, shader, descriptores y L2 al empezar el siguiente envío (`postSubmitFlush`); el
+tiled cache de Maxwell nunca se activa en deko3d 0.5.0 (`TiledCacheEnable` no se escribe al iniciar la cola).
+
+Cambios (`gfx/deko/gpu_sync.cpp`, `dk_sync.h`; cada uno con su línea `[dk] GPU sync: ...` al arrancar y `=0` vuelve
+al camino anterior):
+- **`WWHD_DK_LAZY_BARRIERS`**: barrier solo donde hay un riesgo real: un draw que muestrea algo que un draw o clear
+  escribió desde el último barrier (lectura tras escritura) o que escribe algo muestreado desde entonces (escritura
+  tras lectura). Cada `Surface` guarda la época de su última lectura y escritura en GPU (`syncRead`, `syncWrite`).
+  Escritura tras escritura no lo necesita (el ROP mantiene el orden por píxel con cualquier target atado). Se quedan
+  el del principio del frame, el del present y los de las transferencias. En los frames trazados: **47 → 20**
+  barriers `Fragments` por frame.
+- **`WWHD_DK_ZCULL_KEEP`**: zcull se tira solo si desde el último bind se ató otro depth o capa, o el depth cambió fuera
+  del motor 3D (`R.zcullEpoch`); un clear de depth cuenta como estado válido. **12 → 5** invalidaciones por frame.
+- **`WWHD_DK_DEPTH_SAMPLE_BOUND`**: un draw que muestrea el depth atado sin escribir depth ni stencil lo lee en el sitio
+  (como un depth read-only de Vulkan; mismos valores que GL, es la misma imagen) tras el barrier que pidan las
+  escrituras anteriores, en vez de la feedback copy: en Outset quita cada frame un blit 1280x720 por el motor 2D y sus
+  dos barriers `Full`.
+- **`WWHD_DK_UPLOAD_BATCH`**: subidas seguidas comparten un barrier `Full`, puesto antes del siguiente draw, clear,
+  copia o present; el barrier antes de una subida solo si su imagen se usó desde el último barrier (una textura nueva
+  nunca). Ayuda en las ráfagas de carga (entrar en una zona), no en régimen estable (<1 subida por frame).
+- **`WWHD_DK_TILED_CACHE=1`** (APAGADO por defecto: prueba sin verificar): activa el tiled cache (binning de Maxwell,
+  menos tráfico de ROP en L2/memoria) con un flush del tiled cache antes de cada barrier; `WWHD_DK_TILE_SIZE=WxH`
+  (potencias de dos, por defecto 128x128 como deko3d). Si la imagen sale bien es la mayor ganancia posible de ancho de
+  banda en el pase principal; si sale mal (bloques, pases que no ven lo anterior), quitarlo.
+- **Compresión de depth** (`WWHD_DK_DEPTH_COMPRESSION=1`, sigue apagada por defecto): en deko3d las copias de depth
+  van por el motor 2D (`dkCmdBufBlitImage`, que activa `SetCompressionEnable`), y el muestreo por la unidad de texturas;
+  pero las subidas (`dkCmdBufCopyBufferToImage`) y las capturas (`dkCmdBufCopyImageToBuffer`) usan el motor de copia,
+  que es el caso que rompió en nouveau (ronda 26). Con el depth del DOF ya sin feedback copy, merece un A/B: el clear
+  de depth pasa a ser casi gratis y baja el tráfico de depth de los pases principal y de sombras. Mirar la espuma de
+  la orilla y los compuestos de depth; las capturas PNG de targets de depth pueden salir en bloques con ella.
+
+Medidas nuevas cada 5 s: `[dk] GPU sync per frame: ...` (barriers por motivo, zcull tirado/conservado, depth atado
+muestreado sin copia, subidas agrupadas, flushes del tiled cache) y en `[dk] GPU passes` **`GPU busy X ms without the
+frame start`**: el trabajo de la GPU sin la espera inicial, la cifra a comparar entre builds y switches (los tiempos
+por pase siguen incluyendo los huecos en que la GPU espera el siguiente envío de la CPU a mitad de frame).
+
+Ganancia esperada (estimación, sin hardware): ~27 drenajes de pipeline menos por frame (del orden de 10-30 µs cada
+uno: 0,3-0,8 ms), el blit de depth y dos `Full` menos (0,3-0,6 ms), y zcull efectivo en los ~1000 draws del pase
+principal tras los pases pequeños (rechazo temprano de fragmentos ocultos: hasta ~1 ms en las vistas cargadas). En
+total ~1-2 ms de GPU por frame (3-7 % de ~27 ms); el tiled cache y la compresión de depth, si funcionan, más.
+Para el A/B: `WWHD_DK_LAZY_BARRIERS=0`, `WWHD_DK_ZCULL_KEEP=0`, `WWHD_DK_DEPTH_SAMPLE_BOUND=0`,
+`WWHD_DK_UPLOAD_BATCH=0` (todos a 0 = el camino de antes) y comparar `GPU busy` en el mismo sitio. Otro A/B barato del
+lado GPU: `WWHD_DK_SUBMIT_DRAWS=512` (cada envío a mitad de frame invalida L2 y corta la precarga del host).
