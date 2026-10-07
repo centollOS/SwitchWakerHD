@@ -1484,11 +1484,23 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         for (int i = 0; i < 8; i++) bufs[i] = colors[i] ? GL_COLOR_ATTACHMENT0 + i : GL_NONE;
         FLUSHED(glDrawBuffers)(8, bufs);
         // attachment sets already found complete are not asked again (a status query waits for
-        // Mesa's GL thread, when that is on); surfaces are never freed, so the pointers stay valid
+        // Mesa's GL thread, when that is on); surfaces are never freed, so the pointers stay valid.
+        // On the Switch the query is off unless WWHD_GL_DEBUG or WWHD_GL_FBO_CHECK=1: with texture uploads
+        // queued (round 32) the first query of a new set waited for them all (10.6 ms/s, up to 256 ms in a
+        // second), and no hardware log ever had an incomplete framebuffer. A draw into one is discarded
+        // by GL (GL_INVALID_FRAMEBUFFER_OPERATION) instead of being skipped here.
+        static const bool checkStatus = [] {
+#ifdef __SWITCH__
+            const char* e = getenv("WWHD_GL_FBO_CHECK");
+            return getenv("WWHD_GL_DEBUG") != nullptr || (e && *e == '1');
+#else
+            return true;
+#endif
+        }();
         static std::unordered_set<uint64_t> complete;
         uint64_t setKey = 0xcbf29ce484222325ull;
         for (auto& a : bound) setKey = (setKey ^ (uint64_t(uintptr_t(a.s)) * 31 + a.slice)) * 0x100000001b3ull;
-        GLenum status = complete.count(setKey) ? GL_FRAMEBUFFER_COMPLETE : glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        GLenum status = !checkStatus || complete.count(setKey) ? GL_FRAMEBUFFER_COMPLETE : glCheckFramebufferStatus(GL_FRAMEBUFFER);
         if (status == GL_FRAMEBUFFER_COMPLETE) complete.insert(setKey);
         if (status != GL_FRAMEBUFFER_COMPLETE) {
             log_once(0xFB000000u | status, "[gl] incomplete framebuffer (%s)", std::to_string(status));
