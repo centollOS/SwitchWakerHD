@@ -10,6 +10,8 @@ constexpr int kMaxUniformBuffers = 16;
 constexpr int kMaxSamplers = 32;
 // Cemu's Vulkan binding numbers (one set per stage, UBOs and textures share the numbering) stay below this
 constexpr int kMaxVkBinding = 64;
+// bump when glsl_to_deko's output changes: it is part of the DKSH caches' uamId (shader_files.h)
+constexpr int kConvertRevision = 1;
 
 // Where each of the shader's Vulkan bindings (LatteDecompilerShaderResourceMapping of resourceMappingVK)
 // landed: UBOs and combined image+samplers are renumbered separately from 0, in order of appearance.
