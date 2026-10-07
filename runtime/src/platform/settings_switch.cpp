@@ -29,7 +29,7 @@
 #include <mutex>
 #include <string>
 
-#include "gfx/gl/settings.h"
+#include "gfx/switch_renderer.h"
 #include "overlay/hostui.h"
 #include "runtime.h"
 
@@ -230,7 +230,7 @@ void tick() {
 }
 
 void save_picture() {
-    const gfxgl::PictureGrade g = gfxgl::picture_grade_now();
+    const gfxsw::PictureGrade g = gfxsw::picture_grade_now();
     char b[32];
     snprintf(b, sizeof b, "%.2f", g.exposure);
     hostui::set(kKeyExposure, b);
@@ -292,21 +292,21 @@ void apply_at_start() {
     }
     // picture adjustments and the counter: env.txt wins, else what the menu saved
     if (!picture_env()) {
-        gfxgl::PictureGrade g = gfxgl::picture_grade_now();
+        gfxsw::PictureGrade g = gfxsw::picture_grade_now();
         bool any = false;
         any |= saved_float(kKeyExposure, g.exposure, 0.25f, 4.0f);
         any |= saved_float(kKeyContrast, g.contrast, 0.0f, 2.0f);
         any |= saved_float(kKeySaturation, g.saturation, 0.0f, 3.0f);
         any |= saved_float(kKeyGamma, g.gamma, 0.5f, 2.0f);
         if (any) {
-            gfxgl::set_picture_grade(g);
+            gfxsw::set_picture_grade(g);
             LOG("[switch] picture (settings): exposure %.2f contrast %.2f saturation %.2f gamma %.2f", g.exposure,
                 g.contrast, g.saturation, g.gamma);
         }
     }
     if (!fps_counter_env()) {
         std::string v;
-        if (hostui::get(kKeyFpsCounter, v) && !v.empty()) gfxgl::set_fps_overlay_mode(atoi(v.c_str()));
+        if (hostui::get(kKeyFpsCounter, v) && !v.empty()) gfxsw::set_fps_overlay_mode(atoi(v.c_str()));
     }
 }
 

@@ -22,6 +22,8 @@ frame_*.png
 failed_shader_*.metal
 shaderfail_*.glsl
 shaders/
+# the deko3d renderer's own shader sources
+!/runtime/src/gfx/deko/shaders/
 draw_*.png
 captures/
 # never commit game data, keys or anything derived from the game

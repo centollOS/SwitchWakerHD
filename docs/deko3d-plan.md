@@ -80,8 +80,20 @@ draw(): VS o PS no listo → skip (budget A); el memo de combinaciones no recuer
   al principio (existían para Mesa). Índices nativos, incl. TriangleFan/Quads/LineLoop (P4).
 - Estado: la cache `gs` del GL traducida 1:1 a `DkRasterizerState`, `DkDepthStencilState`, `DkBlendState[8]`,
   `DkColorState`, `DkColorWriteState`, viewport/scissor escalados.
-- Dispositivo con convenciones Vulkan (`OriginUpperLeft | DepthZeroToOne | YAxisPointsDown`) **[S]**, para portar la
-  matemática de `gfx/vulkan/draw.cpp`; verificar en P1/P2.
+- Dispositivo `OriginUpperLeft | DepthZeroToOne` **[V]** (fuente de deko3d 0.5.0): origen de ventana e imágenes arriba a
+  la izquierda, z de clip 0..1, pero **la y del clip space apunta hacia arriba como en OpenGL** sea cual sea el origen
+  (`Primer.md`; `dkCmdBufSetViewports` usa `scaleY = -h/2` con `OriginUpperLeft`, así que y = +1 es la fila 0).
+  `YAxisPointsDown` llegó después de 0.5.0 (commit e4e89f4) y no existe en la imagen de devkitPro. Para portar la
+  matemática y-abajo de `gfx/vulkan/draw.cpp` hay que **negar y**: en P2 el `SET_POSITION` de la rama VULKAN niega
+  `gl_Position.y` (los shaders propios de P1 ya lo hacen); nunca viewports de altura negativa (`viewportH` se calcula
+  como `uint32_t` y desborda). Los scissors siguen en coordenadas de ventana desde arriba. Confirmar con el patrón de P1.
+- Errores: libdeko3d (release) aborta con 2359-xxxx sin llamar al callback ante cualquier fallo (creaciones, uso de una
+  cola en estado de error: submit, acquire, present, flush); las creaciones nunca devuelven null. El backend loguea y
+  hace `log_flush()` antes de cada creación, comprueba `dkQueueIsInErrorState` antes de acquire/submit/present y
+  termina con `fatal()`. Mientras el backend es nuevo se enlaza libdeko3dd también en Release
+  (`WWHD_DEKO3D_DEBUG_LIB`, ON por defecto): sus errores llegan a `debug_message`, que hace `fatal()` legible.
+- Memoria de comandos: `dkCmdBufClear` (0.5.0) rebobina al inicio del último trozo añadido y no pide memoria nueva; cada
+  frame añade explícitamente el primer trozo de su slot tras la fence (como `CCmdMemRing` de deko_examples).
 - uam vendorizado en `runtime/third_party/uam` (MIT) con parches: pthread en `c11/threads.h`, `WriteDksh` a memoria,
   log por callback, sin `exit/abort`. Bison/flex generados y commiteados. **Medir su memoria en P0** [S].
 
