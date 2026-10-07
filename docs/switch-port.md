@@ -215,7 +215,7 @@ Key conventions:
 | Feature | Where | Notes |
 |---|---|---|
 | Extension report at startup | `wwhd.log` | `GL_ARB_clip_control`, `GL_ARB_texture_view`, `GL_ARB_copy_image`, `GL_EXT_texture_sRGB_decode`, `GL_ARB_buffer_storage`, `GL_ARB_viewport_array`: yes/NO |
-| FPS counter | screen, top-left | Frame rate over the last half second. `WWHD_FPS=0` hides it; `WWHD_FPS=2` adds `RT <busy>% DR <draws/frame>` and `GPU LAG <ms>` (updated with the 5 s stats) |
+| FPS counter | screen, top-left | Frame rate over the last half second; off by default (Switch tab, or `WWHD_FPS=1`). `WWHD_FPS=2` adds `RT <busy>% DR <draws/frame>` and `GPU LAG <ms>` (updated with the 5 s stats) |
 | Stats every 5 s | `wwhd.log` | See [Reading the stats line](#reading-the-stats-line) |
 | Hang watchdog | `wwhd.log` | `[watchdog]` lines when no frame comes for 3 s: render-thread step, every guest thread's wait and call stack, core owners |
 | Hitch report | `wwhd.log` | `[hitch]` line for every frame over 55 ms (first 300): where that frame's time went |
@@ -302,7 +302,7 @@ Findings from reading the code and the headless renderer:
 | Index conversion: one tight loop per guest index type, maximum computed in the same pass, 16-bit output for 16-bit lists (restart index 0xFFFF) | Half the index bytes; no second pass | `WWHD_GL_WIDE_INDICES=1` |
 | Converted index lists reused within a frame (same address, count, type, primitive, restart) until guest buffers may have changed | Shadow and reflection passes draw the same meshes again | `WWHD_GL_NO_INDEX_CACHE=1` |
 | Sampler cache keyed by a 16-byte struct instead of a heap-built string | Less work per texture per draw | — |
-| On-screen FPS counter (one shader, 3×5 pixel font) | Requested; also shows load and GPU lag with `WWHD_FPS=2` | `WWHD_FPS=0` |
+| On-screen FPS counter (one shader, 3×5 pixel font) | Requested; also shows load and GPU lag with `WWHD_FPS=2` | off by default (`WWHD_FPS=1`) |
 | New stats: render-thread busy time, GPU lag (timestamp queries), the draw time split into lookup / indices / resources / state / submit, shader-memo hit rate, uniform/index/vertex MB per frame | To tell CPU-bound from GPU-bound, and where draw time goes, from the next hardware log | — |
 
 #### Tests (headless, llvmpipe, title screen to frame 405)

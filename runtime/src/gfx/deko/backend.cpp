@@ -473,7 +473,7 @@ int overlay_mode() {
     int mode = g_fpsMode.load(std::memory_order_relaxed);
     if (mode < 0) {
         const char* e = getenv("WWHD_FPS");
-        mode = e && *e ? atoi(e) : 1;
+        mode = e && *e ? atoi(e) : 0;  // off for players; the Switch tab or WWHD_FPS turn it on
         int expected = -1;
         if (!g_fpsMode.compare_exchange_strong(expected, mode)) mode = expected;
     }
