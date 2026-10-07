@@ -373,8 +373,9 @@ al camino anterior):
   escrituras anteriores, en vez de la feedback copy: en Outset quita cada frame un blit 1280x720 por el motor 2D y sus
   dos barriers `Full`.
 - **`WWHD_DK_UPLOAD_BATCH`**: subidas seguidas comparten un barrier `Full`, puesto antes del siguiente draw, clear,
-  copia o present; el barrier antes de una subida solo si su imagen se usó desde el último barrier (una textura nueva
-  nunca). Ayuda en las ráfagas de carga (entrar en una zona), no en régimen estable (<1 subida por frame).
+  copia o present; el barrier antes de una subida solo si el motor 3D usó su imagen desde el último barrier `Full` (una textura
+  nueva nunca; los `Fragments` no paran al motor de copia, así que no cuentan: contador `before uploads of images
+  used before the last Fragments barrier`). Ayuda en las ráfagas de carga (entrar en una zona), no en régimen estable (<1 subida por frame).
 - **`WWHD_DK_TILED_CACHE=1`** (APAGADO por defecto: prueba sin verificar): activa el tiled cache (binning de Maxwell,
   menos tráfico de ROP en L2/memoria) con un flush del tiled cache antes de cada barrier; `WWHD_DK_TILE_SIZE=WxH`
   (potencias de dos, por defecto 128x128 como deko3d). Si la imagen sale bien es la mayor ganancia posible de ancho de

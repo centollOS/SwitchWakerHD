@@ -18,6 +18,10 @@ bool env_on(const char* name, bool fallback) {
 }
 
 uint64_t g_epoch = 1;           // barriers that ordered fragments and invalidated the texture cache, + 1
+// the epoch the last Full barrier started (or, without an image invalidate, the one it ran in): 3D work marked
+// with an older epoch finished before that barrier, which the copy engine waits for too. Fragments barriers
+// order the 3D engine only, so an upload (copy engine) is ordered against them by this, not by g_epoch.
+uint64_t g_fullEpoch = 1;
 bool g_pendingUploads = false;  // uploads recorded whose barrier after them is deferred (WWHD_DK_UPLOAD_BATCH)
 
 // zcull: the depth buffer (and layer) whose data the hardware holds, as far as the draws know
@@ -35,6 +39,8 @@ struct Counters {
     uint64_t zcullDrops = 0, zcullKept = 0;  // binds of a depth buffer: zcull dropped / kept
     uint64_t boundDepthSamples = 0;          // draws that sampled their bound depth buffer without a copy
     uint64_t uploadsDeferred = 0;            // uploads whose barrier after them was left to the next user
+    uint64_t uploadsBeforeOlder = 0;         // barriers before uploads whose image was used before the last
+                                             // Fragments barrier but after the last Full one (3D vs copy engine)
     uint64_t passChanges = 0;                // target changes (draw.cpp), with or without a barrier
 } g_count;
 
@@ -95,7 +101,7 @@ void sync_log_switches() {
         sync_depth_sample_bound() ? "reads it directly after a barrier" : "reads a feedback copy");
     LOG("[dk] GPU sync: uploads %s (WWHD_DK_UPLOAD_BATCH=0: full barriers before and after each, as before)",
         sync_upload_batch() ? "in a row share one full barrier, placed before the next draw, clear, copy or present; "
-                              "the one before an upload only when its image was used since the last barrier"
+                              "the one before an upload only when the 3D engine used its image since the last full barrier"
                             : "between full barriers each");
     if (sync_tiled_cache())
         LOG("[dk] GPU sync: tiled cache ON (WWHD_DK_TILED_CACHE=1, TEST: not verified on hardware), tiles %ux%u "
@@ -117,6 +123,7 @@ void sync_barrier(DkBarrier mode, uint32_t invalidate, SyncWhy why) {
     dkCmdBufBarrier(R.cmd, mode, invalidate);
     g_count.barriers[size_t(why)]++;
     if (mode >= DkBarrier_Fragments && (invalidate & DkInvalidateFlags_Image)) g_epoch++;
+    if (mode == DkBarrier_Full) g_fullEpoch = g_epoch;
     // a Full barrier waits for the copy engine too: it covers the uploads waiting for theirs
     if (mode == DkBarrier_Full && (invalidate & DkInvalidateFlags_Image)) g_pendingUploads = false;
 }
@@ -242,10 +249,14 @@ void sync_upload_begin(Surface* s, bool workSince) {
         sync_transfer_begin(workSince);
         return;
     }
-    // the copy engine overwrites the image: only work since the last barrier that used it must finish first.
+    // the copy engine overwrites the image: 3D work that used it since the last Full barrier must finish first
+    // (Fragments barriers do not hold the copy engine back: only a Full one makes the host wait for both).
     // Uploads write images only from staging memory, so uploads in a row need nothing between them.
-    if (s->syncRead == g_epoch || s->syncWrite == g_epoch)
+    const uint64_t used = s->syncRead > s->syncWrite ? s->syncRead : s->syncWrite;
+    if (used >= g_fullEpoch) {
+        if (used != g_epoch) g_count.uploadsBeforeOlder++;
         sync_barrier(DkBarrier_Full, DkInvalidateFlags_Image, SyncWhy::TransferBefore);
+    }
 }
 
 void sync_upload_end() {
@@ -265,16 +276,17 @@ std::string sync_report(uint64_t frames) {
     const double fragments = at(SyncWhy::FrameStart) + at(SyncWhy::Present) + at(SyncWhy::PassChange) +
                              at(SyncWhy::ReadAfterWrite) + at(SyncWhy::WriteAfterRead) + at(SyncWhy::ClearAfter);
     const double full = at(SyncWhy::TransferBefore) + at(SyncWhy::TransferAfter) + at(SyncWhy::UploadsAfter);
-    char out[640];
+    char out[800];
     snprintf(out, sizeof out,
              "per frame: %.1f Fragments barriers (pass changes %.1f of %.1f, read after write %.1f, write after read "
              "%.1f, after clears %.1f, frame start %.1f, present %.1f), %.1f Full barriers (before transfers %.1f, after "
-             "transfers %.1f, after upload batches %.1f; %.1f uploads joined a batch); zcull dropped %.1f, kept %.1f "
+             "transfers %.1f, after upload batches %.1f; %.1f uploads joined a batch; %.1f before uploads of images used "
+             "before the last Fragments barrier, ordered for the copy engine); zcull dropped %.1f, kept %.1f "
              "binds; bound depth sampled without a copy %.1f; tiled cache flushes %.1f",
              fragments, at(SyncWhy::PassChange), pf(g_count.passChanges), at(SyncWhy::ReadAfterWrite),
              at(SyncWhy::WriteAfterRead), at(SyncWhy::ClearAfter), at(SyncWhy::FrameStart), at(SyncWhy::Present), full,
              at(SyncWhy::TransferBefore), at(SyncWhy::TransferAfter), at(SyncWhy::UploadsAfter),
-             pf(g_count.uploadsDeferred), pf(g_count.zcullDrops), pf(g_count.zcullKept),
+             pf(g_count.uploadsDeferred), pf(g_count.uploadsBeforeOlder), pf(g_count.zcullDrops), pf(g_count.zcullKept),
              pf(g_count.boundDepthSamples), pf(g_count.tiledFlushes));
     g_count = Counters{};
     return out;
