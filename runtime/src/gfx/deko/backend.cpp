@@ -9,6 +9,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include <switch.h>
 
 #include "dk.h"
+#include "dk_capture.h"
 #include "dk_draw.h"
 #include "dk_shaders.h"
 #include "dk_surfaces.h"
@@ -18,6 +19,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -226,8 +228,49 @@ struct TextUbo {  // text_fsh.glsl, std140
     float box[4];
     int32_t grid[4];
     float fg[4], bg[4];
-    uint32_t glyphs[768];
+    uint32_t glyphs[768];  // uvec4 glyphs[192]: character i in component i & 3 of entry i >> 2
 };
+static_assert(offsetof(TextUbo, box) == 0 && offsetof(TextUbo, grid) == 16 && offsetof(TextUbo, fg) == 32 &&
+                  offsetof(TextUbo, bg) == 48 && offsetof(TextUbo, glyphs) == 64 && sizeof(TextUbo) == 64 + 768 * 4,
+              "TextUbo must match text_fsh.glsl's std140 block");
+
+// start-up self-test of the FPS counter's data: the glyph bits of the characters it shows, the TextUbo
+// offsets next to the std140 offsets text_fsh.glsl reads, and the shader's lookup replayed on the CPU for
+// a sample line (the characters read back from the packed words, as text_fsh selects them)
+void text_self_test() {
+    std::string bits;
+    for (const char* c = "0123456789FPS."; *c; c++) {
+        char b[16];
+        snprintf(b, sizeof b, " %c=%04X", *c, glyph_bits(*c));
+        bits += b;
+    }
+    LOG("[dk] FPS counter self-test: glyph bits (3x5, row 0 in bits 14-12)%s", bits.c_str());
+    const size_t off[5] = {offsetof(TextUbo, box), offsetof(TextUbo, grid), offsetof(TextUbo, fg), offsetof(TextUbo, bg),
+                           offsetof(TextUbo, glyphs)};
+    static const size_t kStd140[5] = {0, 16, 32, 48, 64};
+    const bool layoutOk = !memcmp(off, kStd140, sizeof off);
+    LOG("[dk] FPS counter self-test: TextUbo offsets box %zu grid %zu fg %zu bg %zu glyphs %zu, size %zu (text_fsh.glsl "
+        "std140: 0 16 32 48 64, size 3136): %s", off[0], off[1], off[2], off[3], off[4], sizeof(TextUbo),
+        layoutOk ? "match" : "MISMATCH");
+    // the shader's lookup: entry i >> 2, component i & 3, bit (4 - row) * 3 + (2 - column)
+    const std::string sample = "30.0 FPS";
+    TextUbo t{};
+    for (size_t i = 0; i < sample.size(); i++) t.glyphs[i] = glyph_bits(sample[i]);
+    std::string back;
+    for (int i = 0; i < int(sample.size()); i++) {
+        const uint32_t* q = &t.glyphs[(i >> 2) * 4];
+        const uint32_t g = q[i & 3];
+        char found = '?';
+        for (const char* c = " 0123456789FPS."; *c; c++)
+            if (glyph_bits(*c) == g) {
+                found = *c;
+                break;
+            }
+        back += found;
+    }
+    LOG("[dk] FPS counter self-test: \"%s\" packed and read back as \"%s\": %s", sample.c_str(), back.c_str(),
+        back == sample ? "ok" : "MISMATCH");
+}
 
 // lines at (left, top) in window pixels, `scale` window pixels per font pixel
 void draw_text(int left, int top, int scale, const std::vector<std::string>& lines, const float fg[4], const float bg[4]) {
@@ -487,8 +530,8 @@ std::string clock_report() {
     return b;
 }
 
-// ---- captures (both sticks clicked): the next frame's present
-// pass is logged step by step
+// ---- captures (both sticks clicked): the next frame's passes, draws and present pass in the log, and its
+// pictures, render targets and textures as PNG files (dk_capture.h, capture.cpp)
 std::atomic<bool> g_captureRequested{false};
 uint64_t g_captureFrame = ~0ull;
 bool capturing() { return R.frame + 1 == g_captureFrame; }
@@ -1035,6 +1078,8 @@ void present() {
     const uint64_t t4 = now_ns();
     if (capture) LOG("[dk] capture frame %llu: recorded in %.2f ms, submitted and presented in %.2f ms", (unsigned long long)frame,
                      double(t3 - t2) / 1e6, double(t4 - t3) / 1e6);
+    // the frame's pictures to PNG files (both sticks, WWHD_DUMP_*): waits for the GPU, copies its images back
+    if (g_capture) capture_present(g_swapImages[slot], kWidth, kHeight, src);
     g_times.acquireNs += t2 - t1;
     g_times.submitNs += t4 - t3;
     frame_stats();
@@ -1111,6 +1156,19 @@ void swap() {
     g_traceFrame = (!traced.empty() && std::find(traced.begin(), traced.end(), R.frame + 1) != traced.end()) ||
                    R.frame + 1 == g_captureFrame;
     g_captureDraws = R.frame + 1 == g_captureFrame;
+    // the next frame's PNG files: a capture writes everything; WWHD_DUMP_FRAMES=n,... the pictures (as gfx/gl:
+    // frame_<n>.png, frame_<n>_window.png), WWHD_DUMP_TARGETS=n,... the render targets, WWHD_DUMP_TEXTURES=n,...
+    // the sampled textures and their upload data (captures/<n>/)
+    static const std::vector<uint64_t> dumpFrames = frame_list("WWHD_DUMP_FRAMES", nullptr);
+    static const std::vector<uint64_t> dumpTargets = frame_list("WWHD_DUMP_TARGETS", nullptr);
+    static const std::vector<uint64_t> dumpTextures = frame_list("WWHD_DUMP_TEXTURES", nullptr);
+    auto listed = [](const std::vector<uint64_t>& v) { return std::find(v.begin(), v.end(), R.frame + 1) != v.end(); };
+    uint32_t what = 0;
+    if (listed(dumpFrames)) what |= kCapturePictures;
+    if (listed(dumpTargets)) what |= kCaptureTargets;
+    if (listed(dumpTextures)) what |= kCaptureTextures;
+    if (g_captureDraws) what = kCaptureAll;
+    if (what || g_capture) capture_arm(what, g_captureDraws ? "both sticks" : "WWHD_DUMP_*");
 }
 
 // start-up: a bar filling while shaders_init loads the DKSH caches (as gfx/gl shader_cache_progress), with its
@@ -1186,6 +1244,7 @@ void init() {
     LOG("[dk] queue created: graphics, command memory %u KiB", qm.commandMemorySize >> 10);
     memory_init();
     load_shaders();
+    text_self_test();
     init_swapchain();
     shaders_init(shader_cache_progress);  // the game shaders' worker and caches (dk_shaders.h)
     log_heap("after the deko3d setup");
