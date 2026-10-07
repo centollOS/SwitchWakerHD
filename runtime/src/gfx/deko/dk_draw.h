@@ -21,6 +21,7 @@
 //             (dk_shaders.h) at sh->bindings.ufBlockSlot
 #pragma once
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -52,6 +53,8 @@ struct DrawSkips {
              unsupported = 0;
 };
 DrawSkips draw_skips_take();
+// the fixed-state skip of draws (WWHD_DK_FIXED_SKIP; the Switch tab turns it on and off for A/B tests)
+extern std::atomic<bool> g_fixedSkip;
 
 // P4 (lookup and indices): GX2Invalidate's flags and GX2DrawDone, from backend.cpp (index lists go stale at
 // attribute-buffer invalidates, WWHD_DK_INDEX_GEN); every 5 s the '[dk] lookup per frame' line (frames since

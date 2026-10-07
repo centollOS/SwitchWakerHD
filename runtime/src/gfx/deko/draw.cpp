@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdlib>
@@ -750,6 +751,7 @@ uint32_t prim_key(const uint32_t* r, uint32_t prim) {
 
 }  // namespace
 DrawSkips g_drawSkips;
+std::atomic<bool> g_fixedSkip{env_switch("FIXED_SKIP", true)};
 namespace {
 // a skipped draw's reason, counted for the stats (R.skippedDraws counts them all)
 void skip(uint64_t& reason) {
@@ -1419,8 +1421,8 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     memcpy((void*)&clip, r + REGADDR::PA_CL_CLIP_CNTL, 4);
     // The fixed state (rasterizer, depth / stencil, color output) comes from these registers and the targets'
     // kinds only: when they are the last draw's (that bound it, same state cache epoch), nothing is rebuilt
-    // (WWHD_DK_FIXED_SKIP, on unless 0)
-    static const bool fixedSkipOn = env_switch("FIXED_SKIP", true);
+    // (WWHD_DK_FIXED_SKIP, on unless 0; the Switch tab turns it on and off)
+    const bool fixedSkipOn = g_fixedSkip.load(std::memory_order_relaxed);
     struct FixedKey {
         uint32_t words[25];
         const Surface* depth;

@@ -51,6 +51,11 @@ extern "C" { uint64_t g_shader_regs_gen = 1; }
 // [1] the vertex shader's (+0x400). gfx/deko's ufBlock copies skip their register part while it stays (Switch;
 // WWHD_DK_ALU_GEN=0 off: every upload counts, as before)
 extern "C" { uint64_t g_alu_const_gen[2] = {1, 1}; }
+// on unless WWHD_DK_ALU_GEN=0; the settings overlay's Switch tab turns it on and off (A/B tests)
+std::atomic<bool> g_alu_gen_on{[] {
+    const char* e = getenv("WWHD_DK_ALU_GEN");
+    return !(e && *e == '0');
+}()};
 static void bump_alu_gen(uint32 first, uint32 n) {
     const uint32 lo = (uint32)mmSQ_ALU_CONSTANT0_0, end = first + n;
     if (first < lo + 0x400 && end > lo) g_alu_const_gen[0]++;
@@ -169,11 +174,7 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
     // render thread on the desktop
     if (first >= (uint32)mmSQ_ALU_CONSTANT0_0 && first + n <= (uint32)mmSQ_ALU_CONSTANT0_0 + 0x1000) {
 #ifdef __SWITCH__
-        static const bool aluGen = [] {
-            const char* e = getenv("WWHD_DK_ALU_GEN");
-            return !(e && *e == '0');
-        }();
-        if (!aluGen) bump_alu_gen(first, n);
+        if (!g_alu_gen_on.load(std::memory_order_relaxed)) bump_alu_gen(first, n);
         else if (memcmp(&g_regs[first], v, n * 4) != 0) bump_alu_gen(first, n);
         else {
             if (g_shadow) memcpy(&g_shadow[first], v, n * 4);

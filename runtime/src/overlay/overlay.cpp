@@ -747,6 +747,16 @@ void tab_switch() {
     if (edit != active) note("Applies when the console is %s.", edit == kDocked ? "docked" : "in handheld mode");
     else note("Internal resolution now: %.2f.", gfxsw::dynamic_res_scale());
 
+    heading("Draw optimizations (A/B test)");
+    for (int i = 0; i < gfxsw::kDrawOpts; i++) {
+        static const char* const names[] = {"Skip unchanged uniform registers", "Skip unchanged fixed state"};
+        bool on;
+        if (i) ImGui::SameLine(0, 30);
+        if (check(names[i], gfxsw::draw_opt(i), &on)) gfxsw::set_draw_opt(i, on);
+    }
+    help("Turn both off and on again in the same spot: the log marks each change with its frame.\n"
+         "Not saved: they are on again at the next start.");
+
     heading("Performance in handheld mode");
     const int gp = gpu_profile();
     for (int i = 0; i < kGpuProfiles; i++)

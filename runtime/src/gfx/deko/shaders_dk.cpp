@@ -21,6 +21,7 @@
 #include <zlib.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -46,6 +47,9 @@
 #include "util/helpers/StringBuf.h"
 
 extern "C" uint64_t g_alu_const_gen[2];  // gx2_core.cpp: uniform register writes, pixel / vertex
+namespace gx2 {
+extern std::atomic<bool> g_alu_gen_on;  // gx2_core.cpp: uniform register skip (WWHD_DK_ALU_GEN, the Switch tab)
+}
 
 LatteDecompilerShader* FinishDecompiledShader(LatteDecompilerOutput_t& output);
 LatteFetchShader* LatteShaderRecompiler_createFetchShader(LatteFetchShader::CacheHash hash, uint32* regs, uint32* code,
@@ -1294,10 +1298,7 @@ StreamSlice pack_uniforms_cached(int mode, bool vertex, Shader& sh, const uint32
     static const uint8_t zeros[16] = {};
     // the register part (remapped register constants, uniform registers) only when the stage's uniform registers
     // were written since this shader's last pack (WWHD_DK_ALU_GEN=0: always)
-    static const bool aluGenOn = [] {
-        const char* e = getenv("WWHD_DK_ALU_GEN");
-        return !(e && *e == '0');
-    }();
+    const bool aluGenOn = gx2::g_alu_gen_on.load(std::memory_order_relaxed);
     const uint64_t aluGen = g_alu_const_gen[vertex ? 1 : 0];
     const bool regsSame = aluGenOn && c.aluGen == aluGen && c.aoNoise == aoNoise;
     if (regsSame) g_ufStats.regsSkipped++;

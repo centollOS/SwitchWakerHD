@@ -6,6 +6,9 @@
 #include <malloc.h>
 #include <unistd.h>
 extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into (sbrk)
+namespace gx2 {
+extern std::atomic<bool> g_alu_gen_on;  // gx2_core.cpp: uniform register skip (WWHD_DK_ALU_GEN, the Switch tab)
+}
 #include <switch.h>
 
 #include "dk.h"
@@ -1429,6 +1432,16 @@ void set_picture_grade(const PictureGrade& g) {
 int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }
 float dynamic_res_scale() { return gfxdk::res_scale_shown(); }  // the internal resolution in use (dynamic or not)
+bool draw_opt(int which) {
+    return which == kOptAluGen ? gx2::g_alu_gen_on.load(std::memory_order_relaxed)
+                               : gfxdk::g_fixedSkip.load(std::memory_order_relaxed);
+}
+void set_draw_opt(int which, bool on) {
+    std::atomic<bool>& v = which == kOptAluGen ? gx2::g_alu_gen_on : gfxdk::g_fixedSkip;
+    if (v.exchange(on) == on) return;
+    LOG("[dk] A/B: %s %s from frame %llu (menu)", which == kOptAluGen ? "uniform register skip (ALU_GEN)" : "fixed state skip (FIXED_SKIP)",
+        on ? "ON" : "OFF", (unsigned long long)gfxdk::R.frame + 1);
+}
 void set_resolution_profile(float scale, bool dynamic) {
     gfxdk::g_profileScale.store(scale, std::memory_order_relaxed);
     gfxdk::g_profileDynamic.store(dynamic, std::memory_order_relaxed);
