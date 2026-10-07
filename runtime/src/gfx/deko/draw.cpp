@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdlib>
@@ -257,6 +258,9 @@ struct ResourcePerf {
     uint64_t uboMemoHits = 0;               // ... by the stage's memo (WWHD_DK_UBO_MEMO)
     uint64_t texBindCalls = 0, texHandles = 0, texWanted = 0;  // dkCmdBufBindTextures calls, handles; slots draws use
     uint64_t uboBindCalls = 0, uboBuffers = 0, uboWanted = 0;  // dkCmdBufBindUniformBuffers calls, buffers; slots
+    // the state stage in parts: ordering, targets, shaders, binds, viewport and scissor; rasterizer, depth /
+    // stencil and color output (fixed); vertex streams. fixedSkips: draws whose fixed part was the last one's
+    uint64_t stateBindNs = 0, stateFixedNs = 0, stateVertexNs = 0, fixedSkips = 0;
 } g_res;
 
 // the draw's stage timer: lap() adds the time since the last mark to a stage total; sub() to one part of the
@@ -747,6 +751,7 @@ uint32_t prim_key(const uint32_t* r, uint32_t prim) {
 
 }  // namespace
 DrawSkips g_drawSkips;
+std::atomic<bool> g_fixedSkip{env_switch("FIXED_SKIP", true)};
 namespace {
 // a skipped draw's reason, counted for the stats (R.skippedDraws counts them all)
 void skip(uint64_t& reason) {
@@ -870,7 +875,8 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
         "%.2f us each; table %.0f%% of %.0f/frame) + ufBlock %.2f + descriptors %.2f; binds (in state) %.2f us: "
         "textures %.2f calls %.2f handles of %.2f slots, uniform blocks %.2f calls %.2f buffers of %.2f slots; guest "
         "uniform blocks %.2f/draw (%.0f%% already in the stream, %.0f%% by the memo); ufBlock mode %d: %.0f/frame, "
-        "%.0f%% unchanged, %.0f slices (%.0f KiB) + %.0f pushes (%.1f KiB) per frame",
+        "%.0f%% unchanged, %.0f slices (%.0f KiB) + %.0f pushes (%.1f KiB) per frame; state us "
+        "per draw: ordering/targets/binds %.2f + fixed %.2f (%.0f%% skipped) + vertices %.2f",
         us(p.targetNs), us(p.uboNs), us(p.textureNs), us(p.textureMissNs), perFrame(p.textureMisses),
         p.textureMisses ? double(p.textureMissNs) / 1e3 / double(p.textureMisses) : 0.0,
         pct(p.tableHits, p.tableLookups), perFrame(p.tableLookups), us(p.uniformNs), us(p.descriptorNs), us(p.bindNs),
@@ -878,7 +884,8 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
         perDraw(p.uboBuffers), perDraw(p.uboWanted), perDraw(p.uboBlocks), pct(p.uboReused, p.uboBlocks),
         pct(p.uboMemoHits, p.uboBlocks), g_ufMode,
         perFrame(u.blocks), pct(u.unchanged, u.blocks), perFrame(u.slices), perFrame(u.sliceBytes) / 1024.0,
-        perFrame(u.pushes), perFrame(u.pushBytes) / 1024.0);
+        perFrame(u.pushes), perFrame(u.pushBytes) / 1024.0, us(p.stateBindNs), us(p.stateFixedNs),
+        100.0 * perDraw(p.fixedSkips), us(p.stateVertexNs));
 }
 
 namespace {
@@ -1407,10 +1414,50 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }
 
     // ---- rasterizer
+    const uint64_t fixedStart = timed ? now_ns() : 0;
     LATTE_PA_SU_SC_MODE_CNTL pm;
     memcpy((void*)&pm, r + REGADDR::PA_SU_SC_MODE_CNTL, 4);
     LATTE_PA_CL_CLIP_CNTL clip;
     memcpy((void*)&clip, r + REGADDR::PA_CL_CLIP_CNTL, 4);
+    // The fixed state (rasterizer, depth / stencil, color output) comes from these registers and the targets'
+    // kinds only: when they are the last draw's (that bound it, same state cache epoch), nothing is rebuilt
+    // (WWHD_DK_FIXED_SKIP, on unless 0; the Switch tab turns it on and off)
+    const bool fixedSkipOn = g_fixedSkip.load(std::memory_order_relaxed);
+    struct FixedKey {
+        uint32_t words[25];
+        const Surface* depth;
+        uint32_t colorMask, floatMask, stencilFmt, points;
+        float scale;
+    };
+    static FixedKey lastFixed;
+    static uint64_t lastFixedEpoch = ~0ull;
+    FixedKey fk;
+    memset(&fk, 0, sizeof fk);
+    {
+        static const uint32_t kFixedRegs[25] = {
+            REGADDR::PA_SU_SC_MODE_CNTL, REGADDR::PA_CL_CLIP_CNTL, REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET,
+            REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE, REGADDR::PA_SU_POLY_OFFSET_CLAMP, REGADDR::DB_DEPTH_CONTROL,
+            REGADDR::DB_STENCILREFMASK, REGADDR::DB_STENCILREFMASK_BF, REGADDR::CB_COLOR_CONTROL, REGADDR::CB_TARGET_MASK,
+            REGADDR::CB_BLEND0_CONTROL + 0, REGADDR::CB_BLEND0_CONTROL + 1, REGADDR::CB_BLEND0_CONTROL + 2,
+            REGADDR::CB_BLEND0_CONTROL + 3, REGADDR::CB_BLEND0_CONTROL + 4, REGADDR::CB_BLEND0_CONTROL + 5,
+            REGADDR::CB_BLEND0_CONTROL + 6, REGADDR::CB_BLEND0_CONTROL + 7, REGADDR::CB_BLEND_RED + 0,
+            REGADDR::CB_BLEND_RED + 1, REGADDR::CB_BLEND_RED + 2, REGADDR::CB_BLEND_RED + 3, REGADDR::PA_SU_POINT_SIZE,
+            REGADDR::PA_SU_SC_MODE_CNTL, REGADDR::PA_SU_SC_MODE_CNTL};  // (the last two: padding)
+        for (int i = 0; i < 25; i++) fk.words[i] = r[kFixedRegs[i]];
+        fk.depth = depth;
+        for (uint32_t i = 0; i < 8; i++)
+            if (colors[i]) {
+                fk.colorMask |= 1u << i;
+                if (colors[i]->fmt.kind == FormatInfo::FLOAT) fk.floatMask |= 1u << i;
+            }
+        fk.stencilFmt = depth && depth->fmt.stencil;
+        fk.points = prim == 1;
+        fk.scale = g_drawScale;
+    }
+    const bool fixedSame = fixedSkipOn && lastFixedEpoch == gs.epoch && gs.rasterKnown && gs.depthStencilKnown &&
+                           gs.colorKnown && gs.colorWriteKnown && !memcmp(&fk, &lastFixed, sizeof fk);
+    if (fixedSame) g_res.fixedSkips++;
+    else {
     {
         static const bool flipFront = env_switch("FLIP_FRONT", false);
         DkRasterizerState rs = zeroed<DkRasterizerState>();
@@ -1549,6 +1596,10 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             }
         }
     }
+    lastFixed = fk;
+    lastFixedEpoch = gs.epoch;
+    }  // (fixed state)
+    const uint64_t vertexStart = timed ? now_ns() : 0;
 
     // ---- vertex streams (guest bytes as stored; the GLSL decodes them). Vertex trimming (WWHD_DK_VERTEX_TRIM,
     // on unless 0): only the vertices from the lowest one the draw reads are copied, and the draw's base vertex
@@ -1646,6 +1697,11 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     bind_runs(vtx, vtxMask, gs.vtx, gs.vtxKnown, [&](uint32_t first, const DkBufExtents* e, uint32_t n) {
         dkCmdBufBindVtxBuffers(R.cmd, first, e, n);
     });
+    if (timed) {
+        g_res.stateBindNs += (fixedStart - lap.at) * kDrawTimeSample;
+        g_res.stateFixedNs += (vertexStart - fixedStart) * kDrawTimeSample;
+        g_res.stateVertexNs += (now_ns() - vertexStart) * kDrawTimeSample;
+    }
     lap(R.perf.stateNs);
 
     // ---- draw

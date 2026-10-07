@@ -1429,6 +1429,14 @@ void set_picture_grade(const PictureGrade& g) {
 int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }
 float dynamic_res_scale() { return gfxdk::res_scale_shown(); }  // the internal resolution in use (dynamic or not)
+bool draw_opt(int which) {
+    return which == kOptFixedSkip && gfxdk::g_fixedSkip.load(std::memory_order_relaxed);
+}
+void set_draw_opt(int which, bool on) {
+    if (which != kOptFixedSkip || gfxdk::g_fixedSkip.exchange(on) == on) return;
+    LOG("[dk] A/B: fixed state skip (FIXED_SKIP) %s from frame %llu (menu)", on ? "ON" : "OFF",
+        (unsigned long long)gfxdk::R.frame + 1);
+}
 void set_resolution_profile(float scale, bool dynamic) {
     gfxdk::g_profileScale.store(scale, std::memory_order_relaxed);
     gfxdk::g_profileDynamic.store(dynamic, std::memory_order_relaxed);

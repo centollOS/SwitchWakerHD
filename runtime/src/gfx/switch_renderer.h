@@ -20,6 +20,13 @@ float dynamic_res_scale();  // the internal resolution dynamic resolution has ch
 // any thread: the internal resolution (the most dynamic resolution may use) and whether dynamic resolution
 // may lower it, from the next frame on (the handheld / docked profiles, platform/settings_switch.h)
 void set_resolution_profile(float scale, bool dynamic);
+// per-draw optimizations the Switch tab turns on and off for A/B tests (not saved; env.txt sets them at start):
+// fixed state skipped while unchanged (WWHD_DK_FIXED_SKIP). (A/B 2026-10-07: skipping unchanged uniform
+// registers gained nothing and was removed: the ufBlock cost is the guest uniform blocks' contents.)
+// Each change is logged with its frame, so one session's log compares both halves.
+enum DrawOpt : int { kOptFixedSkip, kDrawOpts };
+bool draw_opt(int which);
+void set_draw_opt(int which, bool on);
 #ifdef __SWITCH__
 std::string clock_report_now();  // "CPU x MHz, GPU y MHz, memory z MHz", or "" if unavailable
 #endif
