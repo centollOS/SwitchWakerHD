@@ -548,6 +548,10 @@ struct PresentUbo {  // present_fsh.glsl, std140
     float grade[4];
     int32_t encode[4];  // x: encode as sRGB (sRGB TV format); y: the image is sRGB (sampling decoded it)
 };
+// where the picture went in the window (GamePad touch, gfxsw::gamepad_touch): x, y, w, h; w 0 while the
+// GamePad picture is not the one shown
+std::atomic<int> g_padRect[4] = {0, 0, 0, 0};
+std::atomic<bool> g_gamepadView{false};
 bool draw_picture(const PresentSource& src, bool capture) {
     if (!g_presentOk || !src.surface || !src.width || !src.height) return false;
     commit_descriptors();  // present_source wrote the picture's view into kPresentImageId
@@ -558,6 +562,9 @@ bool draw_picture(const PresentSource& src, bool capture) {
         w = int(float(g_winH) * a);
     }
     const int x = (int(g_winW) - w) / 2, y = (int(g_winH) - h) / 2;
+    const bool pad = src.imageId == kGamepadImageId;
+    g_padRect[0] = x, g_padRect[1] = y, g_padRect[3] = h;
+    g_padRect[2] = pad ? w : 0;
     constexpr uint32_t kUboSize = (sizeof(PresentUbo) + 255) & ~255u;
     StreamAlloc u = stream_alloc(kUboSize, DK_UNIFORM_BUF_ALIGNMENT);
     if (!u) return false;
@@ -566,7 +573,7 @@ bool draw_picture(const PresentSource& src, bool capture) {
     PresentUbo p{{g.exposure, g.contrast, g.saturation, g.gamma}, {encode ? 1 : 0, src.srgb ? 1 : 0, 0, 0}};
     memcpy(u.cpu, &p, sizeof p);
     static int encoded = -1;
-    if (int(encode) * 2 + int(src.srgb) != encoded) {
+    if (!pad && int(encode) * 2 + int(src.srgb) != encoded) {
         encoded = int(encode) * 2 + int(src.srgb);
         LOG("[dk] presenting the game's picture (%ux%u, GX2 format %03X%s) with %s", src.width, src.height,
             src.surface->format, src.srgb ? ", sRGB" : "", encode ? "sRGB encoding (sRGB TV format)" : "no encoding");
@@ -1180,8 +1187,17 @@ void present() {
     dkCmdBufClearColorFloat(R.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);  // the bars, or no picture yet
     dkCmdBufClearDepthStencil(R.cmd, true, 1.0f, 0xFF, 0);
     static int shown = -1;  // the last frame's: 1 the game's picture, 0 black (logged when it changes)
+    // the GamePad picture instead of the TV's while switched to it (ZL + ZR + Minus); the TV's while there is none
+    static int padShown = -1;
+    const PresentSource pad = g_gamepadView.load(std::memory_order_relaxed) ? gamepad_source() : PresentSource{};
+    if (int(pad.surface != nullptr) != padShown) {
+        padShown = pad.surface != nullptr;
+        LOG("[dk] frame %llu: the window shows the %s picture", (unsigned long long)frame, padShown ? "GamePad" : "TV");
+    }
+    if (!pad.surface) g_padRect[2] = 0;
     if (testPattern) draw_pattern(frame);
-    else if (draw_picture(src, capture)) {
+    else if (pad.surface && draw_picture(pad, capture)) {
+    } else if (draw_picture(src, capture)) {
         if (shown != 1) LOG("[dk] frame %llu: presenting the game's TV picture", (unsigned long long)frame);
         shown = 1;
     } else {
@@ -1425,6 +1441,19 @@ void set_picture_grade(const PictureGrade& g) {
     std::lock_guard<std::mutex> lk(gfxdk::g_gradeMu);
     gfxdk::g_gradeSet = g;
     gfxdk::g_gradeChanged = true;
+}
+bool gamepad_picture_drawn() { return !input::pro_controller(); }
+bool gamepad_view() { return gfxdk::g_gamepadView.load(std::memory_order_relaxed); }
+void set_gamepad_view(bool on) {
+    if (gfxdk::g_gamepadView.exchange(on) != on) LOG("[dk] window: %s picture asked for", on ? "GamePad" : "TV");
+}
+bool gamepad_touch(float x, float y, float& tx, float& ty) {
+    const int rx = gfxdk::g_padRect[0], ry = gfxdk::g_padRect[1], rw = gfxdk::g_padRect[2], rh = gfxdk::g_padRect[3];
+    x *= float(gfxdk::g_winW), y *= float(gfxdk::g_winH);  // (window pixels)
+    if (rw <= 0 || rh <= 0 || x < rx || y < ry || x >= rx + rw || y >= ry + rh) return false;
+    tx = (x - rx) / float(rw);
+    ty = (y - ry) / float(rh);
+    return true;
 }
 int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }

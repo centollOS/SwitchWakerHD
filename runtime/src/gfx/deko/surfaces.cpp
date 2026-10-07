@@ -32,6 +32,7 @@
 #include "dk_surfaces.h"
 #include "dk_sync.h"
 #include "gx2/gx2.h"
+#include "gfx/switch_renderer.h"
 #include "gx2_texture_regs.h"
 #include "runtime.h"
 #include "surf_internal.h"
@@ -1530,10 +1531,15 @@ void copy_to_scan(uint32_t cb, uint32_t target) {
     R.counts.scans++;
     Surface* src = surface_from_color_buffer(cb);
     if (g_traceFrame && target != 1) trace_event("GamePad scan copy of %s", trace_name(src).c_str());
-    if (src && target != 1) {  // the GamePad picture has no screen on the Switch yet
+    if (src && target != 1) {  // the GamePad picture: copied while it is drawn (gfxsw::gamepad_picture_drawn)
         if (src->drcScanFrame == ~0ull)
             LOG("[dk] GamePad picture: buffer %08X, %ux%u, format %X", src->addr, src->width, src->height, src->format);
         src->drcScanFrame = R.frame;
+        // (copied at once: the game draws the next GamePad picture into the same buffer before presenting)
+        if (gfxsw::gamepad_picture_drawn() && !src->fmt.depth && src->img.valid) {
+            copy_scan(src, S.drcScan);
+            S.drcScan->drcCopyFrame = R.frame;
+        }
     }
     if (target != 1) return;
     if (!src || src->fmt.depth || !src->img.valid) return;
@@ -1554,7 +1560,12 @@ void scan_flush() {
     if (!src) return;
     S.scanSrc = nullptr;
     R.perf.scanBlits++;
-    auto& scan = S.tvScan;
+    if (g_traceFrame) trace_event("TV picture copied from %s", trace_name(src).c_str());
+    copy_scan(src, S.tvScan);
+}
+
+// src copied into a scan buffer (made again when src's size or format changes)
+void copy_scan(Surface* src, std::unique_ptr<Surface>& scan) {
     if (!scan || scan->width != src->width || scan->height != src->height || scan->img.pw != src->img.pw ||
         scan->img.ph != src->img.ph || scan->fmt.image != src->fmt.image) {
         if (scan) destroy_surface_image(scan.get());
@@ -1568,7 +1579,6 @@ void scan_flush() {
         scan->scale = src->scale;  // presenting scales it to the window
         create_surface_image(scan.get());
     }
-    if (g_traceFrame) trace_event("TV picture copied from %s", trace_name(src).c_str());
     transfer_begin();
     copy_image(src, 0, 0, scan.get(), 0, 0, std::min(src->img.pw, scan->img.pw), std::min(src->img.ph, scan->img.ph), 1);
     transfer_end();
@@ -1609,6 +1619,37 @@ PresentSource present_source() {
     }
     // the picture's rendering finished and visible to the present pass's sampling
     dkCmdBufBarrier(R.cmd, DkBarrier_Fragments, DkInvalidateFlags_Image);
+    commit_descriptors();
+    return p;
+}
+
+PresentSource gamepad_source() {
+    PresentSource p;
+    p.imageId = kGamepadImageId;
+    Surface* const s = S.drcScan.get();
+    // a copy made in the last few frames (the game may skip a GamePad picture now and then)
+    if (!gfxsw::gamepad_picture_drawn() || !s || !s->img.valid || !s->drcCopyFrame || R.frame - s->drcCopyFrame > 30) return p;
+    p.surface = s;
+    p.pw = s->img.pw;
+    p.ph = s->img.ph;
+    p.width = s->width;
+    p.height = s->height;
+    p.srgb = s->fmt.srgb;
+    static DkGpuAddr written = DK_GPU_ADDR_INVALID;  // (as present_source)
+    static DkImageFormat writtenFormat = DkImageFormat_None;
+    static uint32_t writtenW = 0, writtenH = 0;
+    const DkGpuAddr addr = dkImageGetGpuAddr(&s->img.image);
+    if (addr != written || s->fmt.image != writtenFormat || s->img.pw != writtenW || s->img.ph != writtenH) {
+        dkCmdBufBarrier(R.cmd, DkBarrier_Primitives, 0);
+        DkImageView v;
+        dkImageViewDefaults(&v, &s->img.image);
+        image_descriptor_write(kGamepadImageId, v);
+        written = addr;
+        writtenFormat = s->fmt.image;
+        writtenW = s->img.pw;
+        writtenH = s->img.ph;
+        LOG("[dk] GamePad screen: %ux%u pixels, %s", p.pw, p.ph, describe(s).c_str());
+    }
     commit_descriptors();
     return p;
 }

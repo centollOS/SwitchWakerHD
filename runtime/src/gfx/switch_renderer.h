@@ -30,6 +30,15 @@ void set_draw_opt(int which, bool on);
 #ifdef __SWITCH__
 std::string clock_report_now();  // "CPU x MHz, GPU y MHz, memory z MHz", or "" if unavailable
 #endif
+// the GamePad screen (the game's second screen: items, map, sea chart). Its picture is drawn while the
+// controller acts as the Wii U GamePad; the window then shows the TV picture or, switched (ZL + ZR + Minus, or
+// the Switch tab), the GamePad picture full size, with the console's touch screen as the GamePad's.
+bool gamepad_picture_drawn();         // the controller acts as the GamePad (render thread, every frame)
+bool gamepad_view();                  // the window shows the GamePad picture instead of the TV's
+void set_gamepad_view(bool on);       // any thread, from the next frame
+// touch at x, y (0..1 of the screen from the top left) -> the GamePad screen's 0..1 position; false while
+// the GamePad picture is not shown or outside it
+bool gamepad_touch(float x, float y, float& tx, float& ty);
 // any thread: the next frame is captured (both sticks clicked on the Switch)
 void request_capture();
 

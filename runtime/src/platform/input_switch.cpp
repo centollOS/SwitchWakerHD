@@ -169,6 +169,7 @@ void update_gyro(::PadState& pad) {
 
 void init() {
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    hidInitializeTouchScreen();  // the GamePad's touch screen while its picture is shown (gfxsw::gamepad_view)
     // read here, not at static init: main() applies env.txt first
     if (const char* e = getenv("WWHD_PRO_CONTROLLER"); e && *e) g_pro = strcmp(e, "0") != 0;
     LOG("[input] Switch controller acts as %s", g_pro.load() ? "Pro Controller" : "GamePad");
@@ -192,6 +193,9 @@ void update() {
     PadState s;
     for (auto& m : kMap)
         if (held & m.hid) s.buttons |= m.vpad;
+    // ZL + ZR + Minus switches the window between the TV and the GamePad picture (overlay.cpp): the game does
+    // not get that Minus (in GamePad mode it would switch to Off-TV Play)
+    if ((held & HidNpadButton_ZL) && (held & HidNpadButton_ZR)) s.buttons &= ~uint32_t(kMinus);
     // both sticks clicked together: a capture of the next frame (its passes in the log, its pictures on the
     // SD card) for a picture that goes wrong; the game gets the clicks as usual
     {
@@ -231,6 +235,12 @@ void update() {
         axis(-s.ly, kPadLSUp, kPadLSDown);  // stick up is +y on the Switch
         axis(s.rx, kPadRSLeft, kPadRSRight);
         axis(-s.ry, kPadRSUp, kPadRSDown);
+    }
+    // the console's touch screen (1280x720 panel) is the GamePad's while the window shows the GamePad picture
+    if (gfxsw::gamepad_view()) {
+        HidTouchScreenState ts = {};
+        if (hidGetTouchScreenStates(&ts, 1) && ts.count > 0)
+            s.touch = gfxsw::gamepad_touch(ts.touches[0].x / 1280.0f, ts.touches[0].y / 720.0f, s.tx, s.ty);
     }
     if (overlay::blocks_input()) s = PadState{};
     {

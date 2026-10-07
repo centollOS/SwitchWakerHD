@@ -29,6 +29,7 @@
 #include "dk_shaders.h"
 #include "dk_surfaces.h"
 #include "dk_sync.h"
+#include "gfx/switch_renderer.h"
 #include "runtime.h"
 
 using namespace Latte;
@@ -804,10 +805,11 @@ DrawSkips draw_skips_take() {
 }
 
 // ---- the GamePad picture (WWHD_DK_SKIP_GAMEPAD, or WWHD_GL_SKIP_GAMEPAD; on unless 0): as gfx/gl draw.cpp.
-// The Switch shows only the TV picture; the GamePad's own buffers are not drawn (their depth clears are kept).
+// The GamePad's own buffers are not drawn (their depth clears are kept) unless the GamePad screen can be shown:
+// while the controller acts as the GamePad (gfxsw::gamepad_picture_drawn).
 bool skip_gamepad() {
     static const bool on = env_switch("SKIP_GAMEPAD", true);
-    return on;
+    return on && !gfxsw::gamepad_picture_drawn();
 }
 bool gamepad_only(const Surface* s) {
     // a read by another draw or a copy keeps a buffer drawn, for 300 frames (gfx/gl)

@@ -59,10 +59,12 @@ void convert_row(Convert c, const uint8_t* src, uint8_t* dst, uint32_t count);
 // ---- descriptors (descriptors.cpp). The image and sampler descriptor sets of memory.cpp are bound once
 // per frame by begin_commands. Slot ranges: images 0..kReservedImageIds-1 and samplers
 // 0..kReservedSamplerIds-1 belong to the renderer's own passes (overlay_dk.cpp: images 1-63 and sampler 0;
-// the present pass: image 0 for the game's picture and samplers 1-2: linear and nearest, clamped). The
-// rest belong to this lane, which allocates and recycles them; nobody else writes descriptors there.
-constexpr uint32_t kReservedImageIds = 64, kReservedSamplerIds = 16;
+// the present pass: image 0 for the game's picture, image 64 for the GamePad screen, and samplers 1-2: linear
+// and nearest, clamped). The rest belong to this lane, which allocates and recycles them; nobody else writes
+// descriptors there.
+constexpr uint32_t kReservedImageIds = 65, kReservedSamplerIds = 16;
 constexpr uint32_t kPresentImageId = 0, kPresentLinearSamplerId = 1, kPresentNearestSamplerId = 2;
+constexpr uint32_t kGamepadImageId = 64;
 // a free image descriptor slot; fatal() naming the count when the 8192 slots are used up
 uint32_t image_descriptor_alloc();
 // records the descriptor of view into slot id (dkCmdBufPushData); visible after commit_descriptors()
@@ -126,6 +128,7 @@ struct Surface {
     uint64_t drcScanFrame = ~0ull, tvScanFrame = ~0ull, readFrame = ~0ull;
     bool gamepadSource = false;
     uint64_t gamepadSourceSince = ~0ull;
+    uint64_t drcCopyFrame = 0;  // a GamePad scan copy (S.drcScan): the frame of its last copy
     bool tvShared = false;
     bool skipLogged = false;
     Surface* derivedFrom = nullptr;
@@ -151,6 +154,7 @@ struct SurfaceSet {
     std::unordered_multimap<uint32_t, std::unique_ptr<Surface>> byAddr;
     std::vector<Surface*> list;
     std::unique_ptr<Surface> tvScan;
+    std::unique_ptr<Surface> drcScan;  // the GamePad picture's copy, while it is drawn (gfxsw::gamepad_picture_drawn)
     Surface* tvSource = nullptr;  // the buffer last copied to the TV scan buffer
     Surface* scanSrc = nullptr;   // ... while its copy is not made yet (present reads it directly)
 };
@@ -185,6 +189,7 @@ inline void note_read(Surface* s) {
 // the TV picture: GX2CopyColorBufferToScanBuffer only notes its buffer; presenting reads that buffer unless
 // something writes to it first: scan_flush makes the copy then
 void scan_flush();
+void copy_scan(Surface* src, std::unique_ptr<Surface>& scan);  // src into a scan copy (made to fit)
 inline void before_write(const Surface* s) {
     if (s && s == S.scanSrc) scan_flush();
 }
@@ -243,6 +248,8 @@ struct PresentSource {
 // the TV picture to present: the scan buffer, or the noted buffer itself when nothing wrote to it since the
 // game copied it (gfx/gl present); writes its view into kPresentImageId (commit_descriptors() follows)
 PresentSource present_source();
+// the GamePad picture to show (gfxsw::gamepad_view), in kGamepadImageId; none while it is not drawn
+PresentSource gamepad_source();
 
 // ---- internal resolution (gfx/gl's, surfaces.cpp): screen-shaped render targets get res_scale() x their guest
 // size (WWHD_RES_SCALE, 0.5..2; dynamic resolution, backend.cpp, lowers it while the GPU is the limit)

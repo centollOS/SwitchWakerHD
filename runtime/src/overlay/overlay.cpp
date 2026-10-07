@@ -365,6 +365,16 @@ void read_controller() {
     constexpr double kOptionsHold = 0.5;
 #endif
     if (controller_pressed(kPadHome)) set_open(!is_open());
+#ifdef __SWITCH__
+    // ZL + ZR held, Minus: the window switches between the TV and the GamePad picture (not the menu)
+    if (!is_open() && controller_down(kPadLT) && controller_down(kPadRT) && controller_down(kPadOptions)) {
+        if (!U.options_latched) {
+            U.options_latched = true;
+            gfxsw::set_gamepad_view(!gfxsw::gamepad_view());
+        }
+        return;
+    }
+#endif
     if (controller_down(kPadOptions)) {
         if (!U.options_latched) {
             if (is_open()) {
@@ -901,6 +911,16 @@ void tab_switch() {
         help("Pick the same controller as the game's own options: if they differ, the game reads a\n"
              "controller nobody holds and no button works. The gyro needs the GamePad.");
         if (env) note("env.txt sets WWHD_PRO_CONTROLLER: it is used at every start.");
+        // the GamePad screen (items, map), full size instead of the TV picture
+        const bool view = gfxsw::gamepad_view();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("The screen shows");
+        ImGui::SameLine();
+        if (radio("TV picture", !view)) gfxsw::set_gamepad_view(false);
+        ImGui::SameLine();
+        if (radio("GamePad screen", view, !pro)) gfxsw::set_gamepad_view(true);
+        help("ZL + ZR + Minus switches between them while playing. On the GamePad screen the touch\n"
+             "screen works as the GamePad's (items, map). Only with the GamePad chosen above.");
     }
 
     // gyro aiming with the controller's own motion sensors (input_switch.cpp feeds motion.h); the
