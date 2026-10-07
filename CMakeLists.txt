@@ -374,6 +374,8 @@ if(WWHD_HAS_DEKO3D)
   else()
     target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3d)
   endif()
+  # uam on the console: the game shaders that no DKSH cache has (gfx/deko/shaders_dk.cpp, its worker thread)
+  target_link_libraries(wwhd PRIVATE uamlib)
   # as the OpenGL build: threads created without attributes get a large stack, newlib's C11 thrd_create
   # results are fixed (core.cpp), and abort() logs its caller first (main.cpp)
   target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create -Wl,--wrap=abort)

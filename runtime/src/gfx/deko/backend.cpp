@@ -596,6 +596,56 @@ void swap() {
     }
 }
 
+// start-up: a bar filling while shaders_init loads the DKSH caches (as gfx/gl shader_cache_progress), with its
+// own small command buffer: nothing else records yet, and each bar waits for the GPU before the next
+void shader_cache_progress(size_t done, size_t total) {
+    static uint64_t last = 0;
+    const uint64_t now = now_ns();
+    if (done < total && now - last < 100'000'000) return;
+    last = now;
+    static DkMemBlock mem = nullptr;
+    static DkCmdBuf cmd = nullptr;
+    constexpr uint32_t kSize = 64u << 10;
+    if (!cmd) {
+        DkMemBlockMaker mm;
+        dkMemBlockMakerDefaults(&mm, R.device, kSize);
+        mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+        log_flush();
+        mem = dkMemBlockCreate(&mm);
+        DkCmdBufMaker cm;
+        dkCmdBufMakerDefaults(&cm, R.device);
+        cmd = dkCmdBufCreate(&cm);
+    }
+    dkCmdBufClear(cmd);
+    dkCmdBufAddMemory(cmd, mem, 0, kSize);
+    check_queue("acquiring a swapchain image for the start-up bar", 0);
+    const int slot = dkQueueAcquireImage(R.queue, g_swapchain);
+    DkImageView color;
+    dkImageViewDefaults(&color, &g_swapImages[slot]);
+    const DkImageView* colors[] = {&color};
+    dkCmdBufBindRenderTargets(cmd, colors, 1, nullptr);
+    const DkViewport vp = {0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f};
+    dkCmdBufSetViewports(cmd, 0, &vp, 1);
+    auto fill = [&](uint32_t x, uint32_t y, uint32_t w, uint32_t h, float v) {
+        const DkScissor sc = {x, y, w, h};
+        dkCmdBufSetScissors(cmd, 0, &sc, 1);
+        dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA, v, v, v, 1.0f);
+    };
+    fill(0, 0, kWidth, kHeight, 0.0f);
+    fill(240, 344, 800, 32, 0.2f);
+    const uint32_t w = uint32_t(800 * done / std::max<size_t>(total, 1));
+    if (w) fill(240, 344, std::min<uint32_t>(w, 800), 32, 0.9f);
+    dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(cmd));
+    dkQueuePresentImage(R.queue, g_swapchain, slot);
+    dkQueueWaitIdle(R.queue);  // (the command memory is reused by the next bar)
+    if (done >= total) {  // the last one: the bar's resources go
+        dkCmdBufDestroy(cmd);
+        dkMemBlockDestroy(mem);
+        cmd = nullptr;
+        mem = nullptr;
+    }
+}
+
 void init() {
     log_heap("before the deko3d setup");
     DkDeviceMaker dm;
@@ -620,7 +670,7 @@ void init() {
     memory_init();
     load_shaders();
     init_swapchain();
-    shaders_init();  // the game shaders' worker and caches (dk_shaders.h)
+    shaders_init(shader_cache_progress);  // the game shaders' worker and caches (dk_shaders.h)
     log_heap("after the deko3d setup");
     input::init();
 }
