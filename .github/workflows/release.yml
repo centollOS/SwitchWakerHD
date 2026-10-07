@@ -380,7 +380,7 @@ jobs:
       - name: Checksums and release notes
         run: |
           cd dist && sha256sum *.zip > SHA256SUMS.txt && cat SHA256SUMS.txt && cd ..
-          python3 tools/release/notes.py README.md "$VERSION" dist/SHA256SUMS.txt > dist/notes.md
+          python3 tools/release/notes.py docs/upstream-README.md "$VERSION" dist/SHA256SUMS.txt > dist/notes.md
           cat dist/notes.md
           python3 tools/release/guard.py dist
 

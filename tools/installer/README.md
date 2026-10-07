@@ -4,7 +4,7 @@ The release packages contain no game files and no game code. The first start of 
 builds the game on the player's machine from their own dump (a disc image, a Cemu archive or an
 extracted game folder): it extracts the game (a disc image or archive only), translates its code to C, compiles it with a pinned compiler
 and links it with the prebuilt runtime. Later starts launch the built game directly. Player
-instructions are in the main README ("Install (releases)").
+instructions are in the upstream README, docs/upstream-README.md ("Install (releases)").
 
 ## Portable releases
 
