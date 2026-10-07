@@ -47,6 +47,16 @@ extern "C" { uint64_t g_shader_state_gen = 1; }
 // size, resources, exports: none of them is in the renderer's state hash), so the OpenGL renderer can
 // keep its hash of the other registers when a draw just switches programs.
 extern "C" { uint64_t g_shader_regs_gen = 1; }
+// uniform register (ALU constant) writes that changed a value: [0] the pixel shader's 256 (mmSQ_ALU_CONSTANT0_0),
+// [1] the vertex shader's (+0x400). gfx/deko's ufBlock copies skip their register part while it stays (Switch;
+// WWHD_DK_ALU_GEN=0 off: every upload counts, as before)
+extern "C" { uint64_t g_alu_const_gen[2] = {1, 1}; }
+static void bump_alu_gen(uint32 first, uint32 n) {
+    const uint32 lo = (uint32)mmSQ_ALU_CONSTANT0_0, end = first + n;
+    if (first < lo + 0x400 && end > lo) g_alu_const_gen[0]++;
+    if (first < lo + 0x800 && end > lo + 0x400) g_alu_const_gen[1]++;
+}
+static void bump_alu_gens() { g_alu_const_gen[0]++, g_alu_const_gen[1]++; }
 static bool program_reg(uint32 reg) {
     return (reg >= mmSQ_PGM_START_PS && reg <= mmSQ_PGM_RESOURCES_VS) || (reg >= mmSQ_PGM_START_FS && reg <= mmSQ_PGM_RESOURCES_FS) ||
            (reg >= mmSQ_PGM_CF_OFFSET_PS && reg <= mmSQ_PGM_CF_OFFSET_FS);
@@ -135,6 +145,7 @@ static void apply_small_regs(uint32 first, const uint32* v, uint32 n) {
                 } else actualBump = true;
             }
             g_regs[reg] = value;
+            bump_alu_gen(reg, 1);
         }
         // Shadow can differ even when registers already match: draw mutates
         // primitive type directly, and context setup initializes only shadow.
@@ -157,6 +168,20 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
     // the comparison that decides those is skipped: compared and then copied, they were ~15% of the
     // render thread on the desktop
     if (first >= (uint32)mmSQ_ALU_CONSTANT0_0 && first + n <= (uint32)mmSQ_ALU_CONSTANT0_0 + 0x1000) {
+#ifdef __SWITCH__
+        static const bool aluGen = [] {
+            const char* e = getenv("WWHD_DK_ALU_GEN");
+            return !(e && *e == '0');
+        }();
+        if (!aluGen) bump_alu_gen(first, n);
+        else if (memcmp(&g_regs[first], v, n * 4) != 0) bump_alu_gen(first, n);
+        else {
+            if (g_shadow) memcpy(&g_shadow[first], v, n * 4);
+            return;
+        }
+#else
+        bump_alu_gen(first, n);
+#endif
         memcpy(&g_regs[first], v, n * 4);
         if (g_shadow) memcpy(&g_shadow[first], v, n * 4);
         return;
@@ -220,6 +245,7 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
                 }
             }
         }
+        bump_alu_gen(first, n);
         memcpy(&g_regs[first], v, n * 4);
     }
     if (g_shadow) memcpy(&g_shadow[first], v, n * 4);
@@ -480,6 +506,7 @@ static void set_context(uint32 ctx) {
     memcpy(g_regs, g_shadow, sizeof(g_regs));
     g_shader_state_gen++;
     g_shader_regs_gen++;
+    bump_alu_gens();
 }
 
 constexpr uint32 kColorBufferWords = 0x9C / 4, kDepthBufferWords = 0xAC / 4, kSurfaceWords = 0x74 / 4;
@@ -1177,6 +1204,7 @@ void gx2_ss_load(ss::Reader& r) {
     g_shadow = active && it != g_contexts.end() ? it->second.data() : nullptr;
     g_shader_state_gen++;
     g_shader_regs_gen++;
+    bump_alu_gens();
     g_swap_interval = std::max<uint32>(r.u32(), 1);
     uint64_t guest_swaps = r.u64();
     {

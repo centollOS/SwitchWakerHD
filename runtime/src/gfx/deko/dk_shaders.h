@@ -140,6 +140,7 @@ struct UniformPackStats {
     uint64_t unchanged = 0;   // ... whose values were all the same as the copy's (same frame)
     uint64_t slices = 0, sliceBytes = 0;  // new stream slices and their bytes
     uint64_t pushes = 0, pushBytes = 0;   // dkCmdBufPushConstants calls and their data bytes (mode 2)
+    uint64_t regsSkipped = 0;  // ... whose register part was skipped (no uniform register write since; g_alu_const_gen)
 };
 UniformPackStats uniform_pack_stats_take();
 
