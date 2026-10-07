@@ -36,6 +36,14 @@ Every change to upstream files is marked `SwitchWakerHD patch N`.
    the prototype's own uam binary no longer reproduces 5 of the reference files it wrote. 0x7e0 (no
    barrier, nothing to wait on) is what the scheduler gives every instruction before it runs.
 
+7. **No dual issue** (`mesa-imported/codegen/nv50_ir_emit_gm107.cpp`, `SchedDataCalculatorGM107::setDelay`):
+   uam's Maxwell dual-issue scheduling (README: "enhanced with new experimental findings"; Mesa 20.1,
+   which gfx/gl runs on, never dual-issues) made 4x8-pixel blocks (one 32-thread fragment warp) of
+   sunlit surfaces flicker with wrong lighting on Outset and in Dragon Roost Cavern. Bisected on the
+   console (2026-10-07) with the renderer's load-time patch of the scheduling words: as compiled =
+   specks, no dual issue = clean, same fps. Every instruction now gets its normal stall count instead
+   of a zero-delay pair.
+
 Check: `uam_dksh_test` (`-DWWHD_UAM_TEST=ON`) compiles a directory of GLSL files in one process and
 compares the DKSH bytes with reference files written by the `uam` tool (target `uam_tool`), one
 process per shader.

@@ -26,7 +26,7 @@ namespace gfxdk {
 enum class DepthBiasMode : uint8_t { Gl, Latte, Off, Units2, NoSlope };
 
 struct Bisect {
-    int shaderSched = 2;
+    int shaderSched = 0;  // uam patch 7 compiles without dual issue (1 and 2 stay as diagnostics)
     int earlyZ = 0;
     bool psKnobMesa = false;
     DepthBiasMode depthBias = DepthBiasMode::Gl;

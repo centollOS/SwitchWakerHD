@@ -4128,7 +4128,11 @@ SchedDataCalculatorGM107::setDelay(Instruction *insn, int delay,
       }
    }
 
-   if (lastDualIssued || !next || delay > 1 || !targ->canDualIssue(insn, next)) {
+   // wwhd patch 7: no dual issue. On the console a dual-issued pair in the lit (sunlight) terms of the game's
+   // shaders made whole 32-thread fragment warps (4x8-pixel screen blocks) flicker with wrong lighting;
+   // gfx/gl's Mesa 20.1 never dual-issues. See runtime/third_party/uam/PATCHES.md.
+   static const bool kDualIssue = false;
+   if (!kDualIssue || lastDualIssued || !next || delay > 1 || !targ->canDualIssue(insn, next)) {
       delay = CLAMP(delay, GM107_MIN_ISSUE_DELAY, GM107_MAX_ISSUE_DELAY);
       lastDualIssued = false;
    } else {
