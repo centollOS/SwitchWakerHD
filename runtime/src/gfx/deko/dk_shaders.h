@@ -19,6 +19,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,7 @@
 struct LatteFetchShader;
 namespace gfxdk {
 struct ShaderCode;  // shaders_dk.cpp: one GLSL source's DKSH, shared by every Shader with that glslHash
+struct UniformCache;  // shaders_dk.cpp: the ufBlock's copy kept per shader (pack_uniforms_cached)
 
 enum class ShaderStatus : uint8_t {
     Pending,  // translated; its DKSH is not in memory yet (queued for or compiling on the worker, or done and
@@ -60,6 +62,7 @@ struct Shader {
     // draws skipped since it became pending: the worker's queue serves the most wanted first
     uint32_t wanted = 0;
     ShaderCode* code = nullptr;  // its GLSL's DKSH (shaders_dk.cpp); null when translation failed
+    std::shared_ptr<UniformCache> ufCache;  // pack_uniforms_cached's state, made at the first use
     Shader() {
         uboSlot.fill(-1);
         textureSlot.fill(-1);
@@ -114,6 +117,24 @@ void save_shader_cache();
 // tiling) x1.5. Empty (gpu 0) when the shader has no ufBlock or the stream slice is full.
 StreamSlice pack_uniforms(bool vertex, const Shader& sh, const uint32_t* regs, float scaleX = 1.0f,
                           float scaleY = 1.0f, const float (*texScale)[2] = nullptr, bool aoNoise = false);
+
+// The same block with a copy kept per shader (P4 resources lane; WWHD_DK_UF_CACHE, draw.cpp chooses the mode).
+// The values come from a list of operations made once per shader (no walk of the decompiler's lists per draw)
+// and are compared with the copy. mode 1: a new stream slice only when a value changed or the frame is new.
+// mode 2: one stream slice per shader and frame; changed 16-byte pieces are pushed into it in the command stream
+// (dkCmdBufPushConstants: every deko3d uniform buffer has push-constant semantics, the draws recorded before
+// keep the values they were recorded with), so its address stays and the draw path skips the rebind. The
+// result's size is the size to bind (mode 2: a multiple of 256, as dkCmdBufPushConstants requires). Empty when
+// the stream slice is full.
+StreamSlice pack_uniforms_cached(int mode, bool vertex, Shader& sh, const uint32_t* regs, float scaleX, float scaleY,
+                                 const float (*texScale)[2], bool aoNoise);
+struct UniformPackStats {
+    uint64_t blocks = 0;      // pack_uniforms_cached calls
+    uint64_t unchanged = 0;   // ... whose values were all the same as the copy's (same frame)
+    uint64_t slices = 0, sliceBytes = 0;  // new stream slices and their bytes
+    uint64_t pushes = 0, pushBytes = 0;   // dkCmdBufPushConstants calls and their data bytes (mode 2)
+};
+UniformPackStats uniform_pack_stats_take();
 
 // ---- statistics (backend.cpp's 5 s line and the hitch log)
 struct ShaderStats {

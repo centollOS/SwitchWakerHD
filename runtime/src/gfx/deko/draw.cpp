@@ -233,6 +233,16 @@ inline bool texture_entry_hit(const TextureCacheEntry& e, const uint32_t* words,
            !memcmp(e.words, words, sizeof e.words) && !memcmp(e.sampler, sampler, sizeof e.sampler);
 }
 
+// The ufBlock (P4 resources lane, WWHD_DK_UF_CACHE): 0 = pack_uniforms into a new stream slice every draw (P2's
+// path); 1 = a copy per shader, a new slice only when a value changed; 2 (default) = the copy per shader in one
+// slice per frame, changed pieces pushed into it (dkCmdBufPushConstants), the address unchanged (no rebind)
+const int g_ufMode = [] {
+    const char* e = getenv("WWHD_DK_UF_CACHE");
+    if (!e || !*e) return 2;
+    const int v = atoi(e);
+    return v < 0 || v > 2 ? 2 : v;
+}();
+
 // The resources stage's finer figures (P4 resources lane), per 5 s report (log_resource_stats): times of timed
 // draws (x kDrawTimeSample, as R.perf) and counts of every draw
 struct ResourcePerf {
@@ -703,13 +713,19 @@ void draw_frame_start() {
         LOG("[dk] flat varyings: %s (WWHD_DK_PROVOKING_VERTEX=last|first|latte)", kProvoking[provoking_mode()]);
         LOG("[dk] zcull: on (queue), dropped at every depth-target bind and after copies, uploads or new images of "
             "a depth buffer; depth clears reset it");
-        LOG("[dk] resources (P4): texture lookup table %s (WWHD_DK_TEX_TABLE=0 off); textures and uniform blocks "
-            "bound only for slots that changed", textureCacheOn && textureTableOn ? "on" : "off");
+        static const char* const kUf[] = {"0, packed into a new stream slice every draw (P2)",
+                                          "1, a copy per shader, a new slice only when a value changed",
+                                          "2, a copy per shader in one slice per frame, changed pieces pushed "
+                                          "(dkCmdBufPushConstants), no rebind"};
+        LOG("[dk] resources (P4): texture lookup table %s (WWHD_DK_TEX_TABLE=0 off), ufBlock mode %s "
+            "(WWHD_DK_UF_CACHE=0|1|2); textures and uniform blocks bound only for slots that changed",
+            textureCacheOn && textureTableOn ? "on" : "off", kUf[g_ufMode]);
     }
 }
 
 void log_resource_stats(uint64_t executed, uint64_t frames) {
     const ResourcePerf p = g_res;
+    const UniformPackStats u = uniform_pack_stats_take();
     g_res = {};
     auto us = [&](uint64_t ns) { return executed ? double(ns) / 1e3 / double(executed) : 0.0; };
     auto perDraw = [&](uint64_t n) { return executed ? double(n) / double(executed) : 0.0; };
@@ -718,12 +734,15 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
     LOG("[dk] resources us per draw: targets %.2f + uniform blocks %.2f + textures %.2f (misses %.2f: %.1f/frame, "
         "%.2f us each; table %.0f%% of %.0f/frame) + ufBlock %.2f + descriptors %.2f; binds (in state) %.2f us: "
         "textures %.2f calls %.2f handles of %.2f slots, uniform blocks %.2f calls %.2f buffers of %.2f slots; guest "
-        "uniform blocks %.2f/draw (%.0f%% already in the stream)",
+        "uniform blocks %.2f/draw (%.0f%% already in the stream); ufBlock mode %d: %.0f/frame, %.0f%% unchanged, %.0f "
+        "slices (%.0f KiB) + %.0f pushes (%.1f KiB) per frame",
         us(p.targetNs), us(p.uboNs), us(p.textureNs), us(p.textureMissNs), perFrame(p.textureMisses),
         p.textureMisses ? double(p.textureMissNs) / 1e3 / double(p.textureMisses) : 0.0,
         pct(p.tableHits, p.tableLookups), perFrame(p.tableLookups), us(p.uniformNs), us(p.descriptorNs), us(p.bindNs),
         perDraw(p.texBindCalls), perDraw(p.texHandles), perDraw(p.texWanted), perDraw(p.uboBindCalls),
-        perDraw(p.uboBuffers), perDraw(p.uboWanted), perDraw(p.uboBlocks), pct(p.uboReused, p.uboBlocks));
+        perDraw(p.uboBuffers), perDraw(p.uboWanted), perDraw(p.uboBlocks), pct(p.uboReused, p.uboBlocks), g_ufMode,
+        perFrame(u.blocks), pct(u.unchanged, u.blocks), perFrame(u.slices), perFrame(u.sliceBytes) / 1024.0,
+        perFrame(u.pushes), perFrame(u.pushBytes) / 1024.0);
 }
 
 namespace {
@@ -1057,7 +1076,8 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         if (slot < 0 || slot >= kMaxUniformBuffers) continue;
         const bool aoNoise = g_aoMode == 2 && sh->vertex && is_occlusion(r, true);
         const float(*texScale)[2] = g_unitScale[sh->vertex ? kVertexStage : kPixelStage];
-        const StreamSlice u = pack_uniforms(sh->vertex, *sh, r, g_drawScale, g_drawScale, texScale, aoNoise);
+        const StreamSlice u = g_ufMode ? pack_uniforms_cached(g_ufMode, sh->vertex, *sh, r, g_drawScale, g_drawScale, texScale, aoNoise)
+                                       : pack_uniforms(sh->vertex, *sh, r, g_drawScale, g_drawScale, texScale, aoNoise);
         if (!u) {
             R.perf.streamFullSkips++;
             skip(g_drawSkips.streamFull);
