@@ -56,11 +56,16 @@ constexpr const char* kKeyContrast = "switchContrast";
 constexpr const char* kKeySaturation = "switchSaturation";
 constexpr const char* kKeyGamma = "switchGamma";
 constexpr const char* kKeyFpsCounter = "switchFpsCounter";
+constexpr const char* kKeyCaptureCombo = "switchCaptureCombo";
 // per mode: <key>.handheld / <key>.docked
 constexpr const char* kKeyResScale = "switchResScale";
 constexpr const char* kKeyDynamicRes = "switchDynamicRes";
 void save_picture();       // the current picture adjustments into settings.ini
 bool picture_env();        // one of WWHD_EXPOSURE/CONTRAST/SATURATION/GAMMA is in env.txt
 bool fps_counter_env();    // WWHD_FPS is in env.txt
+// debug: both sticks clicked capture the next frame (PNGs on the SD card, a few seconds' freeze); off by
+// default so it cannot happen by accident (Switch tab; saved)
+bool capture_combo();
+void set_capture_combo(bool on);  // saves it
 
 }  // namespace switch_settings

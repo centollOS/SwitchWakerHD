@@ -17,6 +17,7 @@
 #include "../runtime.h"
 #include "../gfx/switch_renderer.h"
 #include "input_switch.h"
+#include "settings_switch.h"
 
 namespace mods {
 void filter_pad(input::PadState&);
@@ -213,10 +214,10 @@ void update() {
         if (now < pulseUntil) s.buttons |= kMinus;
     }
     // both sticks clicked together: a capture of the next frame (its passes in the log, its pictures on the
-    // SD card) for a picture that goes wrong; the game gets the clicks as usual
+    // SD card) for a picture that goes wrong, when turned on in the Switch tab; the game gets the clicks as usual
     {
         static bool was = false;
-        const bool combo = (held & HidNpadButton_StickL) && (held & HidNpadButton_StickR);
+        const bool combo = (held & HidNpadButton_StickL) && (held & HidNpadButton_StickR) && switch_settings::capture_combo();
         if (combo && !was) {
             LOG("[input] both sticks clicked: capturing the next frame");
             gfxsw::request_capture();

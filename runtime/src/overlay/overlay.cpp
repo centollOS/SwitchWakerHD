@@ -949,6 +949,14 @@ void tab_switch() {
         ImGui::TextUnformatted(motion::status().c_str());
         if (!(g == before)) save_gyro(g);
     }
+    heading("Debug");
+    {
+        bool v;
+        if (check("Capture a frame with both sticks clicked", switch_settings::capture_combo(), &v))
+            hostui::post([v] { switch_settings::set_capture_combo(v); });
+        help("Writes the next frame's pictures to sdmc:/switch/wwhd/captures for a picture that\n"
+             "goes wrong; the game freezes for a few seconds meanwhile. Off: no accidental captures.");
+    }
     heading("Menu");
     note("Minus held half a second opens this menu (a short Minus goes to the game); B or Minus closes it.\n"
          "L / R change tabs.");

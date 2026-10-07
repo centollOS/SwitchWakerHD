@@ -24,6 +24,7 @@
 #include <switch.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -285,6 +286,15 @@ bool picture_env() {
     return env_set("WWHD_EXPOSURE") || env_set("WWHD_CONTRAST") || env_set("WWHD_SATURATION") || env_set("WWHD_GAMMA");
 }
 bool fps_counter_env() { return env_set("WWHD_FPS"); }
+namespace {
+std::atomic<bool> g_captureCombo{false};
+}
+bool capture_combo() { return g_captureCombo.load(std::memory_order_relaxed); }
+void set_capture_combo(bool on) {
+    g_captureCombo = on;
+    hostui::set(kKeyCaptureCombo, on ? "1" : "0");
+    LOG("[switch] capture combo (both sticks): %s", on ? "on" : "off");
+}
 
 void apply_at_start() {
     // GPU profile: env.txt, else the saved choice, else 460 MHz with memory 1600
@@ -369,6 +379,10 @@ void apply_at_start() {
     if (!fps_counter_env()) {
         std::string v;
         if (hostui::get(kKeyFpsCounter, v) && !v.empty()) gfxsw::set_fps_overlay_mode(atoi(v.c_str()));
+    }
+    {
+        std::string v;
+        if (hostui::get(kKeyCaptureCombo, v)) g_captureCombo = v == "1";
     }
 }
 
