@@ -1,10 +1,12 @@
 // The settings overlay's Dear ImGui draw data, drawn by the OpenGL renderer over the TV picture in
-// present() (Switch). Its own vertex array, buffers and program, so the draw path's state cache and
-// vertex array (R.vao) are left as they were; present() forgets the GL state after the swap anyway.
+// present() (Switch). Its own vertex array and program, so the draw path's state cache and vertex array
+// (R.vao) are left as they were; present() forgets the GL state after the swap anyway. Vertices and
+// indices go through the stream buffer (a glBufferSubData over 8 KB made Mesa's GL thread wait).
 #include "gl.h"
 #include "settings.h"
 
 #include <cstring>
+#include <vector>
 
 #include "imgui.h"
 #include "runtime.h"
@@ -34,7 +36,7 @@ void main() { result=color*texture(image,tc); }
 )glsl";
 
 struct Resources {
-    GLuint program = 0, vao = 0, vbo = 0, ebo = 0, sampler = 0;
+    GLuint program = 0, vao = 0, sampler = 0;
     GLint xformLoc = -1, imageLoc = -1;
     bool failed = false;
 };
@@ -79,17 +81,10 @@ bool setup() {
     res.xformLoc = glGetUniformLocation(p, "xform");
     res.imageLoc = glGetUniformLocation(p, "image");
     glGenVertexArrays(1, &res.vao);
-    glGenBuffers(1, &res.vbo);
-    glGenBuffers(1, &res.ebo);
     glBindVertexArray(res.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, res.vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, res.ebo);
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
     glEnableVertexAttribArray(2);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (void*)offsetof(ImDrawVert, pos));
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (void*)offsetof(ImDrawVert, uv));
-    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(ImDrawVert), (void*)offsetof(ImDrawVert, col));
     glBindVertexArray(R.vao);
     glGenSamplers(1, &res.sampler);
     glSamplerParameteri(res.sampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -175,17 +170,22 @@ void overlay_draw(ImDrawData* d, int ww, int wh) {
     glUniform1i(res.imageLoc, R.scratchUnit);
     glActiveTexture(GL_TEXTURE0 + R.scratchUnit);
     glBindSampler(R.scratchUnit, res.sampler);
-    glBindVertexArray(res.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, res.vbo);
-    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(d->TotalVtxCount) * sizeof(ImDrawVert), nullptr, GL_STREAM_DRAW);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, GLsizeiptr(d->TotalIdxCount) * sizeof(ImDrawIdx), nullptr, GL_STREAM_DRAW);
-    GLintptr vOff = 0, iOff = 0;
+    // all lists' vertices, then all indices, into the stream buffer (one slice each)
+    std::vector<uint8_t> vtx(size_t(d->TotalVtxCount) * sizeof(ImDrawVert)), idx(size_t(d->TotalIdxCount) * sizeof(ImDrawIdx));
+    size_t vOff = 0, iOff = 0;
     for (const ImDrawList* l : d->CmdLists) {
-        glBufferSubData(GL_ARRAY_BUFFER, vOff, GLsizeiptr(l->VtxBuffer.Size) * sizeof(ImDrawVert), l->VtxBuffer.Data);
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, iOff, GLsizeiptr(l->IdxBuffer.Size) * sizeof(ImDrawIdx), l->IdxBuffer.Data);
-        vOff += GLintptr(l->VtxBuffer.Size) * sizeof(ImDrawVert);
-        iOff += GLintptr(l->IdxBuffer.Size) * sizeof(ImDrawIdx);
+        memcpy(vtx.data() + vOff, l->VtxBuffer.Data, size_t(l->VtxBuffer.Size) * sizeof(ImDrawVert));
+        memcpy(idx.data() + iOff, l->IdxBuffer.Data, size_t(l->IdxBuffer.Size) * sizeof(ImDrawIdx));
+        vOff += size_t(l->VtxBuffer.Size) * sizeof(ImDrawVert);
+        iOff += size_t(l->IdxBuffer.Size) * sizeof(ImDrawIdx);
     }
+    const StreamSlice vs = stream_upload(vtx.data(), vtx.size(), 16), is = stream_upload(idx.data(), idx.size(), 16);
+    glBindVertexArray(res.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vs.buffer);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (void*)(vs.offset + offsetof(ImDrawVert, pos)));
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (void*)(vs.offset + offsetof(ImDrawVert, uv)));
+    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(ImDrawVert), (void*)(vs.offset + offsetof(ImDrawVert, col)));
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, is.buffer);
     const GLenum indexType = sizeof(ImDrawIdx) == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
     GLuint bound = ~0u;
     int vtxBase = 0, idxBase = 0;
@@ -207,7 +207,7 @@ void overlay_draw(ImDrawData* d, int ww, int wh) {
             }
             glScissor(int(x0), int(wh - y1), int(x1 - x0), int(y1 - y0));
             glDrawElementsBaseVertex(GL_TRIANGLES, GLsizei(c.ElemCount), indexType,
-                                     (void*)(uintptr_t((c.IdxOffset + idxBase) * sizeof(ImDrawIdx))),
+                                     (void*)(uintptr_t(is.offset) + uintptr_t((c.IdxOffset + idxBase) * sizeof(ImDrawIdx))),
                                      GLint(c.VtxOffset + vtxBase));
         }
         vtxBase += l->VtxBuffer.Size;

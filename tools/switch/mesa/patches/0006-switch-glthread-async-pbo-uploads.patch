@@ -1,0 +1,285 @@
+diff --git a/src/mapi/glapi/gen/gl_API.xml b/src/mapi/glapi/gen/gl_API.xml
+index d421e77..271c8ce 100644
+--- a/src/mapi/glapi/gen/gl_API.xml
++++ b/src/mapi/glapi/gen/gl_API.xml
+@@ -3325,7 +3325,7 @@
+         <glx rop="4099" large="true"/>
+     </function>
+ 
+-    <function name="TexSubImage2D" es1="1.0" es2="2.0" no_error="true">
++    <function name="TexSubImage2D" es1="1.0" es2="2.0" no_error="true" marshal="custom">
+         <param name="target" type="GLenum"/>
+         <param name="level" type="GLint"/>
+         <param name="xoffset" type="GLint"/>
+@@ -4039,7 +4039,7 @@
+         <glx rop="4114" large="true"/>
+     </function>
+ 
+-    <function name="TexSubImage3D" es2="3.0" no_error="true">
++    <function name="TexSubImage3D" es2="3.0" no_error="true" marshal="custom">
+         <param name="target" type="GLenum"/>
+         <param name="level" type="GLint"/>
+         <param name="xoffset" type="GLint"/>
+@@ -4560,7 +4560,7 @@
+         <glx rop="214" handcode="client"/>
+     </function>
+ 
+-    <function name="CompressedTexSubImage3D" es2="3.0" marshal="sync"
++    <function name="CompressedTexSubImage3D" es2="3.0" marshal="custom"
+               no_error="true">
+         <param name="target" type="GLenum"/>
+         <param name="level" type="GLint"/>
+@@ -4576,7 +4576,7 @@
+         <glx rop="219" handcode="client"/>
+     </function>
+ 
+-    <function name="CompressedTexSubImage2D" es1="1.0" es2="2.0" marshal="sync"
++    <function name="CompressedTexSubImage2D" es1="1.0" es2="2.0" marshal="custom"
+               no_error="true">
+         <param name="target" type="GLenum"/>
+         <param name="level" type="GLint"/>
+@@ -5058,7 +5058,7 @@
+     <type name="sizeiptr" size="4"  unsigned="true" glx_name="CARD32"/>
+ 
+     <function name="BindBuffer" es1="1.1" es2="2.0" no_error="true"
+-              marshal_call_after="if (COMPAT) _mesa_glthread_BindBuffer(ctx, target, buffer);">
++              marshal_call_after="if (COMPAT || target == GL_PIXEL_UNPACK_BUFFER) _mesa_glthread_BindBuffer(ctx, target, buffer);">
+         <param name="target" type="GLenum"/>
+         <param name="buffer" type="GLuint"/>
+         <glx ignore="true"/>
+@@ -5082,7 +5082,7 @@
+     </function>
+ 
+     <function name="DeleteBuffers" es1="1.1" es2="2.0" no_error="true"
+-              marshal_call_after="if (COMPAT) _mesa_glthread_DeleteBuffers(ctx, n, buffer);">
++              marshal_call_after="_mesa_glthread_DeleteBuffers(ctx, n, buffer);">
+         <param name="n" type="GLsizei" counter="true"/>
+         <param name="buffer" type="const GLuint *" count="n"/>
+         <glx ignore="true"/>
+diff --git a/src/mesa/main/glthread.h b/src/mesa/main/glthread.h
+index a50b2f8..16b7af4 100644
+--- a/src/mesa/main/glthread.h
++++ b/src/mesa/main/glthread.h
+@@ -113,6 +113,8 @@ struct glthread_state
+    /** Currently-bound buffer object IDs. */
+    GLuint CurrentArrayBufferName;
+    GLuint CurrentDrawIndirectBufferName;
++   /** Switch (SwitchWakerHD patch 0006): texture uploads from it are queued (glthread_bufferobj.c) */
++   GLuint CurrentPixelUnpackBufferName;
+ };
+ 
+ void _mesa_glthread_init(struct gl_context *ctx);
+diff --git a/src/mesa/main/glthread_bufferobj.c b/src/mesa/main/glthread_bufferobj.c
+index 2a9c913..562d41d 100644
+--- a/src/mesa/main/glthread_bufferobj.c
++++ b/src/mesa/main/glthread_bufferobj.c
+@@ -66,6 +66,9 @@ _mesa_glthread_BindBuffer(struct gl_context *ctx, GLenum target, GLuint buffer)
+    case GL_DRAW_INDIRECT_BUFFER:
+       glthread->CurrentDrawIndirectBufferName = buffer;
+       break;
++   case GL_PIXEL_UNPACK_BUFFER:
++      glthread->CurrentPixelUnpackBufferName = buffer;
++      break;
+    }
+ }
+ 
+@@ -87,6 +90,8 @@ _mesa_glthread_DeleteBuffers(struct gl_context *ctx, GLsizei n,
+          _mesa_glthread_BindBuffer(ctx, GL_ELEMENT_ARRAY_BUFFER, 0);
+       if (id == glthread->CurrentDrawIndirectBufferName)
+          _mesa_glthread_BindBuffer(ctx, GL_DRAW_INDIRECT_BUFFER, 0);
++      if (id == glthread->CurrentPixelUnpackBufferName)
++         _mesa_glthread_BindBuffer(ctx, GL_PIXEL_UNPACK_BUFFER, 0);
+    }
+ }
+ 
+@@ -319,3 +324,190 @@ _mesa_marshal_NamedBufferSubDataEXT(GLuint buffer, GLintptr offset,
+    _mesa_marshal_BufferSubData_merged(buffer, offset, size, data, true,
+                                       true, "NamedBufferSubDataEXT");
+ }
++
++/* Switch (SwitchWakerHD patch 0006): texture uploads from a pixel unpack buffer are queued like any
++ * other command (their pointer is an offset into the buffer), as Mesa 20.3 and later do; from client
++ * memory they stay synchronous. Mesa 20.1 waited for the GL thread to run everything queued before
++ * every glTexSubImage / glCompressedTexSubImage, which made area changes stall the render thread. */
++struct marshal_cmd_TexSubImage2D
++{
++   struct marshal_cmd_base cmd_base;
++   GLenum target, format, type;
++   GLint level, xoffset, yoffset;
++   GLsizei width, height;
++   const GLvoid *pixels;
++};
++
++void
++_mesa_unmarshal_TexSubImage2D(struct gl_context *ctx,
++                              const struct marshal_cmd_TexSubImage2D *cmd)
++{
++   CALL_TexSubImage2D(ctx->CurrentServerDispatch,
++                      (cmd->target, cmd->level, cmd->xoffset, cmd->yoffset, cmd->width,
++                       cmd->height, cmd->format, cmd->type, cmd->pixels));
++}
++
++void GLAPIENTRY
++_mesa_marshal_TexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
++                            GLsizei width, GLsizei height, GLenum format, GLenum type,
++                            const GLvoid *pixels)
++{
++   GET_CURRENT_CONTEXT(ctx);
++   if (!ctx->GLThread.CurrentPixelUnpackBufferName) {
++      _mesa_glthread_finish_before(ctx, "TexSubImage2D");
++      CALL_TexSubImage2D(ctx->CurrentServerDispatch,
++                         (target, level, xoffset, yoffset, width, height, format, type, pixels));
++      return;
++   }
++   struct marshal_cmd_TexSubImage2D *cmd =
++      _mesa_glthread_allocate_command(ctx, DISPATCH_CMD_TexSubImage2D, sizeof(*cmd));
++   cmd->target = target;
++   cmd->level = level;
++   cmd->xoffset = xoffset;
++   cmd->yoffset = yoffset;
++   cmd->width = width;
++   cmd->height = height;
++   cmd->format = format;
++   cmd->type = type;
++   cmd->pixels = pixels;
++}
++
++struct marshal_cmd_TexSubImage3D
++{
++   struct marshal_cmd_base cmd_base;
++   GLenum target, format, type;
++   GLint level, xoffset, yoffset, zoffset;
++   GLsizei width, height, depth;
++   const GLvoid *pixels;
++};
++
++void
++_mesa_unmarshal_TexSubImage3D(struct gl_context *ctx,
++                              const struct marshal_cmd_TexSubImage3D *cmd)
++{
++   CALL_TexSubImage3D(ctx->CurrentServerDispatch,
++                      (cmd->target, cmd->level, cmd->xoffset, cmd->yoffset, cmd->zoffset,
++                       cmd->width, cmd->height, cmd->depth, cmd->format, cmd->type,
++                       cmd->pixels));
++}
++
++void GLAPIENTRY
++_mesa_marshal_TexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
++                            GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
++                            GLenum format, GLenum type, const GLvoid *pixels)
++{
++   GET_CURRENT_CONTEXT(ctx);
++   if (!ctx->GLThread.CurrentPixelUnpackBufferName) {
++      _mesa_glthread_finish_before(ctx, "TexSubImage3D");
++      CALL_TexSubImage3D(ctx->CurrentServerDispatch,
++                         (target, level, xoffset, yoffset, zoffset, width, height, depth,
++                          format, type, pixels));
++      return;
++   }
++   struct marshal_cmd_TexSubImage3D *cmd =
++      _mesa_glthread_allocate_command(ctx, DISPATCH_CMD_TexSubImage3D, sizeof(*cmd));
++   cmd->target = target;
++   cmd->level = level;
++   cmd->xoffset = xoffset;
++   cmd->yoffset = yoffset;
++   cmd->zoffset = zoffset;
++   cmd->width = width;
++   cmd->height = height;
++   cmd->depth = depth;
++   cmd->format = format;
++   cmd->type = type;
++   cmd->pixels = pixels;
++}
++
++struct marshal_cmd_CompressedTexSubImage2D
++{
++   struct marshal_cmd_base cmd_base;
++   GLenum target, format;
++   GLint level, xoffset, yoffset;
++   GLsizei width, height, imageSize;
++   const GLvoid *data;
++};
++
++void
++_mesa_unmarshal_CompressedTexSubImage2D(struct gl_context *ctx,
++                                        const struct marshal_cmd_CompressedTexSubImage2D *cmd)
++{
++   CALL_CompressedTexSubImage2D(ctx->CurrentServerDispatch,
++                                (cmd->target, cmd->level, cmd->xoffset, cmd->yoffset,
++                                 cmd->width, cmd->height, cmd->format, cmd->imageSize,
++                                 cmd->data));
++}
++
++void GLAPIENTRY
++_mesa_marshal_CompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset,
++                                      GLint yoffset, GLsizei width, GLsizei height,
++                                      GLenum format, GLsizei imageSize, const GLvoid *data)
++{
++   GET_CURRENT_CONTEXT(ctx);
++   if (!ctx->GLThread.CurrentPixelUnpackBufferName) {
++      _mesa_glthread_finish_before(ctx, "CompressedTexSubImage2D");
++      CALL_CompressedTexSubImage2D(ctx->CurrentServerDispatch,
++                                   (target, level, xoffset, yoffset, width, height, format,
++                                    imageSize, data));
++      return;
++   }
++   struct marshal_cmd_CompressedTexSubImage2D *cmd =
++      _mesa_glthread_allocate_command(ctx, DISPATCH_CMD_CompressedTexSubImage2D, sizeof(*cmd));
++   cmd->target = target;
++   cmd->level = level;
++   cmd->xoffset = xoffset;
++   cmd->yoffset = yoffset;
++   cmd->width = width;
++   cmd->height = height;
++   cmd->format = format;
++   cmd->imageSize = imageSize;
++   cmd->data = data;
++}
++
++struct marshal_cmd_CompressedTexSubImage3D
++{
++   struct marshal_cmd_base cmd_base;
++   GLenum target, format;
++   GLint level, xoffset, yoffset, zoffset;
++   GLsizei width, height, depth, imageSize;
++   const GLvoid *data;
++};
++
++void
++_mesa_unmarshal_CompressedTexSubImage3D(struct gl_context *ctx,
++                                        const struct marshal_cmd_CompressedTexSubImage3D *cmd)
++{
++   CALL_CompressedTexSubImage3D(ctx->CurrentServerDispatch,
++                                (cmd->target, cmd->level, cmd->xoffset, cmd->yoffset,
++                                 cmd->zoffset, cmd->width, cmd->height, cmd->depth,
++                                 cmd->format, cmd->imageSize, cmd->data));
++}
++
++void GLAPIENTRY
++_mesa_marshal_CompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset,
++                                      GLint yoffset, GLint zoffset, GLsizei width,
++                                      GLsizei height, GLsizei depth, GLenum format,
++                                      GLsizei imageSize, const GLvoid *data)
++{
++   GET_CURRENT_CONTEXT(ctx);
++   if (!ctx->GLThread.CurrentPixelUnpackBufferName) {
++      _mesa_glthread_finish_before(ctx, "CompressedTexSubImage3D");
++      CALL_CompressedTexSubImage3D(ctx->CurrentServerDispatch,
++                                   (target, level, xoffset, yoffset, zoffset, width, height,
++                                    depth, format, imageSize, data));
++      return;
++   }
++   struct marshal_cmd_CompressedTexSubImage3D *cmd =
++      _mesa_glthread_allocate_command(ctx, DISPATCH_CMD_CompressedTexSubImage3D, sizeof(*cmd));
++   cmd->target = target;
++   cmd->level = level;
++   cmd->xoffset = xoffset;
++   cmd->yoffset = yoffset;
++   cmd->zoffset = zoffset;
++   cmd->width = width;
++   cmd->height = height;
++   cmd->depth = depth;
++   cmd->format = format;
++   cmd->imageSize = imageSize;
++   cmd->data = data;
++}

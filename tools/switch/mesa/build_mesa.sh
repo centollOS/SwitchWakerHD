@@ -13,7 +13,9 @@
 #   0003  the disk shader cache on Horizon, one file under $MESA_SHADER_CACHE_DIR
 #   0004  nvc0's code generation through that cache
 #   0005  mesa_switch_glthread_start (SwitchWakerHD): starts the GL thread without reading Mesa's
-#         structures at fixed offsets. It changes no compiled code, so it is not part of the cache key.
+#         structures at fixed offsets
+#   0006  glthread: texture uploads from a pixel unpack buffer are queued, not synchronous (as Mesa 20.3)
+#   0005 and 0006 change no compiled shader code, so they are not part of the cache key.
 # Output: build/switch-mesa/prefix/{lib,include}. The driver build's name (a hash of the source and
 # every patch) keys the cache: a cache written by another build is discarded on the console.
 # Sources are downloaded once into build/switch-mesa/downloads and checked against their sha256.
@@ -69,7 +71,7 @@ ours=("$here"/patches/*.patch)
 work=$root/build/switch-mesa
 
 # patches that change no compiled shader code (not part of the cache key: an installed cache stays valid)
-not_in_key='0005-*'
+not_in_key='000[56]-*'
 id_input=$mesa_sha256
 for entry in "${dkp_patches[@]}"; do id_input+=" ${entry##* }"; done
 src_input=$id_input

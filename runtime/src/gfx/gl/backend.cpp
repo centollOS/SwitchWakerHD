@@ -1295,7 +1295,9 @@ void present() {
     test_gpu_load();
     gpu_pass_mark("present", nullptr, nullptr);
     gpuTiming.end();
+#ifndef __SWITCH__
     check_texture_errors();
+#endif
     forget_gl_state();
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, R.windowFbo);
 #ifdef __SWITCH__
@@ -1388,6 +1390,10 @@ void present() {
         Stage stage("present: waiting for the GL thread");
         finish_gl_thread();  // switch-mesa's eglSwapBuffers flushes the driver from this thread
     }
+    // the frame's texture allocation errors: glGetError waits for Mesa's GL thread to run everything
+    // queued, which has just been done (at the start of present it waited for the whole frame: 10 ms/s
+    // on average, up to 80 ms in a second at area changes)
+    check_texture_errors();
 #endif
     gpuPasses.frame_end();
     gpuBusy.frame();  // its fence queries wait for the GL thread too: right after the wait above

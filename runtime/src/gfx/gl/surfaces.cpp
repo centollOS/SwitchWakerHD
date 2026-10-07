@@ -205,6 +205,22 @@ void create_surface_texture(Surface* s) {
                                  std::to_string(s->format) + ")");
 }
 
+// texture uploads through a pixel unpack buffer (the stream buffer): with the Mesa of tools/switch/mesa,
+// whose GL thread queues them (patch 0006); WWHD_GL_PBO_UPLOADS=0 uploads from client memory as before
+bool pbo_uploads() {
+    static const bool on = [] {
+#if defined(WWHD_MESA_STATS)
+        const char* e = getenv("WWHD_GL_PBO_UPLOADS");
+        const bool v = !(e && *e == '0');
+#else
+        const bool v = getenv("WWHD_GL_PBO_UPLOADS") && *getenv("WWHD_GL_PBO_UPLOADS") == '1';
+#endif
+        LOG("[gl] texture uploads: %s (WWHD_GL_PBO_UPLOADS)", v ? "through the stream buffer (queued)" : "from client memory");
+        return v;
+    }();
+    return on;
+}
+
 GLuint gen_texture_name() {
     static std::vector<GLuint> pool;
     if (pool.empty()) {
@@ -334,26 +350,38 @@ void upload_surface(Surface* s) {
         decode_level(s, level, data, w, h, slices);
         const FormatInfo& f = s->fmt;
         GLsizei size = (GLsizei)data.size();
+        // the decoded level goes through the stream buffer as a pixel unpack buffer: Mesa's GL thread
+        // queues the upload instead of waiting for everything queued before it (tools/switch/mesa
+        // patch 0006; Mesa 20.1 itself waited at every upload: 70-80 ms/s at area changes). The
+        // pointers below are then offsets into that buffer.
+        const uint8_t* src = data.data();
+        const bool pbo = pbo_uploads() && s->target != GL_TEXTURE_1D && size > 0;
+        if (pbo) {
+            const StreamSlice slice = stream_upload(data.data(), data.size(), 256);
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, slice.buffer);
+            src = reinterpret_cast<const uint8_t*>(uintptr_t(slice.offset));
+        }
         auto sub2d = [&](GLenum target, GLsizei width, GLsizei height, const uint8_t* p, GLsizei bytes) {
             if (f.compressed) glCompressedTexSubImage2D(target, level, 0, 0, width, height, f.internal, bytes, p);
             else glTexSubImage2D(target, level, 0, 0, width, height, f.format, f.type, p);
         };
         switch (s->target) {
         case GL_TEXTURE_1D: glTexSubImage1D(s->target, level, 0, w, f.format, f.type, data.data()); break;
-        case GL_TEXTURE_1D_ARRAY: sub2d(s->target, w, slices, data.data(), size); break;
-        case GL_TEXTURE_2D: sub2d(s->target, w, h, data.data(), size); break;
+        case GL_TEXTURE_1D_ARRAY: sub2d(s->target, w, slices, src, size); break;
+        case GL_TEXTURE_2D: sub2d(s->target, w, h, src, size); break;
         case GL_TEXTURE_CUBE_MAP: {
             GLsizei face = size / 6;
-            for (uint32_t i = 0; i < 6; i++) sub2d(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, w, h, data.data() + i * face, face);
+            for (uint32_t i = 0; i < 6; i++) sub2d(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, w, h, src + i * face, face);
             break;
         }
         default:
             if (f.compressed)
-                glCompressedTexSubImage3D(s->target, level, 0, 0, 0, w, h, slices, f.internal, size, data.data());
+                glCompressedTexSubImage3D(s->target, level, 0, 0, 0, w, h, slices, f.internal, size, src);
             else
-                glTexSubImage3D(s->target, level, 0, 0, 0, w, h, slices, f.format, f.type, data.data());
+                glTexSubImage3D(s->target, level, 0, 0, 0, w, h, slices, f.format, f.type, src);
             break;
         }
+        if (pbo) glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);  // texture allocations read no data from it
     }
     s->contentHash = hash;
     s->writeSeq = next_write_seq();
