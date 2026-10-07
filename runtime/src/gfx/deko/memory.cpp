@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "dk_bisect.h"
 #include "runtime.h"
 
 namespace gfxdk {
@@ -297,7 +298,9 @@ bool code_load(DkShader& shader, const void* dksh, uint32_t size, const char* na
         LOG("[dk] shader code memory full: %s (%u bytes) not loaded", name, size);
         return false;
     }
-    memcpy(static_cast<uint8_t*>(dkMemBlockGetCpuAddr(g_code)) + at, dksh, size);
+    uint8_t* const dst = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(g_code)) + at;
+    memcpy(dst, dksh, size);
+    bisect_patch_dksh(dst, size);  // grass bisection switches (dk_bisect.h)
     DkShaderMaker m;
     dkShaderMakerDefaults(&m, g_code, at);
     dkShaderInitialize(&shader, &m);

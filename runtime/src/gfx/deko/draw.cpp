@@ -8,6 +8,7 @@
 // bindings and state that differ from what the command buffer already has (StateCache, reset by
 // forget_state), the vertex streams and the draw itself.
 #include "dk_draw.h"
+#include "dk_bisect.h"
 
 #include <algorithm>
 #include <array>
@@ -840,6 +841,7 @@ void draw_frame_start() {
                 "clears reset it", sync_zcull_keep() ? "when another depth buffer or layer was bound since"
                                                      : "at every depth-target bind");
         sync_log_switches();
+        bisect_log();
         static const char* const kUf[] = {"0, packed into a new stream slice every draw (P2)",
                                           "1, a copy per shader, a new slice only when a value changed",
                                           "2, a copy per shader in one slice per frame, changed pieces pushed "
@@ -1415,7 +1417,8 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         // flat varyings' vertex: the last, as gfx/gl (it never calls glProvokingVertex: GL's default
         // GL_LAST_VERTEX_CONVENTION, and the triangle lists both make of fans and quads have the same order)
         rs.provokingVertex = provoking_vertex(r);
-        const bool offset = pm.get_OFFSET_FRONT_ENABLED();
+        const DepthBiasMode biasMode = bisect().depthBias;  // WWHD_DK_DEPTH_BIAS (dk_bisect.h)
+        const bool offset = pm.get_OFFSET_FRONT_ENABLED() && biasMode != DepthBiasMode::Off;
         rs.depthBiasEnableMask = offset ? DkPolygonFlag_All : 0;
         if (!gs.rasterKnown || !same_bytes(gs.raster, rs)) {
             dkCmdBufBindRasterizerState(R.cmd, &rs);
@@ -1423,8 +1426,13 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             gs.rasterKnown = true;
         }
         if (offset) {
-            const float bias[3] = {f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET]), f32(r[REGADDR::PA_SU_POLY_OFFSET_CLAMP]),
-                                   f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE]) / 16};
+            // gfx/gl's glPolygonOffset(scale / 16, offset): Mesa programs no clamp (0); deko3d doubles the units
+            // as Mesa nvc0 does. WWHD_DK_DEPTH_BIAS=latte takes the clamp from Latte's register (the P2-P4 path)
+            const float units = f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET]);
+            const float slope = f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE]) / 16;
+            const float bias[3] = {biasMode == DepthBiasMode::Units2 ? units * 2 : units,
+                                   biasMode == DepthBiasMode::Latte ? f32(r[REGADDR::PA_SU_POLY_OFFSET_CLAMP]) : 0.0f,
+                                   biasMode == DepthBiasMode::NoSlope ? 0.0f : slope};
             if (!gs.depthBiasKnown || memcmp(gs.depthBias, bias, sizeof bias)) {
                 dkCmdBufSetDepthBias(R.cmd, bias[0], bias[1], bias[2]);
                 memcpy(gs.depthBias, bias, sizeof bias);
@@ -1633,6 +1641,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     lap(R.perf.stateNs);
 
     // ---- draw
+    bisect_before_draw(pm.get_OFFSET_FRONT_ENABLED());  // grass bisection: shader invalidate, decal barriers
     if (indexed) {
         const int restart = stripRestart ? 1 : 0;
         const uint32_t hostRestart = indices.format == DkIdxFormat_Uint16 ? 0xFFFFu : 0xFFFFFFFFu;

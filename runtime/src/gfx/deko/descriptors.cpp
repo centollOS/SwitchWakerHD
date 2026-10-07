@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "Cafe/HW/Latte/ISA/LatteReg.h"
+#include "dk_bisect.h"
 #include "dk_surfaces.h"
 #include "runtime.h"
 #include "surf_internal.h"
@@ -204,7 +205,8 @@ void sampler_used(uint32_t id) {
 
 void commit_descriptors() {
     if (!g_dirty) return;
-    dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Descriptors);
+    // WWHD_DK_DESC_WFI (dk_bisect.h): wait for idle first, as Mesa's TIC_FLUSH / TSC_FLUSH (deko3d's are NoWfi)
+    dkCmdBufBarrier(R.cmd, bisect().descWfi ? DkBarrier_Primitives : DkBarrier_None, DkInvalidateFlags_Descriptors);
     g_dirty = false;
 }
 

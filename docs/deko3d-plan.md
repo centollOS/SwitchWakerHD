@@ -6,6 +6,56 @@ código o logs; **[S]** = supuesto a confirmar. Estado: P0 y P1 hechos y confirm
 
 ## Estado (2026-10-07, rama `deko3d`)
 
+**fix-grass2 (2026-10-07; compilado, SIN probar en hardware): NRO de bisección de las motas 4x8.** Motas que
+parpadean en bloques de 4x8 píxeles alineados (x%4 = 0, y%8 = 0) en exteriores de islas (hierba, arena) y en la
+Caverna del Dragón (M_NewD2); limpio en interiores (casas de Outset, Omori, kindan) y en GL. Descartados en hardware:
+zcull, compresión de color, contenido de texturas, P4 (ya estaba en P2). Datos (captura 1968): las motas son el color
+del suelo sin las capas de los decals (#2180-2186: polygon offset -0,5/-2, LEQUAL, sin escritura de depth, ZF32, sin
+stencil, blend src alpha); el depth no tiene motas. El alfa del decal sale solo de la máscara BC4 (PS3) y de dos
+uniforms; el color usa además una textura proyectada de 4096x4096 BC4 (t1) y el buffer 960x540 (t2).
+
+Hipótesis principal (confianza media-baja, sin prueba): **planificación de instrucciones de uam**. 4x8 = 32 píxeles =
+un warp: algo falla para un warp entero y depende del tiempo. El hardware es el mismo que con GL, y los registros del
+draw coinciden con Mesa nvc0 (bias con unidades x2 en ambos, A2C, MSAA, stencil, depth clamp, zcull apagado); lo que
+sí difiere es el código del shader: el codegen de uam 1.1.0 activa el *dual issue* (`canDualIssue`, ausente en Mesa
+20.1) y cambia el cálculo de esperas de `SchedDataCalculatorGM107`; el shader del decal tiene 16 pares en dual issue.
+Un warp que lee un registro antes de que llegue el resultado de una TEX lenta (fallos de caché: la textura proyectada
+de 4096x4096 solo existe en exteriores/caverna) da un warp mal sombreado. No encontré a mano una espera que falte en el
+binario del decal (barreras coherentes), por eso la confianza es media-baja. Otras diferencias reales con GL que se
+prueban: clamp del polygon offset (GL/Mesa: 0; deko3d usaba `PA_SU_POLY_OFFSET_CLAMP`), invalidación de descriptores
+sin WFI (Mesa usa TIC_FLUSH/TSC_FLUSH con espera), código de shader cargado a mitad de frame sin invalidar las cachés
+de shader (deko3d solo lo hace en `dkQueueFlush`), tiled cache nunca escrito, perf knob de subtiling (uam 0x087F6080,
+Mesa 0x20164010), early/late Z.
+
+Interruptores (`gfx/deko/dk_bisect.h`, `bisect.cpp`; cada uno en una línea `[dk] grass bisect:` al arrancar):
+
+| Interruptor | Por defecto | Valores |
+|---|---|---|
+| `WWHD_DK_SHADER_SCHED` | **2** | 0 como compila uam; 1 sin dual issue; 2 sin dual issue + cada instrucción espera todos los scoreboards; 3 = 2 + stall 15 (lento) |
+| `WWHD_DK_DEPTH_BIAS` | **gl** | gl (sin clamp, como Mesa); latte (clamp del registro: lo de antes); off; units2; noslope |
+| `WWHD_DK_DESC_WFI` | **1** | 1 espera a idle antes de invalidar descriptores; 0 como antes |
+| `WWHD_DK_SHADER_INVALIDATE` | **1** | 1 invalida cachés de shader tras cargar código a mitad de frame; 0 como antes |
+| `WWHD_DK_TILED_OFF` | **1** | 1 tiled cache apagado explícitamente cada frame; 0 sin tocarlo (lo de antes) |
+| `WWHD_DK_DECAL_BARRIER` | 0 | 1 barrier Fragments antes de cada draw con depth bias (y tras la tanda); 2 barrier Full |
+| `WWHD_DK_EARLY_Z` | 0 | 1 early Z forzado (shaders sin kill ni escritura de depth); 2 late Z en todos (bit KillsPixels del SPH) |
+| `WWHD_DK_PS_KNOB` | 0 | mesa: perf knob de subtiling de Mesa en los fragment shaders |
+
+Siguen valiendo `WWHD_DK_LAZY_BARRIERS=0`, `WWHD_DK_ZCULL_KEEP=0`, `WWHD_DK_DEPTH_SAMPLE_BOUND=0`,
+`WWHD_DK_UPLOAD_BATCH=0`, `WWHD_DK_UF_CACHE=0|1`, `WWHD_DK_SUBMIT_DRAWS=0`, `WWHD_DK_ZCULL=1`,
+`WWHD_DK_RT_COMPRESSION=0`.
+
+**Prueba (dueño):** `wwhd_dk_release.nro`, hierba de Outset (o la caverna), 1 min por línea, **una sola línea en
+`env.txt` cada vez**; anotar motas sí/no y fps:
+1. sin `env.txt` (defaults de arriba). Se espera limpio; `SHADER_SCHED=2` puede costar fps.
+2. Si 1 está limpio, para saber cuál lo arregla: `WWHD_DK_SHADER_SCHED=1`, luego `WWHD_DK_SHADER_SCHED=0`,
+   `WWHD_DK_DESC_WFI=0`, `WWHD_DK_SHADER_INVALIDATE=0`, `WWHD_DK_DEPTH_BIAS=latte`, `WWHD_DK_TILED_OFF=0`. La que
+   devuelva las motas es la causa (si es `SHADER_SCHED=0` y `=1` limpio: el dual issue de uam).
+3. Si 1 aún tiene motas: `WWHD_DK_SHADER_SCHED=3`, `WWHD_DK_DECAL_BARRIER=2`, `WWHD_DK_EARLY_Z=2`,
+   `WWHD_DK_EARLY_Z=1`, `WWHD_DK_PS_KNOB=mesa`, `WWHD_DK_DEPTH_BIAS=off` (los decals desaparecen; mira si las motas
+   también), `WWHD_DK_DEPTH_BIAS=units2`, `WWHD_DK_LAZY_BARRIERS=0`, `WWHD_DK_SUBMIT_DRAWS=0`, `WWHD_DK_UF_CACHE=0`.
+4. Con el resultado, el arreglo definitivo: si es la planificación, parchear uam (sin dual issue, o la corrección
+   concreta) y regenerar `shadercache_dksh.bin` con un uamId nuevo en vez de parchear al cargar.
+
 **P4 integrado (2026-10-07; compilado, SIN probar en hardware).** Merges de `p4-resources`, `p4-gpu`, `p4-prims` y
 `p4-docked` sobre `deko3d` (tras los dos commits del arreglo de texturas, 67aab8b). Conflictos solo de texto: las
 líneas `[dk]` de arranque en `draw_frame_start` y las líneas de cada 5 s en `backend.cpp` (se quedan todas) y las

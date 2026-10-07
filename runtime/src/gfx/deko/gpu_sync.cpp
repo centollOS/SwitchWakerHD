@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "dk_bisect.h"
 #include "dk_surfaces.h"
 #include "runtime.h"
 
@@ -139,6 +140,8 @@ void sync_frame_start() {
         if (!sized && (g_tileW != 128 || g_tileH != 128)) dkCmdBufSetTileSize(R.cmd, g_tileW, g_tileH);
         sized = true;
         dkCmdBufTiledCacheOp(R.cmd, DkTiledCacheOp_Enable);
+    } else if (bisect().tiledOff) {
+        dkCmdBufTiledCacheOp(R.cmd, DkTiledCacheOp_Disable);  // WWHD_DK_TILED_OFF (dk_bisect.h)
     }
 }
 
