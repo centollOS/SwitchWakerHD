@@ -38,15 +38,6 @@ struct Bisect {
 const Bisect& bisect();
 void bisect_log();  // the startup lines (draw_frame_start)
 
-// The settings overlay's 'deko3d: diagnostico' section (Switch tab): render thread (the overlay is built there).
-// Without an env.txt value each switch comes from settings.ini (dkDiag.*), saved when changed. Depth bias, the
-// descriptor wait, the shader invalidate and the tiled cache apply at once; the scheduling patch applies to shaders
-// loaded after a restart. bisect_take_changed: true once after a change (draw_frame_start forgets the GL-like
-// state cache so the depth bias is sent again).
-Bisect& bisect_edit();
-void bisect_changed(const char* key, int value);
-bool bisect_take_changed();
-bool bisect_from_env(const char* key);  // the switch is set in env.txt (the menu's change lasts until exit)
 
 // code_load: patch the DKSH just copied to code memory (scheduling words, early Z, knob) before dkShaderInitialize
 void bisect_patch_dksh(uint8_t* dksh, uint32_t size);

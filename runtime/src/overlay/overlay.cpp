@@ -45,9 +45,6 @@
 #include "../platform/settings_switch.h"
 #include "../mods/warps.h"
 #endif
-#ifdef WWHD_HAS_DEKO3D
-#include "../gfx/deko/dk_bisect.h"
-#endif
 
 namespace interp {
 int mode();  // 0 off, 1 frame interpolation, 2 true 60
@@ -784,52 +781,6 @@ void tab_switch() {
         }
     }
     if (fps_counter_env()) note("env.txt sets WWHD_FPS: it is used at every start.");
-#ifdef WWHD_HAS_DEKO3D
-    // the grass-speck bisection switches (gfx/deko/dk_bisect.h), to test on the console without env.txt
-    heading("deko3d: diagnostico (motas)");
-    {
-        gfxdk::Bisect& b = gfxdk::bisect_edit();
-        static const char* const kSched[] = {"0: as uam compiled", "1: no dual issue", "2: no dual issue + waits",
-                                             "3: 2 + max stall"};
-        static int schedAtStart = -1;
-        if (schedAtStart < 0) schedAtStart = b.shaderSched;
-        ImGui::TextUnformatted("Shader scheduling (after a restart):");
-        for (int i = 0; i < 4; i++) {
-            if (i) ImGui::SameLine();
-            if (radio(kSched[i], b.shaderSched == i)) {
-                b.shaderSched = i;
-                gfxdk::bisect_changed("shaderSched", i);
-            }
-        }
-        if (b.shaderSched != schedAtStart) warn("Restart the game for the scheduling change (shaders are patched when loaded).");
-        static const char* const kBias[] = {"gl", "latte", "off", "units2", "noslope"};
-        ImGui::TextUnformatted("Depth bias:");
-        for (int i = 0; i < 5; i++) {
-            ImGui::SameLine();
-            if (radio(kBias[i], int(b.depthBias) == i)) {
-                b.depthBias = gfxdk::DepthBiasMode(i);
-                gfxdk::bisect_changed("depthBias", i);
-            }
-        }
-        bool v;
-        if (check("Descriptor invalidate waits for idle (as Mesa)", b.descWfi, &v)) {
-            b.descWfi = v;
-            gfxdk::bisect_changed("descWfi", v);
-        }
-        if (check("Invalidate shader caches after mid-frame shader loads", b.shaderInvalidate, &v)) {
-            b.shaderInvalidate = v;
-            gfxdk::bisect_changed("shaderInvalidate", v);
-        }
-        if (check("Tiled cache explicitly off", b.tiledOff, &v)) {
-            b.tiledOff = v;
-            gfxdk::bisect_changed("tiledOff", v);
-        }
-        if (gfxdk::bisect_from_env("WWHD_DK_SHADER_SCHED") || gfxdk::bisect_from_env("WWHD_DK_DEPTH_BIAS") ||
-            gfxdk::bisect_from_env("WWHD_DK_DESC_WFI") || gfxdk::bisect_from_env("WWHD_DK_SHADER_INVALIDATE") ||
-            gfxdk::bisect_from_env("WWHD_DK_TILED_OFF"))
-            note("env.txt sets some of these: env.txt wins at the next start.");
-    }
-#endif
     heading("Menu");
     note("Hold Minus for half a second to open this menu; B or Minus closes it. L / R change tabs.");
 }

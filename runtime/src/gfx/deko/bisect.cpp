@@ -7,7 +7,6 @@
 #include <string>
 
 #include "dk.h"
-#include "overlay/hostui.h"
 #include "runtime.h"
 
 namespace gfxdk {
@@ -18,20 +17,8 @@ int env_int(const char* name, int fallback) {
     return e && *e ? atoi(e) : fallback;
 }
 
-// settings.ini (the overlay's diagnostic section), unless env.txt sets the switch
-int saved_int(const char* env, const char* key, int fallback) {
-    if (const char* e = getenv(env); e && *e) return fallback;
-    std::string v;
-    return hostui::get(key, v) && !v.empty() ? atoi(v.c_str()) : fallback;
-}
-
 Bisect read_switches() {
     Bisect b;
-    b.shaderSched = saved_int("WWHD_DK_SHADER_SCHED", "dkDiag.shaderSched", b.shaderSched);
-    b.depthBias = DepthBiasMode(saved_int("WWHD_DK_DEPTH_BIAS", "dkDiag.depthBias", int(b.depthBias)));
-    b.descWfi = saved_int("WWHD_DK_DESC_WFI", "dkDiag.descWfi", b.descWfi) != 0;
-    b.shaderInvalidate = saved_int("WWHD_DK_SHADER_INVALIDATE", "dkDiag.shaderInvalidate", b.shaderInvalidate) != 0;
-    b.tiledOff = saved_int("WWHD_DK_TILED_OFF", "dkDiag.tiledOff", b.tiledOff) != 0;
     b.shaderSched = env_int("WWHD_DK_SHADER_SCHED", b.shaderSched);
     if (b.shaderSched < 0 || b.shaderSched > 3) b.shaderSched = 0;
     b.earlyZ = env_int("WWHD_DK_EARLY_Z", b.earlyZ);
@@ -73,29 +60,9 @@ struct Patched {
 } g_patched;
 }  // namespace
 
-Bisect& bisect_edit() {
-    static Bisect b = read_switches();
+const Bisect& bisect() {
+    static const Bisect b = read_switches();
     return b;
-}
-const Bisect& bisect() { return bisect_edit(); }
-
-namespace {
-bool g_changed = false;
-}
-void bisect_changed(const char* key, int value) {
-    g_changed = true;
-    LOG("[dk] grass bisect: %s = %d (settings overlay)", key, value);
-    std::string k = std::string("dkDiag.") + key, v = std::to_string(value);
-    hostui::post([k, v] { hostui::set(k.c_str(), v); });
-}
-bool bisect_take_changed() {
-    const bool c = g_changed;
-    g_changed = false;
-    return c;
-}
-bool bisect_from_env(const char* key) {
-    const char* e = getenv(key);
-    return e && *e;
 }
 
 void bisect_patch_dksh(uint8_t* p, uint32_t size) {
