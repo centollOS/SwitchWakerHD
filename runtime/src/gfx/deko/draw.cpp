@@ -216,6 +216,18 @@ struct TextureCacheEntry {
 };
 TextureCacheEntry textureCache[2][LATTE_NUM_MAX_TEX_UNITS];  // vertex, pixel
 const bool textureCacheOn = !env_switch("NO_TEXTURE_CACHE", false);
+// P4 resources lane: behind the per-unit entry (the last lookup of the unit), a table of recent lookups by their
+// words (WWHD_DK_TEX_TABLE, on unless 0): draws that alternate materials on a unit find them there instead of
+// redoing the lookup (find_or_create_surface's multimap, the view and sampler maps)
+const bool textureTableOn = env_switch("TEX_TABLE", true);
+constexpr uint32_t kTextureTableSize = 1024;
+TextureCacheEntry textureTable[kTextureTableSize];
+inline TextureCacheEntry& texture_table_entry(const uint32_t* words, const uint32_t* sampler, bool compare) {
+    uint64_t h = compare ? 0x9E3779B97F4A7C15ull : 0xCBF29CE484222325ull;
+    for (int i = 0; i < 7; i++) h = (h ^ words[i]) * 0x100000001B3ull;
+    for (int i = 0; i < 3; i++) h = (h ^ sampler[i]) * 0x100000001B3ull;
+    return textureTable[(h ^ (h >> 29) ^ (h >> 47)) & (kTextureTableSize - 1)];
+}
 inline bool texture_entry_hit(const TextureCacheEntry& e, const uint32_t* words, const uint32_t* sampler, bool compare) {
     return e.epoch == R.surfaceEpoch && e.textureEpoch == R.textureEpoch && e.compare == compare &&
            !memcmp(e.words, words, sizeof e.words) && !memcmp(e.sampler, sampler, sizeof e.sampler);
@@ -225,7 +237,7 @@ inline bool texture_entry_hit(const TextureCacheEntry& e, const uint32_t* words,
 // draws (x kDrawTimeSample, as R.perf) and counts of every draw
 struct ResourcePerf {
     uint64_t targetNs = 0, uboNs = 0, textureNs = 0, textureMissNs = 0, uniformNs = 0, descriptorNs = 0, bindNs = 0;
-    uint64_t textureMisses = 0;
+    uint64_t textureMisses = 0, tableHits = 0, tableLookups = 0;
     uint64_t uboBlocks = 0, uboReused = 0;  // guest uniform blocks of draws; ... found already in this frame's stream
     uint64_t texBindCalls = 0, texHandles = 0, texWanted = 0;  // dkCmdBufBindTextures calls, handles; slots draws use
     uint64_t uboBindCalls = 0, uboBuffers = 0, uboWanted = 0;  // dkCmdBufBindUniformBuffers calls, buffers; slots
@@ -356,6 +368,15 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         uint32_t view, smp;
         TextureCacheEntry* found = nullptr;
         if (textureCacheOn && texture_entry_hit(cached, words, samplerWords, compare)) found = &cached;
+        else if (textureCacheOn && textureTableOn) {
+            g_res.tableLookups++;
+            TextureCacheEntry& t = texture_table_entry(words, samplerWords, compare);
+            if (texture_entry_hit(t, words, samplerWords, compare)) {
+                g_res.tableHits++;
+                cached = t;  // the unit's entry for the next draw
+                found = &t;
+            }
+        }
         if (found) {
             R.perf.textureCacheHits++;
             s = found->s;
@@ -385,6 +406,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             cached.s = s;
             cached.view = view;
             cached.smp = smp;
+            if (textureTableOn && unique) texture_table_entry(words, samplerWords, compare) = cached;
             if (lap.on) g_res.textureMissNs += (now_ns() - missStart) * kDrawTimeSample;
         }
         if (g_gamepadDrawing) {  // a texture of the GamePad picture
@@ -681,6 +703,8 @@ void draw_frame_start() {
         LOG("[dk] flat varyings: %s (WWHD_DK_PROVOKING_VERTEX=last|first|latte)", kProvoking[provoking_mode()]);
         LOG("[dk] zcull: on (queue), dropped at every depth-target bind and after copies, uploads or new images of "
             "a depth buffer; depth clears reset it");
+        LOG("[dk] resources (P4): texture lookup table %s (WWHD_DK_TEX_TABLE=0 off); textures and uniform blocks "
+            "bound only for slots that changed", textureCacheOn && textureTableOn ? "on" : "off");
     }
 }
 
@@ -692,12 +716,12 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
     auto perFrame = [&](uint64_t n) { return frames ? double(n) / double(frames) : 0.0; };
     auto pct = [](uint64_t a, uint64_t b) { return b ? 100.0 * double(a) / double(b) : 0.0; };
     LOG("[dk] resources us per draw: targets %.2f + uniform blocks %.2f + textures %.2f (misses %.2f: %.1f/frame, "
-        "%.2f us each) + ufBlock %.2f + descriptors %.2f; binds (in state) %.2f us: "
+        "%.2f us each; table %.0f%% of %.0f/frame) + ufBlock %.2f + descriptors %.2f; binds (in state) %.2f us: "
         "textures %.2f calls %.2f handles of %.2f slots, uniform blocks %.2f calls %.2f buffers of %.2f slots; guest "
         "uniform blocks %.2f/draw (%.0f%% already in the stream)",
         us(p.targetNs), us(p.uboNs), us(p.textureNs), us(p.textureMissNs), perFrame(p.textureMisses),
         p.textureMisses ? double(p.textureMissNs) / 1e3 / double(p.textureMisses) : 0.0,
-        us(p.uniformNs), us(p.descriptorNs), us(p.bindNs),
+        pct(p.tableHits, p.tableLookups), perFrame(p.tableLookups), us(p.uniformNs), us(p.descriptorNs), us(p.bindNs),
         perDraw(p.texBindCalls), perDraw(p.texHandles), perDraw(p.texWanted), perDraw(p.uboBindCalls),
         perDraw(p.uboBuffers), perDraw(p.uboWanted), perDraw(p.uboBlocks), pct(p.uboReused, p.uboBlocks));
 }
