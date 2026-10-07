@@ -52,7 +52,6 @@ bool parse(const char* s, Api& out) {
     if (!s) return false;
     if (!strcasecmp(s, "metal")) { out = Api::Metal; return true; }
     if (!strcasecmp(s, "vulkan") || !strcasecmp(s, "vk") || !strcasecmp(s, "moltenvk")) { out = Api::Vulkan; return true; }
-    if (!strcasecmp(s, "opengl") || !strcasecmp(s, "gl")) { out = Api::OpenGL; return true; }
     if (!strcasecmp(s, "deko3d") || !strcasecmp(s, "dk")) { out = Api::Deko3D; return true; }
     return false;
 }
@@ -63,9 +62,6 @@ const Backend* backend_for(Api a) {
 #endif
 #ifdef WWHD_HAS_VULKAN
     if (a == Api::Vulkan) return &vulkan_backend();
-#endif
-#ifdef WWHD_HAS_OPENGL
-    if (a == Api::OpenGL) return &opengl_backend();
 #endif
 #ifdef WWHD_HAS_DEKO3D
     if (a == Api::Deko3D) return &deko3d_backend();
@@ -78,8 +74,6 @@ Api default_api() {
     return Api::Metal;
 #elif defined(WWHD_HAS_DEKO3D)
     return Api::Deko3D;
-#elif defined(WWHD_HAS_OPENGL)
-    return Api::OpenGL;
 #else
     return Api::Vulkan;
 #endif
@@ -87,10 +81,10 @@ Api default_api() {
 }  // namespace
 
 const char* api_name(Api a) {
-    return a == Api::Vulkan ? "Vulkan" : a == Api::OpenGL ? "OpenGL" : a == Api::Deko3D ? "deko3d" : "Metal";
+    return a == Api::Vulkan ? "Vulkan" : a == Api::Deko3D ? "deko3d" : "Metal";
 }
 const char* api_key(Api a) {
-    return a == Api::Vulkan ? "vulkan" : a == Api::OpenGL ? "opengl" : a == Api::Deko3D ? "deko3d" : "metal";
+    return a == Api::Vulkan ? "vulkan" : a == Api::Deko3D ? "deko3d" : "metal";
 }
 bool compiled(Api a) { return backend_for(a) != nullptr; }
 bool can_choose() { return compiled(Api::Metal) && compiled(Api::Vulkan); }

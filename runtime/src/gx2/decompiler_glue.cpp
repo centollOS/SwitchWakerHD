@@ -5,7 +5,7 @@
 #ifdef WWHD_HAS_METAL
 #include "Cafe/HW/Latte/Renderer/Metal/MetalRenderer.h"
 #endif
-#if defined(WWHD_HAS_OPENGL) || defined(WWHD_HAS_DEKO3D)
+#ifdef WWHD_HAS_DEKO3D
 #include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
 #endif
 #include "gfx/renderer.h"
@@ -16,7 +16,7 @@
 // the OpenGL mode: the same GLSL, so the same shader cache keys (docs/deko3d-plan.md, section 1).
 #ifdef WWHD_HAS_METAL
 std::unique_ptr<Renderer> g_renderer = std::make_unique<MetalRenderer>();
-#elif defined(WWHD_HAS_OPENGL) || defined(WWHD_HAS_DEKO3D)
+#elif defined(WWHD_HAS_DEKO3D)
 std::unique_ptr<Renderer> g_renderer = std::make_unique<OpenGLRenderer>();
 #else
 std::unique_ptr<Renderer> g_renderer = std::make_unique<VulkanRenderer>();
@@ -28,8 +28,8 @@ void select_decompiler_api(render::Api api) {
         return;
     }
 #endif
-#if defined(WWHD_HAS_OPENGL) || defined(WWHD_HAS_DEKO3D)
-    if (api == render::Api::OpenGL || api == render::Api::Deko3D) {
+#ifdef WWHD_HAS_DEKO3D
+    if (api == render::Api::Deko3D) {
         g_renderer = std::make_unique<OpenGLRenderer>();
         return;
     }

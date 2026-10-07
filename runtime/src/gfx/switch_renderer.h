@@ -1,7 +1,6 @@
-// What the Switch renderer (OpenGL, gfx/gl; or deko3d, gfx/deko) offers the code around it: the
-// settings overlay's Switch tab (overlay/overlay.cpp), the saved options (platform/settings_switch.cpp)
-// and the capture combo (platform/input_switch.cpp). One Switch renderer is built into an executable
-// (CMake WWHD_RENDERER=OPENGL or DEKO3D), and it defines these functions.
+// What the Switch renderer (deko3d, gfx/deko) offers the code around it: the settings overlay's Switch
+// tab (overlay/overlay.cpp), the saved options (platform/settings_switch.cpp) and the capture combo
+// (platform/input_switch.cpp). gfx/deko defines these functions.
 #pragma once
 #include <string>
 

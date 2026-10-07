@@ -396,8 +396,7 @@ startup that `game/code/cking.rpx` matches the recompiled code.
 
 ### Switch (homebrew, experimental; see docs/switch-port.md)
 
-A deko3d renderer (the Switch's own GPU API; an OpenGL fallback on Mesa nouveau is built with
-`WWHD_RENDERER=OPENGL` as `wwhd_gl.nro`), built as an `.nro` for hbmenu. After steps 1 and 2 above
+A deko3d renderer (the Switch's own GPU API), built as an `.nro` for hbmenu. After steps 1 and 2 above
 (on a PC; needs podman or docker):
 
 ```sh

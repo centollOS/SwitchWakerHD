@@ -93,7 +93,7 @@ static const RegClasses& reg_classes() {
     static const RegClasses classes = [] {
         const char* e = getenv("WWHD_GL_SHADER_KEY_DIRTY");
         // deko3d translates shaders as the OpenGL renderer does (the decompiler's OpenGL mode)
-        const bool glKeyMask = (render::opengl() || render::deko3d()) && (!e || strcmp(e, "0") != 0);
+        const bool glKeyMask = render::deko3d() && (!e || strcmp(e, "0") != 0);
         RegClasses c;
         for (uint32 reg = 0; reg < kNumRegs; reg++) {
             uint32 mask = ~0u;

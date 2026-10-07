@@ -21,7 +21,6 @@
 #include <string>
 #include <thread>
 #ifdef __SWITCH__
-#include "platform/mesa_cache_switch.h"
 #include "platform/settings_switch.h"
 #include <sys/stat.h>
 #include <dirent.h>
@@ -473,15 +472,12 @@ int main(int argc, char** argv) {
     setvbuf(stderr, nullptr, _IOLBF, 0);
     log_session_header();
     // which round of docs/switch-port.md this runtime is (to tell builds apart in the logs)
-    LOG("[boot] recompiled code: %s; runtime: round 37 (CPU clock in the system table's steps, default 1224 MHz; settings menu on a Minus press; round 36 = shader budget: new shaders over frames, their draws skipped; round 35 = texture uploads from client memory again; round 34 = no framebuffer status query; round 33 = Warp tab; round 32 = queued texture uploads, texture error check after the GL thread finish; round 31 = CPU 1785 / GPU 614 options; round 30 = settings overlay on Minus; round 29 = official GPU profile 460.8 MHz handheld; round 28 = round 27 with the near-plane clip distance off, searchlight probe frames after a capture, per-draw trace in captures)",
+    LOG("[boot] recompiled code: %s; runtime: round 38 (deko3d only: the OpenGL renderer removed; round 37 = CPU clock in the system table's steps, default 1224 MHz; settings menu on a Minus press; round 36 = shader budget: new shaders over frames, their draws skipped; round 35 = texture uploads from client memory again; round 34 = no framebuffer status query; round 33 = Warp tab; round 32 = queued texture uploads, texture error check after the GL thread finish; round 31 = CPU 1785 / GPU 614 options; round 30 = settings overlay on Minus; round 29 = official GPU profile 460.8 MHz handheld; round 28 = round 27 with the near-plane clip distance off, searchlight probe frames after a capture, per-draw trace in captures)",
         g_recomp_variant);
     host::place_thread(0);
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
     load_switch_options(argc, argv);
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
-#ifdef WWHD_HAS_OPENGL
-    mesa_cache::setup();  // Mesa's persistent shader cache, before EGL starts
-#endif
 #endif
     apply_portable_mode();
 #ifdef _WIN32

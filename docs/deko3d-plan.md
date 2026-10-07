@@ -6,6 +6,11 @@ código o logs; **[S]** = supuesto a confirmar. Estado: **P5 hecho, deko3d por d
 
 ## Estado (2026-10-07, rama `deko3d`)
 
+**Renderer GL eliminado (2026-10-07, a petición del dueño):** `runtime/src/gfx/gl`, Mesa (`tools/switch/mesa`,
+`mesa_cache_switch`) y la build headless de Linux están en el histórico (`dev` 651ec1d). Para recolectar
+shaders nuevos (warp tour headless) hay que recuperar esa build; la consola sigue añadiendo los shaders que ve
+a `shadercache_gl.bin` y `tools/switch/dksh_cache` los compila.
+
 **P5 hecho (2026-10-07): deko3d es el renderer por defecto en Switch.** `tools/switch/build.sh` →
 `build/switch-dk/wwhd.nro` (hbmenu: "SwitchWakerHD", librería release; `WWHD_DEKO3D_DEBUG_LIB=ON` →
 `wwhd_dk_debug.nro`, "SwitchWakerHD (deko3d debug)"). GL queda como respaldo: `WWHD_RENDERER=OPENGL` →

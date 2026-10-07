@@ -8,9 +8,6 @@
 #elif defined(__SWITCH__)
 #include <switch.h>
 #include <thread>
-#elif defined(WWHD_HEADLESS_GL)
-#include <chrono>
-#include <thread>
 #else
 #include <SDL3/SDL.h>
 #endif
@@ -49,7 +46,7 @@ std::atomic<bool> g_started{false};
 std::atomic<bool> g_flush{false};  // consumer skips everything queued
 #if defined(__APPLE__) && !defined(WWHD_SDL_HOST)
 AudioComponentInstance g_unit = nullptr;
-#elif defined(__SWITCH__) || defined(WWHD_HEADLESS_GL)
+#elif defined(__SWITCH__)
 bool g_unit = false;
 #else
 SDL_AudioStream* g_unit = nullptr;
@@ -126,17 +123,6 @@ void audout_thread() {
         audoutAppendAudioOutBuffer(released);
     }
 }
-#elif defined(WWHD_HEADLESS_GL)
-// a silent device: the game's audio pacing sees samples consumed in real time
-void null_device_thread() {
-    static int16_t buffer[1024 * 2];
-    auto next = std::chrono::steady_clock::now();
-    for (;;) {
-        next += std::chrono::microseconds(1024 * 1000000 / kRate);
-        std::this_thread::sleep_until(next);
-        pull(buffer, 1024);
-    }
-}
 #else
 void SDLCALL render(void*,SDL_AudioStream* stream,int additional,int) {
     // SDL requests input bytes in our configured S16/stereo format. Keep the callback bounded.
@@ -199,10 +185,6 @@ void init() {
     g_unit = true;
     std::thread(audout_thread).detach();
     LOG("[audio] audout started (%u Hz, %u channels)", audoutGetSampleRate(), audoutGetChannelCount());
-#elif defined(WWHD_HEADLESS_GL)
-    g_unit = true;
-    std::thread(null_device_thread).detach();
-    LOG("[audio] headless build: silent output");
 #else
     if(!SDL_InitSubSystem(SDL_INIT_AUDIO)){LOG("[audio] SDL audio initialization: %s",SDL_GetError());return;}
     SDL_AudioSpec spec{SDL_AUDIO_S16,2,kRate};
