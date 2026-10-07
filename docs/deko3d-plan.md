@@ -1,13 +1,13 @@
 # Plan: renderer deko3d para SwitchWakerHD
 
-Plan redactado el 2026-10-07 por un agente de planificación (Fable) a partir del código (`dev` 30fd148,
+Plan redactado el 2026-10-07 por un agente de planificación (Fable) a partir del código (`dev` 194bb77,
 round 36), del prototipo de uam (`~/Documents/uam-proto`) y de los logs de hardware. **[V]** = verificado en
 código o logs; **[S]** = supuesto a confirmar. Estado: **P5 hecho, deko3d por defecto**; P0 y P1 hechos y confirmados en hardware; P2 probado en hardware (llega a Outset); P3 parte A (capturas, contador FPS, texturas, features) integrada, pendiente de prueba en hardware; P3 en hardware con rendimiento igual o algo mejor que GL; P4 (cuatro carriles) integrado, compilado y SIN probar en hardware; ver Estado.
 
 ## Estado (2026-10-07, rama `deko3d`)
 
 **Renderer GL eliminado (2026-10-07, a petición del dueño):** `runtime/src/gfx/gl`, Mesa (`tools/switch/mesa`,
-`mesa_cache_switch`) y la build headless de Linux están en el histórico (`dev` 651ec1d). Para recolectar
+`mesa_cache_switch`) y la build headless de Linux están en el histórico (`dev` 207349b). Para recolectar
 shaders nuevos (warp tour headless) hay que recuperar esa build; la consola sigue añadiendo los shaders que ve
 a `shadercache_gl.bin` y `tools/switch/dksh_cache` los compila.
 
@@ -71,7 +71,7 @@ Siguen valiendo `WWHD_DK_LAZY_BARRIERS=0`, `WWHD_DK_ZCULL_KEEP=0`, `WWHD_DK_DEPT
    concreta) y regenerar `shadercache_dksh.bin` con un uamId nuevo en vez de parchear al cargar.
 
 **P4 integrado (2026-10-07; compilado, SIN probar en hardware).** Merges de `p4-resources`, `p4-gpu`, `p4-prims` y
-`p4-docked` sobre `deko3d` (tras los dos commits del arreglo de texturas, 67aab8b). Conflictos solo de texto: las
+`p4-docked` sobre `deko3d` (tras los dos commits del arreglo de texturas, beae5ef). Conflictos solo de texto: las
 líneas `[dk]` de arranque en `draw_frame_start` y las líneas de cada 5 s en `backend.cpp` (se quedan todas) y las
 secciones del plan. `surfaces.cpp` solo recibe del carril GPU los ganchos de `dk_sync.h` (marcas de lectura/escritura
 por Surface); `capture.cpp` sin tocar; GL sin cambios (nada fuera de `gfx/deko` y este documento). NROs:
@@ -174,7 +174,7 @@ menús correctos (el juego en sí es P3).
 - **No portado aún:** FXAA, probes, rect lists (GL tampoco las dibuja), registros 2 de
   `shadercache_gl.bin`. (Escala interna, resolución dinámica, AO, aniso y timestamps por pase: carril P3 `p3-features`, abajo.)
 
-**P3 parte A (integrada en `deko3d` el 2026-10-07; compilada; SIN probar en hardware).** Tras 0ecc13d el propietario
+**P3 parte A (integrada en `deko3d` el 2026-10-07; compilada; SIN probar en hardware).** Tras cb984e7 el propietario
 llegó a Outset con `wwhd_dk.nro` y vio (1) algunas texturas mal y (2) el contador FPS roto, sin fotos ni log. Se integraron
 tres carriles: `p3-features`, `p3-capture` y `p3-textures` (este último entero redundante con `p3-features`: se queda la
 versión de features del AO y de los slots de sampler, más su línea de log de expulsiones). Compilan los tres NRO (GL sin

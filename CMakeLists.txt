@@ -5,7 +5,7 @@ project(wwhd_recomp C CXX)
 #   METAL  Metal only (macOS)
 #   VULKAN Vulkan only, with the portable SDL3 host (default on other platforms)
 #   DEKO3D deko3d (the Switch's own GPU API, docs/deko3d-plan.md) with the libnx host (Switch homebrew, the
-#          only one there; the OpenGL renderer it replaced was removed after dev 651ec1d)
+#          only one there; the OpenGL renderer it replaced was removed after dev 207349b)
 # Switch homebrew build: the devkitPro toolchain file (Switch.cmake) sets NX_ROOT
 if(DEFINED NX_ROOT)
   set(WWHD_SWITCH ON)

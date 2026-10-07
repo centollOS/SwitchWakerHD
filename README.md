@@ -104,7 +104,7 @@ tools/switch/dksh_cache/build.sh build <shadercache_gl.bin> build/shadercache_dk
 `shadercache_gl.bin` is the list of shader sources the console writes as it plays
 (`sdmc:/switch/wwhd/`); copy it back to the computer from time to time. A complete list was made by
 touring every stage with a headless desktop build that was removed with the OpenGL renderer (in git
-history at `651ec1d`; [docs/switch-port.md](docs/switch-port.md), "Harvesting the shader cache").
+history at `207349b`; [docs/switch-port.md](docs/switch-port.md), "Harvesting the shader cache").
 
 ## Install on the Switch
 
