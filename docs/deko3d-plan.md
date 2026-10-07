@@ -2,7 +2,7 @@
 
 Plan redactado el 2026-10-07 por un agente de planificación (Fable) a partir del código (`dev` 30fd148,
 round 36), del prototipo de uam (`~/Documents/uam-proto`) y de los logs de hardware. **[V]** = verificado en
-código o logs; **[S]** = supuesto a confirmar. Estado: P0 y P1 hechos y confirmados en hardware; P2 integrado en `deko3d`, pendiente de prueba en hardware; ver Estado.
+código o logs; **[S]** = supuesto a confirmar. Estado: P0 y P1 hechos y confirmados en hardware; P2 probado en hardware (llega a Outset); P3 parte A (capturas, contador FPS, texturas, features) integrada, pendiente de prueba en hardware; ver Estado.
 
 ## Estado (2026-10-07, rama `deko3d`)
 
@@ -54,6 +54,20 @@ menús correctos (el juego en sí es P3).
 - **No portado aún:** FXAA, probes, rect lists (GL tampoco las dibuja), registros 2 de
   `shadercache_gl.bin`. (Escala interna, resolución dinámica, AO, aniso y timestamps por pase: carril P3 `p3-features`, abajo.)
 
+**P3 parte A (integrada en `deko3d` el 2026-10-07; compilada; SIN probar en hardware).** Tras 0ecc13d el propietario
+llegó a Outset con `wwhd_dk.nro` y vio (1) algunas texturas mal y (2) el contador FPS roto, sin fotos ni log. Se integraron
+tres carriles: `p3-features`, `p3-capture` y `p3-textures` (este último entero redundante con `p3-features`: se queda la
+versión de features del AO y de los slots de sampler, más su línea de log de expulsiones). Compilan los tres NRO (GL sin
+cambios, deko3d debug y release). `kConvertRevision` no cambió: `shadercache_dksh.bin` de P2 sigue valiendo.
+- **Contador FPS:** causa probable encontrada (uam leía siempre `.x` del vector de glifos: "3333"); ver `p3-capture`.
+- **Texturas:** auditoría completa de `p3-textures` frente a GL (tabla de formatos, conversiones CPU byte a byte,
+  swizzles, detiling, layouts, subidas, samplers, slots, sRGB): sin discrepancias salvo el AO y los slots de sampler
+  (arreglados en `p3-features`). Los dos cambios de motor 2D para targets comprimidos se revirtieron (en deko3d la
+  compresión es del mapeo de memoria, el motor de copia la lee bien). Sospechas abiertas que solo el hardware decide:
+  (a) deko3d 0.5.0 nunca escribe el registro Maxwell 0x56E (framebuffer sRGB): si vale 0, lo dibujado en un target sRGB y
+  muestreado después sale **demasiado oscuro**; (b) las texturas depth dan (D,D,D,1) en deko3d y (D,0,0,1) en GL;
+  (c) la compresión de los targets (`WWHD_DK_RT_COMPRESSION=0` la descarta). Las capturas PNG deciden entre ellas.
+
 **P3 `p3-features` (compilado; SIN probar en hardware):** cada punto con su línea `[dk]` al arrancar.
 - **AO** (`draw.cpp`, `pack_uniforms` aoNoise): el arreglo de GL tal cual, `WWHD_AO_MODE` / `WWHD_NO_AO_QUIRK`, modo 2 por
   defecto (`[dk] AO quirk fix: mode N`; la tabla del renderer informa del modo, solo lectura como GL).
@@ -91,27 +105,27 @@ menús correctos (el juego en sí es P3).
   líneas `[dk] FPS counter self-test` (bits de los glifos, offsets de `TextUbo` frente a std140, lectura de prueba).
   El GLSL convertido del juego no usa ese patrón (comprobado en las 7680 conversiones de la cosecha).
 
-**Pruebas en hardware para el propietario (P2)** (ficheros en `build/deko3d-out/` del checkout principal):
-1. **Copiar** `wwhd_dk.nro` (libdeko3dd: validación, más lento) y `wwhd_dk_release.nro` (librería release, para medir)
-   a `sdmc:/switch/wwhd/`, y **`shadercache_dksh.bin` a `sdmc:/switch/wwhd/shadercache_dksh.bin`** (sustituye a la de
-   P1, que ya no vale: uamId distinto). `wwhd.nro` es el GL de esta rama, para comparar. Todas comparten `settings.ini`,
-   `env.txt`, `shadercache_gl.bin`; `wwhd.log` se sobrescribe (cada sesión queda en `logs/`).
-2. **wwhd_dk.nro primero.** Arranque: barra de progreso de la cache (unos segundos), luego la pantalla de título.
-   Mirar: logo y título derechos (no espejados en vertical), colores como en GL (ni lavados ni oscuros: sRGB), agua y
-   cielo animados, texto del menú legible; entrar en los menús (selección de partida, opciones) y volver. Hacer fotos
-   con el botón de captura en los mismos momentos con `wwhd_dk.nro` y con `wwhd.nro` (GL) para comparar. Al principio
-   faltarán objetos durante unos segundos mientras se compilan shaders que no están en la cache (se saltan sus draws);
-   deben aparecer solos. Si todo va bien, cargar partida e ir a Outset (P3 lo afinará; anotar lo que falle).
-3. **Si la imagen está espejada o faltan caras:** probar `WWHD_DK_FLIP_FRONT=1` en `env.txt`. Si hay basura/bloques en
-   los targets: `WWHD_DK_RT_COMPRESSION=0`. Si no se ve nada pero el juego suena: `WWHD_DK_TEST_PATTERN=1` comprueba que
-   la presentación funciona; mandar el log.
-4. **wwhd_dk_release.nro** después, en el mismo recorrido, para tiempos (fps, `[hitch]`, `render thread busy`).
-5. **Log** (`sdmc:/switch/wwhd/wwhd.log`): las últimas líneas ante cualquier cierre (`FATAL`, `[dk] deko3d error in ...`,
-   `queue is in an error state`); `[dk] shader worker: uam ready` (o `SELF-TEST FAILED`); la carga de las caches
-   (`shadercache_dksh.bin`: N DKSH, uamId); `[dk] surfaces self-check passed`; `[dk] TV picture: buffer ...` y
-   `presenting the game's TV picture`; cada 5 s las líneas `draws per frame` (executed alto, skipped bajando a 0),
-   `shaders` (pending bajando a 0, failed = 0) y `surfaces`; líneas `[dk] draws with the failed ... shader` o
-   `unsupported`. Los dos sticks pulsados registran un frame completo con sus pases (`[trace]`).
+**Prueba en hardware para el propietario (P3 parte A)** (ficheros en `build/deko3d-out/` del checkout principal):
+1. **Copiar** a `sdmc:/switch/wwhd/`: `wwhd_dk.nro` (hbmenu: "SwitchWakerHD (deko3d debug)", libdeko3dd con
+   validación) y `wwhd_dk_release.nro` (hbmenu: "SwitchWakerHD (deko3d)", librería release, para medir). `wwhd.nro` es el GL de
+   esta rama, para comparar. `shadercache_dksh.bin` no cambia desde P2 (copiarlo solo si en la SD no está esa versión).
+   No hace falta tocar `env.txt`: todo lo nuevo está activo por defecto.
+2. **Arrancar `wwhd_dk.nro`** y mirar el **contador FPS**: debe leerse "30.0 FPS" (o el número real), no "3333".
+3. **Ir a Outset** (o donde se vieran las texturas mal). Con una textura mal **en pantalla, pulsar a la vez los dos
+   sticks (L3 + R3)**. El juego se para un momento en ese frame (copia las imágenes de la GPU) y sigue; los PNG se siguen
+   escribiendo en segundo plano unos segundos: **esperar ~30 s** sin salir antes de la siguiente captura o de cerrar. El
+   log dice `[dk] capture of frame N: all M files done`. Hacer 2 o 3 capturas en sitios distintos con texturas mal.
+4. **Opcional, si hay tiempo:** salir, poner `WWHD_DK_RT_COMPRESSION=0` en `sdmc:/switch/wwhd/env.txt`, repetir una
+   captura en el mismo sitio y anotar si la textura sigue mal; luego quitar la línea. Si algo raro aparece con la
+   resolución (imagen borrosa, saltos), `WWHD_DYNAMIC_RES=0` la apaga.
+5. **Cerrar el juego desde el menú HOME** (así el log se cierra entero) y **montar la SD en el Mac** (hekate UMS). No
+   hace falta mandar nada a mano: se leen `sdmc:/switch/wwhd/captures/<frame>/` (`frame_<n>.png` = imagen de TV,
+   `frame_<n>_window.png` = pantalla final con el contador, `target_*.png`, `tex_*.png` y `tex_*_upload.png`),
+   `sdmc:/switch/wwhd/wwhd.log` y `sdmc:/switch/wwhd/logs/`. Basta con decir en una frase qué se veía mal (qué objeto
+   o zona: "la hierba negra", "el mar a cuadros"...), para buscarlo en las capturas.
+6. **wwhd_dk_release.nro** después, solo si el debug fue bien: mismo recorrido, para los tiempos (`fps`, `[hitch]`,
+   `[dk] GPU passes`, `[dk] internal resolution`).
+Si algo se cierra: el log tiene las últimas líneas (`FATAL`, `[dk] deko3d error in ...`, `queue is in an error state`).
 
 ## P2: carriles (interfaces en la rama `deko3d`)
 
