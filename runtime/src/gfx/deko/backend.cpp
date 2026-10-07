@@ -1012,7 +1012,7 @@ const Backend& deko3d_backend() {
         b.shutdown = [] { gfxdk::save_shader_cache(); };  // the queue belongs to the render thread
         b.res_scale = [] { return 1.0f; };
         b.set_res_scale = [](float) {};
-        b.ao_mode = [] { return 0; };
+        b.ao_mode = gfxdk::ao_mode;  // (read-only, as gfx/gl: env.txt chooses it)
         b.set_ao_mode = [](int) {};
         b.ao_hires = [] { return false; };
         b.set_ao_hires = [](bool) {};

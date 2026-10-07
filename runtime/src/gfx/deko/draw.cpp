@@ -219,6 +219,44 @@ StreamSlice zero_block() {
     return slice;
 }
 
+// Ambient-occlusion quirks, as gfx/gl draw.cpp (and the Metal and Vulkan renderers): WWHD_AO_MODE=0..2
+// chooses one; WWHD_NO_AO_QUIRK=1 means 0. The game downsamples the scene depth to 640x360 and computes ambient
+// occlusion from it at 960x540 (vertex shader 44BDF900, pixel shader 44BDFD00), then blurs it into the shadow mask:
+//   0 = as the hardware renders it: the occlusion pass point-samples its centre depth, and every third row and
+//       column lands half a texel off (screen-fixed lines, and with the noise below grainy bands, on sloped
+//       ground in shadow)
+//   1 = that one fetch is bilinear, like the pass's neighbour fetches: the lines go
+//   2 = (default) 1, and the 4x4 noise texture is tiled per 960x540 pixel instead of per 640x360 pixel, so the
+//       game's blur averages it out (pack_uniforms aoNoise)
+constexpr uint32_t kOcclusionVS = 0x44BDF900, kOcclusionPS = 0x44BDFD00;
+const int g_aoMode = [] {
+    if (const char* e = getenv("WWHD_AO_MODE")) return ((atoi(e) % 3) + 3) % 3;
+    return getenv("WWHD_NO_AO_QUIRK") ? 0 : 2;
+}();
+// The occlusion pass's program in this stage: at its address and with its contents (size and hash of the guest
+// program; gfx/gl's values). Another area could load another program at that address; it is left as it is.
+constexpr uint32_t kOcclusionSize[2] = {1584, 384};  // pixel, vertex (Outset, US v0)
+constexpr uint64_t kOcclusionHash[2] = {0x26870ca3f2e34dfaull, 0x36e37317f62658e9ull};
+bool is_occlusion(const uint32_t* r, bool vertex) {
+    const uint32_t reg = vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS;
+    const uint32_t addr = r[reg] << 8, size = r[reg + 1] << 3;
+    if (addr != (vertex ? kOcclusionVS : kOcclusionPS)) return false;
+    const uint64_t frame = R.frame + 1;  // the frame being recorded
+    static uint64_t checked[2] = {~0ull, ~0ull};
+    static uint32_t sizeSeen[2] = {};
+    static bool result[2] = {};
+    if (checked[vertex] == frame && sizeSeen[vertex] == size) return result[vertex];
+    const uint64_t h = program_hash_of(program_hash_ref(addr, size), addr, size, frame);
+    const bool match = size == kOcclusionSize[vertex] && h == kOcclusionHash[vertex];
+    if (match != result[vertex] || checked[vertex] == ~0ull)
+        LOG("[dk] %s program at %08X (size %u, hash %016llx): %s", vertex ? "vertex" : "pixel", addr, size,
+            (unsigned long long)h, match ? "the occlusion pass, AO fix applied" : "not the occlusion pass, AO fix not applied");
+    checked[vertex] = frame;
+    sizeSeen[vertex] = size;
+    result[vertex] = match;
+    return match;
+}
+
 // false: the stream slice is full (the draw is skipped)
 bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>& colors, Surface* depth,
                    StageBindings& out) {
@@ -255,6 +293,13 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         if (slot < 0 || slot >= kMaxSamplers || samplerIndex >= 18) continue;
         const uint32_t* words = r + texbase + unit * 7;
         const uint32_t* samplerWords = r + REGADDR::SQ_TEX_SAMPLER_WORD0_0 + ((sh->vertex ? 18 : 0) + samplerIndex) * 3;
+        uint32_t aoSampler[3];
+        if (g_aoMode >= 1 && unit == 0 && !sh->vertex && is_occlusion(r, false)) {
+            // AO quirk 1: the occlusion pass's centre depth fetch, bilinear (XY mag/min filter)
+            memcpy(aoSampler, samplerWords, sizeof aoSampler);
+            aoSampler[0] = (aoSampler[0] & ~0x7E00u) | (1u << 9) | (1u << 12);
+            samplerWords = aoSampler;
+        }
         const bool compare = sh->dec->textureUsesDepthCompare[unit];
         // the last lookup for this unit, reused while its words and the surface set are unchanged
         TextureCacheEntry& cached = textureCache[stage][unit];
@@ -503,6 +548,8 @@ void skip(uint64_t& reason) {
 }
 }  // namespace
 
+int ao_mode() { return g_aoMode; }
+
 DrawSkips draw_skips_take() {
     const DrawSkips s = g_drawSkips;
     g_drawSkips = {};
@@ -538,6 +585,10 @@ void draw_frame_start() {
             env_switch("VERTEX_TRIM", true) ? "on" : "off", env_switch("PASS_BARRIER", true) ? "on" : "off",
             skip_gamepad() ? "on" : "off", env_switch("FLIP_FRONT", false) ? "FLIPPED (test)" : "as Latte",
             submit && *submit ? submit : "256", g_traceDraws ? "on" : "off");
+        static const char* const kAo[] = {"0, off: as the hardware renders it",
+                                          "1, the occlusion pass's centre depth fetch bilinear",
+                                          "2, the centre fetch bilinear and the noise tiled per 960x540 pixel"};
+        LOG("[dk] AO quirk fix: mode %s (WWHD_AO_MODE=0..2, WWHD_NO_AO_QUIRK=1 for 0)", kAo[g_aoMode]);
     }
 }
 
@@ -863,7 +914,8 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     for (Shader* sh : {vs, ps}) {
         const int slot = sh->bindings.ufBlockSlot;
         if (slot < 0 || slot >= kMaxUniformBuffers) continue;
-        const StreamSlice u = pack_uniforms(sh->vertex, *sh, r, g_drawScale, g_drawScale);
+        const bool aoNoise = g_aoMode == 2 && sh->vertex && is_occlusion(r, true);
+        const StreamSlice u = pack_uniforms(sh->vertex, *sh, r, g_drawScale, g_drawScale, nullptr, aoNoise);
         if (!u) {
             R.perf.streamFullSkips++;
             skip(g_drawSkips.streamFull);
