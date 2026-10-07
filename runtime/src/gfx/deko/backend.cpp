@@ -55,7 +55,10 @@ namespace gfxdk {
 Renderer R;
 
 namespace {
-constexpr uint32_t kWidth = 1280, kHeight = 720, kSwapImages = 3;
+constexpr uint32_t kSwapImages = 3;
+// the window (swapchain images): 1280x720 handheld, 1920x1080 docked (window_wanted below); the game's picture is
+// scaled into it by the present pass. Render thread only once the device exists.
+uint32_t g_winW = 1280, g_winH = 720;
 #ifdef WWHD_DEKO3D_DEBUG_LIB
 constexpr bool kDebugLib = true;  // linked against libdeko3dd (CMakeLists.txt)
 #else
@@ -127,13 +130,13 @@ void init_image(DkImage& image, ImageAlloc& mem, DkImageFormat format, uint32_t 
     dkImageLayoutMakerDefaults(&m, R.device);
     m.flags = flags;
     m.format = format;
-    m.dimensions[0] = kWidth;
-    m.dimensions[1] = kHeight;
+    m.dimensions[0] = g_winW;
+    m.dimensions[1] = g_winH;
     DkImageLayout layout;
     dkImageLayoutInitialize(&layout, &m);
     mem = image_alloc(uint32_t(dkImageLayoutGetSize(&layout)), dkImageLayoutGetAlignment(&layout));
     dkImageInitialize(&image, &layout, mem.block, mem.offset);
-    LOG("[dk] %s: %ux%u, %u KiB at image heap offset 0x%X", what, kWidth, kHeight, mem.size >> 10, mem.offset);
+    LOG("[dk] %s: %ux%u, %u KiB at image heap offset 0x%X", what, g_winW, g_winH, mem.size >> 10, mem.offset);
 }
 
 void init_swapchain() {
@@ -155,8 +158,8 @@ void init_swapchain() {
     dkSwapchainSetSwapInterval(g_swapchain, 1);
     u32 nw = 0, nh = 0;
     nwindowGetDimensions(nwindowGetDefault(), &nw, &nh);
-    LOG("[dk] swapchain: %u RGBA8 images of %ux%u on the default window (%ux%u), swap interval 1", kSwapImages, kWidth,
-        kHeight, nw, nh);
+    LOG("[dk] swapchain: %u RGBA8 images of %ux%u on the default window (%ux%u), swap interval 1", kSwapImages, g_winW,
+        g_winH, nw, nh);
 }
 
 // ---- state for the renderer's own passes
@@ -294,8 +297,8 @@ void draw_text(int left, int top, int scale, const std::vector<std::string>& lin
     memcpy(u.cpu, &t, sizeof t);
     const int w = (columns * 4 + 1) * scale, h = (rows * 6 + 1) * scale;
     bind_pass_state(true, false);
-    set_view(uint32_t(left), uint32_t(top), uint32_t(std::min<int>(w, int(kWidth) - left)),
-             uint32_t(std::min<int>(h, int(kHeight) - top)));
+    set_view(uint32_t(left), uint32_t(top), uint32_t(std::min<int>(w, int(g_winW) - left)),
+             uint32_t(std::min<int>(h, int(g_winH) - top)));
     const DkBufExtents ubo = {u.gpu, kUboSize};
     dkCmdBufBindUniformBuffers(R.cmd, DkStage_Fragment, 0, &ubo, 1);
     dkCmdBufBindVtxAttribState(R.cmd, nullptr, 0);
@@ -352,7 +355,7 @@ void draw_pattern(uint64_t frame) {
     if (!s) return;
     memcpy(s.cpu, v.data(), bytes);
     bind_pass_state(false, true);
-    set_view(0, 0, kWidth, kHeight);
+    set_view(0, 0, g_winW, g_winH);
     static const DkVtxAttribState attribs[] = {
         DkVtxAttribState{0, 0, offsetof(PatternVertex, x), DkVtxAttribSize_3x32, DkVtxAttribType_Float, 0},
         DkVtxAttribState{0, 0, offsetof(PatternVertex, r), DkVtxAttribSize_4x32, DkVtxAttribType_Float, 0},
@@ -367,7 +370,9 @@ void draw_pattern(uint64_t frame) {
     char status[64];
     snprintf(status, sizeof status, "FRAME %llu, WWHD_DK_TEST_PATTERN=1", (unsigned long long)frame);
     static const float fg[4] = {1, 1, 1, 1}, bg[4] = {0, 0, 0, 0.55f};
-    draw_text(330, 36, 3,
+    // laid out for 1280x720, scaled with the window
+    const float k = float(g_winH) / 720.0f;
+    draw_text(int(330 * float(g_winW) / 1280.0f), int(36 * k), std::max(1, int(3 * k)),
               {"DEKO3D TEST PATTERN", status, "", "THIS TEXT UPRIGHT: WINDOW ORIGIN TOP LEFT",
                "RED BOX TOP LEFT, GREEN BOTTOM RIGHT: Y NEGATED", "CYAN IN FRONT OF MAGENTA: DEPTH TEST",
                "GRAY SQUARE EMPTY (NO ORANGE): DEPTH 0 TO 1", "BAR: BLACK LEFT TO WHITE RIGHT",
@@ -419,7 +424,7 @@ void draw_fps() {
         }
     }
     static const float fg[4] = {1.0f, 0.95f, 0.35f, 1.0f}, bg[4] = {0, 0, 0, 0.6f};
-    const int scale = std::max(2, int(kHeight) / 180), margin = std::max(4, int(kHeight) / 90);
+    const int scale = std::max(2, int(g_winH) / 180), margin = std::max(4, int(g_winH) / 90);  // 4 and 8 at 720, 6 and 12 at 1080
     draw_text(margin, margin, scale, lines, fg, bg);
 }
 
@@ -460,12 +465,12 @@ bool draw_picture(const PresentSource& src, bool capture) {
     if (!g_presentOk || !src.surface || !src.width || !src.height) return false;
     commit_descriptors();  // present_source wrote the picture's view into kPresentImageId
     const float a = float(src.width) / float(src.height);
-    int w = int(kWidth), h = int(float(kWidth) / a);
-    if (h > int(kHeight)) {
-        h = int(kHeight);
-        w = int(float(kHeight) * a);
+    int w = int(g_winW), h = int(float(g_winW) / a);
+    if (h > int(g_winH)) {
+        h = int(g_winH);
+        w = int(float(g_winH) * a);
     }
-    const int x = (int(kWidth) - w) / 2, y = (int(kHeight) - h) / 2;
+    const int x = (int(g_winW) - w) / 2, y = (int(g_winH) - h) / 2;
     constexpr uint32_t kUboSize = (sizeof(PresentUbo) + 255) & ~255u;
     StreamAlloc u = stream_alloc(kUboSize, DK_UNIFORM_BUF_ALIGNMENT);
     if (!u) return false;
@@ -1034,7 +1039,7 @@ void present() {
     dkImageViewDefaults(&depth, &g_depth);
     const DkImageView* colors[] = {&color};
     dkCmdBufBindRenderTargets(R.cmd, colors, 1, &depth);
-    set_view(0, 0, kWidth, kHeight);
+    set_view(0, 0, g_winW, g_winH);
     // WWHD_DK_TEST_PATTERN=1: P1's test pattern instead of the game's picture (the game runs behind it)
     static const bool testPattern = [] {
         const char* e = getenv("WWHD_DK_TEST_PATTERN");
@@ -1064,7 +1069,8 @@ void present() {
     if (S.tvSource) S.tvSource->hudFull = false;
     draw_fps();
     // the settings overlay (Minus held, overlay/overlay.h), over the pattern and the FPS counter
-    if (ImDrawData* ui = overlay::frame(float(kWidth), float(kHeight), overlay_renderer_init)) overlay_draw(ui, kWidth, kHeight);
+    // (the window's real size: the UI grows with it, overlay.cpp)
+    if (ImDrawData* ui = overlay::frame(float(g_winW), float(g_winH), overlay_renderer_init)) overlay_draw(ui, int(g_winW), int(g_winH));
     gpuPasses.frame_end();
     frame_end();
     const uint64_t t3 = now_ns();
@@ -1079,7 +1085,7 @@ void present() {
     if (capture) LOG("[dk] capture frame %llu: recorded in %.2f ms, submitted and presented in %.2f ms", (unsigned long long)frame,
                      double(t3 - t2) / 1e6, double(t4 - t3) / 1e6);
     // the frame's pictures to PNG files (both sticks, WWHD_DUMP_*): waits for the GPU, copies its images back
-    if (g_capture) capture_present(g_swapImages[slot], kWidth, kHeight, src);
+    if (g_capture) capture_present(g_swapImages[slot], g_winW, g_winH, src);
     g_times.acquireNs += t2 - t1;
     g_times.submitNs += t4 - t3;
     frame_stats();
@@ -1199,17 +1205,20 @@ void shader_cache_progress(size_t done, size_t total) {
     dkImageViewDefaults(&color, &g_swapImages[slot]);
     const DkImageView* colors[] = {&color};
     dkCmdBufBindRenderTargets(cmd, colors, 1, nullptr);
-    const DkViewport vp = {0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f};
+    const DkViewport vp = {0.0f, 0.0f, float(g_winW), float(g_winH), 0.0f, 1.0f};
     dkCmdBufSetViewports(cmd, 0, &vp, 1);
+    // the bar laid out for 1280x720, scaled with the window
+    auto sx = [](uint32_t v) { return v * g_winW / 1280; };
+    auto sy = [](uint32_t v) { return v * g_winH / 720; };
     auto fill = [&](uint32_t x, uint32_t y, uint32_t w, uint32_t h, float v) {
         const DkScissor sc = {x, y, w, h};
         dkCmdBufSetScissors(cmd, 0, &sc, 1);
         dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA, v, v, v, 1.0f);
     };
-    fill(0, 0, kWidth, kHeight, 0.0f);
-    fill(240, 344, 800, 32, 0.2f);
-    const uint32_t w = uint32_t(800 * done / std::max<size_t>(total, 1));
-    if (w) fill(240, 344, std::min<uint32_t>(w, 800), 32, 0.9f);
+    fill(0, 0, g_winW, g_winH, 0.0f);
+    fill(sx(240), sy(344), sx(800), sy(32), 0.2f);
+    const uint32_t w = uint32_t(sx(800) * done / std::max<size_t>(total, 1));
+    if (w) fill(sx(240), sy(344), std::min<uint32_t>(w, sx(800)), sy(32), 0.9f);
     dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(cmd));
     dkQueuePresentImage(R.queue, g_swapchain, slot);
     dkQueueWaitIdle(R.queue);  // (the command memory is reused by the next bar)
