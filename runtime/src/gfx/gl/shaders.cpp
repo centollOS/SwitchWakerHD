@@ -987,6 +987,77 @@ void check_key(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, uint6
 }
 }  // namespace
 
+// ---- shader budget (shaders.h)
+struct ShaderBudget {
+    int links = 1, compiles = 2;  // per frame; < 0: no limit
+    uint64_t frame = ~0ull;
+    int linksLeft = 0, compilesLeft = 0;
+    ShaderBudgetStats stats;
+};
+ShaderBudget& budget() {
+    static ShaderBudget b = [] {
+        ShaderBudget b;
+        if (const char* e = getenv("WWHD_GL_SHADER_BUDGET"); e && *e) {
+            if (!strcmp(e, "0")) b.links = b.compiles = -1;
+            else sscanf(e, "%d,%d", &b.links, &b.compiles);
+        }
+        if (b.links < 0) LOG("[gl] shader budget: off (WWHD_GL_SHADER_BUDGET=0): new shaders compile when first drawn");
+        else LOG("[gl] shader budget: %d links and %d compiles a frame; the draws of waiting shaders are skipped "
+                 "(WWHD_GL_SHADER_BUDGET)", b.links, b.compiles);
+        return b;
+    }();
+    if (b.frame != R.frame) {
+        b.frame = R.frame;
+        b.linksLeft = b.links;
+        b.compilesLeft = b.compiles;
+    }
+    return b;
+}
+// takes one link (or compile) from this frame's budget; false: wait for a later frame
+bool take_budget(bool link) {
+    ShaderBudget& b = budget();
+    if ((link ? b.links : b.compiles) < 0) return true;
+    int& left = link ? b.linksLeft : b.compilesLeft;
+    if (left <= 0) {
+        (link ? b.stats.deferredLinks : b.stats.deferredCompiles)++;
+        return false;
+    }
+    left--;
+    return true;
+}
+
+// compiles a translated shader's new GLSL and keeps its source (false: a compile error, in shader->error)
+bool compile_translated(Shader* shader, const std::string& glsl, uint64_t base, uint32_t units) {
+    std::string error;
+    Stage compiling("compiling a shader");
+    GLuint obj = compile(shader->vertex, glsl, &error);
+    if (!obj) {
+        shader->error = error;
+        dump_failure(shader->vertex ? "vertex shader" : "pixel shader", shader->key, glsl, error);
+        return false;
+    }
+    objectCompiles++;
+    keep_source(shader->glslHash, shader->vertex, pack_glsl(glsl), uint32_t(glsl.size()));
+    keep_live(shader->glslHash, obj);  // (the link that follows needs it)
+    cache_shader(shader->glslHash, shader->vertex, glsl);
+    shader->compiled = true;
+    cache_translation(shader, base, units);
+    return true;
+}
+// a shader waiting for budget: compiled now if this frame has some left
+void finish_pending(Shader* shader) {
+    if (sources.count(shader->glslHash)) {  // another variant compiled the same GLSL meanwhile
+        shader->compiled = true;
+        cache_translation(shader, shader->pendingBase, shader->pendingUnits);
+    } else if (!take_budget(false)) {
+        return;
+    } else {
+        compile_translated(shader, shader->pendingGlsl, shader->pendingBase, shader->pendingUnits);
+    }
+    shader->pending = false;
+    std::string().swap(shader->pendingGlsl);
+}
+
 Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, uint64_t fsKey, uint64_t frame,
                   uint64_t coreHash) {
     uint32_t start = vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS;
@@ -1004,6 +1075,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     uint64_t key = keyFor(known != textureUnits.end() ? known->second : 0);
     if (auto it = shaders.find(key); it != shaders.end()) {
         if (g_keyCheck) check_key(regs, vertex, fetch, fsKey, base, address, size, it);
+        if (it->second->pending) finish_pending(it->second.get());
         return it->second.get();
     }
     ScopedTime timer{R.perf.shaderNs};
@@ -1042,26 +1114,23 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         cache_translation(shader, base, units);
         return shader;
     }
-    std::string error;
-    Stage compiling("compiling a shader");
-    GLuint obj = compile(vertex, glsl, &error);
-    if (!obj) {
-        shader->error = error;
-        dump_failure(vertex ? "vertex shader" : "pixel shader", key, glsl, error);
+    if (!take_budget(false)) {  // compiled in a later frame (finish_pending); its draws wait
+        shader->pending = true;
+        shader->pendingGlsl = std::move(glsl);
+        shader->pendingBase = base;
+        shader->pendingUnits = units;
         return shader;
     }
-    objectCompiles++;
-    keep_source(shader->glslHash, vertex, pack_glsl(glsl), uint32_t(glsl.size()));
-    keep_live(shader->glslHash, obj);  // (the link that follows needs it)
-    cache_shader(shader->glslHash, vertex, glsl);
-    shader->compiled = true;
-    cache_translation(shader, base, units);
+    compile_translated(shader, glsl, base, units);
     return shader;
 }
+
+ShaderBudgetStats shader_budget_stats() { return budget().stats; }
 
 Program* program(Shader* vs, Shader* ps) {
     uint64_t key = pair_key(vs->glslHash, ps->glslHash);
     if (auto it = linked.find(key); it != linked.end()) return it->second->prog ? it->second.get() : nullptr;
+    if (!take_budget(true)) return nullptr;  // linked in a later frame; its draws wait
     ScopedTime timer{R.perf.shaderNs};
     // The driver compiles the pair's GPU code inside the link (nouveau: nvc0_sp_state_create). The
     // watchdog names the pair if the render thread stays in there (the sources are in

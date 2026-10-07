@@ -1260,14 +1260,20 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             c.vsHash = hashable ? program_hash_of(c.vsRef, vsAddr, vsSize, R.frame) : 0;
             c.psHash = hashable ? program_hash_of(c.psRef, psAddr, psSize, R.frame) : 0;
             c.p = p;
+            // a program still waiting for the shader budget is not remembered as missing: looked up
+            // again next time (the combination would otherwise stay undrawn)
+            if (!p) {
+                c.frame = ~0ull;
+                c.vsRef = c.psRef = nullptr;
+            }
         }
         memo = {g_shader_state_gen, R.frame, R.shaderEpoch, prim, fs, vs, ps, p};
     }
     if (!fs) return;
     if (!vs || !ps || !vs->ready() || !ps->ready()) {
         R.skippedDraws++;
-        if (vs && !vs->ready()) log_once(vs->key, "[gl] vertex shader skipped: %s", vs->error);
-        if (ps && !ps->ready()) log_once(ps->key, "[gl] pixel shader skipped: %s", ps->error);
+        if (vs && !vs->ready() && !vs->pending) log_once(vs->key, "[gl] vertex shader skipped: %s", vs->error);
+        if (ps && !ps->ready() && !ps->pending) log_once(ps->key, "[gl] pixel shader skipped: %s", ps->error);
         return;
     }
     if (!p) {

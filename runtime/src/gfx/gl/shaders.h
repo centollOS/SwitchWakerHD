@@ -20,8 +20,23 @@ struct Shader {
     bool compiled = false;
     uint64_t glslHash = 0;  // equal sources share one source, shader object and the programs linked from it
     std::string error;
+    // its GLSL waits for a frame with shader budget left (shader_budget, shaders.cpp): the draws that
+    // need it are skipped meanwhile
+    bool pending = false;
+    std::string pendingGlsl;
+    uint64_t pendingBase = 0;
+    uint32_t pendingUnits = 0;
     bool ready() const { return dec && compiled; }
 };
+// Shader budget (WWHD_GL_SHADER_BUDGET=links,compiles per frame; default 1,2; 0 = no limit, as before):
+// a frame compiles and links at most that many new shaders and programs. The rest wait for later frames
+// and their draws are skipped meanwhile, so a new area shows its objects over a few seconds instead of
+// freezing while every program links (Switch: ~180 ms per program without Mesa's cache; 105 programs
+// froze 18.9 s at a first visit to Windfall).
+struct ShaderBudgetStats {
+    uint64_t deferredCompiles = 0, deferredLinks = 0;
+};
+ShaderBudgetStats shader_budget_stats();
 // WWHD_GL_UNIFORM_BLOCKS (on unless =0): each stage's loose uniforms (uf_remapped*, the register
 // file, the window/alpha/point/scale values) are compiled into one std140 uniform block, filled from
 // the stream buffer. Mesa's nouveau driver copies the whole default uniform block into the GPU

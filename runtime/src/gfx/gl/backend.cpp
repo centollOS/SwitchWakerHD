@@ -946,6 +946,16 @@ void frame_stats() {
 #ifdef __SWITCH__
     if (std::string clocks = clock_report(); !clocks.empty()) LOG("[gl] clocks: %s", clocks.c_str());
     if (std::string mesa = mesa_cache::report(); !mesa.empty()) LOG("%s", mesa.c_str());
+    {
+        // the shader budget (shaders.h): compiles and links left for later frames (their draws skipped)
+        static ShaderBudgetStats last;
+        const ShaderBudgetStats now = shader_budget_stats();
+        if (now.deferredCompiles != last.deferredCompiles || now.deferredLinks != last.deferredLinks)
+            LOG("[gl] shader budget: %llu compiles and %llu links waited for a later frame",
+                (unsigned long long)(now.deferredCompiles - last.deferredCompiles),
+                (unsigned long long)(now.deferredLinks - last.deferredLinks));
+        last = now;
+    }
 #endif
     if (p.gamepadDraws || p.gamepadClearsSkipped)
         LOG("[gl] GamePad picture: %.0f draws/frame into its own buffers (%.0f ms/s), %s (%.0f draws, %.0f clears per frame; "
