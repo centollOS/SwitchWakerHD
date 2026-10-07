@@ -317,6 +317,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             upload_surface(s);  // once per frame: CPU changes to the texture
             view = cached.view;
             smp = cached.smp;
+            sampler_touch(smp);  // (an evicted slot would be rewritten with another sampler)
         } else {
             bool unique = false;
             s = sampled_texture(words, compare, &unique);

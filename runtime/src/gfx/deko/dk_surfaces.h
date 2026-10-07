@@ -73,6 +73,9 @@ void image_descriptor_free_later(uint32_t id);
 // the two flags; compare: a depth-compare sampler; integer: an integer texture (nearest filtering only).
 // When the cache is full the least recently used slot that no in-flight frame uses is rewritten.
 uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer);
+// a sampler slot used again without sampler_id (the draw path's texture cache): kept from eviction while the
+// frames that use it are in flight
+void sampler_touch(uint32_t id);
 // the barrier that makes this frame's descriptor writes visible (nothing when none since the last one)
 void commit_descriptors();
 // the image descriptor of a 1x1 transparent black texture (shaders sampling a unit that has no surface)

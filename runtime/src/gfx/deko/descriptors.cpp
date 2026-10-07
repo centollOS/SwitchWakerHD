@@ -155,6 +155,12 @@ uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer) {
         }
         g_samplers.erase(g_samplerSlots[id].key);
         g_stats.samplerEvictions++;
+        // the draw path's texture cache (draw.cpp TextureCacheEntry) keeps sampler slots: looked up again
+        R.surfaceEpoch++;
+        static int logged = 0;
+        if (logged++ < 5)
+            LOG("[dk] sampler descriptors: all %u slots used; slot %u rewritten (least recently used)",
+                kSamplerDescriptors - kReservedSamplerIds, id);
     }
     SamplerSlot& slot = g_samplerSlots[id];
     slot.key = key;
@@ -169,6 +175,10 @@ uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer) {
     g_stats.samplerWrites++;
     R.perf.samplerDescriptorWrites++;
     return id;
+}
+
+void sampler_touch(uint32_t id) {
+    if (id >= kReservedSamplerIds && id < kSamplerDescriptors) g_samplerSlots[id].lastFrame = recording();
 }
 
 void commit_descriptors() {
