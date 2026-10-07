@@ -1,13 +1,13 @@
 # Plan: renderer deko3d para SwitchWakerHD
 
-Plan redactado el 2026-10-07 por un agente de planificación (Fable) a partir del código (`dev` 194bb77,
+Plan redactado el 2026-10-07 por un agente de planificación (Fable) a partir del código (`main` 194bb77,
 round 36), del prototipo de uam (`~/Documents/uam-proto`) y de los logs de hardware. **[V]** = verificado en
 código o logs; **[S]** = supuesto a confirmar. Estado: **P5 hecho, deko3d por defecto**; P0 y P1 hechos y confirmados en hardware; P2 probado en hardware (llega a Outset); P3 parte A (capturas, contador FPS, texturas, features) integrada, pendiente de prueba en hardware; P3 en hardware con rendimiento igual o algo mejor que GL; P4 (cuatro carriles) integrado, compilado y SIN probar en hardware; ver Estado.
 
 ## Estado (2026-10-07, rama `deko3d`)
 
 **Renderer GL eliminado (2026-10-07, a petición del dueño):** `runtime/src/gfx/gl`, Mesa (`tools/switch/mesa`,
-`mesa_cache_switch`) y la build headless de Linux están en el histórico (`dev` 207349b). Para recolectar
+`mesa_cache_switch`) y la build headless de Linux están en el histórico (`main` 207349b). Para recolectar
 shaders nuevos (warp tour headless) hay que recuperar esa build; la consola sigue añadiendo los shaders que ve
 a `shadercache_gl.bin` y `tools/switch/dksh_cache` los compila.
 
