@@ -25,8 +25,24 @@ int cpu_clock();
 bool cpu_clock_env();             // WWHD_CPU_CLOCK in env.txt chose it at start
 void set_cpu_clock(int c);        // applies it now and saves it (host loop thread)
 
+// Picture profiles, one per mode (as SwitchWaker's [handheld]/[docked] options): the internal resolution and
+// dynamic resolution. The active mode's profile applies by itself on dock / undock. Defaults: handheld 1x
+// (1280x720), docked 1.5x (1920x1080), dynamic resolution on in both. env.txt WWHD_RES_SCALE / WWHD_DYNAMIC_RES
+// fix that value in both modes.
+enum Mode : int { kHandheld, kDocked, kModes };
+const char* mode_label(int m);    // "Handheld" / "Docked"
+int active_mode();
+struct ResProfile {
+    float scale = 1.0f;
+    bool dynamic = true;
+};
+ResProfile res_profile(int m);
+void set_res_profile(int m, ResProfile p);  // saves it; applies it now when m is the active mode
+bool res_scale_env();             // WWHD_RES_SCALE in env.txt
+bool dynamic_res_env();           // WWHD_DYNAMIC_RES in env.txt
+
 // host loop, often: once a second, sets the clocks chosen above again when the system has changed
-// them (dock / undock, sleep, apm): what sys-clk does for its profiles
+// them (dock / undock, sleep, apm): what sys-clk does for its profiles; and the active mode's picture profile
 void tick();
 
 // at start, after env.txt (main.cpp): the GPU profile, then the saved picture and counter options
@@ -40,6 +56,9 @@ constexpr const char* kKeyContrast = "switchContrast";
 constexpr const char* kKeySaturation = "switchSaturation";
 constexpr const char* kKeyGamma = "switchGamma";
 constexpr const char* kKeyFpsCounter = "switchFpsCounter";
+// per mode: <key>.handheld / <key>.docked
+constexpr const char* kKeyResScale = "switchResScale";
+constexpr const char* kKeyDynamicRes = "switchDynamicRes";
 void save_picture();       // the current picture adjustments into settings.ini
 bool picture_env();        // one of WWHD_EXPOSURE/CONTRAST/SATURATION/GAMMA is in env.txt
 bool fps_counter_env();    // WWHD_FPS is in env.txt

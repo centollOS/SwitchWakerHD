@@ -716,6 +716,37 @@ void tab_warp() {
 // Switch: handheld GPU profile, picture adjustments and the corner counter (platform/settings_switch.h)
 void tab_switch() {
     using namespace switch_settings;
+    // one picture profile per mode (as SwitchWaker): the one shown starts as the active mode's
+    heading("Picture profile");
+    static int edit = -1;
+    const int active = active_mode();
+    if (edit < 0) edit = active;
+    for (int m = 0; m < kModes; m++) {
+        if (m) ImGui::SameLine();
+        std::string label = mode_label(m);
+        if (m == active) label += "  (active)";
+        if (radio(label.c_str(), edit == m)) edit = m;
+    }
+    help("Each mode keeps its own internal resolution and dynamic resolution;\n"
+         "they apply by themselves when the console is docked or undocked.");
+    const ResProfile rp = res_profile(edit);
+    static const float scales[] = {1.0f, 1.25f, 1.5f};
+    static const char* const names[] = {"1x  (1280x720)", "1.25x  (1600x900)", "1.5x  (1920x1080)"};
+    for (int i = 0; i < 3; i++) {
+        if (i) ImGui::SameLine();
+        const float s = scales[i];
+        if (radio(names[i], std::fabs(rp.scale - s) < 0.01f, !res_scale_env()))
+            hostui::post([m = edit, rp, s] { set_res_profile(m, {s, rp.dynamic}); });
+    }
+    bool dyn;
+    if (check("Dynamic resolution", rp.dynamic, &dyn, !dynamic_res_env()))
+        hostui::post([m = edit, rp, dyn] { set_res_profile(m, {rp.scale, dyn}); });
+    help("Lowers the internal resolution while the GPU cannot hold 30 fps, and raises it again when it can.");
+    if (res_scale_env() || dynamic_res_env())
+        note("env.txt sets WWHD_RES_SCALE / WWHD_DYNAMIC_RES: that value is used in both modes.");
+    if (edit != active) note("Applies when the console is %s.", edit == kDocked ? "docked" : "in handheld mode");
+    else note("Internal resolution now: %.2f.", gfxsw::dynamic_res_scale());
+
     heading("Performance in handheld mode");
     const int gp = gpu_profile();
     for (int i = 0; i < kGpuProfiles; i++)
@@ -744,7 +775,6 @@ void tab_switch() {
         clocks = gfxsw::clock_report_now();
     }
     if (!clocks.empty()) note("Now: %s (%s).", clocks.c_str(), gpu_profile_status().c_str());
-    note("Internal resolution: %.2f (dynamic resolution lowers it while the GPU is the limit).", gfxsw::dynamic_res_scale());
 
     heading("Picture");
     gfxsw::PictureGrade g = gfxsw::picture_grade_now();

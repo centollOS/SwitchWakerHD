@@ -67,8 +67,9 @@ std::atomic<int> g_opMode{-1};
 
 // WWHD_DK_DOCKED_1080 (on unless =0): docked, the window is 1920x1080 (the TV's output); handheld 1280x720 (the
 // screen). =0: 1280x720 always (the old path; the system scales it to the TV). WWHD_DK_WINDOW=WxH (at most
-// 1920x1080) forces that size in both modes, for A/B tests in handheld. The game still renders its 1280x720
-// picture (internal and dynamic resolution as before): the present pass scales it into the window.
+// 1920x1080) forces that size in both modes, for A/B tests in handheld. The game renders its picture at the
+// internal resolution of the mode's picture profile (settings_switch.h; docked 1.5x = 1920x1080 by default, lower
+// while dynamic resolution needs it): the present pass scales it into the window.
 struct WindowConfig {
     int mode = 1;  // 0 always 1280x720, 1 by the operation mode, 2 forced
     uint32_t w = 0, h = 0;
@@ -642,9 +643,14 @@ bool dynamic_res_requested() {
 // frame rate says is missing; with GPU time to spare at the start of frames (GpuPasses, below) it steps back up.
 // A step up that the GPU cannot hold is undone, and the next try waits twice as long (up to a minute). The HUD
 // stays at full resolution (draw.cpp). Starts at the requested factor (WWHD_RES_SCALE, at most 1 by default).
+// The handheld / docked profiles (gfxsw::set_resolution_profile) set the top factor and on / off at any time.
+std::atomic<uint32_t> g_profileSeq{0};
+std::atomic<float> g_profileScale{1.0f};
+std::atomic<bool> g_profileDynamic{true};
 struct DynamicRes {
     bool on = false, ready = false;
-    float lo = 0.75f, hi = 1.0f, scale = 1.0f;
+    float lo = 0.75f, hi = 1.0f, scale = 1.0f, loAsked = 0.75f;
+    uint32_t profileSeen = 0;
     uint64_t windowStart = 0, frames = 0, behind = 0;
     uint64_t lastDown = 0, lastUp = 0, backoff = 4'000'000'000ull, calmSince = 0;
     uint32_t idleSamples = 0;  // sampled frames in a row with enough GPU time to spare
@@ -656,6 +662,7 @@ struct DynamicRes {
         const char* e = getenv("WWHD_DYNAMIC_RES");
         on = dynamic_res_requested();
         if (e && atof(e) > 0) lo = std::clamp(float(atof(e)), 0.5f, 1.0f);
+        loAsked = lo;
         lo = std::min(lo, hi);
         scale = hi;
         if (on) LOG("[dk] dynamic resolution: %.2f to %.2f when the GPU is the limit (WWHD_DYNAMIC_RES)", lo, hi);
@@ -672,8 +679,27 @@ struct DynamicRes {
         settle = true;
     }
     // once a frame at present
+    // a new profile (handheld / docked, or the menu): its factor from the next frame, the measures start again
+    void take_profile() {
+        const uint32_t seq = g_profileSeq.load(std::memory_order_acquire);
+        if (seq == profileSeen) return;
+        profileSeen = seq;
+        hi = std::clamp(g_profileScale.load(std::memory_order_relaxed), 0.5f, 2.0f);
+        on = g_profileDynamic.load(std::memory_order_relaxed);
+        lo = std::min(loAsked, hi);
+        LOG("[dk] resolution profile: internal resolution %.2f, dynamic resolution %s (%.2f to %.2f)", hi,
+            on ? "on" : "off", lo, hi);
+        scale = hi;
+        set_res_scale(hi);
+        windowStart = frames = behind = 0;
+        lastDown = lastUp = calmSince = 0;
+        backoff = 4'000'000'000ull;
+        idleSamples = 0;
+        settle = true;
+    }
     void frame(uint64_t now, bool gpuBehind, double idleMs, double busyMs, uint64_t passFrames) {
         if (!ready) setup();
+        take_profile();
         if (!on) return;
         if (!windowStart) windowStart = now;
         frames++;
@@ -1403,6 +1429,11 @@ void set_picture_grade(const PictureGrade& g) {
 int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }
 float dynamic_res_scale() { return gfxdk::res_scale_shown(); }  // the internal resolution in use (dynamic or not)
+void set_resolution_profile(float scale, bool dynamic) {
+    gfxdk::g_profileScale.store(scale, std::memory_order_relaxed);
+    gfxdk::g_profileDynamic.store(dynamic, std::memory_order_relaxed);
+    gfxdk::g_profileSeq.fetch_add(1, std::memory_order_release);
+}
 std::string clock_report_now() { return gfxdk::clock_report(); }
 void request_capture() { gfxdk::g_captureRequested = true; }
 }  // namespace gfxsw
