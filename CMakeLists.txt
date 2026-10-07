@@ -140,6 +140,10 @@ add_library(imgui STATIC ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp ${IM
 target_include_directories(imgui PUBLIC ${IMGUI_DIR})
 target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_DEMO_WINDOWS IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
 target_compile_options(imgui PRIVATE -w -O2)
+if(WWHD_SWITCH)
+  # no processes to open links with on the console (ImGui's default uses execvp/waitpid)
+  target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+endif()
 
 # ---- the game executable: runtime + native GX2 + the selected renderers
 # GX2 sources are compiled into the executable (not a static library) so their
@@ -183,7 +187,8 @@ if(WWHD_HAS_OPENGL)
   file(GLOB GL_SOURCES CONFIGURE_DEPENDS runtime/src/gfx/gl/*.cpp)
   list(APPEND GFX_SOURCES ${GL_SOURCES})
   if(WWHD_SWITCH)
-    list(APPEND GFX_SOURCES runtime/src/platform/input_switch.cpp runtime/src/platform/hostui_switch.cpp)
+    list(APPEND GFX_SOURCES runtime/src/platform/input_switch.cpp runtime/src/platform/hostui_switch.cpp
+                            runtime/src/platform/settings_switch.cpp)
   else()
     list(APPEND GFX_SOURCES runtime/src/platform/input_headless.cpp)
   endif()

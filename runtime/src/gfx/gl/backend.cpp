@@ -16,6 +16,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <mutex>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
@@ -32,6 +33,12 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "platform/input_switch.h"
 #include "runtime.h"
 #include "shaders.h"
+#include "settings.h"
+#ifdef __SWITCH__
+#include "imgui.h"
+#include "overlay/hostui.h"
+#include "overlay/overlay.h"
+#endif
 
 namespace gx2 { uint64_t flips_presented(); }
 
@@ -1086,11 +1093,15 @@ GLuint present_sampler() {
 // ---- performance overlay in the top-left corner: WWHD_FPS=0 hides it, 1 (default) shows the frame
 // rate, 2 adds render-thread load, GPU lag and draws per frame. A 3x5 pixel font; the text is drawn
 // by one fragment shader from a bitmask per character.
+std::atomic<int> g_fpsMode{-1};  // -1: not read yet
 int overlay_mode() {
-    static const int mode = [] {
+    int mode = g_fpsMode.load(std::memory_order_relaxed);
+    if (mode < 0) {
         const char* e = getenv("WWHD_FPS");
-        return e && *e ? atoi(e) : 1;
-    }();
+        mode = e && *e ? atoi(e) : 1;
+        int expected = -1;
+        if (!g_fpsMode.compare_exchange_strong(expected, mode)) mode = expected;
+    }
     return mode;
 }
 
@@ -1232,12 +1243,19 @@ void draw_overlay(int ww, int wh) {
 //   WWHD_CONTRAST   S-curve around mid-grey; black and white stay put, so nothing clips (> 1 = more)
 //   WWHD_SATURATION colour intensity (0 = grey, > 1 = more vivid)
 //   WWHD_GAMMA      > 1 deepens mid-tones and shadows, < 1 lifts them
-struct Grade {
-    float exposure = 1, contrast = 1, saturation = 1, gamma = 1;
-};
-const Grade& picture_grade() {
-    static const Grade g = [] {
-        Grade g;
+// The settings overlay changes them while the game runs (set_picture_grade): a generation tells
+// present() to send the uniform again.
+std::mutex g_gradeMu;
+std::atomic<uint32_t> g_gradeGen{1};
+PictureGrade g_gradeSet;
+bool g_gradeChanged = false;
+PictureGrade picture_grade() {
+    {
+        std::lock_guard<std::mutex> lk(g_gradeMu);
+        if (g_gradeChanged) return g_gradeSet;
+    }
+    static const PictureGrade g = [] {
+        PictureGrade g;
         auto read = [](const char* name, float& v, float lo, float hi) {
             const char* e = getenv(name);
             if (!e || !*e) return;
@@ -1304,12 +1322,13 @@ void present() {
             glDepthRangef(0, 1);
             glUseProgram(prog);
             static const GLint encodeLoc = glGetUniformLocation(prog, "encodeSrgb");
-            static const bool graded = [&] {
-                const Grade& g = picture_grade();
-                glUniform4f(glGetUniformLocation(prog, "grade"), g.exposure, g.contrast, g.saturation, g.gamma);
-                return true;
-            }();
-            (void)graded;
+            static const GLint gradeLoc = glGetUniformLocation(prog, "grade");
+            static uint32_t gradeSent = 0;
+            if (const uint32_t gen = g_gradeGen.load(std::memory_order_acquire); gen != gradeSent) {
+                const PictureGrade g = picture_grade();
+                glUniform4f(gradeLoc, g.exposure, g.contrast, g.saturation, g.gamma);
+                gradeSent = gen;
+            }
             static int encoded = -1;
             const int encode = R.tvSrgb.load(std::memory_order_relaxed) ? 1 : 0;
             if (encode != encoded) {
@@ -1336,6 +1355,10 @@ void present() {
         glClear(GL_COLOR_BUFFER_BIT);
     }
     draw_overlay(ww, wh);
+#ifdef __SWITCH__
+    // the settings overlay (Minus held, overlay/overlay.h), over the picture and the FPS counter
+    if (ImDrawData* ui = overlay::frame(float(ww), float(wh), overlay_renderer_init)) overlay_draw(ui, ww, wh);
+#endif
     g_presented = presented;
     frame_dumps(R.frame + 1);
     frame_stats();
@@ -1469,6 +1492,9 @@ void run_main_loop() {
         if (exitFrame && std::atomic_ref<uint64_t>(R.frame).load() >= exitFrame) break;
 #endif
         input::update();
+#ifdef __SWITCH__
+        hostui::run_posted();  // the settings overlay's changes, on this thread as on the desktop hosts
+#endif
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
     }
     LOG("[boot] host loop ended at frame %llu", (unsigned long long)std::atomic_ref<uint64_t>(R.frame).load());
@@ -1683,6 +1709,22 @@ StreamSlice stream_guest(uint32_t addr, size_t size, size_t alignment, size_t ze
     uploadTable.put({key, R.frame, R.streamGen, size, slice});  // after the upload: a buffer switch advances the generation
     return slice;
 }
+PictureGrade picture_grade_now() { return picture_grade(); }
+void set_picture_grade(const PictureGrade& g) {
+    {
+        std::lock_guard<std::mutex> lk(g_gradeMu);
+        g_gradeSet = g;
+        g_gradeChanged = true;
+    }
+    g_gradeGen.fetch_add(1, std::memory_order_release);
+}
+int fps_overlay_mode() { return overlay_mode(); }
+void set_fps_overlay_mode(int mode) { g_fpsMode = std::clamp(mode, 0, 2); }
+float dynamic_res_scale() { return dynamicRes.on ? dynamicRes.scale : 1.0f; }
+#ifdef __SWITCH__
+std::string clock_report_now() { return clock_report(); }
+#endif
+
 }  // namespace gfxgl
 
 namespace render {

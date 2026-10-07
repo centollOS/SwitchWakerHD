@@ -11,6 +11,7 @@
 
 #include "../input.h"
 #include "../input_map.h"
+#include "../overlay/overlay.h"
 #include "../runtime.h"
 #include "input_switch.h"
 
@@ -27,6 +28,7 @@ namespace {
 std::mutex g_mu;
 PadState g_pad;
 std::atomic<bool> g_pro{true};
+float g_values[input_map::kPadCount] = {};  // the settings overlay's view of the controller (controller_values)
 std::function<void(bool, std::u16string)> g_pending;
 std::u16string g_initial;
 int g_max_len = 0;
@@ -128,9 +130,35 @@ void update() {
     s.ly = l.y / (float)JOYSTICK_MAX;
     s.rx = r.x / (float)JOYSTICK_MAX;
     s.ry = r.y / (float)JOYSTICK_MAX;
+    // the same controller for the settings overlay (by position, as the game sees it): Minus held half
+    // a second opens it, B or Minus closes it; while it is open the game gets no buttons
+    float v[input_map::kPadCount] = {};
+    {
+        using namespace input_map;
+        static const struct { u64 hid; int pad; } kPads[] = {
+            {HidNpadButton_A, kPadA},       {HidNpadButton_B, kPadB},           {HidNpadButton_X, kPadX},
+            {HidNpadButton_Y, kPadY},       {HidNpadButton_L, kPadLB},          {HidNpadButton_R, kPadRB},
+            {HidNpadButton_ZL, kPadLT},     {HidNpadButton_ZR, kPadRT},         {HidNpadButton_Plus, kPadMenu},
+            {HidNpadButton_Minus, kPadOptions}, {HidNpadButton_StickL, kPadL3}, {HidNpadButton_StickR, kPadR3},
+            {HidNpadButton_Up, kPadDUp},    {HidNpadButton_Down, kPadDDown},    {HidNpadButton_Left, kPadDLeft},
+            {HidNpadButton_Right, kPadDRight},
+        };
+        for (auto& p : kPads)
+            if (held & p.hid) v[p.pad] = 1.0f;
+        auto axis = [&](float a, int neg, int pos) {
+            if (a < 0) v[neg] = -a;
+            else v[pos] = a;
+        };
+        axis(s.lx, kPadLSLeft, kPadLSRight);
+        axis(-s.ly, kPadLSUp, kPadLSDown);  // stick up is +y on the Switch
+        axis(s.rx, kPadRSLeft, kPadRSRight);
+        axis(-s.ry, kPadRSUp, kPadRSDown);
+    }
+    if (overlay::blocks_input()) s = PadState{};
     {
         std::lock_guard<std::mutex> lk(g_mu);
         g_pad = s;
+        memcpy(g_values, v, sizeof g_values);
     }
     show_keyboard();
 }
@@ -139,7 +167,11 @@ void set_touch(bool, float, float) {}
 bool pro_controller() { return g_pro.load(std::memory_order_relaxed); }
 void set_pro_controller(bool on) { g_pro = on; LOG("[input] Switch controller acts as %s", on ? "Pro Controller" : "GamePad"); }
 void release_keys() {}
-void controller_values(float* v) { memset(v, 0, sizeof(float) * input_map::kPadCount); }
+void controller_values(float* v) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    memcpy(v, g_values, sizeof g_values);
+}
+void host_controller_values(float* v) { controller_values(v); }
 void held_keys(bool* keys) { memset(keys, 0, 256); }
 
 void prompt_text(const std::u16string& initial, int max_len, std::function<void(bool ok, std::u16string text)> done) {

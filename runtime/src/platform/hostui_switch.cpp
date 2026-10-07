@@ -1,12 +1,15 @@
-// The parts of the settings-overlay host interface (overlay/hostui.h) that runtime code outside the
-// overlay uses on the Switch: saved settings (console language, mod preferences) and post(). The
-// Switch build draws no settings overlay, so the window and display options are not implemented.
+// The settings overlay's host interface (overlay/hostui.h) on the Switch: saved settings
+// (sdmc:/switch/wwhd/settings.ini), post() (run by the host loop, gfx/gl/backend.cpp run_main_loop),
+// and the window and display options, which the Switch does not have (one screen, always full: the
+// overlay hides those tabs; the values here only answer the questions).
 #include "overlay/hostui.h"
 
+#include <deque>
 #include <fstream>
 #include <map>
 #include <mutex>
 
+#include "input.h"
 #include "platform/host.h"
 #include "runtime.h"
 
@@ -32,8 +35,29 @@ void load_locked() {
 }
 }  // namespace
 
-// no UI thread to hand work to: run it now (only overlay code posts, and it is inactive here)
-void post(std::function<void()> fn) { fn(); }
+namespace {
+std::mutex g_post_mu;
+std::deque<std::function<void()>> g_posted;
+}  // namespace
+
+// the overlay builds its UI on the render thread; its changes run on the host loop's thread
+void post(std::function<void()> fn) {
+    std::lock_guard<std::mutex> lk(g_post_mu);
+    g_posted.push_back(std::move(fn));
+}
+
+void run_posted() {
+    for (;;) {
+        std::function<void()> fn;
+        {
+            std::lock_guard<std::mutex> lk(g_post_mu);
+            if (g_posted.empty()) return;
+            fn = std::move(g_posted.front());
+            g_posted.pop_front();
+        }
+        fn();
+    }
+}
 
 bool get(const char* key, std::string& value) {
     std::lock_guard<std::mutex> lk(g_mu);
@@ -59,5 +83,38 @@ void set(const char* key, const std::string& value) {
 }
 
 const char* name() { return "Switch"; }
+
+// no file picker on the console: mods are copied into sdmc:/switch/wwhd/mods by hand
+void choose_mod_source(bool, std::function<void(std::string)>) {}
+
+// graphics options of the desktop hosts: the Switch renderer has its own (Switch tab)
+float res_scale() { return 1.0f; }
+void set_res_scale(float) {}
+void graphics_changed() {}
+int scale_filter() { return 0; }
+void set_scale_filter(int) {}
+bool scale_filter_available() { return false; }
+
+// one screen, always full
+bool fullscreen() { return true; }
+void set_fullscreen(bool) {}
+int drc_modes() { return 0; }
+bool drc_mode_offered(int) { return false; }
+int drc_mode() { return 3; }  // off: the GamePad picture has no screen on the Switch
+void set_drc_mode(int) {}
+int pip_corner() { return 1; }
+void set_pip_corner(int) {}
+float pip_size() { return 0.25f; }
+void set_pip_size(float) {}
+float pip_opacity() { return 1.0f; }
+void set_pip_opacity(float) {}
+bool drc_available() { return false; }
+bool drc_shown() { return false; }
+void show_drc(bool) {}
+void set_pro_controller(bool on) { input::set_pro_controller(on); }
+void load_saved_options() {}
+void toggle_drc() {}
+void drc_window_closed() {}
+void tv_fullscreen_changed() {}
 
 }  // namespace hostui

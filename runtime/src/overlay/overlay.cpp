@@ -38,6 +38,11 @@
 #include "../rumble.h"
 #include "../runtime.h"
 #include "../savestate.h"
+#ifdef __SWITCH__
+#include <switch.h>
+#include "../gfx/gl/settings.h"
+#include "../platform/settings_switch.h"
+#endif
 
 namespace interp {
 int mode();  // 0 off, 1 frame interpolation, 2 true 60
@@ -118,9 +123,16 @@ ImGuiKey imgui_key(int code) {
 }
 
 // ---------------------------------------------------------------- UI state (render thread)
+#ifdef __SWITCH__
+// the Switch renderer has its own options (Switch tab); one screen, and the controller maps by position
+enum Tab { kSaves, kSwitch, kMods, kAbout, kTabs, kGraphics = 100, kDisplay, kControls };
+const char* const kTabNames[kTabs] = {"Saves", "Switch", "Mods", "Language / About"};
+const char* const kTabIds[kTabs] = {"saves", "switch", "mods", "about"};
+#else
 enum Tab { kSaves, kGraphics, kDisplay, kMods, kControls, kAbout, kTabs };
 const char* const kTabNames[kTabs] = {"Saves", "Graphics", "Display", "Mods", "Controls", "Language / About"};
 const char* const kTabIds[kTabs] = {"saves", "graphics", "display", "mods", "controls", "about"};
+#endif
 
 struct Ui {
     bool init = false;
@@ -214,6 +226,20 @@ void setup_style() {
 // a font with arrows and accents if the system has one; Dear ImGui's own scalable font otherwise
 void setup_fonts() {
     ImGuiIO& io = ImGui::GetIO();
+#ifdef __SWITCH__
+    // the console's own font (shared font service), kept by the system: the atlas does not own it
+    if (R_SUCCEEDED(plInitialize(PlServiceType_User))) {
+        PlFontData font;
+        if (R_SUCCEEDED(plGetSharedFontByType(&font, PlSharedFontType_Standard))) {
+            ImFontConfig cfg;
+            cfg.FontDataOwnedByAtlas = false;
+            if (io.Fonts->AddFontFromMemoryTTF(font.address, int(font.size), 17.0f, &cfg)) {
+                LOG("[overlay] font: the system's shared font");
+                return;
+            }
+        }
+    }
+#endif
     static const char* const candidates[] = {
 #if defined(__APPLE__)
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
@@ -595,6 +621,73 @@ void tab_graphics() {
     if (check("Performance overlay (FPS, frame time)", perf_shown(), &v)) set_perf_shown(v);
 }
 
+#ifdef __SWITCH__
+// Switch: handheld GPU profile, picture adjustments and the corner counter (platform/settings_switch.h)
+void tab_switch() {
+    using namespace switch_settings;
+    heading("Performance in handheld mode");
+    const int gp = gpu_profile();
+    for (int i = 0; i < kGpuProfiles; i++)
+        if (radio(gpu_profile_label(i), gp == i)) hostui::post([i] { set_gpu_profile(i); });
+    help("Nintendo's own performance profiles for games: the CPU stays at 1020 MHz.\n"
+         "Docked, the console uses its docked clocks (GPU 768 MHz).");
+    if (gpu_profile_env())
+        note("env.txt sets WWHD_GPU_PROFILE: it is used at every start; a change here lasts until the game closes.");
+    // the clocks, asked at most once a second (clkrst)
+    static double clocks_t = -10;
+    static std::string clocks;
+    if (now_s() - clocks_t >= 1.0) {
+        clocks_t = now_s();
+        clocks = gfxgl::clock_report_now();
+    }
+    if (!clocks.empty()) note("Now: %s (%s).", clocks.c_str(), gpu_profile_status().c_str());
+    note("Internal resolution: %.2f (dynamic resolution lowers it while the GPU is the limit).", gfxgl::dynamic_res_scale());
+
+    heading("Picture");
+    gfxgl::PictureGrade g = gfxgl::picture_grade_now();
+    bool changed = false, done = false;
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+    changed |= ImGui::SliderFloat("Exposure", &g.exposure, 0.5f, 1.5f, "%.2f");
+    done |= ImGui::IsItemDeactivatedAfterEdit();
+    help("Below 1 tames bright areas (sky, sea)");
+    changed |= ImGui::SliderFloat("Contrast", &g.contrast, 0.5f, 2.0f, "%.2f");
+    done |= ImGui::IsItemDeactivatedAfterEdit();
+    changed |= ImGui::SliderFloat("Saturation", &g.saturation, 0.0f, 2.0f, "%.2f");
+    done |= ImGui::IsItemDeactivatedAfterEdit();
+    changed |= ImGui::SliderFloat("Gamma", &g.gamma, 0.5f, 2.0f, "%.2f");
+    done |= ImGui::IsItemDeactivatedAfterEdit();
+    help("Above 1 deepens mid-tones and shadows, below 1 lifts them");
+    ImGui::PopItemWidth();
+    if (changed) gfxgl::set_picture_grade(g);
+    if (ImGui::Button("Original colours")) {
+        gfxgl::set_picture_grade(gfxgl::PictureGrade{});
+        done = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Vivid")) {
+        gfxgl::set_picture_grade(gfxgl::PictureGrade{0.85f, 1.3f, 1.1f, 1.0f});
+        done = true;
+    }
+    if (done) hostui::post([] { save_picture(); });
+    if (picture_env())
+        note("env.txt sets the picture (WWHD_EXPOSURE ...): it is used at every start; changes here last until the game closes.");
+
+    heading("Frame rate counter (top left)");
+    static const char* const modes[] = {"Off", "Frame rate", "Frame rate and load"};
+    const int fm = gfxgl::fps_overlay_mode();
+    for (int i = 0; i < 3; i++) {
+        if (i) ImGui::SameLine();
+        if (radio(modes[i], fm == i)) {
+            gfxgl::set_fps_overlay_mode(i);
+            hostui::post([i] { hostui::set(kKeyFpsCounter, std::to_string(i)); });
+        }
+    }
+    if (fps_counter_env()) note("env.txt sets WWHD_FPS: it is used at every start.");
+    heading("Menu");
+    note("Hold Minus for half a second to open this menu; B or Minus closes it. L / R change tabs.");
+}
+#endif
+
 void tab_display() {
     bool v;
     heading("Window");
@@ -694,6 +787,7 @@ void package_controls() {
     note("Your active profile is protected from deletion.");
     heading("Installed packages");
     note("Install a local .wwhdmod ZIP or a folder containing manifest.json.");
+#ifndef __SWITCH__  // no file picker on the console
     if (ImGui::Button("Choose package…")) hostui::choose_mod_source(false, [](std::string path) {
         std::lock_guard guard(picker_mutex); picked = std::move(path);
     });
@@ -701,6 +795,7 @@ void package_controls() {
     if (ImGui::Button("Choose folder…")) hostui::choose_mod_source(true, [](std::string path) {
         std::lock_guard guard(picker_mutex); picked = std::move(path);
     });
+#endif
     ImGui::SetNextItemWidth(-140);
     ImGui::InputText("Package path", source, sizeof source);
     if (ImGui::Button("Install package")) install(source, error);
@@ -1191,10 +1286,14 @@ void settings_window() {
                     ImGui::BeginChild("page", ImVec2(0, 0), ImGuiChildFlags_NavFlattened);
                     switch (i) {
                     case kSaves: tab_saves(); break;
+#ifdef __SWITCH__
+                    case kSwitch: tab_switch(); break;
+#else
                     case kGraphics: tab_graphics(); break;
                     case kDisplay: tab_display(); break;
-                    case kMods: tab_mods(); break;
                     case kControls: tab_controls(); break;
+#endif
+                    case kMods: tab_mods(); break;
                     default: tab_about(); break;
                     }
                     ImGui::EndChild();

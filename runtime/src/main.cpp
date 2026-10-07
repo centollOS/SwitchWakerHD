@@ -21,6 +21,7 @@
 #include <string>
 #include <thread>
 #ifdef __SWITCH__
+#include "platform/settings_switch.h"
 #include <sys/stat.h>
 #include <dirent.h>
 #include <ctime>
@@ -280,63 +281,6 @@ static void load_switch_options(int& argc, char**& argv) {
     argv = args.data();
 }
 
-// Official GPU profile (handheld): stock CPU 1020 MHz, GPU 460.8 MHz instead of the system's 307.2,
-// memory 1331.2 MHz. Round 28's log was GPU-bound in handheld at 307 MHz (dynamic resolution
-// 0.80-0.85). These configurations are the ones apm offers games, the same table centollOS uses:
-//   0x00020003  CPU 1020  GPU 307.2  memory 1331.2  (handheld default)
-//   0x00020004  CPU 1020  GPU 384.0  memory 1331.2
-//   0x92220008  CPU 1020  GPU 460.8  memory 1331.2
-// Docked (Boost) is left alone. apm keeps one configuration per mode and switches between them
-// itself on dock/undock, so it is set once. apm needs title mode (an application); in applet mode it
-// is skipped. WWHD_GPU_PROFILE=460 (default) | 384 | default | 0x<configuration id>; 460 falls back
-// to 384, then to the system's own. The configuration found at start is restored at exit.
-static u32 g_apm_saved = 0;
-static void restore_gpu_profile() {
-    Result rc = apmSetPerformanceConfiguration(ApmPerformanceMode_Normal, g_apm_saved);
-    LOG("[boot] gpu profile: handheld configuration 0x%08x restored: rc 0x%x", (unsigned)g_apm_saved, (unsigned)rc);
-}
-static void apply_gpu_profile() {
-    const char* profile = getenv("WWHD_GPU_PROFILE");
-    if (!profile || !*profile) profile = "460";
-    if (!strcmp(profile, "default")) {
-        LOG("[boot] gpu profile: default (handheld configuration left to the system)");
-        return;
-    }
-    AppletType applet = appletGetAppletType();
-    if (applet != AppletType_Application && applet != AppletType_SystemApplication) {
-        LOG("[boot] gpu profile %s skipped: apm needs title mode (application)", profile);
-        return;
-    }
-    u32 chain[2] = {};
-    int count = 0;
-    if (!strcmp(profile, "460")) {
-        chain[count++] = 0x92220008;
-        chain[count++] = 0x00020004;
-    } else if (!strcmp(profile, "384")) {
-        chain[count++] = 0x00020004;
-    } else {
-        chain[count++] = (u32)strtoul(profile, nullptr, 0);
-    }
-    Result rc = apmInitialize();
-    if (R_FAILED(rc)) {
-        LOG("[boot] gpu profile %s: apmInitialize failed rc 0x%x; system default kept", profile, (unsigned)rc);
-        return;
-    }
-    rc = apmGetPerformanceConfiguration(ApmPerformanceMode_Normal, &g_apm_saved);
-    if (R_FAILED(rc)) g_apm_saved = 0x00020003;
-    LOG("[boot] gpu profile %s: handheld configuration before 0x%08x (rc 0x%x)", profile, (unsigned)g_apm_saved,
-        (unsigned)rc);
-    for (int i = 0; i < count; i++) {
-        rc = apmSetPerformanceConfiguration(ApmPerformanceMode_Normal, chain[i]);
-        LOG("[boot] gpu profile: set handheld configuration 0x%08x: rc 0x%x%s", (unsigned)chain[i], (unsigned)rc,
-            R_SUCCEEDED(rc) ? "" : " (failed)");
-        if (R_SUCCEEDED(rc)) {
-            atexit(restore_gpu_profile);
-            return;
-        }
-    }
-    LOG("[boot] gpu profile %s: no configuration accepted; system default kept", profile);
-}
 #elif !defined(_WIN32)
 // Memory crashes (SIGSEGV/SIGBUS/...): the report goes to the terminal and to
 // captures/crash-<time>.log (registers, guest return chain, host backtrace, crash recovery's
@@ -528,12 +472,12 @@ int main(int argc, char** argv) {
     setvbuf(stderr, nullptr, _IOLBF, 0);
     log_session_header();
     // which round of docs/switch-port.md this runtime is (to tell builds apart in the logs)
-    LOG("[boot] recompiled code: %s; runtime: round 29 (official GPU profile 460.8 MHz handheld; round 28 = round 27 with the near-plane clip distance off, searchlight probe frames after a capture, per-draw trace in captures)",
+    LOG("[boot] recompiled code: %s; runtime: round 30 (settings overlay on Minus; round 29 = official GPU profile 460.8 MHz handheld; round 28 = round 27 with the near-plane clip distance off, searchlight probe frames after a capture, per-draw trace in captures)",
         g_recomp_variant);
     host::place_thread(0);
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
     load_switch_options(argc, argv);
-    apply_gpu_profile();
+    switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
 #endif
     apply_portable_mode();
 #ifdef _WIN32
