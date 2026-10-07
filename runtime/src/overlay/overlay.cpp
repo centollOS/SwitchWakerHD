@@ -749,12 +749,12 @@ void tab_switch() {
 
     heading("Draw optimizations (A/B test)");
     for (int i = 0; i < gfxsw::kDrawOpts; i++) {
-        static const char* const names[] = {"Skip unchanged uniform registers", "Skip unchanged fixed state"};
+        static const char* const names[] = {"Skip unchanged fixed state"};
         bool on;
         if (i) ImGui::SameLine(0, 30);
         if (check(names[i], gfxsw::draw_opt(i), &on)) gfxsw::set_draw_opt(i, on);
     }
-    help("Turn both off and on again in the same spot: the log marks each change with its frame.\n"
+    help("Turn them off and on again in the same spot: the log marks each change with its frame.\n"
          "Not saved: they are on again at the next start.");
 
     heading("Performance in handheld mode");

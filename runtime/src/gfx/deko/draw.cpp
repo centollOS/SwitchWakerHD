@@ -875,7 +875,7 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
         "%.2f us each; table %.0f%% of %.0f/frame) + ufBlock %.2f + descriptors %.2f; binds (in state) %.2f us: "
         "textures %.2f calls %.2f handles of %.2f slots, uniform blocks %.2f calls %.2f buffers of %.2f slots; guest "
         "uniform blocks %.2f/draw (%.0f%% already in the stream, %.0f%% by the memo); ufBlock mode %d: %.0f/frame, "
-        "%.0f%% unchanged, %.0f%% registers skipped, %.0f slices (%.0f KiB) + %.0f pushes (%.1f KiB) per frame; state us "
+        "%.0f%% unchanged, %.0f slices (%.0f KiB) + %.0f pushes (%.1f KiB) per frame; state us "
         "per draw: ordering/targets/binds %.2f + fixed %.2f (%.0f%% skipped) + vertices %.2f",
         us(p.targetNs), us(p.uboNs), us(p.textureNs), us(p.textureMissNs), perFrame(p.textureMisses),
         p.textureMisses ? double(p.textureMissNs) / 1e3 / double(p.textureMisses) : 0.0,
@@ -883,7 +883,7 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
         perDraw(p.texBindCalls), perDraw(p.texHandles), perDraw(p.texWanted), perDraw(p.uboBindCalls),
         perDraw(p.uboBuffers), perDraw(p.uboWanted), perDraw(p.uboBlocks), pct(p.uboReused, p.uboBlocks),
         pct(p.uboMemoHits, p.uboBlocks), g_ufMode,
-        perFrame(u.blocks), pct(u.unchanged, u.blocks), pct(u.regsSkipped, u.blocks), perFrame(u.slices), perFrame(u.sliceBytes) / 1024.0,
+        perFrame(u.blocks), pct(u.unchanged, u.blocks), perFrame(u.slices), perFrame(u.sliceBytes) / 1024.0,
         perFrame(u.pushes), perFrame(u.pushBytes) / 1024.0, us(p.stateBindNs), us(p.stateFixedNs),
         100.0 * perDraw(p.fixedSkips), us(p.stateVertexNs));
 }

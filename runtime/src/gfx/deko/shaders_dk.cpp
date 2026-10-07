@@ -21,7 +21,6 @@
 #include <zlib.h>
 
 #include <algorithm>
-#include <atomic>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -45,11 +44,6 @@
 #include "shader_files.h"
 #include "uam_api.h"
 #include "util/helpers/StringBuf.h"
-
-extern "C" uint64_t g_alu_const_gen[2];  // gx2_core.cpp: uniform register writes, pixel / vertex
-namespace gx2 {
-extern std::atomic<bool> g_alu_gen_on;  // gx2_core.cpp: uniform register skip (WWHD_DK_ALU_GEN, the Switch tab)
-}
 
 LatteDecompilerShader* FinishDecompiledShader(LatteDecompilerOutput_t& output);
 LatteFetchShader* LatteShaderRecompiler_createFetchShader(LatteFetchShader::CacheHash hash, uint32* regs, uint32* code,
@@ -1206,8 +1200,7 @@ struct UniformCache {
         uint32_t src;    // register index (block == ~0u), else offset in the guest block
         uint32_t block;  // register holding the guest block's address, ~0u for a register constant
     };
-    std::vector<Op> ops;  // the register constants first (regOps of them), then the guest blocks'
-    uint32_t regOps = 0;
+    std::vector<Op> ops;
     std::vector<uint8_t> data;  // the values packed last; in mode 2 also what the GPU's copy holds
     uint32_t size = 0, bound = 0;  // bytes (pack_uniforms' size), bound bytes (a multiple of 256)
     int32_t aoDst = -1;            // offset_remapped: the AO fix's constant (aoNoise)
@@ -1217,10 +1210,6 @@ struct UniformCache {
     std::vector<std::pair<uint32_t, uint32_t>> texScales;  // offset, unit
     uint64_t frame = ~0ull;  // the frame its stream slice belongs to
     DkGpuAddr gpu = 0;
-    // the stage's uniform register generation (g_alu_const_gen) when the register part was packed last, and
-    // the AO fix then: both the same, the register part still holds what the registers say
-    uint64_t aluGen = 0;
-    bool aoNoise = false;
 };
 
 namespace {
@@ -1249,8 +1238,6 @@ UniformCache* uniform_cache(bool vertex, Shader& sh) {
                     c->ops.push_back({uint32_t(dst), uint32_t(entry.indexOffset), blockBase + group.kcacheBankIdOffset / 4u});
             }
     }
-    std::stable_partition(c->ops.begin(), c->ops.end(), [](const UniformCache::Op& op) { return op.block == ~0u; });
-    c->regOps = uint32_t(std::count_if(c->ops.begin(), c->ops.end(), [](const UniformCache::Op& op) { return op.block == ~0u; }));
     if (offsets.offset_uniformRegister >= 0 && fits(offsets.offset_uniformRegister, uint32_t(offsets.count_uniformRegister) * 16)) {
         c->regs = offsets.offset_uniformRegister;
         c->regBase = aluBase;
@@ -1296,16 +1283,7 @@ StreamSlice pack_uniforms_cached(int mode, bool vertex, Shader& sh, const uint32
         mark(offset, 16);
     };
     static const uint8_t zeros[16] = {};
-    // the register part (remapped register constants, uniform registers) only when the stage's uniform registers
-    // were written since this shader's last pack (WWHD_DK_ALU_GEN=0: always)
-    const bool aluGenOn = gx2::g_alu_gen_on.load(std::memory_order_relaxed);
-    const uint64_t aluGen = g_alu_const_gen[vertex ? 1 : 0];
-    const bool regsSame = aluGenOn && c.aluGen == aluGen && c.aoNoise == aoNoise;
-    if (regsSame) g_ufStats.regsSkipped++;
-    c.aluGen = aluGen;
-    c.aoNoise = aoNoise;
-    for (size_t i = regsSame ? c.regOps : 0; i < c.ops.size(); i++) {
-        const UniformCache::Op& op = c.ops[i];
+    for (const UniformCache::Op& op : c.ops) {
         const uint8_t* src;
         if (op.block == ~0u) src = reinterpret_cast<const uint8_t*>(regs + op.src);
         else {
@@ -1323,7 +1301,7 @@ StreamSlice pack_uniforms_cached(int mode, bool vertex, Shader& sh, const uint32
         } else
             put16(op.dst, src);
     }
-    if (c.regs >= 0 && !regsSame) {
+    if (c.regs >= 0) {
         const auto* src = reinterpret_cast<const uint8_t*>(regs + c.regBase);
         for (uint32_t o = 0; o < c.regBytes; o += 16) put16(uint32_t(c.regs) + o, src + o);
     }
