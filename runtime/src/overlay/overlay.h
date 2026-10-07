@@ -1,7 +1,7 @@
 // In-game settings overlay (Dear ImGui), drawn on top of the TV window's picture by both renderers.
 //
 // F1 opens and closes it (Esc closes); on macOS also Cmd+, (app menu > Settings...; most Mac keyboards
-// send F1 only with Fn unless the top row is set to standard function keys); on a controller, hold Select/Minus for half a second or press
+// send F1 only with Fn unless the top row is set to standard function keys); on a controller, hold Select/Minus for half a second (press Minus on the Switch) or press
 // Home. While it is open the game sees no buttons (it keeps running) and the overlay takes keyboard,
 // mouse and controller. Tabs: Saves, Graphics, Display, Mods, Controls, Language / About. Every option
 // calls the same functions as the macOS menu bar (which stays in sync) or the SDL host's shortcuts.

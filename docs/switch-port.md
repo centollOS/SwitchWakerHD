@@ -12,7 +12,7 @@ Status as of 2026-10-07 (runtime round 30, branch `dev`, merged with upstream de
 | Build | Works: `tools/switch/build.sh` → `build/switch-dk/wwhd.nro` (deko3d, ~39 MB); `WWHD_RENDERER=OPENGL tools/switch/build.sh` → `build/switch/wwhd_gl.nro` (~42 MB; `tools/switch/mesa/build_mesa.sh` once first) |
 | Boot on hardware | Works: picture, sound and controller input (as a Wii U Pro Controller, so everything is on one screen) |
 | Performance on hardware | Stock CPU 1020 MHz. Handheld with the official GPU profile (GPU 460.8 MHz, memory 1600 MHz, round 29): median 29.5 fps, 72% of reports at 28 fps or more in views over 2,000 draws; dynamic resolution 0.75-1.00 (1.00 in 38% of reports). At the system's 307 MHz the same play was 26.9 fps |
-| Settings | In-game menu (hold Minus, round 30): GPU profile, picture adjustments, frame-rate counter, save states, mods, language. Saved in `settings.ini`; `env.txt` values win at start |
+| Settings | In-game menu (press Minus; held half a second until round 36): GPU profile, CPU clock (1020-1785 MHz in the system table's steps, default 1224), picture adjustments, frame-rate counter, save states, mods, language. Saved in `settings.ini`; `env.txt` values win at start |
 | On-screen FPS counter | Top-left corner; menu or `WWHD_FPS=0/1/2` |
 | Desktop reproduction | Works: a headless Linux build of the same GL renderer (Mesa llvmpipe) renders the game correctly |
 

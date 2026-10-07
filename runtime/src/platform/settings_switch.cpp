@@ -13,8 +13,8 @@
 // WWHD_GPU_PROFILE (env.txt) = default | 384 | 460 | 1600 (460 with memory 1600) | 614 | 0x<configuration id>;
 // without it, the menu's saved choice; without that, 1600.
 //
-// Beyond apm (a teammate's sys-clk setup, asked for 2026-10-07): CPU 1785 MHz (WWHD_CPU_CLOCK=1785, or the
-// menu) and GPU 614.4 MHz in handheld (profile 614) are set through clkrst, as sys-clk does, on top of
+// Beyond apm (a teammate's sys-clk setup, asked for 2026-10-07): the CPU clock (the system table's steps
+// 1020-1785 MHz, default 1224; WWHD_CPU_CLOCK=<MHz>, or the menu) and GPU 614.4 MHz in handheld (profile 614) are set through clkrst, as sys-clk does, on top of
 // apm's configuration (memory 1600 comes from 0x92220007). The system sets its own clocks again on
 // dock / undock, sleep and apm changes, so tick() sets them again (once a second, when they differ);
 // at exit the CPU goes back to 1020 MHz and the handheld configuration found at start is restored.
@@ -46,11 +46,13 @@ const char* const kIds[kGpuProfiles] = {"default", "384", "460", "1600", "614"};
 const char* const kLabels[kGpuProfiles] = {"System default (GPU 307 MHz)", "GPU 384 MHz", "GPU 460 MHz",
                                            "GPU 460 MHz + memory 1600 MHz",
                                            "GPU 614 MHz + memory 1600 MHz (overclock, as sys-clk)"};
-const char* const kCpuIds[kCpuClocks] = {"1020", "1785"};
-const char* const kCpuLabels[kCpuClocks] = {"CPU 1020 MHz (stock)", "CPU 1785 MHz (overclock, as sys-clk)"};
-constexpr u32 kCpuHz[kCpuClocks] = {1020000000, 1785000000};
+const char* const kCpuIds[kCpuClocks] = {"1020", "1122", "1224", "1326", "1428", "1581", "1683", "1785"};
+const char* const kCpuLabels[kCpuClocks] = {"1020 MHz (stock)", "1122 MHz", "1224 MHz (default)", "1326 MHz",
+                                            "1428 MHz", "1581 MHz", "1683 MHz", "1785 MHz (loading-screen boost)"};
+constexpr u32 kCpuHz[kCpuClocks] = {1020000000, 1122000000, 1224000000, 1326000000,
+                                    1428000000, 1581000000, 1683000000, 1785000000};
 constexpr u32 kGpu614Hz = 614400000;
-int g_cpu = kCpu1020;
+int g_cpu = kCpuDefault;
 bool g_cpu_env = false;
 
 // clkrst sessions for setting clocks (sys-clk's way), opened on first use
@@ -73,7 +75,7 @@ bool clk_ready() {
 bool docked() { return appletGetOperationMode() == AppletOperationMode_Console; }
 
 // the clock overrides wanted now (0: none)
-u32 wanted_cpu_hz() { return g_cpu == kCpu1785 ? kCpuHz[kCpu1785] : 0; }
+u32 wanted_cpu_hz() { return g_cpu != kCpu1020 ? kCpuHz[g_cpu] : 0; }
 u32 wanted_gpu_hz() { return g_profile == kGpu614 && !docked() ? kGpu614Hz : 0; }
 bool g_overridden = false;  // an override was set (at exit: put the stock clocks back)
 
@@ -199,7 +201,7 @@ void set_gpu_profile(int p) {
         static const u32 kGpuHz[kGpuProfiles] = {307200000, 384000000, 460800000, 460800000, kGpu614Hz};
         set_clock(&g_clk_gpu, "GPU", kGpuHz[p]);
     }
-    enforce(true);  // after apm: the GPU 614 / CPU 1785 overrides on top
+    enforce(true);  // after apm: the GPU 614 / CPU overrides on top
     hostui::set(kKeyGpuProfile, kIds[p]);
 }
 
@@ -275,7 +277,7 @@ void apply_at_start() {
         LOG("[switch] gpu profile %s (%s)", id.c_str(), g_profile_env ? "env.txt" : "settings");
         if (p != kGpuDefault) apply(id.c_str(), chain);
     }
-    // CPU clock: env.txt (WWHD_CPU_CLOCK=1020|1785), else the saved choice, else stock
+    // CPU clock: env.txt (WWHD_CPU_CLOCK=<MHz of the table>), else the saved choice, else 1224 MHz
     {
         std::string c;
         if (const char* e = getenv("WWHD_CPU_CLOCK"); e && *e) {
@@ -285,8 +287,10 @@ void apply_at_start() {
             hostui::get(kKeyCpuClock, c);
         }
         std::lock_guard<std::mutex> lk(g_mu);
-        g_cpu = c == kCpuIds[kCpu1785] ? kCpu1785 : kCpu1020;
-        if (g_cpu != kCpu1020) LOG("[switch] cpu clock %s (%s)", kCpuIds[g_cpu], g_cpu_env ? "env.txt" : "settings");
+        g_cpu = kCpuDefault;
+        for (int i = 0; i < kCpuClocks; i++)
+            if (c == kCpuIds[i]) g_cpu = i;
+        LOG("[switch] cpu clock %s MHz (%s)", kCpuIds[g_cpu], g_cpu_env ? "env.txt" : c.empty() ? "default" : "settings");
         apm_ready();  // the exit hook that puts the stock clocks back
         enforce(true);
     }

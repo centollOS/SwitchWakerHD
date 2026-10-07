@@ -358,7 +358,12 @@ void read_controller() {
     input::host_controller_values(U.values);
     using namespace input_map;
     const double t = now_s();
-    // Home: toggles; Select / Minus (View / Share): held half a second opens, a press closes
+    // Home: toggles; Select / Minus (View / Share): held half a second opens (a press on the Switch), a press closes
+#ifdef __SWITCH__
+    constexpr double kOptionsHold = 0.0;
+#else
+    constexpr double kOptionsHold = 0.5;
+#endif
     if (controller_pressed(kPadHome)) set_open(!is_open());
     if (controller_down(kPadOptions)) {
         if (!U.options_latched) {
@@ -367,7 +372,7 @@ void read_controller() {
                 U.options_latched = true;
             } else {
                 if (U.options_since < 0) U.options_since = t;
-                if (t - U.options_since >= 0.5) {
+                if (t - U.options_since >= kOptionsHold) {
                     set_open(true);
                     U.options_latched = true;
                 }
@@ -723,13 +728,13 @@ void tab_switch() {
     heading("CPU");
     const int cc = cpu_clock();
     for (int i = 0; i < kCpuClocks; i++) {
-        if (i) ImGui::SameLine();
+        if (i % 4) ImGui::SameLine();
         if (radio(cpu_clock_label(i), cc == i)) hostui::post([i] { set_cpu_clock(i); });
     }
-    help("1785 MHz is the clock games get during loading screens, set here for the whole game as sys-clk does.\n"
-         "It drains the battery faster and the console runs warmer.");
+    help("The steps of the console's CPU table, set for the whole game as sys-clk does (handheld and docked).\n"
+         "1785 MHz is the clock games get during loading screens. Higher drains the battery faster and the console runs warmer.");
     if (cpu_clock_env()) note("env.txt sets WWHD_CPU_CLOCK: it is used at every start.");
-    if (cc != kCpu1020 || gp == kGpu614)
+    if (cc > kCpuDefault || gp == kGpu614)
         warn("Overclock: more heat and battery use. If sys-clk has its own profile for this game, the two fight over the clocks.");
     // the clocks, asked at most once a second (clkrst)
     static double clocks_t = -10;
@@ -782,7 +787,7 @@ void tab_switch() {
     }
     if (fps_counter_env()) note("env.txt sets WWHD_FPS: it is used at every start.");
     heading("Menu");
-    note("Hold Minus for half a second to open this menu; B or Minus closes it. L / R change tabs.");
+    note("Minus opens this menu; B or Minus closes it. L / R change tabs.");
 }
 #endif
 
