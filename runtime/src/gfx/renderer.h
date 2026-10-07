@@ -1,6 +1,6 @@
 // Renderer selection and dispatch. One executable can contain both renderers (macOS default build:
 // WWHD_RENDERER=BOTH): Metal (gfx/metal_*.mm, namespace gfx) and Vulkan (gfx/vulkan/*, namespace
-// gfxvk). Each fills a Backend table; the GX2 layer and the host (windows, menus, save states) call
+// gfxvk). The Switch builds one of OpenGL (gfx/gl, gfxgl) and deko3d (gfx/deko, gfxdk). Each fills a Backend table; the GX2 layer and the host (windows, menus, save states) call
 // the functions below, which forward to the renderer chosen once at start-up.
 //
 // Choice, highest priority first:
@@ -16,9 +16,9 @@
 
 namespace render {
 
-enum class Api : int { Metal = 0, Vulkan = 1, OpenGL = 2 };
-const char* api_name(Api a);      // "Metal", "Vulkan", "OpenGL"
-const char* api_key(Api a);       // "metal", "vulkan", "opengl" (setting / command line value)
+enum class Api : int { Metal = 0, Vulkan = 1, OpenGL = 2, Deko3D = 3 };
+const char* api_name(Api a);      // "Metal", "Vulkan", "OpenGL", "deko3d"
+const char* api_key(Api a);       // "metal", "vulkan", "opengl", "deko3d" (setting / command line value)
 bool compiled(Api a);             // built into this executable
 bool can_choose();                // more than one renderer built in (the Graphics menu offers the choice)
 
@@ -76,6 +76,9 @@ const Backend& vulkan_backend();  // gfx/vulkan/backend_table.cpp
 #ifdef WWHD_HAS_OPENGL
 const Backend& opengl_backend();  // gfx/gl/backend.cpp (Switch)
 #endif
+#ifdef WWHD_HAS_DEKO3D
+const Backend& deko3d_backend();  // gfx/deko/backend.cpp (Switch)
+#endif
 
 // ---- start-up (main.cpp)
 // pick the renderer from the command line, environment and saved setting (before init)
@@ -89,6 +92,7 @@ void run_main_loop();
 Api active();
 inline bool vulkan() { return g_backend && g_backend->api == Api::Vulkan; }
 inline bool opengl() { return g_backend && g_backend->api == Api::OpenGL; }
+inline bool deko3d() { return g_backend && g_backend->api == Api::Deko3D; }
 Api requested();                  // what was asked for at start-up (differs from active() after a fallback)
 std::string fallback_reason();    // why the requested renderer did not start ("" if it did)
 Api preferred();                  // saved setting: the renderer the next start uses
