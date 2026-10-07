@@ -13,6 +13,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "dk_draw.h"
 #include "dk_shaders.h"
 #include "dk_surfaces.h"
+#include "dk_sync.h"
 
 #include <algorithm>
 #include <atomic>
@@ -782,9 +783,14 @@ struct GpuPasses {
             sum += t.ms;
         }
         std::sort(v.rbegin(), v.rend());
-        char head[128];
-        snprintf(head, sizeof head, "%.1f ms a frame in %zu kinds of passes (%llu sampled frames%s):", sum / double(frames),
-                 totals.size(), (unsigned long long)frames,
+        // the GPU's own work: everything but the idle time at the frame's start (P4: the figure to compare
+        // between builds and switches, which the CPU's pace does not change)
+        double startMs = 0;
+        if (auto it = totals.find("frame start"); it != totals.end()) startMs = it->second.ms;
+        char head[192];
+        snprintf(head, sizeof head, "%.1f ms a frame in %zu kinds of passes (GPU busy %.1f ms without the frame start; "
+                 "%llu sampled frames%s):", sum / double(frames), totals.size(), (sum - startMs) / double(frames),
+                 (unsigned long long)frames,
                  incomplete ? (", " + std::to_string(incomplete) + " incomplete skipped").c_str() : "");
         std::string out = head;
         for (size_t i = 0; i < v.size() && i < 10; i++) {
@@ -912,6 +918,7 @@ void frame_stats() {
         R.perf = {};  // (swap() takes the hitch base after present)
     }
     if (std::string passes = gpuPasses.report(); !passes.empty()) LOG("[dk] GPU passes: %s", passes.c_str());
+    if (std::string sync = sync_report(frames); !sync.empty()) LOG("[dk] GPU sync %s", sync.c_str());
     if (std::string clocks = clock_report(); !clocks.empty()) LOG("[dk] clocks: %s", clocks.c_str());
     overlayStats.renderBusy = busy;
     overlayStats.gpuBusyPct = behindPct;
@@ -946,9 +953,8 @@ void begin_commands() {
     // conservative (plan section 6.3): the texture, uniform and descriptor caches forget what the CPU
     // rewrote in this slot's stream slice four frames ago; and the previous frame's present pass, which may
     // sample the game's TV buffer itself (present_source), finishes before this frame's clears and draws
-    // write to it
-    dkCmdBufBarrier(R.cmd, DkBarrier_Fragments,
-                    DkInvalidateFlags_Image | DkInvalidateFlags_Shader | DkInvalidateFlags_Descriptors);
+    // write to it (gpu_sync.cpp; also the tiled cache's state, WWHD_DK_TILED_CACHE)
+    sync_frame_start();
     dkCmdBufBindImageDescriptorSet(R.cmd, image_descriptors(), kImageDescriptors);
     dkCmdBufBindSamplerDescriptorSet(R.cmd, sampler_descriptors(), kSamplerDescriptors);
     static bool samplersWritten = false;
@@ -1027,8 +1033,9 @@ void present() {
                                                 DkSwizzle_PositiveW};
     dkCmdBufSetViewportSwizzles(R.cmd, 0, &kIdentity, 1);
     dkCmdBufSetPrimitiveRestart(R.cmd, false, 0);
-    // what the frame's passes rendered is complete before the picture is sampled
-    dkCmdBufBarrier(R.cmd, DkBarrier_Fragments, DkInvalidateFlags_Image);
+    // what the frame's passes rendered (and uploads still waiting for their barrier) is complete before the
+    // picture is sampled (gpu_sync.cpp)
+    sync_present();
     const PresentSource src = present_source();
     DkImageView color, depth;
     dkImageViewDefaults(&color, &g_swapImages[slot]);

@@ -30,6 +30,7 @@
 #include "dk_capture.h"
 #include "dk_draw.h"
 #include "dk_surfaces.h"
+#include "dk_sync.h"
 #include "gx2/gx2.h"
 #include "gx2_texture_regs.h"
 #include "runtime.h"
@@ -352,11 +353,15 @@ Staging staging_alloc(uint32_t size) {
 uint64_t g_clearWork = 0;
 uint64_t g_transferWork = ~0ull;
 uint64_t work_counter() { return R.drawCount + R.counts.draws + g_clearWork + R.stateEpoch; }
-void transfer_begin() {
-    if (work_counter() != g_transferWork) dkCmdBufBarrier(R.cmd, DkBarrier_Full, 0);
-}
+// (the barriers themselves: gpu_sync.cpp, dk_sync.h; uploads may share one, WWHD_DK_UPLOAD_BATCH)
+void transfer_begin() { sync_transfer_begin(work_counter() != g_transferWork); }
 void transfer_end() {
-    dkCmdBufBarrier(R.cmd, DkBarrier_Full, DkInvalidateFlags_Image);
+    sync_transfer_end();
+    g_transferWork = work_counter();
+}
+void upload_begin(Surface* s) { sync_upload_begin(s, work_counter() != g_transferWork); }
+void upload_end() {
+    sync_upload_end();
     g_transferWork = work_counter();
 }
 
@@ -599,7 +604,7 @@ void upload_surface(Surface* s) {
     // then resampled to the internal resolution (gfx/gl)
     const float scale = s->scale;
     if (scale != 1.0f) rescale_surface(s, 1.0f, false);
-    transfer_begin();
+    upload_begin(s);
     for (uint32_t level = 0; level < levels; ++level) {
         const LevelGeom lg = level_geom(s, level);
         if (!lg.bytes) continue;
@@ -611,7 +616,7 @@ void upload_surface(Surface* s) {
         dkCmdBufCopyBufferToImage(R.cmd, &src, &v, &rect, 0);
         R.perf.uploadBytes += lg.bytes;
     }
-    transfer_end();
+    upload_end();
     depth_changed(s);
     s->contentHash = hash;
     s->writeSeq = next_write_seq();
@@ -1139,9 +1144,10 @@ void bind_whole(uint32_t pw, uint32_t ph) {
     dkCmdBufSetViewports(R.cmd, 0, &vp, 1);
     dkCmdBufSetScissors(R.cmd, 0, &sc, 1);
 }
-// what a clear wrote is visible to the commands after it (sampling, copies)
-void clear_done() {
-    dkCmdBufBarrier(R.cmd, DkBarrier_Fragments, DkInvalidateFlags_Image);
+// what a clear wrote is visible to the commands after it (sampling, copies): its barrier, or with hazard
+// tracking the next draw's that samples it (dk_sync.h)
+void clear_done(Surface* s, bool depthCleared = false, uint32_t lastSlice = 0) {
+    sync_clear_end(s, depthCleared, lastSlice);
     g_clearWork++;
     forget_state();
 }
@@ -1169,6 +1175,7 @@ void clear_color(const uint32_t*, uint32_t cb, const float rgba[4]) {
     fit_scale(s, false);  // cleared whole: nothing to keep
     gpu_pass_mark("clear", s, nullptr);
     if (g_traceFrame) trace_event("clear %s", trace_name(s).c_str());
+    sync_clear_begin(s);
     bind_whole(s->img.pw, s->img.ph);
     for (uint32_t slice = first; slice < first + num; slice++) {
         DkImageView v;
@@ -1188,7 +1195,7 @@ void clear_color(const uint32_t*, uint32_t cb, const float rgba[4]) {
         } else
             dkCmdBufClearColorFloat(R.cmd, 0, DkColorMask_RGBA, rgba[0], rgba[1], rgba[2], rgba[3]);
     }
-    clear_done();
+    clear_done(s);
     mark_gpu_written(s);
 }
 
@@ -1205,6 +1212,7 @@ void clear_depth_stencil(const uint32_t*, uint32_t db, float depth, uint32_t ste
     fit_scale(s, !(d && (st || !s->fmt.stencil)));  // what the clear leaves is kept
     gpu_pass_mark("clear", nullptr, s);
     if (g_traceFrame) trace_event("clear %s", trace_name(s).c_str());
+    sync_clear_begin(s);
     bind_whole(s->img.pw, s->img.ph);
     for (uint32_t slice = first; slice < first + num; slice++) {
         DkImageView v;
@@ -1212,7 +1220,7 @@ void clear_depth_stencil(const uint32_t*, uint32_t db, float depth, uint32_t ste
         dkCmdBufBindRenderTargets(R.cmd, nullptr, 0, &v);
         dkCmdBufClearDepthStencil(R.cmd, d, std::clamp(depth, 0.0f, 1.0f), st ? 0xFF : 0, uint8_t(stencil));
     }
-    clear_done();
+    clear_done(s, d && num, num ? first + num - 1 : first);
     mark_gpu_written(s);
 }
 
