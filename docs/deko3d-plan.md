@@ -2,9 +2,65 @@
 
 Plan redactado el 2026-10-07 por un agente de planificación (Fable) a partir del código (`dev` 30fd148,
 round 36), del prototipo de uam (`~/Documents/uam-proto`) y de los logs de hardware. **[V]** = verificado en
-código o logs; **[S]** = supuesto a confirmar. Estado: P0 y P1 hechos y confirmados en hardware; P2 probado en hardware (llega a Outset); P3 parte A (capturas, contador FPS, texturas, features) integrada, pendiente de prueba en hardware; ver Estado.
+código o logs; **[S]** = supuesto a confirmar. Estado: P0 y P1 hechos y confirmados en hardware; P2 probado en hardware (llega a Outset); P3 parte A (capturas, contador FPS, texturas, features) integrada, pendiente de prueba en hardware; P3 en hardware con rendimiento igual o algo mejor que GL; P4 (cuatro carriles) integrado, compilado y SIN probar en hardware; ver Estado.
 
 ## Estado (2026-10-07, rama `deko3d`)
+
+**P4 integrado (2026-10-07; compilado, SIN probar en hardware).** Merges de `p4-resources`, `p4-gpu`, `p4-prims` y
+`p4-docked` sobre `deko3d` (tras los dos commits del arreglo de texturas, 67aab8b). Conflictos solo de texto: las
+líneas `[dk]` de arranque en `draw_frame_start` y las líneas de cada 5 s en `backend.cpp` (se quedan todas) y las
+secciones del plan. `surfaces.cpp` solo recibe del carril GPU los ganchos de `dk_sync.h` (marcas de lectura/escritura
+por Surface); `capture.cpp` sin tocar; GL sin cambios (nada fuera de `gfx/deko` y este documento). NROs:
+`build/deko3d-out/wwhd_dk.nro` (libdeko3dd, debug) y `build/deko3d-out/wwhd_dk_release.nro` (librería release);
+`build/deko3d-out/wwhd.nro` (GL) sigue valiendo.
+
+Objetivo de P4 (medida base release, Outset, 1020/460 MHz: 29,6 fps de mediana, ~7 µs/draw en el render thread =
+lookup 1,2 + indices 0,5 + resources 3,1-3,5 + state 1,6-2,0 + submit 0,1): render thread ≤ ~4,7 µs/draw (25 % menos
+que los 6,2 de GL), fps ≥ GL en todas partes, menos tiempo de GPU en barriers, 1080p en dock.
+
+Cambios y sus interruptores (en `sdmc:/switch/wwhd/env.txt`; cada uno sale en una línea `[dk]` al arrancar y `=0`
+vuelve al camino de P3):
+
+| Carril | Interruptor (por defecto) | Qué hace | Ganancia esperada (estimación) |
+|---|---|---|---|
+| resources | `WWHD_DK_TEX_TABLE` (1) | tabla de 1024 búsquedas de textura recientes detrás de la cache por unidad | −0,2..0,5 µs/draw; acierto de texturas > 95 % |
+| resources | `WWHD_DK_UF_CACHE` (2; 1, 0) | ufBlock por shader; modo 2: un slice por shader y frame + `dkCmdBufPushConstants` de los trozos cambiados, sin rebind | −0,3..0,6 µs/draw |
+| resources | `WWHD_DK_UBO_MEMO` (1) | memo por etapa del último slice de cada bloque uniform del guest | −0,05..0,15 µs/draw |
+| prims | `WWHD_DK_MEMO_PRIM_CLASS` (1) | memo y combinaciones por clase de primitiva (puntos / resto) | parte de lookup 1,2 → 0,7-0,9 |
+| prims | `WWHD_DK_COMBO_KEY` (1) | un solo hash de estado de las dos etapas | (ídem) |
+| prims | `WWHD_DK_COMBO_FAST_VALIDATE` (1) | combinaciones de frames anteriores validadas sin búsquedas en mapas | (ídem) |
+| prims | `WWHD_DK_INDEX_GEN` (1) | listas de índices caducan solo con invalidates de atributos y GX2DrawDone | indices 0,5 → ~0,3 µs/draw |
+| prims | `WWHD_DK_NATIVE_PRIMS` (1) | fans, quads, quad strips y line loops nativos de deko3d | menos índices generados/subidos |
+| gpu | `WWHD_DK_LAZY_BARRIERS` (1) | barriers Fragments solo en riesgos reales RAW/WAR (47 → 20 por frame en las trazas) | 0,3-0,8 ms GPU/frame |
+| gpu | `WWHD_DK_ZCULL_KEEP` (1) | zcull conservado mientras sigue el mismo depth buffer y capa (12 → 5 invalidaciones) | hasta ~1 ms en vistas pesadas (incierto) |
+| gpu | `WWHD_DK_DEPTH_SAMPLE_BOUND` (1) | un draw que lee su depth sin escribirlo lo muestrea en sitio (adiós al blit 1280x720 del DoF/niebla y sus 2 barriers Full) | 0,3-0,6 ms GPU/frame |
+| gpu | `WWHD_DK_UPLOAD_BATCH` (1) | barriers de subidas agrupadas (comprobado contra la última barrier Full) | solo en cargas |
+| gpu | `WWHD_DK_TILED_CACHE` (**0**, opt-in `=1`) y `WWHD_DK_DEPTH_COMPRESSION` (**0**, opt-in `=1`) | tiled cache / compresión de depth: sin verificar, apagados | quizá más; probar aparte |
+| docked | `WWHD_DK_DOCKED_1080` (1); `WWHD_DK_WINDOW=WxH` (forzar tamaño, A/B en portátil) | ventana 1920x1080 en dock (swapchain recreada al cambiar de modo; la imagen 720p escalada con filtro lineal en el present) | +0,1-0,2 ms GPU en dock; fps igual que portátil |
+
+Total esperado en el render thread: ~7 → ~5,3-6,0 µs/draw (resources ~2,2-2,6, lookup ~0,7-0,9, indices ~0,3); es
+probable que no llegue aún a 4,7 µs: lo que quede lo dirán las líneas nuevas. GPU: −1..2 ms por frame (3-7 %).
+
+Líneas `[dk]` nuevas cada 5 s: `[dk] resources us per draw: ...` (partes de resources: targets, uniform blocks,
+texturas con fallos y tabla, ufBlock, descriptores; binds), `[dk] lookup per frame: ...` (fallos del memo por causa,
+hashes, validaciones, índices, primitivas nativas), `[dk] GPU sync per frame: ...` (barriers por motivo, zcull,
+depth muestreado en sitio, subidas agrupadas), `[dk] GPU passes` con `GPU busy X ms without the frame start`, y
+`window WxH, N resizes` en la línea de estadísticas.
+
+**Siguiente prueba en hardware (dueño):** mismo recorrido de Outset que el log 18-49-11, 3-5 min cada uno, CPU 1020 /
+GPU 460, sin `env.txt` (todo por defecto):
+1. `wwhd.nro` (GL) — referencia.
+2. `wwhd_dk_release.nro` — comparar fps, `[hitch]`, `draws per frame` (µs por etapa), las líneas nuevas y
+   `GPU busy ... without the frame start` con GL y con el log 18-49-11.
+3. Si se puede, `wwhd_dk_release.nro` en dock unos minutos (1080p): `[dk] window ... now docked`, fps igual que en
+   portátil y el coste del pase `present`.
+4. Si algo sale mal dibujado (constantes/matrices de otro objeto, sombras o profundidad rotas, parpadeos):
+   `WWHD_DK_UF_CACHE=1` y luego `=0`; `WWHD_DK_LAZY_BARRIERS=0`, `WWHD_DK_ZCULL_KEEP=0`,
+   `WWHD_DK_DEPTH_SAMPLE_BOUND=0`; quads/fans raros: `WWHD_DK_NATIVE_PRIMS=0`. Para medir cada cambio por separado,
+   repetir el recorrido con uno solo a `=0`. Si cae, `wwhd_dk.nro` (debug) da el error de deko3d legible.
+5. Opcional: `WWHD_DK_TILED_CACHE=1` y `WWHD_DK_DEPTH_COMPRESSION=1` en tandas separadas (sin verificar).
+
+Detalle de cada carril: secciones "P4, carril ..." más abajo.
 
 Integrados `dk-uam`, `dk-convert`, `dk-tools`, `dk-p1` y los tres carriles de P2 (`p2-surf`, `p2-shader`, `p2-draw`,
 sin conflictos). Compilan `build/switch/wwhd.nro` (GL, por defecto, sin cambios), `build/switch-dk/wwhd_dk.nro`
