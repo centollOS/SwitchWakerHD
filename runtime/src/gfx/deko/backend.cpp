@@ -17,6 +17,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include <atomic>
 #include <chrono>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -224,8 +225,49 @@ struct TextUbo {  // text_fsh.glsl, std140
     float box[4];
     int32_t grid[4];
     float fg[4], bg[4];
-    uint32_t glyphs[768];
+    uint32_t glyphs[768];  // uvec4 glyphs[192]: character i in component i & 3 of entry i >> 2
 };
+static_assert(offsetof(TextUbo, box) == 0 && offsetof(TextUbo, grid) == 16 && offsetof(TextUbo, fg) == 32 &&
+                  offsetof(TextUbo, bg) == 48 && offsetof(TextUbo, glyphs) == 64 && sizeof(TextUbo) == 64 + 768 * 4,
+              "TextUbo must match text_fsh.glsl's std140 block");
+
+// start-up self-test of the FPS counter's data: the glyph bits of the characters it shows, the TextUbo
+// offsets next to the std140 offsets text_fsh.glsl reads, and the shader's lookup replayed on the CPU for
+// a sample line (the characters read back from the packed words, as text_fsh selects them)
+void text_self_test() {
+    std::string bits;
+    for (const char* c = "0123456789FPS."; *c; c++) {
+        char b[16];
+        snprintf(b, sizeof b, " %c=%04X", *c, glyph_bits(*c));
+        bits += b;
+    }
+    LOG("[dk] FPS counter self-test: glyph bits (3x5, row 0 in bits 14-12)%s", bits.c_str());
+    const size_t off[5] = {offsetof(TextUbo, box), offsetof(TextUbo, grid), offsetof(TextUbo, fg), offsetof(TextUbo, bg),
+                           offsetof(TextUbo, glyphs)};
+    static const size_t kStd140[5] = {0, 16, 32, 48, 64};
+    const bool layoutOk = !memcmp(off, kStd140, sizeof off);
+    LOG("[dk] FPS counter self-test: TextUbo offsets box %zu grid %zu fg %zu bg %zu glyphs %zu, size %zu (text_fsh.glsl "
+        "std140: 0 16 32 48 64, size 3136): %s", off[0], off[1], off[2], off[3], off[4], sizeof(TextUbo),
+        layoutOk ? "match" : "MISMATCH");
+    // the shader's lookup: entry i >> 2, component i & 3, bit (4 - row) * 3 + (2 - column)
+    const std::string sample = "30.0 FPS";
+    TextUbo t{};
+    for (size_t i = 0; i < sample.size(); i++) t.glyphs[i] = glyph_bits(sample[i]);
+    std::string back;
+    for (int i = 0; i < int(sample.size()); i++) {
+        const uint32_t* q = &t.glyphs[(i >> 2) * 4];
+        const uint32_t g = q[i & 3];
+        char found = '?';
+        for (const char* c = " 0123456789FPS."; *c; c++)
+            if (glyph_bits(*c) == g) {
+                found = *c;
+                break;
+            }
+        back += found;
+    }
+    LOG("[dk] FPS counter self-test: \"%s\" packed and read back as \"%s\": %s", sample.c_str(), back.c_str(),
+        back == sample ? "ok" : "MISMATCH");
+}
 
 // lines at (left, top) in window pixels, `scale` window pixels per font pixel
 void draw_text(int left, int top, int scale, const std::vector<std::string>& lines, const float fg[4], const float bg[4]) {
@@ -899,6 +941,7 @@ void init() {
     LOG("[dk] queue created: graphics, command memory %u KiB", qm.commandMemorySize >> 10);
     memory_init();
     load_shaders();
+    text_self_test();
     init_swapchain();
     shaders_init(shader_cache_progress);  // the game shaders' worker and caches (dk_shaders.h)
     log_heap("after the deko3d setup");

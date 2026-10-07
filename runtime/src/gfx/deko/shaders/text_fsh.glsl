@@ -17,7 +17,12 @@ void main() {
         ivec2 cell = p / ivec2(4, 6), sub = p - cell * ivec2(4, 6);
         if (cell.x < grid.x && cell.y < grid.y && sub.x < 3 && sub.y < 5) {
             int i = cell.y * grid.x + cell.x;
-            uint g = glyphs[i >> 2][i & 3];
+            // the component by explicit selects: uam (Mesa's glsl_to_tgsi) drops a dynamic component index
+            // of a uniform-block vector, reading .x always (glyphs[i >> 2][i & 3] showed the first character
+            // of every group of four: the FPS counter's "30.0 FPS" came out as "3333")
+            uvec4 q = glyphs[i >> 2];
+            int c = i & 3;
+            uint g = c == 0 ? q.x : (c == 1 ? q.y : (c == 2 ? q.z : q.w));
             on = ((g >> uint((4 - sub.y) * 3 + (2 - sub.x))) & 1u) != 0u;
         }
     }
