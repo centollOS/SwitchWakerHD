@@ -358,12 +358,9 @@ void read_controller() {
     input::host_controller_values(U.values);
     using namespace input_map;
     const double t = now_s();
-    // Home: toggles; Select / Minus (View / Share): held half a second opens (a press on the Switch), a press closes
-#ifdef __SWITCH__
-    constexpr double kOptionsHold = 0.0;
-#else
+    // Home: toggles; Select / Minus (View / Share): held half a second opens, a press closes (on the Switch a
+    // short Minus goes to the game instead, input_switch.cpp: in GamePad mode it is the game's Off-TV Play)
     constexpr double kOptionsHold = 0.5;
-#endif
     if (controller_pressed(kPadHome)) set_open(!is_open());
 #ifdef __SWITCH__
     // ZL + ZR held, Minus: the window switches between the TV and the GamePad picture (not the menu)
@@ -953,7 +950,8 @@ void tab_switch() {
         if (!(g == before)) save_gyro(g);
     }
     heading("Menu");
-    note("Minus opens this menu; B or Minus closes it. L / R change tabs.");
+    note("Minus held half a second opens this menu (a short Minus goes to the game); B or Minus closes it.\n"
+         "L / R change tabs.");
 }
 #endif
 

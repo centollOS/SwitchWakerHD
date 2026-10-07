@@ -193,9 +193,25 @@ void update() {
     PadState s;
     for (auto& m : kMap)
         if (held & m.hid) s.buttons |= m.vpad;
-    // ZL + ZR + Minus switches the window between the TV and the GamePad picture (overlay.cpp): the game does
-    // not get that Minus (in GamePad mode it would switch to Off-TV Play)
-    if ((held & HidNpadButton_ZL) && (held & HidNpadButton_ZR)) s.buttons &= ~uint32_t(kMinus);
+    // Minus is shared with the settings menu (held half a second opens it, overlay.cpp) and ZL + ZR + Minus
+    // (TV / GamePad picture): the game gets a Minus only as a short press that did neither, after its release
+    // (a pulse of 100 ms, read by a few game frames). In GamePad mode the game's Minus is Off-TV Play.
+    {
+        static bool down = false, other = false;  // other: this press opened / closed the menu or was the combo
+        static u64 since = 0, pulseUntil = 0;
+        const u64 now = armTicksToNs(armGetSystemTick());
+        const bool minus = held & HidNpadButton_Minus;
+        if (minus) {
+            if (!down) down = true, other = false, since = now;
+            if (overlay::is_open() || ((held & HidNpadButton_ZL) && (held & HidNpadButton_ZR)) || now - since >= 450000000ull)
+                other = true;
+        } else if (down) {
+            down = false;
+            if (!other && !overlay::is_open()) pulseUntil = now + 100000000ull;
+        }
+        s.buttons &= ~uint32_t(kMinus);
+        if (now < pulseUntil) s.buttons |= kMinus;
+    }
     // both sticks clicked together: a capture of the next frame (its passes in the log, its pictures on the
     // SD card) for a picture that goes wrong; the game gets the clicks as usual
     {
