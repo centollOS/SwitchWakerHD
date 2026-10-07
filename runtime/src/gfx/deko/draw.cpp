@@ -249,6 +249,7 @@ struct ResourcePerf {
     uint64_t targetNs = 0, uboNs = 0, textureNs = 0, textureMissNs = 0, uniformNs = 0, descriptorNs = 0, bindNs = 0;
     uint64_t textureMisses = 0, tableHits = 0, tableLookups = 0;
     uint64_t uboBlocks = 0, uboReused = 0;  // guest uniform blocks of draws; ... found already in this frame's stream
+    uint64_t uboMemoHits = 0;               // ... by the stage's memo (WWHD_DK_UBO_MEMO)
     uint64_t texBindCalls = 0, texHandles = 0, texWanted = 0;  // dkCmdBufBindTextures calls, handles; slots draws use
     uint64_t uboBindCalls = 0, uboBuffers = 0, uboWanted = 0;  // dkCmdBufBindUniformBuffers calls, buffers; slots
 } g_res;
@@ -323,6 +324,17 @@ bool is_occlusion(const uint32_t* r, bool vertex) {
     return match;
 }
 
+// Each stage's guest uniform blocks as the last draw found them in the stream (WWHD_DK_UBO_MEMO, on unless 0):
+// a block at the same address and size is the same slice while the frame and R.streamGen are (stream_guest's
+// own rule), without stream_guest's table probe (P4 resources lane)
+struct UboMemo {
+    uint32_t addr = 0, copy = 0, bound = 0;
+    uint64_t frame = ~0ull, gen = 0;
+    StreamSlice slice;
+};
+UboMemo uboMemo[2][LATTE_NUM_MAX_UNIFORM_BUFFERS];
+const bool uboMemoOn = env_switch("UBO_MEMO", true);
+
 // false: the stream slice is full (the draw is skipped)
 bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>& colors, Surface* depth,
                    StageBindings& out, Lap& lap) {
@@ -343,9 +355,20 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         if (!addr) slice = zero_block();
         else {
             const uint32_t copy = std::min(size, bound);
-            const uint64_t reused = R.perf.reusedBytes;
-            slice = stream_guest(addr, copy, DK_UNIFORM_BUF_ALIGNMENT, bound - copy);
-            g_res.uboReused += R.perf.reusedBytes != reused;
+            UboMemo& m = uboMemo[stage][i];
+            const uint64_t frame = R.frame + 1;
+            if (uboMemoOn && m.addr == addr && m.copy == copy && m.bound == bound && m.frame == frame &&
+                m.gen == R.streamGen && m.slice) {
+                slice = m.slice;
+                R.perf.reusedBytes += copy;
+                g_res.uboReused++;
+                g_res.uboMemoHits++;
+            } else {
+                const uint64_t reused = R.perf.reusedBytes;
+                slice = stream_guest(addr, copy, DK_UNIFORM_BUF_ALIGNMENT, bound - copy);
+                g_res.uboReused += R.perf.reusedBytes != reused;
+                m = {addr, copy, bound, frame, R.streamGen, slice};
+            }
         }
         if (!slice) return false;
         R.perf.uboBytes += bound;
@@ -718,8 +741,9 @@ void draw_frame_start() {
                                           "2, a copy per shader in one slice per frame, changed pieces pushed "
                                           "(dkCmdBufPushConstants), no rebind"};
         LOG("[dk] resources (P4): texture lookup table %s (WWHD_DK_TEX_TABLE=0 off), ufBlock mode %s "
-            "(WWHD_DK_UF_CACHE=0|1|2); textures and uniform blocks bound only for slots that changed",
-            textureCacheOn && textureTableOn ? "on" : "off", kUf[g_ufMode]);
+            "(WWHD_DK_UF_CACHE=0|1|2), guest uniform block memo %s (WWHD_DK_UBO_MEMO=0 off); textures and uniform "
+            "blocks bound only for slots that changed", textureCacheOn && textureTableOn ? "on" : "off", kUf[g_ufMode],
+            uboMemoOn ? "on" : "off");
     }
 }
 
@@ -734,13 +758,13 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
     LOG("[dk] resources us per draw: targets %.2f + uniform blocks %.2f + textures %.2f (misses %.2f: %.1f/frame, "
         "%.2f us each; table %.0f%% of %.0f/frame) + ufBlock %.2f + descriptors %.2f; binds (in state) %.2f us: "
         "textures %.2f calls %.2f handles of %.2f slots, uniform blocks %.2f calls %.2f buffers of %.2f slots; guest "
-        "uniform blocks %.2f/draw (%.0f%% already in the stream); ufBlock mode %d: %.0f/frame, %.0f%% unchanged, %.0f "
+        "uniform blocks %.2f/draw (%.0f%% already in the stream, %.0f%% by the memo); ufBlock mode %d: %.0f/frame, %.0f%% unchanged, %.0f "
         "slices (%.0f KiB) + %.0f pushes (%.1f KiB) per frame",
         us(p.targetNs), us(p.uboNs), us(p.textureNs), us(p.textureMissNs), perFrame(p.textureMisses),
         p.textureMisses ? double(p.textureMissNs) / 1e3 / double(p.textureMisses) : 0.0,
         pct(p.tableHits, p.tableLookups), perFrame(p.tableLookups), us(p.uniformNs), us(p.descriptorNs), us(p.bindNs),
         perDraw(p.texBindCalls), perDraw(p.texHandles), perDraw(p.texWanted), perDraw(p.uboBindCalls),
-        perDraw(p.uboBuffers), perDraw(p.uboWanted), perDraw(p.uboBlocks), pct(p.uboReused, p.uboBlocks), g_ufMode,
+        perDraw(p.uboBuffers), perDraw(p.uboWanted), perDraw(p.uboBlocks), pct(p.uboReused, p.uboBlocks), pct(p.uboMemoHits, p.uboBlocks), g_ufMode,
         perFrame(u.blocks), pct(u.unchanged, u.blocks), perFrame(u.slices), perFrame(u.sliceBytes) / 1024.0,
         perFrame(u.pushes), perFrame(u.pushBytes) / 1024.0);
 }
