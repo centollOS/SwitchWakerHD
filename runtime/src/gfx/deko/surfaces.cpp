@@ -416,6 +416,13 @@ void make_image(Surface* s, SurfaceImage& img, uint32_t pw, uint32_t ph) {
                       : img.type == DkImageType_Cubemap      ? 6
                                                              : s->slices;
     m.mipLevels = s->mips;
+    image_tile_size_fix(m, s->fmt.compressed ? (ph + 3) / 4 : ph);
+    if (m.flags & DkImageFlags_CustomTileSize) {
+        static uint32_t fixed = 0;
+        if (fixed++ < 16)
+            LOG("[dk] image tile height: one GOB for %s (%ux%u; deko3d's default tile would corrupt level 0)%s",
+                describe(s).c_str(), pw, ph, fixed == 16 ? " (no more of these lines)" : "");
+    }
     img.flags = m.flags;
     img.format = m.format;
     dkImageLayoutInitialize(&img.layout, &m);

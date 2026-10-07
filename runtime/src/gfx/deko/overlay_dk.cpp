@@ -58,6 +58,7 @@ void update_texture(ImTextureData* tex) {
         m.format = DkImageFormat_RGBA8_Unorm;
         m.dimensions[0] = uint32_t(tex->Width);
         m.dimensions[1] = uint32_t(tex->Height);
+        image_tile_size_fix(m, m.dimensions[1]);
         DkImageLayout layout;
         dkImageLayoutInitialize(&layout, &m);
         t.mem = image_alloc(uint32_t(dkImageLayoutGetSize(&layout)), dkImageLayoutGetAlignment(&layout));

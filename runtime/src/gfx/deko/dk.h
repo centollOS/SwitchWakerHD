@@ -53,6 +53,13 @@ bool frame_done(uint64_t frame);    // the GPU has finished that frame's command
 bool frame_open();                  // between frame_begin and frame_end: commands and stream memory may be used
 StreamAlloc stream_alloc(uint32_t size, uint32_t alignment);  // this frame's slice; empty when full (logged)
 ImageAlloc image_alloc(uint32_t size, uint32_t alignment);
+// Before dkImageLayoutInitialize of a block-linear 2D/array/cube image whose level 0 is `rows` rows tall
+// (compressed: rows of blocks): gives it a tile height its level 0 does not shrink. deko3d 0.5.0 picks the
+// tile from 1.5 x the height (6..8 rows -> two GOBs) and its layout (calcLevelOffset) shrinks it for level 0
+// to one GOB, but the copy engine, the 2D engine, render targets and the texture descriptor are given the
+// unshrunk tile: level 0 is written with two-GOB blocks over the next level (or the next image) and read
+// back with another layout. Hit by 6..8-row images: BC 24x24..32x32, 1024x32 (the sea's normal map).
+void image_tile_size_fix(DkImageLayoutMaker& m, uint32_t rows);
 void image_free_later(const ImageAlloc& a);  // freed when the GPU is done with the current frame
 bool code_load(DkShader& shader, const void* dksh, uint32_t size, const char* name);
 DkGpuAddr image_descriptors();

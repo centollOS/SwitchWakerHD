@@ -241,6 +241,26 @@ StreamSlice stream_guest(uint32_t addr, uint32_t size, uint32_t alignment, uint3
     return slice;
 }
 
+void image_tile_size_fix(DkImageLayoutMaker& m, uint32_t rows) {
+    if (m.flags & (DkImageFlags_PitchLinear | DkImageFlags_CustomTileSize | DkImageFlags_UsageVideo)) return;
+    if (m.type == DkImageType_1D || m.type == DkImageType_1DArray || m.type == DkImageType_3D ||
+        m.type == DkImageType_Buffer)
+        return;  // (3D images: deko3d's depth tile never shrinks at level 0)
+    if (m.type == DkImageType_2DMS || m.type == DkImageType_2DMSArray) {
+        // the multisampled height (deko3d: m_samplesY)
+        if (m.msMode == DkMsMode_4x || m.msMode == DkMsMode_8x) rows *= 2;
+    }
+    // deko3d's choice (dkImageLayoutInitialize: pickTileSize of 1.5 x the height in GOBs) ...
+    const uint32_t gobs = (rows + rows / 2 + 7) / 8;
+    uint32_t tile = gobs >= 16 ? 4 : gobs >= 8 ? 3 : gobs >= 4 ? 2 : gobs >= 2 ? 1 : 0;
+    // ... and its level-0 shrink (calcLevelOffset: adjustTileSize(m_tileH, 8, height))
+    uint32_t shrunk = tile;
+    while (shrunk && (8u << (shrunk - 1)) >= rows) shrunk--;
+    if (shrunk == tile) return;  // deko3d's own layout is consistent
+    m.flags |= DkImageFlags_CustomTileSize;
+    m.tileSize = DkTileSize(shrunk);
+}
+
 ImageAlloc image_alloc(uint32_t size, uint32_t alignment) {
     size = align_up(size, 256);
     alignment = std::max<uint32_t>(alignment, 256);

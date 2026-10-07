@@ -68,6 +68,28 @@ cambios, deko3d debug y release). `kConvertRevision` no cambió: `shadercache_dk
   muestreado después sale **demasiado oscuro**; (b) las texturas depth dan (D,D,D,1) en deko3d y (D,0,0,1) en GL;
   (c) la compresión de los targets (`WWHD_DK_RT_COMPRESSION=0` la descarta). Las capturas PNG deciden entre ellas.
 
+**P3 parte B (2026-10-07, tras las capturas 683 y 1444 del propietario; compilado; SIN probar en hardware).**
+Síntomas: el mar plano azul saturado (sin olas ni espuma) y cuadraditos grises sobre la hierba y el puente.
+- **Causa (bug de deko3d 0.5.0, `source/dk_image.cpp`):** `dkImageLayoutInitialize` elige la altura de tile con
+  `pickTileSize` de 1,5 × la altura en GOBs (l. 436-442): una imagen de 6..8 filas (BC de 24..32 px de alto: 24x24,
+  30x30, 32x32, 1024x32, 256x32, 64x32) recibe DOS GOBs. `calcLevelOffset` (l. 90, `adjustTileSize(m_tileH, 8,
+  levelHeight)` también en el nivel 0) encoge ese tile a UN GOB para medir el nivel 0 y colocar los mips, pero
+  `ImageInfo::fromImageView` (l. 194-202) solo lo encoge con `mipLevelOffset` != 0, y `tic_generate.cpp` (l. 100) pone
+  `m_tileH` tal cual: el motor de copia (`BlitCopyEngine`, `gpu_transfer.cpp` l. 70/86), el 2D, los render targets y el
+  descriptor escriben/leen el nivel 0 con bloques de dos GOBs. La segunda columna de GOBs del nivel 0 cae en el offset
+  del mip 1 (o tras el final de la imagen) y la subida del mip 1 la pisa: en las capturas, los bloques desplazados de
+  `tex_*.png` son exactamente el mip 1 (comprobado). Los 8 BC4/BC5 que diferían tienen 6..8 filas de bloques; los que
+  coinciden, más. El normal map del mar es `24A2E000` 32x32 BC5_SNORM (draws #3875-3910 de la 1444, t5) y las
+  calcomanías del suelo con poly offset (#4018-4021) usan como máscara alfa (vista xxxx) `2DB69000` 64x32 y `2DAD7000`
+  256x32 BC4: los cuadraditos.
+- **Arreglo:** `image_tile_size_fix` (`memory.cpp`) antes de cada `dkImageLayoutInitialize` de superficies y del overlay:
+  si el nivel 0 encogería el tile, `DkImageFlags_CustomTileSize` con el tile ya encogido (un GOB). Así layout,
+  descriptor, copias y targets coinciden. Línea `[dk] image tile height: one GOB for ...` (las 16 primeras).
+- **Capturas rápidas:** la textura de datos CPU se compara byte a byte con sus datos de subida tras la lectura; solo
+  se escriben (con su `_upload.png`) las que difieren (`WWHD_DK_CAPTURE_ALL_TEXTURES=1`: todas, como antes). El hilo de
+  render nunca espera al escritor (más de 128 MiB en cola: el fichero se descarta con una línea). Al final,
+  `[dk] capture of frame N done in X s: ... written, ... dropped, ... identical`.
+
 **P3 `p3-features` (compilado; SIN probar en hardware):** cada punto con su línea `[dk]` al arrancar.
 - **AO** (`draw.cpp`, `pack_uniforms` aoNoise): el arreglo de GL tal cual, `WWHD_AO_MODE` / `WWHD_NO_AO_QUIRK`, modo 2 por
   defecto (`[dk] AO quirk fix: mode N`; la tabla del renderer informa del modo, solo lectura como GL).
