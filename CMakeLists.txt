@@ -145,6 +145,11 @@ if(WWHD_SWITCH)
   target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
 endif()
 
+# ---- uam (devkitPro's deko3d shader compiler, MIT, runtime/third_party/uam, 1.1.0 + PATCHES.md): the
+# 'uamlib' target (GLSL -> DKSH, uam_api.h) for the coming deko3d renderer; built only when something
+# links it. -DWWHD_UAM_TEST=ON adds uam_dksh_test (desktop).
+add_subdirectory(runtime/third_party/uam EXCLUDE_FROM_ALL)
+
 # ---- the game executable: runtime + native GX2 + the selected renderers
 # GX2 sources are compiled into the executable (not a static library) so their
 # strong HLE definitions replace the generated weak import stubs.
