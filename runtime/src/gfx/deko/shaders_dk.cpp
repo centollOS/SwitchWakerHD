@@ -1164,6 +1164,215 @@ StreamSlice pack_uniforms(bool vertex, const Shader& sh, const uint32_t* regs, f
     return stream_upload(data.data(), uint32_t(data.size()), DK_UNIFORM_BUF_ALIGNMENT);
 }
 
+// ---- the ufBlock with a copy kept per shader (dk_shaders.h pack_uniforms_cached; P4 resources lane). The values
+// and their order are pack_uniforms': remapped register constants, remapped constants of guest uniform blocks
+// (zeros when the block has no address), the uniform registers, then the loose values.
+struct UniformCache {
+    struct Op {
+        uint32_t dst;    // offset in the block (dst + 16 <= size)
+        uint32_t src;    // register index (block == ~0u), else offset in the guest block
+        uint32_t block;  // register holding the guest block's address, ~0u for a register constant
+    };
+    std::vector<Op> ops;
+    std::vector<uint8_t> data;  // the values packed last; in mode 2 also what the GPU's copy holds
+    uint32_t size = 0, bound = 0;  // bytes (pack_uniforms' size), bound bytes (a multiple of 256)
+    int32_t aoDst = -1;            // offset_remapped: the AO fix's constant (aoNoise)
+    int32_t regs = -1;             // offset_uniformRegister, when the whole register range fits
+    uint32_t regBase = 0, regBytes = 0;
+    int32_t alphaRef = -1, pointSize = -1, windowToClip = -1, fragCoordScale = -1;
+    std::vector<std::pair<uint32_t, uint32_t>> texScales;  // offset, unit
+    uint64_t frame = ~0ull;  // the frame its stream slice belongs to
+    DkGpuAddr gpu = 0;
+};
+
+namespace {
+UniformPackStats g_ufStats;
+
+UniformCache* uniform_cache(bool vertex, Shader& sh) {
+    if (sh.ufCache) return sh.ufCache.get();
+    auto c = std::make_shared<UniformCache>();
+    const auto& offsets = sh.uniforms;
+    c->size = uint32_t(std::max(offsets.offset_endOfBlock, 16) + 15) & ~15u;
+    c->bound = (c->size + 255) & ~255u;
+    c->data.assign(c->size, 0);
+    auto fits = [&](int offset, uint32_t bytes) { return offset >= 0 && uint32_t(offset) + bytes <= c->size; };
+    const uint32_t aluBase = mmSQ_ALU_CONSTANT0_0 + (vertex ? 0x400 : 0);
+    const uint32_t blockBase = vertex ? mmSQ_VTX_UNIFORM_BLOCK_START : mmSQ_PS_UNIFORM_BLOCK_START;
+    if (offsets.offset_remapped >= 0) {
+        c->aoDst = offsets.offset_remapped;
+        for (const auto& entry : sh.dec->list_remappedUniformEntries_register) {
+            const int dst = offsets.offset_remapped + int(entry.mappedIndexOffset);
+            if (fits(dst, 16)) c->ops.push_back({uint32_t(dst), aluBase + entry.indexOffset / 4, ~0u});
+        }
+        for (const auto& group : sh.dec->list_remappedUniformEntries_bufferGroups)
+            for (const auto& entry : group.entries) {
+                const int dst = offsets.offset_remapped + int(entry.mappedIndexOffset);
+                if (fits(dst, 16))
+                    c->ops.push_back({uint32_t(dst), uint32_t(entry.indexOffset), blockBase + group.kcacheBankIdOffset / 4u});
+            }
+    }
+    if (offsets.offset_uniformRegister >= 0 && fits(offsets.offset_uniformRegister, uint32_t(offsets.count_uniformRegister) * 16)) {
+        c->regs = offsets.offset_uniformRegister;
+        c->regBase = aluBase;
+        c->regBytes = uint32_t(offsets.count_uniformRegister) * 16;
+    }
+    if (fits(offsets.offset_alphaTestRef, 4)) c->alphaRef = offsets.offset_alphaTestRef;
+    if (fits(offsets.offset_pointSize, 4)) c->pointSize = offsets.offset_pointSize;
+    if (fits(offsets.offset_windowSpaceToClipSpaceTransform, 8)) c->windowToClip = offsets.offset_windowSpaceToClipSpaceTransform;
+    if (fits(offsets.offset_fragCoordScale, 16)) c->fragCoordScale = offsets.offset_fragCoordScale;
+    for (int unit = 0; unit < LATTE_NUM_MAX_TEX_UNITS; ++unit)
+        if (fits(offsets.offset_texScale[unit], 8)) c->texScales.push_back({uint32_t(offsets.offset_texScale[unit]), uint32_t(unit)});
+    sh.ufCache = c;
+    return c.get();
+}
+}  // namespace
+
+StreamSlice pack_uniforms_cached(int mode, bool vertex, Shader& sh, const uint32_t* regs, float scaleX, float scaleY,
+                                 const float (*texScale)[2], bool aoNoise) {
+    if (sh.bindings.ufBlockSlot < 0 || !sh.dec) return {};
+    UniformCache& c = *uniform_cache(vertex, sh);
+    g_ufStats.blocks++;
+    uint8_t* data = c.data.data();
+    // changed 16-byte granules (the pieces mode 2 pushes)
+    static uint64_t dirty[(0x10000 / 16) / 64];
+    uint32_t lo = ~0u, hi = 0;
+    auto mark = [&](uint32_t offset, uint32_t bytes) {
+        const uint32_t first = offset >> 4, last = (offset + bytes - 1) >> 4;
+        for (uint32_t g = first; g <= last; g++) dirty[g >> 6] |= 1ull << (g & 63);
+        lo = std::min(lo, first);
+        hi = std::max(hi, last + 1);
+    };
+    auto put = [&](uint32_t offset, const void* src, uint32_t bytes) {
+        if (!memcmp(data + offset, src, bytes)) return;
+        memcpy(data + offset, src, bytes);
+        mark(offset, bytes);
+    };
+    auto put16 = [&](uint32_t offset, const void* src) {  // (the common case, compared as two words)
+        uint64_t v[2], old[2];
+        memcpy(v, src, 16);
+        memcpy(old, data + offset, 16);
+        if (v[0] == old[0] && v[1] == old[1]) return;
+        memcpy(data + offset, v, 16);
+        mark(offset, 16);
+    };
+    static const uint8_t zeros[16] = {};
+    for (const UniformCache::Op& op : c.ops) {
+        const uint8_t* src;
+        if (op.block == ~0u) src = reinterpret_cast<const uint8_t*>(regs + op.src);
+        else {
+            const uint32_t address = regs[op.block];
+            src = address ? static_cast<const uint8_t*>(ppc_ptr(address + op.src)) : zeros;
+        }
+        if (aoNoise && int32_t(op.dst) == c.aoDst) {  // AO mode 2: .w x1.5 (pack_uniforms)
+            uint8_t v[16];
+            memcpy(v, src, 16);
+            float w;
+            memcpy(&w, v + 12, 4);
+            w *= 1.5f;
+            memcpy(v + 12, &w, 4);
+            put16(op.dst, v);
+        } else
+            put16(op.dst, src);
+    }
+    if (c.regs >= 0) {
+        const auto* src = reinterpret_cast<const uint8_t*>(regs + c.regBase);
+        for (uint32_t o = 0; o < c.regBytes; o += 16) put16(uint32_t(c.regs) + o, src + o);
+    }
+    auto bitsf = [](uint32_t value) {
+        float result;
+        memcpy(&result, &value, 4);
+        return result;
+    };
+    if (c.alphaRef >= 0) {
+        const float ref = bitsf(regs[Latte::REGADDR::SX_ALPHA_REF]);
+        put(uint32_t(c.alphaRef), &ref, 4);
+    }
+    if (c.pointSize >= 0) {
+        const float point = float(regs[Latte::REGADDR::PA_SU_POINT_SIZE] & 0xFFFF) / 8.0f;
+        const float v = (point == 0 ? 0.125f : point) * scaleX;
+        put(uint32_t(c.pointSize), &v, 4);
+    }
+    if (c.windowToClip >= 0) {
+        const float width = 2.0f * bitsf(regs[Latte::REGADDR::PA_CL_VPORT_XSCALE]);
+        const float height = -2.0f * bitsf(regs[Latte::REGADDR::PA_CL_VPORT_YSCALE]);
+        const float v[2] = {width != 0 ? 2.0f / width : 0, height != 0 ? 2.0f / height : 0};
+        put(uint32_t(c.windowToClip), v, 8);
+    }
+    if (c.fragCoordScale >= 0) {
+        const float v[4] = {scaleX != 0 ? 1.0f / scaleX : 1.0f, scaleY != 0 ? 1.0f / scaleY : 1.0f, 0, 0};
+        put(uint32_t(c.fragCoordScale), v, 16);
+    }
+    for (auto [offset, unit] : c.texScales) {
+        static const float one[2] = {1.0f, 1.0f};
+        put(offset, texScale ? texScale[unit] : one, 8);
+    }
+    const bool changed = lo < hi;  // (the granule bits are cleared at the end whatever the mode)
+    auto clear_dirty = [&] {
+        for (uint32_t w = lo >> 6; w < ((hi + 63) >> 6); w++) dirty[w] = 0;
+    };
+    const uint64_t frame = R.frame + 1;  // the frame being recorded: its stream slice
+    StreamSlice out;
+    if (mode == 1) {
+        if (changed || c.frame != frame || !c.gpu) {
+            const StreamSlice slice = stream_upload(data, c.size, DK_UNIFORM_BUF_ALIGNMENT);
+            c.gpu = slice.gpu;
+            c.frame = slice ? frame : ~0ull;
+            if (slice) {
+                g_ufStats.slices++;
+                g_ufStats.sliceBytes += c.size;
+            }
+        } else
+            g_ufStats.unchanged++;
+        out = {c.gpu, c.size};
+    } else {
+        if (c.frame != frame || !c.gpu) {
+            // this frame's copy: the whole block by the CPU (the slice is the frame's own memory; nothing reads
+            // it before the commands recorded from now on)
+            const StreamAlloc a = stream_alloc(c.bound, DK_UNIFORM_BUF_ALIGNMENT);
+            c.gpu = a.gpu;
+            c.frame = a ? frame : ~0ull;
+            if (a) {
+                memcpy(a.cpu, data, c.size);
+                R.perf.streamBytes += c.size;
+                g_ufStats.slices++;
+                g_ufStats.sliceBytes += c.size;
+            }
+        } else if (changed) {
+            // the changed granules, in runs; runs closer than 3 granules (a push's 7 command words) merge
+            uint32_t g = lo;
+            while (g < hi) {
+                if (!(dirty[g >> 6] & (1ull << (g & 63)))) {
+                    g++;
+                    continue;
+                }
+                uint32_t end = g + 1, gap = 0;
+                for (uint32_t k = g + 1; k < hi && gap < 3; k++) {
+                    if (dirty[k >> 6] & (1ull << (k & 63))) {
+                        end = k + 1;
+                        gap = 0;
+                    } else
+                        gap++;
+                }
+                const uint32_t offset = g * 16, bytes = std::min(end * 16, c.size) - offset;
+                dkCmdBufPushConstants(R.cmd, c.gpu, c.bound, offset, bytes, data + offset);
+                g_ufStats.pushes++;
+                g_ufStats.pushBytes += bytes;
+                g = end;
+            }
+        } else
+            g_ufStats.unchanged++;
+        out = {c.gpu, c.bound};
+    }
+    if (changed) clear_dirty();
+    return c.gpu ? out : StreamSlice{};
+}
+
+UniformPackStats uniform_pack_stats_take() {
+    const UniformPackStats s = g_ufStats;
+    g_ufStats = {};
+    return s;
+}
+
 ShaderStats shader_stats_take() {
     static ShaderStats taken;
     return stats_since(taken);

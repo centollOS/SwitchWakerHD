@@ -216,6 +216,63 @@ struct TextureCacheEntry {
 };
 TextureCacheEntry textureCache[2][LATTE_NUM_MAX_TEX_UNITS];  // vertex, pixel
 const bool textureCacheOn = !env_switch("NO_TEXTURE_CACHE", false);
+// P4 resources lane: behind the per-unit entry (the last lookup of the unit), a table of recent lookups by their
+// words (WWHD_DK_TEX_TABLE, on unless 0): draws that alternate materials on a unit find them there instead of
+// redoing the lookup (find_or_create_surface's multimap, the view and sampler maps)
+const bool textureTableOn = env_switch("TEX_TABLE", true);
+constexpr uint32_t kTextureTableSize = 1024;
+TextureCacheEntry textureTable[kTextureTableSize];
+inline TextureCacheEntry& texture_table_entry(const uint32_t* words, const uint32_t* sampler, bool compare) {
+    uint64_t h = compare ? 0x9E3779B97F4A7C15ull : 0xCBF29CE484222325ull;
+    for (int i = 0; i < 7; i++) h = (h ^ words[i]) * 0x100000001B3ull;
+    for (int i = 0; i < 3; i++) h = (h ^ sampler[i]) * 0x100000001B3ull;
+    return textureTable[(h ^ (h >> 29) ^ (h >> 47)) & (kTextureTableSize - 1)];
+}
+inline bool texture_entry_hit(const TextureCacheEntry& e, const uint32_t* words, const uint32_t* sampler, bool compare) {
+    return e.epoch == R.surfaceEpoch && e.textureEpoch == R.textureEpoch && e.compare == compare &&
+           !memcmp(e.words, words, sizeof e.words) && !memcmp(e.sampler, sampler, sizeof e.sampler);
+}
+
+// The ufBlock (P4 resources lane, WWHD_DK_UF_CACHE): 0 = pack_uniforms into a new stream slice every draw (P2's
+// path); 1 = a copy per shader, a new slice only when a value changed; 2 (default) = the copy per shader in one
+// slice per frame, changed pieces pushed into it (dkCmdBufPushConstants), the address unchanged (no rebind)
+const int g_ufMode = [] {
+    const char* e = getenv("WWHD_DK_UF_CACHE");
+    if (!e || !*e) return 2;
+    const int v = atoi(e);
+    return v < 0 || v > 2 ? 2 : v;
+}();
+
+// The resources stage's finer figures (P4 resources lane), per 5 s report (log_resource_stats): times of timed
+// draws (x kDrawTimeSample, as R.perf) and counts of every draw
+struct ResourcePerf {
+    uint64_t targetNs = 0, uboNs = 0, textureNs = 0, textureMissNs = 0, uniformNs = 0, descriptorNs = 0, bindNs = 0;
+    uint64_t textureMisses = 0, tableHits = 0, tableLookups = 0;
+    uint64_t uboBlocks = 0, uboReused = 0;  // guest uniform blocks of draws; ... found already in this frame's stream
+    uint64_t uboMemoHits = 0;               // ... by the stage's memo (WWHD_DK_UBO_MEMO)
+    uint64_t texBindCalls = 0, texHandles = 0, texWanted = 0;  // dkCmdBufBindTextures calls, handles; slots draws use
+    uint64_t uboBindCalls = 0, uboBuffers = 0, uboWanted = 0;  // dkCmdBufBindUniformBuffers calls, buffers; slots
+} g_res;
+
+// the draw's stage timer: lap() adds the time since the last mark to a stage total; sub() to one part of the
+// resources stage (and to the stage's total, R.perf.resourceNs)
+struct Lap {
+    bool on;
+    uint64_t at;
+    void operator()(uint64_t& total) {
+        if (!on) return;
+        const uint64_t now = now_ns();
+        total += (now - at) * kDrawTimeSample;
+        at = now;
+    }
+    void sub(uint64_t& part) {
+        if (!on) return;
+        const uint64_t now = now_ns(), d = (now - at) * kDrawTimeSample;
+        part += d;
+        R.perf.resourceNs += d;
+        at = now;
+    }
+};
 
 // a zero-filled uniform block for a GX2 block with no address, once per frame
 StreamSlice zero_block() {
@@ -267,9 +324,20 @@ bool is_occlusion(const uint32_t* r, bool vertex) {
     return match;
 }
 
+// Each stage's guest uniform blocks as the last draw found them in the stream (WWHD_DK_UBO_MEMO, on unless 0):
+// a block at the same address and size is the same slice while the frame and R.streamGen are (stream_guest's
+// own rule), without stream_guest's table probe (P4 resources lane)
+struct UboMemo {
+    uint32_t addr = 0, copy = 0, bound = 0;
+    uint64_t frame = ~0ull, gen = 0;
+    StreamSlice slice;
+};
+UboMemo uboMemo[2][LATTE_NUM_MAX_UNIFORM_BUFFERS];
+const bool uboMemoOn = env_switch("UBO_MEMO", true);
+
 // false: the stream slice is full (the draw is skipped)
 bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>& colors, Surface* depth,
-                   StageBindings& out) {
+                   StageBindings& out, Lap& lap) {
     const int stage = sh->vertex ? kVertexStage : kPixelStage;
     out.texMask = out.uboMask = 0;
     // ---- uniform blocks: the guest's bytes, then zeros up to a 256-byte multiple (as gfx/gl: shaders must
@@ -283,16 +351,31 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         const uint32_t want = sh->uboBytes[i] ? std::min<uint32_t>(sh->uboBytes[i], size) : size;
         const uint32_t bound = std::min<uint32_t>((want + 255) & ~255u, 0x10000);
         StreamSlice slice;
+        g_res.uboBlocks++;
         if (!addr) slice = zero_block();
         else {
             const uint32_t copy = std::min(size, bound);
-            slice = stream_guest(addr, copy, DK_UNIFORM_BUF_ALIGNMENT, bound - copy);
+            UboMemo& m = uboMemo[stage][i];
+            const uint64_t frame = R.frame + 1;
+            if (uboMemoOn && m.addr == addr && m.copy == copy && m.bound == bound && m.frame == frame &&
+                m.gen == R.streamGen && m.slice) {
+                slice = m.slice;
+                R.perf.reusedBytes += copy;
+                g_res.uboReused++;
+                g_res.uboMemoHits++;
+            } else {
+                const uint64_t reused = R.perf.reusedBytes;
+                slice = stream_guest(addr, copy, DK_UNIFORM_BUF_ALIGNMENT, bound - copy);
+                g_res.uboReused += R.perf.reusedBytes != reused;
+                m = {addr, copy, bound, frame, R.streamGen, slice};
+            }
         }
         if (!slice) return false;
         R.perf.uboBytes += bound;
         out.ubo[slot] = {slice.gpu, bound};
         out.uboMask |= 1u << slot;
     }
+    lap.sub(g_res.uboNs);
     // ---- textures
     const uint32_t texbase = sh->vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
     for (int i = 0; i < sh->dec->textureUnitListCount; i++) {
@@ -316,22 +399,34 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         R.perf.textureLookups++;
         Surface* s;
         uint32_t view, smp;
-        if (textureCacheOn && cached.epoch == R.surfaceEpoch && cached.textureEpoch == R.textureEpoch &&
-            cached.compare == compare && !memcmp(cached.words, words, sizeof cached.words) &&
-            !memcmp(cached.sampler, samplerWords, sizeof cached.sampler)) {
+        TextureCacheEntry* found = nullptr;
+        if (textureCacheOn && texture_entry_hit(cached, words, samplerWords, compare)) found = &cached;
+        else if (textureCacheOn && textureTableOn) {
+            g_res.tableLookups++;
+            TextureCacheEntry& t = texture_table_entry(words, samplerWords, compare);
+            if (texture_entry_hit(t, words, samplerWords, compare)) {
+                g_res.tableHits++;
+                cached = t;  // the unit's entry for the next draw
+                found = &t;
+            }
+        }
+        if (found) {
             R.perf.textureCacheHits++;
-            s = cached.s;
+            s = found->s;
             upload_surface(s);  // once per frame: CPU changes to the texture
-            view = cached.view;
-            smp = cached.smp;
+            view = found->view;
+            smp = found->smp;
             sampler_used(smp);  // (the sampler cache must not rewrite it while this frame may use it)
         } else {
+            g_res.textureMisses++;
+            const uint64_t missStart = lap.on ? now_ns() : 0;
             bool unique = false;
             s = sampled_texture(words, compare, &unique);
             if (!s) {  // nothing there: transparent black
                 out.tex[slot] = dkMakeTextureHandle(null_image_id(), sampler_id(samplerWords, compare, false));
                 out.texMask |= 1u << slot;
                 cached.epoch = 0;
+                if (lap.on) g_res.textureMissNs += (now_ns() - missStart) * kDrawTimeSample;
                 continue;
             }
             view = sampled_view_id(s, words);
@@ -344,6 +439,8 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             cached.s = s;
             cached.view = view;
             cached.smp = smp;
+            if (textureTableOn && unique) texture_table_entry(words, samplerWords, compare) = cached;
+            if (lap.on) g_res.textureMissNs += (now_ns() - missStart) * kDrawTimeSample;
         }
         if (g_gamepadDrawing) {  // a texture of the GamePad picture
             if (!s->gamepadSource) s->gamepadSourceSince = R.frame;
@@ -381,6 +478,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         out.tex[slot] = dkMakeTextureHandle(view, smp);
         out.texMask |= 1u << slot;
     }
+    lap.sub(g_res.textureNs);
     return true;
 }
 
@@ -406,11 +504,17 @@ void bind_runs(const T* want, uint32_t mask, T* cached, uint32_t& known, Bind&& 
 
 void bind_stage(int stage, const StageBindings& b) {
     const DkStage dkStage = stage == kVertexStage ? DkStage_Vertex : DkStage_Fragment;
+    g_res.uboWanted += __builtin_popcount(b.uboMask);
+    g_res.texWanted += __builtin_popcount(b.texMask);
     bind_runs(b.ubo, b.uboMask, gs.ubo[stage], gs.uboKnown[stage], [&](uint32_t first, const DkBufExtents* e, uint32_t n) {
         dkCmdBufBindUniformBuffers(R.cmd, dkStage, first, e, n);
+        g_res.uboBindCalls++;
+        g_res.uboBuffers += n;
     });
     bind_runs(b.tex, b.texMask, gs.tex[stage], gs.texKnown[stage], [&](uint32_t first, const DkResHandle* h, uint32_t n) {
         dkCmdBufBindTextures(R.cmd, dkStage, first, h, n);
+        g_res.texBindCalls++;
+        g_res.texHandles += n;
     });
 }
 
@@ -632,7 +736,38 @@ void draw_frame_start() {
         LOG("[dk] flat varyings: %s (WWHD_DK_PROVOKING_VERTEX=last|first|latte)", kProvoking[provoking_mode()]);
         LOG("[dk] zcull: on (queue), dropped at every depth-target bind and after copies, uploads or new images of "
             "a depth buffer; depth clears reset it");
+        static const char* const kUf[] = {"0, packed into a new stream slice every draw (P2)",
+                                          "1, a copy per shader, a new slice only when a value changed",
+                                          "2, a copy per shader in one slice per frame, changed pieces pushed "
+                                          "(dkCmdBufPushConstants), no rebind"};
+        LOG("[dk] resources (P4): texture lookup table %s (WWHD_DK_TEX_TABLE=0 off), ufBlock mode %s "
+            "(WWHD_DK_UF_CACHE=0|1|2), guest uniform block memo %s (WWHD_DK_UBO_MEMO=0 off); textures and uniform "
+            "blocks bound only for slots that changed", textureCacheOn && textureTableOn ? "on" : "off", kUf[g_ufMode],
+            uboMemoOn ? "on" : "off");
     }
+}
+
+void log_resource_stats(uint64_t executed, uint64_t frames) {
+    const ResourcePerf p = g_res;
+    const UniformPackStats u = uniform_pack_stats_take();
+    g_res = {};
+    auto us = [&](uint64_t ns) { return executed ? double(ns) / 1e3 / double(executed) : 0.0; };
+    auto perDraw = [&](uint64_t n) { return executed ? double(n) / double(executed) : 0.0; };
+    auto perFrame = [&](uint64_t n) { return frames ? double(n) / double(frames) : 0.0; };
+    auto pct = [](uint64_t a, uint64_t b) { return b ? 100.0 * double(a) / double(b) : 0.0; };
+    LOG("[dk] resources us per draw: targets %.2f + uniform blocks %.2f + textures %.2f (misses %.2f: %.1f/frame, "
+        "%.2f us each; table %.0f%% of %.0f/frame) + ufBlock %.2f + descriptors %.2f; binds (in state) %.2f us: "
+        "textures %.2f calls %.2f handles of %.2f slots, uniform blocks %.2f calls %.2f buffers of %.2f slots; guest "
+        "uniform blocks %.2f/draw (%.0f%% already in the stream, %.0f%% by the memo); ufBlock mode %d: %.0f/frame, "
+        "%.0f%% unchanged, %.0f slices (%.0f KiB) + %.0f pushes (%.1f KiB) per frame",
+        us(p.targetNs), us(p.uboNs), us(p.textureNs), us(p.textureMissNs), perFrame(p.textureMisses),
+        p.textureMisses ? double(p.textureMissNs) / 1e3 / double(p.textureMisses) : 0.0,
+        pct(p.tableHits, p.tableLookups), perFrame(p.tableLookups), us(p.uniformNs), us(p.descriptorNs), us(p.bindNs),
+        perDraw(p.texBindCalls), perDraw(p.texHandles), perDraw(p.texWanted), perDraw(p.uboBindCalls),
+        perDraw(p.uboBuffers), perDraw(p.uboWanted), perDraw(p.uboBlocks), pct(p.uboReused, p.uboBlocks),
+        pct(p.uboMemoHits, p.uboBlocks), g_ufMode,
+        perFrame(u.blocks), pct(u.unchanged, u.blocks), perFrame(u.slices), perFrame(u.sliceBytes) / 1024.0,
+        perFrame(u.pushes), perFrame(u.pushBytes) / 1024.0);
 }
 
 namespace {
@@ -706,14 +841,8 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     SampledTime timer{R.perf.drawNs, timed};
     if (!count || !instances || ((prim == 0x13 || prim == 0x14) && count < 4)) return;
     if (r[REGADDR::PA_CL_CLIP_CNTL] & (1 << 22)) return;  // rasterization disabled
-    uint64_t lapAt = timed ? now_ns() : 0;
-    const uint64_t drawStart = lapAt;
-    auto lap = [&](uint64_t& total) {
-        if (!timed) return;
-        const uint64_t now = now_ns();
-        total += (now - lapAt) * kDrawTimeSample;
-        lapAt = now;
-    };
+    Lap lap{timed, timed ? now_ns() : 0};
+    const uint64_t drawStart = lap.at;
     ((uint32_t*)r)[REGADDR::VGT_PRIMITIVE_TYPE] = prim;
 
     // ---- shaders: the last draw's, a recent combination of programs and register state, or translate
@@ -913,6 +1042,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     for (auto* c : colors)
         if (c) upload_surface(c);
     if (depth) upload_surface(depth);
+    lap.sub(g_res.targetNs);
 
     // ---- the scissor (before anything is uploaded for a draw that would be discarded)
     uint32_t sx, sy, sex, sey;
@@ -941,7 +1071,9 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     g_drawSamplesRendered = false;
     g_traceTextures.clear();
     if (g_capture) capture_draw_begin();
-    if (!prepare_stage(r, vs, colors, depth, stages[kVertexStage]) || !prepare_stage(r, ps, colors, depth, stages[kPixelStage])) {
+    lap.sub(g_res.targetNs);  // (the scissor)
+    if (!prepare_stage(r, vs, colors, depth, stages[kVertexStage], lap) ||
+        !prepare_stage(r, ps, colors, depth, stages[kPixelStage], lap)) {
         R.perf.streamFullSkips++;
         skip(g_drawSkips.streamFull);
         return;
@@ -968,8 +1100,10 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         const int slot = sh->bindings.ufBlockSlot;
         if (slot < 0 || slot >= kMaxUniformBuffers) continue;
         const bool aoNoise = g_aoMode == 2 && sh->vertex && is_occlusion(r, true);
-        const StreamSlice u = pack_uniforms(sh->vertex, *sh, r, g_drawScale, g_drawScale,
-                                            g_unitScale[sh->vertex ? kVertexStage : kPixelStage], aoNoise);
+        const float(*texScale)[2] = g_unitScale[sh->vertex ? kVertexStage : kPixelStage];
+        const StreamSlice u =
+            g_ufMode ? pack_uniforms_cached(g_ufMode, sh->vertex, *sh, r, g_drawScale, g_drawScale, texScale, aoNoise)
+                     : pack_uniforms(sh->vertex, *sh, r, g_drawScale, g_drawScale, texScale, aoNoise);
         if (!u) {
             R.perf.streamFullSkips++;
             skip(g_drawSkips.streamFull);
@@ -979,8 +1113,9 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         b.ubo[slot] = {u.gpu, u.size};
         b.uboMask |= 1u << slot;
     }
+    lap.sub(g_res.uniformNs);
     commit_descriptors();  // the descriptors this draw's textures were given
-    lap(R.perf.resourceNs);
+    lap.sub(g_res.descriptorNs);
 
     // ---- render targets: bound when they change (deko3d binds color targets 0..n-1 without gaps: a gap gets
     // the first color target's view with its writes masked off below)
@@ -1042,8 +1177,12 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         gs.vs = &vs->dk;
         gs.ps = &ps->dk;
     }
-    bind_stage(kVertexStage, stages[kVertexStage]);
-    bind_stage(kPixelStage, stages[kPixelStage]);
+    {
+        const uint64_t bindStart = timed ? now_ns() : 0;
+        bind_stage(kVertexStage, stages[kVertexStage]);
+        bind_stage(kPixelStage, stages[kPixelStage]);
+        if (timed) g_res.bindNs += (now_ns() - bindStart) * kDrawTimeSample;
+    }
 
     // ---- viewport, scissor
     set_viewport(r, g_drawScale);
