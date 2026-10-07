@@ -6,9 +6,9 @@
 # and compiled on the player's machine by the installer. tools/release/guard.py fails the job if
 # an artifact contains game code, game files, saves, shader caches or key-like strings.
 #
-# Triggers: pushing a tag v* publishes a release. "Run workflow" (workflow_dispatch) builds and
-# checks the same artifacts without publishing (dry run); with dry_run unchecked on a v* tag it
-# publishes too.
+# Triggers: only "Run workflow" (workflow_dispatch). It builds and checks the artifacts without
+# publishing (dry run); with dry_run unchecked, run on a v* tag, it publishes them. SwitchWakerHD's
+# tags are source-only releases, so pushing a tag does not start it (upstream's did).
 #
 # Toolchains: tools/installer/toolchains.json pins the exact compilers. The Windows and Linux
 # runtimes are built with the same pinned llvm-mingw / zig the installer downloads for players,
@@ -16,8 +16,6 @@
 name: release
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       dry_run:
