@@ -176,6 +176,8 @@ uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer) {
         }
         g_samplers.erase(g_samplerSlots[id].key);
         g_stats.samplerEvictions++;
+        // the draw path's texture caches may still hold the evicted slot for these words: looked up again
+        R.surfaceEpoch++;
     }
     SamplerSlot& slot = g_samplerSlots[id];
     slot.key = key;
@@ -190,6 +192,10 @@ uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer) {
     g_stats.samplerWrites++;
     R.perf.samplerDescriptorWrites++;
     return id;
+}
+
+void sampler_used(uint32_t id) {
+    if (id >= kReservedSamplerIds && id < kSamplerDescriptors) g_samplerSlots[id].lastFrame = recording();
 }
 
 void commit_descriptors() {

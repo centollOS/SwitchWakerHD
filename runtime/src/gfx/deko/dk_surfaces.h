@@ -73,6 +73,10 @@ void image_descriptor_free_later(uint32_t id);
 // the two flags; compare: a depth-compare sampler; integer: an integer texture (nearest filtering only).
 // When the cache is full the least recently used slot that no in-flight frame uses is rewritten.
 uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer);
+// a sampler slot from an earlier sampler_id is used by this frame too (the draw path's texture cache): the
+// cache's eviction then leaves it alone until the GPU is done with this frame. (An eviction advances
+// R.surfaceEpoch: cached lookups of the evicted slot are redone.)
+void sampler_used(uint32_t id);
 // 16x anisotropic filtering (WWHD_ANISO, the overlay's Effects): any thread; samplers follow from the next frame
 bool aniso_enabled();
 void set_aniso(bool on);

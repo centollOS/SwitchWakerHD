@@ -1173,19 +1173,26 @@ PresentSource present_source() {
     p.height = s->height;
     p.srgb = s->fmt.srgb;
     // the reserved slot gets the picture's default view when it changes; the previous frame's present
-    // pass may still read the slot: its draws finish first
+    // pass may still read the slot: its draws finish first. The image is told apart by its address, size
+    // and format: a rescaled picture (internal resolution) or a new image in freed heap memory can have the
+    // address of the one written before
     static DkGpuAddr written = DK_GPU_ADDR_INVALID;
     static DkImageFormat writtenFormat = DkImageFormat_None;
+    static uint32_t writtenW = 0, writtenH = 0;
     const DkGpuAddr addr = dkImageGetGpuAddr(&s->img.image);
-    if (addr != written || s->fmt.image != writtenFormat) {
+    if (addr != written || s->fmt.image != writtenFormat || s->img.pw != writtenW || s->img.ph != writtenH) {
         dkCmdBufBarrier(R.cmd, DkBarrier_Primitives, 0);
         DkImageView v;
         dkImageViewDefaults(&v, &s->img.image);
         image_descriptor_write(kPresentImageId, v);
         written = addr;
         writtenFormat = s->fmt.image;
-        LOG("[dk] presenting %s: %ux%u pixels, %s", s == S.tvScan.get() ? "the TV scan copy" : "the TV buffer itself",
-            p.pw, p.ph, describe(s).c_str());
+        writtenW = s->img.pw;
+        writtenH = s->img.ph;
+        static int logged = 0;  // (internal resolution changes repeat it)
+        if (logged++ < 40)
+            LOG("[dk] presenting %s: %ux%u pixels, %s", s == S.tvScan.get() ? "the TV scan copy" : "the TV buffer itself",
+                p.pw, p.ph, describe(s).c_str());
     }
     // the picture's rendering finished and visible to the present pass's sampling
     dkCmdBufBarrier(R.cmd, DkBarrier_Fragments, DkInvalidateFlags_Image);

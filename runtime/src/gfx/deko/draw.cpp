@@ -314,6 +314,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             upload_surface(s);  // once per frame: CPU changes to the texture
             view = cached.view;
             smp = cached.smp;
+            sampler_used(smp);  // (the sampler cache must not rewrite it while this frame may use it)
         } else {
             bool unique = false;
             s = sampled_texture(words, compare, &unique);
