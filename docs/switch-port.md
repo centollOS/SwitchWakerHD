@@ -76,6 +76,27 @@ The same OpenGL renderer runs on desktop Linux without a window. It renders offs
   podman run --rm -v $PWD:/src:Z wwhd-glhost addr2line -f -C -e /src/build/headless/wwhd <addrs>
   ```
 
+- With Docker (on an arm64 Mac, `docker build -t localhost/wwhd-glhost` with the Containerfile above), `build/gen` may be a symlink to another checkout: mount that path at the same place. Docker Desktop sometimes does not show a freshly linked binary through a `:ro` mount of the whole tree; mount `build/headless` itself (`-v $PWD/build/headless:/bin2:ro`). Build with `-j4`–`-j6` (the generated code needs a lot of RAM per file).
+- The headless link uses `-ffunction-sections`/`--gc-sections` like the Switch's, so test hooks the generated code does not call need no `f_X_orig`; it also uses the Switch's portable `hostui_switch.cpp` (settings.ini).
+
+#### Harvesting the shader cache
+
+The headless build generates the same GLSL as the Switch (same decompiler, same register keys; `glVendor` is never set, so Cemu's vendor branches are equal). Checked 2026-10-07: a headless run to Outset produced 462 sources and 249 pairs, all present with the same hashes in the console's `shadercache_gl.bin`. Translation records (3) are equal except bytes of `textureUnitList` past `textureUnitListCount`, which are uninitialized and never read.
+
+`WWHD_WARP_TOUR=all|main[,dwell_seconds[,start_index]]` (`mods/cheats.cpp`) warps through `mods/warps.h` once a file is loaded (`all`: `kMainWarps` then `kAllWarps`, 148 destinations), stays `dwell_seconds` of game time in each and quits at the end; a destination not reached in 45 s quits with status 3. With the scripted input below the camera turns all the time (`RX=1`) and A is pressed every 90 frames (text boxes). A driver restarts after a crash or a stuck destination from the next one; each run appends to the same `shadercache_gl.bin`:
+
+```sh
+A="300-304:A,400-404:RIGHT,460-464:A"; for f in $(seq 500 40 1100); do A="$A,$f-$((f+4)):A"; done
+A="$A,1200-100000000:RX=1"; for f in $(seq 1300 90 60000); do A="$A,$f-$((f+3)):A"; done
+docker run --rm -v $PWD/build/headless:/bin2:ro -v "$G":/game:ro -v $RUN:/run -w /run \
+  -e LIBGL_ALWAYS_SOFTWARE=1 -e WWHD_PRO_CONTROLLER=1 -e WWHD_SCRIPT_INPUT="$A" -e WWHD_CHEAT_INFINITE=health \
+  -e WWHD_WARP_TOUR=all,6,0 localhost/wwhd-glhost /bin2/wwhd --game /game --save /run/save
+```
+
+(`$RUN/save` holds a copy of the console's save, `save/user/...`.) `tools/switch/merge_shadercache.py out.bin console.bin harvested.bin` merges the files: each source, translation and pair once, sources first (the loader takes a translation only after its GLSL), and drops pairs and translations whose GLSL is missing.
+
+First harvest (2026-10-07, 6 s per destination, ~85 min with restarts): 138 of 148 destinations reached. Not reached: GanonK (crash, twice), Cave08, ENDumi, I_SubAN, M2ganon, PShip (crashes), E3ROOP (scene change never ends), sea_E (not reached in 45 s), sea_T (hang; the title stage, covered at boot). Harvested 7,620 sources, 5,721 pairs, 58,282 translations; merged with the console's file (1,561 / 956 / 13,449): **7,680 sources, 5,763 pairs, 65,907 translations** (44 MB). The headless build loads it (5,763 programs linked in 23 s on llvmpipe; sources and translations 122 MiB of malloc). On the Switch, linking every pair at boot costs ~13 ms each with Mesa's disk cache (~75 s per boot) and ~180 ms each on the first boot (~17 min), and every linked program stays in memory: check the heap before shipping the whole file.
+
 ## Architecture of the port
 
 ### Build system (`CMakeLists.txt`)
