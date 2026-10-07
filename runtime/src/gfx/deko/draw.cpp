@@ -699,9 +699,10 @@ void draw_frame_start() {
         const char* submit = getenv("WWHD_DK_SUBMIT_DRAWS");
         LOG("[dk] P4 lookup and indices: memo by primitive class %s (WWHD_DK_MEMO_PRIM_CLASS), one combination "
             "state hash %s (WWHD_DK_COMBO_KEY), fast combination check %s (WWHD_DK_COMBO_FAST_VALIDATE), index lists "
-            "stale at %s (WWHD_DK_INDEX_GEN)",
+            "stale at %s (WWHD_DK_INDEX_GEN), native fans/quads/quad strips/line loops %s (WWHD_DK_NATIVE_PRIMS)",
             g_primClass ? "on" : "off", g_comboKey ? "on" : "off", g_fastValidate ? "on" : "off",
-            g_indexGenOn ? "attribute-buffer invalidates and GX2DrawDone" : "every attribute or uniform invalidate (P3)");
+            g_indexGenOn ? "attribute-buffer invalidates and GX2DrawDone" : "every attribute or uniform invalidate (P3)",
+            env_switch("NATIVE_PRIMS", true) ? "on" : "off (converted on the CPU)");
         LOG("[dk] draw path: state cache %s, memo %s, texture cache %s, index cache %s, vertex trim %s, barrier per "
             "pass %s, GamePad skip %s, front face %s, submit every %s draws; trace draws %s",
             getenv("WWHD_DK_NO_STATE_CACHE") ? "off" : "on", env_switch("NO_MEMO", false) ? "off" : "on",
@@ -762,6 +763,37 @@ void set_viewport(const uint32_t* r, float scale) {
         dkCmdBufSetViewportSwizzles(R.cmd, 0, &sw, 1);
         gs.swizzle = int(flip);
     }
+}
+
+// P4, WWHD_DK_NATIVE_PRIMS (on unless 0): triangle fans, quads, quad strips and line loops drawn with
+// deko3d's primitives of the same name (dkCmdBufDraw* passes the DkPrimitive to Maxwell's VERTEX_BEGIN_GL
+// unchanged; the 3D engine assembles all four itself, as nouveau's nvc0 driver uses them) instead of index
+// lists generated on the CPU: a non-indexed draw needs no index list at all, an indexed one only its byte
+// order changed, and quads read 4 indices per quad instead of 6. The triangles are the CPU conversion's
+// (quad a b c d: a b c and a c d). Flat varyings: a fan's and a line loop's provoking vertices with the last-
+// vertex convention are the conversion's; a quad's (and a quad strip's) is its last vertex for both of its
+// triangles where the conversion's lists give c then d, so a quad draw whose pixel shader reads a flat
+// varying (SPI_PS_INPUT_CNTL_n FLAT_SHADE, bit 10) stays converted, as do fans when flat varyings use
+// another convention (WWHD_DK_PROVOKING_VERTEX).
+bool native_primitive(const uint32_t* r, uint32_t prim, DkPrimitive& mode) {
+    static const bool on = env_switch("NATIVE_PRIMS", true);
+    if (!on) return false;
+    const uint32_t inputs = std::min<uint32_t>(r[mmSPI_PS_IN_CONTROL_0] & 0x3F, 32);
+    bool flat = false;
+    for (uint32_t i = 0; i < inputs && !flat; i++) flat = (r[mmSPI_PS_INPUT_CNTL_0 + i] >> 10) & 1;
+    const bool lastVertex = provoking_vertex(r) == DkProvokingVertex_Last;
+    if (flat && (prim == 0x13 || prim == 0x14 || !lastVertex)) {
+        g_lookup.flatKeptConverted++;
+        return false;
+    }
+    switch (prim) {
+    case 5: mode = DkPrimitive_TriangleFan; g_lookup.nativeFans++; break;
+    case 0x12: mode = DkPrimitive_LineLoop; g_lookup.nativeLineLoops++; break;
+    case 0x13: mode = DkPrimitive_Quads; g_lookup.nativeQuads++; break;
+    case 0x14: mode = DkPrimitive_QuadStrip; g_lookup.nativeQuadStrips++; break;
+    default: return false;
+    }
+    return true;
 }
 
 void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
@@ -966,11 +998,14 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         skip(g_drawSkips.unsupported);
         return;
     }
-    const bool generated = prim == 5 || prim == 0x12 || prim == 0x13 || prim == 0x14;
-    if (generated) g_lookup.convertedPrims++;
+    bool generated = prim == 5 || prim == 0x12 || prim == 0x13 || prim == 0x14;
+    if (generated && native_primitive(r, prim, mode)) generated = false;  // (P4, WWHD_DK_NATIVE_PRIMS)
+    else if (generated) g_lookup.convertedPrims++;
     IndexList indices;
     if (indexAddr || generated) {
-        indices = index_list(prim, count, indexType, indexAddr, stripRestart, restartIndex);
+        // a native primitive's guest indices only change byte order (index_list's list conversion, prim 4)
+        indices = index_list(generated ? prim : (prim == 5 || prim >= 0x12 ? 4u : prim), count, indexType, indexAddr,
+                             stripRestart, restartIndex);
         if (!indices.count) return;  // (a fan or quad list too short for one primitive)
         if (!indices.slice) {
             R.perf.streamFullSkips++;
