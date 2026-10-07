@@ -44,6 +44,7 @@
 
 #include "input.h"
 #include "mods.h"
+#include "../motion/motion.h"
 #include "runtime.h"
 
 extern "C" {
@@ -189,8 +190,14 @@ void filter_pad(input::PadState& s) {
     std::lock_guard<std::mutex> lk(g_mu);
     // stale movement (the camera never took it, e.g. during an event) is dropped
     if (g_move_step != ~0ull && now > g_move_step + 8) g_dx = g_dy = 0;
+    // gyro (motion/motion.h): the game turns its first-person (subject) camera with the GamePad's motion,
+    // which every item aim uses too
+    motion::set_aiming(in_first_person() || aiming_item(link_proc()));
+    // the mouse as a gyro has the mouse while the game aims: no synthetic right stick then (the game
+    // also ignores the gyro while the right stick is pushed)
+    if (motion::mouse_drives_gyro()) g_dx = g_dy = 0;
     // mouse camera
-    bool active = mouse_camera() && (mouse_captured() || test_mouse());
+    bool active = mouse_camera() && (mouse_captured() || test_mouse()) && !motion::mouse_drives_gyro();
     bool stick_free = std::fabs(s.rx) < 0.2f && std::fabs(s.ry) < 0.2f;
     if (active && stick_free && recent(g_move_step, 8)) {
         if (in_first_person() || aiming_item(link_proc())) {

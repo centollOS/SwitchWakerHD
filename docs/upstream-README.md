@@ -1,9 +1,3 @@
-> **Upstream README.** This is the README of the upstream project,
-> [ZeldaWWHDRecomp](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp), as it was when SwitchWakerHD
-> last merged it (v0.2.2), kept for its desktop and Android instructions, its release notes and its
-> credits. SwitchWakerHD's own README is [../README.md](../README.md). Relative links below point to
-> paths from the repository root.
-
 # The Legend of Zelda: The Wind Waker HD — native port (macOS, Linux, Windows, Android)
 
 A static recompilation of the Wii U version (USA) that runs natively on **macOS** (Apple Silicon),
@@ -15,6 +9,97 @@ platforms), with no Cemu runtime and no GPU command emulation.
 How it works and how it differs from running the game in Cemu: [docs/how-it-works.md](docs/how-it-works.md).
 
 ## What's new in this update
+
+### Next update
+
+- **120 and 240 fps** (settings overlay → **Graphics** → **Frame rate**, or the macOS Graphics
+  menu): frame interpolation now also draws 3 or 7 blended frames between the game's 30 logic steps
+  a second, for 120 Hz and 240 Hz displays. Camera, models, particles, sea and every other blended
+  effect move at even steps between two game steps; input, sound and menus behave as at 30 fps.
+  The game detects the display's refresh rate (ProMotion Macs: 120 Hz; Windows, Linux and Android:
+  the monitor's or phone's current rate, and Android phones are asked for their fast mode) and the
+  overlay shows it ("Your display: 120 Hz"). A rate the display cannot show is capped to it:
+  240 fps on a 120 Hz display draws 120, and 120 fps on a 60 Hz display draws 60. **Keep game
+  speed** is on by default at 120/240 fps: when the computer cannot draw every frame, the game
+  still runs at full speed with fewer in-between frames. Measured on
+  an M3 Max with its 120 Hz display (Outset Island): 120 fps draws 115 frames a second on screen
+  with Vulkan and 108 with Metal, at 29.1–29.7 game steps a second; without presenting, 119.3
+  frames and 29.9 steps. 240 fps is limited by the renderer on that machine (about 146 frames a
+  second when not capped to the display), so on a 120 Hz screen it draws the same as 120 fps.
+- **"Uncapped" debug switch** (settings overlay → **Graphics**; not saved): no frame limit and no
+  vsync, to see how many frames a second your computer can draw (window title and performance
+  overlay). The game counts frames, so it runs faster than normal while it is on: not for playing.
+  Metal and Vulkan; `WWHD_UNCAPPED=1` turns it on at start.
+- **Keep game speed recovers faster after a hitch** (all frame rates): one slow frame (a shader
+  compile, a scene load) no longer turns the in-between frames off for several seconds.
+
+### v0.2.6
+
+- **Far fewer shader translations and pipelines, fewer stutters in new areas, less memory
+  (Vulkan):** the renderer now keys a translated shader only on the state that actually changes its
+  translation (for example, only the textures a shader samples and the vertex inputs and outputs it
+  uses), so the same shader is no longer translated again and again for different render states.
+  Starting from an empty shader cache, Outset Island needed 569 translations and 204 pipelines
+  instead of about 6,100–6,700 and 3,200–3,500, and Windfall 829 and 236 instead of about 4,300–5,000
+  and 2,300–2,700. That takes about 100–115 MB less memory, cuts the frames that take over 50 ms
+  by about a third, and lowers render-thread CPU time by 4–12%. It supersedes PR #46 by rhemfur,
+  whose idea (keys that translate to the same shader share it and its pipelines) is part of it.
+- **Performance reports say which build and system they come from** (issue #44): **Copy performance
+  report** now starts with the version and commit, the operating system and version, the graphics card
+  with its driver and Vulkan version (or the Metal device), and the rendering switches that are not at
+  their defaults (buffer cache, CPU paths turned off, lazy DrawDone / async present turned off, the
+  gyro source). The log's first lines name the version and system too, so crash logs carry them.
+
+### v0.2.5
+
+- **Fixed: much lower frame rate on Windows and Linux PCs with a dedicated graphics card (Vulkan)**
+  (issue #44). Three renderer shortcuts that v0.2.4 turned on for all platforms compared new vertex
+  and uniform data against the previous copy in the GPU's upload memory; reading that memory back is
+  very slow on AMD and NVIDIA cards (one report went from 30 fps in v0.2.1 to 12 fps). The renderer
+  now keeps those comparison copies in normal memory and never reads GPU upload memory, which also
+  speeds up an older index-data path when the buffer cache is off.
+- **Gyro aiming** (issue #45; settings overlay → **Controls** → **Gyro…**): aim the bow, hookshot,
+  boomerang, telescope, Picto Box and grappling hook in first person by moving your controller, as
+  with the Wii U GamePad. Sources: the gyro of a **DualSense, DualShock 4, Switch Pro, Joy-Con or
+  Steam Deck** controller, a **Cemuhook (DSU)** server (DS4Windows, BetterJoy, phone apps;
+  127.0.0.1:26760 by default), or the **mouse** (for Steam Input's "gyro to mouse"). Sensitivity,
+  invert and a recenter button are adjustable. Off by default; the game's own **Options → Gyro**
+  switch still applies. See `docs/gyro.md`.
+
+### v0.2.4
+
+- **Smoother 60 fps on slower PCs (Vulkan):** the render thread no longer waits for the GPU after
+  every frame on Windows, Linux and macOS (the way Android already worked), so CPU and GPU work in
+  parallel. Where the render thread is the limit, this is the difference between slow motion and
+  full speed: in our load tests the game went from 35–40 fps with only a third to half of the 60 fps
+  in-between frames drawn to a steady ~59 fps with almost all of them, at full game speed. Without
+  a frame limit it renders 13–53% more frames per second, depending on the scene. (Issues #7, #44)
+- **Less CPU work per frame (Vulkan):** 15 renderer shortcuts that were Android-only are now on
+  everywhere (8–14% less render-thread time), and on macOS vertex, index and uniform data the game
+  does not change stay on the GPU instead of being copied again for every draw (another 6–17% less
+  render-thread time and 43–64% less data uploaded per frame). Windows, Linux and Android players
+  can try that cache with `WWHD_VK_BUFFER_CACHE=1`; `docs/vulkan.md` ("Guest buffer cache") says
+  what to report.
+- **Performance report** (settings overlay → **Graphics** → **Copy performance report**): copies a
+  breakdown of the render thread's time per frame to the clipboard, for bug reports about speed.
+- **macOS: setup works when the app is opened straight from the downloaded folder** (issue #48).
+  Every setup error now says what failed, what to do, and where the log is.
+- **Sound in GamePad-only mode** (Off-TV Play, the Minus button): the game's sound now plays through
+  your speakers instead of going silent (issue #49).
+
+### v0.2.3
+
+- **Mod manager** (settings overlay → **Mods**): the built-in mods (direct and mouse camera,
+  first-person shortcut, wall climbing, quick doors, fast scenes) in one searchable list, plus
+  **installable mod packages** from a folder or a `.wwhdmod` ZIP, with profiles, dependencies and
+  per-mod options. Everything starts off; nothing from a package loads until you enable it.
+  - **Content mods** replace game files without touching your game folder.
+  - **Cemu graphics packs** (`rules.txt`) can be imported, with their presets and resolution rules;
+    shader packs need the Vulkan renderer. Code patches from Cemu packs are not supported.
+  - **Native mods** (packages with their own compiled code) ask for a one-time confirmation before
+    they are enabled, because they run with the game's full permissions; only enable mods from
+    sources you trust.
+  See `docs/mod-manager.md` for the package format and the mod SDK.
 
 ### v0.2.2
 
@@ -141,10 +226,14 @@ How it works and how it differs from running the game in Cemu: [docs/how-it-work
   characters in the window title. Community fixes from pull requests #1 and #2 (Miiverse manager
   throttling, shared shader-cache memory) are included.
 
-- **60 fps.** Two modes in the Graphics menu:
-  - **60 fps (key 6)**: frame interpolation. The game logic keeps its original 30 steps per second;
-    every second frame is drawn halfway between two steps (camera, models, particles, sea, wave
-    crests, grass and trees, cloth, weather, lighting). Input, sound and menus behave as at 30 fps.
+- **60, 120 and 240 fps.** Modes in the Graphics menu and the settings overlay (Graphics › Frame rate):
+  - **60 fps (key 6), 120 fps, 240 fps**: frame interpolation. The game logic keeps its original
+    30 steps per second; the frames in between (1, 3 or 7 per step) are drawn blended between two
+    steps (camera, models, particles, sea, wave crests, grass and trees, cloth, weather, lighting).
+    Input, sound and menus behave as at 30 fps. The frames reach the screen up to the display's
+    refresh rate (the overlay shows it, e.g. "Your display: 120 Hz"). "Keep game speed" (on by
+    default at 120/240 fps, off at 60) skips in-between frames the computer or display cannot show
+    instead of slowing the game down.
   - **True 60 (key 7, experimental)**: Link and the follow camera run their logic at 60 steps per
     second (for the actions that have been converted and measured against the original); everything
     else runs at 30 and is interpolated.
@@ -228,6 +317,16 @@ First start, per system:
   opened". macOS 14: right-click (Ctrl-click) the app, **Open**, **Open**. macOS 15 and newer: click
   **Done**, then **System Settings › Privacy & Security › Open Anyway**. If Apple's Command Line Tools
   (the free compiler, which also brings Python) are missing, Wind Waker HD offers Apple's installer.
+  Start the app **inside the unzipped folder** and keep it there: it needs `tools/`, `sdk/` and
+  `portable.txt` next to it. Don't drag only `Wind Waker HD.app` into Applications; to keep the game
+  somewhere else, move the whole folder. The folder must be writable (not a disk image or a read-only
+  drive). If macOS asks whether Wind Waker HD may access your Downloads (or Desktop, Documents) folder,
+  click **Allow**: the game is prepared in that folder. Releases up to v0.2.3 stopped with "Setup could
+  not continue … must stay in the unpacked release folder" when started straight from the unzipped
+  download (issue #48, macOS App Translocation); with those, run
+  `xattr -dr com.apple.quarantine <the unzipped folder>` in Terminal once, then open the app again.
+  When setup cannot continue it says what failed and what to do, and writes it to
+  `data/setup-window.log` (or `~/Library/Logs/Wind Waker HD setup.log` when the folder is not writable).
 - **Windows**: the release is not code-signed, so SmartScreen may say "Windows protected your PC":
   **More info › Run anyway**. The first start downloads Python (11 MB) and the compiler (llvm-mingw,
   190 MB) into the release folder, SHA-256 checked, no administrator rights; at the end you can remove
@@ -400,26 +499,6 @@ supported because the recompiled game requires Clang's `musttail` support.
 The build fails with a clear message if `build/gen` has not been generated. The runtime checks at
 startup that `game/code/cking.rpx` matches the recompiled code.
 
-### Switch (homebrew, experimental; see docs/switch-port.md)
-
-A deko3d renderer (the Switch's own GPU API), built as an `.nro` for hbmenu. After steps 1 and 2 above
-(on a PC; needs podman or docker):
-
-```sh
-tools/switch/build.sh          # devkitpro/devkita64 container -> build/switch-dk/wwhd.nro
-```
-
-On the SD card: `/switch/wwhd/wwhd.nro`, `/switch/wwhd/shadercache_dksh.bin` (the compiled shaders,
-made by `tools/switch/dksh_cache`, docs/deko3d-plan.md) and the extracted game as `/switch/wwhd/game/` (`code/`,
-`content/`, `meta/`). Start hbmenu with full RAM (hold R while launching a game), not from the album.
-Saves go to `/switch/wwhd/save/`, the log to `/switch/wwhd/wwhd.log` (startup, crashes, shader
-errors; failing shaders are written as `shaderfail_*.glsl`). Controllers act as a Wii U Pro
-Controller, so the game draws everything on the one screen (pick the Pro Controller when it asks);
-`WWHD_PRO_CONTROLLER=0` in `/switch/wwhd/env.txt` makes them act as the GamePad, whose screen is not
-shown. A frame-rate counter sits in the top-left corner (`WWHD_FPS=0` in `env.txt` hides it,
-`WWHD_FPS=2` adds render-thread load and draws per frame). There are no graphics options, save states
-or mods menus.
-
 ### Android (build it yourself)
 
 The Android port is by [rhemfur](https://github.com/rhemfur) (issue #23): the Vulkan renderer on
@@ -541,7 +620,7 @@ single-key shortcuts (R, O, M, N, 6–9, P, F1–F5, F12) and Esc can't be bound
 
 The **Graphics** menu in the menu bar switches fixes and enhancements while playing (the TV
 window title shows what is active and the current frame rate): 60 fps by frame interpolation
-(**6**), true 60 fps (**7**, experimental), internal resolution 1x / 1.5x / 2x / 3x (**R**
+(**6**; 120 and 240 fps in the menu and the settings overlay), true 60 fps (**7**, experimental), internal resolution 1x / 1.5x / 2x / 3x (**R**
 cycles; the game renders at 1280x720, 2x renders at 2560x1440), edge smoothing (FXAA, **8**),
 ambient-occlusion mode (**O** cycles), full-size occlusion depth (**M**), 16x anisotropic
 filtering (**N**), the aspect ratio, the renderer (Metal or Vulkan), and a frame capture for debugging (**P** or fn+F12, written to `captures/`;
@@ -586,6 +665,14 @@ and the motors stay still while the settings overlay is open, while no game wind
 once the app quits. **Controls > Rumble** in the settings overlay (F1) turns it off and is
 remembered (`WWHD_RUMBLE=0` starts with it off). The macOS app does not drive controller motors yet.
 
+**Gyro aiming** (settings overlay → **Controls** → **Gyro…**, off by default): in first person the
+game turns the camera when the GamePad moves. The port turns its virtual GamePad with a host
+controller's gyro (SDL3; on the macOS app through GameController.framework), a Cemuhook (DSU) server
+or the mouse (Steam Input "gyro to mouse": while the game aims, the pointer is captured and the mouse
+turns the GamePad). Sensitivity and invert per axis, a recenter button or key, and the Cemuhook
+server, port and slot are saved; `WWHD_GYRO=off|controller|cemuhook|mouse` overrides the source at
+start. Details and what to test: `docs/gyro.md`.
+
 The **Display** menu: full screen for the TV window (**⌘F**, **⌃⌘F** or the green button; the
 pointer hides after 2 s without movement), picture scaling (smooth, sharp, or integer scale) and
 where the GamePad screen goes: a separate window (which can be put on another display, also in
@@ -607,9 +694,12 @@ and the renderer are remembered in `~/Library/Application Support/wwhd/display.p
 - Useful environment variables: `WWHD_NO_AUDIO=1`, `WWHD_NO_GAMEPAD=1` (no second window), `WWHD_NO_CONTROLLERS=1` (SDL builds: ignore host game controllers), `WWHD_LANGUAGE=<code>` (console language: 1 English, 2 French, 5 Spanish, … — the USA/Asia disc carries English, French and Spanish; a language the game doesn't contain starts in English),
   `WWHD_DRC_MODE=window|pip|auto|off|gamepad`, `WWHD_FULLSCREEN=0|1` (the TV window starts windowed / in
   full screen this time instead of as it was left; that session's full screen is not remembered), `WWHD_ASPECT=16:9|window|16:10|21:9|32:9|<w:h>`,
-  `WWHD_AUDIO_VOLUME=0..1`, `WWHD_SHADER_CACHE=<file>|0`, `WWHD_AO_MODE=0..2`, `WWHD_AO_HIRES=0|1`, `WWHD_ANISO=0|1`, `WWHD_RES_SCALE=1|1.5|2|3`,
-  `WWHD_FXAA=0|1`, `WWHD_INTERP=1`, `WWHD_INTERP_PACED=0|1`, `WWHD_TRUE60=1` (start values for the Graphics menu; they
-  override the remembered choices);
+  `WWHD_AUDIO_VOLUME=0..1`, `WWHD_AUDIO_OUTPUT=auto|tv|gamepad` (the host plays the TV's sound, plus the GamePad's in Off-TV Play: auto; or only one of them), `WWHD_SHADER_CACHE=<file>|0`, `WWHD_AO_MODE=0..2`, `WWHD_AO_HIRES=0|1`, `WWHD_ANISO=0|1`, `WWHD_RES_SCALE=1|1.5|2|3`,
+  `WWHD_FXAA=0|1`, `WWHD_INTERP=1`, `WWHD_INTERP_FPS=60|120|240` (frame interpolation at that rate),
+  `WWHD_INTERP_PACED=0|1`, `WWHD_TRUE60=1` (start values for the Graphics menu; they
+  override the remembered choices); `WWHD_DISPLAY_HZ=n` replaces the detected display refresh rate
+  that 120/240 fps are capped to (0: no cap); `WWHD_UNCAPPED=1` starts with the debug switch
+  "Uncapped" on (no frame limit, no vsync; the game runs faster than real time);
   `WWHD_SHADOW_SCALE=n` gives the shadow maps their own resolution factor; `WWHD_STATE_DIR=<dir>`
   stores save states elsewhere; `WWHD_RUMBLE=0|1` (SDL builds) start value for Controls > Rumble (overrides the remembered
   choice); `WWHD_LOG_RUMBLE=1` logs the game's motor requests and what the motors do.

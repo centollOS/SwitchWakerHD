@@ -12,8 +12,10 @@
 #include <vector>
 #include "formats.h"
 #include "api.h"
+#include "buffer_cache_core.h"
 namespace gfxvk {
-struct Buffer { VkBuffer buffer=VK_NULL_HANDLE; VkDeviceMemory memory=VK_NULL_HANDLE; void* mapped=nullptr; VkDeviceSize size=0; };
+struct Buffer { VkBuffer buffer=VK_NULL_HANDLE; VkDeviceMemory memory=VK_NULL_HANDLE; void* mapped=nullptr; VkDeviceSize size=0;
+                VkMemoryPropertyFlags properties=0; /* of the memory type create_buffer chose */ };
 struct UploadSlice { VkBuffer buffer=VK_NULL_HANDLE; VkDeviceSize offset=0,size=0; void* mapped=nullptr; };
 struct CachedGuestLayout;
 struct Surface {
@@ -104,12 +106,18 @@ struct Renderer {
  struct UploadBlock { Buffer buffer; VkDeviceSize used=0; };
  std::vector<UploadBlock> uploadBlocks;
  uint64_t uploadAllocations=0,uploadBytes=0;
+ // Upload arena memory is HOST_CACHED|HOST_COHERENT (every block so far): CPU reads of it are as fast as
+ // heap reads (Apple silicon/MoltenVK, many UMA drivers). uploadReadsDirect: the snapshot reuse caches
+ // and the native index scan may read mapped upload slices instead of keeping CPU copies (auto: when
+ // uploadCached; WWHD_VK_UPLOAD_READS=shadow|direct forces a mode). Set by allocate_upload.
+ bool uploadCached=false,uploadReadsDirect=false;
  uint64_t vertexHistoryReuseChecks=0,vertexHistoryReuseHits=0,vertexHistoryReuseBytes=0;
  uint64_t vertexHistoryRequests=0,vertexHistoryMatches=0,vertexHistoryBytes=0;
  std::array<uint64_t,7> vertexHistoryDistances{};
  uint64_t vertexDeclaredBytes=0,vertexCopiedBytes=0;
  uint64_t vertexReuseChecks=0,vertexReuseHits=0,vertexReuseBytes=0,vertexReuseCompareNs=0;
  std::vector<Buffer> garbageBuffers;
+ std::vector<bufcache::Region> garbageCacheRegions; // buffer cache regions replaced while recording
  struct RetiredImage { VkImage image;VkDeviceMemory memory;std::vector<VkImageView> views; }; std::vector<RetiredImage> garbageImages;
  // Each submission retains its pools, upload bytes and deferred objects until
  // its fence completes. The fields above alias the active recording slot.
@@ -130,6 +138,7 @@ struct Renderer {
   std::vector<UploadBlock> uploadBlocks;
   std::vector<Buffer> garbageBuffers;
   std::vector<RetiredImage> garbageImages;
+  std::vector<bufcache::Region> garbageCacheRegions;
  };
  std::array<Submission,4> submissions{};
  size_t activeSubmission=0;
@@ -146,7 +155,11 @@ void reset_pipeline_lookup_cache();
 uint64_t draw_batch_submissions();
 void vk_check(VkResult result,const char* operation);
 uint32_t memory_type(uint32_t bits,VkMemoryPropertyFlags properties);
-Buffer create_buffer(VkDeviceSize size,VkBufferUsageFlags usage,VkMemoryPropertyFlags properties);
+// preferred: extra property flags used when a memory type has them (else the required ones only)
+Buffer create_buffer(VkDeviceSize size,VkBufferUsageFlags usage,VkMemoryPropertyFlags properties,
+                     VkMemoryPropertyFlags preferred=0);
+// host-visible TRANSFER_DST buffer the CPU reads back, host-cached where available
+Buffer create_readback_buffer(VkDeviceSize size);
 UploadSlice allocate_upload(VkDeviceSize size,VkDeviceSize alignment);
 // Renderer smoke tests exercise the production snapshot helper with host data.
 UploadSlice vertex_window_smoke_snapshot(uint32_t binding,uint32_t address,

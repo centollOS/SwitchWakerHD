@@ -17,6 +17,7 @@
 
 #include "../runtime.h"
 #include "../write_watch.h"
+#include "../mods/content.h"
 
 namespace {
 
@@ -127,6 +128,13 @@ std::string host_path(const std::string& guest) {
 #endif
 }
 
+// Optional content mods affect read-only content access only.
+std::string read_path(const std::string& guest,const std::string& mode="rb") {
+    auto override=mods::content::replacement(guest,mode);
+    if(!override.empty())if(const char* trace=std::getenv("WWHD_TEST_CONTENT_TRACE");trace&&std::string(trace)=="1")LOG("[content-mod] read %s -> %s",guest.c_str(),override.c_str());
+    return override.empty()?host_path(guest):override;
+}
+
 void make_parent_dirs(const std::string& path) {
     std::error_code ec; std::filesystem::create_directories(std::filesystem::path(path).parent_path(),ec);
 }
@@ -141,7 +149,7 @@ void fill_stat(uint32_t out, const struct stat& st) {
 }
 
 int32_t open_file(const std::string& gpath, const std::string& mode, uint32_t out_handle) {
-    std::string hp = host_path(gpath);
+    std::string hp = read_path(gpath,mode);
     if (mode.find_first_of("wa") != std::string::npos) make_parent_dirs(hp);
     std::string m = mode;
     if (m.find('b') == std::string::npos) m += "b";
@@ -170,7 +178,7 @@ int32_t stat_path(const std::string& gpath, uint32_t out) {
     int result;
     {
         HostFsCall call;
-        result = stat(host_path(gpath).c_str(), &st);
+        result = stat(read_path(gpath).c_str(), &st);
     }
     if (result != 0) return FS_NOT_FOUND;
     fill_stat(out, st);
@@ -276,7 +284,10 @@ HLE(coreinit, FSReadDir) {
     while ((de = readdir(it->second.d))) {
         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
         struct stat st;
-        if (stat((it->second.path + "/" + de->d_name).c_str(), &st) != 0) continue;
+        auto path=it->second.path + "/" + de->d_name;
+        auto replacement=mods::content::replacement(it->second.gpath + "/" + de->d_name);
+        if(!replacement.empty())path=std::move(replacement);
+        if (stat(path.c_str(), &st) != 0) continue;
         fill_stat(out, st);
         mem::write_cstr(out + 0x64, de->d_name, 256);
         it->second.read++;
@@ -364,7 +375,7 @@ void fs_ss_load(ss::Reader& r) {
         uint64_t pos = r.u64();
         // reopening must not truncate or create: writers continue in update mode
         std::string m = mode.find_first_of("wa+") != std::string::npos ? "r+b" : "rb";
-        FILE* f = fopen(host_path(gp).c_str(), m.c_str());
+        FILE* f = fopen(read_path(gp,m).c_str(), m.c_str());
         if (!f) {
             LOG("[savestate] cannot reopen %s", gp.c_str());
             continue;

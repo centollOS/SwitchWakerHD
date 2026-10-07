@@ -44,6 +44,7 @@
 #include "metal.h"
 #include "renderer.h"
 #include "runtime.h"
+#include "../interp.h"
 #ifdef WWHD_HAS_VULKAN
 #include "vulkan/api.h"
 #endif
@@ -225,8 +226,19 @@ static CAMetalLayer* g_layers[2];
 static NSWindow* g_windows[2];
 static bool screen_visible(NSWindow* win) { return (win.occlusionState & NSWindowOcclusionStateVisible) != 0; }
 // a window was resized, moved to another screen or (un)covered: tell the renderer
+// The TV window's screen refresh rate for frame interpolation (interp::output_fps caps 120/240 fps to
+// it): NSScreen.maximumFramesPerSecond, 120 on ProMotion displays (whose CAMetalLayers present at up
+// to 120 Hz), 60 on most external ones. Main thread; again whenever the window changes screens.
+static void report_refresh_rate(NSWindow* win) {
+    NSScreen* sc = win.screen ?: NSScreen.mainScreen;
+    int hz = 0;
+    if (@available(macOS 12.0, *)) hz = sc ? (int)sc.maximumFramesPerSecond : 0;
+    interp::set_display_hz(hz);
+}
+
 static void screen_changed(int i) {
     NSWindow* win = g_windows[i];
+    if (win && i == 0) report_refresh_rate(win);
     if (!win || !g_layers[i]) return;
     update_drawable_size(g_layers[i], win);
     if (render::active() == render::Api::Metal) {
@@ -251,6 +263,7 @@ static NSWindow* make_window(int index, NSString* title, NSView* view, int w, in
     view = [win contentView];
     [view setWantsLayer:YES];
     g_windows[index] = win;
+    if (index == 0) report_refresh_rate(win);
     for (NSNotificationName n in @[ NSWindowDidChangeOcclusionStateNotification, NSWindowDidResizeNotification,
                                     NSWindowDidChangeBackingPropertiesNotification, NSWindowDidChangeScreenNotification ])
         [[NSNotificationCenter defaultCenter] addObserverForName:n object:win queue:nil usingBlock:^(NSNotification*) {
@@ -835,6 +848,12 @@ static void present_to_layer(Screen& scr, void (^draw)(id<MTLTexture>)) {
     if (!scr.layer || !scr.tex) return;
     MTLPixelFormat want = scr.srgb ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
     if (scr.layer.pixelFormat != want) scr.layer.pixelFormat = want;
+    // uncapped (gx2::uncapped, debug): presentation does not wait for the display
+    const bool sync = !gx2::uncapped();
+    if (scr.layer.displaySyncEnabled != sync) {
+        scr.layer.displaySyncEnabled = sync;
+        if (&scr == &R.tv) interp::set_present_vsync(sync);
+    }
     id<CAMetalDrawable> drawable = scr.visible ? [scr.layer nextDrawable] : nil;
     if (!drawable) return;
     draw(drawable.texture);

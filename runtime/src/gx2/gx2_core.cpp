@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <atomic>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -26,6 +27,7 @@
 #include "../aspect.h"
 #include "gfx/renderer.h"
 #include "platform/perf_hint.h"
+#include "render_prof.h"
 
 using namespace Latte;
 
@@ -121,12 +123,17 @@ static void apply_small_regs(uint32 first, const uint32* v, uint32 n) {
         return e && !strcmp(e, "1");
     }();
     static const bool collectStats = getenv("WWHD_VK_STATS") != nullptr;
+    const bool classify = rprof::enabled();
     bool changed = false, baselineBump = false, actualBump = false;
     uint64_t maskedWords = 0;
     for (uint32 i = 0; i < n; ++i) {
         const uint32 reg = first + i, value = v[i], old = g_regs[reg];
         if (old != value) {
             changed = true;
+            if (classify) {
+                if (rprof::fast_class_reg(reg)) rprof::g_reg_dirty |= 1;
+                else rprof::note_other_reg(reg);
+            }
             if ((collectStats || !actualBump) && !shader_irrelevant(reg)) {
                 baselineBump = true;
                 uint32 mask;
@@ -174,6 +181,12 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
     }
 #endif
     if (memcmp(&g_regs[first], v, n * 4) != 0) {
+        if (rprof::enabled())  // draw classifier (render_prof.h)
+            for (uint32 i = 0; i < n; i++)
+                if (g_regs[first + i] != v[i]) {
+                    if (rprof::fast_class_reg(first + i)) rprof::g_reg_dirty |= 1;
+                    else rprof::note_other_reg(first + i);
+                }
 #ifdef WWHD_HAS_VULKAN
         static const bool keyDirty = [] {
             const char* value = getenv("WWHD_VK_SHADER_KEY_DIRTY");
@@ -266,13 +279,17 @@ static void render_thread_main() {
         {
             std::unique_lock<std::mutex> lk(g_q_mutex);
             g_q_waiting = true;
-            g_progress.idle.store(true, std::memory_order_relaxed);
-            auto waitStart = std::chrono::steady_clock::now();
-            g_q_cv.wait(lk, [] { return !g_q_pending.empty(); });
-            g_progress.idle.store(false, std::memory_order_relaxed);
-            g_render_wait_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                           std::chrono::steady_clock::now() - waitStart).count()),
-                                       std::memory_order_relaxed);
+            if (g_q_pending.empty()) {
+                g_progress.idle.store(true, std::memory_order_relaxed);
+                auto waitStart = std::chrono::steady_clock::now();
+                const uint64_t idle = rprof::enabled() ? rprof::now_ns() : 0;
+                g_q_cv.wait(lk, [] { return !g_q_pending.empty(); });
+                if (idle) rprof::add_idle(rprof::now_ns() - idle);
+                g_progress.idle.store(false, std::memory_order_relaxed);
+                g_render_wait_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - waitStart).count()),
+                                           std::memory_order_relaxed);
+            }
             g_q_waiting = false;
             g_q_work.swap(g_q_pending);
         }
@@ -382,7 +399,18 @@ static void render_sync(int site = kSyncShutdown) {
         }
     } timed;
     const auto started = std::chrono::steady_clock::now();
-    struct Done { int site; std::chrono::steady_clock::time_point t; ~Done() { sync_stat(site, std::chrono::steady_clock::now() - t); } } done{site, started};
+    struct Done {
+        int site;
+        std::chrono::steady_clock::time_point t;
+        ~Done() {
+            const auto waited = std::chrono::steady_clock::now() - t;
+            sync_stat(site, waited);
+            if (rprof::enabled())
+                rprof::add_sync(site == kSyncDrawDone ? rprof::kSyncDrawDone : site == kSyncCopySurface ? rprof::kSyncCopySurface
+                                : site == kSyncFlip || site == kSyncVsyncFlip ? rprof::kSyncFlip : rprof::kSyncOther,
+                                (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count());
+        }
+    } done{site, started};
     uint64_t id;
     {
         std::lock_guard<std::mutex> lk(g_q_mutex);
@@ -480,6 +508,7 @@ static void set_context(uint32 ctx) {
     memcpy(g_regs, g_shadow, sizeof(g_regs));
     g_shader_state_gen++;
     g_shader_regs_gen++;
+    rprof::g_reg_dirty |= 2;  // draw classifier: a context load counts as a full state change
 }
 
 constexpr uint32 kColorBufferWords = 0x9C / 4, kDepthBufferWords = 0xAC / 4, kSurfaceWords = 0x74 / 4;
@@ -493,19 +522,42 @@ static uint32 unpack_struct(const uint32* words, uint32 count, int slot) {
     return addr;
 }
 
+// Vulkan: GX2DrawDone queues the work instead of waiting for an idle device (the default on every
+// platform since 2026-10-07; WWHD_VK_LAZY_DRAW_DONE=0 restores the full wait). The Metal renderer
+// reads large vertex buffers straight from guest memory, so it keeps the real GPU wait.
 static bool lazy_draw_done() {
     static const bool on = [] {
         const char* e = getenv("WWHD_VK_LAZY_DRAW_DONE");
-#ifdef __ANDROID__
         return render::vulkan() && (!e || atoi(e) != 0);
-#else
-        return render::vulkan() && e && atoi(e) != 0;
-#endif
     }();
     return on;
 }
 
+static void execute_op(Op op, const uint32* p, uint32 n);
+// every op is counted and (sampled) timed for the render-thread profiler (render_prof.h); display-list
+// calls are not timed themselves: their ops are
 static void execute_one(Op op, const uint32* p, uint32 n) {
+    rprof::Op kind;
+    switch (op) {
+    case OP_CALL: execute_op(op, p, n); return;
+    case OP_SET_REGS: case OP_SET_PROJ_REGS: kind = rprof::kOpRegs; break;
+    case OP_DRAW: case OP_DRAW_INDEXED: kind = rprof::kOpDraw; rprof::classify_draw(); break;
+    case OP_CLEAR_COLOR: case OP_CLEAR_DEPTH: case OP_CLEAR_BUFFERS: kind = rprof::kOpClear; break;
+    case OP_COPY_SURFACE: kind = rprof::kOpCopy; break;
+    case OP_COPY_TO_SCAN: kind = rprof::kOpScan; break;
+    case OP_INVALIDATE: kind = rprof::kOpInvalidate; break;
+    case OP_FLUSH: kind = rprof::kOpFlush; break;
+    case OP_DRAW_DONE: kind = rprof::kOpDrawDone; break;
+    case OP_SWAP: kind = rprof::kOpSwap; break;
+    default: kind = rprof::kOpOther; break;
+    }
+    const uint64_t started = rprof::op_begin(kind);
+    execute_op(op, p, n);
+    rprof::op_end(kind, started);
+    if (op == OP_SWAP) rprof::frame_end(n >= 2 && p[1]);
+}
+
+static void execute_op(Op op, const uint32* p, uint32 n) {
     switch (op) {
     case OP_NOP: break;
     case OP_SET_REGS: apply_regs(p[0], p + 1, n - 1); break;
@@ -551,9 +603,10 @@ static void execute_one(Op op, const uint32* p, uint32 n) {
     case OP_DRAW_DONE:
         // The Vulkan renderer never writes GPU results back to guest memory (guest data is copied
         // into fenced upload slices when work is recorded), so GX2DrawDone needs this op executed
-        // (render_sync in the HLE), not an idle GPU. WWHD_VK_LAZY_DRAW_DONE=1 (the default in the
-        // Android port) queues the work instead of waiting for the whole device every frame.
-        if (lazy_draw_done()) render::guest_flush();
+        // (render_sync in the HLE), not an idle GPU. Lazy DrawDone (lazy_draw_done(), the default)
+        // queues the work instead of waiting for the whole device every frame. A payload word of 1
+        // (save states) always waits for the idle GPU.
+        if (lazy_draw_done() && !(n && p[0])) render::guest_flush();
         else render::wait_idle();
         break;
     case OP_SWAP:
@@ -632,6 +685,10 @@ using namespace gx2;
 // Display timing, modelled on the hardware: vsync ticks at 60 Hz on its own clock, and a requested
 // flip executes on the first vsync that is at least `swap interval` vsyncs after the previous flip.
 // Games pace themselves by waiting for vsync until their flips have executed.
+// 120/240 fps frame interpolation needs 4/8 flips per logic step: the virtual vsync then ticks 2/4
+// times per 59.94 Hz vsync (interp::vsync_rate()). The clock counts quarter vsyncs ("ticks"); a
+// vsync at the current rate is a granule of 4/rate ticks, and every vsync count below is in ticks,
+// rounded to granules, so at 30/60 fps (granule 4) the timing is the 59.94 Hz one exactly.
 static uint64_t g_swap_count = 0, g_flip_count = 0;
 
 // Hang watchdog: when no frame has been swapped for 3 s, log what the render thread and every guest
@@ -681,20 +738,22 @@ static void watchdog_thread() {
 }
 namespace gx2 { uint64_t flips_presented() { return __atomic_load_n(&g_flip_count, __ATOMIC_RELAXED); } }  // live fps in the title
 static uint32 g_swap_interval = 1;  // as set by the game (frame interpolation halves it)
-namespace interp { uint32_t effective_swap_interval(uint32_t game); }
+namespace interp { uint32_t effective_swap_interval(uint32_t game); uint64_t logic_steps(); int vsync_rate(); }
 static std::mutex g_flip_mutex;
 static const auto g_vsync_epoch = std::chrono::steady_clock::now();
 static constexpr std::chrono::nanoseconds kVsyncPeriod(16683333);  // 59.94 Hz
+static constexpr uint64_t kTicksPerVsync = 4;
 // a flip also waits for the GPU to finish that frame, as on hardware: the game reuses a frame's
 // buffers once its flip has executed
-struct PendingFlip { uint64_t vsync, swap; };
+struct PendingFlip { uint64_t vsync, swap; };  // (vsync: tick of the swap)
 static std::deque<PendingFlip> g_pending_flips;
-static uint64_t g_last_flip_vsync = 0;
+static uint64_t g_last_flip_vsync = 0;  // tick (a granule boundary)
 static uint64_t g_last_flip_time = 0;  // timebase
 static int64_t g_count_offset = 0;     // guest-visible swap/flip counts minus ours (set by a loaded save state)
 
-static uint64_t vsync_index() { return (std::chrono::steady_clock::now() - g_vsync_epoch) / kVsyncPeriod; }
-
+static uint64_t vsync_index() {  // in ticks
+    return uint64_t((std::chrono::steady_clock::now() - g_vsync_epoch).count()) * kTicksPerVsync / uint64_t(kVsyncPeriod.count());
+}
 // WWHD_RELAXED_VSYNC (on by default on the Switch, =0 for the hardware's timing): as on the Wii U, a
 // frame flips at the first vblank after its swap and at least swap-interval vblanks after the
 // previous flip, and the game waits for that flip (vblank by vblank) before it starts the next
@@ -715,39 +774,58 @@ static bool relaxed_vsync() {
 }
 static uint64_t g_late_flips = 0;  // flips the relaxed timing let through before their vblank (for the log)
 static std::chrono::steady_clock::time_point g_last_flip_tp = g_vsync_epoch;
-#ifdef WWHD_HAS_VULKAN
-// Vulkan diagnostics (docs/vulkan.md); never with the Metal renderer
-static bool uncapped_benchmark() {
-    static const bool enabled = [] {
-        const char* value = getenv("WWHD_VK_UNCAPPED");
-        return render::vulkan() && value && !strcmp(value, "1");
-    }();
-    return enabled;
+static uint64_t vsync_granule() {  // ticks per vsync at the current rate: 4 (30/60 fps), 2 (120), 1 (240)
+    const int rate = interp::vsync_rate();
+    return rate >= 4 ? 1 : rate >= 2 ? 2 : kTicksPerVsync;
 }
-#endif
+static std::chrono::steady_clock::time_point tick_time(uint64_t tick) {
+    return g_vsync_epoch + std::chrono::nanoseconds(tick * uint64_t(kVsyncPeriod.count()) / kTicksPerVsync);
+}
+// the first tick at which this flip may execute: the vsync after its swap, and `swap interval`
+// vsyncs after the previous flip
+static uint64_t flip_due(const PendingFlip& f) {
+    const uint64_t g = vsync_granule();
+    return std::max((f.vsync / g + 1) * g, g_last_flip_vsync + interp::effective_swap_interval(g_swap_interval) * g);
+}
+// Uncapped (gx2.h): debug, to see how fast the renderer can go; GPU completion ordering is kept
+static std::atomic<int> g_uncapped{-1};  // -1: not read from the environment yet
+bool gx2::uncapped() {
+    int v = g_uncapped.load(std::memory_order_relaxed);
+    if (v < 0) {
+        const char* any = getenv("WWHD_UNCAPPED");
+        const char* vk = getenv("WWHD_VK_UNCAPPED");
+        v = (any && !strcmp(any, "1")) || (vk && !strcmp(vk, "1") && render::vulkan()) ? 1 : 0;
+        int expected = -1;
+        g_uncapped.compare_exchange_strong(expected, v);
+        v = g_uncapped.load(std::memory_order_relaxed);
+    }
+    return v == 1;
+}
+void gx2::set_uncapped(bool on) {
+    if (uncapped() == on) return;
+    g_uncapped = on ? 1 : 0;
+    LOG("[gx2] uncapped %s", on ? "on (debug: no frame limit, no vsync; the game runs faster than real time)" : "off");
+}
+static bool uncapped_benchmark() { return gx2::uncapped(); }
 
 static void update_flips() {  // g_flip_mutex held
     uint64_t now = vsync_index();
     while (!g_pending_flips.empty()) {
-        const uint64_t interval = interp::effective_swap_interval(g_swap_interval);
-        uint64_t at = std::max(g_pending_flips.front().vsync + 1, g_last_flip_vsync + interval);
+        uint64_t at = flip_due(g_pending_flips.front());
         // relaxed: a rendered frame flips once a whole swap interval has passed since the previous
         // flip, on a vblank or not (a frame on time is rendered before then and flips at that moment,
         // as on its vblank; a late one flips as soon as it is rendered)
         bool late = false;
         if (relaxed_vsync()) {
+            const uint64_t interval = interp::effective_swap_interval(g_swap_interval);
             const auto since = std::chrono::steady_clock::now() - g_last_flip_tp;
             if (since + std::chrono::microseconds(500) < kVsyncPeriod * interval) break;
             late = at > now;
             at = now;
         }
-#ifdef WWHD_HAS_VULKAN
         if ((!uncapped_benchmark() && at > now) || render::frames_completed() < g_pending_flips.front().swap) break;
-#else
-        if (at > now || render::frames_completed() < g_pending_flips.front().swap) break;
-#endif
         g_late_flips += late;
-        at = now;
+        at = now / vsync_granule() * vsync_granule();
         g_pending_flips.pop_front();
         g_last_flip_vsync = at;
         g_last_flip_tp = std::chrono::steady_clock::now();
@@ -762,8 +840,7 @@ static void ready_flip_before_resume() {
         std::lock_guard<std::mutex> lk(g_flip_mutex);
         if(g_pending_flips.empty()) return;
         const auto& front = g_pending_flips.front();
-        const uint64_t at = std::max(front.vsync + 1,
-            g_last_flip_vsync + interp::effective_swap_interval(g_swap_interval));
+        const uint64_t at = flip_due(front);
         if(at > vsync_index()) return;
         needsSync = render::frames_completed() < front.swap;
     }
@@ -776,10 +853,8 @@ static void ready_flip_before_resume() {
 HLE(gx2, GX2Init) {
     set_default_state();
     LOG("[gx2] initialized (native GX2 -> %s)", render::api_name(render::active()));
-#ifdef WWHD_HAS_VULKAN
     if(uncapped_benchmark())
         LOG("[gx2 benchmark] uncapped guest flips; GPU completion ordering retained; frame-based simulation accelerates while timebase/audio clocks remain real-time");
-#endif
 }
 
 HLE(gx2, GX2SetupContextStateEx) {
@@ -920,7 +995,12 @@ HLE(gx2, GX2SwapScanBuffers) {
         auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(d);
         while (std::chrono::steady_clock::now() < until) {}
     }
-    emit_host(OP_SWAP, {ab});
+    // the frame drew no new logic step (an interpolation hold pass): for the render-thread profiler
+    static uint64_t lastSteps = ~0ull;
+    const uint64_t steps = interp::logic_steps();
+    const bool hold = steps == lastSteps;
+    lastSteps = steps;
+    emit_host(OP_SWAP, {ab, hold ? 1u : 0u});
     {
         std::lock_guard<std::mutex> lk(g_flip_mutex);
         update_flips();
@@ -971,7 +1051,6 @@ HLE(gx2, GX2GetSwapStatus) {
 }
 HLE(gx2, GX2SetSwapInterval) { g_swap_interval = std::max<uint32>(arg(c, 0), 1); }
 HLE(gx2, GX2WaitForVsync) {
-#ifdef WWHD_HAS_VULKAN
     if(uncapped_benchmark()) {
         BlockingScope b;
         // The queue fence follows earlier swaps, whose presentation path waits
@@ -981,6 +1060,7 @@ HLE(gx2, GX2WaitForVsync) {
         update_flips();
         return;
     }
+#ifdef WWHD_HAS_VULKAN
     static const bool readyFlipWait = [] {
         const char* value = getenv("WWHD_VK_READY_FLIP_WAIT");
         return render::vulkan() && value && !strcmp(value, "1");
@@ -991,8 +1071,7 @@ HLE(gx2, GX2WaitForVsync) {
             std::lock_guard<std::mutex> lk(g_flip_mutex);
             if(!g_pending_flips.empty()) {
                 const auto& front = g_pending_flips.front();
-                const uint64_t at = std::max(front.vsync + 1,
-                    g_last_flip_vsync + interp::effective_swap_interval(g_swap_interval));
+                const uint64_t at = flip_due(front);
                 eligible = at <= vsync_index();
                 if(eligible) needsSync = render::frames_completed() < front.swap;
             }
@@ -1023,7 +1102,8 @@ HLE(gx2, GX2WaitForVsync) {
         return false;
 #endif
     }();
-    const auto deadline = g_vsync_epoch + kVsyncPeriod * (vsync_index() + 1);
+    const uint64_t granule = vsync_granule();
+    const auto deadline = tick_time((vsync_index() / granule + 1) * granule);  // the next (virtual) vsync
     if (relaxed_vsync()) {
         // a late frame's flip happens when the renderer finishes it: return then instead of at the
         // next vblank (the game's wait loop checks the flip count after each call)
@@ -1119,7 +1199,7 @@ HLE(gx2, GX2SampleBottomGPUCycle) { if (arg(c, 0)) st64(arg(c, 0), timebase::gue
 // the game is frozen between frames: finish all queued GPU work and let pending flips execute, so no
 // command reads guest memory while it is replaced and the swap/flip counts agree
 void gx2_ss_drain() {
-    emit_host(OP_DRAW_DONE, {});
+    emit_host(OP_DRAW_DONE, {1});  // full GPU wait, also with lazy DrawDone
     render_sync(kSyncSaveState);
     for (int i = 0; i < 300; i++) {
         {

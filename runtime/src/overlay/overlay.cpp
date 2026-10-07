@@ -28,6 +28,7 @@
 #include "../gfx/renderer.h"
 #ifdef WWHD_HAS_VULKAN
 #include "../gfx/vulkan/settings.h"
+namespace gfxvk { bool buffer_cache_enabled(); }  // gfx/vulkan/buffer_cache.h
 #endif
 #include "../input.h"
 #include "../input_map.h"
@@ -35,8 +36,10 @@
 #include "../mods/mods.h"
 #include "../mods/manager.h"
 #include "../mods/packages.h"
+#include "../motion/motion.h"
 #include "../platform/keycodes.h"
 #include "../rumble.h"
+#include "../interp.h"
 #include "../runtime.h"
 #include "../savestate.h"
 #ifdef __SWITCH__
@@ -45,15 +48,11 @@
 #include "../platform/settings_switch.h"
 #include "../mods/warps.h"
 #endif
+#include "../render_prof.h"
+#include "../build_info.h"
+#include "../report_header.h"
 
-namespace interp {
-int mode();  // 0 off, 1 frame interpolation, 2 true 60
-void set_mode(int m);
-bool paced_interpolation();  // 60 fps frame interpolation keeps the game's speed (skips in-between frames)
-void set_paced_interpolation(bool on);
-float paced_drawn_share();  // share of in-between frames drawn lately (paced and on), -1 otherwise
-}
-namespace gx2 { uint64_t flips_presented(); }
+namespace gx2 { uint64_t flips_presented(); bool uncapped(); void set_uncapped(bool on); }
 
 namespace overlay {
 namespace {
@@ -70,6 +69,7 @@ const bool g_no_host = getenv("WWHD_NO_HOST_INPUT") != nullptr;  // test runs ig
 // ... except keys a test posts itself (WWHD_TEST_POST_KEYS, gfx/input.mm; the hidden test window never
 // has the user's keyboard)
 const bool g_no_host_keys = g_no_host && !getenv("WWHD_TEST_POST_KEYS");
+bool g_pad_b_used = false;  // B answered a dialog this frame: it does not also close the menu
 
 // input events from the host's main thread, replayed into ImGui on the render thread
 struct Event {
@@ -605,20 +605,46 @@ void tab_graphics() {
         }
     }
     heading("Frame rate");
-    int m = interp::mode();
+    int m = interp::mode(), f = interp::fps();
     if (radio("30 fps (original)", m == 0)) post_changed([] { interp::set_mode(0); });
-    ImGui::SameLine();
-    if (radio("60 fps: frame interpolation", m == 1)) post_changed([] { interp::set_mode(1); });
-    ImGui::SameLine();
+    for (int r : {60, 120, 240}) {
+        ImGui::SameLine();
+        char label[16];
+        snprintf(label, sizeof label, "%d fps", r);
+        if (radio(label, m == 1 && f == r)) post_changed([r] { interp::set_fps(r); interp::set_mode(1); });
+    }
+    help("60, 120 and 240 fps: frame interpolation. The game logic keeps its 30 steps a second, and the\n"
+         "frames in between are drawn blended (1 in-between frame per step at 60 fps, 3 at 120 fps,\n"
+         "7 at 240 fps). The display shows at most its refresh rate: higher choices draw that many.");
     if (radio("True 60 (experimental)", m == 2)) post_changed([] { interp::set_mode(2); });
     help("True 60 runs the game logic at 60 steps per second");
+    // the display's refresh rate, and what the chosen rate draws on it (interp::output_fps)
+    if (const int hz = interp::display_hz(); hz > 0) {
+        const int out = interp::output_fps();
+        if (m == 1 && out < f)
+            note("Your display: %d Hz. %d fps needs a %d Hz display; %d fps are drawn (the display cannot show more).", hz, f, f, out);
+        else if (m == 1 && f > hz + 2)
+            note("Your display: %d Hz. Frames beyond %d a second are drawn but not shown (presentation without vsync).", hz, hz);
+        else
+            note("Your display: %d Hz", hz);
+    } else if (m == 1 && f > 60) {
+        note("Display refresh rate unknown: %d fps are drawn; frames beyond the display's rate are not shown.", f);
+    }
     if (m == 1) {
         bool paced;
         if (check("Keep game speed", interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))
             post_changed([paced] { interp::set_paced_interpolation(paced); });
-        help("When the computer cannot draw 60 frames a second, skip in-between frames instead of\n"
-             "slowing the whole game down. The performance overlay shows how many are drawn.");
+        help("When the computer cannot draw all frames, skip in-between frames instead of slowing the\n"
+             "whole game down. The performance overlay shows how many are drawn.\n"
+             "Saved separately for 60 fps (off by default) and 120/240 fps (on by default).");
     }
+    // debug only, not saved (gx2::uncapped)
+    bool unc;
+    if (check("Uncapped (debug: the game runs too fast)", gx2::uncapped(), &unc)) hostui::post([unc] { gx2::set_uncapped(unc); });
+    help("Debug only, to see how many frames a second this computer can draw: no frame limit and no\n"
+         "vsync. The game counts frames, so it runs faster than normal. The frame rate is in the window\n"
+         "title and the performance overlay. Not saved. (With frame interpolation and Keep game speed\n"
+         "on, the game logic still keeps 30 steps a second.)");
 
     heading("Internal resolution");
     static const float scales[] = {1.0f, 1.5f, 2.0f, 3.0f};
@@ -687,6 +713,37 @@ void tab_graphics() {
 #endif
     heading("Overlay");
     if (check("Performance overlay (FPS, frame time)", perf_shown(), &v)) set_perf_shown(v);
+    // the render-thread profiler's latest report (render_prof.h), for performance bug reports
+    static double copiedAt = -10;
+    if (ImGui::Button("Copy performance report")) {
+        std::string report = rprof::latest_report();
+        // which build, system, GPU and rendering-path switches (report_header.h)
+        reporthdr::Info h;
+        h.version = build::version();
+        h.commit = build::commit();
+        h.os = reporthdr::os_description();
+        h.gpu = render::device();
+        h.renderer = render::vulkan() ? "Vulkan" : "Metal";
+        h.host = hostui::name();
+        h.fps = interp::mode() == 2 ? "true 60 fps" : interp::mode() == 1 ? "60 fps interpolation" : "30 fps";
+        h.scale = hostui::res_scale();
+#ifdef WWHD_HAS_VULKAN
+        if (render::vulkan()) {
+            h.bufferCache = gfxvk::buffer_cache_enabled();
+            h.overrides = reporthdr::vulkan_overrides([](const char* n) -> const char* { return getenv(n); });
+        }
+#endif
+        if (const int g = motion::settings().source; g != motion::kOff) h.gyro = motion::source_id(g);
+        report = reporthdr::format(h) +
+                 (report.empty() ? std::string("No report yet: play for a few seconds, then copy again.\n") : report);
+        hostui::post([report] { hostui::set_clipboard(report); });
+        copiedAt = ImGui::GetTime();
+    }
+    if (ImGui::GetTime() - copiedAt < 2.0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("Copied");
+    }
+    help("Where the renderer spends its time over the last few seconds, as text for a bug report");
 }
 
 #ifdef __SWITCH__
@@ -826,6 +883,7 @@ void tab_switch() {
         }
     }
     if (fps_counter_env()) note("env.txt sets WWHD_FPS: it is used at every start.");
+
     heading("Menu");
     note("Minus opens this menu; B or Minus closes it. L / R change tabs.");
 }
@@ -895,9 +953,57 @@ void tab_display() {
     }
 }
 
+// The one-time native code confirmation (packages.h confirm_native): asked before enable() for each
+// native package the player has not confirmed; Cancel (also B) leaves everything disabled.
+struct NativeConfirm {
+    std::string id, name;                                // the package the player is enabling
+    std::vector<std::pair<std::string, std::string>> native;  // what needs confirming (it, dependencies)
+    bool open_now = false;
+};
+void native_confirm_dialog(NativeConfirm& c, std::string& error) {
+    using namespace mods::packages;
+    const char* title = "Native code##native_confirm";
+    if (c.open_now) { ImGui::OpenPopup(title); c.open_now = false; }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) return;
+    bool answered = c.native.empty(), accept = false;
+    if (!answered) {
+        std::string names;
+        for (size_t i = 0; i < c.native.size(); i++)
+            names += (i == 0 ? "" : i + 1 == c.native.size() ? " and " : ", ") + c.native[i].second;
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28);
+        ImGui::TextWrapped("%s %s native code. It runs with the game's full permissions and can do anything a program "
+                           "on your computer can. Only enable mods from sources you trust.",
+                           names.c_str(), c.native.size() == 1 ? "contains" : "contain");
+        if (c.native.size() > 1 || c.native[0].first != c.id) note("Enabling %s also enables these packages.", c.name.c_str());
+        note("You won't be asked again for this version of the mod.");
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        accept = ImGui::Button("Enable", ImVec2(120, 0));
+        ImGui::SameLine();
+        answered = ImGui::Button("Cancel", ImVec2(120, 0)) || accept;
+        ImGui::SetItemDefaultFocus();  // keyboard and controller start on Cancel
+        if (controller_pressed(input_map::kPadB)) { answered = true; accept = false; g_pad_b_used = true; }
+    }
+    if (accept) {
+        bool ok = true;
+        for (const auto& [id, name] : c.native) ok = ok && confirm_native(id, error);
+        if (ok) enable(c.id, true, error);
+    }
+    if (answered) {
+        c = NativeConfirm{};
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 void package_controls() {
     using namespace mods::packages;
     static std::string error;
+    static NativeConfirm confirm;
+    // debug: WWHD_TEST_MOD_ENABLE=<package id> ticks that package's checkbox once in test runs (the
+    // confirmation then shows for unconfirmed native code)
+    static const char* test_enable = g_no_host ? getenv("WWHD_TEST_MOD_ENABLE") : nullptr;
     static char source[1024] = {}, new_profile[65] = {};
     static std::mutex picker_mutex;
     static std::string picked;
@@ -929,7 +1035,7 @@ void package_controls() {
     ImGui::EndDisabled();
     note("Your active profile is protected from deletion.");
     heading("Installed packages");
-    note("Install a local .wwhdmod ZIP or a folder containing manifest.json.");
+    note("Install a local package, a content/ mod folder or ZIP, or a replacement .pack file.");
 #ifndef __SWITCH__  // no file picker on the console
     if (ImGui::Button("Choose package…")) hostui::choose_mod_source(false, [](std::string path) {
         std::lock_guard guard(picker_mutex); picked = std::move(path);
@@ -952,13 +1058,22 @@ void package_controls() {
     for (const auto& mod : installed) {
         ImGui::PushID(mod.id.c_str());
         bool on = mod.enabled;
-        if (ImGui::Checkbox("##package_enabled", &on)) enable(mod.id, on, error);
+        bool toggled = ImGui::Checkbox("##package_enabled", &on);
+        if (test_enable && mod.id == test_enable) { toggled = on = true; test_enable = nullptr; }
+        if (toggled) {
+            auto native = on ? unconfirmed_native(mod.id) : decltype(unconfirmed_native(mod.id)){};
+            if (native.empty()) enable(mod.id, on, error);
+            else confirm = {mod.id, mod.name, std::move(native), true};
+        }
         ImGui::SameLine();
         if (installed.size() == 1) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
         bool expanded = ImGui::TreeNode("details", "%s · %s", mod.name.c_str(), mod.version.c_str());
         if (expanded) {
-            note("%s · %s", mod.kind == "native" ? "Native mod" : "Built-in settings preset",
-                 mod.active ? "Active" : mod.enabled ? "Waiting for game update" : "Disabled");
+            note("%s · %s", mod.kind == "native" ? "Native mod" : mod.kind == "cemu" ? "Cemu graphics / shader pack" : mod.kind == "content" ? "Model / texture / UI replacement" : "Built-in settings preset",
+                 mod.pending_restart ? "Restart required" : mod.active ? "Active" : mod.enabled ? "Waiting for game update" : "Disabled");
+            if (mod.kind == "native" && mod.compatible)
+                note(mod.native_confirmed ? "Runs native code with the game's permissions (you confirmed this version)."
+                                          : "Runs native code with the game's permissions. Enabling it asks you to confirm first.");
             if (!mod.author.empty()) note("By %s", mod.author.c_str());
             ImGui::TextWrapped("%s", mod.description.c_str());
             if (!mod.reason.empty()) ImGui::TextWrapped("%s", mod.reason.c_str());
@@ -990,6 +1105,7 @@ void package_controls() {
                 if (!option.description.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", option.description.c_str());
                 ImGui::PopID();
             }
+            if(mod.restart_required) note("Changes apply on the next game start. Active files stay loaded until exit.");
             ImGui::BeginDisabled(mod.enabled || mod.active);
             if (ImGui::Button("Remove package")) remove(mod.id, error);
             ImGui::EndDisabled();
@@ -997,6 +1113,7 @@ void package_controls() {
         }
         ImGui::PopID();
     }
+    native_confirm_dialog(confirm, error);
 }
 
 void tab_mods() {
@@ -1192,6 +1309,96 @@ void controls_list(input_map::Mapping& m, float h) {
     }
 }
 
+// ---------------------------------------------------------------- gyro (motion/motion.h)
+void save_gyro(const motion::Settings& g) {
+    hostui::post([g] {
+        motion::set_settings(g);
+        for (const char* k : motion::kKeys) hostui::set(k, motion::value_of(g, k));
+    });
+}
+void load_gyro() {
+    motion::Settings g;
+    std::string v;
+    for (const char* k : motion::kKeys)
+        if (hostui::get(k, v)) motion::from_kv(g, k, v);
+    motion::set_settings(g);
+}
+// the Gyro window (Controls tab > Gyro...): source, sensitivity, invert, recenter, Cemuhook server
+void gyro_window(bool& open) {
+    const char* title = "Gyro aiming##gyro";
+    if (open) { ImGui::OpenPopup(title); open = false; }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) return;
+    motion::Settings g = motion::settings(), before = g;
+    bool v;
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 34);
+    note("On the Wii U you aim in first person (bow, hookshot, boomerang, telescope, Picto Box, grappling hook) by "
+         "moving the GamePad. The game's own Options > Gyro switch still decides whether it uses the motion.");
+    for (int i = 0; i < motion::kSourceCount; i++)
+        if (radio(motion::source_label(i), g.source == i)) g.source = i;
+    if (motion::env_override()) note("WWHD_GYRO=%s overrides the saved source.", getenv("WWHD_GYRO"));
+    if (g.source == motion::kOff && motion::gyro_controllers() > 0) note("A controller with a gyro is connected: choose Controller gyro to use it.");
+    ImGui::SetNextItemWidth(220);
+    ImGui::SliderFloat("Sensitivity left/right", &g.tuning.sensitivity_x, 0.1f, 5.0f, "%.2fx");
+    ImGui::SameLine(0, 16);
+    if (check("Invert##x", g.tuning.invert_x, &v)) g.tuning.invert_x = v;
+    ImGui::SetNextItemWidth(220);
+    ImGui::SliderFloat("Sensitivity up/down", &g.tuning.sensitivity_y, 0.1f, 5.0f, "%.2fx");
+    ImGui::SameLine(0, 16);
+    if (check("Invert##y", g.tuning.invert_y, &v)) g.tuning.invert_y = v;
+    if (g.source == motion::kMouse) {
+        ImGui::SetNextItemWidth(220);
+        ImGui::SliderFloat("Mouse: degrees per point", &g.mouse_degrees, 0.01f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+        help("How far one point of mouse movement turns the GamePad. With Steam Input's gyro to mouse, tune this and "
+             "Steam's own sensitivity together.");
+        note("While the game aims, the pointer is captured and the mouse turns the GamePad (the mouse camera mod "
+             "leaves it alone then).");
+    }
+    if (g.source == motion::kCemuhook) {
+        static char host[256] = "";
+        static int port = 0;
+        static bool init = false;
+        if (!init || ImGui::IsWindowAppearing()) { snprintf(host, sizeof host, "%s", g.dsu_host.c_str()); port = g.dsu_port; init = true; }
+        ImGui::SetNextItemWidth(220);
+        if (ImGui::InputText("Server", host, sizeof host, ImGuiInputTextFlags_EnterReturnsTrue) || ImGui::IsItemDeactivatedAfterEdit())
+            g.dsu_host = host[0] ? host : "127.0.0.1";
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputInt("Port", &port, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue) || ImGui::IsItemDeactivatedAfterEdit())
+            g.dsu_port = std::clamp(port, 1, 65535);
+        ImGui::SetNextItemWidth(120);
+        int slot = g.dsu_slot + 1;
+        if (ImGui::SliderInt("Controller slot", &slot, 1, 4)) g.dsu_slot = slot - 1;
+        note("A Cemuhook (DSU) server: DS4Windows, BetterJoy, SteamDeckGyroDSU or a phone app; default 127.0.0.1, port 26760.");
+    }
+    // recenter: a controller input and/or a key
+    const char* pad_name = g.recenter_pad > 0 ? input_map::pad_label(g.recenter_pad) : "None";
+    ImGui::SetNextItemWidth(220);
+    if (ImGui::BeginCombo("Recenter: controller", pad_name)) {
+        for (int p = 0; p < input_map::kPadCount; p++)
+            if (ImGui::Selectable(p ? input_map::pad_label(p) : "None", g.recenter_pad == p)) g.recenter_pad = p;
+        ImGui::EndCombo();
+    }
+    std::string key_name = g.recenter_key >= 0 ? input_map::key_label(g.recenter_key) : "None";
+    ImGui::SetNextItemWidth(220);
+    if (ImGui::BeginCombo("Recenter: key", key_name.c_str())) {
+        if (ImGui::Selectable("None", g.recenter_key < 0)) g.recenter_key = -1;
+        for (int k = 0; k < 256; k++) {
+            std::string id = input_map::key_id(k);
+            if (id.rfind("Key", 0) == 0) continue;  // unnamed codes
+            if (ImGui::Selectable(input_map::key_label(k).c_str(), g.recenter_key == k)) g.recenter_key = k;
+        }
+        ImGui::EndCombo();
+    }
+    help("The button or key also reaches the game if the controls use it; pick a free one.");
+    if (ImGui::Button("Recenter now")) motion::recenter();
+    ImGui::SameLine();
+    ImGui::TextUnformatted(motion::status().c_str());
+    ImGui::PopTextWrapPos();
+    if (!(g == before)) save_gyro(g);
+    if (ImGui::Button("Close") || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 void tab_controls() {
     bool v;
     input_map::Mapping m = input_map::current();
@@ -1295,6 +1502,15 @@ void tab_controls() {
     help(input::has_rumble() ? "Controller vibration when the game asks for it. Off keeps the motors still."
                              : "Controller vibration: this host does not drive controller motors yet.");
     ImGui::SameLine(0, 24);
+    static bool gyro_open = false;
+    {
+        const motion::Settings g = motion::settings();
+        std::string label = std::string("Gyro: ") + (g.source == motion::kOff ? "off" : motion::source_label(g.source)) + "...";
+        if (ImGui::Button(label.c_str())) gyro_open = true;
+        help("Aim in first person by moving a controller with a gyro, a Cemuhook (DSU) source or the mouse (Steam Input)");
+    }
+    gyro_window(gyro_open);
+    ImGui::SameLine(0, 24);
     if (ImGui::Button("Reset to defaults")) input_map::set_current(input_map::Mapping::defaults());
 }
 
@@ -1390,10 +1606,9 @@ void perf_window(bool menu_open) {
     if (ImGui::Begin("##perf", nullptr, fl)) {
         ImGui::Text("%.0f fps   %.1f ms (worst %.1f)", U.fps, sum / 120.0f, worst);
         ImGui::PlotLines("##ft", U.frame_ms, 120, U.frame_i, nullptr, 0.0f, 50.0f, ImVec2(220, 36));
-        ImGui::TextDisabled("%s  %gx  %s", render::api_name(render::active()), hostui::res_scale(),
-                            interp::mode() == 2 ? "true 60" : interp::mode() == 1 ? "60 fps" : "30 fps");
+        ImGui::TextDisabled("%s  %gx  %s", render::api_name(render::active()), hostui::res_scale(), interp::mode_name());
         if (float share = interp::paced_drawn_share(); share >= 0)
-            ImGui::TextDisabled("60 fps frames drawn: %.0f%%", share * 100.0f);
+            ImGui::TextDisabled("in-between frames drawn: %.0f%%", share * 100.0f);
     }
     ImGui::End();
     (void)menu_open;
@@ -1416,7 +1631,7 @@ void settings_window() {
     }
     if (ImGui::Begin("Wind Waker HD  -  Settings", &open, fl)) {
         // L / R on a controller switch tabs
-        if (U.cap_action < 0) {
+        if (U.cap_action < 0 && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
             if (controller_pressed(input_map::kPadLB)) U.select_tab = (U.tab + kTabs - 1) % kTabs;
             if (controller_pressed(input_map::kPadRB)) U.select_tab = (U.tab + 1) % kTabs;
         }
@@ -1451,8 +1666,9 @@ void settings_window() {
     ImGui::End();
     // B (not while choosing an input or in a list) or the close button closes the menu
     if (!open) set_open(false);
-    if (U.cap_action < 0 && controller_pressed(input_map::kPadB) && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))
+    if (U.cap_action < 0 && controller_pressed(input_map::kPadB) && !g_pad_b_used && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))
         set_open(false);
+    g_pad_b_used = false;
 }
 
 }  // namespace
@@ -1545,6 +1761,8 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
             hostui::post([pro = v == "1"] { hostui::set_pro_controller(pro); });
         // the saved rumble choice (WWHD_RUMBLE wins)
         if (!rumble::env_override() && hostui::get("rumble", v)) rumble::set_enabled(v != "0");
+        // the saved gyro settings (WWHD_GYRO overrides the source)
+        hostui::post([] { load_gyro(); });
     }
     if (!test.done && render::frame_count() + 1 >= test.at) {
         test.done = true;

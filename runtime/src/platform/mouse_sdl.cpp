@@ -1,6 +1,8 @@
 #include "mouse_sdl.h"
 #include "keycodes.h"
 #include "../mods/mods.h"
+#include "../motion/motion.h"
+#include "../overlay/overlay.h"
 #include "../runtime.h"
 #include <atomic>
 #include <cstdlib>
@@ -26,8 +28,23 @@ bool host_key_down(uint16_t code) {
     if (code == kVK_Escape && mouse_captured()) { mouse_release(); return true; }
     return false;
 }
+// the mouse as a gyro (motion.h): while the game aims the pointer is captured, so that Steam Input's
+// gyro-to-mouse (or the mouse) never stops at the screen's edge; it is released when the aim ends
+static bool gyro_capture = false;
+static void update_gyro_capture() {
+    const bool want = tv && motion::mouse_drives_gyro() && !overlay::captures() && SDL_GetKeyboardFocus() == tv &&
+                      !getenv("WWHD_NO_HOST_INPUT");
+    if (want && !gyro_capture) {
+        gyro_capture = true;
+        if (!captured.load() && SDL_SetWindowRelativeMouseMode(tv, true)) LOG("[gyro] mouse captured while the game aims");
+    } else if (!want && gyro_capture) {
+        gyro_capture = false;
+        if (!captured.load() && tv) SDL_SetWindowRelativeMouseMode(tv, false);
+    }
+}
 void update_mouse() {
     if (release_requested.load() || (captured.load() && !mouse_camera())) release_now();
+    update_gyro_capture();
 }
 bool handle_mouse_event(const SDL_Event& event) {
     update_mouse();
@@ -37,6 +54,11 @@ bool handle_mouse_event(const SDL_Event& event) {
     if (event.type == SDL_EVENT_KEY_DOWN && event.key.windowID == id &&
         event.key.scancode == SDL_SCANCODE_ESCAPE && captured.load()) {
         release_now(); return true;
+    }
+    // the mouse as a gyro: every movement in the game window (motion.h keeps it only while the game aims)
+    if (event.type == SDL_EVENT_MOUSE_MOTION && event.motion.windowID == id) {
+        motion::mouse_motion(event.motion.xrel, event.motion.yrel);
+        if (motion::mouse_drives_gyro()) return true;
     }
     if (event.type == SDL_EVENT_MOUSE_WHEEL && event.wheel.windowID == id && first_person_wheel()) {
         float y = event.wheel.y;

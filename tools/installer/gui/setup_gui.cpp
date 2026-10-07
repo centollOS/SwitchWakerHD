@@ -34,9 +34,12 @@
 #include <string>
 #include <vector>
 
+#include <cerrno>
+
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 #ifdef __APPLE__
@@ -46,6 +49,15 @@
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
+
+// the release's terminal setup (the fallback), as the player sees it in the release folder
+#if defined(__APPLE__)
+#define SETUP_IN_TERMINAL "tools/Setup in Terminal.command"
+#elif defined(_WIN32)
+#define SETUP_IN_TERMINAL "tools\\Setup in a console window.bat"
+#else
+#define SETUP_IN_TERMINAL "tools/setup-in-terminal.sh"
+#endif
 
 // ---------------------------------------------------------------------------------------------
 // minimal JSON (the protocol's own messages only)
@@ -380,7 +392,10 @@ struct App {
     std::vector<std::string> passthru;  // arguments for setup.py
     Child child;
     Screen screen = Screen::Starting;
-    std::string fatal;
+    std::string fatal;         // what failed (shown under "Setup could not continue")
+    std::string fatal_hint;    // what to do about it
+    std::string fatal_folder;  // a folder the fatal screen offers to show (e.g. where the app really is)
+    std::string fatal_log;     // where the failure was written down
 
     // hello
     bool hello = false;
@@ -462,15 +477,18 @@ static void go(Screen s) {
     A.screen = s;
 }
 
+static void fail(const std::string& what, const std::string& todo, const std::string& folder = "");
+
 static int request(const std::string& cmd, const std::string& fields) {
     int id = A.next_id++;
     std::string json = "{\"cmd\":" + jstr(cmd) + ",\"id\":" + std::to_string(id) + (fields.empty() ? "" : "," + fields) + "}";
     A.pending_id = id;
     A.pending_cmd = cmd;
-    if (!A.child.send(json)) {
-        A.fatal = "The setup process is not running.";
-        go(Screen::Fatal);
-    }
+    if (!A.child.send(json))
+        fail("The setup process is not running any more (request \"" + cmd + "\" could not be sent" +
+                 (A.child.exited ? ", it ended with exit code " + std::to_string(A.child.exit_code) : std::string()) + ").",
+             "Open Wind Waker HD again; finished steps are kept. If it happens again, click \"Copy log\" and attach the "
+             "log to a bug report.");
     return id;
 }
 
@@ -664,6 +682,7 @@ static std::string read_file(const std::string& path) {
 static void copy_log() {
     std::string text = read_file(A.log_path);
     text += "\n---- installer window ----\n";
+    if (!A.fatal.empty()) text += "Setup could not continue: " + A.fatal + "\n" + A.fatal_hint + "\n";
     for (auto& l : A.log) text += l + "\n";
     SDL_SetClipboardText(text.c_str());
     show_toast("The log is on the clipboard.");
@@ -895,8 +914,9 @@ static void handle_event(const J& ev) {
     } else if (e == "reply") {
         handle_reply(ev);
     } else if (e == "fatal") {
-        A.fatal = ev.str("message");
-        go(Screen::Fatal);
+        fail(ev.str("message"), A.log_path.empty() ? "Fix what the message says and open Wind Waker HD again."
+                                                   : "Fix what the message says and open Wind Waker HD again. The setup log is " +
+                                                         A.log_path + ".");
     }
 }
 
@@ -936,8 +956,16 @@ static void pump_child() {
         else if (!l.empty()) addlog(l);  // the launcher's own output (e.g. fetching Python)
     }
     if (A.child.exited && A.screen != Screen::Fatal && A.exit_code < 0 && A.child.proc) {
-        A.fatal = A.hello ? "The setup process ended unexpectedly." : "Setup could not start (see the details).";
-        go(Screen::Fatal);
+        std::string code = "exit code " + std::to_string(A.child.exit_code);
+        if (A.hello)
+            fail("The setup process (tools/installer/setup.py) ended unexpectedly (" + code + ").",
+                 "Open Wind Waker HD again; finished steps are kept. The last lines it wrote are below" +
+                     (A.log_path.empty() ? std::string(".") : ", its full log is " + A.log_path + ".") +
+                     " If it happens again, click \"Copy log\" and attach the log to a bug report.");
+        else
+            fail("The setup process ended before it was ready (" + code + "; its output is below).",
+                 "Its output usually says what is missing. You can also run the setup in a terminal: " SETUP_IN_TERMINAL
+                 " in the release folder. If that fails too, click \"Copy log\" and attach the log to a bug report.");
     }
 }
 
@@ -1368,63 +1396,253 @@ static void screen_fatal() {
     heading("Setup could not continue");
     ImGui::PopStyleColor();
     ImGui::TextWrapped("%s", A.fatal.c_str());
+    if (!A.fatal_hint.empty()) {
+        ImGui::Spacing();
+        ImGui::TextUnformatted("What to do:");
+        ImGui::TextWrapped("%s", A.fatal_hint.c_str());
+    }
+    if (!A.fatal_log.empty()) {
+        ImGui::Spacing();
+        muted("This was written to " + A.fatal_log);
+    }
     if (!A.log.empty()) log_pane(std::max(60.0f, space_above_footer()));
-    int b = footer({"Quit", "Copy log"});
+#ifdef __APPLE__
+    const char* show = "Show in Finder";
+#else
+    const char* show = "Open the folder";
+#endif
+    int b = A.fatal_folder.empty() ? footer({"Quit", "Copy log"}) : footer({"Quit", "Copy log", show});
     if (b == 0) A.exit_code = 1;
     if (b == 1) copy_log();
+    if (b == 2) open_folder(A.fatal_folder);
 }
 
 // ---------------------------------------------------------------------------------------------
 // startup
 
+// Where the release folder is, and why it was not found (for the message when it isn't).
+struct PackageSearch {
+    std::string pkg;           // the release folder (ends in a separator), empty when not found
+    std::string start;          // the folder the program is in (macOS: the folder containing the original app)
+    std::string checked;        // start + tools/installer/setup.py, where it belongs
+    std::string error;          // why it is not there (strerror)
+    int err = 0;                // errno of that check (0 on Windows)
+    bool translocated = false;  // macOS started a temporary read-only copy of the app
+    bool original_known = true; // ... and said where the original is
+};
+
 #ifdef __APPLE__
-// A downloaded (quarantined) app opened from Finder runs from a random read-only copy ("App
-// Translocation"); ask Security.framework where the original is, so the release folder is found.
-static std::string untranslocate(const std::string& path) {
-    if (path.find("/AppTranslocation/") == std::string::npos) return path;
+// A downloaded (quarantined) app opened from Finder runs from a random read-only copy ("App Translocation",
+// /private/var/folders/.../AppTranslocation/<id>/d/Wind Waker HD.app) that contains only the app, not
+// the release folder around it. Security.framework says where the original is.
+//
+// Ask about the bundle itself: SecTranslocateCreateOriginalPathForURL fails for paths that do not exist,
+// and SDL_GetBasePath() is the bundle's Contents/Resources, which the release app does not have (issue #48:
+// v0.2.3 asked about Contents/Resources, got nothing back and stopped with "must stay in the unpacked
+// release folder").
+static bool untranslocate_bundle(const std::string& bundle, std::string& original, bool& known) {
+    original = bundle;
+    known = true;
     SDL_SharedObject* sec = SDL_LoadObject("/System/Library/Frameworks/Security.framework/Security");
     SDL_SharedObject* cf = SDL_LoadObject("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation");
-    if (!sec || !cf) return path;
     using CreateURL = const void* (*)(const void*, const unsigned char*, long, unsigned char);
+    using IsTranslocated = unsigned char (*)(const void*, bool*, void**);
     using Original = const void* (*)(const void*, void**);
     using GetFS = unsigned char (*)(const void*, unsigned char, unsigned char*, long);
     using Release = void (*)(const void*);
-    auto create = (CreateURL)SDL_LoadFunction(cf, "CFURLCreateFromFileSystemRepresentation");
-    auto getfs = (GetFS)SDL_LoadFunction(cf, "CFURLGetFileSystemRepresentation");
-    auto release = (Release)SDL_LoadFunction(cf, "CFRelease");
-    auto original = (Original)SDL_LoadFunction(sec, "SecTranslocateCreateOriginalPathForURL");
-    std::string out = path;
-    if (create && getfs && release && original) {
-        const void* url = create(nullptr, (const unsigned char*)path.c_str(), (long)path.size(), 1);
+    auto create = cf ? (CreateURL)SDL_LoadFunction(cf, "CFURLCreateFromFileSystemRepresentation") : nullptr;
+    auto getfs = cf ? (GetFS)SDL_LoadFunction(cf, "CFURLGetFileSystemRepresentation") : nullptr;
+    auto release = cf ? (Release)SDL_LoadFunction(cf, "CFRelease") : nullptr;
+    auto is_tl = sec ? (IsTranslocated)SDL_LoadFunction(sec, "SecTranslocateIsTranslocatedURL") : nullptr;
+    auto orig_fn = sec ? (Original)SDL_LoadFunction(sec, "SecTranslocateCreateOriginalPathForURL") : nullptr;
+    // without the functions (a future macOS) the path still tells
+    bool translocated = bundle.find("/AppTranslocation/") != std::string::npos;
+    if (create && getfs && release) {
+        const void* url = create(nullptr, (const unsigned char*)bundle.c_str(), (long)bundle.size(), 1);
         if (url) {
-            const void* orig = original(url, nullptr);
-            unsigned char buf[4096];
-            if (orig && getfs(orig, 1, buf, sizeof buf)) out = (const char*)buf;
-            if (orig) release(orig);
+            bool t = false;
+            if (is_tl && is_tl(url, &t, nullptr)) translocated = t;
+            if (translocated) {
+                known = false;
+                const void* o = orig_fn ? orig_fn(url, nullptr) : nullptr;
+                unsigned char buf[4096];
+                if (o && getfs(o, 1, buf, sizeof buf)) original = (const char*)buf, known = true;
+                if (o) release(o);
+            }
             release(url);
         }
+    } else if (translocated) {
+        known = false;
     }
-    if (!out.empty() && out.back() != '/') out += '/';
-    return out;
+    if (translocated) SDL_Log("App Translocation: started from %s, original %s", bundle.c_str(),
+                              known ? original.c_str() : "unknown");
+    return translocated;
 }
 #endif
 
-static std::string find_package() {
-    if (const char* e = SDL_getenv("WWHD_SETUP_PKG")) return e;
+static PackageSearch find_package() {
+    PackageSearch r;
+    if (const char* e = SDL_getenv("WWHD_SETUP_PKG")) return r.pkg = e, r;
     std::string base = SDL_GetBasePath() ? SDL_GetBasePath() : "./";
+    r.start = base;
 #ifdef __APPLE__
-    base = untranslocate(base);
+    // base is <bundle>/Contents/Resources/ (SDL), or the executable's folder outside a bundle
+    size_t app = base.rfind(".app/Contents/");
+    if (app != std::string::npos) {
+        std::string bundle = base.substr(0, app + 4), original;
+        r.translocated = untranslocate_bundle(bundle, original, r.original_known);
+        base = original + base.substr(bundle.size());
+        r.start = original.substr(0, original.find_last_of('/') + 1);  // the folder containing the app
+    }
 #endif
+    r.checked = r.start + "tools/installer/setup.py";
     for (int up = 0; up < 5; up++) {
+        std::string candidate = base + "tools/installer/setup.py";
         SDL_PathInfo info;
-        if (SDL_GetPathInfo((base + "tools/installer/setup.py").c_str(), &info)) return base;
+        if (SDL_GetPathInfo(candidate.c_str(), &info)) return r.pkg = base, r;
+        if (base == r.start) {  // why it is not next to the app (the place it belongs)
+#ifndef _WIN32
+            struct stat sb;
+            r.err = stat(candidate.c_str(), &sb) == 0 ? 0 : errno;
+            r.error = r.err ? strerror(r.err) : "unreadable";
+#else
+            r.error = SDL_GetError();
+#endif
+            if (r.err == EPERM || r.err == EACCES) break;  // not allowed to look: that is the answer
+        }
         // go one directory up
         if (base.size() > 1) base.pop_back();
         size_t s = base.find_last_of("/\\");
         if (s == std::string::npos) break;
         base = base.substr(0, s + 1);
     }
-    return "";
+    return r;
+}
+
+// "Setup could not continue" when the release folder was not found: what happened, what to do
+static void fail_no_package(const PackageSearch& r) {
+    std::string folder = r.start;
+    if (folder.size() > 1 && (folder.back() == '/' || folder.back() == '\\')) folder.pop_back();
+#ifdef __APPLE__
+    if (r.translocated && !r.original_known) {
+        fail("macOS started Wind Waker HD from a temporary read-only copy (App Translocation, because the downloaded "
+             "folder is still marked as quarantined), and did not say where the original is, so the release folder "
+             "around the app cannot be found.",
+             "In Finder, drag \"Wind Waker HD.app\" out of the unzipped folder (for example onto the Desktop) and back "
+             "into the same folder, then open it again: an app moved with Finder is started where it is. Or, in "
+             "Terminal: xattr -dr com.apple.quarantine followed by the path of the unzipped folder. Keep the app in "
+             "that folder: it needs tools/, sdk/ and portable.txt next to it.");
+        return;
+    }
+    if (r.err == EPERM || r.err == EACCES) {
+        fail("macOS did not let Wind Waker HD read its release folder " + folder + " (checking " + r.checked + ": " +
+                 r.error + ").",
+             "If you answered \"Don't Allow\" when macOS asked about access to a folder (Downloads, Desktop, "
+             "Documents, an external drive), allow Wind Waker HD in System Settings > Privacy & Security > Files and "
+             "Folders, or move the whole unzipped folder to another place (for example your home folder or a Games "
+             "folder) and open the app from there.",
+             folder);
+        return;
+    }
+    fail("Wind Waker HD could not find its release files: " + r.checked + " is missing (" + r.error + ").",
+         "Keep \"Wind Waker HD.app\" inside the unzipped release folder, next to tools/, sdk/ and portable.txt. If you "
+         "moved only the app (for example into Applications), move it back; to keep the game somewhere else, move "
+         "the whole folder.",
+         folder);
+#else
+    fail("Wind Waker HD could not find its release files: " + r.checked + " is missing or unreadable (" + r.error + ").",
+         "Keep this program inside the unzipped release folder, next to tools/, sdk/ and portable.txt. To keep the "
+         "game somewhere else, move the whole folder; if files are missing, unzip the release again.",
+         folder);
+#endif
+}
+
+// The game, saves and settings go into the data folder (in the release folder unless --data-dir):
+// check it can be written before anything starts, so a read-only place (a disk image, a read-only drive or
+// share, a folder of another user) is reported as such and not as a failure halfway through the setup.
+static std::string data_dir_of(const std::string& pkg, const std::vector<std::string>& passthru) {
+    std::string data = pkg + "data";
+    for (size_t i = 0; i + 1 < passthru.size(); i++)
+        if (passthru[i] == "--data-dir") data = passthru[i + 1];
+    return data;
+}
+
+static bool check_writable(const std::string& data) {
+    std::string probe = data + "/.write-test";
+    std::string what;
+    if (!SDL_CreateDirectory(data.c_str())) what = "creating the folder " + data;
+    else {
+        SDL_IOStream* f = SDL_IOFromFile(probe.c_str(), "wb");
+        if (!f) what = "creating the file " + probe;
+        else {
+            bool ok = SDL_WriteIO(f, "ok\n", 3) == 3;
+            ok = SDL_CloseIO(f) && ok;
+            if (!ok) what = "writing the file " + probe;
+            SDL_RemovePath(probe.c_str());
+        }
+    }
+    if (what.empty()) return true;
+    std::string err = SDL_GetError();
+    fail("The release folder cannot be written to: " + what + " failed (" + err + "). Setup keeps the game, saves "
+         "and settings in " + data + ".",
+         "Copy the whole unzipped folder to a place you can write to (for example your home folder or a Games "
+         "folder; not a disk image, a read-only drive or another user's folder) and open Wind Waker HD from there.",
+         A.pkg);
+    return false;
+}
+
+// the failure goes to a log file too: data/setup-window.log in the release folder, or (no release folder or
+// not writable) ~/Library/Logs (macOS), %TEMP% (Windows), $TMPDIR or /tmp
+static std::string fatal_log_file() {
+    if (!A.pkg.empty()) {
+        std::string data = data_dir_of(A.pkg, A.passthru);
+        if (SDL_CreateDirectory(data.c_str())) {
+            std::string p = data + "/setup-window.log";
+            if (SDL_IOStream* f = SDL_IOFromFile(p.c_str(), "ab")) return SDL_CloseIO(f), p;
+        }
+    }
+#if defined(__APPLE__)
+    const char* home = SDL_getenv("HOME");
+    std::string dir = std::string(home ? home : "/tmp") + "/Library/Logs";
+    if (!home || !SDL_CreateDirectory(dir.c_str())) dir = "/tmp";
+    return dir + "/Wind Waker HD setup.log";
+#elif defined(_WIN32)
+    const char* t = SDL_getenv("TEMP");
+    return std::string(t ? t : ".") + "\\Wind Waker HD setup.log";
+#else
+    const char* t = SDL_getenv("TMPDIR");
+    return std::string(t && *t ? t : "/tmp") + "/wind-waker-hd-setup.log";
+#endif
+}
+
+static void fail(const std::string& what, const std::string& todo, const std::string& folder) {
+    A.fatal = what;
+    A.fatal_hint = todo;
+    A.fatal_folder = folder;
+    go(Screen::Fatal);
+    SDL_Log("Setup could not continue: %s", what.c_str());
+    SDL_Log("What to do: %s", todo.c_str());
+    std::string path = fatal_log_file();
+    if (SDL_IOStream* f = SDL_IOFromFile(path.c_str(), "ab")) {
+        char when[64] = "";
+        SDL_Time t;
+        SDL_DateTime dt;
+        if (SDL_GetCurrentTime(&t) && SDL_TimeToDateTime(t, &dt, true))
+            snprintf(when, sizeof when, "%04d-%02d-%02d %02d:%02d:%02d", dt.year, dt.month, dt.day, dt.hour, dt.minute,
+                     dt.second);
+        std::string text = std::string("==== ") + when + " Wind Waker HD" + (A.version.empty() ? "" : " " + A.version) +
+                           ": setup could not continue\n" +
+                           what + "\nWhat to do: " + todo + "\n";
+        const char* bp = SDL_GetBasePath();
+        text += std::string("Program: ") + (bp ? bp : "?") + "\nRelease folder: " + (A.pkg.empty() ? "(not found)" : A.pkg) + "\n";
+        if (!A.log_path.empty()) text += "Setup log: " + A.log_path + "\n";
+        for (auto& l : A.log) text += "  " + l + "\n";
+        SDL_WriteIO(f, text.data(), text.size());
+        SDL_CloseIO(f);
+        A.fatal_log = path;
+    } else {
+        A.fatal_log.clear();
+    }
 }
 
 // the release's version, as package.py wrote it (setup.py reports the same file in its hello)
@@ -1448,8 +1666,13 @@ static void start_child() {
     for (auto& a : A.passthru) args.push_back(a);
     go(Screen::Starting);
     if (!A.child.start(args, A.pkg)) {
-        A.fatal = std::string("Could not start the setup process: ") + SDL_GetError();
-        go(Screen::Fatal);
+        std::string err = SDL_GetError();
+        std::string cmd;
+        for (auto& a : args) cmd += (cmd.empty() ? "" : " ") + a;
+        fail("Could not start the setup process (" + cmd + "): " + err + ".",
+             "Check that the release folder is complete (unzip it again if files are missing). You can also run the "
+             "setup in a terminal: " SETUP_IN_TERMINAL " in the release folder.",
+             A.pkg);
     }
 }
 
@@ -1572,7 +1795,7 @@ int main(int argc, char** argv) {
 
     // prepared already: start the game right away, no window of our own (Shift / --setup: the setup)
     if (!want_setup && automate.empty() && !A.self_test && !shift_held()) {
-        std::string pkg = find_package();
+        std::string pkg = find_package().pkg;
         if (!pkg.empty() && game_ready(pkg, A.passthru) && launch_game()) return 0;
     }
 
@@ -1621,14 +1844,18 @@ int main(int argc, char** argv) {
     ImGui_ImplSDL3_InitForSDLRenderer(g_window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
 
-    A.pkg = find_package();
+    PackageSearch found = find_package();
+    A.pkg = found.pkg;
     if (!A.pkg.empty()) {
         A.version = package_version();
         if (!A.version.empty()) SDL_SetWindowTitle(g_window, ("Wind Waker HD " + A.version).c_str());
+        if (found.translocated)
+            addlog("macOS started a temporary copy of the app (App Translocation); the release folder is " + A.pkg);
     }
     if (A.pkg.empty()) {
-        A.fatal = "This program must stay in the unpacked release folder (next to tools/installer/setup.py).";
-        go(Screen::Fatal);
+        fail_no_package(found);
+    } else if (!check_writable(data_dir_of(A.pkg, A.passthru))) {
+        // fail() has shown why
     } else {
 #ifdef __APPLE__
         if (!clt_ok()) go(Screen::NeedCLT);
@@ -1727,6 +1954,7 @@ int main(int argc, char** argv) {
             } else if (A.screen == Screen::Fatal || A.screen == Screen::NeedCLT ||
                        SDL_GetTicks() / 1000.0 > self_test_deadline) {
                 SDL_Log("self-test failed at the %s screen: %s", screen_name(A.screen), A.fatal.c_str());
+                if (!A.fatal_hint.empty()) SDL_Log("  what to do: %s", A.fatal_hint.c_str());
                 for (auto& l : A.log) SDL_Log("  %s", l.c_str());
                 A.exit_code = 1;
             }

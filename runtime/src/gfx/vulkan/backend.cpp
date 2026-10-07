@@ -5,6 +5,9 @@
 #define VK_USE_PLATFORM_METAL_EXT  // VK_EXT_metal_surface: AppKit views' CAMetalLayers
 #endif
 #include "backend.h"
+#include "buffer_cache.h"
+#include "render_prof.h"
+#include "report_header.h"
 #include "present.h"
 #include "gfx/display.h"
 #include "gfx/display_modes.h"
@@ -17,6 +20,7 @@
 #include "platform/input_sdl.h"
 #include <SDL3/SDL_vulkan.h>
 #endif
+#include "platform/display_rate.h"
 #include "platform/host.h"
 #include "platform/perf_hint.h"
 #include "runtime.h"
@@ -47,7 +51,7 @@
 #include <vulkan/vulkan_beta.h>
 
 namespace gx2 { uint64_t flips_presented(); void checkpoint_vulkan_caches(); }
-namespace interp { int mode(); }
+#include "../../interp.h"
 
 namespace gfxvk {
 Renderer R;
@@ -168,13 +172,16 @@ void init_pipeline_cache() try {
     R.pipelineCache=VK_NULL_HANDLE;
   LOG("[vulkan cache] load disabled after error: %s",error.what());
 }
-template<class F> VkResult timed_call(WaitTiming& timing, F&& call) {
-  if (!perf_enabled()) return call();
+// profWait: also report the wait to the render-thread profiler (render_prof.h)
+template<class F> VkResult timed_call(WaitTiming& timing, F&& call, int profWait = -1) {
+  const bool profiled = profWait >= 0 && rprof::enabled();
+  if (!perf_enabled() && !profiled) return call();
   auto start = std::chrono::steady_clock::now();
   VkResult result = call();
-  ++timing.count;
-  timing.ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+  const uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now() - start).count();
+  if (perf_enabled()) { ++timing.count; timing.ns += ns; }
+  if (profiled) rprof::add_wait(rprof::Wait(profWait), ns);
   return result;
 }
 } // namespace
@@ -291,7 +298,7 @@ uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags flags) {
   throw std::runtime_error("No compatible Vulkan memory type");
 }
 Buffer create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                     VkMemoryPropertyFlags flags) {
+                     VkMemoryPropertyFlags flags, VkMemoryPropertyFlags preferred) {
   Buffer b;
   b.size = std::max<VkDeviceSize>(size, 16);
   VkBufferCreateInfo ci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -304,6 +311,21 @@ Buffer create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ai.allocationSize = req.size;
   ai.memoryTypeIndex = memory_type(req.memoryTypeBits, flags);
+  if (preferred) {
+    VkPhysicalDeviceMemoryProperties p;
+    vkGetPhysicalDeviceMemoryProperties(R.physicalDevice, &p);
+    for (uint32_t i = 0; i < p.memoryTypeCount; i++)
+      if ((req.memoryTypeBits & (1u << i)) &&
+          (p.memoryTypes[i].propertyFlags & (flags | preferred)) == (flags | preferred)) {
+        ai.memoryTypeIndex = i;
+        break;
+      }
+  }
+  {
+    VkPhysicalDeviceMemoryProperties p;
+    vkGetPhysicalDeviceMemoryProperties(R.physicalDevice, &p);
+    b.properties = p.memoryTypes[ai.memoryTypeIndex].propertyFlags;
+  }
   vk_check(vkAllocateMemory(R.device, &ai, nullptr, &b.memory),
            "allocate buffer memory");
   vk_check(vkBindBufferMemory(R.device, b.buffer, b.memory, 0),
@@ -313,6 +335,53 @@ Buffer create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
              "map buffer");
   return b;
 }
+// GPU -> CPU copies (captures, overlay signatures): the CPU reads these, so host-cached memory where
+// the device has it (uncached reads of the plain host-visible type are very slow on discrete GPUs).
+Buffer create_readback_buffer(VkDeviceSize size) {
+  return create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                       VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+}
+// The per-submission upload arena (and the buffer cache's blocks, buffer_cache.cpp) is written by the
+// CPU and read by the GPU only. The memory is host-visible but usually not host-cached: uncached or
+// write-combined system memory, or device-local BAR memory on discrete GPUs, where CPU reads are about
+// 100 times slower than cached ones. Rule: the CPU never reads mapped upload memory. Reuse checks and
+// index scans use CPU copies kept beside the slices (vertex_snapshot_history.h, uniform_snapshot.h,
+// draw.cpp's index paths, the buffer cache's index shadows); see docs/vulkan.md. The one exception is
+// the buffer cache's opt-in verify mode (WWHD_VK_BUFFER_CACHE_VERIFY=1, a diagnostic).
+// Unless the memory is host-cached: if the arena's memory type is HOST_CACHED and HOST_COHERENT (Apple
+// silicon/MoltenVK has only cached types; many UMA drivers too), reads cost what heap reads cost and the
+// copies only add time, so R.uploadReadsDirect lets the reuse caches and the native index scan read the
+// slices. CACHED without COHERENT never counts: the arena requires COHERENT (no flush/invalidate).
+// WWHD_VK_UPLOAD_READS=auto (default) | shadow (always keep CPU copies) | direct (always read slices).
+namespace {
+enum class UploadReads { Auto, Shadow, Direct };
+UploadReads upload_reads_mode() {
+  static const UploadReads mode = [] {
+    const char* e = std::getenv("WWHD_VK_UPLOAD_READS");
+    if (!e || !*e || !std::strcmp(e, "auto")) return UploadReads::Auto;
+    if (!std::strcmp(e, "shadow")) return UploadReads::Shadow;
+    if (!std::strcmp(e, "direct")) return UploadReads::Direct;
+    LOG("[vulkan] WWHD_VK_UPLOAD_READS=%s unknown (auto|shadow|direct): auto", e);
+    return UploadReads::Auto;
+  }();
+  return mode;
+}
+void note_upload_block(const Buffer& buffer) {
+  const VkMemoryPropertyFlags readable =
+      VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  const bool first = R.uploadAllocations == 0;
+  const bool cached = (buffer.properties & readable) == readable && (first || R.uploadCached);
+  const auto mode = upload_reads_mode();
+  const bool direct = mode == UploadReads::Direct || (mode == UploadReads::Auto && cached);
+  if (first || direct != R.uploadReadsDirect)
+    LOG("[vulkan] upload arena memory: %s; reuse checks %s (WWHD_VK_UPLOAD_READS=%s)",
+        cached ? "host-cached" : "not host-cached", direct ? "read the slices" : "keep CPU copies",
+        mode == UploadReads::Auto ? "auto" : mode == UploadReads::Shadow ? "shadow" : "direct");
+  R.uploadCached = cached;
+  R.uploadReadsDirect = direct;
+}
+}  // namespace
 UploadSlice allocate_upload(VkDeviceSize size, VkDeviceSize alignment) {
   size = std::max<VkDeviceSize>(size,16);
   alignment = std::max<VkDeviceSize>(alignment,4);
@@ -322,6 +391,7 @@ UploadSlice allocate_upload(VkDeviceSize size, VkDeviceSize alignment) {
       return UploadSlice{};
     block.used = offset + size;
     R.uploadBytes += size;
+    rprof::add_upload(size);
     return UploadSlice{block.buffer.buffer,offset,size,
                        static_cast<uint8_t*>(block.buffer.mapped)+offset};
   };
@@ -333,6 +403,7 @@ UploadSlice allocate_upload(VkDeviceSize size, VkDeviceSize alignment) {
       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  note_upload_block(buffer);
   R.uploadBlocks.push_back({buffer,0});
   ++R.uploadAllocations;
   return slice(R.uploadBlocks.back());
@@ -654,6 +725,8 @@ static void cleanup_submission(Renderer::Submission& slot) {
     vkFreeMemory(R.device, b.memory, nullptr);
   }
   slot.garbageBuffers.clear();
+  buffer_cache_free(slot.garbageCacheRegions);
+  slot.garbageCacheRegions.clear();
   for (auto &i : slot.garbageImages) {
     for (auto v : i.views)
       if (v)
@@ -676,7 +749,7 @@ static void retire_submission(Renderer::Submission& slot, WaitTiming& timing=sub
   if (status==VK_NOT_READY) {
     vk_check(timed_call(timing,[&] {
       return vkWaitForFences(R.device,1,&slot.fence,VK_TRUE,UINT64_MAX);
-    }),"wait submission retirement");
+    },rprof::kWaitGpu),"wait submission retirement");
   } else vk_check(status,"submission fence status");
   collect_gpu_timestamp_queries(slot);
   if(R.gpuPassTimestampsEnabled) collect_gpu_pass_queries(slot);
@@ -694,6 +767,7 @@ static void activate_submission(size_t index) {
   R.uploadBlocks=std::move(slot.uploadBlocks);
   R.garbageBuffers=std::move(slot.garbageBuffers);
   R.garbageImages=std::move(slot.garbageImages);
+  R.garbageCacheRegions=std::move(slot.garbageCacheRegions);
   R.recording=false;R.rendering=false;R.passTracked=false;
 }
 static void drain_submissions() {
@@ -738,6 +812,7 @@ static void submit(VkSemaphore wait = VK_NULL_HANDLE,
   slot.uploadBlocks=std::move(R.uploadBlocks);
   slot.garbageBuffers=std::move(R.garbageBuffers);
   slot.garbageImages=std::move(R.garbageImages);
+  slot.garbageCacheRegions=std::move(R.garbageCacheRegions);
   slot.pending=true;
   if (asynchronous) {
     activate_submission((R.activeSubmission+1)%R.submissions.size());
@@ -749,11 +824,13 @@ static void submit(VkSemaphore wait = VK_NULL_HANDLE,
 void flush_async() {
   // Deferred objects may reference earlier queued work even if this slot has
   // no draw commands. Submit an empty command buffer to retire them in order.
-  if (!R.recording && (!R.garbageBuffers.empty() || !R.garbageImages.empty())) command_buffer();
+  if (!R.recording && (!R.garbageBuffers.empty() || !R.garbageImages.empty() ||
+                       !R.garbageCacheRegions.empty())) command_buffer();
   submit(VK_NULL_HANDLE,VK_NULL_HANDLE,true);
 }
 void flush() {
-  if (!R.recording && (!R.garbageBuffers.empty() || !R.garbageImages.empty())) command_buffer();
+  if (!R.recording && (!R.garbageBuffers.empty() || !R.garbageImages.empty() ||
+                       !R.garbageCacheRegions.empty())) command_buffer();
   submit();
   drain_submissions();
 }
@@ -893,7 +970,7 @@ static void make_swapchain(Screen &s) {
       offeredNames += std::string(offeredNames.empty() ? "" : ", ") + present_mode_name(m);
     }
   if (&s == &R.tv) set_present_modes_offered(offered);
-  const int wanted = present_mode();
+  const int wanted = effective_present_mode();
   const int chosen = offered >> wanted & 1 ? wanted : kPresentFifo;
   ci.presentMode = kModes[chosen];
   if (chosen != s.presentMode || wanted != s.presentWanted)
@@ -901,6 +978,9 @@ static void make_swapchain(Screen &s) {
         offeredNames.c_str(), chosen != wanted ? " - the requested mode is not offered" : "");
   s.presentMode = chosen;
   s.presentWanted = wanted;
+  // frame interpolation caps 120/240 fps to the display's refresh rate only when presenting waits
+  // for it (interp::output_fps)
+  if (&s == &R.tv) interp::set_present_vsync(chosen == kPresentFifo);
   ci.clipped = VK_TRUE;
   ci.oldSwapchain = s.swapchain;
   VkSwapchainKHR sc;
@@ -962,20 +1042,16 @@ static bool SDLCALL lifecycle_watch(void *, SDL_Event *event) {
   return true;
 }
 #endif
-// Asynchronous presentation (WWHD_VK_ASYNC_PRESENT=1, the default on Android): the presentation
-// submission goes into the four-slot ring like GX2Flush work instead of waiting for the GPU, and the
-// SDL host's swap() does not drain the queue, so the render thread records frame N+1 while the GPU
-// draws frame N. Each frame in flight has its own acquire semaphore (reused only after the submission
-// that waited on it retired) and each swapchain image its own render-finished semaphore. Captures
-// keep the waiting path.
+// Asynchronous presentation (the default on every platform since 2026-10-07; WWHD_VK_ASYNC_PRESENT=0
+// restores the waiting path): the presentation submission goes into the four-slot ring like GX2Flush
+// work instead of waiting for the GPU, and swap() does not drain the queue, so the render thread
+// records frame N+1 while the GPU draws frame N. Each frame in flight has its own acquire semaphore
+// (reused only after the submission that waited on it retired) and each swapchain image its own
+// render-finished semaphore. Captures and frame dumps keep the waiting path.
 static bool async_present() {
   static const bool on = [] {
     const char *e = std::getenv("WWHD_VK_ASYNC_PRESENT");
-#ifdef __ANDROID__
     return !e || std::atoi(e) != 0;
-#else
-    return e && std::atoi(e) != 0;
-#endif
   }();
   return on;
 }
@@ -1004,7 +1080,7 @@ static void present(Screen &s) {
 #endif
   // Presentation changed (settings overlay): a new swapchain, as for a resize (also for a window that
   // is not shown right now, so the next frame it shows uses the new mode)
-  if (s.window && s.swapchain && s.presentWanted != present_mode())
+  if (s.window && s.swapchain && s.presentWanted != effective_present_mode())
     make_swapchain(s);
   if (!s.window || !s.visible || s.width <= 0 || s.height <= 0 || !s.scan ||
       !s.scan->image)
@@ -1062,7 +1138,7 @@ static void present(Screen &s) {
   VkResult ar = timed_call(timing.acquire, [&] {
     return vkAcquireNextImageKHR(R.device, s.swapchain, UINT64_MAX,
                                 acquireSemaphore, VK_NULL_HANDLE, &index);
-  });
+  }, rprof::kWaitAcquire);
   if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
     s.resize = true;
     return;
@@ -1152,7 +1228,7 @@ static void present(Screen &s) {
   pi.pImageIndices = &index;
   VkResult pr = timed_call(timing.present, [&] {
     return vkQueuePresentKHR(R.queue, &pi);
-  });
+  }, rprof::kWaitPresent);
 #ifdef __ANDROID__
   // SUBOPTIMAL here only says the compositor rotates the picture (identity pre-transform, see
   // make_swapchain); size changes come as window events. Rebuilding would happen every frame.
@@ -1170,7 +1246,7 @@ static void present(Screen &s) {
     vk_check(pr, "present scan buffer");
 #endif
   if (!async)
-    vk_check(timed_call(timing.idle, [&] { return vkQueueWaitIdle(R.queue); }),
+    vk_check(timed_call(timing.idle, [&] { return vkQueueWaitIdle(R.queue); }, rprof::kWaitGpu),
              "present completion");
 }
 void copy_to_scan(uint32_t cb, uint32_t target) {
@@ -1279,16 +1355,14 @@ void swap() {
   present(R.tv);
   if (plan.drc_window)
     present(R.drc);
-#ifdef WWHD_SDL_HOST
   // asynchronous presentation: queued like GX2Flush work, the ring's fences retire it (the automatic
-  // overlay's signatures are read back right away, so those frames wait)
+  // overlay's signatures are read back right away, so those frames wait; present dumps and captures
+  // read back through flush()). Both window hosts: the AppKit host presents to its CAMetalLayers
+  // through the same swapchain path.
   if (async_present() && !sampled[0])
     flush_async();
   else
     flush();
-#else
-  flush();
-#endif
   if (sampled[0]) {
     std::vector<float> d = read_signature(0), t = sampled[1] ? read_signature(1) : std::vector<float>{};
     gfx::display_auto_signature(d, sampled[1] ? &t : nullptr, R.frame + 1);
@@ -1320,6 +1394,7 @@ void swap() {
   set_present_plan(nullptr);
   std::atomic_ref<uint64_t>(R.frame).fetch_add(1);
   R.completed = R.frame;
+  buffer_cache_end_frame();
   report_gpu_timestamps();
   perf_hint::frame_done();
   checkpoint_pipeline_cache();
@@ -1382,8 +1457,13 @@ void swap() {
       }
       intervalCount=0;slowIntervals=0;
       auto ss=vk::shader_stats();
-      LOG("[vulkan shaders] lookups %llu last hits %llu variants %llu compiles %llu total compile %.1f ms",
-          (unsigned long long)ss.lookups,(unsigned long long)ss.lastHits,(unsigned long long)ss.variantHits,(unsigned long long)ss.compiles,ss.compileNs/1e6);
+      LOG("[vulkan shaders] lookups %llu last hits %llu variants %llu compiles %llu total compile %.1f ms; %llu programs, %llu keys, %llu shaders (%llu keys shared), %llu sharing a module",
+          (unsigned long long)ss.lookups,(unsigned long long)ss.lastHits,(unsigned long long)ss.variantHits,(unsigned long long)ss.compiles,ss.compileNs/1e6,
+          (unsigned long long)ss.programs,(unsigned long long)ss.variantKeys,(unsigned long long)ss.shaders,(unsigned long long)ss.variantAliases,(unsigned long long)ss.moduleAliases);
+      if (ss.verifyChecks || ss.verifySplitKeys)
+        LOG("[vulkan shader key verify] %llu pre-narrowing keys checked, %llu violations, %llu split; %.1f ms",
+            (unsigned long long)ss.verifyChecks,(unsigned long long)ss.verifyViolations,
+            (unsigned long long)ss.verifySplitKeys,ss.verifyNs/1e6);
       LOG("[vulkan shader disk] hits %llu; memory reuses %llu; SPIR-V compiles %llu %.1f ms; decompile %.1f ms; loads %llu %.1f ms; saves %llu worker %.1f ms %.2f MiB; snapshots %.1f ms",
           (unsigned long long)ss.diskHits,(unsigned long long)ss.spirvReuseHits,(unsigned long long)ss.spirvCompiles,ss.spirvCompileNs/1e6,
           ss.decompileNs/1e6,(unsigned long long)ss.diskLoads,ss.diskLoadNs/1e6,
@@ -1401,6 +1481,7 @@ void swap() {
             (unsigned long long)faults,(unsigned long long)protectedPages);
         checks=g_stat_full_checks;uploads=g_stat_uploads;
       }
+      buffer_cache_report(double(R.frame-frame));
       // CPU-only reports leave per-draw counters/comparison clocks disabled.
       if (perf_enabled()) {
       double frames = double(R.frame-frame);
@@ -1568,17 +1649,20 @@ static std::string version_text(uint32_t v) {
   return std::to_string(VK_API_VERSION_MAJOR(v)) + "." + std::to_string(VK_API_VERSION_MINOR(v)) + "." +
          std::to_string(VK_API_VERSION_PATCH(v));
 }
-// driverVersion: vendor-specific packing (NVIDIA, Intel on Windows); others use Vulkan's
-static std::string driver_version_text(const VkPhysicalDeviceProperties &p) {
-  const uint32_t v = p.driverVersion;
-  if (p.vendorID == 0x10DE)
-    return std::to_string(v >> 22) + "." + std::to_string((v >> 14) & 0xff) + "." +
-           std::to_string((v >> 6) & 0xff) + "." + std::to_string(v & 0x3f);
+// driverVersion: vendor-specific packing, decoded as vulkaninfo does (report_header.cpp)
 #ifdef _WIN32
-  if (p.vendorID == 0x8086)
-    return std::to_string(v >> 14) + "." + std::to_string(v & 0x3fff);
+static constexpr bool kWindows = true;
+#else
+static constexpr bool kWindows = false;
 #endif
-  return version_text(v);
+static std::string driver_version_text(const VkPhysicalDeviceProperties &p) {
+  return reporthdr::driver_version(p.vendorID, p.driverVersion, kWindows);
+}
+// the GPU line of the performance report header: name, driver, Vulkan version ("" before init)
+std::string device_description() {
+  if (!R.properties.deviceName[0]) return "";
+  return reporthdr::vulkan_gpu(R.properties.deviceName, R.properties.vendorID, R.properties.driverVersion,
+                               R.properties.apiVersion, kWindows);
 }
 // How a GPU provides dynamic rendering, the renderer's only way of drawing: Vulkan 1.3 core, or
 // VK_KHR_dynamic_rendering on a Vulkan 1.1 / 1.2 driver. Shaders are SPIR-V 1.3 (Vulkan 1.1).
@@ -2345,6 +2429,11 @@ void run_main_loop() {
     overlay::set_density(SDL_GetWindowPixelDensity(R.tv.window));
     auto now = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(now - titleTime).count();
+    static auto polled = now;  // twice a second: frame interpolation's cap (and Android's display mode)
+    if (now - polled >= std::chrono::milliseconds(500) || polled == now) {
+      polled = now;
+      display_rate::poll(R.tv.window);
+    }
     if (elapsed >= 0.5 && !input::text_prompt_active()) {
       uint64_t frames = gx2::flips_presented();
       if (exitFrame && frame_count() >= exitFrame) {
@@ -2353,10 +2442,11 @@ void run_main_loop() {
       char title[160];
       int mode = interp::mode();
       std::snprintf(title, sizeof title,
-          "The Legend of Zelda: The Wind Waker HD (Vulkan) — %.0f fps%s · %gx%s",
+          "The Legend of Zelda: The Wind Waker HD (Vulkan) — %.0f fps%s%s · %gx%s",
           double(frames - titleFrames) / elapsed,
-          mode == 2 ? " · true 60" : mode == 1 ? " · 60 fps" : "",
+          mode ? " · " : "", mode ? interp::mode_name() : "",
           double(requested_res_scale()), fxaa_enabled() ? " · FXAA" : "");
+      if (gx2::uncapped()) std::strncat(title, " · UNCAPPED (debug)", sizeof title - std::strlen(title) - 1);
       SDL_SetWindowTitle(R.tv.window, title);
       titleFrames = frames;
       titleTime = now;

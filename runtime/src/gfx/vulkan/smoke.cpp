@@ -1,5 +1,8 @@
 // No game assets: assertions inspect data returned by the actual Vulkan device.
 #include "backend.h"
+#include "buffer_cache.h"
+#include "render_prof.h"
+#include "write_watch.h"
 #include "shaders.h"
 #include "gx2/gx2.h"
 #include "runtime.h"
@@ -29,7 +32,7 @@ struct Image {
 };
 std::vector<uint8_t> read_image(Surface& s,VkImageAspectFlags aspect,uint32_t bytes,uint32_t mip=0,uint32_t layer=0) {
  uint32_t w=std::max(1u,s.extent.width>>mip),h=std::max(1u,s.extent.height>>mip);
- Buffer b=create_buffer(size_t(w)*h*bytes,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+ Buffer b=create_readback_buffer(size_t(w)*h*bytes);
  transition_image(&s,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
  VkBufferImageCopy copy{};copy.imageSubresource={aspect,mip,layer,1};copy.imageExtent={w,h,1};
  auto cmd=command_buffer();vkCmdCopyImageToBuffer(cmd,s.image,s.layout,b.buffer,1,&copy);
@@ -52,7 +55,7 @@ void upload_arena_check() {
  require(a.buffer==b.buffer&&a.offset!=b.offset,"arena slices alias or fail pooling");
  require(a.offset%256==0&&b.offset%256==0,"arena alignment failed");
  memset(a.mapped,0x31,16);memset(b.mapped,0x72,16);
- Buffer out=create_buffer(32,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+ Buffer out=create_readback_buffer(32);
  VkBufferCopy ca{a.offset,0,16},cb{b.offset,16,16};
  auto cmd=command_buffer();vkCmdCopyBuffer(cmd,a.buffer,out.buffer,1,&ca);vkCmdCopyBuffer(cmd,b.buffer,out.buffer,1,&cb);
  VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.buffer=out.buffer;barrier.size=VK_WHOLE_SIZE;
@@ -62,10 +65,46 @@ void upload_arena_check() {
  require(R.uploadAllocations<=before+1,"arena allocated per slice");defer_buffer(out);command_buffer();flush();
  fprintf(stderr,"[renderer smoke] immutable upload arena GPU snapshots and fence reuse passed\n");
 }
+std::vector<uint8_t> read_buffer(VkBuffer source,VkDeviceSize offset,uint32_t size) {
+ Buffer out=create_readback_buffer(size);
+ VkBufferCopy copy{offset,0,size};auto cmd=command_buffer();vkCmdCopyBuffer(cmd,source,out.buffer,1,&copy);
+ VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.buffer=out.buffer;barrier.size=VK_WHOLE_SIZE;
+ vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr);
+ try {flush();std::vector<uint8_t> result(static_cast<uint8_t*>(out.mapped),static_cast<uint8_t*>(out.mapped)+size);defer_buffer(out);return result;}
+ catch(...){defer_buffer(out);throw;}
+}
+// Guest buffer cache (WWHD_VK_BUFFER_CACHE=1 only): GPU copies read back from the device after a hit,
+// an unannounced CPU write, a GX2Invalidate hint, a save-state reset and for native index data.
+void buffer_cache_check() {
+ if(!buffer_cache_enabled()){fprintf(stderr,"[renderer smoke] buffer cache off (WWHD_VK_BUFFER_CACHE=1 tests it)\n");return;}
+ const uint32_t size=8192,addr=mem::host_alloc(65536,4096);
+ for(uint32_t i=0;i<65536;++i)mem::ptr(addr)[i]=uint8_t(i*7+3);
+ auto gpu_equals_guest=[&](const UploadSlice& s,uint32_t at,uint32_t n,const char* message) {
+  auto bytes=read_buffer(s.buffer,s.offset,n);require(!memcmp(bytes.data(),mem::ptr(at),n),message);
+ };
+ UploadSlice a,b;
+ require(cached_guest_range(addr,size,rprof::kUpVertex,a),"buffer cache refused a static range");
+ gpu_equals_guest(a,addr,size,"buffer cache upload differs on the GPU");
+ require(cached_guest_range(addr,size,rprof::kUpVertex,b)&&b.buffer==a.buffer&&b.offset==a.offset,"unchanged range was not a hit");
+ require(cached_guest_range(addr,size/2,rprof::kUpUbo,b)&&b.offset==a.offset,"sub-range with the same start was not a hit");
+ mem::ptr(addr)[size-3]^=0xA5;  // unannounced CPU write: page fault, newer stamp
+ require(cached_guest_range(addr,size,rprof::kUpVertex,b)&&b.offset!=a.offset,"written range was not uploaded again");
+ gpu_equals_guest(b,addr,size,"re-uploaded range differs on the GPU");
+ gpu_equals_guest(b,addr,size,"re-uploaded range changed after a submission");
+ a=b;buffer_cache_guest_invalidate(1,addr+16,4);
+ require(cached_guest_range(addr,size,rprof::kUpVertex,b)&&b.offset!=a.offset,"GX2Invalidate did not refresh the range");
+ a=b;buffer_cache_invalidate_all();
+ require(cached_guest_range(addr,size,rprof::kUpVertex,b)&&b.offset!=a.offset,"save-state reset did not refresh the range");
+ gpu_equals_guest(b,addr,size,"range after reset differs on the GPU");
+ UploadSlice ix;bufcache::Entry* entry=nullptr;
+ require(cached_native_indices(addr+size,4096,ix,entry)&&entry&&entry->shadow.size()==4096&&!memcmp(entry->shadow.data(),mem::ptr(addr+size),4096),"index shadow differs");
+ gpu_equals_guest(ix,addr+size,4096,"cached index data differs on the GPU");
+ command_buffer();flush();require(R.garbageCacheRegions.empty(),"replaced buffer cache regions were not retired");
+ fprintf(stderr,"[renderer smoke] buffer cache hit, write fault, GX2Invalidate, reset and index readback passed\n");
+}
 void asynchronous_submission_check() {
  constexpr uint32_t submissions=10, payloadSize=16, regionSize=payloadSize*3;
- Buffer out=create_buffer(submissions*regionSize,VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+ Buffer out=create_readback_buffer(submissions*regionSize);
  std::array<UploadSlice,4> firstSlices{};
  for(uint32_t submission=0;submission<submissions;++submission) {
   auto a=allocate_upload(payloadSize,256),b=allocate_upload(payloadSize,256);
@@ -332,7 +371,7 @@ void dynamic_uniform_check(Surface& s) {
 }
 int renderer_smoke_test() {
  try {
-  mem::init();upload_arena_check();asynchronous_submission_check();set_res_scale(1);latch_res_scale();
+  mem::init();upload_arena_check();asynchronous_submission_check();buffer_cache_check();set_res_scale(1);latch_res_scale();
   {
    Image upload(16,16,0x1a,false,2,2);
    upload.s.addr=mem::host_alloc(65536,256);upload.s.mipAddr=mem::host_alloc(65536,256);
@@ -429,7 +468,7 @@ int renderer_smoke_test() {
    require(R.tv.swapchain!=VK_NULL_HANDLE,"smoke presentation did not create a swapchain");fprintf(stderr,"[renderer smoke] scan-buffer swapchain presentation passed\n");
   }
   // Ensure deferred objects left by readback and stack-owned images are actually reclaimed.
-  command_buffer();flush();require(R.garbageBuffers.empty()&&R.garbageImages.empty(),"deferred Vulkan resources were not reclaimed");
+  command_buffer();flush();require(R.garbageBuffers.empty()&&R.garbageImages.empty()&&R.garbageCacheRegions.empty(),"deferred Vulkan resources were not reclaimed");
   save_pipeline_cache();
   fprintf(stderr,"[renderer smoke] PASS: actual device upload/clear/blit/depth/triangle/present\n");return 0;
  }catch(const std::exception& e){fprintf(stderr,"[renderer smoke] FAIL: %s\n",e.what());try {command_buffer();flush();}catch(...){}return 1;}

@@ -11,6 +11,7 @@
 
 #include "mods.h"
 #include "runtime.h"
+#include "../motion/motion.h"
 
 namespace gfx { bool drc_overlay_hit(void* window, double x, double y); }  // gfx/display.mm
 
@@ -21,16 +22,21 @@ std::atomic<bool> g_captured{false};
 
 bool in_tv(NSEvent* e) { return g_tv && e.window == g_tv; }
 
+bool gyro_capture_active();
 void capture() {
     if (g_captured.exchange(true)) return;
-    CGAssociateMouseAndMouseCursorPosition(false);
-    [NSCursor hide];
+    if (!gyro_capture_active()) {  // else the pointer is captured and hidden already
+        CGAssociateMouseAndMouseCursorPosition(false);
+        [NSCursor hide];
+    }
     LOG("[mods] mouse captured (Esc or middle click releases)");
 }
 void release_now() {
     if (!g_captured.exchange(false)) return;
-    CGAssociateMouseAndMouseCursorPosition(true);
-    [NSCursor unhide];
+    if (!gyro_capture_active()) {  // else the gyro's capture keeps the pointer until the aim ends
+        CGAssociateMouseAndMouseCursorPosition(true);
+        [NSCursor unhide];
+    }
     mouse_button(0, false);
     mouse_button(1, false);
     LOG("[mods] mouse released");
@@ -38,6 +44,30 @@ void release_now() {
 }  // namespace
 
 bool mouse_captured() { return g_captured.load(std::memory_order_relaxed); }
+
+// the mouse as a gyro (motion/motion.h): while the game aims the pointer is captured, so that Steam
+// Input's gyro-to-mouse (or the mouse) never stops at the screen's edge; released when the aim ends.
+// Main thread, from the input timer (gfx/input.mm).
+static bool g_gyro_capture = false;
+namespace { bool gyro_capture_active() { return g_gyro_capture; } }
+void update_gyro_mouse() {
+    const bool want = g_tv && motion::mouse_drives_gyro() && !overlay::captures() && g_tv.isKeyWindow && NSApp.isActive &&
+                      !getenv("WWHD_NO_HOST_INPUT");
+    if (want && !g_gyro_capture) {
+        g_gyro_capture = true;
+        if (!g_captured.load()) {
+            CGAssociateMouseAndMouseCursorPosition(false);
+            [NSCursor hide];
+            LOG("[gyro] mouse captured while the game aims");
+        }
+    } else if (!want && g_gyro_capture) {
+        g_gyro_capture = false;
+        if (!g_captured.load()) {
+            CGAssociateMouseAndMouseCursorPosition(true);
+            [NSCursor unhide];
+        }
+    }
+}
 
 void mouse_release() {
     if ([NSThread isMainThread]) release_now();
@@ -70,6 +100,12 @@ void mouse_init(void* tv_window) {
                 return nil;
             }
             return e;
+        }
+        // the mouse as a gyro: movement in the game window (motion.h keeps it only while the game aims)
+        if ((e.type == NSEventTypeMouseMoved || e.type == NSEventTypeLeftMouseDragged || e.type == NSEventTypeRightMouseDragged ||
+             e.type == NSEventTypeOtherMouseDragged) && (in_tv(e) || mouse_captured() || g_gyro_capture)) {
+            motion::mouse_motion((float)e.deltaX, (float)e.deltaY);
+            if (motion::mouse_drives_gyro()) return nil;
         }
         if (!mouse_camera()) return e;
         if (!mouse_captured()) {

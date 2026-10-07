@@ -52,7 +52,7 @@ std::vector<uint8_t> read_rgba(Surface& source,bool encodeSrgb) {
  uint32_t width=source.extent.width,height=source.extent.height;
  if(!width||!height||size_t(width)>std::numeric_limits<size_t>::max()/height/bytes)throw std::runtime_error("invalid capture dimensions");
  size_t count=size_t(width)*height;
- Buffer buffer=create_buffer(count*bytes,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+ Buffer buffer=create_readback_buffer(count*bytes);
  try {
   transition_image(&source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
   VkBufferImageCopy region{};region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.imageExtent={width,height,1};auto cmd=command_buffer();vkCmdCopyImageToBuffer(cmd,source.image,source.layout,buffer.buffer,1,&region);

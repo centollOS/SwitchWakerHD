@@ -3,7 +3,8 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
-namespace interp { int mode(); void set_mode(int); }
+#include "../../interp.h"
+#include "gx2/gx2.h"
 namespace gfxvk {
 namespace {
 int normalize(int v) { return (v % 3 + 3) % 3; }
@@ -32,6 +33,10 @@ void set_present_mode(int m) {
 bool present_mode_from_env() { return env_present_mode() >= 0; }
 bool present_mode_offered(int m) { return m >= 0 && m < kPresentModes && (g_offered.load() >> m & 1); }
 void set_present_modes_offered(unsigned mask) { g_offered = mask | 1u << kPresentFifo; }
+int effective_present_mode() {
+    if (!gx2::uncapped()) return present_mode();
+    return present_mode_offered(kPresentImmediate) ? kPresentImmediate : present_mode_offered(kPresentMailbox) ? kPresentMailbox : kPresentFifo;
+}
 const char* present_mode_name(int m) { return m == kPresentMailbox ? "mailbox" : m == kPresentImmediate ? "immediate" : "fifo"; }
 int ao_mode() { return settings().ao.load(std::memory_order_relaxed); }
 void set_ao_mode(int v) { settings().ao.store(normalize(v),std::memory_order_relaxed); LOG("[gfx] AO mode %d",ao_mode()); }
@@ -49,7 +54,8 @@ bool graphics_hotkey(char k,bool activate) {
     GraphicsFeature f;
     switch(k) {
     case 'R': if(activate) { constexpr float scales[]={1,1.5f,2,3}; float cur=requested_res_scale(); unsigned next=0; for(unsigned i=0;i<4;++i) if(cur<scales[i]-0.01f) { next=i; break; } set_res_scale(scales[next]); } return true;
-    case '6': case '7': if(activate) { int m=k=='6'?1:2; interp::set_mode(interp::mode()==m?0:m); } return true;
+    case '6': if(activate) interp::toggle_fps(60); return true;  // 60 fps frame interpolation on/off
+    case '7': if(activate) interp::set_mode(interp::mode()==2?0:2); return true;
     case 'O': f=GraphicsFeature::AO; break;
     case 'M': f=GraphicsFeature::AOHires; break;
     case 'N': f=GraphicsFeature::Anisotropy; break;

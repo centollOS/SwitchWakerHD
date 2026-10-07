@@ -71,7 +71,7 @@ jobs:
       - name: Build runtime (Release, Metal) against placeholder guest code
         run: |
           python3 tools/recomp/stubgen.py build/gen-stub
-          cmake -S . -B build/rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DWWHD_RENDERER=METAL \
+          cmake -S . -B build/rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DWWHD_VERSION="$VERSION" -DWWHD_RENDERER=METAL \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DGEN_DIR="$PWD/build/gen-stub" -DWWHD_SETUP_GUI=ON \
             -DWWHD_BUNDLED_ZSTD=ON
           cmake --build build/rel
@@ -190,7 +190,7 @@ jobs:
       - name: Build runtime (Release, Vulkan + SDL3) with zig against placeholder guest code
         run: |
           python3 tools/recomp/stubgen.py build/gen-stub
-          cmake -S . -B build/rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DGEN_DIR="$PWD/build/gen-stub" \
+          cmake -S . -B build/rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DWWHD_VERSION="$VERSION" -DGEN_DIR="$PWD/build/gen-stub" \
             -DCMAKE_C_COMPILER="$ZBIN/zcc" -DCMAKE_CXX_COMPILER="$ZBIN/zcxx" \
             -DCMAKE_AR="$ZBIN/zar" -DCMAKE_RANLIB="$ZBIN/zranlib" \
             -DWWHD_BUNDLED_DEPS=ON -DCMAKE_PREFIX_PATH="$HOME/sdl3" -DWWHD_SETUP_GUI=ON \
@@ -290,7 +290,7 @@ jobs:
       - name: Build runtime (Release, Vulkan + SDL3) with llvm-mingw against placeholder guest code
         run: |
           python tools/recomp/stubgen.py build/gen-stub
-          cmake -S . -B build/rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DGEN_DIR="$(cygpath -m "$PWD/build/gen-stub")" \
+          cmake -S . -B build/rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DWWHD_VERSION="$VERSION" -DGEN_DIR="$(cygpath -m "$PWD/build/gen-stub")" \
             -DCMAKE_C_COMPILER="$LLVM_MINGW/bin/x86_64-w64-mingw32-clang.exe" \
             -DCMAKE_CXX_COMPILER="$LLVM_MINGW/bin/x86_64-w64-mingw32-clang++.exe" \
             -DCMAKE_RC_COMPILER="$LLVM_MINGW/bin/x86_64-w64-mingw32-windres.exe" \

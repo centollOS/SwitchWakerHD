@@ -124,6 +124,9 @@ void init() {
 
 void run_main_loop() { [NSApp run]; }
 
+// the MTLDevice's name, for reports (renderer.h Backend::device); "" before init
+std::string device_name() { return R.device ? std::string(R.device.name.UTF8String) : std::string(); }
+
 // ---------------------------------------------------------------- clears
 static void clear_surface(Surface* s, const float* rgba, bool clearDepth, float depth, bool clearStencil, uint32_t stencil,
                           uint32_t firstSlice = 0, uint32_t numSlices = 1) {

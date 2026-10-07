@@ -62,6 +62,9 @@ struct Backend {
     void (*set_fxaa)(bool);
     // effects this renderer offers right now (menu items are greyed out otherwise)
     bool (*feature_available)(int feature);
+    // the GPU for reports (performance report header): name, and for Vulkan the driver and Vulkan
+    // version; "" before the renderer started
+    std::string (*device)();
 };
 enum Feature : int { kFeatureAO, kFeatureAOHires, kFeatureAniso, kFeatureFXAA, kFeatureScaleFilter, kFeatureCapture,
                      kFeatureShaderHeadStart };
@@ -136,5 +139,6 @@ inline void set_aniso(bool v) { g_backend->set_aniso(v); }
 inline bool fxaa() { return g_backend->fxaa(); }
 inline void set_fxaa(bool v) { g_backend->set_fxaa(v); }
 inline bool feature_available(Feature f) { return g_backend->feature_available(f); }
+inline std::string device() { return g_backend && g_backend->device ? g_backend->device() : std::string(); }
 
 }  // namespace render

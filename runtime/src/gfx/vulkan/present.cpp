@@ -467,7 +467,7 @@ bool record_signature(int slot,Surface& source,bool sourceLinear) {
  }
  if(!g.signatureImage) {
   make_image(g.signatureImage,g.smallMemory,gfx::kSignatureW,gfx::kSignatureH,1);
-  g.buffer=create_buffer(gfx::kSignatureW*gfx::kSignatureH*4,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  g.buffer=create_readback_buffer(gfx::kSignatureW*gfx::kSignatureH*4);
  }
  transition_image(&source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
  auto cmd=command_buffer();
@@ -540,8 +540,7 @@ void record_present_capture(Screen& screen,uint32_t imageIndex) {
   const size_t width=screen.swapExtent.width,height=screen.swapExtent.height;
   if(!width||!height||width>std::numeric_limits<size_t>::max()/height/4)
    throw std::runtime_error("invalid swap-image capture dimensions");
-  capture.buffer=create_buffer(width*height*4,VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  capture.buffer=create_readback_buffer(width*height*4);
   capture.extent=screen.swapExtent;capture.format=screen.swapFormat;
   auto cmd=command_buffer();VkImageMemoryBarrier image{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   image.oldLayout=screen.layouts.at(imageIndex);image.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;

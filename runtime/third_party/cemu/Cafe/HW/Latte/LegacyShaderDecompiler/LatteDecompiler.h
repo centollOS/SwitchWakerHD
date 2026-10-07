@@ -256,6 +256,7 @@ struct LatteDecompilerOutputUniformOffsets
 
 struct LatteDecompilerOptions
 {
+    bool legacyGraphicPackUniforms{false}; // Optional host adapter: pre-2026 pixel support block
 	bool usesGeometryShader{ false };
 	// floating point math
 	bool strictMul{}; // if true, 0*anything=0 rule is emulated

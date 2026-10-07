@@ -6,6 +6,8 @@ body:
     attributes:
       value: |
         Thanks for reporting! For problems **while playing**, please use the "In-game bug" form instead (it asks for a save state).
+
+        If a maintainer closed your issue and the problem comes back, comment `/reopen` on it (as the person who opened it) and it reopens automatically.
   - type: textarea
     id: what
     attributes:

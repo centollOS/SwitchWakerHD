@@ -1,4 +1,4 @@
-// Exact CPU-write tracking for guest memory ranges (texture change detection).
+// Exact CPU-write tracking for guest memory ranges (texture change detection, Vulkan buffer cache).
 //
 // The game writes textures in place without always announcing it: GX2Invalidate(TEXTURE) on the exact
 // range is optional on the console (the GPU reads memory directly), and the game mostly sends the
@@ -27,6 +27,16 @@
 // Not covered: GPU writes into guest memory (neither renderer has any: render targets stay in GPU
 // textures, marked gpuWritten). If page protection is unavailable, active() is false and the renderers
 // keep their sampling fallback.
+//
+// Explicit guest signals (hints): DCFlushRange/DCStoreRange and GX2Invalidate of vertex or uniform
+// buffers say "this range was written". Once a consumer calls enable_hints(), hint() stamps the pages
+// in a second stamp array; changed_since() checks both arrays, written_since() (textures) only the
+// fault stamps, so texture checks do not change. Hints are redundant with the faults for CPU writes
+// into armed pages; they are the explicit second line (Cemu's buffer cache uses them alone).
+//
+// write_seq() advances after every stamp (fault, host write, hint) is stored: a consumer that saw no
+// change of a range while write_seq() read S, and reads S again later, knows that nothing was stamped
+// in between and can skip the page scan.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -43,6 +53,14 @@ bool active();
 // this call. Hash the range only after arming it.
 uint64_t arm(uint32_t addr, uint32_t size);
 bool written_since(uint32_t addr, uint32_t size, uint64_t stamp);
+// written_since, or a hint for one of the pages newer than stamp
+bool changed_since(uint32_t addr, uint32_t size, uint64_t stamp);
+uint64_t write_seq();
+
+// Explicit guest signals (see above). hint() is a no-op until enable_hints(); any thread. Ranges of
+// 256 MiB or more ("everything") are ignored, as GX2Invalidate's texture handling does.
+void enable_hints();
+void hint(uint32_t addr, uint32_t size);
 
 // Brackets a kernel write (fread/ReadFile) into guest memory: the pages stay writable meanwhile and
 // count as written.
@@ -56,5 +74,9 @@ struct HostWrite {
 
 // statistics for the renderers' periodic report: write faults and pages protected since the last call
 void take_stats(uint64_t& faults, uint64_t& protectedPages);
+// hints since the last call: calls and bytes covered
+void take_hint_stats(uint64_t& calls, uint64_t& bytes);
+// pages arm() failed to protect so far (they are reported as written on every check instead)
+uint64_t protect_failures();
 
 }  // namespace wwatch

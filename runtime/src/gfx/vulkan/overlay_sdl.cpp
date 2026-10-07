@@ -8,6 +8,7 @@
 #include "gfx/display_modes.h"
 #include "settings.h"
 #include "input.h"
+#include "interp.h"
 #include "overlay/hostui.h"
 #include "platform/host.h"
 #include "platform/perf_hint.h"
@@ -22,7 +23,6 @@
 #include <mutex>
 #include <vector>
 
-namespace interp { int mode(); void set_mode(int m); bool paced_interpolation(); void set_paced_interpolation(bool on); }
 
 namespace hostui {
 namespace {
@@ -165,11 +165,14 @@ void graphics_changed() {
     put("fxaa", {"WWHD_FXAA"}, gfxvk::fxaa_enabled() ? "1" : "0");
 #ifdef __ANDROID__
     // the player's choice: the phone pauses interpolation by itself (platform/perf_hint.cpp)
-    put("fps60", {"WWHD_INTERP", "WWHD_TRUE60"}, interp::mode() == 2 ? "2" : perf_hint::fps60_chosen() ? "1" : "0");
+    put("fps60", {"WWHD_INTERP", "WWHD_TRUE60", "WWHD_INTERP_FPS"}, interp::mode() == 2 ? "2" : perf_hint::fps60_chosen() ? "1" : "0");
 #else
-    put("fps60", {"WWHD_INTERP", "WWHD_TRUE60"}, std::to_string(interp::mode()));
+    put("fps60", {"WWHD_INTERP", "WWHD_TRUE60", "WWHD_INTERP_FPS"}, std::to_string(interp::mode()));
 #endif
-    put("fps60Paced", {"WWHD_INTERP_PACED"}, interp::paced_interpolation() ? "1" : "0");
+    // (fps60 is the mode, from before 120/240 fps; interpFps the interpolation's frame rate)
+    put("interpFps", {"WWHD_INTERP_FPS"}, std::to_string(interp::fps()));
+    put("fps60Paced", {"WWHD_INTERP_PACED"}, interp::paced_interpolation_at(60) ? "1" : "0");
+    put("fpsHighPaced", {"WWHD_INTERP_PACED"}, interp::paced_interpolation_at(120) ? "1" : "0");
     put("scaleFilter", {"WWHD_SCALE_FILTER"}, std::to_string(gfxvk::scale_filter()));
     put("vkPresentMode", {"WWHD_VK_PRESENT_MODE"}, std::to_string(gfxvk::present_mode()));
     save_locked();
@@ -189,8 +192,10 @@ void load_saved_options() {
     if (saved("aoHires", {"WWHD_AO_HIRES"})) gfxvk::set_ao_hires(num("aoHires") != 0);
     if (saved("aniso", {"WWHD_ANISO"})) gfxvk::set_aniso(num("aniso") != 0);
     if (saved("fxaa", {"WWHD_FXAA"})) gfxvk::set_fxaa(num("fxaa") != 0);
-    if (saved("fps60", {"WWHD_INTERP", "WWHD_TRUE60"})) interp::set_mode((int)num("fps60"));
-    if (saved("fps60Paced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation(num("fps60Paced") != 0);
+    if (saved("interpFps", {"WWHD_INTERP_FPS"})) interp::set_fps((int)num("interpFps"));
+    if (saved("fps60", {"WWHD_INTERP", "WWHD_TRUE60", "WWHD_INTERP_FPS"})) interp::set_mode((int)num("fps60"));
+    if (saved("fps60Paced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation_at(60, num("fps60Paced") != 0);
+    if (saved("fpsHighPaced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation_at(120, num("fpsHighPaced") != 0);
     if (saved("scaleFilter", {"WWHD_SCALE_FILTER"})) gfxvk::set_scale_filter((int)num("scaleFilter"));
     if (saved("vkPresentMode", {"WWHD_VK_PRESENT_MODE"})) gfxvk::set_present_mode((int)num("vkPresentMode"));
     // GamePad screen (display_modes.h); the start-up test overrides after the saved choices
@@ -297,6 +302,7 @@ void set_pro_controller(bool on) {
     show_drc(!on);
 }
 const char* name() { return "SDL"; }
+void set_clipboard(const std::string& text) { SDL_SetClipboardText(text.c_str()); }
 
 }  // namespace hostui
 #endif  // WWHD_SDL_HOST

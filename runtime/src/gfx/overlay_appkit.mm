@@ -76,6 +76,11 @@ void set_pro_controller(bool on) {
     gfx::show_drc_window(!on);
 }
 const char* name() { return "AppKit"; }
+void set_clipboard(const std::string& text) {
+    NSPasteboard* pb = [NSPasteboard generalPasteboard];
+    [pb clearContents];
+    [pb setString:[NSString stringWithUTF8String:text.c_str()] forType:NSPasteboardTypeString];
+}
 void run_posted() {}
 void load_saved_options() {}
 

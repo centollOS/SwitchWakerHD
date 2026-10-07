@@ -4,6 +4,7 @@
 #include "mouse_sdl.h"
 #include "../input.h"
 #include "../input_map.h"
+#include "../motion/motion.h"
 #include "../rumble.h"
 #include "../runtime.h"
 #include "../savestate.h"
@@ -12,6 +13,7 @@
 #include "../overlay/overlay.h"
 #include "../overlay/text_entry.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -252,12 +254,40 @@ static bool rumble_quit_watch(void*,SDL_Event* event){
  return true;
 }
 bool has_rumble(){return true;}
+// ---- motion sensors (motion/motion.h) ------------------------------------------------------------
+// Controllers with a gyro and an accelerometer (DualSense, DualShock 4, Switch Pro, Joy-Con, Steam Deck,
+// ...) send both through SDL; the sensors run only while the gyro source is "controller" (they cost
+// battery and bandwidth). A gyro sample goes to motion.h with the latest accelerometer sample.
+static bool g_sensors_on=false;
+static std::map<SDL_JoystickID,std::array<float,3>> g_accel;
+static bool has_motion(SDL_Gamepad* pad){return SDL_GamepadHasSensor(pad,SDL_SENSOR_GYRO)&&SDL_GamepadHasSensor(pad,SDL_SENSOR_ACCEL);}
+static void set_sensors_locked(SDL_Gamepad* pad,bool on){
+ if(!has_motion(pad))return;
+ SDL_SetGamepadSensorEnabled(pad,SDL_SENSOR_GYRO,on);SDL_SetGamepadSensorEnabled(pad,SDL_SENSOR_ACCEL,on);
+}
+static void update_sensors(){
+ const bool want=motion::wants_controller_sensors();
+ std::lock_guard lk(g_pads_mu);
+ int n=0;for(auto [id,pad]:g_controllers)if(SDL_GamepadConnected(pad)&&has_motion(pad))n++;
+ motion::set_gyro_controllers(n);
+ if(want==g_sensors_on)return;
+ g_sensors_on=want;g_accel.clear();
+ for(auto [id,pad]:g_controllers)set_sensors_locked(pad,want);
+ if(want)LOG("[gyro] controller motion sensors on (%d controller(s) with a gyro)",n);
+}
+static void sensor_event(const SDL_GamepadSensorEvent& e){
+ if(e.sensor==SDL_SENSOR_ACCEL){g_accel[e.which]={e.data[0],e.data[1],e.data[2]};return;}
+ if(e.sensor!=SDL_SENSOR_GYRO)return;
+ auto a=g_accel.find(e.which);if(a==g_accel.end())return;
+ motion::controller_sample((uint64_t)e.which,e.sensor_timestamp,e.data,a->second.data());
+}
 static void open_controller(SDL_JoystickID id){
  std::lock_guard lk(g_pads_mu);
  if(g_controllers.contains(id))return;
  if(auto* pad=SDL_OpenGamepad(id)){g_controllers[id]=pad;
   // asking for a rumble of zero intensity also tells us whether the controller has a motor
-  if(SDL_RumbleGamepad(pad,0,0,0))g_rumble_controllers.insert(id);}
+  if(SDL_RumbleGamepad(pad,0,0,0))g_rumble_controllers.insert(id);
+  if(g_sensors_on)set_sensors_locked(pad,true);}
 }
 void init(){
  input_map::load_startup();
@@ -365,7 +395,8 @@ void handle_event(const SDL_Event& event){
  if(overlay::captures())mods::update_mouse();
  else if(mods::handle_mouse_event(event))return;
  if(event.type==SDL_EVENT_GAMEPAD_ADDED&&!getenv("WWHD_NO_CONTROLLERS"))open_controller(event.gdevice.which);
- if(event.type==SDL_EVENT_GAMEPAD_REMOVED){std::lock_guard lk(g_pads_mu);auto i=g_controllers.find(event.gdevice.which);if(i!=g_controllers.end()){SDL_CloseGamepad(i->second);g_controllers.erase(i);}g_rumble_controllers.erase(event.gdevice.which);g_rumble_sent.erase(event.gdevice.which);}
+ if(event.type==SDL_EVENT_GAMEPAD_REMOVED){std::lock_guard lk(g_pads_mu);auto i=g_controllers.find(event.gdevice.which);if(i!=g_controllers.end()){SDL_CloseGamepad(i->second);g_controllers.erase(i);}g_rumble_controllers.erase(event.gdevice.which);g_rumble_sent.erase(event.gdevice.which);g_accel.erase(event.gdevice.which);motion::controller_gone(event.gdevice.which);}
+ if(event.type==SDL_EVENT_GAMEPAD_SENSOR_UPDATE){if(!getenv("WWHD_NO_HOST_INPUT")&&!overlay::blocks_input())sensor_event(event.gsensor);return;}
  if(event.type==SDL_EVENT_WINDOW_FOCUS_LOST)release_keys();
  if(text_entry_event(event))return;
  if(g_done){
@@ -422,6 +453,7 @@ void handle_event(const SDL_Event& event){
 void update(){
  mods::update_mouse();
  apply_rumble();
+ update_sensors();
  std::function<void(bool,std::u16string)> cancelled;
  {std::lock_guard lk(g_mu);if(g_pending&&!g_done){g_done=std::exchange(g_pending,nullptr);g_text=std::move(g_initial);g_max_len=g_pending_max_len;memset(g_keys,0,sizeof g_keys);if(!g_prompt_window)g_prompt_window=SDL_GetKeyboardFocus();if(g_prompt_window){g_previous_title=SDL_GetWindowTitle(g_prompt_window);if(SDL_StartTextInput(g_prompt_window)){other_windows_text_input(true);show_prompt();LOG("[input] the game asks for text: type it in a game window (shown in the window title), Enter confirms, Escape cancels; WWHD_SWKBD_TEXT=<text> answers automatically");}else{LOG("[input] text input unavailable (%s); set WWHD_SWKBD_TEXT=<text>",SDL_GetError());cancelled=std::exchange(g_done,nullptr);}}else{LOG("[input] text input: no window to type in; set WWHD_SWKBD_TEXT=<text>");cancelled=std::exchange(g_done,nullptr);}}}
  if(cancelled)cancelled(false,{});
@@ -455,6 +487,7 @@ void update(){
   stick(SDL_GAMEPAD_AXIS_LEFTX,SDL_GAMEPAD_AXIS_LEFTY,kPadLSUp,kPadLSDown,kPadLSLeft,kPadLSRight);stick(SDL_GAMEPAD_AXIS_RIGHTX,SDL_GAMEPAD_AXIS_RIGHTY,kPadRSUp,kPadRSDown,kPadRSLeft,kPadRSRight);
  }
  auto state=input_map::controller_state(input_map::current(),v);std::lock_guard lk(g_mu);std::copy(std::begin(v),std::end(v),g_values);g_pad=state;
+ if(!overlay::blocks_input()&&!getenv("WWHD_NO_HOST_INPUT"))motion::poll_recenter(v,g_keys);
 }
 void prompt_text(const std::u16string& initial,int max_len,std::function<void(bool,std::u16string)> done){std::lock_guard lk(g_mu);g_initial=initial;g_pending_max_len=std::max(0,max_len);if(g_initial.size()>(size_t)g_pending_max_len)g_initial.resize(g_pending_max_len);g_pending=std::move(done);}
 // debug: WWHD_PRESS=1000-1010:8000,1500-1505:0008 holds VPAD buttons (hex) during TV frame ranges

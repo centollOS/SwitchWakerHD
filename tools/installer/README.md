@@ -62,6 +62,20 @@ release also: remove the downloaded compiler, add a shortcut), and error screens
 log. On macOS it first checks for Apple's Command
 Line Tools and offers Apple's installer, as the Terminal launcher does.
 
+Finding the release folder: the program looks for `tools/installer/setup.py` next to itself (macOS: next
+to `Wind Waker HD.app`). A downloaded app opened from Finder on macOS runs from a random read-only copy
+of the bundle alone (App Translocation, `/private/var/folders/.../AppTranslocation/<id>/d/`), so it
+asks Security.framework (`SecTranslocateIsTranslocatedURL`, `SecTranslocateCreateOriginalPathForURL`,
+loaded at run time) where the original bundle is and uses the folder around it. The question is about
+the bundle itself: those functions fail for paths that do not exist, such as `Contents/Resources`
+(issue #48). The terminal launcher then removes the quarantine from the release folder, so later starts
+are not translocated. Before the setup starts, the data folder is checked for writing (a disk image, a
+read-only drive). Every "Setup could not continue" screen says what failed (path, operation, error
+text) and what to do, offers to show the folder involved, and appends the same text to
+`data/setup-window.log` (or, when there is no writable release folder, `~/Library/Logs/Wind Waker HD
+setup.log` on macOS, `%TEMP%\Wind Waker HD setup.log` on Windows, `$TMPDIR/wind-waker-hd-setup.log`
+on Linux).
+
 Build: `-DWWHD_SETUP_GUI=ON` adds the `wwhd-setup` target (`cmake/SetupGui.cmake`). SDL3 is linked
 statically on macOS and Windows (pinned source, release toolchain); Linux uses the shared SDL3 the
 release ships in `sdk/runtime`. The ImGui SDL3 and SDL_Renderer backends are the unmodified ones of

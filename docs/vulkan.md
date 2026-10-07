@@ -106,8 +106,9 @@ If the loader does not discover MoltenVK, set `VK_DRIVER_FILES` to its installed
 ## Current scope
 
 This backend is under development. It records real Vulkan draw calls and translates
-Latte shaders to SPIR-V. Guest GX2Flush queues work using four fenced submission
-slots; DrawDone, readbacks and final presentation still wait for completion. Each
+Latte shaders to SPIR-V. Guest GX2Flush, GX2DrawDone and presentation queue work using four fenced
+submission slots (see "CPU/GPU overlap" below); readbacks, captures and save states wait for
+completion. Each
 slot retains its command/descriptor pools and upload arena until its fence completes,
 so memory use is higher than the original single-slot implementation.
 Geometry shaders, transform feedback, multisampled guest surfaces and some format
@@ -131,6 +132,49 @@ an isolated directory; `WWHD_VK_SHADER_CACHE=0` disables disk storage. An explic
 directory overrides `WWHD_SHADER_CACHE=0`. Canonical GLSL and stage deduplication
 remains active in memory when disk storage is disabled. Fresh decompiler metadata
 is kept for every guest variant; identical final shader programs share compilation.
+
+Shader keys have two levels, like Cemu's base and auxiliary shader hashes but exact
+about what the GLSL translation reads (`gfx/vulkan/shaders.cpp`, `gather_linkage` and
+`variant_hash`). The linkage key is the program, the fetch shader, the pixel-shader input
+table (input count, position import, parameter generation, and per input its semantic,
+flat and noperspective bits), the vertex input semantics, and for vertex shaders the
+viewport-transform enable, half Z, points and streamout enable; for pixel shaders the
+output mask (`CB_SHADER_MASK`), the alpha test and the front-face import. The variant key
+adds, for the texture units the program samples, their dimension and integer format, the
+semantic ids of the parameters a vertex shader exports, and streamout strides when it writes
+streamout; the units and exports are recorded from the program's first translation.
+Render-target formats, samplers, buffer addresses and units the program does not sample
+are not in the key. Keys that still translate to an identical shader (GLSL, resource
+mapping, uniform offsets, descriptor ranks) share one shader and its pipelines.
+`WWHD_VK_SHADER_KEY_VERIFY=1` also computes the previous, wider key on every lookup and,
+once per distinct wider key, translates again under the current registers and compares
+the result with the shader the narrow key returned; any difference is logged as
+`[vulkan shader key] VIOLATION` and counted in the stats (`=N` checks one wider key in N).
+Sharing shaders whose translation is identical is the idea of PR #46 by rhemfur, who found that
+5,072 translations in Outset (Galaxy S25) had only 686 distinct GLSL texts and that the resulting
+pipelines (7,500 in two minutes, about 0.12 MB each) eventually exhausted memory.
+
+Measured on macOS (MoltenVK), 60-second scripted runs from a save state with empty shader caches,
+devel against the narrow keys (PR #46 alone in brackets):
+
+| | before | PR #46 | narrow keys |
+| --- | --- | --- | --- |
+| Outset translations / pipelines | 6,127–6,670 / 3,229–3,525 | 6,670 / 339 | 569 / 204 |
+| Windfall translations / pipelines | 4,337–4,981 / 2,323–2,672 | 4,981 / 501 | 829 / 236 |
+| Frames over 50 ms, Outset / Windfall | 21–26 / 18 | | 15–16 / 11–13 |
+
+Peak resident memory was 100–115 MB lower. Without a frame limit render-thread CPU time fell by
+11–12% and the 99th-percentile frame interval from 39 to 20 ms (Outset) and 26 to 15 ms (Windfall);
+with 8–10 ms of artificial render-thread load at paced 60 fps, CPU time fell by 4–7% and slow
+frames by about 40%. The verify mode found no violations and the Khronos validation layer reported
+nothing.
+
+Pipelines are keyed by the two shader identities, the fetch layout, topology, attachment
+formats, vertex strides and the fixed-function state the pipeline bakes in, normalized so
+that ignored state (blend words of attachments that do not blend, stencil words with the
+stencil test off, depth bias words with the bias off) does not create pipelines. The key is
+a fixed-size struct hashed and compared as bytes. Descriptor sets are cached per
+submission by a 64-bit hash of layout and descriptors, confirmed by comparing them.
 
 The versioned cache checks the compiler recipe, exact shader source, checksum,
 record bounds and SPIR-V structure. Incompatible or corrupt files become misses.
@@ -174,12 +218,15 @@ measured about 30 FPS with argument buffers and 30–40 FPS with direct bindings
 these are historical measurements from before the later CPU fixes. The setting is documented in
 [MoltenVK configuration parameters](https://github.com/KhronosGroup/MoltenVK/blob/main/Docs/MoltenVK_Configuration_Parameters.md).
 
-## Opt-in CPU experiments
+## CPU paths (on by default since 2026-10-07; formerly "opt-in CPU experiments")
 
-The following paths are off by default. Each requires its environment value
-to be exactly `1`; other values leave that path disabled. They can be combined,
-but timing comparisons should use the same binary, guarded saved scene, graphics
-settings, warmed caches, and a quiet host, with validation disabled.
+The following paths are on by default on every platform (`runtime/src/main.cpp`,
+`default_vulkan_cpu_paths`; before 2026-10-07 only in the Android port). Each is active only when its
+environment value is exactly `1`; set it to `0` to turn that path off. Together they cut the
+render-thread CPU time by 8-14% on an M3 Max and by about a quarter on a Galaxy S25 Ultra; see
+`docs/performance.md` ("Desktop CPU/GPU overlap and CPU path defaults") for the per-path
+measurements. Timing comparisons should use the same binary, saved scene, graphics settings, warmed
+caches and a quiet host, with validation disabled.
 
 For timing with detailed per-draw instrumentation disabled, unset
 `WWHD_VK_STATS` and set `WWHD_VK_CPU_ONLY_STATS=1`. This reports render-thread
@@ -197,7 +244,7 @@ wait timers disabled. CPU time excludes sleeping and GPU waits.
 | `WWHD_VK_SHADER_ADDRESS_MEMO` | Texture address words 2/3 no longer invalidate the last Vulkan shader lookup. Other register classification is unchanged; textures and attachment aliases are resolved afresh, and context/save-state loads invalidate shader memoization. |
 | `WWHD_VK_FETCH_MEMO` | Reuses the last fetch-program lookup within one frame after fresh header/range validation, preserving the existing once-per-frame program-byte hashing contract and save-state reset. |
 | `WWHD_VK_SPECIALIZE_INDICES` | Selects a typed endian/restart reader once per draw and directly fills expanded primitive indices. Native index eligibility and the final immutable index extent scan remain unchanged; wrapped big-endian guest ranges use the original reader. |
-| `WWHD_VK_SHADER_STATE_MEMO` | Retains four exact gathered-state hash entries per shader stage. Every lookup freshly gathers all existing masked words and compares every active byte, count, and program hash seed. Misses use the identical hash mixer; save-state and sentinel calls clear the memo. |
+| `WWHD_VK_SHADER_STATE_MEMO` | Retains four exact gathered linkage-key entries per shader stage. Every lookup freshly gathers all linkage words and compares every active byte, count, and program hash seed. Misses use the identical hash mixer; save-state and sentinel calls clear the memo. |
 | `WWHD_VK_SKIP_VERTEX_BINDS` | Omits only identical host vertex buffer/offset bindings after fresh snapshot preparation. Sixteen binding slots are guarded by command buffer, submission generation, and pass resets. Index bindings remain fresh. Combine with exact vertex snapshot reuse to make unchanged slice identities available. |
 | `WWHD_VK_SAMPLER_MEMO` | Reuses immutable sampler handles after exact device, fresh sampler-word, compare/integer, and effective anisotropy matching. Texture preparation still runs before lookup. |
 | `WWHD_VK_SPARSE_HASH_MEMO` | Only used where page write tracking is unavailable (texture changes are detected by `runtime/src/write_watch.h`; the sparse check is its fallback). Compares all freshly read, ordered sparse texture samples before reusing their hash. Full texture checks, invalidation, and uploads remain unchanged. Retains 64 entries by default; `WWHD_VK_SPARSE_HASH_ENTRIES=256` selects a bounded 16 MiB sample store. Oversized sample sets stream through the original mixer. |
@@ -242,6 +289,77 @@ anisotropy, and inspected actual swapchain capture. Vertex bind elision skips
 roughly 4,124 calls per frame in the saved scene while retaining fresh byte checks.
 State memo differential QA passed 100,000 cases with UBSan. ASan could not run:
 a process sample showed a runtime initializer deadlock before `main`.
+
+## Guest buffer cache
+
+The guest buffer cache replaces the per-draw copies of guest vertex arrays, index arrays and uniform
+blocks into the upload arena with persistent GPU copies keyed by guest address
+(`runtime/src/gfx/vulkan/buffer_cache_core.h`, glue in `buffer_cache.cpp`). It is **on by default on
+macOS** and **off on Windows, Linux and Android**; `WWHD_VK_BUFFER_CACHE=1` turns it on and
+`WWHD_VK_BUFFER_CACHE=0` off on any platform.
+
+**Testers on Windows and Linux (and Android):** it stays opt-in there until it has been checked on
+those hosts, where the page-fault handling it relies on costs more and Linux limits the number of
+protected regions. Please run a normal play session, or the benchmark scene, once with
+`WWHD_VK_BUFFER_CACHE_VERIFY=1 WWHD_VK_CPU_ONLY_STATS=1` and report:
+- the `[vulkan buffer cache] verify:` lines (the mismatch count must stay 0; any `VERIFY MISMATCH` line
+  is a bug, please include it),
+- the `page write faults` count of the `[vulkan textures]` lines and the `protect failures` count of
+  the `[vulkan buffer cache]` lines,
+- and, if you can, render-thread CPU and FPS with `WWHD_VK_BUFFER_CACHE=1` against `=0`
+  (`tools/bench/run_bench.py --variant off:WWHD_VK_BUFFER_CACHE=0 --variant on:WWHD_VK_BUFFER_CACHE=1`).
+
+- **Validity without hashing.** An entry is current while none of its pages has a newer stamp in the
+  page write tracker (`runtime/src/write_watch.h`, shared with the texture checks): the upload arms
+  (write-protects) the range before reading it, and the first CPU write to such a page faults once and
+  stamps it. Kernel writes are bracketed by `HostWrite` (FSReadFile). Explicit guest signals stamp a
+  separate hint array that only the buffer cache reads: `DCFlushRange`, `DCFlushRangeNoSync`,
+  `DCStoreRange`, `DCStoreRangeNoSync` and `GX2Invalidate` of attribute or uniform buffers (in command
+  order). A save-state load drops every entry. Nothing writes guest memory from the GPU (no stream-out;
+  render targets stay GPU images). Checking an entry costs one atomic load when nothing was stamped
+  anywhere since its last check, otherwise one stamp comparison per page.
+- **What is cached.** Vertex-array prefixes, guest uniform blocks (FULL_CBANK shaders), native index
+  data (with a CPU shadow and a memoized index extent, so draws never rescan it) and converted index
+  data (big-endian, fans, quads, loops, other restart markers: a hit skips the conversion). A request
+  with the same start and at most the cached size hits; a longer one uploads the longer range; ranges
+  with other starts are separate entries. Packed uniform variables stay in the arena.
+- **Dynamic ranges.** A range re-uploaded because of writes three times, each within four frames of the
+  previous upload, is no longer armed and takes the arena path; it is tried again after 64 frames,
+  doubling up to 2048.
+- **Memory.** 32 MiB host-visible blocks, device-local when the device offers it (unified memory,
+  resizable BAR or the 256 MiB BAR window, of which at most half is used). `WWHD_VK_BUFFER_CACHE_MB`
+  sets the budget (default 256). Replaced regions are retired with the recording submission and freed
+  after its fence. Entries unused for 1800 frames are evicted, the least recently used ones when over
+  budget.
+- **Verify mode.** `WWHD_VK_BUFFER_CACHE_VERIFY=1` (implies the cache) compares every hit with freshly
+  read guest bytes (converted indices: a fresh conversion) and logs `VERIFY MISMATCH` with address and
+  size; a difference caused by a write racing the check (newer stamp) is counted as "raced" instead.
+- `WWHD_VK_BUFFER_CACHE_HINTS=0` ignores the DCFlush/GX2Invalidate hints (write faults only).
+
+With `WWHD_VK_CPU_ONLY_STATS=1` the 120-frame report adds a `[vulkan buffer cache]` line: lookups,
+hit rate, uploads, stale entries, dynamic bypasses, resident MiB, hints and protect failures; the
+`[vulkan textures]` line shows the page write faults (textures and buffers together).
+
+Measured 2026-10-07 on an Apple M3 Max (Vulkan via MoltenVK), against the then-new desktop defaults
+(lazy DrawDone, async present, the 15 CPU paths), 6 interleaved runs per variant, hidden windows,
+`tools/bench/run_bench.py` (state load at frame 450, 40 s scripted walk), medians:
+
+| Scene, mode | Render-thread CPU ms/frame off → on | Swaps/s off → on | Uploads MiB/frame off → on |
+| --- | --- | --- | --- |
+| Outset, 30 fps uncapped | 5.05 → 4.65 | 190.5 → 197.1 | 18.1 → 10.3 |
+| Windfall, 30 fps uncapped | 5.32 → 4.41 | 187.5 → 210.2 | 25.7 → 9.2 |
+| Outset, 60 fps paced | 5.32 → 4.98 | 59.7 → 59.7 | 18.2 → 10.3 (hold frames too) |
+| Windfall, 60 fps paced | 5.48 → 4.75 | 59.7 → 59.7 | 25.9 → 9.3 (hold frames too) |
+
+Page write faults rise from about 2 to 9-15 per frame (about 3.7 µs each on this machine). With an
+artificial 10 ms render-thread load (Windfall, paced 60, visible windows) the cache raised swaps/s from
+57.8 to 59.2 and drawn in-between frames from 99.2% to 100%, and lowered the p95 swap interval from
+20.6 to 19.0 ms. The snapshot-reuse defaults (`WWHD_VK_REUSE_VERTEX_SNAPSHOTS`,
+`WWHD_VK_VERTEX_HISTORY_REUSE`, `WWHD_VK_REUSE_UNIFORM_SNAPSHOTS`) are complementary: the cache supersedes
+them for the ranges it serves; they still trim the arena copies of dynamic ranges (turning them off with
+the cache on costs 0.06-0.2 ms/frame). What remains in the arena (about 8.5 MiB/frame of vertex data)
+is ranges the game rewrites every frame; they were invalidated by write faults, not by the hints.
+Verify mode found 0 mismatches in 142 million checked hits (330 s per scene, 30 and 60 fps).
 
 ## Live graphics controls
 
@@ -296,6 +414,73 @@ printed LR/SP values do not establish that deeper guest stack frames match. Load
 later can succeed if the worker threads reach compatible waits. Failed loads do not
 bypass these checks or establish a valid benchmark starting point.
 
+## The CPU never reads mapped upload memory, unless it is host-cached
+
+The upload arena (`allocate_upload`) and the buffer cache's blocks are host-visible memory the CPU
+writes and the GPU reads. On discrete GPUs that memory is uncached or write-combined (plain
+host-visible system memory, or device-local BAR / resizable-BAR memory), and CPU reads from it are
+about 100 times slower than cached reads. On Apple silicon (MoltenVK) all memory is cached, so such
+reads do not show up there. Issue #44: v0.2.4 turned the vertex snapshot reuse paths on everywhere,
+and their comparisons against `slice.mapped` cost an RX 6700 XT 57 ms per frame.
+
+Rule: mapped upload memory is only written. Every reuse check or scan uses a CPU copy in ordinary heap
+memory, kept next to the slice and filled before the slice is written from it (so both hold the same
+bytes even when the game writes the range meanwhile):
+
+- vertex snapshots and vertex windows (`WWHD_VK_REUSE_VERTEX_SNAPSHOTS`, `WWHD_VK_VERTEX_HISTORY_REUSE`):
+  `vertex_snapshot_history.h`;
+- uniform snapshots (`WWHD_VK_REUSE_UNIFORM_SNAPSHOTS`): `uniform_snapshot.h`;
+- native index extents: the buffer cache entry's shadow, or a CPU copy the arena slice is written from;
+- converted indices are built in a CPU vector and scanned there.
+
+`runtime/tools/snapshot_cache_test.cpp` (CTest `snapshot_caches`) poisons every mapped byte right after
+it is written and checks that the caches still find exactly the expected reuse hits. The only read of
+mapped GPU-input memory left is the buffer cache's opt-in diagnostic `WWHD_VK_BUFFER_CACHE_VERIFY=1`.
+Buffers the CPU is meant to read (captures, the GamePad overlay signatures) come from
+`create_readback_buffer`, which prefers host-cached memory.
+
+**Unless it is host-cached.** Where the arena's memory type is both `HOST_CACHED` and `HOST_COHERENT`,
+CPU reads cost what heap reads cost and the copies are pure overhead (on an M3 Max about 0.2 ms of
+render-thread time per frame at Outset, 60 fps). That is every memory type on Apple silicon (MoltenVK),
+and the usual case on UMA drivers (many Android GPUs, integrated GPUs that expose cached host memory).
+`allocate_upload` records the type of each arena block it creates (`R.uploadCached`, true only while
+every block is CACHED and COHERENT) and sets `R.uploadReadsDirect`; then:
+
+- the reuse caches keep no copy: an entry's slice is written from the fresh guest bytes and later
+  compared against `slice.mapped`, which holds exactly those bytes (slices are immutable until their
+  submission retires). The mode is stored per entry, so a comparison always matches how its entry was
+  made;
+- the native index scan of the uncached index path scans the arena slice.
+
+CACHED without COHERENT never counts: the arena requires COHERENT and does no flush or invalidate.
+Uncached memory (discrete GPUs, Windows/Linux AMD and NVIDIA) keeps the copy path unchanged. The reuse
+decisions and hit counts are identical in both modes; `snapshot_caches` runs every sequence in both
+(poisoned arena for the copy mode, a readable one for direct reads) and checks equal hits, and that
+direct reads against a poisoned arena miss.
+
+`WWHD_VK_UPLOAD_READS` overrides the choice for A/B runs: `auto` (default), `shadow` (always keep CPU
+copies, e.g. to measure the discrete-GPU path on a Mac) or `direct` (always read the slices; slow on
+uncached memory, a diagnostic only). The log line `[vulkan] upload arena memory: ...` reports the
+memory and the mode.
+
+## CPU/GPU overlap: lazy DrawDone and asynchronous presentation (all platforms)
+
+Since 2026-10-07 every platform uses the two paths that were Android defaults before:
+
+- `WWHD_VK_LAZY_DRAW_DONE` (default on, `0` restores the wait): GX2DrawDone queues the work instead
+  of waiting for an idle device. The renderer copies all guest data (vertices, indices, uniform
+  blocks, textures) into fenced upload slices when it records the work and never writes GPU results
+  back to guest memory, so the game only needs its commands executed, which `render_sync` already
+  waits for (Cemu's GX2DrawDone waits for its GPU thread in the same way). Save states still wait
+  for the idle GPU.
+- `WWHD_VK_ASYNC_PRESENT` (default on, `0` restores the drain): the presentation submission goes into
+  the submission ring and `swap()` does not wait for the GPU, so the render thread records frame N+1
+  while the GPU draws frame N. Both window hosts (SDL and the macOS AppKit host). Captures, frame and
+  present dumps and the automatic GamePad overlay's signatures read back through a waiting flush.
+
+The Metal renderer keeps its GX2DrawDone wait: it binds large vertex buffers straight from guest
+memory. See `docs/performance.md` ("Desktop CPU/GPU overlap defaults") for the measurements.
+
 ## Draw batching (all platforms)
 
 Every platform defaults to submitting after 2,048 guest draws, with at most three
@@ -316,7 +501,7 @@ Vulkan defaults now select command-buffer prefill mode 3, asynchronous batches o
 2,048 draws with a cap of three extra submissions per frame, and precise vsync
 sleeping. Explicit environment overrides take precedence. Windows/Linux defaults
 remain unchanged and further device testing there is deferred. Vertex snapshot
-reuse remains an opt-in experiment on every platform.
+reuse is on by default on every platform since 2026-10-07 (see "CPU paths").
 
 | Option | Behavior and default |
 | --- | --- |
@@ -324,12 +509,11 @@ reuse remains an opt-in experiment on every platform.
 | `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS` | macOS defaults to `3`; an explicit MoltenVK override, including `0`, is respected. Normal macOS render batches use an autorelease pool. Other platforms receive no application override. |
 | `WWHD_VK_DRAW_BATCH` | Defaults to `2048` when unset, on every platform. Set `0` to disable. Positive decimal values up to 1,048,576 select the batch size; malformed or out-of-range values disable batching. |
 | `WWHD_VK_DRAW_BATCH_CAP` | Accepts `1`, `2`, or `3`. When unset, defaults to `3`. An explicitly invalid value falls back to `2`. Has no effect with batching disabled. |
-| `WWHD_VK_REUSE_VERTEX_SNAPSHOTS=1` | Reuse a bounded vertex snapshot only after exact guest-byte comparison within the same fenced submission generation. Off by default; comparison overhead can outweigh saved copies. |
+| `WWHD_VK_REUSE_VERTEX_SNAPSHOTS=1` | Reuse a bounded vertex snapshot only after exact guest-byte comparison within the same fenced submission generation. On by default since 2026-10-07 (`0` turns it off); measured as a small net CPU gain and 3.3 MiB/frame fewer uploads on Outset. |
 
 Draw batching keeps the four-slot fence retirement contract. More submissions can
 reduce the final GPU tail, but add attachment LOAD/STORE boundaries and descriptor
-cache resets, and can wait when the ring wraps. DrawDone, capture/readback, and final
-presentation still drain work. Use matching camera views and warm caches for
+cache resets, and can wait when the ring wraps. Capture/readback and save states still drain work. Use matching camera views and warm caches for
 comparisons, and keep validation runs separate from timing runs.
 
 On Apple M3 Max, warm static-view, camera-sweep, and character movement/swimming
@@ -411,12 +595,43 @@ For an isolated capture, set `WWHD_CAPTURE_PATH` to the PNG output path and
 `WWHD_CAPTURE` to the renderer frame number (default120). Keep these artifacts
 private; they contain game imagery.
 
+## Render-thread profiler
+
+`runtime/src/render_prof.h` (both renderers) is on by default and cheap (`WWHD_PROFILE=0` turns it
+off). Every 120 frames it builds a report that `WWHD_PROFILE=1`, `WWHD_VK_STATS` or
+`WWHD_VK_CPU_ONLY_STATS=1` log as `[prof]` lines, and that the settings overlay's
+**Copy performance report** button (Graphics tab) puts on the clipboard. Its two header lines
+(`runtime/src/report_header.h`) say where the report comes from: the version and commit (release
+builds: the tag; others `git describe`, e.g. `v0.2.5+3`), the OS and version, the GPU with its driver
+version (decoded as vulkaninfo does) and Vulkan version, or the Metal device; then the renderer, host,
+frame mode, internal scale, buffer cache on/off, the gyro source when not off, and as `overrides:` the
+CPU paths not set to `1` and lazy DrawDone / async present when turned off. The report itself:
+
+- frame time, swaps/s, logic steps/s, render-thread CPU, time in GX2 ops and idle;
+- ms per frame per op and, sampled on one draw in 64, per draw phase (shader lookup, index
+  conversion, targets, pipeline, uniforms, textures, descriptors, pass, recording, vertex
+  snapshots, draw/submit);
+- render-thread waits for the GPU and the swapchain; game-thread waits for the render thread
+  (DrawDone, CopySurface, flips);
+- uploads per frame by kind (vertex, index, uniform blocks, packed uniforms, texture staging; logic
+  and interpolation hold frames apart) and, on one frame in 16, the unique guest bytes those
+  copies read;
+- draw classes: draws with no register change since the previous draw, draws where only ALU
+  constants, uniform-block or vertex-buffer words changed (continued-draw candidates), and the most
+  written other registers;
+- Vulkan shader translations: new programs vs. new variants, and which state words differ from the
+  nearest existing variant of the same program (texture/sampler words of units the shader samples
+  vs. units it does not).
+
+`tools/bench/run_bench.py` runs fixed scenes from a save state and summarizes these reports (see
+`docs/performance.md`, "How to profile").
+
 ## Optional performance diagnostics
 
 These switches require the exact value `1` and remain disabled by default.
 
 - `WWHD_VK_GPU_TIMESTAMPS`: measures submission timestamp intervals using two queries per fenced submission slot. Results are collected only after the existing completion fence, without query waits. The interval sum is not GPU busy time or the frame critical path; unsupported or zero-only timestamp results cannot establish GPU cost.
-- `WWHD_VK_UNCAPPED`: bypasses guest wall-clock flip eligibility for throughput diagnostics, while retaining FIFO GPU completion ordering. Frame-driven simulation accelerates; timebase/audio clocks remain real-time. This is not normal gameplay FPS.
+- `WWHD_VK_UNCAPPED`: bypasses guest wall-clock flip eligibility for throughput diagnostics, while retaining FIFO GPU completion ordering. Frame-driven simulation accelerates; timebase/audio clocks remain real-time. This is not normal gameplay FPS. The same switch is now in the settings overlay (Graphics → "Uncapped (debug: the game runs too fast)", not saved) and `WWHD_UNCAPPED=1` sets it for either renderer; while it is on, the swapchains present with immediate (or mailbox) instead of the chosen mode, and Metal turns the layers' displaySyncEnabled off.
 - `WWHD_VK_READY_FLIP_WAIT`: experimental waiting for an already-eligible pending flip to complete instead of sleeping another full guest tick. It preserves the existing minimum swap interval and GPU completion guards. Literal wait-for-vblank behavior changes for an eligible pending flip; keep opt-in until matched gameplay benchmarks and correctness checks establish suitability.
 - `WWHD_VK_READY_FLIP_PARK`: experimental eligible-flip completion wait after the save-state freeze gate and before guest-core reacquisition. The optional host callback runs while the thread is marked running and its guest core remains released; it keeps the existing flip eligibility and FIFO GPU guards. This avoids a second core release/acquire roundtrip. Default sleep behavior and Metal callers remain unchanged.
 - `WWHD_VK_NARROW_BARRIERS`: experimental layout-specific source dependency scopes. Destination scopes, image ranges, render-pass breaks and same-layout write barriers remain unchanged. Shader-read classification assumes the current vertex/fragment consumers; general and unknown layouts retain conservative scopes.

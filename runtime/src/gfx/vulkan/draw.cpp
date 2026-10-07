@@ -4,6 +4,8 @@
 #include "Cafe/HW/Latte/ISA/LatteReg.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "backend.h"
+#include "buffer_cache.h"
+#include "render_prof.h"
 #include "runtime.h"
 #include "shaders.h"
 #include "settings.h"
@@ -17,6 +19,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstring>
+#include <type_traits>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -158,7 +161,7 @@ UploadSlice vertex_snapshot(uint32_t binding, uint32_t address, uint32_t size,
   static uint64_t generation = ~0ull;
   static VkDevice device = VK_NULL_HANDLE;
   if (device != R.device || generation != R.submissionGeneration) {
-    cache = {};
+    for (auto& h : cache) h.reset();  // keeps the CPU copies' capacity
     device = R.device;
     generation = R.submissionGeneration;
   }
@@ -167,7 +170,7 @@ UploadSlice vertex_snapshot(uint32_t binding, uint32_t address, uint32_t size,
   auto &history = cache[binding];
   auto &last = history.last;
   if (!bounded) {
-    history = {};
+    history.reset();
     return snapshot(mem::ptr(address), size, 4);
   }
   // One exact matching payload per draw; secondary is consulted only when
@@ -181,7 +184,9 @@ UploadSlice vertex_snapshot(uint32_t binding, uint32_t address, uint32_t size,
     static const bool timed = std::getenv("WWHD_VK_STATS") != nullptr;
     std::chrono::steady_clock::time_point start;
     if (timed) start = std::chrono::steady_clock::now();
-    const bool equal = std::memcmp(mem::ptr(address), candidate->slice.mapped, size) == 0;
+    // the entry's CPU copy, not candidate->slice.mapped, unless the entry was made with direct reads
+    // (host-cached upload memory: see vertex_snapshot_history.h)
+    const bool equal = VertexSnapshotHistory<UploadSlice>::equal(*candidate, mem::ptr(address));
     if (timed)
       R.vertexReuseCompareNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now() - start).count();
@@ -196,9 +201,8 @@ UploadSlice vertex_snapshot(uint32_t binding, uint32_t address, uint32_t size,
       return history.last.slice;
     }
   }
-  auto slice = snapshot(mem::ptr(address), size, 4);
-  history.remember(address, size, slice, historyEnabled);
-  return slice;
+  return history.remember(address, size, mem::ptr(address), historyEnabled, R.uploadReadsDirect,
+                          [](const void* bytes, size_t n) { return snapshot(bytes, n, 4); });
 }
 
 // Separate immutable window cache: a partially initialized reservation must
@@ -206,32 +210,37 @@ UploadSlice vertex_snapshot(uint32_t binding, uint32_t address, uint32_t size,
 UploadSlice vertex_window_snapshot(uint32_t binding,uint32_t address,uint32_t reservation,
                                    uint32_t begin,uint32_t length,
                                    const void* source=nullptr,bool poisonUnused=false) {
-  struct Entry { uint32_t address=0,reservation=0,begin=0,length=0; UploadSlice slice{}; };
+  using Entry=VertexWindowEntry<UploadSlice>;
   static std::array<Entry,16> entries{};
   static VkDevice device=VK_NULL_HANDLE;
   static uint64_t generation=~0ull;
   if(device!=R.device || generation!=R.submissionGeneration) {
-    entries={};device=R.device;generation=R.submissionGeneration;
+    for(auto& e:entries) e.clear();
+    device=R.device;generation=R.submissionGeneration;
   }
   static const bool reuse=[] {const char* e=std::getenv("WWHD_VK_REUSE_VERTEX_SNAPSHOTS");
     return e && !std::strcmp(e,"1");}();
-  Entry* entry=binding<entries.size()?&entries[binding]:nullptr;
+  Entry* entry=reuse && binding<entries.size()?&entries[binding]:nullptr;
   const auto* fresh=static_cast<const uint8_t*>(source?source:mem::ptr(address))+begin;
-  if(reuse && entry && entry->slice.mapped && entry->address==address &&
-     entry->reservation==reservation && entry->begin==begin && entry->length==length) {
+  // compares the entry's CPU copy of the window, not the mapped slice, unless the entry was made with
+  // direct reads (host-cached upload memory; vertex_snapshot_history.h)
+  if(entry && entry->matches(address,reservation,begin,length)) {
     ++R.vertexReuseChecks;
-    if(!std::memcmp(fresh,static_cast<const uint8_t*>(entry->slice.mapped)+begin,length)) {
+    if(entry->equal(fresh)) {
       ++R.vertexReuseHits;R.vertexReuseBytes+=length;return entry->slice;
     }
   }
+  // the slice gets the bytes of the entry's copy (one read of guest memory), or fresh if direct
+  const uint8_t* bytes=entry?entry->remember(address,reservation,begin,length,fresh,R.uploadReadsDirect)
+                            :fresh;
   auto slice=allocate_upload(std::max<uint32_t>(reservation,16),4);
   if(poisonUnused) std::memset(slice.mapped,0xCD,slice.size);
-  std::memcpy(static_cast<uint8_t*>(slice.mapped)+begin,fresh,length);
+  std::memcpy(static_cast<uint8_t*>(slice.mapped)+begin,bytes,length);
   // Bytes before the proven minimum are never fetched. Preserve the previous
   // small-allocation padding contract without reading that unused prefix.
   if(slice.size>reservation)
     std::memset(static_cast<uint8_t*>(slice.mapped)+reservation,0,slice.size-reservation);
-  if(entry) *entry={address,reservation,begin,length,slice};
+  if(entry) entry->slice=slice;
   return slice;
 }
 
@@ -317,6 +326,36 @@ VertexExtent indexed_vertex_extent(const void* data, size_t count,
                       : index_extent_typed<uint32_t,true>(data,count,restart,baseVertex);
   return width == 2 ? index_extent_typed<uint16_t>(data, count, restart, baseVertex)
                     : index_extent_typed<uint32_t>(data, count, restart, baseVertex);
+}
+// Index extents of buffer cache entries (buffer_cache.h): the extent of the cached bytes at base
+// vertex 0 is memoized in the entry, the draw's base vertex is applied per draw. The result equals
+// indexed_vertex_extent over the same bytes.
+VertexExtent cached_index_extent(bufcache::Entry& e, const void* data, size_t count, uint32_t width,
+                                 bool restart, int32_t baseVertex) {
+  const uint64_t key = uint64_t(count) | uint64_t(width) << 40 | uint64_t(restart) << 48;
+  if (e.memoKey != key) {
+    if (!data) return {};  // no bytes to scan: the full binding is copied (always safe)
+    const VertexExtent raw = width == 2 ? index_extent_typed<uint16_t, true>(data, count, restart, 0)
+                                        : index_extent_typed<uint32_t, true>(data, count, restart, 0);
+    e.memo[0] = raw.valid; e.memo[1] = raw.minimum; e.memo[2] = raw.maximum;
+    e.memoKey = key;
+  }
+  if (!e.memo[0]) return {};
+  const bool window = vertex_copy_window_enabled();
+  if (!baseVertex) return {true, e.memo[2], window ? e.memo[1] : 0};
+  const int64_t low = int64_t(e.memo[1]) + baseVertex, high = int64_t(e.memo[2]) + baseVertex;
+  if (low < 0 || high > UINT32_MAX) return {};
+  return {true, uint32_t(high), window ? uint32_t(low) : 0};
+}
+VkPrimitiveTopology primitive_topology(uint32_t prim) {
+  switch (prim) {
+  case 1: return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+  case 2: return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+  case 3: case 0x12: return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+  case 4: case 5: case 0x13: case 0x14: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  case 6: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+  default: throw std::runtime_error("unsupported Vulkan primitive");
+  }
 }
 uint32_t vertex_prefix_size(uint32_t declared, uint32_t stride,
                             uint64_t attributeEnd, VertexExtent extent) {
@@ -458,27 +497,96 @@ struct Pipeline {
   const vk::Shader* trimVertex = nullptr;
   std::vector<BindingTrimMetadata> bindingTrims;
 };
-std::unordered_map<std::string, Pipeline> pipelines;
-// Overflow preserves the old variable-length key for unusual fetch programs.
-struct PipelineKeyBytes {
-  std::array<char, 256> stack{};
-  size_t size = 0;
-  std::string overflow;
-  void append(const void* source, size_t bytes) {
-    if (overflow.empty() && bytes <= stack.size()-size) {
-      std::memcpy(stack.data()+size, source, bytes);
-    } else {
-      if (overflow.empty()) overflow.assign(stack.data(), size);
-      overflow.append(static_cast<const char*>(source), bytes);
-    }
-    size += bytes;
+// Pipeline key: the two shader identities plus exactly the fixed-function state pipeline() bakes
+// in, normalized so that state the pipeline ignores (blend factors of attachments that do not
+// blend, stencil words with the stencil test off, depth bias words with the bias off, write masks
+// of absent attachments) does not make a new pipeline. Fixed size, compared with memcmp.
+constexpr uint32_t kMaxPipelineStrides = 16;
+struct PipelineKey {
+  uint64_t vs = 0, ps = 0, fetch = 0;
+  uint32_t topology = 0, colorControl = 0, targetMask = 0, depthControl = 0;
+  uint32_t stencilMask = 0, stencilMaskBack = 0, raster = 0, clip = 0;
+  std::array<uint32_t, 3> depthBias{};
+  std::array<uint32_t, 8> blend{};
+  std::array<uint32_t, 8> formats{};
+  uint32_t depthFormat = 0, strideCount = 0;
+  std::array<uint32_t, kMaxPipelineStrides> strides{};
+  uint32_t reserved = 0;  // no padding bytes: the key is hashed and compared as bytes
+  bool operator==(const PipelineKey& other) const {
+    return !std::memcmp(this, &other, sizeof *this);
   }
-  const char* data() const { return overflow.empty() ? stack.data() : overflow.data(); }
-  bool bounded() const { return overflow.empty(); }
 };
+static_assert(std::has_unique_object_representations_v<PipelineKey>,
+              "pipeline keys are compared and hashed as bytes");
+struct PipelineKeyHash {
+  size_t operator()(const PipelineKey& key) const {
+    const auto* p = reinterpret_cast<const uint8_t*>(&key);
+    uint64_t hash = 0x9E3779B97F4A7C15ull;
+    for (size_t i = 0; i < sizeof key; i += 8) {
+      uint64_t word;
+      std::memcpy(&word, p + i, 8);
+      hash = (hash ^ word) * 0xFF51AFD7ED558CCDull;
+      hash ^= hash >> 32;
+    }
+    return size_t(hash ^ (hash >> 29));
+  }
+};
+static_assert(sizeof(PipelineKey) % 8 == 0);
+std::unordered_map<PipelineKey, Pipeline, PipelineKeyHash> pipelines;
+PipelineKey pipeline_key(const uint32_t* r, const vk::Shader* vs, const vk::Shader* ps,
+                         const LatteFetchShader* fs, VkPrimitiveTopology topology,
+                         const std::array<Surface*, 8>& colors, const Surface* depth) {
+  PipelineKey key;
+  key.vs = vs->pipelineId;
+  key.ps = ps->pipelineId;
+  key.fetch = fs->vkPipelineHashFragment;
+  key.topology = uint32_t(topology);
+  uint32_t ncolor = 0;
+  for (uint32_t i = 0; i < 8; ++i)
+    if (colors[i]) {
+      key.formats[i] = uint32_t(colors[i]->fmt.pixel);
+      ncolor = i + 1;
+    }
+  const uint32_t colorControl = r[REGADDR::CB_COLOR_CONTROL];
+  uint32_t blending = 0;
+  for (uint32_t i = 0; i < ncolor; ++i)
+    if (colors[i] && colors[i]->fmt.kind == FormatInfo::FLOAT && ((colorControl >> (8 + i)) & 1)) {
+      blending |= 1u << i;
+      // without SEPARATE_ALPHA_BLEND the alpha factors are the color ones
+      const uint32_t raw = r[REGADDR::CB_BLEND0_CONTROL + i];
+      key.blend[i] = raw & (raw & (1u << 29) ? 0x3FFF1FFFu : 0x00001FFFu);
+    }
+  key.colorControl = (colorControl & 0x00FF0000u) | (blending << 8);  // ROP, blend enables
+  key.targetMask = ncolor >= 8 ? r[REGADDR::CB_TARGET_MASK]
+                               : r[REGADDR::CB_TARGET_MASK] & ((1u << (4 * ncolor)) - 1);
+  if (depth) {
+    key.depthFormat = uint32_t(depth->fmt.pixel);
+    const uint32_t dc = r[REGADDR::DB_DEPTH_CONTROL];
+    uint32_t canonical = dc & 4;              // depth write
+    if (dc & 2) canonical |= dc & 0x72;       // depth test and its function
+    if (depth->fmt.stencil && (dc & 1)) {
+      const bool back = dc & 0x80;
+      canonical |= dc & (back ? 0xFFFFFF81u : 0x000FFF01u);
+      key.stencilMask = r[REGADDR::DB_STENCILREFMASK] & 0x00FFFF00;
+      if (back) key.stencilMaskBack = r[REGADDR::DB_STENCILREFMASK_BF] & 0x00FFFF00;
+    }
+    key.depthControl = canonical;
+  }
+  const uint32_t mode = r[REGADDR::PA_SU_SC_MODE_CNTL];
+  key.raster = mode & 0x807;  // cull front/back, front face, depth bias enable
+  if (mode & 0x800)
+    key.depthBias = {r[REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE], r[REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET],
+                     r[REGADDR::PA_SU_POLY_OFFSET_CLAMP]};
+  key.clip = r[REGADDR::PA_CL_CLIP_CNTL] & (1u << 27);  // depth clamp
+  if (fs->bufferGroups.size() > kMaxPipelineStrides)
+    throw std::runtime_error("fetch shader has more vertex buffers than a pipeline key holds");
+  for (auto& g : fs->bufferGroups)
+    key.strides[key.strideCount++] =
+        (r[mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.attributeBufferIndex * 7 + 2] >> 11) & 0xFFFF;
+  return key;
+}
 struct LastPipelineLookup {
-  std::array<char, 256> key{};
-  size_t size = 0;
+  PipelineKey key{};
   VkDevice device = VK_NULL_HANDLE;
   Pipeline* value = nullptr;
 };
@@ -486,16 +594,14 @@ LastPipelineLookup lastPipelineLookup;
 struct PipelineLookaside {
   std::array<LastPipelineLookup, 8> entries{};
   uint32_t next = 0;
-  Pipeline* find(const char* key, size_t size, VkDevice device) const {
-    if (size > entries[0].key.size()) return nullptr;
+  Pipeline* find(const PipelineKey& key, VkDevice device) const {
     for (const auto& entry : entries)
-      if (entry.value && entry.device == device && entry.size == size &&
-          !std::memcmp(entry.key.data(), key, size))
+      if (entry.value && entry.device == device && entry.key == key)
         return entry.value;
     return nullptr;
   }
   void remember(const LastPipelineLookup& entry) {
-    if (!entry.value || entry.size > entry.key.size()) return;
+    if (!entry.value) return;
     entries[next] = entry;
     next = (next + 1) % entries.size();
   }
@@ -508,37 +614,12 @@ bool pipeline_lookaside_enabled() {
   }();
   return enabled;
 }
-void append(std::string &k, const void *p, size_t n) {
-  k.append(static_cast<const char *>(p), n);
-}
 Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
                    LatteFetchShader *fs, VkPrimitiveTopology topology,
                    const std::array<Surface *, 8> &colors, Surface *depth,
                    const bool *srgbViews = nullptr) {  // (targets in their sRGB twin format)
   if(preparation_stats_enabled())++R.cpuPreparation.pipelineLookups;
-  PipelineKeyBytes bytes;
-  bytes.append( &vs->key, 8);
-  bytes.append( &ps->key, 8);
-  bytes.append( &fs->vkPipelineHashFragment, 8);
-  bytes.append( &topology, sizeof topology);
-  const uint32_t fields[] = {REGADDR::CB_COLOR_CONTROL,
-                             REGADDR::CB_TARGET_MASK,
-                             REGADDR::DB_DEPTH_CONTROL,
-                             REGADDR::DB_STENCILREFMASK,
-                             REGADDR::DB_STENCILREFMASK_BF,
-                             REGADDR::PA_SU_SC_MODE_CNTL,
-                             REGADDR::PA_CL_CLIP_CNTL,
-                             REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE,
-                             REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET,
-                             REGADDR::PA_SU_POLY_OFFSET_CLAMP};
-  for (auto a : fields) {
-    uint32_t value=r[a];
-    if (a==REGADDR::DB_STENCILREFMASK || a==REGADDR::DB_STENCILREFMASK_BF) value &= 0x00FFFF00;
-    else if (a==REGADDR::PA_SU_SC_MODE_CNTL) value &= 0x807;
-    else if (a==REGADDR::PA_CL_CLIP_CNTL) value &= 1u<<27;
-    bytes.append(&value,4);
-  }
-  bytes.append( r + REGADDR::CB_BLEND0_CONTROL, 32);
+  const PipelineKey key = pipeline_key(r, vs, ps, fs, topology, colors, depth);
   std::array<VkFormat, 8> formats{};
   uint32_t ncolor = 0;
   for (int i = 0; i < 8; i++) {
@@ -548,45 +629,28 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
     if (colors[i])
       ncolor = i + 1;
   }
-  bytes.append( formats.data(), sizeof formats);
   VkFormat df = depth ? depth->fmt.pixel : VK_FORMAT_UNDEFINED;
-  bytes.append( &df, sizeof df);
-  for (auto &g : fs->bufferGroups) {
-    uint32_t stride=(r[mmSQ_VTX_ATTRIBUTE_BLOCK_START+g.attributeBufferIndex*7+2]>>11)&0xFFFF;
-    bytes.append(&stride,4);
-  }
   if (lastPipelineLookup.device != R.device || pipelines.empty()) {
     lastPipelineLookup = {};
     pipelineLookaside = {};
   }
-  if (bytes.bounded() && lastPipelineLookup.value && lastPipelineLookup.size == bytes.size &&
-      !std::memcmp(lastPipelineLookup.key.data(), bytes.data(), bytes.size)) {
+  if (lastPipelineLookup.value && lastPipelineLookup.key == key) {
     if(preparation_stats_enabled())++R.cpuPreparation.pipelineLastHits;
     return *lastPipelineLookup.value;
   }
-  const bool useLookaside = pipeline_lookaside_enabled() && bytes.bounded();
+  const bool useLookaside = pipeline_lookaside_enabled();
   if (useLookaside)
-    if (auto* value = pipelineLookaside.find(bytes.data(), bytes.size, R.device)) {
+    if (auto* value = pipelineLookaside.find(key, R.device)) {
       if(preparation_stats_enabled())++R.cpuPreparation.pipelineLookasideHits;
-      std::memcpy(lastPipelineLookup.key.data(), bytes.data(), bytes.size);
-      lastPipelineLookup.size = bytes.size;
-      lastPipelineLookup.device = R.device;
-      lastPipelineLookup.value = value;
+      lastPipelineLookup = {key, R.device, value};
       return *value;
     }
   auto remember = [&](Pipeline& value) -> Pipeline& {
-    lastPipelineLookup = {};
-    if (bytes.bounded()) {
-      std::memcpy(lastPipelineLookup.key.data(), bytes.data(), bytes.size);
-      lastPipelineLookup.size = bytes.size;
-      lastPipelineLookup.device = R.device;
-      lastPipelineLookup.value = &value;
-      if (useLookaside) pipelineLookaside.remember(lastPipelineLookup);
-    }
+    lastPipelineLookup = {key, R.device, &value};
+    if (useLookaside) pipelineLookaside.remember(lastPipelineLookup);
     return value;
   };
   if(preparation_stats_enabled())++R.cpuPreparation.pipelineMapLookups;
-  std::string key(bytes.data(), bytes.size);
   if (auto it = pipelines.find(key); it != pipelines.end())
     return remember(it->second);
   Pipeline p;
@@ -976,12 +1040,12 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
         fclose(f);
       }
     }
-    return remember(pipelines.emplace(std::move(key), p).first->second);
+    return remember(pipelines.emplace(key, p).first->second);
   }
   vk_check(result, "graphics pipeline");
   R.pipelineCacheDirty = true;
   R.pipelineCacheChangedFrame = R.frame;
-  return remember(pipelines.emplace(std::move(key), p).first->second);
+  return remember(pipelines.emplace(key, p).first->second);
 }
 struct SamplerMemo {
   VkDevice device = VK_NULL_HANDLE;
@@ -1166,12 +1230,10 @@ struct LastDescriptorSet {
   uint32_t count = 0;
   std::array<DescriptorIdentity, 17 + LATTE_NUM_MAX_TEX_UNITS> identities{};
 };
-bool descriptor_matches(const LastDescriptorSet &last,
-                        VkDescriptorSetLayout layout,
-                        const VkWriteDescriptorSet *writes, uint32_t count) {
-  if (!last.set || last.layout != layout || last.count != count) return false;
+bool identities_match(const DescriptorIdentity *identities, const VkWriteDescriptorSet *writes,
+                      uint32_t count) {
   for (uint32_t i = 0; i < count; ++i) {
-    const auto &identity = last.identities[i];
+    const auto &identity = identities[i];
     const auto &write = writes[i];
     if (identity.binding != write.dstBinding || identity.type != write.descriptorType ||
         identity.isBuffer != bool(write.pBufferInfo)) return false;
@@ -1188,14 +1250,10 @@ bool descriptor_matches(const LastDescriptorSet &last,
   }
   return true;
 }
-void remember_descriptors(LastDescriptorSet &last, VkDescriptorSetLayout layout,
-                          VkDescriptorSet set, const VkWriteDescriptorSet *writes,
-                          uint32_t count) {
-  last.layout = layout;
-  last.set = set;
-  last.count = count;
+void store_identities(DescriptorIdentity *identities, const VkWriteDescriptorSet *writes,
+                      uint32_t count) {
   for (uint32_t i = 0; i < count; ++i) {
-    auto &identity = last.identities[i];
+    auto &identity = identities[i];
     const auto &write = writes[i];
     identity.binding = write.dstBinding;
     identity.type = write.descriptorType;
@@ -1204,31 +1262,82 @@ void remember_descriptors(LastDescriptorSet &last, VkDescriptorSetLayout layout,
     else identity.image = *write.pImageInfo;
   }
 }
-std::string descriptor_key(VkDescriptorSetLayout layout,
-                           const VkWriteDescriptorSet *writes, uint32_t count) {
-  std::string key;
-  key.reserve(sizeof(layout) + count * 40);
-  append(key, &layout, sizeof(layout));
-  append(key, &count, sizeof(count));
+bool descriptor_matches(const LastDescriptorSet &last,
+                        VkDescriptorSetLayout layout,
+                        const VkWriteDescriptorSet *writes, uint32_t count) {
+  return last.set && last.layout == layout && last.count == count &&
+         identities_match(last.identities.data(), writes, count);
+}
+void remember_descriptors(LastDescriptorSet &last, VkDescriptorSetLayout layout,
+                          VkDescriptorSet set, const VkWriteDescriptorSet *writes,
+                          uint32_t count) {
+  last.layout = layout;
+  last.set = set;
+  last.count = count;
+  store_identities(last.identities.data(), writes, count);
+}
+// Descriptor sets written in this submission, found by a 64-bit hash of the layout and the
+// descriptors and confirmed by comparing the stored descriptors. Valid until the submission's
+// pool is reset; the vectors and buckets keep their capacity across submissions.
+uint64_t descriptor_hash(VkDescriptorSetLayout layout, const VkWriteDescriptorSet *writes,
+                         uint32_t count) {
+  auto mix = [](uint64_t hash, uint64_t value) {
+    hash = (hash ^ value) * 0xFF51AFD7ED558CCDull;
+    return hash ^ (hash >> 32);
+  };
+  uint64_t hash = mix(0x9E3779B97F4A7C15ull, uint64_t(uintptr_t(layout)) ^ (uint64_t(count) << 56));
   for (uint32_t i = 0; i < count; ++i) {
     const auto &write = writes[i];
-    append(key, &write.dstBinding, sizeof(write.dstBinding));
-    append(key, &write.descriptorType, sizeof(write.descriptorType));
+    hash = mix(hash, uint64_t(write.dstBinding) | (uint64_t(write.descriptorType) << 32));
     if (write.pBufferInfo) {
       const auto &info = *write.pBufferInfo;
-      append(key, &info.buffer, sizeof(info.buffer));
-      append(key, &info.range, sizeof(info.range));
+      hash = mix(hash, uint64_t(uintptr_t(info.buffer)));
+      hash = mix(hash, info.range);
       if (write.descriptorType != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
-        append(key, &info.offset, sizeof(info.offset));
+        hash = mix(hash, info.offset);
     } else {
       const auto &info = *write.pImageInfo;
-      append(key, &info.sampler, sizeof(info.sampler));
-      append(key, &info.imageView, sizeof(info.imageView));
-      append(key, &info.imageLayout, sizeof(info.imageLayout));
+      hash = mix(hash, uint64_t(uintptr_t(info.sampler)));
+      hash = mix(hash, uint64_t(uintptr_t(info.imageView)) ^ (uint64_t(info.imageLayout) << 48));
     }
   }
-  return key;
+  return hash;
 }
+struct SubmissionDescriptorCache {
+  struct Entry {
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    uint32_t count = 0, first = 0, next = UINT32_MAX;
+  };
+  std::unordered_map<uint64_t, uint32_t> heads;
+  std::vector<Entry> entries;
+  std::vector<DescriptorIdentity> identities;
+  void clear() { heads.clear(); entries.clear(); identities.clear(); }
+  VkDescriptorSet find(uint64_t hash, VkDescriptorSetLayout layout,
+                       const VkWriteDescriptorSet *writes, uint32_t count) const {
+    auto head = heads.find(hash);
+    if (head == heads.end()) return VK_NULL_HANDLE;
+    for (uint32_t i = head->second; i != UINT32_MAX; i = entries[i].next) {
+      const auto &entry = entries[i];
+      if (entry.layout == layout && entry.count == count &&
+          identities_match(identities.data() + entry.first, writes, count))
+        return entry.set;
+    }
+    return VK_NULL_HANDLE;
+  }
+  void insert(uint64_t hash, VkDescriptorSetLayout layout, VkDescriptorSet set,
+              const VkWriteDescriptorSet *writes, uint32_t count) {
+    Entry entry{layout, set, count, uint32_t(identities.size()), UINT32_MAX};
+    identities.resize(identities.size() + count);
+    store_identities(identities.data() + entry.first, writes, count);
+    auto [head, inserted] = heads.emplace(hash, uint32_t(entries.size()));
+    if (!inserted) {
+      entry.next = head->second;
+      head->second = uint32_t(entries.size());
+    }
+    entries.push_back(entry);
+  }
+};
 // A descriptor cannot sample the same subresource being written as an
 // attachment without a feedback-loop extension. Snapshot before rendering.
 // Separate stage/unit slots preserve every descriptor selected for one draw.
@@ -1513,7 +1622,9 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
     write.descriptorCount = 1;
     return write;
   };
-  auto uniform = [&](int binding, const void *bytes, size_t size, size_t logicalSlot) {
+  // guestAddr: a guest uniform block (bytes == mem::ptr(guestAddr)), served by the buffer cache if on
+  auto uniform = [&](int binding, const void *bytes, size_t size, size_t logicalSlot,
+                     uint32_t guestAddr = 0) {
     if (binding < 0)
       return;
     if (size > R.properties.limits.maxUniformBufferRange)
@@ -1526,13 +1637,21 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
       const char* value = std::getenv("WWHD_VK_REUSE_UNIFORM_SNAPSHOTS");
       return value && std::strcmp(value, "1") == 0;
     }();
+    // compares CPU copies of the slots' bytes, not mapped upload memory, unless the upload memory is
+    // host-cached (R.uploadReadsDirect; uniform_snapshot.h)
     static UniformSnapshotCache<UploadSlice, VkDevice> uniformCache;
+    rprof::UploadKind uploads(logicalSlot == 16 ? rprof::kUpUniformVars : rprof::kUpUbo);
     auto fresh = [&](const void* source, size_t length) {
       return snapshot(source, length, R.properties.limits.minUniformBufferOffsetAlignment);
     };
-    const auto b = reuseUniforms
+    UploadSlice cachedSlice;
+    const bool cached = guestAddr && buffer_cache_enabled() &&
+        cached_guest_range(guestAddr, uint32_t(size), rprof::kUpUbo, cachedSlice);
+    const auto b = cached ? cachedSlice
+        : reuseUniforms
         ? uniformCache.get(R.device, R.submissionGeneration,
-                           (sh->vertex ? 0 : 17) + logicalSlot, bytes, size, fresh)
+                           (sh->vertex ? 0 : 17) + logicalSlot, bytes, size,
+                           R.uploadReadsDirect, fresh)
         : fresh(bytes, size);
     if (reuseUniforms && preparation_stats_enabled()) {
       const auto& counts = uniformCache.counters;
@@ -1598,8 +1717,10 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
       uint32_t addr = r[block + i * 7];
       uint32_t size = std::min<uint32_t>(r[block + i * 7 + 1] + 1, 0x10000);
       uniform(m.uniformBuffersBindingPoint[i], addr ? mem::ptr(addr) : nullptr,
-              size, size_t(i));
+              size, size_t(i), addr);
+      if (addr) rprof::guest_read(rprof::kUpUbo, addr, size);
     }
+  rprof::mark(rprof::kUniforms);
   uint32_t texbase = sh->vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS
                                 : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
   for (int i = 0; i < sh->dec->textureUnitListCount; i++) {
@@ -1662,9 +1783,12 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.pImageInfo = &info;
   }
+  rprof::mark(rprof::kTextures);
   if (m.uniformVarsBufferBindingPoint >= 0)
     uniform(m.uniformVarsBufferBindingPoint, supportUniforms.data(),
             supportUniforms.size(), 16);
+  rprof::mark(rprof::kUniforms);
+  struct DescriptorMark { ~DescriptorMark() { rprof::mark(rprof::kDescriptors); } } descriptorMark;
   if (useRanks) {
     uint32_t dense = 0;
     for (uint32_t rank = 0; rank < rankPlan.count; ++rank) {
@@ -1685,7 +1809,7 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
   // Resource preparation above must always run, even when the descriptor set
   // itself is reusable. Pool reset/slot activation invalidates every old set.
   static uint64_t cacheGeneration = ~uint64_t{0};
-  static std::unordered_map<std::string, VkDescriptorSet> descriptorCache;
+  static SubmissionDescriptorCache descriptorCache;
   static LastDescriptorSet lastDescriptors[2];
   if (cacheGeneration != R.submissionGeneration) {
     descriptorCache.clear();
@@ -1700,10 +1824,10 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
     out.set = last.set;
     return out;
   }
-  auto key = descriptor_key(layout, writes.data(), writeCount);
-  if (auto found = descriptorCache.find(key); found != descriptorCache.end()) {
+  const uint64_t hash = descriptor_hash(layout, writes.data(), writeCount);
+  if (auto found = descriptorCache.find(hash, layout, writes.data(), writeCount)) {
     ++R.descriptorCacheHits;
-    out.set = found->second;
+    out.set = found;
     remember_descriptors(last, layout, out.set, writes.data(), writeCount);
     return out;
   }
@@ -1716,7 +1840,7 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
   for (uint32_t i = 0; i < writeCount; ++i) writes[i].dstSet = out.set;
   if (writeCount)
     vkUpdateDescriptorSets(R.device, writeCount, writes.data(), 0, nullptr);
-  descriptorCache.emplace(std::move(key), out.set);
+  descriptorCache.insert(hash, layout, out.set, writes.data(), writeCount);
   remember_descriptors(last, layout, out.set, writes.data(), writeCount);
   return out;
 }
@@ -1748,6 +1872,7 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     throw std::runtime_error("missing Vulkan fetch shader");
   auto *vs = vk::translate(r, true, fs, fsKey, R.frame, g_shader_state_gen);
   auto *ps = vk::translate(r, false, fs, fsKey, R.frame, g_shader_state_gen);
+  rprof::mark(rprof::kShader);
   if (!vs || !vs->ready() || !ps || !ps->ready())
     throw std::runtime_error("Vulkan shader translation failed: " +
                              (vs && !vs->ready() ? vs->error
@@ -1791,7 +1916,25 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   const bool guestWrap = indexAddr && (indexType == 4 || indexType == 9) &&
       uint64_t(indexAddr) + guestBytes > 0x100000000ull;
   VkPrimitiveTopology topology;
-  if (specializeIndices && !nativeIndices && !guestWrap) {
+  // Converted (big-endian, fan, quad, loop, other restart marker) index data from the buffer cache:
+  // keyed by everything the conversion reads; a hit skips the conversion.
+  bufcache::Entry* convertedEntry = nullptr;
+  bool convertedHit = false;
+  if (indexAddr && !nativeIndices && !guestWrap && buffer_cache_enabled() &&
+      guestBytes <= (8u << 20) && uint64_t(indexAddr) + guestBytes <= 0x100000000ull) {
+    const bufcache::Key key{indexAddr, bufcache::kIndexConverted,
+        uint64_t(count) | uint64_t(prim & 0xff) << 32 | uint64_t(indexType & 0xff) << 40 |
+            uint64_t(stripRestart) << 48 | uint64_t(specializeIndices) << 49,
+        stripRestart ? restartIndex : 0};
+    switch (buffer_cache().lookup(key, uint32_t(guestBytes), convertedEntry)) {
+    case bufcache::kHit: convertedHit = true; break;
+    case bufcache::kMiss: break;  // armed: convert below, then upload
+    case bufcache::kBypass: convertedEntry = nullptr; break;
+    }
+  }
+  if (convertedHit && !buffer_cache_verify()) {
+    topology = primitive_topology(prim);
+  } else if (specializeIndices && !nativeIndices && !guestWrap) {
     switch (prim) {
     case 1: topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
     case 2: topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
@@ -1877,6 +2020,25 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
       indices[i] = idx(i);
   }
   }
+  if (convertedEntry) {
+    const bool hostStrip = topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
+                           topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    if (!convertedHit) {
+      if (indices.empty() ||
+          !buffer_cache().upload(*convertedEntry, indices.data(), uint32_t(indices.size() * 4))) {
+        convertedEntry = nullptr;
+      } else {
+        rprof::add_upload(rprof::kUpIndex, indices.size() * 4);
+        cached_index_extent(*convertedEntry, indices.data(), indices.size(), 4, hostStrip, 0);
+      }
+    } else if (buffer_cache_verify()) {
+      uint32_t diff = 0;
+      if (convertedEntry->outSize != indices.size() * 4 ||
+          !buffer_cache().verify(*convertedEntry, indices.data(), uint32_t(indices.size() * 4), &diff))
+        buffer_cache_mismatch("converted indices", *convertedEntry, uint32_t(indices.size() * 4), diff);
+    }
+  }
+  rprof::mark(rprof::kIndices);
   const auto &lcr = *reinterpret_cast<const LatteContextRegister *>(r);
   std::array<Surface *, 8> colors{};
   uint32_t slices[8]{}, depthSlice = 0;
@@ -1922,7 +2084,9 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     }
   if (depth && (depth->extent.width < width || depth->extent.height < height))
     depth = nullptr;
+  rprof::mark(rprof::kTargets);
   auto &p = pipeline(r, vs, ps, fs, topology, colors, depth, srgbViews);
+  rprof::mark(rprof::kPipeline);
   if (!p.pipeline)
     return;  // the driver could not build it (logged once in pipeline())
   if(feedback_stats_enabled()) report_feedback_stats();
@@ -2028,6 +2192,7 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     R.passWidth = width;
     R.passHeight = height;
   }
+  rprof::mark(rprof::kPass);
   if (state.pipeline != p.pipeline) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.pipeline);
     state.pipeline = p.pipeline;
@@ -2118,17 +2283,45 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   state.stencilFront = stencilFront;
   state.stencilBack = stencilBack;
   state.stencilValid = true;
-  // Scan the actual immutable index snapshot, never a second guest read.
+  rprof::mark(rprof::kRecord);
+  rprof::UploadKind indexUploads(rprof::kUpIndex);
+  // Scan the actual immutable index snapshot, never a second guest read: the bytes of the buffer
+  // cache entry's shadow, or of a CPU copy that the upload slice is written from. Never the slice's
+  // mapped memory: upload memory is uncached or write-combined on discrete GPUs (issue #44). Unless it
+  // is host-cached (R.uploadReadsDirect): then the slice's mapped bytes are scanned, as fast as a copy.
+  static std::vector<uint8_t> nativeIndexCopy;  // render thread only
   UploadSlice nativeIndexSlice{};
   const bool hostRestart = topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
                            topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
   VertexExtent vertexExtent;
+  const void* nativeIndexData = nullptr;  // the bytes of nativeIndexSlice, on the CPU
   if (nativeIndices) {
     const uint32_t indexBytes = indexType == 0 ? 2 : 4;
-    nativeIndexSlice = snapshot(mem::ptr(indexAddr), size_t(count) * indexBytes, 4);
-    vertexExtent = indexed_vertex_extent(nativeIndexSlice.mapped, count,
-                                         indexBytes, hostRestart,
-                                         int32_t(baseVertex));
+    bufcache::Entry* indexEntry = nullptr;
+    if (buffer_cache_enabled() && uint64_t(count) * indexBytes <= (8u << 20) &&
+        cached_native_indices(indexAddr, count * indexBytes, nativeIndexSlice, indexEntry)) {
+      nativeIndexData = indexEntry->shadow.data();
+      vertexExtent = cached_index_extent(*indexEntry, nativeIndexData, count, indexBytes,
+                                         hostRestart, int32_t(baseVertex));
+    } else {
+      const size_t bytes = size_t(count) * indexBytes;
+      const auto* guest = static_cast<const uint8_t*>(mem::ptr(indexAddr));
+      if (R.uploadReadsDirect) {
+        nativeIndexSlice = snapshot(guest, bytes, 4);
+        nativeIndexData = nativeIndexSlice.mapped;
+      } else {
+        nativeIndexCopy.assign(guest, guest + bytes);
+        nativeIndexSlice = snapshot(nativeIndexCopy.data(), bytes, 4);
+        nativeIndexData = nativeIndexCopy.data();
+      }
+      vertexExtent = indexed_vertex_extent(nativeIndexData, count,
+                                           indexBytes, hostRestart,
+                                           int32_t(baseVertex));
+    }
+    rprof::guest_read(rprof::kUpIndex, indexAddr, uint64_t(count) * indexBytes);
+  } else if (convertedEntry) {
+    vertexExtent = cached_index_extent(*convertedEntry, nullptr, convertedEntry->outSize / 4, 4,
+                                       hostRestart, int32_t(baseVertex));
   } else if (!indices.empty()) {
     vertexExtent = indexed_vertex_extent(indices.data(), indices.size(), 4,
                                          hostRestart, int32_t(baseVertex));
@@ -2143,14 +2336,15 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   } else if(windowStats) {
     if(nativeIndices) {
       windowExtent=indexType==0
-        ? vertex_window_extent<uint16_t>(nativeIndexSlice.mapped,count,hostRestart,int32_t(baseVertex))
-        : vertex_window_extent<uint32_t>(nativeIndexSlice.mapped,count,hostRestart,int32_t(baseVertex));
+        ? vertex_window_extent<uint16_t>(nativeIndexData,count,hostRestart,int32_t(baseVertex))
+        : vertex_window_extent<uint32_t>(nativeIndexData,count,hostRestart,int32_t(baseVertex));
     } else if(!indices.empty()) {
       windowExtent=vertex_window_extent<uint32_t>(indices.data(),indices.size(),hostRestart,int32_t(baseVertex));
     } else if(count && uint64_t(baseVertex)+count-1<=UINT32_MAX) {
       windowExtent={true,baseVertex,uint32_t(uint64_t(baseVertex)+count-1)};
     }
   }
+  rprof::g_upload_kind = rprof::kUpVertex;
   const bool cachedTrims = p.trimFetch == fs && p.trimVertex == vs &&
                            p.bindingTrims.size() == fs->bufferGroups.size();
   size_t trimGroup = 0;
@@ -2186,13 +2380,16 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     }
     R.vertexDeclaredBytes += size;
     R.vertexCopiedBytes += copied;
+    rprof::guest_read(rprof::kUpVertex, addr, copied);
     const uint64_t windowBegin=uint64_t(extent.minimum)*stride;
     const uint64_t windowEnd=uint64_t(extent.maximum)*stride+attributeEnd;
     const bool copyWindow=vertex_copy_window_enabled() &&
         (nativeIndices || !indices.empty()) && supported && rate &&
         attributeEnd && stride && extent.valid && vertexExtent.valid &&
         windowEnd<=copied && windowBegin<windowEnd && windowBegin!=0;
-    auto b = copyWindow
+    UploadSlice b;
+    if (!buffer_cache_enabled() || !cached_guest_range(addr, copied, rprof::kUpVertex, b))
+      b = copyWindow
         ? vertex_window_snapshot(g.attributeBufferIndex,addr,copied,
                                  uint32_t(windowBegin),uint32_t(windowEnd-windowBegin))
         : vertex_snapshot(g.attributeBufferIndex, addr, copied,
@@ -2213,14 +2410,23 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     if(!skip)
       vkCmdBindVertexBuffers(cmd,g.attributeBufferIndex,1,&b.buffer,&offset);
   }
+  rprof::g_upload_kind = rprof::kUpIndex;
+  rprof::mark(rprof::kVertex);
   if (nativeIndices) {
     vkCmdBindIndexBuffer(cmd, nativeIndexSlice.buffer, nativeIndexSlice.offset,
                          indexType == 0 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(cmd, count, instances, 0, int32_t(baseVertex), 0);
+  } else if (convertedEntry) {
+    const uint32_t converted = convertedEntry->outSize / 4;
+    auto b = buffer_cache_slice(*convertedEntry, convertedEntry->outSize);
+    rprof::guest_read(rprof::kUpIndex, indexAddr, guestBytes);
+    vkCmdBindIndexBuffer(cmd, b.buffer, b.offset, VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexed(cmd, converted, instances, 0, int32_t(baseVertex), 0);
   } else if (indices.empty())
     vkCmdDraw(cmd, count, instances, baseVertex, 0);
   else {
     auto b = snapshot(indices.data(), indices.size() * 4, 4);
+    if (indexAddr) rprof::guest_read(rprof::kUpIndex, indexAddr, guestBytes);
     vkCmdBindIndexBuffer(cmd, b.buffer, b.offset, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(cmd, indices.size(), instances, 0, int32_t(baseVertex), 0);
   }
@@ -2250,5 +2456,6 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     flush_async();
     ++drawBatchSubmissions;
   }
+  rprof::mark(rprof::kSubmit);
 }
 } // namespace gfxvk

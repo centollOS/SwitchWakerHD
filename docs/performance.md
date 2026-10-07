@@ -99,6 +99,124 @@ directory) to check that the run still renders correctly. The "Sort by top of st
 `sample.txt` shows where the CPU time goes. `run.log` prints the shader and pipeline counts every
 few seconds.
 
+### Fixed-scene benchmark
+
+`tools/bench/run_bench.py` runs the game headless (or with `--visible` windows, which presentation
+and vsync pacing need) from a save state with scripted input, one game at a time, with a fresh copy
+of the save and its own caches and settings files. A/B variants run interleaved:
+
+```sh
+tools/bench/run_bench.py --binary build/cmake/wwhd --state-dir my_states --scene outset \
+    --fps 60 --renderer vulkan --runs 6 --out build/bench/sync \
+    --variant old:WWHD_VK_LAZY_DRAW_DONE=0,WWHD_VK_ASYNC_PRESENT=0 --variant new:
+```
+
+`--state-dir` holds `slot<N>.bin` files made with the game's save-state keys (outset: slot 3,
+windfall: slot 2, or `--slot`). `--fps 30|60|120|240|true60`, `--display-hz n` (the refresh rate
+120/240 fps are capped to; 0: no cap, for hidden-window runs), `--uncapped` (throughput),
+`--renderer metal`.
+The state is loaded at TV frame 450 (A presses from frame 120 skip the intro), the input starts 200
+frames later and is timed in game seconds, so 30 and 60 fps runs see the same input. Each run's
+`[prof]` reports (render-thread profiler, `docs/vulkan.md`) after two warm-up windows are averaged;
+`summary.json` / `summary.csv` hold the per-variant median, min, max and spread of frame time,
+swaps/s, logic steps/s, render-thread CPU and per-phase ms, GPU waits, game-thread waits, uploads by
+kind, unique guest bytes and draw classes. The load average before and after each run is recorded.
+
+## 120 and 240 fps frame interpolation (2026-10-07)
+
+Apple M3 Max, 120 Hz ProMotion display, Outset (slot 3, walking and turning), 40 s per run,
+`tools/bench/run_bench.py` (one game at a time), Vulkan (MoltenVK) unless noted. Hidden runs present
+nothing; visible runs present to the 120 Hz display. "In-between" is the share of the planned
+in-between frames drawn (paced), frames per step is interpolation's own count.
+
+| Mode | swaps/s | logic steps/s | in-between | frames/step |
+|---|---|---|---|---|
+| 60 fps, hidden (2 runs) | 59.95 | 29.99 | (not paced) | 2.00 |
+| 120 fps, hidden (2 runs) | 119.28 | 29.94 | 99.3% | 3.98 |
+| 240 fps, hidden, no display cap (2 runs) | 146.48 | 29.78 | 55.2% | 4.87 |
+| 240 fps, hidden, capped to the 120 Hz display | 119.72 | 29.97 | 99.7% | 3.99 |
+| 120 fps, hidden, `--display-hz 60` (fallback) | 59.94 | 29.99 | 100% | 2.00 |
+| 60 fps, visible | 59.85 | 29.94 | (not paced) | 2.00 |
+| 120 fps, visible (2 runs) | 114.72 | 29.67 | 94.2% | 3.83 |
+| 240 fps, visible (drawn at 120) | 115.18 | 29.67 | 94.7% | 3.84 |
+| 120 fps, visible, Metal | 108.07 | 29.13 | 88.7% | 3.66 |
+| 240 fps, visible, Metal (drawn at 120) | 111.66 | 29.57 | 92.7% | 3.78 |
+| 240 fps, uncapped, paced | 198.51 | 29.36 | 82.3% | 6.75 |
+| 240 fps, uncapped, not paced | 206.64 | 25.84 | - | 8.00 |
+| 30 fps, uncapped | 190.78 | 190.78 | - | 1 |
+
+- 240 fps is limited by the render thread on this machine: it needs 4.4–4.7 ms of CPU per frame,
+  more than one 4.17 ms tick, so an in-between pass takes two ticks and the pacer plans 3–5 of the
+  7 in-between frames (the game thread needs 3.8 ms per logic pass and 1.3 ms per in-between pass,
+  `WWHD_INTERP_PASS_STATS=1`). Uncapped, the same scene draws ~200 frames a second.
+- Logic stays at 29.6–30.0 steps a second in every paced mode; unpaced 240 fps uncapped shows what
+  pacing prevents (25.8).
+- Visible runs present at ~115 of 120 Hz (as 60 fps runs present at 59.85 of 60).
+- A camera trace (`WWHD_INTERP_CAM_TRACE`) at 240 fps shows the eye advancing in equal eighths of
+  the step (t = 1/8 … 7/8, exact at t = 1) and steps re-planned with fewer in-between frames
+  spaced at 1/7 etc.
+- 60 fps output is unchanged: TV frames 700–703 (exact and halfway frames) are bit-identical to
+  devel; later frames differ from devel by as much as two devel runs differ from each other.
+- Before the per-kind averages and the spike limit, one 76 ms in-between pass kept all in-between
+  frames off for 10 s at 120 fps (28.8 logic steps/s and 1% in-between frames in that window).
+
+## Desktop CPU/GPU overlap and CPU path defaults (2026-10-07)
+
+Apple M3 Max, MoltenVK, Vulkan renderer, `tools/bench/run_bench.py`, Outset (slot 3) and Windfall
+(slot 2) saved scenes, 40 s of scripted walking, variants interleaved, medians [min..max] over 4-6
+runs per variant. "old" = `WWHD_VK_LAZY_DRAW_DONE=0 WWHD_VK_ASYNC_PRESENT=0` (the previous desktop
+behaviour: vkDeviceWaitIdle at every GX2DrawDone, a drained queue at every present).
+
+**Lazy DrawDone and asynchronous presentation** (visible windows):
+
+| Scene | old | new |
+|---|---|---|
+| Outset 60 fps (vsync) | 59.35 swaps/s, GPU wait 3.36 ms/frame, game waits 6.22 ms at DrawDone | 59.49, 0.37 ms, 3.20 ms |
+| Windfall 60 fps (vsync) | 59.72, GPU wait 4.22 ms, render thread in ops 11.06 ms | 59.74, 0.00 ms, 6.78 ms |
+| Outset uncapped, immediate present | 102.5 [96.6..105.2] swaps/s | 115.7 [115.0..143.5] |
+| Windfall uncapped, immediate present | 103.2 [101.9..103.6] swaps/s | 157.5 [143.5..158.5] |
+| Outset paced 60 fps, render thread +7 ms | 40.3 swaps/s, 48.7% in-between frames, 27.4 steps/s | 59.2, 99.7%, 29.6 |
+| Outset paced 60 fps, render thread +8 ms | 35.3 swaps/s, 33.2% in-between frames, 27.4 steps/s | 59.05, 99.7%, 29.55 |
+
+Render-thread CPU time is unchanged; the GPU drain was idle time on both sides. The +7/+8 ms rows
+add a busy-wait to the render thread per frame (a local evaluation aid, not in the code), the regime
+of slower machines (upstream issue #7): there the old path dropped most 60 fps frames and the game
+ran 9% slow. The SDL host (Vulkan-only build, the Windows/Linux window host) shows the same:
+uncapped Outset 105.5 -> 144.1 swaps/s, GPU wait 2.96 -> 0.43 ms.
+
+**CPU paths** (`docs/vulkan.md`, all 15 off vs all on, new sync defaults, headless):
+
+| Scene | render-thread CPU off -> on | uploads MiB/frame |
+|---|---|---|
+| Outset 60 fps | 6.23 -> 5.56 ms (-10.8%) | 22.4 -> 18.6 |
+| Windfall 60 fps | 5.83 -> 5.36 ms (-8.0%) | 28.2 -> 26.3 |
+| Outset 30 fps | 7.56 -> 6.76 ms (-10.5%) | 22.5 -> 18.7 |
+| Outset uncapped | 6.37 -> 5.46 ms (-14.3%), 150 -> 166 swaps/s | 21.9 -> 18.4 |
+
+Leaving one path out (Outset 60, 2 runs each, run spread about 0.4 ms) costs: specialized index
+conversion 0.31 ms, shader state memo 0.28, uniform snapshot reuse 0.25, sampler memo 0.09, sparse
+hash memo 0.09, vertex bind skipping 0.08, redundant bind skipping 0.06, feedback image reuse 0.06,
+shader address memo 0.05, vertex snapshot reuse 0.03 (and 3.3 MiB/frame of uploads); descriptor
+ranks, vertex history reuse, fetch memo, pipeline lookaside and the shader-key dirty classifier
+are neutral within the noise (-0.06 to +0.01 ms). None costs measurably, so all 15 are defaults.
+
+Correctness: frame dumps at six points of a scripted walk (TV and GamePad) are byte-identical
+between old and new and with the CPU paths, except a 20-pixel band at the sea horizon that also
+differs between two runs of the same configuration (run-to-run nondeterminism); save state save and
+reload in-game (slot 3 -> save slot 5 -> load slot 5) works with both; Khronos validation over the
+gameplay run reports no errors (one known warning: a fragment output without attachment, also with
+the old settings); `--renderer-smoke` passes with validation in both builds, with and without the
+CPU paths.
+
+**Where the render-thread time goes** (all defaults on, Outset 60 fps, per frame; `[prof]` lines):
+draws 5.3 ms of 6.5 ms in ops (3,230 draws, 1.74 us each), register writes 0.9 ms (39,000 writes).
+Per draw phase: submit/draw command 1.03 ms (includes the batched queue submissions), shader lookup
+0.62, uniforms 0.63, vertex snapshots 0.62, textures 0.44, pass 0.40, pipeline 0.38, descriptors
+0.37, record 0.31, indices 0.23, targets 0.20. Uploads are 18.6 MiB per frame, 15.7 of them vertex
+copies, but the copied guest ranges hold only 2.2 MiB of unique bytes; an interpolation hold frame
+copies the same 18.6 MiB again. 55% of Outset draws (12% on Windfall) change only buffer pointers
+or ALU constants since the previous draw.
+
 ## Where the time goes
 
 Busy (non-waiting) samples in one 20 s in-game run with 60 fps interpolation on, after all the fixes

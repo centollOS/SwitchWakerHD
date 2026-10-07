@@ -1,5 +1,6 @@
 // The Vulkan renderer's entry in the renderer table (gfx/renderer.h).
 #include "api.h"
+#include "buffer_cache.h"
 #include "settings.h"
 #include "gfx/renderer.h"
 
@@ -62,6 +63,7 @@ const Backend& vulkan_backend() {
         b.wait_idle = gfxvk::wait_idle;
         b.ss_reset = [] {
             gfxvk::ss_reset_surfaces();
+            gfxvk::buffer_cache_invalidate_all();  // restored memory: every cached range is re-read
             // save-state replacement can change microcode without advancing the frame
             gfxvk::vk::reset_shader_memoization();
         };
@@ -91,6 +93,7 @@ const Backend& vulkan_backend() {
             }
             return true;
         };
+        b.device = gfxvk::device_description;
         return b;
     }();
     return b;

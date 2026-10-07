@@ -22,6 +22,7 @@
 // switches its render-target factors at the matching swap (the value travels with the swap
 // command), so a change never lands in the middle of a frame.
 #include "aspect.h"
+#include "mods/cemu_pack.h"
 
 #include <algorithm>
 #include <atomic>
@@ -132,6 +133,7 @@ void set_window_aspect(float a) {
     g_window.store(q, std::memory_order_relaxed);
 }
 float requested() {
+    if(float pack=mods::cemu::aspect_ratio())return pack;
     int m = mode();
     return clamp_aspect(m == kWindow ? g_window.load(std::memory_order_relaxed) : mode_value(m));
 }

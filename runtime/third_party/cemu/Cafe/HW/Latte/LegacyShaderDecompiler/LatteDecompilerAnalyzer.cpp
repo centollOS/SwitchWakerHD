@@ -1037,6 +1037,9 @@ void LatteDecompiler_analyze(LatteDecompilerShaderContext* shaderContext, LatteD
 				break;
 			}
 		}
+		// Host adapter requests the legacy support block only for a matching pack shader.
+		if (shaderContext->options->legacyGraphicPackUniforms)
+			shaderContext->analyzer.hasFragCoordAccess = true;
 		// some existing graphic pack replacement shaders rely on uf_fragCoordScale despite the original shader not needing it. We handle these exceptions here
 		switch (shaderContext->shaderBaseHash)
 		{

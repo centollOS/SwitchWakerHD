@@ -35,9 +35,12 @@
 #endif
 
 #include "gfx/renderer.h"
+#include "mods/cemu_pack.h"
 #include "gx2/gx2.h"
 #include "recomp_table.h"
+#include "report_header.h"
 #include "crash_addr.h"
+#include "build_info.h"
 #include "crashrec.h"
 #include "input.h"
 #include "mods/manager.h"
@@ -462,6 +465,20 @@ static void apply_portable_mode() {
 #endif
 }
 
+// The Vulkan renderer's validated opt-in CPU paths (docs/vulkan.md, "Opt-in CPU experiments"), on by
+// default on every platform: on a Galaxy S25 Ultra they took the render thread from about 40 to
+// 30 ms per frame; on an M3 Max (MoltenVK) together they cut render-thread CPU by 8-14% with no
+// measurable cost from any single one (docs/performance.md, 2026-10-07). NAME=0 turns one off.
+static void default_vulkan_cpu_paths() {
+    for (const char* name : reporthdr::kVulkanCpuPaths) {  // the list: report_header.cpp
+#ifdef _WIN32
+        if (!getenv(name)) _putenv_s(name, "1");
+#else
+        setenv(name, "1", 0);
+#endif
+    }
+}
+
 int main(int argc, char** argv) {
 #ifdef __SWITCH__
     // everything lives in sdmc:/switch/wwhd: game/ (extracted dump), save/, shader cache, wwhd.log
@@ -480,6 +497,7 @@ int main(int argc, char** argv) {
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
 #endif
     apply_portable_mode();
+    default_vulkan_cpu_paths();
 #ifdef _WIN32
     // Windows sleeps in steps of the system timer (15.6 ms by default): sleep_for(1 ms) took
     // 15.7 ms, the 3 ms AX frame loop ran in bursts and vsync waits alternated 15.7 / 31.5 ms.
@@ -493,18 +511,8 @@ int main(int argc, char** argv) {
     if (const char* dir = SDL_GetAndroidExternalStoragePath()) {
         if (chdir(dir) != 0) fprintf(stderr, "cannot enter %s\n", dir);
         setenv("XDG_CONFIG_HOME", (std::string(dir) + "/config").c_str(), 1);
-        // Phones: the Vulkan renderer's validated opt-in CPU paths (docs/vulkan.md, "Opt-in CPU
-        // experiments") and draw batching are on; measured on a Galaxy S25 Ultra, Outset Island,
-        // they took the render thread from about 40 to 30 ms per frame. env.txt can turn any off.
-        for (const char* name : {"WWHD_VK_REUSE_UNIFORM_SNAPSHOTS", "WWHD_VK_REUSE_FEEDBACK_IMAGES",
-                                 "WWHD_VK_SKIP_REDUNDANT_BINDS", "WWHD_VK_DESCRIPTOR_RANKS",
-                                 "WWHD_VK_PIPELINE_LOOKASIDE", "WWHD_VK_SHADER_ADDRESS_MEMO",
-                                 "WWHD_VK_FETCH_MEMO", "WWHD_VK_SPECIALIZE_INDICES",
-                                 "WWHD_VK_SHADER_STATE_MEMO", "WWHD_VK_SKIP_VERTEX_BINDS",
-                                 "WWHD_VK_SAMPLER_MEMO", "WWHD_VK_SPARSE_HASH_MEMO",
-                                 "WWHD_VK_SHADER_KEY_DIRTY", "WWHD_VK_REUSE_VERTEX_SNAPSHOTS",
-                                 "WWHD_VK_VERTEX_HISTORY_REUSE"})
-            setenv(name, "1", 0);
+        // draw batching (the default everywhere since; kept explicit) and the CPU paths
+        // (default_vulkan_cpu_paths) are on; env.txt can turn any off
         setenv("WWHD_VK_DRAW_BATCH", "2048", 0);
         // 60 fps (frame interpolation) is on unless chosen otherwise (settings.ini, read when the
         // renderer starts); platform/perf_hint.cpp pauses it where the phone cannot keep up
@@ -538,6 +546,8 @@ int main(int argc, char** argv) {
 #endif
     }
     install_crash_handler();
+    // which build on which system: also in crash logs (their last log lines)
+    LOG("[boot] Wind Waker HD %s (%s), %s", build::version(), build::commit(), reporthdr::os_description().c_str());
     mods::log_startup();
     // test aid: WWHD_TEST_HOST_CRASH=1 crashes inside a system library (strlen of a bad pointer), so
     // the crash log's module names can be checked (CTest crash_log_module, runtime/tools/crash_log_test.cmake)
@@ -570,6 +580,7 @@ int main(int argc, char** argv) {
     }
 #endif
     mods::manager::load_saved();  // player choices, before the game starts
+    mods::cemu::set_vulkan(render::requested()==render::Api::Vulkan);
     mods::packages::initialize();
     mem::init();
     auto valid_mod_memory = [](uint32_t address, size_t size) {
@@ -609,6 +620,7 @@ int main(int argc, char** argv) {
     st32(argv_arr, arg0);
     // the game runs on its own threads; the process main thread belongs to the window system
     render::init();
+    mods::cemu::set_vulkan(render::active()==render::Api::Vulkan);
     if (warm_shaders) {
         // compile the shader head start once (fills the macOS Metal shader cache), then quit
 #ifdef WWHD_HAS_METAL

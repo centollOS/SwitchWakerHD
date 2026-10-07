@@ -44,6 +44,7 @@ void show_drc(bool on);
 void set_pro_controller(bool on);  // Input: keyboard and controllers act as a Pro Controller (or the GamePad)
 
 const char* name();                // "AppKit" or "SDL"
+void set_clipboard(const std::string& text);  // main thread: put text on the system clipboard
 
 // SDL host only (gfx/vulkan/overlay_sdl.cpp, called by its main loop)
 void run_posted();                 // the functions post()ed since the last call

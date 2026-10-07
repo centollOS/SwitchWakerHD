@@ -1,5 +1,8 @@
+#include "mods/cemu_pack.h"
 // Guest surfaces backed by Vulkan images. LatteAddrLib supplies guest tiling geometry.
 #include "backend.h"
+#include "buffer_cache.h"
+#include "render_prof.h"
 #include "settings.h"
 #include "sparse_hash_memo.h"
 #include "write_watch.h"
@@ -139,6 +142,10 @@ bool target_aspect_factors(uint32_t w, uint32_t h, float& kx, float& ky) {
     return on;
 }
 static void target_aspect(const Surface* s, float& kx, float& ky) {
+    uint32_t width,height;
+    if(!s->fmt.compressed&&s->mips==1&&mods::cemu::texture_extent(s->width,s->height,s->format,s->slices,s->tileMode,width,height)){
+        kx=float(width)/s->width;ky=float(height)/s->height;return;
+    }
     bool on = screen_shaped(s->width, s->height, s->fmt.compressed, s->mips, s->slices);
     kx = on ? g_aspect_kx : 1.0f;
     ky = on ? g_aspect_ky : 1.0f;
@@ -147,6 +154,8 @@ static void target_aspect(const Surface* s, float& kx, float& ky) {
 // the factor a render target gets. Shadow maps (depth arrays: the game's cascades) can have their
 // own factor (WWHD_SHADOW_SCALE=n; default: the same as everything else).
 static float target_scale(const Surface* s) {
+    uint32_t width,height;
+    if(!s->fmt.compressed&&s->mips==1&&mods::cemu::texture_extent(s->width,s->height,s->format,s->slices,s->tileMode,width,height))return 1.0f;
     if (s->fmt.compressed || s->mips > 1) return 1.0f;
     static const float shadow = getenv("WWHD_SHADOW_SCALE") ? parse_scale(getenv("WWHD_SHADOW_SCALE")) : 0.0f;
     if (shadow && s->isDepth && s->slices > 1) return shadow;
@@ -788,6 +797,7 @@ void upload_surface(Surface* s) {
         Buffer staging=create_buffer(packed.size(),VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         if(!staging.mapped){defer_buffer(staging);throw std::runtime_error("Vulkan texture staging allocation is not mapped");}
         memcpy(staging.mapped,packed.data(),packed.size());
+        rprof::add_upload(rprof::kUpTexture,packed.size());
         vkCmdCopyBufferToImage(command_buffer(),staging.buffer,s->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,uint32_t(copies.size()),copies.data());
         defer_buffer(staging);
     }
@@ -903,6 +913,7 @@ void copy_surface(uint32_t src,uint32_t srcMip,uint32_t srcSlice,uint32_t dst,ui
     copy_surface_impl(src,srcMip,srcSlice,dst,dstMip,dstSlice);
 }
 void invalidate(uint32_t flags,uint32_t addr,uint32_t size) {
+    buffer_cache_guest_invalidate(flags,addr,size);
     ++g_stat_invalidates;if(!(flags&2)||size>=0x10000000)return;
     uint64_t end=uint64_t(addr)+size;
     for(auto& [base,s]:R.surfaces) {

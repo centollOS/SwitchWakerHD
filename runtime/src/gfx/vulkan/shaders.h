@@ -22,6 +22,7 @@ DescriptorRankPlan make_descriptor_rank_plan(const LatteDecompilerShaderResource
 // created by the draw backend; this cache owns only translation and SPIR-V.
 struct Shader {
     uint64_t key = 0;
+    uint64_t pipelineId = 0;  // equal for shaders with identical SPIR-V and resource mapping
     bool vertex = false;
     LatteDecompilerShader* dec = nullptr;
     LatteDecompilerShaderResourceMapping mapping;
@@ -29,6 +30,7 @@ struct Shader {
     LatteDecompilerOutputUniformOffsets uniforms;
     std::vector<uint32_t> spirv;
     std::string glsl;
+    std::string translatedGlsl;  // verify mode only: the translation a graphics pack replaced
     std::string error;
     bool ready() const { return dec && !spirv.empty() && error.empty(); }
 };
@@ -38,7 +40,8 @@ void select_renderer();
 LatteFetchShader* get_fetch_shader(const uint32_t* regs, uint64_t* keyOut, uint64_t frame = ~uint64_t{0});
 Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetchShader, uint64_t fsKey,
     uint64_t frame = ~uint64_t{0}, uint64_t stateGeneration = ~uint64_t{0});
-// Generation must advance for every shader-relevant register write. Primitive
+// Generation must advance for every shader-relevant register write (every register the key
+// reads must be covered by gx2's shader_irrelevant()/vulkan_shader_key_mask()). Primitive
 // mode is checked separately because draw submission writes it directly.
 struct ShaderStats {
     uint64_t stateHashLookups = 0, stateHashMemoHits = 0, stateHashBytes = 0;
@@ -46,6 +49,12 @@ struct ShaderStats {
     uint64_t lookups = 0, lastHits = 0, variantHits = 0, compiles = 0, compileNs = 0;
     uint64_t decompileNs = 0, spirvCompiles = 0, spirvCompileNs = 0, diskHits = 0, spirvReuseHits = 0;
     uint64_t diskLoads = 0, diskLoadNs = 0, diskSaves = 0, diskSaveNs = 0, diskSavedBytes = 0, diskSnapshotNs = 0;
+    // Narrow keys: programs = linkage keys, shaders = distinct translations, variantKeys = full
+    // keys (several can share a shader: variantAliases). Verify mode (WWHD_VK_SHADER_KEY_VERIFY):
+    // pre-narrowing keys checked, violations (a shared shader that would have translated
+    // differently), and pre-narrowing keys that the narrow key splits.
+    uint64_t programs = 0, shaders = 0, variantKeys = 0, variantAliases = 0, moduleAliases = 0;
+    uint64_t verifyChecks = 0, verifyViolations = 0, verifySplitKeys = 0, verifyNs = 0;
 };
 ShaderStats shader_stats();
 // Render-thread-only checkpoint schedules one immutable disk worker after quiet frames.

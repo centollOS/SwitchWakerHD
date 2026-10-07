@@ -6,6 +6,8 @@ body:
     attributes:
       value: |
         Thanks for reporting! A **save state** from the moment the problem happens lets us reproduce it in minutes instead of hours, so please add one if you can.
+
+        If a maintainer closed your issue and the problem comes back, comment `/reopen` on it (as the person who opened it) and it reopens automatically.
   - type: textarea
     id: what
     attributes:

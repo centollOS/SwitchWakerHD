@@ -6,6 +6,7 @@
 // X = L-stick click, V = R-stick click; controllers use button positions (Xbox "A" = Wii U B).
 #import <AppKit/AppKit.h>
 #import <GameController/GameController.h>
+#import <QuartzCore/QuartzCore.h>  // CACurrentMediaTime
 #include <Carbon/Carbon.h>  // kVK_* key codes
 
 #include <cmath>
@@ -17,6 +18,7 @@
 #include "../runtime.h"
 #include "../savestate.h"
 #include "../true60.h"
+#include "../motion/motion.h"
 #include "../overlay/overlay.h"
 
 #include <memory>
@@ -24,7 +26,7 @@
 #include <vector>
 
 namespace gfx { void request_capture(); bool menu_hotkey(uint16_t keyCode); bool controls_window_is_key(); bool text_input_key(void* event); }
-namespace mods { void filter_pad(input::PadState& s); bool host_key_down(uint16_t code); }  // mods/
+namespace mods { void filter_pad(input::PadState& s); bool host_key_down(uint16_t code); void update_gyro_mouse(); }  // mods/
 
 namespace input {
 
@@ -181,6 +183,55 @@ static void start_test_keys() {
     }];
 }
 
+// ---- motion sensors (motion/motion.h) ----
+// GameController.framework reports the gyro and accelerometer of DualSense, DualShock 4, Switch Pro and
+// Joy-Con controllers (macOS 11+). Its frame (as CoreMotion's, for a controller lying flat): x right, y
+// towards the top (away from the player), z up out of the face; acceleration in g with gravity's sign
+// (at rest flat: z = -1). motion.h takes SDL's frame (x right, y up, z towards the player, m/s^2 of
+// specific force), so: sdl = (x, z, -y), acceleration negated.
+// WWHD_GYRO_LOG=1 logs a raw sample twice a second (to check the axes with a new controller).
+static void update_motion_sensors() API_AVAILABLE(macos(11.0)) {
+    const bool want = motion::wants_controller_sensors() && !getenv("WWHD_NO_HOST_INPUT");
+    static NSMutableSet* active = [NSMutableSet set];  // controllers whose handler is installed
+    int n = 0;
+    for (GCController* c in [GCController controllers]) {
+        GCMotion* m = c.motion;
+        if (!m || !m.hasRotationRate) continue;
+        n++;
+        const bool on = [active containsObject:c];
+        if (want == on) continue;
+        if (want) {
+            [active addObject:c];
+            if (m.sensorsRequireManualActivation) m.sensorsActive = YES;
+            const uint64_t id = (uint64_t)(uintptr_t)(__bridge void*)c;
+            m.valueChangedHandler = ^(GCMotion* mm) {
+                if (overlay::blocks_input()) return;
+                GCRotationRate r = mm.rotationRate;
+                GCAcceleration a = mm.hasGravityAndUserAcceleration
+                                       ? GCAcceleration{mm.gravity.x + mm.userAcceleration.x, mm.gravity.y + mm.userAcceleration.y,
+                                                        mm.gravity.z + mm.userAcceleration.z}
+                                       : mm.acceleration;
+                const float g = 9.80665f;
+                float gyro[3] = {(float)r.x, (float)r.z, (float)-r.y};
+                float acc[3] = {(float)-a.x * g, (float)-a.z * g, (float)a.y * g};
+                static const bool log = getenv("WWHD_GYRO_LOG") != nullptr;
+                static double last_log = 0;
+                if (log && CACurrentMediaTime() - last_log > 0.5) {
+                    last_log = CACurrentMediaTime();
+                    LOG("[gyro] GameController raw: rate %.3f %.3f %.3f rad/s, acc %.3f %.3f %.3f g", r.x, r.y, r.z, a.x, a.y, a.z);
+                }
+                motion::controller_sample(id, 0, gyro, acc);
+            };
+        } else {
+            [active removeObject:c];
+            m.valueChangedHandler = nil;
+            if (m.sensorsRequireManualActivation) m.sensorsActive = NO;
+            motion::controller_gone((uint64_t)(uintptr_t)(__bridge void*)c);
+        }
+    }
+    motion::set_gyro_controllers(n);
+}
+
 void init() {
     input_map::load_startup();
     start_test_keys();
@@ -225,9 +276,23 @@ void init() {
         float v[input_map::kPadCount];
         controller_values(v);
         PadState s = input_map::controller_state(input_map::current(), v);
-        std::lock_guard<std::mutex> lk(g_mu);
-        g_pad = s;
-        std::copy(v, v + input_map::kPadCount, g_host_values);
+        {
+            std::lock_guard<std::mutex> lk(g_mu);
+            g_pad = s;
+            std::copy(v, v + input_map::kPadCount, g_host_values);
+        }
+        // gyro: sensors on or off with the source, the recenter binding, the mouse gyro's capture
+        static int tick = 0;
+        if (@available(macOS 11.0, *)) if (tick++ % 60 == 0) update_motion_sensors();
+        if (!overlay::blocks_input() && !getenv("WWHD_NO_HOST_INPUT")) {
+            bool keys[256];
+            {
+                std::lock_guard<std::mutex> lk(g_mu);
+                std::copy(g_keys, g_keys + 256, keys);
+            }
+            motion::poll_recenter(v, keys);
+        }
+        mods::update_gyro_mouse();
     }];
 }
 

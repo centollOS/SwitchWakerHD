@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <ctime>
 
+#include "../interp.h"
 #include "../savestate.h"
 #include "../crashrec.h"
 #include "../aspect.h"
@@ -38,14 +39,8 @@ static void cycle_res() {
 }
 
 
-namespace interp {
-int mode();  // 0 off, 1 frame interpolation, 2 true 60 (logic at 60 steps per second)
-void set_mode(int m);
-bool paced_interpolation();  // frame interpolation keeps the game's speed (settings overlay)
-void set_paced_interpolation(bool on);
-}
 
-namespace gx2 { uint64_t flips_presented(); }
+namespace gx2 { uint64_t flips_presented(); bool uncapped(); }
 #include "../mods/mods.h"
 #include "../overlay/overlay.h"
 namespace ax { void start_sound_trace(const char* path, double seconds); }
@@ -95,8 +90,12 @@ static void load_prefs() {
     if (saved(@"aoHires", {"WWHD_AO_HIRES"})) render::set_ao_hires([pref(@"aoHires") boolValue]);
     if (saved(@"aniso", {"WWHD_ANISO"})) render::set_aniso([pref(@"aniso") boolValue]);
     if (saved(@"fxaa", {"WWHD_FXAA"})) render::set_fxaa([pref(@"fxaa") boolValue]);
-    if (saved(@"fps60", {"WWHD_INTERP", "WWHD_TRUE60"})) interp::set_mode([pref(@"fps60") intValue]);
-    if (saved(@"fps60Paced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation([pref(@"fps60Paced") boolValue]);
+    // frame rate: fps60 is the mode (0 30 fps, 1 frame interpolation, 2 true 60; the key predates
+    // 120/240 fps), interpFps the interpolation's rate; "keep game speed" for 60 and for 120/240 fps
+    if (saved(@"interpFps", {"WWHD_INTERP_FPS"})) interp::set_fps([pref(@"interpFps") intValue]);
+    if (saved(@"fps60", {"WWHD_INTERP", "WWHD_TRUE60", "WWHD_INTERP_FPS"})) interp::set_mode([pref(@"fps60") intValue]);
+    if (saved(@"fps60Paced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation_at(60, [pref(@"fps60Paced") boolValue]);
+    if (saved(@"fpsHighPaced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation_at(120, [pref(@"fpsHighPaced") boolValue]);
 #ifdef WWHD_HAS_VULKAN
     if (saved(@"vkPresentMode", {"WWHD_VK_PRESENT_MODE"})) gfxvk::set_present_mode([pref(@"vkPresentMode") intValue]);
 #endif
@@ -108,8 +107,12 @@ static void save_prefs() {
     if (!env_set({"WWHD_AO_HIRES"})) set_pref(@"aoHires", @(render::ao_hires()));
     if (!env_set({"WWHD_ANISO"})) set_pref(@"aniso", @(render::aniso()));
     if (!env_set({"WWHD_FXAA"})) set_pref(@"fxaa", @(render::fxaa()));
-    if (!env_set({"WWHD_INTERP", "WWHD_TRUE60"})) set_pref(@"fps60", @(interp::mode()));
-    if (!env_set({"WWHD_INTERP_PACED"})) set_pref(@"fps60Paced", @(interp::paced_interpolation()));
+    if (!env_set({"WWHD_INTERP", "WWHD_TRUE60", "WWHD_INTERP_FPS"})) set_pref(@"fps60", @(interp::mode()));
+    if (!env_set({"WWHD_INTERP_FPS"})) set_pref(@"interpFps", @(interp::fps()));
+    if (!env_set({"WWHD_INTERP_PACED"})) {
+        set_pref(@"fps60Paced", @(interp::paced_interpolation_at(60)));
+        set_pref(@"fpsHighPaced", @(interp::paced_interpolation_at(120)));
+    }
 #ifdef WWHD_HAS_VULKAN
     if (!env_set({"WWHD_VK_PRESENT_MODE"})) set_pref(@"vkPresentMode", @(gfxvk::present_mode()));
 #endif
@@ -133,7 +136,8 @@ static void update_title() {
     NSString* t = [NSString stringWithFormat:@"%@ \u2014 %@ \u00b7 %.0f fps%@ \u00b7 AO: %s%s \u00b7 AF: %s%@%@", kTitle, rnd, g_fps, res,
                                              ao[render::ao_mode()], render::ao_hires() ? " + full-size depth" : "",
                                              render::aniso() ? "16x" : "game",
-                                             interp::mode() == 2 ? @" \u00b7 true 60" : interp::mode() == 1 ? @" \u00b7 60 fps" : @"", render::fxaa() ? @" \u00b7 FXAA" : @""];
+                                             interp::mode() ? [@" \u00b7 " stringByAppendingString:@(interp::mode_name())] : @"", render::fxaa() ? @" \u00b7 FXAA" : @""];
+    if (gx2::uncapped()) t = [t stringByAppendingString:@" \u00b7 UNCAPPED (debug)"];
     std::string msg = ss::last_message();  // save state confirmations
     if (!msg.empty()) t = [NSString stringWithFormat:@"%@ \u2014 %@ \u2014 %s", kTitle, rnd, msg.c_str()];
     if (getenv("WWHD_LOG_TITLE") && ![t isEqualToString:g_tv.title]) {  // tests: the window title as it changes
@@ -238,6 +242,7 @@ static WWStateMenu* g_state_menu;
     gfx::set_host_setting("proController", item.tag == 1 ? "1" : "0");  // as the settings overlay saves it
 }
 - (void)toggleInterp:(NSMenuItem*)item { interp::set_mode(interp::mode() == item.tag ? 0 : (int)item.tag); update_title(); }
+- (void)toggleInterpFps:(NSMenuItem*)item { interp::toggle_fps((int)item.tag); update_title(); }
 - (void)toggleDrcWindow:(NSMenuItem*)item { gfx::show_drc_window(!gfx::drc_window_shown()); }
 - (void)toggleFxaa:(NSMenuItem*)item { render::set_fxaa(!render::fxaa()); update_title(); }
 - (void)toggleHires:(NSMenuItem*)item { render::set_ao_hires(!render::ao_hires()); update_title(); }
@@ -262,6 +267,8 @@ static WWStateMenu* g_state_menu;
     if (item.action == @selector(setController:))
         item.state = (item.tag == 1) == input::pro_controller() ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(toggleInterp:)) item.state = interp::mode() == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(toggleInterpFps:))
+        item.state = interp::mode() == 1 && interp::fps() == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(toggleDrcWindow:)) {
         item.state = gfx::drc_window_shown() ? NSControlStateValueOn : NSControlStateValueOff;
         return gfx::drc_window_available();
@@ -376,7 +383,9 @@ void install_menu(NSWindow* tv) {
     [g addItem:[NSMenuItem separatorItem]];
     add(g, @"16x anisotropic filtering (N)", @selector(toggleAniso:), @"N");
     add(g, @"Edge smoothing, FXAA (8)", @selector(toggleFxaa:), @"8");
-    add(g, @"60 fps: frame interpolation (6)", @selector(toggleInterp:), @"6", 1);
+    add(g, @"60 fps: frame interpolation (6)", @selector(toggleInterpFps:), @"6", 60);
+    add(g, @"120 fps: frame interpolation", @selector(toggleInterpFps:), @"", 120);
+    add(g, @"240 fps: frame interpolation", @selector(toggleInterpFps:), @"", 240);
     add(g, @"60 fps: true 60, game logic at 60 steps/s (7, experimental)", @selector(toggleInterp:), @"7", 2);
     [g addItem:[NSMenuItem separatorItem]];
     add(g, @"Capture frame for debugging (P)", @selector(capture:), @"P").toolTip =
@@ -482,7 +491,7 @@ bool menu_hotkey(uint16_t code) {
     case kVK_ANSI_O: if (render::feature_available(render::kFeatureAO)) render::set_ao_mode((render::ao_mode() + 1) % 3); break;
     case kVK_ANSI_N: if (render::feature_available(render::kFeatureAniso)) render::set_aniso(!render::aniso()); break;
     case kVK_ANSI_M: if (render::feature_available(render::kFeatureAOHires)) render::set_ao_hires(!render::ao_hires()); break;
-    case kVK_ANSI_6: interp::set_mode(interp::mode() == 1 ? 0 : 1); break;
+    case kVK_ANSI_6: interp::toggle_fps(60); break;
     case kVK_ANSI_7: interp::set_mode(interp::mode() == 2 ? 0 : 2); break;
     case kVK_ANSI_8: if (render::feature_available(render::kFeatureFXAA)) render::set_fxaa(!render::fxaa()); break;
     case kVK_ANSI_R: cycle_res(); break;

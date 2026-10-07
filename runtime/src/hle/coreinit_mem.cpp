@@ -5,6 +5,7 @@
 #include <unordered_map>
 
 #include "../runtime.h"
+#include "../write_watch.h"
 
 namespace {
 
@@ -253,12 +254,13 @@ HLE(coreinit, memcpy) { memcpy(mem::ptr(arg(c, 0)), mem::ptr(arg(c, 1)), arg(c, 
 HLE(coreinit, memmove) { memmove(mem::ptr(arg(c, 0)), mem::ptr(arg(c, 1)), arg(c, 2)); ret(c, arg(c, 0)); }
 HLE(coreinit, memset) { memset(mem::ptr(arg(c, 0)), (int)arg(c, 1), arg(c, 2)); ret(c, arg(c, 0)); }
 
-// caches are coherent on the host
-HLE(coreinit, DCFlushRange) {}
-HLE(coreinit, DCFlushRangeNoSync) {}
+// caches are coherent on the host. Flushes and stores are the game saying "the GPU will read what I
+// wrote here": a hint for the Vulkan buffer cache (write_watch.h; a no-op unless it is on).
+HLE(coreinit, DCFlushRange) { wwatch::hint(arg(c, 0), arg(c, 1)); }
+HLE(coreinit, DCFlushRangeNoSync) { wwatch::hint(arg(c, 0), arg(c, 1)); }
 HLE(coreinit, DCInvalidateRange) {}
-HLE(coreinit, DCStoreRange) {}
-HLE(coreinit, DCStoreRangeNoSync) {}
+HLE(coreinit, DCStoreRange) { wwatch::hint(arg(c, 0), arg(c, 1)); }
+HLE(coreinit, DCStoreRangeNoSync) { wwatch::hint(arg(c, 0), arg(c, 1)); }
 HLE(coreinit, DCZeroRange) { memset(mem::ptr(arg(c, 0) & ~31u), 0, ((arg(c, 0) & 31) + arg(c, 1) + 31) & ~31u); }
 HLE(coreinit, OSIsAddressRangeDCValid) { ret(c, 1); }
 

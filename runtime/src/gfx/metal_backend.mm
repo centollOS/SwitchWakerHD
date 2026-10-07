@@ -21,6 +21,7 @@ bool aniso_enabled();
 void set_aniso(bool v);
 bool fxaa_enabled();
 void set_fxaa(bool v);
+std::string device_name();
 }  // namespace gfx
 
 namespace render {
@@ -60,6 +61,7 @@ const Backend& metal_backend() {
         b.fxaa = gfx::fxaa_enabled;
         b.set_fxaa = gfx::set_fxaa;
         b.feature_available = [](int) { return true; };
+        b.device = gfx::device_name;
         return b;
     }();
     return b;

@@ -113,6 +113,39 @@ world matrices halfway between N and N+1 (viewCalc and the UBO update run on the
 the exact ones are restored right after each). Models without a previous step (spawned, not drawn
 last time) or that jumped further than 400 units use the current matrices.
 
+### 120 and 240 fps (N in-between frames per step)
+
+The same structure with N hold passes per logic step instead of one (N = 3 at 120 fps, 7 at 240;
+`runtime/src/interp_pacing.h` holds the arithmetic, `runtime/tools/interp_pacing_test.cpp` tests
+it). The logic pass draws at t = 1/(N+1); hold passes 1..N-1 ("blended hold passes") draw at
+t = (k+1)/(N+1) without logic; hold pass N, the *record pass*, draws step N+1 exactly and records it
+(the "before" of the next step: model matrices, camera, material animation frames, sea grid). Every
+blend takes the fraction: lerp, s16 angles the short way, colours, slerp for rotations and the
+camera's orbit direction (constant angular speed; at t = 1/2 the original halfway arithmetic, so
+60 fps frames are bit-identical). Values only logic computes (particles, wave crests, sway slots,
+weather sprites) are blended on the logic pass, which keeps their before/after pairs, and re-applied
+at each blended hold pass's own fraction (`fx_hold_blend`). Sound starts are suppressed on every
+hold pass, the sound listener follows only the record pass's camera, the audio frame runs once per
+logic step, and the controller read repeats its previous sample until the step's last pass, so
+input reaches the logic once per step.
+
+GX2's virtual vsync (gx2_core.cpp) ticks 2 or 4 times per 59.94 Hz vsync at 120/240 fps (quarter-
+vsync ticks rounded to the rate's granule; 30/60 fps keep the 59.94 Hz timing exactly), so the
+game's swap interval 2 becomes N+1 flips per step. The drawn rate is capped to what the display
+shows when presentation waits for its vsync (Metal, Vulkan FIFO): 240 fps on a 120 Hz display draws
+120, on a 60 Hz one 60 (`interp::output_fps`; the hosts report the refresh rate: NSScreen
+maximumFramesPerSecond, SDL's display mode, Android's Display, which the game asks for a faster
+mode at 120/240 fps).
+
+Paced ("Keep game speed", on by default at 120/240 fps): the logic pass plans the step's in-between
+frames from the recent logic and in-between pass durations (as many as fit into 33.3 ms + 2 ms),
+spaces them evenly (t = k/(n+1)), and after each pass checks the rest still fits; if only one pass
+fits it skips to the record pass (without one the next step has no "before" and is drawn exactly,
+showing the same picture twice), otherwise drops the rest and the next logic pass waits for its
+time. Pass durations are averaged per kind (a slow logic pass must not keep cheap in-between
+passes out), a single sample counts at most twice the average (one hitch kept them out for 10 s),
+and after 10 s without an in-between pass one probe re-measures them.
+
 Logic stays at 30 Hz. For each rendered tick, record per model (J3DModel pointer) the world
 matrices produced by `calc` and the camera inputs of `camera_draw`. For the in-between frame,
 replay the frame's GX2 command list with draw matrices recomputed from blended world matrices and

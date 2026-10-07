@@ -11,6 +11,7 @@ extern "C" uint64_t g_shader_state_gen;  // gx2_core.cpp: bumped by shader-relev
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
 #include "Cafe/HW/Latte/Renderer/Metal/LatteToMtl.h"
 #include "gx2/gx2.h"
+#include "render_prof.h"
 #include "gx2/gx2_cmd.h"
 #include "write_watch.h"
 #include "metal.h"
@@ -148,6 +149,7 @@ static Upload upload(const void* data, uint32_t size) {
     }
     Upload u{g_pool_cur, g_pool_pos};
     memcpy((uint8_t*)g_pool_cur.contents + g_pool_pos, data, size);
+    rprof::add_upload(size);
     g_pool_pos += size;
     return u;
 }
@@ -1457,6 +1459,7 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
         g_skip[SK_COMPILING]++;
         return;
     }
+    rprof::mark(rprof::kShader);
 
     const LatteContextRegister& lcr = *(const LatteContextRegister*)regs;
     Surface* colors[8] = {};
@@ -1490,11 +1493,13 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
     }
     g_target_kx = kx;
     g_target_ky = ky;
+    rprof::mark(rprof::kTargets);
 
     // textures must be uploaded before the render encoder opens
     static std::vector<uint32_t> indices;  // render thread only; keeps its capacity between draws
     MTLPrimitiveType ptype;
     if (!build_indices(prim, count, indexType, indexAddr, indices, ptype)) { g_skip[SK_PRIM]++; return; }
+    rprof::mark(rprof::kIndices);
     for (Shader* sh : {vs, ps}) {
         uint32_t texBase = sh == vs ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
         for (int u = 0; u < sh->dec->textureUnitListCount; u++) {
@@ -1504,13 +1509,16 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
         }
     }
 
+    rprof::mark(rprof::kTextures);
     if (!ensure_pass(colors, colorSlices, depth, depthSlice)) { g_skip[SK_PASS]++; return; }
+    rprof::mark(rprof::kPass);
     TargetFormats tf;
     for (int i = 0; i < 8; i++)
         if (colors[i]) tf.color[i] = colors[i]->format;
     if (depth) tf.depth = depth->format;
     id<MTLRenderPipelineState> pipe = get_pipeline(regs, vs, ps, fs, fsKey, tf);
     if (!pipe) { g_skip[SK_PIPE_COMPILING]++; return; }
+    rprof::mark(rprof::kPipeline);
     id<MTLRenderCommandEncoder> enc = R.enc;
     [enc setRenderPipelineState:pipe];
     [enc setDepthStencilState:get_depth_state(regs, depth != nullptr)];
@@ -1561,6 +1569,8 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
     uint32_t ex = hi(br & 0x7FFF, kx, w), ey = hi((br >> 16) & 0x7FFF, ky, h);
     if (ex <= sx || ey <= sy) { g_skip[SK_SCISSOR]++; return; }
     [enc setScissorRect:MTLScissorRect{sx, sy, ex - sx, ey - sy}];
+    rprof::mark(rprof::kRecord);
+    rprof::UploadKind vertexUploads(rprof::kUpVertex);
 
     // vertex buffers: small ones (UI, particles, dynamic geometry) are snapshotted like uniforms;
     // large static meshes are read from guest memory directly
@@ -1578,8 +1588,13 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
             [enc setVertexBuffer:b offset:off atIndex:GET_MTL_VERTEX_BUFFER_INDEX(g.attributeBufferIndex)];
         }
     }
-    bind_stage(enc, regs, vs, true, colors);
-    bind_stage(enc, regs, ps, false, colors);
+    rprof::mark(rprof::kVertex);
+    {
+        rprof::UploadKind uploads(rprof::kUpUbo);  // Metal: uniform snapshots and bindings of both stages
+        bind_stage(enc, regs, vs, true, colors);
+        bind_stage(enc, regs, ps, false, colors);
+    }
+    rprof::mark(rprof::kUniforms);
 
     static uint64_t drawInFrame = 0, lastFrame = 0;
     if (lastFrame != R.frame) { lastFrame = R.frame; drawInFrame = 0; }
@@ -1591,6 +1606,7 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
     if (indices.empty()) {
         [enc drawPrimitives:ptype vertexStart:baseVertex vertexCount:count instanceCount:instances];
     } else {
+        rprof::UploadKind uploads(rprof::kUpIndex);
         Upload u = upload(indices.data(), (uint32_t)(indices.size() * 4));
         [enc drawIndexedPrimitives:ptype
                         indexCount:indices.size()

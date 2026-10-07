@@ -4,6 +4,7 @@
 #include "../runtime.h"
 #include "../input.h"
 #include "../rumble.h"
+#include "../motion/motion.h"
 
 namespace interp { bool repeat_input(); bool fresh_sticks(); void trace_read(const char*); uint64_t logic_steps(); }
 
@@ -131,8 +132,18 @@ HLE(vpad, VPADRead) {
     }
     stf32(st + 0x0C, p.lx); stf32(st + 0x10, p.ly);
     stf32(st + 0x14, p.rx); stf32(st + 0x18, p.ry);
-    stf32(st + 0x30, 1.0f);                                    // accXY
-    for (int i = 0; i < 3; i++) stf32(st + 0x6C + i * 0x10, 1.0f);  // dir = identity
+    {  // motion sensors (motion/motion.h). WWHD reads only the direction matrix (0x6C..0x8F): its
+       // first-person camera turns by the change from one frame to the next (dCamera_c::CalcSubjectAngle)
+        const motion::VpadMotion m = motion::vpad(repeat);
+        auto vec = [&](uint32_t at, const motion::Vec3& v) { stf32(at, v.x); stf32(at + 4, v.y); stf32(at + 8, v.z); };
+        vec(st + 0x1C, m.acc);
+        stf32(st + 0x28, m.acc_magnitude);
+        stf32(st + 0x2C, m.acc_variation);
+        stf32(st + 0x30, m.acc_xy[0]); stf32(st + 0x34, m.acc_xy[1]);
+        vec(st + 0x38, m.gyro);
+        vec(st + 0x44, m.angle);
+        for (int i = 0; i < 3; i++) vec(st + 0x6C + i * 0xC, m.dir[i]);
+    }
     // touch panel, raw coordinates as the hardware reports them (mapping from Cemu)
     static uint16_t last_tx = 0, last_ty = 0;
     if (p.touch) {

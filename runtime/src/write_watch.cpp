@@ -34,6 +34,11 @@ std::atomic<uint8_t>* g_flags = nullptr;
 std::atomic<uint64_t> g_clock{1};
 std::atomic<bool> g_active{false};
 std::atomic<uint64_t> g_faults{0}, g_protected{0};
+std::atomic<uint64_t> g_seq{0};                // advanced after each stamp is stored (write_seq)
+std::atomic<uint64_t>* g_hint = nullptr;       // newest hint stamp per page (enable_hints)
+std::atomic<bool> g_hints{false};
+std::atomic<uint64_t> g_hint_calls{0}, g_hint_bytes{0};
+std::atomic<uint64_t> g_protect_failures{0};  // pages arm() could not protect
 // arm() vs host writes: a page inside a pending kernel write must stay writable until the write ends
 std::mutex g_m;
 std::vector<std::pair<uint64_t, uint64_t>> g_pins;  // page ranges [first, last] of pending host writes
@@ -69,6 +74,7 @@ bool on_write_fault(uintptr_t a) {
     if (!set_rw(page, 1, true)) return false;
     g_flags[page].fetch_and((uint8_t)~kProt, std::memory_order_acq_rel);
     stamp_page(page, g_clock.fetch_add(1, std::memory_order_acq_rel) + 1);
+    g_seq.fetch_add(1, std::memory_order_acq_rel);
     g_faults.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -155,8 +161,19 @@ uint64_t arm(uint32_t addr, uint32_t size) {
     uint64_t run = 0, runStart = 0;
     auto flush = [&] {
         if (!run) return;
-        set_rw(runStart, run, false);
-        g_protected.fetch_add(run, std::memory_order_relaxed);
+        if (set_rw(runStart, run, false)) {
+            g_protected.fetch_add(run, std::memory_order_relaxed);
+        } else {
+            // not protected (Linux: too many mappings, vm.max_map_count): writes would go unseen, so
+            // the pages count as written now and stay unflagged; callers see a change on every check
+            uint64_t v = g_clock.fetch_add(1, std::memory_order_acq_rel) + 1;
+            for (uint64_t q = runStart; q < runStart + run; q++) {
+                g_flags[q].fetch_and((uint8_t)~kProt, std::memory_order_acq_rel);
+                stamp_page(q, v);
+            }
+            g_seq.fetch_add(1, std::memory_order_acq_rel);
+            g_protect_failures.fetch_add(run, std::memory_order_relaxed);
+        }
         run = 0;
     };
     for (; p <= last; p++) {
@@ -190,6 +207,7 @@ void host_write_begin(uint32_t addr, uint32_t size) {
         }
     uint64_t v = g_clock.fetch_add(1, std::memory_order_acq_rel) + 1;
     for (uint64_t p = first; p <= last; p++) stamp_page(p, v);
+    g_seq.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void host_write_end(uint32_t addr, uint32_t size) {
@@ -201,11 +219,56 @@ void host_write_end(uint32_t addr, uint32_t size) {
     // stamped again after the data is in: a texture checked during the write is checked once more
     uint64_t v = g_clock.fetch_add(1, std::memory_order_acq_rel) + 1;
     for (uint64_t p = first; p <= last; p++) stamp_page(p, v);
+    g_seq.fetch_add(1, std::memory_order_acq_rel);
+}
+
+bool changed_since(uint32_t addr, uint32_t size, uint64_t stamp) {
+    uint64_t first, last;
+    if (!page_range(addr, size, first, last)) return false;
+    std::atomic<uint64_t>* hints = g_hints.load(std::memory_order_acquire) ? g_hint : nullptr;
+    for (uint64_t p = first; p <= last; p++)
+        if (g_stamp[p].load(std::memory_order_acquire) > stamp ||
+            (hints && hints[p].load(std::memory_order_acquire) > stamp))
+            return true;
+    return false;
+}
+
+uint64_t write_seq() { return g_seq.load(std::memory_order_acquire); }
+
+void enable_hints() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (!active()) return;
+        g_hint = (std::atomic<uint64_t>*)calloc(g_pages, sizeof(std::atomic<uint64_t>));
+        if (g_hint) g_hints.store(true, std::memory_order_release);
+    });
+}
+
+void hint(uint32_t addr, uint32_t size) {
+    if (!g_hints.load(std::memory_order_acquire) || size >= 0x10000000u) return;
+    uint64_t first, last;
+    if (!page_range(addr, size, first, last)) return;
+    // a stamp newer than every arm() so far, the same order as a fault: stamp, then the sequence
+    uint64_t v = g_clock.fetch_add(1, std::memory_order_acq_rel) + 1;
+    for (uint64_t p = first; p <= last; p++) {
+        uint64_t cur = g_hint[p].load(std::memory_order_relaxed);
+        while (cur < v && !g_hint[p].compare_exchange_weak(cur, v, std::memory_order_release, std::memory_order_relaxed)) {}
+    }
+    g_seq.fetch_add(1, std::memory_order_acq_rel);
+    g_hint_calls.fetch_add(1, std::memory_order_relaxed);
+    g_hint_bytes.fetch_add(size, std::memory_order_relaxed);
 }
 
 void take_stats(uint64_t& faults, uint64_t& protectedPages) {
     faults = g_faults.exchange(0, std::memory_order_relaxed);
     protectedPages = g_protected.exchange(0, std::memory_order_relaxed);
+}
+
+uint64_t protect_failures() { return g_protect_failures.load(std::memory_order_relaxed); }
+
+void take_hint_stats(uint64_t& calls, uint64_t& bytes) {
+    calls = g_hint_calls.exchange(0, std::memory_order_relaxed);
+    bytes = g_hint_bytes.exchange(0, std::memory_order_relaxed);
 }
 
 }  // namespace wwatch
