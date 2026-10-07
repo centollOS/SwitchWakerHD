@@ -3,9 +3,9 @@
 # smoke test on Mesa's software Vulkan driver (lavapipe) with the Khronos validation layer.
 name: linux
 
+# Started only by hand (Actions tab, "Run workflow"), to keep the private repository's Actions minutes.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   build:

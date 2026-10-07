@@ -3,9 +3,9 @@
 # tests. The runner has no Vulkan driver, so the renderer smoke test is not run here.
 name: windows
 
+# Started only by hand (Actions tab, "Run workflow"), to keep the private repository's Actions minutes.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   build:

@@ -12,9 +12,9 @@
 # glslang, zlib and LZ4 (URL + SHA-256 in cmake/WindowsDependencies.cmake, WWHD_BUNDLED_DEPS).
 name: android
 
+# Started only by hand (Actions tab, "Run workflow"), to keep the private repository's Actions minutes.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
