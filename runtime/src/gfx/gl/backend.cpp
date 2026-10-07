@@ -535,7 +535,11 @@ struct GpuPasses {
         GLuint query;
         std::string label;
         uint64_t draws;
+        uint64_t cpuNs;  // when it was queued
     };
+    // the GPU idle at a sampled frame's start, against the CPU time from the swap to the first pass being
+    // queued: equal when the GPU waits for the game to send the frame (not for its own work)
+    double idleSumMs = 0, queueSumMs = 0;
     bool on = false, ready = false;
     uint64_t startCpu = 0;  // when the sampled frame's start was queued (GpuClock)
     double lastIdleMs = -1, lastBusyMs = -1;  // the last sampled frame: GPU idle at its start, and the rest
@@ -575,6 +579,8 @@ struct GpuPasses {
             x.draws += marks[i + 1].draws - marks[i].draws;
         }
         lastIdleMs = double(t[1] - t[0]) * k;
+        idleSumMs += lastIdleMs;
+        queueSumMs += double(marks[1].cpuNs - marks[0].cpuNs) / 1e6;
         lastBusyMs = double(t.back() - t[1]) * k;
         collected++;
         frames++;
@@ -607,7 +613,7 @@ struct GpuPasses {
         glMemoryBarrier(GL_FRAMEBUFFER_BARRIER_BIT);
         GLuint q = query();
         glQueryCounter(q, GL_TIMESTAMP);
-        marks.push_back({q, label, R.drawCount});
+        marks.push_back({q, label, R.drawCount, now_ns()});
     }
     void frame_end() {  // before the swap
         if (!g_gpuPassSampling) return;
@@ -633,6 +639,11 @@ struct GpuPasses {
                      double(totals[v[i].second].draws) / double(frames));
             out += item;
         }
+        char tail[160];
+        snprintf(tail, sizeof tail, "; frame start: GPU idle %.1f ms, first pass queued %.1f ms after the swap (CPU)",
+                 idleSumMs / double(frames), queueSumMs / double(frames));
+        out += tail;
+        idleSumMs = queueSumMs = 0;
         totals.clear();
         frames = 0;
         return out;
