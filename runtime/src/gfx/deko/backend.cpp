@@ -883,6 +883,7 @@ void frame_stats() {
             perFrame(p.textureLookups), kib(p.vertexBytes), kib(p.indexBytes), kib(p.uboBytes), kib(p.streamBytes),
             kib(p.reusedBytes), ms(p.copyNs), perFrame(p.flushes), perFrame(p.midFrameSubmits), ms(p.flushNs),
             perFrame(p.gamepadDraws));
+        log_resource_stats(executed, frames);
         const ShaderStats sh = shader_stats_take();
         LOG("[dk] shaders: %llu translated, %llu DKSH in RAM, %llu from cache files, %llu queued, %llu compiled (%.0f ms in "
             "uam), %llu failed, %llu pending now, %llu draws skipped for them; loads %.1f ms, render thread %.1f ms/s "

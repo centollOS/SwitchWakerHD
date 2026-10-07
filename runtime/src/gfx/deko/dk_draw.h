@@ -38,6 +38,8 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
 inline void forget_state() { R.stateEpoch++; }
 // once per frame from begin_commands: the draw path's per-frame caches
 void draw_frame_start();
+// backend.cpp's 5 s report: the resources stage's parts, binds and ufBlock figures since the last call (P4)
+void log_resource_stats(uint64_t executedDraws, uint64_t frames);
 
 // the commands recorded so far go to the GPU now (dkCmdBufFinishList + dkQueueSubmitCommands, after
 // check_queue): GX2Flush / GX2DrawDone, and a frame whose command memory grows past a threshold. Recording
