@@ -835,9 +835,10 @@ void draw_frame_start() {
         static const char* const kProvoking[] = {"the last vertex, as gfx/gl", "the FIRST vertex (test)",
                                                  "Latte's PROVOKING_VTX_LAST bit (test)"};
         LOG("[dk] flat varyings: %s (WWHD_DK_PROVOKING_VERTEX=last|first|latte)", kProvoking[provoking_mode()]);
-        LOG("[dk] zcull: on (queue), dropped after copies, uploads or new images of a depth buffer and %s; depth "
-            "clears reset it", sync_zcull_keep() ? "when another depth buffer or layer was bound since"
-                                                 : "at every depth-target bind");
+        if (R.zcull)  // (off by default: fix-grass, backend.cpp)
+            LOG("[dk] zcull: on (queue), dropped after copies, uploads or new images of a depth buffer and %s; depth "
+                "clears reset it", sync_zcull_keep() ? "when another depth buffer or layer was bound since"
+                                                     : "at every depth-target bind");
         sync_log_switches();
         static const char* const kUf[] = {"0, packed into a new stream slice every draw (P2)",
                                           "1, a copy per shader, a new slice only when a value changed",

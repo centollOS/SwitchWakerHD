@@ -1347,13 +1347,21 @@ void init() {
         "negate y)", dm.flags);
     DkQueueMaker qm;
     dkQueueMakerDefaults(&qm, R.device);
-    qm.flags = DkQueueFlags_Graphics | DkQueueFlags_MediumPrio | DkQueueFlags_EnableZcull;
+    // zcull: off by default (dk.h, R.zcull); WWHD_DK_ZCULL=1 gives the queue zcull again (the behaviour before)
+    R.zcull = [] {
+        const char* e = getenv("WWHD_DK_ZCULL");
+        return e && *e && *e != '0';
+    }();
+    qm.flags = DkQueueFlags_Graphics | DkQueueFlags_MediumPrio |
+               (R.zcull ? DkQueueFlags_EnableZcull : DkQueueFlags_DisableZcull);
     qm.commandMemorySize = 1u << 20;
     qm.flushThreshold = qm.commandMemorySize / 8;
     LOG("[dk] creating the queue");
     log_flush();
     R.queue = dkQueueCreate(&qm);
     LOG("[dk] queue created: graphics, command memory %u KiB", qm.commandMemorySize >> 10);
+    LOG("[dk] zcull: %s (WWHD_DK_ZCULL=1 turns it on: with it, depth-biased ground decals such as Outset's grass "
+        "lose whole 4x8-pixel tiles; gfx/gl's driver never uses zcull)", R.zcull ? "ON (queue)" : "off, as gfx/gl");
     memory_init();
     load_shaders();
     text_self_test();

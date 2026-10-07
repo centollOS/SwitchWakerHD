@@ -116,6 +116,10 @@ struct Renderer {
     // image possibly in the heap memory of an earlier one): the zcull data deko3d keeps for the bound depth
     // target (invalidated by deko3d only when the target's address changes) is dropped before the next draw
     uint64_t zcullEpoch = 1;
+    // zcull (the 3D engine's per-tile early depth rejection) is off unless WWHD_DK_ZCULL=1 (backend.cpp, queue
+    // creation): gfx/gl's driver (Mesa nouveau) never enables it, and with it deko3d dropped the ground's
+    // depth-biased decal layers in whole 4x8-pixel tiles (the likely cause of Outset's flickering grass specks, 2026-10-07)
+    bool zcull = false;
     uint64_t drawCount = 0, skippedDraws = 0, scanCopies = 0;
     bool timedDraw = true;      // this draw is one the per-draw timers measure (SampledTime)
     // render-thread time and work since the last 5 s report. Each lane adds to its own fields only.
