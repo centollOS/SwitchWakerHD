@@ -32,6 +32,7 @@ namespace {
 
 Config g_cfg;
 std::atomic<bool> g_running{false};
+std::atomic<bool> g_keep{false};  // keep_log: the log's text is kept before start
 int g_listen = -1;
 
 struct Command {
@@ -564,7 +565,7 @@ void add_command(const char* name, const char* usage, Handler handler) {
 }
 
 void log_tap(const char* data, size_t size) {
-    if (!g_running.load(std::memory_order_relaxed) || !size) return;
+    if ((!g_running.load(std::memory_order_relaxed) && !g_keep.load(std::memory_order_relaxed)) || !size) return;
     {
         std::lock_guard<std::mutex> lk(g_logMu);
         g_logBuf.append(data, size);
@@ -578,6 +579,16 @@ void log_tap(const char* data, size_t size) {
         }
     }
     g_logCv.notify_all();
+}
+
+void keep_log() { g_keep = true; }
+
+void drop_log() {
+    g_keep = false;
+    if (g_running.load()) return;
+    std::lock_guard<std::mutex> lk(g_logMu);
+    std::string().swap(g_logBuf);
+    g_logBase = 0;
 }
 
 void stop() {

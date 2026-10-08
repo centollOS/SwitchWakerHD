@@ -32,6 +32,16 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_PORT = 6543
+# What differs between the two ports' copies of this client (SwitchWaker: scripts/switch/switchwaker_debug.py)
+PORT_NAME = "SwitchWakerHD"
+ENV_SWITCH = "WWHD_DEBUG_SERVER"        # the env.txt line that starts the server
+ENV_HOST = "WWHD_SWITCH_HOST"           # the console's address on this computer
+ENV_PORT = "WWHD_DEBUG_PORT"
+DEFAULT_NRO = REPO / "build" / "switch-dk" / "wwhd.nro"
+BUILD_HINT = "tools/switch/build.sh"
+REMOTE_NRO = "wwhd.nro"                 # relative to the server's root, sdmc:/switch/wwhd
+REMOTE_LOGS = "logs"
+SESSION_LOG = r"wwhd_\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.log"
 
 
 class ServerError(Exception):
@@ -39,8 +49,8 @@ class ServerError(Exception):
 
 
 def default_host():
-    if os.environ.get("WWHD_SWITCH_HOST"):
-        return os.environ["WWHD_SWITCH_HOST"]
+    if os.environ.get(ENV_HOST):
+        return os.environ[ENV_HOST]
     f = REPO / "build" / "switch_host.txt"
     if f.exists():
         line = f.read_text().strip().splitlines()
@@ -107,11 +117,11 @@ class Conn:
 
 def connect(args, timeout=10.0):
     if not args.host:
-        sys.exit("the console's address: --host IP, WWHD_SWITCH_HOST=IP, or build/switch_host.txt")
+        sys.exit(f"the console's address: --host IP, {ENV_HOST}=IP, or build/switch_host.txt")
     try:
         return Conn(args.host, args.port, timeout)
     except OSError as e:
-        sys.exit(f"cannot reach {args.host}:{args.port}: {e} (is the game running with WWHD_DEBUG_SERVER=1 in env.txt?)")
+        sys.exit(f"cannot reach {args.host}:{args.port}: {e} (is {PORT_NAME} running with {ENV_SWITCH}=1 in env.txt?)")
 
 
 def simple(args, *cmd, timeout=30.0):
@@ -152,7 +162,7 @@ def cmd_log(args):
             except socket.timeout:
                 continue
             if not data:
-                print("[wwhd_debug] the console closed the stream", file=sys.stderr)
+                print("[debug client] the console closed the stream", file=sys.stderr)
                 break
             pending += data.decode(errors="replace")
     except KeyboardInterrupt:
@@ -210,9 +220,9 @@ def wait_server(args, seconds):
 
 
 def cmd_deploy(args):
-    nro = Path(args.nro or REPO / "build" / "switch-dk" / "wwhd.nro")
+    nro = Path(args.nro or DEFAULT_NRO)
     if not nro.exists():
-        sys.exit(f"{nro} does not exist (tools/switch/build.sh builds it)")
+        sys.exit(f"{nro} does not exist ({BUILD_HINT} builds it)")
     c = connect(args)
     try:
         put_file(c, nro, args.remote)
@@ -256,12 +266,12 @@ def remote_ls(args, path):
 
 
 def cmd_lastlog(args):
-    # session logs are named by their start time (wwhd_<date>_<time>.log); wwhd_earlier_build_* are older
-    logs = sorted(name for kind, _, name in remote_ls(args, "logs")
-                  if kind == "f" and re.fullmatch(r"wwhd_\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.log", name))
+    # session logs are named by their start time (<name>_<date>_<time>.log); other names are older builds'
+    logs = sorted(name for kind, _, name in remote_ls(args, REMOTE_LOGS)
+                  if kind == "f" and re.fullmatch(SESSION_LOG, name))
     if not logs:
-        sys.exit("no session logs in logs/")
-    args.remote = "logs/" + logs[-1]
+        sys.exit(f"no session logs in {REMOTE_LOGS}/")
+    args.remote = REMOTE_LOGS + "/" + logs[-1]
     args.local = args.local or logs[-1]
     try:
         cmd_get(args)
@@ -292,7 +302,7 @@ def cmd_crashes(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--host", default=default_host())
-    p.add_argument("--port", type=int, default=int(os.environ.get("WWHD_DEBUG_PORT", DEFAULT_PORT)))
+    p.add_argument("--port", type=int, default=int(os.environ.get(ENV_PORT, DEFAULT_PORT)))
     sub = p.add_subparsers(dest="cmd", required=True)
 
     for name in ("info", "ping", "help", "warps", "quit", "reload"):
@@ -318,7 +328,7 @@ def main():
         sp.add_argument("remote", nargs="?" if name == "ls" else None, default="")
     sp = sub.add_parser("deploy")
     sp.add_argument("nro", nargs="?")
-    sp.add_argument("--remote", default="wwhd.nro", help="where on the SD card (default sdmc:/switch/wwhd/wwhd.nro)")
+    sp.add_argument("--remote", default=REMOTE_NRO, help=f"where on the SD card (default {REMOTE_NRO})")
     sp.add_argument("--no-reload", action="store_true")
     sp = sub.add_parser("shot")
     sp.add_argument("out", nargs="?")
@@ -342,7 +352,7 @@ def main():
         elif args.cmd in ("ls", "rm", "mkdir"):
             simple(args, args.cmd, *([args.remote] if args.remote else []))
         elif args.cmd == "logs":
-            for kind, size, name in remote_ls(args, "logs"):
+            for kind, size, name in remote_ls(args, REMOTE_LOGS):
                 print(f"{size:>10}  {name}")
         elif args.cmd == "wait":
             if not wait_server(args, args.seconds):

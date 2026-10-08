@@ -1,11 +1,14 @@
-// Debug server: a TCP port on the console for the development machine (tools/switch/wwhd_debug.py): the
-// log as it is written, files on the SD card (get, put, ls, rm), controller presses injected into the
-// game's input, and the commands the game adds (platform/debug_switch.cpp: info, warp, screenshot, reload,
-// quit). Off unless env.txt turns it on (WWHD_DEBUG_SERVER=1, or a port number); only for the local network:
-// there is no password. docs/debug-server.md describes the protocol and the client.
+// Debug server: a TCP port on the console for the development machine: the log as it is written, files on
+// the SD card (get, put, ls, rm), controller presses injected into the game's input, and the commands the
+// game adds (info, warp, screenshot, reload, quit). Off unless env.txt turns it on; only for the local
+// network: there is no password.
 //
-// This file and debug_server.cpp know nothing of the game (no runtime.h): the same pair serves SwitchWaker.
-// They build on the Switch (libnx sockets) and on POSIX hosts (tools/switch/debug_server_host_test.cpp).
+// This file and debug_server.cpp know nothing of the game and are the same in both ports (keep them so):
+//   SwitchWakerHD: runtime/src/platform/, commands in debug_switch.cpp, WWHD_DEBUG_SERVER, client
+//                  tools/switch/wwhd_debug.py, docs/debug-server.md
+//   SwitchWaker:   switch/native/source/, commands in cos_debug.cpp, COS_DEBUG_SERVER, client
+//                  scripts/switch/switchwaker_debug.py, docs/DEBUG_SERVER.md
+// They build on the Switch (libnx sockets) and on POSIX hosts (debug_server_host_test.cpp next to the client).
 //
 // Protocol: one command per line ("name arg arg ...", "double quotes" around an argument with spaces).
 // Every reply is "ok <n>\n" or "err <n>\n" followed by n bytes (text, or a file's contents). "put <path>
@@ -48,7 +51,12 @@ bool running();
 // commands the game adds; any thread, before or after start. Handlers run on the connection's thread.
 void add_command(const char* name, const char* usage, Handler handler);
 // the log's text as it is written (the game's log writer): kept for "log" streams; cheap while not running
+// and not keeping
 void log_tap(const char* data, size_t size);
+// keep the log's text before start (the first lines, written before the run options are read); drop_log
+// lets it go when the server will not start
+void keep_log();
+void drop_log();
 // closes the sockets (the Switch: and the socket service) before the program ends or restarts
 void stop();
 
