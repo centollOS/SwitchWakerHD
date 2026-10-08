@@ -4119,7 +4119,11 @@ SchedDataCalculatorGM107::setDelay(Instruction *insn, int delay,
    if (delay <= GM107_MIN_ISSUE_DELAY && (wr & rd) != 7) {
       // Barriers take one additional clock cycle to become active on top of
       // the clock consumed by the instruction producing it.
-      if (!next) {
+      // wwhd patch 8 (from SwitchWaker): Mesa 20.1's rule restored. uam asked the next block's entry for its waits,
+      // but those are only set when that block is visited, so a barrier set by a block's last instruction got
+      // stall 1 and the next block's first instruction passed the not-yet-active barrier (SwitchWaker's light
+      // volumes: the fragment epilogue's MOV R0 overwrote IPA.SAT's R0 = 1/w before the IPA read it). PATCHES.md.
+      if (!next || insn->bb != next->bb) {
          delay = 0x2;
       } else {
          int wt = getWtDepBar(next);

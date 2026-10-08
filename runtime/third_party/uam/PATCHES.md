@@ -44,6 +44,19 @@ Every change to upstream files is marked `SwitchWakerHD patch N`.
    specks, no dual issue = clean, same fps. Every instruction now gets its normal stall count instead
    of a zero-delay pair.
 
+8. **Stall 2 before a new block** (`mesa-imported/codegen/nv50_ir_emit_gm107.cpp`,
+   `SchedDataCalculatorGM107::setDelay`; found in SwitchWaker, its patch 8, devkitPro/uam#7): Mesa
+   20.1's rule restored. A dependency barrier becomes active one clock after the instruction that
+   sets it, so Mesa gives an instruction that sets one stall 2 when the next instruction is in another
+   block (whose waits are not known yet). uam asked the next block's entry instead, and that entry's
+   "wait on every barrier" is only added when the block is visited: the last instruction of a block
+   got stall 1 and the next block's first one could pass the barrier before it was active. On
+   SwitchWaker's console (2026-10-08) the light volumes' fragment epilogue `MOV R0, 1.0` overwrote
+   `IPA.SAT R3 = a[0x8c] * R0` (R0 = 1/w) before the IPA read it: flickering 4x8-pixel specks on every
+   torch halo. Not seen here yet (latent: same uam, same pattern possible in any shader whose block
+   ends on a barrier-setting instruction). The DKSH compiler name gains "patch 8", so every cached
+   DKSH is rebuilt.
+
 Check: `uam_dksh_test` (`-DWWHD_UAM_TEST=ON`) compiles a directory of GLSL files in one process and
 compares the DKSH bytes with reference files written by the `uam` tool (target `uam_tool`), one
 process per shader.
