@@ -1482,6 +1482,7 @@ void run_main_loop() {
         switch_settings::tick();  // CPU / GPU clock overrides set again when the system changed them
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
     }
+    input::stop_rumble();
     LOG("[boot] host loop ended at frame %llu", (unsigned long long)std::atomic_ref<uint64_t>(R.frame).load());
     fflush(stderr);
     std::_Exit(0);
@@ -1516,6 +1517,8 @@ bool gamepad_touch(float x, float y, float& tx, float& ty) {
 }
 int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }
+bool aniso() { return gfxdk::aniso_enabled(); }
+void set_aniso(bool on) { gfxdk::set_aniso(on); }
 float dynamic_res_scale() { return gfxdk::res_scale_shown(); }  // the internal resolution in use (dynamic or not)
 bool draw_opt(int which) {
     using namespace gfxdk;

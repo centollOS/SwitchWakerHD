@@ -10,7 +10,14 @@ namespace {
 int normalize(int v) { return (v % 3 + 3) % 3; }
 struct Settings {
     std::atomic<int> ao{std::getenv("WWHD_AO_MODE") ? normalize(std::atoi(std::getenv("WWHD_AO_MODE"))) : std::getenv("WWHD_NO_AO_QUIRK") ? 0 : 2};
-    std::atomic<bool> hires{!std::getenv("WWHD_AO_HIRES") || std::atoi(std::getenv("WWHD_AO_HIRES")) != 0};
+    // full-size occlusion depth: on by default, off on Android, where the phone GPU is the limit in heavy views
+    // (issue #56: halves the worst GPU wait on an Adreno 830); a saved choice or WWHD_AO_HIRES wins
+#ifdef __ANDROID__
+    static constexpr bool kHiresDefault = false;
+#else
+    static constexpr bool kHiresDefault = true;
+#endif
+    std::atomic<bool> hires{std::getenv("WWHD_AO_HIRES") ? std::atoi(std::getenv("WWHD_AO_HIRES")) != 0 : kHiresDefault};
     std::atomic<bool> aniso{std::getenv("WWHD_ANISO") && std::atoi(std::getenv("WWHD_ANISO")) != 0};
     std::atomic<bool> fxaa{std::getenv("WWHD_FXAA") && std::atoi(std::getenv("WWHD_FXAA")) != 0};
     std::atomic<int> filter{[] { const char* e = std::getenv("WWHD_SCALE_FILTER"); return e && !std::strcmp(e,"sharp") ? 1 : e && !std::strcmp(e,"integer") ? 2 : 0; }()};

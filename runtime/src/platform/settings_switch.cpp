@@ -287,6 +287,7 @@ bool picture_env() {
     return env_set("WWHD_EXPOSURE") || env_set("WWHD_CONTRAST") || env_set("WWHD_SATURATION") || env_set("WWHD_GAMMA");
 }
 bool fps_counter_env() { return env_set("WWHD_FPS"); }
+bool aniso_env() { return env_set("WWHD_ANISO"); }
 namespace {
 std::atomic<bool> g_captureCombo{false};
 }
@@ -384,6 +385,10 @@ void apply_at_start() {
     {
         std::string v;
         if (hostui::get(kKeyCaptureCombo, v)) g_captureCombo = v == "1";
+    }
+    if (!aniso_env()) {
+        std::string v;
+        if (hostui::get(kKeyAniso, v) && !v.empty()) gfxsw::set_aniso(v == "1");
     }
 }
 

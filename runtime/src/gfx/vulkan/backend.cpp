@@ -835,7 +835,6 @@ void flush() {
   drain_submissions();
 }
 void wait_idle() {
-  guest_writeback();  // (CPU-read targets: their pixels into guest memory)
   flush();
   vk_check(vkDeviceWaitIdle(R.device), "device idle");
 }
@@ -1910,6 +1909,7 @@ static void init_device(std::vector<const char *> extensions,
   if (R.portabilitySubset) {
     R.imageViewSwizzle = portability.imageViewFormatSwizzle;
     R.imageViewReinterpretation = portability.imageViewFormatReinterpretation;
+    R.imageView2DOn3DImage = portability.imageView2DOn3DImage;
     R.samplerMipLodBias = portability.samplerMipLodBias;
     R.separateStencilMaskRef = portability.separateStencilMaskRef;
     R.constantAlphaColorBlendFactors =

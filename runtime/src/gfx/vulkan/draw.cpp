@@ -97,7 +97,7 @@ Surface* private_ao_surface(Surface& dst, const Surface* like) {
     dst = *like;
     dst.image = VK_NULL_HANDLE; dst.memory = VK_NULL_HANDLE;
     dst.view = VK_NULL_HANDLE;
-    dst.layerViews.clear(); dst.twinLayerViews.clear(); dst.sampledViews.clear(); dst.guestLayout.reset();
+    dst.layerViews.clear(); dst.sampledViews.clear(); dst.guestLayout.reset();
     dst.addr = dst.mipAddr = 0;
     dst.width = width; dst.height = height; dst.slices = dst.mips = 1;
     dst.dim = uint32_t(Latte::E_DIM::DIM_2D);
@@ -616,16 +616,13 @@ bool pipeline_lookaside_enabled() {
 }
 Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
                    LatteFetchShader *fs, VkPrimitiveTopology topology,
-                   const std::array<Surface *, 8> &colors, Surface *depth,
-                   const bool *srgbViews = nullptr) {  // (targets in their sRGB twin format)
+                   const std::array<Surface *, 8> &colors, Surface *depth) {
   if(preparation_stats_enabled())++R.cpuPreparation.pipelineLookups;
   const PipelineKey key = pipeline_key(r, vs, ps, fs, topology, colors, depth);
   std::array<VkFormat, 8> formats{};
   uint32_t ncolor = 0;
   for (int i = 0; i < 8; i++) {
-    formats[i] = !colors[i]                      ? VK_FORMAT_UNDEFINED
-                 : srgbViews && srgbViews[i] ? srgb_twin_pixel(colors[i]->fmt.pixel)
-                                             : colors[i]->fmt.pixel;
+    formats[i] = colors[i] ? colors[i]->fmt.pixel : VK_FORMAT_UNDEFINED;
     if (colors[i])
       ncolor = i + 1;
   }
@@ -1368,7 +1365,6 @@ void make_feedback_image(Surface& copy, const Surface& source) {
   copy.memory = VK_NULL_HANDLE;
   copy.view = VK_NULL_HANDLE;
   copy.layerViews.clear();
-  copy.twinLayerViews.clear();
   copy.sampledViews.clear();
   copy.guestLayout.reset();
   copy.addr = copy.mipAddr = 0;
@@ -1739,7 +1735,6 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
         (r[mmSQ_PGM_START_PS] << 8) == kOcclusionPS)
       s = &aoPrivateColor;
     upload_surface(s);
-    s = volume_source(s, r + texbase + unit * 7);  // a 3D color buffer's layers sampled as 3D
     int scaleOffset = sh->uniforms.offset_texScale[unit];
     if (scaleOffset >= 0 && size_t(scaleOffset) + 8 <= supportUniforms.size()) {
       const float scale[] = {s->sx, s->sy};
@@ -2042,11 +2037,10 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   const auto &lcr = *reinterpret_cast<const LatteContextRegister *>(r);
   std::array<Surface *, 8> colors{};
   uint32_t slices[8]{}, depthSlice = 0;
-  bool srgbViews[8]{};  // a target drawn in the sRGB twin of its surface's format
   auto mask = LatteMRT::GetActiveColorBufferMask(ps->dec, lcr);
   for (int i = 0; i < 8; i++)
     if (mask & (1 << i))
-      colors[i] = color_target(r, i, &slices[i], &srgbViews[i]);
+      colors[i] = color_target(r, i, &slices[i]);
   Surface *depth = LatteMRT::GetActiveDepthBufferMask(lcr)
                        ? depth_target(r, &depthSlice)
                        : nullptr;
@@ -2056,7 +2050,6 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     aoPrivateSource = colors[0]->addr;
     colors[0] = private_ao_surface(aoPrivateColor, colors[0]);
     slices[0] = 0;
-    srgbViews[0] = false;
     if (depth) {
       depth = private_ao_surface(aoPrivateDepth, depth);
       depthSlice = 0;
@@ -2085,7 +2078,7 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   if (depth && (depth->extent.width < width || depth->extent.height < height))
     depth = nullptr;
   rprof::mark(rprof::kTargets);
-  auto &p = pipeline(r, vs, ps, fs, topology, colors, depth, srgbViews);
+  auto &p = pipeline(r, vs, ps, fs, topology, colors, depth);
   rprof::mark(rprof::kPipeline);
   if (!p.pipeline)
     return;  // the driver could not build it (logged once in pipeline())
@@ -2100,7 +2093,6 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   bool reusePass = R.rendering && R.passTracked && R.passColors == colors &&
                    std::equal(std::begin(slices), std::end(slices),
                               R.passSlices.begin()) &&
-                   std::equal(std::begin(srgbViews), std::end(srgbViews), R.passSrgbViews.begin()) &&
                    R.passDepth == depth && R.passDepthSlice == depthSlice &&
                    R.passWidth == width && R.passHeight == height;
   for (auto *color : colors)
@@ -2155,7 +2147,7 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
                              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-        attachments[i].imageView = layer_view(colors[i], slices[i], srgbViews[i]);
+        attachments[i].imageView = layer_view(colors[i], slices[i]);
         ncolor = i + 1;
       }
     }
@@ -2186,7 +2178,6 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     R.passTracked = true;
     R.passColors = colors;
     std::copy(std::begin(slices), std::end(slices), R.passSlices.begin());
-    std::copy(std::begin(srgbViews), std::end(srgbViews), R.passSrgbViews.begin());
     R.passDepth = depth;
     R.passDepthSlice = depthSlice;
     R.passWidth = width;

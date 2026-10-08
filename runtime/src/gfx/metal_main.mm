@@ -134,7 +134,9 @@ static void clear_surface(Surface* s, const float* rgba, bool clearDepth, float 
     end_encoder();
     for (uint32_t slice = firstSlice; slice < firstSlice + numSlices; slice++) {
     MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-    rp.depthAttachment.slice = rp.stencilAttachment.slice = rp.colorAttachments[0].slice = slice;
+    rp.depthAttachment.slice = rp.stencilAttachment.slice = slice;
+    if (s->tex.textureType == MTLTextureType3D) rp.colorAttachments[0].depthPlane = slice;  // a volume's slice
+    else rp.colorAttachments[0].slice = slice;
     if (s->isDepth) {
         rp.depthAttachment.texture = s->tex;
         rp.depthAttachment.loadAction = clearDepth ? MTLLoadActionClear : MTLLoadActionLoad;

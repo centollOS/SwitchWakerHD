@@ -10,6 +10,8 @@
 // display_plan() for the same layout (picture rectangles, GamePad overlay, scaling filter).
 //
 // Shortcuts: Cmd+F (or Ctrl+Cmd+F, or the green button) full screen; Cmd+G show/hide the GamePad screen.
+// Closing the TV window (close button, Cmd+W) quits the app, asking first while a game is in progress
+// (quit_prompt.mm); closing the GamePad window only hides it.
 // The Display menu holds the rest. Choices are kept in ~/Library/Application Support/wwhd/display.plist
 // (test runs with WWHD_NO_HOST_INPUT neither read nor write it unless WWHD_DISPLAY_SETTINGS names a file).
 //
@@ -57,6 +59,8 @@ namespace mods { bool mouse_captured(); }
 namespace gfx {
 extern Renderer R;
 void install_menu(NSWindow* tv);  // menu.mm
+Class tv_window_class();           // quit_prompt.mm: closing the TV window quits (after asking)
+void install_quit_prompt(NSWindow* tv);
 bool fxaa_enabled();
 void dump_texture(id<MTLTexture> src, const char* name, bool async, bool srgbEncode);
 
@@ -251,7 +255,8 @@ static void screen_changed(int i) {
 }
 
 static NSWindow* make_window(int index, NSString* title, NSView* view, int w, int h, NSPoint origin) {
-    NSWindow* win = [[NSWindow alloc] initWithContentRect:NSMakeRect(origin.x, origin.y, w, h)
+    Class cls = index == 0 ? tv_window_class() : [NSWindow class];
+    NSWindow* win = [[cls alloc] initWithContentRect:NSMakeRect(origin.x, origin.y, w, h)
                                                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                                           NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable
                                                   backing:NSBackingStoreBuffered
@@ -388,6 +393,7 @@ static void create_windows() {
                                [[WWTvView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 720)], 1280, 720, NSMakePoint(0, 0));
     g_tv_window = tv;
     install_menu(tv);
+    install_quit_prompt(tv);
     NSRect saved = NSRectFromString(g_settings[@"tvFrame"] ?: @"");
     if (frame_usable(saved)) [tv setFrame:saved display:NO];
     else [tv center];

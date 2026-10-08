@@ -81,6 +81,9 @@ void update_note(int latest, const char* when) {
 }
 
 bool read_cfg() {
+#ifdef __SWITCH__
+    return false;  // automatic states are full save states, which the Switch cannot load (savestate.cpp kFullStates)
+#endif
     if (const char* e = getenv("WWHD_CRASH_RECOVERY")) return atoi(e) != 0;
     if (FILE* f = fopen(cfg_path().c_str(), "r")) {
         int v = 0;
@@ -118,6 +121,9 @@ bool enabled() {
 }
 
 void set_enabled(bool on) {
+#ifdef __SWITCH__
+    on = false;
+#endif
     enabled();  // make sure the replay settings are read
     g_enabled = on ? 1 : 0;
     if (FILE* f = fopen(cfg_path().c_str(), "w")) { fprintf(f, "%d\n", on ? 1 : 0); fclose(f); }

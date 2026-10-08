@@ -23,8 +23,8 @@ void set_tv_format(uint32_t gx2Format, bool tv);
 void invalidate(uint32_t flags, uint32_t addr, uint32_t size);
 void flush();                    // drain: submit and wait (readbacks, tools)
 void flush_async();              // GX2Flush: submit without waiting
-void guest_writeback();          // CPU-read targets written since the last call -> guest memory (waits)
 void wait_idle();
+void write_back_linear_targets();  // GX2DrawDone: linear render targets to guest memory (surfaces.cpp)
 uint64_t frame_count();
 void request_tv_dump(const std::string& path, int frames_ahead);
 void request_capture();

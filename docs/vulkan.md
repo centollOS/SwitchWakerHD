@@ -92,7 +92,21 @@ that the executable links or runs on Windows/Linux.
 This test does not read game assets. It checks GPU texture uploads, mip/layer
 readback, clears, blits, depth/stencil, a generated triangle and presentation.
 It also queues ten asynchronous submissions, wraps the four-slot ring, and checks
-immutable upload payloads and deferred-buffer retirement by GPU readback.
+immutable upload payloads and deferred-buffer retirement by GPU readback, and the
+scaled depth/stencil copies below (drawn, texel by texel, and through a real aspect-ratio and
+resolution change of a depth target).
+
+Scaled depth copies: a resolution or aspect-ratio change rescales every render target, and a
+scaled GX2CopySurface scales its source. Vulkan makes blits of depth/stencil formats optional,
+and some drivers (Adreno: `D16_UNORM` and `D32_SFLOAT`, issue #72) have none, so for such a format
+the copy is drawn instead (depth through `gl_FragDepth`, stencil one bit per pass, no
+`VK_EXT_shader_stencil_export` needed), with the texel a nearest-filter blit would pick. Devices
+that can blit keep the blit. The first time a format takes another path, one log line names it.
+If a device can neither blit nor draw a format, a whole destination is cleared (depth 1, stencil
+and colour 0) and a partial one keeps its contents, instead of aborting the game.
+`WWHD_VK_DEPTH_COPY=draw` forces the drawn copy on any device (test aid, e.g. on a desktop GPU);
+`WWHD_VK_DEPTH_COPY=none` takes neither the blit nor the draw for depth formats, which shows the
+last resort.
 To enable Khronos validation, install the Vulkan validation layers and set
 `WWHD_VK_VALIDATION=1`. On Homebrew, set `VK_LAYER_PATH` to
 `/opt/homebrew/opt/vulkan-validationlayers/share/vulkan/explicit_layer.d`.
@@ -295,7 +309,7 @@ a process sample showed a runtime initializer deadlock before `main`.
 The guest buffer cache replaces the per-draw copies of guest vertex arrays, index arrays and uniform
 blocks into the upload arena with persistent GPU copies keyed by guest address
 (`runtime/src/gfx/vulkan/buffer_cache_core.h`, glue in `buffer_cache.cpp`). It is **on by default on
-macOS** and **off on Windows, Linux and Android**; `WWHD_VK_BUFFER_CACHE=1` turns it on and
+macOS and desktop Linux** (Steam Deck included) and **off on Windows and Android**; `WWHD_VK_BUFFER_CACHE=1` turns it on and
 `WWHD_VK_BUFFER_CACHE=0` off on any platform.
 
 **Testers on Windows and Linux (and Android):** it stays opt-in there until it has been checked on
@@ -385,7 +399,7 @@ Startup overrides match Metal: `WWHD_RES_SCALE` selects the initial internal sca
 (1–4); `WWHD_AO_MODE` selects AO mode 0–2. If `WWHD_AO_MODE` is absent, presence of
 `WWHD_NO_AO_QUIRK` selects mode 0, otherwise mode 2 is the default. The explicit AO
 mode takes precedence over the legacy flag, whose value is ignored.
-`WWHD_AO_HIRES` defaults to on; `0` disables it. `WWHD_ANISO` defaults to off and a
+`WWHD_AO_HIRES` defaults to on (off on Android, where the phone GPU is the limit in heavy views, issue #56); `0` disables it, `1` enables it. `WWHD_ANISO` defaults to off and a
 nonzero value enables it. `WWHD_FXAA` defaults to off and its presence enables it,
 including a value of `0`, matching Metal's existing behavior.
 `WWHD_SCALE_FILTER=smooth|sharp|integer` selects the initial presentation filter;

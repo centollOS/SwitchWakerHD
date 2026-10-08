@@ -1018,9 +1018,10 @@ Surface* color_target_lookup(const uint32_t* regs, int i, uint32_t* slice, uint3
     uint32_t size = regs[mmCB_COLOR0_SIZE + i], info = regs[mmCB_COLOR0_INFO + i];
     uint32_t pitch = ((size & 0x3FF) + 1) * 8;
     uint32_t height = (((size >> 10) & 0xFFFFF) + 1) * 64 / pitch;
-    // our convention (GX2SetColorBuffer): TILE = width | array slices << 16, FRAG = height
+    // our convention (GX2SetColorBuffer, gx2.h kColorTarget3D): TILE = width | slices << 16 | volume flag, FRAG =
+    // height. deko3d draws a volume's slices as layers either way (volume_source samples their 3D copy)
     uint32_t w = regs[mmCB_COLOR0_TILE + i] & 0xFFFF, h = regs[mmCB_COLOR0_FRAG + i];
-    uint32_t slices = std::max<uint32_t>(regs[mmCB_COLOR0_TILE + i] >> 16, 1);
+    uint32_t slices = gx2::color_target_slices(regs[mmCB_COLOR0_TILE + i]);
     if (slice) *slice = slices > 1 ? std::min<uint32_t>(regs[mmCB_COLOR0_VIEW + i] & 0x7FF, slices - 1) : 0;
     SurfaceDesc d;
     d.addr = base;

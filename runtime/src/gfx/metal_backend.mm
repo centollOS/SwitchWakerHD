@@ -45,6 +45,7 @@ const Backend& metal_backend() {
         b.invalidate = gfx::invalidate;
         b.guest_flush = gfx::flush;
         b.wait_idle = gfx::wait_idle;
+        b.write_back = gfx::write_back_linear_targets;
         b.ss_reset = gfx::ss_reset_surfaces;
         b.frame_count = gfx::frame_count;
         b.request_tv_dump = gfx::request_tv_dump;

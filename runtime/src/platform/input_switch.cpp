@@ -14,6 +14,7 @@
 #include "../input_map.h"
 #include "../motion/motion.h"
 #include "../overlay/overlay.h"
+#include "../rumble.h"
 #include "../runtime.h"
 #include "../gfx/switch_renderer.h"
 #include "input_switch.h"
@@ -166,7 +167,71 @@ void update_gyro(::PadState& pad) {
     }
 }
 
+// ---- rumble: what the game asks of its motors (rumble.h) on the active controller's two actuators, on this
+// (host) thread: a level is sent when it changes and again every 100 ms while it runs. Still while the
+// option is off, the menu is open or the game is not in focus (HOME menu), and when the host loop ends.
+struct Rumble {
+    bool init = false;
+    HidVibrationDeviceHandle handles[3][2];  // handheld, Pro Controller (full key), Joy-Con pair
+    bool ok[3] = {};
+    int current = -1;  // the device that was sent a level
+    float sent = 0;
+    u64 sent_at = 0;
+};
+Rumble g_rumble;
+
+// HD rumble at its neutral frequencies (160 / 320 Hz); kRumbleAmp: the amplitude of the game's full strength
+// (1.0 is harsh on the Joy-Con; games mostly stay near half)
+constexpr float kRumbleAmp = 0.6f;
+void rumble_send(int device, float level) {
+    if (device < 0 || !g_rumble.ok[device]) return;
+    const float a = level * kRumbleAmp;
+    const HidVibrationValue v[2] = {{a, 160.0f, a, 320.0f}, {a, 160.0f, a, 320.0f}};
+    hidSendVibrationValues(g_rumble.handles[device], v, 2);
+}
+
+void update_rumble(::PadState& pad) {
+    if (!g_rumble.init) {
+        g_rumble.init = true;
+        static const struct { HidNpadIdType id; HidNpadStyleTag style; } kDevices[3] = {
+            {HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld},
+            {HidNpadIdType_No1, HidNpadStyleTag_NpadFullKey},
+            {HidNpadIdType_No1, HidNpadStyleTag_NpadJoyDual},
+        };
+        for (int i = 0; i < 3; i++) {
+            const Result rc = hidInitializeVibrationDevices(g_rumble.handles[i], 2, kDevices[i].id, kDevices[i].style);
+            g_rumble.ok[i] = R_SUCCEEDED(rc);
+            if (!g_rumble.ok[i]) LOG("[rumble] vibration device %d: rc 0x%x", i, rc);
+        }
+    }
+    const u32 style = padGetStyleSet(&pad);
+    const int device = style & HidNpadStyleTag_NpadHandheld ? 0 : style & HidNpadStyleTag_NpadFullKey ? 1
+                       : style & HidNpadStyleTag_NpadJoyDual ? 2 : -1;
+    const u64 now = armTicksToNs(armGetSystemTick());
+    static u64 last = 0;
+    const u64 window_us = last ? std::clamp<u64>((now - last) / 1000, 1000, 50000) : 5000;  // until the next update
+    last = now;
+    float level = std::clamp(rumble::host_level(window_us), 0.0f, 1.0f);
+    if (overlay::is_open() || appletGetFocusState() != AppletFocusState_InFocus) level = 0;
+    if (device != g_rumble.current) {
+        if (g_rumble.sent > 0) rumble_send(g_rumble.current, 0);  // the controller that was put away
+        g_rumble.current = device;
+        g_rumble.sent = 0;
+    }
+    if (level == g_rumble.sent && (level == 0 || now - g_rumble.sent_at < 100000000ull)) return;
+    if (rumble::log_enabled() && level != g_rumble.sent) LOG("[rumble] host: device %d motor %.2f", device, level);
+    rumble_send(device, level);
+    g_rumble.sent = level;
+    g_rumble.sent_at = now;
+}
+
 }  // namespace
+
+void stop_rumble() {
+    if (g_rumble.sent > 0) rumble_send(g_rumble.current, 0);
+    g_rumble.sent = 0;
+}
+bool has_rumble() { return true; }
 
 void init() {
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
@@ -182,6 +247,7 @@ void update() {
     (void)initialized;
     padUpdate(&pad);
     update_gyro(pad);
+    update_rumble(pad);
     u64 held = padGetButtons(&pad);
     static const struct { u64 hid; uint32_t vpad; } kMap[] = {
         {HidNpadButton_A, kA},         {HidNpadButton_B, kB},          {HidNpadButton_X, kX},

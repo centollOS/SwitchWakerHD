@@ -1252,7 +1252,7 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
 
 - (BOOL)handleKeyEvent:(NSEvent*)e {
     if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand) && e.keyCode == kVK_ANSI_W) {
-        [self.window performClose:nil];  // Cmd-W (the app has no Window menu)
+        [self.window performClose:nil];  // Cmd-W, before the Window menu sees it
         return YES;
     }
     uint16_t code = e.keyCode & 0xFF;

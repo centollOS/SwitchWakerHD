@@ -5,6 +5,9 @@ main force-pushed, v0.1.0 and v0.2.2 retagged). There is no common ancestor any 
 diff from our old base `c3fb7ce` to `upstream/devel` `4da1e34` (commit 7589856). **The next sync
 starts from `4da1e34`** (`git diff 4da1e34 upstream/devel | git apply -3`).
 
+2026-10-08: v0.2.7-v0.2.8 (`main` 853d7b1) taken the same way; **the next sync starts from `853d7b1`**
+(docs/switch-port.md, "Round 46").
+
 ## Taken as is (common code, now in dev)
 
 | Upstream change | On the Switch |

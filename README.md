@@ -14,49 +14,6 @@ repository; their instructions are in the upstream README, kept as
 [docs/upstream-README.md](docs/upstream-README.md). How the recompilation works:
 [docs/how-it-works.md](docs/how-it-works.md).
 
-## Standing on the shoulders of others
-
-SwitchWakerHD would not exist without these projects. The hard part, recompiling the game and
-reimplementing its system, is their work; this repository adds the layer that runs it on the
-Switch.
-
-- **[ZeldaWWHDRecomp](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp)** (Lukas S and its
-  contributors: Sean13128, rhemfur, resadent, arcadematicas and others): the static recompiler, the
-  Cafe OS and GX2 runtime, the Metal and Vulkan renderers, the settings overlay, the mods and the
-  tools. Almost everything outside the Switch layer is theirs.
-- **[Cemu](https://github.com/cemu-project/Cemu)**: its GPU address library and shader decompiler
-  (vendored), whose GLSL the deko3d renderer compiles; parts of the OS layer follow it.
-- **[zeldaret/tww](https://github.com/zeldaret/tww)**: the GameCube decompilation the function
-  names and the 60 fps work are matched against.
-- **[devkitPro](https://devkitpro.org)**, **[libnx](https://github.com/switchbrew/libnx)**,
-  **[deko3d](https://github.com/devkitPro/deko3d)** and **[uam](https://github.com/devkitPro/uam)**
-  (fincs and the devkitPro team): the Switch toolchain, the GPU API and its shader compiler, which
-  this port runs on the console too.
-- **[nx-hbloader](https://github.com/switchbrew/nx-hbloader)**,
-  **[hacBrewPack](https://github.com/TooTallNate/hacBrewPack)** and
-  **[hactool](https://github.com/SciresM/hactool)**: the HOME-menu forwarder.
-
-If you enjoy this port, the projects above are where the credit belongs. Every component and its
-license: [THIRD_PARTY.md](THIRD_PARTY.md).
-
-## How it was made: AI use
-
-Be aware of this before you use or build on this repository:
-
-- **This fork's own code was written with AI.** Nearly all of the Switch work (the libnx platform
-  layer, the deko3d renderer, the uam integration and its patches, the Switch options menu, the
-  tools under `tools/switch/`), its documentation and the commit messages were written by an AI
-  coding agent, Anthropic's Claude through Claude Code. The human authors chose what to build, set
-  the priorities, played and tested every build on a real Switch, reported the bugs and decided
-  what went in. Commits written with the agent say so in a `Co-Authored-By: Claude` line.
-- **The upstream project** describes its own authorship in its README
-  ([docs/upstream-README.md](docs/upstream-README.md)); its Vulkan renderer, for example, is
-  credited there to OpenAI Codex.
-- **How it is checked**: builds of the NRO and of the desktop targets the changes touch, play on
-  hardware (handheld, stock and official clock profiles), on-console frame captures compared
-  against the game's own textures, and the logs of every session. Bugs can still slip through;
-  reports are welcome.
-
 ## What you need
 
 - **Your own legally obtained copy of the game**: the USA version, title `00050000-10143500`,
@@ -142,13 +99,12 @@ and copy the files.
 - Or install the HOME-screen icon (forwarder), which always starts it in title mode:
   [tools/switch/forwarder/INSTALL.md](tools/switch/forwarder/INSTALL.md).
 - Controllers act as a Wii U Pro Controller, so the game draws everything on one screen: pick the
-  Pro Controller when the game asks. The menu's Switch tab makes them the GamePad instead (choose it
-  in the game's options too): **ZL + ZR + Minus** then switches between the TV picture and the
-  GamePad screen (items, map; the touch screen works on it), and gyro aiming can be turned on.
+  Pro Controller when the game asks.
 
 ### Saves, settings and updates
 
 - Saves: `sdmc:/switch/wwhd/save/`. Back up this folder.
+- Save states: `sdmc:/switch/wwhd/states/`.
 - Settings from the options menu: `settings.ini`. `env.txt` values win over it at every start.
 - To update, replace `wwhd.nro` (and `shadercache_dksh.bin` if you rebuilt it). Saves, settings and
   caches stay.
@@ -157,34 +113,94 @@ and copy the files.
 
 ## Options
 
-- In-game options menu: **Minus held half a second** (a short Minus goes to the game); B or Minus
-  closes it, L / R change tabs. Tabs: Saves (save states), Switch (CPU clock, GPU profile, picture,
-  frame-rate counter, controller, gyro aiming, debug options), Warp (teleport to any stage), Mods,
-  Language / About.
-- **Performance**: the game is **perfectly playable at the console's stock clocks**. An overclock is
-  optional and only makes the frame rate steadier in a few particularly busy scenes; the only one
-  worth using is a mild **CPU at about 1.2 GHz (1224 MHz, marked *Recommended* in the Switch tab)**,
-  which stays well clear of any heat or battery issues. CPU and GPU run at the console's **stock**
-  clocks by default (CPU 1020 MHz, GPU 307 MHz in handheld). The menu still
-  offers every step of the CPU table from the stock 1020 up to 1785 MHz, Nintendo's other handheld
-  GPU profiles (384 and 460.8 MHz) and a 614 MHz GPU overclock; higher clocks drain the battery
-  faster and warm the console, and if sys-clk has its own profile for this title, the two fight
-  over the clocks.
-- **Frame captures** for bug reports: turn on *Capture a frame with both sticks clicked* in the
-  Switch tab's Debug section; **L3 + R3** then writes the frame and its render targets as PNG files
-  to `captures/<frame>/` (they contain game imagery: keep them to yourself).
-- **Test options** in the Switch tab's Debug section, switched while the game runs and not saved:
-  on/off switches for each draw-path optimization (A/B tests), performance diagnostics for the log
-  (the main thread's runtime calls, every game thread's CPU use), and *Frame rate (test)*: 30 fps
-  (the default), 60 fps interpolation or the experimental true 60. The 60 fps modes need far more
-  CPU and GPU than the console has to spare; they are there to try out, not to play with.
-- `WWHD_*` options in `env.txt`: [docs/switch-port.md](docs/switch-port.md) and the comments next to
-  their code (grep for `WWHD_` in `runtime/src`).
+Hold **Minus** for half a second while playing to open the options menu (a short press still goes
+to the game). **L / R** change tabs, **B** or **Minus** closes it. Everything you choose is saved
+and comes back at the next start.
+
+| Tab | What you'll find there |
+|---|---|
+| **Saves** | Five save-state slots: save where you stand, come back to that spot in seconds |
+| **Switch** | Resolution, picture, performance, frame-rate counter, rumble and gyro aiming |
+| **Warp** | Travel straight to any island, dungeon or room |
+| **Mods** | Built-in gameplay and camera mods, and cheats |
+| **Language / About** | The game's language, version information |
+
+### Controls and gyro aiming
+
+- **Play with what you have.** Joy-Con, a Pro Controller or the console in handheld mode all
+  work. They act as a Wii U Pro Controller, so the map, items and menus all sit on one screen.
+- **Rumble:** the Joy-Con or the Pro Controller vibrates whenever the game asks for it, as the Wii U
+  controllers did. One switch turns it off.
+- **Gyro aiming**, as on the Wii U GamePad: aim the bow, hookshot, boomerang, grappling hook,
+  telescope and Picto Box by moving the Joy-Con, the Pro Controller or the whole console. Tune it
+  to your hands:
+  - how turning works: *Player space* (turn however you hold it, recommended), *Yaw* (as if the
+    controller lay flat) or *Roll* (tilt it like a steering wheel);
+  - sensitivity left/right and up/down, each one invertible, with a *Default* button;
+  - *Recalibrate* if the view drifts while you hold still.
+
+  The game's own *Options > Gyro* switch still applies, and the right stick takes over while you
+  push it.
+
+### Picture
+
+- **Resolution for handheld and for docked, each its own:** 720p, 900p or 1080p. It switches by
+  itself when you dock or undock. *Dynamic resolution* lowers it only for the moments the console
+  can't hold 30 fps, and raises it again right after.
+- **Picture adjustments:** exposure, contrast, saturation and gamma, with *Original colours* and
+  *Vivid* presets. Tame a glaring sea and sky, or make the colours pop.
+- **16x anisotropic filtering:** sharper ground, sand and water textures seen at an angle. It costs
+  some GPU time, so it starts off; try it, especially docked.
+- **Frame-rate counter** in the corner: off, frame rate, or frame rate and load.
+
+### Performance
+
+The game is **perfectly playable at the console's stock clocks**, which are the default (CPU
+1020 MHz, GPU 307 MHz in handheld): 30 fps on the opening island, a smooth 26-29 fps in the busiest
+scenes. If you want those scenes at a steady 30, choose the mild **1224 MHz CPU** step, marked
+*Recommended*: it stays well clear of any heat or battery issue. Higher CPU steps (up to 1785 MHz),
+Nintendo's other handheld GPU profiles and a 614 MHz GPU overclock are there too; they drain the
+battery faster and warm the console. If you use sys-clk, give this game no profile there, or the
+two fight over the clocks.
+
+### Save states
+
+Save in any of five slots and load it whenever you like: Link is back on that spot, with the hearts,
+items, rupees and progress he had, and on his boat if he was sailing. A state is a small file of a
+few KB. Enemies and cutscenes start fresh when you load. You can save whenever you control Link, so
+not during a cutscene, a dialogue, a menu or a scene change; a notice tells you when it has to wait.
+
+### Warp
+
+Jump to any of the main places, or to any of the game's stages and rooms, from a list. Visiting a
+place before the story gets there can break its events, so try it on a copy of your save.
+
+### Mods and cheats
+
+All built-in mods start off; turn on the ones you like.
+
+| Mod | What it does |
+|---|---|
+| Direct right-stick camera | The camera turns at once with the right stick, without the original easing; adjustable speed |
+| First-person shortcut | Look in first person with R3 |
+| Climb any wall | Grab and climb walls, with a stamina wheel; A or B lets go |
+| Quick doors | Doors open and close four times faster |
+| Fast scene changes | Quicker fades and transitions; gameplay keeps its normal speed |
+
+**Cheats:** all items; the Master Sword and Mirror Shield; 20 hearts, double magic and 5,000
+rupees; infinite health, magic, arrows and bombs. Save in game to keep what they give you. The
+story cheats (all songs, all Triforce shards, a dungeon's map, compass and boss key, a small key)
+can break story events, so use a spare save file.
+
+### Language
+
+The game speaks the console language you choose, from the languages your copy of the game carries
+(it applies at the next start).
 
 ## Status
 
-Boots and plays on a Switch in handheld mode, with sound, controllers, saves, save states, the
-options menu and mods. Played by hand mostly on the opening island, Dragon Roost and the sea
+Boots and plays on a Switch in handheld mode, with sound, controllers, saves, **working save
+states**, the options menu and mods. Played by hand mostly on the opening island, Dragon Roost and the sea
 around it, and areas reached with the Warp tab. **It is perfectly playable at the console's stock
 clocks** (CPU 1020 MHz, GPU 307 MHz): 30 fps on the opening island, and a smooth 26-29 fps in the
 busiest scenes, such as sailing near Dragon Roost and the volcano island. The recommended CPU
@@ -193,10 +209,25 @@ there, holding a steady 30. CPU and GPU run at their stock clocks by default.
 Shader and texture stutters on first use are much reduced, and shaders seen in an earlier session
 no longer stutter. Docked it renders at 1080p (picture profile per mode in the Switch tab: handheld
 1x, docked 1.5x, with dynamic resolution), tested on a TV at a median of 29.9 fps. Known issues and
-open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Retrospective (rounds 39-45)") and
+open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Round 46") and
 [docs/deko3d-plan.md](docs/deko3d-plan.md).
 
 ## Changelog
+
+### 2026-10-08: save states work, rumble, upstream v0.2.8 (round 46)
+
+- **Save states work on the Switch** (confirmed on the console): five slots in the Saves tab. They
+  are now upstream's *portable* save states, a small file with your progress and Link's place (the
+  boat too), saved and loaded with the game's own save functions. The old full save states never
+  worked on the console and are gone there, with Crash Recovery, which used them.
+- **Gyro aiming in Pro Controller mode** (the default), a lower default sensitivity, a choice of
+  turning axis and *Recalibrate* for drift (upstream #45, #71).
+- **Rumble**: the Joy-Con and Pro Controller now vibrate when the game asks (Switch tab > Rumble).
+- **16x anisotropic filtering** in the Switch tab's Picture section (off by default).
+- Fixed: a crash with quick doors in Tingle's jail on Windfall (upstream #61).
+- The recompiled game code re-reads memory in its wait loops, so a thread waiting for another core
+  can never hang there (upstream #62).
+- Also from upstream: fan translations (including right-to-left scripts) as content mods.
 
 ### 2026-10-08: performance rounds 39-45 (since "Player install kit")
 
@@ -239,6 +270,49 @@ retrospective in [docs/switch-port.md](docs/switch-port.md).
 - At the fully stock CPU (1020 MHz) the busiest scenes, such as sailing near Dragon Roost and the
   volcano island, run at a smooth 26-29 fps (there the game's own code is the limit, not the
   renderer); the recommended 1224 MHz holds a steady 30 fps.
+
+## Standing on the shoulders of others
+
+SwitchWakerHD would not exist without these projects. The hard part, recompiling the game and
+reimplementing its system, is their work; this repository adds the layer that runs it on the
+Switch.
+
+- **[ZeldaWWHDRecomp](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp)** (Lukas S and its
+  contributors: Sean13128, rhemfur, resadent, arcadematicas and others): the static recompiler, the
+  Cafe OS and GX2 runtime, the Metal and Vulkan renderers, the settings overlay, the mods and the
+  tools. Almost everything outside the Switch layer is theirs.
+- **[Cemu](https://github.com/cemu-project/Cemu)**: its GPU address library and shader decompiler
+  (vendored), whose GLSL the deko3d renderer compiles; parts of the OS layer follow it.
+- **[zeldaret/tww](https://github.com/zeldaret/tww)**: the GameCube decompilation the function
+  names and the 60 fps work are matched against.
+- **[devkitPro](https://devkitpro.org)**, **[libnx](https://github.com/switchbrew/libnx)**,
+  **[deko3d](https://github.com/devkitPro/deko3d)** and **[uam](https://github.com/devkitPro/uam)**
+  (fincs and the devkitPro team): the Switch toolchain, the GPU API and its shader compiler, which
+  this port runs on the console too.
+- **[nx-hbloader](https://github.com/switchbrew/nx-hbloader)**,
+  **[hacBrewPack](https://github.com/TooTallNate/hacBrewPack)** and
+  **[hactool](https://github.com/SciresM/hactool)**: the HOME-menu forwarder.
+
+If you enjoy this port, the projects above are where the credit belongs. Every component and its
+license: [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## How it was made: AI use
+
+Be aware of this before you use or build on this repository:
+
+- **This fork's own code was written with AI.** Nearly all of the Switch work (the libnx platform
+  layer, the deko3d renderer, the uam integration and its patches, the Switch options menu, the
+  tools under `tools/switch/`), its documentation and the commit messages were written by an AI
+  coding agent, Anthropic's Claude through Claude Code. The human authors chose what to build, set
+  the priorities, played and tested every build on a real Switch, reported the bugs and decided
+  what went in. Commits written with the agent say so in a `Co-Authored-By: Claude` line.
+- **The upstream project** describes its own authorship in its README
+  ([docs/upstream-README.md](docs/upstream-README.md)); its Vulkan renderer, for example, is
+  credited there to OpenAI Codex.
+- **How it is checked**: builds of the NRO and of the desktop targets the changes touch, play on
+  hardware (handheld, stock and official clock profiles), on-console frame captures compared
+  against the game's own textures, and the logs of every session. Bugs can still slip through;
+  reports are welcome.
 
 ## License
 

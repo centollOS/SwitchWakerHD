@@ -16,6 +16,9 @@ void set_picture_grade(const PictureGrade& g);
 // the counter in the top-left corner: 0 off, 1 frame rate, 2 with render-thread load and draws (WWHD_FPS)
 int fps_overlay_mode();
 void set_fps_overlay_mode(int mode);
+// 16x anisotropic filtering on the game's mipmapped linear samplers (WWHD_ANISO): any thread, from the next frame
+bool aniso();
+void set_aniso(bool on);
 float dynamic_res_scale();  // the internal resolution dynamic resolution has chosen (1 when off)
 // any thread: the internal resolution (the most dynamic resolution may use) and whether dynamic resolution
 // may lower it, from the next frame on (the handheld / docked profiles, platform/settings_switch.h)

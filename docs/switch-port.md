@@ -1,7 +1,7 @@
 # Switch port — current state
 
-Status as of 2026-10-08 (runtime round 45, branch `main`, synced with upstream v0.2.3-v0.2.6 / devel 4da1e34). The
-latest rounds and what they taught: "Round 45" and "Retrospective (rounds 39-45)" near the end.
+Status as of 2026-10-08 (runtime round 46, branch `main`, synced with upstream v0.2.8 / main 853d7b1). The
+latest rounds and what they taught: "Round 46", "Round 45" and "Retrospective (rounds 39-45)" near the end.
 
 ## Summary
 
@@ -1376,6 +1376,53 @@ Two sessions of the same route; the first started the translation records (0 -> 
   1.5-1.9%, GX2DrawDone 1.3-1.8%, OSLock/UnlockMutex ~2%, texture/sampler setters <1% each); **~90% is the game's own
   code**. Other game threads: JASThread 15-30%, WorkerMgr workers 8-13%, update_ubo 12% (2,000-3,400 of its jobs a
   second run on the main thread when its queue is full). Render thread there 530-700 ms/s.
+
+### Round 46: upstream v0.2.7-v0.2.8 sync, portable save states (save states hardware-tested)
+
+Upstream `main` 853d7b1 (48 commits after `4da1e34`, v0.2.7 and v0.2.8) applied as a diff
+(`git diff 4da1e34 853d7b1 | git apply -3`; the README part went to `docs/upstream-README.md`). **The next sync
+starts from `853d7b1`.** Conflicts: `tools/recomp/recomp.py` (the loop barrier combined with our `IJUMP_CALL`),
+`turbo.cpp` (both log lines kept), `gx2.h`/`guard.py` (both sides), and the Picto Box fix, which upstream and this
+fork wrote independently: the Vulkan and Metal renderers now use upstream's (true 3D images, format views,
+write-back list; desktop only), deko3d keeps ours. `GX2SetColorBuffer` now writes upstream's register form
+(`CB_COLORn_TILE` = width | slices << 16 | `kColorTarget3D` in bit 31); deko3d reads the slices with
+`gx2::color_target_slices`, which masks that bit. The game code is regenerated (`build/gen-v028`): the old
+`build/gen` (2026-10-05) also lacked the gyro hook of the previous sync.
+
+| Change (upstream) | On the Switch | Off switch |
+|---|---|---|
+| **Portable save states** (v0.2.8): a slot is a ~7 KB text file `slotN.wwstate` (progress of the Quest Log and Link's place, boat included), made and applied with the game's own save functions at the frame boundary; loading enters the saved place the way a void-out restart does. Only while the player controls Link (no cutscene, dialogue, menu, scene change, rope): otherwise nothing is written and a notice says why. | **The only kind of save state on the Switch.** Full states (`slotN.bin`, the whole MEM2 and every thread's registers) cannot work there: the Switch's game code keeps the callee-saved registers in host locals and leaves out the return-address stores (ppc.h `PPC_KEEP_R`, `PPC_SET_LR`), so a restored thread returns into code that still holds the old values, and the call chains a load compares are stale. `kFullStates` (savestate.cpp) is false on the Switch: Save always makes a portable state, a slot holding only an old `.bin` says so, Crash Recovery (automatic full states) is off and hidden. Saves tab: the console's own text, the files for a bug report listed (no clipboard). | none |
+| **Loop back-edge barrier** (#62): every backward branch in a function runs `PPC_LOOP()` (an empty asm with a memory clobber), so a spin wait reads guest memory again; clang turned the game's job-queue lock wait into `b .` and froze at start-up. | Applies to GCC too: our memory-base read is a non-volatile asm, so a call-free loop's load could be hoisted. 14,640 sites. Cost to measure on hardware (fps at sea and in Outset vs round 45). | none (recompiler) |
+| **Gyro rework** (#45, #71): lower default sensitivity (0.5), axis modes (player space, yaw, roll), bias recalibration instead of recentering, dropout diagnostics, and **gyro aiming in Pro Controller mode** (`site_0261864C`: the game reads the virtual GamePad's motion while a source is on). | The Switch plays as a Pro Controller by default, so gyro aiming now works without choosing the GamePad. Switch tab > Gyro aiming: axis choice, sensitivity 0.05-5 (logarithmic), Default sensitivity, Recalibrate now; the note that Pro Controller mode has no gyro is gone. | Switch tab |
+| **Quick doors without process deletion** in the extra steps (#61): fixes "PROGRAM HALT J3DPacket.cpp:157" in Tingle's jail. | Common code. | `WWHD_MOD_DOOR_DELETE=1` restores the old schedule |
+| Language sources (text from the player's EUR/JPN game), right-to-left text for fan translations, swkbd UTF-8, fan translations as content mods. | Common code; inactive without such files (the text hooks return at once). | |
+| (this fork) **Rumble on the Switch.** The game's motor requests (upstream rumble.h, #35) drive the active controller's two HD rumble actuators (handheld Joy-Con, Pro Controller or Joy-Con pair; `hidInitializeVibrationDevices` once, `hidSendVibrationValues` at 160/320 Hz, amplitude 0.6 at full strength) from the host loop in `input_switch.cpp`: sent when the level changes and every 100 ms while it runs (no thread). Still while the option is off, the menu is open or the game is not in focus, and when the host loop ends. Switch tab > Rumble (saved as `rumble`). | Was missing: the motors never ran | Switch tab, `WWHD_RUMBLE=0` |
+| (this fork) **16x anisotropic filtering** in the Switch tab's Picture section: deko3d already had it (`WWHD_ANISO`), only the desktop Graphics tab offered it. Off by default, saved as `switchAniso`. GPU cost to measure (Outset's heavy view, docked). | Sharper textures at an angle | Switch tab |
+| (this fork) The GamePad view is not offered to players: the Pro Controller / GamePad choice and the TV picture / GamePad screen buttons moved from the Switch tab's Controller section to its Debug section; the README no longer mentions them. | A saved `proController=0` can still be undone there. | |
+| Desktop only: Vulkan scaled depth copies (#72), blur taps and shadow maps at upscaled resolutions (#66, #67), Metal fixes, Windows release work, macOS quit prompt. | Not used. The blur-tap fix (#66) would need the decompiler's new `areaSampledTextures` option in deko3d (off: our GLSL and the offline cache are unchanged). | |
+
+**Built:** `build/switch-v028/wwhd.nro` (from `build/gen-v028`; `tools/switch/build.sh` still uses `build/gen`, which
+is stale), ELF `build/switch-dk/wwhd_r46.elf`.
+
+**Desktop test** (Vulkan, `build/vulkan-v028`, same tree and generated code): `portable_state_test`, `spin_wait_test`
+and `turbo_steps_test` pass. `portable_state_scenario.py --only outset`: saved on Outset, cold boot, 99 rupees
+poked, load: Link back at distance 0.0, angle equal, save data and HD sections equal (PASS). Its `house` case cannot
+run on Linux (`WWHD_TEST_POKE` is ticked only by the macOS host, input.mm), so a stage change was tested instead with a
+Forsaken Fortress state loaded while the Outset save is played: Link arrived in `MajyuE` room 0 at distance 0.0,
+save data equal, rupees 73 as in the state (PASS). Not covered on the desktop: the boat, the refusal during an event,
+and anything specific to the Switch build (`kFullStates`, the Saves tab text).
+
+**Hardware result (2026-10-08, the user):** save states work on the console (save and load from the Saves tab).
+Rumble, gyro in Pro Controller mode, anisotropic filtering and the frame rate with the loop barrier: no report yet.
+
+**Hardware test:** with a save on Outset: Minus > Saves > Save slot 1 while walking (notice "Saved to slot 1"),
+walk elsewhere, change something (cut grass for rupees), Load slot 1: Link is back with the old rupees. Also: save
+during a dialogue (refused with a notice), save on the boat at sea and load from land, load after a restart of the
+game. Log lines: `[savestate] slot 1: portable state written`, `portable state applied`, `portable load: arrived`.
+Gyro: Switch tab > Gyro aiming on, Pro Controller mode, aim the bow. Rumble: get hit by an enemy, let a bomb go off near Link
+(`WWHD_LOG_RUMBLE=1` logs the game's requests and `[rumble] host: device N motor L`); open the menu while it
+vibrates (it stops). Anisotropic filtering: on and off in the same spot (Outset's heaviest view, sea), fps each. Frame rate at sea and in Outset vs round 45 (the
+loop barrier).
 
 ### Retrospective (rounds 39-45, 2026-10-08)
 

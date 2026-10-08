@@ -9,6 +9,7 @@
 #include <functional>
 #include <atomic>
 #include <chrono>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -163,6 +164,8 @@ struct Ui {
     // language (applies on the next start)
     int language = -1;
     int language_at_start = -1;  // the language this start runs with (game_lang: the one on the disc)
+    int language_region = 0;     // game_lang region of a language source (0: the installed game)
+    int language_region_at_start = 0;
     bool linearized = false;
     bool just_opened = false;
     bool list_view = false;  // Controls: the table instead of the drawing
@@ -537,7 +540,19 @@ void tab_saves() {
     std::string msg = ss::last_message();
     if (!msg.empty()) note("%s", msg.c_str());
     heading("Save states");
-    note("A save state keeps the whole running game. Shift+F1..F5 save in game, F2..F5 load (F1 opens this menu).");
+    const bool full = ss::full_states();
+#ifdef __SWITCH__
+    note("A save state keeps your progress and where Link stands (a few KB). Loading enters that place with that "
+         "progress; enemies and cutscenes start fresh. Save while you control Link: not during a cutscene, a "
+         "dialogue, a menu, a scene change or on a rope.");
+#else
+    if (full)
+        note("Full save states: the whole running game (large, contain game data: never share them). Shift+F1..F5 save in "
+             "game, F2..F5 load (F1 opens this menu).");
+    else
+        note("A save state keeps your progress and where Link stands (a few KB, no game data). Loading enters that place "
+             "with that progress; enemies and cutscenes start fresh. Shift+F1..F5 save in game, F2..F5 load (F1 opens this menu).");
+#endif
     if (ImGui::BeginTable("slots", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("Slot", ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableSetupColumn("Saved");
@@ -553,8 +568,18 @@ void tab_saves() {
             if (!s.used) ImGui::TextDisabled("empty");
             else {
                 std::string d = s.when + (s.area.empty() ? "" : "  -  " + s.area);
+                if (!s.portable) d += "  (full)";
                 if (!s.compatible) d += "  (incompatible)";
                 ImGui::TextUnformatted(d.c_str());
+                if (s.older_other && s.portable) {
+                    // decision: an older full state stays on disk; say so (it is large and must not be shared)
+                    ImGui::TextDisabled("also holds an older full state (slot%d.bin, %.0f MB)", i, s.older_bytes / 1048576.0);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Kept on disk, not loaded: the newer portable state is. It contains game data: "
+                                          "don't share it. Delete it in the states folder if you no longer need it.");
+                } else if (s.older_other) {
+                    ImGui::TextDisabled("also holds an older portable state (slot%d.wwstate)", i);
+                }
             }
             ImGui::TableNextColumn();
             if (ImGui::Button("Save")) {
@@ -572,6 +597,36 @@ void tab_saves() {
         }
         ImGui::EndTable();
     }
+    // bug reports: the portable state and the save file, never a full state
+#ifdef __SWITCH__
+    // (no clipboard on the console: the paths are shown)
+    note("For a bug report, attach these files (copy them from the SD card):");
+    static std::string report;
+    static double reportAt = -10;
+    if (ImGui::GetTime() - reportAt > 1.0) { report = ss::bug_report_text(); reportAt = ImGui::GetTime(); }  // (SD card reads)
+    note("%s", report.c_str());
+#else
+    static double copiedAt = -10;
+    if (ImGui::Button("Copy save for bug report")) {
+        std::string text = ss::bug_report_text();
+        hostui::post([text] { hostui::set_clipboard(text); });
+        copiedAt = ImGui::GetTime();
+    }
+    if (ImGui::GetTime() - copiedAt < 2.0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("Copied");
+    }
+    help("Copies the paths of your newest save state and of your save file (cking.sav): attach both files to the bug "
+         "report. Save a state at the place of the problem first.");
+    note("States folder: %s", ss::states_dir().c_str());
+    bool fs;
+    if (check("Full save states (large, contain game data, don't share) - for debugging", full, &fs, !ss::full_states_forced()))
+        ss::set_full_states(fs);
+    help(ss::full_states_forced() ? "Set by WWHD_FULL_SAVE_STATES or a test variable for this start."
+                                  : "Saves the whole running game instead (about 300 MB per slot), exactly as it is. "
+                                    "These files contain game code and data: never attach them to a bug report.");
+#endif
+#ifndef __SWITCH__  // automatic states are full states (savestate.cpp kFullStates)
     heading("Crash Recovery");
     bool on;
     if (check("Crash Recovery (automatic state every few minutes)", crashrec::enabled(), &on)) crashrec::set_enabled(on);
@@ -592,6 +647,7 @@ void tab_saves() {
         else ImGui::TextDisabled("Automatic state %d:  empty", i);
         ImGui::PopID();
     }
+#endif
 }
 
 void tab_graphics() {
@@ -872,6 +928,16 @@ void tab_switch() {
     if (done) hostui::post([] { save_picture(); });
     if (picture_env())
         note("env.txt sets the picture (WWHD_EXPOSURE ...): it is used at every start; changes here last until the game closes.");
+    {
+        bool v;
+        if (check("16x anisotropic filtering", gfxsw::aniso(), &v)) {
+            gfxsw::set_aniso(v);
+            hostui::post([v] { hostui::set(kKeyAniso, v ? "1" : "0"); });
+        }
+        help("Sharper ground, sand and water textures seen at an angle, mostly at a distance.\n"
+             "Costs some GPU time: if the frame rate drops, turn it off.");
+        if (aniso_env()) note("env.txt sets WWHD_ANISO: it is used at every start.");
+    }
 
     heading("Frame rate counter (top left)");
     static const char* const modes[] = {"Off", "Frame rate", "Frame rate and load"};
@@ -885,32 +951,18 @@ void tab_switch() {
     }
     if (fps_counter_env()) note("env.txt sets WWHD_FPS: it is used at every start.");
 
-    // which Wii U controller the Switch controller is: the game's own control mode must match it (with
-    // the Pro Controller chosen here the GamePad lies on the table and sends nothing, system_stubs.cpp)
-    heading("Controller");
+    // the controller's motors follow the game's rumble requests (input_switch.cpp update_rumble; saved as
+    // "rumble" as on the desktop, WWHD_RUMBLE=0 starts with it off)
+    heading("Rumble");
     {
-        const bool pro = input::pro_controller(), env = getenv("WWHD_PRO_CONTROLLER") != nullptr;
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("The controller acts as");
-        ImGui::SameLine();
-        if (radio("Wii U Pro Controller", pro, !env))
-            hostui::post([] { hostui::set_pro_controller(true); hostui::set("proController", "1"); });
-        ImGui::SameLine();
-        if (radio("Wii U GamePad", !pro, !env))
-            hostui::post([] { hostui::set_pro_controller(false); hostui::set("proController", "0"); });
-        help("Pick the same controller as the game's own options: if they differ, the game reads a\n"
-             "controller nobody holds and no button works. The gyro needs the GamePad.");
-        if (env) note("env.txt sets WWHD_PRO_CONTROLLER: it is used at every start.");
-        // the GamePad screen (items, map), full size instead of the TV picture
-        const bool view = gfxsw::gamepad_view();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("The screen shows");
-        ImGui::SameLine();
-        if (radio("TV picture", !view)) gfxsw::set_gamepad_view(false);
-        ImGui::SameLine();
-        if (radio("GamePad screen", view, !pro)) gfxsw::set_gamepad_view(true);
-        help("ZL + ZR + Minus switches between them while playing. On the GamePad screen the touch\n"
-             "screen works as the GamePad's (items, map). Only with the GamePad chosen above.");
+        bool v;
+        if (check("Rumble", rumble::enabled(), &v)) {
+            rumble::set_enabled(v);
+            hostui::post([v] { hostui::set("rumble", v ? "1" : "0"); });
+        }
+        help("The Joy-Con or the Pro Controller vibrates when the game asks for it, as the Wii U\n"
+             "controllers did. Off keeps the motors still.");
+        if (rumble::env_override()) note("env.txt sets WWHD_RUMBLE: it is used at every start.");
     }
 
     // gyro aiming with the controller's own motion sensors (input_switch.cpp feeds motion.h); the
@@ -923,22 +975,33 @@ void tab_switch() {
             g.source = v ? motion::kController : motion::kOff;
         help("First-person aiming (bow, hookshot, boomerang, telescope, Picto Box, grappling hook) follows\n"
              "the Joy-Con, the Pro Controller or the console in handheld mode, as with the Wii U GamePad.\n"
-             "The game's own Options > Gyro switch still applies.");
+             "The game's own Options > Gyro switch still applies, and the game ignores the motion while\n"
+             "the right stick is pushed.");
         if (motion::env_override()) note("WWHD_GYRO=%s overrides the saved source.", getenv("WWHD_GYRO"));
-        // the game reads the gyro only from a GamePad (docs/gyro.md: not in "Pro Controller only" mode)
-        if (g.source == motion::kController && input::pro_controller())
-            note("The controller acts as a Wii U Pro Controller, which has no gyro: choose the GamePad above "
-                 "(and in the game's own options) to aim with it.");
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Turn left/right by");
+        for (int a = 0; a < motion::kAxisModeCount; a++) {
+            ImGui::SameLine();
+            if (radio(motion::axis_label(a), g.tuning.axis == a)) g.tuning.axis = a;
+        }
+        help("Player space: turning the controller left or right about the real vertical, however you hold it\n"
+             "(recommended). Yaw: turning it about its own vertical axis (as if it lay flat). Roll: tilting it to\n"
+             "the side like a steering wheel. Tilting its top up or down always looks up or down.");
+        const float lo = motion::Tuning::kMinSensitivity, hi = motion::Tuning::kMaxSensitivity;
         ImGui::SetNextItemWidth(220);
-        ImGui::SliderFloat("Sensitivity left/right", &g.tuning.sensitivity_x, 0.1f, 5.0f, "%.2fx");
+        ImGui::SliderFloat("Sensitivity left/right", &g.tuning.sensitivity_x, lo, hi, "%.2fx", ImGuiSliderFlags_Logarithmic);
         ImGui::SameLine(0, 16);
         if (check("Invert##gyrox", g.tuning.invert_x, &v)) g.tuning.invert_x = v;
         ImGui::SetNextItemWidth(220);
-        ImGui::SliderFloat("Sensitivity up/down", &g.tuning.sensitivity_y, 0.1f, 5.0f, "%.2fx");
+        ImGui::SliderFloat("Sensitivity up/down", &g.tuning.sensitivity_y, lo, hi, "%.2fx", ImGuiSliderFlags_Logarithmic);
         ImGui::SameLine(0, 16);
         if (check("Invert##gyroy", g.tuning.invert_y, &v)) g.tuning.invert_y = v;
-        if (ImGui::Button("Recenter now")) motion::recenter();
+        if (ImGui::Button("Default sensitivity"))
+            g.tuning.sensitivity_x = g.tuning.sensitivity_y = motion::Tuning::kDefaultSensitivity;
         ImGui::SameLine();
+        if (ImGui::Button("Recalibrate now")) motion::recalibrate();
+        help("Recalibrate if the view drifts while the controller rests, then put it down for a second:\n"
+             "the gyro's offset is learnt anew.");
         ImGui::TextUnformatted(motion::status().c_str());
         if (!(g == before)) save_gyro(g);
     }
@@ -971,6 +1034,32 @@ void tab_switch() {
         help("Performance diagnostics for the log, every 5 s: where the game's main thread spends its\n"
              "time in the runtime ([main] lines) and each game thread's share of its core ([sched] lines).\n"
              "Not saved: off at the next start (env.txt WWHD_MAIN_SAMPLER=1 / WWHD_SCHED_STATS=2 still work).");
+    }
+    // (Debug: the GamePad view is not offered to players) which Wii U controller the Switch controller is: the game's own control mode must match it (with
+    // the Pro Controller chosen here the GamePad lies on the table and sends nothing, system_stubs.cpp)
+    {
+        const bool pro = input::pro_controller(), env = getenv("WWHD_PRO_CONTROLLER") != nullptr;
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("The controller acts as");
+        ImGui::SameLine();
+        if (radio("Wii U Pro Controller", pro, !env))
+            hostui::post([] { hostui::set_pro_controller(true); hostui::set("proController", "1"); });
+        ImGui::SameLine();
+        if (radio("Wii U GamePad", !pro, !env))
+            hostui::post([] { hostui::set_pro_controller(false); hostui::set("proController", "0"); });
+        help("For testing (not offered to players). Pick the same controller as the game's own options:\n"
+             "if they differ, the game reads a controller nobody holds and no button works.");
+        if (env) note("env.txt sets WWHD_PRO_CONTROLLER: it is used at every start.");
+        // the GamePad screen (items, map), full size instead of the TV picture
+        const bool view = gfxsw::gamepad_view();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("The screen shows");
+        ImGui::SameLine();
+        if (radio("TV picture", !view)) gfxsw::set_gamepad_view(false);
+        ImGui::SameLine();
+        if (radio("GamePad screen", view, !pro)) gfxsw::set_gamepad_view(true);
+        help("ZL + ZR + Minus switches between them while playing. On the GamePad screen the touch\n"
+             "screen works as the GamePad's (items, map). Only with the GamePad chosen above.");
     }
     {
         // the upstream 60 fps modes, for testing on the console (the screen is 60 Hz: 60 fps only)
@@ -1428,11 +1517,17 @@ void save_gyro(const motion::Settings& g) {
 void load_gyro() {
     motion::Settings g;
     std::string v;
+    bool saved = false, axis = false;
     for (const char* k : motion::kKeys)
-        if (hostui::get(k, v)) motion::from_kv(g, k, v);
+        if (hostui::get(k, v)) {
+            motion::from_kv(g, k, v);
+            saved = true;
+            axis |= !strcmp(k, "gyro.axis");
+        }
+    if (saved && !axis) motion::upgrade_from_first_release(g);
     motion::set_settings(g);
 }
-// the Gyro window (Controls tab > Gyro...): source, sensitivity, invert, recenter, Cemuhook server
+// the Gyro window (Controls tab > Gyro...): source, axis, sensitivity, invert, recalibrate, Cemuhook server
 void gyro_window(bool& open) {
     const char* title = "Gyro aiming##gyro";
     if (open) { ImGui::OpenPopup(title); open = false; }
@@ -1442,24 +1537,41 @@ void gyro_window(bool& open) {
     bool v;
     ImGui::PushTextWrapPos(ImGui::GetFontSize() * 34);
     note("On the Wii U you aim in first person (bow, hookshot, boomerang, telescope, Picto Box, grappling hook) by "
-         "moving the GamePad. The game's own Options > Gyro switch still decides whether it uses the motion.");
+         "moving the GamePad. This works with the GamePad and the Pro Controller choice alike. The game's own "
+         "Options > Gyro switch still decides whether it uses the motion, and it ignores the motion while the right "
+         "stick is pushed.");
     for (int i = 0; i < motion::kSourceCount; i++)
         if (radio(motion::source_label(i), g.source == i)) g.source = i;
     if (motion::env_override()) note("WWHD_GYRO=%s overrides the saved source.", getenv("WWHD_GYRO"));
     if (g.source == motion::kOff && motion::gyro_controllers() > 0) note("A controller with a gyro is connected: choose Controller gyro to use it.");
+    if (g.source == motion::kController || g.source == motion::kCemuhook) {
+        ImGui::TextUnformatted("Turn left/right by");
+        for (int a = 0; a < motion::kAxisModeCount; a++) {
+            ImGui::SameLine();
+            if (radio(motion::axis_label(a), g.tuning.axis == a)) g.tuning.axis = a;
+        }
+        help("Player space: turning the controller left or right about the real vertical, however you hold it "
+             "(recommended). Yaw: turning it about its own vertical axis (as if it lay flat). Roll: tilting it to "
+             "the side like a steering wheel. Tilting its top up or down always looks up or down.");
+    }
+    const float lo = motion::Tuning::kMinSensitivity, hi = motion::Tuning::kMaxSensitivity;
     ImGui::SetNextItemWidth(220);
-    ImGui::SliderFloat("Sensitivity left/right", &g.tuning.sensitivity_x, 0.1f, 5.0f, "%.2fx");
+    ImGui::SliderFloat("Sensitivity left/right", &g.tuning.sensitivity_x, lo, hi, "%.2fx", ImGuiSliderFlags_Logarithmic);
     ImGui::SameLine(0, 16);
     if (check("Invert##x", g.tuning.invert_x, &v)) g.tuning.invert_x = v;
     ImGui::SetNextItemWidth(220);
-    ImGui::SliderFloat("Sensitivity up/down", &g.tuning.sensitivity_y, 0.1f, 5.0f, "%.2fx");
+    ImGui::SliderFloat("Sensitivity up/down", &g.tuning.sensitivity_y, lo, hi, "%.2fx", ImGuiSliderFlags_Logarithmic);
     ImGui::SameLine(0, 16);
     if (check("Invert##y", g.tuning.invert_y, &v)) g.tuning.invert_y = v;
+    if (ImGui::Button("Default sensitivity"))
+        g.tuning.sensitivity_x = g.tuning.sensitivity_y = motion::Tuning::kDefaultSensitivity;
+    help("1.0 turns the view as far as moving a real Wii U GamePad by the same angle would (about twice the "
+         "controller's turn); the default 0.5 lets the view follow the controller about one to one.");
     if (g.source == motion::kMouse) {
         ImGui::SetNextItemWidth(220);
         ImGui::SliderFloat("Mouse: degrees per point", &g.mouse_degrees, 0.01f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
-        help("How far one point of mouse movement turns the GamePad. With Steam Input's gyro to mouse, tune this and "
-             "Steam's own sensitivity together.");
+        help("How far one point of mouse movement turns the GamePad (before the sensitivity above). With Steam "
+             "Input's gyro to mouse, tune this and Steam's own sensitivity together.");
         note("While the game aims, the pointer is captured and the mouse turns the GamePad (the mouse camera mod "
              "leaves it alone then).");
     }
@@ -1479,17 +1591,17 @@ void gyro_window(bool& open) {
         if (ImGui::SliderInt("Controller slot", &slot, 1, 4)) g.dsu_slot = slot - 1;
         note("A Cemuhook (DSU) server: DS4Windows, BetterJoy, SteamDeckGyroDSU or a phone app; default 127.0.0.1, port 26760.");
     }
-    // recenter: a controller input and/or a key
+    // recalibrate: a controller input and/or a key
     const char* pad_name = g.recenter_pad > 0 ? input_map::pad_label(g.recenter_pad) : "None";
     ImGui::SetNextItemWidth(220);
-    if (ImGui::BeginCombo("Recenter: controller", pad_name)) {
+    if (ImGui::BeginCombo("Recalibrate: controller", pad_name)) {
         for (int p = 0; p < input_map::kPadCount; p++)
             if (ImGui::Selectable(p ? input_map::pad_label(p) : "None", g.recenter_pad == p)) g.recenter_pad = p;
         ImGui::EndCombo();
     }
     std::string key_name = g.recenter_key >= 0 ? input_map::key_label(g.recenter_key) : "None";
     ImGui::SetNextItemWidth(220);
-    if (ImGui::BeginCombo("Recenter: key", key_name.c_str())) {
+    if (ImGui::BeginCombo("Recalibrate: key", key_name.c_str())) {
         if (ImGui::Selectable("None", g.recenter_key < 0)) g.recenter_key = -1;
         for (int k = 0; k < 256; k++) {
             std::string id = input_map::key_id(k);
@@ -1498,8 +1610,10 @@ void gyro_window(bool& open) {
         }
         ImGui::EndCombo();
     }
-    help("The button or key also reaches the game if the controls use it; pick a free one.");
-    if (ImGui::Button("Recenter now")) motion::recenter();
+    help("If the view drifts while the controller rests, recalibrate and put the controller down for a second: "
+         "the gyro's offset is learnt anew. The button or key also reaches the game if the controls use it; pick "
+         "a free one.");
+    if (ImGui::Button("Recalibrate now")) motion::recalibrate();
     ImGui::SameLine();
     ImGui::TextUnformatted(motion::status().c_str());
     ImGui::PopTextWrapPos();
@@ -1632,12 +1746,31 @@ int saved_language() {
     return 1;
 }
 
+// the region of the saved language when it comes from a language source (game_lang::kNoRegion: the game's own)
+int saved_language_region() {
+    std::string v;
+    if (hostui::get("language_region", v)) {
+        const int r = game_lang::region_from_code(v);
+        if (r != game_lang::kUsa) return r;
+    }
+    return game_lang::kNoRegion;
+}
+
 // "English, French and Spanish"
 std::string language_list(const std::vector<int>& langs) {
     std::string s;
     for (size_t k = 0; k < langs.size(); k++)
         s += std::string(k == 0 ? "" : k + 1 == langs.size() ? " and " : ", ") + game_lang::name(langs[k]);
     return s;
+}
+
+void choose_language(int language, int region) {
+    U.language = language;
+    U.language_region = region;
+    hostui::post([language, region] {
+        hostui::set("language", std::to_string(language));
+        hostui::set("language_region", game_lang::region_code(region));
+    });
 }
 
 void tab_about() {
@@ -1648,8 +1781,16 @@ void tab_about() {
     const int env_language = env_set && !*end && env_value >= 0 && env_value < game_lang::kLanguages ? (int)env_value : 1;
     if (U.language < 0) {
         U.language = saved_language();
-        U.language_at_start = game_lang::started();  // the game reads it early in the boot
-        if (U.language_at_start < 0) U.language_at_start = game_lang::usable(env_set ? env_language : U.language);
+        U.language_region = saved_language_region();
+        const game_lang::Start now = game_lang::current();
+        U.language_at_start = now.language;  // the game reads it early in the boot
+        U.language_region_at_start = now.pack ? now.region : game_lang::kNoRegion;
+        if (U.language_at_start < 0) {
+            const game_lang::Start s = game_lang::choose(env_set ? env_language : U.language,
+                                                         env_set ? game_lang::kNoRegion : U.language_region);
+            U.language_at_start = s.language;
+            U.language_region_at_start = s.pack ? s.region : game_lang::kNoRegion;
+        }
     }
     const std::vector<int>& avail = game_lang::available();
     heading("Console language (applies on the next start)");
@@ -1662,21 +1803,42 @@ void tab_about() {
     ImGui::BeginDisabled(env_set);
     for (int i : {1, 2, 5, 3, 4, 8, 9, 10, 7, 0, 6, 11}) {
         if (i != 1 && i != 3 && i != 9 && i != 0) ImGui::SameLine();  // rows of three
-        if (radio(game_lang::name(i), U.language == i, game_lang::is_available(i))) {
-            U.language = i;
-            hostui::post([i] { hostui::set("language", std::to_string(i)); });
+        if (radio(game_lang::name(i), U.language == i && U.language_region == game_lang::kNoRegion,
+                  game_lang::is_available(i)))
+            choose_language(i, game_lang::kNoRegion);
+    }
+    // the languages of the language sources (a European or Japanese disc of the player's, set up with
+    // the setup's --language-source): docs/language-packs.md
+    for (int region : {(int)game_lang::kEurope, (int)game_lang::kJapan}) {
+        const std::vector<int> langs = game_lang::source_languages(region);
+        if (langs.empty()) continue;
+        heading(region == game_lang::kEurope ? "From your European game (language source, experimental)"
+                                             : "From your Japanese game (language source, experimental)");
+        for (size_t k = 0; k < langs.size(); k++) {
+            if (k % 3) ImGui::SameLine();
+            const std::string label = std::string(game_lang::name(langs[k])) + " (" + game_lang::region_name(region) + ")";
+            if (radio(label.c_str(), U.language == langs[k] && U.language_region == region))
+                choose_language(langs[k], region);
         }
     }
+    if (!game_lang::source_languages(game_lang::kJapan).empty())
+        note("Japanese language sources are untested so far: report what looks wrong.");
     ImGui::EndDisabled();
+    const bool from_source = U.language_region != game_lang::kNoRegion &&
+                             game_lang::source_pack(U.language, U.language_region) != nullptr;
     if (env_set) {
         note("WWHD_LANGUAGE=%s is set for this start and takes precedence.", env);
         if (!game_lang::is_available(env_language))
             warn("%s is not on this disc: the game runs in %s.", game_lang::name(env_language),
                  game_lang::name(game_lang::usable(env_language)));
-    } else if (!game_lang::is_available(U.language)) {
+    } else if (U.language_region != game_lang::kNoRegion && !from_source) {
+        warn("%s (%s) is saved but its language source is missing (%s): the game runs in %s.",
+             game_lang::name(U.language), game_lang::region_name(U.language_region),
+             game_lang::sources_dir().c_str(), game_lang::name(game_lang::usable(U.language)));
+    } else if (!from_source && !game_lang::is_available(U.language)) {
         warn("%s is saved but is not on this disc: the game runs in %s. Choose one of the languages above.",
              game_lang::name(U.language), game_lang::name(game_lang::usable(U.language)));
-    } else if (U.language != U.language_at_start) {
+    } else if (U.language != U.language_at_start || (from_source ? U.language_region : 0) != U.language_region_at_start) {
         warn("%s is saved. Restart the game to apply it: the game reads the console language only when it starts.",
              game_lang::name(U.language));
     }
@@ -1905,8 +2067,11 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
     read_controller();
     // the game's text prompt shows unless the menu is open over it (the menu has the input then)
     const bool open = is_open(), perf = perf_shown(), text = !open && text_entry::active();
+    // save state notices (saved, refused during a cutscene, loaded into another Quest Log) show over the
+    // game for a few seconds while the menu is closed (the window title is not visible everywhere)
+    const std::string toast = open ? std::string() : ss::last_message();
     U.linearized = false;
-    if (!open && !perf && !text) {
+    if (!open && !perf && !text && toast.empty()) {
         if (U.init) {  // forget events and pressed keys while nothing is shown
             std::lock_guard<std::mutex> lk(g_mu);
             g_events.clear();
@@ -1960,6 +2125,19 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
         }
     }
     if (perf) perf_window(open);
+    if (!toast.empty()) {
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - 24), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        ImGui::SetNextWindowBgAlpha(0.7f);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(io.DisplaySize.x * 0.8f, FLT_MAX));
+        const ImGuiWindowFlags fl = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+                                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
+        if (ImGui::Begin("##savestate_notice", nullptr, fl)) {
+            ImGui::PushTextWrapPos(io.DisplaySize.x * 0.75f);
+            ImGui::TextUnformatted(toast.c_str());
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::End();
+    }
     ImGui::Render();
     return ImGui::GetDrawData();
 }
