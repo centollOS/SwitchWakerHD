@@ -65,7 +65,7 @@ void set_quick_doors(bool on) { g_doors = on; note("quick doors", on); }
 bool fast_scenes() { return g_scenes.load(std::memory_order_relaxed); }
 void set_fast_scenes(bool on) { g_scenes = on; note("fast scene changes", on); }
 
-// the mods switched on at startup (env.txt on the Switch: read before the static initialisers, main.cpp)
+// the mods switched on at startup (WWHD_MOD_* variables; on the Switch the menu's saved choices)
 void log_startup() {
     if (quick_doors()) note("quick doors", true);
     if (fast_scenes()) note("fast scene changes", true);

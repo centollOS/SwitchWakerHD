@@ -10,12 +10,11 @@
 // on dock/undock, so a choice is set once. apm needs title mode (an application); in applet mode the
 // profile is skipped. A choice falls back to the next lower one when apm refuses it. The handheld
 // configuration found at start is restored at exit.
-// WWHD_GPU_PROFILE (env.txt) = default | 384 | 460 | 1600 (460 with memory 1600) | 614 | 0x<configuration id>;
-// without it, the menu's saved choice; without that, the system's own (stock: GPU 307 MHz, memory 1331 MHz;
+// The menu's saved choice (default | 384 | 460 | 1600 (460 with memory 1600) | 614); without it, the system's own (stock: GPU 307 MHz, memory 1331 MHz;
 // 2026-10-08, the owner: stock GPU and CPU by default; the CPU's 1224 MHz step is marked Recommended).
 //
 // Beyond apm (a teammate's sys-clk setup, asked for 2026-10-07): the CPU clock (the system table's steps
-// 1020-1785 MHz, default the stock 1020, 1224 Recommended; WWHD_CPU_CLOCK=<MHz>, or the menu) and GPU 614.4 MHz in handheld (profile 614) are set through clkrst, as sys-clk does, on top of
+// 1020-1785 MHz, default the stock 1020, 1224 Recommended; the menu) and GPU 614.4 MHz in handheld (profile 614) are set through clkrst, as sys-clk does, on top of
 // apm's configuration (memory 1600 comes from 0x92220007). The system sets its own clocks again on
 // dock / undock, sleep and apm changes, so tick() sets them again (once a second, when they differ);
 // at exit the CPU goes back to 1020 MHz and the handheld configuration found at start is restored.
@@ -40,7 +39,6 @@ namespace {
 
 std::mutex g_mu;
 int g_profile = kGpuDefault;
-bool g_profile_env = false;
 bool g_apm_ready = false, g_apm_failed = false;
 u32 g_apm_saved = 0x00020003, g_apm_now = 0;
 
@@ -55,14 +53,12 @@ constexpr u32 kCpuHz[kCpuClocks] = {1020000000, 1122000000, 1224000000, 13260000
                                     1428000000, 1581000000, 1683000000, 1785000000};
 constexpr u32 kGpu614Hz = 614400000;
 int g_cpu = kCpuDefault;
-bool g_cpu_env = false;
 
 // picture profiles per mode (g_mu); the mode whose profile the renderer has (-1: none yet)
 const char* const kModeIds[kModes] = {"handheld", "docked"};
 const char* const kModeLabels[kModes] = {"Handheld", "Docked"};
 ResProfile g_res[kModes] = {{1.0f, true}, {1.5f, true}};
 int g_res_mode = -1;
-bool g_res_scale_env = false, g_dynamic_env = false;
 
 // clkrst sessions for setting clocks (sys-clk's way), opened on first use
 bool g_clk_tried = false, g_clk_ok = false;
@@ -178,11 +174,6 @@ void apply(const char* what, const u32* chain) {
     LOG("[switch] gpu profile %s: no configuration accepted; 0x%08x kept", what, (unsigned)g_apm_now);
 }
 
-bool env_set(const char* name) {
-    const char* e = getenv(name);
-    return e && *e;
-}
-
 bool saved_float(const char* key, float& out, float lo, float hi) {
     std::string v;
     if (!hostui::get(key, v) || v.empty()) return false;
@@ -197,7 +188,6 @@ int gpu_profile() {
     std::lock_guard<std::mutex> lk(g_mu);
     return g_profile;
 }
-bool gpu_profile_env() { return g_profile_env; }
 std::string gpu_profile_status() {
     std::lock_guard<std::mutex> lk(g_mu);
     if (!g_apm_ready) return "not set (apm unavailable)";
@@ -229,7 +219,6 @@ int cpu_clock() {
     std::lock_guard<std::mutex> lk(g_mu);
     return g_cpu;
 }
-bool cpu_clock_env() { return g_cpu_env; }
 void set_cpu_clock(int c) {
     if (c < 0 || c >= kCpuClocks) return;
     std::lock_guard<std::mutex> lk(g_mu);
@@ -260,16 +249,14 @@ ResProfile res_profile(int m) {
 void set_res_profile(int m, ResProfile p) {
     if (m < 0 || m >= kModes) return;
     std::lock_guard<std::mutex> lk(g_mu);
-    if (!g_res_scale_env) g_res[m].scale = std::clamp(p.scale, 0.5f, 2.0f);
-    if (!g_dynamic_env) g_res[m].dynamic = p.dynamic;
+    g_res[m].scale = std::clamp(p.scale, 0.5f, 2.0f);
+    g_res[m].dynamic = p.dynamic;
     char b[16];
     snprintf(b, sizeof b, "%.2f", g_res[m].scale);
     hostui::set(mode_key(kKeyResScale, m).c_str(), b);
     hostui::set(mode_key(kKeyDynamicRes, m).c_str(), g_res[m].dynamic ? "1" : "0");
     if (m == active_mode()) apply_res_profile("menu");
 }
-bool res_scale_env() { return g_res_scale_env; }
-bool dynamic_res_env() { return g_dynamic_env; }
 
 void save_picture() {
     const gfxsw::PictureGrade g = gfxsw::picture_grade_now();
@@ -283,11 +270,6 @@ void save_picture() {
     snprintf(b, sizeof b, "%.2f", g.gamma);
     hostui::set(kKeyGamma, b);
 }
-bool picture_env() {
-    return env_set("WWHD_EXPOSURE") || env_set("WWHD_CONTRAST") || env_set("WWHD_SATURATION") || env_set("WWHD_GAMMA");
-}
-bool fps_counter_env() { return env_set("WWHD_FPS"); }
-bool aniso_env() { return env_set("WWHD_ANISO"); }
 namespace {
 std::atomic<bool> g_captureCombo{false};
 }
@@ -299,73 +281,44 @@ void set_capture_combo(bool on) {
 }
 
 void apply_at_start() {
-    // GPU profile: env.txt, else the saved choice, else the system's own (stock)
+    // GPU profile: the saved choice, else the system's own (stock)
     std::string id;
-    if (const char* e = getenv("WWHD_GPU_PROFILE"); e && *e) {
-        id = e;
-        g_profile_env = true;
-    } else if (!hostui::get(kKeyGpuProfile, id) || id.empty()) {
-        id = kIds[kGpuDefault];
-    }
+    const bool saved = hostui::get(kKeyGpuProfile, id) && !id.empty();
     {
         std::lock_guard<std::mutex> lk(g_mu);
-        int p = -1;
+        int p = kGpuDefault;
         for (int i = 0; i < kGpuProfiles; i++)
             if (id == kIds[i]) p = i;
+        g_profile = p;
         u32 chain[4] = {};
-        if (p >= 0) {
-            g_profile = p;
-            chain_for(p, chain);
-        } else {  // a configuration id from env.txt (0x...)
-            chain[0] = (u32)strtoul(id.c_str(), nullptr, 0);
-            for (int i = 0; i < kGpuProfiles; i++) {
-                u32 c[4];
-                chain_for(i, c);
-                if (c[0] == chain[0]) g_profile = i;
-            }
-        }
-        LOG("[switch] gpu profile %s (%s)", id.c_str(), g_profile_env ? "env.txt" : "settings");
-        if (p != kGpuDefault) apply(id.c_str(), chain);
+        chain_for(p, chain);
+        LOG("[switch] gpu profile %s (%s)", kIds[p], saved ? "settings" : "default");
+        if (p != kGpuDefault) apply(kIds[p], chain);
     }
-    // CPU clock: env.txt (WWHD_CPU_CLOCK=<MHz of the table>), else the saved choice, else the stock 1020 MHz
+    // CPU clock: the saved choice, else the stock 1020 MHz
     {
         std::string c;
-        if (const char* e = getenv("WWHD_CPU_CLOCK"); e && *e) {
-            c = e;
-            g_cpu_env = true;
-        } else {
-            hostui::get(kKeyCpuClock, c);
-        }
+        hostui::get(kKeyCpuClock, c);
         std::lock_guard<std::mutex> lk(g_mu);
         g_cpu = kCpuDefault;
         for (int i = 0; i < kCpuClocks; i++)
             if (c == kCpuIds[i]) g_cpu = i;
-        LOG("[switch] cpu clock %s MHz (%s)", kCpuIds[g_cpu], g_cpu_env ? "env.txt" : c.empty() ? "default" : "settings");
+        LOG("[switch] cpu clock %s MHz (%s)", kCpuIds[g_cpu], c.empty() ? "default" : "settings");
         apm_ready();  // the exit hook that puts the stock clocks back
         enforce(true);
     }
-    // picture profiles per mode: env.txt fixes a value in both modes, else what the menu saved, else the defaults
+    // picture profiles per mode: what the menu saved, else the defaults
     {
         std::lock_guard<std::mutex> lk(g_mu);
-        const char* rs = getenv("WWHD_RES_SCALE");
-        const char* dr = getenv("WWHD_DYNAMIC_RES");
-        g_res_scale_env = rs && *rs && atof(rs) > 0;
-        g_dynamic_env = dr && *dr;
         for (int m = 0; m < kModes; m++) {
-            if (g_res_scale_env)
-                g_res[m].scale = std::clamp(float(atof(rs)), 0.5f, 2.0f);
-            else
-                saved_float(mode_key(kKeyResScale, m).c_str(), g_res[m].scale, 0.5f, 2.0f);
+            saved_float(mode_key(kKeyResScale, m).c_str(), g_res[m].scale, 0.5f, 2.0f);
             std::string v;
-            if (g_dynamic_env)
-                g_res[m].dynamic = !(atof(dr) == 0.0 && *dr == '0');  // gfx/deko's reading of WWHD_DYNAMIC_RES
-            else if (hostui::get(mode_key(kKeyDynamicRes, m).c_str(), v) && !v.empty())
-                g_res[m].dynamic = v != "0";
+            if (hostui::get(mode_key(kKeyDynamicRes, m).c_str(), v) && !v.empty()) g_res[m].dynamic = v != "0";
         }
         apply_res_profile("start");
     }
-    // picture adjustments and the counter: env.txt wins, else what the menu saved
-    if (!picture_env()) {
+    // picture adjustments and the counter: what the menu saved
+    {
         gfxsw::PictureGrade g = gfxsw::picture_grade_now();
         bool any = false;
         any |= saved_float(kKeyExposure, g.exposure, 0.25f, 4.0f);
@@ -378,7 +331,7 @@ void apply_at_start() {
                 g.contrast, g.saturation, g.gamma);
         }
     }
-    if (!fps_counter_env()) {
+    {
         std::string v;
         if (hostui::get(kKeyFpsCounter, v) && !v.empty()) gfxsw::set_fps_overlay_mode(atoi(v.c_str()));
     }
@@ -386,7 +339,7 @@ void apply_at_start() {
         std::string v;
         if (hostui::get(kKeyCaptureCombo, v)) g_captureCombo = v == "1";
     }
-    if (!aniso_env()) {
+    {
         std::string v;
         if (hostui::get(kKeyAniso, v) && !v.empty()) gfxsw::set_aniso(v == "1");
     }

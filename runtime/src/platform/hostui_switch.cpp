@@ -1,16 +1,19 @@
 // The settings overlay's host interface (overlay/hostui.h) on the Switch: saved settings
-// (sdmc:/switch/wwhd/settings.ini), post() (run by the host loop, gfx/gl/backend.cpp run_main_loop),
+// (sdmc:/switch/wwhd/settings.ini, platform/settings_ini.h: the menu's lines and a [dev] section of
+// developer variables, which the menu keeps as written), post() (run by the host loop, gfx/gl/backend.cpp run_main_loop),
 // and the window and display options, which the Switch does not have (one screen, always full: the
 // overlay hides those tabs; the values here only answer the questions).
 #include "overlay/hostui.h"
 
 #include <deque>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 
 #include "input.h"
 #include "platform/host.h"
+#include "platform/settings_ini.h"
 #include "runtime.h"
 
 namespace hostui {
@@ -19,19 +22,20 @@ std::mutex g_mu;
 std::map<std::string, std::string> g_values;
 bool g_loaded = false;
 
-// sdmc:/switch/wwhd/settings.ini, KEY=VALUE lines (the same format as the SDL host's file)
+// sdmc:/switch/wwhd/settings.ini: the menu's KEY=VALUE lines (the same format as the SDL host's file), then
+// the [dev] section (settings_ini.h)
 std::string path() { return host::config_dir() + "/settings.ini"; }
+
+settings_ini::File read_file() {
+    std::ifstream in(path(), std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    return settings_ini::parse(text);
+}
 
 void load_locked() {
     if (g_loaded) return;
     g_loaded = true;
-    std::ifstream in(path());
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        size_t eq = line.find('=');
-        if (eq != std::string::npos) g_values[line.substr(0, eq)] = line.substr(eq + 1);
-    }
+    g_values = read_file().menu;
 }
 }  // namespace
 
@@ -74,9 +78,10 @@ void set(const char* key, const std::string& value) {
     g_values[key] = value;
     std::string p = path(), tmp = p + ".tmp";
     {
-        std::ofstream out(tmp, std::ios::trunc);
-        out << "# Wind Waker HD settings\n";
-        for (auto& [k, v] : g_values) out << k << '=' << v << '\n';
+        // the [dev] section as the file has it now (it may have been edited since the start, as the debug
+        // server's put does), after the menu's settings
+        std::ofstream out(tmp, std::ios::trunc | std::ios::binary);
+        out << settings_ini::format(g_values, read_file().sections);
         if (!out) return;
     }
     if (!host::replace_file(tmp, p)) LOG("[settings] cannot write %s", p.c_str());

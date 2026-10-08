@@ -6,8 +6,7 @@
 
 namespace gfxsw {
 
-// picture adjustments applied when presenting (neutral = 1; env.txt: WWHD_EXPOSURE, WWHD_CONTRAST,
-// WWHD_SATURATION, WWHD_GAMMA)
+// picture adjustments applied when presenting (neutral = 1; the Switch tab, saved in settings.ini)
 struct PictureGrade {
     float exposure = 1, contrast = 1, saturation = 1, gamma = 1;
 };
@@ -23,7 +22,7 @@ float dynamic_res_scale();  // the internal resolution dynamic resolution has ch
 // any thread: the internal resolution (the most dynamic resolution may use) and whether dynamic resolution
 // may lower it, from the next frame on (the handheld / docked profiles, platform/settings_switch.h)
 void set_resolution_profile(float scale, bool dynamic);
-// per-draw optimizations the Switch tab turns on and off for A/B tests (not saved; env.txt sets them at start):
+// per-draw optimizations the Switch tab turns on and off for A/B tests (not saved; settings.ini's [dev] section sets them at start):
 // fixed state skipped while unchanged (WWHD_DK_FIXED_SKIP); round 40: depth-only draws without their pixel
 // shader (WWHD_DK_DEPTH_ONLY), texture lookups at shared addresses cached (WWHD_DK_TEX_SHARED_CACHE), vertex
 // layouts kept per vertex shader (WWHD_DK_VTX_LAYOUT_CACHE), a submit every 1024 draws instead of 256

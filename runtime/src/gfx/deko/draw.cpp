@@ -250,7 +250,7 @@ const int g_ufMode = [] {
 }();
 
 // Round 40 (the 22 fps views of Outset at stock clocks: the render thread at 998 ms/s). Each is on unless its
-// env.txt switch is 0, and the Switch tab turns it off and on while the game runs (gfxsw::set_draw_opt):
+// switch is 0 (settings.ini [dev]), and the Switch tab turns it off and on while the game runs (gfxsw::set_draw_opt):
 // - WWHD_DK_DEPTH_ONLY: a draw with a depth buffer and no color target (the shadow maps: half the draws) whose
 //   pixel shader cannot change depth, stencil or memory (Shader::fragmentEffects: no discard, alpha test,
 //   gl_FragDepth or image stores) runs an empty pixel shader; its pixel stage's textures, uniform blocks and

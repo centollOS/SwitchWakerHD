@@ -1,5 +1,6 @@
 // Switch-only settings: the handheld GPU profile (apm) and the picture and counter options the
-// settings overlay's Switch tab changes, saved in settings.ini. env.txt values win at start.
+// settings overlay's Switch tab changes, saved in settings.ini (settings_ini.h; the variables these stand for,
+// such as WWHD_CPU_CLOCK, are ignored in its [dev] section).
 #pragma once
 #include <string>
 
@@ -11,7 +12,6 @@ namespace switch_settings {
 enum GpuProfile : int { kGpuDefault, kGpu384, kGpu460, kGpu460Mem1600, kGpu614, kGpuProfiles };
 const char* gpu_profile_label(int p);
 int gpu_profile();                // the one chosen (as the menu shows it)
-bool gpu_profile_env();           // WWHD_GPU_PROFILE in env.txt chose it at start
 // apm's handheld configuration in use ("" before the first change); its id for the log and the menu
 std::string gpu_profile_status();
 void set_gpu_profile(int p);      // applies it now and saves it (host loop thread)
@@ -24,13 +24,11 @@ constexpr int kCpuDefault = kCpu1020;
 constexpr int kCpuRecommended = kCpu1224;
 const char* cpu_clock_label(int c);
 int cpu_clock();
-bool cpu_clock_env();             // WWHD_CPU_CLOCK in env.txt chose it at start
 void set_cpu_clock(int c);        // applies it now and saves it (host loop thread)
 
 // Picture profiles, one per mode (as SwitchWaker's [handheld]/[docked] options): the internal resolution and
 // dynamic resolution. The active mode's profile applies by itself on dock / undock. Defaults: handheld 1x
-// (1280x720), docked 1.5x (1920x1080), dynamic resolution on in both. env.txt WWHD_RES_SCALE / WWHD_DYNAMIC_RES
-// fix that value in both modes.
+// (1280x720), docked 1.5x (1920x1080), dynamic resolution on in both.
 enum Mode : int { kHandheld, kDocked, kModes };
 const char* mode_label(int m);    // "Handheld" / "Docked"
 int active_mode();
@@ -40,14 +38,12 @@ struct ResProfile {
 };
 ResProfile res_profile(int m);
 void set_res_profile(int m, ResProfile p);  // saves it; applies it now when m is the active mode
-bool res_scale_env();             // WWHD_RES_SCALE in env.txt
-bool dynamic_res_env();           // WWHD_DYNAMIC_RES in env.txt
 
 // host loop, often: once a second, sets the clocks chosen above again when the system has changed
 // them (dock / undock, sleep, apm): what sys-clk does for its profiles; and the active mode's picture profile
 void tick();
 
-// at start, after env.txt (main.cpp): the GPU profile, then the saved picture and counter options
+// at start (main.cpp): the GPU profile, then the saved picture and counter options
 void apply_at_start();
 
 // settings.ini keys of the Switch tab
@@ -68,9 +64,6 @@ constexpr const char* kKeyMainSampler = "switchMainSampler";
 constexpr const char* kKeyResScale = "switchResScale";
 constexpr const char* kKeyDynamicRes = "switchDynamicRes";
 void save_picture();       // the current picture adjustments into settings.ini
-bool picture_env();        // one of WWHD_EXPOSURE/CONTRAST/SATURATION/GAMMA is in env.txt
-bool fps_counter_env();    // WWHD_FPS is in env.txt
-bool aniso_env();          // WWHD_ANISO is in env.txt
 // debug: both sticks clicked capture the next frame (PNGs on the SD card, a few seconds' freeze); off by
 // default so it cannot happen by accident (Switch tab; saved)
 bool capture_combo();

@@ -238,68 +238,87 @@ static void start_session_logs(const struct tm& t, char* name, size_t size) {
     });
     for (size_t i = 0; i + kMaxSessionLogs <= logs.size(); i++) remove(("logs/" + logs[i].name).c_str());
 }
-// env.txt's KEY=VALUE lines go into the environment before any static initialiser runs (round 26).
-// Many switches are read into globals at static initialisation (draw.cpp's off switches, the AO mode,
-// the invariant positions, the gameplay mods...), which ran before main() read env.txt: on the Switch
-// those settings never took effect. libnx mounts the SD card (__appInit) before __libc_init_array runs
-// the constructors, and this one runs first (priority 101: switch.ld sorts .init_array by priority).
-// main() reads the file again to log the settings and take the --options.
-__attribute__((constructor(101))) static void early_env_txt() {
-    // the menu's settings read at static initialisation: the main thread's sampler (threads.cpp)
-    if (FILE* s = fopen("sdmc:/switch/wwhd/settings.ini", "r")) {
-        std::string text;
-        char buf[4096];
-        for (size_t n; (n = fread(buf, 1, sizeof buf, s)) > 0;) text.append(buf, n);
-        fclose(s);
-        const settings_ini::File ini = settings_ini::parse(text);
-        if (auto it = ini.menu.find(switch_settings::kKeyMainSampler); it != ini.menu.end() && it->second == "1")
-            setenv("WWHD_MAIN_SAMPLER", "1", 1);
-    }
-    FILE* f = fopen("sdmc:/switch/wwhd/env.txt", "r");
-    if (!f) return;
-    char line[512];
-    while (fgets(line, sizeof line, f)) {
-        size_t n = strlen(line);
-        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = 0;
-        if (!n || line[0] == '#' || line[0] == '-') continue;
-        if (char* eq = strchr(line, '=')) {
-            *eq = 0;
-            setenv(line, eq + 1, 1);
-        }
-    }
-    fclose(f);
+// settings.ini (platform/settings_ini.h) is read before any static initialiser runs: its [dev] section's
+// KEY=VALUE lines go into the environment, and so do the menu's settings that code reads at static
+// initialisation (the main thread's sampler, threads.cpp). Many switches are read into globals then (draw.cpp's
+// switches, the AO mode, the gameplay mods...). libnx mounts the SD card (__appInit) before __libc_init_array
+// runs the constructors, and this one runs first (priority 101: switch.ld sorts .init_array by priority).
+// env.txt, the file of variables before settings.ini had a [dev] section, is converted once and renamed
+// env.txt.old. Nothing can be logged yet: the messages wait for main() (log_messages).
+namespace early_settings {
+constexpr const char* kDir = "sdmc:/switch/wwhd";
+// (function statics: this runs before the globals of this file are initialised)
+std::vector<std::string>& messages() {
+    static std::vector<std::string> v;
+    return v;
 }
-// hbmenu passes no options: env.txt next to the log holds KEY=VALUE environment settings (the
-// WWHD_* switches) and command-line options (lines starting with --)
-static void load_switch_options(int& argc, char**& argv) {
-    static std::vector<std::string> tokens;
-    static std::vector<char*> args;
-    FILE* f = fopen("env.txt", "r");
-    if (!f) return;
-    char line[512];
-    while (fgets(line, sizeof line, f)) {
-        std::string s(line);
-        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
-        if (s.empty() || s[0] == '#') continue;
-        if (s.rfind("--", 0) == 0) {
-            size_t space = s.find(' ');
-            tokens.push_back(s.substr(0, space));
-            if (space != std::string::npos) tokens.push_back(s.substr(space + 1));
-        } else if (size_t eq = s.find('='); eq != std::string::npos) {
-            setenv(s.substr(0, eq).c_str(), s.substr(eq + 1).c_str(), 1);
-            LOG("[boot] env %s", s.c_str());
-        }
-    }
-    fclose(f);
-    args.assign(argv, argv + argc);
-    for (auto& t : tokens) {
-        args.push_back(t.data());
-        LOG("[boot] option %s", t.c_str());
-    }
-    argc = (int)args.size();
-    args.push_back(nullptr);
-    argv = args.data();
+std::vector<std::pair<std::string, bool>>& migrated_mods() {
+    static std::vector<std::pair<std::string, bool>> v;
+    return v;
 }
+bool read_text(const std::string& path, std::string& text) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    char buf[4096];
+    for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+    fclose(f);
+    return true;
+}
+void migrate_env_txt(settings_ini::File& ini) {
+    const std::string dir = kDir, env = dir + "/env.txt", old = env + ".old", ini_path = dir + "/settings.ini";
+    std::string text;
+    if (!read_text(env, text)) return;
+    const settings_ini::Migration m = settings_ini::migrate_env_txt(text, ini);
+    migrated_mods() = m.mods;
+    const std::string out = settings_ini::format(ini), tmp = ini_path + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "wb");
+    const bool written = f && fwrite(out.data(), 1, out.size(), f) == out.size();
+    if (f && fclose(f) != 0) f = nullptr;
+    if (!written || !f || !host::replace_file(tmp, ini_path)) {
+        messages().push_back("[settings] env.txt: cannot write settings.ini: its variables apply to this session "
+                             "only, and env.txt is converted again at the next start");
+        return;
+    }
+    for (const std::string& line : m.log) messages().push_back("[settings] env.txt: " + line);
+    remove(old.c_str());
+    const bool renamed = rename(env.c_str(), old.c_str()) == 0;
+    messages().push_back(std::string("[settings] env.txt converted into settings.ini (") +
+                         std::to_string(m.log.size()) + " variables); " +
+                         (renamed ? "renamed env.txt.old" : "could not rename it: delete env.txt by hand"));
+}
+__attribute__((constructor(101))) void read_at_start() {
+    std::string text;
+    read_text(std::string(kDir) + "/settings.ini", text);
+    settings_ini::File ini = settings_ini::parse(text);
+    migrate_env_txt(ini);
+    for (const auto& [name, value] : settings_ini::dev_variables(ini)) {
+        if (settings_ini::menu_backed(name)) {
+            messages().push_back("[settings] [dev] " + name + " ignored: the settings menu has it");
+            continue;
+        }
+        setenv(name.c_str(), value.c_str(), 1);
+        messages().push_back("[settings] [dev] " + name + "=" + value);
+    }
+    if (auto it = ini.menu.find(switch_settings::kKeyMainSampler); it != ini.menu.end() && it->second == "1")
+        setenv("WWHD_MAIN_SAMPLER", "1", 1);
+}
+void log_messages() {
+    for (const std::string& line : messages()) LOG("%s", line.c_str());
+    messages().clear();
+}
+// the mods env.txt turned on or off, through the mod manager (its own profile too), once it is ready; and a
+// check that settings_ini's list of mod variables is the manager's
+void apply_migrated_mods() {
+    for (const auto& entry : mods::manager::entries()) {
+        bool known = false;
+        for (const settings_ini::ModVariable& m : settings_ini::kModVariables)
+            known |= std::string(m.id) == entry.id && std::string(m.env) == entry.startup_env;
+        if (!known) LOG("[settings] mod %s (%s) is missing from settings_ini::kModVariables", entry.id, entry.startup_env);
+    }
+    for (const auto& [id, on] : migrated_mods()) mods::manager::set_enabled(id, on);
+    migrated_mods().clear();
+}
+}  // namespace early_settings
 
 #elif !defined(_WIN32)
 // Memory crashes (SIGSEGV/SIGBUS/...): the report goes to the terminal and to
@@ -518,9 +537,9 @@ int main(int argc, char** argv) {
     // which round of docs/switch-port.md this runtime is (to tell builds apart in the logs)
     LOG("[boot] recompiled code: %s; runtime: round 45 (fast detiling, translation records, register writes merged in display lists, 2-way shader combinations; round 44 = round 43's helper-thread copies and render priority removed; register writes dispatched directly; round 42 = shader hot data packed and prefetched, one register-class pass; round 41 = context loads copy only written registers, targets/fixed state/viewport skipped by register generations, submit every 1024 draws, per-core load line; round 40 = deko3d: depth-only draws without their pixel shader, shared-surface texture lookups cached, vertex layouts kept, profiler off; round 39 = session log only in logs/, the newest 10 kept; round 38 = deko3d only: the OpenGL renderer removed; round 37 = CPU clock in the system table's steps, default 1224 MHz; settings menu on a Minus press; round 36 = shader budget: new shaders over frames, their draws skipped; round 35 = texture uploads from client memory again; round 34 = no framebuffer status query; round 33 = Warp tab; round 32 = queued texture uploads, texture error check after the GL thread finish; round 31 = CPU 1785 / GPU 614 options; round 30 = settings overlay on Minus; round 29 = official GPU profile 460.8 MHz handheld; round 28 = round 27 with the near-plane clip distance off, searchlight probe frames after a capture, per-draw trace in captures)",
         g_recomp_variant);
+    early_settings::log_messages();  // settings.ini's [dev] section, env.txt converted
     host::place_thread(0);
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
-    load_switch_options(argc, argv);
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
 #endif
     apply_portable_mode();
@@ -610,6 +629,9 @@ int main(int argc, char** argv) {
     mods::cemu::set_vulkan(render::requested()==render::Api::Vulkan);
     mods::content::set_game_root(config::game_dir);  // loose imports (fan translations) find their game path
     mods::packages::initialize();
+#ifdef __SWITCH__
+    early_settings::apply_migrated_mods();
+#endif
     mem::init();
     auto valid_mod_memory = [](uint32_t address, size_t size) {
         if (size > 1024 * 1024) return false;

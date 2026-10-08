@@ -76,9 +76,9 @@ bool ensure_core();   // service threads entering guest code; true if the core w
 void release_core();
 void set_service_core(uint32_t core);
 void report_sched();  // log per-thread core usage
-// diagnostics the settings menu turns on and off while the game runs (env.txt still sets them at start):
-// the main thread's runtime calls every 5 s (WWHD_MAIN_SAMPLER=1) and every game thread's core use every 5 s
-// (WWHD_SCHED_STATS=2)
+// diagnostics the settings menu turns on and off while the game runs: the main thread's runtime calls every 5 s
+// (WWHD_MAIN_SAMPLER=1; on the Switch the menu's saved choice) and every game thread's core use every 5 s
+// (WWHD_SCHED_STATS=2; on the Switch in settings.ini's [dev] section)
 void set_main_sampler(bool on);
 bool main_sampler();
 void set_sched_stats(bool on);

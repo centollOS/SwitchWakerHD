@@ -857,15 +857,13 @@ void tab_switch() {
     for (int i = 0; i < 3; i++) {
         if (i) ImGui::SameLine();
         const float s = scales[i];
-        if (radio(names[i], std::fabs(rp.scale - s) < 0.01f, !res_scale_env()))
+        if (radio(names[i], std::fabs(rp.scale - s) < 0.01f))
             hostui::post([m = edit, rp, s] { set_res_profile(m, {s, rp.dynamic}); });
     }
     bool dyn;
-    if (check("Dynamic resolution", rp.dynamic, &dyn, !dynamic_res_env()))
+    if (check("Dynamic resolution", rp.dynamic, &dyn))
         hostui::post([m = edit, rp, dyn] { set_res_profile(m, {rp.scale, dyn}); });
     help("Lowers the internal resolution while the GPU cannot hold 30 fps, and raises it again when it can.");
-    if (res_scale_env() || dynamic_res_env())
-        note("env.txt sets WWHD_RES_SCALE / WWHD_DYNAMIC_RES: that value is used in both modes.");
     if (edit != active) note("Applies when the console is %s.", edit == kDocked ? "docked" : "in handheld mode");
     else note("Internal resolution now: %.2f.", gfxsw::dynamic_res_scale());
 
@@ -877,8 +875,6 @@ void tab_switch() {
          "The first four are Nintendo's own performance profiles for games.\n"
          "GPU 614 MHz is an overclock set as sys-clk does (handheld only).\n"
          "Docked, the console uses its docked clocks (GPU 768 MHz).");
-    if (gpu_profile_env())
-        note("env.txt sets WWHD_GPU_PROFILE: it is used at every start; a change here lasts until the game closes.");
     heading("CPU");
     const int cc = cpu_clock();
     for (int i = 0; i < kCpuClocks; i++) {
@@ -889,7 +885,6 @@ void tab_switch() {
          "overclock for extra stability: it holds a steady 30 fps in the busiest scenes (sailing near Dragon Roost, the volcano).\n"
          "The steps of the console's CPU table, set for the whole game as sys-clk does (handheld and docked).\n"
          "1785 MHz is the clock games get during loading screens. Higher drains the battery faster and the console runs warmer.");
-    if (cpu_clock_env()) note("env.txt sets WWHD_CPU_CLOCK: it is used at every start.");
     if (cc > kCpuRecommended || gp == kGpu614)
         warn("Overclock: more heat and battery use. If sys-clk has its own profile for this game, the two fight over the clocks.");
     // the clocks, asked at most once a second (clkrst)
@@ -927,8 +922,6 @@ void tab_switch() {
         done = true;
     }
     if (done) hostui::post([] { save_picture(); });
-    if (picture_env())
-        note("env.txt sets the picture (WWHD_EXPOSURE ...): it is used at every start; changes here last until the game closes.");
     {
         bool v;
         if (check("16x anisotropic filtering", gfxsw::aniso(), &v)) {
@@ -937,7 +930,6 @@ void tab_switch() {
         }
         help("Sharper ground, sand and water textures seen at an angle, mostly at a distance.\n"
              "Costs some GPU time: if the frame rate drops, turn it off.");
-        if (aniso_env()) note("env.txt sets WWHD_ANISO: it is used at every start.");
     }
 
     heading("Frame rate counter (top left)");
@@ -950,10 +942,9 @@ void tab_switch() {
             hostui::post([i] { hostui::set(kKeyFpsCounter, std::to_string(i)); });
         }
     }
-    if (fps_counter_env()) note("env.txt sets WWHD_FPS: it is used at every start.");
 
     // the controller's motors follow the game's rumble requests (input_switch.cpp update_rumble; saved as
-    // "rumble" as on the desktop, WWHD_RUMBLE=0 starts with it off)
+    // "rumble" as on the desktop)
     heading("Rumble");
     {
         bool v;
@@ -963,7 +954,6 @@ void tab_switch() {
         }
         help("The Joy-Con or the Pro Controller vibrates when the game asks for it, as the Wii U\n"
              "controllers did. Off keeps the motors still.");
-        if (rumble::env_override()) note("env.txt sets WWHD_RUMBLE: it is used at every start.");
     }
 
     // gyro aiming with the controller's own motion sensors (input_switch.cpp feeds motion.h); the
@@ -978,7 +968,6 @@ void tab_switch() {
              "the Joy-Con, the Pro Controller or the console in handheld mode, as with the Wii U GamePad.\n"
              "The game's own Options > Gyro switch still applies, and the game ignores the motion while\n"
              "the right stick is pushed.");
-        if (motion::env_override()) note("WWHD_GYRO=%s overrides the saved source.", getenv("WWHD_GYRO"));
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Turn left/right by");
         for (int a = 0; a < motion::kAxisModeCount; a++) {
@@ -1060,18 +1049,17 @@ void tab_switch() {
     // (Debug: the GamePad view is not offered to players) which Wii U controller the Switch controller is: the game's own control mode must match it (with
     // the Pro Controller chosen here the GamePad lies on the table and sends nothing, system_stubs.cpp)
     {
-        const bool pro = input::pro_controller(), env = getenv("WWHD_PRO_CONTROLLER") != nullptr;
+        const bool pro = input::pro_controller();
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("The controller acts as");
         ImGui::SameLine();
-        if (radio("Wii U Pro Controller", pro, !env))
+        if (radio("Wii U Pro Controller", pro))
             hostui::post([] { hostui::set_pro_controller(true); hostui::set("proController", "1"); });
         ImGui::SameLine();
-        if (radio("Wii U GamePad", !pro, !env))
+        if (radio("Wii U GamePad", !pro))
             hostui::post([] { hostui::set_pro_controller(false); hostui::set("proController", "0"); });
         help("For testing (not offered to players). Pick the same controller as the game's own options:\n"
              "if they differ, the game reads a controller nobody holds and no button works.");
-        if (env) note("env.txt sets WWHD_PRO_CONTROLLER: it is used at every start.");
         // the GamePad screen (items, map), full size instead of the TV picture
         const bool view = gfxsw::gamepad_view();
         ImGui::AlignTextToFramePadding();

@@ -58,7 +58,7 @@ struct MenuVariable {
     const char* env;
     bool (*convert)(const std::string& value, Settings& out);
 };
-const MenuVariable kMenuVariables[] = {
+constexpr MenuVariable kMenuVariables[] = {
     {"WWHD_DEBUG_SERVER", [](const std::string& v, Settings& o) {  // (debug_switch.cpp: any value but 0; port 6543)
          o.push_back({switch_settings::kKeyDebugServer, !v.empty() && v != "0" ? "1" : "0"});
          return true;
@@ -129,7 +129,7 @@ const MenuVariable* menu_variable(const std::string& name) {
 
 }  // namespace
 
-const ModVariable kModVariables[6] = {
+constexpr ModVariable kModVariables[6] = {
     {"direct-camera", "WWHD_MOD_DIRECT_CAMERA"}, {"mouse-camera", "WWHD_MOD_MOUSE_CAMERA"},
     {"first-person", "WWHD_MOD_FIRST_PERSON"},   {"wall-climb", "WWHD_CLIMB"},
     {"quick-doors", "WWHD_MOD_QUICK_DOORS"},     {"fast-scenes", "WWHD_MOD_FAST_SCENES"},

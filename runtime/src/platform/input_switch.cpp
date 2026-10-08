@@ -1,6 +1,6 @@
 // Switch input: Joy-Cons / Pro Controller read as a Wii U Pro Controller (WPAD/KPAD, see
-// hle/padscore.cpp) so the game puts everything on the one TV screen; WWHD_PRO_CONTROLLER=0 in
-// env.txt makes them act as the Wii U GamePad instead. Buttons map by position, which matches the
+// hle/padscore.cpp) so the game puts everything on the one TV screen; the Switch tab's Debug section
+// (saved as proController) makes them act as the Wii U GamePad instead. Buttons map by position, which matches the
 // Wii U's labels. Text prompts go through the system software keyboard.
 #include <switch.h>
 
@@ -237,8 +237,6 @@ bool has_rumble() { return true; }
 void init() {
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     hidInitializeTouchScreen();  // the GamePad's touch screen while its picture is shown (gfxsw::gamepad_view)
-    // read here, not at static init: main() applies env.txt first
-    if (const char* e = getenv("WWHD_PRO_CONTROLLER"); e && *e) g_pro = strcmp(e, "0") != 0;
     LOG("[input] Switch controller acts as %s", g_pro.load() ? "Pro Controller" : "GamePad");
 }
 
