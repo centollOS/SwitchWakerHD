@@ -11,7 +11,7 @@ licenses). This check rejects, by name and by content:
     saves (cking*.sav, *.sav), anything under a game/ code/ content/ meta/ tree;
   - shader caches and head starts (shaders.bin, headstart.bin, template.bin, testcache.bin, *.metallib);
   - in every text file: a 32-hex-digit string (the shape of a Wii U key; SHA-256 sums are 64 digits
-    and git hashes 40, which do not match).
+    and git hashes 40, which do not match; PUBLIC_HEX lists known public constants of that shape).
 The Windows release's tools/python/ (the official embeddable Python) must hold exactly the files listed
 in tools/release/python-windows-files.json, each with its listed SHA-256.
 Exit status 1 lists every problem.
@@ -42,6 +42,8 @@ BAD_NAME = [
 TEXT_EXT = {".py", ".txt", ".md", ".json", ".sh", ".command", ".bat", ".ps1", ".h", ".hpp", ".c", ".cpp", ".inl",
             ".cfg", ".ini", ".xml", ".plist", ".toml", ".yml", ".yaml", ".rsp", ""}
 KEYLIKE = re.compile(rb"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
+# public constants that have the key shape: the Windows shell link CLSID (tools/installer/test_setup.py)
+PUBLIC_HEX = {b"0114020000000000c000000000000046"}
 # a function body as tools/recomp/recomp.py emits it (stubgen placeholders call ppc_unimplemented)
 GEN_CODE = re.compile(rb"void f_[0-9A-F]{8}\(Cpu\* __restrict c\) \{\n")
 
@@ -80,6 +82,8 @@ def check_entry(name, data, problems):
     ext = os.path.splitext(n)[1].lower()
     if ext in TEXT_EXT and b"\0" not in data[:8192]:
         for m in KEYLIKE.finditer(data):
+            if m.group().lower() in PUBLIC_HEX:
+                continue
             line = data.count(b"\n", 0, m.start()) + 1
             problems.append("%s:%d: 32-hex-digit string (key-like)" % (name, line))
     if GEN_CODE.search(data):
