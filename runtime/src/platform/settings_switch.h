@@ -60,6 +60,10 @@ constexpr const char* kKeyGamma = "switchGamma";
 constexpr const char* kKeyFpsCounter = "switchFpsCounter";
 constexpr const char* kKeyCaptureCombo = "switchCaptureCombo";
 constexpr const char* kKeyAniso = "switchAniso";
+// Debug: the network debug server (debug_switch.h) and the main thread's runtime-call sampler (threads.cpp),
+// both off by default and read at the next start, before anything else (main.cpp)
+constexpr const char* kKeyDebugServer = "switchDebugServer";
+constexpr const char* kKeyMainSampler = "switchMainSampler";
 // per mode: <key>.handheld / <key>.docked
 constexpr const char* kKeyResScale = "switchResScale";
 constexpr const char* kKeyDynamicRes = "switchDynamicRes";

@@ -211,7 +211,8 @@ if(WWHD_HAS_DEKO3D)
   # deko3d renderer and the libnx host
   file(GLOB DEKO3D_SOURCES CONFIGURE_DEPENDS runtime/src/gfx/deko/*.cpp)
   list(APPEND GFX_SOURCES ${DEKO3D_SOURCES} runtime/src/platform/input_switch.cpp runtime/src/platform/hostui_switch.cpp
-                          runtime/src/platform/settings_switch.cpp runtime/src/platform/debug_server.cpp
+                          runtime/src/platform/settings_switch.cpp runtime/src/platform/settings_ini.cpp
+                          runtime/src/platform/debug_server.cpp
                           runtime/src/platform/debug_switch.cpp)
 endif()
 if(WWHD_SDL_HOST)

@@ -47,6 +47,7 @@ namespace gfxvk { bool buffer_cache_enabled(); }  // gfx/vulkan/buffer_cache.h
 #include <switch.h>
 #include "../gfx/switch_renderer.h"
 #include "../platform/settings_switch.h"
+#include "../platform/debug_switch.h"
 #include "../mods/warps.h"
 #endif
 #include "../render_prof.h"
@@ -1028,12 +1029,33 @@ void tab_switch() {
     }
     {
         bool v;
-        if (check("Log the main thread's runtime calls", threads::main_sampler(), &v)) threads::set_main_sampler(v);
+        if (check("Log the main thread's runtime calls", threads::main_sampler(), &v)) {
+            threads::set_main_sampler(v);
+            hostui::post([v] { hostui::set(kKeyMainSampler, v ? "1" : "0"); });
+        }
         ImGui::SameLine(0, 30);
         if (check("Log the game threads' CPU use", threads::sched_stats(), &v)) threads::set_sched_stats(v);
         help("Performance diagnostics for the log, every 5 s: where the game's main thread spends its\n"
              "time in the runtime ([main] lines) and each game thread's share of its core ([sched] lines).\n"
-             "Not saved: off at the next start (env.txt WWHD_MAIN_SAMPLER=1 / WWHD_SCHED_STATS=2 still work).");
+             "The first is saved (it also starts with the game when on); the second is off at the next start.");
+    }
+    {
+        // the saved choice (read at start, debug_switch.cpp), not whether the server runs now
+        static int saved = -1;
+        if (saved < 0) {
+            std::string v;
+            saved = hostui::get(kKeyDebugServer, v) && v == "1" ? 1 : 0;
+        }
+        bool v;
+        if (check("Debug server (network)", saved == 1, &v)) {
+            saved = v ? 1 : 0;
+            hostui::post([v] { hostui::set(kKeyDebugServer, v ? "1" : "0"); });
+        }
+        help("Development only. From the next start, the game listens on port 6543 of the local network\n"
+             "for tools/switch/wwhd_debug.py (logs, files, screenshots, warps, restart), with NO password:\n"
+             "anyone on the same network can use it. Leave it off otherwise. See docs/debug-server.md.");
+        if (debug_switch::running()) note("Running now on port %d.", debug_switch::port());
+        if ((saved == 1) != debug_switch::running()) note("Applies at the next start.");
     }
     // (Debug: the GamePad view is not offered to players) which Wii U controller the Switch controller is: the game's own control mode must match it (with
     // the Pro Controller chosen here the GamePad lies on the table and sends nothing, system_stubs.cpp)

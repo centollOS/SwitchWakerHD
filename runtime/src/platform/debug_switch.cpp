@@ -19,8 +19,10 @@
 #include "../mods/mods.h"
 #include "../mods/warps.h"
 #include "../runtime.h"
+#include "../overlay/hostui.h"
 #include "debug_server.h"
 #include "host.h"
+#include "settings_switch.h"
 
 namespace render { uint64_t frame_count(); }
 
@@ -28,6 +30,8 @@ namespace debug_switch {
 namespace {
 std::atomic<bool> g_quit{false};
 int g_port = 0;
+bool g_running = false;
+constexpr int kPort = 6543;
 
 std::string ip_text() {
     in_addr a;
@@ -148,9 +152,9 @@ debugsrv::Reply quit(const debugsrv::Args&) {
 }  // namespace
 
 void start() {
-    const char* e = getenv("WWHD_DEBUG_SERVER");
-    if (!e || !*e || !strcmp(e, "0")) return;
-    g_port = atoi(e) > 1 ? atoi(e) : 6543;
+    std::string on;
+    if (!hostui::get(switch_settings::kKeyDebugServer, on) || on != "1") return;
+    g_port = kPort;
     debugsrv::add_command("info", "info                   build, frame, stage, heap, address", info);
     debugsrv::add_command("warps", "warps                  the warp destinations, numbered", warps);
     debugsrv::add_command("warp", "warp <n> | warp <stage> [room] [point]", warp);
@@ -162,11 +166,15 @@ void start() {
     c.root = host::config_dir();
     c.log = [](const char* line) { LOG("%s", line); };
     c.threadStart = [] { host::raise_thread_priority(); };
-    if (debugsrv::start(c))
-        LOG("[debug] server listening on %s:%d (WWHD_DEBUG_SERVER; client: tools/switch/wwhd_debug.py; local network "
-            "only, no password)", ip_text().c_str(), g_port);
+    g_running = debugsrv::start(c);
+    if (g_running)
+        LOG("[debug] server listening on %s:%d (Switch tab > Debug, settings.ini %s=1; client: "
+            "tools/switch/wwhd_debug.py; local network only, no password)", ip_text().c_str(), g_port,
+            switch_settings::kKeyDebugServer);
 }
 
 bool quit_requested() { return g_quit.load(std::memory_order_relaxed); }
+bool running() { return g_running; }
+int port() { return g_port; }
 
 }  // namespace debug_switch

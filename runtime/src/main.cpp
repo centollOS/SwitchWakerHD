@@ -22,6 +22,7 @@
 #include <thread>
 #ifdef __SWITCH__
 #include "platform/debug_switch.h"
+#include "platform/settings_ini.h"
 #include "platform/settings_switch.h"
 #include <sys/stat.h>
 #include <dirent.h>
@@ -244,6 +245,16 @@ static void start_session_logs(const struct tm& t, char* name, size_t size) {
 // the constructors, and this one runs first (priority 101: switch.ld sorts .init_array by priority).
 // main() reads the file again to log the settings and take the --options.
 __attribute__((constructor(101))) static void early_env_txt() {
+    // the menu's settings read at static initialisation: the main thread's sampler (threads.cpp)
+    if (FILE* s = fopen("sdmc:/switch/wwhd/settings.ini", "r")) {
+        std::string text;
+        char buf[4096];
+        for (size_t n; (n = fread(buf, 1, sizeof buf, s)) > 0;) text.append(buf, n);
+        fclose(s);
+        const settings_ini::File ini = settings_ini::parse(text);
+        if (auto it = ini.menu.find(switch_settings::kKeyMainSampler); it != ini.menu.end() && it->second == "1")
+            setenv("WWHD_MAIN_SAMPLER", "1", 1);
+    }
     FILE* f = fopen("sdmc:/switch/wwhd/env.txt", "r");
     if (!f) return;
     char line[512];
@@ -500,7 +511,7 @@ int main(int argc, char** argv) {
     start_session_logs(t, logName, sizeof logName);
     if (!freopen(logName, "w", stderr)) freopen("wwhd.log", "w", stderr);  // (logs/ not writable)
     setvbuf(stderr, nullptr, _IOLBF, 0);
-    // WWHD_DEBUG_SERVER (env.txt, read by early_env_txt): first, so its log text has the whole session
+    // the debug server (Switch tab > Debug, saved): first, so its log text has the whole session
     debug_switch::start();  // (platform/debug_switch.h)
     LOG("[session] %04d-%02d-%02d %02d:%02d:%02d (build %s %s); log %s (the newest 10 sessions are kept in logs/)",
         t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, __DATE__, __TIME__, logName);
