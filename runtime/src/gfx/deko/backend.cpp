@@ -1143,6 +1143,7 @@ void present() {
         slot = dkQueueAcquireImage(R.queue, g_swapchain);
     }
     const uint64_t t2 = now_ns();
+    if (rprof::enabled()) rprof::add_wait(rprof::kWaitAcquire, t2 - t1);
     if (capture) LOG("[dk] capture frame %llu: frame open (fence) %.2f ms, swapchain image %d after %.2f ms",
                      (unsigned long long)frame, double(t1 - t0) / 1e6, slot, double(t2 - t1) / 1e6);
     if (g_traceFrame) trace_event("present");

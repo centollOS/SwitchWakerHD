@@ -60,6 +60,15 @@ Plan: `rprof::mark` phases in `gfx/deko/draw.cpp`, `add_upload` in `memory.cpp` 
 report" button in the Switch tab writing `sdmc:/switch/wwhd/logs/perf_<time>.txt`. This also gives
 step 3 its numbers (unique bytes uploaded per frame).
 
+**Done 2026-10-09 (built, not run on the console yet):** phase marks in `gfx/deko/draw.cpp` `draw_impl`
+(shader, indices, targets, textures+uniforms, pass, descriptors, pipeline state, vertex, record),
+`add_upload` in `stream_upload` with `UploadKind` at the uniform-block, index and vertex call sites and
+`guest_read` in `stream_guest` (unique bytes), `add_wait` around the frame fence (`kWaitGpu`) and
+`dkQueueAcquireImage` (`kWaitAcquire`); Switch tab > Debug > "Save performance report" writes the header
+(renderer "deko3d") and `rprof::latest_report()` to `sdmc:/switch/wwhd/logs/perf_<date>_<time>.txt`. The
+profiler stays off by default (A/B switch "Render profiler (slower)"). Not wired: `shader_variant` (its
+groups are the Vulkan translator's).
+
 ### Step 3 — cross-frame buffer reuse (from v0.2.4's guest buffer cache) — only if step 2 says so
 
 Upstream keeps unchanged vertex/index/uniform data on the GPU, validated by write_watch page stamps

@@ -8,6 +8,7 @@
 // bindings and state that differ from what the command buffer already has (StateCache, reset by
 // forget_state), the vertex streams and the draw itself.
 #include "dk_draw.h"
+#include "render_prof.h"
 
 #include <algorithm>
 #include <array>
@@ -393,6 +394,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
                 g_res.uboMemoHits++;
             } else {
                 const uint64_t reused = R.perf.reusedBytes;
+                rprof::UploadKind kind(rprof::kUpUbo);
                 slice = stream_guest(addr, copy, DK_UNIFORM_BUF_ALIGNMENT, bound - copy);
                 g_res.uboReused += R.perf.reusedBytes != reused;
                 m = {addr, copy, bound, frame, R.streamGen, slice};
@@ -657,6 +659,7 @@ template <int Type> IndexList convert_typed(const uint8_t* src, uint32_t count, 
         list.count = uint32_t(out.size());
         list.format = DkIdxFormat_Uint16;
         if (out.empty()) return list;  // nothing to draw (no upload)
+        rprof::UploadKind kind(rprof::kUpIndex);
         list.slice = stream_upload(out.data(), uint32_t(out.size() * 2), 4);
         R.perf.indexBytes += out.size() * 2;
     } else {
@@ -665,6 +668,7 @@ template <int Type> IndexList convert_typed(const uint8_t* src, uint32_t count, 
         list.count = uint32_t(out.size());
         list.format = DkIdxFormat_Uint32;
         if (out.empty()) return list;
+        rprof::UploadKind kind(rprof::kUpIndex);
         list.slice = stream_upload(out.data(), uint32_t(out.size() * 4), 4);
         R.perf.indexBytes += out.size() * 4;
     }
@@ -1268,6 +1272,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }
     lap(R.perf.lookupNs);
 
+    rprof::mark(rprof::kShader);  // (render_prof.h: sampled draws only)
     // ---- indices
     const bool stripRestart = indexAddr && (prim == 3 || prim == 6) && (r[REGADDR::VGT_MULTI_PRIM_IB_RESET_EN] & 1);
     const uint32_t restartIndex = r[REGADDR::VGT_MULTI_PRIM_IB_RESET_INDX];
@@ -1312,6 +1317,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
                     __builtin_prefetch(s);
     }
 
+    rprof::mark(rprof::kIndices);
     // ---- render targets
     const auto& lcr = *reinterpret_cast<const LatteContextRegister*>(r);
     std::array<Surface*, 8> colors{};
@@ -1444,6 +1450,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         g_res.keptDepthOrMemory += (ps->fragmentWhy & 4) != 0;
     }
 
+    rprof::mark(rprof::kTargets);
     // ---- textures and uniform blocks (may upload and copy; nothing of the draw is bound yet)
     static StageBindings stages[2];
     g_gamepadDrawing = gamepadDraw;
@@ -1507,6 +1514,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     commit_descriptors();  // the descriptors this draw's textures were given
     lap.sub(g_res.descriptorNs);
 
+    rprof::mark(rprof::kTextures);
     // ---- GPU ordering (dk_sync.h): the barrier this draw's reads and writes need against earlier draws and
     // clears (with hazard tracking; the old path has one at every change of targets, below)
     sync_draw_check(colors, depth, g_drawDepthWrites, g_drawSamplesBoundDepth);
@@ -1570,6 +1578,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }
     sync_draw_mark(colors, depth, g_drawDepthWrites);
 
+    rprof::mark(rprof::kPass);
     // ---- shaders, textures, uniform blocks
     const DkShader* const fsh = depthOnly ? depthOnlyFs : &ps->dk;
     if (gs.vs != &vs->dk || gs.ps != fsh) {
@@ -1585,6 +1594,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         if (timed) g_res.bindNs += (now_ns() - bindStart) * kDrawTimeSample;
     }
 
+    rprof::mark(rprof::kDescriptors);
     // ---- viewport, scissor
     {
         static uint64_t vpGen = ~0ull, vpEpoch = 0;
@@ -1796,6 +1806,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }  // (fixed state)
     const uint64_t vertexStart = timed ? now_ns() : 0;
 
+    rprof::mark(rprof::kPipeline);
     // ---- vertex streams (guest bytes as stored; the GLSL decodes them). Vertex trimming: only the vertices
     // from the lowest one the draw reads are copied, and the draw's base vertex moves back by as many (a
     // model's parts share one vertex buffer and each draws its own range)
@@ -1827,6 +1838,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     for (int i = 0; i < groupCount; i++) {
         const Group& g = groups[i];
         const uint64_t skipBytes = g.instance ? 0 : uint64_t(trim) * g.stride;
+        rprof::UploadKind kind(rprof::kUpVertex);
         const StreamSlice slice =
             stream_guest(g.addr + uint32_t(skipBytes), uint32_t(std::max<uint64_t>(g.copied - skipBytes, 4)), 16);
         if (!slice) {
@@ -1860,6 +1872,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }
     lap(R.perf.stateNs);
 
+    rprof::mark(rprof::kVertex);
     // ---- draw
     if (g_shaderCodeLoaded) {  // shader code loaded mid-frame: the shader caches forget it (dk.h)
         g_shaderCodeLoaded = false;
@@ -1882,6 +1895,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     } else
         dkCmdBufDraw(R.cmd, mode, count, instances, baseVertex - trim, 0);
     lap(R.perf.submitNs);
+    rprof::mark(rprof::kRecord);
 
     auto tally = [&](Surface* s) {
         if (s->drawFrame != R.frame) {

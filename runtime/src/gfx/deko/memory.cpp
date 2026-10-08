@@ -3,6 +3,7 @@
 // the GPU is past the frame), the shader code block and the descriptor sets. Render thread only, except
 // memory_init (main thread, before the render thread starts).
 #include "dk.h"
+#include "render_prof.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -143,6 +144,11 @@ void frame_begin(uint64_t frame) {
     Slot& s = g_slots[g_slot];
     if (s.fenced) {
         Stage stage("deko3d: waiting for the GPU (frame fence)");
+        const uint64_t waitStart = rprof::enabled() ? rprof::now_ns() : 0;
+        struct WaitLap {  // the render thread blocked on the GPU (render_prof.h)
+            uint64_t t;
+            ~WaitLap() { if (t) rprof::add_wait(rprof::kWaitGpu, rprof::now_ns() - t); }
+        } lap{waitStart};
         for (int waited = 0;; waited++) {
             const DkResult r = dkFenceWait(&s.fence, 2'000'000'000ll);
             if (r == DkResult_Success) break;
@@ -213,6 +219,7 @@ StreamSlice stream_upload(const void* data, uint32_t size, uint32_t alignment, u
         if (zeroTail) memset(static_cast<uint8_t*>(a.cpu) + size, 0, zeroTail);
     }
     R.perf.streamBytes += size + zeroTail;
+    if (rprof::enabled()) rprof::add_upload(size + zeroTail);  // in the caller's rprof::UploadKind
     return {a.gpu, size + zeroTail};
 }
 
@@ -235,6 +242,7 @@ StreamSlice stream_guest(uint32_t addr, uint32_t size, uint32_t alignment, uint3
         R.perf.reusedBytes += size;
         return e->slice;
     }
+    rprof::guest_read(rprof::Upload(rprof::g_upload_kind), addr, size);  // unique guest bytes (sampled frames)
     const StreamSlice slice = stream_upload(mem::ptr(addr), size, alignment, zeroTail);
     if (slice) g_uploads.put({key, stamp, R.streamGen, size, slice});
     return slice;

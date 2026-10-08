@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -1009,6 +1010,50 @@ void tab_switch() {
     }
     help("Turn them off and on again in the same spot: the log marks each change with its frame.\n"
          "Not saved: they are on again at the next start.");
+    {
+        // the render profiler's latest report (render_prof.h; on with "Render profiler" above) to the SD card,
+        // with the build and settings header the desktop's "Copy performance report" puts on the clipboard
+        static std::string saved;
+        static double savedAt = -10;
+        if (ImGui::Button("Save performance report")) {
+            const std::string report = rprof::latest_report();
+            reporthdr::Info h;
+            h.version = build::version();
+            h.commit = build::commit();
+            h.os = reporthdr::os_description();
+            h.gpu = "Tegra X1";
+            h.renderer = "deko3d";
+            h.host = "Switch";
+            h.fps = interp::mode() == 2 ? "true 60 fps" : interp::mode() == 1 ? "60 fps interpolation" : "30 fps";
+            h.scale = hostui::res_scale();
+            if (const int g = motion::settings().source; g != motion::kOff) h.gyro = motion::source_id(g);
+            const std::string text = reporthdr::format(h) +
+                (report.empty() ? std::string("No report: turn on \"Render profiler (slower)\" above, play a few "
+                                              "seconds in the spot to measure, then save again.\n")
+                                : report);
+            const time_t now = time(nullptr);
+            struct tm t;
+            localtime_r(&now, &t);
+            char path[96];
+            snprintf(path, sizeof path, "logs/perf_%04d-%02d-%02d_%02d-%02d-%02d.txt", t.tm_year + 1900, t.tm_mon + 1,
+                     t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+            if (FILE* f = fopen(path, "w")) {
+                fwrite(text.data(), 1, text.size(), f);
+                fclose(f);
+                saved = std::string("sdmc:/switch/wwhd/") + path;
+                LOG("[perf] performance report saved to %s%s", saved.c_str(), report.empty() ? " (no report yet)" : "");
+            } else {
+                saved = "could not write logs/";
+            }
+            savedAt = ImGui::GetTime();
+        }
+        if (ImGui::GetTime() - savedAt < 4.0) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", saved.c_str());
+        }
+        help("Where the renderer spends its time over the last few seconds, as text for a bug report:\n"
+             "turn on \"Render profiler (slower)\", play in the spot, then save. File in sdmc:/switch/wwhd/logs/.");
+    }
     {
         bool v;
         if (check("Capture a frame with both sticks clicked", switch_settings::capture_combo(), &v))
