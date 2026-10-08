@@ -68,6 +68,25 @@ tools/switch/dksh_cache/build.sh build <shadercache_gl.bin> build/shadercache_dk
 touring every stage with a headless desktop build that was removed with the OpenGL renderer (in git
 history at `207349b`; [docs/switch-port.md](docs/switch-port.md), "Harvesting the shader cache").
 
+### Debug server (developers)
+
+For development there is a debug server: from the computer, over the local network, you can
+deploy a new build and restart the game without touching the console, follow the log as it is
+written, take screenshots, press buttons and warp. It is **off by default**: players never need it
+and the game opens no network port unless `env.txt` holds the line `WWHD_DEBUG_SERVER=1`. It has no
+password, so use it only on your own network.
+
+```sh
+echo <console ip> > build/switch_host.txt                  # once; the log prints the address
+tools/switch/build.sh && tools/switch/wwhd_debug.py deploy  # upload, check, restart (~10 s)
+tools/switch/wwhd_debug.py log                               # the log, live
+tools/switch/wwhd_debug.py shot                              # PNG of the next frame
+tools/switch/wwhd_debug.py press A                           # also hold, release, stick, warp
+```
+
+`deploy` restarts the game, so start it from the HOME-screen icon (forwarder). Every command and the
+protocol: [docs/debug-server.md](docs/debug-server.md).
+
 ## Install on the Switch
 
 ### What you need
@@ -213,6 +232,15 @@ open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Round 46") and
 [docs/deko3d-plan.md](docs/deko3d-plan.md).
 
 ## Changelog
+
+### 2026-10-08: debug server for development
+
+- **Network debug server** for developers, **off by default** (`WWHD_DEBUG_SERVER=1` in `env.txt`
+  turns it on). `tools/switch/wwhd_debug.py` deploys a new build and restarts the game, and it
+  streams the log, fetches the session logs and Atmosphère's crash reports, takes screenshots,
+  injects button presses and sticks, and warps. That removes the reboot to hekate for every test.
+  Tested on the console: a 39 MiB build is uploaded, checked and running again in under 10 s.
+  [docs/debug-server.md](docs/debug-server.md).
 
 ### 2026-10-08: save states work, rumble, upstream v0.2.8 (round 46)
 
