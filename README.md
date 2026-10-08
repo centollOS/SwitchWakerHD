@@ -169,18 +169,63 @@ and copy the files.
 - **Frame captures** for bug reports: turn on *Capture a frame with both sticks clicked* in the
   Switch tab's Debug section; **L3 + R3** then writes the frame and its render targets as PNG files
   to `captures/<frame>/` (they contain game imagery: keep them to yourself).
+- **Test options** in the Switch tab's Debug section, switched while the game runs and not saved:
+  on/off switches for each draw-path optimization (A/B tests), performance diagnostics for the log
+  (the main thread's runtime calls, every game thread's CPU use), and *Frame rate (test)*: 30 fps
+  (the default), 60 fps interpolation or the experimental true 60. The 60 fps modes need far more
+  CPU and GPU than the console has to spare; they are there to try out, not to play with.
 - `WWHD_*` options in `env.txt`: [docs/switch-port.md](docs/switch-port.md) and the comments next to
   their code (grep for `WWHD_` in `runtime/src`).
 
 ## Status
 
 Boots and plays on a Switch in handheld mode, with sound, controllers, saves, save states, the
-options menu and mods. Played by hand mostly on the opening island and in a few other areas
-reached with the Warp tab. In handheld at stock CPU and the
-460.8 MHz GPU profile it holds about 30 fps (median 29.9 on the test route), with dips in the
-busiest views. Docked it renders at 1080p (picture profile per mode in the Switch tab: handheld 1x,
-docked 1.5x, with dynamic resolution), tested on a TV at a median of 29.9 fps. Known issues and
-open work: [docs/deko3d-plan.md](docs/deko3d-plan.md) and [docs/switch-port.md](docs/switch-port.md).
+options menu and mods. Played by hand mostly on the opening island, Dragon Roost and the sea
+around it, and areas reached with the Warp tab. Handheld at the console's stock clocks (CPU 1020
+MHz, GPU 307 MHz): about 30 fps on the opening island (~29 in its heaviest view), 26-29 fps
+sailing near Dragon Roost and the volcano island, where the game's own code on its main thread is
+the limit; at a CPU of 1122 MHz those places hold 30. The menu's default CPU clock is 1224 MHz.
+Shader and texture stutters on first use are much reduced, and shaders seen in an earlier session
+no longer stutter. Docked it renders at 1080p (picture profile per mode in the Switch tab: handheld
+1x, docked 1.5x, with dynamic resolution), tested on a TV at a median of 29.9 fps. Known issues and
+open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Retrospective (rounds 39-45)") and
+[docs/deko3d-plan.md](docs/deko3d-plan.md).
+
+## Changelog
+
+### 2026-10-08: performance rounds 39-45 (since "Player install kit")
+
+Measured on a Switch at stock clocks (CPU 1020 MHz, GPU 307 MHz); details, numbers and the
+retrospective in [docs/switch-port.md](docs/switch-port.md).
+
+**Faster**
+- The opening island's heaviest view went from 22 to about 29 fps: the renderer's per-draw work on
+  its render thread dropped by about a fifth (unchanged state is skipped, render-target and texture
+  lookups are cached, shader data is laid out for the cache, half as many GX2 commands are
+  processed, GPU work is submitted in larger batches, and a profiler that only the desktop reports
+  no longer runs on the Switch).
+- Shadow-map draws whose pixel shader has no effect skip it.
+
+**Fewer stutters**
+- Shader variants seen in an earlier session are rebuilt from a new cache file,
+  `shadercache_dk_translations.bin`, instead of being translated again: effects and arrivals that
+  stuttered every session now only do so the first time.
+- New textures are unpacked about three times faster (about 1.7 ms instead of 5.5 ms each).
+
+**Menu** (Switch tab, Debug)
+- On/off switches for each renderer optimization, for A/B tests while the game runs.
+- Performance diagnostics for the log: the main thread's runtime calls and every game thread's CPU
+  use.
+- *Frame rate (test)*: 60 fps interpolation and the experimental true 60, to try out (not saved;
+  the game starts at 30 fps as before).
+
+**Logs**
+- One log per session in `logs/` (`wwhd_<date>_<time>.log`, the newest is the current run); the
+  10 most recent are kept, and there is no `wwhd.log` next to the `.nro` any more.
+
+**Known**
+- Sailing near Dragon Roost and the volcano island stays at 26-29 fps at stock clocks: there the
+  game's own code on its main thread is the limit, not the renderer (30 fps at a CPU of 1122 MHz).
 
 ## License
 

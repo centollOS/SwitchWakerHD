@@ -1,20 +1,21 @@
 # Switch port — current state
 
-Status as of 2026-10-07 (runtime round 30, branch `main`, merged with upstream devel v0.2.2).
+Status as of 2026-10-08 (runtime round 45, branch `main`, synced with upstream v0.2.3-v0.2.6 / devel 4da1e34). The
+latest rounds and what they taught: "Round 45" and "Retrospective (rounds 39-45)" near the end.
 
 ## Summary
 
 | Area | State |
 |---|---|
 | Target | Horizon OS homebrew (`.nro`, launched from hbmenu in title mode via Atmosphère) |
-| Toolchain | devkitPro devkitA64 (GCC 15.2, libnx) in the `devkitpro/devkita64` container; Mesa 20.1 rebuilt with a persistent shader cache (`tools/switch/mesa`) |
+| Toolchain | devkitPro devkitA64 (GCC 15.2, libnx, deko3d, uam) in the `devkitpro/devkita64` container |
 | Graphics | **deko3d** (`runtime/src/gfx/deko`, docs/deko3d-plan.md): the decompiler's GLSL compiled with uam, from an offline cache `shadercache_dksh.bin`. The OpenGL renderer on Mesa nouveau (EGL + glad) described in the history below was removed after `main` 207349b; it, the patched Mesa build (`tools/switch/mesa`) and the headless desktop build are in git history |
 | Build | Works: `tools/switch/build.sh` → `build/switch-dk/wwhd.nro` (~39 MB) |
 | Boot on hardware | Works: picture, sound and controller input (as a Wii U Pro Controller, so everything is on one screen) |
-| Performance on hardware | Stock CPU 1020 MHz. Handheld with the official GPU profile (GPU 460.8 MHz, memory 1600 MHz, round 29): median 29.5 fps, 72% of reports at 28 fps or more in views over 2,000 draws; dynamic resolution 0.75-1.00 (1.00 in 38% of reports). At the system's 307 MHz the same play was 26.9 fps |
-| Settings | In-game menu (press Minus; held half a second until round 36): GPU profile, CPU clock (1020-1785 MHz in the system table's steps, default 1224), picture adjustments, frame-rate counter, save states, mods, language. Saved in `settings.ini`; `env.txt` values win at start |
+| Performance on hardware | Stock clocks (CPU 1020, GPU 307, memory 1331 MHz), round 45: Outset ~30 fps (~29 in its heaviest view, 7,300 draws; limit: the render thread); sailing near Dragon Roost and the volcano 26-29 fps (limit: the game's main thread, ~90% game code); at CPU 1122 MHz 30 fps there. Shader variants of earlier sessions skip the decompiler (translation records); new textures ~1.7 ms each |
+| Settings | In-game menu (Minus held half a second): GPU profile, CPU clock (1020-1785 MHz in the system table's steps, default 1224), picture adjustments, frame-rate counter, controller, gyro, save states, warp, mods, language. Saved in `settings.ini`; `env.txt` values win at start. Switch tab, Debug: A/B switches, log diagnostics and the frame-rate test (not saved; rule: test options always go in the menu) |
 | On-screen FPS counter | Top-left corner; menu or `WWHD_FPS=0/1/2` |
-| Desktop reproduction | Removed with the OpenGL renderer (the headless Linux build used it); in git history (`main` 207349b) |
+| Desktop reproduction | deko3d does not run on the desktop; shared code (GX2 command stream, game code) is A/B-tested and profiled on the desktop Vulkan build (round 45). The headless OpenGL build is in git history (`main` 207349b) |
 
 ## History of decisions
 
