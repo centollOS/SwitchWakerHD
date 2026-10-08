@@ -43,6 +43,7 @@ struct Backend {
     void (*invalidate)(uint32_t flags, uint32_t addr, uint32_t size);
     void (*guest_flush)();         // GX2Flush
     void (*wait_idle)();           // GX2DrawDone
+    void (*gpu_idle)();            // save states: wait until the GPU itself is idle (null: wait_idle does it)
     void (*write_back)();          // GX2DrawDone: render results the CPU reads (linear targets) to guest memory
     void (*ss_reset)();            // a save state was loaded: forget surfaces and shader memos
     // any thread
@@ -124,6 +125,7 @@ inline void set_tv_format(uint32_t f, bool tv) { g_backend->set_tv_format(f, tv)
 inline void invalidate(uint32_t flags, uint32_t addr, uint32_t size) { g_backend->invalidate(flags, addr, size); }
 inline void guest_flush() { g_backend->guest_flush(); }
 inline void wait_idle() { g_backend->wait_idle(); }
+inline void gpu_idle() { if (g_backend->gpu_idle) g_backend->gpu_idle(); }
 inline void write_back() { if (g_backend->write_back) g_backend->write_back(); }
 inline void ss_reset() { g_backend->ss_reset(); }
 uint64_t frame_count();  // 0 before the renderer started

@@ -1558,6 +1558,14 @@ const Backend& deko3d_backend() {
                 gfxdk::submit_commands("GX2DrawDone");
             });
         };
+        // save states (gx2_ss_drain): GX2DrawDone above only submitted; the state must not be read or replaced while
+        // the GPU still runs commands that read guest data
+        b.gpu_idle = [] {
+            guarded("gpu idle", [] {
+                gfxdk::submit_commands("save state");
+                dkQueueWaitIdle(R.queue);
+            });
+        };
         b.ss_reset = [] {
             gfxdk::ss_reset_surfaces();
             gfxdk::reset_shader_memoization();

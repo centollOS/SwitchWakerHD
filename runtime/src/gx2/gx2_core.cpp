@@ -777,6 +777,7 @@ static void execute_op(Op op, const uint32* p, uint32 n) {
         // (save states) always waits for the idle GPU.
         if (lazy_draw_done() && !(n && p[0])) render::guest_flush();
         else render::wait_idle();
+        if (n && p[0]) render::gpu_idle();  // deko3d's wait_idle only submits (upstream-0.2.6-plan step 4)
         // except what the CPU reads back: linear render targets (the Picto Box picture, issue #53)
         render::write_back();
         break;

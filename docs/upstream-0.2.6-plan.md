@@ -78,7 +78,9 @@ Behind `WWHD_DK_BUFFER_CACHE`, off until measured.
 ### Step 4 — small fixes found while comparing
 
 - deko3d `wait_idle` ignores the save-state "full GPU wait" request (`gx2_ss_drain`, payload 1): wait
-  on the queue there.
+  on the queue there. **Done 2026-10-09:** backend hook `gpu_idle` (optional; deko3d: submit, then
+  `dkQueueWaitIdle`), called by `OP_DRAW_DONE` when its payload asks for the full wait. Built; save states
+  not re-tested on the console yet.
 
 ## Hardware checks for this sync (NRO from dev 0921610)
 
