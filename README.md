@@ -234,10 +234,16 @@ there, holding a steady 30. CPU and GPU run at their stock clocks by default.
 Shader and texture stutters on first use are much reduced, and shaders seen in an earlier session
 no longer stutter. Docked it renders at 1080p (picture profile per mode in the Switch tab: handheld
 1x, docked 1.5x, with dynamic resolution), tested on a TV at a median of 29.9 fps. Known issues and
-open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Round 46") and
+open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Round 47") and
 [docs/deko3d-plan.md](docs/deko3d-plan.md).
 
 ## Changelog
+
+### 2026-10-08: post office letters (round 47)
+
+- Fixed: in the Rito post office's letter-sorting game the letters were black, so it could not be
+  played. Models without normals (like the letters) are now lit the way the Wii U's GPU does it.
+  Confirmed on the console.
 
 ### 2026-10-08: settings.ini replaces env.txt
 

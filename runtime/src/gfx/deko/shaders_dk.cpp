@@ -99,6 +99,7 @@ Shader* g_lastPs = nullptr;
 ShaderStats g_total;                   // since start-up (shader_stats_take and the log take differences)
 uint64_t g_codeBytes = 0;              // code memory used by game shaders
 uint64_t g_failuresLogged = 0;
+uint64_t g_strictMulLogged = 0;  // vertex shaders translated with strict multiplication (translate)
 // WWHD_DK_SHADER_BUDGET: DKSH loads per frame (default 64; they are cheap: a copy into code memory); 0 = no
 // budget: a draw waits for the worker to compile what it needs (no skipped draws, the frame stalls; for
 // comparisons).
@@ -999,10 +1000,12 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     if (!address || !size || size > 0x100000 || uint64_t(address) + size > 0x100000000ull) return nullptr;
     uint64_t base = program_hash(address, size, frame) ^ (vertex ? 0x1111 : 0x2222);
     // the key holds the texture state of only the units the program samples (known after its first
-    // translation), as gfx/gl
+    // translation), as gfx/gl. Declared inputs no fetch attribute fills turn the decompiler's strict multiplication
+    // on: they are in the key (the keys and translation records of the other shaders stay as they were).
+    const uint32_t unfetched = vertex ? LatteDecompiler_UnfetchedVertexInputs(regs, fetch) : 0;
     auto keyFor = [&](uint32_t units) {
         return (coreHash ^ (base * 0xFF51AFD7ED558CCDull + 0x2545F4914F6CDD1Dull)) ^ (vertex ? fsKey * 31 : 0) ^
-               texture_state_hash(regs, vertex, units) * 0xC2B2AE3D27D4EB4Full;
+               texture_state_hash(regs, vertex, units) * 0xC2B2AE3D27D4EB4Full ^ uint64_t(unfetched) * 0x9E3779B97F4A7C15ull;
     };
     auto known = textureUnits.find(base);
     uint64_t key = keyFor(known != textureUnits.end() ? known->second : 0);
@@ -1040,6 +1043,10 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
                 size, (unsigned long long)base, error);
         return shader;
     }
+    if (output.strictMulInputs && g_strictMulLogged++ < kLoggedFailures)
+        LOG("[dk] vertex shader at %08X (program %016llx) uses input slots %X that its fetch shader does not fill: "
+            "translated with the GPU's multiplication (0 * x = 0), as the Rito post office's letters need",
+            address, (unsigned long long)base, output.strictMulInputs);
     // the units this program samples depend only on its code: from now on its key includes those alone
     const uint32_t units = uint32_t(output.textureUnitMask.to_ulong());
     textureUnits[base] = units;

@@ -191,6 +191,7 @@ struct LatteDecompilerShaderContext
 	LatteDecompilerShader* shader;
 	LatteConst::ShaderType shaderType;
 	const class LatteDecompilerOptions* options;
+	bool strictMul; // WWHD: options->strictMul, or on for a vertex shader with an unfilled input (_LatteDecompiler_Process)
 	uint32* contextRegisters; // deprecated
 	struct LatteContextRegister* contextRegistersNew;
 	uint64 shaderBaseHash;

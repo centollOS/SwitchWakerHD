@@ -220,6 +220,8 @@ size_t gather_linkage(const uint32_t* regs, bool vertex, const LatteFetchShader*
             std::memcpy(out + count, regs + mmSQ_VTX_SEMANTIC_0, 32 * sizeof(uint32_t));
             count += 32;
         }
+        // declared inputs no attribute fills turn the decompiler's strict multiplication on (only those keys change)
+        if (const uint32_t unfetched = LatteDecompiler_UnfetchedVertexInputs(regs, fetch)) out[count++] = unfetched;
         const uint32_t vte = regs[REGADDR::PA_CL_VTE_CNTL];
         const uint32_t primitive = regs[REGADDR::VGT_PRIMITIVE_TYPE] & 0x3F;
         flags |= (primitive == 1 ? 2u : 0u) | (regs[mmVGT_STRMOUT_EN] ? 4u : 0u) |
@@ -509,6 +511,9 @@ bool decompile(Shader& shader, const uint32_t* regs, bool vertex, LatteFetchShad
     shader.descriptorRanks = make_descriptor_rank_plan(shader.mapping, *shader.dec);
     shader.uniforms = output.uniformOffsetsVK;
     shader.glsl = shader.dec->strBuf_shaderSource->c_str();
+    if (output.strictMulInputs && packReplacement)  // (not the verify mode's second translation)
+        fprintf(stderr, "[vulkan] vertex shader %08X uses input slots %X that its fetch shader does not fill: "
+                "translated with the GPU's multiplication (0 * x = 0)\n", address, output.strictMulInputs);
     if (options.areaSampledTextures && ::gfx::area_sample::rewrite(shader.glsl, options.areaSampledTextures, false) <= 0)
         fprintf(stderr, "[vulkan] pixel shader %08X: area-sampled taps not applied\n", address);
     if (vertex) {

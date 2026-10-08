@@ -1088,7 +1088,7 @@ static void _emitALUOP2InstructionCode(LatteDecompilerShaderContext* shaderConte
 			{
 				useDefaultMul = true;
 			}
-			if (shaderContext->options->strictMul && useDefaultMul == false)
+			if (shaderContext->strictMul && useDefaultMul == false)
 			{
 				src->add("mul_nonIEEE(");
 				_emitOperandInputCode(shaderContext, aluInstruction, 0, LATTE_DECOMPILER_DTYPE_FLOAT);
@@ -1625,7 +1625,7 @@ static void _emitALUOP3InstructionCode(LatteDecompilerShaderContext* shaderConte
 		if (aluInstruction->opcode == ALU_OP3_INST_MULADD_IEEE)
 			useDefaultMul = true;
 
-		if (shaderContext->options->strictMul && useDefaultMul == false)
+		if (shaderContext->strictMul && useDefaultMul == false)
 		{
 			src->add("mul_nonIEEE(");
 			_emitOperandInputCode(shaderContext, aluInstruction, 0, LATTE_DECOMPILER_DTYPE_FLOAT);
@@ -3730,7 +3730,7 @@ void LatteDecompiler_emitHelperFunctions(LatteDecompilerShaderContext* shaderCon
 	"}\r\n");
 
 	// mul non-ieee way (0*NaN/INF => 0.0)
-	if (shaderContext->options->strictMul)
+	if (shaderContext->strictMul)
 	{
 		// things we tried:
 		//fCStr_shaderSource->add("float mul_nonIEEE(float a, float b){ return mix(a*b,0.0,a==0.0||b==0.0); }" STR_LINEBREAK);

@@ -161,7 +161,7 @@ HLE(gx2, GX2SetVertexShader) {
         if (n) set_regs(mmSPI_VS_OUT_ID_0, &tmp[mmSPI_VS_OUT_ID_0], n);
     }
     if (nsem) {
-        set_reg(mmSQ_VTX_SEMANTIC_CLEAR, 0xFFFFFFFF);
+        set_reg(mmSQ_VTX_SEMANTIC_CLEAR, tmp[mmSQ_VTX_SEMANTIC_CLEAR]);  // (the slots past nsem: gx2_shader_regs.cpp)
         set_regs(mmSQ_VTX_SEMANTIC_0, &tmp[mmSQ_VTX_SEMANTIC_0], nsem);
     }
 }

@@ -261,6 +261,7 @@ struct LatteDecompilerOptions
 	bool usesGeometryShader{ false };
 	// floating point math
 	bool strictMul{}; // if true, 0*anything=0 rule is emulated
+	bool strictMulUnfetchedInputs{true}; // WWHD: strictMul for a vertex shader that uses an input its fetch shader does not fill (LatteDecompiler_UnfetchedVertexInputs)
 	// Vulkan-specific
 	bool useTFViaSSBO{ false };
 	struct
@@ -273,6 +274,7 @@ struct LatteDecompilerOutput_t
 {
 	LatteDecompilerShader* shader;
 	LatteConst::ShaderType shaderType;
+	uint32 strictMulInputs{}; // WWHD: vertex shader input slots (bit n: SQ_VTX_SEMANTIC_n) it uses unfilled, which turned strictMul on
 
 	// texture info
 	std::bitset<LATTE_NUM_MAX_TEX_UNITS> textureUnitMask;
@@ -291,6 +293,11 @@ struct LatteDecompilerOutput_t
 };
 
 struct LatteDecompilerSubroutineInfo;
+
+// WWHD: the vertex shader input slots (bit n: SQ_VTX_SEMANTIC_n, register n + 1) that the semantic table declares
+// (the slots SQ_VTX_SEMANTIC_CLEAR does not clear, as GX2SetVertexShader writes it) and no attribute of the fetch
+// shader fills. Shader keys that the decompiler's strictMul choice depends on add it when it is not 0.
+uint32 LatteDecompiler_UnfetchedVertexInputs(const uint32* contextRegisters, const struct LatteFetchShader* fetchShader);
 
 void LatteDecompiler_DecompileVertexShader(uint64 shaderBaseHash, uint32* contextRegisters, uint8* programData, uint32 programSize, struct LatteFetchShader* fetchShader, LatteDecompilerOptions& options, LatteDecompilerOutput_t* output);
 void LatteDecompiler_DecompileGeometryShader(uint64 shaderBaseHash, uint32* contextRegisters, uint8* programData, uint32 programSize, uint8* gsCopyProgramData, uint32 gsCopyProgramSize, uint32 vsRingParameterCount, LatteDecompilerOptions& options, LatteDecompilerOutput_t* output);

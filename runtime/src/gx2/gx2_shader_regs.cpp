@@ -56,7 +56,10 @@ void bind_vertex_shader_regs(uint32* regs, uint32 vs) {
     }
     uint32 nsem = std::min<uint32>(ld32(vs + VS_SEMANTIC_COUNT), 32);
     if (nsem > 0) {
-        regs[mmSQ_VTX_SEMANTIC_CLEAR] = 0xFFFFFFFF;
+        // GX2 writes 0xFFFFFFFF and then the shader's nsem slots: the slots past nsem are what stays cleared. This
+        // writes those, the same table for the GPU, and the decompiler knows which slots the shader declares
+        // (LatteDecompiler_UnfetchedVertexInputs; the other slots keep earlier shaders' semantics here)
+        regs[mmSQ_VTX_SEMANTIC_CLEAR] = nsem < 32 ? 0xFFFFFFFFu << nsem : 0;
         for (uint32 i = 0; i < nsem; i++) regs[mmSQ_VTX_SEMANTIC_0 + i] = ld32(vs + VS_SEMANTIC + 4 * i);
     }
 }

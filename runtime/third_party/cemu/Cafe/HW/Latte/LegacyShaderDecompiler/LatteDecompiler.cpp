@@ -1069,6 +1069,26 @@ void _LatteDecompiler_Process(LatteDecompilerShaderContext* shaderContext, uint8
 		LatteDecompiler_analyze(shaderContext, shaderContext->shader);
 	if (shaderContext->shader->hasError == false)
 		LatteDecompiler_analyzeDataTypes(shaderContext);
+	// WWHD: a vertex shader register that no fetch attribute fills keeps what it held (here: 0). The game relies on
+	// the GPU's legacy multiplication (0 * inf = 0, as Cemu's accurate multiplication) there: the Rito post office's
+	// letters have no normals, so their lighting normalizes (0,0,0) and turned NaN (black) with IEEE multiplication.
+	if (shaderContext->shader->hasError == false && shaderContext->shaderType == LatteConst::ShaderType::Vertex &&
+		!shaderContext->strictMul && shaderContext->options->strictMulUnfetchedInputs && shaderContext->fetchShader)
+	{
+		uint32 used = 0;
+		const uint32 unfetched = LatteDecompiler_UnfetchedVertexInputs(shaderContext->contextRegisters, shaderContext->fetchShader);
+		for (uint32 slot = 0; slot < 32; slot++)
+		{
+			const uint32 gpr = slot + 1;
+			if ((unfetched >> slot & 1) && (shaderContext->analyzer.usesRelativeGPRRead || (shaderContext->analyzer.gprUseMask[gpr / 8] & (1 << (gpr % 8)))))
+				used |= 1u << slot;
+		}
+		if (used)
+		{
+			shaderContext->strictMul = true;
+			shaderContext->output->strictMulInputs = used;
+		}
+	}
 	// check for usage errors
 	if ( shaderContext->analyzer.uniformRegisterAccessTracker.HasAccess() && shaderContext->analyzer.uniformBufferAccessTracker->HasAccess() )
 	{
@@ -1095,11 +1115,33 @@ void _LatteDecompiler_Process(LatteDecompilerShaderContext* shaderContext, uint8
 	_LatteDecompiler_GenerateDataForFastAccess(shaderContext->shader);
 }
 
+uint32 LatteDecompiler_UnfetchedVertexInputs(const uint32* contextRegisters, const LatteFetchShader* fetchShader)
+{
+	const uint32 cleared = contextRegisters[mmSQ_VTX_SEMANTIC_CLEAR];
+	if (!fetchShader || cleared == 0) // (no table written: nothing is known about the inputs)
+		return 0;
+	uint32 unfilled = ~cleared;
+	for (uint32 slot = 0; slot < 32; slot++)
+		if ((unfilled >> slot & 1) && (contextRegisters[mmSQ_VTX_SEMANTIC_0 + slot] & 0xFF) == 0xFF)
+			unfilled &= ~(1u << slot);
+	// an attribute goes to the first slot holding its semantic (LatteDecompiler_emitAttributeImport)
+	for (const auto& group : fetchShader->bufferGroups)
+		for (sint32 i = 0; i < group.attribCount; i++)
+			for (uint32 slot = 0; slot < 32; slot++)
+				if (contextRegisters[mmSQ_VTX_SEMANTIC_0 + slot] == group.attrib[i].semanticId)
+				{
+					unfilled &= ~(1u << slot);
+					break;
+				}
+	return unfilled;
+}
+
 void LatteDecompiler_InitContext(LatteDecompilerShaderContext& dCtx, const LatteDecompilerOptions& options, LatteDecompilerOutput_t* output, LatteConst::ShaderType shaderType, uint64 shaderBaseHash, uint32* contextRegisters)
 {
 	dCtx.output = output;
 	dCtx.shaderType = shaderType;
 	dCtx.options = &options;
+	dCtx.strictMul = options.strictMul;
 	dCtx.shaderBaseHash = shaderBaseHash;
 	dCtx.contextRegisters = contextRegisters;
 	dCtx.contextRegistersNew = (LatteContextRegister*)contextRegisters;

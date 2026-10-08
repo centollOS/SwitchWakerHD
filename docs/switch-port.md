@@ -1,7 +1,7 @@
 # Switch port — current state
 
-Status as of 2026-10-08 (runtime round 46, branch `main`, synced with upstream v0.2.8 / main 853d7b1). The
-latest rounds and what they taught: "Round 46", "Round 45" and "Retrospective (rounds 39-45)" near the end.
+Status as of 2026-10-08 (runtime round 47, branch `main`, synced with upstream v0.2.8 / main 853d7b1). The
+latest rounds and what they taught: "Round 47", "Round 46", "Round 45" and "Retrospective (rounds 39-45)" near the end.
 
 ## Summary
 
@@ -1425,6 +1425,51 @@ Gyro: Switch tab > Gyro aiming on, Pro Controller mode, aim the bow. Rumble: get
 (`WWHD_LOG_RUMBLE=1` logs the game's requests and `[rumble] host: device N motor L`); open the menu while it
 vibrates (it stops). Anisotropic filtering: on and off in the same spot (Outset's heaviest view, sea), fps each. Frame rate at sea and in Outset vs round 45 (the
 loop barrier).
+
+### Round 47: black letters in the Rito post office's sorting game (hardware-tested)
+
+Report (2026-10-08, the user; log `logs-switch/postman/wwhd_2026-10-08_16-45-50.log`, portable state
+`logs-switch/postman/slot1.wwstate` saved in front of Koboli's desk, stage `Atorizk`): in the letter-sorting game
+the letter at the bottom of the screen is a black rectangle, so the game cannot be played. The log shows no error.
+
+**Desktop reproduction** (Vulkan, `build/vulkan-v028`): the same black letter. Route: `tools/savegame/wwstate.py
+to-sav slot1.wwstate` as the save, the state in `states/`, `WWHD_PORTABLE_LOAD_AT=800:1` (`WWHD_PORTABLE_LOAD` applied
+during the boot's first scene change and left the TV black), `WWHD_PRO_CONTROLLER=1`, `WWHD_PRESS` A every 40
+frames 300-660 (title, file select) and every 30 frames 1000-1450 (talk, accept, instructions); the game runs from
+frame ~1480. The letter was found with a temporary per-draw trace in the Vulkan renderer (not kept): three draws of
+24 indices with the same shaders, one per `SwMail_c` letter, each with its own 512x256 BC1 texture.
+
+| Finding | Change | Off switch |
+|---|---|---|
+| The texture is fine (the pixel shader's output replaced by its texture sample shows the seal); the lighting factor is 0. The vertex shader reads the **normal from R2, which no fetch attribute fills** (the letter model has positions, UVs and one more attribute, no normals). R2 stays 0, the shader normalizes it (`1/sqrt(0)` = inf, `0 * inf` = NaN) and its colour output is NaN: black. The GPU's `MUL`/`MULADD` are the legacy (DX9) ones, **0 * anything = 0**, so on a Wii U the letter just gets the ambient colour. Cemu emulates this rule with its default "accurate multiplication" (`strictMul`, `mul_nonIEEE`); this port never turned it on. With it on, the letter shows its seal, lit like the room. | A vertex shader that uses an input slot of its semantic table that no attribute of its fetch shader fills is translated with strict multiplication (`LatteDecompiler_UnfetchedVertexInputs`, decompiler option `strictMulUnfetchedInputs`, on by default; the emitters read a per-shader flag). All renderers: deko3d, Vulkan, Metal's MSL emitter. Only those shaders change: 30 vertex shaders in a title → Dragon Roost → post office session, 15 on the Outset route. Their keys get one more word (deko3d: a term of `translate`'s key; Vulkan: a linkage word), so every other shader keeps its key, GLSL, DKSH and translation record. Log: `[dk] vertex shader at ... uses input slots N that its fetch shader does not fill` (first 32). | none |
+| The register file kept earlier shaders' semantics in the slots past a vertex shader's semantic count: GX2 writes `SQ_VTX_SEMANTIC_CLEAR` = 0xFFFFFFFF, which the runtime only stored, so the slots a shader declares were unknown. | `GX2SetVertexShader` writes `SQ_VTX_SEMANTIC_CLEAR` as the mask of the slots past its count (on a GPU the same table: those slots cleared, the shader's slots written) and the decompiler takes the slots it does not clear as the declared ones. Rebinding a shader writes the same value, so no extra shader-state bumps. | none |
+
+Strict multiplication for every shader (Cemu's default) was not chosen: every shader's GLSL would change, so the
+console would compile all of them again (the offline and local DKSH caches are keyed by GLSL hash), and every
+multiply of the pixel shaders would get a compare and a select on a GPU that is already the limit.
+
+**Desktop test** (Vulkan, `build/vulkan-v028`, baseline = the same tree without the change):
+- Post office, frame 1500: the letter shows its seal and is lit like the room; the only pixels
+  that differ from the baseline are the letter's.
+- Outset route (Outset save, A every 40 frames 300-1100; frames 250, 1400, 1700): 15 shaders translated with strict
+  multiplication; the pictures equal the baseline apart from the animation (Link, palms, clouds, waves). Expected:
+  the rule only changes products with a zero and an infinity or NaN.
+- Unit tests: 30 of 33 pass; `mod_content_fs_off/on` and `language_sources` are not run because their targets do
+  not link (undefined `g_main_sampler_on`, since rounds 39-45; unrelated).
+- deko3d: built, `build/switch-v028/wwhd.nro` (from `build/gen-v028`), ELF `build/switch-dk/wwhd_r47.elf`; it cannot
+  run on the desktop. The 30 strict vertex shaders of the post office session (29 distinct GLSL, dumped from the
+  Vulkan run) go through the console's path offline: `tools/switch/dksh_cache` (`glsl_to_deko` + uam) compiles 29
+  of 29, ~17 ms each, so `mul_nonIEEE` is accepted. Metal: not built here; its key holds the raw semantic table, not the semantic count.
+
+**Hardware result (2026-10-08, the user):** fixed on the console: the letters show their symbols and the sorting
+game can be played. (No log of that session was taken: the console's file server was off afterwards.)
+
+**Hardware test:** copy `build/switch-v028/wwhd.nro`, Minus > Saves > Load slot 1 (the state from the report),
+talk to Koboli, accept: the letter at the bottom shows a symbol; sort ten letters to finish the game. The first
+time the letter can appear a moment late (its vertex shader is new: compiled once on the console, then kept in the
+local DKSH cache). Log: `runtime: round 47` in the boot line and, when the game starts,
+`[dk] vertex shader at ... uses input slots 2 that its fetch shader does not fill`. Other places that draw
+such models log the line too; they should look the same as before.
 
 ### Retrospective (rounds 39-45, 2026-10-08)
 
