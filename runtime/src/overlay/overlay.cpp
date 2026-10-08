@@ -828,12 +828,12 @@ void tab_switch() {
         if (i % 4) ImGui::SameLine();
         if (radio(cpu_clock_label(i), cc == i)) hostui::post([i] { set_cpu_clock(i); });
     }
-    help("The game is perfectly playable at the stock 1020 MHz. 1224 MHz (Recommended, the default) is a mild\n"
+    help("The game is perfectly playable at the stock 1020 MHz (the default). 1224 MHz (Recommended) is a mild\n"
          "overclock for extra stability: it holds a steady 30 fps in the busiest scenes (sailing near Dragon Roost, the volcano).\n"
          "The steps of the console's CPU table, set for the whole game as sys-clk does (handheld and docked).\n"
          "1785 MHz is the clock games get during loading screens. Higher drains the battery faster and the console runs warmer.");
     if (cpu_clock_env()) note("env.txt sets WWHD_CPU_CLOCK: it is used at every start.");
-    if (cc > kCpuDefault || gp == kGpu614)
+    if (cc > kCpuRecommended || gp == kGpu614)
         warn("Overclock: more heat and battery use. If sys-clk has its own profile for this game, the two fight over the clocks.");
     // the clocks, asked at most once a second (clkrst)
     static double clocks_t = -10;

@@ -17,9 +17,11 @@ std::string gpu_profile_status();
 void set_gpu_profile(int p);      // applies it now and saves it (host loop thread)
 
 // CPU clock: the steps of the system's CPU table from stock 1020 MHz to 1785 MHz (the CPU boost clock games
-// get during loading), set through clkrst in handheld and docked, as sys-clk does. Default 1224 MHz.
+// get during loading), set through clkrst in handheld and docked, as sys-clk does. Default: the stock 1020 MHz
+// (2026-10-08); 1224 MHz is marked Recommended (it steadies the busiest scenes at 30 fps).
 enum CpuClock : int { kCpu1020, kCpu1122, kCpu1224, kCpu1326, kCpu1428, kCpu1581, kCpu1683, kCpu1785, kCpuClocks };
-constexpr int kCpuDefault = kCpu1224;
+constexpr int kCpuDefault = kCpu1020;
+constexpr int kCpuRecommended = kCpu1224;
 const char* cpu_clock_label(int c);
 int cpu_clock();
 bool cpu_clock_env();             // WWHD_CPU_CLOCK in env.txt chose it at start

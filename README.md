@@ -163,9 +163,9 @@ and copy the files.
   Language / About.
 - **Performance**: the game is **perfectly playable at the console's stock clocks**. An overclock is
   optional and only makes the frame rate steadier in a few particularly busy scenes; the only one
-  worth using is a mild **CPU at about 1.2 GHz (1224 MHz, marked *Recommended* in the Switch tab,
-  and the default)**, which stays well clear of any heat or battery issues. The GPU stays at the
-  console's **stock** clocks by default (307 MHz in handheld). The menu still
+  worth using is a mild **CPU at about 1.2 GHz (1224 MHz, marked *Recommended* in the Switch tab)**,
+  which stays well clear of any heat or battery issues. CPU and GPU run at the console's **stock**
+  clocks by default (CPU 1020 MHz, GPU 307 MHz in handheld). The menu still
   offers every step of the CPU table from the stock 1020 up to 1785 MHz, Nintendo's other handheld
   GPU profiles (384 and 460.8 MHz) and a 614 MHz GPU overclock; higher clocks drain the battery
   faster and warm the console, and if sys-clk has its own profile for this title, the two fight
@@ -188,8 +188,8 @@ options menu and mods. Played by hand mostly on the opening island, Dragon Roost
 around it, and areas reached with the Warp tab. **It is perfectly playable at the console's stock
 clocks** (CPU 1020 MHz, GPU 307 MHz): 30 fps on the opening island, and a smooth 26-29 fps in the
 busiest scenes, such as sailing near Dragon Roost and the volcano island. The recommended CPU
-setting of about 1.2 GHz (1224 MHz, the default, *Recommended* in the Switch tab) is only for extra
-stability there, holding a steady 30; the GPU stays at its stock clocks.
+setting of about 1.2 GHz (1224 MHz, *Recommended* in the Switch tab) is only for extra stability
+there, holding a steady 30. CPU and GPU run at their stock clocks by default.
 Shader and texture stutters on first use are much reduced, and shaders seen in an earlier session
 no longer stutter. Docked it renders at 1080p (picture profile per mode in the Switch tab: handheld
 1x, docked 1.5x, with dynamic resolution), tested on a TV at a median of 29.9 fps. Known issues and
@@ -231,8 +231,9 @@ retrospective in [docs/switch-port.md](docs/switch-port.md).
 **Clocks**
 - The GPU now runs at the console's stock clocks by default (was Nintendo's 460.8 MHz profile with
   memory 1600 MHz); a choice saved in the menu is kept.
-- The CPU's 1224 MHz step is marked *Recommended* (it stays the default). The game is perfectly
-  playable at stock clocks; this mild overclock only steadies the frame rate in a few busy scenes.
+- The CPU now runs at the stock 1020 MHz by default (was 1224 MHz); a choice saved in the menu is
+  kept. The 1224 MHz step is marked *Recommended*: the game is perfectly playable at stock clocks,
+  and this mild overclock only steadies the frame rate in a few busy scenes.
 
 **Notes**
 - At the fully stock CPU (1020 MHz) the busiest scenes, such as sailing near Dragon Roost and the

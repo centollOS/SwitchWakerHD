@@ -12,10 +12,10 @@
 // configuration found at start is restored at exit.
 // WWHD_GPU_PROFILE (env.txt) = default | 384 | 460 | 1600 (460 with memory 1600) | 614 | 0x<configuration id>;
 // without it, the menu's saved choice; without that, the system's own (stock: GPU 307 MHz, memory 1331 MHz;
-// 2026-10-08, the owner: stock GPU by default, the only overclock needed is the CPU at 1224 MHz).
+// 2026-10-08, the owner: stock GPU and CPU by default; the CPU's 1224 MHz step is marked Recommended).
 //
 // Beyond apm (a teammate's sys-clk setup, asked for 2026-10-07): the CPU clock (the system table's steps
-// 1020-1785 MHz, default 1224; WWHD_CPU_CLOCK=<MHz>, or the menu) and GPU 614.4 MHz in handheld (profile 614) are set through clkrst, as sys-clk does, on top of
+// 1020-1785 MHz, default the stock 1020, 1224 Recommended; WWHD_CPU_CLOCK=<MHz>, or the menu) and GPU 614.4 MHz in handheld (profile 614) are set through clkrst, as sys-clk does, on top of
 // apm's configuration (memory 1600 comes from 0x92220007). The system sets its own clocks again on
 // dock / undock, sleep and apm changes, so tick() sets them again (once a second, when they differ);
 // at exit the CPU goes back to 1020 MHz and the handheld configuration found at start is restored.
@@ -49,7 +49,7 @@ const char* const kLabels[kGpuProfiles] = {"Stock (GPU 307 MHz, default)", "GPU 
                                            "GPU 460 MHz + memory 1600 MHz",
                                            "GPU 614 MHz + memory 1600 MHz (overclock, as sys-clk)"};
 const char* const kCpuIds[kCpuClocks] = {"1020", "1122", "1224", "1326", "1428", "1581", "1683", "1785"};
-const char* const kCpuLabels[kCpuClocks] = {"1020 MHz (stock)", "1122 MHz", "1224 MHz (Recommended)", "1326 MHz",
+const char* const kCpuLabels[kCpuClocks] = {"1020 MHz (stock, default)", "1122 MHz", "1224 MHz (Recommended)", "1326 MHz",
                                             "1428 MHz", "1581 MHz", "1683 MHz", "1785 MHz (loading-screen boost)"};
 constexpr u32 kCpuHz[kCpuClocks] = {1020000000, 1122000000, 1224000000, 1326000000,
                                     1428000000, 1581000000, 1683000000, 1785000000};
@@ -326,7 +326,7 @@ void apply_at_start() {
         LOG("[switch] gpu profile %s (%s)", id.c_str(), g_profile_env ? "env.txt" : "settings");
         if (p != kGpuDefault) apply(id.c_str(), chain);
     }
-    // CPU clock: env.txt (WWHD_CPU_CLOCK=<MHz of the table>), else the saved choice, else 1224 MHz
+    // CPU clock: env.txt (WWHD_CPU_CLOCK=<MHz of the table>), else the saved choice, else the stock 1020 MHz
     {
         std::string c;
         if (const char* e = getenv("WWHD_CPU_CLOCK"); e && *e) {
