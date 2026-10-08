@@ -70,6 +70,12 @@ struct ShaderCode {
 
 namespace {
 constexpr char kGlCachePath[] = "shadercache_gl.bin";             // sdmc:/switch/wwhd (the working directory)
+// (round 45) every translation's result for the draw path, so later sessions skip the decompiler (translate)
+constexpr char kTransPath[] = "shadercache_dk_translations.bin";
+constexpr char kTransMagic[4] = {'W', 'D', 'T', '1'};
+// bump when the shader keys (gather_state, texture_state_hash, translate's keyFor), the decompiler's output or the
+// record layout change: a file of another version is started again
+constexpr uint32_t kTransVersion = 1;
 constexpr char kOfflinePath[] = "shadercache_dksh.bin";
 constexpr char kLocalPath[] = "shadercache_dksh_local.bin";
 constexpr uint8_t kGlCacheMagic[4] = {'W', 'G', 'S', '1'};
@@ -234,7 +240,7 @@ struct CacheFile {
     std::vector<uint8_t> pending;  // under writerMutex
     uint64_t written = 0;
 };
-CacheFile glFile{kGlCachePath}, localFile{kLocalPath};
+CacheFile glFile{kGlCachePath}, localFile{kLocalPath}, transFile{kTransPath};
 std::mutex writerMutex;
 std::condition_variable writerCv;
 bool writerStarted = false;
@@ -256,12 +262,13 @@ void cache_writer() {
     host::set_thread_name("dk shader cache writer");
     std::unique_lock<std::mutex> lk(writerMutex);
     for (;;) {
-        writerCv.wait(lk, [] { return !glFile.pending.empty() || !localFile.pending.empty(); });
+        writerCv.wait(lk, [] { return !glFile.pending.empty() || !localFile.pending.empty() || !transFile.pending.empty(); });
         lk.unlock();
         std::this_thread::sleep_for(std::chrono::seconds(1));  // the rest of a burst goes in the same write
         lk.lock();
         write_pending(glFile, lk);
         write_pending(localFile, lk);
+        write_pending(transFile, lk);
     }
 }
 
@@ -271,7 +278,7 @@ void cache_write(CacheFile& file, const void* data, size_t size) {
     bool first;
     {
         std::lock_guard<std::mutex> lk(writerMutex);
-        first = glFile.pending.empty() && localFile.pending.empty();
+        first = glFile.pending.empty() && localFile.pending.empty() && transFile.pending.empty();
         file.pending.insert(file.pending.end(), bytes, bytes + size);
     }
     if (first) writerCv.notify_one();
@@ -340,6 +347,90 @@ void cache_gl_translation(const Shader* sh, uint64_t base, uint32_t units, const
     memcpy(record.data() + 1, &size, 4);
     record.insert(record.end(), w.b.begin(), w.b.end());
     cache_write(glFile, record.data(), record.size());
+}
+
+// ---- translation records (round 45, WWHD_DK_TRANSLATION_CACHE=0 turns them off): a new shader variant costs
+// ~0.3 ms on the render thread for the decompiler, and new effects or places bring 30-150 of them in a frame or
+// two (the stutters of explosions and arrivals). A variant translated in an earlier session is rebuilt from its
+// record instead (its DKSH is already in code memory by its GLSL hash): what the draw path reads of the decompiler's
+// output, the Vulkan resource mapping and ufBlock layout, the uniform block sizes and the pixel-shader flags.
+const bool g_transCache = [] {
+    const char* e = getenv("WWHD_DK_TRANSLATION_CACHE");
+    return !(e && *e == '0');
+}();
+std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> storedTrans;  // key -> payload (offset, size) in storedBlob
+std::vector<uint8_t> storedBlob;
+std::unordered_set<uint64_t> transWritten;  // keys written this session (or stored)
+uint64_t g_storedHits = 0, g_storedMisses = 0;
+static_assert(std::is_trivially_copyable_v<LatteDecompilerOutputUniformOffsets>);
+
+void cache_dk_translation(const Shader* sh, uint64_t base, uint32_t units) {
+    if (!g_transCache || !transFile.f || !sh->dec || !transWritten.insert(sh->key).second) return;
+    const LatteDecompilerShader* d = sh->dec;
+    ByteWriter w;
+    w.put<uint8_t>(sh->vertex);
+    w.put(sh->key);
+    w.put(base);
+    w.put(units);
+    w.put(sh->glslHash);
+    w.put<uint8_t>(sh->fragmentWhy);
+    w.put<uint32_t>(d->pixelColorOutputMask);
+    w.put<uint8_t>(d->textureUnitListCount);
+    for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++) w.put<uint8_t>(d->textureUnitList[t]);
+    for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++) w.put<uint16_t>(d->textureUnitSamplerAssignment[t]);
+    for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++) w.put<uint8_t>(d->textureUsesDepthCompare[t]);
+    w.put(sh->mapping);
+    w.put(sh->uniforms);
+    for (uint32_t b : sh->uboBytes) w.put(b);
+    w.put<uint32_t>(uint32_t(d->list_remappedUniformEntries_register.size()));
+    for (auto& e : d->list_remappedUniformEntries_register) {
+        w.put<uint32_t>(e.indexOffset);
+        w.put<uint32_t>(e.mappedIndexOffset);
+    }
+    w.put<uint32_t>(uint32_t(d->list_remappedUniformEntries_bufferGroups.size()));
+    for (auto& g : d->list_remappedUniformEntries_bufferGroups) {
+        w.put<uint16_t>(g.bufferId);
+        w.put<uint16_t>(g.kcacheBankIdOffset);
+        w.put<uint32_t>(uint32_t(g.entries.size()));
+        for (auto& e : g.entries) {
+            w.put<uint16_t>(e.indexOffset);
+            w.put<uint16_t>(e.mappedIndexOffset);
+        }
+    }
+    const uint32_t size = uint32_t(w.b.size());
+    std::vector<uint8_t> record(4);
+    memcpy(record.data(), &size, 4);
+    record.insert(record.end(), w.b.begin(), w.b.end());
+    cache_write(transFile, record.data(), record.size());
+}
+
+struct ByteReader {
+    const uint8_t* p;
+    const uint8_t* end;
+    bool ok = true;
+    template <class T> T get() {
+        T v{};
+        if (size_t(end - p) < sizeof v) {
+            ok = false;
+            return v;
+        }
+        memcpy(&v, p, sizeof v);
+        p += sizeof v;
+        return v;
+    }
+};
+
+// the hot copies of the decompiler's texture lists (dk_shaders.h)
+void fill_texture_lists(Shader* shader) {
+    shader->texCount = 0;
+    for (int i = 0; i < shader->dec->textureUnitListCount && i < LATTE_NUM_MAX_TEX_UNITS; i++) {
+        const uint32_t unit = shader->dec->textureUnitList[i];
+        if (unit >= LATTE_NUM_MAX_TEX_UNITS) continue;
+        shader->texUnit[shader->texCount++] = uint8_t(unit);
+        const uint32_t smp = shader->dec->textureUnitSamplerAssignment[unit];
+        shader->texSampler[unit] = smp < 18 ? uint8_t(smp) : 0xFF;
+        if (shader->dec->textureUsesDepthCompare[unit]) shader->texCompare |= 1u << unit;
+    }
 }
 
 // a DKSH record of this session for shadercache_dksh_local.bin (dksh empty: it failed here)
@@ -546,6 +637,10 @@ void set_bindings(Shader* sh, const ShaderCode& code) {
         const int vk = sh->mapping.textureUnitToBindingPoint[t];
         if (vk >= 0 && vk < kMaxVkBinding) sh->textureSlot[t] = b.sampler[vk];
     }
+    sh->ufBlockSlot = int8_t(b.ufBlockSlot >= 0 && b.ufBlockSlot < kMaxUniformBuffers ? b.ufBlockSlot : -1);
+    sh->uboCount = 0;
+    for (int i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; i++)
+        if (sh->uboSlot[i] >= 0 && sh->uboSlot[i] < kMaxUniformBuffers) sh->uboList[sh->uboCount++] = uint8_t(i);
     // the decompiler's Vulkan mapping and the bindings uam saw must agree (a mismatch would bind the wrong data)
     std::string why;
     if (b.ufBlockVkBinding != sh->mapping.uniformVarsBufferBindingPoint)
@@ -762,15 +857,22 @@ void log_total() {
         ready = results.size();
     }
     const ShaderStats d = stats_since(last);
-    if (!d.translations && !d.compiled && !d.failed && !d.skippedDraws && !queued && !ready) return;
+    static uint64_t lastStoredHits = 0, lastStoredMisses = 0;
+    if (!d.translations && !d.compiled && !d.failed && !d.skippedDraws && !queued && !ready &&
+        g_storedHits == lastStoredHits)
+        return;
     LOG("[dk] shaders: queue %zu (%zu asked by draws, %zu done waiting for a frame), %.1f compiles/s, %.0f ms per compile, "
         "%llu failures (%llu since start-up); %llu translations: cache hits %llu offline / %llu local / %llu this "
-        "session; %llu draws skipped for a pending shader; shader code %llu KiB",
+        "session; %llu draws skipped for a pending shader; shader code %llu KiB; %llu variants from translation "
+        "records (%llu records without their DKSH)",
         queued, foreground, ready, double(d.compiled) / secs,
         d.compiled + d.failed ? double(d.compileNs) / 1e6 / double(d.compiled + d.failed) : 0.0,
         (unsigned long long)d.failed, (unsigned long long)g_total.failed, (unsigned long long)d.translations,
         (unsigned long long)d.offlineHits, (unsigned long long)d.localHits, (unsigned long long)d.memoryHits,
-        (unsigned long long)d.skippedDraws, (unsigned long long)(g_codeBytes >> 10));
+        (unsigned long long)d.skippedDraws, (unsigned long long)(g_codeBytes >> 10),
+        (unsigned long long)(g_storedHits - lastStoredHits), (unsigned long long)(g_storedMisses - lastStoredMisses));
+    lastStoredHits = g_storedHits;
+    lastStoredMisses = g_storedMisses;
 }
 }  // namespace
 
@@ -824,6 +926,72 @@ uint64_t shader_combo_state_hash(const uint32_t* regs, uint32_t primitive) {
     return hash_words4(state.data(), count, 0x3333);
 }
 
+namespace {
+// a shader rebuilt from its translation record (round 45): null when the record does not fit or its DKSH is not
+// in code memory (then the decompiler runs as before)
+Shader* shader_from_record(uint64_t key, bool vertex, std::pair<uint32_t, uint32_t> at) {
+    ByteReader r{storedBlob.data() + at.first, storedBlob.data() + at.first + at.second};
+    const bool recVertex = r.get<uint8_t>() != 0;
+    const uint64_t recKey = r.get<uint64_t>();
+    r.get<uint64_t>();  // base
+    r.get<uint32_t>();  // units
+    const uint64_t glslHash = r.get<uint64_t>();
+    if (!r.ok || recVertex != vertex || recKey != key) return nullptr;
+    const auto cit = codes.find(glslHash);
+    if (cit == codes.end() || cit->second.state != ShaderCode::Ready) {
+        g_storedMisses++;
+        return nullptr;
+    }
+    auto owned = std::make_unique<Shader>();
+    Shader* shader = owned.get();
+    shader->fragmentWhy = r.get<uint8_t>();
+    auto dec = std::make_unique<LatteDecompilerShader>(vertex ? LatteConst::ShaderType::Vertex : LatteConst::ShaderType::Pixel);
+    dec->pixelColorOutputMask = r.get<uint32_t>();
+    dec->textureUnitListCount = r.get<uint8_t>();
+    for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++) dec->textureUnitList[t] = r.get<uint8_t>();
+    for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++) dec->textureUnitSamplerAssignment[t] = r.get<uint16_t>();
+    for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++) dec->textureUsesDepthCompare[t] = r.get<uint8_t>() != 0;
+    shader->mapping = r.get<LatteDecompilerShaderResourceMapping>();
+    shader->uniforms = r.get<LatteDecompilerOutputUniformOffsets>();
+    for (uint32_t& b : shader->uboBytes) b = r.get<uint32_t>();
+    const uint32_t nRegs = r.get<uint32_t>();
+    for (uint32_t i = 0; i < nRegs && r.ok && i < 4096; i++) {
+        LatteFastAccessRemappedUniformEntry_register_t e;
+        e.indexOffset = r.get<uint32_t>();
+        e.mappedIndexOffset = r.get<uint32_t>();
+        dec->list_remappedUniformEntries_register.push_back(e);
+    }
+    const uint32_t nGroups = r.get<uint32_t>();
+    for (uint32_t g = 0; g < nGroups && r.ok && g < 64; g++) {
+        const uint16_t bufferId = r.get<uint16_t>(), bank = r.get<uint16_t>();
+        dec->list_remappedUniformEntries_bufferGroups.emplace_back(bufferId, bank);
+        const uint32_t n = r.get<uint32_t>();
+        for (uint32_t i = 0; i < n && r.ok && i < 4096; i++) {
+            LatteFastAccessRemappedUniformEntry_buffer_t e;
+            e.indexOffset = r.get<uint16_t>();
+            e.mappedIndexOffset = r.get<uint16_t>();
+            dec->list_remappedUniformEntries_bufferGroups.back().entries.push_back(e);
+        }
+    }
+    if (!r.ok || r.p != r.end) return nullptr;  // (a record of another layout: the decompiler runs)
+    shader->key = key;
+    shader->vertex = vertex;
+    shader->glslHash = glslHash;
+    shader->dec = dec.release();
+    fill_texture_lists(shader);
+    const auto& u = shader->uniforms;
+    shader->scaleUniforms = u.offset_fragCoordScale >= 0;
+    for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++) shader->scaleUniforms |= u.offset_texScale[t] >= 0;
+    shader->fragmentEffects = vertex || shader->fragmentWhy != 0;
+    shader->code = code_for(shader, std::string());  // (the Ready code: counted as a cache hit)
+    refresh(shader);
+    shaders.emplace(key, std::move(owned));
+    (vertex ? g_lastVs : g_lastPs) = shader;
+    g_storedHits++;
+    return shader;
+}
+}  // namespace
+
 Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, uint64_t fsKey, uint64_t frame,
                   uint64_t coreHash) {
     uint32_t start = vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS;
@@ -851,6 +1019,9 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         return sh;
     }
     ScopedTime timer{R.perf.shaderNs};
+    if (g_transCache)  // (round 45) a variant of an earlier session: rebuilt from its record, no decompiler
+        if (auto it = storedTrans.find(key); it != storedTrans.end())
+            if (Shader* sh = shader_from_record(key, vertex, it->second)) return sh;
     R.perf.shaders++;
     g_total.translations++;
     auto owned = std::make_unique<Shader>();
@@ -880,6 +1051,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         key = shader->key = unitsKey;
     }
     shader->dec = FinishDecompiledShader(output);
+    fill_texture_lists(shader);  // (the hot copies, dk_shaders.h)
     shader->mapping = output.resourceMappingVK;
     shader->uniforms = output.uniformOffsetsVK;
     std::string glsl = shader->dec->strBuf_shaderSource->c_str();
@@ -890,10 +1062,24 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         if (shader->mapping.uniformBuffersBindingPoint[i] >= 0) shader->uboBytes[i] = declared_block_bytes(glsl, vertex, i);
     const auto& u = shader->uniforms;
     shader->scaleUniforms = u.offset_fragCoordScale >= 0;
+    if (!vertex) {
+        auto count = [&](const char* w) {
+            size_t n = 0;
+            for (size_t at = glsl.find(w); at != std::string::npos; at = glsl.find(w, at + 1)) n++;
+            return n;
+        };
+        // the decompiler's alpha test: "if( ((...).a > uf_alphaTestRef) == false) discard;" (or a bare discard
+        // for NEVER); KILL instructions give other discards
+        const size_t discards = count("discard"), alphaTests = count("uf_alphaTestRef) == false) discard");
+        const bool depthOrMemory = count("gl_FragDepth") || count("imageStore") || count("imageAtomic") || count("atomic");
+        shader->fragmentWhy = uint8_t((alphaTests ? 1 : 0) | (discards > alphaTests ? 2 : 0) | (depthOrMemory ? 4 : 0));
+        shader->fragmentEffects = shader->fragmentWhy != 0;
+    }
     for (int t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++) shader->scaleUniforms |= u.offset_texScale[t] >= 0;
     // shadercache_gl.bin as gfx/gl writes it
     cache_gl_source(shader->glslHash, vertex, glsl);
     cache_gl_translation(shader, base, units, output.resourceMappingGL, uint32_t(output.uniformOffsetsGL.count_uniformRegister));
+    cache_dk_translation(shader, base, units);
     shader->code = code_for(shader, std::move(glsl));
     refresh(shader);
     if (g_waitForWorker && shader->pending()) {
@@ -1045,6 +1231,51 @@ void shaders_init(void (*progress)(size_t done, size_t total)) {
         kCodeSize >> 20);
     if (badLoads) LOG("[dk] shader caches: %zu DKSH DID NOT LOAD (see the lines above)", badLoads);
 
+    // translation records (round 45): a variant of an earlier session skips the decompiler (shader_from_record);
+    // each record also gives its program's texture units, which the keys are made with
+    if (g_transCache) {
+        std::vector<uint8_t> t = read_file(kTransPath, nullptr, 0, 0);
+        uint32_t version = 0;
+        if (t.size() >= 8) memcpy(&version, t.data() + 4, 4);
+        const bool good = t.size() >= 8 && !memcmp(t.data(), kTransMagic, 4) && version == kTransVersion;
+        size_t at = good ? 8 : 0;
+        while (good && at + 4 <= t.size()) {
+            uint32_t size;
+            memcpy(&size, t.data() + at, 4);
+            if (size < 1 + 8 + 8 + 4 + 8 || at + 4 + size > t.size()) break;
+            const uint8_t* payload = t.data() + at + 4;
+            uint64_t key, base;
+            uint32_t units;
+            memcpy(&key, payload + 1, 8);
+            memcpy(&base, payload + 9, 8);
+            memcpy(&units, payload + 17, 4);
+            storedTrans[key] = {uint32_t(at + 4), size};
+            transWritten.insert(key);
+            textureUnits[base] = units;
+            at += 4 + size;
+        }
+        if (!good || at < t.size()) {  // another version, a new file or a cut record: written again (valid part kept)
+            if (FILE* f = fopen(kTransPath, "wb")) {
+                if (good) fwrite(t.data(), 1, at, f);
+                else {
+                    fwrite(kTransMagic, 1, 4, f);
+                    fwrite(&kTransVersion, 1, 4, f);
+                }
+                fclose(f);
+            }
+            if (!good) {
+                storedTrans.clear();
+                transWritten.clear();
+            }
+        }
+        storedBlob = std::move(t);
+        transFile.f = fopen(kTransPath, "ab");
+        LOG("[dk] %s: %zu translation records (version %u%s); variants seen before skip the decompiler "
+            "(WWHD_DK_TRANSLATION_CACHE=0 off)", kTransPath, storedTrans.size(), kTransVersion,
+            good ? "" : ", started again");
+    } else
+        LOG("[dk] translation records: off (WWHD_DK_TRANSLATION_CACHE=0)");
+
     // shadercache_gl.bin (gfx/gl load_shader_cache's scan): its sources and translations are not written again;
     // its sources without DKSH are compiled in the background
     std::vector<uint8_t> data = read_file(kGlCachePath, nullptr, 0, 0);
@@ -1104,7 +1335,7 @@ void shaders_init(void (*progress)(size_t done, size_t total)) {
     LOG("[dk] %s: %zu sources, %zu translations; %zu sources without DKSH queued for the compiler (background)",
         kGlCachePath, glSources.size(), glTranslations.size(), background);
     std::vector<uint8_t>().swap(data);
-    if (!writerStarted && (glFile.f || localFile.f)) {
+    if (!writerStarted && (glFile.f || localFile.f || transFile.f)) {
         writerStarted = true;
         host::start_thread(cache_writer, 128 << 10);
     }
@@ -1127,6 +1358,7 @@ void save_shader_cache() {
     std::unique_lock<std::mutex> lk(writerMutex);
     write_pending(glFile, lk);
     write_pending(localFile, lk);
+    write_pending(transFile, lk);
     LOG("[dk] shader caches saved: %llu bytes to %s, %llu to %s this session", (unsigned long long)glFile.written,
         kGlCachePath, (unsigned long long)localFile.written, kLocalPath);
 }
@@ -1216,7 +1448,7 @@ namespace {
 UniformPackStats g_ufStats;
 
 UniformCache* uniform_cache(bool vertex, Shader& sh) {
-    if (sh.ufCache) return sh.ufCache.get();
+    if (sh.uf) return sh.uf;
     auto c = std::make_shared<UniformCache>();
     const auto& offsets = sh.uniforms;
     c->size = uint32_t(std::max(offsets.offset_endOfBlock, 16) + 15) & ~15u;
@@ -1250,6 +1482,7 @@ UniformCache* uniform_cache(bool vertex, Shader& sh) {
     for (int unit = 0; unit < LATTE_NUM_MAX_TEX_UNITS; ++unit)
         if (fits(offsets.offset_texScale[unit], 8)) c->texScales.push_back({uint32_t(offsets.offset_texScale[unit]), uint32_t(unit)});
     sh.ufCache = c;
+    sh.uf = c.get();
     return c.get();
 }
 }  // namespace
@@ -1392,6 +1625,22 @@ StreamSlice pack_uniforms_cached(int mode, bool vertex, Shader& sh, const uint32
     }
     if (changed) clear_dirty();
     return c.gpu ? out : StreamSlice{};
+}
+
+void prefetch_shader(const Shader* sh) {
+    __builtin_prefetch(sh);
+    __builtin_prefetch(reinterpret_cast<const char*>(sh) + 64);
+}
+void prefetch_shader_caches(const Shader* sh) {
+    if (const UniformCache* c = sh->uf) {
+        __builtin_prefetch(c->ops.data());
+        __builtin_prefetch(c->data.data());
+        if (c->data.size() > 64) __builtin_prefetch(c->data.data() + 64);
+    }
+    if (sh->vtx) {
+        __builtin_prefetch(sh->vtx);
+        __builtin_prefetch(reinterpret_cast<const char*>(sh->vtx) + 64);
+    }
 }
 
 UniformPackStats uniform_pack_stats_take() {

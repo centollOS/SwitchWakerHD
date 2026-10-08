@@ -942,9 +942,13 @@ void tab_switch() {
     heading("Debug");
     ImGui::TextUnformatted("Draw optimizations (A/B test)");
     for (int i = 0; i < gfxsw::kDrawOpts; i++) {
-        static const char* const names[] = {"Skip unchanged fixed state"};
+        static const char* const names[] = {"Skip unchanged fixed state", "Shadow draws without the pixel shader",
+                                            "Cache textures of shared surfaces", "Keep vertex layouts",
+                                            "Submit every 1024 draws", "Render profiler (slower)",
+                                            "Prefetch shader data", "Skip unchanged target/state registers"};
+        static_assert(sizeof names / sizeof names[0] == gfxsw::kDrawOpts, "a name per switch");
         bool on;
-        if (i) ImGui::SameLine(0, 30);
+        if (i % 2) ImGui::SameLine(0, 30);
         if (check(names[i], gfxsw::draw_opt(i), &on)) gfxsw::set_draw_opt(i, on);
     }
     help("Turn them off and on again in the same spot: the log marks each change with its frame.\n"
@@ -955,6 +959,35 @@ void tab_switch() {
             hostui::post([v] { switch_settings::set_capture_combo(v); });
         help("Writes the next frame's pictures to sdmc:/switch/wwhd/captures for a picture that\n"
              "goes wrong; the game freezes for a few seconds meanwhile. Off: no accidental captures.");
+    }
+    {
+        bool v;
+        if (check("Log the main thread's runtime calls", threads::main_sampler(), &v)) threads::set_main_sampler(v);
+        ImGui::SameLine(0, 30);
+        if (check("Log the game threads' CPU use", threads::sched_stats(), &v)) threads::set_sched_stats(v);
+        help("Performance diagnostics for the log, every 5 s: where the game's main thread spends its\n"
+             "time in the runtime ([main] lines) and each game thread's share of its core ([sched] lines).\n"
+             "Not saved: off at the next start (env.txt WWHD_MAIN_SAMPLER=1 / WWHD_SCHED_STATS=2 still work).");
+    }
+    {
+        // the upstream 60 fps modes, for testing on the console (the screen is 60 Hz: 60 fps only)
+        ImGui::TextUnformatted("Frame rate (test)");
+        const int m = interp::mode();
+        auto choose = [](int mode) {
+            hostui::post([mode] {
+                if (mode == 1) interp::set_fps(60);
+                interp::set_mode(mode);
+                LOG("[interp] frame rate mode from the Switch tab: %s (not saved)", interp::mode_name());
+            });
+        };
+        if (radio("30 fps (original)", m == 0)) choose(0);
+        ImGui::SameLine();
+        if (radio("60 fps interpolation", m == 1)) choose(1);
+        ImGui::SameLine();
+        if (radio("True 60 (experimental)", m == 2)) choose(2);
+        help("60 fps interpolation: the game logic keeps 30 steps a second and a blended frame is drawn\n"
+             "between them, which doubles the drawing work. True 60 runs the game logic at 60 steps a second.\n"
+             "Both need much more CPU and GPU than 30 fps; for testing only. Not saved: 30 fps at the next start.");
     }
     heading("Menu");
     note("Minus held half a second opens this menu (a short Minus goes to the game); B or Minus closes it.\n"

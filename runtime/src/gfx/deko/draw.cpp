@@ -216,6 +216,10 @@ struct StageBindings {
 struct TextureCacheEntry {
     uint64_t epoch = 0;  // R.surfaceEpoch when filled; 0: not reusable
     uint64_t textureEpoch = 0;
+    // a lookup among several surfaces at one address (chosen by their write order): valid while none of them
+    // was written since (Surface::addrWrites; WWHD_DK_TEX_SHARED_CACHE). Null for an address with one surface.
+    const uint64_t* shared = nullptr;
+    uint64_t sharedSeen = 0;
     uint32_t words[7], sampler[3];
     bool compare = false;
     Surface* s = nullptr;
@@ -237,7 +241,8 @@ inline TextureCacheEntry& texture_table_entry(const uint32_t* words, const uint3
 }
 inline bool texture_entry_hit(const TextureCacheEntry& e, const uint32_t* words, const uint32_t* sampler, bool compare) {
     return e.epoch == R.surfaceEpoch && e.textureEpoch == R.textureEpoch && e.compare == compare &&
-           !memcmp(e.words, words, sizeof e.words) && !memcmp(e.sampler, sampler, sizeof e.sampler);
+           (!e.shared || *e.shared == e.sharedSeen) && !memcmp(e.words, words, sizeof e.words) &&
+           !memcmp(e.sampler, sampler, sizeof e.sampler);
 }
 
 // The ufBlock (P4 resources lane, WWHD_DK_UF_CACHE): 0 = pack_uniforms into a new stream slice every draw (P2's
@@ -249,6 +254,20 @@ const int g_ufMode = [] {
     const int v = atoi(e);
     return v < 0 || v > 2 ? 2 : v;
 }();
+
+// Round 40 (the 22 fps views of Outset at stock clocks: the render thread at 998 ms/s). Each is on unless its
+// env.txt switch is 0, and the Switch tab turns it off and on while the game runs (gfxsw::set_draw_opt):
+// - WWHD_DK_DEPTH_ONLY: a draw with a depth buffer and no color target (the shadow maps: half the draws) whose
+//   pixel shader cannot change depth, stencil or memory (Shader::fragmentEffects: no discard, alpha test,
+//   gl_FragDepth or image stores) runs an empty pixel shader; its pixel stage's textures, uniform blocks and
+//   ufBlock are not looked up, packed or bound. The GPU skips the shading too.
+// - WWHD_DK_TEX_SHARED_CACHE: texture lookups at an address that holds several surfaces (render targets sampled
+//   later, such as the shadow maps every lit draw reads) are cached too, while no surface there is written
+//   (Surface::addrWrites); before, each was a full lookup (~0.9 us at 1020 MHz).
+// - WWHD_DK_VTX_LAYOUT_CACHE: the vertex attribute layout (formats, locations, which buffers) is built once per
+//   vertex shader and fetch shader instead of at every draw; only the buffers' addresses, sizes and strides are
+//   read per draw.
+// (the switches are defined after g_fixedSkip, dk_draw.h)
 
 // The resources stage's finer figures (P4 resources lane), per 5 s report (log_resource_stats): times of timed
 // draws (x kDrawTimeSample, as R.perf) and counts of every draw
@@ -262,6 +281,12 @@ struct ResourcePerf {
     // the state stage in parts: ordering, targets, shaders, binds, viewport and scissor; rasterizer, depth /
     // stencil and color output (fixed); vertex streams. fixedSkips: draws whose fixed part was the last one's
     uint64_t stateBindNs = 0, stateFixedNs = 0, stateVertexNs = 0, fixedSkips = 0;
+    // round 40: depth-only draws without their pixel shader; texture lookups at shared addresses and the hits
+    // among them; vertex layouts built (the rest came from the vertex shader's cache)
+    uint64_t depthOnlyDraws = 0, sharedLookups = 0, sharedHits = 0, layoutBuilds = 0;
+    // round 41: depth-only draws that kept their pixel shader, by what its GLSL does (Shader::fragmentWhy)
+    uint64_t keptAlphaTest = 0, keptDiscard = 0, keptDepthOrMemory = 0;
+    uint64_t targetMemoHits = 0;  // draws whose render targets came from the last draw's lookup (WWHD_DK_REG_GENS)
 } g_res;
 
 // the draw's stage timer: lap() adds the time since the last mark to a stage total; sub() to one part of the
@@ -354,9 +379,9 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
     // read zeros past the guest's data, and the hardware rounds a constant buffer's bound size up to 256
     // bytes, so unpadded it would read the next upload's data). Reads past the bound range return zero.
     const uint32_t block = sh->vertex ? mmSQ_VTX_UNIFORM_BLOCK_START : mmSQ_PS_UNIFORM_BLOCK_START;
-    for (int i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; i++) {
+    for (int k = 0; k < sh->uboCount; k++) {  // (the blocks with a slot, dk_shaders.h)
+        const int i = sh->uboList[k];
         const int slot = sh->uboSlot[i];
-        if (slot < 0 || slot >= kMaxUniformBuffers) continue;
         const uint32_t addr = r[block + i * 7], size = std::min<uint32_t>(r[block + i * 7 + 1] + 1, 0x10000);
         const uint32_t want = sh->uboBytes[i] ? std::min<uint32_t>(sh->uboBytes[i], size) : size;
         const uint32_t bound = std::min<uint32_t>((want + 255) & ~255u, 0x10000);
@@ -388,11 +413,10 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
     lap.sub(g_res.uboNs);
     // ---- textures
     const uint32_t texbase = sh->vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
-    for (int i = 0; i < sh->dec->textureUnitListCount; i++) {
-        const uint32_t unit = sh->dec->textureUnitList[i];
-        if (unit >= LATTE_NUM_MAX_TEX_UNITS) continue;
+    for (int i = 0; i < sh->texCount; i++) {  // (the hot copies of the decompiler's lists, dk_shaders.h)
+        const uint32_t unit = sh->texUnit[i];
         const int slot = sh->textureSlot[unit];
-        const uint32_t samplerIndex = sh->dec->textureUnitSamplerAssignment[unit];
+        const uint32_t samplerIndex = sh->texSampler[unit];
         if (slot < 0 || slot >= kMaxSamplers || samplerIndex >= 18) continue;
         const uint32_t* words = r + texbase + unit * 7;
         const uint32_t* samplerWords = r + REGADDR::SQ_TEX_SAMPLER_WORD0_0 + ((sh->vertex ? 18 : 0) + samplerIndex) * 3;
@@ -403,7 +427,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             aoSampler[0] = (aoSampler[0] & ~0x7E00u) | (1u << 9) | (1u << 12);
             samplerWords = aoSampler;
         }
-        const bool compare = sh->dec->textureUsesDepthCompare[unit];
+        const bool compare = (sh->texCompare >> unit) & 1;
         // the last lookup for this unit, reused while its words and the surface set are unchanged
         TextureCacheEntry& cached = textureCache[stage][unit];
         R.perf.textureLookups++;
@@ -422,8 +446,10 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         }
         if (found) {
             R.perf.textureCacheHits++;
+            if (found->shared) g_res.sharedHits++;
             s = found->s;
-            upload_surface(s);  // once per frame: CPU changes to the texture
+            // once per frame: CPU changes to the texture (upload_surface's own early outs, without the call)
+            if (s->img.valid && !s->gpuWritten && s->lastCheckedFrame != R.frame) upload_surface(s);
             view = found->view;
             smp = found->smp;
             sampler_used(smp);  // (the sampler cache must not rewrite it while this frame may use it)
@@ -441,7 +467,13 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             }
             view = sampled_view_id(s, words);
             smp = sampler_id(samplerWords, compare, s->fmt.kind != FormatInfo::FLOAT);
-            cached.epoch = unique ? R.surfaceEpoch : 0;  // several surfaces at one address: chosen by recency
+            // several surfaces at one address: chosen by their write order, so kept while none is written
+            // (WWHD_DK_TEX_SHARED_CACHE); before, never kept
+            const bool shared = !unique && s->addrWrites && g_texSharedCache.load(std::memory_order_relaxed);
+            if (!unique) g_res.sharedLookups++;
+            cached.epoch = unique || shared ? R.surfaceEpoch : 0;
+            cached.shared = shared ? s->addrWrites : nullptr;
+            cached.sharedSeen = shared ? *s->addrWrites : 0;
             cached.textureEpoch = R.textureEpoch;
             memcpy(cached.words, words, sizeof cached.words);
             memcpy(cached.sampler, samplerWords, sizeof cached.sampler);
@@ -449,7 +481,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             cached.s = s;
             cached.view = view;
             cached.smp = smp;
-            if (textureTableOn && unique) texture_table_entry(words, samplerWords, compare) = cached;
+            if (textureTableOn && cached.epoch) texture_table_entry(words, samplerWords, compare) = cached;
             if (lap.on) g_res.textureMissNs += (now_ns() - missStart) * kDrawTimeSample;
         }
         if (g_gamepadDrawing) {  // a texture of the GamePad picture
@@ -490,9 +522,11 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             view = sampled_view_id(s, words);
             smp = sampler_id(samplerWords, compare, s->fmt.kind != FormatInfo::FLOAT);
         }
-        if (Surface* v = volume_source(s, words); v != s) {  // the layers of a 3D color buffer, sampled as 3D
-            s = v;
-            view = sampled_view_id(s, words);
+        if (s->gpuWritten && (words[0] & 7) == uint32_t(Latte::E_DIM::DIM_3D)) {  // (volume_source's own test first)
+            if (Surface* v = volume_source(s, words); v != s) {  // the layers of a 3D color buffer, sampled as 3D
+                s = v;
+                view = sampled_view_id(s, words);
+            }
         }
         sync_draw_sample(s);
         if (s->gpuWritten) g_drawSamplesRendered = true;
@@ -753,6 +787,15 @@ uint32_t prim_key(const uint32_t* r, uint32_t prim) {
 }  // namespace
 DrawSkips g_drawSkips;
 std::atomic<bool> g_fixedSkip{env_switch("FIXED_SKIP", true)};
+std::atomic<bool> g_depthOnly{env_switch("DEPTH_ONLY", true)};
+std::atomic<bool> g_texSharedCache{env_switch("TEX_SHARED_CACHE", true)};
+std::atomic<bool> g_vtxLayoutCache{env_switch("VTX_LAYOUT_CACHE", true)};
+std::atomic<bool> g_regGens{env_switch("REG_GENS", true)};
+std::atomic<bool> g_prefetch{env_switch("PREFETCH", true)};
+std::atomic<uint32_t> g_submitDraws{[] {
+    const char* e = getenv("WWHD_DK_SUBMIT_DRAWS");
+    return e && *e ? uint32_t(strtoul(e, nullptr, 10)) : kDefaultSubmitDraws;
+}()};
 namespace {
 // a skipped draw's reason, counted for the stats (R.skippedDraws counts them all)
 void skip(uint64_t& reason) {
@@ -840,7 +883,7 @@ void draw_frame_start() {
             textureCacheOn ? "on" : "off", env_switch("NO_INDEX_CACHE", false) ? "off" : "on",
             env_switch("VERTEX_TRIM", true) ? "on" : "off", env_switch("PASS_BARRIER", true) && !sync_lazy_barriers() ? "on" : "off (see GPU sync)",
             skip_gamepad() ? "on" : "off", env_switch("FLIP_FRONT", false) ? "FLIPPED (test)" : "as Latte",
-            submit && *submit ? submit : "256", g_traceDraws ? "on" : "off");
+            submit && *submit ? submit : std::to_string(kDefaultSubmitDraws).c_str(), g_traceDraws ? "on" : "off");
         static const char* const kAo[] = {"0, off: as the hardware renders it",
                                           "1, the occlusion pass's centre depth fetch bilinear",
                                           "2, the centre fetch bilinear and the noise tiled per 960x540 pixel"};
@@ -858,6 +901,10 @@ void draw_frame_start() {
                                           "1, a copy per shader, a new slice only when a value changed",
                                           "2, a copy per shader in one slice per frame, changed pieces pushed "
                                           "(dkCmdBufPushConstants), no rebind"};
+        LOG("[dk] round 40: depth-only draws with an empty pixel shader %s (WWHD_DK_DEPTH_ONLY), texture lookups at "
+            "shared addresses cached %s (WWHD_DK_TEX_SHARED_CACHE), vertex layouts kept per vertex shader %s "
+            "(WWHD_DK_VTX_LAYOUT_CACHE); the Switch tab switches them while the game runs",
+            g_depthOnly.load() ? "on" : "off", g_texSharedCache.load() ? "on" : "off", g_vtxLayoutCache.load() ? "on" : "off");
         LOG("[dk] resources (P4): texture lookup table %s (WWHD_DK_TEX_TABLE=0 off), ufBlock mode %s "
             "(WWHD_DK_UF_CACHE=0|1|2), guest uniform block memo %s (WWHD_DK_UBO_MEMO=0 off); textures and uniform "
             "blocks bound only for slots that changed", textureCacheOn && textureTableOn ? "on" : "off", kUf[g_ufMode],
@@ -888,6 +935,16 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
         perFrame(u.blocks), pct(u.unchanged, u.blocks), perFrame(u.slices), perFrame(u.sliceBytes) / 1024.0,
         perFrame(u.pushes), perFrame(u.pushBytes) / 1024.0, us(p.stateBindNs), us(p.stateFixedNs),
         100.0 * perDraw(p.fixedSkips), us(p.stateVertexNs));
+    LOG("[dk] round 40 per frame: depth-only draws without their pixel shader %.0f (%s), with it %.0f (alpha test "
+        "%.0f, other discard %.0f, depth output or memory writes %.0f); texture lookups at shared addresses %.1f (%s), "
+        "cached hits %.0f; vertex layouts built %.1f (%s); submit every %u draws; render targets from the last "
+        "draw's lookup %.0f (register generations %s)",
+        perFrame(p.depthOnlyDraws), g_depthOnly.load() ? "on" : "OFF",
+        perFrame(std::max(std::max(p.keptAlphaTest, p.keptDiscard), p.keptDepthOrMemory)), perFrame(p.keptAlphaTest),
+        perFrame(p.keptDiscard), perFrame(p.keptDepthOrMemory), perFrame(p.sharedLookups),
+        g_texSharedCache.load() ? "cached" : "NOT cached", perFrame(p.sharedHits), perFrame(p.layoutBuilds),
+        g_vtxLayoutCache.load() ? "kept per vertex shader" : "NOT kept", g_submitDraws.load(),
+        perFrame(p.targetMemoHits), g_regGens.load() ? "on" : "OFF");
 }
 
 namespace {
@@ -968,17 +1025,99 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
                uint32_t baseVertex, uint32_t instances);
 }  // namespace
 
+// A draw's vertex attribute layout: what the fetch shader and the vertex shader's attribute locations make of
+// the vertex buffers that have an address (raw unsigned fetches; the GLSL decodes them). The same for every draw
+// of one (fetch shader, vertex shader) pair with the same buffers bound, so each vertex shader keeps the last one
+// it was built for (Shader::vtxLayout; WWHD_DK_VTX_LAYOUT_CACHE). Per draw, only the buffers' addresses, sizes and
+// strides come from the registers.
+struct VertexLayout {
+    const LatteFetchShader* fs = nullptr;
+    uint64_t bound = 0;  // the fetch shader's buffer groups with an address (bit per group, in its order)
+    DkVtxAttribState attribs[kVtxAttribs];
+    uint32_t attribCount = 0;
+    struct Group {
+        uint32_t index;         // the attribute buffer (vertex buffer slot)
+        uint32_t attributeEnd;  // bytes of a vertex the attributes read
+        bool instance;          // read per instance
+    } groups[kVtxBuffers];
+    int groupCount = 0;
+};
+namespace {
+const VertexLayout& vertex_layout(const uint32_t* r, LatteFetchShader* fs, Shader* vs) {
+    uint64_t bound = 0;
+    const size_t groupTotal = fs->bufferGroups.size();
+    for (size_t j = 0; j < groupTotal && j < 64; j++)
+        if (r[mmSQ_VTX_ATTRIBUTE_BLOCK_START + fs->bufferGroups[j].attributeBufferIndex * 7]) bound |= 1ull << j;
+    const bool cacheable = groupTotal <= 64 && g_vtxLayoutCache.load(std::memory_order_relaxed);
+    if (cacheable && vs->vtx && vs->vtx->fs == fs && vs->vtx->bound == bound) return *vs->vtx;
+    static VertexLayout scratch;  // (the cache off)
+    if (cacheable && !vs->vtx) {
+        vs->vtxLayout = std::make_shared<VertexLayout>();
+        vs->vtx = vs->vtxLayout.get();
+    }
+    VertexLayout& L = cacheable ? *vs->vtx : scratch;
+    g_res.layoutBuilds++;
+    L.fs = fs;
+    L.bound = bound;
+    L.attribCount = 0;
+    L.groupCount = 0;
+    for (size_t j = 0; j < groupTotal; j++) {
+        const auto& g = fs->bufferGroups[j];
+        if (j < 64 ? !(bound >> j & 1) : !r[mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.attributeBufferIndex * 7]) continue;
+        if (g.attributeBufferIndex >= kVtxBuffers) {
+            log_once(0xB0F00000u | g.attributeBufferIndex, "[dk] vertex buffer %s is past deko3d's 16: not fetched",
+                     std::to_string(g.attributeBufferIndex));
+            continue;
+        }
+        bool instance = false;
+        uint32_t attributeEnd = 0;
+        for (int k = 0; k < g.attribCount; k++) {
+            auto& a = g.attrib[k];
+            const int loc = vs->mapping.attributeMapping[a.semanticId];
+            if (loc < 0 || loc >= kVtxAttribs) continue;
+            DkVtxAttribSize asize;
+            uint32_t bytes;
+            if (!vertex_format(a.format, asize, bytes)) {
+                log_once(0xF0F00000u | uint32_t(a.format), "[dk] vertex format %s not fetched",
+                         std::to_string(uint32_t(a.format)));
+                continue;
+            }
+            if (a.offset > 0x3FFF) {
+                log_once(0x0FF50000u ^ a.offset, "[dk] vertex attribute offset %s past deko3d's 14 bits: not fetched",
+                         std::to_string(a.offset));
+                continue;
+            }
+            DkVtxAttribState v = zeroed<DkVtxAttribState>();
+            v.bufferId = g.attributeBufferIndex;
+            v.isFixed = 0;
+            v.offset = a.offset;
+            v.size = asize;
+            v.type = DkVtxAttribType_Uint;
+            while (L.attribCount <= uint32_t(loc)) {  // locations the shader does not read: a fixed zero
+                DkVtxAttribState fixed = zeroed<DkVtxAttribState>();
+                fixed.isFixed = 1;
+                fixed.size = DkVtxAttribSize_1x32;
+                fixed.type = DkVtxAttribType_Uint;
+                L.attribs[L.attribCount++] = fixed;
+            }
+            L.attribs[loc] = v;
+            attributeEnd = std::max<uint32_t>(attributeEnd, uint32_t(a.offset) + bytes);
+            if (a.fetchType == LatteConst::VertexFetchType2::INSTANCE_DATA) instance = true;
+        }
+        L.groups[L.groupCount++] = {g.attributeBufferIndex, attributeEnd, instance};
+    }
+    return L;
+}
+}  // namespace
+
 void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr, uint32_t baseVertex,
           uint32_t instances) {
     R.counts.draws++;
     draw_impl(r, prim, count, indexType, indexAddr, baseVertex, instances);
-    // the GPU starts on the frame before it is complete: every kSubmitDraws executed draws go to it
-    static const uint32_t kSubmitDraws = [] {
-        const char* e = getenv("WWHD_DK_SUBMIT_DRAWS");
-        return e && *e ? uint32_t(strtoul(e, nullptr, 10)) : 256u;
-    }();
+    // the GPU starts on the frame before it is complete: every g_submitDraws executed draws go to it
     static uint64_t lastSubmit = 0;
-    if (kSubmitDraws && R.drawCount - lastSubmit >= kSubmitDraws) {
+    const uint32_t submitDraws = g_submitDraws.load(std::memory_order_relaxed);
+    if (submitDraws && R.drawCount - lastSubmit >= submitDraws) {
         lastSubmit = R.drawCount;
         submit_commands("draws");
     }
@@ -1072,14 +1211,28 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             c.frame = frame;
             return true;
         };
-        static Combo combos[4096];
+        // Round 45: 2-way sets (8192 x 2; was 4096 entries direct-mapped). Near Dragon Roost and the volcano ~2,500
+        // live combinations a frame thrashed the direct-mapped table: 35% hits, 1,800 full lookups (~3.5 us) a frame.
+        // A miss replaces the way used least recently (its frame).
+        static Combo combos[8192][2];
         const uint32_t programs[6] = {r[mmSQ_PGM_START_FS], r[mmSQ_PGM_START_FS + 1], r[mmSQ_PGM_START_VS],
                                       r[mmSQ_PGM_START_VS + 1], r[mmSQ_PGM_START_PS], r[mmSQ_PGM_START_PS + 1]};
         uint64_t h = stateHash.vs * 31 + stateHash.ps;
         for (uint32_t v : programs) h = (h ^ v) * 0x100000001B3ull;
-        Combo& c = combos[(h ^ (h >> 29)) & 4095];
-        if (!noMemo && c.epoch == R.shaderEpoch && c.vsState == stateHash.vs && c.psState == stateHash.ps &&
-            !memcmp(c.programs, programs, sizeof programs) && stillValid(c)) {
+        Combo* set = combos[(h ^ (h >> 29)) & 8191];
+        Combo* hit = nullptr;
+        for (int way = 0; way < 2 && !hit && !noMemo; way++) {
+            Combo& w = set[way];
+            if (w.epoch == R.shaderEpoch && w.vsState == stateHash.vs && w.psState == stateHash.ps &&
+                !memcmp(w.programs, programs, sizeof programs) && stillValid(w))
+                hit = &w;
+        }
+        // the way to refill: an unused one, else the one used in the older frame
+        Combo& c = hit ? *hit
+                       : (set[0].frame == ~0ull || set[0].epoch != R.shaderEpoch) ? set[0]
+                       : (set[1].frame == ~0ull || set[1].epoch != R.shaderEpoch) ? set[1]
+                       : set[0].frame <= set[1].frame ? set[0] : set[1];
+        if (hit) {
             R.perf.comboHits++;
             fs = c.fs;
             vs = c.vs;
@@ -1143,6 +1296,12 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         skip(failed || !vs || !ps ? g_drawSkips.shaderFailed : g_drawSkips.shaderPending);
         return;
     }
+    // the shaders' hot lines on their way while the indices and targets are worked out (WWHD_DK_PREFETCH)
+    const bool prefetch = g_prefetch.load(std::memory_order_relaxed);
+    if (prefetch) {
+        prefetch_shader(vs);
+        prefetch_shader(ps);
+    }
     lap(R.perf.lookupNs);
 
     // ---- indices
@@ -1180,15 +1339,57 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     const uint64_t firstVertex = indexed ? uint64_t(indices.minIndex) + baseVertex : uint64_t(baseVertex);
     lap(R.perf.indexNs);
 
+    if (prefetch) {  // (their lines have had the index stage to arrive) what they point to, and the units' surfaces
+        prefetch_shader_caches(vs);
+        prefetch_shader_caches(ps);
+        for (const Shader* sh : {vs, ps})
+            for (int i = 0; i < sh->texCount; i++)
+                if (const Surface* s = textureCache[sh->vertex ? kVertexStage : kPixelStage][sh->texUnit[i]].s)
+                    __builtin_prefetch(s);
+    }
+
     // ---- render targets
     const auto& lcr = *reinterpret_cast<const LatteContextRegister*>(r);
     std::array<Surface*, 8> colors{};
     uint32_t slices[8]{}, depthSlice = 0;
     bool srgbViews[8]{};  // a target bound in the sRGB twin of its surface's format
-    const auto mask = LatteMRT::GetActiveColorBufferMask(ps->dec, lcr);
-    for (int i = 0; i < 8; i++)
-        if (mask & (1 << i)) colors[i] = color_target(r, i, &slices[i], &srgbViews[i]);
-    Surface* depth = LatteMRT::GetActiveDepthBufferMask(lcr) ? depth_target(r, &depthSlice) : nullptr;
+    Surface* depth = nullptr;
+    // the last draw's lookup while no target register changed (gx2 g_reg_gen; WWHD_DK_REG_GENS), the surface set is
+    // the same and the pixel shader writes the same outputs
+    struct TargetMemo {
+        uint64_t gen = ~0ull, surfaceEpoch = 0, textureEpoch = 0;
+        const LatteDecompilerShader* dec = nullptr;
+        std::array<Surface*, 8> colors{};
+        uint32_t slices[8]{}, depthSlice = 0;
+        bool srgbViews[8]{};
+        Surface* depth = nullptr;
+    };
+    static TargetMemo tm;
+    const bool regGens = g_regGens.load(std::memory_order_relaxed);
+    if (regGens && tm.gen == gx2::g_reg_gen[gx2::kRegCatTargets] && tm.surfaceEpoch == R.surfaceEpoch &&
+        tm.textureEpoch == R.textureEpoch && tm.dec == ps->dec) {
+        colors = tm.colors;
+        memcpy(slices, tm.slices, sizeof slices);
+        memcpy(srgbViews, tm.srgbViews, sizeof srgbViews);
+        depth = tm.depth;
+        depthSlice = tm.depthSlice;
+        g_res.targetMemoHits++;
+    } else {
+        const auto mask = LatteMRT::GetActiveColorBufferMask(ps->dec, lcr);
+        for (int i = 0; i < 8; i++)
+            if (mask & (1 << i)) colors[i] = color_target(r, i, &slices[i], &srgbViews[i]);
+        depth = LatteMRT::GetActiveDepthBufferMask(lcr) ? depth_target(r, &depthSlice) : nullptr;
+        // (after the lookups, which may have made surfaces)
+        tm.gen = gx2::g_reg_gen[gx2::kRegCatTargets];
+        tm.surfaceEpoch = R.surfaceEpoch;
+        tm.textureEpoch = R.textureEpoch;
+        tm.dec = ps->dec;
+        tm.colors = colors;
+        memcpy(tm.slices, slices, sizeof slices);
+        memcpy(tm.srgbViews, srgbViews, sizeof srgbViews);
+        tm.depth = depth;
+        tm.depthSlice = depthSlice;
+    }
     // each render target at the internal resolution it should have now (rescale_surface keeps contents); when
     // some could take it but others wait for an allocation budget, all of them take it now
     if (depth) {
@@ -1266,6 +1467,19 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         }
     }
 
+    // a depth-only draw whose pixel shader changes nothing it writes: the empty pixel shader, no pixel-stage
+    // resources (WWHD_DK_DEPTH_ONLY)
+    const DkShader* const depthOnlyFs =
+        target == depth && !ps->fragmentEffects && g_depthOnly.load(std::memory_order_relaxed) ? shader(kDepthOnlyFs)
+                                                                                                : nullptr;
+    const bool depthOnly = depthOnlyFs != nullptr;
+    g_res.depthOnlyDraws += depthOnly;
+    if (target == depth && ps->fragmentEffects) {
+        g_res.keptAlphaTest += (ps->fragmentWhy & 1) != 0;
+        g_res.keptDiscard += (ps->fragmentWhy & 2) != 0;
+        g_res.keptDepthOrMemory += (ps->fragmentWhy & 4) != 0;
+    }
+
     // ---- textures and uniform blocks (may upload and copy; nothing of the draw is bound yet)
     static StageBindings stages[2];
     g_gamepadDrawing = gamepadDraw;
@@ -1282,8 +1496,9 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     g_traceTextures.clear();
     if (g_capture) capture_draw_begin();
     lap.sub(g_res.targetNs);  // (the scissor)
+    if (depthOnly) stages[kPixelStage].texMask = stages[kPixelStage].uboMask = 0;
     if (!prepare_stage(r, vs, colors, depth, stages[kVertexStage], lap) ||
-        !prepare_stage(r, ps, colors, depth, stages[kPixelStage], lap)) {
+        (!depthOnly && !prepare_stage(r, ps, colors, depth, stages[kPixelStage], lap))) {
         R.perf.streamFullSkips++;
         skip(g_drawSkips.streamFull);
         return;
@@ -1307,8 +1522,9 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }
     // the loose uniforms (ufBlock) of each stage, packed at the targets' scale
     for (Shader* sh : {vs, ps}) {
-        const int slot = sh->bindings.ufBlockSlot;
-        if (slot < 0 || slot >= kMaxUniformBuffers) continue;
+        if (depthOnly && !sh->vertex) continue;
+        const int slot = sh->ufBlockSlot;
+        if (slot < 0) continue;
         const bool aoNoise = g_aoMode == 2 && sh->vertex && is_occlusion(r, true);
         const float(*texScale)[2] = g_unitScale[sh->vertex ? kVertexStage : kPixelStage];
         const StreamSlice u =
@@ -1391,11 +1607,12 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     sync_draw_mark(colors, depth, g_drawDepthWrites);
 
     // ---- shaders, textures, uniform blocks
-    if (gs.vs != &vs->dk || gs.ps != &ps->dk) {
-        const DkShader* shaders[] = {&vs->dk, &ps->dk};
+    const DkShader* const fsh = depthOnly ? depthOnlyFs : &ps->dk;
+    if (gs.vs != &vs->dk || gs.ps != fsh) {
+        const DkShader* shaders[] = {&vs->dk, fsh};
         dkCmdBufBindShaders(R.cmd, DkStageFlag_Vertex | DkStageFlag_Fragment, shaders, 2);
         gs.vs = &vs->dk;
-        gs.ps = &ps->dk;
+        gs.ps = fsh;
     }
     {
         const uint64_t bindStart = timed ? now_ns() : 0;
@@ -1405,7 +1622,17 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }
 
     // ---- viewport, scissor
-    set_viewport(r, g_drawScale);
+    {
+        static uint64_t vpGen = ~0ull, vpEpoch = 0;
+        static float vpScale = 0;
+        const uint64_t gen = gx2::g_reg_gen[gx2::kRegCatViewport];
+        if (!regGens || gen != vpGen || vpScale != g_drawScale || vpEpoch != gs.epoch || !gs.viewportKnown) {
+            set_viewport(r, g_drawScale);
+            vpGen = gen;
+            vpScale = g_drawScale;
+            vpEpoch = gs.epoch;
+        }
+    }
     {
         const DkScissor sc = {sx, sy, sex - sx, sey - sy};
         if (!gs.scissorKnown || !same_bytes(gs.scissor, sc)) {
@@ -1445,7 +1672,13 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             REGADDR::CB_BLEND0_CONTROL + 6, REGADDR::CB_BLEND0_CONTROL + 7, REGADDR::CB_BLEND_RED + 0,
             REGADDR::CB_BLEND_RED + 1, REGADDR::CB_BLEND_RED + 2, REGADDR::CB_BLEND_RED + 3, REGADDR::PA_SU_POINT_SIZE,
             REGADDR::PA_SU_SC_MODE_CNTL, REGADDR::PA_SU_SC_MODE_CNTL};  // (the last two: padding)
-        for (int i = 0; i < 25; i++) fk.words[i] = r[kFixedRegs[i]];
+        if (regGens) {  // the registers' change count instead of their values (gx2 g_reg_gen)
+            const uint64_t gen = gx2::g_reg_gen[gx2::kRegCatFixed];
+            fk.words[0] = uint32_t(gen);
+            fk.words[1] = uint32_t(gen >> 32);
+            fk.words[2] = 0x6E6E6547u;  // (never equal to a key of register values: PA_CL_CLIP_CNTL is not this)
+        } else
+            for (int i = 0; i < 25; i++) fk.words[i] = r[kFixedRegs[i]];
         fk.depth = depth;
         for (uint32_t i = 0; i < 8; i++)
             if (colors[i]) {
@@ -1614,57 +1847,19 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     };
     Group groups[kVtxBuffers];
     int groupCount = 0;
-    DkVtxAttribState attribs[kVtxAttribs];
-    uint32_t attribCount = 0;
+    // the attribute layout: from the vertex shader's cache, or built (WWHD_DK_VTX_LAYOUT_CACHE)
+    const VertexLayout& layout = vertex_layout(r, fs, vs);
+    const DkVtxAttribState* const attribs = layout.attribs;
+    const uint32_t attribCount = layout.attribCount;
     bool trimmable = trimOn && firstVertex > 0;
-    for (auto& g : fs->bufferGroups) {
-        const uint32_t base = mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.attributeBufferIndex * 7;
+    for (int i = 0; i < layout.groupCount; i++) {
+        const VertexLayout::Group& g = layout.groups[i];
+        const uint32_t base = mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.index * 7;
         const uint32_t addr = r[base], size = r[base + 1] + 1, stride = (r[base + 2] >> 11) & 0xFFFF;
-        if (!addr) continue;
-        if (g.attributeBufferIndex >= kVtxBuffers) {
-            log_once(0xB0F00000u | g.attributeBufferIndex, "[dk] vertex buffer %s is past deko3d's 16: not fetched",
-                     std::to_string(g.attributeBufferIndex));
-            continue;
-        }
-        bool instance = false;
-        uint64_t attributeEnd = 0;
-        for (int j = 0; j < g.attribCount; j++) {
-            auto& a = g.attrib[j];
-            const int loc = vs->mapping.attributeMapping[a.semanticId];
-            if (loc < 0 || loc >= kVtxAttribs) continue;
-            DkVtxAttribSize asize;
-            uint32_t bytes;
-            if (!vertex_format(a.format, asize, bytes)) {
-                log_once(0xF0F00000u | uint32_t(a.format), "[dk] vertex format %s not fetched",
-                         std::to_string(uint32_t(a.format)));
-                continue;
-            }
-            if (a.offset > 0x3FFF) {
-                log_once(0x0FF50000u ^ a.offset, "[dk] vertex attribute offset %s past deko3d's 14 bits: not fetched",
-                         std::to_string(a.offset));
-                continue;
-            }
-            DkVtxAttribState v = zeroed<DkVtxAttribState>();
-            v.bufferId = g.attributeBufferIndex;
-            v.isFixed = 0;
-            v.offset = a.offset;
-            v.size = asize;
-            v.type = DkVtxAttribType_Uint;
-            while (attribCount <= uint32_t(loc)) {  // locations the shader does not read: a fixed zero
-                DkVtxAttribState fixed = zeroed<DkVtxAttribState>();
-                fixed.isFixed = 1;
-                fixed.size = DkVtxAttribSize_1x32;
-                fixed.type = DkVtxAttribType_Uint;
-                attribs[attribCount++] = fixed;
-            }
-            attribs[loc] = v;
-            attributeEnd = std::max<uint64_t>(attributeEnd, uint64_t(a.offset) + bytes);
-            if (a.fetchType == LatteConst::VertexFetchType2::INSTANCE_DATA) instance = true;
-        }
-        const uint64_t last = instance ? instances - 1 : maxVertex;
-        const uint64_t copied = std::min<uint64_t>(size, last * stride + std::max<uint64_t>(attributeEnd, stride));
-        if (!instance && stride && firstVertex * stride >= copied) trimmable = false;
-        groups[groupCount++] = {g.attributeBufferIndex, addr, size, stride, instance, copied};
+        const uint64_t last = g.instance ? instances - 1 : maxVertex;
+        const uint64_t copied = std::min<uint64_t>(size, last * stride + std::max<uint64_t>(g.attributeEnd, stride));
+        if (!g.instance && stride && firstVertex * stride >= copied) trimmable = false;
+        groups[groupCount++] = {g.index, addr, size, stride, g.instance, copied};
     }
     const uint32_t trim = trimmable ? uint32_t(firstVertex) : 0;  // vertices left out of every per-vertex stream
     DkVtxBufferState bufferStates[kVtxBuffers];

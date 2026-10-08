@@ -50,9 +50,6 @@ static constexpr size_t kLogPendingMax = 4 << 20;  // dropped beyond this (a flo
                                                    // frame's per-draw trace is ~1.5 MB)
 static uint64_t g_log_dropped = 0;
 
-static FILE* g_session_log = nullptr;  // logs/wwhd_<date>_<time>.log, the same lines as wwhd.log
-void log_set_session_file(FILE* f) { g_session_log = f; }
-
 void log_flush() {
     std::string out;
     {
@@ -60,12 +57,8 @@ void log_flush() {
         out.swap(g_log_pending);
     }
     if (!out.empty()) {
-        fwrite(out.data(), 1, out.size(), stderr);
+        fwrite(out.data(), 1, out.size(), stderr);  // (logs/wwhd_<date>_<time>.log, main.cpp)
         fflush(stderr);
-        if (g_session_log) {
-            fwrite(out.data(), 1, out.size(), g_session_log);
-            fflush(g_session_log);
-        }
     }
 }
 
@@ -87,10 +80,7 @@ void log_crash_write(const char* text, size_t n) {
         out.swap(g_log_pending);
         g_log_mutex.unlock();
     }
-    for (FILE* f : {stderr, g_session_log}) {
-        if (!f) continue;
-        const int fd = fileno(f);
-        if (fd < 0) continue;
+    if (const int fd = fileno(stderr); fd >= 0) {
         if (!out.empty()) (void)!write(fd, out.data(), out.size());
         (void)!write(fd, text, n);
         fsync(fd);
@@ -199,12 +189,6 @@ void fatal(const char* fmt, ...) {
 #else
         fprintf(stderr, "FATAL: %s\n", msg);
         fflush(stderr);
-#endif
-#ifdef __SWITCH__
-        if (g_session_log) {
-            fprintf(g_session_log, "FATAL: %s\n", msg);
-            fflush(g_session_log);
-        }
 #endif
     }
     abort();

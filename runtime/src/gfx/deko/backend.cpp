@@ -11,6 +11,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "dk.h"
 #include "dk_capture.h"
 #include "dk_draw.h"
+#include "render_prof.h"
 #include "dk_shaders.h"
 #include "dk_surfaces.h"
 #include "dk_sync.h"
@@ -43,6 +44,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "runtime.h"
 
 // the renderer's own shaders, compiled by uam at build time (CMakeLists.txt, gfx/deko/shaders)
+#include "depth_fsh_dksh.h"
 #include "imgui_fsh_dksh.h"
 #include "imgui_vsh_dksh.h"
 #include "pattern_fsh_dksh.h"
@@ -172,6 +174,7 @@ void load_shaders() {
         {pattern_vsh_dksh, pattern_vsh_dksh_size, "pattern_vsh"}, {pattern_fsh_dksh, pattern_fsh_dksh_size, "pattern_fsh"},
         {text_vsh_dksh, text_vsh_dksh_size, "text_vsh"},          {text_fsh_dksh, text_fsh_dksh_size, "text_fsh"},
         {imgui_vsh_dksh, imgui_vsh_dksh_size, "imgui_vsh"},       {imgui_fsh_dksh, imgui_fsh_dksh_size, "imgui_fsh"},
+        {depth_fsh_dksh, depth_fsh_dksh_size, "depth_fsh"},
     };
     size_t bytes = 0;
     int ok = 0;
@@ -948,6 +951,59 @@ uint64_t thread_ticks() {
     return t;
 }
 
+// How busy each of the application's cores is (round 41: is there room on a core for render-thread work?).
+// svcGetInfo IdleTickCount answers only for the calling thread's core, so a thread on each of cores 0-2 reads
+// it once a second (high priority: it wakes for microseconds); the 5 s report compares the last two reads.
+struct CoreIdle {
+    std::atomic<uint64_t> idle{0}, at{0};  // the core's idle ticks, and when they were read (system ticks)
+};
+CoreIdle g_coreIdle[3];
+void core_sampler_start() {
+    static Thread threads[3];
+    for (int core = 0; core < 3; core++) {
+        const Result rc = threadCreate(
+            &threads[core],
+            [](void* arg) {
+                CoreIdle& c = g_coreIdle[uintptr_t(arg)];
+                for (;;) {
+                    u64 idle = 0;
+                    if (R_SUCCEEDED(svcGetInfo(&idle, InfoType_IdleTickCount, INVALID_HANDLE, UINT64_MAX))) {
+                        c.idle.store(idle, std::memory_order_relaxed);
+                        c.at.store(armGetSystemTick(), std::memory_order_release);
+                    }
+                    svcSleepThread(1'000'000'000ll);
+                }
+            },
+            reinterpret_cast<void*>(uintptr_t(core)), nullptr, 0x4000, 0x20, core);
+        if (R_SUCCEEDED(rc)) threadStart(&threads[core]);
+        else LOG("[cpu] no load sampler on core %d (rc 0x%X)", core, rc);
+    }
+}
+std::string core_report() {
+    static bool started = false;
+    if (!started) {
+        started = true;
+        core_sampler_start();
+        return "";
+    }
+    static uint64_t lastIdle[3], lastAt[3];
+    std::string out;
+    for (int core = 0; core < 3; core++) {
+        const uint64_t at = g_coreIdle[core].at.load(std::memory_order_acquire);
+        const uint64_t idle = g_coreIdle[core].idle.load(std::memory_order_relaxed);
+        char item[48];
+        if (lastAt[core] && at > lastAt[core]) {
+            const double idlePct = 100.0 * double(idle - lastIdle[core]) / double(at - lastAt[core]);
+            snprintf(item, sizeof item, "%score %d %.0f%%", core ? ", " : "", core, std::clamp(100.0 - idlePct, 0.0, 100.0));
+        } else
+            snprintf(item, sizeof item, "%score %d ?", core ? ", " : "", core);
+        out += item;
+        lastIdle[core] = idle;
+        lastAt[core] = at;
+    }
+    return out;
+}
+
 uint64_t g_hitches = 0;      // frames over 55 ms (check_hitch)
 Renderer::Perf g_hitchBase;  // R.perf after the previous present
 
@@ -1045,6 +1101,9 @@ void frame_stats() {
     if (std::string passes = gpuPasses.report(); !passes.empty()) LOG("[dk] GPU passes: %s", passes.c_str());
     if (std::string sync = sync_report(frames); !sync.empty()) LOG("[dk] GPU sync %s", sync.c_str());
     if (std::string clocks = clock_report(); !clocks.empty()) LOG("[dk] clocks: %s", clocks.c_str());
+    if (std::string cores = core_report(); !cores.empty())
+        LOG("[cpu] cores busy (since the last report): %s; the game's main thread has core 1, the render thread "
+            "core 2 (or 0)", cores.c_str());
     overlayStats.renderBusy = busy;
     overlayStats.gpuBusyPct = behindPct;
     overlayStats.draws = perFrame(c.draws - last.draws);
@@ -1459,12 +1518,44 @@ int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }
 float dynamic_res_scale() { return gfxdk::res_scale_shown(); }  // the internal resolution in use (dynamic or not)
 bool draw_opt(int which) {
-    return which == kOptFixedSkip && gfxdk::g_fixedSkip.load(std::memory_order_relaxed);
+    using namespace gfxdk;
+    switch (which) {
+    case kOptFixedSkip: return g_fixedSkip.load(std::memory_order_relaxed);
+    case kOptDepthOnly: return g_depthOnly.load(std::memory_order_relaxed);
+    case kOptTexSharedCache: return g_texSharedCache.load(std::memory_order_relaxed);
+    case kOptVtxLayoutCache: return g_vtxLayoutCache.load(std::memory_order_relaxed);
+    case kOptBigSubmits: return g_submitDraws.load(std::memory_order_relaxed) >= kBigSubmitDraws;
+    case kOptProfiler: return rprof::enabled();
+    case kOptPrefetch: return g_prefetch.load(std::memory_order_relaxed);
+    case kOptRegGens: return g_regGens.load(std::memory_order_relaxed);
+    default: return false;
+    }
 }
+// (the settings overlay, on the render thread between draws)
 void set_draw_opt(int which, bool on) {
-    if (which != kOptFixedSkip || gfxdk::g_fixedSkip.exchange(on) == on) return;
-    LOG("[dk] A/B: fixed state skip (FIXED_SKIP) %s from frame %llu (menu)", on ? "ON" : "OFF",
-        (unsigned long long)gfxdk::R.frame + 1);
+    using namespace gfxdk;
+    if (which < 0 || which >= kDrawOpts || draw_opt(which) == on) return;
+    static const char* const names[kDrawOpts] = {
+        "fixed state skip (WWHD_DK_FIXED_SKIP)", "depth-only draws without their pixel shader (WWHD_DK_DEPTH_ONLY)",
+        "texture lookups at shared addresses cached (WWHD_DK_TEX_SHARED_CACHE)",
+        "vertex layouts kept per vertex shader (WWHD_DK_VTX_LAYOUT_CACHE)",
+        "a submit every 1024 draws instead of 256 (WWHD_DK_SUBMIT_DRAWS)", "render-thread profiler (WWHD_PROFILE)",
+        "shader data prefetched at each draw (WWHD_DK_PREFETCH)",
+        "targets, fixed state and viewport skipped while their registers are unchanged (WWHD_DK_REG_GENS)"};
+    switch (which) {
+    case kOptFixedSkip: g_fixedSkip = on; break;
+    case kOptDepthOnly: g_depthOnly = on; break;
+    case kOptTexSharedCache:
+        g_texSharedCache = on;
+        R.surfaceEpoch++;  // the draw path's texture lookups again, with the new rule
+        break;
+    case kOptVtxLayoutCache: g_vtxLayoutCache = on; break;
+    case kOptBigSubmits: g_submitDraws = on ? kBigSubmitDraws : kSmallSubmitDraws; break;
+    case kOptProfiler: rprof::set_enabled(on); break;
+    case kOptPrefetch: g_prefetch = on; break;
+    case kOptRegGens: g_regGens = on; break;
+    }
+    LOG("[dk] A/B: %s %s from frame %llu (menu)", names[which], on ? "ON" : "OFF", (unsigned long long)R.frame + 1);
 }
 void set_resolution_profile(float scale, bool dynamic) {
     gfxdk::g_profileScale.store(scale, std::memory_order_relaxed);

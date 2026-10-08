@@ -9,8 +9,11 @@
 //
 // Every 120 swaps the counters are turned into a text report: logged with WWHD_PROFILE=1,
 // WWHD_VK_STATS or WWHD_VK_CPU_ONLY_STATS=1, and kept for the overlay's "Copy performance report"
-// button (latest_report()). WWHD_PROFILE=0 turns the profiler off.
+// button (latest_report()). WWHD_PROFILE=0 turns the profiler off. On the Switch it is off unless
+// WWHD_PROFILE=1 (or the Switch tab's A/B switch): nothing shows its report there, and its per-command and
+// per-register hooks cost the render thread ~1-3 ms a frame at 1020 MHz.
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -26,7 +29,9 @@ enum Upload : int { kUpOther, kUpVertex, kUpIndex, kUpUbo, kUpUniformVars, kUpTe
 enum Wait : int { kWaitGpu, kWaitAcquire, kWaitPresent, kWaits };
 enum Sync : int { kSyncDrawDone, kSyncCopySurface, kSyncFlip, kSyncOther, kSyncs };
 
-bool enabled();
+extern std::atomic<bool> g_enabled;
+inline bool enabled() { return g_enabled.load(std::memory_order_relaxed); }
+void set_enabled(bool on);  // (the Switch tab's A/B switch; logged)
 uint64_t now_ns();
 uint64_t thread_cpu_ns();  // CPU time of the calling thread (0: not available)
 
@@ -39,7 +44,8 @@ inline void mark(Phase p) {
 }
 
 // op timing around execute_one: begin() returns 0 when this call is not timed
-uint64_t op_begin(Op op);
+uint64_t op_begin_slow(Op op);
+inline uint64_t op_begin(Op op) { return enabled() ? op_begin_slow(op) : 0; }
 void op_end(Op op, uint64_t started);
 
 // uploads: the kind of the copies made while the scope lives
@@ -64,7 +70,10 @@ void add_idle(uint64_t ns);                 // render thread waiting for command
 // draw classifier (render thread, gx2 register application)
 extern uint32_t g_reg_dirty;  // bit 0: buffer/constant registers changed, bit 1: other registers changed
 void note_other_reg(uint32_t reg);          // a non-buffer register changed value
-void classify_draw();                       // at each draw: count its class, clear g_reg_dirty
+void classify_draw_slow();
+inline void classify_draw() {                // at each draw: count its class, clear g_reg_dirty
+    if (enabled()) classify_draw_slow();
+}
 bool fast_class_reg(uint32_t reg);          // ALU constants, uniform-block and vertex-buffer words
 
 // shader translations: called by the Vulkan renderer for each new variant (shaders.cpp)

@@ -21,10 +21,19 @@ float dynamic_res_scale();  // the internal resolution dynamic resolution has ch
 // may lower it, from the next frame on (the handheld / docked profiles, platform/settings_switch.h)
 void set_resolution_profile(float scale, bool dynamic);
 // per-draw optimizations the Switch tab turns on and off for A/B tests (not saved; env.txt sets them at start):
-// fixed state skipped while unchanged (WWHD_DK_FIXED_SKIP). (A/B 2026-10-07: skipping unchanged uniform
-// registers gained nothing and was removed: the ufBlock cost is the guest uniform blocks' contents.)
-// Each change is logged with its frame, so one session's log compares both halves.
-enum DrawOpt : int { kOptFixedSkip, kDrawOpts };
+// fixed state skipped while unchanged (WWHD_DK_FIXED_SKIP); round 40: depth-only draws without their pixel
+// shader (WWHD_DK_DEPTH_ONLY), texture lookups at shared addresses cached (WWHD_DK_TEX_SHARED_CACHE), vertex
+// layouts kept per vertex shader (WWHD_DK_VTX_LAYOUT_CACHE), a submit every 1024 draws instead of 256
+// (WWHD_DK_SUBMIT_DRAWS; on by default since round 41), the upstream render-thread profiler (WWHD_PROFILE=1; off by
+// default: it costs render-thread time); round 42: the draw's shader data prefetched (WWHD_DK_PREFETCH). (A/B
+// 2026-10-07 and 2026-10-08: skipping unchanged uniform registers, as a whole and per vec4, gained nothing and was
+// removed: the game changes its constants for nearly every draw.) Each change is logged with its frame, so one
+// session's log compares both halves.
+enum DrawOpt : int {
+    kOptFixedSkip, kOptDepthOnly, kOptTexSharedCache, kOptVtxLayoutCache, kOptBigSubmits, kOptProfiler, kOptPrefetch,
+    kOptRegGens,  // round 41: targets, fixed state and viewport skipped while their registers are unchanged
+    kDrawOpts
+};
 bool draw_opt(int which);
 void set_draw_opt(int which, bool on);
 #ifdef __SWITCH__

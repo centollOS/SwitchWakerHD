@@ -18,7 +18,9 @@
 #include <deko3d.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,6 +33,7 @@ struct LatteFetchShader;
 namespace gfxdk {
 struct ShaderCode;  // shaders_dk.cpp: one GLSL source's DKSH, shared by every Shader with that glslHash
 struct UniformCache;  // shaders_dk.cpp: the ufBlock's copy kept per shader (pack_uniforms_cached)
+struct VertexLayout;  // draw.cpp: a vertex shader's attribute layout for its fetch shader (WWHD_DK_VTX_LAYOUT_CACHE)
 
 enum class ShaderStatus : uint8_t {
     Pending,  // translated; its DKSH is not in memory yet (queued for or compiling on the worker, or done and
@@ -39,37 +42,62 @@ enum class ShaderStatus : uint8_t {
     Failed,   // translation, conversion or uam failed (error says why; logged once): its draws are skipped
 };
 
-struct Shader {
-    uint64_t key = 0;
-    bool vertex = false;
+// alignas(64) and the fields every draw reads first (round 42): the draw path reads a shader's slots, texture units
+// and its per-shader caches at each draw, ~1,500 shader changes a frame; spread over the object (and the decompiler's)
+// they were several cache misses per stage. They now fill its first two cache lines, which draw.cpp prefetches as soon
+// as it knows the shaders (WWHD_DK_PREFETCH).
+struct alignas(64) Shader {
+    // ---- hot: what the draw path reads (copies of the decompiler's lists and of the bindings, set once)
     LatteDecompilerShader* dec = nullptr;
-    uint64_t glslHash = 0;  // the WGS1 hash of its GLSL: the key of the DKSH caches (shader_files.h)
+    UniformCache* uf = nullptr;    // ufCache.get() (pack_uniforms_cached)
+    VertexLayout* vtx = nullptr;   // vtxLayout.get() (draw.cpp, vertex shaders)
     ShaderStatus status = ShaderStatus::Pending;
+    bool vertex = false;
+    bool scaleUniforms = false;  // reads uf_fragCoordScale / uf_texNScale (internal resolution, P3)
+    // a pixel shader whose GLSL can change depth or stencil results or memory: it discards (kills, the alpha
+    // test), writes gl_FragDepth, or stores to images. Without it, a draw with no color target needs no pixel
+    // shader at all (draw.cpp, WWHD_DK_DEPTH_ONLY). Vertex shaders: unused.
+    bool fragmentEffects = true;
+    uint8_t fragmentWhy = 0;  // (the log) 1: the alpha test, 2: another discard, 4: gl_FragDepth or memory writes
+    int8_t ufBlockSlot = -1;  // bindings.ufBlockSlot: the UBO slot of the loose uniforms, -1 = none
+    uint8_t uboCount = 0;     // GX2 uniform blocks it reads (uboList)
+    uint8_t texCount = 0;     // texture units it samples (texUnit)
+    // GX2 uniform block i -> deko3d UBO slot, texture unit -> deko3d texture slot; -1 = the shader does not use it
+    std::array<int8_t, LATTE_NUM_MAX_UNIFORM_BUFFERS> uboSlot;
+    std::array<int8_t, LATTE_NUM_MAX_TEX_UNITS> textureSlot;
+    uint8_t uboList[LATTE_NUM_MAX_UNIFORM_BUFFERS];  // the blocks with a slot
+    uint8_t texUnit[LATTE_NUM_MAX_TEX_UNITS];        // dec->textureUnitList
+    uint8_t texSampler[LATTE_NUM_MAX_TEX_UNITS];     // by unit: dec->textureUnitSamplerAssignment, 0xFF = none
+    uint32_t texCompare = 0;                         // bit per unit: dec->textureUsesDepthCompare
+    // ---- the rest
+    uint64_t key = 0;
+    uint64_t glslHash = 0;  // the WGS1 hash of its GLSL: the key of the DKSH caches (shader_files.h)
     std::string error;
     DkShader dk{};          // valid when status == Ready
     // resources: the decompiler's Vulkan mapping (resourceMappingVK) and where glsl_to_deko put each binding
     LatteDecompilerShaderResourceMapping mapping;  // resourceMappingVK
     ConvertedBindings bindings;                    // Vulkan binding -> deko3d slot (glsl_convert.h)
-    // the same resolved per GX2 resource for the draw path, -1 = the shader does not use it:
-    std::array<int8_t, LATTE_NUM_MAX_UNIFORM_BUFFERS> uboSlot;  // GX2 uniform block i -> deko3d UBO slot
-    std::array<int8_t, LATTE_NUM_MAX_TEX_UNITS> textureSlot;    // texture unit -> deko3d texture slot
     // bytes the shader reads from GX2 uniform block i (its declared array); 0 = unknown: the draw binds
     // min(guest size, 64 KiB) rounded up to 256 with zeros past the guest's data (as gfx/gl)
     std::array<uint32_t, LATTE_NUM_MAX_UNIFORM_BUFFERS> uboBytes{};
     // the loose uniforms block (ufBlock): uniformOffsetsVK layout, in UBO slot bindings.ufBlockSlot
     LatteDecompilerOutputUniformOffsets uniforms;  // uniformOffsetsVK
-    bool scaleUniforms = false;  // reads uf_fragCoordScale / uf_texNScale (internal resolution, P3)
     // draws skipped since it became pending: the worker's queue serves the most wanted first
     uint32_t wanted = 0;
     ShaderCode* code = nullptr;  // its GLSL's DKSH (shaders_dk.cpp); null when translation failed
-    std::shared_ptr<UniformCache> ufCache;  // pack_uniforms_cached's state, made at the first use
+    std::shared_ptr<UniformCache> ufCache;    // pack_uniforms_cached's state, made at the first use (uf)
+    std::shared_ptr<VertexLayout> vtxLayout;  // (vertex shaders) the last attribute layout built, draw.cpp (vtx)
     Shader() {
         uboSlot.fill(-1);
         textureSlot.fill(-1);
+        memset(texSampler, 0xFF, sizeof texSampler);
     }
     bool ready() const { return status == ShaderStatus::Ready; }
     bool pending() const { return status == ShaderStatus::Pending; }
 };
+// the hot fields' cache lines and the per-shader caches they point to, toward the cache (draw.cpp, WWHD_DK_PREFETCH)
+void prefetch_shader(const Shader* sh);
+void prefetch_shader_caches(const Shader* sh);
 
 // ---- lookup (as gfx/gl/shaders.h)
 // frame: program bytes are rehashed once per frame

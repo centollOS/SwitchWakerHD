@@ -30,14 +30,22 @@ namespace interp { uint64_t logic_steps(); }
 
 namespace rprof {
 
-bool enabled() {
-    static const bool on = [] {
-        const char* e = getenv("WWHD_PROFILE");
-        return !e || strcmp(e, "0") != 0;
-    }();
-    return on;
+std::atomic<bool> g_enabled{[] {
+    const char* e = getenv("WWHD_PROFILE");
+#ifdef __SWITCH__
+    return e && strcmp(e, "0") != 0;  // (render_prof.h: off unless asked for)
+#else
+    return !e || strcmp(e, "0") != 0;
+#endif
+}()};
+void set_enabled(bool on) {
+    if (g_enabled.exchange(on, std::memory_order_relaxed) != on)
+        LOG("[prof] render-thread profiler %s", on ? "on" : "off");
 }
 static bool log_reports() {
+#ifdef __SWITCH__
+    return true;  // (on only when asked for: its report goes to the log)
+#endif
     static const bool on = [] {
         const char* p = getenv("WWHD_PROFILE");
         const char* c = getenv("WWHD_VK_CPU_ONLY_STATS");
@@ -47,6 +55,9 @@ static bool log_reports() {
 }
 
 uint64_t now_ns() {
+#ifdef __SWITCH__
+    return armTicksToNs(armGetSystemTick());  // (the counter register: steady_clock costs more than what it times)
+#endif
     return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -112,8 +123,7 @@ void mark_slow(Phase p) {
     g_mark = t;
 }
 
-uint64_t op_begin(Op op) {
-    if (!enabled()) return 0;
+uint64_t op_begin_slow(Op op) {
     W.opCount[op]++;
     if ((op == kOpDraw || op == kOpRegs) && (++sampleCounter[op] & kSampleMask)) {
         if (op == kOpDraw) g_draw_sampled = false;  // also after a sampled draw that threw
@@ -167,7 +177,7 @@ void note_other_reg(uint32_t reg) {
     g_reg_dirty |= 2;
     if (reg < otherRegs.size()) otherRegs[reg]++;
 }
-void classify_draw() {
+void classify_draw_slow() {
     W.draws++;
     if (!g_reg_dirty) W.drawsSame++;
     else if (g_reg_dirty & 2) W.drawsOther++;

@@ -157,7 +157,8 @@ void overlay_renderer_init();
 void overlay_draw(ImDrawData* d, int ww, int wh);
 
 // ---- the renderer's own shaders (embedded DKSH, backend.cpp)
-enum ShaderId { kPatternVs, kPatternFs, kTextVs, kTextFs, kImguiVs, kImguiFs, kShaderCount };
+// kDepthOnlyFs: an empty pixel shader for the game's depth-only draws (draw.cpp, WWHD_DK_DEPTH_ONLY)
+enum ShaderId { kPatternVs, kPatternFs, kTextVs, kTextFs, kImguiVs, kImguiFs, kDepthOnlyFs, kShaderCount };
 const DkShader* shader(ShaderId id);  // null if it did not load (logged)
 
 // the draw path times its stages: on the Switch the tick counter is read directly

@@ -68,7 +68,7 @@ void mem_init_data_imports(uint32_t alloc_slot, uint32_t alloc_ex_slot, uint32_t
 // CPU exceptions (a bad memory access, a jump to a bad address, abort's trap): the kernel sends them
 // to the process's entry point, which is hbloader's; hbloader passes them to the NRO's entry point
 // (nx-hbloader trampoline.s), and libnx's crt0 calls __libnx_exception_handler on the stack below.
-// It writes into wwhd.log (and the session log) the log lines still waiting for the writer thread,
+// It writes into the session log (logs/wwhd_<date>_<time>.log) the log lines still waiting for the writer thread,
 // what crashed and where, the registers, and the return addresses found on the stack. Code
 // addresses are given as code+offset: `addr2line -f -C -e build/switch/wwhd.elf 0x<offset>` names
 // the function (the ELF of the same build). When the handler returns, libnx raises svcBreak and
@@ -190,46 +190,50 @@ static void install_crash_handler() {
         abort();
     });
 }
-// Session logs: each session writes wwhd.log and the same lines to logs/wwhd_<date>_<time>.log
-// (the console clock at startup), so the newest file in logs/ is always the latest session; the
-// newest kMaxSessionLogs stay there. A wwhd.log from a build before this (or one whose session file
-// is missing) is moved into logs/ first.
-void log_set_session_file(FILE* f);  // core.cpp
-static void start_session_logs() {
-    constexpr size_t kMaxSessionLogs = 30;
+// Session logs: each session writes only logs/wwhd_<date>_<time>.log (the console clock at startup), so
+// the newest file in logs/ is always the current session. logs/ keeps the kMaxSessionLogs most recent
+// session logs, the current one included; older ones are deleted by age (modification time, then name).
+// A wwhd.log left next to the .nro by a build before this is moved into logs/ (or deleted when its
+// session file is already there: it held the same lines).
+static void start_session_logs(const struct tm& t, char* name, size_t size) {
+    constexpr size_t kMaxSessionLogs = 10;
     mkdir("logs", 0777);
     if (FILE* f = fopen("wwhd.log", "r")) {
         char first[128] = {};
         if (!fgets(first, sizeof first, f)) first[0] = 0;
         fclose(f);
         int y, mo, d, h, mi, se;
-        char name[96];
+        char old[96];
         if (sscanf(first, "[session] %d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &se) == 6)
-            snprintf(name, sizeof name, "logs/wwhd_%04d-%02d-%02d_%02d-%02d-%02d.log", y, mo, d, h, mi, se);
+            snprintf(old, sizeof old, "logs/wwhd_%04d-%02d-%02d_%02d-%02d-%02d.log", y, mo, d, h, mi, se);
         else
-            snprintf(name, sizeof name, "logs/wwhd_earlier_build_%ld.log", (long)time(nullptr));
+            snprintf(old, sizeof old, "logs/wwhd_earlier_build_%ld.log", (long)time(nullptr));
         struct stat st;
-        if (stat(name, &st) != 0) rename("wwhd.log", name);
+        if (stat(old, &st) != 0) rename("wwhd.log", old);
+        else remove("wwhd.log");
     }
-    std::vector<std::string> logs;
+    snprintf(name, size, "logs/wwhd_%04d-%02d-%02d_%02d-%02d-%02d.log", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+             t.tm_hour, t.tm_min, t.tm_sec);
+    // room for this session's file: the oldest go
+    struct Log {
+        std::string name;
+        time_t mtime;
+    };
+    std::vector<Log> logs;
     if (DIR* dir = opendir("logs")) {
-        while (dirent* e = readdir(dir))
-            if (!strncmp(e->d_name, "wwhd_", 5)) logs.push_back(e->d_name);
+        while (dirent* e = readdir(dir)) {
+            if (strncmp(e->d_name, "wwhd_", 5) != 0) continue;
+            const std::string path = std::string("logs/") + e->d_name;
+            if (path == name) continue;  // (a restart within the same second: reopened below)
+            struct stat st;
+            logs.push_back({e->d_name, stat(path.c_str(), &st) == 0 ? st.st_mtime : 0});
+        }
         closedir(dir);
     }
-    std::sort(logs.begin(), logs.end());  // dated names sort by time
-    for (size_t i = 0; i + kMaxSessionLogs <= logs.size(); i++) remove(("logs/" + logs[i]).c_str());
-}
-static void log_session_header() {
-    time_t now = time(nullptr);
-    struct tm t{};
-    localtime_r(&now, &t);
-    char name[96];
-    snprintf(name, sizeof name, "logs/wwhd_%04d-%02d-%02d_%02d-%02d-%02d.log", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
-             t.tm_hour, t.tm_min, t.tm_sec);
-    if (FILE* f = fopen(name, "w")) log_set_session_file(f);
-    LOG("[session] %04d-%02d-%02d %02d:%02d:%02d (build %s %s); also written to %s", t.tm_year + 1900, t.tm_mon + 1,
-        t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, __DATE__, __TIME__, name);
+    std::sort(logs.begin(), logs.end(), [](const Log& a, const Log& b) {
+        return a.mtime != b.mtime ? a.mtime < b.mtime : a.name < b.name;
+    });
+    for (size_t i = 0; i + kMaxSessionLogs <= logs.size(); i++) remove(("logs/" + logs[i].name).c_str());
 }
 // env.txt's KEY=VALUE lines go into the environment before any static initialiser runs (round 26).
 // Many switches are read into globals at static initialisation (draw.cpp's off switches, the AO mode,
@@ -481,15 +485,20 @@ static void default_vulkan_cpu_paths() {
 
 int main(int argc, char** argv) {
 #ifdef __SWITCH__
-    // everything lives in sdmc:/switch/wwhd: game/ (extracted dump), save/, shader cache, wwhd.log
+    // everything lives in sdmc:/switch/wwhd: game/ (extracted dump), save/, shader cache, logs/
     mkdir(host::config_dir().c_str(), 0777);
     chdir(host::config_dir().c_str());
-    start_session_logs();
-    freopen("wwhd.log", "w", stderr);
+    const time_t now = time(nullptr);
+    struct tm t{};
+    localtime_r(&now, &t);
+    char logName[96];
+    start_session_logs(t, logName, sizeof logName);
+    if (!freopen(logName, "w", stderr)) freopen("wwhd.log", "w", stderr);  // (logs/ not writable)
     setvbuf(stderr, nullptr, _IOLBF, 0);
-    log_session_header();
+    LOG("[session] %04d-%02d-%02d %02d:%02d:%02d (build %s %s); log %s (the newest 10 sessions are kept in logs/)",
+        t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, __DATE__, __TIME__, logName);
     // which round of docs/switch-port.md this runtime is (to tell builds apart in the logs)
-    LOG("[boot] recompiled code: %s; runtime: round 38 (deko3d only: the OpenGL renderer removed; round 37 = CPU clock in the system table's steps, default 1224 MHz; settings menu on a Minus press; round 36 = shader budget: new shaders over frames, their draws skipped; round 35 = texture uploads from client memory again; round 34 = no framebuffer status query; round 33 = Warp tab; round 32 = queued texture uploads, texture error check after the GL thread finish; round 31 = CPU 1785 / GPU 614 options; round 30 = settings overlay on Minus; round 29 = official GPU profile 460.8 MHz handheld; round 28 = round 27 with the near-plane clip distance off, searchlight probe frames after a capture, per-draw trace in captures)",
+    LOG("[boot] recompiled code: %s; runtime: round 45 (fast detiling, translation records, register writes merged in display lists, 2-way shader combinations; round 44 = round 43's helper-thread copies and render priority removed; register writes dispatched directly; round 42 = shader hot data packed and prefetched, one register-class pass; round 41 = context loads copy only written registers, targets/fixed state/viewport skipped by register generations, submit every 1024 draws, per-core load line; round 40 = deko3d: depth-only draws without their pixel shader, shared-surface texture lookups cached, vertex layouts kept, profiler off; round 39 = session log only in logs/, the newest 10 kept; round 38 = deko3d only: the OpenGL renderer removed; round 37 = CPU clock in the system table's steps, default 1224 MHz; settings menu on a Minus press; round 36 = shader budget: new shaders over frames, their draws skipped; round 35 = texture uploads from client memory again; round 34 = no framebuffer status query; round 33 = Warp tab; round 32 = queued texture uploads, texture error check after the GL thread finish; round 31 = CPU 1785 / GPU 614 options; round 30 = settings overlay on Minus; round 29 = official GPU profile 460.8 MHz handheld; round 28 = round 27 with the near-plane clip distance off, searchlight probe frames after a capture, per-draw trace in captures)",
         g_recomp_variant);
     host::place_thread(0);
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());

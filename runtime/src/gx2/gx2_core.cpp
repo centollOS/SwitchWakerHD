@@ -41,6 +41,49 @@ static std::recursive_mutex g_exec_mutex;
 
 uint32* regs() { return g_regs; }
 
+// Context loads (GX2SetContextState, ~23 a frame in Outset) copy only the blocks of 256 registers that
+// something has written: every other block is zero in g_regs and in every context's shadow alike (a context
+// starts zeroed, and only apply_regs writes either). They copied the whole 256 KB file each time (~70 us at
+// 1020 MHz). The block of VGT_PRIMITIVE_TYPE, which draw() writes into g_regs directly, always counts.
+static uint64 g_written_blocks[kNumRegs / 256 / 64];
+static inline void mark_written(uint32 first, uint32 n) {
+    for (uint32 b = first >> 8, last = (first + n - 1) >> 8; b <= last; b++) g_written_blocks[b >> 6] |= 1ull << (b & 63);
+}
+static const bool g_written_init = [] {
+    mark_written(REGADDR::VGT_PRIMITIVE_TYPE, 1);
+    return true;
+}();
+
+uint64_t g_reg_gen[kRegCats];
+// the categories of each register (gx2.h RegCategory), a bit each
+static const std::vector<uint8> g_reg_cat = [] {
+    std::vector<uint8> c(kNumRegs, 0);
+    auto add = [&](uint32 reg, int cat) { c[reg] |= uint8(1u << cat); };
+    for (uint32 r = mmDB_DEPTH_SIZE; r <= mmDB_HTILE_DATA_BASE; r++) add(r, kRegCatTargets);  // (+ kDepthSlicesReg)
+    for (uint32 r = mmCB_COLOR0_BASE; r < mmCB_COLOR0_FRAG + 8; r++) add(r, kRegCatTargets);  // BASE..FRAG, 8 each
+    for (uint32 r : {uint32(REGADDR::CB_COLOR_CONTROL), uint32(REGADDR::CB_TARGET_MASK), uint32(REGADDR::DB_DEPTH_CONTROL),
+                     uint32(REGADDR::PA_SC_GENERIC_SCISSOR_BR)})
+        add(r, kRegCatTargets);
+    for (uint32 r : {uint32(REGADDR::PA_SU_SC_MODE_CNTL), uint32(REGADDR::PA_CL_CLIP_CNTL),
+                     uint32(REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET), uint32(REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE),
+                     uint32(REGADDR::PA_SU_POLY_OFFSET_CLAMP), uint32(REGADDR::DB_DEPTH_CONTROL),
+                     uint32(REGADDR::DB_STENCILREFMASK), uint32(REGADDR::DB_STENCILREFMASK_BF),
+                     uint32(REGADDR::CB_COLOR_CONTROL), uint32(REGADDR::CB_TARGET_MASK), uint32(REGADDR::PA_SU_POINT_SIZE)})
+        add(r, kRegCatFixed);
+    for (uint32 i = 0; i < 8; i++) add(REGADDR::CB_BLEND0_CONTROL + i, kRegCatFixed);
+    for (uint32 r = REGADDR::CB_BLEND_RED; r <= REGADDR::CB_BLEND_ALPHA; r++) add(r, kRegCatFixed);
+    for (uint32 r = REGADDR::PA_CL_VPORT_XSCALE; r <= REGADDR::PA_CL_VPORT_ZOFFSET; r++) add(r, kRegCatViewport);
+    for (uint32 r : {uint32(REGADDR::PA_CL_CLIP_CNTL), uint32(REGADDR::PA_SC_GENERIC_SCISSOR_TL),
+                     uint32(REGADDR::PA_SC_GENERIC_SCISSOR_BR)})
+        add(r, kRegCatViewport);
+    return c;
+}();
+static inline void bump_categories(uint32 cats) {
+    for (int c = 0; c < kRegCats; c++)
+        if (cats >> c & 1) g_reg_gen[c]++;
+}
+static inline void bump_all_categories() { bump_categories((1u << kRegCats) - 1); }
+
 // Register writes that can change how shaders are translated bump g_shader_state_gen; the
 // renderer reuses its last shader lookup while it is unchanged. Uniforms, uniform/vertex buffer
 // addresses and rewrites of an identical value don't count.
@@ -86,7 +129,8 @@ static bool shader_irrelevant(uint32 reg) {
 // OpenGL: like WWHD_VK_SHADER_KEY_DIRTY, register fields that its shader key ignores (texture
 // addresses, viewport, blend, scissor, the alpha-test reference...) don't count, so consecutive draws
 // that only change those reuse the shader lookup. WWHD_GL_SHADER_KEY_DIRTY=0 counts every change.
-enum : uint8 { kRegCounted = 1, kRegMasked = 2, kRegProgram = 4 };
+// (bits 3-5: the register's categories, gx2.h RegCategory: one table and one pass in apply_regs)
+enum : uint8 { kRegCounted = 1, kRegMasked = 2, kRegProgram = 4, kRegShaderBits = 7, kRegCatShift = 3 };
 struct RegClasses {
     std::vector<uint8> kind = std::vector<uint8>(kNumRegs);
     std::vector<uint32> mask = std::vector<uint32>(kNumRegs);
@@ -105,7 +149,7 @@ static const RegClasses& reg_classes() {
                 else if (vulkan_shader_key_mask(reg, mask)) kind = mask ? kRegCounted | kRegMasked : 0;
             }
             if (kind && program_reg(reg)) kind |= kRegProgram;
-            c.kind[reg] = kind;
+            c.kind[reg] = uint8(kind | g_reg_cat[reg] << kRegCatShift);
             c.mask[reg] = mask;
         }
         return c;
@@ -130,6 +174,7 @@ static void apply_small_regs(uint32 first, const uint32* v, uint32 n) {
         const uint32 reg = first + i, value = v[i], old = g_regs[reg];
         if (old != value) {
             changed = true;
+            if (const uint32 cats = g_reg_cat[reg]) bump_categories(cats);
             if (classify) {
                 if (rprof::fast_class_reg(reg)) rprof::g_reg_dirty |= 1;
                 else rprof::note_other_reg(reg);
@@ -163,6 +208,8 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
     // uniform registers (often hundreds of words a call) never move the shader-state counters, so
     // the comparison that decides those is skipped: compared and then copied, they were ~15% of the
     // render thread on the desktop
+    if (!n) return;
+    mark_written(first, n);
     if (first >= (uint32)mmSQ_ALU_CONSTANT0_0 && first + n <= (uint32)mmSQ_ALU_CONSTANT0_0 + 0x1000) {
         memcpy(&g_regs[first], v, n * 4);
         if (g_shadow) memcpy(&g_shadow[first], v, n * 4);
@@ -216,22 +263,24 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
             }
         } else
 #endif
-        // uniform register uploads (often hundreds of words) never count: no per-register check
-        if (first < (uint32)mmSQ_ALU_CONSTANT0_0 || first + n > (uint32)mmSQ_ALU_CONSTANT0_0 + 0x1000) {
+        // (writes that lie wholly in the uniform registers took the fast path above): the shader-state counters
+        // and the register categories (gx2.h) from one table, in one pass over the changed registers
+        {
             const RegClasses& classes = reg_classes();
-            bool bumped = false;
+            bool stateBump = false, regsBump = false;
+            uint32 cats = 0;
             for (uint32 i = 0; i < n; i++) {
                 const uint32 reg = first + i, old = g_regs[reg];
                 if (old == v[i]) continue;
                 const uint8 c = classes.kind[reg];
-                if (!c || ((c & kRegMasked) && !((old ^ v[i]) & classes.mask[reg]))) continue;
-                if (!bumped) g_shader_state_gen++;
-                bumped = true;
-                if (!(c & kRegProgram)) {
-                    g_shader_regs_gen++;
-                    break;
-                }
+                cats |= c >> kRegCatShift;
+                if (!(c & kRegShaderBits) || ((c & kRegMasked) && !((old ^ v[i]) & classes.mask[reg]))) continue;
+                stateBump = true;
+                if (!(c & kRegProgram)) regsBump = true;
             }
+            g_shader_state_gen += stateBump;
+            g_shader_regs_gen += regsBump;
+            if (cats) bump_categories(cats);
         }
         memcpy(&g_regs[first], v, n * 4);
     }
@@ -241,6 +290,8 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
 // ---------------------------------------------------------------- display list recording
 struct Recording {
     uint32 start = 0, pos = 0, end = 0;
+    uint32 last = 0;  // the last recorded command's header (round 45: register writes merge into it), 0 = none
+    uint32 recorded = 0, merged = 0;  // (the [gx2] line's counts: per thread, added up at GX2EndDisplayList)
 };
 static thread_local Recording t_rec;
 
@@ -314,7 +365,26 @@ constexpr size_t kStageWords = 1024;
 struct Staging {
     std::vector<uint32> words;
     int eligible = -1;  // -1: not decided yet
+    size_t last = SIZE_MAX;  // the last staged command's header (round 45: register writes merge into it)
+    uint32 staged = 0, merged = 0;  // (the [gx2] line's counts, added up when the block is handed over)
 };
+// Round 45. While the render thread waits for work, a block was handed over at every command: near Dragon Roost
+// and the volcano (the render thread ~75% busy, ~55,000 commands a frame) that was a queue lock and often a kernel
+// wake-up for nearly every GX2 call, on the main thread, which limits the frame rate there. An idle render thread
+// now gets the block once it holds WWHD_GX2_IDLE_PUBLISH words (default 512; 0 = at once, as before), or at a
+// flush, wait, fence or swap, or when the thread gives up its core.
+const size_t g_idlePublishWords = [] {
+    const char* e = getenv("WWHD_GX2_IDLE_PUBLISH");
+    return e && *e ? size_t(strtoul(e, nullptr, 10)) : size_t(512);
+}();
+// Round 45: single-register writes (shader binds write 10-16 of them one at a time) merge into one OP_SET_REG_PAIRS
+// command, and a write of the registers right after the previous OP_SET_REGS command's extends it
+// (WWHD_GX2_COALESCE=0: every write its own command, as before)
+const bool g_coalesce = [] {
+    const char* e = getenv("WWHD_GX2_COALESCE");
+    return !(e && *e == '0');
+}();
+std::atomic<uint64_t> g_publishes{0}, g_wakes{0}, g_staged{0}, g_merged{0}, g_recorded{0};
 thread_local Staging t_stage;
 bool staging_on() {
     static const bool on = [] {
@@ -331,9 +401,55 @@ void publish_staged() {
     {
         std::lock_guard<std::mutex> lk(g_q_mutex);
         g_q_pending.insert(g_q_pending.end(), s.words.begin(), s.words.end());
-        if (g_q_waiting) g_q_cv.notify_one();
+        g_publishes.fetch_add(1, std::memory_order_relaxed);
+        g_staged.fetch_add(s.staged, std::memory_order_relaxed);
+        g_merged.fetch_add(s.merged, std::memory_order_relaxed);
+        if (g_q_waiting) {
+            g_q_cv.notify_one();
+            g_wakes.fetch_add(1, std::memory_order_relaxed);
+        }
     }
     s.words.clear();
+    s.last = SIZE_MAX;
+    s.staged = s.merged = 0;
+}
+
+// (the command-stream figures of the 5 s [gx2] line: hand-overs to the render thread, kernel wake-ups among them,
+// commands staged, register writes merged into an earlier command)
+void staging_stats(uint64_t& publishes, uint64_t& wakes, uint64_t& staged, uint64_t& merged, uint64_t& recorded) {
+    recorded = g_recorded.exchange(0, std::memory_order_relaxed);
+    publishes = g_publishes.exchange(0, std::memory_order_relaxed);
+    wakes = g_wakes.exchange(0, std::memory_order_relaxed);
+    staged = g_staged.exchange(0, std::memory_order_relaxed);
+    merged = g_merged.exchange(0, std::memory_order_relaxed);
+}
+
+// a register write into the staging buffer: merged into the last command where it can be (round 45)
+static bool stage_regs(Staging& s, uint32 first, const uint32* values, uint32 count) {
+    if (!g_coalesce || s.last == SIZE_MAX) return false;
+    uint32& hdr = s.words[s.last];
+    const uint32 lastOp = hdr & 0xFF, lastN = hdr >> 8;
+    if (lastOp == OP_SET_REGS && lastN >= 1 && s.words[s.last + 1] + (lastN - 1) == first && lastN + count < (1u << 24)) {
+        s.words.insert(s.words.end(), values, values + count);  // the next registers: one longer write
+        hdr = OP_SET_REGS | ((lastN + count) << 8);
+        s.merged++;
+        return true;
+    }
+    if (count == 1 && lastOp == OP_SET_REG_PAIRS && lastN + 2 < (1u << 24)) {
+        s.words.push_back(first);
+        s.words.push_back(values[0]);
+        hdr = OP_SET_REG_PAIRS | ((lastN + 2) << 8);
+        s.merged++;
+        return true;
+    }
+    if (count == 1 && lastOp != OP_SET_REG_PAIRS) {  // a single write starts a pairs command (the next ones join it)
+        s.last = s.words.size();
+        s.words.push_back(OP_SET_REG_PAIRS | (2u << 8));
+        s.words.push_back(first);
+        s.words.push_back(values[0]);
+        return true;
+    }
+    return false;
 }
 
 static void enqueue(Op op, const uint32* payload, uint32 n) {
@@ -345,10 +461,14 @@ static void enqueue(Op op, const uint32* payload, uint32 n) {
         if (s.eligible) s.words.reserve(kStageWords + 1024);
     }
     if (s.eligible) {
-        s.words.push_back(op | (n << 8));
-        s.words.insert(s.words.end(), payload, payload + n);
+        s.staged++;
+        if (!(op == OP_SET_REGS && n >= 2 && stage_regs(s, payload[0], payload + 1, n - 1))) {
+            s.last = s.words.size();
+            s.words.push_back(op | (n << 8));
+            s.words.insert(s.words.end(), payload, payload + n);
+        }
         if (s.words.size() >= kStageWords || (op >= OP_FLUSH && op <= OP_FENCE) ||
-            g_progress.idle.load(std::memory_order_relaxed))
+            (g_progress.idle.load(std::memory_order_relaxed) && s.words.size() >= g_idlePublishWords))
             publish_staged();
         return;
     }
@@ -424,6 +544,31 @@ static void render_sync(int site = kSyncShutdown) {
 
 void emit(Op op, const uint32* payload, uint32 n) {
     if (t_rec.start) {
+        t_rec.recorded++;
+        // (round 45) a register write merged into the list's last command, as in the staging buffer: most of the
+        // game's commands come from display lists (~44,000 executed a frame at Outset for ~85 staged calls)
+        if (g_coalesce && op == OP_SET_REGS && n >= 2 && t_rec.last) {
+            uint32* hdr = (uint32*)mem::ptr(t_rec.last);
+            const uint32 lastOp = *hdr & 0xFF, lastN = *hdr >> 8, count = n - 1;
+            if (lastOp == OP_SET_REGS && lastN >= 1 && hdr[1] + (lastN - 1) == payload[0] &&
+                t_rec.pos + 4 * count <= t_rec.end && lastN + count < (1u << 24)) {
+                memcpy(mem::ptr(t_rec.pos), payload + 1, count * 4);  // the next registers: one longer write
+                t_rec.pos += 4 * count;
+                *hdr = OP_SET_REGS | ((lastN + count) << 8);
+                t_rec.merged++;
+                return;
+            }
+            if (count == 1 && lastOp == OP_SET_REG_PAIRS && t_rec.pos + 8 <= t_rec.end && lastN + 2 < (1u << 24)) {
+                uint32* w = (uint32*)mem::ptr(t_rec.pos);
+                w[0] = payload[0];
+                w[1] = payload[1];
+                t_rec.pos += 8;
+                *hdr = OP_SET_REG_PAIRS | ((lastN + 2) << 8);
+                t_rec.merged++;
+                return;
+            }
+            if (count == 1) op = OP_SET_REG_PAIRS;  // (same words: the next single writes can join it)
+        }
         uint32 bytes = 4 * (n + 1);
         if (t_rec.pos + bytes > t_rec.end) {
             LOG("[gx2] display list overflow at %08X", t_rec.start);
@@ -432,6 +577,7 @@ void emit(Op op, const uint32* payload, uint32 n) {
         uint32* w = (uint32*)mem::ptr(t_rec.pos);
         w[0] = op | (n << 8);
         memcpy(w + 1, payload, n * 4);
+        t_rec.last = t_rec.pos;
         t_rec.pos += bytes;
         return;
     }
@@ -468,6 +614,13 @@ void checkpoint_vulkan_caches() {
 
 void set_regs(uint32 first, const uint32* values, uint32 count) {
     if (!count) return;
+    uint32 small[1 + 64];  // (most writes: up to 64 registers without the thread's heap buffer)
+    if (count <= 64) {
+        small[0] = first;
+        memcpy(&small[1], values, count * 4);
+        emit(OP_SET_REGS, small, count + 1);
+        return;
+    }
     static thread_local std::vector<uint32> buf;
     buf.resize(count + 1);
     buf[0] = first;
@@ -478,6 +631,7 @@ void set_reg(uint32 reg, uint32 value) { emit(OP_SET_REGS, {reg, value}); }
 
 void execute(const uint32* words, uint32 count) {
     uint32 i = 0;
+    uint64_t executed = 0;
     while (i < count) {
         uint32 hdr = words[i];
         Op op = (Op)(hdr & 0xFF);
@@ -487,11 +641,18 @@ void execute(const uint32* words, uint32 count) {
             return;
         }
         g_progress.op.store(op, std::memory_order_relaxed);
-        g_progress.commands.store(g_progress.commands.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-        execute_one(op, &words[i + 1], n);
-        g_progress.op.store(0xFF, std::memory_order_relaxed);
+        // register writes (~80% of the commands) straight to apply_regs: no dispatch through execute_one and
+        // execute_op unless the profiler counts them (round 43)
+        if (op == OP_SET_REGS && n && !rprof::enabled()) apply_regs(words[i + 1], &words[i + 2], n - 1);
+        else if (op == OP_SET_REG_PAIRS && !rprof::enabled())
+            for (uint32 k = 0; k + 1 < n; k += 2) apply_regs(words[i + 1 + k], &words[i + 2 + k], 1);
+        else execute_one(op, &words[i + 1], n);
         i += 1 + n;
+        executed++;
     }
+    // (once per batch: the watchdog only needs to see progress; op is left at the last command, 0xFF after)
+    g_progress.op.store(0xFF, std::memory_order_relaxed);
+    g_progress.commands.store(g_progress.commands.load(std::memory_order_relaxed) + executed, std::memory_order_relaxed);
 }
 
 static void set_context(uint32 ctx) {
@@ -505,7 +666,12 @@ static void set_context(uint32 ctx) {
         return;
     }
     g_shadow = it->second.data();
-    memcpy(g_regs, g_shadow, sizeof(g_regs));
+    for (uint32 w = 0; w < sizeof g_written_blocks / sizeof g_written_blocks[0]; w++)
+        for (uint64 bits = g_written_blocks[w]; bits; bits &= bits - 1) {
+            const uint32 block = w * 64 + uint32(__builtin_ctzll(bits));
+            memcpy(&g_regs[block * 256], &g_shadow[block * 256], 256 * 4);
+        }
+    bump_all_categories();
     g_shader_state_gen++;
     g_shader_regs_gen++;
     rprof::g_reg_dirty |= 2;  // draw classifier: a context load counts as a full state change
@@ -540,7 +706,7 @@ static void execute_one(Op op, const uint32* p, uint32 n) {
     rprof::Op kind;
     switch (op) {
     case OP_CALL: execute_op(op, p, n); return;
-    case OP_SET_REGS: case OP_SET_PROJ_REGS: kind = rprof::kOpRegs; break;
+    case OP_SET_REGS: case OP_SET_PROJ_REGS: case OP_SET_REG_PAIRS: kind = rprof::kOpRegs; break;
     case OP_DRAW: case OP_DRAW_INDEXED: kind = rprof::kOpDraw; rprof::classify_draw(); break;
     case OP_CLEAR_COLOR: case OP_CLEAR_DEPTH: case OP_CLEAR_BUFFERS: kind = rprof::kOpClear; break;
     case OP_COPY_SURFACE: kind = rprof::kOpCopy; break;
@@ -561,6 +727,9 @@ static void execute_op(Op op, const uint32* p, uint32 n) {
     switch (op) {
     case OP_NOP: break;
     case OP_SET_REGS: apply_regs(p[0], p + 1, n - 1); break;
+    case OP_SET_REG_PAIRS:
+        for (uint32 i = 0; i + 1 < n; i += 2) apply_regs(p[i], &p[i + 1], 1);
+        break;
     case OP_DRAW: render::draw(g_regs, p[0], p[1], 0, 0, p[2], p[3]); break;
     case OP_DRAW_INDEXED: render::draw(g_regs, p[0], p[1], p[2], p[3], p[4], p[5]); break;
     case OP_CLEAR_COLOR: {
@@ -877,9 +1046,13 @@ HLE(gx2, GX2GetContextStateDisplayList) {
 HLE(gx2, GX2BeginDisplayListEx) {
     t_rec.start = t_rec.pos = arg(c, 0);
     t_rec.end = arg(c, 0) + arg(c, 1);
+    t_rec.last = 0;
+    t_rec.recorded = t_rec.merged = 0;
 }
 HLE(gx2, GX2EndDisplayList) {
     uint32 size = t_rec.pos - t_rec.start;
+    if (t_rec.recorded) g_recorded.fetch_add(t_rec.recorded, std::memory_order_relaxed);
+    if (t_rec.merged) g_merged.fetch_add(t_rec.merged, std::memory_order_relaxed);
     t_rec = Recording{};
     ret(c, size);
 }
@@ -1029,10 +1202,15 @@ HLE(gx2, GX2SwapScanBuffers) {
         static uint64_t lastLate = 0;
         static uint64_t lastCommands = 0;
         const uint64_t commands = g_progress.commands.load(std::memory_order_relaxed);
+        uint64_t publishes, wakes, staged, merged, recorded;
+        staging_stats(publishes, wakes, staged, merged, recorded);
         LOG("[gx2] frame %llu, %.1f swaps/s, swap interval %u, late frames flipped at once %llu (WWHD_RELAXED_VSYNC %s); "
-            "%.0f GX2 commands per frame",
+            "%.0f GX2 commands per frame executed; per frame: %.0f GX2 calls recorded into display lists, %.0f staged "
+            "by the main thread, %.0f register writes merged into the command before (WWHD_GX2_COALESCE), %.0f "
+            "hand-overs to the render thread (%.0f woke it)",
             (unsigned long long)g_swap_count, 300 / s, g_swap_interval, (unsigned long long)(g_late_flips - lastLate),
-            relaxed_vsync() ? "on" : "off", double(commands - lastCommands) / 300.0);
+            relaxed_vsync() ? "on" : "off", double(commands - lastCommands) / 300.0, double(recorded) / 300.0,
+            double(staged) / 300.0, double(merged) / 300.0, double(publishes) / 300.0, double(wakes) / 300.0);
         lastCommands = commands;
         lastLate = g_late_flips;
         // WWHD_SCHED_STATS=1: report here, every 300 frames; =2: the scheduler thread reports every 5 s
@@ -1255,6 +1433,8 @@ void gx2_ss_load(ss::Reader& r) {
     uint32 active = r.u32();
     auto it = g_contexts.find(active);
     g_shadow = active && it != g_contexts.end() ? it->second.data() : nullptr;
+    memset(g_written_blocks, 0xFF, sizeof g_written_blocks);  // (the loaded files: every block may differ)
+    bump_all_categories();
     g_shader_state_gen++;
     g_shader_regs_gen++;
     g_swap_interval = std::max<uint32>(r.u32(), 1);

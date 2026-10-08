@@ -306,14 +306,13 @@ static void mem_watch_thread() {
 static void sched_tick_thread() {
     host::set_thread_name("sched tick");
     host::raise_thread_priority();
-    static const bool timed_stats = getenv("WWHD_SCHED_STATS") && atoi(getenv("WWHD_SCHED_STATS")) == 2;
     auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     for (;;) {
         std::this_thread::sleep_for(std::chrono::microseconds(500));
         flush_deferred_wakes();
-        if (timed_stats && std::chrono::steady_clock::now() >= next_report) {
+        if (std::chrono::steady_clock::now() >= next_report) {
             next_report += std::chrono::seconds(5);
-            threads::report_sched();
+            if (threads::sched_stats()) threads::report_sched();
         }
         for (int core = 0; core < 3; core++) {
             CoreSched& k = g_sched[core];
@@ -633,7 +632,9 @@ void service_end() {
 }  // namespace threads
 
 std::atomic<const char*> g_main_hle{nullptr};
-bool g_main_sampler_on = getenv("WWHD_MAIN_SAMPLER") && *getenv("WWHD_MAIN_SAMPLER") != '0';
+std::atomic<bool> g_main_sampler_on{getenv("WWHD_MAIN_SAMPLER") && *getenv("WWHD_MAIN_SAMPLER") != '0'};
+static std::atomic<bool> g_sched_stats{getenv("WWHD_SCHED_STATS") && atoi(getenv("WWHD_SCHED_STATS")) == 2};
+static std::atomic<bool> g_sampler_started{false};
 thread_local bool t_is_main_thread = false;
 
 // What the main thread's sends cost (WWHD_MAIN_SAMPLER logs it every 5 s): the clock is read only on
@@ -659,6 +660,13 @@ static void hle_sampler_thread() {
     auto next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!g_main_sampler_on.load(std::memory_order_relaxed)) {  // (switched off in the menu: idle until on again)
+            counts.clear();
+            total = 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            continue;
+        }
         const char* name = g_main_hle.load(std::memory_order_relaxed);
         total++;
         if (name) counts[name]++;
@@ -692,6 +700,22 @@ static void hle_sampler_thread() {
     }
 }
 
+namespace threads {
+void set_main_sampler(bool on) {
+    if (g_main_sampler_on.exchange(on) == on) return;
+    LOG("[main] runtime-call sampler %s (WWHD_MAIN_SAMPLER; menu)", on ? "on" : "off");
+    if (on && !g_sampler_started.exchange(true)) host::start_thread(hle_sampler_thread, 256 << 10);
+}
+bool main_sampler() { return g_main_sampler_on.load(std::memory_order_relaxed); }
+void set_sched_stats(bool on) {
+    if (g_sched_stats.exchange(on) == on) return;
+    LOG("[sched] per-thread core use every 5 s %s (WWHD_SCHED_STATS=2; menu)", on ? "on" : "off");
+    if (on) report_sched();  // (starts the measuring span: the first report covers the next 5 s)
+}
+bool sched_stats() { return g_sched_stats.load(std::memory_order_relaxed); }
+
+}  // namespace threads
+
 #ifdef __SWITCH__
 // guest threads (by name) that run above the render thread on the host like the audio threads:
 // WWHD_BOOST_THREADS, comma-separated, default "update_ubo"; empty turns it off
@@ -718,7 +742,7 @@ static void* thread_main(void* p) {
     t_cpu = &ht->cpu;
     t_is_main_thread = ht->is_main;
     ht->cpu.main_thread = ht->is_main;
-    if (ht->is_main && g_main_sampler_on)
+    if (ht->is_main && g_main_sampler_on.load() && !g_sampler_started.exchange(true))
         host::start_thread(hle_sampler_thread, 256 << 10);
     std::string name = mem::read_cstr(ld32(ht->guest + osthread::kName));
     host::set_thread_name(name.empty() ? "guest" : name.c_str());

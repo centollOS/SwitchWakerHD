@@ -76,6 +76,13 @@ bool ensure_core();   // service threads entering guest code; true if the core w
 void release_core();
 void set_service_core(uint32_t core);
 void report_sched();  // log per-thread core usage
+// diagnostics the settings menu turns on and off while the game runs (env.txt still sets them at start):
+// the main thread's runtime calls every 5 s (WWHD_MAIN_SAMPLER=1) and every game thread's core use every 5 s
+// (WWHD_SCHED_STATS=2)
+void set_main_sampler(bool on);
+bool main_sampler();
+void set_sched_stats(bool on);
+bool sched_stats();
 void dump_state();    // log every guest thread's state and guest call stack, and each core's owner (watchdog)
 }  // namespace threads
 struct BlockingScope {
@@ -138,14 +145,14 @@ PpcFunc hle_find_any(const char* name);
 // the runtime function the game's main thread is in (null: guest code), for the main-thread sampler
 // (threads.cpp hle_sampler): where its time goes, waits that keep its emulated core included
 extern std::atomic<const char*> g_main_hle;
-extern bool g_main_sampler_on;  // WWHD_MAIN_SAMPLER
+extern std::atomic<bool> g_main_sampler_on;  // WWHD_MAIN_SAMPLER, or the Switch tab (threads::set_main_sampler)
 extern thread_local bool t_is_main_thread;
 // Only the main thread writes g_main_hle, so a plain load and store do (the atomic exchange was
 // 2.6% of the main thread on the desktop), and only while the sampler runs.
 struct HleMark {
     const char* prev = nullptr;
     bool on;
-    HleMark(const Cpu* c, const char* name) : on(g_main_sampler_on && c->main_thread) {
+    HleMark(const Cpu* c, const char* name) : on(g_main_sampler_on.load(std::memory_order_relaxed) && c->main_thread) {
         if (on) {
             prev = g_main_hle.load(std::memory_order_relaxed);
             g_main_hle.store(name, std::memory_order_relaxed);

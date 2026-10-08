@@ -121,6 +121,10 @@ struct Surface {
              tileMode = 0, swizzle = 0;
     bool isDepth = false, gpuWritten = false, dirty = true;
     uint64_t writeSeq = 0, contentHash = 0, lastCheckedFrame = ~0ull, sparseHash = 0;
+    // writes (new writeSeq values) to any surface at its address: one counter shared by them all (S.addrWrites).
+    // Which of several surfaces at one address a texture lookup finds depends on their writeSeq order, so the
+    // draw path keeps such a lookup while this is unchanged (WWHD_DK_TEX_SHARED_CACHE). Null for private copies.
+    uint64_t* addrWrites = nullptr;
     uint64_t changedFrame = 0;   // the last frame its guest data was uploaded (upload_surface)
     uint64_t drawFrame = ~0ull;  // the last frame a draw rendered to it, and how many draws did
     uint32_t frameDraws = 0;
@@ -152,6 +156,7 @@ struct Surface {
 // every surface, by address and as a list (surfaces.cpp); the TV scan buffer state (copy_to_scan)
 struct SurfaceSet {
     std::unordered_multimap<uint32_t, std::unique_ptr<Surface>> byAddr;
+    std::unordered_map<uint32_t, uint64_t> addrWrites;  // Surface::addrWrites (node-based: the pointers stay valid)
     std::vector<Surface*> list;
     std::unique_ptr<Surface> tvScan;
     std::unique_ptr<Surface> drcScan;  // the GamePad picture's copy, while it is drawn (gfxsw::gamepad_picture_drawn)
@@ -161,6 +166,11 @@ struct SurfaceSet {
 extern SurfaceSet S;
 
 uint64_t next_write_seq();
+// s was written (by the GPU, an upload or a copy): its new place in the write order
+inline void note_write(Surface* s) {
+    s->writeSeq = next_write_seq();
+    if (s->addrWrites) ++*s->addrWrites;
+}
 // Color surfaces with linear tiling are read by the game's CPU: the Picto Box copies the picture it keeps
 // (GX2CopySurface, caller 027B6BCC) into a linear-special surface and the album takes the pixels from guest memory
 // (black, with leftover lines, while nothing wrote them there); its 800x450 linear-aligned target is the other one.
@@ -177,7 +187,7 @@ inline void mark_gpu_written(Surface* s) {
         s->gpuWritten = true;
         R.surfaceEpoch++;
     }
-    s->writeSeq = next_write_seq();
+    note_write(s);
     if (!s->writebackPending && cpu_read_surface(s)) queue_guest_writeback(s);
 }
 // s is read by something other than the GamePad picture (gamepad_only)

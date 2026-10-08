@@ -55,6 +55,19 @@ struct DrawSkips {
 DrawSkips draw_skips_take();
 // the fixed-state skip of draws (WWHD_DK_FIXED_SKIP; the Switch tab turns it on and off for A/B tests)
 extern std::atomic<bool> g_fixedSkip;
+// round 40 (draw.cpp): depth-only draws with an empty pixel shader (WWHD_DK_DEPTH_ONLY), texture lookups at
+// addresses with several surfaces cached (WWHD_DK_TEX_SHARED_CACHE), vertex layouts kept per vertex shader
+// (WWHD_DK_VTX_LAYOUT_CACHE); executed draws per mid-frame submit (WWHD_DK_SUBMIT_DRAWS, 0 = only at GX2Flush,
+// GX2DrawDone and present; 1024 since round 41: each submit cost ~51 us at 1020 MHz, and in the 2026-10-08 A/B
+// 1024 gained 0.6-0.8 fps over 256 in the 25 fps view). All switchable in the Switch tab.
+extern std::atomic<bool> g_depthOnly, g_texSharedCache, g_vtxLayoutCache;
+// round 41: render targets, fixed state and viewport skipped while their registers are unchanged (gx2.h g_reg_gen;
+// WWHD_DK_REG_GENS)
+extern std::atomic<bool> g_regGens;
+// round 42: the draw's shaders' hot data prefetched once they are known (WWHD_DK_PREFETCH)
+extern std::atomic<bool> g_prefetch;
+constexpr uint32_t kSmallSubmitDraws = 256, kBigSubmitDraws = 1024, kDefaultSubmitDraws = kBigSubmitDraws;
+extern std::atomic<uint32_t> g_submitDraws;
 
 // P4 (lookup and indices): GX2Invalidate's flags and GX2DrawDone, from backend.cpp (index lists go stale at
 // attribute-buffer invalidates, WWHD_DK_INDEX_GEN); every 5 s the '[dk] lookup per frame' line (frames since

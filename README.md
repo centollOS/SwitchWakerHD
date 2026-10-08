@@ -129,7 +129,7 @@ sdmc:/switch/wwhd/
 ├── shadercache_dksh.bin      compiled shaders (optional, see above)
 ├── game/                     your extracted game: code/, content/, meta/
 ├── env.txt                   optional: WWHD_* options, one NAME=value per line
-└── (created by the game: save/, settings.ini, logs/, wwhd.log, shader caches, captures/)
+└── (created by the game: save/, settings.ini, logs/, shader caches, captures/)
 ```
 
 Put the SD card in the computer (or mount it over USB with hekate's *Tools → USB Tools → SD Card*)
@@ -152,7 +152,8 @@ and copy the files.
 - Settings from the options menu: `settings.ini`. `env.txt` values win over it at every start.
 - To update, replace `wwhd.nro` (and `shadercache_dksh.bin` if you rebuilt it). Saves, settings and
   caches stay.
-- Logs, if something goes wrong: `wwhd.log` (this run) and `logs/` (the latest sessions).
+- Logs, if something goes wrong: `logs/`, one `wwhd_<date>_<time>.log` per session (the newest is this
+  run); the 10 most recent are kept.
 
 ## Options
 

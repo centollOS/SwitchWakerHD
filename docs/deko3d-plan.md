@@ -274,7 +274,7 @@ Síntomas: el mar plano azul saturado (sin olas ni espuma) y cuadraditos grises 
 5. **Cerrar el juego desde el menú HOME** (así el log se cierra entero) y **montar la SD en el Mac** (hekate UMS). No
    hace falta mandar nada a mano: se leen `sdmc:/switch/wwhd/captures/<frame>/` (`frame_<n>.png` = imagen de TV,
    `frame_<n>_window.png` = pantalla final con el contador, `target_*.png`, `tex_*.png` y `tex_*_upload.png`),
-   `sdmc:/switch/wwhd/wwhd.log` y `sdmc:/switch/wwhd/logs/`. Basta con decir en una frase qué se veía mal (qué objeto
+   `sdmc:/switch/wwhd/logs/` (el log de la sesión es el más reciente). Basta con decir en una frase qué se veía mal (qué objeto
    o zona: "la hierba negra", "el mar a cuadros"...), para buscarlo en las capturas.
 6. **wwhd_dk_release.nro** después, solo si el debug fue bien: mismo recorrido, para los tiempos (`fps`, `[hitch]`,
    `[dk] GPU passes`, `[dk] internal resolution`).

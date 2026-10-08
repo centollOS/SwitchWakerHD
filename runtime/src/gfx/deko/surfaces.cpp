@@ -168,6 +168,36 @@ LevelGeom level_geom(const Surface* s, uint32_t level) {
     return g;
 }
 
+// ---- fast detiling (round 45, WWHD_DK_FAST_DETILE, on unless 0). In thin tile modes the elements of an 8x8 micro
+// tile sit at fixed offsets from the micro tile's first element (the micro tile is contiguous; its pipe, bank and
+// macro tile are the same for all of it), so the address function runs once per micro tile instead of once per
+// element (as Cemu's AddrLibFastDecode). The 64 offsets come from the address function itself (the first micro
+// tile), and the first level decoded for each (tile mode, element size, depth layout) is checked element by element
+// against the address function: a mismatch turns the fast path off for that combination (logged).
+const bool g_fastDetile = [] {
+    const char* e = getenv("WWHD_DK_FAST_DETILE");
+    return !(e && *e == '0');
+}();
+bool thin_tile_mode(Latte::E_HWTILEMODE tm) {
+    switch (uint32_t(tm)) {
+    case 2: case 4: case 5: case 6: case 8: case 9: case 10: case 12: case 14: return true;  // 1D/2D/2B/3D/3B thin
+    default: return false;
+    }
+}
+enum class FastState : uint8_t { Unchecked, Good, Bad };
+FastState g_fastState[32][17][2];  // [tile mode][bytes per element][depth layout]
+uint64_t g_fastLevels = 0, g_slowLevels = 0;
+inline void copy_element(uint8_t* dst, const uint8_t* src, uint32_t bytes) {
+    switch (bytes) {
+    case 1: *dst = *src; break;
+    case 2: memcpy(dst, src, 2); break;
+    case 4: memcpy(dst, src, 4); break;
+    case 8: memcpy(dst, src, 8); break;
+    case 16: memcpy(dst, src, 16); break;
+    default: memcpy(dst, src, bytes); break;
+    }
+}
+
 // guest level -> host rows of bw blocks (converted), written row by row to dst (write-only memory)
 void decode_level(Surface* s, uint32_t level, uint8_t* dst) {
     const FormatInfo& f = s->fmt;
@@ -185,6 +215,61 @@ void decode_level(Surface* s, uint32_t level, uint8_t* dst) {
     const uint8_t* src = mem::ptr(g.address[level]);
     const bool linear = tm == Latte::E_HWTILEMODE::TM_LINEAR_GENERAL || tm == Latte::E_HWTILEMODE::TM_LINEAR_ALIGNED;
     const bool macro = Latte::TM_IsMacroTiled(tm);
+    const uint32_t bpb = f.bytesPerBlock;
+    FastState* fast = uint32_t(tm) < 32 && bpb <= 16 ? &g_fastState[uint32_t(tm)][bpb][depthData] : nullptr;
+    if (g_fastDetile && fast && *fast != FastState::Bad && thin_tile_mode(tm)) {
+        const size_t rawRow = size_t(lg.bw) * bpb;
+        static std::vector<uint8_t> band;
+        band.resize(rawRow * 8);
+        for (uint32_t z = 0; z < lg.slices; z++) {
+            LatteAddrLib::CachedSurfaceAddrInfo ci;
+            if (macro)
+                LatteAddrLib::SetupCachedSurfaceAddrInfo(&ci, z, 0, bpp, pitch, height, lg.slices, 1, tm, depthData,
+                                                         pipeSwizzle, bankSwizzle);
+            auto ref = [&](uint32_t x, uint32_t y) {
+                return macro ? LatteAddrLib::ComputeSurfaceAddrFromCoordMacroTiledCached(x, y, &ci)
+                             : LatteAddrLib::ComputeSurfaceAddrFromCoordMicroTiled(x, y, z, bpp, pitch, height, tm, depthData);
+            };
+            uint32_t rel[64];
+            const uint32_t base0 = ref(0, 0);
+            for (uint32_t i = 0; i < 64; i++) rel[i] = ref(i & 7, i >> 3) - base0;
+            if (*fast == FastState::Unchecked) {  // (once per combination) every element against the address function
+                bool good = true;
+                for (uint32_t y = 0; y < lg.bh && good; y++)
+                    for (uint32_t x = 0; x < lg.bw && good; x++)
+                        good = ref(x, y) == ref(x & ~7u, y & ~7u) + rel[(y & 7) * 8 + (x & 7)];
+                *fast = good ? FastState::Good : FastState::Bad;
+                LOG("[dk] fast detiling for tile mode %u, %u-byte elements%s: %s", uint32_t(tm), bpb,
+                    depthData ? " (depth layout)" : "", good ? "checked, on" : "MISMATCH, off for this combination");
+                if (!good) break;
+            }
+            for (uint32_t ty = 0; ty < lg.bh; ty += 8) {
+                const uint32_t rows = std::min<uint32_t>(8, lg.bh - ty);
+                for (uint32_t tx = 0; tx < lg.bw; tx += 8) {
+                    const uint32_t cols = std::min<uint32_t>(8, lg.bw - tx);
+                    const uint8_t* tile = src + ref(tx, ty);
+                    for (uint32_t ry = 0; ry < rows; ry++) {
+                        uint8_t* o = band.data() + ry * rawRow + size_t(tx) * bpb;
+                        const uint32_t* r = rel + ry * 8;
+                        for (uint32_t rx = 0; rx < cols; rx++) copy_element(o + rx * bpb, tile + r[rx], bpb);
+                    }
+                }
+                for (uint32_t ry = 0; ry < rows; ry++) {
+                    uint8_t* out = dst + (size_t(z) * lg.bh + ty + ry) * lg.rowBytes;
+                    if (f.convert == Convert::NONE) memcpy(out, band.data() + ry * rawRow, lg.rowBytes);
+                    else {
+                        convert_row(f.convert, band.data() + ry * rawRow, converted.data(), lg.bw);
+                        memcpy(out, converted.data(), lg.rowBytes);
+                    }
+                }
+            }
+        }
+        if (*fast == FastState::Good) {
+            g_fastLevels++;
+            return;
+        }
+    }
+    g_slowLevels++;
     for (uint32_t z = 0; z < lg.slices; z++) {
         LatteAddrLib::CachedSurfaceAddrInfo ci;
         if (macro)
@@ -631,7 +716,7 @@ void upload_surface(Surface* s) {
     upload_end();
     depth_changed(s);
     s->contentHash = hash;
-    s->writeSeq = next_write_seq();
+    note_write(s);
     s->dirty = false;
     s->changedFrame = R.frame;
     if (scale != 1.0f) rescale_surface(s, scale, true);
@@ -897,6 +982,7 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
     s->scale = forRendering ? wanted_scale(s.get()) : 1.0f;
     create_surface_image(s.get());  // (throws for an unsupported format: the GX2 command is skipped and logged)
     s->scalable = screen_shaped(s.get());
+    s->addrWrites = &S.addrWrites[d.addr];
     auto* raw = s.get();
     S.byAddr.emplace(d.addr, std::move(s));
     S.list.push_back(raw);
@@ -1193,7 +1279,7 @@ Surface* volume_source(Surface* s, const uint32_t* texWords) {
         transfer_begin();
         copy_image(s, 0, 0, copy.get(), 0, 0, s->img.pw, s->img.ph, s->img.layers);
         transfer_end();
-        copy->writeSeq = next_write_seq();
+        note_write(copy.get());
         seq = s->writeSeq;
     }
     return copy.get();

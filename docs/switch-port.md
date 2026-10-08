@@ -22,6 +22,15 @@ Status as of 2026-10-07 (runtime round 30, branch `main`, merged with upstream d
 2. **Platform.** Horizon `.nro` was chosen over L4T Linux, as the user preferred.
 3. **Game data.** The user provides their own decrypted dump in `Rom/Decrypted/<title folder>/` (US, v0: `code/`, `content/`, `meta/`). `Rom/` is gitignored. Generated code (`build/gen`) comes from the user's dump and must never be committed.
 
+## Rule for test builds: options in the menu, not env.txt
+
+Every option, A/B switch or diagnostic that a hardware test asks the player to turn on goes into the in-game
+settings menu (Switch tab; diagnostics and A/B switches in its Debug section), switchable while the game runs and
+logged with the frame it changed at. Test instructions name the menu entry. `env.txt` remains an override read at
+start (for scripted runs and defaults), never the only way to reach a test option. (2026-10-08: round 45's first
+instructions asked for two `env.txt` lines for the main-thread and per-thread diagnostics; they are now Debug
+entries.)
+
 ## Building
 
 ### Recompile the game (once per dump)
@@ -131,7 +140,7 @@ Total backed memory is 1448 MiB, so hbmenu must run in title-takeover mode, not 
 ### Process, threads and logging
 
 - **`runtime/src/main.cpp` (Switch only):**
-  - Creates `sdmc:/switch/wwhd`, changes into it, and redirects stderr to `wwhd.log` (line-buffered).
+  - Creates `sdmc:/switch/wwhd`, changes into it, and redirects stderr to `logs/wwhd_<date>_<time>.log` (line-buffered; see "Session logs" below).
   - Reads `env.txt`: `KEY=VALUE` lines become environment variables, and `--opt` lines become extra arguments.
   - `std::set_terminate` logs uncaught exceptions. hbloader intercepts CPU exceptions, so crashes appear only in Atmosphère's `/atmosphere/crash_reports`.
 - **`runtime/src/platform/host.h`:** Switch versions of the thread name (no-op), `executable_base` (`svcQueryMemory`), `page_size` (0x1000), `config_dir` (`sdmc:/switch/wwhd`) and `replace_file` (removes the target first). It also adds:
@@ -583,7 +592,7 @@ Checks: `WWHD_RECOMP_CR_CHECK=1` (dropped CR bits poisoned; leaves now check the
 
 **Hot game code together (`tools/recomp/hot_functions.txt`).** A call-graph profile of the main thread has no dominant subsystem (actor logic ~56%, drawing ~26%, spread over thousands of functions), but the code that runs is small: in scripted gameplay 500 functions make 88% of game-code time (1.4 MB), all 2,827 sampled ones 4.4 MB, out of 35 MB. The list (gameplay and title runs, hottest first, 2,977 functions) makes recomp.py emit those functions into `code_hot_*.c` in that order; in the Switch binary they now span 4.5 MB instead of being spread over 35 MB (fewer instruction-cache, TLB and L2 misses on the A57). `WWHD_RECOMP_HOT=0` turns it off. Functions not in the list stay where they were.
 
-**Session logs.** Each session writes `wwhd.log` and the same lines to `logs/wwhd_<date>_<time>.log` (console clock at startup; the user's console reads January 2025), so the newest file in `logs/` is always the latest session; the newest 30 are kept. Both start with `[session] <date> <time> (build ...)`. A `wwhd.log` from an older build is moved to `logs/wwhd_earlier_build_<n>.log` first. (The first version of this round moved the previous session's `wwhd.log` into `logs/` at startup, which made the newest file there the session before the last one: `wwhd_undated_1736954247.log` was the round 7 build's log.)
+**Session logs.** Each session writes `wwhd.log` and the same lines to `logs/wwhd_<date>_<time>.log` (console clock at startup; the user's console reads January 2025), so the newest file in `logs/` is always the latest session; the newest 30 are kept (10 since round 39, which also dropped `wwhd.log`). Both start with `[session] <date> <time> (build ...)`. A `wwhd.log` from an older build is moved to `logs/wwhd_earlier_build_<n>.log` first. (The first version of this round moved the previous session's `wwhd.log` into `logs/` at startup, which made the newest file there the session before the last one: `wwhd_undated_1736954247.log` was the round 7 build's log.)
 
 #### Hardware test of round 8 (two sessions, 2026-10-04: uniform blocks on, then `WWHD_GL_UNIFORM_BLOCKS=0`)
 
@@ -1127,6 +1136,280 @@ shutter was pressed.
   `[dk] ... written back to guest memory for the CPU (N ms with the GPU wait)`.
 - Metal: only the GX2 convention changed (a 3D buffer is drawn as layers). Its 3D sampling and writeback are
   unchanged and untested.
+
+### Round 39: session logs only in `logs/`, the newest 10 kept (not yet tested on hardware)
+
+Requested 2026-10-08. Each session now writes a single file, `logs/wwhd_<date>_<time>.log` (console clock at
+startup, the same names as before); there is no `wwhd.log` next to the `.nro` any more, and no second copy of
+the lines. At startup `logs/` is trimmed to the 9 most recent session logs, so with the new one there are at
+most 10; the oldest go first (file modification time, then name). A `wwhd.log` left in the folder by an
+earlier build is moved into `logs/` by the date in its `[session]` line, or deleted when that session's file
+is already there (it held the same lines); either way it then counts among the 10. The writer thread still
+writes pending lines every 250 ms, and `fatal()`, crashes and `log_flush()` write them at once. The first line
+now reads `[session] <date> <time> (build ...); log logs/wwhd_<date>_<time>.log (the newest 10 sessions are
+kept in logs/)`. If `logs/` cannot be opened, the log falls back to `wwhd.log`.
+
+### Round 40: the render thread at stock clocks (not yet tested on hardware)
+
+**Log `logs-switch/wwhd_2026-10-08_08-10-27.log`** (round 39 build; stock handheld clocks from line 289: CPU 1020,
+GPU 307, memory 1331 MHz). Most of the play is at 28-30 fps; near the pig farm on Outset it falls to 21.9-22.5 fps at
+6,700-6,900 draws a frame (lines 764-890):
+
+| Figure (22 fps view) | Value | Meaning |
+|---|---|---|
+| render thread busy | 998 ms/s (CPU 961) | it never waits for commands: **it alone sets the frame rate**, 45 ms a frame |
+| draw path | 5.1 us x 6,738 = 34 ms/frame | lookup 0.4 + indices 0.3 + resources 2.6 (targets 0.59, guest uniform blocks 0.34, textures 0.75, ufBlock 0.88) + state 1.5 (ordering/binds 0.66, fixed 0.30, vertices 0.59) |
+| outside the draw path | ~9 ms/frame | the other ~40,000 GX2 commands a frame (register writes), submits 1.5 ms, texture checks 0.4 ms |
+| passes | shadow map 1024x1024: 3,663 draws; main 1280x720: 2,898 draws | over half the draws are depth-only shadow draws |
+| texture lookups | 12,440/frame, 89% cached; 1,420 misses at 0.9 us | the per-unit table found only 19% of the misses |
+| vertex copies | 2.3 MiB/frame copied (15 MiB reused), copy 25 ms/s | small: copies on another core would gain little |
+| submits | 28/frame, 51 us each (32 ms/s) | |
+| dynamic resolution | stayed at 1.00 | correct: at each present the GPU had finished the previous frame (its 45 ms of `GPU passes` include waiting for mid-frame submits) |
+
+To reach 30 fps there, the render thread must go from 45 to under 33 ms a frame.
+
+**Changes** (each with an off switch in `env.txt`, and switchable while the game runs in the Switch tab, Debug section;
+each change is logged as `[dk] A/B: ... ON/OFF from frame N`):
+
+| Change | Why | Off switch |
+|---|---|---|
+| The upstream render-thread profiler (render_prof, from the v0.2.3-v0.2.6 sync) is off on the Switch. It hooked every GX2 command (two calls), every draw and every changed register (a second pass over the registers and a counter in a 256 KB table), and nothing showed its report on the Switch. On (Switch tab or `WWHD_PROFILE=1`) it logs its `[prof]` lines every 120 frames. | Pure overhead on the render thread | `WWHD_PROFILE=1` turns it on |
+| **Depth-only draws without their pixel shader.** A draw with a depth buffer and no color target whose pixel shader cannot change depth, stencil or memory (its GLSL has no `discard`, alpha test, `gl_FragDepth` or image stores: `Shader::fragmentEffects`, set at translation) runs an empty embedded pixel shader (`shaders/depth_fsh.glsl`); its pixel stage's textures, guest uniform blocks and ufBlock are neither looked up, packed nor bound. Alpha-tested casters (foliage) keep their shader. | The shadow maps are over half the draws; their pixel work can change nothing. Less GPU work in the shadow pass as well | `WWHD_DK_DEPTH_ONLY=0` |
+| **Texture lookups at shared addresses cached.** A texture whose address holds several surfaces (a render target sampled later, such as the shadow map) was looked up in full at every draw, because which surface is chosen depends on their write order. Each surface now points to one write counter per address (`Surface::addrWrites`, bumped by `note_write`), and the lookup is kept while that counter is unchanged. | Most of the 1,420 misses a frame (0.9 us each) | `WWHD_DK_TEX_SHARED_CACHE=0` |
+| **Vertex layouts kept per vertex shader.** The attribute layout (formats, locations, per-instance groups, bytes read) is built once per (fetch shader, vertex shader, set of bound buffers) and kept on the vertex shader; per draw only the buffers' addresses, sizes and strides are read. | 0.59 us/draw for vertex state | `WWHD_DK_VTX_LAYOUT_CACHE=0` |
+| A/B only: a submit every 1024 draws instead of 256 | 28 submits a frame at 51 us each; off by default until measured (the GPU then starts each part later) | `WWHD_DK_SUBMIT_DRAWS=1024` turns it on |
+
+New 5 s line: `[dk] round 40 per frame: depth-only draws without their pixel shader N (on); texture lookups at shared
+addresses N (cached), cached hits N; vertex layouts built N (kept per vertex shader); submit every N draws`.
+
+**Hardware test:** stand in the pig-farm view (the 22 fps spot) at stock clocks. After 30 s, open the menu, Switch tab,
+Debug, turn each switch off for ~30 s and on again, one at a time; then turn on "Submit every 1024 draws" for 30 s; then
+"Render profiler" for 30 s (its `[prof] ops ms/frame` line says how much of the frame the ~40,000 register commands take:
+the next target). Look for: fps and `render thread busy` in each window, shadows (all objects still cast them, foliage
+shadows keep their cut-outs), no missing textures.
+
+#### Hardware test of round 40 (`logs-switch/wwhd_2026-10-08_09-00-17.log`; CPU 1020, GPU 307, memory 1331 MHz)
+
+Pig-farm view (6,700-6,950 draws a frame), render thread still at 998 ms/s:
+
+| Window (log lines) | Settings | fps | us per draw |
+|---|---|---|---|
+| round 39 log, lines 844-890 | (round 39) | 21.9-22.5 | 5.1 |
+| 617-679 | round 40 defaults | 25.3-25.5 (6,300 draws) | 4.9 |
+| 744-844 | + submit every 1024 draws | 24.5-25.0 (6,940 draws) | 4.7-4.8 |
+| 870-885 | submits back to 256 | 24.3 | 4.7 |
+| 904-1138 | + render profiler on | 22.7-23.1 | 4.7-4.8 |
+| 1159-1316 | profiler on, submits 1024 | 23.5-23.9 | 4.7 |
+
+- Per draw 5.1 -> 4.7 us. Texture misses 1,420 -> 44 a frame (1,380 shared-address lookups now cached; table 85%).
+- Only ~185 of ~3,700 shadow draws ran without their pixel shader: the others' GLSL discards (the reason is logged
+  from round 41).
+- Submitting every 1024 draws: +0.6-0.8 fps, 8.6 submits a frame instead of 28. The upstream profiler costs ~1.5 fps.
+- Profiler report (instrumentation included): register commands 9.1 ms a frame (37,485), draws 30.5 ms, "other" 1.6 ms
+  for 23 commands (GX2SetContextState: the whole 256 KB register file copied each time); the game thread waits 15.7 ms
+  a frame in GX2DrawDone for the render thread. Of the draw path, the ufBlock is the largest part: 0.90 us a draw.
+
+### Round 41: context loads, ufBlock constants, submits (not yet tested on hardware)
+
+| Change | Why | Off switch |
+|---|---|---|
+| **Context loads copy only written registers.** `apply_regs` marks each block of 256 registers it writes; a GX2SetContextState copies only those blocks from the context's shadow (all others are zero in every shadow and in the register file; the block of VGT_PRIMITIVE_TYPE, which draws write directly, always counts; a save-state load marks every block). Was 256 KB per load, ~23 loads a frame. | ~1.4 ms a frame | none (same result by construction) |
+| ~~ufBlock constants skipped while unchanged~~ (per-vec4 change stamps on the ALU constants). **Removed in round 42**: only ~2,200 vec4 a frame were unchanged (the game changes its constants for nearly every draw), and the A/B showed no difference. | | |
+| **A submit every 1024 draws** is the default (A/B above). | | `WWHD_DK_SUBMIT_DRAWS=256`, Switch tab |
+| The profiler's clock on the Switch is the counter register (was `steady_clock`), so its `[prof]` figures include less of its own cost. | | |
+| New: `[cpu] cores busy (since the last report): core 0 X%, core 1 Y%, core 2 Z%` every 5 s (a 16 KB thread on each core reads that core's idle time once a second). Says whether core 0 has room to take render-thread work, the next large step. | | |
+| New in the `[dk] round 40 per frame` line: depth-only draws that kept their pixel shader, by reason (alpha test, other discard, depth output / memory writes), and ufBlock constants skipped. | | |
+| **Register generations** (`gx2::g_reg_gen`, three categories: render targets, fixed state, viewport). `apply_regs` advances a category's counter when one of its registers changes value (context and save-state loads advance all). A draw then reuses the previous draw's render-target lookup (`GetActiveColorBufferMask`, `color_target` x n, `depth_target`) while the targets counter, the surface epochs and the pixel shader are the same; keys the fixed state on the counter instead of gathering 25 scattered registers; and skips `set_viewport` while the viewport counter and the scale are the same. | targets 0.63 + fixed 0.28 us a draw | `WWHD_DK_REG_GENS=0`, Switch tab |
+| The GX2 executor updates the watchdog's command count once per batch instead of per command (~37,000 register commands a frame). | | |
+| Texture cache hits test `upload_surface`'s and `volume_source`'s early outs inline (no calls for the ~12,500 hits a frame). | | |
+
+Expected at the pig farm (~6,900 draws, ~40 ms a frame in round 40): context loads ~1.4 ms, ufBlock 2-3 ms, register
+generations ~2-3 ms, the rest ~0.5 ms: roughly 6-8 ms, i.e. ~32-34 ms a frame (29-31 fps). Estimates until the log
+says otherwise.
+
+**Hardware test:** the pig-farm view at stock clocks for a minute with the defaults, then in the Switch tab (Debug)
+"Skip unchanged constants" off for 30 s and on again, then "Skip unchanged target/state registers" the same way.
+Look at the picture while each is on (blend, shadows, the HUD, viewports after menus and scene changes). Send the
+log; the `[cpu]` lines are the main new information.
+
+#### Hardware test of round 41 (`logs-switch/wwhd_2026-10-08_11-25-40.log`; CPU 1020, GPU 307, memory 1331 MHz)
+
+| Window (log lines) | Settings | fps at the pig farm (~6,700-6,900 draws) | us per draw |
+|---|---|---|---|
+| round 40 | | ~25 | 4.7-4.8 |
+| 502-652 | round 41 defaults | 27.3-28.3 | 4.4-4.5 |
+| 667-858 | constant stamps off | 27.3-29.5 (no change) | 4.4-4.5 |
+| 872-1304 | register generations off | 26.4-28.0 | 4.6-4.8 |
+| 1319-1363 | both on again | 28.0-29.8 | 4.3 |
+
+- The register generations are worth ~0.2 us a draw (~1.5 fps there; the owner: "did wonders"); the constant stamps nothing.
+- The intro still reaches 27 fps (owner); its first reports (7,264 draws, render thread 998 ms/s) are the same limit.
+- `[cpu] cores busy`: core 1 (the game's main thread) 78-80%; cores 0 and 2 together ~130-140% (the render thread moves
+  between them): **about 60% of a core is free** on cores 0 and 2.
+- Shadow draws: 3,504 a frame keep their pixel shader for the **alpha test** (12 for another discard): a depth-only
+  variant would need an alpha-only shader.
+- The draw path's remaining stage times look like cache misses: the guest-uniform-block step costs 0.33 us a draw for a
+  loop of 32 slot checks with 0.07 blocks a draw. Shaders change ~1,500 times a frame and their per-draw fields lay
+  across several cache lines (and the decompiler's object, the ufBlock cache and the vertex layout).
+
+### Round 42: shader data in two cache lines and prefetched (not yet tested on hardware)
+
+| Change | Off switch |
+|---|---|
+| `Shader` is 64-byte aligned and starts with everything the draw path reads: the decompiler pointer, pointers to its ufBlock cache and vertex layout, flags, the ufBlock slot, uniform-block and texture slots, the list of uniform blocks it reads, and copies of the decompiler's texture units, sampler assignments and depth-compare flags (two cache lines). The uniform-block loop walks the list of used blocks instead of 16 slots per stage. | (layout) |
+| As soon as a draw knows its shaders, those two lines of both shaders are prefetched; after the index stage, what they point to (the ufBlock cache's operations and copy, the vertex layout) and the surfaces of each texture unit's cached lookup. | `WWHD_DK_PREFETCH=0`, Switch tab "Prefetch shader data" |
+| `apply_regs`: the shader-key classes and the register categories come from one table in one pass over the changed registers (was two tables, two passes). | none |
+| Removed: the ufBlock constant stamps (round 41). | |
+
+**Hardware test:** the pig farm and the intro at stock clocks with the defaults; then "Prefetch shader data" off for 30 s and
+on again at the pig farm. Look at the `us per draw` stage times (uniform blocks, textures, ufBlock, vertices).
+
+#### Hardware test of round 42 (`logs-switch/wwhd_2026-10-08_11-43-28.log`)
+
+- Stock clocks (CPU 1020, GPU 307, memory 1331), pig farm (~6,900 draws): **28.3-29.1 fps**, 4.3-4.4 us a draw
+  (round 41: 27.3-28.3). The guest-uniform-block step fell from 0.33 to 0.11 us a draw (the cache misses), textures
+  0.56 -> 0.50; misses moved partly into the targets step (0.46 -> 0.56).
+- CPU at 1122 MHz (line 705): 29.8-30.0 fps in the same views (the owner: solid 30 at 1.1 GHz and stock GPU).
+- Still render-thread bound at 1020 MHz: busy 998 ms/s, **CPU 968 ms/s**: ~30 ms a second the render thread had work
+  and was not running. It ran at libnx's default priority 59, which Horizon time-slices with the game's threads of
+  emulated cores 0 and 2, and it moved between host cores 0 and 2.
+- About 2 ms a frame are missing at 1020 MHz (34.7 ms a frame for 33.3).
+
+### Round 43: the render thread's priority, guest copies on a helper thread (hardware-tested: a regression, removed in round 44)
+
+| Change | Why | Off switch |
+|---|---|---|
+| **The render thread above the game's threads** (priority 0x2C, the log and alarm threads' level; the audio and `update_ubo` threads stay above at 0x2B). It was at 59 since the port began (`host::boost_thread_priority` is a no-op on the Switch), time-sliced (10 ms) with the game's threads of cores 0 and 2. Those now run on the other core of the two, or when the render thread waits. | busy 998 vs CPU 968 ms/s; one core, a warm cache | `WWHD_RENDER_PRIORITY=0`, Switch tab "Render thread above game threads" |
+| **Guest copies on a helper thread.** `stream_guest` (vertex buffers and guest uniform blocks, ~2.3 MiB a frame, ~35 ms/s on the render thread) allocates the stream slice and queues the copy; a helper thread (priority 0x2C, cores 0 and 2) makes it. Every submit of the frame's command buffer and every GX2 fence (`Backend::sync_point`: DrawDone, swaps, CopySurface and save-state syncs, after which the game may change guest data) first drains the queue; a drain claims the remaining jobs itself, so it never waits for a helper that is not running. The helper spins ~2000 `yield`s after its last job, then sleeps on a light event that the render thread signals only when it is asleep. The copies are made at most one submit interval (1024 draws) later than before. New 5 s line: `[dk] guest copies: N queued per frame (KiB), X% done by the helper thread; render thread waited Y ms a frame at drains`. | ~35 ms/s of copies | `WWHD_DK_ASYNC_COPY=0`, Switch tab "Copies on a helper thread" |
+| Register-write commands (~80% of the ~45,000 GX2 commands a frame) go from the executor's loop straight to `apply_regs` (not through `execute_one` and `execute_op`) while the profiler is off. | | none |
+
+Expected at the pig farm at 1020 MHz: priority ~1 ms a frame (the 30 ms/s lost) plus fewer cold caches, copies up to ~1
+ms, the direct dispatch ~0.3-0.5 ms: about 2-2.5 ms, which is what 30 fps needs there. Estimates.
+
+**Hardware test:** stock clocks, the pig farm and the intro with the defaults; then in the Switch tab (Debug) "Copies on
+a helper thread" off for 30 s and on, and "Render thread above game threads" off for 30 s and on. Check that the
+sound, the game's speed and the controls feel the same with the render thread above (game threads on cores 0 and 2
+get less time), and that nothing flickers or shows stale geometry with the copies on the helper.
+
+#### Hardware test of round 43 (`logs-switch/wwhd_2026-10-08_12-19-08.log`, CPU 1122 MHz): a regression
+
+- The owner: performance much worse overall, crackling audio.
+- From boot, all three cores 97-100% busy (round 42: cores 0 + 2 ~130-140%, core 1 ~80%); the render thread was no
+  longer the limit (busy ~805 ms/s) but the pig farm ran at 23-25 fps (round 42 at the same 1122 MHz: ~30).
+- 18,398 `[game] kill DSP channel` lines (the game's own report when its sound processing falls behind; 0-165 in the
+  earlier logs), from boot (line 163), ~430 every 5 s, also after the helper copies were switched off.
+- Cause: the copy helper thread (priority 0x2C, above the game's threads on cores 0 and 2) spun between jobs (~600
+  jobs a frame: it never slept) and, by the cores' load with its switch off, kept a core busy anyway; the game's
+  threads on cores 0 and 2, among them its sound threads, were starved. The render thread's priority change did
+  nothing: the log shows its priority was already 0x2C (libnx's default for this thread), not 59 as assumed.
+
+### Round 44: round 43 removed except the direct register-write dispatch (not yet tested on hardware)
+
+The copy helper thread, `stream_copies_drain`, the backend sync-point hook and the render-thread priority switch are
+gone (and their Switch-tab switches); `stream_guest` copies on the render thread as in round 42. Kept: register-write
+commands go from the executor's loop straight to `apply_regs` while the profiler is off. Otherwise this is round 42.
+
+**Hardware test:** stock clocks (1020), the pig farm and the intro: fps, `render thread busy`, `[cpu]` (cores 0 + 2 should
+be back to ~130-140%) and no `kill DSP channel` lines. If possible, 30 s with "Render profiler" on at the pig farm:
+its `[prof] ops ms/frame` line (now timed with the counter register) says what the ~37,000 register commands cost.
+
+#### Hardware test of round 44 (`logs-switch/wwhd_2026-10-08_12-46-11.log`; CPU 1122, from line 602 1020; GPU 307)
+
+The owner: Outset at or near 30 fps. Dragon Roost: three bomb hits gave a short stutter and a dip to ~22 fps;
+sailing near Dragon Roost and the volcano island 25-28 fps.
+
+- **Sailing there the main thread is the limit, not the render thread**: core 1 at 96-98%, the render thread 580-760
+  ms/s with 2,000-3,300 draws a frame, the GPU idle 7.1 ms at each frame's start, dynamic resolution never triggered.
+  (Outset, 6,900 draws: the render thread at 998 ms/s, core 1 ~80%.)
+- 48,000-60,000 GX2 commands a frame there for ~2,500 draws (~20 a draw; Outset ~6.5): programs change at 2,448 of
+  3,034 draws, and a shader bind writes 10-16 registers one at a time.
+- The render thread there: shader lookup 2.2 us a draw (memo 10%, combinations 35%, **1,811 full lookups a frame**):
+  the direct-mapped 4,096-entry combination table thrashed with ~2,500 live combinations.
+- Stutters: bursts of **new shader variants** (30-150 in a frame or two: 0.3 ms each on the render thread for the
+  decompiler, although the DKSH is cached; e.g. 31-43 ms in one frame) and **first-time texture uploads** (frame 122:
+  43 textures in 235 ms, 5.5 ms each: detiling ran Latte's address function per texel / block). Frames 5754-5780
+  (55-169 ms with the render thread idle) were a warp (`[cheats] warp from sea to sea room 44`).
+- No `kill DSP channel` storm (9 lines at boot).
+
+### Round 45: stutters and the command stream (not yet tested on hardware)
+
+| Change | Why | Off switch |
+|---|---|---|
+| **Fast detiling.** In thin tile modes (1D/2D/2B/3D/3B thin) the elements of an 8x8 micro tile sit at fixed offsets from its first element: the address function runs once per micro tile, the 64 offsets come from the address function itself, and a cached 8-row band is written to the staging memory row by row (as Cemu's AddrLibFastDecode). The first level of each (tile mode, element size, depth layout) is checked element by element against the address function; a mismatch turns that combination off (`[dk] fast detiling for tile mode N, M-byte elements: checked, on` / `MISMATCH`). | ~5.5 ms per new texture | `WWHD_DK_FAST_DETILE=0` |
+| **Translation records** (`sdmc:/switch/wwhd/shadercache_dk_translations.bin`, `WDT1` version 1). Each new shader variant's result for the draw path (texture lists, colour output mask, Vulkan resource mapping, ufBlock layout, remapped-uniform lists, uniform block sizes, pixel-shader flags, GLSL hash, the program's texture units) is appended by the cache writer thread; at start-up the records are loaded and every program's texture units restored, so a variant seen in an earlier session is rebuilt without the decompiler when its DKSH is in code memory. The first session after this build fills the file; the stutters of new effects should be gone from the next one on. Line at start: `[dk] shadercache_dk_translations.bin: N translation records`; every 5 s `N variants from translation records`. | ~0.3 ms per variant, 30-150 at once | `WWHD_DK_TRANSLATION_CACHE=0` |
+| **Register writes merged where they are recorded.** Most commands come from the game's display lists (desktop, Outset: ~35,800 calls recorded a frame, ~85 staged by the main thread). A register write that continues the list's last `OP_SET_REGS`, or a single write after another, is appended to that command (`OP_SET_REG_PAIRS`, a new command: register, value pairs); the same in the main thread's staging buffer. Desktop (Vulkan, Outset route): **44,078 -> 23,503 commands executed a frame**, the same picture (1-3 pixels differ in the animated horizon). | the render thread's per-command work | `WWHD_GX2_COALESCE=0` |
+| The staging buffer hands a block to an idle render thread at 512 words instead of at once. (Desktop: 57 -> 8 hand-overs a frame; small.) | | `WWHD_GX2_IDLE_PUBLISH=0` |
+| **Shader combinations in 2-way sets**, 8,192 x 2 (was 4,096 direct-mapped); a miss replaces the way used in the older frame. | 1,811 full lookups a frame at sea | none |
+| `set_regs` writes up to 64 registers without the thread's heap vector. | | |
+| New in the `[gx2]` line: calls recorded into display lists, staged, register writes merged, hand-overs (and wake-ups). The counters are per thread and summed per display list / hand-over: a first version counted with shared atomics in `gx2::emit` and that alone was ~10% of the desktop main thread (perf: 73% of `emit` after the locked add). | | |
+
+Desktop profile of the main thread (Vulkan, Outset, perf): the game's code; runtime parts ~1.9% mutexes,
+~0.8% `OSSendMessage`. The volcano view's main-thread load needs a hardware breakdown.
+
+**Diagnostics in the menu (round 45):** Switch tab, Debug: "Log the main thread's runtime calls" (`[main]` lines, was
+only `WWHD_MAIN_SAMPLER=1`) and "Log the game threads' CPU use" (`[sched]` lines, was only `WWHD_SCHED_STATS=2`),
+switchable while the game runs (`env.txt` still sets them at start). The sampler thread starts the first time it is
+turned on.
+
+**Hardware test:** Switch tab, Debug: turn on both log options above. Stock clocks. Play the same places twice in two sessions
+(the second one uses the translation records): Dragon Roost with the bombs, sailing near Dragon Roost and the
+volcano, a scene change. Look for the start-up lines (`translation records`, `fast detiling ... checked, on`), any
+wrong textures or shaders, and the stutters in the second session.
+
+#### Hardware test of round 45 (`logs-switch/wwhd_2026-10-08_13-49-02.log` and `..._13-56-52.log`; CPU 1020, GPU 307)
+
+Two sessions of the same route; the first started the translation records (0 -> 3,231), the second used them.
+
+- **Translation records work**: the second session translated ~0 variants (all from records). Shader time in the
+  stutters: 67 -> 2.6 ms (first gameplay frame, 289 -> 214 ms), 102 ms -> gone (an arrival). Hitches in play (more
+  than 300 draws) 17 -> 7; over 100 ms 17 -> 14 (most of the rest are loading screens: 16-19 draws, render thread
+  1-2 ms, the game loading).
+- **Fast detiling** checked and on for every mode met (tile modes 2 and 4, 1-16-byte elements); new textures ~1.7 ms
+  each in the first scene (was 5.5), up to ~4 ms for large ones.
+- **Command merging on the Switch**: ~25,000-27,600 commands executed a frame at sea (round 44: 48,000-60,000),
+  ~18,000 register writes a frame merged.
+- **Frame rate: unchanged where it was low.** Sailing near Dragon Roost and the volcano 25.7-29.5 fps (round 44:
+  26.0-28.8). Outset's heaviest view ~29.0 fps at 7,300 draws (render thread 996 ms/s).
+- **The main thread is the limit at sea**, now measured (session 1, `[main]`/`[sched]` from the Switch tab): main
+  thread run 98% / CPU 98% / wait 0%; **only ~10% of it in runtime calls** (OSSendMessage 1.4-1.6%, GX2SetFetchShader
+  1.5-1.9%, GX2DrawDone 1.3-1.8%, OSLock/UnlockMutex ~2%, texture/sampler setters <1% each); **~90% is the game's own
+  code**. Other game threads: JASThread 15-30%, WorkerMgr workers 8-13%, update_ubo 12% (2,000-3,400 of its jobs a
+  second run on the main thread when its queue is full). Render thread there 530-700 ms/s.
+
+### Retrospective (rounds 39-45, 2026-10-08)
+
+| Place (stock CPU 1020, GPU 307) | Limit | r39 | r40 | r41 | r42 | r44 | r45 |
+|---|---|---|---|---|---|---|---|
+| Outset, pig farm / heaviest view (6,900-7,300 draws) | render thread | 22 | 24.5-25.5 | 27.3-29.8 | 28.3-29.1 | ~29-29.9 | ~29 |
+| Sailing near Dragon Roost / volcano (2,000-3,400 draws) | **main thread** | - | - | - | - | 26-28.8 | 25.7-29.5 |
+
+What we learned:
+1. **There are two different limits.** Dense island views are limited by the render thread; that is what rounds
+   40-45 cut (5.1 -> ~4.2 us a draw, commands halved), and Outset went from 22 to ~29 fps. At sea, Dragon Roost and the
+   volcano the **game's main thread** (core 1, ~90% game code) is the limit and the render thread has headroom: none
+   of the renderer rounds could move those views, and they did not. The `[cpu]` line (round 41) and the main-thread
+   diagnostics (round 45) are what showed it; they should have been looked at before choosing each round's target.
+2. **Measured wins kept, guesses removed.** Kept with hardware evidence: profiler off, register generations (~1.5
+   fps), shared-surface texture cache, submit every 1024 draws (+0.6-0.8 fps), shader data packing/prefetch (uniform
+   blocks 0.33 -> 0.11 us), translation records, fast detiling, command merging. Removed or no gain: per-vec4 constant
+   stamps (the game changes its constants every draw), render-thread priority (already 0x2C), the copy helper thread
+   (a regression: starved the game's sound). Estimates in the round notes were often too optimistic.
+3. **Stutters were a separate problem from frame rate**, and the right fixes were caches (translations) and cheaper
+   first-use work (detiling); what remains is texture first upload (hash + decode + staging) and the game's own
+   loading.
+4. **Process**: options for tests in the menu (rule above); shared runtime code can be A/B-tested and profiled on the
+   desktop Vulkan build before shipping (a shared atomic counter in `gx2::emit` cost ~10% of the desktop main thread
+   and was caught there); one switch per change.
+
+What it means for the next step (not started): at sea the remaining ~10% to 30 fps at 1020 MHz has to come from the
+main thread, i.e. the game's own code (the recompiler's output, or native replacements of the hottest game routines),
+plus the ~10% runtime share (GX2 HLE calls, message queues, mutexes). That needs a profile of the game's hot functions
+in those places: a desktop perf run from a save near Dragon Roost, or a guest-function sampler on the console.
+
+**Test option (round 45, not an optimization):** Switch tab, Debug, "Frame rate (test)": 30 fps (original), 60 fps
+interpolation, True 60 (experimental), switched while the game runs, logged (`[interp] frame rate mode from the
+Switch tab: ...`), not saved. Off (30 fps) by default, as before: no Switch build had interpolation on (`[prof] ... 0
+hold, swaps/s = logic steps/s` in the round 40 log).
 
 ## Rendering resolution
 
