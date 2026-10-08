@@ -17,6 +17,7 @@
 #include "../rumble.h"
 #include "../runtime.h"
 #include "../gfx/switch_renderer.h"
+#include "debug_server.h"
 #include "input_switch.h"
 #include "settings_switch.h"
 
@@ -249,6 +250,9 @@ void update() {
     update_gyro(pad);
     update_rumble(pad);
     u64 held = padGetButtons(&pad);
+    // presses from the debug server (platform/debug_server.h): as if on the controller, the settings menu included
+    const debugsrv::Injected injected = debugsrv::running() ? debugsrv::injected() : debugsrv::Injected{};
+    held |= injected.buttons;
     static const struct { u64 hid; uint32_t vpad; } kMap[] = {
         {HidNpadButton_A, kA},         {HidNpadButton_B, kB},          {HidNpadButton_X, kX},
         {HidNpadButton_Y, kY},         {HidNpadButton_L, kL},          {HidNpadButton_R, kR},
@@ -295,6 +299,8 @@ void update() {
     s.ly = l.y / (float)JOYSTICK_MAX;
     s.rx = r.x / (float)JOYSTICK_MAX;
     s.ry = r.y / (float)JOYSTICK_MAX;
+    if (injected.stick[0]) s.lx = injected.x[0], s.ly = injected.y[0];
+    if (injected.stick[1]) s.rx = injected.x[1], s.ry = injected.y[1];
     // the same controller for the settings overlay (by position, as the game sees it): Minus held half
     // a second opens it, B or Minus closes it; while it is open the game gets no buttons
     float v[input_map::kPadCount] = {};

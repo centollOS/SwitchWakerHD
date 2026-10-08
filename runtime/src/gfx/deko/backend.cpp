@@ -38,6 +38,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "input.h"
 #include "overlay/hostui.h"
 #include "overlay/overlay.h"
+#include "platform/debug_switch.h"
 #include "platform/host.h"
 #include "platform/input_switch.h"
 #include "platform/settings_switch.h"
@@ -635,6 +636,7 @@ std::string clock_report() {
 // ---- captures (both sticks clicked): the next frame's passes, draws and present pass in the log, and its
 // pictures, render targets and textures as PNG files (dk_capture.h, capture.cpp)
 std::atomic<bool> g_captureRequested{false};
+std::atomic<bool> g_picturesRequested{false};  // the debug server's screenshot: the next frame's pictures only
 uint64_t g_captureFrame = ~0ull;
 bool capturing() { return R.frame + 1 == g_captureFrame; }
 
@@ -1377,8 +1379,11 @@ void swap() {
     if (listed(dumpFrames)) what |= kCapturePictures;
     if (listed(dumpTargets)) what |= kCaptureTargets;
     if (listed(dumpTextures)) what |= kCaptureTextures;
+    const bool pictures = g_picturesRequested.exchange(false);
+    if (pictures) what |= kCapturePictures;
     if (g_captureDraws) what = kCaptureAll;
-    if (what || g_capture) capture_arm(what, g_captureDraws ? "both sticks" : "WWHD_DUMP_*");
+    if (what || g_capture)
+        capture_arm(what, g_captureDraws ? "both sticks" : pictures ? "debug server screenshot" : "WWHD_DUMP_*");
 }
 
 // start-up: a bar filling while shaders_init loads the DKSH caches (as gfx/gl shader_cache_progress), with its
@@ -1475,7 +1480,7 @@ void init() {
 }
 
 void run_main_loop() {
-    while (appletMainLoop()) {
+    while (appletMainLoop() && !debug_switch::quit_requested()) {
         input::update();
         poll_operation_mode();    // docked / handheld: the window size (present recreates the swapchain)
         hostui::run_posted();     // the settings overlay's changes, on this thread as on the desktop hosts
@@ -1567,6 +1572,11 @@ void set_resolution_profile(float scale, bool dynamic) {
 }
 std::string clock_report_now() { return gfxdk::clock_report(); }
 void request_capture() { gfxdk::g_captureRequested = true; }
+uint64_t request_pictures() {
+    gfxdk::g_picturesRequested = true;
+    return std::atomic_ref<uint64_t>(gfxdk::R.frame).load() + 1;
+}
+uint64_t pictures_done_frame() { return gfxdk::capture_done_frame(); }
 }  // namespace gfxsw
 
 namespace render {

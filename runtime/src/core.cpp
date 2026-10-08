@@ -4,6 +4,7 @@
 #include <mach/mach_vm.h>
 #include <mach-o/ldsyms.h>
 #endif
+#include "platform/debug_server.h"
 #include "platform/host.h"
 #include "write_watch.h"
 #include <zlib.h>
@@ -59,6 +60,7 @@ void log_flush() {
     if (!out.empty()) {
         fwrite(out.data(), 1, out.size(), stderr);  // (logs/wwhd_<date>_<time>.log, main.cpp)
         fflush(stderr);
+        debugsrv::log_tap(out.data(), out.size());  // "log" streams of the debug server (when it runs)
     }
 }
 

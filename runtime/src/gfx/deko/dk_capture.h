@@ -61,6 +61,8 @@ void capture_note_draw(uint32_t index, const std::array<Surface*, 8>& colors, co
 // backend.cpp present(), after dkQueuePresentImage of a captured frame: waits for the GPU, copies the
 // images back and queues the PNGs (window: the swapchain image presented, ww x wh RGBA8)
 void capture_present(const DkImage& window, uint32_t ww, uint32_t wh, const PresentSource& src);
+// any thread: the frame of the last capture whose files are all written or failed (0: none yet)
+uint64_t capture_done_frame();
 
 // surfaces.cpp: level 0, layer 0 of s's guest data as upload_surface stages it (detiled and converted to
 // s->fmt.image's layout, rows of blocks without padding); changed: the guest data no longer hashes as it

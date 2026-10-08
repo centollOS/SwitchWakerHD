@@ -53,5 +53,10 @@ void set_gamepad_view(bool on);       // any thread, from the next frame
 bool gamepad_touch(float x, float y, float& tx, float& ty);
 // any thread: the next frame is captured (both sticks clicked on the Switch)
 void request_capture();
+// any thread: a coming frame's pictures only (the debug server's screenshot): captures/<n>/frame_<n>_window.png
+// (the window as shown) and frame_<n>.png (the game's TV picture). Returns the earliest frame it can be;
+// pictures_done_frame() is the frame of the last capture whose files are written (0: none yet).
+uint64_t request_pictures();
+uint64_t pictures_done_frame();
 
 }  // namespace gfxsw

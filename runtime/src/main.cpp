@@ -21,6 +21,7 @@
 #include <string>
 #include <thread>
 #ifdef __SWITCH__
+#include "platform/debug_switch.h"
 #include "platform/settings_switch.h"
 #include <sys/stat.h>
 #include <dirent.h>
@@ -505,6 +506,7 @@ int main(int argc, char** argv) {
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
     load_switch_options(argc, argv);
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
+    debug_switch::start();              // WWHD_DEBUG_SERVER: the debug server (platform/debug_switch.h)
 #endif
     apply_portable_mode();
     default_vulkan_cpu_paths();

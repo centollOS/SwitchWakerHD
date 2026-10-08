@@ -6,6 +6,7 @@
 // Test/start-up switches: WWHD_MOD_<NAME>=1 (see mods.cpp).
 #pragma once
 #include <cstdint>
+#include <string>
 
 struct Cpu;
 namespace input { struct PadState; }
@@ -63,6 +64,7 @@ void cheats_service();          // game main thread, frame start (interp.cpp)
 // change is pending
 void request_warp(const char* stage, int room, int point);  // any thread
 bool warp_pending();
+std::string current_stage();  // the stage the game is in ("sea", "LinkRM"...; any thread, "" before the game data)
 
 // shared helpers (mods.cpp)
 uint64_t step();    // full logic steps so far (interp::logic_steps)

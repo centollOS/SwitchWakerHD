@@ -161,6 +161,8 @@ void warp_service() {
 }
 }  // namespace
 
+std::string current_stage() { return stage(); }
+
 void request_warp(const char* name, int room, int point) {
     {
         std::lock_guard<std::mutex> lk(g_warpMu);

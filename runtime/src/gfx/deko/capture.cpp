@@ -7,6 +7,7 @@
 #include <switch.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <condition_variable>
@@ -428,7 +429,10 @@ Thread g_worker;
 // the worker come on top of this).
 constexpr size_t kMaxQueuedBytes = 128u << 20;
 
+std::atomic<uint64_t> g_doneFrame{0};  // the last capture whose files are all written (capture_done_frame)
+
 void log_capture_done(uint64_t frame) {  // (g_jobMutex held)
+    g_doneFrame.store(frame, std::memory_order_release);
     LOG("[dk] capture of frame %llu done in %.1f s: %u files written to captures/%llu/, %u failed, %u dropped (writer "
         "queue full), %u sampled textures identical to their upload data not written",
         (unsigned long long)frame, double(now_ns() - g_filesStart) / 1e9, g_filesWritten, (unsigned long long)frame,
@@ -941,5 +945,7 @@ void capture_present(const DkImage& window, uint32_t ww, uint32_t wh, const Pres
         }
     }
 }
+
+uint64_t capture_done_frame() { return g_doneFrame.load(std::memory_order_acquire); }
 
 }  // namespace gfxdk
