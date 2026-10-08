@@ -280,6 +280,11 @@ void set_capture_combo(bool on) {
     LOG("[switch] capture combo (both sticks): %s", on ? "on" : "off");
 }
 
+void set_gamepad_pip(bool on) {
+    gfxsw::set_gamepad_pip(on);
+    hostui::set(kKeyGamepadPip, on ? "1" : "0");
+}
+
 void apply_at_start() {
     // GPU profile: the saved choice, else the system's own (stock)
     std::string id;
@@ -338,6 +343,10 @@ void apply_at_start() {
     {
         std::string v;
         if (hostui::get(kKeyCaptureCombo, v)) g_captureCombo = v == "1";
+    }
+    {
+        std::string v;
+        if (hostui::get(kKeyGamepadPip, v)) gfxsw::set_gamepad_pip(v == "1");
     }
     {
         std::string v;

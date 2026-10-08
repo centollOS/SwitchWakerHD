@@ -47,6 +47,10 @@ std::string clock_report_now();  // "CPU x MHz, GPU y MHz, memory z MHz", or "" 
 bool gamepad_picture_drawn();         // the controller acts as the GamePad (render thread, every frame)
 bool gamepad_view();                  // the window shows the GamePad picture instead of the TV's
 void set_gamepad_view(bool on);       // any thread, from the next frame
+// the GamePad picture also in a corner of the TV picture (bottom right, a third of the window's width) while
+// the TV picture is shown; the touch screen then works inside that corner (Switch tab, saved)
+bool gamepad_pip();
+void set_gamepad_pip(bool on);        // any thread, from the next frame
 // touch at x, y (0..1 of the screen from the top left) -> the GamePad screen's 0..1 position; false while
 // the GamePad picture is not shown or outside it
 bool gamepad_touch(float x, float y, float& tx, float& ty);

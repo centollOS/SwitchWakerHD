@@ -1070,6 +1070,11 @@ void tab_switch() {
         if (radio("GamePad screen", view, !pro)) gfxsw::set_gamepad_view(true);
         help("ZL + ZR + Minus switches between them while playing. On the GamePad screen the touch\n"
              "screen works as the GamePad's (items, map). Only with the GamePad chosen above.");
+        bool pip = false;
+        if (check("GamePad screen in a corner of the TV picture", gfxsw::gamepad_pip(), &pip, !pro))
+            hostui::post([pip] { switch_settings::set_gamepad_pip(pip); });
+        help("While the TV picture is shown, the GamePad's (items, map) also appears small in the\n"
+             "bottom right corner, and the touch screen works inside it. Only with the GamePad chosen above.");
     }
     {
         // the upstream 60 fps modes, for testing on the console (the screen is 60 Hz: 60 fps only)

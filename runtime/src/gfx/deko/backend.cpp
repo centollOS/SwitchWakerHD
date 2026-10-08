@@ -478,16 +478,21 @@ struct PresentUbo {  // present_fsh.glsl, std140
 // GamePad picture is not the one shown
 std::atomic<int> g_padRect[4] = {0, 0, 0, 0};
 std::atomic<bool> g_gamepadView{false};
-bool draw_picture(const PresentSource& src, bool capture) {
+std::atomic<bool> g_gamepadPip{false};  // the GamePad picture in a corner of the TV's (gfxsw::gamepad_pip)
+// `corner`: the picture in the window's bottom right corner, a third of its width (the GamePad picture-in-picture)
+bool draw_picture(const PresentSource& src, bool capture, bool corner = false) {
     if (!g_presentOk || !src.surface || !src.width || !src.height) return false;
     commit_descriptors();  // present_source wrote the picture's view into kPresentImageId
     const float a = float(src.width) / float(src.height);
-    int w = int(g_winW), h = int(float(g_winW) / a);
-    if (h > int(g_winH)) {
-        h = int(g_winH);
-        w = int(float(g_winH) * a);
+    const int areaW = corner ? int(g_winW) / 3 : int(g_winW), areaH = int(g_winH);
+    int w = areaW, h = int(float(areaW) / a);
+    if (h > areaH) {
+        h = areaH;
+        w = int(float(areaH) * a);
     }
-    const int x = (int(g_winW) - w) / 2, y = (int(g_winH) - h) / 2;
+    const int margin = corner ? int(g_winH) / 40 : 0;
+    const int x = corner ? int(g_winW) - w - margin : (int(g_winW) - w) / 2;
+    const int y = corner ? int(g_winH) - h - margin : (int(g_winH) - h) / 2;
     const bool pad = src.imageId == kGamepadImageId;
     g_padRect[0] = x, g_padRect[1] = y, g_padRect[3] = h;
     g_padRect[2] = pad ? w : 0;
@@ -1173,6 +1178,14 @@ void present() {
     } else if (draw_picture(src, capture)) {
         if (shown != 1) LOG("[dk] frame %llu: presenting the game's TV picture", (unsigned long long)frame);
         shown = 1;
+        // the GamePad picture in the corner, over the TV's (its touch area: g_padRect, set by draw_picture)
+        static int pipShown = -1;
+        const PresentSource corner = g_gamepadPip.load(std::memory_order_relaxed) ? gamepad_source() : PresentSource{};
+        const bool pip = corner.surface && draw_picture(corner, capture, true);
+        if (int(pip) != pipShown) {
+            pipShown = pip;
+            LOG("[dk] frame %llu: GamePad picture in the corner %s", (unsigned long long)frame, pip ? "shown" : "not shown");
+        }
     } else {
         // black until the game copies a picture to the TV scan buffer
         if (shown != 0)
@@ -1421,6 +1434,10 @@ bool gamepad_picture_drawn() { return !input::pro_controller(); }
 bool gamepad_view() { return gfxdk::g_gamepadView.load(std::memory_order_relaxed); }
 void set_gamepad_view(bool on) {
     if (gfxdk::g_gamepadView.exchange(on) != on) LOG("[dk] window: %s picture asked for", on ? "GamePad" : "TV");
+}
+bool gamepad_pip() { return gfxdk::g_gamepadPip.load(std::memory_order_relaxed); }
+void set_gamepad_pip(bool on) {
+    if (gfxdk::g_gamepadPip.exchange(on) != on) LOG("[dk] window: GamePad picture in the corner %s", on ? "on" : "off");
 }
 bool gamepad_touch(float x, float y, float& tx, float& ty) {
     const int rx = gfxdk::g_padRect[0], ry = gfxdk::g_padRect[1], rw = gfxdk::g_padRect[2], rh = gfxdk::g_padRect[3];

@@ -69,7 +69,7 @@ Copy the **contents** of `build/sd/` to the root of the SD card, so the game end
 | | |
 |---|---|
 | **Minus, held half a second** | Settings menu (L / R change tabs, B or Minus closes it). A short Minus goes to the game |
-| **ZL + ZR + Minus** | In GamePad mode: switch between the TV picture and the GamePad screen (items, map). On the GamePad screen the touch screen works as the GamePad's |
+| **ZL + ZR + Minus** | In GamePad mode: switch between the TV picture and the GamePad screen (items, map). On the GamePad screen the touch screen works as the GamePad's. Or show the GamePad screen small in a corner of the TV picture: Minus held > Switch tab > "GamePad screen in a corner of the TV picture" (the touch screen then works inside that corner) |
 
 By default the controller acts as a **Wii U Pro Controller** and everything is on one screen. To play
 with the GamePad features (its screen, **gyro aiming**), choose *Wii U GamePad* in the menu's Switch tab

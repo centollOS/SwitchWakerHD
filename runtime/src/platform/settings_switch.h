@@ -56,6 +56,7 @@ constexpr const char* kKeyGamma = "switchGamma";
 constexpr const char* kKeyFpsCounter = "switchFpsCounter";
 constexpr const char* kKeyCaptureCombo = "switchCaptureCombo";
 constexpr const char* kKeyAniso = "switchAniso";
+constexpr const char* kKeyGamepadPip = "switchGamepadPip";  // the GamePad picture in a corner (gfxsw::gamepad_pip)
 // Debug: the network debug server (debug_switch.h) and the main thread's runtime-call sampler (threads.cpp),
 // both off by default and read at the next start, before anything else (main.cpp)
 constexpr const char* kKeyDebugServer = "switchDebugServer";
@@ -68,5 +69,7 @@ void save_picture();       // the current picture adjustments into settings.ini
 // default so it cannot happen by accident (Switch tab; saved)
 bool capture_combo();
 void set_capture_combo(bool on);  // saves it
+// the GamePad picture in a corner of the TV picture (gfxsw::gamepad_pip); off by default
+void set_gamepad_pip(bool on);    // saves it
 
 }  // namespace switch_settings
