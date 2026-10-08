@@ -10,7 +10,8 @@
 // Protocol: one command per line ("name arg arg ...", "double quotes" around an argument with spaces).
 // Every reply is "ok <n>\n" or "err <n>\n" followed by n bytes (text, or a file's contents). "put <path>
 // <size>" is followed by the file's size bytes. "log" turns the connection into a stream of the log's text
-// until the client closes it.
+// until the client closes it; "logtext" replies with the log text kept (the last 2 MiB: the running session's log
+// file cannot be read while the game writes it).
 #pragma once
 #include <cstddef>
 #include <cstdint>

@@ -41,8 +41,8 @@ debugsrv::Reply info(const debugsrv::Args&) {
     char b[512];
     AppletType type = appletGetAppletType();
     snprintf(b, sizeof b,
-             "version %s (%s), built %s %s\nframe %llu\nstage %s\nheap never used %zu MiB\nrunning as %s\naddress %s:%d\n",
-             build::version(), build::commit(), __DATE__, __TIME__, (unsigned long long)render::frame_count(),
+             "version %s (%s)\nframe %llu\nstage %s\nheap never used %zu MiB\nrunning as %s\naddress %s:%d\n",
+             build::version(), build::commit(), (unsigned long long)render::frame_count(),
              game_running() ? mods::current_stage().c_str() : "-", heap_never_used_mib(),
              type == AppletType_Application ? "application (the HOME menu forwarder: reload works)"
                                             : "applet (hbmenu: reload does not work, use quit and nxlink)",

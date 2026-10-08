@@ -369,12 +369,20 @@ Reply builtin(Conn& c, const std::string& name, const Args& a, bool& handled) {
     if (name == "help") {
         std::string out =
             "ping\nhelp\nlog [all]              the log as it is written (all: the last 2 MiB first)\n"
+            "logtext                the log text kept (the last 2 MiB)\n"
             "get <path>\nput <path> <size>      then size bytes\nls [path]\nrm <path>\nmkdir <path>\n"
             "press <buttons> [ms]   A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LS RS, A+B together; default 120 ms\n"
             "hold <buttons>\nrelease [buttons]\nstick <L|R> <x> <y> [ms]   -1..1, y up; 0 0 lets go\n";
         std::lock_guard<std::mutex> lk(g_cmdMu);
         for (auto& [n, cmd] : g_cmds) out += cmd.usage + "\n";
         return ok(out);
+    }
+    if (name == "logtext") {  // the log text kept (the running session's file cannot be opened while it is written)
+        std::lock_guard<std::mutex> lk(g_logMu);
+        if (!g_logBase) return ok(g_logBuf);
+        char note[96];
+        snprintf(note, sizeof note, "[debug] (the first %llu bytes of the log are not kept)\n", (unsigned long long)g_logBase);
+        return ok(note + g_logBuf);
     }
     if (name == "get") {
         if (a.size() != 1) return err("usage: get <path>");

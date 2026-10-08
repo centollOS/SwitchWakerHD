@@ -32,9 +32,9 @@ address on the first line of `build/switch_host.txt` (`build/` is not in git).
 | `stick L\|R x y [ms]` | stick override, -1..1, y up; `stick L 0 0` lets go |
 | `warps`, `warp N`, `warp STAGE [ROOM] [POINT]` | the Warp tab's destinations, by number or by name |
 | `get`, `put`, `ls`, `rm`, `mkdir` | SD card files; paths are relative to `sdmc:/switch/wwhd` unless they start with `/` |
-| `logs`, `lastlog [LOCAL]` | the session logs in `logs/`; download the newest one |
+| `logs`, `lastlog [LOCAL]` | the session logs in `logs/`; download the newest one. The running session's file cannot be opened while the game writes it (its listed size stays 0), so `lastlog` then takes the text the console keeps in memory (`logtext`: the last 2 MiB; the server starts before the first log line) |
 | `crashes [--fetch DIR]` | Atmosphère's crash reports (`/atmosphere/crash_reports`) |
-| `wait`, `quit`, `reload`, `ping`, `help`, `raw CMD ...` | |
+| `wait`, `quit`, `reload`, `ping`, `help`, `raw CMD ...` | `raw logtext` prints the kept log text |
 
 Button names: `A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LS RS`. Presses go in where the controller is
 read (`platform/input_switch.cpp`), as if they came from the controller, so they reach the settings menu too:

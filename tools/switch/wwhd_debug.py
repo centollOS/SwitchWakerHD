@@ -13,7 +13,7 @@ The console's address: --host, else WWHD_SWITCH_HOST, else the first line of bui
   wwhd_debug.py press A [B ...] [ms]      also hold, release, stick L|R x y [ms]
   wwhd_debug.py warps | warp N | warp STAGE [ROOM] [POINT]
   wwhd_debug.py get REMOTE [LOCAL] | put LOCAL REMOTE | ls [REMOTE] | rm REMOTE | mkdir REMOTE
-  wwhd_debug.py logs | lastlog [LOCAL]    session logs on the SD card; the newest one
+  wwhd_debug.py logs | lastlog [LOCAL]    session logs on the SD card; the newest one (also while it runs)
   wwhd_debug.py crashes [--fetch DIR]     Atmosphere's crash reports
   wwhd_debug.py wait [--seconds N]        until the server answers (after a reload)
   wwhd_debug.py quit | reload | ping | help
@@ -256,12 +256,23 @@ def remote_ls(args, path):
 
 
 def cmd_lastlog(args):
-    logs = sorted(name for kind, _, name in remote_ls(args, "logs") if kind == "f" and name.startswith("wwhd_"))
+    # session logs are named by their start time (wwhd_<date>_<time>.log); wwhd_earlier_build_* are older
+    logs = sorted(name for kind, _, name in remote_ls(args, "logs")
+                  if kind == "f" and re.fullmatch(r"wwhd_\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.log", name))
     if not logs:
         sys.exit("no session logs in logs/")
     args.remote = "logs/" + logs[-1]
     args.local = args.local or logs[-1]
-    cmd_get(args)
+    try:
+        cmd_get(args)
+    except ServerError:
+        # the running session: its file is open for writing, the console keeps its text in memory
+        c = connect(args)
+        try:
+            Path(args.local).write_bytes(c.command("logtext", timeout=30.0))
+        finally:
+            c.close()
+        print(f"{args.remote} is the running session's log: {args.local} has the text the console keeps (the last 2 MiB)")
 
 
 def cmd_crashes(args):

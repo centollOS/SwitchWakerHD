@@ -497,6 +497,8 @@ int main(int argc, char** argv) {
     start_session_logs(t, logName, sizeof logName);
     if (!freopen(logName, "w", stderr)) freopen("wwhd.log", "w", stderr);  // (logs/ not writable)
     setvbuf(stderr, nullptr, _IOLBF, 0);
+    // WWHD_DEBUG_SERVER (env.txt, read by early_env_txt): first, so its log text has the whole session
+    debug_switch::start();  // (platform/debug_switch.h)
     LOG("[session] %04d-%02d-%02d %02d:%02d:%02d (build %s %s); log %s (the newest 10 sessions are kept in logs/)",
         t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, __DATE__, __TIME__, logName);
     // which round of docs/switch-port.md this runtime is (to tell builds apart in the logs)
@@ -506,7 +508,6 @@ int main(int argc, char** argv) {
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
     load_switch_options(argc, argv);
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
-    debug_switch::start();              // WWHD_DEBUG_SERVER: the debug server (platform/debug_switch.h)
 #endif
     apply_portable_mode();
     default_vulkan_cpu_paths();
