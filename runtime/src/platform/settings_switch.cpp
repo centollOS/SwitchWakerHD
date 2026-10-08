@@ -11,7 +11,8 @@
 // profile is skipped. A choice falls back to the next lower one when apm refuses it. The handheld
 // configuration found at start is restored at exit.
 // WWHD_GPU_PROFILE (env.txt) = default | 384 | 460 | 1600 (460 with memory 1600) | 614 | 0x<configuration id>;
-// without it, the menu's saved choice; without that, 1600.
+// without it, the menu's saved choice; without that, the system's own (stock: GPU 307 MHz, memory 1331 MHz;
+// 2026-10-08, the owner: stock GPU by default, the only overclock needed is the CPU at 1224 MHz).
 //
 // Beyond apm (a teammate's sys-clk setup, asked for 2026-10-07): the CPU clock (the system table's steps
 // 1020-1785 MHz, default 1224; WWHD_CPU_CLOCK=<MHz>, or the menu) and GPU 614.4 MHz in handheld (profile 614) are set through clkrst, as sys-clk does, on top of
@@ -38,17 +39,17 @@ namespace switch_settings {
 namespace {
 
 std::mutex g_mu;
-int g_profile = kGpu460Mem1600;
+int g_profile = kGpuDefault;
 bool g_profile_env = false;
 bool g_apm_ready = false, g_apm_failed = false;
 u32 g_apm_saved = 0x00020003, g_apm_now = 0;
 
 const char* const kIds[kGpuProfiles] = {"default", "384", "460", "1600", "614"};
-const char* const kLabels[kGpuProfiles] = {"System default (GPU 307 MHz)", "GPU 384 MHz", "GPU 460 MHz",
+const char* const kLabels[kGpuProfiles] = {"Stock (GPU 307 MHz, default)", "GPU 384 MHz", "GPU 460 MHz",
                                            "GPU 460 MHz + memory 1600 MHz",
                                            "GPU 614 MHz + memory 1600 MHz (overclock, as sys-clk)"};
 const char* const kCpuIds[kCpuClocks] = {"1020", "1122", "1224", "1326", "1428", "1581", "1683", "1785"};
-const char* const kCpuLabels[kCpuClocks] = {"1020 MHz (stock)", "1122 MHz", "1224 MHz (default)", "1326 MHz",
+const char* const kCpuLabels[kCpuClocks] = {"1020 MHz (stock)", "1122 MHz", "1224 MHz (Recommended)", "1326 MHz",
                                             "1428 MHz", "1581 MHz", "1683 MHz", "1785 MHz (loading-screen boost)"};
 constexpr u32 kCpuHz[kCpuClocks] = {1020000000, 1122000000, 1224000000, 1326000000,
                                     1428000000, 1581000000, 1683000000, 1785000000};
@@ -297,13 +298,13 @@ void set_capture_combo(bool on) {
 }
 
 void apply_at_start() {
-    // GPU profile: env.txt, else the saved choice, else 460 MHz with memory 1600
+    // GPU profile: env.txt, else the saved choice, else the system's own (stock)
     std::string id;
     if (const char* e = getenv("WWHD_GPU_PROFILE"); e && *e) {
         id = e;
         g_profile_env = true;
     } else if (!hostui::get(kKeyGpuProfile, id) || id.empty()) {
-        id = kIds[kGpu460Mem1600];
+        id = kIds[kGpuDefault];
     }
     {
         std::lock_guard<std::mutex> lk(g_mu);

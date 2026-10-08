@@ -161,11 +161,15 @@ and copy the files.
   closes it, L / R change tabs. Tabs: Saves (save states), Switch (CPU clock, GPU profile, picture,
   frame-rate counter, controller, gyro aiming, debug options), Warp (teleport to any stage), Mods,
   Language / About.
-- **Performance**: the CPU runs at 1224 MHz by default; the menu offers every step of the console's
-  CPU table from the stock 1020 up to 1785 MHz. The handheld GPU uses Nintendo's official profiles
-  (460.8 MHz with memory 1600 MHz by default), plus a 614 MHz overclock. Higher clocks drain the
-  battery faster and warm the console; if sys-clk has its own profile for this title, the two
-  fight over the clocks.
+- **Performance**: the game is **perfectly playable at the console's stock clocks**. An overclock is
+  optional and only makes the frame rate steadier in a few particularly busy scenes; the only one
+  worth using is a mild **CPU at about 1.2 GHz (1224 MHz, marked *Recommended* in the Switch tab,
+  and the default)**, which stays well clear of any heat or battery issues. The GPU stays at the
+  console's **stock** clocks by default (307 MHz in handheld). The menu still
+  offers every step of the CPU table from the stock 1020 up to 1785 MHz, Nintendo's other handheld
+  GPU profiles (384 and 460.8 MHz) and a 614 MHz GPU overclock; higher clocks drain the battery
+  faster and warm the console, and if sys-clk has its own profile for this title, the two fight
+  over the clocks.
 - **Frame captures** for bug reports: turn on *Capture a frame with both sticks clicked* in the
   Switch tab's Debug section; **L3 + R3** then writes the frame and its render targets as PNG files
   to `captures/<frame>/` (they contain game imagery: keep them to yourself).
@@ -181,10 +185,11 @@ and copy the files.
 
 Boots and plays on a Switch in handheld mode, with sound, controllers, saves, save states, the
 options menu and mods. Played by hand mostly on the opening island, Dragon Roost and the sea
-around it, and areas reached with the Warp tab. Handheld at the console's stock clocks (CPU 1020
-MHz, GPU 307 MHz): about 30 fps on the opening island (~29 in its heaviest view), 26-29 fps
-sailing near Dragon Roost and the volcano island, where the game's own code on its main thread is
-the limit; at a CPU of 1122 MHz those places hold 30. The menu's default CPU clock is 1224 MHz.
+around it, and areas reached with the Warp tab. **It is perfectly playable at the console's stock
+clocks** (CPU 1020 MHz, GPU 307 MHz): 30 fps on the opening island, and a smooth 26-29 fps in the
+busiest scenes, such as sailing near Dragon Roost and the volcano island. The recommended CPU
+setting of about 1.2 GHz (1224 MHz, the default, *Recommended* in the Switch tab) is only for extra
+stability there, holding a steady 30; the GPU stays at its stock clocks.
 Shader and texture stutters on first use are much reduced, and shaders seen in an earlier session
 no longer stutter. Docked it renders at 1080p (picture profile per mode in the Switch tab: handheld
 1x, docked 1.5x, with dynamic resolution), tested on a TV at a median of 29.9 fps. Known issues and
@@ -223,9 +228,16 @@ retrospective in [docs/switch-port.md](docs/switch-port.md).
 - One log per session in `logs/` (`wwhd_<date>_<time>.log`, the newest is the current run); the
   10 most recent are kept, and there is no `wwhd.log` next to the `.nro` any more.
 
-**Known**
-- Sailing near Dragon Roost and the volcano island stays at 26-29 fps at stock clocks: there the
-  game's own code on its main thread is the limit, not the renderer (30 fps at a CPU of 1122 MHz).
+**Clocks**
+- The GPU now runs at the console's stock clocks by default (was Nintendo's 460.8 MHz profile with
+  memory 1600 MHz); a choice saved in the menu is kept.
+- The CPU's 1224 MHz step is marked *Recommended* (it stays the default). The game is perfectly
+  playable at stock clocks; this mild overclock only steadies the frame rate in a few busy scenes.
+
+**Notes**
+- At the fully stock CPU (1020 MHz) the busiest scenes, such as sailing near Dragon Roost and the
+  volcano island, run at a smooth 26-29 fps (there the game's own code is the limit, not the
+  renderer); the recommended 1224 MHz holds a steady 30 fps.
 
 ## License
 

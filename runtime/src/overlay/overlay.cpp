@@ -816,7 +816,8 @@ void tab_switch() {
     const int gp = gpu_profile();
     for (int i = 0; i < kGpuProfiles; i++)
         if (radio(gpu_profile_label(i), gp == i)) hostui::post([i] { set_gpu_profile(i); });
-    help("The first four are Nintendo's own performance profiles for games.\n"
+    help("Stock is the default: the game is perfectly playable at stock clocks.\n"
+         "The first four are Nintendo's own performance profiles for games.\n"
          "GPU 614 MHz is an overclock set as sys-clk does (handheld only).\n"
          "Docked, the console uses its docked clocks (GPU 768 MHz).");
     if (gpu_profile_env())
@@ -827,7 +828,9 @@ void tab_switch() {
         if (i % 4) ImGui::SameLine();
         if (radio(cpu_clock_label(i), cc == i)) hostui::post([i] { set_cpu_clock(i); });
     }
-    help("The steps of the console's CPU table, set for the whole game as sys-clk does (handheld and docked).\n"
+    help("The game is perfectly playable at the stock 1020 MHz. 1224 MHz (Recommended, the default) is a mild\n"
+         "overclock for extra stability: it holds a steady 30 fps in the busiest scenes (sailing near Dragon Roost, the volcano).\n"
+         "The steps of the console's CPU table, set for the whole game as sys-clk does (handheld and docked).\n"
          "1785 MHz is the clock games get during loading screens. Higher drains the battery faster and the console runs warmer.");
     if (cpu_clock_env()) note("env.txt sets WWHD_CPU_CLOCK: it is used at every start.");
     if (cc > kCpuDefault || gp == kGpu614)
