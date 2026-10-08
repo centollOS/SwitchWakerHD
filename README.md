@@ -73,8 +73,9 @@ history at `207349b`; [docs/switch-port.md](docs/switch-port.md), "Harvesting th
 For development there is a debug server: from the computer, over the local network, you can
 deploy a new build and restart the game without touching the console, follow the log as it is
 written, take screenshots, press buttons and warp. It is **off by default**: players never need it
-and the game opens no network port unless `env.txt` holds the line `WWHD_DEBUG_SERVER=1`. It has no
-password, so use it only on your own network.
+and the game opens no network port unless it is turned on in the options menu (**Switch** tab,
+**Debug** section, *Debug server (network)*; it starts at the next start). It has no password, so use
+it only on your own network.
 
 ```sh
 echo <console ip> > build/switch_host.txt                  # once; the log prints the address
@@ -86,6 +87,11 @@ tools/switch/wwhd_debug.py press A                           # also hold, releas
 
 `deploy` restarts the game, so start it from the HOME-screen icon (forwarder). Every command and the
 protocol: [docs/debug-server.md](docs/debug-server.md).
+
+Developer and test variables (`WWHD_*`: traces, renderer switches) go in a `[dev]` section at the end
+of `settings.ini`, one `NAME=value` per line, read at the next start; the menu keeps that section as it
+is. Over the debug server: `get settings.ini`, edit, `put` it back and `reload`
+([docs/debug-server.md](docs/debug-server.md)).
 
 ## Install on the Switch
 
@@ -104,7 +110,6 @@ sdmc:/switch/wwhd/
 ├── wwhd.nro                  the game
 ├── shadercache_dksh.bin      compiled shaders (optional, see above)
 ├── game/                     your extracted game: code/, content/, meta/
-├── env.txt                   optional: WWHD_* options, one NAME=value per line
 └── (created by the game: save/, settings.ini, logs/, shader caches, captures/)
 ```
 
@@ -124,7 +129,8 @@ and copy the files.
 
 - Saves: `sdmc:/switch/wwhd/save/`. Back up this folder.
 - Save states: `sdmc:/switch/wwhd/states/`.
-- Settings from the options menu: `settings.ini`. `env.txt` values win over it at every start.
+- Settings from the options menu: `settings.ini`. An `env.txt` from an earlier build is converted into
+  it at the first start and renamed `env.txt.old`.
 - To update, replace `wwhd.nro` (and `shadercache_dksh.bin` if you rebuilt it). Saves, settings and
   caches stay.
 - Logs, if something goes wrong: `logs/`, one `wwhd_<date>_<time>.log` per session (the newest is this
@@ -233,11 +239,20 @@ open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Round 46") and
 
 ## Changelog
 
+### 2026-10-08: settings.ini replaces env.txt
+
+- Every option lives in the options menu (`settings.ini`). New in the **Switch** tab's **Debug** section:
+  *Debug server (network)* (off by default, applies at the next start), and the main-thread sampler is
+  now saved. Developer variables go in a `[dev]` section of `settings.ini`. An existing `env.txt` is
+  converted at the first start and renamed `env.txt.old`.
+- Old test switches removed (the `WWHD_GL_*` names, the finished grass bisection, rollbacks of
+  long-confirmed renderer paths, the test pattern and a model probe); nothing changes for players.
+
 ### 2026-10-08: debug server for development
 
-- **Network debug server** for developers, **off by default** (`WWHD_DEBUG_SERVER=1` in `env.txt`
-  turns it on). `tools/switch/wwhd_debug.py` deploys a new build and restarts the game, and it
-  streams the log, fetches the session logs and Atmosphère's crash reports, takes screenshots,
+- **Network debug server** for developers, **off by default** (then turned on with `WWHD_DEBUG_SERVER=1`
+  in `env.txt`; now in the options menu). `tools/switch/wwhd_debug.py` deploys a new build and
+  restarts the game, and it streams the log, fetches the session logs and Atmosphère's crash reports, takes screenshots,
   injects button presses and sticks, and warps. That removes the reboot to hekate for every test.
   Tested on the console: a 39 MiB build is uploaded, checked and running again in under 10 s.
   [docs/debug-server.md](docs/debug-server.md).

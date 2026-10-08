@@ -14,7 +14,8 @@ latest rounds and what they taught: "Round 46", "Round 45" and "Retrospective (r
 | Boot on hardware | Works: picture, sound and controller input (as a Wii U Pro Controller, so everything is on one screen) |
 | Performance on hardware | Stock clocks (CPU 1020, GPU 307, memory 1331 MHz), round 45: Outset ~30 fps (~29 in its heaviest view, 7,300 draws; limit: the render thread); sailing near Dragon Roost and the volcano 26-29 fps (limit: the game's main thread, ~90% game code); at CPU 1122 MHz 30 fps there. Shader variants of earlier sessions skip the decompiler (translation records); new textures ~1.7 ms each |
 | Settings | In-game menu (Minus held half a second): GPU profile (default: stock, GPU 307 MHz, since 2026-10-08; was 460.8 MHz + memory 1600), CPU clock (1020-1785 MHz in the system table's steps; default the stock 1020 since 2026-10-08, was 1224; 1224 marked Recommended: it steadies the busiest scenes at 30), picture adjustments, frame-rate counter, controller, gyro, save states, warp, mods, language. Saved in `settings.ini`; `env.txt` values win at start. Switch tab, Debug: A/B switches, log diagnostics and the frame-rate test (not saved; rule: test options always go in the menu) |
-| On-screen FPS counter | Top-left corner; menu or `WWHD_FPS=0/1/2` |
+| On-screen FPS counter | Top-left corner; menu (Switch tab) |
+| Developer variables | `[dev]` section at the end of `sdmc:/switch/wwhd/settings.ini`, read before the static initialisers (2026-10-08; replaces `env.txt`, which is converted once and renamed `env.txt.old`; docs/debug-server.md) |
 | Desktop reproduction | deko3d does not run on the desktop; shared code (GX2 command stream, game code) is A/B-tested and profiled on the desktop Vulkan build (round 45). The headless OpenGL build is in git history (`main` 207349b) |
 
 ## History of decisions
@@ -23,14 +24,15 @@ latest rounds and what they taught: "Round 46", "Round 45" and "Retrospective (r
 2. **Platform.** Horizon `.nro` was chosen over L4T Linux, as the user preferred.
 3. **Game data.** The user provides their own decrypted dump in `Rom/Decrypted/<title folder>/` (US, v0: `code/`, `content/`, `meta/`). `Rom/` is gitignored. Generated code (`build/gen`) comes from the user's dump and must never be committed.
 
-## Rule for test builds: options in the menu, not env.txt
+## Rule for test builds: options in the menu, not [dev] variables
 
 Every option, A/B switch or diagnostic that a hardware test asks the player to turn on goes into the in-game
 settings menu (Switch tab; diagnostics and A/B switches in its Debug section), switchable while the game runs and
-logged with the frame it changed at. Test instructions name the menu entry. `env.txt` remains an override read at
-start (for scripted runs and defaults), never the only way to reach a test option. (2026-10-08: round 45's first
-instructions asked for two `env.txt` lines for the main-thread and per-thread diagnostics; they are now Debug
-entries.)
+logged with the frame it changed at. Test instructions name the menu entry. The `[dev]` section of `settings.ini`
+(developer variables, read at start) is for scripted runs, never the only way to reach a test option; a variable
+the menu has a setting for is ignored there. (2026-10-08: round 45's first instructions asked for two `env.txt`
+lines for the main-thread and per-thread diagnostics; they are now Debug entries. Later that day `env.txt` was
+replaced by the `[dev]` section.)
 
 ## Building
 
@@ -142,7 +144,7 @@ Total backed memory is 1448 MiB, so hbmenu must run in title-takeover mode, not 
 
 - **`runtime/src/main.cpp` (Switch only):**
   - Creates `sdmc:/switch/wwhd`, changes into it, and redirects stderr to `logs/wwhd_<date>_<time>.log` (line-buffered; see "Session logs" below).
-  - Reads `env.txt`: `KEY=VALUE` lines become environment variables, and `--opt` lines become extra arguments.
+  - Before it, a priority-101 constructor reads `settings.ini`: the `[dev]` section's `KEY=VALUE` lines become environment variables (an old `env.txt` is converted into `settings.ini` first and renamed `env.txt.old`). Until 2026-10-08 this was `env.txt`, whose `--opt` lines became extra arguments.
   - `std::set_terminate` logs uncaught exceptions. hbloader intercepts CPU exceptions, so crashes appear only in Atmosphère's `/atmosphere/crash_reports`.
 - **`runtime/src/platform/host.h`:** Switch versions of the thread name (no-op), `executable_base` (`svcQueryMemory`), `page_size` (0x1000), `config_dir` (`sdmc:/switch/wwhd`) and `replace_file` (removes the target first). It also adds:
   - `set_thread_core(core)`: `svcSetThreadCoreMask(core % 3, 0x7)`.
@@ -168,8 +170,8 @@ Total backed memory is 1448 MiB, so hbmenu must run in title-takeover mode, not 
 - The controller acts as a **Wii U Pro Controller** by default: the game reads it through WPAD/KPAD
   (`hle/padscore.cpp`), the GamePad stays connected but idle, and HUD, map and menus all go on the
   TV picture (the only screen shown on the Switch). At the controller question, choose the Pro
-  Controller. `WWHD_PRO_CONTROLLER=0` in `env.txt` makes it act as the GamePad instead (VPAD), as
-  in earlier builds; the log says which mode is active (`[input] Switch controller acts as …`).
+  Controller. The Switch tab's Debug section (saved as `proController`) makes it act as the GamePad instead
+  (VPAD), as in earlier builds; the log says which mode is active (`[input] Switch controller acts as …`).
 - libnx `pad` buttons map by position, the same in both modes:
 
   | Switch | Wii U |
@@ -380,7 +382,7 @@ time per draw (round 2: ~8 µs including the work outside draws). Measured on th
   - The Vulkan renderer handles it with an sRGB swapchain (`gfx/vulkan/backend.cpp`, `set_tv_format`).
 - **Found by comparing with the Vulkan renderer** on the same frames (see [Reference renders](#reference-renders-vulkan-and-gpu-headless)). In the shadowed cliff, tree and house area of title frame 600, average brightness was 40 (OpenGL) against 86 (Vulkan).
 - **Fix:** `set_tv_format` records whether the TV format is sRGB (`R.tvSrgb`). The present shader then applies the sRGB encoding (the Switch's EGL window is not an sRGB surface), and `frame_N.png` dumps are encoded the same way. The same area is now 84 against Vulkan's 86. The log says `[gl] presenting with sRGB encoding (sRGB TV format)`.
-- **Picture adjustments** (`env.txt`, applied by the present shader, neutral = 1): `WWHD_EXPOSURE` (scales the linear picture before encoding; below 1 tames bright sand and sky), `WWHD_CONTRAST` (S-curve around mid-grey, black and white fixed), `WWHD_SATURATION`, `WWHD_GAMMA` (above 1 deepens mid-tones). The shipped `build/switch/env.txt` turns on a "punchy" profile (0.85 / 1.3 / 1.1 / 1.0), with the original colours and a milder profile commented out. The values are logged at startup (`[gl] WWHD_CONTRAST=1.30`).
+- **Picture adjustments** (the Switch tab, saved in `settings.ini`; then `env.txt`; applied by the present shader, neutral = 1): `WWHD_EXPOSURE` (scales the linear picture before encoding; below 1 tames bright sand and sky), `WWHD_CONTRAST` (S-curve around mid-grey, black and white fixed), `WWHD_SATURATION`, `WWHD_GAMMA` (above 1 deepens mid-tones). The shipped `build/switch/env.txt` turns on a "punchy" profile (0.85 / 1.3 / 1.1 / 1.0), with the original colours and a milder profile commented out. The values are logged at startup (`[gl] WWHD_CONTRAST=1.30`).
 - Round 3's zero-padding of short uniform blocks stays: it is a real correctness fix, but it was not the cause of the darkness.
 
 #### The GL thread (`WWHD_GL_THREAD=1`)
@@ -1542,12 +1544,13 @@ The CPU cost (draw count, the render thread) does not depend on the resolution: 
 1. Copy `build/switch/wwhd.nro` to `sdmc:/switch/wwhd/wwhd.nro`.
 2. Copy the decrypted game to `sdmc:/switch/wwhd/game/`, containing `code/`, `content/` and `meta/`. Saves go to `sdmc:/switch/wwhd/save/`.
 3. Launch from hbmenu in **title-takeover mode**: hold R while starting a game, not from the album applet, because 1.4 GiB of memory is needed.
-4. Optional `sdmc:/switch/wwhd/env.txt`, one entry per line:
+4. Optional developer variables: a `[dev]` section at the end of `sdmc:/switch/wwhd/settings.ini`, one entry per
+   line (until 2026-10-08 `env.txt`, which also took `--trace`-style options):
 
    ```
+   [dev]
    WWHD_DUMP_FRAMES=600,1800
    WWHD_DUMP_TARGETS=1800
-   --trace
    ```
 
 5. Logs go to `sdmc:/switch/wwhd/wwhd.log`; native crashes go to `sdmc:/atmosphere/crash_reports/`.

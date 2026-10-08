@@ -2,22 +2,50 @@
 
 A TCP port on the console for the development machine: the log as it is written, files on the SD card,
 controller presses, warps, screenshots, and a new build deployed and restarted without touching the console.
-It is off unless `env.txt` turns it on. There is no password, so use it only on your local network.
+It is off unless the settings menu turns it on. There is no password, so use it only on your local network.
 
 ## Turning it on
 
-In `sdmc:/switch/wwhd/env.txt`:
-
-```
-WWHD_DEBUG_SERVER=1
-```
-
-(`1` uses port 6543; any other number is the port to use.) At start the log says
+Hold Minus for the settings menu, **Switch** tab, **Debug** section: tick **Debug server (network)**. It is
+saved (`switchDebugServer=1` in `sdmc:/switch/wwhd/settings.ini`) and the server starts at the **next** start
+of the game, on port 6543. At start the log says
 `[debug] server listening on <ip>:6543`. A fixed address for the console (a DHCP reservation in the router)
 saves looking it up each time.
 
 On the Mac, tell the client where the console is, either with `export WWHD_SWITCH_HOST=<ip>` or with the
 address on the first line of `build/switch_host.txt` (`build/` is not in git).
+
+## Developer variables: the `[dev]` section of `settings.ini`
+
+The `WWHD_*` variables for development and tests (traces, renderer switches, A/B tests: the README lists
+them) go at the end of `sdmc:/switch/wwhd/settings.ini`, under a `[dev]` header, one `NAME=value` per line:
+
+```
+# Wind Waker HD settings
+switchCpuClock=1224
+switchDebugServer=1
+
+[dev]
+# the passes of two frames in the log
+WWHD_DK_TRACE_FRAMES=2500,2501
+WWHD_SCHED_STATS=2
+```
+
+They are read at the next start, before anything else, and the log lists each one (`[settings] [dev] ...`).
+The menu rewrites only its own lines and keeps the `[dev]` section as it is. A variable the menu has a
+setting for (`WWHD_CPU_CLOCK`, `WWHD_GPU_PROFILE`, `WWHD_DEBUG_SERVER`, `WWHD_MAIN_SAMPLER`, `WWHD_MOD_*`,
+`WWHD_FPS`, the picture's, `WWHD_RES_SCALE`...) is ignored there, with a log line: use the menu.
+
+With the server running, edit it from the Mac:
+
+```
+tools/switch/wwhd_debug.py get settings.ini build/settings.ini
+# edit build/settings.ini: add or change lines under [dev]
+tools/switch/wwhd_debug.py put build/settings.ini settings.ini && tools/switch/wwhd_debug.py reload
+```
+
+An `env.txt` from earlier builds is converted once at start: its variables with a menu setting become that
+setting, the others go into `[dev]`, and it is renamed `env.txt.old` (the log lists every line).
 
 ## The client: `tools/switch/wwhd_debug.py`
 
@@ -66,7 +94,7 @@ each with its own thread.
 - `runtime/src/platform/debug_server.{h,cpp}`: the server. It knows nothing about the game, and it builds on
   the Switch and on POSIX hosts, so the same pair can go into SwitchWaker.
 - `runtime/src/platform/debug_switch.{h,cpp}`: the game's commands (`info`, `warps`, `warp`, `shot`, `reload`,
-  `quit`) and the start from `env.txt`.
+  `quit`) and the start from the saved setting (`settings.ini` `switchDebugServer`).
 - The hooks:
   - `core.cpp` `log_flush`: the log's text goes to `log` streams.
   - `input_switch.cpp`: the injected buttons and sticks.

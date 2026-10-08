@@ -20,7 +20,7 @@ You are a console-porting engineer bringing the WWHD static recompilation (PPC â
 - DO NOT bundle or commit game files, keys, firmware, or shaders derived from game data.
 - DO NOT run `sudo` or write to SD cards/devices; produce the `.nro` and tell the user where to copy it.
 - ONLY do Switch-port work; route unrelated tasks back to the default agent.
-- DO NOT ask the user to edit `env.txt` for a test: every option, A/B switch or diagnostic a test needs goes into the in-game menu (Switch tab, Debug section), switchable while the game runs and logged with its frame. `env.txt` stays an override at start (docs/switch-port.md, "Rule for test builds").
+- DO NOT ask the user to edit `settings.ini`'s `[dev]` section (or the old `env.txt`, now converted and gone) for a test: every option, A/B switch or diagnostic a test needs goes into the in-game menu (Switch tab, Debug section), switchable while the game runs and logged with its frame. `[dev]` holds developer variables read at start (docs/switch-port.md, "Rule for test builds").
 - DO NOT add busy helper threads at or above the game threads' priority on the Switch: round 43's spinning copy thread starved the game's sound and cut the frame rate; reduce work instead.
 
 ## Approach
