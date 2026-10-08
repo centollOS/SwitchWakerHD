@@ -128,7 +128,7 @@ static bool shader_irrelevant(uint32 reg) {
 // bits in mask[reg]; kRegProgram: a program register (not counted by g_shader_regs_gen).
 // OpenGL: like WWHD_VK_SHADER_KEY_DIRTY, register fields that its shader key ignores (texture
 // addresses, viewport, blend, scissor, the alpha-test reference...) don't count, so consecutive draws
-// that only change those reuse the shader lookup. WWHD_GL_SHADER_KEY_DIRTY=0 counts every change.
+// that only change those reuse the shader lookup. WWHD_DK_SHADER_KEY_DIRTY=0 counts every change.
 // (bits 3-5: the register's categories, gx2.h RegCategory: one table and one pass in apply_regs)
 enum : uint8 { kRegCounted = 1, kRegMasked = 2, kRegProgram = 4, kRegShaderBits = 7, kRegCatShift = 3 };
 struct RegClasses {
@@ -137,7 +137,7 @@ struct RegClasses {
 };
 static const RegClasses& reg_classes() {
     static const RegClasses classes = [] {
-        const char* e = getenv("WWHD_GL_SHADER_KEY_DIRTY");
+        const char* e = getenv("WWHD_DK_SHADER_KEY_DIRTY");
         // deko3d translates shaders as the OpenGL renderer does (the decompiler's OpenGL mode)
         const bool glKeyMask = render::deko3d() && (!e || strcmp(e, "0") != 0);
         RegClasses c;

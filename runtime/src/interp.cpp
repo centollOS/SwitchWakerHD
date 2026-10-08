@@ -1163,3 +1163,9 @@ extern "C" void hook_020315CC(Cpu* c) {
     }
     f_020315CC_orig(c);
 }
+
+// J3DModel::calc (027F4D5C) was hooked only by the removed model probe (WWHD_PROBE_MODEL) and is no longer in
+// tools/recomp/hooks.txt. Code generated before that still calls hook_027F4D5C: it runs the function as it is.
+// Weak, so code generated after (no hook, no f_027F4D5C_orig) links too; delete once build/gen is regenerated.
+extern "C" __attribute__((weak)) void f_027F4D5C_orig(Cpu* c);
+extern "C" __attribute__((weak)) void hook_027F4D5C(Cpu* c) { f_027F4D5C_orig(c); }

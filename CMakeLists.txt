@@ -302,7 +302,7 @@ if(WWHD_HAS_DEKO3D)
   find_path(LZ4_INCLUDE_DIR lz4.h REQUIRED)
   find_library(LZ4_LIBRARY NAMES lz4 REQUIRED)
   target_include_directories(wwhd PRIVATE ${LZ4_INCLUDE_DIR})
-  # the renderer's own shaders (test pattern, FPS counter, settings overlay): GLSL compiled at build time
+  # the renderer's own shaders (FPS counter, settings overlay, depth-only): GLSL compiled at build time
   # by devkitPro's uam into DKSH and embedded (bin2s); gfx/deko/shaders/*.glsl, named <name>_<vsh|fsh>.glsl
   file(GLOB DEKO3D_SHADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/src/gfx/deko/shaders/*.glsl)
   set(_dksh)

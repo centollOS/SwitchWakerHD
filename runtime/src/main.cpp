@@ -475,7 +475,9 @@ static void apply_portable_mode() {
 // default on every platform: on a Galaxy S25 Ultra they took the render thread from about 40 to
 // 30 ms per frame; on an M3 Max (MoltenVK) together they cut render-thread CPU by 8-14% with no
 // measurable cost from any single one (docs/performance.md, 2026-10-07). NAME=0 turns one off.
+// Not on the Switch (deko3d only: nothing reads them there).
 static void default_vulkan_cpu_paths() {
+#ifndef __SWITCH__
     for (const char* name : reporthdr::kVulkanCpuPaths) {  // the list: report_header.cpp
 #ifdef _WIN32
         if (!getenv(name)) _putenv_s(name, "1");
@@ -483,6 +485,7 @@ static void default_vulkan_cpu_paths() {
         setenv(name, "1", 0);
 #endif
     }
+#endif
 }
 
 int main(int argc, char** argv) {

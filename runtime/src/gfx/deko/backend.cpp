@@ -1,8 +1,7 @@
 // The deko3d renderer's device, presentation and host loop, and its entry in the renderer table (dk.h).
 // Every GX2 swap presents the game's TV picture (present_source, dk_surfaces.h) with the picture adjustments,
 // the FPS counter and the settings overlay (hold Minus); black until the game has copied a picture to the TV
-// scan buffer. WWHD_DK_TEST_PATTERN=1 shows P1's test pattern of the device's conventions (origin, y direction,
-// depth range, depth test) instead of the picture. Also here: submits, the statistics, hitch log and trace.
+// scan buffer. Also here: submits, the statistics, hitch log and trace.
 #include <malloc.h>
 #include <unistd.h>
 extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into (sbrk)
@@ -48,8 +47,6 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "depth_fsh_dksh.h"
 #include "imgui_fsh_dksh.h"
 #include "imgui_vsh_dksh.h"
-#include "pattern_fsh_dksh.h"
-#include "pattern_vsh_dksh.h"
 #include "present_fsh_dksh.h"
 #include "present_vsh_dksh.h"
 #include "text_fsh_dksh.h"
@@ -172,7 +169,6 @@ void load_shaders() {
         size_t size;
         const char* name;
     } kEmbedded[kShaderCount] = {
-        {pattern_vsh_dksh, pattern_vsh_dksh_size, "pattern_vsh"}, {pattern_fsh_dksh, pattern_fsh_dksh_size, "pattern_fsh"},
         {text_vsh_dksh, text_vsh_dksh_size, "text_vsh"},          {text_fsh_dksh, text_fsh_dksh_size, "text_fsh"},
         {imgui_vsh_dksh, imgui_vsh_dksh_size, "imgui_vsh"},       {imgui_fsh_dksh, imgui_fsh_dksh_size, "imgui_fsh"},
         {depth_fsh_dksh, depth_fsh_dksh_size, "depth_fsh"},
@@ -217,7 +213,7 @@ void init_swapchain() {
         images[i] = &g_swapImages[i];
     }
     init_image(g_depth, g_depthMem, DkImageFormat_Z24S8, DkImageFlags_UsageRender | DkImageFlags_HwCompression,
-               "test pattern depth buffer (Z24S8)");
+               "present pass depth buffer (Z24S8)");
     DkSwapchainMaker m;
     dkSwapchainMakerDefaults(&m, R.device, nwindowGetDefault(), images, kSwapImages);
     LOG("[dk] creating the swapchain on the default window");
@@ -397,80 +393,6 @@ void draw_text(int left, int top, int scale, const std::vector<std::string>& lin
     dkCmdBufDraw(R.cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
 }
 
-// ---- the orientation / depth test pattern. Positions in normalized device coordinates with y down (y = -1
-// is the top of the screen; pattern_vsh negates y, dk.h) and clip-space z from 0 to 1.
-struct PatternVertex {
-    float x, y, z;
-    float r, g, b, a;
-};
-void quad(std::vector<PatternVertex>& v, float x0, float y0, float x1, float y1, float z, const float top[4],
-          const float bottom[4], const float* right = nullptr) {
-    // corners: top = y0 side, bottom = y1 side; `right`: a horizontal gradient from top (left) to right
-    const float* tl = top;
-    const float* tr = right ? right : top;
-    const float* bl = right ? top : bottom;
-    const float* br = right ? right : bottom;
-    auto p = [&](float x, float y, const float* c) { v.push_back({x, y, z, c[0], c[1], c[2], c[3]}); };
-    p(x0, y0, tl), p(x1, y0, tr), p(x0, y1, bl);
-    p(x1, y0, tr), p(x1, y1, br), p(x0, y1, bl);
-}
-void triangle(std::vector<PatternVertex>& v, float x0, float y0, float x1, float y1, float x2, float y2, float z,
-              const float c[4]) {
-    v.push_back({x0, y0, z, c[0], c[1], c[2], c[3]});
-    v.push_back({x1, y1, z, c[0], c[1], c[2], c[3]});
-    v.push_back({x2, y2, z, c[0], c[1], c[2], c[3]});
-}
-
-void draw_pattern(uint64_t frame) {
-    static const float kSkyTop[4] = {0.10f, 0.22f, 0.50f, 1}, kSkyBottom[4] = {0.02f, 0.02f, 0.04f, 1};
-    static const float kBlack[4] = {0, 0, 0, 1}, kWhite[4] = {1, 1, 1, 1}, kRed[4] = {0.9f, 0.1f, 0.1f, 1},
-                       kGreen[4] = {0.1f, 0.8f, 0.2f, 1}, kCyan[4] = {0.1f, 0.85f, 0.9f, 1},
-                       kMagenta[4] = {0.85f, 0.15f, 0.8f, 1}, kOrange[4] = {1.0f, 0.55f, 0.0f, 1},
-                       kGray[4] = {0.3f, 0.3f, 0.3f, 1};
-    std::vector<PatternVertex> v;
-    v.reserve(64);
-    quad(v, -1, -1, 1, 1, 0.99f, kSkyTop, kSkyBottom);           // background: blue at the top, dark at the bottom
-    quad(v, -0.6f, 0.30f, 0.6f, 0.42f, 0.5f, kBlack, kBlack, kWhite);  // black (left) to white (right)
-    quad(v, -0.97f, -0.80f, -0.72f, -0.45f, 0.5f, kRed, kRed);    // top left
-    quad(v, 0.72f, 0.55f, 0.97f, 0.90f, 0.5f, kGreen, kGreen);    // bottom right
-    // depth test: the near cyan triangle first, then the far magenta one over it
-    triangle(v, -0.40f, -0.25f, 0.00f, -0.25f, -0.20f, 0.20f, 0.25f, kCyan);
-    triangle(v, -0.25f, -0.10f, 0.15f, -0.10f, -0.05f, 0.25f, 0.75f, kMagenta);
-    // depth range: the orange triangle has z = -0.5, outside 0..1 (clipped) but inside -1..1; drawn into
-    // a gray square that stays empty when the depth range is 0..1
-    quad(v, 0.30f, -0.30f, 0.70f, 0.20f, 0.9f, kGray, kGray);
-    triangle(v, 0.35f, -0.25f, 0.65f, -0.25f, 0.50f, 0.15f, -0.5f, kOrange);
-    if (!bind_shaders(kPatternVs, kPatternFs)) return;
-    const uint32_t bytes = uint32_t(v.size() * sizeof(PatternVertex));
-    StreamAlloc s = stream_alloc(bytes, 16);
-    if (!s) return;
-    memcpy(s.cpu, v.data(), bytes);
-    bind_pass_state(false, true);
-    set_view(0, 0, g_winW, g_winH);
-    static const DkVtxAttribState attribs[] = {
-        DkVtxAttribState{0, 0, offsetof(PatternVertex, x), DkVtxAttribSize_3x32, DkVtxAttribType_Float, 0},
-        DkVtxAttribState{0, 0, offsetof(PatternVertex, r), DkVtxAttribSize_4x32, DkVtxAttribType_Float, 0},
-    };
-    static const DkVtxBufferState buffers[] = {DkVtxBufferState{sizeof(PatternVertex), 0}};
-    dkCmdBufBindVtxAttribState(R.cmd, attribs, 2);
-    dkCmdBufBindVtxBufferState(R.cmd, buffers, 1);
-    const DkBufExtents vb = {s.gpu, bytes};
-    dkCmdBufBindVtxBuffers(R.cmd, 0, &vb, 1);
-    dkCmdBufDraw(R.cmd, DkPrimitive_Triangles, uint32_t(v.size()), 1, 0, 0);
-    // the legend (window coordinates from the top left)
-    char status[64];
-    snprintf(status, sizeof status, "FRAME %llu, WWHD_DK_TEST_PATTERN=1", (unsigned long long)frame);
-    static const float fg[4] = {1, 1, 1, 1}, bg[4] = {0, 0, 0, 0.55f};
-    // laid out for 1280x720, scaled with the window
-    const float k = float(g_winH) / 720.0f;
-    draw_text(int(330 * float(g_winW) / 1280.0f), int(36 * k), std::max(1, int(3 * k)),
-              {"DEKO3D TEST PATTERN", status, "", "THIS TEXT UPRIGHT: WINDOW ORIGIN TOP LEFT",
-               "RED BOX TOP LEFT, GREEN BOTTOM RIGHT: Y NEGATED", "CYAN IN FRONT OF MAGENTA: DEPTH TEST",
-               "GRAY SQUARE EMPTY (NO ORANGE): DEPTH 0 TO 1", "BAR: BLACK LEFT TO WHITE RIGHT",
-               "BACKGROUND: BLUE TOP, DARK BOTTOM", "HOLD MINUS: SETTINGS"},
-              fg, bg);
-}
-
 // ---- performance overlay in the top-left corner (WWHD_FPS, the OpenGL renderer's counter)
 std::atomic<int> g_fpsMode{-1};  // -1: not read yet
 int overlay_mode() {
@@ -520,7 +442,7 @@ void draw_fps() {
 }
 
 // ---- picture adjustments (gfx/switch_renderer.h): kept for the present pass of the game's picture
-// (P2); the test pattern is drawn as it is
+// (P2)
 std::mutex g_gradeMu;
 gfxsw::PictureGrade g_gradeSet;
 bool g_gradeChanged = false;
@@ -759,7 +681,7 @@ struct DynamicRes {
     }
 } dynamicRes;
 
-// ---- GPU time per render pass (as gfx/gl's GpuPasses; WWHD_DK_GPU_PASSES, or WWHD_GL_GPU_PASSES, on unless =0).
+// ---- GPU time per render pass (as gfx/gl's GpuPasses; WWHD_DK_GPU_PASSES, on unless =0).
 // Every 30th frame, a timestamp (dkCmdBufReportCounter DkCounter_Timestamp: written when the work before it
 // has passed the ROP, so a pass's pixel work counts in that pass) goes at the frame's start, where its render
 // targets change, at clears, copies and present; the next sampled frame reads them (30 frames later: frame_begin
@@ -819,7 +741,6 @@ struct GpuPasses {
     void setup() {
         ready = true;
         const char* e = getenv("WWHD_DK_GPU_PASSES");
-        if (!e) e = getenv("WWHD_GL_GPU_PASSES");
         on = !(e && *e == '0') || dynamic_res_requested();  // dynamic resolution steps up by the sampled idle time
         LOG("[dk] GPU passes: %s", on ? "timestamps every 30th frame ('[dk] GPU passes' every 5 s; WWHD_DK_GPU_PASSES=0 "
                                         "turns them off unless dynamic resolution is on)"
@@ -1237,14 +1158,6 @@ void present() {
     const DkImageView* colors[] = {&color};
     dkCmdBufBindRenderTargets(R.cmd, colors, 1, &depth);
     set_view(0, 0, g_winW, g_winH);
-    // WWHD_DK_TEST_PATTERN=1: P1's test pattern instead of the game's picture (the game runs behind it)
-    static const bool testPattern = [] {
-        const char* e = getenv("WWHD_DK_TEST_PATTERN");
-        const bool on = e && *e && *e != '0';
-        LOG("[dk] present: %s", on ? "the TEST PATTERN (WWHD_DK_TEST_PATTERN=1), not the game's picture"
-                                   : "the game's TV picture (WWHD_DK_TEST_PATTERN=1 shows the test pattern)");
-        return on;
-    }();
     dkCmdBufClearColorFloat(R.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);  // the bars, or no picture yet
     dkCmdBufClearDepthStencil(R.cmd, true, 1.0f, 0xFF, 0);
     static int shown = -1;  // the last frame's: 1 the game's picture, 0 black (logged when it changes)
@@ -1256,8 +1169,7 @@ void present() {
         LOG("[dk] frame %llu: the window shows the %s picture", (unsigned long long)frame, padShown ? "GamePad" : "TV");
     }
     if (!pad.surface) g_padRect[2] = 0;
-    if (testPattern) draw_pattern(frame);
-    else if (pad.surface && draw_picture(pad, capture)) {
+    if (pad.surface && draw_picture(pad, capture)) {
     } else if (draw_picture(src, capture)) {
         if (shown != 1) LOG("[dk] frame %llu: presenting the game's TV picture", (unsigned long long)frame);
         shown = 1;
@@ -1274,7 +1186,7 @@ void present() {
     S.scanSrc = nullptr;
     if (S.tvSource) S.tvSource->hudFull = false;
     draw_fps();
-    // the settings overlay (Minus held, overlay/overlay.h), over the pattern and the FPS counter
+    // the settings overlay (Minus held, overlay/overlay.h), over the picture and the FPS counter
     // (the window's real size: the UI grows with it, overlay.cpp)
     if (ImDrawData* ui = overlay::frame(float(g_winW), float(g_winH), overlay_renderer_init)) overlay_draw(ui, int(g_winW), int(g_winH));
     gpuPasses.frame_end();
@@ -1299,12 +1211,10 @@ void present() {
     latch_res_scale();  // a new internal resolution from the next frame on
 }
 
-// WWHD_DK_TRACE_FRAMES=n,... (or WWHD_GL_TRACE_FRAMES): those frames' passes in the log, as gfx/gl's
-std::vector<uint64_t> frame_list(const char* var, const char* fallbackVar) {
+// WWHD_DK_TRACE_FRAMES=n,...: those frames' passes in the log, as gfx/gl's
+std::vector<uint64_t> frame_list(const char* var) {
     std::vector<uint64_t> frames;
-    const char* e = getenv(var);
-    if (!e && fallbackVar) e = getenv(fallbackVar);
-    if (e)
+    if (const char* e = getenv(var))
         for (const char* p = e; *p;) {
             char* end = nullptr;
             const unsigned long long v = strtoull(p, &end, 10);
@@ -1364,16 +1274,16 @@ void swap() {
             (unsigned long long)c.draws, (unsigned long long)R.drawCount, (unsigned long long)c.clears,
             (unsigned long long)c.copies, (unsigned long long)c.scans);
     }
-    static const std::vector<uint64_t> traced = frame_list("WWHD_DK_TRACE_FRAMES", "WWHD_GL_TRACE_FRAMES");
+    static const std::vector<uint64_t> traced = frame_list("WWHD_DK_TRACE_FRAMES");
     g_traceFrame = (!traced.empty() && std::find(traced.begin(), traced.end(), R.frame + 1) != traced.end()) ||
                    R.frame + 1 == g_captureFrame;
     g_captureDraws = R.frame + 1 == g_captureFrame;
     // the next frame's PNG files: a capture writes everything; WWHD_DUMP_FRAMES=n,... the pictures (as gfx/gl:
     // frame_<n>.png, frame_<n>_window.png), WWHD_DUMP_TARGETS=n,... the render targets, WWHD_DUMP_TEXTURES=n,...
     // the sampled textures and their upload data (captures/<n>/)
-    static const std::vector<uint64_t> dumpFrames = frame_list("WWHD_DUMP_FRAMES", nullptr);
-    static const std::vector<uint64_t> dumpTargets = frame_list("WWHD_DUMP_TARGETS", nullptr);
-    static const std::vector<uint64_t> dumpTextures = frame_list("WWHD_DUMP_TEXTURES", nullptr);
+    static const std::vector<uint64_t> dumpFrames = frame_list("WWHD_DUMP_FRAMES");
+    static const std::vector<uint64_t> dumpTargets = frame_list("WWHD_DUMP_TARGETS");
+    static const std::vector<uint64_t> dumpTextures = frame_list("WWHD_DUMP_TEXTURES");
     auto listed = [](const std::vector<uint64_t>& v) { return std::find(v.begin(), v.end(), R.frame + 1) != v.end(); };
     uint32_t what = 0;
     if (listed(dumpFrames)) what |= kCapturePictures;
@@ -1444,7 +1354,7 @@ void init() {
     DkDeviceMaker dm;
     dkDeviceMakerDefaults(&dm);
     dm.cbDebug = debug_message;
-    // window origin top left, depth 0 to 1; clip-space y up (dk.h): the test pattern shows them
+    // window origin top left, depth 0 to 1; clip-space y up (dk.h)
     dm.flags = DkDeviceFlags_OriginUpperLeft | DkDeviceFlags_DepthZeroToOne;
     LOG("[dk] creating the device (deko3d %s library)", kDebugLib ? "debug" : "release");
     log_flush();  // deko3d aborts when a creation fails, without returning (debug_message)

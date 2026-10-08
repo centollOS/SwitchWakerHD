@@ -48,34 +48,15 @@ sin WFI (Mesa usa TIC_FLUSH/TSC_FLUSH con espera), código de shader cargado a m
 de shader (deko3d solo lo hace en `dkQueueFlush`), tiled cache nunca escrito, perf knob de subtiling (uam 0x087F6080,
 Mesa 0x20164010), early/late Z.
 
-Interruptores (`gfx/deko/dk_bisect.h`, `bisect.cpp`; cada uno en una línea `[dk] grass bisect:` al arrancar):
-
-| Interruptor | Por defecto | Valores |
-|---|---|---|
-| `WWHD_DK_SHADER_SCHED` | **2** | 0 como compila uam; 1 sin dual issue; 2 sin dual issue + cada instrucción espera todos los scoreboards; 3 = 2 + stall 15 (lento) |
-| `WWHD_DK_DEPTH_BIAS` | **gl** | gl (sin clamp, como Mesa); latte (clamp del registro: lo de antes); off; units2; noslope |
-| `WWHD_DK_DESC_WFI` | **1** | 1 espera a idle antes de invalidar descriptores; 0 como antes |
-| `WWHD_DK_SHADER_INVALIDATE` | **1** | 1 invalida cachés de shader tras cargar código a mitad de frame; 0 como antes |
-| `WWHD_DK_TILED_OFF` | **1** | 1 tiled cache apagado explícitamente cada frame; 0 sin tocarlo (lo de antes) |
-| `WWHD_DK_DECAL_BARRIER` | 0 | 1 barrier Fragments antes de cada draw con depth bias (y tras la tanda); 2 barrier Full |
-| `WWHD_DK_EARLY_Z` | 0 | 1 early Z forzado (shaders sin kill ni escritura de depth); 2 late Z en todos (bit KillsPixels del SPH) |
-| `WWHD_DK_PS_KNOB` | 0 | mesa: perf knob de subtiling de Mesa en los fragment shaders |
+Interruptores de la bisección (`WWHD_DK_SHADER_SCHED`, `EARLY_Z`, `PS_KNOB`, `DEPTH_BIAS`, `DECAL_BARRIER`,
+`SHADER_INVALIDATE`, `DESC_WFI`, `TILED_OFF`; `gfx/deko/bisect.cpp`): **retirados** (2026-10-08) cuando el parche 7
+de uam arregló las motas (4928a68). El código conserva lo que eran sus valores por defecto: polygon offset como
+gfx/gl (sin clamp), espera a idle antes de invalidar descriptores, cachés de shader invalidadas tras cargar código
+a mitad de frame, tiled cache apagado explícitamente cada frame; sin parches de DKSH al cargar.
 
 Siguen valiendo `WWHD_DK_LAZY_BARRIERS=0`, `WWHD_DK_ZCULL_KEEP=0`, `WWHD_DK_DEPTH_SAMPLE_BOUND=0`,
 `WWHD_DK_UPLOAD_BATCH=0`, `WWHD_DK_UF_CACHE=0|1`, `WWHD_DK_SUBMIT_DRAWS=0`, `WWHD_DK_ZCULL=1`,
-`WWHD_DK_RT_COMPRESSION=0`.
-
-**Prueba (dueño):** `wwhd_dk_release.nro`, hierba de Outset (o la caverna), 1 min por línea, **una sola línea en
-`env.txt` cada vez**; anotar motas sí/no y fps:
-1. sin `env.txt` (defaults de arriba). Se espera limpio; `SHADER_SCHED=2` puede costar fps.
-2. Si 1 está limpio, para saber cuál lo arregla: `WWHD_DK_SHADER_SCHED=1`, luego `WWHD_DK_SHADER_SCHED=0`,
-   `WWHD_DK_DESC_WFI=0`, `WWHD_DK_SHADER_INVALIDATE=0`, `WWHD_DK_DEPTH_BIAS=latte`, `WWHD_DK_TILED_OFF=0`. La que
-   devuelva las motas es la causa (si es `SHADER_SCHED=0` y `=1` limpio: el dual issue de uam).
-3. Si 1 aún tiene motas: `WWHD_DK_SHADER_SCHED=3`, `WWHD_DK_DECAL_BARRIER=2`, `WWHD_DK_EARLY_Z=2`,
-   `WWHD_DK_EARLY_Z=1`, `WWHD_DK_PS_KNOB=mesa`, `WWHD_DK_DEPTH_BIAS=off` (los decals desaparecen; mira si las motas
-   también), `WWHD_DK_DEPTH_BIAS=units2`, `WWHD_DK_LAZY_BARRIERS=0`, `WWHD_DK_SUBMIT_DRAWS=0`, `WWHD_DK_UF_CACHE=0`.
-4. Con el resultado, el arreglo definitivo: si es la planificación, parchear uam (sin dual issue, o la corrección
-   concreta) y regenerar `shadercache_dksh.bin` con un uamId nuevo en vez de parchear al cargar.
+`WWHD_DK_RT_COMPRESSION=0` (en la sección `[dev]` de `settings.ini`).
 
 **P4 integrado (2026-10-07; compilado, SIN probar en hardware).** Merges de `p4-resources`, `p4-gpu`, `p4-prims` y
 `p4-docked` sobre `deko3d` (tras los dos commits del arreglo de texturas, beae5ef). Conflictos solo de texto: las
@@ -89,8 +70,9 @@ Objetivo de P4 (medida base release, Outset, 1020/460 MHz: 29,6 fps de mediana, 
 lookup 1,2 + indices 0,5 + resources 3,1-3,5 + state 1,6-2,0 + submit 0,1): render thread ≤ ~4,7 µs/draw (25 % menos
 que los 6,2 de GL), fps ≥ GL en todas partes, menos tiempo de GPU en barriers, 1080p en dock.
 
-Cambios y sus interruptores (en `sdmc:/switch/wwhd/env.txt`; cada uno sale en una línea `[dk]` al arrancar y `=0`
-vuelve al camino de P3):
+Cambios y sus interruptores (cada uno sale en una línea `[dk]` al arrancar y `=0` vuelve al camino de P3). Desde
+2026-10-08 `TEX_TABLE`, `UBO_MEMO`, `COMBO_KEY`, `COMBO_FAST_VALIDATE`, `INDEX_GEN` y `NATIVE_PRIMS` ya no son
+interruptores: su camino por defecto es el único (los demás se ponen en la sección `[dev]` de `settings.ini`):
 
 | Carril | Interruptor (por defecto) | Qué hace | Ganancia esperada (estimación) |
 |---|---|---|---|
@@ -127,7 +109,7 @@ GPU 460, sin `env.txt` (todo por defecto):
    portátil y el coste del pase `present`.
 4. Si algo sale mal dibujado (constantes/matrices de otro objeto, sombras o profundidad rotas, parpadeos):
    `WWHD_DK_UF_CACHE=1` y luego `=0`; `WWHD_DK_LAZY_BARRIERS=0`, `WWHD_DK_ZCULL_KEEP=0`,
-   `WWHD_DK_DEPTH_SAMPLE_BOUND=0`; quads/fans raros: `WWHD_DK_NATIVE_PRIMS=0`. Para medir cada cambio por separado,
+   `WWHD_DK_DEPTH_SAMPLE_BOUND=0`. Para medir cada cambio por separado,
    repetir el recorrido con uno solo a `=0`. Si cae, `wwhd_dk.nro` (debug) da el error de deko3d legible.
 5. Opcional: `WWHD_DK_TILED_CACHE=1` y `WWHD_DK_DEPTH_COMPRESSION=1` en tandas separadas (sin verificar).
 
@@ -145,8 +127,8 @@ a 30 fps con GX2 sin ejecutar y llegaba a Outset (por el sonido).
   (`gfx/deko/glsl_convert.cpp`, 7680/7680 de la cosecha); formato `WDK1` (`gfx/deko/shader_files.*`). Cobertura de la
   cache offline: 96,2 % de las fuentes de una consola (riesgo 1: el ~4 % restante se compila en la consola).
 - P1: dispositivo `OriginUpperLeft | DepthZeroToOne` (la y del clip apunta ARRIBA: los VS niegan y), anillos con
-  fences por frame (`memory.cpp`), swapchain 3 × RGBA8 1280×720, contador FPS, overlay ImGui. El patrón de prueba
-  queda tras `WWHD_DK_TEST_PATTERN=1`.
+  fences por frame (`memory.cpp`), swapchain 3 × RGBA8 1280×720, contador FPS, overlay ImGui. (El patrón de prueba
+  de P1, `WWHD_DK_TEST_PATTERN`, se retiró el 2026-10-08.)
 
 **P2 (integrado y compilado; SIN probar en hardware):** el juego dibuja con deko3d. Objetivo: pantalla de título y
 menús correctos (el juego en sí es P3).
@@ -167,9 +149,9 @@ menús correctos (el juego en sí es P3).
 - **Draw** (`draw.cpp`): port de `gl/draw.cpp` (memo y combos, índices convertidos en CPU con cache por frame, recorte
   de vértices, caches de targets y texturas, feedback copies, GamePad skip, trace) a los structs `Dk*State` con cache
   de estado; un submit cada 256 draws (`WWHD_DK_SUBMIT_DRAWS`). Viewport: con `PA_CL_VPORT_YSCALE` < 0 (lo normal) un
-  swizzle NegativeY deshace la negación del VS; la cara frontal es la de Latte (`WWHD_DK_FLIP_FRONT=1` la invierte, por
-  si el culling sale al revés). Barrier `Fragments` en cada cambio de targets (`WWHD_DK_PASS_BARRIER=0` lo quita).
-  Las variables `WWHD_DK_*` aceptan también el nombre `WWHD_GL_*` de GL (`TRACE_FRAMES`, `TRACE_DRAWS`, `SKIP_GAMEPAD`...).
+  swizzle NegativeY deshace la negación del VS; la cara frontal es la de Latte. Barrier `Fragments` en
+  cada cambio de targets. (Los interruptores de prueba `FLIP_FRONT`, `PASS_BARRIER`, `SKIP_GAMEPAD`, `NO_MEMO`... y los
+  alias `WWHD_GL_*` se retiraron el 2026-10-08: solo valen los nombres `WWHD_DK_*`.)
 - **Presentación** (`backend.cpp`): cada swap presenta el buffer de TV que el juego copió (`copy_to_scan`: el propio
   buffer si nada lo reescribió, si no la copia) ajustado a 16:9, con el grade de imagen y la codificación sRGB de
   `gl present_program` (si la imagen es sRGB, el shader deshace la decodificación del muestreo: mismos bytes que GL con
@@ -218,7 +200,7 @@ Síntomas: el mar plano azul saturado (sin olas ni espuma) y cuadraditos grises 
   `[dk] capture of frame N done in X s: ... written, ... dropped, ... identical`.
 
 **P3 `p3-features` (compilado; SIN probar en hardware):** cada punto con su línea `[dk]` al arrancar.
-- **AO** (`draw.cpp`, `pack_uniforms` aoNoise): el arreglo de GL tal cual, `WWHD_AO_MODE` / `WWHD_NO_AO_QUIRK`, modo 2 por
+- **AO** (`draw.cpp`, `pack_uniforms` aoNoise): el arreglo de GL tal cual, `WWHD_AO_MODE`, modo 2 por
   defecto (`[dk] AO quirk fix: mode N`; la tabla del renderer informa del modo, solo lectura como GL).
 - **Varyings flat** con el último vértice, como GL (que nunca llama a `glProvokingVertex`); `WWHD_DK_PROVOKING_VERTEX=latte|first`
   para probar.
@@ -226,7 +208,7 @@ Síntomas: el mar plano azul saturado (sin olas ni espuma) y cuadraditos grises 
   **LOD** como GL/Mesa: un MIN_LOD mayor que el máximo se intercambia (deko3d subía el máximo al mínimo).
 - **Descriptores:** los aciertos de la cache de texturas del draw marcan su sampler como usado (el LRU podía reescribir un
   slot en uso) y una expulsión invalida las caches; el slot del present compara también el tamaño de la imagen.
-- **Zcull:** se descarta en cada bind de depth (también con `WWHD_DK_PASS_BARRIER=0`) y tras subidas, copias, blits o
+- **Zcull:** se descarta en cada bind de depth y tras subidas, copias, blits o
   imágenes nuevas de un depth (`R.zcullEpoch`): deko3d solo lo hace si cambia la dirección del target.
   **Apagado por defecto desde 2026-10-07** (`DkQueueFlags_DisableZcull`; `WWHD_DK_ZCULL=1` lo vuelve a encender): la
   hierba de Outset mostraba bloques de 4x8 px alineados (x%4, y%8) con el color base del suelo sin las capas de decal
@@ -306,8 +288,8 @@ sale en la línea `[dk] resources (P4): ...` al arrancar.
   descriptores con `dkCmdBufPushData`: ~3-4 por segundo en el log, nada que agrupar. Memo + combos de shaders ya suman
   ~100 % (lo que queda es el coste del camino de combos, del carril de lookup).
 - **Total esperado:** resources de ~3,1-3,5 a ~2,2-2,6 µs/draw; el siguiente log dice qué parte queda (si son los
-  targets o fallos de cache de la CPU, el siguiente paso es otro). A/B en hardware: `WWHD_DK_UF_CACHE=0`,
-  `WWHD_DK_TEX_TABLE=0`, `WWHD_DK_UBO_MEMO=0` en `env.txt`. Si algo sale mal dibujado con el modo 2 (matrices o
+  targets o fallos de cache de la CPU, el siguiente paso es otro). A/B en hardware: `WWHD_DK_UF_CACHE=0`
+  (la tabla y el memo ya no se apagan desde 2026-10-08). Si algo sale mal dibujado con el modo 2 (matrices o
   constantes de otro objeto), probar `WWHD_DK_UF_CACHE=1` y luego `=0`.
 
 **P4, carril `p4-prims` (primitivas, índices y memo; compilado, SIN probar en hardware).** Cada cambio con su

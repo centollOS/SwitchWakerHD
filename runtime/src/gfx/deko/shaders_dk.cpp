@@ -101,7 +101,7 @@ uint64_t g_codeBytes = 0;              // code memory used by game shaders
 uint64_t g_failuresLogged = 0;
 // WWHD_DK_SHADER_BUDGET: DKSH loads per frame (default 64; they are cheap: a copy into code memory); 0 = no
 // budget: a draw waits for the worker to compile what it needs (no skipped draws, the frame stalls; for
-// comparisons). WWHD_SHADER_BUDGET=0 and WWHD_GL_SHADER_BUDGET=0 mean the same.
+// comparisons).
 int g_loadBudget = 64;
 bool g_waitForWorker = false;
 
@@ -1121,9 +1121,6 @@ void shaders_init(void (*progress)(size_t done, size_t total)) {
             g_loadBudget = atoi(e);
             g_waitForWorker = g_loadBudget <= 0;
             if (g_loadBudget <= 0) g_loadBudget = 1 << 30;
-        } else {
-            for (const char* alias : {"WWHD_SHADER_BUDGET", "WWHD_GL_SHADER_BUDGET"})
-                if (const char* a = getenv(alias); a && !strcmp(a, "0")) g_waitForWorker = true;
         }
         if (g_waitForWorker)
             LOG("[dk] shader budget off (WWHD_DK_SHADER_BUDGET=0): a draw whose shader is new waits for the compiler");

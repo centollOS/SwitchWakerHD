@@ -8,7 +8,6 @@
 // bindings and state that differ from what the command buffer already has (StateCache, reset by
 // forget_state), the vertex streams and the draw itself.
 #include "dk_draw.h"
-#include "dk_bisect.h"
 
 #include <algorithm>
 #include <array>
@@ -46,11 +45,10 @@ float f32(uint32_t v) {
     memcpy(&f, &v, 4);
     return f;
 }
-// a switch read from WWHD_DK_<name>, else WWHD_GL_<name> (the OpenGL renderer's name for the same thing)
+// a switch read from WWHD_DK_<name>
 bool env_switch(const char* name, bool fallback) {
-    std::string dk = std::string("WWHD_DK_") + name, gl = std::string("WWHD_GL_") + name;
+    const std::string dk = std::string("WWHD_DK_") + name;
     const char* e = getenv(dk.c_str());
-    if (!e) e = getenv(gl.c_str());
     if (!e || !*e) return fallback;
     return *e != '0';
 }
@@ -129,8 +127,7 @@ template <class T> T zeroed() {
 template <class T> bool same_bytes(const T& a, const T& b) { return !memcmp(&a, &b, sizeof(T)); }
 
 // ---- what the command buffer has bound (draws only issue what changed). Code outside draw() that binds
-// anything calls forget_state() (dk_draw.h): every entry becomes unknown. WWHD_DK_NO_STATE_CACHE=1 binds
-// everything for every draw.
+// anything calls forget_state() (dk_draw.h): every entry becomes unknown.
 constexpr int kMaxColor = 8, kVtxBuffers = 16, kVtxAttribs = 32;
 struct StateCache {
     uint64_t epoch = 0;
@@ -178,13 +175,12 @@ struct StateCache {
 } gs;
 
 void sync_cache() {
-    static const bool off = getenv("WWHD_DK_NO_STATE_CACHE") != nullptr;
-    if (gs.epoch == R.stateEpoch && !off) return;
+    if (gs.epoch == R.stateEpoch) return;
     gs = StateCache{};
     gs.epoch = R.stateEpoch;
 }
 
-// ---- trace switches (as gfx/gl): WWHD_DK_TRACE_DRAWS (or WWHD_GL_TRACE_DRAWS) logs every draw of a traced frame
+// ---- trace switches (as gfx/gl): WWHD_DK_TRACE_DRAWS logs every draw of a traced frame
 const bool g_traceDraws = env_switch("TRACE_DRAWS", false);
 std::string g_traceTextures;  // the textures of the draw being prepared
 uint32_t g_frameDraws = 0;    // draws executed in the frame being recorded: the trace's and captures' #n
@@ -226,11 +222,9 @@ struct TextureCacheEntry {
     uint32_t view = 0, smp = 0;
 };
 TextureCacheEntry textureCache[2][LATTE_NUM_MAX_TEX_UNITS];  // vertex, pixel
-const bool textureCacheOn = !env_switch("NO_TEXTURE_CACHE", false);
 // P4 resources lane: behind the per-unit entry (the last lookup of the unit), a table of recent lookups by their
-// words (WWHD_DK_TEX_TABLE, on unless 0): draws that alternate materials on a unit find them there instead of
-// redoing the lookup (find_or_create_surface's multimap, the view and sampler maps)
-const bool textureTableOn = env_switch("TEX_TABLE", true);
+// words: draws that alternate materials on a unit find them there instead of redoing the lookup
+// (find_or_create_surface's multimap, the view and sampler maps)
 constexpr uint32_t kTextureTableSize = 1024;
 TextureCacheEntry textureTable[kTextureTableSize];
 inline TextureCacheEntry& texture_table_entry(const uint32_t* words, const uint32_t* sampler, bool compare) {
@@ -275,7 +269,7 @@ struct ResourcePerf {
     uint64_t targetNs = 0, uboNs = 0, textureNs = 0, textureMissNs = 0, uniformNs = 0, descriptorNs = 0, bindNs = 0;
     uint64_t textureMisses = 0, tableHits = 0, tableLookups = 0;
     uint64_t uboBlocks = 0, uboReused = 0;  // guest uniform blocks of draws; ... found already in this frame's stream
-    uint64_t uboMemoHits = 0;               // ... by the stage's memo (WWHD_DK_UBO_MEMO)
+    uint64_t uboMemoHits = 0;               // ... by the stage's memo (uboMemo)
     uint64_t texBindCalls = 0, texHandles = 0, texWanted = 0;  // dkCmdBufBindTextures calls, handles; slots draws use
     uint64_t uboBindCalls = 0, uboBuffers = 0, uboWanted = 0;  // dkCmdBufBindUniformBuffers calls, buffers; slots
     // the state stage in parts: ordering, targets, shaders, binds, viewport and scissor; rasterizer, depth /
@@ -322,7 +316,7 @@ StreamSlice zero_block() {
 }
 
 // Ambient-occlusion quirks, as gfx/gl draw.cpp (and the Metal and Vulkan renderers): WWHD_AO_MODE=0..2
-// chooses one; WWHD_NO_AO_QUIRK=1 means 0. The game downsamples the scene depth to 640x360 and computes ambient
+// chooses one. The game downsamples the scene depth to 640x360 and computes ambient
 // occlusion from it at 960x540 (vertex shader 44BDF900, pixel shader 44BDFD00), then blurs it into the shadow mask:
 //   0 = as the hardware renders it: the occlusion pass point-samples its centre depth, and every third row and
 //       column lands half a texel off (screen-fixed lines, and with the noise below grainy bands, on sloped
@@ -333,7 +327,7 @@ StreamSlice zero_block() {
 constexpr uint32_t kOcclusionVS = 0x44BDF900, kOcclusionPS = 0x44BDFD00;
 const int g_aoMode = [] {
     if (const char* e = getenv("WWHD_AO_MODE")) return ((atoi(e) % 3) + 3) % 3;
-    return getenv("WWHD_NO_AO_QUIRK") ? 0 : 2;
+    return 2;
 }();
 // The occlusion pass's program in this stage: at its address and with its contents (size and hash of the guest
 // program; gfx/gl's values). Another area could load another program at that address; it is left as it is.
@@ -359,7 +353,7 @@ bool is_occlusion(const uint32_t* r, bool vertex) {
     return match;
 }
 
-// Each stage's guest uniform blocks as the last draw found them in the stream (WWHD_DK_UBO_MEMO, on unless 0):
+// Each stage's guest uniform blocks as the last draw found them in the stream:
 // a block at the same address and size is the same slice while the frame and R.streamGen are (stream_guest's
 // own rule), without stream_guest's table probe (P4 resources lane)
 struct UboMemo {
@@ -368,7 +362,6 @@ struct UboMemo {
     StreamSlice slice;
 };
 UboMemo uboMemo[2][LATTE_NUM_MAX_UNIFORM_BUFFERS];
-const bool uboMemoOn = env_switch("UBO_MEMO", true);
 
 // false: the stream slice is full (the draw is skipped)
 bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>& colors, Surface* depth,
@@ -392,7 +385,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             const uint32_t copy = std::min(size, bound);
             UboMemo& m = uboMemo[stage][i];
             const uint64_t frame = R.frame + 1;
-            if (uboMemoOn && m.addr == addr && m.copy == copy && m.bound == bound && m.frame == frame &&
+            if (m.addr == addr && m.copy == copy && m.bound == bound && m.frame == frame &&
                 m.gen == R.streamGen && m.slice) {
                 slice = m.slice;
                 R.perf.reusedBytes += copy;
@@ -434,8 +427,8 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         Surface* s;
         uint32_t view, smp;
         TextureCacheEntry* found = nullptr;
-        if (textureCacheOn && texture_entry_hit(cached, words, samplerWords, compare)) found = &cached;
-        else if (textureCacheOn && textureTableOn) {
+        if (texture_entry_hit(cached, words, samplerWords, compare)) found = &cached;
+        else {
             g_res.tableLookups++;
             TextureCacheEntry& t = texture_table_entry(words, samplerWords, compare);
             if (texture_entry_hit(t, words, samplerWords, compare)) {
@@ -481,7 +474,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             cached.s = s;
             cached.view = view;
             cached.smp = smp;
-            if (textureTableOn && cached.epoch) texture_table_entry(words, samplerWords, compare) = cached;
+            if (cached.epoch) texture_table_entry(words, samplerWords, compare) = cached;
             if (lap.on) g_res.textureMissNs += (now_ns() - missStart) * kDrawTimeSample;
         }
         if (g_gamepadDrawing) {  // a texture of the GamePad picture
@@ -657,8 +650,7 @@ template <int Type> IndexList convert_typed(const uint8_t* src, uint32_t count, 
     // 16-bit output keeps the guest's 16-bit lists (and short generated lists) at half the bytes; primitive
     // restart then uses 0xFFFF, so a different restart index needs 32-bit output
     constexpr bool source16 = Type == 0 || Type == 4;
-    static const bool wide = env_switch("WIDE_INDICES", false);
-    const bool narrow = !wide && (Type < 0 ? count < 0xFFFF : source16 && (!restart || restartIndex == 0xFFFF));
+    const bool narrow = (Type < 0 ? count < 0xFFFF : source16 && (!restart || restartIndex == 0xFFFF));
     if (narrow) {
         static std::vector<uint16_t> out;
         build_indices<Type>(src, count, prim, restart, restartIndex, out, list.minIndex, list.maxIndex);
@@ -693,10 +685,9 @@ struct LookupStats {
              flatKeptConverted = 0;
 } g_lookup;
 
-// Index lists are reused within a frame while their guest bytes cannot have changed. WWHD_DK_INDEX_GEN (on
-// unless 0): only GX2Invalidate of attribute buffers (index buffers are those; GX2 flag 1) and GX2DrawDone
-// make them stale; =0: R.streamGen, which also advances at every invalidate of uniform blocks (flag 4).
-const bool g_indexGenOn = env_switch("INDEX_GEN", true);
+// Index lists are reused within a frame while their guest bytes cannot have changed: only GX2Invalidate of
+// attribute buffers (index buffers are those; GX2 flag 1) and GX2DrawDone make them stale (not R.streamGen,
+// which also advances at every invalidate of uniform blocks, flag 4).
 uint64_t g_indexGen = 1;
 
 IndexList index_list(uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr, bool restart, uint32_t restartIndex) {
@@ -710,10 +701,9 @@ IndexList index_list(uint32_t prim, uint32_t count, uint32_t indexType, uint32_t
     const uint64_t stamp = R.frame + 1;  // the frame being recorded (its stream slice)
     const uint64_t key = (uint64_t(indexAddr) << 32 | count) ^ (uint64_t(prim) << 56 | uint64_t(indexType) << 48) ^
                          (restart ? 0x5bd1e995ull * (restartIndex + 1) : 0);
-    static const bool noCache = env_switch("NO_INDEX_CACHE", false);
-    const uint64_t gen = g_indexGenOn ? g_indexGen : R.streamGen;
+    const uint64_t gen = g_indexGen;
     g_lookup.indexLists++;
-    if (const Entry* e = cache.find(key, stamp); !noCache && e->stamp == stamp) {
+    if (const Entry* e = cache.find(key, stamp); e->stamp == stamp) {
         if (e->gen == gen && e->addr == indexAddr && e->count == count && e->type == indexType && e->prim == prim &&
             e->restart == restart && e->restartIndex == restartIndex) {
             g_lookup.indexHits++;
@@ -766,19 +756,16 @@ struct ShaderMemo {
     uint64_t regsGen = 0;  // (the miss counters: programs or other registers changed)
 } memo;
 
-// P4 lookup switches (each =0 restores the P3 path)
-// WWHD_DK_MEMO_PRIM_CLASS: the shader translation reads the primitive type only to know whether it draws
+// P4 lookup: WWHD_DK_MEMO_PRIM_CLASS (=0 restores the P3 path): the shader translation reads the primitive type only to know whether it draws
 // points (LatteDecompilerAnalyzer isPointsPrimitive: gl_PointSize output) and, for geometry shaders (which
 // deko3d does not run), the input primitive; the memo and the combinations key on that class instead of the
 // type, so a strip after a list with the same programs and state reuses the lookup without rehashing.
 const bool g_primClass = env_switch("MEMO_PRIM_CLASS", true);
-// WWHD_DK_COMBO_KEY: a combination's state key is one hash of both stages' registers (shader_combo_state_hash:
-// each shared word once, texture units two to a word); the per-stage core hashes translate needs are made
-// only when the combination is not found (P3: two state hashes and two texture hash chains at every change).
-const bool g_comboKey = env_switch("COMBO_KEY", true);
-// WWHD_DK_COMBO_FAST_VALIDATE: a combination made in an earlier frame checks its fetch shader through the
-// program-hash entry it keeps (no hash-map lookups) instead of a full get_fetch_shader.
-const bool g_fastValidate = env_switch("COMBO_FAST_VALIDATE", true);
+// A combination's state key is one hash of both stages' registers (shader_combo_state_hash: each shared word
+// once, texture units two to a word); the per-stage core hashes translate needs are made only when the
+// combination is not found (P3: two state hashes and two texture hash chains at every change). A combination
+// made in an earlier frame checks its fetch shader through the program-hash entry it keeps (no hash-map
+// lookups) instead of a full get_fetch_shader.
 uint32_t prim_key(const uint32_t* r, uint32_t prim) {
     if (!g_primClass || (r[REGADDR::VGT_GS_MODE] & 3)) return prim;
     return prim == 1 ? 1u : 4u;  // points, or any other primitive
@@ -847,12 +834,11 @@ DrawSkips draw_skips_take() {
     return s;
 }
 
-// ---- the GamePad picture (WWHD_DK_SKIP_GAMEPAD, or WWHD_GL_SKIP_GAMEPAD; on unless 0): as gfx/gl draw.cpp.
+// ---- the GamePad picture: as gfx/gl draw.cpp.
 // The GamePad's own buffers are not drawn (their depth clears are kept) unless the GamePad screen can be shown:
 // while the controller acts as the GamePad (gfxsw::gamepad_picture_drawn).
 bool skip_gamepad() {
-    static const bool on = env_switch("SKIP_GAMEPAD", true);
-    return on && !gfxsw::gamepad_picture_drawn();
+    return !gfxsw::gamepad_picture_drawn();
 }
 bool gamepad_only(const Surface* s) {
     // a read by another draw or a copy keeps a buffer drawn, for 300 frames (gfx/gl)
@@ -871,23 +857,14 @@ void draw_frame_start() {
     if (!logged) {
         logged = true;
         const char* submit = getenv("WWHD_DK_SUBMIT_DRAWS");
-        LOG("[dk] P4 lookup and indices: memo by primitive class %s (WWHD_DK_MEMO_PRIM_CLASS), one combination "
-            "state hash %s (WWHD_DK_COMBO_KEY), fast combination check %s (WWHD_DK_COMBO_FAST_VALIDATE), index lists "
-            "stale at %s (WWHD_DK_INDEX_GEN), native fans/quads/quad strips/line loops %s (WWHD_DK_NATIVE_PRIMS)",
-            g_primClass ? "on" : "off", g_comboKey ? "on" : "off", g_fastValidate ? "on" : "off",
-            g_indexGenOn ? "attribute-buffer invalidates and GX2DrawDone" : "every attribute or uniform invalidate (P3)",
-            env_switch("NATIVE_PRIMS", true) ? "on" : "off (converted on the CPU)");
-        LOG("[dk] draw path: state cache %s, memo %s, texture cache %s, index cache %s, vertex trim %s, barrier per "
-            "pass %s, GamePad skip %s, front face %s, submit every %s draws; trace draws %s",
-            getenv("WWHD_DK_NO_STATE_CACHE") ? "off" : "on", env_switch("NO_MEMO", false) ? "off" : "on",
-            textureCacheOn ? "on" : "off", env_switch("NO_INDEX_CACHE", false) ? "off" : "on",
-            env_switch("VERTEX_TRIM", true) ? "on" : "off", env_switch("PASS_BARRIER", true) && !sync_lazy_barriers() ? "on" : "off (see GPU sync)",
-            skip_gamepad() ? "on" : "off", env_switch("FLIP_FRONT", false) ? "FLIPPED (test)" : "as Latte",
+        LOG("[dk] P4 lookup: memo by primitive class %s (WWHD_DK_MEMO_PRIM_CLASS)", g_primClass ? "on" : "off");
+        LOG("[dk] draw path: barrier per pass %s, submit every %s draws; trace draws %s",
+            !sync_lazy_barriers() ? "on" : "off (see GPU sync)",
             submit && *submit ? submit : std::to_string(kDefaultSubmitDraws).c_str(), g_traceDraws ? "on" : "off");
         static const char* const kAo[] = {"0, off: as the hardware renders it",
                                           "1, the occlusion pass's centre depth fetch bilinear",
                                           "2, the centre fetch bilinear and the noise tiled per 960x540 pixel"};
-        LOG("[dk] AO quirk fix: mode %s (WWHD_AO_MODE=0..2, WWHD_NO_AO_QUIRK=1 for 0)", kAo[g_aoMode]);
+        LOG("[dk] AO quirk fix: mode %s (WWHD_AO_MODE=0..2)", kAo[g_aoMode]);
         static const char* const kProvoking[] = {"the last vertex, as gfx/gl", "the FIRST vertex (test)",
                                                  "Latte's PROVOKING_VTX_LAST bit (test)"};
         LOG("[dk] flat varyings: %s (WWHD_DK_PROVOKING_VERTEX=last|first|latte)", kProvoking[provoking_mode()]);
@@ -896,7 +873,6 @@ void draw_frame_start() {
                 "clears reset it", sync_zcull_keep() ? "when another depth buffer or layer was bound since"
                                                      : "at every depth-target bind");
         sync_log_switches();
-        bisect_log();
         static const char* const kUf[] = {"0, packed into a new stream slice every draw (P2)",
                                           "1, a copy per shader, a new slice only when a value changed",
                                           "2, a copy per shader in one slice per frame, changed pieces pushed "
@@ -905,10 +881,8 @@ void draw_frame_start() {
             "shared addresses cached %s (WWHD_DK_TEX_SHARED_CACHE), vertex layouts kept per vertex shader %s "
             "(WWHD_DK_VTX_LAYOUT_CACHE); the Switch tab switches them while the game runs",
             g_depthOnly.load() ? "on" : "off", g_texSharedCache.load() ? "on" : "off", g_vtxLayoutCache.load() ? "on" : "off");
-        LOG("[dk] resources (P4): texture lookup table %s (WWHD_DK_TEX_TABLE=0 off), ufBlock mode %s "
-            "(WWHD_DK_UF_CACHE=0|1|2), guest uniform block memo %s (WWHD_DK_UBO_MEMO=0 off); textures and uniform "
-            "blocks bound only for slots that changed", textureCacheOn && textureTableOn ? "on" : "off", kUf[g_ufMode],
-            uboMemoOn ? "on" : "off");
+        LOG("[dk] resources (P4): ufBlock mode %s (WWHD_DK_UF_CACHE=0|1|2); textures and uniform blocks bound only "
+            "for slots that changed", kUf[g_ufMode]);
     }
 }
 
@@ -960,7 +934,7 @@ namespace {
 //                                          -> row = -(-ys) * yc + yo + ys - ys = yc * ys + yo
 // Facing: deko3d's rasterizer decides it in framebuffer coordinates (row 0 at the top, deko3d's
 // windingFlip() is off with OriginUpperLeft), as Latte and Vulkan do; window positions are Latte's in both
-// cases, so Latte's front face is used unchanged (WWHD_DK_FLIP_FRONT=1 inverts it, a test aid).
+// cases, so Latte's front face is used unchanged.
 // Depth: the shaders' SET_POSITION gives z in 0..1 (Vulkan branch), so near/far are Vulkan's.
 void set_viewport(const uint32_t* r, float scale) {
     const float xs = f32(r[REGADDR::PA_CL_VPORT_XSCALE]), xo = f32(r[REGADDR::PA_CL_VPORT_XOFFSET]);
@@ -990,7 +964,7 @@ void set_viewport(const uint32_t* r, float scale) {
     }
 }
 
-// P4, WWHD_DK_NATIVE_PRIMS (on unless 0): triangle fans, quads, quad strips and line loops drawn with
+// P4: triangle fans, quads, quad strips and line loops drawn with
 // deko3d's primitives of the same name (dkCmdBufDraw* passes the DkPrimitive to Maxwell's VERTEX_BEGIN_GL
 // unchanged; the 3D engine assembles all four itself, as nouveau's nvc0 driver uses them) instead of index
 // lists generated on the CPU: a non-indexed draw needs no index list at all, an indexed one only its byte
@@ -1001,8 +975,6 @@ void set_viewport(const uint32_t* r, float scale) {
 // varying (SPI_PS_INPUT_CNTL_n FLAT_SHADE, bit 10) stays converted, as do fans when flat varyings use
 // another convention (WWHD_DK_PROVOKING_VERTEX).
 bool native_primitive(const uint32_t* r, uint32_t prim, DkPrimitive& mode) {
-    static const bool on = env_switch("NATIVE_PRIMS", true);
-    if (!on) return false;
     const uint32_t inputs = std::min<uint32_t>(r[mmSPI_PS_IN_CONTROL_0] & 0x3F, 32);
     bool flat = false;
     for (uint32_t i = 0; i < inputs && !flat; i++) flat = (r[mmSPI_PS_INPUT_CNTL_0 + i] >> 10) & 1;
@@ -1138,10 +1110,9 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     // ---- shaders: the last draw's, a recent combination of programs and register state, or translate
     Shader *vs, *ps;
     LatteFetchShader* fs;
-    static const bool noMemo = env_switch("NO_MEMO", false);
     const uint64_t frame = R.frame + 1;  // the frame being recorded
     const uint32_t primKey = prim_key(r, prim);
-    if (!noMemo && memo.gen == g_shader_state_gen && memo.frame == frame && memo.epoch == R.shaderEpoch && memo.prim == primKey) {
+    if (memo.gen == g_shader_state_gen && memo.frame == frame && memo.epoch == R.shaderEpoch && memo.prim == primKey) {
         fs = memo.fs;
         vs = memo.vs;
         ps = memo.ps;
@@ -1151,25 +1122,19 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         if (memo.frame != frame || memo.epoch != R.shaderEpoch) g_lookup.missFrame++;
         else if (memo.gen != g_shader_state_gen) (memo.regsGen != g_shader_regs_gen ? g_lookup.missRegisters : g_lookup.missPrograms)++;
         else g_lookup.missPrimitive++;
-        // the register part of the shader keys, kept while only programs change. With WWHD_DK_COMBO_KEY one
-        // hash of both stages (vs; ps unused), and the per-stage cores only when translate needs them
+        // the register part of the shader keys, kept while only programs change: one hash of both stages (vs;
+        // ps unused), and the per-stage cores only when translate needs them
         static struct {
             uint64_t gen = 0;
             uint32_t prim = ~0u;
             uint64_t vs = 0, ps = 0, vsCore = 0, psCore = 0;
             bool cores = false;
         } stateHash;
-        if (noMemo || stateHash.gen != g_shader_regs_gen || stateHash.prim != primKey) {
+        if (stateHash.gen != g_shader_regs_gen || stateHash.prim != primKey) {
             const uint64_t t0 = R.timedDraw ? now_ns() : 0;
-            if (g_comboKey && !noMemo) {
-                stateHash.vs = shader_combo_state_hash(r, primKey);
-                stateHash.ps = 0;
-                stateHash.cores = false;
-            } else {
-                stateHash.vs = shader_state_hash(r, true, &stateHash.vsCore);
-                stateHash.ps = shader_state_hash(r, false, &stateHash.psCore);
-                stateHash.cores = true;
-            }
+            stateHash.vs = shader_combo_state_hash(r, primKey);
+            stateHash.ps = 0;
+            stateHash.cores = false;
             stateHash.gen = g_shader_regs_gen;
             stateHash.prim = primKey;
             g_lookup.stateHashes++;
@@ -1185,18 +1150,17 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             Shader *vs = nullptr, *ps = nullptr;
             void *vsRef = nullptr, *psRef = nullptr;  // program_hash_ref
             uint64_t vsHash = 0, psHash = 0;
-            void* fsRef = nullptr;  // WWHD_DK_COMBO_FAST_VALIDATE: the fetch shader's hash entry, range and key
+            void* fsRef = nullptr;  // the fetch shader's hash entry, range and key (fast check)
             uint32_t fsAddr = 0, fsSize = 0;
             uint64_t fsKey = 0;
         };
-        static const bool comboAcrossFrames = env_switch("COMBO_FRAMES", true);
         auto stillValid = [&](Combo& c) {
             if (c.frame == frame) return true;
-            if (!comboAcrossFrames || !c.vsRef || !c.psRef) return false;
+            if (!c.vsRef || !c.psRef) return false;
             g_lookup.validations++;
             const uint64_t t0 = R.timedDraw ? now_ns() : 0;
             bool valid;
-            if (g_fastValidate && c.fsRef) {
+            if (c.fsRef) {
                 uint32_t fsAddr, fsSize;
                 valid = fetch_shader_range(r, fsAddr, fsSize) && fsAddr == c.fsAddr && fsSize == c.fsSize &&
                         program_hash_of(c.fsRef, fsAddr, fsSize, frame) == c.fsKey;
@@ -1221,7 +1185,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         for (uint32_t v : programs) h = (h ^ v) * 0x100000001B3ull;
         Combo* set = combos[(h ^ (h >> 29)) & 8191];
         Combo* hit = nullptr;
-        for (int way = 0; way < 2 && !hit && !noMemo; way++) {
+        for (int way = 0; way < 2 && !hit; way++) {
             Combo& w = set[way];
             if (w.epoch == R.shaderEpoch && w.vsState == stateHash.vs && w.psState == stateHash.ps &&
                 !memcmp(w.programs, programs, sizeof programs) && stillValid(w))
@@ -1239,7 +1203,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             ps = c.ps;
         } else {
             g_lookup.comboMisses++;
-            if (!stateHash.cores) {  // (WWHD_DK_COMBO_KEY) the per-stage hashes translate keys shaders by
+            if (!stateHash.cores) {  // the per-stage hashes translate keys shaders by
                 shader_state_hash(r, true, &stateHash.vsCore);
                 shader_state_hash(r, false, &stateHash.psCore);
                 stateHash.cores = true;
@@ -1320,7 +1284,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         return;
     }
     bool generated = prim == 5 || prim == 0x12 || prim == 0x13 || prim == 0x14;
-    if (generated && native_primitive(r, prim, mode)) generated = false;  // (P4, WWHD_DK_NATIVE_PRIMS)
+    if (generated && native_primitive(r, prim, mode)) generated = false;  // (P4, native_primitive)
     else if (generated) g_lookup.convertedPrims++;
     IndexList indices;
     if (indexAddr || generated) {
@@ -1435,7 +1399,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             for (auto* c : colors)
                 if (c && !c->skipLogged) {
                     c->skipLogged = true;
-                    LOG("[dk] draws into %s skipped from frame %llu: GamePad picture only (WWHD_DK_SKIP_GAMEPAD)",
+                    LOG("[dk] draws into %s skipped from frame %llu: GamePad picture only",
                         trace_name(c).c_str(), (unsigned long long)frame);
                 }
             return;
@@ -1556,7 +1520,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         for (int i = 0; i < 8 && same; i++)
             same = gs.colors[i] == colors[i] && gs.slices[i] == slices[i] && gs.srgbViews[i] == srgbViews[i];
         if (!same) {
-            static const bool passBarrier = env_switch("PASS_BARRIER", true) && !sync_lazy_barriers();
+            static const bool passBarrier = !sync_lazy_barriers();
             // the old path (WWHD_DK_LAZY_BARRIERS=0): what earlier passes rendered becomes visible to this pass's
             // texture reads (plan section 6.3: conservative, one barrier per change of targets). zcull: deko3d
             // drops it itself only when the depth target's address changes; copies, uploads and reused heap
@@ -1694,7 +1658,6 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     if (fixedSame) g_res.fixedSkips++;
     else {
     {
-        static const bool flipFront = env_switch("FLIP_FRONT", false);
         DkRasterizerState rs = zeroed<DkRasterizerState>();
         dkRasterizerStateDefaults(&rs);
         // depth clamp (no far clipping) when the game turns far-plane clipping off; deko3d's depth clamp also
@@ -1703,12 +1666,11 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         const bool cullFront = pm.get_CULL_FRONT(), cullBack = pm.get_CULL_BACK();
         rs.cullMode = cullFront && cullBack ? DkFace_FrontAndBack : cullFront ? DkFace_Front : cullBack ? DkFace_Back : DkFace_None;
         const bool ccw = pm.get_FRONT_FACE() == LATTE_PA_SU_SC_MODE_CNTL::E_FRONTFACE::CCW;
-        rs.frontFace = ccw != flipFront ? DkFrontFace_CCW : DkFrontFace_CW;  // (set_viewport: Latte's facing)
+        rs.frontFace = ccw ? DkFrontFace_CCW : DkFrontFace_CW;  // (set_viewport: Latte's facing)
         // flat varyings' vertex: the last, as gfx/gl (it never calls glProvokingVertex: GL's default
         // GL_LAST_VERTEX_CONVENTION, and the triangle lists both make of fans and quads have the same order)
         rs.provokingVertex = provoking_vertex(r);
-        const DepthBiasMode biasMode = bisect().depthBias;  // WWHD_DK_DEPTH_BIAS (dk_bisect.h)
-        const bool offset = pm.get_OFFSET_FRONT_ENABLED() && biasMode != DepthBiasMode::Off;
+        const bool offset = pm.get_OFFSET_FRONT_ENABLED();
         rs.depthBiasEnableMask = offset ? DkPolygonFlag_All : 0;
         if (!gs.rasterKnown || !same_bytes(gs.raster, rs)) {
             dkCmdBufBindRasterizerState(R.cmd, &rs);
@@ -1717,12 +1679,10 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         }
         if (offset) {
             // gfx/gl's glPolygonOffset(scale / 16, offset): Mesa programs no clamp (0); deko3d doubles the units
-            // as Mesa nvc0 does. WWHD_DK_DEPTH_BIAS=latte takes the clamp from Latte's register (the P2-P4 path)
+            // as Mesa nvc0 does (the clamp from Latte's PA_SU_POLY_OFFSET_CLAMP was the P2-P4 path: grass specks)
             const float units = f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET]);
             const float slope = f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE]) / 16;
-            const float bias[3] = {biasMode == DepthBiasMode::Units2 ? units * 2 : units,
-                                   biasMode == DepthBiasMode::Latte ? f32(r[REGADDR::PA_SU_POLY_OFFSET_CLAMP]) : 0.0f,
-                                   biasMode == DepthBiasMode::NoSlope ? 0.0f : slope};
+            const float bias[3] = {units, 0.0f, slope};
             if (!gs.depthBiasKnown || memcmp(gs.depthBias, bias, sizeof bias)) {
                 dkCmdBufSetDepthBias(R.cmd, bias[0], bias[1], bias[2]);
                 memcpy(gs.depthBias, bias, sizeof bias);
@@ -1836,10 +1796,9 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }  // (fixed state)
     const uint64_t vertexStart = timed ? now_ns() : 0;
 
-    // ---- vertex streams (guest bytes as stored; the GLSL decodes them). Vertex trimming (WWHD_DK_VERTEX_TRIM,
-    // on unless 0): only the vertices from the lowest one the draw reads are copied, and the draw's base vertex
-    // moves back by as many (a model's parts share one vertex buffer and each draws its own range)
-    static const bool trimOn = env_switch("VERTEX_TRIM", true);
+    // ---- vertex streams (guest bytes as stored; the GLSL decodes them). Vertex trimming: only the vertices
+    // from the lowest one the draw reads are copied, and the draw's base vertex moves back by as many (a
+    // model's parts share one vertex buffer and each draws its own range)
     struct Group {
         uint32_t index, addr, size, stride;
         bool instance;
@@ -1851,7 +1810,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     const VertexLayout& layout = vertex_layout(r, fs, vs);
     const DkVtxAttribState* const attribs = layout.attribs;
     const uint32_t attribCount = layout.attribCount;
-    bool trimmable = trimOn && firstVertex > 0;
+    bool trimmable = firstVertex > 0;
     for (int i = 0; i < layout.groupCount; i++) {
         const VertexLayout::Group& g = layout.groups[i];
         const uint32_t base = mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.index * 7;
@@ -1902,7 +1861,10 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     lap(R.perf.stateNs);
 
     // ---- draw
-    bisect_before_draw(pm.get_OFFSET_FRONT_ENABLED());  // grass bisection: shader invalidate, decal barriers
+    if (g_shaderCodeLoaded) {  // shader code loaded mid-frame: the shader caches forget it (dk.h)
+        g_shaderCodeLoaded = false;
+        dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Shader);
+    }
     if (indexed) {
         const int restart = stripRestart ? 1 : 0;
         const uint32_t hostRestart = indices.format == DkIdxFormat_Uint16 ? 0xFFFFu : 0xFFFFFFFFu;

@@ -33,7 +33,6 @@
 025E1A40  # sound start
 025E1A7C  # sound start
 025E1AA4  # sound start
-027F4D5C  # J3DModel::calc (probe: model matrix layout)
 # sound listener updates from camera_draw: only the exact camera may move the listener
 025E1B44  # mDoAud_getCameraInfo -> JAIZelBasic::getCameraInfo (listener position/orientation)
 02027754  # JAIZelBasic::setCameraPolygonPos (ground point under the camera)

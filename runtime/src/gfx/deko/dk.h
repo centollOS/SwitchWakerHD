@@ -1,5 +1,5 @@
 // The deko3d renderer (Switch), docs/deko3d-plan.md. P1: the device, its memory, the swapchain, the present
-// pass with the FPS counter and the settings overlay (and the test pattern, WWHD_DK_TEST_PATTERN=1). P2: the
+// pass with the FPS counter and the settings overlay. P2: the
 // game's picture: surfaces (dk_surfaces.h), game shaders (dk_shaders.h) and the draw path (dk_draw.h).
 // Namespace gfxdk; one render thread (GX2's) records and submits everything.
 //
@@ -7,7 +7,7 @@
 // and image row 0 at the top, clip-space z from 0 to 1, but clip-space y points UP as in OpenGL (deko3d 0.5.0
 // Primer.md; its viewport transform has scaleY = -height/2 with this origin, so normalized y = +1 is row 0;
 // the YAxisPointsDown flag came after 0.5.0). The renderer's vertex shaders take y-down positions (Vulkan's,
-// row 0 at y = -1) and negate y; P2's SET_POSITION does the same. The test pattern shows it.
+// row 0 at y = -1) and negate y; P2's SET_POSITION does the same.
 #pragma once
 #include <deko3d.h>
 
@@ -62,6 +62,9 @@ ImageAlloc image_alloc(uint32_t size, uint32_t alignment);
 void image_tile_size_fix(DkImageLayoutMaker& m, uint32_t rows);
 void image_free_later(const ImageAlloc& a);  // freed when the GPU is done with the current frame
 bool code_load(DkShader& shader, const void* dksh, uint32_t size, const char* name);
+// shader code was copied to code memory since the last shader cache invalidate (code_load sets it; draw.cpp
+// invalidates the shader caches before its next draw: deko3d only does it at dkQueueFlush)
+extern bool g_shaderCodeLoaded;
 DkGpuAddr image_descriptors();
 DkGpuAddr sampler_descriptors();
 // kQuerySize bytes for counters and timestamps (dkCmdBufReportCounter), CPU-uncached (backend.cpp GPU passes)
@@ -158,7 +161,7 @@ void overlay_draw(ImDrawData* d, int ww, int wh);
 
 // ---- the renderer's own shaders (embedded DKSH, backend.cpp)
 // kDepthOnlyFs: an empty pixel shader for the game's depth-only draws (draw.cpp, WWHD_DK_DEPTH_ONLY)
-enum ShaderId { kPatternVs, kPatternFs, kTextVs, kTextFs, kImguiVs, kImguiFs, kDepthOnlyFs, kShaderCount };
+enum ShaderId { kTextVs, kTextFs, kImguiVs, kImguiFs, kDepthOnlyFs, kShaderCount };
 const DkShader* shader(ShaderId id);  // null if it did not load (logged)
 
 // the draw path times its stages: on the Switch the tick counter is read directly

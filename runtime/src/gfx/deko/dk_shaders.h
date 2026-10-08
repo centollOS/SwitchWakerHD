@@ -108,7 +108,7 @@ uint64_t program_hash_of(void* ref, uint32_t address, uint32_t size, uint64_t fr
 // hash of every register (other than the program's) that translation reads; core: the same without the
 // texture units (translate adds those of the units the program samples)
 uint64_t shader_state_hash(const uint32_t* regs, bool vertex, uint64_t* core);
-// P4 (draw.cpp's combinations, WWHD_DK_COMBO_KEY): one hash of everything shader_state_hash reads for both
+// P4 (draw.cpp's combinations): one hash of everything shader_state_hash reads for both
 // stages (each shared word once, the texture units' state two to a word), with the primitive-type word given
 // (the draw path passes its primitive class). Equal keys mean equal shader_state_hash values of both stages.
 uint64_t shader_combo_state_hash(const uint32_t* regs, uint32_t primitive);

@@ -9,7 +9,6 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "dk_bisect.h"
 #include "runtime.h"
 
 namespace gfxdk {
@@ -229,11 +228,10 @@ FrameTable<UploadEntry> g_uploads;
 // Guest vertex and uniform data may not change between GX2Invalidate calls (or GX2DrawDone) while a
 // frame's draws can still read it, so an address uploaded once this frame is reused (gfx/gl)
 StreamSlice stream_guest(uint32_t addr, uint32_t size, uint32_t alignment, uint32_t zeroTail) {
-    static const bool enabled = !getenv("WWHD_DK_NO_DEDUP");
     const uint64_t key = uint64_t(addr) | uint64_t(alignment) << 32 | uint64_t(zeroTail) << 48;
     const uint64_t stamp = R.frame + 1;  // the frame being recorded
     const UploadEntry* e = g_uploads.find(key, stamp);
-    if (enabled && e->stamp == stamp && e->gen == R.streamGen && e->size >= size) {
+    if (e->stamp == stamp && e->gen == R.streamGen && e->size >= size) {
         R.perf.reusedBytes += size;
         return e->slice;
     }
@@ -292,6 +290,8 @@ void image_free_later(const ImageAlloc& a) {
     g_slots[g_slot].retired.push_back(a);
 }
 
+bool g_shaderCodeLoaded = false;
+
 bool code_load(DkShader& shader, const void* dksh, uint32_t size, const char* name) {
     const uint32_t at = align_up(g_codeUsed, DK_SHADER_CODE_ALIGNMENT);
     if (at + size > kCodeSize - DK_SHADER_CODE_UNUSABLE_SIZE) {
@@ -300,7 +300,7 @@ bool code_load(DkShader& shader, const void* dksh, uint32_t size, const char* na
     }
     uint8_t* const dst = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(g_code)) + at;
     memcpy(dst, dksh, size);
-    bisect_patch_dksh(dst, size);  // grass bisection switches (dk_bisect.h)
+    g_shaderCodeLoaded = true;
     DkShaderMaker m;
     dkShaderMakerDefaults(&m, g_code, at);
     dkShaderInitialize(&shader, &m);

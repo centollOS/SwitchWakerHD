@@ -70,16 +70,16 @@ constexpr uint32_t kSmallSubmitDraws = 256, kBigSubmitDraws = 1024, kDefaultSubm
 extern std::atomic<uint32_t> g_submitDraws;
 
 // P4 (lookup and indices): GX2Invalidate's flags and GX2DrawDone, from backend.cpp (index lists go stale at
-// attribute-buffer invalidates, WWHD_DK_INDEX_GEN); every 5 s the '[dk] lookup per frame' line (frames since
+// attribute-buffer invalidates and GX2DrawDone); every 5 s the '[dk] lookup per frame' line (frames since
 // the last one), after the draw path's line
 void note_invalidate(uint32_t flags);
 void note_wait_idle();
 void log_lookup_stats(uint64_t frames);
 
-// the AO quirk fix's mode (WWHD_AO_MODE / WWHD_NO_AO_QUIRK, read once at start-up as gfx/gl's): 0..2
+// the AO quirk fix's mode (WWHD_AO_MODE, read once at start-up as gfx/gl's): 0..2
 int ao_mode();
 
-// GamePad-only surfaces (WWHD_DK_SKIP_GAMEPAD, as gfx/gl draw.cpp)
+// GamePad-only surfaces (not drawn unless the GamePad picture is shown; as gfx/gl draw.cpp)
 bool gamepad_only(const Surface* s);
 bool skip_gamepad();
 
