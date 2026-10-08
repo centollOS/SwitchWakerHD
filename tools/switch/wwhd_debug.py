@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Client of the Switch debug server (runtime/src/platform/debug_server.h, docs/debug-server.md).
 
-The console runs it when env.txt has WWHD_DEBUG_SERVER=1; its log says '[debug] server listening on <ip>:6543'.
+The console runs it when the settings menu turns it on (Switch tab > Debug > Debug server, at the next start); its
+log says '[debug] server listening on <ip>:6543'.
 The console's address: --host, else WWHD_SWITCH_HOST, else the first line of build/switch_host.txt.
 
   wwhd_debug.py info                      build, frame, stage, heap, address
@@ -34,7 +35,7 @@ REPO = Path(__file__).resolve().parents[2]
 DEFAULT_PORT = 6543
 # What differs between the two ports' copies of this client (SwitchWaker: scripts/switch/switchwaker_debug.py)
 PORT_NAME = "SwitchWakerHD"
-ENV_SWITCH = "WWHD_DEBUG_SERVER"        # the env.txt line that starts the server
+MENU_SWITCH = "Switch tab > Debug > Debug server"  # the menu setting that starts the server
 ENV_HOST = "WWHD_SWITCH_HOST"           # the console's address on this computer
 ENV_PORT = "WWHD_DEBUG_PORT"
 DEFAULT_NRO = REPO / "build" / "switch-dk" / "wwhd.nro"
@@ -121,7 +122,7 @@ def connect(args, timeout=10.0):
     try:
         return Conn(args.host, args.port, timeout)
     except OSError as e:
-        sys.exit(f"cannot reach {args.host}:{args.port}: {e} (is {PORT_NAME} running with {ENV_SWITCH}=1 in env.txt?)")
+        sys.exit(f"cannot reach {args.host}:{args.port}: {e} (is {PORT_NAME} running with its debug server on? {MENU_SWITCH}, then restart)")
 
 
 def simple(args, *cmd, timeout=30.0):
