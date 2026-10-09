@@ -1905,6 +1905,7 @@ void tab_about() {
     heading("About");
     ImGui::Text("The Legend of Zelda: The Wind Waker HD - native port (%s host, %s renderer)", hostui::name(),
                 render::api_name(render::active()));
+    note("Version %s (%s)", build::version(), build::commit());
 #ifdef __APPLE__
     note("Settings overlay: F1 (Fn+F1 on most Mac keyboards), Cmd+, or Settings... in the app menu, or hold Select / "
          "press Home on a controller. Esc, F1 or B closes. "
