@@ -11,22 +11,18 @@ share it.
 |---|---|
 | **The game** | Your own dump of **The Wind Waker HD, USA or Europe** (title `00050000-10143500` or `00050000-10143600`), **version 0** (the disc, or the eShop release without the update): a disc image (`.wux`/`.wud`) with its disc key and your console's Wii U common key, or the extracted game folder (`code/`, `content/`, `meta/`) |
 | **A Switch** | Running Atmosphère with the Homebrew Menu, and about 3 GB free on the SD card |
-| **A computer** | Windows 10/11 (with WSL, or devkitPro without it), macOS or Linux; 8 GB of RAM or more, 10 GB of free disk space |
-| **On the computer** | [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker / Podman on Linux; on Windows, [devkitPro](#windows-without-docker-or-wsl) works instead), Python 3, and this release unzipped |
+| **A computer** | Windows 10/11, macOS or Linux; 8 GB of RAM or more, 10 GB of free disk space |
+| **On the computer** | Python 3, this release unzipped, and the Switch toolchain: on **Windows**, [devkitPro](#windows-devkitpro-no-docker-or-wsl) (recommended: no Docker, no WSL); on macOS and Linux, [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker / Podman on Linux) |
 
 How to dump the game and the keys from your own Wii U is outside this guide: the
 [Cemu dumping guide](https://cemu.cfw.guide/dumping-games.html) (Dumpling) covers it. A dump made with
 Dumpling gives you the extracted folder directly (the base game, `00050000/10143500` or `10143600`, not the update).
 
-**Windows**: run everything below inside WSL (Ubuntu): install WSL with `wsl --install` in an
-administrator PowerShell, turn on Docker Desktop's *Use the WSL 2 based engine* and its integration with
-your Ubuntu, then open Ubuntu and work there (your Windows drives are under `/mnt/c/...`).
+### Windows: devkitPro (no Docker or WSL)
 
-### Windows without Docker or WSL
-
-If you would rather not set up Docker, the build also runs on Windows 10/11 with a native
-[devkitPro](https://devkitpro.org) install. `make_sd.py` uses it when neither Docker nor Podman is installed.
-Do this once, and then run step 2 below in a normal PowerShell or Command Prompt (not WSL):
+The simplest way on Windows 10/11: a native [devkitPro](https://devkitpro.org) install, with no Docker and no
+WSL. `make_sd.py` uses it when neither Docker nor Podman is installed. Do this once, and then run step 2 below
+in a normal PowerShell or Command Prompt (write `python` where step 2 says `python3`):
 
 1. Install [Python 3](https://www.python.org/downloads/) (tick *Add python.exe to PATH*), then
    `python -m pip install zstandard pycryptodome` (`zstandard` is for a `.wua`, `pycryptodome` for a `.wux`/`.wud`).
@@ -44,6 +40,12 @@ keys that step is skipped and the game builds as usual (`--no-forwarder` skips i
 things: [Git](https://git-scm.com/download/win), `python -m pip install pillow`, and in the same MSYS2 window
 `pacman -S gcc`. The `.nsp` ends up in `build\forwarder\` and in `build\sd\NSP\`.
 
+### Windows with Docker and WSL (alternative)
+
+With Docker Desktop installed, run everything below inside WSL (Ubuntu) instead: install WSL with
+`wsl --install` in an administrator PowerShell, turn on Docker Desktop's *Use the WSL 2 based engine* and its
+integration with your Ubuntu, then open Ubuntu and work there (your Windows drives are under `/mnt/c/...`).
+
 ## 2. Build it
 
 Open a terminal in the unzipped release folder.
@@ -55,12 +57,16 @@ python3 -m pip install pycryptodome      # only needed for a .wux/.wud image
 # next to it too (or WIIU_COMMON_KEY=<32 hex digits> in the environment)
 python3 tools/switch/make_sd.py --image /path/to/game.wux
 
+# or from a Cemu archive (no keys; python3 -m pip install zstandard)
+python3 tools/switch/make_sd.py --wua /path/to/game.wua
+
 # or from an extracted game folder
 python3 tools/switch/make_sd.py --game-dir /path/to/10143500
 ```
 
 It checks the game version first, then translates the game's code (about a minute) and builds the
-homebrew in Docker (10 to 20 minutes the first time; Docker downloads the toolchain image, about 1 GB).
+homebrew in Docker, or with devkitPro on Windows (10 to 30 minutes the first time; Docker downloads the
+toolchain image, about 1 GB).
 If the computer runs out of memory, add `--jobs 2`.
 
 At the end the folder `build/sd/` holds:
@@ -117,7 +123,7 @@ it). Saves (`save/`), settings (`settings.ini`) and the compiled graphics stay.
 | `make_sd: ... not the expected file` | The dump is not version 0 of the USA or European game, or the update was merged into it: use the base game only |
 | `the disc key was not found` / `common key not found` | Put `GAME.key` next to `GAME.wux`, and `common.key` next to it (or `WIIU_COMMON_KEY`) |
 | Docker errors | Docker Desktop must be running (on Windows, with its WSL integration on) |
-| `Docker or Podman is needed ... or a native devkitPro` | Install Docker, or do the "Windows without Docker" setup above |
+| `Docker or Podman is needed ... or a native devkitPro` | On Windows, do the "Windows: devkitPro" setup above; elsewhere, install Docker |
 | The game closes at once or says it is out of memory | Start it in title mode (hold R), not from the album |
 | No button works | The game's controller setting differs from the menu's Switch tab: set both to the same |
 | Something else | `sdmc:/switch/wwhd/wwhd.log` and `logs/` say what happened; include them in a report (they contain no game data) |

@@ -10,7 +10,7 @@ never copied into the repository). Title ID: `01FF575748440000`.
 
 On Windows without Docker, `tools/switch/forwarder/build_forwarder_windows.py` does the same with a native devkitPro
 (keys: `%USERPROFILE%\.switch\prod.keys` by default, or `--keys PATH`; never inside the checkout); `make_sd.py` runs it after a native build.
-See [INSTALL.md](../../../INSTALL.md), "Windows without Docker or WSL".
+See [INSTALL.md](../../../INSTALL.md), "Windows: devkitPro (no Docker or WSL)".
 
 ## Requirements
 

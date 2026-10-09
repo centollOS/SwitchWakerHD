@@ -22,7 +22,7 @@ usage:
            --jobs N                           parallel compiles (each needs ~1.5 GB of memory)
 
 Needs Python 3 with pycryptodome (only for --image: pip install pycryptodome) and Docker or Podman, or
-a native devkitPro (Windows: INSTALL.md, "Windows without Docker").
+a native devkitPro (Windows: INSTALL.md, "Windows: devkitPro").
 What it makes contains the game: it is for your own console only; do not share it.
 """
 import argparse
@@ -145,7 +145,7 @@ def main():
     if native:
         if not native_toolchain_ok():
             fail("Docker or Podman is needed (the Switch toolchain runs in the devkitpro/devkita64 image), or "
-                 "a native devkitPro with the Switch libraries: see INSTALL.md, \"Windows without Docker\"")
+                 "a native devkitPro with the Switch libraries: see INSTALL.md, \"Windows: devkitPro\"")
         if args.shaders:
             fail("--shaders needs Docker or Podman (tools/switch/dksh_cache runs in a container): "
                  "leave it out on the native build")

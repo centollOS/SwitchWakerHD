@@ -29,9 +29,10 @@ repository; their instructions are in the upstream README, kept as
 ## Build for the Switch
 
 **The short way** (step-by-step guide for players: [INSTALL.md](INSTALL.md)):
-`python3 tools/switch/make_sd.py --image game.wux` (or `--game-dir <extracted game>`) checks the
-game version, recompiles, builds the NRO in Docker and lays out `build/sd/switch/wwhd/` for the SD
-card. The steps it runs, by hand:
+`python3 tools/switch/make_sd.py --image game.wux` (or `--wua game.wua`, or `--game-dir <extracted game>`)
+checks the game version, recompiles, builds the NRO and lays out `build/sd/switch/wwhd/` for the SD card. On
+Windows it builds with a native devkitPro, no Docker or WSL needed (INSTALL.md); elsewhere in Docker or Podman.
+The steps it runs, by hand:
 
 Requirements: Python 3 with `pycryptodome` (for the extractor), and Docker or Podman (the Switch
 toolchain runs in the `devkitpro/devkita64` image). On the Mac also the Xcode command line tools.
