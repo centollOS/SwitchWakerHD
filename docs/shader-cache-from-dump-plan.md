@@ -190,3 +190,19 @@ so `dksh_cache build` takes a budget (`make_sd.py`: 20 MiB): sources in file ord
 `make_sd.py --shaders shader_manifest.bin` runs speculate, translate and build (a `shadercache_gl.bin` still works
 as before); the work files in `build/shader-cache/` hold game code and stay on the computer.
 
+## Status (2026-10-10, end of the autonomous session)
+
+| Step | State |
+|---|---|
+| 1. Recording | On by default (`WWHD_SHADER_MANIFEST=0` off), every variant new in a session incl. those rebuilt from translation records, keyed, written by a thread every 2 s. **Console test pending** (8478e2f). |
+| 2. Harvest | Title screen only so far (956 variants). |
+| 3. Programs in the dump | 354/367 (96.5%), USA and EU identical. |
+| 4. Tool | `programs` / `speculate` (Python), `dksh_cache translate` / `build [MiB]` (host). Known variants byte-identical to the console. |
+| 5. make_sd.py | `--shaders shader_manifest.bin` (Docker/Podman; not the Windows devkitPro path yet). |
+| 6. Text and docs | First-start notice (13970da), INSTALL.md optional section, README. |
+
+Console tests to do: the manifest recorded by default (a session from a fresh cache folder: the file grows, no
+hitch from the writer, the key skips variants of earlier sessions), the first-start notice's text, and the payoff:
+a cache built from a short session's manifest, then a place not visited in that session (fewer or no black textures
+compared with no cache).
+
