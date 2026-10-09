@@ -1034,6 +1034,13 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         return sh;
     }
     ScopedTime timer{R.perf.shaderNs};
+    if (shader_manifest::enabled()) {  // (this fork) docs/shader-cache-from-dump-plan.md: new in this session
+        uint32_t fetchAddress = 0, fetchSize = 0;
+        bool compact = false;
+        if (vertex) fetch_shader_range(regs, fetchAddress, fetchSize, &compact);
+        shader_manifest::record(key, vertex, regs, base ^ (vertex ? 0x1111 : 0x2222), address, size, fetchAddress,
+                                fetchSize, compact);
+    }
     if (g_transCache)  // (round 45) a variant of an earlier session: rebuilt from its record, no decompiler
         if (auto it = storedTrans.find(key); it != storedTrans.end())
             if (Shader* sh = shader_from_record(key, vertex, it->second)) return sh;
@@ -1047,13 +1054,6 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     (vertex ? g_lastVs : g_lastPs) = shader;
     LatteDecompilerOutput_t output{};
     Stage stage(vertex ? "translating a vertex shader" : "translating a pixel shader");
-    if (shader_manifest::enabled()) {  // (this fork) docs/shader-cache-from-dump-plan.md, step 1
-        uint32_t fetchAddress = 0, fetchSize = 0;
-        bool compact = false;
-        if (vertex) fetch_shader_range(regs, fetchAddress, fetchSize, &compact);
-        shader_manifest::record(vertex, regs, base ^ (vertex ? 0x1111 : 0x2222), address, size, fetchAddress, fetchSize,
-                                compact);
-    }
     if (const char* error = decompile(regs, vertex, fetch, base, address, size, output)) {
         shader->status = ShaderStatus::Failed;
         shader->error = error;
