@@ -6,6 +6,10 @@
     shader_manifest.py find MANIFEST GAME_DIR
         looks for every program of the manifest in the dump's shader files (content/**/*.sharcfb, *.gsh):
         where each one is, and which are missing. Exit status 1 when one is missing.
+    shader_manifest.py programs MANIFEST GAME_DIR OUT
+        the manifest's programs from every shader archive of the dump (upstream's tools/shaderprep.py extractor:
+        the .sharcfb files, also inside the SARC and Yaz0 archives), written to OUT (WSP1) for
+        `dksh_cache translate`. OUT holds game code: it stays on your computer (build/), never share it.
     shader_manifest.py selftest GAME_DIR
         checks the search itself: programs cut from the dump's own files at known places are found there
 
@@ -98,6 +102,23 @@ def find(programs, game_dir, step=4):
     return found
 
 
+def archive_programs(game_dir):
+    """{(hash_bytes, size): microcode} of every vertex/pixel shader in the dump's archives"""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    import shaderprep
+    out = {}
+    for (_typ, code) in shaderprep.game_shaders(game_dir):
+        out.setdefault((hash_bytes(code), len(code)), code)
+    return out
+
+
+def write_programs(path, programs):
+    with open(path, "wb") as f:
+        f.write(b"WSP1" + struct.pack("<I", len(programs)))
+        for (h, n), code in sorted(programs.items()):
+            f.write(struct.pack("<QI", h, n) + code)
+
+
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
@@ -117,6 +138,14 @@ def main():
             print("%016x %6d  %s" % (p[0], p[1], "%s +0x%x" % where if where else "NOT FOUND"))
         print("%d of %d programs found in the dump" % (len(found), len(progs)))
         sys.exit(0 if len(found) == len(progs) else 1)
+    elif cmd == "programs":
+        if len(sys.argv) != 5:
+            sys.exit(__doc__)
+        recs = read_manifest(sys.argv[2])
+        wanted = {(r[1], r[2]) for r in recs}
+        found = {k: v for k, v in archive_programs(sys.argv[3]).items() if k in wanted}
+        write_programs(sys.argv[4], found)
+        print("%d of %d programs of the manifest found in the dump's archives -> %s" % (len(found), len(wanted), sys.argv[4]))
     elif cmd == "selftest":
         files = shader_files(sys.argv[2])
         progs, where = set(), {}

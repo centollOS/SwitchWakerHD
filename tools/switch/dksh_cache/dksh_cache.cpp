@@ -8,6 +8,8 @@
 //     dksh_cache coverage <console shadercache_gl.bin> <harvest shadercache_gl.bin>
 //         how many of the console's sources (and linked pairs) the harvest has, by WGS1 hash: the hit rate an
 //         offline cache built from the harvest would have had on that console
+//     dksh_cache translate <shader_manifest.bin> <programs.bin> <shadercache_gl.bin> [<reference shadercache_dksh.bin>]
+//         a console's shader manifest translated again from the player's dump (translate.cpp)
 //     dksh_cache dump <shadercache_dksh.bin> <dir>
 //         writes each record's DKSH to <dir>/<hash>_vs.dksh or _ps.dksh (comparisons with the uam CLI)
 #include <algorithm>
@@ -203,10 +205,14 @@ int dump(const char* in, const char* dir) {
 }
 }  // namespace
 
+int translate(const char* manifest, const char* programs, const char* out, const char* reference);  // translate.cpp
+
 int main(int argc, char** argv) {
     if (argc == 4 && !strcmp(argv[1], "build")) return build(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "coverage")) return coverage(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "dump")) return dump(argv[2], argv[3]);
+    if ((argc == 5 || argc == 6) && !strcmp(argv[1], "translate"))
+        return translate(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : nullptr);
     fprintf(stderr,
             "usage: dksh_cache build <shadercache_gl.bin> <shadercache_dksh.bin>\n"
             "       dksh_cache coverage <console shadercache_gl.bin> <harvest shadercache_gl.bin>\n"

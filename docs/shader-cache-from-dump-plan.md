@@ -157,3 +157,20 @@ Revised steps:
 6. The first-start warning: says the first start may show black textures, that it improves as you play, and points
    to step 5 for the places not visited yet.
 
+## Step 4, known variants: done (2026-10-10)
+
+`tools/switch/shader_manifest.py programs MANIFEST GAME_DIR OUT` takes the manifest's programs from every archive of
+the dump (upstream's `shaderprep.game_shaders`) into a local `programs.bin`; `dksh_cache translate MANIFEST
+programs.bin shadercache_gl.bin [reference WDK1]` runs the runtime's Latte decompiler (runtime/third_party/cemu, OpenGL
+mode, built into the host tool) on each variant's recorded registers and fetch shader; `dksh_cache build` compiles.
+With the owner's title-screen manifest (956 variants, USA dump):
+
+- 354 of 367 programs found in the dump (5 s); 912 variants translated, 0 failed, 359 distinct GLSL sources;
+  44 variants belong to the 13 programs not in the archives;
+- **all 359 GLSL hashes are in the console's own cache**, so the computer's translation is the console's, and
+- **all 359 DKSH are byte-identical** to the console's (`dksh_cache dump` of both, compared file by file);
+  uam takes 4.2 ms a shader on the computer (70-100 ms on the console).
+
+Next: the speculative variants (archive programs of the same family as recorded ones), `make_sd.py --shaders`,
+recording on by default, and the first-start text.
+
