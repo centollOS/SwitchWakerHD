@@ -84,4 +84,20 @@ void game_files(const std::string& game_dir) {
     exit(1);
 }
 
+void shader_cache() {
+    // shaders_dk.cpp's cache files: the offline one (made on a computer, tools/switch/dksh_cache) and the one the
+    // console fills as it compiles; with neither, every shader is compiled while the game is played
+    if (is_file("shadercache_dksh.bin", true) || is_file("shadercache_dksh_local.bin", true)) return;
+    LOG("[startup] no shadercache_dksh.bin and no shaders compiled on this console yet: warning shown");
+    log_flush();
+    show(false, "SwitchWakerHD: no shader cache (shadercache_dksh.bin)",
+         "sdmc:/switch/wwhd/shadercache_dksh.bin was not found, and no graphics have been compiled on this "
+         "console yet.\n\nThe game will work, but on this first start the console compiles each graphics effect "
+         "the first time it is drawn: until then some textures and objects may look black or appear late. It "
+         "gets better as you play, and what is compiled is kept for the next starts "
+         "(shadercache_dksh_local.bin).\n\nTo avoid it, copy shadercache_dksh.bin next to wwhd.nro in "
+         "sdmc:/switch/wwhd/.",
+         HidNpadButton_A, "Press A to continue.");
+}
+
 }  // namespace startup_checks
