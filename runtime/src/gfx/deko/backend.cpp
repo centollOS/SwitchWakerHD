@@ -7,6 +7,7 @@
 extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into (sbrk)
 #include <switch.h>
 
+#include "shader_wait.h"
 #include "dk.h"
 #include "dk_capture.h"
 #include "dk_draw.h"
@@ -1090,6 +1091,7 @@ void begin_commands() {
     // the lanes' per-frame work (docs/deko3d-plan.md, "P2 lanes")
     surfaces_frame_start();
     shaders_frame_start();
+    shader_wait::frame(frame);  // (this fork) draws wait for compiling shaders in this frame?
     draw_frame_start();
 }
 
