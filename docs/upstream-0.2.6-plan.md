@@ -69,6 +69,15 @@ step 3 its numbers (unique bytes uploaded per frame).
 profiler stays off by default (A/B switch "Render profiler (slower)"). Not wired: `shader_variant` (its
 groups are the Vulkan translator's).
 
+**Run on the console 2026-10-09** (NRO with patches 1-8, handheld, scale 1.0, 30 fps, profiler on, the
+Forsaken Fortress area, `logs/perf_2026-10-09_09-36-23.txt`): render thread CPU 14.9 ms/frame and idle 17.9
+ms/frame (it waits for the game); 1492 draws/frame at 7.15 us/draw. Draw phases ms/frame: textures 2.79,
+shader 1.75, vertex 1.61, indices 1.35, targets 0.93, pass 0.65, descriptors 0.53, pipeline 0.48, record
+0.15. Register writes 4.30 ms/frame (11433). Uploads 2.02 MiB/frame (vertex 1.72, index 0.26, ubo 0.04);
+unique guest bytes 1.63 MiB/frame (vertex 1.60 of 1.72: 93% of the vertex data is new each frame). The
+game's main thread holds core 1 at 93-98%: that is the frame's limit, not the render thread. The report
+button and its file work (without the profiler it writes a note saying to turn it on).
+
 ### Step 3 — cross-frame buffer reuse (from v0.2.4's guest buffer cache) — only if step 2 says so
 
 Upstream keeps unchanged vertex/index/uniform data on the GPU, validated by write_watch page stamps
@@ -84,12 +93,19 @@ within a frame (`stream_guest`) plus `UboMemo`. Options, decided with step 2's u
   frames of equal hashes, then checked only every N frames (with `_VERIFY` mode as upstream).
 Behind `WWHD_DK_BUFFER_CACHE`, off until measured.
 
+**Decision 2026-10-09: not now.** Step 2's numbers: 93% of the vertex bytes a frame uploads are unique
+within it, and the whole vertex phase is 1.61 ms of the render thread's 14.9; a content check would hash
+those 1.6 MiB every frame (no write_watch on Horizon), so the best case saves about 1 ms of a thread that
+already idles 17.9 ms/frame while the game's main thread is the limit. The larger render-thread costs are
+textures (2.79 ms/frame) and shaders (1.75; step 1). Revisit only if the render thread becomes the limit
+(docked, higher scales).
+
 ### Step 4 — small fixes found while comparing
 
 - deko3d `wait_idle` ignores the save-state "full GPU wait" request (`gx2_ss_drain`, payload 1): wait
   on the queue there. **Done 2026-10-09:** backend hook `gpu_idle` (optional; deko3d: submit, then
-  `dkQueueWaitIdle`), called by `OP_DRAW_DONE` when its payload asks for the full wait. Built; save states
-  not re-tested on the console yet.
+  `dkQueueWaitIdle`), called by `OP_DRAW_DONE` when its payload asks for the full wait. Save and load
+  checked on the console 2026-10-09 (slot 1 in the Forsaken Fortress, back at distance 0.0).
 
 ## Hardware checks for this sync (NRO from dev 0921610)
 
