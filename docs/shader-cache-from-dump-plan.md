@@ -104,3 +104,12 @@ So waiting instead of skipping removes the black textures. Open: when to wait. A
 shader, during play too, but only until the console has compiled them), or only during scene changes and the
 first seconds of a place (the game's own fade flag, `GD(0x101F36CC)`), skipping during play as now.
 
+## Option C-2 tried and reverted (2026-10-10)
+
+Draws waited for their compiling shaders inside a window (fades, door events and 120 frames after, the first 600
+frames: b302794). On the owner's console with empty caches it worked as measured (Outset's island and Link's house
+right after loading, 0 draws skipped in the window, 4 during play), but the owner did not want the pauses (the
+picture stops for seconds during the first fades) and preferred the black textures while the problem is solved
+another way: reverted. Kept for further work: `WWHD_DK_SHADER_CACHE_DIR` (a new player's first start without
+touching the caches) and the shader manifest.
+
