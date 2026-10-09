@@ -111,6 +111,26 @@ adjustments, frame-rate counter, controller (Pro Controller or GamePad), gyro ai
 the battery faster and warm the console. If sys-clk has its own profile for this title, the two fight
 over the clocks. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
 
+## Optional: graphics ready for the places you have not visited yet
+
+On the first start the console compiles each of the game's graphics effects the first time it is drawn, so some
+textures can look black for a while and some objects appear a moment late; it gets better as you play, and what is
+compiled is kept. To have the places you have not visited yet ready too:
+
+1. Play a while (a few minutes are enough to start; the more places you visit, the better the guesses). The game
+   writes `sdmc:/switch/wwhd/shader_manifest.bin` as you play: a list of the graphics states it met, with no game
+   code in it.
+2. Copy that file to your computer and build again with it:
+   ```sh
+   python3 tools/switch/make_sd.py --game-dir /path/to/game --shaders /path/to/shader_manifest.bin
+   ```
+   It finds the game's shaders in your own dump, compiles what you met plus guesses for the rest of the game, and adds
+   `shadercache_dksh.bin` to `build/sd/switch/wwhd/` (about 15 MB; under a minute of compiling). Needs Docker or
+   Podman (not yet the Windows devkitPro build).
+3. Copy `shadercache_dksh.bin` next to `wwhd.nro` on the SD card.
+
+`shader_manifest.bin` and `shadercache_dksh.bin` come from your own game: keep them for yourself, do not share them.
+
 ## Updating
 
 Build the new release the same way and copy `wwhd.nro` over the old one (`game/` only if you never copied
