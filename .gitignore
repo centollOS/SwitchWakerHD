@@ -28,6 +28,7 @@ draw_*.png
 captures/
 # never commit game data, keys or anything derived from the game
 *.key
+*.keys
 *.wud
 *.wux
 *.iso
