@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <sys/stat.h>
 #include <unordered_set>
 #include <vector>
 
@@ -31,7 +32,7 @@ constexpr uint32_t kNumRegs = 0x10000;
 constexpr uint32_t kUniformsFirst = 0xC000, kUniformsEnd = 0xD000;
 
 std::mutex g_mutex;
-FILE* g_file = nullptr;
+bool g_writable = false;
 std::unordered_set<uint64_t> g_seen;  // hashes of the records' data in the file
 uint64_t g_written = 0;
 
@@ -92,10 +93,15 @@ bool open_file() {
             fclose(f);
         }
     }
-    g_file = fopen(kPath, "ab");
+    // opened for each record and closed again: a file the game holds open cannot be read on the console (the debug
+    // server's get), and the harvest wants to fetch it while playing
+    if (FILE* f = fopen(kPath, "ab")) {
+        g_writable = true;
+        fclose(f);
+    }
     LOG("[dk] shader manifest %s: %zu variants recorded before%s", kPath, g_seen.size(),
-        g_file ? "" : "; cannot write it");
-    return g_file != nullptr;
+        g_writable ? "" : "; cannot write it");
+    return g_writable;
 }
 
 }  // namespace
@@ -135,6 +141,23 @@ void record(bool vertex, const uint32_t* regs, uint64_t programHash, uint32_t pr
     memcpy(d.data() + countAt, &count, 4);
 
     std::lock_guard<std::mutex> lk(g_mutex);
+    // diagnostics for the plan's step 3 (WWHD_SHADER_MANIFEST_DUMP=1): each program's bytes in shader_programs/, to
+    // compare on the computer with the dump's files. Game code: for the owner's own analysis, never shared.
+    static const bool dump = [] {
+        const char* e = getenv("WWHD_SHADER_MANIFEST_DUMP");
+        if (!(e && *e == '1')) return false;
+        mkdir("shader_programs", 0777);
+        return true;
+    }();
+    static std::unordered_set<uint64_t> dumped;
+    if (dump && dumped.insert(programHash).second) {
+        char name[64];
+        snprintf(name, sizeof name, "shader_programs/%016llx.bin", (unsigned long long)programHash);
+        if (FILE* f = fopen(name, "wb")) {
+            fwrite(ppc_ptr(programAddress), 1, programSize, f);
+            fclose(f);
+        }
+    }
     static const bool opened = open_file();
     if (!opened || !g_seen.insert(hash_data(d)).second) return;
     uLongf packed = compressBound(d.size());
@@ -144,8 +167,10 @@ void record(bool vertex, const uint32_t* regs, uint64_t programHash, uint32_t pr
     const uint32_t packed32 = uint32_t(packed), size = uint32_t(d.size());
     memcpy(rec.data() + 1, &packed32, 4);
     memcpy(rec.data() + 5, &size, 4);
-    fwrite(rec.data(), 1, 9 + packed, g_file);
-    fflush(g_file);
+    FILE* f = fopen(kPath, "ab");
+    if (!f) return;
+    fwrite(rec.data(), 1, 9 + packed, f);
+    fclose(f);
     if (++g_written % 500 == 0) LOG("[dk] shader manifest: %llu variants recorded this session", (unsigned long long)g_written);
 }
 

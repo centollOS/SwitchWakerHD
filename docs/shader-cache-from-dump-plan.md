@@ -54,9 +54,35 @@ Independent of the plan (done on main, 43d74c8): `tools/release/guard.py` refuse
 
 - [x] First-start warning (hardware-tested; its text still names a file players cannot get)
 - [x] 1. Recording: `gfx/deko/shader_manifest.cpp` (`WWHD_SHADER_MANIFEST=1`; builds, not yet run on the console)
-- [ ] 2. Harvest on the owner's console
-- [ ] 3. Programs found in the dump: `tools/switch/shader_manifest.py find` (its search passes `selftest`;
-      waiting for a real manifest). The three `.sharcfb` files are byte-identical in the USA and European dumps.
+- [~] 2. Harvest on the owner's console: a first one at the title screen (956 variants, 367 programs)
+- [x] 3. Programs found in the dump: **NO for about two thirds** (see "Step 3 result"). Stopped here.
 - [ ] 4. Tool, byte-identical result
 - [ ] 5. make_sd.py and release
 - [ ] 6. Text and docs
+
+## Step 3 result (2026-10-10): most programs are not in the dump as they run
+
+First harvest at the title screen: 956 variants, 367 distinct programs. With `WWHD_SHADER_MANIFEST_DUMP=1` (a
+diagnostic: each program's bytes in `sdmc:/switch/wwhd/shader_programs/`, for the owner's own analysis, deleted
+afterwards; never shared) the programs as they run were compared with the dump's shader files:
+
+| Programs | Count | What differs |
+|---|---|---|
+| identical to bytes of a `.sharcfb` | 40 | nothing |
+| identical except the last 8 bytes | 89 | the size the registers give is rounded up: the last 8 bytes are memory after the program (two programs with different hashes come from the same place of the file) |
+| first bytes differ, middle found | 119 | the game changes the program when it loads it |
+| not found at all | 119 | changed more, or made by the game |
+
+So about two thirds of the programs are made or changed by the game's own code at run time (most likely its
+emulation of the GameCube pipeline building TEV programs). Rebuilding them on a computer would mean reproducing
+that code, not just reading the dump with a list of identifiers. The plan as written is not viable.
+
+Options to decide on:
+
+- **A. Partial cache from the dump:** the 129 programs found (35% of this sample), with the hash computed without the
+  last 8 bytes. Less first-start black, not none.
+- **B. Understand the game's changes:** if they are a small, regular patch (constants or branch targets taken from
+  registers or tables), the tool could apply it; how much work is unknown until the patched words are studied.
+- **C. On the console instead:** make the first start's compiles faster or less visible (draw with a waiting shader
+  instead of skipping, a "preparing graphics" pass over the shaders seen so far, more compiler threads).
+
