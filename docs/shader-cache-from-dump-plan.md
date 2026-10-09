@@ -48,15 +48,15 @@ session of round 48 found every shader it drew in the USA-built caches, 0 compil
 6. **Text and docs.** The first-start warning tells players without the file to rebuild with make_sd.py; INSTALL.md
    and the README say what the file is and that it is made on their computer.
 
-Independent of the plan (main): `tools/release/guard.py` also refuses `shadercache_*.bin`, which its shader-cache
-rule does not name yet.
+Independent of the plan (done on main, 43d74c8): `tools/release/guard.py` refuses `shadercache_*.bin` and `*.dksh`.
 
 ## Status
 
 - [x] First-start warning (hardware-tested; its text still names a file players cannot get)
-- [ ] 1. Recording
+- [x] 1. Recording: `gfx/deko/shader_manifest.cpp` (`WWHD_SHADER_MANIFEST=1`; builds, not yet run on the console)
 - [ ] 2. Harvest on the owner's console
-- [ ] 3. Programs found in the dump
+- [ ] 3. Programs found in the dump: `tools/switch/shader_manifest.py find` (its search passes `selftest`;
+      waiting for a real manifest). The three `.sharcfb` files are byte-identical in the USA and European dumps.
 - [ ] 4. Tool, byte-identical result
 - [ ] 5. make_sd.py and release
 - [ ] 6. Text and docs
