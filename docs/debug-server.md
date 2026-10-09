@@ -47,6 +47,18 @@ tools/switch/wwhd_debug.py put build/settings.ini settings.ini && tools/switch/w
 An `env.txt` from earlier builds is converted once at start: its variables with a menu setting become that
 setting, the others go into `[dev]`, and it is renamed `env.txt.old` (the log lists every line).
 
+
+Folders (Switch, read at start-up): `WWHD_GAME_DIR` (default `game`) and `WWHD_SAVE_DIR` (default `save`), relative to
+`sdmc:/switch/wwhd`, and `WWHD_STATE_DIR` (default `sdmc:/switch/wwhd/states`) for save states, e.g. a European game in
+`game-eu` with its own saves next to the usual USA one:
+
+```
+[dev]
+WWHD_GAME_DIR=game-eu
+WWHD_SAVE_DIR=save-eu
+WWHD_STATE_DIR=sdmc:/switch/wwhd/states-eu
+```
+
 ## The client: `tools/switch/wwhd_debug.py`
 
 | Command | What it does |

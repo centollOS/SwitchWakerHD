@@ -650,6 +650,12 @@ int main(int argc, char** argv) {
 #ifdef WWHD_HAS_VULKAN
     bool renderer_smoke = false;
 #endif
+#ifdef __SWITCH__
+    // (this fork) the console has no arguments: settings.ini's [dev] section can choose the game and save folders
+    // (e.g. another region's game next to the usual one; WWHD_STATE_DIR does the same for save states)
+    if (const char* e = getenv("WWHD_GAME_DIR"); e && *e) config::game_dir = e;
+    if (const char* e = getenv("WWHD_SAVE_DIR"); e && *e) config::save_dir = e;
+#endif
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--game") && i + 1 < argc) config::game_dir = argv[++i];
         else if (!strcmp(argv[i], "--save") && i + 1 < argc) config::save_dir = argv[++i];
