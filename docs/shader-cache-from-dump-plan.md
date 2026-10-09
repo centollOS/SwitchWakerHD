@@ -129,3 +129,31 @@ play, plus the archives' programs, pre-translated at start-up. Upstream consider
 and does not ship it: each player records their own. Shipping our manifest (program hashes, register states, fetch
 shaders) would go further than upstream; that is a decision to make before step 5.
 
+## Decision (2026-10-10): the prudent route, as upstream
+
+The manifest is **never shipped**. Like upstream's template, each player records their own on their console while
+playing, and uses it on their own computer. What this changes:
+
+- **The first start keeps its black textures** (accepted: no pauses, and without shipping states there is nothing to
+  compile before the first play).
+- **What improves:** after playing a while, the player copies `sdmc:/switch/wwhd/shader_manifest.bin` to the computer
+  and `make_sd.py --shaders shader_manifest.bin` builds a `shadercache_dksh.bin` with every variant they saw **plus
+  speculative variants of the archives' other programs** (upstream's type 3: an archive program takes the recorded
+  states of programs of the same family, i.e. with the same register block of its own GX2 structure,
+  `shaderprep.own_block`). Places not visited yet then already have their shaders, so they are not black the first
+  time the player gets there.
+
+Revised steps:
+
+1. Recording: on by default (only new variants go through the decompiler, so it writes a few records per new place);
+   `WWHD_SHADER_MANIFEST=0` turns it off. The `_DUMP` diagnostic stays opt-in.
+2. (The owner's harvest: for testing only.)
+3. Done: the programs are in the dump's archives (upstream's `shaderprep.game_shaders`).
+4. Tool (`tools/switch/dksh_cache from-dump <manifest> <game dir> <out>`): the known variants, then the speculative
+   ones; the same Latte decompiler as the runtime, glsl_to_deko, uam. Acceptance: the known variants' DKSH are
+   byte-identical to the console's for the same GLSL; then how many of a later play's shaders the speculative part
+   already had (coverage).
+5. `make_sd.py --shaders shader_manifest.bin` (instead of a `shadercache_gl.bin`), INSTALL.md: "after playing a while".
+6. The first-start warning: says the first start may show black textures, that it improves as you play, and points
+   to step 5 for the places not visited yet.
+
