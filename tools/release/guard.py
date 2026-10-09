@@ -46,6 +46,9 @@ KEYLIKE = re.compile(rb"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 PUBLIC_HEX = {b"0114020000000000c000000000000046"}
 # a function body as tools/recomp/recomp.py emits it (stubgen placeholders call ppc_unimplemented)
 GEN_CODE = re.compile(rb"void f_[0-9A-F]{8}\(Cpu\* __restrict c\) \{\n")
+# and its translated instructions, each followed by its address and word (docs show a function's header only:
+# docs/mod-sdk-v2.md's PPC_MOD_HOOK example)
+GEN_INSN = re.compile(rb"/\* [0-9A-F]{8}: [0-9A-F]{8} \*/")
 
 
 # vendored third-party sources may use the generated code's file names (uam's Mesa has a main/imports.c):
@@ -86,7 +89,7 @@ def check_entry(name, data, problems):
                 continue
             line = data.count(b"\n", 0, m.start()) + 1
             problems.append("%s:%d: 32-hex-digit string (key-like)" % (name, line))
-    if GEN_CODE.search(data):
+    if GEN_CODE.search(data) and GEN_INSN.search(data):
         problems.append("%s: contains recompiled game functions" % name)
 
 
