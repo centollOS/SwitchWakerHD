@@ -1040,7 +1040,8 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         uint32_t fetchAddress = 0, fetchSize = 0;
         bool compact = false;
         if (vertex) fetch_shader_range(regs, fetchAddress, fetchSize, &compact);
-        shader_manifest::record(vertex, regs, base ^ (vertex ? 0x1111 : 0x2222), size, fetchAddress, fetchSize, compact);
+        shader_manifest::record(vertex, regs, base ^ (vertex ? 0x1111 : 0x2222), address, size, fetchAddress, fetchSize,
+                                compact);
     }
     if (const char* error = decompile(regs, vertex, fetch, base, address, size, output)) {
         shader->status = ShaderStatus::Failed;

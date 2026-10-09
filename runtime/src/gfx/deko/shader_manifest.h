@@ -12,7 +12,8 @@
 namespace gfxdk::shader_manifest {
 bool enabled();
 // translate(), before the decompiler runs on these registers (it changes the pixel-shader inputs in them).
-// programHash: hash_bytes of the program's bytes; fetchAddress/fetchSize/fetchCompact: fetch_shader_range's.
-void record(bool vertex, const uint32_t* regs, uint64_t programHash, uint32_t programSize, uint32_t fetchAddress,
-            uint32_t fetchSize, bool fetchCompact);
+// programHash: hash_bytes of the program's bytes (at programAddress); fetchAddress/fetchSize/fetchCompact:
+// fetch_shader_range's.
+void record(bool vertex, const uint32_t* regs, uint64_t programHash, uint32_t programAddress, uint32_t programSize,
+            uint32_t fetchAddress, uint32_t fetchSize, bool fetchCompact);
 }  // namespace gfxdk::shader_manifest

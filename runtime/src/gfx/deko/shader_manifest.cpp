@@ -2,7 +2,8 @@
 //
 // shader_manifest.bin: "WSM1", u32 version, then records {u8 kind (1), u32 packed size, u32 size, zlib data}; the
 // data of a variant record:
-//   u8 vertex, u64 program hash, u32 program size,
+//   u8 vertex, u64 program hash, u32 program size, u64 hash of its first 64 bytes (or all, when smaller: what a
+//   search through the dump's shader files looks for first),
 //   u8 fetch compact, u32 fetch size, fetch bytes (vertex shaders; size 0 otherwise),
 //   u32 register count, then {u16 index, u32 value} for each non-zero context register outside the uniform
 //   constants (0xC000-0xCFFF, which the decompiler does not read).
@@ -37,6 +38,13 @@ uint64_t g_written = 0;
 uint64_t hash_data(const std::vector<uint8_t>& d) {
     uint64_t h = 0xCBF29CE484222325ull;
     for (uint8_t b : d) h = (h ^ b) * 0x100000001B3ull;
+    return h;
+}
+
+// FNV-1a over the bytes (tools/switch/dksh_cache computes the same over the dump's files)
+uint64_t prefix_hash(const uint8_t* p, uint32_t n) {
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (uint32_t i = 0; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
     return h;
 }
 
@@ -100,13 +108,14 @@ bool enabled() {
     return on;
 }
 
-void record(bool vertex, const uint32_t* regs, uint64_t programHash, uint32_t programSize, uint32_t fetchAddress,
-            uint32_t fetchSize, bool fetchCompact) {
+void record(bool vertex, const uint32_t* regs, uint64_t programHash, uint32_t programAddress, uint32_t programSize,
+            uint32_t fetchAddress, uint32_t fetchSize, bool fetchCompact) {
     std::vector<uint8_t> d;
     d.reserve(8192);
     put<uint8_t>(d, vertex);
     put(d, programHash);
     put(d, programSize);
+    put(d, prefix_hash(ppc_ptr(programAddress), programSize < 64 ? programSize : 64));
     put<uint8_t>(d, vertex && fetchCompact);
     const uint32_t fs = vertex && fetchAddress ? fetchSize : 0;
     put(d, fs);
