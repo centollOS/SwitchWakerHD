@@ -86,3 +86,21 @@ Options to decide on:
 - **C. On the console instead:** make the first start's compiles faster or less visible (draw with a waiting shader
   instead of skipping, a "preparing graphics" pass over the shaders seen so far, more compiler threads).
 
+## Option C, first measurements (2026-10-10, owner's console, USA game)
+
+A new player's first start was reproduced without touching the console's caches: `WWHD_DK_SHADER_CACHE_DIR=<empty
+folder>` (settings.ini `[dev]`) makes the renderer use that folder for its four cache files. File 1 loaded, Link on
+Outset's pier, screenshots 5, 15 and 45 s after the file starts:
+
+- **A, as now (draws of a shader still compiling are skipped):** at 5 s Link's cap is black and the island is a dark
+  silhouette; at 45 s Link is right but **the island is still black**: it does not come back once its shaders are
+  compiled. So the black comes from a draw the game makes once (when the place loads) that was skipped, not from
+  objects drawn late.
+- **B, `WWHD_DK_SHADER_BUDGET=0` (a draw waits for its shader):** at 45 s the island is right (rock, grass, house,
+  beach). The cost is at the place's loading only: about 10 compiles a second (70-100 ms each) for a few seconds,
+  about 3 fps behind the fade-in, then 30 fps; 0 draws skipped.
+
+So waiting instead of skipping removes the black textures. Open: when to wait. Always (B: a hitch for each new
+shader, during play too, but only until the console has compiled them), or only during scene changes and the
+first seconds of a place (the game's own fade flag, `GD(0x101F36CC)`), skipping during play as now.
+

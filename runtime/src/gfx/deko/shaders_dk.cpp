@@ -70,15 +70,26 @@ struct ShaderCode {
 };
 
 namespace {
-constexpr char kGlCachePath[] = "shadercache_gl.bin";             // sdmc:/switch/wwhd (the working directory)
+// (this fork) WWHD_DK_SHADER_CACHE_DIR=<folder> (settings.ini [dev]): the four cache files below live there instead
+// of in the working directory, e.g. an empty folder to see a new player's first start without touching the caches
+const char* cache_path(const char* name) {
+    static const std::string dir = [] {
+        const char* e = getenv("WWHD_DK_SHADER_CACHE_DIR");
+        if (!e || !*e) return std::string();
+        mkdir(e, 0777);
+        return std::string(e) + "/";
+    }();
+    return dir.empty() ? name : strdup((dir + name).c_str());
+}
+const char* const kGlCachePath = cache_path("shadercache_gl.bin");  // sdmc:/switch/wwhd (the working directory)
 // (round 45) every translation's result for the draw path, so later sessions skip the decompiler (translate)
-constexpr char kTransPath[] = "shadercache_dk_translations.bin";
+const char* const kTransPath = cache_path("shadercache_dk_translations.bin");
 constexpr char kTransMagic[4] = {'W', 'D', 'T', '1'};
 // bump when the shader keys (gather_state, texture_state_hash, translate's keyFor), the decompiler's output or the
 // record layout change: a file of another version is started again
 constexpr uint32_t kTransVersion = 1;
-constexpr char kOfflinePath[] = "shadercache_dksh.bin";
-constexpr char kLocalPath[] = "shadercache_dksh_local.bin";
+const char* const kOfflinePath = cache_path("shadercache_dksh.bin");
+const char* const kLocalPath = cache_path("shadercache_dksh_local.bin");
 constexpr uint8_t kGlCacheMagic[4] = {'W', 'G', 'S', '1'};
 constexpr size_t kWorkerStack = 8u << 20;  // Mesa's GLSL parser and nv50_ir recurse deeply (uam_api.h)
 // 0x3B (59), the game's own threads' priority: an application's NPDM allows 0x1C-0x3B, and 0x3C (one below
