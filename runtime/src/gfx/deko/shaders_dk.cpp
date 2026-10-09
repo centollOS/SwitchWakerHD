@@ -15,6 +15,7 @@
 // writes them, so the OpenGL build reads what this one saw; its sources without DKSH are compiled in the
 // background (lowest priority) from start-up.
 #include "dk_shaders.h"
+#include "shader_manifest.h"
 
 #include <switch.h>
 #include <sys/stat.h>
@@ -1035,6 +1036,12 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     (vertex ? g_lastVs : g_lastPs) = shader;
     LatteDecompilerOutput_t output{};
     Stage stage(vertex ? "translating a vertex shader" : "translating a pixel shader");
+    if (shader_manifest::enabled()) {  // (this fork) docs/shader-cache-from-dump-plan.md, step 1
+        uint32_t fetchAddress = 0, fetchSize = 0;
+        bool compact = false;
+        if (vertex) fetch_shader_range(regs, fetchAddress, fetchSize, &compact);
+        shader_manifest::record(vertex, regs, base ^ (vertex ? 0x1111 : 0x2222), size, fetchAddress, fetchSize, compact);
+    }
     if (const char* error = decompile(regs, vertex, fetch, base, address, size, output)) {
         shader->status = ShaderStatus::Failed;
         shader->error = error;
