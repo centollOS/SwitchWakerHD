@@ -28,7 +28,6 @@ void log_startup();  // a line for each mod switched on at startup
 bool quick_doors();
 void set_quick_doors(bool on);
 bool fast_scenes();
-bool door_event_running();  // (this fork) turbo.cpp: a door event is in progress
 void set_fast_scenes(bool on);
 
 bool move_speed();

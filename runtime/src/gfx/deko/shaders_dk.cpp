@@ -16,7 +16,6 @@
 // background (lowest priority) from start-up.
 #include "dk_shaders.h"
 #include "shader_manifest.h"
-#include "shader_wait.h"
 
 #include <switch.h>
 #include <sys/stat.h>
@@ -118,8 +117,6 @@ uint64_t g_strictMulLogged = 0;  // vertex shaders translated with strict multip
 // comparisons).
 int g_loadBudget = 64;
 bool g_waitForWorker = false;
-// (this fork) or inside gfx/deko/shader_wait.cpp's window around scene changes and door events
-bool waiting() { return g_waitForWorker || shader_wait::active(); }
 
 // ---- hashes (as gfx/gl/shaders.cpp: the same keys and the same GLSL hashes)
 uint64_t hash_bytes(const void* bytes, size_t size, uint64_t hash = 0x9E3779B97F4A7C15ull) {
@@ -807,7 +804,7 @@ ShaderCode* code_for(Shader* sh, std::string&& glsl) {
     job.hash = sh->glslHash;
     job.vertex = sh->vertex;
     job.glsl = std::move(glsl);
-    job.priority = waiting() ? ~0u : 1;  // (a draw asked for it now)
+    job.priority = g_waitForWorker ? ~0u : 1;  // (a draw asked for it now)
     queue_job(std::move(job));
     return &code;
 }
@@ -1028,7 +1025,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         Shader* sh = it->second.get();
         if (sh->pending()) {
             refresh(sh);
-            if (waiting() && sh->pending() && sh->code) {
+            if (g_waitForWorker && sh->pending() && sh->code) {
                 wait_for(sh->code, sh->glslHash);
                 refresh(sh);
             }
@@ -1111,7 +1108,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     cache_dk_translation(shader, base, units);
     shader->code = code_for(shader, std::move(glsl));
     refresh(shader);
-    if (waiting() && shader->pending()) {
+    if (g_waitForWorker && shader->pending()) {
         wait_for(shader->code, shader->glslHash);
         refresh(shader);
     }

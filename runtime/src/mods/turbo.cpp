@@ -178,9 +178,6 @@ void test_door_delete(Cpu* c) {
 }
 }  // namespace
 
-// (this fork) a door event is running (whether quick doors is on or not): gfx/deko/shader_wait.cpp
-bool door_event_running() { return g_door_event; }
-
 // interp.cpp's fpcEx_Handler hook, after the step's own execute
 void after_execute(Cpu* c, uint32_t execute_fn) {
     // in-between passes of the 60 fps modes: no 30 Hz logic ran (doors, scenes), nothing to do
