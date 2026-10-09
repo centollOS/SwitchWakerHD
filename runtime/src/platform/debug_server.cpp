@@ -1,5 +1,6 @@
-// Debug server (debug_server.h): one listening thread, one thread per connection (at most kMaxConns), the
-// log's recent text in memory for "log" streams, the injected controller state for the input poll.
+// Debug server (debug_server.h): one listening thread, one thread per connection (at most kMaxConns; on the
+// Switch the listener joins them), the log's recent text in memory for "log" streams, the injected
+// controller state for the input poll.
 #include "debug_server.h"
 
 #include <arpa/inet.h>
@@ -21,6 +22,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #ifdef __SWITCH__
 #include <pthread.h>
@@ -71,29 +73,55 @@ uint64_t now_ns() {
                         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-void spawn(void (*fn)(void*), void* arg) {
+#ifdef __SWITCH__
+// libnx has no pthread_detach (core.cpp makes it a no-op): a detached thread keeps its stack and its
+// kernel thread for the rest of the session. That is fine for the listener, not for a thread per
+// connection (after ~60 connections the server stopped answering and the game hung). A connection
+// thread records itself here when it returns, and the listener joins it at its next accept.
+std::mutex g_doneMu;
+std::vector<pthread_t> g_done;
+
+void join_done() {
+    std::vector<pthread_t> done;
+    {
+        std::lock_guard<std::mutex> lk(g_doneMu);
+        done.swap(g_done);
+    }
+    for (pthread_t t : done) pthread_join(t, nullptr);
+}
+#endif
+
+// reap: the thread ends before the session does (a connection), so the listener joins it on the Switch
+void spawn(void (*fn)(void*), void* arg, bool reap = false) {
 #ifdef __SWITCH__
     // Horizon commits a small default stack for std::thread
     struct Start {
         void (*fn)(void*);
         void* arg;
+        bool reap;
     };
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 128 << 10);
     pthread_t t;
-    auto* s = new Start{fn, arg};
+    auto* s = new Start{fn, arg, reap};
     if (pthread_create(&t, &attr, [](void* p) -> void* {
             Start s = *static_cast<Start*>(p);
             delete static_cast<Start*>(p);
             s.fn(s.arg);
+            if (s.reap) {
+                std::lock_guard<std::mutex> lk(g_doneMu);
+                g_done.push_back(pthread_self());
+            }
             return nullptr;
-        }, s) == 0)
-        pthread_detach(t);
-    else
+        }, s) == 0) {
+        if (!reap) pthread_detach(t);
+    } else {
         delete s;
+    }
     pthread_attr_destroy(&attr);
 #else
+    (void)reap;
     std::thread(fn, arg).detach();
 #endif
 }
@@ -499,6 +527,9 @@ void listener(void*) {
         sockaddr_in from{};
         socklen_t len = sizeof from;
         const int fd = accept(g_listen, reinterpret_cast<sockaddr*>(&from), &len);
+#ifdef __SWITCH__
+        join_done();
+#endif
         if (fd < 0) {
             if (!g_running.load()) break;
             wait_ms(100);
@@ -520,7 +551,7 @@ void listener(void*) {
         }
         g_conns++;
         say("[debug] connection from %s", inet_ntoa(from.sin_addr));
-        spawn(connection, new ConnStart{fd});
+        spawn(connection, new ConnStart{fd}, true);
     }
 }
 
