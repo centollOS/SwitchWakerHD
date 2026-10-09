@@ -1638,6 +1638,13 @@ the game addresses it uses as values with `GC()` (code) and `GD()` (data) (`runt
 | `gfx/deko/draw.cpp` | The ambient-occlusion programs are found by size and hash only, not at their USA heap address. |
 | `test_coverage.py` | `core.cpp`'s `0x02100000` (the size of the import window) listed as not an address. |
 
+**This fork's recompiler passes moved out of upstream's file** (so later syncs conflict less): CR liveness, registers
+in locals, single-precision tracking, LR elision, static GQRs, jump-site caches and the hot layout now live in
+`tools/recomp/fork_passes.py` (`ForkPasses`, which `Recompiler` inherits); `recomp.py` keeps only marked calls
+(`# (this fork)`, 19 lines against upstream's). The generated code is byte-identical before and after, with the
+default options and with `WWHD_RECOMP_INLINE=1 WWHD_RECOMP_CR_CHECK=1 WWHD_RECOMP_NONLEAF_CHECK=1`. Rule for new
+fork code: in fork-owned files, reached from upstream's files through small marked hook points.
+
 **Kept from this fork over upstream's version:** the register tracking of round 41 (`g_written_blocks`; upstream's
 `RegisterBlocks` is not used), and the scheduler tick's fixed 500 us cadence (upstream's idle wait
 `g_tick.wait_idle` would leave this fork's deferred wakes unflushed; its ready-contender count and
