@@ -37,6 +37,13 @@ Do this once, and then run step 2 below in a normal PowerShell or Command Prompt
 A Cemu `.wua` archive works directly, with no keys: `python tools/switch/make_sd.py --wua "C:\path\game.wua"`.
 The first build takes 10 to 30 minutes.
 
+**HOME-screen icon (optional).** After the game has built, `make_sd.py` also builds the forwarder `.nsp`
+([tools/switch/forwarder/INSTALL.md](tools/switch/forwarder/INSTALL.md)) when it finds your console's own
+`prod.keys`: put the file in `%USERPROFILE%\.switch\` (not in the release folder), or pass `--keys "D:\path\prod.keys"`. Without
+keys that step is skipped and the game builds as usual (`--no-forwarder` skips it always). It needs three more
+things: [Git](https://git-scm.com/download/win), `python -m pip install pillow`, and in the same MSYS2 window
+`pacman -S gcc`. The `.nsp` ends up in `build\forwarder\` and in `build\sd\NSP\`.
+
 ## 2. Build it
 
 Open a terminal in the unzipped release folder.

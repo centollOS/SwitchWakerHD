@@ -111,6 +111,21 @@ def extract_wua(archive):
     return dst
 
 
+def forwarder(args, out):
+    """Native build, last step: the HOME-screen icon (forwarder .nsp, tools/switch/forwarder). It needs the user's
+    own prod.keys, so without them it is skipped; it never fails the build, since the game does not need it."""
+    print("\n[+] HOME-screen forwarder (optional)", flush=True)
+    keys = os.path.abspath(args.keys or os.path.join(os.path.expanduser("~"), ".switch", "prod.keys"))
+    if not os.path.isfile(keys):
+        print("  skipped: no prod.keys at %s. For the .nsp that puts an icon on the HOME screen, put your console's "
+              "prod.keys there (or use --keys PATH, outside this folder), then run: python "
+              "tools/switch/forwarder/build_forwarder_windows.py --sd \"%s\"" % (keys, out))
+    elif subprocess.call([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "forwarder",
+                                                             "build_forwarder_windows.py"),
+                          "--keys", keys, "--sd", out], cwd=ROOT) != 0:
+        print("  WARNING: the forwarder was not built (see above); wwhd.nro and the SD folder are fine.", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group()
@@ -120,6 +135,9 @@ def main():
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "sd"), help="where the SD card folder goes")
     ap.add_argument("--shaders", help="a shadercache_gl.bin from the console, compiled into shadercache_dksh.bin")
     ap.add_argument("--jobs", type=int, help="parallel compiles")
+    ap.add_argument("--keys", help="native build: your console's prod.keys, for the HOME-screen forwarder "
+                    "(default: .switch\\prod.keys in your user folder; without it the forwarder is skipped)")
+    ap.add_argument("--no-forwarder", action="store_true", help="native build: do not build the forwarder (.nsp)")
     args = ap.parse_args()
     if not (args.image or args.wua or args.game_dir):
         ap.error("one of --image, --wua or --game-dir is required")
@@ -184,6 +202,8 @@ def main():
         shutil.rmtree(gdst, ignore_errors=True)
         for part in ("code", "content", "meta"):
             shutil.copytree(os.path.join(game, part), os.path.join(gdst, part))
+    if native and not args.no_forwarder:
+        forwarder(args, out)
     print("""
 Done: %s
 

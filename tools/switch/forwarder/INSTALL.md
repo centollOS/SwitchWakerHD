@@ -8,6 +8,10 @@ need to open hbmenu by holding R over a game. Ported from centollOS's forwarder.
 Built with `tools/switch/forwarder/build_forwarder.sh` (keys from `~/.switch/prod.keys` by default;
 never copied into the repository). Title ID: `01FF575748440000`.
 
+On Windows without Docker, `tools/switch/forwarder/build_forwarder_windows.py` does the same with a native devkitPro
+(keys: `%USERPROFILE%\.switch\prod.keys` by default, or `--keys PATH`; never inside the checkout); `make_sd.py` runs it after a native build.
+See [INSTALL.md](../../../INSTALL.md), "Windows without Docker or WSL".
+
 ## Requirements
 
 - Atmosphère with sigpatches up to date for your firmware (the NSP does not carry an official
