@@ -55,7 +55,8 @@ Independent of the plan (done on main, 43d74c8): `tools/release/guard.py` refuse
 - [x] First-start warning (hardware-tested; its text still names a file players cannot get)
 - [x] 1. Recording: `gfx/deko/shader_manifest.cpp` (`WWHD_SHADER_MANIFEST=1`; builds, not yet run on the console)
 - [~] 2. Harvest on the owner's console: a first one at the title screen (956 variants, 367 programs)
-- [x] 3. Programs found in the dump: **NO for about two thirds** (see "Step 3 result"). Stopped here.
+- [x] 3. Programs found in the dump: **yes, 354 of 367 (96.5%)** once every archive is searched (see "Step 3 result,
+      corrected"); 13 missing.
 - [ ] 4. Tool, byte-identical result
 - [ ] 5. make_sd.py and release
 - [ ] 6. Text and docs
@@ -112,4 +113,19 @@ right after loading, 0 draws skipped in the window, 4 during play), but the owne
 picture stops for seconds during the first fades) and preferred the black textures while the problem is solved
 another way: reverted. Kept for further work: `WWHD_DK_SHADER_CACHE_DIR` (a new player's first start without
 touching the caches) and the shader manifest.
+
+## Step 3 result, corrected (2026-10-10)
+
+The first search only looked at the three standalone `.sharcfb` files. The game's shaders are also inside the AGL
+resource SARCs and many Yaz0-compressed archives (`*.szs`, `*.pack`): about 30,000 distinct shaders, which
+upstream's `tools/shaderprep.py` (`game_shaders`) extracts in 5 seconds. Searched there, **354 of the 367 programs
+are byte-identical to an archive's microcode**; 13 are not found (the `.gsh` primitive renderer's, or made by the
+game). The "only the last 8 bytes differ" and "first bytes differ" groups were matches against the wrong copy. So
+the game does not patch its programs, and the plan (manifest + dump -> `shadercache_dksh.bin`) is viable again.
+
+Upstream already has the same idea for the desktop: the shader **head start** (`tools/shaderprep.py template` /
+`build`, `runtime/src/gfx/shader_headstart.mm`): a *template* of the register states recorded in the player's own
+play, plus the archives' programs, pre-translated at start-up. Upstream considers the template derived from the game
+and does not ship it: each player records their own. Shipping our manifest (program hashes, register states, fetch
+shaders) would go further than upstream; that is a decision to make before step 5.
 
