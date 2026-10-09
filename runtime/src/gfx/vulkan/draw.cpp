@@ -1,3 +1,6 @@
+#include "aspect.h"
+#include "aspect_panes.h"
+#include "../renderer.h"
 // Vulkan draw submission. Guest state conventions follow Cemu (MPL-2.0).
 #include "Cafe/HW/Latte/Core/FetchShader.h"
 #include "Cafe/HW/Latte/Core/LatteCachedFBO.h"
@@ -71,8 +74,6 @@ struct DrawBatchState {
 };
 DrawBatchState drawBatchState;
 uint64_t drawBatchSubmissions = 0;
-constexpr uint32_t kDepthDownsamplePS = 0x3BB9DE00, kOcclusionPS = 0x44BDFD00;
-constexpr uint32_t kOcclusionVS = 0x44BDF900;
 bool aoPrivateReplay = false;
 uint32_t aoPrivateSource = 0;
 uint64_t aoPrivateFrame = ~0ull;
@@ -95,6 +96,7 @@ Surface* private_ao_surface(Surface& dst, const Surface* like) {
     end_encoder();
     destroy_surface_image(&dst);
     dst = *like;
+    dst.mipChain.reset();
     dst.image = VK_NULL_HANDLE; dst.memory = VK_NULL_HANDLE;
     dst.view = VK_NULL_HANDLE;
     dst.layerViews.clear(); dst.sampledViews.clear(); dst.guestLayout.reset();
@@ -971,46 +973,6 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
   R.pipelineCreateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now()-pipelineStarted).count();
   ++R.pipelineCreates;
-  if (result == VK_ERROR_UNKNOWN) {
-    // WORKAROUND (PR #30, see TODO.md): patches the GLSL text after the driver
-    // refused the pipeline. The proper fix is to link the pixel shader's inputs
-    // to the vertex shader's outputs in the shader translation, so inputs
-    // without an output read as zero up front on every driver.
-    // Pixel shader inputs that this vertex shader does not write (the Latte
-    // translation declares every input of the pixel shader): read as zero.
-    std::string glsl = ps->glsl;
-    size_t replaced = 0;
-    for (size_t at = 0; (at = glsl.find("layout(location = ", at)) != std::string::npos;) {
-      size_t end = glsl.find(';', at);
-      size_t name = glsl.find("in vec4 passParameterSem", at);
-      if (end == std::string::npos || name == std::string::npos || name > end) { at++; continue; }
-      std::string var = glsl.substr(name + 8, end - name - 8);
-      if (vs->glsl.find("out vec4 " + var + ";") == std::string::npos) {
-        std::string zero = "const vec4 " + var + " = vec4(0.0)";
-        glsl.replace(at, end - at, zero);
-        at += zero.size();
-        replaced++;
-      } else {
-        at = end;
-      }
-    }
-    std::string error;
-    auto spirv = replaced ? vk::compile_glsl(glsl, false, &error) : std::vector<uint32_t>{};
-    VkShaderModule zeroed = VK_NULL_HANDLE;
-    if (!spirv.empty()) {
-      VkShaderModuleCreateInfo mc{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-      mc.codeSize = spirv.size() * 4;
-      mc.pCode = spirv.data();
-      if (vkCreateShaderModule(R.device, &mc, nullptr, &zeroed) == VK_SUCCESS) {
-        stages[1].module = zeroed;
-        result = vkCreateGraphicsPipelines(R.device, R.pipelineCache, 1, &ci, nullptr, &p.pipeline);
-        vkDestroyShaderModule(R.device, zeroed, nullptr);
-      }
-    }
-    LOG("[vulkan] graphics pipeline vs %016llX ps %016llX: VK_ERROR_UNKNOWN; %zu pixel shader inputs without a vertex output read as zero: %s",
-        (unsigned long long)vs->key, (unsigned long long)ps->key, replaced,
-        result == VK_SUCCESS ? "built" : error.empty() ? "still fails" : error.c_str());
-  }
   for (auto m : modules)
     vkDestroyShaderModule(R.device, m, nullptr);
   if (result != VK_SUCCESS && result != VK_ERROR_OUT_OF_HOST_MEMORY &&
@@ -1695,10 +1657,15 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
   }
   else
     supportUniforms.clear();
+  // Bloom extract cThresholdParam.z: scale once, before blur/downsampling.
+  if (!sh->vertex && (r[mmSQ_PGM_START_PS] << 8) == 0x44F91200 &&
+      sh->uniforms.offset_remapped >= 0 && size_t(sh->uniforms.offset_remapped) < supportUniforms.size())
+    render::scale_bloom_uniforms(supportUniforms.data() + sh->uniforms.offset_remapped,
+                                supportUniforms.size() - sh->uniforms.offset_remapped);
   // Metal AO mode 2 tiles noise per 960x540 output pixel rather than 640x360.
   const int remapped = sh->uniforms.offset_remapped;
   if (sh->vertex && ao_mode() == 2 &&
-      (r[mmSQ_PGM_START_VS] << 8) == kOcclusionVS && remapped >= 0 &&
+      sh->kind == gfx::ProgramKind::OcclusionVertex && remapped >= 0 &&
       size_t(remapped) + 16 <= supportUniforms.size()) {
     float noiseScale;
     memcpy(&noiseScale, supportUniforms.data() + remapped + 12, sizeof noiseScale);
@@ -1732,7 +1699,7 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
       throw std::runtime_error("missing sampled texture");
     if (!sh->vertex && ao_hires_enabled() && aoPrivateSource &&
         s->addr == aoPrivateSource && aoPrivateFrame == R.frame &&
-        (r[mmSQ_PGM_START_PS] << 8) == kOcclusionPS)
+        sh->kind == gfx::ProgramKind::OcclusionPixel)
       s = &aoPrivateColor;
     upload_surface(s);
     int scaleOffset = sh->uniforms.offset_texScale[unit];
@@ -1749,8 +1716,11 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
                 : sampled_texture_view(s, r + texbase + unit * 7);
     if (!aliases)
       transition_image(s, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
-                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                       narrow_barriers()
+                           ? (sh->vertex ? VK_PIPELINE_STAGE_VERTEX_SHADER_BIT
+                                         : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                           : (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT),
                        VK_ACCESS_SHADER_READ_BIT);
     uint32_t samplerId = sh->dec->textureUnitSamplerAssignment[unit];
     if (samplerId >= 18)
@@ -1763,7 +1733,7 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
                                     (samplerBase + samplerId) * 3;
     uint32_t patchedSampler[3];
     if (!sh->vertex && ao_mode() >= 1 && unit == 0 &&
-        (r[mmSQ_PGM_START_PS] << 8) == kOcclusionPS) {
+        sh->kind == gfx::ProgramKind::OcclusionPixel) {
       memcpy(patchedSampler, samplerWords, sizeof patchedSampler);
       patchedSampler[0] = (patchedSampler[0] & ~0x7E00u) | (1u << 9) | (1u << 12);
       samplerWords = patchedSampler;
@@ -1866,7 +1836,8 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   if (!fs)
     throw std::runtime_error("missing Vulkan fetch shader");
   auto *vs = vk::translate(r, true, fs, fsKey, R.frame, g_shader_state_gen);
-  auto *ps = vk::translate(r, false, fs, fsKey, R.frame, g_shader_state_gen);
+  auto *ps = vk::translate(r, false, fs, fsKey, R.frame, g_shader_state_gen,
+                           vs && vs->ready() ? vs : nullptr);
   rprof::mark(rprof::kShader);
   if (!vs || !vs->ready() || !ps || !ps->ready())
     throw std::runtime_error("Vulkan shader translation failed: " +
@@ -2044,6 +2015,7 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   Surface *depth = LatteMRT::GetActiveDepthBufferMask(lcr)
                        ? depth_target(r, &depthSlice)
                        : nullptr;
+  if (depth && depth->width == 1280 && depth->height == 720) R.mainDepthAddr = depth->addr;
   const uint32_t guestWidth = colors[0] ? colors[0]->width : 0;
   const uint32_t guestHeight = colors[0] ? colors[0]->height : 0;
   if (aoPrivateReplay && colors[0]) {
@@ -2244,6 +2216,9 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
            y = clamp((tl >> 16) & 0x7fff, sy, height),
            ex = clamp(br & 0x7fff, sx, width),
            ey = clamp((br >> 16) & 0x7fff, sy, height);
+  float ax, ay;
+  if (aspect::content_clip() && target_aspect_factors(r[mmCB_COLOR0_TILE] & 0xFFFF, r[mmCB_COLOR0_FRAG], ax, ay))
+    aspect::panes::clip(width, height, ax, ay, x, y, ex, ey);
   if (ex <= x || ey <= y) {
     end_encoder();
     return;
@@ -2431,7 +2406,7 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     return;
   }
   if (ao_hires_enabled() && colors[0] &&
-      (r[mmSQ_PGM_START_PS] << 8) == kDepthDownsamplePS) {
+      ps->kind == gfx::ProgramKind::DepthDownsample) {
     struct ReplayGuard {
       ReplayGuard() { aoPrivateReplay = true; aoPrivateFrame = ~0ull; }
       ~ReplayGuard() { aoPrivateReplay = false; }

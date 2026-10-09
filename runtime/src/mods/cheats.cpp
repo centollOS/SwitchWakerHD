@@ -4,8 +4,8 @@
 //
 // The save data is dSv_info_c of the GameCube decompilation (zeldaret/tww include/d/d_save.h),
 // unchanged in WWHD as far as used here. Each cheat does what the game's own item_func_*
-// (d_item.cpp) does for that item. It lives on the heap at the same address in every session; the
-// copy the file select reads/writes is elsewhere (0x144FDA00), so cheats last once the game is saved.
+// (d_item.cpp) does for that item. Resolve the live area through the mapped save global;
+// heap allocation addresses are not part of the executable address map.
 //
 // Note: the game itself takes the sword away in Forsaken Fortress (first visit) and the bow in the
 // Tower of the Gods when those stages load (d_s_play.cpp), cheat or not.
@@ -29,9 +29,11 @@
 #include <string>
 #include <vector>
 
+#include "guest_addr.h"
 #include "mods.h"
 #include "runtime.h"
 #include "warps.h"
+#include "savestate.h"
 
 namespace mods {
 namespace {
@@ -49,11 +51,11 @@ constexpr uint32_t kTact = 0xBD, kTriforce = 0xBE;  // song bits (6), Triforce s
 constexpr uint32_t kStageKeys = 0x778 + 0x20, kStageDungeonItems = 0x778 + 0x21;  // bits: map, compass, boss key
 
 uint32_t save_addr() {
-    static const uint32_t a = getenv("WWHD_CHEAT_SAVE_ADDR") ? (uint32_t)strtoul(getenv("WWHD_CHEAT_SAVE_ADDR"), nullptr, 16) : 0x145AC92C;
-    return a;
+    const char* override_addr = getenv("WWHD_CHEAT_SAVE_ADDR");
+    return override_addr ? (uint32_t)strtoul(override_addr, nullptr, 16) : ld32(GD(0x101F84DC)) + 0x20;
 }
 
-constexpr uint32_t kStageName = 0x1046F0B0 + 0x5134;  // current stage, as in savestate.cpp
+const uint32_t kStageName = GD(0x1046F0B0) + 0x5134;  // current stage, as in savestate.cpp
 
 std::string stage() { return std::string((const char*)mem::ptr(kStageName), strnlen((const char*)mem::ptr(kStageName), 8)); }
 
@@ -109,10 +111,13 @@ void all_items(uint32_t s) {
 }
 
 void best_sword(uint32_t s) {
-    st8(s + kCollect + 0, 0x0F);  // hero's sword .. full-power Master Sword
+    // Sword ownership is story progress: bit 2 removes Medli from Dragon Roost and the
+    // Earth Temple; bit 3 removes Makar from his earlier locations. Equip the upgrades
+    // without claiming those story milestones. The game's equipment refresh restores
+    // the earned equipment on reload, including a portable-state load.
     st8(s + kSelectEquip + 0, 0x3E);
-    st8(s + kCollect + 1, 0x03);  // hero's + mirror shield
     st8(s + kSelectEquip + 1, 0x3C);
+    ss::notice("Master Sword and Mirror Shield equipped until reload");
 }
 
 void max_stats(uint32_t s) {
@@ -141,7 +146,7 @@ std::atomic<int> g_infinite{parse_env("WWHD_CHEAT_INFINITE", {{"health", kInfHea
 namespace {
 // the next stage request in the play state (dStage_nextStage_c: name[8], s16 point, s8 room, s8 layer,
 // s8 enabled, u8 wipe), the same fields WWHD_TEST_SCENECHANGE writes (true60_test.cpp)
-constexpr uint32_t kNextStage = 0x1046F0B0 + 0x5140;
+const uint32_t kNextStage = GD(0x1046F0B0) + 0x5140;
 std::mutex g_warpMu;
 char g_warpStage[8] = {};
 int g_warpRoom = 0, g_warpPoint = 0;
@@ -201,7 +206,7 @@ Tour* tour() {
     }();
     return t;
 }
-constexpr uint32_t kOverlapRequest = 0x101F36CC;  // as turbo.cpp's kOverlap: a scene change's fade is running
+const uint32_t kOverlapRequest = GD(0x101F36CC);  // as turbo.cpp's kOverlap: a scene change's fade is running
 
 void tour_service() {
     Tour* t = tour();

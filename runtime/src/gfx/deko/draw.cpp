@@ -325,31 +325,33 @@ StreamSlice zero_block() {
 //   1 = that one fetch is bilinear, like the pass's neighbour fetches: the lines go
 //   2 = (default) 1, and the 4x4 noise texture is tiled per 960x540 pixel instead of per 640x360 pixel, so the
 //       game's blur averages it out (pack_uniforms aoNoise)
-constexpr uint32_t kOcclusionVS = 0x44BDF900, kOcclusionPS = 0x44BDFD00;
 const int g_aoMode = [] {
     if (const char* e = getenv("WWHD_AO_MODE")) return ((atoi(e) % 3) + 3) % 3;
     return 2;
 }();
-// The occlusion pass's program in this stage: at its address and with its contents (size and hash of the guest
-// program; gfx/gl's values). Another area could load another program at that address; it is left as it is.
+// The occlusion pass's program in this stage: by its contents (size and hash of the guest program; gfx/gl's
+// values), wherever the game loaded it (its heap address differs between the USA and European builds).
 constexpr uint32_t kOcclusionSize[2] = {1584, 384};  // pixel, vertex (Outset, US v0)
 constexpr uint64_t kOcclusionHash[2] = {0x26870ca3f2e34dfaull, 0x36e37317f62658e9ull};
 bool is_occlusion(const uint32_t* r, bool vertex) {
     const uint32_t reg = vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS;
     const uint32_t addr = r[reg] << 8, size = r[reg + 1] << 3;
-    if (addr != (vertex ? kOcclusionVS : kOcclusionPS)) return false;
+    if (size != kOcclusionSize[vertex]) return false;
     const uint64_t frame = R.frame + 1;  // the frame being recorded
     static uint64_t checked[2] = {~0ull, ~0ull};
-    static uint32_t sizeSeen[2] = {};
+    static uint32_t addrSeen[2] = {};
     static bool result[2] = {};
-    if (checked[vertex] == frame && sizeSeen[vertex] == size) return result[vertex];
+    if (checked[vertex] == frame && addrSeen[vertex] == addr) return result[vertex];
     const uint64_t h = program_hash_of(program_hash_ref(addr, size), addr, size, frame);
     const bool match = size == kOcclusionSize[vertex] && h == kOcclusionHash[vertex];
-    if (match != result[vertex] || checked[vertex] == ~0ull)
-        LOG("[dk] %s program at %08X (size %u, hash %016llx): %s", vertex ? "vertex" : "pixel", addr, size,
-            (unsigned long long)h, match ? "the occlusion pass, AO fix applied" : "not the occlusion pass, AO fix not applied");
+    static uint32_t logged[2] = {};  // (other programs of that size come and go every frame: only new matches)
+    if (match && logged[vertex] != addr) {
+        LOG("[dk] %s program at %08X (size %u, hash %016llx): the occlusion pass, AO fix applied",
+            vertex ? "vertex" : "pixel", addr, size, (unsigned long long)h);
+        logged[vertex] = addr;
+    }
     checked[vertex] = frame;
-    sizeSeen[vertex] = size;
+    addrSeen[vertex] = addr;
     result[vertex] = match;
     return match;
 }

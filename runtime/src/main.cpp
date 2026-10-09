@@ -12,6 +12,9 @@
 #endif
 #include <ctime>
 #include <filesystem>
+#include "guest_addr.h"
+#include "mods/guest_mods.h"
+#include "mods/code_mods.h"
 #include "platform/host.h"
 #ifdef _WIN32
 #include <timeapi.h>
@@ -45,6 +48,7 @@
 #include "crash_addr.h"
 #include "build_info.h"
 #include "crashrec.h"
+#include "crash_context.h"
 #include "input.h"
 #include "mods/manager.h"
 #include "mods/packages.h"
@@ -325,13 +329,15 @@ void apply_migrated_mods() {
 // captures/crash-<time>.log (registers, guest return chain, host backtrace, crash recovery's
 // automatic state, the last log lines). Only write() and preformatted text after the crash.
 static int g_crash_fd = -1;
-static void crash_out(int fd, const char* s, size_t n) {
+static void crash_raw(int fd, const char* s, size_t n) {
     if (write(2, s, n) < 0) {}
     if (fd >= 0 && write(fd, s, n) < 0) {}
 }
-static void crash_log_only(int fd, const char* s, size_t n) {
+static void crash_log_raw(int fd, const char* s, size_t n) {
     if (fd >= 0 && write(fd, s, n) < 0) {}
 }
+static void crash_out(int fd, const char* s, size_t n) { crash_context::redact(fd, {s,n}, crash_raw); }
+static void crash_log_only(int fd, const char* s, size_t n) { crash_context::redact(fd, {s,n}, crash_log_raw); }
 static void crash_handler(int sig, siginfo_t* si, void* uctx) {
     uintptr_t a = (uintptr_t)si->si_addr;
     uintptr_t base = (uintptr_t)PPC_MEM_BASE;
@@ -390,6 +396,7 @@ static void crash_handler(int sig, siginfo_t* si, void* uctx) {
         crash_out(fd, "\n", 1);
     }
     crash_addr::host_backtrace(fd, crash_out, uctx);
+    crash_context::note(fd, crash_out);
     crashrec::crash_note(fd, crash_out);
     if (fd >= 0) {
         crash_log_only(fd, "\n--- last log lines ---\n", 24);
@@ -423,11 +430,13 @@ static void install_crash_handler() {
 }
 
 #else
-static void win_crash_out(int fd, const char* s, size_t n) {
+static void win_crash_raw(int fd, const char* s, size_t n) {
     fwrite(s, 1, n, stderr);
     if (fd >= 0) _write(fd, s, (unsigned)n);
 }
-static void win_crash_log_only(int fd, const char* s, size_t n) { if (fd >= 0) _write(fd, s, (unsigned)n); }
+static void win_crash_log_raw(int fd, const char* s, size_t n) { if (fd >= 0) _write(fd, s, (unsigned)n); }
+static void win_crash_out(int fd, const char* s, size_t n) { crash_context::redact(fd, {s,n}, win_crash_raw); }
+static void win_crash_log_only(int fd, const char* s, size_t n) { crash_context::redact(fd, {s,n}, win_crash_log_raw); }
 static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ex) {
     auto code=ex->ExceptionRecord->ExceptionCode;
     std::error_code ec; std::filesystem::create_directories("captures",ec);
@@ -456,6 +465,7 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ex) {
     }
     if(Cpu* c=threads::current()){n=snprintf(buf,sizeof buf,"guest lr=%08X ctr=%08X\n",c->lr,c->ctr); win_crash_out(fd,buf,n);}
     crash_addr::host_backtrace(fd,win_crash_out,ex->ContextRecord);
+    crash_context::note(fd,win_crash_out);
     crashrec::crash_note(fd,win_crash_out);
     if(fd>=0){win_crash_log_only(fd,"\n--- last log lines ---\n",24); log_ring_write(fd,win_crash_log_only); _close(fd); fprintf(stderr,"[crash] wrote %s\n",path);}
     if(g_ppc_trace) { FILE* f=fopen("trace_dump.txt","w"); if(f){trace_dump(f,3000);fclose(f);} }
@@ -518,6 +528,61 @@ static void default_vulkan_cpu_paths() {
 #endif
 }
 
+// captures/wwhd.log: the whole log of this run (the previous run's is kept as wwhd-previous.log), so
+// players can attach it to an issue; on Windows the console output of the game is otherwise lost.
+// User paths are redacted as in crash logs. WWHD_LOG_FILE=<path> writes elsewhere, =0 turns it off
+// (Android: off unless set; logcat has it). The file stops at 64 MiB.
+static int g_log_fd = -1;
+static size_t g_log_bytes = 0;
+static constexpr size_t kLogFileMax = 64u << 20;
+static void log_file_raw(int fd, const char* s, size_t n) {
+#ifdef _WIN32
+    if (fd >= 0) _write(fd, s, (unsigned)n);
+#else
+    if (fd >= 0 && write(fd, s, n) < 0) {}
+#endif
+}
+static void log_file_line(int fd, const char* s, size_t n) {
+    crash_context::redact(fd, {s, n}, log_file_raw);
+    if (n == 0 || s[n - 1] != '\n') log_file_raw(fd, "\n", 1);
+}
+static void log_file_sink(const char* s, size_t n) {
+    if (g_log_fd < 0 || g_log_bytes > kLogFileMax) return;
+    log_file_line(g_log_fd, s, n);
+    g_log_bytes += n + 1;
+    if (g_log_bytes > kLogFileMax) {
+        static const char note[] = "[log] the log file reached 64 MiB; later lines go to the console only\n";
+        log_file_raw(g_log_fd, note, sizeof note - 1);
+    }
+}
+static void start_log_file() {
+#ifdef __SWITCH__
+    // (the session log in sdmc:/switch/wwhd/logs/ already has every line: no second copy on the SD card)
+#else
+    const char* e = getenv("WWHD_LOG_FILE");
+    if (e && !strcmp(e, "0")) return;
+#ifdef __ANDROID__
+    if (!e || !*e) return;
+#endif
+    std::string path = e && *e ? e : "captures/wwhd.log";
+    std::error_code ec;
+    if (!(e && *e)) {
+        std::filesystem::create_directories("captures", ec);
+        std::filesystem::remove("captures/wwhd-previous.log", ec);
+        std::filesystem::rename(path, "captures/wwhd-previous.log", ec);
+    }
+#ifdef _WIN32
+    g_log_fd = _open(path.c_str(), _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
+    g_log_fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+#endif
+    if (g_log_fd < 0) { LOG("[log] cannot write %s", path.c_str()); return; }
+    log_ring_write(g_log_fd, log_file_line);  // the lines logged before (only the boot so far)
+    log_set_sink(log_file_sink);
+    LOG("[log] writing %s", path.c_str());
+#endif
+}
+
 int main(int argc, char** argv) {
 #ifdef __SWITCH__
     // everything lives in sdmc:/switch/wwhd: game/ (extracted dump), save/, shader cache, logs/
@@ -535,12 +600,15 @@ int main(int argc, char** argv) {
     LOG("[session] %04d-%02d-%02d %02d:%02d:%02d (build %s %s); log %s (the newest 10 sessions are kept in logs/)",
         t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, __DATE__, __TIME__, logName);
     // which round of docs/switch-port.md this runtime is (to tell builds apart in the logs)
-    LOG("[boot] recompiled code: %s; runtime: round 47 (vertex shaders with an input no fetch attribute fills translated with the GPU's multiplication: the post office letters; round 46 = upstream v0.2.8 sync, portable save states, rumble; round 45 = fast detiling, translation records, register writes merged in display lists, 2-way shader combinations; round 44 = round 43's helper-thread copies and render priority removed; register writes dispatched directly; round 42 = shader hot data packed and prefetched, one register-class pass; round 41 = context loads copy only written registers, targets/fixed state/viewport skipped by register generations, submit every 1024 draws, per-core load line; round 40 = deko3d: depth-only draws without their pixel shader, shared-surface texture lookups cached, vertex layouts kept, profiler off; round 39 = session log only in logs/, the newest 10 kept; round 38 = deko3d only: the OpenGL renderer removed; round 37 = CPU clock in the system table's steps, default 1224 MHz; settings menu on a Minus press; round 36 = shader budget: new shaders over frames, their draws skipped; round 35 = texture uploads from client memory again; round 34 = no framebuffer status query; round 33 = Warp tab; round 32 = queued texture uploads, texture error check after the GL thread finish; round 31 = CPU 1785 / GPU 614 options; round 30 = settings overlay on Minus; round 29 = official GPU profile 460.8 MHz handheld; round 28 = round 27 with the near-plane clip distance off, searchlight probe frames after a capture, per-draw trace in captures)",
+    LOG("[boot] recompiled code: %s; runtime: round 48 (upstream v0.2.11 sync: European game support; round 47 = vertex shaders with an input no fetch attribute fills translated with the GPU's multiplication: the post office letters; round 46 = upstream v0.2.8 sync, portable save states, rumble; round 45 = fast detiling, translation records, register writes merged in display lists, 2-way shader combinations; round 44 = round 43's helper-thread copies and render priority removed; register writes dispatched directly; round 42 = shader hot data packed and prefetched, one register-class pass; round 41 = context loads copy only written registers, targets/fixed state/viewport skipped by register generations, submit every 1024 draws, per-core load line; round 40 = deko3d: depth-only draws without their pixel shader, shared-surface texture lookups cached, vertex layouts kept, profiler off; round 39 = session log only in logs/, the newest 10 kept; round 38 = deko3d only: the OpenGL renderer removed; round 37 = CPU clock in the system table's steps, default 1224 MHz; settings menu on a Minus press; round 36 = shader budget: new shaders over frames, their draws skipped; round 35 = texture uploads from client memory again; round 34 = no framebuffer status query; round 33 = Warp tab; round 32 = queued texture uploads, texture error check after the GL thread finish; round 31 = CPU 1785 / GPU 614 options; round 30 = settings overlay on Minus; round 29 = official GPU profile 460.8 MHz handheld; round 28 = round 27 with the near-plane clip distance off, searchlight probe frames after a capture, per-draw trace in captures)",
         g_recomp_variant);
     early_settings::log_messages();  // settings.ini's [dev] section, env.txt converted
     host::place_thread(0);
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
+#endif
+#ifndef __SWITCH__
+    mods::code::startup(argc, argv);  // (code mods rebuild and replace the executable: desktop only)
 #endif
     apply_portable_mode();
     default_vulkan_cpu_paths();
@@ -591,7 +659,9 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--renderer-smoke")) renderer_smoke = true;
 #endif
     }
+    crash_context::initialize();
     install_crash_handler();
+    start_log_file();
     // which build on which system: also in crash logs (their last log lines)
     LOG("[boot] Wind Waker HD %s (%s), %s", build::version(), build::commit(), reporthdr::os_description().c_str());
     mods::log_startup();
@@ -628,6 +698,7 @@ int main(int argc, char** argv) {
     mods::manager::load_saved();  // player choices, before the game starts
     mods::cemu::set_vulkan(render::requested()==render::Api::Vulkan);
     mods::content::set_game_root(config::game_dir);  // loose imports (fan translations) find their game path
+    mods::packages::set_code_mod_support(guestmods::hooks_built() && mods::code::enabled());
     mods::packages::initialize();
 #ifdef __SWITCH__
     early_settings::apply_migrated_mods();
@@ -656,10 +727,11 @@ int main(int argc, char** argv) {
     std::string rpx = config::game_dir + "/code/cking.rpx";
     if (!load_rpx(rpx, m)) fatal("cannot load %s", rpx.c_str());
     if (m.entry != g_recomp_entry_point) fatal("%s does not match the recompiled code", rpx.c_str());
-    LOG("[boot] loaded %s: entry %08X sda %08X sda2 %08X data end %08X", rpx.c_str(), m.entry, m.sda_base, m.sda2_base,
-        m.data_end);
+    LOG("[boot] loaded %s (%s build, title %s): entry %08X sda %08X sda2 %08X data end %08X", rpx.c_str(),
+        g_guest_build_name, g_guest_build_title_id, m.entry, m.sda_base, m.sda2_base, m.data_end);
 
     dispatch::init();
+    guestmods::init();  // trusted manager packages, before guest threads start
     init_data_imports();
     mem_setup_heaps(m.data_end);
     threads::init(m);

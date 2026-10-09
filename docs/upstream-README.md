@@ -1,6 +1,6 @@
 # The Legend of Zelda: The Wind Waker HD — native port (macOS, Linux, Windows, Android)
 
-A static recompilation of the Wii U version (USA) that runs natively on **macOS** (Apple Silicon),
+A static recompilation of the Wii U version (USA or European) that runs natively on **macOS** (Apple Silicon),
 **Linux**, **Windows** and **Android** (arm64; [build it yourself](#android-build-it-yourself)). The
 game's PowerPC code is translated to C ahead of time, the Cafe OS libraries the game uses are
 reimplemented natively, and GX2 graphics are implemented directly on Metal (macOS) or Vulkan (all
@@ -9,6 +9,139 @@ platforms), with no Cemu runtime and no GPU command emulation.
 How it works and how it differs from running the game in Cemu: [docs/how-it-works.md](docs/how-it-works.md).
 
 ## What's new in this update
+
+### Next update
+
+### v0.2.11
+
+- **Linux: one-file AppImage** (issue #55, PR #101, thanks @mhbxyz), next to the zip. Download it,
+  make it executable, run it. It keeps the game, its compiled code, saves and settings in your user
+  folders (`$XDG_DATA_HOME/wwhd`, usually `~/.local/share/wwhd`); `--data-dir` picks another folder.
+  On distributions without libfuse2 (e.g. Ubuntu 24.04+) start it with `--appimage-extract-and-run`.
+  The zip stays as it is.
+
+- **Face buttons by label (Xbox layout)** (issue #78, PR #97, thanks @mhbxyz): settings overlay →
+  Controls → *Face buttons* (also the macOS Controls window and Input menu). *By position
+  (Nintendo)* stays the default; *by label (Xbox)* makes the button named A act as A, so on an Xbox pad
+  A accepts and B goes back.
+
+- **Ultrawide and tall screens: menus fixed** (issue #76, building on PR #16 by @arcadematicas): at
+  21:9, 32:9, 16:10 and 4:3 the pause menu, inventory grid, cursor, map and the tabs stay centred at 16:9
+  and line up again; backgrounds and the sepia filter still fill the picture.
+
+- **Fixed: black letter card in the Rito mail-sorting game** (issues #28, #69, PR #39, thanks
+  @Sean13128): the GPU's "0 × anything = 0" multiply is emulated now (as in Cemu). The shader caches
+  rebuild once after updating, so expect a brief stutter on the first start.
+
+- **Fixed: Cemu graphics packs**
+  - packs that replace pixel shaders (e.g. Contrasty, NoSSAO, RemoveHUD) partly didn't apply on Vulkan
+    since v0.2.10 (PR #87, thanks @rhemfur);
+  - packs for the **European** version were refused with "Cemu pack does not target WWHD USA"
+    (issue #103). A pack is now accepted when its `titleIds` name the version you installed;
+    SDCafiine-style folders named after the title ID follow the same rule.
+
+- **Smoother in busy views on Windows and Android:** the Vulkan buffer cache is now on by default
+  everywhere. It keeps unchanged vertex, index and uniform data on the GPU instead of copying them
+  every frame: on an RX 6700 XT 13–19% less render-thread time and half the uploads (issue #91, thanks
+  @darklinkpower), on a Galaxy S25 Ultra about 34 → 47 fps in heavy Outset views (issue #56, thanks
+  @rhemfur). If you see broken or flickering geometry, start with `WWHD_VK_BUFFER_CACHE=0` and please
+  report it.
+
+- **Less CPU work:**
+  - native versions of the game's two hottest audio loops (PR #81, thanks @depende3000): the audio
+    thread uses about two thirds less CPU, with bit-identical sound (also on the European version);
+  - the scheduler sleeps while nothing is waiting, and GPU context switches copy only the registers
+    that changed;
+  - the recompiler no longer emits signed overflow for `mulli`/`mullw`/`neg` (PR #82, thanks
+    @depende3000), a latent bug a newer compiler could have turned into wrong behaviour.
+
+- **Android:**
+  - when the system driver is too old for the renderer, Adreno phones offer **Install GPU driver…**
+    right in the error message (PR #92, thanks @rhemfur);
+  - on one-screen views the **GamePad screen appears automatically while the game is paused** (map,
+    menus, save prompt) and the TV picture comes back when you resume (PR #59, thanks @rhemfur);
+  - precise Vulkan synchronization (barriers) is on by default, where tile-based GPUs are expected to
+    gain the most (issue #104). On desktop it's opt-in for testing: `WWHD_VK_NARROW_BARRIERS=1`.
+
+- **Save states remember the controller mode** (Pro Controller or GamePad) and restore it on load.
+
+- **"Keep game speed" explained:** with it off, the whole game runs in slow motion whenever the frame
+  target isn't reached (e.g. 120/240 fps at 2x). The setting says so now, is marked as recommended, and
+  the performance overlay warns when it happens (issue #91).
+
+- **A log file for every run:** `captures/wwhd.log` in the game's data folder (the previous run's is
+  kept as `wwhd-previous.log`), with your user paths removed as in crash logs. Please attach it to bug
+  reports. `WWHD_LOG_FILE=<path>` writes it elsewhere, `WWHD_LOG_FILE=0` turns it off.
+
+- **Code mods (Mod SDK v2, off by default):** mods written in C for the console's CPU, translated and
+  built on your machine when you install them, for the USA and the European game. Turn them on in
+  Settings → Mods → *Enable code mods* (this rebuilds the game code once; with it off nothing changes).
+  For modders: [docs/mod-sdk-v2.md](docs/mod-sdk-v2.md).
+
+- **Smaller fixes:** `WWHD_SHADOW_FIX` is gone, use `WWHD_SHADOW_SCALE=1` for console-sized shadow maps
+  (issue #67: since v0.2.9 both sizes look practically the same); the buffer cache's verify mode no
+  longer reads GPU memory (it ran at ~1 fps on some Windows drivers); a crash at exit with SDL 3.4 on
+  Linux is fixed.
+
+### v0.2.10
+
+- **Fixed: the cheats in v0.2.9 wrote to the wrong place in the save data** (Give all items, Master
+  Sword + Mirror Shield, 20 hearts / double magic / 5000 rupees) and could damage the save. They write
+  to the right place again.
+- **Fixed: Medli missing on Dragon Roost after using the Master Sword cheat** (issue #85). The cheat
+  gave the full-power Master Sword as *owned*, which the game treats as story progress, so Medli (and
+  later Makar) stayed away and the story couldn't continue. The cheat now only **equips** the Master
+  Sword and Mirror Shield until the next reload. Saves already affected can be repaired with
+  `tools/savegame/wwsave.py repair-medli` (it keeps a backup; see the save tools README).
+- **Vulkan:** pixel shaders are now linked to their vertex shader when they are translated, so
+  drivers that refused some pipelines get correct shaders from the start (PR #54 by @rhemfur, the
+  proper fix for #30).
+
+### v0.2.9
+
+- **Play the European version directly** (title 00050000-10143600): setup now also accepts the
+  European game on its own, without the USA version, and builds the port from it through an address
+  map derived from the two executables (every function and call matched; contributed by **@ElFDA**,
+  PR #77, with ideas from GreenNaugahyde's Android fork). German, Italian, British English, French and
+  Spanish are its own languages then. Hooks, mods and save states work as on the USA version.
+- **Bloom, distance haze and the sun's glare are back:** the game builds its glow from smaller
+  copies of the picture, which the port never made; now it does, on Metal and Vulkan, so the picture
+  looks like on the Wii U again. The sun's corona and lens flare react to whether the sun is hidden
+  (adapted from GreenNaugahyde's Android fork). New **Settings → Graphics → Effects → Bloom
+  strength** (0–200%, default 100%). On Macs, colours now go through the display's colour profile, as
+  with Vulkan.
+- **Android:** phones whose GPU can't read the game's compressed textures (many Mali and PowerVR
+  GPUs) now decode them on the GPU instead of showing black or broken textures; on Snapdragon phones
+  you can install and select custom Vulkan drivers such as Turnip (**Settings → Graphics**; a driver
+  that crashes or hangs in its first seconds falls back to the system driver on the next start). Both
+  follow the approach of [GreenNaugahyde's Android fork](https://github.com/GreenNaugahyde/ZeldaWWHDRecompAndroid),
+  rebuilt on our renderer. Not yet tested on real Mali/PowerVR/Snapdragon devices: reports welcome.
+- **Run and swim faster** (optional, Mods tab, off by default): hold L3 (or toggle) to boost Link's
+  running and swimming speed, 1.25x to 4x; works with true 60. The idea comes from GreenNaugahyde's
+  Android fork.
+- **Average frame rate** in the performance overlay (and GPU load and temperatures on Android where
+  readable); **crash logs** now include the settings in use, with your user paths removed, and Android
+  offers to share the log after a crash.
+- **Vulkan:** the compressed-texture feature is now enabled as the Vulkan specification requires.
+- **Screenshot key:** **F10** saves the TV picture as a PNG in a `screenshots` folder next to the save
+  states (`~/Library/Application Support/wwhd/screenshots`, `%APPDATA%\WWHD\screenshots`,
+  `~/.config/wwhd/screenshots`; `data/user/screenshots` in a release folder), named
+  `WindWakerHD_YYYY-MM-DD_HH-MM-SS.png`. It is the frame shown when you press the key (also at 60/120/240
+  fps), at the internal resolution and aspect ratio (2x at 21:9: 3414x1440), with the game's own effects
+  and FXAA when on, but without the settings overlay or notices; "Screenshot saved" shows briefly. The
+  key can be changed (or a controller button added) in Controls ("Photo"); the Saves tab has **Open
+  screenshots folder** and an option to also save the GamePad screen (`..._GamePad.png`) while it is
+  shown. Saving happens in the background: the game does not stutter. Both renderers, all platforms.
+
+- **Frame interpolation fixes (60/120/240 fps and true 60):** the waving flags on Dragon Roost no
+  longer turn into huge stretched polygons on the in-between frames (issues #36, #70); the boat's sail
+  and yard and items Link carries (a bomb) no longer jump for single frames (issue #68); the stars in
+  the night sky no longer wobble when the camera turns (issue #68). 30 fps is unchanged.
+- **Fixed: the pause menu would not close at 120/240 fps** (issues #64, #74; probably also #73, no
+  control after an item-get message). The HD screens (the TV pause screen and others) advanced on every
+  drawn frame instead of once per game step, so the TV pause screen reopened itself right after
+  closing. They now update once per step, which also gives their fades their 30 fps speed back at
+  60/120/240 fps.
 
 ### v0.2.8
 
@@ -360,7 +493,10 @@ computer (about two minutes); every later start launches the game directly.
      on Apple Silicon, other ARM boards and laptops), glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+,
      Fedora 36+, Arch, SteamOS 3, Raspberry Pi OS 12), a GPU with Vulkan 1.3 drivers (or 1.1 / 1.2 with
      `VK_KHR_dynamic_rendering`). Take the zip
-     that matches `uname -m` (`x86_64` or `aarch64`); setup says so if it doesn't.
+     that matches `uname -m` (`x86_64` or `aarch64`); setup says so if it doesn't. Or take the
+     single-file **AppImage** (same two architectures) instead of the zip (issue #55): `chmod +x` it
+     and start it from anywhere, Steam Deck included. Nothing is unzipped and the file itself is never
+     written to.
 2. Start **Wind Waker HD** (`Wind Waker HD.app`, `Wind Waker HD.exe`, or `wind-waker-hd` /
    `Wind Waker HD.desktop` on Linux). The first start asks for:
    - your **disc image** (`.wux` or `.wud`), a **Cemu archive** (`.wua`), or an already **extracted
@@ -373,7 +509,8 @@ computer (about two minutes); every later start launches the game directly.
      release folder is used automatically). Keys are checked before anything is extracted, never
      stored, and not part of any log. A Cemu archive or an extracted folder needs no keys.
    - A Cemu archive (Cemu's "Convert to compressed Wii U archive (.wua)") often holds the game, its
-     update and DLC together. Setup uses the game itself, title 00050000-10143500 version 0, and says
+     update and DLC together. Setup uses the game itself, title 00050000-10143500 (USA) or
+     00050000-10143600 (Europe), version 0, and says
      so in its log; an update in the archive is not used: the port is built for the code of version 0,
      and the update's files belong to its newer code. The archive's checksum is verified before
      anything is extracted.
@@ -381,10 +518,13 @@ computer (about two minutes); every later start launches the game directly.
    Then it prepares the game (extract, translate the code to C, compile with a pinned compiler) and
    offers to bring in a save: a Wind Waker HD `cking.sav` folder (Cemu, Wii U), a GameCube `.gci`
    (converted to HD), or the saves and settings of an earlier installation or another Wind Waker HD
-   folder (copied, never moved). Only the USA version (title 00050000-10143500), version 0 (the disc
-   or eShop release, without the update) is supported: before translating, setup checks the game's
-   code (`code/cking.rpx`) against the SHA-256 of that version and explains what to use instead when
-   it differs (e.g. a game folder with an update copied over it).
+   folder (copied, never moved). The USA version (title 00050000-10143500) and the European one
+   (00050000-10143600) are supported, version 0 of either (the disc or eShop release, without the
+   update): before translating, setup checks the game's code (`code/cking.rpx`) against the SHA-256
+   of each and explains what to use instead when it matches neither (e.g. a game folder with an
+   update copied over it). The European game plays in English, French, German, Italian or Spanish —
+   its own text, chosen in the settings' Language tab. How one port serves both:
+   [docs/builds.md](docs/builds.md).
 3. That's it: start Wind Waker HD to play. To repair, update or change the game, hold **Shift** while
    starting it (macOS, Windows) or start it with `--setup` (Linux; also the "Setup" action of its
    menu entry).
@@ -412,6 +552,11 @@ First start, per system:
   it first). It uses your Python 3 and downloads the compiler (zig, 55 MB; the x86-64 or arm64 build
   matching your system) into the release folder;
   you can remove it at the end.
+- **Linux (AppImage)**: `chmod +x WindWakerHD-*-linux-*.AppImage`, then start that file (from a file
+  manager, a terminal or Steam as a non-Steam game). It needs no unzipping and no writable folder of
+  its own. Ubuntu 24.04 and newer have no FUSE by default: install `libfuse2t64` (`libfuse2` on older
+  releases), or start it with `--appimage-extract-and-run`. Repair or change the game with `--setup`.
+  Everything it creates is listed under "Everything stays in the release folder" below.
 
 **Everything stays in the release folder** (in `data/`): the built game, the extracted game files,
 saves (`data/save`), settings, controls, save states and shader caches (`data/user`), crash logs
@@ -421,13 +566,21 @@ the end. To remove everything, delete the folder. Starting a newer release: unzi
 one, start it, choose your game (the old folder's `data/game` can be used in place) and copy your saves
 and settings from the old folder.
 
+The **Linux AppImage is not a portable folder** (issue #55): its file is read-only, so the game, its
+code and saves go to `~/.local/share/wwhd` and the settings, controls, save states and caches to
+`~/.config/wwhd` (or `$XDG_DATA_HOME` / `$XDG_CONFIG_HOME`; `--data-dir FOLDER` chooses another place
+for the first, for example an SD card on a Steam Deck). Nothing is written beside the `.AppImage`; the
+menu entry the setup adds starts the same game. To remove everything, delete the file and those two
+folders.
+
 The setup also runs in a terminal (the fallback): `tools/Setup in Terminal.command` (macOS),
 `tools/Setup in a console window.bat` (Windows), `tools/setup-in-terminal.sh` (Linux). How it works
 and the interface between the window and `tools/installer/setup.py`:
 [tools/installer/README.md](tools/installer/README.md). Scripted use: `tools/installer/setup.py --help`.
 
-Source builds (below) are not portable: they keep using `~/Library/Application Support/wwhd`,
-`%APPDATA%\WWHD` or `~/.config/wwhd`, as before.
+Source builds (below) and the Linux AppImage are not portable: they keep using the per-user folders
+(`~/Library/Application Support/wwhd`, `%LOCALAPPDATA%\WWHD` for the game and saves,
+`~/.config/wwhd` for the settings on Linux), as before.
 
 ## Requirements (building from source)
 
@@ -446,8 +599,9 @@ Source builds (below) are not portable: they keep using `~/Library/Application S
 
 You also need, from your own console and disc:
 
-- a disc image of The Wind Waker HD (USA) in `.wud` or `.wux` format (or a Cemu archive, `.wua`:
-  `build/cmake/wwhd-extract --title 0005000010143500 extract game.wua game`, no keys);
+- a disc image of The Wind Waker HD (USA or Europe) in `.wud` or `.wux` format (or a Cemu archive,
+  `.wua`: `build/cmake/wwhd-extract --title 0005000010143500 extract game.wua game`, with
+  `0005000010143600` for the European game, no keys);
 - its disc key (16 bytes) in a `.key` file next to the image, with the same base name;
 - the Wii U common key, either in a file `common.key` (16 raw bytes or 32 hex digits) next to
   the image or in the current directory, or in the `WIIU_COMMON_KEY` environment variable
@@ -642,8 +796,9 @@ the next start; picture scaling; the GamePad screen),
 gameplay mods and cheats (Graphics also has the Vulkan presentation mode), controls (the same controller drawing as Input > Controls…: select a
 button or chip and press the key or controller input to use; also on Windows and Linux) and the
 console language (only the languages your game contains can be chosen; the USA game has English,
-French and Spanish; experimental: German, Italian, British English or Japanese from your own European
-or Japanese copy of the game, see [docs/language-packs.md](docs/language-packs.md); fan translations
+French and Spanish, the European one English, French, German, Italian and Spanish; experimental:
+those languages from your own European or Japanese copy of the game played with the USA code, see
+[docs/language-packs.md](docs/language-packs.md); fan translations
 into Arabic or Hebrew are drawn right to left, see [docs/rtl-text.md](docs/rtl-text.md)).
 Mouse, keyboard (arrows, Enter, Esc) and controller (D-pad / stick, A, B; L / R switch tabs) all work.
 The game keeps running but gets no input while it is open; Esc, F1 or B closes it. On macOS it shows
@@ -695,14 +850,18 @@ twice is marked with a warning. Changes apply immediately, also while playing. A
 controller sticks and an option to invert the camera's up/down are at the bottom, with **Reset to
 Defaults…**. The mapping is saved to `~/Library/Application Support/WWHD/controls.json`
 (`WWHD_CONTROLS=<file>` uses another file); deleting it restores the defaults. The app's
-single-key shortcuts (R, O, M, N, 6–9, P, F1–F5, F12) and Esc can't be bound.
+single-key shortcuts (R, O, M, N, 6–9, P, F1–F5, F12) and Esc can't be bound. The **Screenshot**
+key (row "Photo", **F10** by default) is bound here like a button, to a key or a controller input.
 
 The **Graphics** menu in the menu bar switches fixes and enhancements while playing (the TV
 window title shows what is active and the current frame rate): 60 fps by frame interpolation
 (**6**; 120 and 240 fps in the menu and the settings overlay), true 60 fps (**7**, experimental), internal resolution 1x / 1.5x / 2x / 3x (**R**
 cycles; the game renders at 1280x720, 2x renders at 2560x1440), edge smoothing (FXAA, **8**),
 ambient-occlusion mode (**O** cycles), full-size occlusion depth (**M**), 16x anisotropic
-filtering (**N**), the aspect ratio, the renderer (Metal or Vulkan), and a frame capture for debugging (**P** or fn+F12, written to `captures/`;
+filtering (**N**), the aspect ratio, the renderer (Metal or Vulkan), **Take Screenshot** (**F10**,
+rebindable in Controls: the TV picture as a PNG at the internal resolution, without the settings
+overlay, in `~/Library/Application Support/wwhd/screenshots`; also *Open Screenshots Folder* and an
+option to save the GamePad screen too), and a frame capture for debugging (**P** or fn+F12, written to `captures/`;
 captures contain game imagery, so keep them to yourself). The Graphics choices are remembered
 between launches (macOS preferences; `defaults delete wwhd` resets them).
 True 60 (**7**) computes Link and the camera at 60 Hz while the game state after every 30 Hz step
@@ -742,6 +901,11 @@ plays the recorded input back to reproduce the crash. Automatic states can also 
 
 Game controllers (Xbox, PlayStation, Switch Pro, MFi) work too; by default buttons map by
 position (the bottom face button is the Wii U's B), and they can be remapped in the Controls window.
+**Face buttons** in the settings overlay (F1 → Controls) or the Input menu switches that preset:
+*by position (Nintendo)* is the default; *by label (Xbox)* makes the button named A drive the Wii
+U's A instead — on an Xbox pad that means A accepts/acts and B goes back (issue #78), and the X/Y
+items follow the printed labels too. The choice rewrites the four face bindings only; keyboard keys
+and the other inputs stay as they are, and a hand-edited face binding shows as *custom*.
 The **Input** menu switches whether keyboard and controllers act as the Wii U GamePad (default)
 or as a Wii U Pro Controller (`WWHD_PRO_CONTROLLER=1` starts in that mode); with the Pro
 Controller, the GamePad window keeps its screen and touch input.
@@ -797,14 +961,15 @@ title screen and the file select, before a file is loaded, it quits without aski
   override the remembered choices); `WWHD_DISPLAY_HZ=n` replaces the detected display refresh rate
   that 120/240 fps are capped to (0: no cap); `WWHD_UNCAPPED=1` starts with the debug switch
   "Uncapped" on (no frame limit, no vsync; the game runs faster than real time);
-  `WWHD_SHADOW_FIX=1` keeps the shadow maps at the console's 1024x1024 at higher internal resolutions
-  (issue #67: soft, steady shadow edges as on the console; by default the maps scale with the internal
-  resolution, for sharper edges that can shimmer in places); `WWHD_SHADOW_SCALE=n` gives the shadow
-  maps their own resolution factor (overrides both); `WWHD_STATE_DIR=<dir>`
+  `WWHD_SHADOW_SCALE=n` gives the shadow maps their own resolution factor (by default they scale with
+  the internal resolution; since v0.2.9 both look practically the same, issue #67). `=1` keeps the
+  console's 1024x1024 and uses much less GPU memory at 2x/3x, useful on weaker hardware; `WWHD_STATE_DIR=<dir>`
   stores save states elsewhere; `WWHD_FULL_SAVE_STATES=0|1` full or portable save states for this
   start; `WWHD_PORTABLE_LOAD=<file.wwstate>` loads that portable state (e.g. from a bug report) as
   soon as a Quest Log is being played; `WWHD_RUMBLE=0|1` (SDL builds) start value for Controls > Rumble (overrides the remembered
   choice); `WWHD_LOG_RUMBLE=1` logs the game's motor requests and what the motors do.
+  `WWHD_STRICT_MUL=0` turns off the GPU's 0×anything=0 multiply rule in shaders (on by default, as in
+  Cemu; off only for performance comparisons, it brings back e.g. the black letter in the Rito mail sorting game).
 - Crashes and game halts write `captures/crash-<time>.log` (crash address, registers, the guest call
   chain, a host backtrace and the last log lines; useful for bug reports, it contains only addresses,
   function names, the file names of the program's modules and log text). A crash address outside the
@@ -889,6 +1054,15 @@ The code of this project is licensed under the Mozilla Public License 2.0 (see `
 Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0), {fmt} (MIT) and Dear ImGui (MIT); see Credits. The extractor links zstd (BSD-3-Clause); releases build it from its pinned release source. The game itself is Nintendo's property and is not included.
 
 ## Credits
+
+European-game builds and the executable-derived address map are by
+[ElFDA](https://github.com/ElFDA), contributed in [PR #77](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp/pull/77).
+The combined integration adds the runtime address audit and regional regression scenarios.
+Thanks also to [GreenNaugahyde](https://github.com/GreenNaugahyde) and the MPL-2.0
+[ZeldaWWHDRecompAndroid](https://github.com/GreenNaugahyde/ZeldaWWHDRecompAndroid) fork: its EUR
+address mapping informed the desktop prototype, and the rendered mip chains and sun depth peeks
+(bloom, haze, the sun's glare), the GPU decoder for compressed textures, custom Adreno driver
+support and the run/swim speed boost were adapted from or modelled on its work.
 
 The Android port (`android/`, the Android parts of the runtime, the single-screen view) is by
 [rhemfur](https://github.com/rhemfur), who also contributed the paced frame interpolation, the

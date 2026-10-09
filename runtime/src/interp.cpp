@@ -1,3 +1,5 @@
+#include "interp.h"
+#include "mods/guest_mods.h"
 #include "mods/packages.h"
 // Frame interpolation (60, 120 or 240 fps output, game logic unchanged at 30 steps per second).
 //
@@ -5,7 +7,8 @@
 // 1 at 60 fps, 3 at 120, 7 at 240; the virtual vsync of gx2_core.cpp ticks fast enough for them)
 // but the game logic only on the first pass of each step:
 //   logic pass:  logic advances S -> S+1; everything is drawn at t = 1/(N+1) between S and S+1
-//   hold pass k (k = 1..N): no logic (no execute/create/delete, scene management, counters, audio);
+//   hold pass k (k = 1..N): no logic (no execute/create/delete, scene management, counters, audio,
+//                HD UI screen updates);
 //                everything is drawn again at t = (k+1)/(N+1); the last one (k = N) draws S+1
 //                exactly and records it as the "before" of the next step's blended frames
 // The painter at the start of each pass renders the previous pass's draw lists, so at 60 fps the
@@ -31,6 +34,7 @@
 #include <vector>
 
 #include "interp_pacing.h"
+#include "guest_addr.h"
 #include "render_prof.h"
 #include "runtime.h"
 #include "savestate.h"
@@ -78,6 +82,8 @@ void f_027F55FC_orig(Cpu* c);  // J3DModel::viewCalc
 void f_027F5018_orig(Cpu* c);  // J3DModel UBO update
 
 }
+
+namespace true60_test { void logic_step(uint64_t step); }
 
 namespace interp {
 
@@ -284,6 +290,7 @@ CamState blend(const CamState& a, const CamState& b, float t) {
     return m;
 }
 
+std::atomic<uint64_t> g_executed_steps{0};
 uint64_t g_logic_steps = 0; // full logic steps (all passes without a 60 fps mode)
 uint64_t g_passes = 0;      // every pass of the per-frame function
 bool g_hold = false;        // hold pass: draw only, no logic
@@ -306,7 +313,11 @@ bool g_exact_step = false;
 // this pass is a blended hold pass (no logic, drawn at pass_t())
 bool blended_hold() { return g_hold && g_phase < g_step_n; }
 // last camera state that was drawn normally, per camera process; the snap decision of the step
-struct Prev { uint32_t cam = 0; CamState s{}; bool valid = false; bool snap = true; uint64_t snap_step = ~0ull; };
+struct Prev {
+    uint32_t cam = 0; CamState s{}; bool valid = false; bool snap = true; uint64_t snap_step = ~0ull;
+    CamState drawn{};          // the camera as camera_draw drew it on pass drawn_pass (blended or exact)
+    uint64_t drawn_pass = ~0ull;
+};
 Prev g_prev[4];
 
 Prev* prev_for(uint32_t cam) {
@@ -354,6 +365,8 @@ extern "C" void hook_024FFC40(Cpu* c) {
             }
             if (p->snap_step == g_logic_steps && !p->snap) write_cam(cam, blend(p->s, cur, pass_t()));
         }
+        p->drawn = read_cam(cam);
+        p->drawn_pass = g_passes;
         // (also on a snap: the sound listener keeps following only the record pass's camera)
         g_cam_blended = p->valid;
         cam_trace(cam, "blended");
@@ -364,8 +377,11 @@ extern "C" void hook_024FFC40(Cpu* c) {
     }
     p->s = read_cam(cam);  // exact step: remember it for the next step's blended frames
     p->valid = true;
+    p->drawn = p->s;
+    p->drawn_pass = g_passes;
     cam_trace(cam, "exact");
     if (g_hold && true60::enabled()) {  // true 60: the half pass's camera is a preview (true60.cpp)
+        p->drawn_pass = ~0ull;  // (drawn with the preview: the stars keep the camera as it is)
         true60::camera_draw_preview(true);
         f_024FFC40_orig(c);
         true60::camera_draw_preview(false);
@@ -376,7 +392,7 @@ extern "C" void hook_024FFC40(Cpu* c) {
         static std::vector<uint32_t> before;
         static std::unordered_map<uint32_t, int> cnt;
         static int n = 0;
-        const uint32_t lo = 0x10100000, hi = 0x10500000;
+        const uint32_t lo = GD(0x10100000), hi = 0x10500000;
         before.assign((uint32_t*)ppc_ptr(lo), (uint32_t*)ppc_ptr(hi));
         f_024FFC40_orig(c);
         const uint32_t* cur = (const uint32_t*)ppc_ptr(lo);
@@ -408,8 +424,14 @@ extern "C" void hook_024FFC40(Cpu* c) {
 // buffers the painter uses, concurrently with the rest of the main thread's draw.
 // Record pass: record each model's world matrices (step S+1, keyed by the joint matrix block).
 // Logic pass and blended hold passes: viewCalc and the UBO update run on blend(recorded step,
-// current step, pass_t()); in between, and after each of them, the exact matrices are back in
-// place, so game logic and attachments (swords, effects) keep reading the exact step.
+// current step, pass_t()), both on the main thread inside the viewCalc hook (the job skips the
+// model); right after, the exact matrices are back in place, so game logic and attachments
+// (swords, carried bombs, the boat's parts) keep reading the exact step.
+// (The UBO update used to stay on the job thread, with the blended matrices written into the
+// model's world matrices around it: that put them in guest memory while the main thread was still
+// drawing, and whatever it attached to the model in that window - an item in Link's hand, parts of
+// the boat - was placed from the blended matrices and then blended a second time: random one-frame
+// jumps of carried and attached models (issue #68).)
 namespace interp {
 float pass_t();
 namespace {
@@ -422,11 +444,11 @@ struct ModelPrev {
     std::vector<uint32_t> w;  // raw guest words, 12 per matrix
 };
 std::unordered_map<uint32_t, ModelPrev> g_models;
-struct ModelStats { uint32_t blended = 0, fresh = 0, cut = 0; std::atomic<uint32_t> changed{0}; } g_mstats;
-// blended matrices waiting for the model's UBO update (update_ubo thread), per model
-struct UboBlend { uint32_t mtx = 0; std::vector<uint32_t> exact, mid; };
+struct ModelStats { uint32_t blended = 0, fresh = 0, cut = 0; } g_mstats;
+// models whose UBO update of this pass already ran on the main thread (blended), per model: the
+// update_ubo job skips that many of its updates
 std::mutex g_ubo_mu;
-std::unordered_map<uint32_t, UboBlend> g_ubo;
+std::unordered_map<uint32_t, uint32_t> g_ubo_done;
 
 float wf(uint32_t w) { return u32_as_f32(__builtin_bswap32(w)); }
 uint32_t fw(float f) { return __builtin_bswap32(f32_as_u32(f)); }
@@ -568,40 +590,35 @@ extern "C" void hook_027F55FC(Cpu* c) {
     }
     g_mstats.blended++;
     trace_model("blended", jnt, n, mid.data());
+    {
+        std::lock_guard<std::mutex> lk(g_ubo_mu);
+        g_ubo_done[model]++;  // (before viewCalc queues the model for the job)
+    }
     memcpy(ppc_ptr(mtx), mid.data(), 4 * words);
     f_027F55FC_orig(c);
+    const uint32_t r3 = c->r[3];
+    c->r[3] = model;
+    f_027F5018_orig(c);  // the model's UBO update, here and now on the blended matrices
+    c->r[3] = r3;
     memcpy(ppc_ptr(mtx), saved.data(), 4 * words);
-    std::lock_guard<std::mutex> lk(g_ubo_mu);
-    g_ubo[model] = UboBlend{mtx, std::move(saved), std::move(mid)};
 }
 
 // J3DModel UBO update (027F5018), run by the "update_ubo" job thread while the main thread is
-// still drawing: copies the world matrices into the model's uniform buffers. On blended passes it
-// runs on the blended matrices prepared by viewCalc, then the exact ones are put back.
+// still drawing: copies the world matrices into the model's uniform buffers. A model blended by
+// the viewCalc hook had its update there already (on the blended matrices): skipped here.
 extern "C" void hook_027F5018(Cpu* c) {
     using namespace interp;
-    uint32_t model = c->r[3];
-    UboBlend b;
+    const uint32_t model = c->r[3];
     {
         std::lock_guard<std::mutex> lk(g_ubo_mu);
-        auto it = g_ubo.find(model);
-        if (!enabled()) g_ubo.clear();  // switched off since viewCalc
-        if (!enabled() || it == g_ubo.end()) {
-            f_027F5018_orig(c);
+        if (!enabled()) g_ubo_done.clear();  // switched off since viewCalc
+        auto it = g_ubo_done.find(model);
+        if (it != g_ubo_done.end()) {
+            if (--it->second == 0) g_ubo_done.erase(it);
             return;
         }
-        b = std::move(it->second);
-        g_ubo.erase(it);
     }
-    const size_t bytes = 4 * b.exact.size();
-    if (memcmp(ppc_ptr(b.mtx), b.exact.data(), bytes) != 0) {  // changed since viewCalc
-        g_mstats.changed++;
-        f_027F5018_orig(c);
-        return;
-    }
-    memcpy(ppc_ptr(b.mtx), b.mid.data(), bytes);
     f_027F5018_orig(c);
-    memcpy(ppc_ptr(b.mtx), b.exact.data(), bytes);
 }
 
 // Per-frame function (0203593C): WWHD's own per-frame systems (HD menus, system UI, lighting setup)
@@ -618,7 +635,7 @@ void ss_reset() {
     g_models.clear();
     {
         std::lock_guard<std::mutex> lk(g_ubo_mu);
-        g_ubo.clear();
+        g_ubo_done.clear();
     }
     g_record_passes += 8;  // step-stamped histories (models, effects) no longer match
     g_hold_next = false;
@@ -850,16 +867,28 @@ extern "C" void hook_0203593C(Cpu* c) {
     paced_pass_start();
     true60::new_pass();
     true60::pass_begin(!enabled() || !g_hold_next);  // full pass: take back Link's half-pass preview
-    if (!enabled() || !g_hold_next) g_logic_steps++;
+    if (!enabled() || !g_hold_next) {
+        g_logic_steps++;
+        true60_test::logic_step(g_logic_steps);
+    }
     if (!enabled()) {
         g_hold_next = false;
         g_phase = 0;
         g_step_n = 1;
-        f_0203593C_orig(c);
+        {
+            PassTimer timer(0);
+            f_0203593C_orig(c);
+        }
+        static unsigned stats_steps = 0;
+        if (pass_stats() && ++stats_steps % 300 == 0) LOG("[interp]%s", pass_cpu_report().c_str());
         return;
     }
     static uint64_t frames = 0;  // passes drawn with interpolation on (frames per step in the log)
     frames++;
+    {
+        std::lock_guard<std::mutex> lk(g_ubo_mu);
+        g_ubo_done.clear();  // (an update of the last pass the job never got to)
+    }
     if (g_hold_next) {
         // hold pass: the per-frame function runs, but its children only per kHoldRun and the loop
         // body draws without logic (blended at pass_t() before the record pass)
@@ -871,10 +900,6 @@ extern "C" void hook_0203593C(Cpu* c) {
         if (record_pass()) {
             g_record_passes++;
         } else {
-            {
-                std::lock_guard<std::mutex> lk(g_ubo_mu);
-                g_ubo.clear();  // not updated last pass (not drawn)
-            }
             fx_hold_blend(pass_t());  // the effects blended at logic time, at this pass's fraction
         }
         f_0203593C_orig(c);
@@ -886,10 +911,6 @@ extern "C" void hook_0203593C(Cpu* c) {
     g_phase = 0;
     g_step_n = plan_step();
     {
-        std::lock_guard<std::mutex> lk(g_ubo_mu);
-        g_ubo.clear();  // not updated last time (not drawn)
-    }
-    {
         PassTimer timer(0);
         f_0203593C_orig(c);  // logic pass (the loop body hook marks it)
     }
@@ -897,9 +918,9 @@ extern "C" void hook_0203593C(Cpu* c) {
     static uint64_t n = 0, t0 = timebase::now(), f0 = 0;
     if (++n % 300 == 0) {
         uint64_t t = timebase::now();
-        LOG("[interp] %.1f logic steps/s (%s, %.2f frames per step); models per step: %.1f blended, %.1f new, %.1f cut, %.1f changed before UBO update%s",
+        LOG("[interp] %.1f logic steps/s (%s, %.2f frames per step); models per step: %.1f blended, %.1f new, %.1f cut%s",
             300.0 * timebase::kTicksPerSec / (double)(t - t0), mode_name(), (frames - f0) / 300.0, g_mstats.blended / 300.0,
-            g_mstats.fresh / 300.0, g_mstats.cut / 300.0, g_mstats.changed.exchange(0) / 300.0, pass_cpu_report().c_str());
+            g_mstats.fresh / 300.0, g_mstats.cut / 300.0, pass_cpu_report().c_str());
         t0 = t;
         f0 = frames;
         g_mstats.blended = g_mstats.fresh = g_mstats.cut = 0;
@@ -933,8 +954,10 @@ extern "C" void hook_025F172C(Cpu* c) {
 // drawing code), and those calls must always run.
 static Cpu* g_hold_child_cpu = nullptr;
 static bool called_from_frame_function() {
+    // the per-frame function, in this build (runtime/include/guest_addr.h)
+    static const uint32_t lo = GC(0x0203593C), hi = GC(0x02035A78);
     uint32_t lr = g_hold_child_cpu ? g_hold_child_cpu->lr : 0;
-    return lr > 0x0203593C && lr < 0x02035A78;
+    return lr > lo && lr < hi;
 }
 static bool hold_skip_child(int i) {
     // children 7-14 (after the loop body: frame setup, lighting, display) run; 1, 4, 5 (HD menus and
@@ -964,7 +987,7 @@ namespace interp { void light_trace_add(const char* fmt, ...); }
 // The state from before the logic pass's call is put back first, so with the random numbers
 // replayed (interp_fx.cpp) the hold pass gets exactly the logic pass's light.
 namespace {
-constexpr uint32_t kSetLightTarget = 0x101E8EC8, kSetLightEfTarget = 0x101E8ECC, kLightStatusPt = 0x101E8CC8;
+const uint32_t kSetLightTarget = GD(0x101E8EC8), kSetLightEfTarget = GD(0x101E8ECC), kLightStatusPt = GD(0x101E8CC8);
 struct SetLightState {
     uint64_t step = ~0ull;
     uint32_t target, ef_target, status, pos[3];
@@ -1008,8 +1031,8 @@ extern "C" void hook_0255E854(Cpu* c) {
         after_logic.status = st2;
         for (int i = 0; i < 3; i++) after_logic.pos[i] = st2 ? ld32(st2 + 4 * i) : 0;
     }
-    uint32_t st = ld32(0x101E8CC8);  // lightStatusPt
-    interp::light_trace_add(" setLight t%.2f r%u p(%.1f,%.1f,%.1f)", ldf32(0x101E8EC8), st ? ld8(st + 0x18) : 0, st ? ldf32(st) : 0.0,
+    uint32_t st = ld32(GD(0x101E8CC8));  // lightStatusPt
+    interp::light_trace_add(" setLight t%.2f r%u p(%.1f,%.1f,%.1f)", ldf32(GD(0x101E8EC8)), st ? ld8(st + 0x18) : 0, st ? ldf32(st) : 0.0,
                             st ? ldf32(st + 4) : 0.0, st ? ldf32(st + 8) : 0.0);
 }
 extern "C" void hook_02738438(Cpu* c) {
@@ -1028,7 +1051,7 @@ extern "C" void hook_02039834(Cpu* c) { g_hold_child_cpu = c; if (!hold_skip_chi
 
 // logic parts of fpcM_Management / fapGm_Execute, skipped on hold passes
 // debug: WWHD_INTERP_RUN=mask runs selected parts on hold passes too
-// (1 execute, 2 delete, 4 priority, 8 create, 16 fapGm_After, 32 counter)
+// (1 execute, 2 delete, 4 priority, 8 create, 16 fapGm_After, 32 counter, 64 HD UI screens)
 static bool skip(int bit) {
     static const int run = getenv("WWHD_INTERP_RUN") ? atoi(getenv("WWHD_INTERP_RUN")) : 0;
     return interp::g_hold && !(run & bit);
@@ -1037,11 +1060,12 @@ static bool g_in_execute = false;  // inside fpcEx_Handler (actor Execute): logi
 namespace mods { void after_execute(Cpu* c, uint32_t execute_fn); }  // mods/turbo.cpp
 extern "C" void hook_025DE788(Cpu* c) {
     if (skip(1) && !true60::enabled()) return;  // true 60: the per-process gate decides (true60.cpp)
+    interp::record_executed_step();
     g_in_execute = true;
     uint32_t execute_fn = c->r[3];
     f_025DE788_orig(c);
     mods::after_execute(c, execute_fn);  // quick doors / fast scene changes: extra steps (full passes only)
-    if (!interp::g_hold_frame) mods::packages::frame(interp::g_logic_steps);
+    if (!interp::g_hold_frame) {guestmods::frame(interp::g_logic_steps);mods::packages::frame(interp::g_logic_steps);}
     g_in_execute = false;
 }
 extern "C" void hook_025DE024(Cpu* c) { if (!skip(2)) f_025DE024_orig(c); }
@@ -1049,6 +1073,18 @@ extern "C" void hook_025E0EE4(Cpu* c) { if (skip(4)) c->r[3] = 1; else f_025E0EE
 extern "C" void hook_025DDCEC(Cpu* c) { if (skip(8)) c->r[3] = 1; else f_025DDCEC_orig(c); }
 extern "C" void hook_025D42C4(Cpu* c) { if (!skip(16)) f_025D42C4_orig(c); }
 extern "C" void hook_0200E6EC(Cpu* c) { if (!skip(32)) f_0200E6EC_orig(c); }
+// WWHD's addition at the end of fpcM_Management (025DFA58): the HD UI manager (*101F8344) updates
+// three of its screens (vtable +0x5C of the objects at +0x214, +0x1EC and +0x1E4; +0x1EC is the TV
+// pause screen): state machines and frame-counted layout animations, i.e. logic. Run on every pass,
+// they advanced once per drawn frame instead of once per logic step (their fades ran 2x/4x/8x as fast
+// at 60/120/240 fps), and the TV pause screen, closed by the menu on a logic pass, reopened itself on
+// the next in-between pass (the game still counted as paused until the next logic pass). The menu's
+// "back to play" state checks the screen on logic passes only; with 3 or more in-between passes per
+// step it always found the screen open again and waited forever: the menu would not close (issues
+// #64, #74; #73, no control after an item-get message, looks like the same). Once per logic step, as
+// at 30 fps (true 60 too: these screens are 30 Hz logic).
+extern "C" void f_02715310_orig(Cpu* c);
+extern "C" void hook_02715310(Cpu* c) { if (!skip(64)) f_02715310_orig(c); }
 
 namespace interp {
 // The pads are read at the end of every frame. JUTGamePad derives "pressed this frame" from
@@ -1067,6 +1103,8 @@ bool hold_pass() { return g_hold; }
 // full (30 Hz) logic steps so far: test scenarios run on game time, so frame-time hitches (which
 // slow the frame-locked game down) don't shift the input against the game
 uint64_t logic_steps() { return g_logic_steps; }
+void record_executed_step() { g_executed_steps.fetch_add(1, std::memory_order_relaxed); }
+uint64_t executed_steps() { return g_executed_steps.load(std::memory_order_relaxed); }
 // pass state for the effect blending (interp_fx.cpp)
 bool logic_pass() { return g_logic_pass; }
 // inside the loop body of a blended pass (logic pass, or a blended hold pass at 120/240 fps)
@@ -1169,3 +1207,29 @@ extern "C" void hook_020315CC(Cpu* c) {
 // Weak, so code generated after (no hook, no f_027F4D5C_orig) links too; delete once build/gen is regenerated.
 extern "C" __attribute__((weak)) void f_027F4D5C_orig(Cpu* c);
 extern "C" __attribute__((weak)) void hook_027F4D5C(Cpu* c) { f_027F4D5C_orig(c); }
+// The night sky's stars (dKyr_drawStar 02574144, from the star packet's draw, which runs when the
+// pass's draw lists are painted, after the per-frame function) are placed around the camera's eye
+// as it is at that moment: the exact step, as camera_draw put it back. The pass was drawn with the
+// blended camera, so on blended frames the stars sat around another eye than the one they were seen
+// from and jumped back and forth while the camera moved (issue #68, "stars on the sky at night").
+// They are placed with the camera as the pass drew it.
+extern "C" void f_02574144_orig(Cpu* c);
+extern "C" void hook_02574144(Cpu* c) {
+    using namespace interp;
+    if (!enabled()) {
+        f_02574144_orig(c);
+        return;
+    }
+    CamState exact[4];
+    bool swapped[4] = {};
+    for (int i = 0; i < 4; i++) {
+        Prev& p = g_prev[i];
+        if (!p.cam || p.drawn_pass != g_passes) continue;
+        exact[i] = read_cam(p.cam);
+        write_cam(p.cam, p.drawn);
+        swapped[i] = true;
+    }
+    f_02574144_orig(c);
+    for (int i = 3; i >= 0; i--)
+        if (swapped[i]) write_cam(g_prev[i].cam, exact[i]);
+}

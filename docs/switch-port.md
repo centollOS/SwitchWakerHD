@@ -1,7 +1,7 @@
 # Switch port — current state
 
-Status as of 2026-10-08 (runtime round 47, branch `main`, synced with upstream v0.2.8 / main 853d7b1). The
-latest rounds and what they taught: "Round 47", "Round 46", "Round 45" and "Retrospective (rounds 39-45)" near the end.
+Status as of 2026-10-09 (runtime round 48, branch `sync-v0.2.11`, synced with upstream v0.2.11 / main defb89f). The
+latest rounds and what they taught: "Round 48", "Round 47", "Round 46", "Round 45" and "Retrospective (rounds 39-45)" near the end.
 
 ## Summary
 
@@ -1615,3 +1615,43 @@ Added:
 - Performance: see [Performance](#performance-in-progress). Gameplay ran at 8–12 fps before round 2 and 14–19 fps after it.
 - Mods that need a mouse or keyboard are inactive.
 - Rounds 1–15 are committed on `feature/switch-port`; rounds 16-26 are not committed yet.
+
+### Round 48: upstream v0.2.9-v0.2.11 sync, European game (not yet tested on hardware)
+
+Upstream `main` defb89f (v0.2.11, 70 commits after `853d7b1`) applied as a diff from branch `dev` 55664c7
+(`git diff 853d7b1 defb89f | git apply -3`; the README part went to `docs/upstream-README.md`). **The next sync
+starts from `defb89f`.** Asked for by issue #4 (European game support, upstream v0.2.9).
+
+**How the European build works upstream:** the recompiler identifies `cking.rpx` by its SHA-256
+(`tools/recomp/builds.py`, map `builds/eu.json`) and names every function by its canonical (USA) address, so
+`f_XXXXXXXX`, `hook_XXXXXXXX` and `site_XXXXXXXX` are the same symbols for both builds; the runtime translates
+the game addresses it uses as values with `GC()` (code) and `GD()` (data) (`runtime/include/guest_addr.h`).
+`tools/recomp/test_coverage.py` fails on any game address in `runtime/src` written without them.
+
+**This fork's parts adapted:**
+
+| Where | Change |
+|---|---|
+| `tools/recomp/recomp.py` | Our passes use the canonical name: instruction sites in non-leaf locals, the tail into the next function, inline leaves (`fi_X`). `hot_functions.txt` (USA addresses) goes through the map (`build_code`); leaflocal gets the save/restore helpers by canonical name (`saved_clobbers_sym`). |
+| `tools/recomp/singleflow.py` | The code addresses found in the runtime's sources (USA) go through the map. |
+| `mods/cheats.cpp`, `overlay/overlay.cpp` | The warp's next-stage request, the fade flag and the Warp tab's current stage read through `GD()`. |
+| `gfx/deko/draw.cpp` | The ambient-occlusion programs are found by size and hash only, not at their USA heap address. |
+| `test_coverage.py` | `core.cpp`'s `0x02100000` (the size of the import window) listed as not an address. |
+
+**Kept from this fork over upstream's version:** the register tracking of round 41 (`g_written_blocks`; upstream's
+`RegisterBlocks` is not used), and the scheduler tick's fixed 500 us cadence (upstream's idle wait
+`g_tick.wait_idle` would leave this fork's deferred wakes unflushed; its ready-contender count and
+`WWHD_TICK_STATS` are taken).
+
+**Not on the Switch:** upstream's `captures/wwhd.log` (the session log in `logs/` has every line); code mods and
+native guest mods (Mod SDK v2: they rebuild/restart the executable or load native libraries built for upstream's
+`ppc.h`; `guest_mods.cpp` refuses them in this fork, and `platform/posix_stubs_switch.cpp` gives the POSIX calls they
+link against an ENOSYS failure); the Screenshots section (the console's capture button); depth peeks for the sun's
+corona and lens flare (`peek_z`: deko3d has no readback yet, so `peekz.cpp` keeps the game's own function as before).
+
+**Checked:** the USA game code from the merged recompiler is byte-identical to `dev`'s once upstream's own two
+recompiler changes are taken out (`mulli`/`mullw`/`neg` without signed overflow, #82; the new hooks for the stars,
+HD UI screens, peekZ and Pane::Draw clipping), apart from the build map in `table.c`. `test_builds.py` (17),
+`test_coverage.py` (4) and `tools/installer/test_setup.py` (56) pass. Switch build OK. Not checked: a European dump
+(none at hand), hardware.
+

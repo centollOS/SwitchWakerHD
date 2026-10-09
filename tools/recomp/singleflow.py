@@ -151,7 +151,7 @@ class Solver:
         self.helpers = set(rc.saved_clobbers)
         # halves a helper (and whatever it falls or jumps into) may write
         self.helper_writes = {}
-        open_ = set(rc.p.addr_taken) | {rc.p.entry} | set(rc.hooks) | runtime_addresses()
+        open_ = set(rc.p.addr_taken) | {rc.p.entry} | set(rc.hooks) | {rc.build_code(a) for a in runtime_addresses()}
         self.entry = {s: (0 if s in open_ or not f.callers else TOP) for s, f in self.funcs.items()}
         self.ret = {s: TOP for s in self.funcs}
 

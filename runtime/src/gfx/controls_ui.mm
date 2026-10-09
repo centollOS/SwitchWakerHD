@@ -164,6 +164,7 @@ struct Group {
     std::vector<NSString*> rowLabels;
     NSPoint anchor;
     bool right;
+    bool leader = true;  // a line to the anchor (app actions have no part on the controller)
     NSRect box;
     std::vector<NSRect> rows;  // one per action (the title row of a multi-row group is box top)
 };
@@ -173,6 +174,7 @@ struct Chip { int action, slot; NSRect r; };
 struct Geo {
     NSSize size = {0, 0};
     bool pro = false;
+    FaceLayout fl = FaceLayout::kPosition;
     CGFloat s = 1;
     NSPoint o;
     NSBezierPath* body;
@@ -217,6 +219,7 @@ struct UIState {
 @property(strong) NSTextField* status;
 @property(strong) NSTextField* padInfo;
 @property(strong) NSSegmentedControl* which;
+@property(strong) NSSegmentedControl* faceLayout;
 @property(strong) NSSlider* deadzone;
 @property(strong) NSTextField* deadzoneValue;
 @property(strong) NSButton* invertY;
@@ -279,10 +282,12 @@ struct UIState {
 
 - (const Geo&)geo {
     NSSize sz = self.bounds.size;
-    if (NSEqualSizes(sz, _g.size) && _g.pro == self.st->pro) return _g;
+    FaceLayout fl = face_layout(self.st->m);
+    if (NSEqualSizes(sz, _g.size) && _g.pro == self.st->pro && _g.fl == fl) return _g;
     Geo g;
     g.size = sz;
     g.pro = self.st->pro;
+    g.fl = fl;
     ControllerDef d = controller_def(g.pro);
     g.colLx = kMargin;
     g.colRx = sz.width - kMargin - kColW;
@@ -321,11 +326,20 @@ struct UIState {
         p.text = text;
         g.parts.push_back(p);
     };
-    // face buttons: X top, A right, B bottom, Y left
-    button(kX, {d.face.x, d.face.y - d.faceSpread}, d.faceR, @"X");
-    button(kA, {d.face.x + d.faceSpread, d.face.y}, d.faceR, @"A");
-    button(kB, {d.face.x, d.face.y + d.faceSpread}, d.faceR, @"B");
-    button(kY, {d.face.x - d.faceSpread, d.face.y}, d.faceR, @"Y");
+    // face buttons: Wii U positions (X top, A right, B bottom, Y left). With the by-label (Xbox)
+    // preset the letters follow the host pad instead (Y top, B right, A bottom, X left), so each
+    // letter sits where that host button is (issue #78).
+    if (g.fl == FaceLayout::kLabels) {
+        button(kY, {d.face.x, d.face.y - d.faceSpread}, d.faceR, @"Y");
+        button(kB, {d.face.x + d.faceSpread, d.face.y}, d.faceR, @"B");
+        button(kA, {d.face.x, d.face.y + d.faceSpread}, d.faceR, @"A");
+        button(kX, {d.face.x - d.faceSpread, d.face.y}, d.faceR, @"X");
+    } else {
+        button(kX, {d.face.x, d.face.y - d.faceSpread}, d.faceR, @"X");
+        button(kA, {d.face.x + d.faceSpread, d.face.y}, d.faceR, @"A");
+        button(kB, {d.face.x, d.face.y + d.faceSpread}, d.faceR, @"B");
+        button(kY, {d.face.x - d.faceSpread, d.face.y}, d.faceR, @"Y");
+    }
     button(kPlus, d.plus, d.smallR, @"+");
     button(kMinus, d.minus, d.smallR, @"−");
     button(kHome, d.home, d.smallR, @"⌂");
@@ -408,6 +422,10 @@ struct UIState {
     multi(@"Left stick (move)", {kLUp, kLDown, kLLeft, kLRight, kStickLClick}, {@"↑", @"↓", @"←", @"→", @"Click"}, PU(d.lstick), false);
     multi(@"Right stick (camera)", {kRUp, kRDown, kRLeft, kRRight, kStickRClick}, {@"↑", @"↓", @"←", @"→", @"Click"}, PU(d.rstick), true);
     multi(@"D-pad", {kDUp, kDDown, kDLeft, kDRight}, {@"↑", @"↓", @"←", @"→"}, PU(d.dpad), false);
+    // app actions: the bottom of the left column, no leader line ("Photo": the row label column is narrow;
+    // hovering shows "Screenshot (app)")
+    single(@"Photo", kScreenshot, NSMakePoint(0, sz.height), false);
+    g.groups.back().leader = false;
     for (auto& p : g.parts)
         if (p.kind == kPartRound) {
             bool right = p.action == kPlus || p.action == kA || p.action == kB || p.action == kX || p.action == kY ||
@@ -665,6 +683,7 @@ static NSRect x_rect(NSRect chip) { return NSMakeRect(NSMaxX(chip) - 7, chip.ori
 
     // leader lines (under the buttons)
     for (auto& gr : g.groups) {
+        if (!gr.leader) continue;
         bool hot = false, warnLine = false;
         for (int a : gr.acts) {
             hot |= [self hot:a];
@@ -994,6 +1013,14 @@ static NSTextField* label(NSString* s) {
     which.toolTip = @"Which Wii U controller the keyboard and your controllers act as (same as the Input menu). "
                     @"Both use the same mapping.";
     self.which = which;
+    NSSegmentedControl* fl = [NSSegmentedControl segmentedControlWithLabels:@[@"Face by position", @"Face by label (Xbox)"]
+                                                                trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                                      target:self
+                                                                      action:@selector(faceLayoutChanged:)];
+    fl.toolTip = @"Which host face buttons drive the Wii U's A/B/X/Y (issue #78). By position: the bottom "
+                 @"button is B (Nintendo layout). By label: the button named A is A — on an Xbox pad that "
+                 @"makes A accept/act and B go back. Only these four bindings are rewritten.";
+    self.faceLayout = fl;
     NSTextField* pi = label(@"");
     pi.textColor = NSColor.secondaryLabelColor;
     pi.alignment = NSTextAlignmentRight;
@@ -1029,16 +1056,16 @@ static NSTextField* label(NSString* s) {
     self.deadzoneValue = dzv;
     NSButton* inv = [NSButton checkboxWithTitle:@"Invert camera up/down" target:self action:@selector(invertChanged:)];
     self.invertY = inv;
-    for (NSView* v in @[which, pi, pv, sep, st, reset, dzl, dz, dzv, inv]) {
+    for (NSView* v in @[which, fl, pi, pv, sep, st, reset, dzl, dz, dzv, inv]) {
         v.translatesAutoresizingMaskIntoConstraints = NO;
         [root addSubview:v];
     }
 
-    NSDictionary* v = NSDictionaryOfVariableBindings(which, pi, pv, sep, st, reset, dzl, dz, dzv, inv);
+    NSDictionary* v = NSDictionaryOfVariableBindings(which, fl, pi, pv, sep, st, reset, dzl, dz, dzv, inv);
     auto C = [&](NSString* f, NSLayoutFormatOptions o = 0) {
         [root addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:f options:o metrics:nil views:v]];
     };
-    C(@"H:|-14-[which]-(>=16)-[pi]-14-|", NSLayoutFormatAlignAllCenterY);
+    C(@"H:|-14-[which]-(>=12)-[fl]-12-[pi]-14-|", NSLayoutFormatAlignAllCenterY);
     C(@"H:|-0-[pv]-0-|");
     C(@"H:|-0-[sep]-0-|");
     C(@"H:|-16-[st]-16-|");
@@ -1066,6 +1093,9 @@ static NSTextField* label(NSString* s) {
     self.deadzone.doubleValue = _st.m.deadzone;
     self.deadzoneValue.stringValue = [NSString stringWithFormat:@"%.0f%%", _st.m.deadzone * 100];
     self.invertY.state = _st.m.invert_camera_y ? NSControlStateValueOn : NSControlStateValueOff;
+    // kCustom: no segment chosen (as the overlay's "(custom)"); either segment then applies its preset
+    FaceLayout fl = face_layout(_st.m);
+    self.faceLayout.selectedSegment = fl == FaceLayout::kCustom ? -1 : fl == FaceLayout::kLabels ? 1 : 0;
 }
 
 - (void)syncWhich {
@@ -1409,6 +1439,14 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
     _st.pro = pro;
     [self syncWhich];
     [self.window makeKeyWindow];  // showing the GamePad window must not take the keyboard from here
+}
+
+- (void)faceLayoutChanged:(NSSegmentedControl*)c {
+    // the same as Input > Face buttons; rewrites the four face bindings only
+    apply_face_layout(_st.m, c.selectedSegment == 1 ? FaceLayout::kLabels : FaceLayout::kPosition);
+    [self commit];
+    [self.padView invalidateGeo];
+    [self setStatus:[NSString stringWithFormat:@"Face buttons: %s.", face_layout_label(face_layout(_st.m))] level:0];
 }
 
 // ---- window

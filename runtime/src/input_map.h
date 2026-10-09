@@ -13,12 +13,14 @@
 
 namespace input_map {
 
-// Wii U GamePad / Pro Controller inputs, in the order the Controls window lists them
+// Wii U GamePad / Pro Controller inputs, in the order the Controls window lists them, then the app
+// actions that are bound the same way (no VPAD bit; the hosts act on them, see screenshot.h)
 enum Action : int {
     kA, kB, kX, kY, kL, kR, kZL, kZR, kPlus, kMinus, kHome,
     kDUp, kDDown, kDLeft, kDRight, kStickLClick, kStickRClick,
     kLUp, kLDown, kLLeft, kLRight,   // left stick (move)
     kRUp, kRDown, kRLeft, kRRight,   // right stick (camera)
+    kScreenshot,                     // app action, not a GamePad input: save a screenshot (screenshot.h)
     kActionCount
 };
 const char* action_id(int a);     // JSON key, e.g. "ZL", "LeftStickUp"
@@ -59,6 +61,18 @@ struct Mapping {
     static Mapping defaults();
     bool operator==(const Mapping&) const = default;
 };
+
+// Which host face buttons drive the Wii U's A/B/X/Y (issue #78). Not stored: it is the shape of
+// the four face bindings, so a hand-edited mapping simply reads back as kCustom.
+//   kPosition (default): by position — the bottom host button (Xbox A) is the Wii U's B, the right
+//     one (Xbox B) is the Wii U's A, and X/Y are swapped the same way (Nintendo layout).
+//   kLabels: by label — the host button named A is the Wii U's A (Xbox convention: A accepts,
+//     B goes back; the X and Y items follow the printed labels too).
+//   kCustom: the four face bindings match neither preset.
+enum class FaceLayout { kPosition, kLabels, kCustom };
+FaceLayout face_layout(const Mapping& m);
+void apply_face_layout(Mapping& m, FaceLayout layout);  // rewrites pad[kA..kY]; kCustom is a no-op
+const char* face_layout_label(FaceLayout l);            // for the UI
 
 // actions (other than `except`) that use this key / controller input
 std::vector<int> key_users(const Mapping& m, int code, int except = -1);

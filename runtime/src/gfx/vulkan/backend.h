@@ -1,5 +1,6 @@
 #pragma once
 #include "loader.h"
+#include "barrier_state.h"
 #ifdef WWHD_SDL_HOST
 #include <SDL3/SDL.h>
 #endif
@@ -7,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <functional>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -14,18 +16,21 @@
 #include "api.h"
 #include "buffer_cache_core.h"
 namespace gfxvk {
-struct Buffer { VkBuffer buffer=VK_NULL_HANDLE; VkDeviceMemory memory=VK_NULL_HANDLE; void* mapped=nullptr; VkDeviceSize size=0;
+struct Buffer { ResourceUse use; VkBuffer buffer=VK_NULL_HANDLE; VkDeviceMemory memory=VK_NULL_HANDLE; void* mapped=nullptr; VkDeviceSize size=0;
                 VkMemoryPropertyFlags properties=0; /* of the memory type create_buffer chose */ };
 struct UploadSlice { VkBuffer buffer=VK_NULL_HANDLE; VkDeviceSize offset=0,size=0; void* mapped=nullptr; };
 struct CachedGuestLayout;
 struct Surface {
+ ResourceUse use;
+    std::shared_ptr<Surface> mipChain; // sampled companion assembled from GPU-rendered levels
+    uint64_t mipChainSeq = ~0ull;
  VkImage image=VK_NULL_HANDLE; VkDeviceMemory memory=VK_NULL_HANDLE; VkImageView view=VK_NULL_HANDLE;
  VkImageType imageType=VK_IMAGE_TYPE_2D; VkImageViewType viewType=VK_IMAGE_VIEW_TYPE_2D;
  VkExtent3D extent{}; VkImageLayout layout=VK_IMAGE_LAYOUT_UNDEFINED; VkImageAspectFlags aspect=VK_IMAGE_ASPECT_COLOR_BIT; VkImageUsageFlags usage=0; VkImageCreateFlags createFlags=0;
  uint32_t arrayLayers=1; std::vector<VkImageView> layerViews;
  std::unordered_map<uint32_t,VkImageView> sampledViews;
  uint32_t addr=0,mipAddr=0,width=0,height=0,slices=1,pitch=0,mips=1,format=0,dim=1,tileMode=0,swizzle=0;
- bool isDepth=false,gpuWritten=false,dirty=true;
+ bool isDepth=false,gpuWritten=false,dirty=true,bcDecoded=false;
  uint64_t writeSeq=0,contentHash=0,lastCheckedFrame=~0ull,sparseHash=0;
  bool formatViews=false; // another surface at this address has the same texel bits in another format (adopt_newer_alias)
  uint64_t writtenBackSeq=0; // writeSeq when last written back to guest memory (linear surfaces, write_back_linear_targets)
@@ -46,6 +51,7 @@ struct Screen {
  VkSurfaceKHR surface=VK_NULL_HANDLE; VkSwapchainKHR swapchain=VK_NULL_HANDLE;
  VkFormat swapFormat=VK_FORMAT_UNDEFINED; VkExtent2D swapExtent{};
  std::vector<VkImage> images; std::vector<VkImageLayout> layouts;
+ std::vector<ResourceUse> imageUses;
  VkSemaphore acquired=VK_NULL_HANDLE,finished=VK_NULL_HANDLE;
  std::unique_ptr<Surface> scan;
  std::atomic<bool> visible{true},srgb{false},resize{false};
@@ -66,6 +72,7 @@ struct GpuScopeToken { uint64_t generation=0; uint32_t index=UINT32_MAX; };
 struct Renderer {
  VkInstance instance=VK_NULL_HANDLE; VkPhysicalDevice physicalDevice=VK_NULL_HANDLE; VkDevice device=VK_NULL_HANDLE;
  VkPhysicalDeviceFeatures enabledFeatures{};
+ bool computeQueue=false;
  bool dynamicRenderingKHR=false; // VK_KHR_dynamic_rendering (device older than Vulkan 1.3)
  bool portabilitySubset=false,imageViewSwizzle=true,imageViewReinterpretation=true;
  bool imageView2DOn3DImage=true; // 2D views of volume slices (render targets); core Vulkan 1.1, optional in the portability subset
@@ -99,6 +106,7 @@ struct Renderer {
  uint64_t pipelineCreates=0,pipelineCreateNs=0;
  std::array<Surface*,8> passColors{};
  std::array<uint32_t,8> passSlices{};
+ uint32_t mainDepthAddr=0;
  Surface* passDepth=nullptr;
  uint32_t passDepthSlice=0,passWidth=0,passHeight=0;
  bool passTracked=false;
@@ -117,6 +125,7 @@ struct Renderer {
  std::array<uint64_t,7> vertexHistoryDistances{};
  uint64_t vertexDeclaredBytes=0,vertexCopiedBytes=0;
  uint64_t vertexReuseChecks=0,vertexReuseHits=0,vertexReuseBytes=0,vertexReuseCompareNs=0;
+ std::vector<std::function<void()>> completions;
  std::vector<Buffer> garbageBuffers;
  std::vector<bufcache::Region> garbageCacheRegions; // buffer cache regions replaced while recording
  struct RetiredImage { VkImage image;VkDeviceMemory memory;std::vector<VkImageView> views; }; std::vector<RetiredImage> garbageImages;
@@ -137,6 +146,7 @@ struct Renderer {
   bool pending=false;
   uint64_t serial=0; // Submission order on the single graphics queue.
   std::vector<UploadBlock> uploadBlocks;
+  std::vector<std::function<void()>> completions;
   std::vector<Buffer> garbageBuffers;
   std::vector<RetiredImage> garbageImages;
   std::vector<bufcache::Region> garbageCacheRegions;
@@ -175,6 +185,8 @@ void gpu_begin_render_scope(const std::array<Surface*,8>&,Surface*,const uint32_
 void gpu_count_render_draw();
 GpuScopeToken gpu_begin_feedback_scope(const Surface&);
 void gpu_end_feedback_scope(GpuScopeToken);
+bool narrow_barriers();
+void transition_buffer(Buffer&, VkPipelineStageFlags, VkAccessFlags);
 void transition_image(Surface*,VkImageLayout,VkPipelineStageFlags stage=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VkAccessFlags access=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT);
 void forget_texture_views();
 void service_captures();

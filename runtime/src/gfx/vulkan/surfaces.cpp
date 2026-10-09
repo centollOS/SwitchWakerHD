@@ -1,3 +1,5 @@
+#include "gfx/render_mips.h"
+#include "bc_decode.h"
 #include "mods/cemu_pack.h"
 // Guest surfaces backed by Vulkan images. LatteAddrLib supplies guest tiling geometry.
 #include "backend.h"
@@ -155,19 +157,16 @@ static void target_aspect(const Surface* s, float& kx, float& ky) {
 }
 
 // the factor a render target gets. Shadow maps (depth arrays: the game's cascades) scale with the
-// internal resolution by default (sharper shadows; the user's choice). WWHD_SHADOW_FIX=1 keeps the
-// console's 1024x1024 (issue #67), and WWHD_SHADOW_SCALE=n gives them their own factor (overrides
-// both). The trade-off: the game softens shadow edges by sampling the map with bilinear depth compare at a per-pixel random
-// offset, then blurring the result on screen. At 2048x2048 each compare filters half as wide, so
-// shadow edges came out hard and the random offsets showed as crawling hatching (issue #67: the
-// bridge's shadow on Outset's water, hard and shimmering at 2x). Cemu's graphics packs also keep
-// the shadow maps at the console's size unless asked.
+// internal resolution by default. WWHD_SHADOW_SCALE=n gives them their own factor; =1 keeps the
+// console's 1024x1024, which uses far less GPU memory at 2x/3x. Issue #67: the hard, crawling
+// shadow edges at 2x in v0.2.6-v0.2.8 came mainly from the missing mip chains the game's
+// shadow-mask softening samples (restored in v0.2.9); since then both sizes give practically the
+// same soft edges, the larger maps only a hair crisper.
 static float target_scale(const Surface* s) {
     uint32_t width,height;
     if(!s->fmt.compressed&&s->mips==1&&mods::cemu::texture_extent(s->width,s->height,s->format,s->slices,s->tileMode,width,height))return 1.0f;
     if (s->fmt.compressed || s->mips > 1) return 1.0f;
-    static const float shadow = getenv("WWHD_SHADOW_SCALE") ? parse_scale(getenv("WWHD_SHADOW_SCALE"))
-                                : getenv("WWHD_SHADOW_FIX") && *getenv("WWHD_SHADOW_FIX") && *getenv("WWHD_SHADOW_FIX") != '0' ? 1.0f : 0.0f;
+    static const float shadow = getenv("WWHD_SHADOW_SCALE") ? parse_scale(getenv("WWHD_SHADOW_SCALE")) : 0.0f;
     if (shadow && s->isDepth && s->slices > 1) return shadow;
     return res_scale();
 }
@@ -273,6 +272,105 @@ Surface* surface_from_depth_buffer(uint32_t addr, uint32_t* firstSlice, uint32_t
 static uint64_t sparse_hash(Surface* s);
 uint64_t g_stat_full_checks, g_stat_uploads, g_stat_invalidates, g_stat_invalidated_surfaces;
 
+// Based on GreenNaugahyde/ZeldaWWHDRecompAndroid, commit 73b54e1 (rendered mip chains).
+static Surface* with_mip_chain(Surface* s, const SurfaceDesc& d) {
+    static const bool off = getenv("WWHD_NO_RT_MIPS") != nullptr;
+    uint32_t mips = d.mips;
+    if (off || mips <= 1 || s->fmt.depth || s->fmt.compressed || s->fmt.kind != FormatInfo::FLOAT || s->imageType != VK_IMAGE_TYPE_2D || s->arrayLayers != 1 ||
+        s->mips != 1 || !s->image)
+        return s;
+    const uint32_t w = s->extent.width, h = s->extent.height;
+    uint32_t full = 1;
+    while ((std::max(w, h) >> full) > 0) full++;
+    mips = std::min(mips, full);
+    if (mips <= 1) return s;
+    static std::unordered_map<VkFormat, bool> blittable;
+    auto bl = blittable.find(s->fmt.pixel);
+    if (bl == blittable.end()) {
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(R.physicalDevice, s->fmt.pixel, &fp);
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
+                                          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        bl = blittable.emplace(s->fmt.pixel, (fp.optimalTilingFeatures & need) == need).first;
+    }
+    if (!bl->second) return s;
+    // the game's own levels, and a key of everything the chain is built from
+    Surface* levels[16] = {};
+    uint64_t key = s->writeSeq * 0x9E3779B97F4A7C15ull;
+    for (uint32_t l = 1; l < mips && l < 16; l++) {
+        levels[l] = ::gfx::render_mips::game_level(d, l, R.surfaces);
+        key = (key ^ (levels[l] ? levels[l]->writeSeq + l : l)) * 0xFF51AFD7ED558CCDull;
+    }
+    Surface* c = s->mipChain.get();
+    if (c && (c->mips != mips || c->extent.width != w || c->extent.height != h || c->fmt.pixel != s->fmt.pixel)) {
+        destroy_surface_image(c);
+        s->mipChain.reset();
+        c = nullptr;
+    }
+    if (!c) {
+        auto chain = std::make_shared<Surface>();
+        c = chain.get();
+        c->addr = s->addr; c->mipAddr = d.mipAddr;
+        c->width = s->width; c->height = s->height; c->slices = 1;
+        c->mips = mips; c->format = s->format; c->dim = s->dim; c->fmt = s->fmt;
+        c->gpuWritten = true;
+        create_surface_image(c, false, s->extent);
+        s->mipChain = std::move(chain);
+        s->mipChainSeq = ~0ull;
+    }
+    if (s->mipChainSeq == key) return c;
+    transition_image(s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    for (uint32_t l = 1; l < mips && l < 16; l++)
+        if (levels[l]) transition_image(levels[l], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    transition_image(c, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);  // all levels in TRANSFER_DST
+    VkCommandBuffer cmd = command_buffer();
+    VkImageCopy cp{};
+    cp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp.extent = {w, h, 1};
+    vkCmdCopyImage(cmd, s->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+    auto to_src = [&](uint32_t level) {  // a finished level becomes the next blit's source
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = c->image;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+    uint32_t fromGame = 0;
+    for (uint32_t l = 1; l < mips; l++) {
+        to_src(l - 1);
+        VkImageBlit b{};
+        b.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
+        b.dstOffsets[1] = {(int32_t)std::max(w >> l, 1u), (int32_t)std::max(h >> l, 1u), 1};
+        Surface* g = l < 16 ? levels[l] : nullptr;
+        if (g) {  // the game's own level (blitted: its image size may differ by rounding)
+            b.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            b.srcOffsets[1] = {(int32_t)g->extent.width, (int32_t)g->extent.height, 1};
+            vkCmdBlitImage(cmd, g->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                           &b, VK_FILTER_LINEAR);
+            fromGame++;
+        } else {
+            b.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l - 1, 0, 1};
+            b.srcOffsets[1] = {(int32_t)std::max(w >> (l - 1), 1u), (int32_t)std::max(h >> (l - 1), 1u), 1};
+            vkCmdBlitImage(cmd, c->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                           &b, VK_FILTER_LINEAR);
+        }
+    }
+    to_src(mips - 1);
+    // Per-level transitions above order writes, and the generated levels are
+    // also blit sources. Preserve these reads for the next whole-image write.
+    derive_dependency(c->use, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, true);
+    c->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;  // every level is now a transfer source
+    s->mipChainSeq = key;
+    static int logged = 0;
+    if (logged++ < 8) LOG("[gfx] mip chain for %08X %ux%u: %u levels, %u of them the game's own", s->addr, w, h, mips, fromGame);
+    return c;
+}
+
 Surface* sampled_texture(const uint32_t* w, bool isDepthSampler) {
     Latte::LATTE_SQ_TEX_RESOURCE_WORD0_N w0;
     Latte::LATTE_SQ_TEX_RESOURCE_WORD1_N w1;
@@ -319,7 +417,7 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler) {
     d.isDepth = isDepthSampler;
     Surface* s = find_or_create_surface(d, false);
     upload_surface(s);
-    return s;
+    return s && s->gpuWritten && d.mips > 1 && !d.isDepth ? with_mip_chain(s, d) : s;
 }
 
 
@@ -498,6 +596,11 @@ void create_surface_image(Surface* s, bool forRendering, VkExtent3D explicitExte
     uint32_t maxDim=std::max({s->extent.width,s->extent.height,s->extent.depth});
     uint32_t maxMips=1; while(maxDim>1){maxDim>>=1;++maxMips;}
     if(s->mips>maxMips)throw std::runtime_error("GX2 surface requests too many mip levels");
+    if (s->fmt.compressed) s->bcDecoded = bc_decode_required(format_info(s->format,s->isDepth));
+    if (s->bcDecoded) {
+        const bool sign = (s->format & 0x200) && (s->format & 0x3f) >= 0x34;
+        s->fmt.pixel = sign ? VK_FORMAT_R8G8B8A8_SNORM : (s->format & 0x400) ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    }
     VkFormatProperties properties{}; vkGetPhysicalDeviceFormatProperties(R.physicalDevice,s->fmt.pixel,&properties);
     auto features=properties.optimalTilingFeatures;
     VkFormatFeatureFlags required=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_TRANSFER_SRC_BIT|VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
@@ -526,7 +629,7 @@ void create_surface_image(Surface* s, bool forRendering, VkExtent3D explicitExte
         viewInfo.viewType=s->viewType;viewInfo.format=s->fmt.pixel;
         viewInfo.subresourceRange={VkImageAspectFlags(s->fmt.depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT),0,s->mips,0,s->arrayLayers};
         check_vk(vkCreateImageView(R.device,&viewInfo,nullptr,&s->view),"create sampling image view");
-        s->layout=VK_IMAGE_LAYOUT_UNDEFINED;
+        s->layout=VK_IMAGE_LAYOUT_UNDEFINED;s->use={};
     } catch(...) {
         if(s->view)vkDestroyImageView(R.device,s->view,nullptr);
         if(s->image)vkDestroyImage(R.device,s->image,nullptr);
@@ -536,11 +639,13 @@ void create_surface_image(Surface* s, bool forRendering, VkExtent3D explicitExte
     }
 }
 void destroy_surface_image(Surface* s) {
-    if(!s||!s->image)return;
+    if (!s) return;
+    if (s->mipChain) { destroy_surface_image(s->mipChain.get()); s->mipChain.reset(); }
+    if(!s->image)return;
     auto views=std::move(s->layerViews);if(s->view)views.push_back(s->view);
     for(auto& [key,view]:s->sampledViews)if(view)views.push_back(view);s->sampledViews.clear();
     defer_surface_image(s->image,s->memory,std::move(views));
-    s->image=VK_NULL_HANDLE;s->memory=VK_NULL_HANDLE;s->view=VK_NULL_HANDLE;s->layout=VK_IMAGE_LAYOUT_UNDEFINED;
+    s->image=VK_NULL_HANDLE;s->memory=VK_NULL_HANDLE;s->view=VK_NULL_HANDLE;s->layout=VK_IMAGE_LAYOUT_UNDEFINED;s->use={};
     s->layerViews.clear();
 }
 VkImageView layer_view(Surface* s,uint32_t layer) {
@@ -881,7 +986,7 @@ static Surface* rescale(Surface* s) {
     catch(...) { destroy_surface_image(&replacement);throw; }
     destroy_surface_image(s);
     s->image=replacement.image;s->memory=replacement.memory;s->view=replacement.view;
-    s->extent=replacement.extent;s->layout=replacement.layout;s->usage=replacement.usage;s->createFlags=replacement.createFlags;s->scale=replacement.scale;s->ax=replacement.ax;s->ay=replacement.ay;s->sx=replacement.sx;s->sy=replacement.sy;
+    s->extent=replacement.extent;s->layout=replacement.layout;s->use=replacement.use;s->usage=replacement.usage;s->createFlags=replacement.createFlags;s->scale=replacement.scale;s->ax=replacement.ax;s->ay=replacement.ay;s->sx=replacement.sx;s->sy=replacement.sy;
     forget_texture_views();return s;
 }
 // One guest surface can be rendered and sampled through views of different formats with the same
@@ -1019,6 +1124,7 @@ void upload_surface(Surface* s) {
     end_encoder();transition_image(s,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
     for(uint32_t level=0;level<s->mips;++level) {
         std::vector<uint8_t> data;uint32_t w,h,slices;decode_level(s,level,mip_base(s,level),data,w,h,slices);
+        if (s->bcDecoded) { bc_decode_upload(s,level,data,w,h,slices); continue; }
         std::vector<VkBufferImageCopy> copies;std::vector<uint8_t> packed;
         bool threeD=s->imageType==VK_IMAGE_TYPE_3D;
         uint32_t layers=threeD?1:slices;
@@ -1114,9 +1220,8 @@ static std::vector<uint8_t> read_guest_texels(Surface* img,uint32_t layer,uint32
         transition_image(src,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
         VkBufferImageCopy region{};region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,layer,1};region.imageExtent={w,h,1};
         auto cmd=command_buffer();vkCmdCopyImageToBuffer(cmd,src->image,src->layout,b.buffer,1,&region);
-        VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
-        barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.buffer=b.buffer;barrier.size=VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr);
+        derive_dependency(b.use,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
+        transition_buffer(b,VK_PIPELINE_STAGE_HOST_BIT,VK_ACCESS_HOST_READ_BIT);
         transition_image(src,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         flush();  // waits for the GPU
         const auto* raw=static_cast<const uint8_t*>(b.mapped);
@@ -1296,6 +1401,7 @@ void invalidate(uint32_t flags,uint32_t addr,uint32_t size) {
     }
 }
 void ss_reset_surfaces() {
+    R.mainDepthAddr = 0;
     reset_ao_private_cache();
     for(auto& [addr,s]:R.surfaces){s->guestLayout.reset();s->dirty=true;s->lastCheckedFrame=~0ull;}
 }

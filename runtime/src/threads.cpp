@@ -28,6 +28,8 @@
 
 #include "runtime.h"
 #include "savestate.h"
+#include "scheduler_tick.h"
+#include "render_prof.h"
 #include "platform/perf_hint.h"
 
 // ---------------------------------------------------------------- time
@@ -157,6 +159,7 @@ struct CoreSched {
     std::deque<HostThread*> ready;  // FIFO among equal priorities
 };
 static CoreSched g_sched[3];
+static threads::SchedulerTick g_tick;
 
 static HostThread* best_ready(CoreSched& k) {  // k.m held
     HostThread* b = nullptr;
@@ -180,6 +183,8 @@ static void core_acquire(HostThread* t) {
     CoreSched& k = g_sched[core];
     std::unique_lock<std::mutex> lk(k.m);
     k.ready.push_back(t);
+    const bool queued = k.owner || best_ready(k) != t;
+    if (queued) g_tick.ready_delta(1);
     if (k.owner && t->prio < k.owner->prio) k.owner->cpu.preempt = 1;
     auto start = std::chrono::steady_clock::now();
     t->acquired = start;
@@ -196,7 +201,7 @@ static void core_acquire(HostThread* t) {
         }
     }
     for (auto it = k.ready.begin(); it != k.ready.end(); ++it)
-        if (*it == t) { k.ready.erase(it); break; }
+        if (*it == t) { k.ready.erase(it); if (queued) g_tick.ready_delta(-1); break; }
     k.owner = t;
     t->holds_core = true;
     t->held_core = core;
@@ -307,13 +312,32 @@ static void sched_tick_thread() {
     host::set_thread_name("sched tick");
     host::raise_thread_priority();
     auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    static const bool tick_stats = getenv("WWHD_TICK_STATS") != nullptr;
+    auto tick_start = std::chrono::steady_clock::now();
+    uint64_t tick_cpu = tick_stats ? rprof::thread_cpu_ns() : 0, tick_wakes = 0;
     for (;;) {
-        std::this_thread::sleep_for(std::chrono::microseconds(500));
+        // (this fork) the fixed 500 us cadence, not upstream's idle wait (g_tick.wait_idle): the deferred
+        // wakes below are only flushed here
+        std::this_thread::sleep_for(kSlice);
         flush_deferred_wakes();
+        ++tick_wakes;
+        if (tick_stats && std::chrono::steady_clock::now() - tick_start >= std::chrono::seconds(5)) {
+            auto now = std::chrono::steady_clock::now();
+            uint64_t cpu = rprof::thread_cpu_ns();
+            double seconds = std::chrono::duration<double>(now - tick_start).count();
+            LOG("[tick] CPU %.6f ms/s, wakes %.2f/s", (cpu - tick_cpu) / 1e6 / seconds, tick_wakes / seconds);
+            tick_start = now; tick_cpu = cpu; tick_wakes = 0;
+        }
         if (std::chrono::steady_clock::now() >= next_report) {
             next_report += std::chrono::seconds(5);
             if (threads::sched_stats()) threads::report_sched();
         }
+        // Timed waits retain the polling cadence, but cannot require preemption
+        // without a ready contender. Queue insertion accounts for contenders
+        // under the core lock and requests higher-priority preemption directly.
+        // A contender arriving after this check is examined on the next tick,
+        // just as one arriving after its core was scanned in the original loop.
+        if (!g_tick.has_ready_contender()) continue;
         for (int core = 0; core < 3; core++) {
             CoreSched& k = g_sched[core];
             std::lock_guard<std::mutex> lk(k.m);
@@ -482,8 +506,10 @@ static bool park_wait(std::unique_lock<std::mutex>& lk, std::condition_variable&
         lk.unlock();
         threads::block_begin();
         lk.lock();
-        if (deadline) cv.wait_until(lk, *deadline, pred);
-        else cv.wait(lk, pred);
+        if (deadline) {
+            threads::SchedulerTick::TimedWait timed(g_tick);
+            cv.wait_until(lk, *deadline, pred);
+        } else cv.wait(lk, pred);
         lk.unlock();
         if (t) park_gate(t);
         threads::block_end();
@@ -589,30 +615,33 @@ void park_sleep_until(std::chrono::steady_clock::time_point tp, bool precise,
         t->wst.store(kParked);
     }
     block_begin();
-    if (precise) {
-        // macOS sleep timers can resume about 1 ms after the requested vsync, so the last part is
-        // spun with the guest core released. The spin window follows the measured lateness: the
-        // largest of the last 120 wakes plus a margin, 0.5..2 ms; a wake past the deadline goes
-        // straight back to 2 ms. (A fixed 2 ms window spun ~1.5 ms per vsync, 15% of Vulkan's CPU.)
-        // WWHD_VSYNC_SPIN_US=n fixes the window at n microseconds.
-        using us = std::chrono::microseconds;
-        static const long fixedUs = getenv("WWHD_VSYNC_SPIN_US") ? atol(getenv("WWHD_VSYNC_SPIN_US")) : -1;
-        static thread_local us window{fixedUs >= 0 ? fixedUs : 2000}, peak{0};
-        static thread_local int wakes = 0;
-        const auto sleepDeadline = tp - window;
-        if (std::chrono::steady_clock::now() < sleepDeadline) {
-            host::sleep_until(sleepDeadline);
-            const auto woke = std::chrono::steady_clock::now();
-            peak = std::max(peak, std::chrono::duration_cast<us>(woke - sleepDeadline));
-            if (fixedUs < 0 && (woke >= tp || ++wakes == 120)) {
-                window = woke >= tp ? us{2000} : std::clamp(peak + us{250}, us{500}, us{2000});
-                peak = us{0};
-                wakes = 0;
+    {
+        SchedulerTick::TimedWait timed(g_tick);
+        if (precise) {
+            // macOS sleep timers can resume about 1 ms after the requested vsync, so the last part is
+            // spun with the guest core released. The spin window follows the measured lateness: the
+            // largest of the last 120 wakes plus a margin, 0.5..2 ms; a wake past the deadline goes
+            // straight back to 2 ms. (A fixed 2 ms window spun ~1.5 ms per vsync, 15% of Vulkan's CPU.)
+            // WWHD_VSYNC_SPIN_US=n fixes the window at n microseconds.
+            using us = std::chrono::microseconds;
+            static const long fixedUs = getenv("WWHD_VSYNC_SPIN_US") ? atol(getenv("WWHD_VSYNC_SPIN_US")) : -1;
+            static thread_local us window{fixedUs >= 0 ? fixedUs : 2000}, peak{0};
+            static thread_local int wakes = 0;
+            const auto sleepDeadline = tp - window;
+            if (std::chrono::steady_clock::now() < sleepDeadline) {
+                host::sleep_until(sleepDeadline);
+                const auto woke = std::chrono::steady_clock::now();
+                peak = std::max(peak, std::chrono::duration_cast<us>(woke - sleepDeadline));
+                if (fixedUs < 0 && (woke >= tp || ++wakes == 120)) {
+                    window = woke >= tp ? us{2000} : std::clamp(peak + us{250}, us{500}, us{2000});
+                    peak = us{0};
+                    wakes = 0;
+                }
             }
+            while (std::chrono::steady_clock::now() < tp) {}
+        } else {
+            host::sleep_until(tp);
         }
-        while (std::chrono::steady_clock::now() < tp) {}
-    } else {
-        host::sleep_until(tp);
     }
     if (t) park_gate(t);
     // The freeze gate marks the thread busy before host-only completion work.
@@ -1514,8 +1543,15 @@ static void alarm_thread() {
     for (;;) {
         if (g_alarm_queue.empty()) { g_alarm_cv.wait(lk); continue; }
         auto it = g_alarm_queue.begin();
+        // Cancelled/replaced deadlines are not pending guest waits. Do not keep
+        // the scheduler polling until a stale deadline that can never fire.
+        if (g_alarm_serial[it->second.guest] != it->second.serial) {
+            g_alarm_queue.erase(it);
+            continue;
+        }
         uint64_t now = timebase::now();
         if (it->first > now) {
+            threads::SchedulerTick::TimedWait timed(g_tick);
             g_alarm_cv.wait_for(lk, ticks_to_ns(it->first - now));
             continue;
         }
@@ -1558,6 +1594,7 @@ static void arm_alarm(uint32_t alarm, uint64_t when, uint64_t period, uint32_t c
     g_alarm_serial[alarm] = s;
     g_alarm_queue.emplace(when, Alarm{t_self ? t_self->core : 1u, alarm, when, period, cb, s});
     g_alarm_cv.notify_all();
+    g_tick.notify();
 }
 
 // OSAlarm layout (Cemu): +0x04 name, +0x0C callback, +0x10 tag, +0x18 nextFire, +0x28 period, +0x30 tick, +0x38 userData
@@ -1585,6 +1622,8 @@ HLE(coreinit, OSSetPeriodicAlarm) {
 HLE(coreinit, OSCancelAlarm) {
     std::lock_guard<std::mutex> lk(g_alarm_mutex);
     g_alarm_serial[arg(c, 0)] = 0;
+    g_alarm_cv.notify_all();
+    g_tick.notify();
     ret(c, 1);
 }
 HLE(coreinit, OSSetAlarmUserData) { st32(arg(c, 0) + 0x38, arg(c, 1)); }
@@ -2033,6 +2072,7 @@ void threads_ss_load(ss::Reader& r) {
         }
     }
     g_alarm_cv.notify_all();
+    g_tick.notify();
     // parked threads re-check their conditions against the restored objects
     auto wake = [](auto& table) {
         std::lock_guard<std::mutex> lk(table.m);

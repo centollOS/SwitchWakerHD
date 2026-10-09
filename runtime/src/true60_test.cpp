@@ -13,6 +13,8 @@
 //   WWHD_TEST_POKE=t:ADDR:HEX,...   at scenario time t (s, game time; see input.mm) writes the bytes
 //                                   HEX to guest memory at ADDR. ADDR is hex, or *PTR+OFF (the word
 //                                   at PTR plus OFF), e.g. *101F84DC+2E:38 equips the Hero's Sword.
+//   WWHD_LINK_WARP=step:x:y:z:angle  once, before Link's full-pass execute at origin step + step;
+//                                   updates the actor and the HD executable's retained position.
 //   WWHD_SAVEINFO_DUMP=path         at the end of the scenario (WWHD_TEST_END) writes the save-info
 //                                   block (dSv_info_c, *101F84DC, 0x12A0 bytes: what the game saves,
 //                                   plus the current stage/zone memory) to path; also at the times
@@ -29,9 +31,11 @@
 #include <string>
 #include <vector>
 
+#include "guest_addr.h"
 #include "runtime.h"
 #include "true60.h"
 #include "savestate.h"
+#include "input.h"
 
 namespace interp { uint64_t logic_steps(); bool hold_pass(); }
 
@@ -64,7 +68,7 @@ std::vector<Poke> parse_pokes() {
     }
     return v;
 }
-constexpr uint32_t kSaveInfoPtr = 0x101F84DC;  // dComIfGs save info (dSv_info_c), see dComIfGs_setSelectEquip 02522398
+const uint32_t kSaveInfoPtr = GD(0x101F84DC);  // dComIfGs save info (dSv_info_c), see dComIfGs_setSelectEquip 02522398
 constexpr uint32_t kSaveInfoSize = 0x12A0;
 void dump_saveinfo(const std::string& path) {
     uint32_t p = ld32(kSaveInfoPtr);
@@ -75,10 +79,115 @@ void dump_saveinfo(const std::string& path) {
         LOG("[test] save info (%08X) written to %s", p, path.c_str());
     }
 }
+// Opt-in integration checks use the actual coreinit HLE on the guest main thread.
+// Only host-created scratch objects and a host callback are used; no game data is logged.
+std::atomic<unsigned> timing_callbacks{0};
+uint32_t timing_event = 0;
+void timing_callback(Cpu* c) {
+    ++timing_callbacks;
+    Cpu call = *c;
+    call.r[3] = timing_event;
+    hle_find("coreinit", "OSSignalEvent")(&call);
+}
+void timing_checks() {
+    Cpu call = *threads::current();
+    auto invoke = [&](const char* name) { hle_find("coreinit", name)(&call); };
+    auto delay = [&](unsigned ms) { return timebase::kTicksPerSec * ms / 1000; };
+    auto pair = [&](int r, uint64_t ticks) { call.r[r] = uint32_t(ticks >> 32); call.r[r + 1] = uint32_t(ticks); };
+    auto check = [](const char* name, bool ok) { LOG("[test] timed HLE %s %s", name, ok ? "PASS" : "FAIL"); };
+    auto sleep = [&](unsigned ms) { pair(3, delay(ms)); invoke("OSSleepTicks"); };
+    auto start = std::chrono::steady_clock::now();
+    sleep(2);
+    check("OSSleepTicks", std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(2));
+    timing_event = mem::host_alloc(0x60, 0x20);
+    call.r[3] = timing_event; call.r[4] = 0; call.r[5] = 0;
+    invoke("OSInitEvent");
+    auto wait_event = [&](unsigned ms) {
+        call.r[3] = timing_event; pair(5, delay(ms)); invoke("OSWaitEventWithTimeout");
+        return call.r[3] != 0;
+    };
+    start = std::chrono::steady_clock::now();
+    bool result = wait_event(2);
+    check("event timeout", !result && std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(2));
+    call.r[3] = timing_event; invoke("OSSignalEvent");
+    check("event signaled", wait_event(2));
+    call.r[3] = timing_event; invoke("OSResetEvent");
+    uint32_t alarm = mem::host_alloc(0x60, 0x20);
+    uint32_t callback = dispatch::register_host(timing_callback, "timed-wait-test");
+    call.r[3] = alarm; invoke("OSCreateAlarm");
+    auto arm = [&](unsigned ms) {
+        call.r[3] = alarm; pair(5, delay(ms)); call.r[7] = callback; invoke("OSSetAlarm");
+    };
+    arm(80); // the earlier replacement must interrupt the alarm thread's old deadline
+    start = std::chrono::steady_clock::now();
+    arm(3);
+    result = wait_event(500);
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    check("alarm rearm/event wake", result && timing_callbacks == 1 && elapsed >= std::chrono::milliseconds(3) &&
+          elapsed < std::chrono::milliseconds(80));
+    call.r[3] = alarm; pair(5, timebase::guest_now() + delay(2)); pair(7, delay(2)); call.r[9] = callback;
+    invoke("OSSetPeriodicAlarm");
+    sleep(12);
+    check("periodic alarm", timing_callbacks >= 3);
+    call.r[3] = alarm; invoke("OSCancelAlarm");
+    sleep(5); // a callback already dispatched at cancellation may finish
+    auto count = timing_callbacks.load();
+    sleep(5);
+    check("alarm cancellation", timing_callbacks == count);
+}
 }  // namespace
 
 // called with the scenario time on every controller read (input.mm)
 void tick(double t, bool ended) {
+    static bool timing_done = false;
+    if (!timing_done && getenv("WWHD_TEST_TIMED_WAITS") && threads::current()) {
+        timing_done = true;
+        timing_checks();
+    }
+
+    // Host-only controller-mode regression script: t:mode (1 GamePad, 2 Pro).
+    auto parse_modes = [](const char* name) {
+        std::vector<std::pair<double, int>> modes;
+        for (const char* e = getenv(name); e && *e;) {
+            double at; int mode, n;
+            if (sscanf(e, "%lf:%d%n", &at, &mode, &n) != 2 || (mode != 1 && mode != 2)) break;
+            modes.emplace_back(at, mode);
+            e += n;
+            if (*e != ',') break;
+            ++e;
+        }
+        return modes;
+    };
+    static auto controllers = parse_modes("WWHD_TEST_CONTROLLER");
+    static auto checks = parse_modes("WWHD_TEST_CONTROLLER_CHECK");
+    for (auto& [at, mode] : controllers) if (mode && t >= at) {
+        input::set_pro_controller(mode == 2);
+        LOG("[test] controller set %d at %.3f", mode, t);
+        mode = 0;
+    }
+    for (auto& [at, mode] : checks) if (mode && t >= at) {
+        LOG("[test] controller check %s expected %d actual %d at %.3f",
+            input::pro_controller() == (mode == 2) ? "PASS" : "FAIL", mode, input::pro_controller() ? 2 : 1, t);
+        mode = 0;
+    }
+    // WWHD_TEST_SAVE=t:slot,... uses the selected kind (WWHD_FULL_SAVE_STATES=0|1).
+    static std::vector<std::pair<double, int>> saves = [] {
+        std::vector<std::pair<double, int>> v;
+        for (const char* e = getenv("WWHD_TEST_SAVE"); e && *e;) {
+            double at; int slot, n;
+            if (sscanf(e, "%lf:%d%n", &at, &slot, &n) != 2) break;
+            v.emplace_back(at, slot);
+            e += n;
+            if (*e != ',') break;
+            ++e;
+        }
+        return v;
+    }();
+    for (auto& [at, slot] : saves) if (slot > 0 && t >= at) {
+        ss::request_save(slot);
+        LOG("[test] t=%.3f save slot %d", t, slot);
+        slot = 0;
+    }
     // WWHD_TEST_LOAD=t:slot,... loads a save state at scenario time t (once each)
     static std::vector<std::pair<double, int>> loads = [] {
         std::vector<std::pair<double, int>> v;
@@ -103,7 +212,7 @@ void tick(double t, bool ended) {
     static double sc_t = getenv("WWHD_TEST_SCENECHANGE") ? atof(getenv("WWHD_TEST_SCENECHANGE")) : -1;
     if (sc_t >= 0 && t >= sc_t) {
         sc_t = -1;
-        constexpr uint32_t kPlay = 0x1046F0B0, kStart = kPlay + 0x5134, kNext = kPlay + 0x5140;
+        const uint32_t kPlay = GD(0x1046F0B0), kStart = kPlay + 0x5134, kNext = kPlay + 0x5140;
         for (uint32_t i = 0; i < 12; i++) st8(kNext + i, ld8(kStart + i));
         st8(kNext + 12, 1);  // enabled
         st8(kNext + 13, 0);  // wipe
@@ -192,7 +301,7 @@ void after_execute(uint32_t proc, uint32_t fn, bool is_link, float dt) {
 void rng_trace() {
     static FILE* f = getenv("WWHD_RNG_TRACE") ? fopen(getenv("WWHD_RNG_TRACE"), "w") : nullptr;
     if (!f || interp::hold_pass()) return;
-    fprintf(f, "%llu %08X %08X %08X", (unsigned long long)interp::logic_steps(), ld32(0x101FF9D4), ld32(0x101FF9D8), ld32(0x101FF9DC));
+    fprintf(f, "%llu %08X %08X %08X", (unsigned long long)interp::logic_steps(), ld32(GD(0x101FF9D4)), ld32(GD(0x101FF9D4) + 4), ld32(GD(0x101FF9D4) + 8));
     // WWHD_MEM_WATCH=addr:len,... adds those bytes (hex) to each line
     static std::vector<std::pair<uint32_t, uint32_t>> w = [] {
         std::vector<std::pair<uint32_t, uint32_t>> v;
@@ -210,12 +319,12 @@ void rng_trace() {
         fprintf(f, " ");
         for (uint32_t i = 0; i < n; i++) fprintf(f, "%02X", ld8(a + i));
     }
-    fprintf(f, " c%08X\n", ld32(0x101FF560));
+    fprintf(f, " c%08X\n", ld32(GD(0x101FF560)));
     static int n = 0;
     if (++n % 30 == 0) fflush(f);
 }
 bool dumping() {
-    static const bool on = getenv("WWHD_ACTOR_DUMP") || getenv("WWHD_RNG_TRACE") || getenv("WWHD_MEM_DUMP") || getenv("WWHD_LINK_PRE");
+    static const bool on = getenv("WWHD_ACTOR_DUMP") || getenv("WWHD_RNG_TRACE") || getenv("WWHD_MEM_DUMP") || getenv("WWHD_LINK_PRE") || getenv("WWHD_LINK_WARP");
     return on;
 }
 }  // namespace true60_test
@@ -241,7 +350,24 @@ void hook_0255BA9C(Cpu* c) { light_trace(4, c); f_0255BA9C_orig(c); }
 
 namespace true60_test {
 // WWHD_LINK_PRE=path: Link's process (0x8284 bytes) right before each full-pass execute (same record format)
+uint64_t origin_step();
 void before_execute_link(uint32_t proc) {
+    // Visual comparison fixture: apply at an actor boundary, outside controller-read call stacks.
+    static bool warped = false;
+    if (!warped && !interp::hold_pass() && origin_step()) {
+        if (const char* e = getenv("WWHD_LINK_WARP")) {
+            unsigned long long step; float x,y,z; int angle;
+            if (sscanf(e,"%llu:%f:%f:%f:%d",&step,&x,&y,&z,&angle)==5 && interp::logic_steps() >= origin_step()+step) {
+                LOG("[test] warp Link %08X from %.1f %.1f %.1f to %.1f %.1f %.1f",proc,(float)ldf32(proc+0x314),(float)ldf32(proc+0x318),(float)ldf32(proc+0x31C),x,y,z);
+                for (uint32_t off : {0x2ECu,0x300u,0x314u}) { stf32(proc+off,x); stf32(proc+off+4,y); stf32(proc+off+8,z); }
+                st16(proc+0x322,(uint16_t)angle);st16(proc+0x32A,(uint16_t)angle);
+                // The HD executable restores these retained debug values at 0240D130 each update.
+                stf32(GD(0x1046CD48),x);stf32(GD(0x1046CD4C),y);stf32(GD(0x1046CD50),z);
+                st16(GD(0x1046CD12),(uint16_t)angle);st16(GD(0x1046CD0A),(uint16_t)angle);
+                warped=true;
+            }
+        }
+    }
     // WWHD_MEM_DUMP=path:addr:size: that memory before each full-pass execute of Link (same record format)
     static FILE* md = nullptr;
     static uint32_t md_a = 0, md_n = 0;
@@ -279,7 +405,19 @@ void before_execute_link(uint32_t proc) {
 
 namespace true60_test {
 uint64_t g_origin_step = 0;
-void set_origin_step(uint64_t s) { g_origin_step = s; }
+// Called at the actual logic-step boundary, including frames that do not poll input.
+void logic_step(uint64_t step) {
+    static FILE* timeline = [] {
+        const char* path = getenv("WWHD_LOGIC_TIMELINE");
+        return path ? fopen(path, "w") : nullptr;
+    }();
+    if (!timeline || !g_origin_step) return;
+    // Only step numbers and clocks: no guest memory or save data.
+    fprintf(timeline, "%llu %.9f %.9f\n", (unsigned long long)step, (step - g_origin_step) / 30.0,
+            timebase::now() / double(timebase::kTicksPerSec));
+    fflush(timeline);
+}
+void set_origin_step(uint64_t s) { g_origin_step = s; logic_step(s); }
 uint64_t origin_step() { return g_origin_step; }
 }
 
@@ -319,11 +457,11 @@ extern "C" void hook_025D6CE8(Cpu* c) {
     std::string ctx;
     if (f) {
         char t[16];
-        for (uint32_t o = 0; o < 0x30; o += 4) { snprintf(t, sizeof t, " %08X", ld32(0x104B45F8 + o)); ctx += t; }
+        for (uint32_t o = 0; o < 0x30; o += 4) { snprintf(t, sizeof t, " %08X", ld32(GD(0x104B45F8) + o)); ctx += t; }
         ctx += " | cull";
         uint32_t m = ld32(a + 0x348);
         for (uint32_t o = 0; o < 0x30 && m; o += 4) { snprintf(t, sizeof t, " %08X", ld32(m + o)); ctx += t; }
-        uint32_t vo = ld32(ld32(ld32(0x101F95D0) + 0x1024));
+        uint32_t vo = ld32(ld32(ld32(GD(0x101F95D0)) + 0x1024));
         snprintf(t, sizeof t, " | vis %08X", vo); ctx += t;
         for (uint32_t o = 0x600; o < 0x800 && vo; o += 4) { snprintf(t, sizeof t, " %08X", ld32(vo + o)); ctx += t; }
         ctx += " | box";

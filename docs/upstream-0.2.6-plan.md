@@ -8,6 +8,9 @@ starts from `4da1e34`** (`git diff 4da1e34 upstream/devel | git apply -3`).
 2026-10-08: v0.2.7-v0.2.8 (`main` 853d7b1) taken the same way; **the next sync starts from `853d7b1`**
 (docs/switch-port.md, "Round 46").
 
+2026-10-09: v0.2.9-v0.2.11 (`main` defb89f) taken the same way; **the next sync starts from `defb89f`**
+(docs/switch-port.md, "Round 48").
+
 ## Taken as is (common code, now in dev)
 
 | Upstream change | On the Switch |

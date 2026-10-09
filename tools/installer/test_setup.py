@@ -6,11 +6,59 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import setup  # noqa: E402
 
 KEY_HEX = "0011223344556677" "8899aabbccddeeff"  # made-up test value
+
+
+class GuestBuildConfig(unittest.TestCase):
+    def test_toolchain_argument_vector(self):
+        with tempfile.TemporaryDirectory() as d:
+            tc = setup.Toolchain(["compiler with spaces", "cc", "-target", "x86_64-linux-gnu.2.35"], [], [])
+            setup.write_guest_build_config(d, tc)
+            with open(os.path.join(d, "guest-sdk.json"), encoding="utf-8") as f:
+                config = json.load(f)
+            self.assertEqual(config["compiler"], tc.cc)
+            self.assertEqual(config["python"], [sys.executable])
+            self.assertTrue(config["builder"].endswith("build_guest_mod.py"))
+            self.assertFalse(os.path.exists(os.path.join(d, "guest-sdk.json.tmp")))
+
+
+    def test_portable_paths_survive_release_move(self):
+        with tempfile.TemporaryDirectory() as directory:
+            release = os.path.join(directory, "release")
+            data = os.path.join(release, "data")
+            paths = {"python": os.path.join(release, "tools", "python", "python.exe"),
+                     "compiler": os.path.join(data, "toolchain", "bin", "zig"),
+                     "builder": os.path.join(release, "tools", "guestmod", "build_guest_mod.py")}
+            for path in paths.values():
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w") as f:
+                    f.write("")  # fixture paths only
+            os.makedirs(os.path.join(release, "sdk", "include"))
+            cache = os.path.join(data, "toolchain", "zig-cache")
+            tc = setup.Toolchain([paths["compiler"], "cc", "-target", "x86_64-linux-gnu.2.35"], [], [],
+                                 env={"ZIG_GLOBAL_CACHE_DIR": cache, "UNRELATED_ENV": "not-persisted"})
+            with mock.patch.multiple(setup, PKG=release, PORTABLE=True), mock.patch.object(setup.sys, "executable", paths["python"]):
+                setup.write_guest_build_config(data, tc)
+            moved = os.path.join(directory, "moved-release")
+            os.rename(release, moved)
+            moved_data = os.path.join(moved, "data")
+            with open(os.path.join(moved_data, "guest-sdk.json")) as f:
+                config = json.load(f)
+            self.assertEqual(config["format_version"], 2)
+            for key in ("python", "compiler"):
+                self.assertFalse(os.path.isabs(config[key][0]))
+                self.assertTrue(os.path.isfile(os.path.join(moved_data, config[key][0])))
+            self.assertTrue(os.path.isfile(os.path.join(moved_data, config["builder"])))
+            self.assertTrue(os.path.isdir(os.path.join(moved_data, config["include"])))
+            self.assertEqual(os.path.normpath(os.path.join(moved_data, config["zig_cache"])),
+                             os.path.join(moved_data, "toolchain", "zig-cache"))
+            self.assertNotIn("UNRELATED_ENV", config)
+
 
 
 class Keys(unittest.TestCase):
@@ -68,13 +116,50 @@ class Paths(unittest.TestCase):
             self.assertEqual(setup.game_folder_title(d), "0005000010143500")
 
 
-class Titles(unittest.TestCase):
-    def test_usa_ok(self):
-        setup.check_title("0005000010143500")
+class DataDir(unittest.TestCase):
+    """default_data_dir: portable.txt next to the release means <release>/data; without it (a source
+    build, or an AppImage whose mount is read-only, issue #55) the per-user folder of earlier
+    releases. --data-dir overrides both (setup_gui.cpp data_dir_of mirrors this)."""
 
-    def test_other_regions(self):
-        with self.assertRaisesRegex(setup.SetupError, "Europe"):
-            setup.check_title("0005000010143600")
+    def setUp(self):
+        self._portable = setup.PORTABLE
+
+    def tearDown(self):
+        setup.PORTABLE = self._portable
+
+    def test_portable_uses_the_release_folder(self):
+        setup.PORTABLE = True
+        self.assertEqual(setup.default_data_dir(), os.path.join(setup.PKG, "data"))
+
+    def test_without_the_marker_uses_the_per_user_folder(self):
+        setup.PORTABLE = False
+        self.assertEqual(setup.default_data_dir(), setup.legacy_data_dir())
+
+    @unittest.skipUnless(setup.IS_LINUX, "the XDG rule is the Linux one")
+    def test_legacy_respects_xdg_data_home(self):
+        saved = os.environ.get("XDG_DATA_HOME")
+        os.environ["XDG_DATA_HOME"] = "/tmp/wwhd-xdg"
+        try:
+            self.assertEqual(setup.legacy_data_dir(), os.path.join("/tmp/wwhd-xdg", "wwhd"))
+        finally:
+            if saved is None:
+                os.environ.pop("XDG_DATA_HOME", None)
+            else:
+                os.environ["XDG_DATA_HOME"] = saved
+
+    def test_legacy_folder_name(self):
+        # the same name as host::config_dir on Linux; "WWHD" on Windows (setup_gui.cpp data_dir_of)
+        self.assertEqual(os.path.basename(setup.legacy_data_dir()), "WWHD" if setup.IS_WIN else "wwhd")
+
+
+class Titles(unittest.TestCase):
+    def test_supported_ok(self):
+        setup.check_title("0005000010143500")   # USA, the canonical build
+        setup.check_title("0005000010143600")   # Europe (tools/recomp/builds/eu.json)
+
+    def test_unsupported(self):
+        with self.assertRaisesRegex(setup.SetupError, "Japan.*can be built from"):
+            setup.check_title("0005000010143400")
         with self.assertRaisesRegex(setup.SetupError, "not The Wind Waker HD"):
             setup.check_title("000500001010ec00")
 
@@ -110,9 +195,15 @@ class ArchiveTitles(unittest.TestCase):
         with self.assertRaisesRegex(setup.SetupError, "only the update"):
             setup.archive_choice(self.info([self.UPDATE]))
 
+    def test_european_archive(self):
+        eu, eu_update = _title("0005000010143600", 0), _title("0005000e10143600", 16)
+        folder, notes = setup.archive_choice(self.info([eu, eu_update], eu))
+        self.assertEqual(folder, "0005000010143600_v0")
+        self.assertIn("the update for The Wind Waker HD (Europe), version 16", notes[0])
+
     def test_other_region(self):
-        with self.assertRaisesRegex(setup.SetupError, "archive contains the Europe version"):
-            setup.archive_choice(self.info([_title("0005000010143600", 0), _title("0005000e10143600", 16)]))
+        with self.assertRaisesRegex(setup.SetupError, "archive contains the Japan version"):
+            setup.archive_choice(self.info([_title("0005000010143400", 0), _title("0005000e10143400", 16)]))
 
     def test_other_game(self):
         with self.assertRaisesRegex(setup.SetupError, "does not contain The Wind Waker HD.*title 00050000-1010EC00"):
@@ -134,8 +225,47 @@ class ArchiveTitles(unittest.TestCase):
         self.assertEqual(setup.EXTRACT_ERRORS[10], "wrong_title")
 
 
+class LanguageSourceBuild(unittest.TestCase):
+    """A language source lends a European or Japanese game's text to the USA code, so it is only for
+    the USA build (docs/language-packs.md, docs/builds.md)."""
+
+    def make(self, d, rpx):
+        os.makedirs(os.path.join(d, "code"), exist_ok=True)
+        with open(os.path.join(d, "code", "cking.rpx"), "wb") as f:
+            f.write(rpx)
+        return d
+
+    def setUp(self):
+        self.saved = setup.game_builds.by_sha256
+        usa = setup.game_builds.Build({"name": "USA", "title_id": "0005000010143500",
+                                       "rpx_sha256": hashlib.sha256(b"usa").hexdigest()})
+        eu = setup.game_builds.Build({"name": "EU", "title_id": "0005000010143600",
+                                      "code_bounds": ["02000000", "03000000"],
+                                      "data_bounds": ["10000000", "10500000"],
+                                      "rpx_sha256": hashlib.sha256(b"eu").hexdigest()})
+        setup.game_builds.by_sha256 = lambda dg: next((b for b in (usa, eu) if b.sha256 == dg), None)
+
+    def tearDown(self):
+        setup.game_builds.by_sha256 = self.saved
+
+    def test_usa_build_allows_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            setup.check_language_source_allowed(self.make(d, b"usa"))
+
+    def test_nothing_installed_yet_allows_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            setup.check_language_source_allowed(d)
+
+    def test_european_build_refuses_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.make(d, b"eu")
+            with self.assertRaisesRegex(setup.SetupError, "EU build.*own languages.*only for the USA build"):
+                setup.check_language_source_allowed(d)
+
+
 class GameVersion(unittest.TestCase):
-    """code/cking.rpx must be the file the port is built for (USA v0); synthetic files, made-up bytes."""
+    """code/cking.rpx must be one of the builds the port knows (version 0 of a region,
+    tools/recomp/builds.py); synthetic files, made-up bytes."""
 
     def make(self, d, rpx=b"made-up rpx", app_tid="0005000010143500", app_ver="0000"):
         os.makedirs(os.path.join(d, "code"), exist_ok=True)
@@ -146,22 +276,35 @@ class GameVersion(unittest.TestCase):
                     '<title_version type="hexBinary" length="2">%s</title_version></app>' % (app_tid, app_ver))
 
     def setUp(self):
-        self.saved = setup.SUPPORTED_RPX_SHA256
-        setup.SUPPORTED_RPX_SHA256 = hashlib.sha256(b"made-up rpx").hexdigest()
+        self.saved = (setup.SUPPORTED_BUILDS, setup.game_builds.by_sha256)
+        fake = [setup.game_builds.Build({"name": "USA", "title_id": "0005000010143500",
+                                         "rpx_sha256": hashlib.sha256(b"made-up rpx").hexdigest()}),
+                setup.game_builds.Build({"name": "EU", "title_id": "0005000010143600",
+                                         "code_bounds": ["02000000", "03000000"],
+                                         "data_bounds": ["10000000", "10500000"],
+                                         "rpx_sha256": hashlib.sha256(b"made-up eu rpx").hexdigest()})]
+        setup.SUPPORTED_BUILDS = {b.title_id: b for b in fake}
+        setup.game_builds.by_sha256 = lambda d: next((b for b in fake if b.sha256 == d), None)
 
     def tearDown(self):
-        setup.SUPPORTED_RPX_SHA256 = self.saved
+        setup.SUPPORTED_BUILDS, setup.game_builds.by_sha256 = self.saved
 
     def test_expected_file(self):
         with tempfile.TemporaryDirectory() as d:
             self.make(d)
-            setup.check_game_version(d)
+            self.assertEqual(setup.check_game_version(d).name, "USA")
+
+    def test_other_build(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.make(d, rpx=b"made-up eu rpx", app_tid="0005000010143600")
+            self.assertEqual(setup.check_game_version(d).name, "EU")
 
     def test_update_merged_in(self):
         with tempfile.TemporaryDirectory() as d:
             self.make(d, rpx=b"other code", app_ver="0010")
             with self.assertRaisesRegex(setup.SetupError, "version 16 of the game.*update merged in.*"
-                                                          "00050000-10143500, version 0.*Use the game's own files"):
+                                                          "00050000-10143500 \\(USA\\).*version 0.*"
+                                                          "Use the game's own files"):
                 setup.check_game_version(d)
             self.make(d, rpx=b"other code", app_tid="0005000E10143500", app_ver="0000")
             with self.assertRaisesRegex(setup.SetupError, "from the update.*merged in"):
@@ -170,16 +313,16 @@ class GameVersion(unittest.TestCase):
     def test_unknown_build(self):
         with tempfile.TemporaryDirectory() as d:
             self.make(d, rpx=b"damaged")
-            with self.assertRaisesRegex(setup.SetupError, "not the expected file \\(SHA-256 [0-9a-f]{16}\\.\\.\\.\\)"):
+            with self.assertRaisesRegex(setup.SetupError, "not a file the port knows \\(SHA-256 [0-9a-f]{16}\\.\\.\\.\\)"):
                 setup.check_game_version(d)
             os.remove(os.path.join(d, "code", "app.xml"))
-            with self.assertRaisesRegex(setup.SetupError, "not the expected file"):
+            with self.assertRaisesRegex(setup.SetupError, "not a file the port knows"):
                 setup.check_game_version(d)
 
-    def test_other_region(self):
+    def test_unsupported_region(self):
         with tempfile.TemporaryDirectory() as d:
-            self.make(d, rpx=b"eu", app_tid="0005000010143600")
-            with self.assertRaisesRegex(setup.SetupError, "The Wind Waker HD \\(Europe\\)"):
+            self.make(d, rpx=b"jp", app_tid="0005000010143400")
+            with self.assertRaisesRegex(setup.SetupError, "The Wind Waker HD \\(Japan\\)"):
                 setup.check_game_version(d)
 
     def test_missing(self):
@@ -189,8 +332,9 @@ class GameVersion(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("WWHD_GAME_DIR"), "WWHD_GAME_DIR (your own extracted game) not set")
     def test_real_game(self):
-        setup.SUPPORTED_RPX_SHA256 = self.saved
-        setup.check_game_version(os.environ["WWHD_GAME_DIR"])  # read only
+        setup.SUPPORTED_BUILDS, setup.game_builds.by_sha256 = self.saved
+        build = setup.check_game_version(os.environ["WWHD_GAME_DIR"])  # read only
+        self.assertIn(build.title_id, setup.SUPPORTED_BUILDS)
 
 
 class Recipe(unittest.TestCase):
@@ -437,6 +581,143 @@ class LanguageSources(unittest.TestCase):
         finally:
             setup.run_extract, setup.archive_info = saved
         self.assertEqual(setup.LANGUAGE_SOURCE_FILES, ["content/Common/Pack/permanent_2d_*.pack", "meta/meta.xml"])
+
+
+class CodeModsBuild(unittest.TestCase):
+    def test_option_default_and_override(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(setup.code_mods.hooks_option())
+        with mock.patch.dict(os.environ, {"WWHD_CODE_MODS": "1"}):
+            self.assertTrue(setup.code_mods.hooks_option())
+            self.assertFalse(setup.code_mods.hooks_option("0"))
+        with self.assertRaises(ValueError):
+            setup.code_mods.hooks_option("yes")
+
+    def test_fingerprint_tracks_build_inputs_and_mode(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "game/code").mkdir(parents=True)
+            (root / "game/code/cking.rpx").write_bytes(b"synthetic test input")
+            (root / "sdk").mkdir()
+            source = root / "sdk/runtime.o"
+            source.write_bytes(b"runtime fixture")
+            def key(hooks=False, compiler="clang", manifest=None):
+                return setup.code_mods.fingerprint(root, manifest or {"exe": "game"},
+                                                   root / "game", compiler, hooks)
+            first = key()
+            self.assertEqual(first, key())
+            self.assertNotEqual(first, key(True))
+            self.assertNotEqual(first, key(compiler="new clang"))
+            self.assertNotEqual(first, key(manifest={"exe": "other"}))
+            source.write_bytes(b"updated runtime fixture")
+            self.assertNotEqual(first, key())
+
+    def test_cache_modes_corruption_and_failed_link(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "game/code").mkdir(parents=True)
+            (root / "game/code/cking.rpx").write_bytes(b"synthetic input")
+            (root / "sdk").mkdir()
+            data = root / "data"
+            ctx = SimpleNamespace(data_dir=str(data), game_dir=str(root / "game"),
+                                  manifest={"toolchain": {}, "exe": "fixture"},
+                                  args=SimpleNamespace(jobs=4))
+            mode = []
+            def translate(game, gen, hooks=False):
+                Path(gen).mkdir(); mode[:] = [hooks]
+            def compile_code(tc, manifest, gen, obj, jobs, **kwargs):
+                Path(obj).mkdir(); kwargs["cancel"](); kwargs["progress"](1, 1)
+                return []
+            def link(tc, manifest, objs, work, target):
+                Path(target).write_bytes(b"hooks on" if mode[0] else b"hooks off")
+            tc = SimpleNamespace(cc=["fixture compiler"], env={})
+            with mock.patch.multiple(setup, PKG=root, PORTABLE=False), \
+                 mock.patch.object(setup, "get_toolchain", return_value=tc), \
+                 mock.patch.object(setup, "run_logged", return_value="fixture compiler version"), \
+                 mock.patch.object(setup, "free_space", return_value=20 << 30), \
+                 mock.patch.object(setup, "recompile", side_effect=translate) as recomp, \
+                 mock.patch.object(setup, "compile_gamecode", side_effect=compile_code), \
+                 mock.patch.object(setup, "link_game", side_effect=link) as linker:
+                data.mkdir()
+                initial = root / "initial.exe"
+                initial.write_bytes(b"hooks off")
+                generated = root / "initial-gen"
+                generated.mkdir()
+                setup.code_mods.remember_installed(setup, ctx, tc, False, initial, generated, [])
+                off = setup.code_mods.rebuild(setup, ctx, False)
+                self.assertTrue(off["cached"])
+                on = setup.code_mods.rebuild(setup, ctx, True)
+                self.assertNotEqual(off["fingerprint"], on["fingerprint"])
+                self.assertTrue(Path(off["exe"]).is_file())
+                again = setup.code_mods.rebuild(setup, ctx, False)
+                self.assertTrue(again["cached"])
+                self.assertEqual(recomp.call_count, 1)
+                # Bad metadata rebuilds rather than trusting an unrelated executable.
+                ready = Path(on["exe"]).parents[1] / "ready.json"
+                ready.write_text("broken json")
+                previous = (data / "code-mods-active.json").read_bytes()
+                linker.side_effect = setup.SetupError("synthetic link failure")
+                with self.assertRaisesRegex(setup.SetupError, "link failure"):
+                    setup.code_mods.rebuild(setup, ctx, True)
+                self.assertEqual((data / "code-mods-active.json").read_bytes(), previous)
+                self.assertTrue(Path(off["exe"]).is_file())
+                self.assertFalse(list(data.glob("*.partial")))
+
+    def test_build_lock_excludes_concurrent_writer_and_reopens(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "code-build.lock"
+            first = setup.code_mods.BuildLock(path, setup.SetupError)
+            try:
+                with self.assertRaisesRegex(setup.SetupError, "Another code-mod rebuild"):
+                    setup.code_mods.BuildLock(path, setup.SetupError)
+            finally:
+                first.close()
+            second = setup.code_mods.BuildLock(path, setup.SetupError)
+            second.close()
+
+    def test_low_space_evicts_only_inactive_owned_cache(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            active, inactive = "a" * 64, "b" * 64
+            for key in (active, inactive):
+                cache = root / "code-builds" / key
+                cache.mkdir(parents=True)
+                (cache / "ready.json").write_text(json.dumps({"fingerprint": key}))
+            unrelated = root / "code-builds" / "unrecognized"
+            unrelated.mkdir()
+            (root / "code-mods-active.json").write_text(json.dumps({"fingerprint": active}))
+            with mock.patch.object(setup, "free_space", side_effect=[0, 3 << 30]):
+                setup.code_mods.make_build_space(setup, root)
+            self.assertTrue((root / "code-builds" / active).is_dir())
+            self.assertFalse((root / "code-builds" / inactive).exists())
+            self.assertTrue(unrelated.is_dir())
+            with mock.patch.object(setup, "free_space", return_value=0):
+                with self.assertRaisesRegex(setup.SetupError, "previous build retained"):
+                    setup.code_mods.make_build_space(setup, root)
+            self.assertTrue((root / "code-builds" / active).is_dir())
+
+    def test_cancel_preserves_selection_and_releases_lock(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            active = root / "code-mods-active.json"
+            active.write_text('{"previous": true}')
+            cancel = root / "cancel"
+            cancel.touch()
+            status = root / "status.json"
+            ctx = SimpleNamespace(data_dir=d)
+            with self.assertRaisesRegex(setup.SetupError, "cancelled"):
+                setup.code_mods.rebuild(setup, ctx, True, status, cancel)
+            self.assertEqual(active.read_text(), '{"previous": true}')
+            with self.assertRaisesRegex(setup.SetupError, "cancelled"):
+                setup.code_mods.rebuild(setup, ctx, True, status, cancel)
+            self.assertEqual(json.loads(status.read_text())["state"], "error")
 
 
 if __name__ == "__main__":

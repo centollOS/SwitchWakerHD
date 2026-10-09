@@ -59,6 +59,8 @@ typedef struct Cpu {
     uint32_t res_addr, res_val; /* lwarx/stwcx. reservation */
     uint32_t pc;               /* target for indirect dispatch */
     uint32_t core;             /* host-side: which emulated core this thread runs on */
+    uint32_t mod_skip;         /* guest mods: the next entry of this function runs its original code
+                                  (fills former padding: sizeof(Cpu) and save states are unchanged) */
     void* thread;              /* host-side: owning guest thread object */
 } Cpu;
 
@@ -151,6 +153,25 @@ void ppc_keep_failed(Cpu* c, int reg, uint32_t fn);
 #else
 #define PPC_SET_LR(c, v) ((c)->lr = (v))
 #endif
+
+/* guest mods (docs/mod-sdk-v2.md; game code generated with recomp.py --mod-hooks): every function body
+   checks its flag byte; a set flag means a mod hooks or replaces it, and ppc_mod_run (c->pc = the
+   function) runs the mods' hooks and the replacement or the original. The mod runtime calls the
+   original code by setting c->mod_skip first. Code without --mod-hooks emits no check or hook metadata. */
+#if defined(__GNUC__) && !defined(_WIN32)
+__attribute__((visibility("hidden")))
+#endif
+extern uint8_t* g_mod_hook_flags;
+void ppc_mod_run(Cpu* c);
+/* Do not mark this branch unlikely: Apple clang 17 can outline a cold hook
+   return into an i1-returning helper, invalidating the void musttail call.
+   Keep the entry branch ordinary so musttail stays in its original function. */
+#define PPC_MOD_HOOK(i, a) do {                                               \
+        if (g_mod_hook_flags[i]) {                                           \
+            if (c->mod_skip != (a)) { c->pc = (a); MUSTTAIL return ppc_mod_run(c); } \
+            c->mod_skip = 0;                                                  \
+        }                                                                     \
+    } while (0)
 
 /* loop back-edge (every backward branch inside a function): a compiler barrier. Guest memory is
    shared with the other guest threads, but the generated loads are plain loads, and Cpu is

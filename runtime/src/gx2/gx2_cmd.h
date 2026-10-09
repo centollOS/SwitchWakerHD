@@ -41,6 +41,8 @@ enum Op : uint32_t {
     OP_LAYOUT_ROOT,     // nw::lyt root pane: drawn into the target bound now (which screen it goes to)
     // (round 45) single-register writes merged by the staging buffer: register, value, register, value...
     OP_SET_REG_PAIRS,
+    OP_PEEK_Z,          // signed x/y in 640x480 space, guest result address (triples)
+    OP_LAYOUT_CONTENT,  // DrawSelf scope: clip TV menu content to the native layout region
     OP_COUNT
 };
 

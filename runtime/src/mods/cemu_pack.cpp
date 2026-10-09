@@ -1,4 +1,5 @@
 #include "cemu_pack.h"
+#include "guest_addr.h"
 #include "mod_archive.h"
 #include <algorithm>
 #include <atomic>
@@ -116,7 +117,7 @@ Pack parse(const fs::path& folder){
     Pack pack;auto sections=ini(read(folder/"rules.txt"));bool definition=false;
     for(const auto& section:sections){auto field=[&](const char* key){auto it=section.fields.find(key);return it==section.fields.end()?std::string{}:unquote(it->second);};
         if(section.name=="definition"){
-            require(!definition,"Multiple Cemu definitions");definition=true;bool usa=false;std::istringstream titles(lower(field("titleids")));std::string title;while(std::getline(titles,title,','))usa|=trim(title)=="0005000010143500";require(usa,"Cemu pack does not target WWHD USA");
+            require(!definition,"Multiple Cemu definitions");definition=true;require(targets_title(field("titleids"),g_guest_build_title_id),std::string("Cemu pack does not target this version of the game (")+g_guest_build_name+", title "+g_guest_build_title_id+")");
             auto version=field("version");require(version=="4"||version=="5","Only Cemu graphics pack versions 4 and 5 are supported");
             pack.name=field("name");require(!pack.name.empty(),"Cemu pack has no name");pack.description=field("description");
         }else if(section.name=="default"){
@@ -155,14 +156,17 @@ Pack parse(const fs::path& folder){
             {"wwhdaspecteur",{{"modulematches","0xb7e748de"},{"0x1004aaf0",".float ($aspectratio)"},{"0x101417e0",".float ($aspectratio)"},{"0x101658a8",".float ($aspectratio)"}}},
             {"wwhdaspectjap",{{"modulematches","0x74bd3f6a"},{"0x1004aaf0",".float ($aspectratio)"},{"0x101417f8",".float ($aspectratio)"},{"0x101658c0",".float ($aspectratio)"}}},
             {"wwhdaspectusa",{{"modulematches","0x475bd29f"},{"0x1004aaf0",".float ($aspectratio)"},{"0x101417d0",".float ($aspectratio)"},{"0x10165898",".float ($aspectratio)"}}}};
-        bool usa=false;std::set<std::string> seen;
+        // the section of the build this port was made from: its addresses are the ones the game has
+        const std::string build=g_guest_build_name;
+        const std::string want=build=="EU"?"wwhdaspecteur":build=="JP"?"wwhdaspectjap":"wwhdaspectusa";
+        bool mine=false;std::set<std::string> seen;
         for(auto section:ini(read(folder/"patches.txt"))) {
             require(expected.contains(section.name)&&seen.insert(section.name).second,"Unsupported Cemu patch section");
             for(auto& [key,value]:section.fields)value=lower(trim(value));
             require(section.fields==expected.at(section.name),"Only official WWHD aspect data patches are supported");
-            usa|=section.name=="wwhdaspectusa";
+            mine|=section.name==want;
         }
-        require(usa,"Missing WWHD USA aspect patch");pack.aspect_expression="$aspectRatio";
+        require(mine,"Missing WWHD "+build+" aspect patch");pack.aspect_expression="$aspectRatio";
     }
     require(!pack.textures.empty()||!pack.shaders.empty(),"Cemu pack contains no supported graphics or shader changes");
     prepare({Selection{"validation",pack,{}}});return pack;

@@ -3,7 +3,8 @@
 // Which key or controller input drives which GamePad input is the controls mapping (input_map.h,
 // edited in Input > Controls…). Defaults: WASD move, arrows camera, K/Space = A, J = B, L = X, I = Y,
 // Q = L, E = R, Left Shift = ZL, C = ZR, Enter = +, Tab = -, H = Home, 1-4 = D-pad up/down/left/right,
-// X = L-stick click, V = R-stick click; controllers use button positions (Xbox "A" = Wii U B).
+// X = L-stick click, V = R-stick click; controllers use button positions (Xbox "A" = Wii U B),
+// switchable to by-label with input_map::FaceLayout (issue #78).
 #import <AppKit/AppKit.h>
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>  // CACurrentMediaTime
@@ -17,6 +18,7 @@
 #include "renderer.h"
 #include "../runtime.h"
 #include "../savestate.h"
+#include "../screenshot.h"
 #include "../true60.h"
 #include "../motion/motion.h"
 #include "../overlay/overlay.h"
@@ -266,6 +268,8 @@ void init() {
             bool repeat = e.type != NSEventTypeFlagsChanged && e.isARepeat;
             if (gfx::text_input_key((__bridge void*)e)) return nil;  // the game's text prompt: typed text
             if (overlay::key(code, down, repeat, m)) return nil;
+            // the Screenshot binding (F10 by default; posted test keys take this path too)
+            if (e.type == NSEventTypeKeyDown && !e.isARepeat && screenshot::key_down(code)) return nil;
             if (posted) return nil;  // test keys only reach the overlay
         }
         std::lock_guard<std::mutex> lk(g_mu);
@@ -305,6 +309,7 @@ void init() {
                 std::copy(g_keys, g_keys + 256, keys);
             }
             motion::poll_recalibrate(v, keys);
+            screenshot::poll_controller(v);  // a controller input bound to Screenshot
         }
         mods::update_gyro_mouse();
     }];

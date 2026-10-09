@@ -24,7 +24,9 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "guest_addr.h"
 #include "mods.h"
+#include "../interp.h"
 #include "turbo_steps.h"
 #include "runtime.h"
 
@@ -46,9 +48,9 @@ namespace interp { bool hold_pass(); }
 
 namespace mods {
 namespace {
-constexpr uint32_t kOverlap = 0x101F36CC;  // l_fopOvlpM_overlap[0] (fopOvlpM_IsPeek 025DBE00)
+const uint32_t kOverlap = GD(0x101F36CC);  // l_fopOvlpM_overlap[0] (fopOvlpM_IsPeek 025DBE00)
 constexpr uint32_t kOvlpTask = 0x20;       // overlap_request_class::mpTask (fopOvlpM_SceneIsStart)
-constexpr uint32_t kPadPtr = 0x101F5088;   // the game's pad state (pad accessors 0200763C...)
+const uint32_t kPadPtr = GD(0x101F5088);   // the game's pad state (pad accessors 0200763C...)
 constexpr uint32_t kCurProc = 0x65F0;      // daPy_lk_c::mCurProc
 constexpr int kDoorTalk = 16;              // dDoor_info_c action table: "TALK"
 
@@ -69,7 +71,7 @@ const StepParts kDoorStep = [] {
 // traces (WWHD_MODS_TRACE): the processes in the delete queue whose timer has run out, which the
 // next fpcDt_Handler deletes (g_fpcDtTg_Queue 101F3A1C, see fpcDt_Handler 025DE024; delete tag:
 // +8 next node, +0xC process, +0x18 timer, fpcDtTg_Do 025DDE44)
-constexpr uint32_t kDeleteQueue = 0x101F3A1C;
+const uint32_t kDeleteQueue = GD(0x101F3A1C);
 void trace_due_deletes(const char* when) {
     if (!trace_on()) return;
     uint32_t n = ld32(kDeleteQueue);
@@ -146,7 +148,7 @@ void call(Cpu* c, void (*f)(Cpu*), uint32_t r3) {
 // function is FN for deletion (fopAcM_delete) right after the first logic step of each door event,
 // as an actor deleting itself in that step would (a rat going into its hole, a pot breaking, Tingle
 // leaving). FN=list traces the actors (execute function, position) instead.
-constexpr uint32_t kActorQueue = 0x101F3328;  // g_fopAcTg_Queue (fopAcIt_Executor 025D51DC)
+const uint32_t kActorQueue = GD(0x101F3328);  // g_fopAcTg_Queue (fopAcIt_Executor 025D51DC)
 uint32_t actor_execute(uint32_t a) {
     uint32_t sub = ld32(a + 0xF0);  // fopAc_ac_c::sub_method (true60.cpp kSubMethod)
     return sub >= 0x10000000 && sub < 0x50000000 ? ld32(sub + 8) : 0;
@@ -223,7 +225,7 @@ void after_execute(Cpu* c, uint32_t execute_fn) {
             if (kStep.priority) call(c, f_025E0EE4_orig, 0);  // fpcPi_Handler
             if (kStep.creation) call(c, f_025DDCEC_orig, 0);  // fpcCt_Handler
             g_door_cut = false;
-            if (kStep.execute) call(c, f_025DE788_orig, execute_fn);
+            if (kStep.execute) { interp::record_executed_step(); call(c, f_025DE788_orig, execute_fn); }
             g_extra_door++;
             door = g_door_cut;  // continue only while the door event still runs
             g_door_cut = false;

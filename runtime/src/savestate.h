@@ -72,6 +72,7 @@ struct SlotInfo {
     bool compatible = true;
     bool portable = false;  // the slot's (newer) file is a portable state
     std::string when;  // local time of the save
+    std::string controller; // empty for legacy states
     std::string area;  // stage name, if known
     std::string path;  // the slot's file
     bool older_other = false;  // the slot also has an older file of the other kind (kept, never deleted)
@@ -94,6 +95,8 @@ bool full_states_forced();              // the environment decides (WWHD_FULL_SA
 std::string bug_report_text();          // paths of the newest portable state and of cking.sav, for a bug report
 std::string states_dir();               // where slots live (created on first use)
 std::string last_message();             // short status for the title bar ("" when stale)
+// a short notice shown the same way (overlay toast, title bar) for a few seconds: screenshots
+void notice(const std::string& text);
 
 // ---- game thread: call at the frame boundary (top of the per-frame function) ----
 void service(Cpu* c);

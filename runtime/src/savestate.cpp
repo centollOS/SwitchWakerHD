@@ -23,6 +23,9 @@
 // runtime allocations) and guest memory (MEM2, runtime objects, fixed slots, foreground bucket,
 // MEM1; all-zero 64 KiB chunks are left out).
 #include "savestate.h"
+#include "guest_addr.h"
+#include "full_state_header.h"
+#include "input.h"
 
 #ifdef __APPLE__
 #include <compression.h>
@@ -55,6 +58,9 @@
 #include "build_info.h"
 #include "crashrec.h"
 #include "portable_state.h"
+#include "state_memory.h"
+#include "mods/guest_mods.h"
+#include "mods/guest_state_section.h"
 #include "quit_prompt.h"
 #include "rumble.h"
 
@@ -92,18 +98,7 @@ constexpr uint32_t kVersion = 2; // liblz4 raw blocks, not Apple COMPRESSION_LZ4
 constexpr uint32_t kChunk = 0x10000;
 constexpr uint32_t kBlock = 8 << 20;  // compression block (raw bytes)
 
-struct Header {
-    char magic[8];
-    uint32_t version;
-    uint32_t header_size;
-    uint64_t created;       // unix time
-    char area[32];          // stage name
-    uint8_t build[16];      // LC_UUID of the executable that wrote it (informational)
-    uint64_t game_id;       // hash of cking.rpx
-    uint32_t cpu_size;      // sizeof(Cpu)
-    uint32_t blocks;        // compressed blocks that follow
-    uint64_t raw_size;      // payload bytes
-};
+using Header = FullStateHeader;
 
 enum : uint32_t {
     kSecThreads = 'THRD',
@@ -114,9 +109,10 @@ enum : uint32_t {
     kSecAllocs = 'RALC',
     kSecDispatch = 'DSPT',
     kSecMemory = 'MEM ',
+    kSecGuestMods = 'GMOD',
 };
 
-struct Region { uint32_t base, size; };
+using Region=MemoryRegion;
 
 std::vector<Region> regions() {
     uint32_t top = (mem::runtime_top() + kChunk - 1) & ~(kChunk - 1);
@@ -124,7 +120,8 @@ std::vector<Region> regions() {
             {mem::kRuntimeStart, top - mem::kRuntimeStart},
             {mem::kFixedStart, mem::kFixedSize},
             {mem::kFgBucket, mem::kFgBucketSize},
-            {mem::kMem1, mem::kMem1Size}};
+            {mem::kMem1, mem::kMem1Size},
+            {guestmods::kRegionStart,guestmods::kRegionSize}};
 }
 
 // A snapshot in memory: header + payload (sections); memory chunks point into the payload.
@@ -135,6 +132,7 @@ struct Snapshot {
     std::unordered_map<uint32_t, const uint8_t*> chunks;      // chunk address -> data (absent = zero)
     std::vector<Region> regs;
     int slot = 0;
+    std::vector<guestmods::ModIdentity> guest_mods;
 
     Reader section(uint32_t tag) const {
         auto it = sections.find(tag);
@@ -151,19 +149,9 @@ struct Snapshot {
             sections[tag] = {off, (size_t)n};
         }
         if (!r.ok || !sections.count(kSecMemory)) return false;
-        Reader m = section(kSecMemory);
-        uint32_t nr = m.u32();
-        for (uint32_t i = 0; i < nr && m.ok; i++) {
-            Region g{m.u32(), m.u32()};
-            regs.push_back(g);
-            uint32_t present = m.u32();
-            for (uint32_t k = 0; k < present && m.ok; k++) {
-                uint32_t idx = m.u32();
-                chunks[g.base + idx * kChunk] = m.p;
-                if (!m.bytes(nullptr, kChunk)) return false;
-            }
-        }
-        return m.ok;
+        if(!guestmods::read_mod_set(section(kSecGuestMods),guest_mods))return false;
+        Reader m=section(kSecMemory);
+        return read_regions(m,regs,chunks);
     }
 };
 
@@ -190,6 +178,14 @@ void message(const char* fmt, ...) {
     std::lock_guard<std::mutex> lk(g_mu);
     g_message = buf;
     g_message_time = std::chrono::steady_clock::now();
+}
+
+void append_mod_warning(bool differs) {
+    if(!differs)return;
+    LOG("[savestate] %s",guestmods::kModWarning);
+    std::lock_guard<std::mutex> lock(g_mu);
+    g_message+="; ";g_message+=guestmods::kModWarning;
+    g_message_time=std::chrono::steady_clock::now();
 }
 
 // the waiting `done` of request_save(slot, done), taken out (empty if it is for another slot)
@@ -266,7 +262,7 @@ uint64_t game_id() {
 }
 
 // current stage (dComIfG_gameInfo.play: the start stage, 8 chars)
-constexpr uint32_t kStageName = 0x1046F0B0 + 0x5134;  // dStage_startStage_c (next stage at +0x5140)
+const uint32_t kStageName = GD(0x1046F0B0) + 0x5134;  // dStage_startStage_c (next stage at +0x5140)
 std::string stage_name() {
     if (const char* e = getenv("WWHD_STATE_STAGE_ADDR")) {
         uint32_t a = (uint32_t)strtoul(e, nullptr, 16);
@@ -281,46 +277,13 @@ std::string stage_name() {
 
 // ---------------------------------------------------------------- memory
 void capture_memory(Writer& w) {
-    auto rs = regions();
-    w.u32((uint32_t)rs.size());
-    for (auto& g : rs) {
-        w.u32(g.base);
-        w.u32(g.size);
-        size_t count_at = w.b.size();
-        w.u32(0);
-        uint32_t present = 0;
-        for (uint32_t off = 0; off < g.size; off += kChunk) {
-            uint8_t* p = mem::ptr(g.base + off);
-            // untouched pages are zero: skip them without reading (reading would commit them)
-            if (!host::memory_touched(p,kChunk)) continue;
-            const uint64_t* q = (const uint64_t*)p;
-            bool zero = true;
-            for (size_t i = 0; i < kChunk / 8 && zero; i++) zero = q[i] == 0;
-            if (zero) continue;
-            w.u32(off / kChunk);
-            w.bytes(p, kChunk);
-            present++;
-        }
-        memcpy(&w.b[count_at], &present, 4);
-    }
+    capture_regions(w,regions(),[](uint32_t a){return mem::ptr(a);},
+                    [](const uint8_t* p,size_t n){return host::memory_touched(const_cast<uint8_t*>(p),n);});
 }
 
 void restore_memory(const Snapshot& s) {
-    for (auto& g : s.regs) {
-        for (uint32_t off = 0; off < g.size; off += kChunk) {
-            uint32_t a = g.base + off;
-            uint8_t* p = mem::ptr(a);
-            auto it = s.chunks.find(a);
-            if (it != s.chunks.end()) {
-                memcpy(p, it->second, kChunk);
-                continue;
-            }
-            if (!host::memory_touched(p,kChunk)) continue;
-            const uint64_t* q = (const uint64_t*)p;
-            for (size_t i = 0; i < kChunk / 8; i++)
-                if (q[i]) { memset(p, 0, kChunk); break; }
-        }
-    }
+    restore_regions(s.regs,s.chunks,[](uint32_t a){return mem::ptr(a);},
+                    [](const uint8_t* p,size_t n){return host::memory_touched(const_cast<uint8_t*>(p),n);});
 }
 
 // ---------------------------------------------------------------- slot files
@@ -370,8 +333,8 @@ bool write_slot(int slot, const Header& h0, const std::vector<uint8_t>& payload)
 }
 
 bool read_header(FILE* f, Header& h, std::string& why) {
-    if (fread(&h, sizeof h, 1, f) != 1 || memcmp(h.magic, kMagic, 8) != 0) { why = "not a save state"; return false; }
-    if (h.version != kVersion || h.header_size != sizeof(Header)) { why = "saved by another version"; return false; }
+    if (!read_full_state_header(f, h, why)) return false;
+    if (h.version != kVersion) { why = "saved by another version"; return false; }
     if (h.cpu_size != sizeof(Cpu)) { why = "saved by an incompatible build"; return false; }
     if (h.game_id != game_id()) { why = "saved with a different game executable"; return false; }
     return true;
@@ -536,6 +499,8 @@ bool do_save(int slot) {
     w = Writer();
     save_dispatch(w);
     put_section(*payload, kSecDispatch, w);
+    w=Writer();guestmods::save_mod_set(w,guestmods::enabled_mods());
+    put_section(*payload,kSecGuestMods,w);
     // memory last, written straight into the payload
     payload->u32(kSecMemory);
     size_t len_at = payload->b.size();
@@ -553,6 +518,7 @@ bool do_save(int slot) {
     build_uuid(h.build);
     h.game_id = game_id();
     h.cpu_size = sizeof(Cpu);
+    h.controller = input::pro_controller() ? 2 : 1;
     threads::thaw();
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     LOG("[savestate] slot %d: captured %.1f MB in %.1f ms (stage %s)", slot, payload->b.size() / 1048576.0, ms, stage.c_str());
@@ -609,6 +575,7 @@ bool do_load(const std::shared_ptr<Snapshot>& s) {
         return true;
     }
     restore_memory(*s);
+    if (s->h.controller) input::set_pro_controller(restored_pro_controller(s->h.controller, input::pro_controller()));
     Reader r = s->section(kSecAllocs);
     mem::raise_runtime_top(r.u32());
     r = s->section(kSecHeaps);
@@ -627,7 +594,9 @@ bool do_load(const std::shared_ptr<Snapshot>& s) {
     threads::thaw();
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     std::string area = s->h.area[0] ? " (" + area_label(s->h.area) + ")" : "";
+    const bool mods_differ=guestmods::different_mods(s->guest_mods,guestmods::enabled_mods());
     message("Loaded %s%s", is_auto(s->slot) ? slot_label(s->slot).c_str() : ("slot " + std::to_string(s->slot)).c_str(), area.c_str());
+    append_mod_warning(mods_differ);
     LOG("[savestate] slot %d: restored in %.1f ms", s->slot, ms);
     return true;
 }
@@ -645,36 +614,39 @@ bool do_load(const std::shared_ptr<Snapshot>& s) {
 //         stage change the way the game restarts a room after a void-out: dSv_restart_c holds
 //         Link's room, position and angle, and the next stage gets point -1 (dStage_playerInit
 //         creates Link there).
-constexpr uint32_t kSaveInfoPtr = 0x101F84DC;       // dComIfGs save area (dSv_info_c at +0x20)
-constexpr uint32_t kPlay = 0x1046F0B0;              // g_dComIfG_gameInfo.play (dComIfG_getGameInfo 025200D4)
-constexpr uint32_t kStartStage = kPlay + 0x5134;    // dStage_startStage_c: name[8], point s16, room s8, layer s8
-constexpr uint32_t kNextStage = kPlay + 0x5140;     // dStage_nextStage_c: the same + enabled, wipe
-constexpr uint32_t kStageData = kPlay + 0x5150;     // dStage_stageDt_c (getStagInfo: vtable +0x15C)
-constexpr uint32_t kLinkPtr = kPlay + 0x5B34;       // mpPlayerPtr[0]: daPy_lk_c
-constexpr uint32_t kShipPtr = kPlay + 0x5B3C;       // dComIfGp_getShipActor: daShip_c (0 without a boat)
+// The addresses of the game's own globals and functions are canonical (USA) ids: GD()/GC() turn
+// them into this build's (runtime/include/guest_addr.h). An offset inside an object does not
+// change with the build, so only the base of each object is translated.
+const uint32_t kSaveInfoPtr = GD(0x101F84DC);       // dComIfGs save area (dSv_info_c at +0x20)
+const uint32_t kPlay = GD(0x1046F0B0);              // g_dComIfG_gameInfo.play (dComIfG_getGameInfo 025200D4)
+const uint32_t kStartStage = kPlay + 0x5134;    // dStage_startStage_c: name[8], point s16, room s8, layer s8
+const uint32_t kNextStage = kPlay + 0x5140;     // dStage_nextStage_c: the same + enabled, wipe
+const uint32_t kStageData = kPlay + 0x5150;     // dStage_stageDt_c (getStagInfo: vtable +0x15C)
+const uint32_t kLinkPtr = kPlay + 0x5B34;       // mpPlayerPtr[0]: daPy_lk_c
+const uint32_t kShipPtr = kPlay + 0x5B3C;       // dComIfGp_getShipActor: daShip_c (0 without a boat)
 constexpr uint32_t kActorPos = 0x314, kActorRoom = 0x326, kShapeAngleY = 0x32A;  // fopAc_ac_c (WWHD)
 constexpr uint32_t kLinkProc = 0x65F0;              // daPy_lk_c::mCurProc
 constexpr uint32_t kInfo = 0x20;                    // dSv_info_c in the save area
-constexpr uint32_t kDataNum = kInfo + 0x1290;       // dSv_info_c::mDataNum (Quest Log 0..2)
+const uint32_t kDataNum = kInfo + 0x1290;       // dSv_info_c::mDataNum (Quest Log 0..2)
 constexpr uint32_t kReturnPlace = 0x50;             // dSv_player_return_place_c (0xC bytes)
-constexpr uint32_t kMemoryTable = kInfo + 0x380;    // dSv_save_c::mSave[16] (dSv_memory_c, 0x24 each)
-constexpr uint32_t kTurnRestart = kInfo + 0x1258;   // dSv_turnRestart_c: pos 0, param 0xC, angle 0x10, room 0x12, ship pos 0x24, ship angle 0x30, has ship 0x34
-constexpr uint32_t kRestart = kInfo + 0x1128;       // dSv_restart_c: room 0, angle 0x16, pos 0x18, param 0x24, last speed 0x28, last mode 0x2C
+const uint32_t kMemoryTable = kInfo + 0x380;    // dSv_save_c::mSave[16] (dSv_memory_c, 0x24 each)
+const uint32_t kTurnRestart = kInfo + 0x1258;   // dSv_turnRestart_c: pos 0, param 0xC, angle 0x10, room 0x12, ship pos 0x24, ship angle 0x30, has ship 0x34
+const uint32_t kRestart = kInfo + 0x1128;       // dSv_restart_c: room 0, angle 0x16, pos 0x18, param 0x24, last speed 0x28, last mode 0x2C
 constexpr uint32_t kHdArea = 0x12C0;                // HD per-file data (SaveMgr getters 027200A0..)
 constexpr uint32_t kCardStatusB = 0x18;             // status B in the card block: time 0xC (f32), date 0x10 (u16)
 // game functions
-constexpr uint32_t fn_memory_to_card = 0x025BA9FC, fn_card_to_memory = 0x025BA7B0, fn_putSave = 0x025B9D24,
-                   fn_getSave = 0x025B9C9C, fn_setGameStartStage = 0x025217F8, fn_danInit = 0x025B9174,
-                   fn_eventInit = 0x025B8B10, fn_refreshGame = 0x02721880, fn_turnRestartSet = 0x025B998C;
+const uint32_t fn_memory_to_card = GC(0x025BA9FC), fn_card_to_memory = GC(0x025BA7B0), fn_putSave = GC(0x025B9D24),
+               fn_getSave = GC(0x025B9C9C), fn_setGameStartStage = GC(0x025217F8), fn_danInit = GC(0x025B9174),
+               fn_eventInit = GC(0x025B8B10), fn_refreshGame = GC(0x02721880), fn_turnRestartSet = GC(0x025B998C);
 // HD sections: (slot getter, live getter, live <- slot copy) and size in the file (SaveMgr read/write 02724764..)
 struct HdSection { uint32_t slot_get, live_get, copy; size_t size; std::vector<uint8_t> pstate::State::*field; };
 const HdSection kHdSections[] = {
-    {0x027200A0, 0x027200D0, 0x0271FCB4, pstate::kHdPlayerSize, &pstate::State::hd_player},
-    {0x027200D8, 0x027200F4, 0x0271FAC0, pstate::kHdStatusSize, &pstate::State::hd_status},
-    {0x027200FC, 0x02720118, 0x0271F914, pstate::kHdEventSize, &pstate::State::hd_event},
-    {0x02720180, 0x0272019C, 0x027208F4, pstate::kHdMapSize, &pstate::State::hd_map},
+    {GC(0x027200A0), GC(0x027200D0), GC(0x0271FCB4), pstate::kHdPlayerSize, &pstate::State::hd_player},
+    {GC(0x027200D8), GC(0x027200F4), GC(0x0271FAC0), pstate::kHdStatusSize, &pstate::State::hd_status},
+    {GC(0x027200FC), GC(0x02720118), GC(0x0271F914), pstate::kHdEventSize, &pstate::State::hd_event},
+    {GC(0x02720180), GC(0x0272019C), GC(0x027208F4), pstate::kHdMapSize, &pstate::State::hd_map},
 };
-constexpr uint32_t fn_name_obj = 0x02720154;  // per-file player name (SafeString: +0 UTF-16 text)
+const uint32_t fn_name_obj = GC(0x02720154);  // per-file player name (SafeString: +0 UTF-16 text)
 
 bool in_mem2(uint32_t a) { return a >= mem::kMem2Start && a < mem::kMem2End; }
 
@@ -729,14 +701,14 @@ bool gameplay_ready(std::string& why, bool& retry) {
 // wipe in progress, Link is the controlled actor, Link is not on a rope). The menu also refuses
 // while the Telescope or the Picto Box aims; that is left out (Link restarts standing, harmless).
 // Updated every frame for the event delay.
-constexpr uint32_t kEventRun = kPlay + 0x5292;     // dComIfGp_event_runCheck (dEvt_control_c mode)
-constexpr uint32_t kMesgStatus = kPlay + 0x5BB2;   // dComIfGp_getMesgStatus (messageState 025F795C)
-constexpr uint32_t kScopeMesgStatus = kPlay + 0x5BB3;
-constexpr uint32_t kMenuFlag = 0x101EA069;         // dMenu_flag (025986BC)
-constexpr uint32_t kPlayerPtr = kPlay + 0x5B2C;    // mpPlayer[0]: the controlled actor
-constexpr uint32_t kPlayerStatus0 = kPlay + 0x5CD8; // dComIfGp_checkPlayerStatus0 (mPlayerStatus[0][0])
+const uint32_t kEventRun = kPlay + 0x5292;     // dComIfGp_event_runCheck (dEvt_control_c mode)
+const uint32_t kMesgStatus = kPlay + 0x5BB2;   // dComIfGp_getMesgStatus (messageState 025F795C)
+const uint32_t kScopeMesgStatus = kPlay + 0x5BB3;
+const uint32_t kMenuFlag = GD(0x101EA069);         // dMenu_flag (025986BC)
+const uint32_t kPlayerPtr = kPlay + 0x5B2C;    // mpPlayer[0]: the controlled actor
+const uint32_t kPlayerStatus0 = kPlay + 0x5CD8; // dComIfGp_checkPlayerStatus0 (mPlayerStatus[0][0])
 constexpr uint32_t kSttsRope = 0x00800000;          // daPyStts0_UNK800000_e: set by Link's rope procedures (procRope*)
-constexpr uint32_t fn_ovlpDoingReq = 0x025DBE38;   // fopOvlpM_IsDoingReq (a wipe or scene overlap runs)
+const uint32_t fn_ovlpDoingReq = GC(0x025DBE38);   // fopOvlpM_IsDoingReq (a wipe or scene overlap runs)
 int g_event_wait = 0;                              // d_menu_window.cpp event_wait_frame
 void track_events() {
     if (ld8(kEventRun)) g_event_wait = 5;
@@ -844,8 +816,10 @@ bool capture_portable(Cpu* c, pstate::State& s, std::string& why) {
     s.title_version = (uint32_t)strtoul(meta_value("title_version").c_str(), nullptr, 10);
     s.game_hash = hex64(game_id());
     s.runtime = std::string(build::version()) + " (" + build::commit() + ")";
+    s.guest_mods=guestmods::enabled_mods();
     s.created = now_text();
     s.file_slot = slot;
+    s.controller = input::pro_controller() ? 2 : 1;
     s.stage = stage;
     s.start_point = (int16_t)ld16(kStartStage + 8);
     s.start_room = (int8_t)ld8(kStartStage + 10);
@@ -921,6 +895,7 @@ bool apply_portable(Cpu* c, const pstate::State& s, std::string& why, bool& retr
     st8(kNextStage + 10, (uint8_t)s.room);
     st8(kNextStage + 11, (uint8_t)s.layer);
     st8(kNextStage + 13, 0);  // wipe: fade
+    if (s.controller) input::set_pro_controller(restored_pro_controller(s.controller, input::pro_controller()));
     st8(kNextStage + 12, 1);  // enabled
     return true;
 }
@@ -1051,6 +1026,7 @@ void service_portable_load(Cpu* c) {
             message("Loaded %s (%s; progress and position)", p.slot ? ("slot " + std::to_string(p.slot)).c_str() : "portable state",
                     area_label(p.s->stage.c_str()).c_str());
         }
+        append_mod_warning(guestmods::different_mods(p.s->guest_mods,guestmods::enabled_mods()));
         g_arrival = Arrival{p.s->stage, {p.s->pos[0], p.s->pos[1], p.s->pos[2]}, render::frame_count(), ld32(ld32(kLinkPtr) + 4), 0, p.s};
         std::lock_guard<std::mutex> lk(g_mu);
         g_last_portable = p.path;
@@ -1174,11 +1150,12 @@ SlotInfo full_slot_info(int slot) {
     info.path = slot_path(slot);
     FILE* f = fopen(info.path.c_str(), "rb");
     if (!f) return info;
-    Header h;
+    Header h{};
     std::string why;
     info.used = true;
     info.compatible = read_header(f, h, why);
     fclose(f);
+    if (info.compatible) info.controller = controller_label(h.controller);
     if (info.compatible || memcmp(h.magic, kMagic, 8) == 0) {
         time_t t = (time_t)h.created;
         struct tm tmv;
@@ -1220,6 +1197,7 @@ SlotInfo portable_slot_info(int slot) {
             info.when = buf;
         } else info.when = s.created;
         info.area = area_label(s.stage.c_str());
+        info.controller = controller_label(s.controller);
     }
     return info;
 }
@@ -1285,6 +1263,7 @@ void request_load_portable_file(const std::string& path) {
     }
     if (s->runtime != std::string(build::version()) + " (" + build::commit() + ")")
         LOG("[savestate] portable state from %s (this build: %s %s)", s->runtime.c_str(), build::version(), build::commit());
+    if(guestmods::different_mods(s->guest_mods,guestmods::enabled_mods()))message("%s",guestmods::kModWarning);
     int slot = 0;
     for (int i = 1; i <= kSlots; i++)
         if (path == slot_path(i, pstate::kExtension)) slot = i;
@@ -1317,6 +1296,7 @@ void request_load(int slot) {
             g_loading = false;
             return;
         }
+        if(guestmods::different_mods(s->guest_mods,guestmods::enabled_mods()))message("%s",guestmods::kModWarning);
         LOG("[savestate] slot %d: read and decompressed %.1f MB in %.0f ms", slot, s->payload.size() / 1048576.0,
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         std::lock_guard<std::mutex> lk(g_mu);
@@ -1383,6 +1363,8 @@ std::string bug_report_text() {
     return out;
 }
 
+void notice(const std::string& text) { message("%s", text.c_str()); }
+
 std::string last_message() {
     std::lock_guard<std::mutex> lk(g_mu);
     if (g_message.empty() || std::chrono::steady_clock::now() - g_message_time > std::chrono::seconds(g_message.size() > 60 ? 7 : 4)) return "";
@@ -1445,7 +1427,7 @@ void service(Cpu* c) {
     if (s && do_load(s)) {
         g_last_load_frame = render::frame_count();
         g_last_load_step = interp::logic_steps();
-        g_last_load_counter = ld32(0x101FF560);  // g_Counter.mTimer: the game's own step counter, part of the state
+        g_last_load_counter = ld32(GD(0x101FF560));  // g_Counter.mTimer: the game's own step counter, part of the state
         {
             std::lock_guard<std::mutex> lk(g_mu);
             g_load_ready.reset();

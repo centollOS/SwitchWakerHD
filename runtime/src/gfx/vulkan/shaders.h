@@ -3,6 +3,7 @@
 #include <array>
 #include <string>
 #include <vector>
+#include "../shader_identity.h"
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
 
 struct LatteFetchShader;
@@ -22,6 +23,7 @@ DescriptorRankPlan make_descriptor_rank_plan(const LatteDecompilerShaderResource
 // created by the draw backend; this cache owns only translation and SPIR-V.
 struct Shader {
     uint64_t key = 0;
+    gfx::ProgramKind kind = gfx::ProgramKind::Other;
     uint64_t pipelineId = 0;  // equal for shaders with identical SPIR-V and resource mapping
     bool vertex = false;
     LatteDecompilerShader* dec = nullptr;
@@ -38,8 +40,10 @@ void select_renderer();
 // Pass the renderer frame to revalidate program bytes once per frame. Omitting
 // it keeps immediate revalidation for standalone callers and shader tools.
 LatteFetchShader* get_fetch_shader(const uint32_t* regs, uint64_t* keyOut, uint64_t frame = ~uint64_t{0});
+// linkedVs (pixel shaders): the draw's vertex shader; inputs it has no output for read the GPU's
+// default value for them (SPI_PS_INPUT_CNTL DEFAULT_VAL), as constants.
 Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetchShader, uint64_t fsKey,
-    uint64_t frame = ~uint64_t{0}, uint64_t stateGeneration = ~uint64_t{0});
+    uint64_t frame = ~uint64_t{0}, uint64_t stateGeneration = ~uint64_t{0}, const Shader* linkedVs = nullptr);
 // Generation must advance for every shader-relevant register write (every register the key
 // reads must be covered by gx2's shader_irrelevant()/vulkan_shader_key_mask()). Primitive
 // mode is checked separately because draw submission writes it directly.
@@ -64,6 +68,7 @@ void checkpoint_shader_cache(uint64_t frame);
 bool shader_cache_dirty();
 uint64_t shader_cache_changed_frame();
 bool save_shader_cache();
+std::vector<uint32_t> compile_compute(const std::string& source, std::string* error = nullptr);
 std::vector<uint32_t> compile_glsl(const std::string& source, bool vertex, std::string* error = nullptr);
 // Caller-owned CPU scratch; all active bytes are freshly zeroed and packed.
 void pack_uniforms_into(const uint32_t* regs, const Shader& shader,

@@ -1,3 +1,5 @@
+#include "bc_decode.h"
+#include "bc_reference.h"
 // No game assets: assertions inspect data returned by the actual Vulkan device.
 #include "backend.h"
 #include "buffer_cache.h"
@@ -10,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 #include <filesystem>
@@ -49,6 +52,29 @@ void clear_image(Surface& s,const float rgba[4]) {
  transition_image(&s,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
  VkClearColorValue value{};std::copy(rgba,rgba+4,value.float32);VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,s.mips,0,s.arrayLayers};
  vkCmdClearColorImage(command_buffer(),s.image,s.layout,&value,1,&range);mark_gpu_written(&s);
+}
+void bc_surface_check() {
+ for (uint32_t format : {0x31u,0x431u,0x32u,0x432u,0x33u,0x433u,0x34u,0x234u,0x35u,0x235u}) {
+  SurfaceDesc d;d.addr=mem::host_alloc(65536,256);d.mipAddr=mem::host_alloc(65536,256);
+  d.width=16;d.height=16;d.pitch=4;d.slices=2;d.mips=2;d.format=format;d.dim=5;
+  memset(mem::ptr(d.addr),0,65536);memset(mem::ptr(d.mipAddr),0,65536);
+  auto* s=find_or_create_surface(d,false);
+  if(!s->bcDecoded)continue;
+  upload_surface(s);auto uploads=g_stat_uploads;upload_surface(s);
+  require(g_stat_uploads==uploads,"BC upload cache did not hit");
+  const unsigned type=(format&63)-0x30,mode=type|((format&0x200)?256:0);
+  auto expected=[&](uint8_t fill){std::vector<uint8_t> block(bc::block_bytes(type),fill);return bc::pixel(block.data(),type,mode&256,0);};
+  auto zero=expected(0),changed=expected(255);
+  for(unsigned level=0;level<2;++level)for(unsigned layer=0;layer<2;++layer)
+   rgba_is(read_image(*s,VK_IMAGE_ASPECT_COLOR_BIT,4,level,layer),zero.data(),"BC mip/layer upload differs");
+  memset(mem::ptr(d.mipAddr),255,65536);invalidate(2,d.mipAddr+16,4);upload_surface(s);
+  require(g_stat_uploads==uploads+1,"BC partial invalidation did not re-upload");
+  for(unsigned layer=0;layer<2;++layer){
+   rgba_is(read_image(*s,VK_IMAGE_ASPECT_COLOR_BIT,4,0,layer),zero.data(),"BC mip invalidation modified base");
+   rgba_is(read_image(*s,VK_IMAGE_ASPECT_COLOR_BIT,4,1,layer),changed.data(),"BC changed mip/layer differs");
+  }
+ }
+ fprintf(stderr,"[renderer smoke] BC production uploads, sRGB/signed views, mip/layer cache and invalidation passed\n");
 }
 void upload_arena_check() {
  const uint64_t before=R.uploadAllocations;
@@ -523,7 +549,19 @@ void dynamic_uniform_check(Surface& s) {
 }
 int renderer_smoke_test() {
  try {
-  mem::init();upload_arena_check();asynchronous_submission_check();buffer_cache_check();set_res_scale(1);latch_res_scale();
+  // Test-only calibration: CI requires the layer to report this intentional WAW.
+  if(std::getenv("WWHD_VK_SYNC_NEGATIVE_CONTROL")) {
+   Buffer b=create_buffer(16,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+   auto cmd=command_buffer();
+   auto fill=reinterpret_cast<PFN_vkCmdFillBuffer>(vkGetDeviceProcAddr(R.device,"vkCmdFillBuffer"));
+   require(fill!=nullptr,"sync negative control needs vkCmdFillBuffer");
+   fill(cmd,b.buffer,0,16,0);
+   fill(cmd,b.buffer,0,16,1);
+   flush();defer_buffer(b);
+   LOG("[renderer smoke] sync negative control submitted two unordered writes");
+   command_buffer();flush();return 0;
+  }
+  mem::init();bc_decode_smoke();bc_surface_check();upload_arena_check();asynchronous_submission_check();buffer_cache_check();set_res_scale(1);latch_res_scale();
   {
    Image upload(16,16,0x1a,false,2,2);
    upload.s.addr=mem::host_alloc(65536,256);upload.s.mipAddr=mem::host_alloc(65536,256);
@@ -574,6 +612,26 @@ int renderer_smoke_test() {
     mark_gpu_written(target);
     require(find_or_create_surface(t,false)==target,"sampling after the render did not find the render target");
     fprintf(stderr,"[renderer smoke] render target after a mipmapped sampled texture passed\n");
+    // Bloom renders level 1 separately, then binds the base descriptor with LOD clamped to 1.
+    // Distinct GPU colours prove that this reads the rendered mip rather than the base image.
+    SurfaceDesc mip=rt;mip.addr=t.mipAddr;mip.width=8;mip.height=8;mip.pitch=8;
+    auto* mipTarget=find_or_create_surface(mip,true);
+    const float baseColor[4]={0,0,1,1},mipColor[4]={0,1,0,1};
+    clear_image(*target,baseColor);clear_image(*mipTarget,mipColor);
+    uint32_t words[7]={1u|(1u<<3)|(1u<<8)|(15u<<19),15u|(0x1au<<26),
+        t.addr>>8,t.mipAddr>>8,(1u<<19)|(2u<<22)|(3u<<25),1,0};
+    auto* sampledMip=sampled_texture(words,false);
+    require(sampledMip!=target && sampledMip->mips==2,"GPU-rendered mip chain was not assembled");
+    const uint8_t mipBytes[4]={0,255,0,255};
+    rgba_is(read_image(*sampledMip,VK_IMAGE_ASPECT_COLOR_BIT,4,1),mipBytes,
+        "fixed-LOD rendered mip readback differs");
+    const uint8_t baseBytes[4]={0,0,255,255};
+    rgba_is(read_image(*sampledMip,VK_IMAGE_ASPECT_COLOR_BIT,4),baseBytes,"mip chain changed the base image");
+    const float changedColor[4]={1,0,0,1};const uint8_t changedBytes[4]={255,0,0,255};
+    clear_image(*mipTarget,changedColor);
+    auto* rebuilt=sampled_texture(words,false);
+    rgba_is(read_image(*rebuilt,VK_IMAGE_ASPECT_COLOR_BIT,4,1),changedBytes,"mip-only write did not rebuild the sampled chain");
+    fprintf(stderr,"[renderer smoke] GPU-rendered mip chain/base preservation/mip-only refresh passed\n");
    }
    {
     // A texel changed in place, unannounced, between the 256 words the former sampled check read
@@ -614,7 +672,29 @@ int renderer_smoke_test() {
    for(size_t i=0;i<stencils.size();++i){float value;memcpy(&value,depths.data()+i*4,4);require(value==0.25f&&stencils[i]==0xa5,"depth/stencil clear differs");}
    fprintf(stderr,"[renderer smoke] depth/stencil upload and clear passed\n");
    depth_copy_check();
-   volume_target_check();
+   {
+    auto peek=std::make_unique<Surface>();
+    peek->width=1280;peek->height=720;peek->pitch=1280;peek->format=0x11;peek->isDepth=true;peek->fmt=format_info(0x11,true);
+    peek->addr=mem::host_alloc(256,256);create_surface_image(peek.get(),true,VkExtent3D{16,16,1});
+    auto* surface=peek.get();auto entry=R.surfaces.emplace(peek->addr,std::move(peek));
+    uint32_t previousDepth=R.mainDepthAddr;R.mainDepthAddr=surface->addr;
+    uint32_t result=mem::host_alloc(256,256);uint32_t cells[]={320,240,result,0,0,result+4};
+    for(float z:{0.25f,1.0f}) {
+     transition_image(surface,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
+     VkClearDepthStencilValue value{z,0};vkCmdClearDepthStencilImage(command_buffer(),surface->image,surface->layout,&value,1,&range);
+     peek_z(cells,6);flush();uint32_t expected=z==1.0f?0xFFFFFFu:0x3FFFFFu;
+     require(ld32(result)==expected&&ld32(result+4)==expected,"GPU depth peek differs");
+    }
+    // A drain retires the newest fence first; an older answer must not replace it.
+    for(float z:{0.25f,1.0f}) {
+     transition_image(surface,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
+     VkClearDepthStencilValue value{z,0};vkCmdClearDepthStencilImage(command_buffer(),surface->image,surface->layout,&value,1,&range);
+     peek_z(cells,6);flush_async();
+    }
+    flush();require(ld32(result)==0xFFFFFFu&&ld32(result+4)==0xFFFFFFu,"older GPU depth answer replaced newer answer");
+    R.mainDepthAddr=previousDepth;destroy_surface_image(surface);R.surfaces.erase(entry);
+    fprintf(stderr,"[renderer smoke] asynchronous GPU depth peeks passed\n");
+   }
    Image rendered(64,64,0x1a);dynamic_uniform_check(rendered.s);vertex_window_check(rendered.s);triangle(rendered.s);
    if(R.tv.scan)destroy_surface_image(R.tv.scan.get());R.tv.scan=std::make_unique<Surface>();auto& scan=*R.tv.scan;scan.width=64;scan.height=64;scan.format=0x1a;scan.fmt=format_info(scan.format,false);create_surface_image(&scan,false);resample(&rendered.s,&scan,1);mark_gpu_written(&scan);
    auto capturePath=std::filesystem::temp_directory_path()/("wwhd-vulkan-smoke-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".png");
@@ -634,12 +714,13 @@ int renderer_smoke_test() {
    std::vector<uint8_t> decoded((64*4+1)*64);uLongf decodedSize=decoded.size();require(header&&uncompress(decoded.data(),&decodedSize,compressed.data(),compressed.size())==Z_OK&&decodedSize==decoded.size(),"PNG capture decompression differs");
    size_t pngCenter=32*(64*4+1)+1+32*4;require(decoded[pngCenter]==255&&decoded[pngCenter+1]==0&&decoded[pngCenter+2]==0,"PNG capture triangle center differs");
    fprintf(stderr,"[renderer smoke] queued GPU PNG capture passed: %s\n",capturePath.string().c_str());
-   require(R.tv.swapchain!=VK_NULL_HANDLE,"smoke presentation did not create a swapchain");fprintf(stderr,"[renderer smoke] scan-buffer swapchain presentation passed\n");
+   require(R.tv.swapchain!=VK_NULL_HANDLE,"smoke presentation did not create a swapchain");LOG("[renderer smoke] scan-buffer swapchain presentation and PNG readback passed");
+   volume_target_check();
   }
   // Ensure deferred objects left by readback and stack-owned images are actually reclaimed.
   command_buffer();flush();require(R.garbageBuffers.empty()&&R.garbageImages.empty()&&R.garbageCacheRegions.empty(),"deferred Vulkan resources were not reclaimed");
   save_pipeline_cache();
-  fprintf(stderr,"[renderer smoke] PASS: actual device upload/clear/blit/depth/triangle/present\n");return 0;
- }catch(const std::exception& e){fprintf(stderr,"[renderer smoke] FAIL: %s\n",e.what());try {command_buffer();flush();}catch(...){}return 1;}
+  LOG("[renderer smoke] PASS: actual device upload/clear/blit/depth/triangle/present");return 0;
+ }catch(const std::exception& e){LOG("[renderer smoke] FAIL: %s",e.what());try {command_buffer();flush();}catch(...){}return 1;}
 }
 } // namespace gfxvk
