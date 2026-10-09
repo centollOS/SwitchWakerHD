@@ -25,6 +25,7 @@
 #include <thread>
 #ifdef __SWITCH__
 #include "platform/debug_switch.h"
+#include "platform/startup_checks_switch.h"
 #include "platform/settings_ini.h"
 #include "platform/settings_switch.h"
 #include <sys/stat.h>
@@ -670,6 +671,10 @@ int main(int argc, char** argv) {
     start_log_file();
     // which build on which system: also in crash logs (their last log lines)
     LOG("[boot] Wind Waker HD %s (%s), %s", build::version(), build::commit(), reporthdr::os_description().c_str());
+#ifdef __SWITCH__
+    // (this fork) the game's files, else an error on screen and the app closes
+    startup_checks::game_files(config::game_dir);
+#endif
     mods::log_startup();
     // test aid: WWHD_TEST_HOST_CRASH=1 crashes inside a system library (strlen of a bad pointer), so
     // the crash log's module names can be checked (CTest crash_log_module, runtime/tools/crash_log_test.cmake)
