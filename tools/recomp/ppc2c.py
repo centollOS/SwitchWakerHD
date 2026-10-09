@@ -151,6 +151,13 @@ def rc(w, dst_expr):
     return " cr0_rc(c, %s);" % dst_expr if w & 1 else ""
 
 
+def link_code(ctx, addr, tgt):
+    """The return-address store of a bl: the fork's ForkPasses.link where the context has it (the game
+    build), otherwise upstream's plain store (guest-mod Translator)."""
+    link = getattr(ctx, "link", None)
+    return link(addr, tgt) if link else "c->lr = 0x%08Xu; " % (addr + 4)
+
+
 def translate(addr, w, ctx):
     """Return C source for the instruction word `w` at `addr`."""
     op = w >> 26
@@ -171,7 +178,7 @@ def translate(addr, w, ctx):
     if op == 18:  # b / ba / bl / bla
         tgt = (sext(w & 0x03FFFFFC, 26) + (0 if w & 2 else addr)) & 0xFFFFFFFF
         if w & 1:
-            return ctx.link(addr, tgt) + ctx.call(addr, tgt)
+            return link_code(ctx, addr, tgt) + ctx.call(addr, tgt)
         return ctx.branch(addr, tgt)
 
     if op == 16:  # bc
@@ -180,7 +187,7 @@ def translate(addr, w, ctx):
         pre = "" if bo & 0x04 else "c->ctr--; "
         cond = cond_expr(bo, bi)
         if w & 1:
-            body = ctx.link(addr, tgt) + ctx.call(addr, tgt)
+            body = link_code(ctx, addr, tgt) + ctx.call(addr, tgt)
         else:
             body = ctx.branch(addr, tgt)
         return pre + ("if (%s) { %s }" % (cond, body) if cond else body)
