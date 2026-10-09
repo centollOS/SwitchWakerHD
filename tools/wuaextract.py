@@ -4,7 +4,7 @@ Port of tools/wudextract/zarchive.cpp. Needs: pip install zstandard
 
 usage: wuaextract.py ARCHIVE.wua list
        wuaextract.py ARCHIVE.wua extract OUTDIR [TITLE]    TITLE: 16 hex digits or folder name
-                                                           (default: 0005000010143500, highest version)
+                                                           (default: the USA or European base game, 0005000010143500 or 0005000010143600)
 """
 import hashlib
 import os
@@ -15,7 +15,7 @@ import sys
 import zstandard
 
 MAGIC, VERSION1, FOOTER, BLOCK = 0x169F52D6, 0x61BF3A01, 144, 65536
-DEFAULT_TITLE = "0005000010143500"
+DEFAULT_TITLES = ("0005000010143500", "0005000010143600")  # the base games the port builds from (USA, Europe)
 
 
 def be(b):
@@ -145,10 +145,11 @@ def main():
             print(t[2], sum(1 for _ in z.walk(t[3])), "files")
         return
     out = sys.argv[3]
-    want = (sys.argv[4] if len(sys.argv) > 4 else DEFAULT_TITLE).lower()
-    cand = [t for t in ts if want in (t[0], t[2].lower())]
+    wants = [sys.argv[4].lower()] if len(sys.argv) > 4 else list(DEFAULT_TITLES)
+    cand = next(([t for t in ts if w in (t[0], t[2].lower())] for w in wants
+                 if any(w in (t[0], t[2].lower()) for t in ts)), [])
     if not cand:
-        sys.exit("title %s not in the archive (it has: %s)" % (want, ", ".join(t[2] for t in ts)))
+        sys.exit("title %s not in the archive (it has: %s)" % (" or ".join(wants), ", ".join(t[2] for t in ts)))
     t = max(cand, key=lambda x: x[1])
     print("checking the archive hash ...", flush=True)
     if not z.verify():

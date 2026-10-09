@@ -117,6 +117,7 @@ it). Saves (`save/`), settings (`settings.ini`) and the compiled graphics stay.
 | `make_sd: ... not the expected file` | The dump is not version 0 of the USA or European game, or the update was merged into it: use the base game only |
 | `the disc key was not found` / `common key not found` | Put `GAME.key` next to `GAME.wux`, and `common.key` next to it (or `WIIU_COMMON_KEY`) |
 | Docker errors | Docker Desktop must be running (on Windows, with its WSL integration on) |
-| `Docker or Podman is needed ... or a native devkitPro` | Install Docker, or do the "Windows without Docker" setup above || The game closes at once or says it is out of memory | Start it in title mode (hold R), not from the album |
+| `Docker or Podman is needed ... or a native devkitPro` | Install Docker, or do the "Windows without Docker" setup above |
+| The game closes at once or says it is out of memory | Start it in title mode (hold R), not from the album |
 | No button works | The game's controller setting differs from the menu's Switch tab: set both to the same |
 | Something else | `sdmc:/switch/wwhd/wwhd.log` and `logs/` say what happened; include them in a report (they contain no game data) |
