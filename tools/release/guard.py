@@ -9,7 +9,8 @@ licenses). This check rejects, by name and by content:
     imports.json, report.txt from tools/recomp), and real-looking generated code inside any file;
   - game files: *.rpx, *.rpl, *.wux, *.wud, disc keys (*.key), tickets/TMDs (title.tik, title.tmd),
     saves (cking*.sav, *.sav), anything under a game/ code/ content/ meta/ tree;
-  - shader caches and head starts (shaders.bin, headstart.bin, template.bin, testcache.bin, *.metallib);
+  - shader caches and head starts (shaders.bin, headstart.bin, template.bin, testcache.bin, *.metallib; the
+    Switch's shadercache_*.bin and compiled *.dksh, made from the game's shaders);
   - in every text file: a 32-hex-digit string (the shape of a Wii U key; SHA-256 sums are 64 digits
     and git hashes 40, which do not match; PUBLIC_HEX lists known public constants of that shape).
 The Windows release's tools/python/ (the official embeddable Python) must hold exactly the files listed
@@ -34,6 +35,8 @@ BAD_NAME = [
     (re.compile(r"\.sav$", re.I), "save file"),
     (re.compile(r"(^|/)(shaders|headstart|template|testcache|mycache)\.bin$", re.I), "shader cache"),
     (re.compile(r"\.metallib$", re.I), "compiled shader cache"),
+    (re.compile(r"(^|/)shadercache_[^/]*\.bin$", re.I), "shader cache (the Switch's, from the game's shaders)"),
+    (re.compile(r"\.dksh$", re.I), "compiled shader (deko3d)"),
     (re.compile(r"(^|/)(game|content|meta)/"), "game file tree"),
     (re.compile(r"(^|/)build/gen"), "recompiler output"),
     (re.compile(r"(^|/)(lib)?gamecode\.(a|lib)$"), "compiled game code"),
