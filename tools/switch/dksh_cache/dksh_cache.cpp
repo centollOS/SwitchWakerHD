@@ -3,6 +3,7 @@
 // shadercache_dksh.bin (WDK1, runtime/src/gfx/deko/shader_files.h). Build: tools/switch/dksh_cache/build.sh.
 //
 //     dksh_cache build <shadercache_gl.bin> <shadercache_dksh.bin>
+//         [max MiB]: stop once the DKSH take that much code memory (the console has 32 MiB for all of its shaders)
 //         converts + compiles every source (one thread: uam is not reentrant), writes the WDK1 file, reads it
 //         back and prints counts, failures (grouped by their first error line), times and the file size
 //     dksh_cache coverage <console shadercache_gl.bin> <harvest shadercache_gl.bin>
@@ -72,16 +73,27 @@ double pct(const std::vector<double>& sorted, double p) {
     return sorted.empty() ? 0 : sorted[std::min(sorted.size() - 1, size_t(sorted.size() * p))];
 }
 
-int build(const char* in, const char* out) {
+// maxMiB: the code memory the records' DKSH may take at most (aligned as code_load places them; 0: no limit). The
+// console loads every record into its 32 MiB of shader code memory at start-up, and what it compiles later goes
+// there too, so a cache built from a manifest's speculative variants must leave room: sources are taken in the
+// file's order (translate writes the recorded variants first) until the budget is used.
+constexpr size_t kCodeAlignment = 0x100;  // deko3d's DK_SHADER_CODE_ALIGNMENT: where code_load places each DKSH
+int build(const char* in, const char* out, double maxMiB = 0) {
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<Wgs1Source> src = load_wgs1(in);
     const uint64_t uamId = dksh_uam_id();
     std::vector<uint8_t> file = wdk1_header(uamId);
     std::map<std::string, std::pair<int, uint64_t>> failures;  // first error -> count, an example hash
     std::vector<double> ms;
-    size_t ok = 0, vs = 0, dkshBytes = 0, convertFail = 0, compileFail = 0;
+    size_t ok = 0, vs = 0, dkshBytes = 0, convertFail = 0, compileFail = 0, codeBytes = 0, leftOut = 0;
+    const size_t budget = maxMiB > 0 ? size_t(maxMiB * 1048576.0) : SIZE_MAX;
     uam::init(true);
     for (size_t i = 0; i < src.size(); i++) {
+        if (codeBytes >= budget) {
+            leftOut = src.size() - i;
+            src.resize(i);
+            break;
+        }
         const Wgs1Source& s = src[i];
         DkshRecord r;
         r.stage = uint8_t(s.vertex ? uam::Stage::Vertex : uam::Stage::Fragment);
@@ -99,6 +111,7 @@ int build(const char* in, const char* out) {
             uam::Result res = uam::compile(s.vertex ? uam::Stage::Vertex : uam::Stage::Fragment, glsl.c_str());
             ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count());
             if (res.ok && !res.dksh.empty()) {
+                codeBytes += (res.dksh.size() + kCodeAlignment - 1) & ~(kCodeAlignment - 1);
                 r.dksh = std::move(res.dksh);
                 dkshBytes += r.dksh.size();
                 ok++;
@@ -135,6 +148,8 @@ int build(const char* in, const char* out) {
     for (double x : ms) sum += x;
     printf("%s: %zu sources (%zu vertex, %zu pixel)\n", in, src.size(), vs, src.size() - vs);
     printf("compiled %zu / %zu; failed: %zu in glsl_to_deko, %zu in uam\n", ok, src.size(), convertFail, compileFail);
+    if (maxMiB > 0)
+        printf("code memory: %.2f MiB of the %.1f MiB budget; %zu sources left out\n", codeBytes / 1048576.0, maxMiB, leftOut);
     for (auto& [why, f] : failures)
         printf("  %5d x %s (e.g. %016llx)\n", f.first, why.c_str(), (unsigned long long)f.second);
     printf("uam per shader: mean %.1f ms, p50 %.1f, p90 %.1f, p99 %.1f, max %.1f; compile sum %.1f s, wall %.1f s\n",
@@ -208,7 +223,7 @@ int dump(const char* in, const char* dir) {
 int translate(const char* manifest, const char* programs, const char* out, const char* reference);  // translate.cpp
 
 int main(int argc, char** argv) {
-    if (argc == 4 && !strcmp(argv[1], "build")) return build(argv[2], argv[3]);
+    if ((argc == 4 || argc == 5) && !strcmp(argv[1], "build")) return build(argv[2], argv[3], argc == 5 ? atof(argv[4]) : 0);
     if (argc == 4 && !strcmp(argv[1], "coverage")) return coverage(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "dump")) return dump(argv[2], argv[3]);
     if ((argc == 5 || argc == 6) && !strcmp(argv[1], "translate"))

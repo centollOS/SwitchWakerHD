@@ -10,6 +10,11 @@
         the manifest's programs from every shader archive of the dump (upstream's tools/shaderprep.py extractor:
         the .sharcfb files, also inside the SARC and Yaz0 archives), written to OUT (WSP1) for
         `dksh_cache translate`. OUT holds game code: it stays on your computer (build/), never share it.
+    shader_manifest.py speculate MANIFEST GAME_DIR OUT_MANIFEST OUT_PROGRAMS [--max N]
+        the manifest's variants plus speculative ones (upstream shaderprep's type 3 records): every archive program
+        the manifest has not seen takes up to N (default 2) states recorded for programs of its family, i.e. with
+        the same register block in their own GX2 structure, so places not visited yet get shaders too. Writes a
+        manifest and a programs file for `dksh_cache translate` (both stay on your computer).
     shader_manifest.py selftest GAME_DIR
         checks the search itself: programs cut from the dump's own files at known places are found there
 
@@ -69,6 +74,28 @@ def read_manifest(path):
     return out
 
 
+def read_manifest_full(path):
+    """as read_manifest, plus the fetch shader's compact flag: (vertex, hash, size, prefix, fetch, regs, compact)"""
+    data = open(path, "rb").read()
+    out, at = [], 8
+    while at + 9 <= len(data) and data[at] == 1:
+        packed, size = struct.unpack_from("<II", data, at + 1)
+        d = zlib.decompress(data[at + 9:at + 9 + packed])
+        at += 9 + packed
+        vertex, phash, psize, prefix, compact, fsize = struct.unpack_from("<BQIQBI", d, 0)
+        o = 26 + fsize
+        fetch = d[26:o]
+        (count,) = struct.unpack_from("<I", d, o)
+        o += 4
+        regs = {}
+        for _ in range(count):
+            i, v = struct.unpack_from("<HI", d, o)
+            regs[i] = v
+            o += 6
+        out.append((bool(vertex), phash, psize, prefix, bytes(fetch), regs, compact))
+    return out
+
+
 def shader_files(game_dir):
     files = []
     for root, _, names in os.walk(os.path.join(game_dir, "content")):
@@ -112,6 +139,18 @@ def archive_programs(game_dir):
     return out
 
 
+def write_manifest(path, recs):
+    """WSM1 as the runtime writes it (runtime/src/gfx/deko/shader_manifest.cpp)"""
+    with open(path, "wb") as f:
+        f.write(b"WSM1" + struct.pack("<I", 1))
+        for vertex, phash, psize, prefix, fetch, regs, compact in recs:
+            d = struct.pack("<BQIQBI", vertex, phash, psize, prefix, compact, len(fetch)) + fetch
+            items = sorted((i, v) for i, v in regs.items() if v and not 0xC000 <= i < 0xD000)
+            d += struct.pack("<I", len(items)) + b"".join(struct.pack("<HI", i, v) for i, v in items)
+            z = zlib.compress(d, 6)
+            f.write(struct.pack("<BII", 1, len(z), len(d)) + z)
+
+
 def write_programs(path, programs):
     with open(path, "wb") as f:
         f.write(b"WSP1" + struct.pack("<I", len(programs)))
@@ -146,6 +185,53 @@ def main():
         found = {k: v for k, v in archive_programs(sys.argv[3]).items() if k in wanted}
         write_programs(sys.argv[4], found)
         print("%d of %d programs of the manifest found in the dump's archives -> %s" % (len(found), len(wanted), sys.argv[4]))
+    elif cmd == "speculate":
+        args = sys.argv[2:]
+        limit = 2
+        if "--max" in args:
+            limit = int(args[args.index("--max") + 1])
+            del args[args.index("--max"):args.index("--max") + 2]
+        if len(args) != 4:
+            sys.exit(__doc__)
+        manifest, game, out_manifest, out_programs = args
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        import shaderprep
+        recs = read_manifest_full(manifest)
+        archive = shaderprep.game_shaders(game)  # (type, code) -> (structure words, path)
+        programs, seen = {}, set()
+        for (typ, code), (w, path) in archive.items():
+            programs[(hash_bytes(code), len(code))] = (typ == shaderprep.VS, code, w)
+        for r in recs:
+            seen.add((r[1], r[2]))
+        # families: the register sets of the archive's blocks; a recorded state belongs to the family whose
+        # registers it holds with those values (as shaderprep cmd_build)
+        regsets = {(v, tuple(sorted(shaderprep.own_block(v, w)))) for (v, code, w) in programs.values()}
+        by_family = {}
+        for r in recs:
+            vertex, regs = r[0], r[5]
+            for (tv, regset) in regsets:
+                if tv == vertex:
+                    by_family.setdefault((tv, tuple((a, regs.get(a, 0)) for a in regset)), []).append(r)
+        pgm = {True: shaderprep.mmSQ_PGM_START_VS, False: shaderprep.mmSQ_PGM_START_PS}
+        out = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6]) for r in recs]
+        used = {k: programs[k][1] for k in seen if k in programs}
+        spec = 0
+        for (h, n), (vertex, code, w) in sorted(programs.items()):
+            if (h, n) in seen:
+                continue
+            blk = shaderprep.own_block(vertex, w)
+            for t in by_family.get((vertex, tuple(sorted(blk.items()))), [])[:limit]:
+                regs = dict(t[5])
+                regs.update(blk)
+                regs[pgm[vertex] + 1] = n >> 3
+                out.append((vertex, h, n, fnv(code[:64]), t[4], regs, t[6]))
+                used[(h, n)] = code
+                spec += 1
+        write_manifest(out_manifest, out)
+        write_programs(out_programs, used)
+        print("%d recorded variants, %d speculative (up to %d per program) for %d archive programs not seen; "
+              "%d programs -> %s, %s" % (len(recs), spec, limit, len({(h, n) for (_, h, n, *_r) in out[len(recs):]}),
+                                          len(used), out_manifest, out_programs))
     elif cmd == "selftest":
         files = shader_files(sys.argv[2])
         progs, where = set(), {}

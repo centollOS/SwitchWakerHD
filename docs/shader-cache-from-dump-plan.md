@@ -174,3 +174,19 @@ With the owner's title-screen manifest (956 variants, USA dump):
 Next: the speculative variants (archive programs of the same family as recorded ones), `make_sd.py --shaders`,
 recording on by default, and the first-start text.
 
+## Speculation and make_sd.py (2026-10-10)
+
+`shader_manifest.py speculate` adds, to the manifest's own variants, up to 2 variants for every archive program the
+manifest has not seen, from the states recorded for programs of its family (upstream shaderprep's type 3 records).
+From the owner's **title-screen** manifest alone (956 variants): 20,308 speculative variants for 10,307 programs,
+11,916 distinct GLSL sources, 11,905 compiled (11 guessed combinations fail in uam). **4,311 of them are in the
+console's offline cache**, which a harvest of the whole game made (7,680 shaders): more than half of the game's
+shaders from a couple of minutes of recording. They take 12.7 MiB of code memory (speculative shaders are small,
+1.1 KB on average) and 24 s to compile on the computer.
+
+The console loads the whole cache into its 32 MiB of shader code memory, and what it compiles later goes there too,
+so `dksh_cache build` takes a budget (`make_sd.py`: 20 MiB): sources in file order, recorded variants first.
+
+`make_sd.py --shaders shader_manifest.bin` runs speculate, translate and build (a `shadercache_gl.bin` still works
+as before); the work files in `build/shader-cache/` hold game code and stay on the computer.
+
