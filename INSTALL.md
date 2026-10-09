@@ -9,14 +9,14 @@ share it.
 
 | | |
 |---|---|
-| **The game** | Your own dump of **The Wind Waker HD, USA**, title `00050000-10143500`, **version 0** (the disc, or the eShop release without the update): a disc image (`.wux`/`.wud`) with its disc key and your console's Wii U common key, or the extracted game folder (`code/`, `content/`, `meta/`) |
+| **The game** | Your own dump of **The Wind Waker HD, USA or Europe** (title `00050000-10143500` or `00050000-10143600`), **version 0** (the disc, or the eShop release without the update): a disc image (`.wux`/`.wud`) with its disc key and your console's Wii U common key, or the extracted game folder (`code/`, `content/`, `meta/`) |
 | **A Switch** | Running Atmosphère with the Homebrew Menu, and about 3 GB free on the SD card |
 | **A computer** | Windows 10/11 (with WSL), macOS or Linux; 8 GB of RAM or more, 10 GB of free disk space |
 | **On the computer** | [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker / Podman on Linux), Python 3, and this release unzipped |
 
 How to dump the game and the keys from your own Wii U is outside this guide: the
 [Cemu dumping guide](https://cemu.cfw.guide/dumping-games.html) (Dumpling) covers it. A dump made with
-Dumpling gives you the extracted folder directly (the base game, `00050000/10143500`, not the update).
+Dumpling gives you the extracted folder directly (the base game, `00050000/10143500` or `10143600`, not the update).
 
 **Windows**: run everything below inside WSL (Ubuntu): install WSL with `wsl --install` in an
 administrator PowerShell, turn on Docker Desktop's *Use the WSL 2 based engine* and its integration with
@@ -92,7 +92,7 @@ it). Saves (`save/`), settings (`settings.ini`) and the compiled graphics stay.
 
 | | |
 |---|---|
-| `make_sd: ... not the expected file` | The dump is not version 0 of the USA game, or the update was merged into it: use the base game only |
+| `make_sd: ... not the expected file` | The dump is not version 0 of the USA or European game, or the update was merged into it: use the base game only |
 | `the disc key was not found` / `common key not found` | Put `GAME.key` next to `GAME.wux`, and `common.key` next to it (or `WIIU_COMMON_KEY`) |
 | Docker errors | Docker Desktop must be running (on Windows, with its WSL integration on) |
 | The game closes at once or says it is out of memory | Start it in title mode (hold R), not from the album |

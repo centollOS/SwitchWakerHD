@@ -2,8 +2,8 @@
 """SwitchWakerHD: build the game for the Switch from your own dump and lay out an SD card folder.
 
 No game files, code or keys come with this repository or its releases. This script does every step on
-your computer, from your own legally dumped copy (The Wind Waker HD, USA, title 00050000-10143500,
-version 0):
+your computer, from your own legally dumped copy (The Wind Waker HD, version 0: USA, title
+00050000-10143500, or Europe, title 00050000-10143600):
 
   1. extracts the disc image (.wux/.wud) into build/sd-game/ (or takes an already extracted folder);
   2. checks that code/cking.rpx is the version the port is made for;
@@ -16,7 +16,7 @@ usage:
                                               common key: WIIU_COMMON_KEY (32 hex digits) or common.key
                                               next to the image or in the current folder
   make_sd.py --game-dir EXTRACTED [--out DIR] a folder with code/, content/, meta/ (e.g. from Cemu's
-                                              mlc01/usr/title/00050000/10143500, without the update)
+                                              mlc01/usr/title/00050000/10143500 or 10143600, without the update)
   options: --shaders shadercache_gl.bin       also compile a shader list into shadercache_dksh.bin
            --jobs N                           parallel compiles (each needs ~1.5 GB of memory)
 
@@ -87,10 +87,10 @@ def main():
 
     step(2, "checking the game version")
     try:
-        setup.check_game_version(game)
+        build = setup.check_game_version(game)
     except setup.SetupError as e:
         fail(str(e))
-    print("  The Wind Waker HD (USA), version 0: OK")
+    print("  The Wind Waker HD (%s), version 0: OK" % build.name)
 
     step(3, "translating the game code to C (about a minute)")
     gen = os.path.join(ROOT, "build", "gen")
