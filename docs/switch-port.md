@@ -1616,7 +1616,7 @@ Added:
 - Mods that need a mouse or keyboard are inactive.
 - Rounds 1–15 are committed on `feature/switch-port`; rounds 16-26 are not committed yet.
 
-### Round 48: upstream v0.2.9-v0.2.11 sync, European game (not yet tested on hardware)
+### Round 48: upstream v0.2.9-v0.2.11 sync, European game (hardware-tested)
 
 Upstream `main` defb89f (v0.2.11, 70 commits after `853d7b1`) applied as a diff from branch `dev` 55664c7
 (`git diff 853d7b1 defb89f | git apply -3`; the README part went to `docs/upstream-README.md`). **The next sync
@@ -1661,4 +1661,11 @@ recompiler changes are taken out (`mulli`/`mullw`/`neg` without signed overflow,
 HD UI screens, peekZ and Pane::Draw clipping), apart from the build map in `table.c`. `test_builds.py` (17),
 `test_coverage.py` (4) and `tools/installer/test_setup.py` (56) pass. Switch build OK. Not checked: a European dump
 (none at hand), hardware.
+
+**Hardware result (2026-10-09, the user):** European game (dump from the owner's RomM, `cking.rpx` SHA-256 f9f46173...,
+in `game-eu` with `save-eu`/`states-eu` through the `[dev]` folder variables): boots in Spanish with the region's five
+languages, new save data, a new game, a portable save state on the Great Sea (saved and loaded, distance 0.0) and a
+warp: all OK (log `logs-switch/wwhd_2026-10-09_21-36-50_EU.log`). USA game, same round: frame rate as before (median
+29.9 fps in the session's reports), save states, a warp and the sun at sea (peekZ falls back to the game's function,
+no hang): all OK (`logs-switch/wwhd_2026-10-09_22-22-57_USA_r48.log`).
 
