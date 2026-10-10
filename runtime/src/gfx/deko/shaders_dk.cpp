@@ -760,6 +760,18 @@ void update_priorities() {
     }
 }
 
+// (this fork) docs/background-shaders-plan.md: the Latte decompiler is not made for two threads, and
+// translate_listed's runs beside the render thread's translate
+std::mutex g_decompileMutex;
+// GLSL from translate_listed (any thread) for the render thread, which owns `codes`: queue_listed / shaders_frame_start
+struct Listed {
+    uint64_t hash;
+    bool vertex;
+    std::string glsl;
+};
+std::mutex g_listedMutex;
+std::vector<Listed> g_listed;
+
 // ---- translation
 // null, or why the program cannot be translated
 const char* decompile(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, uint64_t base, uint32_t address,
@@ -1061,6 +1073,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     (vertex ? g_lastVs : g_lastPs) = shader;
     LatteDecompilerOutput_t output{};
     Stage stage(vertex ? "translating a vertex shader" : "translating a pixel shader");
+    std::unique_lock<std::mutex> decompiling(g_decompileMutex);  // (this fork) translate_listed's thread decompiles too
     if (const char* error = decompile(regs, vertex, fetch, base, address, size, output)) {
         shader->status = ShaderStatus::Failed;
         shader->error = error;
@@ -1084,6 +1097,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         key = shader->key = unitsKey;
     }
     shader->dec = FinishDecompiledShader(output);
+    decompiling.unlock();
     fill_texture_lists(shader);  // (the hot copies, dk_shaders.h)
     shader->mapping = output.resourceMappingVK;
     shader->uniforms = output.uniformOffsetsVK;
@@ -1389,6 +1403,30 @@ void shaders_init(void (*progress)(size_t done, size_t total)) {
 
 void shaders_frame_start() {
     g_bootDraws = 0;
+    {  // (this fork) listed sources: compiled in the background, kept in shadercache_gl.bin for the next starts
+        std::vector<Listed> take;
+        {
+            std::lock_guard<std::mutex> lk(g_listedMutex);
+            const size_t n = std::min<size_t>(g_listed.size(), 32);
+            take.assign(std::make_move_iterator(g_listed.begin()), std::make_move_iterator(g_listed.begin() + n));
+            g_listed.erase(g_listed.begin(), g_listed.begin() + n);
+        }
+        for (Listed& l : take) {
+            if (codes.count(l.hash)) continue;  // compiled already, or queued by a draw
+            ShaderCode& code = codes[l.hash];
+            code.hash = l.hash;
+            code.vertex = l.vertex;
+            code.state = ShaderCode::Queued;
+            code.origin = ShaderCode::Session;
+            cache_gl_source(l.hash, l.vertex, l.glsl);
+            Job job;
+            job.hash = l.hash;
+            job.vertex = l.vertex;
+            job.background = true;
+            job.glsl = std::move(l.glsl);
+            queue_job(std::move(job));
+        }
+    }
     update_priorities();
     load_results(size_t(g_loadBudget));
     log_total();
@@ -1697,6 +1735,75 @@ UniformPackStats uniform_pack_stats_take() {
 ShaderStats shader_stats_take() {
     static ShaderStats taken;
     return stats_since(taken);
+}
+
+bool translate_listed(uint32_t* regs, bool vertex, const uint8_t* program, uint32_t programSize, uint64_t programHash,
+                      const uint8_t* fetch, uint32_t fetchSize, bool fetchCompact, std::string& glsl, uint64_t& glslHash) {
+    static const uint32_t kProgram = mem::host_alloc(0x40000, 256), kFetch = mem::host_alloc(0x1000, 256);
+    static std::unordered_map<std::string, LatteFetchShader*> fetchShaders;  // by their bytes (few hundred)
+    if (!programSize || programSize > 0x40000 || fetchSize > 0x1000 || (vertex && !fetchSize)) return false;
+    std::lock_guard<std::mutex> lk(g_decompileMutex);
+    memcpy(ppc_ptr(kProgram), program, programSize);
+    const uint32_t start = vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS;
+    regs[start] = kProgram >> 8;
+    regs[start + 1] = programSize >> 3;
+    LatteFetchShader* fs = nullptr;
+    if (vertex) {
+        // the same builders as get_fetch_shader, over a copy in guest memory
+        std::string key(1, char(fetchCompact));
+        key.append(reinterpret_cast<const char*>(fetch), fetchSize);
+        if (auto it = fetchShaders.find(key); it != fetchShaders.end()) fs = it->second;
+        else {
+            memcpy(ppc_ptr(kFetch), fetch, fetchSize);
+            regs[mmSQ_PGM_START_FS] = kFetch >> 8;
+            regs[mmSQ_PGM_START_FS + 1] = fetchCompact ? 0 : fetchSize >> 3;
+            fs = fetchCompact ? gx2::build_fetch_shader(kFetch)
+                              : LatteShaderRecompiler_createFetchShader(0, regs, reinterpret_cast<uint32_t*>(ppc_ptr(kFetch)),
+                                                                        fetchSize);
+            fetchShaders.emplace(std::move(key), fs);
+        }
+        if (!fs) return false;
+    }
+    const uint64_t base = programHash ^ (vertex ? 0x1111 : 0x2222);
+    std::vector<uint32_t> saved(regs, regs + 0x10000);  // decompile changes the pixel-shader inputs in them
+    auto run = [&](std::string& out) {
+        LatteDecompilerOutput_t output{};
+        if (decompile(regs, vertex, fs, base, kProgram, programSize, output)) return false;
+        LatteDecompilerShader* dec = FinishDecompiledShader(output);
+        out = dec->strBuf_shaderSource->c_str();
+        delete dec->strBuf_shaderSource;
+        dec->strBuf_shaderSource = nullptr;
+        delete dec;
+        return true;
+    };
+    if (!run(glsl)) return false;
+    // a guessed state can hold a 2D texture where this program reads a cube map (dksh_cache translate.cpp): the
+    // game binds a cube map there, so the variant it makes has that unit's dimension set to one
+    bool cube = false;
+    for (uint32_t unit = 0; unit < Latte::GPU_LIMITS::NUM_TEXTURES_PER_STAGE; unit++) {
+        const std::string name = "cubeMapArrayIndex" + std::to_string(unit);
+        if (glsl.find(name + " =") == std::string::npos || glsl.find("float " + name + " ") != std::string::npos) continue;
+        const uint32_t word0 = (vertex ? Latte::REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : Latte::REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS) +
+                               unit * 7;
+        saved[word0] = (saved[word0] & ~7u) | uint32_t(Latte::E_DIM::DIM_CUBEMAP);
+        cube = true;
+    }
+    if (cube) {
+        memcpy(regs, saved.data(), saved.size() * 4);
+        if (!run(glsl)) return false;
+    }
+    glslHash = hash_bytes(glsl.data(), glsl.size(), vertex ? 0x1111 : 0x2222);
+    return true;
+}
+
+void queue_listed(uint64_t glslHash, bool vertex, std::string&& glsl) {
+    std::lock_guard<std::mutex> lk(g_listedMutex);
+    g_listed.push_back({glslHash, vertex, std::move(glsl)});
+}
+
+size_t listed_waiting() {
+    std::lock_guard<std::mutex> lk(g_listedMutex);
+    return g_listed.size();
 }
 
 uint64_t shaders_skipped_draws() { return g_total.skippedDraws; }  // (render thread's count, read as it is)

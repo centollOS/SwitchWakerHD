@@ -23,6 +23,7 @@
 #include "debug_server.h"
 #include "prepare_graphics_switch.h"
 #include "shader_scan_switch.h"
+#include "background_shaders_switch.h"
 #include "host.h"
 #include "settings_switch.h"
 
@@ -168,6 +169,16 @@ debugsrv::Reply scanbench(const debugsrv::Args&) {
     return debugsrv::ok("scan started: see the log ([scan])");
 }
 
+// "bgshaders [start]": background shaders (background_shaders_switch.h)
+debugsrv::Reply bgshaders(const debugsrv::Args& a) {
+    if (!a.empty() && a[0] == "start") {
+        const std::string why = background_shaders::start();
+        return why.empty() ? debugsrv::ok("background shaders: started") : debugsrv::err(why);
+    }
+    return debugsrv::ok("background shaders: " + (background_shaders::status().empty() ? std::string("not started")
+                                                                                       : background_shaders::status()));
+}
+
 debugsrv::Reply quit(const debugsrv::Args&) {
     debugsrv::Reply r = debugsrv::ok("quitting");
     r.after = [] {
@@ -191,6 +202,7 @@ void start() {
     debugsrv::add_command("reload", "reload                 restart: the forwarder loads the NRO again (put it first)", reload);
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
+    debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);
     debugsrv::add_command("quit", "quit                   end the program", quit);
     debugsrv::Config c;
     c.port = g_port;
