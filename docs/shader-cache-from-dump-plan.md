@@ -244,6 +244,12 @@ Console tests (2026-10-10, hardware):
   reads it as a cube map; `dksh_cache translate` now gives such a variant a cube map unit (the game's own state).
   19,584 / 19,584 compile.
 - Before main: a long normal play session with the feature build (64 MiB of shader code memory is renderer-wide).
+  Done (2026-10-10): the owner played a while (87% of the shaders met came from the generated cache, code memory
+  30 of 64 MiB), then a warp sweep over all Warp tab entries with that cache: the other 136 places loaded with no crash and
+  no "code memory full", each finishing its compiles in 6-11 s; the worst arrivals (Siren, M_Dai, GTower, Ganon
+  rooms) skip 20-30 draws a frame for a few seconds. Ten entries do not work as warps at all (game data, not the
+  renderer: Cave08, PShip, ENDumi, I_SubAN 9, M2ganon, E3ROOP, sea_T, MiniHyo, MiniKaz, sea_E): dropped from the
+  list on main's branch fix/warp-rooms.
 - Before main: `tools/switch/dksh_cache` must also build natively (no Docker/Podman). Today make_sd.py --shaders
   stops with "needs Docker or Podman", so players on the recommended Windows route (native devkitPro, v0.4.1) cannot
   build the cache. Native build on macOS/Linux/Windows (host compiler + the uam/Cemu sources it already uses), the
