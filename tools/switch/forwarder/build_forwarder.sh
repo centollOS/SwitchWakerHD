@@ -14,7 +14,7 @@
 # Output: build/forwarder/wwhd_forwarder.nsp (INSTALL.md: installing it).
 #
 # How it works (built from source in a devkitPro container):
-#   exefs    nx-hbloader v2.4.5 (switchbrew, pinned below) with nx-hbloader-forwarder.patch: it
+#   exefs    nx-hbloader v2.4.5 (switchbrew, pinned in forwarder.env) with nx-hbloader-forwarder.patch: it
 #            loads the NRO named by romfs:/nextNroPath with the argv of romfs:/nextArgv (the SAK /
 #            nsp-forwarder convention), and goes back to the HOME menu when the NRO returns instead
 #            of starting hbmenu. main.npdm is hbloader's hbl.json with our title ID and
@@ -23,11 +23,11 @@
 #            hbmenu passes it).
 #   control  control.nacp from make_nacp.py and the game's own icon (make_icon.py: iconTex.tga of
 #            your dump scaled to 256x256; it stays in build/) in every language slot.
-#   pack     hacBrewPack v3.05 (pinned below), no logo section.
+#   pack     hacBrewPack v3.05 (pinned in forwarder.env), no logo section.
 #
-# Title ID 0x01FF575748440000: "01FF" is outside the ranges used by retail titles (0100...) and
-# "57574844" is ASCII "WWHD"; the low 12 bits are 0 as for any base application. Override with
-# WWHD_FORWARDER_TITLE_ID if it ever collides.
+# Title ID 0x01FF575748440000 (TITLE_ID in forwarder.env, which also holds the pins): "01FF" is outside
+# the ranges used by retail titles (0100...) and "57574844" is ASCII "WWHD"; the low 12 bits are 0 as for
+# any base application. Override with WWHD_FORWARDER_TITLE_ID if it ever collides.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -45,15 +45,16 @@ container_run() {  # container_run ENGINE ROOT [run options...] IMAGE COMMAND...
     fi
 }
 
-title_id=${WWHD_FORWARDER_TITLE_ID:-01ff575748440000}
+# TITLE_ID and the pinned sources are in forwarder.env, shared with build_forwarder_windows.py
+# (tr: a Windows checkout may have turned the file into CRLF).
+eval "$(tr -d '\r' <"$here/forwarder.env")"
+title_id=${WWHD_FORWARDER_TITLE_ID:-$TITLE_ID}
 title_id=$(printf '%s' "${title_id#0x}" | tr 'A-F' 'a-f')
 nro_path=sdmc:/switch/wwhd/wwhd.nro
 name="Wind Waker HD"
 publisher="SwitchWakerHD"
-hbloader_url=https://github.com/switchbrew/nx-hbloader.git
-hbloader_rev=82b95122c5ae8dc059bf23893ba7623c72c86773  # v2.4.5
-hacbrewpack_url=https://github.com/TooTallNate/hacBrewPack.git  # The-4n's repository is gone
-hacbrewpack_rev=745b16ecfc9ce055743067d200572204cb2aac6c  # v3.05, before the fork's WASM build
+hbloader_url=$HBLOADER_URL hbloader_rev=$HBLOADER_COMMIT
+hacbrewpack_url=$HACBREWPACK_URL hacbrewpack_rev=$HACBREWPACK_COMMIT
 
 keys=$HOME/.switch/prod.keys verify=1 icon_src=""
 while [[ $# -gt 0 ]]; do
@@ -124,16 +125,7 @@ container_run "$engine" "$root" -e TITLE_ID="$title_id" "$image" bash -lc '
 set -euo pipefail
 export DEVKITPRO=/opt/devkitpro PATH=/opt/devkitpro/devkitA64/bin:/opt/devkitpro/tools/bin:$PATH
 cd /work/build/forwarder/src/nx-hbloader
-python3 - <<EOF
-import json
-d = json.load(open("hbl.json"))
-tid = "0x" + "$TITLE_ID"
-d.update(name="wwhd_fwd", title_id=tid, title_id_range_min=tid, title_id_range_max=tid)
-for cap in d["kernel_capabilities"]:
-    if cap["type"] == "application_type":
-        cap["value"] = 1  # application (hbl.json: 2, applet)
-json.dump(d, open("hbl.json", "w"), indent=4)
-EOF
+python3 /work/tools/switch/forwarder/patch_hbl.py hbl.json "$TITLE_ID"
 make -s RELEASE=1 >/dev/null
 cd /work/build/forwarder/src/hacBrewPack
 cp config.mk.template config.mk
