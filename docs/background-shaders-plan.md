@@ -38,3 +38,12 @@ Prepare graphics (the sweep) stays as the option for the rest (to ~93%).
    dksh_cache translate does (same decompiler, same GLSL hashes), queue the GLSL to the worker at the lowest priority.
 4. **The first-start bar** and the hidden title, the list kept on the SD card (programs + list: the console's own).
 5. Measure: coverage after the first start + N minutes, the game's frame rate while the list compiles.
+
+## First start on the console (2026-10-10)
+
+From an empty cache and no manifest, the build of 144bb1d: the loading card from the start; the title screen recorded
+40 s behind it; the programs read and the list made (~1.5 min); 30,842 variants translated (1.1 ms each) and
+compiled at full speed: **18.8 minutes** in all, no failures. Then the console's own cache (31 MB, 18,948 shaders)
+against the whole-game harvest: **73.6% of the vertex/pixel pairs, 74.4% of the shaders** (the computer predicted
+73.5% / 74.2%). Gently, during play (core 0, 50% duty), the game keeps 27.5-29.9 fps in a heavy view (25 without
+the duty cycle) at ~5 compiles a second.
