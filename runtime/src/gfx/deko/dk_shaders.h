@@ -187,5 +187,6 @@ struct ShaderStats {
     uint64_t codeBytes = 0;     // code memory used by game shaders
 };
 ShaderStats shader_stats_take();  // counts since the last call; pendingNow and codeBytes as they are
+uint64_t shaders_pending();        // shaders queued for or held by the worker right now (any thread)
 
 }  // namespace gfxdk

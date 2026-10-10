@@ -1699,4 +1699,9 @@ ShaderStats shader_stats_take() {
     return stats_since(taken);
 }
 
+uint64_t shaders_pending() {
+    std::lock_guard<std::mutex> lk(workerMutex);
+    return jobs.size() + results.size() + (workerCurrent ? 1 : 0);
+}
+
 }  // namespace gfxdk

@@ -21,6 +21,7 @@
 #include "../runtime.h"
 #include "../overlay/hostui.h"
 #include "debug_server.h"
+#include "prepare_graphics_switch.h"
 #include "host.h"
 #include "settings_switch.h"
 
@@ -139,6 +140,21 @@ debugsrv::Reply reload(const debugsrv::Args&) {
     return r;
 }
 
+// "prepare start|stop|status": the Prepare graphics sweep (prepare_graphics_switch.h)
+debugsrv::Reply prepare(const debugsrv::Args& a) {
+    const std::string what = a.empty() ? "status" : a[0];
+    if (what == "start") {
+        const std::string why = prepare_graphics::start();
+        return why.empty() ? debugsrv::ok("prepare graphics: started") : debugsrv::err(why);
+    }
+    if (what == "stop") {
+        prepare_graphics::stop();
+        return debugsrv::ok("prepare graphics: stopping after the current place");
+    }
+    const std::string st = prepare_graphics::status();
+    return debugsrv::ok(st.empty() ? "prepare graphics: not running" : st);
+}
+
 debugsrv::Reply quit(const debugsrv::Args&) {
     debugsrv::Reply r = debugsrv::ok("quitting");
     r.after = [] {
@@ -160,6 +176,7 @@ void start() {
     debugsrv::add_command("warp", "warp <n> | warp <stage> [room] [point]", warp);
     debugsrv::add_command("shot", "shot [game]            PNG of the next frame (game: the game's picture alone)", shot);
     debugsrv::add_command("reload", "reload                 restart: the forwarder loads the NRO again (put it first)", reload);
+    debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("quit", "quit                   end the program", quit);
     debugsrv::Config c;
     c.port = g_port;

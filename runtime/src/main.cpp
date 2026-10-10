@@ -26,6 +26,7 @@
 #ifdef __SWITCH__
 #include "platform/debug_switch.h"
 #include "platform/startup_checks_switch.h"
+#include "platform/prepare_graphics_switch.h"
 #include "platform/settings_ini.h"
 #include "platform/settings_switch.h"
 #include <sys/stat.h>
@@ -675,6 +676,7 @@ int main(int argc, char** argv) {
     // (this fork) the game's files, else an error on screen and the app closes; the first start's shader warning
     startup_checks::game_files(config::game_dir);
     startup_checks::shader_cache();
+    prepare_graphics::startup();  // (this fork) a cut "Prepare graphics" sweep: the Quest Log files put back
 #endif
     mods::log_startup();
     // test aid: WWHD_TEST_HOST_CRASH=1 crashes inside a system library (strlen of a bad pointer), so
