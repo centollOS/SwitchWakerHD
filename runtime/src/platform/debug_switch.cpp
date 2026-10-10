@@ -22,6 +22,7 @@
 #include "../overlay/hostui.h"
 #include "debug_server.h"
 #include "prepare_graphics_switch.h"
+#include "shader_scan_switch.h"
 #include "host.h"
 #include "settings_switch.h"
 
@@ -155,6 +156,18 @@ debugsrv::Reply prepare(const debugsrv::Args& a) {
     return debugsrv::ok(st.empty() ? "prepare graphics: not running" : st);
 }
 
+// "scanbench": shader_scan over the game's files, in a thread (the result in the log: [scan])
+debugsrv::Reply scanbench(const debugsrv::Args&) {
+    std::thread([] {
+        shader_scan::Stats st;
+        const auto progs = shader_scan::scan(config::game_dir, st);
+        LOG("[scan] %zu files (%.0f MB read in %.1f s), %zu archives, %zu shaders, %zu distinct; %.0f MB inflated in "
+            "%.1f s; total %.1f s", st.files, st.bytesRead / 1048576.0, st.readSeconds, st.archives, st.shaders,
+            st.distinct, st.bytesInflated / 1048576.0, st.inflateSeconds, st.totalSeconds);
+    }).detach();
+    return debugsrv::ok("scan started: see the log ([scan])");
+}
+
 debugsrv::Reply quit(const debugsrv::Args&) {
     debugsrv::Reply r = debugsrv::ok("quitting");
     r.after = [] {
@@ -177,6 +190,7 @@ void start() {
     debugsrv::add_command("shot", "shot [game]            PNG of the next frame (game: the game's picture alone)", shot);
     debugsrv::add_command("reload", "reload                 restart: the forwarder loads the NRO again (put it first)", reload);
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
+    debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
     debugsrv::add_command("quit", "quit                   end the program", quit);
     debugsrv::Config c;
     c.port = g_port;
