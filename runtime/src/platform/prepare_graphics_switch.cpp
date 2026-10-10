@@ -44,14 +44,27 @@ constexpr double kArriveTimeout = 30.0;   // s: a destination not reached by the
 constexpr double kSettle = 3.0;           // s after the arrival before the worker is watched (draws meet shaders)
 constexpr double kQuiet = 2.0;            // s with nothing pending: this place is done
 constexpr double kPlaceTimeout = 60.0;    // s at most in one place
-// s at least in one place: warping out a few seconds after arriving, while a place's arrival event still runs, stopped
-// the game (c_xyz.cpp:285 isNearZeroSquare, M2tower -> M_DaiB after 10 s, ITest63 -> Kaisen); the warp sweep that
-// stayed 15-20 s everywhere never did
-constexpr double kMinStay = 12.0;
+// Warping out while a place's arrival event still runs stopped the game (c_xyz.cpp:285 isNearZeroSquare: M2tower ->
+// M_DaiB after 10 s): the next warp waits until Link has had control for a moment (no event, message, game menu or
+// stage change, Link the controlled actor: the game's own pause-menu conditions, savestate.cpp player_has_control),
+// after at least kMinStay; places known to have a long arrival event stay at least kMinStayEvent anyway.
+constexpr double kMinStay = 5.0;
+constexpr double kMinStayEvent = 12.0;
+constexpr double kControlFor = 1.0;       // s of control in a row
+constexpr double kControlTimeout = 45.0;  // s: then the warp goes anyway (logged)
+const char* const kArrivalEvents[] = {"M2tower"};
 constexpr uint32_t kMaxBackup = 64 << 10; // save/user files up to this size are copied (not the pictures)
 
 const uint32_t kNextStageReq = GD(0x1046F0B0) + 0x5140 + 12;  // mods/cheats.cpp kNextStage + 12: a request is set
 const uint32_t kOverlap = GD(0x101F36CC);                      // a scene change's fade is running (mods/turbo.cpp)
+// savestate.cpp player_has_control's fields of g_dComIfG_gameInfo.play
+const uint32_t kPlay = GD(0x1046F0B0);
+const uint32_t kEventRun = kPlay + 0x5292;     // dComIfGp_event_runCheck
+const uint32_t kMesgStatus = kPlay + 0x5BB2;   // dComIfGp_getMesgStatus
+const uint32_t kScopeMesgStatus = kPlay + 0x5BB3;
+const uint32_t kMenuFlag = GD(0x101EA069);     // dMenu_flag
+const uint32_t kPlayerPtr = kPlay + 0x5B2C;    // the controlled actor
+const uint32_t kLinkPtr = kPlay + 0x5B34;      // daPy_lk_c
 
 struct Place {
     const char* stage;
@@ -167,6 +180,11 @@ bool arrived(const Place& p) {
     return !mods::warp_pending() && !ld8(kNextStageReq) && !ld32(kOverlap) && mods::current_stage() == p.stage;
 }
 
+bool link_has_control() {
+    return !ld8(kEventRun) && !ld8(kMesgStatus) && !ld8(kScopeMesgStatus) && !ld8(kMenuFlag) && !ld8(kNextStageReq) &&
+           ld32(kPlayerPtr) && ld32(kPlayerPtr) == ld32(kLinkPtr);
+}
+
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void sleep_s(double s) { std::this_thread::sleep_for(std::chrono::duration<double>(s)); }
 
@@ -220,7 +238,20 @@ void sweep() {
             }
             sleep_s(0.25);
         }
-        while (!g_stop && now() - at < kMinStay) sleep_s(0.25);
+        double minStay = kMinStay;
+        for (const char* e : kArrivalEvents)
+            if (!strcmp(e, p.stage)) minStay = kMinStayEvent;
+        while (!g_stop && now() - at < minStay) sleep_s(0.25);
+        for (double since = 0, t1 = now(); !g_stop;) {  // Link has control for kControlFor in a row
+            if (!link_has_control()) since = 0;
+            else if (since == 0) since = now();
+            if (since && now() - since >= kControlFor) break;
+            if (now() - t1 > kControlTimeout) {
+                LOG("[prepare] %s: Link had no control for %.0f s (an event?): going on", p.stage, kControlTimeout);
+                break;
+            }
+            sleep_s(0.1);
+        }
         LOG("[prepare] %zu/%zu %s room %d: %.0f s", i + 1, list.size(), p.stage, p.room, now() - at);
         done++;
         write_index(i + 1);
