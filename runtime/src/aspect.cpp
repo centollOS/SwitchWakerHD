@@ -36,6 +36,7 @@
 
 #include "gx2/gx2_cmd.h"
 #include "runtime.h"
+#include "screen_mode.h"
 
 namespace aspect {
 namespace {
@@ -400,6 +401,7 @@ extern "C" void hook_028766CC(Cpu* c) {
 extern "C" void hook_02877100(Cpu* c) {
     using namespace aspect;
     uint32_t pane = c->r[3];
+    if (screen_mode::hidden_pane(pane)) return;  // (with its children)
     static const uint64_t trace_frame = getenv("WWHD_ASPECT_TRACE_FRAME") ? strtoull(getenv("WWHD_ASPECT_TRACE_FRAME"), nullptr, 10) : 0;
     if (trace_frame && game_frame() == trace_frame) {
         auto trace = [](auto&& self, uint32_t p, int depth) -> void {

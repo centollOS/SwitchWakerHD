@@ -49,6 +49,7 @@ namespace gfxvk { bool buffer_cache_enabled(); }  // gfx/vulkan/buffer_cache.h
 #include "../motion/motion.h"
 #include "../platform/keycodes.h"
 #include "../rumble.h"
+#include "../screen_mode.h"
 #include "../interp.h"
 #include "../runtime.h"
 #include "../savestate.h"
@@ -1075,7 +1076,8 @@ void tab_switch() {
         static const char* const names[] = {"Skip unchanged fixed state", "Shadow draws without the pixel shader",
                                             "Cache textures of shared surfaces", "Keep vertex layouts",
                                             "Submit every 1024 draws", "Render profiler (slower)",
-                                            "Prefetch shader data", "Skip unchanged target/state registers"};
+                                            "Prefetch shader data", "Skip unchanged target/state registers",
+                                            "Skip the TV picture (Off-TV Play)"};
         static_assert(sizeof names / sizeof names[0] == gfxsw::kDrawOpts, "a name per switch");
         bool on;
         if (i % 2) ImGui::SameLine(0, 30);
@@ -1167,17 +1169,31 @@ void tab_switch() {
     // (Debug: the GamePad view is not offered to players) which Wii U controller the Switch controller is: the game's own control mode must match it (with
     // the Pro Controller chosen here the GamePad lies on the table and sends nothing, system_stubs.cpp)
     {
-        const bool pro = input::pro_controller();
-        ImGui::AlignTextToFramePadding();
+        // saved as controllerMode. The single screen is fixed at start (switch_settings::apply_at_start): the game's
+        // screen mode, its controller picker and its options follow it from the title on (screen_mode.cpp), not in
+        // the middle of play. Between the Wii U's own GamePad and Pro Controller the choice applies at once.
+        using switch_settings::ControllerMode;
+        const bool single = screen_mode::single_screen(), pro = input::pro_controller();
+        static int saved = -1;  // the saved choice (ControllerMode)
+        if (saved < 0) saved = int(single ? ControllerMode::kSingle : pro ? ControllerMode::kPro : ControllerMode::kGamePad);
+        auto choose = [&](ControllerMode m, const char* value) {
+            saved = int(m);
+            hostui::post([single, m, value] {
+                if (!single && m != ControllerMode::kSingle) hostui::set_pro_controller(m == ControllerMode::kPro);
+                hostui::set(switch_settings::kKeyControllerMode, value);
+            });
+        };
         ImGui::TextUnformatted("The controller acts as");
+        if (radio("GamePad, single screen", saved == int(ControllerMode::kSingle))) choose(ControllerMode::kSingle, "single");
         ImGui::SameLine();
-        if (radio("Wii U Pro Controller", pro))
-            hostui::post([] { hostui::set_pro_controller(true); hostui::set("proController", "1"); });
+        if (radio("Wii U GamePad", saved == int(ControllerMode::kGamePad))) choose(ControllerMode::kGamePad, "gamepad");
         ImGui::SameLine();
-        if (radio("Wii U GamePad", !pro))
-            hostui::post([] { hostui::set_pro_controller(false); hostui::set("proController", "0"); });
-        help("For testing (not offered to players). Pick the same controller as the game's own options:\n"
-             "if they differ, the game reads a controller nobody holds and no button works.");
+        if (radio("Wii U Pro Controller", saved == int(ControllerMode::kPro))) choose(ControllerMode::kPro, "pro");
+        help("For testing (not offered to players). GamePad, single screen: play in Off-TV Play from the\n"
+             "title screen on, no controller choice, Minus the item menu. Wii U GamePad and Pro Controller:\n"
+             "the game as on the Wii U (TV play, its controller choice); between those two the choice applies\n"
+             "at once, to or from the single screen from the next start.");
+        if ((saved == int(ControllerMode::kSingle)) != single) note("Applies at the next start.");
         // the GamePad screen (items, map), full size instead of the TV picture
         const bool view = gfxsw::gamepad_view();
         ImGui::AlignTextToFramePadding();
@@ -1185,9 +1201,10 @@ void tab_switch() {
         ImGui::SameLine();
         if (radio("TV picture", !view)) gfxsw::set_gamepad_view(false);
         ImGui::SameLine();
-        if (radio("GamePad screen", view, !pro)) gfxsw::set_gamepad_view(true);
+        if (radio("GamePad screen", view)) gfxsw::set_gamepad_view(true);
         help("ZL + ZR + Minus switches between them while playing. On the GamePad screen the touch\n"
-             "screen works as the GamePad's (items, map). Only with the GamePad chosen above.");
+             "screen works as the GamePad's (items, map). With the Pro Controller chosen above, the GamePad\n"
+             "picture is drawn only while it is shown (test: what the game puts there in that mode).");
         bool pip = false;
         if (check("GamePad screen in a corner of the TV picture", gfxsw::gamepad_pip(), &pip, !pro))
             hostui::post([pip] { switch_settings::set_gamepad_pip(pip); });
@@ -2265,9 +2282,11 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
         prefs_read = true;
         std::string v;
         if (hostui::get("perfOverlay", v)) g_perf = v == "1";
+#ifndef __SWITCH__  // (the Switch's is applied before the game starts, switch_settings::apply_at_start)
         // the saved controller choice (WWHD_PRO_CONTROLLER wins); it also hides or shows the GamePad screen
         if (!getenv("WWHD_PRO_CONTROLLER") && hostui::get("proController", v))
             hostui::post([pro = v == "1"] { hostui::set_pro_controller(pro); });
+#endif
         // the saved rumble choice (WWHD_RUMBLE wins)
         if (!rumble::env_override() && hostui::get("rumble", v)) rumble::set_enabled(v != "0");
         // the saved gyro settings (WWHD_GYRO overrides the source)
