@@ -1,7 +1,10 @@
-// Switch input: Joy-Cons / Pro Controller read as a Wii U Pro Controller (WPAD/KPAD, see
-// hle/padscore.cpp) so the game puts everything on the one TV screen; the Switch tab's Debug section
-// (saved as proController) makes them act as the Wii U GamePad instead. Buttons map by position, which matches the
-// Wii U's labels. Text prompts go through the system software keyboard.
+// Switch input: Joy-Cons / Pro Controller act as the Wii U GamePad (VPAD, hle/system_stubs.cpp), and the window
+// shows the GamePad's picture: the game itself in Off-TV Play (Minus), its touch screen otherwise (the console's
+// touch screen is the GamePad's; Plus pauses with the item menu there, buttons and touch). The Switch tab's Debug
+// section (saved as controllerMode) chooses between that single-screen GamePad (the default, screen_mode.cpp), the
+// Wii U's own GamePad play (TV play, Minus the game's), and a Wii U Pro Controller (WPAD/KPAD, hle/padscore.cpp),
+// with the TV picture. Buttons map by position, which matches the Wii U's labels. Text prompts go through the system
+// software keyboard.
 #include <switch.h>
 
 #include <algorithm>
@@ -16,6 +19,7 @@
 #include "../overlay/overlay.h"
 #include "../rumble.h"
 #include "../runtime.h"
+#include "../screen_mode.h"
 #include "../gfx/switch_renderer.h"
 #include "debug_server.h"
 #include "input_switch.h"
@@ -32,7 +36,7 @@ namespace input {
 namespace {
 std::mutex g_mu;
 PadState g_pad;
-std::atomic<bool> g_pro{true};
+std::atomic<bool> g_pro{false};  // the GamePad (2026-10-09; was the Pro Controller)
 float g_values[input_map::kPadCount] = {};  // the settings overlay's view of the controller (controller_values)
 std::function<void(bool, std::u16string)> g_pending;
 std::u16string g_initial;
@@ -264,7 +268,9 @@ void update() {
         if (held & m.hid) s.buttons |= m.vpad;
     // Minus is shared with the settings menu (held half a second opens it, overlay.cpp) and ZL + ZR + Minus
     // (TV / GamePad picture): the game gets a Minus only as a short press that did neither, after its release
-    // (a pulse of 100 ms, read by a few game frames). In GamePad mode the game's Minus is Off-TV Play.
+    // (a pulse of 100 ms, read by a few game frames). In the single-screen GamePad experience it is the game's Plus
+    // (the paused item menu), since the GamePad's Minus would leave Off-TV Play (screen_mode.cpp) and the window
+    // shows only the GamePad picture; otherwise it is the game's Minus (the Wii U GamePad's: TV / Off-TV Play).
     {
         static bool down = false, other = false;  // other: this press opened / closed the menu or was the combo
         static u64 since = 0, pulseUntil = 0;
@@ -279,7 +285,7 @@ void update() {
             if (!other && !overlay::is_open()) pulseUntil = now + 100000000ull;
         }
         s.buttons &= ~uint32_t(kMinus);
-        if (now < pulseUntil) s.buttons |= kMinus;
+        if (now < pulseUntil) s.buttons |= screen_mode::single_screen() && !g_pro.load(std::memory_order_relaxed) ? kPlus : kMinus;
     }
     // both sticks clicked together: a capture of the next frame (its passes in the log, its pictures on the
     // SD card) for a picture that goes wrong, when turned on in the Switch tab; the game gets the clicks as usual
@@ -340,7 +346,11 @@ void update() {
 
 void set_touch(bool, float, float) {}
 bool pro_controller() { return g_pro.load(std::memory_order_relaxed); }
-void set_pro_controller(bool on) { g_pro = on; LOG("[input] Switch controller acts as %s", on ? "Pro Controller" : "GamePad"); }
+void set_pro_controller(bool on) {
+    g_pro = on;
+    gfxsw::set_gamepad_view(!on);  // the GamePad's picture with the GamePad, the TV's with the Pro Controller
+    LOG("[input] Switch controller acts as %s", on ? "Pro Controller" : "GamePad");
+}
 void release_keys() {}
 void controller_values(float* v) {
     std::lock_guard<std::mutex> lk(g_mu);

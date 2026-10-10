@@ -133,7 +133,7 @@ struct Renderer {
         uint64_t memoHits = 0, comboHits = 0, textureLookups = 0, textureCacheHits = 0;
         uint64_t uboBytes = 0, indexBytes = 0, vertexBytes = 0, streamBytes = 0, reusedBytes = 0, copyNs = 0;
         uint64_t streamFullSkips = 0;  // draws skipped because the stream slice was full
-        uint64_t gamepadDraws = 0, gamepadDrawNs = 0, gamepadSkipped = 0, gamepadClearsSkipped = 0;
+        uint64_t gamepadDraws = 0, gamepadDrawNs = 0, gamepadSkipped = 0, gamepadClearsSkipped = 0, tvSkipped = 0, tvClearsSkipped = 0;
         uint64_t flushNs = 0, flushes = 0, midFrameSubmits = 0;
         // surface lane (surfaces.cpp, formats.cpp, descriptors)
         uint64_t uploadNs = 0, uploads = 0, uploadBytes = 0;

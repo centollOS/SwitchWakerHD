@@ -846,6 +846,23 @@ DrawSkips draw_skips_take() {
 bool skip_gamepad() {
     return !gfxsw::gamepad_picture_drawn();
 }
+// ---- the TV picture, the other way round: in Off-TV Play the game still draws the TV's ("Currently playing on
+// Wii U GamePad", 1920x1080 docked, 1.8 ms of GPU a frame measured), which the Switch never shows while the window shows
+// the GamePad picture. A buffer the game sends to the TV, never to the GamePad, and that nothing else reads is the
+// TV's only; its draws and color clears are skipped while the last frame presented the GamePad picture (so the
+// TV's is drawn again at once when the window needs it: before the first GamePad picture, the Pro Controller).
+std::atomic<bool> g_skipTv{env_switch("SKIP_TV", true)};
+bool skip_tv() {
+    // the last frame showed the GamePad picture and this one will too (gamepad_view: what present() shows next), so
+    // the frame that switches to the TV picture (ZL + ZR + Minus, the Switch tab) has its TV draws
+    return g_skipTv.load(std::memory_order_relaxed) && g_padShown.load(std::memory_order_relaxed) && gfxsw::gamepad_view();
+}
+bool tv_only(const Surface* s) {
+    constexpr uint64_t kReadWindow = 300;  // as gamepad_only
+    const bool unread = s->readFrame == ~0ull || R.frame - s->readFrame > kReadWindow;
+    return s->tvScanFrame != ~0ull && R.frame - s->tvScanFrame <= 60 && s->drcScanFrame == ~0ull && !s->gamepadSource &&
+           unread;
+}
 bool gamepad_only(const Surface* s) {
     // a read by another draw or a copy keeps a buffer drawn, for 300 frames (gfx/gl)
     constexpr uint64_t kReadWindow = 300;
@@ -1409,6 +1426,21 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
                 if (c && !c->skipLogged) {
                     c->skipLogged = true;
                     LOG("[dk] draws into %s skipped from frame %llu: GamePad picture only",
+                        trace_name(c).c_str(), (unsigned long long)frame);
+                }
+            return;
+        }
+    }
+    if (target != depth && skip_tv()) {
+        bool tvDraw = true;
+        for (auto* c : colors)
+            if (c && !tv_only(c)) tvDraw = false;
+        if (tvDraw) {
+            R.perf.tvSkipped++;
+            for (auto* c : colors)
+                if (c && !c->skipLogged) {
+                    c->skipLogged = true;
+                    LOG("[dk] draws into %s skipped from frame %llu: TV picture only (the window shows the GamePad's)",
                         trace_name(c).c_str(), (unsigned long long)frame);
                 }
             return;

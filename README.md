@@ -127,8 +127,9 @@ and copy the files.
   **SwitchWakerHD**. Opened from the album (applet mode) the game has far too little memory.
 - Or install the HOME-screen icon (forwarder), which always starts it in title mode:
   [tools/switch/forwarder/INSTALL.md](tools/switch/forwarder/INSTALL.md).
-- Controllers act as a Wii U Pro Controller, so the game draws everything on one screen: pick the
-  Pro Controller when the game asks.
+- Controllers act as the Wii U GamePad, in Off-TV Play: the console's screen shows the game at full
+  resolution, and its touch screen is the GamePad's. The game goes straight from the title to the save
+  list (no controller question) and into play.
 
 ### Saves, settings and updates
 
@@ -158,7 +159,10 @@ and comes back at the next start.
 ### Controls and gyro aiming
 
 - **Play with what you have.** Joy-Con, a Pro Controller or the console in handheld mode all
-  work. They act as a Wii U Pro Controller, so the map, items and menus all sit on one screen.
+  work. They act as the Wii U GamePad, in Off-TV Play: the game on one screen, with the HUD.
+- **The touch screen is the GamePad's.** **Plus** or **Minus** pauses the game with the item menu
+  (Items, Map, Bottles), used with the buttons or by touch: drag items onto Y, X or R, tap the map.
+  Minus never switches to the Wii U's "TV mode", which has no meaning on one screen.
 - **Rumble:** the Joy-Con or the Pro Controller vibrates whenever the game asks for it, as the Wii U
   controllers did. One switch turns it off.
 - **Gyro aiming**, as on the Wii U GamePad: aim the bow, hookshot, boomerang, grappling hook,
@@ -243,6 +247,21 @@ open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Round 47") and
 [docs/deko3d-plan.md](docs/deko3d-plan.md).
 
 ## Changelog
+
+### 2026-10-10: native experience (GamePad mode)
+
+- The controllers act as the **Wii U GamePad** (was the Pro Controller), and the game plays in
+  **Off-TV Play** from the first frame: the title screen, file select and play at full resolution,
+  sharp, at 30 fps (the title ran at ~20 fps), with the touch screen as the GamePad's.
+- No controller question at file select; **Back** on the save list returns to the title screen.
+- **Minus** opens the paused item menu, like Plus; the pause menu's Options no longer lists Controller.
+- No touch-conducting guide over the picture while the Wind Waker is out (conducting by stick or touch
+  still works).
+- The TV picture nobody sees is not drawn (1.8 ms of GPU a frame docked).
+- The Switch tab's Debug section chooses what the controller acts as: **GamePad, single screen** (all
+  of the above, the default), or the game as on the Wii U with the **Wii U GamePad** (TV play) or the
+  **Wii U Pro Controller**. Between those two the choice applies at once; to or from the single
+  screen, from the next start.
 
 ### 2026-10-08: post office letters (round 47)
 
