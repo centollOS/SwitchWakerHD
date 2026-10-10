@@ -43,9 +43,9 @@ void print_wrapped(std::string_view text) {
     printf("\n");
 }
 
-// A text screen with `title` (red for an error, yellow for a warning) and `body`, until `button` is pressed (or
-// the app is asked to close).
-void show(bool error, const char* title, const std::string& body, u64 button, const char* prompt) {
+// A text screen with `title` (red for an error, yellow for a warning) and `body`, until one of `buttons` is pressed
+// (or the app is asked to close: 0); the button pressed.
+u64 show(bool error, const char* title, const std::string& body, u64 buttons, const char* prompt) {
     PrintConsole* con = consoleInit(nullptr);
     printf("\n %s%s\x1b[0m\n\n", error ? "\x1b[31;1m" : "\x1b[33;1m", title);
     print_wrapped(body);
@@ -53,13 +53,15 @@ void show(bool error, const char* title, const std::string& body, u64 button, co
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
     padInitializeDefault(&pad);
+    u64 pressed = 0;
     while (appletMainLoop()) {
         padUpdate(&pad);
-        if (padGetButtonsDown(&pad) & button) break;
+        if ((pressed = padGetButtonsDown(&pad) & buttons)) break;
         consoleUpdate(con);
         svcSleepThread(16'000'000);
     }
     consoleExit(con);
+    return pressed;
 }
 
 }  // namespace
@@ -84,22 +86,25 @@ void game_files(const std::string& game_dir) {
     exit(1);
 }
 
-void shader_cache() {
+bool shader_cache() {
     // shaders_dk.cpp's cache files (in WWHD_DK_SHADER_CACHE_DIR when set): the one built on a computer and the one
     // the console fills as it compiles; with neither, every shader is compiled while the game is played
     const char* e = getenv("WWHD_DK_SHADER_CACHE_DIR");
     const std::string dir = e && *e ? std::string(e) + "/" : std::string();
-    if (is_file(dir + "shadercache_dksh.bin", true) || is_file(dir + "shadercache_dksh_local.bin", true)) return;
+    if (is_file(dir + "shadercache_dksh.bin", true) || is_file(dir + "shadercache_dksh_local.bin", true)) return false;
     LOG("[startup] no shadercache_dksh.bin and no shaders compiled on this console yet: first-start notice shown");
     log_flush();
-    show(false, "SwitchWakerHD: first start",
+    const u64 b = show(false, "SwitchWakerHD: first start",
          "No graphics have been compiled on this console yet. The console compiles each of the game's graphics "
          "effects the first time it is drawn, so on this first start some textures may look black and some objects "
          "may appear a moment late. It gets better as you play: what is compiled is kept for the next starts.\n\n"
-         "If this bothers you, the console can prepare the whole game at once: start your game, hold Minus (-) for "
-         "the settings menu, Switch tab, Prepare graphics. It visits every place by itself (30-40 minutes, best "
-         "docked), then restarts; your Quest Log is left as it was.",
-         HidNpadButton_A, "Press A to continue.");
+         "The console can also prepare the whole game now: it visits every place by itself (30-40 minutes, best "
+         "docked), then restarts at the title screen, ready. Your saves are not touched. You can also do it later: "
+         "hold Minus (-) in the game for the settings menu, Switch tab, Prepare graphics.",
+         HidNpadButton_A | HidNpadButton_B, "A: prepare graphics now      B: play now");
+    const bool prepare = b & HidNpadButton_A;
+    LOG("[startup] first-start notice: %s", prepare ? "prepare graphics now" : "play now");
+    return prepare;
 }
 
 }  // namespace startup_checks

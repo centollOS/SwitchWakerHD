@@ -55,7 +55,21 @@ that requests each warp, waits for the arrival (no pending warp, no fade, the st
   the empty slot empty.
 - Stop in the middle, close the game in the middle, continue.
 
-## Later (option B)
+## From the title screen (implemented, to test)
 
-Start from the title screen without a Quest Log: the game state is not initialised there and warps out of the title's
-scene got stuck today (sea_T, E3ROOP). To study once A works.
+The Warp tab's warps wait for a loaded file (mods/cheats.cpp save_loaded excludes sea_T): that, not the game, is why
+no warp worked after sea_T or E3ROOP in the warp sweep. The sweep writes every warp itself on the game's main thread
+(prepare_graphics::frame, as cheats.cpp warp_service), and tops up Link's health itself, so it runs from the title
+screen's placeholder save data too. The first-start notice offers A: prepare graphics now (the sweep starts once the
+title screen has shown for 4 s) or B: play now.
+
+## Findings on the console (2026-10-10)
+
+- A game over stops the sweep (the next warp with Link dead stopped the game, c_xyz.cpp:285): Link's health is
+  topped up every frame.
+- Warping out a few seconds after arriving (M2tower -> M_DaiB after 10 s, Xboss1 -> Xboss2) stopped the game the same
+  way: the next warp waits until Link has control for 1 s (the game's pause-menu conditions), at least 5 s, and
+  M2tower stays 12 s.
+- The Quest Log files were put back byte-identical after a cut sweep (the game closed), and the sweep continued where
+  it stopped.
+- About 12 s a place with nothing to wait for; ~25-35 min for the 127 places.

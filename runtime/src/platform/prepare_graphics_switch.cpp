@@ -1,11 +1,11 @@
 // Prepare graphics (prepare_graphics_switch.h, docs/prepare-graphics-plan.md).
 //
 // A thread walks mods/warps.h (kMainWarps then kAllWarps, each stage/room once): it asks for the warp (the game's
-// own scene change, mods::request_warp), waits for the arrival (no warp pending, no fade, no next-stage request, the
+// own scene change request, written on the game's main thread by frame()), waits for the arrival (no warp pending, no fade, no next-stage request, the
 // stage named), then waits until the deko3d shader worker has had nothing pending for a moment (or 60 s), and goes on.
 // The next index is kept in prepare_graphics/state.txt, so a sweep stopped or cut continues where it was.
 //
-// Link has infinite health during the sweep (mods/cheats.cpp, as the Mods tab's), so enemies in a place cannot end it.
+// Link's health is topped up every frame during the sweep, so enemies in a place cannot end it.
 // The game in progress is only a vehicle: before the first warp the small Quest Log files of save/user (cking.sav,
 // the play log, the picture order; the Picto Box pictures cannot change without the player) are copied to
 // prepare_graphics/save/, and they are put back at the end (or at the next start, when the game closed during the
@@ -58,6 +58,7 @@ constexpr uint32_t kMaxBackup = 64 << 10; // save/user files up to this size are
 const uint32_t kNextStageReq = GD(0x1046F0B0) + 0x5140 + 12;  // mods/cheats.cpp kNextStage + 12: a request is set
 const uint32_t kOverlap = GD(0x101F36CC);                      // a scene change's fade is running (mods/turbo.cpp)
 // savestate.cpp player_has_control's fields of g_dComIfG_gameInfo.play
+const uint32_t kSaveInfoPtr = GD(0x101F84DC);  // dComIfGs save area (dSv_info_c at +0x20: max life u16, life u16)
 const uint32_t kPlay = GD(0x1046F0B0);
 const uint32_t kEventRun = kPlay + 0x5292;     // dComIfGp_event_runCheck
 const uint32_t kMesgStatus = kPlay + 0x5BB2;   // dComIfGp_getMesgStatus
@@ -74,7 +75,12 @@ struct Place {
 std::mutex g_mu;            // g_status
 std::string g_status;
 std::atomic<bool> g_running{false}, g_stop{false};
-bool g_hadInfiniteHealth = false;  // the player's own setting, put back at the end
+std::atomic<bool> g_atTitle{false};  // start once the title screen shows
+// the next warp, written by frame() on the game's main thread as mods/cheats.cpp warp_service does (mods::request_warp
+// waits for a loaded file, which the title screen's placeholder save data is not)
+std::mutex g_titleMu;
+Place g_titleWarp{};
+std::atomic<bool> g_titleWarpPending{false};
 
 std::string dir() { return host::config_dir() + "/prepare_graphics"; }
 std::string save_user() { return config::save_dir + "/user"; }
@@ -178,9 +184,16 @@ bool in_game() {
     const std::string st = mods::current_stage();
     return !st.empty() && st != "sea_T" && st != "Name";
 }
+bool at_title() { return mods::current_stage() == "sea_T"; }
+
+void request(const Place& p) {
+    std::lock_guard<std::mutex> lk(g_titleMu);
+    g_titleWarp = p;
+    g_titleWarpPending = true;
+}
 
 bool arrived(const Place& p) {
-    return !mods::warp_pending() && !ld8(kNextStageReq) && !ld32(kOverlap) && mods::current_stage() == p.stage;
+    return !mods::warp_pending() && !g_titleWarpPending && !ld8(kNextStageReq) && !ld32(kOverlap) && mods::current_stage() == p.stage;
 }
 
 bool link_has_control() {
@@ -192,7 +205,6 @@ double now() { return std::chrono::duration<double>(std::chrono::steady_clock::n
 void sleep_s(double s) { std::this_thread::sleep_for(std::chrono::duration<double>(s)); }
 
 void finish_and_restart(const char* why) {
-    if (!g_hadInfiniteHealth) mods::set_infinite(mods::kInfHealth, false);
     set_status(std::string("Preparing graphics: ") + why + ". The game restarts.");
     sleep_s(5);  // the shader cache and manifest writers' last batches (they write every couple of seconds)
     restore_save();
@@ -216,7 +228,7 @@ void sweep() {
         char b[160];
         snprintf(b, sizeof b, "Preparing graphics: %zu/%zu (%s). To stop: hold Minus, Switch tab.", i + 1, list.size(), p.stage);
         set_status(b);
-        mods::request_warp(p.stage, p.room, p.point);
+        request(p);
         const double asked = now();
         while (!g_stop && !arrived(p) && now() - asked < kArriveTimeout) sleep_s(0.25);
         if (g_stop) break;
@@ -271,13 +283,9 @@ void sweep() {
 
 std::string start() {
     if (g_running) return "already running";
-    if (!in_game()) return "start a game first (your Quest Log, or a new game you do not save)";
+    if (!in_game() && !at_title()) return "start a game first (your Quest Log, or a new game you do not save)";
     mkdir(dir().c_str(), 0777);
     if (!backup_save()) return "could not copy the Quest Log files (is the SD card full?)";
-    // enemies attack while the sweep waits in a place: with health topped up every frame, Link does not die (a
-    // game over would stop the warps)
-    g_hadInfiniteHealth = mods::infinite(mods::kInfHealth);
-    mods::set_infinite(mods::kInfHealth, true);
     g_stop = false;
     g_running = true;
     std::thread([] {
@@ -292,6 +300,45 @@ bool running() { return g_running; }
 std::string status() {
     std::lock_guard<std::mutex> lk(g_mu);
     return g_running ? g_status : std::string();
+}
+
+void request_at_title() {
+    g_atTitle = true;
+    LOG("[prepare] requested at start-up: starts once the title screen shows");
+}
+
+void frame() {
+    // enemies attack while the sweep waits in a place: Link's health is topped up every frame (as the Mods tab's
+    // infinite health, which waits for a loaded file), so a game over does not stop the warps
+    if (g_running) {
+        const uint32_t sv = ld32(kSaveInfoPtr);
+        if (sv >= mem::kMem2Start && sv < mem::kMem2End) {
+            const uint16_t max = ld16(sv + 0x20 + 0x00);
+            if (max >= 4 && max <= 80) st16(sv + 0x20 + 0x02, max);
+        }
+    }
+    static double titleSince = 0;
+    if (g_atTitle && !g_running) {
+        if (!at_title()) titleSince = 0;
+        else if (titleSince == 0) titleSince = now();
+        else if (now() - titleSince > 4.0) {  // the title screen has settled
+            g_atTitle = false;
+            const std::string why = start();
+            if (!why.empty()) LOG("[prepare] could not start from the title screen: %s", why.c_str());
+        }
+    }
+    if (g_titleWarpPending && !ld8(kNextStageReq)) {  // as mods/cheats.cpp warp_service
+        std::lock_guard<std::mutex> lk(g_titleMu);
+        for (uint32_t i = 0; i < 8; i++) st8(kNextStageReq - 12 + i, uint8_t(i < strlen(g_titleWarp.stage) ? g_titleWarp.stage[i] : 0));
+        st16(kNextStageReq - 12 + 8, uint16_t(int16_t(g_titleWarp.point)));
+        st8(kNextStageReq - 12 + 10, uint8_t(int8_t(g_titleWarp.room)));
+        st8(kNextStageReq - 12 + 11, 0xFF);  // layer: the stage's own choice
+        st8(kNextStageReq - 12 + 13, 0);     // wipe: the default fade
+        st8(kNextStageReq, 1);               // enabled
+        g_titleWarpPending = false;
+        LOG("[prepare] warp from %s to %s room %d point %d", mods::current_stage().c_str(), g_titleWarp.stage,
+            g_titleWarp.room, g_titleWarp.point);
+    }
 }
 
 void startup() {

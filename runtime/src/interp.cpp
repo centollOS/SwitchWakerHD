@@ -39,6 +39,9 @@
 #include "runtime.h"
 #include "savestate.h"
 #include "true60.h"
+#ifdef __SWITCH__
+#include "platform/prepare_graphics_switch.h"  // (this fork)
+#endif
 
 
 extern "C" {
@@ -856,6 +859,9 @@ extern "C" void hook_0203593C(Cpu* c) {
     fx_pass_start();
     ss::service(c);  // save states: exact values are back in guest memory, all other threads idle
     mods::cheats_service();
+#ifdef __SWITCH__
+    prepare_graphics::frame();  // (this fork) Prepare graphics: its warps and Link's health
+#endif
     g_passes++;
     // test aid: WWHD_INTERP_AT_STEP=n switches interpolation on after n frames
     static uint64_t passes = 0;
