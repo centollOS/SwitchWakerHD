@@ -186,7 +186,7 @@ void sweep() {
     for (; i < list.size() && !g_stop; i++) {
         const Place& p = list[i];
         char b[160];
-        snprintf(b, sizeof b, "Preparing graphics: %zu/%zu (%s). Stop: Warp tab or settings.", i + 1, list.size(), p.stage);
+        snprintf(b, sizeof b, "Preparing graphics: %zu/%zu (%s). To stop: hold Minus, Switch tab.", i + 1, list.size(), p.stage);
         set_status(b);
         mods::request_warp(p.stage, p.room, p.point);
         const double asked = now();
