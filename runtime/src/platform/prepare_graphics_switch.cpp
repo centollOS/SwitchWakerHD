@@ -222,6 +222,15 @@ bool link_has_control() {
            ld32(kPlayerPtr) && ld32(kPlayerPtr) == ld32(kLinkPtr);
 }
 
+// why Link has no control / the arrival is not done (for the log)
+std::string why_not() {
+    char b[160];
+    snprintf(b, sizeof b, "event %u mesg %u/%u menu %u next %u overlap %08X player %08X link %08X warp %d",
+             ld8(kEventRun), ld8(kMesgStatus), ld8(kScopeMesgStatus), ld8(kMenuFlag), ld8(kNextStageReq), ld32(kOverlap),
+             ld32(kPlayerPtr), ld32(kLinkPtr), int(mods::warp_pending() || g_titleWarpPending));
+    return b;
+}
+
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void sleep_s(double s) { std::this_thread::sleep_for(std::chrono::duration<double>(s)); }
 
@@ -312,8 +321,8 @@ void sweep() {
         // in the place but still in its arrival (a story event of a new game's data, as the title screen's: Link's
         // house): good enough, the game draws it
         const bool inPlace = !arrived(p) && mods::current_stage() == p.stage && !g_titleWarpPending;
-        if (inPlace) LOG("[prepare] %s room %d: in the place, its arrival still running after %.0f s: going on", p.stage,
-                         p.room, kArriveTimeout);
+        if (inPlace) LOG("[prepare] %s room %d: in the place, its arrival still running after %.0f s (%s): going on",
+                         p.stage, p.room, kArriveTimeout, why_not().c_str());
         if (!arrived(p) && !inPlace) {
             // a warp the game did not take is often stuck in its scene change: later warps would wait for it
             LOG("[prepare] %s room %d not reached in %.0f s (stage %s): continuing after a restart", p.stage, p.room,
@@ -349,7 +358,8 @@ void sweep() {
             else if (since == 0) since = now();
             if (since && now() - since >= kControlFor) break;
             if (now() - t1 > kControlTimeout) {
-                LOG("[prepare] %s: Link had no control for %.0f s (an event?): going on", p.stage, kControlTimeout);
+                LOG("[prepare] %s: Link had no control for %.0f s (%s): going on", p.stage, kControlTimeout,
+                    why_not().c_str());
                 break;
             }
             sleep_s(0.1);
