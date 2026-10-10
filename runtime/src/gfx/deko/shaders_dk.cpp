@@ -619,7 +619,19 @@ void worker_main(void*) {
         static int mask = 0x5;
         const int want = job.background ? 0x1 : 0x5;
         if (want != mask) svcSetThreadCoreMask(CUR_THREAD_HANDLE, want == 0x1 ? 0 : -1, mask = want);
+        const uint64_t c0 = now_ns();
         compile_job(job, r);
+        // and it rests as long as it compiled (WWHD_DK_BG_DUTY: the percentage of core 0 it may take, default 50):
+        // game threads on core 0 that the main thread waits for every frame lost their time to a busy worker
+        if (job.background) {
+            static const int duty = [] {
+                const char* e = getenv("WWHD_DK_BG_DUTY");
+                const int d = e && *e ? atoi(e) : 50;
+                return d < 5 ? 5 : d > 100 ? 100 : d;
+            }();
+            const uint64_t took = now_ns() - c0;
+            if (duty < 100) svcSleepThread(int64_t(took * uint64_t(100 - duty) / uint64_t(duty)));
+        }
         lk.lock();
         workerCurrent = 0;
         workerLastPartner = job.partner;
@@ -773,6 +785,7 @@ struct Listed {
     uint64_t hash;
     bool vertex;
     std::string glsl;
+    std::vector<uint8_t> record;  // its shadercache_gl.bin record 1, zlib'd by the listing thread (not the render's)
 };
 std::mutex g_listedMutex;
 std::vector<Listed> g_listed;
@@ -1412,7 +1425,7 @@ void shaders_frame_start() {
         std::vector<Listed> take;
         {
             std::lock_guard<std::mutex> lk(g_listedMutex);
-            const size_t n = std::min<size_t>(g_listed.size(), 32);
+            const size_t n = std::min<size_t>(g_listed.size(), 4);  // (a few a frame: the render thread's time)
             take.assign(std::make_move_iterator(g_listed.begin()), std::make_move_iterator(g_listed.begin() + n));
             g_listed.erase(g_listed.begin(), g_listed.begin() + n);
         }
@@ -1423,7 +1436,7 @@ void shaders_frame_start() {
             code.vertex = l.vertex;
             code.state = ShaderCode::Queued;
             code.origin = ShaderCode::Session;
-            cache_gl_source(l.hash, l.vertex, l.glsl);
+            if (glFile.f && glSources.insert(l.hash).second) cache_write(glFile, l.record.data(), l.record.size());
             Job job;
             job.hash = l.hash;
             job.vertex = l.vertex;
@@ -1802,8 +1815,18 @@ bool translate_listed(uint32_t* regs, bool vertex, const uint8_t* program, uint3
 }
 
 void queue_listed(uint64_t glslHash, bool vertex, std::string&& glsl) {
+    // the shadercache_gl.bin record, as cache_gl_source makes it, here on the listing thread
+    uLongf packed = compressBound(glsl.size());
+    std::vector<uint8_t> record(18 + packed);
+    if (compress2(record.data() + 18, &packed, (const Bytef*)glsl.data(), glsl.size(), 6) != Z_OK) return;
+    const uint32_t sizes[2] = {uint32_t(packed), uint32_t(glsl.size())};
+    record[0] = 1;
+    record[1] = vertex;
+    memcpy(record.data() + 2, &glslHash, 8);
+    memcpy(record.data() + 10, sizes, 8);
+    record.resize(18 + packed);
     std::lock_guard<std::mutex> lk(g_listedMutex);
-    g_listed.push_back({glslHash, vertex, std::move(glsl)});
+    g_listed.push_back({glslHash, vertex, std::move(glsl), std::move(record)});
 }
 
 size_t listed_waiting() {

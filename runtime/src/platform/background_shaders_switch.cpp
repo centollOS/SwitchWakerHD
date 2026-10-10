@@ -79,7 +79,7 @@ void run(void*) {
             set_status(b);
             LOG("[bg-shaders] %s", b);
         }
-        svcSleepThread(1'000'000);  // a breath for the game between variants
+        svcSleepThread(int64_t((now() - d0) * 2e9) + 1'000'000);  // a third of core 0 at most (the game's threads)
     }
     LOG("[bg-shaders] done: %zu translated, %zu queued (duplicates of what is compiled are dropped by the renderer), "
         "%zu failed, %.0f s", done, queued, failed, now() - t0);
