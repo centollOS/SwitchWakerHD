@@ -184,7 +184,7 @@ console's offline cache**, which a harvest of the whole game made (7,680 shaders
 shaders from a couple of minutes of recording. They take 12.7 MiB of code memory (speculative shaders are small,
 1.1 KB on average) and 24 s to compile on the computer.
 
-The console loads the whole cache into its 32 MiB of shader code memory, and what it compiles later goes there too,
+The console loads the whole cache into its shader code memory (32 MiB then, 64 MiB since 5936276), and what it compiles later goes there too,
 so `dksh_cache build` takes a budget (`make_sd.py`: 20 MiB): sources in file order, recorded variants first.
 
 `make_sd.py --shaders shader_manifest.bin` runs speculate, translate and build (a `shadercache_gl.bin` still works
@@ -224,4 +224,20 @@ Console tests (2026-10-10, hardware):
   rocks floating) and Forest Haven has sky where its fog and background go; with the cache both are drawn. Not all
   skips are gone: the speculation (up to 2 recorded states per program family) does not cover every variant of
   places never visited. Next: more speculative states per family (`--max`, within the budget) and the uam failures.
+- Vertex shaders (5936276): speculate made 4 vertex variants out of 40,000, because this runtime writes
+  SQ_VTX_SEMANTIC_CLEAR as 0xFFFFFFFF << semantics and shaderprep's own_block 0xFFFFFFFF, so no recorded vertex
+  state matched its family. Fixed, the same manifest against the console's whole-game harvest (7,680 shaders,
+  5,763 pairs): pairs with both stages 21% -> 76% (vertex 11% -> 62%), 19,573 shaders in 28.6 MiB. More states per
+  family (`--max 4/8`) add little (76.0%, 76.8%) and ordering the guesses by rank did worse under a budget. The
+  console's shader code memory is now 64 MiB (32 was our constant, not a limit) and make_sd.py's budget 40 MiB.
+  Same four warps on the console with that cache (loads in 0.65 s, 29.3 MiB of 64):
+
+  | place | no cache | first cache | with vertex shaders |
+  |---|---|---|---|
+  | Windfall | 72.6, 58.3 | 31.4, 43.4 | 10.7, 4.3 |
+  | Dragon Roost | 89.1, 240.6, 79.8 | 28.9, 71.6, 17.0 | 24.8, 41.5, 2.0 |
+  | Forest Haven (inside) | 38.9, 228.1, 53.1 | 38.0, 82.1, 16.2 | 17.8, 35.3, 1.8 |
+  | Wind Temple | 22.0, 1.8 | 16.0, 0.4 | 4.8, 0.0 |
+
+  Skips after arriving fall by 70-90% against no cache, from a couple of minutes of recording.
 
