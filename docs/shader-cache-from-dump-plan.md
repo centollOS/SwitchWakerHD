@@ -244,4 +244,8 @@ Console tests (2026-10-10, hardware):
   reads it as a cube map; `dksh_cache translate` now gives such a variant a cube map unit (the game's own state).
   19,584 / 19,584 compile.
 - Before main: a long normal play session with the feature build (64 MiB of shader code memory is renderer-wide).
+- Before main: `tools/switch/dksh_cache` must also build natively (no Docker/Podman). Today make_sd.py --shaders
+  stops with "needs Docker or Podman", so players on the recommended Windows route (native devkitPro, v0.4.1) cannot
+  build the cache. Native build on macOS/Linux/Windows (host compiler + the uam/Cemu sources it already uses), the
+  container kept as a fallback. To do in parallel with the warp sweep (stopped after warp 24 of 146).
 
