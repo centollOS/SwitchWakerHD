@@ -77,6 +77,12 @@ const Texts kEnglish = {
     "start a game first (your Quest Log, or a new game you do not save)",
     "could not copy the Quest Log files (is the SD card full?)",
     "Prepare graphics: choose your Quest Log (or start a new game you do not save) and it begins by itself.",
+    "Preparing the graphics",
+    "First start: the console prepares the graphics of the game once, so that places are not black or late the first time. This takes about 15 minutes, best docked.",
+    "Starting the game...",
+    "Reading the game's graphics...",
+    "%zu of %zu",
+    "B: play now (what is left goes on in the background)",
 };
 
 const Texts kSpanish = {
@@ -145,6 +151,12 @@ const Texts kSpanish = {
     "empieza antes una partida (tu diario, o una partida nueva que no guardes)",
     "no se pudieron copiar los archivos del diario (¿está llena la tarjeta SD?)",
     "Preparar gráficos: elige tu diario (o empieza una partida nueva que no guardes) y empezará sola.",
+    "Preparando los gráficos",
+    "Primer arranque: la consola prepara una vez los gráficos del juego, para que los lugares no se vean negros ni tarden la primera vez. Tarda unos 15 minutos, mejor con la consola en la base.",
+    "Arrancando el juego...",
+    "Leyendo los gráficos del juego...",
+    "%zu de %zu",
+    "B: jugar ya (lo que falte sigue en segundo plano)",
 };
 
 const Texts kFrench = {
@@ -213,6 +225,12 @@ const Texts kFrench = {
     "lancez d'abord une partie (votre journal, ou une nouvelle partie non sauvegardée)",
     "impossible de copier les fichiers du journal (la carte SD est-elle pleine ?)",
     "Préparer les graphismes : choisissez votre journal (ou une nouvelle partie non sauvegardée) et elle démarrera toute seule.",
+    "Préparation des graphismes",
+    "Premier démarrage : la console prépare une fois les graphismes du jeu, pour que les lieux ne soient ni noirs ni en retard la première fois. Environ 15 minutes, de préférence sur la station d'accueil.",
+    "Démarrage du jeu...",
+    "Lecture des graphismes du jeu...",
+    "%zu sur %zu",
+    "B : jouer maintenant (le reste continue en arrière-plan)",
 };
 
 const Texts kGerman = {
@@ -281,6 +299,12 @@ const Texts kGerman = {
     "starte zuerst ein Spiel (dein Spielstand oder ein neues Spiel, das du nicht speicherst)",
     "die Spielstanddateien konnten nicht kopiert werden (ist die SD-Karte voll?)",
     "Grafik vorbereiten: Wähle deinen Spielstand (oder starte ein neues Spiel, das du nicht speicherst), dann beginnt es von selbst.",
+    "Grafik wird vorbereitet",
+    "Erster Start: Die Konsole bereitet die Grafik des Spiels einmal vor, damit Orte beim ersten Mal weder schwarz noch verzögert sind. Das dauert etwa 15 Minuten, am besten in der Station.",
+    "Spiel wird gestartet...",
+    "Grafik des Spiels wird gelesen...",
+    "%zu von %zu",
+    "B: jetzt spielen (der Rest läuft im Hintergrund weiter)",
 };
 
 const Texts kItalian = {
@@ -349,6 +373,12 @@ const Texts kItalian = {
     "avvia prima una partita (il tuo diario, o una nuova partita che non salvi)",
     "impossibile copiare i file del diario (la scheda SD è piena?)",
     "Prepara la grafica: scegli il tuo diario (o inizia una nuova partita che non salvi) e partirà da sola.",
+    "Preparazione della grafica",
+    "Primo avvio: la console prepara una volta la grafica del gioco, così i luoghi non saranno neri né in ritardo la prima volta. Circa 15 minuti, meglio con la console nella base.",
+    "Avvio del gioco...",
+    "Lettura della grafica del gioco...",
+    "%zu di %zu",
+    "B: gioca ora (il resto continua in background)",
 };
 
 // the game's "language" setting (Wii U codes, hle/coreinit_misc.cpp), else the console's language

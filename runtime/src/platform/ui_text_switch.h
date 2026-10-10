@@ -24,6 +24,8 @@ struct Texts {
     // Prepare graphics: messages
     const char *ready, *statusLine, *etaPart, *ending, *endComplete, *endStopped, *endPlaceFailed, *endNoRestart,
         *errRunning, *errNoGame, *errCopy, *waitingForGame;
+    // the first start's loading card (background shaders)
+    const char *bgTitle, *bgBody, *bgStarting, *bgReading, *bgCompiling, *bgSkip;
 };
 
 const Texts& tx();

@@ -58,6 +58,7 @@ namespace gfxvk { bool buffer_cache_enabled(); }  // gfx/vulkan/buffer_cache.h
 #include "../platform/settings_switch.h"
 #include "../platform/debug_switch.h"
 #include "../platform/prepare_graphics_switch.h"
+#include "../platform/background_shaders_switch.h"
 #include "../mods/warps.h"
 #endif
 #include "../screenshot.h"
@@ -2314,7 +2315,7 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
     std::string toast = open ? std::string() : ss::last_message();
 #ifdef __SWITCH__
     if (!open && !prepare_graphics::screen_line().empty()) toast = prepare_graphics::screen_line();  // (this fork)
-    const bool preparing = !open && prepare_graphics::running();  // (this fork) its full-screen card, drawn below
+    const bool preparing = !open && (prepare_graphics::running() || background_shaders::card().up);  // (this fork)
 #else
     const bool preparing = false;
 #endif
@@ -2373,7 +2374,8 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
         }
     }
 #ifdef __SWITCH__
-    if (preparing) prepare_graphics::draw_screen(io.DisplaySize.x, io.DisplaySize.y);  // (this fork)
+    if (preparing && !background_shaders::draw_screen(io.DisplaySize.x, io.DisplaySize.y))  // (this fork)
+        prepare_graphics::draw_screen(io.DisplaySize.x, io.DisplaySize.y);
 #endif
     if (perf) perf_window(open);
     if (!toast.empty() && !preparing) {

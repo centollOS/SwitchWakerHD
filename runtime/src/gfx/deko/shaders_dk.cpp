@@ -489,6 +489,10 @@ std::vector<uint8_t> read_file(const char* path, void (*progress)(size_t, size_t
 }
 
 // ---- the uam worker
+// behind the first start's loading card the game's frame rate does not matter: background jobs on cores 0 and 2,
+// no rest, more listed sources a frame (set_background_fast)
+std::atomic<bool> g_bgFast{false};
+
 struct Job {
     uint64_t hash = 0;
     bool vertex = false;
@@ -617,13 +621,14 @@ void worker_main(void*) {
         // (this fork) a background job (no draw waits for it) only on core 0: on core 2 it took the render thread's
         // time (the game at 27 fps while docs/background-shaders-plan.md's list compiled)
         static int mask = 0x5;
-        const int want = job.background ? 0x1 : 0x5;
+        const bool fast = g_bgFast.load(std::memory_order_relaxed);
+        const int want = job.background && !fast ? 0x1 : 0x5;
         if (want != mask) svcSetThreadCoreMask(CUR_THREAD_HANDLE, want == 0x1 ? 0 : -1, mask = want);
         const uint64_t c0 = now_ns();
         compile_job(job, r);
         // and it rests as long as it compiled (WWHD_DK_BG_DUTY: the percentage of core 0 it may take, default 50):
         // game threads on core 0 that the main thread waits for every frame lost their time to a busy worker
-        if (job.background) {
+        if (job.background && !fast) {
             static const int duty = [] {
                 const char* e = getenv("WWHD_DK_BG_DUTY");
                 const int d = e && *e ? atoi(e) : 50;
@@ -1425,7 +1430,7 @@ void shaders_frame_start() {
         std::vector<Listed> take;
         {
             std::lock_guard<std::mutex> lk(g_listedMutex);
-            const size_t n = std::min<size_t>(g_listed.size(), 4);  // (a few a frame: the render thread's time)
+            const size_t n = std::min<size_t>(g_listed.size(), g_bgFast ? 24 : 4);  // (the render thread's time)
             take.assign(std::make_move_iterator(g_listed.begin()), std::make_move_iterator(g_listed.begin() + n));
             g_listed.erase(g_listed.begin(), g_listed.begin() + n);
         }
@@ -1827,6 +1832,12 @@ void queue_listed(uint64_t glslHash, bool vertex, std::string&& glsl) {
     record.resize(18 + packed);
     std::lock_guard<std::mutex> lk(g_listedMutex);
     g_listed.push_back({glslHash, vertex, std::move(glsl), std::move(record)});
+}
+
+void set_background_fast(bool on) {
+    g_bgFast = on;
+    LOG("[dk] background shader jobs: %s", on ? "fast (cores 0 and 2, no rest: behind a loading screen)"
+                                              : "gentle (core 0, WWHD_DK_BG_DUTY)");
 }
 
 size_t listed_waiting() {

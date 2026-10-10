@@ -9,6 +9,7 @@
 
 #include "imgui.h"
 #include "ui_text_switch.h"
+#include "background_shaders_switch.h"
 
 namespace prepare_graphics {
 namespace {
@@ -31,6 +32,9 @@ bool battery_low(uint32_t& percent) {
 }
 
 }  // namespace
+
+const ImVec4 kHeadingColour = kHeading;
+void note_text(const char* s) { text(kNote, s); }
 
 bool ui_section() {
     ImGui::Spacing();
@@ -114,3 +118,51 @@ bool draw_screen(float width, float height) {
 }
 
 }  // namespace prepare_graphics
+
+// the first start's loading card (background_shaders_switch.h), in the same look as Prepare graphics'
+bool background_shaders::draw_screen(float width, float height) {
+    using prepare_graphics::kHeadingColour;
+    const CardState c = card();
+    if (!c.up) return false;
+    const ui_text::Texts& t = ui_text::tx();
+    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.03f, 0.06f, 0.10f, 1.0f));
+    const ImGuiWindowFlags fl = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                                ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs |
+                                ImGuiWindowFlags_NoBringToFrontOnFocus;
+    if (ImGui::Begin("##background_shaders_card", nullptr, fl)) {
+        const float w = width * 0.6f, x = (width - w) * 0.5f;
+        ImGui::SetCursorPos(ImVec2(x, height * 0.34f));
+        ImGui::PushStyleColor(ImGuiCol_Text, kHeadingColour);
+        ImGui::PushFont(nullptr, ImGui::GetFontSize() * 1.6f);
+        ImGui::TextUnformatted(t.bgTitle);
+        ImGui::PopFont();
+        ImGui::PopStyleColor();
+        ImGui::SetCursorPosX(x);
+        char b[160];
+        if (c.phase == CardState::kCompiling && c.total) {
+            snprintf(b, sizeof b, t.bgCompiling, c.done, c.total);
+            ImGui::ProgressBar(float(c.done) / float(c.total), ImVec2(w, 0), b);
+        } else {
+            ImGui::ProgressBar(-1.0f * float(ImGui::GetTime()), ImVec2(w, 0),
+                               c.phase == CardState::kReading ? t.bgReading : t.bgStarting);
+        }
+        ImGui::PushTextWrapPos(x + w);
+        ImGui::SetCursorPosX(x);
+        if (c.phase == CardState::kCompiling) {
+            if (c.minutesLeft >= 0) snprintf(b, sizeof b, t.minutesLeft, c.minutesLeft < 1 ? 1 : c.minutesLeft);
+            else snprintf(b, sizeof b, "%s", t.workingOut);
+            prepare_graphics::note_text(b);
+        }
+        ImGui::SetCursorPosX(x);
+        prepare_graphics::note_text(t.bgBody);
+        ImGui::SetCursorPosX(x);
+        prepare_graphics::note_text(t.bgSkip);
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    return true;
+}

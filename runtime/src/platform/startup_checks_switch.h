@@ -7,9 +7,7 @@ namespace startup_checks {
 // The game's files in game_dir (code/cking.rpx, content/, meta/meta.xml): when one is missing, an error that says
 // what to copy, and the app closes.
 void game_files(const std::string& game_dir);
-// No compiled shaders yet (no shadercache_dksh.bin, and none compiled on this console so far: the first start): a
-// notice that some textures may look black at first, with the choice to prepare the graphics now (A: true, Prepare
-// graphics then starts at the title screen) or to play (B: false). With graphics already compiled (an update), the
-// same choice once, as "new in this version" (until Prepare graphics completes).
-bool shader_cache();
+// No compiled shaders on this console yet (no shadercache_dksh.bin, none compiled so far): the first start
+// (background_shaders_switch.h shows its loading card then).
+bool first_start();
 }  // namespace startup_checks

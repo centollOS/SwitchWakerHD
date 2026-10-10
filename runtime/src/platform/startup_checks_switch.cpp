@@ -13,7 +13,6 @@
 #include <vector>
 
 #include "../runtime.h"
-#include "prepare_graphics_switch.h"
 #include "ui_text_switch.h"
 
 namespace startup_checks {
@@ -133,34 +132,14 @@ void game_files(const std::string& game_dir) {
     exit(1);
 }
 
-bool shader_cache() {
+bool first_start() {
     // shaders_dk.cpp's cache files (in WWHD_DK_SHADER_CACHE_DIR when set): the one built on a computer and the one
-    // the console fills as it compiles; with neither, every shader is compiled while the game is played
+    // the console fills as it compiles; with neither, nothing has been compiled on this console yet
     const char* e = getenv("WWHD_DK_SHADER_CACHE_DIR");
     const std::string dir = e && *e ? std::string(e) + "/" : std::string();
-    if (is_file(dir + "shadercache_dksh.bin", true) || is_file(dir + "shadercache_dksh_local.bin", true)) {
-        // graphics already compiled here: a player updating from a version without Prepare graphics, offered once
-        if (!prepare_graphics::offer_to_update()) return false;
-        prepare_graphics::mark_offered();
-        LOG("[startup] Prepare graphics offered once (an update)");
-        log_flush();
-        const ui_text::Texts& t = ui_text::tx();
-        const u64 b = show(false, t.updateTitle, {t.updateExplain},
-                           {{"A", t.prepareNow, t.prepareNowDetailUpdate}, {"B", t.later, t.laterDetail}},
-                           HidNpadButton_A | HidNpadButton_B, nullptr);
-        LOG("[startup] update notice: %s", b & HidNpadButton_A ? "prepare graphics now" : "later");
-        return b & HidNpadButton_A;
-    }
-    LOG("[startup] no shadercache_dksh.bin and no shaders compiled on this console yet: first-start notice shown");
-    log_flush();
-    const ui_text::Texts& t = ui_text::tx();
-    const u64 b = show(false, t.firstTitle, {t.firstNotPrepared, t.firstExplain},
-                       {{"A", t.prepareNow, t.prepareNowDetail}, {"B", t.playNow, t.playNowDetail}},
-                       HidNpadButton_A | HidNpadButton_B, nullptr);
-    prepare_graphics::mark_offered();  // (the update notice is for players who never saw this one)
-    const bool prepare = b & HidNpadButton_A;
-    LOG("[startup] first-start notice: %s", prepare ? "prepare graphics now" : "play now");
-    return prepare;
+    const bool first = !is_file(dir + "shadercache_dksh.bin", true) && !is_file(dir + "shadercache_dksh_local.bin", true);
+    if (first) LOG("[startup] no shaders compiled on this console yet: the first start's loading card");
+    return first;
 }
 
 }  // namespace startup_checks
