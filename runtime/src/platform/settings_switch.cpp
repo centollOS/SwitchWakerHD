@@ -31,7 +31,9 @@
 #include <string>
 
 #include "gfx/switch_renderer.h"
+#include "input.h"
 #include "overlay/hostui.h"
+#include "screen_mode.h"
 #include "runtime.h"
 
 namespace switch_settings {
@@ -347,6 +349,18 @@ void apply_at_start() {
     {
         std::string v;
         if (hostui::get(kKeyGamepadPip, v)) gfxsw::set_gamepad_pip(v == "1");
+    }
+    // the saved controller choice, before the game starts (screen_mode.cpp decides the first title screen's mode from
+    // it): controllerMode single (the default: the GamePad, single screen), gamepad or pro (the Wii U's own GamePad /
+    // Pro Controller play). An older proController=1 is pro, =0 single; WWHD_PRO_CONTROLLER wins.
+    {
+        std::string v;
+        ControllerMode m = ControllerMode::kSingle;
+        if (const char* e = getenv("WWHD_PRO_CONTROLLER")) m = strcmp(e, "0") ? ControllerMode::kPro : ControllerMode::kSingle;
+        else if (hostui::get(kKeyControllerMode, v)) m = v == "pro" ? ControllerMode::kPro : v == "gamepad" ? ControllerMode::kGamePad : ControllerMode::kSingle;
+        else if (hostui::get("proController", v) && v == "1") m = ControllerMode::kPro;
+        screen_mode::set_single_screen(m == ControllerMode::kSingle);
+        input::set_pro_controller(m == ControllerMode::kPro);
     }
     {
         std::string v;

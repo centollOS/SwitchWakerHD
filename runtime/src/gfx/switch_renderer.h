@@ -34,6 +34,7 @@ void set_resolution_profile(float scale, bool dynamic);
 enum DrawOpt : int {
     kOptFixedSkip, kOptDepthOnly, kOptTexSharedCache, kOptVtxLayoutCache, kOptBigSubmits, kOptProfiler, kOptPrefetch,
     kOptRegGens,  // round 41: targets, fixed state and viewport skipped while their registers are unchanged
+    kOptSkipTv,   // the TV picture not drawn while the window shows the GamePad's (Off-TV Play; WWHD_DK_SKIP_TV)
     kDrawOpts
 };
 bool draw_opt(int which);
@@ -42,9 +43,10 @@ void set_draw_opt(int which, bool on);
 std::string clock_report_now();  // "CPU x MHz, GPU y MHz, memory z MHz", or "" if unavailable
 #endif
 // the GamePad screen (the game's second screen: items, map, sea chart). Its picture is drawn while the
-// controller acts as the Wii U GamePad; the window then shows the TV picture or, switched (ZL + ZR + Minus, or
-// the Switch tab), the GamePad picture full size, with the console's touch screen as the GamePad's.
-bool gamepad_picture_drawn();         // the controller acts as the GamePad (render thread, every frame)
+// controller acts as the Wii U GamePad, and with the Pro Controller while the window shows it; the window shows
+// the TV picture or, switched (ZL + ZR + Minus, or the Switch tab), the GamePad picture full size, with the
+// console's touch screen as the GamePad's.
+bool gamepad_picture_drawn();         // the controller acts as the GamePad, or the window shows its picture (render thread, every frame)
 bool gamepad_view();                  // the window shows the GamePad picture instead of the TV's
 void set_gamepad_view(bool on);       // any thread, from the next frame
 // the GamePad picture also in a corner of the TV picture (bottom right, a third of the window's width) while

@@ -11,7 +11,7 @@ latest rounds and what they taught: "Round 48", "Round 47", "Round 46", "Round 4
 | Toolchain | devkitPro devkitA64 (GCC 15.2, libnx, deko3d, uam) in the `devkitpro/devkita64` container |
 | Graphics | **deko3d** (`runtime/src/gfx/deko`, docs/deko3d-plan.md): the decompiler's GLSL compiled with uam, from an offline cache `shadercache_dksh.bin`. The OpenGL renderer on Mesa nouveau (EGL + glad) described in the history below was removed after `main` 207349b; it, the patched Mesa build (`tools/switch/mesa`) and the headless desktop build are in git history |
 | Build | Works: `tools/switch/build.sh` → `build/switch-dk/wwhd.nro` (~39 MB) |
-| Boot on hardware | Works: picture, sound and controller input (as a Wii U Pro Controller, so everything is on one screen) |
+| Boot on hardware | Works: picture, sound and controller input (as the Wii U GamePad in Off-TV Play since 2026-10-10: the game on one screen, the touch screen as the GamePad's; was the Pro Controller, still a Debug choice) |
 | Performance on hardware | Stock clocks (CPU 1020, GPU 307, memory 1331 MHz), round 45: Outset ~30 fps (~29 in its heaviest view, 7,300 draws; limit: the render thread); sailing near Dragon Roost and the volcano 26-29 fps (limit: the game's main thread, ~90% game code); at CPU 1122 MHz 30 fps there. Shader variants of earlier sessions skip the decompiler (translation records); new textures ~1.7 ms each |
 | Settings | In-game menu (Minus held half a second): GPU profile (default: stock, GPU 307 MHz, since 2026-10-08; was 460.8 MHz + memory 1600), CPU clock (1020-1785 MHz in the system table's steps; default the stock 1020 since 2026-10-08, was 1224; 1224 marked Recommended: it steadies the busiest scenes at 30), picture adjustments, frame-rate counter, controller, gyro, save states, warp, mods, language. Saved in `settings.ini`; `env.txt` values win at start. Switch tab, Debug: A/B switches, log diagnostics and the frame-rate test (not saved; rule: test options always go in the menu) |
 | On-screen FPS counter | Top-left corner; menu (Switch tab) |
@@ -167,11 +167,15 @@ Total backed memory is 1448 MiB, so hbmenu must run in title-takeover mode, not 
 
 ### Input (`runtime/src/platform/input_switch.cpp`)
 
-- The controller acts as a **Wii U Pro Controller** by default: the game reads it through WPAD/KPAD
-  (`hle/padscore.cpp`), the GamePad stays connected but idle, and HUD, map and menus all go on the
-  TV picture (the only screen shown on the Switch). At the controller question, choose the Pro
-  Controller. The Switch tab's Debug section (saved as `proController`) makes it act as the GamePad instead
-  (VPAD), as in earlier builds; the log says which mode is active (`[input] Switch controller acts as …`).
+- The controller acts as the **Wii U GamePad** by default (since 2026-10-10; was the Pro Controller): the game
+  reads it through VPAD (`hle/system_stubs.cpp`), plays in Off-TV Play, and the window shows the GamePad picture,
+  the console's touch screen being the GamePad's. See "GamePad mode" below. The Switch tab's Debug section (saved
+  as `controllerMode`) offers three choices: `single`, that single-screen GamePad (the default); `gamepad`, the
+  Wii U GamePad with the game's own behaviour (TV play, the controller picker, Minus for Off-TV Play); `pro`, a
+  **Wii U Pro Controller** (WPAD/KPAD, `hle/padscore.cpp`) with the TV picture. `gamepad` <-> `pro` applies at
+  once; to or from `single`, from the next start (`screen_mode::single_screen`, set in
+  `switch_settings::apply_at_start`). An older `proController=1` reads as `pro`, `=0` as `single`;
+  `WWHD_PRO_CONTROLLER` wins. The log says which controller is active (`[input] Switch controller acts as …`).
 - libnx `pad` buttons map by position, the same in both modes:
 
   | Switch | Wii U |
@@ -1608,9 +1612,41 @@ Modified:
 Added:
 `.github/agents/switch-port.agent.md`, `runtime/src/gfx/gl/` (all files), `runtime/src/platform/input_switch.cpp`, `runtime/src/platform/input_switch.h`, `runtime/src/platform/input_headless.cpp`, `runtime/third_party/cemu/Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h`, `tools/switch/build.sh`, `docs/switch-port.md`.
 
+## GamePad mode (2026-10-10)
+
+The controller acts as the Wii U GamePad and the game plays in **Off-TV Play** from the first frame: the
+window shows the GamePad picture, which in Off-TV Play is the game at full resolution with its HUD, and the
+console's touch screen is the GamePad's (items, map, bottles). Runtime: `runtime/src/screen_mode.cpp` (hooks in
+`tools/recomp/hooks_screen.txt`), `platform/input_switch.cpp`, `gfx/deko/draw.cpp`.
+
+- **The screen mode** is the HD controller manager's (`*101F5088 + 0x1D0`): 0 TV only (no GamePad), 1 TV play
+  (the GamePad shows its own screen), 2 Off-TV Play, 3 the picture on both screens (the title). The setter
+  `02618094(mgr, mode)` is hooked: in GamePad mode a request for 1 becomes 2 (the play start, `0270AB10`, and
+  any other path), and a 3 becomes 2 after it (the title on return); the controller manager's own setup writes
+  the first 3 directly (`@02617874`). The title and its story sequence are then sharp and at 30 fps (mode 3
+  renders the scene twice, the GamePad's at 854x480).
+- **The controller question** (file select's `StateID_ControllerSelect`, `0270AB10`): the picker widget is given
+  the answer "GamePad" without being shown (`@0270AC04`); Back on the save list goes to `StateID_Cancel`, the
+  title, instead of back to the picker (`@0270ADD0`).
+- **Minus** reaches the game as Plus (the paused item menu): the GamePad's Minus would leave Off-TV Play, and
+  "TV mode" has nothing to show on one screen.
+- **Options**: the pause menu's Options list (`026D7828`, 6 items in the US game) without Controller: its
+  descriptors (static, `1010307C`) and values reordered so that Controller is past the end of a 5-item list;
+  the saver (`026D6DD4`) and the Controller callback (`026D87D0`) see the game's order.
+- **The Wind Waker's touch-conducting guide** (`BatonSignList_00` > `N_SlideInput_00`) is not drawn in Off-TV
+  Play, where it would sit in the middle of the picture (the `Pane::Draw` hook in `aspect.cpp`).
+- **The TV picture** ("Currently playing on Wii U GamePad", 1920x1080 docked) is not drawn while the window shows
+  the GamePad picture: 1.8 ms of GPU a frame docked (`draw.cpp` skip_tv, Switch tab > Debug "Skip the TV picture").
+- All of the above applies only to the **single screen** choice (the default), decided at start. The **Wii U
+  GamePad** and **Pro Controller** choices (Debug section) keep the game's own behaviour: the picker, TV play,
+  Minus, the Controller option, the Wind Waker guide; they switch between each other at once, while play runs.
+- Tested on the console (USA game, handheld and docked, title takeover): title, story sequence, file select and
+  Back, the start of play, Minus and Plus, touch (items to Y/X/R, the map), doors, the Wind Waker (stick and
+  touch conducting), Options (Gyroscope changed and saved).
+
 ## Known limitations and follow-ups
 
-- The GamePad (second-screen) picture is not shown; only the TV image is presented. The controller acts as a Pro Controller by default, so the game puts its HUD, map and menus on the TV picture.
+- One screen: the window shows the GamePad picture (single screen, the default) or the TV picture (Pro Controller, Debug section; ZL + ZR + Minus with the Wii U GamePad choice), not both. In single screen the game plays in Off-TV Play, so the GamePad picture is the game itself; its item screen comes with Plus or Minus (paused).
 - Renderer features that are no-ops on GL: the in-game AO toggle and the full-size occlusion depth (`WWHD_AO_HIRES` in the Vulkan/Metal renderers; the AO line fix itself is on, `WWHD_AO_MODE`), anisotropic filtering, FXAA, aspect-ratio adjustment, renderer restart, capture. Resolution scale works below 1 (round 20).
 - Performance: see [Performance](#performance-in-progress). Gameplay ran at 8–12 fps before round 2 and 14–19 fps after it.
 - Mods that need a mouse or keyboard are inactive.

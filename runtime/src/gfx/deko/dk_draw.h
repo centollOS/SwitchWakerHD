@@ -64,6 +64,8 @@ extern std::atomic<bool> g_depthOnly, g_texSharedCache, g_vtxLayoutCache;
 // round 41: render targets, fixed state and viewport skipped while their registers are unchanged (gx2.h g_reg_gen;
 // WWHD_DK_REG_GENS)
 extern std::atomic<bool> g_regGens;
+extern std::atomic<bool> g_skipTv;    // the TV picture not drawn while the window shows the GamePad's (draw.cpp)
+extern std::atomic<bool> g_padShown;  // the last frame presented the GamePad picture (backend.cpp)
 // round 42: the draw's shaders' hot data prefetched once they are known (WWHD_DK_PREFETCH)
 extern std::atomic<bool> g_prefetch;
 constexpr uint32_t kSmallSubmitDraws = 256, kBigSubmitDraws = 1024, kDefaultSubmitDraws = kBigSubmitDraws;
@@ -82,6 +84,8 @@ int ao_mode();
 // GamePad-only surfaces (not drawn unless the GamePad picture is shown; as gfx/gl draw.cpp)
 bool gamepad_only(const Surface* s);
 bool skip_gamepad();
+bool tv_only(const Surface* s);
+bool skip_tv();
 
 // WWHD_DK_TRACE_FRAMES / capture (backend.cpp, as gfx/gl): the passes of a frame in the log
 extern bool g_traceFrame;    // the frame being recorded is traced

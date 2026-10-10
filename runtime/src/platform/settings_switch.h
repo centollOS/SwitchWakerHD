@@ -56,6 +56,10 @@ constexpr const char* kKeyGamma = "switchGamma";
 constexpr const char* kKeyFpsCounter = "switchFpsCounter";
 constexpr const char* kKeyCaptureCombo = "switchCaptureCombo";
 constexpr const char* kKeyAniso = "switchAniso";
+// which Wii U controller the Switch controller is (Debug section): single (the GamePad, single screen; the default),
+// gamepad, pro; single <-> the others from the next start (screen_mode::single_screen)
+enum class ControllerMode : int { kSingle, kGamePad, kPro };
+constexpr const char* kKeyControllerMode = "controllerMode";
 constexpr const char* kKeyGamepadPip = "switchGamepadPip";  // the GamePad picture in a corner (gfxsw::gamepad_pip)
 // Debug: the network debug server (debug_switch.h) and the main thread's runtime-call sampler (threads.cpp),
 // both off by default and read at the next start, before anything else (main.cpp)

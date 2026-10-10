@@ -1444,6 +1444,10 @@ void clear_color(const uint32_t*, uint32_t cb, const float rgba[4]) {
         R.perf.gamepadClearsSkipped++;
         return;
     }
+    if (skip_tv() && tv_only(s)) {
+        R.perf.tvClearsSkipped++;
+        return;
+    }
     before_write(s);
     s->hudFull = false;
     s->derivedFrom = nullptr;
