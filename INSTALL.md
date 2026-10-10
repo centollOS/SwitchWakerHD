@@ -111,28 +111,21 @@ adjustments, frame-rate counter, controller (Pro Controller or GamePad), gyro ai
 the battery faster and warm the console. If sys-clk has its own profile for this title, the two fight
 over the clocks. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
 
-## Optional: graphics ready for the places you have not visited yet
+## Optional: graphics ready for the whole game (Prepare graphics)
 
 On the first start the console compiles each of the game's graphics effects the first time it is drawn, so some
-textures can look black for a while and some objects appear a moment late; it gets better as you play, and what is
-compiled is kept. To have the places you have not visited yet ready too:
+textures can look black for a while and some objects appear a moment late (in Outset, about the first minute); it gets
+better as you play, and what is compiled is kept. To have the whole game ready at once:
 
-1. Play a while (a few minutes are enough to start; the more places you visit, the better the guesses). The game
-   writes `sdmc:/switch/wwhd/shader_manifest.bin` as you play: a list of the graphics states it met, with no game
-   code in it.
-2. Copy that file to your computer and build again with it:
-   ```sh
-   python3 tools/switch/make_sd.py --game-dir /path/to/game --shaders /path/to/shader_manifest.bin
-   ```
-   It finds the game's shaders in your own dump, compiles what you met plus guesses for the rest of the game, and adds
-   `shadercache_dksh.bin` to `build/sd/switch/wwhd/` (about 30 MB; a minute or two of compiling). It needs CMake,
-   Ninja and a C++ compiler, else Docker or Podman: on **Windows with devkitPro**, run once in the *devkitPro >
-   MSYS2* window `pacman -S --needed gcc cmake ninja zlib-devel`; on **macOS**, `xcode-select --install` and
-   `brew install cmake ninja` (or just keep Docker Desktop); on **Linux**, your distribution's `g++ cmake
-   ninja-build zlib` packages (or Docker / Podman).
-3. Copy `shadercache_dksh.bin` next to `wwhd.nro` on the SD card.
+1. Start your game (your Quest Log, or a new game you do not save).
+2. Hold **Minus** for the settings menu, **Switch** tab, **Prepare graphics**.
+3. The game visits every place by itself and compiles what each one needs: 30 to 40 minutes, best docked. The
+   progress shows at the bottom of the screen; **Stop preparing graphics** in the same place stops it.
+4. At the end the game restarts. Your Quest Log is left exactly as it was (it is copied before and put back after).
 
-`shader_manifest.bin` and `shadercache_dksh.bin` come from your own game: keep them for yourself, do not share them.
+If you stop it, close the game or turn the console off in the middle, what was compiled is kept and the next
+Prepare graphics continues where it stopped. On the owner's console this covers about 93% of the game's graphics; the
+rest compiles in a few seconds when you get there.
 
 ## Updating
 

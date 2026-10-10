@@ -96,10 +96,9 @@ void shader_cache() {
          "No graphics have been compiled on this console yet. The console compiles each of the game's graphics "
          "effects the first time it is drawn, so on this first start some textures may look black and some objects "
          "may appear a moment late. It gets better as you play: what is compiled is kept for the next starts.\n\n"
-         "To prepare the places you have not visited yet: after playing a while, copy "
-         "sdmc:/switch/wwhd/shader_manifest.bin (made as you play) to your computer and build again with "
-         "make_sd.py --shaders shader_manifest.bin (INSTALL.md). Copy the new shadercache_dksh.bin next to "
-         "wwhd.nro.",
+         "If this bothers you, the console can prepare the whole game at once: start your game, hold Minus (-) for "
+         "the settings menu, Switch tab, Prepare graphics. It visits every place by itself (30-40 minutes, best "
+         "docked), then restarts; your Quest Log is left as it was.",
          HidNpadButton_A, "Press A to continue.");
 }
 

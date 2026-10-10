@@ -60,7 +60,11 @@ console, in a background thread; until then its draws are skipped, so on a first
 stay black for a while) and keeps the result in `shadercache_dksh_local.bin`, so a shader is compiled
 once per console. A `shadercache_dksh.bin` next to the NRO is loaded whole at start-up.
 
-The console writes `shader_manifest.bin` as it plays: for each shader variant, the program's hash and
+**Prepare graphics** (settings menu, Switch tab; docs/prepare-graphics-plan.md) has the console warp through every
+place by itself and wait in each until its shaders are compiled (30-40 minutes, once): about 93% of the game's
+shaders, with no computer. The Quest Log is copied before and put back after, and the game restarts at the end.
+
+For developers, the console also writes `shader_manifest.bin` as it plays: for each shader variant, the program's hash and
 size, the GPU registers and the vertex fetch layout it was translated with (identifiers, no game code).
 `make_sd.py --shaders shader_manifest.bin` builds `shadercache_dksh.bin` from it on the computer: the
 programs come from the player's own dump (every shader archive, with upstream's `tools/shaderprep.py`
