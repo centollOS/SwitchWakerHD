@@ -53,6 +53,7 @@ constexpr double kMinStay = 5.0;
 constexpr double kMinStayEvent = 12.0;
 constexpr double kControlFor = 1.0;       // s of control in a row
 constexpr double kControlTimeout = 45.0;  // s: then the warp goes anyway (logged)
+constexpr double kHoldToStop = 1.5;       // s of B held on the loading screen
 const char* const kArrivalEvents[] = {"M2tower"};
 constexpr uint32_t kMaxBackup = 64 << 10; // save/user files up to this size are copied (not the pictures)
 
@@ -210,6 +211,30 @@ void sleep_s(double s) { std::this_thread::sleep_for(std::chrono::duration<doubl
 
 // during the sweep: no auto-sleep or screen dimming (30-40 minutes with nobody touching the console), the game muted
 // and the controllers still (the player's sound and rumble settings come back at the end)
+// B held on the loading screen stops the sweep (its own pad reader: the game's input is not involved)
+std::atomic<float> g_hold{0};
+void watch_stop_button() {
+    PadState pad;
+    padInitializeDefault(&pad);
+    double heldSince = 0;
+    while (g_running && !g_stop) {
+        padUpdate(&pad);
+        if (padGetButtons(&pad) & HidNpadButton_B) {
+            if (heldSince == 0) heldSince = now();
+            const double held = now() - heldSince;
+            g_hold = float(held / kHoldToStop > 1 ? 1 : held / kHoldToStop);
+            if (held >= kHoldToStop) {
+                LOG("[prepare] B held on the loading screen: stopping");
+                stop();
+            }
+        } else {
+            heldSince = 0;
+            g_hold = 0;
+        }
+        sleep_s(0.05);
+    }
+}
+
 void console_quiet(bool on) {
     appletSetAutoSleepDisabled(on);
     appletSetMediaPlaybackState(on);
@@ -251,7 +276,7 @@ void sweep() {
             const double left = (now() - t0) / done * double(list.size() - i);
             snprintf(eta, sizeof eta, ", about %.0f min left", left / 60 < 1 ? 1.0 : left / 60);
         }
-        snprintf(b, sizeof b, "Preparing graphics: %zu of %zu (%s)%s. To stop: hold Minus, Switch tab.", i + 1,
+        snprintf(b, sizeof b, "Preparing graphics: %zu of %zu (%s)%s. To stop: hold B.", i + 1,
                  list.size(), p.stage, eta);
         set_status(b);
         {
@@ -326,6 +351,7 @@ std::string start() {
     g_stop = false;
     g_running = true;
     console_quiet(true);
+    std::thread(watch_stop_button).detach();
     std::thread([] {
         sweep();
         g_running = false;
@@ -338,7 +364,9 @@ bool running() { return g_running; }
 
 Live live() {
     std::lock_guard<std::mutex> lk(g_mu);
-    return g_live;
+    Live l = g_live;
+    l.holdToStop = g_stop ? 1.0f : g_hold.load();
+    return l;
 }
 
 Progress progress() {

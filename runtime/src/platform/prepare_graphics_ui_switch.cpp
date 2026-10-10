@@ -102,7 +102,13 @@ bool draw_screen(float width, float height) {
         text(kNote, "The game is visiting every place by itself to compile its graphics, with the sound and rumble off. "
                     "It restarts at the title screen when it is done. Your saves are not touched.");
         ImGui::SetCursorPosX(x);
-        text(kNote, "To stop: hold Minus (-), Switch tab. What is done is kept.");
+        if (l.holdToStop >= 1.0f) text(kWarn, "Stopping after this place... What is done is kept.");
+        else if (l.holdToStop > 0) {
+            text(kWarn, "Keep holding B to stop");
+            ImGui::SetCursorPosX(x);
+            ImGui::ProgressBar(l.holdToStop, ImVec2(w * 0.3f, 6), "");
+        } else
+            text(kNote, "Hold B to stop. What is done is kept, and Prepare graphics continues from here next time.");
         ImGui::PopTextWrapPos();
     }
     ImGui::End();

@@ -34,6 +34,7 @@ struct Live {
     size_t place = 0, total = 0;   // 1-based place being visited
     std::string name;              // its stage
     int minutesLeft = -1;          // -1: not known yet
+    float holdToStop = 0;          // 0..1 while B is held (1: stopping)
 };
 Live live();
 void frame();            // the game's main thread, every frame (interp.cpp, next to the cheats)
