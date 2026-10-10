@@ -352,7 +352,9 @@ void set_touch(bool, float, float) {}
 bool pro_controller() { return g_pro.load(std::memory_order_relaxed); }
 void set_pro_controller(bool on) {
     g_pro = on;
-    gfxsw::set_gamepad_view(!on);  // the GamePad's picture with the GamePad, the TV's with the Pro Controller
+    // the GamePad picture in the single screen (the game itself, in Off-TV Play); the TV's with the Wii U GamePad
+    // choice (TV play: the GamePad picture is its own screen, ZL + ZR + Minus) and the Pro Controller
+    gfxsw::set_gamepad_view(!on && screen_mode::single_screen());
     LOG("[input] Switch controller acts as %s", on ? "Pro Controller" : "GamePad");
 }
 void release_keys() {}

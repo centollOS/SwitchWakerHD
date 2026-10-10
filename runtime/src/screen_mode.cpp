@@ -111,8 +111,6 @@ extern "C" void site_02617874(Cpu* c) {
     if (c->r[0] == 3 && gamepad_mode()) c->r[0] = 2;
 }
 
-
-
 // ---- the Controller option in the pause menu's Options (GamePad mode: the GamePad is the only controller)
 // The options window (constructor 026D7828, 0x148 bytes) lists 6 items in the US game: Target Type, Camera,
 // First-Person Camera, Controller, Gyroscope, UI Display (Furigana is Japan only; the Miiverse items have their

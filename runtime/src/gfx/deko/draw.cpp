@@ -854,7 +854,7 @@ bool skip_gamepad() {
 std::atomic<bool> g_skipTv{env_switch("SKIP_TV", true)};
 bool skip_tv() {
     // the last frame showed the GamePad picture and this one will too (gamepad_view: what present() shows next), so
-    // the frame that switches to the TV picture (ZL + ZR + Minus, the Switch tab) has its TV draws
+    // the frame that switches to the TV picture (ZL + ZR + Minus, the Switch tab) has its TV draws drawn
     return g_skipTv.load(std::memory_order_relaxed) && g_padShown.load(std::memory_order_relaxed) && gfxsw::gamepad_view();
 }
 bool tv_only(const Surface* s) {
