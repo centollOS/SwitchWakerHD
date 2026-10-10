@@ -198,7 +198,7 @@ as before); the work files in `build/shader-cache/` hold game code and stay on t
 | 2. Harvest | Title screen only so far (956 variants). |
 | 3. Programs in the dump | 354/367 (96.5%), USA and EU identical. |
 | 4. Tool | `programs` / `speculate` (Python), `dksh_cache translate` / `build [MiB]` (host). Known variants byte-identical to the console. |
-| 5. make_sd.py | `--shaders shader_manifest.bin` (Docker/Podman; not the Windows devkitPro path yet). |
+| 5. make_sd.py | `--shaders shader_manifest.bin`: dksh_cache built natively (CMake, Ninja, a C++ compiler; on Windows devkitPro's MSYS2 packages), else in Docker/Podman. |
 | 6. Text and docs | First-start notice (13970da), INSTALL.md optional section, README. |
 
 Console tests (2026-10-10, hardware):
@@ -248,4 +248,8 @@ Console tests (2026-10-10, hardware):
   stops with "needs Docker or Podman", so players on the recommended Windows route (native devkitPro, v0.4.1) cannot
   build the cache. Native build on macOS/Linux/Windows (host compiler + the uam/Cemu sources it already uses), the
   container kept as a fallback. To do in parallel with the warp sweep (stopped after warp 24 of 146).
+  Done: tools/switch/dksh_cache/build.sh builds natively when cmake, ninja and a C++ compiler are installed
+  (build/dksh_cache-native), the container otherwise (WWHD_DKSH_CONTAINER=1 forces it); make_sd.py --shaders works on
+  the native devkitPro path (devkitPro's MSYS2: `pacman -S --needed gcc cmake ninja zlib-devel`). On macOS (clang)
+  translate and build give byte-identical GLSL and DKSH to the container's. Not yet tried on Windows.
 

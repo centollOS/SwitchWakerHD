@@ -64,11 +64,15 @@ def shader_cache(src, game):
     """build/shadercache_dksh.bin from the console's shader manifest (docs/shader-cache-from-dump-plan.md) or a
     shadercache_gl.bin. The files in build/shader-cache/ hold game code: they stay on this computer."""
     out = os.path.join(ROOT, "build", "shadercache_dksh.bin")
-    tool = ["bash", os.path.join("tools", "switch", "dksh_cache", "build.sh")]
+    # natively when CMake, Ninja and a C++ compiler are there (on Windows devkitPro's MSYS2 ones: INSTALL.md), else in
+    # a container (tools/switch/dksh_cache/build.sh)
+    env = dict(os.environ)
+    shell = native_shell(env) if os.name == "nt" else ["bash"]
+    tool = shell + [os.path.join("tools", "switch", "dksh_cache", "build.sh")]
     with open(src, "rb") as f:
         manifest = f.read(4) == b"WSM1"
     if not manifest:
-        run(tool + ["build", src, out])
+        run(tool + ["build", src, out], env=env)
         return out
     work = os.path.join(ROOT, "build", "shader-cache")
     os.makedirs(work, exist_ok=True)
@@ -76,8 +80,8 @@ def shader_cache(src, game):
     run([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "shader_manifest.py"), "speculate", src, game, m,
          programs])
     # (2: a few variants failed: speculative ones whose guessed state does not fit their program)
-    run(tool + ["translate", m, programs, gl], ok=(0, 2))
-    run(tool + ["build", gl, out, SHADER_CODE_MIB], ok=(0, 2))
+    run(tool + ["translate", m, programs, gl], env=env, ok=(0, 2))
+    run(tool + ["build", gl, out, SHADER_CODE_MIB], env=env, ok=(0, 2))
     return out
 
 
@@ -177,9 +181,6 @@ def main():
         if not native_toolchain_ok():
             fail("Docker or Podman is needed (the Switch toolchain runs in the devkitpro/devkita64 image), or "
                  "a native devkitPro with the Switch libraries: see INSTALL.md, \"Windows: devkitPro\"")
-        if args.shaders:
-            fail("--shaders needs Docker or Podman (tools/switch/dksh_cache runs in a container): "
-                 "leave it out on the native build")
 
     step(1, "the game files")
     if args.image:

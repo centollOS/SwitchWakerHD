@@ -125,8 +125,11 @@ compiled is kept. To have the places you have not visited yet ready too:
    python3 tools/switch/make_sd.py --game-dir /path/to/game --shaders /path/to/shader_manifest.bin
    ```
    It finds the game's shaders in your own dump, compiles what you met plus guesses for the rest of the game, and adds
-   `shadercache_dksh.bin` to `build/sd/switch/wwhd/` (about 15 MB; under a minute of compiling). Needs Docker or
-   Podman (not yet the Windows devkitPro build).
+   `shadercache_dksh.bin` to `build/sd/switch/wwhd/` (about 30 MB; a minute or two of compiling). It needs CMake,
+   Ninja and a C++ compiler, else Docker or Podman: on **Windows with devkitPro**, run once in the *devkitPro >
+   MSYS2* window `pacman -S --needed gcc cmake ninja zlib-devel`; on **macOS**, `xcode-select --install` and
+   `brew install cmake ninja` (or just keep Docker Desktop); on **Linux**, your distribution's `g++ cmake
+   ninja-build zlib` packages (or Docker / Podman).
 3. Copy `shadercache_dksh.bin` next to `wwhd.nro` on the SD card.
 
 `shader_manifest.bin` and `shadercache_dksh.bin` come from your own game: keep them for yourself, do not share them.
