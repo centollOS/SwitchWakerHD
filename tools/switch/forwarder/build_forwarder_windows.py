@@ -20,7 +20,6 @@ MSYS2 (open devkitPro > MSYS2, then: pacman -S gcc). Output: build\\forwarder\\w
 Not verified offline with hactool, unlike build_forwarder.sh.
 """
 import argparse
-import json
 import os
 import re
 import shutil
@@ -33,12 +32,27 @@ ROOT = os.path.normpath(os.path.join(FDIR, "..", "..", ".."))
 DKP = os.environ.get("DEVKITPRO_WIN", "C:/devkitPro")
 EXIT_NO_KEYS = 3
 
-# "01FF" is outside retail ranges, "57574844" is ASCII "WWHD"; the same override as build_forwarder.sh
-TITLE_ID = re.sub(r"^0[xX]", "", os.environ.get("WWHD_FORWARDER_TITLE_ID", "01ff575748440000")).lower()
+
+
+def read_env(path):
+    """forwarder.env: plain KEY=value lines, shared with build_forwarder.sh (which sources it)."""
+    env = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                env[k.strip()] = v.strip()
+    return env
+
+
+ENV = read_env(os.path.join(FDIR, "forwarder.env"))
+# the same override as build_forwarder.sh
+TITLE_ID = re.sub(r"^0[xX]", "", os.environ.get("WWHD_FORWARDER_TITLE_ID", ENV["TITLE_ID"])).lower()
 NRO_PATH = "sdmc:/switch/wwhd/wwhd.nro"
 NAME, PUBLISHER = "Wind Waker HD", "SwitchWakerHD"
-HBLOADER = ("https://github.com/switchbrew/nx-hbloader.git", "82b95122c5ae8dc059bf23893ba7623c72c86773")  # v2.4.5
-HACBREWPACK = ("https://github.com/TooTallNate/hacBrewPack.git", "745b16ecfc9ce055743067d200572204cb2aac6c")  # v3.05
+HBLOADER = (ENV["HBLOADER_URL"], ENV["HBLOADER_COMMIT"])
+HACBREWPACK = (ENV["HACBREWPACK_URL"], ENV["HACBREWPACK_COMMIT"])
 LANGS = ["AmericanEnglish", "BritishEnglish", "Japanese", "French", "German", "LatinAmericanSpanish", "Spanish",
          "Italian", "Dutch", "CanadianFrench", "Portuguese", "Russian", "Korean", "TraditionalChinese",
          "SimplifiedChinese", "BrazilianPortuguese"]
@@ -114,7 +128,7 @@ def main():
     secrets = key_values(keys)
 
     fdir = FDIR
-    for f in ("make_nacp.py", "make_icon.py", "nx-hbloader-forwarder.patch"):
+    for f in ("make_nacp.py", "make_icon.py", "patch_hbl.py", "nx-hbloader-forwarder.patch"):
         if not os.path.isfile(os.path.join(fdir, f)):
             fail("missing %s next to this script" % os.path.join(fdir, f))
     missing = [n for n, p in {
@@ -162,15 +176,7 @@ def main():
     run(["git", "-C", hbl, "apply", "--ignore-whitespace", os.path.join(fdir, "nx-hbloader-forwarder.patch")])
 
     print("\n[2/4] building the loader and the packer", flush=True)
-    with open(os.path.join(hbl, "hbl.json")) as f:
-        conf = json.load(f)
-    tid = "0x" + TITLE_ID
-    conf.update(name="wwhd_fwd", title_id=tid, title_id_range_min=tid, title_id_range_max=tid)
-    for cap in conf["kernel_capabilities"]:
-        if cap["type"] == "application_type":
-            cap["value"] = 1  # application (hbl.json: 2, applet): the application's memory
-    with open(os.path.join(hbl, "hbl.json"), "w") as f:
-        json.dump(conf, f, indent=4)
+    run([sys.executable, "-I", os.path.join(fdir, "patch_hbl.py"), os.path.join(hbl, "hbl.json"), TITLE_ID])
     rc, text = msys('''export DEVKITA64=$DEVKITPRO/devkitA64
 export PATH="$DEVKITPRO/tools/bin:$DEVKITA64/bin:$PATH"
 cd "$(cygpath -u "$HBL")" && make -s RELEASE=1 >/dev/null
