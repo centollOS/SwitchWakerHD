@@ -1109,6 +1109,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     SampledTime timer{R.perf.drawNs, timed};
     if (!count || !instances || ((prim == 0x13 || prim == 0x14) && count < 4)) return;
     if (r[REGADDR::PA_CL_CLIP_CNTL] & (1 << 22)) return;  // rasterization disabled
+    shaders_draw_seen();
     Lap lap{timed, timed ? now_ns() : 0};
     const uint64_t drawStart = lap.at;
     ((uint32_t*)r)[REGADDR::VGT_PRIMITIVE_TYPE] = prim;
