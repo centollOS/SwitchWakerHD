@@ -53,7 +53,7 @@ const Texts kEnglish = {
     "Keep holding B to stop",
     "Hold B to stop. What is done is kept, and Prepare graphics continues from here next time.",
 
-    "Prepare graphics",
+    "Prepare graphics (experimental)",
     "Stop preparing graphics",
     "What is prepared so far is kept; Prepare graphics continues from here next time.",
     "The console prepares each graphics effect the first time it is drawn, so new places can look black or show "
@@ -126,7 +126,7 @@ const Texts kSpanish = {
     "Mantén B para parar",
     "Mantén pulsado B para parar. Lo hecho se conserva y la próxima vez Preparar gráficos sigue desde aquí.",
 
-    "Preparar gráficos",
+    "Preparar gráficos (experimental)",
     "Parar la preparación",
     "Lo preparado hasta ahora se conserva; la próxima vez Preparar gráficos sigue desde aquí.",
     "La consola prepara cada efecto gráfico la primera vez que se dibuja, así que los lugares nuevos pueden verse "
@@ -200,7 +200,7 @@ const Texts kFrench = {
     "Maintenez B pour arrêter",
     "Maintenez B pour arrêter. Ce qui est fait est conservé, et la préparation reprendra d'ici la prochaine fois.",
 
-    "Préparer les graphismes",
+    "Préparer les graphismes (expérimental)",
     "Arrêter la préparation",
     "Ce qui est préparé est conservé ; la préparation reprendra d'ici la prochaine fois.",
     "La console prépare chaque effet graphique la première fois qu'il est dessiné : les nouveaux lieux peuvent donc "
@@ -274,7 +274,7 @@ const Texts kGerman = {
     "B weiter halten zum Anhalten",
     "Halte B zum Anhalten. Bisheriges bleibt erhalten, und es geht beim nächsten Mal hier weiter.",
 
-    "Grafik vorbereiten",
+    "Grafik vorbereiten (experimentell)",
     "Vorbereitung anhalten",
     "Bisher Vorbereitetes bleibt erhalten; beim nächsten Mal geht es hier weiter.",
     "Die Konsole bereitet jeden Grafikeffekt vor, wenn er zum ersten Mal gezeichnet wird; neue Orte können daher "
@@ -348,7 +348,7 @@ const Texts kItalian = {
     "Continua a tenere B per fermare",
     "Tieni premuto B per fermare. Ciò che è fatto viene conservato e la prossima volta si riprende da qui.",
 
-    "Prepara la grafica",
+    "Prepara la grafica (sperimentale)",
     "Ferma la preparazione",
     "Ciò che è pronto viene conservato; la prossima volta si riprende da qui.",
     "La console prepara ogni effetto grafico la prima volta che viene disegnato, quindi i luoghi nuovi possono "
