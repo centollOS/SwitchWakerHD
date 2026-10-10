@@ -89,7 +89,11 @@ void run(bool firstStart) {
     set_status(CardState::kReading, "reading the game's shader programs");
     const double t2 = now();
     shader_scan::Stats st;
-    const std::vector<shader_scan::Program> programs = shader_scan::scan(config::game_dir, st);
+    // without the card (B pressed, or a later start) the reading rests twice its time after each file, as the
+    // translation does: the game's threads on core 0 keep their time
+    const std::vector<shader_scan::Program> programs = shader_scan::scan(config::game_dir, st, [](double seconds) {
+        if (!g_fast) sleep_s(seconds * 2);
+    });
     const double t3 = now();
     const std::vector<shader_list::Recorded> recorded = shader_list::read_manifest("shader_manifest.bin");
     const std::vector<shader_list::Variant> list = shader_list::speculate(programs, recorded, 2);

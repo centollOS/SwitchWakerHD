@@ -15,6 +15,8 @@
 #include "../motion/motion.h"
 #include "../overlay/overlay.h"
 #include "../rumble.h"
+#include "background_shaders_switch.h"
+#include "prepare_graphics_switch.h"
 #include "../runtime.h"
 #include "../gfx/switch_renderer.h"
 #include "debug_server.h"
@@ -329,7 +331,9 @@ void update() {
         if (hidGetTouchScreenStates(&ts, 1) && ts.count > 0)
             s.touch = gfxsw::gamepad_touch(ts.touches[0].x / 1280.0f, ts.touches[0].y / 720.0f, s.tx, s.ty);
     }
-    if (overlay::blocks_input()) s = PadState{};
+    // (this fork) nor behind a loading card: the first start's (B there is read by background_shaders itself) and
+    // Prepare graphics' (its warps drive the game)
+    if (overlay::blocks_input() || background_shaders::card().up || prepare_graphics::running()) s = PadState{};
     {
         std::lock_guard<std::mutex> lk(g_mu);
         g_pad = s;

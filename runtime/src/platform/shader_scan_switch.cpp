@@ -56,6 +56,7 @@ bool yaz0(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
 
 struct Scanner {
     Stats& st;
+    const std::function<void(double)>& afterFile;
     std::vector<Program> out;
     std::unordered_set<std::string> seen;  // (type, microcode)
 
@@ -137,6 +138,7 @@ struct Scanner {
         st.files++;
         st.bytesRead += data.size();
         walk(data.data(), data.size(), 0);
+        if (afterFile) afterFile(now() - t0);
     }
 
     void dir(const std::string& d) {
@@ -164,10 +166,10 @@ struct Scanner {
 
 }  // namespace
 
-std::vector<Program> scan(const std::string& game_dir, Stats& stats) {
+std::vector<Program> scan(const std::string& game_dir, Stats& stats, const std::function<void(double)>& after_file) {
     stats = {};
     const double t0 = now();
-    Scanner s{stats, {}, {}};
+    Scanner s{stats, after_file, {}, {}};
     s.dir(game_dir + "/content");
     stats.distinct = s.out.size();
     stats.totalSeconds = now() - t0;

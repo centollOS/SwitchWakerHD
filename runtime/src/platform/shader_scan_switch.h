@@ -4,6 +4,7 @@
 // shipped: it is read on the console, from the console's own copy of the game.
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -21,7 +22,9 @@ struct Stats {
     double readSeconds = 0, inflateSeconds = 0, totalSeconds = 0;
 };
 
-// every distinct program under game_dir/content; `stats` filled
-std::vector<Program> scan(const std::string& game_dir, Stats& stats);
+// every distinct program under game_dir/content; `stats` filled. after_file (optional), after each file with the
+// seconds that file took: a caller can rest there (reading 1.4 GB and inflating 3.4 GB takes a core for a minute)
+std::vector<Program> scan(const std::string& game_dir, Stats& stats,
+                          const std::function<void(double seconds)>& after_file = nullptr);
 
 }  // namespace shader_scan
