@@ -87,6 +87,9 @@ std::vector<Place> places() {
     };
     for (const mods::Warp& w : mods::kMainWarps) add(w);
     for (const mods::Warp& w : mods::kAllWarps) add(w);
+    // last, the title screen's stage (the "press Start" view of Outset): no warp works after it (mods/warps.h leaves it
+    // out for that), but it is the last one and the game restarts there, so the first picture after the sweep is whole
+    out.push_back({"sea_T", 44, 0});
     return out;
 }
 
@@ -242,7 +245,8 @@ void sweep() {
         for (const char* e : kArrivalEvents)
             if (!strcmp(e, p.stage)) minStay = kMinStayEvent;
         while (!g_stop && now() - at < minStay) sleep_s(0.25);
-        for (double since = 0, t1 = now(); !g_stop;) {  // Link has control for kControlFor in a row
+        const bool last = i + 1 == list.size();  // (no warp follows: the title screen, where Link has no control)
+        for (double since = 0, t1 = now(); !g_stop && !last;) {  // Link has control for kControlFor in a row
             if (!link_has_control()) since = 0;
             else if (since == 0) since = now();
             if (since && now() - since >= kControlFor) break;
