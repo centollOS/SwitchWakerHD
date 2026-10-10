@@ -240,4 +240,8 @@ Console tests (2026-10-10, hardware):
   | Wind Temple | 22.0, 1.8 | 16.0, 0.4 | 4.8, 0.0 |
 
   Skips after arriving fall by 70-90% against no cache, from a couple of minutes of recording.
+- The uam failures (`cubeMapArrayIndexN` undeclared): guessed states whose texture unit was 2D for a program that
+  reads it as a cube map; `dksh_cache translate` now gives such a variant a cube map unit (the game's own state).
+  19,584 / 19,584 compile.
+- Before main: a long normal play session with the feature build (64 MiB of shader code memory is renderer-wide).
 
