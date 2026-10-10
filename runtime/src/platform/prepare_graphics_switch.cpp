@@ -31,6 +31,7 @@
 
 #include "../mods/mods.h"
 #include "../mods/warps.h"
+#include "../rumble.h"
 #include "../runtime.h"
 #include "guest_addr.h"
 #include "host.h"
@@ -72,8 +73,11 @@ struct Place {
     int room, point;
 };
 
-std::mutex g_mu;            // g_status
+std::mutex g_mu;            // g_status, g_live
 std::string g_status;
+Live g_live;
+float g_volume = 1.0f;      // audout's volume before the sweep (muted during it)
+bool g_rumble = true;       // the rumble option before the sweep (off during it)
 std::atomic<bool> g_running{false}, g_stop{false};
 std::atomic<bool> g_atTitle{false};  // start once the title screen shows
 // the next warp, written by frame() on the game's main thread as mods/cheats.cpp warp_service does (mods::request_warp
@@ -204,8 +208,25 @@ bool link_has_control() {
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void sleep_s(double s) { std::this_thread::sleep_for(std::chrono::duration<double>(s)); }
 
+// during the sweep: no auto-sleep or screen dimming (30-40 minutes with nobody touching the console), the game muted
+// and the controllers still (the player's sound and rumble settings come back at the end)
+void console_quiet(bool on) {
+    appletSetAutoSleepDisabled(on);
+    appletSetMediaPlaybackState(on);
+    if (on) {
+        if (R_FAILED(audoutGetAudioOutVolume(&g_volume))) g_volume = 1.0f;
+        audoutSetAudioOutVolume(0.0f);
+        g_rumble = rumble::enabled();
+        rumble::set_enabled(false);
+    } else {
+        audoutSetAudioOutVolume(g_volume);
+        rumble::set_enabled(g_rumble);
+    }
+}
+
 void finish_and_restart(const char* why) {
     set_status(std::string("Preparing graphics: ") + why + ". The game restarts.");
+    console_quiet(false);
     sleep_s(5);  // the shader cache and manifest writers' last batches (they write every couple of seconds)
     restore_save();
     log_flush();
@@ -233,6 +254,13 @@ void sweep() {
         snprintf(b, sizeof b, "Preparing graphics: %zu of %zu (%s)%s. To stop: hold Minus, Switch tab.", i + 1,
                  list.size(), p.stage, eta);
         set_status(b);
+        {
+            std::lock_guard<std::mutex> lk(g_mu);
+            g_live.place = i + 1;
+            g_live.total = list.size();
+            g_live.name = p.stage;
+            g_live.minutesLeft = done >= 5 ? int((now() - t0) / done * double(list.size() - i) / 60 + 0.5) : -1;
+        }
         request(p);
         const double asked = now();
         while (!g_stop && !arrived(p) && now() - asked < kArriveTimeout) sleep_s(0.25);
@@ -297,6 +325,7 @@ std::string start() {
     if (!backup_save()) return "could not copy the Quest Log files (is the SD card full?)";
     g_stop = false;
     g_running = true;
+    console_quiet(true);
     std::thread([] {
         sweep();
         g_running = false;
@@ -306,6 +335,11 @@ std::string start() {
 
 void stop() { g_stop = true; }
 bool running() { return g_running; }
+
+Live live() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return g_live;
+}
 
 Progress progress() {
     static const size_t total = places().size();

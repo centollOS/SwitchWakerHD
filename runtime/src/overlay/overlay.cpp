@@ -2314,6 +2314,9 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
     std::string toast = open ? std::string() : ss::last_message();
 #ifdef __SWITCH__
     if (!open && !prepare_graphics::screen_line().empty()) toast = prepare_graphics::screen_line();  // (this fork)
+    const bool preparing = !open && prepare_graphics::running();  // (this fork) its full-screen card, drawn below
+#else
+    const bool preparing = false;
 #endif
     U.linearized = false;
     if (!open && !perf && !text && toast.empty()) {
@@ -2369,8 +2372,11 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
             g_wait_release = true;
         }
     }
+#ifdef __SWITCH__
+    if (preparing) prepare_graphics::draw_screen(io.DisplaySize.x, io.DisplaySize.y);  // (this fork)
+#endif
     if (perf) perf_window(open);
-    if (!toast.empty()) {
+    if (!toast.empty() && !preparing) {
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - 24), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
         ImGui::SetNextWindowBgAlpha(0.7f);
         ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(io.DisplaySize.x * 0.8f, FLT_MAX));

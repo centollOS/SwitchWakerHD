@@ -27,5 +27,14 @@ Progress progress();
 std::string screen_line();
 // the Switch tab's section; true when the menu should close (a sweep was started)
 bool ui_section();
+// while a sweep runs and the menu is closed: a full-screen card over the game's picture (the game still draws, which
+// is what compiles its shaders); true when drawn (prepare_graphics_ui_switch.cpp)
+bool draw_screen(float width, float height);
+struct Live {
+    size_t place = 0, total = 0;   // 1-based place being visited
+    std::string name;              // its stage
+    int minutesLeft = -1;          // -1: not known yet
+};
+Live live();
 void frame();            // the game's main thread, every frame (interp.cpp, next to the cheats)
 }  // namespace prepare_graphics

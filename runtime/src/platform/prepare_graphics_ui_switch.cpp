@@ -70,4 +70,44 @@ bool ui_section() {
     return close;
 }
 
+bool draw_screen(float width, float height) {
+    if (!running()) return false;
+    const Live l = live();
+    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.03f, 0.06f, 0.10f, 1.0f));
+    const ImGuiWindowFlags fl = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                                ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs |
+                                ImGuiWindowFlags_NoBringToFrontOnFocus;
+    if (ImGui::Begin("##prepare_graphics_screen", nullptr, fl)) {
+        const float w = width * 0.6f, x = (width - w) * 0.5f;
+        ImGui::SetCursorPos(ImVec2(x, height * 0.36f));
+        ImGui::PushStyleColor(ImGuiCol_Text, kHeading);
+        ImGui::PushFont(nullptr, ImGui::GetFontSize() * 1.6f);
+        ImGui::TextUnformatted("Preparing graphics");
+        ImGui::PopFont();
+        ImGui::PopStyleColor();
+        ImGui::SetCursorPosX(x);
+        char b[96];
+        if (l.total) snprintf(b, sizeof b, "%zu of %zu", l.place, l.total);
+        else snprintf(b, sizeof b, "starting");
+        ImGui::ProgressBar(l.total ? float(l.place - 1) / float(l.total) : 0.0f, ImVec2(w, 0), b);
+        ImGui::SetCursorPosX(x);
+        ImGui::PushTextWrapPos(x + w);
+        if (l.minutesLeft >= 0) snprintf(b, sizeof b, "About %d min left", l.minutesLeft < 1 ? 1 : l.minutesLeft);
+        else snprintf(b, sizeof b, "Working out the time left...");
+        text(kNote, b);
+        ImGui::SetCursorPosX(x);
+        text(kNote, "The game is visiting every place by itself to compile its graphics, with the sound and rumble off. "
+                    "It restarts at the title screen when it is done. Your saves are not touched.");
+        ImGui::SetCursorPosX(x);
+        text(kNote, "To stop: hold Minus (-), Switch tab. What is done is kept.");
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    return true;
+}
+
 }  // namespace prepare_graphics
