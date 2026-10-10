@@ -7,6 +7,8 @@
 #pragma once
 #include <string>
 
+struct Cpu;  // runtime/include/ppc.h
+
 namespace prepare_graphics {
 // start: from the first destination, or from where a stopped sweep left off; "" or why it cannot start
 std::string start();
@@ -41,5 +43,5 @@ struct Live {
     float holdToStop = 0;          // 0..1 while B is held (1: stopping)
 };
 Live live();
-void frame();            // the game's main thread, every frame (interp.cpp, next to the cheats)
+void frame(Cpu* c);      // the game's main thread, every frame (interp.cpp, next to the cheats)
 }  // namespace prepare_graphics

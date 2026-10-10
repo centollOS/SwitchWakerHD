@@ -76,6 +76,7 @@ const Texts kEnglish = {
     "already running",
     "start a game first (your Quest Log, or a new game you do not save)",
     "could not copy the Quest Log files (is the SD card full?)",
+    "Prepare graphics: choose your Quest Log (or start a new game you do not save) and it begins by itself.",
 };
 
 const Texts kSpanish = {
@@ -143,6 +144,7 @@ const Texts kSpanish = {
     "ya está en marcha",
     "empieza antes una partida (tu diario, o una partida nueva que no guardes)",
     "no se pudieron copiar los archivos del diario (¿está llena la tarjeta SD?)",
+    "Preparar gráficos: elige tu diario (o empieza una partida nueva que no guardes) y empezará sola.",
 };
 
 const Texts kFrench = {
@@ -210,6 +212,7 @@ const Texts kFrench = {
     "déjà en cours",
     "lancez d'abord une partie (votre journal, ou une nouvelle partie non sauvegardée)",
     "impossible de copier les fichiers du journal (la carte SD est-elle pleine ?)",
+    "Préparer les graphismes : choisissez votre journal (ou une nouvelle partie non sauvegardée) et elle démarrera toute seule.",
 };
 
 const Texts kGerman = {
@@ -277,6 +280,7 @@ const Texts kGerman = {
     "läuft bereits",
     "starte zuerst ein Spiel (dein Spielstand oder ein neues Spiel, das du nicht speicherst)",
     "die Spielstanddateien konnten nicht kopiert werden (ist die SD-Karte voll?)",
+    "Grafik vorbereiten: Wähle deinen Spielstand (oder starte ein neues Spiel, das du nicht speicherst), dann beginnt es von selbst.",
 };
 
 const Texts kItalian = {
@@ -344,6 +348,7 @@ const Texts kItalian = {
     "già in corso",
     "avvia prima una partita (il tuo diario, o una nuova partita che non salvi)",
     "impossibile copiare i file del diario (la scheda SD è piena?)",
+    "Prepara la grafica: scegli il tuo diario (o inizia una nuova partita che non salvi) e partirà da sola.",
 };
 
 // the game's "language" setting (Wii U codes, hle/coreinit_misc.cpp), else the console's language

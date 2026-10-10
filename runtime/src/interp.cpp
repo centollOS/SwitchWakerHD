@@ -860,7 +860,7 @@ extern "C" void hook_0203593C(Cpu* c) {
     ss::service(c);  // save states: exact values are back in guest memory, all other threads idle
     mods::cheats_service();
 #ifdef __SWITCH__
-    prepare_graphics::frame();  // (this fork) Prepare graphics: its warps and Link's health
+    prepare_graphics::frame(c);  // (this fork) Prepare graphics: its warps and Link's health
 #endif
     g_passes++;
     // test aid: WWHD_INTERP_AT_STEP=n switches interpolation on after n frames

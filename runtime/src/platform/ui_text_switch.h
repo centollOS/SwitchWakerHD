@@ -23,7 +23,7 @@ struct Texts {
         *doneNote;
     // Prepare graphics: messages
     const char *ready, *statusLine, *etaPart, *ending, *endComplete, *endStopped, *endPlaceFailed, *endNoRestart,
-        *errRunning, *errNoGame, *errCopy;
+        *errRunning, *errNoGame, *errCopy, *waitingForGame;
 };
 
 const Texts& tx();

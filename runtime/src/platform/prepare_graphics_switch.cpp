@@ -60,7 +60,7 @@ constexpr double kPlaceTimeout = 60.0;    // s at most in one place
 constexpr double kMinStay = 2.0;          // (the wait for Link's control guards the arrival events)
 constexpr double kMinStayEvent = 12.0;
 constexpr double kControlFor = 1.0;       // s of control in a row
-constexpr double kControlTimeout = 45.0;  // s: then the warp goes anyway (logged)
+constexpr double kControlTimeout = 20.0;  // s: then the warp goes anyway (logged; a new game's story events)
 constexpr double kHoldToStop = 1.5;       // s of B held on the loading screen
 const char* const kArrivalEvents[] = {"M2tower"};
 constexpr uint32_t kMaxBackup = 64 << 10; // save/user files up to this size are copied (not the pictures)
@@ -68,6 +68,14 @@ constexpr uint32_t kMaxBackup = 64 << 10; // save/user files up to this size are
 const uint32_t kNextStageReq = GD(0x1046F0B0) + 0x5140 + 12;  // mods/cheats.cpp kNextStage + 12: a request is set
 const uint32_t kOverlap = GD(0x101F36CC);                      // a scene change's fade is running (mods/turbo.cpp)
 // savestate.cpp player_has_control's fields of g_dComIfG_gameInfo.play
+// from the title screen the game starts a game the way the file select does (d_s_name: 025ADC60): its next stage,
+// then fopScnM_ChangeReq(the current scene, the play scene 7, fade 0, 5, 1); the title's own call (024B8854) finds
+// its scene with fopScnM_SearchByID(the global 1047E6C4)
+const uint32_t fn_ovlpDoingReq = GC(0x025DBE00);  // fopOvlpM_IsDoingReq: a scene overlap runs
+const uint32_t fn_searchById = GC(0x025DC80C);    // fopScnM_SearchByID
+const uint32_t fn_changeReq = GC(0x025DC86C);     // fopScnM_ChangeReq
+const uint32_t kSceneId = GD(0x1047E6C4);         // the current scene's process id
+constexpr uint32_t kPlayScene = 7;
 const uint32_t kSaveInfoPtr = GD(0x101F84DC);  // dComIfGs save area (dSv_info_c at +0x20: max life u16, life u16)
 const uint32_t kPlay = GD(0x1046F0B0);
 const uint32_t kEventRun = kPlay + 0x5292;     // dComIfGp_event_runCheck
@@ -88,7 +96,7 @@ Live g_live;
 float g_volume = 1.0f;      // audout's volume before the sweep (muted during it)
 bool g_rumble = true;       // the rumble option before the sweep (off during it)
 std::atomic<bool> g_running{false}, g_stop{false};
-std::atomic<bool> g_atTitle{false};  // start once the title screen shows
+std::atomic<bool> g_atTitle{false};  // start (or continue) once a game is in progress
 // the next warp, written by frame() on the game's main thread as mods/cheats.cpp warp_service does (mods::request_warp
 // waits for a loaded file, which the title screen's placeholder save data is not)
 std::mutex g_titleMu;
@@ -301,12 +309,18 @@ void sweep() {
         const double asked = now();
         while (!g_stop && !arrived(p) && now() - asked < kArriveTimeout) sleep_s(0.25);
         if (g_stop) break;
-        if (!arrived(p)) {
+        // in the place but still in its arrival (a story event of a new game's data, as the title screen's: Link's
+        // house): good enough, the game draws it
+        const bool inPlace = !arrived(p) && mods::current_stage() == p.stage && !g_titleWarpPending;
+        if (inPlace) LOG("[prepare] %s room %d: in the place, its arrival still running after %.0f s: going on", p.stage,
+                         p.room, kArriveTimeout);
+        if (!arrived(p) && !inPlace) {
             // a warp the game did not take is often stuck in its scene change: later warps would wait for it
             LOG("[prepare] %s room %d not reached in %.0f s (stage %s): continuing after a restart", p.stage, p.room,
                 kArriveTimeout, mods::current_stage().c_str());
             write_index(i + 1);
             skipped++;
+            write_file(dir() + "/resume.txt", "1\n");  // continues by itself once a game is in progress again
             finish_and_restart(ui_text::tx().endPlaceFailed);
             return;
         }
@@ -419,12 +433,25 @@ std::string status() {
     return g_running ? g_status : std::string();
 }
 
-void request_at_title() {
-    g_atTitle = true;
-    LOG("[prepare] requested at start-up: starts once the title screen shows");
+// a sweep asked for at start-up begins once the title screen has settled (its first warp asks for the play scene, see
+// frame()), or in a game in progress if a file was loaded meanwhile
+// dStage_nextStage_c, as mods/cheats.cpp warp_service writes it
+void write_next_stage(const Place& p) {
+    const uint32_t ns = kNextStageReq - 12;
+    for (uint32_t i = 0; i < 8; i++) st8(ns + i, uint8_t(i < strlen(p.stage) ? p.stage[i] : 0));
+    st16(ns + 8, uint16_t(int16_t(p.point)));
+    st8(ns + 10, uint8_t(int8_t(p.room)));
+    st8(ns + 11, 0xFF);  // layer: the stage's own choice
+    st8(ns + 13, 0);     // wipe: the default fade
+    st8(kNextStageReq, 1);  // enabled
 }
 
-void frame() {
+void request_at_title() {
+    g_atTitle = true;
+    LOG("[prepare] requested at start-up: starts at the title screen");
+}
+
+void frame(Cpu* c) {
     // enemies attack while the sweep waits in a place: Link's health is topped up every frame (as the Mods tab's
     // infinite health, which waits for a loaded file), so a game over does not stop the warps
     if (g_running) {
@@ -434,31 +461,51 @@ void frame() {
             if (max >= 4 && max <= 80) st16(sv + 0x20 + 0x02, max);
         }
     }
-    static double titleSince = 0;
+    static double readySince = 0;
     if (g_atTitle && !g_running) {
-        if (!at_title()) titleSince = 0;
-        else if (titleSince == 0) titleSince = now();
-        else if (now() - titleSince > 4.0) {  // the title screen has settled
+        // the title screen settled, or a game in progress with Link in control (a file loaded meanwhile)
+        if (!at_title() && !(in_game() && link_has_control())) readySince = 0;
+        else if (readySince == 0) readySince = now();
+        else if (now() - readySince > 3.0) {
             g_atTitle = false;
             const std::string why = start();
-            if (!why.empty()) LOG("[prepare] could not start from the title screen: %s", why.c_str());
+            if (!why.empty()) LOG("[prepare] could not start: %s", why.c_str());
         }
+    }
+    if (g_titleWarpPending && !ld8(kNextStageReq) && at_title()) {
+        // the title screen does not act on a next-stage request: the play scene is asked for, as the file select does
+        Cpu saved = *c;
+        if (guest_call(c, fn_ovlpDoingReq) & 0xFF) {  // a fade still runs: next frame
+            *c = saved;
+            return;
+        }
+        std::lock_guard<std::mutex> lk(g_titleMu);
+        write_next_stage(g_titleWarp);
+        const uint32_t scene = guest_call(c, fn_searchById, {ld32(kSceneId)});
+        const uint32_t ok = scene ? guest_call(c, fn_changeReq, {scene, kPlayScene, 0, 5, 1}) : 0;
+        *c = saved;
+        g_titleWarpPending = false;
+        LOG("[prepare] from the title screen to %s room %d point %d: play scene asked for (scene %08X, %s)",
+            g_titleWarp.stage, g_titleWarp.room, g_titleWarp.point, scene, ok ? "accepted" : "REFUSED");
+        return;
     }
     if (g_titleWarpPending && !ld8(kNextStageReq)) {  // as mods/cheats.cpp warp_service
         std::lock_guard<std::mutex> lk(g_titleMu);
-        for (uint32_t i = 0; i < 8; i++) st8(kNextStageReq - 12 + i, uint8_t(i < strlen(g_titleWarp.stage) ? g_titleWarp.stage[i] : 0));
-        st16(kNextStageReq - 12 + 8, uint16_t(int16_t(g_titleWarp.point)));
-        st8(kNextStageReq - 12 + 10, uint8_t(int8_t(g_titleWarp.room)));
-        st8(kNextStageReq - 12 + 11, 0xFF);  // layer: the stage's own choice
-        st8(kNextStageReq - 12 + 13, 0);     // wipe: the default fade
-        st8(kNextStageReq, 1);               // enabled
+        write_next_stage(g_titleWarp);
         g_titleWarpPending = false;
         LOG("[prepare] warp from %s to %s room %d point %d", mods::current_stage().c_str(), g_titleWarp.stage,
             g_titleWarp.room, g_titleWarp.point);
     }
 }
 
+void startup_resume() {
+    if (access((dir() + "/resume.txt").c_str(), F_OK) != 0) return;
+    remove((dir() + "/resume.txt").c_str());
+    request_at_title();
+}
+
 void startup() {
+    startup_resume();
     if (restore_save()) LOG("[prepare] a sweep was cut (the game closed during it): Quest Log files put back");
 }
 
