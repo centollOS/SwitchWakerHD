@@ -15,6 +15,10 @@ bool running();
 std::string status();    // one line for the screen and the debug server ("" when not running)
 void startup();          // main.cpp, once: puts the Quest Log back if a sweep was cut (the game closed during it)
 void request_at_title(); // start by itself once the title screen shows (the first-start notice's choice)
+// players updating from a version without Prepare graphics: offer it once (never completed, never offered); the
+// offer is remembered when made
+bool offer_to_update();
+void mark_offered();
 
 // for the menu (prepare_graphics_ui_switch.cpp)
 struct Progress {

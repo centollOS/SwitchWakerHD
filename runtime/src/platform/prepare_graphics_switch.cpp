@@ -362,6 +362,15 @@ std::string start() {
 void stop() { g_stop = true; }
 bool running() { return g_running; }
 
+bool offer_to_update() {
+    return access((dir() + "/complete.txt").c_str(), F_OK) != 0 && access((dir() + "/offered.txt").c_str(), F_OK) != 0 &&
+           !g_running;
+}
+void mark_offered() {
+    mkdir(dir().c_str(), 0777);
+    write_file(dir() + "/offered.txt", "1\n");
+}
+
 Live live() {
     std::lock_guard<std::mutex> lk(g_mu);
     Live l = g_live;

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../runtime.h"
+#include "prepare_graphics_switch.h"
 
 namespace startup_checks {
 namespace {
@@ -135,7 +136,26 @@ bool shader_cache() {
     // the console fills as it compiles; with neither, every shader is compiled while the game is played
     const char* e = getenv("WWHD_DK_SHADER_CACHE_DIR");
     const std::string dir = e && *e ? std::string(e) + "/" : std::string();
-    if (is_file(dir + "shadercache_dksh.bin", true) || is_file(dir + "shadercache_dksh_local.bin", true)) return false;
+    if (is_file(dir + "shadercache_dksh.bin", true) || is_file(dir + "shadercache_dksh_local.bin", true)) {
+        // graphics already compiled here: a player updating from a version without Prepare graphics, offered once
+        if (!prepare_graphics::offer_to_update()) return false;
+        prepare_graphics::mark_offered();
+        LOG("[startup] Prepare graphics offered once (an update)");
+        log_flush();
+        const u64 b = show(false, "SwitchWakerHD: new in this version",
+             {"Prepare graphics: the console can now prepare the graphics of the whole game at once, so that places "
+              "you have not visited yet are not black or late the first time."},
+             {{"A", "Prepare graphics now",
+               "The game visits every place by itself behind a loading screen (about 30-40 minutes, best docked), "
+               "then restarts at the title screen, ready. Your saves are not touched. What is already prepared on "
+               "this console goes faster."},
+              {"B", "Later",
+               "This message does not show again. Prepare graphics stays in the settings menu: hold Minus (-) in "
+               "the game, Switch tab."}},
+             HidNpadButton_A | HidNpadButton_B, nullptr);
+        LOG("[startup] update notice: %s", b & HidNpadButton_A ? "prepare graphics now" : "later");
+        return b & HidNpadButton_A;
+    }
     LOG("[startup] no shadercache_dksh.bin and no shaders compiled on this console yet: first-start notice shown");
     log_flush();
     const u64 b = show(false, "SwitchWakerHD: first start",
@@ -149,6 +169,7 @@ bool shader_cache() {
           {"B", "Play now",
            "You can prepare the graphics later: hold Minus (-) in the game for the settings menu, Switch tab."}},
          HidNpadButton_A | HidNpadButton_B, nullptr);
+    prepare_graphics::mark_offered();  // (the update notice is for players who never saw this one)
     const bool prepare = b & HidNpadButton_A;
     LOG("[startup] first-start notice: %s", prepare ? "prepare graphics now" : "play now");
     return prepare;
