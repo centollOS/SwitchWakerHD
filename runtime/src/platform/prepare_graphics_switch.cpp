@@ -5,6 +5,7 @@
 // stage named), then waits until the deko3d shader worker has had nothing pending for a moment (or 60 s), and goes on.
 // The next index is kept in prepare_graphics/state.txt, so a sweep stopped or cut continues where it was.
 //
+// Link has infinite health during the sweep (mods/cheats.cpp, as the Mods tab's), so enemies in a place cannot end it.
 // The game in progress is only a vehicle: before the first warp the small Quest Log files of save/user (cking.sav,
 // the play log, the picture order; the Picto Box pictures cannot change without the player) are copied to
 // prepare_graphics/save/, and they are put back at the end (or at the next start, when the game closed during the
@@ -56,6 +57,7 @@ struct Place {
 std::mutex g_mu;            // g_status
 std::string g_status;
 std::atomic<bool> g_running{false}, g_stop{false};
+bool g_hadInfiniteHealth = false;  // the player's own setting, put back at the end
 
 std::string dir() { return host::config_dir() + "/prepare_graphics"; }
 std::string save_user() { return config::save_dir + "/user"; }
@@ -165,6 +167,7 @@ double now() { return std::chrono::duration<double>(std::chrono::steady_clock::n
 void sleep_s(double s) { std::this_thread::sleep_for(std::chrono::duration<double>(s)); }
 
 void finish_and_restart(const char* why) {
+    if (!g_hadInfiniteHealth) mods::set_infinite(mods::kInfHealth, false);
     set_status(std::string("Preparing graphics: ") + why + ". The game restarts.");
     sleep_s(5);  // the shader cache and manifest writers' last batches (they write every couple of seconds)
     restore_save();
@@ -231,6 +234,10 @@ std::string start() {
     if (!in_game()) return "start a game first (your Quest Log, or a new game you do not save)";
     mkdir(dir().c_str(), 0777);
     if (!backup_save()) return "could not copy the Quest Log files (is the SD card full?)";
+    // enemies attack while the sweep waits in a place: with health topped up every frame, Link does not die (a
+    // game over would stop the warps)
+    g_hadInfiniteHealth = mods::infinite(mods::kInfHealth);
+    mods::set_infinite(mods::kInfHealth, true);
     g_stop = false;
     g_running = true;
     std::thread([] {
