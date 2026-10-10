@@ -7,14 +7,12 @@ body:
       value: |
         Thanks for reporting! A **save state** made where the problem happens (`slotN.wwstate`, a few KB) plus your **save file** (`cking.sav`) lets us reproduce it much faster, so please add them if you can.
 
-        **Never share full save states** (`slotN.bin`, hundreds of MB): they contain the game's own code and data from your console, which must not be shared publicly. The small `.wwstate` files only hold your progress and position.
-
         If a maintainer closed your issue and the problem comes back, comment `/reopen` on it (as the person who opened it) and it reopens automatically.
   - type: textarea
     id: what
     attributes:
       label: What happens
-      description: What you see, and what you expected instead. Screenshots or a short video help a lot.
+      description: What you see, and what you expected instead. Screenshots or a short video help a lot (the console's Capture button works).
     validations:
       required: true
   - type: textarea
@@ -33,15 +31,13 @@ body:
       label: Save state and save file, or why you can't add them
       description: |
         **Please attach a save state and your save file** (they only hold your progress and position, a few KB each):
-        1. Go to where the problem happens and save a state: **Shift+F1** (or another slot, Shift+F2–F5), or the **Save** button in the Saves tab of the settings overlay (F1). This writes `slotN.wwstate`.
-        2. In the Saves tab, **Copy save for bug report** copies where both files are:
-           - the state: `slotN.wwstate` in the states folder (shown in the Saves tab)
-           - the save file `cking.sav`: `data/save/user/cking.sav` inside the folder you unzipped (release), or `save/user/cking.sav` in the folder you start the game from (built from source, or the folder you pass with `--save`)
+        1. Go to where the problem happens, hold **Minus** to open the options menu and save a state in the **Saves** tab. This writes `slotN.wwstate`.
+        2. Copy both files from the SD card (in the computer, or over USB with hekate's *Tools → USB Tools → SD Card*):
+           - the state: `sdmc:/switch/wwhd/states/slotN.wwstate`
+           - the save file: `sdmc:/switch/wwhd/save/user/cking.sav`
         3. Zip both files and drag the zip into this box.
 
         Also say where you were and what you did (island or dungeon, room, which file slot).
-
-        **Never attach or link full save states** (`slotN.bin`, hundreds of MB, made with the "Full save states" option): they contain the game's code and data and must not be shared.
         If you can't add the files, write the reason here instead.
       placeholder: "state.zip attached (slot1.wwstate + cking.sav), file 1, standing at ... or: no files because ..."
     validations:
@@ -50,39 +46,30 @@ body:
     id: version
     attributes:
       label: Version
-      description: The release (e.g. v0.2.1), or the commit if you built it yourself (`git rev-parse --short HEAD`).
+      description: The release (e.g. v0.4.1, shown in the options menu's About tab), or the commit if you built it yourself (`git rev-parse --short HEAD`).
     validations:
       required: true
   - type: dropdown
-    id: platform
+    id: mode
     attributes:
-      label: Platform
+      label: Console mode
       options:
-        - Windows
-        - macOS
-        - Linux (x86-64)
-        - Linux (arm64)
-        - Android
+        - Handheld
+        - Docked
+        - Both
     validations:
       required: true
   - type: input
-    id: hardware
+    id: setup
     attributes:
-      label: Hardware
-      description: CPU, GPU and RAM (e.g. "Ryzen 5 5600, RTX 3060, 16 GB" or "M1, 8 GB").
+      label: Console and setup
+      description: Console model, firmware and Atmosphère version, and the CPU/GPU clocks if you changed them in the options menu.
+      placeholder: "e.g. Switch OLED, 19.0.1, Atmosphère 1.8.0, stock clocks"
     validations:
       required: true
-  - type: dropdown
-    id: renderer
-    attributes:
-      label: Renderer
-      options:
-        - Metal
-        - Vulkan
-        - Don't know
   - type: textarea
     id: logs
     attributes:
       label: Logs
       description: |
-        If the game crashed: the newest `crash-<date>-<time>.log` from `data/captures/` (release) or `captures/` (built from source). If the setup failed: `data/setup.log`. Drag the file in here.
+        The newest `wwhd_<date>_<time>.log` from `sdmc:/switch/wwhd/logs/`. If the game crashed, also the newest report from `sdmc:/atmosphere/crash_reports/`. Drag the files in here.

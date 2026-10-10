@@ -1,5 +1,5 @@
 name: Setup, start or other bug
-description: The setup fails, the game doesn't start, or a problem outside of playing (menus of the launcher, installation, downloads).
+description: The build or install fails, the game doesn't start, or a problem outside of playing (SD card layout, forwarder, shader cache).
 labels: ["bug", "setup"]
 body:
   - type: markdown
@@ -29,39 +29,40 @@ body:
     id: version
     attributes:
       label: Version
-      description: The release (e.g. v0.2.1), or the commit if you built it yourself (`git rev-parse --short HEAD`).
+      description: The release (e.g. v0.4.1), or the commit if you built it yourself (`git rev-parse --short HEAD`).
     validations:
       required: true
   - type: dropdown
-    id: platform
+    id: where
     attributes:
-      label: Platform
+      label: Where it fails
       options:
-        - Windows
-        - macOS
-        - Linux (x86-64)
-        - Linux (arm64)
-        - Android
+        - Building on the computer
+        - Installing / copying to the SD card
+        - Starting the game on the Switch
+        - Other
     validations:
       required: true
   - type: input
-    id: hardware
+    id: setup
     attributes:
-      label: Hardware
-      description: CPU, GPU and RAM (e.g. "Ryzen 5 5600, RTX 3060, 16 GB" or "M1, 8 GB").
+      label: Console and computer
+      description: Console model, firmware and Atmosphère version; for build problems also the computer's OS.
+      placeholder: "e.g. Switch v2, 19.0.1, Atmosphère 1.8.0; macOS 15"
     validations:
       required: true
   - type: dropdown
-    id: renderer
+    id: start
     attributes:
-      label: Renderer
+      label: How you start the game
       options:
-        - Metal
-        - Vulkan
-        - Don't know
+        - HOME-screen icon (forwarder)
+        - Homebrew Menu in title mode (holding R)
+        - Homebrew Menu from the album
+        - Not relevant
   - type: textarea
     id: logs
     attributes:
       label: Logs
       description: |
-        If the game crashed: the newest `crash-<date>-<time>.log` from `data/captures/` (release) or `captures/` (built from source). If the setup failed: `data/setup.log`. Drag the file in here.
+        The newest `wwhd_<date>_<time>.log` from `sdmc:/switch/wwhd/logs/`; if the game crashed, also the newest report from `sdmc:/atmosphere/crash_reports/`; for build problems, the terminal output. Drag the files in here.
