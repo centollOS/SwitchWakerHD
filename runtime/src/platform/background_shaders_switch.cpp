@@ -93,10 +93,12 @@ Thread g_thread;
 
 std::string start() {
     if (g_running.exchange(true)) return "already running";
-    // the lowest priority, on core 0 (the game's main thread has core 1, the renderer core 2)
-    if (R_FAILED(threadCreate(&g_thread, run, nullptr, nullptr, 4 * 1024 * 1024, 0x3F, 0)) ||
-        R_FAILED(threadStart(&g_thread))) {
+    // the lowest priority the app has (0x3B, as the shader worker), on core 0 (the game's main thread has core 1, the renderer core 2)
+    Result rc = threadCreate(&g_thread, run, nullptr, nullptr, 4 * 1024 * 1024, 0x3B, 0);
+    if (R_SUCCEEDED(rc)) rc = threadStart(&g_thread);
+    if (R_FAILED(rc)) {
         g_running = false;
+        LOG("[bg-shaders] cannot start its thread: result 0x%x", unsigned(rc));
         return "cannot start its thread";
     }
     return "";

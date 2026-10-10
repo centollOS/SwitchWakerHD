@@ -614,6 +614,11 @@ void worker_main(void*) {
         workerLastPartner = 0;
         lk.unlock();
         JobResult r;
+        // (this fork) a background job (no draw waits for it) only on core 0: on core 2 it took the render thread's
+        // time (the game at 27 fps while docs/background-shaders-plan.md's list compiled)
+        static int mask = 0x5;
+        const int want = job.background ? 0x1 : 0x5;
+        if (want != mask) svcSetThreadCoreMask(CUR_THREAD_HANDLE, want == 0x1 ? 0 : -1, mask = want);
         compile_job(job, r);
         lk.lock();
         workerCurrent = 0;

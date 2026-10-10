@@ -55,9 +55,15 @@ uint32_t reg_value(const Regs& regs, uint16_t index) {  // regs sorted by index
     return it != regs.end() && it->first == index ? it->second : 0;
 }
 
+// field by field: a pair<uint16_t, uint32_t> has 2 bytes of padding whose contents are undefined (on the console they
+// differed between equal registers, and no family matched)
 std::string family_key(bool vertex, const Regs& block) {
     std::string k(1, char(vertex));
-    k.append(reinterpret_cast<const char*>(block.data()), block.size() * sizeof block[0]);
+    k.reserve(1 + block.size() * 6);
+    for (const auto& [a, v] : block) {
+        k.append(reinterpret_cast<const char*>(&a), 2);
+        k.append(reinterpret_cast<const char*>(&v), 4);
+    }
     return k;
 }
 
