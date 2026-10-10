@@ -35,6 +35,7 @@
 #include "../runtime.h"
 #include "guest_addr.h"
 #include "host.h"
+#include "ui_text_switch.h"
 
 namespace gfxdk {  // gfx/deko/dk_shaders.h (without the decompiler's headers)
 uint64_t shaders_pending();
@@ -257,7 +258,11 @@ void console_quiet(bool on) {
 }
 
 void finish_and_restart(const char* why) {
-    set_status(std::string("Preparing graphics: ") + why + ". The game restarts.");
+    {
+        char b[256];
+        snprintf(b, sizeof b, ui_text::tx().ending, why);
+        set_status(b);
+    }
     console_quiet(false);
     sleep_s(5);  // the shader cache and manifest writers' last batches (they write every couple of seconds)
     restore_save();
@@ -268,7 +273,7 @@ void finish_and_restart(const char* why) {
         LOG("[prepare] restart failed: appletRestartProgram rc 0x%x", rc);
     }
     // from the Homebrew Menu (applet mode) there is no restart: the player closes the game
-    set_status("Preparing graphics: done. Close the game and start it again (your Quest Log is as it was).");
+    set_status(ui_text::tx().endNoRestart);
 }
 
 void sweep() {
@@ -278,13 +283,12 @@ void sweep() {
     const double t0 = now();
     for (; i < list.size() && !g_stop; i++) {
         const Place& p = list[i];
-        char b[200], eta[48] = "";
+        char b[256], eta[64] = "";
         if (done >= 5) {  // the minutes left, from this sweep's own pace
             const double left = (now() - t0) / done * double(list.size() - i);
-            snprintf(eta, sizeof eta, ", about %.0f min left", left / 60 < 1 ? 1.0 : left / 60);
+            snprintf(eta, sizeof eta, ui_text::tx().etaPart, left / 60 < 1 ? 1 : int(left / 60 + 0.5));
         }
-        snprintf(b, sizeof b, "Preparing graphics: %zu of %zu (%s)%s. To stop: hold B.", i + 1,
-                 list.size(), p.stage, eta);
+        snprintf(b, sizeof b, ui_text::tx().statusLine, i + 1, list.size(), p.stage, eta);
         set_status(b);
         {
             std::lock_guard<std::mutex> lk(g_mu);
@@ -303,7 +307,7 @@ void sweep() {
                 kArriveTimeout, mods::current_stage().c_str());
             write_index(i + 1);
             skipped++;
-            finish_and_restart("a place did not load; start it again to continue");
+            finish_and_restart(ui_text::tx().endPlaceFailed);
             return;
         }
         const double at = now();
@@ -348,16 +352,16 @@ void sweep() {
         write_file(dir() + "/complete.txt", "1\n");  // progress().complete
         write_file(dir() + "/announce.txt", "1\n");  // "Graphics ready" after the restart
     }
-    finish_and_restart(complete ? "complete" : "stopped (start it again to continue)");
+    finish_and_restart(complete ? ui_text::tx().endComplete : ui_text::tx().endStopped);
 }
 
 }  // namespace
 
 std::string start() {
-    if (g_running) return "already running";
-    if (!in_game() && !at_title()) return "start a game first (your Quest Log, or a new game you do not save)";
+    if (g_running) return ui_text::tx().errRunning;
+    if (!in_game() && !at_title()) return ui_text::tx().errNoGame;
     mkdir(dir().c_str(), 0777);
-    if (!backup_save()) return "could not copy the Quest Log files (is the SD card full?)";
+    if (!backup_save()) return ui_text::tx().errCopy;
     g_stop = false;
     g_running = true;
     console_quiet(true);
@@ -407,7 +411,7 @@ std::string screen_line() {
     static double since = 0;  // from when the title screen shows (the restart's first picture)
     if (!announce) return {};
     if (since == 0 && at_title()) since = now();
-    if (since != 0 && now() - since < 12.0) return "Graphics ready: the whole game has been prepared on this console.";
+    if (since != 0 && now() - since < 12.0) return ui_text::tx().ready;
     return {};
 }
 std::string status() {

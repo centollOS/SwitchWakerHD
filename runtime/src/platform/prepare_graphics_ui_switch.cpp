@@ -8,6 +8,7 @@
 #include <string>
 
 #include "imgui.h"
+#include "ui_text_switch.h"
 
 namespace prepare_graphics {
 namespace {
@@ -34,32 +35,29 @@ bool battery_low(uint32_t& percent) {
 bool ui_section() {
     ImGui::Spacing();
     ImGui::PushStyleColor(ImGuiCol_Text, kHeading);
-    ImGui::SeparatorText("Prepare graphics");
+    ImGui::SeparatorText(ui_text::tx().heading);
     ImGui::PopStyleColor();
     if (running()) {
         text(kNote, status().c_str());
-        if (ImGui::Button("Stop preparing graphics")) stop();
-        text(kNote, "What is prepared so far is kept; Prepare graphics continues from here next time.");
+        if (ImGui::Button(ui_text::tx().stopButton)) stop();
+        text(kNote, ui_text::tx().menuKept);
         return false;
     }
     const Progress p = progress();
-    text(kNote, "The console compiles each graphics effect the first time it is drawn, so new places can look black or "
-                "show objects late for a few seconds. Prepare graphics does it for the whole game at once: the game "
-                "visits every place by itself (30-40 minutes, best docked), then restarts at the title screen. Your "
-                "saves are not touched.");
+    text(kNote, ui_text::tx().menuBody);
     uint32_t percent = 0;
     if (battery_low(percent)) {
         char b[120];
-        snprintf(b, sizeof b, "The battery is at %u%%: connect the charger or dock the console first.", percent);
+        snprintf(b, sizeof b, ui_text::tx().battery, percent);
         text(kWarn, b);
     }
     char label[96];
     if (p.next > 0 && p.next < p.total)
-        snprintf(label, sizeof label, "Continue preparing graphics (%zu of %zu done)", p.next, p.total);
+        snprintf(label, sizeof label, ui_text::tx().continueButton, p.next, p.total);
     else
-        snprintf(label, sizeof label, p.complete ? "Prepare graphics again" : "Prepare graphics");
+        snprintf(label, sizeof label, "%s", p.complete ? ui_text::tx().againButton : ui_text::tx().prepareButton);
     if (p.complete && p.next == 0)
-        text(kNote, "Done on this console. Again is only useful after an update that changed the graphics.");
+        text(kNote, ui_text::tx().doneNote);
     static std::string why;
     bool close = false;
     if (ImGui::Button(label)) {
@@ -85,30 +83,29 @@ bool draw_screen(float width, float height) {
         ImGui::SetCursorPos(ImVec2(x, height * 0.36f));
         ImGui::PushStyleColor(ImGuiCol_Text, kHeading);
         ImGui::PushFont(nullptr, ImGui::GetFontSize() * 1.6f);
-        ImGui::TextUnformatted("Preparing graphics");
+        ImGui::TextUnformatted(ui_text::tx().preparing);
         ImGui::PopFont();
         ImGui::PopStyleColor();
         ImGui::SetCursorPosX(x);
-        char b[96];
-        if (l.total) snprintf(b, sizeof b, "%zu of %zu", l.place, l.total);
-        else snprintf(b, sizeof b, "starting");
+        char b[160];
+        if (l.total) snprintf(b, sizeof b, ui_text::tx().placeOf, l.place, l.total);
+        else snprintf(b, sizeof b, "%s", ui_text::tx().starting);
         ImGui::ProgressBar(l.total ? float(l.place - 1) / float(l.total) : 0.0f, ImVec2(w, 0), b);
         ImGui::SetCursorPosX(x);
         ImGui::PushTextWrapPos(x + w);
-        if (l.minutesLeft >= 0) snprintf(b, sizeof b, "About %d min left", l.minutesLeft < 1 ? 1 : l.minutesLeft);
-        else snprintf(b, sizeof b, "Working out the time left...");
+        if (l.minutesLeft >= 0) snprintf(b, sizeof b, ui_text::tx().minutesLeft, l.minutesLeft < 1 ? 1 : l.minutesLeft);
+        else snprintf(b, sizeof b, "%s", ui_text::tx().workingOut);
         text(kNote, b);
         ImGui::SetCursorPosX(x);
-        text(kNote, "The game is visiting every place by itself to compile its graphics, with the sound and rumble off. "
-                    "It restarts at the title screen when it is done. Your saves are not touched.");
+        text(kNote, ui_text::tx().cardBody);
         ImGui::SetCursorPosX(x);
-        if (l.holdToStop >= 1.0f) text(kWarn, "Stopping after this place... What is done is kept.");
+        if (l.holdToStop >= 1.0f) text(kWarn, ui_text::tx().stopping);
         else if (l.holdToStop > 0) {
-            text(kWarn, "Keep holding B to stop");
+            text(kWarn, ui_text::tx().keepHolding);
             ImGui::SetCursorPosX(x);
             ImGui::ProgressBar(l.holdToStop, ImVec2(w * 0.3f, 6), "");
         } else
-            text(kNote, "Hold B to stop. What is done is kept, and Prepare graphics continues from here next time.");
+            text(kNote, ui_text::tx().holdToStop);
         ImGui::PopTextWrapPos();
     }
     ImGui::End();

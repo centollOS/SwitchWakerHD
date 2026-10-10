@@ -14,6 +14,7 @@
 
 #include "../runtime.h"
 #include "prepare_graphics_switch.h"
+#include "ui_text_switch.h"
 
 namespace startup_checks {
 namespace {
@@ -90,23 +91,25 @@ u64 wait_for(PrintConsole* con, u64 buttons) {
 // detail) or a one-line prompt; until one of `buttons` is pressed. The button pressed.
 u64 show(bool error, const char* title, const std::vector<std::string>& paragraphs, const std::vector<Choice>& choices,
          u64 buttons, const char* prompt) {
+    using ui_text::to_console;  // (the console's code page: accented Latin letters)
     PrintConsole* con = consoleInit(nullptr);
-    title_bar(error, title);
+    title_bar(error, to_console(title).c_str());
     for (const std::string& p : paragraphs) {
-        print_wrapped(p, kMargin, C_TEXT);
+        print_wrapped(to_console(p), kMargin, C_TEXT);
         printf("\n");
     }
     if (!choices.empty()) {
         rule();
         printf("\n");
         for (const Choice& c : choices) {
-            printf("%*s" C_GREEN "(%s)" C_RESET "  " C_TEXT "%s" C_RESET "\n", int(kMargin), "", c.button, c.label);
-            print_wrapped(c.detail, kMargin + 5, C_DIM);
+            printf("%*s" C_GREEN "(%s)" C_RESET "  " C_TEXT "%s" C_RESET "\n", int(kMargin), "", c.button,
+                   to_console(c.label).c_str());
+            print_wrapped(to_console(c.detail), kMargin + 5, C_DIM);
             printf("\n");
         }
         rule();
     }
-    if (prompt) printf("\n%*s" C_CYAN "%s" C_RESET "\n", int(kMargin), "", prompt);
+    if (prompt) printf("\n%*s" C_CYAN "%s" C_RESET "\n", int(kMargin), "", to_console(prompt).c_str());
     return wait_for(con, buttons);
 }
 
@@ -122,12 +125,11 @@ void game_files(const std::string& game_dir) {
     if (!missing) return;
     LOG("[startup] the game's files are missing: %s/%s; closing", shown.c_str(), missing);
     log_flush();
-    show(true, "SwitchWakerHD: the game's files were not found",
-         {"SwitchWakerHD needs your own copy of the game in " + shown + "/ (the folders code/, content/ and meta/), "
-          "as tools/switch/make_sd.py lays it out from your dump (INSTALL.md).",
-          "Missing: " + shown + "/" + missing,
-          "Copy the build/sd/ folder made by make_sd.py to the root of the SD card, then start the game again."},
-         {}, HidNpadButton_Plus, "Press + to close.");
+    const ui_text::Texts& t = ui_text::tx();
+    char need[512], miss[256];
+    snprintf(need, sizeof need, t.filesNeed, shown.c_str());
+    snprintf(miss, sizeof miss, t.filesMissing, (shown + "/" + missing).c_str());
+    show(true, t.filesTitle, {need, miss, t.filesCopy}, {}, HidNpadButton_Plus, t.pressPlusToClose);
     exit(1);
 }
 
@@ -142,33 +144,19 @@ bool shader_cache() {
         prepare_graphics::mark_offered();
         LOG("[startup] Prepare graphics offered once (an update)");
         log_flush();
-        const u64 b = show(false, "SwitchWakerHD: new in this version",
-             {"Prepare graphics: the console can now prepare the graphics of the whole game at once, so that places "
-              "you have not visited yet are not black or late the first time."},
-             {{"A", "Prepare graphics now",
-               "The game visits every place by itself behind a loading screen (about 30-40 minutes, best docked), "
-               "then restarts at the title screen, ready. Your saves are not touched. What is already prepared on "
-               "this console goes faster."},
-              {"B", "Later",
-               "This message does not show again. Prepare graphics stays in the settings menu: hold Minus (-) in "
-               "the game, Switch tab."}},
-             HidNpadButton_A | HidNpadButton_B, nullptr);
+        const ui_text::Texts& t = ui_text::tx();
+        const u64 b = show(false, t.updateTitle, {t.updateExplain},
+                           {{"A", t.prepareNow, t.prepareNowDetailUpdate}, {"B", t.later, t.laterDetail}},
+                           HidNpadButton_A | HidNpadButton_B, nullptr);
         LOG("[startup] update notice: %s", b & HidNpadButton_A ? "prepare graphics now" : "later");
         return b & HidNpadButton_A;
     }
     LOG("[startup] no shadercache_dksh.bin and no shaders compiled on this console yet: first-start notice shown");
     log_flush();
-    const u64 b = show(false, "SwitchWakerHD: first start",
-         {"The graphics have not been prepared on this console yet.",
-          "On this first start some textures may look black and some objects may appear a moment late: the console "
-          "prepares each graphics effect the first time it is drawn. It gets better as you play, and what is "
-          "prepared is kept for the next starts."},
-         {{"A", "Prepare graphics now",
-           "The game visits every place by itself behind a loading screen (about 30-40 minutes, best docked), then "
-           "restarts at the title screen, ready. Your saves are not touched."},
-          {"B", "Play now",
-           "You can prepare the graphics later: hold Minus (-) in the game for the settings menu, Switch tab."}},
-         HidNpadButton_A | HidNpadButton_B, nullptr);
+    const ui_text::Texts& t = ui_text::tx();
+    const u64 b = show(false, t.firstTitle, {t.firstNotPrepared, t.firstExplain},
+                       {{"A", t.prepareNow, t.prepareNowDetail}, {"B", t.playNow, t.playNowDetail}},
+                       HidNpadButton_A | HidNpadButton_B, nullptr);
     prepare_graphics::mark_offered();  // (the update notice is for players who never saw this one)
     const bool prepare = b & HidNpadButton_A;
     LOG("[startup] first-start notice: %s", prepare ? "prepare graphics now" : "play now");
