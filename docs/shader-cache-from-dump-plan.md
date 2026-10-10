@@ -201,8 +201,27 @@ as before); the work files in `build/shader-cache/` hold game code and stay on t
 | 5. make_sd.py | `--shaders shader_manifest.bin` (Docker/Podman; not the Windows devkitPro path yet). |
 | 6. Text and docs | First-start notice (13970da), INSTALL.md optional section, README. |
 
-Console tests to do: the manifest recorded by default (a session from a fresh cache folder: the file grows, no
-hitch from the writer, the key skips variants of earlier sessions), the first-start notice's text, and the payoff:
-a cache built from a short session's manifest, then a place not visited in that session (fewer or no black textures
-compared with no cache).
+Console tests (2026-10-10, hardware):
+- Recording by default: a session from an empty cache folder grew shader_manifest.bin to ~3,500 variants (title,
+  Outset, Orca's house) with no hitch from the writer; later sessions appended to it (5,022 variants, 696 programs).
+- The first-start notice is shown with no cache, and A continues.
+- On the way, the players' "black shadows" were found and fixed on main (v0.4.2): a one-time draw before the title
+  screen was skipped while its shader compiled; start-up draws now wait for their shaders until the first frame with
+  40 draws (WWHD_DK_SHADER_BOOT_WAIT).
+- The payoff. make_sd's pipeline on that manifest: 12,355 shaders (recorded + speculative), 12,344 compiled (11 fail
+  in uam: `cubeMapArrayIndex0` undeclared, to look at), 13.5 MiB of the 20 MiB budget, ~50 s on a Mac. Then the
+  same file loaded and four warps to places that session never saw, each from an empty cache vs that cache, draws
+  skipped for a pending shader per frame (two or three 5 s log lines after the warp):
+
+  | place | no cache | cache from the manifest |
+  |---|---|---|
+  | Windfall | 72.6, 58.3 | 31.4, 43.4 |
+  | Dragon Roost | 89.1, 240.6, 79.8 | 28.9, 71.6, 17.0 |
+  | Forest Haven (inside) | 38.9, 228.1, 53.1 | 38.0, 82.1, 16.2 |
+  | Wind Temple | 22.0, 1.8 | 16.0, 0.4 |
+
+  Roughly half to two thirds fewer skips, and it shows: without a cache Dragon Roost's island is missing (palms and
+  rocks floating) and Forest Haven has sky where its fog and background go; with the cache both are drawn. Not all
+  skips are gone: the speculation (up to 2 recorded states per program family) does not cover every variant of
+  places never visited. Next: more speculative states per family (`--max`, within the budget) and the uam failures.
 
