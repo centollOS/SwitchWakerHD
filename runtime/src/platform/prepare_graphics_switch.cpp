@@ -44,6 +44,10 @@ constexpr double kArriveTimeout = 30.0;   // s: a destination not reached by the
 constexpr double kSettle = 3.0;           // s after the arrival before the worker is watched (draws meet shaders)
 constexpr double kQuiet = 2.0;            // s with nothing pending: this place is done
 constexpr double kPlaceTimeout = 60.0;    // s at most in one place
+// s at least in one place: warping out a few seconds after arriving, while a place's arrival event still runs, stopped
+// the game (c_xyz.cpp:285 isNearZeroSquare, M2tower -> M_DaiB after 10 s, ITest63 -> Kaisen); the warp sweep that
+// stayed 15-20 s everywhere never did
+constexpr double kMinStay = 12.0;
 constexpr uint32_t kMaxBackup = 64 << 10; // save/user files up to this size are copied (not the pictures)
 
 const uint32_t kNextStageReq = GD(0x1046F0B0) + 0x5140 + 12;  // mods/cheats.cpp kNextStage + 12: a request is set
@@ -216,6 +220,7 @@ void sweep() {
             }
             sleep_s(0.25);
         }
+        while (!g_stop && now() - at < kMinStay) sleep_s(0.25);
         LOG("[prepare] %zu/%zu %s room %d: %.0f s", i + 1, list.size(), p.stage, p.room, now() - at);
         done++;
         write_index(i + 1);
