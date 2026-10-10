@@ -42,14 +42,14 @@ namespace prepare_graphics {
 namespace {
 
 constexpr double kArriveTimeout = 30.0;   // s: a destination not reached by then is skipped
-constexpr double kSettle = 3.0;           // s after the arrival before the worker is watched (draws meet shaders)
-constexpr double kQuiet = 2.0;            // s with nothing pending: this place is done
+constexpr double kSettle = 2.0;           // s after the arrival before the worker is watched (draws meet shaders)
+constexpr double kQuiet = 1.0;            // s with nothing pending: this place is done
 constexpr double kPlaceTimeout = 60.0;    // s at most in one place
 // Warping out while a place's arrival event still runs stopped the game (c_xyz.cpp:285 isNearZeroSquare: M2tower ->
 // M_DaiB after 10 s): the next warp waits until Link has had control for a moment (no event, message, game menu or
 // stage change, Link the controlled actor: the game's own pause-menu conditions, savestate.cpp player_has_control),
 // after at least kMinStay; places known to have a long arrival event stay at least kMinStayEvent anyway.
-constexpr double kMinStay = 5.0;
+constexpr double kMinStay = 2.0;          // (the wait for Link's control guards the arrival events)
 constexpr double kMinStayEvent = 12.0;
 constexpr double kControlFor = 1.0;       // s of control in a row
 constexpr double kControlTimeout = 45.0;  // s: then the warp goes anyway (logged)
