@@ -27,6 +27,7 @@ size_t listed_waiting();
 uint64_t shaders_pending();
 void set_background_fast(bool on);
 }  // namespace gfxdk
+namespace render { uint64_t frame_count(); }
 
 namespace background_shaders {
 namespace {
@@ -57,6 +58,7 @@ void set_fast(bool on) {
 
 // B on the loading card: play now (its own pad reader; a press once the card has been up 2 s)
 void watch_card_button() {
+    while (render::frame_count() < 30) sleep_s(0.2);  // (input is set up by then)
     PadState pad;
     padInitializeDefault(&pad);
     const double t0 = now();
@@ -73,6 +75,8 @@ void watch_card_button() {
 }
 
 void run(bool firstStart) {
+    // the game's memory and the renderer exist once frames are presented (this thread starts in main(), before both)
+    while (render::frame_count() < 30) sleep_s(0.2);
     const double t0 = now();
     if (firstStart) {
         // the title screen's draws record their states into the manifest (and compile the title's own shaders)

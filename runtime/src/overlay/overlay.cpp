@@ -2320,7 +2320,7 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
     const bool preparing = false;
 #endif
     U.linearized = false;
-    if (!open && !perf && !text && toast.empty()) {
+    if (!open && !perf && !text && toast.empty() && !preparing) {
         if (U.init) {  // forget events and pressed keys while nothing is shown
             std::lock_guard<std::mutex> lk(g_mu);
             g_events.clear();
