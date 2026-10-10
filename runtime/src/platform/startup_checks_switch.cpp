@@ -10,8 +10,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
+#include <vector>
 
 #include "../runtime.h"
+#include "ui_text_switch.h"
 
 namespace startup_checks {
 namespace {
@@ -25,41 +27,89 @@ bool is_dir(const std::string& p) {
     return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-// `text` word-wrapped to the console's 80 columns (blank lines kept)
-void print_wrapped(std::string_view text) {
-    constexpr size_t kCols = 78;
+// libnx's console: 80 columns, ANSI colours (bold = bright)
+constexpr size_t kCols = 80, kMargin = 4;
+#define C_RESET "\x1b[0m"
+#define C_DIM "\x1b[37m"
+#define C_TEXT "\x1b[37;1m"
+#define C_CYAN "\x1b[36;1m"
+#define C_GREEN "\x1b[32;1m"
+
+// `text` word-wrapped between column `indent` and the right margin (blank lines kept), in `colour`
+void print_wrapped(std::string_view text, size_t indent = kMargin, const char* colour = C_DIM) {
+    const size_t width = kCols - kMargin - indent;
+    printf("%s%*s", colour, int(indent), "");
     size_t col = 0;
     while (!text.empty()) {
-        if (text[0] == '\n') { printf("\n"); col = 0; text.remove_prefix(1); continue; }
+        if (text[0] == '\n') { printf("\n%*s", int(indent), ""); col = 0; text.remove_prefix(1); continue; }
         size_t n = text.find_first_of(" \n");
         std::string_view word = text.substr(0, n);
-        if (col && col + 1 + word.size() > kCols) { printf("\n"); col = 0; }
+        if (col && col + 1 + word.size() > width) { printf("\n%*s", int(indent), ""); col = 0; }
         else if (col) { printf(" "); col++; }
         printf("%.*s", int(word.size()), word.data());
         col += word.size();
         text.remove_prefix(word.size());
         if (!text.empty() && text[0] == ' ') text.remove_prefix(1);
     }
-    printf("\n");
+    printf(C_RESET "\n");
 }
 
-// A text screen with `title` (red for an error, yellow for a warning) and `body`, until `button` is pressed (or
-// the app is asked to close).
-void show(bool error, const char* title, const std::string& body, u64 button, const char* prompt) {
-    PrintConsole* con = consoleInit(nullptr);
-    printf("\n %s%s\x1b[0m\n\n", error ? "\x1b[31;1m" : "\x1b[33;1m", title);
-    print_wrapped(body);
-    printf("\n\x1b[36;1m%s\x1b[0m\n", prompt);
+// a full-width bar: the title on a coloured background (red: an error, yellow: a notice)
+void title_bar(bool error, const char* title) {
+    const char* bar = error ? "\x1b[41;37;1m" : "\x1b[43;30m";
+    printf("\n%s%*s%s\n", bar, int(kCols), "", C_RESET);
+    printf("%s%*s%-*s%s\n", bar, int(kMargin), "", int(kCols - kMargin), title, C_RESET);
+    printf("%s%*s%s\n\n", bar, int(kCols), "", C_RESET);
+}
+
+void rule() { printf(C_DIM "%*s%s" C_RESET "\n", int(kMargin), "", std::string(kCols - 2 * kMargin, '-').c_str()); }
+
+struct Choice {
+    const char* button;  // "A"
+    const char* label;
+    const char* detail;
+};
+
+// waits for one of `buttons` (0: the app is asked to close); the button pressed
+u64 wait_for(PrintConsole* con, u64 buttons) {
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
     padInitializeDefault(&pad);
+    u64 pressed = 0;
     while (appletMainLoop()) {
         padUpdate(&pad);
-        if (padGetButtonsDown(&pad) & button) break;
+        if ((pressed = padGetButtonsDown(&pad) & buttons)) break;
         consoleUpdate(con);
         svcSleepThread(16'000'000);
     }
     consoleExit(con);
+    return pressed;
+}
+
+// A text screen: a title bar, paragraphs, then either choices (each a coloured button, its label and a line of
+// detail) or a one-line prompt; until one of `buttons` is pressed. The button pressed.
+u64 show(bool error, const char* title, const std::vector<std::string>& paragraphs, const std::vector<Choice>& choices,
+         u64 buttons, const char* prompt) {
+    using ui_text::to_console;  // (the console's code page: accented Latin letters)
+    PrintConsole* con = consoleInit(nullptr);
+    title_bar(error, to_console(title).c_str());
+    for (const std::string& p : paragraphs) {
+        print_wrapped(to_console(p), kMargin, C_TEXT);
+        printf("\n");
+    }
+    if (!choices.empty()) {
+        rule();
+        printf("\n");
+        for (const Choice& c : choices) {
+            printf("%*s" C_GREEN "(%s)" C_RESET "  " C_TEXT "%s" C_RESET "\n", int(kMargin), "", c.button,
+                   to_console(c.label).c_str());
+            print_wrapped(to_console(c.detail), kMargin + 5, C_DIM);
+            printf("\n");
+        }
+        rule();
+    }
+    if (prompt) printf("\n%*s" C_CYAN "%s" C_RESET "\n", int(kMargin), "", to_console(prompt).c_str());
+    return wait_for(con, buttons);
 }
 
 }  // namespace
@@ -74,33 +124,22 @@ void game_files(const std::string& game_dir) {
     if (!missing) return;
     LOG("[startup] the game's files are missing: %s/%s; closing", shown.c_str(), missing);
     log_flush();
-    show(true, "SwitchWakerHD: the game's files were not found",
-         "SwitchWakerHD needs your own copy of the game in " + shown +
-             "/ (the folders code/, content/ and meta/), as tools/switch/make_sd.py lays it out from your dump "
-             "(INSTALL.md).\n\nMissing: " + shown + "/" + missing +
-             "\n\nCopy the build/sd/ folder made by make_sd.py to the root of the SD card, then start the game "
-             "again.",
-         HidNpadButton_Plus, "Press + to close.");
+    const ui_text::Texts& t = ui_text::tx();
+    char need[512], miss[256];
+    snprintf(need, sizeof need, t.filesNeed, shown.c_str());
+    snprintf(miss, sizeof miss, t.filesMissing, (shown + "/" + missing).c_str());
+    show(true, t.filesTitle, {need, miss, t.filesCopy}, {}, HidNpadButton_Plus, t.pressPlusToClose);
     exit(1);
 }
 
-void shader_cache() {
+bool first_start() {
     // shaders_dk.cpp's cache files (in WWHD_DK_SHADER_CACHE_DIR when set): the one built on a computer and the one
-    // the console fills as it compiles; with neither, every shader is compiled while the game is played
+    // the console fills as it compiles; with neither, nothing has been compiled on this console yet
     const char* e = getenv("WWHD_DK_SHADER_CACHE_DIR");
     const std::string dir = e && *e ? std::string(e) + "/" : std::string();
-    if (is_file(dir + "shadercache_dksh.bin", true) || is_file(dir + "shadercache_dksh_local.bin", true)) return;
-    LOG("[startup] no shadercache_dksh.bin and no shaders compiled on this console yet: first-start notice shown");
-    log_flush();
-    show(false, "SwitchWakerHD: first start",
-         "No graphics have been compiled on this console yet. The console compiles each of the game's graphics "
-         "effects the first time it is drawn, so on this first start some textures may look black and some objects "
-         "may appear a moment late. It gets better as you play: what is compiled is kept for the next starts.\n\n"
-         "To prepare the places you have not visited yet: after playing a while, copy "
-         "sdmc:/switch/wwhd/shader_manifest.bin (made as you play) to your computer and build again with "
-         "make_sd.py --shaders shader_manifest.bin (INSTALL.md). Copy the new shadercache_dksh.bin next to "
-         "wwhd.nro.",
-         HidNpadButton_A, "Press A to continue.");
+    const bool first = !is_file(dir + "shadercache_dksh.bin", true) && !is_file(dir + "shadercache_dksh_local.bin", true);
+    if (first) LOG("[startup] no shaders compiled on this console yet: the first start's loading card");
+    return first;
 }
 
 }  // namespace startup_checks

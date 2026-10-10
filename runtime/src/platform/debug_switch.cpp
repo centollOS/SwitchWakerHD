@@ -21,6 +21,9 @@
 #include "../runtime.h"
 #include "../overlay/hostui.h"
 #include "debug_server.h"
+#include "prepare_graphics_switch.h"
+#include "shader_scan_switch.h"
+#include "background_shaders_switch.h"
 #include "host.h"
 #include "settings_switch.h"
 
@@ -139,6 +142,43 @@ debugsrv::Reply reload(const debugsrv::Args&) {
     return r;
 }
 
+// "prepare start|stop|status": the Prepare graphics sweep (prepare_graphics_switch.h)
+debugsrv::Reply prepare(const debugsrv::Args& a) {
+    const std::string what = a.empty() ? "status" : a[0];
+    if (what == "start") {
+        const std::string why = prepare_graphics::start();
+        return why.empty() ? debugsrv::ok("prepare graphics: started") : debugsrv::err(why);
+    }
+    if (what == "stop") {
+        prepare_graphics::stop();
+        return debugsrv::ok("prepare graphics: stopping after the current place");
+    }
+    const std::string st = prepare_graphics::status();
+    return debugsrv::ok(st.empty() ? "prepare graphics: not running" : st);
+}
+
+// "scanbench": shader_scan over the game's files, in a thread (the result in the log: [scan])
+debugsrv::Reply scanbench(const debugsrv::Args&) {
+    std::thread([] {
+        shader_scan::Stats st;
+        const auto progs = shader_scan::scan(config::game_dir, st);
+        LOG("[scan] %zu files (%.0f MB read in %.1f s), %zu archives, %zu shaders, %zu distinct; %.0f MB inflated in "
+            "%.1f s; total %.1f s", st.files, st.bytesRead / 1048576.0, st.readSeconds, st.archives, st.shaders,
+            st.distinct, st.bytesInflated / 1048576.0, st.inflateSeconds, st.totalSeconds);
+    }).detach();
+    return debugsrv::ok("scan started: see the log ([scan])");
+}
+
+// "bgshaders [start]": background shaders (background_shaders_switch.h)
+debugsrv::Reply bgshaders(const debugsrv::Args& a) {
+    if (!a.empty() && a[0] == "start") {
+        const std::string why = background_shaders::start();
+        return why.empty() ? debugsrv::ok("background shaders: started") : debugsrv::err(why);
+    }
+    return debugsrv::ok("background shaders: " + (background_shaders::status().empty() ? std::string("not started")
+                                                                                       : background_shaders::status()));
+}
+
 debugsrv::Reply quit(const debugsrv::Args&) {
     debugsrv::Reply r = debugsrv::ok("quitting");
     r.after = [] {
@@ -155,11 +195,17 @@ void start() {
     std::string on;
     if (!hostui::get(switch_settings::kKeyDebugServer, on) || on != "1") return;
     g_port = kPort;
+    // a console under test from the computer is often left alone for minutes: no auto-sleep while the server runs
+    appletSetAutoSleepDisabled(true);
+    LOG("[debug] auto-sleep off while the debug server runs");
     debugsrv::add_command("info", "info                   build, frame, stage, heap, address", info);
     debugsrv::add_command("warps", "warps                  the warp destinations, numbered", warps);
     debugsrv::add_command("warp", "warp <n> | warp <stage> [room] [point]", warp);
     debugsrv::add_command("shot", "shot [game]            PNG of the next frame (game: the game's picture alone)", shot);
     debugsrv::add_command("reload", "reload                 restart: the forwarder loads the NRO again (put it first)", reload);
+    debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
+    debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
+    debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);
     debugsrv::add_command("quit", "quit                   end the program", quit);
     debugsrv::Config c;
     c.port = g_port;

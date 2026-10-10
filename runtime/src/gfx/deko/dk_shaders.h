@@ -187,5 +187,16 @@ struct ShaderStats {
     uint64_t codeBytes = 0;     // code memory used by game shaders
 };
 ShaderStats shader_stats_take();  // counts since the last call; pendingNow and codeBytes as they are
+uint64_t shaders_pending();        // shaders queued for or held by the worker right now (any thread)
+uint64_t shaders_skipped_draws();  // draws skipped for a shader not ready yet, since start-up (any thread)
+// (this fork) docs/background-shaders-plan.md: a variant no draw has made yet, translated the way a draw would
+// (the program and fetch shader copied to guest memory, the same decompile and fetch builders); regs: a full
+// register file the call may change. Any thread (the decompiler is shared under a lock).
+bool translate_listed(uint32_t* regs, bool vertex, const uint8_t* program, uint32_t programSize, uint64_t programHash,
+                      const uint8_t* fetch, uint32_t fetchSize, bool fetchCompact, std::string& glsl, uint64_t& glslHash);
+// any thread: compile that GLSL in the background (behind every draw's), keep it in shadercache_gl.bin
+void queue_listed(uint64_t glslHash, bool vertex, std::string&& glsl);
+size_t listed_waiting();  // queue_listed sources not handed to the worker yet
+void set_background_fast(bool on);  // background jobs at full speed (behind the first start's loading screen)
 
 }  // namespace gfxdk

@@ -57,6 +57,8 @@ namespace gfxvk { bool buffer_cache_enabled(); }  // gfx/vulkan/buffer_cache.h
 #include "../gfx/switch_renderer.h"
 #include "../platform/settings_switch.h"
 #include "../platform/debug_switch.h"
+#include "../platform/prepare_graphics_switch.h"
+#include "../platform/background_shaders_switch.h"
 #include "../mods/warps.h"
 #endif
 #include "../screenshot.h"
@@ -912,6 +914,7 @@ void tab_warp() {
 void save_gyro(const motion::Settings& g);
 void tab_switch() {
     using namespace switch_settings;
+    if (prepare_graphics::ui_section()) set_open(false);  // (this fork) platform/prepare_graphics_ui_switch.cpp
     // one picture profile per mode (as SwitchWaker): the one shown starts as the active mode's
     heading("Picture profile");
     static int edit = -1;
@@ -2309,9 +2312,15 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
     const bool open = is_open(), perf = perf_shown(), text = !open && text_entry::active();
     // save state notices (saved, refused during a cutscene, loaded into another Quest Log) show over the
     // game for a few seconds while the menu is closed (the window title is not visible everywhere)
-    const std::string toast = open ? std::string() : ss::last_message();
+    std::string toast = open ? std::string() : ss::last_message();
+#ifdef __SWITCH__
+    if (!open && !prepare_graphics::screen_line().empty()) toast = prepare_graphics::screen_line();  // (this fork)
+    const bool preparing = !open && (prepare_graphics::running() || background_shaders::card().up);  // (this fork)
+#else
+    const bool preparing = false;
+#endif
     U.linearized = false;
-    if (!open && !perf && !text && toast.empty()) {
+    if (!open && !perf && !text && toast.empty() && !preparing) {
         if (U.init) {  // forget events and pressed keys while nothing is shown
             std::lock_guard<std::mutex> lk(g_mu);
             g_events.clear();
@@ -2364,8 +2373,12 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
             g_wait_release = true;
         }
     }
+#ifdef __SWITCH__
+    if (preparing && !background_shaders::draw_screen(io.DisplaySize.x, io.DisplaySize.y))  // (this fork)
+        prepare_graphics::draw_screen(io.DisplaySize.x, io.DisplaySize.y);
+#endif
     if (perf) perf_window(open);
-    if (!toast.empty()) {
+    if (!toast.empty() && !preparing) {
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - 24), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
         ImGui::SetNextWindowBgAlpha(0.7f);
         ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(io.DisplaySize.x * 0.8f, FLT_MAX));

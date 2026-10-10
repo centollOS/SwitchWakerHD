@@ -111,28 +111,21 @@ adjustments, frame-rate counter, controller (Pro Controller or GamePad), gyro ai
 the battery faster and warm the console. If sys-clk has its own profile for this title, the two fight
 over the clocks. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
 
-## Optional: graphics ready for the places you have not visited yet
+## The first start: preparing the graphics
 
-On the first start the console compiles each of the game's graphics effects the first time it is drawn, so some
-textures can look black for a while and some objects appear a moment late; it gets better as you play, and what is
-compiled is kept. To have the places you have not visited yet ready too:
+The console compiles each of the game's graphics effects the first time it is drawn; until then a texture can look
+black or an object appear a moment late. So the **first start** shows a "Preparing the graphics" screen instead of the
+game: behind it the game boots and its title screen runs, then the console reads the graphics programs of your own
+copy of the game and compiles about three quarters of the game's graphics, about 20 minutes (best docked). Then the
+title screen. It happens once: what is compiled is kept.
 
-1. Play a while (a few minutes are enough to start; the more places you visit, the better the guesses). The game
-   writes `sdmc:/switch/wwhd/shader_manifest.bin` as you play: a list of the graphics states it met, with no game
-   code in it.
-2. Copy that file to your computer and build again with it:
-   ```sh
-   python3 tools/switch/make_sd.py --game-dir /path/to/game --shaders /path/to/shader_manifest.bin
-   ```
-   It finds the game's shaders in your own dump, compiles what you met plus guesses for the rest of the game, and adds
-   `shadercache_dksh.bin` to `build/sd/switch/wwhd/` (about 30 MB; a minute or two of compiling). It needs CMake,
-   Ninja and a C++ compiler, else Docker or Podman: on **Windows with devkitPro**, run once in the *devkitPro >
-   MSYS2* window `pacman -S --needed gcc cmake ninja zlib-devel`; on **macOS**, `xcode-select --install` and
-   `brew install cmake ninja` (or just keep Docker Desktop); on **Linux**, your distribution's `g++ cmake
-   ninja-build zlib` packages (or Docker / Podman).
-3. Copy `shadercache_dksh.bin` next to `wwhd.nro` on the SD card.
+- **B** on that screen: play now. What is left goes on in the background while you play, gently (the frame rate
+  stays), and in the next starts if needed.
+- The rest of the game's graphics compile the first time they show, in a few seconds, once.
 
-`shader_manifest.bin` and `shadercache_dksh.bin` come from your own game: keep them for yourself, do not share them.
+Optional, in the settings menu (hold **Minus**, **Switch** tab): **Prepare graphics** has the game visit every place
+by itself (30-40 minutes, behind a loading screen) for the remaining quarter. It is experimental: some places start
+story events with its data and take longer.
 
 ## Updating
 
