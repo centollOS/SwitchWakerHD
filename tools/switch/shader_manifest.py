@@ -139,6 +139,16 @@ def archive_programs(game_dir):
     return out
 
 
+def own_block(shaderprep, vertex, w):
+    """shaderprep.own_block as this runtime's GX2SetVertexShader writes it: SQ_VTX_SEMANTIC_CLEAR clears only the
+    shader's semantics (0xFFFFFFFF << count), where shaderprep writes 0xFFFFFFFF; without this no recorded vertex
+    state matched its family and the speculation made no vertex shaders"""
+    blk = shaderprep.own_block(vertex, w)
+    if vertex and shaderprep.mmSQ_VTX_SEMANTIC_CLEAR in blk:
+        blk[shaderprep.mmSQ_VTX_SEMANTIC_CLEAR] = (0xFFFFFFFF << min(w[0x40 // 4], 32)) & 0xFFFFFFFF
+    return blk
+
+
 def write_manifest(path, recs):
     """WSM1 as the runtime writes it (runtime/src/gfx/deko/shader_manifest.cpp)"""
     with open(path, "wb") as f:
@@ -205,7 +215,7 @@ def main():
             seen.add((r[1], r[2]))
         # families: the register sets of the archive's blocks; a recorded state belongs to the family whose
         # registers it holds with those values (as shaderprep cmd_build)
-        regsets = {(v, tuple(sorted(shaderprep.own_block(v, w)))) for (v, code, w) in programs.values()}
+        regsets = {(v, tuple(sorted(own_block(shaderprep, v, w)))) for (v, code, w) in programs.values()}
         by_family = {}
         for r in recs:
             vertex, regs = r[0], r[5]
@@ -219,7 +229,7 @@ def main():
         for (h, n), (vertex, code, w) in sorted(programs.items()):
             if (h, n) in seen:
                 continue
-            blk = shaderprep.own_block(vertex, w)
+            blk = own_block(shaderprep, vertex, w)
             for t in by_family.get((vertex, tuple(sorted(blk.items()))), [])[:limit]:
                 regs = dict(t[5])
                 regs.update(blk)

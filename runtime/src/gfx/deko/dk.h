@@ -30,7 +30,8 @@ constexpr uint32_t kStreamSliceSize = 32u << 20;   // per frame: vertices, indic
 constexpr uint32_t kCmdSliceSize = 4u << 20;       // per frame: command memory
 constexpr uint32_t kCmdChunk = 64u << 10;          // fed to the command buffer at frame_begin, then as it asks
 constexpr uint32_t kImageChunkSize = 64u << 20;    // image heap chunks
-constexpr uint32_t kCodeSize = 32u << 20;          // shader code (DKSH), bump allocated
+constexpr uint32_t kCodeSize = 64u << 20;          // shader code (DKSH), bump allocated (a cache made with
+                                                   // make_sd.py --shaders takes up to 40 MiB: tools/switch/make_sd.py)
 constexpr uint32_t kImageDescriptors = 8192, kSamplerDescriptors = 1024;
 constexpr uint32_t kQuerySize = 64u << 10;         // counters / timestamps
 

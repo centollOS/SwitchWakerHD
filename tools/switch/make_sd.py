@@ -54,9 +54,10 @@ def run(cmd, env=None, ok=(0,)):
         fail("this step failed (see the messages above)")
 
 
-# the shader cache's code budget: the console loads it whole into its 32 MiB of shader code memory, and what it
-# compiles later goes there too (tools/switch/dksh_cache build)
-SHADER_CODE_MIB = "20"
+# the shader cache's code budget: the console loads it whole into its 64 MiB of shader code memory (gfx/deko/dk.h),
+# and what it compiles later goes there too (tools/switch/dksh_cache build). A whole game harvested on the console took
+# 14 MiB: 24 MiB stay free.
+SHADER_CODE_MIB = "40"
 
 
 def shader_cache(src, game):
