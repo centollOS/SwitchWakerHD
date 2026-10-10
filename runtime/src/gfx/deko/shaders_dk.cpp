@@ -1699,6 +1699,8 @@ ShaderStats shader_stats_take() {
     return stats_since(taken);
 }
 
+uint64_t shaders_skipped_draws() { return g_total.skippedDraws; }  // (render thread's count, read as it is)
+
 uint64_t shaders_pending() {
     std::lock_guard<std::mutex> lk(workerMutex);
     return jobs.size() + results.size() + (workerCurrent ? 1 : 0);

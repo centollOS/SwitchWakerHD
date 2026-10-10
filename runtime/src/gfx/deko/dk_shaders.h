@@ -188,5 +188,6 @@ struct ShaderStats {
 };
 ShaderStats shader_stats_take();  // counts since the last call; pendingNow and codeBytes as they are
 uint64_t shaders_pending();        // shaders queued for or held by the worker right now (any thread)
+uint64_t shaders_skipped_draws();  // draws skipped for a shader not ready yet, since start-up (any thread)
 
 }  // namespace gfxdk

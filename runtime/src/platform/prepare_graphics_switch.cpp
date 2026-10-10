@@ -36,14 +36,21 @@
 #include "guest_addr.h"
 #include "host.h"
 
-namespace gfxdk { uint64_t shaders_pending(); }  // gfx/deko/dk_shaders.h (without the decompiler's headers)
+namespace gfxdk {  // gfx/deko/dk_shaders.h (without the decompiler's headers)
+uint64_t shaders_pending();
+uint64_t shaders_skipped_draws();
+}  // namespace gfxdk
+namespace render { uint64_t frame_count(); }
 
 namespace prepare_graphics {
 namespace {
 
 constexpr double kArriveTimeout = 30.0;   // s: a destination not reached by then is skipped
 constexpr double kSettle = 2.0;           // s after the arrival before the worker is watched (draws meet shaders)
-constexpr double kQuiet = 1.0;            // s with nothing pending: this place is done
+// this place is done when nothing is pending and the last kQuietFrames frames skipped no draw for a shader (every
+// draw the game made there had its shaders), at least kQuiet s
+constexpr double kQuiet = 1.0;
+constexpr uint64_t kQuietFrames = 30;
 constexpr double kPlaceTimeout = 60.0;    // s at most in one place
 // Warping out while a place's arrival event still runs stopped the game (c_xyz.cpp:285 isNearZeroSquare: M2tower ->
 // M_DaiB after 10 s): the next warp waits until Link has had control for a moment (no event, message, game menu or
@@ -302,14 +309,17 @@ void sweep() {
         const double at = now();
         sleep_s(kSettle);
         double quietSince = 0;
+        uint64_t skips = gfxdk::shaders_skipped_draws(), skipFrame = render::frame_count();
         while (!g_stop && now() - at < kPlaceTimeout) {
-            if (gfxdk::shaders_pending() == 0) {
+            const uint64_t sk = gfxdk::shaders_skipped_draws(), frame = render::frame_count();
+            if (sk != skips) skips = sk, skipFrame = frame;  // a draw waited for a shader since the last look
+            if (gfxdk::shaders_pending() == 0 && frame - skipFrame >= kQuietFrames) {
                 if (quietSince == 0) quietSince = now();
                 if (now() - quietSince >= kQuiet) break;
             } else {
                 quietSince = 0;
             }
-            sleep_s(0.25);
+            sleep_s(0.1);
         }
         double minStay = kMinStay;
         for (const char* e : kArrivalEvents)
