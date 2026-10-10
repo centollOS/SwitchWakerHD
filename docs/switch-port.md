@@ -1511,6 +1511,10 @@ in those places: a desktop perf run from a save near Dragon Roost, or a guest-fu
 interpolation, True 60 (experimental), switched while the game runs, logged (`[interp] frame rate mode from the
 Switch tab: ...`), not saved. Off (30 fps) by default, as before: no Switch build had interpolation on (`[prof] ... 0
 hold, swaps/s = logic steps/s` in the round 40 log).
+Under 60 fps interpolation, a "Keep game speed" check box (paced interpolation, `interp_pacing.h`) keeps the logic at
+30 steps a second and drops in-between frames that do not fit; off (the desktop's 60 fps default), every in-between
+frame is drawn and the game slows down below 60 fps. Not saved, off at the next start; `WWHD_INTERP_PACED` in `[dev]`
+wins over it (the box is then greyed out).
 
 ## Rendering resolution
 
