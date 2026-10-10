@@ -1,7 +1,10 @@
 // Teleport destinations for the settings overlay (Switch tab "Warp"), from centollOS's PC menu
 // (native/src/pc/features/pc_menu.cpp there): stage, room, spawn point. The sea's rooms are its 7x7
 // grid squares (A1 = 1). The full list is every stage of the HD disc (content/Common/Stage) with the
-// start centollOS's boot sweep found; the GameCube's test stages, absent from HD, are left out.
+// start centollOS's boot sweep found; the GameCube's test stages, absent from HD, are left out. A warp sweep on the
+// console (2026-10-10) left out too: Cave08 and PShip (the game stops loading them: d_s_room.cpp:637), ENDumi (stops:
+// d_event_data.cpp demo_data), I_SubAN room 9 and M2ganon (the game crashes reading a bad pointer), E3ROOP and
+// sea_T (no warp works after them) and MiniHyo, MiniKaz and sea_E (the warp does nothing).
 #pragma once
 
 namespace mods {
@@ -50,14 +53,11 @@ inline constexpr Warp kAllWarps[] = {
     {"Cave05", 0, 0, nullptr},
     {"Cave06", 0, 0, nullptr},
     {"Cave07", 0, 0, nullptr},
-    {"Cave08", 0, 0, nullptr},
     {"Cave09", 0, 0, nullptr},
     {"Cave10", 1, 0, nullptr},
     {"Cave11", 1, 0, nullptr},
     {"Comori", 0, 0, nullptr},
     {"DmSpot0", 0, 0, nullptr},
-    {"E3ROOP", 0, 0, nullptr},
-    {"ENDumi", 0, 0, nullptr},
     {"Ebesso", 0, 0, nullptr},
     {"Edaichi", 0, 0, nullptr},
     {"Ekaze", 0, 0, nullptr},
@@ -82,11 +82,9 @@ inline constexpr Warp kAllWarps[] = {
     {"ITest61", 0, 0, nullptr},
     {"ITest62", 0, 0, nullptr},
     {"ITest63", 0, 0, nullptr},
-    {"I_SubAN", 9, 0, nullptr},
     {"Kaisen", 0, 0, nullptr},
     {"LinkRM", 0, 1, nullptr},
     {"LinkUG", 0, 1, nullptr},
-    {"M2ganon", 0, 0, nullptr},
     {"M2tower", 0, 16, nullptr},
     {"M_Dai", 0, 0, nullptr},
     {"M_DaiB", 0, 0, nullptr},
@@ -95,8 +93,6 @@ inline constexpr Warp kAllWarps[] = {
     {"M_DragB", 0, 0, nullptr},
     {"M_NewD2", 0, 0, nullptr},
     {"MajyuE", 0, 0, nullptr},
-    {"MiniHyo", 0, 0, nullptr},
-    {"MiniKaz", 0, 0, nullptr},
     {"Mjtower", 0, 16, nullptr},
     {"Msmoke", 0, 0, nullptr},
     {"Mukao", 0, 0, nullptr},
@@ -114,7 +110,6 @@ inline constexpr Warp kAllWarps[] = {
     {"Opub", 0, 0, nullptr},
     {"Orichh", 0, 0, nullptr},
     {"Otkura", 0, 0, nullptr},
-    {"PShip", 0, 0, nullptr},
     {"PShip2", 0, 0, nullptr},
     {"PShip3", 0, 0, nullptr},
     {"Pdrgsh", 0, 0, nullptr},
@@ -160,8 +155,6 @@ inline constexpr Warp kAllWarps[] = {
     {"ma3room", 0, 0, nullptr},
     {"majroom", 0, 0, nullptr},
     {"sea", 1, 0, nullptr},
-    {"sea_E", 0, 0, nullptr},
-    {"sea_T", 44, 0, nullptr},
     {"tincle", 0, 0, nullptr},
 };
 
