@@ -672,8 +672,9 @@ int main(int argc, char** argv) {
     // which build on which system: also in crash logs (their last log lines)
     LOG("[boot] Wind Waker HD %s (%s), %s", build::version(), build::commit(), reporthdr::os_description().c_str());
 #ifdef __SWITCH__
-    // (this fork) the game's files, else an error on screen and the app closes
+    // (this fork) the game's files, else an error on screen and the app closes; the first start's shader warning
     startup_checks::game_files(config::game_dir);
+    startup_checks::shader_cache();
 #endif
     mods::log_startup();
     // test aid: WWHD_TEST_HOST_CRASH=1 crashes inside a system library (strlen of a bad pointer), so

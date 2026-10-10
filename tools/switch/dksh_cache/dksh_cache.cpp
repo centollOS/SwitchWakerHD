@@ -3,11 +3,14 @@
 // shadercache_dksh.bin (WDK1, runtime/src/gfx/deko/shader_files.h). Build: tools/switch/dksh_cache/build.sh.
 //
 //     dksh_cache build <shadercache_gl.bin> <shadercache_dksh.bin>
+//         [max MiB]: stop once the DKSH take that much code memory (the console has 64 MiB for all of its shaders)
 //         converts + compiles every source (one thread: uam is not reentrant), writes the WDK1 file, reads it
 //         back and prints counts, failures (grouped by their first error line), times and the file size
-//     dksh_cache coverage <console shadercache_gl.bin> <harvest shadercache_gl.bin>
+//     dksh_cache coverage <console shadercache_gl.bin> <harvest shadercache_gl.bin | built shadercache_dksh.bin>
 //         how many of the console's sources (and linked pairs) the harvest has, by WGS1 hash: the hit rate an
 //         offline cache built from the harvest would have had on that console
+//     dksh_cache translate <shader_manifest.bin> <programs.bin> <shadercache_gl.bin> [<reference shadercache_dksh.bin>]
+//         a console's shader manifest translated again from the player's dump (translate.cpp)
 //     dksh_cache dump <shadercache_dksh.bin> <dir>
 //         writes each record's DKSH to <dir>/<hash>_vs.dksh or _ps.dksh (comparisons with the uam CLI)
 #include <algorithm>
@@ -70,16 +73,27 @@ double pct(const std::vector<double>& sorted, double p) {
     return sorted.empty() ? 0 : sorted[std::min(sorted.size() - 1, size_t(sorted.size() * p))];
 }
 
-int build(const char* in, const char* out) {
+// maxMiB: the code memory the records' DKSH may take at most (aligned as code_load places them; 0: no limit). The
+// console loads every record into its 64 MiB of shader code memory at start-up, and what it compiles later goes
+// there too, so a cache built from a manifest's speculative variants must leave room: sources are taken in the
+// file's order (translate writes the recorded variants first) until the budget is used.
+constexpr size_t kCodeAlignment = 0x100;  // deko3d's DK_SHADER_CODE_ALIGNMENT: where code_load places each DKSH
+int build(const char* in, const char* out, double maxMiB = 0) {
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<Wgs1Source> src = load_wgs1(in);
     const uint64_t uamId = dksh_uam_id();
     std::vector<uint8_t> file = wdk1_header(uamId);
     std::map<std::string, std::pair<int, uint64_t>> failures;  // first error -> count, an example hash
     std::vector<double> ms;
-    size_t ok = 0, vs = 0, dkshBytes = 0, convertFail = 0, compileFail = 0;
+    size_t ok = 0, vs = 0, dkshBytes = 0, convertFail = 0, compileFail = 0, codeBytes = 0, leftOut = 0;
+    const size_t budget = maxMiB > 0 ? size_t(maxMiB * 1048576.0) : SIZE_MAX;
     uam::init(true);
     for (size_t i = 0; i < src.size(); i++) {
+        if (codeBytes >= budget) {
+            leftOut = src.size() - i;
+            src.resize(i);
+            break;
+        }
         const Wgs1Source& s = src[i];
         DkshRecord r;
         r.stage = uint8_t(s.vertex ? uam::Stage::Vertex : uam::Stage::Fragment);
@@ -97,6 +111,7 @@ int build(const char* in, const char* out) {
             uam::Result res = uam::compile(s.vertex ? uam::Stage::Vertex : uam::Stage::Fragment, glsl.c_str());
             ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count());
             if (res.ok && !res.dksh.empty()) {
+                codeBytes += (res.dksh.size() + kCodeAlignment - 1) & ~(kCodeAlignment - 1);
                 r.dksh = std::move(res.dksh);
                 dkshBytes += r.dksh.size();
                 ok++;
@@ -133,6 +148,8 @@ int build(const char* in, const char* out) {
     for (double x : ms) sum += x;
     printf("%s: %zu sources (%zu vertex, %zu pixel)\n", in, src.size(), vs, src.size() - vs);
     printf("compiled %zu / %zu; failed: %zu in glsl_to_deko, %zu in uam\n", ok, src.size(), convertFail, compileFail);
+    if (maxMiB > 0)
+        printf("code memory: %.2f MiB of the %.1f MiB budget; %zu sources left out\n", codeBytes / 1048576.0, maxMiB, leftOut);
     for (auto& [why, f] : failures)
         printf("  %5d x %s (e.g. %016llx)\n", f.first, why.c_str(), (unsigned long long)f.second);
     printf("uam per shader: mean %.1f ms, p50 %.1f, p90 %.1f, p99 %.1f, max %.1f; compile sum %.1f s, wall %.1f s\n",
@@ -147,9 +164,26 @@ int build(const char* in, const char* out) {
 
 int coverage(const char* console, const char* harvest) {
     std::vector<std::pair<uint64_t, uint64_t>> cPairs, hPairs;
-    std::vector<Wgs1Source> c = load_wgs1(console, &cPairs), h = load_wgs1(harvest, &hPairs);
+    std::vector<Wgs1Source> c = load_wgs1(console, &cPairs);
     std::unordered_set<uint64_t> have;
-    for (auto& s : h) have.insert(s.hash);
+    size_t hSize = 0;
+    std::vector<uint8_t> hData = read_file(harvest);
+    if (hData.size() >= 4 && !memcmp(hData.data(), "WDK1", 4)) {  // a built cache: the shaders it holds compiled
+        std::vector<DkshRecord> recs;
+        uint64_t id = 0;
+        std::string err;
+        if (!read_wdk1(hData, &recs, &id, &err)) {
+            fprintf(stderr, "%s: %s\n", harvest, err.c_str());
+            return 1;
+        }
+        for (const DkshRecord& r : recs)
+            if (!r.dksh.empty()) have.insert(r.glslHash);
+        hSize = have.size();
+    } else {
+        std::vector<Wgs1Source> h = load_wgs1(harvest, &hPairs);
+        for (auto& s : h) have.insert(s.hash);
+        hSize = h.size();
+    }
     size_t hit[2] = {}, total[2] = {};
     std::vector<uint64_t> missing;
     for (auto& s : c) {
@@ -169,7 +203,7 @@ int coverage(const char* console, const char* harvest) {
     auto rate = [](size_t a, size_t b) { return b ? 100.0 * a / b : 0.0; };
     printf("console %s: %zu sources (%zu vertex, %zu pixel), %zu distinct pairs\n", console, all, total[1], total[0],
            pairTotal);
-    printf("harvest %s: %zu sources\n", harvest, h.size());
+    printf("harvest %s: %zu sources\n", harvest, hSize);
     printf("sources in the harvest: %zu / %zu = %.1f%% (vertex %zu / %zu = %.1f%%, pixel %zu / %zu = %.1f%%)\n", allHit,
            all, rate(allHit, all), hit[1], total[1], rate(hit[1], total[1]), hit[0], total[0], rate(hit[0], total[0]));
     printf("expected miss rate of the offline cache: %.1f%% of sources (%zu)\n", 100 - rate(allHit, all),
@@ -203,10 +237,14 @@ int dump(const char* in, const char* dir) {
 }
 }  // namespace
 
+int translate(const char* manifest, const char* programs, const char* out, const char* reference);  // translate.cpp
+
 int main(int argc, char** argv) {
-    if (argc == 4 && !strcmp(argv[1], "build")) return build(argv[2], argv[3]);
+    if ((argc == 4 || argc == 5) && !strcmp(argv[1], "build")) return build(argv[2], argv[3], argc == 5 ? atof(argv[4]) : 0);
     if (argc == 4 && !strcmp(argv[1], "coverage")) return coverage(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "dump")) return dump(argv[2], argv[3]);
+    if ((argc == 5 || argc == 6) && !strcmp(argv[1], "translate"))
+        return translate(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : nullptr);
     fprintf(stderr,
             "usage: dksh_cache build <shadercache_gl.bin> <shadercache_dksh.bin>\n"
             "       dksh_cache coverage <console shadercache_gl.bin> <harvest shadercache_gl.bin>\n"

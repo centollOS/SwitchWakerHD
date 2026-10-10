@@ -56,19 +56,22 @@ checked, readable errors). Details, architecture and the history of the port:
 ### The shader cache
 
 The renderer compiles each game shader with uam the first time it is drawn (about 70 ms on the
-console, in a background thread; the object it draws appears a few frames late) and keeps the
-result in `shadercache_dksh_local.bin`, so a shader is compiled once per console. To start without
-those first-time hitches, `tools/switch/dksh_cache` compiles a whole list of shaders on the
-computer into `shadercache_dksh.bin`:
+console, in a background thread; until then its draws are skipped, so on a first start some textures
+stay black for a while) and keeps the result in `shadercache_dksh_local.bin`, so a shader is compiled
+once per console. A `shadercache_dksh.bin` next to the NRO is loaded whole at start-up.
+
+The console writes `shader_manifest.bin` as it plays: for each shader variant, the program's hash and
+size, the GPU registers and the vertex fetch layout it was translated with (identifiers, no game code).
+`make_sd.py --shaders shader_manifest.bin` builds `shadercache_dksh.bin` from it on the computer: the
+programs come from the player's own dump (every shader archive, with upstream's `tools/shaderprep.py`
+extractor), `tools/switch/dksh_cache translate` runs the same Latte decompiler as the runtime (the result
+is byte-identical to the console's), and speculative variants (programs of the same family with the
+recorded states) cover places not visited yet. Details and measurements:
+[docs/shader-cache-from-dump-plan.md](docs/shader-cache-from-dump-plan.md). Neither file is ever shipped.
 
 ```sh
-tools/switch/dksh_cache/build.sh build <shadercache_gl.bin> build/shadercache_dksh.bin
+tools/switch/dksh_cache/build.sh build <shadercache_gl.bin> build/shadercache_dksh.bin   # a GLSL list, as before
 ```
-
-`shadercache_gl.bin` is the list of shader sources the console writes as it plays
-(`sdmc:/switch/wwhd/`); copy it back to the computer from time to time. A complete list was made by
-touring every stage with a headless desktop build that was removed with the OpenGL renderer (in git
-history at `207349b`; [docs/switch-port.md](docs/switch-port.md), "Harvesting the shader cache").
 
 ### Debug server (developers)
 

@@ -18,7 +18,10 @@ usage:
   make_sd.py --wua GAME.wua [--out DIR]       a Cemu Wii U archive (no keys; needs: pip install zstandard)
   make_sd.py --game-dir EXTRACTED [--out DIR] a folder with code/, content/, meta/ (e.g. from Cemu's
                                               mlc01/usr/title/00050000/10143500 or 10143600, without the update)
-  options: --shaders shadercache_gl.bin       also compile a shader list into shadercache_dksh.bin
+  options: --shaders shader_manifest.bin      also build shadercache_dksh.bin from your console's shader manifest
+                                              (sdmc:/switch/wwhd/shader_manifest.bin, after playing a while): the
+                                              shaders you met, and guesses for the places you have not visited yet
+                                              (a shadercache_gl.bin is still accepted: its sources only)
            --jobs N                           parallel compiles (each needs ~1.5 GB of memory)
 
 Needs Python 3 with pycryptodome (only for --image: pip install pycryptodome) and Docker or Podman, or
@@ -45,10 +48,41 @@ def step(n, text):
     print("\n[%d/5] %s" % (n, text), flush=True)
 
 
-def run(cmd, env=None):
+def run(cmd, env=None, ok=(0,)):
     print("  $ " + " ".join(cmd), flush=True)
-    if subprocess.call(cmd, cwd=ROOT, env=env) != 0:
+    if subprocess.call(cmd, cwd=ROOT, env=env) not in ok:
         fail("this step failed (see the messages above)")
+
+
+# the shader cache's code budget: the console loads it whole into its 64 MiB of shader code memory (gfx/deko/dk.h),
+# and what it compiles later goes there too (tools/switch/dksh_cache build). A whole game harvested on the console took
+# 14 MiB: 24 MiB stay free.
+SHADER_CODE_MIB = "40"
+
+
+def shader_cache(src, game):
+    """build/shadercache_dksh.bin from the console's shader manifest (docs/shader-cache-from-dump-plan.md) or a
+    shadercache_gl.bin. The files in build/shader-cache/ hold game code: they stay on this computer."""
+    out = os.path.join(ROOT, "build", "shadercache_dksh.bin")
+    # natively when CMake, Ninja and a C++ compiler are there (on Windows devkitPro's MSYS2 ones: INSTALL.md), else in
+    # a container (tools/switch/dksh_cache/build.sh)
+    env = dict(os.environ)
+    shell = native_shell(env) if os.name == "nt" else ["bash"]
+    tool = shell + [os.path.join("tools", "switch", "dksh_cache", "build.sh")]
+    with open(src, "rb") as f:
+        manifest = f.read(4) == b"WSM1"
+    if not manifest:
+        run(tool + ["build", src, out], env=env)
+        return out
+    work = os.path.join(ROOT, "build", "shader-cache")
+    os.makedirs(work, exist_ok=True)
+    m, programs, gl = (os.path.join(work, n) for n in ("manifest.bin", "programs.bin", "shadercache_gl.bin"))
+    run([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "shader_manifest.py"), "speculate", src, game, m,
+         programs])
+    # (2: a few variants failed: speculative ones whose guessed state does not fit their program)
+    run(tool + ["translate", m, programs, gl], env=env, ok=(0, 2))
+    run(tool + ["build", gl, out, SHADER_CODE_MIB], env=env, ok=(0, 2))
+    return out
 
 
 # Native build (no Docker/Podman): used when neither is installed. On Windows it needs a devkitPro install
@@ -133,7 +167,8 @@ def main():
     src.add_argument("--wua", help="a Cemu Wii U archive (.wua; no keys needed)")
     src.add_argument("--game-dir", help="an extracted game folder (code/, content/, meta/)")
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "sd"), help="where the SD card folder goes")
-    ap.add_argument("--shaders", help="a shadercache_gl.bin from the console, compiled into shadercache_dksh.bin")
+    ap.add_argument("--shaders", help="your console's shader_manifest.bin (or a shadercache_gl.bin), compiled into "
+                                      "shadercache_dksh.bin")
     ap.add_argument("--jobs", type=int, help="parallel compiles")
     ap.add_argument("--keys", help="native build: your console's prod.keys, for the HOME-screen forwarder "
                     "(default: .switch\\prod.keys in your user folder; without it the forwarder is skipped)")
@@ -146,9 +181,6 @@ def main():
         if not native_toolchain_ok():
             fail("Docker or Podman is needed (the Switch toolchain runs in the devkitpro/devkita64 image), or "
                  "a native devkitPro with the Switch libraries: see INSTALL.md, \"Windows: devkitPro\"")
-        if args.shaders:
-            fail("--shaders needs Docker or Podman (tools/switch/dksh_cache runs in a container): "
-                 "leave it out on the native build")
 
     step(1, "the game files")
     if args.image:
@@ -187,8 +219,7 @@ def main():
         fail("the build made no %s" % nro)
     dksh = None
     if args.shaders:
-        dksh = os.path.join(ROOT, "build", "shadercache_dksh.bin")
-        run(["bash", os.path.join("tools", "switch", "dksh_cache", "build.sh"), "build", os.path.abspath(args.shaders), dksh])
+        dksh = shader_cache(os.path.abspath(args.shaders), game)
 
     step(5, "the SD card folder")
     out = os.path.abspath(args.out)
