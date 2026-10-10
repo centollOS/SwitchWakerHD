@@ -225,8 +225,13 @@ void sweep() {
     const double t0 = now();
     for (; i < list.size() && !g_stop; i++) {
         const Place& p = list[i];
-        char b[160];
-        snprintf(b, sizeof b, "Preparing graphics: %zu/%zu (%s). To stop: hold Minus, Switch tab.", i + 1, list.size(), p.stage);
+        char b[200], eta[48] = "";
+        if (done >= 5) {  // the minutes left, from this sweep's own pace
+            const double left = (now() - t0) / done * double(list.size() - i);
+            snprintf(eta, sizeof eta, ", about %.0f min left", left / 60 < 1 ? 1.0 : left / 60);
+        }
+        snprintf(b, sizeof b, "Preparing graphics: %zu of %zu (%s)%s. To stop: hold Minus, Switch tab.", i + 1,
+                 list.size(), p.stage, eta);
         set_status(b);
         request(p);
         const double asked = now();
@@ -275,7 +280,11 @@ void sweep() {
     const bool complete = i >= list.size();
     LOG("[prepare] %s: %zu places in %.0f min, %zu skipped", complete ? "complete" : "stopped", done, (now() - t0) / 60,
         skipped);
-    if (complete) write_index(0);
+    if (complete) {
+        write_index(0);
+        write_file(dir() + "/complete.txt", "1\n");  // progress().complete
+        write_file(dir() + "/announce.txt", "1\n");  // "Graphics ready" after the restart
+    }
     finish_and_restart(complete ? "complete" : "stopped (start it again to continue)");
 }
 
@@ -297,6 +306,29 @@ std::string start() {
 
 void stop() { g_stop = true; }
 bool running() { return g_running; }
+
+Progress progress() {
+    static const size_t total = places().size();
+    Progress p;
+    p.total = total;
+    p.next = read_index();
+    p.complete = access((dir() + "/complete.txt").c_str(), F_OK) == 0;
+    return p;
+}
+
+std::string screen_line() {
+    if (g_running) return status();
+    static const bool announce = [] {
+        const bool a = access((dir() + "/announce.txt").c_str(), F_OK) == 0;
+        if (a) remove((dir() + "/announce.txt").c_str());
+        return a;
+    }();
+    static double since = 0;  // from when the title screen shows (the restart's first picture)
+    if (!announce) return {};
+    if (since == 0 && at_title()) since = now();
+    if (since != 0 && now() - since < 12.0) return "Graphics ready: the whole game has been prepared on this console.";
+    return {};
+}
 std::string status() {
     std::lock_guard<std::mutex> lk(g_mu);
     return g_running ? g_status : std::string();

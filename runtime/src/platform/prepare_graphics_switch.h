@@ -15,5 +15,17 @@ bool running();
 std::string status();    // one line for the screen and the debug server ("" when not running)
 void startup();          // main.cpp, once: puts the Quest Log back if a sweep was cut (the game closed during it)
 void request_at_title(); // start by itself once the title screen shows (the first-start notice's choice)
+
+// for the menu (prepare_graphics_ui_switch.cpp)
+struct Progress {
+    size_t next = 0, total = 0;  // the next place to visit (0: from the start), of total
+    bool complete = false;       // a sweep reached the end once
+};
+Progress progress();
+// the line at the bottom of the screen: the progress while running, else for a few seconds after the restart that
+// ends a sweep, "Graphics ready" ("" otherwise)
+std::string screen_line();
+// the Switch tab's section; true when the menu should close (a sweep was started)
+bool ui_section();
 void frame();            // the game's main thread, every frame (interp.cpp, next to the cheats)
 }  // namespace prepare_graphics

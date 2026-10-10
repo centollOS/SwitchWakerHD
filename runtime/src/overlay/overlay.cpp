@@ -913,23 +913,8 @@ void tab_warp() {
 void save_gyro(const motion::Settings& g);
 void tab_switch() {
     using namespace switch_settings;
+    if (prepare_graphics::ui_section()) set_open(false);  // (this fork) platform/prepare_graphics_ui_switch.cpp
     // one picture profile per mode (as SwitchWaker): the one shown starts as the active mode's
-    // (this fork) Prepare graphics: platform/prepare_graphics_switch.h
-    heading("Prepare graphics");
-    if (prepare_graphics::running()) {
-        note("%s", prepare_graphics::status().c_str());
-        if (ImGui::Button("Stop preparing graphics")) prepare_graphics::stop();
-    } else {
-        note("Compiles the graphics of the whole game once, so that new places are not black or late the first "
-             "time: the game visits every place by itself (30-40 minutes, best docked) and then restarts. Your "
-             "Quest Log is left as it was. Needs a game in progress: yours, or a new game you do not save.");
-        static std::string why;
-        if (ImGui::Button("Prepare graphics")) {
-            why = prepare_graphics::start();
-            if (why.empty()) set_open(false);
-        }
-        if (!why.empty()) warn("%s", why.c_str());
-    }
     heading("Picture profile");
     static int edit = -1;
     const int active = active_mode();
@@ -2328,7 +2313,7 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
     // game for a few seconds while the menu is closed (the window title is not visible everywhere)
     std::string toast = open ? std::string() : ss::last_message();
 #ifdef __SWITCH__
-    if (!open && prepare_graphics::running()) toast = prepare_graphics::status();  // (this fork) its progress
+    if (!open && !prepare_graphics::screen_line().empty()) toast = prepare_graphics::screen_line();  // (this fork)
 #endif
     U.linearized = false;
     if (!open && !perf && !text && toast.empty()) {
