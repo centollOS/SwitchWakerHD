@@ -60,9 +60,14 @@ console, in a background thread; until then its draws are skipped, so on a first
 stay black for a while) and keeps the result in `shadercache_dksh_local.bin`, so a shader is compiled
 once per console. A `shadercache_dksh.bin` next to the NRO is loaded whole at start-up.
 
-**Prepare graphics** (settings menu, Switch tab; docs/prepare-graphics-plan.md) has the console warp through every
-place by itself and wait in each until its shaders are compiled (30-40 minutes, once): about 93% of the game's
-shaders, with no computer. The Quest Log is copied before and put back after, and the game restarts at the end.
+**The first start** (docs/background-shaders-plan.md) prepares about three quarters of the game's shaders behind a
+loading screen, with no computer and nothing shipped: the title screen runs hidden and records its GPU states into
+`shader_manifest.bin`, the console reads its own game files' shader programs (`platform/shader_scan_switch.cpp`,
+upstream shaderprep's extractor in C++), speculates variants by family (`shader_list_switch.cpp`) and translates
+them the way a draw would (`gfx/deko translate_listed`); the worker compiles them at full speed behind the card
+(about 19 minutes on a stock console: 73.6% of a whole-game harvest's shader pairs), or gently in the background
+after B (core 0 only, a 50% duty cycle: the game keeps ~30 fps). **Prepare graphics** (settings menu, Switch tab;
+docs/prepare-graphics-plan.md) warps through every place for the rest; experimental.
 
 For developers, the console also writes `shader_manifest.bin` as it plays: for each shader variant, the program's hash and
 size, the GPU registers and the vertex fetch layout it was translated with (identifiers, no game code).

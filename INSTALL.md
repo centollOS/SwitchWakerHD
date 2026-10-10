@@ -111,21 +111,21 @@ adjustments, frame-rate counter, controller (Pro Controller or GamePad), gyro ai
 the battery faster and warm the console. If sys-clk has its own profile for this title, the two fight
 over the clocks. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
 
-## Optional: graphics ready for the whole game (Prepare graphics)
+## The first start: preparing the graphics
 
-On the first start the console compiles each of the game's graphics effects the first time it is drawn, so some
-textures can look black for a while and some objects appear a moment late (in Outset, about the first minute); it gets
-better as you play, and what is compiled is kept. To have the whole game ready at once:
+The console compiles each of the game's graphics effects the first time it is drawn; until then a texture can look
+black or an object appear a moment late. So the **first start** shows a "Preparing the graphics" screen instead of the
+game: behind it the game boots and its title screen runs, then the console reads the graphics programs of your own
+copy of the game and compiles about three quarters of the game's graphics, about 20 minutes (best docked). Then the
+title screen. It happens once: what is compiled is kept.
 
-1. Start your game (your Quest Log, or a new game you do not save).
-2. Hold **Minus** for the settings menu, **Switch** tab, **Prepare graphics**.
-3. The game visits every place by itself and compiles what each one needs: 30 to 40 minutes, best docked. The
-   progress shows at the bottom of the screen; **Stop preparing graphics** in the same place stops it.
-4. At the end the game restarts. Your Quest Log is left exactly as it was (it is copied before and put back after).
+- **B** on that screen: play now. What is left goes on in the background while you play, gently (the frame rate
+  stays), and in the next starts if needed.
+- The rest of the game's graphics compile the first time they show, in a few seconds, once.
 
-If you stop it, close the game or turn the console off in the middle, what was compiled is kept and the next
-Prepare graphics continues where it stopped. On the owner's console this covers about 93% of the game's graphics; the
-rest compiles in a few seconds when you get there.
+Optional, in the settings menu (hold **Minus**, **Switch** tab): **Prepare graphics** has the game visit every place
+by itself (30-40 minutes, behind a loading screen) for the remaining quarter. It is experimental: some places start
+story events with its data and take longer.
 
 ## Updating
 
