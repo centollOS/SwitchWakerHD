@@ -67,9 +67,10 @@ title screen has shown for 4 s) or B: play now.
 
 - A game over stops the sweep (the next warp with Link dead stopped the game, c_xyz.cpp:285): Link's health is
   topped up every frame.
-- Warping out a few seconds after arriving (M2tower -> M_DaiB after 10 s, Xboss1 -> Xboss2) stopped the game the same
-  way: the next warp waits until Link has control for 1 s (the game's pause-menu conditions), at least 5 s, and
+- Warping out a few seconds after arriving (M2tower -> M_DaiB after 10 s) stopped the game the same way: the next warp waits until Link has control for 1 s (the game's pause-menu conditions), at least 5 s, and
   M2tower stays 12 s.
+- Xboss1 -> Xboss2 (after 12 s there) crashed in the game's audio thread (JASThread, data abort), not the c_xyz
+  assert; that build's ELF was overwritten, so not symbolized. Open: watch for it again.
 - The Quest Log files were put back byte-identical after a cut sweep (the game closed), and the sweep continued where
   it stopped.
 - About 12 s a place with nothing to wait for; ~25-35 min for the 127 places.
