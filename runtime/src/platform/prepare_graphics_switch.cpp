@@ -31,6 +31,7 @@
 
 #include "../mods/mods.h"
 #include "../mods/warps.h"
+#include "../overlay/hostui.h"
 #include "../rumble.h"
 #include "../runtime.h"
 #include "guest_addr.h"
@@ -261,7 +262,8 @@ void watch_stop_button() {
 }
 
 void console_quiet(bool on) {
-    appletSetAutoSleepDisabled(on);
+    std::string debugServer;  // (platform/debug_switch.cpp keeps auto-sleep off while its server runs)
+    if (on || !hostui::get("switchDebugServer", debugServer) || debugServer != "1") appletSetAutoSleepDisabled(on);
     appletSetMediaPlaybackState(on);
     if (on) {
         if (R_FAILED(audoutGetAudioOutVolume(&g_volume))) g_volume = 1.0f;

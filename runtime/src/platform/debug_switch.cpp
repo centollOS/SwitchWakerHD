@@ -195,6 +195,9 @@ void start() {
     std::string on;
     if (!hostui::get(switch_settings::kKeyDebugServer, on) || on != "1") return;
     g_port = kPort;
+    // a console under test from the computer is often left alone for minutes: no auto-sleep while the server runs
+    appletSetAutoSleepDisabled(true);
+    LOG("[debug] auto-sleep off while the debug server runs");
     debugsrv::add_command("info", "info                   build, frame, stage, heap, address", info);
     debugsrv::add_command("warps", "warps                  the warp destinations, numbered", warps);
     debugsrv::add_command("warp", "warp <n> | warp <stage> [room] [point]", warp);
