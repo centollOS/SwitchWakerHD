@@ -10,6 +10,7 @@
 // matches the console's exactly only when the translation is the same.
 #include <zlib.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -22,6 +23,7 @@
 
 #include "Cafe/HW/Latte/Core/FetchShader.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
+#include "Cafe/HW/Latte/ISA/LatteReg.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
 #include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
@@ -221,9 +223,9 @@ int translate(const char* manifestPath, const char* programsPath, const char* ou
     }
     fwrite("WGS1", 1, 4, out);
     std::unordered_set<uint64_t> written;
-    size_t noProgram = 0, failed = 0, translated = 0, inReference = 0;
+    size_t noProgram = 0, failed = 0, translated = 0, inReference = 0, cubeFixed = 0;
     std::vector<uint32_t> regs(kNumRegs);
-    for (const Variant& v : variants) {
+    for (Variant& v : variants) {
         auto it = programs.find({v.programHash, v.programSize});
         if (it == programs.end()) {
             noProgram++;
@@ -244,19 +246,50 @@ int translate(const char* manifestPath, const char* programsPath, const char* ou
         }
         std::vector<uint8_t> program = it->second;  // (the decompiler may read it as words: an aligned copy)
         const uint64_t base = v.programHash ^ (v.vertex ? 0x1111 : 0x2222);
-        LatteShader_UpdatePSInputs(regs.data());
-        LatteDecompilerOptions options;
-        LatteDecompilerOutput_t output{};
-        if (v.vertex)
-            LatteDecompiler_DecompileVertexShader(base, regs.data(), program.data(), v.programSize, fetch, options, &output);
-        else
-            LatteDecompiler_DecompilePixelShader(base, regs.data(), program.data(), v.programSize, options, &output);
-        if (!output.shader || output.shader->hasError || !output.shader->strBuf_shaderSource) {
+        auto decompile = [&](std::string& glsl) {
+            LatteShader_UpdatePSInputs(regs.data());
+            LatteDecompilerOptions options;
+            LatteDecompilerOutput_t output{};
+            if (v.vertex)
+                LatteDecompiler_DecompileVertexShader(base, regs.data(), program.data(), v.programSize, fetch, options,
+                                                      &output);
+            else
+                LatteDecompiler_DecompilePixelShader(base, regs.data(), program.data(), v.programSize, options, &output);
+            if (!output.shader || output.shader->hasError || !output.shader->strBuf_shaderSource) return false;
+            glsl = FinishDecompiledShader(output)->strBuf_shaderSource->c_str();
+            return true;
+        };
+        std::string glsl;
+        if (!decompile(glsl)) {
             failed++;
             continue;
         }
-        LatteDecompilerShader* dec = FinishDecompiledShader(output);
-        const std::string glsl = dec->strBuf_shaderSource->c_str();
+        // a guessed state (shader_manifest.py speculate) takes its textures from another program's: a program that
+        // reads a unit as a cube map (SET_CUBEMAP_INDEX) may find a 2D texture there, and the GLSL uses a
+        // cubeMapArrayIndexN it never declares (uam rejects it). The game binds a cube map to that unit, so the
+        // variant it makes has the unit's dimension set to one: translated again that way
+        bool cube = false;
+        for (uint32_t unit = 0; unit < Latte::GPU_LIMITS::NUM_TEXTURES_PER_STAGE; unit++) {
+            const std::string name = "cubeMapArrayIndex" + std::to_string(unit);
+            if (glsl.find(name + " =") == std::string::npos || glsl.find("float " + name + " ") != std::string::npos)
+                continue;
+            const uint32_t word0 = (v.vertex ? Latte::REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS
+                                             : Latte::REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS) + unit * 7;
+            cube = true;
+            for (auto& [i, value] : v.regs)
+                if (i == word0) value = (value & ~7u) | uint32_t(Latte::E_DIM::DIM_CUBEMAP);
+            if (!std::any_of(v.regs.begin(), v.regs.end(), [&](auto& r) { return r.first == word0; }))
+                v.regs.emplace_back(word0, uint32_t(Latte::E_DIM::DIM_CUBEMAP));
+        }
+        if (cube) {
+            std::fill(regs.begin(), regs.end(), 0);
+            for (auto& [i, value] : v.regs) regs[i] = value;
+            if (!decompile(glsl)) {
+                failed++;
+                continue;
+            }
+            cubeFixed++;
+        }
         const uint64_t hash = hash_bytes(glsl.data(), glsl.size(), v.vertex ? 0x1111 : 0x2222);
         translated++;
         if (!written.insert(hash).second) continue;
@@ -274,8 +307,8 @@ int translate(const char* manifestPath, const char* programsPath, const char* ou
     }
     fclose(out);
     printf("%zu variants: %zu translated (%zu distinct GLSL sources written to %s), %zu without their program in the "
-           "dump, %zu failed\n",
-           variants.size(), translated, written.size(), outPath, noProgram, failed);
+           "dump, %zu failed; %zu guessed with a cube map unit\n",
+           variants.size(), translated, written.size(), outPath, noProgram, failed, cubeFixed);
     if (referencePath)
         printf("%zu of the %zu sources are in %s (the console's translation gave the same GLSL)\n", inReference,
                written.size(), referencePath);
