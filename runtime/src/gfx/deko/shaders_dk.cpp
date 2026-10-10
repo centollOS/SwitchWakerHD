@@ -117,6 +117,13 @@ uint64_t g_strictMulLogged = 0;  // vertex shaders translated with strict multip
 // comparisons).
 int g_loadBudget = 64;
 bool g_waitForWorker = false;
+// WWHD_DK_SHADER_BOOT_WAIT: at start-up draws wait for their shaders too, until the first frame with that many
+// draws (default 40). The game draws a few things once before the title screen and uses them the whole session
+// (a 640x360 target the shadows need): skipped for a shader still compiling (no cache yet), every shadow stayed
+// black until the game was closed. The logos draw ~20-35 a frame; the title screen ~950, whose shaders (~250,
+// ~18 s) must not all wait: only its first 40 draws do. 0 = never.
+uint64_t g_bootWaitDraws = 40;
+uint64_t g_bootDraws = 0;  // in this frame
 
 // ---- hashes (as gfx/gl/shaders.cpp: the same keys and the same GLSL hashes)
 uint64_t hash_bytes(const void* bytes, size_t size, uint64_t hash = 0x9E3779B97F4A7C15ull) {
@@ -1131,6 +1138,13 @@ void shader_wanted(Shader* sh) {
     }
 }
 
+void shaders_draw_seen() {
+    if (!g_bootWaitDraws || ++g_bootDraws < g_bootWaitDraws) return;
+    g_bootWaitDraws = 0;
+    g_waitForWorker = false;
+    LOG("[dk] start-up shader wait over (a frame with %llu draws)", (unsigned long long)g_bootDraws);
+}
+
 void reset_shader_memoization() {
     programHashes.clear();
     g_lastVs = g_lastPs = nullptr;
@@ -1148,7 +1162,14 @@ void shaders_init(void (*progress)(size_t done, size_t total)) {
             g_waitForWorker = g_loadBudget <= 0;
             if (g_loadBudget <= 0) g_loadBudget = 1 << 30;
         }
-        if (g_waitForWorker)
+        if (const char* b = getenv("WWHD_DK_SHADER_BOOT_WAIT"); b && *b) g_bootWaitDraws = strtoull(b, nullptr, 10);
+        if (g_waitForWorker) g_bootWaitDraws = 0;
+        else if (g_bootWaitDraws) {
+            g_waitForWorker = true;
+            LOG("[dk] start-up: draws wait for their shaders until a frame has %llu draws (one-time start-up draws; "
+                "WWHD_DK_SHADER_BOOT_WAIT)", (unsigned long long)g_bootWaitDraws);
+        }
+        if (g_waitForWorker && !g_bootWaitDraws)
             LOG("[dk] shader budget off (WWHD_DK_SHADER_BUDGET=0): a draw whose shader is new waits for the compiler");
         else
             LOG("[dk] shader budget: draws of shaders the compiler has not finished are skipped; up to %d DKSH loads "
@@ -1367,6 +1388,7 @@ void shaders_init(void (*progress)(size_t done, size_t total)) {
 }
 
 void shaders_frame_start() {
+    g_bootDraws = 0;
     update_priorities();
     load_results(size_t(g_loadBudget));
     log_total();
