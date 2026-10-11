@@ -30,6 +30,8 @@ $S = @{
         py_pkgs          = 'Instalando dependencias Python (zstandard, pycryptodome)...'
         py_pkgs_ok       = 'Dependencias Python instaladas.'
         dkp_already      = 'devkitPro ya esta instalado.'
+        dkp_searching    = 'Buscando dkp-pacman en C:\devkitPro...'
+        dkp_found_at     = 'dkp-pacman encontrado en: {0}'
         dkp_downloading  = 'Descargando instalador de devkitPro v3.0.3...'
         dkp_verifying    = 'Verificando integridad del instalador...'
         dkp_verified     = 'Integridad verificada.'
@@ -124,6 +126,8 @@ $S = @{
         py_pkgs          = 'Installing Python dependencies (zstandard, pycryptodome)...'
         py_pkgs_ok       = 'Python dependencies installed.'
         dkp_already      = 'devkitPro is already installed.'
+        dkp_searching    = 'Searching for dkp-pacman in C:\devkitPro...'
+        dkp_found_at     = 'dkp-pacman found at: {0}'
         dkp_downloading  = 'Downloading devkitPro installer v3.0.3...'
         dkp_verifying    = 'Verifying installer integrity...'
         dkp_verified     = 'Integrity verified.'
@@ -311,11 +315,30 @@ Write-OK (T 'py_pkgs_ok')
 Write-Section '2/5' (T 'sec_devkit')
 
 $DevkitRoot      = 'C:\devkitPro'
-$DkpPacman       = "$DevkitRoot\devkitpro-pacman\bin\dkp-pacman.exe"
 $DevkitInstaller = "$WorkDir\devkitProInstaller.exe"
 $DevkitSHA256    = '038a99dc84f1ca0b52e9e0e074a94a3b0672e6d7bf0988563f0ab0812dcbb38d'
 
-if (-not (Test-Path $DkpPacman)) {
+# Searches for dkp-pacman / pacman under the devkitPro root; returns path or $null.
+function Find-DkpPacman([string]$root) {
+    $candidates = @(
+        "$root\devkitpro-pacman\bin\dkp-pacman.exe",
+        "$root\devkitpro-pacman\usr\bin\pacman.exe",
+        "$root\msys2\usr\bin\pacman.exe",
+        "$root\pacman\usr\bin\pacman.exe"
+    )
+    foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
+    # Recursive fallback — dkp-pacman first, then any pacman
+    foreach ($name in @('dkp-pacman.exe', 'pacman.exe')) {
+        $hit = Get-ChildItem $root -Recurse -Filter $name -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+        if ($hit) { return $hit.FullName }
+    }
+    return $null
+}
+
+$DkpPacman = Find-DkpPacman $DevkitRoot
+
+if (-not $DkpPacman) {
     Write-Step (T 'dkp_downloading')
     Get-FileFromWeb `
         'https://github.com/devkitPro/installer/releases/download/v3.0.3/devkitProUpdater-3.0.3.exe' `
@@ -336,20 +359,25 @@ if (-not (Test-Path $DkpPacman)) {
     $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
                 [System.Environment]::GetEnvironmentVariable('Path','User')
 
-    if (-not (Test-Path $DkpPacman)) {
-        Write-Host ''
+    # Search again after install
+    Write-Step (T 'dkp_searching')
+    $DkpPacman = Find-DkpPacman $DevkitRoot
+
+    if (-not $DkpPacman) {
         Write-Warn (T 'dkp_manual')
         Write-Host (T 'dkp_press_done') -ForegroundColor Cyan
         $null = Read-Host
         $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
                     [System.Environment]::GetEnvironmentVariable('Path','User')
+        $DkpPacman = Find-DkpPacman $DevkitRoot
     }
 }
 else {
     Write-OK (T 'dkp_already')
 }
 
-if (-not (Test-Path $DkpPacman)) { Exit-WithError (T 'dkp_not_found' $DkpPacman) }
+if (-not $DkpPacman) { Exit-WithError (T 'dkp_not_found' $DevkitRoot) }
+Write-OK (T 'dkp_found_at' $DkpPacman)
 
 Write-Step (T 'dkp_installing')
 $env:DEVKITPRO = $DevkitRoot
