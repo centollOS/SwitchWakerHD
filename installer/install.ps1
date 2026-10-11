@@ -458,15 +458,13 @@ Write-Host (T 'game_opt2') -ForegroundColor White
 Write-Host (T 'game_opt3') -ForegroundColor White
 Write-Host ''
 Write-Host (T 'game_prompt') -ForegroundColor White -NoNewline
-Write-Host ' ' -NoNewline
-$choice = (Read-Host).Trim()
-
-Add-Type -AssemblyName System.Windows.Forms
+Write-Host ': ' -NoNewline
+$choice = ([Console]::ReadLine()).Trim()
 
 $gamePath = $null
 $buildArg = $null
 
-switch ($choice.Trim()) {
+switch ($choice) {
     '1' {
         $dlg = New-Object System.Windows.Forms.OpenFileDialog
         $dlg.Title  = T 'dlg_title_img'
@@ -486,8 +484,9 @@ switch ($choice.Trim()) {
     '3' {
         Write-Host ''
         Write-Host (T 'dlg_type_path') -ForegroundColor Gray
-        $typed    = Read-Host '  >'
-        $gamePath = $typed.Trim().Trim('"').Trim("'")
+        Write-Host '  > ' -NoNewline
+        $typed    = ([Console]::ReadLine()).Trim().Trim('"').Trim("'")
+        $gamePath = $typed
         $buildArg = '--game-dir'
     }
     default { Exit-WithError (T 'game_invalid') }
@@ -527,8 +526,8 @@ Write-Host (T 'sd_header') -ForegroundColor White
 Write-Host (T 'sd_hint')   -ForegroundColor Gray
 Write-Host ''
 Write-Host (T 'sd_prompt') -ForegroundColor White -NoNewline
-Write-Host ' ' -NoNewline
-$sdLetter = (Read-Host).Trim()
+Write-Host ': ' -NoNewline
+$sdLetter = ([Console]::ReadLine()).Trim()
 
 if ($sdLetter -match '^[A-Za-z]$') {
     $sdDrive = "$($sdLetter.ToUpper()):"
