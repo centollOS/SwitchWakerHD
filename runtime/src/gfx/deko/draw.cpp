@@ -184,6 +184,7 @@ void sync_cache() {
 // ---- trace switches (as gfx/gl): WWHD_DK_TRACE_DRAWS logs every draw of a traced frame
 const bool g_traceDraws = env_switch("TRACE_DRAWS", false);
 std::string g_traceTextures;  // the textures of the draw being prepared
+std::string g_traceVertices;  // (traced draws) the first two vertices of each vertex stream, guest bytes
 uint32_t g_frameDraws = 0;    // draws executed in the frame being recorded: the trace's and captures' #n
 
 // the draw being prepared: renders the GamePad picture; its targets' internal resolution
@@ -1500,6 +1501,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }
     sync_draw_begin();
     g_traceTextures.clear();
+    g_traceVertices.clear();
     if (g_capture) capture_draw_begin();
     lap.sub(g_res.targetNs);  // (the scissor)
     if (depthOnly) stages[kPixelStage].texMask = stages[kPixelStage].uboMask = 0;
@@ -1791,9 +1793,12 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         bool constantColor = false;
         for (uint32_t i = 0; i < 8; i++) {
             if (!colors[i]) continue;  // (a gap: mask 0)
-            dkColorWriteStateSetMask(&cw, i, (r[REGADDR::CB_TARGET_MASK] >> (4 * i)) & 15);
+            uint32_t mask = (r[REGADDR::CB_TARGET_MASK] >> (4 * i)) & 15;
             const bool on = colors[i]->fmt.kind == FormatInfo::FLOAT && ((r[REGADDR::CB_COLOR_CONTROL] >> (8 + i)) & 1);
-            if (!on) continue;
+            if (!on) {
+                dkColorWriteStateSetMask(&cw, i, mask);
+                continue;
+            }
             dkColorStateSetBlendEnable(&cs, i, true);
             LATTE_CB_BLENDN_CONTROL b;
             memcpy((void*)&b, r + REGADDR::CB_BLEND0_CONTROL + i, 4);
@@ -1809,6 +1814,37 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             for (DkBlendFactor f : {DkBlendFactor(bs.srcColorBlendFactor), DkBlendFactor(bs.dstColorBlendFactor),
                                      DkBlendFactor(bs.srcAlphaBlendFactor), DkBlendFactor(bs.dstAlphaBlendFactor)})
                 constantColor |= constant_factor(f);
+            // deko3d 0.5.0's dkCmdBufBindBlendStates writes the color destination factor as the alpha one too
+            // (gpu_3d_state.cpp FuncAlphaDst; issue #12: the place names' alpha-only draw left the target's alpha
+            // as it was, and the scratch pattern over the name, blended by that alpha, covered the letters). When
+            // one part leaves the target as it is (ZERO, ONE), that part's channels are masked off and the other
+            // part's factors serve both.
+            if (bs.dstAlphaBlendFactor != bs.dstColorBlendFactor) {
+                auto keeps = [](DkBlendFactor src, DkBlendFactor dst, DkBlendOp op) {
+                    return src == DkBlendFactor_Zero && dst == DkBlendFactor_One &&
+                           (op == DkBlendOp_Add || op == DkBlendOp_RevSub);
+                };
+                if (keeps(DkBlendFactor(bs.srcColorBlendFactor), DkBlendFactor(bs.dstColorBlendFactor),
+                          DkBlendOp(bs.colorBlendOp))) {
+                    bs.srcColorBlendFactor = bs.srcAlphaBlendFactor;
+                    bs.dstColorBlendFactor = bs.dstAlphaBlendFactor;
+                    bs.colorBlendOp = bs.alphaBlendOp;
+                    mask &= 8;
+                } else if (keeps(DkBlendFactor(bs.srcAlphaBlendFactor), DkBlendFactor(bs.dstAlphaBlendFactor),
+                                 DkBlendOp(bs.alphaBlendOp))) {
+                    bs.srcAlphaBlendFactor = bs.srcColorBlendFactor;
+                    bs.dstAlphaBlendFactor = bs.dstColorBlendFactor;
+                    bs.alphaBlendOp = bs.colorBlendOp;
+                    mask &= 7;
+                } else {
+                    char t[48];
+                    snprintf(t, sizeof t, "%08X", r[REGADDR::CB_BLEND0_CONTROL + i]);
+                    log_once(0xB1E0000000ull | r[REGADDR::CB_BLEND0_CONTROL + i],
+                             "[dk] blend %s: its alpha destination factor differs from the color one (deko3d uses the "
+                             "color one for both)", t);
+                }
+            }
+            dkColorWriteStateSetMask(&cw, i, mask);
             if (!(gs.blendKnown & (1u << i)) || !same_bytes(gs.blend[i], bs)) {
                 dkCmdBufBindBlendStates(R.cmd, i, &bs, 1);
                 gs.blend[i] = bs;
@@ -1882,6 +1918,17 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             return;
         }
         R.perf.vertexBytes += g.copied - skipBytes;
+        if (g_traceFrame && (g_traceDraws || g_captureDraws) && g.stride) {
+            char t[48];
+            snprintf(t, sizeof t, " vb%u@%08X stride %u:", g.index, g.addr, g.stride);
+            g_traceVertices += t;
+            const uint64_t first = g.instance ? 0 : firstVertex * g.stride;
+            for (uint64_t b = first; b < std::min<uint64_t>(first + 2ull * g.stride, g.size); b++) {
+                snprintf(t, sizeof t, "%s%02X", (b - first) % g.stride ? "" : " ",
+                         *static_cast<const uint8_t*>(ppc_ptr(g.addr + uint32_t(b))));
+                g_traceVertices += t;
+            }
+        }
         while (bufferCount <= g.index) bufferStates[bufferCount++] = {0, 0};
         bufferStates[g.index] = {g.stride, g.instance ? 1u : 0u};
         vtx[g.index] = {slice.gpu, slice.size};
@@ -1973,9 +2020,25 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
                 uint32_t(tdc.get_STENCIL_ENABLE()), (r[REGADDR::PA_SU_SC_MODE_CNTL] >> 11) & 1,
                 f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE]) / 16, f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET]),
                 r[REGADDR::CB_BLEND0_CONTROL], r[REGADDR::CB_TARGET_MASK], trim, g_traceTextures.c_str());
+            // the remapped register constants each stage reads (as pack_uniforms copies them), as floats
+            std::string uniforms;
+            for (Shader* sh : {vs, ps}) {
+                if (!sh->dec) continue;
+                const uint32_t aluBase = mmSQ_ALU_CONSTANT0_0 + (sh->vertex ? 0x400 : 0);
+                for (const auto& e : sh->dec->list_remappedUniformEntries_register) {
+                    const uint32_t* c = r + aluBase + e.indexOffset / 4;
+                    char t[96];
+                    snprintf(t, sizeof t, " %s[%u]=(%g %g %g %g)", sh->vertex ? "vs" : "ps", e.mappedIndexOffset / 16,
+                             f32(c[0]), f32(c[1]), f32(c[2]), f32(c[3]));
+                    uniforms += t;
+                }
+                if (!sh->dec->list_remappedUniformEntries_bufferGroups.empty()) uniforms += sh->vertex ? " vs+blocks" : " ps+blocks";
+            }
+            LOG("[trace]   draw #%u uniforms%s; vertices%s", drawIndex, uniforms.c_str(), g_traceVertices.c_str());
         }
     }
     g_traceTextures.clear();
+    g_traceVertices.clear();
     R.drawCount++;
 }
 }  // namespace
