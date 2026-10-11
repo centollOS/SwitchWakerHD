@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -186,6 +187,38 @@ debugsrv::Reply dspguard(const debugsrv::Args& a) {
     return debugsrv::ok(std::string("dspguard ") + (audio_guard::kept() ? "the game's own" : "off"));
 }
 
+// "stall <ms> [core] [count] [gap ms]": a host thread above every game thread spins on a core, as
+// the hitches that set off the game's "kill DSP channel" (issue #13) do; to test the guard at will
+Thread g_stallThread;
+std::atomic<bool> g_stalling{false};
+int g_stallMs = 0, g_stallCount = 0, g_stallGapMs = 0;
+
+void stall_main(void*) {
+    for (int i = 0; i < g_stallCount; ++i) {
+        const uint64_t end = armGetSystemTick() + armNsToTicks(uint64_t(g_stallMs) * 1000000);
+        while (armGetSystemTick() < end) {}
+        if (i + 1 < g_stallCount) svcSleepThread(int64_t(g_stallGapMs) * 1000000);
+    }
+    g_stalling = false;
+}
+
+debugsrv::Reply stall(const debugsrv::Args& a) {
+    if (a.empty()) return debugsrv::err("stall <ms> [core] [count] [gap ms]");
+    if (g_stalling.exchange(true)) return debugsrv::err("a stall is running");
+    if (g_stallThread.handle) threadClose(&g_stallThread);
+    g_stallMs = std::max(1, std::min(atoi(a[0].c_str()), 1000));
+    const int core = a.size() > 1 ? std::max(0, std::min(atoi(a[1].c_str()), 2)) : 0;
+    g_stallCount = a.size() > 2 ? std::max(1, std::min(atoi(a[2].c_str()), 1000)) : 1;
+    g_stallGapMs = a.size() > 3 ? std::max(0, std::min(atoi(a[3].c_str()), 10000)) : 1000;
+    if (R_FAILED(threadCreate(&g_stallThread, stall_main, nullptr, nullptr, 64 << 10, 0x20, core)) ||
+        R_FAILED(threadStart(&g_stallThread))) {
+        g_stalling = false;
+        return debugsrv::err("thread not started");
+    }
+    LOG("[debug] stall: %d ms on core %d, %d times, %d ms apart", g_stallMs, core, g_stallCount, g_stallGapMs);
+    return debugsrv::ok("stalling");
+}
+
 debugsrv::Reply quit(const debugsrv::Args&) {
     debugsrv::Reply r = debugsrv::ok("quitting");
     r.after = [] {
@@ -213,6 +246,7 @@ void start() {
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
+    debugsrv::add_command("stall", "stall <ms> [core] [n] [gap]  spin above the game threads (audio guard tests)", stall);
     debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);
     debugsrv::add_command("quit", "quit                   end the program", quit);
     debugsrv::Config c;
