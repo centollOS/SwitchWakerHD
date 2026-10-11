@@ -18,6 +18,10 @@ void set_fps_overlay_mode(int mode);
 // 16x anisotropic filtering on the game's mipmapped linear samplers (WWHD_ANISO): any thread, from the next frame
 bool aniso();
 void set_aniso(bool on);
+// the bloom chain and distance haze (issue #15): render targets sampled with more levels than they have get a mip
+// chain of the game's own rendered levels (gfx/deko mip_chain); on by default, WWHD_NO_RT_MIPS=1 off; any thread
+bool rt_mips();
+void set_rt_mips(bool on);
 float dynamic_res_scale();  // the internal resolution dynamic resolution has chosen (1 when off)
 // any thread: the internal resolution (the most dynamic resolution may use) and whether dynamic resolution
 // may lower it, from the next frame on (the handheld / docked profiles, platform/settings_switch.h)

@@ -181,6 +181,12 @@ debugsrv::Reply bgshaders(const debugsrv::Args& a) {
                                                                                        : background_shaders::status()));
 }
 
+// "rtmips [0|1]": the rendered mip chains (bloom, distance haze; gfxsw::set_rt_mips), not saved
+debugsrv::Reply rtmips(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_rt_mips(a[0] != "0");
+    return debugsrv::ok(std::string("rtmips ") + (gfxsw::rt_mips() ? "on" : "off"));
+}
+
 // "dspguard [0|1]": the game's DSP-overload guard (audio_guard_switch.h): 1 the game's own, 0 off (the default)
 debugsrv::Reply dspguard(const debugsrv::Args& a) {
     if (!a.empty()) audio_guard::set_kept(a[0] != "0");
@@ -254,6 +260,7 @@ void start() {
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
+    debugsrv::add_command("rtmips", "rtmips [0|1]           rendered mip chains (bloom, haze; not saved)", rtmips);
     debugsrv::add_command("stall", "stall <ms> [core] [n] [gap]  spin above the game threads (audio guard tests)", stall);
     debugsrv::add_command("evict", "evict [now | idle <n>] texture eviction: now, or after n unused frames", evict);
     debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);

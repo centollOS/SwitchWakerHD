@@ -81,6 +81,8 @@ uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer);
 void sampler_used(uint32_t id);
 // 16x anisotropic filtering (WWHD_ANISO, the overlay's Effects): any thread; samplers follow from the next frame
 bool aniso_enabled();
+bool rt_mips_enabled();
+void set_rt_mips(bool on);
 void set_aniso(bool on);
 // the barrier that makes this frame's descriptor writes visible (nothing when none since the last one)
 void commit_descriptors();
@@ -239,6 +241,12 @@ Surface* feedback_copy(Surface* s);
 // target (a 3D color buffer is drawn slice by slice into layers: deko3d renders into no 3D image) a 3D copy of
 // its layers, made again when the layers were written since the last one (the Picto Box's colour table)
 Surface* volume_source(Surface* s, const uint32_t* texWords);
+// the surface a draw samples for texture words that ask for more levels than a render target s has: a copy
+// with the mip chain, its levels the game's own rendered ones (GPU-written surfaces at the descriptor's mip
+// addresses: the bloom chain, the light buffer) or else s halved; made again when one of them was written.
+// As gfx/vulkan's with_mip_chain (upstream e40b7e6, after GreenNaugahyde/ZeldaWWHDRecompAndroid 73b54e1);
+// rt_mips_enabled (the Switch tab; WWHD_NO_RT_MIPS: off at start): off, s itself (issue #15: the bloom read only level 0)
+Surface* mip_chain(Surface* s, const uint32_t* texWords);
 // copy (scaled) between two surfaces' levels/layers; depth always through dkCmdBufBlitImage (plan section 3)
 void blit(Surface* src, uint32_t srcLevel, uint32_t srcLayer, uint32_t sw, uint32_t sh, Surface* dst,
           uint32_t dstLevel, uint32_t dstLayer, uint32_t dw, uint32_t dh);

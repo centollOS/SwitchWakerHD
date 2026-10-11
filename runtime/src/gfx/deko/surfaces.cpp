@@ -28,6 +28,7 @@
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/LatteAddrLib/LatteAddrLib.h"
 #include "dk_capture.h"
+#include "gfx/render_mips.h"
 #include "dk_draw.h"
 #include "dk_surfaces.h"
 #include "dk_sync.h"
@@ -1225,7 +1226,9 @@ Surface* surface_from_depth_buffer(uint32_t addr, uint32_t* firstSlice, uint32_t
     return find_or_create_surface(d, true);
 }
 
-Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
+namespace {
+// the surface the texture words describe (addr 0: none)
+SurfaceDesc texture_desc(const uint32_t* w, bool isDepthSampler) {
     Latte::LATTE_SQ_TEX_RESOURCE_WORD0_N w0;
     Latte::LATTE_SQ_TEX_RESOURCE_WORD1_N w1;
     Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N w4;
@@ -1234,9 +1237,9 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
     memcpy(static_cast<void*>(&w1), &w[1], 4);
     memcpy(static_cast<void*>(&w4), &w[4], 4);
     memcpy(static_cast<void*>(&w5), &w[5], 4);
-    if (unique) *unique = false;
+    SurfaceDesc d;
     uint32_t addr = w[2] << 8, mipAddr = w[3] << 8;
-    if (!addr) return nullptr;
+    if (!addr) return d;
     auto dim = w0.get_DIM();
     uint32_t pitch = (w0.get_PITCH() + 1) << 3;
     uint32_t width = w0.get_WIDTH() + 1;
@@ -1257,7 +1260,6 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
         swizzle = addr & 0x700;
         addr &= ~0x700u;
     }
-    SurfaceDesc d;
     d.addr = addr;
     d.mipAddr = mipAddr;
     d.width = width;
@@ -1270,6 +1272,14 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
     d.tileMode = (uint32_t)tileMode;
     d.swizzle = swizzle;
     d.isDepth = isDepthSampler;
+    return d;
+}
+}  // namespace
+
+Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
+    if (unique) *unique = false;
+    const SurfaceDesc d = texture_desc(w, isDepthSampler);
+    if (!d.addr) return nullptr;
     Surface* s = find_or_create_surface(d, false);
     if (unique) *unique = S.byAddr.count(d.addr) == 1;
     upload_surface(s);
@@ -1398,6 +1408,75 @@ Surface* volume_source(Surface* s, const uint32_t* texWords) {
         seq = s->writeSeq;
     }
     return copy.get();
+}
+
+namespace {
+std::atomic<bool> g_rtMips{getenv("WWHD_NO_RT_MIPS") == nullptr};
+}
+bool rt_mips_enabled() { return g_rtMips.load(std::memory_order_relaxed); }
+void set_rt_mips(bool on) {
+    if (g_rtMips.exchange(on) != on) LOG("[dk] rendered mip chains (bloom, issue #15) %s", on ? "on" : "off");
+}
+
+Surface* mip_chain(Surface* s, const uint32_t* texWords) {
+    if (!rt_mips_enabled() || !s || !s->img.valid || !s->gpuWritten || s->mips != 1 || s->slices != 1 || s->fmt.depth ||
+        s->fmt.compressed || s->fmt.kind != FormatInfo::FLOAT || s->img.type != DkImageType_2D || !format_can_2d(s->fmt.image))
+        return s;
+    const SurfaceDesc d = texture_desc(texWords, false);
+    uint32_t full = 1;
+    while ((std::max(s->width, s->height) >> full) > 0) full++;
+    const uint32_t mips = std::min({d.mips, full, 16u});
+    if (mips <= 1) return s;
+    // the game's own levels, and a key of everything the chain is built from
+    Surface* levels[16] = {};
+    uint64_t key = s->writeSeq * 0x9E3779B97F4A7C15ull;
+    for (uint32_t l = 1; l < mips; l++) {
+        levels[l] = gfx::render_mips::game_level(d, l, S.byAddr);
+        if (levels[l] && (!levels[l]->img.valid || !same_2d_class(levels[l], s))) levels[l] = nullptr;
+        key = (key ^ (levels[l] ? levels[l]->writeSeq + l : l)) * 0xFF51AFD7ED558CCDull;
+    }
+    struct Chain {
+        uint64_t key = ~0ull;
+        std::unique_ptr<Surface> c;
+    };
+    static std::unordered_map<Surface*, Chain> chains;
+    auto& [seq, c] = chains[s];
+    if (c && (c->mips != mips || c->width != s->width || c->height != s->height || c->fmt.image != s->fmt.image)) {
+        destroy_surface_image(c.get());
+        c.reset();
+    }
+    if (!c) {
+        c = std::make_unique<Surface>();
+        c->width = s->width;
+        c->height = s->height;
+        c->dim = s->dim;
+        c->format = s->format;
+        c->fmt = s->fmt;
+        c->mips = mips;  // (the image at the guest size: create_surface_image keeps a mip chain at scale 1)
+        c->gpuWritten = true;
+        create_surface_image(c.get());
+        seq = ~0ull;
+    }
+    if (seq == key) return c.get();
+    if (g_traceFrame) trace_event("mip chain of %s (%u levels)", trace_name(s).c_str(), mips);
+    // level 0 from the surface (its internal resolution down to the guest size), each further level the game's
+    // own when it rendered one, else the previous level halved
+    uint32_t fromGame = 0;
+    blit(s, 0, 0, s->width, s->height, c.get(), 0, 0, c->width, c->height);
+    for (uint32_t l = 1; l < mips; l++) {
+        const uint32_t w = std::max(c->width >> l, 1u), h = std::max(c->height >> l, 1u);
+        if (Surface* g = levels[l]) {
+            blit(g, 0, 0, g->width, g->height, c.get(), l, 0, w, h);
+            fromGame++;
+        } else
+            blit(c.get(), l - 1, 0, std::max(c->width >> (l - 1), 1u), std::max(c->height >> (l - 1), 1u), c.get(), l, 0, w, h);
+    }
+    note_write(c.get());
+    seq = key;
+    static int logged = 0;
+    if (logged++ < 8)
+        LOG("[dk] mip chain for %s: %u levels, %u of them the game's own", describe(s).c_str(), mips, fromGame);
+    return c.get();
 }
 
 // ---------------------------------------------------------------- CPU reads (dk_surfaces.h cpu_read_surface)

@@ -527,6 +527,12 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
                 view = sampled_view_id(s, words);
             }
         }
+        if (s->gpuWritten && s->mips == 1 && !compare && (words[0] & 7) == uint32_t(Latte::E_DIM::DIM_2D) && (words[5] & 0xF) != 0) {
+            if (Surface* m = mip_chain(s, words); m != s) {  // levels the render target has not: its mip chain
+                s = m;
+                view = sampled_view_id(s, words);
+            }
+        }
         sync_draw_sample(s);
         if (s->gpuWritten) g_drawSamplesRendered = true;
         if (sh->scaleUniforms) {

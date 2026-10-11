@@ -1009,6 +1009,15 @@ void tab_switch() {
         help("Sharper ground, sand and water textures seen at an angle, mostly at a distance.\n"
              "Costs some GPU time: if the frame rate drops, turn it off.");
     }
+    {
+        bool v;
+        if (check("Bloom and distance haze", gfxsw::rt_mips(), &v)) {
+            gfxsw::set_rt_mips(v);
+            hostui::post([v] { hostui::set(kKeyRtMips, v ? "1" : "0"); });
+        }
+        help("The glow around the sky and bright places, and the haze over far places, as on the Wii U.\n"
+             "Costs a little GPU time: if the frame rate drops, turn it off.");
+    }
 
     heading("Frame rate counter (top left)");
     static const char* const modes[] = {"Off", "Frame rate", "Frame rate and load"};
