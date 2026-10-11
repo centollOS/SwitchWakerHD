@@ -336,7 +336,7 @@ public partial class MainWindow : Window
     }
 
     // Called on the worker thread: shows the notice and waits for its button (or a cancel).
-    void AskUser(string heading, string text, string button)
+    void AskUser(string heading, string text, string button, string? command)
     {
         var ev = new ManualResetEventSlim();
         noticeEvent = ev;

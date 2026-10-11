@@ -5,7 +5,7 @@
     <TargetFramework>net48</TargetFramework>
     <UseWPF>true</UseWPF>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <ApplicationIcon>..\shared\Assets\app.ico</ApplicationIcon>
     <AssemblyName>SwitchWakerHD-Installer</AssemblyName>
     <RootNamespace>SwitchWakerHD.Installer</RootNamespace>
     <Nullable>enable</Nullable>
@@ -21,7 +21,9 @@
     <Version>1.0.0</Version>
   </PropertyGroup>
   <ItemGroup>
-    <Resource Include="Assets\logo.png" />
+    <!-- shared with the Linux installer -->
+    <Compile Include="..\shared\*.cs" />
+    <Resource Include="..\shared\Assets\logo.png" Link="Assets\logo.png" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="System.Net.Http" />
