@@ -43,7 +43,9 @@ dir=build/switch-dk
 debuglib=${WWHD_DEKO3D_DEBUG_LIB:-OFF}
 out=wwhd.nro
 [[ $debuglib == ON ]] && out=wwhd_dk_debug.nro
-options="-DWWHD_RENDERER=DEKO3D -DWWHD_DEKO3D_DEBUG_LIB=$debuglib"
+# the guest memory base in x28 (CMakeLists.txt); WWHD_SWITCH_BASE_REG=OFF for a build without it.
+# Passed every time so that build dirs configured before it became the default switch too.
+options="-DWWHD_RENDERER=DEKO3D -DWWHD_DEKO3D_DEBUG_LIB=$debuglib -DWWHD_SWITCH_BASE_REG=${WWHD_SWITCH_BASE_REG:-ON}"
 if [[ $native == 1 ]]; then
     export DEVKITA64=${DEVKITA64:-$DEVKITPRO/devkitA64}
     export PATH="$DEVKITPRO/tools/bin:$DEVKITA64/bin:$PATH"

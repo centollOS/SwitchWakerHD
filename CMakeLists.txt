@@ -237,9 +237,9 @@ if(ANDROID)
 else()
   add_executable(wwhd ${RUNTIME_SOURCES} ${GX2_SOURCES} ${GFX_SOURCES} ${MOD_GFX_SOURCES} ${IMGUI_METAL})
 endif()
-# Experimental (Switch): the guest memory base stays in the reserved register x28 (runtime/include/ppc.h,
-# core.cpp guest_call). Off by default.
-option(WWHD_SWITCH_BASE_REG "Switch: keep the guest memory base in x28" OFF)
+# Switch: the guest memory base stays in the reserved register x28 (runtime/include/ppc.h, core.cpp
+# guest_call). On by default since v0.4.4 (main thread ~2% faster in the performance test's busy scenes).
+option(WWHD_SWITCH_BASE_REG "Switch: keep the guest memory base in x28" ON)
 if(WWHD_SWITCH AND WWHD_SWITCH_BASE_REG)
   target_compile_options(gamecode PRIVATE -ffixed-x28)
   target_compile_definitions(gamecode PRIVATE PPC_BASE_REG=1)
