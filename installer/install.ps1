@@ -482,16 +482,19 @@ switch ($choice.Trim()) {
         $buildArg = '--wua'
     }
     '3' {
-        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-        $dlg.Description         = T 'dlg_folder'
-        $dlg.ShowNewFolderButton = $false
-        $null = $dlg.ShowDialog()
-        $gamePath = $dlg.SelectedPath
-        # Fallback: dialog may appear behind console or STA not active
+        $gamePath = $null
+        # Shell.Application COM is more reliable than FolderBrowserDialog in compiled exes
+        try {
+            $shell  = New-Object -ComObject Shell.Application
+            $picked = $shell.BrowseForFolder(0, (T 'dlg_folder'), 0)
+            if ($picked) { $gamePath = $picked.Self.Path }
+        }
+        catch { }
+        # Text input fallback if COM dialog failed or was cancelled
         if ([string]::IsNullOrWhiteSpace($gamePath)) {
             Write-Host ''
             Write-Warn (T 'dlg_fallback')
-            $typed = Read-Host (T 'dlg_type_path')
+            $typed    = Read-Host (T 'dlg_type_path')
             $gamePath = $typed.Trim().Trim('"').Trim("'")
         }
         $buildArg = '--game-dir'
