@@ -80,6 +80,8 @@ $S = @{
         dlg_title_wua    = 'Selecciona el archivo Cemu (.wua)'
         dlg_filter_wua   = 'Archivo Cemu (*.wua)|*.wua|Todos los archivos (*.*)|*.*'
         dlg_folder       = 'Selecciona la carpeta raiz del juego (contiene code/, content/, meta/)'
+        dlg_fallback     = 'El dialogo no devolvio una ruta. Escribe la ruta manualmente:'
+        dlg_type_path    = '  Ruta de la carpeta del juego'
         build_banner     = @(
             '  =================================================',
             '   Construyendo... puede tardar entre 10-30 min.  ',
@@ -176,6 +178,8 @@ $S = @{
         dlg_title_wua    = 'Select the Cemu archive (.wua)'
         dlg_filter_wua   = 'Cemu archive (*.wua)|*.wua|All files (*.*)|*.*'
         dlg_folder       = 'Select the game root folder (contains code/, content/, meta/)'
+        dlg_fallback     = 'The dialog returned no path. Type the path manually:'
+        dlg_type_path    = '  Game folder path'
         build_banner     = @(
             '  =================================================',
             '   Building... this may take 10-30 minutes.        ',
@@ -483,6 +487,13 @@ switch ($choice.Trim()) {
         $dlg.ShowNewFolderButton = $false
         $null = $dlg.ShowDialog()
         $gamePath = $dlg.SelectedPath
+        # Fallback: dialog may appear behind console or STA not active
+        if ([string]::IsNullOrWhiteSpace($gamePath)) {
+            Write-Host ''
+            Write-Warn (T 'dlg_fallback')
+            $typed = Read-Host (T 'dlg_type_path')
+            $gamePath = $typed.Trim().Trim('"').Trim("'")
+        }
         $buildArg = '--game-dir'
     }
     default { Exit-WithError (T 'game_invalid') }
