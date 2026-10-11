@@ -1,6 +1,6 @@
 # Texture eviction: the image heap stops growing with every new place (plan)
 
-Branch `feature/texture-eviction`. Issue #11. Status: console-tested (2026-10-11), perf check pending.
+Branch `feature/texture-eviction`. Issue #11. Status: console-tested (2026-10-11), no measurable performance cost.
 
 ## Why
 
@@ -77,3 +77,15 @@ would have to be kept or proven redrawn), freeing empty chunks, the rescale pool
 - Prepare graphics restarted from the title (no Link loaded) visits one place per restart: a Prepare graphics problem,
   not this change.
 
+
+## Performance (2026-10-11, console, USA game, docked, internal resolution 1.50)
+
+`perf_test.py ab` main (514be0d) vs this branch, both with the bench commits, ABBA (2 boots each), 600 frames per
+scene, Quest Log 2:
+
+| Scene | main | eviction | difference (95% CI) |
+|---|---|---|---|
+| lava (Dragon Roost Cavern) | 27.43 fps | 27.24 fps | -0.19 (±0.86) |
+| windfall | 27.12 fps | 26.97 fps | -0.14 (±0.64) |
+
+Within the boot-to-boot spread (the second pair of boots was ~0.5 fps slower for both builds): no measurable cost.
