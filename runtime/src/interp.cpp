@@ -41,6 +41,7 @@
 #include "true60.h"
 #ifdef __SWITCH__
 #include "platform/prepare_graphics_switch.h"  // (this fork)
+#include "platform/audio_guard_switch.h"  // (this fork)
 #endif
 
 
@@ -861,6 +862,7 @@ extern "C" void hook_0203593C(Cpu* c) {
     mods::cheats_service();
 #ifdef __SWITCH__
     prepare_graphics::frame(c);  // (this fork) Prepare graphics: its warps and Link's health
+    audio_guard::frame();  // (this fork) the game's DSP-overload guard off (issue #13)
 #endif
     g_passes++;
     // test aid: WWHD_INTERP_AT_STEP=n switches interpolation on after n frames

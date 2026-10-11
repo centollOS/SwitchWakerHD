@@ -24,6 +24,7 @@
 #include "prepare_graphics_switch.h"
 #include "shader_scan_switch.h"
 #include "background_shaders_switch.h"
+#include "audio_guard_switch.h"
 #include "host.h"
 #include "settings_switch.h"
 
@@ -179,6 +180,12 @@ debugsrv::Reply bgshaders(const debugsrv::Args& a) {
                                                                                        : background_shaders::status()));
 }
 
+// "dspguard [0|1]": the game's DSP-overload guard (audio_guard_switch.h): 1 the game's own, 0 off (the default)
+debugsrv::Reply dspguard(const debugsrv::Args& a) {
+    if (!a.empty()) audio_guard::set_kept(a[0] != "0");
+    return debugsrv::ok(std::string("dspguard ") + (audio_guard::kept() ? "the game's own" : "off"));
+}
+
 debugsrv::Reply quit(const debugsrv::Args&) {
     debugsrv::Reply r = debugsrv::ok("quitting");
     r.after = [] {
@@ -205,6 +212,7 @@ void start() {
     debugsrv::add_command("reload", "reload                 restart: the forwarder loads the NRO again (put it first)", reload);
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
+    debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
     debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);
     debugsrv::add_command("quit", "quit                   end the program", quit);
     debugsrv::Config c;
