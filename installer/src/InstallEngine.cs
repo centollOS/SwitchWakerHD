@@ -38,6 +38,9 @@ sealed class InstallEngine
 
     public string GamePath = "";
     public string GameArg  = "";                      // --image, --wua or --game-dir
+    // Optional: the console's prod.keys, for the HOME-screen forwarder (.nsp). Only with it are Git, Pillow
+    // and MSYS2's gcc installed (INSTALL.md, "HOME-screen icon"); without it make_sd.py gets --no-forwarder.
+    public string? ForwarderKeys;
 
     public string ReleaseDir { get; private set; } = "";
     public string SdOut => Path.Combine(ReleaseDir, "build", "sd");
@@ -90,7 +93,7 @@ sealed class InstallEngine
             if (!FindPython()) throw new InstallException(Str.Get("py_fail"));
         }
         Say(Str.Get("py_pkgs"));
-        Exec(pythonCmd, "-m pip install --disable-pip-version-check zstandard pycryptodome");
+        Exec(pythonCmd, "-m pip install --disable-pip-version-check zstandard pycryptodome" + (ForwarderKeys != null ? " pillow" : ""));
     }
 
     bool FindPython()
@@ -161,10 +164,14 @@ sealed class InstallEngine
         }
         Ok(Str.Get("dkp_found_at", pacman));
 
+        if (ForwarderKeys != null) ForwarderGit();
+
         Say(Str.Get("dkp_installing"));
         SetDevkitEnv();
         ClearStalePacmanLock();
-        if (Exec(pacman, "-Sy --needed --noconfirm switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake", check: false) != 0)
+        // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it
+        var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake" + (ForwarderKeys != null ? " gcc" : "");
+        if (Exec(pacman, "-Sy --needed --noconfirm " + packages, check: false) != 0)
             Warn(Str.Get("dkp_pkg_warn"));
     }
 
@@ -230,6 +237,24 @@ sealed class InstallEngine
         Environment.SetEnvironmentVariable("DEVKITARM", Path.Combine(DevkitRoot, "devkitARM"));
         Environment.SetEnvironmentVariable("DEVKITPPC", Path.Combine(DevkitRoot, "devkitPPC"));
         Environment.SetEnvironmentVariable("PATH", $@"{DevkitRoot}\tools\bin;{DevkitRoot}\devkitARM\bin;" + path);
+    }
+
+    // The forwarder script fetches nx-hbloader and hacBrewPack with git. It is optional: if Git cannot be
+    // installed, the game still builds, without the forwarder.
+    void ForwarderGit()
+    {
+        if (Capture("git", "--version").code == 0) return;
+        Say(Str.Get("fwd_git"));
+        Exec("winget", "install --id Git.Git --source winget --accept-package-agreements --accept-source-agreements --silent", check: false);
+        RefreshPath();
+        var gitCmd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git", "cmd");
+        if (Capture("git", "--version").code != 0 && Directory.Exists(gitCmd))
+            Environment.SetEnvironmentVariable("PATH", gitCmd + ";" + Environment.GetEnvironmentVariable("PATH"));
+        if (Capture("git", "--version").code != 0)
+        {
+            Warn(Str.Get("fwd_git_fail"));
+            ForwarderKeys = null;
+        }
     }
 
     static void RefreshPath()
@@ -314,6 +339,7 @@ sealed class InstallEngine
         }
         void OnLine(string line)
         {
+            if (line.StartsWith("[+] HOME-screen forwarder")) { Status?.Invoke(Str.Get("fwd_building")); return; }
             var m = StageLine.Match(line);
             if (m.Success)
             {
@@ -332,7 +358,8 @@ sealed class InstallEngine
             var pct = (int)(frac * 100);
             if (pct > shownPct) { shownPct = pct; Status?.Invoke(Str.Get("build_s4_pct", pct)); }
         }
-        var rc = Exec(pythonCmd, $"\"{MakeSd(ReleaseDir)}\" {GameArg} \"{GamePath}\"", ReleaseDir, check: false, onLine: OnLine);
+        var forwarder = ForwarderKeys != null ? $" --keys \"{ForwarderKeys}\"" : " --no-forwarder";
+        var rc = Exec(pythonCmd, $"\"{MakeSd(ReleaseDir)}\" {GameArg} \"{GamePath}\"{forwarder}", ReleaseDir, check: false, onLine: OnLine);
         Progress?.Invoke(rc == 0 ? 1 : (double?)null);
         if (rc != 0) throw new InstallException(Str.Get("build_fail", rc));
         Ok(SdOut);
