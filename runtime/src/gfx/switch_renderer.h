@@ -39,6 +39,13 @@ enum DrawOpt : int {
 };
 bool draw_opt(int which);
 void set_draw_opt(int which, bool on);
+// texture eviction (gfx/deko/surfaces.cpp, issue #11): frames a texture may stay unused before it leaves the image
+// heap (0: only under memory pressure); evict_textures_now: every texture unused for a few frames goes at the next
+// frame. Any thread (the debug server's "evict")
+uint64_t texture_idle_frames();
+void set_texture_idle_frames(uint64_t frames);
+void evict_textures_now();
+std::string texture_eviction_report();
 #ifdef __SWITCH__
 std::string clock_report_now();  // "CPU x MHz, GPU y MHz, memory z MHz", or "" if unavailable
 #endif

@@ -219,6 +219,14 @@ debugsrv::Reply stall(const debugsrv::Args& a) {
     return debugsrv::ok("stalling");
 }
 
+// "evict [now | idle <frames>]": texture eviction (issue #11, gfx/deko/surfaces.cpp)
+debugsrv::Reply evict(const debugsrv::Args& a) {
+    if (!a.empty() && a[0] == "now") gfxsw::evict_textures_now();
+    else if (a.size() > 1 && a[0] == "idle") gfxsw::set_texture_idle_frames(strtoull(a[1].c_str(), nullptr, 10));
+    else if (!a.empty()) return debugsrv::err("evict [now | idle <frames>]");
+    return debugsrv::ok(gfxsw::texture_eviction_report());
+}
+
 debugsrv::Reply quit(const debugsrv::Args&) {
     debugsrv::Reply r = debugsrv::ok("quitting");
     r.after = [] {
@@ -247,6 +255,7 @@ void start() {
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
     debugsrv::add_command("stall", "stall <ms> [core] [n] [gap]  spin above the game threads (audio guard tests)", stall);
+    debugsrv::add_command("evict", "evict [now | idle <n>] texture eviction: now, or after n unused frames", evict);
     debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);
     debugsrv::add_command("quit", "quit                   end the program", quit);
     debugsrv::Config c;

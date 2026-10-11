@@ -951,7 +951,9 @@ uint64_t env_frames(const char* name, uint64_t def) {
     const char* e = getenv(name);
     return e && *e ? strtoull(e, nullptr, 10) : def;
 }
-const uint64_t g_idleFrames = env_frames("WWHD_DK_TEX_IDLE_FRAMES", 9000);
+std::atomic<uint64_t> g_idleFrames{env_frames("WWHD_DK_TEX_IDLE_FRAMES", 9000)};
+std::atomic<bool> g_evictNow{false};  // the debug server's "evict now"
+std::atomic<uint64_t> g_evictOut{0}, g_evictRestores{0};  // (for texture_eviction_report)
 const uint64_t g_pressureFrames = std::max<uint64_t>(env_frames("WWHD_DK_TEX_PRESSURE_FRAMES", 150), kFrames + 1);
 struct EvictStats {
     uint64_t idle = 0, idleBytes = 0, pressure = 0, pressureBytes = 0, restores = 0, out = 0;
@@ -1002,15 +1004,20 @@ Surface* found(Surface* s) {
 }
 
 void evict_idle() {
-    if (!g_idleFrames || R.frame % 300) return;
+    const bool now = g_evictNow.exchange(false, std::memory_order_relaxed);
+    const uint64_t idle = now ? kFrames + 1 : g_idleFrames.load(std::memory_order_relaxed);
+    g_evictOut.store(g_evict.out, std::memory_order_relaxed);
+    g_evictRestores.store(g_evict.restores, std::memory_order_relaxed);
+    if (!now && (!idle || R.frame % 300)) return;
     uint64_t n = 0, bytes = 0;
     for (Surface* s : S.list)
-        if (evictable(s, g_idleFrames)) {
+        if (evictable(s, idle)) {
             bytes += evict_surface(s);
             n++;
         }
     g_evict.idle += n;
     g_evict.idleBytes += bytes;
+    if (now) LOG("[dk] evict now: %llu textures (%.1f MiB)", (unsigned long long)n, double(bytes) / 1048576.0);
 }
 }  // namespace
 
@@ -2053,3 +2060,20 @@ void surface_memory(size_t& total, size_t& targets, size_t& count) {
 }
 
 }  // namespace gfxdk
+
+namespace gfxsw {
+uint64_t texture_idle_frames() { return gfxdk::g_idleFrames.load(std::memory_order_relaxed); }
+void set_texture_idle_frames(uint64_t frames) {
+    gfxdk::g_idleFrames.store(frames, std::memory_order_relaxed);
+    LOG("[dk] texture eviction: unused for %llu frames%s", (unsigned long long)frames, frames ? "" : " (off: only under memory pressure)");
+}
+void evict_textures_now() { gfxdk::g_evictNow.store(true, std::memory_order_relaxed); }
+std::string texture_eviction_report() {
+    char t[160];
+    snprintf(t, sizeof t, "textures evicted now %llu, restored %llu; idle frames %llu",
+             (unsigned long long)gfxdk::g_evictOut.load(std::memory_order_relaxed),
+             (unsigned long long)gfxdk::g_evictRestores.load(std::memory_order_relaxed),
+             (unsigned long long)texture_idle_frames());
+    return t;
+}
+}  // namespace gfxsw
