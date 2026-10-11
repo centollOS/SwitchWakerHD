@@ -7,7 +7,7 @@ $ProjectDir = Join-Path $PSScriptRoot "src"
 $OutputDir  = Join-Path $PSScriptRoot "bin"
 
 Write-Host ""
-Write-Host "  SwitchWakerHD — Installer builder (.NET 8)" -ForegroundColor Cyan
+Write-Host "  SwitchWakerHD - Installer builder (.NET 8)" -ForegroundColor Cyan
 Write-Host ""
 
 # ── Install .NET 8 SDK if missing ─────────────────────────────────────────────
