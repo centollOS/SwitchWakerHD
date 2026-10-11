@@ -1,22 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net6.0-windows</TargetFramework>
+    <!-- .NET Framework 4.8: pre-installed on all Windows 10/11 — zero runtime dependency -->
+    <TargetFramework>net48</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>SwitchWakerHD-Installer</AssemblyName>
     <RootNamespace>SwitchWakerHD.Installer</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
     <Optimize>true</Optimize>
-    <!-- Self-contained: no .NET runtime required on end-user machine -->
-    <SelfContained>true</SelfContained>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <PublishSingleFile>true</PublishSingleFile>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <!-- Exe metadata shown in Windows file properties -->
+    <DebugType>none</DebugType>
+    <!-- Exe metadata -->
     <AssemblyTitle>SwitchWakerHD Installer</AssemblyTitle>
     <AssemblyDescription>Automatic installer for SwitchWakerHD - Wind Waker HD on Nintendo Switch</AssemblyDescription>
     <Company>centollOS</Company>

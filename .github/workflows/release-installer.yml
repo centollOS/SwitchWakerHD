@@ -15,20 +15,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET 8
+      - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
 
-      - name: Publish installer (self-contained, win-x64)
+      - name: Publish installer (net48)
         shell: pwsh
         run: |
           dotnet publish installer/src/SwitchWakerHD.Installer.csproj `
             --configuration Release `
-            --runtime win-x64 `
-            --self-contained true `
-            -p:PublishSingleFile=true `
-            -p:EnableCompressionInSingleFile=true `
             -p:Version=$("${{ github.ref_name }}" -replace '^v','') `
             --output installer/bin `
             --nologo

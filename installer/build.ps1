@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# build.ps1 — Builds SwitchWakerHD-Installer.exe from the C# project.
+# build.ps1 - Builds SwitchWakerHD-Installer.exe from the C# project.
 # Run this once on Windows to generate the distributable installer.
 
 $ErrorActionPreference = 'Stop'
@@ -7,13 +7,13 @@ $ProjectDir = Join-Path $PSScriptRoot "src"
 $OutputDir  = Join-Path $PSScriptRoot "bin"
 
 Write-Host ""
-Write-Host "  SwitchWakerHD - Installer builder (.NET 8)" -ForegroundColor Cyan
+Write-Host "  SwitchWakerHD - Installer builder (.NET Framework 4.8)" -ForegroundColor Cyan
 Write-Host ""
 
-# ── Install .NET 8 SDK if missing ─────────────────────────────────────────────
+# Install any .NET SDK if missing (net48 compiles with any modern SDK)
 if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
     Write-Host "  Installing .NET SDK via winget..." -ForegroundColor White
-    winget install Microsoft.DotNet.SDK.6 --accept-package-agreements --accept-source-agreements --silent
+    winget install Microsoft.DotNet.SDK.8 --accept-package-agreements --accept-source-agreements --silent
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
                 [System.Environment]::GetEnvironmentVariable("Path","User")
 }
@@ -21,17 +21,13 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
 $sdkVer = dotnet --version 2>$null
 Write-Host "  [OK] .NET SDK: $sdkVer" -ForegroundColor Green
 
-# ── Build ─────────────────────────────────────────────────────────────────────
+# Build
 Write-Host ""
-Write-Host "  Publishing SwitchWakerHD-Installer.exe (self-contained, win-x64)..." -ForegroundColor White
+Write-Host "  Building SwitchWakerHD-Installer.exe (net48)..." -ForegroundColor White
 Write-Host ""
 
 dotnet publish "$ProjectDir\SwitchWakerHD.Installer.csproj" `
     --configuration Release `
-    --runtime win-x64 `
-    --self-contained true `
-    -p:PublishSingleFile=true `
-    -p:EnableCompressionInSingleFile=true `
     --output "$OutputDir" `
     --nologo
 
@@ -42,11 +38,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $exe  = Get-Item "$OutputDir\SwitchWakerHD-Installer.exe"
-$size = [math]::Round($exe.Length / 1MB, 1)
+$size = [math]::Round($exe.Length / 1KB, 0)
 
 Write-Host ""
 Write-Host "  =================================================" -ForegroundColor Green
-Write-Host "  [OK] SwitchWakerHD-Installer.exe  ($size MB)    " -ForegroundColor Green
+Write-Host "  [OK] SwitchWakerHD-Installer.exe  ($size KB)    " -ForegroundColor Green
 Write-Host "  =================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Path: $($exe.FullName)" -ForegroundColor Gray

@@ -1,5 +1,5 @@
 // SwitchWakerHD Installer  —  github.com/centollOS/SwitchWakerHD
-// C# / .NET 8 / WinForms dialogs / self-contained single exe
+// C# / .NET Framework 4.8 / WinForms dialogs — zero runtime dependency on Win10/11
 #pragma warning disable CA1416  // Windows-only APIs — intentional
 
 using System.Diagnostics;
@@ -8,7 +8,7 @@ using System.IO.Compression;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Security.Principal;
-using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
 namespace SwitchWakerHD.Installer;
@@ -112,11 +112,14 @@ class Program
 
     static readonly string DevkitRoot = @"C:\devkitPro";
 
-    static readonly HttpClient Http = new()
+    static readonly HttpClient Http = CreateHttpClient();
+    static HttpClient CreateHttpClient()
     {
-        Timeout = TimeSpan.FromMinutes(30),
-        DefaultRequestHeaders = { { "User-Agent", "SwitchWakerHD-Installer/1.0" } }
-    };
+        var c = new HttpClient();
+        c.Timeout = TimeSpan.FromMinutes(30);
+        c.DefaultRequestHeaders.UserAgent.ParseAdd("SwitchWakerHD-Installer/1.0");
+        return c;
+    }
 
     static string PythonCmd  = "python";
     static string DkpPacman  = "";
@@ -234,7 +237,8 @@ class Program
         try
         {
             var json = Http.GetStringAsync("https://api.github.com/repos/centollOS/SwitchWakerHD/releases/latest").GetAwaiter().GetResult();
-            ReleaseVer = JsonDocument.Parse(json).RootElement.GetProperty("tag_name").GetString() ?? ReleaseVer;
+            var m = Regex.Match(json, "\"tag_name\":\\s*\"([^\"]+)\"");
+            if (m.Success) ReleaseVer = m.Groups[1].Value;
             WriteOK(Str.Get("rel_found", ReleaseVer));
         }
         catch { WriteWarn(Str.Get("rel_fallback", ReleaseVer)); }
@@ -303,7 +307,6 @@ class Program
             using var dlg = new FolderBrowserDialog
             {
                 Description = Str.Get("dlg_folder"),
-                UseDescriptionForTitle = true,
                 AutoUpgradeEnabled = true,
                 ShowNewFolderButton = false
             };
@@ -518,7 +521,7 @@ class Program
     {
         using var sha    = SHA256.Create();
         using var stream = File.OpenRead(file);
-        var hash = Convert.ToHexString(sha.ComputeHash(stream));
+        var hash = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToUpperInvariant();
         if (!string.Equals(hash, expected, StringComparison.OrdinalIgnoreCase))
         {
             File.Delete(file);
