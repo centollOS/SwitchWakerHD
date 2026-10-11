@@ -1418,7 +1418,7 @@ void set_rt_mips(bool on) {
     if (g_rtMips.exchange(on) != on) LOG("[dk] rendered mip chains (bloom, issue #15) %s", on ? "on" : "off");
 }
 
-Surface* mip_chain(Surface* s, const uint32_t* texWords) {
+Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* samplerWords) {
     if (!rt_mips_enabled() || !s || !s->img.valid || !s->gpuWritten || s->mips != 1 || s->slices != 1 || s->fmt.depth ||
         s->fmt.compressed || s->fmt.kind != FormatInfo::FLOAT || s->img.type != DkImageType_2D || !format_can_2d(s->fmt.image))
         return s;
@@ -1458,14 +1458,24 @@ Surface* mip_chain(Surface* s, const uint32_t* texWords) {
         create_surface_image(c.get());
         for (uint32_t l = 0; l < 16; l++) ch.seq[l] = ~0ull;
     }
-    // Only the levels whose source changed are copied: the game renders its chain a level at a time, each pass
-    // sampling the level before, so a whole copy at every lookup would copy the chain once per level per frame.
+    // The levels this lookup can read: the sampler's LOD clamp (as make_sampler gives it to deko3d). The game
+    // renders its chain a level at a time and samples it after each pass with the LOD clamped to one level, so
+    // bringing every level up to date at every lookup would copy the whole chain several times a frame.
+    Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0 sw0;
+    Latte::LATTE_SQ_TEX_SAMPLER_WORD1_0 sw1;
+    memcpy(static_cast<void*>(&sw0), samplerWords, 4);
+    memcpy(static_cast<void*>(&sw1), samplerWords + 1, 4);
+    const float minLod = sw1.get_MIN_LOD() / 64.f, maxLod = uint32_t(sw0.get_MIP_FILTER()) ? sw1.get_MAX_LOD() / 64.f : 0.f;
+    uint32_t lo = std::min(uint32_t(std::min(minLod, maxLod)), mips - 1);
+    const uint32_t hi = std::min(uint32_t(std::ceil(std::max(minLod, maxLod))), mips - 1);
+    while (lo > 0 && !levels[lo]) lo--;  // a halved level needs the ones below it
     // Level 0 from the surface (its internal resolution down to the guest size), each further level the game's
-    // own when it rendered one, else the previous level halved (again when that one was copied)
+    // own when it rendered one, else the previous level halved (again when that one was copied); only levels whose
+    // source changed are copied
     static uint64_t g_lookups = 0, g_levelCopies = 0, g_logFrame = 0;
     g_lookups++;
     bool copied = false, below = false;  // below: the previous level was copied now
-    for (uint32_t l = 0; l < mips; l++) {
+    for (uint32_t l = lo; l <= hi; l++) {
         const Surface* src = l == 0 ? s : levels[l];
         const uint64_t seq = src ? src->writeSeq : 0;
         if (src ? ch.from[l] == src && ch.seq[l] == seq : !below && ch.from[l] == nullptr && ch.seq[l] != ~0ull) {
