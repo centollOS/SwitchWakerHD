@@ -938,6 +938,111 @@ void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
                     s->img.ph, keepContents ? ", contents kept" : "");
 }
 
+// ---------------------------------------------------------------- eviction (issue #11, docs/texture-eviction-plan.md)
+// Surfaces are never removed (pointers to them live in the draw caches, the capture notes, GuestRanges...), but the
+// image of a texture nothing draws with any more is: one the GPU never wrote and that was never a render target holds
+// only what upload_surface copied from guest memory, so the next lookup makes it again from there (revive). Without
+// this every place visited stayed in the image heap until a new 64 MiB chunk no longer fit and deko3d ended the game.
+// - under memory pressure (image_alloc found no room): the least recently used ones idle for at least
+//   WWHD_DK_TEX_PRESSURE_FRAMES (150), before a new chunk is added
+// - when idle for WWHD_DK_TEX_IDLE_FRAMES (9000, ~5 min; 0: never), checked every 300 frames
+namespace {
+uint64_t env_frames(const char* name, uint64_t def) {
+    const char* e = getenv(name);
+    return e && *e ? strtoull(e, nullptr, 10) : def;
+}
+const uint64_t g_idleFrames = env_frames("WWHD_DK_TEX_IDLE_FRAMES", 9000);
+const uint64_t g_pressureFrames = std::max<uint64_t>(env_frames("WWHD_DK_TEX_PRESSURE_FRAMES", 150), kFrames + 1);
+struct EvictStats {
+    uint64_t idle = 0, idleBytes = 0, pressure = 0, pressureBytes = 0, restores = 0, out = 0;
+} g_evict;
+
+// its image can go: guest memory holds everything in it, and no frame the GPU has not finished uses it (its memory
+// returns to the heap at once)
+bool evictable(const Surface* s, uint64_t minIdle) {
+    if (!s->img.valid || s->gpuWritten || s->renderTarget || s->scale != 1.0f || s->twin.valid || s->writebackPending)
+        return false;
+    if (s == S.tvSource || s == S.scanSrc) return false;
+    return frame_retired(s->useFrame) && R.frame + 1 - s->useFrame >= minIdle;
+}
+
+size_t evict_surface(Surface* s) {
+    const size_t bytes = s->img.mem.size;
+    image_descriptor_free_later(s->img.imageId);
+    for (auto& [key, id] : s->img.views) image_descriptor_free_later(id);
+    image_free_now(s->img.mem);
+    s->img = SurfaceImage{};
+    s->evicted = true;
+    // the next upload reads the guest data in full
+    s->dirty = true;
+    s->lastCheckedFrame = ~0ull;
+    s->dataSize = 0;
+    s->contentHash = s->sparseHash = 0;
+    g_evict.out++;
+    R.surfaceEpoch++;  // lookups and views cached by the draws
+    R.textureEpoch++;
+    return bytes;
+}
+
+// an evicted surface looked up again: its image made again and the guest data uploaded (also when the lookup is for
+// rendering or a copy's destination: what was there before is kept, as without eviction)
+void revive(Surface* s) {
+    s->evicted = false;
+    g_evict.out--;
+    g_evict.restores++;
+    create_surface_image(s);
+    upload_surface(s);
+}
+
+// a surface a lookup returns: in use this frame
+Surface* found(Surface* s) {
+    if (s->evicted) revive(s);
+    s->useFrame = R.frame + 1;
+    return s;
+}
+
+void evict_idle() {
+    if (!g_idleFrames || R.frame % 300) return;
+    uint64_t n = 0, bytes = 0;
+    for (Surface* s : S.list)
+        if (evictable(s, g_idleFrames)) {
+            bytes += evict_surface(s);
+            n++;
+        }
+    g_evict.idle += n;
+    g_evict.idleBytes += bytes;
+}
+}  // namespace
+
+bool image_heap_pressure(uint32_t bytes) {
+    std::vector<Surface*> c;
+    for (Surface* s : S.list)
+        if (evictable(s, g_pressureFrames)) c.push_back(s);
+    static int logged = 0;
+    if (c.empty()) {
+        if (logged++ < 20)
+            LOG("[dk] image heap full for %u KiB and no texture unused for %llu frames to evict: a new chunk", bytes >> 10,
+                (unsigned long long)g_pressureFrames);
+        return false;
+    }
+    std::sort(c.begin(), c.end(), [](const Surface* a, const Surface* b) { return a->useFrame < b->useFrame; });
+    // about twice the request at once: the freed ranges need not be next to each other
+    const uint64_t want = std::max<uint64_t>(uint64_t(bytes) * 2, 8u << 20);
+    uint64_t freed = 0, n = 0;
+    for (Surface* s : c) {
+        freed += evict_surface(s);
+        n++;
+        if (freed >= want) break;
+    }
+    g_evict.pressure += n;
+    g_evict.pressureBytes += freed;
+    if (logged++ < 200)
+        LOG("[dk] image heap full for %u KiB: %llu textures evicted (%.1f MiB, unused for %llu frames or more; %zu could "
+            "go)", bytes >> 10, (unsigned long long)n, double(freed) / 1048576.0,
+            (unsigned long long)(R.frame + 1 - c[n - 1]->useFrame), c.size());
+    return true;
+}
+
 // ---------------------------------------------------------------- lookup
 Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
     if (!d.addr) return nullptr;
@@ -954,6 +1059,7 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
             s->slices == d.slices &&
             (forRendering || s->mips >= d.mips || s->gpuWritten)) {
             if (forRendering) {
+                found(s);  // (an evicted texture comes back as it was made: before it is a render target)
                 s->renderTarget = true;
                 return s;
             }
@@ -961,9 +1067,9 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
         } else if (!forRendering && s->gpuWritten && (s->format & 0x3f) == (d.format & 0x3f))
             consider(s);
     }
-    if (exact && (exact->gpuWritten || !rendered || exact->writeSeq > rendered->writeSeq)) return exact;
-    if (rendered) return rendered;
-    if (exact) return exact;
+    if (exact && (exact->gpuWritten || !rendered || exact->writeSeq > rendered->writeSeq)) return found(exact);
+    if (rendered) return found(rendered);
+    if (exact) return found(exact);
     auto s = std::make_unique<Surface>();
     s->addr = d.addr;
     s->mipAddr = d.mipAddr;
@@ -983,6 +1089,7 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
     create_surface_image(s.get());  // (throws for an unsupported format: the GX2 command is skipped and logged)
     s->scalable = screen_shaped(s.get());
     s->addrWrites = &S.addrWrites[d.addr];
+    s->useFrame = R.frame + 1;
     auto* raw = s.get();
     S.byAddr.emplace(d.addr, std::move(s));
     S.list.push_back(raw);
@@ -1900,7 +2007,7 @@ void surface_stats() {
     LOG("[dk] surfaces: %zu (%.1f MiB, render targets %.1f MiB); uploads %llu (%.1f MiB, %.1f ms/s), staging %.1f MiB/s, "
         "%llu waits (%.1f ms), %llu one-off blocks; clears %llu (%.1f ms/s), copies %llu (%llu by the CPU, %.1f ms/s), "
         "scan copies %llu (%llu made), feedback copies %llu, invalidates %llu (%.1f ms/s); descriptors: %u images, "
-        "%u samplers",
+        "%u samplers; evicted textures %llu (idle %llu, %.1f MiB; memory full %llu, %.1f MiB, so far), %llu restored",
         count, double(total) / 1048576.0, double(targets) / 1048576.0, (unsigned long long)(p.uploads - last.uploads),
         double(p.uploadBytes - last.uploadBytes) / 1048576.0, ms(p.uploadNs - last.uploadNs),
         double(st.bytes - lastStaging.bytes) / 1048576.0 / secs, (unsigned long long)(st.waits - lastStaging.waits),
@@ -1909,7 +2016,10 @@ void surface_stats() {
         (unsigned long long)(p.surfaceCopies - last.surfaceCopies), (unsigned long long)(p.cpuSurfaceCopies - last.cpuSurfaceCopies),
         ms(p.surfaceCopyNs - last.surfaceCopyNs), (unsigned long long)(p.scans - last.scans),
         (unsigned long long)(p.scanBlits - last.scanBlits), (unsigned long long)(p.feedbackCopies - last.feedbackCopies),
-        (unsigned long long)(p.invalidates - last.invalidates), ms(p.invalidateNs - last.invalidateNs), images, samplers);
+        (unsigned long long)(p.invalidates - last.invalidates), ms(p.invalidateNs - last.invalidateNs), images, samplers,
+        (unsigned long long)g_evict.out, (unsigned long long)g_evict.idle, double(g_evict.idleBytes) / 1048576.0,
+        (unsigned long long)g_evict.pressure, double(g_evict.pressureBytes) / 1048576.0,
+        (unsigned long long)g_evict.restores);
     last = p;
     lastStaging = st;
 }
@@ -1927,6 +2037,7 @@ void surfaces_frame_start() {
     // the previous frame was presented: its TV buffer gets a copy only if the game copies it again
     S.scanSrc = nullptr;
     if (S.tvSource) S.tvSource->hudFull = false;
+    evict_idle();
     surface_stats();
 }
 

@@ -62,6 +62,9 @@ ImageAlloc image_alloc(uint32_t size, uint32_t alignment);
 // back with another layout. Hit by 6..8-row images: BC 24x24..32x32, 1024x32 (the sea's normal map).
 void image_tile_size_fix(DkImageLayoutMaker& m, uint32_t rows);
 void image_free_later(const ImageAlloc& a);  // freed when the GPU is done with the current frame
+void image_free_now(const ImageAlloc& a);    // memory no frame the GPU has not finished uses
+// image_alloc found no room: frees what it can (surfaces.cpp, texture eviction) and says whether it freed any
+bool image_heap_pressure(uint32_t bytes);
 bool code_load(DkShader& shader, const void* dksh, uint32_t size, const char* name);
 // shader code was copied to code memory since the last shader cache invalidate (code_load sets it; draw.cpp
 // invalidates the shader caches before its next draw: deko3d only does it at dkQueueFlush)

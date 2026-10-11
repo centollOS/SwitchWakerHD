@@ -286,7 +286,12 @@ ImageAlloc image_alloc(uint32_t size, uint32_t alignment) {
                 return {c.block, at, size, int(ci)};
             }
         }
-        // no room: a new chunk (bigger than 64 MB only for a bigger image)
+        // no room: textures nobody draws with any more go first (surfaces.cpp), while that frees something;
+        // then a new chunk (bigger than 64 MB only for a bigger image)
+        if (image_heap_pressure(size + alignment)) {
+            pass--;
+            continue;
+        }
         add_chunk(std::max(kImageChunkSize, align_up(size + alignment, DK_MEMBLOCK_ALIGNMENT)));
     }
     fatal("[dk] image heap: cannot place %u bytes", size);
@@ -296,6 +301,12 @@ void image_free_later(const ImageAlloc& a) {
     if (a.chunk < 0) return;
     g_stats.imageBytes -= a.size;
     g_slots[g_slot].retired.push_back(a);
+}
+
+void image_free_now(const ImageAlloc& a) {
+    if (a.chunk < 0) return;
+    g_stats.imageBytes -= a.size;
+    chunk_free(g_chunks[size_t(a.chunk)], a.offset, a.size);
 }
 
 bool g_shaderCodeLoaded = false;

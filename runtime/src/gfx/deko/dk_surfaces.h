@@ -126,6 +126,10 @@ struct Surface {
     // draw path keeps such a lookup while this is unchanged (WWHD_DK_TEX_SHARED_CACHE). Null for private copies.
     uint64_t* addrWrites = nullptr;
     uint64_t changedFrame = 0;   // the last frame its guest data was uploaded (upload_surface)
+    // texture eviction (issue #11, surfaces.cpp): the recording frame of its last lookup or sampling draw; evicted:
+    // its image, views and descriptors were freed (a texture made again from guest memory at its next lookup)
+    uint64_t useFrame = 0;
+    bool evicted = false;
     uint64_t drawFrame = ~0ull;  // the last frame a draw rendered to it, and how many draws did
     uint32_t frameDraws = 0;
     // the GamePad picture (gamepad_only, dk_draw.h), as gfx/gl's

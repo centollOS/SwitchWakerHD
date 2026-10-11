@@ -482,6 +482,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             if (cached.epoch) texture_table_entry(words, samplerWords, compare) = cached;
             if (lap.on) g_res.textureMissNs += (now_ns() - missStart) * kDrawTimeSample;
         }
+        s->useFrame = R.frame + 1;  // (texture eviction: in use)
         if (g_gamepadDrawing) {  // a texture of the GamePad picture
             if (!s->gamepadSource) s->gamepadSourceSince = R.frame;
             s->gamepadSource = true;
