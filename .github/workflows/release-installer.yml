@@ -1,0 +1,55 @@
+name: Build Windows Installer
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write   # needed to upload assets to the release
+
+jobs:
+  build-installer:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ps2exe
+        shell: pwsh
+        run: Install-Module -Name ps2exe -Scope CurrentUser -Force -AllowClobber
+
+      - name: Build installer EXE
+        shell: pwsh
+        run: |
+          Import-Module ps2exe
+
+          # Strip leading 'v' for the exe version field (e.g. v0.4.3 -> 0.4.3.0)
+          $rawTag  = "${{ github.ref_name }}"
+          $exeVer  = ($rawTag -replace '^v', '') + '.0'
+
+          Invoke-ps2exe `
+            -inputFile  "installer\install.ps1" `
+            -outputFile "SwitchWakerHD-Installer.exe" `
+            -title       "SwitchWakerHD Installer" `
+            -description "Automatic installer for SwitchWakerHD $rawTag - Wind Waker HD on Nintendo Switch" `
+            -company     "centollOS" `
+            -product     "SwitchWakerHD" `
+            -version     $exeVer `
+            -copyright   "SwitchWakerHD by centollOS (GPLv3) - github.com/centollOS/SwitchWakerHD" `
+            -requireAdmin `
+            -sta
+
+      - name: Compute SHA256 of installer
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash SwitchWakerHD-Installer.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  SwitchWakerHD-Installer.exe" | Out-File -Encoding ascii SwitchWakerHD-Installer.exe.sha256
+          Write-Host "SHA256: $hash"
+
+      - name: Upload installer to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            SwitchWakerHD-Installer.exe
+            SwitchWakerHD-Installer.exe.sha256

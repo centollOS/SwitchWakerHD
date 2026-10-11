@@ -5,6 +5,32 @@ comes with it**: you build it on your computer from your own copy of the game, w
 the result to the SD card. What you build contains the game, so it is for your own console only: do not
 share it.
 
+## Windows: Easy Installer (recommended)
+
+On **Windows 10/11**, an automatic installer handles everything for you: Python, devkitPro, the release
+download, and the build. You only need your own personal dump of the game.
+
+**[⬇ Download SwitchWakerHD-Installer.exe](https://github.com/centollOS/SwitchWakerHD/releases/latest/download/SwitchWakerHD-Installer.exe)**
+
+1. Download the `.exe` above and double-click it.
+2. Accept the UAC prompt (the installer needs Administrator rights to install devkitPro).
+3. When prompted, accept the devkitPro license and keep the default path (`C:\devkitPro`).
+4. Select your game dump using the file picker (disc image, Cemu archive, or extracted folder).
+5. Wait for the build (10–30 minutes). The installer then asks for your SD card drive letter and copies the files.
+
+> **Windows SmartScreen** may show *"Windows protected your PC"* on first run because the installer is
+> not code-signed. Click **More info → Run anyway**. This is expected for open-source unsigned executables.
+> The [source code](installer/install.ps1) and [build script](installer/build.ps1) are in this repository.
+
+The installer is multilingual: it uses **English** or **Spanish** automatically based on your Windows
+display language.
+
+---
+
+*For macOS, Linux, or manual Windows setup, continue below.*
+
+---
+
 ## 1. What you need
 
 | | |
