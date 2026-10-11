@@ -1427,20 +1427,21 @@ Surface* mip_chain(Surface* s, const uint32_t* texWords) {
     while ((std::max(s->width, s->height) >> full) > 0) full++;
     const uint32_t mips = std::min({d.mips, full, 16u});
     if (mips <= 1) return s;
-    // the game's own levels, and a key of everything the chain is built from
+    // the game's own levels
     Surface* levels[16] = {};
-    uint64_t key = s->writeSeq * 0x9E3779B97F4A7C15ull;
     for (uint32_t l = 1; l < mips; l++) {
         levels[l] = gfx::render_mips::game_level(d, l, S.byAddr);
         if (levels[l] && (!levels[l]->img.valid || !same_2d_class(levels[l], s))) levels[l] = nullptr;
-        key = (key ^ (levels[l] ? levels[l]->writeSeq + l : l)) * 0xFF51AFD7ED558CCDull;
     }
+    // per level, what it was last copied from (the surface and its writeSeq; a halved level: none)
     struct Chain {
-        uint64_t key = ~0ull;
         std::unique_ptr<Surface> c;
+        const Surface* from[16] = {};
+        uint64_t seq[16] = {};
     };
     static std::unordered_map<Surface*, Chain> chains;
-    auto& [seq, c] = chains[s];
+    Chain& ch = chains[s];
+    auto& c = ch.c;
     if (c && (c->mips != mips || c->width != s->width || c->height != s->height || c->fmt.image != s->fmt.image)) {
         destroy_surface_image(c.get());
         c.reset();
@@ -1455,27 +1456,47 @@ Surface* mip_chain(Surface* s, const uint32_t* texWords) {
         c->mips = mips;  // (the image at the guest size: create_surface_image keeps a mip chain at scale 1)
         c->gpuWritten = true;
         create_surface_image(c.get());
-        seq = ~0ull;
+        for (uint32_t l = 0; l < 16; l++) ch.seq[l] = ~0ull;
     }
-    if (seq == key) return c.get();
-    if (g_traceFrame) trace_event("mip chain of %s (%u levels)", trace_name(s).c_str(), mips);
-    // level 0 from the surface (its internal resolution down to the guest size), each further level the game's
-    // own when it rendered one, else the previous level halved
-    uint32_t fromGame = 0;
-    blit(s, 0, 0, s->width, s->height, c.get(), 0, 0, c->width, c->height);
-    for (uint32_t l = 1; l < mips; l++) {
+    // Only the levels whose source changed are copied: the game renders its chain a level at a time, each pass
+    // sampling the level before, so a whole copy at every lookup would copy the chain once per level per frame.
+    // Level 0 from the surface (its internal resolution down to the guest size), each further level the game's
+    // own when it rendered one, else the previous level halved (again when that one was copied)
+    static uint64_t g_lookups = 0, g_levelCopies = 0, g_logFrame = 0;
+    g_lookups++;
+    bool copied = false, below = false;  // below: the previous level was copied now
+    for (uint32_t l = 0; l < mips; l++) {
+        const Surface* src = l == 0 ? s : levels[l];
+        const uint64_t seq = src ? src->writeSeq : 0;
+        if (src ? ch.from[l] == src && ch.seq[l] == seq : !below && ch.from[l] == nullptr && ch.seq[l] != ~0ull) {
+            below = false;
+            continue;
+        }
+        if (!copied && g_traceFrame) trace_event("mip chain of %s (%u levels) from level %u", trace_name(s).c_str(), mips, l);
         const uint32_t w = std::max(c->width >> l, 1u), h = std::max(c->height >> l, 1u);
-        if (Surface* g = levels[l]) {
-            blit(g, 0, 0, g->width, g->height, c.get(), l, 0, w, h);
-            fromGame++;
-        } else
+        if (src)
+            blit(const_cast<Surface*>(src), 0, 0, src->width, src->height, c.get(), l, 0, w, h);
+        else
             blit(c.get(), l - 1, 0, std::max(c->width >> (l - 1), 1u), std::max(c->height >> (l - 1), 1u), c.get(), l, 0, w, h);
+        ch.from[l] = src;
+        ch.seq[l] = seq;
+        below = copied = true;
+        g_levelCopies++;
     }
-    note_write(c.get());
-    seq = key;
+    if (copied) note_write(c.get());
+    if (R.frame >= g_logFrame + 600) {
+        if (g_logFrame)
+            LOG("[dk] mip chains: %.1f lookups, %.2f level copies per frame", double(g_lookups) / double(R.frame - g_logFrame),
+                double(g_levelCopies) / double(R.frame - g_logFrame));
+        g_logFrame = R.frame;
+        g_lookups = g_levelCopies = 0;
+    }
     static int logged = 0;
-    if (logged++ < 8)
+    if (copied && logged++ < 8) {
+        uint32_t fromGame = 0;
+        for (uint32_t l = 1; l < mips; l++) fromGame += levels[l] != nullptr;
         LOG("[dk] mip chain for %s: %u levels, %u of them the game's own", describe(s).c_str(), mips, fromGame);
+    }
     return c.get();
 }
 
