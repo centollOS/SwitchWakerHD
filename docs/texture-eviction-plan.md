@@ -1,6 +1,6 @@
 # Texture eviction: the image heap stops growing with every new place (plan)
 
-Branch `feature/texture-eviction`. Issue #11. Status: plan (2026-10-11).
+Branch `feature/texture-eviction`. Issue #11. Status: console-tested (2026-10-11), perf check pending.
 
 ## Why
 
@@ -62,3 +62,18 @@ would have to be kept or proven redrawn), freeing empty chunks, the rescale pool
   used` stops falling with every place.
 - Perf: `bench` (perf/benchmark) lava / windfall against main, the evictions must not cost a frame in a settled
   scene.
+
+## Results (2026-10-11, console, European game, 8cafb51)
+
+- Restore path (`evict idle 60`, debug command): Windfall, Outset, Dragon Roost Cavern, Windfall again: 312 textures
+  out at once, 189 restored for the second Windfall; screenshots as before, no errors in the log, image heap 3 chunks.
+- Prepare graphics, docked, internal resolution 1.50 with dynamic resolution, the player's Quest Log loaded:
+  - places 27 → 63 in 6 min: image heap 4 chunks (224-247 MiB), heap never used 719 → 702 MiB; ended by the game's
+    own assert on M2tower → M_DaiB (c_xyz.cpp:285, prepare-graphics-plan.md), not the renderer
+  - places 75 → 127 ("complete: 53 places in 7 min, 0 skipped"): 5 chunks from place ~80 to the end (one chunk added
+    in the whole run after start-up), 26 evictions under memory pressure instead of new chunks, up to 855 textures
+    out at once, heap never used 687 → 608 MiB; no errors
+  - before (issue #11): HOME after ~7 places, heap never used falling with every place.
+- Prepare graphics restarted from the title (no Link loaded) visits one place per restart: a Prepare graphics problem,
+  not this change.
+
