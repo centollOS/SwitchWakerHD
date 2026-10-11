@@ -245,7 +245,7 @@ Surface* volume_source(Surface* s, const uint32_t* texWords);
 // with the mip chain, its levels the game's own rendered ones (GPU-written surfaces at the descriptor's mip
 // addresses: the bloom chain, the light buffer) or else s halved; made again when one of them was written.
 // As gfx/vulkan's with_mip_chain (upstream e40b7e6, after GreenNaugahyde/ZeldaWWHDRecompAndroid 73b54e1);
-// rt_mips_enabled (the Switch tab; WWHD_NO_RT_MIPS: off at start): off, s itself (issue #15: the bloom read only level 0)
+// rt_mips_enabled (the Switch tab, off by default; WWHD_RT_MIPS=1: on at start): off, s itself (issue #15: the bloom read only level 0)
 // Only the levels the sampler's LOD clamp lets it read are brought up to date (and the ones they are halved from).
 Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* samplerWords);
 // copy (scaled) between two surfaces' levels/layers; depth always through dkCmdBufBlitImage (plan section 3)

@@ -1016,7 +1016,7 @@ void tab_switch() {
             hostui::post([v] { hostui::set(kKeyRtMips, v ? "1" : "0"); });
         }
         help("The glow around the sky and bright places, and the haze over far places, as on the Wii U.\n"
-             "Costs a little GPU time: if the frame rate drops, turn it off.");
+             "Experimental: some shadows flicker when the camera turns. Costs a little GPU time.");
     }
 
     heading("Frame rate counter (top left)");

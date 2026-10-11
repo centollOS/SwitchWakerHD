@@ -19,7 +19,7 @@ void set_fps_overlay_mode(int mode);
 bool aniso();
 void set_aniso(bool on);
 // the bloom chain and distance haze (issue #15): render targets sampled with more levels than they have get a mip
-// chain of the game's own rendered levels (gfx/deko mip_chain); on by default, WWHD_NO_RT_MIPS=1 off; any thread
+// chain of the game's own rendered levels (gfx/deko mip_chain); off by default (shadows flicker with it: issue #15 follow-up), WWHD_RT_MIPS=1 on; any thread
 bool rt_mips();
 void set_rt_mips(bool on);
 float dynamic_res_scale();  // the internal resolution dynamic resolution has chosen (1 when off)

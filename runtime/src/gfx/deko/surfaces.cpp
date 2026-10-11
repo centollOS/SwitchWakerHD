@@ -1411,7 +1411,11 @@ Surface* volume_source(Surface* s, const uint32_t* texWords) {
 }
 
 namespace {
-std::atomic<bool> g_rtMips{getenv("WWHD_NO_RT_MIPS") == nullptr};
+// off by default while shadows flickering with it on is looked into (issue #15 follow-up); WWHD_RT_MIPS=1 on at start
+std::atomic<bool> g_rtMips{[] {
+    const char* e = getenv("WWHD_RT_MIPS");
+    return e && atoi(e) != 0;
+}()};
 }
 bool rt_mips_enabled() { return g_rtMips.load(std::memory_order_relaxed); }
 void set_rt_mips(bool on) {
