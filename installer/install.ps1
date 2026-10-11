@@ -457,7 +457,9 @@ Write-Host (T 'game_opt1') -ForegroundColor White
 Write-Host (T 'game_opt2') -ForegroundColor White
 Write-Host (T 'game_opt3') -ForegroundColor White
 Write-Host ''
-$choice = Read-Host (T 'game_prompt')
+Write-Host (T 'game_prompt') -ForegroundColor White -NoNewline
+Write-Host ' ' -NoNewline
+$choice = (Read-Host).Trim()
 
 Add-Type -AssemblyName System.Windows.Forms
 
@@ -524,7 +526,9 @@ Write-Host ''
 Write-Host (T 'sd_header') -ForegroundColor White
 Write-Host (T 'sd_hint')   -ForegroundColor Gray
 Write-Host ''
-$sdLetter = Read-Host (T 'sd_prompt')
+Write-Host (T 'sd_prompt') -ForegroundColor White -NoNewline
+Write-Host ' ' -NoNewline
+$sdLetter = (Read-Host).Trim()
 
 if ($sdLetter -match '^[A-Za-z]$') {
     $sdDrive = "$($sdLetter.ToUpper()):"
