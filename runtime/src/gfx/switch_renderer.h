@@ -19,8 +19,8 @@ void set_fps_overlay_mode(int mode);
 bool aniso();
 void set_aniso(bool on);
 // the bloom and the distance blur (issue #15): the game samples its bloom chain and its half-size picture with more
-// levels than the render targets have; gfx/deko mip_chain makes those levels. Off by default (WWHD_BLOOM=1,
-// WWHD_DISTANCE_BLUR=1 on at start); any thread
+// levels than the render targets have; gfx/deko mip_chain makes those levels. On by default (WWHD_BLOOM=0,
+// WWHD_DISTANCE_BLUR=0 off at start); any thread
 bool bloom();
 void set_bloom(bool on);
 bool distance_blur();

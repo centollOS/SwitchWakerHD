@@ -1413,9 +1413,9 @@ Surface* volume_source(Surface* s, const uint32_t* texWords) {
 namespace {
 bool env_on(const char* name) {
     const char* e = getenv(name);
-    return e && atoi(e) != 0;
+    return !e || atoi(e) != 0;
 }
-// the Switch tab's two options (off by default; WWHD_BLOOM=1 / WWHD_DISTANCE_BLUR=1 on at start); the other chains
+// the Switch tab's two options (on by default; WWHD_BLOOM=0 / WWHD_DISTANCE_BLUR=0 off at start); the other chains
 // (the light buffer's, the depth reduction's: shadows and ambient occlusion as on the Wii U) are always made, unless
 // WWHD_NO_RT_MIPS=1 turns every chain off
 std::atomic<bool> g_bloom{env_on("WWHD_BLOOM")}, g_blur{env_on("WWHD_DISTANCE_BLUR")};
