@@ -1821,36 +1821,8 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             for (DkBlendFactor f : {DkBlendFactor(bs.srcColorBlendFactor), DkBlendFactor(bs.dstColorBlendFactor),
                                      DkBlendFactor(bs.srcAlphaBlendFactor), DkBlendFactor(bs.dstAlphaBlendFactor)})
                 constantColor |= constant_factor(f);
-            // deko3d 0.5.0's dkCmdBufBindBlendStates writes the color destination factor as the alpha one too
-            // (gpu_3d_state.cpp FuncAlphaDst; issue #12: the place names' alpha-only draw left the target's alpha
-            // as it was, and the scratch pattern over the name, blended by that alpha, covered the letters). When
-            // one part leaves the target as it is (ZERO, ONE), that part's channels are masked off and the other
-            // part's factors serve both.
-            if (bs.dstAlphaBlendFactor != bs.dstColorBlendFactor) {
-                auto keeps = [](DkBlendFactor src, DkBlendFactor dst, DkBlendOp op) {
-                    return src == DkBlendFactor_Zero && dst == DkBlendFactor_One &&
-                           (op == DkBlendOp_Add || op == DkBlendOp_RevSub);
-                };
-                if (keeps(DkBlendFactor(bs.srcColorBlendFactor), DkBlendFactor(bs.dstColorBlendFactor),
-                          DkBlendOp(bs.colorBlendOp))) {
-                    bs.srcColorBlendFactor = bs.srcAlphaBlendFactor;
-                    bs.dstColorBlendFactor = bs.dstAlphaBlendFactor;
-                    bs.colorBlendOp = bs.alphaBlendOp;
-                    mask &= 8;
-                } else if (keeps(DkBlendFactor(bs.srcAlphaBlendFactor), DkBlendFactor(bs.dstAlphaBlendFactor),
-                                 DkBlendOp(bs.alphaBlendOp))) {
-                    bs.srcAlphaBlendFactor = bs.srcColorBlendFactor;
-                    bs.dstAlphaBlendFactor = bs.dstColorBlendFactor;
-                    bs.alphaBlendOp = bs.colorBlendOp;
-                    mask &= 7;
-                } else {
-                    char t[48];
-                    snprintf(t, sizeof t, "%08X", r[REGADDR::CB_BLEND0_CONTROL + i]);
-                    log_once(0xB1E0000000ull | r[REGADDR::CB_BLEND0_CONTROL + i],
-                             "[dk] blend %s: its alpha destination factor differs from the color one (deko3d uses the "
-                             "color one for both)", t);
-                }
-            }
+            // separate alpha factors reach the GPU as given: deko3d is built from source with its alpha destination
+            // factor fixed (runtime/third_party/deko3d/PATCHES.md patch 1; issues #12 and #7)
             dkColorWriteStateSetMask(&cw, i, mask);
             if (!(gs.blendKnown & (1u << i)) || !same_bytes(gs.blend[i], bs)) {
                 dkCmdBufBindBlendStates(R.cmd, i, &bs, 1);

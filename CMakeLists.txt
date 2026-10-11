@@ -150,6 +150,11 @@ endif()
 # 'uamlib' target (GLSL -> DKSH, uam_api.h) for the coming deko3d renderer; built only when something
 # links it. -DWWHD_UAM_TEST=ON adds uam_dksh_test (desktop).
 add_subdirectory(runtime/third_party/uam EXCLUDE_FROM_ALL)
+# ---- deko3d (devkitPro's Switch GPU API, zlib, runtime/third_party/deko3d, 0.5.0 + PATCHES.md): built from
+# source for its fixes, in place of devkitPro's libdeko3d / libdeko3dd
+if(WWHD_RENDERER STREQUAL "DEKO3D")
+  add_subdirectory(runtime/third_party/deko3d EXCLUDE_FROM_ALL)
+endif()
 
 # ---- build identification (runtime/src/build_info.h): version and commit, rewritten by
 # cmake/BuildInfo.cmake on every build when they change. Release builds pass the tag.
@@ -323,15 +328,15 @@ if(WWHD_HAS_DEKO3D)
     list(APPEND _dksh dksh_${_name})
   endforeach()
   dkp_add_embedded_binary_library(deko_shaders ${_dksh})
-  # libdeko3dd: deko3d's checks of every call and its messages (gfx/deko/backend.cpp debug_message: a misuse
+  # deko3d_debug (libdeko3dd): deko3d's checks of every call and its messages (gfx/deko/backend.cpp debug_message: a misuse
   # or failure is logged before the process ends). Release libdeko3d aborts with only a 2359-xxxx result.
   # On while the backend is new (also in Release builds); off for performance measurements.
   option(WWHD_DEKO3D_DEBUG_LIB "deko3d: link the debug library libdeko3dd (also in Release builds)" OFF)
   if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(wwhd PRIVATE WWHD_DEKO3D_DEBUG_LIB=1)
-    target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3dd)
+    target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3d_debug)
   else()
-    target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3d)
+    target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3d_release)
   endif()
   # uam on the console: the game shaders that no DKSH cache has (gfx/deko/shaders_dk.cpp, its worker thread)
   target_link_libraries(wwhd PRIVATE uamlib)
