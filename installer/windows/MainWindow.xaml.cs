@@ -658,7 +658,10 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            XferStatus(ex is OperationCanceledException ? Str.Get("cancelled") : ex.Message, "Bad");
+            var msg = ex is OperationCanceledException ? Str.Get("cancelled") : ex.Message;
+            XferStatus(msg, "Bad");
+            EnqueueLog(msg, LogKind.Error);
+            if (!(ex is InstallException || ex is OperationCanceledException)) EnqueueLog(ex.ToString(), LogKind.Error);
         }
         finally { SetXferBusy(false); }
     }

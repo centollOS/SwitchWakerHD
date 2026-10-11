@@ -208,7 +208,8 @@ sealed class InstallEngine : EngineBase
         Say(Str.Get("sd_copying", drive));
         SetProgress(null);
         // robocopy: 0-7 is success (files copied, extra files, ...), 8 and up is failure.
-        var rc = Exec("robocopy", $"\"{SdOut}\" \"{drive.TrimEnd('\\')}\\\" /E /R:2 /W:2 /NP /NDL /NJH /NJS", check: false);
+        // "D:\" would escape the closing quote (Windows argv rules); "D:\\" is D:\ for robocopy.
+        var rc = Exec("robocopy", $"\"{SdOut}\" \"{drive.TrimEnd('\\')}\\\\\" /E /R:2 /W:2 /NP /NDL /NJH /NJS", check: false);
         if (rc < 0 || rc >= 8) throw new InstallException(Str.Get("sd_fail", rc));
         Ok(Str.Get("sd_copied", drive));
     }
