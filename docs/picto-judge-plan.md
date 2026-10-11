@@ -31,7 +31,8 @@ renderer's issue #12 workaround (masking one part's channels) is removed: the li
 
 - Console, Windfall, after the fix: the write-back's alpha holds subject numbers (0, 1, 3, 4; 63 elsewhere)
   and the game judged a picture of a person "Good" (never before).
-- Pending: place names (#12) with the workaround removed; Lenzo's own quest with a save that has it.
+- Place names (#12) with the renderer workaround removed: correct on the console (user, 2026-10-12).
+- Pending: Lenzo's own quest with a save that has it.
 
 # Picto Box pictures cropped to 80% (black right and bottom bands)
 
