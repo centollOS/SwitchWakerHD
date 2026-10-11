@@ -1422,7 +1422,8 @@ void set_rt_mips(bool on) {
     if (g_rtMips.exchange(on) != on) LOG("[dk] rendered mip chains (bloom, issue #15) %s", on ? "on" : "off");
 }
 
-Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* samplerWords) {
+Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* samplerWords, Surface* const* targets,
+                   size_t numTargets) {
     if (!rt_mips_enabled() || !s || !s->img.valid || !s->gpuWritten || s->mips != 1 || s->slices != 1 || s->fmt.depth ||
         s->fmt.compressed || s->fmt.kind != FormatInfo::FLOAT || s->img.type != DkImageType_2D || !format_can_2d(s->fmt.image))
         return s;
@@ -1473,6 +1474,16 @@ Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* sampler
     uint32_t lo = std::min(uint32_t(std::min(minLod, maxLod)), mips - 1);
     const uint32_t hi = std::min(uint32_t(std::ceil(std::max(minLod, maxLod))), mips - 1);
     while (lo > 0 && !levels[lo]) lo--;  // a halved level needs the ones below it
+    // the draw renders into a level it can read: the one-level surface, as before the chains
+    for (uint32_t l = lo; l <= hi; l++)
+        for (size_t t = 0; levels[l] && t < numTargets; t++)
+            if (targets[t] == levels[l]) {
+                static int logged = 0;
+                if (logged++ < 4)
+                    LOG("[dk] mip chain of %s not used: the draw renders into its level %u (%s)", describe(s).c_str(), l,
+                        describe(levels[l]).c_str());
+                return s;
+            }
     // Level 0 from the surface (its internal resolution down to the guest size), each further level the game's
     // own when it rendered one, else the previous level halved (again when that one was copied); only levels whose
     // source changed are copied

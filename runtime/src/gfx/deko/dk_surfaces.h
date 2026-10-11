@@ -247,7 +247,12 @@ Surface* volume_source(Surface* s, const uint32_t* texWords);
 // As gfx/vulkan's with_mip_chain (upstream e40b7e6, after GreenNaugahyde/ZeldaWWHDRecompAndroid 73b54e1);
 // rt_mips_enabled (the Switch tab, off by default; WWHD_RT_MIPS=1: on at start): off, s itself (issue #15: the bloom read only level 0)
 // Only the levels the sampler's LOD clamp lets it read are brought up to date (and the ones they are halved from).
-Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* samplerWords);
+// A draw that renders into one of the levels its sampler can read gets s itself, as before the chains: the game's
+// depth reduction renders level 1 of F40E8000 sampling that texture with the LOD clamped to 1, which the one-level
+// target answers with level 0; read from the chain, level 1 would be made from itself and keep old depths (shadows
+// darkening while the camera turns, issue #15).
+Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* samplerWords, Surface* const* targets,
+                   size_t numTargets);
 // copy (scaled) between two surfaces' levels/layers; depth always through dkCmdBufBlitImage (plan section 3)
 void blit(Surface* src, uint32_t srcLevel, uint32_t srcLayer, uint32_t sw, uint32_t sh, Surface* dst,
           uint32_t dstLevel, uint32_t dstLayer, uint32_t dw, uint32_t dh);
