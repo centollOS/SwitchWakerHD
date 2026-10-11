@@ -32,3 +32,18 @@ renderer's issue #12 workaround (masking one part's channels) is removed: the li
 - Console, Windfall, after the fix: the write-back's alpha holds subject numbers (0, 1, 3, 4; 63 elsewhere)
   and the game judged a picture of a person "Good" (never before).
 - Pending: place names (#12) with the workaround removed; Lenzo's own quest with a save that has it.
+
+# Picto Box pictures cropped to 80% (black right and bottom bands)
+
+Report (user, 2026-10-12, console screenshot): every picture fills only the top-left 80% of its frame.
+
+- Console diagnostics (picture draws: targets, viewports, sampled textures, constants, vertices): the first
+  picture pass draws the scene (`F5807800`, 1280x720) into `20974000` 1600x900 with the full viewport and UVs
+  inside the texture (0.0625..0.9375), but with the scene's depth buffer `F500E000` still bound: 1280x720.
+- deko3d's `dkCmdBufBindRenderTargets` sets the screen scissor to the smallest bound target, so only
+  1280x720 of the 1600x900 picture was drawn (1280/1600 = 0.8). On the Wii U that depth buffer is 1920x1080
+  (the game's high size; it always takes its low size here, `docs/switch-port.md` "Why 720p").
+- Fix (`gfx/deko/draw.cpp`, target selection): a depth buffer smaller than a color target is left out when
+  the draw cannot use it (no stencil; depth test off, or ALWAYS without writes). Otherwise it stays bound
+  and `[dk] depth buffer ... smaller than a color target and used` is logged once.
+- Console: the picture fills its frame (user confirmed).

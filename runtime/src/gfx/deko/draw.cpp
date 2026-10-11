@@ -1388,6 +1388,31 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         tm.depth = depth;
         tm.depthSlice = depthSlice;
     }
+    // a depth buffer smaller than the color targets: deko3d clips drawing to the smallest target it binds (the
+    // screen scissor of dkCmdBufBindRenderTargets), Latte does not. The Picto Box draws its 1600x900 picture with the
+    // scene's depth buffer still bound, 1920x1080 on the Wii U but 1280x720 here (the game's low size, "Why 720p" in
+    // docs/switch-port.md): only 80% of the picture was drawn. A depth buffer this draw cannot change the outcome
+    // with (test ALWAYS, no depth or stencil writes) is left out.
+    if (depth) {
+        bool smaller = false;
+        for (auto* c : colors)
+            if (c && (c->width > depth->width || c->height > depth->height)) smaller = true;
+        if (smaller) {
+            LATTE_DB_DEPTH_CONTROL dc;
+            memcpy((void*)&dc, r + REGADDR::DB_DEPTH_CONTROL, 4);
+            const bool unused = !dc.get_STENCIL_ENABLE() &&  // (Z_FUNC 7: ALWAYS)
+                                (!dc.get_Z_ENABLE() || (uint32_t(dc.get_Z_FUNC()) == 7 && !dc.get_Z_WRITE_ENABLE()));
+            if (unused) {
+                depth = nullptr;
+            } else {
+                char t[64];
+                snprintf(t, sizeof t, "%08X %ux%u, DB_DEPTH_CONTROL %08X", depth->addr, depth->width, depth->height,
+                         r[REGADDR::DB_DEPTH_CONTROL]);
+                log_once(0xD5A11E0000000000ull | depth->addr,
+                         "[dk] depth buffer %s smaller than a color target and used: drawing stops at its size", t);
+            }
+        }
+    }
     // each render target at the internal resolution it should have now (rescale_surface keeps contents); when
     // some could take it but others wait for an allocation budget, all of them take it now
     if (depth) {
