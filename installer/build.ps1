@@ -12,8 +12,8 @@ Write-Host ""
 
 # ── Install .NET 8 SDK if missing ─────────────────────────────────────────────
 if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
-    Write-Host "  Installing .NET 8 SDK via winget..." -ForegroundColor White
-    winget install Microsoft.DotNet.SDK.8 --accept-package-agreements --accept-source-agreements --silent
+    Write-Host "  Installing .NET SDK via winget..." -ForegroundColor White
+    winget install Microsoft.DotNet.SDK.6 --accept-package-agreements --accept-source-agreements --silent
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
                 [System.Environment]::GetEnvironmentVariable("Path","User")
 }
