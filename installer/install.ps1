@@ -81,7 +81,7 @@ $S = @{
         dlg_filter_wua   = 'Archivo Cemu (*.wua)|*.wua|Todos los archivos (*.*)|*.*'
         dlg_folder       = 'Selecciona la carpeta raiz del juego (contiene code/, content/, meta/)'
         dlg_fallback     = 'El dialogo no devolvio una ruta. Escribe la ruta manualmente:'
-        dlg_type_path    = '  Ruta de la carpeta del juego'
+        dlg_type_path    = '  Escribe o pega la ruta de la carpeta del juego (contiene code/, content/, meta/):'
         build_banner     = @(
             '  =================================================',
             '   Construyendo... puede tardar entre 10-30 min.  ',
@@ -179,7 +179,7 @@ $S = @{
         dlg_filter_wua   = 'Cemu archive (*.wua)|*.wua|All files (*.*)|*.*'
         dlg_folder       = 'Select the game root folder (contains code/, content/, meta/)'
         dlg_fallback     = 'The dialog returned no path. Type the path manually:'
-        dlg_type_path    = '  Game folder path'
+        dlg_type_path    = '  Type or paste the game folder path (must contain code/, content/, meta/):'
         build_banner     = @(
             '  =================================================',
             '   Building... this may take 10-30 minutes.        ',
@@ -482,21 +482,10 @@ switch ($choice.Trim()) {
         $buildArg = '--wua'
     }
     '3' {
-        $gamePath = $null
-        # Shell.Application COM is more reliable than FolderBrowserDialog in compiled exes
-        try {
-            $shell  = New-Object -ComObject Shell.Application
-            $picked = $shell.BrowseForFolder(0, (T 'dlg_folder'), 0)
-            if ($picked) { $gamePath = $picked.Self.Path }
-        }
-        catch { }
-        # Text input fallback if COM dialog failed or was cancelled
-        if ([string]::IsNullOrWhiteSpace($gamePath)) {
-            Write-Host ''
-            Write-Warn (T 'dlg_fallback')
-            $typed    = Read-Host (T 'dlg_type_path')
-            $gamePath = $typed.Trim().Trim('"').Trim("'")
-        }
+        Write-Host ''
+        Write-Host (T 'dlg_type_path') -ForegroundColor Gray
+        $typed    = Read-Host '  >'
+        $gamePath = $typed.Trim().Trim('"').Trim("'")
         $buildArg = '--game-dir'
     }
     default { Exit-WithError (T 'game_invalid') }
