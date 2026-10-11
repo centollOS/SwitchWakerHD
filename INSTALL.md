@@ -14,16 +14,24 @@ download, and the build. You only need your own personal dump of the game.
 
 1. Download the `.exe` above and double-click it.
 2. Accept the UAC prompt (the installer needs Administrator rights to install devkitPro).
-3. When prompted, accept the devkitPro license and keep the default path (`C:\devkitPro`).
-4. Select your game dump using the file picker (disc image, Cemu archive, or extracted folder).
-5. Wait for the build (10–30 minutes). The installer then asks for your SD card drive letter and copies the files.
+3. Pick your game dump: a Cemu archive (`.wua`), a disc image (`.wux`/`.wud`, with its keys), or an
+   extracted folder. You can also drag it onto the window.
+4. Press **Install**. If devkitPro is not installed yet, the installer asks you to open its setup: accept the
+   license and keep the default path (`C:\devkitPro`).
+5. Wait for the build (10–30 minutes), then choose how the files reach the Switch:
+   - **Over a USB cable, with DBI**: on the Switch, open DBI and choose *Run MTP responder*, then connect the cable.
+   - **With the microSD card in the PC**: a card reader, or hekate's *USB Tools > SD Card* (UMS).
+   - **By hand**: the installer opens the folder; copy its contents to the root of the SD card.
+
+If something fails, *Show details* shows what happened; the full log is in
+`%USERPROFILE%\SwitchWakerHD-Build\installer.log`.
 
 > **Windows SmartScreen** may show *"Windows protected your PC"* on first run because the installer is
 > not code-signed. Click **More info → Run anyway**. This is expected for open-source unsigned executables.
-> The [source code](installer/install.ps1) and [build script](installer/build.ps1) are in this repository.
+> The [source code](installer/src) and [build script](installer/build.ps1) are in this repository.
 
-The installer is multilingual: it uses **English** or **Spanish** automatically based on your Windows
-display language.
+The installer is multilingual: it starts in **English** or **Spanish** based on your Windows display
+language, and the button in its corner switches between them.
 
 ---
 

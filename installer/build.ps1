@@ -1,9 +1,8 @@
 #Requires -Version 5.1
-# build.ps1 - Builds SwitchWakerHD-Installer.exe from the C# project.
+# build.ps1 - Builds SwitchWakerHD-Installer.exe (WPF, .NET Framework 4.8) from installer/src.
 # Run this once on Windows to generate the distributable installer.
 
 $ErrorActionPreference = 'Stop'
-$ProjectDir = Join-Path $PSScriptRoot "src"
 $OutputDir  = Join-Path $PSScriptRoot "bin"
 
 Write-Host ""
@@ -22,30 +21,30 @@ $sdkVer = dotnet --version 2>$null
 Write-Host "  [OK] .NET SDK: $sdkVer" -ForegroundColor Green
 
 # Build
-Write-Host ""
-Write-Host "  Building SwitchWakerHD-Installer.exe (net48)..." -ForegroundColor White
-Write-Host ""
-
-dotnet publish "$ProjectDir\SwitchWakerHD.Installer.csproj" `
-    --configuration Release `
-    --output "$OutputDir" `
-    --nologo
-
-if ($LASTEXITCODE -ne 0) {
+$projects = @(
+    @{ Proj = "$PSScriptRoot\src\SwitchWakerHD.Installer.csproj"; Exe = "SwitchWakerHD-Installer.exe" }
+)
+foreach ($p in $projects) {
     Write-Host ""
-    Write-Host "  [ERROR] Build failed. Check the output above." -ForegroundColor Red
-    exit 1
+    Write-Host "  Building $($p.Exe) (net48)..." -ForegroundColor White
+    Write-Host ""
+    dotnet publish $p.Proj --configuration Release --output "$OutputDir" --nologo
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "  [ERROR] Build of $($p.Exe) failed. Check the output above." -ForegroundColor Red
+        exit 1
+    }
 }
 
-$exe  = Get-Item "$OutputDir\SwitchWakerHD-Installer.exe"
-$size = [math]::Round($exe.Length / 1KB, 0)
-
 Write-Host ""
 Write-Host "  =================================================" -ForegroundColor Green
-Write-Host "  [OK] SwitchWakerHD-Installer.exe  ($size KB)    " -ForegroundColor Green
+foreach ($p in $projects) {
+    $exe = Get-Item "$OutputDir\$($p.Exe)"
+    Write-Host ("  [OK] {0}  ({1} KB)" -f $p.Exe, [math]::Round($exe.Length / 1KB, 0)) -ForegroundColor Green
+}
 Write-Host "  =================================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "  Path: $($exe.FullName)" -ForegroundColor Gray
+Write-Host "  Path: $OutputDir" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  NOTE: Windows SmartScreen will warn 'unknown app' on first run" -ForegroundColor Yellow
 Write-Host "  because the exe is not code-signed. Click More info > Run anyway." -ForegroundColor Yellow

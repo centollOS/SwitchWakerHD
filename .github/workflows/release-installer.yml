@@ -20,7 +20,7 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - name: Publish installer (net48)
+      - name: Publish installer (net48, WPF)
         shell: pwsh
         run: |
           dotnet publish installer/src/SwitchWakerHD.Installer.csproj `
