@@ -38,6 +38,10 @@ abstract class EngineBase
 
     public string GamePath = "";
     public string GameArg  = "";                      // --image, --wua or --game-dir
+    // Optional (Windows): the console's prod.keys, for the HOME-screen forwarder (.nsp). Only with it are Git,
+    // Pillow and MSYS2's gcc installed (INSTALL.md, "HOME-screen icon"); without it make_sd.py gets
+    // --no-forwarder. Linux never sets it: make_sd.py's forwarder step is the Windows script.
+    public string? ForwarderKeys { get; set; }
 
     public string ReleaseDir { get; protected set; } = "";
     public string SdOut => Path.Combine(ReleaseDir, "build", "sd");
@@ -159,6 +163,7 @@ abstract class EngineBase
         }
         void OnLine(string line)
         {
+            if (line.StartsWith("[+] HOME-screen forwarder")) { Status?.Invoke(Str.Get("fwd_building")); return; }
             var m = StageLine.Match(line);
             if (m.Success)
             {
@@ -177,7 +182,8 @@ abstract class EngineBase
             var pct = (int)(frac * 100);
             if (pct > shownPct) { shownPct = pct; Status?.Invoke(Str.Get("build_s4_pct", pct)); }
         }
-        var rc = Exec(pythonCmd, $"\"{MakeSd(ReleaseDir)}\" {GameArg} \"{GamePath}\"", ReleaseDir, check: false, onLine: OnLine);
+        var forwarder = ForwarderKeys != null ? $" --keys \"{ForwarderKeys}\"" : " --no-forwarder";
+        var rc = Exec(pythonCmd, $"\"{MakeSd(ReleaseDir)}\" {GameArg} \"{GamePath}\"{forwarder}", ReleaseDir, check: false, onLine: OnLine);
         Progress?.Invoke(rc == 0 ? 1 : (double?)null);
         if (rc != 0) throw new InstallException(Str.Get("build_fail", rc));
         Ok(SdOut);

@@ -16,6 +16,10 @@ download, and the build. You only need your own personal dump of the game.
 2. Accept the UAC prompt (the installer needs Administrator rights to install devkitPro).
 3. Pick your game dump: a Cemu archive (`.wua`), a disc image (`.wux`/`.wud`, with its keys), or an
    extracted folder. You can also drag it onto the window.
+   Optional, for a **HOME-screen icon**: choose your console's `prod.keys` (dumped with Lockpick_RCM; they are
+   read where they are, never copied). The installer then also sets up Git, Pillow and MSYS2's gcc and builds
+   the forwarder `.nsp` ([details](tools/switch/forwarder/INSTALL.md)); it travels in `NSP\` with the rest: install it with
+   DBI (*Browse SD card > NSP > wwhd_forwarder.nsp > Install*; it needs current Atmosphère sigpatches).
 4. Press **Install**. If devkitPro is not installed yet, the installer asks you to open its setup: accept the
    license and keep the default path (`C:\devkitPro`).
 5. Wait for the build (10–30 minutes), then choose how the files reach the Switch:

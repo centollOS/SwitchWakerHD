@@ -124,6 +124,11 @@ public partial class MainWindow : Window
         TxtOptDir.Text   = Str.Get("game_opt_dir");  TxtOptDirD.Text = Str.Get("game_opt_dir_d");
         BtnBrowse.Content = Str.Get("btn_browse");
         ValidateGame();
+        TxtFwdH.Text = Str.Get("fwd_h");
+        TxtFwdD.Text = Str.Get("fwd_d");
+        BtnFwdPick.Content = Str.Get("fwd_pick");
+        BtnFwdClear.Content = Str.Get("fwd_clear");
+        ShowKeys();
 
         TxtProgH.Text    = Str.Get("prog_h");
         TxtProgBody.Text = Str.Get("prog_body");
@@ -240,6 +245,29 @@ public partial class MainWindow : Window
         ValidateGame();
     }
 
+    // ── Optional HOME-screen forwarder: the console's prod.keys ─────────────
+    string? keysPath;
+
+    void ShowKeys()
+    {
+        TxtFwdKeys.Text = keysPath ?? Str.Get("fwd_none");
+        TxtFwdKeys.Foreground = (Brush)FindResource(keysPath == null ? "FgDim" : "Fg");
+        BtnFwdClear.Visibility = keysPath == null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    void BtnFwdPick_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog { Title = Str.Get("fwd_dlg_title"), Filter = Str.Get("fwd_dlg_filter") };
+        if (dlg.ShowDialog(this) == true) keysPath = dlg.FileName;
+        ShowKeys();
+    }
+
+    void BtnFwdClear_Click(object sender, RoutedEventArgs e)
+    {
+        keysPath = null;
+        ShowKeys();
+    }
+
     // Dropping the game file or folder on the window picks it and its format.
     void Window_Drop(object sender, DragEventArgs e)
     {
@@ -261,6 +289,7 @@ public partial class MainWindow : Window
     {
         engine.GamePath = gamePath;
         engine.GameArg  = GameArg();
+        engine.ForwarderKeys = keysPath != null && File.Exists(keysPath) ? keysPath : null;
         running = true; failed = false;
         cts = new CancellationTokenSource();
         for (int i = 0; i < stepStates.Length; i++) SetStep(i, StepState.Pending);
@@ -497,6 +526,12 @@ public partial class MainWindow : Window
     void EnterDone()
     {
         TxtOut.Text = engine.SdOut;
+        // The forwarder lands in the SD folder's NSP\ and travels with it, whichever way is chosen.
+        var nsp = System.IO.Path.Combine(engine.SdOut, "NSP", "wwhd_forwarder.nsp");
+        var nspFresh = File.Exists(nsp) && File.GetLastWriteTime(nsp) > DateTime.Now - elapsed.Elapsed - TimeSpan.FromMinutes(1);
+        TxtFwdDone.Visibility = keysPath != null ? Visibility.Visible : Visibility.Collapsed;
+        TxtFwdDone.Text = Str.Get(nspFresh ? "fwd_done" : "fwd_missing");
+        TxtFwdDone.Foreground = (Brush)FindResource(nspFresh ? "Fg" : "Warn");
         try
         {
             var files = Directory.GetFiles(engine.SdOut, "*", SearchOption.AllDirectories);

@@ -60,6 +60,23 @@ static class Str
         ["dlg_filter_wua"] = ("Archivo de Cemu (*.wua)|*.wua|Todos (*.*)|*.*",       "Cemu archive (*.wua)|*.wua|All files (*.*)|*.*"),
         ["dlg_folder"]     = ("Selecciona la carpeta del juego (contiene code, content y meta)", "Select the game folder (contains code, content and meta)"),
 
+        // HOME-screen forwarder (optional)
+        ["fwd_h"]          = ("Icono en el menú HOME (opcional)",                    "HOME-screen icon (optional)"),
+        ["fwd_d"]          = ("Crea un forwarder .nsp para abrir el juego desde el menú HOME, sin mantener R. Necesita las prod.keys de tu Switch (se sacan con Lockpick_RCM): se leen desde donde estén, no se copian.",
+                               "Builds a forwarder .nsp that starts the game from the HOME screen, without holding R. It needs your Switch's prod.keys (dump them with Lockpick_RCM): they are read where they are, never copied."),
+        ["fwd_none"]       = ("Sin icono",                                           "No icon"),
+        ["fwd_pick"]       = ("Elegir prod.keys...",                                 "Choose prod.keys..."),
+        ["fwd_clear"]      = ("Quitar",                                              "Remove"),
+        ["fwd_dlg_title"]  = ("Selecciona las prod.keys de tu Switch",               "Select your Switch's prod.keys"),
+        ["fwd_dlg_filter"] = ("Claves (*.keys)|*.keys|Todos (*.*)|*.*",              "Keys (*.keys)|*.keys|All files (*.*)|*.*"),
+        ["fwd_git"]        = ("Instalando Git (para el icono del menú HOME)...",     "Installing Git (for the HOME-screen icon)..."),
+        ["fwd_git_fail"]   = ("No se pudo instalar Git: se construye el juego sin el icono del menú HOME.", "Could not install Git: the game is built without the HOME-screen icon."),
+        ["fwd_building"]   = ("Creando el icono del menú HOME...",                   "Building the HOME-screen icon..."),
+        ["fwd_done"]       = ("Icono del menú HOME: en DBI, Browse SD card > NSP > wwhd_forwarder.nsp > Install (necesita sigpatches de Atmosphère al día).",
+                               "HOME-screen icon: in DBI, Browse SD card > NSP > wwhd_forwarder.nsp > Install (it needs current Atmosphere sigpatches)."),
+        ["fwd_missing"]    = ("No se pudo crear el icono del menú HOME (mira el registro); el juego funciona igual desde el Homebrew Menu.",
+                               "The HOME-screen icon could not be built (see the log); the game works the same from the Homebrew Menu."),
+
         // Progress page
         ["prog_h"]         = ("Instalando",                                          "Installing"),
         ["prog_body"]      = ("Puedes dejar el PC trabajando. El build tarda entre 10 y 30 minutos.", "You can leave the PC working. The build takes 10 to 30 minutes."),
