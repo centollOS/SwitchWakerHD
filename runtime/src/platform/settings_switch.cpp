@@ -365,7 +365,8 @@ void apply_at_start() {
     {
         std::string v;
         if (hostui::get(kKeyAniso, v) && !v.empty()) gfxsw::set_aniso(v == "1");
-        if (hostui::get(kKeyRtMips, v) && !v.empty()) gfxsw::set_rt_mips(v == "1");
+        if (hostui::get(kKeyBloom, v) && !v.empty()) gfxsw::set_bloom(v == "1");
+        if (hostui::get(kKeyDistanceBlur, v) && !v.empty()) gfxsw::set_distance_blur(v == "1");
     }
 }
 

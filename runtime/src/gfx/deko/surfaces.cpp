@@ -1411,20 +1411,28 @@ Surface* volume_source(Surface* s, const uint32_t* texWords) {
 }
 
 namespace {
-// off by default while shadows flickering with it on is looked into (issue #15 follow-up); WWHD_RT_MIPS=1 on at start
-std::atomic<bool> g_rtMips{[] {
-    const char* e = getenv("WWHD_RT_MIPS");
+bool env_on(const char* name) {
+    const char* e = getenv(name);
     return e && atoi(e) != 0;
-}()};
 }
-bool rt_mips_enabled() { return g_rtMips.load(std::memory_order_relaxed); }
-void set_rt_mips(bool on) {
-    if (g_rtMips.exchange(on) != on) LOG("[dk] rendered mip chains (bloom, issue #15) %s", on ? "on" : "off");
+// the Switch tab's two options (off by default; WWHD_BLOOM=1 / WWHD_DISTANCE_BLUR=1 on at start); the other chains
+// (the light buffer's, the depth reduction's: shadows and ambient occlusion as on the Wii U) are always made, unless
+// WWHD_NO_RT_MIPS=1 turns every chain off
+std::atomic<bool> g_bloom{env_on("WWHD_BLOOM")}, g_blur{env_on("WWHD_DISTANCE_BLUR")};
+const bool g_noChains = getenv("WWHD_NO_RT_MIPS") != nullptr;
+}
+bool bloom_enabled() { return g_bloom.load(std::memory_order_relaxed); }
+void set_bloom(bool on) {
+    if (g_bloom.exchange(on) != on) LOG("[dk] bloom (its mip chain, issue #15) %s", on ? "on" : "off");
+}
+bool blur_enabled() { return g_blur.load(std::memory_order_relaxed); }
+void set_blur(bool on) {
+    if (g_blur.exchange(on) != on) LOG("[dk] distance blur (its mip chain, issue #15) %s", on ? "on" : "off");
 }
 
 Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* samplerWords, Surface* const* targets,
                    size_t numTargets) {
-    if (!rt_mips_enabled() || !s || !s->img.valid || !s->gpuWritten || s->mips != 1 || s->slices != 1 || s->fmt.depth ||
+    if (g_noChains || !s || !s->img.valid || !s->gpuWritten || s->mips != 1 || s->slices != 1 || s->fmt.depth ||
         s->fmt.compressed || s->fmt.kind != FormatInfo::FLOAT || s->img.type != DkImageType_2D || !format_can_2d(s->fmt.image))
         return s;
     const SurfaceDesc d = texture_desc(texWords, false);
@@ -1432,6 +1440,9 @@ Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* sampler
     while ((std::max(s->width, s->height) >> full) > 0) full++;
     const uint32_t mips = std::min({d.mips, full, 16u});
     if (mips <= 1) return s;
+    // which option the chain belongs to: the bloom's is the only one with more than two levels (320x180, four);
+    // the half-size picture (640x360 RGB10A2, two levels) gives the distance blur (far places out of focus)
+    if (mips > 2 ? !bloom_enabled() : s->format == 0x019 && !blur_enabled()) return s;
     // the game's own levels
     Surface* levels[16] = {};
     for (uint32_t l = 1; l < mips; l++) {

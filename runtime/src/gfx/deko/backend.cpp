@@ -1476,8 +1476,10 @@ int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }
 bool aniso() { return gfxdk::aniso_enabled(); }
 void set_aniso(bool on) { gfxdk::set_aniso(on); }
-bool rt_mips() { return gfxdk::rt_mips_enabled(); }
-void set_rt_mips(bool on) { gfxdk::set_rt_mips(on); }
+bool bloom() { return gfxdk::bloom_enabled(); }
+void set_bloom(bool on) { gfxdk::set_bloom(on); }
+bool distance_blur() { return gfxdk::blur_enabled(); }
+void set_distance_blur(bool on) { gfxdk::set_blur(on); }
 float dynamic_res_scale() { return gfxdk::res_scale_shown(); }  // the internal resolution in use (dynamic or not)
 bool draw_opt(int which) {
     using namespace gfxdk;

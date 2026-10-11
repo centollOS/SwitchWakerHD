@@ -194,9 +194,9 @@ and comes back at the next start.
   *Vivid* presets. Tame a glaring sea and sky, or make the colours pop.
 - **16x anisotropic filtering:** sharper ground, sand and water textures seen at an angle. It costs
   some GPU time, so it starts off; try it, especially docked.
-- **Bloom and distance haze:** the glow around the sky and bright places and the haze over far
-  places, as on the Wii U. Experimental and off by default for now: some shadows flicker with it
-  when the camera turns. It costs about a tenth of a frame per second where the console is below 30 fps.
+- **Bloom** and **Distance blur:** the glow around the sky and bright places, and far places softly
+  out of focus, as on the Wii U. Each its own option, off by default; together they cost about a
+  tenth of a frame per second where the console is below 30 fps.
 - **Frame-rate counter** in the corner: off, frame rate, or frame rate and load.
 
 ### Performance

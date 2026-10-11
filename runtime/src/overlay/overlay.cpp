@@ -1011,12 +1011,19 @@ void tab_switch() {
     }
     {
         bool v;
-        if (check("Bloom and distance haze", gfxsw::rt_mips(), &v)) {
-            gfxsw::set_rt_mips(v);
-            hostui::post([v] { hostui::set(kKeyRtMips, v ? "1" : "0"); });
+        if (check("Bloom", gfxsw::bloom(), &v)) {
+            gfxsw::set_bloom(v);
+            hostui::post([v] { hostui::set(kKeyBloom, v ? "1" : "0"); });
         }
-        help("The glow around the sky and bright places, and the haze over far places, as on the Wii U.\n"
-             "Experimental: some shadows flicker when the camera turns. Costs a little GPU time.");
+        help("The glow around the sky and bright places, as on the Wii U.\nCosts a little GPU time.");
+    }
+    {
+        bool v;
+        if (check("Distance blur", gfxsw::distance_blur(), &v)) {
+            gfxsw::set_distance_blur(v);
+            hostui::post([v] { hostui::set(kKeyDistanceBlur, v ? "1" : "0"); });
+        }
+        help("Far places softly out of focus, as on the Wii U.\nCosts a little GPU time.");
     }
 
     heading("Frame rate counter (top left)");

@@ -81,8 +81,10 @@ uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer);
 void sampler_used(uint32_t id);
 // 16x anisotropic filtering (WWHD_ANISO, the overlay's Effects): any thread; samplers follow from the next frame
 bool aniso_enabled();
-bool rt_mips_enabled();
-void set_rt_mips(bool on);
+bool bloom_enabled();
+void set_bloom(bool on);
+bool blur_enabled();
+void set_blur(bool on);
 void set_aniso(bool on);
 // the barrier that makes this frame's descriptor writes visible (nothing when none since the last one)
 void commit_descriptors();
@@ -245,7 +247,8 @@ Surface* volume_source(Surface* s, const uint32_t* texWords);
 // with the mip chain, its levels the game's own rendered ones (GPU-written surfaces at the descriptor's mip
 // addresses: the bloom chain, the light buffer) or else s halved; made again when one of them was written.
 // As gfx/vulkan's with_mip_chain (upstream e40b7e6, after GreenNaugahyde/ZeldaWWHDRecompAndroid 73b54e1);
-// rt_mips_enabled (the Switch tab, off by default; WWHD_RT_MIPS=1: on at start): off, s itself (issue #15: the bloom read only level 0)
+// The bloom's chain and the distance blur's are the Switch tab's options (bloom_enabled, blur_enabled); off, s itself
+// (issue #15: the bloom read only level 0). WWHD_NO_RT_MIPS=1: no chains at all.
 // Only the levels the sampler's LOD clamp lets it read are brought up to date (and the ones they are halved from).
 // A draw that renders into one of the levels its sampler can read gets s itself, as before the chains: the game's
 // depth reduction renders level 1 of F40E8000 sampling that texture with the LOD clamped to 1, which the one-level
