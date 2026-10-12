@@ -31,8 +31,16 @@ image=wwhd-dksh-tools
 if ! "$engine" image inspect "$image" >/dev/null 2>&1; then
     "$engine" build -t "$image" tools/switch/dksh_cache
 fi
+# MSYS2 (devkitPro's bash on Windows) rewrites /src-like arguments of native programs such as docker.exe into
+# C:/devkitPro/msys2/src (issue #22): keep the container paths as they are and give Docker Windows host paths
+host_pwd=$PWD host_home=$HOME
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+        host_pwd=$(pwd -W) host_home=$(cd "$HOME" && pwd -W) ;;
+esac
 # build/gen and Rom may be symlinks out of the tree: mount $HOME too so that absolute paths resolve
-"$engine" run --rm -v "$PWD":/src -v "$HOME":"$HOME" -w /src "$image" bash -c "
+"$engine" run --rm -v "$host_pwd":/src -v "$host_home":"$HOME" -w /src "$image" bash -c "
     cmake -S tools/switch/dksh_cache -B build/dksh_cache -G Ninja -DCMAKE_BUILD_TYPE=Release >/dev/null &&
     ninja -C build/dksh_cache -j $jobs dksh_cache &&
     if [[ \$# -gt 0 ]]; then build/dksh_cache/dksh_cache \"\$@\"; fi" bash "$@"
