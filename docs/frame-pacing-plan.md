@@ -1,7 +1,8 @@
 # Frame pacing: every frame on screen for two vblanks at 30 fps (plan)
 
 Branch `fix/frame-pacing`. Issue #23 ("Uneven/inconsistent frametime": slight judder turning the camera at 30 fps,
-v0.4.4, OLED handheld). Status: measured and decided handheld (2026-10-12); **docked not tested yet**.
+v0.4.4, OLED handheld). Status: measured and decided handheld (2026-10-12); final build checked handheld, docked and with 60 fps
+interpolation (2026-10-13).
 
 ## Cause
 
@@ -63,9 +64,24 @@ longer than 33 ms for; they are the remaining 3-vblank frames and are the same i
   lock into the worst phase (52/47/52 in one window). Its first version also made a late frame wait a whole vblank.
   It needed hooks in gx2_core.cpp; none are left.
 
+## Final build on the console (2026-10-13, `wwhd_fp_final.nro`, 698974c)
+
+Same spot (Outset, the pier by Link's house), modes 1 / 0 interleaved twice, 30 s of camera turning each:
+
+| | Mode | 1 / 2 / 3 vblanks per 5 s | Hold changes | 37-45 ms presents |
+|---|---|---|---|---|
+| Handheld (720p) | 0 | 0-9 / 116-133 / 12-20 | 23-48 | 19-30 |
+| Handheld (720p) | 1 | **0** / 133-146 / 3-12 | 6-24 | 6-27 |
+| Docked (1080p) | 0 | 0-9 / 113-134 / 10-23 | 23-53 | 14-38 |
+| Docked (1080p) | 1 | **0** / 118-130 / 14-22 | 27-45 | 27-58 |
+
+- Boot: `pacing mode 1`, "Default" refused (rc 0x1272), "Internal" vsync event, `[dk] frame 1: swap interval 2`.
+- Docked: the operation mode change recreates the swapchain at 1920x1080 and the next present sets the interval
+  again. The "Internal" vsync event keeps ticking docked (60.00 Hz, no missed wakes) and the statistics stay
+  consistent, but whether it follows the TV's own vblank is not proven.
+- 60 fps interpolation (Switch tab > Debug > Frame rate (test), not saved): `[dk] frame N: swap interval 1` at once,
+  and `swap interval 2` again back at 30 fps.
+
 ## Pending
 
-- **Docked**: does the `"Internal"` vsync event still tick (and at what rate) on the TV, or is `"External"` needed?
-  Without vblanks only the statistics are missing (the line has no display part); the swap interval does not depend
-  on them. Then the mode 0 / mode 1 comparison docked.
-- 60 fps frame interpolation: check that the swap interval goes back to 1 (`[dk] frame N: swap interval 1`).
+- Whether the "Internal" vsync event is the TV's vblank when docked (only the statistics depend on it).
