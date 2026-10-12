@@ -29,11 +29,14 @@ if [[ -z "$engine" || $native == 1 ]]; then
 fi
 image=docker.io/devkitpro/devkita64:latest
 # MSYS2 (devkitPro's bash on Windows) rewrites /src-like arguments of native programs such as docker.exe into
-# C:/devkitPro/msys2/src (issue #22): keep the container paths as they are and give Docker Windows host paths
+# C:/devkitPro/msys2/src (issue #22): keep the container paths as they are and give Docker Windows host paths.
+# Only for the container: the native build needs that conversion, or the Windows gcc gets /home/... paths.
 host_pwd=$PWD
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; host_pwd=$(pwd -W) ;;
-esac
+if [[ $native != 1 ]]; then
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; host_pwd=$(pwd -W) ;;
+    esac
+fi
 # each generated file needs a lot of compiler memory at -O3: WWHD_JOBS limits parallel compiles
 cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)  # (macOS has no nproc)
 jobs=${WWHD_JOBS:-$(( cpus / 2 > 0 ? cpus / 2 : 1 ))}
