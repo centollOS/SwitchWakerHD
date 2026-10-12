@@ -919,13 +919,6 @@ static void watchdog_thread() {
 namespace gx2 { uint64_t flips_presented() { return __atomic_load_n(&g_flip_count, __ATOMIC_RELAXED); } }  // live fps in the title
 static uint32 g_swap_interval = 1;  // as set by the game (frame interpolation halves it)
 namespace gx2 { uint32_t swap_interval() { return g_swap_interval; } }  // SwitchWakerHD (#23): gfx/deko/frame_pacing.cpp
-#ifdef __SWITCH__  // SwitchWakerHD (#23): the virtual vsync can follow the display's vblanks (gfx/deko/frame_pacing.cpp)
-namespace frame_pacing {
-uint64_t ticks(uint64_t steadyTicks, uint64_t perVsync);
-bool tick_time(uint64_t& tick, uint64_t perVsync, std::chrono::steady_clock::time_point& out);
-bool locked();
-}
-#endif
 namespace interp { uint32_t effective_swap_interval(uint32_t game); uint64_t logic_steps(); int vsync_rate(); }
 static std::mutex g_flip_mutex;
 static const auto g_vsync_epoch = std::chrono::steady_clock::now();
@@ -940,11 +933,7 @@ static uint64_t g_last_flip_time = 0;  // timebase
 static int64_t g_count_offset = 0;     // guest-visible swap/flip counts minus ours (set by a loaded save state)
 
 static uint64_t vsync_index() {  // in ticks
-    const uint64_t t = uint64_t((std::chrono::steady_clock::now() - g_vsync_epoch).count()) * kTicksPerVsync / uint64_t(kVsyncPeriod.count());
-#ifdef __SWITCH__  // SwitchWakerHD (#23)
-    return frame_pacing::ticks(t, kTicksPerVsync);
-#endif
-    return t;
+    return uint64_t((std::chrono::steady_clock::now() - g_vsync_epoch).count()) * kTicksPerVsync / uint64_t(kVsyncPeriod.count());
 }
 // WWHD_RELAXED_VSYNC (on by default on the Switch, =0 for the hardware's timing): as on the Wii U, a
 // frame flips at the first vblank after its swap and at least swap-interval vblanks after the
@@ -971,9 +960,6 @@ static uint64_t vsync_granule() {  // ticks per vsync at the current rate: 4 (30
     return rate >= 4 ? 1 : rate >= 2 ? 2 : kTicksPerVsync;
 }
 static std::chrono::steady_clock::time_point tick_time(uint64_t tick) {
-#ifdef __SWITCH__  // SwitchWakerHD (#23): the vblanks' time, or the tick on the steady clock's own count
-    if (std::chrono::steady_clock::time_point tp; frame_pacing::tick_time(tick, kTicksPerVsync, tp)) return tp;
-#endif
     return g_vsync_epoch + std::chrono::nanoseconds(tick * uint64_t(kVsyncPeriod.count()) / kTicksPerVsync);
 }
 // the first tick at which this flip may execute: the vsync after its swap, and `swap interval`
@@ -1011,14 +997,6 @@ static void update_flips() {  // g_flip_mutex held
         // flip, on a vblank or not (a frame on time is rendered before then and flips at that moment,
         // as on its vblank; a late one flips as soon as it is rendered)
         bool late = false;
-#ifdef __SWITCH__  // SwitchWakerHD (#23): on the display's vblanks a flip is due `swap interval` vblanks after the
-        // previous one (not also after its swap: a frame swapped late flips as soon as it is rendered, as relaxed
-        // vsync does), on the vblank grid (this loop runs when the game polls)
-        if (relaxed_vsync() && frame_pacing::locked()) {
-            at = g_last_flip_vsync + interp::effective_swap_interval(g_swap_interval) * vsync_granule();
-            late = now / vsync_granule() > at / vsync_granule();
-        } else
-#endif
         if (relaxed_vsync()) {
             const uint64_t interval = interp::effective_swap_interval(g_swap_interval);
             const auto since = std::chrono::steady_clock::now() - g_last_flip_tp;
