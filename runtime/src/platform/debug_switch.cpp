@@ -17,6 +17,7 @@
 
 #include "../build_info.h"
 #include "../gfx/switch_renderer.h"
+#include "../gfx/deko/frame_pacing.h"
 #include "../mods/mods.h"
 #include "../mods/warps.h"
 #include "../runtime.h"
@@ -191,6 +192,15 @@ debugsrv::Reply blur(const debugsrv::Args& a) {
     return debugsrv::ok(std::string("blur ") + (gfxsw::distance_blur() ? "on" : "off"));
 }
 
+// "pacing [0-3]": frame pacing mode (gfx/deko/frame_pacing.h, #23): bit 0 swap interval the game's, bit 1 the
+// virtual vsync on the display's vblanks; not saved
+debugsrv::Reply pacing(const debugsrv::Args& a) {
+    if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
+    const int m = frame_pacing::mode();
+    return debugsrv::ok("pacing " + std::to_string(m) + ": swap interval " + (m & 1 ? "the game's" : "1") +
+                        ", virtual vsync on " + (m & 2 ? "the display's vblanks" : "a steady 59.94 Hz clock"));
+}
+
 // "dspguard [0|1]": the game's DSP-overload guard (audio_guard_switch.h): 1 the game's own, 0 off (the default)
 debugsrv::Reply dspguard(const debugsrv::Args& a) {
     if (!a.empty()) audio_guard::set_kept(a[0] != "0");
@@ -264,6 +274,7 @@ void start() {
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
+    debugsrv::add_command("pacing", "pacing [0-3]           frame pacing: +1 swap interval the game's, +2 vsync on vblanks", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);
     debugsrv::add_command("stall", "stall <ms> [core] [n] [gap]  spin above the game threads (audio guard tests)", stall);

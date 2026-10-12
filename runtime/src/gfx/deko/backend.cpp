@@ -1159,6 +1159,19 @@ void present() {
             resize_window(ww, wh, frame);
         }
     }
+    {
+        // (this fork, #23) the swap interval of the pacing mode (frame_pacing.h): 1, or the game's
+        static DkSwapchain set = nullptr;
+        static uint32_t interval = 1;
+        const uint32_t want = frame_pacing::swap_interval();
+        if (set != g_swapchain || want != interval) {
+            dkSwapchainSetSwapInterval(g_swapchain, want);
+            if (want != interval) LOG("[dk] frame %llu: swap interval %u", (unsigned long long)frame, want);
+            set = g_swapchain;
+            interval = want;
+            frame_pacing::set_interval(want);
+        }
+    }
     const uint64_t t1 = now_ns();
     int slot;
     {
