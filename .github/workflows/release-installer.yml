@@ -1,0 +1,44 @@
+name: Build Windows Installer
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-installer:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish installer (net48, WPF)
+        shell: pwsh
+        run: |
+          dotnet publish installer/src/SwitchWakerHD.Installer.csproj `
+            --configuration Release `
+            -p:Version=$("${{ github.ref_name }}" -replace '^v','') `
+            --output installer/bin `
+            --nologo
+
+      - name: Compute SHA256
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash installer/bin/SwitchWakerHD-Installer.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  SwitchWakerHD-Installer.exe" | Out-File -Encoding ascii installer/bin/SwitchWakerHD-Installer.exe.sha256
+          Write-Host "SHA256: $hash"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/bin/SwitchWakerHD-Installer.exe
+            installer/bin/SwitchWakerHD-Installer.exe.sha256

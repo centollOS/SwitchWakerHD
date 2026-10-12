@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- .NET Framework 4.8 + WPF: both ship with Windows 10/11, so the .exe needs nothing installed -->
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <AssemblyName>SwitchWakerHD-Installer</AssemblyName>
+    <RootNamespace>SwitchWakerHD.Installer</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Optimize>true</Optimize>
+    <DebugType>none</DebugType>
+    <AssemblyTitle>SwitchWakerHD Installer</AssemblyTitle>
+    <AssemblyDescription>Automatic installer for SwitchWakerHD - Wind Waker HD on Nintendo Switch</AssemblyDescription>
+    <Company>centollOS</Company>
+    <Product>SwitchWakerHD</Product>
+    <Copyright>SwitchWakerHD by centollOS (GPLv3) - github.com/centollOS/SwitchWakerHD</Copyright>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\logo.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <!-- WinForms only for FolderBrowserDialog (WPF has no folder picker on .NET Framework) -->
+    <Reference Include="System.Windows.Forms" />
+    <!-- dynamic, for the shell COM objects that reach DBI over MTP -->
+    <Reference Include="Microsoft.CSharp" />
+  </ItemGroup>
+</Project>
