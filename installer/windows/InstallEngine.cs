@@ -1,87 +1,24 @@
-// The install steps, run off the UI thread: output goes to events, and failures throw InstallException.
+// The Windows steps (shared/EngineBase.cs has the rest): Python through winget, devkitPro through its own
+// installer and MSYS2's pacman, processes in job objects, robocopy for the SD card.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
-using System.Net.Http;
-using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace SwitchWakerHD.Installer;
 
-enum StepState { Pending, Running, Done, Failed }
-enum LogKind { Info, Ok, Warn, Error, Output }
-
-sealed class InstallException : Exception
+sealed class InstallEngine : EngineBase
 {
-    public InstallException(string message) : base(message) { }
-}
-
-sealed class InstallEngine
-{
-    public static readonly string WorkDir =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SwitchWakerHD-Build");
     const string DevkitRoot = @"C:\devkitPro";
 
-    public const int StepPython = 0, StepDevkit = 1, StepRelease = 2, StepBuild = 3;
-
-    public event Action<string, LogKind>? Log;
-    public event Action<int, StepState>? StepChanged;
-    public event Action<string>? Status;
-    public event Action<double?>? Progress;          // 0..1, or null for "busy, no estimate"
-    // Shows a notice (title, text, button) and blocks this thread until the user presses the button.
-    public Action<string, string, string>? AskUser;
-
-    public string GamePath = "";
-    public string GameArg  = "";                      // --image, --wua or --game-dir
-    // Optional: the console's prod.keys, for the HOME-screen forwarder (.nsp). Only with it are Git, Pillow
-    // and MSYS2's gcc installed (INSTALL.md, "HOME-screen icon"); without it make_sd.py gets --no-forwarder.
-    public string? ForwarderKeys;
-
-    public string ReleaseDir { get; private set; } = "";
-    public string SdOut => Path.Combine(ReleaseDir, "build", "sd");
-
-    string pythonCmd  = "python";
-    string pacman     = "";
-    string releaseVer = "v0.4.3";
-    CancellationToken ct;
+    string pacman = "";
     ProcessJob? currentJob;   // the running process and all it started; KillCurrent stops them
 
-    static readonly HttpClient Http = CreateHttpClient();
-    static HttpClient CreateHttpClient()
-    {
-        var c = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
-        c.DefaultRequestHeaders.UserAgent.ParseAdd("SwitchWakerHD-Installer/1.0");
-        return c;
-    }
-
-    public void Run(CancellationToken token)
-    {
-        ct = token;
-        Directory.CreateDirectory(WorkDir);
-        Info(Str.Get("welcome_dir", WorkDir));
-        RunStep(StepPython,  Python);
-        RunStep(StepDevkit,  DevkitPro);
-        RunStep(StepRelease, Release);
-        RunStep(StepBuild,   Build);
-    }
-
-    void RunStep(int step, Action body)
-    {
-        ct.ThrowIfCancellationRequested();
-        StepChanged?.Invoke(step, StepState.Running);
-        Progress?.Invoke(null);
-        try { body(); }
-        catch { StepChanged?.Invoke(step, StepState.Failed); throw; }
-        StepChanged?.Invoke(step, StepState.Done);
-    }
-
     // ── Python ───────────────────────────────────────────────────────────────
-    void Python()
+    protected override void Python()
     {
         if (!FindPython())
         {
@@ -123,7 +60,7 @@ sealed class InstallEngine
     }
 
     // ── devkitPro ────────────────────────────────────────────────────────────
-    void DevkitPro()
+    protected override void Toolchain()
     {
         Say(Str.Get("dkp_searching"));
         pacman = FindPacman();
@@ -136,9 +73,9 @@ sealed class InstallEngine
             Say(Str.Get("dkp_verifying"));
             VerifySha256(installer, "038a99dc84f1ca0b52e9e0e074a94a3b0672e6d7bf0988563f0ab0812dcbb38d");
 
-            AskUser?.Invoke(Str.Get("dkp_notice_h"), Str.Get("dkp_notice"), Str.Get("dkp_open"));
+            Ask(Str.Get("dkp_notice_h"), Str.Get("dkp_notice"), Str.Get("dkp_open"));
             Say(Str.Get("dkp_wait"));
-            Progress?.Invoke(null);
+            SetProgress(null);
             // Not killOnClose: whatever the updater leaves running (a pacman still installing) must finish.
             using (var job = new ProcessJob(killOnClose: false))
             using (var p = Process.Start(new ProcessStartInfo(installer) { UseShellExecute = true }))
@@ -157,7 +94,7 @@ sealed class InstallEngine
 
             if (pacman == "")
             {
-                AskUser?.Invoke(Str.Get("dkp_manual_h"), Str.Get("dkp_manual"), Str.Get("btn_continue"));
+                Ask(Str.Get("dkp_manual_h"), Str.Get("dkp_manual"), Str.Get("btn_continue"));
                 pacman = FindPacman();
                 if (pacman == "") throw new InstallException(Str.Get("dkp_not_found"));
             }
@@ -264,113 +201,12 @@ sealed class InstallEngine
         Environment.SetEnvironmentVariable("PATH", machine + ";" + user);
     }
 
-    // ── Release ──────────────────────────────────────────────────────────────
-    void Release()
-    {
-        Say(Str.Get("rel_checking"));
-        try
-        {
-            var json = Http.GetStringAsync("https://api.github.com/repos/centollOS/SwitchWakerHD/releases/latest").GetAwaiter().GetResult();
-            var m = Regex.Match(json, "\"tag_name\":\\s*\"([^\"]+)\"");
-            if (m.Success) releaseVer = m.Groups[1].Value;
-            Ok(Str.Get("rel_found", releaseVer));
-        }
-        catch { Warn(Str.Get("rel_fallback", releaseVer)); }
-
-        var zip = Path.Combine(WorkDir, $"SwitchWakerHD-{releaseVer}.zip");
-        ReleaseDir = Path.Combine(WorkDir, $"SwitchWakerHD-{releaseVer}");
-        var baseUrl = $"https://github.com/centollOS/SwitchWakerHD/releases/download/{releaseVer}/SwitchWakerHD-{releaseVer}.zip";
-
-        if (!File.Exists(zip))
-        {
-            Say(Str.Get("rel_downloading", releaseVer));
-            var part = zip + ".part";
-            Download(baseUrl, part);
-            Say(Str.Get("rel_verifying"));
-            var shaFile = zip + ".sha256";
-            Download(baseUrl + ".sha256", shaFile);
-            VerifySha256(part, File.ReadAllText(shaFile).Split(' ')[0].Trim());
-            File.Move(part, zip);
-        }
-        else Ok(Str.Get("rel_already", releaseVer));
-
-        if (!Directory.Exists(ReleaseDir))
-        {
-            Say(Str.Get("rel_extracting"));
-            Progress?.Invoke(null);
-            var tmp = ReleaseDir + ".tmp";
-            if (Directory.Exists(tmp)) Directory.Delete(tmp, true);
-            ZipFile.ExtractToDirectory(zip, tmp);
-            Directory.Move(tmp, ReleaseDir);
-        }
-
-        // Release zips come from `git archive --prefix=SwitchWakerHD-<ver>/`, so the source sits one folder down.
-        if (!File.Exists(MakeSd(ReleaseDir)))
-        {
-            var nested = Directory.GetDirectories(ReleaseDir).FirstOrDefault(d => File.Exists(MakeSd(d)));
-            if (nested == null) throw new InstallException(Str.Get("rel_no_script"));
-            ReleaseDir = nested;
-        }
-    }
-
-    static string MakeSd(string dir) => Path.Combine(dir, "tools", "switch", "make_sd.py");
-
-    // ── Build ────────────────────────────────────────────────────────────────
-    // make_sd.py's stages ("[3/5] ...") and the compiler's own progress ("[ 45%] Building C object ..." from
-    // CMake's makefiles, "[120/812] ..." from Ninja in a container) drive the bar. Each stage owns a share
-    // of it, by how long it takes; compiling is most of the wait.
-    static readonly double[] StageStart = { 0.00, 0.08, 0.09, 0.15, 0.95 };
-    static readonly double[] StageSpan  = { 0.08, 0.01, 0.06, 0.80, 0.05 };
-    static readonly Regex StageLine = new(@"^\[([1-5])/5\] ");
-    static readonly Regex MakePct   = new(@"^\[\s*(\d{1,3})%\]");
-    static readonly Regex NinjaStep = new(@"^\[(\d+)/(\d+)\] ");
-
-    void Build()
-    {
-        Say(Str.Get("build_running"));
-        Progress?.Invoke(null);
-        int stage = 0, shownPct = -1;
-        double best = -1;
-        void Report(double p)
-        {
-            if (p <= best) return;   // parallel jobs can print out of order; the bar only moves forward
-            best = p;
-            Progress?.Invoke(p);
-        }
-        void OnLine(string line)
-        {
-            if (line.StartsWith("[+] HOME-screen forwarder")) { Status?.Invoke(Str.Get("fwd_building")); return; }
-            var m = StageLine.Match(line);
-            if (m.Success)
-            {
-                stage = int.Parse(m.Groups[1].Value);
-                Report(StageStart[stage - 1]);
-                Status?.Invoke(Str.Get("build_s" + stage));
-                return;
-            }
-            if (stage != 4) return;
-            double frac;
-            if ((m = MakePct.Match(line)).Success) frac = int.Parse(m.Groups[1].Value) / 100.0;
-            else if ((m = NinjaStep.Match(line)).Success && int.Parse(m.Groups[2].Value) > 0)
-                frac = (double)int.Parse(m.Groups[1].Value) / int.Parse(m.Groups[2].Value);
-            else return;
-            Report(StageStart[3] + StageSpan[3] * Math.Min(frac, 1));
-            var pct = (int)(frac * 100);
-            if (pct > shownPct) { shownPct = pct; Status?.Invoke(Str.Get("build_s4_pct", pct)); }
-        }
-        var forwarder = ForwarderKeys != null ? $" --keys \"{ForwarderKeys}\"" : " --no-forwarder";
-        var rc = Exec(pythonCmd, $"\"{MakeSd(ReleaseDir)}\" {GameArg} \"{GamePath}\"{forwarder}", ReleaseDir, check: false, onLine: OnLine);
-        Progress?.Invoke(rc == 0 ? 1 : (double?)null);
-        if (rc != 0) throw new InstallException(Str.Get("build_fail", rc));
-        Ok(SdOut);
-    }
-
     // ── SD card (from the done page) ─────────────────────────────────────────
     public void CopyToSd(string drive, CancellationToken token)
     {
         ct = token;
         Say(Str.Get("sd_copying", drive));
-        Progress?.Invoke(null);
+        SetProgress(null);
         // robocopy: 0-7 is success (files copied, extra files, ...), 8 and up is failure.
         // "D:\" would escape the closing quote (Windows argv rules); "D:\\" is D:\ for robocopy.
         var rc = Exec("robocopy", $"\"{SdOut}\" \"{drive.TrimEnd('\\')}\\\\\" /E /R:2 /W:2 /NP /NDL /NJH /NJS", check: false);
@@ -378,51 +214,10 @@ sealed class InstallEngine
         Ok(Str.Get("sd_copied", drive));
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
-    void Download(string url, string dest)
+    // ── Processes ────────────────────────────────────────────────────────────
+    protected override int Exec(string exe, string args, string? workDir = null, bool check = true, Action<string>? onLine = null)
     {
-        Log?.Invoke(url, LogKind.Info);
-        using var response = Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).GetAwaiter().GetResult();
-        if (!response.IsSuccessStatusCode) throw new InstallException(Str.Get("err_download", url));
-
-        var total = response.Content.Headers.ContentLength ?? -1L;
-        using var src  = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();
-        using var file = File.Create(dest);
-        var buf = new byte[81920];
-        long done = 0; int read; var last = DateTime.MinValue;
-        while ((read = src.Read(buf, 0, buf.Length)) > 0)
-        {
-            ct.ThrowIfCancellationRequested();
-            file.Write(buf, 0, read);
-            done += read;
-            if (total > 0 && (DateTime.UtcNow - last).TotalMilliseconds > 150)
-            {
-                last = DateTime.UtcNow;
-                Progress?.Invoke((double)done / total);
-                Status?.Invoke(Str.Get("download_prog", (done / 1048576.0).ToString("0.0"), (total / 1048576.0).ToString("0.0")));
-            }
-        }
-        Progress?.Invoke(null);
-    }
-
-    void VerifySha256(string file, string expected)
-    {
-        string hash;
-        using (var sha = SHA256.Create())
-        using (var stream = File.OpenRead(file))
-            hash = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "");
-        if (!string.Equals(hash, expected, StringComparison.OrdinalIgnoreCase))
-        {
-            File.Delete(file);
-            throw new InstallException(Str.Get("err_integrity"));
-        }
-        Ok("SHA256 " + hash.ToLowerInvariant());
-    }
-
-    // Runs a process, streams its output to the log; with check, a non-zero exit is a failure.
-    int Exec(string exe, string args, string? workDir = null, bool check = true, Action<string>? onLine = null)
-    {
-        Log?.Invoke($"> {exe} {args}", LogKind.Info);
+        LogLine($"> {exe} {args}", LogKind.Info);
         var psi = new ProcessStartInfo(exe, args)
         {
             UseShellExecute        = false,
@@ -441,8 +236,8 @@ sealed class InstallEngine
         try
         {
             using var proc = new Process { StartInfo = psi };
-            proc.OutputDataReceived += (_, e) => { if (e.Data != null) { Log?.Invoke(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
-            proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) { Log?.Invoke(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
+            proc.OutputDataReceived += (_, e) => { if (e.Data != null) { LogLine(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
+            proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) { LogLine(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
             proc.Start();
             job.Add(proc);
             currentJob = job;
@@ -465,7 +260,7 @@ sealed class InstallEngine
         catch (OperationCanceledException) { throw; }
         catch (Exception e)
         {
-            Log?.Invoke(e.Message, LogKind.Error);
+            LogLine(e.Message, LogKind.Error);
             rc = -1;
         }
         finally { currentJob = null; }
@@ -493,10 +288,5 @@ sealed class InstallEngine
         catch { return (-1, ""); }
     }
 
-    public void KillCurrent() => currentJob?.Terminate();
-
-    void Say(string msg)  { Status?.Invoke(msg); Log?.Invoke(msg, LogKind.Info); }
-    void Info(string msg) => Log?.Invoke(msg, LogKind.Info);
-    void Ok(string msg)   => Log?.Invoke(msg, LogKind.Ok);
-    void Warn(string msg) => Log?.Invoke(msg, LogKind.Warn);
+    public override void KillCurrent() => currentJob?.Terminate();
 }

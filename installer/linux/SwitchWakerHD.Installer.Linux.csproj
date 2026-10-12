@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- .NET 8 + Avalonia, published self-contained as one file: nothing to install on the distribution -->
+    <TargetFramework>net8.0</TargetFramework>
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- no libicu needed; the language comes from LANG (Program.cs) -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>SwitchWakerHD-Installer</AssemblyName>
+    <RootNamespace>SwitchWakerHD.Installer</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <DebugType>none</DebugType>
+    <Product>SwitchWakerHD</Product>
+    <Company>centollOS</Company>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.22" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- shared with the Windows installer -->
+    <Compile Include="../shared/*.cs" />
+    <AvaloniaResource Include="../shared/Assets/logo.png" Link="Assets/logo.png" />
+  </ItemGroup>
+</Project>

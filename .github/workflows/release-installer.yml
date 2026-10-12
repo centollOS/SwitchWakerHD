@@ -1,4 +1,4 @@
-name: Build Windows Installer
+name: Build Installers
 
 on:
   release:
@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  build-installer:
+  build-windows:
     runs-on: windows-latest
 
     steps:
@@ -23,7 +23,7 @@ jobs:
       - name: Publish installer (net48, WPF)
         shell: pwsh
         run: |
-          dotnet publish installer/src/SwitchWakerHD.Installer.csproj `
+          dotnet publish installer/windows/SwitchWakerHD.Installer.csproj `
             --configuration Release `
             -p:Version=$("${{ github.ref_name }}" -replace '^v','') `
             --output installer/bin `
@@ -42,3 +42,38 @@ jobs:
           files: |
             installer/bin/SwitchWakerHD-Installer.exe
             installer/bin/SwitchWakerHD-Installer.exe.sha256
+
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish installer (.NET 8, Avalonia, one self-contained file)
+        run: |
+          dotnet publish installer/linux/SwitchWakerHD.Installer.Linux.csproj \
+            --configuration Release \
+            -p:Version="${GITHUB_REF_NAME#v}" \
+            --output installer/bin-linux \
+            --nologo
+          mv installer/bin-linux/SwitchWakerHD-Installer installer/bin-linux/SwitchWakerHD-Installer-linux-x64
+          chmod +x installer/bin-linux/SwitchWakerHD-Installer-linux-x64
+
+      - name: Compute SHA256
+        run: |
+          cd installer/bin-linux
+          sha256sum SwitchWakerHD-Installer-linux-x64 > SwitchWakerHD-Installer-linux-x64.sha256
+          cat SwitchWakerHD-Installer-linux-x64.sha256
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/bin-linux/SwitchWakerHD-Installer-linux-x64
+            installer/bin-linux/SwitchWakerHD-Installer-linux-x64.sha256

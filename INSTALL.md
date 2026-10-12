@@ -32,14 +32,32 @@ If something fails, *Show details* shows what happened; the full log is in
 
 > **Windows SmartScreen** may show *"Windows protected your PC"* on first run because the installer is
 > not code-signed. Click **More info → Run anyway**. This is expected for open-source unsigned executables.
-> The [source code](installer/src) and [build script](installer/build.ps1) are in this repository.
+> The [source code](installer/windows) and [build script](installer/build.ps1) are in this repository.
 
 The installer is multilingual: it starts in **English** or **Spanish** based on your Windows display
 language, and the button in its corner switches between them.
 
+## Linux: Easy Installer
+
+The same installer for **Linux (x86-64)**: one file with everything inside, nothing to install first.
+
+**[⬇ Download SwitchWakerHD-Installer-linux-x64](https://github.com/centollOS/SwitchWakerHD/releases/latest/download/SwitchWakerHD-Installer-linux-x64)**
+
+1. Make it executable and start it: `chmod +x SwitchWakerHD-Installer-linux-x64 && ./SwitchWakerHD-Installer-linux-x64`
+   (or *Properties > Allow executing as program* in the file manager). Run it as your user, not with `sudo`.
+2. Pick your game dump, as on Windows (or type or paste its path).
+3. Press **Install**. Python gets its own environment in `~/SwitchWakerHD-Build` (your system's is left alone).
+   To build, it uses devkitPro if it is installed, else Docker or Podman if your user can run them; with neither,
+   it installs one: devkitPro on Debian/Ubuntu and their derivatives, Podman on Fedora, Arch and openSUSE. That
+   step asks for your password (a window, or a `sudo` command to paste in a terminal).
+4. Wait for the build, then move the files: **USB cable with DBI** (MTP, through `gio`, which GNOME, Cinnamon,
+   MATE, Xfce and most desktops have), **the microSD in the PC** (a card reader or hekate's UMS), or **by hand**.
+
+The log is in `~/SwitchWakerHD-Build/installer.log`.
+
 ---
 
-*For macOS, Linux, or manual Windows setup, continue below.*
+*For macOS, or a manual setup on Windows or Linux, continue below.*
 
 ---
 

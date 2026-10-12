@@ -1,0 +1,145 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="SwitchWakerHD.Installer.App"
+             RequestedThemeVariant="Dark">
+  <Application.Resources>
+    <!-- Palette: Great Sea night (the same as the Windows installer) -->
+    <SolidColorBrush x:Key="Bg"        Color="#0E1A28"/>
+    <SolidColorBrush x:Key="Header"    Color="#122338"/>
+    <SolidColorBrush x:Key="Card"      Color="#16293F"/>
+    <SolidColorBrush x:Key="CardHover" Color="#1C3350"/>
+    <SolidColorBrush x:Key="Line"      Color="#24405F"/>
+    <SolidColorBrush x:Key="Accent"    Color="#3FB6E8"/>
+    <SolidColorBrush x:Key="AccentHi"  Color="#62C8F2"/>
+    <SolidColorBrush x:Key="AccentLo"  Color="#2A8DBA"/>
+    <SolidColorBrush x:Key="OnAccent"  Color="#06223A"/>
+    <SolidColorBrush x:Key="Fg"        Color="#EAF2F8"/>
+    <SolidColorBrush x:Key="FgDim"     Color="#9FB3C8"/>
+    <SolidColorBrush x:Key="Good"      Color="#4CC38A"/>
+    <SolidColorBrush x:Key="Warn"      Color="#F2B84B"/>
+    <SolidColorBrush x:Key="Bad"       Color="#F06A6A"/>
+    <SolidColorBrush x:Key="LogBg"     Color="#0A131E"/>
+    <FontFamily x:Key="Mono">DejaVu Sans Mono, Liberation Mono, Noto Sans Mono, monospace</FontFamily>
+  </Application.Resources>
+
+  <Application.Styles>
+    <FluentTheme/>
+
+    <Style Selector="TextBlock">
+      <Setter Property="TextWrapping" Value="Wrap"/>
+    </Style>
+    <Style Selector="TextBlock.h1">
+      <Setter Property="FontSize" Value="24"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Margin" Value="0,0,0,8"/>
+    </Style>
+    <Style Selector="TextBlock.dim">
+      <Setter Property="Foreground" Value="{StaticResource FgDim}"/>
+    </Style>
+
+    <!-- Buttons -->
+    <Style Selector="Button">
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Padding" Value="20,9"/>
+      <Setter Property="MinWidth" Value="110"/>
+      <Setter Property="CornerRadius" Value="6"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.primary">
+      <Setter Property="Background" Value="{StaticResource Accent}"/>
+      <Setter Property="Foreground" Value="{StaticResource OnAccent}"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style Selector="Button.primary:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource AccentHi}"/>
+      <Setter Property="Foreground" Value="{StaticResource OnAccent}"/>
+    </Style>
+    <Style Selector="Button.primary:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource AccentLo}"/>
+      <Setter Property="Foreground" Value="{StaticResource OnAccent}"/>
+    </Style>
+    <Style Selector="Button.primary:disabled /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource Accent}"/>
+      <Setter Property="Foreground" Value="{StaticResource OnAccent}"/>
+      <Setter Property="Opacity" Value="0.4"/>
+    </Style>
+    <Style Selector="Button.secondary">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Foreground" Value="{StaticResource Fg}"/>
+    </Style>
+    <Style Selector="Button.secondary:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource CardHover}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="Foreground" Value="{StaticResource Fg}"/>
+    </Style>
+    <Style Selector="Button.link">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{StaticResource Accent}"/>
+      <Setter Property="Padding" Value="6,4"/>
+      <Setter Property="MinWidth" Value="0"/>
+      <Setter Property="FontSize" Value="13"/>
+    </Style>
+    <Style Selector="Button.link:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{StaticResource AccentHi}"/>
+    </Style>
+
+    <!-- Game format and device choices: a radio button drawn as a card -->
+    <Style Selector="RadioButton.card">
+      <Setter Property="Margin" Value="0,0,0,10"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="HorizontalAlignment" Value="Stretch"/>
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Name="b" CornerRadius="8" Background="{StaticResource Card}" BorderThickness="2"
+                  BorderBrush="Transparent" Padding="16,12">
+            <Grid ColumnDefinitions="Auto,*">
+              <Panel Width="20" Height="20" Margin="0,2,14,0" VerticalAlignment="Top">
+                <Ellipse Name="ring" Stroke="{StaticResource FgDim}" StrokeThickness="2"/>
+                <Ellipse Name="dot" Width="10" Height="10" Fill="{StaticResource Accent}" IsVisible="False"/>
+              </Panel>
+              <ContentPresenter Grid.Column="1" Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"/>
+            </Grid>
+          </Border>
+        </ControlTemplate>
+      </Setter>
+    </Style>
+    <Style Selector="RadioButton.card:pointerover /template/ Border#b">
+      <Setter Property="Background" Value="{StaticResource CardHover}"/>
+    </Style>
+    <Style Selector="RadioButton.card:checked /template/ Border#b">
+      <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+    </Style>
+    <Style Selector="RadioButton.card:checked /template/ Ellipse#ring">
+      <Setter Property="Stroke" Value="{StaticResource Accent}"/>
+    </Style>
+    <Style Selector="RadioButton.card:checked /template/ Ellipse#dot">
+      <Setter Property="IsVisible" Value="True"/>
+    </Style>
+    <Style Selector="RadioButton.card:disabled">
+      <Setter Property="Opacity" Value="0.5"/>
+    </Style>
+
+    <Style Selector="ProgressBar">
+      <Setter Property="MinHeight" Value="6"/>
+      <Setter Property="Height" Value="6"/>
+      <Setter Property="CornerRadius" Value="3"/>
+      <Setter Property="Foreground" Value="{StaticResource Accent}"/>
+      <Setter Property="Background" Value="{StaticResource Card}"/>
+    </Style>
+
+    <!-- The running step pulses -->
+    <Style Selector="Ellipse.running">
+      <Style.Animations>
+        <Animation Duration="0:0:0.8" IterationCount="INFINITE" PlaybackDirection="Alternate">
+          <KeyFrame Cue="0%"><Setter Property="Opacity" Value="1"/></KeyFrame>
+          <KeyFrame Cue="100%"><Setter Property="Opacity" Value="0.3"/></KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+  </Application.Styles>
+</Application>

@@ -1,3 +1,6 @@
 bin/
-src/bin/
-src/obj/
+bin-linux/
+windows/bin/
+windows/obj/
+linux/bin/
+linux/obj/
