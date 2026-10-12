@@ -1011,9 +1011,11 @@ static void update_flips() {  // g_flip_mutex held
         // flip, on a vblank or not (a frame on time is rendered before then and flips at that moment,
         // as on its vblank; a late one flips as soon as it is rendered)
         bool late = false;
-#ifdef __SWITCH__  // SwitchWakerHD (#23): on the display's vblanks a flip is due at its vblank (flip_due); a late
-        // frame still flips as soon as it is rendered (this loop runs when the game polls)
+#ifdef __SWITCH__  // SwitchWakerHD (#23): on the display's vblanks a flip is due `swap interval` vblanks after the
+        // previous one (not also after its swap: a frame swapped late flips as soon as it is rendered, as relaxed
+        // vsync does), on the vblank grid (this loop runs when the game polls)
         if (relaxed_vsync() && frame_pacing::locked()) {
+            at = g_last_flip_vsync + interp::effective_swap_interval(g_swap_interval) * vsync_granule();
             late = now / vsync_granule() > at / vsync_granule();
         } else
 #endif
