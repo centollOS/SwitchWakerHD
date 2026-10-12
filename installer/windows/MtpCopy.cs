@@ -120,8 +120,10 @@ static class MtpCopy
             var len = new FileInfo(file).Length;
             s.Progress(s.FilesDone, s.FilesTotal, s.BytesDone, s.BytesTotal, name);
 
+            // A size of -1 means the device does not report it: then being there has to do.
             dynamic? have = Child(dst, name);
-            if (have == null || SizeOf(have) != len)
+            long haveLen = have == null ? -1 : SizeOf(have);
+            if (have == null || (haveLen >= 0 && haveLen != len))
             {
                 dst.CopyHere(file, CopyFlags);
                 // Done once the file is there with its full size.
@@ -129,18 +131,39 @@ static class MtpCopy
                 var ok = WaitFor(() =>
                 {
                     var i = Child(dst, name);
-                    return i != null && SizeOf(i) == len ? i : null;
+                    if (i == null) return null;
+                    long n = SizeOf(i);
+                    return n == len || n < 0 ? i : null;
                 }, timeout, s.Ct);
-                if (ok == null) throw new InstallException(Str.Get("mtp_copy_fail", name));
+                if (ok == null)
+                {
+                    // What the Switch shows for that name, for the log.
+                    var seen = Child(dst, name);
+                    var why = seen == null ? "not listed" : $"listed as \"{(string)seen.Name}\", {SizeOf(seen)} of {len} bytes";
+                    throw new InstallException(Str.Get("mtp_copy_fail", name) + $" ({why})");
+                }
             }
             s.FilesDone++;
             s.BytesDone += len;
         }
     }
 
+    // FolderItem.Size is often 0 for portable-device files; System.Size is what Explorer shows. -1: unknown.
     static long SizeOf(dynamic item)
     {
-        try { return (long)item.Size; } catch { return -1; }
+        try
+        {
+            object? v = item.ExtendedProperty("System.Size");
+            if (v != null) return Convert.ToInt64(v);
+        }
+        catch { }
+        try
+        {
+            long n = (long)item.Size;
+            if (n > 0) return n;
+        }
+        catch { }
+        return -1;
     }
 
     // A child by name: ParseName, else a scan (some portable devices only answer one of the two).
