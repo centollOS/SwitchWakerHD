@@ -56,6 +56,8 @@ constexpr const char* kKeyGamma = "switchGamma";
 constexpr const char* kKeyFpsCounter = "switchFpsCounter";
 constexpr const char* kKeyCaptureCombo = "switchCaptureCombo";
 constexpr const char* kKeyAniso = "switchAniso";
+constexpr const char* kKeyBloom = "switchBloom";                 // gfxsw::bloom
+constexpr const char* kKeyDistanceBlur = "switchDistanceBlur";  // gfxsw::distance_blur
 // which Wii U controller the Switch controller is (Debug section): single (the GamePad, single screen; the default),
 // gamepad, pro; single <-> the others from the next start (screen_mode::single_screen)
 enum class ControllerMode : int { kSingle, kGamePad, kPro };

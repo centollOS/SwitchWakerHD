@@ -6,7 +6,8 @@
 // First start (no compiled shaders on the console): a loading card from the start. Behind it the game boots and its
 // title screen runs, recording its states into the manifest; then the list is made and compiled at full speed
 // (the frame rate does not matter behind the card). B on the card: play now, the rest goes on gently. Later starts:
-// what is left goes on gently in the background, with no screen.
+// what is left goes on gently in the background, with no screen, from where the last start stopped (progress.txt),
+// and waits whenever the game presents fewer frames than usual. The perf overlay's corner shows it.
 #pragma once
 #include <cstddef>
 #include <string>
@@ -16,6 +17,7 @@ void first_start();      // main.cpp: no compiled shaders yet (startup_checks::f
 void later_start();      // main.cpp: otherwise; continues an unfinished list in the background
 std::string start();     // the debug server: a gentle run now ("" or why not)
 bool running();
+bool paused();           // running, but waiting while the game is below its usual frame rate
 std::string status();    // one line: phase, counts, rate
 // the first start's loading card (prepare_graphics_ui_switch.cpp draws it while `up`)
 struct CardState {

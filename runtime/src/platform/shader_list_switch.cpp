@@ -5,6 +5,7 @@
 #include <zlib.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -125,7 +126,7 @@ std::vector<Recorded> read_manifest(const std::string& path) {
 }
 
 std::vector<Variant> speculate(const std::vector<shader_scan::Program>& programs, const std::vector<Recorded>& recorded,
-                               size_t limit) {
+                               size_t limit, const std::function<void(double)>& rest) {
     // the programs by (hash, size), in shader_manifest.py's order (sorted), and the ones recorded
     struct Key {
         uint64_t hash;
@@ -149,7 +150,14 @@ std::vector<Variant> speculate(const std::vector<shader_scan::Program>& programs
         regsets[{programs[i].vertex, std::move(set)}] = true;
     }
     std::unordered_map<std::string, std::vector<const Recorded*>> byFamily;
-    for (const Recorded& r : recorded)
+    auto chunkStart = std::chrono::steady_clock::now();
+    size_t n = 0;
+    for (const Recorded& r : recorded) {
+        if (rest && ++n % 256 == 0) {  // (the longest part: every recorded state under every family)
+            const auto t = std::chrono::steady_clock::now();
+            rest(std::chrono::duration<double>(t - chunkStart).count());
+            chunkStart = std::chrono::steady_clock::now();
+        }
         for (const auto& [rs, unused] : regsets) {
             if (rs.first != r.vertex) continue;
             Regs fam;
@@ -158,6 +166,7 @@ std::vector<Variant> speculate(const std::vector<shader_scan::Program>& programs
             auto& list = byFamily[family_key(r.vertex, fam)];
             if (list.size() < limit) list.push_back(&r);
         }
+    }
     std::vector<Variant> out;
     for (const auto& [key, i] : byKey) {
         if (seen.count(key)) continue;

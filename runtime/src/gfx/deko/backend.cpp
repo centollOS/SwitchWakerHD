@@ -14,6 +14,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "dk_shaders.h"
 #include "dk_surfaces.h"
 #include "dk_sync.h"
+#include "../../platform/background_shaders_switch.h"  // (this fork) the counter's shader line
 
 #include <algorithm>
 #include <atomic>
@@ -433,6 +434,26 @@ void draw_fps() {
         }
         if (s.gpuBusyPct >= 0) {
             snprintf(b, sizeof b, "GPU BUSY %.0f%%", s.gpuBusyPct);
+            lines.push_back(b);
+        }
+    }
+    {  // (this fork) shaders being compiled: for the draws of this place, and the background list
+        size_t forDraws = 0, background = 0;
+        shader_queue(forDraws, background);
+        if (forDraws) {
+            snprintf(b, sizeof b, "SHADERS %zu", forDraws);
+            lines.push_back(b);
+        }
+        if (background_shaders::running()) {
+            const background_shaders::CardState c = background_shaders::card();
+            const char* wait = background_shaders::paused() ? " WAIT" : "";
+            if (c.phase == background_shaders::CardState::kCompiling && c.total)
+                snprintf(b, sizeof b, "BG SHADERS %.0f%%%s", 100.0 * double(c.done) / double(c.total), wait);
+            else
+                snprintf(b, sizeof b, "BG SHADERS READ%s", wait);
+            lines.push_back(b);
+        } else if (background) {
+            snprintf(b, sizeof b, "BG SHADERS %zu", background);
             lines.push_back(b);
         }
     }
@@ -1455,6 +1476,10 @@ int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }
 bool aniso() { return gfxdk::aniso_enabled(); }
 void set_aniso(bool on) { gfxdk::set_aniso(on); }
+bool bloom() { return gfxdk::bloom_enabled(); }
+void set_bloom(bool on) { gfxdk::set_bloom(on); }
+bool distance_blur() { return gfxdk::blur_enabled(); }
+void set_distance_blur(bool on) { gfxdk::set_blur(on); }
 float dynamic_res_scale() { return gfxdk::res_scale_shown(); }  // the internal resolution in use (dynamic or not)
 bool draw_opt(int which) {
     using namespace gfxdk;

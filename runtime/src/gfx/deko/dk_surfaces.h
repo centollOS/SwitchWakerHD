@@ -81,6 +81,10 @@ uint32_t sampler_id(const uint32_t* samplerWords, bool compare, bool integer);
 void sampler_used(uint32_t id);
 // 16x anisotropic filtering (WWHD_ANISO, the overlay's Effects): any thread; samplers follow from the next frame
 bool aniso_enabled();
+bool bloom_enabled();
+void set_bloom(bool on);
+bool blur_enabled();
+void set_blur(bool on);
 void set_aniso(bool on);
 // the barrier that makes this frame's descriptor writes visible (nothing when none since the last one)
 void commit_descriptors();
@@ -126,6 +130,10 @@ struct Surface {
     // draw path keeps such a lookup while this is unchanged (WWHD_DK_TEX_SHARED_CACHE). Null for private copies.
     uint64_t* addrWrites = nullptr;
     uint64_t changedFrame = 0;   // the last frame its guest data was uploaded (upload_surface)
+    // texture eviction (issue #11, surfaces.cpp): the recording frame of its last lookup or sampling draw; evicted:
+    // its image, views and descriptors were freed (a texture made again from guest memory at its next lookup)
+    uint64_t useFrame = 0;
+    bool evicted = false;
     uint64_t drawFrame = ~0ull;  // the last frame a draw rendered to it, and how many draws did
     uint32_t frameDraws = 0;
     // the GamePad picture (gamepad_only, dk_draw.h), as gfx/gl's
@@ -235,6 +243,19 @@ Surface* feedback_copy(Surface* s);
 // target (a 3D color buffer is drawn slice by slice into layers: deko3d renders into no 3D image) a 3D copy of
 // its layers, made again when the layers were written since the last one (the Picto Box's colour table)
 Surface* volume_source(Surface* s, const uint32_t* texWords);
+// the surface a draw samples for texture words that ask for more levels than a render target s has: a copy
+// with the mip chain, its levels the game's own rendered ones (GPU-written surfaces at the descriptor's mip
+// addresses: the bloom chain, the light buffer) or else s halved; made again when one of them was written.
+// As gfx/vulkan's with_mip_chain (upstream e40b7e6, after GreenNaugahyde/ZeldaWWHDRecompAndroid 73b54e1);
+// The bloom's chain and the distance blur's are the Switch tab's options (bloom_enabled, blur_enabled); off, s itself
+// (issue #15: the bloom read only level 0). WWHD_NO_RT_MIPS=1: no chains at all.
+// Only the levels the sampler's LOD clamp lets it read are brought up to date (and the ones they are halved from).
+// A draw that renders into one of the levels its sampler can read gets s itself, as before the chains: the game's
+// depth reduction renders level 1 of F40E8000 sampling that texture with the LOD clamped to 1, which the one-level
+// target answers with level 0; read from the chain, level 1 would be made from itself and keep old depths (shadows
+// darkening while the camera turns, issue #15).
+Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* samplerWords, Surface* const* targets,
+                   size_t numTargets);
 // copy (scaled) between two surfaces' levels/layers; depth always through dkCmdBufBlitImage (plan section 3)
 void blit(Surface* src, uint32_t srcLevel, uint32_t srcLayer, uint32_t sw, uint32_t sh, Surface* dst,
           uint32_t dstLevel, uint32_t dstLayer, uint32_t dw, uint32_t dh);

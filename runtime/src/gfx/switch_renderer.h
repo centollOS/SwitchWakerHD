@@ -18,6 +18,13 @@ void set_fps_overlay_mode(int mode);
 // 16x anisotropic filtering on the game's mipmapped linear samplers (WWHD_ANISO): any thread, from the next frame
 bool aniso();
 void set_aniso(bool on);
+// the bloom and the distance blur (issue #15): the game samples its bloom chain and its half-size picture with more
+// levels than the render targets have; gfx/deko mip_chain makes those levels. On by default (WWHD_BLOOM=0,
+// WWHD_DISTANCE_BLUR=0 off at start); any thread
+bool bloom();
+void set_bloom(bool on);
+bool distance_blur();
+void set_distance_blur(bool on);
 float dynamic_res_scale();  // the internal resolution dynamic resolution has chosen (1 when off)
 // any thread: the internal resolution (the most dynamic resolution may use) and whether dynamic resolution
 // may lower it, from the next frame on (the handheld / docked profiles, platform/settings_switch.h)
@@ -39,6 +46,13 @@ enum DrawOpt : int {
 };
 bool draw_opt(int which);
 void set_draw_opt(int which, bool on);
+// texture eviction (gfx/deko/surfaces.cpp, issue #11): frames a texture may stay unused before it leaves the image
+// heap (0: only under memory pressure); evict_textures_now: every texture unused for a few frames goes at the next
+// frame. Any thread (the debug server's "evict")
+uint64_t texture_idle_frames();
+void set_texture_idle_frames(uint64_t frames);
+void evict_textures_now();
+std::string texture_eviction_report();
 #ifdef __SWITCH__
 std::string clock_report_now();  // "CPU x MHz, GPU y MHz, memory z MHz", or "" if unavailable
 #endif

@@ -4,6 +4,7 @@
 // this runtime's SQ_VTX_SEMANTIC_CLEAR), so places not visited yet get their shaders too.
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,8 +33,10 @@ struct Variant {
     std::vector<uint8_t> fetch;
     bool fetchCompact;
 };
+// `rest` (optional) is called every few hundred recorded variants with the seconds they took (the caller may sleep:
+// a later start's list is made beside the game)
 std::vector<Variant> speculate(const std::vector<shader_scan::Program>& programs, const std::vector<Recorded>& recorded,
-                               size_t limit = 2);
+                               size_t limit = 2, const std::function<void(double)>& rest = {});
 
 // gfx/deko shaders_dk.cpp hash_bytes (the manifest names programs with it)
 uint64_t hash_bytes(const void* bytes, size_t size, uint64_t hash = 0x9E3779B97F4A7C15ull);

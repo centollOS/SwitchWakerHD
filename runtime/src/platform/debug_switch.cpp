@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -24,6 +25,7 @@
 #include "prepare_graphics_switch.h"
 #include "shader_scan_switch.h"
 #include "background_shaders_switch.h"
+#include "audio_guard_switch.h"
 #include "host.h"
 #include "settings_switch.h"
 
@@ -179,6 +181,62 @@ debugsrv::Reply bgshaders(const debugsrv::Args& a) {
                                                                                        : background_shaders::status()));
 }
 
+// "bloom [0|1]" / "blur [0|1]": the Switch tab's Bloom and Distance blur (gfxsw::set_bloom, set_distance_blur), not saved
+debugsrv::Reply bloom(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_bloom(a[0] != "0");
+    return debugsrv::ok(std::string("bloom ") + (gfxsw::bloom() ? "on" : "off"));
+}
+debugsrv::Reply blur(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_distance_blur(a[0] != "0");
+    return debugsrv::ok(std::string("blur ") + (gfxsw::distance_blur() ? "on" : "off"));
+}
+
+// "dspguard [0|1]": the game's DSP-overload guard (audio_guard_switch.h): 1 the game's own, 0 off (the default)
+debugsrv::Reply dspguard(const debugsrv::Args& a) {
+    if (!a.empty()) audio_guard::set_kept(a[0] != "0");
+    return debugsrv::ok(std::string("dspguard ") + (audio_guard::kept() ? "the game's own" : "off"));
+}
+
+// "stall <ms> [core] [count] [gap ms]": a host thread above every game thread spins on a core, as
+// the hitches that set off the game's "kill DSP channel" (issue #13) do; to test the guard at will
+Thread g_stallThread;
+std::atomic<bool> g_stalling{false};
+int g_stallMs = 0, g_stallCount = 0, g_stallGapMs = 0;
+
+void stall_main(void*) {
+    for (int i = 0; i < g_stallCount; ++i) {
+        const uint64_t end = armGetSystemTick() + armNsToTicks(uint64_t(g_stallMs) * 1000000);
+        while (armGetSystemTick() < end) {}
+        if (i + 1 < g_stallCount) svcSleepThread(int64_t(g_stallGapMs) * 1000000);
+    }
+    g_stalling = false;
+}
+
+debugsrv::Reply stall(const debugsrv::Args& a) {
+    if (a.empty()) return debugsrv::err("stall <ms> [core] [count] [gap ms]");
+    if (g_stalling.exchange(true)) return debugsrv::err("a stall is running");
+    if (g_stallThread.handle) threadClose(&g_stallThread);
+    g_stallMs = std::max(1, std::min(atoi(a[0].c_str()), 1000));
+    const int core = a.size() > 1 ? std::max(0, std::min(atoi(a[1].c_str()), 2)) : 0;
+    g_stallCount = a.size() > 2 ? std::max(1, std::min(atoi(a[2].c_str()), 1000)) : 1;
+    g_stallGapMs = a.size() > 3 ? std::max(0, std::min(atoi(a[3].c_str()), 10000)) : 1000;
+    if (R_FAILED(threadCreate(&g_stallThread, stall_main, nullptr, nullptr, 64 << 10, 0x20, core)) ||
+        R_FAILED(threadStart(&g_stallThread))) {
+        g_stalling = false;
+        return debugsrv::err("thread not started");
+    }
+    LOG("[debug] stall: %d ms on core %d, %d times, %d ms apart", g_stallMs, core, g_stallCount, g_stallGapMs);
+    return debugsrv::ok("stalling");
+}
+
+// "evict [now | idle <frames>]": texture eviction (issue #11, gfx/deko/surfaces.cpp)
+debugsrv::Reply evict(const debugsrv::Args& a) {
+    if (!a.empty() && a[0] == "now") gfxsw::evict_textures_now();
+    else if (a.size() > 1 && a[0] == "idle") gfxsw::set_texture_idle_frames(strtoull(a[1].c_str(), nullptr, 10));
+    else if (!a.empty()) return debugsrv::err("evict [now | idle <frames>]");
+    return debugsrv::ok(gfxsw::texture_eviction_report());
+}
+
 debugsrv::Reply quit(const debugsrv::Args&) {
     debugsrv::Reply r = debugsrv::ok("quitting");
     r.after = [] {
@@ -205,6 +263,11 @@ void start() {
     debugsrv::add_command("reload", "reload                 restart: the forwarder loads the NRO again (put it first)", reload);
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
+    debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
+    debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
+    debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);
+    debugsrv::add_command("stall", "stall <ms> [core] [n] [gap]  spin above the game threads (audio guard tests)", stall);
+    debugsrv::add_command("evict", "evict [now | idle <n>] texture eviction: now, or after n unused frames", evict);
     debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);
     debugsrv::add_command("quit", "quit                   end the program", quit);
     debugsrv::Config c;

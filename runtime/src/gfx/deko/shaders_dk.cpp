@@ -492,6 +492,8 @@ std::vector<uint8_t> read_file(const char* path, void (*progress)(size_t, size_t
 // behind the first start's loading card the game's frame rate does not matter: background jobs on cores 0 and 2,
 // no rest, more listed sources a frame (set_background_fast)
 std::atomic<bool> g_bgFast{false};
+// (this fork) the background list's pause (set_background_paused): the game below its frame rate, background jobs wait
+std::atomic<bool> g_bgPaused{false};
 
 struct Job {
     uint64_t hash = 0;
@@ -607,7 +609,11 @@ void worker_main(void*) {
     std::unique_lock<std::mutex> lk(workerMutex);
     workerReady = true;
     for (;;) {
-        workerCv.wait(lk, [] { return workerStop || !jobs.empty(); });
+        // (this fork) while the list's thread has paused the background (the game below its frame rate), only jobs a
+        // draw asked for are taken
+        workerCv.wait(lk, [] {
+            return workerStop || (!jobs.empty() && (foregroundQueued > 0 || !g_bgPaused || g_bgFast));
+        });
         if (workerStop) break;
         const size_t i = pick_job();
         Job job = std::move(jobs[i]);
@@ -626,22 +632,25 @@ void worker_main(void*) {
         if (want != mask) svcSetThreadCoreMask(CUR_THREAD_HANDLE, want == 0x1 ? 0 : -1, mask = want);
         const uint64_t c0 = now_ns();
         compile_job(job, r);
+        const uint64_t took = now_ns() - c0;
+        lk.lock();
+        workerCurrent = 0;
+        workerLastPartner = job.partner;
+        results.push_back(std::move(r));
+        doneCv.notify_all();
         // and it rests as long as it compiled (WWHD_DK_BG_DUTY: the percentage of core 0 it may take, default 50):
-        // game threads on core 0 that the main thread waits for every frame lost their time to a busy worker
+        // game threads on core 0 that the main thread waits for every frame lost their time to a busy worker. A job a
+        // draw asks for ends the rest (it used to wait behind it: more black textures in a new place)
         if (job.background && !fast) {
             static const int duty = [] {
                 const char* e = getenv("WWHD_DK_BG_DUTY");
                 const int d = e && *e ? atoi(e) : 50;
                 return d < 5 ? 5 : d > 100 ? 100 : d;
             }();
-            const uint64_t took = now_ns() - c0;
-            if (duty < 100) svcSleepThread(int64_t(took * uint64_t(100 - duty) / uint64_t(duty)));
+            if (duty < 100)
+                workerCv.wait_for(lk, std::chrono::nanoseconds(took * uint64_t(100 - duty) / uint64_t(duty)),
+                                  [] { return workerStop || foregroundQueued > 0; });
         }
-        lk.lock();
-        workerCurrent = 0;
-        workerLastPartner = job.partner;
-        results.push_back(std::move(r));
-        doneCv.notify_all();
     }
 }
 
@@ -785,6 +794,9 @@ void update_priorities() {
 // (this fork) docs/background-shaders-plan.md: the Latte decompiler is not made for two threads, and
 // translate_listed's runs beside the render thread's translate
 std::mutex g_decompileMutex;
+// when a draw last needed a shader this session had not used (render thread): translate_listed keeps away from the
+// decompiler for a while after it, so the render thread does not wait behind a listed translation in a new place
+std::atomic<uint64_t> g_lastDrawTranslateNs{0};
 // GLSL from translate_listed (any thread) for the render thread, which owns `codes`: queue_listed / shaders_frame_start
 struct Listed {
     uint64_t hash;
@@ -1086,6 +1098,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     if (g_transCache)  // (round 45) a variant of an earlier session: rebuilt from its record, no decompiler
         if (auto it = storedTrans.find(key); it != storedTrans.end())
             if (Shader* sh = shader_from_record(key, vertex, it->second)) return sh;
+    g_lastDrawTranslateNs.store(now_ns(), std::memory_order_relaxed);  // (this fork) translate_listed: the decompiler
     R.perf.shaders++;
     g_total.translations++;
     auto owned = std::make_unique<Shader>();
@@ -1765,6 +1778,11 @@ bool translate_listed(uint32_t* regs, bool vertex, const uint8_t* program, uint3
     static const uint32_t kProgram = mem::host_alloc(0x40000, 256), kFetch = mem::host_alloc(0x1000, 256);
     static std::unordered_map<std::string, LatteFetchShader*> fetchShaders;  // by their bytes (few hundred)
     if (!programSize || programSize > 0x40000 || fetchSize > 0x1000 || (vertex && !fetchSize)) return false;
+    // not within 2 s of a draw's own translation (a new place being drawn), except behind the loading card
+    constexpr uint64_t kQuietNs = 2'000'000'000;
+    while (!g_bgFast.load(std::memory_order_relaxed) &&
+           now_ns() - g_lastDrawTranslateNs.load(std::memory_order_relaxed) < kQuietNs)
+        svcSleepThread(100'000'000);
     std::lock_guard<std::mutex> lk(g_decompileMutex);
     memcpy(ppc_ptr(kProgram), program, programSize);
     const uint32_t start = vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS;
@@ -1834,8 +1852,20 @@ void queue_listed(uint64_t glslHash, bool vertex, std::string&& glsl) {
     g_listed.push_back({glslHash, vertex, std::move(glsl), std::move(record)});
 }
 
+void set_background_paused(bool on) {
+    if (g_bgPaused.exchange(on) == on) return;
+    {
+        std::lock_guard<std::mutex> lk(workerMutex);  // (the worker's wait sees it)
+    }
+    workerCv.notify_all();
+}
+
 void set_background_fast(bool on) {
     g_bgFast = on;
+    {
+        std::lock_guard<std::mutex> lk(workerMutex);
+    }
+    workerCv.notify_all();
     LOG("[dk] background shader jobs: %s", on ? "fast (cores 0 and 2, no rest: behind a loading screen)"
                                               : "gentle (core 0, WWHD_DK_BG_DUTY)");
 }
@@ -1846,6 +1876,12 @@ size_t listed_waiting() {
 }
 
 uint64_t shaders_skipped_draws() { return g_total.skippedDraws; }  // (render thread's count, read as it is)
+
+void shader_queue(size_t& forDraws, size_t& background) {
+    std::lock_guard<std::mutex> lk(workerMutex);
+    forDraws = foregroundQueued;
+    background = jobs.size() - foregroundQueued;
+}
 
 uint64_t shaders_pending() {
     std::lock_guard<std::mutex> lk(workerMutex);

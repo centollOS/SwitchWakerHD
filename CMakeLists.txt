@@ -150,6 +150,11 @@ endif()
 # 'uamlib' target (GLSL -> DKSH, uam_api.h) for the coming deko3d renderer; built only when something
 # links it. -DWWHD_UAM_TEST=ON adds uam_dksh_test (desktop).
 add_subdirectory(runtime/third_party/uam EXCLUDE_FROM_ALL)
+# ---- deko3d (devkitPro's Switch GPU API, zlib, runtime/third_party/deko3d, 0.5.0 + PATCHES.md): built from
+# source for its fixes, in place of devkitPro's libdeko3d / libdeko3dd
+if(WWHD_RENDERER STREQUAL "DEKO3D")
+  add_subdirectory(runtime/third_party/deko3d EXCLUDE_FROM_ALL)
+endif()
 
 # ---- build identification (runtime/src/build_info.h): version and commit, rewritten by
 # cmake/BuildInfo.cmake on every build when they change. Release builds pass the tag.
@@ -214,7 +219,7 @@ if(WWHD_HAS_DEKO3D)
                           runtime/src/platform/settings_switch.cpp runtime/src/platform/settings_ini.cpp
                           runtime/src/platform/debug_server.cpp
                           runtime/src/platform/debug_switch.cpp runtime/src/platform/posix_stubs_switch.cpp
-                          runtime/src/platform/startup_checks_switch.cpp runtime/src/platform/prepare_graphics_switch.cpp
+                          runtime/src/platform/startup_checks_switch.cpp runtime/src/platform/prepare_graphics_switch.cpp runtime/src/platform/audio_guard_switch.cpp
                           runtime/src/platform/prepare_graphics_ui_switch.cpp runtime/src/platform/ui_text_switch.cpp runtime/src/platform/shader_scan_switch.cpp runtime/src/platform/shader_list_switch.cpp
                           runtime/src/platform/background_shaders_switch.cpp)
 endif()
@@ -237,9 +242,9 @@ if(ANDROID)
 else()
   add_executable(wwhd ${RUNTIME_SOURCES} ${GX2_SOURCES} ${GFX_SOURCES} ${MOD_GFX_SOURCES} ${IMGUI_METAL})
 endif()
-# Experimental (Switch): the guest memory base stays in the reserved register x28 (runtime/include/ppc.h,
-# core.cpp guest_call). Off by default.
-option(WWHD_SWITCH_BASE_REG "Switch: keep the guest memory base in x28" OFF)
+# Switch: the guest memory base stays in the reserved register x28 (runtime/include/ppc.h, core.cpp
+# guest_call). On by default since v0.4.4 (main thread ~2% faster in the performance test's busy scenes).
+option(WWHD_SWITCH_BASE_REG "Switch: keep the guest memory base in x28" ON)
 if(WWHD_SWITCH AND WWHD_SWITCH_BASE_REG)
   target_compile_options(gamecode PRIVATE -ffixed-x28)
   target_compile_definitions(gamecode PRIVATE PPC_BASE_REG=1)
@@ -323,15 +328,15 @@ if(WWHD_HAS_DEKO3D)
     list(APPEND _dksh dksh_${_name})
   endforeach()
   dkp_add_embedded_binary_library(deko_shaders ${_dksh})
-  # libdeko3dd: deko3d's checks of every call and its messages (gfx/deko/backend.cpp debug_message: a misuse
+  # deko3d_debug (libdeko3dd): deko3d's checks of every call and its messages (gfx/deko/backend.cpp debug_message: a misuse
   # or failure is logged before the process ends). Release libdeko3d aborts with only a 2359-xxxx result.
   # On while the backend is new (also in Release builds); off for performance measurements.
   option(WWHD_DEKO3D_DEBUG_LIB "deko3d: link the debug library libdeko3dd (also in Release builds)" OFF)
   if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(wwhd PRIVATE WWHD_DEKO3D_DEBUG_LIB=1)
-    target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3dd)
+    target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3d_debug)
   else()
-    target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3d)
+    target_link_libraries(wwhd PRIVATE deko_shaders ${LZ4_LIBRARY} deko3d_release)
   endif()
   # uam on the console: the game shaders that no DKSH cache has (gfx/deko/shaders_dk.cpp, its worker thread)
   target_link_libraries(wwhd PRIVATE uamlib)

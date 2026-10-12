@@ -28,6 +28,7 @@
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/LatteAddrLib/LatteAddrLib.h"
 #include "dk_capture.h"
+#include "gfx/render_mips.h"
 #include "dk_draw.h"
 #include "dk_surfaces.h"
 #include "dk_sync.h"
@@ -938,6 +939,118 @@ void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
                     s->img.ph, keepContents ? ", contents kept" : "");
 }
 
+// ---------------------------------------------------------------- eviction (issue #11, docs/texture-eviction-plan.md)
+// Surfaces are never removed (pointers to them live in the draw caches, the capture notes, GuestRanges...), but the
+// image of a texture nothing draws with any more is: one the GPU never wrote and that was never a render target holds
+// only what upload_surface copied from guest memory, so the next lookup makes it again from there (revive). Without
+// this every place visited stayed in the image heap until a new 64 MiB chunk no longer fit and deko3d ended the game.
+// - under memory pressure (image_alloc found no room): the least recently used ones idle for at least
+//   WWHD_DK_TEX_PRESSURE_FRAMES (150), before a new chunk is added
+// - when idle for WWHD_DK_TEX_IDLE_FRAMES (9000, ~5 min; 0: never), checked every 300 frames
+namespace {
+uint64_t env_frames(const char* name, uint64_t def) {
+    const char* e = getenv(name);
+    return e && *e ? strtoull(e, nullptr, 10) : def;
+}
+std::atomic<uint64_t> g_idleFrames{env_frames("WWHD_DK_TEX_IDLE_FRAMES", 9000)};
+std::atomic<bool> g_evictNow{false};  // the debug server's "evict now"
+std::atomic<uint64_t> g_evictOut{0}, g_evictRestores{0};  // (for texture_eviction_report)
+const uint64_t g_pressureFrames = std::max<uint64_t>(env_frames("WWHD_DK_TEX_PRESSURE_FRAMES", 150), kFrames + 1);
+struct EvictStats {
+    uint64_t idle = 0, idleBytes = 0, pressure = 0, pressureBytes = 0, restores = 0, out = 0;
+} g_evict;
+
+// its image can go: guest memory holds everything in it, and no frame the GPU has not finished uses it (its memory
+// returns to the heap at once)
+bool evictable(const Surface* s, uint64_t minIdle) {
+    if (!s->img.valid || s->gpuWritten || s->renderTarget || s->scale != 1.0f || s->twin.valid || s->writebackPending)
+        return false;
+    if (s == S.tvSource || s == S.scanSrc) return false;
+    return frame_retired(s->useFrame) && R.frame + 1 - s->useFrame >= minIdle;
+}
+
+size_t evict_surface(Surface* s) {
+    const size_t bytes = s->img.mem.size;
+    image_descriptor_free_later(s->img.imageId);
+    for (auto& [key, id] : s->img.views) image_descriptor_free_later(id);
+    image_free_now(s->img.mem);
+    s->img = SurfaceImage{};
+    s->evicted = true;
+    // the next upload reads the guest data in full
+    s->dirty = true;
+    s->lastCheckedFrame = ~0ull;
+    s->dataSize = 0;
+    s->contentHash = s->sparseHash = 0;
+    g_evict.out++;
+    R.surfaceEpoch++;  // lookups and views cached by the draws
+    R.textureEpoch++;
+    return bytes;
+}
+
+// an evicted surface looked up again: its image made again and the guest data uploaded (also when the lookup is for
+// rendering or a copy's destination: what was there before is kept, as without eviction)
+void revive(Surface* s) {
+    s->evicted = false;
+    g_evict.out--;
+    g_evict.restores++;
+    create_surface_image(s);
+    upload_surface(s);
+}
+
+// a surface a lookup returns: in use this frame
+Surface* found(Surface* s) {
+    if (s->evicted) revive(s);
+    s->useFrame = R.frame + 1;
+    return s;
+}
+
+void evict_idle() {
+    const bool now = g_evictNow.exchange(false, std::memory_order_relaxed);
+    const uint64_t idle = now ? kFrames + 1 : g_idleFrames.load(std::memory_order_relaxed);
+    g_evictOut.store(g_evict.out, std::memory_order_relaxed);
+    g_evictRestores.store(g_evict.restores, std::memory_order_relaxed);
+    if (!now && (!idle || R.frame % 300)) return;
+    uint64_t n = 0, bytes = 0;
+    for (Surface* s : S.list)
+        if (evictable(s, idle)) {
+            bytes += evict_surface(s);
+            n++;
+        }
+    g_evict.idle += n;
+    g_evict.idleBytes += bytes;
+    if (now) LOG("[dk] evict now: %llu textures (%.1f MiB)", (unsigned long long)n, double(bytes) / 1048576.0);
+}
+}  // namespace
+
+bool image_heap_pressure(uint32_t bytes) {
+    std::vector<Surface*> c;
+    for (Surface* s : S.list)
+        if (evictable(s, g_pressureFrames)) c.push_back(s);
+    static int logged = 0;
+    if (c.empty()) {
+        if (logged++ < 20)
+            LOG("[dk] image heap full for %u KiB and no texture unused for %llu frames to evict: a new chunk", bytes >> 10,
+                (unsigned long long)g_pressureFrames);
+        return false;
+    }
+    std::sort(c.begin(), c.end(), [](const Surface* a, const Surface* b) { return a->useFrame < b->useFrame; });
+    // about twice the request at once: the freed ranges need not be next to each other
+    const uint64_t want = std::max<uint64_t>(uint64_t(bytes) * 2, 8u << 20);
+    uint64_t freed = 0, n = 0;
+    for (Surface* s : c) {
+        freed += evict_surface(s);
+        n++;
+        if (freed >= want) break;
+    }
+    g_evict.pressure += n;
+    g_evict.pressureBytes += freed;
+    if (logged++ < 200)
+        LOG("[dk] image heap full for %u KiB: %llu textures evicted (%.1f MiB, unused for %llu frames or more; %zu could "
+            "go)", bytes >> 10, (unsigned long long)n, double(freed) / 1048576.0,
+            (unsigned long long)(R.frame + 1 - c[n - 1]->useFrame), c.size());
+    return true;
+}
+
 // ---------------------------------------------------------------- lookup
 Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
     if (!d.addr) return nullptr;
@@ -954,6 +1067,7 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
             s->slices == d.slices &&
             (forRendering || s->mips >= d.mips || s->gpuWritten)) {
             if (forRendering) {
+                found(s);  // (an evicted texture comes back as it was made: before it is a render target)
                 s->renderTarget = true;
                 return s;
             }
@@ -961,9 +1075,9 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
         } else if (!forRendering && s->gpuWritten && (s->format & 0x3f) == (d.format & 0x3f))
             consider(s);
     }
-    if (exact && (exact->gpuWritten || !rendered || exact->writeSeq > rendered->writeSeq)) return exact;
-    if (rendered) return rendered;
-    if (exact) return exact;
+    if (exact && (exact->gpuWritten || !rendered || exact->writeSeq > rendered->writeSeq)) return found(exact);
+    if (rendered) return found(rendered);
+    if (exact) return found(exact);
     auto s = std::make_unique<Surface>();
     s->addr = d.addr;
     s->mipAddr = d.mipAddr;
@@ -983,6 +1097,7 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
     create_surface_image(s.get());  // (throws for an unsupported format: the GX2 command is skipped and logged)
     s->scalable = screen_shaped(s.get());
     s->addrWrites = &S.addrWrites[d.addr];
+    s->useFrame = R.frame + 1;
     auto* raw = s.get();
     S.byAddr.emplace(d.addr, std::move(s));
     S.list.push_back(raw);
@@ -1111,7 +1226,9 @@ Surface* surface_from_depth_buffer(uint32_t addr, uint32_t* firstSlice, uint32_t
     return find_or_create_surface(d, true);
 }
 
-Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
+namespace {
+// the surface the texture words describe (addr 0: none)
+SurfaceDesc texture_desc(const uint32_t* w, bool isDepthSampler) {
     Latte::LATTE_SQ_TEX_RESOURCE_WORD0_N w0;
     Latte::LATTE_SQ_TEX_RESOURCE_WORD1_N w1;
     Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N w4;
@@ -1120,9 +1237,9 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
     memcpy(static_cast<void*>(&w1), &w[1], 4);
     memcpy(static_cast<void*>(&w4), &w[4], 4);
     memcpy(static_cast<void*>(&w5), &w[5], 4);
-    if (unique) *unique = false;
+    SurfaceDesc d;
     uint32_t addr = w[2] << 8, mipAddr = w[3] << 8;
-    if (!addr) return nullptr;
+    if (!addr) return d;
     auto dim = w0.get_DIM();
     uint32_t pitch = (w0.get_PITCH() + 1) << 3;
     uint32_t width = w0.get_WIDTH() + 1;
@@ -1143,7 +1260,6 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
         swizzle = addr & 0x700;
         addr &= ~0x700u;
     }
-    SurfaceDesc d;
     d.addr = addr;
     d.mipAddr = mipAddr;
     d.width = width;
@@ -1156,6 +1272,14 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
     d.tileMode = (uint32_t)tileMode;
     d.swizzle = swizzle;
     d.isDepth = isDepthSampler;
+    return d;
+}
+}  // namespace
+
+Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
+    if (unique) *unique = false;
+    const SurfaceDesc d = texture_desc(w, isDepthSampler);
+    if (!d.addr) return nullptr;
     Surface* s = find_or_create_surface(d, false);
     if (unique) *unique = S.byAddr.count(d.addr) == 1;
     upload_surface(s);
@@ -1284,6 +1408,132 @@ Surface* volume_source(Surface* s, const uint32_t* texWords) {
         seq = s->writeSeq;
     }
     return copy.get();
+}
+
+namespace {
+bool env_on(const char* name) {
+    const char* e = getenv(name);
+    return !e || atoi(e) != 0;
+}
+// the Switch tab's two options (on by default; WWHD_BLOOM=0 / WWHD_DISTANCE_BLUR=0 off at start); the other chains
+// (the light buffer's, the depth reduction's: shadows and ambient occlusion as on the Wii U) are always made, unless
+// WWHD_NO_RT_MIPS=1 turns every chain off
+std::atomic<bool> g_bloom{env_on("WWHD_BLOOM")}, g_blur{env_on("WWHD_DISTANCE_BLUR")};
+const bool g_noChains = getenv("WWHD_NO_RT_MIPS") != nullptr;
+}
+bool bloom_enabled() { return g_bloom.load(std::memory_order_relaxed); }
+void set_bloom(bool on) {
+    if (g_bloom.exchange(on) != on) LOG("[dk] bloom (its mip chain, issue #15) %s", on ? "on" : "off");
+}
+bool blur_enabled() { return g_blur.load(std::memory_order_relaxed); }
+void set_blur(bool on) {
+    if (g_blur.exchange(on) != on) LOG("[dk] distance blur (its mip chain, issue #15) %s", on ? "on" : "off");
+}
+
+Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* samplerWords, Surface* const* targets,
+                   size_t numTargets) {
+    if (g_noChains || !s || !s->img.valid || !s->gpuWritten || s->mips != 1 || s->slices != 1 || s->fmt.depth ||
+        s->fmt.compressed || s->fmt.kind != FormatInfo::FLOAT || s->img.type != DkImageType_2D || !format_can_2d(s->fmt.image))
+        return s;
+    const SurfaceDesc d = texture_desc(texWords, false);
+    uint32_t full = 1;
+    while ((std::max(s->width, s->height) >> full) > 0) full++;
+    const uint32_t mips = std::min({d.mips, full, 16u});
+    if (mips <= 1) return s;
+    // which option the chain belongs to: the bloom's is the only one with more than two levels (320x180, four);
+    // the half-size picture (640x360 RGB10A2, two levels) gives the distance blur (far places out of focus)
+    if (mips > 2 ? !bloom_enabled() : s->format == 0x019 && !blur_enabled()) return s;
+    // the game's own levels
+    Surface* levels[16] = {};
+    for (uint32_t l = 1; l < mips; l++) {
+        levels[l] = gfx::render_mips::game_level(d, l, S.byAddr);
+        if (levels[l] && (!levels[l]->img.valid || !same_2d_class(levels[l], s))) levels[l] = nullptr;
+    }
+    // per level, what it was last copied from (the surface and its writeSeq; a halved level: none)
+    struct Chain {
+        std::unique_ptr<Surface> c;
+        const Surface* from[16] = {};
+        uint64_t seq[16] = {};
+    };
+    static std::unordered_map<Surface*, Chain> chains;
+    Chain& ch = chains[s];
+    auto& c = ch.c;
+    if (c && (c->mips != mips || c->width != s->width || c->height != s->height || c->fmt.image != s->fmt.image)) {
+        destroy_surface_image(c.get());
+        c.reset();
+    }
+    if (!c) {
+        c = std::make_unique<Surface>();
+        c->width = s->width;
+        c->height = s->height;
+        c->dim = s->dim;
+        c->format = s->format;
+        c->fmt = s->fmt;
+        c->mips = mips;  // (the image at the guest size: create_surface_image keeps a mip chain at scale 1)
+        c->gpuWritten = true;
+        create_surface_image(c.get());
+        for (uint32_t l = 0; l < 16; l++) ch.seq[l] = ~0ull;
+    }
+    // The levels this lookup can read: the sampler's LOD clamp (as make_sampler gives it to deko3d). The game
+    // renders its chain a level at a time and samples it after each pass with the LOD clamped to one level, so
+    // bringing every level up to date at every lookup would copy the whole chain several times a frame.
+    Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0 sw0;
+    Latte::LATTE_SQ_TEX_SAMPLER_WORD1_0 sw1;
+    memcpy(static_cast<void*>(&sw0), samplerWords, 4);
+    memcpy(static_cast<void*>(&sw1), samplerWords + 1, 4);
+    const float minLod = sw1.get_MIN_LOD() / 64.f, maxLod = uint32_t(sw0.get_MIP_FILTER()) ? sw1.get_MAX_LOD() / 64.f : 0.f;
+    uint32_t lo = std::min(uint32_t(std::min(minLod, maxLod)), mips - 1);
+    const uint32_t hi = std::min(uint32_t(std::ceil(std::max(minLod, maxLod))), mips - 1);
+    while (lo > 0 && !levels[lo]) lo--;  // a halved level needs the ones below it
+    // the draw renders into a level it can read: the one-level surface, as before the chains
+    for (uint32_t l = lo; l <= hi; l++)
+        for (size_t t = 0; levels[l] && t < numTargets; t++)
+            if (targets[t] == levels[l]) {
+                static int logged = 0;
+                if (logged++ < 4)
+                    LOG("[dk] mip chain of %s not used: the draw renders into its level %u (%s)", describe(s).c_str(), l,
+                        describe(levels[l]).c_str());
+                return s;
+            }
+    // Level 0 from the surface (its internal resolution down to the guest size), each further level the game's
+    // own when it rendered one, else the previous level halved (again when that one was copied); only levels whose
+    // source changed are copied
+    static uint64_t g_lookups = 0, g_levelCopies = 0, g_logFrame = 0;
+    g_lookups++;
+    bool copied = false, below = false;  // below: the previous level was copied now
+    for (uint32_t l = lo; l <= hi; l++) {
+        const Surface* src = l == 0 ? s : levels[l];
+        const uint64_t seq = src ? src->writeSeq : 0;
+        if (src ? ch.from[l] == src && ch.seq[l] == seq : !below && ch.from[l] == nullptr && ch.seq[l] != ~0ull) {
+            below = false;
+            continue;
+        }
+        if (!copied && g_traceFrame) trace_event("mip chain of %s (%u levels) from level %u", trace_name(s).c_str(), mips, l);
+        const uint32_t w = std::max(c->width >> l, 1u), h = std::max(c->height >> l, 1u);
+        if (src)
+            blit(const_cast<Surface*>(src), 0, 0, src->width, src->height, c.get(), l, 0, w, h);
+        else
+            blit(c.get(), l - 1, 0, std::max(c->width >> (l - 1), 1u), std::max(c->height >> (l - 1), 1u), c.get(), l, 0, w, h);
+        ch.from[l] = src;
+        ch.seq[l] = seq;
+        below = copied = true;
+        g_levelCopies++;
+    }
+    if (copied) note_write(c.get());
+    if (R.frame >= g_logFrame + 600) {
+        if (g_logFrame)
+            LOG("[dk] mip chains: %.1f lookups, %.2f level copies per frame", double(g_lookups) / double(R.frame - g_logFrame),
+                double(g_levelCopies) / double(R.frame - g_logFrame));
+        g_logFrame = R.frame;
+        g_lookups = g_levelCopies = 0;
+    }
+    static int logged = 0;
+    if (copied && logged++ < 8) {
+        uint32_t fromGame = 0;
+        for (uint32_t l = 1; l < mips; l++) fromGame += levels[l] != nullptr;
+        LOG("[dk] mip chain for %s: %u levels, %u of them the game's own", describe(s).c_str(), mips, fromGame);
+    }
+    return c.get();
 }
 
 // ---------------------------------------------------------------- CPU reads (dk_surfaces.h cpu_read_surface)
@@ -1900,7 +2150,7 @@ void surface_stats() {
     LOG("[dk] surfaces: %zu (%.1f MiB, render targets %.1f MiB); uploads %llu (%.1f MiB, %.1f ms/s), staging %.1f MiB/s, "
         "%llu waits (%.1f ms), %llu one-off blocks; clears %llu (%.1f ms/s), copies %llu (%llu by the CPU, %.1f ms/s), "
         "scan copies %llu (%llu made), feedback copies %llu, invalidates %llu (%.1f ms/s); descriptors: %u images, "
-        "%u samplers",
+        "%u samplers; evicted textures %llu (idle %llu, %.1f MiB; memory full %llu, %.1f MiB, so far), %llu restored",
         count, double(total) / 1048576.0, double(targets) / 1048576.0, (unsigned long long)(p.uploads - last.uploads),
         double(p.uploadBytes - last.uploadBytes) / 1048576.0, ms(p.uploadNs - last.uploadNs),
         double(st.bytes - lastStaging.bytes) / 1048576.0 / secs, (unsigned long long)(st.waits - lastStaging.waits),
@@ -1909,7 +2159,10 @@ void surface_stats() {
         (unsigned long long)(p.surfaceCopies - last.surfaceCopies), (unsigned long long)(p.cpuSurfaceCopies - last.cpuSurfaceCopies),
         ms(p.surfaceCopyNs - last.surfaceCopyNs), (unsigned long long)(p.scans - last.scans),
         (unsigned long long)(p.scanBlits - last.scanBlits), (unsigned long long)(p.feedbackCopies - last.feedbackCopies),
-        (unsigned long long)(p.invalidates - last.invalidates), ms(p.invalidateNs - last.invalidateNs), images, samplers);
+        (unsigned long long)(p.invalidates - last.invalidates), ms(p.invalidateNs - last.invalidateNs), images, samplers,
+        (unsigned long long)g_evict.out, (unsigned long long)g_evict.idle, double(g_evict.idleBytes) / 1048576.0,
+        (unsigned long long)g_evict.pressure, double(g_evict.pressureBytes) / 1048576.0,
+        (unsigned long long)g_evict.restores);
     last = p;
     lastStaging = st;
 }
@@ -1927,6 +2180,7 @@ void surfaces_frame_start() {
     // the previous frame was presented: its TV buffer gets a copy only if the game copies it again
     S.scanSrc = nullptr;
     if (S.tvSource) S.tvSource->hudFull = false;
+    evict_idle();
     surface_stats();
 }
 
@@ -1942,3 +2196,20 @@ void surface_memory(size_t& total, size_t& targets, size_t& count) {
 }
 
 }  // namespace gfxdk
+
+namespace gfxsw {
+uint64_t texture_idle_frames() { return gfxdk::g_idleFrames.load(std::memory_order_relaxed); }
+void set_texture_idle_frames(uint64_t frames) {
+    gfxdk::g_idleFrames.store(frames, std::memory_order_relaxed);
+    LOG("[dk] texture eviction: unused for %llu frames%s", (unsigned long long)frames, frames ? "" : " (off: only under memory pressure)");
+}
+void evict_textures_now() { gfxdk::g_evictNow.store(true, std::memory_order_relaxed); }
+std::string texture_eviction_report() {
+    char t[160];
+    snprintf(t, sizeof t, "textures evicted now %llu, restored %llu; idle frames %llu",
+             (unsigned long long)gfxdk::g_evictOut.load(std::memory_order_relaxed),
+             (unsigned long long)gfxdk::g_evictRestores.load(std::memory_order_relaxed),
+             (unsigned long long)texture_idle_frames());
+    return t;
+}
+}  // namespace gfxsw

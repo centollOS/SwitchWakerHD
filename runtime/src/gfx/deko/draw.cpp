@@ -184,6 +184,7 @@ void sync_cache() {
 // ---- trace switches (as gfx/gl): WWHD_DK_TRACE_DRAWS logs every draw of a traced frame
 const bool g_traceDraws = env_switch("TRACE_DRAWS", false);
 std::string g_traceTextures;  // the textures of the draw being prepared
+std::string g_traceVertices;  // (traced draws) the first two vertices of each vertex stream, guest bytes
 uint32_t g_frameDraws = 0;    // draws executed in the frame being recorded: the trace's and captures' #n
 
 // the draw being prepared: renders the GamePad picture; its targets' internal resolution
@@ -481,6 +482,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             if (cached.epoch) texture_table_entry(words, samplerWords, compare) = cached;
             if (lap.on) g_res.textureMissNs += (now_ns() - missStart) * kDrawTimeSample;
         }
+        s->useFrame = R.frame + 1;  // (texture eviction: in use)
         if (g_gamepadDrawing) {  // a texture of the GamePad picture
             if (!s->gamepadSource) s->gamepadSourceSince = R.frame;
             s->gamepadSource = true;
@@ -522,6 +524,12 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         if (s->gpuWritten && (words[0] & 7) == uint32_t(Latte::E_DIM::DIM_3D)) {  // (volume_source's own test first)
             if (Surface* v = volume_source(s, words); v != s) {  // the layers of a 3D color buffer, sampled as 3D
                 s = v;
+                view = sampled_view_id(s, words);
+            }
+        }
+        if (s->gpuWritten && s->mips == 1 && !compare && (words[0] & 7) == uint32_t(Latte::E_DIM::DIM_2D) && (words[5] & 0xF) != 0) {
+            if (Surface* m = mip_chain(s, words, samplerWords, colors.data(), colors.size()); m != s) {  // levels the render target has not: its mip chain
+                s = m;
                 view = sampled_view_id(s, words);
             }
         }
@@ -1380,6 +1388,31 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         tm.depth = depth;
         tm.depthSlice = depthSlice;
     }
+    // a depth buffer smaller than the color targets: deko3d clips drawing to the smallest target it binds (the
+    // screen scissor of dkCmdBufBindRenderTargets), Latte does not. The Picto Box draws its 1600x900 picture with the
+    // scene's depth buffer still bound, 1920x1080 on the Wii U but 1280x720 here (the game's low size, "Why 720p" in
+    // docs/switch-port.md): only 80% of the picture was drawn. A depth buffer this draw cannot change the outcome
+    // with (test ALWAYS, no depth or stencil writes) is left out.
+    if (depth) {
+        bool smaller = false;
+        for (auto* c : colors)
+            if (c && (c->width > depth->width || c->height > depth->height)) smaller = true;
+        if (smaller) {
+            LATTE_DB_DEPTH_CONTROL dc;
+            memcpy((void*)&dc, r + REGADDR::DB_DEPTH_CONTROL, 4);
+            const bool unused = !dc.get_STENCIL_ENABLE() &&  // (Z_FUNC 7: ALWAYS)
+                                (!dc.get_Z_ENABLE() || (uint32_t(dc.get_Z_FUNC()) == 7 && !dc.get_Z_WRITE_ENABLE()));
+            if (unused) {
+                depth = nullptr;
+            } else {
+                char t[64];
+                snprintf(t, sizeof t, "%08X %ux%u, DB_DEPTH_CONTROL %08X", depth->addr, depth->width, depth->height,
+                         r[REGADDR::DB_DEPTH_CONTROL]);
+                log_once(0xD5A11E0000000000ull | depth->addr,
+                         "[dk] depth buffer %s smaller than a color target and used: drawing stops at its size", t);
+            }
+        }
+    }
     // each render target at the internal resolution it should have now (rescale_surface keeps contents); when
     // some could take it but others wait for an allocation budget, all of them take it now
     if (depth) {
@@ -1500,6 +1533,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }
     sync_draw_begin();
     g_traceTextures.clear();
+    g_traceVertices.clear();
     if (g_capture) capture_draw_begin();
     lap.sub(g_res.targetNs);  // (the scissor)
     if (depthOnly) stages[kPixelStage].texMask = stages[kPixelStage].uboMask = 0;
@@ -1791,9 +1825,12 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         bool constantColor = false;
         for (uint32_t i = 0; i < 8; i++) {
             if (!colors[i]) continue;  // (a gap: mask 0)
-            dkColorWriteStateSetMask(&cw, i, (r[REGADDR::CB_TARGET_MASK] >> (4 * i)) & 15);
+            uint32_t mask = (r[REGADDR::CB_TARGET_MASK] >> (4 * i)) & 15;
             const bool on = colors[i]->fmt.kind == FormatInfo::FLOAT && ((r[REGADDR::CB_COLOR_CONTROL] >> (8 + i)) & 1);
-            if (!on) continue;
+            if (!on) {
+                dkColorWriteStateSetMask(&cw, i, mask);
+                continue;
+            }
             dkColorStateSetBlendEnable(&cs, i, true);
             LATTE_CB_BLENDN_CONTROL b;
             memcpy((void*)&b, r + REGADDR::CB_BLEND0_CONTROL + i, 4);
@@ -1809,6 +1846,9 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             for (DkBlendFactor f : {DkBlendFactor(bs.srcColorBlendFactor), DkBlendFactor(bs.dstColorBlendFactor),
                                      DkBlendFactor(bs.srcAlphaBlendFactor), DkBlendFactor(bs.dstAlphaBlendFactor)})
                 constantColor |= constant_factor(f);
+            // separate alpha factors reach the GPU as given: deko3d is built from source with its alpha destination
+            // factor fixed (runtime/third_party/deko3d/PATCHES.md patch 1; issues #12 and #7)
+            dkColorWriteStateSetMask(&cw, i, mask);
             if (!(gs.blendKnown & (1u << i)) || !same_bytes(gs.blend[i], bs)) {
                 dkCmdBufBindBlendStates(R.cmd, i, &bs, 1);
                 gs.blend[i] = bs;
@@ -1882,6 +1922,17 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             return;
         }
         R.perf.vertexBytes += g.copied - skipBytes;
+        if (g_traceFrame && (g_traceDraws || g_captureDraws) && g.stride) {
+            char t[48];
+            snprintf(t, sizeof t, " vb%u@%08X stride %u:", g.index, g.addr, g.stride);
+            g_traceVertices += t;
+            const uint64_t first = g.instance ? 0 : firstVertex * g.stride;
+            for (uint64_t b = first; b < std::min<uint64_t>(first + 2ull * g.stride, g.size); b++) {
+                snprintf(t, sizeof t, "%s%02X", (b - first) % g.stride ? "" : " ",
+                         *static_cast<const uint8_t*>(ppc_ptr(g.addr + uint32_t(b))));
+                g_traceVertices += t;
+            }
+        }
         while (bufferCount <= g.index) bufferStates[bufferCount++] = {0, 0};
         bufferStates[g.index] = {g.stride, g.instance ? 1u : 0u};
         vtx[g.index] = {slice.gpu, slice.size};
@@ -1973,9 +2024,25 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
                 uint32_t(tdc.get_STENCIL_ENABLE()), (r[REGADDR::PA_SU_SC_MODE_CNTL] >> 11) & 1,
                 f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE]) / 16, f32(r[REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET]),
                 r[REGADDR::CB_BLEND0_CONTROL], r[REGADDR::CB_TARGET_MASK], trim, g_traceTextures.c_str());
+            // the remapped register constants each stage reads (as pack_uniforms copies them), as floats
+            std::string uniforms;
+            for (Shader* sh : {vs, ps}) {
+                if (!sh->dec) continue;
+                const uint32_t aluBase = mmSQ_ALU_CONSTANT0_0 + (sh->vertex ? 0x400 : 0);
+                for (const auto& e : sh->dec->list_remappedUniformEntries_register) {
+                    const uint32_t* c = r + aluBase + e.indexOffset / 4;
+                    char t[96];
+                    snprintf(t, sizeof t, " %s[%u]=(%g %g %g %g)", sh->vertex ? "vs" : "ps", e.mappedIndexOffset / 16,
+                             f32(c[0]), f32(c[1]), f32(c[2]), f32(c[3]));
+                    uniforms += t;
+                }
+                if (!sh->dec->list_remappedUniformEntries_bufferGroups.empty()) uniforms += sh->vertex ? " vs+blocks" : " ps+blocks";
+            }
+            LOG("[trace]   draw #%u uniforms%s; vertices%s", drawIndex, uniforms.c_str(), g_traceVertices.c_str());
         }
     }
     g_traceTextures.clear();
+    g_traceVertices.clear();
     R.drawCount++;
 }
 }  // namespace
