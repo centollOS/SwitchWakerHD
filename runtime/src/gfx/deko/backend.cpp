@@ -14,6 +14,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "dk_shaders.h"
 #include "dk_surfaces.h"
 #include "dk_sync.h"
+#include "frame_pacing.h"  // (this fork, #23) vblank statistics and pacing modes
 #include "../../platform/background_shaders_switch.h"  // (this fork) the counter's shader line
 
 #include <algorithm>
@@ -1047,6 +1048,7 @@ void frame_stats() {
             (unsigned long long)p.poolHits, rescale_pool_bytes() >> 20, 100.0 * perFrame(p.hudSwitches));
         R.perf = {};  // (swap() takes the hitch base after present)
     }
+    LOG("[dk] pacing: %s", frame_pacing::report().c_str());  // (this fork, #23)
     if (std::string passes = gpuPasses.report(); !passes.empty()) LOG("[dk] GPU passes: %s", passes.c_str());
     if (std::string sync = sync_report(frames); !sync.empty()) LOG("[dk] GPU sync %s", sync.c_str());
     if (std::string clocks = clock_report(); !clocks.empty()) LOG("[dk] clocks: %s", clocks.c_str());
@@ -1227,6 +1229,7 @@ void present() {
     // (the window's real size: the UI grows with it, overlay.cpp)
     if (ImDrawData* ui = overlay::frame(float(g_winW), float(g_winH), overlay_renderer_init)) overlay_draw(ui, int(g_winW), int(g_winH));
     gpuPasses.frame_end();
+    frame_pacing::on_present(R.cmd, frame);  // (this fork, #23) the GPU writes the frame number when done
     frame_end();
     const uint64_t t3 = now_ns();
     check_queue("the submit", frame);
@@ -1421,6 +1424,7 @@ void init() {
     poll_operation_mode();
     window_wanted(g_winW, g_winH);  // the first swapchain at the current mode's size
     init_swapchain();
+    frame_pacing::start();  // (this fork, #23)
     shaders_init(shader_cache_progress);  // the game shaders' worker and caches (dk_shaders.h)
     log_heap("after the deko3d setup");
     input::init();
