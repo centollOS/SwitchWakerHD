@@ -173,11 +173,26 @@ void start() {
     memset(const_cast<uint8_t*>(g_cpu), 0, 16);
     static ViDisplay display;
     static Event vsync;
-    Result rc = viOpenDefaultDisplay(&display);
-    if (R_SUCCEEDED(rc)) rc = viGetDisplayVsyncEvent(&display, &vsync);
-    if (R_FAILED(rc)) {
-        LOG("[dk] pacing: no display vsync event (rc 0x%X): no vblank statistics, the virtual vsync stays on the "
-            "steady clock", rc);
+    // the default display first; the panel's and the TV's by name if the system refuses it
+    Result rc = 0;
+    bool got = false;
+    for (const char* name : {"Default", "Internal", "External"}) {
+        rc = viOpenDisplay(name, &display);
+        if (R_FAILED(rc)) {
+            LOG("[dk] pacing: display \"%s\" not opened (rc 0x%X)", name, rc);
+            continue;
+        }
+        rc = viGetDisplayVsyncEvent(&display, &vsync);
+        if (R_SUCCEEDED(rc)) {
+            LOG("[dk] pacing: vsync event of the display \"%s\" (id %llu)", name, (unsigned long long)display.display_id);
+            got = true;
+            break;
+        }
+        LOG("[dk] pacing: display \"%s\" (id %llu): no vsync event (rc 0x%X)", name, (unsigned long long)display.display_id, rc);
+        viCloseDisplay(&display);
+    }
+    if (!got) {
+        LOG("[dk] pacing: no display vsync event: no vblank statistics, the virtual vsync stays on the steady clock");
         return;
     }
     static Thread thread;
