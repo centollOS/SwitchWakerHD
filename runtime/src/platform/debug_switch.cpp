@@ -192,7 +192,7 @@ debugsrv::Reply blur(const debugsrv::Args& a) {
     return debugsrv::ok(std::string("blur ") + (gfxsw::distance_blur() ? "on" : "off"));
 }
 
-// "pacing [0|1]": frame pacing mode (gfx/deko/frame_pacing.h, #23): 1 swap interval the game's,
+// "pacing [0|1]": frame pacing mode (gfx/deko/frame_pacing.h, #23): 1 swap interval the game's (the default),
 // 0 swap interval 1 (as before); not saved
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));

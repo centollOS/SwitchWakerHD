@@ -224,15 +224,16 @@ void init_swapchain() {
     dkSwapchainSetSwapInterval(g_swapchain, 1);
     u32 nw = 0, nh = 0;
     nwindowGetDimensions(nwindowGetDefault(), &nw, &nh);
-    LOG("[dk] swapchain: %u RGBA8 images of %ux%u on the default window (%ux%u), swap interval 1", kSwapImages, g_winW,
+    LOG("[dk] swapchain: %u RGBA8 images of %ux%u on the default window (%ux%u), swap interval 1 until the first present (frame_pacing)", kSwapImages, g_winW,
         g_winH, nw, nh);
 }
 
 // a new window size (the operation mode changed): the GPU finishes what was submitted (the previous present
 // passes into the old images), the old swapchain releases the window's buffers (nwindowReleaseBuffers), and new
 // images and a new swapchain of the new size take their place (deko3d sets the window's dimensions from them,
-// nwindowSetDimensions). The old images' memory is freed once the GPU is done with this frame. Same swap
-// interval (1); relaxed vsync is gx2_core's own pacing (steady clock, 59.94 Hz), the same in both modes.
+// nwindowSetDimensions). The old images' memory is freed once the GPU is done with this frame. The next present
+// sets the swap interval again (frame_pacing, #23: the game's, 2 at 30 fps); relaxed vsync is gx2_core's own
+// pacing (steady clock, 59.94 Hz), the same in both modes.
 void resize_window(uint32_t w, uint32_t h, uint64_t frame) {
     const uint64_t t0 = now_ns();
     const uint32_t ow = g_winW, oh = g_winH;
@@ -247,7 +248,7 @@ void resize_window(uint32_t w, uint32_t h, uint64_t frame) {
     g_winH = h;
     init_swapchain();
     g_windowResizes++;
-    LOG("[dk] frame %llu: window %ux%u -> %ux%u: swapchain recreated in %.1f ms (GPU idle wait %.1f ms), swap interval 1",
+    LOG("[dk] frame %llu: window %ux%u -> %ux%u: swapchain recreated in %.1f ms (GPU idle wait %.1f ms), swap interval set again at the next present",
         (unsigned long long)frame, ow, oh, w, h, double(now_ns() - t0) / 1e6, double(t1 - t0) / 1e6);
 }
 

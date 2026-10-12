@@ -3,7 +3,8 @@
 // and the intervals between presents (the 5 s '[dk] pacing' line).
 // Pacing mode (WWHD_DK_PACING=n at boot, debug command "pacing [0|1]"):
 //   0: swap interval 1 (the behaviour before #23)
-//   1: the swapchain's swap interval follows the game's (2 at 30 fps; 1 with frame interpolation / true 60)
+//   1 (the default): the swapchain's swap interval follows the game's (2 at 30 fps; 1 with frame interpolation /
+//      true 60)
 #pragma once
 #include <deko3d.h>
 

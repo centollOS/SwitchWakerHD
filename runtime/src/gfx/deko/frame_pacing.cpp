@@ -7,7 +7,7 @@
 // (plus a constant compositor latency, which does not change the counts). A frame finished within the wake-up
 // latency of the thread (microseconds) before a vblank can be counted one vblank late.
 //
-// Mode 1 gives the swapchain the game's swap interval, so the display holds every frame at least
+// Mode 1 (the default) gives the swapchain the game's swap interval, so the display holds every frame at least
 // two vblanks at 30 fps instead of showing a frame that finished early after one (docs/frame-pacing-plan.md).
 #include "frame_pacing.h"
 
@@ -31,7 +31,7 @@ using gfxdk::R;
 namespace {
 std::atomic<int> g_mode{[] {
     const char* e = getenv("WWHD_DK_PACING");
-    return e ? std::clamp(atoi(e), 0, 1) : 0;
+    return e ? std::clamp(atoi(e), 0, 1) : 1;  // mode 1 by default (#23)
 }()};
 
 // GPU-written report: the frame number (word 0) and the GPU's timestamp (bytes 8..15)
@@ -146,7 +146,7 @@ void set_mode(int m) {
 }
 
 void start() {
-    LOG("[dk] pacing mode %d (WWHD_DK_PACING; 1: swap interval the game's; 0: swap interval 1)", mode());
+    LOG("[dk] pacing mode %d (WWHD_DK_PACING; 1: swap interval the game's, the default; 0: swap interval 1)", mode());
     DkMemBlockMaker mm;
     dkMemBlockMakerDefaults(&mm, R.device, DK_MEMBLOCK_ALIGNMENT);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
