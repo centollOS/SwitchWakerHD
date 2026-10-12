@@ -15,7 +15,7 @@ download, and the build. You only need your own personal dump of the game.
 1. Download the `.exe` above and double-click it.
 2. Accept the UAC prompt (the installer needs Administrator rights to install devkitPro).
 3. Pick your game dump: a Cemu archive (`.wua`), a disc image (`.wux`/`.wud`, with its keys), or an
-   extracted folder. You can also drag it onto the window.
+   extracted folder.
    Optional, for a **HOME-screen icon**: choose your console's `prod.keys` (dumped with Lockpick_RCM; they are
    read where they are, never copied). The installer then also sets up Git, Pillow and MSYS2's gcc and builds
    the forwarder `.nsp` ([details](tools/switch/forwarder/INSTALL.md)); it travels in `NSP\` with the rest: install it with
