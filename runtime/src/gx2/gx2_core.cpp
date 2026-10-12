@@ -918,7 +918,6 @@ static void watchdog_thread() {
 }
 namespace gx2 { uint64_t flips_presented() { return __atomic_load_n(&g_flip_count, __ATOMIC_RELAXED); } }  // live fps in the title
 static uint32 g_swap_interval = 1;  // as set by the game (frame interpolation halves it)
-namespace gx2 { uint32_t swap_interval() { return g_swap_interval; } }  // SwitchWakerHD (#23): gfx/deko/frame_pacing.cpp
 namespace interp { uint32_t effective_swap_interval(uint32_t game); uint64_t logic_steps(); int vsync_rate(); }
 static std::mutex g_flip_mutex;
 static const auto g_vsync_epoch = std::chrono::steady_clock::now();

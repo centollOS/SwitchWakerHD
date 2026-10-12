@@ -7,9 +7,8 @@
 // (plus a constant compositor latency, which does not change the counts). A frame finished within the wake-up
 // latency of the thread (microseconds) before a vblank can be counted one vblank late.
 //
-// The same vblanks can drive gx2_core's virtual vsync (mode bit 1): its ticks are then the vblank count
-// (extrapolated between vblanks with the measured period) instead of a 59.94 Hz steady clock, so the game
-// starts its frames in phase with the display and at its exact rate.
+// Mode 1 gives the swapchain the game's swap interval, so the display holds every frame at least
+// two vblanks at 30 fps instead of showing a frame that finished early after one (docs/frame-pacing-plan.md).
 #include "frame_pacing.h"
 
 #include <switch.h>
@@ -24,7 +23,6 @@
 #include "dk.h"
 #include "runtime.h"
 
-namespace gx2 { uint32_t swap_interval(); }  // as set by the game (gx2_core.cpp)
 namespace interp { uint32_t effective_swap_interval(uint32_t game); int vsync_rate(); }
 
 namespace frame_pacing {
@@ -33,7 +31,7 @@ using gfxdk::R;
 namespace {
 std::atomic<int> g_mode{[] {
     const char* e = getenv("WWHD_DK_PACING");
-    return e ? std::clamp(atoi(e), 0, 3) : 0;
+    return e ? std::clamp(atoi(e), 0, 1) : 0;
 }()};
 
 // GPU-written report: the frame number (word 0) and the GPU's timestamp (bytes 8..15)
@@ -138,32 +136,17 @@ struct Presents {
     uint64_t n = 0;
 } g_p;
 
-// ---- the virtual vsync source (gx2_core hooks; g_tm)
-std::mutex g_tm;
-int g_src = 0;        // 0 steady clock, 1 vblanks
-int64_t g_off = 0;    // added to the source's own ticks (continuity across changes)
-uint64_t g_lastOut = 0;
-
-bool vblanks_valid(uint64_t now, uint64_t& count, uint64_t& lastNs, double& period) {
-    std::lock_guard<std::mutex> lk(g_m);
-    count = g_v.count;
-    lastNs = g_v.lastNs;
-    period = g_v.period;
-    return g_vsyncOk && g_v.ringFill >= kRing && now >= lastNs && now - lastNs < 100'000'000ull;
-}
 }  // namespace
 
 int mode() { return g_mode.load(std::memory_order_relaxed); }
 void set_mode(int m) {
-    m = std::clamp(m, 0, 3);
+    m = std::clamp(m, 0, 1);
     if (g_mode.exchange(m) != m)
-        LOG("[dk] pacing mode %d: swap interval %s, virtual vsync on %s", m, m & 1 ? "the game's" : "1",
-            m & 2 ? "the display's vblanks" : "a steady 59.94 Hz clock");
+        LOG("[dk] pacing mode %d: swap interval %s", m, m ? "the game's (2 at 30 fps)" : "1 (as before #23)");
 }
 
 void start() {
-    LOG("[dk] pacing mode %d (WWHD_DK_PACING; bit 0: swap interval the game's, bit 1: virtual vsync on the "
-        "display's vblanks)", mode());
+    LOG("[dk] pacing mode %d (WWHD_DK_PACING; 1: swap interval the game's; 0: swap interval 1)", mode());
     DkMemBlockMaker mm;
     dkMemBlockMakerDefaults(&mm, R.device, DK_MEMBLOCK_ALIGNMENT);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
@@ -173,7 +156,9 @@ void start() {
     memset(const_cast<uint8_t*>(g_cpu), 0, 16);
     static ViDisplay display;
     static Event vsync;
-    // the default display first; the panel's and the TV's by name if the system refuses it
+    // the default display first; the panel's and the TV's by name if the system refuses it. Measured handheld:
+    // "Default" is taken by the default window (rc 0x1272) and "Internal" gives the panel's vblanks at 60.000 Hz.
+    // NOT TESTED DOCKED: whether "Internal" still ticks, or the TV's rate, there (docs/frame-pacing-plan.md).
     Result rc = 0;
     bool got = false;
     for (const char* name : {"Default", "Internal", "External"}) {
@@ -222,9 +207,12 @@ void on_present(DkCmdBuf cmd, uint64_t frame) {
     g_p.lastNs = t;
 }
 
+// The game's own interval is not exported by gx2_core (an upstream file): Wind Waker HD sets 2
+// (GX2SetSwapInterval) in every log so far (530 of 530 '[gx2] ... swap interval' lines, title and gameplay).
+constexpr uint32_t kGameSwapInterval = 2;
 uint32_t swap_interval() {
-    if (!(mode() & 1) || interp::vsync_rate() > 1) return 1;
-    return std::clamp<uint32_t>(interp::effective_swap_interval(gx2::swap_interval()), 1, 2);
+    if (!mode() || interp::vsync_rate() > 1) return 1;
+    return std::clamp<uint32_t>(interp::effective_swap_interval(kGameSwapInterval), 1, 2);
 }
 
 void set_interval(uint32_t interval) { g_interval.store(interval, std::memory_order_relaxed); }
@@ -244,9 +232,9 @@ std::string report() {
     const double mean = p.n ? p.sum / double(p.n) : 0;
     const double sd = p.n ? std::sqrt(std::max(0.0, p.sumSq / double(p.n) - mean * mean)) : 0;
     char out[640];
-    int k = snprintf(out, sizeof out, "mode %d (swap interval %u, virtual vsync %s); present intervals (ms) <12 %llu, "
+    int k = snprintf(out, sizeof out, "mode %d (swap interval %u); present intervals (ms) <12 %llu, "
                      "12-22 %llu, 22-30 %llu, 30-37 %llu, 37-45 %llu, 45-58 %llu, 58+ %llu; mean %.2f sd %.2f",
-                     mode(), swap_interval(), locked() ? "on vblanks" : "steady 59.94 Hz",
+                     mode(), swap_interval(),
                      (unsigned long long)p.buckets[0], (unsigned long long)p.buckets[1], (unsigned long long)p.buckets[2],
                      (unsigned long long)p.buckets[3], (unsigned long long)p.buckets[4], (unsigned long long)p.buckets[5],
                      (unsigned long long)p.buckets[6], mean, sd);
@@ -262,52 +250,4 @@ std::string report() {
     return out;
 }
 
-uint64_t ticks(uint64_t steadyTicks, uint64_t perVsync) {
-    const uint64_t now = now_ns();
-    uint64_t count, lastNs;
-    double period;
-    const bool valid = vblanks_valid(now, count, lastNs, period);
-    const int want = (mode() & 2) && valid ? 1 : 0;
-    auto source = [&](int src) -> uint64_t {
-        if (src == 0) return steadyTicks;
-        const double pos = double(count) + double(now - lastNs) / period;
-        return uint64_t(pos * double(perVsync));
-    };
-    std::lock_guard<std::mutex> lk(g_tm);
-    if (want != g_src) {
-        // the new source continues where the old one is now
-        const uint64_t cur = uint64_t(int64_t(source(g_src)) + g_off);
-        g_off = int64_t(std::max(cur, g_lastOut)) - int64_t(source(want));
-        LOG("[dk] pacing: the virtual vsync now follows %s", want ? "the display's vblanks" : "the steady 59.94 Hz clock");
-        g_src = want;
-    }
-    const uint64_t out = std::max<uint64_t>(uint64_t(int64_t(source(g_src)) + g_off), g_lastOut);
-    g_lastOut = out;
-    return out;
-}
-
-bool tick_time(uint64_t& tick, uint64_t perVsync, std::chrono::steady_clock::time_point& out) {
-    int src;
-    int64_t off;
-    {
-        std::lock_guard<std::mutex> lk(g_tm);
-        src = g_src;
-        off = g_off;
-    }
-    if (src == 0) {
-        tick = uint64_t(std::max<int64_t>(0, int64_t(tick) - off));
-        return false;
-    }
-    std::lock_guard<std::mutex> lk(g_m);
-    const double pos = double(int64_t(tick) - off) / double(perVsync);  // in vblanks
-    // (+50 us: a wait until this time finds the tick reached)
-    const double at = double(g_v.lastNs) + (pos - double(g_v.count)) * g_v.period + 50'000.0;
-    out = std::chrono::steady_clock::now() + std::chrono::nanoseconds(int64_t(at - double(now_ns())));
-    return true;
-}
-
-bool locked() {
-    std::lock_guard<std::mutex> lk(g_tm);
-    return g_src == 1;
-}
 }  // namespace frame_pacing
