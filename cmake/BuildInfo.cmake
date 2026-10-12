@@ -4,8 +4,9 @@
 #
 # version: VERSION when given (release builds: the tag, e.g. v0.2.5; .github/workflows/release.yml),
 #   else from the newest v* tag: "v0.2.5" on the tagged commit, "v0.2.5+3" three commits after it,
-#   "dev" without git or tags (a source archive)
-# commit:  the short commit hash, "-dirty" with uncommitted changes to tracked files, "unknown" without git
+#   from cmake/version.txt in a source archive (git archive fills it in), "dev" without git or tags
+# commit:  the short commit hash, "-dirty" with uncommitted changes to tracked files; in a source archive
+#   from cmake/version.txt; "unknown" otherwise
 set(version "${VERSION}")
 set(commit "unknown")
 find_package(Git QUIET)
@@ -27,6 +28,28 @@ if(GIT_FOUND AND EXISTS "${SRC}/.git")
       set(version "${CMAKE_MATCH_1}")
       if(NOT CMAKE_MATCH_2 EQUAL 0)
         string(APPEND version "+${CMAKE_MATCH_2}")
+      endif()
+    endif()
+  endif()
+elseif(EXISTS "${SRC}/cmake/version.txt")
+  # a source archive (git archive, tools/switch/package_release.sh): cmake/version.txt is marked
+  # export-subst (.gitattributes), so it holds "git describe --tags" and the short commit; in a
+  # checkout without .git it still holds the $Format placeholders and is ignored
+  file(STRINGS "${SRC}/cmake/version.txt" lines LIMIT_COUNT 2)
+  list(LENGTH lines n)
+  if(n EQUAL 2)
+    list(GET lines 0 desc)
+    list(GET lines 1 head)
+    if(NOT desc MATCHES "Format:" AND NOT head MATCHES "Format:")
+      if(head MATCHES "^[0-9a-f]+$")
+        set(commit "${head}")
+      endif()
+      if(NOT version)
+        if(desc MATCHES "^(.+)-([0-9]+)-g[0-9a-f]+$")
+          set(version "${CMAKE_MATCH_1}+${CMAKE_MATCH_2}")
+        elseif(desc MATCHES "^v[0-9]")
+          set(version "${desc}")
+        endif()
       endif()
     endif()
   endif()
