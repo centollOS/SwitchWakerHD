@@ -14,6 +14,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "dk_shaders.h"
 #include "dk_surfaces.h"
 #include "dk_sync.h"
+#include "frame_pacing.h"  // (this fork, #23) vblank statistics and pacing modes
 #include "../../platform/background_shaders_switch.h"  // (this fork) the counter's shader line
 
 #include <algorithm>
@@ -223,15 +224,16 @@ void init_swapchain() {
     dkSwapchainSetSwapInterval(g_swapchain, 1);
     u32 nw = 0, nh = 0;
     nwindowGetDimensions(nwindowGetDefault(), &nw, &nh);
-    LOG("[dk] swapchain: %u RGBA8 images of %ux%u on the default window (%ux%u), swap interval 1", kSwapImages, g_winW,
+    LOG("[dk] swapchain: %u RGBA8 images of %ux%u on the default window (%ux%u), swap interval 1 until the first present (frame_pacing)", kSwapImages, g_winW,
         g_winH, nw, nh);
 }
 
 // a new window size (the operation mode changed): the GPU finishes what was submitted (the previous present
 // passes into the old images), the old swapchain releases the window's buffers (nwindowReleaseBuffers), and new
 // images and a new swapchain of the new size take their place (deko3d sets the window's dimensions from them,
-// nwindowSetDimensions). The old images' memory is freed once the GPU is done with this frame. Same swap
-// interval (1); relaxed vsync is gx2_core's own pacing (steady clock, 59.94 Hz), the same in both modes.
+// nwindowSetDimensions). The old images' memory is freed once the GPU is done with this frame. The next present
+// sets the swap interval again (frame_pacing, #23: the game's, 2 at 30 fps); relaxed vsync is gx2_core's own
+// pacing (steady clock, 59.94 Hz), the same in both modes.
 void resize_window(uint32_t w, uint32_t h, uint64_t frame) {
     const uint64_t t0 = now_ns();
     const uint32_t ow = g_winW, oh = g_winH;
@@ -246,7 +248,7 @@ void resize_window(uint32_t w, uint32_t h, uint64_t frame) {
     g_winH = h;
     init_swapchain();
     g_windowResizes++;
-    LOG("[dk] frame %llu: window %ux%u -> %ux%u: swapchain recreated in %.1f ms (GPU idle wait %.1f ms), swap interval 1",
+    LOG("[dk] frame %llu: window %ux%u -> %ux%u: swapchain recreated in %.1f ms (GPU idle wait %.1f ms), swap interval set again at the next present",
         (unsigned long long)frame, ow, oh, w, h, double(now_ns() - t0) / 1e6, double(t1 - t0) / 1e6);
 }
 
@@ -1047,6 +1049,7 @@ void frame_stats() {
             (unsigned long long)p.poolHits, rescale_pool_bytes() >> 20, 100.0 * perFrame(p.hudSwitches));
         R.perf = {};  // (swap() takes the hitch base after present)
     }
+    LOG("[dk] pacing: %s", frame_pacing::report().c_str());  // (this fork, #23)
     if (std::string passes = gpuPasses.report(); !passes.empty()) LOG("[dk] GPU passes: %s", passes.c_str());
     if (std::string sync = sync_report(frames); !sync.empty()) LOG("[dk] GPU sync %s", sync.c_str());
     if (std::string clocks = clock_report(); !clocks.empty()) LOG("[dk] clocks: %s", clocks.c_str());
@@ -1157,6 +1160,19 @@ void present() {
             resize_window(ww, wh, frame);
         }
     }
+    {
+        // (this fork, #23) the swap interval of the pacing mode (frame_pacing.h): 1, or the game's
+        static DkSwapchain set = nullptr;
+        static uint32_t interval = 1;
+        const uint32_t want = frame_pacing::swap_interval();
+        if (set != g_swapchain || want != interval) {
+            dkSwapchainSetSwapInterval(g_swapchain, want);
+            if (want != interval) LOG("[dk] frame %llu: swap interval %u", (unsigned long long)frame, want);
+            set = g_swapchain;
+            interval = want;
+            frame_pacing::set_interval(want);
+        }
+    }
     const uint64_t t1 = now_ns();
     int slot;
     {
@@ -1227,6 +1243,7 @@ void present() {
     // (the window's real size: the UI grows with it, overlay.cpp)
     if (ImDrawData* ui = overlay::frame(float(g_winW), float(g_winH), overlay_renderer_init)) overlay_draw(ui, int(g_winW), int(g_winH));
     gpuPasses.frame_end();
+    frame_pacing::on_present(R.cmd, frame);  // (this fork, #23) the GPU writes the frame number when done
     frame_end();
     const uint64_t t3 = now_ns();
     check_queue("the submit", frame);
@@ -1421,6 +1438,7 @@ void init() {
     poll_operation_mode();
     window_wanted(g_winW, g_winH);  // the first swapchain at the current mode's size
     init_swapchain();
+    frame_pacing::start();  // (this fork, #23)
     shaders_init(shader_cache_progress);  // the game shaders' worker and caches (dk_shaders.h)
     log_heap("after the deko3d setup");
     input::init();
