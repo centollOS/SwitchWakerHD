@@ -87,7 +87,7 @@ def shader_cache(src, game):
 
 # Native build (no Docker/Podman): used when neither is installed, and on Windows whenever devkitPro is there (issue
 # #22: Docker from devkitPro's MSYS2 bash got its container paths rewritten). On Windows it needs a devkitPro install
-# (C:/devkitPro, https://devkitpro.org) with: pacman -S switch-dev deko3d uam switch-lz4 switch-zlib
+# (C:/devkitPro, https://devkitpro.org) with: pacman -S switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make
 DKP_WIN = "C:/devkitPro"
 
 

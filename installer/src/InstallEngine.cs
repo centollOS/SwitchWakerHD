@@ -169,10 +169,44 @@ sealed class InstallEngine
         Say(Str.Get("dkp_installing"));
         SetDevkitEnv();
         ClearStalePacmanLock();
+        // cmake and make (MSYS2's): build.sh runs them, and no devkitPro package brings them (issue #28).
         // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it
-        var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake" + (ForwarderKeys != null ? " gcc" : "");
+        var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make" + (ForwarderKeys != null ? " gcc" : "");
         if (Exec(pacman, "-Sy --needed --noconfirm " + packages, check: false) != 0)
+        {
+            // pkg.devkitpro.org often answers 403 (Cloudflare, devkitPro/pacman#63) and the whole -Sy gives up
+            // without installing anything. The package lists it did refresh, and the ones from earlier runs,
+            // are still on disk: install from those.
             Warn(Str.Get("dkp_pkg_warn"));
+            ClearStalePacmanLock();
+            Exec(pacman, "-S --needed --noconfirm " + packages, check: false);
+        }
+        CheckDevkitTools();
+    }
+
+    // What the build needs, by the files it runs or links. A missing one stops here, with the reason,
+    // instead of after the download and two build stages (issue #28).
+    void CheckDevkitTools()
+    {
+        var needed = new (string name, string file)[]
+        {
+            ("cmake",       @"msys2\usr\bin\cmake.exe"),
+            ("make",        @"msys2\usr\bin\make.exe"),
+            ("devkitA64",   @"devkitA64\bin\aarch64-none-elf-gcc.exe"),
+            ("libnx",       @"libnx\lib\libnx.a"),
+            ("switch-cmake", @"cmake\Switch.cmake"),
+            ("switch-zlib", @"portlibs\switch\lib\libz.a"),
+            ("switch-lz4",  @"portlibs\switch\lib\liblz4.a"),
+        };
+        var missing = needed.Where(t => !File.Exists(Path.Combine(DevkitRoot, t.file))).Select(t => t.name).ToList();
+        if (missing.Count > 0) throw new InstallException(Str.Get("dkp_missing", string.Join(", ", missing)));
+
+        if (ForwarderKeys != null && !File.Exists(Path.Combine(DevkitRoot, @"msys2\usr\bin\gcc.exe")))
+        {
+            Warn(Str.Get("fwd_gcc_fail"));
+            ForwarderKeys = null;
+        }
+        Ok(Str.Get("dkp_tools_ok"));
     }
 
     static string FindPacman()

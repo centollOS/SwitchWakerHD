@@ -27,6 +27,11 @@ if [[ -z "$engine" || $native == 1 ]]; then
     fi
     native=1
 fi
+# devkitPro's packages do not bring the host cmake/make (issue #28): say so instead of "command not found"
+if [[ $native == 1 ]] && ! command -v cmake >/dev/null; then
+    echo "cmake is missing: install it with: pacman -S --needed cmake make (devkitPro's MSYS2 on Windows)" >&2
+    exit 1
+fi
 image=docker.io/devkitpro/devkita64:latest
 # MSYS2 (devkitPro's bash on Windows) rewrites /src-like arguments of native programs such as docker.exe into
 # C:/devkitPro/msys2/src (issue #22): keep the container paths as they are and give Docker Windows host paths.

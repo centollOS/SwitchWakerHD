@@ -66,7 +66,7 @@ in a normal PowerShell or Command Prompt (write `python` where step 2 says `pyth
    `python -m pip install zstandard pycryptodome` (`zstandard` is for a `.wua`, `pycryptodome` for a `.wux`/`.wud`).
 2. Install devkitPro from <https://github.com/devkitPro/installer/releases> into the default `C:\devkitPro`.
 3. Open *devkitPro > MSYS2* from the Start menu and run
-   `pacman -Syu`, then `pacman -S --needed switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake`.
+   `pacman -Syu`, then `pacman -S --needed switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make`.
 
 A Cemu `.wua` archive works directly, with no keys: `python tools/switch/make_sd.py --wua "C:\path\game.wua"`.
 The first build takes 10 to 30 minutes.
