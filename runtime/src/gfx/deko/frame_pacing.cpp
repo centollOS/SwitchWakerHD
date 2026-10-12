@@ -64,7 +64,7 @@ struct Shown {
 uint32_t g_cur = 0;
 uint64_t g_lastDisplay = 0, g_prevHold = 0;  // the vblank the latest frame reached the screen at (model above)
 std::atomic<uint32_t> g_interval{1};         // the swapchain's swap interval now (backend.cpp: set_interval)
-bool g_vsyncOk = false;
+std::atomic<bool> g_vsyncOk{false};
 
 void vblank_thread(void* arg) {
     Event* ev = static_cast<Event*>(arg);
@@ -100,7 +100,10 @@ void vblank_thread(void* arg) {
         g_s.vblanks += n;
         // Frames the GPU finished since the previous vblank reach the screen in order (the window's queue is
         // FIFO): each at this vblank at the earliest, and `swap interval` vblanks after the one before it
-        if (shown != g_cur && shown > g_cur) {
+        if (!g_cur && shown) {  // the first frame seen
+            g_cur = shown;
+            g_lastDisplay = g_v.count;
+        } else if (shown > g_cur) {
             const uint64_t interval = g_interval.load(std::memory_order_relaxed);
             for (uint32_t f = g_cur + 1; f <= shown; f++) {
                 const uint64_t at = g_lastDisplay ? std::max(g_v.count, g_lastDisplay + interval) : g_v.count;
