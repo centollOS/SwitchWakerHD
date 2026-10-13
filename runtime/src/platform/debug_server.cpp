@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdarg>
@@ -521,8 +522,26 @@ void connection(void* arg) {
     g_conns--;
 }
 
+// a socket listening on port (any address), or -1
+int open_listen(int port) {
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(uint16_t(port));
+    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 || listen(fd, 4) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 void listener(void*) {
     if (g_cfg.threadStart) g_cfg.threadStart();
+    int failures = 0;  // accept() failures in a row
     while (g_running.load()) {
         sockaddr_in from{};
         socklen_t len = sizeof from;
@@ -532,9 +551,20 @@ void listener(void*) {
 #endif
         if (fd < 0) {
             if (!g_running.load()) break;
+            // The Switch's sleep mode closes every socket, the listening one too: accept() then fails at once
+            // from the wake-up on. After a second of failures the listening socket is opened again.
+            if (++failures >= 10) {
+                if (g_listen >= 0) close(g_listen);
+                g_listen = open_listen(g_cfg.port);
+                say(g_listen >= 0 ? "[debug] listening again on port %d (the old socket stopped accepting, errno %d)"
+                                  : "[debug] cannot listen on port %d again yet (errno %d); retrying",
+                    g_cfg.port, errno);
+                failures = 0;
+            }
             wait_ms(100);
             continue;
         }
+        failures = 0;
         if (g_conns.load() >= kMaxConns) {
             const char busy[] = "err 39\ntoo many connections (4 at most) open\n";
             send_all(fd, busy, sizeof busy - 1);
@@ -567,17 +597,9 @@ bool start(const Config& config) {
         return false;
     }
 #endif
-    g_listen = socket(AF_INET, SOCK_STREAM, 0);
-    int one = 1;
-    setsockopt(g_listen, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(uint16_t(config.port));
-    if (g_listen < 0 || bind(g_listen, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 || listen(g_listen, 4) != 0) {
+    g_listen = open_listen(config.port);
+    if (g_listen < 0) {
         say("[debug] server off: cannot listen on port %d", config.port);
-        if (g_listen >= 0) close(g_listen);
-        g_listen = -1;
 #ifdef __SWITCH__
         socketExit();
 #endif
