@@ -246,6 +246,40 @@ debugsrv::Reply evict(const debugsrv::Args& a) {
     return debugsrv::ok(gfxsw::texture_eviction_report());
 }
 
+// game memory as hex, 16 bytes a line (big-endian words as the game sees them): MEM2 (data, heap) only
+debugsrv::Reply peek(const debugsrv::Args& a) {
+    if (a.empty()) return debugsrv::err("peek <address> [bytes]");
+    const uint32_t addr = uint32_t(strtoul(a[0].c_str(), nullptr, 16)) & ~3u;
+    const uint32_t len = std::min<uint32_t>(a.size() > 1 ? uint32_t(strtoul(a[1].c_str(), nullptr, 0)) : 64u, 4096u);
+    if (addr < mem::kMem2Start || addr + len > mem::kMem2End || addr + len < addr)
+        return debugsrv::err("peek: outside MEM2 (10000000-4FFFFFFF)");
+    std::string out;
+    char b[16];
+    for (uint32_t o = 0; o < len; o += 4) {
+        if (o % 16 == 0) {
+            snprintf(b, sizeof b, "%s%08X:", o ? "\n" : "", addr + o);
+            out += b;
+        }
+        snprintf(b, sizeof b, " %08X", ld32(addr + o));
+        out += b;
+    }
+    return debugsrv::ok(out + "\n");
+}
+
+// a big-endian word into game memory (MEM2), for experiments on the game's data
+debugsrv::Reply poke(const debugsrv::Args& a) {
+    if (a.size() < 2) return debugsrv::err("poke <address> <word>");
+    const uint32_t addr = uint32_t(strtoul(a[0].c_str(), nullptr, 16)) & ~3u;
+    const uint32_t v = uint32_t(strtoul(a[1].c_str(), nullptr, 16));
+    if (addr < mem::kMem2Start || addr + 4 > mem::kMem2End) return debugsrv::err("poke: outside MEM2 (10000000-4FFFFFFF)");
+    const uint32_t old = ld32(addr);
+    st32(addr, v);
+    LOG("[debug] poke %08X: %08X -> %08X", addr, old, v);
+    char b[64];
+    snprintf(b, sizeof b, "%08X: %08X -> %08X\n", addr, old, v);
+    return debugsrv::ok(b);
+}
+
 debugsrv::Reply quit(const debugsrv::Args&) {
     debugsrv::Reply r = debugsrv::ok("quitting");
     r.after = [] {
@@ -280,6 +314,8 @@ void start() {
     debugsrv::add_command("evict", "evict [now | idle <n>] texture eviction: now, or after n unused frames", evict);
     debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);
     debugsrv::add_command("quit", "quit                   end the program", quit);
+    debugsrv::add_command("peek", "peek <addr> [bytes]    game memory (MEM2) as hex words", peek);
+    debugsrv::add_command("poke", "poke <addr> <word>     write a word of game memory (MEM2)", poke);
     debugsrv::Config c;
     c.port = g_port;
     c.root = host::config_dir();
