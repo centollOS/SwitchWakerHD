@@ -203,11 +203,11 @@ and comes back at the next start.
 
 The game is **perfectly playable at the console's stock clocks**, which are the default (CPU
 1020 MHz, GPU 307 MHz in handheld): 30 fps on the opening island, a smooth 26-29 fps in the busiest
-scenes. If you want those scenes at a steady 30, choose the mild **1224 MHz CPU** step, marked
-*Recommended*: it stays well clear of any heat or battery issue. Higher CPU steps (up to 1785 MHz),
-Nintendo's other handheld GPU profiles and a 614 MHz GPU overclock are there too; they drain the
-battery faster and warm the console. If you use sys-clk, give this game no profile there, or the
-two fight over the clocks.
+scenes. Nintendo's other handheld GPU profiles are in the Switch tab. The game no longer sets a CPU
+or GPU overclock itself (the CPU steps and GPU 614 MHz were removed: with the CPU raised that way the
+console did not wake from sleep, #33). If you want the busiest scenes at a steady 30, a mild CPU
+clock of 1224 MHz does it: set it with [sys-clk](https://github.com/retronx-team/sys-clk), which
+handles sleep and docking properly.
 
 ### Save states
 
@@ -249,9 +249,9 @@ Boots and plays on a Switch in handheld mode, with sound, controllers, saves, **
 states**, the options menu and mods. Played by hand mostly on the opening island, Dragon Roost and the sea
 around it, and areas reached with the Warp tab. **It is perfectly playable at the console's stock
 clocks** (CPU 1020 MHz, GPU 307 MHz): 30 fps on the opening island, and a smooth 26-29 fps in the
-busiest scenes, such as sailing near Dragon Roost and the volcano island. The recommended CPU
-setting of about 1.2 GHz (1224 MHz, *Recommended* in the Switch tab) is only for extra stability
-there, holding a steady 30. CPU and GPU run at their stock clocks by default.
+busiest scenes, such as sailing near Dragon Roost and the volcano island. A CPU at about 1.2 GHz
+(1224 MHz, set with sys-clk) holds a steady 30 there. The game runs the CPU and GPU at their stock
+clocks and sets no overclock itself.
 Shader and texture stutters on first use are much reduced, and shaders seen in an earlier session
 no longer stutter. Docked it renders at 1080p (picture profile per mode in the Switch tab: handheld
 1x, docked 1.5x, with dynamic resolution), tested on a TV at a median of 29.9 fps. Known issues and

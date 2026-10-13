@@ -143,11 +143,9 @@ with the GamePad features (its screen, **gyro aiming**), choose *Wii U GamePad* 
 
 ### The Switch tab of the menu
 
-CPU clock (1224 MHz by default; up to 1785 MHz), handheld GPU profile (Nintendo's official profiles, plus
-a 614 MHz overclock), picture profile per mode (internal resolution, dynamic resolution), picture
-adjustments, frame-rate counter, controller (Pro Controller or GamePad), gyro aiming. Higher clocks drain
-the battery faster and warm the console. If sys-clk has its own profile for this title, the two fight
-over the clocks. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
+Handheld GPU profile (Nintendo's official profiles; stock by default), picture profile per mode
+(internal resolution, dynamic resolution), picture adjustments, frame-rate counter, controller (Pro
+Controller or GamePad), gyro aiming. The game sets no CPU or GPU overclock; for one, use sys-clk. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
 
 ## The first start: preparing the graphics
 

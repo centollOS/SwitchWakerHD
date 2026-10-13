@@ -22,7 +22,7 @@ them) go at the end of `sdmc:/switch/wwhd/settings.ini`, under a `[dev]` header,
 
 ```
 # Wind Waker HD settings
-switchCpuClock=1224
+switchGpuProfile=1600
 switchDebugServer=1
 
 [dev]

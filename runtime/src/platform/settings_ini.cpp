@@ -68,20 +68,16 @@ constexpr MenuVariable kMenuVariables[] = {
          return true;
      }},
     {"WWHD_GPU_PROFILE", [](const std::string& v, Settings& o) {
-         for (const char* id : {"default", "384", "460", "1600", "614"})
+         for (const char* id : {"default", "384", "460", "1600", "614"})  // (614: removed, read as 1600)
              if (v == id) {
                  o.push_back({switch_settings::kKeyGpuProfile, v});
                  return true;
              }
          return false;  // (a configuration id: not a menu choice)
      }},
-    {"WWHD_CPU_CLOCK", [](const std::string& v, Settings& o) {
-         for (const char* id : {"1020", "1122", "1224", "1326", "1428", "1581", "1683", "1785"})
-             if (v == id) {
-                 o.push_back({switch_settings::kKeyCpuClock, v});
-                 return true;
-             }
-         return false;
+    {"WWHD_CPU_CLOCK", [](const std::string& v, Settings& o) {  // (removed option: logged as ignored at start)
+         o.push_back({switch_settings::kKeyCpuClock, v});
+         return true;
      }},
     {"WWHD_FPS", [](const std::string& v, Settings& o) {
          o.push_back({switch_settings::kKeyFpsCounter, std::to_string(std::clamp(atoi(v.c_str()), 0, 2))});
