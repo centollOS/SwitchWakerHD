@@ -742,7 +742,8 @@ bool capture_upload_data(Surface* s, std::vector<uint8_t>& out, bool& changed) {
 }
 
 // ---------------------------------------------------------------- internal resolution
-// As gfx/gl: render targets the shape of the screen (1280x720 and its reductions down to 60x33, not the
+// As gfx/gl: render targets the shape of the screen (1280x720 and its reductions down to 640x360; 320x180 and below
+// stay at the guest size, screen_shaped below; not the
 // GamePad's 854x480 ones, shadow maps, mip chains or arrays) get res_scale() x their guest size. Shaders sample
 // with normalized coordinates and draws scale their viewport and scissor (draw.cpp), so they render the same
 // picture at fewer (or more) pixels; uf_fragCoordScale / uf_texNScale give programs that need them the factors.
@@ -760,6 +761,12 @@ std::atomic<float> g_resShown{g_resFrame};
 bool screen_shaped(const Surface* s) {
     if (s->fmt.compressed || s->mips > 1 || s->slices > 1 || s->width < 32 || s->img.type != DkImageType_2D) return false;
     if (!format_can_2d(s->fmt.image)) return false;  // (its contents could not be resampled: kept at the guest size)
+    // 320x180 and its reductions (the bloom chain and the other small passes) stay at the guest size: with dynamic
+    // resolution at 0.75-0.9 the bloom covered only that share of the screen, the rest kept older levels (a green
+    // band on the right with grass close to the camera, or a quarter of the screen without bloom; issue #32). The
+    // exact step that misses the scale was not found (no image overlap, no freed image in use, no mixed-scale draw);
+    // these targets are a few hundred KB, so scaling them saved next to nothing
+    if (s->width <= 320) return false;
     for (uint32_t w = 854, h = 480; w >= 32; w >>= 1, h >>= 1)
         if ((s->width == w || s->width == w + 1) && s->height == h) return false;
     float r = float(s->width) * 9.0f / (float(s->height) * 16.0f);
