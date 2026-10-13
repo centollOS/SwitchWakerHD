@@ -71,7 +71,9 @@ if [[ $native == 1 ]]; then
     cmake --build "$dir" -j $jobs
 else
 "$engine" run --rm "${mounts[@]}" -w /src "$image" bash -c "
-    git config --global --add safe.directory /src &&
+    # git refuses a repository owned by another user (the container runs as root; issue fixed by #36). From /:
+    # in a git worktree /src/.git points outside the mount, and git run inside /src would stop the build
+    git -C / config --global --add safe.directory /src &&
     cmake -S . -B $dir -G Ninja -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake \
           -DCMAKE_BUILD_TYPE=${WWHD_BUILD_TYPE:-Release} $options &&
     ninja -C $dir -j $jobs"
