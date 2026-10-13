@@ -308,7 +308,7 @@ def main():
 
     for name in ("info", "ping", "help", "warps", "quit", "reload"):
         sub.add_parser(name)
-    for name in ("press", "hold", "release", "warp", "stick"):
+    for name in ("press", "hold", "release", "warp", "stick", "peek", "poke"):
         sp = sub.add_parser(name)
         sp.add_argument("rest", nargs="*")
     sp = sub.add_parser("raw")
@@ -346,7 +346,7 @@ def main():
     try:
         if args.cmd in ("info", "ping", "help", "warps", "quit", "reload"):
             simple(args, args.cmd)
-        elif args.cmd in ("press", "hold", "release", "warp", "stick"):
+        elif args.cmd in ("press", "hold", "release", "warp", "stick", "peek", "poke"):
             simple(args, args.cmd, *args.rest, timeout=120.0)
         elif args.cmd == "raw":
             simple(args, *args.rest, timeout=120.0)

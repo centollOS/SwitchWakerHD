@@ -74,6 +74,8 @@ WWHD_STATE_DIR=sdmc:/switch/wwhd/states-eu
 | `get`, `put`, `ls`, `rm`, `mkdir` | SD card files; paths are relative to `sdmc:/switch/wwhd` unless they start with `/` |
 | `logs`, `lastlog [LOCAL]` | the session logs in `logs/`; download the newest one. The running session's file cannot be opened while the game writes it (its listed size stays 0), so `lastlog` then takes the text the console keeps in memory (`logtext`: the last 2 MiB; the server starts before the first log line) |
 | `crashes [--fetch DIR]` | Atmosphère's crash reports (`/atmosphere/crash_reports`) |
+| `peek ADDR [BYTES]` | MEM2 (0x10000000–0x4FFFFFFF) as hex words, 16 bytes/line, up to 4 KiB |
+| `poke ADDR WORD` | write one big-endian word to MEM2; logs old and new value |
 | `wait`, `quit`, `reload`, `ping`, `help`, `raw CMD ...` | `raw logtext` prints the kept log text |
 
 Button names: `A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LS RS`. Presses go in where the controller is
