@@ -338,7 +338,8 @@ retrospective in [docs/switch-port.md](docs/switch-port.md).
 - Performance diagnostics for the log: the main thread's runtime calls and every game thread's CPU
   use.
 - *Frame rate (test)*: 60 fps interpolation and the experimental true 60, to try out (not saved;
-  the game starts at 30 fps as before).
+  the game starts at 30 fps as before). With 60 fps interpolation, *Keep game speed* skips
+  in-between frames the console cannot draw in time instead of slowing the game down (not saved; off).
 
 **Logs**
 - One log per session in `logs/` (`wwhd_<date>_<time>.log`, the newest is the current run); the

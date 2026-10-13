@@ -1237,6 +1237,19 @@ void tab_switch() {
         help("60 fps interpolation: the game logic keeps 30 steps a second and a blended frame is drawn\n"
              "between them, which doubles the drawing work. True 60 runs the game logic at 60 steps a second.\n"
              "Both need much more CPU and GPU than 30 fps; for testing only. Not saved: 30 fps at the next start.");
+        if (m == 1) {
+            bool paced;
+            if (check("Keep game speed", interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))
+                hostui::post([paced] {
+                    interp::set_paced_interpolation(paced);
+                    LOG("[interp] keep game speed from the Switch tab: %s (not saved)", paced ? "on" : "off");
+                });
+            help("When the console cannot draw 60 frames a second, skip in-between frames instead of slowing\n"
+                 "the whole game down: the game logic keeps its 30 steps a second. Off: every in-between frame\n"
+                 "is drawn and the game runs slower than real time. Not saved: off at the next start.");
+            if (float share = interp::paced_drawn_share(); share >= 0)
+                note("In-between frames drawn lately: %.0f%%", share * 100.0f);
+        }
     }
     heading("Menu");
     note("Minus held half a second opens this menu (a short Minus goes to the game); B or Minus closes it.\n"
