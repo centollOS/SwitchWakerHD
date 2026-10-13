@@ -223,7 +223,7 @@ if(WWHD_HAS_DEKO3D)
                           runtime/src/platform/debug_switch.cpp runtime/src/platform/posix_stubs_switch.cpp
                           runtime/src/platform/startup_checks_switch.cpp runtime/src/platform/prepare_graphics_switch.cpp runtime/src/platform/audio_guard_switch.cpp
                           runtime/src/platform/prepare_graphics_ui_switch.cpp runtime/src/platform/ui_text_switch.cpp runtime/src/platform/shader_scan_switch.cpp runtime/src/platform/shader_list_switch.cpp
-                          runtime/src/platform/background_shaders_switch.cpp runtime/src/platform/main_switch.cpp runtime/src/platform/core_switch.cpp)
+                          runtime/src/platform/background_shaders_switch.cpp runtime/src/platform/main_switch.cpp runtime/src/platform/core_switch.cpp runtime/src/platform/audio_out_switch.cpp)
 endif()
 if(WWHD_SDL_HOST)
   if(NOT TARGET SDL3::SDL3)

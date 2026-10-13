@@ -6,8 +6,7 @@
 #if defined(__APPLE__) && !defined(WWHD_SDL_HOST)
 #include <AudioToolbox/AudioToolbox.h>
 #elif defined(__SWITCH__)
-#include <switch.h>
-#include <thread>
+#include "platform/audio_out_switch.h"  // (this fork) audout
 #else
 #include <SDL3/SDL.h>
 #endif
@@ -20,7 +19,6 @@
 #include <mutex>
 #include <vector>
 
-#include "platform/host.h"
 #include "runtime.h"
 
 namespace audio {
@@ -101,28 +99,7 @@ OSStatus render(void*,AudioUnitRenderActionFlags*,const AudioTimeStamp*,UInt32,U
     pull((int16_t*)io->mBuffers[0].mData,frames);return noErr;
 }
 #elif defined(__SWITCH__)
-// audout plays 48 kHz stereo s16 natively: a thread keeps four page-aligned buffers queued
-constexpr uint32_t kBufferFrames = 1024;
-void audout_thread() {
-    host::raise_thread_priority();
-    AudioOutBuffer bufs[4]{};
-    for (auto& b : bufs) {
-        b.buffer = aligned_alloc(0x1000, kBufferFrames * 4);
-        b.buffer_size = kBufferFrames * 4;
-        b.data_size = kBufferFrames * 4;
-        pull((int16_t*)b.buffer, kBufferFrames);
-        armDCacheFlush(b.buffer, b.buffer_size);
-        audoutAppendAudioOutBuffer(&b);
-    }
-    for (;;) {
-        AudioOutBuffer* released = nullptr;
-        u32 count = 0;
-        if (R_FAILED(audoutWaitPlayFinish(&released, &count, UINT64_MAX)) || !released) continue;
-        pull((int16_t*)released->buffer, kBufferFrames);
-        armDCacheFlush(released->buffer, released->buffer_size);
-        audoutAppendAudioOutBuffer(released);
-    }
-}
+// (this fork) audout's thread pulls: platform/audio_out_switch.cpp
 #else
 void SDLCALL render(void*,SDL_AudioStream* stream,int additional,int) {
     // SDL requests input bytes in our configured S16/stereo format. Keep the callback bounded.
@@ -178,13 +155,7 @@ void init() {
     }
     LOG("[audio] CoreAudio output started (48 kHz stereo)");
 #elif defined(__SWITCH__)
-    if (R_FAILED(audoutInitialize()) || R_FAILED(audoutStartAudioOut())) {
-        LOG("[audio] audout unavailable");
-        return;
-    }
-    g_unit = true;
-    std::thread(audout_thread).detach();
-    LOG("[audio] audout started (%u Hz, %u channels)", audoutGetSampleRate(), audoutGetChannelCount());
+    if (!(g_unit = audio_switch::start(pull))) return;  // (this fork) platform/audio_out_switch.cpp
 #else
     if(!SDL_InitSubSystem(SDL_INIT_AUDIO)){LOG("[audio] SDL audio initialization: %s",SDL_GetError());return;}
     SDL_AudioSpec spec{SDL_AUDIO_S16,2,kRate};
