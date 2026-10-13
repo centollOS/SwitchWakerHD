@@ -83,6 +83,12 @@ a 403), and **remove that line afterwards**.
 to `liblz4.a.bak` (the retry cannot download it again): the new installer must stop in the devkitPro step with
 "Some devkitPro tools are missing: switch-lz4", before downloading the release. Rename it back afterwards.
 
+**D. A Windows user name with a space (issue #30).** Sign in with a local account whose name has a space (for
+example a new local user "Test User"): the new installer must work in `C:\SwitchWakerHD-Build` (its welcome page
+and log say so) instead of `C:\Users\Test User\SwitchWakerHD-Build`, and build, even from v0.4.6's release zip
+(the release is unpacked and built inside that folder, so no path has a space; the CMake quoting fix of #30 on
+fix/build-path-spaces covers manual builds).
+
 ## Expected results
 
 | Case | Old installer (v0.4.6) | New installer |
@@ -91,5 +97,6 @@ to `liblz4.a.bak` (the retry cannot download it again): the new installer must s
 | A + B | fails in `[4/5]`: `cmake: command not found` | warning, retry installs `cmake`, builds |
 | B + C | fails in `[4/5]` (missing lz4) | stops in the devkitPro step: `switch-lz4` missing |
 | Nothing broken | builds | builds; log shows "devkitPro tools ready." |
+| D, user name with a space | works in `C:\Users\Test User\...`, fails at 26 % | works in `C:\SwitchWakerHD-Build`, builds |
 
 Restore afterwards: `pacman -S --needed cmake make`, remove the `hosts` line, rename `liblz4.a.bak` back.

@@ -28,7 +28,8 @@ download, and the build. You only need your own personal dump of the game.
    - **By hand**: the installer opens the folder; copy its contents to the root of the SD card.
 
 If something fails, *Show details* shows what happened; the full log is in
-`%USERPROFILE%\SwitchWakerHD-Build\installer.log`.
+`%USERPROFILE%\SwitchWakerHD-Build\installer.log` (in `C:\SwitchWakerHD-Build\installer.log` when your Windows
+user name has a space or an accented letter: the installer then works there).
 
 > **Windows SmartScreen** may show *"Windows protected your PC"* on first run because the installer is
 > not code-signed. Click **More info → Run anyway**. This is expected for open-source unsigned executables.

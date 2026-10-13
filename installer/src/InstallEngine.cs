@@ -23,8 +23,27 @@ sealed class InstallException : Exception
 
 sealed class InstallEngine
 {
-    public static readonly string WorkDir =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SwitchWakerHD-Build");
+    public static readonly string WorkDir = ChooseWorkDir();
+
+    // %USERPROFILE%\SwitchWakerHD-Build, unless the user name has a space or a non-ASCII letter ("JAM Visuals",
+    // issue #30): the build tools do not all cope with those, so then a folder at the root of the system drive
+    // (C:\SwitchWakerHD-Build), which standard users may create. Back to the profile if that cannot be created.
+    static string ChooseWorkDir()
+    {
+        var inProfile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SwitchWakerHD-Build");
+        if (Regex.IsMatch(inProfile, @"^[A-Za-z0-9_.:\\-]+$"))
+            return inProfile;
+        var atRoot = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", "SwitchWakerHD-Build");
+        try
+        {
+            Directory.CreateDirectory(atRoot);
+            return atRoot;
+        }
+        catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
+        {
+            return inProfile;
+        }
+    }
     const string DevkitRoot = @"C:\devkitPro";
 
     public const int StepPython = 0, StepDevkit = 1, StepRelease = 2, StepBuild = 3;
