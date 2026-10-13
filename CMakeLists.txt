@@ -109,6 +109,8 @@ if(WWHD_SWITCH)
   # no frame-pointer setup in each of the ~40,000 recompiled functions (code size: the Switch's
   # caches are small and the game code is ~38 MB)
   target_compile_options(gamecode PRIVATE -fomit-frame-pointer)
+  # each game file's code on a 64-byte boundary: the game code's alignment no longer moves with the runtime's size
+  target_compile_options(gamecode PRIVATE "SHELL:-include \"${CMAKE_SOURCE_DIR}/runtime/include/switch_code_align.h\"")
 endif()
 
 
