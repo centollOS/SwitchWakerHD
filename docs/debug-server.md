@@ -63,7 +63,7 @@ WWHD_STATE_DIR=sdmc:/switch/wwhd/states-eu
 
 | Command | What it does |
 |---|---|
-| `info` | build, frame, stage, heap, applet type, address |
+| `info` | build, frame, stage, heap, battery (charge, charger, handheld or docked), applet type, address |
 | `log [--all] [--save F] [--grep RE] [--seconds N]` | the log as it is written; `--all` starts with the last 2 MiB |
 | `deploy [NRO] [--no-reload]` | uploads `build/switch-dk/wwhd.nro`, checks its CRC32, restarts the game, waits until it answers again |
 | `shot [OUT.png] [--game]` | PNG of the next frame: the window as shown, or only the game's picture with `--game` |

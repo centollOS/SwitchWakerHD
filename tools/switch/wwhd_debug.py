@@ -5,7 +5,7 @@ The console runs it when the settings menu turns it on (Switch tab > Debug > Deb
 log says '[debug] server listening on <ip>:6543'.
 The console's address: --host, else WWHD_SWITCH_HOST, else the first line of build/switch_host.txt.
 
-  wwhd_debug.py info                      build, frame, stage, heap, address
+  wwhd_debug.py info                      build, frame, stage, heap, battery, address
   wwhd_debug.py log [--all] [--save F] [--grep RE] [--seconds N]
                                           the log as it is written (Ctrl-C ends it)
   wwhd_debug.py deploy [NRO] [--no-reload]
