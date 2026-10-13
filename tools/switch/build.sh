@@ -71,6 +71,7 @@ if [[ $native == 1 ]]; then
     cmake --build "$dir" -j $jobs
 else
 "$engine" run --rm "${mounts[@]}" -w /src "$image" bash -c "
+    git config --global --add safe.directory /src &&
     cmake -S . -B $dir -G Ninja -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake \
           -DCMAKE_BUILD_TYPE=${WWHD_BUILD_TYPE:-Release} $options &&
     ninja -C $dir -j $jobs"
