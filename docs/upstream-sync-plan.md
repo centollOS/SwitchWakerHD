@@ -1,6 +1,10 @@
 # Upstream sync to devel (after v0.2.11): plan
 
-Status: **plan only** (2026-10-13). Nothing below is done yet.
+Status (2026-10-13): **phase 1 written** (steps 1.1-1.7, one commit each, on main 9f75519): the Switch NRO builds
+and the changed runtime files compile for macOS; the console gate after 1.7 and the phase 0 baselines are still to do.
+In upstream files the fork's lines went from main.cpp +327, core.cpp +249, host.h +83, audio_out.cpp +50,
+CMakeLists.txt +141, overlay.cpp +525 to +35, +81, +23, +21, +22, +87 (the rest is phase 2's: generic fork
+changes, small Switch branches inside upstream functions).
 
 The last sync took upstream `main` defb89f (v0.2.11, "Round 48", docs/upstream-0.2.6-plan.md). Upstream `devel`
 has 418 commits since (481aafe on 2026-10-13). There is still no common ancestor, so the sync is again
