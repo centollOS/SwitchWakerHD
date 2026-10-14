@@ -253,15 +253,19 @@ sealed class InstallEngine
                 .Select(d => Path.Combine(d, "python.exe"))
                 .Where(File.Exists));
         }
+        // 3.8 or newer (older ones get no pip wheels for zstandard and pycryptodome) and 64-bit (translating the
+        // game code needs more memory than a 32-bit process has). The Microsoft Store's "python" stub prints nothing.
         foreach (var cmd in candidates)
         {
-            var (code, output) = Capture(cmd, "--version");
-            if (code == 0 && output.Contains("Python 3."))
-            {
-                pythonCmd = cmd;
-                Ok(Str.Get("py_found", output.Trim()));
-                return true;
-            }
+            var (code, output) = Capture(cmd, "-c \"import sys,struct;print('PY',sys.version_info[0],sys.version_info[1],struct.calcsize('P')*8)\"");
+            var m = Regex.Match(output, @"PY (\d+) (\d+) (\d+)");
+            if (code != 0 || !m.Success) continue;
+            int major = int.Parse(m.Groups[1].Value), minor = int.Parse(m.Groups[2].Value), bits = int.Parse(m.Groups[3].Value);
+            var desc = $"Python {major}.{minor} ({bits}-bit, {cmd})";
+            if (major != 3 || minor < 8 || bits != 64) { Info(Str.Get("py_unsuitable", desc)); continue; }
+            pythonCmd = cmd;
+            Ok(Str.Get("py_found", desc));
+            return true;
         }
         return false;
     }
@@ -623,13 +627,53 @@ sealed class InstallEngine
             var pct = (int)(frac * 100);
             if (pct > shownPct) { shownPct = pct; Status?.Invoke(Str.Get("build_s4_pct", pct)); }
         }
+        // make_sd's builds use half the CPU threads, each compile ~1.5 GB: fewer on a PC without the memory for that
+        // (8 threads with 8 GB of memory would need ~6 GB for the compiles alone). WWHD_JOBS reaches build.sh through make_sd's environment.
+        var env = new Dictionary<string, string>();
+        var ramGb = TotalRamGb();
+        var jobs = Math.Max(1, Math.Min(Environment.ProcessorCount / 2, (int)((ramGb - 2) / 1.5)));
+        if (ramGb > 0 && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WWHD_JOBS")))
+        {
+            env["WWHD_JOBS"] = jobs.ToString();
+            Info(Str.Get("build_jobs", jobs, Environment.ProcessorCount, ramGb.ToString("0")));
+        }
         var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
         var rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}", ReleaseDir, check: false,
-                      onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); });
+                      onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); }, env: env);
         Progress?.Invoke(rc == 0 ? 1 : (double?)null);
-        if (rc != 0) throw new InstallException(ExplainBuildFailure(rc, tail.ToList()));
+        if (rc != 0)
+        {
+            // An object file cut short by an interrupted build (newer than its source, so make keeps it) or a CMake
+            // cache from another folder fails every retry the same way: start the Switch build over.
+            var broken = new Regex(@"file truncated|file format not recognized|error adding symbols|CMakeCache\.txt directory .* is different", RegexOptions.IgnoreCase);
+            var buildDir = Path.Combine(ReleaseDir, "build", "switch-dk");
+            if (tail.Any(broken.IsMatch) && Directory.Exists(buildDir))
+            {
+                try { Directory.Delete(buildDir, true); Warn(Str.Get("build_reset", buildDir)); }
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { Warn(e.Message); }
+            }
+            throw new InstallException(ExplainBuildFailure(rc, tail.ToList()));
+        }
         Ok(SdOut);
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct MEMORYSTATUSEX
+    {
+        public uint dwLength, dwMemoryLoad;
+        public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX status);
+
+    // The PC's memory in GB, or 0 when Windows does not say.
+    static double TotalRamGb()
+    {
+        var st = new MEMORYSTATUSEX { dwLength = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(MEMORYSTATUSEX)) };
+        try { return GlobalMemoryStatusEx(ref st) ? st.ullTotalPhys / 1073741824.0 : 0; }
+        catch (Exception) { return 0; }
     }
 
     // The build's last lines, turned into what the error box shows: make_sd's own reason (its "make_sd: ..." line),
@@ -655,7 +699,7 @@ sealed class InstallEngine
             Has(@"No space left on device|not enough space on the disk|ENOSPC") ? "hint_disk" :
             Has(@"out of memory|virtual memory exhausted|MemoryError|Cannot allocate memory") ? "hint_memory" :
             Has(@"cannot specify '-o' with '-c'")                               ? "hint_path_space" :
-            Has(@"file truncated|file format not recognized|error adding symbols") ? "hint_broken_obj" :
+            Has(@"file truncated|file format not recognized|error adding symbols|CMakeCache\.txt directory .* is different") ? "hint_broken_obj" :
             Has(@"command not found")                                           ? "hint_tool_missing" :
             Has(@"Permission denied|Access is denied|PermissionError|Device or resource busy|Operation not permitted") ? "hint_av" :
             null;

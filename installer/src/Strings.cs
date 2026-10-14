@@ -92,6 +92,7 @@ static class Str
 
         // Engine messages
         ["py_found"]       = ("Python encontrado: {0}",                              "Python found: {0}"),
+        ["py_unsuitable"]  = ("No sirve: {0} (hace falta Python 3.8 o posterior, de 64 bits).", "Not usable: {0} (Python 3.8 or newer, 64-bit, is needed)."),
         ["py_installing"]  = ("Instalando Python 3.12...",                           "Installing Python 3.12..."),
         ["py_fail"]        = ("No se pudo instalar Python automáticamente. Instala Python 3 desde python.org (marca \"Add python.exe to PATH\") y vuelve a intentarlo.",
                                "Could not install Python automatically. Install Python 3 from python.org (tick \"Add python.exe to PATH\") and try again."),
@@ -152,6 +153,8 @@ static class Str
         ["build_s4"]       = ("Compilando para la Switch...",                        "Compiling for the Switch..."),
         ["build_s4_pct"]   = ("Compilando para la Switch... {0}%",                   "Compiling for the Switch... {0}%"),
         ["build_s5"]       = ("Preparando la carpeta de la SD...",                   "Preparing the SD card folder..."),
+        ["build_jobs"]     = ("Compilaciones en paralelo: {0} ({1} hilos de CPU, {2} GB de memoria).", "Parallel compiles: {0} ({1} CPU threads, {2} GB of memory)."),
+        ["build_reset"]    = ("El build anterior quedó a medias; se borra {0} para compilar de nuevo.", "The earlier build was left half-done; deleting {0} to compile it again."),
         ["build_fail"]     = ("El build falló (código {0}). Pulsa \"Mostrar detalles\" para ver el error.", "The build failed (exit code {0}). Press \"Show details\" to see the error."),
         ["pre_game"]       = ("Juego: {0} {1}",                                      "Game: {0} {1}"),
         ["pre_no_game"]    = ("No se encuentra el juego: {0}. Vuelve a elegirlo.",   "The game is not there: {0}. Choose it again."),
@@ -191,8 +194,8 @@ static class Str
         ["hint_disk"]      = ("El disco se quedó sin espacio. Libera al menos 10 GB y pulsa Reintentar.", "The disk ran out of space. Free at least 10 GB and press Retry."),
         ["hint_memory"]    = ("El PC se quedó sin memoria al compilar. Cierra otros programas y pulsa Reintentar.", "The PC ran out of memory while compiling. Close other programs and press Retry."),
         ["hint_path_space"]= ("La ruta de la carpeta de trabajo tiene un espacio, y esta versión del juego no lo admite.", "The working folder's path has a space in it, which this version of the game does not support."),
-        ["hint_broken_obj"]= ("Un build anterior se interrumpió y dejó un archivo a medias. Pulsa Reintentar: se vuelve a compilar.",
-                               "An earlier build was interrupted and left a half-written file. Press Retry: it is compiled again."),
+        ["hint_broken_obj"]= ("Un build anterior se interrumpió y dejó archivos a medias; ya se han borrado. Pulsa Reintentar: se compila de nuevo.",
+                               "An earlier build was interrupted and left half-written files; they have been deleted. Press Retry to compile again."),
         ["hint_tool_missing"] = ("Falta una herramienta de devkitPro. Pulsa Reintentar; si vuelve a fallar, en Inicio > devkitPro > MSYS2 ejecuta: pacman -S --needed switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make",
                                "A devkitPro tool is missing. Press Retry; if it fails again, in Start > devkitPro > MSYS2 run: pacman -S --needed switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make"),
         ["hint_av"]        = ("Windows denegó el acceso a un archivo. Suele ser un antivirus o el \"acceso controlado a carpetas\" de Windows: añade C:\\devkitPro y la carpeta de trabajo a sus exclusiones y pulsa Reintentar.",
