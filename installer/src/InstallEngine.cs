@@ -48,7 +48,25 @@ sealed class InstallEngine
             return inProfile;
         }
     }
-    const string DevkitRoot = @"C:\devkitPro";
+    // devkitPro's folder: C:\devkitPro (its installer's default, what the wizard asks for), or X:\devkitPro on
+    // another drive when it was installed there. Looked up on each use: it appears during the devkitPro step.
+    static string DevkitRoot => FindDevkitRoot();
+    static string FindDevkitRoot()
+    {
+        const string fallback = @"C:\devkitPro";
+        if (File.Exists(Path.Combine(fallback, @"msys2\usr\bin\bash.exe"))) return fallback;
+        try
+        {
+            foreach (var drive in DriveInfo.GetDrives())
+            {
+                if (drive.DriveType != DriveType.Fixed || !drive.IsReady) continue;
+                var root = Path.Combine(drive.RootDirectory.FullName, "devkitPro");
+                if (File.Exists(Path.Combine(root, @"msys2\usr\bin\bash.exe"))) return root;
+            }
+        }
+        catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
+        return fallback;
+    }
 
     public const int StepPython = 0, StepDevkit = 1, StepRelease = 2, StepBuild = 3;
 

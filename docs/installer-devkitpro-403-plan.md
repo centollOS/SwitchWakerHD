@@ -136,8 +136,8 @@ key checks with those folder names, of the failure and pacman explanations on th
 `cmake` that exits 127 silently; shellcheck. Not checked: anything that needs Windows.
 
 Still open (decisions): the `.exe` runs elevated (`requireAdministrator`), so drag and drop from Explorer is
-blocked by Windows (UIPI) and mapped network drives are not visible to it; devkitPro must be in `C:\devkitPro`
-(make_sd hard-codes it); the installer never runs `pacman -Syu` itself (a partial-update breakage is reported,
+blocked by Windows (UIPI) and mapped network drives are not visible to it (kept: neither is supported);
+devkitPro is looked for in `C:\devkitPro`, then `X:\devkitPro` on the other fixed drives (installer and make_sd); the installer never runs `pacman -Syu` itself (a partial-update breakage is reported,
 not repaired).
 
 ### Manual Windows test checklist (built `.exe`)
