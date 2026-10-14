@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
@@ -126,6 +127,8 @@ sealed class InstallEngine
         if (GameArg == "--image" && CheckImageKeys(GamePath) is string keys)
             throw new InstallException(keys);
 
+        CheckClock();
+
         // OneDrive "online-only" (Files On-Demand): the whole file is downloaded when make_sd reads it
         if (GameArg != "--game-dir" && (File.GetAttributes(GamePath) & (FileAttributes.Offline | RecallOnDataAccess)) != 0)
             Warn(Str.Get("pre_cloud", GamePath));
@@ -145,6 +148,31 @@ sealed class InstallEngine
     }
 
     const FileAttributes RecallOnDataAccess = (FileAttributes)0x400000;
+
+    // pacman and pip fail with "certificate has expired" for every server when the PC's clock is far off (a log
+    // in #30): compare it with GitHub's. Being offline is only a warning here: a re-run may need no download.
+    void CheckClock()
+    {
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Head, "https://github.com");
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            using var resp = Http.SendAsync(req, timeout.Token).GetAwaiter().GetResult();
+            var date = resp.Headers.Date;
+            if (date != null && Math.Abs((DateTimeOffset.UtcNow - date.Value).TotalHours) > 24)
+                Warn(Str.Get("pre_clock", DateTime.Now.ToString("g"), date.Value.ToLocalTime().ToString("g")));
+        }
+        catch (HttpRequestException e) when (e.InnerException is WebException we &&
+                                             (we.Status == WebExceptionStatus.TrustFailure || we.Status == WebExceptionStatus.SecureChannelFailure))
+        {
+            throw new InstallException(Str.Get("pre_tls", e.InnerException.Message));
+        }
+        catch (Exception e) when (e is HttpRequestException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+        {
+            Warn(Str.Get("pre_offline", e.InnerException?.Message ?? e.Message));
+        }
+    }
 
     // The keys make_sd needs for a disc image (tools/wudextract.py): the disc key as <image name>.key next to the
     // image, and the Wii U common key as common.key next to it (or WIIU_COMMON_KEY); each 16 bytes or 32 hex digits.
@@ -288,24 +316,51 @@ sealed class InstallEngine
         // cmake and make (MSYS2's): build.sh runs them, and no devkitPro package brings them (issue #28).
         // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it
         var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make" + (ForwarderKeys != null ? " gcc" : "");
-        if (Exec(pacman, "-Sy --needed --noconfirm " + packages, check: false) != 0)
+        var output = new List<string>();
+        string? reason = null;
+        for (int attempt = 1; ; attempt++)
+        {
+            output.Clear();
+            if (Exec(pacman, "-Sy --needed --noconfirm " + packages, check: false, onLine: output.Add) == 0) { reason = null; break; }
+            reason = PacmanFailure(output);
+            // a network hiccup may pass; a 403, an expired certificate or a lock will not
+            if (attempt == 2 || reason != "dkp_why_net") break;
+            Warn(Str.Get("dkp_retry"));
+            for (int i = 0; i < 10; i++) { ct.ThrowIfCancellationRequested(); Thread.Sleep(1000); }
+            ClearStalePacmanLock();
+        }
+        if (reason != null)
         {
             // pkg.devkitpro.org often answers 403 (Cloudflare, devkitPro/pacman#63) and the whole -Sy gives up
             // without installing anything. The package lists it did refresh, and the ones from earlier runs,
             // are still on disk: install from those.
-            Warn(Str.Get("dkp_pkg_warn"));
+            Warn(Str.Get("dkp_pkg_warn") + " " + Str.Get(reason));
             ClearStalePacmanLock();
             Exec(pacman, "-S --needed --noconfirm " + packages, check: false);
         }
-        CheckDevkitTools();
+        CheckDevkitTools(reason);
+    }
+
+    // Why pacman failed, from its output: a Str key that explains it to the player.
+    internal static string PacmanFailure(IEnumerable<string> output)
+    {
+        var all = string.Join("\n", output);
+        bool Has(string pattern) => Regex.IsMatch(all, pattern, RegexOptions.IgnoreCase);
+        return Has(@"returned error: 403")                                     ? "dkp_why_403" :
+               Has(@"certificate has expired|certificate is not yet valid|SSL certificate") ? "dkp_why_ssl" :
+               Has(@"unable to lock database")                                 ? "dkp_why_lock" :
+               Has(@"Could not resolve host|timed out|Failed to connect|Connection reset|returned error: 5\d\d|Recv failure") ? "dkp_why_net" :
+               Has(@"signature .* (unknown trust|is invalid)|invalid or corrupted package|keyring") ? "dkp_why_sig" :
+               "dkp_why_other";
     }
 
     // What the build needs, by the files it runs or links. A missing one stops here, with the reason,
     // instead of after the download and two build stages (issue #28).
-    void CheckDevkitTools()
+    void CheckDevkitTools(string? pacmanFailure)
     {
         var needed = new (string name, string file)[]
         {
+            ("msys2",       @"msys2\usr\bin\bash.exe"),
             ("cmake",       @"msys2\usr\bin\cmake.exe"),
             ("make",        @"msys2\usr\bin\make.exe"),
             ("devkitA64",   @"devkitA64\bin\aarch64-none-elf-gcc.exe"),
@@ -315,7 +370,19 @@ sealed class InstallEngine
             ("switch-lz4",  @"portlibs\switch\lib\liblz4.a"),
         };
         var missing = needed.Where(t => !File.Exists(Path.Combine(DevkitRoot, t.file))).Select(t => t.name).ToList();
-        if (missing.Count > 0) throw new InstallException(Str.Get("dkp_missing", string.Join(", ", missing)));
+        if (missing.Count > 0)
+            throw new InstallException(Str.Get("dkp_missing", string.Join(", ", missing)) + "\n\n" + Str.Get(pacmanFailure ?? "dkp_why_other"));
+
+        // There is not enough: they must also start. An MSYS2 program whose library is missing (cmake installed
+        // by a partial update) exits without a word, which is how build.sh stopped silently in #28.
+        var bash = Path.Combine(DevkitRoot, @"msys2\usr\bin\bash.exe");
+        var env = MsysEnv();
+        const string probe = "set -e; command -v cmake make; cmake --version; make --version; $DEVKITPRO/devkitA64/bin/aarch64-none-elf-gcc --version";
+        if (Exec(bash, "-l -c \"" + probe + "\"", check: false, env: env) != 0)
+        {
+            Exec(bash, "-l -c \"ldd /usr/bin/cmake.exe /usr/bin/make.exe\"", check: false, env: env);   // for the log: what is missing
+            throw new InstallException(Str.Get("dkp_broken"));
+        }
 
         if (ForwarderKeys != null && !File.Exists(Path.Combine(DevkitRoot, @"msys2\usr\bin\gcc.exe")))
         {
@@ -379,6 +446,14 @@ sealed class InstallEngine
             catch (Exception e) { Warn(e.Message); }
         }
     }
+
+    // make_sd.native_shell's environment for devkitPro's bash, so the checks see what the build will see
+    static Dictionary<string, string> MsysEnv() => new()
+    {
+        ["DEVKITPRO"] = "/opt/devkitpro",
+        ["CHERE_INVOKING"] = "1",
+        ["MSYS2_PATH_TYPE"] = "inherit",
+    };
 
     static void SetDevkitEnv()
     {
@@ -606,7 +681,8 @@ sealed class InstallEngine
     }
 
     // Runs a process, streams its output to the log; with check, a non-zero exit is a failure.
-    int Exec(string exe, string args, string? workDir = null, bool check = true, Action<string>? onLine = null)
+    int Exec(string exe, string args, string? workDir = null, bool check = true, Action<string>? onLine = null,
+             IDictionary<string, string>? env = null)
     {
         Log?.Invoke($"> {exe} {args}", LogKind.Info);
         var psi = new ProcessStartInfo(exe, args)
@@ -621,14 +697,16 @@ sealed class InstallEngine
         };
         psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1";
         psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+        if (env != null) foreach (var kv in env) psi.EnvironmentVariables[kv.Key] = kv.Value;
 
         int rc;
         using var job = new ProcessJob(killOnClose: true);
+        var gate = new object();   // stdout and stderr arrive on two threads; onLine sees one line at a time
         try
         {
             using var proc = new Process { StartInfo = psi };
-            proc.OutputDataReceived += (_, e) => { if (e.Data != null) { Log?.Invoke(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
-            proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) { Log?.Invoke(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
+            proc.OutputDataReceived += (_, e) => { if (e.Data != null) lock (gate) { Log?.Invoke(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
+            proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) lock (gate) { Log?.Invoke(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
             proc.Start();
             job.Add(proc);
             currentJob = job;
