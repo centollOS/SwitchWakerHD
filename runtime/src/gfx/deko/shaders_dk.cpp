@@ -1059,6 +1059,16 @@ Shader* shader_from_record(uint64_t key, bool vertex, std::pair<uint32_t, uint32
 }
 }  // namespace
 
+ShaderMemory shader_memory() {
+    ShaderMemory m;
+    m.variants = shaders.size();
+    m.codes = codes.size();
+    m.programs = programHashes.size();
+    m.storedRecords = storedTrans.size();
+    m.storedBytes = storedBlob.size();
+    return m;
+}
+
 Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, uint64_t fsKey, uint64_t frame,
                   uint64_t coreHash) {
     uint32_t start = vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS;

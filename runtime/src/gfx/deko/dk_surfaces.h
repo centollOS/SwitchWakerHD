@@ -302,5 +302,7 @@ size_t rescale_pool_bytes();      // images a rescale let go, kept for the next 
 void surfaces_frame_start();
 // image heap bytes of all surfaces (stats): total, render targets, surface count
 void surface_memory(size_t& total, size_t& targets, size_t& count);
+// (this fork, #37) surfaces ever created (their bookkeeping stays after eviction), for the [mem] line
+size_t surface_structs();
 
 }  // namespace gfxdk

@@ -2194,6 +2194,8 @@ void surfaces_frame_start() {
     surface_stats();
 }
 
+size_t surface_structs() { return S.list.size(); }
+
 void surface_memory(size_t& total, size_t& targets, size_t& count) {
     total = targets = count = 0;
     for (const Surface* s : S.list) {
