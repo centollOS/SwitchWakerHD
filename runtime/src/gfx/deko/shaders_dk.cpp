@@ -1443,6 +1443,10 @@ void shaders_init(void (*progress)(size_t done, size_t total)) {
                 transWritten.clear();
             }
         }
+        // (this fork, #37) only the valid records stay in memory: a file of another version (74 MB of them on a
+        // console after the version 2 keys) was kept whole, unused
+        t.resize(good ? at : 0);
+        t.shrink_to_fit();
         storedBlob = std::move(t);
         transFile.f = fopen(kTransPath, "ab");
         LOG("[dk] %s: %zu translation records (version %u%s); variants seen before skip the decompiler "
