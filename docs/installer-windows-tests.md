@@ -4,8 +4,12 @@ Manual tests of `SwitchWakerHD-Installer.exe` before a release (what changed: `i
 "Hardening"). The `.exe` of a branch comes from the **Build Windows Installer** workflow run by hand on that branch
 (Actions → Build Windows Installer → Run workflow; the `.exe` is the run's artifact, version 0.0.0).
 
-For every test keep `installer.log` (next to the `.exe`). **Pass** means it builds, or it stops with a message that
-names the cause and what to do, before wasting a download or a build. Note anything unclear in the messages too.
+For every test keep the `installer.log` of that run. It is in the working folder, not next to the `.exe`:
+`%USERPROFILE%\SwitchWakerHD-Build\installer.log`, or `C:\SwitchWakerHD-Build\installer.log` when the user name has a
+space, non-ASCII letters or is long (the window shows the path under "Full log"). Every run is appended after a
+`==== <date> ====` line, so keep from the last one; copy it out before deleting or renaming the working folder.
+**Pass** means it builds, or it stops with a message that names the cause and what to do, before wasting a download or
+a build. Note anything unclear in the messages too.
 
 Not supported, not tested: dragging files onto the window (the installer runs as administrator), mapped network
 drives and network shares.
