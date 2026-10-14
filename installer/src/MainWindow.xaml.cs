@@ -215,9 +215,11 @@ public partial class MainWindow : Window
 
         string? warn = null;
         if (gamePath != "" && GameArg() == "--game-dir" && !IsGameDir(gamePath)) warn = Str.Get("game_bad_dir");
-        else if (gamePath != "" && GameArg() == "--image" &&
-                 !File.Exists(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(gamePath) ?? "", "GAME.key")))
-            warn = Str.Get("game_no_keys");
+        else if (gamePath != "" && GameArg() == "--image" && File.Exists(gamePath))
+        {
+            try { warn = InstallEngine.CheckImageKeys(gamePath); }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { warn = e.Message; }
+        }
         TxtGameWarn.Text = warn ?? "";
         TxtGameWarn.Visibility = warn == null ? Visibility.Collapsed : Visibility.Visible;
         if (page == Page.Game) UpdateFooter();

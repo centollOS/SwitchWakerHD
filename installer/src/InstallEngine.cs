@@ -28,10 +28,13 @@ sealed class InstallEngine
     // %USERPROFILE%\SwitchWakerHD-Build, unless the user name has a space or a non-ASCII letter ("JAM Visuals",
     // issue #30): the build tools do not all cope with those, so then a folder at the root of the system drive
     // (C:\SwitchWakerHD-Build), which standard users may create. Back to the profile if that cannot be created.
+    // Also there when the profile path is long: the release is unpacked two folders down and the deepest object
+    // file adds ~160 characters, and devkitPro's gcc cannot open paths over 260 (MAX_PATH).
+    const int MaxWorkDirLength = 45;
     static string ChooseWorkDir()
     {
         var inProfile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SwitchWakerHD-Build");
-        if (Regex.IsMatch(inProfile, @"^[A-Za-z0-9_.:\\-]+$"))
+        if (Regex.IsMatch(inProfile, @"^[A-Za-z0-9_.:\\-]+$") && inProfile.Length <= MaxWorkDirLength)
             return inProfile;
         var atRoot = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", "SwitchWakerHD-Build");
         try
@@ -83,6 +86,7 @@ sealed class InstallEngine
         ct = token;
         Directory.CreateDirectory(WorkDir);
         Info(Str.Get("welcome_dir", WorkDir));
+        Preflight();
         RunStep(StepPython,  Python);
         RunStep(StepDevkit,  DevkitPro);
         RunStep(StepRelease, Release);
@@ -110,6 +114,83 @@ sealed class InstallEngine
     }
 
     public static readonly string[] StepKeys = { "step_python", "step_devkit", "step_release", "step_build" };
+
+    // ── Before anything: the game, its keys and the disk ────────────────────
+    // What make_sd would only stop on after the downloads and the toolchain (#28: the disc key was not where it
+    // looks), checked up front.
+    void Preflight()
+    {
+        Info(Str.Get("pre_game", GameArg, GamePath));
+        if (GameArg == "--game-dir" ? !Directory.Exists(GamePath) : !File.Exists(GamePath))
+            throw new InstallException(Str.Get("pre_no_game", GamePath));
+        if (GameArg == "--image" && CheckImageKeys(GamePath) is string keys)
+            throw new InstallException(keys);
+
+        // OneDrive "online-only" (Files On-Demand): the whole file is downloaded when make_sd reads it
+        if (GameArg != "--game-dir" && (File.GetAttributes(GamePath) & (FileAttributes.Offline | RecallOnDataAccess)) != 0)
+            Warn(Str.Get("pre_cloud", GamePath));
+
+        // The extracted game twice (build/sd-game and the SD folder), the generated code, the objects: ~9 GB
+        // the first time; a re-run reuses most of it.
+        var rerun = Directory.Exists(WorkDir) && Directory.GetDirectories(WorkDir, "SwitchWakerHD-v*").Length > 0;
+        var needGb = rerun ? 5 : 10;
+        try
+        {
+            var drive = new DriveInfo(Path.GetPathRoot(WorkDir)!);
+            var freeGb = drive.AvailableFreeSpace / 1e9;
+            Info(Str.Get("pre_space", drive.Name, freeGb.ToString("0.0")));
+            if (freeGb < needGb) throw new InstallException(Str.Get("pre_no_space", drive.Name, freeGb.ToString("0.0"), needGb));
+        }
+        catch (ArgumentException) { }   // a drive DriveInfo cannot describe (network share): no check
+    }
+
+    const FileAttributes RecallOnDataAccess = (FileAttributes)0x400000;
+
+    // The keys make_sd needs for a disc image (tools/wudextract.py): the disc key as <image name>.key next to the
+    // image, and the Wii U common key as common.key next to it (or WIIU_COMMON_KEY); each 16 bytes or 32 hex digits.
+    // Null when both are there, else what is wrong and exactly which file to put where.
+    internal static string? CheckImageKeys(string image)
+    {
+        var dir = Path.GetDirectoryName(Path.GetFullPath(image)) ?? "";
+        var discKey = Path.Combine(dir, Path.GetFileNameWithoutExtension(image) + ".key");
+        var common = Path.Combine(dir, "common.key");
+        if (!File.Exists(discKey))
+        {
+            if (File.Exists(discKey + ".txt")) return Str.Get("key_txt", discKey + ".txt", Path.GetFileName(discKey));
+            // a key under another name ("game.key", "title.key"): say which to rename. (On Windows "*.key" also
+            // matches prod.keys, hence the extension check.)
+            var others = Directory.Exists(dir)
+                ? Directory.GetFiles(dir, "*.key").Where(f => Path.GetExtension(f).Equals(".key", StringComparison.OrdinalIgnoreCase) &&
+                                                              !Path.GetFileName(f).Equals("common.key", StringComparison.OrdinalIgnoreCase)).ToList()
+                : new List<string>();
+            return others.Count == 1 ? Str.Get("key_rename", others[0], Path.GetFileName(discKey))
+                                     : Str.Get("key_missing", discKey);
+        }
+        if (!KeyFileOk(File.ReadAllBytes(discKey))) return Str.Get("key_bad", discKey);
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WIIU_COMMON_KEY"))) return null;
+        if (!File.Exists(common))
+            return File.Exists(common + ".txt") ? Str.Get("key_txt", common + ".txt", "common.key") : Str.Get("common_missing", common);
+        if (!KeyFileOk(File.ReadAllBytes(common))) return Str.Get("key_bad", common);
+        return null;
+    }
+
+    // wudextract.parse_key: 16 raw bytes, or 32 hex digits with whitespace around them
+    internal static bool KeyFileOk(byte[] data)
+    {
+        if (data.Length == 16) return true;
+        var text = Encoding.ASCII.GetString(data.Where(b => b < 0x80).ToArray());
+        if (text.Length != data.Length) return false;
+        text = text.Trim(' ', '\t', '\r', '\n', '\v', '\f');
+        return text.Length == 32 && text.All(Uri.IsHexDigit);
+    }
+
+    // One argument for a Windows command line: in quotes, with trailing backslashes doubled so that a folder such
+    // as D:\ does not escape the closing quote. (Windows paths cannot contain quotes.)
+    internal static string Quote(string arg)
+    {
+        var trailing = arg.Length - arg.TrimEnd('\\').Length;
+        return "\"" + arg + new string('\\', trailing) + "\"";
+    }
 
     // ── Python ───────────────────────────────────────────────────────────────
     void Python()
@@ -428,8 +509,8 @@ sealed class InstallEngine
             if (pct > shownPct) { shownPct = pct; Status?.Invoke(Str.Get("build_s4_pct", pct)); }
         }
         var tail = new Queue<string>();
-        var forwarder = ForwarderKeys != null ? $" --keys \"{ForwarderKeys}\"" : " --no-forwarder";
-        var rc = Exec(pythonCmd, $"\"{MakeSd(ReleaseDir)}\" {GameArg} \"{GamePath}\"{forwarder}", ReleaseDir, check: false,
+        var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
+        var rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}", ReleaseDir, check: false,
                       onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); });
         Progress?.Invoke(rc == 0 ? 1 : (double?)null);
         if (rc != 0) throw new InstallException(ExplainBuildFailure(rc, tail.ToList()));
@@ -478,8 +559,7 @@ sealed class InstallEngine
         Say(Str.Get("sd_copying", drive));
         Progress?.Invoke(null);
         // robocopy: 0-7 is success (files copied, extra files, ...), 8 and up is failure.
-        // "D:\" would escape the closing quote (Windows argv rules); "D:\\" is D:\ for robocopy.
-        var rc = Exec("robocopy", $"\"{SdOut}\" \"{drive.TrimEnd('\\')}\\\\\" /E /R:2 /W:2 /NP /NDL /NJH /NJS", check: false);
+        var rc = Exec("robocopy", $"{Quote(SdOut)} {Quote(drive)} /E /R:2 /W:2 /NP /NDL /NJH /NJS", check: false);
         if (rc < 0 || rc >= 8) throw new InstallException(Str.Get("sd_fail", rc));
         Ok(Str.Get("sd_copied", drive));
     }
