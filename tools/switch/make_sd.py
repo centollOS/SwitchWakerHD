@@ -50,8 +50,10 @@ def step(n, text):
 
 def run(cmd, env=None, ok=(0,)):
     print("  $ " + " ".join(cmd), flush=True)
-    if subprocess.call(cmd, cwd=ROOT, env=env) not in ok:
-        fail("this step failed (see the messages above)")
+    rc = subprocess.call(cmd, cwd=ROOT, env=env)
+    if rc not in ok:
+        # (a Windows program that cannot start, e.g. a missing DLL, exits with 0xC0000135 and prints nothing)
+        fail("this step failed (exit code %s; see the messages above)" % (hex(rc & 0xFFFFFFFF) if rc < 0 or rc > 255 else rc))
 
 
 # the shader cache's code budget: the console loads it whole into its 64 MiB of shader code memory (gfx/deko/dk.h),

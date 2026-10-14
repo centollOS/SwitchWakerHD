@@ -9,6 +9,8 @@
 # build/gen may be a symbolic link (git worktrees share the main checkout's): its target is mounted into the
 # container at the same path (not for the native build).
 set -euo pipefail
+# a command that fails without printing anything (a tool that cannot start: issue #28) still says which one
+trap 'rc=$?; echo "build.sh: line $LINENO: \"$BASH_COMMAND\" failed (exit code $rc)" >&2' ERR
 cd "$(dirname "$0")/../.."
 
 if ! ls build/gen/code_*.c >/dev/null 2>&1; then

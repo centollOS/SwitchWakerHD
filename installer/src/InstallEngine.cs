@@ -705,7 +705,8 @@ sealed class InstallEngine
             null;
         // #28: build.sh stopped and printed nothing at all (a tool that cannot start, such as an MSYS2 program
         // whose library is missing after a partial update, or one blocked by an antivirus)
-        if (hint == null && why > 0 && lines[why].EndsWith("this step failed (see the messages above)") && lines[why - 1].StartsWith("$ "))
+        if (hint == null && why > 0 && lines[why].Contains("this step failed") &&
+            (lines[why - 1].StartsWith("$ ") || Regex.IsMatch(lines[why - 1], @"^build\.sh: line \d+: .* failed \(exit code \d+\)$")))
             hint = "hint_silent";
         if (hint != null) msg.Append("\n\n").Append(Str.Get(hint));
         return msg.ToString();
