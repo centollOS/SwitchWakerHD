@@ -717,6 +717,22 @@ sealed class InstallEngine
         ct = token;
         Say(Str.Get("sd_copying", drive));
         Progress?.Invoke(null);
+
+        // Room for what is new or bigger (files already on the card are replaced), and FAT32's 4 GB file limit.
+        var di = new DriveInfo(drive);
+        long need = 0, biggest = 0;
+        foreach (var f in Directory.GetFiles(SdOut, "*", SearchOption.AllDirectories))
+        {
+            var len = new FileInfo(f).Length;
+            var dst = new FileInfo(Path.Combine(drive, f.Substring(SdOut.Length).TrimStart('\\')));
+            need += Math.Max(0, len - (dst.Exists ? dst.Length : 0));
+            biggest = Math.Max(biggest, len);
+        }
+        if (di.AvailableFreeSpace < need)
+            throw new InstallException(Str.Get("sd_no_space", drive, (di.AvailableFreeSpace / 1e9).ToString("0.0"), (need / 1e9).ToString("0.0")));
+        if (biggest >= 4L << 30 && di.DriveFormat.Equals("FAT32", StringComparison.OrdinalIgnoreCase))
+            throw new InstallException(Str.Get("sd_fat32", drive));
+        if (!Directory.Exists(Path.Combine(drive, "atmosphere"))) Warn(Str.Get("sd_no_atmo", drive));
         // robocopy: 0-7 is success (files copied, extra files, ...), 8 and up is failure.
         var rc = Exec("robocopy", $"{Quote(SdOut)} {Quote(drive)} /E /R:2 /W:2 /NP /NDL /NJH /NJS", check: false);
         if (rc < 0 || rc >= 8) throw new InstallException(Str.Get("sd_fail", rc));
