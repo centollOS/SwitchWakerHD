@@ -1349,6 +1349,7 @@ std::string bug_report_text() {
     }
     std::string save = config::save_dir + "/user/cking.sav";
     auto absolute = [](const std::string& p) {
+        if (p.find(":/") != std::string::npos) return p;  // (this fork) already absolute: the Switch's "sdmc:/..."
         std::error_code ec;
         auto a = std::filesystem::absolute(p, ec);
         return ec ? p : a.lexically_normal().string();
