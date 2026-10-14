@@ -40,3 +40,14 @@ What round 1's plan listed that turns out small now:
    (`tools/switch/mem_tour.py`).
 
 Surface structs and side copies (feedback/volume/mip chains, `g_wbSized`) stay for later: a few MiB in the tour.
+
+## Results
+
+**Step 1-2 (2026-10-14, trace tour: main 68d7226 + step 1, 40 warps, 17 min).** The image heap reached 4 chunks
+at frame 4626 (~2.5 min) and stayed there for the remaining ~15 min (233 MiB placed at the end, peak 255 of 256).
+`image_heap_sim.py` on the trace: first fit, best fit, split and split-best all need the same 4 chunks (split
+even needs the 4th earlier). The chunks follow the working set (surfaces ~95-200 MiB, the rescale pool 24 MiB,
+side copies), not a placement problem: **step 2 dropped**, first fit stays. Step 3 (a chunk bound) waits for the
+long test: no growth past the working set in 17 min.
+
+What still grows after the 4th chunk: malloc +33 MiB in ~14 min with +2,780 variants (~12 KB each): step 4.
