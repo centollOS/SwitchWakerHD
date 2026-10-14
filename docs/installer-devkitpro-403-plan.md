@@ -100,3 +100,74 @@ fix/build-path-spaces covers manual builds).
 | D, user name with a space | works in `C:\Users\Test User\...`, fails at 26 % | works in `C:\SwitchWakerHD-Build`, builds |
 
 Restore afterwards: `pacman -S --needed cmake make`, remove the `hosts` line, rename `liblz4.a.bak` back.
+
+## Hardening (branch `fix/installer-hardening`, on top of this one)
+
+From the players' `installer.log`s (#28, #30) and a review of every step. Only `installer/src` changes what the
+`.exe` does; `make_sd.py` and `build.sh` reach players with the next release zip.
+
+- **Failures say why.** The error box carries make_sd's own reason, the first compiler error and a hint (disc or
+  common key missing, wrong key, disk full, out of memory, path with a space, interrupted build, missing tool,
+  access denied / antivirus, and build.sh stopping with no output, #28's last attempt). File and network
+  exceptions name the step; pip and a missing winget get their own messages.
+- **Checked before anything is installed:** the game file or folder; for a disc image, `<image name>.key` and
+  `common.key` next to it (16 bytes or 32 hex digits), naming the exact file, the `.key` to rename or the hidden
+  `.txt`; free space (10 GB, 5 GB on a re-run); the PC's clock against GitHub's (pacman's "certificate has
+  expired" on every mirror in a #30 log); an OneDrive online-only image (warning). The game page shows the same
+  key check, with the right file name (it asked for `GAME.key`, which make_sd never reads).
+- **devkitPro:** pacman's output gives the reason (403, certificate/clock, lock, network with one retry,
+  signatures) that goes with the "tools missing" stop; MSYS2's bash then runs `cmake`, `make` and
+  `aarch64-none-elf-gcc` the way make_sd does, so a tool that cannot start stops the step with "run
+  `pacman -Syu`" (and `ldd` in the log). `bash.exe` is checked too.
+- **Paths:** every path goes through `Quote()` (a trailing backslash, as in a game folder at a drive root, no
+  longer eats the closing quote); a profile path over 45 characters also moves the working folder to
+  `C:\SwitchWakerHD-Build` (MAX_PATH for devkitPro's gcc).
+- **Re-runs:** the latest release comes from the API, else the `releases/latest` redirect, else the newest one
+  already downloaded (it was a hard-coded v0.4.3); a damaged zip is deleted for Retry; a link error from a
+  truncated object (interrupted build) or a CMake cache from another folder deletes `build/switch-dk`.
+- **Python:** 64-bit 3.8+ only (else 3.12 is installed). **Build:** `WWHD_JOBS` from the PC's memory (~1.5 GB a
+  compile). **SD copy:** free space, FAT32's 4 GB limit, a card without `atmosphere/` (warning).
+- **make_sd / build.sh:** the failing command, its line and exit code (an ERR trap; hex for a Windows status).
+
+Checked on macOS: the whole `.exe` project compiles (net48 + WPF, `EnableWindowsTargeting` and the
+`Microsoft.NETFramework.ReferenceAssemblies` package in a scratch copy); unit checks of `Quote()` against the
+Windows argv rules with tricky names (commas, parentheses, `&`, `%`, José, Cyrillic, Chinese, `D:\`, UNC), of the
+key checks with those folder names, of the failure and pacman explanations on the players' logs; build.sh with a
+`cmake` that exits 127 silently; shellcheck. Not checked: anything that needs Windows.
+
+Still open (decisions): the `.exe` runs elevated (`requireAdministrator`), so drag and drop from Explorer is
+blocked by Windows (UIPI) and mapped network drives are not visible to it; devkitPro must be in `C:\devkitPro`
+(make_sd hard-codes it); the installer never runs `pacman -Syu` itself (a partial-update breakage is reported,
+not repaired).
+
+### Manual Windows test checklist (built `.exe`)
+
+Run each with a fresh look at `installer.log`; "stops" means it stops with a message naming the cause and the fix.
+
+1. Clean PC, `.wua` on the Desktop: builds; log shows Python, "devkitPro tools ready", "Parallel compiles: N".
+2. Run the `.exe` from Downloads, from the Desktop and straight from inside its zip (Explorer's "open"): same.
+3. Disc image named `Legend of Zelda, The - The Wind Waker HD (USA, Asia) (En,Fr,Es).wux`:
+   a. no `.key` → the game page and Install both name the exact `...(En,Fr,Es).key` path, before any download;
+   b. key saved as `GAME.key` → "Rename GAME.key to ...";
+   c. key saved from Notepad as `...key.txt` (extensions hidden) → ".txt" message;
+   d. no `common.key` / `common.key` with spaced hex → exact message; e. both right → builds.
+4. EUR game (`.wua` or image): builds; log says "The Wind Waker HD (Europe), version 0: OK".
+5. Extracted game folder at a drive root (USB stick `E:\` with code/content/meta): builds.
+6. User names: "Test User" (space), "José", a Cyrillic and a Chinese name, and a 20-letter name: working folder is
+   `C:\SwitchWakerHD-Build`; builds. Game on an OneDrive Desktop (online-only): warning, builds.
+7. Game on a second drive (`D:\Games\...`) and on a UNC share: builds.
+8. Less than 10 GB free on C: → stops before any download.
+9. devkitPro blocked: hosts line `127.0.0.1 pkg.devkitpro.org` (see B above): with tools already installed →
+   warning, builds; with `liblz4.a` renamed (C above) → stops in the devkitPro step with the network reason.
+10. Clock set a year ahead → stops with the date/time message (or warns, then pacman's reason is the clock).
+11. `pacman -R cmake`, then in MSYS2 install an older/mismatched cmake or delete one of its DLLs
+    (`ldd /usr/bin/cmake.exe` shows them) → the devkitPro step stops with "run pacman -Syu" and ldd in the log.
+12. Cancel during "Compiling for the Switch... 40%", then Retry: builds (if a link error from a cut-off file
+    appears, the message says so and the next Retry builds).
+13. Re-run after a success: no download, reuses the release; re-run with the network unplugged: uses the
+    downloaded release ("using the one already downloaded").
+14. Python: only a 32-bit Python installed → "Not usable" in the log, 3.12 installed, builds. No winget → the
+    "install Python from python.org" message.
+15. Windows Defender "Controlled folder access" on, working folder not allowed → the access-denied hint.
+16. Copy to SD: a card with too little space → "does not fit"; a card without `atmosphere/` → warning; a normal
+    card → `switch/wwhd/` at the root; the game starts from the Homebrew Menu.
