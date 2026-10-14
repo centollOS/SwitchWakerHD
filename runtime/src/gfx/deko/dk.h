@@ -85,6 +85,16 @@ struct MemoryStats {
     uint64_t imageBytes = 0, imageChunks = 0, codeBytes = 0;
 };
 MemoryStats memory_stats_take();  // per-frame figures since the last call; totals as they are
+// (this fork, memory round 2) the image heap as the [mem] line shows it: chunks, their bytes, the bytes not placed
+// (frees the GPU has not passed yet count as placed) and the largest free range, which says how fragmented it is
+struct ImageHeapFigures {
+    uint64_t chunks = 0, total = 0, free = 0, largestFree = 0;
+};
+ImageHeapFigures image_heap_figures();
+// WWHD_DK_IMAGE_TRACE=1 ([dev]): every placement, free, eviction pass and new chunk of the image heap, appended to
+// image_trace.bin by this call (the 5 s stats; the file is closed between calls, so the debug server can fetch it).
+// tools/switch/image_heap_sim.py replays it with other placement policies.
+void image_trace_flush();
 
 // One-frame data (vertices, indices, uniform blocks) in this frame's stream slice (memory.cpp, as gfx/gl's
 // stream_upload / stream_guest). Empty (gpu 0) when the slice is full: stream_alloc logged it, the caller
