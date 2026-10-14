@@ -21,28 +21,28 @@ from ppc2c import translate, Unhandled
 
 # condition-register liveness (crlive.py): on unless WWHD_RECOMP_CRLIVE=0; WWHD_RECOMP_CR_CHECK=1
 # generates a checking build that poisons the dropped bits and aborts if one is ever read
-CRLIVE = os.environ.get("WWHD_RECOMP_CRLIVE", "1") != "0"
+CRLIVE = ppc2c.pass_on("WWHD_RECOMP_CRLIVE")
 CR_CHECK = os.environ.get("WWHD_RECOMP_CR_CHECK", "0") == "1"
 # leaf functions keep guest registers in locals (leaflocal.py): on unless WWHD_RECOMP_LEAF=0
-LEAF = os.environ.get("WWHD_RECOMP_LEAF", "1") != "0"
+LEAF = ppc2c.pass_on("WWHD_RECOMP_LEAF")
 # hot functions first (hot_functions.txt, from profiles) in their own files, in that order: on unless
 # WWHD_RECOMP_HOT=0
-HOT = os.environ.get("WWHD_RECOMP_HOT", "1") != "0"
+HOT = ppc2c.pass_on("WWHD_RECOMP_HOT")
 # small hot leaf functions get an always-inline copy that hot callers use (inline_leaves.h): off unless
 # WWHD_RECOMP_INLINE=1 (an experiment: it removes the call overhead but makes the hot code 15% larger)
 INLINE = os.environ.get("WWHD_RECOMP_INLINE", "0") == "1"  # experimental: +15% hot code size
 INLINE_MAX_INSNS = 24
 # functions with calls keep guest registers in locals too (leaflocal.transform_nonleaf): on unless
 # WWHD_RECOMP_NONLEAF=0
-NONLEAF = os.environ.get("WWHD_RECOMP_NONLEAF", "1") != "0"
+NONLEAF = ppc2c.pass_on("WWHD_RECOMP_NONLEAF")
 # return-address stores of direct calls to ordinary functions through PPC_SET_LR (nothing on the
 # Switch): on unless WWHD_RECOMP_LR=0
-LR_ELIDE = os.environ.get("WWHD_RECOMP_LR", "1") != "0"
+LR_ELIDE = ppc2c.pass_on("WWHD_RECOMP_LR")
 # paired-single loads and stores through GQRs the game never writes skip the GQR check
 # (static_float_gqrs): on unless WWHD_RECOMP_GQR=0
-GQR_STATIC = os.environ.get("WWHD_RECOMP_GQR", "1") != "0"
+GQR_STATIC = ppc2c.pass_on("WWHD_RECOMP_GQR")
 # indirect jumps (bctr) remember their last target per site (ppc.h PPC_IJUMP): on unless WWHD_RECOMP_IJUMP=0
-IJUMP = os.environ.get("WWHD_RECOMP_IJUMP", "1") != "0"
+IJUMP = ppc2c.pass_on("WWHD_RECOMP_IJUMP")
 IJUMP_CALL = "PPC_IJUMP(c)(c)" if IJUMP else "ppc_dispatch(c)"
 # checking build: abort if a callee changes a callee-saved register (ppc.h PPC_KEEP_R)
 NONLEAF_CHECK = os.environ.get("WWHD_RECOMP_NONLEAF_CHECK", "0") == "1"
@@ -244,7 +244,7 @@ class ForkPasses:
 
     def fork_translated(self, body):
         """emit_function, the function translated: condition-register liveness."""
-        if not CRLIVE:
+        if not CRLIVE or self.mod_hooks:  # (guest mod hooks: a mod may hook or replace any function)
             return body
         live_after, fields = crlive.analyze(body, self.cur_start, self.cur_end, self.p.jump_tables, branch_target,
                                             self.sites)
@@ -259,6 +259,8 @@ class ForkPasses:
         tail_wb = ""
         stmts = [s for _, _, s in body]
         sites_done = False
+        if self.mod_hooks:  # (as upstream: a mod may hook or replace any function)
+            return body, "", False
         if LEAF and not hooked and not any(a in self.sites for a, _, _ in body) and leaflocal.eligible(stmts):
             prologue, stmts, tail_wb = leaflocal.transform(stmts)
             body = [(a, w, s) for (a, w, _), s in zip(body, stmts)]
@@ -356,7 +358,8 @@ class ForkPasses:
         """funcs.h, before ppc.h: the checking builds' switches and the static GQRs. GQRs no instruction of
         the game writes keep their initial value (0: plain floats), so paired-single loads and stores through
         them need no check of the GQR (ppc.h psq_load_l)."""
-        gqr = "#define PPC_GQR_STATIC_FLOAT 0x%02X\n" % self.static_float_gqrs() if GQR_STATIC else ""
+        gqr = ("#define PPC_GQR_STATIC_FLOAT 0x%02X\n" % self.static_float_gqrs()
+               if GQR_STATIC and not self.mod_hooks else "")  # (a mod's code may write any GQR)
         return "%s%s%s%s" % ("#define PPC_CR_CHECK 1\n" if CR_CHECK else "",
                              "#define PPC_NONLEAF_CHECK 1\n" if NONLEAF_CHECK else "",
                              "#define PPC_ELIDE_LR 1\n" if NONLEAF_CHECK else "", gqr)

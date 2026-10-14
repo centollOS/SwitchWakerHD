@@ -47,3 +47,6 @@ headstart.bin
 /wwhd_src/
 # local coordination board
 /task.md
+
+# Release template is fetched from the pinned private repository.
+/tools/shadercache/template.bin

@@ -29,6 +29,32 @@ import android.view.View;
 public class SDLControllerManager
 {
 
+    // Once per device/key, capped for the process: held keys and noisy drivers cannot flood logcat.
+    private static final java.util.Set<Long> inputKeyDiagnostics = new java.util.HashSet<>();
+    static synchronized void logControllerKey(KeyEvent event, String route) {
+        if (event.getAction() != KeyEvent.ACTION_DOWN || event.getRepeatCount() != 0 ||
+                !isDeviceSDLJoystick(event.getDeviceId())) return;
+        long key = ((long) event.getDeviceId() << 32) | (event.getKeyCode() & 0xffffffffL);
+        if (inputKeyDiagnostics.size() >= 512 || !inputKeyDiagnostics.add(key)) return;
+        InputDevice d = event.getDevice();
+        Log.i("wwhd", "[input] Android controller key: device=" + event.getDeviceId() +
+                " name=" + (d == null ? "?" : d.getName()) +
+                " key=" + KeyEvent.keyCodeToString(event.getKeyCode()) + "(" + event.getKeyCode() + ")" +
+                " scan=" + event.getScanCode() + " source=0x" + Integer.toHexString(event.getSource()) +
+                " deviceSources=0x" + Integer.toHexString(d == null ? 0 : d.getSources()) +
+                " route=" + route);
+    }
+
+    static void logControllerDevice(InputDevice d) {
+        int sources = d.getSources();
+        Log.i("wwhd", "[input] Android controller connected: device=" + d.getId() +
+                " name=" + d.getName() + " vendor=" + d.getVendorId() + " product=" + d.getProductId() +
+                " sources=0x" + Integer.toHexString(sources) +
+                " gamepad=" + ((sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD) +
+                " joystick=" + ((sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) +
+                " keyboard=" + ((sources & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD));
+    }
+
     static native void nativeSetupJNI();
 
     static native void nativeAddJoystick(int device_id, String name, String desc,
@@ -76,6 +102,16 @@ public class SDLControllerManager
     /**
      * This method is called by SDL using JNI.
      */
+    private static native void nativeRequestDeviceRefresh();
+
+    // The SDL Android backend otherwise discovers device changes on a 3 s poll.
+    // Schedule its enumeration on the native input thread, preserving SDL's
+    // joystick-lock -> Java-handler-lock order (never enumerate directly here).
+    public static void requestDeviceRefresh() {
+        try { nativeRequestDeviceRefresh(); }
+        catch (UnsatisfiedLinkError ignored) { /* Native game library not loaded yet. */ }
+    }
+
     static void pollInputDevices() {
         mJoystickHandler.pollInputDevices();
     }
@@ -293,6 +329,7 @@ class SDLJoystickHandler {
                         }
                     }
 
+                    SDLControllerManager.logControllerDevice(joystickDevice);
                     mJoysticks.add(joystick);
                     SDLControllerManager.nativeAddJoystick(joystick.device_id, joystick.name, joystick.desc,
                             getVendorId(joystickDevice), getProductId(joystickDevice),

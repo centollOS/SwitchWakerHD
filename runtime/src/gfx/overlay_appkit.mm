@@ -2,6 +2,7 @@
 // code (menu.mm, display.mm), so the overlay and the menus change the same state; and the overlay's
 // mouse input from the TV window.
 #import <AppKit/AppKit.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include "../input.h"
 #include "../overlay/hostui.h"
@@ -39,6 +40,21 @@ void choose_mod_source(bool folder, std::function<void(std::string)> chosen) {
     post([folder, chosen] {
         NSOpenPanel* panel = [NSOpenPanel openPanel];
         panel.title = folder ? @"Choose mod folder" : @"Choose mod package";
+        panel.canChooseDirectories = folder;
+        panel.canChooseFiles = !folder;
+        panel.allowsMultipleSelection = NO;
+        [panel beginWithCompletionHandler:^(NSModalResponse result) {
+            if (result == NSModalResponseOK) chosen(std::string(panel.URL.path.UTF8String));
+        }];
+    });
+}
+void choose_game_source(bool folder, std::function<void(std::string)> chosen) {
+    post([folder, chosen] {
+        NSOpenPanel* panel = [NSOpenPanel openPanel];
+        panel.title = folder ? @"Choose extracted GameCube game folder" : @"Choose GameCube disc image";
+        if (!folder) panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"iso"],
+                                                  [UTType typeWithFilenameExtension:@"gcm"],
+                                                  [UTType typeWithFilenameExtension:@"rvz"]];
         panel.canChooseDirectories = folder;
         panel.canChooseFiles = !folder;
         panel.allowsMultipleSelection = NO;
@@ -114,13 +130,20 @@ void install_overlay_input() {
         // the title bar stays the window's (move, close)
         if (p.y > sz.height && e.type != NSEventTypeScrollWheel) return e;
         overlay::mouse_move((float)(p.x / sz.width), (float)(v.isFlipped ? p.y / sz.height : 1.0 - p.y / sz.height));
+        // This monitor can swallow the event before the mouse-camera monitor sees it. Keep the
+        // physical button gate current, particularly an up inside the overlay before it closes.
+        if (e.type == NSEventTypeLeftMouseDown || e.type == NSEventTypeRightMouseDown || e.type == NSEventTypeOtherMouseDown ||
+            e.type == NSEventTypeLeftMouseUp || e.type == NSEventTypeRightMouseUp || e.type == NSEventTypeOtherMouseUp) {
+            const bool down = e.type == NSEventTypeLeftMouseDown || e.type == NSEventTypeRightMouseDown || e.type == NSEventTypeOtherMouseDown;
+            input::mouse_binding_button(0, (int)e.buttonNumber, down, false);
+        }
         switch (e.type) {
         case NSEventTypeLeftMouseDown: overlay::mouse_button(0, true); break;
         case NSEventTypeLeftMouseUp: overlay::mouse_button(0, false); break;
         case NSEventTypeRightMouseDown: overlay::mouse_button(1, true); break;
         case NSEventTypeRightMouseUp: overlay::mouse_button(1, false); break;
-        case NSEventTypeOtherMouseDown: overlay::mouse_button(2, true); break;
-        case NSEventTypeOtherMouseUp: overlay::mouse_button(2, false); break;
+        case NSEventTypeOtherMouseDown: overlay::mouse_button((int)e.buttonNumber, true); break;
+        case NSEventTypeOtherMouseUp: overlay::mouse_button((int)e.buttonNumber, false); break;
         case NSEventTypeScrollWheel: {
             float dx = (float)e.scrollingDeltaX, dy = (float)e.scrollingDeltaY;
             if (e.hasPreciseScrollingDeltas) dx /= 10.0f, dy /= 10.0f;  // trackpad: points, not lines

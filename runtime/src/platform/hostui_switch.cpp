@@ -91,6 +91,11 @@ const char* name() { return "Switch"; }
 
 // no file picker on the console: mods are copied into sdmc:/switch/wwhd/mods by hand
 void choose_mod_source(bool, std::function<void(std::string)>) {}
+// no file picker, clipboard or file manager on the console (overlay::ext features off: overlay_switch.cpp)
+void choose_game_source(bool, std::function<void(std::string)>) {}
+void set_clipboard(const std::string&) {}
+bool can_open_folder() { return false; }
+void open_folder(const std::string&) {}
 
 // graphics options of the desktop hosts: the Switch renderer has its own (Switch tab)
 float res_scale() { return 1.0f; }

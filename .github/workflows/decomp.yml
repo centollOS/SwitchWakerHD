@@ -1,0 +1,23 @@
+# Decomp build check (docs/decomp-build.md): the decomp build's tools (function list, setup and release
+# variant). The WWHD_DECOMP=ON build itself is not made here: since decomp 2c1deae its configure step
+# reads the user's own game (model data, source glue; tools/decomp_build/gen.py --game), which CI does
+# not have. Informational: it never blocks the other workflows or a release (continue-on-error).
+name: decomp
+
+on:
+  workflow_dispatch:   # (this fork) by hand only
+
+jobs:
+  macos:
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Decomp build tests
+        run: |
+          python3 tools/decomp_build/test_gen.py
+          python3 tools/installer/test_setup.py DecompRelease
+          python3 tools/release/test_sdk_package.py DecompVariant

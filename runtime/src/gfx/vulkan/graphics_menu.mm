@@ -2,6 +2,7 @@
 #import <AppKit/AppKit.h>
 #include <SDL3/SDL.h>
 #include "settings.h"
+#include "../shader_prebuild.h"
 #include "../../savestate.h"
 #include "../../crashrec.h"
 #include <cmath>
@@ -62,6 +63,12 @@ static constexpr float scales[]={1,1.5f,2,3};
 @interface WWVulkanGraphicsMenu : NSObject <NSMenuItemValidation>
 @end
 @implementation WWVulkanGraphicsMenu
+- (void)rebuildShaders:(NSMenuItem*)item {
+    NSAlert* alert = [NSAlert new];
+    alert.messageText = shaderprebuild::request_rebuild() ? @"Shader cache rebuild requested" : @"Could not save the rebuild request";
+    alert.informativeText = [NSString stringWithUTF8String:shaderprebuild::setup_hint()];
+    [alert runModal];
+}
 - (void)resolution:(NSMenuItem*)i { gfxvk::set_res_scale(scales[i.tag]); }
 - (void)ao:(NSMenuItem*)i { gfxvk::set_ao_mode((int)i.tag); }
 - (void)hires:(NSMenuItem*)i { gfxvk::set_ao_hires(!gfxvk::ao_hires_enabled()); }
@@ -95,6 +102,7 @@ void install_graphics_menu(SDL_Window* window) {
     NSMenuItem* root=[[NSMenuItem alloc]initWithTitle:@"Graphics" action:nil keyEquivalent:@""];
     NSMenu* menu=[[NSMenu alloc]initWithTitle:@"Graphics"];root.submenu=menu;[bar addItem:root];
     auto add=[&](NSString* title,SEL action,NSInteger tag){NSMenuItem* i=[[NSMenuItem alloc]initWithTitle:title action:action keyEquivalent:@""];i.target=target;i.tag=tag;[menu addItem:i];};
+    add(@"Rebuild shader cache",@selector(rebuildShaders:),0);
     add(@"1280 × 720 (1×) — R cycles",@selector(resolution:),0);
     add(@"1920 × 1080 (1.5×)",@selector(resolution:),1);
     add(@"2560 × 1440 (2×)",@selector(resolution:),2);

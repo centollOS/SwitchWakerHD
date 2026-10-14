@@ -1,4 +1,5 @@
 #include "interp.h"
+#include "countdown.h"
 #include "mods/guest_mods.h"
 #include "mods/packages.h"
 // Frame interpolation (60, 120 or 240 fps output, game logic unchanged at 30 steps per second).
@@ -33,9 +34,12 @@
 #include <unordered_map>
 #include <vector>
 
+#include "interp_nodraw.h"
 #include "interp_pacing.h"
+#include "mods/fast_forward.h"
 #include "guest_addr.h"
 #include "render_prof.h"
+#include "perf_metrics.h"
 #include "runtime.h"
 #include "savestate.h"
 #include "true60.h"
@@ -43,6 +47,8 @@
 #include "platform/prepare_graphics_switch.h"  // (this fork)
 #include "platform/audio_guard_switch.h"  // (this fork)
 #endif
+#include "gx2/gx2.h"
+#include "gfx/renderer.h"
 
 
 extern "C" {
@@ -101,7 +107,7 @@ static std::atomic<bool> g_on{[] {
     const char* e = getenv("WWHD_INTERP");
     return (e ? atoi(e) != 0 : g_env_fps != 0) && !true60::enabled();
 }()};
-bool interp_on() { return g_on.load(std::memory_order_relaxed); }
+bool interp_on() { return g_on.load(std::memory_order_relaxed) && !mods::fast_forward_active(); }
 // the pass structure below is used by both 60 fps modes and the 120/240 fps interpolation:
 // interpolation (30 Hz logic) and true 60 (true60.cpp: 60 Hz processes also execute on the
 // in-between "hold" passes; always one per step)
@@ -145,7 +151,7 @@ void set_fps(int f) {
     if (g_fps.exchange(f) != f && interp_on()) LOG("[interp] frame interpolation at %s", fps_name(f));
 }
 // the 60 fps mode: 0 off, 1 frame interpolation (at fps()), 2 true 60 (game logic at 60 steps per second)
-int mode() { return true60::enabled() ? 2 : interp_on() ? 1 : 0; }
+int mode() { return true60::selected() ? 2 : g_on.load(std::memory_order_relaxed) ? 1 : 0; }
 void set_mode(int m) {
     g_on = false;
     true60::set_enabled(false);
@@ -321,8 +327,16 @@ struct Prev {
     uint32_t cam = 0; CamState s{}; bool valid = false; bool snap = true; uint64_t snap_step = ~0ull;
     CamState drawn{};          // the camera as camera_draw drew it on pass drawn_pass (blended or exact)
     uint64_t drawn_pass = ~0ull;
+    uint32_t projection[16]{}; // raw projection-view words before true60's actor rollback
+    uint64_t projection_pass = ~0ull;
 };
 Prev g_prev[4];
+
+void capture_projection(Prev& p) {
+    if (!enabled()) return;
+    memcpy(p.projection, ppc_ptr(p.cam + 0x1A4), sizeof p.projection);
+    p.projection_pass = g_passes;
+}
 
 Prev* prev_for(uint32_t cam) {
     for (auto& p : g_prev)
@@ -342,6 +356,36 @@ float pass_t() {
 }
 // the step's exact state is drawn and recorded (the "before" of the next step's blended frames)
 bool record_pass() { return g_hold && g_phase >= g_step_n; }
+
+// A sight point follows the camera's draw fraction, including camera cuts. A
+// blend can also snap internally (a >45 degree turn or abrupt collision zoom).
+float reticle_t() {
+    if (!g_blend_draw) return 1.0f;
+    const uint32_t view = ld32(GD(0x1046F0B0) + 0x5FA4); // mDoLib_project's active view
+    for (const auto& p : g_prev) {
+        if (!p.cam || p.cam != view || p.drawn_pass != g_passes) continue;
+        if (p.snap_step == g_logic_steps && p.snap) return 1.0f;
+        CamState cur = read_cam(p.cam);
+        bool moved = false, exact = true;
+        for (int i = 0; i < 3; ++i) {
+            moved |= p.s.eye[i] != cur.eye[i] || p.s.center[i] != cur.center[i];
+            exact &= p.drawn.eye[i] == cur.eye[i] && p.drawn.center[i] == cur.center[i];
+        }
+        if (moved && exact) return 1.0f;
+    }
+    return pass_t();
+}
+
+bool reticle_projection(uint32_t& address, uint32_t* words) {
+    const uint32_t view = ld32(GD(0x1046F0B0) + 0x5FA4);
+    for (const auto& p : g_prev) {
+        if (p.cam != view || p.projection_pass != g_passes) continue;
+        address = view + 0x1A4;
+        memcpy(words, p.projection, sizeof p.projection);
+        return true;
+    }
+    return false;
+}
 
 }  // namespace interp
 
@@ -375,6 +419,7 @@ extern "C" void hook_024FFC40(Cpu* c) {
         g_cam_blended = p->valid;
         cam_trace(cam, "blended");
         f_024FFC40_orig(c);
+        capture_projection(*p);
         g_cam_blended = false;
         write_cam(cam, cur);
         return;
@@ -388,6 +433,7 @@ extern "C" void hook_024FFC40(Cpu* c) {
         p->drawn_pass = ~0ull;  // (drawn with the preview: the stars keep the camera as it is)
         true60::camera_draw_preview(true);
         f_024FFC40_orig(c);
+        capture_projection(*p);
         true60::camera_draw_preview(false);
         return;
     }
@@ -399,6 +445,7 @@ extern "C" void hook_024FFC40(Cpu* c) {
         const uint32_t lo = GD(0x10100000), hi = 0x10500000;
         before.assign((uint32_t*)ppc_ptr(lo), (uint32_t*)ppc_ptr(hi));
         f_024FFC40_orig(c);
+        capture_projection(*p);
         const uint32_t* cur = (const uint32_t*)ppc_ptr(lo);
         for (size_t i = 0; i < before.size(); i++)
             if (cur[i] != before[i]) cnt[lo + 4 * (uint32_t)i]++;
@@ -418,6 +465,7 @@ extern "C" void hook_024FFC40(Cpu* c) {
         return;
     }
     f_024FFC40_orig(c);
+    capture_projection(*p);
 }
 
 // Models. J3DModel::calc (027F4D5C, actor Execute or Draw) writes the world (joint) matrices:
@@ -530,6 +578,7 @@ void blend_mtx(const float* a, const float* b, float* out, float t) {
     }
 }
 }  // namespace
+void blend_world_matrix(const float* a, const float* b, float* out, float t) { blend_mtx(a, b, out, t); }
 }  // namespace interp
 
 // J3DModel::viewCalc(J3DModel*)
@@ -632,8 +681,11 @@ namespace interp {
 void fx_pass_start();          // interp_fx.cpp: puts back the values drawn blended
 void fx_hold_blend(float t);   // interp_fx.cpp: blended hold pass: logic-time effect blends at t
 void fx_ss_reset();
+void nodraw_reset();          // fopAc_Draw hook: the step's one-shot no-draw requests
+void reticle_reset();
 // a save state was loaded: nothing may blend across the jump
 void ss_reset() {
+    countdown::reset();
     for (auto& p : g_prev) p = Prev{};
     g_last_step = 0;
     g_models.clear();
@@ -646,17 +698,19 @@ void ss_reset() {
     g_phase = 0;
     g_step_n = 1;
     fx_ss_reset();
+    nodraw_reset();
+    reticle_reset();
     true60::ss_reset();
 }
-// Paced interpolation (WWHD_INTERP_PACED=1, the default on Android and at 120/240 fps): an
-// in-between pass is drawn only when it fits before the next logic step is due (33.3 ms after the
-// last one, measured with the passes' recent durations); otherwise the rest of the step's
+// Paced interpolation (WWHD_INTERP_PACED=1, the default on Android, Windows on ARM64 and at 120/240
+// fps): an in-between pass is drawn only when it fits before the next logic step is due (33.3 ms
+// after the last one, measured with the passes' recent durations); otherwise the rest of the step's
 // in-between passes are dropped and the next step waits for its time. The game then always advances
 // 30 steps a second, and the picture gets 60/120/240 frames a second where the device draws (and
 // the display shows) them fast enough and fewer where it does not. Without pacing, every logic step
 // is followed by all its in-between passes, and a device that draws fewer frames a second runs the
-// whole game slower than real time (at 120/240 fps on a 60 Hz display with vsync: half or a
-// quarter of the speed), which is why pacing is on by default there.
+// whole game slower than real time (at 120/240 fps on a 60 Hz display with vsync: half or a quarter
+// of the speed), which is why pacing is on by default there.
 // At 120/240 fps the logic pass also plans how many in-between frames the step gets (as many as
 // fit at the recent pass duration, at least one) and spaces them evenly over the step
 // (t = k/(n+1)): a 60 Hz display then gets clean 60 fps blending instead of uneven frames and a
@@ -665,8 +719,11 @@ void ss_reset() {
 // for 60 fps and one for 120/240 fps); the variable sets both at start and wins over the saved
 // values.
 static const char* const g_env_paced = getenv("WWHD_INTERP_PACED");
+// Windows on ARM64 (Snapdragon X) draws 60 fps only where the Adreno driver's per-draw CPU cost
+// allows: unpaced, the Outset save-state benchmark ran 16 logic steps a second (half speed, and the
+// audio, which follows the game's speed, crackled)
 static std::atomic<bool> g_paced{[] {
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || (defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__)))
     return !g_env_paced || atoi(g_env_paced) != 0;
 #else
     return g_env_paced && atoi(g_env_paced) != 0;
@@ -695,7 +752,8 @@ static pace_clock::time_point g_last_logic{}, g_last_entry{};
 static pace_clock::duration g_slept{}, g_logic_avg = std::chrono::milliseconds(16), g_hold_avg = std::chrono::milliseconds(16);
 static pace_clock::time_point g_last_hold{};  // the last hold pass drawn (probe after a long pause)
 static bool g_probe = false;  // this hold pass re-measures their cost after a long pause
-constexpr auto kProbeAfter = std::chrono::seconds(10);
+static pace_clock::time_point g_probe_retry{};  // another probe then (the last one met a hitch)
+constexpr auto kProbeAfter = std::chrono::seconds(10), kProbeRetry = std::chrono::seconds(1);
 // one tick of the virtual vsync at the drawn rate (59.94 Hz x frames per step / 2)
 static pace_clock::duration vsync_tick() {
     return std::chrono::nanoseconds(16'683'333LL * 2 / std::max(2, frames_per_step()));
@@ -704,35 +762,100 @@ static pace_clock::duration vsync_tick() {
 static bool g_pass_was_hold = false;
 static bool g_wait_step = false;  // the next logic pass waits for its time
 static uint64_t g_paced_possible = 0, g_paced_holds = 0, g_paced_steps = 0, g_paced_planned = 0;
-constexpr auto kPacedStep = std::chrono::nanoseconds(33'333'333);
-// a logic pass and an in-between pass both wait for the 59.94 Hz grid (2 x 16.68 = 33.37 ms, more
-// than kPacedStep): 2 ms of slack
+// a logic step: two vsyncs of the 59.94 Hz grid (the game's swap interval; 29.97 steps a second, as
+// on the console). (It was 33.333 ms, which drifted against the grid's 33.367 ms: issue #164.)
+constexpr auto kPacedStep = std::chrono::nanoseconds(2 * 16'683'333);
+// the passes of a step wait for the grid's vsyncs and together take the whole step: 2 ms of slack
 constexpr auto kPacedBudget = std::chrono::nanoseconds(kPacedStep + std::chrono::milliseconds(2));
+// debug: WWHD_TRACE_STEPS=file writes a line per paced logic pass at 120/240 fps: its start (steady
+// clock, ms), the step start before and after it (W waited for it, K kept the schedule, N started a
+// new one), and the recent logic and hold pass durations; and a line per skip to the record pass
+// (the phase it followed) and per dropped rest of a step (D). With WWHD_TRACE_FLIPS (gx2_core.cpp).
+static void trace_step(pace_clock::time_point now, pace_clock::time_point before, char how) {
+    static FILE* out = getenv("WWHD_TRACE_STEPS") ? fopen(getenv("WWHD_TRACE_STEPS"), "w") : nullptr;
+    if (!out) return;
+    const auto ms = [](pace_clock::time_point t) { return std::chrono::duration<double, std::milli>(t.time_since_epoch()).count(); };
+    fprintf(out, "%.3f %.3f %.3f %c %.3f %.3f\n", ms(now), ms(before), ms(g_last_logic), how, std::chrono::duration<double, std::milli>(g_logic_avg).count(),
+            std::chrono::duration<double, std::milli>(g_hold_avg).count());
+}
 // start of every pass: the last pass's own duration, and the wait before a logic pass that follows
 // a dropped in-between pass (and at 120/240 fps before every logic pass that comes early)
 static void paced_pass_start() {
     static bool previousRecord = false;
-    if (!paced() || !interp_on()) { g_exact_step = false; previousRecord = false; return; }
+    if (!paced() || !interp_on()) { g_exact_step = false; previousRecord = false;
+        if (mods::fast_forward_active()) { g_wait_step = false; g_last_entry = {}; g_last_logic = {}; }
+        return; }
     if (!g_hold_next) g_exact_step = !previousRecord;  // this logic pass: blend only after a record pass
     previousRecord = g_hold_next && g_phase + 1 >= g_step_n;  // this pass is the step's record pass
     const auto now = pace_clock::now();
     if (g_last_entry != pace_clock::time_point{}) {
         const auto pass = now - g_last_entry - g_slept;
         pace_clock::duration& avg = g_pass_was_hold ? g_hold_avg : g_logic_avg;
-        // a probe after a long pause replaces the old value: the scene may have changed since
-        avg = g_pass_was_hold && g_probe ? pass : pace_clock::duration(pacing::update_average(avg.count(), pass.count()));
+        // a probe after a long pause replaces the old value (pacing::probe_estimate; one that hit a
+        // hitch is repeated a second later)
+        if (g_pass_was_hold && g_probe) {
+            bool retry;
+            avg = pace_clock::duration(pacing::probe_estimate(avg.count(), pass.count(), retry));
+            if (retry) {
+                LOG("[interp] paced: the in-between pass probe took %.1f ms (a hitch?): another probe in a second",
+                    std::chrono::duration<double, std::milli>(pass).count());
+                g_probe_retry = now + kProbeRetry;
+            }
+        } else {
+            avg = pace_clock::duration(pacing::update_average(avg.count(), pass.count()));
+        }
         if (g_pass_was_hold) g_probe = false;
     }
     g_pass_was_hold = g_hold_next;
     g_last_entry = now;
     g_slept = {};
     if (g_hold_next) return;
-    if (g_wait_step && now < g_last_logic + kPacedStep) {
-        threads::park_sleep_until(g_last_logic + kPacedStep);  // the game keeps 30 steps a second
-        g_slept = pace_clock::now() - now;
+    // 120/240 fps: the virtual vsync's step slots are the schedule (gx2/vsync_pacing.h): a step's
+    // logic frame is due two vsyncs after the previous one's, so the logic pass starts one drawn frame
+    // before its slot, as it does after a record pass. (Paced on a clock of its own, the logic pass
+    // could sleep past its frame's vsync, which bunched up the step's frames: issue #164.) The slot
+    // keeps the schedule for a logic frame that was less than a step late, and the elapsed time
+    // counted from it makes the step after a late one plan fewer in-between frames.
+    pace_clock::time_point slot;
+    if (in_between() > 1 && gx2::next_step_time(slot)) {
+        using ns = std::chrono::nanoseconds;
+        const auto plan = pacing::slot_step_start(ns(now.time_since_epoch()).count(), ns(slot.time_since_epoch()).count(),
+                                                  ns(vsync_tick()).count(), ns(kPacedStep).count(), g_wait_step);
+        const auto before = g_last_logic;
+        g_last_logic = pace_clock::time_point(std::chrono::duration_cast<pace_clock::duration>(ns(plan.start)));
+        if (plan.how == pacing::StepStart::kWait) {
+            threads::park_sleep_until(g_last_logic);
+            g_slept = pace_clock::now() - now;
+        } else if (plan.how == pacing::StepStart::kLate) {
+            gx2::drop_step_slot();
+        }
+        g_wait_step = false;
+        trace_step(now, before, plan.how == pacing::StepStart::kWait ? 'W' : plan.how == pacing::StepStart::kKeep ? 'K' : 'N');
+        return;
     }
+    if (g_wait_step && now < g_last_logic + kPacedStep) {
+        const auto due = g_last_logic + kPacedStep;
+        threads::park_sleep_until(due);  // the game keeps 30 steps a second
+        g_slept = pace_clock::now() - now;
+        // the step starts at its time, not when the sleep timer woke up (0.2-1 ms later): counted from
+        // the wake-up, every waited step was that much longer than 33.3 ms (at 120 fps, with flips
+        // that do not wait for a missed vsync, 28.9 instead of 30 logic steps a second)
+        g_wait_step = false;
+        g_last_logic = due;
+        trace_step(now, due - kPacedStep, 'W');
+        return;
+    }
+    // 120/240 fps before there is a step slot (every step waits for its time): a step that starts
+    // late, because its in-between passes took longer than planned, keeps the schedule if it is less
+    // than a step late, so this step plans fewer in-between frames and the game catches up (counted
+    // from its own start, a late step was lost: 29.4 logic steps a second at 240 fps on a computer
+    // that draws ~150 fps)
+    const bool keep = g_wait_step && in_between() > 1 && g_last_logic != pace_clock::time_point{} &&
+                      now - (g_last_logic + kPacedStep) < kPacedStep;
+    const auto before = g_last_logic;
     g_wait_step = false;
-    g_last_logic = pace_clock::now();
+    g_last_logic = keep ? g_last_logic + kPacedStep : pace_clock::now();
+    trace_step(now, before, keep ? 'K' : 'N');
 }
 // logic pass: the in-between frames of this step (pacing::plan_in_between: as many as fit at the
 // recent pass duration)
@@ -793,20 +916,23 @@ static void after_pass(int phase) {
     const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(now - g_last_logic).count();
     // After a long time without in-between passes their cost is stale (the scene may be lighter
     // now): one probe, if one vsync tick fits; its duration replaces the estimate.
-    const bool probe = phase == 0 && now - g_last_hold >= kProbeAfter;
+    const bool probe = phase == 0 && (now - g_last_hold >= kProbeAfter || (g_probe_retry != pace_clock::time_point{} && now >= g_probe_retry));
     const auto pass = std::chrono::duration_cast<std::chrono::nanoseconds>(probe ? vsync_tick() : g_hold_avg).count();
     switch (pacing::next_pass(phase, g_step_n, elapsed, pass, kPacedBudget.count())) {
     case pacing::Next::kHold:
         g_hold_next = true;
         g_probe = probe;
+        if (probe) g_probe_retry = {};
         g_last_hold = now;
         break;
-    case pacing::Next::kRecord:  // the blended hold passes left are skipped, the record pass is drawn
+    case pacing::Next::kRecord:  // blended hold passes that do not fit are skipped (the next hold pass increments g_phase)
+        trace_step(now, g_last_logic, char('0' + std::min(phase, 9)));
         g_hold_next = true;
-        g_phase = g_step_n - 1;  // (the next hold pass increments it to the record pass)
+        g_phase = pacing::skip_to(phase, g_step_n, elapsed, pass, kPacedBudget.count());
         g_last_hold = now;
         break;
     default:  // the rest of the step's in-between passes (and its record pass) are dropped
+        trace_step(now, g_last_logic, 'D');
         g_hold_next = false;
         g_wait_step = true;
         paced_step_done(g_step_holds);
@@ -857,6 +983,39 @@ std::string pass_cpu_report() {
 
 extern "C" void hook_0203593C(Cpu* c) {
     using namespace interp;
+    // Opt-in countdown trace: scalar timing measurements only, no save or asset data.
+    struct CountdownTrace {
+        bool hold;
+        ~CountdownTrace() {
+            static FILE* out = getenv("WWHD_COUNTDOWN_TRACE") ? fopen(getenv("WWHD_COUNTDOWN_TRACE"), "w") : nullptr;
+            if (!out) return;
+            const uint32_t timer = ld32(GD(0x1046F0B0) + 0x5CF0);
+            if (timer < mem::kMem2Start || timer >= mem::kMem2End - 0x136) return;
+            static bool paced = false;
+            if (!paced && getenv("WWHD_COUNTDOWN_REALTIME")) {
+                gx2::set_uncapped(false);
+                paced = true;
+            }
+            const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            fprintf(out, "%llu %llu %d %.6f %u %u %u %u\n", (unsigned long long)g_passes,
+                    (unsigned long long)g_logic_steps, int(hold), wall, ld32(timer + 0x114),
+                    unsigned(ld8(timer + 0x124)), unsigned(ld8(timer + 0x122)), ld32(timer + 0x10C));
+            fflush(out);
+            static bool captured = false;
+            if (!captured && !g_hold_next) {
+                const char* capture = getenv("WWHD_COUNTDOWN_CAPTURE");
+                unsigned frames = 0; int n = 0;
+                if (capture && sscanf(capture, "%u:%n", &frames, &n) == 1 && n && capture[n] &&
+                    ld32(timer + 0x10C) == frames) {
+                    // Tests can align the capture with the painter's delayed draw lists.
+                    const char* ahead = getenv("WWHD_COUNTDOWN_CAPTURE_AHEAD");
+                    render::request_tv_dump(capture + n, ahead ? std::clamp(atoi(ahead), 1, 16) : 1);
+                    captured = true;
+                }
+            }
+        }
+    } countdown_trace{enabled() && g_hold_next};
+    perf::game_frame();
     fx_pass_start();
     ss::service(c);  // save states: exact values are back in guest memory, all other threads idle
     mods::cheats_service();
@@ -864,6 +1023,9 @@ extern "C" void hook_0203593C(Cpu* c) {
     prepare_graphics::frame(c);  // (this fork) Prepare graphics: its warps and Link's health
     audio_guard::frame();  // (this fork) the game's DSP-overload guard off (issue #13)
 #endif
+    const bool was_fast_forward = mods::fast_forward_active();
+    mods::fast_forward_service();
+    const bool ff_transition = was_fast_forward != mods::fast_forward_active();
     g_passes++;
     // test aid: WWHD_INTERP_AT_STEP=n switches interpolation on after n frames
     static uint64_t passes = 0;
@@ -874,7 +1036,18 @@ extern "C" void hook_0203593C(Cpu* c) {
     if (at60 && ++passes60 == at60) set_mode(2);
     paced_pass_start();
     true60::new_pass();
-    true60::pass_begin(!enabled() || !g_hold_next);  // full pass: take back Link's half-pass preview
+    true60::pass_begin(ff_transition || !enabled() || !g_hold_next);  // full pass: take back Link's half-pass preview
+    if (ff_transition) {
+        for (auto& p : g_prev) p = Prev{};
+        g_last_step = 0;
+        g_models.clear();
+        g_record_passes += 8;
+        g_hold_next = false;
+        g_phase = 0;
+        g_step_n = 1;
+        fx_ss_reset();
+        reticle_reset();
+    }
     if (!enabled() || !g_hold_next) {
         g_logic_steps++;
         true60_test::logic_step(g_logic_steps);
@@ -1074,6 +1247,7 @@ extern "C" void hook_025DE788(Cpu* c) {
     f_025DE788_orig(c);
     mods::after_execute(c, execute_fn);  // quick doors / fast scene changes: extra steps (full passes only)
     if (!interp::g_hold_frame) {guestmods::frame(interp::g_logic_steps);mods::packages::frame(interp::g_logic_steps);}
+    guestmods::draw_frame(c,interp::executed_steps());
     g_in_execute = false;
 }
 extern "C" void hook_025DE024(Cpu* c) { if (!skip(2)) f_025DE024_orig(c); }
@@ -1092,9 +1266,38 @@ extern "C" void hook_0200E6EC(Cpu* c) { if (!skip(32)) f_0200E6EC_orig(c); }
 // #64, #74; #73, no control after an item-get message, looks like the same). Once per logic step, as
 // at 30 fps (true 60 too: these screens are 30 Hz logic).
 extern "C" void f_02715310_orig(Cpu* c);
-extern "C" void hook_02715310(Cpu* c) { if (!skip(64)) f_02715310_orig(c); }
+extern "C" void hook_02715310(Cpu* c) {
+    if (!skip(64)) f_02715310_orig(c);
+    else countdown::refresh(c);
+}
+
+// fopAc_Draw(fopAc_ac_c*): one-shot "not drawn this frame" requests (fopAcStts_NODRAW_e) made by
+// the step's logic hold for all passes of the step (interp_nodraw.h; issue #126: in conversations
+// the talk camera hides Link on logic frames only, so he flickered at 60/120/240 fps and true 60).
+// debug: WWHD_INTERP_NODRAW=0 turns this off; WWHD_INTERP_NODRAW_TRACE=n logs n kept requests
+extern "C" void f_025D4654_orig(Cpu* c);
+static interp::OneShotNoDraw g_nodraw;
+extern "C" void hook_025D4654(Cpu* c) {
+    static const bool off = getenv("WWHD_INTERP_NODRAW") && !atoi(getenv("WWHD_INTERP_NODRAW"));
+    if (interp::enabled() && !off) {
+        const uint32_t actor = c->r[3];
+        const uint32_t status = ld32(actor + interp::OneShotNoDraw::kStatus);
+        const uint32_t want = g_nodraw.on_draw(actor, status, interp::g_hold, interp::g_logic_steps);
+        if (want != status) {
+            st32(actor + interp::OneShotNoDraw::kStatus, want);
+            static int trace = getenv("WWHD_INTERP_NODRAW_TRACE") ? atoi(getenv("WWHD_INTERP_NODRAW_TRACE")) : 0;
+            if (trace > 0) {
+                trace--;
+                LOG("[interp] step %llu phase %d: actor %08X kept hidden (requested by the step's logic)",
+                    (unsigned long long)interp::g_logic_steps, interp::g_phase, actor);
+            }
+        }
+    }
+    f_025D4654_orig(c);
+}
 
 namespace interp {
+void nodraw_reset() { g_nodraw.reset(); }
 // The pads are read at the end of every frame. JUTGamePad derives "pressed this frame" from
 // consecutive reads, so a change first seen on the read after a logic pass would be spent on a pass
 // without logic. While interpolating, that read repeats the previous sample (see VPADRead /

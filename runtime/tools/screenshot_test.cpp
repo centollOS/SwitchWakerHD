@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "input_map.h"
+#include "mouse_bindings.h"
 #include "platform/keycodes.h"
 #include "screenshot.h"
 
@@ -174,6 +175,22 @@ int main() {
     CHECK(!gp7.empty() && tv7 != tv3);
     CHECK(gp3.size() > 12 && gp3.substr(gp3.size() - 12) == "_GamePad.png" && gp3.substr(0, gp3.size() - 12) + ".png" == tv3);
 
+    // Mouse screenshot bindings use the same request and consume the button while held.
+    {
+        auto m = input_map::current();m.keys[input_map::kScreenshot]={input_map::kMouse1,input_map::kWheelUp};
+        m.keys[input_map::kB]={input_map::kMouse1,input_map::kNoKey};input_map::set_current(m,false);
+        input::MouseBindings mouse;mouse.button(1,0,true,true);
+        std::string mtv,mgp;
+        CHECK(mouse.read(m,true,nullptr,screenshot::key_down).buttons==0);
+        CHECK(screenshot::take(10,mtv,mgp));
+        CHECK(mouse.read(m,true,nullptr,screenshot::key_down).buttons==0);
+        CHECK(!screenshot::take(11,mtv,mgp));
+        mouse.wheel(1,true);mouse.read(m,true,nullptr,screenshot::key_down);
+        CHECK(screenshot::take(12,mtv,mgp));
+        mouse.consume();mouse.read(m,true,nullptr,screenshot::key_down);
+        CHECK(!screenshot::take(13,mtv,mgp));
+        CHECK(!screenshot::key_down(input_map::kInputCount));
+    }
     // 4. writing on the worker thread; the TV file shows a notice; finish() waits for all of them
     auto owned = std::make_shared<std::vector<uint8_t>>(px);
     for (const std::string& p : {tv, tv2, tv3, gp3})

@@ -3,7 +3,8 @@
   "id": "addcalc-replace",
   "name": "cLib_addCalc2 replacement (guest mod example)",
   "version": "0.1.0",
-  "game_id": "wwhd-usa",
+  "game_id": "wwhd",
+  "minimum_manager_version": "1.5.0",
   "kind": "guest",
   "guest": {"api_version": 1, "elf": "mod.elf"},
   "options": []

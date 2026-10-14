@@ -4,7 +4,15 @@
 # cmake -DWWHD=<wwhd executable> -DWORK=<empty work folder> -P crash_log_test.cmake
 file(REMOVE_RECURSE "${WORK}")
 file(MAKE_DIRECTORY "${WORK}")
-execute_process(COMMAND "${CMAKE_COMMAND}" -E env WWHD_TEST_HOST_CRASH=1 WWHD_NO_AUDIO=1 "WWHD_TEST_CONTEXT_PATH=$ENV{HOME}/crash-test" "${WWHD}"
+# Match crash_context.cpp: native Windows shells normally provide USERPROFILE, not HOME.
+set(test_home "$ENV{HOME}")
+if(NOT DEFINED ENV{HOME})
+  set(test_home "$ENV{USERPROFILE}")
+endif()
+if(test_home STREQUAL "")
+  message(FATAL_ERROR "a home directory is required to test crash-context redaction")
+endif()
+execute_process(COMMAND "${CMAKE_COMMAND}" -E env WWHD_TEST_HOST_CRASH=1 WWHD_NO_AUDIO=1 "WWHD_TEST_CONTEXT_PATH=${test_home}/crash-test" "${WWHD}"
                 WORKING_DIRECTORY "${WORK}" RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 120)
 if(rc EQUAL 0)
   message(FATAL_ERROR "the executable did not crash:\n${out}\n${err}")
@@ -52,9 +60,7 @@ message(STATUS "crash address in ${module}: ok")
 
 expect("--- crash context [(]startup[)] ---" "startup settings context")
 expect("WWHD_TEST_CONTEXT_PATH=~/crash-test" "redacted environment path")
-if(NOT "$ENV{HOME}" STREQUAL "")
-  string(FIND "${log}" "$ENV{HOME}" home_pos)
-  if(NOT home_pos EQUAL -1)
-    message(FATAL_ERROR "crash log contains an unredacted home path")
-  endif()
+string(FIND "${log}" "${test_home}" home_pos)
+if(NOT home_pos EQUAL -1)
+  message(FATAL_ERROR "crash log contains an unredacted home path")
 endif()

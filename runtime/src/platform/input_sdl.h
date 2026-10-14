@@ -5,6 +5,7 @@ namespace input {
 void handle_event(const SDL_Event& event);
 void update();
 void set_prompt_window(SDL_Window* window);
+void set_gamepad_window(SDL_Window* window);
 // While the game asks for text the window title shows the prompt (the frame-rate title waits).
 bool text_prompt_active();
 // Android: a touch device that belongs to a connected controller (GameSir and others register a

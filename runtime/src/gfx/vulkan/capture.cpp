@@ -1,3 +1,5 @@
+#include "deferred_dispatch.h"
+#include "../../exception_report.h"
 #include "gfx/depth_peek.h"
 #include "runtime.h"
 #include "backend.h"
@@ -41,7 +43,7 @@ void peek_z(const uint32_t* cells, uint32_t n) {
         destinations[i] = cells[i*3+2];
     }
     transition_image(depth,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
-    vkCmdCopyImageToBuffer(command_buffer(),depth->image,depth->layout,staging.buffer,points,regions.data());
+    record::vkCmdCopyImageToBuffer(command_buffer(),depth->image,depth->layout,staging.buffer,points,regions.data());
     derive_dependency(staging.use,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
     transition_buffer(staging,VK_PIPELINE_STAGE_HOST_BIT,VK_ACCESS_HOST_READ_BIT);
     uint64_t ticket = ::gfx::depth_peek::next_ticket();
@@ -69,7 +71,7 @@ std::mutex captureMutex;
 std::vector<Request> captures;
 void be32(std::vector<uint8_t>& output,uint32_t value){for(int shift=24;shift>=0;shift-=8)output.push_back(uint8_t(value>>shift));}
 void chunk(std::vector<uint8_t>& png,const char* type,const std::vector<uint8_t>& data) {
- if(data.size()>std::numeric_limits<uint32_t>::max())throw std::runtime_error("PNG chunk too large");
+ if(data.size()>std::numeric_limits<uint32_t>::max())exception_report::raise("PNG chunk too large");
  be32(png,uint32_t(data.size()));size_t begin=png.size();png.insert(png.end(),type,type+4);png.insert(png.end(),data.begin(),data.end());
  uLong crc=crc32(0,Z_NULL,0);crc=crc32(crc,png.data()+begin,uInt(data.size()+4));be32(png,uint32_t(crc));
 }
@@ -77,9 +79,9 @@ void write_png(const std::string& path,uint32_t width,uint32_t height,const std:
  size_t row=size_t(width)*4;std::vector<uint8_t> scanlines((row+1)*height);
  for(uint32_t y=0;y<height;++y){scanlines[y*(row+1)]=0;memcpy(scanlines.data()+y*(row+1)+1,rgba.data()+y*row,row);}
  uLongf compressedSize=compressBound(uLong(scanlines.size()));std::vector<uint8_t> compressed(compressedSize);
- if(compress2(compressed.data(),&compressedSize,scanlines.data(),uLong(scanlines.size()),Z_BEST_SPEED)!=Z_OK)throw std::runtime_error("PNG zlib compression failed");compressed.resize(compressedSize);
+ if(compress2(compressed.data(),&compressedSize,scanlines.data(),uLong(scanlines.size()),Z_BEST_SPEED)!=Z_OK)exception_report::raise("PNG zlib compression failed");compressed.resize(compressedSize);
  std::vector<uint8_t> png{137,80,78,71,13,10,26,10},header;be32(header,width);be32(header,height);header.insert(header.end(),{8,6,0,0,0});chunk(png,"IHDR",header);chunk(png,"IDAT",compressed);chunk(png,"IEND",{});
- FILE* file=fopen(path.c_str(),"wb");if(!file)throw std::runtime_error("cannot open PNG "+path);size_t written=fwrite(png.data(),1,png.size(),file);int result=fclose(file);if(written!=png.size()||result)throw std::runtime_error("cannot write PNG "+path);
+ FILE* file=fopen(path.c_str(),"wb");if(!file)exception_report::raise("cannot open PNG "+path);size_t written=fwrite(png.data(),1,png.size(),file);int result=fclose(file);if(written!=png.size()||result)exception_report::raise("cannot write PNG "+path);
 }
 float half(uint16_t value) {
  unsigned exponent=(value>>10)&31,mantissa=value&1023;float magnitude;
@@ -97,15 +99,15 @@ std::vector<uint8_t> read_rgba(Surface& source,bool encodeSrgb) {
  case VK_FORMAT_R8_UNORM:bytes=1;break;
  case VK_FORMAT_R16G16B16A16_SFLOAT:bytes=8;break;
  case VK_FORMAT_R32G32B32A32_SFLOAT:bytes=16;break;
- default:throw std::runtime_error("unsupported TV PNG capture VkFormat "+std::to_string(source.fmt.pixel));
+ default:exception_report::raise("unsupported TV PNG capture VkFormat "+std::to_string(source.fmt.pixel));
  }
  uint32_t width=source.extent.width,height=source.extent.height;
- if(!width||!height||size_t(width)>std::numeric_limits<size_t>::max()/height/bytes)throw std::runtime_error("invalid capture dimensions");
+ if(!width||!height||size_t(width)>std::numeric_limits<size_t>::max()/height/bytes)exception_report::raise("invalid capture dimensions");
  size_t count=size_t(width)*height;
  Buffer buffer=create_readback_buffer(count*bytes);
  try {
   transition_image(&source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
-  VkBufferImageCopy region{};region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.imageExtent={width,height,1};auto cmd=command_buffer();vkCmdCopyImageToBuffer(cmd,source.image,source.layout,buffer.buffer,1,&region);
+  VkBufferImageCopy region{};region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.imageExtent={width,height,1};auto cmd=command_buffer();record::vkCmdCopyImageToBuffer(cmd,source.image,source.layout,buffer.buffer,1,&region);
   derive_dependency(buffer.use,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
   transition_buffer(buffer,VK_PIPELINE_STAGE_HOST_BIT,VK_ACCESS_HOST_READ_BIT);flush();
   const auto* raw=static_cast<const uint8_t*>(buffer.mapped);std::vector<uint8_t> rgba(count*4);
@@ -141,7 +143,7 @@ void service_captures() {
  {std::lock_guard lock(captureMutex);for(auto it=captures.begin();it!=captures.end();)if(it->frame<=frame_count()){paths.push_back(std::move(it->path));it=captures.erase(it);}else ++it;}
  if(paths.empty())return;
  try {
-  auto& source=*R.tv.scan;auto rgba=read_rgba(source,R.tv.srgb.load());
+  auto& source=*R.tv.scan;auto rgba=read_rgba(source,R.tv.scanSrgb);
   for(const auto& path:paths)try {write_png(path,source.extent.width,source.extent.height,rgba);fprintf(stderr,"[gfx] wrote %s (%ux%u)\n",path.c_str(),source.extent.width,source.extent.height);}catch(const std::exception& e){fprintf(stderr,"[gfx] PNG capture failed: %s\n",e.what());}
  }catch(const std::exception& e){fprintf(stderr,"[gfx] TV capture failed: %s\n",e.what());}
 }

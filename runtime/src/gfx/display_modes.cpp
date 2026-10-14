@@ -11,13 +11,12 @@
 //                                        touch mapping), e.g. to check a full-screen layout without going full screen
 //   WWHD_TEST_TOUCH=3400-3410:0.9:0.85   a mouse press at (x, y) in the TV window (0..1 from top left) during
 //                                        TV frames 3400..3410; mapped through the overlay like a real click
-//   WWHD_DRC_AUTO=0.12:4                 automatic mode: changed-area threshold and hold time in seconds
-//   WWHD_DRC_AUTO_LOG=1                  log the automatic mode's change measurements
 //   WWHD_TEST_DRC_MODE=3400:gamepad,3600:pip   switch the mode at those TV frames (as the settings overlay)
 //   WWHD_VIEW_BUTTON=0|1                 the touch screens' view button (on by default on Android only)
 //   WWHD_FULLSCREEN=0|1                  the TV window starts in full screen (1) or windowed (0), instead of as it
 //                                        was left (that session's full screen is not saved; 1 takes over the screen!)
 #include "display_modes.h"
+#include "../platform/touch_buttons.h"
 
 #include <algorithm>
 #include <chrono>
@@ -54,6 +53,13 @@ std::atomic<int> g_filter{kSmooth};
 std::atomic<bool> g_shown{true};
 std::atomic<bool> g_auto_pin{false};
 std::atomic<double> g_auto_until{0};
+static std::atomic<unsigned> g_gamepad_ui{0};
+static std::atomic<double> g_plus_at{-1};
+static std::atomic<int> g_pause_restore{-1};
+static GamePadUiState gamepad_ui() {
+    const unsigned bits = g_gamepad_ui.load();
+    return {bool(bits & 1), bool(bits & 2), bool(bits & 4), bool(bits & 8)};
+}
 std::atomic<float> g_drc_aspect{854.0f / 480.0f};
 std::atomic<bool> g_has_drc_window{false};
 
@@ -132,28 +138,32 @@ int display_test_mode(uint64_t frame) {
 bool drc_window_wanted() { return g_mode == kDrcWindow && g_shown; }
 bool pip_shown_now() {
     if (g_mode == kDrcPip) return g_shown;
-    if (g_mode == kDrcAuto) return g_auto_pin || display_now() < g_auto_until;
+    if (g_mode == kDrcAuto) {
+        AutoPipDecision decision{g_auto_until.load()};
+        return decision.shown(gamepad_ui(), g_auto_pin, display_now());
+    }
     return false;
 }
 bool drc_screen_shown(bool drc_window_visible) {
     if (g_mode == kDrcWindow) return drc_window_visible;
     if (g_mode == kDrcGamePad) return true;
+    if (g_mode == kDrcAuto) return g_auto_pin; // controls toggle the pin, even while a menu is visible
     return pip_shown_now();
 }
 void display_show_drc(bool on) {
     if (g_mode == kDrcAuto) {
         g_auto_pin = on;
-        if (!on) g_auto_until = 0;
     } else {
         g_shown = on;
     }
 }
 void display_set_mode(int m) {
+    g_pause_restore = -1;
+    g_plus_at = -1;
     g_mode = m;
-    if (m == kDrcAuto) g_auto_pin = false;
+    if (m == kDrcAuto) { g_auto_pin = false; g_auto_until = 0; g_gamepad_ui = 0; }
     else if (m != kDrcOff) g_shown = true;
 }
-void display_touched() { g_auto_until = std::max<double>(g_auto_until, display_now() + 2.0); }
 
 // ---------------------------------------------------------------- GamePad screen while paused
 static const bool g_pause_view = [] {
@@ -164,71 +174,46 @@ static const bool g_pause_view = [] {
     return e && atoi(e) != 0;
 #endif
 }();
-static std::atomic<double> g_plus_at{-1};      // display_now() of the last +, -1: none pending
-// the view to go back to (-1: not switched) and the time of the switch: written by the sampling
-// (render thread; Metal: a completion handler), read by the hosts when they save the view
-static std::atomic<int> g_pause_restore{-1};
-static std::atomic<double> g_pause_since{0};
-static bool pause_switchable(int mode) { return mode == kDrcPip || mode == kDrcOff || mode == kDrcAuto; }
+// Host-only pause view state, updated on the guest thread and read by the window hosts.
+static bool pause_switchable(int mode) { return mode == kDrcPip || mode == kDrcOff; }
 void display_plus_pressed() {
-    // only when the view can switch (or the switch is up: + resumes); other views never sample
+    // Only while a pause view can switch; the menu state determines when it resumes.
     if (g_pause_view && (pause_switchable(g_mode) || g_pause_restore >= 0)) g_plus_at = display_now();
 }
 int display_saved_mode() {
     const int restore = g_pause_restore;
     return restore >= 0 ? restore : int(g_mode);
 }
-// tv_change: share of the TV signature's cells that changed since the last sample (-1: unknown);
-// tv_dark: the TV picture is (nearly) black
-static void pause_view_update(float tv_change, bool tv_dark) {
-    static int still = 0, moving = 0;
-    if (g_pause_restore < 0) {
-        const double plus = g_plus_at;
-        if (!g_pause_view || plus < 0) return;
-        if (display_now() - plus > 2.0) {  // + did not pause the game (or the picture never settled)
+bool display_gamepad_state_needed() {
+    return g_mode == kDrcAuto || (g_pause_view && (g_plus_at >= 0 || g_pause_restore >= 0));
+}
+void display_gamepad_ui(GamePadUiState state) {
+    g_gamepad_ui = unsigned(state.available) | (unsigned(state.menu) << 1) |
+        (unsigned(state.off_tv) << 2) | (unsigned(state.switching) << 3);
+    const double now = display_now();
+    if (g_mode == kDrcAuto) {
+        AutoPipDecision decision{g_auto_until.load()};
+        decision.update(state, now);
+        g_auto_until = decision.until;
+        return; // auto always keeps menus in PiP, including when the pause preference is on
+    }
+    if (!g_pause_view) return;
+    if (g_pause_restore >= 0) {
+        if (g_mode != kDrcGamePad) { // a manually chosen view stays
+            g_pause_restore = -1;
             g_plus_at = -1;
-            still = 0;
-            return;
+        } else if (!state.available || !state.menu || state.off_tv || state.switching) {
+            g_mode = int(g_pause_restore);
+            g_pause_restore = -1;
+            g_plus_at = -1;
         }
-        // a still picture after +; not a black one (a fade to black, a loading screen)
-        still = tv_change >= 0 && tv_change < 0.01f && !tv_dark ? still + 1 : 0;
-        const int mode = g_mode;
-        if (still >= 2 && pause_switchable(mode)) {
-            g_pause_since = display_now();
-            g_pause_restore = mode;
+    } else if (g_plus_at >= 0) {
+        if (state.available && state.menu && !state.off_tv && !state.switching && pause_switchable(g_mode)) {
+            g_pause_restore = int(g_mode);
             g_mode = kDrcGamePad;
             g_plus_at = -1;
-            still = moving = 0;
-            LOG("[display] paused: GamePad screen shown");
-        }
-        return;
+        } else if (now - g_plus_at > 2.0) g_plus_at = -1;
     }
-    if (g_mode != kDrcGamePad) {  // another view was chosen meanwhile: it stays
-        g_pause_restore = -1;
-        g_plus_at = -1;
-        return;
-    }
-    auto resume = [&](const char* why) {
-        g_mode = int(g_pause_restore);
-        g_pause_restore = -1;
-        g_plus_at = -1;  // (the + that resumed does not start another wait)
-        moving = still = 0;
-        LOG("[display] resumed (%s): back to the TV picture", why);
-    };
-    const double now = display_now(), plus = g_plus_at, since = g_pause_since;
-    if (plus >= 0) {
-        if (plus > since + 0.3) return resume("+");  // + again: the usual way out of the pause
-        g_plus_at = -1;  // a + right after the switch: ignored (and no more sampling every frame)
-    }
-    // the pause's own transition (the TV picture dims) is not the game moving again
-    if (now - since < 0.7) {
-        moving = 0;
-        return;
-    }
-    // the game resumed however the menu was left (B, after saving): the TV picture moves again, in
-    // 3 samples in a row (a calm scene changes little: 2% of the cells)
-    moving = tv_change > 0.02f ? moving + 1 : 0;
-    if (moving >= 3) resume("the TV picture moves");
 }
 
 // ---------------------------------------------------------------- layout
@@ -283,6 +268,13 @@ static bool sim_screen(float* w, float* h) {
     return true;
 }
 
+void display_input_plan(const PresentPlan& p) {
+    std::lock_guard<std::mutex> lk(g_layout_mu);
+    g_tv_layout={p.tv,p.pip,p.pip_on,p.drc_only,p.scale};
+    g_button=p.button;
+    g_tv_dw=p.dw;
+    g_tv_dh=p.dh;
+}
 bool overlay_hit(float nx, float ny, float* tx, float* ty, bool clamp_outside) {
     std::lock_guard<std::mutex> lk(g_layout_mu);
     const Layout& L = g_tv_layout;
@@ -304,6 +296,16 @@ bool main_picture(float* x, float* y, float* w, float* h) {
 }
 
 // ---------------------------------------------------------------- view button (touch screens)
+std::atomic<int> g_touch_buttons{touch_buttons::Automatic};
+std::atomic<bool> g_touch_controller{false}, g_touch_controls{true};
+static std::atomic<int64_t> g_touch_reveal_until{0};
+static int64_t touch_time_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+bool touch_buttons_visible() {
+    return touch_buttons::visible(g_touch_buttons, g_touch_controller, touch_time_ms() < g_touch_reveal_until);
+}
+void reveal_touch_buttons() { g_touch_reveal_until = touch_time_ms() + 5000; }
 bool view_button_enabled() {
     static const bool on = [] {
         const char* e = getenv("WWHD_VIEW_BUTTON");
@@ -313,7 +315,7 @@ bool view_button_enabled() {
         return e && atoi(e) != 0;
 #endif
     }();
-    return on;
+    return on && touch_buttons_visible();
 }
 // a square of 9% of the window's shorter side in the top left corner (rhemfur's Android layout)
 static Box view_button(float dw, float dh) {
@@ -321,6 +323,7 @@ static Box view_button(float dw, float dh) {
     return {m, m, s, s};
 }
 bool view_button_hit(float nx, float ny) {
+    if (!view_button_enabled()) return false;
     std::lock_guard<std::mutex> lk(g_layout_mu);
     const float x = nx * g_tv_dw, y = ny * g_tv_dh;
     return g_button.w > 0 && x >= g_button.x && y >= g_button.y && x < g_button.x + g_button.w && y < g_button.y + g_button.h;
@@ -336,83 +339,6 @@ int next_view() {
         if (drc_mode_offered(m)) return m;
     }
     return g_mode;
-}
-
-// ---------------------------------------------------------------- automatic overlay
-// The overlay comes up for a few seconds when a large part of the GamePad picture changes between two
-// samples (a menu opens, the screen switches). Every 4th frame the renderer reduces both pictures to
-// 32x18 display-encoded luma. Not counted:
-//  - small changes (the map's position marker, blinking cursors),
-//  - fades to or from black and plain brightness shifts (scene changes),
-//  - a GamePad picture that mirrors the TV (title screen and other moments where the game shows the
-//    same picture on both screens; nothing to look at on the GamePad).
-void display_auto_signature(const std::vector<float>& cur_in, const std::vector<float>* tv, uint64_t frame) {
-    const uint32_t kSigN = kSignatureW * kSignatureH;
-    static std::mutex mu;
-    static std::vector<float> prev;
-    std::lock_guard<std::mutex> lk(mu);
-    {
-        // the TV picture's change, for the GamePad screen while paused
-        static std::vector<float> prev_tv;
-        float tv_change = -1, tv_mean = 1;
-        if (tv && tv->size() == kSigN) {
-            tv_mean = 0;
-            for (float x : *tv) tv_mean += x;
-            tv_mean /= kSigN;
-            if (prev_tv.size() == kSigN) {
-                uint32_t changed = 0;
-                for (uint32_t i = 0; i < kSigN; i++)
-                    if (fabsf((*tv)[i] - prev_tv[i]) > 0.03f) changed++;
-                tv_change = (float)changed / kSigN;
-            }
-            prev_tv = *tv;
-        }
-        pause_view_update(tv_change, tv_mean < 0.04f);  // (black: as the automatic overlay's "dark")
-    }
-    if (g_mode != kDrcAuto) { prev.clear(); return; }
-    static float thresh = 0.12f, hold = 4.0f;
-    static bool parsed = [] {
-        if (const char* e = getenv("WWHD_DRC_AUTO")) sscanf(e, "%f:%f", &thresh, &hold);
-        return true;
-    }();
-    (void)parsed;
-    static const bool log = getenv("WWHD_DRC_AUTO_LOG") != nullptr;
-    std::vector<float> cur = cur_in;
-    if (cur.size() != kSigN) return;
-    float mean = 0, mirror_diff = 1;
-    for (float x : cur) mean += x;
-    mean /= kSigN;
-    if (tv && tv->size() == kSigN) {
-        const std::vector<float>& t = *tv;
-        mirror_diff = 0;
-        for (uint32_t i = 0; i < kSigN; i++) mirror_diff += fabsf(t[i] - cur[i]);
-        mirror_diff /= kSigN;
-    }
-    if (prev.size() == kSigN) {
-        float pmean = 0;
-        uint32_t changed = 0;
-        for (uint32_t i = 0; i < kSigN; i++) {
-            pmean += prev[i];
-            if (fabsf(cur[i] - prev[i]) > 0.08f) changed++;
-        }
-        pmean /= kSigN;
-        float shift = mean - pmean, frac = (float)changed / kSigN;
-        uint32_t against = 0;  // cells that changed other than by the overall brightness shift
-        for (uint32_t i = 0; i < kSigN; i++)
-            if (fabsf((cur[i] - prev[i]) - shift) > 0.08f) against++;
-        float content = (float)against / kSigN;
-        bool dark = mean < 0.04f || pmean < 0.04f;
-        bool mirror = mirror_diff < 0.06f;
-        bool event = frac > thresh && content > thresh && !dark && !mirror;
-        if (event) {
-            double until = display_now() + hold;
-            if (until > g_auto_until) g_auto_until = until;
-        }
-        if (log && (frac > 0.01f || event))
-            LOG("[display] auto: frame %llu changed %.3f (content %.3f) mean %.3f vs TV %.3f%s%s%s", (unsigned long long)frame, frac,
-                content, mean, mirror_diff, dark ? " dark" : "", mirror ? " mirror" : "", event ? " -> show" : "");
-    }
-    prev = std::move(cur);
 }
 
 // ---------------------------------------------------------------- scripted touch (tests)
@@ -488,11 +414,15 @@ static PresentPlan plan_from(const Layout& L, float dw, float dh) {
 
 // start of a present (render thread): everything both renderers share
 PresentPlan display_plan(bool have_tv, float tw, float th, bool have_drc, float pw, float ph, float layer_w, float layer_h,
-                         uint64_t frame) {
+                         uint64_t frame, bool publish_input) {
     test_touch(frame);
     if (have_drc) g_drc_aspect = pw / ph;
-    bool pip = (g_mode == kDrcPip || g_mode == kDrcAuto) && pip_shown_now() && have_drc;
-    bool drc_only = g_mode == kDrcGamePad && have_drc;
+    // Preserve a requested separate-window mode across display removal. Until
+    // that window returns, keep the GamePad accessible in the primary picture.
+    bool window_fallback = g_mode == kDrcWindow && !g_has_drc_window && g_shown;
+    bool pip = (((g_mode == kDrcPip || g_mode == kDrcAuto) && pip_shown_now()) || window_fallback) && have_drc;
+    bool drc_only = (g_mode == kDrcGamePad ||
+        (g_mode == kDrcAuto && gamepad_ui().available && gamepad_ui().off_tv)) && have_drc;
     float dw = 0, dh = 0;
     bool sim = sim_screen(&dw, &dh);
     if (!sim) dw = layer_w, dh = layer_h;
@@ -500,22 +430,9 @@ PresentPlan display_plan(bool have_tv, float tw, float th, bool have_drc, float 
     Layout L;
     if (have_tv || drc_only) L = layout(dw, dh, have_tv ? tw : 0, have_tv ? th : 0, have_drc ? pw : 0, have_drc ? ph : 0, pip, drc_only);
     PresentPlan p = plan_from(L, dw, dh);
-    {
-        std::lock_guard<std::mutex> lk(g_layout_mu);
-        g_tv_layout = L;
-        g_button = p.button;
-        g_tv_dw = dw;
-        g_tv_dh = dh;
-    }
+    if(publish_input) display_input_plan(p);
     p.sim = sim;
     p.pip_wanted = pip;
-    // Sampling waits for the GPU on those frames (the signatures are read back at once): the
-    // automatic overlay samples every 4th frame; the GamePad screen while paused only while there is
-    // something to see, never in plain gameplay: every frame for at most 2 s after + (whether the game
-    // paused: the switch follows within 2-3 frames), every 4th frame while it shows the GamePad
-    // screen (the game is paused, whether it resumed).
-    const bool plusWaits = g_pause_view && g_plus_at >= 0, pauseShown = g_pause_view && g_pause_restore >= 0;
-    p.sample_auto = have_drc && (plusWaits || ((g_mode == kDrcAuto || pauseShown) && frame % 4 == 0));
     return p;
 }
 
@@ -523,7 +440,6 @@ PresentPlan display_plan_for(const PresentPlan& p, float dw, float dh, float tw,
     PresentPlan q = plan_from(layout(dw, dh, tw, th, pw, ph, p.pip_wanted, p.drc_only), dw, dh);
     q.sim = p.sim;
     q.pip_wanted = p.pip_wanted;
-    q.sample_auto = p.sample_auto;
     q.drc_window = p.drc_window;
     q.button_dot = p.button_dot;
     return q;

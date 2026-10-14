@@ -9,6 +9,7 @@ extern "C" uint64_t g_shader_state_gen;  // gx2_core.cpp: bumped by shader-relev
 #include "Cafe/HW/Latte/Core/FetchShader.h"
 #include "gfx/area_sample.h"
 #include "gfx/shader_identity.h"
+#include "gfx/target_draw_history.h"
 #include "Cafe/HW/Latte/Core/LatteCachedFBO.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
 #include "Cafe/HW/Latte/ISA/LatteReg.h"
@@ -187,6 +188,24 @@ static std::unordered_map<uint64_t, LatteFetchShader*> g_fetch;
 static LatteFetchShader* get_fetch_shader(const uint32_t* regs, uint64_t* keyOut) {
     uint32_t prog = regs[mmSQ_PGM_START_FS] << 8;
     if (!prog) return nullptr;
+    if (uint64_t(prog) + 32 <= 0x100000000ull && !memcmp(mem::ptr(prog), "WWFA0001", 8)) {
+        const uint8_t* p = mem::ptr(prog);
+        auto word = [](const uint8_t* q) { return uint32_t(q[0]) | uint32_t(q[1]) << 8 |
+            uint32_t(q[2]) << 16 | uint32_t(q[3]) << 24; };
+        const uint32_t count = word(p + 16);
+        if (count > 64) return nullptr;
+        uint64_t h = uint64_t(word(p + 24)) | uint64_t(word(p + 28)) << 32;
+        for (uint32_t b = 0; b < 16; ++b)
+            h = (h ^ ((regs[mmSQ_VTX_ATTRIBUTE_BLOCK_START + b * 7 + 2] >> 11) & 0xFFFF)) * 1099511628211ull;
+        *keyOut = h;
+        if (auto it = g_fetch.find(h); it != g_fetch.end()) return it->second;
+        auto* fs = gx2::decode_fetch_attributes(prog, 32 + count * 52, nullptr);
+        if (fs) {
+            fs->CheckIfVerticesNeedManualFetchMtl(const_cast<uint32_t*>(regs));
+            g_fetch.emplace(h, fs);
+        }
+        return fs;
+    }
     // either our compact encoding (from GX2InitFetchShaderEx) or real fetch shader microcode shipped with the game
     bool ours = ld32(prog) == 0x57574653;
     uint32_t size = ours ? 16 + ld32(prog + 4) * 16 : regs[mmSQ_PGM_START_FS + 1] << 3;
@@ -382,12 +401,12 @@ static void compile_msl(Shader* sh, const char* rawSrc, uint64_t key) {
     std::string copy = src;
     g_compiles_in_flight++;
     [R.device newLibraryWithSource:source options:opt completionHandler:^(id<MTLLibrary> lib, NSError* err) {
-        g_compiles_in_flight--;
         if (injectFailure) lib = nil;
         id<MTLFunction> fn = lib ? [lib newFunctionWithName:entry] : nil;
-        if (!fn) { report_compile_error(copy.c_str(), key, err, attempt, lib != nil); compile_done(sh->state, CS_FAILED); return; }
+        if (!fn) { report_compile_error(copy.c_str(), key, err, attempt, lib != nil); compile_done(sh->state, CS_FAILED); g_compiles_in_flight--; return; }
         sh->fn = fn;
         compile_done(sh->state, CS_READY);
+        g_compiles_in_flight--;
     }];
 }
 
@@ -495,7 +514,8 @@ static Shader* get_shader_uncached(const uint32_t* regs, bool vertex, LatteFetch
     double t0 = now_ms();
     LatteShader_UpdatePSInputs((uint32*)regs);
     LatteDecompilerOptions opt;
-    if (!vertex) opt.areaSampledTextures = gfx::area_sample::units_for_pixel_shader(mem::ptr(addr), size);
+    const auto fixes = vertex ? gfx::area_sample::Program{} : gfx::area_sample::pixel_program(mem::ptr(addr), size);
+    opt.areaSampledTextures = fixes.units;
     // the GPU's MUL/MULADD give 0*anything=0 (rsqrt(0)*0 is NaN otherwise: black letter in the Rito
     // mail sorting game); Cemu's default too. WWHD_STRICT_MUL=0 turns it off for comparisons
     static const bool strictMul = !getenv("WWHD_STRICT_MUL") || strcmp(getenv("WWHD_STRICT_MUL"), "0");
@@ -513,11 +533,11 @@ static Shader* get_shader_uncached(const uint32_t* regs, bool vertex, LatteFetch
     s->dec = FinishDecompiledShader(out);
     if (opt.areaSampledTextures) {
         std::string src = s->dec->strBuf_shaderSource->c_str();
-        if (gfx::area_sample::rewrite(src, opt.areaSampledTextures, true) > 0) {
+        if (gfx::area_sample::rewrite(src, fixes, true) > 0) {
             s->dec->strBuf_shaderSource->reset();
             s->dec->strBuf_shaderSource->add(std::string_view(src));
         } else {
-            LOG("[gfx] pixel shader %08X: area-sampled taps not applied", addr);
+            LOG("[gfx] pixel shader %08X: upscaling fix not applied", addr);
         }
     }
     cache_record_shader(regs, vertex);
@@ -622,7 +642,7 @@ void set_ao_mode(int m) { g_ao_mode = m % 3; LOG("[gfx] ambient occlusion mode %
 // wait for their compile without the budget, like the Vulkan renderer does for every draw.
 static bool g_building_ahead = false;
 static bool g_draw_must_run = false;  // the current draw writes a target that isn't redrawn every frame
-static std::unordered_map<uint32_t, uint64_t> g_target_drawn;  // render target address -> frame of its last draw
+static std::unordered_map<uint32_t, gfx::TargetDrawHistory> g_target_drawn;
 static uint64_t g_must_run_waits = 0;
 static double g_must_run_wait_ms = 0;
 static bool wait_compiled(const std::atomic<int>& st) {
@@ -779,11 +799,11 @@ static id<MTLRenderPipelineState> get_pipeline(const uint32_t* regs, Shader* vs,
     }
     g_compiles_in_flight++;
     [R.device newRenderPipelineStateWithDescriptor:d completionHandler:^(id<MTLRenderPipelineState> p, NSError* err) {
-        g_compiles_in_flight--;
         if (injectFailure) p = nil;
         if (!p) pipelineFailed(err);
         pl->state = p;
         compile_done(pl->status, p ? CS_READY : CS_FAILED);
+        g_compiles_in_flight--;
     }];
     return wait_compiled(pl->status) ? pl->state : nil;
 }
@@ -1602,7 +1622,7 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
     {
         auto notRedrawn = [](uint32_t addr) {
             auto it = g_target_drawn.find(addr);
-            return it == g_target_drawn.end() || it->second + 1 < R.frame;
+            return it == g_target_drawn.end() || it->second.must_wait(R.frame);
         };
         bool must = false;
         for (int i = 0; i < 8 && !must; i++)
@@ -1783,8 +1803,8 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
                       baseInstance:0];
     }
     for (int i = 0; i < 8; i++)
-        if (colors[i] && regs[mmCB_COLOR0_BASE + i]) g_target_drawn[regs[mmCB_COLOR0_BASE + i]] = R.frame;
-    if (depth && regs[mmDB_DEPTH_BASE]) g_target_drawn[regs[mmDB_DEPTH_BASE]] = R.frame;
+        if (colors[i] && regs[mmCB_COLOR0_BASE + i]) g_target_drawn[regs[mmCB_COLOR0_BASE + i]].drawn(R.frame);
+    if (depth && regs[mmDB_DEPTH_BASE]) g_target_drawn[regs[mmDB_DEPTH_BASE]].drawn(R.frame);
     // debug: WWHD_DUMP_DRAWS=frame:i,j,k dumps color target 0 after those draws
     static uint64_t dumpFrame = ~0ull;
     static std::set<uint64_t> dumpDraws = [] {
@@ -1920,6 +1940,15 @@ bool headstart_translate(const uint32_t* regs, bool vertex, bool compileNow) {
 
 // Metal compiles (shaders and pipelines) that haven't finished yet
 size_t headstart_compiling() { return std::max(0, g_compiles_in_flight.load()); }
+// Called after the in-flight count reaches zero: callbacks have published every
+// final state before decrementing it, so setup can report actual compile failures.
+size_t headstart_failures() {
+    size_t failed = 0;
+    for (const auto& [key, shader] : g_shaders) failed += shader->state.load(std::memory_order_acquire) == CS_FAILED;
+    for (const auto& [key, pipeline] : g_pipelines) failed += pipeline->status.load(std::memory_order_acquire) == CS_FAILED;
+    return failed;
+}
+
 
 // queue a head-start pipeline recipe (a raw kRecPipeline record); built like the user cache's, once
 // its shaders are compiled

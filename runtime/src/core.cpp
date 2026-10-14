@@ -102,21 +102,14 @@ extern "C" void ppc_single_failed(uint32_t at, double v) {
 }
 
 void fatal(const char* fmt, ...) {
-    log_flush();
-    {
-        std::lock_guard<std::mutex> lk(g_log_mutex);
-        va_list ap;
-        va_start(ap, fmt);
-        char msg[1024];
-        vsnprintf(msg, sizeof msg, fmt, ap);
-        va_end(ap);
-#ifdef __ANDROID__
-        __android_log_print(ANDROID_LOG_FATAL, "wwhd", "%s", msg);
-#else
-        fprintf(stderr, "FATAL: %s\n", msg);
-        fflush(stderr);
-#endif
-    }
+    char message[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(message, sizeof message, fmt, ap);
+    va_end(ap);
+    exception_report::record(message);
+    LOG("FATAL: %s", message); // file and crash ring, not just stderr
+    log_flush();  // (this fork) the Switch's log is buffered (platform/core_switch.cpp)
     abort();
 }
 
@@ -311,9 +304,8 @@ uint32_t register_host(PpcFunc fn, const char* name) {
 }
 }  // namespace dispatch
 
-// checking build of the recompiler's CR liveness pass (WWHD_RECOMP_CR_CHECK=1): a dropped CR bit was read
-extern "C" void ppc_cr_poisoned(Cpu* c, int bit, uint32_t addr) {
-    fatal("CR liveness: bit %d read at %08X without a live store (lr=%08X)", bit, addr, c->lr);
+extern "C" void ppc_host_call(Cpu* c, PpcFunc fn) {
+    exception_report::boundary<GuestExit>("native game callback", [&] { fn(c); });
 }
 
 // checking build of the recompiler's register locals (WWHD_RECOMP_NONLEAF_CHECK=1): a callee changed
@@ -325,14 +317,30 @@ extern "C" void ppc_keep_failed(Cpu* c, int reg, uint32_t fn) {
 extern "C" void ppc_dispatch(Cpu* c) {
     PpcFunc f = dispatch::lookup(c->pc);
     if (!f) fatal("indirect branch to unknown address %08X (lr=%08X ctr=%08X)", c->pc, c->lr, c->ctr);
+    if (c->pc - dispatch::kSlotBase < dispatch::kSlotSize ||
+        c->pc - mem::kHleFuncBase < dispatch::kHostSize) {
+        ppc_host_call(c, f);
+        return;
+    }
     MUSTTAIL return f(c);
 }
+
+// (this fork) host targets (imports, HLE, native callbacks) go through ppc_host_call like ppc_dispatch's,
+// and are not remembered: a call site's cache would skip that boundary
+static bool host_target(uint32_t pc) {
+    return pc - dispatch::kSlotBase < dispatch::kSlotSize || pc - mem::kHleFuncBase < dispatch::kHostSize;
+}
+static void ppc_return_now(Cpu*) {}
 
 // PPC_IJUMP's slow path: look the target up and remember it in the jump site's entry
 extern "C" PpcFunc ppc_ijump_resolve(Cpu* c, uint64_t* slot) {
     const uint32_t pc = c->pc;
     PpcFunc f = dispatch::lookup(pc);
     if (!f) fatal("indirect branch to unknown address %08X (lr=%08X ctr=%08X)", pc, c->lr, c->ctr);
+    if (host_target(pc)) {  // a tail jump: the call, then straight back to the jump site's caller
+        ppc_host_call(c, f);
+        return ppc_return_now;
+    }
     const intptr_t off = (intptr_t)f - (intptr_t)&ppc_dispatch;
     if (off == (intptr_t)(int32_t)off) {  // the newest target first, the previous one second (ppc.h)
         __atomic_store_n(&slot[1], __atomic_load_n(&slot[0], __ATOMIC_RELAXED), __ATOMIC_RELAXED);
@@ -346,6 +354,10 @@ extern "C" void ppc_icall_miss(Cpu* c, uint64_t* slot) {
     const uint32_t pc = c->pc;
     PpcFunc f = dispatch::lookup(pc);
     if (!f) fatal("indirect branch to unknown address %08X (lr=%08X ctr=%08X)", pc, c->lr, c->ctr);
+    if (host_target(pc)) {
+        ppc_host_call(c, f);
+        return;
+    }
     const intptr_t off = (intptr_t)f - (intptr_t)&ppc_dispatch;
     if (off == (intptr_t)(int32_t)off) {  // the newest target first, the previous one second (ppc.h)
         __atomic_store_n(&slot[1], __atomic_load_n(&slot[0], __ATOMIC_RELAXED), __ATOMIC_RELAXED);
@@ -367,6 +379,12 @@ struct GuestBaseScope {
 #else
 struct GuestBaseScope {};
 #endif
+
+// checking builds of the recompiler (tools/recomp/recomp.py): WWHD_RECOMP_CR_CHECK=1 poisons the CR
+// bits the liveness pass drops, and reading one stops here
+extern "C" void ppc_cr_poisoned(Cpu* c, int bit, uint32_t addr) {
+    fatal("CR liveness: bit %d read at %08X without a live store (lr=%08X)", bit, addr, c->lr);
+}
 
 uint32_t guest_call(Cpu* c, uint32_t fn, std::initializer_list<uint32_t> args) {
     GuestBaseScope base;

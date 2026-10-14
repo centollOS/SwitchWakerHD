@@ -48,6 +48,7 @@ no-op without the marker).
 | file | what |
 |---|---|
 | `setup.py` | all of the installation logic (Python 3.8+, standard library only) |
+| `decomp_setup.py` | the optional decomp version (macOS development builds; [docs/decomp-build.md](../../docs/decomp-build.md)) |
 | `toolchains.json` | pinned compilers and Python downloads (URL + SHA-256); CI builds with the same ones |
 | `gui/setup_gui.cpp` | **Wind Waker HD**, the program a release starts: first-start setup, then the game launcher (SDL3 + Dear ImGui) |
 | `install-macos.command` | setup in Terminal, macOS (shipped as `tools/Setup in Terminal.command`) |
@@ -147,10 +148,10 @@ One JSON object per line. Events on stdout all have `"event"`:
 
 | event | fields |
 |---|---|
-| `hello` | `version`, `platform`, `data_dir`, `app_dir`, `log`, `portable`, `package`, `installed` (state or null), `game_files`, `game_dir`, `save_exists`, `legacy` (an earlier installation to copy from), `free_bytes`, `language_sources` (as the `language_sources` reply), `toolchain` |
+| `hello` | `version`, `platform`, `data_dir`, `app_dir`, `log`, `portable`, `package`, `installed` (state or null), `game_files`, `game_dir`, `save_exists`, `legacy` (an earlier installation to copy from), `free_bytes`, `language_sources` (as the `language_sources` reply), `toolchain`, `code_mods`, `decomp_offered` (the decomp version can be built: macOS development builds), `decomp` (its option), `decomp_text`, `decomp_docs` |
 | `log` | `text` (also written to `setup.log`) |
 | `plan` | `steps`: `[{id, title}]` of the installation that starts |
-| `step` | `n`, `total`, `title`, `id` (`keys`, `archive`, `folder`, `compiler`, `extract`, `copy`, `translate`, `compile`, `app`) |
+| `step` | `n`, `total`, `title`, `id` (`keys`, `archive`, `folder`, `compiler`, `extract`, `copy`, `translate`, `compile`, `app`, `shaders`, `decomp`) |
 | `progress` | `label`, `done`, `total`, `detail` |
 | `reply` | `id` and `cmd` of the request, `ok`; on failure `problem` and `message` |
 | `fatal` | `message` (setup cannot run, e.g. the wrong release for this system) |
@@ -161,7 +162,7 @@ Requests on stdin: `{"cmd": ..., "id": n, ...}`
 |---|---|---|
 | `probe` | `path` | `kind` (`image`/`archive`/`folder`), `disc_key` (found next to the image), `common_key` (where one was found); for a folder `in_place`, `bytes`; for an archive `title`, `folder`, `bytes`, `message` (which title is used and why); problem `wrong_title` when the archive has no usable game |
 | `check_keys` | `image`, optional `disc_key_file`, `common_key_file` or `common_key_hex` | `title_id`, `files`, `bytes`; problems `disc_key_wrong`, `common_key_wrong`, `wrong_title`, ... |
-| `install` | `source` (`image`/`archive`/`folder`/`installed`), `path`, optional `jobs` | streams `plan`/`step`/`progress`/`log`, then `app`, `exe`, `data_dir`, `game_dir`, `toolchain_bytes` |
+| `install` | `source` (`image`/`archive`/`folder`/`installed`), `path`, optional `jobs`, `code_mods`, `decomp` (also build the decomp version, [docs/decomp-build.md](../../docs/decomp-build.md); remembered) | streams `plan`/`step`/`progress`/`log`, then `app`, `exe`, `data_dir`, `game_dir`, `toolchain_bytes`, `decomp_exe` (empty when not built), `decomp_error` (why it failed; the normal game is installed) |
 | `import_save` | `kind` (`hd`/`gc`), `path`, optional `replace` | `message`; problem `exists` when a save is installed and `replace` is not set (with `replace`, the old save is moved to `save/user.backup-<time>` first) |
 | `import_existing` | optional `path` (another release folder; none: the earlier per-user installation), `replace` | `message` (saves and settings copied, never moved; problem `exists` as above) |
 | `language_sources` | | `sources`: `[{region (EU/JP), title_id, source, packs: [{file, language, bytes, sha256}]}]` (experimental, [docs/language-packs.md](../../docs/language-packs.md)) |
@@ -169,7 +170,8 @@ Requests on stdin: `{"cmd": ..., "id": n, ...}`
 | `remove_language_source` | `region` (`EU`/`JP`) | `removed` (the folder) |
 | `remove_toolchain` | | `freed` bytes |
 | `shortcut` | | `path` of the created shortcut |
-| `launch` | | starts the installed game |
+| `launch` | | starts the installed game (the decomp version when `start_decomp` is set) |
+| `start_decomp` | `on` | `start_decomp`: Play (and starting Wind Waker HD) starts the decomp version from now on; problem `not_built` |
 | `quit` | | |
 
 Keys: an image install uses the keys from the last successful `check_keys`; they stay in the
@@ -212,9 +214,39 @@ already when the window probes it), a disc image or Cemu archive right after ext
 `game.partial`, which is then removed, so an earlier `game/` stays), a repair or update with the
 installed files. On a mismatch the message says what was found (another title, "an update merged in"
 when `code/app.xml` or `meta/meta.xml` give a version above 0 or the update's title id, otherwise
-"not the expected file" with the start of its SHA-256), what is needed and how to get it. Tests:
+"not a file the port knows" with the start of its SHA-256), what is needed and how to get it. Tests:
 `GameVersion` in `test_setup.py` (synthetic files; `WWHD_GAME_DIR=game` also checks your own copy).
 The recompiler reads only `code/cking.rpx` (the runtime checks at start that it matches the translated
 code); the other files in `code/` (`app.xml`, `cos.xml`) are metadata and are not checked.
 For Europe it emits mapped hooks and runtime address tables automatically; no USA dump or
 separate language source is needed. See [regional builds](../../docs/builds.md).
+
+
+## Local setup Python capabilities
+
+Guest compilation and Python mod setup use the interpreter recorded in `guest-sdk.json`.
+Setup verifies Python 3.14 or newer and an actual isolated `compression.zstd` round trip,
+rather than assuming that a version number guarantees the optional compiled codec.
+Windows uses only the release's official, hash-checked embeddable Python 3.14.8; the
+installer never downloads a replacement there. An incomplete/older Windows release must
+be replaced with the complete current release.
+
+On macOS (arm64 and x86_64) and Linux (aarch64 and x86_64), a capable setup interpreter is
+reused. Otherwise the trusted installer downloads the architecture-specific standalone
+Python pinned in `toolchains.json`, verifies its SHA-256, and installs it privately under
+`data/setup-python/`. It probes the staged interpreter before selecting it. The system
+Python is unchanged. Downloads remain installer operations; mod setup tools retain their
+reviewed local file capabilities and cannot download or launch programs.
+
+Existing installations can update only this interpreter, preserving the compiler and
+other bridge settings, by passing `--repair-guest-python` to their release's terminal
+setup launcher (plus `--data-dir PATH` for a nondefault installation). This does not rebuild
+game code. A normal setup/repair also refreshes the interpreter configuration. Portable
+format-v2 paths remain relative to the data directory and survive moving the release.
+
+The Windows ZIP pin is published by [Python.org](https://www.python.org/downloads/release/python-3148/).
+Standalone pins use the publisher's SHA-256 asset digests from
+[python-build-standalone 20261003](https://github.com/astral-sh/python-build-standalone/releases/tag/20261003).
+When updating Windows, regenerate every-file hashes in `tools/release/python-windows-files.json`
+and update the release workflow's versioned DLL signature check together with the archive pin.
+Android guest mods remain unsupported; these interpreter paths describe supported desktop setup.

@@ -5,8 +5,8 @@
 Bring your GameCube Wind Waker progress to Wind Waker HD:
 
 1. Export the save from your memory card as a `.gci` file (Dolphin: Tools › Memory Card
-   Manager › Export; a real card: GCMM, Swiss or similar). USA (GZLE01) and Japanese (GZLJ01)
-   saves are supported; European (GZLP01) saves are rejected.
+   Manager › Export; a real card: GCMM, Swiss or similar). USA (GZLE01), Japanese (GZLJ01), and
+   European (PAL, GZLP01) saves are supported.
 2. Convert it (Python 3, nothing else needed):
 
    ```
@@ -34,6 +34,13 @@ Tingle Island event; `--drop-tingle-tuner` removes it instead). HD-only data (fo
 play statistics) starts as in a new HD file. Files that were empty on the GameCube stay
 "New Game".
 
+**European saves:** accented Latin names, including Œ/œ, are decoded from the PAL name-entry
+character set. The PAL card-wide language is copied to byte 4 of every HD per-slot
+option record. HD still chooses its text pack from the console/port language setting; choose
+your display language there.
+The same converted file targets USA HD (00050000-10143500) and European HD
+(00050000-10143600); no region option is needed.
+
 ## Tools
 
 Plain Python 3, no dependencies, no game data. Layouts come from the zeldaret tww decompilation
@@ -42,9 +49,9 @@ functions.
 
 | Tool | Use |
 |---|---|
-| `gc2hd.py SAVE.gci -o OUTDIR` | GameCube memory-card save (`.gci`, USA GZLE01 or Japan GZLJ01) → `OUTDIR/cking.sav` for HD. `--batch SRC_DIR -o ROOT` converts every `.gci` below `SRC_DIR` into `ROOT/<path>/user/cking.sav`. Options: `--drop-tingle-tuner`, `--name NAME`. |
+| `gc2hd.py SAVE.gci -o OUTDIR` | GameCube memory-card save (`.gci`, USA GZLE01, Japan GZLJ01 or Europe GZLP01) → `OUTDIR/cking.sav` for HD. `--batch SRC_DIR -o ROOT` converts every `.gci` below `SRC_DIR` into `ROOT/<path>/user/cking.sav`. Options: `--drop-tingle-tuner`, `--name NAME`. |
 | `hd_save_info.py PATH` | progress of each file: hearts, rupees, magic, items, sword/shield, arrows/bombs, songs, Triforce shards, pearls, sail (Sail / Swift Sail), islands visited and charted, charts owned, dungeon items and bosses, return stage, time of day, deaths, New Game+ count, save counter. `PATH` = `cking.sav`, a `save/` or `save/user/` folder, or a `.gci`. `--short` (one line per file), `--json`, `--file N`. |
-| `hd2gc.py cking.sav -o OUT.gci` | the reverse direction (shared fields only), mainly for the round-trip check. `--set-gc-name` writes the HD name into the GameCube name field, `--template X.gci` copies the banner/icon block. |
+| `hd2gc.py cking.sav -o OUT.gci` | the reverse direction (shared fields only), mainly for the round-trip check. `--set-gc-name` writes the HD name into the GameCube name field, `--template X.gci` copies the banner/icon block. `--code GZLP01` writes PAL; `--pal-language english\|german\|french\|spanish\|italian` chooses its card-wide language (default: recover HD per-slot language; mixed used Quest Logs require an override). |
 | `roundtrip_test.py cking.sav ...` | HD → GameCube layout → HD; every shared field must come back bit-identical (GameCube and HD checksums are verified on the way). |
 | `wwstate.py info STATE.wwstate` / `wwstate.py to-sav STATE.wwstate -o OUTDIR [--into cking.sav] [--file N]` | a portable save state (`slotN.wwstate`, [docs/portable-save-states.md](../../docs/portable-save-states.md), e.g. from a bug report): check it and show its place and progress, or write its save data as Quest Log N of a `cking.sav`. |
 | `wwsave.py repair-medli cking.sav -o OUTDIR [--file N]` | repair an early save whose premature Master Sword ownership hides Medli (#85). Writes a repaired `OUTDIR/cking.sav` and an exact `OUTDIR/cking.sav.before-medli.bak`; never changes the input or overwrites existing output files. Quest Log N defaults to 1. |
@@ -129,8 +136,8 @@ field by field through them. Group by group:
 
 Unused GameCube files (no player name) are copied as they are; HD shows them as "New Game"
 (save counter 0) and starting a game re-initialises them. GameCube USA and Japan saves have the
-same layout (tww: `d_save.h` only differs for the demo build, event flags have no version
-conditionals); PAL saves are rejected (the save counter holds the language there; not checked).
+same packed layout as PAL (tww: `d_save.h` only differs for the demo build, event flags have
+no region conditionals). See the PAL and HD region details below.
 
 ## Validation (2026-10-05)
 
@@ -144,3 +151,82 @@ conditionals); PAL saves are rejected (the save counter holds the language there
   the HD file select and loads into gameplay. Hearts, rupees, magic, items and place match
   `hd_save_info.py`. No crash. A New Game+ file shows the Triforce mark. The first test found
   the save counter rule (files with counter 0 showed "New Game"); fixed in `gc2hd.py`.
+
+## PAL layout and HD region evidence (2026-10-12)
+
+Checked against [zeldaret/tww at 342d447b](https://github.com/zeldaret/tww/tree/342d447b6b6b3bafe7a0dc42d6b1e36b2de172e0):
+
+- [`d_save.h`](https://github.com/zeldaret/tww/blob/342d447b6b6b3bafe7a0dc42d6b1e36b2de172e0/include/d/d_save.h)
+  and [`d_save.cpp`](https://github.com/zeldaret/tww/blob/342d447b6b6b3bafe7a0dc42d6b1e36b2de172e0/src/d/d_save.cpp):
+  retail USA/Japan/PAL share `dSv_save_c_PACKED`, 0x768 bytes, and the
+  `memory_to_card`/`card_to_memory` packing order. PAL has different initial defaults
+  (e.g. config ruby); these are saved values and are copied, not reinitialized.
+- [`m_Do_MemCardRWmng.h`](https://github.com/zeldaret/tww/blob/342d447b6b6b3bafe7a0dc42d6b1e36b2de172e0/include/m_Do/m_Do_MemCardRWmng.h)
+  and [`.cpp`](https://github.com/zeldaret/tww/blob/342d447b6b6b3bafe7a0dc42d6b1e36b2de172e0/src/m_Do/m_Do_MemCardRWmng.cpp):
+  `card_savedata` is 0x2000 bytes with three 0x770-byte slots starting at +8;
+  its first u32 (`save_count`) holds PAL language instead of a card save sequence number.
+  **This is not the per-slot u16 `info.save_count` at info +0x10.** `Store` writes
+  `dComIfGs_getPalLanguage()`; `Restore`/`Restore2` accept 0..4 and clamp larger values to 0.
+  `BuildHeader` establishes the order: English, German, French, Spanish, Italian. The
+  language is card-wide, read from backup block 1 even when slot data needs block 2.
+  The localized memory-card comment differs; directory structure, two save copies,
+  data version 0, slot and block checksum algorithms do not. Artwork/comments are not converted.
+- [`d_name.cpp`](https://github.com/zeldaret/tww/blob/342d447b6b6b3bafe7a0dc42d6b1e36b2de172e0/src/d/d_name.cpp),
+  PAL `str01`/`str02` in `screenSet`: single-byte Western names, including accented Latin
+  letters and bytes 0x8C/0x9C for Œ/œ. Use CP1252 for PAL rather than Latin-1 (Japan remains
+  Shift-JIS). Names still use the shared 17-byte NUL-terminated fields.
+
+HD evidence: this repository's executable-verified `tools/recomp/builds/eu.json` maps
+USA `card_to_memory`/`memory_to_card` (025BA7B0/025BA9FC) to EU 025BA770/025BA9BC
+with identical relocation-normalized function bodies. Likewise SaveMgr slot checksums (02721AC4/02721AFC →
+02722380/027223B8), readers (027246A0..02724B74 → 02724F5C..02725430), slot writer
+(02724C20 → 027254DC), extra-data CRC (027201E4 → 02720AA0), and fresh-data init
+(0271FF4C → 02720808) have identical bodies. Both use the file format documented above,
+without a title ID or region marker. The verified HD storage routines in
+`d_menu_save_storage.cpp` serialize slots, player/status/event/name/map sections, format 4,
+and CRC only. `hd_sys_setting.cpp` 025F9448 reads console language into runtime options
+(save +0x12F0, byte +4). SaveMgr 02720D34 (EU 027215F0) copies a selected slot's option
+bytes 0..8 to those runtime options via 0271FCB4 (EU 02720570); 02721B34 (EU 027223F0)
+copies them back on save. Thus byte 4 of each serialized 16-byte `player` record can
+preserve PAL language in the same 0..4 order. The console language still selects the text pack.
+See also `runtime/src/game_languages.h` and `runtime/src/language_region.cpp`.
+
+Fresh per-slot option defaults are not completely identical: initializer 0271FBE8
+(EU 027204A4) stores byte 3 as 0 for USA, 1 for EU, and byte 5 as 1 in both. This is
+an option default, not a format/region tag: the shared readers accept either value. The converter
+keeps the existing USA defaults for the other HD-only option bytes and maps PAL language at +4.
+No target-region flag is needed to make the file load.
+
+PAL output example (override the recovered language if desired):
+
+```sh
+python3 tools/savegame/hd2gc.py converted/cking.sav -o back.gci --code GZLP01 --pal-language french --set-gc-name
+python3 tools/savegame/pal_test.py
+```
+
+The PAL round trip preserves shared progress; a used slot's zero counter becomes 1 for HD,
+and its language is copied into HD per-slot options and recovered on export. A PAL card
+has one language, so conflicting used HD slots need an explicit `--pal-language` override.
+HD-only fields and pictures have the same limitations as USA/Japan conversion. `--template` copies artwork but the requested
+`--code` always controls the output directory entry's region.
+
+Validation for this change:
+
+- `python3 tools/savegame/pal_test.py`: six synthetic tests pass, covering all five languages,
+  every packed field in three slots, PAL → HD → PAL → HD, CP1252 accents/ligatures,
+  empty slots, invalid language fallback, backup recovery, checksum rejection, CLI language
+  recovery/override, conflicting slot languages, and a different-region artwork template.
+- Existing `repair_medli_test.py` (three tests) and `tools/recomp/test_builds.py` (18 tests) pass.
+- `mkbuildmap.py --check tools/recomp/builds/eu.json` against the local USA/EU RPX pair:
+  map unchanged; regional save-function equivalence confirmed.
+- A Release Metal EU build from this branch loaded a converted PAL-layout test copy into
+  Earth Temple gameplay, headless with audio disabled. The timed test completed; the
+  in-memory name, current/max hearts and magic, rupees, all inventory bytes, and all collect
+  bytes matched the converted file. The source save and converted `cking.sav` remained
+  unchanged. This integration input was generated from a copy of a local HD save, exported
+  to PAL layout with a zero slot counter, French card language, and an accented player name;
+  it was not an original GameCube PAL save. No game/save data is included in the repository.
+- Not tested: an original PAL memory-card export, PAL output in Dolphin/on GameCube hardware,
+  HD saves in Cemu/on Wii U hardware, in-game saving/reloading, or every gameplay stage/name glyph.
+  USA HD compatibility was checked through the executable map and existing converter tests;
+  this change's gameplay run used EU HD only.

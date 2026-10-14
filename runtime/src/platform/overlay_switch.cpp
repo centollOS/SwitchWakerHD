@@ -1,4 +1,4 @@
-// SwitchWakerHD (this fork): the settings overlay's Switch parts, behind overlay.cpp's marked hooks
+// SwitchWakerHD (this fork): the settings overlay's Switch parts, registered through overlay::ext
 // (overlay_switch.h).
 #include "overlay_switch.h"
 
@@ -12,7 +12,7 @@
 #include <ctime>
 #include <mutex>
 
-#include "imgui_internal.h"  // ClearActiveID (text_field)
+#include "imgui.h"
 #include "guest_addr.h"
 #include "../gfx/switch_renderer.h"
 #include "../build_info.h"
@@ -21,6 +21,9 @@
 #include "../mods/mods.h"
 #include "../mods/warps.h"
 #include "../motion/motion.h"
+#include "../input_map.h"
+#include "../overlay/extensions.h"
+#include "../overlay/release_gate.h"
 #include "../overlay/hostui.h"
 #include "../overlay/overlay.h"
 #include "../render_prof.h"
@@ -472,65 +475,48 @@ bool load_font(ImGuiIO& io) {
     return false;
 }
 
-bool text_field(const char* label, char* buf, size_t size, ImGuiInputTextFlags flags) {
-    struct Pending {
-        std::mutex mu;
-        ImGuiID id = 0;
-        std::string text;
-        bool ready = false;
-    };
-    static Pending pending;
-    const ImGuiID id = ImGui::GetID(label);
-    bool changed = false;
-    {
-        std::lock_guard<std::mutex> lk(pending.mu);
-        if (pending.ready && pending.id == id) {
-            snprintf(buf, size, "%s", pending.text.c_str());
-            pending.ready = false;
-            changed = true;
-        }
-    }
-    ImGui::InputText(label, buf, size, (flags & ~ImGuiInputTextFlags_EnterReturnsTrue) | ImGuiInputTextFlags_ReadOnly);
-    if (ImGui::IsItemActivated()) {
-        std::u16string initial;
-        for (const char* c = buf; *c;) {  // UTF-8 -> UTF-16
-            uint32_t cp = 0;
-            const ssize_t n = decode_utf8(&cp, reinterpret_cast<const uint8_t*>(c));
-            if (n <= 0) break;
-            c += n;
-            if (cp >= 0x10000) {
-                cp -= 0x10000;
-                initial.push_back(char16_t(0xD800 + (cp >> 10)));
-                initial.push_back(char16_t(0xDC00 + (cp & 0x3FF)));
-            } else {
-                initial.push_back(char16_t(cp));
-            }
-        }
-        input::prompt_text(initial, int(size) - 1, [id](bool ok, std::u16string text) {
-            if (!ok) return;
-            std::string out;  // UTF-16 -> UTF-8
-            for (size_t i = 0; i < text.size(); i++) {
-                uint32_t c = text[i];
-                if (c >= 0xD800 && c < 0xDC00 && i + 1 < text.size()) c = 0x10000 + ((c - 0xD800) << 10) + (text[++i] - 0xDC00);
-                uint8_t b[4];
-                const ssize_t n = encode_utf8(b, c);
-                if (n > 0) out.append(reinterpret_cast<const char*>(b), size_t(n));
-            }
-            std::lock_guard<std::mutex> lk(pending.mu);
-            pending.id = id;
-            pending.text = std::move(out);
-            pending.ready = true;
-        });
-        ImGui::ClearActiveID();
-    }
-    return changed;
-}
-
 bool frame_layer_wanted(std::string& toast) {
     if (!prepare_graphics::screen_line().empty()) toast = prepare_graphics::screen_line();
     return prepare_graphics::running() || background_shaders::card().up;
 }
 void frame_layer_draw(float w, float h) {
     if (!background_shaders::draw_screen(w, h)) prepare_graphics::draw_screen(w, h);
+}
+
+void register_ext() {
+    namespace ext = overlay::ext;
+    // the Switch renderer has its own options (Switch tab); one screen, and the controller maps by position
+    ext::add_tab({"switch", "Switch", tab_switch, nullptr}, "audio");
+    ext::add_tab({"warp", "Warp", tab_warp, nullptr}, "audio");
+    for (const char* id : {"graphics", "display", "controls"}) ext::hide_tab(id);
+    ext::Features f;
+    f.clipboard = false;    // the paths are shown instead
+    f.file_picker = false;
+    f.screenshots = false;  // the console's own capture button
+    f.full_states = false;  // portable states only (savestate.cpp)
+    ext::set_features(f);
+    ext::set_font_loader(load_font);
+    // ZL + ZR held, Minus: the window switches between the TV and the GamePad picture (not the menu)
+    ext::add_shortcut([](const overlay::PadValues& pad, bool menu_open) {
+        static bool latched = false;
+        const bool combo = pad[input_map::kPadLT] > 0.5f && pad[input_map::kPadRT] > 0.5f &&
+                           pad[input_map::kPadOptions] > 0.5f;
+        if (!combo || menu_open) {
+            latched = latched && combo;
+            return false;
+        }
+        if (!latched) gfxsw::set_gamepad_view(!gfxsw::gamepad_view());
+        latched = true;
+        return true;
+    });
+    // the system keyboard for the overlay's text fields (no physical keyboard)
+    ext::set_text_input([](const text_entry::Request& r, text_entry::Done done) {
+        input::prompt_text(r.initial, r.max_len, std::move(done));
+    });
+    // Prepare graphics and the first start's card cover the game while the menu is closed
+    ext::add_frame_layer({frame_layer_wanted, [](float w, float h) {
+                              frame_layer_draw(w, h);
+                              return true;
+                          }});
 }
 }  // namespace overlay_switch

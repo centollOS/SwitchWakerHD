@@ -1,4 +1,4 @@
-// Controls mapping: which keyboard keys and host-controller inputs drive each Wii U GamePad input.
+// Controls mapping: which keyboard/mouse and host-controller inputs drive each Wii U GamePad input.
 //
 // Plain C++ (no AppKit) so it can be unit-tested (runtime/tools/input_map_test.cpp). input.mm
 // evaluates the current mapping on every read; the Controls window (gfx/controls_ui.mm) edits it.
@@ -42,7 +42,10 @@ const char* pad_id(int p);     // JSON value, e.g. "LeftTrigger"
 const char* pad_label(int p);  // for the UI
 int pad_from_id(const std::string& id);  // -1 if unknown
 
-// Keyboard: macOS virtual key codes (kVK_*), 0..255
+// Keyboard: macOS virtual key codes (kVK_*), 0..255; mouse inputs use 256..262.
+// Mouse IDs share the two keyboard binding slots, above the legacy 0..255 key range.
+constexpr int kMouse1 = 256, kMouse2 = 257, kMouse3 = 258, kMouse4 = 259, kMouse5 = 260;
+constexpr int kWheelUp = 261, kWheelDown = 262, kInputCount = 263;
 constexpr int kNoKey = -1;
 constexpr int kKeysPerAction = 2;
 std::string key_id(int code);     // JSON value, e.g. "K", "Space", "LeftShift"; "Key93" for unnamed codes
@@ -53,11 +56,31 @@ int key_from_id(const std::string& id);  // kNoKey if unknown
 // Controls window reserves (Escape cancels a capture). Returns what the key does, or nullptr.
 const char* reserved_key(int code);
 
+constexpr float kMinStickRange = 1.0f, kMaxStickRange = 1.5f;
+
 struct Mapping {
     std::array<std::array<int, kKeysPerAction>, kActionCount> keys;  // kNoKey = empty slot
     std::array<int, kActionCount> pad;                                // kPadNone = unbound
-    float deadzone = 0.0f;          // radial dead zone for controller sticks, 0..0.9
-    bool invert_camera_y = false;   // right stick Y, keyboard and controller
+    // Real sticks do not reliably return exact zero. In particular, a tiny residual zoom input
+    // keeps the Picto Box's zoom-blur preset active. Format 2 saves preserve an explicit zero;
+    // unmarked saves migrate the former zero default to this value.
+    float deadzone = 0.15f;         // radial dead zone for controller sticks, 0..0.9
+    // Stick range (issue #40), per stick, kMinStickRange..kMaxStickRange. Applied after the dead
+    // zone: the stick vector's length is multiplied by the range and capped at 1, direction kept,
+    // so a worn stick that only reaches 0.9 delivers full deflection at about 1.11.
+    float left_range = 1.0f;
+    float right_range = 1.0f;
+    bool skip_controller_selection = true; // title: choose the configured Wii U controller
+    // Camera only (issue #167): applied where the game's camera reads the right stick
+    // (camera_invert.h, mods/camera.cpp), never to the stick itself, so the baton is not inverted
+    bool invert_camera_y = false;
+    bool face_auto = false;         // Automatic face preset: follow the dominant pad's labels
+    // In-game button prompts (issues #110, #141, #143; runtime/src/button_glyphs.cpp)
+    enum class Prompts : uint8_t { kAuto, kOriginal, kXbox, kPlayStation };
+    enum class ShoulderNames : uint8_t { kAuto, kNintendo, kNumbered, kXbox };
+    Prompts prompts = Prompts::kAuto;            // face-button look while the face buttons are by label
+    ShoulderNames shoulder_names = ShoulderNames::kAuto;
+    bool prompt_colours = true;                  // coloured face buttons (Xbox / PlayStation colours)
     static Mapping defaults();
     bool operator==(const Mapping&) const = default;
 };
@@ -73,6 +96,84 @@ enum class FaceLayout { kPosition, kLabels, kCustom };
 FaceLayout face_layout(const Mapping& m);
 void apply_face_layout(Mapping& m, FaceLayout layout);  // rewrites pad[kA..kY]; kCustom is a no-op
 const char* face_layout_label(FaceLayout l);            // for the UI
+// the controller input that is the Wii U's A, B, X or Y (action kA..kY) in the current mapping, for
+// the overlay's own menus and on-screen keyboard (confirm/back as in the game); unbound: by position
+int face_input(int action);
+
+// The Automatic preset (the follow-up to #97): the four face bindings follow whatever is printed
+// on the dominant controller's buttons, so an Xbox pad plays by label and a Nintendo pad by
+// position (where the two agree). face_auto is the one preset state that is stored — the two
+// manual presets stay the shape of the four bindings — and the shape it resolved to is what
+// face_layout() reports, so the drawings and the manual presets keep working unchanged.
+// The labels of one pad's four face buttons, in the order the Pad enum names them (by Xbox
+// position): [0] south (A), [1] east (B), [2] west (X), [3] north (Y). Cross/Circle/Square/
+// Triangle are the PlayStation names for those same four letters.
+enum class FaceLabel { kUnknown, kA, kB, kX, kY, kCross, kCircle, kSquare, kTriangle };
+
+// The letter one button has printed on it, from the name a host gives it: an SF Symbol name
+// ("a.circle", "xmark.circle", "square.circle.fill", "x.square.fill") or a localized name
+// ("Button A", "Cross Button"). The first dot-separated component is the symbol's own name and
+// what follows is decoration — so "square.circle" is Square (X) and not Circle (B) — and words
+// like "button" are ignored in a free-form name. kUnknown when the name says nothing.
+FaceLabel face_label_from_text(const char* text);
+
+// GameController's Nintendo face elements use printed letters, unlike our positional Pad
+// inputs. A single sideways Joy-Con has a different permutation from a Pro / paired pad.
+// Name parsing and routing are pure so macOS hardware is not needed for regression tests.
+enum class AppleFaceLayout { kStandard, kNintendo, kJoyConSingle };
+AppleFaceLayout apple_face_layout(const char* product_category, const char* vendor_name);
+int apple_face_input(AppleFaceLayout layout, int pad);  // non-face inputs pass through
+void apple_face_labels(AppleFaceLayout layout, FaceLabel labels[4]);  // raw A/B/X/Y -> positions
+// A possible pre-#181 manual workaround; report it, never silently overwrite an intentional
+// by-label choice (or a shared mapping used with another controller).
+bool apple_face_workaround(const Mapping& m, AppleFaceLayout layout);
+
+// The face bindings a pad with these labels asks for: each printed letter drives the Wii U button
+// of that letter (Cross is A, Circle is B, and so on). A letter no button carries falls back to the
+// by-position preset. Returns false and leaves `out` alone when no label is known at all (there is
+// nothing to follow).
+bool face_bindings_from_labels(const FaceLabel labels[4], int out[4]);
+
+// The platform hosts call this whenever the dominant controller's labels may have changed
+// (connect, disconnect, startup). With face_auto on it rewrites pad[kA..kY] and saves; otherwise
+// it only remembers the labels for the next set_face_auto. An all-unknown report changes nothing.
+void note_face_labels(const FaceLabel labels[4]);
+
+// Turn the Automatic preset on or off on `m`. On rewrites pad[kA..kY] from the labels
+// note_face_labels last reported (a mapping is ready before the next pad connects); with none
+// reported the bindings stay as they are. apply_face_layout turns it off: a preset is a choice.
+void set_face_auto(Mapping& m, bool on);
+
+// The dominant pad's family, from the labels note_face_labels last reported: PlayStation when it
+// names Cross/Circle/Square/Triangle, Xbox when its bottom button is A, Nintendo when it is B.
+enum class PadFamily { kUnknown, kXbox, kPlayStation, kNintendo };
+PadFamily pad_family_from_labels(const FaceLabel labels[4]);
+PadFamily pad_family();
+
+// What the in-game button prompts look like (button_glyphs.cpp draws it). Resolved from the
+// mapping and the pad family; pure, so input_map_test and button_glyphs_test can cover it.
+//   face: the face buttons are restyled only while they are by label (the game's own prompts
+//     already match a by-position pad): Automatic picks PlayStation shapes on a PlayStation pad
+//     and the Xbox colours/positions on anything else; Original keeps the game's look.
+//   shoulders: Automatic follows the face style (Xbox: LB/RB/LT/RT, PlayStation: L1/R1/L2/R2,
+//     original: the game's L/R/ZL/ZR); a fixed choice applies with any face layout.
+enum class FaceStyle : uint8_t { kOriginal, kXbox, kPlayStation };
+enum class ShoulderStyle : uint8_t { kOriginal, kNumbered, kXbox };
+struct PromptStyle {
+    FaceStyle face = FaceStyle::kOriginal;
+    bool colours = false;         // face colours (only with a face style)
+    ShoulderStyle shoulders = ShoulderStyle::kOriginal;
+    bool positions = false;       // HUD face cluster in the Xbox/PlayStation positions
+    bool active() const { return face != FaceStyle::kOriginal || shoulders != ShoulderStyle::kOriginal; }
+    bool operator==(const PromptStyle&) const = default;
+};
+PromptStyle prompt_style(const Mapping& m, PadFamily family);
+const char* prompts_label(Mapping::Prompts p);              // for the UI
+const char* shoulder_names_label(Mapping::ShoulderNames n);  // for the UI
+
+// Rewrite one controller binding. A hand-edited face binding (kA..kY) drops the Automatic preset,
+// so a custom binding is not overwritten when the next pad connects.
+void set_pad_binding(Mapping& m, int action, int pad);
 
 // actions (other than `except`) that use this key / controller input
 std::vector<int> key_users(const Mapping& m, int code, int except = -1);
@@ -85,8 +186,9 @@ int conflict_count(const Mapping& m);
 std::string key_short_label(int code);
 const char* pad_short_label(int p);
 
-// Evaluate a mapping. keys[code] = held; values[p] = 0..1 for each Pad input (max over controllers)
-input::PadState keyboard_state(const Mapping& m, const bool keys[256]);
+// Evaluate a mapping. keys[code] = held (count entries, 256 for legacy keyboard callers).
+// values[p] = 0..1 for each Pad input (max over controllers).
+input::PadState keyboard_state(const Mapping& m, const bool* keys, int count = 256);
 input::PadState controller_state(const Mapping& m, const float values[kPadCount]);
 
 // JSON. from_json starts from defaults: inputs missing from the file keep their default binding.
@@ -101,5 +203,7 @@ void load_startup();
 Mapping current();
 void set_current(const Mapping& m, bool save = true);  // applies immediately; saves to default_path()
 uint32_t generation();  // bumps on every set_current
+bool skip_controller_selection();
+bool invert_camera_y();  // current().invert_camera_y without copying the mapping (camera hooks)
 
 }  // namespace input_map

@@ -14,7 +14,21 @@
 // last draw still listed: its heap destroy reached ~J3DPacket with mEntryPtr set,
 // "PROGRAM HALT J3DPacket.cpp:157 mEntryPtr == (0)" (Tingle's jail on Windfall, both door ways).
 // The extra steps now skip fpcDt_Handler: deletion keeps counting frames, as in the game.
+//
+// The weather effects keep the same rule with a countdown of their own (issue #145): rain, stars,
+// spores (housi), fog (moya) and waves each have a phase byte in g_env_light (dKyw_wether_move_draw
+// 0257ACAC, enum WeatherPhase): 0 create, 1 move (the only phase whose packet is drawn: entered
+// into a draw buffer), 2 drain, 3 delete (the packet is destroyed right away, delete_weather_packet,
+// not through the delete queue). 1 -> 2 -> 3 -> delete takes three steps, so in the game the packet
+// gets a draw (and its buffer a frameInit) between its last entry and its destruction. Leaving a
+// Forbidden Woods spore room through a door (ky_tag0 sets the spore count only while Link stays in
+// its room) runs that countdown during the door event; with three extra steps it finished within
+// one frame and ~J3DPacket found the spore packet still listed: "PROGRAM HALT J3DPacket.cpp:157
+// mEntryPtr == (0)". While any weather effect is draining or deleting, a frame gets no more extra
+// steps, so the countdown counts drawn frames as in the game.
 #pragma once
+
+#include <cstdint>
 
 namespace mods {
 
@@ -31,5 +45,22 @@ struct StepParts {
 constexpr StepParts kNormalStep{true, true, true, true, true};
 // a quick-door extra step (turbo.cpp): everything but deletion, which stays once per frame
 constexpr StepParts kDoorExtraStep{true, false, true, true, true};
+
+// weather phases (enum WeatherPhase, d_kankyo_wether.h) and the phase bytes in g_env_light
+// (10475A68) of the effects whose packet a phase-3 step destroys
+enum WeatherPhase : uint8_t { kWeatherCreate, kWeatherMove, kWeatherDrain, kWeatherDelete };
+struct WeatherEffect {
+    const char* name;
+    uint32_t phase_off;
+};
+constexpr WeatherEffect kWeatherEffects[] = {
+    {"rain", 0xA3C},   // mbRainInitialized, packet +0xA44
+    {"star", 0xA54},   // mbStarInitialized, packet +0xA60
+    {"housi", 0xA70},  // mbHousiInitialized (spores), packet +0xA78
+    {"moya", 0xA7C},   // mMoyaInitialized (fog), packet +0xA84
+    {"wave", 0xA98},   // mWaveInitialized, packet +0xAA0
+};
+// an effect in this phase destroys its packet within the next two steps: they must be drawn frames
+constexpr bool weather_tearing_down(uint8_t phase) { return phase == kWeatherDrain || phase == kWeatherDelete; }
 
 }  // namespace mods

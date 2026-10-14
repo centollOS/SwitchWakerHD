@@ -67,6 +67,14 @@ typedef struct Cpu {
 typedef void (*PpcFunc)(Cpu*);
 
 /* runtime entry points */
+void ppc_host_call(Cpu* c, PpcFunc fn);           /* guarded native hook/site entry */
+/* (this fork) a runtime hook's entry (recomp.py): on the Switch a plain call, as before (the console's crash
+ * report is its own, and the guarded entry adds a frame to every hooked call); elsewhere upstream's guarded one */
+#ifdef __SWITCH__
+#define PPC_HOOK_CALL(c, fn) fn(c)
+#else
+#define PPC_HOOK_CALL(c, fn) ppc_host_call(c, fn)
+#endif
 void ppc_dispatch(Cpu* c);                       /* call/jump to c->pc */
 /* Indirect call (bctrl/blrl) with a one-entry cache per call site: most are virtual calls that
  * always reach the same function, and the dispatch table (32 MB) costs a cache miss per lookup.
@@ -199,9 +207,41 @@ static inline uint64_t f64_as_u64(double d) { uint64_t u; memcpy(&u, &d, 8); ret
 static inline float u32_as_f32(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
 static inline uint32_t f32_as_u32(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
 
-static inline double ldf32(uint32_t ea) { return (double)u32_as_f32(ld32(ea)); }
+/* ---- signalling-NaN counter (local diagnostic, CMake -DWWHD_SNAN_COUNT=ON, logs with WWHD_SNAN_COUNT=1):
+ * counts every float load/store where the host conversion would quiet a signalling NaN (f32 -> double on
+ * lfs / psq_l, double -> f32 on stfs / psq_st), per call site (snan_count.cpp, captures/snan.log).
+ * Not compiled in by default: then these are no-ops and the code is unchanged. */
+#ifdef WWHD_SNAN_COUNT
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern int wwhd_snan_on;
+void wwhd_snan_hit(int kind, uint32_t ea, uint64_t bits);  /* noinline: its return address is the call site */
+#ifdef __cplusplus
+}
+#endif
+enum { WWHD_SNAN_LFS = 0, WWHD_SNAN_STFS = 1, WWHD_SNAN_PSQ_L = 2, WWHD_SNAN_PSQ_ST = 3 };
+static inline __attribute__((always_inline)) uint32_t snan_chk32(uint32_t b, uint32_t ea, int kind) {
+    if (__builtin_expect(wwhd_snan_on, 0) && (b & 0x7FC00000u) == 0x7F800000u && (b & 0x003FFFFFu))
+        wwhd_snan_hit(kind, ea, b);
+    return b;
+}
+static inline __attribute__((always_inline)) double snan_chk64(double d, uint32_t ea, int kind) {
+    if (__builtin_expect(wwhd_snan_on, 0)) {
+        uint64_t b = f64_as_u64(d);
+        if ((b & 0x7FF8000000000000ull) == 0x7FF0000000000000ull && (b & 0x0007FFFFFFFFFFFFull))
+            wwhd_snan_hit(kind, ea, b);
+    }
+    return d;
+}
+#else
+#define snan_chk32(b, ea, kind) (b)
+#define snan_chk64(d, ea, kind) (d)
+#endif
+
+static inline double ldf32(uint32_t ea) { return (double)u32_as_f32(snan_chk32(ld32(ea), ea, 0)); }
 static inline double ldf64(uint32_t ea) { return u64_as_f64(ld64(ea)); }
-static inline void stf32(uint32_t ea, double d) { st32(ea, f32_as_u32((float)d)); }
+static inline void stf32(uint32_t ea, double d) { st32(ea, f32_as_u32((float)snan_chk64(d, ea, 1))); }
 static inline void stf64(uint32_t ea, double d) { st64(ea, f64_as_u64(d)); }
 
 /* ---- integer helpers ---- */
@@ -404,26 +444,25 @@ static inline uint32_t psq_quant(float v, uint32_t type, uint32_t scale) {
     }
 }
 /* quantized formats (GQR type 4-7): out of line, so the float case below stays small and inline.
- * The _l forms take the two halves of the FPR separately (the recompiler keeps a leaf function's
- * registers in locals, tools/recomp/leaflocal.py). */
+ * The _l forms take the two halves of the FPR separately (for code that keeps registers in C locals). */
 static __attribute__((noinline)) void psq_load_slow_l(Cpu* c, double* p0, double* p1, uint32_t ea, int w, int i) {
     uint32_t g = c->gqr[i], type = (g >> 16) & 7, scale = (g >> 24) & 0x3F;
     int sz = (type == 4 || type == 6) ? 1 : (type == 5 || type == 7) ? 2 : 4;
-    uint32_t d0 = sz == 1 ? ld8(ea) : sz == 2 ? ld16(ea) : ld32(ea);
+    uint32_t d0 = sz == 1 ? ld8(ea) : sz == 2 ? ld16(ea) : snan_chk32(ld32(ea), ea, 2);
     *p0 = psq_dequant(d0, type, scale);
     if (w) *p1 = 1.0;
     else {
-        uint32_t d1 = sz == 1 ? ld8(ea + 1) : sz == 2 ? ld16(ea + 2) : ld32(ea + 4);
+        uint32_t d1 = sz == 1 ? ld8(ea + 1) : sz == 2 ? ld16(ea + 2) : snan_chk32(ld32(ea + 4), ea + 4, 2);
         *p1 = psq_dequant(d1, type, scale);
     }
 }
 static __attribute__((noinline)) void psq_store_slow_l(Cpu* c, double v0, double v1, uint32_t ea, int w, int i) {
     uint32_t g = c->gqr[i], type = g & 7, scale = (g >> 8) & 0x3F;
     int sz = (type == 4 || type == 6) ? 1 : (type == 5 || type == 7) ? 2 : 4;
-    uint32_t d0 = psq_quant((float)v0, type, scale);
+    uint32_t d0 = psq_quant((float)(sz == 4 ? snan_chk64(v0, ea, 3) : v0), type, scale);
     if (sz == 1) st8(ea, d0); else if (sz == 2) st16(ea, d0); else st32(ea, d0);
     if (!w) {
-        uint32_t d1 = psq_quant((float)v1, type, scale);
+        uint32_t d1 = psq_quant((float)(sz == 4 ? snan_chk64(v1, ea + 4, 3) : v1), type, scale);
         if (sz == 1) st8(ea + 1, d1); else if (sz == 2) st16(ea + 2, d1); else st32(ea + 4, d1);
     }
 }
@@ -436,16 +475,16 @@ static __attribute__((noinline)) void psq_store_slow_l(Cpu* c, double v0, double
 #endif
 static inline __attribute__((always_inline)) void psq_load_l(Cpu* c, double* p0, double* p1, uint32_t ea, int w, int i) {
     if (((PPC_GQR_STATIC_FLOAT >> i) & 1) || __builtin_expect(((c->gqr[i] >> 16) & 7) < 4, 1)) {
-        *p0 = u32_as_f32(ld32(ea));
-        *p1 = w ? 1.0 : (double)u32_as_f32(ld32(ea + 4));
+        *p0 = u32_as_f32(snan_chk32(ld32(ea), ea, 2));
+        *p1 = w ? 1.0 : (double)u32_as_f32(snan_chk32(ld32(ea + 4), ea + 4, 2));
         return;
     }
     psq_load_slow_l(c, p0, p1, ea, w, i);
 }
 static inline __attribute__((always_inline)) void psq_store_l(Cpu* c, double v0, double v1, uint32_t ea, int w, int i) {
     if (((PPC_GQR_STATIC_FLOAT >> i) & 1) || __builtin_expect((c->gqr[i] & 7) < 4, 1)) {
-        st32(ea, f32_as_u32((float)v0));
-        if (!w) st32(ea + 4, f32_as_u32((float)v1));
+        st32(ea, f32_as_u32((float)snan_chk64(v0, ea, 3)));
+        if (!w) st32(ea + 4, f32_as_u32((float)snan_chk64(v1, ea + 4, 3)));
         return;
     }
     psq_store_slow_l(c, v0, v1, ea, w, i);

@@ -307,14 +307,16 @@ void update() {
     s.ry = r.y / (float)JOYSTICK_MAX;
     if (injected.stick[0]) s.lx = injected.x[0], s.ly = injected.y[0];
     if (injected.stick[1]) s.rx = injected.x[1], s.ry = injected.y[1];
-    // the same controller for the settings overlay (by position, as the game sees it): Minus held half
-    // a second opens it, B or Minus closes it; while it is open the game gets no buttons
+    // the same controller for the settings overlay: Minus held half a second opens it, B or Minus closes it;
+    // while it is open the game gets no buttons. The face buttons by position, as input_map's Pad inputs are
+    // (Xbox positions: kPadA is the bottom button, the Switch's B): input_map's default "by position" preset
+    // then gives the overlay the Wii U's A on the Switch's A (face_input)
     float v[input_map::kPadCount] = {};
     {
         using namespace input_map;
         static const struct { u64 hid; int pad; } kPads[] = {
-            {HidNpadButton_A, kPadA},       {HidNpadButton_B, kPadB},           {HidNpadButton_X, kPadX},
-            {HidNpadButton_Y, kPadY},       {HidNpadButton_L, kPadLB},          {HidNpadButton_R, kPadRB},
+            {HidNpadButton_A, kPadB},       {HidNpadButton_B, kPadA},           {HidNpadButton_X, kPadY},
+            {HidNpadButton_Y, kPadX},       {HidNpadButton_L, kPadLB},          {HidNpadButton_R, kPadRB},
             {HidNpadButton_ZL, kPadLT},     {HidNpadButton_ZR, kPadRT},         {HidNpadButton_Plus, kPadMenu},
             {HidNpadButton_Minus, kPadOptions}, {HidNpadButton_StickL, kPadL3}, {HidNpadButton_StickR, kPadR3},
             {HidNpadButton_Up, kPadDUp},    {HidNpadButton_Down, kPadDDown},    {HidNpadButton_Left, kPadDLeft},

@@ -38,6 +38,7 @@
 #include "Cafe/HW/Latte/Core/FetchShader.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
+#include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
 #include "gx2/gx2.h"
 #include "platform/host.h"
 #include "ppc.h"
@@ -1279,6 +1280,9 @@ void reset_shader_memoization() {
     g_lastVs = g_lastPs = nullptr;
     R.shaderEpoch++;
 }
+
+// the same GLSL as the OpenGL renderer, so the same shader cache keys (docs/deko3d-plan.md, section 1)
+void select_decompiler() { g_renderer = std::make_unique<OpenGLRenderer>(); }
 
 // ---- start-up, frames, shutdown
 void shaders_init(void (*progress)(size_t done, size_t total)) {

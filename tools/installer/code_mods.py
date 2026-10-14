@@ -57,13 +57,19 @@ def fingerprint(pkg, manifest, game_dir, compiler, hooks):
     return h.hexdigest()
 
 
+def cache_name(key):
+    """The folder of a cached build in code-builds: the first 16 hex digits of its fingerprint (issue #144:
+    short paths on Windows; ready.json holds the full fingerprint). Releases up to v0.2.12 used all 64."""
+    return key[:16]
+
+
 def make_build_space(setup, data):
     """Evict only inactive variants created by this builder, oldest first."""
     minimum = 2 << 30
     if setup.free_space(str(data)) >= minimum:
         return
     try:
-        active = json.loads((data / 'code-mods-active.json').read_text())['fingerprint']
+        active = json.loads((data / 'code-mods-active.json').read_text(encoding='utf-8'))['fingerprint']
     except FileNotFoundError:
         active = None
     except (ValueError, KeyError, TypeError):
@@ -71,19 +77,20 @@ def make_build_space(setup, data):
         raise setup.SetupError('Not enough space; cannot identify the active code build for cache cleanup')
     candidates = []
     for cache in (data / 'code-builds').glob('*'):
-        if cache.name == active or cache.is_symlink() or not cache.is_dir():
+        if cache.name in (active, cache_name(active or '')) or cache.is_symlink() or not cache.is_dir():
             continue
-        if len(cache.name) != 64 or any(c not in '0123456789abcdef' for c in cache.name):
+        if len(cache.name) not in (16, 64) or any(c not in '0123456789abcdef' for c in cache.name):
             continue
         try:
             ready = cache / 'ready.json'
-            record = json.loads(ready.read_text())
-            if record.get('fingerprint') == cache.name:
+            record = json.loads(ready.read_text(encoding='utf-8'))
+            key = record.get('fingerprint')
+            if isinstance(key, str) and cache.name in (key, cache_name(key)):
                 candidates.append((ready.stat().st_mtime, cache))
         except (OSError, ValueError, AttributeError):
             continue
     for _, cache in sorted(candidates):
-        shutil.rmtree(cache)
+        shutil.rmtree(setup.longpath(cache))
         if setup.free_space(str(data)) >= minimum:
             return
     raise setup.SetupError('Not enough space for rebuilding game code (2 GB needed); previous build retained')
@@ -148,7 +155,7 @@ def rebuild(setup, ctx, hooks, status_file=None, cancel_file=None):
         tc = setup.get_toolchain(ctx.manifest['toolchain'], ctx.data_dir, setup.UI(False))
         version = setup.run_logged(tc.cc + ['--version'], env=tc.env, what='checking the compiler')
         key = fingerprint(setup.PKG, ctx.manifest, ctx.game_dir, [tc.cc, version], hooks)
-        cache = data / 'code-builds' / key
+        cache = data / 'code-builds' / cache_name(key)
         exe = cache / 'bin' / ctx.manifest['exe']
         ready = cache / 'ready.json'
         cached = False
@@ -163,8 +170,8 @@ def rebuild(setup, ctx, hooks, status_file=None, cancel_file=None):
                 # to discard the previous working selection.
                 cached = False
         if not cached:
-            work = data / ('code-build-' + key + '.partial')
-            shutil.rmtree(work, ignore_errors=True)
+            work = data / ('code-build-' + cache_name(key) + '.partial')
+            shutil.rmtree(setup.longpath(work), ignore_errors=True)
             work.mkdir(parents=True)
             make_build_space(setup, data)
             progress('Translating game code')
@@ -192,15 +199,15 @@ def rebuild(setup, ctx, hooks, status_file=None, cancel_file=None):
             atomic_json(work / 'ready.json', record)
             check()
             # Completed outputs only; caches remain small enough to keep both modes.
-            shutil.rmtree(work / 'gen')
-            shutil.rmtree(work / 'obj')
+            shutil.rmtree(setup.longpath(work / 'gen'))
+            shutil.rmtree(setup.longpath(work / 'obj'))
             archive = work / 'libgamecode.a'
             if archive.exists():
                 archive.unlink()
             cache.parent.mkdir(parents=True, exist_ok=True)
             if cache.exists():
-                shutil.rmtree(cache)
-            os.replace(work, cache)
+                shutil.rmtree(setup.longpath(cache))
+            os.replace(setup.longpath(work), setup.longpath(cache))
             work = None
         check()
         result = {'state': 'ready', 'hooks': bool(hooks), 'fingerprint': key,
@@ -219,7 +226,7 @@ def rebuild(setup, ctx, hooks, status_file=None, cancel_file=None):
         raise
     finally:
         if work:
-            shutil.rmtree(work, ignore_errors=True)
+            shutil.rmtree(setup.longpath(work), ignore_errors=True)
         lock.close()
 
 
@@ -227,17 +234,16 @@ def remember_installed(setup, ctx, tc, hooks, exe, gen, objs):
     """Keep the initial variant too, so the first round trip can use its cache."""
     data = Path(ctx.data_dir)
     if setup.free_space(str(data)) < (2 << 30):
+        (data / 'code-mods-active.json').unlink(missing_ok=True)
         return
     lock = BuildLock(data / 'code-build.lock', setup.SetupError)
     stage = None
     try:
         version = setup.run_logged(tc.cc + ['--version'], env=tc.env, what='checking the compiler')
         key = fingerprint(setup.PKG, ctx.manifest, ctx.game_dir, [tc.cc, version], hooks)
-        cache = data / 'code-builds' / key
-        if cache.exists():
-            return
-        stage = data / ('code-build-' + key + '.initial')
-        shutil.rmtree(stage, ignore_errors=True)
+        cache = data / 'code-builds' / cache_name(key)
+        stage = data / ('code-build-' + cache_name(key) + '.initial')
+        shutil.rmtree(setup.longpath(stage), ignore_errors=True)
         (stage / 'bin').mkdir(parents=True)
         source = Path(exe)
         shutil.copy2(source, stage / 'bin' / ctx.manifest['exe'])
@@ -252,9 +258,15 @@ def remember_installed(setup, ctx, tc, hooks, exe, gen, objs):
             'gamecode_objects': file_hashes(objs),
             'generated': file_hashes(sorted(p for p in Path(gen).rglob('*') if p.is_file()), Path(gen))})
         cache.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(stage, cache)
+        if cache.exists():
+            shutil.rmtree(setup.longpath(cache))
+        os.replace(setup.longpath(stage), setup.longpath(cache))
         stage = None
+        atomic_json(data / 'code-mods-active.json', {
+            'state': 'ready', 'hooks': bool(hooks), 'fingerprint': key,
+            'exe': str((cache / 'bin' / ctx.manifest['exe']).resolve()),
+            'user_dir': str((data / 'user').resolve()) if setup.PORTABLE else ''})
     finally:
         if stage:
-            shutil.rmtree(stage, ignore_errors=True)
+            shutil.rmtree(setup.longpath(stage), ignore_errors=True)
         lock.close()

@@ -26,14 +26,52 @@ const Entry catalogue[] = {
      "Run door-opening and closing events at four times their normal speed.",
      "WWHD_MOD_QUICK_DOORS", quick_doors, set_quick_doors},
     {"move-speed", "Run/swim speed", "Gameplay",
-     "Hold the selected button to run or swim faster. Default: L3 (rebind it in Controls).",
+     "Boost Link's running and swimming speed, separate multipliers, held or toggled, with a stamina "
+     "bar and a cooldown. Default: hold L3 (rebind it in Controls).",
      "WWHD_MOD_MOVE_SPEED", move_speed, set_move_speed},
+    {"ladder-speed", "Faster ladders", "Gameplay",
+     "Climb ladders faster. The climbing animation plays faster, so hands and feet stay in step.",
+     "WWHD_MOD_LADDER_SPEED", ladder_speed, set_ladder_speed},
+    {"sidle-speed", "Faster sidling", "Gameplay",
+     "Sidle along walls faster. The animation speeds up with the movement.",
+     "WWHD_MOD_SIDLE_SPEED", sidle_speed, set_sidle_speed},
+    {"sail-speed", "Sailing speed", "Gameplay",
+     "Sail faster, with separate multipliers for the normal sail and the Swift Sail.",
+     "WWHD_MOD_SAIL_SPEED", sail_speed, set_sail_speed},
+    {"auto-wind", "Automatic wind", "Gameplay",
+     "Makes the normal sail behave like the Swift Sail: the wind always blows the way the boat is heading.",
+     "WWHD_MOD_AUTO_WIND", auto_wind, set_auto_wind},
+    {"fast-forward", "Fast forward cutscenes and dialogue", "Gameplay",
+     "Hold the selected button during events to play faster. Choices still wait for input.",
+     "WWHD_MOD_FAST_FORWARD", fast_forward, set_fast_forward},
+    {"story-system", "Story system", "Story",
+     "Letters, quests, the story notebook and mod charts. It comes with the Story Notebook package, which the "
+     "mod manager downloads from the mod catalogue and keeps installed while this is on.",
+     "WWHD_STORY_SYSTEM", story_system, set_story_system, true},
     {"fast-scenes", "Fast scene changes", "Gameplay",
      "Speed up fades and scene transitions while keeping ordinary gameplay at normal speed.",
      "WWHD_MOD_FAST_SCENES", fast_scenes, set_fast_scenes},
 };
 std::string key(const Entry& entry) { return std::string("mod.")+entry.id+".enabled"; }
 bool player_preferences() { return !std::getenv("WWHD_NO_HOST_INPUT"); }
+const NumberOption traversal_catalogue[] = {
+    {"mod.ladder-speed.factor", "ladder-speed.factor", "WWHD_MOD_LADDER_FACTOR", ladder_speed_factor, set_ladder_speed_factor},
+    {"mod.sidle-speed.factor", "sidle-speed.factor", "WWHD_MOD_SIDLE_FACTOR", sidle_speed_factor, set_sidle_speed_factor},
+    {"mod.sail-speed.normal", "sail-speed.normal", "WWHD_MOD_SAIL_FACTOR", sail_speed_normal_factor, set_sail_speed_normal_factor},
+    {"mod.sail-speed.swift", "sail-speed.swift", "WWHD_MOD_SWIFT_SAIL_FACTOR", sail_speed_swift_factor, set_sail_speed_swift_factor},
+};
+}  // namespace
+
+std::span<const NumberOption> traversal_options() { return traversal_catalogue; }
+void set_traversal_option(std::string_view profile_key, float value) {
+    for (const auto& option : traversal_catalogue) {
+        if (profile_key != option.profile_key) continue;
+        option.apply(value);
+        const float applied = option.value();
+        if (player_preferences()) hostui::set(option.key, std::to_string(applied));
+        packages::remember_option(option.profile_key, applied);
+        return;
+    }
 }
 
 std::span<const Entry> entries() { return catalogue; }
@@ -59,7 +97,47 @@ void load_saved() {
         if (end != value.c_str() && *end == '\0' && std::isfinite(parsed) && parsed >= lo && parsed <= hi)
             apply(parsed);
     };
-    number("mod.move-speed.factor", "WWHD_MOD_MOVE_FACTOR", 1.25f, 4.f, set_move_speed_factor);
+    if (!std::getenv("WWHD_MOD_FF_RATE")) {
+        std::string v;
+        if (hostui::get("mod.fast-forward.rate", v) && (v == "2" || v == "3" || v == "4"))
+            set_fast_forward_rate(unsigned(v[0] - '0'));
+    }
+    if (!std::getenv("WWHD_MOD_FF_BUTTON")) {
+        std::string v;
+        if (hostui::get("mod.fast-forward.button", v)) {
+            char* end = nullptr;
+            auto n = std::strtoul(v.c_str(), &end, 10);
+            if (end != v.c_str() && !*end && n <= UINT32_MAX) set_fast_forward_button(uint32_t(n));
+        }
+    }
+    if (!std::getenv("WWHD_MOD_FF_MUTE")) {
+        std::string v;
+        if (hostui::get("mod.fast-forward.mute", v) && (v == "0" || v == "1")) set_fast_forward_mute(v == "1");
+    }
+    number("mod.move-speed.land", "WWHD_MOD_MOVE_FACTOR", 1.f, 4.f, set_move_speed_land_factor);
+    number("mod.move-speed.swim", "WWHD_MOD_MOVE_SWIM", 1.f, 4.f, set_move_speed_swim_factor);
+    // A settings file from before the split stored one factor, which applied to both states.
+    if (!std::getenv("WWHD_MOD_MOVE_FACTOR") && !std::getenv("WWHD_MOD_MOVE_SWIM")) {
+        std::string land_v, swim_v, legacy_v;
+        if (hostui::get("mod.move-speed.factor", legacy_v) && !hostui::get("mod.move-speed.land", land_v) &&
+            !hostui::get("mod.move-speed.swim", swim_v)) {
+            char* end = nullptr;
+            const float f = std::strtof(legacy_v.c_str(), &end);
+            if (end != legacy_v.c_str() && *end == '\0' && std::isfinite(f) && f >= 1.f && f <= 4.f) {
+                set_move_speed_land_factor(f);
+                set_move_speed_swim_factor(f);
+            }
+        }
+    }
+    number("mod.move-speed.stamina", "WWHD_MOD_MOVE_STAMINA", 0.f, 60.f, set_move_speed_stamina_seconds);
+    number("mod.move-speed.cooldown", "WWHD_MOD_MOVE_COOLDOWN", 0.f, 60.f, set_move_speed_cooldown_seconds);
+    std::string mode;
+    if (hostui::get("mod.move-speed.mode", mode) && (mode == "0" || mode == "1"))
+        set_move_speed_mode(mode == "1" ? MoveMode::kToggle : MoveMode::kHold);
+    std::string anim;
+    if (!std::getenv("WWHD_MOD_MOVE_ANIM") && hostui::get("mod.move-speed.anim", anim) && valid_move_anim_id(anim))
+        set_move_speed_anim(move_anim_from_id(anim));
+    for (const auto& option : traversal_options()) number(option.key, option.startup_env, 1.f, 3.f, option.apply);
     number("mod.direct-camera.speed", "WWHD_MOD_CAMERA_SPEED", .5f, 2.f, set_camera_speed);
     std::string button;
     if (hostui::get("mod.move-speed.button", button)) {

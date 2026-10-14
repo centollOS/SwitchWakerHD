@@ -51,12 +51,14 @@ import urllib.request
 import zipfile
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Windows embeddable Python runs in isolated mode: it does not add the script
 # directory to sys.path. Resolve shipped sibling modules explicitly.
 sys.path.insert(0, HERE)
 import code_mods  # noqa: E402
+import decomp_setup  # noqa: E402
 PKG = os.path.normpath(os.path.join(HERE, "..", ".."))
 # Portable release (portable.txt in the release folder): everything setup and the game create stays
 # in <release folder>/data. Without the marker: the per-user locations of earlier releases.
@@ -68,6 +70,123 @@ IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
 IS_LINUX = not IS_MAC and not IS_WIN
 EXE_SUFFIX = ".exe" if IS_WIN else ""
+
+
+# ---------------------------------------------------------------------------------------------
+# long paths on Windows (issue #144)
+#
+# Windows limits ordinary paths to MAX_PATH (260 UTF-16 units with the terminating NUL), unless a path
+# carries the extended-length prefix \\?\ (an absolute, normalised path; up to about 32767 units).
+# Windows' "Extract All" puts the release folder inside a folder of the same name, and the longest
+# files of the pinned llvm-mingw archive are 117-118 characters deep, so unpacking the compiler from
+# a release in Downloads can exceed MAX_PATH. Setup's own file operations (unpacking, moving and
+# deleting the compiler, game files, generated code, caches) therefore use longpath(); messages and
+# the log keep showing the normal path (plain_path / plain_text).
+
+LONGPATH_PREFIX = "\\\\?\\"
+WINDOWS_MAX_PATH = 259  # characters of a full path without the extended-length prefix (MAX_PATH - NUL)
+# The deepest path the game, wwhd-extract and the compiler create, read or start below the data folder.
+# These programs use ordinary Windows paths (no \\?\; the game declares longPathAware, which only helps
+# where Windows has long paths enabled), so the data folder + this must stay within MAX_PATH. The deepest
+# ones are names nobody here chooses:
+#   game\content\Common\AudioRes\stream\Kugutu_Taraba_Intro_CK.w.32.dspadpcm.bfstm         (78, a game file)
+#   toolchain\llvm-mingw-20260922-ucrt-aarch64\bin\aarch64-w64-mingw32-clang++.exe          (78, the compiler)
+# Every name the game and setup choose themselves stays within 64 (test_setup.LongPaths), e.g.
+#   user\shader-prebuild\live\vk-<12 hex>.bin.recipes.t<8 hex>                              (63)
+#   user\shader-prebuild\generation-<8>\manifest.json.t<8>                                  (64)
+# The compiler reads its headers through LLVM, which widens long paths itself; setup unpacks, moves and
+# deletes the compiler with \\?\ paths (its unused Python/lldb files are 128 deep, 139 while unpacking).
+DEEPEST_DATA_PATH = 78
+MAX_DATA_DIR_CHARS = WINDOWS_MAX_PATH - 1 - DEEPEST_DATA_PATH  # 180 (the 1: the separator after it)
+
+
+# Extended-length paths need a Python whose own path functions join with backslashes: shutil, os.walk
+# and zipfile append names with os.path.join, and Windows takes a \\?\ path literally ("/" is no
+# separator there). The release's Python is such a one; MSYS2's Python (used by some CI jobs) joins with
+# "/", so there setup keeps ordinary paths.
+NATIVE_WINDOWS_PATHS = IS_WIN and os.path.join("a", "b") == "a\\b"
+
+
+def windows_path(p):
+    """p as a normalised Windows path with backslashes, whatever separator the Python flavour uses (MSYS2's
+    Python writes "/"): no "." or ".." components, no doubled separators; a drive root keeps its backslash."""
+    p = os.fspath(p).replace("/", "\\")
+    if p.startswith("\\\\"):  # \\server\share\...
+        parts = p[2:].split("\\")
+        root, rest = "\\\\" + "\\".join(parts[:2]) + "\\", parts[2:]
+    elif len(p) >= 2 and p[1] == ":":
+        root, rest = p[:2] + "\\", p[2:].split("\\")
+    else:
+        root, rest = "", p.split("\\")
+    out = []
+    for part in rest:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if out:
+                out.pop()
+            continue
+        out.append(part)
+    return (root + "\\".join(out)) if (root or out) else "."
+
+
+def longpath(p, windows=None):
+    """p for Windows file APIs without the MAX_PATH limit: the absolute, normalised path with backslashes
+    and the extended-length prefix (\\\\?\\C:\\..., \\\\?\\UNC\\server\\share\\... for a network share).
+    Unchanged on other platforms and with a Python that joins paths with "/" (NATIVE_WINDOWS_PATHS).
+    windows=True: the string form only (tests simulate Windows anywhere). Use it only for the file operation
+    itself, never in messages."""
+    if not (NATIVE_WINDOWS_PATHS if windows is None else windows):
+        return p
+    p = os.fspath(p)
+    if p.startswith(LONGPATH_PREFIX) or p.startswith("\\\\.\\"):
+        return p
+    p = windows_path(os.path.abspath(p) if windows is None else p)
+    if p.startswith("\\\\"):  # \\server\share\...
+        return LONGPATH_PREFIX + "UNC\\" + p[2:]
+    return LONGPATH_PREFIX + p
+
+
+def plain_path(p):
+    """The normal form of a path longpath() made (for messages and the log)."""
+    p = os.fspath(p)
+    if p.startswith(LONGPATH_PREFIX + "UNC\\"):
+        return "\\\\" + p[len(LONGPATH_PREFIX) + 4:]
+    if p.startswith(LONGPATH_PREFIX):
+        return p[len(LONGPATH_PREFIX):]
+    return p
+
+
+def plain_text(text):
+    """text (an error message) with every extended-length path shown in its normal form."""
+    text = str(text)
+    # as repr() writes it (an OSError's message quotes its file name with doubled backslashes), then as it is
+    for bs in ("\\\\", "\\"):
+        prefix = bs * 2 + "?" + bs
+        text = text.replace(prefix + "UNC" + bs, bs * 2).replace(prefix, "")
+    return text
+
+
+def path_length_problem(data_dir, package=None, windows=None):
+    """None, or the message that stops setup before it downloads anything when the data folder is too
+    deep for Windows: the game, wwhd-extract and the compiler would fail on their deepest files
+    (DEEPEST_DATA_PATH). package: the release folder; when the data folder is inside it (a portable
+    release), that is the folder the player moves."""
+    if not (IS_WIN if windows is None else windows):
+        return None
+    data_dir = windows_path(plain_path(data_dir))
+    if len(data_dir) <= MAX_DATA_DIR_CHARS:
+        return None
+    if package and data_dir.rsplit("\\", 1)[0].lower() == windows_path(package).lower():
+        package = windows_path(package)
+        limit = MAX_DATA_DIR_CHARS - (len(data_dir) - len(package))
+        return ("This folder's path is too long for Windows (%d characters, at most %d work). Move the Wind "
+                "Waker HD folder to a shorter place such as C:\\Games\\WindWakerHD and start it again."
+                % (len(package), limit))
+    return ("The install folder's path is too long for Windows (%d characters, at most %d work). Choose a "
+            "shorter place such as C:\\Games\\WindWakerHD and start it again." % (len(data_dir), MAX_DATA_DIR_CHARS))
+
+
 APP_NAME = "Wind Waker HD"
 TITLE_IDS = {
     "0005000010143500": "USA",
@@ -127,7 +246,7 @@ class Log:
 
     def write(self, text):
         if self.f:
-            self.f.write(text.rstrip("\n") + "\n")
+            self.f.write(plain_text(text).rstrip("\n") + "\n")
             self.f.flush()
 
 
@@ -153,6 +272,7 @@ GUI = None  # Protocol when running under the graphical installer
 
 
 def say(text=""):
+    text = plain_text(text)  # never a \\?\ path in what the player reads (longpath)
     if GUI:
         GUI.emit({"event": "log", "text": text})
     else:
@@ -468,14 +588,36 @@ def parse_key(data):
     return bytes.fromhex(h)
 
 
-def read_key_file(path):
+KEY_FILE_LIMIT = 1024 * 1024  # bounded, but large enough for a Cemu library
+
+
+def parse_key_entries(data):
+    """Keys in file order (entry numbers count valid keys, not comments/junk)."""
+    single = parse_key(data)
+    if single:
+        return [single]
+    if isinstance(data, bytes):
+        data = data.decode("utf-8-sig", "replace")
+    entries = []
+    for line in data.splitlines():
+        match = re.match(r"^\s*([0-9a-fA-F]{32})(?=$|\s|#|;|//)", line)
+        if match:
+            entries.append(bytes.fromhex(match[1]))
+    return entries
+
+
+def read_key_entries(path):
     try:
-        if os.path.getsize(path) > 4096:
-            return None
         with open(path, "rb") as f:
-            return parse_key(f.read())
+            data = f.read(KEY_FILE_LIMIT + 1)
+        return parse_key_entries(data) if len(data) <= KEY_FILE_LIMIT else []
     except OSError:
-        return None
+        return []
+
+
+def read_key_file(path):
+    entries = read_key_entries(path)
+    return entries[0] if len(entries) == 1 else None
 
 
 class Keys:
@@ -545,33 +687,224 @@ def load_toolchains():
         return json.load(f)
 
 
-def download(url, dst, sha256, size_hint, label):
-    """Downloads url to dst with a progress bar and checks the SHA-256 before keeping it."""
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def local_copy(name, sha256):
+    """A copy of a download the player saved themselves (issue #113: when setup cannot download it):
+    the file name from the URL, in the release folder or the setup folder, with the expected SHA-256."""
+    for folder in (PKG, HERE):
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            if file_sha256(path) == sha256:
+                return path
+            say("  Ignoring %s: it is not the expected file (SHA-256 differs)." % path)
+    return None
+
+
+def download_error(url, e):
+    text = str(e)
+    if "CERTIFICATE_VERIFY_FAILED" in text or "certificate verify failed" in text:
+        why = ("the secure connection's certificate could not be checked. Either Windows lacks a root certificate "
+               "that it normally fetches on demand, or an antivirus or security program or a proxy intercepts "
+               "HTTPS connections")
+    else:
+        why = "%s." % text.rstrip(".")
+    name = os.path.basename(url.split("?")[0])
+    return SetupError("download failed: %s\nRun setup again (it resumes where it stopped). If it keeps failing, "
+                      "download %s in your browser, put %s in the Wind Waker HD folder and run setup again."
+                      % (why, url, name))
+
+
+DOWNLOAD_ATTEMPTS = 6
+
+
+def windows_curl():
+    """Windows' own curl.exe (Windows 10 1803 and later). It verifies certificates through Windows,
+    which fetches missing root certificates on demand; Python's ssl module only reads the store as it
+    is, so a fresh Windows can fail there with "unable to get local issuer certificate" (issue #113)."""
+    if os.name != "nt":
+        return None
+    path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "curl.exe")
+    return path if os.path.isfile(path) else None
+
+
+def curl_download(curl, url, tmp):
+    """Downloads url to tmp with curl.exe (resuming tmp); True when curl reports success."""
+    say("  Python could not verify the certificate; downloading with Windows' curl instead.")
+    cmd = [curl, "--location", "--fail", "--silent", "--show-error", "--retry", "5", "--continue-at", "-",
+           "--output", tmp, url]
+    return subprocess.run(cmd).returncode == 0
+
+
+def download(url, dst, sha256, size_hint, label, attempts=DOWNLOAD_ATTEMPTS, wait=2.0):
+    """Downloads url to dst with a progress bar and checks the SHA-256 before keeping it. Interrupted
+    downloads are retried and resume where they stopped (HTTP range requests); a copy the player
+    downloaded themselves is used instead when present (local_copy). sha256 None: the caller checks the
+    content itself (the decomp source: its unpacked tree, decomp_setup.py)."""
+    name = os.path.basename(url.split("?")[0])
+    own = local_copy(name, sha256) if sha256 else None
+    if own:
+        say("  Using %s" % own)
+        shutil.copyfile(own, dst + ".part")
+        os.replace(dst + ".part", dst)
+        return
     tmp = dst + ".part"
     say("  Downloading %s" % url)
-    h = hashlib.sha256()
-    req = urllib.request.Request(url, headers={"User-Agent": "wwhd-setup"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
-            total = int(r.headers.get("Content-Length") or size_hint or 0)
-            pr = Progress(label)
-            done = 0
-            while True:
-                chunk = r.read(1 << 20)
-                if not chunk:
+    pr = Progress(label)
+    last = None
+    for attempt in range(attempts):
+        have = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+        headers = {"User-Agent": "wwhd-setup"}
+        if have:
+            headers["Range"] = "bytes=%d-" % have
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                resumed = have and getattr(r, "status", 200) == 206
+                mode = "ab" if resumed else "wb"
+                done = have if resumed else 0
+                length = int(r.headers.get("Content-Length") or 0)
+                total = (done + length) if length else int(size_hint or 0)
+                with open(tmp, mode) as f:
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        done += len(chunk)
+                        pr.update(done, total or done, human(done))
+                if total and done < total:
+                    raise OSError("the connection closed after %s of %s" % (human(done), human(total)))
+            break
+        except OSError as e:  # urllib's errors, timeouts and resets are all OSErrors
+            last = e
+            if getattr(e, "code", None) == 416 and os.path.isfile(tmp):  # a stale or oversized partial file
+                os.remove(tmp)
+            if "CERTIFICATE_VERIFY_FAILED" in str(e):
+                curl = windows_curl()
+                if curl and curl_download(curl, url, tmp):
                     break
-                f.write(chunk)
-                h.update(chunk)
-                done += len(chunk)
-                pr.update(done, total or done, human(done))
-            pr.done(human(done))
-    except OSError as e:
-        raise SetupError("download failed: %s\nCheck your internet connection and run setup again." % e)
-    if h.hexdigest() != sha256:
+                raise download_error(url, e)
+            if attempt == attempts - 1:
+                raise download_error(url, e)
+            say("  Download interrupted (%s); retrying..." % e)
+            time.sleep(wait * (2 ** attempt))
+    pr.done(human(os.path.getsize(tmp)))
+    if sha256 and file_sha256(tmp) != sha256:
         os.remove(tmp)
         raise SetupError("the download of %s is corrupt or was changed (SHA-256 mismatch); nothing was installed. "
                          "Run setup again; if this repeats, report it." % url)
     os.replace(tmp, dst)
+
+
+def python_setup_capable(executable):
+    """Probe the interpreter itself, including optional compiled stdlib codec support."""
+    try:
+        result = subprocess.run([executable, "-I", "-c",
+                                 "import sys; from compression import zstd; "
+                                 "assert sys.version_info >= (3, 14); "
+                                 "assert zstd.decompress(zstd.compress(b'wwhd')) == b'wwhd'"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def ensure_setup_python(data_dir, prefer_system=True):
+    """Select/provision trusted host Python for guest builds and local setup services.
+
+    The installer owns downloads; guest setup scripts receive no additional capabilities.
+    Windows always uses the release's audited embeddable distribution (issue #58).
+    """
+    if IS_WIN:
+        executable = os.path.join(PKG, "tools", "python", "python.exe")
+        if not python_setup_capable(executable):
+            raise SetupError("The bundled Python lacks Python 3.14 compression.zstd support. "
+                             "Download the current complete Windows release; no Python will be downloaded by setup.")
+        return executable
+    if prefer_system and python_setup_capable(sys.executable):
+        return sys.executable
+    arch = host_arch()
+    if IS_MAC:
+        key = {"aarch64": "macos", "x86_64": "macos-x86_64"}.get(arch)
+    elif IS_LINUX:
+        key = {"aarch64": "linux-aarch64", "x86_64": "linux"}.get(arch)
+    else:
+        key = None
+    if key is None:
+        raise SetupError("No private setup Python is available for this platform/architecture")
+    pin = load_toolchains()["python"][key]
+    root = os.path.join(data_dir, "setup-python")
+    executable = os.path.join(root, "python", "bin", "python3")
+    marker = os.path.join(root, ".wwhd-python")
+    try:
+        with open(marker) as f:
+            current = f.read().strip() == pin["sha256"]
+    except OSError:
+        current = False
+    if current and python_setup_capable(executable):
+        return executable
+    os.makedirs(root, exist_ok=True)
+    archive = os.path.join(root, "download.tar.gz")
+    stage = os.path.join(root, "unpack.tmp")
+    say("  Installing private Python 3.14 for local mod setup (system Python is unchanged).")
+    download(pin["url"], archive, pin["sha256"], pin.get("size"), "setup Python")
+    shutil.rmtree(longpath(stage), ignore_errors=True)
+    os.makedirs(stage)
+    try:
+        # Only the SHA-verified, maintainer-pinned standalone archive reaches extraction.
+        if shutil.which("tar"):
+            run_logged(["tar", "-xf", archive, "-C", stage], what="unpacking setup Python")
+        else:
+            raise SetupError("tar is required to unpack the pinned setup Python")
+        staged = os.path.join(stage, "python", "bin", "python3")
+        if not python_setup_capable(staged):
+            raise SetupError("The pinned Python cannot run compression.zstd on this computer")
+        shutil.rmtree(longpath(os.path.join(root, "python")), ignore_errors=True)
+        os.replace(os.path.join(stage, "python"), os.path.join(root, "python"))
+        with open(marker + ".tmp", "w") as f:
+            f.write(pin["sha256"] + "\n")
+        os.replace(marker + ".tmp", marker)
+    finally:
+        shutil.rmtree(longpath(stage), ignore_errors=True)
+        if os.path.exists(archive):
+            os.remove(archive)
+    return executable
+
+
+def repair_guest_python(data_dir):
+    """Upgrade an existing guest bridge without rebuilding game code or changing its compiler."""
+    path = os.path.join(data_dir, "guest-sdk.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            config = json.load(f)
+    except (OSError, ValueError) as e:
+        raise SetupError("No valid guest SDK configuration to repair: %s" % e)
+    if not isinstance(config, dict) or config.get("format_version") not in (1, 2):
+        raise SetupError("Unsupported guest SDK configuration version")
+    executable = ensure_setup_python(data_dir)
+    if config["format_version"] == 2 and PORTABLE and os.path.isabs(executable):
+        for root in (PKG, data_dir):
+            try:
+                inside = os.path.commonpath([os.path.abspath(root), executable]) == os.path.abspath(root)
+            except ValueError:  # another Windows drive
+                inside = False
+            if inside:
+                executable = os.path.relpath(executable, data_dir)
+                if not executable.startswith("."):
+                    executable = "." + os.sep + executable
+                break
+    config["python"] = [executable]
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(config, f)
+    os.replace(path + ".tmp", path)
+    say("Local mod setup Python is ready (compression.zstd verified).")
 
 
 def ensure_xcode_clt(ui):
@@ -621,29 +954,31 @@ def get_toolchain(name, data_dir, ui):
         arc = os.path.join(root, os.path.basename(tc["url"].split("?")[0]))
         download(tc["url"], arc, tc["sha256"], tc.get("size"), "compiler")
         tmp = os.path.join(root, "unpack.tmp")
-        shutil.rmtree(tmp, ignore_errors=True)
-        os.makedirs(tmp)
+        shutil.rmtree(longpath(tmp), ignore_errors=True)
+        os.makedirs(longpath(tmp))
         say("  Unpacking...")
         if arc.endswith(".zip"):
+            # \\?\ paths: the deepest files of llvm-mingw exceed MAX_PATH below a deep release folder (#144)
             with zipfile.ZipFile(arc) as z:
-                z.extractall(tmp)
+                z.extractall(longpath(tmp))
         elif shutil.which("tar"):
             run_logged(["tar", "-xf", arc, "-C", tmp], what="unpacking the compiler")
         else:
             with tarfile.open(arc) as t:
-                t.extractall(tmp)
+                t.extractall(longpath(tmp))
         src = os.path.join(tmp, tc["dir"])
-        if not os.path.isdir(src):
+        if not os.path.isdir(longpath(src)):
             raise SetupError("unexpected compiler archive layout")
-        shutil.rmtree(tdir, ignore_errors=True)
-        os.replace(src, tdir)
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(longpath(tdir), ignore_errors=True)
+        os.replace(longpath(src), longpath(tdir))
+        shutil.rmtree(longpath(tmp), ignore_errors=True)
         os.remove(arc)
         with open(marker, "w") as f:
             f.write(tc["sha256"] + "\n")
     if kind == "llvm-mingw":
         b = os.path.join(tdir, "bin")
-        return Toolchain([os.path.join(b, "x86_64-w64-mingw32-clang.exe")], [os.path.join(b, "x86_64-w64-mingw32-clang++.exe")],
+        triple = tc.get("triple", "x86_64-w64-mingw32")  # aarch64-w64-mingw32: the Windows on ARM64 release
+        return Toolchain([os.path.join(b, triple + "-clang.exe")], [os.path.join(b, triple + "-clang++.exe")],
                          [os.path.join(b, "llvm-ar.exe")], rsp=True, desc="llvm-mingw " + tc["dir"])
     if kind == "zig":
         z = os.path.join(tdir, "zig")
@@ -859,7 +1194,7 @@ def valid_game_folder(path):
 
 def folder_size(path):
     total = 0
-    for dp, _, fns in os.walk(path):
+    for dp, _, fns in os.walk(longpath(path)):
         for fn in fns:
             try:
                 total += os.path.getsize(os.path.join(dp, fn))
@@ -869,60 +1204,41 @@ def folder_size(path):
 
 
 def get_disc_keys(image, ui, args):
-    keys = Keys()
-    if args.disc_key:
-        keys.disc = read_key_file(args.disc_key)
-        if not keys.disc:
-            raise SetupError("%s does not contain a disc key (16 raw bytes or 32 hex digits)" % args.disc_key)
-    else:
-        side = os.path.splitext(image)[0] + ".key"
-        if os.path.isfile(side):
-            keys.disc = read_key_file(side)
-            if keys.disc:
-                say("  Disc key: found %s" % os.path.basename(side))
-    if args.common_key:
-        keys.common = read_key_file(args.common_key)
-        if not keys.common:
-            raise SetupError("%s does not contain the Wii U common key (16 raw bytes or 32 hex digits)" % args.common_key)
-    elif os.environ.get("WIIU_COMMON_KEY"):
-        keys.common = parse_key(os.environ["WIIU_COMMON_KEY"])
-        if not keys.common:
-            raise SetupError("WIIU_COMMON_KEY is not 32 hex digits")
-        say("  Common key: from WIIU_COMMON_KEY")
-    else:
-        for d in (os.path.dirname(image), PKG):
-            p = os.path.join(d, "common.key")
-            if os.path.isfile(p) and read_key_file(p):
-                keys.common = read_key_file(p)
-                say("  Common key: found %s" % p)
-                break
-    if not keys.disc:
-        keys.disc = ask_key(ui, "disc key", "16 bytes, dumped together with this disc, usually a .key file next to the image")
-    if not keys.common:
-        keys.common = ask_key(ui, "Wii U common key", "16 bytes, the same for every Wii U, dumped from your console")
+    req = {"disc_key_file": args.disc_key, "common_key_file": args.common_key}
     while True:
-        problem, err, info = disc_info(image, keys)
-        if not problem:
+        keys, info, why, notices = resolve_disc_keys(image, req)
+        if not why:
+            for notice in notices:
+                say("  " + notice)
             return keys, info
-        if problem in ("disc_key_bad", "disc_key_wrong"):
-            say("  The disc key does not match this disc image.")
-            if not ui.interactive or args.disc_key:
-                raise SetupError(err)
-            keys.disc = ask_key(ui, "disc key", "it must be the key dumped together with this disc")
-        elif problem in ("common_key_bad", "common_key_wrong"):
-            say("  The Wii U common key is not correct.")
-            if not ui.interactive or args.common_key:
-                raise SetupError(err)
-            keys.common = ask_key(ui, "Wii U common key", "the same 16 bytes for every Wii U console")
+        problem, message = why
+        if not ui.interactive or not problem.startswith(("disc_key", "common_key")):
+            raise SetupError(message)
+        say("  " + message)
+        name = "disc" if problem.startswith("disc_key") else "common"
+        choice = ui.choose("Provide the %s key (Cemu keeps both keys in keys.txt)." % name,
+                           ["choose a key file / keys.txt", "paste it (32 hex digits; the input is hidden)"])
+        req.pop(name + "_key_file", None)
+        req.pop(name + "_key_hex", None)
+        if choice == 0:
+            req[name + "_key_file"] = ui.pick_path("Choose the key file / keys.txt")
         else:
-            raise SetupError("cannot read the disc image: %s" % err)
+            req[name + "_key_hex"] = ui.secret("Paste the %s key and press Enter:" % name)
+
+
+def game_staging_dir(data_dir):
+    """The empty folder the game files are extracted or copied into before they replace data/game. As
+    short as "game" (issue #144): the game's deepest file names then stay as deep below the data folder
+    as in data/game (DEEPEST_DATA_PATH). Releases up to v0.2.12 used game.partial."""
+    for old in ("game.partial", "gnew"):
+        shutil.rmtree(longpath(os.path.join(data_dir, old)), ignore_errors=True)
+    return os.path.join(data_dir, "gnew")
 
 
 def extract_game(image, keys, info, data_dir, title=None):
     """Extracts a disc image (keys) or one title folder of a Cemu archive (title, no keys) into data_dir/game."""
     dst = os.path.join(data_dir, "game")
-    tmp = os.path.join(data_dir, "game.partial")
-    shutil.rmtree(tmp, ignore_errors=True)
+    tmp = game_staging_dir(data_dir)
     total = int(info.get("bytes", 0))
     need = total + (1 << 30)
     if free_space(data_dir) < need:
@@ -933,7 +1249,7 @@ def extract_game(image, keys, info, data_dir, title=None):
     try:
         check_game_version(tmp)
     except SetupError:
-        shutil.rmtree(tmp, ignore_errors=True)  # keeps the game files of an earlier setup
+        shutil.rmtree(longpath(tmp), ignore_errors=True)  # keeps the game files of an earlier setup
         raise
     replace_dir(tmp, dst)
 
@@ -973,7 +1289,7 @@ def run_extract(image, keys, out, title=None, only=None):
     err = b"".join(errbuf).decode("utf-8", "replace").strip()
     LOG.write(err)
     if rc != 0:
-        shutil.rmtree(out, ignore_errors=True)
+        shutil.rmtree(longpath(out), ignore_errors=True)
         raise SetupError("extracting the game failed: %s" % err)
     pr.done()
 
@@ -985,16 +1301,16 @@ def copy_game_folder(src, data_dir):
     total = folder_size(src)
     if free_space(data_dir) < total + (1 << 30):
         raise SetupError("not enough free disk space in %s: %s needed" % (data_dir, human(total + (1 << 30))))
-    tmp = os.path.join(data_dir, "game.partial")
-    shutil.rmtree(tmp, ignore_errors=True)
+    tmp = game_staging_dir(data_dir)
     pr = Progress("copying")
     done = 0
-    for dp, dns, fns in os.walk(src):
-        rel = os.path.relpath(dp, src)
-        os.makedirs(os.path.join(tmp, rel), exist_ok=True)
+    long_src, long_tmp = longpath(src), longpath(tmp)
+    for dp, dns, fns in os.walk(long_src):
+        rel = os.path.relpath(dp, long_src)
+        os.makedirs(os.path.join(long_tmp, rel), exist_ok=True)
         for fn in fns:
             s = os.path.join(dp, fn)
-            shutil.copyfile(s, os.path.join(tmp, rel, fn))
+            shutil.copyfile(s, os.path.join(long_tmp, rel, fn))
             done += os.path.getsize(s)
             pr.update(done, total or 1, "%s of %s" % (human(done), human(total)))
     pr.done()
@@ -1003,11 +1319,11 @@ def copy_game_folder(src, data_dir):
 
 def replace_dir(new, dst):
     old = dst + ".old"
-    shutil.rmtree(old, ignore_errors=True)
+    shutil.rmtree(longpath(old), ignore_errors=True)
     if os.path.exists(dst):
-        os.replace(dst, old)
-    os.replace(new, dst)
-    shutil.rmtree(old, ignore_errors=True)
+        os.replace(longpath(dst), longpath(old))
+    os.replace(longpath(new), longpath(dst))
+    shutil.rmtree(longpath(old), ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1089,12 +1405,12 @@ def finish_language_source(tmp, region, title_id, source_name, data_dir):
         with open(path, "rb") as f:
             head = f.read(4)
         if head != b"SARC":
-            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.rmtree(longpath(tmp), ignore_errors=True)
             raise SetupError("%s is not a language pack (damaged or not from the game)" % name)
         packs.append({"file": name, "language": known[name.lower()], "bytes": os.path.getsize(path),
                       "sha256": file_sha256(path)})
     if not packs:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(longpath(tmp), ignore_errors=True)
         raise SetupError("no language packs (content/Common/Pack/permanent_2d_%s*.pack) were found in this %s game"
                          % ("Eu" if region == "EU" else "Jp", LANGUAGE_REGION_NAMES[region]))
     for name in ignored:
@@ -1134,7 +1450,7 @@ def remove_language_source(data_dir, region):
     d = os.path.join(language_root(data_dir), region)
     if not os.path.isdir(d):
         raise SetupError("there is no %s language source" % LANGUAGE_REGION_NAMES[region])
-    shutil.rmtree(d)
+    shutil.rmtree(longpath(d))
     return d
 
 
@@ -1158,6 +1474,14 @@ def check_language_source_allowed(game_dir):
                      "(F1) > Language instead." % build.name)
 
 
+def language_staging_dir(root, region):
+    """The empty folder a language source is extracted into first: game-lang/<region>.tmp (short, issue
+    #144; releases up to v0.2.12 used <region>.partial)."""
+    for name in (region + ".partial", region + ".tmp"):
+        shutil.rmtree(longpath(os.path.join(root, name)), ignore_errors=True)
+    return os.path.join(root, region + ".tmp")
+
+
 def add_language_source(source, data_dir, keys=None, info=None, game_dir=None):
     """Takes the language packs of a European or Japanese game: source ("image", path) with keys and
     disc info (wwhd-extract info), ("archive", path) or ("folder", path). Returns [manifest] (an archive
@@ -1171,8 +1495,7 @@ def add_language_source(source, data_dir, keys=None, info=None, game_dir=None):
     name = os.path.basename(path.rstrip("/\\"))
     if kind == "image":
         region = language_source_region(info.get("title_id"))
-        tmp = os.path.join(root, region + ".partial")
-        shutil.rmtree(tmp, ignore_errors=True)
+        tmp = language_staging_dir(root, region)
         run_extract(path, keys, tmp, only=LANGUAGE_SOURCE_FILES)
         return [finish_language_source(tmp, region, info["title_id"].lower(), name, data_dir)]
     if kind == "archive":
@@ -1189,8 +1512,7 @@ def add_language_source(source, data_dir, keys=None, info=None, game_dir=None):
         out = []
         for t in titles:
             region = LANGUAGE_SOURCE_TITLES[t["id"]]
-            tmp = os.path.join(root, region + ".partial")
-            shutil.rmtree(tmp, ignore_errors=True)
+            tmp = language_staging_dir(root, region)
             run_extract(path, None, tmp, title=t["folder"], only=LANGUAGE_SOURCE_FILES)
             out.append(finish_language_source(tmp, region, t["id"], "%s (%s)" % (name, t["folder"]), data_dir))
         return out
@@ -1202,8 +1524,7 @@ def add_language_source(source, data_dir, keys=None, info=None, game_dir=None):
         tid = game_folder_title(folder) or code_title_version(folder)[0]
         region = language_source_region(tid)
         files = language_files_in(folder)
-        tmp = os.path.join(root, region + ".partial")
-        shutil.rmtree(tmp, ignore_errors=True)
+        tmp = language_staging_dir(root, region)
         dst = os.path.join(tmp, "content", "Common", "Pack")
         os.makedirs(dst)
         os.makedirs(os.path.join(tmp, "meta"))
@@ -1233,12 +1554,27 @@ def language_source_kind(path):
 # build
 
 
+def decomp_hooks_file():
+    """The decomp release (docs/decomp-build.md; tools/release/package.py): its runtime runs the decompiled
+    game functions listed in sdk/decomp_hooks.txt, so the game code is translated with that list
+    (recomp.py --decomp-hooks). None for the regular release."""
+    p = os.path.join(PKG, "sdk", "decomp_hooks.txt")
+    return p if os.path.isfile(p) else None
+
+
 def recompile(game_dir, gen_dir, hooks=False):
-    shutil.rmtree(gen_dir, ignore_errors=True)
+    shutil.rmtree(longpath(gen_dir), ignore_errors=True)
     rpx = os.path.join(game_dir, "code", "cking.rpx")
-    out = run_logged([sys.executable, os.path.join(PKG, "tools", "recomp", "recomp.py"), rpx, gen_dir] + (["--mod-hooks"] if hooks else []),
+    decomp = decomp_hooks_file()
+    if decomp:
+        build = game_builds.identify(rpx)
+        if build is not None and not build.canonical:
+            raise SetupError("this is the decomp build of the port, which works with the USA game only (yours is the %s "
+                             "build); use the regular release" % build.name)
+    out = run_logged([sys.executable, os.path.join(PKG, "tools", "recomp", "recomp.py"), rpx, gen_dir] +
+                     (["--mod-hooks"] if hooks else []) + (["--decomp-hooks", decomp] if decomp else []),
                      env=dict(os.environ, WWHD_RECOMP_MOD_HOOKS="0"), what="translating the game code")
-    n = len(glob.glob(os.path.join(gen_dir, "code_*.c")))
+    n = len(glob.glob(os.path.join(glob.escape(gen_dir), "code_*.c")))
     if n == 0:
         raise SetupError("the recompiler wrote no code")
     return n
@@ -1282,7 +1618,7 @@ def fwd(p):
 
 def compile_gamecode(tc, manifest, gen_dir, obj_dir, jobs, cancel=None, progress=None):
     os.makedirs(obj_dir, exist_ok=True)
-    srcs = sorted(glob.glob(os.path.join(gen_dir, "code_*.c")))
+    srcs = sorted(glob.glob(os.path.join(glob.escape(gen_dir), "code_*.c")))
     srcs += [os.path.join(gen_dir, f) for f in ("table.c", "imports.c")]
     srcs.sort(key=lambda s: -os.path.getsize(s))  # big files first: better use of the cores
     m = {"sdk": fwd(os.path.join(PKG, "sdk")), "gen": fwd(gen_dir)}
@@ -1323,29 +1659,107 @@ def compile_gamecode(tc, manifest, gen_dir, obj_dir, jobs, cancel=None, progress
     return sorted(objs)
 
 
-def link_game(tc, manifest, objs, work, out_exe):
+# A macOS SDK newer than the Command Line Tools' linker (e.g. a beta SDK installed by a partial update):
+# its .tbd stubs name architectures the linker doesn't know ("unknown architecture arm64e.x1-macos",
+# "tapi error: malformed file"), so every system library fails to link.
+MAC_SDK_MISMATCH = re.compile(r"tapi error: malformed file|\.tbd:\d+:\d+: error: unknown architecture")
+
+
+def mac_sdk_version(path):
+    m = re.search(r"MacOSX(\d+)(?:\.(\d+))?\.sdk$", os.path.basename(os.path.normpath(path)))
+    return (int(m.group(1)), int(m.group(2) or 0)) if m else None
+
+
+def mac_sdks():
+    """The installed macOS SDKs (Command Line Tools and Xcode), newest first, as (version, real path)."""
+    found = {}
+    for pattern in ("/Library/Developer/CommandLineTools/SDKs/MacOSX*.sdk",
+                    "/Applications/Xcode*.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk"):
+        for path in glob.glob(pattern):
+            real = os.path.realpath(path)
+            version = mac_sdk_version(real) or mac_sdk_version(path)
+            if version and os.path.isdir(real):
+                found.setdefault(real, version)
+    return sorted(((v, p) for p, v in found.items()), reverse=True)
+
+
+def mac_current_sdk():
+    try:
+        out = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL).stdout.decode("utf-8", "replace").strip()
+    except OSError:
+        return None
+    return os.path.realpath(out) if out else None
+
+
+def mac_fallback_sdks(current, sdks, minimum=(14, 0)):
+    """SDKs to retry the link with when `current` doesn't match the linker: older ones first by version
+    (newest of them first), never below the game's deployment target."""
+    # the current SDK's real path can be unversioned (Xcode's MacOSX.sdk): take its version from the list,
+    # where the versioned name pointing at it was found
+    cur = next((v for v, p in sdks if p == current), None) or (mac_sdk_version(current) if current else None)
+    return [p for v, p in sdks if p != current and v >= minimum and (cur is None or v < cur)]
+
+
+def link_with_sdk_fallback(cmd, env):
+    """Links; on macOS, a linker that rejects the SDK's library stubs is retried with an older installed SDK."""
+    try:
+        run_logged(cmd, env=env, what="linking the game")
+        return
+    except SetupError as e:
+        if not (IS_MAC and MAC_SDK_MISMATCH.search(str(e))) or (env or os.environ).get("SDKROOT"):
+            raise
+        failed = e
+    current = mac_current_sdk()
+    say("  The macOS SDK (%s) is newer than the linker of the Command Line Tools; trying an older installed SDK."
+        % os.path.basename(current or "?"))
+    for sdk in mac_fallback_sdks(current, mac_sdks()):
+        say("  Linking with %s" % os.path.basename(sdk))
+        try:
+            run_logged(cmd, env=dict(env or os.environ, SDKROOT=sdk), what="linking the game")
+            say("  Linked with %s. Updating the Command Line Tools (Software Update) fixes the mismatch for good."
+                % os.path.basename(sdk))
+            return
+        except SetupError as e:
+            if not MAC_SDK_MISMATCH.search(str(e)):
+                raise
+    raise SetupError("linking the game failed: the installed macOS SDK (%s) doesn't match the linker of the "
+                     "Command Line Tools, and no older SDK works. Update the Command Line Tools (System Settings "
+                     "> General > Software Update, or run: xcode-select --install), then run setup again.\n\n%s"
+                     % (os.path.basename(current or "?"), failed))
+
+
+def link_game(tc, manifest, objs, work, out_exe, recipe=None, glue=()):
+    """recipe: another link line than manifest["link"] (the decomp version: decomp_setup.py), whose
+    {decomp_glue} stands for the objects `glue`"""
     lib = os.path.join(work, "libgamecode.a")
     if os.path.exists(lib):
         os.remove(lib)
     if tc.rsp:
         rsp = os.path.join(work, "ar.rsp")
-        with open(rsp, "w") as f:
+        with open(rsp, "w", encoding="utf-8") as f:  # LLVM reads response files as UTF-8; the folder may hold any character
             f.write("\n".join('"%s"' % fwd(o) for o in objs))
         run_logged(tc.ar + ["rcs", fwd(lib), "@" + fwd(rsp)], env=tc.env, what="archiving the game code")
     else:
         run_logged(tc.ar + ["rcs", lib] + objs, env=tc.env, what="archiving the game code")
     m = {"sdk": fwd(os.path.join(PKG, "sdk")), "gamecode": fwd(lib), "out": fwd(out_exe)}
-    args = [sub(a, m) for a in manifest["link"]]
+    args = []
+    for a in (recipe or manifest["link"]):
+        args += [fwd(g) for g in glue] if a == "{decomp_glue}" else [sub(a, m)]
     if IS_LINUX:
         args += ["-Wl,-rpath,$ORIGIN"]
+    elif IS_MAC:
+        # the runtime libraries the release installs next to the game (manifest runtime_files: the Vulkan
+        # loader and MoltenVK) are found there, never in Homebrew or elsewhere on the Mac
+        args += ["-Wl,-rpath,@executable_path"]
     if tc.rsp:
         rsp = os.path.join(work, "link.rsp")
-        with open(rsp, "w") as f:
+        with open(rsp, "w", encoding="utf-8") as f:
             f.write("\n".join('"%s"' % a.replace('"', '\\"') for a in args))
         cmd = tc.cxx + ["@" + fwd(rsp)]
     else:
         cmd = tc.cxx + args
-    run_logged(cmd, env=tc.env, what="linking the game")
+    link_with_sdk_fallback(cmd, tc.env)
     if not os.path.isfile(out_exe):
         raise SetupError("the linker produced no executable")
 
@@ -1354,13 +1768,22 @@ def link_game(tc, manifest, objs, work, out_exe):
 # launchers
 
 
-def mac_app(app_path, exe_src, data_dir, version):
-    """~/Applications/Wind Waker HD.app: the game binary plus a launcher that points it at the data folder."""
+def mac_icns(png):
+    """An .icns holding one PNG image (128x128 'ic07'; macOS scales it for larger sizes)."""
+    entry = b"ic07" + struct.pack(">I", 8 + len(png)) + png
+    return b"icns" + struct.pack(">I", 8 + len(entry)) + entry
+
+
+def mac_app(app_path, exe_src, data_dir, version, runtime_files=()):
+    """~/Applications/Wind Waker HD.app: the game binary plus a launcher that points it at the data folder.
+    runtime_files (next to exe_src) go next to the binary as well: its rpath is @executable_path."""
     tmp = app_path + ".tmp"
-    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.rmtree(longpath(tmp), ignore_errors=True)
     macos = os.path.join(tmp, "Contents", "MacOS")
     os.makedirs(macos)
     shutil.copy2(exe_src, os.path.join(macos, "wwhd"))
+    for rf in runtime_files:
+        shutil.copy2(os.path.join(os.path.dirname(exe_src), rf), os.path.join(macos, rf))
     launcher = os.path.join(macos, "launch")
     with open(launcher, "w") as f:
         f.write('#!/bin/sh\n# written by the Wind Waker HD setup\ncd "%s" || exit 1\nexec "$(dirname "$0")/wwhd" '
@@ -1378,9 +1801,19 @@ def mac_app(app_path, exe_src, data_dir, version):
   <key>CFBundleVersion</key><string>%s</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.games</string>%s
 </dict></plist>
-""" % (APP_NAME, APP_NAME, version.lstrip("v"), version.lstrip("v"))
+"""
+    # the game's own icon (made here from the player's game files; the release ships none)
+    png = game_icon_png(data_dir)
+    icon_key = ""
+    if png:
+        resources = os.path.join(tmp, "Contents", "Resources")
+        os.makedirs(resources)
+        with open(os.path.join(resources, "AppIcon.icns"), "wb") as f:
+            f.write(mac_icns(png))
+        icon_key = "\n  <key>CFBundleIconFile</key><string>AppIcon</string>"
+    plist = plist % (APP_NAME, APP_NAME, version.lstrip("v"), version.lstrip("v"), icon_key)
     with open(os.path.join(tmp, "Contents", "Info.plist"), "w") as f:
         f.write(plist)
     subprocess.run(["codesign", "--force", "--deep", "-s", "-", tmp], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1402,7 +1835,7 @@ def write_guest_build_config(data_dir, tc):
                     return relative if relative.startswith(".") else "." + os.sep + relative
         return path
 
-    config = {"format_version": 2, "python": [stored_path(sys.executable)],
+    config = {"format_version": 2, "python": [stored_path(ensure_setup_python(data_dir))],
               "compiler": [stored_path(tc.cc[0])] + tc.cc[1:],
               "builder": stored_path(os.path.join(PKG, "tools", "guestmod", "build_guest_mod.py")),
               "include": stored_path(os.path.join(PKG, "sdk", "include")),
@@ -1486,13 +1919,20 @@ def windows_shortcuts(data_dir, exe):
             LOG.write("shortcut not created (folder 0x%x): %s" % (csidl, e))
 
 
-def launch(state, data_dir):
+def launch(state, data_dir, decomp=None):
+    """decomp: start the decomp version (docs/decomp-build.md); None: as chosen in setup (start_decomp)"""
     say("")
-    say("Starting the game...")
-    if IS_MAC and state.get("app") and os.path.isdir(state["app"]):
-        subprocess.Popen(["open", state["app"]])
-        return
+    if decomp is None:
+        decomp = bool(state.get("start_decomp"))
     exe = state["exe"]
+    if decomp and state.get("decomp_exe") and os.path.isfile(state["decomp_exe"]):
+        exe = state["decomp_exe"]
+        say("Starting the decomp version of the game...")
+    else:
+        say("Starting the game...")
+        if IS_MAC and state.get("app") and os.path.isdir(state["app"]):
+            subprocess.Popen(["open", state["app"]])
+            return
     args = [exe, "--game", state.get("game_dir") or os.path.join(data_dir, "game"), "--save", os.path.join(data_dir, "save")]
     if IS_WIN:
         subprocess.Popen(args, cwd=data_dir, creationflags=0x00000008 | 0x00000200)  # DETACHED_PROCESS | NEW_GROUP
@@ -1545,7 +1985,7 @@ def remove_toolchain(data_dir):
     """Deletes the downloaded compiler (repair and guest mod builds need setup to restore it)."""
     d = toolchain_dir(data_dir)
     n = folder_size(d) if os.path.isdir(d) else 0
-    shutil.rmtree(d, ignore_errors=True)
+    shutil.rmtree(longpath(d), ignore_errors=True)
     say("  Removed the downloaded compiler (%s)" % human(n))
     return n
 
@@ -1571,7 +2011,7 @@ def import_save(kind, path, data_dir, replace=False):
     if have_save(data_dir) and not replace:
         raise SetupError("a save already exists in %s" % user)
     tmp = os.path.join(data_dir, "save-import.tmp")
-    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.rmtree(longpath(tmp), ignore_errors=True)
     os.makedirs(tmp)
     try:
         if kind == "gc":
@@ -1591,11 +2031,11 @@ def import_save(kind, path, data_dir, replace=False):
         backup = None
         if os.path.isdir(user) and os.listdir(user):
             backup = user + ".backup-" + time.strftime("%Y%m%d-%H%M%S")
-            os.replace(user, backup)
+            os.replace(longpath(user), longpath(backup))
         os.makedirs(os.path.dirname(user), exist_ok=True)
-        os.replace(tmp, user)
+        os.replace(longpath(tmp), longpath(user))
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(longpath(tmp), ignore_errors=True)
     n = len([f for f in os.listdir(user) if f.endswith(".sav")])
     msg = "Copied %d save file%s to %s" % (n, "" if n == 1 else "s", user)
     if kind == "gc":
@@ -1604,6 +2044,18 @@ def import_save(kind, path, data_dir, replace=False):
         msg += " (the previous save is in %s)" % backup
     say("  " + msg)
     return msg
+
+
+def legacy_appimage_data_notice(image=None):
+    """v0.2.13's AppImage kept a portable setup in "<image>.data"; later ones use the runtime's standard
+    "<image>.home" and never read ".data" (issue #55). The hint when one is still there, else "".
+    Same text as AppRun and runtime/src/platform/appimage_notice.h."""
+    image = os.environ.get("APPIMAGE") if image is None else image
+    if not image or not os.path.isdir(image + ".data"):
+        return ""
+    name = os.path.basename(image)
+    return ("Found %s.data: this folder is no longer used. Move its contents to %s.home (see the changelog) "
+            "to keep your saves and settings." % (name, name))
 
 
 def legacy_config_dirs():
@@ -1720,6 +2172,12 @@ def load_manifest():
     if IS_LINUX and arch and normalize_arch(arch) != host_arch():
         raise SetupError("this release is for %s, but this computer is %s: download the %s release instead"
                          % (m["platform"], host_arch(), "linux-" + host_arch()))
+    # Windows: the x86-64 release also runs on ARM64 (emulated); the ARM64 one runs only there
+    if plat == "windows" and arch and normalize_arch(arch) == "aarch64" and host_arch() != "aarch64":
+        raise SetupError("this release is for Windows on ARM64, but this computer is %s: download the "
+                         "windows-x86_64 release instead" % host_arch())
+    if (m.get("variant") == "decomp") != bool(decomp_hooks_file()):
+        raise SetupError("sdk/manifest.json and sdk/decomp_hooks.txt do not match (decomp build): unpack the release again")
     return m
 
 
@@ -1760,7 +2218,7 @@ def abs_from_data(path, data_dir):
 
 def resolved_state(state, data_dir):
     st = dict(state)
-    for k in ("exe", "game_dir"):
+    for k in ("exe", "game_dir", "decomp_exe"):
         if st.get(k):
             st[k] = abs_from_data(st[k], data_dir)
     return st
@@ -1768,7 +2226,7 @@ def resolved_state(state, data_dir):
 
 def write_state(data_dir, state):
     st = dict(state)
-    for k in ("exe", "game_dir", "data_dir"):
+    for k in ("exe", "game_dir", "data_dir", "decomp_exe"):
         if st.get(k):
             st[k] = rel_to_data(st[k], data_dir)
     if PORTABLE:
@@ -1790,6 +2248,10 @@ class Ctx:
         self.exe = os.path.join(self.exe_dir, self.manifest["exe"])
         os.makedirs(self.data_dir, exist_ok=True)
         LOG.open(os.path.join(self.data_dir, "setup.log"))
+        problem = path_length_problem(self.data_dir, PKG)
+        if problem:  # before anything is downloaded or built (issue #144)
+            LOG.write("data folder %s: %s" % (self.data_dir, problem))
+            raise SetupError(problem)
         self.game_dir = self.state().get("game_dir") or os.path.join(self.data_dir, "game")
 
     def state(self):
@@ -1810,15 +2272,116 @@ STEP_TITLES = {
     "translate": "Translating the game code to C",
     "compile": "Compiling the game code (the longest step: several minutes)",
     "app": "Building the game",
+    "shaders": "Preparing shaders",
+    "decomp": "Building the decomp version (experimental)",
 }
 
 
-def plan_steps(kind):
-    return {"image": ["keys", "compiler", "extract", "translate", "compile", "app"],
+def plan_steps(kind, decomp=False):
+    result = {"image": ["keys", "compiler", "extract", "translate", "compile", "app"],
             "archive": ["archive", "compiler", "extract", "translate", "compile", "app"],
             "folder": ["folder", "compiler"] + ([] if PORTABLE else ["copy"]) + ["translate", "compile", "app"],
             "installed": ["compiler", "translate", "compile", "app"],
             "gen": ["compiler", "compile", "app"]}[kind]
+    return result + ([] if kind == "gen" else ["shaders"]) + (["decomp"] if decomp else [])
+
+
+def decomp_offered(manifest):
+    return decomp_setup.offered(manifest, IS_MAC)
+
+
+def decomp_wanted(ctx):
+    """The decomp version (decomp_setup.py): --decomp / --no-decomp (or the setup window's choice), else
+    what the last setup did. Never where it is not offered."""
+    if not decomp_offered(ctx.manifest):
+        return False
+    choice = getattr(ctx.args, "decomp", None)
+    return bool(ctx.state().get("decomp", False) if choice is None else choice)
+
+
+CODE_MODS_TEXT = (
+    "For mods in the catalogue or Mods tab marked as code mods. Built-in mods, graphics packs and "
+    "content mods do not need this. The game code gets a small check in every function, which can "
+    "cost some performance, and the build takes a bit longer. You can switch this later in "
+    "Settings > Mods; that requires another rebuild.")
+
+
+def setup_code_mods(ctx, ui=None):
+    explicit = getattr(ctx.args, "code_mods", None)
+    if explicit is not None or "WWHD_CODE_MODS" in os.environ:
+        return code_mods.hooks_option(explicit)
+    try:
+        active = json.loads(Path(ctx.data_dir, "code-mods-active.json").read_text(encoding="utf-8"))
+        remembered = active["hooks"] if active.get("state") == "ready" else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        remembered = None
+    default = remembered if isinstance(remembered, bool) else bool(ctx.state().get("code_mods", False))
+    if ui and ui.interactive:
+        say(CODE_MODS_TEXT)
+        return ui.yesno("Build with code-mod support?", default)
+    return default
+
+
+def write_code_mods_setting(data_dir, hooks):
+    """Use the same stores and overrides as the AppKit and SDL hosts."""
+    import plistlib
+    portable = Path(data_dir, "user")
+    if IS_MAC:
+        default = portable / "display.plist" if PORTABLE else Path(os.path.expanduser(
+            "~/Library/Application Support/wwhd/display.plist"))
+        path = Path(os.environ.get("WWHD_DISPLAY_SETTINGS", str(default)))
+        values = plistlib.loads(path.read_bytes()) if path.exists() else {}
+        values["code-mods"] = "1" if hooks else "0"
+        payload = plistlib.dumps(values)
+    else:
+        default = (portable if PORTABLE else Path(legacy_config_dirs()[0])) / "settings.ini"
+        path = Path(os.environ.get("WWHD_SETTINGS", str(default)))
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        lines = [line for line in lines if not line.startswith("code-mods=")]
+        payload = ("\n".join(lines + ["code-mods=" + ("1" if hooks else "0")]) + "\n").encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(payload)
+    os.replace(tmp, path)
+
+
+def shader_progress_callback(progress):
+    """progress(text[, fraction]) for shader_prebuild.prepare, shown on a Progress line.
+
+    fraction covers the whole preparation (0..1); None until the helpers report one, so the bar
+    is indeterminate until then. The log gets each phase once, not every update."""
+    last = {"phase": None}
+    def message(text, fraction=None):
+        if fraction is None:
+            progress.update(0, 0, text, force=True)
+        else:
+            done = int(round(1000 * fraction))
+            if GUI:
+                # the bar shows this text instead of its percentage; keep it short enough for
+                # the bar: "<phase>: 1,234 of 5,678 (42%)" (the terminal line keeps the units)
+                counted = re.match(r"(.*?: [\d,]+ of [\d,]+)( |$)", text)
+                progress.update(done, 1000, "%s (%d%%)" % (counted.group(1) if counted else text, done // 10))
+            else:
+                progress.update(done, 1000, text)
+        phase = text.split(":", 1)[0]
+        if phase != last["phase"]:
+            last["phase"] = phase
+            LOG.write(text)
+    return message
+
+
+def prepare_shaders_nonfatal(*args, **kwargs):
+    """Shader preparation is optional, including unexpected helper failures."""
+    try:
+        import shader_prebuild
+        return shader_prebuild.prepare(*args, **kwargs)
+    except Exception as error:
+        message = "Shader preparation unavailable: %s. The game can still run." % error
+        try:
+            LOG.write(message)
+        except Exception:
+            pass  # A broken log must not turn optional preparation into setup failure.
+        return dict(status="failed", message=str(error))
 
 
 def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
@@ -1827,8 +2390,11 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
     Returns the new install state."""
     ui = ui or UI(False)
     args, manifest, data_dir = ctx.args, ctx.manifest, ctx.data_dir
+    args.code_mods = "1" if setup_code_mods(ctx, ui) else "0"
     kind = source[0]
-    steps = plan_steps(kind)
+    want_decomp = kind != "gen" and decomp_wanted(ctx)
+    old_state = ctx.state()
+    steps = plan_steps(kind, want_decomp)
     total = len(steps)
     counter = iter(range(1, total + 1))
 
@@ -1901,7 +2467,7 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
     keys = None
 
     work = os.path.join(data_dir, "work")
-    shutil.rmtree(work, ignore_errors=True)
+    shutil.rmtree(longpath(work), ignore_errors=True)
     os.makedirs(work)
     if free_space(data_dir) < (2 << 30):
         raise SetupError("not enough free disk space in %s for building (2 GB needed)" % data_dir)
@@ -1938,6 +2504,8 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
              "installed": time.strftime("%Y-%m-%d %H:%M:%S"), "toolchain": manifest["toolchain"],
              "placeholder_code": kind == "gen",
              "code_mods": code_mods.hooks_option(getattr(args, "code_mods", None))}
+    if manifest.get("variant"):
+        state["variant"] = manifest["variant"]  # "decomp": the decomp build (docs/decomp-build.md)
     if os.environ.get("APPIMAGE"):
         # an AppImage (issue #55): its mount is read-only, so nothing is written beside it and
         # portable.txt is not created. Record which image this was installed from: install.json is
@@ -1954,8 +2522,10 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
     elif not args.no_shortcuts and kind != "gen":
         if IS_MAC:
             app = os.path.join(ctx.app_dir, APP_NAME + ".app")
-            mac_app(app, exe, data_dir, ctx.version)
-            os.remove(exe)  # the app holds the game binary
+            mac_app(app, exe, data_dir, ctx.version, manifest.get("runtime_files", []))
+            os.remove(exe)  # the app holds the game binary (and its runtime files)
+            for rf in manifest.get("runtime_files", []):
+                os.remove(os.path.join(exe_dir, rf))
             if not os.listdir(exe_dir):
                 os.rmdir(exe_dir)
             state["app"] = app
@@ -1969,16 +2539,98 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
             say("  Shortcuts: Start menu and desktop (\"%s\")" % APP_NAME)
     if kind != "gen":
         try:
-            code_mods.remember_installed(sys.modules[__name__], ctx, tc, state["code_mods"], exe, gen_dir, objs)
+            code_mods.remember_installed(sys.modules[__name__], ctx, tc, state["code_mods"], state["exe"], gen_dir, objs)
         except (OSError, SetupError) as e:
             LOG.write("Initial code-mod cache skipped: " + str(e))
+            # Never leave an older variant selected after a successful setup build.
+            Path(data_dir, "code-mods-active.json").unlink(missing_ok=True)
+        write_code_mods_setting(data_dir, state["code_mods"])
+    if kind != "gen":
+        begin("shaders")
+        import shader_prebuild
+        shader_template = Path(getattr(args, "shader_template", None) or os.environ.get("WWHD_SHADER_TEMPLATE") or Path(PKG) / "tools/shadercache/template.bin").expanduser().resolve()
+        shader_root = shader_prebuild.default_cache_root(data_dir, PORTABLE)
+        try:
+            shader_root.mkdir(parents=True, exist_ok=True)
+            shader_prebuild.atomic_json(shader_root / "launcher.json", {
+                "schema": 1, "python": sys.executable, "package": str(PKG),
+                "helper": str(Path(PKG) / "tools/installer/shader_prebuild.py"),
+                "template": str(shader_template)})
+        except OSError as error:
+            say("Shader preparation launcher unavailable: %s" % error)
+        shader_progress = Progress("Preparing shaders")
+        state["shader_prebuild"] = prepare_shaders_nonfatal(
+            ctx.game_dir, shader_template, state["exe"],
+            shader_root, PKG,
+            renderer="metal" if IS_MAC else "vulkan", progress=shader_progress_callback(shader_progress), log=LOG.write,
+            # macOS: the player chooses Metal or Vulkan (MoltenVK) in Graphics > Renderer: prepare both
+            renderers=["metal", "vulkan"] if IS_MAC else ["vulkan"],
+            skip=bool(getattr(args, "skip_shader_prebuild", False)),
+            cancel=lambda: bool(getattr(args, "shader_prebuild_cancel", None) and
+                                Path(args.shader_prebuild_cancel).exists()))
+        prepared = state["shader_prebuild"]
+        states = prepared.get("renderers") or {}
+        ready = [name.capitalize() for name, value in sorted(states.items()) if value == "ready"]
+        # macOS: "ready (Metal, Vulkan)", or "ready (Metal)" when MoltenVK is unavailable
+        shader_progress.done(prepared["status"] + (" (%s)" % ", ".join(ready) if len(states) > 1 and ready else ""))
     if not args.keep_work:
-        shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(longpath(work), ignore_errors=True)
     if kind != "gen":
         os.makedirs(os.path.join(data_dir, "save"), exist_ok=True)
     write_guest_build_config(data_dir, tc)
-    write_state(data_dir, state)
+    if decomp_offered(manifest) and kind != "gen":
+        state["decomp"] = want_decomp  # remembered: a repair or update builds it again
+        state["start_decomp"] = bool(old_state.get("start_decomp")) and want_decomp
+    write_state(data_dir, state)  # the normal game is ready, whatever happens to the decomp version
+    if want_decomp:
+        begin("decomp")
+        try:
+            exe, rev, nunits = decomp_setup.build(sys.modules[__name__], ctx, tc, jobs)
+            state.update(decomp_exe=exe, decomp_revision=rev)
+            state.pop("decomp_error", None)
+        except SetupError as e:
+            # the normal game stays as it is: the decomp version is optional
+            say("")
+            say("  The decomp version could not be built (the normal game is ready and unaffected): %s" % e)
+            LOG.write("decomp version failed: %s" % e)
+            state["decomp_error"] = str(e).splitlines()[0][:300]
+            state.pop("decomp_exe", None)
+            stale = decomp_setup.exe_path(data_dir, PORTABLE)  # an earlier release's decomp version
+            if os.path.isfile(stale):
+                os.remove(stale)
+            state["start_decomp"] = False
+        write_state(data_dir, state)
+    elif decomp_offered(manifest) and old_state.get("decomp_exe"):
+        # switched off: the decomp version this setup built earlier goes
+        old = old_state["decomp_exe"]
+        if os.path.isfile(old) and old != state.get("exe"):
+            os.remove(old)
+    if kind != "gen" and state.get("code_mods") and state.get("exe"):
+        install_story_notebook(state, data_dir)
     return state
+
+
+def install_story_notebook(state, data_dir, runner=subprocess.run):
+    """The story system's required package (runtime/src/mods/required.h): when the story system is on (the
+    default), the game downloads the Story Notebook from the mod catalogue once, here. Offline is fine: the
+    setup finishes and the Mods menu can install it later. Returns True when it is installed."""
+    say("")
+    say("Installing the story notebook (the story system's quest package) from the mod catalogue...")
+    args = [state["exe"], "--game", state.get("game_dir") or os.path.join(data_dir, "game"), "--save", os.path.join(data_dir, "save"),
+            "--install-story-notebook"]
+    try:
+        done = runner(args, cwd=data_dir, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+        lines = [l for l in (done.stdout or "").splitlines() if l.startswith("{")]
+        result = json.loads(lines[-1]) if lines else {"ok": False, "message": "no answer from the game"}
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        result = {"ok": False, "message": str(e)}
+    LOG.write("story notebook: %s" % result)
+    if result.get("ok"):
+        say("  The story notebook is installed.")
+        return True
+    say("  The story notebook couldn't be installed now (%s). The game works without it; install it later from the "
+        "Mods menu (it needs the internet once)." % result.get("message", ""))
+    return False
 
 
 def run_language_source(args, ui, data_dir, path):
@@ -2004,16 +2656,27 @@ def main():
                                  epilog=__doc__)
     ap.add_argument("--image", help="disc image (.wux or .wud; a .wua is taken as --archive)")
     ap.add_argument("--archive", help="Cemu Wii U archive (.wua): no keys needed")
-    ap.add_argument("--disc-key", help="disc key file (default: IMAGE.key)")
-    ap.add_argument("--common-key", help="Wii U common key file (or WIIU_COMMON_KEY)")
+    ap.add_argument("--disc-key", help="disc key file or Cemu keys.txt (default: IMAGE.key)")
+    ap.add_argument("--common-key", help="Wii U common key file or Cemu keys.txt (or WIIU_COMMON_KEY)")
     ap.add_argument("--game-dir", help="an already extracted game folder (code/, content/, meta/) instead of an image")
     ap.add_argument("--gen-dir", help="use this generated code instead of recompiling (build checks)")
     ap.add_argument("--data-dir", help="where the game is installed (default: %s)" % default_data_dir())
     ap.add_argument("--app-dir", help="macOS: where the app goes (default: ~/Applications)")
-    ap.add_argument("--code-mods", choices=("0", "1"), help="build PowerPC mod support (default off; WWHD_CODE_MODS override)")
+    ap.add_argument("--code-mods", choices=("0", "1"), help="build PowerPC mod support (new installs default off; skips the question; overrides WWHD_CODE_MODS)")
     ap.add_argument("--rebuild-code-mods", action="store_true", help="stage a cached game-code variant for the next restart")
     ap.add_argument("--code-mods-status", help="atomic rebuild progress/result JSON")
     ap.add_argument("--code-mods-cancel", help="cancel rebuild when this file exists")
+    ap.add_argument("--decomp", dest="decomp", action="store_const", const=True, default=None,
+                    help="development builds, macOS: also build the decomp version of the game (experimental; "
+                         "docs/decomp-build.md); remembered for repairs and updates")
+    ap.add_argument("--no-decomp", dest="decomp", action="store_const", const=False,
+                    help="do not build the decomp version (any more)")
+    ap.add_argument("--start-decomp", choices=("0", "1"),
+                    help="start the decomp version instead of the normal game from now on (1) or not (0)")
+    ap.add_argument("--repair-guest-python", action="store_true", help="upgrade local mod setup Python without rebuilding game code")
+    ap.add_argument("--shader-template", help="local shader template (or WWHD_SHADER_TEMPLATE); optional")
+    ap.add_argument("--skip-shader-prebuild", action="store_true", help="skip optional shader preparation; compile during play")
+    ap.add_argument("--shader-prebuild-cancel", help="skip shader preparation when this file exists")
     ap.add_argument("--repair", action="store_true", help="rebuild the game code from the installed game files")
     ap.add_argument("--jobs", type=int, help="parallel compiler processes")
     ap.add_argument("--yes", action="store_true", help="non-interactive (also WWHD_SETUP_NONINTERACTIVE=1)")
@@ -2061,6 +2724,9 @@ def main():
 
 def run(args, ui):
     ctx = Ctx(args)
+    if getattr(args, "repair_guest_python", False):
+        repair_guest_python(ctx.data_dir)
+        return 0
     if getattr(args, "rebuild_code_mods", False):
         if not valid_game_folder(ctx.game_dir):
             raise SetupError("No installed game files to rebuild from; run setup first")
@@ -2069,10 +2735,29 @@ def run(args, ui):
         return 0
     version, data_dir, game_dir = ctx.version, ctx.data_dir, ctx.game_dir
     say("The Legend of Zelda: The Wind Waker HD - native PC port, setup %s" % version)
+    hint = "" if GUI else legacy_appimage_data_notice()  # the setup window shows it itself
+    if hint:
+        say("")
+        say(hint)
+        say("")
     say("This release contains no game files. Setup builds the game from your own dump of the game.")
     say("Install folder: %s" % data_dir)
     state = ctx.state()
     installed = ctx.installed()
+    if getattr(args, "decomp", None) and not decomp_offered(ctx.manifest):
+        raise SetupError("the decomp version is offered on macOS in development builds only (docs/decomp-build.md)")
+    if getattr(args, "start_decomp", None) is not None:
+        on = args.start_decomp == "1"
+        if on and not (state.get("decomp_exe") and os.path.isfile(state["decomp_exe"])):
+            raise SetupError("the decomp version is not built: run setup with --decomp first")
+        state["start_decomp"] = on
+        write_state(ctx.data_dir, state)
+        say("From now on the game starts %s." % ("the decomp version" if on else "the normal version"))
+        if args.decomp is None:
+            return 0
+    # --decomp / --no-decomp on an installed game: a repair that builds (or drops) the decomp version
+    decomp_change = (installed and getattr(args, "decomp", None) is not None
+                     and bool(args.decomp) != bool(state.get("decomp_exe")))
     if args.remove_language_source:
         say("Removed %s" % remove_language_source(data_dir, args.remove_language_source))
         return 0
@@ -2089,7 +2774,7 @@ def run(args, ui):
         source = ("image", os.path.abspath(args.image))
     elif args.game_dir:
         source = ("folder", os.path.abspath(args.game_dir))
-    elif args.repair:
+    elif args.repair or decomp_change:
         if not valid_game_folder(game_dir):
             raise SetupError("no installed game files to repair from; run setup with your disc image")
         source = ("installed", game_dir)
@@ -2158,6 +2843,7 @@ def run(args, ui):
     state = install(ctx, source, ui=ui, check_keys=lambda image: get_disc_keys(image, ui, args))
     if source[0] != "gen":
         maybe_import_save(ui, data_dir)
+        write_code_mods_setting(data_dir, state["code_mods"])
     if PORTABLE and ui.interactive and source[0] != "gen":
         if not args.shortcuts and ui.yesno("Add a shortcut to %s?" % {"darwin": "your Applications folder", "win32": "the Start menu"}
                                            .get(sys.platform, "your applications menu"), False):
@@ -2190,16 +2876,18 @@ def run(args, ui):
 # Requests (stdin):
 #   probe        {path}                  -> kind image|archive|folder|invalid, disc_key, common_key, title;
 #                                           archive: title, folder, bytes, message (which title, why)
-#   check_keys   {image, disc_key_file?, common_key_file?, common_key_hex?}
+#   check_keys   {image, disc_key_file?, disc_key_hex?, common_key_file?, common_key_hex?}
 #                                        -> title_id, files, bytes  (keys stay in memory for install)
 #   install      {source: image|archive|folder|installed, path?, jobs?}  -> streams step/progress/log, then
 #                                           reply {app, exe, data_dir}
 #   import_save  {kind: hd|gc, path, replace?}  -> message; problem "exists" if a save is there
 #   language_sources {}                  -> sources: [{region, title_id, source, packs: [{file, language, bytes}]}]
-#   add_language_source {path, disc_key_file?, common_key_file?, common_key_hex?}
+#   add_language_source {path, disc_key_file?, disc_key_hex?, common_key_file?, common_key_hex?}
 #                                        -> sources (the added ones); experimental (docs/language-packs.md)
 #   remove_language_source {region}      -> removed (the folder)
-#   launch       {}                      -> starts the installed game
+#   launch       {}                      -> starts the installed game (the decomp version when start_decomp)
+#   start_decomp {on}                    -> start the decomp version from now on (development builds, macOS;
+#                                           install {decomp: true} builds it; hello: decomp_offered, decomp)
 #   quit         {}
 # Keys never leave this process: they are not logged, not echoed, not written to disk.
 
@@ -2221,7 +2909,8 @@ def find_common_key(image):
 
 
 KEY_MESSAGES = {
-    "disc_key_bad": "The disc key file does not contain a key (16 raw bytes or 32 hex digits).",
+    "disc_key_bad": "No valid disc key was supplied. Paste 32 hex digits or choose a key file / Cemu keys.txt.",
+    "disc_key_is_common": "You entered the Wii U common key as the disc key. The disc key is a different key that belongs to your disc dump (Cemu keeps it in keys.txt).",
     "disc_key_wrong": "The disc key does not match this disc image. It must be the key dumped together with this disc.",
     "common_key_bad": "That is not a Wii U common key: it must be 16 raw bytes or 32 hex digits.",
     "common_key_wrong": "The Wii U common key is not correct (it is the same 16 bytes on every Wii U).",
@@ -2231,13 +2920,87 @@ KEY_MESSAGES = {
 }
 
 
+def resolve_disc_keys(image, req, info_reader=None, file_reader=None):
+    """Shared CLI/GUI/Android resolver. Returns keys, info, error, value-free notices.
+
+    A common-key error proves the disc partition check passed. Find that disc
+    candidate once, then scan common candidates: O(disc + common), not O(n²).
+    Explicit paste/single-key inputs take priority; multi-entry files can supply
+    either missing key. Never return candidate values in diagnostics.
+    """
+    info_reader = info_reader or disc_info
+    file_reader = file_reader or read_key_entries
+    candidates = {"disc": [], "common": []}
+    shared = []
+    for name in candidates:
+        text = req.get(name + "_key_hex")
+        path = req.get(name + "_key_file")
+        if text is not None:
+            key = parse_key(text)
+            if not key:
+                return None, None, (name + "_key_bad", KEY_MESSAGES[name + "_key_bad"]), []
+            candidates[name] = [(key, None)]
+        elif path:
+            entries = file_reader(path)
+            if not entries:
+                return None, None, (name + "_key_bad", KEY_MESSAGES[name + "_key_bad"]), []
+            label = req.get(name + "_key_label") or os.path.basename(path)
+            values = [(key, "%s key: found in %s (entry %d)" %
+                       ("Disc" if name == "disc" else "Common", label, i))
+                      for i, key in enumerate(entries, 1)]
+            candidates[name] = values
+            if len(entries) > 1:
+                shared.extend((key, label, i) for i, key in enumerate(entries, 1))
+    for name in candidates:
+        if not candidates[name]:
+            candidates[name] = [(key, "%s key: found in %s (entry %d)" %
+                                 ("Disc" if name == "disc" else "Common", path, i)) for key, path, i in shared]
+        if not candidates[name]:
+            if name == "disc":
+                side = find_sidecar_disc_key(image)
+                key = read_key_file(side) if side else None
+            else:
+                _, key = find_common_key(image)
+            if key:
+                candidates[name] = [(key, None)]
+    disc = candidates["disc"]
+    common = candidates["common"]
+    if not disc:
+        return None, None, ("disc_key_missing", "The disc key is needed: paste it or choose a key file / Cemu keys.txt."), []
+    keys = Keys()
+    keys.common = common[0][0] if common else bytes(16)
+    disc_notice = None
+    for key, notice in disc:
+        keys.disc = key
+        problem, error, info = info_reader(image, keys)
+        if problem not in ("disc_key_bad", "disc_key_wrong"):
+            if problem not in (None, "common_key_bad", "common_key_wrong"):
+                return None, None, (problem, KEY_MESSAGES.get(problem, error)), []
+            disc_notice = notice
+            break
+    else:
+        same = len(disc) == 1 and any(disc[0][0] == key for key, _ in common)
+        problem = "disc_key_is_common" if same else "disc_key_wrong"
+        return None, None, (problem, KEY_MESSAGES[problem]), []
+    if not common:
+        return None, None, ("common_key_missing", "The Wii U common key is needed: paste it or choose a key file / Cemu keys.txt."), []
+    for key, notice in common:
+        keys.common = key
+        problem, error, info = info_reader(image, keys)
+        if not problem:
+            return keys, info, None, [n for n in (disc_notice, notice) if n]
+        if problem not in ("common_key_bad", "common_key_wrong"):
+            return None, None, (problem, KEY_MESSAGES.get(problem, error)), []
+    return None, None, ("common_key_wrong", KEY_MESSAGES["common_key_wrong"]), []
+
+
 def gui_main(args):
     global GUI
     GUI = Protocol()
     try:
         ctx = Ctx(args)
     except SetupError as e:
-        GUI.emit({"event": "fatal", "message": str(e)})
+        GUI.emit({"event": "fatal", "message": plain_text(e)})
         return 1
     session = {"keys": None, "info": None, "image": None}
 
@@ -2251,6 +3014,10 @@ def gui_main(args):
                   "game_dir": ctx.game_dir, "save_exists": have_save(ctx.data_dir),
                   "legacy": bool(legacy_save or legacy_items), "free_bytes": free_space(ctx.data_dir),
                   "language_sources": sources_reply(),
+                  "code_mods": setup_code_mods(ctx),
+                  # the decomp version (decomp_setup.py): offered on macOS in development builds only
+                  "decomp_offered": decomp_offered(ctx.manifest), "decomp": decomp_wanted(ctx),
+                  "decomp_text": decomp_setup.DECOMP_TEXT, "decomp_docs": decomp_setup.DOCS_URL,
                   "toolchain": ctx.manifest["toolchain"]})
 
     def reply(req, ok=True, **kw):
@@ -2258,7 +3025,7 @@ def gui_main(args):
         GUI.emit(kw)
 
     def fail(req, problem, message):
-        reply(req, False, problem=problem, message=message)
+        reply(req, False, problem=problem, message=plain_text(message))
 
     def probe(req):
         p = req.get("path") or ""
@@ -2301,27 +3068,8 @@ def gui_main(args):
 
     def request_keys(req, image):
         """(keys, None) or (None, (problem, message)) from a request's key fields (check_keys, add_language_source)."""
-        keys = Keys()
-        if req.get("disc_key_file"):
-            keys.disc = read_key_file(req["disc_key_file"])
-            if not keys.disc:
-                return None, ("disc_key_bad", KEY_MESSAGES["disc_key_bad"])
-        else:
-            side = find_sidecar_disc_key(image)
-            keys.disc = read_key_file(side) if side else None
-            if not keys.disc:
-                return None, ("disc_key_missing", "No disc key was found next to the image: choose the key file.")
-        given = req.get("common_key_hex") or req.get("common_key_file")
-        if req.get("common_key_hex"):
-            keys.common = parse_key(req["common_key_hex"])
-        elif req.get("common_key_file"):
-            keys.common = read_key_file(req["common_key_file"])
-        else:
-            keys.common = find_common_key(image)[1]
-        if not keys.common:
-            return None, (("common_key_bad", KEY_MESSAGES["common_key_bad"]) if given
-                          else ("common_key_missing", "The Wii U common key is needed."))
-        return keys, None
+        keys, _, why, _ = resolve_disc_keys(image, req)
+        return keys, why
 
     def sources_reply():
         return [{k: m.get(k) for k in ("region", "title_id", "source", "packs")} for m in language_sources(ctx.data_dir)]
@@ -2355,39 +3103,34 @@ def gui_main(args):
 
     def check(req):
         image = req.get("image") or ""
-        keys = Keys()
-        if req.get("disc_key_file"):
-            keys.disc = read_key_file(req["disc_key_file"])
-            if not keys.disc:
-                return fail(req, "disc_key_bad", KEY_MESSAGES["disc_key_bad"])
-        else:
-            side = find_sidecar_disc_key(image)
-            keys.disc = read_key_file(side) if side else None
-            if not keys.disc:
-                return fail(req, "disc_key_missing", "No disc key was found next to the image: choose the key file.")
-        if req.get("common_key_hex"):
-            keys.common = parse_key(req["common_key_hex"])
-        elif req.get("common_key_file"):
-            keys.common = read_key_file(req["common_key_file"])
-        else:
-            keys.common = find_common_key(image)[1]
-        if not keys.common:
-            return fail(req, "common_key_bad" if (req.get("common_key_hex") or req.get("common_key_file"))
-                        else "common_key_missing",
-                        KEY_MESSAGES["common_key_bad"] if (req.get("common_key_hex") or req.get("common_key_file"))
-                        else "The Wii U common key is needed.")
-        problem, err, info = disc_info(image, keys)
-        if problem:
-            return fail(req, problem, KEY_MESSAGES.get(problem, err))
+        session.update(keys=None, info=None, image=None)
+        keys, info, why, notices = resolve_disc_keys(image, req)
+        if why:
+            return fail(req, *why)
         try:
             check_title(info.get("title_id", ""))
         except SetupError as e:
             return fail(req, "wrong_title", str(e))
         session.update(keys=keys, info=info, image=image)
-        reply(req, title_id=info.get("title_id"), files=int(info.get("files", 0)), bytes=int(info.get("bytes", 0)))
+        reply(req, title_id=info.get("title_id"), files=int(info.get("files", 0)), bytes=int(info.get("bytes", 0)),
+              message="\n".join(notices))
 
     def do_install(req):
         kind = req.get("source")
+        if "code_mods" in req:
+            if not isinstance(req["code_mods"], bool):
+                return fail(req, "bad_request", "code_mods must be a boolean")
+            ctx.args.code_mods = "1" if req["code_mods"] else "0"
+        if "decomp" in req:
+            if not isinstance(req["decomp"], bool):
+                return fail(req, "bad_request", "decomp must be a boolean")
+            ctx.args.decomp = req["decomp"]
+        if "skip_shader_prebuild" in req:
+            ctx.args.skip_shader_prebuild = bool(req["skip_shader_prebuild"])
+        if req.get("shader_prebuild_cancel"):
+            # GUI marker is confined to this installation, not an arbitrary path.
+            ctx.args.shader_prebuild_cancel = str(Path(ctx.data_dir) / "shader-prebuild-cancel")
+            Path(ctx.args.shader_prebuild_cancel).unlink(missing_ok=True)
         if req.get("jobs"):
             ctx.args.jobs = int(req["jobs"])
         if kind == "image":
@@ -2402,7 +3145,8 @@ def gui_main(args):
             source = ("installed", ctx.game_dir)
         else:
             return fail(req, "bad_request", "unknown source")
-        GUI.emit({"event": "plan", "id": req.get("id"), "steps": [{"id": s, "title": STEP_TITLES[s]} for s in plan_steps(kind)]})
+        steps = plan_steps(kind, decomp_wanted(ctx))
+        GUI.emit({"event": "plan", "id": req.get("id"), "steps": [{"id": s, "title": STEP_TITLES[s]} for s in steps]})
         try:
             state = install(ctx, source, session["keys"], session["info"])
         except SetupError as e:
@@ -2412,6 +3156,7 @@ def gui_main(args):
             session.update(keys=None, info=None)
         tdir = toolchain_dir(ctx.data_dir)
         reply(req, app=state.get("app", ""), exe=state.get("exe", ""), data_dir=ctx.data_dir,
+              decomp_exe=state.get("decomp_exe", ""), decomp_error=state.get("decomp_error", ""),
               game_dir=state.get("game_dir", ""), save_exists=have_save(ctx.data_dir),
               toolchain_bytes=folder_size(tdir) if os.path.isdir(tdir) else 0)
 
@@ -2425,6 +3170,9 @@ def gui_main(args):
     def do_import_existing(req):
         try:
             msg = import_existing(ctx.data_dir, req.get("path") or None, bool(req.get("replace")))
+            st = ctx.state()
+            if "code_mods" in st:
+                write_code_mods_setting(ctx.data_dir, st["code_mods"])
         except SetupError as e:
             if have_save(ctx.data_dir) and not req.get("replace") and "already exists" in str(e):
                 return fail(req, "exists", str(e))
@@ -2447,9 +3195,22 @@ def gui_main(args):
         launch(st, ctx.data_dir)
         reply(req)
 
+    def do_start_decomp(req):
+        """{on: bool}: start the decomp version instead of the normal game from now on"""
+        st = ctx.state()
+        on = req.get("on")
+        if not isinstance(on, bool):
+            return fail(req, "bad_request", "on must be a boolean")
+        if on and not (st.get("decomp_exe") and os.path.isfile(st["decomp_exe"])):
+            return fail(req, "not_built", "The decomp version is not built.")
+        st["start_decomp"] = on
+        write_state(ctx.data_dir, st)
+        reply(req, start_decomp=on)
+
     handlers = {"probe": probe, "check_keys": check, "install": do_install, "import_save": save,
                 "import_existing": do_import_existing, "remove_toolchain": do_remove_toolchain,
                 "shortcut": do_shortcut, "launch": do_launch, "hello": lambda req: hello(),
+                "start_decomp": do_start_decomp,
                 "language_sources": do_language_sources, "add_language_source": do_add_language_source,
                 "remove_language_source": do_remove_language_source}
     hello()

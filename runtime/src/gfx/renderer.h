@@ -1,6 +1,6 @@
 // Renderer selection and dispatch. One executable can contain both renderers (macOS default build:
 // WWHD_RENDERER=BOTH): Metal (gfx/metal_*.mm, namespace gfx) and Vulkan (gfx/vulkan/*, namespace
-// gfxvk). The Switch builds deko3d (gfx/deko, gfxdk). Each fills a Backend table; the GX2 layer and the host (windows, menus, save states) call
+// gfxvk); (this fork) the Switch's deko3d (gfx/deko, gfxdk) registers through renderer_ext.h. Each fills a Backend table; the GX2 layer and the host (windows, menus, save states) call
 // the functions below, which forward to the renderer chosen once at start-up.
 //
 // Choice, highest priority first:
@@ -10,15 +10,16 @@
 //   Metal                                                   default
 // If Vulkan cannot start (no Vulkan loader / MoltenVK / suitable device), the game starts with Metal
 // and says why (log, window title, a sheet on the TV window).
+// A platform port can add its own renderer as Api::Platform (renderer_ext.h).
 #pragma once
 #include <cstdint>
 #include <string>
 
 namespace render {
 
-enum class Api : int { Metal = 0, Vulkan = 1, Deko3D = 3 };  // (2 was OpenGL, removed)
-const char* api_name(Api a);      // "Metal", "Vulkan", "deko3d"
-const char* api_key(Api a);       // "metal", "vulkan", "deko3d" (setting / command line value)
+enum class Api : int { Metal = 0, Vulkan = 1, Platform = 2 };
+const char* api_name(Api a);      // "Metal", "Vulkan", the platform backend's name
+const char* api_key(Api a);       // "metal", "vulkan", its key (setting / command line value)
 bool compiled(Api a);             // built into this executable
 bool can_choose();                // more than one renderer built in (the Graphics menu offers the choice)
 
@@ -44,7 +45,6 @@ struct Backend {
     void (*invalidate)(uint32_t flags, uint32_t addr, uint32_t size);
     void (*guest_flush)();         // GX2Flush
     void (*wait_idle)();           // GX2DrawDone
-    void (*gpu_idle)();            // save states: wait until the GPU itself is idle (null: wait_idle does it)
     void (*write_back)();          // GX2DrawDone: render results the CPU reads (linear targets) to guest memory
     void (*ss_reset)();            // a save state was loaded: forget surfaces and shader memos
     // any thread
@@ -68,6 +68,12 @@ struct Backend {
     // the GPU for reports (performance report header): name, and for Vulkan the driver and Vulkan
     // version; "" before the renderer started
     std::string (*device)();
+    // optional, null for Metal and Vulkan (a platform backend, renderer_ext.h):
+    // GX2DrawDone for a save state: a full wait for the idle GPU. Null: wait_idle does that.
+    void (*gpu_idle)();
+    // the bits of a register that can change this renderer's shader key (true: `mask` is set; mask 0:
+    // none); false: every change of a shader-relevant register counts. Null: as Metal / Vulkan.
+    bool (*shader_key_mask)(uint32_t reg, uint32_t& mask);
 };
 enum Feature : int { kFeatureAO, kFeatureAOHires, kFeatureAniso, kFeatureFXAA, kFeatureScaleFilter, kFeatureCapture,
                      kFeatureShaderHeadStart };
@@ -78,9 +84,6 @@ const Backend& metal_backend();   // gfx/metal_backend.mm
 #endif
 #ifdef WWHD_HAS_VULKAN
 const Backend& vulkan_backend();  // gfx/vulkan/backend_table.cpp
-#endif
-#ifdef WWHD_HAS_DEKO3D
-const Backend& deko3d_backend();  // gfx/deko/backend.cpp (Switch)
 #endif
 
 // ---- start-up (main.cpp)
@@ -94,7 +97,7 @@ void run_main_loop();
 
 Api active();
 inline bool vulkan() { return g_backend && g_backend->api == Api::Vulkan; }
-inline bool deko3d() { return g_backend && g_backend->api == Api::Deko3D; }
+inline bool platform() { return g_backend && g_backend->api == Api::Platform; }
 Api requested();                  // what was asked for at start-up (differs from active() after a fallback)
 std::string fallback_reason();    // why the requested renderer did not start ("" if it did)
 Api preferred();                  // saved setting: the renderer the next start uses
@@ -102,6 +105,9 @@ void set_preferred(Api a);        // save the setting (Graphics > Renderer)
 bool restart_pending();           // the setting was changed this session to another renderer than the active one
 // relaunch the game with the saved choice (Graphics > Renderer > Restart now); returns on failure
 bool restart();
+// restart() can relaunch on this platform (not on Windows, which has no exec, nor on Android,
+// where the app process cannot re-exec itself)
+bool can_restart();
 
 // ---- dispatch
 inline void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
@@ -129,7 +135,7 @@ inline void set_tv_format(uint32_t f, bool tv) { g_backend->set_tv_format(f, tv)
 inline void invalidate(uint32_t flags, uint32_t addr, uint32_t size) { g_backend->invalidate(flags, addr, size); }
 inline void guest_flush() { g_backend->guest_flush(); }
 inline void wait_idle() { g_backend->wait_idle(); }
-inline void gpu_idle() { if (g_backend->gpu_idle) g_backend->gpu_idle(); }
+inline void gpu_idle() { if (g_backend->gpu_idle) g_backend->gpu_idle(); else g_backend->wait_idle(); }
 inline void write_back() { if (g_backend->write_back) g_backend->write_back(); }
 inline void ss_reset() { g_backend->ss_reset(); }
 uint64_t frame_count();  // 0 before the renderer started

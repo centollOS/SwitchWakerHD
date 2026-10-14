@@ -25,6 +25,7 @@ extern "C" void f_0252E388_orig(Cpu* c);  // dDlst_peekZ_c::peekData
 
 extern "C" void hook_0252E388(Cpu* c) {
     static const bool off = [] { const char* e = getenv("WWHD_PEEKZ"); return e && atoi(e) == 0; }();
+    static const bool log = getenv("WWHD_PEEKZ_LOG") != nullptr;
     if (off || !render::can_peek_z()) { f_0252E388_orig(c); return; }
     const uint32_t obj = c->r[3];
     const uint32_t n = std::min<uint32_t>(ld8(obj), 64);
@@ -34,9 +35,12 @@ extern "C" void hook_0252E388(Cpu* c) {
         uint32_t cell = obj + 4 + i * 8;
         uint32_t dst = ld32(cell + 4);
         if (!dst) continue;
-        cells.push_back((uint32_t)(int32_t)(int16_t)ld16(cell));
-        cells.push_back((uint32_t)(int32_t)(int16_t)ld16(cell + 2));
+        const int32_t x = int16_t(ld16(cell)), y = int16_t(ld16(cell + 2));
+        cells.push_back(uint32_t(x));
+        cells.push_back(uint32_t(y));
         cells.push_back(dst);
+        if (log) LOG("[peekz] request (%d,%d) in 640x480 -> %08X",
+                     int(x), int(y), dst);
     }
     if (!cells.empty()) gx2::emit(gx2::OP_PEEK_Z, cells.data(), (uint32_t)cells.size());
     st8(obj, 0);  // as the game's function: the cells are taken

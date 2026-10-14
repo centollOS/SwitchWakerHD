@@ -1,14 +1,36 @@
+#include "pass.h"
+#ifdef __ANDROID__
+#include "overlay/overlay.h"
+#include "platform/input_sdl.h"
+#endif
+#include "deferred_dispatch.h"
+#include "../../exception_report.h"
 #include "bc_decode.h"
 #include "bc_reference.h"
 // No game assets: assertions inspect data returned by the actual Vulkan device.
 #include "backend.h"
+#include "stereo.h"
+#include "../stereo_projection.h"
+#include "android_shared_image.h"
+#include "pipeline_trace.h"
+#include "present.h"
 #include "buffer_cache.h"
 #include "render_prof.h"
+#include "perf_metrics.h"
 #include "write_watch.h"
 #include "shaders.h"
 #include "gx2/gx2.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "runtime.h"
+#include "Cafe/HW/Latte/LatteAddrLib/LatteAddrLib.h"
+#include "input.h"
+#include "input_map.h"
+#include "gfx/display_modes.h"
+#include "platform/dual_display.h"
+#include "overlay/hostui.h"
+#ifdef __ANDROID__
+#include <SDL3/SDL.h>
+#endif
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -21,12 +43,13 @@
 #include <zlib.h>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace gfxvk {
 extern uint64_t g_stat_full_checks, g_stat_uploads;
 void request_tv_dump(const std::string&,int);
 namespace {
-void require(bool condition,const char* message) { if(!condition)throw std::runtime_error(message); }
+void require(bool condition,const char* message) { if(!condition)exception_report::raise(message); }
 struct Image {
  Surface s;
  Image(uint32_t w,uint32_t h,uint32_t format,bool depth=false,uint32_t layers=1,uint32_t mips=1) {
@@ -39,9 +62,9 @@ std::vector<uint8_t> read_image(Surface& s,VkImageAspectFlags aspect,uint32_t by
  Buffer b=create_readback_buffer(size_t(w)*h*bytes);
  transition_image(&s,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
  VkBufferImageCopy copy{};copy.imageSubresource={aspect,mip,layer,1};copy.imageExtent={w,h,1};
- auto cmd=command_buffer();vkCmdCopyImageToBuffer(cmd,s.image,s.layout,b.buffer,1,&copy);
+ auto cmd=command_buffer();record::vkCmdCopyImageToBuffer(cmd,s.image,s.layout,b.buffer,1,&copy);
  VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.buffer=b.buffer;barrier.size=VK_WHOLE_SIZE;
- vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr);
+ record::vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr);
  try {flush();std::vector<uint8_t> result(size_t(w)*h*bytes);memcpy(result.data(),b.mapped,result.size());defer_buffer(b);return result;}
  catch(...){defer_buffer(b);throw;}
 }
@@ -51,8 +74,47 @@ void rgba_is(const std::vector<uint8_t>& data,const uint8_t rgba[4],const char* 
 void clear_image(Surface& s,const float rgba[4]) {
  transition_image(&s,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
  VkClearColorValue value{};std::copy(rgba,rgba+4,value.float32);VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,s.mips,0,s.arrayLayers};
- vkCmdClearColorImage(command_buffer(),s.image,s.layout,&value,1,&range);mark_gpu_written(&s);
+ record::vkCmdClearColorImage(command_buffer(),s.image,s.layout,&value,1,&range);mark_gpu_written(&s);
 }
+// A colour placeholder used by a comparison instruction must retain colour tiling while
+// providing a Vulkan depth image. A subsequently rendered depth alias takes precedence.
+void colour_comparison_check() {
+ for (uint32_t tile : {1u,2u}) {
+  uint32_t addr=mem::host_alloc(4096,256);
+  memset(mem::ptr(addr),0,4096);
+  auto offset=[&](uint32_t x,uint32_t y) {
+   if(tile==1)return (y*8+x)*4;
+   return LatteAddrLib::ComputeSurfaceAddrFromCoordMicroTiled(x,y,0,32,8,8,
+       Latte::E_HWTILEMODE::TM_1D_TILED_THIN1,false);
+  };
+  for(uint32_t y=0;y<4;++y)for(uint32_t x=0;x<4;++x) {
+   uint8_t rgba[4]={uint8_t((x+y*4)*17),uint8_t(255-x*17),uint8_t(y*31),255};
+   memcpy(mem::ptr(addr)+offset(x,y),rgba,4);
+  }
+  uint32_t words[7]={1u|(tile<<3)|(3u<<19),3u|(0x1au<<26),addr>>8,0,
+                    (1u<<19)|(2u<<22)|(3u<<25),0,0};
+  auto* color=sampled_texture(words,false);
+  require(color&&!color->fmt.depth,"comparison fixture colour upload failed");
+  auto* compared=sampled_texture(words,true);
+  require(compared&&compared!=color&&compared->fmt.pixel==VK_FORMAT_D32_SFLOAT,
+          "RGBA8 comparison texture was not converted to depth");
+  auto data=read_image(*compared,VK_IMAGE_ASPECT_DEPTH_BIT,4);
+  for(uint32_t i=0;i<16;++i) {
+   float value;memcpy(&value,data.data()+i*4,4);
+   require(std::abs(value-float(i)/15.0f)<0.000001f,"colour comparison upload/tiling differs");
+  }
+  SurfaceDesc depth;depth.addr=addr;depth.width=depth.height=4;depth.pitch=8;
+  depth.format=0x11;depth.isDepth=true;depth.tileMode=tile;
+  auto* rendered=find_or_create_surface(depth,true);
+  transition_image(rendered,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
+  VkClearDepthStencilValue value{0.25f,0};VkImageSubresourceRange range{rendered->aspect,0,1,0,1};
+  record::vkCmdClearDepthStencilImage(command_buffer(),rendered->image,rendered->layout,&value,1,&range);
+  mark_gpu_written(rendered);
+  require(sampled_texture(words,true)==rendered,"rendered depth alias lost to the colour comparison placeholder");
+ }
+ fprintf(stderr,"[renderer smoke] colour comparison conversion, colour tiling and rendered depth alias passed\n");
+}
+
 void bc_surface_check() {
  for (uint32_t format : {0x31u,0x431u,0x32u,0x432u,0x33u,0x433u,0x34u,0x234u,0x35u,0x235u}) {
   SurfaceDesc d;d.addr=mem::host_alloc(65536,256);d.mipAddr=mem::host_alloc(65536,256);
@@ -76,6 +138,45 @@ void bc_surface_check() {
  }
  fprintf(stderr,"[renderer smoke] BC production uploads, sRGB/signed views, mip/layer cache and invalidation passed\n");
 }
+void completed_scan_retention_check() {
+ require(R.tv.scan && R.tv.scan->image, "completed scan missing for repeat check");
+ const auto frame = R.frame;
+ const auto original = read_image(*R.tv.scan, VK_IMAGE_ASPECT_COLOR_BIT, 4);
+ const auto before = compose_offscreen(R.tv, 64, 64, false);
+ // The real-game diagnostic also captures GamePad. Exercise its published
+ // scan when this smoke configuration supplies one, without changing setup.
+ Surface* drcScan = R.drc.scan && R.drc.scan->image ? R.drc.scan.get() : nullptr;
+ const auto drcBefore = drcScan ? read_image(*drcScan, VK_IMAGE_ASPECT_COLOR_BIT, 4) : std::vector<uint8_t>{};
+ Image next(64, 64, 0x1a);
+ const float blue[4] = {0, 0, 1, 1};
+ clear_image(next.s, blue);
+ if (R.tv.buildingScan) destroy_surface_image(R.tv.buildingScan.get());
+ R.tv.buildingScan = std::make_unique<Surface>(std::move(next.s));
+ next.s = {};
+ R.tv.buildingScanDirty = true; R.tv.buildingScanSrgb = false;
+ begin_pipeline_pending_frame();
+ std::this_thread::sleep_for(std::chrono::milliseconds(20));
+ present_completed_frame_while_pipeline_pending();
+ require(R.frame == frame, "repeated presentation advanced guest frame state");
+ require(read_image(*R.tv.scan, VK_IMAGE_ASPECT_COLOR_BIT, 4) == original,
+         "pending presentation exposed or modified the next scan image");
+ if (drcScan) require(R.drc.scan.get() == drcScan &&
+     read_image(*drcScan, VK_IMAGE_ASPECT_COLOR_BIT, 4) == drcBefore,
+     "pending presentation modified the published GamePad scan");
+ const auto repeated = compose_offscreen(R.tv, 64, 64, false);
+ require(repeated == before, "repeated completed composition differs pixel-for-pixel");
+ swap();
+ const uint8_t rgba[4] = {0, 0, 255, 255};
+ rgba_is(read_image(*R.tv.scan, VK_IMAGE_ASPECT_COLOR_BIT, 4), rgba,
+         "completed next scan was not published at swap");
+ if (const char* path = std::getenv("WWHD_VK_PENDING_PROOF_DIR")) {
+  std::filesystem::create_directories(path);
+  write_rgba_png(std::string(path) + "/completed.png", 64, 64, before);
+  write_rgba_png(std::string(path) + "/repeated.png", 64, 64, repeated);
+  write_rgba_png(std::string(path) + "/resumed.png", 64, 64, compose_offscreen(R.tv, 64, 64, false));
+ }
+ fprintf(stderr, "[renderer smoke] pending presentation retained completed pixels; next scan published only at swap\n");
+}
 void upload_arena_check() {
  const uint64_t before=R.uploadAllocations;
  auto a=allocate_upload(16,256),b=allocate_upload(16,256);
@@ -84,9 +185,9 @@ void upload_arena_check() {
  memset(a.mapped,0x31,16);memset(b.mapped,0x72,16);
  Buffer out=create_readback_buffer(32);
  VkBufferCopy ca{a.offset,0,16},cb{b.offset,16,16};
- auto cmd=command_buffer();vkCmdCopyBuffer(cmd,a.buffer,out.buffer,1,&ca);vkCmdCopyBuffer(cmd,b.buffer,out.buffer,1,&cb);
+ auto cmd=command_buffer();record::vkCmdCopyBuffer(cmd,a.buffer,out.buffer,1,&ca);record::vkCmdCopyBuffer(cmd,b.buffer,out.buffer,1,&cb);
  VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.buffer=out.buffer;barrier.size=VK_WHOLE_SIZE;
- vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr);flush();
+ record::vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr);flush();
  auto bytes=static_cast<uint8_t*>(out.mapped);for(int i=0;i<32;i++)require(bytes[i]==(i<16?0x31:0x72),"arena GPU snapshots corrupted");
  auto reuse=allocate_upload(16,256);require(reuse.buffer==a.buffer&&reuse.offset==a.offset,"arena failed fence reuse");
  require(R.uploadAllocations<=before+1,"arena allocated per slice");defer_buffer(out);command_buffer();flush();
@@ -94,9 +195,9 @@ void upload_arena_check() {
 }
 std::vector<uint8_t> read_buffer(VkBuffer source,VkDeviceSize offset,uint32_t size) {
  Buffer out=create_readback_buffer(size);
- VkBufferCopy copy{offset,0,size};auto cmd=command_buffer();vkCmdCopyBuffer(cmd,source,out.buffer,1,&copy);
+ VkBufferCopy copy{offset,0,size};auto cmd=command_buffer();record::vkCmdCopyBuffer(cmd,source,out.buffer,1,&copy);
  VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.buffer=out.buffer;barrier.size=VK_WHOLE_SIZE;
- vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr);
+ record::vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr);
  try {flush();std::vector<uint8_t> result(static_cast<uint8_t*>(out.mapped),static_cast<uint8_t*>(out.mapped)+size);defer_buffer(out);return result;}
  catch(...){defer_buffer(out);throw;}
 }
@@ -154,16 +255,16 @@ void asynchronous_submission_check() {
   VkBufferCopy first{a.offset,submission*regionSize,payloadSize};
   VkBufferCopy second{b.offset,submission*regionSize+payloadSize,payloadSize};
   VkBufferCopy toTemporary{a.offset,0,payloadSize};
-  vkCmdCopyBuffer(cmd,a.buffer,out.buffer,1,&first);
-  vkCmdCopyBuffer(cmd,b.buffer,out.buffer,1,&second);
-  vkCmdCopyBuffer(cmd,a.buffer,temporary.buffer,1,&toTemporary);
+  record::vkCmdCopyBuffer(cmd,a.buffer,out.buffer,1,&first);
+  record::vkCmdCopyBuffer(cmd,b.buffer,out.buffer,1,&second);
+  record::vkCmdCopyBuffer(cmd,a.buffer,temporary.buffer,1,&toTemporary);
   VkBufferMemoryBarrier transfer{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
   transfer.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;transfer.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
   transfer.srcQueueFamilyIndex=transfer.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
   transfer.buffer=temporary.buffer;transfer.size=VK_WHOLE_SIZE;
-  vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,1,&transfer,0,nullptr);
+  record::vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,1,&transfer,0,nullptr);
   VkBufferCopy fromTemporary{0,submission*regionSize+payloadSize*2,payloadSize};
-  vkCmdCopyBuffer(cmd,temporary.buffer,out.buffer,1,&fromTemporary);
+  record::vkCmdCopyBuffer(cmd,temporary.buffer,out.buffer,1,&fromTemporary);
   defer_buffer(temporary);
   flush_async();
  }
@@ -171,7 +272,7 @@ void asynchronous_submission_check() {
  host.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
  host.srcQueueFamilyIndex=host.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
  host.buffer=out.buffer;host.size=VK_WHOLE_SIZE;
- vkCmdPipelineBarrier(command_buffer(),VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&host,0,nullptr);
+ record::vkCmdPipelineBarrier(command_buffer(),VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&host,0,nullptr);
  flush();
  auto* bytes=static_cast<uint8_t*>(out.mapped);
  for(uint32_t submission=0;submission<submissions;++submission)
@@ -182,9 +283,43 @@ void asynchronous_submission_check() {
    require(bytes[offset+payloadSize*2]==uint8_t(submission*19+byte),"async deferred temporary copy differs");
   }
  for(const auto& slot:R.submissions)
-  require(!slot.pending&&slot.garbageBuffers.empty()&&slot.garbageImages.empty(),"async drain left pending resources");
+  require(!slot.pending&&slot.garbageBuffers.empty()&&slot.garbageImages.empty()&&slot.garbageFramebuffers.empty(),"async drain left pending resources");
  defer_buffer(out);flush();
  fprintf(stderr,"[renderer smoke] ten async submissions, immutable snapshots, slot wrap and deferred retirement passed\n");
+}
+// The fallback must resolve framebuffer handles before capture, then invalidate
+// them at view deferral even though their native begin commands are not emitted.
+void renderpass_retirement_check() {
+ if(!R.renderPasses)return;
+ end_encoder();
+ for(uint32_t i=0;i<10;++i) {
+  Surface surface;surface.width=surface.height=8;surface.format=0x1a;surface.fmt=format_info(surface.format,false);
+  create_surface_image(&surface,true,VkExtent3D{8,8,1});
+  transition_image(&surface,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+  auto cmd=command_buffer();
+  const auto cached=pass_caches().framebuffer_count();
+  const auto retired=R.garbageFramebuffers.size();
+  VkRenderingAttachmentInfo attachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+  attachment.imageView=surface.view;attachment.imageLayout=surface.layout;
+  attachment.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;attachment.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
+  VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
+  rendering.renderArea.extent={8,8};rendering.layerCount=1;
+  rendering.colorAttachmentCount=1;rendering.pColorAttachments=&attachment;
+  DeferredCommands captured;captured.start_capture();
+  begin_pass(cmd,rendering,[&] { return color_pass(surface.fmt.pixel,surface.layout); });
+  end_pass(cmd);
+  require(captured.command_count()==2,"classic begin/end did not enter the deferred command stream");
+  require(pass_caches().framebuffer_count()==cached+1,"captured framebuffer was not resolved at recording time");
+  destroy_surface_image(&surface);
+  require(pass_caches().framebuffer_count()==cached,"view deferral retained a framebuffer cache entry");
+  require(R.garbageFramebuffers.size()==retired+1,"framebuffer did not share its view's submission retirement");
+  captured.finish_exact();flush_async();
+ }
+ wait_idle();
+ for(const auto& slot:R.submissions)
+  require(slot.garbageFramebuffers.empty()&&slot.garbageImages.empty(),"framebuffer/view retirement survived the submission drain");
+ fprintf(stderr,"[renderer smoke] captured render passes, immediate invalidation and ten fenced framebuffer retirements passed\n");
 }
 // Scaled depth copies without blits (surfaces.cpp draw_depth_copy). Vulkan makes blits of depth/stencil
 // formats optional and Adreno drivers report none for some, so resizing a depth target (a resolution or
@@ -215,7 +350,7 @@ void depth_copy_check() {
    Buffer staging=create_buffer(texels.size(),VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
    require(staging.mapped!=nullptr,"depth copy staging buffer is not mapped");memcpy(staging.mapped,texels.data(),texels.size());
    VkBufferImageCopy copy{};copy.imageSubresource={aspect,0,layer,1};copy.imageExtent={s.extent.width,s.extent.height,1};
-   vkCmdCopyBufferToImage(command_buffer(),staging.buffer,s.image,s.layout,1,&copy);defer_buffer(staging);
+   record::vkCmdCopyBufferToImage(command_buffer(),staging.buffer,s.image,s.layout,1,&copy);defer_buffer(staging);
   }
   mark_gpu_written(&s);
  };
@@ -255,7 +390,7 @@ void depth_copy_check() {
    Image dst(48,32,format,true,1);
    transition_image(&dst.s,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
    VkClearDepthStencilValue value{0.75f,0x33};VkImageSubresourceRange range{dst.s.aspect,0,1,0,1};
-   vkCmdClearDepthStencilImage(command_buffer(),dst.s.image,dst.s.layout,&value,1,&range);
+   record::vkCmdClearDepthStencilImage(command_buffer(),dst.s.image,dst.s.layout,&value,1,&range);
    resample(&src.s,&dst.s,1,0.5f,0.75f,30,21);
    check(dst.s,20,18,30,21,1,"drawn partial depth copy differs",0.75f,0x33);
   }
@@ -271,7 +406,7 @@ void depth_copy_check() {
   Image part(48,32,0x11,true,1);
   transition_image(&part.s,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
   VkClearDepthStencilValue value{0.75f,0x33};VkImageSubresourceRange range{part.s.aspect,0,1,0,1};
-  vkCmdClearDepthStencilImage(command_buffer(),part.s.image,part.s.layout,&value,1,&range);
+  record::vkCmdClearDepthStencilImage(command_buffer(),part.s.image,part.s.layout,&value,1,&range);
   resample(&src.s,&part.s,1,0.5f,0.75f,30,21);
   check(part.s,20,18,0,0,1,"unscalable partial depth copy changed the destination",0.75f,0x33);
  }
@@ -313,14 +448,14 @@ void volume_target_check() {
  VkRenderingAttachmentInfo target{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};target.imageView=layer_view(s,selected);target.imageLayout=s->layout;
  target.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;target.storeOp=VK_ATTACHMENT_STORE_OP_STORE;target.clearValue.color.float32[1]=1;target.clearValue.color.float32[3]=1;
  VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea.extent={w,h};ri.layerCount=1;ri.colorAttachmentCount=1;ri.pColorAttachments=&target;
- auto cmd=command_buffer();vkCmdBeginRendering(cmd,&ri);R.rendering=true;end_encoder();mark_gpu_written(s);
+ auto cmd=command_buffer();begin_pass(cmd,ri,[&] { return color_pass(s->fmt.pixel,s->layout); });R.rendering=true;end_encoder();mark_gpu_written(s);
  auto read_slice=[&](uint32_t z) {
   Buffer b=create_readback_buffer(w*h*4);
   transition_image(s,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
   VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageOffset={0,0,int32_t(z)};copy.imageExtent={w,h,1};
-  auto c=command_buffer();vkCmdCopyImageToBuffer(c,s->image,s->layout,b.buffer,1,&copy);
+  auto c=command_buffer();record::vkCmdCopyImageToBuffer(c,s->image,s->layout,b.buffer,1,&copy);
   VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.buffer=b.buffer;barrier.size=VK_WHOLE_SIZE;
-  vkCmdPipelineBarrier(c,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr);
+  record::vkCmdPipelineBarrier(c,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr);
   try {flush();std::vector<uint8_t> result(w*h*4);memcpy(result.data(),b.mapped,result.size());defer_buffer(b);return result;}
   catch(...){defer_buffer(b);throw;}
  };
@@ -337,18 +472,23 @@ void volume_target_check() {
  require(other&&other!=s&&other->imageType==VK_IMAGE_TYPE_2D,"a 2D sampled view got the rendered volume");
  fprintf(stderr,"[renderer smoke] volume render target slice, clear isolation and 3D sampling passed\n");
 }
-void triangle(Surface& s) {
+float triangle(Surface& s, float eyeOffset=0, float clipW=1) {
  struct Resources {
   VkShaderModule vs=VK_NULL_HANDLE,ps=VK_NULL_HANDLE;VkPipelineLayout layout=VK_NULL_HANDLE;VkPipeline pipeline=VK_NULL_HANDLE;
   ~Resources(){if(pipeline)vkDestroyPipeline(R.device,pipeline,nullptr);if(layout)vkDestroyPipelineLayout(R.device,layout,nullptr);if(vs)vkDestroyShaderModule(R.device,vs,nullptr);if(ps)vkDestroyShaderModule(R.device,ps,nullptr);}
  } objects;
  auto module=[&](const char* glsl,bool vertex,VkShaderModule& result) {
-  std::string error;auto words=vk::compile_glsl(glsl,vertex,&error);if(words.empty())throw std::runtime_error("smoke GLSL compilation: "+error);
+  std::string error;auto words=vk::compile_glsl(glsl,vertex,&error);if(words.empty())exception_report::raise("smoke GLSL compilation: "+error);
   VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};ci.codeSize=words.size()*4;ci.pCode=words.data();vk_check(vkCreateShaderModule(R.device,&ci,nullptr,&result),"smoke shader module");
  };
- module("#version 450\nvoid main(){vec2 p[3]=vec2[3](vec2(-0.8,-0.8),vec2(0.8,-0.8),vec2(0,0.8));gl_Position=vec4(p[gl_VertexIndex],0,1);}",true,objects.vs);
+ float projection[16]={1,0,0,0, 0,1,0,0, 0,0,-1.01f,-.1f, 0,0,-1,0};
+ if (clipW==1) { projection[11]=0;projection[14]=0;projection[15]=1; }
+ stereo::project_eye(projection,eyeOffset,4);
+ std::string vertexSource="#version 450\nlayout(push_constant) uniform Camera { vec4 row; } camera; void main(){vec2 p[3]=vec2[3](vec2(-0.8,-0.8),vec2(0.8,-0.8),vec2(0,0.8));float w="+std::to_string(clipW)+";vec4 view=vec4(p[gl_VertexIndex]*w,-w,1);gl_Position=vec4(dot(camera.row,view),view.y,0,w);}";
+ module(vertexSource.c_str(),true,objects.vs);
  module("#version 450\nlayout(location=0) out vec4 color;void main(){color=vec4(1,0,0,1);}",false,objects.ps);
- VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};vk_check(vkCreatePipelineLayout(R.device,&layout,nullptr,&objects.layout),"smoke pipeline layout");
+ VkPushConstantRange stereoRange{VK_SHADER_STAGE_VERTEX_BIT,0,16};
+ VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};layout.pushConstantRangeCount=1;layout.pPushConstantRanges=&stereoRange;vk_check(vkCreatePipelineLayout(R.device,&layout,nullptr,&objects.layout),"smoke pipeline layout");
  VkPipelineShaderStageCreateInfo stages[2]{};
  for(auto& stage:stages){stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;stage.pName="main";}
  stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=objects.vs;stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=objects.ps;
@@ -361,14 +501,14 @@ void triangle(Surface& s) {
  VkPipelineColorBlendAttachmentState attachment{};attachment.colorWriteMask=0xf;
  VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};blend.attachmentCount=1;blend.pAttachments=&attachment;
  VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};rendering.colorAttachmentCount=1;rendering.pColorAttachmentFormats=&s.fmt.pixel;
- VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};info.pNext=&rendering;info.stageCount=2;info.pStages=stages;info.pVertexInputState=&vertex;info.pInputAssemblyState=&assembly;info.pViewportState=&vp;info.pRasterizationState=&raster;info.pMultisampleState=&ms;info.pColorBlendState=&blend;info.layout=objects.layout;
- vk_check(vkCreateGraphicsPipelines(R.device,R.pipelineCache,1,&info,nullptr,&objects.pipeline),"smoke triangle pipeline");
+ VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};pipeline_targets(info,rendering);info.stageCount=2;info.pStages=stages;info.pVertexInputState=&vertex;info.pInputAssemblyState=&assembly;info.pViewportState=&vp;info.pRasterizationState=&raster;info.pMultisampleState=&ms;info.pColorBlendState=&blend;info.layout=objects.layout;
+ vk_check(stutter::create_graphics(R.frame, "smoke_pipeline", R.device,R.pipelineCache,1,&info,nullptr,&objects.pipeline),"smoke triangle pipeline");
  R.pipelineCacheDirty=true;
  R.pipelineCacheChangedFrame=R.frame;
  transition_image(&s,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
  VkRenderingAttachmentInfo target{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};target.imageView=layer_view(&s,0);target.imageLayout=s.layout;target.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;target.storeOp=VK_ATTACHMENT_STORE_OP_STORE;target.clearValue.color.float32[3]=1;
  VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea=scissor;ri.layerCount=1;ri.colorAttachmentCount=1;ri.pColorAttachments=&target;
- auto cmd=command_buffer();vkCmdBeginRendering(cmd,&ri);R.rendering=true;vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,objects.pipeline);vkCmdDraw(cmd,3,1,0,0);end_encoder();mark_gpu_written(&s);flush();
+ auto cmd=command_buffer();begin_pass(cmd,ri,[&] { return color_pass(s.fmt.pixel,s.layout); });R.rendering=true;record::vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,objects.pipeline);record::vkCmdPushConstants(cmd,objects.layout,VK_SHADER_STAGE_VERTEX_BIT,0,16,projection);record::vkCmdDraw(cmd,3,1,0,0);end_encoder();mark_gpu_written(&s);flush();
  auto pixels=read_image(s,VK_IMAGE_ASPECT_COLOR_BIT,4);
  size_t center=(size_t(s.extent.height/2)*s.extent.width+s.extent.width/2)*4;
  require(pixels[center]==255&&pixels[center+1]==0&&pixels[center+2]==0&&pixels[center+3]==255,"triangle center pixel differs");
@@ -376,6 +516,108 @@ void triangle(Surface& s) {
  size_t red=0;for(size_t i=0;i<pixels.size();i+=4)if(pixels[i]==255)++red;
  require(red>size_t(s.extent.width)*s.extent.height/5&&red<size_t(s.extent.width)*s.extent.height/2,"triangle rasterized area differs");
  fprintf(stderr,"[renderer smoke] generated GLSL triangle/readback passed (%zu red pixels)\n",red);
+ double sum=0;for(size_t i=0;i<pixels.size();i+=4)if(pixels[i]==255)sum+=(i/4)%s.extent.width;
+ return float(sum/red);
+}
+void stereo_geometry_check() {
+ // Exercise the real remapped-uniform path, including a stale HUD register
+ // range beside a world projection. Each eye must get an immutable snapshot.
+ std::vector<uint32_t> regs(0x10000);
+ const uint32_t base=mmSQ_ALU_CONSTANT0_0+0x400;
+ const float camera[16]={2,0,0,0, 0,3,0,0, 0,0,-1.01f,-20, 0,0,-1,0};
+ memcpy(regs.data()+base,camera,64);
+ memcpy(regs.data()+base+32,camera,64);
+ const auto oldTag=stereo::layoutProjection;
+ const auto oldStart=stereo::layoutProjectionStart;
+ stereo::tag_layout(base+32,regs.data()+base+32);
+ LatteDecompilerShader metadata(LatteConst::ShaderType::Vertex);
+ metadata.list_remappedUniformEntries_register={{0,16},{16,0},{32,48},{48,32},{128,64}};
+ vk::Shader shader;shader.vertex=true;shader.dec=&metadata;
+ shader.uniforms.offset_remapped=0;shader.uniforms.offset_endOfBlock=80;
+ std::vector<uint8_t> leftUniforms,rightUniforms;
+ vk::pack_uniforms_into(regs.data(),shader,leftUniforms,1,1,-8,600);
+ vk::pack_uniforms_into(regs.data(),shader,rightUniforms,1,1,8,600);
+ float leftRow[4],rightRow[4];
+ memcpy(leftRow,leftUniforms.data()+16,16);memcpy(rightRow,rightUniforms.data()+16,16);
+ require(leftRow[3]==16 && rightRow[3]==-16,"stereo remapped world projection not applied");
+ require(!memcmp(leftUniforms.data()+64,camera,16)&&!memcmp(rightUniforms.data()+64,camera,16),"stereo moved tagged HUD projection");
+ require(!memcmp(regs.data()+base,camera,64),"stereo modified shared guest uniforms");
+ stereo::layoutProjection=oldTag;stereo::layoutProjectionStart=oldStart;
+ SurfaceDesc desc;desc.addr=0x3E000000;desc.width=64;desc.height=64;desc.pitch=64;desc.format=0x1a;
+ Surface* left=find_or_create_surface(desc,true);
+ const float nearLeft=triangle(*left,-.4f,2);
+ auto leftPixels=read_image(*left,VK_IMAGE_ASPECT_COLOR_BIT,4);
+ stereo_select_eye(1);
+ Surface* right=find_or_create_surface(desc,true);
+ require(right!=left && right->image!=left->image,"stereo surfaces alias between eyes");
+ const float nearRight=triangle(*right,.4f,2);
+ require(nearLeft>nearRight+4,"near geometry lacks stereo disparity");
+ require(read_image(*left,VK_IMAGE_ASPECT_COLOR_BIT,4)==leftPixels,"right eye overwrote left eye");
+ float zeroRight=triangle(*right,.4f,4),farRight=triangle(*right,.4f,8);
+ float hudRight=triangle(*right,.4f,1);
+ stereo_select_eye(0);
+ require(find_or_create_surface(desc,false)==left,"eye surface namespace not restored");
+ float zeroLeft=triangle(*left,-.4f,4),farLeft=triangle(*left,-.4f,8);
+ float hudLeft=triangle(*left,-.4f,1);
+ require(std::fabs(zeroLeft-zeroRight)<.01f,"convergence plane has disparity");
+ require(farRight>farLeft+2,"far geometry has wrong disparity sign");
+ require(std::fabs(hudLeft-hudRight)<.01f,"orthographic HUD has disparity");
+ std::vector<int> order;
+ stereo_pair([&]{order.push_back(stereoEye);},true);
+ stereo_pair([&]{order.push_back(stereoEye);},true);
+ require(order==std::vector<int>({0,1,1,0}),"stereo eye scheduling changed per-eye order");
+ left->gpuWritten=right->gpuWritten=false;
+ left->dirty=right->dirty=false;
+ left->lastCheckedFrame=right->lastCheckedFrame=R.frame;
+ const bool wasRendering=R.rendering;
+ stereo_invalidate(2,desc.addr,64*64*4);
+ require(left->dirty&&right->dirty,"stereo invalidation missed an eye cache");
+ require(stereoEye==0&&R.rendering==wasRendering,"CPU invalidation changed active render context");
+ SurfaceDesc atlas;atlas.addr=mem::host_alloc(6*1024*1024,256);
+ atlas.width=atlas.height=atlas.pitch=1024;atlas.slices=3;atlas.dim=5;atlas.format=5;atlas.isDepth=true;
+ auto* sun=find_or_create_surface(atlas,true);
+ transition_image(sun,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
+ VkClearDepthStencilValue shadowClear{0.375f,0};
+ VkImageSubresourceRange shadowRange{VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,3};
+ record::vkCmdClearDepthStencilImage(command_buffer(),sun->image,sun->layout,&shadowClear,1,&shadowRange);
+ mark_gpu_written(sun);
+ stereo_select_eye(1);
+ require(find_or_create_surface(atlas,true)==sun,"sun atlas duplicated for the second eye");
+ require(&stereo_copy_cache(atlas.addr,1024,1024,3)==&stereo_surface_cache(atlas),"shadow copy missed shared atlas");
+ auto shadowPixels=read_image(*sun,VK_IMAGE_ASPECT_DEPTH_BIT,2,0,2);
+ uint16_t shadowValue;memcpy(&shadowValue,shadowPixels.data(),2);
+ require(std::abs(int(shadowValue)-24576)<=1,"second eye cannot read shared sun depth");
+ atlas.slices=1;
+ require(find_or_create_surface(atlas,true)!=sun,"ordinary depth unexpectedly shared");
+ stereo_select_eye(0);
+ // Turning stereo off must release the second eye while retaining eye 0.
+ const auto oldFrame=stereo::frame;
+ const int oldMode=stereo::requestedMode.load();
+ stereo::frame.mode=stereo::HalfSBS;
+ for(auto* scan : {&stereoRight.scan,&stereoRight.buildingScan}) {
+  *scan=std::make_unique<Surface>();
+  (*scan)->width=(*scan)->height=16;(*scan)->format=0x1a;
+  (*scan)->fmt=format_info(0x1a,false);create_surface_image(scan->get(),false);
+ }
+ stereoRight.buildingScanDirty=true;
+ stereo_select_eye(1);
+ stereo::set_mode(stereo::Off);stereo_latch();
+ require(stereoEye==0 && find_or_create_surface(desc,false)==left,"stereo disable lost the primary eye");
+ require(!stereoRight.scan && !stereoRight.buildingScan && !stereoRight.buildingScanDirty,"stereo disable retained scan buffers");
+ stereo_select_eye(1);
+ require(R.surfaces.empty() && R.linearTargets.empty() && R.mainDepthAddr==0,"stereo disable retained second-eye surfaces");
+ stereo_select_eye(0);
+ // Re-enable twice: shared shadows survive, and the released namespace is recreated.
+ for(int cycle=0;cycle<2;++cycle) {
+  stereo::set_mode(stereo::HalfSBS);stereo_latch();
+  stereo_select_eye(1);
+  require(find_or_create_surface(desc,true)->image!=left->image,"re-enabled stereo aliases the primary eye");
+  atlas.slices=3;require(find_or_create_surface(atlas,true)==sun,"stereo toggle lost the shared shadow atlas");
+  stereo::set_mode(stereo::Off);stereo_latch();
+ }
+ stereo::frame=oldFrame;stereo::requestedMode=oldMode;
+ flush();
+ fprintf(stderr,"[renderer smoke] stereo geometry, convergence, HUD, eye isolation and toggle cleanup PASS\n");
 }
 void vertex_window_check(Surface& s) {
  struct Resources {
@@ -383,7 +625,7 @@ void vertex_window_check(Surface& s) {
   ~Resources(){if(pipeline)vkDestroyPipeline(R.device,pipeline,nullptr);if(layout)vkDestroyPipelineLayout(R.device,layout,nullptr);if(vs)vkDestroyShaderModule(R.device,vs,nullptr);if(ps)vkDestroyShaderModule(R.device,ps,nullptr);}
  } objects;
  auto module=[&](const char* glsl,bool vertex,VkShaderModule& result) {
-  std::string error;auto words=vk::compile_glsl(glsl,vertex,&error);if(words.empty())throw std::runtime_error("smoke GLSL compilation: "+error);
+  std::string error;auto words=vk::compile_glsl(glsl,vertex,&error);if(words.empty())exception_report::raise("smoke GLSL compilation: "+error);
   VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};ci.codeSize=words.size()*4;ci.pCode=words.data();vk_check(vkCreateShaderModule(R.device,&ci,nullptr,&result),"smoke shader module");
  };
  module("#version 450\nlayout(location=0) in vec3 position;layout(location=1) in vec4 tint;layout(location=0) out vec4 vertexColor;void main(){gl_Position=vec4(position.xy,0,1);vertexColor=gl_VertexIndex==int(position.z)?tint:vec4(0,0,1,1);}",true,objects.vs);
@@ -404,8 +646,8 @@ void vertex_window_check(Surface& s) {
  VkPipelineColorBlendAttachmentState attachment{};attachment.colorWriteMask=0xf;
  VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};blend.attachmentCount=1;blend.pAttachments=&attachment;
  VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};rendering.colorAttachmentCount=1;rendering.pColorAttachmentFormats=&s.fmt.pixel;
- VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};info.pNext=&rendering;info.stageCount=2;info.pStages=stages;info.pVertexInputState=&vertex;info.pInputAssemblyState=&assembly;info.pViewportState=&vp;info.pRasterizationState=&raster;info.pMultisampleState=&ms;info.pColorBlendState=&blend;info.layout=objects.layout;
- vk_check(vkCreateGraphicsPipelines(R.device,R.pipelineCache,1,&info,nullptr,&objects.pipeline),"smoke triangle pipeline");
+ VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};pipeline_targets(info,rendering);info.stageCount=2;info.pStages=stages;info.pVertexInputState=&vertex;info.pInputAssemblyState=&assembly;info.pViewportState=&vp;info.pRasterizationState=&raster;info.pMultisampleState=&ms;info.pColorBlendState=&blend;info.layout=objects.layout;
+ vk_check(stutter::create_graphics(R.frame, "smoke_pipeline", R.device,R.pipelineCache,1,&info,nullptr,&objects.pipeline),"smoke triangle pipeline");
  R.pipelineCacheDirty=true;
  R.pipelineCacheChangedFrame=R.frame;
  std::array<Vertex,128> data{};
@@ -447,9 +689,9 @@ void vertex_window_check(Surface& s) {
   transition_image(&s,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
   VkRenderingAttachmentInfo target{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};target.imageView=layer_view(&s,0);target.imageLayout=s.layout;target.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;target.storeOp=VK_ATTACHMENT_STORE_OP_STORE;target.clearValue.color.float32[3]=1;
   VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea=scissor;ri.layerCount=1;ri.colorAttachmentCount=1;ri.pColorAttachments=&target;
-  auto cmd=command_buffer();vkCmdBeginRendering(cmd,&ri);R.rendering=true;vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,objects.pipeline);
-  vkCmdBindVertexBuffers(cmd,0,1,&vertices.buffer,&vertices.offset);vkCmdBindIndexBuffer(cmd,indices.buffer,indices.offset,narrow?VK_INDEX_TYPE_UINT16:VK_INDEX_TYPE_UINT32);
-  vkCmdDrawIndexed(cmd,wide.size(),1,0,base,0);end_encoder();mark_gpu_written(&s);flush_async();
+  auto cmd=command_buffer();begin_pass(cmd,ri,[&] { return color_pass(s.fmt.pixel,s.layout); });R.rendering=true;record::vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,objects.pipeline);
+  record::vkCmdBindVertexBuffers(cmd,0,1,&vertices.buffer,&vertices.offset);record::vkCmdBindIndexBuffer(cmd,indices.buffer,indices.offset,narrow?VK_INDEX_TYPE_UINT16:VK_INDEX_TYPE_UINT32);
+  record::vkCmdDrawIndexed(cmd,wide.size(),1,0,base,0);end_encoder();mark_gpu_written(&s);flush_async();
  };
  for(int test=0;test<12;++test) {
   const uint32_t first=test>=8?101:100;const int32_t base=test%3==0?-5:test%3==1?5:0;
@@ -478,7 +720,7 @@ void dynamic_uniform_check(Surface& s) {
   ~Resources(){for(auto set:sets)if(set)vkDestroyDescriptorSetLayout(R.device,set,nullptr);if(pipeline)vkDestroyPipeline(R.device,pipeline,nullptr);if(layout)vkDestroyPipelineLayout(R.device,layout,nullptr);if(vs)vkDestroyShaderModule(R.device,vs,nullptr);if(ps)vkDestroyShaderModule(R.device,ps,nullptr);}
  } objects;
  auto module=[&](const char* glsl,bool vertex,VkShaderModule& result) {
-  std::string error;auto words=vk::compile_glsl(glsl,vertex,&error);if(words.empty())throw std::runtime_error("smoke GLSL compilation: "+error);
+  std::string error;auto words=vk::compile_glsl(glsl,vertex,&error);if(words.empty())exception_report::raise("smoke GLSL compilation: "+error);
   VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};ci.codeSize=words.size()*4;ci.pCode=words.data();vk_check(vkCreateShaderModule(R.device,&ci,nullptr,&result),"smoke shader module");
  };
  module("#version 450\nlayout(set=0,binding=7,std140) uniform Transform{vec4 transform;} ;layout(set=0,binding=1,std140) uniform Tint{vec4 tint;};layout(location=0) out vec4 vcolor;void main(){vec2 p[3]=vec2[3](vec2(-1,-1),vec2(3,-1),vec2(-1,3));gl_Position=vec4(p[gl_VertexIndex]*transform.xy+transform.zw,0,1);vcolor=tint;}",true,objects.vs);
@@ -504,8 +746,8 @@ void dynamic_uniform_check(Surface& s) {
  VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};rendering.colorAttachmentCount=1;rendering.pColorAttachmentFormats=&s.fmt.pixel;
  VkDynamicState dynamicState=VK_DYNAMIC_STATE_SCISSOR;
  VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};dynamic.dynamicStateCount=1;dynamic.pDynamicStates=&dynamicState;
- VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};info.pNext=&rendering;info.stageCount=2;info.pStages=stages;info.pVertexInputState=&vertex;info.pInputAssemblyState=&assembly;info.pViewportState=&vp;info.pRasterizationState=&raster;info.pMultisampleState=&ms;info.pColorBlendState=&blend;info.layout=objects.layout;info.pDynamicState=&dynamic;
- vk_check(vkCreateGraphicsPipelines(R.device,R.pipelineCache,1,&info,nullptr,&objects.pipeline),"smoke triangle pipeline");
+ VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};pipeline_targets(info,rendering);info.stageCount=2;info.pStages=stages;info.pVertexInputState=&vertex;info.pInputAssemblyState=&assembly;info.pViewportState=&vp;info.pRasterizationState=&raster;info.pMultisampleState=&ms;info.pColorBlendState=&blend;info.layout=objects.layout;info.pDynamicState=&dynamic;
+ vk_check(stutter::create_graphics(R.frame, "smoke_pipeline", R.device,R.pipelineCache,1,&info,nullptr,&objects.pipeline),"smoke triangle pipeline");
  R.pipelineCacheDirty=true;
  R.pipelineCacheChangedFrame=R.frame;
  // Two rounds force a pool reset between freshly allocated descriptor sets.
@@ -531,12 +773,12 @@ void dynamic_uniform_check(Surface& s) {
   transition_image(&s,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
   VkRenderingAttachmentInfo target{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};target.imageView=layer_view(&s,0);target.imageLayout=s.layout;target.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;target.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
   VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea=scissor;ri.layerCount=1;ri.colorAttachmentCount=1;ri.pColorAttachments=&target;
-  auto cmd=command_buffer();vkCmdBeginRendering(cmd,&ri);R.rendering=true;vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,objects.pipeline);
+  auto cmd=command_buffer();begin_pass(cmd,ri,[&] { return color_pass(s.fmt.pixel,s.layout); });R.rendering=true;record::vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,objects.pipeline);
   for(uint32_t draw=0;draw<2;++draw) {
    // Dynamic offsets are ordered by binding within VS set0, then PS set1.
    uint32_t offsets[3]={uint32_t(tintSlices[draw].offset),uint32_t(transforms[draw].offset),uint32_t(factors[draw].offset)};
-   vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,objects.layout,0,2,sets,3,offsets);
-   VkRect2D half{{int32_t(draw*s.extent.width/2),0},{s.extent.width/2,s.extent.height}};vkCmdSetScissor(cmd,0,1,&half);vkCmdDraw(cmd,3,1,0,0);
+   record::vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,objects.layout,0,2,sets,3,offsets);
+   VkRect2D half{{int32_t(draw*s.extent.width/2),0},{s.extent.width/2,s.extent.height}};record::vkCmdSetScissor(cmd,0,1,&half);record::vkCmdDraw(cmd,3,1,0,0);
   }
   end_encoder();mark_gpu_written(&s);flush();
   require(R.submissionGeneration!=generation,"dynamic descriptor pool reset did not change generation");
@@ -547,6 +789,219 @@ void dynamic_uniform_check(Surface& s) {
  fprintf(stderr,"[renderer smoke] dynamic UBO immutable draws, VS/PS binding order and fresh sets after pool reset passed\n");
 }
 }
+#ifdef __ANDROID__
+bool android_display_touch_event(const SDL_Event&);
+int android_display_smoke_test() {
+ try {
+  mem::init();
+  for (Screen* screen : {&R.tv, &R.drc}) {
+   screen->scan = std::make_unique<Surface>();
+   Surface& image = *screen->scan;
+   image.width = 64; image.height = 36; image.format = 0x1a;
+   image.fmt = format_info(image.format, false);
+   create_surface_image(&image, false);
+  }
+  auto start = std::chrono::steady_clock::now();
+  auto report = start;
+  uint64_t touchEventsSeen = 0, touchEventsHandled = 0;
+  SDL_SetHint("WWHD_DISPLAY_SMOKE_INPUT_TRACE", "1");
+  std::chrono::steady_clock::time_point lastPrimary;
+  uint64_t lastPrimaryCount=R.tv.presented.load(),timingEpoch=0;
+  auto timingStarted=start;
+  std::vector<double> primaryIntervals,swapCosts;
+  auto summary=[](std::vector<double> values) {
+    std::array<double,4> result{};
+    if(values.empty())return result;
+    std::sort(values.begin(),values.end());
+    for(size_t i=0;i<3;++i) {
+      const double quantiles[]={.50,.95,.99};
+      result[i]=values[size_t(std::ceil(quantiles[i]*values.size()))-1];
+    }
+    result[3]=values.back();return result;
+  };
+  const char* internal = SDL_GetAndroidInternalStoragePath();
+  require(internal != nullptr, "internal app storage is unavailable");
+  std::filesystem::path metrics = std::filesystem::path(internal) / "display-smoke.json";
+  const std::string temporary = metrics.string() + ".tmp";
+  // Full lifecycle/fold probes can exceed two minutes on a freshly booted
+  // emulator. The runner still enforces per-transition and frame-time gates.
+  while (std::chrono::steady_clock::now() - start < std::chrono::seconds(240)) {
+   SDL_Event event;
+   while (SDL_PollEvent(&event)) {
+    if (event.type == SDL_EVENT_QUIT) return 0;
+    const bool touchHandled = android_display_touch_event(event);
+    if (event.type == SDL_EVENT_FINGER_DOWN || event.type == SDL_EVENT_FINGER_MOTION ||
+        event.type == SDL_EVENT_FINGER_UP || event.type == SDL_EVENT_FINGER_CANCELED) {
+     ++touchEventsSeen;
+     if (touchHandled) ++touchEventsHandled;
+     LOG("[display smoke input] type=%u finger=%lld window=%u primary=%u x=%f y=%f handled=%d dual=%d swapped=%d",
+         unsigned(event.type), (long long)event.tfinger.fingerID, event.tfinger.windowID,
+         SDL_GetWindowID(R.tv.window), event.tfinger.x, event.tfinger.y, int(touchHandled),
+         int(gfx::g_has_drc_window), int(dual_display::active_swap.load()));
+    }
+    if (!touchHandled) input::handle_event(event);
+    if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED || event.type == SDL_EVENT_WINDOW_FOCUS_LOST)
+     LOG("[display smoke input] focus type=%u window=%u", unsigned(event.type), event.window.windowID);
+    if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED &&
+        event.window.windowID == SDL_GetWindowID(R.tv.window)) {
+     R.tv.width = event.window.data1; R.tv.height = event.window.data2;
+     R.tv.resize = true;
+    }
+    if (event.type == SDL_EVENT_WINDOW_RESTORED || event.type == SDL_EVENT_WINDOW_SHOWN)
+     R.tv.visible = true;
+    if (event.type == SDL_EVENT_WINDOW_MINIMIZED) R.tv.visible = false;
+   }
+   hostui::run_posted();
+   input::update();
+   const auto commandPath = std::filesystem::path(internal) / "display-smoke-command";
+   if (std::ifstream command{commandPath}; command) {
+    std::string value;
+    command >> value;
+    if (value == "overlay1") overlay::set_open(true);
+    if (value == "overlay0") overlay::set_open(false);
+    if (value == "faceauto" || value == "faceposition") {
+      auto mapping=input_map::current();
+      if(value=="faceauto") input_map::set_face_auto(mapping,true);
+      else input_map::apply_face_layout(mapping,input_map::FaceLayout::kPosition);
+      input_map::set_current(mapping,false);
+    }
+    if (value == "touchauto") { gfx::g_touch_buttons = 0; hostui::set("touchButtons", "0"); }
+    if (value == "touchshow") { gfx::g_touch_buttons = 1; hostui::set("touchButtons", "1"); }
+    if (value == "touchhide") { gfx::g_touch_buttons = 2; hostui::set("touchButtons", "2"); }
+    if (value == "swap1") hostui::set_displays_swapped(true);
+    if (value == "swap0") hostui::set_displays_swapped(false);
+    if (value == "filter0") hostui::set_scale_filter(0);
+    if (value == "filter1") hostui::set_scale_filter(1);
+    if (value == "filter2") hostui::set_scale_filter(2);
+    if (value == "retirement1") R.secondaryRetirementHeld=true;
+    if (value == "retirement0") R.secondaryRetirementHeld=false;
+    if (value == "worker1") R.secondaryPresentHeld=true;
+    if (value == "worker0") R.secondaryPresentHeld=false;
+    if (value == "lose_acquire") R.secondaryInjectAcquireLoss=true;
+    if (value == "lose_present") R.secondaryInjectPresentLoss=true;
+    if (value == "external_memory_capabilities") {
+      try { android_external_memory_capabilities(); LOG("[vulkan] external memory capability probe passed"); }
+      catch(const std::exception& error) { LOG("[vulkan] external memory capability probe failed: %s",error.what()); }
+    }
+    if (value == "shared_image_general_probe") {
+      try { android_shared_image_smoke(true); LOG("[vulkan] two-device shared image general shader probe passed"); }
+      catch(const std::exception& error) { LOG("[vulkan] two-device shared image general shader probe failed: %s",error.what()); }
+    }
+    if (value == "shared_image_probe") {
+      try { android_shared_image_smoke(); LOG("[vulkan] two-device shared image shader probe passed"); }
+      catch(const std::exception& error) { LOG("[vulkan] two-device shared image shader probe failed: %s",error.what()); }
+    }
+    if (value == "lose_query") { R.secondaryInjectQueryLoss=true;R.drc.resize=true; }
+    if (value == "lose_primary_query") { R.primaryInjectQueryLoss=true; R.tv.resize=true; }
+    if (value == "acquire1") R.secondaryAcquireHeld=true;
+    if (value == "acquire0") R.secondaryAcquireHeld=false;
+    if (value == "timestamps0") R.gpuTimestampsEnabled=false;
+    if (value == "resize_primary") R.tv.resize=true;
+    if (value.size()==5 && value.starts_with("mode") && value[4]>='0' && value[4]<'0'+gfx::kDrcModeCount)
+      hostui::set_drc_mode(value[4]-'0');
+    if (value == "secondary_profile1") R.secondaryProfile=true;
+    if (value == "secondary_profile0") R.secondaryProfile=false;
+    if (value == "timing_reset") {
+      primaryIntervals.clear();swapCosts.clear();lastPrimary={};
+      lastPrimaryCount=R.tv.presented.load();++timingEpoch;timingStarted=std::chrono::steady_clock::now();
+    }
+    std::filesystem::remove(commandPath);
+    if(value=="exit_smoke")break;
+   }
+   // Authored moving color patterns: red TV, blue GamePad. No guest assets.
+   float pulse = .5f + float(R.frame % 60) / 120.0f;
+   const float tv[4] = {pulse, 0, 0, 1}, drc[4] = {0, 0, pulse, 1};
+   clear_image(*R.tv.scan, tv); clear_image(*R.drc.scan, drc);
+   const auto swapStarted=std::chrono::steady_clock::now();
+   swap();
+   auto now = std::chrono::steady_clock::now();
+   if(R.tv.presented.load()!=lastPrimaryCount) {
+    if(lastPrimary!=std::chrono::steady_clock::time_point{})
+      primaryIntervals.push_back(std::chrono::duration<double,std::milli>(now-lastPrimary).count());
+    swapCosts.push_back(std::chrono::duration<double,std::milli>(now-swapStarted).count());
+    lastPrimary=now;lastPrimaryCount=R.tv.presented.load();
+   }
+   if (now - report >= std::chrono::milliseconds(100)) {
+    input::PadState pad = input::read();
+    const auto intervals=summary(primaryIntervals),costs=summary(swapCosts);
+    const SDL_DisplayMode* mode=SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(R.tv.window));
+    std::ofstream out(temporary, std::ios::trunc);
+    out << "{\"secondary_stage_cpu\":[";
+    for(size_t i=0;i<R.secondaryStageNs.size();++i) {
+      if(i)out << ',';
+      out << "{\"stage\":\"" << secondaryStageNames[i] << "\",\"ns\":" << R.secondaryStageNs[i].load() << ",\"calls\":" << R.secondaryStageCalls[i].load() << '}';
+    }
+    out << "]";
+    out << ",\"pad_family\":" << int(input_map::pad_family())
+        << ",\"settings_open\":" << (overlay::is_open() ? "true" : "false")
+        << ",\"touch_buttons\":" << (gfx::touch_buttons_visible() ? "true" : "false")
+        << ",\"pad_buttons\":" << pad.buttons
+        << ",\"primary_presented\":" << R.tv.presented.load()
+        << ",\"primary_surface_losses\":" << R.primarySurfaceLosses.load()
+        << ",\"primary_swapchains\":" << R.tv.swapchainGeneration
+        << ",\"secondary_presented\":" << R.drc.presented.load()
+        << ",\"timing_epoch\":" << timingEpoch
+        << ",\"timing_duration_ms\":" << std::chrono::duration<double,std::milli>(now-timingStarted).count()
+        << ",\"primary_interval_samples\":" << primaryIntervals.size()
+        << ",\"primary_intervals_ms\":{\"p50\":" << intervals[0] << ",\"p95\":" << intervals[1]
+        << ",\"p99\":" << intervals[2] << ",\"max\":" << intervals[3] << "}"
+        << ",\"swap_cpu_ms\":{\"p50\":" << costs[0] << ",\"p95\":" << costs[1]
+        << ",\"p99\":" << costs[2] << ",\"max\":" << costs[3] << "}"
+        << ",\"gpu_timestamps_enabled\":" << (R.gpuTimestampsEnabled ? "true" : "false")
+        << ",\"gpu_submission_intervals_ns\":" << R.gpuTimestampLifetimeStats.intervalNs
+        << ",\"gpu_submission_samples\":" << R.gpuTimestampLifetimeStats.submissions
+        << ",\"drc_mode\":" << gfx::g_mode
+        << ",\"primary_present_mode\":" << R.tv.presentMode
+        << ",\"secondary_present_mode\":" << R.drc.presentMode
+        << ",\"primary_refresh_hz\":" << (mode ? mode->refresh_rate : 0)
+        << ",\"secondary_width\":" << R.drc.width.load() << ",\"secondary_height\":" << R.drc.height.load()
+        << ",\"secondary_fence_retirement\":" << (R.secondaryPresentFences ? "true" : "false")
+        << ",\"primary_requested_queues\":" << R.primaryRequestedQueues
+        << ",\"secondary_device_swapchains\":" << R.secondaryDeviceSwapchains.load()
+        << ",\"secondary_shared_snapshots\":" << R.secondarySharedSnapshots.load()
+        << ",\"secondary_local_queue_waits\":" << R.secondaryLocalQueueWaits.load()
+        << ",\"secondary_shared_general\":" << (R.secondaryIsolated && getenv("WWHD_VK_SHARED_GENERAL") && !strcmp(getenv("WWHD_VK_SHARED_GENERAL"),"1") ? "true" : "false")
+        << ",\"secondary_isolated_device\":" << (R.secondaryIsolated ? "true" : "false")
+        << ",\"secondary_present_worker\":" << (R.secondaryQueue ? "true" : "false")
+        << ",\"primary_queue_family\":" << R.queueFamily
+        << ",\"secondary_queue_family\":" << R.secondaryQueueFamily
+        << ",\"secondary_present_held\":" << (R.secondaryPresentHeld.load() ? "true" : "false")
+        << ",\"secondary_present_pending\":" << (R.secondaryPresentPending ? "true" : "false")
+        << ",\"secondary_acquire_waiting\":" << (R.secondaryAcquireWaiting.load() ? "true" : "false")
+        << ",\"secondary_acquire_held\":" << (R.secondaryAcquireHeld.load() ? "true" : "false")
+        << ",\"secondary_acquire_pending\":" << (R.secondaryAcquirePending ? "true" : "false")
+        << ",\"secondary_surface_losses\":" << R.secondarySurfaceLosses.load()
+        << ",\"secondary_present_skipped\":" << R.secondaryPresentSkipped.load()
+        << ",\"secondary_retirement_held\":" << (R.secondaryRetirementHeld ? "true" : "false")
+        << ",\"secondary_idle_waits\":" << R.secondaryIdleWaits.load()
+        << ",\"secondary_retired\":" << R.secondaryRetired.load()
+        << ",\"secondary_retirement_pending\":" << R.secondaryRetirementPending.load()
+        << ",\"dual\":" << (gfx::g_has_drc_window ? "true" : "false")
+        << ",\"swap_requested\":" << (dual_display::requested_swap ? "true" : "false")
+        << ",\"swap_active\":" << (dual_display::active_swap ? "true" : "false")
+        << ",\"scale_filter\":" << hostui::scale_filter()
+        << ",\"primary_width\":" << R.tv.width.load() << ",\"primary_height\":" << R.tv.height.load()
+        << ",\"touch_events_seen\":" << touchEventsSeen
+        << ",\"touch_events_handled\":" << touchEventsHandled
+        << ",\"touch\":" << (pad.touch ? "true" : "false")
+        << ",\"tx\":" << pad.tx << ",\"ty\":" << pad.ty << "}\n";
+    out.close();
+    require(bool(out), "cannot write display smoke metrics");
+    std::filesystem::rename(temporary, metrics);
+    report = now;
+   }
+   SDL_Delay(16);
+  }
+  wait_idle();
+  LOG("[display smoke] completed synthetic display session");
+  return 0;
+ } catch (const std::exception& error) {
+  LOG("[display smoke] FAIL: %s", error.what());
+  return 1;
+ }
+}
+#endif
+
 int renderer_smoke_test() {
  try {
   // Test-only calibration: CI requires the layer to report this intentional WAW.
@@ -561,7 +1016,7 @@ int renderer_smoke_test() {
    LOG("[renderer smoke] sync negative control submitted two unordered writes");
    command_buffer();flush();return 0;
   }
-  mem::init();bc_decode_smoke();bc_surface_check();upload_arena_check();asynchronous_submission_check();buffer_cache_check();set_res_scale(1);latch_res_scale();
+  mem::init();bc_decode_smoke();bc_surface_check();upload_arena_check();asynchronous_submission_check();renderpass_retirement_check();buffer_cache_check();set_res_scale(1);latch_res_scale();
   {
    Image upload(16,16,0x1a,false,2,2);
    upload.s.addr=mem::host_alloc(65536,256);upload.s.mipAddr=mem::host_alloc(65536,256);
@@ -667,11 +1122,12 @@ int renderer_smoke_test() {
    auto depths=read_image(depth.s,VK_IMAGE_ASPECT_DEPTH_BIT,4);auto stencils=read_image(depth.s,VK_IMAGE_ASPECT_STENCIL_BIT,1);
    for(size_t i=0;i<stencils.size();++i){float value;memcpy(&value,depths.data()+i*4,4);require(std::abs(value-0.5f)<0.00001f&&stencils[i]==0x5a,"depth/stencil guest upload differs");}
    transition_image(&depth.s,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
-   VkClearDepthStencilValue dv{0.25f,0xa5};VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT,0,1,0,1};vkCmdClearDepthStencilImage(command_buffer(),depth.s.image,depth.s.layout,&dv,1,&range);
+   VkClearDepthStencilValue dv{0.25f,0xa5};VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT,0,1,0,1};record::vkCmdClearDepthStencilImage(command_buffer(),depth.s.image,depth.s.layout,&dv,1,&range);
    depths=read_image(depth.s,VK_IMAGE_ASPECT_DEPTH_BIT,4);stencils=read_image(depth.s,VK_IMAGE_ASPECT_STENCIL_BIT,1);
    for(size_t i=0;i<stencils.size();++i){float value;memcpy(&value,depths.data()+i*4,4);require(value==0.25f&&stencils[i]==0xa5,"depth/stencil clear differs");}
    fprintf(stderr,"[renderer smoke] depth/stencil upload and clear passed\n");
    depth_copy_check();
+   colour_comparison_check();
    {
     auto peek=std::make_unique<Surface>();
     peek->width=1280;peek->height=720;peek->pitch=1280;peek->format=0x11;peek->isDepth=true;peek->fmt=format_info(0x11,true);
@@ -681,20 +1137,21 @@ int renderer_smoke_test() {
     uint32_t result=mem::host_alloc(256,256);uint32_t cells[]={320,240,result,0,0,result+4};
     for(float z:{0.25f,1.0f}) {
      transition_image(surface,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
-     VkClearDepthStencilValue value{z,0};vkCmdClearDepthStencilImage(command_buffer(),surface->image,surface->layout,&value,1,&range);
+     VkClearDepthStencilValue value{z,0};record::vkCmdClearDepthStencilImage(command_buffer(),surface->image,surface->layout,&value,1,&range);
      peek_z(cells,6);flush();uint32_t expected=z==1.0f?0xFFFFFFu:0x3FFFFFu;
      require(ld32(result)==expected&&ld32(result+4)==expected,"GPU depth peek differs");
     }
     // A drain retires the newest fence first; an older answer must not replace it.
     for(float z:{0.25f,1.0f}) {
      transition_image(surface,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
-     VkClearDepthStencilValue value{z,0};vkCmdClearDepthStencilImage(command_buffer(),surface->image,surface->layout,&value,1,&range);
+     VkClearDepthStencilValue value{z,0};record::vkCmdClearDepthStencilImage(command_buffer(),surface->image,surface->layout,&value,1,&range);
      peek_z(cells,6);flush_async();
     }
     flush();require(ld32(result)==0xFFFFFFu&&ld32(result+4)==0xFFFFFFu,"older GPU depth answer replaced newer answer");
     R.mainDepthAddr=previousDepth;destroy_surface_image(surface);R.surfaces.erase(entry);
     fprintf(stderr,"[renderer smoke] asynchronous GPU depth peeks passed\n");
    }
+   stereo_geometry_check();
    Image rendered(64,64,0x1a);dynamic_uniform_check(rendered.s);vertex_window_check(rendered.s);triangle(rendered.s);
    if(R.tv.scan)destroy_surface_image(R.tv.scan.get());R.tv.scan=std::make_unique<Surface>();auto& scan=*R.tv.scan;scan.width=64;scan.height=64;scan.format=0x1a;scan.fmt=format_info(scan.format,false);create_surface_image(&scan,false);resample(&rendered.s,&scan,1);mark_gpu_written(&scan);
    auto capturePath=std::filesystem::temp_directory_path()/("wwhd-vulkan-smoke-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".png");
@@ -716,10 +1173,45 @@ int renderer_smoke_test() {
    fprintf(stderr,"[renderer smoke] queued GPU PNG capture passed: %s\n",capturePath.string().c_str());
    require(R.tv.swapchain!=VK_NULL_HANDLE,"smoke presentation did not create a swapchain");LOG("[renderer smoke] scan-buffer swapchain presentation and PNG readback passed");
    volume_target_check();
+   completed_scan_retention_check();
   }
   // Ensure deferred objects left by readback and stack-owned images are actually reclaimed.
   command_buffer();flush();require(R.garbageBuffers.empty()&&R.garbageImages.empty()&&R.garbageCacheRegions.empty(),"deferred Vulkan resources were not reclaimed");
+  // Exercise the actual timestamp command sites, not just the demand predicate.
+  if (!getenv("WWHD_VK_GPU_TIMESTAMPS") && !getenv("WWHD_VK_GPU_PASS_TIMESTAMPS")) {
+    perf::set_demand(false, false);
+    auto before = perf::counters();
+    command_buffer(); flush();
+    require(perf::counters().timestamp_writes == before.timestamp_writes, "hidden overlay wrote timestamps");
+    // Queue families with zero timestamp bits must silently keep the GPU reading unavailable.
+    auto validBits = R.gpuTimestampValidBits;
+    R.gpuTimestampValidBits = 0;
+    perf::set_demand(true, false);
+    command_buffer(); flush();
+    require(perf::counters().timestamp_writes == before.timestamp_writes, "unsupported queue wrote timestamps");
+    perf::set_demand(false, false);
+    R.gpuTimestampValidBits = validBits;
+    perf::set_demand(true, false);
+    command_buffer(); flush();
+    auto measured = perf::counters();
+    if (R.gpuTimestampValidBits && R.properties.limits.timestampPeriod > 0)
+      require(measured.timestamp_writes == before.timestamp_writes + 2, "visible overlay did not write timestamp pair");
+    require(measured.query_reads == before.query_reads, "overlay read timestamps in the recorded frame");
+    ++R.frame; command_buffer(); flush();
+    measured = perf::counters();
+    if (measured.query_reads > before.query_reads)
+      require(measured.minimum_query_age >= 1, "overlay read timestamps without a frame of delay");
+    perf::set_demand(false, false);
+    command_buffer(); flush();
+    require(perf::counters().timestamp_writes == measured.timestamp_writes, "hiding overlay kept writing timestamps");
+    require(perf::counters().query_reads == measured.query_reads, "hidden overlay polled query results");
+    LOG("[renderer smoke] overlay timestamp writes: hidden 0, on %llu, hidden again 0",
+        (unsigned long long)(measured.timestamp_writes - before.timestamp_writes));
+  }
+  test_hdr_presentation();
   save_pipeline_cache();
+  wait_idle();
+  reset_pass_caches();
   LOG("[renderer smoke] PASS: actual device upload/clear/blit/depth/triangle/present");return 0;
  }catch(const std::exception& e){LOG("[renderer smoke] FAIL: %s",e.what());try {command_buffer();flush();}catch(...){}return 1;}
 }

@@ -1,0 +1,3 @@
+[submodule "decomp"]
+	path = decomp
+	url = https://github.com/ZeldaWWHDDecomp/wwhd.git

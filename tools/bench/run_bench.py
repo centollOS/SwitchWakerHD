@@ -20,6 +20,7 @@ through Windfall town (slot 2), still = no input (any slot). The state file must
 """
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -141,12 +143,29 @@ def quiet_reasons(args):
 
 
 def wait_for_quiet(args):
+    """Wait without touching unrelated processes; load is runnable work, not CPU percent."""
+    quiet_since = None
+    last_report = 0
+    cores = os.cpu_count() or 1
     while True:
+        now = time.monotonic()
+        load = load1()
+        if args.max_load_per_core is not None and load < 0:
+            raise RuntimeError("host load averages unavailable; use an external --gate on this platform")
+        games = args.wait_for_others and other_games()
+        busy = args.max_load_per_core is not None and load / cores > args.max_load_per_core
         reasons = quiet_reasons(args)
-        if not reasons:
+        if games or busy or reasons:
+            quiet_since = None
+        elif quiet_since is None:
+            quiet_since = now
+        if quiet_since is not None and now - quiet_since >= args.quiet_seconds:
             return
-        print("  waiting: " + "; ".join(reasons), file=sys.stderr, flush=True)
-        time.sleep(30)
+        if now - last_report >= 30:
+            reason = "; ".join(reasons) if reasons else "another game process" if games else "host load %.2f / %d CPUs" % (load, cores) if busy else "quiet-period confirmation"
+            print("  waiting: " + reason, file=sys.stderr, flush=True)
+            last_report = now
+        time.sleep(5)
 
 
 def stop(proc):
@@ -248,7 +267,7 @@ def paired_statistics(results, names):
         return {}
     reference, comparison = names
     paired = {}
-    for metric in ("frame_ms", "logic_cpu_ms"):
+    for metric in ("frame_ms", "logic_cpu_ms", "render_cpu_ms"):
         groups = {}
         for run in results:
             if run["status"] == "ok" and metric in run["summary"]:
@@ -277,11 +296,32 @@ def logic_cpu_samples(lines):
             for match in [re.search(r"main thread CPU per pass: logic " + NUM + r" ms", line)] if match]
 
 
+def variant_cache_dir(args, variant, out_dir):
+    cache = os.path.abspath(args.cache_dir or os.path.join(out_dir, "cache"))
+    if getattr(args, "variant_caches", False):
+        # Variant labels may contain path separators; never use them as paths.
+        token = hashlib.sha256(variant.encode("utf-8")).hexdigest()
+        cache = os.path.join(cache, token)
+    return cache
+
+
+def warmup_specs(args, variants):
+    if getattr(args, "variant_caches", False):
+        # Keep the actual variant name so warmup and samples share its cache.
+        return [(name, env, name) for name, env in variants]
+    return [("warmup", variants[0][1], variants[0][0])]
+
+
 def run_once(args, variant, env_extra, index, out_dir):
     binary = args.variant_binaries.get(variant, args.binary)
     wait_for_quiet(args)
     run_dir = os.path.join(out_dir, "%s_%02d" % (variant, index))
-    shutil.rmtree(run_dir, ignore_errors=True)
+    # Keep rejected attempts and their logs/traces for diagnosing disturbed runs.
+    if os.path.exists(run_dir):
+        attempt = 1
+        while os.path.exists(run_dir + ".attempt%d" % attempt):
+            attempt += 1
+        os.rename(run_dir, run_dir + ".attempt%d" % attempt)
     os.makedirs(run_dir)
     shutil.copytree(args.save, os.path.join(run_dir, "save"))
     os.chmod(os.path.join(run_dir, "save"), 0o755)
@@ -291,8 +331,10 @@ def run_once(args, variant, env_extra, index, out_dir):
     slot, stick, rstick = SCENES[args.scene]
     slot = args.slot or slot
     load_at, origin = args.load_frame, args.origin
-    cache = os.path.abspath(args.cache_dir or os.path.join(out_dir, "cache"))
+    cache = variant_cache_dir(args, variant, out_dir)
     os.makedirs(cache, exist_ok=True)
+    if args.cold_caches:
+        cache = tempfile.mkdtemp(prefix="%s_%02d_" % (variant, index), dir=cache)
     env = {k: v for k, v in os.environ.items() if not k.startswith("WWHD_")}
     press_from = args.press_from if args.press_from >= 0 else max(0, load_at - 300)
     presses = ",".join("%d-%d:8000" % (f, f + 8) for f in range(press_from, load_at, args.press_every))
@@ -351,11 +393,23 @@ def run_once(args, variant, env_extra, index, out_dir):
         time.sleep(30)
     binary = args.variant_binaries.get(variant, args.binary)
     wait_for_quiet(args)
+    if args.stutter_trace:
+        env["WWHD_VK_STUTTER_TRACE"] = os.path.abspath(os.path.join(run_dir, "stutter.csv"))
+    command = [os.path.abspath(binary), "--game", os.path.abspath(args.game), "--save", "save"]
+    relevant_host_env = {"VK_DRIVER_FILES", "VK_ICD_FILENAMES", "VK_INSTANCE_LAYERS",
+                         "VK_LAYER_PATH", "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS",
+                         "MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS"}
+    with open(os.path.join(run_dir, "invocation.json"), "w") as invocation:
+        json.dump({"command": command, "cwd": os.path.abspath(run_dir),
+                   "env": {k: v for k, v in env.items() if k.startswith("WWHD_") or k in relevant_host_env}},
+                  invocation, indent=2)
     load_before = load1()
     load_peak = load_before
-    started = time.time()
+    started = time.monotonic()
+    interference = []
+    load_samples = [{"seconds": 0.0, "load1": load_before}]
     with open(os.path.join(run_dir, "log"), "w") as log:
-        proc = subprocess.Popen([os.path.abspath(binary), "--game", os.path.abspath(args.game), "--save", "save"],
+        proc = subprocess.Popen(command,
                                 cwd=run_dir, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
         status = "ok"
         try:
@@ -364,18 +418,29 @@ def run_once(args, variant, env_extra, index, out_dir):
                 if args.max_load and load_peak >= args.max_load:
                     status = "load exceeded limit"
                     break
+                elapsed = time.monotonic() - started
+                if elapsed - load_samples[-1]["seconds"] >= 5:
+                    current_load = load1()
+                    load_samples.append({"seconds": round(elapsed, 3), "load1": current_load})
+                    if args.max_run_load_per_core is not None and current_load >= 0 and \
+                            current_load / (os.cpu_count() or 1) > args.max_run_load_per_core and status == "ok":
+                        status = "busy host"
                 if os.path.exists(os.path.join(run_dir, "test_done")):
                     time.sleep(1)
                     break
-                if time.time() - started > args.timeout:
+                if time.monotonic() - started > args.timeout:
                     status = "timeout"
                     break
                 if quiet_reasons(args):
                     status = "disturbed"
-                    break
-                if args.watch_others and other_games(proc.pid):
+                    if not args.keep_disturbed:
+                        break
+                others = other_games(proc.pid) if args.watch_others else []
+                if others:
                     status = "disturbed"  # another game started meanwhile: the timings are not usable
-                    break
+                    interference.append({"seconds": round(time.monotonic() - started, 3), "processes": others})
+                    if not args.keep_disturbed:
+                        break
                 time.sleep(1)
         finally:
             stop(proc)
@@ -401,7 +466,10 @@ def run_once(args, variant, env_extra, index, out_dir):
              for m in [re.search(r"\[interp\] " + NUM + r" logic steps/s \([^,]*, " + NUM + " frames per step", l)] if m]
     pacing = [float(m.group(1)) for l in lines[loaded or 0:] for m in [re.search(r"\[vulkan pacing\].*p95 " + NUM, l)] if m]
     result = {"variant": variant, "binary": os.path.abspath(binary), "run": index, "status": status, "env": env_extra, "load_before": load_before,
-              "load_after": load_after, "load_peak": load_peak, "seconds": round(time.time() - started, 1), "windows": len(windows),
+              "cache_dir": cache, "load_peak": load_peak,
+              "interference": interference,
+              "logical_cpus": os.cpu_count(), "load_samples": load_samples,
+              "load_after": load_after, "seconds": round(time.monotonic() - started, 1), "windows": len(windows),
               "summary": summarize(windows) if windows else {}}
     tick = [float(m.group(1)) for l in lines[loaded or 0:] for m in [re.search(r"\[tick\] CPU " + NUM, l)] if m]
     logic = [float(m.group(1)) for l in lines[loaded or 0:] for m in [re.search(r"main thread CPU per pass: logic " + NUM, l)] if m]
@@ -469,8 +537,13 @@ def main():
     p.add_argument("--variant", action="append", default=[], metavar="NAME:K=V,K=V",
                    help="a configuration (environment); repeat for A/B runs, run interleaved")
     p.add_argument("--runs", type=int, default=1, help="runs per variant")
+    p.add_argument("--attempts", type=int, default=3, help="maximum attempts per run (rejected attempts are retained)")
+    p.add_argument("--keep-disturbed", action="store_true", help="finish and trace a disturbed route for diagnostics, while retaining disturbed status")
     p.add_argument("--warmup", action="store_true", help="one discarded run first (warms the shader caches)")
+    p.add_argument("--stutter-trace", action="store_true", help="record individual Vulkan frame/compilation events to each run's stutter.csv")
     p.add_argument("--cache-dir", help="shader/pipeline caches shared by the runs (default: <out>/cache)")
+    p.add_argument("--variant-caches", action="store_true", help="isolate caches per variant; --warmup warms each variant with its own executable")
+    p.add_argument("--cold-caches", action="store_true", help="use a new isolated application cache for every run and retry; leaves driver caches uncontrolled")
     p.add_argument("--timeout", type=float, default=600)
     p.add_argument("--max-load", type=float, default=0, help="wait below this 1-minute load; discard a run if it exceeds the limit (0 disables)")
     p.add_argument("--quiet-load-max", type=float, help="wait until load1 is below this value; discard disturbed runs")
@@ -480,6 +553,9 @@ def main():
                    help="retry interrupted samples until quiet, preserving the interleaved order; other failures remain bounded")
     p.add_argument("--min-free-gb", type=float, default=0, help="minimum free decimal GB before/during each run")
     p.add_argument("--gate", help="shell command run (and waited for) before every run")
+    p.add_argument("--max-load-per-core", type=float, help="wait before starting until 1-minute host load / logical CPUs is at most this value (not a CPU percentage)")
+    p.add_argument("--quiet-seconds", type=float, default=0, help="require this quiet period before starting; used with host-load and other-game checks")
+    p.add_argument("--max-run-load-per-core", type=float, help="mark timings 'busy host' if the 1-minute load / logical CPUs exceeds this while running")
     p.add_argument("--out", default=os.path.join(REPO, "build", "bench"))
     p.add_argument("--no-wait", dest="wait_for_others", action="store_false", help="don't wait for other game processes")
     p.add_argument("--no-watch", dest="watch_others", action="store_false", help="don't discard runs disturbed by another game")
@@ -490,6 +566,9 @@ def main():
         p.error("--min-free-gb must be nonnegative")
     if args.origin_load_steps is not None and args.origin_load_steps < 0:
         p.error("--origin-load-steps must be non-negative")
+    if args.quiet_seconds < 0 or any(value is not None and value <= 0 for value in
+                                    (args.max_load_per_core, args.max_run_load_per_core)):
+        p.error("quiet seconds must be nonnegative and host-load limits must be positive")
     if not os.path.exists(os.path.join(args.state_dir, "slot%d.bin" % (args.slot or SCENES[args.scene][0]))):
         p.error("no slot%d.bin in %s" % (args.slot or SCENES[args.scene][0], args.state_dir))
     variants = []
@@ -508,10 +587,11 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     results = []
     if args.warmup:
-        args.variant_binaries["warmup"] = args.variant_binaries.get(variants[0][0], args.binary)
-        warmup = run_once(args, "warmup", variants[0][1], 0, args.out)
-        if warmup["status"] != "ok":
-            p.exit(1, "warmup failed: %s; no measured runs started\n" % warmup["status"])
+        for name, env, source in warmup_specs(args, variants):
+            args.variant_binaries[name] = args.variant_binaries.get(source, args.binary)
+            warmup = run_once(args, name, env, 0, args.out)
+            if warmup["status"] != "ok":
+                p.exit(1, "warmup failed: %s; no measured runs started\n" % warmup["status"])
     for i in range(args.runs):
         order = variants if i % 2 == 0 else list(reversed(variants))  # A B, B A, ...
         for name, env in order:
@@ -528,9 +608,15 @@ def main():
             stats[k] = run_statistics(vals)
         table[name] = stats
     meta = {k: getattr(args, k) for k in ("scene", "fps", "renderer", "uncapped", "visible", "seconds", "runs", "display_hz",
-                                                   "quiet_load_max", "exclusive_bench", "exclusive_work", "min_free_gb", "retry_disturbed")}
+                                                   "quiet_load_max", "exclusive_bench", "exclusive_work", "min_free_gb", "retry_disturbed", "load_frame", "origin", "slot", "cold_caches", "variant_caches", "stutter_trace", "attempts")}
+    meta.update({k: getattr(args, k) for k in ("max_load_per_core", "max_run_load_per_core", "quiet_seconds")})
     meta["binary"] = os.path.basename(args.binary)
     meta["variant_binaries"] = {name: os.path.basename(path) for name, path in args.variant_binaries.items() if name != "warmup"}
+    with open(args.binary, "rb") as binary:
+        digest = hashlib.sha256()
+        for block in iter(lambda: binary.read(1024 * 1024), b""):
+            digest.update(block)
+        meta["binary_sha256"] = digest.hexdigest()
     with open(os.path.join(args.out, "summary.json"), "w") as f:
         json.dump({"meta": meta, "variants": table, "runs": results,
                    "paired_differences": paired_statistics(results, [name for name, _ in variants])}, f, indent=1)

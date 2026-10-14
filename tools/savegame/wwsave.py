@@ -6,7 +6,7 @@ project's verified WWHD decompilation).
 
 Sources
 -------
-GameCube (tww, GZLE01/GZLJ01 identical; d_save.h only differs for the demo build):
+GameCube (tww, retail GZLE01/GZLJ01/GZLP01 packed slots identical; d_save.h only differs for the demo build):
   include/d/d_save.h            dSv_player_*_c, dSv_memBit_c, dSv_ocean_c, dSv_event_c, ...
   src/d/d_save.cpp              dSv_info_c::memory_to_card / card_to_memory (packed order)
   include/m_Do/m_Do_MemCardRWmng.h, src/m_Do/m_Do_MemCardRWmng.cpp
@@ -143,7 +143,8 @@ def put(buf, table, name, value):
 GCI_HEADER = 0x40
 CARD_BLOCK = 0x2000
 GC_REGIONS = {b"GZLE": "USA (GZLE01)", b"GZLJ": "Japan (GZLJ01)", b"GZLP": "Europe (GZLP01)"}
-SUPPORTED_GC = (b"GZLE01", b"GZLJ01")
+SUPPORTED_GC = (b"GZLE01", b"GZLJ01", b"GZLP01")
+PAL_LANGUAGES = ("english", "german", "french", "spanish", "italian")
 
 
 class GciError(Exception):
@@ -174,8 +175,7 @@ def read_gci(raw, allow=SUPPORTED_GC):
     if raw[0:4] not in GC_REGIONS:
         raise GciError("not a Wind Waker save (game code %r)" % code)
     if code not in allow:
-        raise GciError("unsupported region %s: only %s are supported (PAL saves store the language "
-                       "in the save counter and were not checked)" %
+        raise GciError("unsupported region %s: only %s are supported" %
                        (GC_REGIONS[raw[0:4]], ", ".join(c.decode() for c in allow)))
     if raw[8:15] != b"gczelda":
         raise GciError("unexpected file name %r (expected gczelda)" % raw[8:40].rstrip(b"\0"))
@@ -197,9 +197,25 @@ def gc_slot_is_new(g):
     return get(g, GC_FIELDS, "info.player_name")[0] == 0
 
 
-def write_gci(code, slots, comment=b"Zelda: The Wind Waker", template=None):
+def gc_pal_language(raw):
+    """Card-wide PAL language, not info.save_count; Restore/Restore2 clamp >4 to English.
+
+    Like tww's Restore, read the first card_savedata header even when a slot uses backup data.
+    The game does not verify the block checksum before reading this word.
+    """
+    if len(raw) < GCI_HEADER + 2 * CARD_BLOCK or raw[:6] != b"GZLP01":
+        raise GciError("PAL language requires a GZLP01 card header")
+    value = struct.unpack_from(">I", raw, GCI_HEADER + CARD_BLOCK)[0]
+    return value if value < len(PAL_LANGUAGES) else 0
+
+
+def write_gci(code, slots, comment=b"Zelda: The Wind Waker", template=None, pal_language=0):
     """a .gci with the three slots. Without a template the banner/icon block is blank (the card
     file still loads; the IPL just shows no picture)."""
+    if code not in SUPPORTED_GC:
+        raise GciError("unsupported game code %r" % code)
+    if not 0 <= pal_language < len(PAL_LANGUAGES):
+        raise GciError("PAL language must be 0..4")
     blocks = 12
     out = bytearray(GCI_HEADER + blocks * CARD_BLOCK)
     if template is not None:
@@ -215,8 +231,10 @@ def write_gci(code, slots, comment=b"Zelda: The Wind Waker", template=None):
         struct.pack_into(">IIHHBBHHHI", out, 0x28, 0, 0, 1, 3, 4, 0, 0, blocks, 0xFFFF, 0x1C00)
         c = GCI_HEADER + 0x1C00
         out[c:c + len(comment)] = comment
+    # A template supplies artwork, never the requested target region.
+    out[:6] = code
     sav = bytearray(CARD_BLOCK)
-    struct.pack_into(">II", sav, 0, 1, 0)
+    struct.pack_into(">II", sav, 0, pal_language if code == b"GZLP01" else 1, 0)
     for s, g in enumerate(slots):
         o = 8 + s * 0x770
         sav[o:o + 0x768] = g
@@ -340,10 +358,13 @@ def hd_name(extras_slot):
 # player names
 
 def decode_gc_name(raw, code):
-    """the GC player name (info.player_name, NUL-terminated, ASCII for USA, Shift-JIS for Japan)"""
+    """the GC player name (info.player_name, NUL-terminated, Western single-byte for USA/PAL, Shift-JIS for Japan)"""
     raw = raw.split(b"\0", 1)[0]
     if code[3:4] == b"J":
         return raw.decode("shift_jis", "replace")
+    if code == b"GZLP01":
+        # tww d_name.cpp PAL str01/str02: Latin-1 letters plus CP1252 OE ligatures.
+        return raw.decode("cp1252", "replace")
     return raw.decode("latin-1")
 
 

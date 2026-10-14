@@ -78,5 +78,15 @@ os.replace(a.code_mods_status+'.tmp',a.code_mods_status)
     assert(hostui::get("code-mods",saved)&&saved=="0"&&!enabled());
     env("WWHD_CODE_MODS","1");assert(enabled());
     assert(hostui::get("code-mods",saved)&&saved=="0");
+    // the decomp version (startup(..., true)) is never swapped for a ready code-mod build
+    auto install=root/"install";auto cache=install/"code-builds"/"fp";
+    fs::create_directories(cache/"bin");std::ofstream(cache/"bin"/"wwhd")<<"cached build";
+    std::ofstream(cache/"ready.json")<<R"({"fingerprint":"fp","hooks":true})";
+    std::ofstream(install/"code-mods-active.json")<<R"({"state":"ready","hooks":true,"fingerprint":"fp","exe":")"
+        <<(cache/"bin"/"wwhd").generic_string()<<R"("})";
+    env("WWHD_INSTALL_DIR",install.string());clear_env("WWHD_CODE_MODS");
+    startup(argc,argv,true);  // returns: an exec would end this test
+    std::string error;assert(!restart(error)&&error.find("decomp")!=std::string::npos);
+    clear_env("WWHD_INSTALL_DIR");
     fs::remove_all(root);
 }

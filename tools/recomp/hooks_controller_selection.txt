@@ -1,0 +1,4 @@
+# Title controller selection (#189): input event and prompt visibility only.
+@026D44A8 # updateSelection: copied input event, before reading its kind
+026D50C4  # SelectController_00 draw: hide the automatically answered title prompt
+026F8B54  # Parts::draw: hide only the title background during automatic choice/caption fade

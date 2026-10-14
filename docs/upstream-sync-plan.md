@@ -1,5 +1,14 @@
 # Upstream sync to devel (after v0.2.11): plan
 
+Status (2026-10-14): **phase 2 done on feature/upstream-sync** (bbd239c, then 27cff38 and 59a301c), with upstream
+`devel` **4dc4832**: the next sync starts from there (`git diff 4dc4832 upstream/devel | git apply -3`). #187 was
+merged, so step 2.5 registers deko3d through `render::ext`; the Switch's overlay parts go through `overlay::ext`
+(platform/overlay_switch.cpp), and what the console can't do is left out by marked hooks (code mods, the mod
+catalogue, file choosers, the Speakers choice, keyboard hints) that are to become `overlay::ext` features upstream.
+The recompiler keeps fork_passes.py: its output equals main's apart from upstream's new hooks and instruction
+hooks. Console check: boot, a 14-place warp tour with screenshots, menu, save states (user), all fine; the
+performance A/B against main is still to do. Seen on the way: #41 (Ghost Ship floor, also on v0.4.6).
+
 Status (2026-10-13): **phase 1 written** (steps 1.1-1.7, one commit each, on main 9f75519): the Switch NRO builds
 and the changed runtime files compile for macOS; the console gate after 1.7 and the phase 0 baselines are still to do.
 In upstream files the fork's lines went from main.cpp +327, core.cpp +249, host.h +83, audio_out.cpp +50,

@@ -1,6 +1,8 @@
 #pragma once
-// Area-sampled blur taps on upscaled render targets (issues #66, #67), shared by the Metal and the
-// Vulkan renderer.
+// Pixel-shader fixes for upscaled render targets, shared by the Metal and the Vulkan renderer:
+// area-sampled blur taps (issues #66, #67) and the shadow mask's gather spacing (issue #135).
+//
+// Area-sampled blur taps.
 //
 // The game blurs its light buffer (ambient occlusion in R, the sun shadow mask in G; 960x540) and
 // its bloom chain with a separable Gaussian: PS 44B3AB00 (horizontal) and 44B39A00 (vertical),
@@ -21,7 +23,23 @@
 // The decompiler declares uf_texNScale (texture pixels per guest pixel, filled from the surface's
 // sx/sy by both renderers) for the units named in LatteDecompilerOptions::areaSampledTextures; the
 // sample calls of those units are then rewritten here to go through the helper.
+//
+// Gather spacing of the sun shadow mask (issue #135). PS 68048F00 / 44D3BF00 (the address depends on
+// where the game loads it) writes the shadow mask into the light buffer. For each pixel it gathers
+// the 2x2 quad of the 1280x720 scene depth around it (tex0) and rebuilds view-space positions from
+// those depths and three view rays its vertex shader passes in: the pixel's own (R0), one a guest
+// texel further in y (R1) and one a guest texel further in x (R2). Their cross product is the
+// surface normal, which sets the normal-offset bias of the shadow lookup and the softness term the
+// later passes read (B, from 1 - |N.L|). On a depth buffer scaled by the internal resolution the
+// gather returns texels 1/scale guest texels apart, but the rays stay one guest texel apart: the
+// depth steps come out `scale` times too small for the lateral step, so every rebuilt normal leans
+// towards the camera. How far |N.L| is then off depends on the angle between the view and the sun,
+// so turning the camera switched the shadows between sharp and very soft at 2x/3x, with a halo
+// around Link where the quad straddles his silhouette; at 1x everything matched. The fix moves the
+// two offset rays to host-texel spacing (R0 + (Rn - R0) / scale), so the depths and the rays agree
+// again and the normals come out as on the console, at the higher resolution.
 #include <bit>
+#include <utility>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -40,21 +58,41 @@ inline uint64_t program_hash(const void* bytes, uint32_t size) {
     return a + b;
 }
 
-// texture units of this pixel shader that are read area-sampled (bit n = unit n); 0 for all others
-inline uint32_t units_for_pixel_shader(const void* bytes, uint32_t size) {
-    if (!bytes || size != 448) return 0;
-    switch (program_hash(bytes, size)) {
-    case 0x51a7ccdf69184627ull:  // PS 44B3AB00, horizontal Gaussian
-    case 0x16285301a96cbf8dull:  // PS 44B39A00, vertical Gaussian
-        return 1u;
-    default:
-        return 0;
+// What a pixel shader needs on upscaled render targets: the texture units whose uf_texNScale the
+// decompiler must declare (bit n = unit n) and how its source is rewritten.
+enum class Fix : uint8_t { None, AreaTaps, GatherRays };
+struct Program {
+    uint32_t units = 0;
+    Fix fix = Fix::None;
+};
+inline Program pixel_program(const void* bytes, uint32_t size) {
+    if (!bytes) return {};
+    if (size == 448) {
+        switch (program_hash(bytes, size)) {
+        case 0x51a7ccdf69184627ull:  // PS 44B3AB00, horizontal Gaussian
+        case 0x16285301a96cbf8dull:  // PS 44B39A00, vertical Gaussian
+            return {1u, Fix::AreaTaps};
+        default:
+            return {};
+        }
     }
+    if (size == 2112 && program_hash(bytes, size) == 0x62ae9ab4cb625546ull)  // sun shadow mask
+        return {1u, Fix::GatherRays};
+    return {};
+}
+inline uint32_t units_for_pixel_shader(const void* bytes, uint32_t size) { return pixel_program(bytes, size).units; }
+
+// The shadow mask's offset view rays at host-texel spacing (see above): `scale` is the depth
+// texture's pixels per guest pixel. The same formula is in the shader helpers below.
+struct Ray { float x, y, z, w; };
+inline Ray gather_ray(Ray centre, Ray ray, float scale_x, float scale_y) {
+    if (scale_x == 1.0f && scale_y == 1.0f) return ray;
+    return {centre.x + (ray.x - centre.x) / scale_x, centre.y + (ray.y - centre.y) / scale_y, ray.z, ray.w};
 }
 
 // Rewrites the sample calls of `units` in a decompiled pixel shader (MSL or Vulkan GLSL) to the
 // helper and inserts the helper. Returns the number of calls rewritten (0: source left unchanged).
-inline int rewrite(std::string& src, uint32_t units, bool msl) {
+inline int rewrite_area_taps(std::string& src, uint32_t units, bool msl) {
     const size_t entry = src.find(msl ? "fragment FragmentOut main0" : "void main(");
     if (!units || entry == std::string::npos) return 0;
     int count = 0;
@@ -94,6 +132,68 @@ inline int rewrite(std::string& src, uint32_t units, bool msl) {
         "}\n";
     src.insert(src.find(msl ? "fragment FragmentOut main0" : "void main("), msl ? kMsl : kGlsl);
     return count;
+}
+
+namespace detail {
+// the varying that the line "R<reg>i = ..." (or R<reg>f) in main reads: its position and name
+inline bool find_varying(const std::string& src, size_t entry, int reg, bool msl, size_t& at, std::string& name) {
+    const std::string r = "\nR" + std::to_string(reg);
+    for (const char* type : {"i = ", "f = "}) {
+        size_t line = src.find(r + type, entry);
+        if (line == std::string::npos) continue;
+        size_t end = src.find(';', line);
+        size_t v = src.find(msl ? "in.passParameterSem" : "passParameterSem", line);
+        if (end == std::string::npos || v == std::string::npos || v > end) return false;
+        size_t e = src.find_first_not_of("0123456789", v + (msl ? 19 : 16));
+        if (e == std::string::npos || e > end || e == v + (msl ? 19 : 16)) return false;
+        at = v;
+        name = src.substr(v, e - v);
+        return true;
+    }
+    return false;
+}
+}  // namespace detail
+
+// Rewrites the shadow mask's reads of the offset rays R1 and R2 to go through the helper (unit 0 is
+// the gathered depth). Returns the number of reads rewritten (0: source left unchanged).
+inline int rewrite_gather_rays(std::string& src, bool msl) {
+    const size_t entry = src.find(msl ? "fragment FragmentOut main0" : "void main(");
+    if (entry == std::string::npos) return 0;
+    std::string centre, ray1, ray2;
+    size_t at, at1, at2;
+    if (!detail::find_varying(src, entry, 0, msl, at, centre) || !detail::find_varying(src, entry, 1, msl, at1, ray1) ||
+        !detail::find_varying(src, entry, 2, msl, at2, ray2) || centre == ray1 || centre == ray2 || ray1 == ray2)
+        return 0;
+    const std::string scale = msl ? "supportBuffer.tex0Scale" : "uf_tex0Scale";
+    const std::string fn = msl ? "wwhd_gather_ray(" : "wwhdGatherRay(";
+    // the later read first, so the earlier position stays valid
+    std::pair<size_t, std::string> reads[2] = {{at1, ray1}, {at2, ray2}};
+    if (reads[0].first < reads[1].first) std::swap(reads[0], reads[1]);
+    for (auto& [pos, name] : reads) src.replace(pos, name.size(), fn + centre + ", " + name + ", " + scale + ")");
+    static const char* const kMsl =
+        "// shadow-mask view ray at host-texel spacing (runtime/src/gfx/area_sample.h, issue #135)\n"
+        "static float4 wwhd_gather_ray(float4 centre, float4 ray, float2 scale) {\n"
+        "    if (all(scale == float2(1.0))) return ray;\n"
+        "    return float4(centre.xy + (ray.xy - centre.xy) / scale, ray.zw);\n"
+        "}\n";
+    static const char* const kGlsl =
+        "// shadow-mask view ray at host-texel spacing (runtime/src/gfx/area_sample.h, issue #135)\n"
+        "vec4 wwhdGatherRay(vec4 centre, vec4 ray, vec2 scale) {\n"
+        "    if (all(equal(scale, vec2(1.0)))) return ray;\n"
+        "    return vec4(centre.xy + (ray.xy - centre.xy) / scale, ray.zw);\n"
+        "}\n";
+    src.insert(entry, msl ? kMsl : kGlsl);
+    return 2;
+}
+
+// Applies the program's fix to its decompiled source (MSL or Vulkan GLSL). Returns the number of
+// places rewritten (0: source left unchanged).
+inline int rewrite(std::string& src, const Program& program, bool msl) {
+    switch (program.fix) {
+    case Fix::AreaTaps: return rewrite_area_taps(src, program.units, msl);
+    case Fix::GatherRays: return program.units & 1u ? rewrite_gather_rays(src, msl) : 0;
+    default: return 0;
+    }
 }
 
 }  // namespace gfx::area_sample

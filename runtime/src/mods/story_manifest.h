@@ -1,0 +1,313 @@
+// Story quests declared in a mod's manifest.json ("quests_format": 1, "quests": [...]), read when the mod
+// is enabled, without running mod code (docs/mod-sdk-v2.md, "Quests in the manifest"). The port then
+// sends the quest's letter, starts the quest when the letter is read, hands Link the enclosed letter,
+// shows each step's texts and place, and runs the declared resident talks; the mod's code only reports
+// progress the port can't see. Pure code, unit-tested in runtime/tools/story_notebook_test.cpp.
+#pragma once
+#include <cmath>
+#include <cstdlib>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "mod_json.h"
+#include "story_mail_book.h"
+#include "story_npc_catalogue.h"
+#include "story_notebook_list.h"
+#include "story_sail.h"
+#include "story_takeover.h"
+
+namespace story_notebook {
+
+// The story system's required package (the mod repository's "story-notebook"): its letter brings the
+// story notebook, its manifest's "notebook" block gives the notebook's look, and every quest mod
+// depends on it (packages.cpp).
+inline const std::string kNotebookPackage = "story-notebook";
+
+struct ManifestStep {
+    unsigned n = 0;
+    std::string text, where;
+    bool has_place = false;
+    float x = 0, z = 0;
+    bool has_talk = false;
+    Resident resident = kResidentNone;
+    bool needs_letter = false;
+    std::string lines;   // joined with '\n'
+    uint8_t reward = 0;  // a rupee item
+    bool follow = true;  // npc "follow": false keeps the step's place fixed
+    Availability when;   // "available": the step's prerequisites
+    std::string sail_line;  // "sail_line": the King of Red Lions says it once (story_sail.h); '\n' between lines
+    std::string give_chart;  // npc "then": {"give": "chart:<id>"}: the talk gives Link the mod's chart
+    std::string find_chart;  // "find": "chart:<id>": the chart's treasure; the chart is finished when the step is
+};
+struct ManifestQuest {
+    std::string id, title, reward_text, start_text, journal = "on_enable";
+    uint8_t reward_item = 0;
+    bool has_letter = false, letter_encloses_letter = false;
+    bool letter_encloses_notebook = false;  // "encloses": ["notebook"]: the letter brings the story notebook (the Story Notebook package's)
+    std::string letter_id, letter_sender, letter_text;
+    // the enclosed letter as the Delivery Bag describes it (A or a touch on it): its name and its
+    // description ("encloses": [{"id": "letter:friend", "name": ..., "description": ...}]); empty:
+    // the defaults (enclosure_name / enclosure_description)
+    std::string enclosure_name, enclosure_description;
+    std::vector<std::string> letter_charts;  // "encloses": ["chart:<id>"]: the letter gives Link these charts
+    std::string reward_chart;                // "reward": {"chart": "chart:<id>"}: given when the quest is done
+    std::vector<ManifestStep> steps;
+};
+// A chart declared in the manifest ("charts": [...]): what the MAP screen's chart list shows for it
+struct ManifestChart {
+    std::string id, name, description;
+    float x = 0, z = 0;
+};
+// "chart:<id>": the id, or empty
+inline std::string chart_ref(const mods::json::Value& v) {
+    if (v.type != mods::json::Value::String || v.text.rfind("chart:", 0) != 0) return {};
+    return v.text.substr(6);
+}
+// Parses the manifest's charts ("charts": [{"id", "name", "description", "place": {"x", "z"}}]).
+inline bool parse_charts(const mods::json::Value& manifest, std::vector<ManifestChart>& out, std::string& why) {
+    using mods::json::Value;
+    out.clear();
+    const Value& charts = manifest.get("charts");
+    if (charts.type == Value::Null) return true;
+    if (charts.type != Value::Array || charts.array.size() > 8) return why = "charts must be a list of up to 8", false;
+    for (const Value& c : charts.array) {
+        ManifestChart m;
+        std::u16string ignored;
+        if (c.type != Value::Object || c.get("id").type != Value::String || !story_mail::valid_id(c.get("id").text))
+            return why = "invalid chart id", false;
+        m.id = c.get("id").text;
+        if (c.get("name").type != Value::String || c.get("name").text.empty() || c.get("name").text.size() > 40 ||
+            !story_mail::append_utf16(c.get("name").text, false, ignored))
+            return why = "chart " + m.id + ": a name of up to 40 bytes is needed", false;
+        m.name = c.get("name").text;
+        if (c.get("description").type != Value::Null) {
+            if (c.get("description").type != Value::String || c.get("description").text.size() > 200 ||
+                !story_mail::append_utf16(c.get("description").text, true, ignored))
+                return why = "chart " + m.id + ": invalid description", false;
+            m.description = c.get("description").text;
+        }
+        const Value& place = c.get("place");
+        if (place.type != Value::Object || place.get("x").type != Value::Number || place.get("z").type != Value::Number)
+            return why = "chart " + m.id + ": the place of its mark is needed", false;
+        m.x = float(place.get("x").number), m.z = float(place.get("z").number);
+        if (!(std::fabs(m.x) <= 350000 && std::fabs(m.z) <= 350000)) return why = "chart " + m.id + ": place off the sea", false;
+        for (const ManifestChart& o : out)
+            if (o.id == m.id) return why = "chart " + m.id + " is declared twice", false;
+        out.push_back(m);
+    }
+    return true;
+}
+inline constexpr size_t kMaxEnclosureNameBytes = 40, kMaxEnclosureDescriptionBytes = 200;
+// What the Delivery Bag says about a quest's sealed letter
+inline std::string enclosure_name(const ManifestQuest& q) { return q.enclosure_name.empty() ? "Sealed Letter" : q.enclosure_name; }
+inline std::string enclosure_description(const ManifestQuest& q) {
+    if (!q.enclosure_description.empty()) return q.enclosure_description;
+    return q.letter_sender.empty() ? "A sealed letter. It isn't addressed to you." : "A sealed letter from " + q.letter_sender + ". It isn't addressed to you.";
+}
+
+// "rupee_green" .. "rupee_orange"; 0 if not one
+inline uint8_t rupee_item(const std::string& name) {
+    static const char* const kNames[] = {"rupee_green", "rupee_blue", "rupee_yellow", "rupee_red", "rupee_purple", "rupee_orange"};
+    for (uint8_t i = 0; i < 6; i++)
+        if (name == kNames[i]) return uint8_t(i + 1);
+    return 0;
+}
+// an event flag written as "0x2D01" (the game's flag number); false if not one
+inline bool event_number(const mods::json::Value& v, uint16_t& out) {
+    if (v.type != mods::json::Value::String || v.text.size() < 3 || v.text.size() > 6 || v.text.rfind("0x", 0) != 0) return false;
+    char* end = nullptr;
+    const unsigned long n = strtoul(v.text.c_str() + 2, &end, 16);
+    if (*end || n > 0xFFFF || !(n & 0xFF)) return false;
+    out = uint16_t(n);
+    return true;
+}
+inline bool parse_available(const mods::json::Value& v, Availability& a, std::string& why) {
+    using mods::json::Value;
+    if (v.type == Value::Null) return true;
+    if (v.type != Value::Object) return why = "available must be an object", false;
+    for (const char* key : {"event", "not_event"})
+        for (const Value& e : v.get(key).type == Value::Array ? v.get(key).array : std::vector<Value>{v.get(key)}) {
+            if (e.type == Value::Null) continue;
+            uint16_t n;
+            if (!event_number(e, n)) return why = std::string("invalid ") + key + " flag", false;
+            (std::string(key) == "event" ? a.events : a.not_events).push_back(n);
+        }
+    if (v.get("time").type == Value::String) {
+        const std::string& t = v.get("time").text;
+        if (t == "day") a.time = 1;
+        else if (t == "night") a.time = 2;
+        else if (t != "any") return why = "time must be day, night or any", false;
+    }
+    std::u16string ignored;
+    if (v.get("text").type != Value::String || v.get("text").text.empty() || v.get("text").text.size() > kMaxConditionBytes ||
+        !story_mail::append_utf16(v.get("text").text, false, ignored))
+        return why = "available needs a text for the player (up to 96 bytes)", false;
+    a.text = v.get("text").text;
+    return true;
+}
+
+// Parses the manifest's quests. Returns false with a reason for anything it doesn't accept (the mod's
+// quests are then not in the notebook; the mod itself still loads).
+// NPCs are named from the catalogue ("who": "windfall-um1"); a name it doesn't know, or an
+// "npc_catalogue" version newer than it, refuses the quests (and the mod, packages.cpp). Steps whose
+// time of day never meets their resident's are allowed, with a warning.
+inline bool parse_quests(const mods::json::Value& manifest, std::vector<ManifestQuest>& out, std::string& why,
+                         const NpcCatalogue& catalogue = npc_catalogue(), std::vector<std::string>* warnings = nullptr) {
+    using mods::json::Value;
+    out.clear();
+    const Value& needs = manifest.get("npc_catalogue");
+    if (needs.type != Value::Null) {
+        if (needs.type != Value::Number || needs.number < 1 || std::floor(needs.number) != needs.number)
+            return why = "npc_catalogue must be a version number", false;
+        if (needs.number > catalogue.version)
+            return why = "needs NPC catalogue version " + std::to_string(unsigned(needs.number)) + "; this port has version " +
+                         std::to_string(catalogue.version) + " (update the port)",
+                   false;
+    }
+    const Value& quests = manifest.get("quests");
+    if (quests.type == Value::Null) return true;
+    const Value& format = manifest.get("quests_format");
+    if (format.type != Value::Number || format.number != 1) return why = "unsupported quests_format", false;
+    if (quests.type != Value::Array || quests.array.size() > kMaxQuestsPerMod) return why = "quests must be a list of up to 8", false;
+    auto text = [&](const Value& v, size_t max, bool lines, std::string& to, const char* what) {
+        if (v.type == Value::Null) return true;
+        std::u16string ignored;
+        if (v.type != Value::String || v.text.size() > max || !story_mail::append_utf16(v.text, lines, ignored))
+            return why = std::string("invalid ") + what, false;
+        to = v.text;
+        return true;
+    };
+    for (const Value& q : quests.array) {
+        ManifestQuest m;
+        if (q.type != Value::Object) return why = "a quest must be an object", false;
+        if (q.get("id").type != Value::String || !story_mail::valid_id(q.get("id").text)) return why = "invalid quest id", false;
+        m.id = q.get("id").text;
+        if (!text(q.get("title"), kMaxTitleBytes, false, m.title, "title") || m.title.empty()) return why = "quest " + m.id + ": invalid title", false;
+        if (q.get("journal").type == Value::String) {
+            m.journal = q.get("journal").text;
+            if (m.journal != "on_enable" && m.journal != "on_trigger" && m.journal != "hidden") return why = "quest " + m.id + ": invalid journal", false;
+        }
+        if (!text(q.get("start").get("text"), kMaxNextBytes, false, m.start_text, "start text")) return false;
+        if (!text(q.get("reward").get("text"), kMaxRewardBytes, false, m.reward_text, "reward text")) return false;
+        if (q.get("reward").get("item").type == Value::String && !(m.reward_item = rupee_item(q.get("reward").get("item").text)))
+            return why = "quest " + m.id + ": unsupported reward item", false;
+        if (q.get("reward").get("chart").type != Value::Null && (m.reward_chart = chart_ref(q.get("reward").get("chart"))).empty())
+            return why = "quest " + m.id + ": the reward chart must be \"chart:<id>\"", false;
+        const Value& letter = q.get("letter");
+        if (letter.type == Value::Object) {
+            m.has_letter = true;
+            if (letter.get("id").type != Value::String || !story_mail::valid_id(letter.get("id").text)) return why = "invalid letter id", false;
+            m.letter_id = letter.get("id").text;
+            if (!text(letter.get("sender"), story_mail::kMaxSenderBytes, false, m.letter_sender, "letter sender") ||
+                !text(letter.get("text"), story_mail::kMaxTextBytes, true, m.letter_text, "letter text") || m.letter_sender.empty() ||
+                m.letter_text.empty())
+                return why = "quest " + m.id + ": invalid letter", false;
+            for (const Value& e : letter.get("encloses").array) {
+                if (e.type == Value::String && e.text.rfind("letter:", 0) == 0) m.letter_encloses_letter = true;
+                if (e.type == Value::String && e.text == "notebook") m.letter_encloses_notebook = true;
+                if (const std::string chart = chart_ref(e); !chart.empty()) m.letter_charts.push_back(chart);
+                // the object form: the enclosure with what the Delivery Bag says about it
+                if (e.type == Value::Object && e.get("id").type == Value::String && e.get("id").text.rfind("letter:", 0) == 0) {
+                    m.letter_encloses_letter = true;
+                    if (!text(e.get("name"), kMaxEnclosureNameBytes, false, m.enclosure_name, "enclosure name") ||
+                        !text(e.get("description"), kMaxEnclosureDescriptionBytes, true, m.enclosure_description, "enclosure description"))
+                        return false;
+                }
+            }
+        }
+        for (const Value& st : q.get("steps").array) {
+            ManifestStep s;
+            if (st.get("n").type != Value::Number || st.get("n").number < 1 || st.get("n").number > kMaxStep || std::floor(st.get("n").number) != st.get("n").number)
+                return why = "quest " + m.id + ": invalid step number", false;
+            s.n = unsigned(st.get("n").number);
+            if (!text(st.get("text"), kMaxNextBytes, false, s.text, "step text") || !text(st.get("where"), kMaxWhereBytes, false, s.where, "where"))
+                return false;
+            const Value& place = st.get("place");
+            if (place.type == Value::Object && place.get("x").type == Value::Number && place.get("z").type == Value::Number) {
+                s.x = float(place.get("x").number), s.z = float(place.get("z").number);
+                if (!(std::fabs(s.x) <= 350000 && std::fabs(s.z) <= 350000)) return why = "quest " + m.id + ": place off the sea", false;
+                s.has_place = true;
+            }
+            if (!parse_available(st.get("available"), s.when, why)) return why = "quest " + m.id + ": " + why, false;
+            if (st.get("find").type != Value::Null && (s.find_chart = chart_ref(st.get("find"))).empty())
+                return why = "quest " + m.id + ": \"find\" must be \"chart:<id>\"", false;
+            // "sail_line": a string, or up to three strings (one message box)
+            const Value& sail = st.get("sail_line");
+            if (sail.type != Value::Null) {
+                const std::vector<Value> parts = sail.type == Value::Array ? sail.array : std::vector<Value>{sail};
+                for (const Value& l : parts) {
+                    if (l.type != Value::String) return why = "quest " + m.id + ": invalid sail_line", false;
+                    if (!s.sail_line.empty()) s.sail_line += '\n';
+                    s.sail_line += l.text;
+                }
+                size_t breaks = 0;
+                for (char ch : s.sail_line) breaks += ch == '\n';
+                std::u16string ignored;
+                if (s.sail_line.empty() || s.sail_line.size() > kMaxSailLineBytes || breaks > 2 ||
+                    !story_mail::append_utf16(s.sail_line, true, ignored))
+                    return why = "quest " + m.id + ": the sail_line must be up to three lines, 240 bytes", false;
+            }
+            const Value& npc = st.get("npc");
+            if (npc.type == Value::Object) {
+                s.has_talk = true;
+                const Value& who = npc.get("who");
+                if (who.type != Value::String) return why = "quest " + m.id + ": \"who\" must name an NPC from the catalogue", false;
+                s.resident = catalogue.find(who.text);
+                if (s.resident == kResidentNone)
+                    return why = "quest " + m.id + ": this port's NPC catalogue (version " + std::to_string(catalogue.version) +
+                                 ") has no NPC named \"" + who.text + "\"",
+                           false;
+                const NpcEntry& e = *catalogue.entry(s.resident);
+                if (!e.talks())
+                    return why = "quest " + m.id + ": " + e.name + " can't speak a quest's lines in this port yet (only townspeople of class people can)",
+                           false;
+                if (s.where.empty()) s.where = e.where;
+                if (!s.has_place && e.has_spot) s.has_place = true, s.x = e.x, s.z = e.z;
+                if (warnings && ((s.when.time == 1 && !e.day) || (s.when.time == 2 && !e.night)))
+                    warnings->push_back("quest " + m.id + " step " + std::to_string(s.n) + ": " + e.name + " is only out " +
+                                        (e.day ? "by day" : "at night") + ", but the step is available only " +
+                                        (s.when.time == 1 ? "by day" : "at night"));
+                s.needs_letter = npc.get("when").get("carries").type == Value::String;
+                for (const Value& l : npc.get("lines").array) {
+                    if (l.type != Value::String) return why = "invalid line", false;
+                    if (!s.lines.empty()) s.lines += '\n';
+                    s.lines += l.text;
+                }
+                std::u16string ignored;
+                if (s.lines.empty() || s.lines.size() > kMaxLinesBytes || npc.get("lines").array.size() > 3 ||
+                    !story_mail::append_utf16(s.lines, true, ignored))
+                    return why = "quest " + m.id + ": the lines must be up to three, 240 bytes", false;
+                if (npc.get("follow").type == Value::Bool) s.follow = npc.get("follow").boolean;
+                else if (npc.get("follow").type != Value::Null) return why = "quest " + m.id + ": follow must be true or false", false;
+                const Value& give = npc.get("then").get("give");
+                if (give.type == Value::String && !(s.give_chart = chart_ref(give)).empty()) {
+                } else if (give.type == Value::String && !(s.reward = rupee_item(give.text)))
+                    return why = "quest " + m.id + ": unsupported item to give", false;
+            }
+            m.steps.push_back(s);
+        }
+        out.push_back(std::move(m));
+    }
+    // the charts the quests name must be declared
+    std::vector<ManifestChart> charts;
+    if (!parse_charts(manifest, charts, why)) return false;
+    auto declared = [&](const std::string& id) {
+        for (const ManifestChart& c : charts)
+            if (c.id == id) return true;
+        return false;
+    };
+    for (const ManifestQuest& q : out) {
+        std::vector<std::string> refs = q.letter_charts;
+        if (!q.reward_chart.empty()) refs.push_back(q.reward_chart);
+        for (const ManifestStep& st : q.steps) {
+            if (!st.give_chart.empty()) refs.push_back(st.give_chart);
+            if (!st.find_chart.empty()) refs.push_back(st.find_chart);
+        }
+        for (const std::string& r : refs)
+            if (!declared(r)) return why = "quest " + q.id + ": chart \"" + r + "\" is not declared in \"charts\"", false;
+    }
+    return true;
+}
+
+}  // namespace story_notebook

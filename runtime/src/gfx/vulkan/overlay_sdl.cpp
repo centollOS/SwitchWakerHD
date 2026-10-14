@@ -8,11 +8,13 @@
 #include "backend.h"
 #include "gfx/display_modes.h"
 #include "settings.h"
+#include "stereo.h"
 #include "input.h"
 #include "interp.h"
 #include "overlay/hostui.h"
 #include "platform/host.h"
 #include "platform/perf_hint.h"
+#include "platform/dual_display.h"
 #include "runtime.h"
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -124,6 +126,21 @@ void choose_mod_source(bool folder, std::function<void(std::string)> chosen) {
         else SDL_ShowOpenFileDialog(done, callback, nullptr, nullptr, 0, nullptr, false);
     });
 }
+void choose_game_source(bool folder, std::function<void(std::string)> chosen) {
+    post([folder, chosen] {
+        auto callback = new std::function<void(std::string)>(chosen);
+        auto done = [](void* context, const char* const* files, int) {
+            auto fn = static_cast<std::function<void(std::string)>*>(context);
+            if (files && files[0]) (*fn)(files[0]);
+            delete fn;
+        };
+        if (folder) SDL_ShowOpenFolderDialog(done, callback, nullptr, nullptr, false);
+        else {
+            static const SDL_DialogFileFilter filter[]={ {"GameCube disc image", "iso;gcm;rvz"} };
+            SDL_ShowOpenFileDialog(done, callback, nullptr, filter, 1, nullptr, false);
+        }
+    });
+}
 // SDL main loop (backend.cpp run_main_loop)
 void run_posted() {
     std::vector<std::function<void()>> fns;
@@ -179,6 +196,7 @@ void graphics_changed() {
     put("fpsHighPaced", {"WWHD_INTERP_PACED"}, interp::paced_interpolation_at(120) ? "1" : "0");
     put("scaleFilter", {"WWHD_SCALE_FILTER"}, std::to_string(gfxvk::scale_filter()));
     put("vkPresentMode", {"WWHD_VK_PRESENT_MODE"}, std::to_string(gfxvk::present_mode()));
+    put("vkDevice", {"WWHD_VK_DEVICE"}, gfxvk::device_setting());
     save_locked();
 }
 // start-up (backend.cpp init): the saved graphics options
@@ -191,6 +209,11 @@ void load_saved_options() {
     }
     auto saved = [&](const char* key, std::initializer_list<const char*> env) { return !env_set(env) && v.count(key); };
     auto num = [&](const char* key) { return atof(v[key].c_str()); };
+#ifdef __ANDROID__
+    if (saved("touchButtons", {})) gfx::g_touch_buttons = std::clamp((int)num("touchButtons"), 0, 2);
+    if (saved("touchControls", {})) gfx::g_touch_controls = num("touchControls") != 0;
+#endif
+    gfxvk::load_saved_stereo_hdr();  // shared with the AppKit host (init_appkit)
     if (saved("resScale", {"WWHD_RES_SCALE"})) gfxvk::set_res_scale((float)num("resScale"));
     if (saved("aoMode", {"WWHD_AO_MODE", "WWHD_NO_AO_QUIRK"})) gfxvk::set_ao_mode((int)num("aoMode"));
     if (saved("aoHires", {"WWHD_AO_HIRES"})) gfxvk::set_ao_hires(num("aoHires") != 0);
@@ -203,6 +226,9 @@ void load_saved_options() {
     if (saved("fpsHighPaced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation_at(120, num("fpsHighPaced") != 0);
     if (saved("scaleFilter", {"WWHD_SCALE_FILTER"})) gfxvk::set_scale_filter((int)num("scaleFilter"));
     if (saved("vkPresentMode", {"WWHD_VK_PRESENT_MODE"})) gfxvk::set_present_mode((int)num("vkPresentMode"));
+#ifdef __ANDROID__
+    if (v.count("androidSwapDisplays")) dual_display::requested_swap = num("androidSwapDisplays") != 0;
+#endif
     // GamePad screen (display_modes.h); the start-up test overrides after the saved choices
     using namespace gfx;
     if (v.count("drcMode")) {
@@ -232,6 +258,13 @@ void set_scale_filter(int f) {
     graphics_changed();
 }
 bool scale_filter_available() { return gfxvk::graphics_feature_available(gfxvk::GraphicsFeature::ScaleFilter); }
+#ifdef __ANDROID__
+bool displays_swapped() { return dual_display::requested_swap; }
+void set_displays_swapped(bool swapped) {
+    dual_display::requested_swap = swapped;
+    set("androidSwapDisplays", swapped ? "1" : "0");
+}
+#endif
 
 bool fullscreen() { return gfxvk::R.tv.window && (SDL_GetWindowFlags(gfxvk::R.tv.window) & SDL_WINDOW_FULLSCREEN); }
 void set_fullscreen(bool on) {
@@ -333,4 +366,8 @@ void open_folder(const std::string& path) {
 #endif
 
 }  // namespace hostui
+
+namespace gfxvk {
+void load_device_setting() { std::string value; if (hostui::get("vkDevice", value)) set_device_setting(value); }
+}
 #endif  // WWHD_SDL_HOST

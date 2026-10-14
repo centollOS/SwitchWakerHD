@@ -3,6 +3,8 @@
 //   /vol/code/...     -> <game>/code/...
 //   /vol/meta/...     -> <game>/meta/...
 //   /vol/save/...     -> <save dir>/...
+#include "../mods/story_mail.h"
+#include "../mods/story_store.h"
 #include "../platform/filesystem.h"
 
 #include <atomic>
@@ -37,6 +39,9 @@ struct OpenFile {
     FILE* f;
     std::string path;  // guest path
     std::string mode;
+    uint64_t limit = UINT64_MAX;  // the game's part of a save file with the story block (story_store.h)
+    bool story = false;           // a save file that carries the story block
+    std::string host;
 };
 struct OpenDir {
     DIR* d;
@@ -44,6 +49,11 @@ struct OpenDir {
     std::string gpath;
     uint32_t read = 0;  // entries returned so far
 };
+
+bool trace_story() {
+    static const bool on = [] { const char* e = getenv("WWHD_STORY_STORE_TRACE"); return e && *e == '1'; }();
+    return on;
+}
 
 std::mutex g_fs_mutex;
 std::unordered_map<uint32_t, OpenFile> g_files;
@@ -134,6 +144,7 @@ std::string host_path(const std::string& guest) {
 // the pack of the active language source (game_languages.h: the European or Japanese pack the player
 // chose, read under the name the game asks for), then the installed game.
 std::string read_path(const std::string& guest,const std::string& mode="rb") {
+    if(mode=="r"||mode=="rb")if(auto model=story_mail::model_override(guest);!model.empty())return model;  // the story notebook's model
     auto override=mods::content::replacement(guest,mode);
     if(!override.empty())if(const char* trace=std::getenv("WWHD_TEST_CONTENT_TRACE");trace&&std::string(trace)=="1")LOG("[content-mod] read %s -> %s",guest.c_str(),override.c_str());
     if(override.empty()&&(mode=="r"||mode=="rb"))override=game_lang::redirect(guest);
@@ -144,13 +155,19 @@ void make_parent_dirs(const std::string& path) {
     std::error_code ec; std::filesystem::create_directories(std::filesystem::path(path).parent_path(),ec);
 }
 
-void fill_stat(uint32_t out, const struct stat& st) {
+void fill_stat(uint32_t out, const struct stat& st, uint64_t size = UINT64_MAX) {
     memset(mem::ptr(out), 0, 0x64);
     bool dir = S_ISDIR(st.st_mode);
+    if (size == UINT64_MAX) size = (uint64_t)st.st_size;
     st32(out + 0x00, dir ? 0x80000000u : 0x01000000u);
     st32(out + 0x04, 0x666);
-    st32(out + 0x10, dir ? 0 : (uint32_t)st.st_size);
-    st32(out + 0x14, dir ? 0 : (uint32_t)st.st_size);
+    st32(out + 0x10, dir ? 0 : (uint32_t)size);
+    st32(out + 0x14, dir ? 0 : (uint32_t)size);
+}
+// the size the game sees: a save file's story block is not part of it
+uint64_t game_size(const std::string& gpath, const std::string& hp, const struct stat& st) {
+    return !S_ISDIR(st.st_mode) && story_store::is_save_file(gpath) ? story_store::game_size(hp, (uint64_t)st.st_size)
+                                                                      : (uint64_t)st.st_size;
 }
 
 int32_t open_file(const std::string& gpath, const std::string& mode, uint32_t out_handle) {
@@ -165,6 +182,10 @@ int32_t open_file(const std::string& gpath, const std::string& mode, uint32_t ou
     }
     TRACE("[fs] open %s (%s) -> %s", gpath.c_str(), mode.c_str(), f ? "ok" : "not found");
     if (!f) return FS_NOT_FOUND;
+    const bool story = story_store::is_save_file(gpath);
+    uint64_t limit = UINT64_MAX;
+    if (story && mode.find_first_of("wa") == std::string::npos) limit = story_store::opened_for_read(gpath, hp);
+    if (story && trace_story()) LOG("[story] the game opens %s (%s)", gpath.c_str(), mode.c_str());
     if (mode.find_first_of("wa+") == std::string::npos) {
         const size_t slash = gpath.find_last_of('/');
         if (!mods::content::pack_language(slash == std::string::npos ? gpath : gpath.substr(slash + 1)).empty())
@@ -172,7 +193,7 @@ int32_t open_file(const std::string& gpath, const std::string& mode, uint32_t ou
     }
     std::lock_guard<std::mutex> lk(g_fs_mutex);
     uint32_t h = g_next_handle++;
-    g_files[h] = {f, gpath, m};
+    g_files[h] = {f, gpath, m, limit, story, hp};
     st32(out_handle, h);
     return FS_OK;
 }
@@ -185,13 +206,14 @@ FILE* file(uint32_t h) {
 
 int32_t stat_path(const std::string& gpath, uint32_t out) {
     struct stat st;
+    const std::string hp = read_path(gpath);
     int result;
     {
         HostFsCall call;
-        result = stat(read_path(gpath).c_str(), &st);
+        result = stat(hp.c_str(), &st);
     }
     if (result != 0) return FS_NOT_FOUND;
-    fill_stat(out, st);
+    fill_stat(out, st, game_size(gpath, hp, st));
     return FS_OK;
 }
 
@@ -231,11 +253,21 @@ HLE(coreinit, FSOpenFile) {
 }
 
 HLE(coreinit, FSCloseFile) {
-    std::lock_guard<std::mutex> lk(g_fs_mutex);
-    auto it = g_files.find(arg(c, 2));
-    if (it != g_files.end()) {
-        fclose(it->second.f);
-        g_files.erase(it);
+    std::string written_guest, written_host;
+    {
+        std::lock_guard<std::mutex> lk(g_fs_mutex);
+        auto it = g_files.find(arg(c, 2));
+        if (it != g_files.end()) {
+            fclose(it->second.f);
+            if (it->second.story && it->second.mode.find_first_of("wa+") != std::string::npos)
+                written_guest = it->second.path, written_host = it->second.host;
+            g_files.erase(it);
+        }
+    }
+    // a save file the game wrote: the story block goes after it again (story_store.h)
+    if (!written_guest.empty()) {
+        BlockingScope b;
+        story_store::written(written_guest, written_host);
     }
     ret(c, FS_OK);
 }
@@ -244,6 +276,18 @@ HLE(coreinit, FSReadFile) {
     uint32_t dst = arg(c, 2), size = arg(c, 3), count = arg(c, 4);
     FILE* f = file(arg(c, 5));
     if (!f || size == 0) { ret(c, 0); return; }
+    uint64_t limit = UINT64_MAX;
+    {
+        std::lock_guard<std::mutex> lk(g_fs_mutex);
+        auto it = g_files.find(arg(c, 5));
+        if (it != g_files.end()) limit = it->second.limit;
+    }
+    if (limit != UINT64_MAX) {  // a save file's reads end at the game's part
+        const int64_t pos = host::file_tell(f);
+        const uint64_t left = pos < 0 || (uint64_t)pos >= limit ? 0 : limit - (uint64_t)pos;
+        count = (uint32_t)std::min<uint64_t>(count, left / size);
+        if (count == 0) { ret(c, 0); return; }
+    }
     size_t n;
     {
         HostFsCall call;  // the calling thread waits for the disc; others on its core run
@@ -279,7 +323,13 @@ HLE(coreinit, FSGetStatFile) {
     FILE* f = file(arg(c, 2));
     struct stat st;
     if (!f || fstat(fileno(f), &st) != 0) { ret(c, FS_NOT_FOUND); return; }
-    fill_stat(arg(c, 3), st);
+    uint64_t size = UINT64_MAX;
+    {
+        std::lock_guard<std::mutex> lk(g_fs_mutex);
+        auto it = g_files.find(arg(c, 2));
+        if (it != g_files.end() && it->second.story) size = game_size(it->second.path, it->second.host, st);
+    }
+    fill_stat(arg(c, 3), st, size);
     ret(c, FS_OK);
 }
 
@@ -298,7 +348,8 @@ HLE(coreinit, FSReadDir) {
         auto replacement=mods::content::replacement(it->second.gpath + "/" + de->d_name);
         if(!replacement.empty())path=std::move(replacement);
         if (stat(path.c_str(), &st) != 0) continue;
-        fill_stat(out, st);
+        const std::string entry = it->second.gpath + "/" + de->d_name;
+        fill_stat(out, st, game_size(entry, path, st));
         mem::write_cstr(out + 0x64, de->d_name, 256);
         it->second.read++;
         ret(c, FS_OK);
@@ -391,7 +442,14 @@ void fs_ss_load(ss::Reader& r) {
             continue;
         }
         host::file_seek(f,pos,SEEK_SET);
-        g_files[h] = {f, gp, mode};
+        const std::string hp = read_path(gp,m);
+        const bool story = story_store::is_save_file(gp);
+        uint64_t limit = UINT64_MAX;
+        if (story && mode.find_first_of("wa") == std::string::npos) {
+            struct stat st;
+            if (fstat(fileno(f), &st) == 0) limit = story_store::game_size(hp, (uint64_t)st.st_size);
+        }
+        g_files[h] = {f, gp, mode, limit, story, hp};
     }
     n = r.u32();
     for (uint32_t i = 0; i < n && r.ok; i++) {

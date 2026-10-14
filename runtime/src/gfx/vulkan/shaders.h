@@ -3,6 +3,7 @@
 #include <array>
 #include <string>
 #include <vector>
+#include <memory>
 #include "../shader_identity.h"
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
 
@@ -21,21 +22,28 @@ DescriptorRankPlan make_descriptor_rank_plan(const LatteDecompilerShaderResource
 // Metadata uses the decompiler's original binding numbers and std140 byte offsets.
 // Vertex descriptors occupy set 0, pixel descriptors set 1. Device modules are
 // created by the draw backend; this cache owns only translation and SPIR-V.
+struct ShaderBinary;
+bool shader_binary_ready(const std::shared_ptr<ShaderBinary>& binary);
+std::vector<uint32_t> shader_binary_words(const std::shared_ptr<ShaderBinary>& binary);
+std::vector<uint32_t> shader_binary_words_exact(const std::shared_ptr<ShaderBinary>& binary, uint64_t frame);
 struct Shader {
     uint64_t key = 0;
     gfx::ProgramKind kind = gfx::ProgramKind::Other;
-    uint64_t pipelineId = 0;  // equal for shaders with identical SPIR-V and resource mapping
+    uint64_t pipelineId = 0;  // portable canonical GLSL+metadata identity, stable before SPIR-V
     bool vertex = false;
     LatteDecompilerShader* dec = nullptr;
     LatteDecompilerShaderResourceMapping mapping;
     DescriptorRankPlan descriptorRanks;
     LatteDecompilerOutputUniformOffsets uniforms;
     std::vector<uint32_t> spirv;
+    std::shared_ptr<ShaderBinary> binary; // CPU result; immutable metadata is already published
     std::string glsl;
     std::string translatedGlsl;  // verify mode only: the translation a graphics pack replaced
     std::string error;
-    bool ready() const { return dec && !spirv.empty() && error.empty(); }
+    bool ready() const { return dec && (!spirv.empty() || binary) && error.empty(); }
 };
+// Render-thread-only lookup; recorded pipeline identity, never program hash.
+const Shader* find_pipeline_shader(uint64_t pipelineId, bool vertex);
 void select_renderer();
 // Pass the renderer frame to revalidate program bytes once per frame. Omitting
 // it keeps immediate revalidation for standalone callers and shader tools.
@@ -72,7 +80,8 @@ std::vector<uint32_t> compile_compute(const std::string& source, std::string* er
 std::vector<uint32_t> compile_glsl(const std::string& source, bool vertex, std::string* error = nullptr);
 // Caller-owned CPU scratch; all active bytes are freshly zeroed and packed.
 void pack_uniforms_into(const uint32_t* regs, const Shader& shader,
-    std::vector<uint8_t>& data, float scaleX = 1.0f, float scaleY = 1.0f);
+    std::vector<uint8_t>& data, float scaleX = 1.0f, float scaleY = 1.0f,
+    float eyeOffset = 0, float convergence = 600);
 std::vector<uint8_t> pack_uniforms(const uint32_t* regs, const Shader& shader,
     float scaleX = 1.0f, float scaleY = 1.0f);
 // After guest memory replacement and render drain; compiled variants stay alive.

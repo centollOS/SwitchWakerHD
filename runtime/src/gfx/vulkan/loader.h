@@ -17,12 +17,14 @@
 #define WWHD_VK_INSTANCE_FUNCTIONS(X) \
   X(vkCreateDevice) X(vkDestroySurfaceKHR) X(vkEnumerateDeviceExtensionProperties) X(vkEnumeratePhysicalDevices) \
   X(vkGetDeviceProcAddr) X(vkGetPhysicalDeviceFeatures) X(vkGetPhysicalDeviceFeatures2) \
-  X(vkGetPhysicalDeviceFormatProperties) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceProperties) \
+  X(vkGetPhysicalDeviceFormatProperties) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceProperties2) \
   X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
   X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) \
   X(vkGetPhysicalDeviceSurfaceSupportKHR)
 // device functions (vkGetDeviceProcAddr): Vulkan 1.0 core and VK_KHR_swapchain
 #define WWHD_VK_DEVICE_FUNCTIONS(X) \
+  X(vkCreateRenderPass) X(vkDestroyRenderPass) X(vkCreateFramebuffer) X(vkDestroyFramebuffer) \
+  X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) \
   X(vkAcquireNextImageKHR) X(vkAllocateCommandBuffers) X(vkAllocateDescriptorSets) X(vkAllocateMemory) \
   X(vkBeginCommandBuffer) X(vkBindBufferMemory) X(vkBindImageMemory) X(vkCmdBindDescriptorSets) \
   X(vkCmdBindIndexBuffer) X(vkCmdBindPipeline) X(vkCmdBindVertexBuffers) X(vkCmdBlitImage) \
@@ -34,12 +36,13 @@
   X(vkCreateComputePipelines) X(vkCmdDispatch) X(vkCreateGraphicsPipelines) X(vkCreateImage) X(vkCreateImageView) X(vkCreatePipelineCache) \
   X(vkCreatePipelineLayout) X(vkCreateQueryPool) X(vkCreateSampler) X(vkCreateSemaphore) \
   X(vkCreateShaderModule) X(vkCreateSwapchainKHR) X(vkDestroyBuffer) X(vkDestroyDescriptorSetLayout) \
-  X(vkDestroyImage) X(vkDestroyImageView) X(vkDestroyPipeline) X(vkDestroyPipelineLayout) \
+  X(vkDestroyCommandPool) X(vkDestroyDescriptorPool) \
+  X(vkDestroyImage) X(vkDestroyImageView) X(vkDestroyPipeline) X(vkDestroyPipelineCache) X(vkDestroyPipelineLayout) \
   X(vkDestroyQueryPool) X(vkDestroySampler) X(vkDestroySemaphore) X(vkDestroyShaderModule) \
-  X(vkDestroySwapchainKHR) X(vkDeviceWaitIdle) X(vkEndCommandBuffer) X(vkFreeMemory) \
+  X(vkDestroySwapchainKHR) X(vkDestroyFence) X(vkDeviceWaitIdle) X(vkEndCommandBuffer) X(vkFreeMemory) \
   X(vkGetBufferMemoryRequirements) X(vkGetDeviceQueue) X(vkGetFenceStatus) X(vkGetImageMemoryRequirements) \
   X(vkGetPipelineCacheData) X(vkGetQueryPoolResults) X(vkGetSwapchainImagesKHR) X(vkMapMemory) \
-  X(vkQueuePresentKHR) X(vkQueueSubmit) X(vkQueueWaitIdle) X(vkResetCommandPool) X(vkResetDescriptorPool) \
+  X(vkQueuePresentKHR) X(vkQueueSubmit) X(vkQueueWaitIdle) X(vkMergePipelineCaches) X(vkResetCommandPool) X(vkResetDescriptorPool) \
   X(vkResetFences) X(vkUnmapMemory) X(vkUpdateDescriptorSets) X(vkWaitForFences)
 // dynamic rendering: Vulkan 1.3 core, or VK_KHR_dynamic_rendering on Vulkan 1.1 / 1.2 drivers (the
 // ...KHR entry points, loaded under these names; the structures are the same)
@@ -62,5 +65,6 @@ WWHD_VK_RENDERING_FUNCTIONS(WWHD_VK_DECLARE)
 void load_global_functions(PFN_vkGetInstanceProcAddr gipa);
 void load_instance_functions(VkInstance instance);
 // khrDynamicRendering: VK_KHR_dynamic_rendering is enabled (the device is older than Vulkan 1.3)
-void load_device_functions(VkDevice device, bool khrDynamicRendering);
+// renderPasses: do not request dynamic-rendering entry points from the device.
+void load_device_functions(VkDevice device, bool khrDynamicRendering, bool renderPasses=false);
 }  // namespace gfxvk

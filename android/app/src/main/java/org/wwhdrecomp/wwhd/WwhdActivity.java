@@ -12,8 +12,10 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import android.util.Log;
 import android.view.Display;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.RelativeLayout;
 
 import org.libsdl.app.SDLActivity;
 
@@ -21,6 +23,79 @@ import java.io.File;
 
 // The game: SDL loads libmain.so and runs its SDL_main (runtime/src/main.cpp).
 public class WwhdActivity extends SDLActivity {
+    public static String downloadCatalogue(String url, String destination, long limit) {
+        return HttpsDownload.download(url, destination, limit);
+    }
+
+    // Public thermal/battery APIs, sampled by the overlay/report via JNI at most once a second.
+    public static String performanceThermals() { return PerformanceThermals.read(mSingleton); }
+
+
+    protected GamePadDisplay gamePadDisplay;
+    private File onDeviceGame;
+    private AndroidGame.Selection selection;
+    private static AndroidGame.Selection sessionSelection;
+    private static File sessionLibrary;
+
+    @Override protected boolean retainNativeSessionOnRecreation() { return true; }
+
+    @Override public void loadLibraries() {
+        if (isReusingNativeSession()) {
+            // A setup update must not change the loaded engine or assets mid-session.
+            selection = sessionSelection;
+            onDeviceGame = sessionLibrary;
+            return;
+        }
+        selection = AndroidGame.selected(this);
+        onDeviceGame = selection != null ? selection.library : null;
+        if (onDeviceGame == null) {
+            super.loadLibraries();
+        } else {
+            System.loadLibrary("SDL3");
+            System.load(onDeviceGame.getAbsolutePath());
+            Log.i("wwhd-game", "Loaded on-device game " + onDeviceGame.getAbsolutePath());
+            if (selection.game != null) Log.i("wwhd-game", "Selected game assets " + selection.game.getAbsolutePath());
+        }
+        sessionSelection = selection;
+        sessionLibrary = onDeviceGame;
+    }
+
+    @Override protected String getMainSharedObject() {
+        return onDeviceGame != null ? onDeviceGame.getAbsolutePath() : super.getMainSharedObject();
+    }
+
+    protected File shaderUserDirectory() { return AndroidUserDirectories.config(getExternalFilesDir(null)); }
+
+    @Override protected String[] getArguments() {
+        java.util.ArrayList<String> args = new java.util.ArrayList<>();
+        if (selection != null && selection.game != null) {
+            args.add("--game"); args.add(selection.game.getAbsolutePath());
+            args.add("--shader-prebuild-library"); args.add(selection.library.getAbsolutePath());
+        }
+        // Keep devel's external config folder; no implicit WWHD_USER_DIR override.
+        return args.toArray(new String[0]);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        // Only start after SDL successfully loaded the native game library.
+        if (!mBrokenLibraries) {
+            if (gamePadDisplay == null) gamePadDisplay = new GamePadDisplay(this, mLayout, mSurface);
+            gamePadDisplay.start();
+        }
+    }
+
+    /** Render-thread notification; surface replacement always belongs to the UI thread. */
+    public void recoverGamePadSurface(long generation) {
+        runOnUiThread(() -> {
+            if (gamePadDisplay != null) gamePadDisplay.recoverSurface(generation);
+        });
+    }
+
+    @Override protected void onPause() {
+        if (gamePadDisplay != null) gamePadDisplay.stop();
+        super.onPause();
+    }
     @Override
     protected String[] getLibraries() {
         return new String[] { "SDL3", "main" };
@@ -38,6 +113,10 @@ public class WwhdActivity extends SDLActivity {
         }
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        // on-screen controls over the game (the button under the view button shows or hides them)
+        if (mLayout != null)
+            mLayout.addView(new TouchControls(this), new RelativeLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         if (files != null && savedInstanceState == null) offerCrashLog(files);
     }
 

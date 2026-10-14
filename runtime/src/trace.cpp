@@ -66,6 +66,16 @@ extern "C" void ppc_trace_enter(uint32_t addr) {
                     log_msg("%s", line);
                 }
             }
+            if (const char* e = getenv("WWHD_WATCH_STR")) {  // "reg": the C string at r<reg> (e.g. a sound's name)
+                const uint32_t at = c->r[(unsigned)atoi(e) & 31];
+                char text[64] = {};
+                for (uint32_t k = 0; at && k + 1 < sizeof text; k++) {
+                    const char ch = (char)ld8(at + k);
+                    if (!ch || ch < 0x20 || ch > 0x7E) break;
+                    text[k] = ch;
+                }
+                log_msg("[watch]   \"%s\"", text);
+            }
             if (const char* e = getenv("WWHD_WATCH_EXPR")) {  // "reg+off": print ld32(r<reg> + off)
                 unsigned reg = 0, off = 0;
                 if (sscanf(e, "%u+%x", &reg, &off) == 2 && reg < 32) log_msg("[watch]   ld32(r%u+%X) = %08X", reg, off, ld32(c->r[reg] + off));

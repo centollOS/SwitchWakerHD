@@ -3814,7 +3814,7 @@ void LatteDecompiler_emitMSLShader(LatteDecompilerShaderContext* shaderContext, 
     bool usesGeometryShader = UseGeometryShader(*shaderContext->contextRegistersNew, shaderContext->options->usesGeometryShader);
     bool fetchVertexManually = (usesGeometryShader || (shaderContext->fetchShader && shaderContext->fetchShader->mtlFetchVertexManually));
 
-	StringBuf* src = new StringBuf(1024*1024*12); // reserve 12MB for generated source (we resize-to-fit at the end)
+	StringBuf* src = new StringBuf(1024*1024); // reserve 1MB for generated source, grows if needed (we resize-to-fit at the end)
 	shaderContext->shaderSource = src;
 
 	// debug info

@@ -110,7 +110,11 @@ int action_from_id(const std::string& id) {
 }
 
 const char* pad_id(int p) { return p >= 0 && p < kPadCount ? kPads[p].id : ""; }
-const char* pad_label(int p) { return p > 0 && p < kPadCount ? kPads[p].label : ""; }
+const char* pad_label(int p) {
+    static const char* const nintendo[] = {"B (bottom)", "A (right)", "Y (left)", "X (top)"};
+    if (p >= kPadA && p <= kPadY && pad_family() == PadFamily::kNintendo) return nintendo[p - kPadA];
+    return p > 0 && p < kPadCount ? kPads[p].label : "";
+}
 int pad_from_id(const std::string& id) {
     if (id.empty()) return kPadNone;
     for (int p = 1; p < kPadCount; p++)
@@ -118,17 +122,22 @@ int pad_from_id(const std::string& id) {
     return -1;
 }
 
+static const char* mouse_ids[] = {"Mouse1", "Mouse2", "Mouse3", "Mouse4", "Mouse5", "WheelUp", "WheelDown"};
+static const char* mouse_labels[] = {"Left mouse button", "Right mouse button", "Middle mouse button", "Mouse 4", "Mouse 5", "Wheel up", "Wheel down"};
 std::string key_id(int code) {
+    if (code >= kMouse1 && code < kInputCount) return mouse_ids[code-kMouse1];
     if (code < 0 || code > 255) return "";
     if (auto* k = find_key(code)) return k->id;
     return "Key" + std::to_string(code);
 }
 std::string key_label(int code) {
+    if (code >= kMouse1 && code < kInputCount) return mouse_labels[code-kMouse1];
     if (code < 0 || code > 255) return "";
     if (auto* k = find_key(code)) return k->label;
     return "Key " + std::to_string(code);
 }
 int key_from_id(const std::string& id) {
+    for (int i = kMouse1; i < kInputCount; ++i) if (id == mouse_ids[i-kMouse1]) return i;
     for (auto& k : kKeys)
         if (id == k.id) return k.code;
     if (id.size() > 3 && id.compare(0, 3, "Key") == 0) {
@@ -205,8 +214,14 @@ FaceLayout face_layout(const Mapping& m) {
 
 void apply_face_layout(Mapping& m, FaceLayout layout) {
     if (layout == FaceLayout::kCustom) return;
+    m.face_auto = false;  // a preset is a choice, not a pad's to make
     const int* src = layout == FaceLayout::kLabels ? kFaceByLabel : kFaceByPosition;
     for (int i = 0; i < 4; i++) m.pad[kA + i] = src[i];
+}
+
+int face_input(int action) {
+    const int p = current().pad[action];
+    return p != kPadNone ? p : kFaceByPosition[action - kA];
 }
 
 const char* face_layout_label(FaceLayout l) {
@@ -215,6 +230,186 @@ const char* face_layout_label(FaceLayout l) {
     case FaceLayout::kLabels: return "by label (Xbox)";
     default: return "custom";
     }
+}
+
+// ---- the Automatic preset: follow the labels printed on the dominant pad (issue #78)
+
+namespace {
+// Cross/Circle/Square/Triangle are the PlayStation names for the A/B/X/Y letters
+int label_letter(FaceLabel l) {
+    switch (l) {
+    case FaceLabel::kA: case FaceLabel::kCross: return 0;
+    case FaceLabel::kB: case FaceLabel::kCircle: return 1;
+    case FaceLabel::kX: case FaceLabel::kSquare: return 2;
+    case FaceLabel::kY: case FaceLabel::kTriangle: return 3;
+    default: return -1;
+    }
+}
+
+FaceLabel word_letter(const std::string& w) {
+    if (w == "a" || w == "xmark" || w == "cross") return FaceLabel::kA;
+    if (w == "b" || w == "circle") return FaceLabel::kB;
+    if (w == "x" || w == "square") return FaceLabel::kX;
+    if (w == "y" || w == "triangle") return FaceLabel::kY;
+    return FaceLabel::kUnknown;
+}
+}  // namespace
+
+FaceLabel face_label_from_text(const char* text) {
+    if (!text || !*text) return FaceLabel::kUnknown;
+    std::string t;
+    for (const char* p = text; *p; p++) t.push_back((char)tolower((unsigned char)*p));
+    // SF Symbols: the name first, the decoration after a dot ("a.circle", "x.square.fill"). The
+    // name alone decides: "square.circle" is Square, not Circle.
+    if (const FaceLabel l = word_letter(t.substr(0, t.find('.'))); l != FaceLabel::kUnknown) return l;
+    // a free-form name ("Button A", "Cross Button", "xbox.button.a"): the one word that is a letter
+    FaceLabel found = FaceLabel::kUnknown;
+    std::string w;
+    auto consider = [&](char c) {
+        if (c >= 'a' && c <= 'z') {
+            w.push_back(c);
+            return;
+        }
+        if (w != "button" && w != "fill" && w != "grid" && w != "the" && found == FaceLabel::kUnknown)
+            found = word_letter(w);
+        w.clear();
+    };
+    for (char c : t) consider(c);
+    consider(' ');  // the last word
+    return found;
+}
+
+AppleFaceLayout apple_face_layout(const char* product_category, const char* vendor_name) {
+    auto words = [](const char* text) {
+        std::string out = " ";
+        for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text ? text : ""); *p; ++p) {
+            if (std::isalnum(*p)) out += char(std::tolower(*p));
+            else if (out.back() != ' ') out += ' ';
+        }
+        return out + " ";
+    };
+    const std::string category = words(product_category), vendor = words(vendor_name);
+    // A recognized standard profile wins over a vendor name (e.g. a Nintendo-style pad
+    // connected in Xbox mode). Its GameController elements already represent positions.
+    for (const char* family : {" xbox ", " dualsense ", " dualshock ", " playstation "})
+        if (category.find(family) != std::string::npos) return AppleFaceLayout::kStandard;
+    const std::string who = category + vendor;
+    auto has = [&](const char* word) { return who.find(word) != std::string::npos; };
+    // Do not infer the four-button diamond for other Nintendo retro controllers.
+    if (has(" n64 ") || has(" nes ") || has(" genesis ") || has(" gamecube ")) return AppleFaceLayout::kStandard;
+    const bool joycon = has(" joy con ") || has(" joycon ");
+    if (joycon && !has(" l r ") && !has(" pair ") && (has(" l ") || has(" r ")))
+        return AppleFaceLayout::kJoyConSingle;
+    if (joycon || has(" nintendo ") || has(" switch pro ") || has(" snes ") || has(" super famicom "))
+        return AppleFaceLayout::kNintendo;
+    return AppleFaceLayout::kStandard;
+}
+
+int apple_face_input(AppleFaceLayout layout, int pad) {
+    if (pad < kPadA || pad > kPadY) return pad;
+    // SDL's MFi driver uses these same destinations for GCInputButtonA/B/X/Y.
+    static constexpr int nintendo[] = {kPadB, kPadA, kPadY, kPadX};
+    static constexpr int single[] = {kPadA, kPadX, kPadB, kPadY};
+    return layout == AppleFaceLayout::kNintendo ? nintendo[pad - kPadA]
+         : layout == AppleFaceLayout::kJoyConSingle ? single[pad - kPadA] : pad;
+}
+
+void apple_face_labels(AppleFaceLayout layout, FaceLabel labels[4]) {
+    const std::array<FaceLabel, 4> raw = {labels[0], labels[1], labels[2], labels[3]};
+    for (int i = 0; i < 4; ++i) labels[apple_face_input(layout, kPadA + i) - kPadA] = raw[i];
+}
+
+bool apple_face_workaround(const Mapping& m, AppleFaceLayout layout) {
+    return layout == AppleFaceLayout::kNintendo && !m.face_auto && face_layout(m) == FaceLayout::kLabels;
+}
+
+bool face_bindings_from_labels(const FaceLabel labels[4], int out[4]) {
+    // 0..3 are the face pads in the labels' order: kPadA (south), kPadB (east), kPadX, kPadY
+    int bind[4] = {-1, -1, -1, -1};  // bind[Wii U letter] = the host face button driving it
+    bool taken[4] = {false, false, false, false};
+    int found = 0;
+    for (int h = 0; h < 4; h++) {  // a printed letter drives the Wii U button of that letter
+        const int letter = label_letter(labels[h]);
+        if (letter < 0) continue;
+        bind[letter] = h;
+        taken[h] = true;
+        found++;
+    }
+    if (!found) return false;
+    for (int i = 0; i < 4; i++) {  // no printed letter: the by-position button, or the first free one
+        if (bind[i] >= 0) continue;
+        int h = kFaceByPosition[i] - kPadA;
+        if (taken[h]) {
+            for (h = 0; h < 4 && taken[h]; h++) {}
+            if (h == 4) return false;  // unreachable: four letters, four buttons
+        }
+        bind[i] = h;
+        taken[h] = true;
+    }
+    for (int i = 0; i < 4; i++) out[i] = kPadA + bind[i];
+    return true;
+}
+
+PadFamily pad_family_from_labels(const FaceLabel labels[4]) {
+    for (int i = 0; i < 4; i++)
+        if (labels[i] == FaceLabel::kCross || labels[i] == FaceLabel::kCircle || labels[i] == FaceLabel::kSquare ||
+            labels[i] == FaceLabel::kTriangle)
+            return PadFamily::kPlayStation;
+    if (labels[0] == FaceLabel::kA) return PadFamily::kXbox;      // south
+    if (labels[0] == FaceLabel::kB) return PadFamily::kNintendo;
+    return PadFamily::kUnknown;
+}
+
+PromptStyle prompt_style(const Mapping& m, PadFamily family) {
+    PromptStyle s;
+    if (face_layout(m) == FaceLayout::kLabels) {
+        switch (m.prompts) {
+        case Mapping::Prompts::kAuto:
+            s.face = family == PadFamily::kPlayStation ? FaceStyle::kPlayStation : FaceStyle::kXbox;
+            break;
+        case Mapping::Prompts::kXbox: s.face = FaceStyle::kXbox; break;
+        case Mapping::Prompts::kPlayStation: s.face = FaceStyle::kPlayStation; break;
+        case Mapping::Prompts::kOriginal: break;
+        }
+    }
+    s.positions = s.face != FaceStyle::kOriginal;
+    s.colours = s.positions && m.prompt_colours;
+    switch (m.shoulder_names) {
+    case Mapping::ShoulderNames::kAuto:
+        s.shoulders = s.face == FaceStyle::kXbox ? ShoulderStyle::kXbox
+                    : s.face == FaceStyle::kPlayStation ? ShoulderStyle::kNumbered : ShoulderStyle::kOriginal;
+        break;
+    case Mapping::ShoulderNames::kNintendo: break;
+    case Mapping::ShoulderNames::kNumbered: s.shoulders = ShoulderStyle::kNumbered; break;
+    case Mapping::ShoulderNames::kXbox: s.shoulders = ShoulderStyle::kXbox; break;
+    }
+    return s;
+}
+
+const char* prompts_label(Mapping::Prompts p) {
+    switch (p) {
+    case Mapping::Prompts::kAuto: return "automatic";
+    case Mapping::Prompts::kOriginal: return "original";
+    case Mapping::Prompts::kXbox: return "Xbox";
+    case Mapping::Prompts::kPlayStation: return "PlayStation";
+    }
+    return "?";
+}
+
+const char* shoulder_names_label(Mapping::ShoulderNames n) {
+    switch (n) {
+    case Mapping::ShoulderNames::kAuto: return "automatic";
+    case Mapping::ShoulderNames::kNintendo: return "L / R / ZL / ZR";
+    case Mapping::ShoulderNames::kNumbered: return "L1 / R1 / L2 / R2";
+    case Mapping::ShoulderNames::kXbox: return "LB / RB / LT / RT";
+    }
+    return "?";
+}
+
+void set_pad_binding(Mapping& m, int action, int pad) {
+    if (action < 0 || action >= kActionCount) return;
+    m.pad[action] = pad;
+    if (action <= kY) m.face_auto = false;  // a hand-edited face binding is nobody's preset
 }
 
 std::vector<int> key_users(const Mapping& m, int code, int except) {
@@ -243,7 +438,7 @@ bool has_conflict(const Mapping& m, int a) {
 
 int conflict_count(const Mapping& m) {
     int n = 0;
-    for (int code = 0; code < 256; code++)
+    for (int code = 0; code < kInputCount; code++)
         if (key_users(m, code).size() > 1) n++;
     for (int p = 1; p < kPadCount; p++)
         if (pad_users(m, p).size() > 1) n++;
@@ -251,6 +446,7 @@ int conflict_count(const Mapping& m) {
 }
 
 std::string key_short_label(int code) {
+    if (code >= kMouse1 && code <= kMouse5) return "Mouse " + std::to_string(code-kMouse1+1);
     switch (code) {
     case kVK_Shift: return "L ⇧";
     case kVK_RightShift: return "R ⇧";
@@ -272,6 +468,8 @@ std::string key_short_label(int code) {
 }
 
 const char* pad_short_label(int p) {
+    static const char* const nintendo[] = {"B", "A", "Y", "X"};
+    if (p >= kPadA && p <= kPadY && pad_family() == PadFamily::kNintendo) return nintendo[p - kPadA];
     static const char* const kShort[kPadCount] = {
         "", "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "Menu", "View", "Home", "L3", "R3",
         "D-pad ↑", "D-pad ↓", "D-pad ←", "D-pad →", "LS ↑", "LS ↓", "LS ←", "LS →", "RS ↑", "RS ↓", "RS ←", "RS →",
@@ -279,12 +477,12 @@ const char* pad_short_label(int p) {
     return p > 0 && p < kPadCount ? kShort[p] : "";
 }
 
-input::PadState keyboard_state(const Mapping& m, const bool keys[256]) {
+input::PadState keyboard_state(const Mapping& m, const bool* keys, int count) {
     float v[kActionCount];
     for (int a = 0; a < kActionCount; a++) {
         v[a] = 0;
         for (int k : m.keys[a])
-            if (k >= 0 && k < 256 && keys[k]) v[a] = 1;
+            if (k >= 0 && k < count && keys[k]) v[a] = 1;
     }
     input::PadState s;
     for (int a = 0; a < kActionCount; a++)
@@ -294,7 +492,7 @@ input::PadState keyboard_state(const Mapping& m, const bool keys[256]) {
     s.rx = v[kRRight] - v[kRLeft];
     s.ry = v[kRUp] - v[kRDown];
     if (s.lx && s.ly) { s.lx *= 0.7071f; s.ly *= 0.7071f; }  // keep diagonal walking at full-stick length
-    if (m.invert_camera_y) s.ry = -s.ry;
+    // invert_camera_y is not applied here: the camera applies it (camera_invert.h, issue #167)
     return s;
 }
 
@@ -303,6 +501,18 @@ static void apply_deadzone(float& x, float& y, float dz) {
     if (dz <= 0) return;
     if (len <= dz) { x = y = 0; return; }
     float scale = std::min(1.0f, (len - dz) / (1.0f - dz)) / len;  // rescale so the edge still reaches 1
+    x *= scale;
+    y *= scale;
+}
+
+// issue #40: scale the vector's length by the range and cap it at full deflection, keeping
+// the direction, so a stick that physically stops short still reaches 1.0.
+static void apply_range(float& x, float& y, float range) {
+    range = std::clamp(range, kMinStickRange, kMaxStickRange);
+    if (range == 1.0f) return;
+    float len = std::sqrt(x * x + y * y);
+    if (len <= 0) return;
+    float scale = std::min(len * range, 1.0f) / len;
     x *= scale;
     y *= scale;
 }
@@ -323,7 +533,8 @@ input::PadState controller_state(const Mapping& m, const float values[kPadCount]
     float dz = std::clamp(m.deadzone, 0.0f, 0.9f);
     apply_deadzone(s.lx, s.ly, dz);
     apply_deadzone(s.rx, s.ry, dz);
-    if (m.invert_camera_y) s.ry = -s.ry;
+    apply_range(s.lx, s.ly, m.left_range);
+    apply_range(s.rx, s.ry, m.right_range);
     return s;
 }
 
@@ -477,10 +688,23 @@ std::string to_json(const Mapping& m) {
         o += "    " + quote(action_id(a)) + ": " + (m.pad[a] == kPadNone ? std::string("null") : quote(pad_id(m.pad[a])));
         o += a + 1 < kActionCount ? ",\n" : "\n";
     }
-    char opt[160];
-    snprintf(opt, sizeof opt, "  },\n  \"options\": {\n    \"stick_deadzone\": %.3g,\n    \"invert_camera_y\": %s\n  }\n}\n",
-             m.deadzone, m.invert_camera_y ? "true" : "false");
-    return o + opt;
+    // button prompts: written only when not the default, as face_layout
+    static const char* const kPromptIds[] = {"auto", "original", "xbox", "playstation"};
+    static const char* const kShoulderIds[] = {"auto", "nintendo", "numbered", "xbox"};
+    std::string prompts;
+    if (m.prompts != Mapping::Prompts::kAuto)
+        prompts += std::string(",\n    \"button_prompts\": \"") + kPromptIds[(int)m.prompts] + "\"";
+    if (m.shoulder_names != Mapping::ShoulderNames::kAuto)
+        prompts += std::string(",\n    \"shoulder_names\": \"") + kShoulderIds[(int)m.shoulder_names] + "\"";
+    if (!m.prompt_colours) prompts += ",\n    \"button_colours\": false";
+    char opt[320];
+    snprintf(opt, sizeof opt,
+             "  },\n  \"options\": {\n    \"format\": 2,\n    \"stick_deadzone\": %.3g,\n"
+             "    \"left_stick_range\": %.3g,\n    \"right_stick_range\": %.3g,\n"
+             "    \"skip_controller_selection\": %s,\n    \"invert_camera_y\": %s%s",
+             m.deadzone, m.left_range, m.right_range, m.skip_controller_selection ? "true" : "false", m.invert_camera_y ? "true" : "false",
+             m.face_auto ? ",\n    \"face_layout\": \"auto\"" : "");
+    return o + opt + prompts + "\n  }\n}\n";
 }
 
 bool from_json(const std::string& text, Mapping& out, std::string* error) {
@@ -515,7 +739,12 @@ bool from_json(const std::string& text, Mapping& out, std::string* error) {
         for (auto& [id, v] : pc->obj) {
             int a = action_from_id(id);
             if (a < 0) { warn += "unknown input \"" + id + "\"; "; continue; }
-            if (v.type == Json::Null) { m.pad[a] = kPadNone; continue; }
+            if (v.type == Json::Null) {
+                if (a >= kA && a <= kY) {
+                    warn += "null face binding " + id + " repaired to default; ";
+                } else m.pad[a] = kPadNone;
+                continue;
+            }
             if (v.type != Json::Str) continue;
             int p = pad_from_id(v.s);
             if (p < 0) { warn += "unknown controller input \"" + v.s + "\"; "; continue; }
@@ -523,9 +752,37 @@ bool from_json(const std::string& text, Mapping& out, std::string* error) {
         }
     }
     if (const Json* op = root.get("options"); op && op->type == Json::Obj) {
-        if (const Json* d = op->get("stick_deadzone"); d && d->type == Json::Num)
-            m.deadzone = std::clamp((float)d->n, 0.0f, 0.9f);
+        const Json* format = op->get("format");
+        const bool legacy = !format || format->type != Json::Num || format->n < 2;
+        if (const Json* d = op->get("stick_deadzone"); d && d->type == Json::Num) {
+            // Old saves always wrote zero, the former default. Format 2 distinguishes a
+            // deliberate zero from that default; saving writes the marker after migration.
+            if (!(legacy && d->n == 0))
+                m.deadzone = std::clamp((float)d->n, 0.0f, 0.9f);
+        }
+        // issue #40: missing keys keep the default 1.0 (no scaling)
+        if (const Json* r = op->get("left_stick_range"); r && r->type == Json::Num)
+            m.left_range = std::clamp((float)r->n, kMinStickRange, kMaxStickRange);
+        if (const Json* r = op->get("right_stick_range"); r && r->type == Json::Num)
+            m.right_range = std::clamp((float)r->n, kMinStickRange, kMaxStickRange);
+        if (const Json* i = op->get("skip_controller_selection"); i && i->type == Json::Bool) m.skip_controller_selection = i->b;
         if (const Json* i = op->get("invert_camera_y"); i && i->type == Json::Bool) m.invert_camera_y = i->b;
+        // only "automatic" is stored: the two manual presets are the shape of the face bindings
+        if (const Json* f = op->get("face_layout"); f && f->type == Json::Str) m.face_auto = f->s == "auto";
+        // button prompts (#143); an unknown value keeps the default
+        if (const Json* p = op->get("button_prompts"); p && p->type == Json::Str) {
+            if (p->s == "original") m.prompts = Mapping::Prompts::kOriginal;
+            else if (p->s == "xbox") m.prompts = Mapping::Prompts::kXbox;
+            else if (p->s == "playstation") m.prompts = Mapping::Prompts::kPlayStation;
+            else if (p->s != "auto") warn += "unknown button_prompts \"" + p->s + "\"; ";
+        }
+        if (const Json* n = op->get("shoulder_names"); n && n->type == Json::Str) {
+            if (n->s == "nintendo") m.shoulder_names = Mapping::ShoulderNames::kNintendo;
+            else if (n->s == "numbered") m.shoulder_names = Mapping::ShoulderNames::kNumbered;
+            else if (n->s == "xbox") m.shoulder_names = Mapping::ShoulderNames::kXbox;
+            else if (n->s != "auto") warn += "unknown shoulder_names \"" + n->s + "\"; ";
+        }
+        if (const Json* c = op->get("button_colours"); c && c->type == Json::Bool) m.prompt_colours = c->b;
     }
     out = m;
     if (error) *error = warn;
@@ -575,6 +832,53 @@ std::string default_path() {
 static std::mutex g_mu;
 static Mapping g_map = Mapping::defaults();
 static std::atomic<uint32_t> g_gen{1};
+static std::atomic<bool> g_skip_controller_selection{true};
+static std::atomic<bool> g_invert_camera_y{false};
+
+// the dominant pad's labels as note_face_labels last reported them (its own lock: set_current
+// takes g_mu)
+static std::mutex g_labels_mu;
+static FaceLabel g_labels[4] = {FaceLabel::kUnknown, FaceLabel::kUnknown, FaceLabel::kUnknown,
+                                FaceLabel::kUnknown};
+
+static std::atomic<int> g_family{(int)PadFamily::kUnknown};
+
+PadFamily pad_family() { return (PadFamily)g_family.load(std::memory_order_relaxed); }
+
+void note_face_labels(const FaceLabel labels[4]) {
+    Mapping m = current();
+    {
+        std::lock_guard<std::mutex> lk(g_labels_mu);
+        for (int i = 0; i < 4; i++) g_labels[i] = labels[i];
+    }
+    // the prompts follow the family (button_glyphs re-reads the style on a new generation). An
+    // unplugged pad (all unknown) keeps the last family, as the Automatic face preset keeps its choice.
+    if (const PadFamily f = pad_family_from_labels(labels); f != PadFamily::kUnknown && f != pad_family()) {
+        g_family.store((int)f, std::memory_order_relaxed);
+        g_gen++;
+    }
+    if (!m.face_auto) return;
+    int out[4];
+    if (!face_bindings_from_labels(labels, out)) return;
+    bool changed = false;
+    for (int i = 0; i < 4; i++) changed |= m.pad[kA + i] != out[i];
+    if (!changed) return;
+    for (int i = 0; i < 4; i++) m.pad[kA + i] = out[i];
+    set_current(m);
+}
+
+void set_face_auto(Mapping& m, bool on) {
+    m.face_auto = on;
+    if (!on) return;
+    int out[4];
+    FaceLabel labels[4];
+    {
+        std::lock_guard<std::mutex> lk(g_labels_mu);
+        for (int i = 0; i < 4; i++) labels[i] = g_labels[i];
+    }
+    if (face_bindings_from_labels(labels, out))  // none noted: the bindings wait for a pad
+        for (int i = 0; i < 4; i++) m.pad[kA + i] = out[i];
+}
 
 void load_startup() {
     std::string path = default_path(), err;
@@ -599,11 +903,15 @@ void set_current(const Mapping& m, bool save) {
         std::lock_guard<std::mutex> lk(g_mu);
         g_map = m;
     }
+    g_skip_controller_selection = m.skip_controller_selection;
+    g_invert_camera_y = m.invert_camera_y;
     g_gen++;
     if (save && !save_file(default_path(), m))
         fprintf(stderr, "[input] could not save controls to %s\n", default_path().c_str());
 }
 
 uint32_t generation() { return g_gen.load(); }
+bool skip_controller_selection() { return g_skip_controller_selection.load(std::memory_order_relaxed); }
+bool invert_camera_y() { return g_invert_camera_y.load(std::memory_order_relaxed); }
 
 }  // namespace input_map

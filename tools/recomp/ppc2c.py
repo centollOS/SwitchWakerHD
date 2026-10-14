@@ -6,8 +6,8 @@ Ctx callbacks: `branch(target)` returns C for a jump, `call(target)` for a call.
 
 Semantics follow Cemu's interpreter (src/Cafe/HW/Espresso/Interpreter).
 """
+import os
 import sys
-
 
 
 def sext16(v):
@@ -130,6 +130,14 @@ def fp_transfer(state, w, call_keeps_saved):
             return put(d, k(*src[0]), k(*src[1]))
         return put(d, False, False)
     return state
+
+
+def pass_on(var):
+    """The switch of a code-quality pass (recomp.py's usage text): on unless var=0. With
+    WWHD_RECOMP_PLAIN=1 every pass is off unless its own variable is 1."""
+    return os.environ.get(var, "0" if os.environ.get("WWHD_RECOMP_PLAIN") == "1" else "1") != "0"
+
+
 
 
 def ra0(a):

@@ -1,6 +1,8 @@
 #pragma once
+#include "device_choice.h"
 struct SDL_Window;
 namespace gfxvk {
+void load_device_setting();
 float res_scale();
 float requested_res_scale();
 void set_res_scale(float scale);

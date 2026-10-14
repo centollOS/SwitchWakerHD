@@ -6,4 +6,5 @@
 namespace build {
 const char* version();  // "v0.2.5" (a release, or the tagged commit), "v0.2.5+3" (3 commits later), "dev"
 const char* commit();   // short commit hash, "-dirty" with local changes, "unknown" without git
+const char* variant();  // "decomp" in the decomp build (docs/decomp-build.md), "" in the normal (recompiled) build
 }  // namespace build

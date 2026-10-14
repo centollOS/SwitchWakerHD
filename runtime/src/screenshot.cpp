@@ -182,8 +182,9 @@ void request() {
 }
 
 bool key_down(int code) {
-    if (code < 0 || code > 255) return false;
-    for (int k : input_map::current().keys[input_map::kScreenshot])
+    if (code < 0 || code >= input_map::kInputCount) return false;
+    const auto mapping = input_map::current();
+    for (int k : mapping.keys[input_map::kScreenshot])
         if (k == code) {
             request();
             return true;
