@@ -49,20 +49,20 @@ drives and network shares.
 
 | # | Setup | Expected |
 |---|---|---|
-| 20b | In the MSYS2 shell `pacman -R cmake` (#28's `cmake: command not found`) | Installs MSYS2's cmake again; builds |
-| 21 | Block devkitPro: add `127.0.0.1 pkg.devkitpro.org` to `C:\Windows\System32\drivers\etc\hosts`, tools already installed | Warning; builds |
-| 22 | Same block, and one devkitPro file missing (rename `C:\devkitPro\portlibs\switch\lib\liblz4.a`) | Stops in the devkitPro step with the network reason (undo both afterwards) |
-| 23 | PC clock set a year ahead | Stops with the date/time message (or pacman's reason is the clock) |
-| 24 | Break MSYS2's cmake (delete one of the DLLs `ldd /usr/bin/cmake.exe` lists, in the MSYS2 shell) | The devkitPro step stops with "run pacman -Syu"; `ldd` output in the log |
-| 25 | Network unplugged on a re-run | Uses the release already downloaded ("using the one already downloaded") |
+| 21 | In the MSYS2 shell `pacman -R cmake` (#28's `cmake: command not found`) | Installs MSYS2's cmake again; builds |
+| 22 | Block devkitPro: add `127.0.0.1 pkg.devkitpro.org` to `C:\Windows\System32\drivers\etc\hosts`, tools already installed | Warning; builds |
+| 23 | Same block, and one devkitPro file missing (rename `C:\devkitPro\portlibs\switch\lib\liblz4.a`) | Stops in the devkitPro step with the network reason (undo both afterwards) |
+| 24 | PC clock set a year ahead | Stops with the date/time message (or pacman's reason is the clock) |
+| 25 | Break MSYS2's cmake (delete one of the DLLs `ldd /usr/bin/cmake.exe` lists, in the MSYS2 shell) | The devkitPro step stops with "run pacman -Syu"; `ldd` output in the log |
+| 26 | Network unplugged on a re-run | Uses the release already downloaded ("using the one already downloaded") |
 
 ## E. Interruptions and the SD card
 
 | # | Setup | Expected |
 |---|---|---|
-| 26 | Cancel during "Compiling for the Switch… 40%", then Retry | Builds (a link error from a cut-off file says so; the next Retry builds) |
-| 27 | SD card with too little free space | "does not fit" |
-| 28 | SD card without an `atmosphere/` folder | Warning |
+| 27 | Cancel during "Compiling for the Switch… 40%", then Retry | Builds (a link error from a cut-off file says so; the next Retry builds) |
+| 28 | SD card with too little free space | "does not fit" |
+| 29 | SD card without an `atmosphere/` folder | Warning |
 
 ## Results
 
