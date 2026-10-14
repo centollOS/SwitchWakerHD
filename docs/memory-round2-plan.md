@@ -56,3 +56,10 @@ What still grows after the 4th chunk: malloc +33 MiB in ~14 min with +2,780 vari
 5,152 kept without it), no crash, the 14 screenshots fine. But malloc still grows +24 MiB after the 4th chunk
 (+33 MiB without it): the variants were ~9 MiB of it, not ~12 KB each as estimated from the slope. The rest grows
 with something else (programs 32k, surface structs 1.4k, the records +2.4 MiB account for some): more counters next.
+
+**The rest of the growth: a deko3d leak (2026-10-15).** The malloc census (WWHD_HEAP_CENSUS, `heap mark` at warp 8,
+`heap diff` at the end) put +21.65 MiB of the +25.5 MiB on deko3d's `CmdBuf::appendCtrlCmd`: 22,171 control
+chunks of 1 KiB that `CmdBuf::clear` dropped (it kept only the newest used chunk). Vendored deko3d patch 2
+(PATCHES.md) links the whole used list back; the same tour with it: **+3.5 MiB** since the mark, no
+appendCtrlCmd growth. What is left: surface structs and their layouts (+1.4 MiB for ~770 new textures), fetch
+shader and program maps (+0.8 MiB), the log buffer (1.4 MiB, one block, not growing).
