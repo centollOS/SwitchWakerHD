@@ -32,7 +32,7 @@ drives and network shares.
 |---|---|---|
 | 8 | Disc image without its `.key` | Game page and Install name the exact `…(En,Fr,Es).key` path |
 | 9 | Key saved as `GAME.key` | "Rename GAME.key to …" |
-| 10 | Key saved from Notepad as `….key.txt` (extensions hidden) | The ".txt" message |
+| 10 | Key saved from Notepad as `….key.txt` (extensions hidden) | The ".txt" message, with how to show extensions |
 | 11 | No `common.key`, or one with spaces in the hex | Exact message about `common.key` |
 | 12 | Extracted game folder at a drive root (`E:\` with `code/`, `content/`, `meta/`) | Builds |
 
@@ -46,7 +46,7 @@ drives and network shares.
 | 16 | Game image on an OneDrive Desktop, "online only" | Warning; builds |
 | 17 | Less than 10 GB free on `C:` | Stops before any download |
 | 18 | Only a 32-bit Python installed | "Not usable" in the log, Python 3.12 installed, builds |
-| 19 | No winget (older Windows 10) and no Python | The "install Python from python.org" message |
+| 19 | No winget (older Windows 10, or its alias off) and no Python | "this Windows has no winget", install Python from python.org |
 | 20 | Defender "Controlled folder access" on, working folder not allowed | The access-denied / antivirus hint |
 
 ## D. devkitPro and network problems (#28)
@@ -57,7 +57,7 @@ drives and network shares.
 | 22 | Block devkitPro: add `127.0.0.1 pkg.devkitpro.org` to `C:\Windows\System32\drivers\etc\hosts`, tools already installed | Warning; an installed cmake/make is left as it is (no `upgraded cmake` in the log); builds |
 | 23 | Same block, and one devkitPro file missing (rename `C:\devkitPro\portlibs\switch\lib\liblz4.a`) | Stops in the devkitPro step with the network reason (undo both afterwards) |
 | 24 | PC clock set a year ahead | Stops with the date/time message (or pacman's reason is the clock) |
-| 25 | Break MSYS2's cmake (delete one of the DLLs `ldd /usr/bin/cmake.exe` lists, in the MSYS2 shell) | "Updating MSYS2…" (pacman -Syu in the log, no `dkp-libs` in it); a deleted file is not brought back by an update, so it then stops with "updating MSYS2 did not fix it" and `ldd` in the log. Partial update (an older `jsoncpp` next to a newer `cmake`, as in #40): repaired, builds |
+| 25 | Break MSYS2's cmake: delete one of the DLLs `ldd /usr/bin/cmake.exe` lists whose package is already up to date (`pacman -Qo` names the package, `pacman -Qu` lists the outdated ones; an update reinstalls an outdated one) | "Updating MSYS2…" (pacman -Syu in the log, no `dkp-libs` in it); a deleted file is not brought back by an update, so it then stops with "updating MSYS2 did not fix it" and `ldd` in the log (if the update itself fails, e.g. HTTP 429, it says so instead, with the reason). Partial update (an older `jsoncpp` next to a newer `cmake`, as in #40): repaired, builds |
 | 26 | Network unplugged on a re-run | Uses the release already downloaded ("using the one already downloaded") |
 
 ## E. Interruptions and the SD card
