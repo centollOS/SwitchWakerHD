@@ -132,6 +132,18 @@ macro(switch_port_executable)
     # threads created without attributes get a large stack, newlib's C11 thrd_create results are fixed
     # (core.cpp), and abort() logs its caller first (main.cpp)
     target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create -Wl,--wrap=abort)
+    # (this fork, memory round 2) diagnostics only, never a release: malloc counted by call site, the debug
+    # server's `heap` command (platform/heap_census_switch.cpp)
+    option(WWHD_HEAP_CENSUS "Switch: count malloc by call site (debug server: heap mark / diff / top)" OFF)
+    if(WWHD_HEAP_CENSUS)
+      target_sources(wwhd PRIVATE runtime/src/platform/heap_census_switch.cpp)
+      set_source_files_properties(runtime/src/platform/heap_census_switch.cpp PROPERTIES COMPILE_OPTIONS
+                                  "-fno-omit-frame-pointer")
+      target_compile_definitions(wwhd PRIVATE WWHD_HEAP_CENSUS=1)
+      foreach(f malloc free calloc realloc memalign aligned_alloc posix_memalign)
+        target_link_options(wwhd PRIVATE -Wl,--wrap=${f})
+      endforeach()
+    endif()
     # the default build is wwhd.nro (what the HOME-menu forwarder starts); the debug-library build says so in
     # hbmenu and is named wwhd_dk_debug.nro, so it can sit in its own folder next to it
     if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")

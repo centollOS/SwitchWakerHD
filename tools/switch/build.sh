@@ -62,6 +62,9 @@ out=wwhd.nro
 # the guest memory base in x28 (CMakeLists.txt); WWHD_SWITCH_BASE_REG=OFF for a build without it.
 # Passed every time so that build dirs configured before it became the default switch too.
 options="-DWWHD_RENDERER=DEKO3D -DWWHD_DEKO3D_DEBUG_LIB=$debuglib -DWWHD_SWITCH_BASE_REG=${WWHD_SWITCH_BASE_REG:-ON}"
+# (this fork) WWHD_HEAP_CENSUS=ON: a diagnostics build that counts malloc by call site (the debug server's heap
+# command); passed every time, so the next build without it is a normal one again
+options="$options -DWWHD_HEAP_CENSUS=${WWHD_HEAP_CENSUS:-OFF}"
 if [[ $native == 1 ]]; then
     export DEVKITA64=${DEVKITA64:-$DEVKITPRO/devkitA64}
     export PATH="$DEVKITPRO/tools/bin:$DEVKITA64/bin:$PATH"
