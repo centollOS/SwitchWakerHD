@@ -39,7 +39,7 @@ drives and network shares.
 | 13 | User names "José", one in Cyrillic, one in Chinese, one of 20+ letters | Working folder `C:\SwitchWakerHD-Build`; builds |
 | 14 | Game on a second drive (`D:\Games\…`) | Builds |
 | 15 | devkitPro installed in `D:\devkitPro` (not `C:`) | Found; builds |
-| 16 | Game image on an OneDrive Desktop, "online only" | Warning; an installed cmake/make is left as it is (no `upgraded cmake` in the log); builds |
+| 16 | Game image on an OneDrive Desktop, "online only" | Warning; builds |
 | 17 | Less than 10 GB free on `C:` | Stops before any download |
 | 18 | Only a 32-bit Python installed | "Not usable" in the log, Python 3.12 installed, builds |
 | 19 | No winget (older Windows 10) and no Python | The "install Python from python.org" message |
@@ -50,7 +50,7 @@ drives and network shares.
 | # | Setup | Expected |
 |---|---|---|
 | 21 | In the MSYS2 shell `pacman -R cmake` (#28's `cmake: command not found`) | Installs MSYS2's cmake again (if it then doesn't start: "updating MSYS2…", then "MSYS2 updated: the tools start"); builds |
-| 22 | Block devkitPro: add `127.0.0.1 pkg.devkitpro.org` to `C:\Windows\System32\drivers\etc\hosts`, tools already installed | Warning; builds |
+| 22 | Block devkitPro: add `127.0.0.1 pkg.devkitpro.org` to `C:\Windows\System32\drivers\etc\hosts`, tools already installed | Warning; an installed cmake/make is left as it is (no `upgraded cmake` in the log); builds |
 | 23 | Same block, and one devkitPro file missing (rename `C:\devkitPro\portlibs\switch\lib\liblz4.a`) | Stops in the devkitPro step with the network reason (undo both afterwards) |
 | 24 | PC clock set a year ahead | Stops with the date/time message (or pacman's reason is the clock) |
 | 25 | Break MSYS2's cmake (delete one of the DLLs `ldd /usr/bin/cmake.exe` lists, in the MSYS2 shell) | "Updating MSYS2…" (pacman -Syu in the log, no `dkp-libs` in it); a deleted file is not brought back by an update, so it then stops with "updating MSYS2 did not fix it" and `ldd` in the log. Partial update (an older `jsoncpp` next to a newer `cmake`, as in #40): repaired, builds |
