@@ -87,7 +87,7 @@ const char* const kTransPath = cache_path("shadercache_dk_translations.bin");
 constexpr char kTransMagic[4] = {'W', 'D', 'T', '1'};
 // bump when the shader keys (gather_state, texture_state_hash, translate's keyFor), the decompiler's output or the
 // record layout change: a file of another version is started again
-constexpr uint32_t kTransVersion = 1;
+constexpr uint32_t kTransVersion = 2;  // (this fork, #37) 2: exact keys (variant_core), the exports mask in each record
 const char* const kOfflinePath = cache_path("shadercache_dksh.bin");
 const char* const kLocalPath = cache_path("shadercache_dksh_local.bin");
 constexpr uint8_t kGlCacheMagic[4] = {'W', 'G', 'S', '1'};
@@ -103,6 +103,9 @@ std::unordered_map<uint64_t, LatteFetchShader*> fetchShaders;
 struct ProgramHash { uint64_t hash = 0, frame = ~uint64_t{0}, sample = 0; };
 std::unordered_map<uint64_t, ProgramHash> programHashes;
 std::unordered_map<uint64_t, uint32_t> textureUnits;  // program hash -> texture units it samples (bit t: unit t)
+// (this fork, #37) vertex program hash -> the parameters it exports (bit i: SPI_VS_OUT_ID byte i), known after its
+// first translation, as the texture units
+std::unordered_map<uint64_t, uint32_t> exportMasks;
 // shadercache_gl.bin: the sources (record 1) and translations (record 3) it already has
 std::unordered_set<uint64_t> glSources, glTranslations;
 std::vector<ShaderCode*> wantedCodes;  // codes with wantedFrame > 0
@@ -250,6 +253,64 @@ uint64_t texture_state_hash(const uint32_t* regs, bool vertex, uint32_t mask) {
     return h;
 }
 
+// (this fork, #37) the stage's part of a variant's key, exact about what the GLSL translation reads (as gfx/vulkan's
+// gather_linkage). gather_state, which the draw path's combinations still use, hashes all 32 SQ_VTX_SEMANTIC and
+// 10 SPI_VS_OUT_ID words and the 8 CB_COLOR*_INFO words; GX2SetVertexShader writes only a shader's own semantics and
+// out ids, so the rest held what earlier shaders left there and one shader got a new key for every draw history
+// (21,922 variants of 10,878 GLSL sources in a 17-minute warp tour, ~9 KB each: a 4-hour session ran out of memory).
+// The decompiler reads, for a vertex shader, the first slot holding each fetch attribute's semantic (attribute
+// import, the analyzer; the slots no attribute fills are in the key through `unfetched`) and the out id of each
+// parameter the program exports (exports: ~0u while those are not known yet: all 10 words); the render-target words
+// only in the analyzer's Metal check.
+uint64_t variant_core(const uint32_t* regs, bool vertex, const LatteFetchShader* fetch, uint32_t exports) {
+    std::array<uint32_t, kStateWords + 48> state;
+    size_t count = gather_state(regs, vertex, regs[REGADDR::VGT_PRIMITIVE_TYPE] & 0x3F, true, false, state.data(), 0);
+    auto put = [&](uint32_t first, uint32_t length) {
+        memcpy(state.data() + count, regs + first, length * sizeof(uint32_t));
+        count += length;
+    };
+    if (vertex) {
+        // each fetch attribute's slot, a byte each (0xFF: none), four to a word, at most 32 words
+        uint32_t packed = 0, bytes = 0, attributes = 0;
+        if (fetch)
+            for (const auto& group : fetch->bufferGroups)
+                for (int i = 0; i < group.attribCount && bytes < 4 * 32; ++i) {
+                    uint32_t slot = 0xFF;
+                    for (uint32_t f = 0; f < 32; ++f)
+                        if (regs[mmSQ_VTX_SEMANTIC_0 + f] == group.attrib[i].semanticId) { slot = f; break; }
+                    packed |= slot << (8 * (bytes++ & 3));
+                    if ((bytes & 3) == 0) { state[count++] = packed; packed = 0; }
+                    attributes++;
+                }
+        if (bytes & 3) state[count++] = packed;
+        state[count++] = attributes;
+        if (exports == ~0u) {
+            put(mmSPI_VS_OUT_ID_0, 10);
+        } else {  // the exported parameters' out ids, a byte each
+            packed = bytes = 0;
+            for (uint32_t i = 0; i < 32; i++) {
+                if (!(exports >> i & 1)) continue;
+                packed |= ((regs[mmSPI_VS_OUT_ID_0 + i / 4] >> (8 * (i % 4))) & 0xFF) << (8 * (bytes++ & 3));
+                if ((bytes & 3) == 0) { state[count++] = packed; packed = 0; }
+            }
+            if (bytes & 3) state[count++] = packed;
+            state[count++] = exports;
+        }
+        put(mmSPI_VS_OUT_CONFIG, 1);
+        put(mmPA_CL_VS_OUT_CNTL, 1);
+    } else {
+        put(mmCB_SHADER_MASK, 1);
+        put(mmCB_SHADER_CONTROL, 1);
+        put(mmDB_SHADER_CONTROL, 1);
+        put(mmSPI_INPUT_Z, 1);
+        put(REGADDR::SX_ALPHA_TEST_CONTROL, 1);
+        state[count++] = regs[REGADDR::DB_DEPTH_CONTROL] & 0x83;
+        put(REGADDR::CB_COLOR_CONTROL, 1);
+        put(REGADDR::CB_TARGET_MASK, 1);
+    }
+    return hash_words4(state.data(), count, vertex ? 0x1111 : 0x2222);
+}
+
 const char* stage_name(bool vertex) { return vertex ? "vertex shader" : "pixel shader"; }
 
 // ---- the writer thread: shadercache_gl.bin and shadercache_dksh_local.bin get their new records from it,
@@ -392,6 +453,7 @@ void cache_dk_translation(const Shader* sh, uint64_t base, uint32_t units) {
     w.put(sh->key);
     w.put(base);
     w.put(units);
+    w.put<uint32_t>(sh->vertex ? d->outputParameterMask : 0);  // (version 2) the exports, for the key (variant_core)
     w.put(sh->glslHash);
     w.put<uint8_t>(sh->fragmentWhy);
     w.put<uint32_t>(d->pixelColorOutputMask);
@@ -1002,6 +1064,7 @@ Shader* shader_from_record(uint64_t key, bool vertex, std::pair<uint32_t, uint32
     const uint64_t recKey = r.get<uint64_t>();
     r.get<uint64_t>();  // base
     r.get<uint32_t>();  // units
+    r.get<uint32_t>();  // exports
     const uint64_t glslHash = r.get<uint64_t>();
     if (!r.ok || recVertex != vertex || recKey != key) return nullptr;
     const auto cit = codes.find(glslHash);
@@ -1079,12 +1142,16 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     // translation), as gfx/gl. Declared inputs no fetch attribute fills turn the decompiler's strict multiplication
     // on: they are in the key (the keys and translation records of the other shaders stay as they were).
     const uint32_t unfetched = vertex ? LatteDecompiler_UnfetchedVertexInputs(regs, fetch) : 0;
-    auto keyFor = [&](uint32_t units) {
-        return (coreHash ^ (base * 0xFF51AFD7ED558CCDull + 0x2545F4914F6CDD1Dull)) ^ (vertex ? fsKey * 31 : 0) ^
-               texture_state_hash(regs, vertex, units) * 0xC2B2AE3D27D4EB4Full ^ uint64_t(unfetched) * 0x9E3779B97F4A7C15ull;
+    (void)coreHash;  // (this fork, #37) the draw path's broad hash: variant_core keys the variant
+    auto keyFor = [&](uint32_t units, uint32_t exports) {
+        return (variant_core(regs, vertex, fetch, exports) ^ (base * 0xFF51AFD7ED558CCDull + 0x2545F4914F6CDD1Dull)) ^
+               (vertex ? fsKey * 31 : 0) ^ texture_state_hash(regs, vertex, units) * 0xC2B2AE3D27D4EB4Full ^
+               uint64_t(unfetched) * 0x9E3779B97F4A7C15ull;
     };
     auto known = textureUnits.find(base);
-    uint64_t key = keyFor(known != textureUnits.end() ? known->second : 0);
+    auto knownExports = vertex ? exportMasks.find(base) : exportMasks.end();
+    uint64_t key = keyFor(known != textureUnits.end() ? known->second : 0,
+                          !vertex ? 0u : knownExports != exportMasks.end() ? knownExports->second : ~0u);
     if (auto it = shaders.find(key); it != shaders.end()) {
         Shader* sh = it->second.get();
         if (sh->pending()) {
@@ -1135,7 +1202,9 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     // the units this program samples depend only on its code: from now on its key includes those alone
     const uint32_t units = uint32_t(output.textureUnitMask.to_ulong());
     textureUnits[base] = units;
-    if (uint64_t unitsKey = keyFor(units); unitsKey != key) {
+    const uint32_t exports = vertex ? output.shader->outputParameterMask : 0;  // (this fork, #37) likewise
+    if (vertex) exportMasks[base] = exports;
+    if (uint64_t unitsKey = keyFor(units, exports); unitsKey != key) {
         auto node = shaders.extract(key);
         node.key() = unitsKey;
         auto inserted = shaders.insert(std::move(node));
@@ -1346,16 +1415,18 @@ void shaders_init(void (*progress)(size_t done, size_t total)) {
         while (good && at + 4 <= t.size()) {
             uint32_t size;
             memcpy(&size, t.data() + at, 4);
-            if (size < 1 + 8 + 8 + 4 + 8 || at + 4 + size > t.size()) break;
+            if (size < 1 + 8 + 8 + 4 + 4 + 8 || at + 4 + size > t.size()) break;
             const uint8_t* payload = t.data() + at + 4;
             uint64_t key, base;
-            uint32_t units;
+            uint32_t units, exports;
             memcpy(&key, payload + 1, 8);
             memcpy(&base, payload + 9, 8);
             memcpy(&units, payload + 17, 4);
+            memcpy(&exports, payload + 21, 4);
             storedTrans[key] = {uint32_t(at + 4), size};
             transWritten.insert(key);
             textureUnits[base] = units;
+            if (payload[0]) exportMasks[base] = exports;
             at += 4 + size;
         }
         if (!good || at < t.size()) {  // another version, a new file or a cut record: written again (valid part kept)
