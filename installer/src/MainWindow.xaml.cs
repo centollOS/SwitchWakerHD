@@ -457,10 +457,16 @@ public partial class MainWindow : Window
             try
             {
                 Directory.CreateDirectory(InstallEngine.WorkDir);
-                logFile = new StreamWriter(LogPath, true, Encoding.UTF8) { AutoFlush = true };
+                // Shared: a second installer window (or Notepad on an older version's lock) appends to the same file.
+                var stream = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                logFile = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
                 logFile.WriteLine($"==== {DateTime.Now:yyyy-MM-dd HH:mm:ss}  SwitchWakerHD installer (GUI) ====");
             }
-            catch { logFile = null; }
+            catch (Exception e)
+            {
+                logFile = null;
+                EnqueueLog(Str.Get("log_open_fail", LogPath, e.Message), LogKind.Warn);
+            }
         }
     }
 

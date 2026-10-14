@@ -245,12 +245,12 @@ sealed class InstallEngine
         {
             Say(Str.Get("py_installing"));
             // PrependPath: winget's own silent switches leave python.exe off PATH.
-            // Not checked: without winget (older Windows 10) or when it fails, the search below says so.
-            Exec("winget", "install --id Python.Python.3.12 --source winget --accept-package-agreements " +
-                           "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1\"",
-                 check: false);
+            // -1: winget did not start (older Windows 10, or its App Execution Alias turned off).
+            var rc = Exec("winget", "install --id Python.Python.3.12 --source winget --accept-package-agreements " +
+                                    "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1\"",
+                          check: false);
             RefreshPath();
-            if (!FindPython()) throw new InstallException(Str.Get("py_fail"));
+            if (!FindPython()) throw new InstallException(Str.Get(rc == -1 ? "py_no_winget" : "py_fail"));
         }
         Say(Str.Get("py_pkgs"));
         var pkgs = "zstandard pycryptodome" + (ForwarderKeys != null ? " pillow" : "");
@@ -336,8 +336,13 @@ sealed class InstallEngine
         SetDevkitEnv();
         ClearStalePacmanLock();
         // cmake and make (MSYS2's): build.sh runs them, and no devkitPro package brings them (issue #28).
-        // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it
-        var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make" + (ForwarderKeys != null ? " gcc" : "");
+        // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it.
+        // Only when missing: --needed still upgrades an installed one to the package list's version, without its
+        // libraries (cmake 4.0.2 -> 4.4.4 without msys-jsoncpp-27.dll, so cmake no longer started). A partial
+        // update of MSYS2 (RepairMsys mends one when the tools then don't start).
+        var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
+        foreach (var tool in ForwarderKeys != null ? new[] { "cmake", "make", "gcc" } : new[] { "cmake", "make" })
+            if (!File.Exists(Path.Combine(DevkitRoot, @"msys2\usr\bin", tool + ".exe"))) packages += " " + tool;
         var output = new List<string>();
         string? reason = null;
         for (int attempt = 1; ; attempt++)
@@ -371,6 +376,7 @@ sealed class InstallEngine
         return Has(@"returned error: 403")                                     ? "dkp_why_403" :
                Has(@"certificate has expired|certificate is not yet valid|SSL certificate") ? "dkp_why_ssl" :
                Has(@"unable to lock database")                                 ? "dkp_why_lock" :
+               Has(@"returned error: 429")                                     ? "dkp_why_429" :
                Has(@"Could not resolve host|timed out|Failed to connect|Connection reset|returned error: 5\d\d|Recv failure") ? "dkp_why_net" :
                Has(@"signature .* (unknown trust|is invalid)|invalid or corrupted package|keyring") ? "dkp_why_sig" :
                "dkp_why_other";
@@ -403,7 +409,15 @@ sealed class InstallEngine
         if (Exec(bash, "-l -c \"" + probe + "\"", check: false, env: env) != 0)
         {
             Exec(bash, "-l -c \"ldd /usr/bin/cmake.exe /usr/bin/make.exe\"", check: false, env: env);   // for the log: what is missing
-            throw new InstallException(Str.Get("dkp_broken"));
+            var updateFailure = RepairMsys(bash, env);
+            if (Exec(bash, "-l -c \"" + probe + "\"", check: false, env: env) != 0)
+            {
+                Exec(bash, "-l -c \"ldd /usr/bin/cmake.exe /usr/bin/make.exe\"", check: false, env: env);
+                throw new InstallException(updateFailure != null
+                    ? Str.Get("dkp_update_fail") + "\n\n" + Str.Get(updateFailure)
+                    : Str.Get("dkp_broken"));
+            }
+            Ok(Str.Get("dkp_repaired"));
         }
 
         if (ForwarderKeys != null && !File.Exists(Path.Combine(DevkitRoot, @"msys2\usr\bin\gcc.exe")))
@@ -412,6 +426,54 @@ sealed class InstallEngine
             ForwarderKeys = null;
         }
         Ok(Str.Get("dkp_tools_ok"));
+    }
+
+    // The tools are installed but don't start: a partial update of MSYS2 (a program newer than the libraries it
+    // needs, e.g. cmake from a package list newer than the rest: #28, case 22 of the Windows tests). Mended here
+    // rather than asking the player: a full update of MSYS2's own packages, from MSYS2's mirrors only. devkitPro's
+    // repositories (often a 403, which stops a whole -Syu) are left out of a copy of pacman.conf: none of the
+    // broken programs come from them. Up to three passes: the first one may update only MSYS2's core and end
+    // the shell it runs in; the last one finds nothing left to do. Returns why the update failed (a Str key),
+    // or null when a pass ended well.
+    string? RepairMsys(string bash, IDictionary<string, string> env)
+    {
+        Say(Str.Get("dkp_repairing"));
+        var conf = Path.Combine(DevkitRoot, @"msys2\etc\pacman.conf");
+        var copy = Path.Combine(DevkitRoot, @"msys2\tmp\wwhd-msys-only.conf");   // /tmp/wwhd-msys-only.conf in MSYS2
+        var kept = new List<string>();
+        var dkp = false;
+        foreach (var line in File.ReadAllLines(conf))
+        {
+            var t = line.Trim();
+            if (t.StartsWith("[") && t.EndsWith("]")) dkp = t.StartsWith("[dkp", StringComparison.OrdinalIgnoreCase);
+            if (!dkp) kept.Add(line);
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(copy)!);
+        File.WriteAllLines(copy, kept);
+        string? failure = null;
+        var output = new List<string>();
+        for (int pass = 1; pass <= 3; pass++)
+        {
+            ct.ThrowIfCancellationRequested();
+            ClearStalePacmanLock();
+            output.Clear();
+            var rc = Exec(bash, "-l -c \"pacman --config /tmp/wwhd-msys-only.conf -Syu --noconfirm\"", check: false, env: env,
+                          onLine: output.Add);
+            if (rc == 0)
+            {
+                failure = null;
+                if (pass >= 2) break;
+                continue;
+            }
+            failure = PacmanFailure(output);
+            if (pass == 3) break;
+            // the mirrors limit how often one address may download (HTTP 429): give them a minute
+            var wait = failure == "dkp_why_429" ? 60 : failure == "dkp_why_net" ? 10 : 0;
+            if (wait > 0) Warn(Str.Get(wait == 60 ? "dkp_retry_429" : "dkp_retry"));
+            for (int i = 0; i < wait; i++) { ct.ThrowIfCancellationRequested(); Thread.Sleep(1000); }
+        }
+        try { File.Delete(copy); } catch (IOException) { }
+        return failure;
     }
 
     static string FindPacman()

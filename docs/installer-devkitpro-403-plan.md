@@ -119,6 +119,15 @@ From the players' `installer.log`s (#28, #30) and a review of every step. Only `
   signatures) that goes with the "tools missing" stop; MSYS2's bash then runs `cmake`, `make` and
   `aarch64-none-elf-gcc` the way make_sd does, so a tool that cannot start stops the step with "run
   `pacman -Syu`" (and `ldd` in the log). `bash.exe` is checked too.
+- **MSYS2's `cmake`, `make` (and `gcc`) only when missing.** Asked for with `--needed`, an installed one was still
+  upgraded to the package list's version without its libraries: in the Windows tests (case 22) cmake 4.0.2 became
+  4.4.4 next to `jsoncpp` 1.9.6-3 (`msys-jsoncpp-27.dll => not found`), and every later run stopped with "run
+  `pacman -Syu`". A partial update the installer itself caused, with or without devkitPro's 403.
+- **A partial update is mended, not left to the player.** When the tools are there but don't start, the installer
+  runs `pacman -Syu` itself (up to three passes: a core update ends the first one) with a copy of `pacman.conf`
+  without devkitPro's `[dkp-*]` repositories, so their 403 can't stop it (none of the broken programs come from
+  them), then checks the tools again; only if they still don't start does it stop, with pacman's output and `ldd`
+  in the log. This also covers a missing `cmake` installed next to an older `jsoncpp` (case 21).
 - **Paths:** every path goes through `Quote()` (a trailing backslash, as in a game folder at a drive root, no
   longer eats the closing quote); a profile path over 45 characters also moves the working folder to
   `C:\SwitchWakerHD-Build` (MAX_PATH for devkitPro's gcc).
@@ -137,8 +146,7 @@ key checks with those folder names, of the failure and pacman explanations on th
 
 Still open (decisions): the `.exe` runs elevated (`requireAdministrator`), so drag and drop from Explorer is
 blocked by Windows (UIPI) and mapped network drives are not visible to it (kept: neither is supported);
-devkitPro is looked for in `C:\devkitPro`, then `X:\devkitPro` on the other fixed drives (installer and make_sd); the installer never runs `pacman -Syu` itself (a partial-update breakage is reported,
-not repaired).
+devkitPro is looked for in `C:\devkitPro`, then `X:\devkitPro` on the other fixed drives (installer and make_sd); a partial update is repaired with `pacman -Syu` from MSYS2's mirrors only (see above).
 
 ### Manual Windows test checklist (built `.exe`)
 
