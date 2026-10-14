@@ -9,6 +9,8 @@
 # build/gen may be a symbolic link (git worktrees share the main checkout's): its target is mounted into the
 # container at the same path (not for the native build).
 set -euo pipefail
+# a command that fails without printing anything (a tool that cannot start: issue #28) still says which one
+trap 'rc=$?; echo "build.sh: line $LINENO: \"$BASH_COMMAND\" failed (exit code $rc)" >&2' ERR
 cd "$(dirname "$0")/../.."
 
 if ! ls build/gen/code_*.c >/dev/null 2>&1; then
@@ -26,6 +28,11 @@ if [[ -z "$engine" || $native == 1 ]]; then
         exit 1
     fi
     native=1
+fi
+# devkitPro's packages do not bring the host cmake/make (issue #28): say so instead of "command not found"
+if [[ $native == 1 ]] && ! command -v cmake >/dev/null; then
+    echo "cmake is missing: install it with: pacman -Syu, then pacman -S --needed cmake make (devkitPro's MSYS2 on Windows)" >&2
+    exit 1
 fi
 image=docker.io/devkitpro/devkita64:latest
 # MSYS2 (devkitPro's bash on Windows) rewrites /src-like arguments of native programs such as docker.exe into

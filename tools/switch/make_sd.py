@@ -50,8 +50,10 @@ def step(n, text):
 
 def run(cmd, env=None, ok=(0,)):
     print("  $ " + " ".join(cmd), flush=True)
-    if subprocess.call(cmd, cwd=ROOT, env=env) not in ok:
-        fail("this step failed (see the messages above)")
+    rc = subprocess.call(cmd, cwd=ROOT, env=env)
+    if rc not in ok:
+        # (a Windows program that cannot start, e.g. a missing DLL, exits with 0xC0000135 and prints nothing)
+        fail("this step failed (exit code %s; see the messages above)" % (hex(rc & 0xFFFFFFFF) if rc < 0 or rc > 255 else rc))
 
 
 # the shader cache's code budget: the console loads it whole into its 64 MiB of shader code memory (gfx/deko/dk.h),
@@ -87,8 +89,20 @@ def shader_cache(src, game):
 
 # Native build (no Docker/Podman): used when neither is installed, and on Windows whenever devkitPro is there (issue
 # #22: Docker from devkitPro's MSYS2 bash got its container paths rewritten). On Windows it needs a devkitPro install
-# (C:/devkitPro, https://devkitpro.org) with: pacman -S switch-dev deko3d uam switch-lz4 switch-zlib
-DKP_WIN = "C:/devkitPro"
+# (C:/devkitPro, https://devkitpro.org) with: pacman -S switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make
+def find_devkitpro_win():
+    """C:/devkitPro (devkitPro's default), or X:/devkitPro on another fixed drive when it was installed there"""
+    if os.name != "nt":
+        return "C:/devkitPro"
+    import string
+    for letter in "C" + string.ascii_uppercase.replace("C", ""):
+        root = letter + ":/devkitPro"
+        if os.path.isfile(root + "/msys2/usr/bin/bash.exe"):
+            return root
+    return "C:/devkitPro"
+
+
+DKP_WIN = find_devkitpro_win()
 
 
 def have_container_engine():

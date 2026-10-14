@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
@@ -23,9 +24,49 @@ sealed class InstallException : Exception
 
 sealed class InstallEngine
 {
-    public static readonly string WorkDir =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SwitchWakerHD-Build");
-    const string DevkitRoot = @"C:\devkitPro";
+    public static readonly string WorkDir = ChooseWorkDir();
+
+    // %USERPROFILE%\SwitchWakerHD-Build, unless the user name has a space or a non-ASCII letter ("JAM Visuals",
+    // issue #30): the build tools do not all cope with those, so then a folder at the root of the system drive
+    // (C:\SwitchWakerHD-Build), which standard users may create. Back to the profile if that cannot be created.
+    // Also there when the profile path is long: the release is unpacked two folders down and the deepest object
+    // file adds ~160 characters, and devkitPro's gcc cannot open paths over 260 (MAX_PATH).
+    const int MaxWorkDirLength = 45;
+    static string ChooseWorkDir()
+    {
+        var inProfile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SwitchWakerHD-Build");
+        if (Regex.IsMatch(inProfile, @"^[A-Za-z0-9_.:\\-]+$") && inProfile.Length <= MaxWorkDirLength)
+            return inProfile;
+        var atRoot = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", "SwitchWakerHD-Build");
+        try
+        {
+            Directory.CreateDirectory(atRoot);
+            return atRoot;
+        }
+        catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
+        {
+            return inProfile;
+        }
+    }
+    // devkitPro's folder: C:\devkitPro (its installer's default, what the wizard asks for), or X:\devkitPro on
+    // another drive when it was installed there. Looked up on each use: it appears during the devkitPro step.
+    static string DevkitRoot => FindDevkitRoot();
+    static string FindDevkitRoot()
+    {
+        const string fallback = @"C:\devkitPro";
+        if (File.Exists(Path.Combine(fallback, @"msys2\usr\bin\bash.exe"))) return fallback;
+        try
+        {
+            foreach (var drive in DriveInfo.GetDrives())
+            {
+                if (drive.DriveType != DriveType.Fixed || !drive.IsReady) continue;
+                var root = Path.Combine(drive.RootDirectory.FullName, "devkitPro");
+                if (File.Exists(Path.Combine(root, @"msys2\usr\bin\bash.exe"))) return root;
+            }
+        }
+        catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
+        return fallback;
+    }
 
     public const int StepPython = 0, StepDevkit = 1, StepRelease = 2, StepBuild = 3;
 
@@ -47,7 +88,7 @@ sealed class InstallEngine
 
     string pythonCmd  = "python";
     string pacman     = "";
-    string releaseVer = "v0.4.3";
+    string releaseVer = "";
     CancellationToken ct;
     ProcessJob? currentJob;   // the running process and all it started; KillCurrent stops them
 
@@ -64,6 +105,7 @@ sealed class InstallEngine
         ct = token;
         Directory.CreateDirectory(WorkDir);
         Info(Str.Get("welcome_dir", WorkDir));
+        Preflight();
         RunStep(StepPython,  Python);
         RunStep(StepDevkit,  DevkitPro);
         RunStep(StepRelease, Release);
@@ -76,8 +118,124 @@ sealed class InstallEngine
         StepChanged?.Invoke(step, StepState.Running);
         Progress?.Invoke(null);
         try { body(); }
+        catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is InvalidDataException ||
+                                  e is HttpRequestException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+        {
+            // A file or network error with no message of ours (a timeout is a cancel nobody asked for): say which
+            // step it was and what probably caused it.
+            StepChanged?.Invoke(step, StepState.Failed);
+            Log?.Invoke(e.ToString(), LogKind.Error);
+            var key = e is HttpRequestException || e is OperationCanceledException ? "err_network" : "err_io";
+            throw new InstallException(Str.Get(key, Str.Get(StepKeys[step]), e.Message));
+        }
         catch { StepChanged?.Invoke(step, StepState.Failed); throw; }
         StepChanged?.Invoke(step, StepState.Done);
+    }
+
+    public static readonly string[] StepKeys = { "step_python", "step_devkit", "step_release", "step_build" };
+
+    // ── Before anything: the game, its keys and the disk ────────────────────
+    // What make_sd would only stop on after the downloads and the toolchain (#28: the disc key was not where it
+    // looks), checked up front.
+    void Preflight()
+    {
+        Info(Str.Get("pre_game", GameArg, GamePath));
+        if (GameArg == "--game-dir" ? !Directory.Exists(GamePath) : !File.Exists(GamePath))
+            throw new InstallException(Str.Get("pre_no_game", GamePath));
+        if (GameArg == "--image" && CheckImageKeys(GamePath) is string keys)
+            throw new InstallException(keys);
+
+        CheckClock();
+
+        // OneDrive "online-only" (Files On-Demand): the whole file is downloaded when make_sd reads it
+        if (GameArg != "--game-dir" && (File.GetAttributes(GamePath) & (FileAttributes.Offline | RecallOnDataAccess)) != 0)
+            Warn(Str.Get("pre_cloud", GamePath));
+
+        // The extracted game twice (build/sd-game and the SD folder), the generated code, the objects: ~9 GB
+        // the first time; a re-run reuses most of it.
+        var rerun = Directory.Exists(WorkDir) && Directory.GetDirectories(WorkDir, "SwitchWakerHD-v*").Length > 0;
+        var needGb = rerun ? 5 : 10;
+        try
+        {
+            var drive = new DriveInfo(Path.GetPathRoot(WorkDir)!);
+            var freeGb = drive.AvailableFreeSpace / 1e9;
+            Info(Str.Get("pre_space", drive.Name, freeGb.ToString("0.0")));
+            if (freeGb < needGb) throw new InstallException(Str.Get("pre_no_space", drive.Name, freeGb.ToString("0.0"), needGb));
+        }
+        catch (ArgumentException) { }   // a drive DriveInfo cannot describe (network share): no check
+    }
+
+    const FileAttributes RecallOnDataAccess = (FileAttributes)0x400000;
+
+    // pacman and pip fail with "certificate has expired" for every server when the PC's clock is far off (a log
+    // in #30): compare it with GitHub's. Being offline is only a warning here: a re-run may need no download.
+    void CheckClock()
+    {
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Head, "https://github.com");
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            using var resp = Http.SendAsync(req, timeout.Token).GetAwaiter().GetResult();
+            var date = resp.Headers.Date;
+            if (date != null && Math.Abs((DateTimeOffset.UtcNow - date.Value).TotalHours) > 24)
+                Warn(Str.Get("pre_clock", DateTime.Now.ToString("g"), date.Value.ToLocalTime().ToString("g")));
+        }
+        catch (HttpRequestException e) when (e.InnerException is WebException we &&
+                                             (we.Status == WebExceptionStatus.TrustFailure || we.Status == WebExceptionStatus.SecureChannelFailure))
+        {
+            throw new InstallException(Str.Get("pre_tls", e.InnerException.Message));
+        }
+        catch (Exception e) when (e is HttpRequestException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+        {
+            Warn(Str.Get("pre_offline", e.InnerException?.Message ?? e.Message));
+        }
+    }
+
+    // The keys make_sd needs for a disc image (tools/wudextract.py): the disc key as <image name>.key next to the
+    // image, and the Wii U common key as common.key next to it (or WIIU_COMMON_KEY); each 16 bytes or 32 hex digits.
+    // Null when both are there, else what is wrong and exactly which file to put where.
+    internal static string? CheckImageKeys(string image)
+    {
+        var dir = Path.GetDirectoryName(Path.GetFullPath(image)) ?? "";
+        var discKey = Path.Combine(dir, Path.GetFileNameWithoutExtension(image) + ".key");
+        var common = Path.Combine(dir, "common.key");
+        if (!File.Exists(discKey))
+        {
+            if (File.Exists(discKey + ".txt")) return Str.Get("key_txt", discKey + ".txt", Path.GetFileName(discKey));
+            // a key under another name ("game.key", "title.key"): say which to rename. (On Windows "*.key" also
+            // matches prod.keys, hence the extension check.)
+            var others = Directory.Exists(dir)
+                ? Directory.GetFiles(dir, "*.key").Where(f => Path.GetExtension(f).Equals(".key", StringComparison.OrdinalIgnoreCase) &&
+                                                              !Path.GetFileName(f).Equals("common.key", StringComparison.OrdinalIgnoreCase)).ToList()
+                : new List<string>();
+            return others.Count == 1 ? Str.Get("key_rename", others[0], Path.GetFileName(discKey))
+                                     : Str.Get("key_missing", discKey);
+        }
+        if (!KeyFileOk(File.ReadAllBytes(discKey))) return Str.Get("key_bad", discKey);
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WIIU_COMMON_KEY"))) return null;
+        if (!File.Exists(common))
+            return File.Exists(common + ".txt") ? Str.Get("key_txt", common + ".txt", "common.key") : Str.Get("common_missing", common);
+        if (!KeyFileOk(File.ReadAllBytes(common))) return Str.Get("key_bad", common);
+        return null;
+    }
+
+    // wudextract.parse_key: 16 raw bytes, or 32 hex digits with whitespace around them
+    internal static bool KeyFileOk(byte[] data)
+    {
+        if (data.Length == 16) return true;
+        var text = Encoding.ASCII.GetString(data.Where(b => b < 0x80).ToArray());
+        if (text.Length != data.Length) return false;
+        text = text.Trim(' ', '\t', '\r', '\n', '\v', '\f');
+        return text.Length == 32 && text.All(Uri.IsHexDigit);
+    }
+
+    // One argument for a Windows command line: in quotes, with trailing backslashes doubled so that a folder such
+    // as D:\ does not escape the closing quote. (Windows paths cannot contain quotes.)
+    internal static string Quote(string arg)
+    {
+        var trailing = arg.Length - arg.TrimEnd('\\').Length;
+        return "\"" + arg + new string('\\', trailing) + "\"";
     }
 
     // ── Python ───────────────────────────────────────────────────────────────
@@ -87,13 +245,17 @@ sealed class InstallEngine
         {
             Say(Str.Get("py_installing"));
             // PrependPath: winget's own silent switches leave python.exe off PATH.
-            Exec("winget", "install --id Python.Python.3.12 --source winget --accept-package-agreements " +
-                           "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1\"");
+            // -1: winget did not start (older Windows 10, or its App Execution Alias turned off).
+            var rc = Exec("winget", "install --id Python.Python.3.12 --source winget --accept-package-agreements " +
+                                    "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1\"",
+                          check: false);
             RefreshPath();
-            if (!FindPython()) throw new InstallException(Str.Get("py_fail"));
+            if (!FindPython()) throw new InstallException(Str.Get(rc == -1 ? "py_no_winget" : "py_fail"));
         }
         Say(Str.Get("py_pkgs"));
-        Exec(pythonCmd, "-m pip install --disable-pip-version-check zstandard pycryptodome" + (ForwarderKeys != null ? " pillow" : ""));
+        var pkgs = "zstandard pycryptodome" + (ForwarderKeys != null ? " pillow" : "");
+        if (Exec(pythonCmd, "-m pip install --disable-pip-version-check " + pkgs, check: false) != 0)
+            throw new InstallException(Str.Get("py_pkgs_fail", pkgs));
     }
 
     bool FindPython()
@@ -109,15 +271,19 @@ sealed class InstallEngine
                 .Select(d => Path.Combine(d, "python.exe"))
                 .Where(File.Exists));
         }
+        // 3.8 or newer (older ones get no pip wheels for zstandard and pycryptodome) and 64-bit (translating the
+        // game code needs more memory than a 32-bit process has). The Microsoft Store's "python" stub prints nothing.
         foreach (var cmd in candidates)
         {
-            var (code, output) = Capture(cmd, "--version");
-            if (code == 0 && output.Contains("Python 3."))
-            {
-                pythonCmd = cmd;
-                Ok(Str.Get("py_found", output.Trim()));
-                return true;
-            }
+            var (code, output) = Capture(cmd, "-c \"import sys,struct;print('PY',sys.version_info[0],sys.version_info[1],struct.calcsize('P')*8)\"");
+            var m = Regex.Match(output, @"PY (\d+) (\d+) (\d+)");
+            if (code != 0 || !m.Success) continue;
+            int major = int.Parse(m.Groups[1].Value), minor = int.Parse(m.Groups[2].Value), bits = int.Parse(m.Groups[3].Value);
+            var desc = $"Python {major}.{minor} ({bits}-bit, {cmd})";
+            if (major != 3 || minor < 8 || bits != 64) { Info(Str.Get("py_unsuitable", desc)); continue; }
+            pythonCmd = cmd;
+            Ok(Str.Get("py_found", desc));
+            return true;
         }
         return false;
     }
@@ -169,10 +335,145 @@ sealed class InstallEngine
         Say(Str.Get("dkp_installing"));
         SetDevkitEnv();
         ClearStalePacmanLock();
-        // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it
-        var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake" + (ForwarderKeys != null ? " gcc" : "");
-        if (Exec(pacman, "-Sy --needed --noconfirm " + packages, check: false) != 0)
-            Warn(Str.Get("dkp_pkg_warn"));
+        // cmake and make (MSYS2's): build.sh runs them, and no devkitPro package brings them (issue #28).
+        // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it.
+        // Only when missing: --needed still upgrades an installed one to the package list's version, without its
+        // libraries (cmake 4.0.2 -> 4.4.4 without msys-jsoncpp-27.dll, so cmake no longer started). A partial
+        // update of MSYS2 (RepairMsys mends one when the tools then don't start).
+        var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
+        foreach (var tool in ForwarderKeys != null ? new[] { "cmake", "make", "gcc" } : new[] { "cmake", "make" })
+            if (!File.Exists(Path.Combine(DevkitRoot, @"msys2\usr\bin", tool + ".exe"))) packages += " " + tool;
+        var output = new List<string>();
+        string? reason = null;
+        for (int attempt = 1; ; attempt++)
+        {
+            output.Clear();
+            if (Exec(pacman, "-Sy --needed --noconfirm " + packages, check: false, onLine: output.Add) == 0) { reason = null; break; }
+            reason = PacmanFailure(output);
+            // a network hiccup may pass; a 403, an expired certificate or a lock will not
+            if (attempt == 2 || reason != "dkp_why_net") break;
+            Warn(Str.Get("dkp_retry"));
+            for (int i = 0; i < 10; i++) { ct.ThrowIfCancellationRequested(); Thread.Sleep(1000); }
+            ClearStalePacmanLock();
+        }
+        if (reason != null)
+        {
+            // pkg.devkitpro.org often answers 403 (Cloudflare, devkitPro/pacman#63) and the whole -Sy gives up
+            // without installing anything. The package lists it did refresh, and the ones from earlier runs,
+            // are still on disk: install from those.
+            Warn(Str.Get("dkp_pkg_warn") + " " + Str.Get(reason));
+            ClearStalePacmanLock();
+            Exec(pacman, "-S --needed --noconfirm " + packages, check: false);
+        }
+        CheckDevkitTools(reason);
+    }
+
+    // Why pacman failed, from its output: a Str key that explains it to the player.
+    internal static string PacmanFailure(IEnumerable<string> output)
+    {
+        var all = string.Join("\n", output);
+        bool Has(string pattern) => Regex.IsMatch(all, pattern, RegexOptions.IgnoreCase);
+        return Has(@"returned error: 403")                                     ? "dkp_why_403" :
+               Has(@"certificate has expired|certificate is not yet valid|SSL certificate") ? "dkp_why_ssl" :
+               Has(@"unable to lock database")                                 ? "dkp_why_lock" :
+               Has(@"returned error: 429")                                     ? "dkp_why_429" :
+               Has(@"Could not resolve host|timed out|Failed to connect|Connection reset|returned error: 5\d\d|Recv failure") ? "dkp_why_net" :
+               Has(@"signature .* (unknown trust|is invalid)|invalid or corrupted package|keyring") ? "dkp_why_sig" :
+               "dkp_why_other";
+    }
+
+    // What the build needs, by the files it runs or links. A missing one stops here, with the reason,
+    // instead of after the download and two build stages (issue #28).
+    void CheckDevkitTools(string? pacmanFailure)
+    {
+        var needed = new (string name, string file)[]
+        {
+            ("msys2",       @"msys2\usr\bin\bash.exe"),
+            ("cmake",       @"msys2\usr\bin\cmake.exe"),
+            ("make",        @"msys2\usr\bin\make.exe"),
+            ("devkitA64",   @"devkitA64\bin\aarch64-none-elf-gcc.exe"),
+            ("libnx",       @"libnx\lib\libnx.a"),
+            ("switch-cmake", @"cmake\Switch.cmake"),
+            ("switch-zlib", @"portlibs\switch\lib\libz.a"),
+            ("switch-lz4",  @"portlibs\switch\lib\liblz4.a"),
+        };
+        var missing = needed.Where(t => !File.Exists(Path.Combine(DevkitRoot, t.file))).Select(t => t.name).ToList();
+        if (missing.Count > 0)
+            throw new InstallException(Str.Get("dkp_missing", string.Join(", ", missing)) + "\n\n" + Str.Get(pacmanFailure ?? "dkp_why_other"));
+
+        // There is not enough: they must also start. An MSYS2 program whose library is missing (cmake installed
+        // by a partial update) exits without a word, which is how build.sh stopped silently in #28.
+        var bash = Path.Combine(DevkitRoot, @"msys2\usr\bin\bash.exe");
+        var env = MsysEnv();
+        const string probe = "set -e; command -v cmake make; cmake --version; make --version; $DEVKITPRO/devkitA64/bin/aarch64-none-elf-gcc --version";
+        if (Exec(bash, "-l -c \"" + probe + "\"", check: false, env: env) != 0)
+        {
+            Exec(bash, "-l -c \"ldd /usr/bin/cmake.exe /usr/bin/make.exe\"", check: false, env: env);   // for the log: what is missing
+            var updateFailure = RepairMsys(bash, env);
+            if (Exec(bash, "-l -c \"" + probe + "\"", check: false, env: env) != 0)
+            {
+                Exec(bash, "-l -c \"ldd /usr/bin/cmake.exe /usr/bin/make.exe\"", check: false, env: env);
+                throw new InstallException(updateFailure != null
+                    ? Str.Get("dkp_update_fail") + "\n\n" + Str.Get(updateFailure)
+                    : Str.Get("dkp_broken"));
+            }
+            Ok(Str.Get("dkp_repaired"));
+        }
+
+        if (ForwarderKeys != null && !File.Exists(Path.Combine(DevkitRoot, @"msys2\usr\bin\gcc.exe")))
+        {
+            Warn(Str.Get("fwd_gcc_fail"));
+            ForwarderKeys = null;
+        }
+        Ok(Str.Get("dkp_tools_ok"));
+    }
+
+    // The tools are installed but don't start: a partial update of MSYS2 (a program newer than the libraries it
+    // needs, e.g. cmake from a package list newer than the rest: #28, case 22 of the Windows tests). Mended here
+    // rather than asking the player: a full update of MSYS2's own packages, from MSYS2's mirrors only. devkitPro's
+    // repositories (often a 403, which stops a whole -Syu) are left out of a copy of pacman.conf: none of the
+    // broken programs come from them. Up to three passes: the first one may update only MSYS2's core and end
+    // the shell it runs in; the last one finds nothing left to do. Returns why the update failed (a Str key),
+    // or null when a pass ended well.
+    string? RepairMsys(string bash, IDictionary<string, string> env)
+    {
+        Say(Str.Get("dkp_repairing"));
+        var conf = Path.Combine(DevkitRoot, @"msys2\etc\pacman.conf");
+        var copy = Path.Combine(DevkitRoot, @"msys2\tmp\wwhd-msys-only.conf");   // /tmp/wwhd-msys-only.conf in MSYS2
+        var kept = new List<string>();
+        var dkp = false;
+        foreach (var line in File.ReadAllLines(conf))
+        {
+            var t = line.Trim();
+            if (t.StartsWith("[") && t.EndsWith("]")) dkp = t.StartsWith("[dkp", StringComparison.OrdinalIgnoreCase);
+            if (!dkp) kept.Add(line);
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(copy)!);
+        File.WriteAllLines(copy, kept);
+        string? failure = null;
+        var output = new List<string>();
+        for (int pass = 1; pass <= 3; pass++)
+        {
+            ct.ThrowIfCancellationRequested();
+            ClearStalePacmanLock();
+            output.Clear();
+            var rc = Exec(bash, "-l -c \"pacman --config /tmp/wwhd-msys-only.conf -Syu --noconfirm\"", check: false, env: env,
+                          onLine: output.Add);
+            if (rc == 0)
+            {
+                failure = null;
+                if (pass >= 2) break;
+                continue;
+            }
+            failure = PacmanFailure(output);
+            if (pass == 3) break;
+            // the mirrors limit how often one address may download (HTTP 429): give them a minute
+            var wait = failure == "dkp_why_429" ? 60 : failure == "dkp_why_net" ? 10 : 0;
+            if (wait > 0) Warn(Str.Get(wait == 60 ? "dkp_retry_429" : "dkp_retry"));
+            for (int i = 0; i < wait; i++) { ct.ThrowIfCancellationRequested(); Thread.Sleep(1000); }
+        }
+        try { File.Delete(copy); } catch (IOException) { }
+        return failure;
     }
 
     static string FindPacman()
@@ -230,6 +531,14 @@ sealed class InstallEngine
         }
     }
 
+    // make_sd.native_shell's environment for devkitPro's bash, so the checks see what the build will see
+    static Dictionary<string, string> MsysEnv() => new()
+    {
+        ["DEVKITPRO"] = "/opt/devkitpro",
+        ["CHERE_INVOKING"] = "1",
+        ["MSYS2_PATH_TYPE"] = "inherit",
+    };
+
     static void SetDevkitEnv()
     {
         var path = Environment.GetEnvironmentVariable("PATH") ?? "";
@@ -268,14 +577,19 @@ sealed class InstallEngine
     void Release()
     {
         Say(Str.Get("rel_checking"));
-        try
+        releaseVer = LatestRelease();
+        if (releaseVer != "") Ok(Str.Get("rel_found", releaseVer));
+        else
         {
-            var json = Http.GetStringAsync("https://api.github.com/repos/centollOS/SwitchWakerHD/releases/latest").GetAwaiter().GetResult();
-            var m = Regex.Match(json, "\"tag_name\":\\s*\"([^\"]+)\"");
-            if (m.Success) releaseVer = m.Groups[1].Value;
-            Ok(Str.Get("rel_found", releaseVer));
+            // offline or GitHub unreachable: the newest release an earlier run downloaded
+            releaseVer = Directory.GetFileSystemEntries(WorkDir, "SwitchWakerHD-v*")
+                .Select(p => Regex.Match(Path.GetFileName(p), @"^SwitchWakerHD-(v(\d+)\.(\d+)\.(\d+))(\.zip)?$"))
+                .Where(m => m.Success)
+                .OrderByDescending(m => new Version(int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value), int.Parse(m.Groups[4].Value)))
+                .Select(m => m.Groups[1].Value).FirstOrDefault() ?? "";
+            if (releaseVer == "") throw new InstallException(Str.Get("rel_unknown"));
+            Warn(Str.Get("rel_fallback", releaseVer));
         }
-        catch { Warn(Str.Get("rel_fallback", releaseVer)); }
 
         var zip = Path.Combine(WorkDir, $"SwitchWakerHD-{releaseVer}.zip");
         ReleaseDir = Path.Combine(WorkDir, $"SwitchWakerHD-{releaseVer}");
@@ -300,7 +614,14 @@ sealed class InstallEngine
             Progress?.Invoke(null);
             var tmp = ReleaseDir + ".tmp";
             if (Directory.Exists(tmp)) Directory.Delete(tmp, true);
-            ZipFile.ExtractToDirectory(zip, tmp);
+            try { ZipFile.ExtractToDirectory(zip, tmp); }
+            catch (InvalidDataException e)
+            {
+                // checked when it was downloaded, so damaged on disk since: download it again next time
+                Log?.Invoke(e.Message, LogKind.Error);
+                File.Delete(zip);
+                throw new InstallException(Str.Get("rel_corrupt"));
+            }
             Directory.Move(tmp, ReleaseDir);
         }
 
@@ -311,6 +632,34 @@ sealed class InstallEngine
             if (nested == null) throw new InstallException(Str.Get("rel_no_script"));
             ReleaseDir = nested;
         }
+    }
+
+    // The latest release's tag: GitHub's API, else where github.com/.../releases/latest redirects to (the API
+    // allows 60 calls an hour per address). "" when neither answers.
+    string LatestRelease()
+    {
+        try
+        {
+            var json = Http.GetStringAsync("https://api.github.com/repos/centollOS/SwitchWakerHD/releases/latest").GetAwaiter().GetResult();
+            var m = Regex.Match(json, "\"tag_name\":\\s*\"([^\"]+)\"");
+            if (m.Success) return m.Groups[1].Value;
+        }
+        catch (Exception e) when (e is HttpRequestException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+        {
+            Log?.Invoke(e.Message, LogKind.Output);
+        }
+        try
+        {
+            using var resp = Http.GetAsync("https://github.com/centollOS/SwitchWakerHD/releases/latest", HttpCompletionOption.ResponseHeadersRead, ct)
+                                 .GetAwaiter().GetResult();
+            var m = Regex.Match(resp.RequestMessage?.RequestUri?.AbsolutePath ?? "", @"/releases/tag/([^/]+)$");
+            if (resp.IsSuccessStatusCode && m.Success) return Uri.UnescapeDataString(m.Groups[1].Value);
+        }
+        catch (Exception e) when (e is HttpRequestException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+        {
+            Log?.Invoke(e.Message, LogKind.Output);
+        }
+        return "";
     }
 
     static string MakeSd(string dir) => Path.Combine(dir, "tools", "switch", "make_sd.py");
@@ -358,11 +707,89 @@ sealed class InstallEngine
             var pct = (int)(frac * 100);
             if (pct > shownPct) { shownPct = pct; Status?.Invoke(Str.Get("build_s4_pct", pct)); }
         }
-        var forwarder = ForwarderKeys != null ? $" --keys \"{ForwarderKeys}\"" : " --no-forwarder";
-        var rc = Exec(pythonCmd, $"\"{MakeSd(ReleaseDir)}\" {GameArg} \"{GamePath}\"{forwarder}", ReleaseDir, check: false, onLine: OnLine);
+        // make_sd's builds use half the CPU threads, each compile ~1.5 GB: fewer on a PC without the memory for that
+        // (8 threads with 8 GB of memory would need ~6 GB for the compiles alone). WWHD_JOBS reaches build.sh through make_sd's environment.
+        var env = new Dictionary<string, string>();
+        var ramGb = TotalRamGb();
+        var jobs = Math.Max(1, Math.Min(Environment.ProcessorCount / 2, (int)((ramGb - 2) / 1.5)));
+        if (ramGb > 0 && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WWHD_JOBS")))
+        {
+            env["WWHD_JOBS"] = jobs.ToString();
+            Info(Str.Get("build_jobs", jobs, Environment.ProcessorCount, ramGb.ToString("0")));
+        }
+        var tail = new Queue<string>();
+        var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
+        var rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}", ReleaseDir, check: false,
+                      onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); }, env: env);
         Progress?.Invoke(rc == 0 ? 1 : (double?)null);
-        if (rc != 0) throw new InstallException(Str.Get("build_fail", rc));
+        if (rc != 0)
+        {
+            // An object file cut short by an interrupted build (newer than its source, so make keeps it) or a CMake
+            // cache from another folder fails every retry the same way: start the Switch build over.
+            var broken = new Regex(@"file truncated|file format not recognized|error adding symbols|CMakeCache\.txt directory .* is different", RegexOptions.IgnoreCase);
+            var buildDir = Path.Combine(ReleaseDir, "build", "switch-dk");
+            if (tail.Any(broken.IsMatch) && Directory.Exists(buildDir))
+            {
+                try { Directory.Delete(buildDir, true); Warn(Str.Get("build_reset", buildDir)); }
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { Warn(e.Message); }
+            }
+            throw new InstallException(ExplainBuildFailure(rc, tail.ToList()));
+        }
         Ok(SdOut);
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct MEMORYSTATUSEX
+    {
+        public uint dwLength, dwMemoryLoad;
+        public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX status);
+
+    // The PC's memory in GB, or 0 when Windows does not say.
+    static double TotalRamGb()
+    {
+        var st = new MEMORYSTATUSEX { dwLength = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(MEMORYSTATUSEX)) };
+        try { return GlobalMemoryStatusEx(ref st) ? st.ullTotalPhys / 1073741824.0 : 0; }
+        catch (Exception) { return 0; }
+    }
+
+    // The build's last lines, turned into what the error box shows: make_sd's own reason (its "make_sd: ..." line),
+    // the last error line before it, and a hint for the failures players have met.
+    internal static string ExplainBuildFailure(int rc, IList<string> tail)
+    {
+        var lines = tail.Select(l => l.Trim()).Where(l => l != "").ToList();
+        var msg = new StringBuilder(Str.Get("build_fail", rc));
+        var why = lines.FindLastIndex(l => l.StartsWith("make_sd: "));
+        if (why >= 0) msg.Append("\n").Append(lines[why]);
+        // a compiler's first "error:" says more than make's "*** Error 2" after it
+        var before = lines.Take(why >= 0 ? why : lines.Count).Where(l => !l.StartsWith("$ ")).ToList();
+        var errLine = before.FirstOrDefault(l => Regex.IsMatch(l, @"\berror\s*:", RegexOptions.IgnoreCase))
+                   ?? before.LastOrDefault(l => Regex.IsMatch(l, @"\b(error|fatal|not found|denied)\b", RegexOptions.IgnoreCase));
+        if (errLine != null) msg.Append("\n").Append(errLine.Length > 300 ? errLine.Substring(0, 300) + "..." : errLine);
+
+        var all = string.Join("\n", lines);
+        bool Has(string pattern) => Regex.IsMatch(all, pattern, RegexOptions.IgnoreCase);
+        string? hint =
+            Has(@"disc key (was )?not found")                                   ? "hint_disc_key" :
+            Has(@"common key not found")                                        ? "hint_common_key" :
+            Has(@"bad FST magic|wrong key|not this disc's key")                 ? "hint_wrong_key" :
+            Has(@"No space left on device|not enough space on the disk|ENOSPC") ? "hint_disk" :
+            Has(@"out of memory|virtual memory exhausted|MemoryError|Cannot allocate memory") ? "hint_memory" :
+            Has(@"cannot specify '-o' with '-c'")                               ? "hint_path_space" :
+            Has(@"file truncated|file format not recognized|error adding symbols|CMakeCache\.txt directory .* is different") ? "hint_broken_obj" :
+            Has(@"command not found")                                           ? "hint_tool_missing" :
+            Has(@"Permission denied|Access is denied|PermissionError|Device or resource busy|Operation not permitted") ? "hint_av" :
+            null;
+        // #28: build.sh stopped and printed nothing at all (a tool that cannot start, such as an MSYS2 program
+        // whose library is missing after a partial update, or one blocked by an antivirus)
+        if (hint == null && why > 0 && lines[why].Contains("this step failed") &&
+            (lines[why - 1].StartsWith("$ ") || Regex.IsMatch(lines[why - 1], @"^build\.sh: line \d+: .* failed \(exit code \d+\)$")))
+            hint = "hint_silent";
+        if (hint != null) msg.Append("\n\n").Append(Str.Get(hint));
+        return msg.ToString();
     }
 
     // ── SD card (from the done page) ─────────────────────────────────────────
@@ -371,9 +798,24 @@ sealed class InstallEngine
         ct = token;
         Say(Str.Get("sd_copying", drive));
         Progress?.Invoke(null);
+
+        // Room for what is new or bigger (files already on the card are replaced), and FAT32's 4 GB file limit.
+        var di = new DriveInfo(drive);
+        long need = 0, biggest = 0;
+        foreach (var f in Directory.GetFiles(SdOut, "*", SearchOption.AllDirectories))
+        {
+            var len = new FileInfo(f).Length;
+            var dst = new FileInfo(Path.Combine(drive, f.Substring(SdOut.Length).TrimStart('\\')));
+            need += Math.Max(0, len - (dst.Exists ? dst.Length : 0));
+            biggest = Math.Max(biggest, len);
+        }
+        if (di.AvailableFreeSpace < need)
+            throw new InstallException(Str.Get("sd_no_space", drive, (di.AvailableFreeSpace / 1e9).ToString("0.0"), (need / 1e9).ToString("0.0")));
+        if (biggest >= 4L << 30 && di.DriveFormat.Equals("FAT32", StringComparison.OrdinalIgnoreCase))
+            throw new InstallException(Str.Get("sd_fat32", drive));
+        if (!Directory.Exists(Path.Combine(drive, "atmosphere"))) Warn(Str.Get("sd_no_atmo", drive));
         // robocopy: 0-7 is success (files copied, extra files, ...), 8 and up is failure.
-        // "D:\" would escape the closing quote (Windows argv rules); "D:\\" is D:\ for robocopy.
-        var rc = Exec("robocopy", $"\"{SdOut}\" \"{drive.TrimEnd('\\')}\\\\\" /E /R:2 /W:2 /NP /NDL /NJH /NJS", check: false);
+        var rc = Exec("robocopy", $"{Quote(SdOut)} {Quote(drive)} /E /R:2 /W:2 /NP /NDL /NJH /NJS", check: false);
         if (rc < 0 || rc >= 8) throw new InstallException(Str.Get("sd_fail", rc));
         Ok(Str.Get("sd_copied", drive));
     }
@@ -420,7 +862,8 @@ sealed class InstallEngine
     }
 
     // Runs a process, streams its output to the log; with check, a non-zero exit is a failure.
-    int Exec(string exe, string args, string? workDir = null, bool check = true, Action<string>? onLine = null)
+    int Exec(string exe, string args, string? workDir = null, bool check = true, Action<string>? onLine = null,
+             IDictionary<string, string>? env = null)
     {
         Log?.Invoke($"> {exe} {args}", LogKind.Info);
         var psi = new ProcessStartInfo(exe, args)
@@ -435,14 +878,16 @@ sealed class InstallEngine
         };
         psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1";
         psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+        if (env != null) foreach (var kv in env) psi.EnvironmentVariables[kv.Key] = kv.Value;
 
         int rc;
         using var job = new ProcessJob(killOnClose: true);
+        var gate = new object();   // stdout and stderr arrive on two threads; onLine sees one line at a time
         try
         {
             using var proc = new Process { StartInfo = psi };
-            proc.OutputDataReceived += (_, e) => { if (e.Data != null) { Log?.Invoke(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
-            proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) { Log?.Invoke(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
+            proc.OutputDataReceived += (_, e) => { if (e.Data != null) lock (gate) { Log?.Invoke(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
+            proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) lock (gate) { Log?.Invoke(e.Data, LogKind.Output); onLine?.Invoke(e.Data); } };
             proc.Start();
             job.Add(proc);
             currentJob = job;
@@ -470,7 +915,7 @@ sealed class InstallEngine
         }
         finally { currentJob = null; }
 
-        if (check && rc != 0) throw new InstallException($"{Path.GetFileName(exe)} {rc}");
+        if (check && rc != 0) throw new InstallException(Str.Get("cmd_fail", Path.GetFileName(exe), rc));
         return rc;
     }
 

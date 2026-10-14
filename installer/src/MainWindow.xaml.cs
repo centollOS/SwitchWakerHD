@@ -40,7 +40,6 @@ public partial class MainWindow : Window
     const int LogBoxMaxChars = 400_000;
     static readonly string LogPath = System.IO.Path.Combine(InstallEngine.WorkDir, "installer.log");
 
-    readonly string[] stepKeys = { "step_python", "step_devkit", "step_release", "step_build" };
     readonly (Ellipse ring, TextBlock glyph, TextBlock label)[] stepRows = new (Ellipse, TextBlock, TextBlock)[4];
     readonly StepState[] stepStates = new StepState[4];
 
@@ -132,7 +131,7 @@ public partial class MainWindow : Window
 
         TxtProgH.Text    = Str.Get("prog_h");
         TxtProgBody.Text = Str.Get("prog_body");
-        for (int i = 0; i < stepRows.Length; i++) stepRows[i].label.Text = Str.Get(stepKeys[i]);
+        for (int i = 0; i < stepRows.Length; i++) stepRows[i].label.Text = Str.Get(InstallEngine.StepKeys[i]);
         TxtErrorH.Text   = Str.Get("fail_h");
         TxtLogPath.Text  = Str.Get("log_at", LogPath);
         UpdateLogButtons();
@@ -216,9 +215,11 @@ public partial class MainWindow : Window
 
         string? warn = null;
         if (gamePath != "" && GameArg() == "--game-dir" && !IsGameDir(gamePath)) warn = Str.Get("game_bad_dir");
-        else if (gamePath != "" && GameArg() == "--image" &&
-                 !File.Exists(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(gamePath) ?? "", "GAME.key")))
-            warn = Str.Get("game_no_keys");
+        else if (gamePath != "" && GameArg() == "--image" && File.Exists(gamePath))
+        {
+            try { warn = InstallEngine.CheckImageKeys(gamePath); }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { warn = e.Message; }
+        }
         TxtGameWarn.Text = warn ?? "";
         TxtGameWarn.Visibility = warn == null ? Visibility.Collapsed : Visibility.Visible;
         if (page == Page.Game) UpdateFooter();
@@ -456,10 +457,16 @@ public partial class MainWindow : Window
             try
             {
                 Directory.CreateDirectory(InstallEngine.WorkDir);
-                logFile = new StreamWriter(LogPath, true, Encoding.UTF8) { AutoFlush = true };
+                // Shared: a second installer window (or Notepad on an older version's lock) appends to the same file.
+                var stream = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                logFile = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
                 logFile.WriteLine($"==== {DateTime.Now:yyyy-MM-dd HH:mm:ss}  SwitchWakerHD installer (GUI) ====");
             }
-            catch { logFile = null; }
+            catch (Exception e)
+            {
+                logFile = null;
+                EnqueueLog(Str.Get("log_open_fail", LogPath, e.Message), LogKind.Warn);
+            }
         }
     }
 
