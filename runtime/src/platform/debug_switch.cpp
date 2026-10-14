@@ -47,13 +47,23 @@ std::string ip_text() {
 
 bool game_running() { return render::frame_count() > 0; }  // guest memory and the game's data are there
 
+// battery charge, charger and mode (psm), e.g. "72%, on battery, handheld": to know before a long test on the console
+std::string power_text() {
+    static const bool psm = R_SUCCEEDED(psmInitialize());
+    u32 percent = 0;
+    PsmChargerType charger = PsmChargerType_Unconnected;
+    if (!psm || R_FAILED(psmGetBatteryChargePercentage(&percent)) || R_FAILED(psmGetChargerType(&charger))) return "unknown";
+    return std::to_string(percent) + "%, " + (charger == PsmChargerType_Unconnected ? "on battery" : "charging") + ", " +
+           (appletGetOperationMode() == AppletOperationMode_Console ? "docked" : "handheld");
+}
+
 debugsrv::Reply info(const debugsrv::Args&) {
-    char b[512];
+    char b[640];
     AppletType type = appletGetAppletType();
     snprintf(b, sizeof b,
-             "version %s (%s)\nframe %llu\nstage %s\nheap never used %zu MiB\nrunning as %s\naddress %s:%d\n",
+             "version %s (%s)\nframe %llu\nstage %s\nheap never used %zu MiB\nbattery %s\nrunning as %s\naddress %s:%d\n",
              build::version(), build::commit(), (unsigned long long)render::frame_count(),
-             game_running() ? mods::current_stage().c_str() : "-", heap_never_used_mib(),
+             game_running() ? mods::current_stage().c_str() : "-", heap_never_used_mib(), power_text().c_str(),
              type == AppletType_Application ? "application (the HOME menu forwarder: reload works)"
                                             : "applet (hbmenu: reload does not work, use quit and nxlink)",
              ip_text().c_str(), g_port);
@@ -299,7 +309,7 @@ void start() {
     // a console under test from the computer is often left alone for minutes: no auto-sleep while the server runs
     appletSetAutoSleepDisabled(true);
     LOG("[debug] auto-sleep off while the debug server runs");
-    debugsrv::add_command("info", "info                   build, frame, stage, heap, address", info);
+    debugsrv::add_command("info", "info                   build, frame, stage, heap, battery, address", info);
     debugsrv::add_command("warps", "warps                  the warp destinations, numbered", warps);
     debugsrv::add_command("warp", "warp <n> | warp <stage> [room] [point]", warp);
     debugsrv::add_command("shot", "shot [game]            PNG of the next frame (game: the game's picture alone)", shot);
