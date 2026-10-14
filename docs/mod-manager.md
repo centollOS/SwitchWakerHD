@@ -30,14 +30,117 @@ guide the design; any future reuse requires a separate license review.
 ## Player workflow
 
 Open the in-game settings overlay (F1, Fn+F1 on many Macs, Cmd+, or Settings in
-the menu) and select **Mods**. The searchable built-in catalogue manages the
-mods that are part of this build: direct camera, mouse camera, first-person
-shortcut, wall climbing, quick doors and fast scenes. Descriptions and options
-appear beside the selected entry. All defaults are off.
+the menu) and select **Mods**. It has three sub-tabs (L / R on a controller move between
+them, then on to the neighbouring settings tabs). The sub-tab last chosen stays selected until
+the game is closed. Both mod lists use the same rows: an on/off switch, the name (it opens the
+mod's page), the *Experimental* tag where it applies and a one-word status (*On*, *Off*,
+*Needs setup*, *Installing… 45%* while it is downloaded, *Setting up… 45%* after that,
+*Restart to apply*, *Update available*, *Error*).
 
-The Installed packages section accepts a local folder or `.wwhdmod` ZIP. Choose
-it with the file/folder picker, then press Install package. Installed packages
-start disabled; nothing from a package is loaded until you enable it. Enabling
+- **Built-in** ("Included with the game. Switch on or off any time."): the mods compiled
+  into the game: direct camera, mouse camera, first-person shortcut, wall climbing,
+  run/swim speed, faster ladders, faster sidling, sailing speed, automatic wind, quick
+  doors, fast forward and fast scene changes; all off by default.
+- **Community** ("Made by players. Downloaded from the mod catalogue."): every installed
+  package (from the catalogue, from a file or folder, graphics packs and content packs),
+  then **Available to download**: the catalogue's mods that aren't downloaded yet (see
+  Catalogue). Code mods such as Call of the Sky and the GameCube sea minimap are catalogue
+  mods and are listed here. With nothing installed and the list not loaded yet, it shows
+  "Loading the mod list…" (or why it couldn't be loaded, with Retry).
+- **More**: what a player rarely needs, in collapsed sections: Switch all mods
+  off, Profiles, Install from a file or folder, GameCube game for mods, Code-mod
+  support, Save backups, Mod list (its source and the automatic check), Cheats
+  and the Mods folder. Notices from the manager (for example a graphics pack that
+  was switched off) appear at the top of the tab until OK.
+
+**Switching a mod on is the one way to get it running.** A built-in mod or a mod
+that needs nothing switches on at once. Otherwise one review opens with
+everything at once: what the mod does, the experimental warning (saves are backed
+up first), the GameCube game (picked right there, checked immediately, shown by
+file name with the full path on hover), setup choices, that it contains code
+that runs on the computer, that code-mod support is added (one rebuild of about
+5 minutes, the game restarts by itself) or that it starts working after a
+restart, and the download size and expected time. One button (**Install** for a
+mod that isn't downloaded yet, **Switch on** otherwise) and Cancel, which is the
+default for keyboard and controller (B and Esc cancel). Install stays unavailable,
+with the reason next to it, until a needed GameCube game is chosen.
+
+After that, one progress view on the mod's page lists the steps with check marks
+(Download, Check, Back up saves, Prepare…, Add code-mod support, Build code mod,
+Switch on), an overall bar, the current step's bar, the time so far and an
+estimate. It keeps running when the menu is closed: a small line over the game
+shows the progress and then "… is on", "… is ready. Restart the game to switch it
+on." or the failure. At the end the mod is on; if it needs a restart, **Restart
+now** / **Later** (on Android: close and reopen the app). A failure shows one
+plain sentence, **Show details** (the technical reason and tool output, with
+Copy details) and **Try again**, which keeps the completed steps; Cancel also
+keeps them.
+
+A mod's page shows its switch and status, description, the setup state ("Set up
+✓", or "Needs setup — about 1 minute. Switch it on to set it up."), the options, **Update** and **Remove**. Setup choices and setup
+actions are not offered while the mod is on or still loaded in this session;
+one line says why instead: "Switch the mod off first to change its setup.", or,
+when it is off but its files stay loaded until exit, "Off — takes effect after a
+restart." with **Restart now** right there. Options that can change are always
+editable ("Changes apply after a restart." for mods loaded at startup).
+**Details** (collapsed) lists version, author, licence and the kind of mod in
+plain words; **Troubleshooting** (collapsed) lists each setup step as Done / Not
+done yet / Working… / Failed with **Run again** while the mod is off and not
+loaded, the GameCube game's file name, the manager's status and the content
+hashes. **Remove** asks once and says how much space it frees: it deletes the
+package and the files its setup prepared (`Data/<id>`); saves are not touched.
+
+A mod that applies at the next start shows *Restart to apply* in its row after it is
+switched on or off, and the top of Mods says "Restart to apply: … ." with **Restart
+now** (on Android: close and reopen the app). There is one restart offer at a time:
+the end of an install and the page of a mod that is off but still loaded offer
+their own instead, and switching mods does not open a popup.
+
+Run/swim speed offers three animation choices. **Native** keeps the game's cycle with the boosted
+cadence. **Dash instead of walk** replaces the low-speed walk portion; the normal full-speed run
+already uses dash. **Sprint pose** adds a forward torso lean, compensating head tilt and stronger
+arm drive to the current run cycle, blended with the boost. It applies during ordinary forward
+running, leaving lock-on, item actions and special walks to their own poses. In water the same
+choice redraws the boosted surface swim as a crawl: a flatter torso with a much wider
+phase-locked arm sweep instead of the stock paddle. The choice
+is saved in the active mod profile. Older profiles without an animation key retain the saved
+settings choice at startup. `WWHD_MOD_MOVE_ANIM=native|dash|sprint` overrides saved choices
+at startup. For in-game verification, `WWHD_MODS_TRACE=<path>` records applied sprint and swim
+poses with their blend weight and cycle phase, plus `swim-swirl` and `swim-trail` splash lines.
+
+The sprint pose leans up to 30 degrees through the torso, with a compensating head tilt and wider
+arm swings. Starting a grounded run boost emits one short fan of three larger, more opaque puffs
+of the game's land dust behind Link's feet. While the run boost remains active on the ground, a
+small dim puff follows every few steps as a dust trail. A forward roll keeps the current boost cycle and
+continues using stamina, but plays at its native speed and
+pose. Running resumes automatically after the roll while the cycle still has stamina; cancelling,
+exhausting the bar or genuinely stopping ends it. Resuming the same cycle after a roll does not
+emit a second starting burst. While the swim boost is active, each arm pull splashes the game's
+own sea-coloured water element at that side, and a light foam trail follows behind every few
+steps. Both use the game's own water particles, so the native swim wake is untouched.
+
+Faster ladders and faster sidling each have one speed slider on their mod page (1x to 3x,
+1.5x when first switched on). Both speed up the game's own animation, so hands and feet stay in step with the
+movement: a ladder clip moves Link by its own motion, and sidling scales the animation and the
+sidling speed together. Climbing on and off a ladder speeds up the same way, and the next rung
+starts right after the footstep instead of after a short pause, so the climb speeds up by about
+the chosen factor; the footstep sounds stay on their frames. Sailing speed multiplies the speed
+the wind gives the boat, with separate sliders on its mod page for the normal sail and the Swift Sail; the
+boat's jump keeps its normal height. Automatic wind makes the normal sail behave like the Swift
+Sail: while you sail, the wind turns to blow the way the boat is heading (in eight directions,
+as with the Swift Sail). It changes only the wind; the normal sail keeps its own speed, look and
+sounds. On the macOS menu bar the same switches and a few speed presets are under Gameplay.
+`WWHD_MOD_LADDER_SPEED`, `WWHD_MOD_SIDLE_SPEED`, `WWHD_MOD_SAIL_SPEED` and `WWHD_MOD_AUTO_WIND`
+(`=1`) switch them on at startup, with the factors `WWHD_MOD_LADDER_FACTOR`,
+`WWHD_MOD_SIDLE_FACTOR`, `WWHD_MOD_SAIL_FACTOR` and `WWHD_MOD_SWIFT_SAIL_FACTOR`. With a mod off,
+the game runs its original code. These mods work the same at 30 fps, with 60/120/240 fps
+interpolation and with true 60: they change animation rates and speed targets inside the game's
+own steps, never amounts added per frame.
+
+**More > Install from a file or folder** accepts a local folder or `.wwhdmod` ZIP
+from the file/folder picker; the review for switching it on opens right away
+(Cancel leaves it installed and off). Nothing from a package is loaded until it
+is switched on. Enabling
 resolves required dependencies; missing versions, cycles, declared conflicts and
 overlapping settings presets produce an error. The details show metadata, status
 and bool/number/string/enum options. String edits commit with Enter. Disable a
@@ -47,37 +150,130 @@ ID. Refresh discovers manual folder changes when all packages are disabled.
 
 ### Native code confirmation
 
-Enabling a package with native code (`kind: native`) first shows a confirmation:
-"<Mod name> contains native code. It runs with the game's full permissions and
-can do anything a program on your computer can. Only enable mods from sources
-you trust." **Enable** confirms and enables it; **Cancel** (the default button,
-also B on a controller) leaves it disabled. If enabling a package would also
-enable native dependencies that are not confirmed yet, the one dialog names all
-of them. The dialog works with the mouse, the keyboard (Tab/arrows, Enter or
-Space) and a controller (D-pad, A, B), on the AppKit and the SDL host.
+Switching on a package with native code (`kind: native`, guest code or a setup
+tool) asks in the review: "Contains code that runs on your computer with the
+game's permissions. Install only mods from people you trust." **Install** /
+**Switch on** confirms; **Cancel** (the default button, also B) leaves it off. The
+review covers native dependencies that would be switched on as well. For a
+catalogue install the confirmation is for that catalogue version: the download is
+checked against the catalogue's size and SHA-256 and manifest before the trust
+record (below) is written for the installed files. It works with the mouse, the
+keyboard (Tab/arrows, Enter or Space) and a controller (D-pad, A, B).
 
-The confirmation is asked once per package and native library: it is stored in
-`profiles.json` as `native_trust`, mapping the package ID to the SHA-256 of the
-package's library for this platform (the file named in `binaries`). It applies
-to every profile. Installing an update whose library differs asks again;
-removing a package forgets its confirmation. Only that one library is
-fingerprinted; anything the library itself loads from its folder is not.
-Built-in mods, settings presets, content mods and Cemu graphics packs never ask:
-they contain no native code, and the manager loads native code only through
-`kind: native` packages.
+The confirmation is asked once per package version and fingerprint. It is stored
+in `profiles.json` as `native_trust`, mapping the package ID to the SHA-256 of a
+sorted inventory of every package file, including the manifest and imported
+helpers. It applies to every profile. Changing any file asks again; removing a
+package forgets its confirmation. Built-in mods, settings presets, content mods
+and Cemu graphics packs without preparation tools need no confirmation.
+
+Manager 1.3 also recognizes declarative `setup` steps. Packages with a `run_tool`
+preparation step and guest packages use the same trust record. Guest compilation
+keeps its separate ELF fingerprint for address allocation and module-cache validation.
+Settings/content packages without tools still need no native-code confirmation.
+Preparation options must match the manifest's boolean or enum option schema.
+
+Preparation tools run from the mod's `Data/<id>` folder with a declared argument
+vector, without a shell. `{data}`, `{package}` and `{game:gc_usa}` (or another
+supported game-source ID) substitute within one argument without word splitting.
+`gc_wind_waker` accepts the supported USA, European or Japanese GameCube disc
+identifiers, for tools that use the same input format across regions. Region-specific
+IDs still require their exact region. Disc headers are checked for both plain ISO
+files, RVZ containers and extracted folders containing `sys/boot.bin`. RVZ selection
+checks its uncompressed embedded disc identifier and GameCube magic; the setup tool
+must separately validate container checksums, compression and resource formats.
+Other compressed disc formats are not accepted.
+Game-source paths are saved locally under shared `game_sources` settings and
+validated again when used. The tool's bounded final output is available on
+failure, with saved game-source paths redacted. A successful tool must produce
+all declared data-relative `outputs`; its setup receipt is bound to the package
+fingerprint and resolved argument list, including selected game-source paths.
+Updating a helper invalidates that receipt as well as native trust. Selecting a
+different source or moving the required source makes the step unsatisfied.
+Starting a rerun clears its earlier receipt before launching the tool, so a
+failed rerun cannot appear ready because old output files remain on disk.
+
+Switching a mod on (in the list or on its page) opens the review described under
+Player workflow. It asks for the GameCube game and choices of the remaining
+required steps; accepting records trust for the exact package/version (a changed
+package asks again), then the steps run in order and the mod is switched on. If
+code-mod support is missing, the review says so and the setup adds it: the game
+code is rebuilt and the game restarts. Setup resumes after that restart in the
+same profile for the same package fingerprint, before switching the mod on, and
+the progress view continues where it was. A guest mod needs one final **Restart
+now** to become active. Individual steps can be run again under the collapsed
+**Troubleshooting** section of the mod's page while it is off and not loaded.
+Tools and guest builds run in a background worker. Options and profiles cannot
+change during preparation. Guest preparation uses the same persisted address
+allocator and build bridge as startup, including the installed game's region
+mapping. A failed build retains its allocation for a stable retry. A successful
+build leaves the package inactive; enabling it takes effect after restart.
+Readiness checks the ELF, region, allocation and cached module, then validates
+the full build cache key in one startup batch outside the manager lock. The key
+includes the selected compiler and version, flags, translator, ABI and source
+inputs. Stale or unavailable entries stay unsatisfied; a successful preparation
+marks the package ready immediately. The UI reads this cached readiness without
+running tools each frame. Startup also validates and rebuilds stale modules.
+If code-mod support is off, the setup adds it as one of its steps.
 
 Native code is never loaded without a matching confirmation, also when a
 profile switch, an older `profiles.json` or an updated library would enable it.
 Such a package stays unloaded and is switched off in that profile, and the tab
 shows "Not loaded: it contains native code you have not confirmed. Enable it
-again to review." Ticking it again shows the confirmation. Packages that depend
+again to review." Switching it on again shows the review. Packages that depend
 on it report that a dependency failed to load, as for any failed load. The
 manager API enforces this as well (`enable()` refuses unconfirmed native code;
 `unconfirmed_native()` and `confirm_native()` serve the dialog).
 
-Profiles save package toggles/configuration and built-in choices. Clone current
-creates another profile; select it in Active profile. Switch away before deleting
-a profile. Disable all covers both built-ins and external packages. Explicit
+### Experimental mods and save backups
+
+Some mods are marked experimental: they are untested and can cause game-breaking
+problems, and saving the game while one is active can damage the save. The
+list hides those not downloaded yet unless **Show experimental mods** (under
+Available to download, off by default) is on. An installed experimental mod is
+always listed, with an orange **Experimental** label, so it can be turned off or
+removed.
+
+Switching on an experimental mod (or a mod that requires one) explains the risk in
+the review, and its first step backs up the whole save folder before anything is
+turned on; **Cancel** (the default, also B) leaves it off. If the backup fails,
+for example because the disk is full, the mod stays off and the progress view
+says why. Each switch-on asks again; the confirmation is not remembered. A profile switch to a profile that already has the mod enabled does
+not ask.
+
+**Mods > More > Save backups** lists every backup with its date, reason and size.
+**Back up now** makes a manual backup. Backups live in `save-backups` next to the
+save folder (on Android in the app's files folder, next to `save`), one folder
+per backup named after its date and reason (for example
+`2026-10-11_14-03-12-mod-dragon` before a mod, with its id cut to 7 characters,
+`…-restore` or `…-manual`), with the copied files under `save/` and
+the details in `backup.json`. A backup is written to a temporary folder and
+renamed when complete, and an existing backup is never overwritten. The newest
+10 automatic backups (before a mod, before a restore) are kept; manual backups
+are never deleted automatically, and folders you put there yourself are left
+alone. **Delete** removes one backup, manual or automatic, after a confirmation
+("This can't be undone"); the backup staged for a restore cannot be deleted until
+that restore is cancelled.
+
+**Restore** asks for confirmation and then stages the restore: the game keeps
+its save files open while it runs, so the files are replaced at the next start,
+before the game loads any save. The Restart required notice offers a restart
+(on Android, restart the app yourself); **Cancel restore** undoes the choice.
+At that start the current save is backed up first ("Before a restore"), so a
+restore can itself be undone. If the restore fails, the save folder stays as it
+was and the Mods tab says why. Backups and restores are logged with the
+`[save-backup]` prefix.
+
+Package manifests and catalogue entries mark a mod with `"experimental": true`
+(optional, default `false`; older catalogues without the field keep working). A
+package installed from an experimental catalogue entry counts as experimental
+even if its own manifest predates the field.
+
+Profiles (More > Profiles) save package switches/configuration and built-in
+choices. **Copy current** creates another profile from the name typed next to it;
+choose the active one in the Profile list. Other profiles can be deleted; the
+active one can't. **Switch all mods off** (More) covers both built-ins and
+external packages. Explicit
 startup environment values, including zero, override saved choices at startup.
 
 Storage is `<host config directory>/ModManager`: `Mods/<id>/manifest.json` plus
@@ -89,9 +285,15 @@ are preserved. Game assets and saves are never committed, uploaded or redistribu
 Test aids (only with `WWHD_NO_HOST_INPUT`): `WWHD_TEST_TRUST_NATIVE_MODS=id[,id…]`
 treats those native packages as confirmed without writing `native_trust`; it
 also needs an explicit `WWHD_MOD_MANAGER_DIR`, so it never applies to a player's
-storage. `WWHD_TEST_MOD_ENABLE=<id>` ticks that package's checkbox once when the
-Mods tab is drawn (with `WWHD_TEST_OVERLAY=open:mods`), which shows the
-confirmation for an unconfirmed native package.
+storage. With an explicit `WWHD_MOD_MANAGER_DIR` and `WWHD_TEST_OVERLAY=open:mods`:
+`WWHD_TEST_MOD_ENABLE=<id>` flips that mod's switch once (with
+`WWHD_TEST_GAME_SOURCES=<json>` it first sets the GameCube game the review asks
+for); `WWHD_TEST_CATALOGUE_INSTALL=<id>` switches on that catalogue mod once the
+list is loaded; `WWHD_TEST_MOD_SETUP=<id>` accepts that mod's review;
+`WWHD_TEST_MOD_DISABLE`, `WWHD_TEST_MOD_REMOVE` (accepts the confirmation) and
+`WWHD_TEST_MOD_INSTALL=<path>` (More > Install from a file) do the same for those
+actions; `WWHD_TEST_MODS_VIEW=more|page:<id>` opens that area or page. The log
+says `[catalogue] installed <id>`, `[mods] <id> is on` and `[setup test] ready <id>`.
 
 ## Native mod SDK v1
 
@@ -117,15 +319,21 @@ of the PowerPC guest mod prototype, [mod-sdk-v2.md](mod-sdk-v2.md).) It does **n
 translated-function interception, PPC instruction patch execution, texture
 providers, or compatibility with Zelda64Recomp/BlueWake packages.
 
+Manager versions: 1.1 content mods, 1.2 Cemu graphics packs, 1.3 setup steps, 1.4 the
+`experimental` flag, 1.5 the region-neutral `game_id` `"wwhd"` (imports written by 1.5 use it and
+require 1.5.0, so an older build shows "Requires mod manager 1.5.0" instead of "targets another game").
+Manifests with `"wwhd-usa"` keep loading.
+
 Package manifest fields:
 
 | Field | Meaning |
 | --- | --- |
 | `format_version` | `1` |
 | `id`, `name`, `version` | Stable lowercase ASCII identifier, display name, three-part version |
-| `game_id` | `wwhd-usa` (the runtime also verifies its exact RPX entry) |
+| `game_id` | `wwhd`: this game, any region (manager 1.5; give `"minimum_manager_version": "1.5.0"` with it). `wwhd-usa` from older manifests is still accepted. Region checks stay where they apply: the title ID of Cemu and SDCafiine packs and the game build of code mods; the runtime also verifies its exact RPX entry |
 | `author`, `description` | Optional display metadata |
 | `minimum_manager_version` | Optional three-part minimum |
+| `experimental` | Optional `true` for untested mods: hidden by default, enabling backs up the saves first (manager 1.4) |
 | `kind` | `native`, `settings`, `content` or `cemu` |
 | `abi_version`, `binaries` | Native ABI `1`; platform-to-relative-library map |
 | `content_dir` | Content package: relative folder holding game-relative replacement files |
@@ -164,6 +372,23 @@ Cemu and content packs: legacy imports, loose `.pack` files, preset validation,
 replacement conflicts, the rejection of code, shader, rule and region mismatches,
 and the restart-only lifecycle; such packages never ask for a native confirmation.
 
+`mods_model` checks the Mods tab's state model without UI: every row status and
+its enabled/loaded combinations, which actions a mod's page offers and which
+explanation it shows instead, the install flow (review, progress, done or failed,
+Try again keeping completed steps, Cancel, restart needed), the progress and time
+estimates, and the catalogue list: cache shown at once, background check, offline
+fallback and the once-per-session and hourly limits. `mod_oneclick_flow` drives the
+real tab offscreen with mouse clicks on synthetic packages: switch on, the one
+review (GameCube game picker, choices), progress, failure and Try again, Cancel,
+the code-mod rebuild with its restart and resume, a catalogue download, and experimental mods (installed
+from the catalogue, switched on, updated while on: exactly one save backup before it is switched on;
+a backup that can't be made stops with its reason). Its `tabs` scenario checks that every built-in mod is listed under Built-in only, and the installed and
+the downloadable catalogue mod under Community only, and that the chosen sub-tab is kept. Its `ids`
+scenario opens every view of the tab (both lists, More with every section
+open, every mod page, the reviews and the progress states), hovers it all over and fails when
+Dear ImGui reports two items with one ID. Release builds turn Dear ImGui's red "conflicting ID" box
+off (`io.ConfigDebugHighlightIdConflicts`); debug builds and the tests keep it.
+
 `mod_content_startup`, `mod_cemu_startup` and `mod_cemu_backend` start the
 manager on prepared storage and check startup activation, read-only routing,
 volume boundaries, case-insensitive lookup and that content stays active when a
@@ -176,12 +401,13 @@ these are host tests, not proof that a given community mod looks right in game.
 
 ## Existing model, texture and UI mods (manager 1.1)
 
-Use **Mods → Installed packages → Choose folder… / Choose package… → Install package**.
+Use **Mods → More → Install from a file or folder**.
 Select a single local pack with a `content/` directory, or its ZIP. Installation
 starts disabled. Enable it and restart the game. Disable it and restart to restore
 original reads; then it can be updated or removed. Profiles choose the next
 launch's content set. Active content is deliberately immutable for the session.
-Content packages contain no native code and never ask for a native confirmation.
+Content payloads need no native-code confirmation. A content package with a
+preparation tool asks for confirmation before that tool runs.
 
 The importer accepts a simple `MyMod/content/...` tree, a single-pack SDCafiine
 layout, and file-only Cemu packs with Definition metadata. Explicit SDCafiine
@@ -238,8 +464,8 @@ An explicit package uses, for example:
   "id": "my-model",
   "name": "My local model replacement",
   "version": "1.0.0",
-  "game_id": "wwhd-usa",
-  "minimum_manager_version": "1.1.0",
+  "game_id": "wwhd",
+  "minimum_manager_version": "1.5.0",
   "kind": "content",
   "content_dir": "content"
 }
@@ -260,8 +486,7 @@ resolver. Missing paths fall through unchanged. Directory enumeration retains
 original names but reports replacement sizes for replaced entries: this adapter
 targets replacement of existing resources, not discovery of new files or
 deletion/hiding. Conflicting enabled packages are rejected, rather than silently
-choosing a load order. Content packages currently cannot declare runtime options
-or dependencies. Native packages can depend on content packages, but wait until
+choosing a load order. Content packages can declare setup options, but cannot declare dependencies. Native packages can depend on content packages, but wait until
 the required startup content is active.
 
 Installed payloads should not be edited externally while the game runs.
@@ -273,8 +498,8 @@ files are not changed, and game assets stay outside Git.
 
 ## Cemu graphics packs (manager 1.2)
 
-Import one Cemu pack folder or ZIP with Mods → Installed packages → Install
-package. The adapter reads `rules.txt` versions 4/5, checks the USA WWHD title
+Import one Cemu pack folder or ZIP with Mods → More → Install from a file or
+folder. The adapter reads `rules.txt` versions 4/5, checks the USA WWHD title
 ID, and exposes each preset category as a dropdown. Enable it and restart.
 Changing a preset, disabling or switching profiles also requires a restart. The
 active snapshot stays fixed until exit; active pack files cannot be replaced or
@@ -311,9 +536,25 @@ replacement adapter documented above.
 
 Preset expressions support finite arithmetic, parentheses, variables,
 min/max/floor/ceil/round; missing variables and cycles are rejected. Dimension
-limits are 1–16384 and aspect ratios 1–4. Overlapping rules from different
-enabled packs and duplicate shader variants are rejected. Both imported presets
-and changes to an enabled pack are checked before saving the profile.
+limits are 1–16384 and aspect ratios 1–4. Packs that change the same shader
+variant, overlap graphics rules or both set the aspect ratio cannot be enabled
+together. The mod's page shows “Can't be used with …” under Details. Switching on a conflicting
+pack opens a **Switch / Cancel** dialog; Switch saves the new choice and disables
+its conflicting packs in one change. Cancel leaves the profile alone. The dialog
+supports mouse, keyboard and controller, with Cancel focused initially.
+
+A pack switched on or off shows *Restart to apply* in the list. A
+"Restart to apply: …" line with **Restart now** appears at the top of Mods. Switching packs keeps
+the current pack active until restart, then applies the chosen pack; details
+continue to show applied/rejected shader counts as shaders are encountered.
+
+Old profiles with conflicting packs are repaired and saved before activation:
+the currently active pack wins, otherwise the earliest recorded enable wins.
+Legacy profiles without enable history use package ID as a deterministic tie
+breaker. A one-time, dismissible notice at the top of Mods names each disabled pack. Profile
+switches and preset changes use the same repair rule. Independent packs still
+work together. There is no pack order or partial mixing: **a combined pack is
+needed to get both effects** from conflicting packs.
 
 Primary format reference: [Cemu graphics pack documentation](https://github.com/cemu-project/cemu_graphic_packs/wiki/How-to-create-Graphic-Packs).
 Compatibility was checked against the public [WWHD Resolution pack](https://github.com/cemu-project/cemu_graphic_packs/tree/master/Resolutions/WindWakerHD_Resolution)
@@ -321,3 +562,55 @@ and [WWHD Contrasty pack](https://github.com/cemu-project/cemu_graphic_packs/tre
 their sources are not part of the repository, and the host tests use synthetic
 fixtures only. This covers the tested adapter paths, not universal Cemu
 graphics-pack compatibility or the visual accuracy of every preset.
+
+## Catalogue transport dependencies
+
+Catalogue downloads use the operating system's certificate validation and accept
+HTTPS URLs only, including redirects. Downloads have a byte limit, five-redirect
+limit and a two-minute transfer deadline; failed transfers remove partial files.
+macOS uses Foundation, Windows uses WinHTTP and Android uses
+HttpsURLConnection. Android requires the INTERNET permission for explicit
+catalogue requests. Linux uses the system `libcurl.so.4`, loaded when a download
+is requested. Install the distribution's `libcurl4` package to enable downloads;
+local package installation and offline startup do not load it. Linux developers
+need libcurl headers (`libcurl4-openssl-dev` on Ubuntu). The build does not link
+libcurl into the executable.
+
+The catalogue fills **Available to download** in Mods. Opening the Mods tab
+shows the last successfully loaded list from the local cache at once and checks
+for new mods in the background, without blocking the menu: once per session, again
+when the last check is more than an hour old while the game runs, and when the
+small Refresh (↻) next to "Show experimental mods" is pressed. While it checks,
+"Checking for new mods…" is shown; when it fails, the cached list stays with one
+quiet line, "Couldn't check for new mods — showing the last list." and **Retry**.
+On first use without a cache and without a network: "Couldn't load the mod list.
+Check your internet connection." and Retry.
+
+A check fetches only the public `index.json` (no IDs, no personal or game data);
+packages are downloaded only by Install or Update. **More > Mod list** says so and
+has **Check for new mods automatically** (on by default; off, the list comes from
+the cache until Refresh), the list's address with **Use this list** and **Reset
+to default**, and the last check's technical error. The address is saved in local
+settings; `WWHD_MOD_CATALOGUE` overrides it and can name a local index for
+fixtures. A search field appears when the list has more than eight entries.
+
+A mod that isn't downloaded yet shows *Not downloaded* with its download size
+(and "code mod" where that applies); its page has the description and, under
+Details, version, authors, licences and the kind of mod. Incompatible entries say
+"Not available for this version of the game." next to a switch that can't be
+used. Update is offered on the mod's page for a newer three-part version and uses the
+same review and progress view. An update ends in the mod's state before it: a mod
+that is off is downloaded, checked and prepared (its tools run; its code mod is
+built when code-mod support is there, otherwise when it is switched on) and stays
+off ("… is updated. It stays off."); a mod that is on is offered the update only
+where it can be switched off and on while the game runs (native and settings
+mods): it is switched off for the update and on again at the end. A mod loaded at
+the next start (code mods, content and graphics packs) is switched off first, and
+updated after the restart that unloads it.
+Install verifies the downloaded size and SHA-256 plus package/index metadata,
+then uses the manager's atomic installer, then continues with the setup and
+switches the mod on.
+Successful checks save validated metadata in the manager’s Catalogue folder.
+Cache keys are bound to the selected URL or fixture path. Failed or invalid
+checks keep the previous cache; installed packages remain available without a
+network connection.

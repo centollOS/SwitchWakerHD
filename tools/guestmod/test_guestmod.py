@@ -121,7 +121,7 @@ WWHD_HOOK(0x0240EBB0, mapped, (void* actor)) {
         return os.path.join(d, "mod.elf")
 
     def test_examples_build(self):
-        for mod in ("heart-ticker", "addcalc-replace"):
+        for mod in ("heart-ticker", "addcalc-replace", "hud-demo", "button-icons", "hud-cost"):
             with tempfile.TemporaryDirectory() as d:
                 pkg = os.path.join(d, "pkg")
                 os.makedirs(pkg)
@@ -172,8 +172,26 @@ WWHD_REPLACE(0x02005678, void, repl, (void)) { ptr = helper; orig_fn(); wwhd_log
     def test_host_services_compile(self):
         src = r'''
 #include "wwhd_guest.h"
+_Static_assert(sizeof(wwhd_hud_element)==72, "HUD wire ABI");
+_Static_assert(WWHD_HUD_API_VERSION==2, "HUD capability version");
+static void draw(u32 list) {
+    static wwhd_hud_element element = {.kind=WWHD_HUD_RECT,.w=10,.h=20,.thickness=1,.u1=1,.v1=1,.rgba=0xFFFFFFFF};
+    wwhd_hud_emit(list,&element);
+    element.kind=WWHD_HUD_CLIP_PUSH;wwhd_hud_clip(list,&element);
+    element.kind=WWHD_HUD_CLIP_POP;wwhd_hud_clip(list,&element);
+}
 WWHD_HOOK(0x02000000, all_services, (void)) {
+    static short pcm[2]={-1234,1234};
+    int stream=wwhd_audio_open(48000,2);
+    wwhd_audio_submit(stream,pcm,1,2);wwhd_audio_available(stream);
+    wwhd_audio_close(stream);wwhd_audio_epoch();
+    wwhd_hud_register(draw,WWHD_HUD_BOTH);
+    u32 image=wwhd_hud_texture(WWHD_HUD_PACKAGE,"assets/original.png");
+    wwhd_hud_release(image);
+    wwhd_log_int("hud epoch",(int)wwhd_hud_epoch());
     char* p = wwhd_malloc(64);
+    wwhd_setting_get("input.face_layout",WWHD_SETTING_STRING,p,64);
+    wwhd_log_int("settings revision",(int)wwhd_setting_changed("input.face_layout"));
     wwhd_input_state pad;
     wwhd_input_read(&pad);
     wwhd_config_string("choice", p, 64);
@@ -182,6 +200,25 @@ WWHD_HOOK(0x02000000, all_services, (void)) {
     wwhd_log_int("step", (int)wwhd_logic_step());
     wwhd_file_write("progress.bin", p, 64);
     wwhd_file_read("progress.bin", p, 64);
+    if (wwhd_mail_send("hello", "A friend", "Text") == WWHD_MAIL_WAITING) wwhd_log("sent");
+    wwhd_log_int("letter", wwhd_mail_state("hello"));
+    if (wwhd_chart_give("tale") == WWHD_CHART_OWNED) wwhd_log("given");
+    wwhd_chart_mark("tale", "start", WWHD_CHART_COLUMN_X('D'), WWHD_CHART_ROW_Z(2), WWHD_CHART_ICON_STORY, "Windfall");
+    wwhd_log_int("chart", wwhd_chart_state("tale"));
+    wwhd_chart_unmark("tale", 0);
+    wwhd_chart_finish("tale");
+    wwhd_quest_define("tale", "A tale", 0, 0);
+    wwhd_quest_step("tale", 1, "Go", "Windfall");
+    wwhd_quest_place("tale", 0.0f, 0.0f);
+    wwhd_quest_no_place("tale");
+    wwhd_quest_known("tale", "Known");
+    wwhd_quest_portrait("tale", "assets/p.png");
+    wwhd_log_int("quest", wwhd_quest_state("tale"));
+    wwhd_quest_carry("tale", 1);
+    wwhd_quest_talk("tale", 1, "windfall-um1", "Hello", 6);
+    wwhd_quest_set_flag("tale", 1, 1);
+    wwhd_log_int("flag", wwhd_quest_flag("tale", 1));
+    wwhd_quest_done("tale");
     wwhd_free(p);
 }
 '''
@@ -191,10 +228,68 @@ WWHD_HOOK(0x02000000, all_services, (void)) {
             for address, (kind, name) in t.imports.items():
                 if kind == "svc":
                     self.assertIn("c->pc = 0x%08Xu;" % address, translated, name)
-            self.assertIn("wwhd_file_write", t.services)
+            for name in ("wwhd_audio_open","wwhd_audio_submit","wwhd_audio_available","wwhd_audio_close","wwhd_audio_epoch","wwhd_file_write","wwhd_hud_register","wwhd_hud_emit","wwhd_hud_texture",
+                         "wwhd_hud_release","wwhd_hud_epoch","wwhd_hud_clip","wwhd_setting_get","wwhd_setting_changed",
+                         "wwhd_mail_send","wwhd_mail_state","wwhd_chart_give","wwhd_chart_finish","wwhd_chart_state",
+                         "wwhd_chart_mark","wwhd_chart_unmark","wwhd_quest_define","wwhd_quest_step","wwhd_quest_place",
+                         "wwhd_quest_no_place","wwhd_quest_known","wwhd_quest_portrait","wwhd_quest_done","wwhd_quest_state","wwhd_quest_carry","wwhd_quest_talk",
+                         "wwhd_quest_set_flag","wwhd_quest_flag"):
+                self.assertIn(name,t.services)
             Path(d, "manifest.json").write_text(json.dumps({"kind": "guest", "id": "services", "guest": {"api_version": 1}}))
             result = builder.build(d, str(Path(d, "cache")), 0x7F000000, builder.default_cc(), str(Path(REPO, "runtime/include")))
             self.assertTrue(result["ok"])
+
+    def test_clip_service_refuses_old_host(self):
+        src = r'''
+#include "wwhd_guest.h"
+WWHD_HOOK(0x02000000, clipping, (void)) { wwhd_hud_clip(0,0); }
+'''
+        driver = r'''
+#include "wwhd_guest_abi.h"
+#include <assert.h>
+#include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+static int supported;
+static void clip(Cpu* cpu) { (void)cpu; }
+static PpcFunc service(const char* name) {
+    return supported && !strcmp(name,"wwhd_hud_clip") ? clip : 0;
+}
+int main(int argc,char** argv) {
+    assert(argc==2);
+#ifdef _WIN32
+    HMODULE library=LoadLibraryA(argv[1]);assert(library);
+    WWHDGuestInitV1 init=(WWHDGuestInitV1)GetProcAddress(library,WWHD_GUEST_INIT_SYMBOL);
+#else
+    void* library=dlopen(argv[1],RTLD_NOW);assert(library);
+    WWHDGuestInitV1 init=(WWHDGuestInitV1)dlsym(library,WWHD_GUEST_INIT_SYMBOL);
+#endif
+    assert(init);
+    WWHDGuestHostV1 host={0};host.size=sizeof(host);host.abi_version=WWHD_GUEST_ABI_VERSION;host.service=service;
+    assert(!init(&host)); // v1 host without clipping cannot load this module
+    supported=1;assert(init(&host));
+#ifdef _WIN32
+    FreeLibrary(library);
+#else
+    dlclose(library);
+#endif
+    return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as d:
+            self.build_elf(src,d)
+            Path(d,'manifest.json').write_text(json.dumps({'kind':'guest','id':'clip-capability','guest':{'api_version':1}}))
+            result=builder.build(d,str(Path(d,'cache')),0x7F000000,builder.default_cc(),str(Path(REPO,'runtime/include')))
+            source=Path(d,'driver.c');source.write_text(driver)
+            executable=Path(d,'driver.exe' if os.name=='nt' else 'driver')
+            command=builder.default_cc()+['-O2','-I',str(Path(REPO,'runtime/include')),str(source),'-o',str(executable)]
+            if sys.platform.startswith('linux'):
+                command.append('-ldl')
+            subprocess.run(command,check=True)
+            subprocess.run([str(executable),result['module']],check=True)
 
     def test_register_pair_module_executes(self):
         # Leaf guest functions need no guest RAM: this executes the actual translated module.
@@ -272,6 +367,37 @@ class BuildInterfaceTest(unittest.TestCase):
             installed.mkdir(parents=True)
             (installed / "wwhd_guest_abi.h").write_text("/* ABI fixture */")
             self.assertEqual(builder.default_include(), str(installed))
+
+    def test_read_only_batch_cache_validation(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); pkg = root / "pkg"; pkg.mkdir()
+            (pkg / "manifest.json").write_text(json.dumps({"id": "fixture", "kind": "guest", "guest": {"api_version": 1}}))
+            (pkg / "mod.elf").write_bytes(b"fixture ELF")
+            include = root / "include"; include.mkdir()
+            for name in ("ppc.h", "wwhd_guest_abi.h"):
+                shutil.copy(Path(REPO, "runtime", "include", name), include)
+            cc = ["clang"]; base = 0x7F000000
+            key = builder.cache_key(b"fixture ELF", "fixture", base, cc, include, version="compiler one")
+            module = root / "cache" / key / ("fixture" + builder.module_ext())
+            module.parent.mkdir(parents=True); module.write_bytes(b"fixture module")
+            request = {"id": "fixture", "package": str(pkg), "base": base, "module": str(module)}
+            with mock.patch.object(builder.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="compiler one")) as probe:
+                result = builder.check_cached([request, {**request, "id": "other"}], root / "cache", cc, include)
+                self.assertEqual(result["valid"], ["fixture"])
+                self.assertEqual(probe.call_count, 1)  # one version probe, no compile per package
+                self.assertEqual(probe.call_args.args[0], ["clang", "--version"])
+                with mock.patch.object(builder.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="compiler two")):
+                    self.assertEqual(builder.check_cached([request], root / "cache", cc, include)["valid"], [])
+                for changed in ({"base": base + 65536}, {"module": str(root / "unrelated")}, {"base": True}):
+                    self.assertEqual(builder.check_cached([{**request, **changed}], root / "cache", cc, include)["valid"], [])
+                (pkg / "mod.elf").write_bytes(b"changed ELF")
+                self.assertEqual(builder.check_cached([request], root / "cache", cc, include)["valid"], [])
+                (pkg / "mod.elf").write_bytes(b"fixture ELF")
+                with (include / "ppc.h").open("a") as header:
+                    header.write("\n/* ABI changed */\n")
+                self.assertEqual(builder.check_cached([request], root / "cache", cc, include)["valid"], [])
+            self.assertEqual(module.read_bytes(), b"fixture module")
+            self.assertEqual([p.name for p in (root / "cache").iterdir()], [key])
 
     def test_package_paths_and_ids(self):
         with tempfile.TemporaryDirectory() as d:

@@ -2,6 +2,7 @@
 #pragma once
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 
 struct LatteFetchShader;
@@ -34,6 +35,10 @@ uint32_t color_buffer_address(const GX2::GX2ColorBuffer* cb);
 // the layers a color buffer is drawn as: a 2D array's slices, a 3D buffer's depth slices at its view's level, else 1
 uint32_t color_buffer_slices(const GX2::GX2ColorBuffer* cb);
 LatteFetchShader* build_fetch_shader(uint32_t program);  // from our encoded fetch "program"
+// Local head-start semantic attributes, never guest GPU instructions. Validates
+// the whole WWFA0001 payload before constructing a parsed fetch shader.
+LatteFetchShader* decode_fetch_attributes(uint32_t program, uint32_t size, uint64_t* sourceHash);
+void normalize_fetch_shader(LatteFetchShader* fetch);
 // Uncapped (debug only: settings overlay > Graphics; WWHD_UNCAPPED=1 for any renderer, and the older
 // WWHD_VK_UNCAPPED=1 with Vulkan): flips no longer wait for the virtual vsync and presentation no
 // longer waits for the display (Metal: displaySyncEnabled off; Vulkan: immediate or mailbox), so the
@@ -41,6 +46,10 @@ LatteFetchShader* build_fetch_shader(uint32_t program);  // from our encoded fet
 // Not saved.
 bool uncapped();
 void set_uncapped(bool on);
+// Paced frame interpolation at 120/240 fps (interp.cpp): the time the next logic step's frame is due
+// on the virtual vsync (its step's slot, gx2/vsync_pacing.h); false if there is none yet
+bool next_step_time(std::chrono::steady_clock::time_point& at);
+void drop_step_slot();  // a logic pass more than a step late: the schedule starts anew
 }  // namespace gx2
 
 // The renderer backend (Metal). All calls come from the thread executing GX2

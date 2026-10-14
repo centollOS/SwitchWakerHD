@@ -8,6 +8,7 @@
 #include <Carbon/Carbon.h>  // kVK_Escape
 
 #include <atomic>
+#include "../input_map.h"
 
 #include "mods.h"
 #include "runtime.h"
@@ -29,7 +30,7 @@ void capture() {
         CGAssociateMouseAndMouseCursorPosition(false);
         [NSCursor hide];
     }
-    LOG("[mods] mouse captured (Esc or middle click releases)");
+    LOG("[mods] mouse captured (Esc releases; unbound middle click also releases)");
 }
 void release_now() {
     if (!g_captured.exchange(false)) return;
@@ -37,6 +38,7 @@ void release_now() {
         CGAssociateMouseAndMouseCursorPosition(true);
         [NSCursor unhide];
     }
+    input::release_mouse_bindings();
     mouse_button(0, false);
     mouse_button(1, false);
     LOG("[mods] mouse released");
@@ -88,8 +90,19 @@ void mouse_init(void* tv_window) {
     g_tv.acceptsMouseMovedEvents = YES;
     NSEventMask mask = NSEventMaskMouseMoved | NSEventMaskLeftMouseDragged | NSEventMaskRightMouseDragged |
                        NSEventMaskOtherMouseDragged | NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp |
-                       NSEventMaskRightMouseDown | NSEventMaskRightMouseUp | NSEventMaskOtherMouseDown | NSEventMaskScrollWheel;
+                       NSEventMaskRightMouseDown | NSEventMaskRightMouseUp | NSEventMaskOtherMouseDown | NSEventMaskOtherMouseUp | NSEventMaskScrollWheel;
     [NSEvent addLocalMonitorForEventsMatchingMask:mask handler:^NSEvent*(NSEvent* e) {
+        const bool eligible = in_tv(e) && mouse_captured() && !overlay::captures() &&
+            !gfx::drc_overlay_hit((__bridge void*)g_tv, e.locationInWindow.x, e.locationInWindow.y);
+        if (e.type == NSEventTypeLeftMouseDown || e.type == NSEventTypeRightMouseDown || e.type == NSEventTypeOtherMouseDown ||
+            e.type == NSEventTypeLeftMouseUp || e.type == NSEventTypeRightMouseUp || e.type == NSEventTypeOtherMouseUp) {
+            const bool down = e.type == NSEventTypeLeftMouseDown || e.type == NSEventTypeRightMouseDown || e.type == NSEventTypeOtherMouseDown;
+            input::mouse_binding_button(0, (int)e.buttonNumber, down, eligible);
+        }
+        if (e.type == NSEventTypeScrollWheel) {
+            float dy = (float)e.scrollingDeltaY; if (e.hasPreciseScrollingDeltas) dy /= 10.f;
+            input::mouse_binding_wheel(dy, eligible && !first_person_wheel());
+        }
         if (overlay::captures()) return e;  // the settings overlay (or the text prompt) has the mouse (gfx/overlay_appkit.mm)
         if (e.type == NSEventTypeScrollWheel) {
             if (first_person_wheel() && (in_tv(e) || mouse_captured())) {
@@ -118,6 +131,7 @@ void mouse_init(void* tv_window) {
             }
             return e;
         }
+        if (!in_tv(e)) return e;
         switch (e.type) {
         case NSEventTypeMouseMoved:
         case NSEventTypeLeftMouseDragged:
@@ -129,7 +143,10 @@ void mouse_init(void* tv_window) {
         case NSEventTypeLeftMouseUp: mouse_button(0, false); break;
         case NSEventTypeRightMouseDown: mouse_button(1, true); break;
         case NSEventTypeRightMouseUp: mouse_button(1, false); break;
-        case NSEventTypeOtherMouseDown: release_now(); break;
+        case NSEventTypeOtherMouseDown:
+            // Cocoa previously released for every "other" button. Keep that when unbound.
+            if (e.buttonNumber >= 5 || input_map::key_users(input_map::current(), input_map::kMouse1+(int)e.buttonNumber).empty()) release_now();
+            break;
         default: break;
         }
         return nil;

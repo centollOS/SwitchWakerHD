@@ -1,9 +1,12 @@
+#include "deferred_dispatch.h"
+#include "../../exception_report.h"
 #include "bc_decode.h"
 #include "bc_reference.h"
 #include "bc_shader.h"
 #include "shaders.h"
 #include "runtime.h"
 #include "render_prof.h"
+#include "worker_metrics.h"
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -17,7 +20,7 @@ VkPipeline pipeline = VK_NULL_HANDLE;
 bool env_on(const char* key) { const char* s=std::getenv(key); return s && std::strcmp(s,"0"); }
 void initialize() {
     if(pipeline)return;
-    if(!R.computeQueue)throw std::runtime_error("BC fallback requires a compute-capable graphics queue");
+    if(!R.computeQueue)exception_report::raise("BC fallback requires a compute-capable graphics queue");
     VkDescriptorSetLayoutBinding bindings[2]{};
     for(uint32_t n=0;n<2;++n)bindings[n]={n,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_COMPUTE_BIT,nullptr};
     VkDescriptorSetLayoutCreateInfo di{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -28,12 +31,20 @@ void initialize() {
     li.setLayoutCount=1;li.pSetLayouts=&descriptors;li.pushConstantRangeCount=1;li.pPushConstantRanges=&push;
     vk_check(vkCreatePipelineLayout(R.device,&li,nullptr,&layout),"BC pipeline layout");
     std::string error;auto spirv=vk::compile_compute(bc::shader,&error);
-    if(spirv.empty())throw std::runtime_error("BC compute compile: "+error);
+    if(spirv.empty())exception_report::raise("BC compute compile: "+error);
     VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};mi.codeSize=spirv.size()*4;mi.pCode=spirv.data();
     VkShaderModule module=VK_NULL_HANDLE;vk_check(vkCreateShaderModule(R.device,&mi,nullptr,&module),"BC shader module");
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};ci.layout=layout;
     ci.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,nullptr,0,VK_SHADER_STAGE_COMPUTE_BIT,module,"main",nullptr};
+    const bool tracing=stutter::trace().enabled();
+    const auto cpuStart=tracing?stutter::thread_cpu_now():0;
+    const auto started=tracing?stutter::now():0;
     VkResult result=vkCreateComputePipelines(R.device,R.pipelineCache,1,&ci,nullptr,&pipeline);
+    if(tracing) {
+        const auto ended=stutter::now();
+        stutter::trace().add("bc_decode_compute_pipeline",R.frame,0,started,ended,int(result),
+                             stutter::cpu_elapsed(cpuStart));
+    }
     vkDestroyShaderModule(R.device,module,nullptr);vk_check(result,"BC compute pipeline");
 }
 Buffer dispatch(const std::vector<uint8_t>& blocks,uint32_t w,uint32_t h,uint32_t slices,uint32_t mode,bool readback) {
@@ -41,16 +52,16 @@ Buffer dispatch(const std::vector<uint8_t>& blocks,uint32_t w,uint32_t h,uint32_
     uint64_t pixels=uint64_t(w)*h*slices;
     if(!pixels||pixels>UINT32_MAX/4||pixels*4>R.properties.limits.maxStorageBufferRange||
        blocks.size()>R.properties.limits.maxStorageBufferRange)
-        throw std::runtime_error("BC decode exceeds device buffer limits");
+        exception_report::raise("BC decode exceeds device buffer limits");
     const uint32_t groups=uint32_t((pixels+63)/64);
     const uint32_t gx=std::min(groups,R.properties.limits.maxComputeWorkGroupCount[0]);
     const uint32_t gy=(groups+gx-1)/gx;
-    if(gy>R.properties.limits.maxComputeWorkGroupCount[1])throw std::runtime_error("BC decode dispatch exceeds device limits");
+    if(gy>R.properties.limits.maxComputeWorkGroupCount[1])exception_report::raise("BC decode dispatch exceeds device limits");
     end_encoder();auto cmd=command_buffer();
     Buffer input=create_buffer(blocks.size(),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     Buffer output=create_buffer(pixels*4,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         readback?VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT:VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if(!input.mapped)throw std::runtime_error("BC input buffer not mapped");
+    if(!input.mapped)exception_report::raise("BC input buffer not mapped");
     std::memcpy(input.mapped,blocks.data(),blocks.size());
     VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};ai.descriptorPool=R.descriptorPool;ai.descriptorSetCount=1;ai.pSetLayouts=&descriptors;
     VkDescriptorSet set=VK_NULL_HANDLE;vk_check(vkAllocateDescriptorSets(R.device,&ai,&set),"BC descriptor set");
@@ -59,10 +70,10 @@ Buffer dispatch(const std::vector<uint8_t>& blocks,uint32_t w,uint32_t h,uint32_
     for(uint32_t i=0;i<2;++i){writes[i]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};writes[i].dstSet=set;writes[i].dstBinding=i;writes[i].descriptorCount=1;writes[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;writes[i].pBufferInfo=&buffers[i];}
     vkUpdateDescriptorSets(R.device,2,writes,0,nullptr);
     // Coherent host writes are made available by submission. The input is unique to this dispatch.
-    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline);
-    vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,layout,0,1,&set,0,nullptr);
-    uint32_t params[]={w,h,slices,mode};vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof params,params);
-    vkCmdDispatch(cmd,gx,gy,1);
+    record::vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline);
+    record::vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,layout,0,1,&set,0,nullptr);
+    uint32_t params[]={w,h,slices,mode};record::vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof params,params);
+    record::vkCmdDispatch(cmd,gx,gy,1);
     derive_dependency(output.use,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_WRITE_BIT);
     transition_buffer(output,VK_PIPELINE_STAGE_TRANSFER_BIT|(readback?VK_PIPELINE_STAGE_HOST_BIT:0),
                       VK_ACCESS_TRANSFER_READ_BIT|(readback?VK_ACCESS_HOST_READ_BIT:0));
@@ -72,10 +83,10 @@ void verify(Buffer output,const std::vector<uint8_t>& blocks,uint32_t w,uint32_t
     flush();
     auto reference=bc::decode(blocks,w,h,slices,mode);
     auto bytes=static_cast<const uint8_t*>(output.mapped);
-    if(!bytes)throw std::runtime_error("BC verification buffer not mapped");
+    if(!bytes)exception_report::raise("BC verification buffer not mapped");
     for(size_t n=0;n<reference.size();++n)if(bytes[n]!=reference[n]) {
         LOG("[vulkan BC] mismatch mode=%u size=%ux%ux%u byte=%zu GPU=%u CPU=%u",mode,w,h,slices,n,bytes[n],reference[n]);
-        throw std::runtime_error("BC GPU/CPU verification mismatch");
+        exception_report::raise("BC GPU/CPU verification mismatch");
     }
 }
 }
@@ -95,7 +106,7 @@ void bc_decode_upload(Surface* s,uint32_t level,const std::vector<uint8_t>& bloc
     Buffer output=dispatch(blocks,w,h,slices,mode,check);
     VkBufferImageCopy copy{};bool volume=s->imageType==VK_IMAGE_TYPE_3D;
     copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,level,0,volume?1:slices};copy.imageExtent={w,h,volume?slices:1};
-    vkCmdCopyBufferToImage(command_buffer(),output.buffer,s->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+    record::vkCmdCopyBufferToImage(command_buffer(),output.buffer,s->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
     if(check)verify(output,blocks,w,h,slices,mode);
     defer_buffer(output);
     rprof::add_upload(rprof::kUpTexture,blocks.size());

@@ -52,6 +52,7 @@
 #include <CoreGraphics/CoreGraphics.h>
 #endif
 
+#include "../../../runtime/src/platform/appimage_notice.h"  // the v0.2.13 .data hint (issue #55)
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
@@ -347,6 +348,8 @@ static bool run_quick(const std::vector<std::string>& args) {
 // starting the built game
 
 static std::string g_exe, g_game_dir, g_data_dir;  // set when the game is ready to start
+static std::string g_exe_normal_path;                // the normal game (g_exe may be the decomp version)
+static std::string g_exe_normal() { return g_exe_normal_path; }
 
 // Replaces this process with the game (macOS, Linux; the Dock keeps showing "Wind Waker HD") or starts
 // it and returns (Windows). The game runs in the data folder (its crash logs go to data/captures).
@@ -440,6 +443,8 @@ struct App {
     std::string probe_msg;
     bool probe_ok = false;
     std::string disc_key_found, disc_key_file, common_key_found, common_key_file;
+    int disc_mode = 0;
+    char disc_paste[128] = {};
     int common_mode = 0;  // 0 key file, 1 paste
     char paste[128] = {};
     std::string keys_msg;
@@ -456,8 +461,15 @@ struct App {
     std::string package, game_dir;
     double free_bytes = 0, source_bytes = 0, toolchain_bytes = 0;
     bool opt_remove_toolchain = false, opt_shortcut = false;
+    bool code_mods = false;
+    // the decomp version (tools/installer/decomp_setup.py): offered on macOS in development builds only
+    bool decomp_offered = false, decomp = false, start_decomp = false;
+    std::string decomp_text, decomp_docs, decomp_exe, decomp_error;
+    bool prepare_shaders = true;
+    bool shader_skip_requested = false;
     std::deque<std::pair<std::string, std::string>> queue;  // requests to send one after another
     std::string after;                                       // then: play | quit | open
+    std::string leaving;  // Done screen: Play or Quit was pressed (its options are queued and no longer shown)
     bool exec_game = false;                                  // start the game when the window has closed
 
     // save import
@@ -470,6 +482,10 @@ struct App {
     bool log_scroll = false;
     std::string toast;
     double toast_until = 0;
+    // a v0.2.13 "<AppImage>.data" folder next to the AppImage (no longer used, issue #55): shown first,
+    // setup starts when it is acknowledged
+    std::string legacy_notice;
+    bool legacy_notice_open = false;
 
     // file dialogs answer on any thread
     std::mutex dlg_mu;
@@ -770,6 +786,10 @@ static void set_source(const std::string& path) {
     A.disc_key_found.clear();
     A.common_key_found.clear();
     A.disc_key_file.clear();
+    A.common_key_file.clear();
+    A.disc_mode = A.common_mode = 0;
+    SDL_memset(A.disc_paste, 0, sizeof A.disc_paste);
+    SDL_memset(A.paste, 0, sizeof A.paste);
     A.keys_msg.clear();
     request("probe", "\"path\":" + jstr(path));
 }
@@ -801,22 +821,29 @@ static void apply_dialog(const std::string& target, const std::string& path) {
 static void start_install(const std::string& source) {
     A.install_source = source;
     A.steps.clear();
+    A.shader_skip_requested = false;
     A.current = -1;
     std::string f = "\"source\":" + jstr(source);
+    f += std::string(",\"code_mods\":") + (A.code_mods ? "true" : "false");
+    if (A.decomp_offered) f += std::string(",\"decomp\":") + (A.decomp ? "true" : "false");
     if (source != "installed") f += ",\"path\":" + jstr(A.source_path);
+    f += std::string(",\"skip_shader_prebuild\":") + (A.prepare_shaders ? "false" : "true");
+    f += ",\"shader_prebuild_cancel\":" + jstr(A.data_dir + "/shader-prebuild-cancel");
     request("install", f);
     go(Screen::Installing);
 }
 
 static void check_keys() {
     std::string f = "\"image\":" + jstr(A.source_path);
-    if (!A.disc_key_file.empty()) f += ",\"disc_key_file\":" + jstr(A.disc_key_file);
+    if (A.disc_mode == 1 && A.disc_paste[0]) f += ",\"disc_key_hex\":" + jstr(A.disc_paste);
+    else if (A.disc_mode == 0 && !A.disc_key_file.empty()) f += ",\"disc_key_file\":" + jstr(A.disc_key_file);
     if (A.common_mode == 1 && A.paste[0]) f += ",\"common_key_hex\":" + jstr(A.paste);
     else if (A.common_mode == 0 && !A.common_key_file.empty()) f += ",\"common_key_file\":" + jstr(A.common_key_file);
     A.keys_msg = "Checking the keys...";
     request("check_keys", f);
     f.assign(f.size(), '\0');                              // the request held the pasted key
     SDL_memset(A.paste, 0, sizeof A.paste);                // sent once; never kept
+    SDL_memset(A.disc_paste, 0, sizeof A.disc_paste);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -853,7 +880,7 @@ static void handle_reply(const J& ev) {
             A.probe_msg = "Wii U disc image. The game files are extracted from it into this folder (about 1.7 GB).";
     } else if (cmd == "check_keys") {
         if (ok) {
-            A.keys_msg.clear();
+            A.keys_msg = ev.str("message");
             start_install("image");
         } else {
             A.keys_msg = ev.str("message");
@@ -867,6 +894,11 @@ static void handle_reply(const J& ev) {
             A.toolchain_bytes = ev.num("toolchain_bytes");
             A.game_dir = ev.str("game_dir", A.game_dir);
             g_exe = ev.str("exe"), g_game_dir = A.game_dir, g_data_dir = ev.str("data_dir", A.data_dir);
+            g_exe_normal_path = g_exe;
+            A.decomp_exe = ev.str("decomp_exe");
+            A.decomp_error = ev.str("decomp_error");
+            if (A.decomp_exe.empty()) A.start_decomp = false;
+            if (A.start_decomp) g_exe = A.decomp_exe;
             A.installed = true;
             addlog("Setup finished.");
             go(A.save_exists ? Screen::Done : Screen::Save);
@@ -902,6 +934,11 @@ static void handle_event(const J& ev) {
         A.app_dir = ev.str("app_dir");
         A.log_path = ev.str("log");
         A.platform = ev.str("platform");
+        A.code_mods = ev.boolean("code_mods");
+        A.decomp_offered = ev.boolean("decomp_offered");
+        A.decomp = ev.boolean("decomp");
+        A.decomp_text = ev.str("decomp_text");
+        A.decomp_docs = ev.str("decomp_docs");
         A.game_files = ev.boolean("game_files");
         A.save_exists = ev.boolean("save_exists");
         A.portable = ev.boolean("portable");
@@ -914,7 +951,11 @@ static void handle_event(const J& ev) {
         A.installed_version = A.installed ? inst->str("version") : "";
         if (A.installed) {
             A.result_app = inst->str("app");
+            A.decomp_exe = inst->str("decomp_exe");
+            A.start_decomp = inst->boolean("start_decomp") && !A.decomp_exe.empty();
             g_exe = inst->str("exe"), g_game_dir = inst->str("game_dir"), g_data_dir = A.data_dir;
+            g_exe_normal_path = g_exe;
+            if (A.start_decomp) g_exe = A.decomp_exe;
         }
         go(A.installed ? Screen::Menu : Screen::Welcome);
     } else if (e == "log") {
@@ -1110,16 +1151,47 @@ static void screen_welcome() {
     if (b == 1) go(Screen::Source);
 }
 
+static void code_mods_choice() {
+    checkbox("Prepare shaders now (recommended)", &A.prepare_shaders);
+    muted("You can skip this and rebuild the shader cache later in Graphics settings.");
+    checkbox("Build with code-mod support", &A.code_mods);
+    muted("For mods in the catalogue or Mods tab marked as code mods. Built-in mods, graphics packs and "
+          "content mods do not need this. The game code gets a small check in every function, which can "
+          "cost some performance, and the build takes a bit longer. You can switch this later in "
+          "Settings > Mods; that requires another rebuild.");
+    if (A.decomp_offered) {
+        checkbox("Also build the decomp version (experimental)", &A.decomp);
+        muted(A.decomp_text);
+        if (button("About the decomp version (docs/decomp-build.md)")) SDL_OpenURL(A.decomp_docs.c_str());
+    }
+    ImGui::Spacing();
+}
+
+// Menu and Done: which version Play starts (only when the decomp version is built)
+static void start_choice() {
+    if (A.decomp_exe.empty()) return;
+    bool v = A.start_decomp;
+    if (checkbox("Start the decomp version instead of the normal game", &v)) {
+        A.start_decomp = v;
+        request("start_decomp", std::string("\"on\":") + (v ? "true" : "false"));
+        g_exe = v ? A.decomp_exe : g_exe_normal();
+    }
+    muted("The decomp version runs the decompiled game functions as compiled source (experimental). Starting "
+          "Wind Waker HD with --decomp starts it once.");
+}
+
 static void screen_menu() {
     bool update = A.installed_version != A.version;
     page_header(A.portable ? "Wind Waker HD" : "Wind Waker HD is installed",
                 update ? "Prepared with " + A.installed_version + ". This release: " + A.version + "."
                        : "Version " + A.version + ", in " + home_folder());
+    code_mods_choice();
     float w = 520;
     if (update) {
         if (button("Update to this release", ImVec2(w, 0), true)) start_install("installed");
         muted("Rebuilds the game with this release. Your game files and saves are kept; no keys needed.");
     }
+    start_choice();
     if (button("Play", ImVec2(w, 0), !update)) A.after = "play";
     if (button("Repair", ImVec2(w, 0))) start_install("installed");
     muted("Rebuilds the game code from the installed game files.");
@@ -1149,6 +1221,7 @@ static void screen_source() {
         muted(A.source_path);
         ImGui::EndChild();
     }
+    code_mods_choice();
     int b = footer({"Back", "Next"}, 1, (A.probe_ok && !busy()) ? 0 : 2);
     if (b == 0) go(A.installed ? Screen::Menu : Screen::Welcome);
     if (b == 1) {
@@ -1164,22 +1237,32 @@ static std::string base_name(const std::string& p) {
 
 static void screen_keys() {
     page_header("Keys", base_name(A.source_path));
+    muted("Disc images need two keys; Cemu keeps them in keys.txt. Choose it once for both.");
+    muted("Or use Cemu: Convert to compressed Wii U archive (.wua), which needs no keys.");
     static const SDL_DialogFileFilter keyf[] = {{"Key files (.key, .bin, .txt)", "key;bin;txt"}, {"All files", "*"}};
 
     ImGui::BeginChild("disc", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
     heading("Disc key", 20);
-    if (!A.disc_key_file.empty()) {
-        mark(2);
-        ImGui::TextWrapped("Key file: %s", base_name(A.disc_key_file).c_str());
-    } else if (!A.disc_key_found.empty()) {
-        mark(2);
-        ImGui::TextWrapped("Found next to the image: %s", base_name(A.disc_key_found).c_str());
-    } else {
-        mark(3);
-        ImGui::TextWrapped("Not found next to the image. Choose the .key file that was dumped with this disc.");
+    int disc_mode = A.disc_mode;
+    radio("Key file##disc", &disc_mode, 0);
+    ImGui::SameLine(0, 30);
+    radio("Paste the key##disc", &disc_mode, 1);
+    if (disc_mode != A.disc_mode) {
+        A.disc_mode = disc_mode;
+        SDL_memset(A.disc_paste, 0, sizeof A.disc_paste);
+        keys_changed();
     }
-    if (button(A.disc_key_found.empty() && A.disc_key_file.empty() ? "Choose key file...##disc" : "Choose a different key file...##disc"))
-        choose_file("disc_key", keyf, 2);
+    if (A.disc_mode == 0) {
+        if (!A.disc_key_file.empty()) ImGui::TextWrapped("Key file: %s", base_name(A.disc_key_file).c_str());
+        else if (!A.disc_key_found.empty()) ImGui::TextWrapped("Found next to the image: %s", base_name(A.disc_key_found).c_str());
+        else muted("Choose the key dumped with this disc, or Cemu's keys.txt.");
+        if (button("Choose key file / keys.txt...##disc")) choose_file("disc_key", keyf, 2);
+    } else {
+        ImGui::SetNextItemWidth(460);
+        if (ImGui::InputTextWithHint("##disc_paste", "32 hex digits", A.disc_paste, sizeof A.disc_paste,
+                                    ImGuiInputTextFlags_Password | ImGuiInputTextFlags_CharsNoBlank)) keys_changed();
+        muted("The key is hidden, used once to check and decrypt, and never saved.");
+    }
     ImGui::EndChild();
     ImGui::Spacing();
 
@@ -1196,7 +1279,7 @@ static void screen_keys() {
     radio("Paste the key", &mode, 1);
     set_common_mode(mode);
     if (A.common_mode == 0) {
-        if (button("Choose key file...##common")) choose_file("common_key", keyf, 2);
+        if (button("Choose key file / keys.txt...##common")) choose_file("common_key", keyf, 2);
         if (!A.common_key_file.empty()) {
             ImGui::SameLine();
             ImGui::TextUnformatted(base_name(A.common_key_file).c_str());
@@ -1219,9 +1302,9 @@ static void screen_keys() {
             colored(BAD, A.keys_msg);
         }
     }
-    bool have_disc = !A.disc_key_found.empty() || !A.disc_key_file.empty();
+    bool have_disc = A.disc_mode == 1 ? A.disc_paste[0] != 0 : (!A.disc_key_found.empty() || !A.disc_key_file.empty());
     bool have_common = A.common_mode == 1 ? strlen(A.paste) > 0 : (!A.common_key_file.empty() || !A.common_key_found.empty());
-    int b = footer({"Back", "Check keys and install"}, 1, (have_disc && have_common && !busy()) ? 0 : 2);
+    int b = footer({"Back", "Check keys and install"}, 1, ((have_disc || have_common) && !busy()) ? 0 : 2);
     if (b == 0) go(Screen::Source);
     if (b == 1) check_keys();
 }
@@ -1229,7 +1312,7 @@ static void screen_keys() {
 static double step_weight(const std::string& id) {
     static const std::map<std::string, double> w = {{"keys", 1},      {"archive", 1},   {"folder", 1},
                                                     {"compiler", 3},  {"extract", 15},  {"copy", 8},
-                                                    {"translate", 8}, {"compile", 60},  {"app", 4}};
+                                                    {"translate", 8}, {"compile", 60},  {"app", 4}, {"shaders", 20}};
     auto it = w.find(id);
     return it == w.end() ? 1 : it->second;
 }
@@ -1237,6 +1320,7 @@ static double step_weight(const std::string& id) {
 static void screen_installing() {
     if (A.portable) page_header("Preparing the game", "One time, about two minutes. You can keep using your computer.");
     else page_header("Installing", "This takes a few minutes. You can keep using your computer.");
+    if (!A.keys_msg.empty()) ImGui::TextWrapped("%s", A.keys_msg.c_str());
     double tw = 0, dw = 0;
     for (auto& s : A.steps) {
         double w = step_weight(s.id);
@@ -1263,6 +1347,17 @@ static void screen_installing() {
     }
     ImGui::EndChild();
     ImGui::Spacing();
+    const bool preparing = std::any_of(A.steps.begin(), A.steps.end(), [](const Step& step) {
+        return step.id == "shaders" && step.state == 1;
+    });
+    if (preparing) {
+        if (A.shader_skip_requested) muted("Skipping shader preparation; finishing setup...");
+        else if (ImGui::Button("Skip shader preparation")) {
+            if (auto* file = SDL_IOFromFile((A.data_dir + "/shader-prebuild-cancel").c_str(), "wb")) {
+                SDL_CloseIO(file); A.shader_skip_requested = true;
+            }
+        }
+    }
     if (details_header()) log_pane(std::max(60.0f, space_above_footer()));
 }
 
@@ -1389,7 +1484,15 @@ static void screen_done() {
         muted("Game files and saves: " + A.data_dir);
     }
     if (!A.save_msg.empty()) muted(A.save_msg);
-    if (A.portable) {
+    if (!A.decomp_error.empty()) muted("The decomp version could not be built: " + A.decomp_error +
+                                       " (the normal game is ready; details in the setup log)");
+    else if (A.leaving.empty()) start_choice();
+    if (!A.leaving.empty()) {
+        // the chosen options run now, then the window closes: showing them again (reset, so they look
+        // like a new question) would ask after the answer was given
+        ImGui::Spacing();
+        muted(A.leaving == "play" ? "Starting the game..." : "Finishing...");
+    } else if (A.portable) {
         ImGui::Spacing();
         if (A.toolchain_bytes > 0) {
             checkbox(("Remove the downloaded compiler (" + format_size(A.toolchain_bytes) + ")").c_str(),
@@ -1407,15 +1510,15 @@ static void screen_done() {
             &A.opt_shortcut);
         muted("Off by default: then nothing is written outside this folder.");
     }
-    int b = footer({"Quit", "Open folder", "Play"}, 2, busy() || !A.after.empty() ? 7 : 0);
+    int b = footer({"Quit", "Open folder", "Play"}, 2, busy() || !A.after.empty() || !A.leaving.empty() ? 7 : 0);
     auto queue_options = [] {
         if (A.portable && A.toolchain_bytes > 0 && A.opt_remove_toolchain) A.queue.push_back({"remove_toolchain", ""});
         if (A.portable && A.opt_shortcut) A.queue.push_back({"shortcut", ""});
         A.toolchain_bytes = 0, A.opt_shortcut = false;  // once
     };
-    if (b == 0) queue_options(), A.after = "quit";
+    if (b == 0) queue_options(), A.after = A.leaving = "quit";
     if (b == 1) open_folder(home_folder());
-    if (b == 2) queue_options(), A.after = "play";
+    if (b == 2) queue_options(), A.after = A.leaving = "play";
 }
 
 static void screen_fatal() {
@@ -1744,7 +1847,7 @@ static void start_child() {
 // automation (tests): a JSON array of steps, each run when its screen is showing:
 //   {"screen": "keys", "set": {"common_mode": "file", "common_key_file": "..."}, "when_step": "compile",
 //    "idle": true, "shot": "03-keys.png", "click": "Check keys and install"}
-// "set" fields: source (as if chosen in the dialog), disc_key_file, common_key_file, common_mode
+// "set" fields: code_mods (boolean), decomp (boolean), source (as if chosen in the dialog), disc_key_file, common_key_file, common_mode
 // (file|paste), save_kind (none|hd|gc|legacy|other), save_path, open_details (true). Screenshots are PNG files
 // of the window. The run ends (exit 0) after the last step, or with exit 2 on a 45-minute timeout.
 
@@ -1775,11 +1878,14 @@ static void automation_frame() {
             const std::string v = kv.second.t == J::Str ? kv.second.s : "";
             if (k == "source") set_source(v);
             else if (k == "disc_key_file") set_disc_key_file(v);
+            else if (k == "disc_mode") { A.disc_mode = v == "paste" ? 1 : 0; keys_changed(); }
             else if (k == "common_key_file") set_common_key_file(v);
             else if (k == "common_mode") set_common_mode(v == "paste" ? 1 : 0);
             else if (k == "save_kind")
                 set_save_kind(v == "hd" ? 1 : v == "gc" ? 2 : v == "legacy" ? 3 : v == "other" ? 4 : 0);
             else if (k == "save_path") set_save_path(v);
+            else if (k == "code_mods") A.code_mods = kv.second.t == J::Bool && kv.second.b;
+            else if (k == "decomp") A.decomp = kv.second.t == J::Bool && kv.second.b;
             else if (k == "open_details") details_open = true;
         }
     }
@@ -1813,7 +1919,8 @@ static void save_shot(SDL_Renderer* r, const std::string& name) {
 }
 
 // The game in this folder is built for this release and its game files are there: start it directly.
-static bool game_ready(const std::string& pkg, const std::vector<std::string>& passthru) {
+// The decomp version (setup's option, development builds) when chosen in setup or asked for with --decomp.
+static bool game_ready(const std::string& pkg, const std::vector<std::string>& passthru, bool want_decomp) {
     SDL_PathInfo info;
     std::string data = data_dir_of(pkg, passthru);
     J st, man;
@@ -1826,11 +1933,24 @@ static bool game_ready(const std::string& pkg, const std::vector<std::string>& p
         return p.empty() || abs ? p : data + "/" + p;
     };
     std::string exe = resolve(st.str("exe")), game = resolve(st.str("game_dir"));
+    std::string dexe = resolve(st.str("decomp_exe"));
+    if ((want_decomp || st.boolean("start_decomp")) && !dexe.empty() && SDL_GetPathInfo(dexe.c_str(), &info)) exe = dexe;
+    else if (want_decomp) SDL_Log("--decomp: the decomp version is not built (setup option, development builds)");
     if (exe.empty() || game.empty() || !SDL_GetPathInfo(exe.c_str(), &info) ||
         !SDL_GetPathInfo((game + "/code/cking.rpx").c_str(), &info))
         return false;
     g_exe = exe, g_game_dir = game, g_data_dir = data;
     return true;
+}
+
+// after the hello checks (and the .data notice, when there is one): start setup.py
+static void begin_setup() {
+#ifdef __APPLE__
+    if (!clt_ok()) go(Screen::NeedCLT);
+    else start_child();
+#else
+    start_child();
+#endif
 }
 
 int main(int argc, char** argv) {
@@ -1840,13 +1960,14 @@ int main(int argc, char** argv) {
     }
 #endif
     std::string automate;
-    bool want_setup = false;
+    bool want_setup = false, want_decomp = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--automate" && i + 1 < argc) automate = argv[++i];
         else if (a == "--screenshots" && i + 1 < argc) A.shots_dir = argv[++i];
         else if (a == "--self-test") A.self_test = true;
         else if (a == "--setup") want_setup = true;
+        else if (a == "--decomp") want_decomp = true;  // start the decomp version (setup.py's --decomp builds it)
         else if (a.rfind("-psn_", 0) == 0) continue;  // macOS Finder's process serial number
         else A.passthru.push_back(a);
     }
@@ -1863,7 +1984,7 @@ int main(int argc, char** argv) {
     // prepared already: start the game right away, no window of our own (Shift / --setup: the setup)
     if (!want_setup && automate.empty() && !A.self_test && !shift_held()) {
         std::string pkg = find_package().pkg;
-        if (!pkg.empty() && game_ready(pkg, A.passthru) && launch_game()) return 0;
+        if (!pkg.empty() && game_ready(pkg, A.passthru, want_decomp) && launch_game()) return 0;
     }
 
     SDL_SetHint(SDL_HINT_APP_NAME, "Wind Waker HD");
@@ -1924,12 +2045,14 @@ int main(int argc, char** argv) {
     } else if (!check_writable(data_dir_of(A.pkg, A.passthru))) {
         // fail() has shown why
     } else {
-#ifdef __APPLE__
-        if (!clt_ok()) go(Screen::NeedCLT);
-        else start_child();
-#else
-        start_child();
-#endif
+        A.legacy_notice = appimage::legacy_data_notice(SDL_getenv("APPIMAGE"));
+        if (!A.legacy_notice.empty()) {
+            addlog(A.legacy_notice);
+            // tests and scripted runs do not wait for a click (the line is in their output)
+            if (A.self_test || A.script.t == J::Arr) SDL_Log("notice: %s", A.legacy_notice.c_str());
+            else A.legacy_notice_open = true;
+        }
+        if (!A.legacy_notice_open) begin_setup();
     }
 
     double self_test_deadline = SDL_GetTicks() / 1000.0 + 600;
@@ -1982,6 +2105,21 @@ int main(int argc, char** argv) {
             ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x,
                                        ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - ImGui::GetFrameHeight()));
             colored(GOOD, A.toast);
+        }
+        if (A.legacy_notice_open) {
+            ImGui::OpenPopup("Old portable folder");
+            ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.7f, 0));
+        }
+        if (ImGui::BeginPopupModal("Old portable folder", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextWrapped("%s", A.legacy_notice.c_str());
+            muted("Setup continues without it: the game, saves and settings go to the usual folders, or into "
+                  "the .home folder once it exists.");
+            if (button("OK", ImVec2(160, 0), true)) {
+                A.legacy_notice_open = false;
+                ImGui::CloseCurrentPopup();
+                begin_setup();
+            }
+            ImGui::EndPopup();
         }
         if (quit_requested) {
             if (A.screen == Screen::Installing) ImGui::OpenPopup("Stop setup?");

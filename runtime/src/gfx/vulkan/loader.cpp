@@ -1,4 +1,5 @@
 // Vulkan entry points loaded at run time (loader.h).
+#include "../../exception_report.h"
 #include "loader.h"
 #include <stdexcept>
 #include <string>
@@ -16,14 +17,14 @@ WWHD_VK_RENDERING_FUNCTIONS(WWHD_VK_DEFINE)
 
 namespace {
 [[noreturn]] void missing(const char *name) {
-  throw std::runtime_error(std::string("the Vulkan driver does not provide ") + name +
+  exception_report::raise(std::string("the Vulkan driver does not provide ") + name +
                            "; update the graphics driver");
 }
 }  // namespace
 
 void load_global_functions(PFN_vkGetInstanceProcAddr gipa) {
   if (!gipa)
-    throw std::runtime_error("the Vulkan loader has no vkGetInstanceProcAddr");
+    exception_report::raise("the Vulkan loader has no vkGetInstanceProcAddr");
   vkGetInstanceProcAddr = gipa;
 #define WWHD_VK_LOAD(name) \
   if (!(name = reinterpret_cast<PFN_##name>(gipa(nullptr, #name)))) missing(#name);
@@ -44,11 +45,12 @@ void load_instance_functions(VkInstance instance) {
 #undef WWHD_VK_LOAD
 }
 
-void load_device_functions(VkDevice device, bool khrDynamicRendering) {
+void load_device_functions(VkDevice device, bool khrDynamicRendering, bool renderPasses) {
 #define WWHD_VK_LOAD(name) \
   if (!(name = reinterpret_cast<PFN_##name>(vkGetDeviceProcAddr(device, #name)))) missing(#name);
   WWHD_VK_DEVICE_FUNCTIONS(WWHD_VK_LOAD)
 #undef WWHD_VK_LOAD
+  if (renderPasses) { vkCmdBeginRendering=nullptr; vkCmdEndRendering=nullptr; return; }
   // the core 1.3 function or the extension's: same parameters (VkRenderingInfoKHR = VkRenderingInfo)
 #define WWHD_VK_LOAD(name)                                                                          \
   {                                                                                                 \

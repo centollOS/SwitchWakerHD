@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Statically recompile a Wii U RPX into C.
 
-usage: recomp.py game/code/cking.rpx OUTDIR [--insns-per-file N] [--build NAME] [--mod-hooks]
+usage: recomp.py game/code/cking.rpx OUTDIR [--insns-per-file N] [--build NAME] [--mod-hooks] [--decomp-hooks FILE]
 
 The rpx is identified by its SHA-256 (tools/recomp/builds.py). Functions are named by their
 *canonical* (USA) address, so the runtime refers to the same f_XXXXXXXX whichever build of the game
@@ -10,6 +10,25 @@ it was translated from; the dispatch table maps this build's real addresses to t
 --mod-hooks (or WWHD_RECOMP_MOD_HOOKS=1): every function body starts with a check of its byte in
 g_mod_hook_flags (runtime/src/mods/guest_mods.cpp), so guest mods (docs/mod-sdk-v2.md) can hook or
 replace any game function at runtime without rebuilding the game code.
+
+--decomp-hooks FILE: the code for the decomp build (CMake WWHD_DECOMP=ON, docs/decomp-build.md). FILE
+(written by tools/decomp_build/gen.py) lists the decompiled functions; each becomes a hook (f_X calls
+hook_X in the runtime, which runs the decompiled function or the recompiled f_X_orig). A listed address
+that is not a function entry, or a function containing an instruction-level hook ("@ADDR"; the
+decompiled function would bypass it), stays as it is: it gets an f_X_orig that is never reached and is
+listed in g_recomp_decomp_kept (table.c), so the runtime keeps it recompiled. FILE is copied to
+OUTDIR/decomp_hooks.txt (CMakeLists.txt checks that the build's list matches). USA build only (the
+decompiled code uses the USA build's addresses).
+
+Code-quality passes (each on by default; the variable set to 0 when generating turns it off):
+  WWHD_RECOMP_CRLIVE       condition-register liveness: compares store only the CR bits read later (crlive.py)
+  WWHD_RECOMP_LEAF         leaf functions keep guest registers and CR bits in C locals (leaflocal.py)
+  WWHD_RECOMP_NONLEAF      functions with calls keep guest registers in C locals between calls (leaflocal.py)
+  WWHD_RECOMP_GQR          paired-single loads/stores through GQRs the game never writes skip the GQR check
+WWHD_RECOMP_PLAIN=1 turns them all off: the output is then the same as without these passes (the
+plain c->r[N] form that tools/true60 and tools/verify read).
+Checking builds (set to 1): WWHD_RECOMP_CR_CHECK (a dropped CR bit that is read aborts),
+WWHD_RECOMP_LEAF_POISON (scratch registers get garbage at returns).
 
 Output:
   OUTDIR/funcs.h         prototypes of every recompiled function and import
@@ -25,6 +44,7 @@ import collections
 import json
 import os
 import re
+import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -33,6 +53,22 @@ from analyze import Program, sext
 from ppc2c import translate, Unhandled
 import fork_passes  # (this fork) its recompiler passes: tools/recomp/fork_passes.py
 from rpx import R_PPC_ADDR16_HA, R_PPC_ADDR16_LO, R_PPC_ADDR16_HI
+import ppc2c
+import crlive
+import leaflocal
+
+# condition-register liveness (crlive.py): on unless WWHD_RECOMP_CRLIVE=0; WWHD_RECOMP_CR_CHECK=1
+# generates a checking build that poisons the dropped bits and aborts if one is ever read
+CRLIVE = ppc2c.pass_on("WWHD_RECOMP_CRLIVE")
+CR_CHECK = os.environ.get("WWHD_RECOMP_CR_CHECK", "0") == "1"
+# leaf functions keep guest registers in locals (leaflocal.py): on unless WWHD_RECOMP_LEAF=0
+LEAF = ppc2c.pass_on("WWHD_RECOMP_LEAF")
+# functions with calls keep guest registers in locals too (leaflocal.transform_nonleaf): on unless
+# WWHD_RECOMP_NONLEAF=0
+NONLEAF = ppc2c.pass_on("WWHD_RECOMP_NONLEAF")
+# paired-single loads and stores through GQRs the game never writes skip the GQR check
+# (static_float_gqrs): on unless WWHD_RECOMP_GQR=0
+GQR_STATIC = ppc2c.pass_on("WWHD_RECOMP_GQR")
 
 
 def unknown_build_message(path):
@@ -61,7 +97,7 @@ DATA_IMPORT_STRIDE = 0x1000
 
 
 class Recompiler(fork_passes.ForkPasses):  # (this fork)
-    def __init__(self, path, build=None, mod_hooks=False):
+    def __init__(self, path, build=None, mod_hooks=False, decomp_hooks=None):
         """`build` is which build of the game `path` is (tools/recomp/builds.py); by default it is
         identified by its SHA-256, and an rpx that is none of them is refused."""
         self.build = build or game_builds.identify(path)
@@ -91,6 +127,37 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
             (self.sites if site else self.hooks).add(addr)
         self._fixpoint()
         self._check_hooks(hook_entries)
+        self.decomp_hooks_file = decomp_hooks
+        self.decomp, self.decomp_kept = set(), []
+        if decomp_hooks:
+            self._decomp_hooks(decomp_hooks)
+
+    def _decomp_hooks(self, path):
+        """The decomp build's functions (see --decomp-hooks): hooked like the runtime's own hooks, unless
+        the recompiler has to keep them."""
+        if not self.build.canonical:
+            raise SystemExit("--decomp-hooks: the decomp build is made from the USA game only (this is the %s "
+                             "build); the decompiled code uses the USA build's addresses" % self.build.name)
+        entries, _ = game_builds.read_hooks([path], self.build)
+        if not entries:
+            raise SystemExit("--decomp-hooks: %s lists no functions" % path)
+        self._bounds()
+        sites = sorted(self.sites)
+        for site, canon, addr, where in entries:
+            if site:
+                raise SystemExit("%s: instruction-level entries are not allowed in a decomp hook list" % where)
+            if addr in self.hooks:
+                raise SystemExit("%s: %08X is already a runtime hook; regenerate the decomp list (the build "
+                                 "does: tools/decomp_build/gen.py)" % (where, canon))
+            if addr not in self.entries:
+                self.decomp_kept.append((addr, "not a function entry"))
+                continue
+            i = bisect.bisect_left(sites, addr)
+            if i < len(sites) and sites[i] < self.func_end(addr):
+                self.decomp_kept.append((addr, "contains instruction hook @%08X" % sites[i]))
+                continue
+            self.decomp.add(addr)
+        self.hooks |= self.decomp
 
     def _check_hooks(self, hook_entries):
         """A hook is written against the canonical code, so check that it can mean the same thing in
@@ -238,7 +305,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         out = []
         if hooked:
             # runtime hook: callers reach hook_X, which may call the original code (f_X_orig)
-            out.append("void f_%08X(Cpu* __restrict c) { hook_%08X(c); }\n" % (name, name))
+            out.append("void f_%08X(Cpu* __restrict c) { PPC_HOOK_CALL(c, hook_%08X); }\n" % (name, name))
         out += ["void %s(Cpu* __restrict c) {" % fname, "    PPC_ENTER(0x%08Xu);" % start]
         if self.mod_hooks:
             # guest mods: the check sits in the game's code (f_X, or f_X_orig behind a port hook), so the
@@ -265,6 +332,9 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
     def run(self, outdir, per_file):
         os.makedirs(outdir, exist_ok=True)
         self.unhandled = collections.Counter()
+        self.cr_stats = [0, 0]  # CR writers, writers with no live bit
+        self.leaf_count = 0
+        self.nonleaf_count = 0
         self.used_imports = set()
         self.imm_override = self.imm_override
         self.fork_prepare()  # (this fork)
@@ -272,6 +342,19 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         files = self.fork_write_code(outdir, per_file)  # (this fork: hot layout, inline leaves)
         self.write_headers(outdir)
         self.write_report(outdir, len(files))
+
+    def static_float_gqrs(self):
+        """GQRs (bit n: GQRn) that no mtspr in the game's code writes. The runtime starts every
+        thread with GQR0, GQR1, GQR6 and GQR7 at 0 (threads.cpp) and GQR2-5 at quantized formats,
+        so only GQR0 and GQR1 can count."""
+        written = set()
+        for a in range(self.p.text_lo, self.p.text_hi, 4):
+            w = self.p.word(a)
+            if w >> 26 == 31 and (w >> 1) & 0x3FF == 467:  # mtspr
+                spr = ((w >> 16) & 31) | (((w >> 11) & 31) << 5)
+                if 912 <= spr <= 919 or 896 <= spr <= 903:
+                    written.add((spr - 912) if spr >= 912 else (spr - 896))
+        return sum(1 << n for n in (0, 1) if n not in written)
 
     def write_headers(self, outdir):
         func_slots = sorted(s for s, (lib, name, kind) in self.imports.items() if kind == "f")
@@ -282,6 +365,10 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
             f.write("\n/* hooked functions: hook_X is implemented in the runtime, f_X_orig is the game's code */\n")
             for e in sorted(self.sym(a) for a in self.hooks):
                 f.write("void f_%08X_orig(Cpu* __restrict c);\nvoid hook_%08X(Cpu* c);\n" % (e, e))
+            if self.decomp_kept:
+                f.write("\n/* decomp build: listed functions kept as they are (table.c g_recomp_decomp_kept) */\n")
+                for a, _ in self.decomp_kept:
+                    f.write("void f_%08X_orig(Cpu* __restrict c);\n" % self.sym(a))
             f.write("\n/* instruction-level hooks (\"@ADDR\" in hooks.txt), run before the instruction at ADDR */\n")
             for e in sorted(self.sym(a) for a in self.sites):
                 f.write("void site_%08X(Cpu* c);\n" % e)
@@ -304,6 +391,8 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
             f.write("};\nconst unsigned g_recomp_import_count = %d;\n" % len(self.imports))
             f.write("const uint32_t g_recomp_entry_point = 0x%08Xu;\n" % self.p.entry)
             self.write_build_map(f)
+            if self.decomp_hooks_file:
+                self.write_decomp(f, outdir)
             # Off mode emits exactly devel's files, including table.c. Only an enabled
             # build registers hook tables with the runtime; the marker cannot be
             # spoofed by changing a player setting or a sidecar JSON file.
@@ -326,6 +415,23 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
                     self.imp_name(s), lib, name))
         with open(os.path.join(outdir, "imports.json"), "w") as f:
             json.dump([{"slot": s, "lib": l, "name": n, "kind": k} for s, (l, n, k) in sorted(self.imports.items())], f, indent=1)
+
+    def write_decomp(self, f, outdir):
+        """Decomp build: the listed functions the recompiler kept. The runtime's hook_X (generated from the
+        same list) refers to f_X_orig of every listed function, so a kept one gets an f_X_orig too: the
+        plain function where it is one (never reached: nothing calls hook_X), else a stop."""
+        f.write("\n/* decomp build (--decomp-hooks): %d functions decompiled, %d kept */\n" % (
+            len(self.decomp), len(self.decomp_kept)))
+        for a, why in self.decomp_kept:
+            if a in self.entries:
+                f.write("void f_%08X_orig(Cpu* __restrict c) { f_%08X(c); }  /* %s */\n" % (self.sym(a), self.sym(a), why))
+            else:
+                f.write("void f_%08X_orig(Cpu* __restrict c) { ppc_unimplemented(c, 0x%08Xu, 0); }  /* %s */\n" % (
+                    self.sym(a), a, why))
+        kept = sorted(self.canon_of.get(a, a) for a, _ in self.decomp_kept)
+        f.write("const uint32_t g_recomp_decomp_kept[] = {%s};\n" % (", ".join("0x%08Xu" % a for a in kept) or "0u"))
+        f.write("const unsigned g_recomp_decomp_kept_count = %d;\n" % len(kept))
+        shutil.copyfile(self.decomp_hooks_file, os.path.join(outdir, "decomp_hooks.txt"))
 
     def write_build_map(self, f):
         """The address map of this build, for the runtime (runtime/include/guest_addr.h)."""
@@ -353,6 +459,10 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
             for where, canon, addr in self.hooks_in_changed:
                 f.write("hook on a function this build compiled differently: %08X (here %08X, %s)\n" % (
                     canon, addr, where))
+            if self.decomp_hooks_file:
+                f.write("decomp build: %d functions decompiled, %d kept\n" % (len(self.decomp), len(self.decomp_kept)))
+                for a, why in self.decomp_kept:
+                    f.write("  decomp kept: %08X %s\n" % (a, why))
             f.write("functions: %d\nfiles: %d\nfixpoint rounds: %d\n" % (len(self.sorted_entries), nfiles, self.fixpoint_rounds))
             f.write(self.fork_report_hot())  # (this fork)
             f.write("imports used: %d of %d\n" % (len(self.used_imports), len(self.imports)))
@@ -371,10 +481,11 @@ if __name__ == "__main__":
     ap.add_argument("--build", help="which build the rpx is, when it should not be identified by "
                                     "its SHA-256 (%s)" % ", ".join(b.name for b in game_builds.all_builds()))
     ap.add_argument("--mod-hooks", action="store_true", default=os.environ.get("WWHD_RECOMP_MOD_HOOKS") == "1")
+    ap.add_argument("--decomp-hooks", help="the decomp build's function list (tools/decomp_build/gen.py)")
     a = ap.parse_args()
     build = None
     if a.build:
         build = game_builds.by_name(a.build)
         if build is None:
             sys.exit("unknown build %r; known: %s" % (a.build, ", ".join(b.name for b in game_builds.all_builds())))
-    Recompiler(a.rpx, build, mod_hooks=a.mod_hooks).run(a.outdir, a.insns_per_file)
+    Recompiler(a.rpx, build, mod_hooks=a.mod_hooks, decomp_hooks=a.decomp_hooks).run(a.outdir, a.insns_per_file)

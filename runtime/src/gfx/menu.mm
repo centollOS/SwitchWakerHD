@@ -1,3 +1,5 @@
+#include "../mods/manager.h"
+#include "shader_prebuild.h"
 // Menu bar: app menu (Quit, which asks first while a game is in progress: quit_prompt.mm), a Window
 // menu (Close Window on the TV window quits the same way) and a Graphics menu to switch fixes and
 // enhancements while playing. Each option also has a single-key shortcut in the game window.
@@ -7,6 +9,8 @@
 #include "../platform/host.h"
 #include <sys/stat.h>
 #include <ctime>
+#include <string>
+#include <tuple>
 
 #include "../interp.h"
 #include "../savestate.h"
@@ -87,6 +91,14 @@ static void set_pref(NSString* key, id value) {
         [NSUserDefaults.standardUserDefaults setObject:value forKey:key];
     }
 }
+#ifdef WWHD_HAS_VULKAN
+namespace gfxvk {
+void load_device_setting() {
+    if (g_prefs) if (id value = pref(@"vkDevice"))
+        if ([value isKindOfClass:[NSString class]]) set_device_setting([value UTF8String]);
+}
+}
+#endif
 static void load_prefs() {
     g_prefs_loaded = true;
     if (!g_prefs) return;
@@ -122,6 +134,7 @@ static void save_prefs() {
         set_pref(@"fpsHighPaced", @(interp::paced_interpolation_at(120)));
     }
 #ifdef WWHD_HAS_VULKAN
+    if (!env_set({"WWHD_VK_DEVICE"})) set_pref(@"vkDevice", [NSString stringWithUTF8String:gfxvk::device_setting().c_str()]);
     if (!env_set({"WWHD_VK_PRESENT_MODE"})) set_pref(@"vkPresentMode", @(gfxvk::present_mode()));
 #endif
     if (NSString* p = portable_prefs_path()) [g_portable_prefs writeToFile:p atomically:YES];
@@ -250,6 +263,12 @@ static WWStateMenu* g_state_menu;
 @end
 
 @implementation WWGraphicsMenu
+- (void)rebuildShaders:(NSMenuItem*)item {
+    NSAlert* alert = [NSAlert new];
+    alert.messageText = shaderprebuild::request_rebuild() ? @"Shader cache rebuild requested" : @"Could not save the rebuild request";
+    alert.informativeText = [NSString stringWithUTF8String:shaderprebuild::setup_hint()];
+    [alert runModal];
+}
 - (void)setBloom:(NSMenuItem*)item { render::set_bloom_strength(item.tag / 100.0f); update_title(); }
 - (void)setAO:(NSMenuItem*)item { render::set_ao_mode((int)item.tag); update_title(); }
 - (void)toggleAniso:(NSMenuItem*)item { render::set_aniso(!render::aniso()); update_title(); }
@@ -268,7 +287,8 @@ static WWStateMenu* g_state_menu;
 - (void)setFaceLayout:(NSMenuItem*)item {
     // issue #78: which host face buttons drive the Wii U's A/B/X/Y (the same as the Controls window)
     input_map::Mapping m = input_map::current();
-    input_map::apply_face_layout(m, item.tag == 1 ? input_map::FaceLayout::kLabels : input_map::FaceLayout::kPosition);
+    if (item.tag == 2) input_map::set_face_auto(m, true);
+    else input_map::apply_face_layout(m, item.tag == 1 ? input_map::FaceLayout::kLabels : input_map::FaceLayout::kPosition);
     input_map::set_current(m);
 }
 - (void)toggleInterp:(NSMenuItem*)item { interp::set_mode(interp::mode() == item.tag ? 0 : (int)item.tag); update_title(); }
@@ -277,7 +297,11 @@ static WWStateMenu* g_state_menu;
 - (void)toggleFxaa:(NSMenuItem*)item { render::set_fxaa(!render::fxaa()); update_title(); }
 - (void)toggleHires:(NSMenuItem*)item { render::set_ao_hires(!render::ao_hires()); update_title(); }
 - (void)setRes:(NSMenuItem*)item { set_res(kResScales[item.tag]); update_title(); }
-- (void)setAspect:(NSMenuItem*)item { aspect::set_mode((int)item.tag); update_title(); }
+- (void)setAspect:(NSMenuItem*)item {
+    aspect::set_mode((int)item.tag);
+    gfx::set_host_setting("aspectMode", std::to_string((int)item.tag));  // as the settings overlay saves it
+    update_title();
+}
 - (BOOL)validateMenuItem:(NSMenuItem*)item {
     if (item.action == @selector(setRes:))
         item.state = fabsf(kResScales[item.tag] - current_res_scale()) < 0.01f ? NSControlStateValueOn : NSControlStateValueOff;
@@ -397,6 +421,7 @@ void install_menu(NSWindow* tv) {
 
     NSMenuItem* gfxItem = [bar addItemWithTitle:@"Graphics" action:nil keyEquivalent:@""];
     NSMenu* g = [[NSMenu alloc] initWithTitle:@"Graphics"];
+    add(g, @"Rebuild shader cache", @selector(rebuildShaders:), @"", 0);
     if (render::can_choose()) {
         // both renderers are built in: the choice is saved and used from the next start
         [g addItemWithTitle:@"Renderer (takes effect after a restart)" action:nil keyEquivalent:@""].enabled = NO;
@@ -404,7 +429,7 @@ void install_menu(NSWindow* tv) {
         add(g, @"    Metal", @selector(setRenderer:), @"", (NSInteger)render::Api::Metal).toolTip =
             @"Apple's Metal: the original renderer, all features";
         add(g, @"    Vulkan (MoltenVK)", @selector(setRenderer:), @"", (NSInteger)render::Api::Vulkan).toolTip =
-            [@"Vulkan through MoltenVK (needs: brew install vulkan-loader molten-vk glslang). Falls back to Metal if it cannot start." stringByAppendingString:why];
+            [@"Vulkan through MoltenVK (included in the release; source builds: brew install vulkan-loader molten-vk glslang). Falls back to Metal if it cannot start." stringByAppendingString:why];
         [g addItem:[NSMenuItem separatorItem]];
     }
     [g addItemWithTitle:@"Internal resolution (R cycles)" action:nil keyEquivalent:@""].enabled = NO;
@@ -465,6 +490,9 @@ void install_menu(NSWindow* tv) {
     add(in, @"    By label (Xbox)", @selector(setFaceLayout:), @"", 1).toolTip =
         @"The button named A is A: on an Xbox pad A accepts/acts and B goes back (issue #78). "
         @"Rewrites the A/B/X/Y controller bindings only";
+    add(in, @"    Automatic", @selector(setFaceLayout:), @"", 2).toolTip =
+        @"Follows the labels printed on the pad that was plugged in first: by label on an Xbox pad, "
+        @"by position on a Nintendo one";
     [in addItem:[NSMenuItem separatorItem]];
     add(in, @"Show GamePad screen (\u2318G)", @selector(toggleDrcWindow:), @"");
     [in addItem:gfx::controls_menu_item()];
@@ -492,8 +520,37 @@ void install_menu(NSWindow* tv) {
     [gp addItem:[NSMenuItem separatorItem]];
     toggle(gp, @"Climb any wall", ^BOOL { return mods::climb_enabled(); }, ^(BOOL on) { mods::set_climb_enabled(on); },
            @"Grab and climb any wall (stamina wheel; B or A lets go)");
+    // traversal mods (mods/traversal.cpp): the switch, then the factor presets (the overlay has sliders)
+    auto factors = [gp](NSString* title, const char* id, BOOL (^on)(void), NSString* tip, const char* key, float (*value)()) {
+        std::string mod = id;
+        toggle(gp, title, on, ^(BOOL v) { mods::manager::set_enabled(mod, v); }, tip);
+        std::string option = key;
+        for (float f : {1.25f, 1.5f, 2.f, 3.f})
+            toggle(gp, [NSString stringWithFormat:@"        Speed %gx", f], ^BOOL { return value() == f; },
+                   ^(BOOL) { mods::manager::set_traversal_option(option, f); });
+    };
+    factors(@"Faster ladders", "ladder-speed", ^BOOL { return mods::ladder_speed(); },
+            @"The climbing animation plays faster, so hands and feet stay in step", "ladder-speed.factor", mods::ladder_speed_factor);
+    factors(@"Faster sidling", "sidle-speed", ^BOOL { return mods::sidle_speed(); },
+            @"Sidling along walls is faster; the animation speeds up with the movement", "sidle-speed.factor", mods::sidle_speed_factor);
+    toggle(gp, @"Sailing speed", ^BOOL { return mods::sail_speed(); }, ^(BOOL on) { mods::manager::set_enabled("sail-speed", on); },
+           @"Multiplies the speed the wind gives the boat; the jump keeps its normal height");
+    for (auto [title, key, value] : {std::tuple{@"    Normal sail", "sail-speed.normal", mods::sail_speed_normal_factor},
+                                     {@"    Swift Sail", "sail-speed.swift", mods::sail_speed_swift_factor}}) {
+        [gp addItemWithTitle:title action:nil keyEquivalent:@""].enabled = NO;
+        std::string option = key;
+        float (*get)() = value;  // (blocks cannot capture structured bindings)
+        for (float f : {1.25f, 1.5f, 2.f, 3.f})
+            toggle(gp, [NSString stringWithFormat:@"        Speed %gx", f], ^BOOL { return get() == f; },
+                   ^(BOOL) { mods::manager::set_traversal_option(option, f); });
+    }
+    toggle(gp, @"Automatic wind with the normal sail", ^BOOL { return mods::auto_wind(); },
+           ^(BOOL on) { mods::manager::set_enabled("auto-wind", on); },
+           @"Makes the normal sail behave like the Swift Sail: the wind always blows the way the boat is heading");
     toggle(gp, @"Quick doors", ^BOOL { return mods::quick_doors(); }, ^(BOOL on) { mods::set_quick_doors(on); },
            @"Door events (walk-in, opening, closing) run at 4x speed");
+    toggle(gp, @"Fast forward cutscenes and dialogue (hold ZR by default)", ^BOOL { return mods::fast_forward(); },
+           ^(BOOL on) { mods::manager::set_enabled("fast-forward", on); }, @"Choose the speed, hold button and audio setting in Settings > Mods > Gameplay");
     toggle(gp, @"Fast scene changes", ^BOOL { return mods::fast_scenes(); }, ^(BOOL on) { mods::set_fast_scenes(on); },
            @"Fades and loading between areas run at 4x speed; the scenes themselves are not sped up");
     [gp addItem:[NSMenuItem separatorItem]];

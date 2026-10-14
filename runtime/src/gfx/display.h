@@ -22,22 +22,18 @@ struct PresentPlan {
     float pip_opacity = 1;
     bool drc_window = false;   // the GamePad window is shown: present the GamePad picture there
     int filter = 0;            // picture scaling: 0 smooth, 1 sharp, 2 integer
-    bool sample_auto = false;  // automatic overlay mode wants this frame's 32x18 signatures
     bool drc_only = false;     // GamePad-only mode: pip is the GamePad picture fitted to the window, no TV picture
     Box button;                // touch screens: the view button (display_modes.h), empty when not shown
     int button_dot = 0;        // the host's state dot on the button: 0 none, 1 on (green), 2 paused (yellow)
 };
-constexpr uint32_t kSignatureW = 32, kSignatureH = 18;
 
 // start of a present: GamePad aspect for touch, "Match window" aspect, scripted touches, layout
 PresentPlan display_plan(bool haveTv, float tvW, float tvH, bool haveDrc, float drcW, float drcH, float layerW, float layerH,
-                         uint64_t frame);
+                         uint64_t frame, bool publish_input = true);
 // the same layout for another target size (sim screen: the window's real drawable)
 PresentPlan display_plan_for(const PresentPlan& p, float dw, float dh, float tvW, float tvH, float drcW, float drcH);
 // GamePad window: its picture scaled to fit
 Box display_layout(float dw, float dh, float tw, float th);
-// automatic overlay: display-encoded luma (0..1, kSignatureW x kSignatureH) of the GamePad and TV pictures
-void display_auto_signature(const std::vector<float>& drc, const std::vector<float>* tv, uint64_t frame);
 // WWHD_DUMP_PRESENT / capture: composed window pictures requested since the last present
 std::vector<std::string> display_take_present_dumps();
 void request_present_dump(const std::string& path);

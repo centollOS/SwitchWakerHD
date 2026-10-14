@@ -45,6 +45,7 @@ std::vector<std::string> vulkan_overrides(GetEnv env);
 
 struct Info {
     std::string version, commit;   // build::version(), build::commit()
+    std::string variant;           // build::variant(): "decomp" in the decomp build, else ""
     std::string os;                // os_description()
     std::string gpu;               // vulkan_gpu() or the Metal device name; "" when unknown
     std::string renderer, host, fps;

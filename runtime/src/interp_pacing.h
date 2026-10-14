@@ -108,5 +108,44 @@ inline Next next_pass(int phase, int n, int64_t elapsed, int64_t pass, int64_t b
     return Next::kDrop;
 }
 
+// A probe of the in-between pass cost (after a long time without in-between passes, and the first
+// in-between pass of all) replaces the estimate: the scene may be lighter now. One that hit a hitch
+// (more than twice the estimate) counts twice the estimate and asks for another probe soon
+// (retry): at the start the first in-between pass met one (90-200 ms, measured here and in the
+// #164 report) and kept in-between frames out until the next probe 10 s later.
+inline int64_t probe_estimate(int64_t avg, int64_t pass, bool& retry) {
+    retry = avg > 0 && pass > 2 * avg;
+    return retry ? 2 * avg : pass;
+}
+
+// Next::kRecord (not all passes left fit): the phase the step goes on from, so that the next hold
+// pass is the one after it. As few blended passes are skipped as make the rest fit (elapsed, pass,
+// budget as for next_pass), at least the record pass is left. (Skipping every blended pass up to
+// the record pass left gaps of 15-25 ms at 240 fps where in-between passes take a little longer than
+// a frame, a few times a second: issue #164.)
+inline int skip_to(int phase, int n, int64_t elapsed, int64_t pass, int64_t budget) {
+    pass = std::max<int64_t>(pass, 1);
+    const int64_t fit = std::clamp<int64_t>((budget - elapsed) / pass, 1, std::max(1, n - phase));
+    return n - int(fit);
+}
+
+// Paced logic pass at 120/240 fps with a step slot (gx2/vsync_pacing.h: when the step's logic frame
+// is due on the virtual vsync). The pass starts one drawn frame (`frame`) before the slot, as it does
+// after a record pass, so its frame makes the slot: it waits for that time if it is early and `wait`
+// (the step's passes are done), keeps it if less than a step late (the elapsed time counted from it
+// makes the step plan fewer in-between frames, and the game catches up), and starts its own schedule
+// when later than that (the caller then drops the slot). `start`: the step's start, which its elapsed time counts from.
+enum class StepStart { kWait, kKeep, kLate };
+struct StepPlan {
+    int64_t start;
+    StepStart how;
+};
+inline StepPlan slot_step_start(int64_t now, int64_t slot, int64_t frame, int64_t step, bool wait) {
+    const int64_t start = slot - frame;
+    if (wait && now < start) return {start, StepStart::kWait};
+    if (now - start < step) return {start, StepStart::kKeep};
+    return {now, StepStart::kLate};
+}
+
 }  // namespace pacing
 }  // namespace interp

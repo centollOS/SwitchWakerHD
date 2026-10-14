@@ -14,6 +14,8 @@ float requested();                 // what the setting asks for now
 // projections; returns the aspect the render thread should switch to at this swap
 float on_swap();
 float game();
+float fov_scale();
+void set_fov_scale(float scale); // 1 = authored gameplay FOV; events keep their original FOV
 uint64_t game_frame();                // swaps so far                      // aspect the game draws with this frame
 // HD layouts: the game thread marks uploads of layout projection matrices and the drawing of layout
 // roots; the render thread, which knows the target, narrows the projection for TV-shaped targets

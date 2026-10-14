@@ -11,12 +11,16 @@
 // creation, cCt_Counter) and fpcEx_Handler (every process: Link, door, camera, event manager in the
 // play scene). Drawing, process deletion (fpcDt_Handler: its timers count drawn frames, see
 // turbo_steps.h), scene management (fapGm_After) and the pad read stay once per frame. Button
-// presses ("trigger" bits) are cleared for the extra steps, so a press is seen once.
+// presses ("trigger" bits) are cleared for the extra steps, so a press is seen once. While a weather
+// effect (spores, rain, fog, ...) drains or deletes its packet, the frame gets no more extra steps:
+// that countdown also counts drawn frames (turbo_steps.h, issue #145).
 //
 // Fast scene changes: while an overlap (fade/wipe) process exists (l_fopOvlpM_overlap[0],
-// 101F36CC), the frame gets kSceneExtra more runs of the transition machinery only: process
-// creation (fpcCt_Handler: the new scene's loading phases), the overlap process's execute (its fade
-// timers) and fapGm_After (scene and overlap request phases). The scenes themselves (actors,
+// 101F36CC), the frame gets kSceneExtra more runs of the transition machinery only: the overlap
+// process's execute (its fade timers) and fapGm_After (scene and overlap request phases). Process
+// creation (fpcCt_Handler) stays once per frame: extra runs created the new scene's actors ahead of
+// the frames they normally get, and Outset's grandma then kept her back to Link while handing over
+// the shield (issue #116, found and tested by GreenNaugahyde). The scenes themselves (actors,
 // events, cutscenes) keep running at normal speed, so no story event is shortened.
 //
 // Both act on full logic passes only (not on the 60 fps in-between passes) and in all 60 fps modes.
@@ -67,6 +71,17 @@ const StepParts kDoorStep = [] {
     if (env_i("WWHD_MOD_DOOR_DELETE", 0)) p.deletion = true;
     return p;
 }();
+// debug: WWHD_MOD_DOOR_WEATHER=0 keeps running extra steps while a weather effect tears down (the
+// behaviour before the fix of issue #145, for A/B runs: it can destroy a packet that is still listed)
+const bool kDoorWeatherWait = env_i("WWHD_MOD_DOOR_WEATHER", 1) != 0;
+const uint32_t kEnvLight = GD(0x10475A68);  // g_env_light (dKyw_wether_move_draw 0257ACAC)
+
+// a weather effect is draining or deleting its packet (turbo_steps.h): the next steps must be frames
+const WeatherEffect* weather_teardown() {
+    for (const WeatherEffect& w : kWeatherEffects)
+        if (weather_tearing_down(ld8(kEnvLight + w.phase_off))) return &w;
+    return nullptr;
+}
 
 // traces (WWHD_MODS_TRACE): the processes in the delete queue whose timer has run out, which the
 // next fpcDt_Handler deletes (g_fpcDtTg_Queue 101F3A1C, see fpcDt_Handler 025DE024; delete tag:
@@ -210,6 +225,10 @@ void after_execute(Cpu* c, uint32_t execute_fn) {
         uint32_t saved[sizeof kTrigWords / sizeof *kTrigWords];
         bool cleared = false;
         for (int i = 0; i < kDoorExtra && door; i++) {
+            if (const WeatherEffect* w = kDoorWeatherWait ? weather_teardown() : nullptr) {
+                trace("extra steps wait: %s packet tearing down (phase %u)", w->name, ld8(kEnvLight + w->phase_off));
+                break;
+            }
             if (pad && !cleared) {
                 for (size_t k = 0; k < sizeof kTrigWords / sizeof *kTrigWords; k++) {
                     saved[k] = ld32(pad + kTrigWords[k]);
@@ -236,7 +255,6 @@ void after_execute(Cpu* c, uint32_t execute_fn) {
     // fast scene changes: transition machinery only
     if (fast_scenes()) {
         for (int i = 0; i < kSceneExtra && overlap_active(); i++) {
-            call(c, f_025DDCEC_orig, 0);  // fpcCt_Handler: loading phases of the new scene
             uint32_t ovl_req = ld32(kOverlap);
             uint32_t task = ovl_req ? ld32(ovl_req + kOvlpTask) : 0;
             if (task) call(c, f_025DF940, task);  // the overlap process: fade timers

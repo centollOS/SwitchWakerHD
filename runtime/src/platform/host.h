@@ -33,6 +33,16 @@
 #include <sys/syscall.h>
 #endif
 namespace host {
+#ifdef _WIN32
+inline std::string utf8(const std::wstring& value) {
+ int count=WideCharToMultiByte(CP_UTF8,0,value.data(),int(value.size()),nullptr,0,nullptr,nullptr);
+ std::string result(count,0);if(count)WideCharToMultiByte(CP_UTF8,0,value.data(),int(value.size()),result.data(),count,nullptr,nullptr);return result;
+}
+inline std::string environment_utf8(const wchar_t* name) {
+ DWORD count=GetEnvironmentVariableW(name,nullptr,0);if(!count)return {};
+ std::wstring value(count,0);DWORD used=GetEnvironmentVariableW(name,value.data(),count);value.resize(used);return utf8(value);
+}
+#endif
 #if defined(__APPLE__) && defined(WWHD_HAS_VULKAN)
 // Render command batches can create Objective-C temporaries inside MoltenVK.
 void with_autorelease_pool(void (*fn)());
@@ -50,18 +60,26 @@ template<class Fn> void with_autorelease_pool(Fn&& fn) {
  }, &call);
 }
 inline thread_local std::string thread_label;
-inline void set_thread_name(const char* name) {
- thread_label=name;
+// Diagnostic only, and called first thing in thread entry functions where an
+// escaping exception would terminate the process: never throws, and the OS name
+// is set without heap allocation (an exhausted allocator only loses the label).
+inline void set_thread_name(const char* name) noexcept {
+ try { thread_label=name; } catch(...) { thread_label.clear(); }
 #ifdef __APPLE__
  pthread_setname_np(name);
 #elif defined(_WIN32)
  using SetDescription=HRESULT(WINAPI*)(HANDLE,PCWSTR);
  auto f=(SetDescription)GetProcAddress(GetModuleHandleW(L"Kernel32.dll"),"SetThreadDescription");
- if(f) { std::wstring text; for(unsigned char c:thread_label)text.push_back(c); f(GetCurrentThread(),text.c_str()); }
+ if(f) {
+  wchar_t text[256]; size_t n=0;
+  for(;name[n] && n+1<sizeof text/sizeof *text;++n) text[n]=(unsigned char)name[n];
+  text[n]=0; f(GetCurrentThread(),text);
+ }
 #elif defined(__SWITCH__)
  (void)name;
 #else
- pthread_setname_np(pthread_self(),thread_label.substr(0,15).c_str());
+ char text[16]; snprintf(text,sizeof text,"%s",name); // Linux limit: 15 bytes + NUL.
+ pthread_setname_np(pthread_self(),text);
 #endif
 }
 // Game and render threads: keep them on fast cores and ahead of background work. macOS: QoS
@@ -113,11 +131,17 @@ inline uintptr_t executable_base() {
 }
 inline std::string executable_path() {
 #ifdef _WIN32
- char path[32768]; DWORD n=GetModuleFileNameA(nullptr,path,sizeof path);return std::string(path,n);
-#elif !defined(__APPLE__) && !defined(__SWITCH__)
+ wchar_t path[32768]; DWORD n=GetModuleFileNameW(nullptr,path,32768);return utf8(std::wstring(path,n));
+#elif defined(__SWITCH__)
+ return {};
+#elif !defined(__APPLE__)
  char path[4096];ssize_t n=readlink("/proc/self/exe",path,sizeof path);return n>0?std::string(path,n):std::string();
 #else
- return {};
+ uint32_t n=0;_NSGetExecutablePath(nullptr,&n);
+ std::vector<char> path(n);
+ if(!n||_NSGetExecutablePath(path.data(),&n))return {};
+ std::error_code ec;auto resolved=std::filesystem::canonical(path.data(),ec);
+ return ec?std::string(path.data()):resolved.string();
 #endif
 }
 inline size_t page_size() {
@@ -150,7 +174,8 @@ inline bool memory_touched(void* p,size_t bytes) {
 }
 inline bool replace_file(const std::string& from,const std::string& to) {
 #ifdef _WIN32
- return MoveFileExA(from.c_str(),to.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+ return MoveFileExW(std::filesystem::u8path(from).c_str(),std::filesystem::u8path(to).c_str(),
+                    MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
 #else
 #ifdef __SWITCH__
  remove(to.c_str());  // the SD card file system does not replace an existing target
@@ -169,7 +194,7 @@ inline std::string exe_dir() {
   char buf[4096]; uint32_t n=sizeof buf;
   if(_NSGetExecutablePath(buf,&n)==0){ char real[PATH_MAX]; p=realpath(buf,real)?real:buf; }
 #elif defined(_WIN32)
-  char buf[MAX_PATH*4]; DWORD n=GetModuleFileNameA(nullptr,buf,sizeof buf); if(n>0&&n<sizeof buf) p.assign(buf,n);
+  p=executable_path();
 #elif !defined(__SWITCH__)  // the Switch has no portable mode: everything is in sdmc:/switch/wwhd
   char buf[4096]; ssize_t n=readlink("/proc/self/exe",buf,sizeof buf-1); if(n>0) p.assign(buf,(size_t)n);
 #endif
@@ -180,10 +205,18 @@ inline std::string exe_dir() {
 }
 inline const std::string& portable_user_dir() {
  static const std::string dir=[]{
+#ifdef _WIN32
+  const auto override=environment_utf8(L"WWHD_USER_DIR");if(!override.empty())return override;
+#else
   if(const char* override=std::getenv("WWHD_USER_DIR"))return std::string(override);
+#endif
   std::string e=exe_dir();
   if(e.empty()) return std::string();
+#ifdef _WIN32
+  FILE* f=_wfopen(std::filesystem::u8path(e+"/portable.txt").c_str(),L"rb");
+#else
   FILE* f=fopen((e+"/portable.txt").c_str(),"rb");
+#endif
   if(!f) return std::string();
   fclose(f);
   size_t s=e.find_last_of("/\\");
@@ -192,17 +225,26 @@ inline const std::string& portable_user_dir() {
  return dir;
 }
 inline bool portable() { return !portable_user_dir().empty(); }
+// Shared Linux/Android XDG resolution; Android supplies its external app config root.
+inline std::string xdg_config_dir(const char* xdg, const char* home) {
+ if(xdg)return std::string(xdg)+"/wwhd";
+ return std::string(home?home:".")+"/.config/wwhd";
+}
 inline std::string config_dir() {
+#ifdef _WIN32
+ const auto override=environment_utf8(L"WWHD_USER_DIR");if(!override.empty())return override;
+#else
+ if(const char* override=getenv("WWHD_USER_DIR"))return override;
+#endif
  if(portable()) return portable_user_dir();
 #ifdef __APPLE__
  const char* home=getenv("HOME");return std::string(home?home:".")+"/Library/Application Support/WWHD";
 #elif defined(_WIN32)
- const char* root=getenv("APPDATA");return std::string(root?root:".")+"/WWHD";
+ const auto root=environment_utf8(L"APPDATA");return (root.empty()?std::string("."):root)+"/WWHD";
 #elif defined(__SWITCH__)
  return "sdmc:/switch/wwhd";
 #else
- if(const char* xdg=getenv("XDG_CONFIG_HOME"))return std::string(xdg)+"/wwhd";
- const char* home=getenv("HOME");return std::string(home?home:".")+"/.config/wwhd";
+ return xdg_config_dir(getenv("XDG_CONFIG_HOME"),getenv("HOME"));
 #endif
 }
 }

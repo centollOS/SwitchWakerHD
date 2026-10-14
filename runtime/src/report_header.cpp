@@ -187,7 +187,8 @@ std::vector<std::string> vulkan_overrides(GetEnv env) {
 }
 
 std::string format(const Info& in) {
-    std::string s = "Wind Waker HD " + in.version + " (" + in.commit + "), " + in.os;
+    std::string s = "Wind Waker HD " + in.version + " (" + in.commit + ")" + (in.variant.empty() ? "" : " " + in.variant) +
+                    ", " + in.os;
     if (!in.gpu.empty()) s += ", " + in.gpu;
     char scale[32];
     snprintf(scale, sizeof scale, "%.1fx", in.scale);

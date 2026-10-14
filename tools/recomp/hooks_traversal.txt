@@ -1,0 +1,8 @@
+# Traversal mods (runtime/src/mods/traversal.cpp): faster ladders and sidling (#95), sailing speed and
+# automatic wind (#96). With each mod off, every hook runs only the original code.
+02427CA8  # daPy_lk_c::procLadderMove: the rung clip's rate from the stick, times the ladder factor
+0242A218  # daPy_lk_c::setBlendWHideMoveAnime: the sidle blend sees the scaled mMaxNormalSpeed
+@0247D4E8 # setMoveAngle: normalize speedF in f10 for sailing's speed-dependent rudder response
+@0247E988 # daShip_c::procSteerMove: normal-sail branch after the HD Swift Sail check: automatic wind
+@0247EB88 # procSteerMove: f29 = target speed (windPower): times the factor of the sail in use
+@0247ED24 # procSteerMove: before the jump code: the stock target again (jump height stays stock)

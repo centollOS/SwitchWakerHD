@@ -2,6 +2,7 @@
 @024FFA98 # camera_execute: stfs f0 -> view.mAspect (16/9 constant 1004AAF0)
 @025020E0 # init_phase2 (camera creation): the same
 @024FFD60 # camera_draw: bl C_MTXPerspective (f1 fovy, f2 aspect)
+@0250007C # camera_draw: bl sead::PerspectiveProjection::set (f3 fovy radians, f4 aspect): the HD renderer's projection
 @024F811C # view_setup: bl mDoLib_clipper::setup (f1 fovy, f2 aspect)
 @024F8168 # view_setup: the same (other far plane)
 @025ADB38 # dScnName_c::setView: bl C_MTXPerspective (file select scene)

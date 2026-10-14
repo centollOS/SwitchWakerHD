@@ -125,6 +125,9 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
 void shader_wanted(Shader* sh);
 // save state loaded / guest programs replaced: forget the memos (R.shaderEpoch++); compiled shaders stay
 void reset_shader_memoization();
+// the shader decompiler's output: the OpenGL mode (g_renderer, decompiler_glue.cpp), set by render::ext
+// (backend.cpp register_deko3d)
+void select_decompiler();
 // (this fork, #37) render thread, for the 5 s [mem] line: the shader containers that only grow during a session
 struct ShaderMemory {
     size_t variants = 0, codes = 0, programs = 0, storedRecords = 0, storedBytes = 0;

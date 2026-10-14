@@ -1,0 +1,1132 @@
+{
+  "catalogue_format": 3,
+  "place": "windfall",
+  "title": "Windfall Island",
+  "about": "A recipe, not a catalogue: references into the game (actor classes and codes, stages, rooms, layers, the figurine message number) and our own words. The names and spots come from the player's own game files (tools/story_mods/npc_catalogue.py).",
+  "layers": {
+    "sea room 11": "0 day, 1 night, 3 the Endless Night, 4 day and 5 night once event flag 0x2D01 is set (dComIfG_play_c::getLayerNo); R every layer",
+    "interiors": "0 day, 1 night (also the Endless Night); R every layer"
+  },
+  "npcs": [
+    {
+      "id": "windfall-uo1",
+      "since": 3,
+      "description": "an old man resting on the sea-view bench at the cliff",
+      "where": "Windfall Island, on the sea-view bench at the cliff",
+      "figure_message": "0x37FC",
+      "own_name": true,
+      "present": [
+        "day"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Uo1",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-uo2",
+      "since": 3,
+      "description": "a man who sits at the bar all day",
+      "where": "Windfall Island, in the bar",
+      "figure_message": "0x37FD",
+      "own_name": true,
+      "present": [
+        "day"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Uo2",
+          "stage": "Opub",
+          "room": 0,
+          "layers": [
+            "0"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-uo3",
+      "since": 3,
+      "description": "a well-dressed man walking through town",
+      "where": "Windfall Island, walking through town",
+      "figure_message": "0x37FE",
+      "own_name": true,
+      "present": [
+        "day"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Uo3",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-ub1",
+      "since": 3,
+      "description": "one of the two women chatting up the steps by the brick house (the first)",
+      "where": "Windfall Island, up the steps by the brick house",
+      "figure_message": "0x37FF",
+      "own_name": false,
+      "present": [
+        "day"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Ub1",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-ub2",
+      "since": 3,
+      "description": "one of the two women chatting up the steps by the brick house (the second)",
+      "where": "Windfall Island, up the steps by the brick house",
+      "figure_message": "0x37FF",
+      "own_name": false,
+      "present": [
+        "day"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Ub2",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-ub3",
+      "since": 3,
+      "description": "a woman on the harbour pier",
+      "where": "Windfall Island, on the harbour pier",
+      "figure_message": "0x3800",
+      "own_name": true,
+      "present": [
+        "day"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Ub3",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-ub4",
+      "since": 3,
+      "description": "a woman by the town gate",
+      "where": "Windfall Island, by the town gate",
+      "figure_message": "0x3801",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "gate": "in the photographer's studio until Link holds a certain treasure chart, and only at the entrance he came through (d_a_npc_people phase_1)",
+      "actors": [
+        {
+          "class": "people",
+          "code": "Ub4",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        },
+        {
+          "class": "people",
+          "code": "Ub4",
+          "stage": "Ocmera",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-uw1",
+      "since": 3,
+      "description": "the young woman working in the bar",
+      "where": "Windfall Island, in the bar",
+      "figure_message": "0x37FA",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Uw1",
+          "stage": "Opub",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-uw2",
+      "since": 3,
+      "description": "a young woman in the town square or in the bar",
+      "where": "Windfall Island, the town square or the bar",
+      "figure_message": "0x37FB",
+      "own_name": true,
+      "present": [
+        "day"
+      ],
+      "gate": "where she stands follows her story with the young man of the town square: event register 0xB907 (d_a_npc_people phase_1, arg0)",
+      "actors": [
+        {
+          "class": "people",
+          "code": "Uw2",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        },
+        {
+          "class": "people",
+          "code": "Uw2",
+          "stage": "Opub",
+          "room": 0,
+          "layers": [
+            "0"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-um1",
+      "since": 3,
+      "description": "the man up on the windmill by the light",
+      "where": "Windfall Island, up on the windmill by the light",
+      "figure_message": "0x37F8",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Um1",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-um2",
+      "since": 3,
+      "description": "a young man in the town square or in the bar",
+      "where": "Windfall Island, the town square or the bar",
+      "figure_message": "0x37F7",
+      "own_name": true,
+      "present": [
+        "day"
+      ],
+      "gate": "where he stands follows his story with the young woman of the town square: event register 0xB907 (d_a_npc_people phase_1, arg0)",
+      "actors": [
+        {
+          "class": "people",
+          "code": "Um2",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        },
+        {
+          "class": "people",
+          "code": "Um2",
+          "stage": "Opub",
+          "room": 0,
+          "layers": [
+            "0"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-um3",
+      "since": 3,
+      "description": "a young man on the steps by the red door (up high at night)",
+      "where": "Windfall Island, on the steps by the red door (up high at night)",
+      "figure_message": "0x37F9",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Um3",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-sa1",
+      "since": 3,
+      "description": "a sailor who drinks in the bar at night",
+      "where": "Windfall Island, in the bar at night",
+      "figure_message": "0x3816",
+      "own_name": true,
+      "present": [
+        "night"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Sa1",
+          "stage": "Opub",
+          "room": 0,
+          "layers": [
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-sa2",
+      "since": 3,
+      "description": "a sailor on the high lookout",
+      "where": "Windfall Island, on the high lookout",
+      "figure_message": "0x3802",
+      "own_name": true,
+      "present": [
+        "day"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Sa2",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-sa3",
+      "since": 3,
+      "description": "a sailor on the stone dock",
+      "where": "Windfall Island, on the stone dock",
+      "figure_message": "0x3803",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Sa3",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        },
+        {
+          "class": "people",
+          "code": "Sa3",
+          "stage": "Opub",
+          "room": 0,
+          "layers": [
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-sa4",
+      "since": 3,
+      "description": "a sailor at the end of the wooden pier",
+      "where": "Windfall Island, at the end of the wooden pier",
+      "figure_message": "0x3805",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Sa4",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        },
+        {
+          "class": "people",
+          "code": "Sa4",
+          "stage": "Opub",
+          "room": 0,
+          "layers": [
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-sa5",
+      "since": 3,
+      "description": "a sailor on the grass by the stone wall",
+      "where": "Windfall Island, on the grass by the stone wall",
+      "figure_message": "0x3804",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "actors": [
+        {
+          "class": "people",
+          "code": "Sa5",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        },
+        {
+          "class": "people",
+          "code": "Sa5",
+          "stage": "Opub",
+          "room": 0,
+          "layers": [
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-ug1",
+      "since": 3,
+      "description": "one of the two by the flowers at the cliff (the first)",
+      "where": "Windfall Island, by the flowers at the cliff",
+      "figure_message": "0x37F6",
+      "own_name": false,
+      "present": [
+        "day",
+        "night"
+      ],
+      "gate": "by the flowers except on days 5 and 6 of the game's week, in the school house on those days (d_a_npc_people phase_1, dKy_get_dayofweek)",
+      "actors": [
+        {
+          "class": "people",
+          "code": "Ug1",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        },
+        {
+          "class": "people",
+          "code": "Ug1",
+          "stage": "Nitiyou",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-ug2",
+      "since": 3,
+      "description": "one of the two by the flowers at the cliff (the second)",
+      "where": "Windfall Island, by the flowers at the cliff",
+      "figure_message": "0x37F6",
+      "own_name": false,
+      "present": [
+        "day",
+        "night"
+      ],
+      "gate": "by the flowers except on days 5 and 6 of the game's week, in the school house on those days (d_a_npc_people phase_1, dKy_get_dayofweek)",
+      "actors": [
+        {
+          "class": "people",
+          "code": "Ug2",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        },
+        {
+          "class": "people",
+          "code": "Ug2",
+          "stage": "Nitiyou",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-rsh1",
+      "since": 3,
+      "description": "the travelling merchant at his stall",
+      "where": "Windfall Island, the travelling merchant's stall",
+      "figure_message": "0x37F3",
+      "own_name": true,
+      "present": [
+        "day"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_rsh1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_rsh1",
+          "actor": "Rsh1",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-tt",
+      "since": 3,
+      "description": "the dancer on the hill",
+      "where": "Windfall Island, dancing on the hill",
+      "figure_message": "0x37EB",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_tt) are not decoded",
+      "actors": [
+        {
+          "class": "npc_tt",
+          "actor": "Tt",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "1",
+            "4",
+            "5"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-kk1",
+      "since": 3,
+      "description": "the rich man's daughter",
+      "where": "Windfall Island, in town",
+      "figure_message": "0x37EC",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "gate": "story-gated (her own create conditions are not decoded here)",
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_kk1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_kk1",
+          "actor": "Kk1",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "4",
+            "5"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-gk1",
+      "since": 3,
+      "description": "the rich man, the daughter's father",
+      "where": "Windfall Island, in town",
+      "figure_message": "0x37ED",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "gate": "story-gated: the auction house before his fall, the town and the bar after it",
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_gk1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_gk1",
+          "actor": "Gk1",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "4"
+          ]
+        },
+        {
+          "class": "npc_gk1",
+          "actor": "Gk1",
+          "stage": "Opub",
+          "room": 0,
+          "layers": [
+            "1"
+          ]
+        },
+        {
+          "class": "npc_gk1",
+          "actor": "Kf1",
+          "stage": "Orichh",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-kp1",
+      "since": 3,
+      "description": "the poor family's daughter",
+      "where": "Windfall Island, the auction house",
+      "figure_message": "0x37EE",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "gate": "story-gated",
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_kp1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_kp1",
+          "actor": "Kp1",
+          "stage": "Orichh",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-pf1",
+      "since": 3,
+      "description": "the poor family's father",
+      "where": "Windfall Island, in town",
+      "figure_message": "0x37EF",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "gate": "story-gated: the town before his fortune, the auction house after it",
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_pf1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_pf1",
+          "actor": "Pf1",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0"
+          ]
+        },
+        {
+          "class": "npc_pf1",
+          "actor": "Gp1",
+          "stage": "Orichh",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-bms1",
+      "since": 3,
+      "description": "the bomb shop keeper",
+      "where": "Windfall Island, the bomb shop",
+      "figure_message": "0x37F0",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_bms1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_bms1",
+          "actor": "Bms1",
+          "stage": "Obombh",
+          "room": 0,
+          "layers": [
+            "0",
+            "1"
+          ]
+        },
+        {
+          "class": "npc_bms1",
+          "actor": "Bms2",
+          "stage": "Obombh",
+          "room": 0,
+          "layers": [
+            "0",
+            "1",
+            "8"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-ds1",
+      "since": 3,
+      "description": "the potion maker in his shop",
+      "where": "Windfall Island, the potion shop",
+      "figure_message": "0x37F1",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_ds1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_ds1",
+          "actor": "Ds1",
+          "stage": "Pdrgsh",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-po",
+      "since": 3,
+      "description": "the photographer in his studio",
+      "where": "Windfall Island, the photographer's studio",
+      "figure_message": "0x37F2",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_photo) are not decoded",
+      "actors": [
+        {
+          "class": "npc_photo",
+          "actor": "Po",
+          "stage": "Ocmera",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-ho",
+      "since": 3,
+      "description": "the teacher of the school house",
+      "where": "Windfall Island, the school house",
+      "figure_message": "0x37F4",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_ho) are not decoded",
+      "actors": [
+        {
+          "class": "npc_ho",
+          "actor": "Ho",
+          "stage": "Nitiyou",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-kg1",
+      "since": 3,
+      "description": "the host of the battleship game",
+      "where": "Windfall Island, the battleship game",
+      "figure_message": "0x3815",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_kg1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_kg1",
+          "actor": "Kg1",
+          "stage": "Kaisen",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-npcso",
+      "since": 3,
+      "description": "the talking fish in the sea by the island",
+      "where": "Windfall Island, the sea by the island",
+      "figure_message": "0x3811",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_so) are not decoded",
+      "actors": [
+        {
+          "class": "npc_so",
+          "actor": "NpcSo",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-tc",
+      "since": 3,
+      "description": "the man locked in the jail",
+      "where": "Windfall Island, the jail",
+      "figure_message": "0x380D",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_tc) are not decoded",
+      "actors": [
+        {
+          "class": "npc_tc",
+          "actor": "Tc",
+          "stage": "Pnezumi",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-bm4",
+      "since": 3,
+      "description": "a man in the bar who also comes to the auctions",
+      "where": "Windfall Island, the bar and the auction house",
+      "figure_message": "0x3824",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_bm4) are not decoded",
+      "actors": [
+        {
+          "class": "npc_bm4",
+          "actor": "Bm4",
+          "stage": "Opub",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        },
+        {
+          "class": "npc_bm4",
+          "actor": "Bm4",
+          "stage": "Orichh",
+          "room": 0,
+          "layers": [
+            "R"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-zl1",
+      "since": 3,
+      "description": "the pirate captain in the bomb shop",
+      "where": "Windfall Island, the bomb shop",
+      "figure_message": "0x3806",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "gate": "story-gated: the bomb shop break-in (conditions not decoded here)",
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_zl1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_zl1",
+          "actor": "Zl1",
+          "stage": "Obombh",
+          "room": 0,
+          "layers": [
+            "0",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-p1a",
+      "since": 3,
+      "description": "a pirate in the bomb shop (the first of three)",
+      "where": "Windfall Island, the bomb shop",
+      "figure_message": "0x3807",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "gate": "story-gated: the bomb shop break-in",
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_p1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_p1",
+          "actor": "P1a",
+          "stage": "Obombh",
+          "room": 0,
+          "layers": [
+            "0",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-p1b",
+      "since": 3,
+      "description": "a pirate in the bomb shop (the second of three)",
+      "where": "Windfall Island, the bomb shop",
+      "figure_message": "0x3808",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "gate": "story-gated: the bomb shop break-in",
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_p1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_p1",
+          "actor": "P1b",
+          "stage": "Obombh",
+          "room": 0,
+          "layers": [
+            "0",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-p1c",
+      "since": 3,
+      "description": "a pirate in the bomb shop (the third of three)",
+      "where": "Windfall Island, the bomb shop",
+      "figure_message": "0x3809",
+      "own_name": true,
+      "present": [
+        "day",
+        "night"
+      ],
+      "gate": "story-gated: the bomb shop break-in",
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_p1) are not decoded",
+      "actors": [
+        {
+          "class": "npc_p1",
+          "actor": "P1c",
+          "stage": "Obombh",
+          "room": 0,
+          "layers": [
+            "0",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-mk",
+      "since": 3,
+      "description": "one of the four children around town (the leader)",
+      "where": "Windfall Island, around town",
+      "figure_message": "0x37F5",
+      "own_name": false,
+      "present": [
+        "day"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_mk) are not decoded",
+      "actors": [
+        {
+          "class": "npc_mk",
+          "actor": "Mk",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-ukb",
+      "since": 3,
+      "description": "one of the four children around town (the second)",
+      "where": "Windfall Island, around town",
+      "figure_message": "0x37F5",
+      "own_name": false,
+      "present": [
+        "day"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_uk) are not decoded",
+      "actors": [
+        {
+          "class": "npc_uk",
+          "actor": "UkB",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-ukc",
+      "since": 3,
+      "description": "one of the four children around town (the third)",
+      "where": "Windfall Island, around town",
+      "figure_message": "0x37F5",
+      "own_name": false,
+      "present": [
+        "day"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_uk) are not decoded",
+      "actors": [
+        {
+          "class": "npc_uk",
+          "actor": "UkC",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "windfall-ukd",
+      "since": 3,
+      "description": "one of the four children around town (the fourth)",
+      "where": "Windfall Island, around town",
+      "figure_message": "0x37F5",
+      "own_name": false,
+      "present": [
+        "day"
+      ],
+      "unconfirmed": "when it is out: only from the room layers; the actor's own create conditions (d_a_npc_uk) are not decoded",
+      "actors": [
+        {
+          "class": "npc_uk",
+          "actor": "UkD",
+          "stage": "sea",
+          "room": 11,
+          "layers": [
+            "0",
+            "4"
+          ]
+        }
+      ]
+    }
+  ]
+}

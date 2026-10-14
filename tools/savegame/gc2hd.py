@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a GameCube Wind Waker memory-card save (.gci, GZLE01 USA or GZLJ01 Japan) into a
+"""Convert a GameCube Wind Waker memory-card save (.gci, GZLE01 USA, GZLJ01 Japan or GZLP01 Europe) into a
 Wind Waker HD save (cking.sav, Wii U / Cemu `save/user/` layout).
 
 usage: gc2hd.py SAVE.gci -o OUTDIR [--drop-tingle-tuner] [--name NAME] [--quiet]
@@ -85,6 +85,14 @@ def convert_gci(raw, drop_tingle_tuner=False, name=None):
         out_extras.append(extras)
         report.append((s, W.gc_slot_is_new(g), W.decode_gc_name(W.get(g, W.GC_FIELDS, "info.player_name"), code),
                        extras["name"], notes))
+    if code == b"GZLP01":
+        language = W.gc_pal_language(raw)
+        for extras in out_extras:
+            player = bytearray(extras["player"])
+            player[4] = language  # saved per-slot options, copied to runtime options on load
+            extras["player"] = bytes(player)
+        report[0][4].append("PAL language %s -> HD per-slot options (console language still selects text)" %
+                            W.PAL_LANGUAGES[language])
     return code, W.write_hd(out_slots, out_extras), report
 
 

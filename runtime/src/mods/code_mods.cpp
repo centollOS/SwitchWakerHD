@@ -1,3 +1,4 @@
+#include "../exception_report.h"
 #include "code_mods.h"
 #include "guest_build.h"
 #include "packages.h"
@@ -22,11 +23,12 @@ struct Worker {
     ~Worker(){if(thread.joinable()){if(!cancel_path.empty())std::ofstream(cancel_path)<<"cancel";thread.join();}}
 } worker;
 json::Value read(const fs::path& path) {
-    if(!fs::is_regular_file(path)||fs::file_size(path)>1024*1024)throw std::runtime_error("Code-mod build configuration is unavailable; run setup again from a complete release folder");
+    if(!fs::is_regular_file(path)||fs::file_size(path)>1024*1024)exception_report::raise("Code-mod build configuration is unavailable; run setup again from a complete release folder");
     std::ifstream f(path);return json::parse(std::string{std::istreambuf_iterator<char>(f),{}});
 }
 }
 namespace {
+bool g_fixed_build=false;  // startup(..., true): the decomp version
 void environment(const char* name,const std::string& value){
 #ifdef _WIN32
     _putenv_s(name,value.c_str());
@@ -55,7 +57,11 @@ fs::path selected(){
     if(const char* override=std::getenv("WWHD_CODE_MODS"))
         if((std::string(override)=="1")!=active.get("hooks").boolean)return {};
     auto exe=fs::path(active.get("exe").string());
-    auto cache=install_dir/"code-builds"/active.get("fingerprint").string();
+    // code-builds/<first 16 hex digits of the fingerprint> (setup's code_mods.cache_name); releases up to
+    // v0.2.12 used all 64 digits
+    const auto fingerprint=active.get("fingerprint").string();
+    auto cache=install_dir/"code-builds"/fingerprint.substr(0,16);
+    if(!fs::is_directory(cache))cache=install_dir/"code-builds"/fingerprint;
     if(!fs::is_regular_file(exe)||fs::weakly_canonical(exe.parent_path())!=fs::weakly_canonical(cache/"bin"))return {};
     auto record=read(cache/"ready.json");
     if(record.get("fingerprint")!=active.get("fingerprint")||record.get("hooks")!=active.get("hooks"))return {};
@@ -63,13 +69,17 @@ fs::path selected(){
     return exe;
 }
 }
-void startup(int argc,char** argv){
+void startup(int argc,char** argv,bool fixed_build){
     launch_args.assign(argv,argv+argc);
+    g_fixed_build=fixed_build;
     if(const char* dir=std::getenv("WWHD_INSTALL_DIR"))install_dir=dir;
     else install_dir=fs::path(host::exe_dir()).parent_path();
     environment("WWHD_INSTALL_DIR",install_dir.string());
     auto config=install_dir/"guest-sdk.json";
     if(!std::getenv("WWHD_GUEST_BUILD_CONFIG")&&fs::is_regular_file(config))environment("WWHD_GUEST_BUILD_CONFIG",config.string());
+    // the decomp version (setup's option, docs/decomp-build.md) is a build of its own, without code-mod
+    // support: it is never replaced by the cached code-mod build of the normal game
+    if(fixed_build)return;
     try {
         auto exe=selected();if(exe.empty())return;
         auto current=fs::path(host::exe_dir())/fs::path(argv[0]).filename();
@@ -79,6 +89,10 @@ void startup(int argc,char** argv){
 }
 bool restart(std::string& error){
     auto failed=[&]{std::lock_guard guard(mutex);state.error=error;return false;};
+    if(g_fixed_build){error="The decomp version has no code-mod support; start the normal game for code mods";return failed();}
+    // The relaunched game uses the support the player just built: an explicit WWHD_CODE_MODS from the
+    // launch (automated runs) would otherwise select the other build and stop a setup that resumes there.
+    {std::lock_guard guard(mutex);if(state.ready&&std::getenv("WWHD_CODE_MODS"))environment("WWHD_CODE_MODS",state.target?"1":"0");}
     try {auto exe=selected();if(exe.empty()){error="No completed code-mod build is available";return failed();}if(!replace(exe.string(),error))return failed();return true;}
     catch(const std::exception& e){error=e.what();return failed();}
 }
@@ -87,8 +101,8 @@ bool enabled(){
     if(const char* value=std::getenv("WWHD_CODE_MODS"))return std::string(value)=="1";
     std::string value;return hostui::get("code-mods",value)&&value=="1";
 }
-void request(bool on,const std::string& mod){std::lock_guard guard(mutex);if(state.building)return;state={};state.requested=true;state.target=on;pending_mod=mod;fprintf(stderr,"[code mods] rebuild offer: support %s%s%s\n",on?"on":"off",mod.empty()?"":" for ",mod.c_str());}
-void dismiss(){std::lock_guard guard(mutex);if(!state.building)state.requested=false;}
+void request(bool on,const std::string& mod){std::lock_guard guard(mutex);if(state.building)return;state={};state.requested=true;state.target=on;state.mod=mod;pending_mod=mod;fprintf(stderr,"[code mods] rebuild offer: support %s%s%s\n",on?"on":"off",mod.empty()?"":" for ",mod.c_str());}
+void dismiss(){std::lock_guard guard(mutex);state.requested=false;}
 Status status(){
     std::lock_guard guard(mutex);
     if(state.building&&!status_path.empty())try {
@@ -105,7 +119,7 @@ void begin(){
         const char* override=std::getenv("WWHD_GUEST_BUILD_CONFIG");
         fs::path config=override?fs::path(override):fs::path("guest-sdk.json");
         auto cfg=read(config);auto base=fs::absolute(config).parent_path();
-        auto resolve=[&](const std::string& name){fs::path p(cfg.get(name.c_str()).string());if(p.empty())throw std::runtime_error("Code-mod setup tools are missing; run setup again");return p.is_absolute()?p:base/p;};
+        auto resolve=[&](const std::string& name){fs::path p(cfg.get(name.c_str()).string());if(p.empty())exception_report::raise("Code-mod setup tools are missing; run setup again");return p.is_absolute()?p:base/p;};
         auto python=guestmods::BuildBridge::arguments(cfg.get("python"));
         fs::path executable(python.front());if(executable.is_relative()&&executable.has_parent_path())python.front()=(base/executable).lexically_normal().string();
         auto data=resolve("data_dir");auto setup=resolve("setup");
@@ -120,12 +134,12 @@ void begin(){
             try {
                 auto report=read(status_path);
                 if(result.code||!result.error.empty()||report.get("state").string()!="ready")
-                    throw std::runtime_error(report.get("message").string(result.error.empty()?"Code-mod rebuild failed; see setup.log. Previous build retained.":result.error));
+                    exception_report::raise(report.get("message").string(result.error.empty()?"Code-mod rebuild failed; see setup.log. Previous build retained.":result.error));
                 state.ready=true;state.exe=report.get("exe").string();
                 fprintf(stderr,"[code mods] rebuild ready; restart required\n");
                 if(!mod.empty()) {
                     std::string error;
-                    if(!packages::enable_after_code_rebuild(mod,error))throw std::runtime_error("Game code rebuilt, but the mod could not be queued: "+error);
+                    if(!packages::enable_after_code_rebuild(mod,error))exception_report::raise("Game code rebuilt, but the mod could not be queued: "+error);
                 }
                 hostui::post([target]{hostui::set("code-mods",target?"1":"0");});
             }catch(const std::exception& e){state.error=e.what();}

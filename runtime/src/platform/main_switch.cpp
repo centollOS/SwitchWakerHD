@@ -8,6 +8,7 @@
 #include "debug_switch.h"
 #include "startup_checks_switch.h"
 #include "prepare_graphics_switch.h"
+#include "overlay_switch.h"
 #include "background_shaders_switch.h"
 #include "settings_ini.h"
 #include "settings_switch.h"
@@ -45,7 +46,10 @@ u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
 extern char* fake_heap_end;  // libnx: the heap malloc grows into (sbrk)
 void __libnx_exception_handler(ThreadExceptionDump* ctx);
 }
-namespace render { uint64_t frame_count(); }
+namespace render {
+uint64_t frame_count();
+void register_deko3d();  // gfx/deko/backend.cpp
+}
 // what crashed and where, into the logs (CPU exception handler, abort): kind, pc/lr/sp/fp, the fault
 // address, the registers when known, the frame-pointer chain and the code addresses on the stack
 static void crash_report(const char* kind, uint64_t pc, uint64_t lr, uint64_t sp, uint64_t fp, uint64_t far,
@@ -284,6 +288,8 @@ void apply_migrated_mods() {
 
 // first thing in main(): working folder, session log, debug server, boot lines, saved settings
 void main_switch::start() {
+    render::register_deko3d();  // the renderer (gfx/renderer_ext.h), before render::choose()
+    overlay_switch::register_ext();  // the menu's Switch parts (overlay/extensions.h), before its first frame
     // everything lives in sdmc:/switch/wwhd: game/ (extracted dump), save/, shader cache, logs/
     mkdir(host::config_dir().c_str(), 0777);
     chdir(host::config_dir().c_str());

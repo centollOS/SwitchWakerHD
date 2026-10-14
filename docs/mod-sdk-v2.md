@@ -1,547 +1,89 @@
-# Mod SDK v2: PowerPC guest mods (design study and prototype)
+# Mod SDK v2: PowerPC code mods
 
-Status: **prototype** on branch `sdk2-guest-mods`, off by default. The Native SDK v1
-(`runtime/include/wwhd_mod.h`, [mod-manager.md](mod-manager.md)) stays supported and unchanged.
+Code mods for this port are written in C (or C++) and compiled for the game's own CPU:
+32-bit big-endian PowerPC. One package works on macOS, Windows and Linux. When a player
+installs it, the port translates the mod's PowerPC code to C and compiles it with the
+compiler setup already installed, then loads it at startup. Mods hook or replace game
+functions at runtime; the game code itself is not translated again.
 
-Code mods for this port are written in C (or C++) against mod headers and compiled for the
-console CPU: 32-bit big-endian PowerPC, the game's ABI. The package is the same on every
-platform. On install, the port translates the mod's PowerPC code to C with its own translator
-and compiles it with the player's local compiler (the one setup already uses for the game
-code) into a loadable module. Mods hook or replace game functions **at runtime**: the game
-code is not translated or compiled again.
-
-This follows the model of Zelda64Recomp / N64Recomp mods (see [Prior art](#prior-art)).
+The idea follows the Zelda64Recomp / N64Recomp mod system (ideas only, no code copied).
+Native SDK v1 mods (`runtime/include/wwhd_mod.h`, [mod-manager.md](mod-manager.md)) stay
+supported.
 
 ## Contents
 
-- [Prior art](#prior-art)
-- [The port today](#the-port-today)
-- [Runtime hooking: options and costs](#runtime-hooking-options-and-costs)
-- [Mod toolchain and package](#mod-toolchain-and-package)
-- [Install-time translation](#install-time-translation)
-- [Headers for modders (legal)](#headers-for-modders-legal)
+- [For players: enabling code mods](#for-players-enabling-code-mods)
+- [Writing a mod](#writing-a-mod)
+- [Hooks and replacements](#hooks-and-replacements)
+- [Game functions, data and objects](#game-functions-data-and-objects)
 - [Host services](#host-services)
+- [Port settings](#port-settings)
+- [Drawing on screen (HUD API v1)](#drawing-on-screen-hud-api-v1)
+- [Letters](#letters)
+- [Charts and markers](#charts-and-markers)
+- [The story notebook](#the-story-notebook)
+- [Packages with content and images](#packages-with-content-and-images)
 - [Trust](#trust)
-- [Mod manager integration](#mod-manager-integration)
-- [Prototype: what exists and how to run it](#prototype-what-exists-and-how-to-run-it)
-- [Measurements](#measurements)
-- [Open decisions](#open-decisions)
-- [Road to a production version](#road-to-a-production-version)
-
-## Prior art
-
-Checked on 2026-10-08 in the public sources of
-[N64Recomp](https://github.com/N64Recomp/N64Recomp) (`ffb39cd`),
-[N64ModernRuntime](https://github.com/N64Recomp/N64ModernRuntime) (`cdf5abb`),
-[Zelda64Recomp](https://github.com/Zelda64Recomp/Zelda64Recomp) (`b65c482`) and
-[MMRecompModTemplate](https://github.com/Zelda64Recomp/MMRecompModTemplate) (`0c3e82c`).
-Only ideas are described here; no code was copied.
-
-| Topic | Zelda64Recomp / N64Recomp |
-| --- | --- |
-| Package | `.nrm` = zip of `mod.json` (id, version, authors, `minimum_recomp_version`, dependencies, optional dependencies, `config_schema`, `native_libraries`), `mod_syms.bin` (sections, functions, relocations, imports/exports, replacements, hooks, events) and `mod_binary.bin` (section bytes). Built by `RecompModTool` from a linked ELF (N64Recomp `RecompModTool/main.cpp`, `src/mod_symbols.cpp`). |
-| Toolchain | Stock clang + ld.lld for MIPS (`-target mips -mips2 -mabi=32 -O2 -G0 ...`, linked with `--emit-relocs` at 0x81000000; the template's `Makefile` / `mod.ld`). Apple clang lacks the target, so macOS modders use Homebrew LLVM. |
-| Marking | `RECOMP_PATCH`, `RECOMP_HOOK("fn")`, `RECOMP_HOOK_RETURN`, `RECOMP_EXPORT`, `RECOMP_IMPORT`, `RECOMP_CALLBACK` are only `section(...)` attributes; the tool reads the sections (template `include/modding.h`). Patch/hook targets are checked by name against the game's reference symbols at build time. |
-| Load-time recompilation | A **live recompiler** (sljit JIT) turns the mod's MIPS code into host code at every launch, on all platforms (`LiveRecomp/`). An offline C path (`OfflineModRecomp`, `.offline.nrm` + a native library) exists for debugging only. No cache. |
-| Replacement | The runtime **overwrites the first bytes of the native game function** with an absolute jump into the mod (x86-64 `movabs/jmp`, ARM64 `ldr/br`), making the page writable meanwhile (N64ModernRuntime `librecomp/src/mods.cpp`, `patch_func`). Zero cost for functions that are not replaced. |
-| Hooks | Per (function, entry/return) a hook slot. The function is **regenerated from the original ROM code** by the live recompiler with `run_hook(slot)` calls inserted and jump-patched in. Needs the original code and a JIT at runtime. Return hooks can read the return value. |
-| Conflicts | Two mods replacing one function: error. Replacing a function the port itself patched needs `RECOMP_FORCE_PATCH`. Any number of hooks. |
-| Calls | Mod → game: relocations against reference symbols, resolved to direct native calls. Function pointers: every mod function registered at its guest address. |
-| Versioning | `minimum_recomp_version`, `game_id`, dependency minimum versions, native library `recomp_api_version == 1`. |
-| Events | `RECOMP_DECLARE_EVENT` / `RECOMP_CALLBACK`: callbacks in mod order, register context restored between them. The port declares base events. |
-| Native libraries | "extlib": `.dll/.so/.dylib` named in the manifest, loaded next to the mod, functions callable as imports `(rdram, ctx)`. Full process privileges. |
-| Config | Typed schema (enum, number, string, ranges), read with `recomp_get_config_*`, stored per mod. |
-| Memory | Mod sections copied into emulated RAM from 0x81000000, guard gaps, then the mod heap. |
-| Trust | No trust prompt or sandbox found; native libraries run unrestricted. |
-
-The two ideas that do **not** carry over: jump-patching native code (our game code is in the
-signed, locally linked executable; macOS on Apple silicon forbids writable code pages of a
-signed image, and the hardened runtime of a release would forbid it entirely) and hooking by
-regeneration (we have no in-process recompiler or JIT; our "recompiler" is Python + the local
-C compiler, used offline at setup). The rest (section-marked hooks, name or address based
-imports, conflict rules, typed config, events, function registration for pointers) does.
-
-## The port today
-
-- **Translation** (`tools/recomp/recomp.py`, `ppc2c.py`): each guest function becomes a C
-  function `void f_XXXXXXXX(Cpu* c)`; the 39,713 functions of `cking.rpx` go into 78
-  `code_NNN.c` files (about 170 MB of C).
-- **Calls**: direct `bl` → a direct C call `f_X(c)`; branches to other functions → `MUSTTAIL`
-  tail calls; computed calls (`bctrl`, `blrl`, vtables, process method tables) and unknown
-  targets → `c->pc = target; ppc_dispatch(c)`, a lookup in a flat 16 MiB-range table
-  (`runtime/src/core.cpp`, `dispatch::lookup`, one load) indexed by `(addr - 0x02000000) / 4`.
-- **Port hooks** (`tools/recomp/hooks*.txt`): for a listed address the generator emits
-  `f_X(c) { hook_X(c); }` and renames the game code to `f_X_orig`; the runtime defines
-  `hook_X` (frame interpolation, true 60, gameplay mods). `@ADDR` lines add instruction-level
-  `site_X(c)` calls. Changing the list requires translating and compiling the game again.
-- **Local build** (`tools/installer/setup.py`): setup runs `recomp.py`, compiles the 80
-  sources with the pinned toolchain (`xcrun clang` from Apple's Command Line Tools on macOS,
-  llvm-mingw on Windows, zig on Linux; flags from `sdk/manifest.json`, i.e.
-  `-O3 -ffp-contract=off -fno-strict-aliasing`), archives them and links them with the
-  prebuilt runtime into the executable. On an M-series Mac this takes about 1.5 minutes at
-  4 jobs (about 5 CPU minutes).
-- **Native mods v1**: `kind: native` packages, `dlopen`/`LoadLibrary` of a prebuilt library
-  per platform, a C ABI with frame callbacks and guest-memory access, one-time trust
-  confirmation.
-
-## Runtime hooking: options and costs
-
-| Option | Cost per call of an unhooked function | Code size | Hookable | Notes |
-| --- | --- | --- | --- | --- |
-| **(a) flag check at every function entry** (recommended, prototyped) | 1 load + test + not-taken branch (arm64: `adrp; add; ldrb; cbnz`) | +3.2 MB text (+7.8 %) for the cold paths, +40 KB flags, +318 KB table | every function, also through pointers and tail calls | no change of the call graph; inlining unaffected |
-| (b) all direct calls through a function table | an indirect call instead of a direct one (load + `blr`), no inlining across calls | small | every function | indirect branches strain the predictor at ~40k targets; blocks clang's inlining and musttail optimizations |
-| (c) only a published "hookable" subset (like `hooks.txt`) | zero for the rest | tiny | the list only | a new hook point needs a port update (and the game rebuilt on the player's machine) |
-| (d) patch native code at load (N64Recomp) | zero | zero | every function, but hooks need regeneration | not possible on macOS arm64 for a signed executable; Windows/Linux need writable code pages; hooks would need a JIT |
-
-(a) is the recommendation: every game function is hookable with a cost at the level of the
-two checks every function already has (`PPC_ENTER`: trace switch and core preemption), and no
-part of the game must be rebuilt when mods change. (c) remains a fallback if the measured cost
-were too high (it is not, see [Measurements](#measurements)); (a) and (c) can also be combined
-(check only in functions that are not on a "hot leaf" list).
-
-### Mechanism (prototype)
-
-`recomp.py --mod-hooks` (or `WWHD_RECOMP_MOD_HOOKS=1`) emits at the start of every function body:
-
-```c
-void f_0200EDC8(Cpu* __restrict c) {
-    PPC_ENTER(0x0200EDC8u);
-    PPC_MOD_HOOK(515, 0x0200EDC8u);   /* ordinal in g_recomp_funcs, address */
-    ...
-```
-
-`PPC_MOD_HOOK` (`runtime/include/ppc.h`) tests `g_mod_hook_flags[ordinal]`, one byte per
-function (generated in `table.c`). A set flag diverts to `ppc_mod_run`
-(`runtime/src/mods/guest_mods.cpp`), which runs the entry hooks, the replacement or the
-original, then the return hooks. To run the original, the runtime sets `c->mod_skip` to the
-function address and calls the function body (`g_mod_bodies[ordinal]`); the check consumes
-the skip. `Cpu::mod_skip` uses what was padding, so `sizeof(Cpu)` and save states are
-unchanged.
-
-Calling convention of hooks is the game's: entry and return hooks receive the function's
-arguments (r3–r10 and f1–f8 are restored before every hook), a return hook leaves the return
-value (r3, r4, f1) as the function produced it, a replacement is the function. r1/r2/r13 are
-preserved by every callee (ABI). Return hooks run in reverse load order.
-
-### Apple clang 17 compatibility
-
-The hook flag test deliberately has no `__builtin_expect` hint. Apple clang 17's cold-block
-outliner can move an unlikely hook return into a helper with a different return type, making
-its `musttail` call invalid. Keeping this branch ordinary preserves the guaranteed tail call
-in the generated function; it does not add a plain-call fallback or change hooks-off code.
-The release workflow compiles the generated-style hook entry at `-O3` with Xcode 16.4 explicitly,
-and the hook runtime test exercises that entry in every build configuration.
-
-### Port hooks, frame interpolation and true 60
-
-The check sits in the game code (`f_X`, or `f_X_orig` behind a port hook), so the port's
-own hooks stay **outermost**: interpolation and true 60 decide first whether and how a game
-function runs, and mods hook the game's code below them.
-
-- A mod hooking a logic function runs once per logic step, also at 60/120/240 fps
-  interpolation (hold passes skip the logic, so they skip the mod too).
-- A mod hooking a drawing function runs once per displayed frame.
-- With true 60, the port scales the arguments of the `cLib_addCalc*` family by the step
-  length before the game code runs; a mod replacing such a function receives the scaled
-  arguments, so its replacement stays 60 Hz correct. Mods that count steps should use a
-  host service for the step length (planned: `wwhd_logic_dt`).
-- A mod replacement of a function the port hooks itself (all `hooks*.txt` entries) is
-  allowed but should be marked in the mod (like N64Recomp's force patch) so the manager can
-  warn. Not enforced in the prototype.
-
-## Mod toolchain and package
-
-- **Compiler**: clang with the PowerPC target and ld.lld, free on all three platforms
-  (LLVM releases; Homebrew `llvm` + `lld` on macOS; Apple's clang has no PowerPC target). Tested:
-  Homebrew clang 20.1.8 and ld.lld 21. Only clang/lld is supported for mod authors.
-- **Flags** (see `runtime/guest/include/wwhd_guest.h`, `examples/guest-mods/Makefile`):
-  `--target=powerpc-unknown-eabi -mcpu=750 -O2 -ffreestanding -fno-builtin -nostdlib
-  -fno-jump-tables -ffunction-sections -fdata-sections`. `-mcpu=750` keeps to instructions
-  of the game's CPU family (no AltiVec, no `isel`); clang does not use small-data (r2/r13)
-  addressing for this target, so the game's r2/r13 stay untouched.
-- **Output**: one relocatable ELF per mod (`ld.lld -m elf32ppc -r *.o -o mod.elf`), not linked to an
-  address. Relocations and undefined symbols are resolved on install.
-- **References to the game** by address, so no symbol database is needed:
-  `WWHD_GAME_FUNC(0x0200ED84, void, cLib_addCalc2, (f32*, f32, f32, f32))` declares a game
-  function (`__wwhd_game_0x0200ED84` as the symbol), `WWHD_GAME_ORIGINAL(...)` the game's own
-  code below all mods, `WWHD_GAME_DATA(addr, type)` a variable. A later SDK can add
-  name-based symbols on top (a generated `game_symbols.txt`; see the legal section).
-- **Hooks** are descriptors in section `.wwhd_hooks` (`WWHD_REPLACE`, `WWHD_HOOK`,
-  `WWHD_HOOK_RETURN`), read by the translator.
-- **Memory**: the mod's code, data and bss live in guest memory at a base the mod manager
-  assigns, in a region the game and the runtime do not use (`0x7F000000`–`0x80000000`,
-  16 MiB). Game code can therefore use pointers into mod data, and mod functions are
-  registered in the dispatch table at their guest addresses (function pointers handed to the
-  game work). A mod heap (guest `malloc`) is a planned host service.
-- **ABI**: the game's: arguments r3–r10 / f1–f8, results r3/r4/f1, stack r1, small-data
-  bases r2/r13 owned by the game, big-endian. Varargs follow the SVR4 rules (cr6).
-- **Package** (`manifest.json`, the v1 manifest format plus):
-  `"kind": "guest", "guest": {"api_version": 1, "elf": "mod.elf"}`. Options, dependencies
-  and conflicts as for v1.
-
-## Install-time translation
-
-`tools/guestmod/build_guest_mod.py PACKAGE --out CACHE [--base ADDR] [--cc CC] [--json]`:
-
-1. reads the manifest and the ELF (`tools/guestmod/guestmod.py`): lays the allocatable
-   sections out at the base (code, read-only data, data, bss), applies all relocations
-   (`ADDR32`, `ADDR16_LO/HI/HA`, `REL24`, `REL14`, `REL32`; anything else, e.g. small-data
-   relocations, is an error), resolves undefined symbols (`__wwhd_game_*`, `__wwhd_orig_*`,
-   `__wwhd_gdata_*`, otherwise a host service by name);
-2. finds the functions (symbols, call targets, address-taken code, cross-function branch
-   targets) and translates every instruction with **the game's translator** (`ppc2c.py`);
-   unsupported instructions are an install error that names them;
-3. writes one C file: the functions, the relocated initial memory image, the function table,
-   the hook table and the list of host services; it exports `wwhd_guest_module_v1`
-   (`runtime/include/wwhd_guest_abi.h`) and **imports nothing from the executable** (all
-   runtime entry points come through a host table), so a module is a plain shared library on
-   every platform and does not depend on how the game code was built;
-4. compiles it with the local compiler (`-O2 -ffp-contract=off -fno-strict-aliasing -fPIC
-   -shared`) into `CACHE/<key>/<id>.dylib|.so|.dll`.
-
-The cache key covers the ELF, the base, the translator version, the module ABI version and
-the compiler with its flags. A cached module is reused; a port update that changes the
-translator or the ABI changes the key and the module is rebuilt on the next start (a few
-hundred milliseconds per mod). A game rebuild alone does not invalidate modules; the runtime
-re-validates hook targets on load (every target must be a function entry of this build).
-
-### Manager startup and local tools (phase 1)
-
-Guest packages use the same one-time code trust dialog as native packages. The
-fingerprint is the SHA-256 of `mod.elf`, so rebuilding a module does not ask again.
-The manager freezes the enabled guest set and options during initialization.
-After memory and dispatch initialization, before guest threads start, it inspects,
-allocates, builds and loads that set in dependency order. Failures appear in each
-package's details in the Mods tab. Later enable, disable, profile and option changes
-need a restart; an active guest module remains resident until the process exits.
-
-Memory assignments are 64 KiB aligned and persisted in `profiles.json` under
-`guest_regions`. Valid assignments remain stable, including those of disabled
-installed mods. Growing a mod may move it and rebuild its module; removing a mod
-releases its assignment. Overlapping or invalid saved assignments are repaired.
-A guest startup dependency must already be active (content/another guest mod), or
-be a settings preset; a native plugin loaded later during gameplay cannot supply
-a startup dependency.
-
-Setup writes `guest-sdk.json` in the game data directory with its Python command,
-compiler argument vector, translator path and SDK headers. Keep the release tools
-and local compiler installed. If they are missing, the Mods tab asks you to run
-setup again. Development builds may select an equivalent JSON file with
-`WWHD_GUEST_BUILD_CONFIG`. The bridge runs argument vectors directly, without a
-shell; `--cc-json '["compiler", "arguments"]'` preserves paths containing spaces.
-The original `--cc` interface remains supported for catalogue integrations.
-
-On Windows, the standard LLVM installer and llvm-mingw do not include the PowerPC
-backend. Modders should use the MSYS2 CLANG64 clang/lld packages (an all-target build),
-while players' host modules still compile with setup's pinned llvm-mingw. Pass
-`-m elf32ppc` to lld to select ELF output on Windows, where MSYS2 defaults to PE. The
-[MSYS2 LLVM package recipe](https://github.com/msys2/MINGW-packages/blob/master/mingw-w64-llvm/PKGBUILD)
-selects all targets for its clang build. CI verifies the actual PowerPC compilation.
-
-### Build-step contract additions (phase 1)
-
-`build_guest_mod.py PACKAGE --inspect --base ADDR --json` reports the relocated
-`memory_size`, the 64 KiB rounded `allocation_size`, `base`, package `id` and
-`elf_sha256` without invoking a compiler. The manager uses this to allocate the
-mod region before building. Bases must be 64 KiB aligned in the mod region.
-The existing build command and last-line JSON contract remain supported; successful
-build and cache-hit responses now also contain these memory and ELF metadata fields.
-
-Cache keys include the actual guest translator, `ppc2c.py`, build script and runtime
-ABI/header bytes, in addition to their version strings, ELF, base, package ID,
-compiler command/version and flags. This also invalidates development caches when
-the translator or CPU layout changes without a release version bump. ELF paths are
-relative to the package; parent paths, absolute paths and symlinks are rejected.
-
-The `guestmods` CI workflow compiles the examples with Apple CLT, pinned llvm-mingw
-and pinned zig selected by setup. The modder-side PowerPC compiler remains clang
-with lld. These tests use synthetic mod code and require no game files.
-
-Errors for the player are short (`--json`: `{"ok": false, "error": "..."}`), for example
-"instructions the translator does not support: …", "the mod needs guest API 2; this game
-supports 1", "the local compiler could not build the mod (see …/build.log)". Load-time
-errors (hook target is not a game function, function already replaced by another mod, a
-host service missing in this version, memory overlap) leave the mod unloaded and are logged.
-
-## Headers for modders (public sources)
-
-The SDK generator reads a fresh, clean HTTPS clone of the public
-[HD decompilation](https://github.com/ZeldaWWHDDecomp/wwhd). It never executes code
-from that checkout. The generated files retain its CC0 notice and source revision.
-Private decompilation branches and recompiled game output are not inputs.
-[The public GameCube decompilation](https://github.com/zeldaret/tww) remains useful
-for names and semantics; its layouts must not be substituted for HD layouts.
-
-```sh
-git clone https://github.com/ZeldaWWHDDecomp/wwhd.git build/public-wwhd
-git -C build/public-wwhd checkout 47e1dbc3886cfd8233859dffd73efc41a04a9130
-python3 tools/guestmod/regenerate_sdk.py --public-clone build/public-wwhd
-# CI performs this check without modifying the committed files:
-python3 tools/guestmod/regenerate_sdk.py --public-clone build/public-wwhd --check
-```
-
-`wwhd/functions.h` gives every public verified function a named hook address.
-Ambiguous names retain an address suffix. `wwhd/bindings.h` declares callable
-functions with supported signatures; object pointers are opaque `void*`, and
-names use a `wwhd_` prefix. Unsupported signatures are reported rather than guessed.
-The JSON inventory retains their original public declarations for further curation.
-The current public revision resolves every verified declaration (22,853 unique callable
-bindings). Public `Pair32` and six-byte vector returns explicitly use two integer registers;
-the SDK exposes them as `wwhd_gpr_pair`, with `WWHD_RESULT_R3` and `WWHD_RESULT_R4` accessors,
-rather than declaring a C struct return with a hidden result pointer. For `SxyzResult`,
-r3 contains x/y and the upper 16 bits of r4 contain z; its lower 16 bits are not part of
-the value. The generator validates these public ABI adapters and curated enum definitions
-before emitting their declarations. A synthetic translated-module execution test checks
-the PowerPC register order with each desktop host compiler.
-These addresses target USA version 0. Functions absent from the public decomp
-remain hookable by address when hook checks are compiled in.
-
-`wwhd/data.h` names the public save/resource pointer slots, matrix stack, zero
-vector and item table bases/strides. It contains no initialized game data.
-
-Curated `actor.h`, `link.h`, `camera.h`, `items.h` and `messages.h` provide partial
-HD views. Named scalar fields have compile-time offset checks; unknown compound
-fields remain accessible through the byte view. Source qualifications about
-inferred fields still apply. `save.h` exposes the documented status prefix and
-save-info pointer rather than assuming a fixed live save address. The views require
-a 32-bit guest target, and compile as C or C++ with clang.
-
-### European installs
-
-Modders target USA addresses in a single PowerPC ELF package. At inspection and build,
-the port translates hook targets, game calls, original calls, function pointers and
-`WWHD_GAME_DATA` relocations through the installed game's `tools/recomp/builds` map.
-The running executable selects the build; USA and EU modules use separate cache keys,
-which also fingerprint the address map. Changed or unmapped functions are refused with
-an error naming their public SDK function when available and its USA address.
-
-Use `WWHD_GAME_DATA(address, type)` for constant game data addresses and the generated
-table accessors for indexed data. Raw integer-to-pointer casts embed USA addresses and
-are unsupported for portable mods. EU refuses packages built with the older SDK, whose
-data addresses had no relocations; their authors must rebuild against this SDK.
-Object layouts must also be valid for both builds; an address map does not translate
-member offsets or game object contents. The standalone builder accepts `--build EU`
-for testing; the manager supplies this automatically.
-
-## Host services
-
-Services use the game ABI and resolve by name when the module loads. ABI 2 marks each
-imported service call with its originating mod instruction address in `Cpu::pc`.
-This identifies the owning package even for mod functions called through game function
-pointers or nested cross-mod calls. Old modules must rebuild; the cache hashes the ABI
-header and translator sources, so this happens automatically.
-
-| Service | Phase 1 behavior |
-| --- | --- |
-| `wwhd_log`, `_int`, `_hex`, `_float` | Log lines tagged with the calling mod ID. |
-| `wwhd_config_int`, `_bool`, `_float`, `_string` | Typed values from the manager's startup snapshot; numeric/bool calls use their fallback on missing or wrong-type values. `_float` returns a double. Strings include enum options and copy into a caller-owned guest buffer. |
-| `wwhd_malloc`, `wwhd_free` | Per-mod 16-byte-aligned guest heap. `guest.heap_size` chooses bytes (default 256 KiB, maximum 8 MiB); null on exhaustion. Metadata stays in guest memory, so restoring it restores allocation state. |
-| `wwhd_input_read` | Read-only VPAD-style buttons, sticks and touch in `wwhd_input_state`. |
-| `wwhd_file_read`, `wwhd_file_write` | Flat filenames in `ModManager/Data/<id>`, at most 1 MiB per call. No directory components, symlinks, hardlinks or Windows device names. Write replaces the file. Both return bytes transferred, or -1 on failure. |
-| `wwhd_logic_dt`, `wwhd_logic_step` | Seconds in the current logic step (true-60 scaling included), and the full logic-step counter. |
-| `memcpy`, `memmove`, `memset` | Compiler-generated struct copies and explicit guest-memory operations. |
-
-Option and enabled-set changes take effect on restart. `WWHD_GUEST_OPT_*` and the
-prototype's unchecked `WWHD_GUEST_MODS` direct-library loading are retired; install
-packages through the mod manager and its code trust dialog.
-
-The HUD service is phase 2. Its proposed interface is renderer-independent submission
-of text, rectangles and mod-owned RGBA images, with opaque per-mod resource handles,
-explicit guest buffer lengths, frame-scoped draw lists and cleanup at shutdown. The
-host would copy pixels/text before returning and render the lists through Metal/Vulkan
-at the overlay stage. No guest pointers would be retained by a renderer. Audio streams,
-events and additional compiler helpers also remain future work.
-
-## Phase 2 interfaces and integration
-
-The following HUD interface is a proposal, not an available phase 1 import:
-
-```c
-typedef u32 wwhd_hud_list;
-typedef u32 wwhd_hud_image;
-wwhd_hud_list wwhd_hud_begin(u32 screen); /* TV or GamePad; zero on failure */
-void wwhd_hud_rect(wwhd_hud_list list, f32 x, f32 y, f32 w, f32 h, u32 rgba);
-void wwhd_hud_text(wwhd_hud_list list, f32 x, f32 y, f32 size,
-                   u32 rgba, const char* utf8, u32 bytes);
-wwhd_hud_image wwhd_hud_image_rgba(const void* pixels, u32 width, u32 height, u32 stride);
-void wwhd_hud_image_draw(wwhd_hud_list list, wwhd_hud_image image,
-                        f32 x, f32 y, f32 w, f32 h, u32 rgba);
-void wwhd_hud_commit(wwhd_hud_list list);
-void wwhd_hud_image_release(wwhd_hud_image image);
-```
-
-Coordinates use a documented 1280×720 logical canvas with an aspect-preserving safe
-rectangle; the runtime supplies the actual screen rectangle. Commands draw in submission
-order. Text uses a runtime font, bounded UTF-8 lengths and explicit sizes. Images are
-uncompressed RGBA8 with checked stride, dimensions and byte length; resource and draw-list
-quotas are per mod. Handles are owned by the calling mod and cannot name another mod's
-resources. Calls synchronously copy guest data; no guest pointers cross to renderer threads.
-
-A commit atomically publishes an immutable list for subsequent rendered frames. A logic
-hook can update it once per step while interpolation reuses it between steps. Publishing
-an empty list hides the panel. Released images remain alive until queued render work has
-finished. Metal and Vulkan draw at the same overlay stage; GamePad drawing is explicit.
-Host resources are not guest memory: state-load notification must let mods rebuild handles
-and publish a fresh list after a full-state restore. Shutdown releases every owned handle.
-These rules also resolve the minimap/dragon panel overlap through configurable placement,
-rather than hard-coded renderer patches.
-
-Audio streams should follow the same ownership and bounded-copy model: open a stream with
-an explicit sample rate/channel count, queue bounded interleaved PCM buffers, query queue
-space, and close it. A runtime mixer resamples as needed, obeys mute/volume settings and
-rejects invalid handles or oversized queues. It must support cancellation and state-load
-reset without retaining guest buffers. This supplies synthesized mod music; access to the
-game's own effects remains through game functions. No HUD or audio-stream code is built in
-phase 1.
-
-Catalogue integration can already call `build_guest_mod.py` through its documented
-inspect/build JSON contract. Follow-up work is to connect catalogue progress/errors and
-use the manager's persisted allocation, selected host compiler, trust fingerprint and
-cache directory. The catalogue must not allocate independently or trust a previously built
-native module without checking its ELF. Dependency resolution remains the manager's job.
-
-Android needs a separate plan for host module compilation, executable code loading,
-package storage/document URIs and lifecycle handling. Desktop compile-test results do not
-prove Android support. Until that work and device tests are complete, Android guest mods
-remain unsupported. Further compiler helpers, events and cross-mod exports should have
-versioned contracts and focused tests before being added.
-
-## Porting the existing minimap and dragon prototypes
-
-These are porting plans, not completed ports. Keep their existing gameplay limitations
-visible and preserve local asset preparation: no maps, models or game sounds belong in
-distributed mod packages.
-
-For **gc-minimap**, replace the built-in switch with a guest package and manager options.
-A return hook on the public Link execute target captures position, heading and stage/event
-visibility once per logic step. The generated actor views and public game accessors replace
-host `ppc_ptr` reads. Keep sector/map-coordinate math in guest code; host mutexes disappear
-when state stays in guest globals. Move the renderer-specific panel to the phase 2 HUD
-interface, including the frame, heading marker and arrows. Preserve the existing rule of
-hiding sectors without verified bounds. Stage/event fields not yet curated into the SDK
-need public-source declarations and offset checks before the port uses them.
-
-The cache builder still runs locally against the player's own files. Put its results in the
-mod's own data folder, with flat filenames; split files larger than the phase 1 1 MiB
-per-call limit. A future catalogue preparation step can manage this. A guest package cannot
-read the prototype's arbitrary external cache path through the phase 1 file service.
-Verify no state reads or resource uploads when disabled, and compare the panel on both
-renderers once the HUD interface exists. Full visual parity is therefore phase 2 work.
-
-For **dragon**, rewrite `Cpu*`/host-memory wrappers as typed PowerPC hooks and replacements.
-Use public names for Link execute, camera follow, Valoo lifecycle, resources, song handling
-and save-slot operations. Preserve the port's outer climb/true-60 hooks. Entry/return hooks
-cannot change argument registers or the result, so operations that redirect arguments or
-suppress the original need a replacement plus `WWHD_GAME_ORIGINAL`, scoped to the mod's own
-actors. Replacement conflicts must remain explicit. Generic public audio trampolines need
-signature curation before using them as semantic song APIs.
-
-Move ride/quest state and tagged actor bookkeeping into guest globals or the mod heap;
-use `wwhd_logic_dt()` rather than assuming 30 steps/s. Use the input service and typed
-options. Store per-slot quest progress with flat per-mod filenames, retaining explicit
-new-game/reset behavior. Full states restore guest quest/heap state, but external progress
-files are not rewound: do not immediately overwrite restored state by rereading a newer
-file. Save-slot copy behavior and state-load notification need explicit follow-up tests.
-Use game resource/effect functions for locally available models, animations and effects.
-The letter/flight panels await HUD support, and synthesized melody mixing awaits the audio
-stream interface. Test cancellation, ordinary story actors, boat/leaf recovery, save slots,
-true-60 timing and simultaneous minimap placement before claiming parity. Existing route,
-collision and presentation limitations remain separate from the SDK port.
-
-## Trust
-
-A translated guest mod is compiled to native code in the game process. Two properties limit
-it compared with a v1 native library: its loads and stores go to the 4 GiB guest window, and
-it reaches the host only through the services above and the game's own functions (including
-the runtime's emulated system calls, e.g. the game's file access). That is a mitigation, not
-a sandbox: a mod can still crash the game, corrupt the save the game writes, and any bug in
-the runtime's emulated system calls is reachable. Recommendation: the same one-time trust
-confirmation as v1 native mods, fingerprinting `mod.elf` (the platform-independent code)
-instead of a library; a rebuilt module of the same ELF does not ask again. The install step
-itself is safe to run on untrusted packages: the generated C contains only numbers and
-checked identifiers.
-
-## Mod manager integration
-
-The catalogue's `build_guest_mod` setup step (browse/install/setup flow) runs, per enabled
-guest package and after every port update:
-
-```
-python3 tools/guestmod/build_guest_mod.py <ModManager>/Mods/<id> --out <ModManager>/GuestBuild \
-        --base <assigned base> --cc "<sdk/manifest.json toolchain cc>" --include <sdk>/include --json
-```
-
-- The manager assigns each installed guest mod a 64 KiB-aligned base in the guest mod region
-  (from its memory size, stored in `profiles.json`) and rebuilds when it changes.
-- The last stdout line is JSON: `ok`, `module`, `cached`, `error`. The manager shows `error`
-  in the package details and keeps the package unloaded.
-- On start, the runtime loads the modules of the enabled guest packages before any guest code
-  runs (the prototype takes `WWHD_GUEST_MODS=path,...`). Enabling, disabling and changing the
-  load order need a restart in the first version (hooks are installed before the game
-  threads start).
-- Requires game code built with `--mod-hooks`; setup passes it by default once the decision is
-  made. Without it the runtime logs that guest mods are unavailable.
-
-## Players: enabling PowerPC code mods
-
-Code-mod support starts **off**. Content replacements, settings presets, Cemu packs and
-Native SDK v1 mods do not need it. In **Settings → Mods**, choose **Enable code mods
-(PowerPC mods)**; the macOS Gameplay menu has the same option. Confirm the game-code
-rebuild, which normally takes a few minutes. The dialog shows translation, compilation
-progress and any errors. Cancel leaves the previous build selected. Keep the complete
-release folder and the compiler downloaded by setup: rebuilding uses those local tools.
-
-When setup finishes, choose **Restart now** or restart later. The new build becomes active
-at restart. Turning support off follows the same rebuild and restart flow. Setup caches
-completed variants separately using a fingerprint that includes the hooks option, game,
-compiler and packaged build inputs; returning to an intact cached variant avoids compilation.
-
-You can install a guest package while support is off. The manager offers to enable support;
-enabling a guest package also shows the existing native-code trust confirmation. A mod
-accepted through that offer is queued only after a successful rebuild and becomes active
-on the next launch. The running build's generated hook marker is checked independently
-of the saved setting, so changing a preference alone cannot make an unsupported build load
-PowerPC code mods. Existing enabled guest packages remain installed when support is off.
-
-See [performance and limits](#performance-and-limits) for rebuild timings and the performance gate.
-The opt-in real-game driver is `tools/guestmod/test_code_mods_e2e.py --help`.
-
-For automated runs, `WWHD_CODE_MODS=0` or `1` overrides the preference. Setup accepts
-`--code-mods 0` or `1` (default off). The runtime override does not compile game code or
-invent hook support: launch a variant built with the matching option. Generated C contains
-no SDK hook checks or registration metadata with support off.
-
-## Writing and installing a mod
-
-Guest mods currently target desktop builds. Android still builds, but guest packages are
-unsupported there. A player's build needs game code translated with `--mod-hooks`;
-this flag remains opt-in pending a quiet-window performance rerun.
-
-### Install the modder toolchain
-
-Use clang with the PowerPC backend and lld. The player's host compiler is separate:
-setup already installs or selects Apple CLT, llvm-mingw or zig for module compilation.
-Keep the downloaded host compiler for guest builds. If removed, run setup again to
-restore it. Portable releases store guest-build paths relative to `guest-sdk.json` so
-the release folder can move; system tools keep their external paths.
-Modders do not need devkitPPC, and this SDK does not bundle a modder compiler.
-
-- macOS: `brew install llvm lld`. Use `$(brew --prefix llvm)/bin/clang` and
-  `$(brew --prefix lld)/bin/ld.lld`; Apple's system clang lacks the required target.
-- Windows: install MSYS2, open its CLANG64 shell, then run
-  `pacman -S mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-lld make`.
-  Use that shell's `clang` and `ld.lld`. The official Windows LLVM and llvm-mingw
-  packages may omit the PowerPC backend; llvm-mingw is the player's host compiler.
-- Debian/Ubuntu Linux: `sudo apt install clang lld make`. Other distributions provide
-  equivalent LLVM packages. Check that `clang --print-targets` lists PowerPC.
-
-### Write and build
-
-Include `wwhd_guest.h` and the generated `wwhd` headers. Hook targets use
-`WWHD_ADDR_<public_name>`; callable declarations use `wwhd_<public_name>` where the
-name is unique. Ambiguous names have an address suffix. Entry hooks receive the game's
-arguments. Return hooks receive those arguments again and preserve the game result.
-Only one replacement may own a target; a conflict reports both package IDs.
+- [Save states](#save-states)
+- [Limits](#limits)
+- [How it works](#how-it-works)
+- [For maintainers and tool authors](#for-maintainers-and-tool-authors)
+
+## For players: enabling code mods
+
+Code-mod support is **off** by default. Content replacements, settings presets, Cemu
+graphics packs and Native SDK v1 mods don't need it.
+
+The simplest way: switch the code mod on in **Settings (F1) → Mods**. Its review says that
+code-mod support is added; after **Install** (or **Switch on**) the game code is rebuilt once
+(a few minutes; the progress view shows it), the game restarts by itself and the setup
+continues until the mod is on. A failed step shows one sentence, **Show details** and **Try
+again**; Cancel keeps the current build.
+
+To switch support on or off by hand: **Mods → More → Code-mod support → Use code mods** (on macOS the
+Gameplay menu has the same option), confirm the rebuild, then **Restart now** (or later).
+Support is active from the next start. Both variants are cached, so switching back to one
+you built before is quick. Keep the complete release folder and the compiler setup
+downloaded: building code mods uses those local tools. If they are missing, the Mods tab asks
+you to run setup again.
+
+Accepting the review records your trust in this package version (see [Trust](#trust)); a
+changed package asks again. Individual steps can be run again under **Troubleshooting** on
+the mod's page while it is off. Switching code mods on or off and changing their options take
+effect after a restart.
+
+### GameCube files used by mods
+
+The review of a mod that needs it asks for your GameCube Wind Waker disc image (`.iso`,
+`.gcm` or `.rvz`) or extracted game folder; **Mods → More → GameCube game for mods**
+changes it later. The setting shows the recognised
+region; some mods require a specific region. These files stay on your computer.
+
+Mods use this shared copy automatically. A mod with a missing or incompatible copy shows
+a warning and a **Go to GameCube game for mods** button, and cannot be enabled until the
+copy passes validation. Then choose **Set up** to complete its remaining preparation.
+Changing or clearing the copy turns dependent mods off in every profile and marks their
+preparation for rerunning. Prepared files are kept; restart to unload any active mod,
+then rerun its setup before enabling it again.
+
+## Writing a mod
+
+### Toolchain
+
+You need clang with the PowerPC backend, and lld. You don't need devkitPPC.
+
+- **macOS:** `brew install llvm lld`, then use `$(brew --prefix llvm)/bin/clang` and
+  `$(brew --prefix lld)/bin/ld.lld`. Apple's own clang has no PowerPC target.
+- **Windows:** install MSYS2, open its CLANG64 shell and run
+  `pacman -S mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-lld make`. The official
+  Windows LLVM installer and llvm-mingw may lack the PowerPC backend.
+- **Linux (Debian/Ubuntu):** `sudo apt install clang lld make`. Check that
+  `clang --print-targets` lists PowerPC.
+
+### Write
+
+Include `wwhd_guest.h` and the generated `wwhd/` headers. A hook that runs every time Link's
+per-step function runs:
 
 ```c
 #include "wwhd_guest.h"
@@ -553,32 +95,30 @@ WWHD_HOOK(WWHD_ADDR_daPy_Execute, on_link_step, (void* link)) {
 }
 ```
 
-Compile from the repository root (substitute your LLVM executable paths):
+### Build
 
 ```sh
 clang --target=powerpc-unknown-eabi -mcpu=750 -O2 -ffreestanding \
   -fno-builtin -nostdlib -fno-jump-tables -ffunction-sections -fdata-sections \
-  -Iruntime/guest/include -c mod.c -o mod.o
+  -I<sdk>/include -c mod.c -o mod.o
 ld.lld -m elf32ppc -r mod.o -o mod.elf
 ```
 
-A release SDK ships modder headers in `sdk/guest/include`; use that directory instead
-of `runtime/guest/include` when compiling outside a source checkout.
-
-The relocatable ELF is identical across desktop platforms. Do not link it to a fixed
-address. Use `WWHD_GAME_ORIGINAL` with the generated target address to call below all
-mod hooks. The port's own interpolation and true-60 hooks remain outside mod hooks.
-Use `wwhd_logic_dt()` for time-based behavior, and avoid interpreting rendered frames
-as logic steps. The examples demonstrate entry/return hooks and original calls.
+`<sdk>/include` is `sdk/guest/include` in a release folder, or `runtime/guest/include` in a
+source checkout. `-mcpu=750` keeps to the game CPU's instructions. Link with `-r` only: the
+ELF must stay relocatable (the port picks its address). `-m elf32ppc` is needed on Windows,
+where MSYS2's lld defaults to PE. The same `mod.elf` works on every desktop platform.
 
 ### Package and install
 
-Place this manifest beside `mod.elf` (replace the metadata for your mod):
+Put a `manifest.json` next to `mod.elf` (`game_id` is `"wwhd"` for both regions, from mod manager 1.5;
+`"wwhd-usa"` from older manifests is still accepted; the game build is checked when the code mod is built):
 
 ```json
 {
   "format_version": 1,
-  "game_id": "wwhd-usa",
+  "game_id": "wwhd",
+  "minimum_manager_version": "1.5.0",
   "id": "hello-link",
   "name": "Hello Link",
   "version": "1.0.0",
@@ -587,111 +127,901 @@ Place this manifest beside `mod.elf` (replace the metadata for your mod):
 }
 ```
 
-Choose the folder in **Mods → Installed packages → Choose folder → Install package**.
-Alternatively, from inside the package folder run
-`python3 -m zipfile -c hello-link.wwhdmod manifest.json mod.elf` and choose that package.
-Distribute only the manifest, your ELF and your own permitted resources.
+Install the folder with **Mods → Installed packages → Choose folder → Install package**, or
+zip it (`python3 -m zipfile -c hello-link.wwhdmod manifest.json mod.elf`) and install the
+file. Enable it, confirm the trust prompt and restart. Build or load errors appear in the
+package's details in the Mods tab.
 
-Enable the installed package, accept the same trust confirmation used for native mods,
-and restart. Confirmation is tied to the ELF hash; changing the ELF asks again.
-The manager assigns memory, translates the ELF and builds a cached native module at
-startup. Build/load failures appear in the Mods tab and leave that package unloaded.
-Changing enabled mods or options takes effect on the next restart. Typed options use
-the normal manager manifest schema; read them with `wwhd_config_*` rather than environment
-variables. Files are restricted to flat names in the package's own data directory.
+Options, dependencies and conflicts use the normal manifest schema
+([mod-manager.md](mod-manager.md)); read options with `wwhd_config_*`. To update a mod,
+disable it, restart and install the new version with the same ID; its settings stay.
+Distribute only your manifest, your ELF and resources you are allowed to share, never game
+files.
 
-For updates, disable the package, restart, then reinstall the same ID. Configurations
-remain associated with that ID. A translator, ABI or compiler change invalidates the
-module cache automatically; it does not require redistributing the ELF.
+The examples in [`examples/guest-mods`](../examples/guest-mods) are complete mods:
+
+| Example | Shows |
+| --- | --- |
+| `heart-ticker` | entry and return hooks on Link's per-step function, calling a game function |
+| `addcalc-replace` | replacing a game function (`cLib_addCalc2`) and calling the original |
+| `hud-demo` | HUD drawing with package artwork and text, texture reload after a state load |
+| `button-icons` | reading port settings, following the game's button panes |
+
+Story mods live in the mod repository ([ZeldaWWHDMods](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods))
+with their content:
+
+| Package | Shows |
+| --- | --- |
+| `story-notebook` | the story system's required package: the letter that brings the story notebook, the notebook's look, a first quest as data (see [The story notebook](#the-story-notebook)) |
+| `rito-letter` | a story mod's letter, delivered once per save file by the Rito postbox |
+| `story-chart` | a story mod's chart, like a treasure chart: the red circle on Windfall's lighthouse once Link stands there |
+
+## Hooks and replacements
+
+| Macro | Runs |
+| --- | --- |
+| `WWHD_HOOK(target, name, (args))` | before the game function, with its arguments |
+| `WWHD_HOOK_RETURN(target, name, (args))` | after it, with the same arguments; the game's result is kept |
+| `WWHD_REPLACE(target, ret, name, (args))` | instead of it |
+| `WWHD_GAME_ORIGINAL(...)` | the game's own code, below all mod hooks |
+
+- Every game function can be hooked, including calls through function pointers.
+- Hooks can't change the arguments or the result. To change them, replace the function and
+  call the original yourself.
+- Only one mod may replace a function; a second one is an error naming both mods. Any number
+  of mods may hook one.
+- Entry hooks run in load order, return hooks in reverse order.
+- The port's own hooks (frame interpolation, 60 fps) stay outside mod hooks: a hook on a
+  logic function runs once per logic step, at any frame rate; a hook on a drawing function
+  runs once per displayed frame. Use `wwhd_logic_dt()` for anything time-based, and don't
+  count displayed frames as game steps.
+- Calling convention is the game's: arguments in r3–r10 / f1–f8, results in r3/r4/f1.
+
+## Game functions, data and objects
+
+The headers come from the public [HD decompilation](https://github.com/ZeldaWWHDDecomp/wwhd)
+and target the USA game version; mods work on EU installs too (see below).
+
+- `wwhd/functions.h`: every public verified function as a hook target, `WWHD_ADDR_<name>`.
+  Ambiguous names have an address suffix.
+- `wwhd/bindings.h`: callable declarations, `wwhd_<name>(...)`. Object pointers are `void*`.
+  Functions returning a register pair use `wwhd_gpr_pair` with `WWHD_RESULT_R3` /
+  `WWHD_RESULT_R4`.
+- `wwhd/data.h`: named save/resource pointers, matrix stack and item tables.
+- `actor.h`, `link.h`, `camera.h`, `items.h`, `messages.h`, `save.h`: partial views of game
+  objects with checked field offsets; unknown parts are reachable as bytes.
+- Functions not in the public decomp can still be hooked by address with
+  `WWHD_GAME_FUNC(address, ret, name, (args))`; game variables with
+  `WWHD_GAME_DATA(address, type)`.
+
+**European installs.** Write your mod against USA addresses; when it is built on an EU install,
+the port translates hook targets, game calls, function pointers and `WWHD_GAME_DATA`
+references to the EU build. Functions that differ or don't exist in EU are refused with an
+error naming them. Don't cast integers to pointers (that hard-codes a USA address), and only
+use object fields that are the same in both versions.
+
+## Host services
+
+| Service | What it does |
+| --- | --- |
+| `wwhd_log`, `_int`, `_hex`, `_float` | Log lines tagged with your mod's ID |
+| `wwhd_config_int`, `_bool`, `_float`, `_string` | Your mod's options (values from startup; fallback on missing or wrong type; strings copy into your buffer) |
+| `wwhd_malloc`, `wwhd_free` | Per-mod heap, 16-byte aligned; size from `guest.heap_size` (default 256 KiB, max 8 MiB); null when full |
+| `wwhd_input_read` | Buttons, sticks and touch (read-only) |
+| `wwhd_file_read`, `wwhd_file_write` | Flat file names in your mod's own data folder, at most 1 MiB per call; write replaces the file; return bytes or -1 |
+| `wwhd_logic_dt`, `wwhd_logic_step` | Length of the current logic step in seconds (60 fps modes included) and the step counter |
+| `wwhd_setting_get`, `wwhd_setting_changed` | Read-only port settings, below |
+| `wwhd_hud_*` | Drawing on screen, below |
+| `wwhd_audio_*` | Bounded PCM streams, below |
+| `wwhd_mail_send`, `wwhd_mail_state` | A letter from your mod, delivered by the Rito postbox, below |
+| `wwhd_chart_*` | A chart from your mod that marks places on Link's sea chart, below |
+| `wwhd_quest_*` | Your mod's quests in the story notebook, below |
+| `memcpy`, `memmove`, `memset` | As usual |
+
+Your mod can also call any game function. Original synthesized audio can use the PCM stream service below.
+
+## Port settings
+
+`wwhd_setting_get(key, type, buffer, capacity)` returns the bytes written, or 0 for an unknown
+key, wrong type or too small buffer (the buffer stays unchanged). Pass a null buffer and 0 to
+get the size. Strings include the NUL; numbers are big-endian. Settings are never changed by
+mods. `wwhd_setting_changed(key)` returns a revision that changes when the value changes; read
+settings once per logic step.
+
+| Key | Type | Values |
+| --- | --- | --- |
+| `input.face_layout` | STRING | `position`, `labels`, `custom` |
+| `input.controller_mode` | STRING | `gamepad`, `pro` |
+| `game.language` | U32 | Wii U language code 0–11 in use (set at startup) |
+| `game.build` | STRING | `USA`, `EU` |
+| `display.drc_mode` | STRING | `window`, `pip`, `auto`, `off`, `gamepad` |
+| `display.aspect` | F64 | Aspect ratio of the current frame |
+| `render.interp_fps` | U32 | Frame rate shown: 30, the interpolation rate, or 60 in true 60 mode |
+| `render.true60` | BOOL | 0 or 1 |
+
+```c
+static char layout[16];
+if (wwhd_setting_get("input.face_layout", WWHD_SETTING_STRING, layout, sizeof layout)) {
+    /* layout holds the current preset name */
+}
+```
+
+## Drawing on screen (HUD API v2)
+
+Register one draw callback with `wwhd_hud_register(draw, screen)` from a game hook (a null
+callback unregisters it). The port calls `draw(list)` after each logic step; record elements
+with `wwhd_hud_emit(list, &element)`. The list is shown when the callback returns and stays
+on screen until the next step. Only read game state in the callback.
+
+```c
+#include "wwhd_guest.h"
+#include "wwhd/functions.h"
+
+static wwhd_hud_element box;
+static void draw(u32 list) {
+    box = (wwhd_hud_element){
+        .kind = WWHD_HUD_RECT, .anchor = WWHD_HUD_TOP_LEFT,
+        .x = 20, .y = 96, .w = 160, .h = 40,
+        .thickness = 1, .u1 = 1, .v1 = 1, .rgba = 0x204060C0
+    };
+    wwhd_hud_emit(list, &box);
+}
+WWHD_HOOK(WWHD_ADDR_daPy_Execute, register_box, (void* link)) {
+    (void)link;
+    wwhd_hud_register(draw, WWHD_HUD_BOTH);
+}
+```
+
+- **Elements** (`wwhd_hud_element` in `wwhd_guest.h`): filled or outlined rectangles and
+  circles, lines, text and images. Set `thickness`, `u1` and `v1` to 1 unless you need other
+  values. Circle `size` is the radius, text `size` the height. Images support UV subrects,
+  tint, rotation and alpha or additive blending. Keep elements and text in static storage or
+  your heap.
+- **Coordinates:** TV 1280 × 720, GamePad 854 × 480 (`WWHD_HUD_BOTH` uses TV coordinates,
+  scaled). Anchors keep elements at the screen edges on wide screens.
+- **Images:** `wwhd_hud_texture(WWHD_HUD_PACKAGE, "assets/x.png")` loads your package's own
+  art from `assets/` or `textures/`; `WWHD_HUD_DATA` loads from your mod's data folder.
+  Keep the handle and free it with `wwhd_hud_release`. After a state load the handles are
+  gone: compare `wwhd_hud_epoch()` in each callback and reload when it changes.
+- **Limits:** per list 1024 elements and 64 KiB of text; per mod 32 images and 16 MiB of
+  decoded pixels. An invalid element (bad UTF-8, bad handle, non-finite numbers, over the
+  limits) drops the whole list, with a message in the Mods tab.
+
+HUD v2 adds bounded clip rectangles without changing the 72-byte element layout.
+Record `WWHD_HUD_CLIP_PUSH` and `WWHD_HUD_CLIP_POP` with
+`wwhd_hud_clip(list, &element)`, using the normal element initialization above.
+Push uses `x/y/w/h` and `anchor`; its screen-aligned rectangle intersects the
+current parent clip and screen. Geometry, image rotation and UVs remain unchanged.
+Pop restores the parent. Up to 16 nested clips are allowed; underflow, overflow or
+an unbalanced callback drops the entire list. Clips belong to one recording list
+and cannot affect another mod. Send ordinary drawing elements through
+`wwhd_hud_emit`; that service rejects clip commands.
+
+`WWHD_HUD_API_VERSION` is 2; the guest module ABI and manifest `guest.api_version`
+remain 1. Importing `wwhd_hud_clip` is the runtime capability check: older hosts
+lack that service and refuse the module during loading. Existing HUD v1 mods
+continue to load without it. Do not emulate clipping by moving or shrinking the
+image, since that changes registration at a map boundary.
+
+It draws on Metal and Vulkan, in the TV picture and the GamePad screen (window or
+picture-in-picture); the settings overlay stays on top. Positions are not interpolated
+between logic steps.
+
+## Letters
+
+A story mod (a mod that adds a quest) can announce itself the way Wind Waker does: with a
+letter. The Rito postbox hands it out like the game's own mail, and the game shows it in its
+letter window.
+
+```c
+#include "wwhd_guest.h"
+#include "wwhd/functions.h"
+#include "wwhd/save.h"
+
+WWHD_HOOK(WWHD_ADDR_daPy_Execute, send_letter, (void* link)) {
+    (void)link;
+    u16 max_life = dComIfGs_player_status_a.max_life;
+    if (max_life < 12 || max_life > 80) return;  /* no save file loaded */
+    wwhd_mail_send("hello", "A wandering storyteller",
+                   "Dear Link,\na new tale has reached the Great Sea.\nFair winds!");
+}
+```
+
+`wwhd_mail_send(letter_id, sender, text)` puts the letter in the postbox of the loaded save file,
+unless that file already got it. Call it from a gameplay hook; calling it again (even every logic
+step) never sends the letter twice. It returns the letter's state:
+
+| Result | Meaning |
+| --- | --- |
+| `WWHD_MAIL_NONE` (0) | never sent to this save file (only from `wwhd_mail_state`) |
+| `WWHD_MAIL_WAITING` (1) | waiting in the postbox (handed out once Link has the Delivery Bag) |
+| `WWHD_MAIL_READ` (2) | handed out and read |
+| `WWHD_MAIL_INVALID` (-1) | invalid ID, sender or text |
+| `WWHD_MAIL_NO_ROOM` (-2) | no save file loaded, or its story record is full (255 entries per Quest Log, shared with charts and the notebook) |
+
+`wwhd_mail_state(letter_id)` returns the state without sending; use it, for example, to start
+your quest once the letter was read.
+
+- **ID:** 1 to 32 characters `a`-`z`, `0`-`9`, `-`, `_`, `.`; unique within your mod.
+- **Sender:** one line, up to 48 bytes. It is shown below the text as the signature.
+- **Text:** plain UTF-8, up to 1200 bytes; `\n` breaks a line. Other control characters are
+  refused (the game uses them for its own text codes). Keep lines short (about 40 characters)
+  and the letter to about ten lines. Characters the game's font lacks are not shown.
+- The text of the first call in a session is used; the letter can only be shown while your mod is
+  on.
+
+**Delivery.** Any Rito postbox hands out waiting letters, after the game's own, once Link has the
+**Delivery Bag** (from Quill on Dragon Roost Island; the port asks the game, as its own characters
+do). Until then a letter stays waiting in the save file: nothing is lost, and it comes with the
+first postbox visit after Link gets the bag. The game opens its postboxes only after the first
+pearl; letters from mods are handed out before that too, as soon as Link has the bag (the game's
+own letters still wait for the pearl). A letter from a mod needs no postage. Like the game's
+letters it comes with an enclosure, which Link takes after reading: the Story Notebook package's
+letter encloses the **story notebook**, every other one a green rupee. Several waiting letters are
+handed out one after another.
+
+**The story notebook** is the port's journal for story mods (see [The story notebook](#the-story-notebook)).
+Link keeps it in the Delivery Bag. Receiving it writes nothing to the inventory: it is kept in the
+story record (below).
+
+**Saving.** Whether a letter was sent and read, and whether the notebook was received, is kept with
+the save file (see [Where story progress is saved](#where-story-progress-is-saved)). A letter
+received but not saved arrives again after loading the older save. The text is not stored; turning
+your mod off leaves its letters waiting in the record, and nothing changes for the postbox.
+
+**Players without letter mods.** The postbox, message and item functions are only hooked while a loaded
+mod uses `wwhd_mail_*`. If another mod replaces one of them, letters from mods are not delivered
+in that session and the log says so.
+
+## Charts and markers
+
+A story mod can give Link a chart the way Wind Waker gives him a treasure chart, and the sea
+chart treats it the same way. In the game, an owned treasure chart puts nothing on the sea chart:
+its X is only on the chart itself. Once the treasure is salvaged, the game's red hand-drawn circle
+marks the spot on the sea chart. Your mod's chart behaves the same way: while Link only owns it,
+the sea chart shows nothing for it; when your mod finishes it, the red circle marks each of its
+markers' spots. (The guiding marks of your quest are the story notebook's job: the quest shown on
+the chart gets the game's white story ring, see [The story notebook](#the-story-notebook).)
+
+```c
+#include "wwhd_guest.h"
+#include "wwhd/functions.h"
+#include "wwhd/save.h"
+
+WWHD_HOOK(WWHD_ADDR_daPy_Execute, quest_step, (void* link)) {
+    (void)link;
+    u16 max_life = dComIfGs_player_status_a.max_life;
+    if (max_life < 12 || max_life > 80) return;  /* no save file loaded */
+    if (wwhd_mail_state("hello") == WWHD_MAIL_READ) wwhd_chart_give("tale");
+    wwhd_chart_mark("tale", "start", WWHD_CHART_COLUMN_X('D'), WWHD_CHART_ROW_Z(2),
+                    WWHD_CHART_ICON_STORY, "Windfall Island: the storyteller");
+}
+```
+
+| Service | What it does |
+| --- | --- |
+| `wwhd_chart_give(chart)` | Link gets the chart in the loaded save file (once; later calls change nothing) |
+| `wwhd_chart_finish(chart)` | the chart is done: the red circle marks its markers' spots |
+| `wwhd_chart_state(chart)` | the chart's state, without changing it |
+| `wwhd_chart_mark(chart, marker, x, z, icon, label)` | adds the marker, or moves it if it exists |
+| `wwhd_chart_unmark(chart, marker)` | removes the marker; `NULL` removes all markers of the chart |
+
+All of them return the chart's state in the loaded save file, or an error:
+
+| Result | Meaning |
+| --- | --- |
+| `WWHD_CHART_NONE` (0) | not given to this save file |
+| `WWHD_CHART_OWNED` (1) | Link has it (nothing on the sea chart yet, like an owned treasure chart) |
+| `WWHD_CHART_DONE` (2) | finished: its markers have the red circle |
+| `WWHD_CHART_INVALID` (-1) | invalid ID, place, icon or label |
+| `WWHD_CHART_NO_ROOM` (-2) | no save file loaded, or its record is full; or too many markers |
+
+- **IDs:** chart and marker IDs are 1 to 32 characters `a`-`z`, `0`-`9`, `-`, `_`, `.`; chart IDs
+  are unique within your mod, marker IDs within the chart.
+- **Place:** `x` and `z` in the Great Sea's world coordinates, the ones Link's position uses. The
+  sea is 7 × 7 squares of 100000 units; the center of square D4 is (0, 0), `x` grows to the east
+  and `z` to the south. `WWHD_CHART_COLUMN_X('A'..'G')` and `WWHD_CHART_ROW_Z(1..7)` give the
+  center of a square, so Windfall Island (D2) is `WWHD_CHART_COLUMN_X('D'), WWHD_CHART_ROW_Z(2)`.
+  The game's own marks sit on the island squares too.
+- **Icon:** `WWHD_CHART_ICON_STORY` is the only one for now (the sea chart draws the game's red
+  circle for a finished chart's marker, whatever the icon).
+- **Label:** one line of UTF-8, up to 64 bytes, or `NULL`. The sea chart shows the circle only,
+  like the game's own marks; the label names the marker for other screens (a quest notebook, a
+  minimap).
+- **Markers** are placed by your mod in every session, like the letter text: call
+  `wwhd_chart_mark` from a gameplay hook (every logic step is fine) with the place for the
+  current step of your quest, and move or remove it as the quest goes on. Up to 8 markers per
+  mod, 32 in all.
+
+**What the player sees.** While Link owns a chart, nothing of it is on the sea chart. Once the
+chart is finished, each of its markers has the game's red hand-drawn circle (the mark of a
+salvaged treasure) at its exact spot: on the sea chart of the MAP screen, on the GamePad, on the
+TV (Pro Controller) and on the warp map, and in the zoomed view of the marker's square. The circle
+is drawn and animated by the game: it is the circle of the marker's own square, or of another
+square, as long as the game does not show that square's circle itself. The game's own circles
+always come first: when Link salvages the treasure of a square whose circle a marker uses, the
+game gets it back and the marker takes another square's circle (with all 49 in the game's use, it
+waits). In the zoomed view of a square there is one circle: the notebook's shown quest comes first,
+then finished charts' markers, and the game's own circle wins over both.
+
+**Charts as data: the chart list.** Declare your charts in the manifest, and they are charts like
+the game's: while Link owns one, the MAP screen's chart list shows it after the game's charts, with
+its name, and opening it shows its square's map with the X at its place (the game's own chart view;
+once the chart is finished, its red circle).
+
+```json
+"charts": [{"id": "old-map", "name": "Old map",
+            "description": "An old chart. An X marks the top of the lighthouse.",
+            "place": {"x": 1759, "z": -202572}}],
+"quests": [{"id": "hunt", "title": "The old map",
+  "letter": {"id": "hunt", "sender": "A sailor", "text": "...", "encloses": ["chart:old-map"]},
+  "steps": [{"n": 1, "text": "Find the treasure marked on the Old map.",
+             "where": "On your Old map (chart list)", "find": "chart:old-map"}]}]
+```
+
+- **Declaring:** `id`, `name` (up to 40 bytes, the list's caption), `description` (up to 200 bytes)
+  and `place` (the X). Up to 8 per mod.
+- **Getting it:** a letter that encloses `"chart:<id>"` gives it when it is read; a resident's talk
+  with `"then": {"give": "chart:<id>"}`; the quest's reward (`"reward": {"chart": "chart:<id>"}`, when
+  the quest is done); or your code (`wwhd_chart_give`). A chart the quests name must be declared.
+- **Finishing it:** a step with `"find": "chart:<id>"` finishes the chart once the quest is past that
+  step (your code reports the step, a condition or a talk moves the quest on); or your code calls
+  `wwhd_chart_finish`. Finished: the red circle on the sea chart and in the chart view.
+- **"Open chart":** while the current step's chart (`find`) is Link's, the notebook's step page has
+  an Open chart plate (X): the notebook closes and the MAP screen opens with that chart selected.
+- **In the list,** a mod chart stands in for a treasure chart the save file does not own: the
+  game's chart bits are neither read nor written for it, and opening it in the list is kept in
+  the chart's record. With every treasure chart owned there is no room in the list; the chart
+  still works (the notebook, the red circle).
+
+**Saving.** Whether Link owns a chart, and whether it is finished, is stored in the save file in
+the same record as the letters (it stays unused by the game itself; letters and charts of all mods
+share its 19 places per save file). It is saved and loaded with
+the game and kept by full and portable save states. Full save states hold the sea chart as the
+game left it, without the markers' circles; they appear again on the next frame. The places of the
+markers are not saved: your mod places them every session. Turning your mod off leaves its charts
+in the record, and the sea chart shows only the game's own marks.
+
+**Players without chart mods.** The sea chart functions are only hooked while a loaded mod uses
+`wwhd_chart_*`. If another mod replaces one of them, markers are not shown in that session and the
+log says so.
+
+**For map mods (native).** `story_chart::shown_markers()` (`runtime/src/mods/story_chart.h`) lists
+the markers the sea chart shows now, with their world place, icon and label, so a minimap can draw
+them in its own style.
+
+## The story notebook
+
+With several story mods on, the player needs to know what each of them asks for. Wind Waker has
+no quest log; the port adds one in the game's own way: a notebook that arrives by Rito mail.
+
+**The story system and its required package.** Letters, quests, the notebook and mod charts are the
+port's story system (the "Story system" built-in, on by default). It comes with one package from
+the mod repository, **`story-notebook`**: its letter brings the notebook (its manifest's
+`"encloses": ["notebook"]`; only this package's letter can), its manifest's `notebook` block gives
+the notebook's look (`"icon"`: a PNG, `"model"`: a binary glTF the port turns into the game model on
+the player's machine), and it holds a first small quest. The mod manager downloads it from the mod
+catalogue by itself, confirms it like the port's own code and keeps it enabled while the story
+system is on; it can't be switched off or removed on its own. Every quest mod depends on it (a
+manifest with `quests` or `charts` gets the dependency even if it doesn't declare it). While it
+isn't installed (offline, download failed), the story system is inactive: no letters, takeovers,
+chart marks or notebook; quest mods wait with "Needs the Story Notebook quest", the game is untouched
+and no save is changed; the next start tries again.
+
+Your mod fills the notebook with its quests: what to do next, where, and how far the player got.
+The player can show one quest on the sea chart.
+
+```c
+WWHD_HOOK(WWHD_ADDR_daPy_Execute, quest_step, (void* link)) {
+    (void)link;
+    u16 max_life = dComIfGs_player_status_a.max_life;
+    if (max_life < 12 || max_life > 80) return;  /* no save file loaded */
+    s32 letter = wwhd_mail_send("hello", "A wandering storyteller", "Dear Link, ...");
+    s32 quest = wwhd_quest_define("tale", "The storyteller's tale", "A piece of heart", 0);
+    if (letter == WWHD_MAIL_READ && quest == WWHD_QUEST_NEW) quest = wwhd_quest_step("tale", 1, 0, 0);
+    if (quest == 1) {
+        wwhd_quest_step("tale", 1, "Ask the storyteller about his lantern.", "Windfall Island");
+        wwhd_quest_place("tale", WWHD_CHART_COLUMN_X('D'), WWHD_CHART_ROW_Z(2));
+    }
+}
+```
+
+| Service | What it does |
+| --- | --- |
+| `wwhd_quest_define(quest, title, reward, condition)` | registers the quest for this session (call it first, in every session) |
+| `wwhd_quest_step(quest, step, next, where)` | step N reached (1..254), with what to do next and where; step 0 sets the texts only |
+| `wwhd_quest_place(quest, x, z)` | the next step's place on the sea chart (the coordinates of `wwhd_chart_mark`) |
+| `wwhd_quest_no_place(quest)` | the next step has no place on the chart; the notebook says so |
+| `wwhd_quest_known(quest, text)` | what the player knows so far (several lines) |
+| `wwhd_quest_portrait(quest, png)` | the quest's portrait, a PNG of your package (`assets/` or `textures/`, up to 256 × 256) |
+| `wwhd_quest_done(quest)` | the quest is done |
+| `wwhd_quest_state(quest)` | the quest's state, without changing it |
+| `wwhd_quest_set_flag(quest, n, on)` / `wwhd_quest_flag(quest, n)` | the quest's flags 1..8, your own markers for progress inside a step (returns the flag, 0 or 1) |
+
+All of them return the quest's state in the loaded save file, or an error:
+
+| Result | Meaning |
+| --- | --- |
+| `WWHD_QUEST_NEW` (0) | not started in this save file |
+| 1 to 254 | the step reached ("in progress") |
+| `WWHD_QUEST_DONE` (255) | done |
+| `WWHD_QUEST_INVALID` (-1) | invalid ID or text, or the quest was not defined in this session |
+| `WWHD_QUEST_NO_ROOM` (-2) | no save file loaded, or its story record is full; or too many quests (8 per mod, 32 in all) |
+
+- **IDs:** 1 to 32 characters `a`-`z`, `0`-`9`, `-`, `_`, `.`; unique within your mod.
+- **Texts** are plain UTF-8, one line each, `NULL` for none: title (1 to 48 bytes), reward (96),
+  condition (96), next step (120: one sentence), where (48: the island or place). What is known may
+  have line breaks (600 bytes). Like letters, texts are registered in every session and not saved.
+- **Steps** only go forward: a lower step than the saved one changes nothing, and a done quest stays
+  done. Call the services from a gameplay hook; calling them every logic step is fine.
+- **Condition:** a quest that can't be started yet names its condition ("after the Tower of the
+  Gods rises"); the notebook shows "Not yet available: ..." until your mod reaches step 1 or
+  defines the quest again without a condition.
+
+**What the player sees.** The notebook comes with the Story Notebook package's letter, so only once
+Link has the Delivery Bag (see [Letters](#letters)); a story mod's quests are in it from then on. It is kept in
+the Delivery Bag (the first empty place of the bag;
+if all eight places hold the game's items, it waits for one to be free), with its own icon: the port
+draws it over the bag place and it follows the menu's animations. It can't be put on X, Y
+or R. Touching it on the GamePad (or clicking it on the GamePad picture), or choosing it with A in
+the item menu, opens its page over the game:
+
+- one row per quest: your portrait, or an emblem with the initial of your mod's name; the title and
+  your mod's name; the next step; where; and the status: **New**, **In progress**, **Not yet
+  available**: the condition, or **Done** with a stamp;
+- the order: the quest shown on the chart, quests in progress, new ones, ones not yet available.
+  Done quests move to the **Archive** tab (Left/Right or a tap on the tab switches);
+- choosing a row shows what is known so far and the reward, and **Show on chart**: that quest's
+  next step gets the game's story ring on the sea chart (the first of the game's eight story
+  rings the game is not showing; the game's own marks come first). One quest at a time;
+  choosing it again stops showing it. The ring moves when you place the next step elsewhere and
+  disappears when the quest is done or the step has no place (the page then says the step has no
+  place on the chart). In the zoomed view of that square, the game's red hand-drawn circle (the one
+  it uses for a salvaged treasure) marks the step's exact place; where the game shows its own circle
+  in that square, the game's wins;
+- Up/Down (or the stick) choose, A opens or shows on the chart, B goes back and closes. Taps (and
+  the mouse on the GamePad picture) work on the rows and buttons. The game gets no input while the
+  page is open.
+
+The page looks like one of the item menu's own windows: its text is in the game's menu font, its
+window and plates are made from the item menu's torn-paper window and button plate, the A and B
+prompts are the game's button pictures (in the Xbox colours or as PlayStation shapes when the
+**Button prompts** setting restyles the game's own prompts), and the game's cursor brackets
+mark what A acts on. It opens and closes like the menu's mini windows, turns its page when you
+switch tabs or open a quest, and plays the menu's own sounds (cursor, decide, back, tab, show on
+chart). All of it is read from your copy of the game while you play; nothing of the game is stored
+in the port. If a piece can't be read (another mod changed the menu), the page falls back to plain
+boxes and the overlay font. The sealed letter of a quest is not the notebook: A or a touch on it in
+the Delivery Bag shows a small window with what it is (B, A or a tap closes it).
+
+**Saving.** The save file keeps the step reached, whether a quest is done, its flags, which quest is
+shown on the chart and the letters Link carries (see [Where story progress is saved](#where-story-progress-is-saved)).
+Quests that were never started take no room. Nothing is written to the inventory or the Delivery
+Bag: with all mods off, the game's save is a plain game save, and the notebook, its records and the
+chart ring are simply not shown.
+
+### Where story progress is saved
+
+Everything the port keeps for story mods (letters, charts, the notebook, quests, their flags, the
+tracked quest, carried letters) is stored per Quest Log in a **story block appended to `cking.sav`**,
+after the game's own bytes:
+
+- the game never sees it: its reads end at its own part and the file size it gets is its own. A
+  `cking.sav` with the block loads in the game (and on Cemu or a Wii U, where a save there drops the
+  block: the game save stays intact, the story progress is lost);
+- it is written with every game save (the block follows the game's write, through a temporary file
+  that replaces the save in one step), so story progress always matches the game save: progress not
+  saved is undone by loading, like the game's own. Full save states carry it; portable save states
+  don't;
+- without any story progress nothing is appended: a save stays byte for byte the game's;
+- the block ends with a footer (magic, length, format version, checksum). A block whose checksum
+  doesn't match is not used: the log says so and the file is copied once to
+  `cking.sav.story-damaged`; the next game save writes a new block;
+- up to 255 records per Quest Log. Saves from earlier test builds, which kept a smaller record in
+  the game's own save data, are moved into the block the first time that Quest Log is loaded.
+
+### Quests in the manifest
+
+The preferred way: describe the quest as data in your `manifest.json`. The port reads it when the
+player enables your mod, without running your code, so the quest is in the notebook at once. Your
+code then only reports progress the port can't see (`wwhd_quest_step`, `wwhd_quest_done`); the
+`story-notebook` package's quest needs no code at all. (The example is that package's own manifest:
+only it may enclose the notebook; your letters enclose `letter:...` or `chart:...`.)
+
+```json
+"npc_catalogue": 3,
+"quests_format": 1,
+"quests": [{
+  "id": "lantern",
+  "title": "The storyteller's lantern",
+  "journal": "on_enable",
+  "start": {"text": "Check a Rito postbox for a letter."},
+  "letter": {"id": "lantern", "sender": "The storyteller", "text": "Dear Link, ...",
+             "encloses": ["notebook", "letter:friend"]},
+  "reward": {"text": "100 rupees", "item": "rupee_orange"},
+  "steps": [{
+    "n": 1,
+    "text": "Bring the storyteller's letter to his old friend who keeps Windfall's light.",
+    "npc": {"who": "windfall-um1",
+            "when": {"carries": "letter:friend"},
+            "lines": ["A letter from my old friend? Thank you!", "...", "..."],
+            "then": {"give": "rupee_orange", "take": "letter:friend", "complete": true}}
+  }]
+}]
+```
+
+- `journal`: `on_enable` (in the notebook as soon as the mod is on, the default), `on_trigger` or
+  `hidden` (not in the notebook; revealing comes later).
+- `letter`: the port sends it (the postbox hands it out once Link has the Delivery Bag). When it
+  is read the quest reaches step 1, and with `"letter:..."` in `encloses` Link carries a sealed
+  letter for the quest: it shows in the Delivery Bag next to the notebook (never in the game's
+  inventory) until it is handed over. A or a touch on it shows what it is; the enclosure may be
+  written as an object to say that in its own words: `{"id": "letter:friend", "name": "Sealed
+  Letter", "description": "A sealed letter from the storyteller for his old friend."}` (both
+  optional; `name` up to 40 bytes, `description` up to 200 bytes and three lines). Without them the
+  bag says "Sealed Letter" and "A sealed letter from <sender>. It isn't addressed to you."
+- `steps`: the notebook shows each step's `text`, `where` and `place` (world `x`/`z`, the
+  coordinates of `wwhd_chart_mark`; the tracked quest's ring goes there). A step with an `npc`
+  takes `where` and `place` from the NPC catalogue unless it gives its own. While that character is
+  loaded (Link is in its room), the tracked step's marks on the sea chart follow where it actually
+  stands, read from the game without changing anything; otherwise they are at the place. A step's
+  `"npc": {"follow": false, ...}` keeps them at the place. Before step 1 it shows `start.text`.
+- `available` (optional, per step): the step's prerequisites, checked read-only from the save:
+  `"event"` / `"not_event"`: the game's event flag numbers (`"0x2D01"`, or a list) that must be set
+  / not set; `"time"`: `"day"` (6:00–18:00), `"night"` or `"any"`; and `"text"` for the player.
+  While they don't hold, the notebook says "Not yet possible: <text>", the step has no ring on the
+  chart and its resident talk is not live. The port never changes any of them.
+- `sail_line` (optional, per step): what the King of Red Lions says once about this step, the next
+  time Link boards him or walks up to him: a string or a list of up to three lines (one message box,
+  240 bytes). Below.
+- `npc`: a talk to a game resident, below. Up to 8 quests per mod; texts have the limits of
+  `wwhd_quest_*`.
+- A declaration the port doesn't accept (an invalid field, an NPC its catalogue doesn't know, or
+  an `npc_catalogue` version newer than the port's) keeps the mod from being enabled; the Mods tab
+  shows the reason ("Story quests: ...").
+
+### Talking to residents
+
+A step can have a game resident speak your lines instead of their own, once: the friend reads
+the letter, thanks Link, gives the reward through the game's own get-item scene, and the quest is
+done. The port arbitrates, not your mod:
+
+- the talk takes over while your quest is at that step and its conditions hold: Link carries its
+  letter (`when.carries`) and the step's `available` holds. Tracking is not needed; it only decides
+  the sea chart's ring and circle. Otherwise the resident talks exactly as in the game;
+- several quests (from any mods) may want the same resident at once. Then the talk starts with the
+  game's own choice box: two of the quests (the one shown on the chart first, else the ones started
+  first, by their titles, shortened to fit) and "Never mind". The chosen quest's lines follow in the
+  same talk. "Never mind" ends the talk, the resident's next talk is the game's own line, and the one
+  after that offers the quests again. One quest per talk;
+- a step that takes over a resident with no condition at all (no letter, no `available`) speaks for
+  your quest whenever the step is current; the log warns about it, so give such steps a condition;
+- the port never sets or clears a game flag. For that one talk the resident's own choice of line
+  does not run, so a first-meeting line the game would have shown (and the flag it would have
+  set) is not lost: it comes with a later talk;
+- the lines are one message box: up to three lines, 240 bytes. `then.give` is a rupee item
+  (`rupee_green` ... `rupee_orange`, 100);
+- `"who"` names a resident from the NPC catalogue, below.
+
+From code, the same is `wwhd_quest_talk(id, step, "windfall-um1", lines, reward_item)` and
+`wwhd_quest_carry(id, 1)` gives the sealed letter.
+
+### The King of Red Lions
+
+A step's `sail_line` is said once by the King of Red Lions, the way he gives his own news: the next
+time Link boards him or walks up to him in front, he turns to Link and says it in one message box.
+
+```json
+{"n": 1, "text": "Bring the storyteller's letter to his old friend who keeps Windfall's light.",
+ "sail_line": ["That sealed letter you carry is for the man",
+               "who keeps the light up on Windfall's windmill.",
+               "Let us not keep an old friend waiting, Link!"]}
+```
+
+The port arbitrates, not your mod:
+
+- only for the quest **shown on the chart** (tracked), at its current step. Untracked (or with your
+  mod off) the boat talks exactly as in the game;
+- **the game comes first.** His own lines that he says unasked (news after a pearl, a story
+  moment) always go first; the quest's line waits while one of them is pending, while any event or
+  cutscene runs, and for a short moment after the boat's last talk. Talking to him yourself always
+  gives his own hint: the quest's line never replaces it;
+- said once per step: the save's story record remembers it (see
+  [Where story progress is saved](#where-story-progress-is-saved)), never a flag of the game. A
+  later step with its own `sail_line` is said once again. A line that was cut short before its box
+  showed (a save state loaded during the talk) comes again;
+- the port never sets or clears a game flag for it, and the boat's state after the talk is the
+  state before it.
+
+### The NPC catalogue
+
+The characters a quest can name, by a neutral id: `<place>-<actor code>` (`windfall-um1`). The port
+keeps a **recipe** per place (`runtime/assets/npc_catalogue/<place>.recipe.json`): the ids, our own
+description of each character, the place in our words, when they are out, and references into the
+game (actor class and code, stage, room, layers, the figurine's message number). No game text and no
+coordinates are in the port: the character's name (its Nintendo Gallery figurine name) and where it
+stands outside come from the player's own game files. The port runs
+`tools/story_mods/npc_catalogue.py` the first time a quest mod is loaded and keeps the result in its
+data folder (`story/` in the port's configuration folder); without it, the notebook and the log show
+the description instead of the name, and residents have no place on the chart unless the step gives
+one.
+
+**Which id is which character.** Run the tool against your own game:
+
+```sh
+python3 tools/story_mods/npc_catalogue.py --game <your game folder> --list
+```
+
+It prints each id with the name your game gives the character, where it is and its spot; the list of
+names exists only on your machine.
+
+A new place or a new character adds rows to a recipe, never a change to the manifest format. A mod
+that names a character added in a later catalogue version declares the version it needs,
+`"npc_catalogue": 3`, so an older port refuses it with a clear message instead of ignoring the talk.
+
+Each entry lists the actors that are this character (actor class plus what identifies it: the
+townsperson code for the `people` class, the stage actor name for others) and the rooms and room
+layers they stand in. The name is the game's figurine name for exactly that actor: the decompilation
+ties each actor's pictograph type to its figurine (`dSnap_RegistFig`, figure = type − 0x49, name
+message 0x37DD + figure). A figurine that shows a pair or a group doesn't say which actor is which;
+those entries show their description.
+
+A talk is matched where the recipe says the actor stands (stage and room). Only the townspeople
+(class `people`) can speak a quest's lines so far; naming another character is refused with the
+reason. When the characters are out: "by day" is 6:00–18:00, and during the Endless Night (between
+the Wind Waker and Nayru's pearl) it is always night. A step whose `available` time never meets its
+character's is accepted with a warning in the log. Some characters move with the story (the recipe's
+`gate`): a couple of the town square follows their own story, two families swap houses, the pirates
+are in the bomb shop only for that scene.
+
+Catalogue version 3, Windfall Island ("unconfirmed": for characters other than the townspeople, the
+actor's own conditions for appearing are not decoded yet; only the room layers say when they are out).
+
+| Id | Who (our words) | Where | Out | Actor | Quest lines |
+|---|---|---|---|---|---|
+| `windfall-uo1` | an old man resting on the sea-view bench at the cliff | on the sea-view bench at the cliff | day | people Uo1 | yes |
+| `windfall-uo2` | a man who sits at the bar all day | in the bar | day | people Uo2 | yes |
+| `windfall-uo3` | a well-dressed man walking through town | walking through town | day | people Uo3 | yes |
+| `windfall-ub1` | one of the two women chatting up the steps by the brick house (the first) | up the steps by the brick house | day | people Ub1 | yes |
+| `windfall-ub2` | one of the two women chatting up the steps by the brick house (the second) | up the steps by the brick house | day | people Ub2 | yes |
+| `windfall-ub3` | a woman on the harbour pier | on the harbour pier | day | people Ub3 | yes |
+| `windfall-ub4` | a woman by the town gate | by the town gate | day and night | people Ub4 | yes |
+| `windfall-uw1` | the young woman working in the bar | in the bar | day and night | people Uw1 | yes |
+| `windfall-uw2` | a young woman in the town square or in the bar | the town square or the bar | day | people Uw2 | yes |
+| `windfall-um1` | the man up on the windmill by the light | up on the windmill by the light | day and night | people Um1 | yes |
+| `windfall-um2` | a young man in the town square or in the bar | the town square or the bar | day | people Um2 | yes |
+| `windfall-um3` | a young man on the steps by the red door (up high at night) | on the steps by the red door (up high at night) | day and night | people Um3 | yes |
+| `windfall-sa1` | a sailor who drinks in the bar at night | in the bar at night | night | people Sa1 | yes |
+| `windfall-sa2` | a sailor on the high lookout | on the high lookout | day | people Sa2 | yes |
+| `windfall-sa3` | a sailor on the stone dock | on the stone dock | day and night | people Sa3 | yes |
+| `windfall-sa4` | a sailor at the end of the wooden pier | at the end of the wooden pier | day and night | people Sa4 | yes |
+| `windfall-sa5` | a sailor on the grass by the stone wall | on the grass by the stone wall | day and night | people Sa5 | yes |
+| `windfall-ug1` | one of the two by the flowers at the cliff (the first) | by the flowers at the cliff | day and night | people Ug1 | yes |
+| `windfall-ug2` | one of the two by the flowers at the cliff (the second) | by the flowers at the cliff | day and night | people Ug2 | yes |
+| `windfall-rsh1` | the travelling merchant at his stall | the travelling merchant's stall | day (unconfirmed) | npc_rsh1 Rsh1 | not yet |
+| `windfall-tt` | the dancer on the hill | dancing on the hill | day and night (unconfirmed) | npc_tt Tt | not yet |
+| `windfall-kk1` | the rich man's daughter | in town | day and night (unconfirmed) | npc_kk1 Kk1 | not yet |
+| `windfall-gk1` | the rich man, the daughter's father | in town | day and night (unconfirmed) | npc_gk1 Gk1, Kf1 | not yet |
+| `windfall-kp1` | the poor family's daughter | the auction house | day and night (unconfirmed) | npc_kp1 Kp1 | not yet |
+| `windfall-pf1` | the poor family's father | in town | day and night (unconfirmed) | npc_pf1 Pf1, Gp1 | not yet |
+| `windfall-bms1` | the bomb shop keeper | the bomb shop | day and night (unconfirmed) | npc_bms1 Bms1, Bms2 | not yet |
+| `windfall-ds1` | the potion maker in his shop | the potion shop | day and night (unconfirmed) | npc_ds1 Ds1 | not yet |
+| `windfall-po` | the photographer in his studio | the photographer's studio | day and night (unconfirmed) | npc_photo Po | not yet |
+| `windfall-ho` | the teacher of the school house | the school house | day and night (unconfirmed) | npc_ho Ho | not yet |
+| `windfall-kg1` | the host of the battleship game | the battleship game | day and night (unconfirmed) | npc_kg1 Kg1 | not yet |
+| `windfall-npcso` | the talking fish in the sea by the island | the sea by the island | day and night (unconfirmed) | npc_so NpcSo | not yet |
+| `windfall-tc` | the man locked in the jail | the jail | day and night (unconfirmed) | npc_tc Tc | not yet |
+| `windfall-bm4` | a man in the bar who also comes to the auctions | the bar and the auction house | day and night (unconfirmed) | npc_bm4 Bm4 | not yet |
+| `windfall-zl1` | the pirate captain in the bomb shop | the bomb shop | day and night (unconfirmed) | npc_zl1 Zl1 | not yet |
+| `windfall-p1a` | a pirate in the bomb shop (the first of three) | the bomb shop | day and night (unconfirmed) | npc_p1 P1a | not yet |
+| `windfall-p1b` | a pirate in the bomb shop (the second of three) | the bomb shop | day and night (unconfirmed) | npc_p1 P1b | not yet |
+| `windfall-p1c` | a pirate in the bomb shop (the third of three) | the bomb shop | day and night (unconfirmed) | npc_p1 P1c | not yet |
+| `windfall-mk` | one of the four children around town (the leader) | around town | day (unconfirmed) | npc_mk Mk | not yet |
+| `windfall-ukb` | one of the four children around town (the second) | around town | day (unconfirmed) | npc_uk UkB | not yet |
+| `windfall-ukc` | one of the four children around town (the third) | around town | day (unconfirmed) | npc_uk UkC | not yet |
+| `windfall-ukd` | one of the four children around town (the fourth) | around town | day (unconfirmed) | npc_uk UkD | not yet |
+
+Not in the catalogue: the auction's bidders (their faces are chosen at random each auction), animals
+and objects, and characters who only appear in cutscenes.
+
+**Testing.** `tools/story_mods/notebook_e2e.sh` runs the `story-notebook` package headless from a
+save on Windfall: letter, notebook, page, tracking and the sea chart, and checks the log.
+
+**Players without story mods.** The item menu functions are only hooked while a loaded mod uses
+`wwhd_quest_*`. If another mod replaces one of them, the notebook is not in the item menu that
+session and the log says so.
+
+## Packages with content and images
+
+A code mod may also contain content replacements in `content/` (or a `content_dir` named in
+the manifest) and original art in `textures/` or `assets/`. Content follows the same rules
+as content-only packages ([mod-manager.md](mod-manager.md)) and is active only when the code
+loads. With code mods off, neither part applies.
+
+Images must be your own artwork, never game assets: PNG, at most 2048 × 2048 and 16 MiB
+each, at most 32 per package and 16 MiB of decoded pixels in total. Invalid images make the
+installation fail.
+
+## Trust
+
+A code mod becomes native code inside the game process. Its memory accesses stay inside the
+game's memory, and it reaches the system only through the services above and the game's own
+functions, but that is not a sandbox: it can crash the game or damage saves. So enabling a
+code mod asks once, like native mods. The confirmation covers the package version and a
+fingerprint of every package file; a changed package asks again. Rebuilding the same package after a port update
+does not ask for trust again.
 
 ## Save states
 
-Full states capture the complete guest mod region (`0x7F000000`–`0x80000000`),
-including module data and guest heap metadata. Zero chunks remain sparse. Restoring a
-full state restores allocations as well as the bytes in those allocations.
+Full save states include the mods' memory and heaps. Both state formats record which mods
+(ID and version) were loaded; loading a state made with different mods shows a warning and
+continues. Loading a state never installs, enables or disables mods. Files a mod writes
+itself are not part of save states.
 
-Both full states and portable `.wwstate` files record the loaded guest mods by ID and
-version. Loading a state with a different set displays a warning and continues; ordering
-alone does not cause a warning. Older states without this metadata count as an empty mod
-set. Portable states restore game progress and position, rather than mod memory.
+## Limits
 
-Guest modules remain selected at startup. Loading a state does not install, build, enable
-or disable mods. Use the same mod versions that created a state when reproducing gameplay.
+- Desktop only (macOS, Windows, Linux). Android doesn't support code mods yet.
+- Changing enabled mods or their options needs a restart.
+- Mods live in a 16 MiB region of game memory (`0x7F000000`–`0x80000000`); each mod gets its
+  own 64 KiB-aligned part.
+- No events or exports between mods yet. Audio streams support 48 kHz mono/stereo PCM.
+- Instructions the translator doesn't support are reported when the mod is built.
 
-## Prototype: what exists and how to run it
+## How it works
 
-| Part | File |
-| --- | --- |
-| generator option `--mod-hooks` | `tools/recomp/recomp.py` |
-| check macro, `Cpu::mod_skip` | `runtime/include/ppc.h` |
-| module ABI | `runtime/include/wwhd_guest_abi.h` |
-| loader, hook chains, host services | `runtime/src/mods/guest_mods.cpp` |
-| translator, install-time build | `tools/guestmod/guestmod.py`, `tools/guestmod/build_guest_mod.py` |
-| SDK header | `runtime/guest/include/wwhd_guest.h` |
-| tests | `tools/guestmod/test_guestmod.py` (needs a PowerPC clang: `WWHD_PPC_CLANG`, `WWHD_PPC_LLD`) |
-| examples | `examples/guest-mods/heart-ticker` (entry + return hook of Link's per-step function, calls a game function; hearts tick down a quarter at a time to half and refill), `examples/guest-mods/addcalc-replace` (replaces `cLib_addCalc2` by an equivalent implementation; every other call goes to the game's original) |
+- **Hook checks.** With code mods on, setup builds the game code with a one-byte check at the
+  start of every game function. When a mod hooks a function, its flag is set and the call runs
+  the mod hooks, the replacement or the original. With code mods off, the checks are not in
+  the game code at all.
+- **Building a mod.** On the first start after enabling, the port lays out the ELF at its
+  assigned address, resolves relocations, translates the PowerPC code to C with the same
+  translator as the game, and compiles it with the local compiler into a small library. The
+  result is cached; a port update that changes the translator or compiler rebuilds it
+  automatically. The module imports nothing from the game executable, so it doesn't depend on
+  how the game was built.
+
+## For maintainers and tool authors
+
+**Regenerating the headers** from a clean clone of the public decomp (never a private branch):
 
 ```sh
-python3 tools/recomp/recomp.py game/code/cking.rpx build/gen --mod-hooks
-cmake --build build/cmake                                   # as usual
-make -C examples/guest-mods CLANG=/opt/homebrew/opt/llvm/bin/clang LLD=/opt/homebrew/opt/lld/bin/ld.lld
-python3 tools/guestmod/build_guest_mod.py examples/guest-mods/heart-ticker --out build/guestcache --base 0x7F000000
-python3 tools/guestmod/build_guest_mod.py examples/guest-mods/addcalc-replace --out build/guestcache --base 0x7F100000
+git clone https://github.com/ZeldaWWHDDecomp/wwhd.git build/public-wwhd
+git -C build/public-wwhd checkout 47e1dbc3886cfd8233859dffd73efc41a04a9130
+python3 tools/guestmod/regenerate_sdk.py --public-clone build/public-wwhd
+python3 tools/guestmod/regenerate_sdk.py --public-clone build/public-wwhd --check   # what CI runs
 ```
 
-These commands describe the prototype build. Install the packages through the manager
-as described above; direct `WWHD_GUEST_MODS` loading has been retired.
+**Build tool** (`tools/guestmod/build_guest_mod.py`, used by the mod manager):
 
-Historically verified end to end on macOS arm64 (headless scripted run, copy of a save): both modules
-load, the heart display changes by quarter hearts during gameplay, the replacement handles
-half of the ≈ 600,000 `cLib_addCalc2` calls of the run with no visible difference, the mod's
-call of a game function goes through the other mod's replacement, and the return hook sees
-Link's actor pointer.
+- `PACKAGE --out CACHE --base ADDR [--build EU] [--cc-json '[...]'] [--include DIR] --json`
+  builds a module; the last line of output is JSON with `ok`, `module`, `cached`, `error`
+  plus memory and ELF metadata.
+- `--inspect --base ADDR --json` reports the memory size without compiling.
+- `--check-cache-json '[{id, package, base, module}, ...]'` checks prepared modules without
+  compiling and returns `{ok: true, valid: [ids]}`.
 
-## Performance and limits
+Setup writes `guest-sdk.json` (Python, compiler arguments, translator, headers) into the game
+data folder; `WWHD_GUEST_BUILD_CONFIG` selects another one in development.
+`WWHD_CODE_MODS=0|1` overrides the player's setting for automated runs (the build must have
+been made with the matching option), and setup accepts `--code-mods 0|1`.
 
-Code-mod support starts off. With support off, generation emits no hook checks or
-registration metadata. Enabling support rebuilds game code and takes effect after restart.
-Completed variants are cached. Local cold rebuilds took about 88–114 seconds with four
-compiler jobs; cached selection took about 0.08–0.12 seconds. Timing varies by machine.
+**Tests:** `tools/guestmod/test_guestmod.py` (set `WWHD_PPC_CLANG` and `WWHD_PPC_LLD`), the
+`guestmods` CI workflow (examples compiled with each platform's host compiler), and the
+opt-in real-game driver `tools/guestmod/test_code_mods_e2e.py`.
 
-The historical no-mod A/B collected 15 interleaved pairs per renderer:
+### Opt-in catalogue and setup lifecycle checks
 
-| Renderer | Metric | Baseline median / IQR | Hooks median / IQR | Median cost |
-| --- | --- | --- | --- | --- |
-| Metal | Frame ms | 6.0650 / 0.1033 | 6.0894 / 0.1191 | +0.40% |
-| Metal | Logic CPU ms | 3.8680 / 0.0520 | 3.9360 / 0.1170 | +1.76% |
-| Vulkan | Frame ms | 4.6961 / 0.0740 | 4.6824 / 0.1454 | -0.29% |
-| Vulkan | Logic CPU ms | 3.8300 / 0.0950 | 3.8860 / 0.1060 | +1.46% |
+`tools/guestmod/test_package_lifecycle_e2e.py` exercises a reviewed guest ZIP and
+its real catalogue metadata. Supply an installed release/data directory, regional
+normal save and extracted HD game, the ZIP, source `catalogue.json`, an explicit
+private game-source JSON and a private output folder. The JSON maps declared game
+IDs to the player's local paths (for example `gc_wind_waker` to an RVZ); use `{}`
+for a mod without a game-source step. Run separately with `--region USA`/`EU` and
+`--renderer metal`/`vulkan`; `--mode` accepts `30`, `interp60` and `true60`.
 
-**The IQR exceeds the measured difference for every metric.** These historical
-measurements do not establish the overhead of the current hook implementation.
-A quiet-machine rerun is required before enabling support by default; the limit is
-2% median overhead on both renderers. `tools/bench/run_bench.py` supports separate
-`--variant-binary` executables, interleaved `--runs 15`, inclusive quartiles and
-per-pair differences in its JSON report. Failed warm-up stops the campaign.
+Before launching, the driver invokes the real installer with
+`--rebuild-code-mods --code-mods 0 --jobs N` and verifies its completed off cache.
+Use the driver’s `--jobs 1..4` to reserve compiler capacity; the default is four.
+It records the original generated-C and game-object hash maps, executable SHA,
+fingerprint, cache hit/fresh build status and elapsed rebuild time. After the UI
+support rebuild it verifies the on selection and cache record, confirms that the
+off baseline remains unchanged, and observes each running process's executable
+path against the verified selection. Setting an environment flag alone is not
+accepted as evidence of compiled hooks being disabled or enabled.
 
-Android guest mods are not supported in phase 1. Live Windows/Linux rebuild and restart
-UI, forced-crash recovery and a genuinely full disk still need platform validation.
-Modules use native code and require the same trust confirmation as native mods.
+In one game run, as a player does it, the driver switches the catalogue mod on
+(the test aid accepts its review, with the GameCube game from the private JSON): it
+is downloaded, its setup adds code-mod support, the game relaunches itself into
+the hook-enabled build (the relaunch keeps the support just built, also when the
+run started with `WWHD_CODE_MODS=0`), the setup resumes there, runs preparation,
+builds the guest module through the normal setup workers and switches it on for
+the following restart. It checks setup receipts, declared output
+files, regional build allocation and module existence, activation after restart,
+disable-until-restart and removal. Normal saves are copied for each process; full
+states are never transferred between versions. Only owned game processes are
+stopped. The default functional session limit is four and disk floor is 15 GiB;
+these checks do not measure performance.
 
-## Fixed phase 1 decisions
+The setup diagnostics require all of `WWHD_NO_HOST_INPUT`, an explicit
+`WWHD_MOD_MANAGER_DIR`, `WWHD_TEST_MOD_SETUP` and an absolute private
+`WWHD_TEST_GAME_SOURCES` JSON path. They call the same source validators and setup
+APIs as the UI, and do not accept native-code trust automatically. The driver uses
+the existing explicit isolated-test trust switch; native file-picker interaction
+and the trust dialog still require separate UI review. Ordinary runs never select
+setup actions from these inputs.
 
-Headers use public sources only. Every game function is hookable. Modders use clang
-and lld; no compiler is bundled for them. Guest packages use the native trust dialog,
-bound to the ELF hash. Full states include mod memory, and both state formats warn
-without blocking when mod IDs or versions differ. Enabling and disabling takes effect
-only after restart. Hook checks remain off by default until the quiet-machine
-Metal and Vulkan A/B gate demonstrates at most 2% median overhead.
+Local verification copies the supplied ZIP beside a private catalogue index and
+uses the existing relative-file fixture exception. This verifies catalogue
+parsing, hashes, installation and setup, but does not verify remote hosting.
+Published catalogues continue to require absolute HTTPS package URLs. Runtime
+captures need visual review to establish each mod's visible behavior; successful
+loading and receipts alone are not a visual acceptance test.
 
-## Remaining work
 
-Phase 2 covers the [HUD/audio interfaces](#phase-2-interfaces-and-integration),
-state-load notifications, broader translator coverage and ELF fuzzing, cross-mod exports,
-and catalogue integration. The [minimap and dragon porting plan](#porting-the-existing-minimap-and-dragon-prototypes)
-identifies their required services and reusable game-side hooks. Runtime mod-set changes
-continue to require a restart.
+### Hidden HUD composition diagnostic
 
-The broad generated declarations remain committed so modders can discover public names
-without running the generator. A smaller curated set would suffice for the current two
-examples, but would limit other mods; curation can be evaluated separately.
+Ordinary hidden runs do not present the HUD, so they cannot establish its GPU
+composition cost. Internal renderer verification can opt into
+`WWHD_TEST_OFFSCREEN_FRAMES=1..10000` together with `WWHD_HIDDEN_WINDOWS=1`,
+`WWHD_NO_HOST_INPUT=1` and `WWHD_SIM_SCREEN=1280x720`. This encodes the existing TV
+composition path into one reusable offscreen target on Metal or Vulkan. It adds
+no image readback, presentation or extra queue wait. The bounded diagnostic
+refuses an invalid configuration or exhausted frame allowance. With the flag
+absent, it allocates no diagnostic target and encodes no diagnostic composition.
+
+`[headless-compose]` records encoded frames and HUD vertices, indices and command
+counts. The `hud-cost` fixture emits 200 rectangles (800 vertices and 1,200 indices)
+when enabled, and registers no HUD callback with `draw` false. Both variants must
+use the same host, module, compatible full state and warmed cache. Verify actual
+state restoration and visible rectangles before measuring. Save-state toasts are
+additional overlay geometry and last several wall-clock seconds: exclude their
+windows and verify the diagnostic counters throughout the measured interval.
+Uncapped game time alone does not establish that a toast has expired.
+
+Measure render-thread CPU time separately from GPU elapsed time. Keep captures
+and readback out of measured runs, use a quiet exclusive window, interleave the
+variants, and report medians, IQRs and each paired difference. A difference smaller
+than the observed variability is inconclusive. This fixture covers rectangles;
+it does not measure texture-upload or large-text cost.
+
+
+## PCM audio streams v1
+
+Guest mods may synthesize original audio with `wwhd_audio_open(48000, channels)`
+(one or two channels), `wwhd_audio_submit(handle, samples, frames, channels)`,
+`wwhd_audio_available(handle)` and `wwhd_audio_close(handle)`. Samples are signed
+16-bit, interleaved and guest-endian. The host copies them before returning;
+it retains no guest pointers. Buffers must fit in the calling mod's region.
+Only 48000 Hz is supported; callers resample other content themselves.
+
+Each stream holds 8192 frames, each submission is at most 2048 frames, and limits
+are four streams per mod and 32 globally (1 MiB fixed host sample storage).
+Open returns a positive opaque handle. Available returns free queue frames;
+submit returns accepted frames, including zero when full. Close returns zero.
+Errors are `WWHD_AUDIO_INVALID` (-1), `WWHD_AUDIO_BUSY` (-2; retry later without
+advancing a synthesis cursor), and `WWHD_AUDIO_QUOTA` (-3). Handles are checked
+against the calling mod and never reused during the process lifetime. Numeric
+handle exhaustion fails explicitly. Submission/query/close use try-locks;
+there are no waits for a device. Open can allocate a bounded owner string.
+
+The AX producer mixes copied samples into the common stereo output before its
+master gain and dump path. Mixing sums streams in 32-bit precision and saturates
+once to S16. Mono duplicates to both channels. Underruns contribute silence;
+there is no automatic replay. The device callback performs no mod work. With no
+streams the producer bypasses the mixer. `WWHD_AUDIO_VOLUME` applies equally to
+game and guest PCM; zero mutes while draining. `WWHD_NO_AUDIO=1` opens no device
+but drains on the existing AX producer clock, including optional diagnostic dumps.
+The service is independent of Metal/Vulkan and does not expose callbacks,
+networking or host filesystem access.
+
+Compare `wwhd_audio_epoch()` before using handles. Full-state loading and output
+flush/reset clear all streams and increment this host-only epoch. CoreAudio
+notifies default-output changes; SDL output topology/format events invalidate
+streams too. Queues and handles are not serialized. Recreate streams on a change
+and resume from restored guest musical state; previously played sound is not
+rewound. Disabling takes effect at restart, so no streams survive a changed mod
+set. This service does not add backend device-reconnection facilities beyond
+those of the existing output backend.
+
+For bounded service-call diagnostics, `WWHD_AUDIO_STREAM_TRACE=1` logs open/submit/close
+results and epochs, never sample payloads. Leave it unset for normal operation.

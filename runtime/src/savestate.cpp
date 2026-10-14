@@ -1,3 +1,5 @@
+#include "mods/fast_forward.h"
+#include "mods/story_store.h"
 // Save states: snapshot the whole running game into one of 5 slots and restore it, also in a new
 // process.
 //
@@ -61,6 +63,7 @@
 #include "state_memory.h"
 #include "mods/guest_mods.h"
 #include "mods/guest_state_section.h"
+#include "mods/story_chart.h"
 #include "quit_prompt.h"
 #include "rumble.h"
 
@@ -83,6 +86,7 @@ bool gx2_ss_check(ss::Reader r, std::string& why);
 void gx2_ss_load(ss::Reader& r);
 namespace interp { void ss_reset(); }
 namespace aspect { void ss_reset(); }
+namespace button_glyphs { void ss_reset(); }
 namespace dispatch { std::vector<std::pair<uint32_t, std::string>> host_functions(); }
 
 namespace interp { uint64_t logic_steps(); }
@@ -460,6 +464,7 @@ std::string area_label(const char* stage) {
 
 // true when done (saved or failed for good); false to retry on the next frame
 bool do_save(int slot) {
+    mods::fast_forward_reset();
     std::string busy, why;
     auto t0 = std::chrono::steady_clock::now();
     if (!threads::quiesce(250, busy, 1, 30)) {
@@ -505,7 +510,9 @@ bool do_save(int slot) {
     payload->u32(kSecMemory);
     size_t len_at = payload->b.size();
     payload->u64(0);
+    story_chart::capture_begin();  // the sea chart's story marks as the game left them (mod markers off)
     capture_memory(*payload);
+    story_chart::capture_end();
     uint64_t mlen = payload->b.size() - len_at - 8;
     memcpy(&payload->b[len_at], &mlen, 8);
     Header h{};
@@ -547,6 +554,7 @@ bool do_save(int slot) {
 }
 
 bool do_load(const std::shared_ptr<Snapshot>& s) {
+    mods::fast_forward_reset();
     std::string busy, why;
     auto t0 = std::chrono::steady_clock::now();
     threads_ss_targets(s->section(kSecThreads));
@@ -586,8 +594,10 @@ bool do_load(const std::shared_ptr<Snapshot>& s) {
     ax_ss_load(r);
     r = s->section(kSecGx2);
     gx2_ss_load(r);
+    guestmods::state_loaded();
     interp::ss_reset();
     aspect::ss_reset();
+    button_glyphs::ss_reset();
     rumble::reset();     // an effect running before the load is not the restored game's
     r = s->section(kSecThreads);
     threads_ss_load(r);  // last: wakes the parked threads (they continue after the thaw)
@@ -794,7 +804,11 @@ bool capture_portable(Cpu* c, pstate::State& s, std::string& why) {
     }
     if (stage != "PShip") guest_call(c, fn_setGameStartStage);  // (PShip would also set the next time of day)
     memset(mem::ptr(buf), 0, pstate::kSaveDataSize);
-    int32_t r = (int32_t)guest_call(c, fn_memory_to_card, {info, buf, 0});
+    int32_t r;
+    {
+        story_store::Quiet quiet;  // a scratch buffer: not a game save (story progress stays as it is)
+        r = (int32_t)guest_call(c, fn_memory_to_card, {info, buf, 0});
+    }
     memcpy(mem::ptr(sv + kReturnPlace), rp, sizeof rp);
     if (stage_no >= 0 && stage_no < 16) memcpy(mem::ptr(sv + kMemoryTable + stage_no * 0x24), entry, sizeof entry);
     if (r == -1) { why = "the game's save function failed"; return false; }
@@ -857,7 +871,10 @@ bool apply_portable(Cpu* c, const pstate::State& s, std::string& why, bool& retr
     CallScope scope(c);
     const uint32_t sv = ld32(kSaveInfoPtr), info = sv + kInfo, buf = scratch();
     memcpy(mem::ptr(buf), s.savedata.data(), pstate::kSaveDataSize);
-    if ((int32_t)guest_call(c, fn_card_to_memory, {info, buf, 0}) == -1) { why = "the game refused the save data"; return false; }
+    {
+        story_store::Quiet quiet;  // story progress is not part of a portable state
+        if ((int32_t)guest_call(c, fn_card_to_memory, {info, buf, 0}) == -1) { why = "the game refused the save data"; return false; }
+    }
     int stage_no = current_stage_no(c);
     if (stage_no >= 0 && stage_no < 16) guest_call(c, fn_getSave, {info, (uint32_t)stage_no});
     guest_call(c, fn_danInit, {info + 0x79C, 0xFFFFFFFFu});  // dSv_danBit_c::init(-1): the next stage starts fresh

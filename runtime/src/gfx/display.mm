@@ -17,7 +17,7 @@
 //
 // The modes, the layout of the TV window, the automatic overlay and the overlay's touch mapping are
 // shared with the SDL host (display_modes.cpp, which lists their test variables: WWHD_DRC_MODE,
-// WWHD_DRC_PIP, WWHD_SCALE_FILTER, WWHD_SIM_SCREEN, WWHD_TEST_TOUCH, WWHD_DRC_AUTO, WWHD_DRC_AUTO_LOG).
+// WWHD_DRC_PIP, WWHD_SCALE_FILTER, WWHD_SIM_SCREEN, WWHD_TEST_TOUCH).
 //
 // Debug / test environment:
 //   WWHD_FULLSCREEN=0|1                  TV window starts windowed / in full screen instead of as it was left
@@ -30,6 +30,7 @@
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
 
+#include "../exception_report.h"
 #include <atomic>
 #include <cmath>
 #include <map>
@@ -41,6 +42,7 @@
 #include "../aspect.h"
 #include "display.h"
 #include "display_modes.h"
+#include "headless_compose.h"
 #include "gx2/gx2.h"
 #include "input.h"
 #include "metal.h"
@@ -53,7 +55,34 @@
 #include "imgui.h"
 #include "backends/imgui_impl_metal.h"
 #include "../overlay/overlay.h"
+#include "../overlay/guest_hud.h"
 #include "../screenshot.h"
+
+// The game's own icon in the Dock: meta/iconTex.tga of the game folder (uncompressed 32-bit TGA,
+// 128x128 in Wind Waker HD), as the SDL host does for its windows. Nothing happens without it.
+static void set_dock_icon() {
+    NSData* data = [NSData dataWithContentsOfFile:@((config::game_dir + "/meta/iconTex.tga").c_str())];
+    const uint8_t* d = (const uint8_t*)data.bytes;
+    if (data.length < 18 || d[1] != 0 || d[2] != 2 || d[16] != 32) return;  // no colour map, true colour, 32 bpp
+    const NSInteger w = d[12] | d[13] << 8, h = d[14] | d[15] << 8, start = 18 + d[0];
+    if (!w || !h || w > 1024 || h > 1024 || (NSInteger)data.length < start + w * h * 4) return;
+    NSBitmapImageRep* rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr pixelsWide:w pixelsHigh:h
+        bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace
+        bitmapFormat:NSBitmapFormatAlphaNonpremultiplied bytesPerRow:w * 4 bitsPerPixel:32];
+    if (!rep) return;
+    const bool topDown = d[17] & 0x20;  // otherwise the first row is the bottom one
+    for (NSInteger y = 0; y < h; y++) {
+        const uint8_t* src = d + start + (topDown ? y : h - 1 - y) * w * 4;
+        uint8_t* dst = rep.bitmapData + y * rep.bytesPerRow;
+        for (NSInteger x = 0; x < w; x++) {  // BGRA -> RGBA
+            dst[x * 4] = src[x * 4 + 2]; dst[x * 4 + 1] = src[x * 4 + 1];
+            dst[x * 4 + 2] = src[x * 4]; dst[x * 4 + 3] = src[x * 4 + 3];
+        }
+    }
+    NSImage* image = [[NSImage alloc] initWithSize:NSMakeSize(w, h)];
+    [image addRepresentation:rep];
+    NSApp.applicationIconImage = image;
+}
 
 namespace mods { bool mouse_captured(); }
 
@@ -170,7 +199,6 @@ static void load_options() {
     if ([self map:e x:&x y:&y clamp:false]) {
         self.touching = true;
         input::set_touch(true, x, y);
-        gfx::display_touched();
     } else {
         [super mouseDown:e];
     }
@@ -185,7 +213,6 @@ static void load_options() {
     self.touching = false;
     if (![self map:e x:&x y:&y clamp:true]) x = y = 0;
     input::set_touch(false, x, y);
-    gfx::display_touched();
 }
 @end
 
@@ -393,6 +420,7 @@ static void create_windows() {
     // keyboard focus from the user's game
     bool test = getenv("WWHD_NO_HOST_INPUT") != nullptr;
     [NSApp setActivationPolicy:test ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular];
+    if (!test) set_dock_icon();
     load_settings();
     load_options();
     NSWindow* tv = make_window(0, @"The Legend of Zelda: The Wind Waker HD (recompiled)",
@@ -446,14 +474,15 @@ static void create_windows() {
         screen_named(g_settings[@"drcScreen"]) && screen_named(g_settings[@"drcScreen"]) != tv.screen)
         dispatch_async(dispatch_get_main_queue(), ^{ if (!is_fullscreen(g_drc_window)) [g_drc_window toggleFullScreen:nil]; });
 
-    // full screen: hide the pointer after 2 s without movement (not while the mouse camera holds it)
+    // hide the pointer after 2 s without movement while the game window is active, in a window too
+    // (issue #109); not while the settings overlay is open or the mouse camera holds it
     [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer*) {
         static NSPoint last = {-1, -1};
         static double moved = 0;
         static bool hidden = false;
         NSPoint p = [NSEvent mouseLocation];
         if (!NSEqualPoints(p, last)) { last = p; moved = display_now(); hidden = false; }
-        if (!hidden && is_fullscreen(g_tv_window) && NSApp.active && g_tv_window.keyWindow && !mods::mouse_captured() &&
+        if (!hidden && NSApp.active && g_tv_window.keyWindow && !mods::mouse_captured() && !overlay::is_open() &&
             display_now() - moved > 2.0) {
             [NSCursor setHiddenUntilMouseMoves:YES];
             hidden = true;
@@ -738,6 +767,11 @@ static void compose_tv(id<MTLTexture> target, const Layout& L) {
         float frame[4] = {0, 0, 0, 0.6f * op};
         draw_solid(e, fmt, dw, dh, {L.pip.x - bw, L.pip.y - bw, L.pip.w + 2 * bw, L.pip.h + 2 * bw}, frame);
         draw_image(e, fmt, dw, dh, R.drc.tex, R.drc.srgb, L.pip, op);
+        if(auto* draw=overlay::guesthud::gamepad_region(dw,dh,L.pip.x,L.pip.y,L.pip.w,L.pip.h,op)) {
+            if(is_srgb(fmt))overlay::linearize_colors(draw,true);
+            ImGui_ImplMetal_NewFrame(rp);
+            ImGui_ImplMetal_RenderDrawData(draw,command_buffer(),e);
+        }
     }
     // settings overlay (overlay/overlay.h) on top: Dear ImGui's Metal backend in the same pass
     if (g_overlay_draw) {
@@ -757,94 +791,12 @@ static void compose_drc(id<MTLTexture> target) {
     id<MTLRenderCommandEncoder> e = [command_buffer() renderCommandEncoderWithDescriptor:rp];
     Layout L = layout(target.width, target.height, R.drc.tex.width, R.drc.tex.height, 0, 0, false);
     draw_image(e, target.pixelFormat, target.width, target.height, R.drc.tex, R.drc.srgb, L.tv, 1.0f);
+    if (auto* draw = overlay::guesthud::gamepad_region(target.width,target.height,L.tv.x,L.tv.y,L.tv.w,L.tv.h,1)) {
+        if (is_srgb(target.pixelFormat)) overlay::linearize_colors(draw, true);
+        ImGui_ImplMetal_NewFrame(rp);
+        ImGui_ImplMetal_RenderDrawData(draw, command_buffer(), e);
+    }
     [e endEncoding];
-}
-
-// ---------------------------------------------------------------- automatic overlay
-// Every 4th frame both pictures are reduced to 32x18 (mipmapped copy, then a trilinear draw, display-
-// encoded RGBA8) and read back; display_auto_signature (display_modes.cpp) decides.
-namespace {
-const uint32_t kSigW = 32, kSigH = 18, kSigN = kSigW * kSigH;
-struct Sig {
-    id<MTLTexture> mip, small;
-    id<MTLBuffer> buf;
-    // encode the reduction of `src` (on the current command buffer)
-    void encode(id<MTLTexture> src, bool src_linear) {
-        if (!mip || mip.width != src.width || mip.height != src.height || mip.pixelFormat != src.pixelFormat) {
-            MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width
-                                                                                         height:src.height mipmapped:YES];
-            d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-            d.storageMode = MTLStorageModePrivate;
-            mip = [R.device newTextureWithDescriptor:d];
-        }
-        if (!small) {
-            MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:kSigW
-                                                                                         height:kSigH mipmapped:NO];
-            d.usage = MTLTextureUsageRenderTarget;
-            d.storageMode = MTLStorageModePrivate;
-            small = [R.device newTextureWithDescriptor:d];
-            buf = [R.device newBufferWithLength:kSigN * 4 options:MTLResourceStorageModeShared];
-        }
-        static id<MTLSamplerState> trilinear = [] {
-            MTLSamplerDescriptor* sd = [MTLSamplerDescriptor new];
-            sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
-            sd.mipFilter = MTLSamplerMipFilterLinear;
-            sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
-            return [R.device newSamplerStateWithDescriptor:sd];
-        }();
-        id<MTLBlitCommandEncoder> b = [command_buffer() blitCommandEncoder];
-        [b copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
-                sourceSize:MTLSizeMake(src.width, src.height, 1) toTexture:mip destinationSlice:0 destinationLevel:0
-         destinationOrigin:MTLOriginMake(0, 0, 0)];
-        [b generateMipmapsForTexture:mip];
-        [b endEncoding];
-        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        rp.colorAttachments[0].texture = small;
-        rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-        id<MTLRenderCommandEncoder> e = [command_buffer() renderCommandEncoderWithDescriptor:rp];
-        float rect[4] = {0, 0, 1, 1};
-        struct { int aa, conv; float sharp, foot; } p = {0, src_linear ? 2 : 0, 1.0f, 1.0f};
-        [e setRenderPipelineState:pipeline(MTLPixelFormatRGBA8Unorm, false, false)];
-        [e setVertexBytes:rect length:sizeof rect atIndex:0];
-        [e setFragmentTexture:mip atIndex:0];
-        [e setFragmentBytes:&p length:sizeof p atIndex:0];
-        [e setFragmentSamplerState:trilinear atIndex:0];
-        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
-        [e endEncoding];
-        b = [command_buffer() blitCommandEncoder];
-        [b copyFromTexture:small sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(kSigW, kSigH, 1)
-                  toBuffer:buf destinationOffset:0 destinationBytesPerRow:kSigW * 4 destinationBytesPerImage:kSigN * 4];
-        [b endEncoding];
-    }
-    std::vector<float> luma() const {
-        std::vector<float> v(kSigN);
-        const uint8_t* px = (const uint8_t*)buf.contents;
-        for (uint32_t i = 0; i < kSigN; i++) v[i] = (0.299f * px[i * 4] + 0.587f * px[i * 4 + 1] + 0.114f * px[i * 4 + 2]) / 255.0f;
-        return v;
-    }
-};
-}  // namespace
-
-// Metal: reduce on the GPU, decide when the command buffer completed
-static void sample_screens() {
-    static std::atomic<bool> busy{false};
-    static Sig drc, tv;
-    if (g_mode != kDrcAuto || !R.drc.tex || R.frame % 4 || busy) {
-        if (g_mode != kDrcAuto) display_auto_signature({}, nullptr, R.frame);  // forgets the last signature
-        return;
-    }
-    drc.encode(R.drc.tex, R.drc.srgb);
-    bool have_tv = R.tv.tex != nil;
-    if (have_tv) tv.encode(R.tv.tex, R.tv.srgb);
-    busy = true;
-    uint64_t frame = R.frame;
-    [command_buffer() addCompletedHandler:^(id<MTLCommandBuffer>) {
-        std::vector<float> t;
-        if (have_tv) t = tv.luma();
-        display_auto_signature(drc.luma(), have_tv ? &t : nullptr, frame);
-        busy = false;
-    }];
 }
 
 // ---------------------------------------------------------------- present
@@ -927,7 +879,6 @@ static void take_screenshot(const PresentPlan& P) {
 
 // Metal, called from swap(): compose and present the TV window (with the GamePad overlay) and the GamePad window
 void present_screens() {
-    sample_screens();
     CGSize ls = R.tv.layer ? R.tv.layer.drawableSize : CGSizeMake(0, 0);
     PresentPlan P = display_plan(R.tv.tex != nil, R.tv.tex.width, R.tv.tex.height, R.drc.tex != nil, R.drc.tex.width, R.drc.tex.height,
                                  ls.width, ls.height, R.frame);
@@ -939,7 +890,29 @@ void present_screens() {
     L.scale = P.scale;
     float dw = P.dw, dh = P.dh;
     bool pip = P.pip_wanted, drc_only = P.drc_only;
+    if(overlay::guesthud::active())overlay::guesthud::set_tv_region(P.tv.x,P.tv.y,P.tv.w,P.tv.h,!P.drc_only);
     g_overlay_draw = overlay::frame(dw, dh, overlay_metal_init);  // settings overlay, drawn by compose_tv
+    // Hidden test-only composition: one reused GPU target, no drawable/readback/disk.
+    // Like Metal's other resources this target is process-lifetime; replace on device/format change.
+    const auto& diagnostic=headless_compose::policy();
+    if(diagnostic.enabled()&&R.tv.tex) {
+        static id<MTLTexture> target=nil;
+        static headless_compose::Counter counter;
+        counter.require_capacity(diagnostic);
+        if(dw!=headless_compose::width||dh!=headless_compose::height)
+            exception_report::raise("headless composition diagnostic requires WWHD_SIM_SCREEN=1280x720");
+        const auto format=R.tv.srgb?MTLPixelFormatRGBA8Unorm_sRGB:MTLPixelFormatRGBA8Unorm;
+        if(!target||target.device!=R.device||target.pixelFormat!=format)
+            target=offscreen(headless_compose::width,headless_compose::height,R.tv.srgb);
+        if(!target)exception_report::raise("headless Metal composition target allocation failed");
+        compose_tv(target,L);
+        unsigned commands=0;
+        if(g_overlay_draw)for(const auto* list:g_overlay_draw->CmdLists)commands+=list->CmdBuffer.Size;
+        const unsigned vertices=g_overlay_draw?g_overlay_draw->TotalVtxCount:0,indices=g_overlay_draw?g_overlay_draw->TotalIdxCount:0;
+        if(counter.encoded(diagnostic,vertices,indices,commands))
+            LOG("[headless-compose] Metal encoded_frames=%u last_vertices=%u last_indices=%u last_commands=%u total_vertices=%llu total_indices=%llu total_commands=%llu",counter.frames,vertices,indices,commands,
+                (unsigned long long)counter.vertices,(unsigned long long)counter.indices,(unsigned long long)counter.commands);
+    }
     take_screenshot(P);
     if (P.sim) {
         present_to_layer(R.tv, ^(id<MTLTexture> t) {
@@ -1048,6 +1021,7 @@ bool drc_overlay_hit(void* window, double wx, double wy) {
         if (item.tag == gfx::kDrcWindow) return gfx::g_drc_window != nil;
     }
     if (a == @selector(toggleDrc:)) {
+        item.title = gfx::g_mode == gfx::kDrcAuto ? @"Pin GamePad Picture-in-Picture" : @"Show GamePad Screen";
         on(gfx::drc_window_shown());
         return gfx::g_mode != gfx::kDrcOff && gfx::drc_window_available();
     }
@@ -1100,7 +1074,7 @@ void install_display_menu(NSMenu* bar) {
     add(m, @"    Separate window", @selector(setMode:), kDrcWindow);
     add(m, @"    Picture-in-picture in the TV window", @selector(setMode:), kDrcPip).toolTip = @"Click the overlay to touch";
     add(m, @"    Automatic picture-in-picture", @selector(setMode:), kDrcAuto).toolTip =
-        @"The overlay appears for a few seconds when the GamePad picture changes a lot (a menu opens); Cmd+G keeps it up";
+        @"Shows GamePad menus while open; follows Off-TV Play. Cmd+G pins the overlay";
     add(m, @"    Off", @selector(setMode:), kDrcOff).toolTip = @"Not shown; the game keeps drawing it";
     add(m, @"    GamePad only", @selector(setMode:), kDrcGamePad).toolTip =
         @"Only the GamePad picture in the TV window (click it to touch); in the game, Minus switches to Off-TV Play";

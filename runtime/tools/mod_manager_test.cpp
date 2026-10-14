@@ -22,10 +22,29 @@ void env(const char* key, const char* value) {
 }
 }
 namespace mods {
+static bool ff_on = false, ff_mute = true;
+static unsigned ff_rate = 2;
+static uint32_t ff_button = 0x40;
+bool fast_forward() { return ff_on; } void set_fast_forward(bool on) { ff_on = on; }
+unsigned fast_forward_rate() { return ff_rate; }
+void set_fast_forward_rate(unsigned r) { if (r >= 2 && r <= 4) ff_rate = r; }
+uint32_t fast_forward_button() { return ff_button; }
+void set_fast_forward_button(uint32_t b) { if (valid_fast_forward_button(b)) ff_button = b; }
+bool fast_forward_mute() { return ff_mute; } void set_fast_forward_mute(bool on) { ff_mute = on; }
+
 static bool move_on = false;
+static float move_land = 1.5f, move_swim = 1.25f, move_seconds = 5.f, move_cooldown = 3.f;
+static int move_mode = (int)MoveMode::kHold;
+static int move_anim = (int)MoveAnim::kNative;
+static uint32_t move_button = 0x40000;
 bool move_speed() { return move_on; } void set_move_speed(bool on) { move_on = on; }
-float move_speed_factor() { return 1.5f; } void set_move_speed_factor(float) {}
-uint32_t move_speed_button() { return 0x40000; } void set_move_speed_button(uint32_t) {}
+float move_speed_land_factor() { return move_land; } void set_move_speed_land_factor(float f) { if (f >= 1 && f <= 4) move_land = f; }
+float move_speed_swim_factor() { return move_swim; } void set_move_speed_swim_factor(float f) { if (f >= 1 && f <= 4) move_swim = f; }
+float move_speed_stamina_seconds() { return move_seconds; } void set_move_speed_stamina_seconds(float s) { if (s >= 0 && s <= 60) move_seconds = s; }
+float move_speed_cooldown_seconds() { return move_cooldown; } void set_move_speed_cooldown_seconds(float s) { if (s >= 0 && s <= 60) move_cooldown = s; }
+MoveMode move_speed_mode() { return (MoveMode)move_mode; } void set_move_speed_mode(MoveMode m) { move_mode = (int)m; }
+MoveAnim move_speed_anim() { return (MoveAnim)move_anim; } void set_move_speed_anim(MoveAnim a) { move_anim = (int)a; }
+uint32_t move_speed_button() { return move_button; } void set_move_speed_button(uint32_t b) { if (b && !(b & (b - 1))) move_button = b; }
 
 bool direct_camera() { return state[0]; } void set_direct_camera(bool b) { state[0]=b; }
 bool mouse_camera() { return state[1]; } void set_mouse_camera(bool b) { state[1]=b; }
@@ -44,14 +63,22 @@ bool get(const char* k, std::string& value) {
 }
 void set(const char* k, const std::string& value) { ++writes;preferences[k]=value; }
 }
-namespace mods::packages { void remember_builtin(const std::string&,bool) {} }
+static std::map<std::string,double> remembered;
+namespace mods::packages {
+void remember_builtin(const std::string&,bool) {}
+void remember_option(const std::string& id,double value) { remembered[id]=value; }
+void remember_option(const std::string&,const std::string&) {}
+}
 int main() {
     using namespace mods::manager;
     env("WWHD_NO_HOST_INPUT",nullptr);
     for(const auto& entry:entries()) env(entry.startup_env,nullptr);
     env("WWHD_MOD_CAMERA_SPEED",nullptr);env("WWHD_MOD_MOUSE_SENS",nullptr);
-    assert(entries().size()==7);
+    env("WWHD_MOD_MOVE_FACTOR",nullptr);env("WWHD_MOD_MOVE_SWIM",nullptr);env("WWHD_MOD_MOVE_STAMINA",nullptr);
+    assert(entries().size()==13);
+    for(const auto& option:traversal_options()) env(option.startup_env,nullptr);
     load_saved(); for(bool on:state) assert(!on); // stock defaults stay off
+    assert(!mods::ladder_speed() && !mods::sidle_speed() && !mods::sail_speed() && !mods::auto_wind());
     preferences["mod.wall-climb.enabled"]="1";
     preferences["mod.quick-doors.enabled"]="invalid";
     preferences["mod.direct-camera.speed"]="1.5";
@@ -67,6 +94,63 @@ int main() {
     assert(set_enabled("move-speed",true));assert(mods::move_speed());
     disable_all();for(bool on:state) assert(!on);assert(!mods::move_speed());
     for(const auto& entry:entries()) assert(preferences[std::string("mod.")+entry.id+".enabled"]=="0");
+    preferences["mod.fast-forward.rate"] = "3";
+    preferences["mod.fast-forward.button"] = "32";
+    preferences["mod.fast-forward.mute"] = "0";
+    load_saved();
+    assert(mods::fast_forward_rate() == 3 && mods::fast_forward_button() == 32 && !mods::fast_forward_mute());
+    env("WWHD_MOD_FF_RATE", "4");
+    preferences["mod.fast-forward.rate"] = "2";
+    load_saved(); assert(mods::fast_forward_rate() == 3); // environment owns startup rate
+    env("WWHD_MOD_FF_RATE", nullptr);
+    preferences["mod.fast-forward.button"] = "32768"; // A cannot answer prompts as boost
+    preferences["mod.fast-forward.rate"] = "nan";
+    load_saved(); assert(mods::fast_forward_rate() == 3 && mods::fast_forward_button() == 32);
+    assert(set_enabled("fast-forward", true) && mods::fast_forward());
+    disable_all(); assert(!mods::fast_forward());
+    // The run/swim options round-trip, and a pre-split setting's single factor feeds both states.
+    preferences["mod.move-speed.land"] = "2.5";
+    preferences["mod.move-speed.swim"] = "1";
+    preferences["mod.move-speed.stamina"] = "8";
+    preferences["mod.move-speed.cooldown"] = "5";
+    preferences["mod.move-speed.mode"] = "1";
+    preferences["mod.move-speed.anim"] = "dash";
+    preferences["mod.move-speed.button"] = "65536";
+    load_saved();
+    assert(mods::move_speed_land_factor() == 2.5f && mods::move_speed_swim_factor() == 1.f);
+    assert(mods::move_speed_stamina_seconds() == 8.f && mods::move_speed_mode() == mods::MoveMode::kToggle);
+    assert(mods::move_speed_cooldown_seconds() == 5.f);
+    assert(mods::move_speed_anim() == mods::MoveAnim::kDash);
+    assert(mods::move_speed_button() == 65536);
+    preferences.erase("mod.move-speed.land");
+    preferences.erase("mod.move-speed.swim");
+    preferences["mod.move-speed.factor"] = "3";
+    load_saved();
+    assert(mods::move_speed_land_factor() == 3.f && mods::move_speed_swim_factor() == 3.f);
+    // The traversal mods (#95, #96): switches and their factors round-trip; out-of-range values are ignored.
+    for(const char* id:{"ladder-speed","sidle-speed","sail-speed","auto-wind"}) assert(set_enabled(id,true));
+    assert(mods::ladder_speed() && mods::sidle_speed() && mods::sail_speed() && mods::auto_wind());
+    disable_all(); assert(!mods::ladder_speed() && !mods::sidle_speed() && !mods::sail_speed() && !mods::auto_wind());
+    assert(mods::ladder_speed_factor()==1.5f && mods::sidle_speed_factor()==1.5f);  // defaults once switched on
+    assert(mods::sail_speed_normal_factor()==1.5f && mods::sail_speed_swift_factor()==1.5f);
+    preferences["mod.ladder-speed.factor"]="2";
+    preferences["mod.sidle-speed.factor"]="9";      // out of range: ignored
+    preferences["mod.sail-speed.normal"]="1.25";
+    preferences["mod.sail-speed.swift"]="nan";
+    load_saved();
+    assert(mods::ladder_speed_factor()==2.f && mods::sidle_speed_factor()==1.5f);
+    assert(mods::sail_speed_normal_factor()==1.25f && mods::sail_speed_swift_factor()==1.5f);
+    set_traversal_option("ladder-speed.factor",2.5f);
+    assert(mods::ladder_speed_factor()==2.5f && remembered["ladder-speed.factor"]==2.5);
+    assert(std::stof(preferences["mod.ladder-speed.factor"])==2.5f);
+    set_traversal_option("sail-speed.swift",2.5f);
+    assert(mods::sail_speed_swift_factor()==2.5f && remembered["sail-speed.swift"]==2.5);
+    assert(std::stof(preferences["mod.sail-speed.swift"])==2.5f);
+    set_traversal_option("sidle-speed.factor",7.f);  // clamped by the setter, saved as applied
+    assert(mods::sidle_speed_factor()==3.f && remembered["sidle-speed.factor"]==3.0);
+    env("WWHD_MOD_LADDER_FACTOR","1");preferences["mod.ladder-speed.factor"]="3";
+    load_saved(); assert(mods::ladder_speed_factor()==2.5f);  // the environment owns startup values
+    env("WWHD_MOD_LADDER_FACTOR",nullptr);
     // Test isolation protects player settings even when toggles are exercised.
     env("WWHD_NO_HOST_INPUT","1");prior=reads;load_saved();assert(reads==prior);
     prior=writes;assert(set_enabled("quick-doors",true));assert(state[4]);assert(writes==prior);

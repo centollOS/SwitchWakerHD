@@ -614,7 +614,7 @@ void draw_controls(ControlsView& v, float w, float h) {
         const int code = isPad ? m.pad[a] : m.keys[a][c];
         const bool bound = isPad ? code != kPadNone : code != kNoKey;
         const bool capturing = v.cap_action == a && (v.cap_col == kColAny ? c != kColKey1 : v.cap_col == c);
-        const bool held = bound && (isPad ? v.pad && v.pad[code] > 0.5f : v.keys && v.keys[code]);
+        const bool held = bound && (isPad ? v.pad && v.pad[code] > 0.5f : code < 256 && v.keys && v.keys[code]);
         const bool conflict = bound && !(isPad ? pad_users(m, code, a) : key_users(m, code, a)).empty();
         const bool hovered = ch.hovered;
         const bool twin = bound && !hovered && hoverCode >= 0 && hoverPad == isPad && hoverCode == code;

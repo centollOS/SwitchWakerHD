@@ -1,3 +1,4 @@
+#include "../exception_report.h"
 #include "content.h"
 #include "cemu_pack.h"
 #include "guest_addr.h"
@@ -5,6 +6,8 @@
 #include "mod_json.h"
 #include <cstdio>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <vector>
 #include <sstream>
 #include <atomic>
@@ -12,10 +15,14 @@
 namespace mods::content {
 namespace fs=std::filesystem;
 namespace {
-Files active;
+// The active replacements. Set at startup, then replaced once more with the combined set when guest
+// modules start (packages::start_guests); readers take a reference, so replacing is safe while files open.
+std::mutex active_mutex;
+std::shared_ptr<const Files> active_files;
 std::atomic<bool> present{false};
+std::shared_ptr<const Files> current(){std::lock_guard guard(active_mutex);return active_files;}
 std::string lower(std::string s){for(char& c:s)if(c>='A'&&c<='Z')c+= 'a'-'A';return s;}
-void require(bool ok,const char* reason){if(!ok)throw std::runtime_error(reason);}
+void require(bool ok,const char* reason){if(!ok)exception_report::raise(reason);}
 }
 // The 2D language packs the game names (Common/Pack/permanent_2d_<Us|Eu|Jp><Language>.pack, cking.rpx
 // 0x1048DD4C) and its other packs. A fan translation is usually one of the language packs.
@@ -96,7 +103,7 @@ void import_legacy(const fs::path& stage,const std::string& source_name){
     // Stable deterministic ID by source name. An explicit manifest can supply a different ID/version.
     auto name=fs::path(source_name).stem().string();require(!name.empty(),"Missing mod name");if(name.size()>128)name.resize(128);
     auto id=lower(name);for(char& c:id)if(!((c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_'))c='-';if(id.size()>55)id.resize(55);id="content."+id;
-    json::Value m;m["format_version"]=1;m["id"]=id;m["name"]=name;m["version"]="1.0.0";m["game_id"]="wwhd-usa";m["kind"]="content";m["minimum_manager_version"]="1.1.0";
+    json::Value m;m["format_version"]=1;m["id"]=id;m["name"]=name;m["version"]="1.0.0";m["game_id"]="wwhd";m["kind"]="content";m["minimum_manager_version"]="1.5.0";
     m["content_dir"]=candidates.front().lexically_relative(stage).generic_string();
     std::string description="Imported local content replacement. Requires restart. Model and archive compatibility must be checked in game.";
     if(!mapped.empty())description+=" Loose files placed at: "+mapped+".";
@@ -119,9 +126,14 @@ Files index(const fs::path& directory){
     }
     require(!out.empty(),"Content mod contains no files");return out;
 }
-void activate(Files files){require(!present.load(),"Content overrides already activated");active=std::move(files);present.store(!active.empty(),std::memory_order_release);}
+void activate(Files files){
+    auto next=files.empty()?nullptr:std::make_shared<const Files>(std::move(files));
+    std::lock_guard guard(active_mutex);active_files=next;present.store(next!=nullptr,std::memory_order_release);
+}
 std::string replacement(const std::string& guest,const std::string& mode){
     if(!present.load(std::memory_order_acquire))return {};
+    auto files=current();if(!files)return {};
+    const Files& active=*files;
     if(mode!="r"&&mode!="rb")return {}; // never redirect writers or update handles
     auto relative=guest;
     if(relative.starts_with("/vol/content/"))relative.erase(0,13);

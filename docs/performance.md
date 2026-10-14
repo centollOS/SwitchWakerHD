@@ -99,6 +99,41 @@ directory) to check that the run still renders correctly. The "Sort by top of st
 `sample.txt` shows where the CPU time goes. `run.log` prints the shader and pipeline counts every
 few seconds.
 
+### Windows on ARM64: sampling the frame threads
+
+macOS `sample` has no counterpart on Windows that works without administrator rights (ETW / WPR
+need them). `WWHD_SAMPLE_THREADS=<prefix>` turns on a sampling profiler inside the game
+(`runtime/src/platform/thread_sampler.cpp`, Windows on ARM64 only): about 1000 times a second the
+render thread and the game's main thread are suspended, their stacks are copied (unwound with
+`RtlVirtualUnwind`, then the frame-pointer chain) and they are resumed. `WWHD_SAMPLE_AFTER=<s>`
+delays the start (skip boot and loading), `WWHD_SAMPLE_SECONDS=<s>` limits it. It writes
+`<prefix>.samples` and `<prefix>.modules`; `tools/bench/thread_profile.py` reports the time by module
+and function, and for time spent in the Vulkan driver or the kernel the game executable's call site
+that led there:
+
+```sh
+tools/bench/run_bench.py --binary build/prof/wwhd.exe --state-dir my_states --scene outset --fps 60 \
+    --runs 1 --out build/bench/prof --variant "prof:WWHD_SAMPLE_THREADS=prof,WWHD_SAMPLE_AFTER=35,WWHD_SAMPLE_SECONDS=40"
+tools/bench/thread_profile.py build/bench/prof/prof_01/prof --exe build/prof/wwhd.exe --thread render
+```
+
+Build with debug information (`-DCMAKE_BUILD_TYPE=RelWithDebInfo`) so the executable's functions and
+lines can be named (`llvm-symbolizer`, e.g. from llvm-mingw); functions of system and driver DLLs are
+named after their nearest export, which names entry points but not internal functions. On a
+Snapdragon X, return addresses saved on the stack carry a pointer-authentication code in their upper
+bits; the sampler and the script strip it (user addresses fit in 48 bits).
+
+First results (Snapdragon X Elite, Adreno X1-85 driver 31.0.152.1, `devel` of 2026-10-11, 60 fps,
+llvm-mingw build): a hilltop view of Outset's village (about 3,970 draws/frame) ran 59.7 fps with
+29.86 logic steps/s (116 fps uncapped); the render thread was idle about 20% of the time and spent
+about 22% inside the Vulkan driver, spread over many calls: `vkCmdDrawIndexed` about 7-8%,
+`vkCmdBeginRendering` about 3-4% (about 49 passes/frame), descriptor set allocation and updates
+about 3%, the submission path about 4% (the driver destroys a kernel synchronization object in
+`vkResetFences` and creates one in `vkQueueSubmit`, about 0.5% of the thread together). On this
+scene, interleaved uncapped A/B runs (3 each) of `WWHD_VK_DRAW_BATCH=4096`, `WWHD_VK_DRAW_BATCH=0` and
+`WWHD_VK_NARROW_BARRIERS=1` stayed within the runs' spread (+2.2%, +2.7%, -3.4% in median fps), so the
+defaults are unchanged.
+
 ### Fixed-scene benchmark
 
 `tools/bench/run_bench.py` runs the game headless (or with `--visible` windows, which presentation
@@ -159,6 +194,101 @@ in-between frames drawn (paced), frames per step is interpolation's own count.
   devel; later frames differ from devel by as much as two devel runs differ from each other.
 - Before the per-kind averages and the spike limit, one 76 ms in-between pass kept all in-between
   frames off for 10 s at 120 fps (28.8 logic steps/s and 1% in-between frames in that window).
+
+## Frames that miss their vsync (issue #125, 2026-10-11)
+
+A computer that draws a little under 60 frames a second (Uncapped ~60) got about 30 at 60 fps and
+40–50 at 120/240 fps. The cause was the virtual vsync (`gx2_core.cpp`): a flip executed only on a
+tick of a fixed 59.94 Hz grid (2/4 times as fast at 120/240 fps), and the game waits for its flip
+before it goes on. A frame ready 1 ms after its tick waited for the next one, so every frame took
+two vsyncs (33.4 ms, double-buffered vsync). Now (`gx2/vsync_pacing.h`) a frame that is late flips
+as soon as it is ready (GX2WaitForVsync waits for that frame in 0.25 ms steps instead of sleeping
+to the next tick); lateness under one 59.94 Hz vsync keeps the grid, more moves the grid to the
+flip. Frames that are on time flip exactly on the grid, as before. Two pacing changes in
+`interp.cpp` go with it: a logic step that waited for its time starts at that time, not when the
+sleep timer woke up (0.2–1 ms later every step), and at 120/240 fps a step that starts late keeps
+the schedule (less than a step late), so the game catches up with fewer in-between frames.
+
+Measurement aids (test only): `WWHD_TEST_RENDER_LOAD_MS=x` busy-waits x ms on the render thread per
+frame, `WWHD_TEST_GAME_LOAD_MS=x` on the game thread at each swap; `WWHD_LOG_FLIP_PACING=1` logs the
+flip intervals (p50/p95/p99/max, count over 25 and 34 ms) every 300 flips.
+
+Apple M3 Max, Windfall (slot 2, walking), `tools/bench/run_bench.py`, hidden windows (nothing is
+presented, so these are the game's own flips; the display's vsync and the Vulkan present modes are
+not involved), 25 s per run, old and new interleaved in one binary, render thread +15 ms per frame
+(17.7 ms in all, Uncapped 56 fps). fps = flips (swaps) per second; 120/240 fps uncapped by the display
+(`--display-hz 0`):
+
+| Limit | Renderer | old fps / logic steps/s | new fps / logic steps/s |
+|---|---|---|---|
+| 60 | Vulkan | 30.2 / 15.1 | 56.3 / 28.2 |
+| 60 | Metal | 30.3 / 15.2 | 54.7 / 27.3 |
+| 60, game thread +15 ms instead | Vulkan | 30.4 / 15.2 | 56.7 / 28.3 |
+| 60, paced | Vulkan | 30.4 / 15.2 | 56.4 / 28.2 |
+| 120 (paced) | Vulkan | 40.3 / 20.2 | 56.6 / 30.0 |
+| 240 (paced) | Vulkan | 48.2 / 24.1 | 56.7 / 30.0 |
+| 120 (paced) | Metal | 40.2 / 20.1 | 54.5 / 30.0 |
+| 240 (paced) | Metal | 48.1 / 24.1 | 54.6 / 30.0 |
+| true 60 | Vulkan | 30.3 / 15.1 | 56.2 / 28.1 |
+| Uncapped | Vulkan | 56.0 / 28.0 | 55.7 / 27.9 |
+| 30 | Vulkan | 30.0 / 30.0 | 30.0 / 30.0 |
+
+At 60 fps with the load, the flip intervals were 33.4 ms (p50 and p95) before and 18.1 ms (p95)
+after, with none over 34 ms. Without the load the rates are unchanged (60 fps: 59.9 flips/s, 30.0
+logic steps/s, p95 16.7 ms on both renderers; Vulkan 120/240 fps 119.8/238.9; true 60 59.9), and the
+worst flip interval at 60 fps fell from 33.4 to 17.7 ms. Metal at 240 fps without a display cap
+(this computer draws ~150) now draws 149 instead of 119 frames a second at 30.0 instead of 29.8
+logic steps/s.
+
+## 240 fps micro-stutter: step slots (issue #164, 2026-10-12)
+
+At 240 fps with "Keep game speed" on, v0.2.13 hitched every step for seconds at a time and skipped
+an in-between frame every few seconds. Two clocks disagreed: paced interpolation scheduled logic
+steps on a wall clock of its own (33.333 ms, 30.000 steps a second, a late step keeping the
+schedule since #125), while the virtual vsync draws 8 frames a step on the 59.94 Hz grid (33.367
+ms). The schedule drifted 0.034 ms a step against the grid. Where it ran ahead, a logic pass slept
+past its frame's vsync, that frame flipped late ("flips when ready", #125, keeping the grid) and the
+step's in-between frames bunched up behind it at ~3 ms to catch up: one 10-12 ms interval and
+several short ones every step, until the drift had crossed a whole vsync (~8 s on and ~8 s off in a
+cycle of ~16 s). Where it ran behind, the 2 ms planning slack ran out every few seconds and the rest
+of a step's blended frames were skipped. 120 fps has the same cycle at a smaller scale.
+
+Now the schedule is the grid (`gx2/vsync_pacing.h`, step slots): a step's logic frame is due two
+vsyncs after the previous step's (the game's swap interval, 29.97 steps a second as on the
+console), and the logic pass starts one drawn frame before that slot (`interp_pacing.h`
+`slot_step_start`). A logic frame less than a step late keeps the schedule and the next step plans
+fewer in-between frames (the #125 behaviour); later than a step starts a new schedule. Two smaller
+changes go with it: a logic pass that ran late keeps the in-between frames that still fit instead
+of skipping all blended frames of the step (`skip_to`), and an in-between pass probe that
+hits a hitch (at the start the first in-between pass is a probe, and it measured 75-112 ms in four
+of six boots at 240 fps here) counts twice the old estimate and is retried after a second instead of
+keeping in-between frames out for 10 s. `WWHD_TRACE_FLIPS=file` and `WWHD_TRACE_STEPS=file` write
+per-flip and per-step traces.
+
+Measurements (Apple M3 Max, Windfall, Vulkan, hidden windows, `WWHD_DISPLAY_HZ=240`, three runs per build, v0.2.12 /
+v0.2.13 / the fix interleaved; 1-minute load 30-45 from other work, so the rates are noisy): at 240 fps, uneven flip
+intervals (over 1.4 or under 0.6 frames) per second 13.5 / 21.0 / 8.3; at 120 fps 6.9 / 11.2 / 6.8; with 15 ms of
+extra render work per frame (the #125 case) 44 / 51 / 51 fps; with 2.5 ms of extra game work 99 / 147 / 155 fps;
+"Keep game speed" off unchanged. At boot, v0.2.13 measured its first in-between pass at ~85 ms and drew no in-between
+frames; the fix retries that probe and draws ~90 % of them a second later. The late-step rule is `skip_to` (it
+skips as few blended passes as make the rest of the step fit). Full table (three runs per build, interleaved, median; Windfall, Vulkan unless noted, hidden windows,
+`WWHD_DISPLAY_HZ=240`, 36 s per run; 1-minute load 30-46 for every row, so absolute rates are depressed, the
+comparison between builds is fair). Cells: fps, frame-time p50 / p99, uneven intervals per second, logic steps/s.
+
+| Case | v0.2.12 | v0.2.13 | fix |
+|---|---|---|---|
+| 240 fps | 229.1, 4.17 / 8.34 ms, 7.99/s, 29.61 | 239.2, 4.17 / 10.61 ms, 19.05/s, 30.00 | 238.8, 4.17 / 5.24 ms, 1.85/s, 29.97 |
+| 120 fps | 119.9, 8.34 / 8.34 ms, 0.08/s, 29.96 | 119.7, 8.34 / 14.30 ms, 6.56/s, 29.97 | 119.8, 8.34 / 8.34 ms, 0.08/s, 29.97 |
+| 240, render +15 ms (#125 case) | 47.9, 20.85 / 20.86 ms, 23.95 | 56.6, 17.60 / 19.36 ms, 30.00 | 56.6, 17.62 / 18.99 ms, 29.97 |
+| 240, game +2.5 ms | 119.6, 8.34 / 8.34 ms, 29.93 | 180.7, 5.01 / 23.50 ms, 10.7/s, 30.00 | 191.4, 5.08 / 8.15 ms, 11.8/s, 29.97 |
+| Metal 240 | 109.3, 8.35 / 16.70 ms, 29.09 | 127.0, 7.66 / 13.36 ms, 30.00 | 126.3, 7.76 / 11.77 ms, 29.97 |
+| 60 paced, render +15 ms | 29.8, 33.37 / 33.37 ms, 15.27 | 51.3, 17.44 / 33.37 ms, 28.65 | 51.4, 17.40 / 33.37 ms, 28.72 |
+| 240, "Keep game speed" off | 235.2, 4.17 / 8.34 ms, 4.68/s, 29.41 | 239.4, 4.17 / 5.07 ms, 1.37/s, 29.93 | 239.5, 4.17 / 5.37 ms, 1.79/s, 29.94 |
+| Boot at 240: in-between frames in the first 10 s | 2 / 1 / 1 % | 0 / 0 / 0 % | 91 / 85 / 81 % |
+
+Uneven/s is left out where every interval exceeds 1.4 frames. v0.2.12 is tag 5c39d489 and v0.2.13 devel d7d96991,
+each with only the trace and load aids added.
+
 
 ## Desktop CPU/GPU overlap and CPU path defaults (2026-10-07)
 

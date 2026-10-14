@@ -8,6 +8,50 @@ import run_bench as bench
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_variant_cache_paths_are_distinct_stable_and_confined(self):
+        args = types.SimpleNamespace(cache_dir=None, variant_caches=True)
+        root = pathlib.Path('/tmp/bench-check').resolve()
+        a = bench.variant_cache_dir(args, '../base', str(root))
+        b = bench.variant_cache_dir(args, 'candidate', str(root))
+        self.assertNotEqual(a, b)
+        self.assertEqual(a, bench.variant_cache_dir(args, '../base', str(root)))
+        self.assertEqual(pathlib.Path(a).parent, root / 'cache')
+        self.assertEqual(pathlib.Path(b).parent, root / 'cache')
+        args.variant_caches = False
+        self.assertEqual(bench.variant_cache_dir(args, 'candidate', str(root)), str(root / 'cache'))
+
+    def test_isolated_warmups_use_each_variants_actual_cache_identity(self):
+        variants = [('base', {'FLAG': '0'}), ('candidate', {'FLAG': '1'})]
+        args = types.SimpleNamespace(variant_caches=True)
+        self.assertEqual(bench.warmup_specs(args, variants),
+                         [('base', {'FLAG': '0'}, 'base'), ('candidate', {'FLAG': '1'}, 'candidate')])
+        args.variant_caches = False
+        self.assertEqual(bench.warmup_specs(args, variants), [('warmup', {'FLAG': '0'}, 'base')])
+
+    def test_second_variant_warmup_failure_stops_before_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            argv = ['run_bench.py', '--binary', '/unused/base', '--state-dir', '/unused/states',
+                    '--variant', 'base:', '--variant', 'candidate:FLAG=1',
+                    '--variant-binary', 'candidate=/unused/new', '--variant-caches',
+                    '--warmup', '--runs', '3', '--out', directory]
+            launches = []
+            def warm(args, name, env, index, out):
+                launches.append((name, env, index, args.variant_binaries[name],
+                                 bench.variant_cache_dir(args, name, out)))
+                return {'status': 'ok' if name == 'base' else 'load exceeded limit'}
+            with patch.object(bench.sys, 'argv', argv), \
+                 patch.object(bench.os.path, 'exists', return_value=True), \
+                 patch.object(bench.os.path, 'isfile', return_value=True), \
+                 patch.object(bench, 'run_once', side_effect=warm), \
+                 patch.object(bench, 'run_with_retries') as measured:
+                with self.assertRaises(SystemExit) as stopped:
+                    bench.main()
+                self.assertEqual(stopped.exception.code, 1)
+                measured.assert_not_called()
+            self.assertEqual([item[:4] for item in launches],
+                             [('base', {}, 0, '/unused/base'), ('candidate', {'FLAG': '1'}, 0, bench.os.path.abspath('/unused/new'))])
+            self.assertNotEqual(launches[0][4], launches[1][4])
+
     def test_invalid_warmup_stops_before_measured_runs(self):
         with tempfile.TemporaryDirectory() as directory:
             argv = ['run_bench.py', '--binary', '/unused/game', '--state-dir', '/unused/states',
@@ -20,14 +64,27 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertEqual(run.call_count, 1)
                 self.assertEqual(run.call_args.args[1], 'warmup')
 
+    def test_combined_quiet_gate_keeps_upstream_exclusivity_checks(self):
+        args = types.SimpleNamespace(max_load_per_core=None, quiet_seconds=0, wait_for_others=True)
+        with patch.object(bench, 'quiet_reasons', side_effect=[['another build'], []]) as reasons, \
+             patch.object(bench, 'other_games', return_value=[]), \
+             patch.object(bench, 'load1', return_value=5), patch.object(bench.time, 'sleep') as sleep:
+            bench.wait_for_quiet(args)
+        self.assertEqual(reasons.call_count, 2)
+        sleep.assert_called_once_with(5)
+
     def run_fake(self, root, complete, phase=None, profile=True):
         (root / 'source').mkdir()
+        (root / 'base').touch()
+        (root / 'new').touch()
         args = types.SimpleNamespace(binary=str(root / 'base'), variant_binaries={'new': str(root / 'new')},
             save=str(root / 'source'), game='/unused/game', state_dir='/unused/states', scene='still', slot=1,
             load_frame=450, origin=650, cache_dir=None, press_from=120, press_every=30, renderer='metal',
             fps='30', visible=False, display_hz=0, uncapped=False, gate=None, wait_for_others=True,
             watch_others=True, max_load=12, seconds=60, timeout=100, skip_windows=0,
-            quiet_load_max=None, exclusive_bench=False, exclusive_work=False, min_free_gb=0)
+            quiet_load_max=None, exclusive_bench=False, exclusive_work=False, min_free_gb=0,
+            max_load_per_core=None, max_run_load_per_core=None, quiet_seconds=0,
+            cold_caches=False, stutter_trace=False, keep_disturbed=False)
         launched = []
 
         class Process:
@@ -94,7 +151,7 @@ class BenchmarkStatistics(unittest.TestCase):
     def test_pair_differences_match_pair_numbers_in_ab_ba_order(self):
         def sample(name, pair, value, status='ok'):
             return {'variant': name, 'run': pair, 'status': status,
-                    'summary': {'frame_ms': value, 'logic_cpu_ms': value / 2}}
+                    'summary': {'frame_ms': value, 'logic_cpu_ms': value / 2, 'render_cpu_ms': value / 4}}
         results = [sample('base', 1, 10), sample('hooks', 1, 12),
                    sample('hooks', 2, 8), sample('base', 2, 10),
                    sample('base', 3, 10), sample('hooks', 3, 14),
@@ -106,6 +163,10 @@ class BenchmarkStatistics(unittest.TestCase):
         self.assertEqual(report['difference_ms']['n'], 3)
         self.assertTrue(report['run_iqr_exceeds_median_difference'])
         self.assertTrue(report['paired_iqr_exceeds_paired_median'])
+        render = run_bench.paired_statistics(results, ['base', 'hooks'])['metrics']['render_cpu_ms']
+        self.assertEqual([p['difference_ms'] for p in render['pairs']], [.5, -.5, 1])
+        self.assertEqual(render['difference_ms']['n'], 3)
+        self.assertEqual(render['difference_ms']['median'], .5)
 
     def test_worker_detection_checks_programs_not_shell_command_text(self):
         listing = '''101 /usr/bin/python3 /repo/tools/bench/run_bench.py
@@ -210,7 +271,8 @@ class BenchmarkStatistics(unittest.TestCase):
                         'windows': 3, 'load_before': 11, 'load_after': 13 if disturbed else 11,
                         'summary': {'frame_ms': 6, 'logic_cpu_ms': 4}}
 
-            argv = ['run_bench.py', '--binary', 'fixture', '--state-dir', str(root),
+            (root / 'fixture').touch()
+            argv = ['run_bench.py', '--binary', str(root / 'fixture'), '--state-dir', str(root),
                     '--scene', 'still', '--variant', 'a:', '--variant', 'b:', '--runs', '15',
                     '--warmup', '--retry-disturbed', '--out', str(root / 'out')]
             with mock.patch.object(sys, 'argv', argv), mock.patch('run_bench.run_once', side_effect=sample), contextlib.redirect_stdout(io.StringIO()):

@@ -1,4 +1,4 @@
-// Input > Controls…: remap keyboard keys and controller inputs (input_map.h) on a drawing of the
+// Input > Controls…: remap keyboard/mouse and controller inputs (input_map.h) on a drawing of the
 // selected Wii U controller (GamePad or Pro Controller, as chosen in the Input menu).
 //
 // The drawing is an original, simplified schematic made in code (no artwork). Each button, d-pad
@@ -222,9 +222,18 @@ struct UIState {
 @property(strong) NSSegmentedControl* faceLayout;
 @property(strong) NSSlider* deadzone;
 @property(strong) NSTextField* deadzoneValue;
+@property(strong) NSSlider* leftRange;     // issue #40: per-stick range, tag 0 = left, 1 = right
+@property(strong) NSSlider* rightRange;
+@property(strong) NSTextField* leftRangeValue;
+@property(strong) NSTextField* rightRangeValue;
 @property(strong) NSButton* invertY;
+@property(strong) NSButton* skipController;
+@property(strong) NSPopUpButton* prompts;        // in-game button prompts (#143)
+@property(strong) NSPopUpButton* shoulderNames;
+@property(strong) NSButton* promptColours;
 @property(strong) NSTimer* timer;
 - (BOOL)handleKeyEvent:(NSEvent*)e;
+- (BOOL)handleMouseEvent:(NSEvent*)e;
 - (void)beginCapture:(int)a mode:(int)mode;
 - (void)cancelCapture;
 - (void)clearAction:(int)a slot:(int)slot;
@@ -242,6 +251,7 @@ struct UIState {
     if ((e.type == NSEventTypeKeyDown || e.type == NSEventTypeKeyUp || e.type == NSEventTypeFlagsChanged) &&
         [self.controls handleKeyEvent:e])
         return;
+    if ([self.controls handleMouseEvent:e]) return;
     [super sendEvent:e];
 }
 @end
@@ -908,7 +918,7 @@ static NSRect x_rect(NSRect chip) { return NSMakeRect(NSMaxX(chip) - 7, chip.ori
     int code = isPad ? m.pad[a] : m.keys[a][sl];
     bool bound = isPad ? code != kPadNone : code != kNoKey;
     bool capturing = st.capAction == a && (st.capMode == kCapAny ? sl != kSlotKey1 : st.capMode == sl + 1);
-    bool held = bound && (isPad ? st.pad[code] > 0.5f : st.keys[code]);
+    bool held = bound && (isPad ? st.pad[code] > 0.5f : code < 256 && st.keys[code]);
     bool conflict = bound && !(isPad ? pad_users(m, code, a) : key_users(m, code, a)).empty();
     bool hovered = a == self.hoverAction && sl == self.hoverSlot;
     // the same key / controller input as the hovered chip: show where else it is used
@@ -990,7 +1000,7 @@ static NSTextField* label(NSString* s) {
 }
 
 - (void)build {
-    WWControlsWindow* w = [[WWControlsWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1060, 610)
+    WWControlsWindow* w = [[WWControlsWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1060, 638)
                                                               styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                                                         NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable
                                                                 backing:NSBackingStoreBuffered
@@ -999,7 +1009,7 @@ static NSTextField* label(NSString* s) {
     w.controls = self;
     w.delegate = self;
     w.releasedWhenClosed = NO;
-    w.contentMinSize = NSMakeSize(960, 570);
+    w.contentMinSize = NSMakeSize(960, 632);
     // remembered window frame (NSUserDefaults); not in portable mode, which keeps nothing outside its folder
     if (!getenv("WWHD_NO_HOST_INPUT") && !host::portable()) w.frameAutosaveName = @"WWHDControls2";  // test runs: always the default size
     self.window = w;
@@ -1013,13 +1023,17 @@ static NSTextField* label(NSString* s) {
     which.toolTip = @"Which Wii U controller the keyboard and your controllers act as (same as the Input menu). "
                     @"Both use the same mapping.";
     self.which = which;
-    NSSegmentedControl* fl = [NSSegmentedControl segmentedControlWithLabels:@[@"Face by position", @"Face by label (Xbox)"]
+    NSButton* skip = [NSButton checkboxWithTitle:@"Skip controller selection" target:self action:@selector(skipControllerChanged:)];
+    skip.toolTip = @"At the title screen, automatically choose the configured Wii U controller.";
+    self.skipController = skip;
+    NSSegmentedControl* fl = [NSSegmentedControl segmentedControlWithLabels:@[@"Face by position", @"Face by label (Xbox)", @"Face automatic"]
                                                                 trackingMode:NSSegmentSwitchTrackingSelectOne
                                                                       target:self
                                                                       action:@selector(faceLayoutChanged:)];
     fl.toolTip = @"Which host face buttons drive the Wii U's A/B/X/Y (issue #78). By position: the bottom "
                  @"button is B (Nintendo layout). By label: the button named A is A — on an Xbox pad that "
-                 @"makes A accept/act and B go back. Only these four bindings are rewritten.";
+                 @"makes A accept/act and B go back. Automatic reads the labels printed on the pad that was "
+                 @"plugged in first. Only these four bindings are rewritten.";
     self.faceLayout = fl;
     NSTextField* pi = label(@"");
     pi.textColor = NSColor.secondaryLabelColor;
@@ -1049,28 +1063,95 @@ static NSTextField* label(NSString* s) {
     NSTextField* dzl = label(@"Stick dead zone:");
     NSSlider* dz = [NSSlider sliderWithValue:0 minValue:0 maxValue:0.5 target:self action:@selector(deadzoneChanged:)];
     dz.continuous = YES;
+    dz.toolTip = @"Default: 15%. Filters resting-stick drift on both sticks.";
     dz.numberOfTickMarks = 11;
     self.deadzone = dz;
     NSTextField* dzv = label(@"0%");
     dzv.alignment = NSTextAlignmentRight;
     self.deadzoneValue = dzv;
     NSButton* inv = [NSButton checkboxWithTitle:@"Invert camera up/down" target:self action:@selector(invertChanged:)];
+    inv.toolTip = @"Camera only, including first-person views and item aiming (bow, hookshot, telescope, Picto Box) and the mouse camera. The Wind Waker baton and other right-stick controls are not inverted.";
     self.invertY = inv;
-    for (NSView* v in @[which, fl, pi, pv, sep, st, reset, dzl, dz, dzv, inv]) {
+    // issue #40: stick range, one slider per stick (worn sticks usually wear one at a time)
+    NSString* rangeTip = @"Default: 100% (no change). Scales the stick after the dead zone so a short stick reaches full deflection.";
+    auto rangeSlider = [&](NSInteger tag) {
+        NSSlider* s = [NSSlider sliderWithValue:kMinStickRange minValue:kMinStickRange maxValue:kMaxStickRange
+                                         target:self action:@selector(rangeChanged:)];
+        s.continuous = YES;
+        s.tag = tag;
+        s.toolTip = rangeTip;
+        s.numberOfTickMarks = 11;
+        return s;
+    };
+    NSTextField* lrl = label(@"Left stick range:");
+    NSSlider* lr = rangeSlider(0);
+    NSTextField* lrv = label(@"100%");
+    lrv.alignment = NSTextAlignmentRight;
+    NSTextField* rrl = label(@"Right stick range:");
+    NSSlider* rr = rangeSlider(1);
+    NSTextField* rrv = label(@"100%");
+    rrv.alignment = NSTextAlignmentRight;
+    self.leftRange = lr;
+    self.rightRange = rr;
+    self.leftRangeValue = lrv;
+    self.rightRangeValue = rrv;
+    NSTextField* rh = label(@"Raise if your stick can't reach full deflection, e.g. the Wind Waker baton's directions don't register.");
+    rh.font = [NSFont systemFontOfSize:11];
+    rh.textColor = NSColor.secondaryLabelColor;
+    rh.lineBreakMode = NSLineBreakByTruncatingTail;
+    [rh setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    // in-game button prompts (#110, #143); the item tags are the Mapping enums
+    NSTextField* ppl = label(@"Button prompts:");
+    NSPopUpButton* pp = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    for (auto p : {Mapping::Prompts::kAuto, Mapping::Prompts::kOriginal, Mapping::Prompts::kXbox, Mapping::Prompts::kPlayStation}) {
+        NSString* t = [NSString stringWithUTF8String:prompts_label(p)];
+        [pp addItemWithTitle:[[t substringToIndex:1].uppercaseString stringByAppendingString:[t substringFromIndex:1]]];
+        pp.lastItem.tag = (NSInteger)p;
+    }
+    pp.target = self;
+    pp.action = @selector(promptsChanged:);
+    pp.toolTip = @"How the game's button icons look while the face buttons are by label. Automatic: PlayStation "
+                 @"shapes on a PlayStation controller, the Xbox colours and positions on any other. Original keeps "
+                 @"the game's look. By position always keeps the game's look: its prompts then already match the "
+                 @"buttons' positions.";
+    self.prompts = pp;
+    NSTextField* snl = label(@"Shoulder names:");
+    NSPopUpButton* sn = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    for (auto n : {Mapping::ShoulderNames::kAuto, Mapping::ShoulderNames::kNintendo, Mapping::ShoulderNames::kNumbered,
+                   Mapping::ShoulderNames::kXbox}) {
+        NSString* t = [NSString stringWithUTF8String:shoulder_names_label(n)];
+        [sn addItemWithTitle:n == Mapping::ShoulderNames::kAuto ? @"Automatic" : t];
+        sn.lastItem.tag = (NSInteger)n;
+    }
+    sn.target = self;
+    sn.action = @selector(promptsChanged:);
+    sn.toolTip = @"How prompts name the shoulder buttons and triggers. Automatic follows the button prompts: "
+                 @"LB / RB / LT / RT with the Xbox look, L1 / R1 / L2 / R2 with the PlayStation shapes, the game's "
+                 @"L / R / ZL / ZR otherwise. A fixed choice applies with any face buttons setting.";
+    self.shoulderNames = sn;
+    NSButton* pc = [NSButton checkboxWithTitle:@"Coloured face buttons" target:self action:@selector(promptsChanged:)];
+    pc.toolTip = @"Green A, red B, blue X and yellow Y in the Xbox look; coloured shapes in the PlayStation look. "
+                 @"Off: the game's white buttons (in the Xbox positions while the face buttons are by label).";
+    self.promptColours = pc;
+    for (NSView* v in @[which, skip, fl, pi, pv, sep, st, reset, dzl, dz, dzv, inv, lrl, lr, lrv, rrl, rr, rrv, rh, ppl, pp, snl, sn, pc]) {
         v.translatesAutoresizingMaskIntoConstraints = NO;
         [root addSubview:v];
     }
 
-    NSDictionary* v = NSDictionaryOfVariableBindings(which, fl, pi, pv, sep, st, reset, dzl, dz, dzv, inv);
+    NSDictionary* v = NSDictionaryOfVariableBindings(which, skip, fl, pi, pv, sep, st, reset, dzl, dz, dzv, inv, lrl, lr, lrv, rrl, rr, rrv, rh,
+                                                     ppl, pp, snl, sn, pc);
     auto C = [&](NSString* f, NSLayoutFormatOptions o = 0) {
         [root addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:f options:o metrics:nil views:v]];
     };
     C(@"H:|-14-[which]-(>=12)-[fl]-12-[pi]-14-|", NSLayoutFormatAlignAllCenterY);
+    C(@"H:|-14-[skip]-(>=14)-|");
     C(@"H:|-0-[pv]-0-|");
     C(@"H:|-0-[sep]-0-|");
     C(@"H:|-16-[st]-16-|");
     C(@"H:|-16-[reset]-(>=24)-[dzl]-8-[dz(160)]-6-[dzv(40)]-24-[inv]-16-|", NSLayoutFormatAlignAllCenterY);
-    C(@"V:|-12-[which]-6-[pv(>=400)]-0-[sep]-8-[st]-8-[reset]-14-|");
+    C(@"H:|-16-[rh]-(>=24)-[lrl]-8-[lr(160)]-6-[lrv(40)]-24-[rrl]-8-[rr(160)]-6-[rrv(40)]-16-|", NSLayoutFormatAlignAllCenterY);
+    C(@"H:|-16-[ppl]-8-[pp]-24-[snl]-8-[sn]-24-[pc]-(>=16)-|", NSLayoutFormatAlignAllCenterY);
+    C(@"V:|-12-[which]-6-[skip]-6-[pv(>=400)]-0-[sep]-8-[st]-8-[reset]-10-[lr]-10-[pp]-14-|");
     [w center];
     [self syncOptions];
     [self syncWhich];
@@ -1092,10 +1173,22 @@ static NSTextField* label(NSString* s) {
 - (void)syncOptions {
     self.deadzone.doubleValue = _st.m.deadzone;
     self.deadzoneValue.stringValue = [NSString stringWithFormat:@"%.0f%%", _st.m.deadzone * 100];
+    self.skipController.state = _st.m.skip_controller_selection ? NSControlStateValueOn : NSControlStateValueOff;
     self.invertY.state = _st.m.invert_camera_y ? NSControlStateValueOn : NSControlStateValueOff;
-    // kCustom: no segment chosen (as the overlay's "(custom)"); either segment then applies its preset
-    FaceLayout fl = face_layout(_st.m);
-    self.faceLayout.selectedSegment = fl == FaceLayout::kCustom ? -1 : fl == FaceLayout::kLabels ? 1 : 0;
+    self.leftRange.doubleValue = _st.m.left_range;
+    self.rightRange.doubleValue = _st.m.right_range;
+    self.leftRangeValue.stringValue = [NSString stringWithFormat:@"%.0f%%", _st.m.left_range * 100];
+    self.rightRangeValue.stringValue = [NSString stringWithFormat:@"%.0f%%", _st.m.right_range * 100];
+    [self.prompts selectItemWithTag:(NSInteger)_st.m.prompts];
+    [self.shoulderNames selectItemWithTag:(NSInteger)_st.m.shoulder_names];
+    self.promptColours.state = _st.m.prompt_colours ? NSControlStateValueOn : NSControlStateValueOff;
+    // kCustom: no segment chosen (as the overlay's "(custom)"); any segment then applies its preset.
+    // Automatic is segment 2 whatever the bindings resolved to (as the overlay's "(-> ...)").
+    if (_st.m.face_auto) self.faceLayout.selectedSegment = 2;
+    else {
+        FaceLayout fl = face_layout(_st.m);
+        self.faceLayout.selectedSegment = fl == FaceLayout::kCustom ? -1 : fl == FaceLayout::kLabels ? 1 : 0;
+    }
 }
 
 - (void)syncWhich {
@@ -1125,8 +1218,8 @@ static NSTextField* label(NSString* s) {
     bool recent = _message && now - _messageTime < (_messageLevel ? 8 : 4);
     if (_st.capAction >= 0 && !(recent && _messageLevel == 2)) {
         NSString* what = _st.capMode == kCapPad   ? @"press a controller button or move a stick"
-                         : _st.capMode == kCapAny ? @"press a key or a controller button"
-                                                  : (_st.capMode == kCapKey1 ? @"press the alternate key" : @"press a key");
+                         : _st.capMode == kCapAny ? @"press a key, mouse button or controller button"
+                                                  : (_st.capMode == kCapKey1 ? @"press an alternate key or mouse button" : @"press a key or mouse button");
         s = [NSString stringWithFormat:@"%@: %@ (Esc cancels).", ns(action_label(_st.capAction)), what];
         if (_st.capMode != kCapKey0 && _st.capMode != kCapKey1 && !_st.padConnected)
             s = [s stringByAppendingString:@" No game controller connected."];
@@ -1209,18 +1302,16 @@ static NSTextField* label(NSString* s) {
             }
         }
     }
-    // pressed state per action, stick deflection (as the game sees it, without camera inversion)
+    // pressed state per action, stick deflection (as the game sees it; the camera applies the inversion)
     float act[kActionCount];
     for (int a = 0; a < kActionCount; a++) {
         act[a] = 0;
         for (int k : _st.m.keys[a])
-            if (k != kNoKey && keys[k]) act[a] = 1;
+            if (k >= 0 && k < 256 && keys[k]) act[a] = 1;
         int p = _st.m.pad[a];
         if (p != kPadNone) act[a] = std::max(act[a], v[p]);
     }
-    Mapping m = _st.m;
-    m.invert_camera_y = false;
-    input::PadState ks = keyboard_state(m, keys), cs = controller_state(m, v);
+    input::PadState ks = keyboard_state(_st.m, keys), cs = controller_state(_st.m, v);
     float stick[2][2] = {{ks.lx || ks.ly ? ks.lx : cs.lx, ks.lx || ks.ly ? ks.ly : cs.ly},
                          {ks.rx || ks.ry ? ks.rx : cs.rx, ks.rx || ks.ry ? ks.ry : cs.ry}};
     if (memcmp(act, _st.act, sizeof act) || memcmp(stick, _st.stick, sizeof stick) || memcmp(keys, _st.keys, sizeof keys) ||
@@ -1278,6 +1369,19 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
         }
     *known = code == kVK_CapsLock;
     return code == kVK_CapsLock && (f & NSEventModifierFlagCapsLock);
+}
+
+- (BOOL)handleMouseEvent:(NSEvent*)e {
+    if (_st.capAction < 0 || _st.capMode == kCapPad) return NO;
+    int code = kNoKey;
+    if (e.type == NSEventTypeLeftMouseDown || e.type == NSEventTypeRightMouseDown || e.type == NSEventTypeOtherMouseDown) {
+        if (e.buttonNumber >= 0 && e.buttonNumber < 5) code = kMouse1 + (int)e.buttonNumber;
+    } else if (e.type == NSEventTypeScrollWheel && e.scrollingDeltaY != 0) {
+        code = e.scrollingDeltaY > 0 ? kWheelUp : kWheelDown;
+    }
+    if (code == kNoKey) return NO;
+    [self assignKey:code];
+    return YES;
 }
 
 - (BOOL)handleKeyEvent:(NSEvent*)e {
@@ -1343,7 +1447,7 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
 
 - (void)assignPad:(int)p {
     int a = _st.capAction;
-    _st.m.pad[a] = p;
+    set_pad_binding(_st.m, a, p);  // a hand-edited face binding drops the Automatic preset
     _st.capAction = -1;
     [self commit];
     auto others = pad_users(_st.m, p, a);
@@ -1360,7 +1464,7 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
 
 - (void)clearAction:(int)a slot:(int)slot {
     if (_st.capAction == a) _st.capAction = -1;
-    if (slot == kSlotPad) _st.m.pad[a] = kPadNone;
+    if (slot == kSlotPad) set_pad_binding(_st.m, a, kPadNone);
     else _st.m.keys[a][slot] = kNoKey;
     [self commit];
     [self setStatus:[NSString stringWithFormat:@"Cleared %@ (%s).", ns(action_label(a)),
@@ -1374,9 +1478,9 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
     switch (what) {
     case 0: [self beginCapture:a mode:kCapAny]; return;
     case 1: _st.m.keys[a].fill(kNoKey); break;
-    case 2: _st.m.pad[a] = kPadNone; break;
-    case 3: _st.m.keys[a].fill(kNoKey); _st.m.pad[a] = kPadNone; break;
-    case 4: _st.m.keys[a] = d.keys[a]; _st.m.pad[a] = d.pad[a]; break;
+    case 2: set_pad_binding(_st.m, a, kPadNone); break;
+    case 3: _st.m.keys[a].fill(kNoKey); set_pad_binding(_st.m, a, kPadNone); break;
+    case 4: _st.m.keys[a] = d.keys[a]; set_pad_binding(_st.m, a, d.pad[a]); break;
     }
     if (_st.capAction == a) _st.capAction = -1;
     [self commit];
@@ -1403,7 +1507,7 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
     [self cancelCapture];
     NSAlert* alert = [[NSAlert alloc] init];
     alert.messageText = @"Reset all controls to their defaults?";
-    alert.informativeText = @"Keyboard keys, controller buttons, the dead zone and camera inversion go back to the built-in layout.";
+    alert.informativeText = @"Keyboard keys, controller buttons, the dead zone, the stick ranges and camera inversion go back to the built-in layout.";
     [alert addButtonWithTitle:@"Reset"];
     [alert addButtonWithTitle:@"Cancel"];
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
@@ -1426,8 +1530,29 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
     _gen = generation();
 }
 
+- (void)rangeChanged:(NSSlider*)s {
+    float r = std::clamp((float)(std::round(s.doubleValue * 100) / 100), kMinStickRange, kMaxStickRange);
+    (s.tag ? _st.m.right_range : _st.m.left_range) = r;
+    (s.tag ? self.rightRangeValue : self.leftRangeValue).stringValue = [NSString stringWithFormat:@"%.0f%%", r * 100];
+    set_current(_st.m);
+    _gen = generation();
+}
+
+- (void)skipControllerChanged:(NSButton*)b {
+    _st.m.skip_controller_selection = b.state == NSControlStateValueOn;
+    [self commit];
+}
+
 - (void)invertChanged:(NSButton*)b {
     _st.m.invert_camera_y = b.state == NSControlStateValueOn;
+    [self commit];
+}
+
+- (void)promptsChanged:(id)sender {
+    // the in-game button prompts; they follow on the next frame (button_glyphs.cpp)
+    _st.m.prompts = (Mapping::Prompts)self.prompts.selectedTag;
+    _st.m.shoulder_names = (Mapping::ShoulderNames)self.shoulderNames.selectedTag;
+    _st.m.prompt_colours = self.promptColours.state == NSControlStateValueOn;
     [self commit];
 }
 
@@ -1443,10 +1568,14 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
 
 - (void)faceLayoutChanged:(NSSegmentedControl*)c {
     // the same as Input > Face buttons; rewrites the four face bindings only
-    apply_face_layout(_st.m, c.selectedSegment == 1 ? FaceLayout::kLabels : FaceLayout::kPosition);
+    if (c.selectedSegment == 2) set_face_auto(_st.m, true);
+    else apply_face_layout(_st.m, c.selectedSegment == 1 ? FaceLayout::kLabels : FaceLayout::kPosition);
     [self commit];
     [self.padView invalidateGeo];
-    [self setStatus:[NSString stringWithFormat:@"Face buttons: %s.", face_layout_label(face_layout(_st.m))] level:0];
+    [self setStatus:_st.m.face_auto
+                     ? [NSString stringWithFormat:@"Face buttons: automatic (%s).", face_layout_label(face_layout(_st.m))]
+                     : [NSString stringWithFormat:@"Face buttons: %s.", face_layout_label(face_layout(_st.m))]
+               level:0];
 }
 
 // ---- window
@@ -1525,10 +1654,10 @@ static NSEvent* key_event(NSWindow* w, uint16_t code, NSString* chars) {
                            isARepeat:NO keyCode:code];
 }
 
-static void self_test() {
+static int self_test() {
     if (!getenv("WWHD_CONTROLS")) {  // it rewrites the controls file: never the user's own
         LOG("[controls-test] needs WWHD_CONTROLS=<scratch file>");
-        return;
+        return 1;
     }
     WWControls* c = g_controls;
     NSWindow* w = c.window;
@@ -1571,9 +1700,23 @@ static void self_test() {
     [c clearAction:kZR slot:kSlotPad];
     expect(current().pad[kZR] == kPadNone, "clear ZR's controller input");
     // 8. options
+    expect(c.skipController.state == NSControlStateValueOn, "skip controller selection defaults on");
+    c.skipController.state = NSControlStateValueOff;
+    [c skipControllerChanged:c.skipController];
+    expect(!current().skip_controller_selection, "skip controller selection can be disabled");
     c.invertY.state = NSControlStateValueOn;
     [c invertChanged:c.invertY];
     expect(current().invert_camera_y, "invert camera Y");
+    c.rightRange.doubleValue = 1.111;
+    [c rangeChanged:c.rightRange];
+    expect(current().right_range == 1.11f && current().left_range == 1.0f, "right stick range = 111%");
+    [c.prompts selectItemWithTag:(NSInteger)Mapping::Prompts::kPlayStation];
+    [c.shoulderNames selectItemWithTag:(NSInteger)Mapping::ShoulderNames::kXbox];
+    c.promptColours.state = NSControlStateValueOff;
+    [c promptsChanged:c.prompts];
+    expect(current().prompts == Mapping::Prompts::kPlayStation && current().shoulder_names == Mapping::ShoulderNames::kXbox &&
+               !current().prompt_colours,
+           "button prompts: PlayStation, LB/RB/LT/RT, no colours");
     // 9. the file on disk follows
     Mapping disk;
     expect(load_file(default_path(), disk) && disk == current(), "controls.json matches the live mapping");
@@ -1591,6 +1734,7 @@ static void self_test() {
     [c beginCapture:kX mode:kCapAny];
     [c releaseLocalKeys];  // the synthetic key-downs never get key-ups
     LOG("[controls-test] done, %d failed; window id %ld", fails, (long)w.windowNumber);
+    return fails;
 }
 
 namespace gfx {

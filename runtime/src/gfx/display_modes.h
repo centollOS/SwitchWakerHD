@@ -8,7 +8,7 @@
 // Modes (WWHD_DRC_MODE at start, not saved):
 //   window   the GamePad picture in its own window (hosts with a GamePad window)
 //   pip      picture-in-picture: the GamePad picture in a corner of the TV window
-//   auto     picture-in-picture for a few seconds when the GamePad picture changes a lot
+//   auto     GamePad menus while open; follows the game's Off-TV Play routing
 //   off      not shown (the game keeps drawing it)
 //   gamepad  only the GamePad picture, fitted to the TV window, like a Wii U played without a TV
 //            (Wind Waker HD's Off-TV Play, Minus, puts the game itself on it); a click or touch on
@@ -18,6 +18,7 @@
 #include <cstdint>
 
 #include "display.h"
+#include "auto_pip.h"
 
 namespace gfx {
 
@@ -35,7 +36,7 @@ extern std::atomic<float> g_pip_opacity;   // 0.2..1
 extern std::atomic<int> g_filter;          // picture scaling (the SDL host mirrors gfxvk::scale_filter)
 extern std::atomic<bool> g_shown;          // window / pip modes: GamePad screen shown (Cmd+G, Pro Controller)
 extern std::atomic<bool> g_auto_pin;       // auto mode: Cmd+G keeps the overlay up
-extern std::atomic<double> g_auto_until;   // auto mode: overlay up until this time (display_now)
+extern std::atomic<double> g_auto_until;   // auto mode: closing grace expires at this time (display_now)
 extern std::atomic<float> g_drc_aspect;    // of the GamePad image, for the GamePad window's touch
 extern std::atomic<bool> g_has_drc_window; // the host made a GamePad window (window mode possible)
 
@@ -59,16 +60,16 @@ int display_test_mode(uint64_t frame);
 // state changes of the modes (the hosts then show or hide their GamePad window and save)
 bool drc_window_wanted();          // window mode and shown
 bool pip_shown_now();              // the overlay is up (pip / auto modes)
-bool drc_screen_shown(bool drc_window_visible);  // the "Show GamePad screen" state in this mode
-void display_show_drc(bool on);    // show / hide the GamePad screen in the current mode
+bool drc_screen_shown(bool drc_window_visible);  // show/hide control state; auto: whether the overlay is pinned
+void display_show_drc(bool on);    // show / hide the GamePad screen; auto: set / clear the pin
 void display_set_mode(int m);      // a new mode (shown again unless off; auto starts unpinned)
-void display_touched();            // a touch on the overlay: auto mode keeps it up 2 s longer
-// The GamePad screen while paused (one screen: picture-in-picture or TV only): after + the view
-// switches to GamePad only once the TV picture stands still (the game paused; its menus, the map
-// and the save prompt are on the GamePad), and back when the TV picture moves again. A view chosen
-// meanwhile stays. On by default on Android; WWHD_DRC_PAUSE=0|1.
-void display_plus_pressed();       // + went down (input_sdl.cpp)
-int display_saved_mode();          // the view to save: while the switch is up, the one it goes back to
+// The optional Plus-button pause view uses the same read-only game state, with no GPU sampling.
+// On by default on Android; WWHD_DRC_PAUSE=0|1. A manually chosen view stays.
+void display_plus_pressed();
+int display_saved_mode();
+bool display_gamepad_state_needed();
+void display_read_gamepad_ui(); // guest thread, once at swap; returns immediately outside auto/pause
+void display_gamepad_ui(GamePadUiState state); // publish a host-only snapshot
 
 // pixel rectangles in the target (drawable), top-left origin
 struct Layout { Box tv, pip; bool pip_on = false; bool drc_only = false; float scale = 1; };
@@ -78,6 +79,7 @@ Layout layout(float dw, float dh, float tw, float th, float pw, float ph, bool p
 // a point in the TV window (0..1 from top left) on the GamePad picture -> touch position (0..1),
 // from the last display_plan; clamp_outside: a drag that left the picture keeps touching its edge
 bool overlay_hit(float nx, float ny, float* tx, float* ty, bool clamp_outside = false);
+void display_input_plan(const PresentPlan& plan); // publish the logical canvas used by the compositor
 // the main picture of the last TV layout (the TV picture, or the GamePad picture in GamePad-only
 // mode), 0..1 of the TV window from the top left; false before the first layout (the settings
 // overlay's text prompt places itself on it)
@@ -86,6 +88,10 @@ bool main_picture(float* x, float* y, float* w, float* h);
 // Touch screens (Android; WWHD_VIEW_BUTTON=1 elsewhere for tests): a button in the TV window's top
 // left corner. A tap cycles the views offered there (picture-in-picture, GamePad only, TV only);
 // what a long press does is the host's (Android: 60 fps on / off).
+extern std::atomic<int> g_touch_buttons;
+extern std::atomic<bool> g_touch_controller, g_touch_controls;
+bool touch_buttons_visible();
+void reveal_touch_buttons();
 bool view_button_enabled();
 bool view_button_hit(float nx, float ny);  // a point in the TV window (0..1) on the button
 int next_view();                           // the mode a tap switches to (the host sets and saves it)

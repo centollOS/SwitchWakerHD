@@ -1,3 +1,9 @@
+#include "../mods/fast_forward.h"
+#ifdef WWHD_HAS_VULKAN
+#include "gfx/vulkan/stutter_trace.h"
+#include "gfx/vulkan/headstart.h"
+namespace gx2 { void checkpoint_vulkan_caches(); }
+#endif
 // Keyboard and GameController input, merged into one GamePad state.
 //
 // Which key or controller input drives which GamePad input is the controls mapping (input_map.h,
@@ -15,6 +21,8 @@
 
 #include "input.h"
 #include "input_map.h"
+#include "mouse_bindings.h"
+#include "mods/mods.h"
 #include "renderer.h"
 #include "../runtime.h"
 #include "../savestate.h"
@@ -22,6 +30,7 @@
 #include "../true60.h"
 #include "../motion/motion.h"
 #include "../overlay/overlay.h"
+#include "../overlay/release_gate.h"
 
 #include <memory>
 #include <string>
@@ -33,6 +42,14 @@ namespace mods { void filter_pad(input::PadState& s); bool host_key_down(uint16_
 namespace input {
 
 static std::mutex g_mu;
+static MouseBindings g_mouse_bindings;
+void release_mouse_bindings() { std::lock_guard lk(g_mu); g_mouse_bindings.consume(); }
+void mouse_binding_button(uint64_t device, int button, bool down, bool eligible) {
+    std::lock_guard lk(g_mu); g_mouse_bindings.button(device, button, down, eligible);
+}
+void mouse_binding_wheel(float delta, bool eligible) {
+    std::lock_guard lk(g_mu); g_mouse_bindings.wheel(delta, eligible);
+}
 static bool g_keys[256];
 static PadState g_pad;  // controller part, refreshed on the main thread
 static bool g_touch;
@@ -51,19 +68,24 @@ static bool g_script_keys[256];
 static PadState keyboard_state(bool use_host) {
     bool keys[256];
     for (int i = 0; i < 256; i++) keys[i] = (use_host && g_keys[i]) || g_script_keys[i];
-    return input_map::keyboard_state(input_map::current(), keys);
+    return g_mouse_bindings.read(input_map::current(), use_host && mods::mouse_captured() && !overlay::captures(), keys, screenshot::key_down, !mods::first_person_wheel());
 }
 
-// every mappable controller input, 0..1, the strongest over all connected controllers
-void controller_values(float* v) {
+static input_map::AppleFaceLayout controller_face_layout(GCController* c) {
+    return input_map::apple_face_layout(c.productCategory.UTF8String, c.vendorName.UTF8String);
+}
+
+// every mappable controller input of one controller, 0..1; false: not a gamepad
+static bool device_values(GCController* c, float* v) {
     using namespace input_map;
     for (int i = 0; i < kPadCount; i++) v[i] = 0;
     auto put = [&](int p, float x) { if (x > v[p]) v[p] = x; };
-    for (GCController* c in [GCController controllers]) {
-        GCExtendedGamepad* g = c.extendedGamepad;
-        if (!g) continue;
+    GCExtendedGamepad* g = c.extendedGamepad;
+    if (!g) return false;
+    {
+        const auto layout = controller_face_layout(c);
         auto b = [&](GCControllerButtonInput* in, int p) {
-            if (in) put(p, in.isPressed ? std::max(in.value, 0.51f) : std::min(in.value, 0.5f));
+            if (in) put(apple_face_input(layout, p), in.isPressed ? std::max(in.value, 0.51f) : std::min(in.value, 0.5f));
         };
         b(g.buttonA, kPadA); b(g.buttonB, kPadB); b(g.buttonX, kPadX); b(g.buttonY, kPadY);
         b(g.leftShoulder, kPadLB); b(g.rightShoulder, kPadRB);
@@ -79,6 +101,84 @@ void controller_values(float* v) {
         stick(g.leftThumbstick, kPadLSUp, kPadLSDown, kPadLSLeft, kPadLSRight);
         stick(g.rightThumbstick, kPadRSUp, kPadRSDown, kPadRSLeft, kPadRSRight);
     }
+    return true;
+}
+
+// each connected controller's values, keyed by the controller: a reconnected one is a new object
+static std::vector<std::pair<uintptr_t, overlay::PadValues>> devices_values() {
+    std::vector<std::pair<uintptr_t, overlay::PadValues>> out;
+    for (GCController* c in [GCController controllers]) {
+        overlay::PadValues d;
+        if (device_values(c, d.data())) out.emplace_back((uintptr_t)(__bridge void*)c, d);
+    }
+    return out;
+}
+
+// every mappable controller input, 0..1, the strongest over all connected controllers
+void controller_values(float* v) {
+    using namespace input_map;
+    for (int i = 0; i < kPadCount; i++) v[i] = 0;
+    for (const auto& [id, d] : devices_values())
+        for (int p = 0; p < kPadCount; p++) v[p] = std::max(v[p], d[p]);
+}
+
+// ---- the labels printed on a pad's face buttons (issue #78's Automatic preset)
+
+// The letter on one face button, from its SF Symbol name ("a.circle", "xmark.circle") or its
+// localized name ("Button A"). The parsing is input_map's, so input_map_test can cover the names
+// real pads report. kUnknown when the host does not say.
+static input_map::FaceLabel button_letter(GCControllerButtonInput* in) {
+    if (!in) return input_map::FaceLabel::kUnknown;
+    NSString* s = nil;
+    if (@available(macOS 11.0, *)) s = in.sfSymbolsName.length ? in.sfSymbolsName : in.localizedName;
+    return input_map::face_label_from_text(s.UTF8String);
+}
+
+// A pad whose buttons do not name themselves (older MFi, some HID): guess the family from what it
+// says it is. Xbox/PlayStation letters sit where the letters are; Nintendo's are the other way.
+static void family_letters(GCController* c, input_map::FaceLabel out[4]) {
+    using FL = input_map::FaceLabel;
+    NSString* who = [NSString stringWithFormat:@"%@ %@", c.vendorName ?: @"", c.productCategory ?: @""].lowercaseString;
+    const bool nintendo = controller_face_layout(c) == input_map::AppleFaceLayout::kNintendo;
+    BOOL playstation = [who containsString:@"sony"] || [who containsString:@"dualsense"] ||
+                       [who containsString:@"dualshock"] || [who containsString:@"playstation"];
+    BOOL xboxish = [who containsString:@"xbox"] || [who containsString:@"microsoft"] ||
+                   [who containsString:@"steam"] || [who containsString:@"stadia"] || [who containsString:@"luna"];
+    if (nintendo) {
+        out[0] = FL::kB; out[1] = FL::kA; out[2] = FL::kY; out[3] = FL::kX;  // south, east, west, north
+    } else if (playstation) {  // the Xbox letters' places; the in-game prompts show the shapes (#143)
+        out[0] = FL::kCross; out[1] = FL::kCircle; out[2] = FL::kSquare; out[3] = FL::kTriangle;
+    } else if (xboxish) {
+        out[0] = FL::kA; out[1] = FL::kB; out[2] = FL::kX; out[3] = FL::kY;
+    }
+}
+
+// Connect order of the pads we have seen: GameController's own list is not that order, and the
+// Automatic preset follows the first pad still connected.
+static NSMutableArray<GCController*>* g_connect_order;
+
+static void note_dominant_labels() {
+    using FL = input_map::FaceLabel;
+    FL labels[4] = {FL::kUnknown, FL::kUnknown, FL::kUnknown, FL::kUnknown};
+    GCController* dominant = nil;
+    for (GCController* c in [g_connect_order copy]) {
+        if (c.extendedGamepad) { dominant = c; break; }
+    }
+    if (dominant) {
+        GCExtendedGamepad* g = dominant.extendedGamepad;
+        GCControllerButtonInput* face[4] = {g.buttonA, g.buttonB, g.buttonX, g.buttonY};  // framework element order
+        bool any = false;
+        for (int i = 0; i < 4; i++) {
+            labels[i] = button_letter(face[i]);
+            any |= labels[i] != FL::kUnknown;
+        }
+        input_map::apple_face_labels(controller_face_layout(dominant), labels);
+        if (!any) family_letters(dominant, labels);  // nothing printed we can read: guess the family
+    }
+    input_map::note_face_labels(labels);
+    if (dominant && input_map::apple_face_workaround(input_map::current(), controller_face_layout(dominant)))
+        LOG("[input] Nintendo pad with by-label bindings: if these were the old macOS workaround, "
+            "select Input > Face buttons > By position (Nintendo) or Automatic (#181). Saved bindings kept.");
 }
 
 // the latest controller_values (the timer below), for the settings overlay's navigation
@@ -94,7 +194,9 @@ void held_keys(bool* keys) {
 }
 
 void release_keys() {
+    mods::fast_forward_reset();
     std::lock_guard<std::mutex> lk(g_mu);
+    g_mouse_bindings.consume();
     memset(g_keys, 0, sizeof(g_keys));
 }
 
@@ -249,11 +351,22 @@ static void update_motion_sensors() API_AVAILABLE(macos(11.0)) {
 }
 
 void init() {
+    if (const char* v = getenv("WWHD_OVERLAY_MOUSE_HANDOFF"); v && !strcmp(v,"0"))
+        LOG("[overlay] diagnostic mouse handoff disabled (WWHD_OVERLAY_MOUSE_HANDOFF=0)");
     input_map::load_startup();
     start_test_keys();
     NSEventMask mask = NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged;
     [NSEvent addLocalMonitorForEventsMatchingMask:mask handler:^NSEvent*(NSEvent* e) {
-        if (e.modifierFlags & NSEventModifierFlagCommand) return e;  // keep Cmd-Q etc.
+        // keep Cmd-Q etc.; in an overlay text field the editing shortcuts (Cmd+A/C/V/X/Z) go to the overlay
+        if (e.modifierFlags & NSEventModifierFlagCommand) {
+            const uint16_t k = e.keyCode;
+            const bool editing = k == kVK_ANSI_A || k == kVK_ANSI_C || k == kVK_ANSI_V || k == kVK_ANSI_X || k == kVK_ANSI_Z;
+            if (!(editing && overlay::wants_text())) return e;
+            if (k == kVK_ANSI_V && e.type == NSEventTypeKeyDown) {
+                NSString* s = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
+                overlay::set_clipboard_text(s ? s.UTF8String : "");
+            }
+        }
         if (NSApp.keyWindow.sheetParent || NSApp.modalWindow) return e;  // text prompt has focus
         if (gfx::controls_window_is_key()) return e;  // Controls window: keys go to it, not the game
         uint16_t code = e.keyCode & 0xFF;
@@ -267,7 +380,20 @@ void init() {
             bool down = e.type == NSEventTypeKeyDown || (e.type == NSEventTypeFlagsChanged && modifier_down(code, f));
             bool repeat = e.type != NSEventTypeFlagsChanged && e.isARepeat;
             if (gfx::text_input_key((__bridge void*)e)) return nil;  // the game's text prompt: typed text
-            if (overlay::key(code, down, repeat, m)) return nil;
+            if (overlay::key(code, down, repeat, m)) {
+                // typed characters for the overlay's text fields (not shortcuts, not function/arrow keys)
+                if (e.type == NSEventTypeKeyDown && !(m & (overlay::kCtrl | overlay::kSuper)) && overlay::is_open()) {
+                    NSString* chars = e.characters ?: @"";
+                    NSMutableString* typed = [NSMutableString string];
+                    for (NSUInteger i = 0; i < chars.length; ++i) {
+                        unichar c = [chars characterAtIndex:i];
+                        if (c < 0x20 || c == 0x7F || (c >= 0xF700 && c <= 0xF8FF)) continue;  // control, NSF*FunctionKey
+                        [typed appendFormat:@"%C", c];
+                    }
+                    if (typed.length) overlay::text(typed.UTF8String);
+                }
+                return nil;
+            }
             // the Screenshot binding (F10 by default; posted test keys take this path too)
             if (e.type == NSEventTypeKeyDown && !e.isARepeat && screenshot::key_down(code)) return nil;
             if (posted) return nil;  // test keys only reach the overlay
@@ -286,14 +412,34 @@ void init() {
     [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidResignActiveNotification
                                                       object:nil queue:nil usingBlock:^(NSNotification*) {
         std::lock_guard<std::mutex> lk(g_mu);
+        g_mouse_bindings.consume();
         memset(g_keys, 0, sizeof(g_keys));
     }];
     [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
+    // the Automatic face preset follows the pad that was plugged in first (issue #78 follow-up)
+    g_connect_order = [NSMutableArray array];
+    for (GCController* c in [GCController controllers]) [g_connect_order addObject:c];
+    NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
+    [nc addObserverForName:GCControllerDidConnectNotification object:nil queue:nil usingBlock:^(NSNotification* n) {
+        GCController* c = n.object;
+        if (c && ![g_connect_order containsObject:c]) [g_connect_order addObject:c];
+        note_dominant_labels();
+    }];
+    [nc addObserverForName:GCControllerDidDisconnectNotification object:nil queue:nil usingBlock:^(NSNotification* n) {
+        [g_connect_order removeObject:n.object];
+        note_dominant_labels();
+    }];
+    note_dominant_labels();
     // GameController values are polled on the main thread
     [NSTimer scheduledTimerWithTimeInterval:1.0 / 240 repeats:YES block:^(NSTimer*) {
-        float v[input_map::kPadCount];
-        controller_values(v);
-        PadState s = input_map::controller_state(input_map::current(), v);
+        float v[input_map::kPadCount], game[input_map::kPadCount];
+        // inputs held while the overlay or the text prompt had them stay from the game until released,
+        // one gate per controller as on the SDL host (overlay/release_gate.h, issue #153); the overlay
+        // polls the Home / Select shortcut on its frame (and the platform shortcuts: an input one took
+        // counts as captured, overlay/extensions.h)
+        static overlay::DeviceGates<uintptr_t> gates;
+        gates.combine(devices_values(), overlay::captures() || overlay::shortcut_took_input(), v, game);
+        PadState s = input_map::controller_state(input_map::current(), game);
         {
             std::lock_guard<std::mutex> lk(g_mu);
             g_pad = s;
@@ -308,8 +454,8 @@ void init() {
                 std::lock_guard<std::mutex> lk(g_mu);
                 std::copy(g_keys, g_keys + 256, keys);
             }
-            motion::poll_recalibrate(v, keys);
-            screenshot::poll_controller(v);  // a controller input bound to Screenshot
+            motion::poll_recalibrate(game, keys);
+            screenshot::poll_controller(game);  // a controller input bound to Screenshot
         }
         mods::update_gyro_mouse();
     }];
@@ -490,10 +636,25 @@ static void apply_scenario(PadState& s) {
     true60_test::tick(t, sc.end > 0 && t >= sc.end);  // test aids (true60_test.cpp)
     if (sc.end > 0 && t >= sc.end && !ended.exchange(true)) {
         LOG("[test] t=%.3f s: end", t);
+        #ifdef WWHD_HAS_VULKAN
+        gfxvk::stutter::trace().flush();
+        if (render::active() == render::Api::Vulkan) gx2::checkpoint_vulkan_caches();
+#endif
         if (FILE* f = fopen("test_done", "w")) fclose(f);
     }
+    // Opt-in raw controller fixture: exercise bindings and the dead zone before guest delivery.
+    static const bool controller_stick = getenv("WWHD_TEST_CONTROLLER_STICK") != nullptr;
     for (auto& p : sc.sticks)
-        if (t >= p.from && t < p.to) { s.lx = p.x; s.ly = p.y; }
+        if (t >= p.from && t < p.to) {
+            s.lx = p.x; s.ly = p.y;
+            if (controller_stick) {
+                float values[input_map::kPadCount]{};
+                values[p.x < 0 ? input_map::kPadLSLeft : input_map::kPadLSRight] = std::fabs(p.x);
+                values[p.y < 0 ? input_map::kPadLSDown : input_map::kPadLSUp] = std::fabs(p.y);
+                auto mapped = input_map::controller_state(input_map::current(), values);
+                s.lx = mapped.lx; s.ly = mapped.ly;
+            }
+        }
     for (auto& p : sc.rsticks)
         if (t >= p.from && t < p.to) { s.rx = p.x; s.ry = p.y; }
     for (auto& p : sc.presses)
@@ -531,7 +692,7 @@ PadState read() {
         memset(g_script_keys, 0, sizeof g_script_keys);
         for (auto& p : keys)
             if (render::frame_count() >= p.from && render::frame_count() <= p.to)
-                for (int c : p.codes) g_script_keys[c] = true;
+                for (int c : p.codes) if (c < 256) g_script_keys[c] = true;
     }
     PadState k = keyboard_state(!no_host), s = g_pad;
     if (no_host) s = PadState{};
@@ -567,6 +728,7 @@ void prompt_text(const std::u16string& initial, int max_len,
     dispatch_async(dispatch_get_main_queue(), ^{
         {
             std::lock_guard<std::mutex> lk(g_mu);
+            g_mouse_bindings.consume();
             memset(g_keys, 0, sizeof(g_keys));  // keys pressed now belong to the prompt
         }
         NSAlert* alert = [[NSAlert alloc] init];

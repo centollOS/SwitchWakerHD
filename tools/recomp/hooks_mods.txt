@@ -7,8 +7,17 @@
 @02510EA0 # manualCamera: V smoothing factor (cSAngle * f1)
 @02510EE4 # manualCamera: U smoothing factor (cSAngle * f1)
 025071FC  # dCamera_c::subjectCamera: first person is active
+# Invert camera up/down (issue #167; runtime/src/camera_invert.h): after the camera's right-stick Y reads
+@024F9DA4 # dCamera_c::updatePad: after CPad_GET_SUBSTICK_POS_Y
+@0250074C # dCamera_c::initPad: after CPad_GET_SUBSTICK_POS_Y
+@02506C68 # dCamera_c::CalcSubjectAngle: after CPad_GET_SUBSTICK_POS_Y (first person / aiming)
+@02506C80 # dCamera_c::CalcSubjectAngle: the same on the game's inverted-aiming branch
+@02171B1C # new_himo2_move: after CPad_GET_SUBSTICK_POS_Y (rope-swing event camera)
 0240EBB0  # daPy_Execute: Link (left click while aiming, traces)
 # Quick doors / fast scene changes (mods/turbo.cpp; extra logic steps from interp.cpp's fpcEx_Handler hook)
 0252A684  # dDoor_info_c::getDemoAction: a door event cut is running
 021C0078  # daMbdoor_c::getDemoAction
 025DC86C  # fopScnM_ChangeReq: scene change trigger (traces)
+023DE788  # daPy_lk_c::setFrameCtrl: the run/swim boost scales the animation rate (mods.cpp)
+023E048C  # daPy_lk_c::getAnmData: the boost can swap ANM_WALK for ANM_DASH (mods.cpp)
+023D6B30  # daPy_lk_c::jointBeforeCB: additive sprint pose, restored by the native jointAfterCB

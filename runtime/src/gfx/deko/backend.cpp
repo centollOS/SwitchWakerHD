@@ -33,6 +33,8 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 
 #include "audio_out.h"
 #include "gfx/renderer.h"
+#include "gfx/renderer_ext.h"
+#include "gx2/shader_key_dirty.h"
 #include "gfx/switch_renderer.h"
 #include "gx2/gx2.h"
 #include "imgui.h"
@@ -1582,7 +1584,7 @@ const Backend& deko3d_backend() {
     using gfxdk::R;
     static const Backend b = [] {
         Backend b{};
-        b.api = Api::Deko3D;
+        b.api = Api::Platform;  // registered through renderer_ext.h (register_deko3d below)
         b.init = gfxdk::init;
         b.run_main_loop = gfxdk::run_main_loop;
         // GX2 render thread: the draw path (dk_draw.h) and the surfaces (dk_surfaces.h)
@@ -1633,13 +1635,26 @@ const Backend& deko3d_backend() {
                 gfxdk::submit_commands("GX2DrawDone");
             });
         };
-        // save states (gx2_ss_drain): GX2DrawDone above only submitted; the state must not be read or replaced while
-        // the GPU still runs commands that read guest data
+        // save states (gx2_ss_drain, backend_hooks.h draw_done): GX2DrawDone's whole work, and then the GPU itself:
+        // the state must not be read or replaced while the GPU still runs commands that read guest data
         b.gpu_idle = [] {
+            R.counts.waits++;
+            R.streamGen++;
+            gfxdk::note_wait_idle();
             guarded("gpu idle", [] {
+                gfxdk::guest_writeback();
                 gfxdk::submit_commands("save state");
                 dkQueueWaitIdle(R.queue);
             });
+        };
+        // deko3d translates shaders as the OpenGL renderer does (the decompiler's OpenGL mode): register fields
+        // its shader key ignores don't count as shader changes (gx2/backend_hooks.h)
+        b.shader_key_mask = [](uint32_t reg, uint32_t& mask) {
+            if (reg == Latte::REGADDR::SX_ALPHA_REF) {  // a uniform (uf_alphaTestRef)
+                mask = 0;
+                return true;
+            }
+            return gx2::vulkan_shader_key_mask(reg, mask);
         };
         b.ss_reset = [] {
             gfxdk::ss_reset_surfaces();
@@ -1663,5 +1678,11 @@ const Backend& deko3d_backend() {
         return b;
     }();
     return b;
+}
+
+// deko3d as upstream's platform backend (renderer_ext.h): main_switch::start() registers it before
+// render::choose(); the default renderer, "deko3d" for --renderer= / WWHD_RENDERER_RUNTIME
+void register_deko3d() {
+    ext::register_backend({"deko3d", "deko3d", &deko3d_backend(), true, gfxdk::select_decompiler});
 }
 }  // namespace render

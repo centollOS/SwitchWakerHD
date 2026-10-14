@@ -4,6 +4,8 @@
 #include <cassert>
 #include <cstdio>
 #include "mods/mods.h"
+#include "input_map.h"
+namespace input { void release_mouse_bindings() {} }
 #include "platform/mouse_sdl.h"
 #include "platform/keycodes.h"
 static bool camera = true, wheel_enabled = true, relative = false;
@@ -58,6 +60,12 @@ int main() {
     capture(); e = {}; e.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
     e.button.windowID = 17; e.button.button = SDL_BUTTON_MIDDLE;
     assert(mods::handle_mouse_event(e)); assert(!relative && !mods::mouse_captured());
+    auto mapping=input_map::Mapping::defaults();mapping.keys[input_map::kR][1]=input_map::kMouse3;
+    input_map::set_current(mapping,false);capture();
+    e={};e.type=SDL_EVENT_MOUSE_BUTTON_DOWN;e.button.windowID=17;e.button.button=SDL_BUTTON_MIDDLE;
+    assert(mods::handle_mouse_event(e));assert(relative && mods::mouse_captured());
+    assert(mods::host_key_down(kVK_Escape));mods::update_mouse();assert(!relative);
+    input_map::set_current(input_map::Mapping::defaults(),false);
     // mouse gyro: the pointer is captured while the game aims and released after; movement goes to the
     // gyro then, not to the mouse camera
     gyro_mouse = true; mods::update_mouse(); assert(!relative);

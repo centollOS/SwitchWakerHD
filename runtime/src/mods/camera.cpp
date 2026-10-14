@@ -32,6 +32,12 @@
 //   distance 250 -> 20 in 7 steps, R3 again -> back). The mod adds the mouse wheel: forward enters
 //   first person, backward leaves it, as a one-step R3 press.
 //
+// Invert camera up/down (Controls; issue #167): the camera's own reads of the right stick's Y are
+//   negated (instruction hooks right after each call, camera_invert.h lists every reader and why),
+//   so first person, aiming and the follow/manual camera invert while the baton does not. The mouse
+//   follows: in first person through the synthetic right stick, in the follow camera through the
+//   sign of its pitch rate (site_0251053C).
+//
 // Logic only runs on logic passes: the sites run inside the camera's execute, and the camera's
 // manual and subject modes run at 30 Hz in both 60 fps modes (true60 converts the follow camera only),
 // so the per-step amounts above hold in all modes; interpolation blends the drawn camera.
@@ -42,6 +48,8 @@
 #include <mutex>
 #include <vector>
 
+#include "../camera_invert.h"
+#include "../input_map.h"
 #include "input.h"
 #include "mods.h"
 #include "../motion/motion.h"
@@ -238,7 +246,7 @@ void filter_pad(input::PadState& s) {
         g_synth = false;
     }
     // left click while aiming an item: that item's button
-    if (active && g_left) {
+    if (active && g_left && input_map::key_users(input_map::current(), input_map::kMouse1).empty()) {
         uint32_t p = link_proc();
         uint32_t l = g_link.load(std::memory_order_relaxed);
         if (l && aiming_item(p)) {
@@ -311,8 +319,8 @@ extern "C" void site_0251053C(Cpu* c) {
     }
     double per = ldf32(c->r[1] + 0x14);
     if (!(std::fabs(per) > 0.01)) return;
-    // mouse down (dy > 0) looks down: V grows, so f28 < 0
-    c->f[28].ps0 = -dy * mouse_sensitivity() / per;
+    // mouse down (dy > 0) looks down: V grows, so f28 < 0 (the other way with Invert camera up/down)
+    c->f[28].ps0 = -dy * mouse_sensitivity() / per * camera_invert::mouse_pitch_sign(input_map::invert_camera_y());
 }
 // V smoothing (cSAngle * f1, f1 = [sp+0x18]) and U smoothing (f1 = [sp+0x1C])
 extern "C" void site_02510EA0(Cpu* c) {
@@ -321,6 +329,21 @@ extern "C" void site_02510EA0(Cpu* c) {
 extern "C" void site_02510EE4(Cpu* c) {
     if (mouse_step() || direct_camera()) c->f[1].ps0 = 1.0;
 }
+
+// ---- Invert camera up/down: right after the camera's CPad_GET_SUBSTICK_POS_Y calls (f1 = stick y)
+static void camera_stick_y(Cpu* c, const char* site) {
+    if (!input_map::invert_camera_y()) return;
+    const float y = (float)c->f[1].ps0;
+    c->f[1].ps0 = camera_invert::stick_y(y, true, camera_invert::Use::kCamera);
+    c->f[1].ps1 = c->f[1].ps0;  // lfs result: both halves
+    static uint64_t n = 0;
+    if (y != 0.0f && trace_on() && (n++ % 30) == 0) trace("invert camera: %s stick y %.2f -> %.2f", site, y, -y);
+}
+extern "C" void site_024F9DA4(Cpu* c) { camera_stick_y(c, "024F9DA4"); }  // dCamera_c::updatePad
+extern "C" void site_0250074C(Cpu* c) { camera_stick_y(c, "0250074C"); }  // dCamera_c::initPad
+extern "C" void site_02506C68(Cpu* c) { camera_stick_y(c, "02506C68"); }  // dCamera_c::CalcSubjectAngle (first person, aiming)
+extern "C" void site_02506C80(Cpu* c) { camera_stick_y(c, "02506C80"); }  // the same, with the game's inverted-aiming option
+extern "C" void site_02171B1C(Cpu* c) { camera_stick_y(c, "02171B1C"); }  // new_himo2_move: rope-swing event camera
 
 // which camera mode ran (for the mouse: manual camera vs first person)
 extern "C" void hook_0250FDC8(Cpu* c) {

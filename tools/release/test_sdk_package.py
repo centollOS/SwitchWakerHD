@@ -14,7 +14,7 @@ import package
 
 class SDKPackage(unittest.TestCase):
     def test_platform_sdk_archives_pass_guard(self):
-        for platform in ("macos-arm64", "linux-x86_64", "linux-aarch64", "windows-x86_64"):
+        for platform in ("macos-arm64", "linux-x86_64", "linux-aarch64", "windows-x86_64", "windows-arm64"):
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp) / ("WindWakerHD-test-" + platform)
                 package.copy_sdk_headers(str(root))
@@ -30,6 +30,22 @@ class SDKPackage(unittest.TestCase):
                 problems, count = guard.scan(str(archive))
                 self.assertGreater(count, 10)
                 self.assertEqual(problems, [])
+
+    def test_optional_template_packaging_uses_synthetic_payload(self):
+        from test_guard_template import fixture, encode
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'source'
+            destination = Path(tmp) / 'package'
+            source.mkdir()
+            self.assertFalse(package.copy_shader_template(str(source), str(destination)))
+            self.assertFalse(destination.exists())
+            relative = Path('tools/shadercache/template.bin')
+            template = source / relative
+            template.parent.mkdir(parents=True)
+            template.write_bytes(encode(fixture()))
+            self.assertTrue(package.copy_shader_template(str(source), str(destination)))
+            self.assertEqual((destination / relative).read_bytes(), template.read_bytes())
+            self.assertEqual(guard.scan(str(destination))[0], [])
 
     def test_installer_local_imports_are_shipped(self):
         installer = Path(package.ROOT) / "tools/installer"
@@ -76,6 +92,47 @@ class SDKPackage(unittest.TestCase):
         guard.check_entry("sdk/guest/include/wwhd/functions.h", b"0" * 32, problems)
         self.assertTrue(any("key-like" in problem for problem in problems))
 
+
+class DecompVariant(unittest.TestCase):
+    def test_variant_from_the_cmake_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build = Path(tmp)
+            self.assertIsNone(package.decomp_variant(str(build)))
+            (build / "CMakeCache.txt").write_text("WWHD_DECOMP:BOOL=OFF\n")
+            self.assertIsNone(package.decomp_variant(str(build)))
+            (build / "CMakeCache.txt").write_text("WWHD_DECOMP:BOOL=ON\n")
+            with self.assertRaises(SystemExit):
+                package.decomp_variant(str(build))  # the function list is missing
+            (build / "decomp").mkdir()
+            (build / "decomp" / "decomp_hooks.txt").write_text("02000020\n")
+            self.assertEqual(package.decomp_variant(str(build)), "decomp")
+
+
+
+class DecompBuildPackaging(unittest.TestCase):
+    """--decomp-build: the compile commands setup replays for the decomp version (portable_flags)."""
+
+    def test_portable_flags(self):
+        root, ddir, build = "/r", "/r/decomp", "/b"
+        mapping = {root + "/runtime/include": "{sdk}/include", root + "/runtime/src": "{sdk}/decomp/include",
+                   root + "/tools/decomp_build": "{tools}/decomp_build", build + "/decomp": "{out}", ddir: "{decomp}"}
+        args = ["/usr/bin/c++", "-DWWHD_DECOMP=1", "-I/r/runtime/include", "-I/r/runtime/src",
+                "-isystem", "/r/runtime/third_party/imgui", "-I/b/_deps/sdl3/include", "-O3", "-std=c++20",
+                "-arch", "arm64", "-I/r/decomp/tools/verify/include", "-I/b/decomp/include", "-O2", "-w",
+                "-include", "/r/tools/decomp_build/frames_vis.h", "-MD", "-MT", "x.o", "-MF", "x.o.d",
+                "-o", "x.o", "-c", "/r/tools/decomp_build/flags_probe.cpp"]
+        out = package.portable_flags(args, "/r/tools/decomp_build/flags_probe.cpp", mapping)
+        self.assertEqual(out, ["-DWWHD_DECOMP=1", "-I{sdk}/include", "-I{sdk}/decomp/include", "-O3", "-std=c++20",
+                               "-arch", "arm64", "-I{decomp}/tools/verify/include", "-I{out}/include", "-O2", "-w",
+                               "-include", "{tools}/decomp_build/frames_vis.h"])
+        with self.assertRaises(SystemExit):
+            package.portable_flags(["c++", "-include", "/elsewhere/x.h", "-c", "a.cpp"], "a.cpp", mapping)
+
+    def test_decomp_parts_listed(self):
+        self.assertIn("tools/installer/decomp_setup.py", package.INSTALLER_FILES)
+        self.assertEqual(package.DECOMP_HOOKS_NONE, "tools_decomp_build_hooks_none.cpp.o")
+        for rel in package.DECOMP_TOOLS:
+            self.assertTrue((Path(package.ROOT) / rel).is_file(), rel)
 
 if __name__ == "__main__":
     unittest.main()

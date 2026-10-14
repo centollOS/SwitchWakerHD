@@ -1,3 +1,7 @@
+#include "gfx/display_modes.h"
+#include "../game_clock.h"
+#include "vsync_pacing.h"
+#include "../mods/fast_forward.h"
 #include "../platform/host.h"
 #ifdef __APPLE__
 #include <pthread/qos.h>
@@ -19,7 +23,9 @@
 #include "gx2_cmd.h"
 #include "gx2_regs.h"
 #include "gx2_texture_regs.h"
+#include "register_blocks.h"
 #include "shader_key_dirty.h"
+#include "backend_hooks.h"
 #ifdef WWHD_HAS_VULKAN
 #include "gfx/vulkan/api.h"
 #endif
@@ -27,8 +33,10 @@
 #include "savestate.h"
 #include "guest_addr.h"
 #include "../aspect.h"
+#include "gfx/stereo.h"
 #include "gfx/renderer.h"
 #include "platform/perf_hint.h"
+#include "platform/thread_sampler.h"
 #include "render_prof.h"
 
 using namespace Latte;
@@ -40,21 +48,9 @@ static uint32 g_regs[kNumRegs];
 static uint32* g_shadow = nullptr;  // register copy of the active GX2ContextState
 static std::unordered_map<uint32, std::vector<uint32>> g_contexts;
 static std::recursive_mutex g_exec_mutex;
+static RegisterBlocks<kNumRegs> g_register_blocks;
 
 uint32* regs() { return g_regs; }
-
-// Context loads (GX2SetContextState, ~23 a frame in Outset) copy only the blocks of 256 registers that
-// something has written: every other block is zero in g_regs and in every context's shadow alike (a context
-// starts zeroed, and only apply_regs writes either). They copied the whole 256 KB file each time (~70 us at
-// 1020 MHz). The block of VGT_PRIMITIVE_TYPE, which draw() writes into g_regs directly, always counts.
-static uint64 g_written_blocks[kNumRegs / 256 / 64];
-static inline void mark_written(uint32 first, uint32 n) {
-    for (uint32 b = first >> 8, last = (first + n - 1) >> 8; b <= last; b++) g_written_blocks[b >> 6] |= 1ull << (b & 63);
-}
-static const bool g_written_init = [] {
-    mark_written(REGADDR::VGT_PRIMITIVE_TYPE, 1);
-    return true;
-}();
 
 uint64_t g_reg_gen[kRegCats];
 // the categories of each register (gx2.h RegCategory), a bit each
@@ -128,28 +124,24 @@ static bool shader_irrelevant(uint32 reg) {
 // How a register change counts for the shader-state counters, looked up per register (the game sets
 // millions of registers per second): 0 = not at all, else counted; kRegMasked: only changes of the
 // bits in mask[reg]; kRegProgram: a program register (not counted by g_shader_regs_gen).
-// OpenGL: like WWHD_VK_SHADER_KEY_DIRTY, register fields that its shader key ignores (texture
-// addresses, viewport, blend, scissor, the alpha-test reference...) don't count, so consecutive draws
-// that only change those reuse the shader lookup. WWHD_DK_SHADER_KEY_DIRTY=0 counts every change.
+// With the backend's shader_key_mask (backend_hooks.h; deko3d's: the fields its shader key ignores, texture
+// addresses, viewport, blend, scissor, the alpha-test reference...) those don't count, so consecutive draws
+// that only change them reuse the shader lookup.
 // (bits 3-5: the register's categories, gx2.h RegCategory: one table and one pass in apply_regs)
 enum : uint8 { kRegCounted = 1, kRegMasked = 2, kRegProgram = 4, kRegShaderBits = 7, kRegCatShift = 3 };
 struct RegClasses {
     std::vector<uint8> kind = std::vector<uint8>(kNumRegs);
     std::vector<uint32> mask = std::vector<uint32>(kNumRegs);
 };
+static ShaderKeyMask shader_key_mask();
 static const RegClasses& reg_classes() {
     static const RegClasses classes = [] {
-        const char* e = getenv("WWHD_DK_SHADER_KEY_DIRTY");
-        // deko3d translates shaders as the OpenGL renderer does (the decompiler's OpenGL mode)
-        const bool glKeyMask = render::deko3d() && (!e || strcmp(e, "0") != 0);
+        const ShaderKeyMask keyMask = shader_key_mask();
         RegClasses c;
         for (uint32 reg = 0; reg < kNumRegs; reg++) {
             uint32 mask = ~0u;
             uint8 kind = shader_irrelevant(reg) ? 0 : kRegCounted;
-            if (kind && glKeyMask) {
-                if (reg == REGADDR::SX_ALPHA_REF) kind = 0;  // a uniform (uf_alphaTestRef)
-                else if (vulkan_shader_key_mask(reg, mask)) kind = mask ? kRegCounted | kRegMasked : 0;
-            }
+            if (kind && keyMask && keyMask(reg, mask)) kind = mask ? kRegCounted | kRegMasked : 0;
             if (kind && program_reg(reg)) kind |= kRegProgram;
             c.kind[reg] = uint8(kind | g_reg_cat[reg] << kRegCatShift);
             c.mask[reg] = mask;
@@ -161,6 +153,12 @@ static const RegClasses& reg_classes() {
 
 static ShaderKeyDirtyStats shaderKeyDirtyStats;
 ShaderKeyDirtyStats shader_key_dirty_stats() { return shaderKeyDirtyStats; }
+
+// which register changes count for the shader key (backend_hooks.h), picked once the renderer runs
+static ShaderKeyMask shader_key_mask() {
+    static const ShaderKeyMask keyMask = pick_shader_key_mask(render::g_backend);
+    return keyMask;
+}
 
 #ifdef WWHD_HAS_VULKAN
 static void apply_small_regs(uint32 first, const uint32* v, uint32 n) {
@@ -206,12 +204,12 @@ static void apply_small_regs(uint32 first, const uint32* v, uint32 n) {
 #endif
 
 static void apply_regs(uint32 first, const uint32* v, uint32 n) {
-    if (first + n > kNumRegs) return;
-    // uniform registers (often hundreds of words a call) never move the shader-state counters, so
-    // the comparison that decides those is skipped: compared and then copied, they were ~15% of the
+    if (first >= kNumRegs || n > kNumRegs - first) return;
+    g_register_blocks.touch(first, n);
+    // (this fork) uniform registers (often hundreds of words a call) never move the shader-state counters,
+    // so the comparison that decides those is skipped: compared and then copied, they were ~15% of the
     // render thread on the desktop
     if (!n) return;
-    mark_written(first, n);
     if (first >= (uint32)mmSQ_ALU_CONSTANT0_0 && first + n <= (uint32)mmSQ_ALU_CONSTANT0_0 + 0x1000) {
         memcpy(&g_regs[first], v, n * 4);
         if (g_shadow) memcpy(&g_shadow[first], v, n * 4);
@@ -236,21 +234,16 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
                     if (rprof::fast_class_reg(first + i)) rprof::g_reg_dirty |= 1;
                     else rprof::note_other_reg(first + i);
                 }
-#ifdef WWHD_HAS_VULKAN
-        static const bool keyDirty = [] {
-            const char* value = getenv("WWHD_VK_SHADER_KEY_DIRTY");
-            return render::vulkan() && value && !strcmp(value, "1");
-        }();
+        const ShaderKeyMask keyMask = shader_key_mask();
         static const bool collectStats = render::vulkan() && getenv("WWHD_VK_STATS") != nullptr;
-        if(keyDirty || collectStats) {
+        if(collectStats) {
             bool baselineBump = false, actualBump = false;
             uint64_t maskedWords = 0;
             for(uint32 i = 0; i < n; ++i) {
                 uint32 reg = first + i;
                 if(g_regs[reg] == v[i] || shader_irrelevant(reg)) continue;
                 baselineBump = true;
-                uint32 mask;
-                if(keyDirty && vulkan_shader_key_mask(reg, mask) && !((g_regs[reg] ^ v[i]) & mask)) {
+                if(!shader_key_changed(keyMask, reg, g_regs[reg], v[i])) {
                     if(collectStats) ++maskedWords;
                 } else actualBump = true;
                 if(actualBump && !collectStats) break;
@@ -264,8 +257,7 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
                 shaderKeyDirtyStats.maskedWords += maskedWords;
             }
         } else
-#endif
-        // (writes that lie wholly in the uniform registers took the fast path above): the shader-state counters
+        // (this fork; writes that lie wholly in the uniform registers took the fast path above): the shader-state counters
         // and the register categories (gx2.h) from one table, in one pass over the changed registers
         {
             const RegClasses& classes = reg_classes();
@@ -328,6 +320,7 @@ static void render_thread_main() {
     host::place_thread(2);  // the render thread: host core 2, or 0 and 2 with WWHD_CORE_LAYOUT
     host::boost_thread_priority();
     perf_hint::add_current_thread();
+    thread_sampler::add_current_thread("render");
     for (;;) {
         {
             std::unique_lock<std::mutex> lk(g_q_mutex);
@@ -456,7 +449,9 @@ static bool stage_regs(Staging& s, uint32 first, const uint32* values, uint32 co
 
 static void enqueue(Op op, const uint32* payload, uint32 n) {
     static std::once_flag once;
-    std::call_once(once, [] { host::start_thread(render_thread_main, 8 << 20); });
+    std::call_once(once, [] {
+        host::start_thread([] { exception_report::boundary("GX2 render thread", render_thread_main); }, 8 << 20);
+    });
     Staging& s = t_stage;
     if (s.eligible < 0) {
         s.eligible = staging_on() && threads::current_core() == 1;
@@ -603,14 +598,14 @@ static void emit_host(Op op, std::initializer_list<uint32> payload) {
 
 #ifdef WWHD_HAS_VULKAN
 void checkpoint_vulkan_caches() {
-    // Wait for queued work, then exclude further renderer mutations while the
-    // SDL thread writes the final cache checkpoint during orderly shutdown.
     render_sync();
     std::lock_guard<std::recursive_mutex> lk(g_exec_mutex);
-    host::with_autorelease_pool([] {
-        gfxvk::wait_idle();
-        gfxvk::save_renderer_caches();
-    });
+    host::with_autorelease_pool([] { gfxvk::save_renderer_caches(); });
+}
+void shutdown_vulkan_caches() {
+    render_sync();
+    std::lock_guard<std::recursive_mutex> lk(g_exec_mutex);
+    host::with_autorelease_pool([] { gfxvk::shutdown_renderer_caches(); });
 }
 #endif
 
@@ -668,14 +663,12 @@ static void set_context(uint32 ctx) {
         return;
     }
     g_shadow = it->second.data();
-    for (uint32 w = 0; w < sizeof g_written_blocks / sizeof g_written_blocks[0]; w++)
-        for (uint64 bits = g_written_blocks[w]; bits; bits &= bits - 1) {
-            const uint32 block = w * 64 + uint32(__builtin_ctzll(bits));
-            memcpy(&g_regs[block * 256], &g_shadow[block * 256], 256 * 4);
-        }
-    bump_all_categories();
-    g_shader_state_gen++;
-    g_shader_regs_gen++;
+    // Draw writes primitive type without updating the context shadow.
+    g_register_blocks.touch(uint32(REGADDR::VGT_PRIMITIVE_TYPE), 1);
+    if (g_register_blocks.restore(g_regs, g_shadow, [](uint32 reg, uint32 old, uint32 value) {
+        return !shader_irrelevant(reg) && shader_key_changed(shader_key_mask(), reg, old, value);
+    })) { ++g_shader_state_gen; ++g_shader_regs_gen; }
+    bump_all_categories();  // (this fork) gx2.h RegCategory
     rprof::g_reg_dirty |= 2;  // draw classifier: a context load counts as a full state change
 }
 
@@ -724,6 +717,17 @@ static void execute_one(Op op, const uint32* p, uint32 n) {
     execute_op(op, p, n);
     rprof::op_end(kind, started);
     if (op == OP_SWAP) rprof::frame_end(n >= 2 && p[1]);
+}
+
+// Test only: WWHD_TEST_RENDER_LOAD_MS=x / WWHD_TEST_GAME_LOAD_MS=x busy-wait x ms per frame on the
+// render thread (before each swap is executed) / on the game thread (at each GX2SwapScanBuffers):
+// the frame time of a slower computer, for measuring frame pacing (docs/performance.md).
+static void test_frame_load(const char* name) {
+    const char* e = getenv(name);
+    const double ms = e ? atof(e) : 0;
+    if (ms <= 0) return;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(int64_t(ms * 1e6));
+    while (std::chrono::steady_clock::now() < until) {}
 }
 
 static void execute_op(Op op, const uint32* p, uint32 n) {
@@ -778,18 +782,18 @@ static void execute_op(Op op, const uint32* p, uint32 n) {
         // into fenced upload slices when work is recorded), so GX2DrawDone needs this op executed
         // (render_sync in the HLE), not an idle GPU. Lazy DrawDone (lazy_draw_done(), the default)
         // queues the work instead of waiting for the whole device every frame. A payload word of 1
-        // (save states) always waits for the idle GPU.
-        if (lazy_draw_done() && !(n && p[0])) render::guest_flush();
-        else render::wait_idle();
-        if (n && p[0]) render::gpu_idle();  // deko3d's wait_idle only submits (upstream-0.2.6-plan step 4)
-        // except what the CPU reads back: linear render targets (the Picto Box picture, issue #53)
-        render::write_back();
+        // (save states) always waits for the idle GPU (a platform backend's gpu_idle, else wait_idle),
+        // then the CPU reads back linear render targets (backend_hooks.h).
+        draw_done(lazy_draw_done(), n && p[0]);
         break;
-    case OP_SWAP:
+    case OP_SWAP: {
+        static const bool load = getenv("WWHD_TEST_RENDER_LOAD_MS") != nullptr;
+        if (load) test_frame_load("WWHD_TEST_RENDER_LOAD_MS");
         if (n) render::set_frame_aspect(gx2::bitsf(p[0]));  // aspect ratio from the next frame on (aspect.cpp)
         if (n >= 3 && p[2]) render::request_capture();
         render::swap();
         break;
+    }
     case OP_SET_PROJ_REGS: {
         uint32 v[16];
         memcpy(v, p + 1, sizeof v);
@@ -800,6 +804,7 @@ static void execute_op(Op op, const uint32* p, uint32 n) {
                 v[4 + i] = fbits(bitsf(v[4 + i]) / ky);
             }
         apply_regs(p[0], v, std::min<uint32>(n - 1, 16));
+        if (n == 17) stereo::tag_layout(p[0], v);
         break;
     }
     case OP_LAYOUT_CONTENT:
@@ -918,54 +923,75 @@ static void watchdog_thread() {
 }
 namespace gx2 { uint64_t flips_presented() { return __atomic_load_n(&g_flip_count, __ATOMIC_RELAXED); } }  // live fps in the title
 static uint32 g_swap_interval = 1;  // as set by the game (frame interpolation halves it)
-namespace interp { uint32_t effective_swap_interval(uint32_t game); uint64_t logic_steps(); int vsync_rate(); }
+namespace interp { uint32_t effective_swap_interval(uint32_t game); uint64_t logic_steps(); int vsync_rate(); int frames_per_step(); bool paced_interpolation(); }
 static std::mutex g_flip_mutex;
 static const auto g_vsync_epoch = std::chrono::steady_clock::now();
 static constexpr std::chrono::nanoseconds kVsyncPeriod(16683333);  // 59.94 Hz
 static constexpr uint64_t kTicksPerVsync = 4;
 // a flip also waits for the GPU to finish that frame, as on hardware: the game reuses a frame's
 // buffers once its flip has executed
-struct PendingFlip { uint64_t vsync, swap; };  // (vsync: tick of the swap)
+// (at: when it was swapped; step: the first frame of a logic step, not an interpolation hold pass)
+struct PendingFlip { uint64_t swap; std::chrono::steady_clock::time_point at; bool step; };
 static std::deque<PendingFlip> g_pending_flips;
 static uint64_t g_last_flip_vsync = 0;  // tick (a granule boundary)
 static uint64_t g_last_flip_time = 0;  // timebase
 static int64_t g_count_offset = 0;     // guest-visible swap/flip counts minus ours (set by a loaded save state)
 
+// The clock is advanced (g_vsync_shift) when a late flip moves the grid (vsync_pacing.h).
+static constexpr vsync_pacing::Clock kVsyncClock{kVsyncPeriod.count(), kTicksPerVsync};
+static std::atomic<int64_t> g_vsync_shift{0};  // ns; written with g_flip_mutex held
+static int64_t vsync_clock_now() {  // ns since the epoch on the vsync's clock (the game's clock when it runs faster)
+    if (!game_clock::shifted()) return (std::chrono::steady_clock::now() - g_vsync_epoch).count();
+    const auto epoch = std::chrono::duration_cast<std::chrono::nanoseconds>(g_vsync_epoch.time_since_epoch()).count();
+    return game_clock::sample().guest - epoch;
+}
 static uint64_t vsync_index() {  // in ticks
-    return uint64_t((std::chrono::steady_clock::now() - g_vsync_epoch).count()) * kTicksPerVsync / uint64_t(kVsyncPeriod.count());
+    return kVsyncClock.index(vsync_clock_now(), g_vsync_shift.load(std::memory_order_relaxed));
 }
-// WWHD_RELAXED_VSYNC (on by default on the Switch, =0 for the hardware's timing): as on the Wii U, a
-// frame flips at the first vblank after its swap and at least swap-interval vblanks after the
-// previous flip, and the game waits for that flip (vblank by vblank) before it starts the next
-// frame. So a frame that takes a little longer than two vblanks costs three: 30 fps drops straight
-// to 20, and the game (whose logic runs per frame) plays at two thirds of its speed. Relaxed: a
-// frame that missed its vblank flips as soon as it is rendered, and GX2WaitForVsync returns then,
-// so a 35 ms frame gives ~28 fps. Frames are still at least a swap interval apart.
-static bool relaxed_vsync() {
-    static const bool on = [] {
-        const char* e = getenv("WWHD_RELAXED_VSYNC");
-#ifdef __SWITCH__
-        return !(e && *e == '0');
-#else
-        return e && *e == '1';
-#endif
-    }();
-    return on;
-}
-static uint64_t g_late_flips = 0;  // flips the relaxed timing let through before their vblank (for the log)
-static std::chrono::steady_clock::time_point g_last_flip_tp = g_vsync_epoch;
+static uint64_t g_late_flips = 0;  // (this fork) flips that moved the vsync grid (vsync_pacing.h), for the [gx2] line
 static uint64_t vsync_granule() {  // ticks per vsync at the current rate: 4 (30/60 fps), 2 (120), 1 (240)
     const int rate = interp::vsync_rate();
     return rate >= 4 ? 1 : rate >= 2 ? 2 : kTicksPerVsync;
 }
 static std::chrono::steady_clock::time_point tick_time(uint64_t tick) {
-    return g_vsync_epoch + std::chrono::nanoseconds(tick * uint64_t(kVsyncPeriod.count()) / kTicksPerVsync);
+    const auto at = std::chrono::nanoseconds(kVsyncClock.time(tick, g_vsync_shift.load(std::memory_order_relaxed)));
+    if (!game_clock::shifted())
+        return g_vsync_epoch + at;
+    const auto sample = game_clock::sample();
+    const auto target = g_vsync_epoch + at;
+    const auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(target.time_since_epoch()).count() - sample.guest;
+    return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(sample.host + std::max<int64_t>(0, (left + sample.rate - 1) / sample.rate)));
 }
-// the first tick at which this flip may execute: the vsync after its swap, and `swap interval`
-// vsyncs after the previous flip
+// Step slots (vsync_pacing.h): with paced frame interpolation at 120/240 fps a logic step's first
+// frame is due on its step's slot (ns on the vsync's clock, -1: none), two vsyncs after the previous
+// step's
+static int64_t g_step_slot = -1;  // g_flip_mutex held
+static bool step_slots() { return interp::frames_per_step() > 2 && interp::paced_interpolation(); }
+static int64_t step_ns() {  // the frames of a step, one (virtual) vsync each: the game's swap interval, two vsyncs
+    return kVsyncClock.granule_ns(uint64_t(interp::frames_per_step()) * interp::effective_swap_interval(g_swap_interval) * vsync_granule());
+}
+// the first tick at which this flip may execute: `swap interval` vsyncs after the previous flip, and
+// a step's first frame not before its step's slot. (On hardware also the vsync after its swap, which
+// is the same for a swap made before that tick; a later swap, a frame that missed its vsync, flips
+// as soon as it is ready: vsync_pacing.h.)
 static uint64_t flip_due(const PendingFlip& f) {
     const uint64_t g = vsync_granule();
-    return std::max((f.vsync / g + 1) * g, g_last_flip_vsync + interp::effective_swap_interval(g_swap_interval) * g);
+    const uint64_t due = g_last_flip_vsync + interp::effective_swap_interval(g_swap_interval) * g;
+    if (!f.step || !step_slots()) return due;
+    return vsync_pacing::step_due(kVsyncClock, due, g_step_slot, g_vsync_shift.load(std::memory_order_relaxed), g);
+}
+// paced interpolation (interp.cpp): a logic pass more than a step late drops the schedule (the next
+// logic frame starts a new one)
+void gx2::drop_step_slot() {
+    std::lock_guard<std::mutex> lk(g_flip_mutex);
+    g_step_slot = -1;
+}
+// paced interpolation (interp.cpp): when the next logic step's frame is due, if there is a slot
+bool gx2::next_step_time(std::chrono::steady_clock::time_point& at) {
+    std::lock_guard<std::mutex> lk(g_flip_mutex);
+    if (g_step_slot < 0 || !step_slots()) return false;
+    at = tick_time(vsync_pacing::slot_tick(kVsyncClock, g_step_slot, g_vsync_shift.load(std::memory_order_relaxed), vsync_granule()));
+    return true;
 }
 // Uncapped (gx2.h): debug, to see how fast the renderer can go; GPU completion ordering is kept
 static std::atomic<int> g_uncapped{-1};  // -1: not read from the environment yet
@@ -988,30 +1014,103 @@ void gx2::set_uncapped(bool on) {
 }
 static bool uncapped_benchmark() { return gx2::uncapped(); }
 
+// debug: WWHD_LOG_FLIP_PACING=1 logs, every 300 flips, the intervals between flips (the frame times
+// the game sees) and what the flips waited for
+static void log_flip_pacing(const PendingFlip& f) {
+    static const bool on = getenv("WWHD_LOG_FLIP_PACING") != nullptr;
+    if (!on) return;
+    using clk = std::chrono::steady_clock;
+    static clk::time_point last{};
+    static std::vector<float> intervals;
+    static double waitSum = 0;
+    const auto now = clk::now();
+    if (last != clk::time_point{}) intervals.push_back(std::chrono::duration<float, std::milli>(now - last).count());
+    last = now;
+    waitSum += std::chrono::duration<double, std::milli>(now - f.at).count();
+    if (intervals.size() < 300) return;
+    std::vector<float> v = intervals;
+    std::sort(v.begin(), v.end());
+    double sum = 0;
+    int over25 = 0, over34 = 0;
+    for (float x : v) { sum += x; over25 += x > 25; over34 += x > 34; }
+    LOG("[gx2 flips] %.1f flips/s, interval p50 %.2f p95 %.2f p99 %.2f max %.2f ms, >25 ms %d, >34 ms %d of %zu; swap to flip %.2f ms",
+        1000.0 * v.size() / sum, v[v.size() / 2], v[v.size() * 95 / 100], v[v.size() * 99 / 100], v.back(), over25, over34, v.size(),
+        waitSum / v.size());
+    intervals.clear();
+    waitSum = 0;
+}
+// debug: WWHD_TRACE_FLIPS=file writes a line per flip: when it executed, when its frame was
+// swapped, when it was due (steady clock, ms), the tick it was due on and the tick it counts as
+// (they differ when it moved the grid), whether it was an in-between frame, and the granule. With
+// WWHD_TRACE_STEPS (interp.cpp) for the frame pacing at 120/240 fps.
+static FILE* trace_flips_file() {
+    static FILE* out = getenv("WWHD_TRACE_FLIPS") ? fopen(getenv("WWHD_TRACE_FLIPS"), "w") : nullptr;
+    return out;
+}
+static void trace_flip(const PendingFlip& f, std::chrono::steady_clock::time_point dueAt, uint64_t due, uint64_t at) {
+    FILE* out = trace_flips_file();
+    if (!out) return;
+    const auto ms = [](std::chrono::steady_clock::time_point t) { return std::chrono::duration<double, std::milli>(t.time_since_epoch()).count(); };
+    fprintf(out, "%.3f %.3f %.3f %llu %llu %d %d\n", ms(std::chrono::steady_clock::now()), ms(f.at), ms(dueAt), (unsigned long long)due,
+            (unsigned long long)at, int(!f.step), int(vsync_granule()));
+}
 static void update_flips() {  // g_flip_mutex held
     uint64_t now = vsync_index();
     while (!g_pending_flips.empty()) {
-        uint64_t at = flip_due(g_pending_flips.front());
-        // relaxed: a rendered frame flips once a whole swap interval has passed since the previous
-        // flip, on a vblank or not (a frame on time is rendered before then and flips at that moment,
-        // as on its vblank; a late one flips as soon as it is rendered)
-        bool late = false;
-        if (relaxed_vsync()) {
-            const uint64_t interval = interp::effective_swap_interval(g_swap_interval);
-            const auto since = std::chrono::steady_clock::now() - g_last_flip_tp;
-            if (since + std::chrono::microseconds(500) < kVsyncPeriod * interval) break;
-            late = at > now;
-            at = now;
+        const uint64_t due = flip_due(g_pending_flips.front());
+        if ((!uncapped_benchmark() && due > now) || render::frames_completed() < g_pending_flips.front().swap) break;
+        uint64_t at = now / vsync_granule() * vsync_granule();
+        const auto dueAt = trace_flips_file() ? tick_time(due) : std::chrono::steady_clock::time_point{};
+        if (!uncapped_benchmark()) {  // on its vsync, or late: then the grid may move (vsync_pacing.h)
+            int64_t shift = g_vsync_shift.load(std::memory_order_relaxed);
+            const int64_t t = vsync_clock_now();
+            const int64_t dueTime = kVsyncClock.time(due, shift);
+            at = vsync_pacing::flip_executed(kVsyncClock, shift, due, t, vsync_granule());
+            g_late_flips += at != due;
+            g_vsync_shift.store(shift, std::memory_order_relaxed);
+            now = std::max(now, at);
+            if (g_pending_flips.front().step) {  // the next step's slot
+                const bool slotted = g_step_slot >= 0 && step_slots();
+                g_step_slot = step_slots() ? vsync_pacing::next_slot(slotted ? g_step_slot : dueTime, t, step_ns(),
+                                                                       kVsyncClock.granule_ns(vsync_granule())) : -1;
+            }
+        } else {
+            g_step_slot = -1;
         }
-        if ((!uncapped_benchmark() && at > now) || render::frames_completed() < g_pending_flips.front().swap) break;
-        g_late_flips += late;
-        at = now / vsync_granule() * vsync_granule();
+        log_flip_pacing(g_pending_flips.front());
+        trace_flip(g_pending_flips.front(), dueAt, due, at);
         g_pending_flips.pop_front();
         g_last_flip_vsync = at;
-        g_last_flip_tp = std::chrono::steady_clock::now();
-        g_last_flip_time = timebase::now();
+        g_last_flip_time = timebase::simulation_now();
         g_flip_count++;
     }
+}
+// A flip whose vsync has come but whose frame is not ready yet (the game swapped late, or the
+// renderer has not finished it): GX2WaitForVsync waits for that frame in short steps instead of
+// sleeping to the next vsync, and returns when the flip has executed (vsync_pacing.h).
+static bool late_flip_pending() {  // g_flip_mutex held
+    if (g_pending_flips.empty()) return false;
+    const auto& front = g_pending_flips.front();
+    return flip_due(front) <= vsync_index() && render::frames_completed() < front.swap;
+}
+static bool wait_for_late_flip(std::chrono::steady_clock::time_point deadline) {
+    uint64_t flips;
+    {
+        std::lock_guard<std::mutex> lk(g_flip_mutex);
+        flips = g_flip_count;
+        update_flips();
+        if (g_flip_count != flips) return true;
+        if (!late_flip_pending()) return false;
+    }
+    constexpr auto kStep = std::chrono::microseconds(250);
+    for (auto now = std::chrono::steady_clock::now(); now < deadline; now = std::chrono::steady_clock::now()) {
+        threads::park_sleep_until(std::min(deadline, now + kStep));
+        std::lock_guard<std::mutex> lk(g_flip_mutex);
+        update_flips();
+        if (g_flip_count != flips) return true;
+        if (!late_flip_pending()) return false;
+    }
+    return false;
 }
 #ifdef WWHD_HAS_VULKAN
 static void ready_flip_before_resume() {
@@ -1170,6 +1269,11 @@ HLE(gx2, GX2SwapScanBuffers) {
         }
         LOG("%s", buf);
     }
+    {
+        static const bool load = getenv("WWHD_TEST_GAME_LOAD_MS") != nullptr;
+        if (load) test_frame_load("WWHD_TEST_GAME_LOAD_MS");
+    }
+    gfx::display_read_gamepad_ui(); // read-only; no guest reads outside auto or a pending pause view
     float a = aspect::on_swap();  // aspect ratio of the next frame (game projections, render targets)
     uint32 ab;
     memcpy(&ab, &a, 4);
@@ -1209,7 +1313,7 @@ HLE(gx2, GX2SwapScanBuffers) {
         std::lock_guard<std::mutex> lk(g_flip_mutex);
         update_flips();
         g_swap_count++;
-        g_pending_flips.push_back({vsync_index(), g_swap_count});
+        g_pending_flips.push_back({g_swap_count, std::chrono::steady_clock::now(), !hold});
     }
     g_watch_swaps.store(g_swap_count, std::memory_order_relaxed);
     static std::once_flag watchdog;
@@ -1235,12 +1339,12 @@ HLE(gx2, GX2SwapScanBuffers) {
         const uint64_t commands = g_progress.commands.load(std::memory_order_relaxed);
         uint64_t publishes, wakes, staged, merged, recorded;
         staging_stats(publishes, wakes, staged, merged, recorded);
-        LOG("[gx2] frame %llu, %.1f swaps/s, swap interval %u, late frames flipped at once %llu (WWHD_RELAXED_VSYNC %s); "
+        LOG("[gx2] frame %llu, %.1f swaps/s, swap interval %u, late frames flipped at once %llu; "
             "%.0f GX2 commands per frame executed; per frame: %.0f GX2 calls recorded into display lists, %.0f staged "
             "by the main thread, %.0f register writes merged into the command before (WWHD_GX2_COALESCE), %.0f "
             "hand-overs to the render thread (%.0f woke it)",
             (unsigned long long)g_swap_count, 300 / s, g_swap_interval, (unsigned long long)(g_late_flips - lastLate),
-            relaxed_vsync() ? "on" : "off", double(commands - lastCommands) / 300.0, double(recorded) / 300.0,
+            double(commands - lastCommands) / 300.0, double(recorded) / 300.0,
             double(staged) / 300.0, double(merged) / 300.0, double(publishes) / 300.0, double(wakes) / 300.0);
         lastCommands = commands;
         lastLate = g_late_flips;
@@ -1313,39 +1417,7 @@ HLE(gx2, GX2WaitForVsync) {
     }();
     const uint64_t granule = vsync_granule();
     const auto deadline = tick_time((vsync_index() / granule + 1) * granule);  // the next (virtual) vsync
-    if (relaxed_vsync()) {
-        // a late frame's flip happens when the renderer finishes it: return then instead of at the
-        // next vblank (the game's wait loop checks the flip count after each call)
-        // a flip since the previous call returned: the game's flip wait is over (a late frame often
-        // flips before the game asks); without one, a real vblank wait as before
-        static uint64_t flipsSeen = 0;
-        bool pending;
-        uint64_t flips;
-        {
-            std::lock_guard<std::mutex> lk(g_flip_mutex);
-            update_flips();
-            pending = !g_pending_flips.empty();
-            flips = g_flip_count;
-            if (flips != flipsSeen) {
-                flipsSeen = flips;
-                return;
-            }
-        }
-        if (pending) {
-            for (;;) {
-                const std::chrono::steady_clock::time_point limit = deadline,
-                                                            soon = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);
-                const auto step = std::min(limit, soon);
-                threads::park_sleep_until(step, false);
-                std::lock_guard<std::mutex> lk(g_flip_mutex);
-                update_flips();
-                if (g_flip_count != flips || g_pending_flips.empty() || std::chrono::steady_clock::now() >= deadline) {
-                    flipsSeen = g_flip_count;
-                    return;
-                }
-            }
-        }
-    }
+    if (wait_for_late_flip(deadline)) return;
 #ifdef WWHD_HAS_VULKAN
     static const bool readyFlipPark = [] {
         const char* value = getenv("WWHD_VK_READY_FLIP_PARK");
@@ -1452,6 +1524,8 @@ void gx2_ss_load(ss::Reader& r) {
     std::lock_guard<std::recursive_mutex> lk(g_exec_mutex);
     r.u32();
     r.bytes(g_regs, sizeof g_regs);
+    g_register_blocks = {};
+    g_register_blocks.include(g_regs);
     g_contexts.clear();
     uint32 n = r.u32();
     for (uint32 i = 0; i < n && r.ok; i++) {
@@ -1459,11 +1533,11 @@ void gx2_ss_load(ss::Reader& r) {
         auto& v = g_contexts[k];
         v.resize(words);
         r.bytes(v.data(), (size_t)words * 4);
+        if (words == kNumRegs) g_register_blocks.include(v.data());
     }
     uint32 active = r.u32();
     auto it = g_contexts.find(active);
     g_shadow = active && it != g_contexts.end() ? it->second.data() : nullptr;
-    memset(g_written_blocks, 0xFF, sizeof g_written_blocks);  // (the loaded files: every block may differ)
     bump_all_categories();
     g_shader_state_gen++;
     g_shader_regs_gen++;

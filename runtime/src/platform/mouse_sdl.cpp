@@ -5,6 +5,7 @@
 #include "../overlay/overlay.h"
 #include "../runtime.h"
 #include <atomic>
+#include "../input_map.h"
 #include <cstdlib>
 
 namespace mods {
@@ -16,6 +17,7 @@ void release_now() {
     release_requested.store(false);
     if (!captured.exchange(false)) return;
     if (tv) SDL_SetWindowRelativeMouseMode(tv, false);
+    input::release_mouse_bindings();
     mouse_button(0, false);
     mouse_button(1, false);
     LOG("[mods] mouse released");
@@ -70,7 +72,7 @@ bool handle_mouse_event(const SDL_Event& event) {
         event.button.button == SDL_BUTTON_LEFT && !captured.load()) {
         if (SDL_SetWindowRelativeMouseMode(tv, true)) {
             captured.store(true);
-            LOG("[mods] mouse captured (Esc or middle click releases)");
+            LOG("[mods] mouse captured (Esc releases; unbound middle click also releases)");
             return true;
         }
         return false;
@@ -83,7 +85,7 @@ bool handle_mouse_event(const SDL_Event& event) {
         const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
         if (event.button.button == SDL_BUTTON_LEFT) mouse_button(0, down);
         else if (event.button.button == SDL_BUTTON_RIGHT) mouse_button(1, down);
-        else if (event.button.button == SDL_BUTTON_MIDDLE && down) release_now();
+        else if (event.button.button == SDL_BUTTON_MIDDLE && down && input_map::key_users(input_map::current(), input_map::kMouse3).empty()) release_now();
         return true;
     }
     return false;

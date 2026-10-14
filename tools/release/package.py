@@ -38,13 +38,20 @@ LIB_EXT = (".a", ".lib", ".tbd", ".dylib", ".so")
 # files shipped from the source tree (relative to ROOT -> relative to the package)
 TOOL_FILES = [
     "tools/rpx.py",
+    "tools/shaderprep.py",
+    "tools/shaderprep_format.py",
+    "tools/release/guard.py",  # shaderprep.py export/merge check templates with it (issue #162)
     "tools/wudextract.py",
     "tools/recomp/recomp.py",
     "tools/recomp/analyze.py",
     "tools/recomp/ppc2c.py",
     "tools/recomp/builds.py",
+    "tools/recomp/crlive.py",
+    "tools/recomp/leaflocal.py",
     "tools/guestmod/build_guest_mod.py",
     "tools/guestmod/guestmod.py",
+    "tools/story_mods/npc_catalogue.py",  # the NPC catalogue from the player's game files (story_npc_catalogue.h)
+    "tools/story_mods/notebook_model.py",  # the story notebook's model from the Story Notebook package
     "tools/savegame/gc2hd.py",
     "tools/savegame/wwsave.py",
     "tools/savegame/README.md",
@@ -52,6 +59,8 @@ TOOL_FILES = [
 INSTALLER_FILES = [
     "tools/installer/setup.py",
     "tools/installer/code_mods.py",
+    "tools/installer/decomp_setup.py",
+    "tools/installer/shader_prebuild.py",
     "tools/installer/toolchains.json",
     "tools/installer/README.md",
 ]
@@ -106,7 +115,7 @@ def add_setup_gui(pkg, platform, exe, version):
     if platform.startswith("macos"):
         app = os.path.join(pkg, SETUP_APP + ".app", "Contents")
         copy(exe, os.path.join(app, "MacOS", "wind-waker-hd"))
-        v = re.sub(r"[^0-9.]", "", version.lstrip("v")) or "0"
+        v = re.match(r"[0-9.]*", version.lstrip("v")).group().strip(".") or "0"
         with open(os.path.join(app, "Info.plist"), "w") as f:
             f.write(MAC_SETUP_PLIST % (v, v))
         if shutil.which("codesign"):  # ad-hoc: seals the bundle (not a developer signature)
@@ -209,6 +218,168 @@ def is_system_path(p):
     return "/MacOSX.platform/" in p or "/CommandLineTools/SDKs/" in p or p.startswith("/usr/lib/") or p.startswith("/lib/")
 
 
+def decomp_variant(build):
+    """"decomp" for a WWHD_DECOMP=ON build directory, else None."""
+    try:
+        with open(os.path.join(build, "CMakeCache.txt"), encoding="utf-8", errors="replace") as f:
+            on = any(re.match(r"WWHD_DECOMP:BOOL=(ON|1|TRUE|YES)$", l.strip(), re.I) for l in f)
+    except OSError:
+        return None
+    if on and not os.path.isfile(os.path.join(build, "decomp", "decomp_hooks.txt")):
+        sys.exit("decomp build without decomp/decomp_hooks.txt in %s" % build)
+    return "decomp" if on else None
+
+
+# The decomp version setup can build (development builds, macOS; tools/installer/decomp_setup.py,
+# docs/decomp-build.md): the tools that prepare the decompilation's source. The source is not in the
+# release: setup downloads the pinned commit and checks it against the SHA-256 written here.
+DECOMP_TOOLS = ["tools/decomp_build/gen.py", "tools/decomp_build/glue.cpp", "tools/decomp_build/frames_vis.h"]
+DECOMP_HOOKS_NONE = "tools_decomp_build_hooks_none.cpp.o"  # flattened like the other runtime objects
+
+
+def cache_value(build, key):
+    try:
+        with open(os.path.join(build, "CMakeCache.txt"), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k.split(":")[0] == key:
+                    return v
+    except OSError:
+        pass
+    return None
+
+
+def compile_entry(build, suffix):
+    with open(os.path.join(build, "compile_commands.json")) as f:
+        db = json.load(f)
+    e = next((e for e in db if e["file"].replace("\\", "/").endswith(suffix)), None)
+    if e is None:
+        sys.exit("%s: no compile command for %s" % (build, suffix))
+    return e.get("arguments") or split_command(e["command"]), e["file"]
+
+
+def portable_flags(args, src, mapping, keep_unknown_includes=False):
+    """A compile command as a recipe: compiler, output, input and dependency options dropped, the paths of
+    `mapping` (longest first) written as placeholders; other include directories dropped (keep_unknown_includes
+    False) or an error."""
+    norm = lambda p: os.path.normcase(os.path.normpath(p))
+    keys = sorted(mapping, key=len, reverse=True)
+
+    def place(p):
+        n = norm(p)
+        for k in keys:
+            if n == norm(k) or n.startswith(norm(k) + os.sep):
+                return mapping[k] + n[len(norm(k)):].replace(os.sep, "/")
+        return None
+
+    out, i = [], 1
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a in ("-o", "-MF", "-MT", "-MQ", "-isysroot"):
+            i += 1
+            continue
+        if a in ("-c", "-MD", "-MMD") or norm(a) == norm(src):
+            continue
+        if a in ("-I", "-isystem", "-iquote", "-include"):
+            opt, val = a, args[i]
+            i += 1
+        elif a.startswith("-isystem"):
+            opt, val = "-isystem", a[len("-isystem"):]
+        elif a.startswith("-I"):
+            opt, val = "-I", a[2:]
+        else:
+            out.append(a)
+            continue
+        p = place(val)
+        if p is None:
+            if opt == "-include" or keep_unknown_includes:
+                sys.exit("unexpected %s %s in the compile command of %s" % (opt, val, src))
+            continue  # the runtime's third-party include directories: nothing a game unit or hooks.cpp uses
+        out += ["-I" + p] if opt in ("-I", "-isystem") else [opt, p]
+    return out
+
+
+def add_decomp(pkg, dbuild, linkonly):
+    """--decomp-build: the parts of the decomp version setup can build (tools/installer/decomp_setup.py).
+    DBUILD is configured like --build, plus -DWWHD_DECOMP=ON -DWWHD_DECOMP_RUNTIME_ONLY=ON (no game needed).
+    Returns the manifest's "decomp" entry."""
+    on = lambda v: (v or "").upper() in ("ON", "1", "TRUE", "YES")
+    if not (on(cache_value(dbuild, "WWHD_DECOMP")) and on(cache_value(dbuild, "WWHD_DECOMP_RUNTIME_ONLY"))):
+        sys.exit("--decomp-build %s: configure it with -DWWHD_DECOMP=ON -DWWHD_DECOMP_RUNTIME_ONLY=ON" % dbuild)
+    ddir = cache_value(dbuild, "WWHD_DECOMP_DIR")
+    if not ddir or not os.path.isfile(os.path.join(ddir, "tools", "verify", "include", "gabi.h")):
+        sys.exit("--decomp-build: no decompilation at %s (git submodule update --init decomp)" % ddir)
+    # the link line: the runtime objects that are the same as the regular release's are taken from sdk/obj
+    # (and its libraries from sdk/lib), the others go to sdk/decomp/obj; hooks_none.cpp's object becomes {decomp_glue} (setup's hooks and units)
+    stage = pkg + ".decomp-stage"
+    shutil.rmtree(stage, ignore_errors=True)
+    _, link, _, _ = build_link_recipe(dbuild, stage, linkonly)
+    recipe, own = [], 0
+    for a in link:
+        if a == "{sdk}/obj/" + DECOMP_HOOKS_NONE:
+            recipe.append("{decomp_glue}")
+            continue
+        for kind in ("obj", "lib"):
+            if a.startswith("{sdk}/%s/" % kind):
+                name = a[len("{sdk}/%s/" % kind):]
+                mine, main = os.path.join(stage, "sdk", kind, name), os.path.join(pkg, "sdk", kind, name)
+                # static libraries are built from the same sources with the same options in both builds
+                # (WWHD_DECOMP only defines things for the wwhd target) but carry their own archive times
+                if os.path.isfile(main) and (kind == "lib" or file_sha256(main) == file_sha256(mine)):
+                    break
+                copy(mine, os.path.join(pkg, "sdk", "decomp", kind, name))
+                a = "{sdk}/decomp/%s/%s" % (kind, name)
+                own += 1
+                break
+        recipe.append(a)
+    shutil.rmtree(stage)
+    if "{decomp_glue}" not in recipe:
+        sys.exit("--decomp-build: %s is not on the decomp build's link line" % DECOMP_HOOKS_NONE)
+    mapping = {os.path.join(ROOT, "runtime", "include"): "{sdk}/include",
+               os.path.join(ROOT, "runtime", "src"): "{sdk}/decomp/include",
+               os.path.join(ROOT, "tools", "decomp_build"): "{tools}/decomp_build",
+               os.path.join(dbuild, "decomp"): "{out}",
+               ddir: "{decomp}"}
+    unit_flags = portable_flags(*compile_entry(dbuild, "tools/decomp_build/flags_probe.cpp"), mapping)
+    hooks_flags = portable_flags(*compile_entry(dbuild, "tools/decomp_build/hooks_none.cpp"), mapping)
+    # the decompilation's source: its commit and the SHA-256 of the files setup downloads (decomp_setup.py
+    # SOURCE_PATHS as git tracks them), from a temporary copy; not shipped
+    sys.path.insert(0, os.path.join(ROOT, "tools", "installer"))
+    import decomp_setup
+    paths = decomp_setup.SOURCE_PATHS
+    tracked = subprocess.run(["git", "-C", ddir, "ls-files", "-z", "--"] + paths, capture_output=True,
+                             check=True).stdout.decode("utf-8").split("\0")
+    tracked = [t for t in tracked if t]
+    if not tracked or subprocess.run(["git", "-C", ddir, "diff", "--quiet", "HEAD", "--"] + paths).returncode:
+        sys.exit("--decomp-build: %s is not a clean checkout of the decompilation" % ddir)
+    tree = pkg + ".decomp-tree"
+    shutil.rmtree(tree, ignore_errors=True)
+    for rel in tracked:
+        copy(os.path.join(ddir, rel), os.path.join(tree, rel))
+    digest = decomp_setup.tree_digest(tree)
+    shutil.rmtree(tree)
+    rev = subprocess.run(["git", "-C", ddir, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    # about the size of GitHub's archive of the commit (shown before setup downloads it)
+    size = len(subprocess.run(["git", "-C", ddir, "archive", "--format=tar.gz", "HEAD"], capture_output=True,
+                              check=True).stdout)
+    for rel in DECOMP_TOOLS:
+        copy(os.path.join(ROOT, rel), os.path.join(pkg, rel))
+    copy(os.path.join(ROOT, "runtime", "src", "decomp", "decomp.h"), os.path.join(pkg, "sdk", "decomp", "include", "decomp", "decomp.h"))
+    print("decomp version: decompilation %s (%d files, setup downloads about %d MB), %d own runtime objects"
+          % (rev[:7], len(tracked), size // 1000000, own))
+    return {"revision": rev, "tree_sha256": digest, "url": decomp_setup.ARCHIVE_URL % rev, "download_bytes": size,
+            "link": recipe, "unit_flags": unit_flags, "hooks_flags": hooks_flags}
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def build_link_recipe(build, pkg, linkonly):
     args = link_command(build)
     recipe, objs, libs = [], 0, 0
@@ -275,19 +446,21 @@ def build_link_recipe(build, pkg, linkonly):
     return args[0], recipe, objs, libs
 
 
-def add_windows_python(pkg, zip_path):
+def add_windows_python(pkg, zip_path, platform="windows-x86_64"):
     """The official embeddable Python, unpacked unmodified into tools/python (its exe and DLLs keep the PSF
-    signature). Checked against the pin in toolchains.json and every file against python-windows-files.json,
-    which tools/release/guard.py uses too."""
+    signature). Checked against the pin in toolchains.json and every file against python-windows-files.json
+    (python-windows-arm64-files.json and the python.windows-arm64 pin for windows-arm64), which
+    tools/release/guard.py uses too."""
+    arm64 = platform == "windows-arm64"
     with open(os.path.join(ROOT, "tools", "installer", "toolchains.json")) as f:
-        pin = json.load(f)["python"]["windows"]
-    with open(os.path.join(ROOT, "tools", "release", "python-windows-files.json")) as f:
+        pin = json.load(f)["python"]["windows-arm64" if arm64 else "windows"]
+    with open(os.path.join(ROOT, "tools", "release", "python-windows-arm64-files.json" if arm64 else "python-windows-files.json")) as f:
         expected = json.load(f)
     with open(zip_path, "rb") as f:
         data = f.read()
     if hashlib.sha256(data).hexdigest() != pin["sha256"] or expected["sha256"] != pin["sha256"]:
-        sys.exit("%s is not the pinned embeddable Python (SHA-256 mismatch with toolchains.json / "
-                 "python-windows-files.json)" % zip_path)
+        sys.exit("%s is not the pinned embeddable Python for %s (SHA-256 mismatch with toolchains.json / "
+                 "python-windows*-files.json)" % (zip_path, platform))
     dest = os.path.join(pkg, "tools", "python")
     names = set()
     with zipfile.ZipFile(zip_path) as z:
@@ -327,6 +500,17 @@ def make_zip(src_dir, zip_path):
                     z.writestr(info, f.read(), compresslevel=9)
 
 
+def copy_shader_template(source, destination):
+    """Optional private payload: forks remain installable without it."""
+    relative = "tools/shadercache/template.bin"
+    path = os.path.join(source, relative)
+    if os.path.isfile(path):
+        copy(path, os.path.join(destination, relative))
+        return True
+    print("Shader template unavailable; shader preparation will be skipped")
+    return False
+
+
 def copy_sdk_headers(pkg):
     """Shared by every platform: public declarations use wwhd/, never a game/ tree."""
     shutil.copytree(os.path.join(ROOT, "runtime", "include"), os.path.join(pkg, "sdk", "include"))
@@ -337,7 +521,7 @@ def copy_sdk_headers(pkg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", required=True)
-    ap.add_argument("--platform", required=True, help="macos-arm64, linux-x86_64, linux-aarch64 or windows-x86_64")
+    ap.add_argument("--platform", required=True, help="macos-arm64, linux-x86_64, linux-aarch64, windows-x86_64 or windows-arm64")
     ap.add_argument("--version", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--toolchain", required=True, help="toolchain id from tools/installer/toolchains.json")
@@ -345,13 +529,18 @@ def main():
     ap.add_argument("--runtime-file", action="append", default=[], help="file to install next to the executable")
     ap.add_argument("--linkonly-lib", action="append", default=[], help="system library to ship for linking only")
     ap.add_argument("--setup-gui", help="the built graphical installer (wwhd-setup) to include")
-    ap.add_argument("--windows-python", help="windows: the pinned embeddable Python zip (toolchains.json python.windows), "
+    ap.add_argument("--windows-python", help="windows: the pinned embeddable Python zip (toolchains.json python.windows, or python.windows-arm64), "
                     "shipped unmodified as tools/python")
+    ap.add_argument("--decomp-build", help="macOS development builds: a build configured with -DWWHD_DECOMP=ON "
+                    "-DWWHD_DECOMP_RUNTIME_ONLY=ON; the release then lets setup build the decomp version (experimental)")
     ap.add_argument("--no-zip", action="store_true")
     a = ap.parse_args()
 
     build = os.path.abspath(a.build)
-    name = "WindWakerHD-%s-%s" % (a.version, a.platform)
+    # the decomp build (CMake WWHD_DECOMP=ON, docs/decomp-build.md): its own package, with the function list
+    # setup translates the game code with (sdk/decomp_hooks.txt)
+    variant = decomp_variant(build)
+    name = "WindWakerHD-%s-%s%s" % (a.version, a.platform, "-" + variant if variant else "")
     pkg = os.path.join(os.path.abspath(a.out), name)
     if os.path.exists(pkg):
         shutil.rmtree(pkg)
@@ -380,11 +569,19 @@ def main():
         "link": link,
         "runtime_files": runtime_files,
     }
+    if a.decomp_build:
+        if variant or not a.platform.startswith("macos"):
+            sys.exit("--decomp-build: macOS regular releases only")
+        manifest["decomp"] = add_decomp(pkg, os.path.abspath(a.decomp_build), a.linkonly_lib)
+    if variant:
+        manifest["variant"] = variant
+        copy(os.path.join(build, "decomp", "decomp_hooks.txt"), os.path.join(pkg, "sdk", "decomp_hooks.txt"))
     with open(os.path.join(pkg, "sdk", "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=1)
 
     for rel in TOOL_FILES + INSTALLER_FILES:
         copy(os.path.join(ROOT, rel), os.path.join(pkg, rel))
+    copy_shader_template(ROOT, pkg)
     for hp in sorted(os.listdir(os.path.join(ROOT, "tools", "recomp"))):
         if re.match(r"hooks.*\.txt$", hp):
             copy(os.path.join(ROOT, "tools", "recomp", hp), os.path.join(pkg, "tools", "recomp", hp))
@@ -403,6 +600,12 @@ def main():
         sys.exit("wwhd-extract in %s uses a system zstd; configure release builds with -DWWHD_BUNDLED_ZSTD=ON "
                  "(on by default with -DWWHD_BUNDLED_DEPS=ON)" % build)
     copy(os.path.join(build, "wwhd-extract" + exe_suffix), os.path.join(pkg, "tools", "bin", "wwhd-extract" + exe_suffix))
+    # the native Yaz0 decoder for tools/shaderprep.py (CMake target wwhd_yaz0); without it, preparing
+    # shaders falls back to a pure-Python decoder that takes minutes
+    yaz0_name = "libyaz0" + (".dll" if a.platform.startswith("windows") else ".dylib" if a.platform.startswith("macos") else ".so")
+    if not os.path.isfile(os.path.join(build, yaz0_name)):
+        sys.exit("%s missing in %s (CMake target wwhd_yaz0)" % (yaz0_name, build))
+    copy(os.path.join(build, yaz0_name), os.path.join(pkg, "tools", "lib", yaz0_name))
 
     # the setup in a terminal (the fallback for the program above), in tools/
     inst = os.path.join(ROOT, "tools", "installer")
@@ -414,7 +617,7 @@ def main():
             sys.exit("windows: --setup-gui is required (tools/Setup in a console window.bat runs Wind Waker HD.exe)")
         if not a.windows_python:
             sys.exit("windows: --windows-python is required (the setup runs with the bundled Python)")
-        add_windows_python(pkg, a.windows_python)
+        add_windows_python(pkg, a.windows_python, a.platform)
         copy(os.path.join(inst, "install-windows.bat"), os.path.join(pkg, "tools", "Setup in a console window.bat"))
     else:
         copy(os.path.join(inst, "install-linux.sh"), os.path.join(pkg, "tools", "setup-in-terminal.sh"))
@@ -426,6 +629,7 @@ def main():
         add_setup_gui(pkg, a.platform, a.setup_gui, a.version)
 
     copy(os.path.join(ROOT, "README.md"), os.path.join(pkg, "README.md"))
+    copy(os.path.join(ROOT, "CHANGELOG.md"), os.path.join(pkg, "CHANGELOG.md"))
     lic = os.path.join(ROOT, "LICENSE")
     if os.path.isfile(lic):
         copy(lic, os.path.join(pkg, "LICENSE"))

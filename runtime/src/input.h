@@ -22,6 +22,11 @@ struct PadState {
     float tx = 0, ty = 0;                  // touch position on the GamePad screen, 0..1 from top left
 };
 
+// Mouse button order: left, right, middle, side 4, side 5 (converted by the host).
+// eligible means TV + camera capture + no overlay/text prompt. Device IDs stay host-local.
+void mouse_binding_button(uint64_t device, int button, bool down, bool eligible);
+void mouse_binding_wheel(float delta, bool eligible);
+void release_mouse_bindings();
 void set_touch(bool down, float x, float y);  // mouse on the GamePad window
 
 // Which Wii U controller the keyboard and host controllers act as. In Pro Controller mode the
