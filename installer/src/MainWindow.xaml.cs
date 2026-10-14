@@ -40,7 +40,6 @@ public partial class MainWindow : Window
     const int LogBoxMaxChars = 400_000;
     static readonly string LogPath = System.IO.Path.Combine(InstallEngine.WorkDir, "installer.log");
 
-    readonly string[] stepKeys = { "step_python", "step_devkit", "step_release", "step_build" };
     readonly (Ellipse ring, TextBlock glyph, TextBlock label)[] stepRows = new (Ellipse, TextBlock, TextBlock)[4];
     readonly StepState[] stepStates = new StepState[4];
 
@@ -132,7 +131,7 @@ public partial class MainWindow : Window
 
         TxtProgH.Text    = Str.Get("prog_h");
         TxtProgBody.Text = Str.Get("prog_body");
-        for (int i = 0; i < stepRows.Length; i++) stepRows[i].label.Text = Str.Get(stepKeys[i]);
+        for (int i = 0; i < stepRows.Length; i++) stepRows[i].label.Text = Str.Get(InstallEngine.StepKeys[i]);
         TxtErrorH.Text   = Str.Get("fail_h");
         TxtLogPath.Text  = Str.Get("log_at", LogPath);
         UpdateLogButtons();

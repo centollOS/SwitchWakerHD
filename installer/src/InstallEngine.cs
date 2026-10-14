@@ -95,9 +95,21 @@ sealed class InstallEngine
         StepChanged?.Invoke(step, StepState.Running);
         Progress?.Invoke(null);
         try { body(); }
+        catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is InvalidDataException ||
+                                  e is HttpRequestException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+        {
+            // A file or network error with no message of ours (a timeout is a cancel nobody asked for): say which
+            // step it was and what probably caused it.
+            StepChanged?.Invoke(step, StepState.Failed);
+            Log?.Invoke(e.ToString(), LogKind.Error);
+            var key = e is HttpRequestException || e is OperationCanceledException ? "err_network" : "err_io";
+            throw new InstallException(Str.Get(key, Str.Get(StepKeys[step]), e.Message));
+        }
         catch { StepChanged?.Invoke(step, StepState.Failed); throw; }
         StepChanged?.Invoke(step, StepState.Done);
     }
+
+    public static readonly string[] StepKeys = { "step_python", "step_devkit", "step_release", "step_build" };
 
     // ── Python ───────────────────────────────────────────────────────────────
     void Python()
@@ -106,13 +118,17 @@ sealed class InstallEngine
         {
             Say(Str.Get("py_installing"));
             // PrependPath: winget's own silent switches leave python.exe off PATH.
+            // Not checked: without winget (older Windows 10) or when it fails, the search below says so.
             Exec("winget", "install --id Python.Python.3.12 --source winget --accept-package-agreements " +
-                           "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1\"");
+                           "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1\"",
+                 check: false);
             RefreshPath();
             if (!FindPython()) throw new InstallException(Str.Get("py_fail"));
         }
         Say(Str.Get("py_pkgs"));
-        Exec(pythonCmd, "-m pip install --disable-pip-version-check zstandard pycryptodome" + (ForwarderKeys != null ? " pillow" : ""));
+        var pkgs = "zstandard pycryptodome" + (ForwarderKeys != null ? " pillow" : "");
+        if (Exec(pythonCmd, "-m pip install --disable-pip-version-check " + pkgs, check: false) != 0)
+            throw new InstallException(Str.Get("py_pkgs_fail", pkgs));
     }
 
     bool FindPython()
@@ -411,11 +427,48 @@ sealed class InstallEngine
             var pct = (int)(frac * 100);
             if (pct > shownPct) { shownPct = pct; Status?.Invoke(Str.Get("build_s4_pct", pct)); }
         }
+        var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? $" --keys \"{ForwarderKeys}\"" : " --no-forwarder";
-        var rc = Exec(pythonCmd, $"\"{MakeSd(ReleaseDir)}\" {GameArg} \"{GamePath}\"{forwarder}", ReleaseDir, check: false, onLine: OnLine);
+        var rc = Exec(pythonCmd, $"\"{MakeSd(ReleaseDir)}\" {GameArg} \"{GamePath}\"{forwarder}", ReleaseDir, check: false,
+                      onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); });
         Progress?.Invoke(rc == 0 ? 1 : (double?)null);
-        if (rc != 0) throw new InstallException(Str.Get("build_fail", rc));
+        if (rc != 0) throw new InstallException(ExplainBuildFailure(rc, tail.ToList()));
         Ok(SdOut);
+    }
+
+    // The build's last lines, turned into what the error box shows: make_sd's own reason (its "make_sd: ..." line),
+    // the last error line before it, and a hint for the failures players have met.
+    internal static string ExplainBuildFailure(int rc, IList<string> tail)
+    {
+        var lines = tail.Select(l => l.Trim()).Where(l => l != "").ToList();
+        var msg = new StringBuilder(Str.Get("build_fail", rc));
+        var why = lines.FindLastIndex(l => l.StartsWith("make_sd: "));
+        if (why >= 0) msg.Append("\n").Append(lines[why]);
+        // a compiler's first "error:" says more than make's "*** Error 2" after it
+        var before = lines.Take(why >= 0 ? why : lines.Count).Where(l => !l.StartsWith("$ ")).ToList();
+        var errLine = before.FirstOrDefault(l => Regex.IsMatch(l, @"\berror\s*:", RegexOptions.IgnoreCase))
+                   ?? before.LastOrDefault(l => Regex.IsMatch(l, @"\b(error|fatal|not found|denied)\b", RegexOptions.IgnoreCase));
+        if (errLine != null) msg.Append("\n").Append(errLine.Length > 300 ? errLine.Substring(0, 300) + "..." : errLine);
+
+        var all = string.Join("\n", lines);
+        bool Has(string pattern) => Regex.IsMatch(all, pattern, RegexOptions.IgnoreCase);
+        string? hint =
+            Has(@"disc key (was )?not found")                                   ? "hint_disc_key" :
+            Has(@"common key not found")                                        ? "hint_common_key" :
+            Has(@"bad FST magic|wrong key|not this disc's key")                 ? "hint_wrong_key" :
+            Has(@"No space left on device|not enough space on the disk|ENOSPC") ? "hint_disk" :
+            Has(@"out of memory|virtual memory exhausted|MemoryError|Cannot allocate memory") ? "hint_memory" :
+            Has(@"cannot specify '-o' with '-c'")                               ? "hint_path_space" :
+            Has(@"file truncated|file format not recognized|error adding symbols") ? "hint_broken_obj" :
+            Has(@"command not found")                                           ? "hint_tool_missing" :
+            Has(@"Permission denied|Access is denied|PermissionError|Device or resource busy|Operation not permitted") ? "hint_av" :
+            null;
+        // #28: build.sh stopped and printed nothing at all (a tool that cannot start, such as an MSYS2 program
+        // whose library is missing after a partial update, or one blocked by an antivirus)
+        if (hint == null && why > 0 && lines[why].EndsWith("this step failed (see the messages above)") && lines[why - 1].StartsWith("$ "))
+            hint = "hint_silent";
+        if (hint != null) msg.Append("\n\n").Append(Str.Get(hint));
+        return msg.ToString();
     }
 
     // ── SD card (from the done page) ─────────────────────────────────────────
@@ -523,7 +576,7 @@ sealed class InstallEngine
         }
         finally { currentJob = null; }
 
-        if (check && rc != 0) throw new InstallException($"{Path.GetFileName(exe)} {rc}");
+        if (check && rc != 0) throw new InstallException(Str.Get("cmd_fail", Path.GetFileName(exe), rc));
         return rc;
     }
 
