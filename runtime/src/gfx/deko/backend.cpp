@@ -1047,6 +1047,14 @@ void frame_stats() {
             "images (%zu MiB kept); HUD at full resolution in %.0f%% of frames",
             double(res_scale()), double(requested_res_scale()), dynamicRes.on ? "on" : "off", (unsigned long long)p.rescales,
             (unsigned long long)p.poolHits, rescale_pool_bytes() >> 20, 100.0 * perFrame(p.hudSwitches));
+        {  // (this fork, #37) what grows over a long session: malloc in use against its arena, and the containers
+            const struct mallinfo mi = mallinfo();
+            const ShaderMemory sm = shader_memory();
+            LOG("[mem] malloc %zu MiB in use of %zu MiB taken (heap never used %zu MiB); shader variants %zu, GLSL %zu, "
+                "programs %zu, translation records %zu (%zu KiB); surfaces %zu (with evicted ones)",
+                size_t(mi.uordblks) >> 20, size_t(mi.arena) >> 20, heap_never_used_mib(), sm.variants, sm.codes,
+                sm.programs, sm.storedRecords, sm.storedBytes >> 10, surface_structs());
+        }
         R.perf = {};  // (swap() takes the hitch base after present)
     }
     LOG("[dk] pacing: %s", frame_pacing::report().c_str());  // (this fork, #23)
