@@ -1053,10 +1053,10 @@ void frame_stats() {
             const struct mallinfo mi = mallinfo();
             const ShaderMemory sm = shader_memory();
             const ImageHeapFigures ih = image_heap_figures();
-            LOG("[mem] malloc %zu MiB in use of %zu MiB taken (heap never used %zu MiB); shader variants %zu, GLSL %zu, "
+            LOG("[mem] malloc %zu MiB in use of %zu MiB taken (heap never used %zu MiB); shader variants %zu (%zu freed), GLSL %zu, "
                 "programs %zu, translation records %zu (%zu KiB); surfaces %zu (with evicted ones); image heap %llu "
                 "chunks, %llu MiB, %.1f MiB free, largest free %.1f MiB",
-                size_t(mi.uordblks) >> 20, size_t(mi.arena) >> 20, heap_never_used_mib(), sm.variants, sm.codes,
+                size_t(mi.uordblks) >> 20, size_t(mi.arena) >> 20, heap_never_used_mib(), sm.variants, sm.evicted, sm.codes,
                 sm.programs, sm.storedRecords, sm.storedBytes >> 10, surface_structs(), (unsigned long long)ih.chunks,
                 (unsigned long long)(ih.total >> 20), double(ih.free) / 1048576.0, double(ih.largestFree) / 1048576.0);
             image_trace_flush();

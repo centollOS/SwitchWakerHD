@@ -51,3 +51,8 @@ side copies), not a placement problem: **step 2 dropped**, first fit stays. Step
 long test: no growth past the working set in 17 min.
 
 What still grows after the 4th chunk: malloc +33 MiB in ~14 min with +2,780 variants (~12 KB each): step 4.
+
+**Step 4 (2026-10-14, same tour, variants idle 3600 frames freed).** Variants stay at 1,000-1,800 (5,447 freed;
+5,152 kept without it), no crash, the 14 screenshots fine. But malloc still grows +24 MiB after the 4th chunk
+(+33 MiB without it): the variants were ~9 MiB of it, not ~12 KB each as estimated from the slope. The rest grows
+with something else (programs 32k, surface structs 1.4k, the records +2.4 MiB account for some): more counters next.

@@ -1298,6 +1298,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         prefetch_shader(vs);
         prefetch_shader(ps);
     }
+    vs->drawnFrame = ps->drawnFrame = uint32_t(R.frame);  // (this fork, memory round 2) evict_idle_variants
     lap(R.perf.lookupNs);
 
     rprof::mark(rprof::kShader);  // (render_prof.h: sampled draws only)
@@ -1356,6 +1357,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     // the same and the pixel shader writes the same outputs
     struct TargetMemo {
         uint64_t gen = ~0ull, surfaceEpoch = 0, textureEpoch = 0;
+        uint64_t shaderEpoch = 0;  // (this fork, memory round 2) a freed variant's dec address can come back
         const LatteDecompilerShader* dec = nullptr;
         std::array<Surface*, 8> colors{};
         uint32_t slices[8]{}, depthSlice = 0;
@@ -1365,7 +1367,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     static TargetMemo tm;
     const bool regGens = g_regGens.load(std::memory_order_relaxed);
     if (regGens && tm.gen == gx2::g_reg_gen[gx2::kRegCatTargets] && tm.surfaceEpoch == R.surfaceEpoch &&
-        tm.textureEpoch == R.textureEpoch && tm.dec == ps->dec) {
+        tm.textureEpoch == R.textureEpoch && tm.shaderEpoch == R.shaderEpoch && tm.dec == ps->dec) {
         colors = tm.colors;
         memcpy(slices, tm.slices, sizeof slices);
         memcpy(srgbViews, tm.srgbViews, sizeof srgbViews);
@@ -1381,6 +1383,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         tm.gen = gx2::g_reg_gen[gx2::kRegCatTargets];
         tm.surfaceEpoch = R.surfaceEpoch;
         tm.textureEpoch = R.textureEpoch;
+        tm.shaderEpoch = R.shaderEpoch;
         tm.dec = ps->dec;
         tm.colors = colors;
         memcpy(tm.slices, slices, sizeof slices);

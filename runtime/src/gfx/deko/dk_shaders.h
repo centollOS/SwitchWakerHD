@@ -69,6 +69,9 @@ struct alignas(64) Shader {
     uint8_t texUnit[LATTE_NUM_MAX_TEX_UNITS];        // dec->textureUnitList
     uint8_t texSampler[LATTE_NUM_MAX_TEX_UNITS];     // by unit: dec->textureUnitSamplerAssignment, 0xFF = none
     uint32_t texCompare = 0;                         // bit per unit: dec->textureUsesDepthCompare
+    // (this fork, memory round 2) the last frame a draw used it (draw.cpp): variants idle for long are freed and
+    // rebuilt from their translation record when drawn again (shaders_frame_start)
+    uint32_t drawnFrame = 0;
     // ---- the rest
     uint64_t key = 0;
     uint64_t glslHash = 0;  // the WGS1 hash of its GLSL: the key of the DKSH caches (shader_files.h)
@@ -92,6 +95,9 @@ struct alignas(64) Shader {
         textureSlot.fill(-1);
         memset(texSampler, 0xFF, sizeof texSampler);
     }
+    ~Shader();  // (this fork, memory round 2) frees dec: variants are freed now (shaders_dk.cpp)
+    Shader(const Shader&) = delete;
+    Shader& operator=(const Shader&) = delete;
     bool ready() const { return status == ShaderStatus::Ready; }
     bool pending() const { return status == ShaderStatus::Pending; }
 };
@@ -131,6 +137,7 @@ void select_decompiler();
 // (this fork, #37) render thread, for the 5 s [mem] line: the shader containers that only grow during a session
 struct ShaderMemory {
     size_t variants = 0, codes = 0, programs = 0, storedRecords = 0, storedBytes = 0;
+    size_t evicted = 0;  // (memory round 2) idle variants freed so far
 };
 ShaderMemory shader_memory();
 
