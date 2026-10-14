@@ -119,6 +119,10 @@ From the players' `installer.log`s (#28, #30) and a review of every step. Only `
   signatures) that goes with the "tools missing" stop; MSYS2's bash then runs `cmake`, `make` and
   `aarch64-none-elf-gcc` the way make_sd does, so a tool that cannot start stops the step with "run
   `pacman -Syu`" (and `ldd` in the log). `bash.exe` is checked too.
+- **MSYS2's `cmake`, `make` (and `gcc`) only when missing.** Asked for with `--needed`, an installed one was still
+  upgraded to the package list's version without its libraries: in the Windows tests (case 22) cmake 4.0.2 became
+  4.4.4 next to `jsoncpp` 1.9.6-3 (`msys-jsoncpp-27.dll => not found`), and every later run stopped with "run
+  `pacman -Syu`". A partial update the installer itself caused, with or without devkitPro's 403.
 - **Paths:** every path goes through `Quote()` (a trailing backslash, as in a game folder at a drive root, no
   longer eats the closing quote); a profile path over 45 characters also moves the working folder to
   `C:\SwitchWakerHD-Build` (MAX_PATH for devkitPro's gcc).

@@ -336,8 +336,13 @@ sealed class InstallEngine
         SetDevkitEnv();
         ClearStalePacmanLock();
         // cmake and make (MSYS2's): build.sh runs them, and no devkitPro package brings them (issue #28).
-        // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it
-        var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make" + (ForwarderKeys != null ? " gcc" : "");
+        // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it.
+        // Only when missing: --needed still upgrades an installed one to the package list's version, without its
+        // libraries (cmake 4.0.2 -> 4.4.4 without msys-jsoncpp-27.dll, so cmake no longer started). A partial
+        // update of MSYS2; the installer never runs pacman -Syu.
+        var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
+        foreach (var tool in ForwarderKeys != null ? new[] { "cmake", "make", "gcc" } : new[] { "cmake", "make" })
+            if (!File.Exists(Path.Combine(DevkitRoot, @"msys2\usr\bin", tool + ".exe"))) packages += " " + tool;
         var output = new List<string>();
         string? reason = null;
         for (int attempt = 1; ; attempt++)
