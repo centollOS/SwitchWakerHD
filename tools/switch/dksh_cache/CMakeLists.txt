@@ -15,7 +15,7 @@ list(FILTER CEMU_SOURCES EXCLUDE REGEX "LatteDecompilerEmitMSL[^/]*\\.cpp$")
 add_library(cemu_latte_host STATIC ${CEMU_SOURCES})
 target_include_directories(cemu_latte_host PUBLIC ${CEMU_DIR} ${CEMU_DIR}/Cafe ${WWHD_ROOT}/runtime/third_party/fmt/include)
 target_compile_definitions(cemu_latte_host PUBLIC ENABLE_OPENGL=1)
-target_compile_options(cemu_latte_host PRIVATE "SHELL:-include ${CEMU_DIR}/cemu_shim.h" -w -O2)
+target_compile_options(cemu_latte_host PRIVATE "SHELL:-include \"${CEMU_DIR}/cemu_shim.h\"" -w -O2)
 set_target_properties(cemu_latte_host PROPERTIES CXX_STANDARD 20)
 
 add_executable(dksh_cache dksh_cache.cpp translate.cpp ${WWHD_ROOT}/runtime/src/gfx/deko/glsl_convert.cpp

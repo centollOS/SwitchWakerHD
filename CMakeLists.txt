@@ -96,7 +96,7 @@ endif()
 add_library(cemu_latte STATIC ${CEMU_SOURCES})
 target_include_directories(cemu_latte PUBLIC ${CEMU_DIR} ${CEMU_DIR}/Cafe ${CMAKE_SOURCE_DIR}/runtime/third_party/metal-cpp
                                              ${CMAKE_SOURCE_DIR}/runtime/third_party/fmt/include)
-target_compile_options(cemu_latte PRIVATE "SHELL:-include ${CEMU_DIR}/cemu_shim.h")
+target_compile_options(cemu_latte PRIVATE "SHELL:-include \"${CEMU_DIR}/cemu_shim.h\"")
 if(WWHD_HAS_METAL)
   target_compile_definitions(cemu_latte PUBLIC ENABLE_METAL=1)
 endif()
@@ -262,7 +262,7 @@ if(WWHD_HAS_METAL)
 add_executable(shadertest runtime/tools/shadertest.cpp runtime/src/gx2/gx2_shader_regs.cpp)
 target_include_directories(shadertest PRIVATE runtime/include runtime/src runtime/src/gx2)
 target_link_libraries(shadertest PRIVATE cemu_latte)
-target_compile_options(shadertest PRIVATE "SHELL:-include ${CEMU_DIR}/cemu_shim.h")
+target_compile_options(shadertest PRIVATE "SHELL:-include \"${CEMU_DIR}/cemu_shim.h\"")
 
 endif()
 
