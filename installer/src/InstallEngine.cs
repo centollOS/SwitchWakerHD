@@ -339,7 +339,7 @@ sealed class InstallEngine
         // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it.
         // Only when missing: --needed still upgrades an installed one to the package list's version, without its
         // libraries (cmake 4.0.2 -> 4.4.4 without msys-jsoncpp-27.dll, so cmake no longer started). A partial
-        // update of MSYS2; the installer never runs pacman -Syu.
+        // update of MSYS2 (RepairMsys mends one when the tools then don't start).
         var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
         foreach (var tool in ForwarderKeys != null ? new[] { "cmake", "make", "gcc" } : new[] { "cmake", "make" })
             if (!File.Exists(Path.Combine(DevkitRoot, @"msys2\usr\bin", tool + ".exe"))) packages += " " + tool;
@@ -408,7 +408,13 @@ sealed class InstallEngine
         if (Exec(bash, "-l -c \"" + probe + "\"", check: false, env: env) != 0)
         {
             Exec(bash, "-l -c \"ldd /usr/bin/cmake.exe /usr/bin/make.exe\"", check: false, env: env);   // for the log: what is missing
-            throw new InstallException(Str.Get("dkp_broken"));
+            RepairMsys(bash, env);
+            if (Exec(bash, "-l -c \"" + probe + "\"", check: false, env: env) != 0)
+            {
+                Exec(bash, "-l -c \"ldd /usr/bin/cmake.exe /usr/bin/make.exe\"", check: false, env: env);
+                throw new InstallException(Str.Get("dkp_broken"));
+            }
+            Ok(Str.Get("dkp_repaired"));
         }
 
         if (ForwarderKeys != null && !File.Exists(Path.Combine(DevkitRoot, @"msys2\usr\bin\gcc.exe")))
@@ -417,6 +423,37 @@ sealed class InstallEngine
             ForwarderKeys = null;
         }
         Ok(Str.Get("dkp_tools_ok"));
+    }
+
+    // The tools are installed but don't start: a partial update of MSYS2 (a program newer than the libraries it
+    // needs, e.g. cmake from a package list newer than the rest: #28, case 22 of the Windows tests). Mended here
+    // rather than asking the player: a full update of MSYS2's own packages, from MSYS2's mirrors only. devkitPro's
+    // repositories (often a 403, which stops a whole -Syu) are left out of a copy of pacman.conf: none of the
+    // broken programs come from them. Up to three passes: the first one may update only MSYS2's core and end
+    // the shell it runs in; the last one finds nothing left to do.
+    void RepairMsys(string bash, IDictionary<string, string> env)
+    {
+        Say(Str.Get("dkp_repairing"));
+        var conf = Path.Combine(DevkitRoot, @"msys2\etc\pacman.conf");
+        var copy = Path.Combine(DevkitRoot, @"msys2\tmp\wwhd-msys-only.conf");   // /tmp/wwhd-msys-only.conf in MSYS2
+        var kept = new List<string>();
+        var dkp = false;
+        foreach (var line in File.ReadAllLines(conf))
+        {
+            var t = line.Trim();
+            if (t.StartsWith("[") && t.EndsWith("]")) dkp = t.StartsWith("[dkp", StringComparison.OrdinalIgnoreCase);
+            if (!dkp) kept.Add(line);
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(copy)!);
+        File.WriteAllLines(copy, kept);
+        for (int pass = 1; pass <= 3; pass++)
+        {
+            ct.ThrowIfCancellationRequested();
+            ClearStalePacmanLock();
+            var rc = Exec(bash, "-l -c \"pacman --config /tmp/wwhd-msys-only.conf -Syu --noconfirm\"", check: false, env: env);
+            if (rc == 0 && pass >= 2) break;
+        }
+        try { File.Delete(copy); } catch (IOException) { }
     }
 
     static string FindPacman()

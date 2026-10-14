@@ -31,7 +31,7 @@ if [[ -z "$engine" || $native == 1 ]]; then
 fi
 # devkitPro's packages do not bring the host cmake/make (issue #28): say so instead of "command not found"
 if [[ $native == 1 ]] && ! command -v cmake >/dev/null; then
-    echo "cmake is missing: install it with: pacman -S --needed cmake make (devkitPro's MSYS2 on Windows)" >&2
+    echo "cmake is missing: install it with: pacman -Syu, then pacman -S --needed cmake make (devkitPro's MSYS2 on Windows)" >&2
     exit 1
 fi
 image=docker.io/devkitpro/devkita64:latest
