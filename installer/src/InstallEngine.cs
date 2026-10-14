@@ -70,7 +70,7 @@ sealed class InstallEngine
 
     string pythonCmd  = "python";
     string pacman     = "";
-    string releaseVer = "v0.4.3";
+    string releaseVer = "";
     CancellationToken ct;
     ProcessJob? currentJob;   // the running process and all it started; KillCurrent stops them
 
@@ -493,14 +493,19 @@ sealed class InstallEngine
     void Release()
     {
         Say(Str.Get("rel_checking"));
-        try
+        releaseVer = LatestRelease();
+        if (releaseVer != "") Ok(Str.Get("rel_found", releaseVer));
+        else
         {
-            var json = Http.GetStringAsync("https://api.github.com/repos/centollOS/SwitchWakerHD/releases/latest").GetAwaiter().GetResult();
-            var m = Regex.Match(json, "\"tag_name\":\\s*\"([^\"]+)\"");
-            if (m.Success) releaseVer = m.Groups[1].Value;
-            Ok(Str.Get("rel_found", releaseVer));
+            // offline or GitHub unreachable: the newest release an earlier run downloaded
+            releaseVer = Directory.GetFileSystemEntries(WorkDir, "SwitchWakerHD-v*")
+                .Select(p => Regex.Match(Path.GetFileName(p), @"^SwitchWakerHD-(v(\d+)\.(\d+)\.(\d+))(\.zip)?$"))
+                .Where(m => m.Success)
+                .OrderByDescending(m => new Version(int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value), int.Parse(m.Groups[4].Value)))
+                .Select(m => m.Groups[1].Value).FirstOrDefault() ?? "";
+            if (releaseVer == "") throw new InstallException(Str.Get("rel_unknown"));
+            Warn(Str.Get("rel_fallback", releaseVer));
         }
-        catch { Warn(Str.Get("rel_fallback", releaseVer)); }
 
         var zip = Path.Combine(WorkDir, $"SwitchWakerHD-{releaseVer}.zip");
         ReleaseDir = Path.Combine(WorkDir, $"SwitchWakerHD-{releaseVer}");
@@ -525,7 +530,14 @@ sealed class InstallEngine
             Progress?.Invoke(null);
             var tmp = ReleaseDir + ".tmp";
             if (Directory.Exists(tmp)) Directory.Delete(tmp, true);
-            ZipFile.ExtractToDirectory(zip, tmp);
+            try { ZipFile.ExtractToDirectory(zip, tmp); }
+            catch (InvalidDataException e)
+            {
+                // checked when it was downloaded, so damaged on disk since: download it again next time
+                Log?.Invoke(e.Message, LogKind.Error);
+                File.Delete(zip);
+                throw new InstallException(Str.Get("rel_corrupt"));
+            }
             Directory.Move(tmp, ReleaseDir);
         }
 
@@ -536,6 +548,34 @@ sealed class InstallEngine
             if (nested == null) throw new InstallException(Str.Get("rel_no_script"));
             ReleaseDir = nested;
         }
+    }
+
+    // The latest release's tag: GitHub's API, else where github.com/.../releases/latest redirects to (the API
+    // allows 60 calls an hour per address). "" when neither answers.
+    string LatestRelease()
+    {
+        try
+        {
+            var json = Http.GetStringAsync("https://api.github.com/repos/centollOS/SwitchWakerHD/releases/latest").GetAwaiter().GetResult();
+            var m = Regex.Match(json, "\"tag_name\":\\s*\"([^\"]+)\"");
+            if (m.Success) return m.Groups[1].Value;
+        }
+        catch (Exception e) when (e is HttpRequestException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+        {
+            Log?.Invoke(e.Message, LogKind.Output);
+        }
+        try
+        {
+            using var resp = Http.GetAsync("https://github.com/centollOS/SwitchWakerHD/releases/latest", HttpCompletionOption.ResponseHeadersRead, ct)
+                                 .GetAwaiter().GetResult();
+            var m = Regex.Match(resp.RequestMessage?.RequestUri?.AbsolutePath ?? "", @"/releases/tag/([^/]+)$");
+            if (resp.IsSuccessStatusCode && m.Success) return Uri.UnescapeDataString(m.Groups[1].Value);
+        }
+        catch (Exception e) when (e is HttpRequestException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+        {
+            Log?.Invoke(e.Message, LogKind.Output);
+        }
+        return "";
     }
 
     static string MakeSd(string dir) => Path.Combine(dir, "tools", "switch", "make_sd.py");
