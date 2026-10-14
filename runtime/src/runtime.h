@@ -184,7 +184,7 @@ void log_flush();  // writes out buffered log lines (the Switch logs through a w
 [[noreturn]] void fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 #define LOG(...) log_msg(__VA_ARGS__)
 #ifdef __SWITCH__
-size_t heap_never_used_mib();  // core.cpp
+size_t heap_never_used_mib();  // platform/core_switch.cpp
 void log_heap(const char* when);
 #endif
 // every later log line also goes to `sink` (one line without '\n'); nullptr stops (main.cpp: log file)
