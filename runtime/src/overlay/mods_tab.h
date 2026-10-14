@@ -54,6 +54,9 @@ struct Host {
     mods::catalogue::Version port_version;
     std::string build_name = "USA";
     bool android = false;
+    // (this fork) the Switch: no code mods, no downloads (the catalogue, the Story Notebook) and no file choosers
+    // (overlay.cpp mods_host)
+    bool console = false;
     bool file_picker = true; // the host has file and folder choosers (overlay/extensions.h Features)
     bool back = false;       // controller B this frame
     bool b_used = false;     // out: B answered something here (it must not also close the menu)
@@ -243,7 +246,7 @@ inline void open_catalogue(const Host& h) {
     auto work = catalogue_work();
     if (work.empty()) return;
     auto& s = state();
-    s.loader.open(catalogue_url(), work, h.fetch, ImGui::GetTime(), s.auto_check);
+    s.loader.open(catalogue_url(), work, h.fetch, ImGui::GetTime(), s.auto_check && !h.console);
 }
 inline const mods::catalogue::Entry* catalogue_entry(const CatalogueLoader::Snapshot& snap, const std::string& id) {
     for (const auto& e : snap.catalogue.index.entries) if (e.id == id) return &e;
@@ -993,6 +996,7 @@ inline void builtin_list(Host& h) {
     muted(kAreaCaptions[kBuiltin]);
     if (!begin_list("builtin")) return;
     for (const auto& e : mods::manager::entries()) {
+        if (h.console && e.id == "story-system") continue;  // (this fork) it needs the Story Notebook's download
         Facts fx;
         fx.builtin = true;
         fx.enabled = e.enabled();
@@ -1013,7 +1017,8 @@ inline void builtin_list(Host& h) {
 inline void community_list(Host& h) {
     using namespace mods::packages;
     auto& s = state();
-    muted(kAreaCaptions[kCommunity]);
+    if (h.console) muted("Mods you add to the mods folder (More > Mods folder).");  // (this fork) no downloads
+    else muted(kAreaCaptions[kCommunity]);
     auto list = mods::packages::list();
     auto snap = s.loader.snapshot();
     static const char* test_install = h.test ? getenv("WWHD_TEST_CATALOGUE_INSTALL") : nullptr;
@@ -1052,12 +1057,13 @@ inline void community_list(Host& h) {
     // the story system's required package (mods/required.h): its status, Install while it is missing
     if (const auto required = mods::required::status(); !required.text.empty()) {
         colored(required.working || required.restart ? kMuted : kWarn, required.text);
-        if (!required.working && !find_view(list, mods::required::kStoryNotebook) && mods::story_system()) {
+        if (!h.console && !required.working && !find_view(list, mods::required::kStoryNotebook) && mods::story_system()) {
             ImGui::SameLine();
             if (small_button("Install##story_notebook")) install_story_notebook(h);
         }
     }
     // available to download
+    if (h.console) return;  // (this fork)
     ImGui::SeparatorText("Available to download");
     auto line = catalogue_line(snap.have_list, snap.checking, snap.failed, s.auto_check);
     if (!line.text.empty()) {
@@ -1461,7 +1467,7 @@ inline void more(Host& h) {
         if (button("Choose folder…##package")) pick(true);
         ImGui::Unindent();
     }
-    if (section("GameCube game for mods")) {
+    if (!h.console && section("GameCube game for mods")) {  // (this fork: a file chooser)
         ImGui::Indent();
         muted("Some mods use files from the GameCube version of the game. They stay on your computer.");
         game_source_picker(h, "gc_wind_waker");
@@ -1469,7 +1475,7 @@ inline void more(Host& h) {
         if (!src.path.empty() && small_button("Forget it")) { std::string e; set_game_source("gc_wind_waker", "", e); }
         ImGui::Unindent();
     }
-    if (section("Code-mod support")) {
+    if (!h.console && section("Code-mod support")) {  // (this fork: no rebuild on the console)
         ImGui::Indent();
         bool code = mods::code::enabled();
         // not the section's own label: two items with one ID
@@ -1483,7 +1489,7 @@ inline void more(Host& h) {
         if (experimental::backups_section(h.back)) h.b_used = true;
         ImGui::Unindent();
     }
-    if (section("Mod list")) {
+    if (!h.console && section("Mod list")) {  // (this fork: no downloads)
         ImGui::Indent();
         if (ImGui::Checkbox("Check for new mods automatically", &s.auto_check))
             hostui::post([on = s.auto_check] { hostui::set("mod.catalogue.auto", on ? "1" : "0"); });
