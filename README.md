@@ -150,6 +150,8 @@ and copy the files.
   caches stay.
 - Logs, if something goes wrong: `logs/`, one `wwhd_<date>_<time>.log` per session (the newest is this
   run); the 10 most recent are kept.
+- Found a bug? [docs/reporting-bugs.md](docs/reporting-bugs.md) shows how to get the log, a save state and your
+  save file off the console for the report.
 
 ## Options
 

@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting! A **save state** made where the problem happens (`slotN.wwstate`, a few KB) plus your **save file** (`cking.sav`) lets us reproduce it much faster, so please add them if you can.
+        Thanks for reporting! A **save state** made where the problem happens (`slotN.wwstate`, a few KB) plus your **save file** (`cking.sav`) lets us reproduce it much faster, so please add them if you can. [How to get the files off the console](https://github.com/centollOS/SwitchWakerHD/blob/main/docs/reporting-bugs.md).
 
         If a maintainer closed your issue and the problem comes back, comment `/reopen` on it (as the person who opened it) and it reopens automatically.
   - type: textarea
