@@ -42,7 +42,7 @@ struct ModVariable {
     const char* id;
     const char* env;
 };
-extern const ModVariable kModVariables[6];
+extern const ModVariable kModVariables[13];
 
 // env.txt's text into f: a variable with a menu setting becomes that setting (one that cannot be converted is
 // dropped), any other KEY=VALUE line goes into [dev]; comments, blank lines and --option lines are dropped.
