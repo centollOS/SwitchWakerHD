@@ -1370,6 +1370,21 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         skip(g_drawSkips.noFetchShader);
         return;
     }
+    // (this fork) a draw into a 3D color target waits for its shaders instead of being skipped: the game draws the
+    // Picto Box's 8x8x8 color table there once, at the session's first picture, and samples it for every picture
+    // after; skipped for a shader still compiling, the table stayed zero and every picture was black until the game
+    // was closed (docs/picto-black-plan.md). At most one wait per shader.
+    if (vs && ps && ps->dec && (vs->pending() || ps->pending())) {
+        // the targets the draw writes, as the target lookup below finds them (a slot left set: not one of them)
+        const auto used = LatteMRT::GetActiveColorBufferMask(ps->dec, *reinterpret_cast<const LatteContextRegister*>(r));
+        bool volume = false;
+        for (int i = 0; i < 8; i++)
+            volume |= (used & (1 << i)) && (r[mmCB_COLOR0_TILE + i] & gx2::kColorTarget3D);
+        if (volume) {
+            shader_wait(vs);
+            shader_wait(ps);
+        }
+    }
     if (!vs || !ps || !vs->ready() || !ps->ready()) {
         // quietly: a pending shader asks the worker to hurry; a failed one was logged by the shader lane
         bool failed = false;

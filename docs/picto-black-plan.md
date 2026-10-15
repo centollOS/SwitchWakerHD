@@ -35,3 +35,11 @@ the GPU; zeros in guest memory). In a session where the pictures are good the ta
 frame and not again (traced: no draw into it at the save's load nor later). So the game draws the table once, at the
 first picture; when that draw is skipped for a pending shader, the table stays zero for the session and every
 picture multiplied by it is black. A new start draws it again (the shaders then come from the cache).
+
+**Step 3 (2026-10-16, the same repro).** A draw into a 3D color target waits for its pending shaders (`shader_wait`)
+instead of being skipped; which targets a draw writes comes from the pixel shader's outputs as the target lookup
+finds them (`GetActiveColorBufferMask`): the game leaves the table in color slots 1-7 with their write masks on
+after the table's draw, so the registers alone made ~75 later draws wait (17 s). `wait_for` also takes a
+background job of that shader while the background is paused. Console: the first picture (other shaders of the
+chain still pending) is black and waits ~120 ms once (the table's two shaders); the next picture, the queue empty,
+is good (before: black until the game was closed).
