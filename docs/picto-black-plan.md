@@ -22,3 +22,16 @@ moment of the picture alone (each later picture draws again).
    (black), another after the queue is empty (black?), back to the title and the save again, a picture (good).
    The trace of a black and a good picture says which texture or target differs.
 3. **Fix** by what step 2 shows, and the same repro to check it.
+
+## Results
+
+**Step 2 (2026-10-15, console, first starts with empty caches and B on the card, Windfall).** The picture's chain, one
+frame: `20974000` (1600x900) from the scene; then the color table `3B783000` (8x8x8, GX2 format 0x816, one draw into
+its 8 slices as 8 color targets, vs `44F22500`); `F4000800` (1600x900) from `20974000` through that table (vs
+`44F4F800`, t1 = the table); two passes `F4592000` ↔ `F4000800`; `2069E000` (800x450) and its alpha; `3E9D0000`
+(800x450, read by the CPU). With every draw of the chain drawn and every shader ready, a later picture of the same
+session is black: the captures show `20974000` right and `F4000800` black, and the table is CPU data (never drawn by
+the GPU; zeros in guest memory). In a session where the pictures are good the table is drawn in the first picture's
+frame and not again (traced: no draw into it at the save's load nor later). So the game draws the table once, at the
+first picture; when that draw is skipped for a pending shader, the table stays zero for the session and every
+picture multiplied by it is black. A new start draws it again (the shaders then come from the cache).

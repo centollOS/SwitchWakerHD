@@ -1127,6 +1127,72 @@ void draw(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, 
 }
 
 namespace {
+// (this fork, Picto Box black pictures) WWHD_DK_TRACE_TARGET=<hex address>,...: every draw into a color target at
+// one of these addresses gets the frame trace's draw lines (textures with /cpu when CPU data, shaders, state), and a
+// draw skipped for a pending or failed shader there is logged too; at most 4000 lines a session. An address with a '*' (drawn every frame) only gets a short line
+// in a ring of its last 32 draws, printed at the next draw into one of the other addresses
+struct TargetTrace {
+    std::vector<uint32_t> addrs, quiet;
+    uint32_t lines = 0;
+    std::array<std::string, 32> ring;
+    uint32_t ringNext = 0;
+    // WWHD_DK_TRACE_TARGET_CAPTURES=n: the first n frames with a drawn (not skipped) draw into one of the addresses
+    // are captured from that draw on (render targets and sampled textures, captures/<frame>/)
+    uint32_t captures = uint32_t(strtoul(getenv("WWHD_DK_TRACE_TARGET_CAPTURES") ? getenv("WWHD_DK_TRACE_TARGET_CAPTURES") : "0", nullptr, 10));
+    TargetTrace() {
+        const char* e = getenv("WWHD_DK_TRACE_TARGET");
+        for (const char* p = e; p && *p;) {
+            char* end;
+            const unsigned long v = strtoul(p, &end, 16);
+            if (end == p) break;
+            (*end == '*' ? quiet : addrs).push_back(uint32_t(v));
+            if (*end == '*') end++;
+            p = *end == ',' ? end + 1 : end;
+        }
+        if (!addrs.empty() || !quiet.empty())
+            LOG("[dk] WWHD_DK_TRACE_TARGET: draws into %zu color target address(es) traced, %zu in a ring", addrs.size(),
+                quiet.size());
+    }
+    uint64_t tracedFrame = ~0ull;  // the last frame with a draw into one of addrs: the '*' addresses traced in full too
+    bool wants(const uint32_t* r, uint64_t frame) {
+        if (addrs.empty() || lines >= 4000) return false;
+        for (int i = 0; i < 8; i++) {
+            const uint32_t a = r[mmCB_COLOR0_BASE + i];
+            if (std::find(addrs.begin(), addrs.end(), a) != addrs.end()) {
+                tracedFrame = frame;
+                return true;
+            }
+            if (frame == tracedFrame && std::find(quiet.begin(), quiet.end(), a) != quiet.end()) return true;
+        }
+        return false;
+    }
+    void note_quiet(const uint32_t* r, uint64_t frame, const char* shaders) {
+        if (quiet.empty() || lines >= 4000) return;
+        for (int i = 0; i < 8; i++) {
+            const uint32_t a = r[mmCB_COLOR0_BASE + i];
+            if (std::find(quiet.begin(), quiet.end(), a) == quiet.end()) continue;
+            const uint32_t info = r[mmCB_COLOR0_INFO + i];
+            char b[256];
+            snprintf(b, sizeof b, "frame %llu: c%d=%08X %ux%u fmt %X tile %u info %08X, d=%08X, vs %08X ps %08X %s, mask %08X",
+                     (unsigned long long)frame, i, a, r[mmCB_COLOR0_TILE + i] & 0xFFFF, r[mmCB_COLOR0_FRAG + i],
+                     (info >> 2) & 0x3F, (info >> 8) & 0xF, info, r[mmDB_DEPTH_BASE], r[mmSQ_PGM_START_VS] << 8,
+                     r[mmSQ_PGM_START_PS] << 8, shaders, r[REGADDR::CB_TARGET_MASK]);
+            ring[ringNext++ % ring.size()] = b;
+            return;
+        }
+    }
+    void dump_ring() {
+        const uint32_t n = std::min<uint32_t>(ringNext, ring.size());
+        for (uint32_t k = ringNext - n; k < ringNext; k++) LOG("[trace] ring %s", ring[k % ring.size()].c_str());
+        lines += n;
+        ringNext = 0;
+    }
+};
+TargetTrace& target_trace() {
+    static TargetTrace t;
+    return t;
+}
+
 void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
                uint32_t baseVertex, uint32_t instances) {
     static uint32_t drawSample = 0;
@@ -1270,6 +1336,35 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             }
         }
         memo = {g_shader_state_gen, frame, R.shaderEpoch, primKey, fs, vs, ps, g_shader_regs_gen};
+    }
+    // (WWHD_DK_TRACE_TARGET) this draw in the frame trace's lines, whatever the frame
+    const bool targetTraced = target_trace().wants(r, frame);
+    target_trace().note_quiet(r, frame,
+                              !fs || !vs || !ps ? "none" : !vs->ready() || !ps->ready() ? "pending (skipped)" : "ready");
+    if (targetTraced) target_trace().dump_ring();
+    struct TraceScope {
+        bool on, frame, draws;
+        explicit TraceScope(bool o) : on(o), frame(g_traceFrame), draws(g_captureDraws) {
+            if (on) g_traceFrame = g_captureDraws = true;
+        }
+        ~TraceScope() {
+            if (on) g_traceFrame = frame, g_captureDraws = draws;
+        }
+    } traceScope(targetTraced);
+    if (targetTraced) {
+        target_trace().lines += 3;
+        if (!fs || !vs || !ps || !vs->ready() || !ps->ready())
+            LOG("[trace] frame %llu: a draw into %08X skipped: fetch shader %s, vs %08X %s, ps %08X %s",
+                (unsigned long long)frame, r[mmCB_COLOR0_BASE], fs ? "ok" : "none", r[mmSQ_PGM_START_VS] << 8,
+                !vs ? "none" : vs->ready() ? "ready" : vs->pending() ? "pending" : "failed", r[mmSQ_PGM_START_PS] << 8,
+                !ps ? "none" : ps->ready() ? "ready" : ps->pending() ? "pending" : "failed");
+        else {
+            LOG("[trace] frame %llu: a draw into %08X", (unsigned long long)frame, r[mmCB_COLOR0_BASE]);
+            if (target_trace().captures && !g_capture) {
+                target_trace().captures--;
+                capture_arm(kCaptureTargets | kCaptureTextures, "WWHD_DK_TRACE_TARGET_CAPTURES");
+            }
+        }
     }
     if (!fs) {
         skip(g_drawSkips.noFetchShader);
