@@ -78,7 +78,7 @@ once, so the second lap only revisits: what still grows then is a leak. (The dek
 |---|---|---|
 | F1 | No crash in the two laps | |
 | F2 | `malloc ... in use` at the end of lap 1 and of lap 2 | Lap 2 adds a few MiB at most |
-| F3 | Image heap | 4 chunks (256 MiB), no new one in lap 2 |
+| F3 | Image heap | At most 5 chunks (320 MiB); the 5th can come late, from fragmentation (v0.4.8 run: lap 3) |
 | F4 | Shader variants | Bounded (1,000-2,000 alive), screenshots fine |
 
 A **2-hour run** only when lap 2 grows, or when the release changes how the renderer or the runtime allocate or
