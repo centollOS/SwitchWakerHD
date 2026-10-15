@@ -16,6 +16,7 @@
 #include "glsl/opt_add_neg_to_sub.h"
 #include "main/mtypes.h"
 #include "program/program.h"
+#include "program/prog_parameter.h"
 #include "state_tracker/st_glsl_to_tgsi.h"
 #include "tgsi/tgsi_from_mesa.h"
 #include "glsl/ir_uniform.h"
@@ -579,9 +580,22 @@ unsigned glsl_program_compute_get_shared_size(glsl_program prg)
 
 void glsl_program_free(glsl_program prg)
 {
+	// SwitchWakerHD patch 9: as Mesa's _mesa_delete_program and _mesa_delete_linked_shader, the program's
+	// parameter list (malloc, not ralloc) and the linked shader itself (its own ralloc tree: the linked IR)
+	// are freed too; uam freed only the program (~15 KB a compile kept, ~130 MiB over a first start's ~7,800)
 	for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
-		if (prg->_LinkedShaders[i])
-			ralloc_free(prg->_LinkedShaders[i]->Program);
+		struct gl_linked_shader *linked = prg->_LinkedShaders[i];
+		if (!linked)
+			continue;
+		if (linked->Program) {
+			if (linked->Program->Parameters) {
+				_mesa_free_parameter_list(linked->Program->Parameters);
+				linked->Program->Parameters = NULL;
+			}
+			ralloc_free(linked->Program);
+		}
+		ralloc_free(linked);
+		prg->_LinkedShaders[i] = NULL;
 	}
 
 	delete prg->AttributeBindings;
