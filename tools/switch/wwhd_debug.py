@@ -207,6 +207,22 @@ def cmd_get(args):
     print(f"{args.remote} -> {local} ({os.path.getsize(local)} bytes)")
 
 
+# commands that change the console: refused when the server that answers is another game's (SwitchWaker, the
+# GameCube port, listens on the same port; a WWHD deploy then lands in sdmc:/switch/switchwaker and restarts it)
+CHANGING = ("put", "rm", "mkdir", "deploy", "reload", "quit", "press", "hold", "release", "warp", "stick", "poke")
+
+
+def check_game(args):
+    c = connect(args)
+    try:
+        text = c.command("info", timeout=10.0).decode(errors="replace")
+    finally:
+        c.close()
+    first = text.splitlines()[0] if text else ""
+    if "build switchwaker" in text or re.match(r"version \d", first):
+        sys.exit(f"the console runs another game, not SwitchWakerHD ({first}): nothing sent")
+
+
 def wait_server(args, seconds):
     end = time.time() + seconds
     while time.time() < end:
@@ -344,6 +360,8 @@ def main():
 
     args = p.parse_args()
     try:
+        if args.cmd in CHANGING or (args.cmd == "raw" and args.rest[0] in CHANGING):
+            check_game(args)
         if args.cmd in ("info", "ping", "help", "warps", "quit", "reload"):
             simple(args, args.cmd)
         elif args.cmd in ("press", "hold", "release", "warp", "stick", "peek", "poke"):
