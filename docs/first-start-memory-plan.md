@@ -58,4 +58,12 @@ the change was reverted: patch 9 alone leaves ~430 MiB more than before, several
 before these ended at boot frame 150 with the game's ResMgrThread reading NULL+0x14, `f_0275D21C`: the crash
 seen once on 2026-10-13, before any shader work, unrelated.)
 
-Next: step 3 (a chunk that does not fit must not abort), then step 4's tour.
+**Picto Box after a first start (2026-10-15, checklist C).** No crash (the original report's abort). The first
+pictures, taken right after loading a save in Windfall with 100-200 shaders queued (Windfall is not in the first
+start's list), came out black: their draws were skipped for pending shaders, the known CPU-read surface risk, on
+main too. With the same caches and the queue empty, main and this branch both take good pictures. uam patch 9 on
+the console's 10,663 converted sources (`dksh_cache build`, with and without Guard Malloc): the same
+shadercache_dksh.bin as the unpatched uam, byte for byte.
+
+Next: step 3 (a chunk that does not fit must not abort), then step 4's tour; the black pictures with pending
+shaders are their own fix (draws into CPU-read surfaces must not be skipped).
