@@ -60,6 +60,8 @@ int main() {
     CHECK(menu_backed("WWHD_DEBUG_SERVER") && menu_backed("WWHD_MAIN_SAMPLER") && menu_backed("WWHD_MOD_FAST_SCENES"));
     CHECK(menu_backed("WWHD_CPU_CLOCK") && menu_backed("WWHD_CLIMB") && menu_backed("WWHD_RES_SCALE"));
     CHECK(!menu_backed("WWHD_DK_TRACE_FRAMES") && !menu_backed("WWHD_SCHED_STATS"));
+    // the mods of upstream v0.2.9-v0.2.11 (round 48): every mods/manager.cpp entry is listed
+    CHECK(menu_backed("WWHD_MOD_MOVE_SPEED") && menu_backed("WWHD_MOD_FAST_FORWARD") && menu_backed("WWHD_STORY_SYSTEM"));
     // the owner's env.txt: everything becomes a menu setting, [dev] stays empty
     {
         File f = parse("# Wind Waker HD settings\nswitchCpuClock=1224\n");

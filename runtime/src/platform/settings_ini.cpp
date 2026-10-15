@@ -125,10 +125,14 @@ const MenuVariable* menu_variable(const std::string& name) {
 
 }  // namespace
 
-constexpr ModVariable kModVariables[6] = {
+constexpr ModVariable kModVariables[13] = {
     {"direct-camera", "WWHD_MOD_DIRECT_CAMERA"}, {"mouse-camera", "WWHD_MOD_MOUSE_CAMERA"},
     {"first-person", "WWHD_MOD_FIRST_PERSON"},   {"wall-climb", "WWHD_CLIMB"},
-    {"quick-doors", "WWHD_MOD_QUICK_DOORS"},     {"fast-scenes", "WWHD_MOD_FAST_SCENES"},
+    {"quick-doors", "WWHD_MOD_QUICK_DOORS"},     {"move-speed", "WWHD_MOD_MOVE_SPEED"},
+    {"ladder-speed", "WWHD_MOD_LADDER_SPEED"},   {"sidle-speed", "WWHD_MOD_SIDLE_SPEED"},
+    {"sail-speed", "WWHD_MOD_SAIL_SPEED"},       {"auto-wind", "WWHD_MOD_AUTO_WIND"},
+    {"fast-forward", "WWHD_MOD_FAST_FORWARD"},   {"story-system", "WWHD_STORY_SYSTEM"},
+    {"fast-scenes", "WWHD_MOD_FAST_SCENES"},
 };
 
 File parse(const std::string& text) {
