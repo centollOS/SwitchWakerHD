@@ -444,6 +444,14 @@ std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> storedTrans;  // key
 std::vector<uint8_t> storedBlob;
 std::unordered_set<uint64_t> transWritten;  // keys written this session (or stored)
 uint64_t g_storedHits = 0, g_storedMisses = 0;
+// (this fork, memory round 2) WWHD_DK_VARIANT_IDLE=<frames>: a variant no draw used for that long is freed at a
+// frame start, when its translation record is in memory (a later draw rebuilds it, no decompiler); 0 = never.
+// 3600: two minutes at 30 fps, so the places nearby keep theirs
+const uint32_t g_variantIdle = [] {
+    const char* e = getenv("WWHD_DK_VARIANT_IDLE");
+    return e && *e ? uint32_t(strtoul(e, nullptr, 10)) : 3600u;
+}();
+size_t g_variantsEvicted = 0;
 static_assert(std::is_trivially_copyable_v<LatteDecompilerOutputUniformOffsets>);
 
 void cache_dk_translation(const Shader* sh, uint64_t base, uint32_t units) {
@@ -485,6 +493,10 @@ void cache_dk_translation(const Shader* sh, uint64_t base, uint32_t units) {
     memcpy(record.data(), &size, 4);
     record.insert(record.end(), w.b.begin(), w.b.end());
     cache_write(transFile, record.data(), record.size());
+    // (this fork, memory round 2) kept in memory as the file's records are: an idle variant can be freed and
+    // rebuilt from it (evict_idle_variants), ~0.7 KB against ~11 KB for the variant
+    storedTrans.try_emplace(sh->key, uint32_t(storedBlob.size()), size);
+    storedBlob.insert(storedBlob.end(), w.b.begin(), w.b.end());
 }
 
 struct ByteReader {
@@ -1108,6 +1120,7 @@ Shader* shader_from_record(uint64_t key, bool vertex, std::pair<uint32_t, uint32
     shader->key = key;
     shader->vertex = vertex;
     shader->glslHash = glslHash;
+    shader->drawnFrame = uint32_t(R.frame);
     shader->dec = dec.release();
     fill_texture_lists(shader);
     const auto& u = shader->uniforms;
@@ -1130,6 +1143,7 @@ ShaderMemory shader_memory() {
     m.programs = programHashes.size();
     m.storedRecords = storedTrans.size();
     m.storedBytes = storedBlob.size();
+    m.evicted = g_variantsEvicted;
     return m;
 }
 
@@ -1183,6 +1197,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     Shader* shader = owned.get();
     shader->key = key;
     shader->vertex = vertex;
+    shader->drawnFrame = uint32_t(R.frame);
     shaders.emplace(key, std::move(owned));
     (vertex ? g_lastVs : g_lastPs) = shader;
     LatteDecompilerOutput_t output{};
@@ -1280,6 +1295,8 @@ void reset_shader_memoization() {
     g_lastVs = g_lastPs = nullptr;
     R.shaderEpoch++;
 }
+
+Shader::~Shader() { delete dec; }
 
 // the same GLSL as the OpenGL renderer, so the same shader cache keys (docs/deko3d-plan.md, section 1)
 void select_decompiler() { g_renderer = std::make_unique<OpenGLRenderer>(); }
@@ -1526,6 +1543,33 @@ void shaders_init(void (*progress)(size_t done, size_t total)) {
     log_heap("after the deko3d shader caches");
 }
 
+namespace {
+// (this fork, memory round 2) variants idle for g_variantIdle frames, freed every 150 frames at a frame start
+// (no draw holds one then). The draw path's memos hold Shader pointers: the epoch makes them look again
+// (reset_shader_memoization); compiled DKSH (codes) stay.
+void evict_idle_variants() {
+    if (!g_variantIdle || R.frame % 150 != 0 || R.frame < g_variantIdle) return;
+    const uint32_t before = uint32_t(R.frame) - g_variantIdle;
+    size_t n = 0;
+    for (auto it = shaders.begin(); it != shaders.end();) {
+        const Shader& sh = *it->second;
+        if (sh.ready() && int32_t(sh.drawnFrame - before) < 0 && storedTrans.count(sh.key)) {
+            it = shaders.erase(it);
+            n++;
+        } else
+            ++it;
+    }
+    if (!n) return;
+    g_variantsEvicted += n;
+    g_lastVs = g_lastPs = nullptr;
+    R.shaderEpoch++;
+    static int logged = 0;
+    if (logged++ < 20)
+        LOG("[dk] shader variants: %zu not drawn for %u frames freed (%zu kept; rebuilt from their records when drawn; "
+            "WWHD_DK_VARIANT_IDLE)", n, g_variantIdle, shaders.size());
+}
+}  // namespace
+
 void shaders_frame_start() {
     g_bootDraws = 0;
     {  // (this fork) listed sources: compiled in the background, kept in shadercache_gl.bin for the next starts
@@ -1555,6 +1599,7 @@ void shaders_frame_start() {
     update_priorities();
     load_results(size_t(g_loadBudget));
     log_total();
+    evict_idle_variants();
 }
 
 void save_shader_cache() {

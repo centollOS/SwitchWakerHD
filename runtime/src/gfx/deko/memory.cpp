@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 
 #include "runtime.h"
 
@@ -93,11 +94,49 @@ struct Chunk {
 };
 std::vector<Chunk> g_chunks;
 
+// (this fork, memory round 2) WWHD_DK_IMAGE_TRACE: the heap's events for image_heap_sim.py. A free names the
+// placement it ends by its number (offsets differ under another policy). Little-endian records of 16 bytes.
+struct TraceEvent {
+    enum Kind : uint8_t { Alloc = 1, Free = 2, Pressure = 3, NewChunk = 4 };
+    uint8_t kind;
+    uint8_t alignLog2;  // Alloc: log2 of the alignment
+    uint16_t pad = 0;
+    uint32_t frame;
+    uint32_t id;    // Alloc/Free: the placement's number; NewChunk: the chunk's index
+    uint32_t size;  // bytes (Alloc, Free, NewChunk), Pressure: the request that found no room
+};
+static_assert(sizeof(TraceEvent) == 16);
+struct Trace {
+    bool on = false;
+    std::vector<TraceEvent> events;
+    std::unordered_map<uint64_t, uint32_t> live;  // chunk << 32 | offset -> placement number
+    uint32_t next = 0;
+} g_trace;
+const char* const kTracePath = "image_trace.bin";  // sdmc:/switch/wwhd (the working directory)
+
+void trace(TraceEvent::Kind kind, uint32_t id, uint32_t size, uint32_t alignment = 1) {
+    g_trace.events.push_back({kind, uint8_t(__builtin_ctz(alignment)), 0, uint32_t(R.frame), id, size});
+}
+void trace_placed(int chunk, uint32_t offset, uint32_t size, uint32_t alignment) {
+    if (!g_trace.on) return;
+    const uint32_t id = g_trace.next++;
+    g_trace.live[uint64_t(chunk) << 32 | offset] = id;
+    trace(TraceEvent::Alloc, id, size, alignment);
+}
+void trace_freed(int chunk, uint32_t offset, uint32_t size) {
+    if (!g_trace.on) return;
+    auto it = g_trace.live.find(uint64_t(chunk) << 32 | offset);
+    if (it == g_trace.live.end()) return;
+    trace(TraceEvent::Free, it->second, size);
+    g_trace.live.erase(it);
+}
+
 void add_chunk(uint32_t size) {
     char what[64];
     snprintf(what, sizeof what, "image heap chunk %zu", g_chunks.size());
     g_chunks.push_back({make_block(size, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image, what), size, {{0, size}}});
     g_stats.imageChunks = g_chunks.size();
+    if (g_trace.on) trace(TraceEvent::NewChunk, uint32_t(g_chunks.size() - 1), size);
 }
 
 void chunk_free(Chunk& c, uint32_t offset, uint32_t size) {
@@ -135,6 +174,16 @@ void memory_init() {
     g_descriptors = make_block(align_up((kImageDescriptors + kSamplerDescriptors) * 32, DK_MEMBLOCK_ALIGNMENT),
                                DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached,
                                "descriptors (8192 images, 1024 samplers)");
+    if (const char* e = getenv("WWHD_DK_IMAGE_TRACE"); e && *e == '1') {
+        g_trace.on = true;
+        if (FILE* f = fopen(kTracePath, "wb")) {  // a new trace each session: the magic and the record size
+            fwrite("WIT1", 1, 4, f);
+            const uint32_t recordSize = sizeof(TraceEvent);
+            fwrite(&recordSize, 4, 1, f);
+            fclose(f);
+        }
+        LOG("[dk] image heap trace on (WWHD_DK_IMAGE_TRACE): %s, written every 5 s", kTracePath);
+    }
     g_queries = make_block(kQuerySize, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "queries");
     add_chunk(kImageChunkSize);  // the first image heap chunk now: its size shows in the start-up memory figures
 }
@@ -162,7 +211,10 @@ void frame_begin(uint64_t frame) {
         }
     }
     for (const ImageAlloc& a : s.retired)
-        if (a.chunk >= 0) chunk_free(g_chunks[size_t(a.chunk)], a.offset, a.size);
+        if (a.chunk >= 0) {
+            chunk_free(g_chunks[size_t(a.chunk)], a.offset, a.size);
+            trace_freed(a.chunk, a.offset, a.size);
+        }
     s.retired.clear();
     s.streamUsed = 0;
     // dkCmdBufClear rewinds to the start of the memory fed last (deko3d 0.5.0 CmdBuf::clear keeps it), which
@@ -283,11 +335,13 @@ ImageAlloc image_alloc(uint32_t size, uint32_t alignment) {
                 if (at > off) chunk_free(c, off, at - off);
                 if (at + size < off + len) chunk_free(c, at + size, off + len - at - size);
                 g_stats.imageBytes += size;
+                trace_placed(int(ci), at, size, alignment);
                 return {c.block, at, size, int(ci)};
             }
         }
         // no room: textures nobody draws with any more go first (surfaces.cpp), while that frees something;
         // then a new chunk (bigger than 64 MB only for a bigger image)
+        if (g_trace.on) trace(TraceEvent::Pressure, 0, size, alignment);
         if (image_heap_pressure(size + alignment)) {
             pass--;
             continue;
@@ -307,6 +361,29 @@ void image_free_now(const ImageAlloc& a) {
     if (a.chunk < 0) return;
     g_stats.imageBytes -= a.size;
     chunk_free(g_chunks[size_t(a.chunk)], a.offset, a.size);
+    trace_freed(a.chunk, a.offset, a.size);
+}
+
+ImageHeapFigures image_heap_figures() {
+    ImageHeapFigures f;
+    f.chunks = g_chunks.size();
+    for (const Chunk& c : g_chunks) {
+        f.total += c.size;
+        for (const auto& [off, len] : c.free) {
+            f.free += len;
+            f.largestFree = std::max<uint64_t>(f.largestFree, len);
+        }
+    }
+    return f;
+}
+
+void image_trace_flush() {
+    if (!g_trace.on || g_trace.events.empty()) return;
+    if (FILE* f = fopen(kTracePath, "ab")) {
+        fwrite(g_trace.events.data(), sizeof(TraceEvent), g_trace.events.size(), f);
+        fclose(f);
+    }
+    g_trace.events.clear();
 }
 
 bool g_shaderCodeLoaded = false;

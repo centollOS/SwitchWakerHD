@@ -26,3 +26,10 @@ Every change to upstream files is marked `SwitchWakerHD patch N`.
    (CB_BLEND0_CONTROL 20010504): the alpha stayed 255 and Lenzo never found the subject (issue #7).
    Issue #12 (place names) was the same bug, worked around in the renderer before. Still unfixed
    upstream at `350f2b0` (2026-02).
+
+2. **Control memory chunks lost on clear** (`source/dk_cmdbuf.cpp`, `CmdBuf::clear`): the command buffer's
+   control memory comes in 1 KiB chunks kept in a used list (newest first). `clear()` linked only the newest
+   chunk to the free list, overwriting its link to the older ones, so every frame that needed more than one
+   chunk leaked the rest: ~22,000 chunks (21.6 MiB) in a 14-minute warp tour, found with the malloc census
+   (WWHD_HEAP_CENSUS, docs/memory-round2-plan.md); several hundred MiB over a long session. Still unfixed
+   upstream at `350f2b0` (2026-02).

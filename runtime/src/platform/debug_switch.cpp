@@ -32,6 +32,12 @@
 
 namespace render { uint64_t frame_count(); }
 
+#ifdef WWHD_HEAP_CENSUS
+namespace heap_census {
+void register_commands();
+}
+#endif
+
 namespace debug_switch {
 namespace {
 std::atomic<bool> g_quit{false};
@@ -310,6 +316,9 @@ void start() {
     appletSetAutoSleepDisabled(true);
     LOG("[debug] auto-sleep off while the debug server runs");
     debugsrv::add_command("info", "info                   build, frame, stage, heap, battery, address", info);
+#ifdef WWHD_HEAP_CENSUS
+    ::heap_census::register_commands();  // (this fork, memory round 2) heap_census_switch.cpp
+#endif
     debugsrv::add_command("warps", "warps                  the warp destinations, numbered", warps);
     debugsrv::add_command("warp", "warp <n> | warp <stage> [room] [point]", warp);
     debugsrv::add_command("shot", "shot [game]            PNG of the next frame (game: the game's picture alone)", shot);
