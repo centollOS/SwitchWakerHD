@@ -67,17 +67,22 @@ Use the save states in `sdmc:/switch/wwhd/states/` (`docs/portable-save-states.m
 | E1 | Save in game, return to the title, load | Same place and items |
 | E2 | Portable save state: write slot 1, load it, load one made by the last release | Loads; the old one is accepted |
 
-## F. Memory (renderer, memory or thread changes)
+## F. Memory (every release)
 
 The tour (memory round 2, `docs/memory-round2-plan.md`): 40 warps (every third of `warps`; all 136 hit the game's
-own assert at M_DaiB, #18) for 2 h, the `[mem]` lines kept.
+own assert at M_DaiB, #18), 25 s each, **two laps (~35 min)**, the `[mem]` lines kept. One lap visits every place
+once, so the second lap only revisits: what still grows then is a leak. (The deko3d leak of round 2 showed as
++21 MiB in a 14-minute tour; the image heap reaches its 4 chunks in ~3 minutes.)
 
 | # | Check | Expected |
 |---|---|---|
-| F1 | No crash in 2 h | |
-| F2 | `malloc ... in use` after the first lap (~20 min) to the end | Within a few MiB an hour (v0.4.8: +7 MiB in 18 min while new places were still coming) |
-| F3 | Image heap | 4 chunks (256 MiB), no new one after the first lap |
+| F1 | No crash in the two laps | |
+| F2 | `malloc ... in use` at the end of lap 1 and of lap 2 | Lap 2 adds a few MiB at most |
+| F3 | Image heap | 4 chunks (256 MiB), no new one in lap 2 |
 | F4 | Shader variants | Bounded (1,000-2,000 alive), screenshots fine |
+
+A **2-hour run** only when lap 2 grows, or when the release changes how the renderer or the runtime allocate or
+free memory (texture/shader eviction, the image heap, deko3d patches): then the slope over 2 h, in MiB an hour.
 
 ## G. Performance (renderer, CPU-side or recompiler changes)
 
@@ -103,6 +108,6 @@ Release vX.Y.Z  commit ...  tested YYYY-MM-DD  console: Erista/Mariko, firmware,
 A1 ok  A2 ok  A3 ok/skipped (why)  A4 ok
 B1 ok  B2 ok  B3 ok  B4 ok  B5 ok
 C1 ok  C2 ok  C3 ok  C4 ok  C5 ok  C6 ok
-D1 ..  E1 ..  F: malloc +N MiB/h, chunks N  G: lava ±N, windfall ±N, dragonroost ±N fps
+D1 ..  E1 ..  F: malloc lap 1 N MiB, lap 2 +N MiB, chunks N  G: lava ±N, windfall ±N, dragonroost ±N fps
 Known open, not blocking: #..
 ```
