@@ -63,3 +63,20 @@ chunks of 1 KiB that `CmdBuf::clear` dropped (it kept only the newest used chunk
 (PATCHES.md) links the whole used list back; the same tour with it: **+3.5 MiB** since the mark, no
 appendCtrlCmd growth. What is left: surface structs and their layouts (+1.4 MiB for ~770 new textures), fetch
 shader and program maps (+0.8 MiB), the log buffer (1.4 MiB, one block, not growing).
+
+**Step 5, long test (2026-10-15, main 5e6e2b3 build, 60 min, 140 warps: the 40 of the tours, 3.5 laps).** A first
+run over all 136 warps stopped at 28 min on the game's own assert at M_DaiB (#18, `c_xyz.cpp:285`); memory was
+flat until then. The 40-warp run, no crash, screenshots fine:
+
+| | end of lap 1 (17 min) | end of lap 2 (34 min) | end (60 min) |
+|---|---|---|---|
+| malloc in use | 2463 MiB | 2465 MiB | 2529 MiB (+64: the 5th chunk) |
+| image heap | 4 chunks | 4 chunks | 5 chunks, 128 MiB free |
+| shader variants alive (freed) | 1625 (7161) | 1583 (11909) | 1559 (21453) |
+
+Without the image heap, malloc is flat after lap 1 (+2 MiB in lap 2, 0 in laps 3-4): the deko3d fix holds. The
+5th chunk came in lap 3 (Cave05, ~39 min) from **fragmentation**: 71.5 MiB free in 4 chunks, the largest range
+9.2 MiB, a 10.9 MiB image asked; evicting 144 textures (19 MiB) left no range big enough. The 17-minute trace
+did not reach this, so step 2's "not fragmentation" holds only for short sessions. No 6th chunk in the
+remaining 21 min. Next: a trace of a ~45-minute run, replayed with the split policy (big images apart), to decide
+step 3 (placement, or evicting until a range fits before a new chunk).
