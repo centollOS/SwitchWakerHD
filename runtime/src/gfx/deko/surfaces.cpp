@@ -928,8 +928,15 @@ void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
             g_poolBytes -= s->img.mem.size;
             g_pool.erase(g_pool.begin() + i);
             R.perf.poolHits++;
-        } else
-            make_image(s, s->img, w, h);
+        } else {
+            try {
+                make_image(s, s->img, w, h);
+            } catch (...) {  // (this fork) the image heap full: the surface keeps its image and scale
+                s->img = std::move(old);
+                s->scale = oldScale;
+                throw;
+            }
+        }
     }
     if (keepContents) resample(s, old, s->img);
     if (keepOld) {
@@ -996,11 +1003,22 @@ size_t evict_surface(Surface* s) {
 
 // an evicted surface looked up again: its image made again and the guest data uploaded (also when the lookup is for
 // rendering or a copy's destination: what was there before is kept, as without eviction)
+// (this fork) a kept helper surface (a copy, a chain, a scan copy) whose image cannot be made (the image heap full)
+// is dropped again, so the next call makes it anew instead of using a surface without an image
+void create_surface_image_or_reset(std::unique_ptr<Surface>& s) {
+    try {
+        create_surface_image(s.get());
+    } catch (...) {
+        s.reset();
+        throw;
+    }
+}
+
 void revive(Surface* s) {
+    create_surface_image(s);  // (first: may throw, the image heap full; the surface stays evicted)
     s->evicted = false;
     g_evict.out--;
     g_evict.restores++;
-    create_surface_image(s);
     upload_surface(s);
 }
 
@@ -1029,15 +1047,16 @@ void evict_idle() {
 }
 }  // namespace
 
-bool image_heap_pressure(uint32_t bytes) {
+bool image_heap_pressure(uint32_t bytes, uint64_t minIdle) {
+    if (!minIdle) minIdle = g_pressureFrames;
     std::vector<Surface*> c;
     for (Surface* s : S.list)
-        if (evictable(s, g_pressureFrames)) c.push_back(s);
+        if (evictable(s, minIdle)) c.push_back(s);
     static int logged = 0;
     if (c.empty()) {
         if (logged++ < 20)
-            LOG("[dk] image heap full for %u KiB and no texture unused for %llu frames to evict: a new chunk", bytes >> 10,
-                (unsigned long long)g_pressureFrames);
+            LOG("[dk] image heap full for %u KiB and no texture unused for %llu frames to evict%s", bytes >> 10,
+                (unsigned long long)minIdle, minIdle == g_pressureFrames ? ": a new chunk" : "");
         return false;
     }
     std::sort(c.begin(), c.end(), [](const Surface* a, const Surface* b) { return a->useFrame < b->useFrame; });
@@ -1356,7 +1375,7 @@ Surface* feedback_copy(Surface* s) {
         copy->mips = 1;
         copy->gpuWritten = true;
         copy->scale = s->scale;
-        create_surface_image(copy.get());
+        create_surface_image_or_reset(copy);
         seq = 0;
     }
     if (seq != s->writeSeq) {
@@ -1400,7 +1419,7 @@ Surface* volume_source(Surface* s, const uint32_t* texWords) {
         copy->fmt = s->fmt;
         copy->mips = 1;
         copy->gpuWritten = true;
-        create_surface_image(copy.get());
+        create_surface_image_or_reset(copy);
         seq = 0;
         LOG("[dk] %s is sampled as a 3D texture: its %u layers are copied into one (%s)", describe(s).c_str(),
             s->img.layers, describe(copy.get()).c_str());
@@ -1478,7 +1497,7 @@ Surface* mip_chain(Surface* s, const uint32_t* texWords, const uint32_t* sampler
         c->fmt = s->fmt;
         c->mips = mips;  // (the image at the guest size: create_surface_image keeps a mip chain at scale 1)
         c->gpuWritten = true;
-        create_surface_image(c.get());
+        create_surface_image_or_reset(c);
         for (uint32_t l = 0; l < 16; l++) ch.seq[l] = ~0ull;
     }
     // The levels this lookup can read: the sampler's LOD clamp (as make_sampler gives it to deko3d). The game
@@ -1617,7 +1636,7 @@ void guest_writeback() {
                 sized->format = s->format;
                 sized->fmt = s->fmt;
                 sized->gpuWritten = true;
-                create_surface_image(sized.get());
+                create_surface_image_or_reset(sized);
             }
             blit(s, 0, 0, s->width, s->height, sized.get(), 0, 0, s->width, s->height);
             src = sized.get();
@@ -1925,7 +1944,7 @@ void copy_scan(Surface* src, std::unique_ptr<Surface>& scan) {
         scan->gpuWritten = true;
         scan->renderTarget = true;
         scan->scale = src->scale;  // presenting scales it to the window
-        create_surface_image(scan.get());
+        create_surface_image_or_reset(scan);
     }
     transfer_begin();
     copy_image(src, 0, 0, scan.get(), 0, 0, std::min(src->img.pw, scan->img.pw), std::min(src->img.ph, scan->img.ph), 1);
