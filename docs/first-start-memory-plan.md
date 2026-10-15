@@ -76,3 +76,8 @@ whose image cannot be made stay consistent (dropped, or the old image kept). Wit
 Windfall's render targets): the picture black, `draw skipped: image heap full` logged, the game on at 30 fps, no
 crash. With 3 chunks: Windfall, pictures, the sea and 16 warps (Forest Haven to the Ghost Ship) stayed within 3
 chunks by the usual evictions, all good.
+
+**Step 4 (2026-10-16, console, empty caches, the card waited for).** The step-3 build: preparation 25,690 variants
+in 1,321 s, heap never used 472 MiB after it; then Quest Log 2 and 40 warps, 25 s each (the sea to the Ghost Ship,
+Ganon's Tower, the Forsaken Fortress): no crash, the image heap at 3 chunks (192 MiB) the whole tour, heap never used
+408 MiB at the end, six image chunks' worth.
