@@ -153,6 +153,9 @@ void shaders_init(void (*progress)(size_t done, size_t total) = nullptr);
 // render thread, from begin_commands once per frame (and by translate when it has budget): the worker's
 // finished DKSH -> code_load + dkShaderInitialize -> Ready (or Failed, logged). At most `budget` loads.
 void shaders_frame_start();
+// (this fork) render thread: waits for a pending shader's compile and loads it (draw.cpp: a draw that must not be
+// skipped, into a 3D color target); a ready or failed shader returns at once
+void shader_wait(Shader* sh);
 // each draw (draw_impl): ends the start-up shader wait at the first big frame (WWHD_DK_SHADER_BOOT_WAIT)
 void shaders_draw_seen();
 // main thread at shutdown (render::shutdown): the worker takes no more jobs; the records the writer thread

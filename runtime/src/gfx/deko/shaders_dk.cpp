@@ -944,8 +944,15 @@ void wait_for(ShaderCode* code, uint64_t hash) {
     {
         std::lock_guard<std::mutex> lk(workerMutex);
         for (Job& j : jobs)
-            if (j.hash == hash) j.priority = ~0u;  // (a background job from shadercache_gl.bin too)
+            if (j.hash == hash) {
+                j.priority = ~0u;  // (a background job from shadercache_gl.bin too)
+                if (j.background) {  // (this fork) taken while the background is paused too
+                    j.background = false;
+                    foregroundQueued++;
+                }
+            }
     }
+    workerCv.notify_one();
     while (code->state == ShaderCode::Queued) {
         {
             std::unique_lock<std::mutex> lk(workerMutex);
@@ -1281,6 +1288,15 @@ void shader_wanted(Shader* sh) {
         if (!other->code->wantedFrame++) wantedCodes.push_back(other->code);
         other->code->partner = sh->glslHash;
     }
+}
+
+void shader_wait(Shader* sh) {
+    if (!sh || !sh->pending() || !sh->code) return;
+    const uint64_t t0 = now_ns();
+    wait_for(sh->code, sh->glslHash);
+    refresh(sh);
+    LOG("[dk] a draw into a 3D color target waited %.0f ms for its %s shader %016llx", double(now_ns() - t0) / 1e6,
+        sh->vertex ? "vertex" : "pixel", (unsigned long long)sh->glslHash);
 }
 
 void shaders_draw_seen() {
