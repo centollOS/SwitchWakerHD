@@ -31,3 +31,31 @@ taken but free (3,187 − 2,760) that a 64 MiB block cannot use; (2) a chunk tha
    again; a draw whose texture still cannot be placed is skipped (logged) instead of ending the game.
 4. **Console check:** the same first start, then the 40-warp tour for one lap: no crash, heap never used well above
    one chunk.
+
+## Results
+
+**Step 1, census (2026-10-15, main + kModVariables, census build, empty caches).** Once the card was done the extra
+memory was the preparation's own: the recorded variants (`background_shaders_switch.cpp`, ~228 MiB of registers in
+156,715 vectors, + 18 MiB of records) kept through the translation, and uam's per-compile leftovers over ~7,800
+compiles (the linked shaders' Mesa IR ~98 MiB, `ralloc_asprintf_rewrite_tail` 13 MiB, parameter lists ~11 MiB,
+nv50's binary 9 MiB).
+
+**Step 2 (2026-10-15, first starts with empty caches, normal builds unless noted).** Two fixes were tried: uam
+patch 9 (a compile's linked shaders, parameter lists and binary freed; DKSH bytes unchanged) and freeing the
+recorded variants once the list is made.
+
+| build | translation | compile (mean) | heap never used after |
+|---|---|---|---|
+| before (main + kModVariables) | 1,218 s | ~100 ms | 47 MiB |
+| patch 9 + recorded freed | 1,614 s | 117 ms | 651 MiB |
+| patch 9 + recorded freed, census build | 1,936 s (census before: 1,537) | 128 ms | 581 MiB |
+| **patch 9 alone (kept)** | **1,325 s** | 85 ms | **476 MiB** |
+| patch 9 + recorded in 4 MiB blocks, then freed | 1,621 s | 98 ms | 546 MiB |
+
+Freeing the recorded variants cost ~300 s of translation every time, also with their data in a few 4 MiB blocks
+(so not the small holes between other threads' blocks that was the first guess); the cause was not found and
+the change was reverted: patch 9 alone leaves ~430 MiB more than before, several image heap chunks. (One run
+before these ended at boot frame 150 with the game's ResMgrThread reading NULL+0x14, `f_0275D21C`: the crash
+seen once on 2026-10-13, before any shader work, unrelated.)
+
+Next: step 3 (a chunk that does not fit must not abort), then step 4's tour.
