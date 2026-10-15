@@ -1,5 +1,6 @@
 #include "compiler_iface.h"
 #include "uam_log.h"
+#include <stdlib.h>
 
 namespace
 {
@@ -300,6 +301,9 @@ DekoCompiler::~DekoCompiler()
 {
 	if (m_glsl)
 		glsl_program_free(m_glsl);
+	// SwitchWakerHD patch 9: the binary nv50_ir_generate_code MALLOCs and hands over (nouveau frees it with
+	// the program); the DKSH has been written from it by now
+	free(m_info.bin.code);
 
 	if (!s_frontendResident)
 		glsl_frontend_exit();

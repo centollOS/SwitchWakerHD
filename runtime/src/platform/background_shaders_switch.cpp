@@ -18,6 +18,7 @@
 
 #include "../mods/mods.h"
 #include "../runtime.h"
+#include "debug_server.h"
 #include "host.h"
 #include "shader_list_switch.h"
 #include "shader_scan_switch.h"
@@ -202,9 +203,14 @@ void watch_card_button() {
     PadState pad;
     padInitializeDefault(&pad);
     const double t0 = now();
+    bool injectedB = false;
     while (g_card) {
         padUpdate(&pad);
-        if (now() - t0 > 2.0 && (padGetButtonsDown(&pad) & HidNpadButton_B)) {
+        // a B pressed through the debug server too (it reaches the game's input poll, not this PadState)
+        const bool b = debugsrv::running() && (debugsrv::injected().buttons & HidNpadButton_B);
+        const bool injectedDown = b && !injectedB;
+        injectedB = b;
+        if (now() - t0 > 2.0 && ((padGetButtonsDown(&pad) & HidNpadButton_B) || injectedDown)) {
             LOG("[bg-shaders] B on the loading card: play now, the rest goes on gently");
             g_card = false;
             set_fast(false);

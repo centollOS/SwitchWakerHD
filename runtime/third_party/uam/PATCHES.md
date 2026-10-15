@@ -57,6 +57,16 @@ Every change to upstream files is marked `SwitchWakerHD patch N`.
    ends on a barrier-setting instruction). The DKSH compiler name gains "patch 8", so every cached
    DKSH is rebuilt.
 
+9. **Free a compile's memory** (`source/glsl_frontend.cpp`, `glsl_program_free`;
+   `source/compiler_iface.cpp`, `~DekoCompiler`): uam freed the program but not its linked shaders
+   (each its own ralloc tree: the linked IR), their programs' parameter lists (malloc, not ralloc) or
+   nv50's binary (`m_info.bin.code`, MALLOC). Freed now as Mesa's `_mesa_delete_linked_shader` and
+   `_mesa_delete_program` do. On the console (2026-10-15 census, first start, ~7,800 compiles) this
+   was ~130 MiB that stayed in use after the preparation. The DKSH bytes do not change (no new
+   compiler name): `uam_dksh_test` on 589 sources, 175 identical to the unpatched tool, the other 414
+   fail in both (GL-renderer sources, driver constbuf uniforms), clean under Guard Malloc; macOS
+   `leaks` at exit: 3.43 MB before, 0.29 MB after.
+
 Check: `uam_dksh_test` (`-DWWHD_UAM_TEST=ON`) compiles a directory of GLSL files in one process and
 compares the DKSH bytes with reference files written by the `uam` tool (target `uam_tool`), one
 process per shader.
