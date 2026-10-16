@@ -196,6 +196,13 @@ Total backed memory is 1448 MiB, so hbmenu must run in title-takeover mode, not 
 - Opens, stats, reads and writes release the caller's emulated core while the host works, and are counted and timed for the stats (`files` in the `[gl]` and `[hitch]` lines).
 - **Case-insensitive lookup on Linux (`fold_case`).** The game requests `content/Common/Audiores/...`, but the disc has `AudioRes`. On case-sensitive file systems the open failed and the game crashed at guest address `0x3C` during audio init. Missing path components are now matched case-insensitively and the results are cached. The Switch (FAT/exFAT) and macOS are case-insensitive already, so this only affects Linux.
 
+### Guest mods built into the NRO (`runtime/src/mods/guest_builtin.cpp`, `tools/switch/guest_mods.py`)
+
+- Horizon has no `dlopen` or compiler, so Mod SDK v2 guest mods are translated on the computer and compiled into the NRO (`make_sd.py --guest-mod`). Design and console results: [guest-mods-switch-plan.md](guest-mods-switch-plan.md).
+- Only the hooked game functions get the mods' check (`WWHD_RECOMP_MOD_HOOKS_ONLY=build/guest-mods/hooks.txt`); the rest of the game code is the same as without mods. A hook on another function is refused at load.
+- The mods' guest memory (from `0x7F000000`) is backed only when the NRO has mods. Their files are in `sdmc:/switch/wwhd/mods/<id>/` (`package/`, `data/`, `options.json`).
+- Horizon has no `openat` (`posix_stubs_switch.cpp`): `guest_files.h` opens the path directly on the Switch.
+
 ### OpenGL renderer (`runtime/src/gfx/gl/`, namespace `gfxgl`, `render::Api::OpenGL`)
 
 | File | Role |

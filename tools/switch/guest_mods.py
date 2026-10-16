@@ -8,12 +8,14 @@ what the build and the SD card need (docs/guest-mods-switch-plan.md):
   OUT/hooks.txt                 the game functions the mods hook (canonical addresses): the recompile's
                                 WWHD_RECOMP_MOD_HOOKS_ONLY, so only those get the mods' check
   OUT/registry.c, OUT/mod_*.c   compiled into the NRO when OUT is build/guest-mods (cmake/SwitchPort.cmake)
-  OUT/sd/<id>/                  sdmc:/switch/wwhd/mods/<id>/: package/ (manifest, images), data/ (the setup's
-                                files), options.json
-  OUT/guest-mods.json           what was built
+  OUT/sd/<id>/                  sdmc:/switch/wwhd/mods/<id>/: package/ (manifest, images), options.json
+  DATA/<id>/                    the mod's setup output (its data/ on the SD card): outside the checkout, since a
+                                mod's files derived from your games must not land in a Git repository; DATA is
+                                --data, by default a per-user folder (user_data_root)
+  OUT/guest-mods.json           what was built (each mod's data folder too)
 
-usage: guest_mods.py PACKAGE [PACKAGE ...] [--out build/guest-mods] [--build USA|EU] [--gc-game PATH]
-                     [--option ID.KEY=VALUE ...]
+usage: guest_mods.py PACKAGE [PACKAGE ...] [--out build/guest-mods] [--data DIR] [--build USA|EU]
+                     [--gc-game PATH] [--option ID.KEY=VALUE ...]
        guest_mods.py --clear [--out build/guest-mods]          (no mods: the NRO as without this script)
 
 PACKAGE is a mod's .zip from the catalogue or its folder (manifest.json with kind "guest" and its mod.elf).
@@ -50,6 +52,18 @@ GQR_WRITE = re.compile(r"c->gqr\[\d\]\s*=(?!=)")
 
 class Fail(Exception):
     pass
+
+
+def user_data_root():
+    """The per-user folder for the mods' setup output (macOS Application Support, Windows LOCALAPPDATA, XDG)."""
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    elif os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+    return os.path.join(base, "SwitchWakerHD", "guest-mods")
 
 
 def c_name(mod_id):
@@ -180,7 +194,9 @@ def build(args):
         if GQR_WRITE.search(source):
             raise Fail("%s writes a GQR (paired-single quantization register): not supported in the Switch build" % mid)
         sd = os.path.join(out, "sd", mid)
-        data = os.path.join(sd, "data")
+        os.makedirs(sd)
+        data = os.path.join(os.path.abspath(args.data), mid)
+        shutil.rmtree(data, ignore_errors=True)
         os.makedirs(data)
         run_setup(man, pkg, data, args.gc_game)
         os.makedirs(os.path.join(sd, "package"))
@@ -201,7 +217,7 @@ def build(args):
                 f.write("#define %s gm_%s_%s\n" % (s, cn, s))
             f.write("#define wwhd_guest_module_v1 wwhd_guest_builtin_%s\n" % cn)
             f.write('#include "translated/%s.c"\n' % cn)
-        mods.append({"id": mid, "name": man.get("name", mid), "version": man.get("version", ""), "c_name": cn,
+        mods.append({"id": mid, "name": man.get("name", mid), "version": man.get("version", ""), "c_name": cn, "data": data,
                      "base": base, "region": region, "heap": heap, "memory": t.end - base,
                      "hooks": ["%08X" % tg for _, tg, _, _ in canon.hooks], "services": t.services})
         print("  %s %s: %d functions, %d hooks, guest memory %08X-%08X (module %d bytes, heap %d)" % (
@@ -233,6 +249,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("package", nargs="*")
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "guest-mods"))
+    ap.add_argument("--data", default=user_data_root(), help="the mods' setup output, outside the checkout")
     ap.add_argument("--build", default="USA", help="the game's build (USA or EU)")
     ap.add_argument("--gc-game", help="your GameCube Wind Waker, for mods whose setup reads it")
     ap.add_argument("--option", action="append", default=[], help="a mod option: ID.KEY=VALUE")

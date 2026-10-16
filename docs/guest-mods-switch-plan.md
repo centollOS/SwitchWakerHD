@@ -60,4 +60,17 @@ the mod's package: that is their consent; no trust prompt on the console).
 
 ## Results
 
-(none yet)
+- **Steps 1-2 (2026-10-16).** gc-minimap 0.2.1 from the catalogue zip and a USA GameCube ISO: maps prepared in 34 s,
+  module 5,520 bytes at `7F000000` (heap 256 KiB, region to `7F050000`); its C compiles for the Switch without warnings.
+  `WWHD_RECOMP_MOD_HOOKS_ONLY` with `0240EBB0`: build/gen differs from a plain recompile only in the check in that one
+  function (`code_hot_007.c`) and the tables in `table.c`.
+- **Step 3, console (USA, handheld).** The log: `return hook 0240EBB0`, `loaded gc-minimap (built into the NRO)`.
+  Outset Island: the chart, with Link's marker on the pier; it moves and turns as he walks; 30 fps. A warp to
+  Windfall: its chart (sector change). Hidden in the pause menu, in the Tower of the Gods' sector (no chart) and in
+  Link's house.
+  - Found on the way: every mod file read failed on the Switch (the chart never showed): upstream's `guest_files.h`
+    opens through `openat`, which Horizon lacks (`posix_stubs_switch.cpp` returns `ENOSYS`). Fixed with a marked fork
+    branch that opens the path directly (the SD card's FAT has no links to guard against).
+- **Step 4.** The mod's setup tool refuses a data folder inside a Git checkout, so `guest_mods.py` writes the setup's
+  output to a per-user folder (`--data`, default `~/Library/Application Support/SwitchWakerHD/guest-mods` on macOS,
+  `%LOCALAPPDATA%` on Windows, XDG on Linux) and `make_sd.py` copies it into `OUT/switch/wwhd/mods/<id>/data/`.

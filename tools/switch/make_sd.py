@@ -9,7 +9,8 @@ your computer, from your own legally dumped copy (The Wind Waker HD, version 0: 
   2. checks that code/cking.rpx is the version the port is made for;
   3. translates the game's PowerPC code to C (tools/recomp/recomp.py -> build/gen/);
   4. builds the Switch homebrew in the devkitPro container (tools/switch/build.sh -> build/switch-dk/wwhd.nro);
-  5. writes OUT/switch/wwhd/ (wwhd.nro and game/): copy OUT's contents to the root of the SD card.
+  5. writes OUT/switch/wwhd/ (wwhd.nro, game/ and with --guest-mod mods/): copy OUT's contents to the root
+     of the SD card.
 
 usage:
   make_sd.py --image GAME.wux [--out DIR]     disc key: GAME.key next to the image (16 bytes or 32 hex digits);
@@ -23,12 +24,18 @@ usage:
                                               shaders you met, and guesses for the places you have not visited yet
                                               (a shadercache_gl.bin is still accepted: its sources only)
            --jobs N                           parallel compiles (each needs ~1.5 GB of memory)
+           --guest-mod PACKAGE                a code mod (Mod SDK v2) built into the NRO: its .zip from the mod
+                                              catalogue or its folder; repeat for more (tools/switch/guest_mods.py)
+           --gc-game PATH                     your GameCube Wind Waker (.iso/.gcm/.rvz or extracted), for mods
+                                              whose setup reads it (the GameCube sea minimap)
+           --mod-option ID.KEY=VALUE          a mod's option (e.g. gc-minimap.size=260); repeat for more
 
 Needs Python 3 with pycryptodome (only for --image: pip install pycryptodome) and Docker or Podman, or
 a native devkitPro (Windows: INSTALL.md, "Windows: devkitPro").
 What it makes contains the game: it is for your own console only; do not share it.
 """
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -188,6 +195,9 @@ def main():
     ap.add_argument("--keys", help="native build: your console's prod.keys, for the HOME-screen forwarder "
                     "(default: .switch\\prod.keys in your user folder; without it the forwarder is skipped)")
     ap.add_argument("--no-forwarder", action="store_true", help="native build: do not build the forwarder (.nsp)")
+    ap.add_argument("--guest-mod", action="append", default=[], help="a code mod built into the NRO (.zip or folder)")
+    ap.add_argument("--gc-game", help="your GameCube Wind Waker, for mods whose setup reads it")
+    ap.add_argument("--mod-option", action="append", default=[], help="a mod's option: ID.KEY=VALUE")
     args = ap.parse_args()
     if not (args.image or args.wua or args.game_dir):
         ap.error("one of --image, --wua or --game-dir is required")
@@ -216,11 +226,26 @@ def main():
     print("  The Wind Waker HD (%s), version 0: OK" % build.name)
 
     step(3, "translating the game code to C (about a minute)")
+    # code mods built into the NRO (docs/guest-mods-switch-plan.md): prepared and translated first, since the game
+    # code gets their check in the functions they hook; without --guest-mod an earlier set is removed
+    mods_dir = os.path.join(ROOT, "build", "guest-mods")
+    tool = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "guest_mods.py"), "--out", mods_dir]
+    renv = dict(os.environ)
+    if args.guest_mod:
+        run(tool + [os.path.abspath(p) for p in args.guest_mod] + ["--build", build.name] +
+            (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []) +
+            sum((["--option", o] for o in args.mod_option), []))
+        renv["WWHD_RECOMP_MOD_HOOKS_ONLY"] = os.path.join(mods_dir, "hooks.txt")
+    else:
+        if args.mod_option or args.gc_game:
+            fail("--mod-option and --gc-game go with --guest-mod")
+        run(tool + ["--clear"])
     gen = os.path.join(ROOT, "build", "gen")
     if os.path.islink(gen):
         fail("build/gen is a symbolic link: remove it (or run from a checkout without one)")
     shutil.rmtree(gen, ignore_errors=True)
-    run([sys.executable, "-I", os.path.join(ROOT, "tools", "recomp", "recomp.py"), os.path.join(game, "code", "cking.rpx"), gen])
+    run([sys.executable, "-I", os.path.join(ROOT, "tools", "recomp", "recomp.py"), os.path.join(game, "code", "cking.rpx"), gen],
+        env=renv)
 
     step(4, "building the Switch homebrew (10-20 minutes the first time)")
     env = dict(os.environ)
@@ -243,6 +268,13 @@ def main():
     shutil.copyfile(nro, os.path.join(wwhd, "wwhd.nro"))
     if dksh:
         shutil.copyfile(dksh, os.path.join(wwhd, "shadercache_dksh.bin"))
+    if args.guest_mod:  # sdmc:/switch/wwhd/mods/<id>/: each mod's images and options, and its prepared data
+        with open(os.path.join(mods_dir, "guest-mods.json")) as f:
+            for m in json.load(f)["mods"]:
+                dst = os.path.join(wwhd, "mods", m["id"])
+                shutil.rmtree(dst, ignore_errors=True)
+                shutil.copytree(os.path.join(mods_dir, "sd", m["id"]), dst)
+                shutil.copytree(m["data"], os.path.join(dst, "data"))
     gdst = os.path.join(wwhd, "game")
     if os.path.realpath(gdst) != os.path.realpath(game):
         shutil.rmtree(gdst, ignore_errors=True)
