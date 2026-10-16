@@ -177,19 +177,34 @@ macro(switch_port_executable)
       set(WWHD_NRO_OUTPUT wwhd.nro)
     endif()
 
-    # NACP from the shared script; name (unless given), author, version (git describe) and title ID are its defaults, as the forwarder's
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
-    # The second output never exists, so the command runs on every build: the version (git describe) and the
-    # name are not inputs CMake can see. make_nacp.py leaves the file alone when its content is the same, and the
-    # NRO is only packed again when the NACP changed (restat with Ninja, the timestamp with make).
-    add_custom_command(
-      OUTPUT "${WWHD_NACP_FILE}" "${WWHD_NACP_FILE}.always"
-      COMMAND ${Python3_EXECUTABLE} "${WWHD_MAKE_NACP}" "${WWHD_NACP_FILE}" ${WWHD_NACP_NAME_ARGS}
-      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-      DEPENDS "${WWHD_MAKE_NACP}"
-      COMMENT "Generating NRO NACP with forwarder-matching metadata"
-      VERBATIM
-    )
+    # NACP from the shared script; name (unless given), author, version (git describe) and title ID are its defaults, as the forwarder's.
+    # The native build (devkitPro's MSYS2 on Windows, which has no Python of its own) gets the Python that runs
+    # make_sd.py from build.sh (-DPython3_EXECUTABLE); without any Python, devkitPro's own NACP tool with the same
+    # name and author, so the build never stops for it.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+      # The second output never exists, so the command runs on every build: the version (git describe) and the
+      # name are not inputs CMake can see. make_nacp.py leaves the file alone when its content is the same, and the
+      # NRO is only packed again when the NACP changed (restat with Ninja, the timestamp with make).
+      add_custom_command(
+        OUTPUT "${WWHD_NACP_FILE}" "${WWHD_NACP_FILE}.always"
+        COMMAND ${Python3_EXECUTABLE} "${WWHD_MAKE_NACP}" "${WWHD_NACP_FILE}" ${WWHD_NACP_NAME_ARGS}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        DEPENDS "${WWHD_MAKE_NACP}"
+        COMMENT "Generating NRO NACP with forwarder-matching metadata"
+        VERBATIM
+      )
+    else()
+      set(_nacp_name "SwitchWakerHD")
+      if(DEFINED WWHD_NACP_NAME AND NOT WWHD_NACP_NAME STREQUAL "")
+        set(_nacp_name "${WWHD_NACP_NAME}")
+      endif()
+      if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+        string(APPEND _nacp_name " (deko3d debug)")
+      endif()
+      message(WARNING "no Python for tools/switch/forwarder/make_nacp.py: the NRO's NACP from nx_generate_nacp (version 0.1.0)")
+      nx_generate_nacp(OUTPUT "${WWHD_NACP_FILE}" NAME "${_nacp_name}" AUTHOR "centollOS/SwitchWakerHD" VERSION "0.1.0")
+    endif()
 
     # The icon: a finished 256x256 JPEG that tools/switch/build.sh made on the host (-DWWHD_NRO_ICON); without it
     # the NRO keeps the default icon

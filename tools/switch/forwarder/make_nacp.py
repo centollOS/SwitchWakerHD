@@ -18,6 +18,8 @@ shows the title and icon whatever the console's language. Choices (as in centoll
   - PresenceGroupId, SaveDataOwnerId, LocalCommunicationId[0] and SeedForPseudoDeviceId = the
     title ID, as the official tools and hacBrewPack's --titleid fill them; AddOnContentBaseId = title ID + 0x1000.
 """
+from __future__ import annotations  # "str | None" below on Python 3.8 and 3.9 (the installer accepts 3.8)
+
 import argparse
 import os
 import struct

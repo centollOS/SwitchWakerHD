@@ -118,6 +118,13 @@ elif [[ $native == 1 ]]; then
 else
     nro_opts+=("-DWWHD_NRO_ICON=/src/$nro_icon")
 fi
+# the native build's CMake runs make_nacp.py with the Python that runs make_sd.py (devkitPro's MSYS2 has none of
+# its own); the container has its own python3
+if [[ $native == 1 && -n ${WWHD_PYTHON:-} ]]; then
+    nacp_py=$WWHD_PYTHON
+    if command -v cygpath >/dev/null 2>&1; then nacp_py=$(cygpath -u "$nacp_py"); fi  # C:\...\python.exe on Windows
+    nro_opts+=("-DPython3_EXECUTABLE=$nacp_py")
+fi
 nro_opts_q=$(printf '%q ' "${nro_opts[@]}")
 if [[ $native == 1 ]]; then
     export DEVKITA64=${DEVKITA64:-$DEVKITPRO/devkitA64}
