@@ -82,6 +82,10 @@ sealed class InstallEngine
     // Optional: the console's prod.keys, for the HOME-screen forwarder (.nsp). Only with it are Git, Pillow
     // and MSYS2's gcc installed (INSTALL.md, "HOME-screen icon"); without it make_sd.py gets --no-forwarder.
     public string? ForwarderKeys;
+    // Optional: the player's GameCube Wind Waker (disc image or folder), for the GameCube sea minimap: make_sd.py
+    // downloads the mod from the mod catalogue and builds it into the game (INSTALL.md, "Optional: code mods").
+    public string? MinimapGame;
+    public const string MinimapMod = "gc-minimap";
 
     public string ReleaseDir { get; private set; } = "";
     public string SdOut => Path.Combine(ReleaseDir, "build", "sd");
@@ -144,6 +148,13 @@ sealed class InstallEngine
             throw new InstallException(Str.Get("pre_no_game", GamePath));
         if (GameArg == "--image" && CheckImageKeys(GamePath) is string keys)
             throw new InstallException(keys);
+
+        if (MinimapGame != null)
+        {
+            Info(Str.Get("mm_pre", MinimapGame));
+            if (!File.Exists(MinimapGame) && !Directory.Exists(MinimapGame))
+                throw new InstallException(Str.Get("mm_no_game", MinimapGame));
+        }
 
         CheckClock();
 
@@ -256,6 +267,43 @@ sealed class InstallEngine
         var pkgs = "zstandard pycryptodome" + (ForwarderKeys != null ? " pillow" : "");
         if (Exec(pythonCmd, "-m pip install --disable-pip-version-check " + pkgs, check: false) != 0)
             throw new InstallException(Str.Get("py_pkgs_fail", pkgs));
+        if (MinimapGame != null && IsZstdRvz(MinimapGame)) Python314();
+    }
+
+    // A Dolphin .rvz with Zstandard compression (its default): the minimap's map tool reads it with Python 3.14's own
+    // compression.zstd. 3.14 goes next to the Python above, reached through the py launcher (py -3.14), which
+    // make_sd.py's tools/switch/guest_mods.py looks for; the build keeps the Python above.
+    internal static bool IsZstdRvz(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+            var head = new byte[0x50];
+            using (var f = File.OpenRead(path))
+                if (f.Read(head, 0, head.Length) != head.Length) return false;
+            if (head[0] != 'R' || head[1] != 'V' || head[2] != 'Z' || head[3] != 1) return false;
+            return head[0x4C] == 0 && head[0x4D] == 0 && head[0x4E] == 0 && head[0x4F] == 5;   // disc struct: compression
+        }
+        catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { return false; }
+    }
+
+    bool HasZstdPython()
+    {
+        foreach (var (cmd, args) in new[] { ("py", "-3.14 "), ("py", "-3 "), (pythonCmd, "") })
+            if (Capture(cmd, args + "-c \"import compression.zstd;print('ZSTD')\"").output.Contains("ZSTD")) return true;
+        return false;
+    }
+
+    void Python314()
+    {
+        if (HasZstdPython()) return;
+        Say(Str.Get("mm_py_installing"));
+        var rc = Exec("winget", "install --id Python.Python.3.14 --source winget --accept-package-agreements " +
+                                "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=0 Include_launcher=1\"",
+                      check: false);
+        RefreshPath();
+        if (!HasZstdPython()) throw new InstallException(Str.Get(rc == -1 ? "py_no_winget" : "mm_py_fail"));
+        Ok(Str.Get("mm_py_ok"));
     }
 
     bool FindPython()
@@ -689,6 +737,7 @@ sealed class InstallEngine
         void OnLine(string line)
         {
             if (line.StartsWith("[+] HOME-screen forwarder")) { Status?.Invoke(Str.Get("fwd_building")); return; }
+            if (line.StartsWith("  " + MinimapMod + ": ")) { Status?.Invoke(Str.Get("mm_building")); return; }
             var m = StageLine.Match(line);
             if (m.Success)
             {
@@ -719,7 +768,8 @@ sealed class InstallEngine
         }
         var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
-        var rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}", ReleaseDir, check: false,
+        var minimap = MinimapGame != null ? $" --guest-mod {MinimapMod} --gc-game {Quote(MinimapGame)}" : "";
+        var rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}{minimap}", ReleaseDir, check: false,
                       onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); }, env: env);
         Progress?.Invoke(rc == 0 ? 1 : (double?)null);
         if (rc != 0)
@@ -764,6 +814,9 @@ sealed class InstallEngine
         var msg = new StringBuilder(Str.Get("build_fail", rc));
         var why = lines.FindLastIndex(l => l.StartsWith("make_sd: "));
         if (why >= 0) msg.Append("\n").Append(lines[why]);
+        // the code mods' step (tools/switch/guest_mods.py) says what stopped it on its own line
+        var mods = lines.FindLastIndex(l => l.StartsWith("guest_mods: "));
+        if (mods >= 0) msg.Append("\n").Append(lines[mods]);
         // a compiler's first "error:" says more than make's "*** Error 2" after it
         var before = lines.Take(why >= 0 ? why : lines.Count).Where(l => !l.StartsWith("$ ")).ToList();
         var errLine = before.FirstOrDefault(l => Regex.IsMatch(l, @"\berror\s*:", RegexOptions.IgnoreCase))
@@ -773,6 +826,7 @@ sealed class InstallEngine
         var all = string.Join("\n", lines);
         bool Has(string pattern) => Regex.IsMatch(all, pattern, RegexOptions.IgnoreCase);
         string? hint =
+            mods >= 0                                                           ? "hint_minimap" :
             Has(@"disc key (was )?not found")                                   ? "hint_disc_key" :
             Has(@"common key not found")                                        ? "hint_common_key" :
             Has(@"bad FST magic|wrong key|not this disc's key")                 ? "hint_wrong_key" :

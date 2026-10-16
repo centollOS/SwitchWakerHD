@@ -122,3 +122,11 @@ D (installer build; a Windows run by the user).
   options at the values of `options.json`. A raises the slider's edit, Right x 8: size 240 -> 284, saved when let go;
   the style combo: `original`. After a restart, Windfall: the panel 225 px wide against 190 px at 240 (x1.18, as
   284/240) and the original style's tiles.
+- **Catalogue ids (2026-10-17).** `--guest-mod gc-minimap`: the catalogue's entry (kind guest, its single download),
+  SHA-256 checked (`5369bcac...`, as the zip used before), kept in `DATA/downloads/`; python.org's Python 3.14 has no
+  certificates here: curl took over. A full guest_mods.py run by id: as from the zip.
+- **D (2026-10-17).** The installer's game page has a "GameCube sea minimap (optional)" card (disc or folder); the
+  build gets `--guest-mod gc-minimap --gc-game PATH`; a Zstandard RVZ installs Python 3.14 beside (winget, py launcher,
+  not on PATH) when no Python has `compression.zstd`; a `guest_mods:` line goes into the error box with its hint; the
+  done page says where the options are. Built on macOS with the .NET 8 SDK (`EnableWindowsTargeting`): no warnings or
+  errors; `IsZstdRvz` run against the test headers and the ISO. Not run on Windows (the user's test).

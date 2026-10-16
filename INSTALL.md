@@ -20,6 +20,9 @@ download, and the build. You only need your own personal dump of the game.
    read where they are, never copied). The installer then also sets up Git, Pillow and MSYS2's gcc and builds
    the forwarder `.nsp` ([details](tools/switch/forwarder/INSTALL.md)); it travels in `NSP\` with the rest: install it with
    DBI (*Browse SD card > NSP > wwhd_forwarder.nsp > Install*; it needs current Atmosphère sigpatches).
+   Optional, the **GameCube sea minimap**: choose your own GameCube Wind Waker (`.iso`, `.gcm`, `.rvz` or its
+   folder); the installer downloads the mod and builds it into the game
+   ([details](#optional-code-mods-the-gamecube-sea-minimap)).
 4. Press **Install**. If devkitPro is not installed yet, the installer asks you to open its setup: accept the
    license and keep the default path (`C:\devkitPro`).
 5. Wait for the build (10–30 minutes), then choose how the files reach the Switch:
