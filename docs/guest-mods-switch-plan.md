@@ -88,3 +88,25 @@ the mod's package: that is their consent; no trust prompt on the console).
   No measurable cost: every difference is inside its interval (the mod's build is, if anything, ahead: code placement).
   Events: not checked one by one; the panel hid through every warp's fade and load, as the mod's event/next-stage
   test says.
+
+## Follow-up: an easier install (2026-10-17)
+
+What a player meets today: the Windows installer (the guide's recommended way) cannot add mods; a Dolphin `.rvz`
+(Zstandard, Dolphin's default) needs Python 3.14 for the mod's map step (`tools/rvz.py`: standard-library
+`compression.zstd`), which the guide does not say; changing an option means building again.
+
+- **A. Docs.** INSTALL.md: the GameCube disc first; the `.rvz` and Python 3.14 (or an ISO made with Dolphin's *Convert
+  File*); options edited on the console (C); the installer's mod box (D).
+- **B. make_sd.py / guest_mods.py.** Before anything slow: the `--gc-game` path exists; a Zstandard RVZ (WIA/RVZ disc
+  struct compression 5) with a Python older than 3.14 looks for a Python 3.14+ (`python3.14`..., Windows `py -3.14`) to
+  run the mod's setup tools, else stops with what to do.
+- **C. Options on the console.** `options.json` is already read at boot (guest_builtin.cpp); the Mods tab gets a fork
+  section on the Switch, "Built into this game": each built-in guest mod with its manifest's options (the package copy
+  on the SD card), written back to `options.json`; "Restart the game to apply" (the mod reads its options once; the
+  Switch cannot relaunch itself).
+- **D. Windows installer.** An optional "GameCube sea minimap" box: the mod's `.zip` (chosen or downloaded from the
+  catalogue's release) and the GameCube disc; `make_sd.py --guest-mod ... --gc-game ...`; a `.rvz` gets Python 3.14
+  from winget. Strings in both languages. Built by CI (release-installer.yml) or locally with the .NET SDK.
+
+Steps: A+B (computer: a zstd RVZ with 3.12 and 3.14, an ISO), C (console: change size, restart, the panel's new size),
+D (installer build; a Windows run by the user).
