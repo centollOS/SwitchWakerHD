@@ -166,13 +166,22 @@ struct HleMark {
     }
 };
 struct GuestExit { uint32_t value; };
+// (this fork) on the Switch an HLE call runs its body directly, as before the upstream sync: the
+// console's crash report is its own, and the guarded entry (a lambda in a try block) cost ~0.25 ms
+// of the main thread a frame in the lava room (thousands of GX2 calls; docs/perf-test.md)
+#ifdef __SWITCH__
+#define HLE_BODY_CALL(lib, name, c) hle_impl_##lib##_##name(c)
+#else
+#define HLE_BODY_CALL(lib, name, c)                                           \
+        exception_report::boundary<GuestExit>("HLE " #lib "." #name, [&] {      \
+            hle_impl_##lib##_##name(c);                                       \
+        })
+#endif
 #define HLE(lib, name)                                                        \
     static void hle_impl_##lib##_##name(Cpu* c);                               \
     extern "C" void imp_##lib##_##name(Cpu* c) {                               \
         HleMark hle_mark_(c, #name);                                           \
-        exception_report::boundary<GuestExit>("HLE " #lib "." #name, [&] {      \
-            hle_impl_##lib##_##name(c);                                       \
-        });                                                                  \
+        HLE_BODY_CALL(lib, name, c);                                           \
     }                                                                        \
     static HleReg hle_reg_##lib##_##name(#lib, #name, imp_##lib##_##name);       \
     static void hle_impl_##lib##_##name(Cpu* c)
