@@ -138,8 +138,9 @@ python3 tools/switch/make_sd.py --game-dir /path/to/10143500 \
   for that step; if there is none it stops at once and says so. Then install Python 3.14 from
   [python.org](https://www.python.org/downloads/), or make an `.iso` in Dolphin (right-click the game, *Convert
   File...*, format *ISO*) and give that. An `.iso`, a `.gcm` or a folder works with any Python 3.
-- `--mod-option gc-minimap.size=260`: an option to start with (the minimap: `x`, `y`, `size`, `opacity`,
-  `style` = `vector` or `original`); repeat it for more.
+- **Its options** (position, size, opacity, map style) are changed on the console: hold **Minus** > **Mods** >
+  **Built-in**, at the bottom, *Code mods in this build*; then close the game and start it again. Or set them when you
+  build: `--mod-option gc-minimap.size=260` (`x`, `y`, `size`, `opacity`, `style` = `vector` or `original`).
 - The maps it prepares are kept in your user folder (macOS: `~/Library/Application Support/SwitchWakerHD/guest-mods`,
   Windows: `%LOCALAPPDATA%\SwitchWakerHD\guest-mods`, Linux: `~/.local/share/SwitchWakerHD/guest-mods`), and
   copied to `build/sd/switch/wwhd/mods/`.

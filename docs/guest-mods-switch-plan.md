@@ -110,3 +110,15 @@ What a player meets today: the Windows installer (the guide's recommended way) c
 
 Steps: A+B (computer: a zstd RVZ with 3.12 and 3.14, an ISO), C (console: change size, restart, the panel's new size),
 D (installer build; a Windows run by the user).
+
+### Follow-up results
+
+- **A+B (2026-10-17).** `guest_mods.py --check`, run by make_sd.py before the extraction. Checked with RVZ headers made
+  for the test (compression 5 and 4), Python 3.12: the Zstandard one finds `/Library/Frameworks/.../python3.14`, which
+  then runs the setup (the mod's reader reached, past its version check); with PATH without a 3.14, the message; LZMA
+  and the ISO keep 3.12; a missing disc, no `--gc-game`, a non-guest package stop at once. Not tried: a real Zstandard
+  RVZ (no Dolphin here).
+- **C, console (USA, handheld).** Mods > Built-in, at the end: *Code mods in this build*, gc-minimap 0.2.1 with its five
+  options at the values of `options.json`. A raises the slider's edit, Right x 8: size 240 -> 284, saved when let go;
+  the style combo: `original`. After a restart, Windfall: the panel 225 px wide against 190 px at 240 (x1.18, as
+  284/240) and the original style's tiles.

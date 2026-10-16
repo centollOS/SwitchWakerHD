@@ -57,6 +57,7 @@ struct Host {
     // (this fork) the Switch: no code mods, no downloads (the catalogue, the Story Notebook) and no file choosers
     // (overlay.cpp mods_host)
     bool console = false;
+    std::function<void()> builtin_code_mods;  // (this fork) the Switch NRO's code mods (guest_builtin_ui.h)
     bool file_picker = true; // the host has file and folder choosers (overlay/extensions.h Features)
     bool back = false;       // controller B this frame
     bool b_used = false;     // out: B answered something here (it must not also close the menu)
@@ -1010,6 +1011,7 @@ inline void builtin_list(Host& h) {
                  });
     }
     ImGui::EndTable();
+    if (h.builtin_code_mods) h.builtin_code_mods();  // (this fork)
 }
 // Community: the installed packages (catalogue, file, graphics packs), then the catalogue's mods that aren't
 // downloaded yet. Every row has the same switch: switching on a mod that isn't downloaded yet downloads,

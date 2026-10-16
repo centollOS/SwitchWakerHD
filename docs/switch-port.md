@@ -202,6 +202,7 @@ Total backed memory is 1448 MiB, so hbmenu must run in title-takeover mode, not 
 - Only the hooked game functions get the mods' check (`WWHD_RECOMP_MOD_HOOKS_ONLY=build/guest-mods/hooks.txt`); the rest of the game code is the same as without mods. A hook on another function is refused at load.
 - The mods' guest memory (from `0x7F000000`) is backed only when the NRO has mods. Their files are in `sdmc:/switch/wwhd/mods/<id>/` (`package/`, `data/`, `options.json`).
 - Horizon has no `openat` (`posix_stubs_switch.cpp`): `guest_files.h` opens the path directly on the Switch.
+- The Mods tab's Built-in area lists them at its end (`overlay/guest_builtin_ui.cpp`, `modsui::Host::builtin_code_mods`): their options from the package's manifest, saved to `options.json`; the mods read them at the start, so a change applies at the next start.
 
 ### OpenGL renderer (`runtime/src/gfx/gl/`, namespace `gfxgl`, `render::Api::OpenGL`)
 

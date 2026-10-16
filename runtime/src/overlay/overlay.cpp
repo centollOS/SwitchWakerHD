@@ -15,6 +15,7 @@
 #include "setup_test.h"
 #include "setup_flow.h"
 #include "mods_tab.h"
+#include "guest_builtin_ui.h"  // (this fork)
 #include "graphics_switch.h"
 #include "restart_dialog.h"
 #include "gamepad_nav.h"
@@ -1308,6 +1309,7 @@ modsui::Host& mods_host() {
 #endif
 #ifdef __SWITCH__
         h.console = true;  // (this fork)
+        h.builtin_code_mods = [] { guestbuiltinui::draw(); };  // (this fork) the code mods built into the NRO
 #endif
         h.test = g_no_host && getenv("WWHD_MOD_MANAGER_DIR");
         h.file_picker = ext::features().file_picker;
