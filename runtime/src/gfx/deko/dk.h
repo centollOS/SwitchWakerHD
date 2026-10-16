@@ -64,7 +64,9 @@ void image_tile_size_fix(DkImageLayoutMaker& m, uint32_t rows);
 void image_free_later(const ImageAlloc& a);  // freed when the GPU is done with the current frame
 void image_free_now(const ImageAlloc& a);    // memory no frame the GPU has not finished uses
 // image_alloc found no room: frees what it can (surfaces.cpp, texture eviction) and says whether it freed any
-bool image_heap_pressure(uint32_t bytes);
+// minIdle: frames a texture went unused (default WWHD_DK_TEX_PRESSURE_FRAMES); (this fork) kFrames + 1 when no new
+// chunk can be made: every texture the frames in flight do not use
+bool image_heap_pressure(uint32_t bytes, uint64_t minIdle = 0);
 bool code_load(DkShader& shader, const void* dksh, uint32_t size, const char* name);
 // shader code was copied to code memory since the last shader cache invalidate (code_load sets it; draw.cpp
 // invalidates the shader caches before its next draw: deko3d only does it at dkQueueFlush)

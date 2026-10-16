@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <unordered_map>
 
 #include "runtime.h"
@@ -18,12 +19,13 @@ namespace {
 
 // deko3d aborts the process when a creation fails (release library: diagAbortWithResult, 2359-xxxx; the debug
 // one: debug_message, then a trap) and never returns null: the line before names what was being created
-DkMemBlock make_block(uint32_t size, uint32_t flags, const char* what) {
+DkMemBlock make_block(uint32_t size, uint32_t flags, const char* what, void* storage = nullptr) {
     LOG("[dk] creating a memory block: %s, %u KiB (flags 0x%X)", what, size >> 10, flags);
     log_flush();
     DkMemBlockMaker m;
     dkMemBlockMakerDefaults(&m, R.device, size);
     m.flags = flags;
+    m.storage = storage;
     DkMemBlock b = dkMemBlockCreate(&m);
     LOG("[dk] memory block: %s at GPU address 0x%llX", what, (unsigned long long)dkMemBlockGetGpuAddr(b));
     return b;
@@ -131,12 +133,28 @@ void trace_freed(int chunk, uint32_t offset, uint32_t size) {
     g_trace.live.erase(it);
 }
 
-void add_chunk(uint32_t size) {
+// (this fork) docs/first-start-memory-plan.md step 3: the chunk's memory is taken here first (deko3d's own allocation
+// aborts the game when the heap has no such free range: after a first start's shader preparation, a Picto Box
+// picture did); false when there is none. WWHD_DK_IMAGE_CHUNKS_MAX=n ([dev], a test): no chunk after the n-th.
+bool add_chunk(uint32_t size) {
+    static const size_t maxChunks = [] {
+        const char* e = getenv("WWHD_DK_IMAGE_CHUNKS_MAX");
+        return e && *e ? size_t(strtoul(e, nullptr, 10)) : SIZE_MAX;
+    }();
+    void* storage = g_chunks.size() < maxChunks ? aligned_alloc(DK_MEMBLOCK_ALIGNMENT, size) : nullptr;
+    if (!storage) {
+        static int logged = 0;
+        if (logged++ < 20)
+            LOG("[dk] image heap: no memory for chunk %zu (%u KiB)%s", g_chunks.size(), size >> 10,
+                g_chunks.size() >= maxChunks ? " (WWHD_DK_IMAGE_CHUNKS_MAX)" : "");
+        return false;
+    }
     char what[64];
     snprintf(what, sizeof what, "image heap chunk %zu", g_chunks.size());
-    g_chunks.push_back({make_block(size, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image, what), size, {{0, size}}});
+    g_chunks.push_back({make_block(size, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image, what, storage), size, {{0, size}}});
     g_stats.imageChunks = g_chunks.size();
     if (g_trace.on) trace(TraceEvent::NewChunk, uint32_t(g_chunks.size() - 1), size);
+    return true;
 }
 
 void chunk_free(Chunk& c, uint32_t offset, uint32_t size) {
@@ -185,7 +203,8 @@ void memory_init() {
         LOG("[dk] image heap trace on (WWHD_DK_IMAGE_TRACE): %s, written every 5 s", kTracePath);
     }
     g_queries = make_block(kQuerySize, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "queries");
-    add_chunk(kImageChunkSize);  // the first image heap chunk now: its size shows in the start-up memory figures
+    if (!add_chunk(kImageChunkSize))  // the first image heap chunk now: its size shows in the start-up memory figures
+        fatal("[dk] image heap: no memory for its first chunk");
 }
 
 void frame_begin(uint64_t frame) {
@@ -323,7 +342,8 @@ void image_tile_size_fix(DkImageLayoutMaker& m, uint32_t rows) {
 ImageAlloc image_alloc(uint32_t size, uint32_t alignment) {
     size = align_up(size, 256);
     alignment = std::max<uint32_t>(alignment, 256);
-    for (int pass = 0; pass < 2; pass++) {
+    bool chunkTried = false;
+    for (;;) {
         for (size_t ci = 0; ci < g_chunks.size(); ci++) {
             Chunk& c = g_chunks[ci];
             for (size_t i = 0; i < c.free.size(); i++) {
@@ -340,15 +360,25 @@ ImageAlloc image_alloc(uint32_t size, uint32_t alignment) {
             }
         }
         // no room: textures nobody draws with any more go first (surfaces.cpp), while that frees something;
-        // then a new chunk (bigger than 64 MB only for a bigger image)
+        // then a new chunk (bigger than 64 MB only for a bigger image); (this fork) without memory for one, every
+        // texture the frames in flight do not use, and at last the image is not made: the GX2 command that needed
+        // it is skipped (render::guarded logs it) instead of ending the game
         if (g_trace.on) trace(TraceEvent::Pressure, 0, size, alignment);
-        if (image_heap_pressure(size + alignment)) {
-            pass--;
-            continue;
+        if (image_heap_pressure(size + alignment)) continue;
+        if (!chunkTried) {
+            chunkTried = true;
+            if (add_chunk(std::max(kImageChunkSize, align_up(size + alignment, DK_MEMBLOCK_ALIGNMENT)))) continue;
         }
-        add_chunk(std::max(kImageChunkSize, align_up(size + alignment, DK_MEMBLOCK_ALIGNMENT)));
+        if (image_heap_pressure(size + alignment, kFrames + 1)) continue;
+        break;
     }
-    fatal("[dk] image heap: cannot place %u bytes", size);
+    static int logged = 0;
+    if (logged++ < 20) {
+        const ImageHeapFigures f = image_heap_figures();
+        LOG("[dk] image heap: no room for %u KiB (%zu chunks, %.1f MiB free, largest %.1f MiB)", size >> 10, size_t(f.chunks),
+            double(f.free) / 1048576.0, double(f.largestFree) / 1048576.0);
+    }
+    throw std::runtime_error("image heap full");
 }
 
 void image_free_later(const ImageAlloc& a) {
