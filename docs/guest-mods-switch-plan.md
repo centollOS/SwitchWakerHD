@@ -74,3 +74,17 @@ the mod's package: that is their consent; no trust prompt on the console).
 - **Step 4.** The mod's setup tool refuses a data folder inside a Git checkout, so `guest_mods.py` writes the setup's
   output to a per-user folder (`--data`, default `~/Library/Application Support/SwitchWakerHD/guest-mods` on macOS,
   `%LOCALAPPDATA%` on Windows, XDG on Linux) and `make_sd.py` copies it into `OUT/switch/wwhd/mods/<id>/data/`.
+- **Step 5, frame time (2026-10-16).** The same source with the bench commits (local throwaway branch), two NROs: A
+  with gc-minimap (game code with the check in `daPy_Execute`), B without mods (plain recompile). `perf_test.py ab`,
+  ABBA x 2 (4 boots each), Quest Log 2, 900 frames a scene, handheld, stock clocks. The panel is drawn in the
+  Windfall scene (checked with a screenshot); lava and Dragon Roost are not on the sea (hook runs, panel hidden).
+
+  | Scene | A (mod) fps | B fps | B - A fps (95% CI) | main ms A / B |
+  |---|---|---|---|---|
+  | lava | 27.88 | 27.60 | -0.28 (+-0.35) | 34.90 / 35.32 |
+  | windfall | 28.06 | 27.89 | -0.17 (+-0.31) | 34.79 / 35.16 |
+  | dragonroost | 28.43 | 28.48 | +0.05 (+-0.18) | 34.34 / 34.42 |
+
+  No measurable cost: every difference is inside its interval (the mod's build is, if anything, ahead: code placement).
+  Events: not checked one by one; the panel hid through every warp's fade and load, as the mod's event/next-stage
+  test says.
