@@ -46,6 +46,10 @@ IJUMP = ppc2c.pass_on("WWHD_RECOMP_IJUMP")
 IJUMP_CALL = "PPC_IJUMP(c)(c)" if IJUMP else "ppc_dispatch(c)"
 # checking build: abort if a callee changes a callee-saved register (ppc.h PPC_KEEP_R)
 NONLEAF_CHECK = os.environ.get("WWHD_RECOMP_NONLEAF_CHECK", "0") == "1"
+# guest mods built into the Switch NRO (docs/guest-mods-switch-plan.md): WWHD_RECOMP_MOD_HOOKS_ONLY=FILE (canonical
+# addresses, one per line, as hooks.txt; written by tools/switch/guest_mods.py) puts the guest mods' flag check
+# (recomp.py --mod-hooks) only into the listed functions; every other function stays as without --mod-hooks
+MOD_HOOKS_ONLY = os.environ.get("WWHD_RECOMP_MOD_HOOKS_ONLY", "")
 
 
 def load_hot_functions():
@@ -68,6 +72,39 @@ def branch_target(addr, w):
 
 class ForkPasses:
     ijump_call = IJUMP_CALL  # what an indirect jump (bctr) tail-calls: the per-site cache or the dispatcher
+    mod_checked = None  # WWHD_RECOMP_MOD_HOOKS_ONLY: this build's addresses of the functions with the check
+
+    def fork_mod_hooks_only(self, read_hooks):
+        """__init__: WWHD_RECOMP_MOD_HOOKS_ONLY turns the mod hook tables on with checks in the listed functions."""
+        if not MOD_HOOKS_ONLY:
+            return
+        if self.mod_hooks:
+            raise SystemExit("WWHD_RECOMP_MOD_HOOKS_ONLY and --mod-hooks: one or the other")
+        entries, _ = read_hooks([MOD_HOOKS_ONLY], self.build)
+        if any(site for site, _, _, _ in entries):
+            raise SystemExit("%s: guest mods hook functions, not instructions (@ADDR)" % MOD_HOOKS_ONLY)
+        self.mod_hooks = True
+        self.mod_checked = {addr for _, _, addr, _ in entries}
+        self.mod_checked_canon = sorted({canon for _, canon, _, _ in entries})
+
+    def fork_mod_check(self, start):
+        """whether the function at `start` gets the mod hook check (and upstream's conservative code for it)"""
+        return self.mod_hooks and (self.mod_checked is None or start in self.mod_checked)
+
+    def fork_mod_table(self):
+        """table.c, after the mod hook tables: with WWHD_RECOMP_MOD_HOOKS_ONLY, the functions that have the check
+        (runtime/src/mods/guest_static.cpp refuses a hook on any other)"""
+        if self.mod_checked is None:
+            return ""
+        missing = sorted(a for a in self.mod_checked if a not in self.ordinal)
+        if missing:
+            raise SystemExit("%s: not function entries: %s" % (MOD_HOOKS_ONLY, ", ".join("%08X" % a for a in missing)))
+        addrs = sorted(self.mod_checked)
+        return ("\n/* (this fork) guest mods: the check only in these functions (WWHD_RECOMP_MOD_HOOKS_ONLY) */\n"
+                "static const uint32_t mod_checked[%d] = {%s};\n" % (len(addrs), ", ".join("0x%08Xu" % a for a in addrs)) +
+                "extern void ppc_mod_checked(unsigned, const uint32_t*);\n"
+                "__attribute__((constructor)) static void register_mod_checked(void) {\n"
+                "    ppc_mod_checked(%d, mod_checked);\n}\n" % len(addrs))
 
     def link(self, addr, tgt):
         """The return-address store of a bl. A direct call to an ordinary game function uses
@@ -244,7 +281,7 @@ class ForkPasses:
 
     def fork_translated(self, body):
         """emit_function, the function translated: condition-register liveness."""
-        if not CRLIVE or self.mod_hooks:  # (guest mod hooks: a mod may hook or replace any function)
+        if not CRLIVE or self.fork_mod_check(self.cur_start):  # (guest mod hooks: a mod may hook or replace any function)
             return body
         live_after, fields = crlive.analyze(body, self.cur_start, self.cur_end, self.p.jump_tables, branch_target,
                                             self.sites)
@@ -259,7 +296,7 @@ class ForkPasses:
         tail_wb = ""
         stmts = [s for _, _, s in body]
         sites_done = False
-        if self.mod_hooks:  # (as upstream: a mod may hook or replace any function)
+        if self.fork_mod_check(start):  # (as upstream: a mod may hook or replace any function)
             return body, "", False
         if LEAF and not hooked and not any(a in self.sites for a, _, _ in body) and leaflocal.eligible(stmts):
             prologue, stmts, tail_wb = leaflocal.transform(stmts)
@@ -359,7 +396,8 @@ class ForkPasses:
         the game writes keep their initial value (0: plain floats), so paired-single loads and stores through
         them need no check of the GQR (ppc.h psq_load_l)."""
         gqr = ("#define PPC_GQR_STATIC_FLOAT 0x%02X\n" % self.static_float_gqrs()
-               if GQR_STATIC and not self.mod_hooks else "")  # (a mod's code may write any GQR)
+               if GQR_STATIC and not (self.mod_hooks and self.mod_checked is None) else "")
+        # (a mod's code may write any GQR; the mods built into the NRO are checked not to: tools/switch/guest_mods.py)
         return "%s%s%s%s" % ("#define PPC_CR_CHECK 1\n" if CR_CHECK else "",
                              "#define PPC_NONLEAF_CHECK 1\n" if NONLEAF_CHECK else "",
                              "#define PPC_ELIDE_LR 1\n" if NONLEAF_CHECK else "", gqr)
