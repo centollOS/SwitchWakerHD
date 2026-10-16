@@ -29,6 +29,7 @@
 #include "input.h"
 #include "true60.h"
 #include "guest_addr.h"
+#include "guest_builtin.h"  // (this fork) guest mods built into the NRO
 #include <atomic>
 #include <limits>
 
@@ -42,7 +43,8 @@
 #include <vector>
 
 // (this fork) native guest modules are built against upstream's ppc.h (g_core_preempt, its Cpu layout);
-// this fork's generated code differs (Cpu::preempt, registers kept in host locals), so they are refused
+// this fork's generated code differs (Cpu::preempt, registers kept in host locals), so they are refused. The
+// modules built into the Switch NRO (guest_builtin.h) come from this fork's translator and load without a library.
 #define WWHD_FORK_NO_NATIVE_GUEST_MODS 1
 #if WWHD_FORK_NO_NATIVE_GUEST_MODS
 #elif defined(_WIN32)
@@ -419,11 +421,15 @@ PpcFunc service(const char* name) {
 
 bool g_story_package=false;  // (this fork: outside the native-mods block below)
 
-#if !WWHD_FORK_NO_NATIVE_GUEST_MODS
 const WWHDGuestHostV1 kHost = {
     sizeof(WWHDGuestHostV1), WWHD_GUEST_ABI_VERSION,
     ppc_dispatch, ppc_unimplemented, ppc_trap, ppc_timebase, ppc_fres, ppc_frsqrte, ppc_preempt,
-    g_core_preempt, call_original, service,
+#if WWHD_FORK_NO_NATIVE_GUEST_MODS
+    nullptr,  // (this fork) the fork's modules read Cpu::preempt
+#else
+    g_core_preempt,
+#endif
+    call_original, service,
 };
 
 // The NPC catalogue's names and spots come from the player's own game files: generated once by
@@ -480,14 +486,19 @@ std::string notebook_model(const std::filesystem::path& glb,const std::string& d
     } catch(const std::exception& e) {LOG("[notebook] the notebook's model not built: %s",e.what());}
     return std::filesystem::is_regular_file(out,ec)?out.string():std::string();
 }
-#endif
 
-bool load_one(const std::string& path, std::string& err,const mods::packages::GuestPackage& pkg,uint32_t base,uint32_t reserved) {
+// (this fork) `builtin`: a module built into the NRO (guest_builtin.h), installed without a library
+bool load_one(const std::string& path, std::string& err,const mods::packages::GuestPackage& pkg,uint32_t base,uint32_t reserved,
+              WWHDGuestInitV1 builtin = nullptr) {
 #if WWHD_FORK_NO_NATIVE_GUEST_MODS
-    (void)path, (void)pkg, (void)base, (void)reserved;
-    err = "native guest mods are not supported by this port (they are built for upstream's game code)";
-    return false;
+    if (!builtin) {
+        err = "native guest mods are not supported by this port (they are built for upstream's game code)";
+        return false;
+    }
+    void* lib = nullptr;
+    auto init = builtin;
 #else
+    (void)builtin;
 #ifdef _WIN32
     void* lib = (void*)LoadLibraryA(path.c_str());
     auto init = lib ? (WWHDGuestInitV1)(void*)GetProcAddress((HMODULE)lib, WWHD_GUEST_INIT_SYMBOL) : nullptr;
@@ -496,11 +507,13 @@ bool load_one(const std::string& path, std::string& err,const mods::packages::Gu
     auto init = lib ? (WWHDGuestInitV1)dlsym(lib, WWHD_GUEST_INIT_SYMBOL) : nullptr;
 #endif
     if (!lib) { err = "cannot load the module"; return false; }
+#endif
     struct LibraryGuard {
         void* handle;
         ~LibraryGuard() {
             if (!handle) return;
-#ifdef _WIN32
+#if WWHD_FORK_NO_NATIVE_GUEST_MODS  // (this fork) no libraries
+#elif defined(_WIN32)
             FreeLibrary((HMODULE)handle);
 #else
             dlclose(handle);
@@ -520,6 +533,7 @@ bool load_one(const std::string& path, std::string& err,const mods::packages::Gu
                 auto it = g_chains.find(addr);
                 return it == g_chains.end() ? std::string() : it->second.replace_mod;
             }, err)) return false;
+    if (!guestbuiltin::hooks_checked(*m, err)) return false;  // (this fork) WWHD_RECOMP_MOD_HOOKS_ONLY game code
     for (auto& o : g_loaded)
         if (m->mem_base < o.m->mem_base + o.region_size && o.m->mem_base < m->mem_base + reserved) {
             err = "module memory overlaps " + o.path;
@@ -570,7 +584,6 @@ bool load_one(const std::string& path, std::string& err,const mods::packages::Gu
     LOG("[guestmods] loaded %s (translator %s): %u functions, %u hooks, guest memory %08X-%08X", path.c_str(),
         m->translator, m->func_count, m->hook_count, m->mem_base, m->mem_base + m->mem_size);
     return true;
-#endif
 }
 
 struct Args {
@@ -621,6 +634,10 @@ void init() {
             ids.push_back(id.text);
         }
         return ids;
+    });
+    // (this fork) the guest mods built into the NRO, before the mod manager's
+    guestbuiltin::load([](const packages::GuestPackage& pkg,uint32_t base,uint32_t reserved,WWHDGuestInitV1 init,std::string& error) {
+        return load_one(pkg.id+" (built into the NRO)",error,pkg,base,reserved,init);
     });
     packages::start_guests(inspect,[build](const packages::GuestPackage& pkg,uint32_t base) {
         auto result=build(pkg,base);std::string error;

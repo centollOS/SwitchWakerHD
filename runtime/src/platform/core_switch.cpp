@@ -13,6 +13,7 @@
 #include <string>
 
 #include "../runtime.h"
+#include "../mods/guest_builtin.h"  // (this fork) guest mods built into the NRO: their guest memory
 #include "debug_server.h"
 #include "host.h"
 
@@ -160,7 +161,13 @@ void core_switch::init_memory() {
     }
     virtmemUnlock();
     uint64_t total = 0;
-    for (const auto& r : kGuestRanges) {
+    // the guest memory of the guest mods built into the NRO (mods/guest_builtin.h), when it has any
+    GuestRange ranges[std::size(kGuestRanges) + 1];
+    size_t n = 0;
+    for (const auto& r : kGuestRanges) ranges[n++] = r;
+    if (const guestbuiltin::Region mods = guestbuiltin::memory(); mods.size) ranges[n++] = {mods.start, mods.size};
+    for (size_t i = 0; i < n; i++) {
+        const GuestRange& r = ranges[i];
         void* backing = aligned_alloc(0x1000, r.size);
         if (!backing)
             fatal("out of memory backing guest range %08X (+%X); start the game with full RAM (hold R on a title)",
