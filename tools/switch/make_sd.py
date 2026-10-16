@@ -160,7 +160,7 @@ def extract_wua(archive):
     return dst
 
 
-def forwarder(args, out):
+def forwarder(args, out, icon=None):
     """Native build, last step: the HOME-screen icon (forwarder .nsp, tools/switch/forwarder). It needs the user's
     own prod.keys, so without them it is skipped; it never fails the build, since the game does not need it."""
     print("\n[+] HOME-screen forwarder (optional)", flush=True)
@@ -169,10 +169,14 @@ def forwarder(args, out):
         print("  skipped: no prod.keys at %s. For the .nsp that puts an icon on the HOME screen, put your console's "
               "prod.keys there (or use --keys PATH, outside this folder), then run: python "
               "tools/switch/forwarder/build_forwarder_windows.py --sd \"%s\"" % (keys, out))
-    elif subprocess.call([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "forwarder",
-                                                             "build_forwarder_windows.py"),
-                          "--keys", keys, "--sd", out], cwd=ROOT) != 0:
-        print("  WARNING: the forwarder was not built (see above); wwhd.nro and the SD folder are fine.", flush=True)
+    else:
+        cmd = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "forwarder",
+                                                  "build_forwarder_windows.py"),
+               "--keys", keys, "--sd", out]
+        if icon:
+            cmd += ["--icon", os.path.abspath(icon)]
+        if subprocess.call(cmd, cwd=ROOT) != 0:
+            print("  WARNING: the forwarder was not built (see above); wwhd.nro and the SD folder are fine.", flush=True)
 
 
 def main():
@@ -187,7 +191,10 @@ def main():
     ap.add_argument("--jobs", type=int, help="parallel compiles")
     ap.add_argument("--keys", help="native build: your console's prod.keys, for the HOME-screen forwarder "
                     "(default: .switch\\prod.keys in your user folder; without it the forwarder is skipped)")
+    ap.add_argument("--icon", help="custom icon (TGA, PNG, JPG) for the NRO and forwarder (default: from the game dump; "
+                    "disc images may not have it — use Cemu's mlc01/usr/title/.../meta/iconTex.tga)")
     ap.add_argument("--no-forwarder", action="store_true", help="native build: do not build the forwarder (.nsp)")
+    ap.add_argument("--name", help="custom display name for the NRO (default: Wind Waker HD)")
     args = ap.parse_args()
     if not (args.image or args.wua or args.game_dir):
         ap.error("one of --image, --wua or --game-dir is required")
@@ -207,6 +214,19 @@ def main():
     if not setup.valid_game_folder(game):
         fail("%s is not an extracted game (code/cking.rpx, content/, meta/meta.xml)" % game)
     print("  " + game)
+
+    # the icon of the NRO and forwarder: --icon, else meta/iconTex.tga of the game
+    icon_path = os.path.join(game, "meta", "iconTex.tga")
+    if args.icon:
+        pass
+    elif os.path.isfile(icon_path):
+        print("  Found icon: %s" % icon_path)
+    else:
+        print("  WARNING: no iconTex.tga found in %s/meta/" % game)
+        print("  The disc image may not contain the icon. For the HOME screen icon,")
+        print("  use --icon with a path to iconTex.tga from your Cemu mlc01 folder:")
+        print("    --icon <path/to/mlc01/usr/title/.../meta/iconTex.tga>")
+        print("  Or the NRO/forwarder will use a default icon.")
 
     step(2, "checking the game version")
     try:
@@ -228,6 +248,13 @@ def main():
         env["WWHD_JOBS"] = str(args.jobs)
     if native:
         env["WWHD_NATIVE"] = "1"
+    # build.sh makes the NRO's icon on this machine (with this Python, which has Pillow for the forwarder too)
+    env["WWHD_PYTHON"] = sys.executable
+    if args.icon:
+        env["WWHD_ICON"] = os.path.abspath(args.icon)
+    env["WWHD_GAME_DIR"] = game  # where build.sh finds meta/iconTex.tga
+    if args.name:
+        env["WWHD_NACP_NAME"] = args.name
     run((native_shell(env) if native else ["bash"]) + ["tools/switch/build.sh"], env=env)
     nro = os.path.join(ROOT, "build", "switch-dk", "wwhd.nro")
     if not os.path.isfile(nro):
@@ -249,7 +276,7 @@ def main():
         for part in ("code", "content", "meta"):
             shutil.copytree(os.path.join(game, part), os.path.join(gdst, part))
     if native and not args.no_forwarder:
-        forwarder(args, out)
+        forwarder(args, out, args.icon)
     print("""
 Done: %s
 

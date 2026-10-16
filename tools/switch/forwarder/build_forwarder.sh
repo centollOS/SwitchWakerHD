@@ -3,12 +3,13 @@
 # screen and starts sdmc:/switch/wwhd/wwhd.nro as an application (title mode: all the memory, and
 # apm accepts the GPU profile), without hbmenu. Ported from centollOS (scripts/switch there).
 #
-#   tools/switch/forwarder/build_forwarder.sh [--keys PATH] [--icon TGA] [--no-verify]
+#   tools/switch/forwarder/build_forwarder.sh [--keys PATH] [--icon TGA] [--name NAME] [--no-verify]
 #
 #   --keys PATH   the console's own keys (default ~/.switch/prod.keys). They are only bind-mounted
 #                 read-only into the container for the pack and verify steps; nothing copies them
 #                 and this script checks that no key value reached its logs.
-#   --icon TGA    the icon's source (default: meta/iconTex.tga of the first dump in Rom/Decrypted)
+#   --icon TGA    the icon's source (default: WWHD_GAME_DIR/meta/iconTex.tga, else build/sd/switch/wwhd/game/meta/iconTex.tga, else Rom/Decrypted/*/meta/iconTex.tga)
+#   --name NAME   the display name in the HOME screen (default: "Wind Waker HD")
 #   --no-verify   skip the offline hactool check of the NSP
 #
 # Output: build/forwarder/wwhd_forwarder.nsp (INSTALL.md: installing it).
@@ -56,16 +57,20 @@ publisher="SwitchWakerHD"
 hbloader_url=$HBLOADER_URL hbloader_rev=$HBLOADER_COMMIT
 hacbrewpack_url=$HACBREWPACK_URL hacbrewpack_rev=$HACBREWPACK_COMMIT
 
-keys=$HOME/.switch/prod.keys verify=1 icon_src=""
+keys=$HOME/.switch/prod.keys verify=1 icon_src="" name_src=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --keys) keys=$2; shift 2 ;;
         --icon) icon_src=$2; shift 2 ;;
+        --name) name_src=$2; shift 2 ;;
         --no-verify) verify=0; shift ;;
         -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
         *) echo "build_forwarder: unknown option $1" >&2; exit 2 ;;
     esac
 done
+if [[ -n $name_src ]]; then
+    name=$name_src
+fi
 if [[ ! -r $keys ]]; then
     echo "build_forwarder: cannot read the keys at $keys (--keys)" >&2
     exit 1
@@ -81,7 +86,14 @@ if [[ -z $engine ]]; then
     exit 1
 fi
 if [[ -z $icon_src ]]; then
-    icon_src=$(ls "$root"/Rom/Decrypted/*/meta/iconTex.tga 2>/dev/null | head -1 || true)
+    # Same priority as NRO build: explicit > WWHD_GAME_DIR > build/sd > Rom/Decrypted
+    if [[ -n ${WWHD_GAME_DIR:-} && -f "$root/$WWHD_GAME_DIR/meta/iconTex.tga" ]]; then
+        icon_src="$root/$WWHD_GAME_DIR/meta/iconTex.tga"
+    elif [[ -f "$root/build/sd/switch/wwhd/game/meta/iconTex.tga" ]]; then
+        icon_src="$root/build/sd/switch/wwhd/game/meta/iconTex.tga"
+    else
+        icon_src=$(ls "$root"/Rom/Decrypted/*/meta/iconTex.tga 2>/dev/null | head -1 || true)
+    fi
 fi
 if [[ ! -f $icon_src ]]; then
     echo "build_forwarder: no icon: give --icon path/to/meta/iconTex.tga (from your dump)" >&2
@@ -141,7 +153,7 @@ cp "$out/src/nx-hbloader/hbl.npdm" "$pack/exefs/main.npdm"
 printf '%s' "$nro_path" >"$pack/romfs/nextNroPath"
 printf '%s' "$nro_path" >"$pack/romfs/nextArgv"
 python3 "$here/make_nacp.py" "$pack/control/control.nacp" --title-id "$title_id" \
-    --name "$name" --publisher "$publisher" --version "$version"
+    --name "$name" --author "$publisher" --version "$version"
 for lang in AmericanEnglish BritishEnglish Japanese French German LatinAmericanSpanish Spanish \
             Italian Dutch CanadianFrench Portuguese Russian Korean TraditionalChinese \
             SimplifiedChinese BrazilianPortuguese; do
