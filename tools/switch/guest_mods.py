@@ -17,9 +17,13 @@ what the build and the SD card need (docs/guest-mods-switch-plan.md):
 usage: guest_mods.py PACKAGE [PACKAGE ...] [--out build/guest-mods] [--data DIR] [--build USA|EU]
                      [--gc-game PATH] [--option ID.KEY=VALUE ...]
        guest_mods.py --clear [--out build/guest-mods]          (no mods: the NRO as without this script)
+       guest_mods.py --check PACKAGE [...] [--gc-game PATH]    only what would stop the build (make_sd.py runs it
+                                                               first): the packages, the GameCube disc, its Python
 
 PACKAGE is a mod's .zip from the catalogue or its folder (manifest.json with kind "guest" and its mod.elf).
 --gc-game is your GameCube Wind Waker (.iso, .gcm, .rvz or an extracted folder) for mods whose setup reads it.
+A Zstandard .rvz (Dolphin's default) needs Python 3.14 or newer for the mods' readers (standard-library
+compression.zstd): an older Python here looks for one (setup_python).
 After this, the game code must be translated again with the hook list (make_sd.py --guest-mod does both):
   WWHD_RECOMP_MOD_HOOKS_ONLY=build/guest-mods/hooks.txt python3 tools/recomp/recomp.py cking.rpx build/gen
 """
@@ -124,7 +128,47 @@ def option_values(man, given):
     return values
 
 
-def run_setup(man, pkg, data, gc_game):
+def rvz_codec(path):
+    """A WIA/RVZ image's compression (the disc struct after the 0x48-byte header: 5 is Zstandard); None for others."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(0x50)
+    except OSError:
+        return None
+    if len(head) < 0x50 or head[:4] not in (b"RVZ\x01", b"WIA\x01"):
+        return None
+    return int.from_bytes(head[0x4C:0x50], "big")
+
+
+def setup_python(gc_game):
+    """The Python that runs the mods' setup tools: this one, unless the disc is a Zstandard RVZ and this Python has
+    no compression.zstd (before 3.14); then a Python 3.14 or newer from PATH (Windows: the py launcher)."""
+    if not gc_game or rvz_codec(gc_game) != 5 or sys.version_info >= (3, 14):
+        return [sys.executable]
+    candidates = [["py", "-3.%d" % v] for v in range(20, 13, -1)] if os.name == "nt" else []
+    candidates += [["python3.%d" % v] for v in range(20, 13, -1)] + [["python3"], ["python"]]
+    for cmd in candidates:
+        if not shutil.which(cmd[0]):
+            continue
+        try:
+            if subprocess.call(cmd + ["-I", "-c", "import compression.zstd"], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=60) == 0:
+                return cmd
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    raise Fail("%s is a Zstandard .rvz (Dolphin's default): reading it needs Python 3.14 or newer, and this computer "
+               "has Python %d.%d. Install Python 3.14 (python.org), or turn the disc into an .iso in Dolphin "
+               "(right-click the game > Convert File..., format ISO) and give that" % (
+                   os.path.basename(gc_game), sys.version_info[0], sys.version_info[1]))
+
+
+def check_gc_game(gc_game):
+    if gc_game and not os.path.exists(gc_game):
+        raise Fail("--gc-game %s: no such file or folder" % gc_game)
+    return setup_python(gc_game)
+
+
+def run_setup(man, pkg, data, gc_game, python):
     """The manifest's setup steps that run on the computer: game_path, run_tool; build_guest_mod is this script."""
     games = {}
     for st in man.get("setup", []):
@@ -146,7 +190,7 @@ def run_setup(man, pkg, data, gc_game):
                 return re.sub(r"\{game:(\w+)\}", lambda m: games[m.group(1)], a)
             print("  %s: %s" % (man["id"], st.get("title", st["tool"])), flush=True)
             # (not -I: the tool imports its own modules from its folder)
-            rc = subprocess.call([sys.executable, "-s", "-E", tool] + [arg(a) for a in st.get("arguments", [])], cwd=pkg)
+            rc = subprocess.call(python + ["-s", "-E", tool] + [arg(a) for a in st.get("arguments", [])], cwd=pkg)
             if rc:
                 raise Fail("%s: setup step %s failed (exit code %d)" % (man["id"], st.get("id"), rc))
             for o in st.get("outputs", []):
@@ -170,6 +214,9 @@ def build(args):
         if not m:
             raise Fail("--option %s: ID.KEY=VALUE" % o)
         given.setdefault(m.group(1), {})[m.group(2)] = m.group(3)
+    python = check_gc_game(args.gc_game)
+    if python[0] != sys.executable:
+        print("  the mods' setup runs with %s (the .rvz needs Python 3.14 or newer)" % " ".join(python), flush=True)
     base = guestmod.REGION_START
     mods, hooks = [], {}
     for src in args.package:
@@ -198,7 +245,7 @@ def build(args):
         data = os.path.join(os.path.abspath(args.data), mid)
         shutil.rmtree(data, ignore_errors=True)
         os.makedirs(data)
-        run_setup(man, pkg, data, args.gc_game)
+        run_setup(man, pkg, data, args.gc_game, python)
         os.makedirs(os.path.join(sd, "package"))
         shutil.copyfile(os.path.join(pkg, "manifest.json"), os.path.join(sd, "package", "manifest.json"))
         for d in PACKAGE_DIRS:
@@ -245,6 +292,37 @@ def build(args):
     return mods
 
 
+def check(args):
+    """What would stop build() later, found before the slow steps: the packages are guest mods, the GameCube disc
+    is there when one needs it, and a Python can read it."""
+    needs_gc = False
+    for src in args.package:
+        if not os.path.exists(src):
+            raise Fail("%s: no such file or folder" % src)
+        if os.path.isdir(src):
+            path = os.path.join(src, "manifest.json")
+            if not os.path.isfile(path):
+                raise Fail("%s: no manifest.json (not a mod folder)" % src)
+            with open(path, encoding="utf-8") as f:
+                man = json.load(f)
+        else:
+            if not zipfile.is_zipfile(src):
+                raise Fail("%s: not a mod folder or .zip" % src)
+            with zipfile.ZipFile(src) as z:
+                if "manifest.json" not in z.namelist():
+                    raise Fail("%s: no manifest.json at its top (not a mod package)" % src)
+                man = json.loads(z.read("manifest.json"))
+        if man.get("kind") != "guest":
+            raise Fail("%s: %s is not a code mod (kind %r); only code mods go into the NRO" % (
+                src, man.get("id"), man.get("kind")))
+        needs_gc |= any(st.get("type") == "game_path" for st in man.get("setup", []))
+    if needs_gc and not args.gc_game:
+        raise Fail("a mod needs your GameCube Wind Waker (.iso, .gcm, .rvz or an extracted folder): --gc-game PATH")
+    python = check_gc_game(args.gc_game)
+    print("guest mods: %d package(s) OK%s" % (len(args.package), "" if python[0] == sys.executable else
+                                                 "; the setup will run with " + " ".join(python)))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("package", nargs="*")
@@ -254,6 +332,7 @@ def main():
     ap.add_argument("--gc-game", help="your GameCube Wind Waker, for mods whose setup reads it")
     ap.add_argument("--option", action="append", default=[], help="a mod option: ID.KEY=VALUE")
     ap.add_argument("--clear", action="store_true", help="remove OUT: the NRO without guest mods")
+    ap.add_argument("--check", action="store_true", help="only check the packages and the GameCube disc")
     args = ap.parse_args()
     if args.clear:
         shutil.rmtree(os.path.abspath(args.out), ignore_errors=True)
@@ -261,6 +340,12 @@ def main():
         return
     if not args.package:
         ap.error("give one or more mod packages (or --clear)")
+    if args.check:
+        try:
+            check(args)
+        except (Fail, OSError, KeyError, ValueError) as e:
+            sys.exit("guest_mods: %s" % e)
+        return
     try:
         mods = build(args)
     except (Fail, guestmod.ModError, OSError, KeyError, ValueError) as e:

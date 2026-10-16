@@ -207,6 +207,13 @@ def main():
             fail("Docker or Podman is needed (the Switch toolchain runs in the devkitpro/devkita64 image), or "
                  "a native devkitPro with the Switch libraries: see INSTALL.md, \"Windows: devkitPro\"")
 
+    if args.guest_mod:  # what would stop the mods' step, found before the slow ones (the disc, its Python)
+        run([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "guest_mods.py"), "--check"] +
+            [os.path.abspath(p) for p in args.guest_mod] +
+            (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []))
+    elif args.mod_option or args.gc_game:
+        fail("--mod-option and --gc-game go with --guest-mod")
+
     step(1, "the game files")
     if args.image:
         game = extract(os.path.abspath(args.image))
@@ -237,8 +244,6 @@ def main():
             sum((["--option", o] for o in args.mod_option), []))
         renv["WWHD_RECOMP_MOD_HOOKS_ONLY"] = os.path.join(mods_dir, "hooks.txt")
     else:
-        if args.mod_option or args.gc_game:
-            fail("--mod-option and --gc-game go with --guest-mod")
         run(tool + ["--clear"])
     gen = os.path.join(ROOT, "build", "gen")
     if os.path.islink(gen):

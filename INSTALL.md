@@ -118,24 +118,33 @@ build/sd/switch/wwhd/
 
 ### Optional: code mods (the GameCube sea minimap)
 
-The Switch cannot build code mods (Mod SDK v2, "guest" mods) itself, so they go into the game when you
-build it. Download the mod's `.zip` from the mod catalogue
-([ZeldaWWHDMods](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods)) and add it to the command, for
-example the GameCube sea minimap, which draws its maps from your own GameCube Wind Waker:
+The GameCube sea minimap draws a GameCube-style chart of the Great Sea in a corner of the screen. It needs **two
+things besides your Wind Waker HD**:
+
+- **Your own GameCube Wind Waker** (USA, Europe or Japan): a disc image (`.iso`, `.gcm`, `.rvz`) or its extracted
+  folder. The mod draws its maps from it, on your computer.
+- **The mod**: `gc-minimap.zip` from the mod catalogue ([ZeldaWWHDMods](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods)).
+
+The Switch cannot build code mods (Mod SDK v2, "guest" mods) itself, so they go into the game when you build it: add
+both to the command.
 
 ```sh
 python3 tools/switch/make_sd.py --game-dir /path/to/10143500 \
     --guest-mod gc-minimap.zip --gc-game /path/to/GameCube-WindWaker.iso
 ```
 
-- `--gc-game`: your GameCube disc (`.iso`, `.gcm`, `.rvz`) or its extracted folder.
-- `--mod-option gc-minimap.size=260`: a mod's option (the minimap: `x`, `y`, `size`, `opacity`,
+- **A `.rvz` from Dolphin** needs **Python 3.14 or newer** (Dolphin's usual RVZ compression, Zstandard, is read with
+  Python 3.14's own library). With an older Python, `make_sd.py` looks for a Python 3.14 on the computer and uses it
+  for that step; if there is none it stops at once and says so. Then install Python 3.14 from
+  [python.org](https://www.python.org/downloads/), or make an `.iso` in Dolphin (right-click the game, *Convert
+  File...*, format *ISO*) and give that. An `.iso`, a `.gcm` or a folder works with any Python 3.
+- `--mod-option gc-minimap.size=260`: an option to start with (the minimap: `x`, `y`, `size`, `opacity`,
   `style` = `vector` or `original`); repeat it for more.
 - The maps it prepares are kept in your user folder (macOS: `~/Library/Application Support/SwitchWakerHD/guest-mods`,
   Windows: `%LOCALAPPDATA%\SwitchWakerHD\guest-mods`, Linux: `~/.local/share/SwitchWakerHD/guest-mods`), and
   copied to `build/sd/switch/wwhd/mods/`.
-- To change a mod or an option, or to remove the mods, run `make_sd.py` again (without `--guest-mod`:
-  no mods) and copy `wwhd.nro` and `mods/` again.
+- To add or remove a mod, run `make_sd.py` again (without `--guest-mod`: no mods) and copy `wwhd.nro` and `mods/`
+  again.
 - Mods that replace game functions are not supported on the Switch; `make_sd.py` says so.
 
 ## 3. Copy it to the SD card
