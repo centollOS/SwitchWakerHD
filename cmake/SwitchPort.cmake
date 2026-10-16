@@ -155,12 +155,49 @@ macro(switch_port_executable)
     endif()
     # the default build is wwhd.nro (what the HOME-menu forwarder starts); the debug-library build says so in
     # hbmenu and is named wwhd_dk_debug.nro, so it can sit in its own folder next to it
-    if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")
-      nx_generate_nacp(OUTPUT wwhd_dk.nacp NAME "SwitchWakerHD (deko3d debug)" AUTHOR "centollOS" VERSION "0.1.0")
-      nx_create_nro(wwhd NACP wwhd_dk.nacp OUTPUT wwhd_dk_debug.nro)
-    else()
-      nx_generate_nacp(OUTPUT wwhd_dk.nacp NAME "SwitchWakerHD" AUTHOR "centollOS" VERSION "0.1.0")
-      nx_create_nro(wwhd NACP wwhd_dk.nacp OUTPUT wwhd.nro)
+
+    # ---- NRO metadata (NACP, icon) ----
+    # The name in hbmenu: -DWWHD_NACP_NAME=... (tools/switch/build.sh passes "Wind Waker HD" unless --name says
+    # otherwise, as build_forwarder.sh does for the HOME screen); without it make_nacp.py's default.
+    set(WWHD_NACP_NAME_ARGS "")
+    if(DEFINED WWHD_NACP_NAME AND NOT WWHD_NACP_NAME STREQUAL "")
+      list(APPEND WWHD_NACP_NAME_ARGS --name "${WWHD_NACP_NAME}")
     endif()
+    if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+      list(APPEND WWHD_NACP_NAME_ARGS --name-suffix " (deko3d debug)")
+    endif()
+
+    # Scripts (shared with forwarder)
+    set(WWHD_MAKE_NACP "${CMAKE_SOURCE_DIR}/tools/switch/forwarder/make_nacp.py")
+    set(WWHD_NACP_FILE "${CMAKE_CURRENT_BINARY_DIR}/wwhd_dk.nacp")
+
+    if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+      set(WWHD_NRO_OUTPUT wwhd_dk_debug.nro)
+    else()
+      set(WWHD_NRO_OUTPUT wwhd.nro)
+    endif()
+
+    # NACP from the shared script; name (unless given), author, version (git describe) and title ID are its defaults, as the forwarder's
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    # The second output never exists, so the command runs on every build: the version (git describe) and the
+    # name are not inputs CMake can see. make_nacp.py leaves the file alone when its content is the same, and the
+    # NRO is only packed again when the NACP changed (restat with Ninja, the timestamp with make).
+    add_custom_command(
+      OUTPUT "${WWHD_NACP_FILE}" "${WWHD_NACP_FILE}.always"
+      COMMAND ${Python3_EXECUTABLE} "${WWHD_MAKE_NACP}" "${WWHD_NACP_FILE}" ${WWHD_NACP_NAME_ARGS}
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      DEPENDS "${WWHD_MAKE_NACP}"
+      COMMENT "Generating NRO NACP with forwarder-matching metadata"
+      VERBATIM
+    )
+
+    # The icon: a finished 256x256 JPEG that tools/switch/build.sh made on the host (-DWWHD_NRO_ICON); without it
+    # the NRO keeps the default icon
+    set(WWHD_ICON_ARG "")
+    if(WWHD_NRO_ICON AND EXISTS "${WWHD_NRO_ICON}")
+      set(WWHD_ICON_ARG ICON "${WWHD_NRO_ICON}")
+    endif()
+
+    nx_create_nro(wwhd NACP "${WWHD_NACP_FILE}" ${WWHD_ICON_ARG} OUTPUT ${WWHD_NRO_OUTPUT})
   endif()
 endmacro()

@@ -7,7 +7,7 @@ sdmc:/switch/wwhd/wwhd.nro as an application, so the game launches without holdi
 install instead of a container. make_sd.py runs it after a successful native build; it can also be run
 on its own, from the repository folder:
 
-  python tools/switch/forwarder/build_forwarder_windows.py [--keys C:\\path\\prod.keys] [--sd build\\sd]
+  python tools/switch/forwarder/build_forwarder_windows.py [--keys C:\\path\\prod.keys] [--sd build\\sd] [--icon path\\icon.{tga,png,jpg}]
 
 Needs your own console's prod.keys (dump them with Lockpick_RCM): by default %USERPROFILE%\\.switch\\prod.keys,
 or --keys PATH. Like build_forwarder.sh it refuses keys inside this folder. Without keys nothing is built and
@@ -18,6 +18,7 @@ Needs (besides the native build of INSTALL.md): git, Pillow (pip install pillow)
 MSYS2 (open devkitPro > MSYS2, then: pacman -S gcc). Output: build\\forwarder\\wwhd_forwarder.nsp, and with
 --sd DIR a copy in DIR\\NSP\\. Install it with DBI or Goldleaf; it needs up-to-date Atmosphere sigpatches.
 Not verified offline with hactool, unlike build_forwarder.sh.
+--icon: custom icon (TGA, PNG, JPG) (default: from game dump; disc images may not have it — use Cemu's mlc01/usr/title/.../meta/iconTex.tga)
 """
 import argparse
 import os
@@ -112,7 +113,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--keys", help="your console's prod.keys, outside this folder (default: .switch\\prod.keys in "
                     "your user folder)")
-    ap.add_argument("--icon", help="the game's iconTex.tga (default: from the extracted game in build\\)")
+    ap.add_argument("--icon", help="the game's icon (TGA, PNG, JPG) (default: from the extracted game in build\\)")
     ap.add_argument("--sd", help="also copy the NSP into DIR\\NSP\\ (the SD card folder make_sd.py made)")
     ap.add_argument("--version", help="the version shown on the HOME screen (default: from the folder name)")
     args = ap.parse_args()
@@ -152,7 +153,7 @@ def main():
                 icon_src = c
                 break
     if not icon_src or not os.path.isfile(icon_src):
-        fail("no icon: give --icon path\\to\\meta\\iconTex.tga (from your dump)")
+        fail("no icon: give --icon path\\to\\icon.{tga,png,jpg} (from your dump)")
     # the display version (NACP: at most 15 bytes): as build_forwarder.sh, git describe without the "v" and
     # without the hash when that is too long; a release zip has no git, so then the folder name's version
     version = args.version
@@ -200,7 +201,7 @@ cd "$(cygpath -u "$HBP")" && cp config.mk.template config.mk && (make -s >/dev/n
         with open(os.path.join(pack, "romfs", f), "w", newline="") as fh:
             fh.write(NRO_PATH)
     run([sys.executable, "-I", os.path.join(fdir, "make_nacp.py"), os.path.join(pack, "control", "control.nacp"),
-         "--title-id", TITLE_ID, "--name", NAME, "--publisher", PUBLISHER, "--version", version])
+         "--title-id", TITLE_ID, "--name", NAME, "--author", PUBLISHER, "--version", version])
     icon = os.path.join(out, "icon.jpg")
     run([sys.executable, "-I", os.path.join(fdir, "make_icon.py"), icon_src, icon])
     for lang in LANGS:
