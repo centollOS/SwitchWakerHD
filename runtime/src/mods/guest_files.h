@@ -58,11 +58,18 @@ class Files {
         if(ok)ok=(write?WriteFile(f,buffer,size,&done,nullptr):ReadFile(f,buffer,size,&done,nullptr))!=0;
         CloseHandle(f);return ok?int32_t(done):-1;
 #else
+#ifdef __SWITCH__
+        // (this fork) Horizon has no openat (platform/posix_stubs_switch.cpp); the SD card's FAT has no links
+        int f=open((root_/name).c_str(),(write?O_WRONLY|O_CREAT:O_RDONLY)|O_CLOEXEC,0600);
+        if(f<0)return -1;
+        struct stat status{};bool ok=!fstat(f,&status)&&S_ISREG(status.st_mode);
+#else
         int directory=open(root_.c_str(),O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
         if(directory<0)return -1;
         int f=openat(directory,name.c_str(),(write?O_WRONLY|O_CREAT:O_RDONLY)|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK,0600);
         close(directory);if(f<0)return -1;
         struct stat status{};bool ok=!fstat(f,&status)&&S_ISREG(status.st_mode)&&status.st_nlink==1;
+#endif
         if(write&&ok)ok=!ftruncate(f,0);
         uint32_t done=0;
         while(ok&&done<size) {

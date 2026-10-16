@@ -104,6 +104,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         if self.build is None:
             raise SystemExit(unknown_build_message(path))
         self.mod_hooks = mod_hooks
+        self.fork_mod_hooks_only(game_builds.read_hooks)  # (this fork)
         self.p = Program(path)
         self.p.discover()
         self.entries = set(self.p.entries)
@@ -307,7 +308,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
             # runtime hook: callers reach hook_X, which may call the original code (f_X_orig)
             out.append("void f_%08X(Cpu* __restrict c) { PPC_HOOK_CALL(c, hook_%08X); }\n" % (name, name))
         out += ["void %s(Cpu* __restrict c) {" % fname, "    PPC_ENTER(0x%08Xu);" % start]
-        if self.mod_hooks:
+        if self.fork_mod_check(start):  # (this fork: or only the listed functions)
             # guest mods: the check sits in the game's code (f_X, or f_X_orig behind a port hook), so the
             # port's own hooks (interpolation, true 60) stay outermost and mods hook the game's code
             out.append("    PPC_MOD_HOOK(%d, 0x%08Xu);" % (self.ordinal[start], start))
@@ -407,6 +408,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
                 f.write("extern void ppc_mod_register(unsigned, uint8_t*, const PpcFunc*);\n")
                 f.write("__attribute__((constructor)) static void register_mod_hooks(void) {\n")
                 f.write("    ppc_mod_register(%d, mod_hook_flags, mod_bodies);\n}\n" % n)
+                f.write(self.fork_mod_table())  # (this fork)
         with open(os.path.join(outdir, "imports.c"), "w") as f:
             f.write('#include "funcs.h"\n\nvoid hle_unimplemented(Cpu* c, const char* lib, const char* name);\n\n')
             for s in func_slots:

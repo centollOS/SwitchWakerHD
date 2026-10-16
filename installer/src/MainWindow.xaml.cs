@@ -128,6 +128,12 @@ public partial class MainWindow : Window
         BtnFwdPick.Content = Str.Get("fwd_pick");
         BtnFwdClear.Content = Str.Get("fwd_clear");
         ShowKeys();
+        TxtMmH.Text = Str.Get("mm_h");
+        TxtMmD.Text = Str.Get("mm_d");
+        BtnMmPick.Content = Str.Get("mm_pick");
+        BtnMmFolder.Content = Str.Get("mm_folder");
+        BtnMmClear.Content = Str.Get("fwd_clear");
+        ShowMinimap();
 
         TxtProgH.Text    = Str.Get("prog_h");
         TxtProgBody.Text = Str.Get("prog_body");
@@ -269,6 +275,41 @@ public partial class MainWindow : Window
         ShowKeys();
     }
 
+    // ── Optional GameCube sea minimap: the player's GameCube Wind Waker ─────
+    string? minimapGame;
+
+    void ShowMinimap()
+    {
+        TxtMmGame.Text = minimapGame ?? Str.Get("mm_none");
+        TxtMmGame.Foreground = (Brush)FindResource(minimapGame == null ? "FgDim" : "Fg");
+        BtnMmClear.Visibility = minimapGame == null ? Visibility.Collapsed : Visibility.Visible;
+        // a Dolphin .rvz (Zstandard) also gets Python 3.14, which the map tool needs for it
+        var rvz = minimapGame != null && InstallEngine.IsZstdRvz(minimapGame);
+        TxtMmNote.Text = rvz ? Str.Get("mm_rvz_note") : "";
+        TxtMmNote.Visibility = rvz ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    void BtnMmPick_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog { Title = Str.Get("mm_dlg_title"), Filter = Str.Get("mm_dlg_filter") };
+        if (dlg.ShowDialog(this) == true) minimapGame = dlg.FileName;
+        ShowMinimap();
+    }
+
+    void BtnMmFolder_Click(object sender, RoutedEventArgs e)
+    {
+        using var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = Str.Get("mm_dlg_folder"), ShowNewFolderButton = false };
+        if (minimapGame != null && Directory.Exists(minimapGame)) dlg.SelectedPath = minimapGame;
+        if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK) minimapGame = dlg.SelectedPath;
+        ShowMinimap();
+    }
+
+    void BtnMmClear_Click(object sender, RoutedEventArgs e)
+    {
+        minimapGame = null;
+        ShowMinimap();
+    }
+
     // Dropping the game file or folder on the window picks it and its format.
     void Window_Drop(object sender, DragEventArgs e)
     {
@@ -291,6 +332,7 @@ public partial class MainWindow : Window
         engine.GamePath = gamePath;
         engine.GameArg  = GameArg();
         engine.ForwarderKeys = keysPath != null && File.Exists(keysPath) ? keysPath : null;
+        engine.MinimapGame = minimapGame;
         running = true; failed = false;
         cts = new CancellationTokenSource();
         for (int i = 0; i < stepStates.Length; i++) SetStep(i, StepState.Pending);
@@ -539,6 +581,8 @@ public partial class MainWindow : Window
         TxtFwdDone.Visibility = keysPath != null ? Visibility.Visible : Visibility.Collapsed;
         TxtFwdDone.Text = Str.Get(nspFresh ? "fwd_done" : "fwd_missing");
         TxtFwdDone.Foreground = (Brush)FindResource(nspFresh ? "Fg" : "Warn");
+        TxtMmDone.Visibility = minimapGame != null ? Visibility.Visible : Visibility.Collapsed;
+        TxtMmDone.Text = Str.Get("mm_done");
         try
         {
             var files = Directory.GetFiles(engine.SdOut, "*", SearchOption.AllDirectories);

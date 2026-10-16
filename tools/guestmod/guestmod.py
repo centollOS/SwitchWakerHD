@@ -401,8 +401,9 @@ WWHD_MODULE_LOCAL uint64_t ppc_timebase(void) { return g_host->timebase(); }
 WWHD_MODULE_LOCAL double ppc_fres(double x) { return g_host->fres(x); }
 WWHD_MODULE_LOCAL double ppc_frsqrte(double x) { return g_host->frsqrte(x); }
 #undef PPC_ENTER
-#define PPC_ENTER(a) do { if (__builtin_expect(g_host->core_preempt[c->core], 0)) g_host->preempt(c); } while (0)
+#define PPC_ENTER(a) do { if (__builtin_expect(c->preempt, 0)) g_host->preempt(c); } while (0)
 """
+# (this fork) the preemption request is a byte in the Cpu (ppc.h PPC_ENTER), not upstream's g_core_preempt[core]
 
 EPILOGUE = r"""
 static const WWHDGuestModuleV1 k_module = {
