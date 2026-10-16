@@ -280,6 +280,9 @@ Point button_centre(uint32_t group, uint32_t picture) {
 }  // namespace
 
 void button_glyphs::calculate_pane(Cpu* c, PpcFunc calculate) {
+    // (this fork) every pane's matrix passes here (thousands a frame): in a session that never
+    // restyled the prompts nothing below applies, so the name compares are skipped (docs/perf-test.md)
+    if (!marking() && !style().positions) return calculate(c);
     const uint32_t pane = c->r[3];
     const int face = face_group(pane_name(pane));
     if (face < 0) return calculate(c);
