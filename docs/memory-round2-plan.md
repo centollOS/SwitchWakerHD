@@ -80,3 +80,11 @@ Without the image heap, malloc is flat after lap 1 (+2 MiB in lap 2, 0 in laps 3
 did not reach this, so step 2's "not fragmentation" holds only for short sessions. No 6th chunk in the
 remaining 21 min. Next: a trace of a ~45-minute run, replayed with the split policy (big images apart), to decide
 step 3 (placement, or evicting until a range fits before a new chunk).
+
+**The 5th chunk again (2026-10-16 night, main 279de25, `WWHD_DK_IMAGE_TRACE=1`).** Quest Log 2 and three laps of the
+40-warp tour, 25 s each (50 min, 120 warps): the image heap stayed at 3 chunks (192 MiB) the whole run, 10 MiB free
+at the end, largest free range 3.6 MiB; heap never used 789 MiB. Replayed with `image_heap_sim.py` (4,005 placements):
+first fit (the runtime's) 3 chunks, best fit / split / split-best 4 each. The fragmentation chunk of the earlier
+60-minute run is not reproduced on main, and first fit is already the best of the policies tried: no placement
+change is warranted now. Step 3 stays open only as "evict until a range fits before a new chunk", if a long session
+shows a late chunk again.
