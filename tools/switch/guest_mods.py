@@ -20,7 +20,8 @@ usage: guest_mods.py PACKAGE [PACKAGE ...] [--out build/guest-mods] [--data DIR]
        guest_mods.py --check PACKAGE [...] [--gc-game PATH]    only what would stop the build (make_sd.py runs it
                                                                first): the packages, the GameCube disc, its Python
 
-PACKAGE is a mod's .zip from the catalogue or its folder (manifest.json with kind "guest" and its mod.elf).
+PACKAGE is a mod's .zip from the catalogue or its folder (manifest.json with kind "guest" and its mod.elf), or a
+catalogue id (e.g. gc-minimap): its .zip is downloaded from the mod catalogue (CATALOGUE) and its SHA-256 checked.
 --gc-game is your GameCube Wind Waker (.iso, .gcm, .rvz or an extracted folder) for mods whose setup reads it.
 A Zstandard .rvz (Dolphin's default) needs Python 3.14 or newer for the mods' readers (standard-library
 compression.zstd): an older Python here looks for one (setup_python).
@@ -28,12 +29,14 @@ After this, the game code must be translated again with the hook list (make_sd.p
   WWHD_RECOMP_MOD_HOOKS_ONLY=build/guest-mods/hooks.txt python3 tools/recomp/recomp.py cking.rpx build/gen
 """
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import urllib.request
 import zipfile
 
 sys.dont_write_bytecode = True
@@ -54,6 +57,11 @@ MODULE_SYMBOLS = ("ppc_dispatch", "ppc_unimplemented", "ppc_trap", "ppc_timebase
 GQR_WRITE = re.compile(r"c->gqr\[\d\]\s*=(?!=)")
 
 
+# the mod catalogue (upstream's, as the Mods tab's mods_tab.h kDefaultCatalogue)
+CATALOGUE = "https://raw.githubusercontent.com/ZeldaWWHDRecomp/ZeldaWWHDMods/main/index.json"
+CATALOGUE_ID = re.compile(r"[a-z0-9][a-z0-9_.-]*")
+
+
 class Fail(Exception):
     pass
 
@@ -68,6 +76,69 @@ def user_data_root():
     else:
         base = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
     return os.path.join(base, "SwitchWakerHD", "guest-mods")
+
+
+def fetch(url, limit):
+    """url's bytes (at most limit): urllib, or curl when this Python has no certificates (python.org's macOS Python
+    before its Install Certificates step); what is fetched is checked by its caller."""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "wwhd-guest-mods"}),
+                                    timeout=60) as r:
+            data = r.read(limit + 1)
+    except OSError as e:
+        curl = shutil.which("curl")
+        if "CERTIFICATE_VERIFY_FAILED" not in str(e) or not curl:
+            raise Fail("cannot download %s: %s" % (url, e))
+        try:
+            data = subprocess.run([curl, "-fsSL", "--max-time", "120", url], stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, check=True).stdout
+        except (OSError, subprocess.CalledProcessError) as e2:
+            raise Fail("cannot download %s: %s" % (url, getattr(e2, "stderr", b"").decode(errors="replace").strip() or e2))
+    if len(data) > limit:
+        raise Fail("%s is larger than expected" % url)
+    return data
+
+
+def from_catalogue(mod_id, cache):
+    """A catalogue id: the mod's .zip, downloaded into cache (kept while its SHA-256 matches the catalogue's)."""
+    try:
+        index = json.loads(fetch(CATALOGUE, 16 << 20))
+    except ValueError as e:
+        raise Fail("the mod catalogue is not readable: %s" % e)
+    entry = next((m for m in index.get("mods", []) if isinstance(m, dict) and m.get("id") == mod_id), None)
+    if entry is None:
+        raise Fail("%s: not a file or folder, and the mod catalogue has no mod with that id" % mod_id)
+    if entry.get("kind") != "guest":
+        raise Fail("%s is not a code mod (kind %r); only code mods go into the NRO" % (mod_id, entry.get("kind")))
+    dl = entry.get("downloads", {}).get("all")
+    if not isinstance(dl, dict) or not dl.get("url") or not re.fullmatch(r"[0-9a-f]{64}", str(dl.get("sha256", ""))):
+        raise Fail("%s: the catalogue gives no single download for it" % mod_id)
+    os.makedirs(cache, exist_ok=True)
+    path = os.path.join(cache, "%s-%s.zip" % (mod_id, re.sub(r"[^0-9A-Za-z_.-]", "_", str(entry.get("version", "")))))
+    if os.path.isfile(path):
+        with open(path, "rb") as f:
+            if hashlib.sha256(f.read()).hexdigest() == dl["sha256"]:
+                print("  %s %s: %s" % (mod_id, entry.get("version", ""), path), flush=True)
+                return path
+    print("  %s %s: downloading %s" % (mod_id, entry.get("version", ""), dl["url"]), flush=True)
+    data = fetch(dl["url"], int(dl.get("size") or 0) or (64 << 20))
+    if hashlib.sha256(data).hexdigest() != dl["sha256"]:
+        raise Fail("%s: the download does not match the catalogue's SHA-256" % mod_id)
+    with open(path + ".part", "wb") as f:
+        f.write(data)
+    os.replace(path + ".part", path)
+    return path
+
+
+def resolve(packages, data):
+    """The packages as paths: a catalogue id (no such file or folder) becomes its downloaded .zip."""
+    cache = os.path.join(os.path.abspath(data), "downloads")
+    out = []
+    for p in packages:
+        if not os.path.exists(p) and CATALOGUE_ID.fullmatch(p):
+            p = from_catalogue(p, cache)
+        out.append(p)
+    return out
 
 
 def c_name(mod_id):
@@ -214,6 +285,7 @@ def build(args):
         if not m:
             raise Fail("--option %s: ID.KEY=VALUE" % o)
         given.setdefault(m.group(1), {})[m.group(2)] = m.group(3)
+    args.package = resolve(args.package, args.data)
     python = check_gc_game(args.gc_game)
     if python[0] != sys.executable:
         print("  the mods' setup runs with %s (the .rvz needs Python 3.14 or newer)" % " ".join(python), flush=True)
@@ -296,6 +368,7 @@ def check(args):
     """What would stop build() later, found before the slow steps: the packages are guest mods, the GameCube disc
     is there when one needs it, and a Python can read it."""
     needs_gc = False
+    args.package = resolve(args.package, args.data)
     for src in args.package:
         if not os.path.exists(src):
             raise Fail("%s: no such file or folder" % src)

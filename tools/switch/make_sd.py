@@ -24,8 +24,9 @@ usage:
                                               shaders you met, and guesses for the places you have not visited yet
                                               (a shadercache_gl.bin is still accepted: its sources only)
            --jobs N                           parallel compiles (each needs ~1.5 GB of memory)
-           --guest-mod PACKAGE                a code mod (Mod SDK v2) built into the NRO: its .zip from the mod
-                                              catalogue or its folder; repeat for more (tools/switch/guest_mods.py)
+           --guest-mod PACKAGE                a code mod (Mod SDK v2) built into the NRO: its id in the mod catalogue
+                                              (downloaded, e.g. gc-minimap), its .zip or its folder; repeat for
+                                              more (tools/switch/guest_mods.py)
            --gc-game PATH                     your GameCube Wind Waker (.iso/.gcm/.rvz or extracted), for mods
                                               whose setup reads it (the GameCube sea minimap)
            --mod-option ID.KEY=VALUE          a mod's option (e.g. gc-minimap.size=260); repeat for more
@@ -195,7 +196,7 @@ def main():
     ap.add_argument("--keys", help="native build: your console's prod.keys, for the HOME-screen forwarder "
                     "(default: .switch\\prod.keys in your user folder; without it the forwarder is skipped)")
     ap.add_argument("--no-forwarder", action="store_true", help="native build: do not build the forwarder (.nsp)")
-    ap.add_argument("--guest-mod", action="append", default=[], help="a code mod built into the NRO (.zip or folder)")
+    ap.add_argument("--guest-mod", action="append", default=[], help="a code mod built into the NRO (catalogue id, .zip or folder)")
     ap.add_argument("--gc-game", help="your GameCube Wind Waker, for mods whose setup reads it")
     ap.add_argument("--mod-option", action="append", default=[], help="a mod's option: ID.KEY=VALUE")
     args = ap.parse_args()
@@ -207,9 +208,11 @@ def main():
             fail("Docker or Podman is needed (the Switch toolchain runs in the devkitpro/devkita64 image), or "
                  "a native devkitPro with the Switch libraries: see INSTALL.md, \"Windows: devkitPro\"")
 
+    # a mod's .zip or folder, or a catalogue id (guest_mods.py downloads it)
+    mods = [os.path.abspath(p) if os.path.exists(p) else p for p in args.guest_mod]
     if args.guest_mod:  # what would stop the mods' step, found before the slow ones (the disc, its Python)
         run([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "guest_mods.py"), "--check"] +
-            [os.path.abspath(p) for p in args.guest_mod] +
+            mods +
             (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []))
     elif args.mod_option or args.gc_game:
         fail("--mod-option and --gc-game go with --guest-mod")
@@ -239,7 +242,7 @@ def main():
     tool = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "guest_mods.py"), "--out", mods_dir]
     renv = dict(os.environ)
     if args.guest_mod:
-        run(tool + [os.path.abspath(p) for p in args.guest_mod] + ["--build", build.name] +
+        run(tool + mods + ["--build", build.name] +
             (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []) +
             sum((["--option", o] for o in args.mod_option), []))
         renv["WWHD_RECOMP_MOD_HOOKS_ONLY"] = os.path.join(mods_dir, "hooks.txt")

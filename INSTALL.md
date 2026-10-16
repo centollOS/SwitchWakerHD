@@ -123,15 +123,17 @@ things besides your Wind Waker HD**:
 
 - **Your own GameCube Wind Waker** (USA, Europe or Japan): a disc image (`.iso`, `.gcm`, `.rvz`) or its extracted
   folder. The mod draws its maps from it, on your computer.
-- **The mod**: `gc-minimap.zip` from the mod catalogue ([ZeldaWWHDMods](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods)).
-
-The Switch cannot build code mods (Mod SDK v2, "guest" mods) itself, so they go into the game when you build it: add
-both to the command.
+On Windows, the [Easy Installer](#windows-easy-installer-recommended) has a box for it: choose your GameCube disc
+there. With `make_sd.py`, add the mod and the disc to the command:
 
 ```sh
 python3 tools/switch/make_sd.py --game-dir /path/to/10143500 \
-    --guest-mod gc-minimap.zip --gc-game /path/to/GameCube-WindWaker.iso
+    --guest-mod gc-minimap --gc-game /path/to/GameCube-WindWaker.iso
 ```
+
+`--guest-mod gc-minimap` downloads the mod from the mod catalogue
+([ZeldaWWHDMods](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods)) and checks it; a mod's `.zip` or folder works too.
+The Switch cannot build code mods (Mod SDK v2, "guest" mods) itself, so they go into the game when you build it.
 
 - **A `.rvz` from Dolphin** needs **Python 3.14 or newer** (Dolphin's usual RVZ compression, Zstandard, is read with
   Python 3.14's own library). With an older Python, `make_sd.py` looks for a Python 3.14 on the computer and uses it
