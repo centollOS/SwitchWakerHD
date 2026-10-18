@@ -40,9 +40,23 @@ a second copy of the window.
 
 ## Status
 
-- [ ] 1. Plan, make_sd.py
-- [ ] 2. DesktopEngine
-- [ ] 3. LinuxEngine
-- [ ] 4. Packaging
-- [ ] 5. Docs
-- [ ] 6. Tests
+- [x] 1. Plan, make_sd.py
+- [x] 2. DesktopEngine
+- [x] 3. LinuxEngine
+- [x] 4. Packaging
+- [x] 5. Docs
+- [~] 6. Tests (below)
+
+Tests (2026-10-19, containers on this Mac, arm64; a console harness running the engine without the window):
+- Mac engine after the DesktopEngine split: end to end again, RUN OK (minimap + forwarder).
+- devkitpro/devkita64 (Debian 12, devkitPro installed), as root: native route, Python 3.14 downloaded, release
+  verified, build with the GameCube sea minimap and the forwarder (533,720-byte NSP): RUN OK.
+- Ubuntu 24.04 as root: the apt route ran apt-get (make, gcc, git, wget...), then wget of
+  apt.devkitpro.org/install-devkitpro-pacman got **403 from Cloudflare** (this network is blocked for every client
+  and user agent, as pkg.devkitpro.org was for players in #28): now explained as dkp_why_403 (wget -nv, "ERROR 403").
+  The devkitPro apt install itself is therefore not tested here.
+- Ubuntu 24.04 as a user without a password window: the notice with `sudo sh '~/SwitchWakerHD-Build/root-step.sh'`.
+- Fedora 41 as root: Podman route, `dnf install -y podman` completes; podman cannot start inside an unprivileged
+  container (expected here), so the build is not reached.
+- The window: the linux-arm64 single file under Xvfb (Debian 12 + libice6/libsm6/fontconfig), Spanish from LANG.
+Not tested: pkexec on a real desktop, DBI over MTP, x86-64, the apt route from an unblocked network.
