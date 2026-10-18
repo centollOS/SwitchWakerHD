@@ -25,7 +25,7 @@ jobs:
       - name: Publish installer (net48, WPF)
         shell: pwsh
         run: |
-          dotnet publish installer/src/SwitchWakerHD.Installer.csproj `
+          dotnet publish installer/windows/SwitchWakerHD.Installer.csproj `
             --configuration Release `
             -p:Version=$(if ("${{ github.event_name }}" -eq "release") { "${{ github.ref_name }}" -replace '^v','' } else { "0.0.0" }) `
             --output installer/bin `

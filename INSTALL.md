@@ -36,7 +36,7 @@ user name has a space or an accented letter: the installer then works there).
 
 > **Windows SmartScreen** may show *"Windows protected your PC"* on first run because the installer is
 > not code-signed. Click **More info → Run anyway**. This is expected for open-source unsigned executables.
-> The [source code](installer/src) and [build script](installer/build.ps1) are in this repository.
+> The [source code](installer/windows) and [build script](installer/build.ps1) are in this repository.
 
 The installer is multilingual: it starts in **English** or **Spanish** based on your Windows display
 language, and the button in its corner switches between them.
