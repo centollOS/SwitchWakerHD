@@ -90,3 +90,9 @@ since v0.4.7's make_sd.py has no --guest-mod): Python 3.14.7 downloaded and veri
 Tools found, devkitPro found (no password: already installed by the spike), release zip verified, build with the
 GameCube sea minimap (GZLE01.iso) and the forwarder (533,720-byte NSP): RUN OK. Still to run: the root script
 (password window) from the app, the copy to a real card, the console.
+
+Root script from the engine (2026-10-19): the first try showed that the AppleScript passed with `-e` lost its quotes
+("No es posible convertir current application en tipo string", -1700), hidden as a warning since the packages were
+there. Fixed in 7636241b (a .applescript file; an osascript failure without the root script's log is an error).
+Rerun: the password window, pacman "there is nothing to do", its log streamed. Still to run: the copy to a real
+card, the console, and the app by hand.
