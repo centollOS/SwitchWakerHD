@@ -1,9 +1,9 @@
-name: Build Installers (Windows, macOS)
+name: Build Installers (Windows, macOS, Linux)
 
 on:
   release:
     types: [published]
-  # By hand on any branch, to try an installer change before a release: the .exe and the Mac zips are run artifacts
+  # By hand on any branch, to try an installer change before a release: the .exe, the Mac zips and the Linux archives are run artifacts
   workflow_dispatch:
 
 permissions:
@@ -89,3 +89,38 @@ jobs:
           files: |
             installer/bin/SwitchWakerHD-Installer-macOS-*.zip
             installer/bin/SwitchWakerHD-Installer-macOS-*.zip.sha256
+
+  # The Linux installer (installer/desktop, Avalonia): one self-contained file per architecture (installer/build-linux.sh)
+  build-linux-installer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build the installers (x86-64 and arm64)
+        run: |
+          version=${{ github.event_name == 'release' && github.ref_name || '0.0.0' }}
+          DOTNET=dotnet installer/build-linux.sh "$version"
+
+      - name: Upload as a run artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwitchWakerHD-Installer-Linux
+          path: |
+            installer/bin/SwitchWakerHD-Installer-linux-*.tar.gz
+            installer/bin/SwitchWakerHD-Installer-linux-*.tar.gz.sha256
+
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/bin/SwitchWakerHD-Installer-linux-*.tar.gz
+            installer/bin/SwitchWakerHD-Installer-linux-*.tar.gz.sha256
