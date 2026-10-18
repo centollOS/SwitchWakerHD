@@ -37,8 +37,12 @@ Findings:
 - Both root steps go in one script run through `osascript ... with administrator privileges`: one password window.
 - Host `cmake`: the `cmake` wheel from pip in the installer's Python (no Homebrew). `make`, `git` and a C compiler
   (the forwarder's hacBrewPack): Apple's Command Line Tools (`xcode-select --install`, Apple's own window).
-- Native `make_sd.py` build in a clean environment (PATH without Homebrew/Docker, DEVKITPRO=/opt/devkitpro): see
-  step 1.
+- Native `make_sd.py` build in a clean environment (PATH `<venv>/bin:/usr/bin:/bin:/usr/sbin:/sbin`, no Homebrew,
+  no Docker, DEVKITPRO=/opt/devkitpro, pip `cmake` 4.4.4, WWHD_JOBS=6): **builds unchanged** (macOS bash 3.2 is fine),
+  ~25 min on an M-series Mac, a 42.6 MB wwhd.nro. devkitA64 is GCC 16.1 (the packages Windows players get too; the
+  local Docker image was 15.2).
+- The forwarder: `build_forwarder_windows.py` runs on macOS too (the system's bash, `cc`/`make`/`git` from the
+  Command Line Tools, devkitPro from DEVKITPRO): a 533,720-byte wwhd_forwarder.nsp.
 
 **Python: a private Python 3.14** (python-build-standalone, pinned version and sha256) unpacked into the work folder,
 no administrator: the Mac's own `python3` is Apple's 3.9 (needs the Command Line Tools) and the minimap's `.rvz`
@@ -71,8 +75,8 @@ build progress, failure hints, strings); Windows keeps its WPF window and its en
 
 ## Status
 
-- [ ] 1. Native macOS build
-- [ ] 2. Shared code
+- [x] 1. Native macOS build (console check of the NRO and the NSP: with step 8)
+- [x] 2. Shared code
 - [ ] 3. Avalonia app
 - [ ] 4. MacEngine
 - [ ] 5. Done page
