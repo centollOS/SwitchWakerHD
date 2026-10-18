@@ -48,6 +48,8 @@ static class MacStrings
                                "The SwitchWakerHD installer wants to install devkitPro (the Nintendo Switch tools) in /opt/devkitpro."),
         ["dkp_mac_cancelled"] = ("Se canceló la ventana de la contraseña: sin ella no se puede instalar devkitPro. Pulsa Reintentar y escribe la contraseña de tu usuario del Mac.",
                                "The password window was cancelled: devkitPro cannot be installed without it. Press Retry and type your Mac user's password."),
+        ["dkp_mac_fail"]   = ("No se pudo pedir la contraseña para instalar devkitPro ({0}). Pulsa Reintentar; el registro tiene los detalles.",
+                               "Could not ask for the password to install devkitPro ({0}). Press Retry; the log has the details."),
         ["dkp_why_ssl"]    = ("La conexión segura falló (\"certificate has expired\"): comprueba que la fecha y la hora del Mac son correctas (Ajustes del Sistema > General > Fecha y hora) y vuelve a intentarlo.",
                                "The secure connection failed (\"certificate has expired\"): check that the Mac's date and time are right (System Settings > General > Date & Time) and try again."),
         ["dkp_why_lock"]   = ("Otro proceso de pacman tiene bloqueada la base de datos. Espera a que termine (o reinicia el Mac) y vuelve a intentarlo.",

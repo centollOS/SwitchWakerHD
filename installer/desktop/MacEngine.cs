@@ -163,14 +163,20 @@ sealed class MacEngine : EngineBase
         File.Delete(log);
 
         Say(Str.Get("dkp_mac_password"));
+        // The AppleScript goes in a file: on a command line its quotes would not survive
         var prompt = Str.Get("dkp_mac_prompt").Replace("\\", "\\\\").Replace("\"", "\\\"");
-        var apple = $"do shell script \"/bin/sh '{script.Replace("'", "'\\''")}'\" with administrator privileges with prompt \"{prompt}\"";
+        var apple = Path.Combine(WorkDir, "devkitpro-root.applescript");
+        File.WriteAllText(apple, $"do shell script \"/bin/sh '{script.Replace("'", "'\\\\''")}'\" " +
+                                 $"with administrator privileges with prompt \"{prompt}\"\n");
         var output = new List<string>();
         int rc;
         using (var follow = FollowLog(log, output))
-            rc = Exec("/usr/bin/osascript", "-e " + Quote(apple), check: false, onLine: output.Add);
+            rc = Exec("/usr/bin/osascript", Quote(apple), check: false, onLine: output.Add);
         if (rc != 0 && output.Any(l => l.Contains("(-128)")))
             throw new InstallException(Str.Get("dkp_mac_cancelled"));
+        // osascript failed before the script ran (no log): say so, whatever is installed already
+        if (rc != 0 && !File.Exists(log))
+            throw new InstallException(Str.Get("dkp_mac_fail", string.Join(" ", output.TakeLast(3))));
 
         var missing = MissingDevkit();
         if (missing.Count > 0)
