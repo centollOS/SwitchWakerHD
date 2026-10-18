@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Linq;
 using Avalonia;
 
 namespace SwitchWakerHD.Installer;
@@ -9,16 +10,19 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
-        Str.Override(MacStrings.Table);
+        Str.Override(DesktopStrings.For(OperatingSystem.IsMacOS()));
         Str.Es = SystemLanguage().StartsWith("es", StringComparison.OrdinalIgnoreCase);
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
-    // An app opened from the Finder gets no LANG: the first of the Mac's preferred languages (System Settings >
-    // General > Language & Region), as `defaults read -g AppleLanguages` lists them ("(\n    "es-ES",\n ...").
+    // Linux: the locale variables. macOS: an app opened from the Finder gets no LANG, so the first of the Mac's
+    // preferred languages (System Settings > General > Language & Region), as `defaults read -g AppleLanguages`
+    // lists them ("(\n    "es-ES",\n ...").
     static string SystemLanguage()
     {
-        var lang = Environment.GetEnvironmentVariable("LANG") ?? "";
+        var lang = new[] { "LC_ALL", "LC_MESSAGES", "LANG" }.Select(Environment.GetEnvironmentVariable)
+                       .FirstOrDefault(v => !string.IsNullOrEmpty(v)) ?? "";
+        if (!OperatingSystem.IsMacOS()) return lang;
         try
         {
             var psi = new ProcessStartInfo("/usr/bin/defaults", "read -g AppleLanguages")

@@ -252,7 +252,8 @@ abstract class EngineBase
     {
         var all = string.Join("\n", output);
         bool Has(string pattern) => Regex.IsMatch(all, pattern, RegexOptions.IgnoreCase);
-        return Has(@"returned error: 403")                                     ? "dkp_why_403" :
+        // pacman's curl ("returned error: 403"); wget fetching devkitPro's apt installer on Linux ("ERROR 403")
+        return Has(@"returned error: 403|ERROR 403|403 Forbidden")            ? "dkp_why_403" :
                Has(@"certificate has expired|certificate is not yet valid|SSL certificate") ? "dkp_why_ssl" :
                Has(@"unable to lock database")                                 ? "dkp_why_lock" :
                Has(@"returned error: 429")                                     ? "dkp_why_429" :

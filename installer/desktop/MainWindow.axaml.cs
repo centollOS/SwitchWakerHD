@@ -1,5 +1,5 @@
-// The installer's window on macOS (Avalonia): the Windows installer's four pages (windows/MainWindow.xaml.cs),
-// with the Mac's ways to the SD card.
+// The installer's window on macOS and Linux (Avalonia): the Windows installer's four pages (windows/MainWindow.xaml.cs),
+// with each system's ways to the SD card (DBI over MTP on Linux only: a Mac has no MTP).
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -25,7 +25,7 @@ public partial class MainWindow : Window
 {
     enum Page { Welcome, Game, Progress, Done }
 
-    readonly MacEngine engine = new();
+    readonly DesktopEngine engine = DesktopEngine.Create();
     Page page = Page.Welcome;
     bool running, failed, closingConfirmed;
     CancellationTokenSource? cts;
@@ -40,7 +40,7 @@ public partial class MainWindow : Window
     StreamWriter? logFile;
     readonly StringBuilder logText = new();
     const int LogBoxMaxChars = 200_000;
-    static readonly string LogPath = System.IO.Path.Combine(MacEngine.WorkDir, "installer.log");
+    static readonly string LogPath = System.IO.Path.Combine(DesktopEngine.WorkDir, "installer.log");
 
     readonly (Ellipse ring, Path glyph, TextBlock label)[] stepRows = new (Ellipse, Path, TextBlock)[4];
     readonly StepState[] stepStates = new StepState[4];
@@ -54,7 +54,8 @@ public partial class MainWindow : Window
         engine.Status      += msg => Ui(() => TxtStatus.Text = msg);
         engine.Progress    += p => Ui(() => SetProgress(p));
         engine.StepChanged += (i, s) => Ui(() => SetStep(i, s));
-        engine.AskUser      = AskUser;
+        engine.AskUser      = (h, t, b) => AskUser(h, t, b, null);
+        engine.AskCommand   = (h, t, b, c) => AskUser(h, t, b, c);
 
         logTimer.Tick += (_, _) => FlushLog();
         logTimer.Start();
@@ -117,7 +118,7 @@ public partial class MainWindow : Window
         TxtWelcomeLi3.Text   = "•  " + Str.Get("welcome_li3");
         TxtWelcomeNeed.Text  = Str.Get("welcome_need");
         TxtWelcomeAdmin.Text = Str.Get("welcome_admin");
-        TxtWelcomeDir.Text   = Str.Get("welcome_dir", MacEngine.WorkDir);
+        TxtWelcomeDir.Text   = Str.Get("welcome_dir", DesktopEngine.WorkDir);
 
         TxtGameH.Text    = Str.Get("game_h");
         TxtGameBody.Text = Str.Get("game_body");
@@ -147,7 +148,14 @@ public partial class MainWindow : Window
 
         TxtDoneH.Text     = Str.Get("done_h");
         TxtDoneBody.Text  = Str.Get("done_body");
+        TxtXferMtp.Text = Str.Get("xfer_mtp");       TxtXferMtpD.Text = Str.Get("xfer_mtp_d");
         TxtXferSd.Text  = Str.Get("xfer_sd");        TxtXferSdD.Text  = Str.Get("xfer_sd_d");
+        TxtMtpSteps.Text  = Str.Get("mtp_steps");
+        TxtMtpLabel.Text  = Str.Get("mtp_label");
+        TxtMtpNone.Text   = Str.Get("mtp_none");
+        TxtMtpReplace.Text = Str.Get("mtp_replace");
+        BtnCopyMtp.Content = Str.Get("btn_copy_mtp");
+        BtnMtpRefresh.Content = Str.Get("btn_refresh");
         TxtXferManual.Text = Str.Get("xfer_manual"); TxtXferManualD.Text = Str.Get("xfer_manual_d");
         TxtSdHint.Text    = Str.Get("sd_hint");
         TxtSdLabel.Text   = Str.Get("sd_label");
@@ -157,7 +165,7 @@ public partial class MainWindow : Window
         TxtManual.Text    = Str.Get("manual_body");
         BtnOpenOut.Content = Str.Get("btn_open_out");
         TxtNextH.Text = Str.Get("next_h");
-        TxtNext1.Text = Str.Get("next_1"); TxtNext2.Text = Str.Get("next_2");
+        TxtNext1.Text = Str.Get(XferMtp.IsChecked == true ? "next_1_mtp" : "next_1"); TxtNext2.Text = Str.Get("next_2");
         TxtNext3.Text = Str.Get("next_3"); TxtNext4.Text = Str.Get("next_4");
         BtnConfirmYes.Content = Str.Get("btn_yes_cancel");
         BtnConfirmNo.Content  = Str.Get("btn_no");
@@ -441,8 +449,9 @@ public partial class MainWindow : Window
         if (!IsActive) Activate();
     }
 
-    // Called on the worker thread: shows the notice and waits for its button (or a cancel).
-    void AskUser(string heading, string text, string button)
+    // Called on the worker thread: shows the notice (with a command to paste in a terminal, or none) and waits for
+    // its button (or a cancel).
+    void AskUser(string heading, string text, string button, string? command)
     {
         var ev = new ManualResetEventSlim();
         noticeEvent = ev;
@@ -451,7 +460,12 @@ public partial class MainWindow : Window
             TxtNoticeH.Text = heading;
             TxtNotice.Text = text;
             BtnNotice.Content = button;
+            noticeCommand = command;
+            TxtNoticeCmd.Text = command ?? "";
+            NoticeCmd.IsVisible = BtnNoticeCopy.IsVisible = command != null;
+            BtnNoticeCopy.Content = Str.Get("btn_copy_cmd");
             Notice.IsVisible = true;
+            Attention();
             Notice.BringIntoView();
         });
         try { ev.Wait(cts!.Token); }
@@ -463,6 +477,13 @@ public partial class MainWindow : Window
     }
 
     void BtnNotice_Click(object? sender, RoutedEventArgs e) => noticeEvent?.Set();
+
+    string? noticeCommand;
+
+    async void BtnNoticeCopy_Click(object? sender, RoutedEventArgs e)
+    {
+        if (noticeCommand != null && Clipboard != null) await Clipboard.SetTextAsync(noticeCommand);
+    }
 
     // ── Steps and progress ───────────────────────────────────────────────────
     void BuildStepRows()
@@ -528,10 +549,10 @@ public partial class MainWindow : Window
             if (logFile != null) return;
             try
             {
-                Directory.CreateDirectory(MacEngine.WorkDir);
+                Directory.CreateDirectory(DesktopEngine.WorkDir);
                 var stream = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
                 logFile = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
-                logFile.WriteLine($"==== {DateTime.Now:yyyy-MM-dd HH:mm:ss}  SwitchWakerHD installer (macOS {Environment.OSVersion.Version}, " +
+                logFile.WriteLine($"==== {DateTime.Now:yyyy-MM-dd HH:mm:ss}  SwitchWakerHD installer ({System.Runtime.InteropServices.RuntimeInformation.OSDescription}, " +
                                   $"{System.Runtime.InteropServices.RuntimeInformation.OSArchitecture}) ====");
             }
             catch (Exception e)
@@ -588,15 +609,15 @@ public partial class MainWindow : Window
         if (Clipboard != null) await Clipboard.SetTextAsync(logText.ToString());
     }
 
-    void BtnLogOpen_Click(object? sender, RoutedEventArgs e) => MacEngine.Open(LogPath, "TextEdit");
+    void BtnLogOpen_Click(object? sender, RoutedEventArgs e) => engine.Open(LogPath, text: true);
 
     // ── Done page: moving the files to the Switch ────────────────────────────
-    // Two ways on a Mac (it has no MTP for DBI): the microSD mounted in the Finder (a card reader, or hekate's
-    // USB mass storage), or by hand. The card list refreshes itself while the page is open.
+    // DBI's MTP responder over USB (Linux, through gio), the microSD mounted on the computer (a card reader, or
+    // hekate's USB mass storage), or by hand. The lists refresh themselves while the page is open.
     readonly DispatcherTimer devicePoll = new() { Interval = TimeSpan.FromSeconds(3) };
-    bool xferBusy, sdScanning, pollHooked;
+    bool xferBusy, sdScanning, mtpScanning, pollHooked;
     string? copiedTo;   // after a copy, the button ejects that card
-    string[] sdKeys = Array.Empty<string>();
+    string[] sdKeys = Array.Empty<string>(), mtpKeys = Array.Empty<string>();
 
     void EnterDone()
     {
@@ -615,14 +636,16 @@ public partial class MainWindow : Window
             TxtXferSize.Text = Str.Get("xfer_size", files.Length, (files.Sum(f => new FileInfo(f).Length) / 1e9).ToString("0.0"));
         }
         catch { TxtXferSize.Text = ""; }
-        if (XferSd.IsChecked != true && XferManual.IsChecked != true) XferSd.IsChecked = true;
+        XferMtp.IsVisible = engine.HasMtp;
+        if (XferMtp.IsChecked != true && XferSd.IsChecked != true && XferManual.IsChecked != true)
+            (engine.HasMtp ? XferMtp : XferSd).IsChecked = true;
         ShowPage(Page.Done);
         UpdatePanels();
-        RefreshDrives();
+        RefreshDevices();
         if (!pollHooked)
         {
             pollHooked = true;
-            devicePoll.Tick += (_, _) => { if (page == Page.Done && !xferBusy) RefreshDrives(); };
+            devicePoll.Tick += (_, _) => { if (page == Page.Done && !xferBusy) RefreshDevices(); };
         }
         devicePoll.Start();
     }
@@ -631,19 +654,40 @@ public partial class MainWindow : Window
     {
         if (sender is not RadioButton { IsChecked: true }) return;
         UpdatePanels();
-        if (page == Page.Done) RefreshDrives();
+        if (page == Page.Done) RefreshDevices();
     }
 
     void UpdatePanels()
     {
+        PanelMtp.IsVisible    = XferMtp.IsChecked == true;
         PanelSd.IsVisible     = XferSd.IsChecked == true;
         PanelManual.IsVisible = XferManual.IsChecked == true;
         TxtXferStatus.IsVisible = false;
-        var panel = PanelSd.IsVisible ? PanelSd : (Control)PanelManual;
+        TxtNext1.Text = Str.Get(XferMtp.IsChecked == true ? "next_1_mtp" : "next_1");
+        var panel = PanelMtp.IsVisible ? PanelMtp : PanelSd.IsVisible ? PanelSd : (Control)PanelManual;
         Dispatcher.UIThread.Post(() => panel.BringIntoView(), DispatcherPriority.Background);
     }
 
-    void BtnDevRefresh_Click(object? sender, RoutedEventArgs e) => RefreshDrives();
+    void BtnDevRefresh_Click(object? sender, RoutedEventArgs e) => RefreshDevices();
+
+    void RefreshDevices()
+    {
+        if (XferSd.IsChecked == true) RefreshDrives();
+        if (XferMtp.IsChecked == true) RefreshMtp();
+    }
+
+    async void RefreshMtp()
+    {
+        if (mtpScanning) return;
+        mtpScanning = true;
+        System.Collections.Generic.List<MtpStorage> found;
+        try { found = await Task.Run(GioMtp.FindSdStorages); }
+        catch { found = new(); }
+        finally { mtpScanning = false; }
+        FillList(MtpList, ref mtpKeys, found.Select(m => ("mtp" + Math.Abs(m.Uri.GetHashCode()), m.Device, m.Name, (object)m)).ToArray());
+        TxtMtpNone.IsVisible = found.Count == 0;
+        BtnCopyMtp.IsEnabled = found.Count > 0 && !xferBusy;
+    }
 
     // Rebuilds the list of card choices only when what is mounted changed, so the selection stays.
     void FillList(StackPanel list, ref string[] keys, (string key, string title, string info, object tag)[] items)
@@ -679,8 +723,8 @@ public partial class MainWindow : Window
     {
         if (sdScanning) return;
         sdScanning = true;
-        System.Collections.Generic.List<MacEngine.Volume> drives;
-        try { drives = await Task.Run(MacEngine.SdVolumes); }
+        System.Collections.Generic.List<DesktopEngine.Volume> drives;
+        try { drives = await Task.Run(engine.SdVolumes); }
         catch { drives = new(); }
         finally { sdScanning = false; }
         FillList(SdList, ref sdKeys, drives.Select(d => (
@@ -707,8 +751,9 @@ public partial class MainWindow : Window
     {
         xferBusy = busy;
         running = busy;   // closing the window asks first
-        foreach (var c in new Control[] { XferSd, XferManual, SdList, BtnSdRefresh })
+        foreach (var c in new Control[] { XferMtp, XferSd, XferManual, MtpList, SdList, BtnMtpRefresh, BtnSdRefresh })
             c.IsEnabled = !busy;
+        BtnCopyMtp.IsEnabled = !busy && MtpList.Children.Count > 0;
         XferBar.IsVisible = busy;
         UpdateCopyButton();
         UpdateFooter();
@@ -727,7 +772,7 @@ public partial class MainWindow : Window
         if (mount == null) return;
         if (copiedTo == mount)
         {
-            var ok = await Task.Run(() => MacEngine.Eject(mount));
+            var ok = await Task.Run(() => engine.Eject(mount));
             XferStatus(ok ? Str.Get("sd_ejected") : Str.Get("sd_eject_fail", mount), ok ? "Good" : "Warn");
             if (ok) copiedTo = null;
             RefreshDrives();
@@ -759,5 +804,38 @@ public partial class MainWindow : Window
         finally { SetXferBusy(false); }
     }
 
-    void BtnOpenOut_Click(object? sender, RoutedEventArgs e) => MacEngine.Open(engine.SdOut);
+    async void BtnCopyMtp_Click(object? sender, RoutedEventArgs e)
+    {
+        var target = MtpList.Children.OfType<RadioButton>().FirstOrDefault(r => r.IsChecked == true)?.Tag as MtpStorage;
+        if (target == null) return;
+        SetXferBusy(true);
+        XferBar.IsIndeterminate = false;
+        XferBar.Value = 0;
+        XferStatus(Str.Get("mtp_starting", target.Device), "Fg");
+        EnqueueLog(Str.Get("mtp_starting", target.Device) + $" ({target.Uri})", LogKind.Info);
+        cts = new CancellationTokenSource();
+        var token = cts.Token;
+        var src = engine.SdOut;
+        try
+        {
+            await Task.Run(() => GioMtp.Copy(src, target, (fd, ft, bd, bt, name) => Ui(() =>
+            {
+                XferBar.Value = bt > 0 ? bd * 100.0 / bt : 0;
+                TxtXferStatus.Text = Str.Get("mtp_progress", fd, ft, bd / 1048576, bt / 1048576);
+            }), line => EnqueueLog(line, LogKind.Output), token));
+            XferStatus(Str.Get("mtp_done"), "Good");
+            EnqueueLog(Str.Get("mtp_done"), LogKind.Ok);
+        }
+        catch (Exception ex)
+        {
+            var msg = ex is OperationCanceledException ? Str.Get("cancelled")
+                    : ex is InstallException ? ex.Message
+                    : Str.Get("mtp_error", ex.Message);
+            XferStatus(msg, "Bad");
+            EnqueueLog(msg, LogKind.Error);
+        }
+        finally { SetXferBusy(false); }
+    }
+
+    void BtnOpenOut_Click(object? sender, RoutedEventArgs e) => engine.Open(engine.SdOut);
 }

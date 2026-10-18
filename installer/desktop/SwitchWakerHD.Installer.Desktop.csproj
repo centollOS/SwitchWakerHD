@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <!-- .NET 8 + Avalonia, published self-contained (build-mac.sh): nothing to install on the Mac -->
+    <!-- .NET 8 + Avalonia, published self-contained (build-mac.sh, build-linux.sh): nothing to install first -->
     <TargetFramework>net8.0</TargetFramework>
-    <RuntimeIdentifiers>osx-arm64;osx-x64</RuntimeIdentifiers>
+    <RuntimeIdentifiers>osx-arm64;osx-x64;linux-x64;linux-arm64</RuntimeIdentifiers>
     <SelfContained>true</SelfContained>
     <AssemblyName>SwitchWakerHD-Installer</AssemblyName>
     <RootNamespace>SwitchWakerHD.Installer</RootNamespace>

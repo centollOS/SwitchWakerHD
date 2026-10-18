@@ -23,14 +23,8 @@ static class MacStrings
         // Progress
         ["prog_body"]      = ("Puedes dejar el Mac trabajando (enchufado, para que no se duerma). El build tarda entre 10 y 30 minutos.",
                                "You can leave the Mac working (plugged in, so it does not sleep). The build takes 10 to 30 minutes."),
-        ["step_python"]    = ("Python 3.14",                                          "Python 3.14"),
         ["step_devkit"]    = ("Herramientas de Apple y devkitPro",                    "Apple's tools and devkitPro"),
 
-        // Python
-        ["py_mac_arch"]    = ("Este Mac ({0}) no es Apple Silicon ni Intel de 64 bits.", "This Mac ({0}) is neither Apple Silicon nor 64-bit Intel."),
-        ["py_mac_downloading"] = ("Descargando Python {0}...",                        "Downloading Python {0}..."),
-        ["py_mac_unpacking"] = ("Preparando Python...",                               "Setting up Python..."),
-        ["py_mac_fail"]    = ("Python no arranca desde {0}. Borra esa carpeta y pulsa Reintentar.", "Python does not start from {0}. Delete that folder and press Retry."),
 
         // Apple's Command Line Tools
         ["clt_checking"]   = ("Buscando las herramientas de línea de comandos de Apple...", "Looking for Apple's command line tools..."),
@@ -64,7 +58,6 @@ static class MacStrings
                                "Could not make a secure connection to GitHub ({0}). Check the Mac's date and time, and that no proxy or filter intercepts HTTPS connections."),
         ["key_txt"]        = ("{0} termina en .txt. En el Finder, selecciónalo, Archivo > Obtener información, y en Nombre y extensión déjalo como {1}.",
                                "{0} ends in .txt. In the Finder, select it, File > Get Info, and under Name & Extension make it {1}."),
-        ["rel_no_script"]  = ("La versión descargada no contiene tools/switch/make_sd.py.", "The downloaded release has no tools/switch/make_sd.py."),
 
         // Failures
         ["err_io"]         = ("Error de archivos en el paso \"{0}\": {1}\nComprueba que hay espacio libre en el disco y que macOS deja al instalador leer la carpeta del juego (Ajustes del Sistema > Privacidad y seguridad > Archivos y carpetas); luego pulsa Reintentar.",
@@ -76,26 +69,17 @@ static class MacStrings
                                "macOS denied access to a file. If the game is on the Desktop, in Documents, Downloads or on an external disk, allow the installer in System Settings > Privacy & Security > Files and Folders (or Full Disk Access), then press Retry."),
         ["hint_silent"]    = ("El build se detuvo sin mensaje: una herramienta no llegó a arrancar. Pulsa Reintentar; si vuelve a pasar, comparte el registro (installer.log) en una issue.",
                                "The build stopped without a message: a tool did not start. Press Retry; if it happens again, share the log (installer.log) in an issue."),
-        ["mm_rvz_note"]    = ("Un .rvz de Dolphin se lee con Python 3.14, que es el que usa este instalador.",
-                               "A Dolphin .rvz is read with Python 3.14, the one this installer uses."),
 
         // Done page
         ["xfer_sd"]        = ("Con la microSD en el Mac",                             "With the microSD card in the Mac"),
         ["sd_hint"]        = ("Pon la microSD en un lector de tarjetas, o en la Switch abre hekate > Tools > USB Tools > SD Card y conecta el cable USB: la tarjeta aparece en el Finder.",
                                "Put the microSD card in a card reader, or on the Switch open hekate > Tools > USB Tools > SD Card and plug in the USB cable: the card shows up in the Finder."),
-        ["sd_mac_todo"]    = ("{0} archivos que copiar ({1} ya estaban en la tarjeta).", "{0} files to copy ({1} were already on the card)."),
-        ["sd_fail_mac"]    = ("La copia falló ({0}): comprueba que la tarjeta sigue conectada y no está protegida contra escritura, y vuelve a copiar; o cópiala a mano.",
-                               "The copy failed ({0}): check that the card is still connected and not write-protected, and copy again; or copy it by hand."),
         ["sd_copied"]      = ("Copiado a {0}. Expulsa la tarjeta antes de sacarla.",  "Copied to {0}. Eject the card before removing it."),
-        ["sd_ejected"]     = ("Tarjeta expulsada: ya puedes sacarla (o salir de hekate).", "Card ejected: you can remove it now (or leave hekate)."),
-        ["sd_eject_fail"]  = ("No se pudo expulsar {0}: ciérrala en el Finder y expúlsala desde allí.", "Could not eject {0}: close it in the Finder and eject it there."),
         ["sd_fat32"]       = ("{0} está en FAT32, que no admite archivos de más de 4 GB. Formatea la tarjeta en exFAT (con hekate o el formateador oficial de la SD Association).",
                                "{0} is FAT32, which cannot hold files over 4 GB. Format the card as exFAT (with hekate or the SD Association's official formatter)."),
         ["manual_body"]    = ("Copia el contenido de esta carpeta (la carpeta switch) a la raíz de la microSD y reemplaza los archivos si pregunta. El Finder deja archivos ._ en la tarjeta; la opción \"Con la microSD en el Mac\" no.",
                                "Copy the contents of this folder (the switch folder) to the root of the microSD card, replacing files if asked. The Finder leaves ._ files on the card; the \"microSD card in the Mac\" option does not."),
-        ["btn_eject"]      = ("Expulsar tarjeta",                                     "Eject card"),
+        ["sd_eject_fail"]  = ("No se pudo expulsar {0}: ciérrala en el Finder y expúlsala desde allí.", "Could not eject {0}: close it in the Finder and eject it there."),
         ["btn_open_out"]   = ("Abrir en el Finder",                                   "Show in Finder"),
-        ["btn_yes_cancel"] = ("Sí, cancelar",                                         "Yes, cancel"),
-        ["btn_no"]         = ("No",                                                   "No"),
     };
 }
