@@ -77,9 +77,16 @@ build progress, failure hints, strings); Windows keeps its WPF window and its en
 
 - [x] 1. Native macOS build (console check of the NRO and the NSP: with step 8)
 - [x] 2. Shared code
-- [ ] 3. Avalonia app
-- [ ] 4. MacEngine
-- [ ] 5. Done page
-- [ ] 6. Packaging
-- [ ] 7. Docs
+- [x] 3. Avalonia app
+- [x] 4. MacEngine (engine end to end, see below)
+- [x] 5. Done page (card copy not yet run against a real card)
+- [x] 6. Packaging
+- [x] 7. Docs
 - [ ] 8. End to end
+
+Engine end to end (2026-10-19, this Mac, a console harness running MacEngine in a clean environment: PATH
+/usr/bin:/bin:/usr/sbin:/sbin, no LANG, fresh ~/SwitchWakerHD-Build, this branch placed as the v0.4.7 release folder
+since v0.4.7's make_sd.py has no --guest-mod): Python 3.14.7 downloaded and verified, pip packages, Command Line
+Tools found, devkitPro found (no password: already installed by the spike), release zip verified, build with the
+GameCube sea minimap (GZLE01.iso) and the forwarder (533,720-byte NSP): RUN OK. Still to run: the root script
+(password window) from the app, the copy to a real card, the console.

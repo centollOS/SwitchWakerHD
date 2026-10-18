@@ -143,6 +143,13 @@ sealed class MacEngine : EngineBase
                 File.Move(part, pkg);
             }
         }
+        InstallDevkit(pkg);
+    }
+
+    // The root script: devkitPro's pkg when given, then the Switch packages; fails with the reason when a package
+    // is still missing after it.
+    void InstallDevkit(string? pkg)
+    {
         var log = Path.Combine(WorkDir, "devkitpro-root.log");
         var script = Path.Combine(WorkDir, "devkitpro-root.sh");
         var sb = new StringBuilder();
@@ -165,7 +172,7 @@ sealed class MacEngine : EngineBase
         if (rc != 0 && output.Any(l => l.Contains("(-128)")))
             throw new InstallException(Str.Get("dkp_mac_cancelled"));
 
-        missing = MissingDevkit();
+        var missing = MissingDevkit();
         if (missing.Count > 0)
         {
             var why = PacmanFailure(output);
