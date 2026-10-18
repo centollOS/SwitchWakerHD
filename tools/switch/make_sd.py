@@ -209,7 +209,9 @@ def main():
     args = ap.parse_args()
     if not (args.image or args.wua or args.game_dir):
         ap.error("one of --image, --wua or --game-dir is required")
-    native = not have_container_engine() or (os.name == "nt" and native_toolchain_ok())
+    # WWHD_NATIVE=1 (build.sh's switch; the macOS and Linux installers set it): native even with docker/podman around
+    native = (not have_container_engine() or (os.name == "nt" and native_toolchain_ok()) or
+              os.environ.get("WWHD_NATIVE") == "1")
     if native:
         if not native_toolchain_ok():
             fail("Docker or Podman is needed (the Switch toolchain runs in the devkitpro/devkita64 image), or "
