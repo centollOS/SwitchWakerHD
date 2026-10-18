@@ -96,22 +96,28 @@ sealed class LinuxEngine : DesktopEngine
         return true;
     }
 
-    // devkitPro's own apt route (https://devkitpro.org/wiki/devkitPro_pacman): their script adds the apt repository
-    // and dkp-pacman; then the Switch packages, and what the native build and the icon run (cmake comes from pip).
+    // devkitPro's own apt route (https://devkitpro.org/wiki/devkitPro_pacman), its install-devkitpro-pacman steps
+    // done here: the key, the repository, devkitpro-pacman; then the Switch packages, and what the native build and
+    // the icon run (cmake comes from pip). devkitPro's servers sit behind Cloudflare's bot rules, which refuse the
+    // download tools' own user agents (curl, Wget, Python-urllib: 403) but let package managers' through (apt,
+    // pacman) and the custom one their script uses for the key, "dkp apt": so the key is fetched exactly as theirs
+    // does, and the rest goes through apt and dkp-pacman (docs/linux-installer-plan.md, "devkitPro's 403").
     static string DevkitProAptScript()
     {
+        const string key = "/usr/share/keyring/devkitpro-pub.gpg", list = "/etc/apt/sources.list.d/devkitpro.list";
         var sb = new StringBuilder();
         sb.AppendLine("set -e");
         sb.AppendLine("export DEBIAN_FRONTEND=noninteractive");
         sb.AppendLine("apt-get update");
-        sb.AppendLine("apt-get install -y make gcc git wget ca-certificates gnupg");
+        sb.AppendLine("apt-get install -y make gcc git wget ca-certificates apt-transport-https");
         sb.AppendLine("if ! command -v dkp-pacman >/dev/null; then");
-        sb.AppendLine("  cd \"$(mktemp -d)\"");
-        sb.AppendLine("  wget -nv https://apt.devkitpro.org/install-devkitpro-pacman");
-        sb.AppendLine("  chmod +x ./install-devkitpro-pacman");
-        sb.AppendLine("  yes | ./install-devkitpro-pacman");
+        sb.AppendLine("  mkdir -p /usr/share/keyring");
+        sb.AppendLine($"  [ -s {key} ] || wget -nv -U 'dkp apt' -O {key} https://apt.devkitpro.org/devkitpro-pub.gpg");
+        sb.AppendLine($"  [ -f {list} ] || echo 'deb [signed-by={key}] https://apt.devkitpro.org stable main' > {list}");
+        sb.AppendLine("  apt-get update");
+        sb.AppendLine("  apt-get install -y devkitpro-pacman");
         sb.AppendLine("fi");
-        // pkg.devkitpro.org often answers 403 to the refresh: then install from the lists already there
+        // pkg.devkitpro.org may refuse the refresh: then install from the lists already there
         sb.AppendLine($"dkp-pacman -Sy --needed --noconfirm {DkpPackages} || dkp-pacman -S --needed --noconfirm {DkpPackages}");
         return sb.ToString();
     }

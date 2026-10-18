@@ -21,7 +21,8 @@ Two causes:
 1. **pkg.devkitpro.org answers 403.** Cloudflare in front of devkitPro blocks some pacman users by mistake
    (devkitPro is fighting LLM scraper bots): [devkitPro/pacman#63](https://github.com/devkitPro/pacman/issues/63),
    [#62](https://github.com/devkitPro/pacman/issues/62). On 2026-10-12 it also answered 403 to us, for every
-   URL and user agent, so here it looks IP-based. A failed `-Sy` installs nothing at all.
+   URL and user agent, so here it looks IP-based. (2026-10-19: not so; those probes used curl, which is refused
+   for any user agent: docs/linux-installer-plan.md, "devkitPro's 403".) A failed `-Sy` installs nothing at all.
 2. **MSYS2's `cmake` was never requested.** No devkitPro package brings it (`switch-cmake` only brings
    `Switch.cmake`), so a machine without it failed in stage 4 even when pacman worked. The reporter had
    `Switch.cmake` (build.sh's check passed) but no `cmake`.

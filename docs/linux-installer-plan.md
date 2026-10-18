@@ -60,3 +60,30 @@ Tests (2026-10-19, containers on this Mac, arm64; a console harness running the 
   container (expected here), so the build is not reached.
 - The window: the linux-arm64 single file under Xvfb (Debian 12 + libice6/libsm6/fontconfig), Spanish from LANG.
 Not tested: pkexec on a real desktop, DBI over MTP, x86-64, the apt route from an unblocked network.
+
+## devkitPro's 403 (investigated 2026-10-19)
+
+Not an IP block: Cloudflare's bot rules in front of devkitpro.org, apt.devkitpro.org and pkg.devkitpro.org decide by
+the client. From this network (Ubuntu 24.04 container and the Mac):
+
+| client | user agent | answer |
+|---|---|---|
+| curl (Ubuntu 8.5, macOS) | any, also with --http1.1 | 403 |
+| wget | its own (`Wget/…`), `Mozilla/5.0`, `Python-urllib/…` | 403 |
+| wget | `dkp apt` (devkitPro's own script), `pacman/…`, `SwitchWakerHD-Installer/1.0` | 200 |
+| Python urllib | its own, `curl/…`, `Wget/…` | 403 |
+| Python urllib | `pacman/…` (Linux, Darwin, MSYS_NT), `Debian APT-HTTP/…`, `dkp apt` | 200 |
+| apt, dkp-pacman (Linux), dkp-pacman (macOS) | their own | 200 |
+
+So download tools' own user agents are refused and package managers' (and devkitPro's "dkp apt") pass; the curl
+command line is refused whatever it sends. The first apt-route test failed only because our root script fetched
+devkitPro's `install-devkitpro-pacman` with plain `wget`. Fix (LinuxEngine.DevkitProAptScript): do that script's
+steps ourselves, the key with `wget -U 'dkp apt'` exactly as theirs, then apt and dkp-pacman. Tested: Ubuntu 24.04
+as root, from this network, devkitpro-pacman 6.0.1 installed, `dkp-pacman -Sy` synced dkp-libs and dkp-linux,
+115 MiB of Switch packages, then the build with minimap and forwarder: RUN OK.
+
+The earlier conclusion in installer-devkitpro-403-plan.md ("for every URL and user agent, so here it looks
+IP-based") came from curl probes, which are refused for any user agent: it does not hold. Windows' MSYS2 pacman
+sends `pacman/… (MSYS_NT-…) libalpm/…`, which passes; the 403 in #28 is then not its user agent (its TLS client,
+or that player's address, would be next). Possible hardening, not done: when pacman gets 403, retry with a
+pacman.conf whose XferCommand downloads through the installer's own Python with a pacman user agent.
