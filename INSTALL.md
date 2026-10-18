@@ -41,9 +41,45 @@ user name has a space or an accented letter: the installer then works there).
 The installer is multilingual: it starts in **English** or **Spanish** based on your Windows display
 language, and the button in its corner switches between them.
 
+## macOS: Easy Installer (recommended)
+
+On a **Mac with macOS 12 or newer** (Apple Silicon or Intel), the same installer as on Windows, in a window: no
+Terminal, no Homebrew, no Docker. It sets up its own Python 3.14, Apple's command line tools and devkitPro, downloads
+the release, builds the game natively and copies it to the SD card.
+
+**[⬇ Apple Silicon (M1 and newer)](https://github.com/centollOS/SwitchWakerHD/releases/latest/download/SwitchWakerHD-Installer-macOS-AppleSilicon.zip)**
+· **[⬇ Intel](https://github.com/centollOS/SwitchWakerHD/releases/latest/download/SwitchWakerHD-Installer-macOS-Intel.zip)**
+(Apple menu > *About This Mac* says which: *Chip Apple M…* or *Processor Intel*)
+
+1. Download the zip and double-click it: *SwitchWakerHD Installer* appears next to it (you can move it to
+   *Applications*).
+2. **The first time**, macOS stops it, because the app is not signed with an Apple developer account
+   (*"Apple could not verify…"*): press **Done**, open **System Settings > Privacy & Security**, scroll down to
+   *"SwitchWakerHD Installer was blocked…"* and press **Open Anyway**, then **Open** and your password. Later
+   starts open directly.
+3. Pick your game dump (a `.wua`, a `.wux`/`.wud` with its keys, or an extracted folder), and if you like the
+   **GameCube sea minimap** (your own GameCube Wind Waker: `.iso`, `.gcm`, `.rvz` or its folder) and the
+   **HOME-screen icon** (your console's `prod.keys`), as on Windows above. You can also drag the game onto the
+   window.
+4. Press **Install**. On the way:
+   - if Apple's **command line tools** are missing, macOS shows its own window: press *Install*, wait, then
+     *Continue* in the installer;
+   - macOS asks for **your password once**, to install devkitPro in `/opt/devkitpro`;
+   - if the game is on the Desktop, in Documents, Downloads or on an external disk, macOS may ask to let the
+     installer read it: allow it.
+5. Wait for the build (10–30 minutes; keep the Mac plugged in), then:
+   - **With the microSD card in the Mac**: a card reader, or on the Switch hekate's *Tools > USB Tools > SD Card*
+     and the USB cable; the installer copies the files and ejects the card. (A Mac has no MTP, so DBI's USB
+     transfer is not offered.)
+   - **By hand**: *Show in Finder* opens the folder; copy its contents to the root of the SD card.
+
+The full log is in `~/SwitchWakerHD-Build/installer.log`. The installer starts in Spanish or English from the
+Mac's language; the button in its corner switches. Source: [installer/desktop](installer/desktop) and
+[installer/build-mac.sh](installer/build-mac.sh).
+
 ---
 
-*For macOS, Linux, or manual Windows setup, continue below.*
+*For Linux, or a manual setup on Windows or macOS, continue below.*
 
 ---
 
@@ -54,7 +90,7 @@ language, and the button in its corner switches between them.
 | **The game** | Your own dump of **The Wind Waker HD, USA or Europe** (title `00050000-10143500` or `00050000-10143600`), **version 0** (the disc, or the eShop release without the update): a disc image (`.wux`/`.wud`) with its disc key and your console's Wii U common key, or the extracted game folder (`code/`, `content/`, `meta/`) |
 | **A Switch** | Running Atmosphère with the Homebrew Menu, and about 3 GB free on the SD card |
 | **A computer** | Windows 10/11, macOS or Linux; 8 GB of RAM or more, 10 GB of free disk space |
-| **On the computer** | Python 3, this release unzipped, and the Switch toolchain: on **Windows**, [devkitPro](#windows-devkitpro-no-docker-or-wsl) (recommended: no Docker, no WSL); on macOS and Linux, [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker / Podman on Linux) |
+| **On the computer** | Python 3, this release unzipped, and the Switch toolchain: on **Windows**, [devkitPro](#windows-devkitpro-no-docker-or-wsl) (recommended: no Docker, no WSL); on **macOS**, the [Easy Installer](#macos-easy-installer-recommended) sets up devkitPro itself (or by hand: [Docker Desktop](https://www.docker.com/products/docker-desktop/)); on Linux, Docker or Podman |
 
 How to dump the game and the keys from your own Wii U is outside this guide: the
 [Cemu dumping guide](https://cemu.cfw.guide/dumping-games.html) (Dumpling) covers it. A dump made with

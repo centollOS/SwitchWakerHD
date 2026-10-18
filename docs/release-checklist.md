@@ -18,6 +18,7 @@ Rules:
 | A1 | USA and EUR NROs build from the release zip (`package_release.sh`, then `make_sd.py`) | Both build; `tools/release/guard.py` passes |
 | A2 | `info` and the boot log of a build from the zip | The version is the tag (`vX.Y.Z+N (hash)`), not "dev (unknown)" (#20) |
 | A3 | Windows installer, `docs/installer-windows-tests.md` section A | All pass (#1, #28, #30) |
+| A3m | macOS installer: the zip from `release-installer.yml` (workflow_dispatch), quarantined like a download | Opens after *Open Anyway*; a fresh `~/SwitchWakerHD-Build` installs, builds and copies to a card (`docs/mac-installer-plan.md` step 8) |
 | A4 | The tag is new | Never re-publish or move a tag: bump the version (the installer caches zips by tag) |
 
 ## B. Boot, screens and system
