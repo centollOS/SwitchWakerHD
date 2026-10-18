@@ -17,20 +17,25 @@ Branch `fix/prepare-sweep`, from main bed2af7. Code: runtime/src/platform/prepar
 
 ## Fixes
 
-1. **Places entered from the sea.** The places whose arrival from another stage stopped or crashed the game
-   (Mjtower after M_DragB, M_DaiB after M2tower) are entered from the sea: the sweep first warps to the sea (the list's
-   first place, sea room 44), waits for the arrival and Link's control as for any place, then goes on. The place list
-   and its numbering do not change (state.txt stays valid).
+1. **Places left out** (`kLeftOut`): M2tower, M_DaiB, Mjtower. The player's first visit prepares them, as without the
+   sweep. A detour through the sea was tried first: M2tower -> sea -> M_DaiB passed once, but M_DragB -> sea ->
+   Mjtower crashed the same way (the state that breaks Mjtower comes from the places before, not the warp), so the
+   places go instead. The list is now 124 places (state.txt of a sweep in progress may move by up to 3 places).
 2. **The sweep needs a game in progress.** Starting from the title screen goes: the settings menu and `prepare start`
-   already ask for a game in progress outside the title (the title start was for the first-start notice, which the
-   background-shaders card replaced; nothing asks for it now). A sweep that continues after a restart waits for a
-   Quest Log to be loaded (Link in control), showing `waitingForGame` ("choose your Quest Log ... and it begins by
+   already asked for a game in progress outside the title (the title start was for the first-start notice, which the
+   background-shaders card replaced; nothing asked for it any more). A sweep that continues after a restart waits for
+   a Quest Log to be loaded (Link in control), showing `waitingForGame` ("choose your Quest Log ... and it begins by
    itself") on the screen until then. The title-screen warp in frame() goes with it.
 
-## Tests (console)
+## Results (console, 2026-10-18, USA, handheld, Quest Log 2)
 
-- Fix 1: state.txt 63, a Quest Log loaded: M2tower -> sea -> M_DaiB -> ... -> M_DragB -> sea -> Mjtower, no crash,
-  then on to the end. 2 passes.
-- Fix 2: state.txt 65 + resume.txt, restart: the title screen shows the waiting line and nothing warps; load the Quest
-  Log: the sweep begins by itself at place 66 and goes on.
-- The Quest Log files and prepare_graphics/ put back as before the tests.
+- Main's list from place 1 with a Quest Log: places 1-64 passed, then M2tower -> M_DaiB stopped the game with the
+  issue's `c_xyz.cpp:285 isNearZeroSquare` (reproduced; from a fresh load at M2tower it had passed 3 of 3).
+- With the three places left out: places 64-124 in one go, "complete: 61 places in 7 min, 0 skipped" (with 1-64 of
+  the run before, the whole list has passed once).
+- Fix 2: state.txt 63 + resume.txt, restart: "[prepare] continues once a Quest Log is loaded", the title screen shows
+  the waiting line, no warp; Quest Log loaded: the sweep began by itself at 64/124 (M_DaiMB, M_Dra09, M_DragB,
+  Msmoke), stopped with `prepare stop`.
+- Once, the restart that ends a sweep hit the known boot crash (ResMgrThread, f_0275D21C reading NULL+0x14 at frame
+  ~165, seen 2026-10-13 and -15 on other builds): unrelated.
+- Quest Log files (41) and prepare_graphics/ byte-identical to before the tests.
