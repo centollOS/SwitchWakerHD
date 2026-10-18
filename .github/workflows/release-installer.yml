@@ -1,9 +1,9 @@
-name: Build Windows Installer
+name: Build Installers (Windows, macOS)
 
 on:
   release:
     types: [published]
-  # By hand on any branch, to try an installer change before a release: the .exe is a run artifact
+  # By hand on any branch, to try an installer change before a release: the .exe and the Mac zips are run artifacts
   workflow_dispatch:
 
 permissions:
@@ -54,3 +54,38 @@ jobs:
           files: |
             installer/bin/SwitchWakerHD-Installer.exe
             installer/bin/SwitchWakerHD-Installer.exe.sha256
+
+  # The macOS installer (installer/desktop, Avalonia): one .app per architecture, signed ad hoc (installer/build-mac.sh)
+  build-mac-installer:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build the apps (Apple Silicon and Intel)
+        run: |
+          version=${{ github.event_name == 'release' && github.ref_name || '0.0.0' }}
+          DOTNET=dotnet installer/build-mac.sh "$version"
+
+      - name: Upload as a run artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwitchWakerHD-Installer-macOS
+          path: |
+            installer/bin/SwitchWakerHD-Installer-macOS-*.zip
+            installer/bin/SwitchWakerHD-Installer-macOS-*.zip.sha256
+
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/bin/SwitchWakerHD-Installer-macOS-*.zip
+            installer/bin/SwitchWakerHD-Installer-macOS-*.zip.sha256
