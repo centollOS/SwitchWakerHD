@@ -1,3 +1,5 @@
 bin/
 windows/bin/
 windows/obj/
+desktop/bin/
+desktop/obj/

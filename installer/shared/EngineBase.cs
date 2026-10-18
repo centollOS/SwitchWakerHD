@@ -111,6 +111,8 @@ abstract class EngineBase
     public abstract void KillCurrent();
     // The computer's memory in GB, or 0 when the system does not say.
     protected abstract double TotalRamGb();
+    // What the system adds to make_sd.py's environment (macOS: the native devkitPro and the installer's Python).
+    protected virtual void BuildEnv(Dictionary<string, string> env) { }
 
     public static readonly string[] StepKeys = { "step_python", "step_devkit", "step_release", "step_build" };
 
@@ -243,6 +245,22 @@ abstract class EngineBase
         }
         catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { return false; }
     }
+
+    // Why pacman (devkitPro's: MSYS2 on Windows, its own on macOS) failed, from its output: a Str key that explains
+    // it to the player.
+    internal static string PacmanFailure(IEnumerable<string> output)
+    {
+        var all = string.Join("\n", output);
+        bool Has(string pattern) => Regex.IsMatch(all, pattern, RegexOptions.IgnoreCase);
+        return Has(@"returned error: 403")                                     ? "dkp_why_403" :
+               Has(@"certificate has expired|certificate is not yet valid|SSL certificate") ? "dkp_why_ssl" :
+               Has(@"unable to lock database")                                 ? "dkp_why_lock" :
+               Has(@"returned error: 429")                                     ? "dkp_why_429" :
+               Has(@"Could not resolve host|timed out|Failed to connect|Connection reset|returned error: 5\d\d|Recv failure") ? "dkp_why_net" :
+               Has(@"signature .* (unknown trust|is invalid)|invalid or corrupted package|keyring") ? "dkp_why_sig" :
+               "dkp_why_other";
+    }
+
     // ── Release ──────────────────────────────────────────────────────────────
     void Release()
     {
@@ -388,6 +406,7 @@ abstract class EngineBase
             env["WWHD_JOBS"] = jobs.ToString();
             Info(Str.Get("build_jobs", jobs, Environment.ProcessorCount, ramGb.ToString("0")));
         }
+        BuildEnv(env);
         var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
         var minimap = MinimapGame != null ? $" --guest-mod {MinimapMod} --gc-game {Quote(MinimapGame)}" : "";

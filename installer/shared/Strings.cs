@@ -294,9 +294,14 @@ static class Str
                                "This installer needs administrator rights. Right-click the .exe and choose \"Run as administrator\"."),
     };
 
+    // Another system's wording (the macOS installer: desktop/MacStrings.cs): its keys win over Table's.
+    static Dictionary<string, (string es, string en)>? overrides;
+    public static void Override(Dictionary<string, (string es, string en)> table) => overrides = table;
+
     public static string Get(string key, params object[] args)
     {
-        if (!Table.TryGetValue(key, out var pair)) return $"[{key}]";
+        if ((overrides == null || !overrides.TryGetValue(key, out var pair)) && !Table.TryGetValue(key, out pair))
+            return $"[{key}]";
         var s = Es ? pair.es : pair.en;
         return args.Length > 0 ? string.Format(s, args) : s;
     }

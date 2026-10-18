@@ -217,20 +217,6 @@ sealed class InstallEngine : EngineBase
         CheckDevkitTools(reason);
     }
 
-    // Why pacman failed, from its output: a Str key that explains it to the player.
-    internal static string PacmanFailure(IEnumerable<string> output)
-    {
-        var all = string.Join("\n", output);
-        bool Has(string pattern) => Regex.IsMatch(all, pattern, RegexOptions.IgnoreCase);
-        return Has(@"returned error: 403")                                     ? "dkp_why_403" :
-               Has(@"certificate has expired|certificate is not yet valid|SSL certificate") ? "dkp_why_ssl" :
-               Has(@"unable to lock database")                                 ? "dkp_why_lock" :
-               Has(@"returned error: 429")                                     ? "dkp_why_429" :
-               Has(@"Could not resolve host|timed out|Failed to connect|Connection reset|returned error: 5\d\d|Recv failure") ? "dkp_why_net" :
-               Has(@"signature .* (unknown trust|is invalid)|invalid or corrupted package|keyring") ? "dkp_why_sig" :
-               "dkp_why_other";
-    }
-
     // What the build needs, by the files it runs or links. A missing one stops here, with the reason,
     // instead of after the download and two build stages (issue #28).
     void CheckDevkitTools(string? pacmanFailure)
