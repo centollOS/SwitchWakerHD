@@ -143,6 +143,8 @@ static class Str
         ["dkp_pkg_warn"]   = ("pacman no pudo actualizar la lista de paquetes; se instala con la que ya hay.", "pacman could not refresh the package lists; installing from the ones already there."),
         ["dkp_missing"]    = ("Faltan herramientas de devkitPro: {0}. No se pudieron descargar.",
                                "Some devkitPro tools are missing: {0}. They could not be downloaded."),
+        ["dkp_403_xfer"]   = ("El servidor de devkitPro rechazó a pacman (error 403); se reintenta descargando a través de Python...",
+                               "devkitPro's server refused pacman (error 403); retrying with the downloads through Python..."),
         ["dkp_retry"]      = ("Fallo de red al hablar con el servidor de paquetes; se reintenta en 10 segundos...", "Network error talking to the package server; retrying in 10 seconds..."),
         ["dkp_why_403"]    = ("El servidor de devkitPro (pkg.devkitpro.org) rechazó la descarga (error 403): bloquea algunas conexiones por error al defenderse de bots. Vuelve a intentarlo más tarde, o desde otra red (por ejemplo, compartiendo internet desde el móvil).",
                                "devkitPro's server (pkg.devkitpro.org) refused the download (error 403): it blocks some connections by mistake while fending off bots. Try again later, or from another network (for example, your phone's hotspot)."),

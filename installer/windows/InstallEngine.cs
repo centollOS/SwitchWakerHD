@@ -205,6 +205,14 @@ sealed class InstallEngine : EngineBase
             for (int i = 0; i < 10; i++) { ct.ThrowIfCancellationRequested(); Thread.Sleep(1000); }
             ClearStalePacmanLock();
         }
+        if (reason == "dkp_why_403")
+        {
+            Warn(Str.Get("dkp_403_xfer"));
+            ClearStalePacmanLock();
+            output.Clear();
+            if (PacmanThroughPython("-Sy --needed --noconfirm " + packages, output) == 0) reason = null;
+            else reason = PacmanFailure(output);
+        }
         if (reason != null)
         {
             // pkg.devkitpro.org often answers 403 (Cloudflare, devkitPro/pacman#63) and the whole -Sy gives up
@@ -311,6 +319,46 @@ sealed class InstallEngine : EngineBase
         return failure;
     }
 
+    // pacman again with its downloads through the installer's Python (EngineBase.WritePacmanFetch): a copy of
+    // its pacman.conf with an XferCommand. pacman is an MSYS2 program: the Python and the script are given to it
+    // as /c/... paths; MSYS2 turns its POSIX arguments (%o) into Windows ones for a Windows Python, and the
+    // script joins them to MSYS2's folder if not.
+    int PacmanThroughPython(string args, List<string> output)
+    {
+        var root = PacmanRoot();
+        var conf = Path.Combine(root, @"etc\pacman.conf");
+        var copy = Path.Combine(root, @"tmp\wwhd-xfer.conf");
+        var python = Capture(pythonCmd, "-c \"import sys;print(sys.executable)\"").output.Trim();
+        if (!File.Exists(conf) || !File.Exists(python)) return -1;
+        var xfer = $"XferCommand = \"{MsysPath(python)}\" \"{MsysPath(WritePacmanFetch())}\" \"{root.Replace('\\', '/')}\" %u %o";
+        var lines = new List<string>();
+        foreach (var line in File.ReadAllLines(conf))
+        {
+            if (line.TrimStart().StartsWith("XferCommand", StringComparison.OrdinalIgnoreCase)) continue;
+            lines.Add(line);
+            if (line.Trim().Equals("[options]", StringComparison.OrdinalIgnoreCase)) lines.Add(xfer);
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(copy)!);
+        File.WriteAllLines(copy, lines);
+        try { return Exec(pacman, $"--config \"{copy.Replace('\\', '/')}\" " + args, check: false, onLine: output.Add); }
+        finally { try { File.Delete(copy); } catch (IOException) { } }
+    }
+
+    // C:\Users\x -> /c/Users/x
+    static string MsysPath(string windows) =>
+        windows.Length > 2 && windows[1] == ':' ? "/" + char.ToLowerInvariant(windows[0]) + windows.Substring(2).Replace('\\', '/')
+                                                : windows.Replace('\\', '/');
+
+    // pacman's root: the folder above usr\bin (msys2 layout) or above bin
+    string PacmanRoot()
+    {
+        var binDir = Path.GetDirectoryName(pacman) ?? DevkitRoot;
+        var root   = Directory.GetParent(binDir)?.FullName ?? DevkitRoot;
+        if (Path.GetFileName(root).Equals("usr", StringComparison.OrdinalIgnoreCase))
+            root = Directory.GetParent(root)?.FullName ?? root;
+        return root;
+    }
+
     static string FindPacman()
     {
         var candidates = new[]
@@ -346,12 +394,7 @@ sealed class InstallEngine : EngineBase
             if (PacmanRunning()) { Warn(Str.Get("dkp_lock_busy")); return; }
         }
 
-        // pacman's root is the folder above usr\bin (msys2 layout) or above bin.
-        var binDir = Path.GetDirectoryName(pacman) ?? DevkitRoot;
-        var root   = Directory.GetParent(binDir)?.FullName ?? DevkitRoot;
-        if (Path.GetFileName(root).Equals("usr", StringComparison.OrdinalIgnoreCase))
-            root = Directory.GetParent(root)?.FullName ?? root;
-
+        var root = PacmanRoot();
         var locks = new[]
         {
             Path.Combine(root, "var", "lib", "pacman", "db.lck"),

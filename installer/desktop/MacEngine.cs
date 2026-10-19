@@ -86,8 +86,11 @@ sealed class MacEngine : DesktopEngine
         sb.Append("#!/bin/sh\n# SwitchWakerHD installer: devkitPro and its Switch packages (run once as root)\ncd /\n");
         sb.Append($"exec > {ShQuote(log)} 2>&1\n");
         if (pkg != null) sb.Append($"/usr/sbin/installer -pkg {ShQuote(pkg)} -target / || exit 10\n");
-        // pkg.devkitpro.org often answers 403 to the refresh (as on Windows): then install from the lists already there
+        // pkg.devkitpro.org may answer 403 (as on Windows, #28): then again with the downloads through our Python,
+        // and last from the package lists already there
+        sb.Append(PacmanXferFunction(DkpPacman));
         sb.Append($"{DkpPacman} -Sy --needed --noconfirm {DkpPackages} && exit 0\n");
+        sb.Append("dkp_xfer && exit 0\n");
         sb.Append($"echo '== retry without refreshing the package lists'\n{DkpPacman} -S --needed --noconfirm {DkpPackages}\n");
         File.WriteAllText(script, sb.ToString());
         File.Delete(log);

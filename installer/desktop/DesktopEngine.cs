@@ -92,6 +92,21 @@ abstract class DesktopEngine : EngineBase
     protected static int DkpFilesCount => DkpFiles.Length;
     protected static List<string> MissingDevkit() => DkpFiles.Where(f => !File.Exists(f.path)).Select(f => f.what).ToList();
 
+    // For the root scripts: a shell function, dkp_xfer, that installs the Switch packages with pacman downloading
+    // through the installer's Python (EngineBase.WritePacmanFetch), from a copy of devkitPro's pacman.conf that
+    // the script makes then (on a new install the file only appears in the same script).
+    protected string PacmanXferFunction(string pacman)
+    {
+        var xfer = $"XferCommand = \"{PyExe}\" \"{WritePacmanFetch()}\" / %u %o";
+        return "dkp_xfer() {\n" +
+               "  echo '== retry with the downloads through the installer'\"'\"'s Python'\n" +
+               "  c=$(mktemp) || return 1\n" +
+               $"  awk -v x={ShQuote(xfer)} '{{ print }} /^\\[options\\]/ {{ print x }}' {Dkp}/pacman/etc/pacman.conf > \"$c\" &&\n" +
+               $"    {pacman} --config \"$c\" -Sy --needed --noconfirm {DkpPackages}\n" +
+               "  rc=$?; rm -f \"$c\"; return $rc\n" +
+               "}\n";
+    }
+
     // ── SD card (from the done page) ─────────────────────────────────────────
     public sealed record Volume(string Mount, string Name, long Size, string Format);
 

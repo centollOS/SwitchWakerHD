@@ -102,7 +102,7 @@ sealed class LinuxEngine : DesktopEngine
     // download tools' own user agents (curl, Wget, Python-urllib: 403) but let package managers' through (apt,
     // pacman) and the custom one their script uses for the key, "dkp apt": so the key is fetched exactly as theirs
     // does, and the rest goes through apt and dkp-pacman (docs/linux-installer-plan.md, "devkitPro's 403").
-    static string DevkitProAptScript()
+    string DevkitProAptScript()
     {
         const string key = "/usr/share/keyring/devkitpro-pub.gpg", list = "/etc/apt/sources.list.d/devkitpro.list";
         var sb = new StringBuilder();
@@ -117,8 +117,10 @@ sealed class LinuxEngine : DesktopEngine
         sb.AppendLine("  apt-get update");
         sb.AppendLine("  apt-get install -y devkitpro-pacman");
         sb.AppendLine("fi");
-        // pkg.devkitpro.org may refuse the refresh: then install from the lists already there
-        sb.AppendLine($"dkp-pacman -Sy --needed --noconfirm {DkpPackages} || dkp-pacman -S --needed --noconfirm {DkpPackages}");
+        // pkg.devkitpro.org may answer 403 (#28): then again with the downloads through our Python, and last from
+        // the package lists already there
+        sb.Append(PacmanXferFunction("dkp-pacman"));
+        sb.AppendLine($"dkp-pacman -Sy --needed --noconfirm {DkpPackages} || dkp_xfer || dkp-pacman -S --needed --noconfirm {DkpPackages}");
         return sb.ToString();
     }
 

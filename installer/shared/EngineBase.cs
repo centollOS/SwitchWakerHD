@@ -469,6 +469,47 @@ abstract class EngineBase
         return msg.ToString();
     }
 
+    // ── pacman through the installer's Python ────────────────────────────────
+    // devkitPro's servers sit behind Cloudflare's bot rules, which decide by the client, not only by the address
+    // (docs/linux-installer-plan.md, "devkitPro's 403"): Python with a pacman user agent passes them. When pacman's
+    // own downloads get 403 (#28), it is run again with a copy of its pacman.conf whose XferCommand is this script:
+    //   XferCommand = <python> <script> <root> %u %o
+    // <root> is MSYS2's folder on Windows, for an %o that reaches a Windows Python as a POSIX path ("/" elsewhere).
+    // Its "returned error: 403" lines are the ones PacmanFailure reads in pacman's own output.
+    const string PacmanFetchScript = """
+        # SwitchWakerHD installer: pacman's XferCommand, the download through Python with a pacman user agent
+        import os, platform, shutil, sys, urllib.error, urllib.request
+        root, url, out = sys.argv[1:4]
+        if os.name == "nt" and out.startswith("/"):
+            out = root.rstrip("/") + out
+        system = "MSYS_NT-10.0" if os.name == "nt" else platform.system()
+        agent = f"pacman/6.0.2 ({system} {platform.machine()}) libalpm/13.0.2"
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": agent})
+            with urllib.request.urlopen(request, timeout=60) as response, open(out, "wb") as f:
+                shutil.copyfileobj(response, f)
+        except urllib.error.HTTPError as e:
+            print(f"error: failed retrieving file '{os.path.basename(url)}': The requested URL returned error: {e.code}",
+                  file=sys.stderr)
+        except (OSError, urllib.error.URLError) as e:
+            print(f"error: failed retrieving file '{os.path.basename(url)}': {e}", file=sys.stderr)
+        else:
+            sys.exit(0)
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+        sys.exit(1)
+        """;
+
+    // Writes the script to the work folder; returns its path.
+    protected string WritePacmanFetch()
+    {
+        var path = Path.Combine(Work, "pacman-fetch.py");
+        File.WriteAllText(path, PacmanFetchScript.Replace("\r\n", "\n") + "\n");
+        return path;
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
     protected void Download(string url, string dest)
     {

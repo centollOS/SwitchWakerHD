@@ -85,5 +85,13 @@ as root, from this network, devkitpro-pacman 6.0.1 installed, `dkp-pacman -Sy` s
 The earlier conclusion in installer-devkitpro-403-plan.md ("for every URL and user agent, so here it looks
 IP-based") came from curl probes, which are refused for any user agent: it does not hold. Windows' MSYS2 pacman
 sends `pacman/… (MSYS_NT-…) libalpm/…`, which passes; the 403 in #28 is then not its user agent (its TLS client,
-or that player's address, would be next). Possible hardening, not done: when pacman gets 403, retry with a
-pacman.conf whose XferCommand downloads through the installer's own Python with a pacman user agent.
+or that player's address, would be next).
+
+Hardening (all three systems): when pacman's own downloads get 403, it runs again with a copy of its pacman.conf
+whose XferCommand is `pacman-fetch.py` (EngineBase.WritePacmanFetch): the installer's Python with a pacman user
+agent, which the rules let through; then, as before, the install from the package lists already there. Windows
+does it after a 403 (InstallEngine.PacmanThroughPython, Python and script as /c/... paths for MSYS2's pacman);
+the Mac and Linux root scripts as a shell function, dkp_xfer, between the two. Tested: Linux (devkitpro/devkita64,
+the generated function on its own, package lists cleared): both lists and a 6 MiB package came through Python,
+rc 0; the script's error path prints pacman's "returned error: 404" and leaves no partial file. Not tested: Windows
+(MSYS2's path conversion of %o), the Mac root run.
