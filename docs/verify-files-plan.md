@@ -32,6 +32,9 @@ files** button on the console (#48's point 3) is for later.
   hashes as in builds.py); a second USA copy (build/sd-game) matches. Check of 1.7 GB: about 4 s cold on this Mac.
   Tested on a clone with one file removed, one cut off and one byte changed: all three reported, extra files
   ignored; make_sd.py prints the warning in step 2 and goes on.
-- [ ] 2. Installers' warning
+- [x] 2. Installers' warning: EngineBase reads make_sd's warning (count and lines), a warning in the log after the
+  build, and on the done page (both windows) the count, three of the files and what to do. Tested with the engine
+  harness and a stand-in make_sd.py printing the warning: count 3 and the three lines read, the log warning shown.
+  (The installers run the release's make_sd.py: the check reaches players with the release that has it.)
 - [ ] 3. SD read-back
 - [ ] 4. Docs, tests

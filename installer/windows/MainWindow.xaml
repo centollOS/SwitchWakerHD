@@ -301,6 +301,7 @@
               <TextBlock x:Name="TxtNext4" Style="{StaticResource Dim}"/>
               <TextBlock x:Name="TxtFwdDone" Margin="0,10,0,0" Visibility="Collapsed"/>
               <TextBlock x:Name="TxtMmDone" Margin="0,10,0,0" Visibility="Collapsed"/>
+              <TextBlock x:Name="TxtGameFilesDone" Margin="0,10,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
             </StackPanel>
           </Border>
         </StackPanel>

@@ -583,6 +583,9 @@ public partial class MainWindow : Window
         TxtFwdDone.Foreground = (Brush)FindResource(nspFresh ? "Fg" : "Warn");
         TxtMmDone.Visibility = minimapGame != null ? Visibility.Visible : Visibility.Collapsed;
         TxtMmDone.Text = Str.Get("mm_done");
+        TxtGameFilesDone.Visibility = engine.BadGameFiles > 0 ? Visibility.Visible : Visibility.Collapsed;
+        TxtGameFilesDone.Text = Str.Get("game_files_done", engine.BadGameFiles, string.Join("\n", engine.BadGameFileLines.Take(3)));
+        TxtGameFilesDone.Foreground = (Brush)FindResource("Warn");
         try
         {
             var files = Directory.GetFiles(engine.SdOut, "*", SearchOption.AllDirectories);

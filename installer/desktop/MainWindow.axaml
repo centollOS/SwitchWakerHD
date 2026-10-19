@@ -241,6 +241,7 @@
                 <TextBlock x:Name="TxtNext4" Classes="dim"/>
                 <TextBlock x:Name="TxtFwdDone" Margin="0,4,0,0" IsVisible="False"/>
                 <TextBlock x:Name="TxtMmDone" Margin="0,4,0,0" IsVisible="False"/>
+                <TextBlock x:Name="TxtGameFilesDone" Margin="0,4,0,0" TextWrapping="Wrap" IsVisible="False"/>
               </StackPanel>
             </Border>
           </StackPanel>

@@ -53,6 +53,11 @@ abstract class EngineBase
     public string? MinimapGame;
     public const string MinimapMod = "gc-minimap";
 
+    // What make_sd.py's check of the game's content/ found (tools/switch/game_files.py): how many files are missing,
+    // cut off or damaged, and its lines naming them. A warning: the build goes on (#48).
+    public int BadGameFiles { get; private set; }
+    public List<string> BadGameFileLines { get; } = new();
+
     public string ReleaseDir { get; private set; } = "";
     public string SdOut => Path.Combine(ReleaseDir, "build", "sd");
 
@@ -368,6 +373,8 @@ abstract class EngineBase
         Say(Str.Get("build_running"));
         Progress?.Invoke(null);
         int stage = 0, shownPct = -1;
+        BadGameFiles = 0;
+        BadGameFileLines.Clear();
         double best = -1;
         void Report(double p)
         {
@@ -375,11 +382,17 @@ abstract class EngineBase
             best = p;
             Progress?.Invoke(p);
         }
+        var badFiles = new Regex(@"^  WARNING: game files missing or damaged: (\d+)");
+        var inBadFiles = false;
         void OnLine(string line)
         {
+            Match m;
+            if ((m = badFiles.Match(line)).Success) { BadGameFiles = int.Parse(m.Groups[1].Value); inBadFiles = true; return; }
+            if (inBadFiles && line.StartsWith("    ")) { BadGameFileLines.Add(line.Trim()); return; }
+            inBadFiles = false;
             if (line.StartsWith("[+] HOME-screen forwarder")) { Status?.Invoke(Str.Get("fwd_building")); return; }
             if (line.StartsWith("  " + MinimapMod + ": ")) { Status?.Invoke(Str.Get("mm_building")); return; }
-            var m = StageLine.Match(line);
+            m = StageLine.Match(line);
             if (m.Success)
             {
                 stage = int.Parse(m.Groups[1].Value);
@@ -427,6 +440,7 @@ abstract class EngineBase
             }
             throw new InstallException(ExplainBuildFailure(rc, tail.ToList()));
         }
+        if (BadGameFiles > 0) Warn(Str.Get("game_files_warn", BadGameFiles));
         Ok(SdOut);
     }
     // The build's last lines, turned into what the error box shows: make_sd's own reason (its "make_sd: ..." line),
