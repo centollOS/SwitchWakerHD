@@ -27,7 +27,8 @@ download, and the build. You only need your own personal dump of the game.
    license and keep the default path (`C:\devkitPro`).
 5. Wait for the build (10–30 minutes), then choose how the files reach the Switch:
    - **Over a USB cable, with DBI**: on the Switch, open DBI and choose *Run MTP responder*, then connect the cable.
-   - **With the microSD card in the PC**: a card reader, or hekate's *USB Tools > SD Card* (UMS).
+   - **With the microSD card in the PC**: a card reader, or hekate's *USB Tools > SD Card* (UMS). After the copy
+     the installer reads every file back from the card and copies again any that differs.
    - **By hand**: the installer opens the folder; copy its contents to the root of the SD card.
 
 If something fails, *Show details* shows what happened; the full log is in
@@ -69,8 +70,8 @@ the release, builds the game natively and copies it to the SD card.
      installer read it: allow it.
 5. Wait for the build (10–30 minutes; keep the Mac plugged in), then:
    - **With the microSD card in the Mac**: a card reader, or on the Switch hekate's *Tools > USB Tools > SD Card*
-     and the USB cable; the installer copies the files and ejects the card. (A Mac has no MTP, so DBI's USB
-     transfer is not offered.)
+     and the USB cable; the installer copies the files, reads every one back from the card (copying again any
+     that differs) and ejects the card. (A Mac has no MTP, so DBI's USB transfer is not offered.)
    - **By hand**: *Show in Finder* opens the folder; copy its contents to the root of the SD card.
 
 The full log is in `~/SwitchWakerHD-Build/installer.log`. The installer starts in Spanish or English from the
@@ -101,7 +102,8 @@ desktop), one file with everything inside:
 4. Wait for the build (10–30 minutes), then:
    - **Over a USB cable, with DBI**: on the Switch, open DBI and choose *Run MTP responder*, then connect the
      cable (through `gio`, which most desktops have);
-   - **With the microSD card in the computer**: a card reader, or hekate's *Tools > USB Tools > SD Card*;
+   - **With the microSD card in the computer**: a card reader, or hekate's *Tools > USB Tools > SD Card* (the
+     installer reads every file back from the card and copies again any that differs);
    - **By hand**: *Open folder*, then copy its contents to the root of the SD card.
 
 The full log is in `~/SwitchWakerHD-Build/installer.log`. Source: [installer/desktop](installer/desktop) and
@@ -175,7 +177,8 @@ python3 tools/switch/make_sd.py --wua /path/to/game.wua
 python3 tools/switch/make_sd.py --game-dir /path/to/10143500
 ```
 
-It checks the game version first, then translates the game's code (about a minute) and builds the
+It checks the game version first, and every file of the game's `content/` against that version's list (a
+missing, cut-off or damaged file is a warning naming it: dump or extract the game again), then translates the game's code (about a minute) and builds the
 homebrew in Docker, or with devkitPro on Windows (10 to 30 minutes the first time; Docker downloads the
 toolchain image, about 1 GB).
 If the computer runs out of memory, add `--jobs 2`.

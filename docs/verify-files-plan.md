@@ -48,4 +48,6 @@ files** button on the console (#48's point 3) is for later.
   with the file in the cache (`cmp` still saw it identical): found, copied again, checked: OK, on both. A file
   the size and date check skipped is found the same way. Not tested: Windows (compiles), a card that keeps
   failing (the error path).
-- [ ] 4. Docs, tests
+- [x] 4. Docs, tests: INSTALL.md (make_sd's check; the card check in each Easy Installer section), release
+  checklist rows A3v and A3g, tools/switch/test_game_files.py (a made-up folder; the shipped lists' shape) in
+  linux.yml.

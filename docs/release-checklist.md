@@ -20,6 +20,8 @@ Rules:
 | A3 | Windows installer, `docs/installer-windows-tests.md` section A | All pass (#1, #28, #30) |
 | A3m | macOS installer: the zip from `release-installer.yml` (workflow_dispatch), quarantined like a download | Opens after *Open Anyway*; a fresh `~/SwitchWakerHD-Build` installs, builds and copies to a card (`docs/mac-installer-plan.md` step 8) |
 | A3l | Linux installer: the archive from `release-installer.yml`, on a desktop | Extracts and opens; installs, builds and copies (`docs/linux-installer-plan.md` step 6) |
+| A3v | The SD card copy check (a card reader, each installer that ran in A3) | The log says "Copy checked: all N files on the card match"; a file changed on the card is copied again (#48) |
+| A3g | `make_sd.py` step 2 with the USA and EUR dumps | `content/: every file as in the USA/EU list: OK` (#48) |
 | A4 | The tag is new | Never re-publish or move a tag: bump the version (the installer caches zips by tag) |
 
 ## B. Boot, screens and system
