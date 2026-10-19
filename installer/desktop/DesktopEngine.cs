@@ -118,9 +118,9 @@ abstract class DesktopEngine : EngineBase
     // DBI's MTP responder over USB (Linux, through gio)
     public virtual bool HasMtp => false;
 
-    // A plain copy, file by file (no extended attributes: no ._ files from a Mac), of what is new or changed;
-    // progress(done bytes, total bytes).
-    public void CopyToSd(string mount, Action<long, long> progress, CancellationToken token)
+    // A plain copy, file by file (no extended attributes: no ._ files from a Mac), of what is new or changed, then
+    // every file read back (VerifyCard); progress(done bytes, total bytes, checking).
+    public void CopyToSd(string mount, Action<long, long, bool> progress, CancellationToken token)
     {
         ct = token;
         Say(Str.Get("sd_copying", mount));
@@ -149,33 +149,55 @@ abstract class DesktopEngine : EngineBase
         Info(Str.Get("sd_desk_todo", todo.Count, files.Count - todo.Count));
 
         long done = 0;
-        var buf = new byte[1 << 20];
         var last = DateTime.MinValue;
         try
         {
             foreach (var (src, dst, _) in todo)
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
-                using (var input = File.OpenRead(src))
-                using (var output = new FileStream(dst, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
+                CopyFile(src, dst, n =>
                 {
-                    int n;
-                    while ((n = input.Read(buf, 0, buf.Length)) > 0)
-                    {
-                        ct.ThrowIfCancellationRequested();
-                        output.Write(buf, 0, n);
-                        done += n;
-                        if ((DateTime.UtcNow - last).TotalMilliseconds > 200) { last = DateTime.UtcNow; progress(done, total); }
-                    }
-                }
-                File.SetLastWriteTimeUtc(dst, File.GetLastWriteTimeUtc(src));
-            }
+                    done += n;
+                    if ((DateTime.UtcNow - last).TotalMilliseconds > 200) { last = DateTime.UtcNow; progress(done, total, false); }
+                });
+            progress(total, total, false);
+            Capture("sync", "");
+            VerifyCard(mount, files, OpenCard, (src, dst) => CopyFile(src, dst, null), (d, t) => progress(d, t, true));
         }
         catch (IOException e) { throw new InstallException(Str.Get("sd_fail_desk", e.Message)); }
-        progress(total, total);
-        Capture("sync", "");
         Ok(Str.Get("sd_copied", mount));
     }
+
+    // One file to the card, written past the system's cache (Uncache), so the check after reads the card
+    void CopyFile(string src, string dst, Action<long>? onBytes)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+        var buf = new byte[1 << 20];
+        using (var input = File.OpenRead(src))
+        using (var output = new FileStream(dst, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
+        {
+            Uncache(output);
+            int n;
+            while ((n = input.Read(buf, 0, buf.Length)) > 0)
+            {
+                ct.ThrowIfCancellationRequested();
+                output.Write(buf, 0, n);
+                onBytes?.Invoke(n);
+            }
+            output.Flush(true);
+            Uncache(output);
+        }
+        File.SetLastWriteTimeUtc(dst, File.GetLastWriteTimeUtc(src));
+    }
+
+    FileStream OpenCard(string path)
+    {
+        var s = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, FileOptions.SequentialScan);
+        Uncache(s);
+        return s;
+    }
+
+    // Keeps a card file's data out of the system's cache (macOS: F_NOCACHE), or drops what it holds of it once
+    // written to the card (Linux: posix_fadvise DONTNEED); called on opening and after a write's flush.
+    protected abstract void Uncache(FileStream file);
 
     // ── Processes ────────────────────────────────────────────────────────────
     Process? current;

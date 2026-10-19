@@ -471,7 +471,8 @@ sealed class InstallEngine : EngineBase
     }
 
     // ── SD card (from the done page) ─────────────────────────────────────────
-    public void CopyToSd(string drive, CancellationToken token)
+    // progress(done bytes, total bytes): the check after the copy (robocopy shows none)
+    public void CopyToSd(string drive, Action<long, long> progress, CancellationToken token)
     {
         ct = token;
         Say(Str.Get("sd_copying", drive));
@@ -495,6 +496,15 @@ sealed class InstallEngine : EngineBase
         // robocopy: 0-7 is success (files copied, extra files, ...), 8 and up is failure.
         var rc = Exec("robocopy", $"{Quote(SdOut)} {Quote(drive)} /E /R:2 /W:2 /NP /NDL /NJH /NJS", check: false);
         if (rc < 0 || rc >= 8) throw new InstallException(Str.Get("sd_fail", rc));
+        // robocopy skips a file with the same size and date: every file read back from the card
+        VerifyCard(drive, Directory.GetFiles(SdOut, "*", SearchOption.AllDirectories), f => new UncachedFile(f),
+                   (src, dst) =>
+                   {
+                       Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+                       if (File.Exists(dst)) File.SetAttributes(dst, FileAttributes.Normal);
+                       File.Copy(src, dst, true);
+                   },
+                   progress);
         Ok(Str.Get("sd_copied", drive));
     }
 

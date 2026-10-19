@@ -36,5 +36,16 @@ files** button on the console (#48's point 3) is for later.
   build, and on the done page (both windows) the count, three of the files and what to do. Tested with the engine
   harness and a stand-in make_sd.py printing the warning: count 3 and the three lines read, the log warning shown.
   (The installers run the release's make_sd.py: the check reaches players with the release that has it.)
-- [ ] 3. SD read-back
+- [x] 3. SD read-back: EngineBase.VerifyCard (SHA-256 of each file, the SD folder's against the card's; a
+  differing or missing one copied again and read once more; still different: an error naming the files, the card
+  may be damaged or fake). Past the cache: macOS F_NOCACHE on writes and reads, and msync(MS_INVALIDATE) on a
+  mapping before a read (F_NOCACHE alone still serves pages already cached: seen in the test); fcntl is variadic,
+  so on Apple arm64 it is declared with six unused register arguments (the plain declaration is ignored without
+  an error: tested with F_SETFD/F_GETFD). Linux: fsync, then posix_fadvise DONTNEED. Windows: after robocopy, an
+  unbuffered read (FILE_FLAG_NO_BUFFERING, UncachedFile.cs); a file differing is copied again with File.Copy.
+  Tests (2026-10-19): a FAT32 disk image on the Mac and a FAT32 loop device in an Ubuntu 24.04 container. First
+  copy checked (1115 files, 1.7 GB, 20 s on the Mac). A byte changed in the image file behind the file system,
+  with the file in the cache (`cmp` still saw it identical): found, copied again, checked: OK, on both. A file
+  the size and date check skipped is found the same way. Not tested: Windows (compiles), a card that keeps
+  failing (the error path).
 - [ ] 4. Docs, tests

@@ -131,6 +131,37 @@ sealed class MacEngine : DesktopEngine
         env["PATH"] = string.Join(":", Path.Combine(PyDir, "bin"), Dkp + "/tools/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin");
     }
 
+    // fcntl is variadic: on Apple arm64 a variadic argument goes on the stack, after the eight argument registers,
+    // so there it is declared with six unused ones in between (with the plain declaration F_NOCACHE is ignored)
+    [DllImport("libc", EntryPoint = "fcntl")]
+    static extern int FcntlArm64(int fd, int cmd, long x2, long x3, long x4, long x5, long x6, long x7, long arg);
+    [DllImport("libc", EntryPoint = "fcntl")]
+    static extern int FcntlX64(int fd, int cmd, long arg);
+    const int F_NOCACHE = 48;
+    [DllImport("libc")]
+    static extern IntPtr mmap(IntPtr addr, UIntPtr len, int prot, int flags, int fd, long offset);
+    [DllImport("libc")]
+    static extern int msync(IntPtr addr, UIntPtr len, int flags);
+    [DllImport("libc")]
+    static extern int munmap(IntPtr addr, UIntPtr len);
+    const int PROT_READ = 1, MAP_SHARED = 1, MS_INVALIDATE = 2;
+
+    // F_NOCACHE keeps what is read or written next out of the cache, but a read still gets pages that are there
+    // already (a file read or copied before): for a read those are dropped first, through msync(MS_INVALIDATE) on a
+    // mapping of the file (tested: then the read sees a byte changed on the card behind the cache's back).
+    protected override void Uncache(FileStream file)
+    {
+        var fd = (int)file.SafeFileHandle.DangerousGetHandle();
+        if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64) FcntlArm64(fd, F_NOCACHE, 0, 0, 0, 0, 0, 0, 1);
+        else FcntlX64(fd, F_NOCACHE, 1);
+        if (file.CanWrite || file.Length == 0) return;
+        var len = (UIntPtr)(ulong)file.Length;
+        var map = mmap(IntPtr.Zero, len, PROT_READ, MAP_SHARED, fd, 0);
+        if (map == new IntPtr(-1)) return;
+        msync(map, len, MS_INVALIDATE);
+        munmap(map, len);
+    }
+
     protected override double TotalRamGb()
     {
         var (code, output) = Capture("/usr/sbin/sysctl", "-n hw.memsize");

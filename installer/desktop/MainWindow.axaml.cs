@@ -789,10 +789,11 @@ public partial class MainWindow : Window
         var token = cts.Token;
         try
         {
-            await Task.Run(() => engine.CopyToSd(mount, (d, t) => Ui(() =>
+            await Task.Run(() => engine.CopyToSd(mount, (d, t, checking) => Ui(() =>
             {
                 XferBar.Value = t > 0 ? d * 100.0 / t : 100;
-                TxtXferStatus.Text = Str.Get("sd_copying", mount) + $"  {d / 1048576} / {t / 1048576} MB";
+                TxtXferStatus.Text = (checking ? Str.Get("sd_verify_prog") : Str.Get("sd_copying", mount)) +
+                                     $"  {d / 1048576} / {t / 1048576} MB";
             }), token));
             copiedTo = mount;
             XferStatus(Str.Get("sd_copied", mount), "Good");

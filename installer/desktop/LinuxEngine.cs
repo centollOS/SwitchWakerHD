@@ -24,6 +24,14 @@ sealed class LinuxEngine : DesktopEngine
     [DllImport("libc")]
     static extern uint geteuid();
 
+    [DllImport("libc")]
+    static extern int posix_fadvise(int fd, long offset, long len, int advice);
+    const int POSIX_FADV_DONTNEED = 4;
+
+    // drops the file's clean pages: the next read comes from the card (written ones are clean after the flush)
+    protected override void Uncache(FileStream file) =>
+        posix_fadvise((int)file.SafeFileHandle.DangerousGetHandle(), 0, 0, POSIX_FADV_DONTNEED);
+
     // ── Switch toolchain ─────────────────────────────────────────────────────
     protected override void Toolchain()
     {

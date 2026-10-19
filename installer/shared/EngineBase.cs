@@ -483,6 +483,64 @@ abstract class EngineBase
         return msg.ToString();
     }
 
+    // ── The SD card copy, read back ──────────────────────────────────────────
+    // A file already on the card with the same size (and date) is not copied again, damaged or not; and a card can
+    // keep something other than what was written (a worn or fake card). So after the copy every file is read back
+    // from the card and compared with the SD folder's (SHA-256); one that differs, or is missing, is copied again
+    // (copyAgain) and read once more. openCard must open a card file past the system's cache, or what comes back
+    // is what was just written to memory. progress(done bytes, total bytes). Throws when files still differ.
+    protected void VerifyCard(string card, IList<string> files, Func<string, Stream> openCard,
+                              Action<string, string> copyAgain, Action<long, long> progress)
+    {
+        Say(Str.Get("sd_verifying"));
+        long total = files.Sum(f => new FileInfo(f).Length), done = 0;
+        var last = DateTime.MinValue;
+        void Advance(long n)
+        {
+            done += n;
+            if ((DateTime.UtcNow - last).TotalMilliseconds > 200) { last = DateTime.UtcNow; progress(done, total); }
+        }
+        bool Same(string src, string dst, Action<long>? onRead)
+        {
+            if (!File.Exists(dst) || new FileInfo(dst).Length != new FileInfo(src).Length) return false;
+            byte[] want;
+            using (var s = File.OpenRead(src)) want = Sha256(s, null);
+            using (var s = openCard(dst)) return want.SequenceEqual(Sha256(s, onRead));
+        }
+        var bad = new List<string>();
+        foreach (var src in files)
+        {
+            var rel = src.Substring(SdOut.Length).TrimStart('/', '\\');
+            var dst = Path.Combine(card, rel);
+            var len = new FileInfo(src).Length;
+            long read = 0;
+            if (Same(src, dst, n => { read += n; Advance(n); })) continue;
+            Advance(len - read);
+            Warn(Str.Get("sd_verify_again", rel));
+            copyAgain(src, dst);
+            if (!Same(src, dst, null)) bad.Add(rel);
+        }
+        progress(total, total);
+        if (bad.Count > 0)
+            throw new InstallException(Str.Get("sd_verify_fail", bad.Count, string.Join("\n", bad.Take(5))));
+        Ok(Str.Get("sd_verified", files.Count));
+    }
+
+    byte[] Sha256(Stream s, Action<long>? onRead)
+    {
+        using var sha = SHA256.Create();
+        var buf = new byte[1 << 20];
+        int n;
+        while ((n = s.Read(buf, 0, buf.Length)) > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            sha.TransformBlock(buf, 0, n, null, 0);
+            onRead?.Invoke(n);
+        }
+        sha.TransformFinalBlock(buf, 0, 0);
+        return sha.Hash!;
+    }
+
     // ── pacman through the installer's Python ────────────────────────────────
     // devkitPro's servers sit behind Cloudflare's bot rules, which decide by the client, not only by the address
     // (docs/linux-installer-plan.md, "devkitPro's 403"): Python with a pacman user agent passes them. When pacman's

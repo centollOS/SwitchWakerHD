@@ -707,7 +707,12 @@ public partial class MainWindow : Window
         cts = new CancellationTokenSource();
         try
         {
-            await Task.Run(() => engine.CopyToSd(drive, cts.Token));
+            await Task.Run(() => engine.CopyToSd(drive, (d, t) => Ui(() =>
+            {
+                XferBar.IsIndeterminate = false;
+                XferBar.Value = t > 0 ? d * 100.0 / t : 100;
+                TxtXferStatus.Text = Str.Get("sd_verify_prog") + $"  {d / 1048576} / {t / 1048576} MB";
+            }), cts.Token));
             XferStatus(Str.Get("sd_copied", drive), "Good");
         }
         catch (Exception ex)
