@@ -6,7 +6,8 @@ your computer, from your own legally dumped copy (The Wind Waker HD, version 0: 
 00050000-10143500, or Europe, title 00050000-10143600):
 
   1. extracts the disc image (.wux/.wud) into build/sd-game/ (or takes an already extracted folder);
-  2. checks that code/cking.rpx is the version the port is made for;
+  2. checks that code/cking.rpx is the version the port is made for, and content/ against that version's list
+     of files (a missing or damaged file is a warning: the game may crash where it needs it);
   3. translates the game's PowerPC code to C (tools/recomp/recomp.py -> build/gen/);
   4. builds the Switch homebrew in the devkitPro container (tools/switch/build.sh -> build/switch-dk/wwhd.nro);
   5. writes OUT/switch/wwhd/ (wwhd.nro, game/ and with --guest-mod mods/): copy OUT's contents to the root
@@ -46,6 +47,8 @@ sys.dont_write_bytecode = True
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "tools", "installer"))
 import setup  # noqa: E402  (the desktop installer's game checks: same title, same version)
+sys.path.insert(0, os.path.join(ROOT, "tools", "switch"))
+import game_files  # noqa: E402  (content/ against the build's list)
 
 
 def fail(msg):
@@ -250,12 +253,25 @@ def main():
         print("    --icon <path/to/mlc01/usr/title/.../meta/iconTex.tga>")
         print("  Or the NRO/forwarder will use a default icon.")
 
-    step(2, "checking the game version")
+    step(2, "checking the game version and files")
     try:
         build = setup.check_game_version(game)
     except setup.SetupError as e:
         fail(str(e))
     print("  The Wind Waker HD (%s), version 0: OK" % build.name)
+    # (a warning only: whoever changed files on purpose still gets a build)
+    problems = game_files.check(game, build.name)
+    if problems is None:
+        print("  (no file list for %s: content/ is not checked)" % build.name)
+    elif any(problems):
+        print("  WARNING: game files missing or damaged: %d (content/ against the %s list):" %
+              (sum(len(p) for p in problems), build.name))
+        for line in game_files.report(problems):
+            print("    " + line)
+        print("  The game may crash where it needs them. Dump or extract the game again (or copy it again from "
+              "where it is); a file you changed on purpose shows up here too.")
+    else:
+        print("  content/: every file as in the %s list: OK" % build.name)
 
     step(3, "translating the game code to C (about a minute)")
     # code mods built into the NRO (docs/guest-mods-switch-plan.md): prepared and translated first, since the game
