@@ -23,7 +23,8 @@ for rid in linux-x64 linux-arm64; do
         -p:EnableCompressionInSingleFile=true -p:InvariantGlobalization=true -o "$dir" --nologo
     chmod +x "$dir/SwitchWakerHD-Installer"
     tgz="$out/SwitchWakerHD-Installer-$rid.tar.gz"
-    tar -C "$work/$rid" -czf "$tgz" SwitchWakerHD-Installer
+    # COPYFILE_DISABLE: on macOS, no ._ files or extended attributes in the archive
+    COPYFILE_DISABLE=1 tar --no-xattrs -C "$work/$rid" -czf "$tgz" SwitchWakerHD-Installer
     (cd "$out" && shasum -a 256 "$(basename "$tgz")" > "$(basename "$tgz").sha256")
     echo "   $(du -h "$tgz" | cut -f1)  $tgz"
 done

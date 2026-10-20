@@ -37,6 +37,9 @@ static class Program
         return lang;
     }
 
+    // Linux draws in software: with OpenGL some drivers (virtual machines, remote desktops) show an empty window
+    // without any error Avalonia could fall back from, and a window of text and buttons needs no GPU
     public static AppBuilder BuildAvaloniaApp() =>
-        AppBuilder.Configure<App>().UsePlatformDetect().WithInterFont().LogToTrace();
+        AppBuilder.Configure<App>().UsePlatformDetect().WithInterFont().LogToTrace()
+            .With(new X11PlatformOptions { RenderingMode = new[] { X11RenderingMode.Software } });
 }
