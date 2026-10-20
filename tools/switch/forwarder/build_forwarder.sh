@@ -124,8 +124,14 @@ else
 fi
 
 # The display version (NACP, at most 15 bytes): git describe without the "v", without the hash
-# when that is too long.
-describe=$(git -C "$root" describe --tags --always --dirty 2>/dev/null || echo 0)
+# when that is too long. A release zip has no git: the same description from cmake/version.txt (git archive
+# fills it in, as for the game's own version, cmake/BuildInfo.cmake).
+describe=$(git -C "$root" describe --tags --always --dirty 2>/dev/null || true)
+if [[ -z $describe && -f $root/cmake/version.txt ]]; then
+    describe=$(head -n 1 "$root/cmake/version.txt" | tr -d '\r')
+    [[ $describe == *Format:* ]] && describe=
+fi
+[[ -z $describe ]] && describe=0
 version=${describe#v}
 if [[ ${#version} -gt 15 ]]; then
     version=${version%-g*}

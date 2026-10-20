@@ -70,7 +70,9 @@ def generate_nacp(name: str, author: str, version: str, title_id: str) -> bytes:
 
 
 def get_git_version() -> str | None:
-    """Get version from git describe, like the forwarder does."""
+    """The display version: git describe, like the forwarder does; in a release zip (no git) the same
+    description from cmake/version.txt, which git archive fills in (export-subst, as cmake/BuildInfo.cmake)."""
+    version = None
     try:
         result = subprocess.run(
             ["git", "describe", "--tags", "--always", "--dirty"],
@@ -78,19 +80,29 @@ def get_git_version() -> str | None:
         )
         if result.returncode == 0 and result.stdout.strip():
             version = result.stdout.strip()
-            # Strip leading 'v' like forwarder
-            if version.startswith('v'):
-                version = version[1:]
-            # Truncate to 15 chars if needed (NACP limit)
-            if len(version) > 15:
-                # Drop -g<hash> suffix if present
-                if '-g' in version:
-                    version = version.rsplit('-g', 1)[0]
-                version = version[:15]
-            return version
     except Exception:
         pass
-    return None
+    if version is None:
+        try:
+            root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
+            with open(os.path.join(root, "cmake", "version.txt"), encoding="utf-8") as f:
+                line = f.readline().strip()
+            if line and "Format:" not in line:
+                version = line
+        except OSError:
+            pass
+    if version is None:
+        return None
+    # Strip leading 'v' like forwarder
+    if version.startswith('v'):
+        version = version[1:]
+    # Truncate to 15 chars if needed (NACP limit)
+    if len(version) > 15:
+        # Drop -g<hash> suffix if present
+        if '-g' in version:
+            version = version.rsplit('-g', 1)[0]
+        version = version[:15]
+    return version
 
 
 def main():
@@ -99,7 +111,7 @@ def main():
     ap.add_argument("--name", default="SwitchWakerHD", help="Application name (max 511 chars, default: SwitchWakerHD)")
     ap.add_argument("--name-suffix", default="", help="appended to the name (e.g. a debug build's marker)")
     ap.add_argument("--author", default="centollOS/SwitchWakerHD", help="Author/publisher (max 255 chars, default: centollOS/SwitchWakerHD)")
-    ap.add_argument("--version", default=None, help="Display version (max 15 chars, default: from git describe or 0.1.0)")
+    ap.add_argument("--version", default=None, help="Display version (max 15 chars, default: from git describe, else cmake/version.txt, else 0.1.0)")
     ap.add_argument("--title-id", default="01ff575748440000", help="Title ID in hex (default: WWHD forwarder)")
     a = ap.parse_args()
 
