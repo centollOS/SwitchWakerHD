@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""build_forwarder_windows.py: build the HOME-screen forwarder (wwhd_forwarder.nsp) on Windows, no Docker.
+"""build_forwarder_windows.py: build the HOME-screen forwarder (wwhd_forwarder.nsp) on Windows, no Docker
+(also on macOS with devkitPro's own pacman and Apple's Command Line Tools: the Mac installer, installer/desktop).
 
 The forwarder is a small NSP that puts a "Wind Waker HD" icon on the Switch HOME screen and starts
 sdmc:/switch/wwhd/wwhd.nro as an application, so the game launches without holding R over another game
@@ -31,7 +32,10 @@ import sys
 sys.dont_write_bytecode = True
 FDIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(FDIR, "..", "..", ".."))
-DKP = os.environ.get("DEVKITPRO_WIN", "C:/devkitPro")
+WINDOWS = os.name == "nt"
+# macOS (this fork's Mac installer): devkitPro in DEVKITPRO (/opt/devkitpro), the system's bash and C compiler
+DKP = os.environ.get("DEVKITPRO_WIN", "C:/devkitPro") if WINDOWS else os.environ.get("DEVKITPRO", "/opt/devkitpro")
+EXE = ".exe" if WINDOWS else ""
 EXIT_NO_KEYS = 3
 
 
@@ -75,6 +79,10 @@ def msys(script, env_extra=None, capture=False):
     available to the script; paths in them are Windows paths (convert with cygpath -u)."""
     env = dict(os.environ, DEVKITPRO="/opt/devkitpro", MSYS2_PATH_TYPE="inherit", **(env_extra or {}))
     cmd = [DKP + "/msys2/usr/bin/bash.exe", "-l", "-c", "set -e\n" + script]
+    if not WINDOWS:
+        # the same scripts with the system's bash; paths are already POSIX, so cygpath -u passes them through
+        env["DEVKITPRO"] = DKP
+        cmd = ["bash", "-c", "set -e\ncygpath() { [ \"$1\" = -u ] && shift; printf '%s' \"$1\"; }\n" + script]
     if capture:
         p = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         return p.returncode, p.stdout.decode("utf-8", "replace")
@@ -134,10 +142,13 @@ def main():
     for f in ("make_nacp.py", "make_icon.py", "patch_hbl.py", "nx-hbloader-forwarder.patch"):
         if not os.path.isfile(os.path.join(fdir, f)):
             fail("missing %s next to this script" % os.path.join(fdir, f))
-    missing = [n for n, p in {
-        "devkitA64": DKP + "/devkitA64/bin/aarch64-none-elf-gcc.exe", "libnx": DKP + "/libnx/lib/libnx.a",
-        "npdmtool (switch-tools)": DKP + "/tools/bin/npdmtool.exe", "devkitPro MSYS2": DKP + "/msys2/usr/bin/bash.exe",
-        "gcc in MSYS2 (pacman -S gcc)": DKP + "/msys2/usr/bin/gcc.exe"}.items() if not os.path.exists(p)]
+    need = {"devkitA64": DKP + "/devkitA64/bin/aarch64-none-elf-gcc" + EXE, "libnx": DKP + "/libnx/lib/libnx.a",
+            "npdmtool (switch-tools)": DKP + "/tools/bin/npdmtool" + EXE}
+    if WINDOWS:
+        need.update({"devkitPro MSYS2": DKP + "/msys2/usr/bin/bash.exe", "gcc in MSYS2 (pacman -S gcc)": DKP + "/msys2/usr/bin/gcc.exe"})
+    missing = [n for n, p in need.items() if not os.path.exists(p)]
+    if not WINDOWS:
+        missing += [t + " (Apple's Command Line Tools: xcode-select --install)" for t in ("cc", "make") if not shutil.which(t)]
     if missing:
         fail("devkitPro is not set up at %s (missing: %s); see INSTALL.md" % (DKP, ", ".join(missing)))
     if not shutil.which("git"):
@@ -232,7 +243,7 @@ Done: %s (%d bytes), title ID 0x%s, "%s" %s
 %sInstall it with DBI (Browse SD card > the .nsp > Install) or Goldleaf; it needs current Atmosphere sigpatches.
 The NRO must stay at %s. (The NSP has not been checked with hactool.)"""
           % (final, os.path.getsize(final), TITLE_ID, NAME, version,
-             "Also copied to %s\\NSP\\.\n" % os.path.abspath(args.sd) if args.sd else "", NRO_PATH))
+             "Also copied to %s.\n" % os.path.join(os.path.abspath(args.sd), "NSP") if args.sd else "", NRO_PATH))
 
 
 if __name__ == "__main__":

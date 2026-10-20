@@ -143,6 +143,12 @@ static class Str
         ["dkp_pkg_warn"]   = ("pacman no pudo actualizar la lista de paquetes; se instala con la que ya hay.", "pacman could not refresh the package lists; installing from the ones already there."),
         ["dkp_missing"]    = ("Faltan herramientas de devkitPro: {0}. No se pudieron descargar.",
                                "Some devkitPro tools are missing: {0}. They could not be downloaded."),
+        ["game_files_warn"] = ("Faltan o están dañados {0} archivos del juego (la lista está más arriba en el registro): el juego puede colgarse donde los necesite.",
+                               "{0} game files are missing or damaged (listed above in the log): the game may crash where it needs them."),
+        ["game_files_done"] = ("Aviso: faltan o están dañados {0} archivos de tu copia del juego, por ejemplo:\n{1}\nEl juego puede colgarse donde los necesite. Vuelve a volcar o extraer el juego (o cópialo otra vez desde donde lo tengas) e instala de nuevo. Si cambiaste esos archivos a propósito, ignora este aviso.",
+                               "Warning: {0} files of your copy of the game are missing or damaged, for example:\n{1}\nThe game may crash where it needs them. Dump or extract the game again (or copy it again from where you keep it) and install again. If you changed those files on purpose, ignore this warning."),
+        ["dkp_403_xfer"]   = ("El servidor de devkitPro rechazó a pacman (error 403); se reintenta descargando a través de Python...",
+                               "devkitPro's server refused pacman (error 403); retrying with the downloads through Python..."),
         ["dkp_retry"]      = ("Fallo de red al hablar con el servidor de paquetes; se reintenta en 10 segundos...", "Network error talking to the package server; retrying in 10 seconds..."),
         ["dkp_why_403"]    = ("El servidor de devkitPro (pkg.devkitpro.org) rechazó la descarga (error 403): bloquea algunas conexiones por error al defenderse de bots. Vuelve a intentarlo más tarde, o desde otra red (por ejemplo, compartiendo internet desde el móvil).",
                                "devkitPro's server (pkg.devkitpro.org) refused the download (error 403): it blocks some connections by mistake while fending off bots. Try again later, or from another network (for example, your phone's hotspot)."),
@@ -274,6 +280,12 @@ static class Str
         ["sd_label"]       = ("Tarjeta SD:",                                         "SD card:"),
         ["sd_none"]        = ("Todavía no se detecta ninguna tarjeta SD.",           "No SD card detected yet."),
         ["sd_copying"]     = ("Copiando a {0}...",                                   "Copying to {0}..."),
+        ["sd_verifying"]   = ("Comprobando la copia: se relee cada archivo de la tarjeta...", "Checking the copy: reading every file back from the card..."),
+        ["sd_verify_prog"] = ("Comprobando la copia:",                                "Checking the copy:"),
+        ["sd_verify_again"] = ("{0} no coincide en la tarjeta: se copia otra vez.",   "{0} differs on the card: copying it again."),
+        ["sd_verify_fail"] = ("{0} archivos siguen sin coincidir en la tarjeta después de copiarlos otra vez:\n{1}\nLa tarjeta puede estar dañada o no ser de la capacidad que dice. Prueba con otra tarjeta, o formatéala y copia de nuevo.",
+                               "{0} files still differ on the card after copying them again:\n{1}\nThe card may be damaged or smaller than it claims. Try another card, or format it and copy again."),
+        ["sd_verified"]    = ("Copia comprobada: los {0} archivos de la tarjeta coinciden.", "Copy checked: all {0} files on the card match."),
         ["sd_copied"]      = ("Copiado a {0}. Expulsa la tarjeta antes de sacarla.", "Copied to {0}. Eject the card before removing it."),
         ["sd_fail"]        = ("La copia falló (robocopy {0}): comprueba que la tarjeta sigue conectada y no está protegida contra escritura, y vuelve a copiar; o cópiala a mano.",
                                "The copy failed (robocopy {0}): check that the card is still connected and not write-protected, and copy again; or copy the folder by hand."),
@@ -294,9 +306,14 @@ static class Str
                                "This installer needs administrator rights. Right-click the .exe and choose \"Run as administrator\"."),
     };
 
+    // Another system's wording (the macOS installer: desktop/MacStrings.cs): its keys win over Table's.
+    static Dictionary<string, (string es, string en)>? overrides;
+    public static void Override(Dictionary<string, (string es, string en)> table) => overrides = table;
+
     public static string Get(string key, params object[] args)
     {
-        if (!Table.TryGetValue(key, out var pair)) return $"[{key}]";
+        if ((overrides == null || !overrides.TryGetValue(key, out var pair)) && !Table.TryGetValue(key, out pair))
+            return $"[{key}]";
         var s = Es ? pair.es : pair.en;
         return args.Length > 0 ? string.Format(s, args) : s;
     }

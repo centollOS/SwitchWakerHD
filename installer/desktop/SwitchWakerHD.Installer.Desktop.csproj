@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- .NET 8 + Avalonia, published self-contained (build-mac.sh, build-linux.sh): nothing to install first -->
+    <TargetFramework>net8.0</TargetFramework>
+    <RuntimeIdentifiers>osx-arm64;osx-x64;linux-x64;linux-arm64</RuntimeIdentifiers>
+    <SelfContained>true</SelfContained>
+    <AssemblyName>SwitchWakerHD-Installer</AssemblyName>
+    <RootNamespace>SwitchWakerHD.Installer</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <DebugType>none</DebugType>
+    <Product>SwitchWakerHD</Product>
+    <Company>centollOS</Company>
+    <Copyright>SwitchWakerHD by centollOS (GPLv3) - github.com/centollOS/SwitchWakerHD</Copyright>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.22" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- shared with the Windows installer (installer/windows) -->
+    <Compile Include="../shared/*.cs" />
+    <AvaloniaResource Include="../windows/Assets/logo.png" Link="Assets/logo.png" />
+  </ItemGroup>
+</Project>

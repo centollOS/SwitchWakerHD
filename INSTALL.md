@@ -27,7 +27,8 @@ download, and the build. You only need your own personal dump of the game.
    license and keep the default path (`C:\devkitPro`).
 5. Wait for the build (10–30 minutes), then choose how the files reach the Switch:
    - **Over a USB cable, with DBI**: on the Switch, open DBI and choose *Run MTP responder*, then connect the cable.
-   - **With the microSD card in the PC**: a card reader, or hekate's *USB Tools > SD Card* (UMS).
+   - **With the microSD card in the PC**: a card reader, or hekate's *USB Tools > SD Card* (UMS). After the copy
+     the installer reads every file back from the card and copies again any that differs.
    - **By hand**: the installer opens the folder; copy its contents to the root of the SD card.
 
 If something fails, *Show details* shows what happened; the full log is in
@@ -36,14 +37,84 @@ user name has a space or an accented letter: the installer then works there).
 
 > **Windows SmartScreen** may show *"Windows protected your PC"* on first run because the installer is
 > not code-signed. Click **More info → Run anyway**. This is expected for open-source unsigned executables.
-> The [source code](installer/src) and [build script](installer/build.ps1) are in this repository.
+> The [source code](installer/windows) and [build script](installer/build.ps1) are in this repository.
 
 The installer is multilingual: it starts in **English** or **Spanish** based on your Windows display
 language, and the button in its corner switches between them.
 
+## macOS: Easy Installer (recommended)
+
+On a **Mac with macOS 12 or newer** (Apple Silicon or Intel), the same installer as on Windows, in a window: no
+Terminal, no Homebrew, no Docker. It sets up its own Python 3.14, Apple's command line tools and devkitPro, downloads
+the release, builds the game natively and copies it to the SD card.
+
+**[⬇ Apple Silicon (M1 and newer)](https://github.com/centollOS/SwitchWakerHD/releases/latest/download/SwitchWakerHD-Installer-macOS-AppleSilicon.zip)**
+· **[⬇ Intel](https://github.com/centollOS/SwitchWakerHD/releases/latest/download/SwitchWakerHD-Installer-macOS-Intel.zip)**
+(Apple menu > *About This Mac* says which: *Chip Apple M…* or *Processor Intel*)
+
+1. Download the zip and double-click it: *SwitchWakerHD Installer* appears next to it (you can move it to
+   *Applications*).
+2. **The first time**, macOS stops it, because the app is not signed with an Apple developer account
+   (*"Apple could not verify…"*): press **Done**, open **System Settings > Privacy & Security**, scroll down to
+   *"SwitchWakerHD Installer was blocked…"* and press **Open Anyway**, then **Open** and your password. Later
+   starts open directly.
+3. Pick your game dump (a `.wua`, a `.wux`/`.wud` with its keys, or an extracted folder), and if you like the
+   **GameCube sea minimap** (your own GameCube Wind Waker: `.iso`, `.gcm`, `.rvz` or its folder) and the
+   **HOME-screen icon** (your console's `prod.keys`), as on Windows above. You can also drag the game onto the
+   window.
+4. Press **Install**. On the way:
+   - if Apple's **command line tools** are missing, macOS shows its own window: press *Install*, wait, then
+     *Continue* in the installer;
+   - macOS asks for **your password once**, to install devkitPro in `/opt/devkitpro`;
+   - if the game is on the Desktop, in Documents, Downloads or on an external disk, macOS may ask to let the
+     installer read it: allow it.
+5. Wait for the build (10–30 minutes; keep the Mac plugged in), then:
+   - **With the microSD card in the Mac**: a card reader, or on the Switch hekate's *Tools > USB Tools > SD Card*
+     and the USB cable; the installer copies the files, reads every one back from the card (copying again any
+     that differs) and ejects the card. (A Mac has no MTP, so DBI's USB transfer is not offered.)
+   - **By hand**: *Show in Finder* opens the folder; copy its contents to the root of the SD card.
+
+The full log is in `~/SwitchWakerHD-Build/installer.log`. The installer starts in Spanish or English from the
+Mac's language; the button in its corner switches. Source: [installer/desktop](installer/desktop) and
+[installer/build-mac.sh](installer/build-mac.sh).
+
+## Linux: Easy Installer
+
+The same installer for **Linux** (x86-64 or arm64; Ubuntu, Debian, Mint, Fedora, Arch, openSUSE and others with a
+desktop), one file with everything inside:
+
+**[⬇ x86-64](https://github.com/centollOS/SwitchWakerHD/releases/latest/download/SwitchWakerHD-Installer-linux-x64.tar.gz)**
+· **[⬇ arm64](https://github.com/centollOS/SwitchWakerHD/releases/latest/download/SwitchWakerHD-Installer-linux-arm64.tar.gz)**
+
+1. Extract the archive (double-click it, or right-click > *Extract here*) and double-click
+   **SwitchWakerHD-Installer** (if your file manager asks, choose *Run*).
+2. Pick your game dump and, if you like, the GameCube sea minimap and the HOME-screen icon, as on Windows above.
+3. Press **Install**. It sets up its own Python 3.14 in its working folder, then the Switch toolchain, the first
+   that fits:
+   - devkitPro already installed (`/opt/devkitpro` with the Switch packages): it builds natively;
+   - on Debian, Ubuntu and their derivatives: devkitPro's own apt route (it asks for your password once);
+   - else a Docker or Podman your user may use: it builds in the `devkitpro/devkita64` image (the first time it
+     downloads it, ~1.5 GB); Fedora, Arch and openSUSE get Podman (your password once). The HOME-screen icon
+     needs devkitPro installed, so it is skipped in a container.
+
+   The password window comes from your desktop (polkit). Without one, the installer shows a command to paste in a
+   terminal.
+4. Wait for the build (10–30 minutes), then:
+   - **Over a USB cable, with DBI**: on the Switch, open DBI and choose *Run MTP responder*, then connect the
+     cable (through `gio`, which most desktops have);
+   - **With the microSD card in the computer**: a card reader, or hekate's *Tools > USB Tools > SD Card* (the
+     installer reads every file back from the card and copies again any that differs);
+   - **By hand**: *Open folder*, then copy its contents to the root of the SD card.
+
+The full log is in `~/SwitchWakerHD-Build/installer.log`. Source: [installer/desktop](installer/desktop) and
+[installer/build-linux.sh](installer/build-linux.sh).
+
+> If `pkg.devkitpro.org` or `apt.devkitpro.org` answers *403*, devkitPro's servers blocked your connection while
+> fending off bots: try later or from another network (for example your phone's hotspot).
+
 ---
 
-*For macOS, Linux, or manual Windows setup, continue below.*
+*For a manual setup on Windows, macOS or Linux, continue below.*
 
 ---
 
@@ -54,7 +125,7 @@ language, and the button in its corner switches between them.
 | **The game** | Your own dump of **The Wind Waker HD, USA or Europe** (title `00050000-10143500` or `00050000-10143600`), **version 0** (the disc, or the eShop release without the update): a disc image (`.wux`/`.wud`) with its disc key and your console's Wii U common key, or the extracted game folder (`code/`, `content/`, `meta/`) |
 | **A Switch** | Running Atmosphère with the Homebrew Menu, and about 3 GB free on the SD card |
 | **A computer** | Windows 10/11, macOS or Linux; 8 GB of RAM or more, 10 GB of free disk space |
-| **On the computer** | Python 3, this release unzipped, and the Switch toolchain: on **Windows**, [devkitPro](#windows-devkitpro-no-docker-or-wsl) (recommended: no Docker, no WSL); on macOS and Linux, [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker / Podman on Linux) |
+| **On the computer** | Python 3, this release unzipped, and the Switch toolchain: on **Windows**, [devkitPro](#windows-devkitpro-no-docker-or-wsl) (recommended: no Docker, no WSL); on **macOS**, the [Easy Installer](#macos-easy-installer-recommended) sets up devkitPro itself (or by hand: [Docker Desktop](https://www.docker.com/products/docker-desktop/)); on **Linux**, the [Easy Installer](#linux-easy-installer) (or by hand: Docker or Podman) |
 
 How to dump the game and the keys from your own Wii U is outside this guide: the
 [Cemu dumping guide](https://cemu.cfw.guide/dumping-games.html) (Dumpling) covers it. A dump made with
@@ -106,7 +177,8 @@ python3 tools/switch/make_sd.py --wua /path/to/game.wua
 python3 tools/switch/make_sd.py --game-dir /path/to/10143500
 ```
 
-It checks the game version first, then translates the game's code (about a minute) and builds the
+It checks the game version first, and every file of the game's `content/` against that version's list (a
+missing, cut-off or damaged file is a warning naming it: dump or extract the game again), then translates the game's code (about a minute) and builds the
 homebrew in Docker, or with devkitPro on Windows (10 to 30 minutes the first time; Docker downloads the
 toolchain image, about 1 GB).
 If the computer runs out of memory, add `--jobs 2`.

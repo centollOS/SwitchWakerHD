@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# build.ps1 - Builds SwitchWakerHD-Installer.exe (WPF, .NET Framework 4.8) from installer/src.
+# build.ps1 - Builds SwitchWakerHD-Installer.exe (WPF, .NET Framework 4.8) from installer/windows (and installer/shared).
 # Run this once on Windows to generate the distributable installer.
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +22,7 @@ Write-Host "  [OK] .NET SDK: $sdkVer" -ForegroundColor Green
 
 # Build
 $projects = @(
-    @{ Proj = "$PSScriptRoot\src\SwitchWakerHD.Installer.csproj"; Exe = "SwitchWakerHD-Installer.exe" }
+    @{ Proj = "$PSScriptRoot\windows\SwitchWakerHD.Installer.csproj"; Exe = "SwitchWakerHD-Installer.exe" }
 )
 foreach ($p in $projects) {
     Write-Host ""

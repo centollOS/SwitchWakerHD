@@ -1,22 +1,23 @@
+// The installer's window on macOS and Linux (Avalonia): the Windows installer's four pages (windows/MainWindow.xaml.cs),
+// with each system's ways to the SD card (DBI over MTP on Linux only: a Mac has no MTP).
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Shapes;
-using System.Windows.Threading;
-using Microsoft.Win32;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.Shapes;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Platform.Storage;
+using Avalonia.Threading;
+using Path = Avalonia.Controls.Shapes.Path;
 
 namespace SwitchWakerHD.Installer;
 
@@ -24,9 +25,9 @@ public partial class MainWindow : Window
 {
     enum Page { Welcome, Game, Progress, Done }
 
-    readonly InstallEngine engine = new();
+    readonly DesktopEngine engine = DesktopEngine.Create();
     Page page = Page.Welcome;
-    bool running, failed;
+    bool running, failed, closingConfirmed;
     CancellationTokenSource? cts;
     ManualResetEventSlim? noticeEvent;
 
@@ -37,10 +38,11 @@ public partial class MainWindow : Window
     readonly Stopwatch elapsed = new();
     readonly object logFileLock = new();
     StreamWriter? logFile;
-    const int LogBoxMaxChars = 400_000;
-    static readonly string LogPath = System.IO.Path.Combine(InstallEngine.WorkDir, "installer.log");
+    readonly StringBuilder logText = new();
+    const int LogBoxMaxChars = 200_000;
+    static readonly string LogPath = System.IO.Path.Combine(DesktopEngine.WorkDir, "installer.log");
 
-    readonly (Ellipse ring, TextBlock glyph, TextBlock label)[] stepRows = new (Ellipse, TextBlock, TextBlock)[4];
+    readonly (Ellipse ring, Path glyph, TextBlock label)[] stepRows = new (Ellipse, Path, TextBlock)[4];
     readonly StepState[] stepStates = new StepState[4];
 
     public MainWindow()
@@ -52,32 +54,33 @@ public partial class MainWindow : Window
         engine.Status      += msg => Ui(() => TxtStatus.Text = msg);
         engine.Progress    += p => Ui(() => SetProgress(p));
         engine.StepChanged += (i, s) => Ui(() => SetStep(i, s));
-        engine.AskUser      = AskUser;
+        engine.AskUser      = (h, t, b) => AskUser(h, t, b, null);
+        engine.AskCommand   = (h, t, b, c) => AskUser(h, t, b, c);
 
         logTimer.Tick += (_, _) => FlushLog();
         logTimer.Start();
         clock.Tick += (_, _) => TxtElapsed.Text = Str.Get("elapsed", elapsed.Elapsed.ToString(@"hh\:mm\:ss"));
 
-        SourceInitialized += (_, _) => UseDarkTitleBar();
         Closing += Window_Closing;
-        Drop += Window_Drop;
+        AddHandler(DragDrop.DropEvent, Window_Drop);
 
         OptWua.IsChecked = true;
         ShowPage(Page.Welcome);
         ApplyLanguage();
     }
 
-    void Ui(Action a) => Dispatcher.BeginInvoke(a);
+    static void Ui(Action a) => Dispatcher.UIThread.Post(a);
+    IBrush Res(string key) => (IBrush)this.FindResource(key)!;
 
     // ── Pages and texts ──────────────────────────────────────────────────────
     void ShowPage(Page p)
     {
         page = p;
-        PageWelcome.Visibility  = p == Page.Welcome  ? Visibility.Visible : Visibility.Collapsed;
-        PageGame.Visibility     = p == Page.Game     ? Visibility.Visible : Visibility.Collapsed;
-        PageProgress.Visibility = p == Page.Progress ? Visibility.Visible : Visibility.Collapsed;
-        PageDone.Visibility     = p == Page.Done     ? Visibility.Visible : Visibility.Collapsed;
-        BtnLang.Visibility      = p == Page.Welcome || p == Page.Game ? Visibility.Visible : Visibility.Collapsed;
+        PageWelcome.IsVisible  = p == Page.Welcome;
+        PageGame.IsVisible     = p == Page.Game;
+        PageProgress.IsVisible = p == Page.Progress;
+        PageDone.IsVisible     = p == Page.Done;
+        BtnLang.IsVisible      = p == Page.Welcome || p == Page.Game;
         UpdateFooter();
     }
 
@@ -85,7 +88,7 @@ public partial class MainWindow : Window
     {
         void Set(Button b, string? key, bool enabled = true)
         {
-            b.Visibility = key == null ? Visibility.Collapsed : Visibility.Visible;
+            b.IsVisible = key != null;
             if (key != null) b.Content = Str.Get(key);
             b.IsEnabled = enabled;
         }
@@ -97,7 +100,7 @@ public partial class MainWindow : Window
                 if (running) { Set(BtnSecondary, "btn_cancel"); Set(BtnPrimary, null); }
                 else         { Set(BtnSecondary, "btn_close");  Set(BtnPrimary, failed ? "btn_retry" : null); }
                 break;
-            case Page.Done:     Set(BtnSecondary, null);         Set(BtnPrimary, "btn_close"); break;
+            case Page.Done:     Set(BtnSecondary, null);         Set(BtnPrimary, "btn_close", !xferBusy); break;
         }
     }
 
@@ -114,7 +117,8 @@ public partial class MainWindow : Window
         TxtWelcomeLi2.Text   = "•  " + Str.Get("welcome_li2");
         TxtWelcomeLi3.Text   = "•  " + Str.Get("welcome_li3");
         TxtWelcomeNeed.Text  = Str.Get("welcome_need");
-        TxtWelcomeDir.Text   = Str.Get("welcome_dir", InstallEngine.WorkDir);
+        TxtWelcomeAdmin.Text = Str.Get("welcome_admin");
+        TxtWelcomeDir.Text   = Str.Get("welcome_dir", DesktopEngine.WorkDir);
 
         TxtGameH.Text    = Str.Get("game_h");
         TxtGameBody.Text = Str.Get("game_body");
@@ -137,7 +141,7 @@ public partial class MainWindow : Window
 
         TxtProgH.Text    = Str.Get("prog_h");
         TxtProgBody.Text = Str.Get("prog_body");
-        for (int i = 0; i < stepRows.Length; i++) stepRows[i].label.Text = Str.Get(InstallEngine.StepKeys[i]);
+        for (int i = 0; i < stepRows.Length; i++) stepRows[i].label.Text = Str.Get(EngineBase.StepKeys[i]);
         TxtErrorH.Text   = Str.Get("fail_h");
         TxtLogPath.Text  = Str.Get("log_at", LogPath);
         UpdateLogButtons();
@@ -146,58 +150,82 @@ public partial class MainWindow : Window
         TxtDoneBody.Text  = Str.Get("done_body");
         TxtXferMtp.Text = Str.Get("xfer_mtp");       TxtXferMtpD.Text = Str.Get("xfer_mtp_d");
         TxtXferSd.Text  = Str.Get("xfer_sd");        TxtXferSdD.Text  = Str.Get("xfer_sd_d");
-        TxtXferManual.Text = Str.Get("xfer_manual"); TxtXferManualD.Text = Str.Get("xfer_manual_d");
         TxtMtpSteps.Text  = Str.Get("mtp_steps");
         TxtMtpLabel.Text  = Str.Get("mtp_label");
         TxtMtpNone.Text   = Str.Get("mtp_none");
         TxtMtpReplace.Text = Str.Get("mtp_replace");
         BtnCopyMtp.Content = Str.Get("btn_copy_mtp");
         BtnMtpRefresh.Content = Str.Get("btn_refresh");
+        TxtXferManual.Text = Str.Get("xfer_manual"); TxtXferManualD.Text = Str.Get("xfer_manual_d");
         TxtSdHint.Text    = Str.Get("sd_hint");
         TxtSdLabel.Text   = Str.Get("sd_label");
         BtnSdRefresh.Content = Str.Get("btn_refresh");
         TxtSdNone.Text    = Str.Get("sd_none");
-        BtnCopySd.Content = Str.Get("btn_copy_sd");
+        UpdateCopyButton();
         TxtManual.Text    = Str.Get("manual_body");
         BtnOpenOut.Content = Str.Get("btn_open_out");
         TxtNextH.Text = Str.Get("next_h");
         TxtNext1.Text = Str.Get(XferMtp.IsChecked == true ? "next_1_mtp" : "next_1"); TxtNext2.Text = Str.Get("next_2");
         TxtNext3.Text = Str.Get("next_3"); TxtNext4.Text = Str.Get("next_4");
+        BtnConfirmYes.Content = Str.Get("btn_yes_cancel");
+        BtnConfirmNo.Content  = Str.Get("btn_no");
 
         UpdateFooter();
     }
 
-    void BtnLang_Click(object sender, RoutedEventArgs e)
+    void BtnLang_Click(object? sender, RoutedEventArgs e)
     {
         Str.Es = !Str.Es;
         ApplyLanguage();
     }
 
-    void BtnPrimary_Click(object sender, RoutedEventArgs e)
+    void BtnPrimary_Click(object? sender, RoutedEventArgs e)
     {
         switch (page)
         {
             case Page.Welcome:  ShowPage(Page.Game); break;
-            case Page.Game:     StartInstall(); break;
+            case Page.Game:     if (GameReady()) StartInstall(); break;
             case Page.Progress: if (!running && failed) StartInstall(); break;
             case Page.Done:     Close(); break;
         }
     }
 
-    void BtnSecondary_Click(object sender, RoutedEventArgs e)
+    async void BtnSecondary_Click(object? sender, RoutedEventArgs e)
     {
         switch (page)
         {
             case Page.Game:     ShowPage(Page.Welcome); break;
-            case Page.Progress: if (running) AskCancel(); else Close(); break;
+            case Page.Progress:
+                if (!running) { Close(); break; }
+                if (await AskYesNo(Str.Get("cancel_q"))) CancelRun();
+                break;
         }
+    }
+
+    // ── Yes/No over the window ───────────────────────────────────────────────
+    TaskCompletionSource<bool>? confirmTcs;
+
+    Task<bool> AskYesNo(string question)
+    {
+        TxtConfirm.Text = question;
+        Confirm.IsVisible = true;
+        confirmTcs = new TaskCompletionSource<bool>();
+        BtnConfirmNo.Focus();
+        return confirmTcs.Task;
+    }
+
+    void BtnConfirm_Click(object? sender, RoutedEventArgs e)
+    {
+        Confirm.IsVisible = false;
+        confirmTcs?.TrySetResult(sender == BtnConfirmYes);
     }
 
     // ── Game page ────────────────────────────────────────────────────────────
     string gamePath = "";
 
-    void Opt_Checked(object sender, RoutedEventArgs e)
+    void Opt_Changed(object? sender, RoutedEventArgs e)
     {
+        if (sender is not RadioButton { IsChecked: true }) return;
         // A path picked for another format no longer fits.
         if (gamePath != "" && !PathFitsFormat(gamePath)) gamePath = "";
         ValidateGame();
@@ -215,40 +243,47 @@ public partial class MainWindow : Window
 
     void ValidateGame()
     {
-        if (TxtGamePath == null) return;   // during InitializeComponent
         TxtGamePath.Text = gamePath == "" ? Str.Get("game_none_yet") : gamePath;
-        TxtGamePath.Foreground = (Brush)FindResource(gamePath == "" ? "FgDim" : "Fg");
+        TxtGamePath.Foreground = Res(gamePath == "" ? "FgDim" : "Fg");
 
         string? warn = null;
         if (gamePath != "" && GameArg() == "--game-dir" && !IsGameDir(gamePath)) warn = Str.Get("game_bad_dir");
         else if (gamePath != "" && GameArg() == "--image" && File.Exists(gamePath))
         {
-            try { warn = InstallEngine.CheckImageKeys(gamePath); }
+            try { warn = EngineBase.CheckImageKeys(gamePath); }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { warn = e.Message; }
         }
         TxtGameWarn.Text = warn ?? "";
-        TxtGameWarn.Visibility = warn == null ? Visibility.Collapsed : Visibility.Visible;
+        TxtGameWarn.IsVisible = warn != null;
         if (page == Page.Game) UpdateFooter();
     }
 
-    void BtnBrowse_Click(object sender, RoutedEventArgs e)
+    async Task<string?> PickFile(string titleKey, string typeKey, params string[] extensions)
     {
-        if (GameArg() == "--game-dir")
+        var patterns = extensions.SelectMany(x => new[] { "*." + x, "*." + x.ToUpperInvariant() }).ToArray();
+        var r = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            using var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = Str.Get("dlg_folder"), ShowNewFolderButton = false };
-            if (gamePath != "" && Directory.Exists(gamePath)) dlg.SelectedPath = gamePath;
-            if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK) gamePath = dlg.SelectedPath;
-        }
-        else
+            Title = Str.Get(titleKey),
+            FileTypeFilter = new[] { new FilePickerFileType(Str.Get(typeKey)) { Patterns = patterns }, FilePickerFileTypes.All },
+        });
+        return r.FirstOrDefault()?.TryGetLocalPath();
+    }
+
+    async Task<string?> PickFolder(string titleKey)
+    {
+        var r = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = Str.Get(titleKey) });
+        return r.FirstOrDefault()?.TryGetLocalPath();
+    }
+
+    async void BtnBrowse_Click(object? sender, RoutedEventArgs e)
+    {
+        var p = GameArg() switch
         {
-            var img = GameArg() == "--image";
-            var dlg = new OpenFileDialog
-            {
-                Title  = Str.Get(img ? "dlg_title_img" : "dlg_title_wua"),
-                Filter = Str.Get(img ? "dlg_filter_img" : "dlg_filter_wua"),
-            };
-            if (dlg.ShowDialog(this) == true) gamePath = dlg.FileName;
-        }
+            "--game-dir" => await PickFolder("dlg_folder"),
+            "--image"    => await PickFile("dlg_title_img", "game_opt_img", "wux", "wud"),
+            _            => await PickFile("dlg_title_wua", "game_opt_wua", "wua"),
+        };
+        if (p != null) gamePath = p;
         ValidateGame();
     }
 
@@ -258,18 +293,18 @@ public partial class MainWindow : Window
     void ShowKeys()
     {
         TxtFwdKeys.Text = keysPath ?? Str.Get("fwd_none");
-        TxtFwdKeys.Foreground = (Brush)FindResource(keysPath == null ? "FgDim" : "Fg");
-        BtnFwdClear.Visibility = keysPath == null ? Visibility.Collapsed : Visibility.Visible;
+        TxtFwdKeys.Foreground = Res(keysPath == null ? "FgDim" : "Fg");
+        BtnFwdClear.IsVisible = keysPath != null;
     }
 
-    void BtnFwdPick_Click(object sender, RoutedEventArgs e)
+    async void BtnFwdPick_Click(object? sender, RoutedEventArgs e)
     {
-        var dlg = new OpenFileDialog { Title = Str.Get("fwd_dlg_title"), Filter = Str.Get("fwd_dlg_filter") };
-        if (dlg.ShowDialog(this) == true) keysPath = dlg.FileName;
+        var p = await PickFile("fwd_dlg_title", "fwd_pick", "keys");
+        if (p != null) keysPath = p;
         ShowKeys();
     }
 
-    void BtnFwdClear_Click(object sender, RoutedEventArgs e)
+    void BtnFwdClear_Click(object? sender, RoutedEventArgs e)
     {
         keysPath = null;
         ShowKeys();
@@ -281,41 +316,42 @@ public partial class MainWindow : Window
     void ShowMinimap()
     {
         TxtMmGame.Text = minimapGame ?? Str.Get("mm_none");
-        TxtMmGame.Foreground = (Brush)FindResource(minimapGame == null ? "FgDim" : "Fg");
-        BtnMmClear.Visibility = minimapGame == null ? Visibility.Collapsed : Visibility.Visible;
-        // a Dolphin .rvz (Zstandard) also gets Python 3.14, which the map tool needs for it
-        var rvz = minimapGame != null && InstallEngine.IsZstdRvz(minimapGame);
+        TxtMmGame.Foreground = Res(minimapGame == null ? "FgDim" : "Fg");
+        BtnMmClear.IsVisible = minimapGame != null;
+        var rvz = minimapGame != null && EngineBase.IsZstdRvz(minimapGame);
         TxtMmNote.Text = rvz ? Str.Get("mm_rvz_note") : "";
-        TxtMmNote.Visibility = rvz ? Visibility.Visible : Visibility.Collapsed;
+        TxtMmNote.IsVisible = rvz;
     }
 
-    void BtnMmPick_Click(object sender, RoutedEventArgs e)
+    async void BtnMmPick_Click(object? sender, RoutedEventArgs e)
     {
-        var dlg = new OpenFileDialog { Title = Str.Get("mm_dlg_title"), Filter = Str.Get("mm_dlg_filter") };
-        if (dlg.ShowDialog(this) == true) minimapGame = dlg.FileName;
+        var p = await PickFile("mm_dlg_title", "mm_h", "iso", "gcm", "rvz");
+        if (p != null) minimapGame = p;
         ShowMinimap();
     }
 
-    void BtnMmFolder_Click(object sender, RoutedEventArgs e)
+    async void BtnMmFolder_Click(object? sender, RoutedEventArgs e)
     {
-        using var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = Str.Get("mm_dlg_folder"), ShowNewFolderButton = false };
-        if (minimapGame != null && Directory.Exists(minimapGame)) dlg.SelectedPath = minimapGame;
-        if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK) minimapGame = dlg.SelectedPath;
+        var p = await PickFolder("mm_dlg_folder");
+        if (p != null) minimapGame = p;
         ShowMinimap();
     }
 
-    void BtnMmClear_Click(object sender, RoutedEventArgs e)
+    void BtnMmClear_Click(object? sender, RoutedEventArgs e)
     {
         minimapGame = null;
         ShowMinimap();
     }
 
     // Dropping the game file or folder on the window picks it and its format.
-    void Window_Drop(object sender, DragEventArgs e)
+    void Window_Drop(object? sender, DragEventArgs e)
     {
-        if (running || page == Page.Done || !e.Data.GetDataPresent(DataFormats.FileDrop)) return;
-        var path = ((string[])e.Data.GetData(DataFormats.FileDrop)).FirstOrDefault();
+        if (running || page == Page.Done) return;
+#pragma warning disable CS0618   // Data still works in Avalonia 11; DataTransfer is the 12 API
+        var path = e.Data.GetFiles()?.FirstOrDefault()?.TryGetLocalPath();
+#pragma warning restore CS0618
         if (path == null) return;
+        path = path.TrimEnd('/');
         var ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
         if (Directory.Exists(path)) OptDir.IsChecked = true;
         else if (ext == ".wua") OptWua.IsChecked = true;
@@ -336,9 +372,9 @@ public partial class MainWindow : Window
         running = true; failed = false;
         cts = new CancellationTokenSource();
         for (int i = 0; i < stepStates.Length; i++) SetStep(i, StepState.Pending);
-        ErrorBox.Visibility = Visibility.Collapsed;
-        Notice.Visibility = Visibility.Collapsed;
-        TxtStatus.Foreground = (Brush)FindResource("Fg");
+        ErrorBox.IsVisible = false;
+        Notice.IsVisible = false;
+        TxtStatus.Text = "";
         OpenLogFile();
         ShowPage(Page.Progress);
         elapsed.Restart();
@@ -347,7 +383,8 @@ public partial class MainWindow : Window
         string? error = null;
         try
         {
-            await Task.Run(() => engine.Run(cts.Token));
+            var token = cts.Token;
+            await Task.Run(() => engine.Run(token));
         }
         catch (InstallException ex)         { error = ex.Message; }
         catch (OperationCanceledException)  { error = Str.Get("cancelled"); }
@@ -364,86 +401,101 @@ public partial class MainWindow : Window
             EnqueueLog(Str.Get("done_h"), LogKind.Ok);
             FlushLog();
             EnterDone();
-            FlashIfInactive();
+            Attention();
             return;
         }
 
         failed = true;
         EnqueueLog(error, LogKind.Error);
         TxtError.Text = error;
-        ErrorBox.Visibility = Visibility.Visible;
+        ErrorBox.IsVisible = true;
         TxtStatus.Text = "";
-        SetProgress(0);
+        Bar.IsIndeterminate = false;
+        Bar.Value = 0;
         for (int i = 0; i < stepStates.Length; i++)
             if (stepStates[i] == StepState.Running) SetStep(i, StepState.Failed);
         ShowLog(true);
         UpdateFooter();
-        FlashIfInactive();
+        Attention();
     }
 
-    void AskCancel()
+    void CancelRun()
     {
-        if (MessageBox.Show(this, Str.Get("cancel_q"), Str.Get("title"), MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
-            return;
         BtnSecondary.IsEnabled = false;
         TxtStatus.Text = Str.Get("cancelling");
         cts?.Cancel();
-        engine.KillCurrent();
+        Task.Run(() => engine.KillCurrent());
     }
 
-    void Window_Closing(object? sender, CancelEventArgs e)
+    async void Window_Closing(object? sender, WindowClosingEventArgs e)
     {
-        if (running)
+        if (running && !closingConfirmed)
         {
-            if (MessageBox.Show(this, Str.Get("cancel_q"), Str.Get("title"), MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
-            {
-                e.Cancel = true;
-                return;
-            }
+            e.Cancel = true;
+            if (!await AskYesNo(Str.Get("cancel_q"))) return;
+            closingConfirmed = true;
             cts?.Cancel();
             engine.KillCurrent();
+            Close();
+            return;
         }
         FlushLog();
         lock (logFileLock) { logFile?.Dispose(); logFile = null; }
     }
 
-    // Called on the worker thread: shows the notice and waits for its button (or a cancel).
-    void AskUser(string heading, string text, string button)
+    // Brings the window forward when it needs the player (a notice, the end) and they are elsewhere.
+    void Attention()
+    {
+        if (!IsActive) Activate();
+    }
+
+    // Called on the worker thread: shows the notice (with a command to paste in a terminal, or none) and waits for
+    // its button (or a cancel).
+    void AskUser(string heading, string text, string button, string? command)
     {
         var ev = new ManualResetEventSlim();
         noticeEvent = ev;
-        Dispatcher.Invoke(() =>
+        Ui(() =>
         {
             TxtNoticeH.Text = heading;
             TxtNotice.Text = text;
             BtnNotice.Content = button;
-            Notice.Visibility = Visibility.Visible;
+            noticeCommand = command;
+            TxtNoticeCmd.Text = command ?? "";
+            NoticeCmd.IsVisible = BtnNoticeCopy.IsVisible = command != null;
+            BtnNoticeCopy.Content = Str.Get("btn_copy_cmd");
+            Notice.IsVisible = true;
+            Attention();
             Notice.BringIntoView();
-            FlashIfInactive();
         });
         try { ev.Wait(cts!.Token); }
         finally
         {
             noticeEvent = null;
-            Dispatcher.Invoke(() => Notice.Visibility = Visibility.Collapsed);
+            Ui(() => Notice.IsVisible = false);
         }
     }
 
-    void BtnNotice_Click(object sender, RoutedEventArgs e) => noticeEvent?.Set();
+    void BtnNotice_Click(object? sender, RoutedEventArgs e) => noticeEvent?.Set();
+
+    string? noticeCommand;
+
+    async void BtnNoticeCopy_Click(object? sender, RoutedEventArgs e)
+    {
+        if (noticeCommand != null && Clipboard != null) await Clipboard.SetTextAsync(noticeCommand);
+    }
 
     // ── Steps and progress ───────────────────────────────────────────────────
     void BuildStepRows()
     {
         for (int i = 0; i < stepRows.Length; i++)
         {
-            var row = new Grid { Margin = new Thickness(0, 0, 0, 8) };
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            row.ColumnDefinitions.Add(new ColumnDefinition());
-            var icon = new Grid { Width = 22, Height = 22, Margin = new Thickness(0, 0, 12, 0) };
+            var row = new Grid { Margin = new Thickness(0, 0, 0, 8), ColumnDefinitions = new ColumnDefinitions("Auto,*") };
+            var icon = new Panel { Width = 22, Height = 22, Margin = new Thickness(0, 0, 12, 0) };
             var ring = new Ellipse { StrokeThickness = 2 };
-            var glyph = new TextBlock
+            var glyph = new Path
             {
-                FontFamily = new FontFamily("Segoe MDL2 Assets"), FontSize = 11, Foreground = (Brush)FindResource("Bg"),
+                Stroke = Res("Bg"), StrokeThickness = 2.2, StrokeLineCap = PenLineCap.Round, StrokeJoin = PenLineJoin.Round,
                 HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
             };
             icon.Children.Add(ring);
@@ -458,29 +510,28 @@ public partial class MainWindow : Window
         }
     }
 
+    static readonly Geometry Check = Geometry.Parse("M0,4 L3,7 L9,0");
+    static readonly Geometry Cross = Geometry.Parse("M0,0 L7,7 M7,0 L0,7");
+
     void SetStep(int i, StepState s)
     {
         stepStates[i] = s;
         var (ring, glyph, label) = stepRows[i];
-        ring.BeginAnimation(OpacityProperty, null);
-        ring.Opacity = 1;
+        ring.Classes.Set("running", s == StepState.Running);
         switch (s)
         {
             case StepState.Pending:
-                ring.Stroke = (Brush)FindResource("Line"); ring.Fill = Brushes.Transparent; glyph.Text = "";
-                label.Foreground = (Brush)FindResource("FgDim"); break;
+                ring.Stroke = Res("Line"); ring.Fill = Brushes.Transparent; glyph.Data = null;
+                label.Foreground = Res("FgDim"); break;
             case StepState.Running:
-                ring.Stroke = (Brush)FindResource("Accent"); ring.Fill = (Brush)FindResource("Accent"); glyph.Text = "";
-                label.Foreground = (Brush)FindResource("Fg");
-                ring.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0.3, TimeSpan.FromSeconds(0.8))
-                    { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever });
-                break;
+                ring.Stroke = Res("Accent"); ring.Fill = Res("Accent"); glyph.Data = null;
+                label.Foreground = Res("Fg"); break;
             case StepState.Done:
-                ring.Stroke = (Brush)FindResource("Good"); ring.Fill = (Brush)FindResource("Good"); glyph.Text = "";
-                label.Foreground = (Brush)FindResource("Fg"); break;
+                ring.Stroke = Res("Good"); ring.Fill = Res("Good"); glyph.Data = Check;
+                label.Foreground = Res("Fg"); break;
             case StepState.Failed:
-                ring.Stroke = (Brush)FindResource("Bad"); ring.Fill = (Brush)FindResource("Bad"); glyph.Text = "";
-                label.Foreground = (Brush)FindResource("Bad"); break;
+                ring.Stroke = Res("Bad"); ring.Fill = Res("Bad"); glyph.Data = Cross;
+                label.Foreground = Res("Bad"); break;
         }
     }
 
@@ -498,11 +549,11 @@ public partial class MainWindow : Window
             if (logFile != null) return;
             try
             {
-                Directory.CreateDirectory(InstallEngine.WorkDir);
-                // Shared: a second installer window (or Notepad on an older version's lock) appends to the same file.
+                Directory.CreateDirectory(DesktopEngine.WorkDir);
                 var stream = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
-                logFile = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
-                logFile.WriteLine($"==== {DateTime.Now:yyyy-MM-dd HH:mm:ss}  SwitchWakerHD installer (GUI) ====");
+                logFile = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
+                logFile.WriteLine($"==== {DateTime.Now:yyyy-MM-dd HH:mm:ss}  SwitchWakerHD installer ({System.Runtime.InteropServices.RuntimeInformation.OSDescription}, " +
+                                  $"{System.Runtime.InteropServices.RuntimeInformation.OSArchitecture}) ====");
             }
             catch (Exception e)
             {
@@ -523,13 +574,11 @@ public partial class MainWindow : Window
     void FlushLog()
     {
         if (logQueue.IsEmpty) return;
-        var sb = new StringBuilder();
-        while (logQueue.TryDequeue(out var line)) sb.Append(line).Append('\n');
-        var atEnd = LogBox.VerticalOffset + LogBox.ViewportHeight >= LogBox.ExtentHeight - 4;
-        LogBox.AppendText(sb.ToString());
-        if (LogBox.Text.Length > LogBoxMaxChars)
-            LogBox.Text = LogBox.Text.Substring(LogBox.Text.Length - LogBoxMaxChars / 2);
-        if (atEnd) LogBox.ScrollToEnd();
+        while (logQueue.TryDequeue(out var line)) logText.Append(line).Append('\n');
+        if (logText.Length > LogBoxMaxChars) logText.Remove(0, logText.Length - LogBoxMaxChars / 2);
+        if (!logVisible) return;
+        LogBox.Text = logText.ToString();
+        LogBox.CaretIndex = LogBox.Text.Length;   // follows the end
     }
 
     bool logVisible;
@@ -537,9 +586,9 @@ public partial class MainWindow : Window
     void ShowLog(bool show)
     {
         logVisible = show;
-        LogBox.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
-        LogRow.Height = show ? new GridLength(6, GridUnitType.Star) : new GridLength(0);
-        if (show) { FlushLog(); _ = Dispatcher.BeginInvoke(new Action(LogBox.ScrollToEnd), DispatcherPriority.Loaded); }
+        LogBox.IsVisible = show;
+        PageProgress.RowDefinitions[2].Height = show ? new GridLength(6, GridUnitType.Star) : new GridLength(0);
+        if (show) { LogBox.Text = logText.ToString(); FlushLog(); LogBox.CaretIndex = LogBox.Text?.Length ?? 0; }
         UpdateLogButtons();
     }
 
@@ -547,75 +596,82 @@ public partial class MainWindow : Window
     {
         BtnLog.Content = Str.Get(logVisible ? "btn_log_hide" : "btn_log_show");
         BtnLogCopy.Content = Str.Get("btn_log_copy");
-        BtnLogCopy.Visibility = logVisible ? Visibility.Visible : Visibility.Collapsed;
+        BtnLogCopy.IsVisible = logVisible;
         BtnLogOpen.Content = Str.Get("btn_log_open");
-        BtnLogOpen.Visibility = logVisible && File.Exists(LogPath) ? Visibility.Visible : Visibility.Collapsed;
+        BtnLogOpen.IsVisible = logVisible && File.Exists(LogPath);
     }
 
-    void BtnLog_Click(object sender, RoutedEventArgs e) => ShowLog(!logVisible);
+    void BtnLog_Click(object? sender, RoutedEventArgs e) => ShowLog(!logVisible);
 
-    void BtnLogCopy_Click(object sender, RoutedEventArgs e)
+    async void BtnLogCopy_Click(object? sender, RoutedEventArgs e)
     {
         FlushLog();
-        try { Clipboard.SetText(LogBox.Text); } catch { }
+        if (Clipboard != null) await Clipboard.SetTextAsync(logText.ToString());
     }
 
-    void BtnLogOpen_Click(object sender, RoutedEventArgs e)
-    {
-        try { Process.Start("notepad.exe", $"\"{LogPath}\""); } catch { }
-    }
+    void BtnLogOpen_Click(object? sender, RoutedEventArgs e) => engine.Open(LogPath, text: true);
 
     // ── Done page: moving the files to the Switch ────────────────────────────
-    // Three ways: DBI's MTP responder over USB, the microSD in the PC (a card reader, or hekate's UMS),
-    // or by hand. The device lists refresh themselves while the page is open.
+    // DBI's MTP responder over USB (Linux, through gio), the microSD mounted on the computer (a card reader, or
+    // hekate's USB mass storage), or by hand. The lists refresh themselves while the page is open.
     readonly DispatcherTimer devicePoll = new() { Interval = TimeSpan.FromSeconds(3) };
-    bool xferBusy, mtpScanning;
-    string[] mtpKeys = new string[0], sdKeys = new string[0];
+    bool xferBusy, sdScanning, mtpScanning, pollHooked;
+    string? copiedTo;   // after a copy, the button ejects that card
+    string[] sdKeys = Array.Empty<string>(), mtpKeys = Array.Empty<string>();
 
     void EnterDone()
     {
         TxtOut.Text = engine.SdOut;
-        // The forwarder lands in the SD folder's NSP\ and travels with it, whichever way is chosen.
+        // The forwarder lands in the SD folder's NSP/ and travels with it.
         var nsp = System.IO.Path.Combine(engine.SdOut, "NSP", "wwhd_forwarder.nsp");
         var nspFresh = File.Exists(nsp) && File.GetLastWriteTime(nsp) > DateTime.Now - elapsed.Elapsed - TimeSpan.FromMinutes(1);
-        TxtFwdDone.Visibility = keysPath != null ? Visibility.Visible : Visibility.Collapsed;
+        TxtFwdDone.IsVisible = keysPath != null;
         TxtFwdDone.Text = Str.Get(nspFresh ? "fwd_done" : "fwd_missing");
-        TxtFwdDone.Foreground = (Brush)FindResource(nspFresh ? "Fg" : "Warn");
-        TxtMmDone.Visibility = minimapGame != null ? Visibility.Visible : Visibility.Collapsed;
+        TxtFwdDone.Foreground = Res(nspFresh ? "Fg" : "Warn");
+        TxtMmDone.IsVisible = minimapGame != null;
         TxtMmDone.Text = Str.Get("mm_done");
+        TxtGameFilesDone.IsVisible = engine.BadGameFiles > 0;
+        TxtGameFilesDone.Text = Str.Get("game_files_done", engine.BadGameFiles, string.Join("\n", engine.BadGameFileLines.Take(3)));
+        TxtGameFilesDone.Foreground = Res("Warn");
         try
         {
             var files = Directory.GetFiles(engine.SdOut, "*", SearchOption.AllDirectories);
             TxtXferSize.Text = Str.Get("xfer_size", files.Length, (files.Sum(f => new FileInfo(f).Length) / 1e9).ToString("0.0"));
         }
         catch { TxtXferSize.Text = ""; }
-        if (XferMtp.IsChecked != true && XferSd.IsChecked != true && XferManual.IsChecked != true) XferMtp.IsChecked = true;
+        XferMtp.IsVisible = engine.HasMtp;
+        if (XferMtp.IsChecked != true && XferSd.IsChecked != true && XferManual.IsChecked != true)
+            (engine.HasMtp ? XferMtp : XferSd).IsChecked = true;
         ShowPage(Page.Done);
+        UpdatePanels();
         RefreshDevices();
-        if (devicePoll.Tag == null)
+        if (!pollHooked)
         {
-            devicePoll.Tag = true;
+            pollHooked = true;
             devicePoll.Tick += (_, _) => { if (page == Page.Done && !xferBusy) RefreshDevices(); };
         }
         devicePoll.Start();
     }
 
-    void Xfer_Checked(object sender, RoutedEventArgs e)
+    void Xfer_Changed(object? sender, RoutedEventArgs e)
     {
-        PanelMtp.Visibility    = XferMtp.IsChecked == true    ? Visibility.Visible : Visibility.Collapsed;
-        PanelSd.Visibility     = XferSd.IsChecked == true     ? Visibility.Visible : Visibility.Collapsed;
-        PanelManual.Visibility = XferManual.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
-        TxtXferStatus.Visibility = Visibility.Collapsed;
-        TxtNext1.Text = Str.Get(XferMtp.IsChecked == true ? "next_1_mtp" : "next_1");
-        if (page == Page.Done)
-        {
-            RefreshDevices();
-            var panel = XferMtp.IsChecked == true ? PanelMtp : XferSd.IsChecked == true ? PanelSd : PanelManual;
-            _ = Dispatcher.BeginInvoke(new Action(() => panel.BringIntoView()), DispatcherPriority.Loaded);
-        }
+        if (sender is not RadioButton { IsChecked: true }) return;
+        UpdatePanels();
+        if (page == Page.Done) RefreshDevices();
     }
 
-    void BtnDevRefresh_Click(object sender, RoutedEventArgs e) => RefreshDevices();
+    void UpdatePanels()
+    {
+        PanelMtp.IsVisible    = XferMtp.IsChecked == true;
+        PanelSd.IsVisible     = XferSd.IsChecked == true;
+        PanelManual.IsVisible = XferManual.IsChecked == true;
+        TxtXferStatus.IsVisible = false;
+        TxtNext1.Text = Str.Get(XferMtp.IsChecked == true ? "next_1_mtp" : "next_1");
+        var panel = PanelMtp.IsVisible ? PanelMtp : PanelSd.IsVisible ? PanelSd : (Control)PanelManual;
+        Dispatcher.UIThread.Post(() => panel.BringIntoView(), DispatcherPriority.Background);
+    }
+
+    void BtnDevRefresh_Click(object? sender, RoutedEventArgs e) => RefreshDevices();
 
     void RefreshDevices()
     {
@@ -623,89 +679,124 @@ public partial class MainWindow : Window
         if (XferMtp.IsChecked == true) RefreshMtp();
     }
 
-    // Rebuilds a list of device cards only when what is connected changed, so the selection stays.
+    async void RefreshMtp()
+    {
+        if (mtpScanning) return;
+        mtpScanning = true;
+        System.Collections.Generic.List<MtpStorage> found;
+        try { found = await Task.Run(GioMtp.FindSdStorages); }
+        catch { found = new(); }
+        finally { mtpScanning = false; }
+        FillList(MtpList, ref mtpKeys, found.Select(m => ("mtp" + Math.Abs(m.Uri.GetHashCode()), m.Device, m.Name, (object)m)).ToArray());
+        TxtMtpNone.IsVisible = found.Count == 0;
+        BtnCopyMtp.IsEnabled = found.Count > 0 && !xferBusy;
+    }
+
+    // Rebuilds the list of card choices only when what is mounted changed, so the selection stays.
     void FillList(StackPanel list, ref string[] keys, (string key, string title, string info, object tag)[] items)
     {
         var newKeys = items.Select(i => i.key).ToArray();
         if (newKeys.SequenceEqual(keys)) return;
-        var selected = list.Children.OfType<RadioButton>().FirstOrDefault(r => r.IsChecked == true)?.Uid;
+        var selected = list.Children.OfType<RadioButton>().FirstOrDefault(r => r.IsChecked == true)?.Name;
         keys = newKeys;
         list.Children.Clear();
         foreach (var it in items)
         {
-            list.Children.Add(new RadioButton
+            var rb = new RadioButton
             {
-                Style = (Style)FindResource("ChoiceCard"), GroupName = list.Name, Tag = it.tag, Uid = it.key,
-                IsChecked = it.key == selected,
+                GroupName = list.Name, Tag = it.tag, Name = it.key, IsChecked = it.key == selected,
                 Content = new StackPanel
                 {
                     Children =
                     {
-                        new TextBlock { Text = it.title, FontWeight = FontWeights.SemiBold },
-                        new TextBlock { Text = it.info, Foreground = (Brush)FindResource("FgDim"), FontSize = 13 },
+                        new TextBlock { Text = it.title, FontWeight = FontWeight.SemiBold },
+                        new TextBlock { Text = it.info, Foreground = Res("FgDim"), FontSize = 13 },
                     },
                 },
-            });
+            };
+            rb.Classes.Add("card");
+            rb.IsCheckedChanged += (_, _) => UpdateCopyButton();
+            list.Children.Add(rb);
         }
         if (list.Children.Count > 0 && !list.Children.OfType<RadioButton>().Any(r => r.IsChecked == true))
             ((RadioButton)list.Children[0]).IsChecked = true;
     }
 
-    void RefreshDrives()
+    async void RefreshDrives()
     {
-        var drives = DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Removable && d.IsReady).ToList();
-        FillList(SdPanel, ref sdKeys, drives.Select(d => (
-            d.Name + d.VolumeLabel + d.TotalSize,
-            string.IsNullOrEmpty(d.VolumeLabel) ? d.Name : $"{d.Name}  {d.VolumeLabel}",
-            $"{d.TotalSize / 1e9:0.#} GB · {d.DriveFormat}",
-            (object)d.Name)).ToArray());
-        TxtSdNone.Visibility = drives.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        BtnCopySd.IsEnabled = drives.Count > 0 && !xferBusy;
+        if (sdScanning) return;
+        sdScanning = true;
+        System.Collections.Generic.List<DesktopEngine.Volume> drives;
+        try { drives = await Task.Run(engine.SdVolumes); }
+        catch { drives = new(); }
+        finally { sdScanning = false; }
+        FillList(SdList, ref sdKeys, drives.Select(d => (
+            "sd" + Math.Abs((d.Mount + d.Size).GetHashCode()),
+            $"{d.Name}  ({d.Mount})",
+            $"{d.Size / 1e9:0.#} GB · {d.Format}",
+            (object)d.Mount)).ToArray());
+        TxtSdNone.IsVisible = drives.Count == 0;
+        if (copiedTo != null && !drives.Any(d => d.Mount == copiedTo)) copiedTo = null;
+        UpdateCopyButton();
     }
 
-    async void RefreshMtp()
+    string? SelectedMount() => SdList.Children.OfType<RadioButton>().FirstOrDefault(r => r.IsChecked == true)?.Tag as string;
+
+    // "Copy to SD", or "Eject card" once the selected card has the copy
+    void UpdateCopyButton()
     {
-        if (mtpScanning) return;
-        mtpScanning = true;
-        List<MtpStorage> found;
-        try { found = await MtpCopy.Sta(MtpCopy.FindSdStorages); }
-        catch { found = new List<MtpStorage>(); }
-        finally { mtpScanning = false; }
-        FillList(MtpList, ref mtpKeys, found.Select(m => (m.Device + "|" + m.Name, m.Device, m.Name, (object)m)).ToArray());
-        TxtMtpNone.Visibility = found.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        BtnCopyMtp.IsEnabled = found.Count > 0 && !xferBusy;
+        var eject = copiedTo != null && copiedTo == SelectedMount();
+        BtnCopySd.Content = Str.Get(eject ? "btn_eject" : "btn_copy_sd");
+        BtnCopySd.IsEnabled = SdList.Children.Count > 0 && !xferBusy;
     }
 
     void SetXferBusy(bool busy)
     {
         xferBusy = busy;
         running = busy;   // closing the window asks first
-        foreach (var c in new UIElement[] { XferMtp, XferSd, XferManual, MtpList, SdPanel, BtnMtpRefresh, BtnSdRefresh, BtnPrimary })
+        foreach (var c in new Control[] { XferMtp, XferSd, XferManual, MtpList, SdList, BtnMtpRefresh, BtnSdRefresh })
             c.IsEnabled = !busy;
         BtnCopyMtp.IsEnabled = !busy && MtpList.Children.Count > 0;
-        BtnCopySd.IsEnabled = !busy && SdPanel.Children.Count > 0;
-        XferBar.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+        XferBar.IsVisible = busy;
+        UpdateCopyButton();
+        UpdateFooter();
     }
 
     void XferStatus(string text, string brush)
     {
         TxtXferStatus.Text = text;
-        TxtXferStatus.Foreground = (Brush)FindResource(brush);
-        TxtXferStatus.Visibility = Visibility.Visible;
+        TxtXferStatus.Foreground = Res(brush);
+        TxtXferStatus.IsVisible = true;
     }
 
-    async void BtnCopySd_Click(object sender, RoutedEventArgs e)
+    async void BtnCopySd_Click(object? sender, RoutedEventArgs e)
     {
-        var drive = SdPanel.Children.OfType<RadioButton>().FirstOrDefault(r => r.IsChecked == true)?.Tag as string;
-        if (drive == null) return;
+        var mount = SelectedMount();
+        if (mount == null) return;
+        if (copiedTo == mount)
+        {
+            var ok = await Task.Run(() => engine.Eject(mount));
+            XferStatus(ok ? Str.Get("sd_ejected") : Str.Get("sd_eject_fail", mount), ok ? "Good" : "Warn");
+            if (ok) copiedTo = null;
+            RefreshDrives();
+            return;
+        }
         SetXferBusy(true);
-        XferBar.IsIndeterminate = true;
-        XferStatus(Str.Get("sd_copying", drive), "Fg");
+        XferBar.IsIndeterminate = false;
+        XferBar.Value = 0;
+        XferStatus(Str.Get("sd_copying", mount), "Fg");
         cts = new CancellationTokenSource();
+        var token = cts.Token;
         try
         {
-            await Task.Run(() => engine.CopyToSd(drive, cts.Token));
-            XferStatus(Str.Get("sd_copied", drive), "Good");
+            await Task.Run(() => engine.CopyToSd(mount, (d, t, checking) => Ui(() =>
+            {
+                XferBar.Value = t > 0 ? d * 100.0 / t : 100;
+                TxtXferStatus.Text = (checking ? Str.Get("sd_verify_prog") : Str.Get("sd_copying", mount)) +
+                                     $"  {d / 1048576} / {t / 1048576} MB";
+            }), token));
+            copiedTo = mount;
+            XferStatus(Str.Get("sd_copied", mount), "Good");
         }
         catch (Exception ex)
         {
@@ -717,7 +808,7 @@ public partial class MainWindow : Window
         finally { SetXferBusy(false); }
     }
 
-    async void BtnCopyMtp_Click(object sender, RoutedEventArgs e)
+    async void BtnCopyMtp_Click(object? sender, RoutedEventArgs e)
     {
         var target = MtpList.Children.OfType<RadioButton>().FirstOrDefault(r => r.IsChecked == true)?.Tag as MtpStorage;
         if (target == null) return;
@@ -725,21 +816,17 @@ public partial class MainWindow : Window
         XferBar.IsIndeterminate = false;
         XferBar.Value = 0;
         XferStatus(Str.Get("mtp_starting", target.Device), "Fg");
-        EnqueueLog(Str.Get("mtp_starting", target.Device) + $" ({target.Name})", LogKind.Info);
+        EnqueueLog(Str.Get("mtp_starting", target.Device) + $" ({target.Uri})", LogKind.Info);
         cts = new CancellationTokenSource();
         var token = cts.Token;
         var src = engine.SdOut;
         try
         {
-            await MtpCopy.Sta(() =>
+            await Task.Run(() => GioMtp.Copy(src, target, (fd, ft, bd, bt, name) => Ui(() =>
             {
-                MtpCopy.Copy(src, target, (fd, ft, bd, bt, name) => Ui(() =>
-                {
-                    XferBar.Value = bt > 0 ? bd * 100.0 / bt : 0;
-                    TxtXferStatus.Text = Str.Get("mtp_progress", fd, ft, bd / 1048576, bt / 1048576);
-                }), token);
-                return 0;
-            });
+                XferBar.Value = bt > 0 ? bd * 100.0 / bt : 0;
+                TxtXferStatus.Text = Str.Get("mtp_progress", fd, ft, bd / 1048576, bt / 1048576);
+            }), line => EnqueueLog(line, LogKind.Output), token));
             XferStatus(Str.Get("mtp_done"), "Good");
             EnqueueLog(Str.Get("mtp_done"), LogKind.Ok);
         }
@@ -750,34 +837,9 @@ public partial class MainWindow : Window
                     : Str.Get("mtp_error", ex.Message);
             XferStatus(msg, "Bad");
             EnqueueLog(msg, LogKind.Error);
-            if (!(ex is InstallException || ex is OperationCanceledException)) EnqueueLog(ex.ToString(), LogKind.Error);
         }
         finally { SetXferBusy(false); }
     }
 
-    void BtnOpenOut_Click(object sender, RoutedEventArgs e)
-    {
-        try { Process.Start("explorer.exe", $"\"{engine.SdOut}\""); } catch { }
-    }
-
-    // ── Window chrome ────────────────────────────────────────────────────────
-    [DllImport("dwmapi.dll")]
-    static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
-
-    [DllImport("user32.dll")]
-    static extern bool FlashWindow(IntPtr hwnd, bool invert);
-
-    void UseDarkTitleBar()
-    {
-        var hwnd = new WindowInteropHelper(this).Handle;
-        int on = 1;
-        // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Windows 10 20H1+); 19 on earlier Windows 10 builds.
-        if (DwmSetWindowAttribute(hwnd, 20, ref on, sizeof(int)) != 0)
-            DwmSetWindowAttribute(hwnd, 19, ref on, sizeof(int));
-    }
-
-    void FlashIfInactive()
-    {
-        if (!IsActive) FlashWindow(new WindowInteropHelper(this).Handle, true);
-    }
+    void BtnOpenOut_Click(object? sender, RoutedEventArgs e) => engine.Open(engine.SdOut);
 }
