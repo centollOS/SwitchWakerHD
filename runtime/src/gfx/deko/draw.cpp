@@ -1660,17 +1660,22 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     // after the post-processing that reads the scene. At a lower internal resolution, the first draw into the TV
     // picture's buffer that comes after a read of it this frame, has no depth buffer and samples only the game's
     // own textures (nothing rendered) switches that buffer to its full-size image, the scene scaled up into it;
-    // the next frame's clear (or 3D drawing) switches back
-    if (target->scale < 1.0f && target == S.tvSource && !depth && !g_drawSamplesRendered && colors[0] == target &&
-        target->readFrame == R.frame) {
+    // the next frame's clear (or 3D drawing) switches back. With edge smoothing on (issue #21), the scene goes
+    // through FXAA there, at any internal resolution (fxaa_scene), so the HUD drawn after it stays sharp
+    const bool smooth = fxaa_enabled();
+    if ((target->scale < 1.0f || smooth) && target == shown_source() && !depth && !g_drawSamplesRendered &&
+        colors[0] == target && target->readFrame == R.frame) {
         bool single = true;
         for (int i = 1; i < 8; i++)
             if (colors[i]) single = false;
         if (single) {
-            target->hudFull = true;
-            fit_scale(target, true, true);
+            const bool scaled = target->scale < 1.0f;
+            if (!(smooth && fxaa_scene(target)) && target->scale < 1.0f) {
+                target->hudFull = true;
+                fit_scale(target, true, true);
+            }
             g_drawScale = target->scale;
-            R.perf.hudSwitches++;
+            if (scaled) R.perf.hudSwitches++;
         }
     }
     // the loose uniforms (ufBlock) of each stage, packed at the targets' scale
