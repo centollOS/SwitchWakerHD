@@ -28,6 +28,7 @@
 #include "background_shaders_switch.h"
 #include "audio_guard_switch.h"
 #include "bench_switch.h"  // (this fork) the performance test
+#include "shader_wait_switch.h"
 #include "host.h"
 #include "settings_switch.h"
 
@@ -229,6 +230,14 @@ debugsrv::Reply shaderthreads(const debugsrv::Args& a) {
     return debugsrv::ok("shaderthreads " + std::to_string(gfxsw::shader_compile_threads()));
 }
 
+// "shaderwait [0-3]": draws of a shader still compiling (shader_wait_switch.h, #49): 0 skipped (the default), 1 wait
+// while an item is shown, 2 also during events, 3 always; not saved (the menu saves it)
+debugsrv::Reply shaderwait(const debugsrv::Args& a) {
+    if (!a.empty()) shader_wait::set_mode(atoi(a[0].c_str()));
+    return debugsrv::ok(std::string("shaderwait ") + std::to_string(shader_wait::mode()) + ": " +
+                        shader_wait::label(shader_wait::mode()));
+}
+
 // "stall <ms> [core] [count] [gap ms]": a host thread above every game thread spins on a core, as
 // the hitches that set off the game's "kill DSP channel" (issue #13) do; to test the guard at will
 Thread g_stallThread;
@@ -333,6 +342,8 @@ void start() {
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
     debugsrv::add_command("shaderthreads", "shaderthreads [1-3]    threads compiling the shaders draws ask for", shaderthreads);
+    debugsrv::add_command("shaderwait", "shaderwait [0-3]       draws of a compiling shader: 0 skip, 1 items, 2 +events, 3 always",
+                          shaderwait);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);

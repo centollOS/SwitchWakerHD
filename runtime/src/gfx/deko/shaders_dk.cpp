@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -129,6 +130,12 @@ bool g_waitForWorker = false;
 // ~18 s) must not all wait: only its first 40 draws do. 0 = never.
 uint64_t g_bootWaitDraws = 40;
 uint64_t g_bootDraws = 0;  // in this frame
+// (this fork, #49) platform/shader_wait_switch.h: the game's main thread says when draws wait (an item shown, ...)
+std::atomic<bool> g_drawsWait{false};
+std::atomic<uint64_t> g_momentWaits{0}, g_momentWaitNs{0};  // waits since the switch went on (its log line)
+bool draws_wait() { return g_waitForWorker || g_drawsWait.load(std::memory_order_relaxed); }
+// the render thread waits for a shader a draw needs now (wait mode, the start-up's first draws, shader_wait)
+void wait_for_draw(ShaderCode* code, uint64_t hash);
 
 // ---- hashes (as gfx/gl/shaders.cpp: the same keys and the same GLSL hashes)
 uint64_t hash_bytes(const void* bytes, size_t size, uint64_t hash = 0x9E3779B97F4A7C15ull) {
@@ -1006,7 +1013,7 @@ ShaderCode* code_for(Shader* sh, std::string&& glsl) {
     job.hash = sh->glslHash;
     job.vertex = sh->vertex;
     job.glsl = std::move(glsl);
-    job.priority = g_waitForWorker ? ~0u : 1;  // (a draw asked for it now)
+    job.priority = draws_wait() ? ~0u : 1;  // (a draw asked for it now)
     queue_job(std::move(job));
     return &code;
 }
@@ -1037,6 +1044,13 @@ void wait_for(ShaderCode* code, uint64_t hash) {
         }
         load_results(~size_t{0});
     }
+}
+
+void wait_for_draw(ShaderCode* code, uint64_t hash) {
+    const uint64_t t0 = now_ns();
+    wait_for(code, hash);
+    g_momentWaits.fetch_add(1, std::memory_order_relaxed);
+    g_momentWaitNs.fetch_add(now_ns() - t0, std::memory_order_relaxed);
 }
 
 // the counts since b (which becomes now); pendingNow and codeBytes as they are
@@ -1251,8 +1265,8 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         Shader* sh = it->second.get();
         if (sh->pending()) {
             refresh(sh);
-            if (g_waitForWorker && sh->pending() && sh->code) {
-                wait_for(sh->code, sh->glslHash);
+            if (draws_wait() && sh->pending() && sh->code) {
+                wait_for_draw(sh->code, sh->glslHash);
                 refresh(sh);
             }
         }
@@ -1340,8 +1354,8 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     cache_dk_translation(shader, base, units);
     shader->code = code_for(shader, std::move(glsl));
     refresh(shader);
-    if (g_waitForWorker && shader->pending()) {
-        wait_for(shader->code, shader->glslHash);
+    if (draws_wait() && shader->pending()) {
+        wait_for_draw(shader->code, shader->glslHash);
         refresh(shader);
     }
     return shader;
@@ -2104,6 +2118,19 @@ void shader_queue(size_t& forDraws, size_t& background) {
     std::lock_guard<std::mutex> lk(workerMutex);
     forDraws = foregroundQueued;
     background = jobs.size() - foregroundQueued;
+}
+
+// (this fork, #49) platform/shader_wait_switch.cpp, the game's main thread: draws wait for their shaders from now
+void set_draws_wait(bool on) {
+    if (g_drawsWait.exchange(on) == on) return;
+    if (on) {
+        g_momentWaits = 0;
+        g_momentWaitNs = 0;
+        LOG("[shader-wait] draws wait for their shaders (frame %llu)", (unsigned long long)R.frame);
+    } else {
+        LOG("[shader-wait] draws skip again (frame %llu): %llu waited, %.0f ms in all", (unsigned long long)R.frame,
+            (unsigned long long)g_momentWaits.load(), double(g_momentWaitNs.load()) / 1e6);
+    }
 }
 
 uint64_t shaders_pending() {

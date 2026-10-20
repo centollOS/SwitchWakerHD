@@ -19,6 +19,7 @@
 // (appletHook) did not help: the program was suspended before the hook ran. Overclocks are left to sys-clk. A saved switchCpuClock is ignored (logged); a saved GPU profile 614
 // becomes 1600 (the same apm configuration without the raised GPU clock).
 #include "settings_switch.h"
+#include "shader_wait_switch.h"
 
 #include <switch.h>
 
@@ -293,6 +294,7 @@ void apply_at_start() {
         if (hostui::get(kKeyAniso, v) && !v.empty()) gfxsw::set_aniso(v == "1");
         if (hostui::get(kKeyBloom, v) && !v.empty()) gfxsw::set_bloom(v == "1");
         if (hostui::get(kKeyDistanceBlur, v) && !v.empty()) gfxsw::set_distance_blur(v == "1");
+        if (hostui::get(kKeyShaderWait, v) && !v.empty()) shader_wait::set_mode(atoi(v.c_str()));
     }
 }
 
