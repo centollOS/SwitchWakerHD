@@ -1,7 +1,8 @@
 # HOME-screen icon (forwarder NSP)
 
-`build/forwarder/wwhd_forwarder.nsp` installs a "Wind Waker HD" icon (the game's own icon, from your
-dump) on the HOME screen. Opening it starts `sdmc:/switch/wwhd/wwhd.nro` as an application: all the
+`build/forwarder/wwhd_forwarder.nsp` installs a "Wind Waker HD" icon on the HOME screen: the
+title-screen logo over the boot screen's art, both taken from your dump by `make_icon.py` (else the game's
+own small icon; `--icon` for your own image). Opening it starts `sdmc:/switch/wwhd/wwhd.nro` as an application: all the
 memory, and apm accepts the handheld GPU profile (in applet mode, from the album, it is skipped). No
 need to open hbmenu by holding R over a game. Ported from centollOS's forwarder.
 

@@ -199,8 +199,8 @@ def main():
     ap.add_argument("--jobs", type=int, help="parallel compiles")
     ap.add_argument("--keys", help="native build: your console's prod.keys, for the HOME-screen forwarder "
                     "(default: .switch\\prod.keys in your user folder; without it the forwarder is skipped)")
-    ap.add_argument("--icon", help="custom icon (TGA, PNG, JPG) for the NRO and forwarder (default: from the game dump; "
-                    "disc images may not have it — use Cemu's mlc01/usr/title/.../meta/iconTex.tga)")
+    ap.add_argument("--icon", help="custom icon (TGA, PNG, JPG) for the NRO and forwarder (default: the title-screen "
+                    "logo from the game's files, else its meta/iconTex.tga)")
     ap.add_argument("--no-forwarder", action="store_true", help="native build: do not build the forwarder (.nsp)")
     ap.add_argument("--name", help="custom display name for the NRO (default: Wind Waker HD)")
     ap.add_argument("--guest-mod", action="append", default=[], help="a code mod built into the NRO (catalogue id, .zip or folder)")
@@ -235,17 +235,13 @@ def main():
         fail("%s is not an extracted game (code/cking.rpx, content/, meta/meta.xml)" % game)
     print("  " + game)
 
-    # the icon of the NRO and forwarder: --icon, else meta/iconTex.tga of the game
-    icon_path = os.path.join(game, "meta", "iconTex.tga")
-    if args.icon:
-        pass
-    elif os.path.isfile(icon_path):
-        print("  Found icon: %s" % icon_path)
-    else:
-        print("  WARNING: no iconTex.tga found in %s/meta/" % game)
-        print("  The disc image may not contain the icon. For the HOME screen icon,")
-        print("  use --icon with a path to iconTex.tga from your Cemu mlc01 folder:")
-        print("    --icon <path/to/mlc01/usr/title/.../meta/iconTex.tga>")
+    # the icon of the NRO and forwarder: --icon, else made from the game's files (forwarder/make_icon.py: the
+    # title-screen logo over the boot screen, else meta/iconTex.tga)
+    if not args.icon and not os.path.isfile(os.path.join(game, "meta", "bootTvTex.tga")) \
+            and not os.path.isfile(os.path.join(game, "meta", "iconTex.tga")):
+        print("  WARNING: no bootTvTex.tga or iconTex.tga in %s" % os.path.join(game, "meta"))
+        print("  The disc image may not contain them. For the HOME screen icon, use --icon with an image,")
+        print("  e.g. iconTex.tga from your Cemu mlc01 folder: --icon <mlc01/usr/title/.../meta/iconTex.tga>")
         print("  Or the NRO/forwarder will use a default icon.")
 
     step(2, "checking the game version")
@@ -285,7 +281,7 @@ def main():
     env["WWHD_PYTHON"] = sys.executable
     if args.icon:
         env["WWHD_ICON"] = os.path.abspath(args.icon)
-    env["WWHD_GAME_DIR"] = game  # where build.sh finds meta/iconTex.tga
+    env["WWHD_GAME_DIR"] = game  # where build.sh makes the icon from
     if args.name:
         env["WWHD_NACP_NAME"] = args.name
     run((native_shell(env) if native else ["bash"]) + ["tools/switch/build.sh"], env=env)
@@ -316,7 +312,7 @@ def main():
         for part in ("code", "content", "meta"):
             shutil.copytree(os.path.join(game, part), os.path.join(gdst, part))
     if native and not args.no_forwarder:
-        forwarder(args, out, args.icon)
+        forwarder(args, out, args.icon or game)
     print("""
 Done: %s
 

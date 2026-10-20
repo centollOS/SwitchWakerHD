@@ -3,12 +3,13 @@
 # screen and starts sdmc:/switch/wwhd/wwhd.nro as an application (title mode: all the memory, and
 # apm accepts the GPU profile), without hbmenu. Ported from centollOS (scripts/switch there).
 #
-#   tools/switch/forwarder/build_forwarder.sh [--keys PATH] [--icon TGA] [--name NAME] [--no-verify]
+#   tools/switch/forwarder/build_forwarder.sh [--keys PATH] [--icon PATH] [--name NAME] [--no-verify]
 #
 #   --keys PATH   the console's own keys (default ~/.switch/prod.keys). They are only bind-mounted
 #                 read-only into the container for the pack and verify steps; nothing copies them
 #                 and this script checks that no key value reached its logs.
-#   --icon TGA    the icon's source (default: WWHD_GAME_DIR/meta/iconTex.tga, else build/sd/switch/wwhd/game/meta/iconTex.tga, else Rom/Decrypted/*/meta/iconTex.tga)
+#   --icon PATH   the icon's source, an image (TGA, PNG, JPG) or a game folder (default: the game folder
+#                 WWHD_GAME_DIR, else build/sd/switch/wwhd/game, else Rom/Decrypted/*, else Rom)
 #   --name NAME   the display name in the HOME screen (default: "Wind Waker HD")
 #   --no-verify   skip the offline hactool check of the NSP
 #
@@ -22,8 +23,9 @@
 #            application_type 1 (application): pool 0, the application's memory.
 #   romfs    nextNroPath and nextArgv = sdmc:/switch/wwhd/wwhd.nro (argv[0] is the NRO's path, as
 #            hbmenu passes it).
-#   control  control.nacp from make_nacp.py and the game's own icon (make_icon.py: iconTex.tga of
-#            your dump scaled to 256x256; it stays in build/) in every language slot.
+#   control  control.nacp from make_nacp.py and the icon (make_icon.py: the title-screen logo over the
+#            boot screen of your dump, else its iconTex.tga, 256x256; it stays in build/) in every
+#            language slot.
 #   pack     hacBrewPack v3.05 (pinned in forwarder.env), no logo section.
 #
 # Title ID 0x01FF575748440000 (TITLE_ID in forwarder.env, which also holds the pins): "01FF" is outside
@@ -86,17 +88,15 @@ if [[ -z $engine ]]; then
     exit 1
 fi
 if [[ -z $icon_src ]]; then
-    # Same priority as NRO build: explicit > WWHD_GAME_DIR > build/sd > Rom/Decrypted
-    if [[ -n ${WWHD_GAME_DIR:-} && -f "$root/$WWHD_GAME_DIR/meta/iconTex.tga" ]]; then
-        icon_src="$root/$WWHD_GAME_DIR/meta/iconTex.tga"
-    elif [[ -f "$root/build/sd/switch/wwhd/game/meta/iconTex.tga" ]]; then
-        icon_src="$root/build/sd/switch/wwhd/game/meta/iconTex.tga"
-    else
-        icon_src=$(ls "$root"/Rom/Decrypted/*/meta/iconTex.tga 2>/dev/null | head -1 || true)
-    fi
+    # Same priority as the NRO build: explicit > WWHD_GAME_DIR > build/sd > Rom/Decrypted > Rom
+    game_dir=${WWHD_GAME_DIR:-}
+    [[ -n $game_dir && $game_dir != /* ]] && game_dir=$root/$game_dir
+    for c in "$game_dir" "$root/build/sd/switch/wwhd/game" "$root"/Rom/Decrypted/* "$root/Rom"; do
+        if [[ -n $c && -d $c/meta ]]; then icon_src=$c; break; fi
+    done
 fi
-if [[ ! -f $icon_src ]]; then
-    echo "build_forwarder: no icon: give --icon path/to/meta/iconTex.tga (from your dump)" >&2
+if [[ -z $icon_src || ! -e $icon_src ]]; then
+    echo "build_forwarder: no icon: give --icon with your game folder (meta/, content/) or an image" >&2
     exit 1
 fi
 
