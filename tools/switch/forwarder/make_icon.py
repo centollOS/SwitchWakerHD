@@ -19,9 +19,6 @@ import sys
 
 from PIL import Image
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-import shaderprep  # noqa: E402  (Yaz0 and SARC of the game's archives)
-
 SIZE = 256
 # bootTvTex.tga (1280x720): the frame of the centre panel is x 509..784, y 207..473; with a 7 px margin on every
 # side the box is 290x281, scaled to the square icon (3% taller)
@@ -67,6 +64,9 @@ def title_icon(game):
     if not (os.path.isfile(tv) and os.path.isfile(szs)):
         return None
     try:
+        # Yaz0 and SARC of the game's archives; imported here, so that an image source never needs it
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+        import shaderprep
         boot = Image.open(tv).convert("RGB")
         if boot.size != (1280, 720):
             return None
@@ -76,7 +76,7 @@ def title_icon(game):
         for name, width, gap in LOGO:
             im = bflim_rgba8(files[name])
             logos.append((im.resize((width, round(im.height * width / im.width)), Image.LANCZOS), gap))
-    except (OSError, KeyError, ValueError, struct.error) as e:
+    except Exception as e:  # an archive or texture other than the expected one: the fallback, not a failed build
         print("make_icon: no title-screen icon (%s); the game's iconTex.tga instead" % e, file=sys.stderr)
         return None
     icon = boot.crop(PANEL).resize((SIZE, SIZE), Image.LANCZOS)
