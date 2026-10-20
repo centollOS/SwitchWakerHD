@@ -3,8 +3,8 @@
 #   tools/switch/build.sh                        deko3d renderer: build/switch-dk/wwhd.nro
 #                                                (WWHD_DEKO3D_DEBUG_LIB=ON: deko3d's debug library,
 #                                                build/switch-dk/wwhd_dk_debug.nro)
-#   tools/switch/build.sh --icon PATH            custom icon, any path (TGA, PNG, JPG; default: the game's iconTex.tga;
-#                                                needs python3 with Pillow on this machine)
+#   tools/switch/build.sh --icon PATH            custom icon, any path (TGA, PNG, JPG, or a game folder; default: the title-screen logo
+#                                                from the game's files, make_icon.py; needs python3 with Pillow here)
 #   tools/switch/build.sh --name NAME            custom NRO display name (default: Wind Waker HD)
 # The console also needs sdmc:/switch/wwhd/shadercache_dksh.bin (tools/switch/dksh_cache, docs/deko3d-plan.md).
 # Needs podman or docker (or the native devkitPro of WWHD_NATIVE below), and build/gen from
@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
         *) echo "build.sh: unknown option $1" >&2; exit 2 ;;
     esac
 done
-if [[ -n $icon_src && ! -f $icon_src ]]; then
+if [[ -n $icon_src && ! -e $icon_src ]]; then
     echo "build.sh: icon file not found: $icon_src" >&2
     exit 1
 fi
@@ -84,13 +84,12 @@ options="-DWWHD_RENDERER=DEKO3D -DWWHD_DEKO3D_DEBUG_LIB=$debuglib -DWWHD_SWITCH_
 # command); passed every time, so the next build without it is a normal one again
 options="$options -DWWHD_HEAP_CENSUS=${WWHD_HEAP_CENSUS:-OFF}"
 # The NRO's icon is made here, on the host, as make_sd.py and the forwarder scripts do: the container has no
-# Pillow, so CMake gets a finished JPEG. Icon: --icon (any path), else meta/iconTex.tga of WWHD_GAME_DIR (the
-# extracted game, make_sd.py), else of build/sd, else of Rom/Decrypted. Without one, or without python3 with
-# Pillow, the NRO keeps the default icon.
+# Pillow, so CMake gets a finished JPEG. Icon: --icon (any path), else made from the game's files (make_icon.py:
+# the title-screen logo, or meta/iconTex.tga) of WWHD_GAME_DIR (the extracted game, make_sd.py), else of build/sd,
+# else of Rom/Decrypted/* or Rom. Without one, or without python3 with Pillow, the NRO keeps the default icon.
 if [[ -z $icon_src ]]; then
-    for c in "${WWHD_GAME_DIR:+$WWHD_GAME_DIR/meta/iconTex.tga}" build/sd/switch/wwhd/game/meta/iconTex.tga \
-             Rom/Decrypted/*/meta/iconTex.tga; do
-        if [[ -n $c && -f $c ]]; then icon_src=$c; break; fi
+    for c in "${WWHD_GAME_DIR:-}" build/sd/switch/wwhd/game Rom/Decrypted/* Rom; do
+        if [[ -n $c && -d $c/meta ]]; then icon_src=$c; break; fi
     done
 fi
 nro_icon=
@@ -101,11 +100,11 @@ if [[ -n $icon_src ]]; then
         nro_icon=build/nro_icon.jpg
     else
         rm -f build/nro_icon.jpg
-        echo "build.sh: no NRO icon: converting $icon_src needs python3 with Pillow (pip install pillow); the NRO gets the default icon" >&2
+        echo "build.sh: no NRO icon: making it from $icon_src needs python3 with Pillow (pip install pillow); the NRO gets the default icon" >&2
     fi
 else
     rm -f build/nro_icon.jpg
-    echo "build.sh: no game icon found (--icon PATH, or meta/iconTex.tga of the game); the NRO gets the default icon" >&2
+    echo "build.sh: no game files for the icon (--icon PATH, or WWHD_GAME_DIR); the NRO gets the default icon" >&2
 fi
 # The name has spaces, so these go in an array and not in $options (the native build expands $options unquoted);
 # the container gets them quoted for its inner shell (nro_opts_q). Passed every time: a cached value from an

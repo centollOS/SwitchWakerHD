@@ -19,7 +19,8 @@ Needs (besides the native build of INSTALL.md): git, Pillow (pip install pillow)
 MSYS2 (open devkitPro > MSYS2, then: pacman -S gcc). Output: build\\forwarder\\wwhd_forwarder.nsp, and with
 --sd DIR a copy in DIR\\NSP\\. Install it with DBI or Goldleaf; it needs up-to-date Atmosphere sigpatches.
 Not verified offline with hactool, unlike build_forwarder.sh.
---icon: custom icon (TGA, PNG, JPG) (default: from game dump; disc images may not have it — use Cemu's mlc01/usr/title/.../meta/iconTex.tga)
+--icon: custom icon (TGA, PNG, JPG, or a game folder) (default: made from the extracted game in build\\ by make_icon.py:
+the title-screen logo, else meta/iconTex.tga)
 """
 import argparse
 import os
@@ -121,7 +122,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--keys", help="your console's prod.keys, outside this folder (default: .switch\\prod.keys in "
                     "your user folder)")
-    ap.add_argument("--icon", help="the game's icon (TGA, PNG, JPG) (default: from the extracted game in build\\)")
+    ap.add_argument("--icon", help="the icon: an image (TGA, PNG, JPG) or the game folder (default: the extracted game "
+                    "in build\\)")
     ap.add_argument("--sd", help="also copy the NSP into DIR\\NSP\\ (the SD card folder make_sd.py made)")
     ap.add_argument("--version", help="the version shown on the HOME screen (default: from the folder name)")
     args = ap.parse_args()
@@ -158,13 +160,12 @@ def main():
 
     icon_src = args.icon
     if not icon_src:
-        for c in (os.path.join(ROOT, "build", "sd-game", "meta", "iconTex.tga"),
-                  os.path.join(ROOT, "build", "sd", "switch", "wwhd", "game", "meta", "iconTex.tga")):
-            if os.path.isfile(c):
+        for c in (os.path.join(ROOT, "build", "sd-game"), os.path.join(ROOT, "build", "sd", "switch", "wwhd", "game")):
+            if os.path.isdir(os.path.join(c, "meta")):
                 icon_src = c
                 break
-    if not icon_src or not os.path.isfile(icon_src):
-        fail("no icon: give --icon path\\to\\icon.{tga,png,jpg} (from your dump)")
+    if not icon_src or not os.path.exists(icon_src):
+        fail("no icon: give --icon with your game folder (meta\\, content\\) or an image (TGA, PNG, JPG)")
     # the display version (NACP: at most 15 bytes): as build_forwarder.sh, git describe without the "v" and
     # without the hash when that is too long; a release zip has no git, so then the folder name's version
     version = args.version
