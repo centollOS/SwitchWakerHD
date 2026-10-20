@@ -10,4 +10,7 @@ void game_files(const std::string& game_dir);
 // No compiled shaders on this console yet (no shadercache_dksh.bin, none compiled so far): the first start
 // (background_shaders_switch.h shows its loading card then).
 bool first_start();
+// The first start's choice (a text screen, #49): A prepare graphics (true: the sweep, once a Quest Log is loaded),
+// B play now (false: the background shaders' loading card)
+bool first_start_prepare();
 }  // namespace startup_checks

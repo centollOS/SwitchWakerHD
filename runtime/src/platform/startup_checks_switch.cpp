@@ -138,8 +138,20 @@ bool first_start() {
     const char* e = getenv("WWHD_DK_SHADER_CACHE_DIR");
     const std::string dir = e && *e ? std::string(e) + "/" : std::string();
     const bool first = !is_file(dir + "shadercache_dksh.bin", true) && !is_file(dir + "shadercache_dksh_local.bin", true);
-    if (first) LOG("[startup] no shaders compiled on this console yet: the first start's loading card");
+    if (first) LOG("[startup] no shaders compiled on this console yet: the first start");
     return first;
+}
+
+bool first_start_prepare() {
+    log_flush();
+    const ui_text::Texts& t = ui_text::tx();
+    const u64 b = show(false, t.firstTitle, {t.firstNotPrepared, t.firstExplain},
+                       {{"A", t.prepareNow, t.prepareNowDetail}, {"B", t.playNow, t.playNowDetail}},
+                       HidNpadButton_A | HidNpadButton_B, nullptr);
+    const bool prepare = b & HidNpadButton_A;
+    LOG("[startup] first-start choice: %s", prepare ? "prepare graphics (once a Quest Log is loaded)"
+                                                   : "play now (the loading card)");
+    return prepare;
 }
 
 }  // namespace startup_checks

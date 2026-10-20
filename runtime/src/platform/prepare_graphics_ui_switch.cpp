@@ -47,6 +47,11 @@ bool ui_section() {
         text(kNote, ui_text::tx().menuKept);
         return false;
     }
+    if (waiting()) {  // the first start's choice, or a sweep the program restarted (#49)
+        text(kNote, ui_text::tx().waitingForGame);
+        if (ImGui::Button(ui_text::tx().stopButton)) cancel_wait();
+        return false;
+    }
     const Progress p = progress();
     text(kNote, ui_text::tx().menuBody);
     uint32_t percent = 0;

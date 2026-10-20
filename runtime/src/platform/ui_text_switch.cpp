@@ -20,10 +20,12 @@ const Texts kEnglish = {
     "prepares each graphics effect the first time it is drawn. It gets better as you play, and what is prepared is "
     "kept for the next starts.",
     "Prepare graphics now",
-    "The game visits every place by itself behind a loading screen (about 30-40 minutes, best docked), then "
-    "restarts at the title screen, ready. Your saves are not touched.",
+    "Next, choose your Quest Log (or start a new game you do not save): the game then visits every place by itself "
+    "behind a loading screen (about 30-40 minutes, best docked) and restarts at the title screen, ready. Your saves "
+    "are not touched.",
     "Play now",
-    "You can prepare the graphics later: hold Minus (-) in the game for the settings menu, Switch tab.",
+    "The console prepares the most common graphics first behind a loading screen (about 20 minutes; B there to play "
+    "at once). Prepare graphics stays in the settings menu: hold Minus (-) in the game, Switch tab.",
 
     "SwitchWakerHD: new in this version",
     "Prepare graphics: the console can now prepare the graphics of the whole game at once, so that places you have "
@@ -92,10 +94,12 @@ const Texts kSpanish = {
     "de retraso: la consola prepara cada efecto gráfico la primera vez que se dibuja. Mejora a medida que juegas, y "
     "lo preparado se guarda para los siguientes arranques.",
     "Preparar los gráficos ahora",
-    "El juego visita cada lugar por sí solo detrás de una pantalla de carga (unos 30-40 minutos, mejor con la "
-    "consola en la base) y después vuelve a la pantalla de título, listo. Tus partidas no se tocan.",
+    "Después elige tu diario (o empieza una partida nueva que no guardes): el juego visita entonces cada lugar por "
+    "sí solo detrás de una pantalla de carga (unos 30-40 minutos, mejor con la consola en la base) y vuelve a la "
+    "pantalla de título, listo. Tus partidas no se tocan.",
     "Jugar ahora",
-    "Puedes preparar los gráficos más tarde: mantén pulsado Menos (-) en el juego para abrir los ajustes, pestaña "
+    "La consola prepara primero los gráficos más comunes detrás de una pantalla de carga (unos 20 minutos; B allí "
+    "para jugar enseguida). Preparar gráficos sigue en los ajustes: mantén pulsado Menos (-) en el juego, pestaña "
     "Switch.",
 
     "SwitchWakerHD: novedad en esta versión",
@@ -166,11 +170,13 @@ const Texts kFrench = {
     "un léger retard : la console prépare chaque effet graphique la première fois qu'il est dessiné. Cela s'améliore "
     "en jouant, et ce qui est préparé est conservé pour les démarrages suivants.",
     "Préparer les graphismes maintenant",
-    "Le jeu visite chaque lieu tout seul derrière un écran de chargement (environ 30-40 minutes, de préférence sur la "
-    "station d'accueil), puis revient à l'écran titre, prêt. Vos sauvegardes ne sont pas touchées.",
+    "Choisissez ensuite votre journal (ou une nouvelle partie non sauvegardée) : le jeu visite alors chaque lieu tout "
+    "seul derrière un écran de chargement (environ 30-40 minutes, de préférence sur la station d'accueil), puis "
+    "revient à l'écran titre, prêt. Vos sauvegardes ne sont pas touchées.",
     "Jouer maintenant",
-    "Vous pourrez préparer les graphismes plus tard : maintenez Moins (-) en jeu pour ouvrir les réglages, onglet "
-    "Switch.",
+    "La console prépare d'abord les graphismes les plus courants derrière un écran de chargement (environ 20 "
+    "minutes ; B pour jouer tout de suite). Préparer les graphismes reste dans les réglages : maintenez Moins (-) en "
+    "jeu, onglet Switch.",
 
     "SwitchWakerHD : nouveau dans cette version",
     "Préparer les graphismes : la console peut maintenant préparer en une fois les graphismes de tout le jeu, pour "
@@ -240,10 +246,12 @@ const Texts kGerman = {
     "Konsole bereitet jeden Grafikeffekt vor, wenn er zum ersten Mal gezeichnet wird. Das wird beim Spielen besser, "
     "und Vorbereitetes bleibt für die nächsten Starts erhalten.",
     "Grafik jetzt vorbereiten",
-    "Das Spiel besucht hinter einem Ladebildschirm jeden Ort von selbst (etwa 30-40 Minuten, am besten in der "
-    "Station) und startet dann fertig im Titelbildschirm neu. Deine Spielstände werden nicht verändert.",
+    "Wähle danach deinen Spielstand (oder starte ein neues Spiel, das du nicht speicherst): Das Spiel besucht dann "
+    "hinter einem Ladebildschirm jeden Ort von selbst (etwa 30-40 Minuten, am besten in der Station) und startet "
+    "fertig im Titelbildschirm neu. Deine Spielstände werden nicht verändert.",
     "Jetzt spielen",
-    "Du kannst die Grafik später vorbereiten: Halte im Spiel Minus (-) für das Einstellungsmenü, Reiter Switch.",
+    "Die Konsole bereitet zuerst die häufigsten Grafiken hinter einem Ladebildschirm vor (etwa 20 Minuten; B dort, "
+    "um sofort zu spielen). Grafik vorbereiten bleibt im Einstellungsmenü: Halte im Spiel Minus (-), Reiter Switch.",
 
     "SwitchWakerHD: neu in dieser Version",
     "Grafik vorbereiten: Die Konsole kann jetzt die Grafik des ganzen Spiels auf einmal vorbereiten, damit noch nicht "
@@ -314,11 +322,12 @@ const Texts kItalian = {
     "ritardo: la console prepara ogni effetto grafico la prima volta che viene disegnato. Migliora man mano che "
     "giochi, e ciò che è pronto viene conservato per gli avvii successivi.",
     "Prepara la grafica ora",
-    "Il gioco visita da solo ogni luogo dietro una schermata di caricamento (circa 30-40 minuti, meglio con la "
-    "console nella base) e poi riparte dalla schermata del titolo, pronto. I tuoi salvataggi non vengono toccati.",
+    "Poi scegli il tuo diario (o inizia una nuova partita che non salvi): il gioco visita da solo ogni luogo dietro "
+    "una schermata di caricamento (circa 30-40 minuti, meglio con la console nella base) e riparte dalla schermata "
+    "del titolo, pronto. I tuoi salvataggi non vengono toccati.",
     "Gioca ora",
-    "Puoi preparare la grafica più tardi: tieni premuto Meno (-) nel gioco per il menu delle impostazioni, scheda "
-    "Switch.",
+    "La console prepara prima la grafica più comune dietro una schermata di caricamento (circa 20 minuti; B lì per "
+    "giocare subito). Prepara la grafica resta nelle impostazioni: tieni premuto Meno (-) nel gioco, scheda Switch.",
 
     "SwitchWakerHD: novità in questa versione",
     "Prepara la grafica: ora la console può preparare in una volta la grafica di tutto il gioco, così i luoghi non "
