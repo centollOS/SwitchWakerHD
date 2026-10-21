@@ -77,10 +77,5 @@ void request_capture();
 // pictures_done_frame() is the frame of the last capture whose files are written (0: none yet).
 uint64_t request_pictures();
 uint64_t pictures_done_frame();
-// any thread, before appletRestartProgram (platform/restart_switch.h): the render thread, at its next present,
-// waits for the GPU, destroys the swapchain (the window's buffers back to vi) and stops there for good; then
-// the default window and its layer are closed. False when the render thread did not get there within
-// timeoutMs (the window is left as it is).
-bool release_window(unsigned timeoutMs);
 
 }  // namespace gfxsw

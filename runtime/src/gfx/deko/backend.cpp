@@ -135,8 +135,6 @@ constexpr bool kDebugLib = false;
 #endif
 
 DkSwapchain g_swapchain = nullptr;
-// release_window (switch_renderer.h): 1 asked for, 2 the render thread let the window go and is stopped
-std::atomic<int> g_releaseWindow{0};
 DkImage g_swapImages[kSwapImages];
 DkImage g_depth;
 DkShader g_shaders[kShaderCount];
@@ -1163,17 +1161,6 @@ namespace {
 
 // GX2 swap: the present pass into the next swapchain image
 void present() {
-    if (g_releaseWindow.load(std::memory_order_acquire) == 1) {
-        // the program restarts (release_window): nothing of this process may be in flight at vi when it ends (a
-        // present's buffer queued, the layer's buffers held: vi aborted at restarts, 2026-10-21)
-        dkQueueWaitIdle(R.queue);
-        dkSwapchainDestroy(g_swapchain);
-        g_swapchain = nullptr;
-        LOG("[dk] frame %llu: window released for the restart (GPU idle, swapchain destroyed); the render thread stops",
-            (unsigned long long)R.frame);
-        g_releaseWindow.store(2, std::memory_order_release);
-        for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));  // (the system ends the process)
-    }
     const uint64_t frame = R.frame + 1;
     const bool capture = capturing();
     const uint64_t t0 = now_ns();
@@ -1494,23 +1481,7 @@ const DkShader* shader(ShaderId id) { return g_shaderOk[id] ? &g_shaders[id] : n
 }  // namespace gfxdk
 
 // ---- gfx/switch_renderer.h
-extern "C" void __nx_win_exit(void);  // libnx: closes the default window, its layer and the display
-
 namespace gfxsw {
-bool release_window(unsigned timeoutMs) {
-    int expected = 0;
-    if (!gfxdk::g_releaseWindow.compare_exchange_strong(expected, 1)) return expected == 2;
-    for (unsigned ms = 0; gfxdk::g_releaseWindow.load(std::memory_order_acquire) != 2; ms += 5) {
-        if (ms >= timeoutMs) {
-            LOG("[dk] release_window: the render thread did not present within %u ms; the window stays open", timeoutMs);
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    __nx_win_exit();
-    LOG("[dk] default window, layer and display closed");
-    return true;
-}
 PictureGrade picture_grade_now() { return gfxdk::picture_grade(); }
 void set_picture_grade(const PictureGrade& g) {
     std::lock_guard<std::mutex> lk(gfxdk::g_gradeMu);
