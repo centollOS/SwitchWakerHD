@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../runtime.h"
+#include "debug_server.h"
 #include "ui_text_switch.h"
 
 namespace startup_checks {
@@ -75,10 +76,14 @@ u64 wait_for(PrintConsole* con, u64 buttons) {
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
     padInitializeDefault(&pad);
-    u64 pressed = 0;
+    u64 pressed = 0, injectedBefore = 0;
     while (appletMainLoop()) {
         padUpdate(&pad);
         if ((pressed = padGetButtonsDown(&pad) & buttons)) break;
+        // a press through the debug server too (it reaches the game's input poll, not this PadState)
+        const u64 injected = debugsrv::running() ? debugsrv::injected().buttons : 0;
+        if ((pressed = injected & ~injectedBefore & buttons)) break;
+        injectedBefore = injected;
         consoleUpdate(con);
         svcSleepThread(16'000'000);
     }
