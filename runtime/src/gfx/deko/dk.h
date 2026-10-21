@@ -158,6 +158,7 @@ struct Renderer {
         uint64_t rescales = 0, imageDescriptorWrites = 0, samplerDescriptorWrites = 0;
         uint64_t poolHits = 0;     // rescales that reused a kept image (internal resolution)
         uint64_t hudSwitches = 0;  // frames whose HUD went to the TV buffer's full-resolution image (draw.cpp)
+        uint64_t fxaaPasses = 0;   // frames whose scene went through FXAA before the HUD (fxaa_scene)
         // shader lane (shaders_dk.cpp; the worker's own figures are in ShaderStats)
         uint64_t shaderNs = 0, shaders = 0, dkshLoads = 0, uniformPackNs = 0;
     } perf;
@@ -177,7 +178,8 @@ void overlay_draw(ImDrawData* d, int ww, int wh);
 
 // ---- the renderer's own shaders (embedded DKSH, backend.cpp)
 // kDepthOnlyFs: an empty pixel shader for the game's depth-only draws (draw.cpp, WWHD_DK_DEPTH_ONLY)
-enum ShaderId { kTextVs, kTextFs, kImguiVs, kImguiFs, kDepthOnlyFs, kShaderCount };
+// kFxaaFs: edge smoothing before the HUD (fxaa_pass, dk_draw.h), with the present pass's vertex shader
+enum ShaderId { kTextVs, kTextFs, kImguiVs, kImguiFs, kDepthOnlyFs, kFxaaFs, kShaderCount };
 const DkShader* shader(ShaderId id);  // null if it did not load (logged)
 
 // the draw path times its stages: on the Switch the tick counter is read directly

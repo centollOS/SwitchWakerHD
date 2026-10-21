@@ -86,6 +86,9 @@ void set_bloom(bool on);
 bool blur_enabled();
 void set_blur(bool on);
 void set_aniso(bool on);
+// edge smoothing (FXAA, issue #21; WWHD_FXAA=1, the Switch tab's Picture): any thread, from the next frame
+bool fxaa_enabled();
+void set_fxaa(bool on);
 // the barrier that makes this frame's descriptor writes visible (nothing when none since the last one)
 void commit_descriptors();
 // the image descriptor of a 1x1 transparent black texture (shaders sampling a unit that has no surface)
@@ -169,6 +172,7 @@ struct SurfaceSet {
     std::unique_ptr<Surface> tvScan;
     std::unique_ptr<Surface> drcScan;  // the GamePad picture's copy, while it is drawn (gfxsw::gamepad_picture_drawn)
     Surface* tvSource = nullptr;  // the buffer last copied to the TV scan buffer
+    Surface* drcSource = nullptr; // the buffer last copied to the GamePad's (drcScan)
     Surface* scanSrc = nullptr;   // ... while its copy is not made yet (present reads it directly)
 };
 extern SurfaceSet S;
@@ -207,6 +211,9 @@ inline void note_read(Surface* s) {
 // the TV picture: GX2CopyColorBufferToScanBuffer only notes its buffer; presenting reads that buffer unless
 // something writes to it first: scan_flush makes the copy then
 void scan_flush();
+// the buffer of the picture the window shows: the GamePad's while it is the one presented (Off-TV Play, the default),
+// else the TV's. Its HUD is where FXAA and the full-resolution HUD switch apply (draw.cpp)
+Surface* shown_source();
 void copy_scan(Surface* src, std::unique_ptr<Surface>& scan);  // src into a scan copy (made to fit)
 inline void before_write(const Surface* s) {
     if (s && s == S.scanSrc) scan_flush();
@@ -296,6 +303,14 @@ void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld = 
 // a render target about to be written: the scale it should have unless that needs a new image and this
 // frame's allocations are used up (false: still at its old scale); force: in any case
 bool fit_scale(Surface* s, bool keepContents, bool force = false);
+// FXAA on the TV picture's scene before the HUD is drawn into it (draw.cpp's HUD switch, issue #21): at a lower
+// internal resolution the scene goes to the full-size image through FXAA instead of the 2D engine's upscale; at
+// full resolution it goes through FXAA into a kept image of the same size, which takes the buffer's place.
+// Once a frame; false when it did not run (the shader did not load, or out of memory: the scene as it was)
+bool fxaa_scene(Surface* tv);
+// one FXAA pass (backend.cpp): src sampled at its own grid, drawn over all of dst; linear: the samples are linear
+// light. Forgets the draw state (forget_state)
+bool fxaa_pass(const SurfaceImage& src, const SurfaceImage& dst, bool linear);
 size_t rescale_pool_bytes();      // images a rescale let go, kept for the next one (stats)
 
 // once per frame from begin_commands: retire freed descriptor slots and images the GPU is done with

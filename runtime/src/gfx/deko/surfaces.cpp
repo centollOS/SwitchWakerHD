@@ -859,7 +859,7 @@ bool fit_scale(Surface* s, bool keepContents, bool force) {
         if (g_allocBudget <= 0) return false;  // a later frame (or a draw that needs it now)
         g_allocBudget--;
     }
-    rescale_surface(s, want, keepContents, s == S.tvSource);
+    rescale_surface(s, want, keepContents, s == S.tvSource || s == S.drcSource);
     return true;
 }
 
@@ -951,6 +951,60 @@ void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
     if (g_traceFrame)
         trace_event("rescale %s %.2f -> %.2f (%ux%u)%s", trace_name(s).c_str(), double(oldScale), double(scale), s->img.pw,
                     s->img.ph, keepContents ? ", contents kept" : "");
+}
+
+// ---------------------------------------------------------------- edge smoothing before the HUD (issue #21)
+// At full resolution the FXAA pass needs a second image of the TV buffer's size: kept while FXAA is on
+// (surfaces_frame_start frees it when it is turned off), and swapped with the buffer's image after each pass,
+// so no copy back is needed.
+namespace {
+SurfaceImage g_fxaaImage;
+}  // namespace
+
+bool fxaa_scene(Surface* s) {
+    static uint64_t doneFrame = ~0ull, noImageUntil = 0;
+    if (!s || !s->img.valid || doneFrame == R.frame) return false;
+    // tried once a frame, even when it fails: a later HUD draw must not filter the HUD already drawn
+    doneFrame = R.frame;
+    // what the shader decides edges on: the samples are linear light when the image decodes sRGB, or when the
+    // present pass encodes them (an sRGB TV format)
+    const bool linear = s->fmt.srgb || R.tvSrgb.load(std::memory_order_relaxed);
+    before_write(s);
+    if (s->scale < 1.0f) {
+        // the full-size image the HUD switch would make, filled through FXAA instead of the 2D engine's upscale
+        s->hudFull = true;
+        rescale_surface(s, 1.0f, false, true);
+        if (s->scale != 1.0f || !s->twin.valid) return false;
+        if (!fxaa_pass(s->twin, s->img, linear)) {
+            resample(s, s->twin, s->img);
+            return false;
+        }
+    } else {
+        SurfaceImage& t = g_fxaaImage;
+        if (t.valid && (t.pw != s->img.pw || t.ph != s->img.ph || t.format != s->img.format || t.flags != s->img.flags))
+            free_image(t);
+        if (!t.valid) {
+            if (R.frame < noImageUntil) return false;
+            try {
+                make_image(s, t, s->img.pw, s->img.ph);
+            } catch (const std::exception& e) {  // (the image heap full: no FXAA for 300 frames, then a new try)
+                noImageUntil = R.frame + 300;
+                static int logged = 0;
+                if (logged++ < 4) LOG("[dk] FXAA: no image for %s (%s): 300 frames without it", describe(s).c_str(), e.what());
+                return false;
+            }
+            LOG("[dk] FXAA: an image of %ux%u for the TV picture (%s)", t.pw, t.ph, describe(s).c_str());
+        }
+        if (!fxaa_pass(s->img, t, linear)) return false;
+        std::swap(s->img, t);
+        R.surfaceEpoch++;  // views and lookups cached by the draws
+        R.textureEpoch++;  // render targets bound again
+    }
+    // the pass wrote the buffer and read its other image: a later draw that samples it, or writes the other image,
+    // gets the barrier it needs (dk_sync.h)
+    s->syncWrite = s->syncRead = sync_epoch();
+    R.perf.fxaaPasses++;
+    return true;
 }
 
 // ---------------------------------------------------------------- eviction (issue #11, docs/texture-eviction-plan.md)
@@ -1907,6 +1961,7 @@ void copy_to_scan(uint32_t cb, uint32_t target) {
             copy_scan(src, S.drcScan);
             S.drcScan->drcCopyFrame = R.frame;
         }
+        S.drcSource = src;
     }
     if (target != 1) return;
     if (!src || src->fmt.depth || !src->img.valid) return;
@@ -1920,6 +1975,8 @@ void copy_to_scan(uint32_t cb, uint32_t target) {
     // noted only: presenting reads src itself unless something writes to it first (scan_flush)
     S.tvSource = S.scanSrc = src;
 }
+
+Surface* shown_source() { return g_padShown.load(std::memory_order_relaxed) ? S.drcSource : S.tvSource; }
 
 // the noted TV picture copied after all: src is about to change before the picture is shown
 void scan_flush() {
@@ -2209,6 +2266,11 @@ void surfaces_frame_start() {
     // the previous frame was presented: its TV buffer gets a copy only if the game copies it again
     S.scanSrc = nullptr;
     if (S.tvSource) S.tvSource->hudFull = false;
+    if (S.drcSource) S.drcSource->hudFull = false;
+    if (g_fxaaImage.valid && !fxaa_enabled()) {  // (FXAA turned off: its image goes)
+        free_image(g_fxaaImage);
+        LOG("[dk] FXAA off: its image freed");
+    }
     evict_idle();
     surface_stats();
 }
