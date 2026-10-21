@@ -1236,6 +1236,21 @@ void present() {
             frame_pacing::set_interval(want);
         }
     }
+    // (this fork, #49) a frame drawn while draws wait, with shaders still compiling: they are compiled now (all at
+    // once), the frame's passes are submitted (render targets the next frame reads), and it is not shown: the window
+    // keeps the last whole picture, and the next frame draws with every shader
+    if (finish_held_frame()) {
+        S.scanSrc = nullptr;
+        if (S.tvSource) S.tvSource->hudFull = false;
+        gpuPasses.frame_end();
+        frame_pacing::on_present(R.cmd, frame);
+        frame_end();
+        check_queue("the submit (frame held)", frame);
+        dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(R.cmd));
+        frame_stats();
+        latch_res_scale();
+        return;
+    }
     const uint64_t t1 = now_ns();
     int slot;
     {
@@ -1530,7 +1545,13 @@ const DkShader* shader(ShaderId id) { return g_shaderOk[id] ? &g_shaders[id] : n
 }  // namespace gfxdk
 
 // ---- gfx/switch_renderer.h
+namespace gfxdk {  // shaders_dk.cpp
+int shader_compile_threads();
+void set_shader_compile_threads(int n);
+}  // namespace gfxdk
 namespace gfxsw {
+int shader_compile_threads() { return gfxdk::shader_compile_threads(); }
+void set_shader_compile_threads(int n) { gfxdk::set_shader_compile_threads(n); }
 PictureGrade picture_grade_now() { return gfxdk::picture_grade(); }
 void set_picture_grade(const PictureGrade& g) {
     std::lock_guard<std::mutex> lk(gfxdk::g_gradeMu);

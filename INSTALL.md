@@ -269,18 +269,19 @@ Controller or GamePad), gyro aiming. The game sets no CPU or GPU overclock; for 
 ## The first start: preparing the graphics
 
 The console compiles each of the game's graphics effects the first time it is drawn; until then a texture can look
-black or an object appear a moment late. So the **first start** shows a "Preparing the graphics" screen instead of the
-game: behind it the game boots and its title screen runs, then the console reads the graphics programs of your own
-copy of the game and compiles about three quarters of the game's graphics, about 20 minutes (best docked). Then the
-title screen. It happens once: what is compiled is kept.
+black or an object appear a moment late. So the **first start** asks how to prepare them, once:
 
-- **B** on that screen: play now. What is left goes on in the background while you play, gently (the frame rate
-  stays), and in the next starts if needed.
-- The rest of the game's graphics compile the first time they show, in a few seconds, once.
+- **A: Prepare graphics** (the most complete). Choose your Quest Log, or start a new game you do not save; the game
+  then visits every place by itself behind a loading screen (30-40 minutes, best docked; hold B to stop) and restarts
+  at the title screen with about 93% of the game's graphics ready. Your saves are not touched. Until a Quest Log is
+  loaded it waits, also after a restart; the settings menu (Minus, **Switch** tab) can cancel it.
+- **B: Play now.** A "Preparing the graphics" screen instead: behind it the game boots and its title screen runs, then
+  the console reads the graphics programs of your own copy of the game and compiles about three quarters of the
+  game's graphics, about 20 minutes. **B** on that screen plays at once; what is left goes on in the background while
+  you play, gently (the frame rate stays), and in the next starts if needed.
 
-Optional, in the settings menu (hold **Minus**, **Switch** tab): **Prepare graphics** has the game visit every place
-by itself (30-40 minutes, behind a loading screen) for the remaining quarter. It is experimental: some places start
-story events with its data and take longer.
+What is compiled is kept. The rest of the game's graphics compile the first time they show, in a few seconds, once.
+**Prepare graphics** stays in the settings menu (Minus, **Switch** tab) for later.
 
 ## Updating
 

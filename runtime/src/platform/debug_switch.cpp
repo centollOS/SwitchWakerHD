@@ -29,6 +29,7 @@
 #include "audio_guard_switch.h"
 #include "thread_sampler.h"
 #include "bench_switch.h"  // (this fork) the performance test
+#include "shader_wait_switch.h"
 #include "host.h"
 #include "settings_switch.h"
 
@@ -224,6 +225,20 @@ debugsrv::Reply dspguard(const debugsrv::Args& a) {
     return debugsrv::ok(std::string("dspguard ") + (audio_guard::kept() ? "the game's own" : "off"));
 }
 
+// "shaderthreads [0-3]": threads that compile the shaders draws ask for (gfx/deko helper_main; 0 auto; not saved)
+debugsrv::Reply shaderthreads(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_shader_compile_threads(atoi(a[0].c_str()));
+    return debugsrv::ok("shaderthreads " + std::to_string(gfxsw::shader_compile_threads()));
+}
+
+// "shaderwait [0-3]": draws of a shader still compiling (shader_wait_switch.h, #49): 0 skipped (the default), 1 wait
+// while an item is shown, 2 also during events, 3 always; not saved (the menu saves it)
+debugsrv::Reply shaderwait(const debugsrv::Args& a) {
+    if (!a.empty()) shader_wait::set_mode(atoi(a[0].c_str()));
+    return debugsrv::ok(std::string("shaderwait ") + std::to_string(shader_wait::mode()) + ": " +
+                        shader_wait::label(shader_wait::mode()));
+}
+
 // "profile [seconds]": sample the frame threads (thread_sampler.h, docs/cpu-threading-plan.md 0.2); "profile status"
 debugsrv::Reply profile(const debugsrv::Args& a) {
     if (!a.empty() && a[0] == "status") return debugsrv::ok("profile: " + thread_sampler::status());
@@ -334,6 +349,9 @@ void start() {
     debugsrv::add_command("reload", "reload                 restart: the forwarder loads the NRO again (put it first)", reload);
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
+    debugsrv::add_command("shaderthreads", "shaderthreads [0-3]    shader compile threads: 0 auto, 1-3", shaderthreads);
+    debugsrv::add_command("shaderwait", "shaderwait [0-3]       draws of a compiling shader: 0 skip, 1 items, 2 +events, 3 always",
+                          shaderwait);
     debugsrv::add_command("profile", "profile [s] | status   sample the main and render threads (logs/prof_*.samples)",
                           profile);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);

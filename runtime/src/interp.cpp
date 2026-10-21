@@ -47,6 +47,7 @@
 #include "platform/prepare_graphics_switch.h"  // (this fork)
 #include "platform/audio_guard_switch.h"  // (this fork)
 #include "platform/bench_switch.h"  // (this fork)
+#include "platform/shader_wait_switch.h"  // (this fork)
 #endif
 #include "gx2/gx2.h"
 #include "gfx/renderer.h"
@@ -1024,6 +1025,7 @@ extern "C" void hook_0203593C(Cpu* c) {
     prepare_graphics::frame(c);  // (this fork) Prepare graphics: its warps and Link's health
     audio_guard::frame();  // (this fork) the game's DSP-overload guard off (issue #13)
     bench::game_frame(c);        // (this fork) the performance test: the clock held, main-thread time (bench_switch.h)
+    shader_wait::frame();  // (this fork) draws wait for their shaders while an item is shown (#49)
 #endif
     const bool was_fast_forward = mods::fast_forward_active();
     mods::fast_forward_service();

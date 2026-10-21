@@ -35,6 +35,7 @@
 #include "debug_switch.h"
 #include "prepare_graphics_switch.h"
 #include "settings_switch.h"
+#include "shader_wait_switch.h"
 
 namespace overlay_switch {
 namespace {
@@ -305,6 +306,21 @@ void tab_switch() {
     help("Turn them off and on again in the same spot: the log marks each change with its frame.\n"
          "Not saved: they are on again at the next start.");
     {
+        const int cur = gfxsw::shader_compile_threads();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Shader compile threads");
+        for (int n = 0; n <= 3; n++) {
+            ImGui::SameLine();
+            char label[16];
+            snprintf(label, sizeof label, n ? "%d##shthr" : "Auto##shthr", n);
+            if (radio(label, cur == n)) gfxsw::set_shader_compile_threads(n);
+        }
+        help("Test: how many threads compile the shaders the game is waiting for (a new place, an item seen\n"
+             "for the first time). Auto (the default): three while the picture waits for its shaders (the\n"
+             "wait option above, the start-up), one otherwise. 1: one, as before. 2-3: always (in play they\n"
+             "take ~3 fps while they run). Not saved.");
+    }
+    {
         // the render profiler's latest report (render_prof.h; on with "Render profiler" above) to the SD card,
         // with the build and settings header the desktop's "Copy performance report" puts on the clipboard
         static std::string saved;
@@ -384,6 +400,23 @@ void tab_switch() {
              "anyone on the same network can use it. Leave it off otherwise. See docs/debug-server.md.");
         if (debug_switch::running()) note("Running now on port %d.", debug_switch::port());
         if ((saved == 1) != debug_switch::running()) note("Applies at the next start.");
+    }
+    {
+        // (#49) a model seen for the first time: wait for its shaders instead of drawing it piece by piece
+        const int cur = shader_wait::mode();
+        ImGui::TextUnformatted("Draws of a shader still compiling");
+        for (int m = 0; m < shader_wait::kModes; m++) {
+            if (m) ImGui::SameLine();
+            if (radio(shader_wait::label(m), cur == m)) {
+                shader_wait::set_mode(m);
+                hostui::post([m] { hostui::set(kKeyShaderWait, std::to_string(m)); });
+            }
+        }
+        help("Test (issue #49): an item or new clothes seen for the first time appear piece by piece while\n"
+             "their shaders compile. Off: those draws are skipped (as before). The others make them wait:\n"
+             "a short freeze instead, only the first time. While an item is shown: Link holding up an item,\n"
+             "opening a chest. Items and events: also every cutscene, talk and door. Always: everywhere\n"
+             "(new places freeze for a moment). Saved. The log's [shader-wait] lines say how long it waited.");
     }
     // (Debug: the GamePad view is not offered to players) which Wii U controller the Switch controller is: the game's own control mode must match it (with
     // the Pro Controller chosen here the GamePad lies on the table and sends nothing, system_stubs.cpp)

@@ -57,6 +57,8 @@ constexpr const char* kKeyGamepadPip = "switchGamepadPip";  // the GamePad pictu
 // both off by default and read at the next start, before anything else (main.cpp)
 constexpr const char* kKeyDebugServer = "switchDebugServer";
 constexpr const char* kKeyMainSampler = "switchMainSampler";
+// Debug: draws wait for their shaders (shader_wait_switch.h, #49): 0 off (the default) .. 3 always
+constexpr const char* kKeyShaderWait = "switchShaderWait";
 // per mode: <key>.handheld / <key>.docked
 constexpr const char* kKeyResScale = "switchResScale";
 constexpr const char* kKeyDynamicRes = "switchDynamicRes";
