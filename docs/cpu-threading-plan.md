@@ -353,3 +353,24 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   The main thread's time per frame is lower in all three; these scenes are only partly main-thread bound (GPU
   31-36 ms, render thread 26-35 ms a frame), so the fps moves less than at night at sea, where the main thread is
   the only limit.
+- 2026-10-21, **1.1 shaders on several threads: uam made reentrant, but 3 threads are slower on the Switch.**
+  Branch `feature/parallel-shaders` (from main): uam patch 10 (the `gl_context` one per thread, the log callback
+  and the fatal jump thread-local) and `dksh_cache stress`. On the Mac, 24,417 of the game's GLSL sources
+  (translated from the console's manifest and the game files): 3 threads give the same DKSH bytes as one, 2.51x as
+  fast; ThreadSanitizer 0 reports (46 and an abort without the patch). Then deko3d helper threads (up to 2, only
+  jobs a draw asked for; Debug "Shader compile threads", default 1).
+  **Console, cold cache (a test folder, no first-start card, the background list off), 1020 MHz:**
+
+  | | 1 thread | 3 threads |
+  |---|---|---|
+  | uam time per 5 s window with a backlog | ~5,000 ms | ~15,000 ms (three threads busy) |
+  | shaders finished per 5 s window | 43 | 21 |
+  | mean uam time per shader | 104 ms | 598 ms |
+
+  Each compile takes ~6x as long, so the throughput halves. Suspects: cores 0 and 2 only (shared with the render
+  thread and the game's threads; three compilers at the lowest priority time-slice), and Mesa's mutexes (its type
+  tables) contended through the kernel. The default stays 1 thread (as before). Next: 2 threads, and the sampler on
+  the compiler threads to see where the time goes. (Time-to-settle comparisons were useless: the title's attract
+  sequence draws more places the longer it runs.)
+  Also: one restart through the forwarder failed at 17:40 (`vi` crashed, then the new process aborted in libnx's
+  `__nx_win_init`, getting no window): rarer than through the title override, but not gone.
