@@ -8,6 +8,7 @@
 #include "../platform/filesystem.h"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #ifndef _WIN32
@@ -22,6 +23,7 @@
 #include "../mods/content.h"
 #include "../game_languages.h"
 #include "../rtl_text.h"
+#include "fs_problems.h"  // (this fork, #47)
 
 namespace {
 
@@ -176,12 +178,17 @@ int32_t open_file(const std::string& gpath, const std::string& mode, uint32_t ou
     std::string m = mode;
     if (m.find('b') == std::string::npos) m += "b";
     FILE* f;
+    int err;
     {
         HostFsCall call;
         f = fopen(hp.c_str(), m.c_str());
+        err = errno;
     }
     TRACE("[fs] open %s (%s) -> %s", gpath.c_str(), mode.c_str(), f ? "ok" : "not found");
-    if (!f) return FS_NOT_FOUND;
+    if (!f) {
+        fs_problems::open_failed(gpath, mode, err, hp);  // (this fork, #47)
+        return FS_NOT_FOUND;
+    }
     const bool story = story_store::is_save_file(gpath);
     uint64_t limit = UINT64_MAX;
     if (story && mode.find_first_of("wa") == std::string::npos) limit = story_store::opened_for_read(gpath, hp);
@@ -207,12 +214,16 @@ FILE* file(uint32_t h) {
 int32_t stat_path(const std::string& gpath, uint32_t out) {
     struct stat st;
     const std::string hp = read_path(gpath);
-    int result;
+    int result, err;
     {
         HostFsCall call;
         result = stat(hp.c_str(), &st);
+        err = errno;
     }
-    if (result != 0) return FS_NOT_FOUND;
+    if (result != 0) {
+        fs_problems::stat_missed(gpath, err, [](const std::string& g) { return read_path(g); });  // (this fork, #47)
+        return FS_NOT_FOUND;
+    }
     fill_stat(out, st, game_size(gpath, hp, st));
     return FS_OK;
 }
