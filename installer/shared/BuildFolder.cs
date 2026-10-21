@@ -36,8 +36,11 @@ static class BuildFolder
         return fallback();
     }
 
+    // Only a folder the player picked: the default is worked out again on every start (it can change, #30)
+    static bool Picked;
     public static void Save(string dir)
     {
+        if (!Picked) return;
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(SavedFile)!);
@@ -46,19 +49,17 @@ static class BuildFolder
         catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
     }
 
-    // The work folder for a folder picked in the dialog: that one when it already is a work folder, else a
-    // SwitchWakerHD-Build inside it (picking D:\ builds in D:\SwitchWakerHD-Build).
+    // The work folder for a folder picked in the dialog: that one when it already is a work folder (by its name or
+    // its log), else a SwitchWakerHD-Build inside it (picking D:\ builds in D:\SwitchWakerHD-Build). Not by a
+    // SwitchWakerHD-v* inside: Downloads with the release unzipped by hand is no work folder.
     public static string ForPick(string picked)
     {
+        Picked = true;
         picked = Path.GetFullPath(picked);
         if (picked.Length > (Path.GetPathRoot(picked)?.Length ?? 0)) picked = picked.TrimEnd('\\', '/');
-        if (string.Equals(Path.GetFileName(picked), Name, StringComparison.OrdinalIgnoreCase)) return picked;
-        try
-        {
-            if (File.Exists(Path.Combine(picked, "installer.log")) || Directory.GetDirectories(picked, "SwitchWakerHD-v*").Length > 0)
-                return picked;
-        }
-        catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
+        if (string.Equals(Path.GetFileName(picked), Name, StringComparison.OrdinalIgnoreCase) ||
+            File.Exists(Path.Combine(picked, "installer.log")))
+            return picked;
         return Path.Combine(picked, Name);
     }
 
