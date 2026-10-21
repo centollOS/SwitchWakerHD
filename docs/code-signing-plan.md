@@ -94,4 +94,4 @@ HOME icon; the minimap mod if chosen) from GitHub and from those tools' own serv
 
 ## Status
 
-- 2026-10-21: plan, csproj and workflow on this branch; application to SignPath Foundation drafted, not sent.
+- 2026-10-21: plan, csproj and workflow on this branch (signing off until the variables exist); application to SignPath Foundation drafted, not sent; org 2FA still off.
