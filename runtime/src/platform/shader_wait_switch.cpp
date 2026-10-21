@@ -20,7 +20,10 @@ const uint32_t kEventRun = kPlay + 0x5292;  // dComIfGp_event_runCheck
 const uint32_t kLinkPtr = kPlay + 0x5B34;   // daPy_lk_c
 constexpr uint32_t kCurProc = 0x65F0;       // daPy_lk_c::mCurProc (decomp tools/verify/units/d_a_player_main.txt)
 // d_a_player_main_05.h link05demo: the procedures that show an item
+// (scripted ones: the story's gifts, e.g. Grandma's Hero's Clothes, run in DEMO_TOOL, Link acting on an event's "tool"
+// commands; seen on the console with the item shown, 2026-10-21)
 constexpr int32_t kItemProcs[] = {
+    0xA9,  // daPyProc_DEMO_TOOL_e
     0xAC,  // daPyProc_DEMO_HOLDUP_e
     0xAD,  // daPyProc_DEMO_OPEN_TREASURE_e
     0xAE,  // daPyProc_DEMO_GET_ITEM_e
