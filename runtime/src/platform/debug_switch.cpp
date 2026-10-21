@@ -24,6 +24,7 @@
 #include "../overlay/hostui.h"
 #include "debug_server.h"
 #include "prepare_graphics_switch.h"
+#include "restart_switch.h"
 #include "shader_scan_switch.h"
 #include "background_shaders_switch.h"
 #include "audio_guard_switch.h"
@@ -66,14 +67,11 @@ std::string power_text() {
 
 debugsrv::Reply info(const debugsrv::Args&) {
     char b[640];
-    AppletType type = appletGetAppletType();
     snprintf(b, sizeof b,
              "version %s (%s)\nframe %llu\nstage %s\nheap never used %zu MiB\nbattery %s\nrunning as %s\naddress %s:%d\n",
              build::version(), build::commit(), (unsigned long long)render::frame_count(),
              game_running() ? mods::current_stage().c_str() : "-", heap_never_used_mib(), power_text().c_str(),
-             type == AppletType_Application ? "application (the HOME menu forwarder: reload works)"
-                                            : "applet (hbmenu: reload does not work, use quit and nxlink)",
-             ip_text().c_str(), g_port);
+             restart_switch::launch_text().c_str(), ip_text().c_str(), g_port);
     return debugsrv::ok(b);
 }
 
@@ -147,17 +145,14 @@ debugsrv::Reply shot(const debugsrv::Args& a) {
 }
 
 debugsrv::Reply reload(const debugsrv::Args&) {
-    if (appletGetAppletType() != AppletType_Application)
-        return debugsrv::err("reload needs the HOME menu forwarder (running from hbmenu: quit, then nxlink or hbmenu)");
+    // (from a title override the restart would start the borrowed game itself: restart_switch.h)
+    if (!restart_switch::from_forwarder())
+        return debugsrv::err("reload needs the HOME menu forwarder; running as " + restart_switch::launch_text());
     debugsrv::Reply r = debugsrv::ok("restarting: the forwarder loads the NRO from the SD card again");
     r.after = [] {
-        LOG("[debug] reload: the program restarts (appletRestartProgram)");
-        log_flush();
+        LOG("[debug] reload");
         debugsrv::stop();
-        static const char arg[] = "wwhd debug reload";
-        const Result rc = appletRestartProgram(arg, sizeof arg);
-        // (on success the system ends this process)
-        LOG("[debug] reload failed: appletRestartProgram rc 0x%x", rc);
+        restart_switch::restart("wwhd debug reload");
     };
     return r;
 }

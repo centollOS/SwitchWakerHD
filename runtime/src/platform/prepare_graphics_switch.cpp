@@ -36,6 +36,7 @@
 #include "../runtime.h"
 #include "guest_addr.h"
 #include "host.h"
+#include "restart_switch.h"
 #include "ui_text_switch.h"
 
 namespace gfxdk {  // gfx/deko/dk_shaders.h (without the decompiler's headers)
@@ -286,12 +287,8 @@ void finish_and_restart(const char* why) {
     sleep_s(5);  // the shader cache and manifest writers' last batches (they write every couple of seconds)
     restore_save();
     log_flush();
-    if (appletGetAppletType() == AppletType_Application) {
-        static const char arg[] = "wwhd prepare graphics";
-        const Result rc = appletRestartProgram(arg, sizeof arg);
-        LOG("[prepare] restart failed: appletRestartProgram rc 0x%x", rc);
-    }
-    // from the Homebrew Menu (applet mode) there is no restart: the player closes the game
+    restart_switch::restart("wwhd prepare graphics");
+    // no restart from the Homebrew Menu or a title override (restart_switch.h): the player closes the game
     set_status(ui_text::tx().endNoRestart);
 }
 

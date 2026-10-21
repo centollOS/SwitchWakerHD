@@ -8,6 +8,7 @@
 #include "debug_switch.h"
 #include "startup_checks_switch.h"
 #include "prepare_graphics_switch.h"
+#include "restart_switch.h"
 #include "overlay_switch.h"
 #include "background_shaders_switch.h"
 #include "settings_ini.h"
@@ -310,6 +311,7 @@ void main_switch::start() {
     early_settings::log_messages();  // settings.ini's [dev] section, env.txt converted
     host::place_thread(0);
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
+    LOG("[boot] started as %s", restart_switch::launch_text().c_str());  // (platform/restart_switch.h)
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
 }
 

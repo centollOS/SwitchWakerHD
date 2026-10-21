@@ -92,7 +92,11 @@ tools/switch/wwhd_debug.py warp 4 && sleep 10 && tools/switch/wwhd_debug.py shot
 ```
 
 `reload` restarts the application (`appletRestartProgram`), so it only works when the game was started from
-the HOME-menu forwarder. Started from hbmenu, use `quit`, then start it again. A game that crashed takes the
+the HOME-menu forwarder (`info` says how it was started). Started from hbmenu, use `quit`, then start it again.
+Started through Atmosphere's title override (R held on another game's icon, then hbmenu or sphaira) the game is
+also an application, but a restart would start that other game without the override: it aborted on every
+reload on 2026-10-21, and took the system's `vi` down with it three times. `reload` refuses then, and Prepare
+graphics ends without its restart (runtime/src/platform/restart_switch.h). A game that crashed takes the
 server down with it: start the game again from the console, then fetch `lastlog` and `crashes`.
 
 ## Protocol
