@@ -16,6 +16,7 @@
 // background (lowest priority) from start-up.
 #include "dk_shaders.h"
 #include "shader_manifest.h"
+#include "../../platform/thread_heap_switch.h"
 
 #include <switch.h>
 #include <sys/stat.h>
@@ -606,6 +607,7 @@ Thread workerThread;
 // is not burdened by the background list. The Switch tab's Debug section / debug server "shaderthreads N" /
 // WWHD_DK_SHADER_THREADS: 1 (no helpers, as before; the default) to 3.
 constexpr int kMaxHelpers = 2;
+constexpr size_t kCompileHeap = 24u << 20;  // each compile thread's own heap (thread_heap_switch.h): blocks <= 4 KiB
 std::atomic<int> g_compileThreads{[] {
     const char* e = getenv("WWHD_DK_SHADER_THREADS");
     const int n = e && *e ? atoi(e) : 1;
@@ -676,6 +678,8 @@ void worker_main(void*) {
     // cores 0 and 2: core 1 runs the main thread and the guest threads placed there (WWHD_CORE_LAYOUT)
     svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 0x5);
     host::set_thread_name("dk shader compiler");
+    // (this fork) a heap of its own: Mesa allocates constantly, and the compile threads queued on newlib's one lock
+    if (!thread_heap::attach(kCompileHeap)) LOG("[dk] shader worker: no heap of its own (newlib's)");
     const uint64_t t0 = now_ns();
     uam::init(true);
     // self-test: a small vertex shader through glsl_to_deko's output form and uam (also builds the resident
@@ -748,6 +752,7 @@ void helper_main(void* arg) {
     const int index = int(reinterpret_cast<intptr_t>(arg));
     svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 0x5);
     host::set_thread_name("dk shader helper");
+    if (!thread_heap::attach(kCompileHeap)) LOG("[dk] shader helper %d: no heap of its own (newlib's)", index + 1);
     std::unique_lock<std::mutex> lk(workerMutex);
     for (;;) {
         workerCv.wait(lk, [index] {
