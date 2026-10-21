@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: write
+  # SignPath reads the unsigned .exe from this run's artifacts
+  actions: read
 
 jobs:
   build-installer:
@@ -22,14 +24,58 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          $v = if ("${{ github.event_name }}" -eq "release") { "${{ github.ref_name }}" -replace '^v','' } else { "0.0.0" }
+          "value=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
       - name: Publish installer (net48, WPF)
         shell: pwsh
         run: |
           dotnet publish installer/windows/SwitchWakerHD.Installer.csproj `
             --configuration Release `
-            -p:Version=$(if ("${{ github.event_name }}" -eq "release") { "${{ github.ref_name }}" -replace '^v','' } else { "0.0.0" }) `
+            -p:Version=${{ steps.version.outputs.value }} `
             --output installer/bin `
             --nologo
+
+      # Signing (docs/code-signing-plan.md): only once the SignPath settings exist in the repository; until then the
+      # .exe goes out unsigned, as before. The signed .exe replaces the unsigned one before the SHA256.
+      - name: Upload the unsigned installer for signing
+        id: upload-unsigned
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwitchWakerHD-Installer-unsigned
+          path: installer/bin/SwitchWakerHD-Installer.exe
+          if-no-files-found: error
+
+      - name: Sign with SignPath (waits for the approval)
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ github.event_name == 'release' && 'release-signing' || 'test-signing' }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: installer/signed
+          parameters: |
+            version: "${{ steps.version.outputs.value }}"
+
+      - name: Use the signed installer
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        shell: pwsh
+        run: |
+          Copy-Item installer/signed/SwitchWakerHD-Installer.exe installer/bin/SwitchWakerHD-Installer.exe -Force
+          $sig = Get-AuthenticodeSignature installer/bin/SwitchWakerHD-Installer.exe
+          Write-Host "Signature: $($sig.Status) $($sig.SignerCertificate.Subject)"
+          # test-signing (runs by hand) uses a test certificate Windows does not trust: only a release must be Valid
+          if ("${{ github.event_name }}" -eq "release" -and $sig.Status -ne 'Valid') { throw "the signed installer's signature is $($sig.Status)" }
 
       - name: Compute SHA256
         shell: pwsh
