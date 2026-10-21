@@ -416,3 +416,16 @@ Newest last. Each entry: what was done, what was measured, what it decided.
     18,779 functions change. Lockstep (macOS in the Switch's form, `PPC_ELIDE_SAVED_WB`): identical at equal
     boot alignment.
   Next: `perf_test.py ab` of E, K and L (K-E: the memory mapping, L-K: the elision).
+- 2026-10-21, **K and L measured: no measurable change, both reverted** (kept on branch `exp/mem2m-elide-saved`).
+  `perf_test.py ab` E / K / L, order ABCCBA x2 (the twelfth boot, an E, did not come back: the `vi` crash at a
+  restart; E 3 boots, K and L 4 each), 1020 MHz:
+
+  | scene | E | K (2 MiB guest memory) | L (K + callee-saved write-backs elided) |
+  |---|---|---|---|
+  | lava | 27.73 | 27.62 (-0.11 +-1.42) | 27.66 (-0.07 +-1.47) |
+  | windfall | 28.49 | 28.19 (-0.30 +-1.40) | 28.34 (-0.15 +-1.41) |
+  | dragonroost | 28.58 | 28.46 (-0.12 +-0.23) | 28.56 (-0.02 +-0.24) |
+
+  Inside the noise everywhere (E's boots spread +-0.5 fps this session). The TLB idea does not show (the kernel
+  may map the memory well already, or the loads are cache misses that larger pages do not help); the elision is
+  correct (lockstep) but too small to see here. Rule 3: not kept on the PR branch.
