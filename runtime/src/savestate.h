@@ -99,7 +99,9 @@ uint64_t portable_arrivals();
 // Completion runs once on refusal or after restore/portable arrival, outside
 // the request mutex. Parsing failures may complete synchronously.
 void request_load(int slot, std::function<void(bool,const std::string&)> done);
-void request_load_portable_file(const std::string& path, std::function<void(bool,const std::string&)> done);
+// any_region (this fork, the performance test): a state of the other Wind Waker HD region (USA / Europe) loads too
+void request_load_portable_file(const std::string& path, std::function<void(bool,const std::string&)> done,
+                                bool any_region = false);
 void request_load_portable_file(const std::string& path);  // a .wwstate anywhere (WWHD_PORTABLE_LOAD)
 bool full_states();                     // save button / shortcuts make full states
 void set_full_states(bool on);          // the setting (kept in the states folder)

@@ -1207,11 +1207,20 @@ bool read_text(const std::string& path, std::string& out, std::string& why) {
     return true;
 }
 
-bool read_portable(const std::string& path, pstate::State& s, std::string& why) {
+// (this fork) Wind Waker HD's USA and European titles: the same save layout and stages (the performance test's
+// states, made on a USA console, load on a European one: request_load_portable_file's any_region)
+bool wwhd_title(const std::string& t) { return t == "0005000010143500" || t == "0005000010143600"; }
+
+bool read_portable(const std::string& path, pstate::State& s, std::string& why, bool any_region = false) {
     std::string text;
     if (!read_text(path, text, why)) return false;
     if (!pstate::read(text, s, why)) return false;
-    if (s.title_id != title_id()) { why = "made with another game (title " + s.title_id + ")"; return false; }
+    if (s.title_id != title_id() && !(any_region && wwhd_title(s.title_id) && wwhd_title(title_id()))) {
+        why = "made with another game (title " + s.title_id + ")";
+        return false;
+    }
+    if (s.title_id != title_id())
+        LOG("[savestate] portable state of title %s on title %s (another region)", s.title_id.c_str(), title_id().c_str());
     return true;
 }
 
@@ -1635,11 +1644,12 @@ bool in_gameplay() { return quitprompt::gameplay_stage(stage_name()); }
 
 void request_load_portable_file(const std::string& path) { request_load_portable_file(path,{}); }
 
-void request_load_portable_file(const std::string& path, std::function<void(bool,const std::string&)> done) {
+void request_load_portable_file(const std::string& path, std::function<void(bool,const std::string&)> done,
+                                bool any_region) {
     LoadResult result(std::move(done));
     auto s = std::make_shared<pstate::State>();
     std::string why;
-    if (!read_portable(path, *s, why)) {
+    if (!read_portable(path, *s, why, any_region)) {
         message("Portable state: %s", why.c_str());
         result.complete(false,why);return;
     }

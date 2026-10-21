@@ -172,7 +172,7 @@ void add_current_thread(const char* tag) {
     }
 }
 }  // namespace thread_sampler
-#else
+#elif !defined(__SWITCH__)  // (the Switch: thread_sampler_switch.cpp)
 namespace thread_sampler {
 void add_current_thread(const char*) {}
 }  // namespace thread_sampler
