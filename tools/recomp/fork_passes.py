@@ -39,6 +39,12 @@ NONLEAF = ppc2c.pass_on("WWHD_RECOMP_NONLEAF")
 # functions' code, as in the compiler's save/restore helpers, where each entry falls into the next) is left out, so
 # the register locals and the tail call cover only the code that runs: on unless WWHD_RECOMP_DEAD_TAIL=0
 DEAD_TAIL = ppc2c.pass_on("WWHD_RECOMP_DEAD_TAIL")
+# calls of the compiler's register save/restore helpers (find_saved_clobbers: straight-line runs of loads and
+# stores that end in blr) become those instructions in the caller: no call, and the caller keeps its registers in
+# locals across it (a call to one made it write every register back and read it again): on unless
+# WWHD_RECOMP_HELPER_INLINE=0
+HELPER_INLINE = ppc2c.pass_on("WWHD_RECOMP_HELPER_INLINE")
+HELPER_MAX_INSNS = 80
 # return-address stores of direct calls to ordinary functions through PPC_SET_LR (nothing on the
 # Switch): on unless WWHD_RECOMP_LR=0
 LR_ELIDE = ppc2c.pass_on("WWHD_RECOMP_LR")
@@ -313,6 +319,56 @@ class ForkPasses:
             self.dead_tail = True  # (ends in one: the fall-through tail call is unreachable too)
         return body
 
+    def helper_run(self, tgt):
+        """The instructions a save/restore helper entry runs: from tgt, straight on (through the next entries)
+        to its blr; None if tgt is not one or the run has anything but plain instructions (no branch, call,
+        trap or system call before the blr, no instruction hook)."""
+        cache = self.__dict__.setdefault("_helper_runs", {})
+        if tgt in cache:
+            return cache[tgt]
+        run = None
+        if tgt in getattr(self, "saved_clobbers", ()) and tgt not in self.hooks:
+            words = []
+            for a in range(tgt, tgt + 4 * HELPER_MAX_INSNS, 4):
+                if not (self.p.text_lo <= a < self.p.text_hi) or a in self.sites:
+                    break
+                w = self.p.word(a)
+                op = w >> 26
+                if w == 0x4E800020:
+                    words.append((a, w))
+                    run = words
+                    break
+                if w != 0x4C00012C and (op in (2, 3, 16, 17, 18, 19) or (op == 31 and (w >> 1) & 0x3FF == 4)):
+                    break  # traps, branches, sc (an isync is fine: the restore helpers end with one)
+                    break
+                words.append((a, w))
+        cache[tgt] = run
+        return run
+
+    def fork_inline_helper(self, addr, tgt, tail):
+        """recomp.py call()/branch(): a call (bl) or tail jump (b) to a save/restore helper as the helper's own
+        instructions, translated here; the blr returns from the caller for a tail jump and is left out for a
+        call. None: an ordinary call or branch."""
+        if (not HELPER_INLINE or not hasattr(self, "saved_clobbers") or self.fork_mod_check(self.cur_start)
+                or self.cur_start <= tgt < self.cur_end):
+            return None  # (find_saved_clobbers translates before the list exists: calls as they are then)
+        run = self.helper_run(tgt)
+        if not run:
+            return None
+        saved = (ppc2c.fp_state, ppc2c.cur_addr)
+        try:
+            parts = []
+            for a, w in (run if tail else run[:-1]):
+                ppc2c.fp_state = 0  # (the helpers do no multiplication: the single-precision state is not used)
+                ppc2c.cur_addr = a
+                parts.append(translate(a, w, self))
+        except Unhandled:
+            return None
+        finally:
+            ppc2c.fp_state, ppc2c.cur_addr = saved
+        self.helper_inlined = getattr(self, "helper_inlined", 0) + 1
+        return " ".join(parts) if tail else "{ %s }" % " ".join(parts)  # (translate's link code comes before)
+
     def fork_dead_tail(self):
         """emit_function: the body ends in an unconditional return or branch (no fall-through tail call)."""
         return getattr(self, "dead_tail", False)
@@ -436,7 +492,7 @@ class ForkPasses:
     def fork_table_head(self):
         """table.c, after the includes: which passes made this code (logged at boot)"""
         variant = ", ".join(n for n, on in (("cr liveness", CRLIVE), ("leaf locals", LEAF), ("nonleaf locals", NONLEAF),
-                                             ("hot layout", HOT), ("dead tails", DEAD_TAIL), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
+                                             ("hot layout", HOT), ("dead tails", DEAD_TAIL), ("helpers inlined", HELPER_INLINE), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
                                              ("single-precision tracking", ppc2c.SINGLE),
                                              ("whole-program single precision", ppc2c.SINGLE and singleflow.INTERPROC),
                                              ("static GQRs", GQR_STATIC), ("jump-site caches", IJUMP)) if on)
@@ -451,6 +507,7 @@ class ForkPasses:
                 "leaf functions with registers in locals: %d\n" % self.leaf_count +
                 "functions with calls with registers in locals: %d\n" % self.nonleaf_count +
                 "functions that change callee-saved registers (save/restore helpers): %d\n" % len(self.saved_clobbers) +
+                "save/restore helper calls inlined: %d\n" % getattr(self, "helper_inlined", 0) +
                 "dead tails left out: %d functions, %d instructions\n" % (getattr(self, "dead_tail_count", 0),
                                                                      getattr(self, "dead_tail_insns", 0)) +
                 "small hot leaves inlined into callers: %d\n" % getattr(self, "inline_count", 0) +

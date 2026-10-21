@@ -230,6 +230,9 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
 
     # --- callbacks used by ppc2c.translate ---
     def branch(self, addr, tgt):
+        inl = self.fork_inline_helper(addr, tgt, tail=True)  # (this fork: save/restore helpers inlined)
+        if inl:
+            return inl
         if addr in self.p.import_calls:  # tail call into an imported function
             lib, name, slot = self.p.import_calls[addr]
             self.used_imports.add(slot)
@@ -244,6 +247,9 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         return "c->pc = 0x%08Xu; MUSTTAIL return ppc_dispatch(c);" % tgt
 
     def call(self, addr, tgt):
+        inl = self.fork_inline_helper(addr, tgt, tail=False)  # (this fork: save/restore helpers inlined)
+        if inl:
+            return inl
         if addr in self.p.import_calls:
             lib, name, slot = self.p.import_calls[addr]
             self.used_imports.add(slot)
