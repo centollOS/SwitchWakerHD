@@ -8,7 +8,8 @@
 #include "runtime.h"
 #include "model_probe.h"
 
-extern "C" void f_027F4D5C_orig(Cpu* c);
+// (this fork) weak: tools/recomp/hooks.txt leaves J3DModel::calc unhooked (a call per model), so the probe never runs
+extern "C" __attribute__((weak)) void f_027F4D5C_orig(Cpu*) {}
 
 namespace {
 std::mutex probe_mutex;

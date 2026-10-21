@@ -172,10 +172,11 @@ class NativeBoundaries(unittest.TestCase):
             compiler.build = SimpleNamespace(canon_code=lambda a: a)
             emitted, count = compiler.emit_function(address)
             self.assertEqual(count, 1)
-            self.assertIn("ppc_host_call(c, hook_00001000)", emitted)
-            self.assertIn("ppc_host_call(c, site_00001000)", emitted)
+            # (this fork) hooks: PPC_HOOK_CALL, ppc_host_call except on the Switch (runtime/include/ppc.h); sites
+            # stay plain calls (leaflocal.py's register write-back recognises them by that form)
+            self.assertIn("PPC_HOOK_CALL(c, hook_00001000)", emitted)
+            self.assertIn("site_00001000(c)", emitted)
             self.assertNotIn("hook_00001000(c)", emitted)
-            self.assertNotIn("site_00001000(c)", emitted)
 
 
 if __name__ == "__main__":

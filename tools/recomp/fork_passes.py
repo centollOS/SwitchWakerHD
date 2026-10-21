@@ -267,7 +267,7 @@ class ForkPasses:
     def fork_begin_function(self, start):
         """emit_function, before translating: the single-precision state at each instruction."""
         self.emitted_leaf = False
-        if not ppc2c.SINGLE:
+        if not ppc2c.SINGLE or not hasattr(self, "saved_clobbers"):  # (no fork_prepare: emit_function alone, tests)
             self.single_in = None
         elif self.singleflow:
             self.single_in = self.singleflow.states(start)
@@ -281,8 +281,8 @@ class ForkPasses:
 
     def fork_translated(self, body):
         """emit_function, the function translated: condition-register liveness."""
-        if not CRLIVE or self.fork_mod_check(self.cur_start):  # (guest mod hooks: a mod may hook or replace any function)
-            return body
+        if not CRLIVE or self.fork_mod_check(self.cur_start) or not hasattr(self, "saved_clobbers"):
+            return body  # (guest mod hooks: a mod may hook or replace any function; no fork_prepare: tests)
         live_after, fields = crlive.analyze(body, self.cur_start, self.cur_end, self.p.jump_tables, branch_target,
                                             self.sites)
         body = [(a, w, crlive.rewrite(s, fields[i], live_after[i], CR_CHECK, a)) for i, (a, w, s) in enumerate(body)]
@@ -296,8 +296,8 @@ class ForkPasses:
         tail_wb = ""
         stmts = [s for _, _, s in body]
         sites_done = False
-        if self.fork_mod_check(start):  # (as upstream: a mod may hook or replace any function)
-            return body, "", False
+        if self.fork_mod_check(start) or not hasattr(self, "saved_clobbers"):  # (as upstream: a mod may hook or
+            return body, "", False  # replace any function; no fork_prepare: tests)
         if LEAF and not hooked and not any(a in self.sites for a, _, _ in body) and leaflocal.eligible(stmts):
             prologue, stmts, tail_wb = leaflocal.transform(stmts)
             body = [(a, w, s) for (a, w, _), s in zip(body, stmts)]

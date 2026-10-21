@@ -508,13 +508,13 @@ target_link_libraries(guest_png_test PRIVATE ZLIB::ZLIB)
 add_test(NAME guest_png COMMAND guest_png_test "${CMAKE_SOURCE_DIR}/examples/guest-mods")
 
 # Synthetic integration tests call the real guest filesystem HLE handlers.
-add_executable(mod_content_fs_test runtime/tools/mod_content_fs_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c)
+add_executable(mod_content_fs_test runtime/tools/mod_content_fs_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c)
 target_include_directories(mod_content_fs_test PRIVATE runtime/src runtime/include)
 target_compile_options(mod_content_fs_test PRIVATE -UNDEBUG)
 target_link_libraries(mod_content_fs_test PRIVATE ZLIB::ZLIB Threads::Threads)
 
 # language sources: synthetic European/Japanese packs read through the guest file system (game_languages.h)
-add_executable(language_source_test runtime/tools/language_source_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c)
+add_executable(language_source_test runtime/tools/language_source_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c)
 target_include_directories(language_source_test PRIVATE runtime/src runtime/include)
 target_compile_options(language_source_test PRIVATE -UNDEBUG)
 target_link_libraries(language_source_test PRIVATE ZLIB::ZLIB Threads::Threads)
@@ -599,7 +599,7 @@ add_executable(release_gate_test runtime/tools/release_gate_test.cpp)
 target_include_directories(release_gate_test PRIVATE runtime/src)
 target_compile_options(release_gate_test PRIVATE -UNDEBUG)
 # Live button-art styling: production hooks on synthetic guest objects, original functions stubbed.
-add_executable(button_glyphs_test runtime/tools/button_glyphs_test.cpp runtime/src/button_glyphs.cpp runtime/src/button_glyph_font.cpp runtime/src/aspect.cpp runtime/src/input_map.cpp runtime/src/guest_addr_identity.c)
+add_executable(button_glyphs_test runtime/tools/button_glyphs_test.cpp runtime/src/button_glyphs.cpp runtime/src/button_glyph_font.cpp runtime/src/aspect.cpp runtime/src/input_map.cpp runtime/src/guest_addr_identity.c runtime/tools/fork_test_stubs.cpp)
 target_include_directories(button_glyphs_test PRIVATE runtime/src runtime/include)
 target_compile_options(button_glyphs_test PRIVATE -UNDEBUG)
 target_link_libraries(button_glyphs_test PRIVATE cemu_latte)
@@ -915,7 +915,7 @@ if(WIN32)
   target_link_libraries(motion_test PRIVATE ws2_32)
 endif()
 # controller packets: actual VPAD/KPAD writers, without a game or renderer
-add_executable(pad_delivery_test runtime/tools/pad_delivery_test.cpp runtime/src/hle/padscore.cpp runtime/src/hle/system_stubs.cpp runtime/src/rumble.cpp runtime/src/guest_addr_identity.c)
+add_executable(pad_delivery_test runtime/tools/pad_delivery_test.cpp runtime/src/hle/padscore.cpp runtime/src/hle/system_stubs.cpp runtime/src/rumble.cpp runtime/src/guest_addr_identity.c runtime/tools/fork_test_stubs.cpp)
 target_include_directories(pad_delivery_test PRIVATE runtime/src runtime/include)
 target_compile_options(pad_delivery_test PRIVATE -UNDEBUG)
 target_link_libraries(pad_delivery_test PRIVATE Threads::Threads)
@@ -1382,7 +1382,7 @@ target_compile_options(crash_redact_test PRIVATE -UNDEBUG)
 add_test(NAME crash_redact COMMAND crash_redact_test)
 
 # Cheats must preserve sword ownership: it controls Medli/Makar story placement (#85).
-add_executable(cheats_test runtime/tools/cheats_test.cpp runtime/src/mods/cheats.cpp runtime/src/guest_addr_identity.c)
+add_executable(cheats_test runtime/tools/cheats_test.cpp runtime/src/mods/cheats.cpp runtime/src/guest_addr_identity.c runtime/tools/fork_test_stubs.cpp)
 target_include_directories(cheats_test PRIVATE runtime/src runtime/include)
 target_compile_options(cheats_test PRIVATE -UNDEBUG)
 add_test(NAME cheats_story_progress COMMAND cheats_test)
@@ -1621,7 +1621,7 @@ add_test(NAME story_scene_native_contract COMMAND story_scenes_native_test)
 add_test(NAME mod_world_content_startup COMMAND mod_package_test --world-content-startup
   "${CMAKE_SOURCE_DIR}/examples/guest-mods/sdk-v3-windfall")
 
-add_executable(guest_hooks_test runtime/tools/guest_hooks_test.cpp runtime/tools/guest_hooks_body.c runtime/src/mods/guest_png.cpp runtime/src/mods/mod_archive.cpp runtime/src/mods/story_native_event_dispatch.cpp runtime/src/mods/story_native_event_depth.cpp runtime/src/mods/story_native_event_game_thread.cpp runtime/src/mods/story_native_stage_owner_hooks.cpp runtime/src/mods/story_native_setinfo_diagnostic.cpp runtime/src/mods/story_native_setinfo_observation.cpp runtime/src/mods/story_native_setinfo_candidate.cpp runtime/src/mods/story_native_sarc_extent.cpp runtime/src/mods/story_native_bfres_extent.cpp runtime/src/guest_addr_identity.c)
+add_executable(guest_hooks_test runtime/tools/guest_hooks_test.cpp runtime/tools/guest_hooks_body.c runtime/src/mods/guest_png.cpp runtime/src/mods/mod_archive.cpp runtime/src/mods/story_native_event_dispatch.cpp runtime/src/mods/story_native_event_depth.cpp runtime/src/mods/story_native_event_game_thread.cpp runtime/src/mods/story_native_stage_owner_hooks.cpp runtime/src/mods/story_native_setinfo_diagnostic.cpp runtime/src/mods/story_native_setinfo_observation.cpp runtime/src/mods/story_native_setinfo_candidate.cpp runtime/src/mods/story_native_sarc_extent.cpp runtime/src/mods/story_native_bfres_extent.cpp runtime/src/guest_addr_identity.c runtime/tools/fork_test_stubs.cpp runtime/src/mods/guest_builtin.cpp)
 # The entry musttail regression must reach the optimized backend even in Debug builds.
 set_source_files_properties(runtime/tools/guest_hooks_body.c PROPERTIES COMPILE_OPTIONS "-O3")
 target_include_directories(guest_hooks_test PRIVATE runtime/include runtime/src)
@@ -1775,7 +1775,7 @@ target_compile_options(android_display_rate_test PRIVATE -UNDEBUG)
 add_test(NAME android_display_rate COMMAND android_display_rate_test)
 
 add_executable(aspect_panes_test runtime/tools/aspect_panes_test.cpp)
-add_executable(gameplay_fov_test runtime/tools/gameplay_fov_test.cpp runtime/src/aspect.cpp runtime/src/guest_addr_identity.c)
+add_executable(gameplay_fov_test runtime/tools/gameplay_fov_test.cpp runtime/src/aspect.cpp runtime/src/guest_addr_identity.c runtime/tools/fork_test_stubs.cpp)
 target_include_directories(gameplay_fov_test PRIVATE runtime/src runtime/include)
 target_compile_options(gameplay_fov_test PRIVATE -UNDEBUG)
 add_test(NAME gameplay_fov_events COMMAND gameplay_fov_test)
@@ -2933,7 +2933,7 @@ add_executable(native_quiescence_test
     runtime/tools/native_quiescence_test.cpp
     runtime/tools/native_quiescence_test_stubs.cpp
     runtime/src/native_quiescence.cpp
-    runtime/src/mods/story_native_event_game_thread.cpp)
+    runtime/src/mods/story_native_event_game_thread.cpp runtime/tools/fork_test_stubs.cpp)
 target_include_directories(native_quiescence_test PRIVATE
     runtime/src runtime/include runtime/src/gx2
     runtime/third_party/cemu runtime/third_party/cemu/Cafe
@@ -3606,14 +3606,14 @@ add_test(NAME state_load_result COMMAND state_load_result_test)
 # off): the hook-flag table stays null and an --editor start must still come up (last: after every source
 # the targets above add to guest_hooks_test).
 get_target_property(GUEST_HOOKS_TEST_SOURCES guest_hooks_test SOURCES)
-add_executable(guest_mods_no_hooks_test ${GUEST_HOOKS_TEST_SOURCES})
+add_executable(guest_mods_no_hooks_test ${GUEST_HOOKS_TEST_SOURCES} runtime/tools/fork_test_stubs.cpp runtime/src/mods/guest_builtin.cpp)
 target_compile_definitions(guest_mods_no_hooks_test PRIVATE GUEST_HOOKS_TEST_NO_HOOKS=1)
 target_include_directories(guest_mods_no_hooks_test PRIVATE runtime/include runtime/src)
 target_compile_options(guest_mods_no_hooks_test PRIVATE -UNDEBUG)
 target_link_libraries(guest_mods_no_hooks_test PRIVATE ZLIB::ZLIB ${CMAKE_DL_LIBS} Threads::Threads)
 add_test(NAME guest_mods_no_hooks COMMAND guest_mods_no_hooks_test)
 # ... and for an --editor start with hooks: the scene player is installed for the editor's previews.
-add_executable(guest_mods_editor_test ${GUEST_HOOKS_TEST_SOURCES})
+add_executable(guest_mods_editor_test ${GUEST_HOOKS_TEST_SOURCES} runtime/tools/fork_test_stubs.cpp runtime/src/mods/guest_builtin.cpp)
 target_compile_definitions(guest_mods_editor_test PRIVATE GUEST_HOOKS_TEST_EDITOR=1)
 target_include_directories(guest_mods_editor_test PRIVATE runtime/include runtime/src)
 target_compile_options(guest_mods_editor_test PRIVATE -UNDEBUG)

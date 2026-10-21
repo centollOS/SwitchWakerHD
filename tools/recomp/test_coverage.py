@@ -21,7 +21,7 @@ NON_ADDRESS = {
     ("gfx/metal_main.mm", 0x02000000): "executable memory lower bound",
     ("hle/system_stubs.cpp", 0x02000000): "executable memory lower bound",
     ("mods/mod_archive.cpp", 0x02014B50): "ZIP central directory signature",
-    ("core.cpp", 0x02100000): "size of the import/host function window at 0xC0000000 (the Switch's guest map)",
+    ("platform/core_switch.cpp", 0x02100000): "size of the import/host function window at 0xC0000000 (the Switch's guest map)",
     ("mods/lyt_build.cpp", 0x02020000): "the layout files' format version (BFLYT / BFLAN)",
 }
 NON_ADDRESS.update({("espresso_fp.c", value): "frsqrte mantissa lookup table"
