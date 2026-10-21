@@ -86,7 +86,7 @@ void set_bloom(bool on);
 bool blur_enabled();
 void set_blur(bool on);
 void set_aniso(bool on);
-// edge smoothing (FXAA, issue #21; WWHD_FXAA=1, the Switch tab's Graphics): any thread, from the next frame
+// edge smoothing (FXAA, issue #21; WWHD_FXAA=1, the Switch tab's Picture): any thread, from the next frame
 bool fxaa_enabled();
 void set_fxaa(bool on);
 // the barrier that makes this frame's descriptor writes visible (nothing when none since the last one)

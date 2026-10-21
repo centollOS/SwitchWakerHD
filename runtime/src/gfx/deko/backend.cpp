@@ -1088,7 +1088,7 @@ void frame_stats() {
 }  // namespace
 std::atomic<bool> g_padShown{false};  // the last frame presented the GamePad picture (skip_tv, draw.cpp)
 
-// ---- edge smoothing (FXAA, issue #21): off by default (WWHD_FXAA=1, the Switch tab's Graphics)
+// ---- edge smoothing (FXAA, issue #21): off by default (WWHD_FXAA=1, the Switch tab's Picture)
 std::atomic<bool> g_fxaa{[] {
     const char* e = getenv("WWHD_FXAA");
     return e && atoi(e) != 0;
