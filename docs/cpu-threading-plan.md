@@ -338,3 +338,18 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   ("Application", `nn::diag::detail::Abort` in nnSdk, 15:27, the console rebooted). A separate issue; until it is
   understood, comparisons that need a restart are done one build per session, and A/B within a session uses
   runtime switches.
+- 2026-10-21, **the standard performance test** (Pulpparty's `tools/switch/perf_test.py`, merged into this branch):
+  `ab` of `main` + the region change (its states were made on a USA console: `bench load` now accepts the other
+  region's) against this branch (build E = D + the region change), ABBA twice, 4 boots each, 900 frames per scene,
+  Quest Log 1, stock 1020 MHz, the console started from a forwarder (restarts safe again; the earlier reload
+  crashes were the title override, PR #56):
+
+  | scene | main fps | this branch | fps (95% CI) | main thread ms (95% CI) |
+  |---|---|---|---|---|
+  | lava | 27.23 | 27.38 | +0.15 (+-0.33): no measurable change | -0.24 (+-0.42) |
+  | windfall | 27.56 | 28.11 | **+0.54 (+-0.29), +2.0%: faster** | -0.67 (+-0.40) |
+  | dragonroost | 28.01 | 28.32 | +0.31 (+-0.33): no measurable change | -0.37 (+-0.41) |
+
+  The main thread's time per frame is lower in all three; these scenes are only partly main-thread bound (GPU
+  31-36 ms, render thread 26-35 ms a frame), so the fps moves less than at night at sea, where the main thread is
+  the only limit.
