@@ -4,6 +4,8 @@
 #include <cstdint>
 #if defined(_WIN64) && (defined(__x86_64__) || defined(_M_X64))
 #include <intrin.h>
+#elif defined(__SWITCH__)
+#include <switch/arm/tls.h>  // (this fork)
 #else
 #include <pthread.h>
 #endif
@@ -18,6 +20,10 @@ inline uintptr_t thread_identity() {
     return p;
 #elif defined(_WIN64) && (defined(__x86_64__) || defined(_M_X64))
     return (uintptr_t)__readgsqword(0x30);  // the thread's TEB
+#elif defined(__SWITCH__)
+    // (this fork) the thread's TLS block (TPIDRRO_EL0, one instruction); pthread_self() is a call into the
+    // kernel-thread lookup there (__syscall_thread_self: ~0.8% of the main thread in the lava scene)
+    return (uintptr_t)armGetTls();
 #else
     // macOS: pthread_self() reads TPIDRRO_EL0 / %gs; __builtin_thread_pointer (TPIDR_EL0) is not per
     // thread there (threads share values)
