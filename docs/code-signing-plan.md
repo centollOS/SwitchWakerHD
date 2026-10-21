@@ -43,8 +43,8 @@ Windows then shows "SignPath Foundation" as the publisher, not centollOS.
 - Privacy: the installer only talks to GitHub (the release zip, the latest release's tag, the devkitPro
   updater, the minimap mod) and to the package servers of what it installs, all to do the install the user
   asked for. Nothing is sent about the user.
-- A "Code signing policy" section on the home page and the download page (README and INSTALL.md), see below.
-  It goes in once SignPath accepts the project, not before (it names SignPath as the signer).
+- A "Code signing policy" section on the home page and the download page: in README and INSTALL.md since
+  main 716f4afd, saying the installer stays unsigned until SignPath accepts the project.
 
 ## The change
 
@@ -63,25 +63,12 @@ Repository settings once accepted (Settings > Secrets and variables > Actions):
 - variables `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG` (e.g. `SwitchWakerHD`),
   `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG` (e.g. `installer`).
 
-## Code signing policy (README and INSTALL.md, after acceptance)
+## On acceptance
 
-```markdown
-## Code signing policy
-
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
-[SignPath Foundation](https://signpath.org).
-
-- Committers and reviewers: [members of centollOS](https://github.com/orgs/centollOS/people)
-- Approvers: [Pulpparty](https://github.com/Pulpparty)
-
-Only `SwitchWakerHD-Installer.exe` is signed. It is built from this repository by
-[GitHub Actions](.github/workflows/release-installer.yml), and every signing is approved by hand.
-
-Privacy policy: this program will not transfer any information to other networked systems unless specifically
-requested by the user or the person installing or operating it. To install, it downloads the release, the
-devkitPro updater and the tools it installs (Python, devkitPro packages; Git, Pillow and MSYS2's gcc for the
-HOME icon; the minimap mod if chosen) from GitHub and from those tools' own servers.
-```
+1. Create the secret and variables above, and paste `.signpath/artifact-configuration.xml` into the SignPath project.
+2. Drop "(Applied for in October 2026: ... still unsigned.)" from INSTALL.md's Code signing policy and
+   "(applied for in October 2026; unsigned until accepted)" from README's.
+3. Merge this branch, then test as below.
 
 ## Testing
 
@@ -93,4 +80,6 @@ HOME icon; the minimap mod if chosen) from GitHub and from those tools' own serv
 
 ## Status
 
-- 2026-10-21: plan, csproj and workflow on this branch (signing off until the variables exist); application to SignPath Foundation drafted, not sent; org 2FA required since 2026-10-21.
+- 2026-10-21: plan, csproj and workflow on this branch (signing off until the variables exist); org 2FA required.
+- 2026-10-21: code signing policy on main (716f4afd); application sent to SignPath Foundation (no official review time:
+  1-2 weeks to ~2 months by other projects' reports). Check mid-November; if refused, Certum Open Source.
