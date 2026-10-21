@@ -31,9 +31,16 @@ download, and the build. You only need your own personal dump of the game.
      the installer reads every file back from the card and copies again any that differs.
    - **By hand**: the installer opens the folder; copy its contents to the root of the SD card.
 
-If something fails, *Show details* shows what happened; the full log is in
-`%USERPROFILE%\SwitchWakerHD-Build\installer.log` (in `C:\SwitchWakerHD-Build\installer.log` when your Windows
-user name has a space or an accented letter: the installer then works there).
+If something fails, *Show details* shows what happened; the full log is `installer.log` in the working folder,
+`%USERPROFILE%\SwitchWakerHD-Build` (`C:\SwitchWakerHD-Build` when your Windows user name has a space or an accented
+letter: the installer then works there).
+
+**Not enough room on C:?** On the welcome page, *Change folder...* builds on another drive (any drive, also an SD
+card): the page shows the free space there against the ~10 GB the build needs (5 GB on a re-run). The path cannot
+have spaces or accented letters and must be short (the build tools); pick for example `D:\` and the installer
+works in `D:\SwitchWakerHD-Build`. It remembers the folder for the next update. devkitPro still installs in
+`C:\devkitPro`. On the Switch's own SD card the build needs about 12 GB free there, and the working folder stays
+on the card for the next update (delete it when you like).
 
 > **Windows SmartScreen** may show *"Windows protected your PC"* on first run because the installer is
 > not code-signed. Click **More info → Run anyway**. This is expected for open-source unsigned executables.
@@ -83,7 +90,8 @@ the release, builds the game natively and copies it to the SD card.
      that differs) and ejects the card. (A Mac has no MTP, so DBI's USB transfer is not offered.)
    - **By hand**: *Show in Finder* opens the folder; copy its contents to the root of the SD card.
 
-The full log is in `~/SwitchWakerHD-Build/installer.log`. The installer starts in Spanish or English from the
+The full log is `installer.log` in the working folder, `~/SwitchWakerHD-Build` unless you picked another one
+with *Change folder...* on the welcome page (an external disk works too). The installer starts in Spanish or English from the
 Mac's language; the button in its corner switches. Source: [installer/desktop](installer/desktop) and
 [installer/build-mac.sh](installer/build-mac.sh).
 
@@ -115,7 +123,9 @@ desktop), one file with everything inside:
      installer reads every file back from the card and copies again any that differs);
    - **By hand**: *Open folder*, then copy its contents to the root of the SD card.
 
-The full log is in `~/SwitchWakerHD-Build/installer.log`. Source: [installer/desktop](installer/desktop) and
+The full log is `installer.log` in the working folder, `~/SwitchWakerHD-Build` unless you picked another one
+with *Change folder...* on the welcome page (it has to be a Linux disk format such as ext4: FAT and exFAT
+drives cannot hold the build). Source: [installer/desktop](installer/desktop) and
 [installer/build-linux.sh](installer/build-linux.sh).
 
 > If `pkg.devkitpro.org` or `apt.devkitpro.org` answers *403*, devkitPro's servers blocked your connection while

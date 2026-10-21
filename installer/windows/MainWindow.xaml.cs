@@ -38,7 +38,7 @@ public partial class MainWindow : Window
     readonly object logFileLock = new();
     StreamWriter? logFile;
     const int LogBoxMaxChars = 400_000;
-    static readonly string LogPath = System.IO.Path.Combine(InstallEngine.WorkDir, "installer.log");
+    static string LogPath => System.IO.Path.Combine(InstallEngine.WorkDir, "installer.log");
 
     readonly (Ellipse ring, TextBlock glyph, TextBlock label)[] stepRows = new (Ellipse, TextBlock, TextBlock)[4];
     readonly StepState[] stepStates = new StepState[4];
@@ -91,7 +91,7 @@ public partial class MainWindow : Window
         }
         switch (page)
         {
-            case Page.Welcome:  Set(BtnSecondary, null);         Set(BtnPrimary, "btn_start"); break;
+            case Page.Welcome:  Set(BtnSecondary, null);         Set(BtnPrimary, "btn_start", workDirProblem == null); break;
             case Page.Game:     Set(BtnSecondary, "btn_back");   Set(BtnPrimary, "btn_install", GameReady()); break;
             case Page.Progress:
                 if (running) { Set(BtnSecondary, "btn_cancel"); Set(BtnPrimary, null); }
@@ -114,7 +114,8 @@ public partial class MainWindow : Window
         TxtWelcomeLi2.Text   = "•  " + Str.Get("welcome_li2");
         TxtWelcomeLi3.Text   = "•  " + Str.Get("welcome_li3");
         TxtWelcomeNeed.Text  = Str.Get("welcome_need");
-        TxtWelcomeDir.Text   = Str.Get("welcome_dir", InstallEngine.WorkDir);
+        BtnWorkDir.Content   = Str.Get("btn_change_dir");
+        ShowWorkDir();
 
         TxtGameH.Text    = Str.Get("game_h");
         TxtGameBody.Text = Str.Get("game_body");
@@ -177,7 +178,7 @@ public partial class MainWindow : Window
     {
         switch (page)
         {
-            case Page.Welcome:  ShowPage(Page.Game); break;
+            case Page.Welcome:  if (workDirProblem == null) ShowPage(Page.Game); break;
             case Page.Game:     StartInstall(); break;
             case Page.Progress: if (!running && failed) StartInstall(); break;
             case Page.Done:     Close(); break;
@@ -188,9 +189,40 @@ public partial class MainWindow : Window
     {
         switch (page)
         {
-            case Page.Game:     ShowPage(Page.Welcome); break;
+            case Page.Game:     ShowPage(Page.Welcome); ShowWorkDir(); break;
             case Page.Progress: if (running) AskCancel(); else Close(); break;
         }
+    }
+
+    // ── Welcome page: the work folder (#59) ─────────────────────────────────
+    string? workDirProblem;
+
+    void ShowWorkDir()
+    {
+        var dir = InstallEngine.WorkDir;
+        TxtWelcomeDir.Text = Str.Get("welcome_dir", dir);
+        TxtWelcomeDir.ToolTip = dir;
+        workDirProblem = BuildFolder.Problem(dir);
+        TxtWelcomeSpace.Text = BuildFolder.SpaceLine(dir, out var low);
+        TxtWelcomeSpace.Foreground = (Brush)FindResource(low ? "Warn" : "FgDim");
+        var warn = workDirProblem ?? (BuildFolder.SavedGone != null ? Str.Get("dir_saved_gone", BuildFolder.SavedGone) : null);
+        TxtWelcomeDirWarn.Text = warn ?? "";
+        TxtWelcomeDirWarn.Visibility = warn == null ? Visibility.Collapsed : Visibility.Visible;
+        var removable = workDirProblem == null && BuildFolder.IsRemovable(dir);
+        TxtWelcomeDirNote.Text = removable ? Str.Get("dir_removable", BuildFolder.NeedGb(dir) + 2) : "";
+        TxtWelcomeDirNote.Visibility = removable ? Visibility.Visible : Visibility.Collapsed;
+        if (page == Page.Welcome) UpdateFooter();
+    }
+
+    void BtnWorkDir_Click(object sender, RoutedEventArgs e)
+    {
+        using var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = Str.Get("dlg_build_dir"), ShowNewFolderButton = true };
+        var parent = System.IO.Path.GetDirectoryName(InstallEngine.WorkDir);
+        if (parent != null && Directory.Exists(parent)) dlg.SelectedPath = parent;
+        if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+        InstallEngine.WorkDir = BuildFolder.ForPick(dlg.SelectedPath);
+        BuildFolder.SavedGone = null;
+        ShowWorkDir();
     }
 
     // ── Game page ────────────────────────────────────────────────────────────
@@ -333,6 +365,8 @@ public partial class MainWindow : Window
         engine.GameArg  = GameArg();
         engine.ForwarderKeys = keysPath != null && File.Exists(keysPath) ? keysPath : null;
         engine.MinimapGame = minimapGame;
+        BuildFolder.Save(InstallEngine.WorkDir);
+        TxtLogPath.Text = Str.Get("log_at", LogPath);
         running = true; failed = false;
         cts = new CancellationTokenSource();
         for (int i = 0; i < stepStates.Length; i++) SetStep(i, StepState.Pending);

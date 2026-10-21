@@ -18,14 +18,15 @@ sealed class InstallEngine : EngineBase
 {
     protected override string Work => WorkDir;
 
-    public static readonly string WorkDir = ChooseWorkDir();
+    // The player's pick on the welcome page, remembered from the last run (BuildFolder), or ChooseWorkDir's
+    public static string WorkDir = BuildFolder.Load(ChooseWorkDir);
 
     // %USERPROFILE%\SwitchWakerHD-Build, unless the user name has a space or a non-ASCII letter ("JAM Visuals",
     // issue #30): the build tools do not all cope with those, so then a folder at the root of the system drive
     // (C:\SwitchWakerHD-Build), which standard users may create. Back to the profile if that cannot be created.
     // Also there when the profile path is long: the release is unpacked two folders down and the deepest object
     // file adds ~160 characters, and devkitPro's gcc cannot open paths over 260 (MAX_PATH).
-    const int MaxWorkDirLength = 45;
+    const int MaxWorkDirLength = BuildFolder.MaxWindowsLength;
     static string ChooseWorkDir()
     {
         var inProfile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SwitchWakerHD-Build");

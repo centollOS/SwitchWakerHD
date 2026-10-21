@@ -26,6 +26,14 @@ drives and network shares.
 | 6 | Re-run after a successful build | No new download; reuses the release; builds |
 | 7 | Copy to a normal SD card | `switch/wwhd/` at the card's root; the game starts from the Homebrew Menu (title mode) |
 
+### Working folder on another drive (#59)
+
+| # | Setup | Expected |
+|---|---|---|
+| 7a | Welcome page, *Change folder...*, pick `D:\` (or an SD card in a reader) | Shows `D:\SwitchWakerHD-Build` and the free space on `D:\`; an SD card also shows the removable-drive note; builds there, log in that folder |
+| 7b | Pick a folder with a space or an accent (`D:\Mis juegos`) | Refused on the welcome page with the reason; *Get started* stays off |
+| 7c | Close and open the installer again | Same folder as 7a; a re-run reuses its release. With the card taken out: the usual folder and a note about last time's |
+
 ## B. Keys and game files (stop before any download)
 
 | # | Setup | Expected |

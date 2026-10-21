@@ -145,13 +145,11 @@ abstract class EngineBase
         if (GameArg != "--game-dir" && (File.GetAttributes(GamePath) & (FileAttributes.Offline | RecallOnDataAccess)) != 0)
             Warn(Str.Get("pre_cloud", GamePath));
 
-        // The extracted game twice (build/sd-game and the SD folder), the generated code, the objects: ~9 GB
-        // the first time; a re-run reuses most of it.
-        var rerun = Directory.Exists(Work) && Directory.GetDirectories(Work, "SwitchWakerHD-v*").Length > 0;
-        var needGb = rerun ? 5 : 10;
+        var needGb = BuildFolder.NeedGb(Work);
         try
         {
-            var drive = new DriveInfo(Path.GetPathRoot(Work)!);
+            var drive = BuildFolder.DriveOf(Work);
+            if (drive == null) return;
             var freeGb = drive.AvailableFreeSpace / 1e9;
             Info(Str.Get("pre_space", drive.Name, freeGb.ToString("0.0")));
             if (freeGb < needGb) throw new InstallException(Str.Get("pre_no_space", drive.Name, freeGb.ToString("0.0"), needGb));

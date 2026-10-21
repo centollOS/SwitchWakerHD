@@ -40,7 +40,18 @@
             </Border>
             <TextBlock x:Name="TxtWelcomeNeed" Margin="0,0,0,6"/>
             <TextBlock x:Name="TxtWelcomeAdmin" Classes="dim" Margin="0,0,0,10"/>
-            <TextBlock x:Name="TxtWelcomeDir" Classes="dim" FontSize="12"/>
+            <!-- The work folder (#59): where it is, the room on its drive, and a pick -->
+            <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,10" Margin="0,4,0,0">
+              <Grid ColumnDefinitions="*,Auto">
+                <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                  <TextBlock x:Name="TxtWelcomeDir" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+                  <TextBlock x:Name="TxtWelcomeSpace" Classes="dim" FontSize="13" Margin="0,2,0,0"/>
+                </StackPanel>
+                <Button x:Name="BtnWorkDir" Grid.Column="1" Classes="secondary" Click="BtnWorkDir_Click"/>
+              </Grid>
+            </Border>
+            <TextBlock x:Name="TxtWelcomeDirWarn" Foreground="{StaticResource Warn}" Margin="2,10,0,0" IsVisible="False"/>
+            <TextBlock x:Name="TxtWelcomeDirNote" Classes="dim" FontSize="13" Margin="2,10,0,0" IsVisible="False"/>
           </StackPanel>
         </ScrollViewer>
 

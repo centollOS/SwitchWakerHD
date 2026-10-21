@@ -31,5 +31,9 @@ static class DesktopStrings
                                "A Dolphin .rvz is read with Python 3.14, the one this installer uses."),
         ["rel_no_script"]  = ("La versión descargada no contiene tools/switch/make_sd.py.", "The downloaded release has no tools/switch/make_sd.py."),
         ["step_python"]    = ("Python 3.14",                                          "Python 3.14"),
+        ["dir_no_links"]   = ("La unidad de {0} no admite enlaces simbólicos ni programas (suele ser FAT o exFAT), y el juego no se puede construir ahí. Elige una carpeta en otro disco.",
+                               "The drive of {0} cannot hold symbolic links or programs (usually FAT or exFAT), so the game cannot be built there. Choose a folder on another disk."),
+        ["dlg_build_dir"]  = ("Elige dónde construir el juego (dentro se crea una carpeta SwitchWakerHD-Build)",
+                               "Choose where to build the game (a SwitchWakerHD-Build folder is made inside)"),
     };
 }
