@@ -405,3 +405,14 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   since any callee might read any register; an interprocedural pass with each callee's transitive live-in
   registers (tools/verify/funcdb.py already computes live-ins for the harness) would write back only those.
   The largest generic cost left; checked like the other passes (function-by-function diff, lockstep).
+- 2026-10-21, **two more changes, built, A/B pending** (the console is with the restart test of PR #56):
+  - **K: guest memory on 2 MiB boundaries** (`core_switch.cpp init_memory`): the window was found with 64 KiB
+    alignment and backed with 4 KiB-aligned heap blocks, which leaves the kernel only 4 KiB pages for 1.4 GB; now
+    both are 2 MiB-aligned so 2 MiB blocks are possible. `WWHD_GUEST_MEM_2M=0` ([dev]) restores the old.
+  - **L = K + callee-saved write-backs elided** (`leaflocal.py ELIDE_SAVED_REGS`, `PPC_WB_SAVED` in ppc.h): in
+    the hot code the write-backs before calls were 45.1% argument registers, 2.7% r1, **20.7% callee-saved**
+    (r14-r31, f14-f31), 24.9% other volatile; the callee-saved ones are left out before direct calls to ordinary
+    game functions on the Switch (they stay dirty, written back before the next call that may read anything).
+    18,779 functions change. Lockstep (macOS in the Switch's form, `PPC_ELIDE_SAVED_WB`): identical at equal
+    boot alignment.
+  Next: `perf_test.py ab` of E, K and L (K-E: the memory mapping, L-K: the elision).
