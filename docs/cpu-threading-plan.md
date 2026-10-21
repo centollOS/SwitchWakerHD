@@ -235,3 +235,11 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   accessors, checked with tools/verify and on the lockstep check).
   Note for the routes: these warps arrive at the save's time of day, and the first sea profile ran during an
   arrival event; a route needs a fixed time and no event.
+- 2026-10-21, **the same five places at stock CPU 1020 MHz** (GPU 307, handheld; sys-clk had the CPU at 1224
+  before). Sea at Dragon Roost at night, no event (Link standing in the shallows): **27.0-27.7 fps, core 1
+  94-95%, main thread never idle** (0% `svcSleepThread`). Outset 29.0-30.0 fps (core 1 80%, idle 16%), Forest
+  Haven 29.0-29.9 (81%, 15%), Windfall 29.6-30.0 (61%, 35%), Tower of the Gods 29.2-30.0 (55%, 42%). The night
+  at sea is the main-thread-limited case at stock clocks; there the star field again: `dKyr_drawStar` 2.7% self,
+  `dComIfGp_get` 2.1%. The rest stays flat (no game function above ~2%).
+  **First benchmark route:** warp 3 (sea, room 13: Dragon Roost) at night, Link standing, no event; ~2.5 fps under
+  30. Done when its numbers repeat (next session).
