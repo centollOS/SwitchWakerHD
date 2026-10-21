@@ -47,6 +47,11 @@ enum DrawOpt : int {
     kOptSkipTv,   // the TV picture not drawn while the window shows the GamePad's (Off-TV Play; WWHD_DK_SKIP_TV)
     kDrawOpts
 };
+// shader compile threads for the shaders draws ask for (gfx/deko/shaders_dk.cpp helper_main): 0 auto (the default:
+// three while draws wait for their shaders, one otherwise), 1 (as before) to 3; any thread (the Switch tab's Debug
+// section, debug server "shaderthreads")
+int shader_compile_threads();
+void set_shader_compile_threads(int n);
 bool draw_opt(int which);
 void set_draw_opt(int which, bool on);
 // texture eviction (gfx/deko/surfaces.cpp, issue #11): frames a texture may stay unused before it leaves the image

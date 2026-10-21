@@ -388,6 +388,7 @@ std::string start() {
     if (!in_game()) return ui_text::tx().errNoGame;
     mkdir(dir().c_str(), 0777);
     if (!backup_save()) return ui_text::tx().errCopy;
+    remove((dir() + "/resume.txt").c_str());  // (a sweep waiting for a Quest Log: it begins now)
     g_stop = false;
     g_running = true;
     console_quiet(true);
@@ -462,6 +463,18 @@ void continue_when_loaded() {
     LOG("[prepare] continues once a Quest Log is loaded");
 }
 
+void start_when_loaded() {
+    mkdir(dir().c_str(), 0777);
+    write_file(dir() + "/resume.txt", "1\n");  // (removed when the sweep begins)
+    continue_when_loaded();
+}
+bool waiting() { return g_waitForGame && !g_running; }
+void cancel_wait() {
+    g_waitForGame = false;
+    remove((dir() + "/resume.txt").c_str());
+    LOG("[prepare] no longer waiting for a Quest Log (the menu)");
+}
+
 void frame(Cpu*) {
     // enemies attack while the sweep waits in a place: Link's health is topped up every frame (as the Mods tab's
     // infinite health, which waits for a loaded file), so a game over does not stop the warps
@@ -493,8 +506,7 @@ void frame(Cpu*) {
 }
 
 void startup_resume() {
-    if (access((dir() + "/resume.txt").c_str(), F_OK) != 0) return;
-    remove((dir() + "/resume.txt").c_str());
+    if (access((dir() + "/resume.txt").c_str(), F_OK) != 0) return;  // (removed when the sweep begins)
     continue_when_loaded();
 }
 

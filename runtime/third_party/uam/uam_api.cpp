@@ -1,4 +1,4 @@
-// uam_api.h on top of uam's DekoCompiler (one thread only, see the header)
+// uam_api.h on top of uam's DekoCompiler (threads: see the header)
 #include "uam_api.h"
 
 #include "compiler_iface.h"

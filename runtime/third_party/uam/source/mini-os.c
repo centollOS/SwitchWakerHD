@@ -3,10 +3,10 @@
 #include "util/os_misc.h"
 #include "uam_log.h"
 
-// SwitchWakerHD patches 3 and 4: the log callback and the fatal-error jump (see uam_log.h)
-static uam_log_fn s_log_fn;
-static void* s_log_user;
-jmp_buf* uam_fatal_jmp;
+// SwitchWakerHD patches 3 and 4: the log callback and the fatal-error jump (see uam_log.h); patch 10: per thread
+static _Thread_local uam_log_fn s_log_fn;
+static _Thread_local void* s_log_user;
+__thread jmp_buf* uam_fatal_jmp;
 
 void uam_set_log_callback(uam_log_fn fn, void* user)
 {

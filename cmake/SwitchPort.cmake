@@ -77,7 +77,7 @@ macro(switch_port_sources)
                             runtime/src/platform/settings_switch.cpp runtime/src/platform/settings_ini.cpp
                             runtime/src/platform/debug_server.cpp
                             runtime/src/platform/debug_switch.cpp runtime/src/platform/posix_stubs_switch.cpp
-                            runtime/src/platform/startup_checks_switch.cpp runtime/src/platform/prepare_graphics_switch.cpp runtime/src/platform/audio_guard_switch.cpp runtime/src/platform/thread_sampler_switch.cpp
+                            runtime/src/platform/startup_checks_switch.cpp runtime/src/platform/prepare_graphics_switch.cpp runtime/src/platform/audio_guard_switch.cpp runtime/src/platform/thread_heap_switch.cpp runtime/src/platform/shader_wait_switch.cpp runtime/src/platform/thread_sampler_switch.cpp
                             runtime/src/platform/prepare_graphics_ui_switch.cpp runtime/src/platform/ui_text_switch.cpp runtime/src/platform/shader_scan_switch.cpp runtime/src/platform/shader_list_switch.cpp
                             runtime/src/platform/background_shaders_switch.cpp runtime/src/platform/main_switch.cpp runtime/src/platform/core_switch.cpp runtime/src/platform/audio_out_switch.cpp runtime/src/platform/overlay_switch.cpp
                             runtime/src/platform/upstream_stubs_switch.cpp runtime/src/platform/bench_switch.cpp)
@@ -146,6 +146,13 @@ macro(switch_port_executable)
     # threads created without attributes get a large stack, newlib's C11 thrd_create results are fixed
     # (core.cpp), and abort() logs its caller first (main.cpp)
     target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create -Wl,--wrap=abort)
+    # (this fork) the shader compile threads' own heaps (platform/thread_heap_switch.cpp); not with the heap census,
+    # which wraps malloc itself
+    if(NOT WWHD_HEAP_CENSUS)
+      foreach(f malloc free calloc realloc memalign aligned_alloc posix_memalign _free_r _realloc_r)
+        target_link_options(wwhd PRIVATE -Wl,--wrap=${f})
+      endforeach()
+    endif()
     # (this fork, memory round 2) diagnostics only, never a release: malloc counted by call site, the debug
     # server's `heap` command (platform/heap_census_switch.cpp)
     option(WWHD_HEAP_CENSUS "Switch: count malloc by call site (debug server: heap mark / diff / top)" OFF)

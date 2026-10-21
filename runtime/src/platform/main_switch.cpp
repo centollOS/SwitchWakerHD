@@ -324,9 +324,14 @@ void main_switch::after_boot_line() {
     // the game's files, else an error on screen and the app closes; the first start's shader warning
     startup_checks::game_files(config::game_dir);
     prepare_graphics::startup();  // a cut "Prepare graphics" sweep: the Quest Log files put back
-    // the first start prepares the graphics behind a loading card; later starts finish a list left over
-    if (startup_checks::first_start()) background_shaders::first_start();
-    else background_shaders::later_start();
+    // the first start: Prepare graphics (the warp sweep, once a Quest Log is loaded) or the loading card; later
+    // starts finish a list left over (not while a sweep waits: its places wait for the shader worker to be idle)
+    if (startup_checks::first_start()) {
+        if (startup_checks::first_start_prepare()) prepare_graphics::start_when_loaded();
+        else background_shaders::first_start();
+    } else if (!prepare_graphics::waiting()) {
+        background_shaders::later_start();
+    }
 }
 
 void main_switch::after_mods() { early_settings::apply_migrated_mods(); }
