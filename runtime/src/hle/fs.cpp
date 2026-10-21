@@ -11,20 +11,19 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
-#include <cstring>
 #ifndef _WIN32
 #include <strings.h>
 #endif
 #include <mutex>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 
 #include "../runtime.h"
 #include "../write_watch.h"
 #include "../mods/content.h"
 #include "../game_languages.h"
 #include "../rtl_text.h"
+#include "fs_problems.h"  // (this fork, #47)
 
 namespace {
 
@@ -56,33 +55,6 @@ struct OpenDir {
 bool trace_story() {
     static const bool on = [] { const char* e = getenv("WWHD_STORY_STORE_TRACE"); return e && *e == '1'; }();
     return on;
-}
-
-// A game file (/vol/content, /vol/code) the game cannot find or open is logged once per path: the game's
-// assert after it does not say which file it was (issue #47). Saves and writes are left out.
-void log_game_file_problem(const char* what, const std::string& gpath, const std::string& hp, int err) {
-    if (gpath.compare(0, 13, "/vol/content/") != 0 && gpath.compare(0, 10, "/vol/code/") != 0) return;
-    static std::mutex mu;
-    static std::unordered_set<std::string> seen;
-    {
-        std::lock_guard<std::mutex> lk(mu);
-        if (!seen.insert(gpath).second) return;
-    }
-    LOG("[fs] %s %s (at %s): %s", what, gpath.c_str(), hp.c_str(), strerror(err));
-}
-
-// The game looks a content file up with FSGetStat in /vol/content/Cafe/<language>/, Cafe/Common/, Common/
-// and last at /vol/content/<path>; most files are found in Common/, so the first misses are normal. A miss
-// at the last place right after Common/ missed means the file is nowhere: then the game gives up without
-// FSOpenFile (a missing room archive stops it at d_s_room.cpp's "fileList != (0)").
-std::string host_path(const std::string& guest);
-void stat_missed(const std::string& gpath, int err) {
-    thread_local std::string last_miss;  // the game's lookups run one after the other on its thread
-    static const std::string content = "/vol/content/", common = "/vol/content/Common/";
-    if (gpath.compare(0, content.size(), content) == 0 &&
-        last_miss == common + gpath.substr(content.size()))
-        log_game_file_problem("the game cannot find", gpath, host_path(last_miss), err);  // where it usually is
-    last_miss = gpath;
 }
 
 std::mutex g_fs_mutex;
@@ -214,7 +186,7 @@ int32_t open_file(const std::string& gpath, const std::string& mode, uint32_t ou
     }
     TRACE("[fs] open %s (%s) -> %s", gpath.c_str(), mode.c_str(), f ? "ok" : "not found");
     if (!f) {
-        if (mode.find_first_of("wa+") == std::string::npos) log_game_file_problem("cannot open", gpath, hp, err);
+        fs_problems::open_failed(gpath, mode, err, hp);  // (this fork, #47)
         return FS_NOT_FOUND;
     }
     const bool story = story_store::is_save_file(gpath);
@@ -248,7 +220,10 @@ int32_t stat_path(const std::string& gpath, uint32_t out) {
         result = stat(hp.c_str(), &st);
         err = errno;
     }
-    if (result != 0) { stat_missed(gpath, err); return FS_NOT_FOUND; }
+    if (result != 0) {
+        fs_problems::stat_missed(gpath, err, [](const std::string& g) { return read_path(g); });  // (this fork, #47)
+        return FS_NOT_FOUND;
+    }
     fill_stat(out, st, game_size(gpath, hp, st));
     return FS_OK;
 }

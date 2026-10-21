@@ -381,13 +381,13 @@ target_link_libraries(guest_png_test PRIVATE ZLIB::ZLIB)
 add_test(NAME guest_png COMMAND guest_png_test "${CMAKE_SOURCE_DIR}/examples/guest-mods")
 
 # Synthetic integration tests call the real guest filesystem HLE handlers.
-add_executable(mod_content_fs_test runtime/tools/mod_content_fs_test.cpp runtime/src/hle/fs.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c)
+add_executable(mod_content_fs_test runtime/tools/mod_content_fs_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c)
 target_include_directories(mod_content_fs_test PRIVATE runtime/src runtime/include)
 target_compile_options(mod_content_fs_test PRIVATE -UNDEBUG)
 target_link_libraries(mod_content_fs_test PRIVATE ZLIB::ZLIB Threads::Threads)
 
 # language sources: synthetic European/Japanese packs read through the guest file system (game_languages.h)
-add_executable(language_source_test runtime/tools/language_source_test.cpp runtime/src/hle/fs.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c)
+add_executable(language_source_test runtime/tools/language_source_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c)
 target_include_directories(language_source_test PRIVATE runtime/src runtime/include)
 target_compile_options(language_source_test PRIVATE -UNDEBUG)
 target_link_libraries(language_source_test PRIVATE ZLIB::ZLIB Threads::Threads)
