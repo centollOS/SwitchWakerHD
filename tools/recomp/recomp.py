@@ -39,6 +39,7 @@ Output:
   OUTDIR/report.txt      statistics and unhandled instructions
 """
 import argparse
+import io
 import bisect
 import collections
 import json
@@ -56,6 +57,29 @@ from rpx import R_PPC_ADDR16_HA, R_PPC_ADDR16_LO, R_PPC_ADDR16_HI
 import ppc2c
 import crlive
 import leaflocal
+
+
+class _Output(io.StringIO):
+    """An output file that is written only when its text changed: a run on the same game and tools leaves
+    every file (and its time) as it was, so the build does not compile the game code again."""
+
+    def __init__(self, path):
+        super().__init__()
+        self.path = path
+
+    def __exit__(self, *exc):
+        if exc[0] is None:
+            text = self.getvalue()
+            try:
+                with open(self.path, encoding="utf-8") as old:
+                    same = old.read() == text
+            except (OSError, UnicodeDecodeError):
+                same = False
+            if not same:
+                with open(self.path, "w", encoding="utf-8") as f:
+                    f.write(text)
+        return super().__exit__(*exc)
+
 
 # condition-register liveness (crlive.py): on unless WWHD_RECOMP_CRLIVE=0; WWHD_RECOMP_CR_CHECK=1
 # generates a checking build that poisons the dropped bits and aborts if one is ever read
@@ -359,7 +383,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
 
     def write_headers(self, outdir):
         func_slots = sorted(s for s, (lib, name, kind) in self.imports.items() if kind == "f")
-        with open(os.path.join(outdir, "funcs.h"), "w") as f:
+        with _Output(os.path.join(outdir, "funcs.h")) as f:
             f.write('#pragma once\n%s#include "ppc.h"\n\n' % self.fork_funcs_defines())  # (this fork)
             for e in self.sorted_entries:
                 f.write("void f_%08X(Cpu* __restrict c);\n" % self.sym(e))
@@ -377,7 +401,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
             for s in func_slots:
                 f.write("void %s(Cpu* c);\n" % self.imp_name(s))
             f.write(self.fork_funcs_tail())  # (this fork)
-        with open(os.path.join(outdir, "table.c"), "w") as f:
+        with _Output(os.path.join(outdir, "table.c")) as f:
             f.write('#include "funcs.h"\n#include "recomp_table.h"\n#include "guest_addr.h"\n\n')
             f.write(self.fork_table_head())  # (this fork)
             f.write("const RecompEntry g_recomp_funcs[] = {\n")
@@ -409,13 +433,13 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
                 f.write("__attribute__((constructor)) static void register_mod_hooks(void) {\n")
                 f.write("    ppc_mod_register(%d, mod_hook_flags, mod_bodies);\n}\n" % n)
                 f.write(self.fork_mod_table())  # (this fork)
-        with open(os.path.join(outdir, "imports.c"), "w") as f:
+        with _Output(os.path.join(outdir, "imports.c")) as f:
             f.write('#include "funcs.h"\n\nvoid hle_unimplemented(Cpu* c, const char* lib, const char* name);\n\n')
             for s in func_slots:
                 lib, name, _ = self.imports[s]
                 f.write('__attribute__((weak)) void %s(Cpu* c) { hle_unimplemented(c, "%s", "%s"); }\n' % (
                     self.imp_name(s), lib, name))
-        with open(os.path.join(outdir, "imports.json"), "w") as f:
+        with _Output(os.path.join(outdir, "imports.json")) as f:
             json.dump([{"slot": s, "lib": l, "name": n, "kind": k} for s, (l, n, k) in sorted(self.imports.items())], f, indent=1)
 
     def write_decomp(self, f, outdir):
@@ -454,7 +478,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         f.write("const unsigned g_guest_changed_code_count = %d;\n" % len(b.differing))
 
     def write_report(self, outdir, nfiles):
-        with open(os.path.join(outdir, "report.txt"), "w") as f:
+        with _Output(os.path.join(outdir, "report.txt")) as f:
             f.write("build: %s (title %s)\n" % (self.build.name, self.build.title_id))
             for name, only in self.skipped_hooks:
                 f.write("hooks skipped: %s (only for the %s build)\n" % (name, only))

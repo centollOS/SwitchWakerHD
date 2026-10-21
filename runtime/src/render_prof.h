@@ -15,6 +15,7 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <initializer_list>
 #include <string>
 
 namespace rprof {
@@ -74,7 +75,15 @@ void classify_draw_slow();
 inline void classify_draw() {                // at each draw: count its class, clear g_reg_dirty
     if (enabled()) classify_draw_slow();
 }
-bool fast_class_reg(uint32_t reg);          // ALU constants, uniform-block and vertex-buffer words
+// ALU constants, uniform-block and vertex-buffer words (gx2 looks this up in its register class table)
+inline bool fast_class_reg(uint32_t reg) {
+    // RegDefines.h: mmSQ_ALU_CONSTANT0_0 0xC000; mmSQ_TEX_RESOURCE_WORD0 0xE000 + 0x7E0 (VS uniform
+    // blocks), + 0x250 (PS), + 0xCB0 (GS), + 0x8C0 (vertex attribute buffers), 7 words each
+    if (reg >= 0xC000 && reg < 0xC000 + 0x1000) return true;
+    for (uint32_t base : {0xE7E0u, 0xE250u, 0xECB0u, 0xE8C0u})
+        if (reg >= base && reg < base + 7 * 16) return true;  // includes the vertex stride (pipeline-only)
+    return false;
+}
 
 // shader translations: called by the Vulkan renderer for each new variant (shaders.cpp)
 void shader_variant(bool newProgram, bool onlyUnusedUnits, const char* const* groups, int groupCount);

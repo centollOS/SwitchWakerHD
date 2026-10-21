@@ -5,7 +5,9 @@
 #include <vector>
 #include <memory>
 #include "../shader_identity.h"
+#include "shader_source.h"
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
+namespace stereo { struct EyeRows; }
 
 struct LatteFetchShader;
 namespace gfxvk::vk {
@@ -35,12 +37,24 @@ struct Shader {
     LatteDecompilerShaderResourceMapping mapping;
     DescriptorRankPlan descriptorRanks;
     LatteDecompilerOutputUniformOffsets uniforms;
-    std::vector<uint32_t> spirv;
+    SpirvWords spirvWords; // shared with the SPIR-V disk cache entry
     std::shared_ptr<ShaderBinary> binary; // CPU result; immutable metadata is already published
-    std::string glsl;
+    std::string glsl; // Mutable translation scratch, released once the compile is requested.
+    // Final GLSL identity (hash + length): aliasing, disk cache and pending
+    // compilations compare this. The text itself is kept (retainedSource)
+    // only in the verification modes (WWHD_VK_SHADER_KEY_VERIFY,
+    // WWHD_VK_SHADER_SOURCE_VERIFY=1).
+    ShaderSourceId sourceId;
+    uint64_t spirvKey = 0; // disk cache / pending compilation key of the final GLSL
+    ShaderSource retainedSource;
+    const std::string& source_text() const { return retainedSource ? *retainedSource : glsl; }
     std::string translatedGlsl;  // verify mode only: the translation a graphics pack replaced
     std::string error;
-    bool ready() const { return dec && (!spirv.empty() || binary) && error.empty(); }
+    const std::vector<uint32_t>& spirv() const {
+        static const std::vector<uint32_t> none;
+        return spirvWords ? *spirvWords : none;
+    }
+    bool ready() const { return dec && (!spirv().empty() || binary) && error.empty(); }
 };
 // Render-thread-only lookup; recorded pipeline identity, never program hash.
 const Shader* find_pipeline_shader(uint64_t pipelineId, bool vertex);
@@ -69,6 +83,15 @@ struct ShaderStats {
     uint64_t verifyChecks = 0, verifyViolations = 0, verifySplitKeys = 0, verifyNs = 0;
 };
 ShaderStats shader_stats();
+// Render-thread-only diagnostic payload/capacity counters, not total allocator heap.
+// SPIR-V shared by a shader and its disk entry is counted once (spirvCapacity
+// for shaders, diskSpirvCapacity for disk entries no shader uses).
+struct ShaderMemoryStats {
+    uint64_t shaders = 0, decompilerText = 0, glslCapacity = 0, verifyCapacity = 0;
+    uint64_t spirvCapacity = 0, diskEntries = 0, diskSpirvCapacity = 0;
+    uint64_t pendingCompiles = 0, retainedSourceCapacity = 0;
+};
+ShaderMemoryStats shader_memory_stats();
 // Render-thread-only checkpoint schedules one immutable disk worker after quiet frames.
 // Explicit save joins that worker and synchronously saves the latest revision.
 // Disk cache retains SPIR-V only; decompiler metadata is always rebuilt safely.
@@ -79,9 +102,10 @@ bool save_shader_cache();
 std::vector<uint32_t> compile_compute(const std::string& source, std::string* error = nullptr);
 std::vector<uint32_t> compile_glsl(const std::string& source, bool vertex, std::string* error = nullptr);
 // Caller-owned CPU scratch; all active bytes are freshly zeroed and packed.
+// eyeRows: receives the rows the eye offset shifted (stereo_projection.h)
 void pack_uniforms_into(const uint32_t* regs, const Shader& shader,
     std::vector<uint8_t>& data, float scaleX = 1.0f, float scaleY = 1.0f,
-    float eyeOffset = 0, float convergence = 600);
+    float eyeOffset = 0, float convergence = 600, stereo::EyeRows* eyeRows = nullptr);
 std::vector<uint8_t> pack_uniforms(const uint32_t* regs, const Shader& shader,
     float scaleX = 1.0f, float scaleY = 1.0f);
 // After guest memory replacement and render drain; compiled variants stay alive.

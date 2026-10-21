@@ -111,7 +111,7 @@ void import_legacy(const fs::path& stage,const std::string& source_name){
     m["description"]=description;
     std::ofstream out(stage/"manifest.json");out<<json::dump(m)<<'\n';out.close();require(bool(out),"Cannot write imported manifest");
 }
-Files index(const fs::path& directory){
+Files index(const fs::path& directory, bool allow_empty_world){
     require(fs::is_directory(directory),"Content folder is missing");
     require(!fs::is_symlink(directory),"Content paths may not use symlinks");
     Files out;uint64_t total=0;size_t count=0;
@@ -120,11 +120,14 @@ Files index(const fs::path& directory){
         if(e.is_directory())continue;
         require(e.is_regular_file(),"Unsupported content file type");require(!lower(e.path().filename().string()).starts_with(".deleted_"),"SDCafiine file hiding is not supported yet");auto n=e.file_size();total+=n;
         require(n<=128ull*1024*1024&&total<=512ull*1024*1024,"Content size limit exceeded");
+        // Source-controlled world examples use an empty marker to keep their
+        // content folder. It is not a game replacement shared by every mod.
+        if(allow_empty_world&&e.path().filename()==".gitkeep"&&n==0)continue;
         auto relative=e.path().lexically_relative(directory).generic_string();
         require(archive::relative_path(relative),"Invalid content path");
         require(out.emplace(lower(relative),e.path().string()).second,"Duplicate content path (case insensitive)");
     }
-    require(!out.empty(),"Content mod contains no files");return out;
+    require(allow_empty_world || !out.empty(),"Content mod contains no files");return out;
 }
 void activate(Files files){
     auto next=files.empty()?nullptr:std::make_shared<const Files>(std::move(files));

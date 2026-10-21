@@ -38,9 +38,9 @@ mod's page), the *Experimental* tag where it applies and a one-word status (*On*
 *Restart to apply*, *Update available*, *Error*).
 
 - **Built-in** ("Included with the game. Switch on or off any time."): the mods compiled
-  into the game: direct camera, mouse camera, first-person shortcut, wall climbing,
-  run/swim speed, faster ladders, faster sidling, sailing speed, automatic wind, quick
-  doors, fast forward and fast scene changes; all off by default.
+  into the game: direct camera, mouse camera, camera-directed items, first-person shortcut, extended enemy lock-on, wall climbing,
+  run/swim speed, faster ladders, faster sidling, faster ivy climbing, faster ledge hanging, sailing speed, automatic wind, jump anywhere,
+  quick doors, fast forward and fast scene changes; all off by default.
 - **Community** ("Made by players. Downloaded from the mod catalogue."): every installed
   package (from the catalogue, from a file or folder, graphics packs and content packs),
   then **Available to download**: the catalogue's mods that aren't downloaded yet (see
@@ -96,6 +96,42 @@ now** (on Android: close and reopen the app). There is one restart offer at a ti
 the end of an install and the page of a mod that is off but still loaded offer
 their own instead, and switching mods does not open a popup.
 
+**Letterbox while targeting** is on by default in **Mods > Built-in > Camera**; switch it off to remove bars during normal targeting while keeping cutscenes and special cameras unchanged.
+
+### Camera-directed items (prototype)
+
+**Camera-directed items (prototype)** is off by default. Enable it in
+**Mods > Built-in** to turn Link toward the free camera once when starting a
+supported grounded item action: bows, boomerang, hookshot, grappling hook,
+qualifying inventory-bomb throws, hammer strikes and empty-bottle swings.
+Grounded Deku Leaf gusts also follow the camera's up/down direction.
+Enemy lock-on and existing first-person aiming keep priority; other projectile
+pitch and ongoing aim stay native. This is partial, experimental coverage, not
+continuous camera-facing movement or full camera aiming for every item.
+Water, bait and other unsupported or contextual actions stay unchanged.
+
+### Extended enemy lock-on
+
+**Extended enemy lock-on** is off by default. Switch it on in **Mods > Built-in**
+to adjust **Enemy lock-on range** from **1x to 3x** (default **1x**). Only enemy
+horizontal targeting distances change; the game's eligibility rules and NPC
+interactions stay unchanged. **Cycle enemy targets with R3** is on by default:
+press R3 while locked onto an enemy to select the next eligible enemy. With no
+alternative target, the lock stays unchanged. Switching the mod off restores
+original targeting behavior.
+
+### Quick-use locked items
+
+In **Mods > Built-in**, switch on **Quick-use locked items** (off by default).
+While locked onto an enemy, one item-button press equips and uses a bow (including
+fire/ice/light arrows), boomerang, hookshot or grappling rope; inventory bombs
+are readied and thrown, and equipping the hammer completes one native strike.
+Already-equipped hammer attacks remain native. Without an enemy lock, aiming
+and item use are unchanged; native item restrictions and resource costs still apply.
+Choose **Quick-use animation speed**: **1x (vanilla)**, **1.25x** or **1.5x**.
+It speeds up supported equip animations and boomerang wind-up, not projectile
+flight or grapple countdowns. Choosing a speed alone does not enable quick use.
+
 Run/swim speed offers three animation choices. **Native** keeps the game's cycle with the boosted
 cadence. **Dash instead of walk** replaces the low-speed walk portion; the normal full-speed run
 already uses dash. **Sprint pose** adds a forward torso lean, compensating head tilt and stronger
@@ -119,23 +155,57 @@ emit a second starting burst. While the swim boost is active, each arm pull spla
 own sea-coloured water element at that side, and a light foam trail follows behind every few
 steps. Both use the game's own water particles, so the native swim wake is untouched.
 
+The boost bar is the ring that shows how much boost is left. It appears while you boost and
+while it refills, then fades out. Set **Boost time** to "no limit" and there is nothing to run
+out, so no bar appears at all. To keep a limit but hide the bar, turn off **Show boost bar**
+(on by default): the boost, its time limit and its cooldown work exactly as before, you just
+don't see the ring. The option is saved with your other run/swim settings and in your mod
+profiles; `WWHD_MOD_MOVE_BAR=0` or `1` overrides it at startup. The boost bar and the
+stamina wheel of "Climb any wall" both fade out while the pause menu, an item or collection
+screen, the map, a cutscene or a conversation is on screen, and come back when you return
+to play.
+
+The boost button can be L3, R3, L, R, ZL or ZR, or **Roll, then hold A**. With that choice,
+press A while running: Link rolls exactly as usual. Keep A held as he comes out of the roll and
+the boost starts; it lasts as long as you hold A and ends when you let go or stop running.
+Boost time, cooldown and the boost bar work as with the other buttons. Only a roll you start
+while running counts: rolling from a standstill, letting go of A during the roll, or holding A
+from before (after talking to someone or picking something up) doesn't start a boost, so A
+keeps all its usual jobs. This choice is always held, even with **Press to toggle** selected,
+and it works on land only: you can't roll in water, so swimming isn't boosted with it (pick
+one of the other buttons if you want a swimming boost). The choice is saved like the other
+buttons and in your mod profiles; `WWHD_MOD_MOVE_BUTTON=L3`, `R3`, `L`, `R`, `ZL`, `ZR` or
+`roll-a` overrides it at startup.
+
 Faster ladders and faster sidling each have one speed slider on their mod page (1x to 3x,
 1.5x when first switched on). Both speed up the game's own animation, so hands and feet stay in step with the
 movement: a ladder clip moves Link by its own motion, and sidling scales the animation and the
 sidling speed together. Climbing on and off a ladder speeds up the same way, and the next rung
 starts right after the footstep instead of after a short pause, so the climb speeds up by about
-the chosen factor; the footstep sounds stay on their frames. Sailing speed multiplies the speed
+the chosen factor; the footstep sounds stay on their frames. Faster ivy climbing (up, down and
+sideways on ivy and vines, also on walls climbed with Climb any wall) and faster ledge hanging
+(moving along a ledge while hanging from it) work the same way, each with its own slider. Sailing speed multiplies the speed
 the wind gives the boat, with separate sliders on its mod page for the normal sail and the Swift Sail; the
 boat's jump keeps its normal height. Automatic wind makes the normal sail behave like the Swift
 Sail: while you sail, the wind turns to blow the way the boat is heading (in eight directions,
 as with the Swift Sail). It changes only the wind; the normal sail keeps its own speed, look and
 sounds. On the macOS menu bar the same switches and a few speed presets are under Gameplay.
-`WWHD_MOD_LADDER_SPEED`, `WWHD_MOD_SIDLE_SPEED`, `WWHD_MOD_SAIL_SPEED` and `WWHD_MOD_AUTO_WIND`
-(`=1`) switch them on at startup, with the factors `WWHD_MOD_LADDER_FACTOR`,
-`WWHD_MOD_SIDLE_FACTOR`, `WWHD_MOD_SAIL_FACTOR` and `WWHD_MOD_SWIFT_SAIL_FACTOR`. With a mod off,
+`WWHD_MOD_LADDER_SPEED`, `WWHD_MOD_SIDLE_SPEED`, `WWHD_MOD_IVY_SPEED`, `WWHD_MOD_HANG_SPEED`,
+`WWHD_MOD_SAIL_SPEED` and `WWHD_MOD_AUTO_WIND` (`=1`) switch them on at startup, with the factors
+`WWHD_MOD_LADDER_FACTOR`, `WWHD_MOD_SIDLE_FACTOR`, `WWHD_MOD_IVY_FACTOR`, `WWHD_MOD_HANG_FACTOR`,
+`WWHD_MOD_SAIL_FACTOR` and `WWHD_MOD_SWIFT_SAIL_FACTOR`. With a mod off,
 the game runs its original code. These mods work the same at 30 fps, with 60/120/240 fps
 interpolation and with true 60: they change animation rates and speed targets inside the game's
 own steps, never amounts added per frame.
+
+Jump anywhere makes Link jump from standing or running with a button of your choice (L by
+default; also R, ZL, ZR, L3 or R3), using the game's own jump off a ledge, a little higher. The
+button keeps its normal use. Options on its mod page: **Double jump** allows one more jump in the
+air, and **No automatic jumps off ledges** makes Link drop off an edge instead of jumping by
+himself; press the button just after leaving the edge to jump. It does not work in cutscenes or
+dialogue or while swimming, climbing or on a ladder, and the moon jump cheat keeps L while it is
+on. `WWHD_MOD_JUMP=1` switches it on at startup (`WWHD_MOD_JUMP_DOUBLE`, `WWHD_MOD_JUMP_NO_AUTO`,
+`WWHD_MOD_JUMP_BUTTON`).
 
 **More > Install from a file or folder** accepts a local folder or `.wwhdmod` ZIP
 from the file/folder picker; the review for switching it on opens right away
@@ -336,7 +406,7 @@ Package manifest fields:
 | `experimental` | Optional `true` for untested mods: hidden by default, enabling backs up the saves first (manager 1.4) |
 | `kind` | `native`, `settings`, `content` or `cemu` |
 | `abi_version`, `binaries` | Native ABI `1`; platform-to-relative-library map |
-| `content_dir` | Content package: relative folder holding game-relative replacement files |
+| `content_dir` | Content package: relative folder holding game-relative replacement files. A content package that only declares story content (letters, charts, items, quests, models, actors, scenes) can leave it out |
 | `cemu_dir` | Cemu package: relative folder holding `rules.txt` and shader files (empty for the package root) |
 | `settings` | Settings preset: built-in IDs to booleans |
 | `dependencies` | Objects with `id` and optional `minimum_version`; `builtin:<id>` allowed |
@@ -486,7 +556,10 @@ resolver. Missing paths fall through unchanged. Directory enumeration retains
 original names but reports replacement sizes for replaced entries: this adapter
 targets replacement of existing resources, not discovery of new files or
 deletion/hiding. Conflicting enabled packages are rejected, rather than silently
-choosing a load order. Content packages can declare setup options, but cannot declare dependencies. Native packages can depend on content packages, but wait until
+choosing a load order. Content packages can declare setup options, but cannot declare dependencies, with one
+exception: a content package with story content (letters, charts, items, quests, models, actors or scenes)
+depends on the Story Notebook, the story system's own package; it gets that dependency even when it doesn't
+declare it, and it can't depend on anything else. Native packages can depend on content packages, but wait until
 the required startup content is active.
 
 Installed payloads should not be edited externally while the game runs.

@@ -88,11 +88,11 @@ void save_and_quit() {
 void ask() {
     LOG("[quit] asking before quitting");
     NSAlert* a = [NSAlert new];
-    a.messageText = @"Quit Wind Waker HD?";
-    a.informativeText = [NSString stringWithFormat:@"Progress since your last in-game save is lost.\n\n"
+    a.messageText = @(quitprompt::kTitle);
+    a.informativeText = [NSString stringWithFormat:@"%s\n\n"
                                                    @"Save State and Quit keeps it in save state slot %d (Save States menu), "
                                                    @"replacing what is there.",
-                                                   quitprompt::kSaveSlot];
+                                                   quitprompt::kProgressLost, quitprompt::kSaveSlot];
     a.alertStyle = NSAlertStyleWarning;
     [a addButtonWithTitle:@"Quit"];    // default (Return)
     [a addButtonWithTitle:@"Cancel"];  // Esc
@@ -166,6 +166,13 @@ bool quit_request(const char* from) {
 @end
 
 namespace gfx {
+// Settings > Quit Game (overlay/quit_dialog.h) has asked already: quit as the app menu's Quit does once
+// answered (applicationShouldTerminate: lets it through, then display.mm's orderly exit)
+void quit_answered() {
+    LOG("[quit] Settings > Quit Game: quitting");
+    quit_now();
+}
+
 Class tv_window_class() { return [WWTvWindow class]; }
 
 // with the windows (display.mm): the TV window's delegate and the application's

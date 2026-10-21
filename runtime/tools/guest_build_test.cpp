@@ -68,5 +68,47 @@ int main(int argc,char** argv) {
     {std::ofstream out(fixture/"bad.json");out<<R"({"format_version":999})";}
     failed=false;try{guestmods::BuildBridge::read((fixture/"bad.json").string(),"cache");}catch(const std::exception&){failed=true;}
     assert(failed);
+    // AppImage (issue #230): the image is mounted at a new /tmp/.mount_XXXXXX on every start. A format 3
+    // configuration names its tools as "$RELEASE/..."; a format 2 one (setup before the fix) has the
+    // absolute paths of the mount it was written from, mapped onto the running release.
+    const auto first=fixture/".mount_AAA",second=fixture/".mount_BBB",data=fixture/"data";
+    fs::create_directories(first/"tools"/"guestmod");fs::create_directories(first/"sdk"/"include");
+    fs::create_directories(first/"tools"/"installer");fs::create_directories(data/"toolchain");
+    std::ofstream(first/"tools"/"guestmod"/"build_guest_mod.py")<<"";
+    std::ofstream(first/"tools"/"installer"/"setup.py")<<"";
+    std::ofstream(data/"toolchain"/"zig")<<"";
+    auto json_path=[](const fs::path& p){auto s=p.generic_string();std::string out;for(char c:s){if(c=='\\'||c=='"')out+='\\';out+=c;}return out;};
+    {std::ofstream out(data/"stale.json");
+     out<<"{\"format_version\":2,\"python\":[\"python3\"],\"compiler\":[\""<<json_path(data/"toolchain"/"zig")<<"\",\"cc\"],"
+        <<"\"builder\":\""<<json_path(first/"tools"/"guestmod"/"build_guest_mod.py")<<"\","
+        <<"\"include\":\""<<json_path(first/"sdk"/"include")<<"\","
+        <<"\"missing\":\""<<json_path(first/"tools"/"gone.py")<<"\"}";}
+    {std::ofstream out(data/"marker.json");
+     out<<R"({"format_version":3,"python":["python3"],"compiler":["$RELEASE/tools/guestmod/build_guest_mod.py","cc"],)"
+        <<R"("builder":"$RELEASE/tools/guestmod/build_guest_mod.py","include":"$RELEASE/sdk/include","zig_cache":"./toolchain/zig-cache"})";}
+    fs::rename(first,second);
+    for(const auto* name:{"stale.json","marker.json"}) {
+        auto moved=guestmods::BuildBridge::read((data/name).string(),"cache",second.string());
+        assert(fs::path(moved.builder)==(second/"tools"/"guestmod"/"build_guest_mod.py").lexically_normal());
+        assert(fs::path(moved.include)==(second/"sdk"/"include").lexically_normal());
+        assert(moved.python[0]=="python3"&&moved.compiler[1]=="cc");
+        assert(fs::is_regular_file(moved.builder)&&fs::is_directory(moved.include));
+    }
+    assert(fs::path(guestmods::BuildBridge::read((data/"stale.json").string(),"cache",second.string()).compiler[0])==data/"toolchain"/"zig");
+    assert(fs::path(guestmods::BuildBridge::read((data/"marker.json").string(),"cache",second.string()).zig_cache)==(data/"toolchain"/"zig-cache").lexically_normal());
+    // a path that is gone from the running release too, or no release to resolve against: left as stored
+    const auto gone=(first/"tools"/"gone.py").string();
+    assert(guestmods::resolve_path(gone,data,second.string())==gone);
+    assert(guestmods::resolve_path(gone,data,"")==gone);
+    assert(guestmods::BuildBridge::read((data/"marker.json").string(),"cache","").builder=="$RELEASE/tools/guestmod/build_guest_mod.py");
+    assert(guestmods::resolve_path("$RELEASE/tools/installer/setup.py",data,second.string())==(second/"tools"/"installer"/"setup.py").lexically_normal().string());
+    // the release folder is the running AppImage's $APPDIR
+#ifdef _WIN32
+    _putenv_s("APPDIR",second.string().c_str());
+#else
+    setenv("APPDIR",second.string().c_str(),1);
+#endif
+    assert(fs::path(guestmods::release_root())==second);
+    assert(fs::path(guestmods::BuildBridge::read((data/"stale.json").string(),"cache").builder)==(second/"tools"/"guestmod"/"build_guest_mod.py").lexically_normal());
     std::cout<<"guest build argument/result bridge passed\n";
 }

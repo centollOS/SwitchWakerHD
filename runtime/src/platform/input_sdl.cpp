@@ -1,14 +1,19 @@
+#include "platform/process_peak_rss.h"
+#include "platform/present_observer.h"
 #ifdef __ANDROID__
 #include <jni.h>
+#include "phone_rumble.h"
 #include "overlay/hostui.h"
+#include "quest_theater.h"
 #endif
 #include "gfx/display_modes.h"
 #include "android_controller.h"
 #include "../mods/fast_forward.h"
+#include "../mods/mods.h"
 #ifdef WWHD_HAS_VULKAN
 #include "gfx/vulkan/stutter_trace.h"
 #include "gfx/vulkan/headstart.h"
-namespace gx2 { void checkpoint_vulkan_caches(); }
+namespace gx2 { void checkpoint_vulkan_caches(); void checkpoint_present_observer(); }
 #endif
 // SDL3 keyboard/gamepad input. Stable key IDs preserve existing controls.json mappings.
 #include "input_sdl.h"
@@ -34,6 +39,7 @@ namespace gx2 { void checkpoint_vulkan_caches(); }
 #include "../overlay/overlay.h"
 #include "../overlay/release_gate.h"
 #include "../overlay/text_entry.h"
+#include "../fixed_seed.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -62,6 +68,8 @@ void mouse_binding_wheel(float delta, bool eligible) {
     std::lock_guard lk(g_mu); g_mouse_bindings.wheel(delta, eligible);
 }
 static bool g_keys[256]={},g_script_keys[256]={};
+static std::atomic<bool> g_gameplay_focus{false};
+bool gameplay_focused(){return g_gameplay_focus.load(std::memory_order_relaxed);}
 static PadState g_pad;
 static float g_values[input_map::kPadCount]={};
 static bool g_touch=false;static float g_tx=0,g_ty=0;
@@ -207,7 +215,7 @@ static int keycode(SDL_Scancode code) {
  }
 }
 void set_touch(bool down,float x,float y){std::lock_guard lk(g_mu);g_touch=down;g_tx=x;g_ty=y;}
-void release_keys(){mods::fast_forward_reset();std::lock_guard lk(g_mu);g_mouse_bindings.consume();memset(g_keys,0,sizeof g_keys);g_touch=false;}
+void release_keys(){mods::fast_forward_reset();mods::lock_on_reset();mods::quick_use_reset();std::lock_guard lk(g_mu);g_mouse_bindings.consume();memset(g_keys,0,sizeof g_keys);g_touch=false;}
 void held_keys(bool* keys){std::lock_guard lk(g_mu);for(int i=0;i<256;i++)keys[i]=g_keys[i]||g_script_keys[i];}
 void controller_values(float* out){std::lock_guard lk(g_mu);std::copy(std::begin(g_values),std::end(g_values),out);}
 void host_controller_values(float* out){controller_values(out);}
@@ -293,13 +301,44 @@ static void rumble_all_locked(Uint16 level,Uint32 ms){
   sent=level;
  }
 }
+#ifdef __ANDROID__
+static void phone_rumble_level(Uint16 level) {
+ static phone_rumble::Refresh refresh;
+ if(!refresh.send(level,SDL_GetTicks()))return;
+ auto* env=static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+ if(!env)return;
+ jobject activity=static_cast<jobject>(SDL_GetAndroidActivity());
+ if(!activity)return;
+ jclass cls=env->GetObjectClass(activity);
+ if(cls){
+  if(jmethodID method=env->GetStaticMethodID(cls,"phoneRumble","(I)V"))env->CallStaticVoidMethod(cls,method,(jint)level);
+  env->DeleteLocalRef(cls);
+ }
+ if(env->ExceptionCheck())env->ExceptionClear();
+ env->DeleteLocalRef(activity);
+}
+#endif
 static void apply_rumble(){
  g_rumble_update_ms=SDL_GetTicks();
+#ifdef __ANDROID__
+ const auto mode=phone_rumble::choice.load();
+ // Avoid the touch-visibility clock query for phone-off/controller-only play.
+ const bool touch=phone_rumble::touch_selected(mode!=phone_rumble::kOff && gfx::g_touch_controls,
+                  phone_rumble::last_input_touch.load()) && gfx::touch_buttons_visible();
+ const bool phone=phone_rumble::allowed(mode,touch,!g_rumble_controllers.empty());
+ if(!phone)phone_rumble_level(0);
+ if((g_rumble_controllers.empty()&&!phone)||g_rumble_quit)return;
+#else
  if(g_rumble_controllers.empty()||g_rumble_quit)return;  // no controller with a motor: nothing to do
+#endif
  // the share of "on" over the next host frame (the motor spins up and down slower than that)
  float level=rumble::host_level(1000000/60);
  if(overlay::is_open()||!SDL_GetKeyboardFocus())level=0;  // the game cannot stop it from here
+#ifdef __ANDROID__
+ if(phone)phone_rumble_level((Uint16)(std::clamp(level,0.f,1.f)*0xFFFFu));
+#endif
  std::lock_guard lk(g_pads_mu);
+ g_rumble_update_ms=SDL_GetTicks();  // with the motors, under the lock: the watchdog decides on both at once
  rumble_all_locked((Uint16)(std::clamp(level,0.f,1.f)*0xFFFFu),kRumbleRefreshMs);
 }
 static void rumble_watchdog(){
@@ -307,6 +346,9 @@ static void rumble_watchdog(){
   SDL_Delay(100);
   if(SDL_GetTicks()-g_rumble_update_ms<kRumbleStallMs)continue;
   std::lock_guard lk(g_pads_mu);
+  // again under the lock: an update may have run between the check above and here, and the level it
+  // just sent must stand (stopping it raced the update: input_sdl_test on a busy Windows runner)
+  if(SDL_GetTicks()-g_rumble_update_ms<kRumbleStallMs)continue;
   if(std::any_of(g_rumble_sent.begin(),g_rumble_sent.end(),[](auto& s){return s.second!=0;})){
    LOG("[rumble] the main loop stalls: motors stopped");
    rumble_all_locked(0,0);  // the next update runs them again
@@ -380,6 +422,82 @@ static void sensor_event(const SDL_GamepadSensorEvent& e){
  auto a=g_accel.find(e.which);if(a==g_accel.end())return;
  motion::controller_sample((uint64_t)e.which,e.sensor_timestamp,e.data,a->second.data());
 }
+#ifdef __ANDROID__
+// The device sensors are independent of gamepads. SDL reports natural-screen axes;
+// remap them to the shown screen, then to the existing flat-controller fusion frame.
+// No sensor subsystem/handles are opened on the default Off path.
+static SDL_Sensor* g_device_gyro=nullptr;
+static SDL_Sensor* g_device_accel=nullptr;
+static bool g_device_attempted=false,g_device_subsystem=false,g_device_foreground=true,g_device_accel_seen=false;
+static std::array<float,3> g_device_acceleration{};
+static int g_device_rotation=-1;
+static int orientation_quarters(SDL_DisplayOrientation orientation){
+ switch(orientation){
+ case SDL_ORIENTATION_PORTRAIT:return 0;
+ case SDL_ORIENTATION_LANDSCAPE:return 1;
+ case SDL_ORIENTATION_PORTRAIT_FLIPPED:return 2;
+ case SDL_ORIENTATION_LANDSCAPE_FLIPPED:return 3;
+ default:return -1;
+ }
+}
+static void close_device_sensors(){
+ if(g_device_gyro)SDL_CloseSensor(g_device_gyro);
+ if(g_device_accel)SDL_CloseSensor(g_device_accel);
+ g_device_gyro=g_device_accel=nullptr;
+ if(g_device_subsystem)SDL_QuitSubSystem(SDL_INIT_SENSOR);
+ g_device_subsystem=false;g_device_accel_seen=false;g_device_rotation=-1;
+ motion::device_reset();
+}
+static void update_device_sensors(){
+ SDL_Window* focused=motion::wants_device_sensors()?SDL_GetKeyboardFocus():nullptr;
+ const bool want=focused&&g_device_foreground&&
+                 !getenv("WWHD_NO_HOST_INPUT")&&!overlay::blocks_input();
+ if(!want){
+  if(g_device_attempted){close_device_sensors();g_device_attempted=false;}
+  return;
+ }
+ if(!g_device_attempted){
+  g_device_attempted=true;
+  g_device_subsystem=SDL_InitSubSystem(SDL_INIT_SENSOR);
+  if(g_device_subsystem){
+   int count=0;auto* ids=SDL_GetSensors(&count);
+   for(int i=0;i<count;i++){
+    const auto type=SDL_GetSensorTypeForID(ids[i]);
+    if(type==SDL_SENSOR_GYRO&&!g_device_gyro)g_device_gyro=SDL_OpenSensor(ids[i]);
+    if(type==SDL_SENSOR_ACCEL&&!g_device_accel)g_device_accel=SDL_OpenSensor(ids[i]);
+   }
+   SDL_free(ids);
+  }
+  const bool available=g_device_gyro&&g_device_accel;
+  motion::set_device_sensors_available(available);
+  if(!available){LOG("[gyro] this device has no usable gyro/accelerometer pair: %s",SDL_GetError());close_device_sensors();return;}
+  LOG("[gyro] this device's motion sensors on");
+ }
+ if(!g_device_gyro||!g_device_accel)return;
+ auto display=SDL_GetDisplayForWindow(focused);
+ if(!display)display=SDL_GetPrimaryDisplay();
+ const int natural=orientation_quarters(SDL_GetNaturalDisplayOrientation(display));
+ const int current=orientation_quarters(SDL_GetCurrentDisplayOrientation(display));
+ const int rotation=natural<0||current<0?-1:(current-natural+4)%4;
+ if(rotation!=g_device_rotation){
+  // A bias/gravity estimate in the old axes cannot be carried into the new ones.
+  // Leave the virtual GamePad pose alone, discard pending turns and await fresh acceleration.
+  motion::device_reset();g_device_accel_seen=false;g_device_rotation=rotation;
+ }
+}
+static void device_sensor_event(const SDL_SensorEvent& e){
+ if(!g_device_gyro||!g_device_accel||g_device_rotation<0||!g_device_foreground||
+    !SDL_GetKeyboardFocus()||overlay::blocks_input()||getenv("WWHD_NO_HOST_INPUT")||!motion::wants_device_sensors())return;
+ if(e.which==SDL_GetSensorID(g_device_accel)){
+  std::copy_n(e.data,3,g_device_acceleration.begin());g_device_accel_seen=true;return;
+ }
+ if(e.which!=SDL_GetSensorID(g_device_gyro)||!g_device_accel_seen)return;
+ const auto g=motion::device_to_sdl({e.data[0],e.data[1],e.data[2]},g_device_rotation);
+ const auto a=motion::device_to_sdl({g_device_acceleration[0],g_device_acceleration[1],g_device_acceleration[2]},g_device_rotation);
+ const float gyro[3]={g.x,g.y,g.z},accel[3]={a.x,a.y,a.z};
+ motion::device_sample(e.sensor_timestamp,gyro,accel);
+}
+#endif
 // What the dominant pad (first connected still present) has printed on its face buttons, in the
 // order kPadA, kPadB, kPadX, kPadY: south, east, west, north (issue #78's Automatic preset).
 static void dominant_labels(input_map::FaceLabel out[4]){
@@ -417,6 +535,9 @@ static void note_dominant_labels(){
  input_map::FaceLabel labels[4];dominant_labels(labels);input_map::note_face_labels(labels);
 }
 static void open_controller(SDL_JoystickID id){
+#ifdef __ANDROID__
+ if(!SDL_IsJoystickVirtual(id))phone_rumble::last_input_touch=false;
+#endif
  std::lock_guard lk(g_pads_mu);
  if(g_controllers.contains(id))return;
 #ifdef __ANDROID__
@@ -545,10 +666,11 @@ bool touch_from_controller(SDL_TouchID id){
 // debug: WWHD_TEST_POST_KEYS=300:F1,410:Down,420:Return,430:K/30 (held 30 frames),500:Text=Tetra pushes key
 // presses (and typed text) at TV frames into SDL's event queue, as gfx/input.mm does on macOS: they take the
 // real path in hidden test runs and reach only the settings overlay and the game's text prompt.
+// Mouse1..Mouse5 click in the TV window (the mouse camera captures the pointer; needs host input).
 static constexpr Uint64 kTestEventTime=4242;  // timestamp that marks them
 static bool test_event(const SDL_Event& e){return e.common.timestamp==kTestEventTime;}
 static void post_test_keys(){
- struct Post{uint64_t frame;SDL_Scancode code;bool down;std::string text;};
+ struct Post{uint64_t frame;SDL_Scancode code;bool down;std::string text;SDL_Keymod mods=SDL_KMOD_NONE;Uint8 button=0;};
  static std::vector<Post> posts=[]{
   std::vector<Post> v;const char* e=getenv("WWHD_TEST_POST_KEYS");
   for(const char* p=e;p&&*p;){
@@ -556,10 +678,23 @@ static void post_test_keys(){
    size_t len=strcspn(p,",");std::string k(p,len);p+=len+(p[len]==',');
    if(k.rfind("Text=",0)==0){v.push_back({f,SDL_SCANCODE_UNKNOWN,true,k.substr(5)});continue;}
    uint64_t hold=0;if(size_t sl=k.find('/');sl!=std::string::npos){hold=strtoull(k.c_str()+sl+1,nullptr,10);k.resize(sl);}
+   SDL_Keymod mods=SDL_KMOD_NONE;
+   for(;;){
+    if(k.rfind("Shift+",0)==0){mods=SDL_Keymod(mods|SDL_KMOD_SHIFT);k=k.substr(6);}
+    else if(k.rfind("Ctrl+",0)==0){mods=SDL_Keymod(mods|SDL_KMOD_CTRL);k=k.substr(5);}
+    else if(k.rfind("Alt+",0)==0){mods=SDL_Keymod(mods|SDL_KMOD_ALT);k=k.substr(4);}
+    else if(k.rfind("Cmd+",0)==0){mods=SDL_Keymod(mods|SDL_KMOD_GUI);k=k.substr(4);}
+    else break;
+   }
    int code=input_map::key_from_id(k);SDL_Scancode sc=SDL_SCANCODE_UNKNOWN;
+   if(code>=input_map::kMouse1&&code<input_map::kMouse1+5){
+    static constexpr Uint8 kButtons[]={SDL_BUTTON_LEFT,SDL_BUTTON_RIGHT,SDL_BUTTON_MIDDLE,SDL_BUTTON_X1,SDL_BUTTON_X2};
+    const Uint8 button=kButtons[code-input_map::kMouse1];
+    v.push_back({f,sc,true,{},mods,button});v.push_back({f+hold,sc,false,{},mods,button});continue;
+   }
    for(int i=0;i<SDL_SCANCODE_COUNT&&code!=input_map::kNoKey;i++)if(keycode((SDL_Scancode)i)==code){sc=(SDL_Scancode)i;break;}
    if(sc==SDL_SCANCODE_UNKNOWN){LOG("[input] WWHD_TEST_POST_KEYS: unknown key %s",k.c_str());continue;}
-   v.push_back({f,sc,true,{}});v.push_back({f+hold,sc,false,{}});
+   v.push_back({f,sc,true,{},mods});v.push_back({f+hold,sc,false,{},mods});
   }
   std::stable_sort(v.begin(),v.end(),[](const Post& a,const Post& b){return a.frame<b.frame;});
   return v;
@@ -568,7 +703,13 @@ static void post_test_keys(){
  for(;next<posts.size()&&render::frame_count()>=posts[next].frame;next++){
   const Post& p=posts[next];SDL_Event e{};e.common.timestamp=kTestEventTime;
   if(!p.text.empty()){texts.push_back(p.text);e.type=SDL_EVENT_TEXT_INPUT;e.text.windowID=g_prompt_window?SDL_GetWindowID(g_prompt_window):0;e.text.text=texts.back().c_str();}
-  else{e.type=p.down?SDL_EVENT_KEY_DOWN:SDL_EVENT_KEY_UP;e.key.scancode=p.code;e.key.down=p.down;e.key.windowID=g_prompt_window?SDL_GetWindowID(g_prompt_window):0;}
+  else if(p.button){
+   e.type=p.down?SDL_EVENT_MOUSE_BUTTON_DOWN:SDL_EVENT_MOUSE_BUTTON_UP;e.button.button=p.button;e.button.down=p.down;e.button.which=1;
+   e.button.windowID=g_prompt_window?SDL_GetWindowID(g_prompt_window):0;
+   LOG("[input] test mouse button %d %s at frame %llu",p.button,p.down?"down":"up",(unsigned long long)render::frame_count());
+   SDL_PushEvent(&e);continue;
+  }
+  else{e.type=p.down?SDL_EVENT_KEY_DOWN:SDL_EVENT_KEY_UP;e.key.scancode=p.code;e.key.down=p.down;e.key.mod=p.mods;e.key.windowID=g_prompt_window?SDL_GetWindowID(g_prompt_window):0;}
   LOG("[input] test %s %s%s at frame %llu",p.text.empty()?"key":"text",p.text.empty()?SDL_GetScancodeName(p.code):p.text.c_str(),p.text.empty()?(p.down?" down":" up"):"",(unsigned long long)render::frame_count());
   SDL_PushEvent(&e);
  }
@@ -588,6 +729,7 @@ static bool text_entry_event(const SDL_Event& event){
  default:return false;
  }
 }
+int physical_keycode(int scancode) { return keycode(static_cast<SDL_Scancode>(scancode)); }
 void handle_event(const SDL_Event& event){
  // Defer focus loss until update(), after the event queue drains: a TV -> GamePad
  // handoff must move the menu rather than close it between the loss and gain events.
@@ -596,7 +738,23 @@ void handle_event(const SDL_Event& event){
  else if(event.type==SDL_EVENT_WINDOW_HIDDEN || event.type==SDL_EVENT_WINDOW_MINIMIZED ||
            event.type==SDL_EVENT_WINDOW_SHOWN || event.type==SDL_EVENT_WINDOW_RESTORED)
   update_overlay_window(SDL_GetKeyboardFocus());
+#ifdef __ANDROID__
+ if(event.type==SDL_EVENT_WILL_ENTER_BACKGROUND||event.type==SDL_EVENT_TERMINATING){
+  g_device_foreground=false;close_device_sensors();g_device_attempted=false;
+ }
+ if(event.type==SDL_EVENT_DID_ENTER_FOREGROUND)g_device_foreground=true;
+ if(event.type==SDL_EVENT_DISPLAY_ORIENTATION)update_device_sensors();
+ if(event.type==SDL_EVENT_SENSOR_UPDATE){device_sensor_event(event.sensor);return;}
+#endif
  if((event.type==SDL_EVENT_AUDIO_DEVICE_ADDED||event.type==SDL_EVENT_AUDIO_DEVICE_REMOVED||event.type==SDL_EVENT_AUDIO_DEVICE_FORMAT_CHANGED)&&!event.adevice.recording)audio::flush();
+#ifdef __ANDROID__
+ // Showing touch buttons alone does not select phone feedback. Actual touch-pad input
+ // selects it; physical-controller or keyboard input deselects the phone again.
+ if(event.type==SDL_EVENT_KEY_DOWN ||
+    (event.type==SDL_EVENT_GAMEPAD_BUTTON_DOWN && !SDL_IsJoystickVirtual(event.gbutton.which)) ||
+    (event.type==SDL_EVENT_GAMEPAD_AXIS_MOTION && std::abs(int(event.gaxis.value))>8192 && !SDL_IsJoystickVirtual(event.gaxis.which)))
+  phone_rumble::last_input_touch=false;
+#endif
  if (event.type==SDL_EVENT_MOUSE_REMOVED) {
   std::lock_guard lk(g_mu);g_mouse_bindings.remove_device(event.mdevice.which);
  }
@@ -604,11 +762,15 @@ void handle_event(const SDL_Event& event){
   const bool eligible = g_prompt_window && mods::mouse_captured() && !overlay::captures() && !g_done;
   if (event.type==SDL_EVENT_MOUSE_BUTTON_DOWN || event.type==SDL_EVENT_MOUSE_BUTTON_UP) {
    int b=event.button.button==SDL_BUTTON_LEFT?0:event.button.button==SDL_BUTTON_RIGHT?1:event.button.button==SDL_BUTTON_MIDDLE?2:event.button.button==SDL_BUTTON_X1?3:event.button.button==SDL_BUTTON_X2?4:-1;
+   if (b>=0 && event.button.which!=SDL_TOUCH_MOUSEID && game_window(event.button.windowID) &&
+       overlay::pointer_shortcut(input_map::kMouse1+b,event.type==SDL_EVENT_MOUSE_BUTTON_DOWN)) return;
    mouse_binding_button(event.button.which,b,event.type==SDL_EVENT_MOUSE_BUTTON_DOWN,
        eligible && event.button.which != SDL_TOUCH_MOUSEID && event.button.windowID==SDL_GetWindowID(g_prompt_window));
   }
   if(event.type==SDL_EVENT_MOUSE_WHEEL) {
    float y=event.wheel.y; if(event.wheel.direction==SDL_MOUSEWHEEL_FLIPPED)y=-y;
+   if (y!=0 && event.wheel.which!=SDL_TOUCH_MOUSEID && game_window(event.wheel.windowID) &&
+       overlay::pointer_shortcut(y>0?input_map::kWheelUp:input_map::kWheelDown,true)) return;
    mouse_binding_wheel(y,eligible && event.wheel.which != SDL_TOUCH_MOUSEID && event.wheel.windowID==SDL_GetWindowID(g_prompt_window) && !mods::first_person_wheel());
   }
  }
@@ -639,35 +801,20 @@ void handle_event(const SDL_Event& event){
   }return;
  }
  if(getenv("WWHD_NO_HOST_INPUT")&&!test_event(event))return;
- if(overlay_event(event))return;
- // the Screenshot binding (F10 by default), in any game window; posted test keys take this path too
- if(event.type==SDL_EVENT_KEY_DOWN&&!event.key.repeat){int code=keycode(event.key.scancode);if(code>=0&&screenshot::key_down(code))return;}
- if(test_event(event))return;  // posted test keys reach only the overlay (and the Screenshot binding)
- // Save states belong to either game window, not auxiliary controls/text windows.
- if((event.type==SDL_EVENT_KEY_DOWN||event.type==SDL_EVENT_KEY_UP) &&
-    game_window(event.key.windowID) &&
-    event.key.scancode>=SDL_SCANCODE_F1 && event.key.scancode<=SDL_SCANCODE_F5){
-  if(event.type==SDL_EVENT_KEY_DOWN && !event.key.repeat){
-   const int slot=int(event.key.scancode-SDL_SCANCODE_F1)+1;
-   if(event.key.mod&SDL_KMOD_SHIFT)ss::request_save(slot);
-   else ss::request_load(slot);
-  }
+#ifdef __ANDROID__
+ // Android's Back (the navigation bar's back button or the back gesture) opens and closes Settings, like F1 on
+ // desktop: the one control every Android device has (#215). SDL passes it on as AC_BACK; backend.cpp traps it
+ // so Android does not close the app. Left alone while a text prompt is open (the game's name entry).
+ if((event.type==SDL_EVENT_KEY_DOWN||event.type==SDL_EVENT_KEY_UP)&&event.key.scancode==SDL_SCANCODE_AC_BACK&&
+    !text_entry::active()&&!overlay::wants_text()){
+  // a dialog in Settings closes first (as Esc closes it), then the menu
+  if(overlay::dialog_open())overlay::key(kVK_Escape,event.type==SDL_EVENT_KEY_DOWN,event.key.repeat,0);
+  else if(event.type==SDL_EVENT_KEY_DOWN&&!event.key.repeat)overlay::set_open(!overlay::is_open(),overlay::OpenReason::API);
   return;
  }
- // Graphics shortcuts are plain keys scoped to the game window; repeats never toggle.
- if((event.type==SDL_EVENT_KEY_DOWN||event.type==SDL_EVENT_KEY_UP) && g_prompt_window &&
-    event.key.windowID==SDL_GetWindowID(g_prompt_window) &&
-    !(event.key.mod&(SDL_KMOD_CTRL|SDL_KMOD_ALT|SDL_KMOD_GUI))){
-  char action=0;
-  switch(event.key.scancode){
-   case SDL_SCANCODE_R: action='R';break; case SDL_SCANCODE_O: action='O';break;
-   case SDL_SCANCODE_M: action='M';break; case SDL_SCANCODE_N: action='N';break;
-   case SDL_SCANCODE_8: action='8';break; case SDL_SCANCODE_6: action='6';break;
-   case SDL_SCANCODE_7: action='7';break; default:break;
-  }
-  const bool activate=event.type==SDL_EVENT_KEY_DOWN&&!event.key.repeat;
-  if(action && gfxvk::graphics_hotkey(action,activate)){if(activate)hostui::graphics_changed();return;}
- }
+#endif
+ if(overlay_event(event))return;
+ if(test_event(event))return;
  #ifdef __ANDROID__
  // phones: the controller is the GamePad. Keys only type text (above): controllers such as the
  // GameSir also show up as a keyboard and would press keyboard-mapped GamePad buttons twice.
@@ -687,6 +834,7 @@ void handle_event(const SDL_Event& event){
 }
 void update(){
  update_overlay_window(SDL_GetKeyboardFocus());
+ g_gameplay_focus.store(SDL_GetKeyboardFocus()!=nullptr&&!text_prompt_active(),std::memory_order_relaxed);
  if(wwhd_trace::enabled()) {
   overlay_trace_sdl::begin(overlay::is_open());
   for(auto [id,pad]:g_controllers) overlay_trace_sdl::pad(id,pad);
@@ -694,14 +842,24 @@ void update(){
  mods::update_mouse();
  apply_rumble();
  update_sensors();
+#ifdef __ANDROID__
+ update_device_sensors();
+#endif
  std::function<void(bool,std::u16string)> cancelled;
  {std::lock_guard lk(g_mu);if(g_pending&&!g_done){g_done=std::exchange(g_pending,nullptr);g_text=std::move(g_initial);g_max_len=g_pending_max_len;g_mouse_bindings.consume();memset(g_keys,0,sizeof g_keys);if(!g_prompt_window)g_prompt_window=SDL_GetKeyboardFocus();if(g_prompt_window){g_previous_title=SDL_GetWindowTitle(g_prompt_window);if(SDL_StartTextInput(g_prompt_window)){other_windows_text_input(true);show_prompt();LOG("[input] the game asks for text: type it in a game window (shown in the window title), Enter confirms, Escape cancels; WWHD_SWKBD_TEXT=<text> answers automatically");}else{LOG("[input] text input unavailable (%s); set WWHD_SWKBD_TEXT=<text>",SDL_GetError());cancelled=std::exchange(g_done,nullptr);}}else{LOG("[input] text input: no window to type in; set WWHD_SWKBD_TEXT=<text>");cancelled=std::exchange(g_done,nullptr);}}}
  if(cancelled)cancelled(false,{});
  // SDL text input in every game window while the overlay's text prompt shows (typed text, input methods;
  // on Android it brings up the system keyboard); the input method's candidates open over the prompt
  // (also while a text field of the settings overlay has the keyboard)
+ // Not in the Quest theater: an immersive OpenXR session never shows Android's system keyboard, which
+ // would still take every controller press from the on-screen keyboard (the controllers type there).
+#ifdef __ANDROID__
+ const bool system_keyboard=!quest_theater::active();
+#else
+ const bool system_keyboard=true;
+#endif
  static bool entry_text=false;
- if((text_entry::active()||overlay::wants_text())!=entry_text&&!g_done){
+ if(system_keyboard&&(text_entry::active()||overlay::wants_text())!=entry_text&&!g_done){
   entry_text=!entry_text;int n=0;
   if(SDL_Window** ws=SDL_GetWindows(&n)){
    for(int i=0;i<n;i++){
@@ -728,6 +886,12 @@ void update(){
   button(SDL_GAMEPAD_BUTTON_SOUTH,kPadA);button(SDL_GAMEPAD_BUTTON_EAST,kPadB);button(SDL_GAMEPAD_BUTTON_WEST,kPadX);button(SDL_GAMEPAD_BUTTON_NORTH,kPadY);
   button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,kPadLB);button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,kPadRB);
   button(SDL_GAMEPAD_BUTTON_START,kPadMenu);button(SDL_GAMEPAD_BUTTON_BACK,kPadOptions);button(SDL_GAMEPAD_BUTTON_GUIDE,kPadHome);
+  button(SDL_GAMEPAD_BUTTON_MISC1,kPadCapture);
+  button(SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1,kPadRightPaddle1);button(SDL_GAMEPAD_BUTTON_LEFT_PADDLE1,kPadLeftPaddle1);
+  button(SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2,kPadRightPaddle2);button(SDL_GAMEPAD_BUTTON_LEFT_PADDLE2,kPadLeftPaddle2);
+  button(SDL_GAMEPAD_BUTTON_TOUCHPAD,kPadTouchpad);
+  button(SDL_GAMEPAD_BUTTON_MISC2,kPadMisc2);button(SDL_GAMEPAD_BUTTON_MISC3,kPadMisc3);button(SDL_GAMEPAD_BUTTON_MISC4,kPadMisc4);
+  button(SDL_GAMEPAD_BUTTON_MISC5,kPadMisc5);button(SDL_GAMEPAD_BUTTON_MISC6,kPadMisc6);
   button(SDL_GAMEPAD_BUTTON_LEFT_STICK,kPadL3);button(SDL_GAMEPAD_BUTTON_RIGHT_STICK,kPadR3);
   button(SDL_GAMEPAD_BUTTON_DPAD_UP,kPadDUp);button(SDL_GAMEPAD_BUTTON_DPAD_DOWN,kPadDDown);button(SDL_GAMEPAD_BUTTON_DPAD_LEFT,kPadDLeft);button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT,kPadDRight);
   put(kPadLT,std::max(0.f,SDL_GetGamepadAxis(pad,SDL_GAMEPAD_AXIS_LEFT_TRIGGER)/32767.f));put(kPadRT,std::max(0.f,SDL_GetGamepadAxis(pad,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)/32767.f));
@@ -742,6 +906,7 @@ void update(){
  overlay::poll_controller_shortcuts(v);
  const bool captured=captured_before||overlay::captures()||overlay::shortcut_took_input();
  g_gates.combine(devices,captured,v,game);  // a reconnected pad (new id) gets a new gate
+ input_map::consume_shortcut_buttons(input_map::current(),v,game);
  auto state=input_map::controller_state(input_map::current(),game);
  // + went down: the view may switch to the GamePad screen while the game is paused
  // (not while the settings overlay or the text prompt takes the buttons: Start acts there)
@@ -877,9 +1042,10 @@ static void apply_scenario(PadState& s) {
         ol_step = found;
         sc.origin = 1;
     }
-    if (!sc.origin || (!ol && render::frame_count() < sc.origin)) return;
+    if (!sc.origin || (!ol && fixed_seed::script_frame(render::frame_count()) < sc.origin)) return;
     // scenario time = game time: full logic steps / 30 (frame-time hitches don't shift the input)
     static const uint64_t s0 = [ol_step] {
+        present_observer::scenario_origin(render::frame_count(), ol_step ? ol_step : interp::logic_steps());
         if (ol_step) {
             LOG("[test] origin at logic step %llu (load + WWHD_TEST_ORIGIN_LOAD), logic step %llu", (unsigned long long)ol_step,
                 (unsigned long long)ol_step);
@@ -903,8 +1069,12 @@ static void apply_scenario(PadState& s) {
         LOG("[test] t=%.3f s: end", t);
         #ifdef WWHD_HAS_VULKAN
         gfxvk::stutter::trace().flush();
-        if (render::active() == render::Api::Vulkan) gx2::checkpoint_vulkan_caches();
+        if (render::active() == render::Api::Vulkan) {
+            gx2::checkpoint_vulkan_caches();
+            gx2::checkpoint_present_observer();
+        }
 #endif
+        process_peak_rss::write_endpoint(render::frame_count());
         if (FILE* f = fopen("test_done", "w")) fclose(f);
     }
     true60_test::tick(t, sc.end > 0 && t >= sc.end);
@@ -929,7 +1099,14 @@ static void apply_scenario(PadState& s) {
 
 static std::atomic<bool> g_pro{getenv("WWHD_PRO_CONTROLLER") != nullptr};
 bool pro_controller() { return g_pro.load(std::memory_order_relaxed); }
-void set_pro_controller(bool on) { g_pro = on; LOG("[input] keyboard/controller act as %s", on ? "Pro Controller" : "GamePad"); }
+static std::atomic<void (*)(bool)> g_controller_listener{nullptr};
+void set_controller_listener(void (*fn)(bool pro)) { g_controller_listener = fn; }
+void set_pro_controller(bool on) {
+    const bool was = g_pro.exchange(on);
+    LOG("[input] keyboard/controller act as %s", on ? "Pro Controller" : "GamePad");
+    if (was != on)
+        if (auto fn = g_controller_listener.load()) fn(on);
+}
 
 PadState read() {
     static const std::vector<Press> script = scripted();
@@ -939,20 +1116,21 @@ PadState read() {
     std::lock_guard<std::mutex> lk(g_mu);
     // debug: WWHD_NO_HOST_INPUT=1 ignores keyboard and host controllers (scripted test runs)
     static const bool no_host = getenv("WWHD_NO_HOST_INPUT") != nullptr;
+    const uint64_t frame = fixed_seed::script_frame(render::frame_count());  // (TV frame unless WWHD_TEST_FIXED_SEED)
     if (!keys.empty()) {
         memset(g_script_keys, 0, sizeof g_script_keys);
         for (auto& p : keys)
-            if (render::frame_count() >= p.from && render::frame_count() <= p.to)
+            if (frame >= p.from && frame <= p.to)
                 for (int c : p.codes) if (c < 256) g_script_keys[c] = true;
     }
     PadState k = keyboard_state(!no_host), s = g_pad;
     if (no_host) s = PadState{};
     for (auto& p : script)
-        if (render::frame_count() >= p.from && render::frame_count() <= p.to) s.buttons |= p.bits;
+        if (frame >= p.from && frame <= p.to) s.buttons |= p.bits;
     for (auto& p : sticks)
-        if (render::frame_count() >= p.from && render::frame_count() <= p.to) { s.lx = p.x; s.ly = p.y; }
+        if (frame >= p.from && frame <= p.to) { s.lx = p.x; s.ly = p.y; }
     for (auto& p : rsticks)
-        if (render::frame_count() >= p.from && render::frame_count() <= p.to) { s.rx = p.x; s.ry = p.y; }
+        if (frame >= p.from && frame <= p.to) { s.rx = p.x; s.ry = p.y; }
     apply_scenario(s);
     s.buttons |= k.buttons;
     if (k.lx || k.ly) { s.lx = k.lx; s.ly = k.ly; }
@@ -968,7 +1146,12 @@ PadState read() {
         last_buttons = s.buttons;
     }
     mods::filter_pad(s);  // gameplay mods: mouse camera, wheel -> R3
-    if (overlay::blocks_input()) s = PadState{};  // the settings overlay has the input
+    if (overlay::blocks_input()) {
+        mods::quick_use_reset();  // no pending item press survives menu/text capture
+        s = PadState{};
+    } else {
+        mods::quick_use_filter_pad(s);  // final merged/polled pad, never overlay-owned input
+    }
     return s;
 }
 

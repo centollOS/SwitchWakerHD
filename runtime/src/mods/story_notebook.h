@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "story_notebook_list.h"
+#include "story_npc_catalogue.h"
 #include "mod_json.h"
 #include "story_notebook_bag.h"
 
@@ -34,13 +35,41 @@ int32_t step(const std::string& mod, const std::string& quest, uint32_t step, co
 // wwhd_quest_place / wwhd_quest_no_place: the next step's place on the sea chart
 int32_t place(const std::string& mod, const std::string& quest, float x, float z);
 int32_t no_place(const std::string& mod, const std::string& quest);
+// Read the owner's current resolved quest place (XZ only, not stage/room/height).
+// Uses existing mod-owned progress; never writes a record. Outputs stay unchanged on failure.
+// The actor adapter must constrain navigation to its current room and ground.
+struct QuestDestination;
+// Current resolved warp destination (or manifest step 1 before starting).
+// Interior places preserve stage/room and spawn point or XYZ; sea places and
+// code-owned overrides use sea coordinates. Unavailable/completed has no target.
+// Keeps outputs unchanged on failure.
+bool place_destination(const std::string& mod,const std::string& quest,QuestDestination& out);
+bool place_position(const std::string& mod,const std::string& quest,float& x,float& z);
 // wwhd_quest_known, wwhd_quest_portrait: what is known so far; the quest's portrait (package image)
 int32_t known(const std::string& mod, const std::string& quest, const std::string& text);
 int32_t portrait(const std::string& mod, const std::string& quest, const std::string& path, const std::string& package_dir);
 int32_t done(const std::string& mod, const std::string& quest);
+// Declarative completion also queues the manifest rupee reward, once.
+int32_t done_action(const std::string& mod,const std::string& quest);
 // The quests a mod declares in its manifest.json ("quests"), when the mod is loaded: false (logged)
 // if the declaration is not accepted.
 bool declare(const std::string& mod, const std::string& mod_name, const mods::json::Value& manifest);
+// World editor (game thread, while story_idle()): the mod's manifest quests, quest talks, sail lines,
+// letters and charts again, as the manifest has them now (docs/mod-editor.md, "Quests, letters, charts
+// and items while the game runs"). Only this mod's tables change: its declarations, its residents'
+// takeovers and sail lines, its letters on their own (and their texts in the postbox), its charts
+// (story_chart::redefine); quests its code defined keep their registration. Nothing of the save file is
+// written: progress stays as its records have it. All or nothing: false (why) when the manifest's story
+// is not accepted or there is no room (a key collision, more quests than the notebook takes).
+struct Redeclared {
+    unsigned quests = 0, talks = 0, letters = 0, charts = 0;
+    std::vector<std::string> charts_kept;  // charts the manifest dropped: declared until a restart
+    bool sail_waits = false;               // the manifest has sail lines, but the boat's hooks were not installed at start-up
+};
+bool redeclare(const std::string& mod, const std::string& mod_name, const mods::json::Value& manifest, Redeclared& out, std::string& why);
+// No page, quest talk, sail line or letter of the story system is running (game thread): a calm moment
+// for redeclare(). False with what runs.
+bool story_idle(std::string& why);
 // The notebook's look from the Story Notebook package: its icon (PNG file) and the model archive its
 // setup step built on the player's machine (empty: the game's stand-in model). Before install().
 void set_look(const std::string& icon_png, const std::string& model_archive);
@@ -50,6 +79,16 @@ bool load_local_npc_catalogue(const std::string& file);
 // the compiled-in recipes, for the generator (place -> recipe text)
 std::vector<std::pair<std::string, std::string>> npc_recipes();
 void declared_tick();  // what pad() runs a few times a second (tests)
+// The game's residents the NPC catalogue knows that are in the game's actor list now (Link's stage
+// `stage`), with where they stand: for the world editor. Read-only; on the game thread.
+struct LiveVillager {
+    Resident resident = kResidentNone;  // npc_catalogue().entry(resident)
+    uint32_t actor = 0;
+    std::string stage;
+    int room = -1;
+    float x = 0, y = 0, z = 0;
+};
+std::vector<LiveVillager> scan_villagers(const std::string& stage);
 // wwhd_quest_carry: Link carries (or no longer carries) the quest's letter, shown in the Delivery Bag
 int32_t carry(const std::string& mod, const std::string& quest, bool carried);
 // wwhd_quest_talk: at that step, while the quest is tracked and its letter carried, the resident says
@@ -72,7 +111,18 @@ std::vector<Row> rows_now(std::vector<Quest>& storage);
 // when it closes reach the game only after they are released.
 bool notebook_owned();
 bool open_page(const char* how = "by the port");  // how: for the log
+// an item's caption (story_items.h: Info, use "show", a get); false while the page or a caption is open
+bool show_info(const std::string& title, const std::string& text, const char* how);
+// a manifest quest reaches a step without changing its texts (an item's use action); the step, or < 0
+int32_t reach(const std::string& mod, const std::string& quest, uint32_t step);
 void close_page();
+// the item menu while its Delivery Bag window runs (this logic step or the last), else 0 (the bag pages)
+uint32_t delivery_window_menu();
+// the item menu is on screen (with the Pro Controller, Plus can close it while the bag window's state still runs)
+bool item_menu_shown();
+// The Delivery Bag's extra pages (story_bag.h): while `covered` says their page lies over the bag window,
+// the port's icons over the window's places (the notebook, a letter, mod items) are not drawn
+void set_bag_cover(bool (*covered)());
 bool page_open();     // the page or the sealed letter's caption has the controller
 bool caption_open();  // the sealed letter's caption (A or a touch on the letter in the Delivery Bag)
 void pad(input::PadState& p, Cpu* c = nullptr);  // c: the reading thread (the game's fonts and sounds)
@@ -96,6 +146,7 @@ void inventory_item(Cpu* c);  // hdMenuItem_inventoryItem(key)
 void icon_frame(Cpu* c);      // hdMenuItem itemForSlot(this, item)
 void open_child(Cpu* c);      // hdMenuMain_c::openSelectedChild(index)
 void touch_select(Cpu* c);    // hdMenuItem_c::selectTouchEnter()
+void unselect_enter(Cpu* c);  // hdMenuItem_c::unselectEnter(): a tap ended
 void set_visible(Cpu* c);     // hdMenuItem_c::setVisible(visible)
 void execute_window(Cpu* c);  // hdMenuMain_c::executeWindow()
 void cursor_float(Cpu* c);    // hdMenuItem_c::beginCursorSelection(point)

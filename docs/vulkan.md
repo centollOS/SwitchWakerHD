@@ -39,14 +39,19 @@ the windows' views through a `CAMetalLayer` and `VK_EXT_metal_surface`; `display
 same layout as the Metal composition (picture rectangle, GamePad overlay with frame and opacity,
 filter), and `gfx/vulkan/present.cpp` draws it. The TV window title starts with the renderer in use.
 
+Settings → Display has PiP size (5–100 %) and opacity (10–100 %) sliders, nine positions and a
+placement diagram (drag freely, click a circle to snap to a position); the outlined game preview
+can also be dragged while placement is open. See [GamePad screen modes](gamepad-display.md).
+
 | Feature (macOS app) | Metal | Vulkan |
 | --- | --- | --- |
 | TV / GamePad windows, full screen, display modes, PiP, automatic PiP | yes | yes |
 | Scaling smooth / sharp / integer, FXAA | yes | yes |
 | Internal resolution, AO modes, full-size AO depth, 16x AF | yes | yes |
+| Dynamic resolution (Settings → Graphics: off, down to 75 % or 50 %) | yes | yes |
 | Aspect ratio (16:10, 21:9, 32:9, match window) | yes | yes |
 | 60 fps interpolation, true 60 | yes | yes |
-| Save states (menu, Shift+F1..F5 / F1..F5) | yes | yes (a state loads with either renderer) |
+| Save states (menu, Shift+F1..F5 / F6, F2..F5) | yes | yes (a state loads with either renderer) |
 | Controls window, keyboard, game controllers, mouse camera, mods | yes | yes |
 | Climb mod stamina wheel | yes | yes (ported shader; not yet seen in a test run) |
 | Frame dumps `WWHD_DUMP_FRAMES`, `WWHD_DUMP_PRESENT` | yes | yes |
@@ -317,6 +322,13 @@ an isolated directory; `WWHD_VK_SHADER_CACHE=0` disables disk storage. An explic
 directory overrides `WWHD_SHADER_CACHE=0`. Canonical GLSL and stage deduplication
 remains active in memory when disk storage is disabled. Fresh decompiler metadata
 is kept for every guest variant; identical final shader programs share compilation.
+The file (format `WWVKSC03`) stores SPIR-V with a hash and the length of the GLSL it was
+compiled from, not the GLSL text; files from older versions (`WWVKSC02`) still load and are
+rewritten in the new format. In memory, shaders likewise keep the SPIR-V (shared with the
+cache) and the GLSL hash; the text is released once its compilation has started.
+`WWHD_VK_SHADER_SOURCE_VERIFY=1` keeps it, confirms every hash match between translated
+shaders byte for byte and lets failed-pipeline captures include the GLSL. Key verification
+(`WWHD_VK_SHADER_KEY_VERIFY`) keeps it too.
 
 Shader keys have two levels, like Cemu's base and auxiliary shader hashes but exact
 about what the GLSL translation reads (`gfx/vulkan/shaders.cpp`, `gather_linkage` and
@@ -564,7 +576,9 @@ Verify mode found 0 mismatches in 142 million checked hits (330 s per scene, 30 
 ## Live graphics controls
 
 In the macOS app the Graphics and Display menus and their keys work as with Metal. The SDL game window
-also accepts the following plain-key shortcuts; repeated keydown events are ignored.
+also accepts the following default shortcuts; change them in **Settings → Shortcuts**.
+Each action supports a modified key, an alternate key, and a controller combination.
+Repeated keydown events are ignored.
 The shortcuts are scoped to the game window, respect host-input disabling, and do
 not toggle settings while entering text. Menu checkmarks reflect pending settings;
 resolution changes latch at the next render-frame boundary. Unsupported effect
@@ -603,11 +617,27 @@ roughly 30 FPS while other CPU workloads were active.
 
 ## Save-state shortcuts
 
-In the macOS app, the Save States menu and keys work as with Metal. In the SDL game window, `F1` through `F5` load slots 1 through 5;
+In the macOS app, the Save States menu and keys work as with Metal. In the SDL game window, `F6` loads slot 1 and `F2` through `F5` load slots 2 through 5;
 `Shift+F1` through `Shift+F5` save those slots. Repeated keydown events are ignored,
 and these keys do not reach the game's button mapping. The Screenshot binding (F10 by default,
-Controls) works in every game window the same way; `WWHD_TEST_SCREENSHOT=<frames>` scripts it. Host-input-disabled scripted
+Settings → Shortcuts) works in every game window the same way; `WWHD_TEST_SCREENSHOT=<frames>` scripts it. Host-input-disabled scripted
 runs do not accept the shortcuts. State files remain in the configured state directory.
+
+The Shortcuts tab also offers picture-in-picture, the performance overlay, mute and volume,
+initially unbound. Bindings are stored with the game controls in `controls.json`; older Screenshot
+bindings migrate automatically. Conflicts include game keys and duplicate combinations.
+Home is the default controller button shown under **Settings**, and is remappable there.
+Esc (or F1) opens Settings. With a captured mouse, the first Esc frees the mouse and a second
+one opens Settings. Escape closes Settings when no input is being recorded. While recording,
+Escape, L/R, Select and Home are assigned without triggering their normal menu actions.
+
+Right-click to clear a binding in either Controls or Shortcuts. With a binding focused,
+Delete, Backspace or the controller button mapped to X clears it. Right-click during mouse
+capture assigns the right mouse button. Capture/Share, rear paddles and touchpad clicks are
+also assignable and start unbound. Combinations consume only their two buttons while both
+are held; single-button shortcuts consume their button while held. Using Select as a hold
+button reserves it for combinations.
+Android keyboard shortcuts require `WWHD_ANDROID_KEYBOARD`; controller combinations do not.
 
 A load must pass the existing allocation, thread, and guest-stack guards. A state
 that loads in the same process may fail during a new process's startup; matching
@@ -694,6 +724,30 @@ Set `WWHD_VK_DRAW_BATCH=0` to disable mid-frame batching, or set an explicit
 positive draw count to tune it. Empty or invalid values disable batching.
 `WWHD_VK_DRAW_BATCH_CAP=1|2|3` sets the maximum mid-frame submissions (default three).
 See `docs/performance.md` for the local Windows comparison.
+
+## Recording graphics on a second thread (on by default on Android, optional elsewhere)
+
+Settings → Graphics → Advanced → "Record graphics on a second thread" moves the recording and
+submission of the Vulkan commands from the render thread to a second thread. The render thread
+still decides what to draw (shaders, pipelines, textures, uploads); it copies each command's
+arguments into a compact byte stream, and the second thread turns that stream into the actual
+Vulkan calls and submits them. The pictures are the same either way.
+
+- It can raise the frame rate on devices whose CPU limits it, such as phones and handhelds.
+- On computers where the CPU is not the limit it brings nothing, and the hand-over between the
+  two threads can make frame times less even.
+- It uses a little more CPU time and battery.
+
+The choice is saved with the other graphics settings and applies the next time the game starts.
+`WWHD_VK_RECORD_WORKER=1` turns it on and any other value turns it off for one start; the
+environment variable takes precedence over the saved setting. The log says which path runs
+(`[vulkan record worker] enabled` or `disabled`).
+
+Uploads, descriptor pools and other resources of a submission stay alive until its GPU fence
+completes, exactly as without the second thread. Screenshots and other readbacks, presentation,
+save states and shutdown first wait for the second thread to finish the commands they depend on.
+A command whose arguments do not fit the stream is recorded directly by the render thread after
+the second thread has caught up, so the order of the commands never changes.
 
 ## macOS defaults and tuning
 
@@ -910,6 +964,39 @@ The strict opt-in `WWHD_VK_VERTEX_COPY_WINDOW=1` instead fuses minimum and maxim
 
 Small register updates (at most 16 words) use the fused Vulkan path by default. Set `WWHD_VK_FUSE_SMALL_REGS=0` to disable it. Matched scene tests suggest roughly 2% less renderer CPU time; FPS benefit remains modest and subject to run drift.
 
+`WWHD_VK_MEMORY_LOG_FRAMES=N` (a positive integer, for example `300`) adds aggregate
+`[gfx] memory` reports every N renderer frames. Unset, zero or invalid values disable
+process queries and cache traversal. Reports include current process RSS (zero means
+unavailable), cached surfaces and their image allocations, unique upload blocks, and
+retained shader text and SPIR-V capacity counters (SPIR-V shared by a shader and its disk
+cache entry is counted once). The regular log and crash log ring retain these short
+lines; they contain no shader source, guest memory or save data.
+
+These counters are not a heap total or peak RSS. Shader counters exclude compiler
+results, asynchronous disk snapshots, metadata and allocator overhead; image counters
+exclude retired, non-cache and driver allocations. Use an aggregate heap summary with
+a repeatable scene when investigating retention, and disable diagnostics for performance
+comparisons.
+
+## Dynamic resolution
+
+**Settings → Graphics → Dynamic resolution** lowers the internal resolution by itself while the
+graphics card can't keep up with the frame rate, and raises it again when there is room. Choose
+**Down to 75%** or **Down to 50%**: the lowest share of the chosen internal resolution it may use.
+It is **off** by default.
+
+- It helps when the graphics card is what holds the game back: a weaker GPU, or a high internal
+  resolution. When the processor is the limit, the resolution stays where it is.
+- It changes in small steps (1×, ⅞, ¾, ⅝, ½ of the internal resolution), one step at a time, and
+  waits before going back up, so it does not swing back and forth. A change does not cause a stutter.
+- The picture gets softer while the resolution is lower. Its size and place in the window stay the
+  same, and it is always scaled smoothly while lowered (also with sharp or integer scaling).
+- It uses some extra graphics memory for the neighbouring steps: about 35–55 MB at 1×, more at
+  higher internal resolutions.
+- The current resolution is shown in the performance overlay and in the copied performance report.
+
+Both renderers (Metal and Vulkan) support it. The idea comes from GreenNaugahyde's Android fork.
+
 ## Choosing the GPU
 
 In Settings → Graphics → GPU (Vulkan), choose Automatic or a graphics card. The choice applies after restarting. Automatic keeps the driver's order, preferring cards with Vulkan 1.3. Unavailable cards show the reason; if a saved card is missing or unusable, the game uses Automatic and shows a notice.
@@ -930,3 +1017,39 @@ Readbacks deliberately stall submissions and may allow the compiler to finish
 during capture, so this diagnostic must be disabled for performance measurements.
 No artificial compilation delay is introduced. The diagnostic attempts at most
 once per process and bounds each scan to 16 megapixels; keep its output local.
+
+## Steam Deck Gaming Mode
+
+In Gaming Mode, the GamePad screen defaults to **Picture-in-picture** and the game starts
+in **Full screen**, unless you already saved a choice or supplied a launch override.
+This also applies to the Windows build through Proton when the gamescope session is detected.
+Desktop Mode keeps its existing defaults.
+
+Change **View** under **Settings → Graphics → GamePad screen**, or change **Full screen**
+in Graphics. Your choices are remembered. A separate GamePad window is still available,
+but Gaming Mode shows one window at a time and may scale the game picture, making it blurry.
+
+The old launch-option workaround to hide the GamePad and force full screen is no longer
+needed for a fresh configuration. Remove those launch options to use picture-in-picture;
+existing launch overrides still take precedence. The aspect default is unchanged: choose
+**Match window** or **16:10** to use the Deck screen's shape.
+
+### 40 fps on the Steam Deck
+
+**Settings → Graphics → Frame rate → 40 fps** draws 4 frames for every 3 game steps: smoother than
+30 fps, and much lighter than 60 fps, so the battery lasts longer. The game itself keeps its speed
+(30 steps a second).
+
+40 fps only looks even when the screen's refresh rate is a whole multiple of 40. Set it in the
+quick access menu (**...** button → Performance → Refresh Rate):
+
+- **Steam Deck LCD:** 40 Hz. Every frame stays on screen for one refresh.
+- **Steam Deck OLED:** 80 Hz. Every frame stays on screen for two refreshes.
+
+At 60 Hz, 40 fps can't be even: frames alternate between one and two refreshes, which looks like a
+slight judder. The game still runs it, but Settings shows a note under the frame rate, and the log
+says so. In that case choose 30 or 60 fps, or change the refresh rate. Leave the Framerate Limit in the
+same menu off (or at 40) so it doesn't hold frames back.
+
+Keep game speed works at 40 fps as at 60 fps: if the Deck can't draw 40 frames a second, it skips
+some in-between frames, never the game's speed.

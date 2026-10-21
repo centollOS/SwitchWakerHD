@@ -21,6 +21,7 @@ supported.
 - [Drawing on screen (HUD API v1)](#drawing-on-screen-hud-api-v1)
 - [Letters](#letters)
 - [Charts and markers](#charts-and-markers)
+- [Items](#items)
 - [The story notebook](#the-story-notebook)
 - [Packages with content and images](#packages-with-content-and-images)
 - [Trust](#trust)
@@ -138,11 +139,13 @@ disable it, restart and install the new version with the same ID; its settings s
 Distribute only your manifest, your ELF and resources you are allowed to share, never game
 files.
 
+The hooks example [`heart-ticker`](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods/tree/main/heart-ticker) is in the
+mod repository: entry and return hooks on Link's per-step function, calling a game function.
+
 The examples in [`examples/guest-mods`](../examples/guest-mods) are complete mods:
 
 | Example | Shows |
 | --- | --- |
-| `heart-ticker` | entry and return hooks on Link's per-step function, calling a game function |
 | `addcalc-replace` | replacing a game function (`cLib_addCalc2`) and calling the original |
 | `hud-demo` | HUD drawing with package artwork and text, texture reload after a state load |
 | `button-icons` | reading port settings, following the game's button panes |
@@ -307,6 +310,32 @@ It draws on Metal and Vulkan, in the TV picture and the GamePad screen (window o
 picture-in-picture); the settings overlay stays on top. Positions are not interpolated
 between logic steps.
 
+### Current-room maps for mod dungeons
+
+`wwhd_dungeon_room_get(&room, cached_revision)` returns the current mod-stage
+room's existing map pixels as an owned HUD image and its world X/Z bounds. Call it
+from a HUD callback. It returns 0 when the stage has no map, the room has no image,
+or the host predates this service. Stock dungeon images remain the mod's responsibility.
+
+`wwhd_dungeon_room` is an 808-byte guest structure: version (1), image handle,
+revision, signed floor, four float bounds (min X/Z, max X/Z), marker count, reserved
+zero, then up to 64 `(float x, float z, u32 kind)` markers. Kinds are 1 (unopened
+chest) and 2 (boss door). The port filters markers by current room and compass
+ownership, using the same save record and map pixels as its map page. This does
+not reveal neighboring rooms or change save flags.
+
+Pass cached revision 0 on first use and after `wwhd_hud_epoch()` changes. A new
+revision supplies a new image; release the preceding handle. An unchanged revision
+returns image 0 and the caller retains its existing handle. Geometry and markers
+are refreshed every call, including chest opening; rebuilding a room changes its
+revision. Never pass a nonzero revision after releasing its image.
+
+The helper uses the existing `wwhd_setting_get` query transport with key
+`mod-stage.current-room-map` and structured type 5. Older hosts return 0 for this
+unknown key/type, so the guest keeps working with no new import or translator
+requirement. Querying a null buffer with zero capacity reports 808 on hosts that
+support the query. The guest module ABI remains unchanged.
+
 ## Letters
 
 A story mod (a mod that adds a quest) can announce itself the way Wind Waker does: with a
@@ -359,6 +388,51 @@ own letters still wait for the pearl). A letter from a mod needs no postage. Lik
 letters it comes with an enclosure, which Link takes after reading: the Story Notebook package's
 letter encloses the **story notebook**, every other one a green rupee. Several waiting letters are
 handed out one after another.
+
+**Letters in the manifest.** A letter needs no code: declare it in `manifest.json` and the port
+sends it while your mod is on. Once Link has read it, he has what it encloses: your charts
+(`"chart:<id>"`, see [Charts and markers](#charts-and-markers)) and items (`"item:<id>"`, see
+[Items](#items)), each given once. Such a letter makes no entry in the story notebook; for a letter
+that starts a quest, use the quest's own `"letter"` (see [Quests in the manifest](#quests-in-the-manifest)).
+
+```json
+"letters": [
+  {"id": "map-letter", "sender": "A sailor",
+   "text": "Dear Link,\nI found this old map in a bottle.\nMaybe you can find what it marks.",
+   "encloses": ["chart:old-map"]}
+]
+```
+
+Up to 8 letters per mod; the same rules for ID, sender and text as above. Every chart and item a
+letter encloses must be declared in the manifest, and a letter's ID must not be a quest letter's.
+
+**A letter that waits.** A letter can wait for your story to get somewhere (`"when"`) and then for
+some days of the game's calendar (`"after_days"`), for example a thank-you letter that arrives two
+days after a quest is done:
+
+```json
+"letters": [
+  {"id": "thanks", "sender": "The lighthouse keeper",
+   "text": "Dear Link,\nsince you brought the light back,\nthe ships come safely home.",
+   "when": {"quest": "lighthouse", "done": true}, "after_days": 2}
+]
+```
+
+- **when** (optional): every condition in it must hold before the letter is sent.
+  - `"quest"` with `"step": 2`: that quest of your manifest has reached step 2 or gone past it.
+  - `"quest"` with `"done": true`: that quest is done.
+  - `"quests"`: a list of up to 8 such conditions, `[{"quest": "a", "step": 2}, {"quest": "b", "done": true}]`.
+  - `"flag"` / `"not_flag"`: one of your mod's flags is set / is not set (the same flags actors
+    and scenes use, see [Actors and scenes](mod-sdk-v3.md)).
+- **after_days** (optional): 1 to 255 days. The game's calendar moves on one day each time its
+  clock passes midnight (also with the Song of Passing). The days count from the day `when` first
+  held (without `when`, from the first day your mod is on). Once the count has started, it goes on
+  even if the condition stops holding.
+- Without `when` and `after_days` the letter is sent as before, as soon as your mod is on.
+
+Once due, the letter waits in the postbox like any other. The day the count started is kept in the
+save file's story record, so it survives saving and loading and save states; it is freed when the
+letter is sent. The quests, steps and flags `when` names must be your manifest's own.
 
 **The story notebook** is the port's journal for story mods (see [The story notebook](#the-story-notebook)).
 Link keeps it in the Delivery Bag. Receiving it writes nothing to the inventory: it is kept in the
@@ -462,8 +536,10 @@ once the chart is finished, its red circle).
 - **Declaring:** `id`, `name` (up to 40 bytes, the list's caption), `description` (up to 200 bytes)
   and `place` (the X). Up to 8 per mod.
 - **Getting it:** a letter that encloses `"chart:<id>"` gives it when it is read; a resident's talk
-  with `"then": {"give": "chart:<id>"}`; the quest's reward (`"reward": {"chart": "chart:<id>"}`, when
-  the quest is done); or your code (`wwhd_chart_give`). A chart the quests name must be declared.
+  with `"then": {"give": "chart:<id>"}`; a placed actor's dialogue, a talk or a scene's end with the
+  action `{"action": "give", "id": "chart:<id>"}` (see [Dialogue and actions](mod-sdk-v3.md#dialogue-and-actions));
+  the quest's reward (`"reward": {"chart": "chart:<id>"}`, when the quest is done); or your code
+  (`wwhd_chart_give`). Each way gives it once. A chart the manifest names must be declared.
 - **Finishing it:** a step with `"find": "chart:<id>"` finishes the chart once the quest is past that
   step (your code reports the step, a condition or a talk moves the quest on); or your code calls
   `wwhd_chart_finish`. Finished: the red circle on the sea chart and in the chart view.
@@ -473,6 +549,30 @@ once the chart is finished, its red circle).
   game's chart bits are neither read nor written for it, and opening it in the list is kept in
   the chart's record. With every treasure chart owned there is no room in the list; the chart
   still works (the notebook, the red circle).
+
+**A treasure chart on its own.** A chart that is just a treasure to find needs no quest and no
+notebook entry. Declare it and send it in a letter; that is all. The Old map example:
+
+```json
+"charts": [
+  {"id": "old-map", "name": "Old map", "description": "An old map. An X marks the top of the lighthouse.",
+   "place": {"x": 1759, "z": -202572}}
+],
+"letters": [
+  {"id": "map-letter", "sender": "A sailor",
+   "text": "Dear Link,\nI found this old map in a bottle.\nMaybe you can find what it marks.",
+   "encloses": ["chart:old-map"]}
+]
+```
+
+Link gets the letter at the next Rito postbox; after reading it he owns the Old map, and the MAP
+screen's chart list shows it with its X. Such a mod needs no code and no game files: a content
+package (`"kind": "content"`) with only `charts` and `letters` (or items, or quests) is enough, and
+it needs no `content_dir` (see [the mod manager](mod-manager.md)). A chart's `"item"` says what its treasure chest holds: one of your items
+(`"item:<id>"`, see [Items](#items)) or a game item (`"game:purple_rupee"`, `"game:orange_rupee"`,
+`"game:silver_rupee"`, `"game:heart_piece"`, `"game:heart_container"`); without it, an orange rupee. A quest whose only step is to find a chart gets a warning in
+the log: make it a chart with a letter instead. A chart to find as one step of a longer quest is
+fine (`"find": "chart:<id>"`, see [Quests in the manifest](#quests-in-the-manifest)).
 
 **Saving.** Whether Link owns a chart, and whether it is finished, is stored in the save file in
 the same record as the letters (it stays unused by the game itself; letters and charts of all mods
@@ -490,6 +590,70 @@ log says so.
 the markers the sea chart shows now, with their world place, icon and label, so a minimap can draw
 them in its own style.
 
+## Items
+
+A story mod can give Link its own items. They are kept in the Delivery Bag like the game's
+delivery items, but they never take one of the bag's eight places unless the player puts one
+there: the bag gets extra pages for them. An item is declared in the manifest; Link gets it from
+the mod's quests (a letter, a talk, a reward) or from the mod's code.
+
+```json
+"items": [
+  {"id": "old-key", "name": "Old key", "description": "A rusty key. It smells of the sea.",
+   "icon": "assets/old_key.png"},
+  {"id": "lamp", "name": "Storm lamp", "description": "Shows the way in the dark.",
+   "icon": "assets/lamp.png", "stack": 3, "use": {"action": "show"}}
+]
+```
+
+- **id:** 1..32 of `a-z 0-9 - _ .`, unique within the mod.
+- **name** (up to 40 bytes) and **description** (up to 200 bytes, line breaks allowed): what the
+  item's Info box shows.
+- **icon:** a PNG in your package, best 128 × 128 with transparency.
+- **stack:** how many Link can carry, 1..254 (default 1). A give beyond it keeps the maximum.
+- **use** (optional): what using the item does. Only an item with a use can go on X, Y or R.
+  - `{"action": "show"}`: shows its Info box.
+  - `{"action": "open_notebook"}`: opens the story notebook.
+  - `{"action": "quest_step", "quest": "<quest id>", "step": 2}`: that quest of your manifest
+    reaches the step.
+  - `{"action": "event"}`: your code is told (`wwhd_item_used`).
+
+**Giving items from the manifest.** A quest's letter can enclose an item
+(`"encloses": ["item:old-key"]`), a resident's talk can give one (`"then": {"give": "item:old-key"}`)
+and a quest's reward can be one (`"reward": {"item": "item:old-key"}`, given once when the quest is
+done). Every item a quest names must be declared in `"items"`.
+
+**Holding it up.** An item with a model of your own (`"held_model"`) and `"hold_up": true` is shown
+like the game's own items when Link gets it: he holds the model up over his head with the game's get
+message, instead of the small caption. See
+[Original item models in Link's hand](mod-sdk-v3.md#original-item-models-in-links-hand-preview).
+
+**From code:**
+
+```c
+#include "wwhd_guest.h"
+s32 n = wwhd_item_give("lamp", 1);      /* the count now, or WWHD_ITEM_INVALID / WWHD_ITEM_NO_ROOM */
+if (wwhd_item_count("old-key") > 0) wwhd_item_take("old-key", 1);  /* WWHD_ITEM_NOT_ENOUGH if fewer */
+if (wwhd_item_used("token") > 0) { /* the player used it since the last call */ }
+```
+
+When Link gets an item, its name and description show with the game's small get jingle. If the
+bag's pages are full (4 pages of 8 by default), the item is kept and gets a place as soon as one is
+free; the caption says so.
+
+**In the bag.** In the Delivery Bag window, R (or a tap on the page dots above the window) turns to
+the extra pages and L back; B returns to the game's eight places. A on an item offers Info, Use and
+a move into an empty place of the game's eight; A on an empty place there brings a mod item back.
+X or Y puts an item with a use on that button. New items fill 4 pages by default (`WWHD_BAG_PAGES=1..16`);
+when they are full, new items wait and the page says how many.
+
+**Saving.** How many of each item Link has, where it sits in the bag and which button it is on are
+stored in the save file's story area (see [Where story progress is saved](#where-story-progress-is-saved)),
+never in the game's own item data. A save file without your mod is a normal save: the bag shows the
+game's items only, and the buttons keep the game's items. Turning your mod on again brings its items
+back. To draw an item in the game's own places and buttons, the port lends it one of the game's
+unused item numbers for that save file; the game's data never refers to these numbers.
+
 ## The story notebook
 
 With several story mods on, the player needs to know what each of them asks for. Wind Waker has
@@ -502,8 +666,10 @@ the mod repository, **`story-notebook`**: its letter brings the notebook (its ma
 the notebook's look (`"icon"`: a PNG, `"model"`: a binary glTF the port turns into the game model on
 the player's machine), and it holds a first small quest. The mod manager downloads it from the mod
 catalogue by itself, confirms it like the port's own code and keeps it enabled while the story
-system is on; it can't be switched off or removed on its own. Every quest mod depends on it (a
-manifest with `quests` or `charts` gets the dependency even if it doesn't declare it). While it
+system is on; it can't be switched off or removed on its own. Every story mod depends on it (a
+manifest with `quests`, `charts`, `letters`, `items`, `models`, `actors` or `scenes` gets the
+dependency even if it doesn't declare it; a package of [mod stages](mod-stages.md#a-quest-through-the-stage)
+can declare it `"optional": true` instead and plays without its story content then). While it
 isn't installed (offline, download failed), the story system is inactive: no letters, takeovers,
 chart marks or notebook; quest mods wait with "Needs the Story Notebook quest", the game is untouched
 and no save is changed; the next start tries again.
@@ -679,6 +845,48 @@ only it may enclose the notebook; your letters enclose `letter:...` or `chart:..
 - A declaration the port doesn't accept (an invalid field, an NPC its catalogue doesn't know, or
   an `npc_catalogue` version newer than the port's) keeps the mod from being enabled; the Mods tab
   shows the reason ("Story quests: ...").
+
+### Mod flags and places inside buildings
+
+A step's `available` can also use `flag` and `not_flag`. Each accepts a string
+or a list of up to eight flag IDs, and every condition must hold:
+
+```json
+"available": {"flag":["notice-read","door-open"], "not_flag":"reward-taken",
+              "text":"Read the notice and open the door first."}
+```
+
+These are the mod's own actor flags, not game event bits. Each flag must have a
+producer in the same manifest: an actor's read/open, switch, break or defeat
+flag, or a `flag` action, including a talk or scene end. Naming a flag in a
+condition does not declare it. The existing `event` / `not_event` conditions
+remain read-only checks of game events. The notebook and resident talks
+re-evaluate mod-flag conditions as quest availability changes.
+
+A sea place keeps its existing `{"x":100,"z":-201500}` form. For a building,
+cave or dungeon, give its stage and room together with the sea entrance hint:
+
+```json
+"place": {"stage":"Pnezumi", "room":0,
+          "sea":{"x":0,"z":-200000}, "point":0}
+```
+
+`room` is 0–63 and `point` is a spawn number from 0–255. Omit `point` to use the room's normal entrance,
+or replace it with all three room coordinates: `"x":10,"y":0,"z":20`.
+For one of the package's own [mod stages](mod-stages.md#a-quest-through-the-stage), `stage` is
+`"stage:<its id>"`. Coordinates must be finite and within ±350000. Do not combine `point` and
+coordinates. The explicit `sea` hint is required:
+a stage can have several entrances, so a stage name does not uniquely identify
+the island to mark. The notebook shows the step's `where` text, and the sea
+chart's ring stays at the hint even if the step also names a resident. There is
+no interior minimap or world-space quest ring. The editor's Quest warp list
+uses the stage/room and spawn or coordinates to enter the destination.
+
+Placed actors can finish a declared quest with
+`{"action":"quest_done","id":"lantern"}` in their dialogue actions or a
+scene's final `end.then`. The reward is given once; a repeated completion does
+nothing. See the SDK v3 dialogue section for flag-gated actors, multiple quest
+conditions and ordered talks.
 
 ### Talking to residents
 
@@ -858,9 +1066,17 @@ Full save states include the mods' memory and heaps. Both state formats record w
 continues. Loading a state never installs, enables or disables mods. Files a mod writes
 itself are not part of save states.
 
+Mod features reserve guest memory only when a loaded mod uses them (native particles, held item
+models, world actors and scenes, story progress). A start without mods reserves none, so its full
+save states keep the layout of the game without mods: full states made without mods by builds
+from before 2026-10-17 load again.
+
 ## Limits
 
-- Desktop only (macOS, Windows, Linux). Android doesn't support code mods yet.
+- macOS, Windows, Linux and Android. On Android the setup app builds the game code with code-mod
+  support (its **Code mods** switch, see [setup-code-mods.md](setup-code-mods.md)), and each mod is built
+  on the device with the app's own compiler. Mod preparation tools written in Python run there too;
+  other programs in a mod package don't run on Android.
 - Changing enabled mods or their options needs a restart.
 - Mods live in a 16 MiB region of game memory (`0x7F000000`–`0x80000000`); each mod gets its
   own 64 KiB-aligned part.

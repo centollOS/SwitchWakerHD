@@ -53,8 +53,30 @@ inline float pass_fraction(int phase, int n, bool exact) {
     return phase < n ? float(phase + 1) / float(n + 1) : 1.0f;
 }
 
-// Frame rates frame interpolation offers: 60, 120, 240 (anything else rounds down to one of them)
-inline int valid_fps(int f) { return f >= 240 ? 240 : f >= 120 ? 120 : 60; }
+// Frame rates frame interpolation offers: 40, 60, 120, 240 (anything else rounds down to one of
+// them; below 40, 60)
+inline int valid_fps(int f) { return f >= 240 ? 240 : f >= 120 ? 120 : f >= 60 ? 60 : f >= 40 ? 40 : 60; }
+
+// 40 fps: 3 logic steps over 4 frames (a frame every 1.5 vsyncs of 59.94 Hz, 25.03 ms). In each
+// group of 3 steps one step gets an in-between frame (drawn halfway, as at 60 fps: its logic pass
+// blended, its record pass exact) and the other two get one frame each: their logic pass, drawn
+// exactly and recorded as the "before" of the next step's blended frame (a record logic pass).
+// Which step gets the in-between frame follows from the step slots on the virtual vsync (gx2/
+// vsync_pacing.h step_frames: the step whose next step's frame is two frames later). Without a slot
+// (Keep game speed off, or before the first slot) the first step of every three.
+inline bool is_fps40(int fps) { return fps == 40; }
+inline int in_between_40(uint64_t step) { return step % 3 == 0 ? 1 : 0; }
+// the drawn frame interval at 40 fps: 3/4 of a step (1.5 vsyncs), in the step's unit
+inline int64_t frame_40(int64_t step) { return step * 3 / 4; }
+// The display shows a frame rate evenly when its refresh rate is a whole multiple of it (40 fps on
+// 40, 80, 120 or 160 Hz; 60 fps on 60, 120, 240 Hz). hz 0: unknown (taken as even). Rounded rates
+// count (119.88 Hz, 59.94 Hz).
+inline bool even_on_display(int fps, int hz) {
+    if (hz <= 0 || fps <= 0) return true;
+    if (hz < fps - 1) return false;
+    const int r = hz % fps;
+    return r <= 1 || r >= fps - 1;
+}
 
 // The frame rate drawn for a chosen one on a display with refresh rate hz (0: unknown) when
 // presenting waits for the display's vsync: the highest offered rate the display can show (a
@@ -63,6 +85,7 @@ inline int valid_fps(int f) { return f >= 240 ? 240 : f >= 120 ? 120 : 60; }
 inline int cap_fps(int fps, int hz, bool vsync) {
     fps = valid_fps(fps);
     if (!vsync || hz <= 0) return fps;
+    if (is_fps40(fps)) return fps;  // 40 fps is drawn on any display (even_on_display says if it looks even)
     const int shown = hz >= 238 ? 240 : hz >= 118 ? 120 : 60;  // (119.88 Hz and 239.76 Hz modes count)
     return std::min(fps, shown);
 }
@@ -80,6 +103,17 @@ inline int plan_in_between(int n_max, int64_t budget, int64_t logic_pass, int64_
     return int(std::clamp<int64_t>(fit, 1, n_max));
 }
 
+// Even frame delivery: the in-between frames a step may have so that its frames divide the display's
+// refreshes per step evenly (refreshes: whole refreshes in a 33.37 ms step, 4 at 120 Hz, 2 at 60 Hz,
+// 8 at 240 Hz; 0: unknown). On a 120 Hz screen 3 frames a step (90 fps) would stay 1, 1 and 2
+// refreshes: uneven by construction. The most of at most n that divide evenly, at least 1.
+inline int even_in_between(int n, int refreshes) {
+    if (refreshes <= 0) return std::max(1, n);
+    for (int k = std::max(1, n); k > 1; --k)
+        if (refreshes % (k + 1) == 0) return k;
+    return 1;
+}
+
 // The running average of a pass duration (3/4 old, 1/4 new). A single sample counts at most twice
 // the average: one hitch (a shader compiled, a scene loaded) would otherwise make in-between passes
 // look unaffordable, and while none are drawn none are measured (measured: one 76 ms pass kept
@@ -89,6 +123,49 @@ inline int64_t update_average(int64_t avg, int64_t sample) {
     return (avg * 3 + sample) / 4;
 }
 
+// The in-between decision of a step at 60 fps (one in-between frame), taken after the logic pass
+// (phase 0). The decision comes when the game has issued the logic frame, before the pass waits for its vsync and for the renderer to show it: a render thread that
+// delays the flips (issue #178: 15 ms a frame on top) makes the logic pass last longer than the
+// decision sees, and counted from the decision every in-between frame "fitted" and each step took
+// two render frames (24 instead of 29.97 steps a second). So the step's elapsed time counts the
+// logic pass at least at its recent duration (from one pass start to the next), and the in-between
+// frame is drawn when the next step then starts at most one drawn frame late (`frame`): that step
+// counts its lateness from the step schedule and skips its own in-between frame if it would not
+// make up for it. A computer that draws two frames a step a little too slowly so draws as many as
+// keep the game at its speed (a third of them skipped at 20 ms a frame) instead of none.
+// All times in one unit; pass_start: the logic pass's start (after any wait for its time),
+// step_start: the step's start on the schedule. On time and fast, the step's passes take one vsync
+// each and the frame is drawn.
+inline int64_t logic_pass_elapsed(int64_t now, int64_t pass_start, int64_t step_start, int64_t logic_pass) {
+    return std::max(now, pass_start + std::max<int64_t>(logic_pass, 0)) - step_start;
+}
+inline int64_t one_frame_budget(int64_t step, int64_t frame) { return step + frame; }
+// The same rule at 40 fps for a step with an in-between frame: its two frames span two drawn frames
+// (50 ms; the next step's frame is due two frames after its own), and the next step may start up to
+// a frame late. (At 60 fps the two frames are the step.) A device whose logic passes alone take a
+// step or longer (logic_pass: their recent duration) cannot keep 30 steps a second with one frame a
+// step: none (0). Without that, each time its late steps started a new schedule (two steps late) the
+// next in-between frame fitted the fresh budget of three frames and cost the game another frame
+// (simulated, 36 ms passes: 24.6 instead of 27.5 steps a second; at 60 fps the budget of 50 ms
+// never fits two such passes).
+inline int64_t one_frame_budget_40(int64_t frame, int64_t logic_pass, int64_t step) {
+    return logic_pass >= step ? 0 : one_frame_budget(2 * frame, frame);
+}
+// After a dropped in-between frame at 60 fps the next logic pass starts at once instead of waiting
+// for its step's time (one_frame: a step with one in-between frame at 60 fps). Its lateness on the
+// step schedule goes below zero by what the skip saved beyond the deficit so far (a lead:
+// slot_step_start kKeep with wait = false), and the following steps count it. The step lateness so
+// is the accumulated deficit of the drawn steps (logic pass + in-between pass - step), each skip
+// takes a whole in-between pass off it, and the skips come at the deficit rate (deficit / in-between
+// pass), one whenever the accumulated deficit reaches a frame: as few as keep the game's speed, and
+// evenly spaced. (Waiting threw away the part of a skip the deficit had not used up: a skip that
+// one slow pass brought forward saved less than a frame and the next skip came sooner, and a device
+// whose passes take longer than a vsync, where the lead after a skip is what lets the next step's
+// in-between frame fit, drew almost none.) The lead never moves a logic frame before its slot
+// (gx2_core.cpp: the step slot gates its flip). At 120/240 fps a dropped step (not even its record
+// pass fitted) still waits.
+inline bool wait_after_drop(bool one_frame) { return !one_frame; }
+
 // What follows a pass of a step (paced): phase just ended (0 = logic pass), n = the step's planned
 // in-between frames, elapsed = time since the logic pass started, pass = recent duration of a hold
 // pass.
@@ -97,6 +174,7 @@ enum class Next {
     kHold,        // the next hold pass of the step
     kRecord,      // skip the remaining blended hold passes: the next pass is the record pass
     kDrop,        // no pass fits: the rest of the step is dropped, the next logic pass waits for its time
+                  // (at 60 fps it starts at once: wait_after_drop)
 };
 inline Next next_pass(int phase, int n, int64_t elapsed, int64_t pass, int64_t budget) {
     if (phase >= n) return Next::kStepDone;
@@ -135,17 +213,88 @@ inline int skip_to(int phase, int n, int64_t elapsed, int64_t pass, int64_t budg
 // (the step's passes are done), keeps it if less than a step late (the elapsed time counted from it
 // makes the step plan fewer in-between frames, and the game catches up), and starts its own schedule
 // when later than that (the caller then drops the slot). `start`: the step's start, which its elapsed time counts from.
+// window: how late a step may start and keep the schedule (0: one step; keep_window).
 enum class StepStart { kWait, kKeep, kLate };
 struct StepPlan {
     int64_t start;
     StepStart how;
 };
-inline StepPlan slot_step_start(int64_t now, int64_t slot, int64_t frame, int64_t step, bool wait) {
+inline StepPlan slot_step_start(int64_t now, int64_t slot, int64_t frame, int64_t step, bool wait, int64_t window = 0) {
     const int64_t start = slot - frame;
     if (wait && now < start) return {start, StepStart::kWait};
-    if (now - start < step) return {start, StepStart::kKeep};
+    if (now - start < (window > 0 ? window : step)) return {start, StepStart::kKeep};
     return {now, StepStart::kLate};
 }
+// How late a logic step may start and keep the step schedule. At 60 fps (one_frame: one in-between
+// frame a step) two steps: a step that one slow pass (a hitch of 20-40 ms, a few a minute on a
+// phone) left more than a step late catches up by skipping the in-between frames of the next steps,
+// as it does from a smaller lateness (each skip makes up a step less a logic pass). With one step
+// such a step started a new schedule and the time was lost: the game ran slower (issue #254: a
+// phone with 17.2 ms passes held 29.85-29.95 instead of 29.97 steps a second; simulated with a
+// 15 ms hitch every 200 passes 29.90, now 29.97). Later than that (a scene load) still starts a new
+// schedule: catching up would skip many frames in a row. (Two steps is also where the flip side,
+// vsync_pacing.h next_slot, starts a new schedule.) `frame` is unused: 120/240 fps keep one step.
+inline int64_t keep_window(int64_t step, int64_t /*frame*/, bool one_frame) { return one_frame ? 2 * step : step; }
+
+// Android's automatic frame interpolation (platform/perf_hint.cpp adapt_60, Keep game speed off):
+// interpolation pauses while fewer frames a second than this are drawn for 2 s (the game would run
+// slower). 50 for 60 fps and up (unchanged); 5/6 of the rate at 40 fps (33.3: at 50 a 40 fps game
+// would always pause).
+inline double adapt_slow_fps(int fps) { return is_fps40(fps) ? fps * 5.0 / 6.0 : 50.0; }
+// and resumes when a 30 fps frame costs the render thread less than this (ms): room for the frames
+// of a step (two at 60 fps: 14 ms; 4/3 at 40 fps: 21 ms)
+inline double adapt_resume_ms(int fps) { return is_fps40(fps) ? 21.0 : 14.0; }
+
+// Even frame delivery (on by default on Android; WWHD_INTERP_EVEN_PACING=0/1). The passes of a step
+// take different times: a logic pass runs the game, an in-between pass only draws. When the game thread is the bottleneck
+// (a Xiaomi 14 with the record worker on: logic pass 19-20 ms, in-between pass 12-14 ms) frames
+// were ready 20 and 13 ms apart, and its 120 Hz screen showed a third of the 60 fps frames for 1 or
+// 3 refreshes instead of 2. Here a frame that is ready early is held on the CPU side (its present
+// call waits; the game and the renderer go on) until one frame interval after the previous frame;
+// a frame that is late goes out at once. Nothing feeds back into the game's timing.
+// - interval: the frame's intended distance to the previous frame (the step's length over its
+//   frames: 16.68 ms at 60 fps); 0 turns the schedule off (30 fps, uncapped, no interpolation).
+// - Each slot is the previous frame's time plus the interval less a small leak (1/128 interval):
+//   the late kind of frame (the logic frame) then anchors the schedule, and a schedule pushed late
+//   by one slow frame comes back to the frames' own times within about a hundred frames instead of
+//   keeping that delay for good. In the steady state the intervals alternate between interval -
+//   leak and interval + leak (16.55 / 16.81 ms at 60 fps: both two 120 Hz refreshes). A smaller leak
+//   keeps the schedule nearer the latest the logic frames come (less jitter on screen, a little
+//   more latency); a simulation with a 120 Hz display: 1/32 92%, 1/64 94%, 1/128 95% of the frames
+//   on screen for two refreshes (without the schedule 56%).
+// - A frame is never held longer than one interval (no more than one frame of added latency): one
+//   that would wait longer goes out at once and starts the schedule anew.
+struct EvenSchedule {
+    int64_t last = 0;      // the previous frame's present time
+    int64_t interval = 0;  // its interval
+    bool valid = false;
+    void reset() { valid = false; }
+    int64_t leakDivisor = 128;  // the leak per frame: interval / leakDivisor
+    int64_t leak(int64_t frameInterval) const { return frameInterval / std::max<int64_t>(1, leakDivisor); }
+    // the present time of a frame ready at `ready`
+    int64_t plan(int64_t ready, int64_t frameInterval) {
+        interval = frameInterval;
+        if (frameInterval <= 0) {
+            valid = false;
+            return ready;
+        }
+        int64_t t = ready;
+        if (valid) {
+            const int64_t slot = last + frameInterval - leak(frameInterval);
+            if (slot > ready && slot - ready <= frameInterval) t = slot;
+        }
+        last = t;
+        valid = true;
+        return t;
+    }
+    // the frame planned for `due` went out at `at`. A little late (the presenting thread was busy, a
+    // timer woke late) keeps the schedule: counted from the late time, every late wake-up would push
+    // the following frames later for good (measured: holds grew to a whole interval). Much later
+    // (more than 1/8 interval) or early (the next frame forced it out) counts from `at`.
+    void presented(int64_t due, int64_t at) {
+        if (valid && (at < due || at - due > interval / 8)) last = at;
+    }
+};
 
 }  // namespace pacing
 }  // namespace interp

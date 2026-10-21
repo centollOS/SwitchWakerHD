@@ -49,6 +49,7 @@
 #endif
 #include "crashrec.h"
 #include "crash_context.h"
+#include "crash_memory.h"
 #include "input.h"
 #include "mods/manager.h"
 #include "mods/required.h"
@@ -58,6 +59,9 @@
 #include "mods/save_backup.h"
 #include "runtime.h"
 #include "mods/mods.h"
+#include "mods/story_world_arrival.h"
+#include "overlay/editor_panel.h"
+#include "editor/editor_game.h"
 #ifdef __ANDROID__
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>  // main() becomes SDL_main, called by SDLActivity
@@ -67,7 +71,8 @@ namespace interp { void set_mode(int); }
 #ifdef WWHD_HAS_VULKAN
 namespace gfxvk { int renderer_smoke_test(); int warm_headstart_shaders(); }
 #ifdef __ANDROID__
-namespace gfxvk { int android_display_smoke_test(); void shutdown_renderer_caches(); }
+namespace gfxvk { int android_display_smoke_test(); }
+namespace gx2 { void shutdown_vulkan_caches(); }
 #endif
 #endif
 #ifdef WWHD_HAS_METAL
@@ -133,6 +138,7 @@ static void crash_handler(int sig, siginfo_t* si, void* uctx) {
         crash_out(fd, line, n);
     }
     Cpu* c = threads::current();
+    crash_memory::note(fd, crash_out, c ? c->r : nullptr);
     if (c) {
         n = snprintf(buf, sizeof buf, "  guest lr=%08X ctr=%08X cr=%08X\n", c->lr, c->ctr, ppc_mfcr(c));
         crash_out(fd, buf, n);
@@ -224,6 +230,8 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ex) {
         line[n++]='\n'; win_crash_out(fd,line,n);
     }
     if(Cpu* c=threads::current()){n=snprintf(buf,sizeof buf,"guest lr=%08X ctr=%08X\n",c->lr,c->ctr); win_crash_out(fd,buf,n);}
+    Cpu* diagnostic_cpu=threads::current();
+    crash_memory::note(fd,win_crash_out,diagnostic_cpu ? diagnostic_cpu->r : nullptr);
     crash_addr::host_backtrace(fd,win_crash_out,ex->ContextRecord);
     crash_context::note(fd,win_crash_out);
     crashrec::crash_note(fd,win_crash_out);
@@ -300,7 +308,7 @@ static void default_vulkan_cpu_paths() {
 // captures/wwhd.log: the whole log of this run (the previous run's is kept as wwhd-previous.log), so
 // players can attach it to an issue; on Windows the console output of the game is otherwise lost.
 // User paths are redacted as in crash logs. WWHD_LOG_FILE=<path> writes elsewhere, =0 turns it off
-// (Android: off unless set; logcat has it). The file stops at 64 MiB.
+// (Android: on by default). The file stops at 64 MiB.
 static int g_log_fd = -1;
 static size_t g_log_bytes = 0;
 static constexpr size_t kLogFileMax = 64u << 20;
@@ -338,7 +346,7 @@ static void index_game_functions() {
     crash_addr::set_game_functions(host, guest, v.size());
 }
 
-// Off unless the player turns on Settings > Graphics > "Write a log file" (saved as logFile=1),
+// Android defaults on; elsewhere the player turns on Graphics > "Write a log file" (logFile=1),
 // or WWHD_LOG_FILE is set: 1 = the default file, a path = that file, 0 = off.
 static void start_log_file(bool error = false) {
 #ifdef __SWITCH__
@@ -352,7 +360,13 @@ static void start_log_file(bool error = false) {
     std::string saved;
     const char* overlay_trace = getenv("WWHD_OVERLAY_TRACE");
     const bool tracing_overlay = overlay_trace && !strcmp(overlay_trace,"1");
-    if (!(e && *e) && !tracing_overlay && !(hostui::get("logFile", saved) && saved == "1")) return;
+    const bool hasSaved = hostui::get("logFile", saved);
+#ifdef __ANDROID__
+    const bool enabledBySetting = !hasSaved || saved != "0";
+#else
+    const bool enabledBySetting = hasSaved && saved == "1";
+#endif
+    if (!(e && *e) && !tracing_overlay && !enabledBySetting) return;
     std::string path = chosen ? e : "captures/wwhd.log";
     std::error_code ec;
     if (!chosen) {
@@ -452,6 +466,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--trace")) g_trace_hle = true;
         else if (!strcmp(argv[i], "--warm-shaders")) warm_shaders = true;
         else if (!strcmp(argv[i], "--install-story-notebook")) install_story_notebook = true;  // setup's step (mods/required.h)
+        else if (!strcmp(argv[i], "--editor")) editor::set_launch_mode(true);  // the world editor (docs/mod-editor.md)
 #ifdef WWHD_HAS_VULKAN
         else if (!strcmp(argv[i], "--renderer-smoke")) renderer_smoke = true;
 #ifdef __ANDROID__
@@ -466,6 +481,7 @@ int main(int argc, char** argv) {
 #endif
     }
     crash_context::initialize();
+    editor_ui::register_tab();  // the world editor's Editor tab (only with --editor)
     index_game_functions();
     install_crash_handler();
     start_log_file();
@@ -526,7 +542,7 @@ int main(int argc, char** argv) {
 #ifdef __ANDROID__
             if (display_smoke) {
                 result = gfxvk::android_display_smoke_test();
-                gfxvk::shutdown_renderer_caches();
+                gx2::shutdown_vulkan_caches();
             }
             else
 #endif
@@ -542,6 +558,10 @@ int main(int argc, char** argv) {
     mods::cemu::set_vulkan(render::requested()==render::Api::Vulkan);
     mods::content::set_game_root(config::game_dir);  // loose imports (fan translations) find their game path
     mods::packages::set_code_mod_support(guestmods::hooks_built() && mods::code::enabled());
+    // game code with mod hooks while the code-mod setting is off: guest code mods stay unloaded, the port's own
+    // hooked services (story mods, the editor's live edits) still run; without hooks guestmods::init says so
+    if (guestmods::hooks_built() && !mods::code::enabled())
+        LOG("[code mods] off (setting or WWHD_CODE_MODS): guest code mods are not loaded; the port's own services keep their hooks");
     mods::packages::initialize();
 #ifdef __SWITCH__
     main_switch::after_mods();  // (this fork) env.txt's mods through the mod manager
@@ -580,9 +600,7 @@ int main(int argc, char** argv) {
         mods::required::Context rc;
         std::string version = build::version();
         rc.catalogue = mods::required::catalogue_url(version);
-        if (version.starts_with("v")) version.erase(0, 1);
-        version = version.substr(0, version.find_first_of("+-"));
-        try { rc.port = mods::catalogue::Version::parse(version); } catch (...) {}
+        rc.port = mods::catalogue::port_version_from_build(version);  // ahead of a release: the next one
         rc.fetch = host::download_https;
         rc.build = g_guest_build_name;
         const std::string dir = mods::packages::directory();
@@ -600,7 +618,17 @@ int main(int argc, char** argv) {
         _exit(ok ? 0 : 1);
     }
     if (mods::packages::has_code_mod_support() && mods::required::check_local()) mods::packages::refresh_guest_startup();
+    // the world editor's inspector: only with --editor (or WWHD_EDITOR=1), so a normal start copies no manifest
+    // into an editor session; set_launch_mode ran in the argument loop above, before any package loads
+    if (editor::enabled()) guestmods::set_package_observer(editor::register_package);
     guestmods::init();  // trusted manager packages, before guest threads start
+    // the island arrival notice (story_world_arrival.h): an overlay layer only when a loaded package
+    // declares an arrival, or with --editor (a live edit can add one); the overlay seals at its first
+    // frame, after this point
+    if (story_world_arrival::declared() || editor::enabled()) {
+        story_world_arrival::register_overlay();
+        LOG("[world_island] arrival notices %s", story_world_arrival::registered() ? "on" : "unavailable (the overlay started already)");
+    }
 #ifdef WWHD_DECOMP
     decomp::init();  // decomp build: which functions run decompiled (runtime/src/decomp), after the mods
 #endif

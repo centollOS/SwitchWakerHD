@@ -27,6 +27,7 @@
 #include "../mods/packages.h"
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "popup.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -54,11 +55,10 @@ struct Host {
     mods::catalogue::Version port_version;
     std::string build_name = "USA";
     bool android = false;
-    // (this fork) the Switch: no code mods, no downloads (the catalogue, the Story Notebook) and no file choosers
-    // (overlay.cpp mods_host)
-    bool console = false;
     std::function<void()> builtin_code_mods;  // (this fork) the Switch NRO's code mods (guest_builtin_ui.h)
     bool file_picker = true; // the host has file and folder choosers (overlay/extensions.h Features)
+    bool code_mods = true;      // code mods can run here (Features::code_mods)
+    bool mod_downloads = true;  // the online mod list (Features::mod_downloads)
     bool back = false;       // controller B this frame
     bool b_used = false;     // out: B answered something here (it must not also close the menu)
     bool test = false;       // isolated headless run: WWHD_TEST_* aids apply
@@ -173,7 +173,9 @@ inline bool selectable(const char* label, bool selected = false, ImGuiSelectable
 inline bool g_expand_all = false;
 inline bool section(const char* label) {
     if (g_expand_all) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
-    return ImGui::CollapsingHeader(label);
+    const bool open = ImGui::CollapsingHeader(label);
+    state().rects[label] = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+    return open;
 }
 inline bool tree(const char* label) {
     if (g_expand_all) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
@@ -247,7 +249,7 @@ inline void open_catalogue(const Host& h) {
     auto work = catalogue_work();
     if (work.empty()) return;
     auto& s = state();
-    s.loader.open(catalogue_url(), work, h.fetch, ImGui::GetTime(), s.auto_check && !h.console);
+    s.loader.open(catalogue_url(), work, h.fetch, ImGui::GetTime(), s.auto_check && h.mod_downloads);
 }
 inline const mods::catalogue::Entry* catalogue_entry(const CatalogueLoader::Snapshot& snap, const std::string& id) {
     for (const auto& e : snap.catalogue.index.entries) if (e.id == id) return &e;
@@ -847,12 +849,15 @@ inline void review_popup(Host& h) {
     auto& r = s.review;
     const char* id = "###mods_review";
     std::string title = (r.mode == Review::Install ? "Install " : r.mode == Review::Update ? "Update " : "Switch on ") + r.name + id;
-    if (r.request) { ImGui::OpenPopup(id); r.request = false; }
+    (void)id;  // the dialog's ID whatever the title says
+    const bool open = r.request;
+    r.request = false;
+    if (!popup::begin(title.c_str(), open, ImGui::GetFontSize() * 22)) return;
     const ImVec2 vp = ImGui::GetMainViewport()->Size;
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(std::min(vp.x * 0.92f, ImGui::GetFontSize() * 22), 0), ImVec2(vp.x * 0.94f, vp.y * 0.9f));
-    if (!ImGui::BeginPopupModal(title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) return;
-    ImGui::PushTextWrapPos(std::min(ImGui::GetFontSize() * 30, vp.x * 0.85f));
+    bool ready = source_ready(r);
+    bool busy = state().job.flow.phase == Phase::Working;
+    popup::body_begin(!ready || busy ? 2 : 1);  // the buttons (and why Install waits) stay below the scrolling text
+    ImGui::PushTextWrapPos(popup::wrap_pos(30));
     if (!r.description.empty()) text(first_sentence(r.description, 240));
     ImGui::Spacing();
     // what it needs, all at once
@@ -898,9 +903,7 @@ inline void review_popup(Host& h) {
     summary += "takes " + duration_text(preview.total_expected());
     muted(summary);
     ImGui::PopTextWrapPos();
-    ImGui::Spacing();
-    bool ready = source_ready(r);
-    bool busy = state().job.flow.phase == Phase::Working;
+    popup::body_end();
     const char* go = r.mode == Review::Install ? "Install##review" : r.mode == Review::Update ? "Update##review" : "Switch on##review";
     ImGui::BeginDisabled(!ready || busy);
     bool accept = button(go, ImVec2(ImGui::GetFontSize() * 7, 0));
@@ -914,12 +917,12 @@ inline void review_popup(Host& h) {
     if (h.test && ready && !busy)
         for (const char* key : {"WWHD_TEST_MOD_SETUP", "WWHD_TEST_MOD_ENABLE", "WWHD_TEST_CATALOGUE_INSTALL"})
             if (const char* t = getenv(key); t && r.id == t) accept = true;
-    if (h.back || ImGui::IsKeyPressed(ImGuiKey_Escape)) { cancel = true; accept = false; h.b_used = h.b_used || h.back; }
+    if (popup::dismissed(h.back)) { cancel = true; accept = false; h.b_used = h.b_used || h.back; }  // the X, a tap outside, Esc or B
     if (accept && ready && !busy) {
         begin(h, ImGui::GetTime());
         ImGui::CloseCurrentPopup();
     } else if (cancel) ImGui::CloseCurrentPopup();
-    ImGui::EndPopup();
+    popup::end();
 }
 
 // ---------------------------------------------------------------- the story system's required package
@@ -987,7 +990,7 @@ inline bool begin_list(const char* id) {
 }
 // Why a catalogue mod can't be switched on here ("" when it can).
 inline std::string unavailable_reason(const Host& h, const mods::catalogue::Entry& e) {
-    if (e.kind == "guest" && h.android) return "Code mods don't work on Android yet.";
+    if (e.kind == "guest" && !h.code_mods) return "Code mods don't work on this platform.";
     bool compatible = false;
     try { compatible = e.compatible(h.port_version, h.build_name, mods::packages::platform_key()); } catch (...) {}
     return compatible ? "" : "Not available for this version of the game.";
@@ -997,7 +1000,9 @@ inline void builtin_list(Host& h) {
     muted(kAreaCaptions[kBuiltin]);
     if (!begin_list("builtin")) return;
     for (const auto& e : mods::manager::entries()) {
-        if (h.console && e.id == "story-system") continue;  // (this fork) it needs the Story Notebook's download
+        // the story system needs the Story Notebook package, which only the mod list provides
+        if (e.id == "story-system" && !h.mod_downloads && !find_view(mods::packages::list(), mods::required::kStoryNotebook))
+            continue;
         Facts fx;
         fx.builtin = true;
         fx.enabled = e.enabled();
@@ -1019,8 +1024,7 @@ inline void builtin_list(Host& h) {
 inline void community_list(Host& h) {
     using namespace mods::packages;
     auto& s = state();
-    if (h.console) muted("Mods you add to the mods folder (More > Mods folder).");  // (this fork) no downloads
-    else muted(kAreaCaptions[kCommunity]);
+    muted(h.mod_downloads ? kAreaCaptions[kCommunity] : "Mods you add to the mods folder (More > Mods folder).");
     auto list = mods::packages::list();
     auto snap = s.loader.snapshot();
     static const char* test_install = h.test ? getenv("WWHD_TEST_CATALOGUE_INSTALL") : nullptr;
@@ -1059,13 +1063,13 @@ inline void community_list(Host& h) {
     // the story system's required package (mods/required.h): its status, Install while it is missing
     if (const auto required = mods::required::status(); !required.text.empty()) {
         colored(required.working || required.restart ? kMuted : kWarn, required.text);
-        if (!h.console && !required.working && !find_view(list, mods::required::kStoryNotebook) && mods::story_system()) {
+        if (h.mod_downloads && !required.working && !find_view(list, mods::required::kStoryNotebook) && mods::story_system()) {
             ImGui::SameLine();
             if (small_button("Install##story_notebook")) install_story_notebook(h);
         }
     }
     // available to download
-    if (h.console) return;  // (this fork)
+    if (!h.mod_downloads) return;
     ImGui::SeparatorText("Available to download");
     auto line = catalogue_line(snap.have_list, snap.checking, snap.failed, s.auto_check);
     if (!line.text.empty()) {
@@ -1203,15 +1207,14 @@ inline void troubleshooting(const Host& h, const mods::packages::View& v, const 
     for (const auto& [path, hash] : v.content_hashes) muted("SHA-256 " + path + ": " + hash);
     ImGui::Unindent();
 }
-inline void remove_popup(const Host& h) {
+inline void remove_popup(Host& h) {
     auto& s = state();
-    const char* id = "Remove mod##mods_remove";
-    if (s.remove_request) { ImGui::OpenPopup(id); s.remove_request = false; }
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (!ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) return;
+    const bool open = s.remove_request;
+    s.remove_request = false;
+    if (!popup::begin("Remove mod##mods_remove", open)) return;
     std::string name = s.remove_id;
     for (const auto& v : mods::packages::list()) if (v.id == s.remove_id) name = v.name;
-    ImGui::PushTextWrapPos(std::min(ImGui::GetFontSize() * 26, ImGui::GetMainViewport()->Size.x * 0.85f));
+    ImGui::PushTextWrapPos(popup::wrap_pos(26));
     text("Remove " + name + "?");
     text("This deletes the mod and the files it prepared (" + size_text(s.remove_bytes) + "). Your saves are not touched.");
     ImGui::PopTextWrapPos();
@@ -1220,7 +1223,7 @@ inline void remove_popup(const Host& h) {
     bool cancel = button("Cancel##remove", ImVec2(ImGui::GetFontSize() * 6, 0));
     ImGui::SetItemDefaultFocus();
     if (h.test) if (const char* t = getenv("WWHD_TEST_MOD_REMOVE"); t && s.remove_id == t) accept = true;
-    if (h.back || ImGui::IsKeyPressed(ImGuiKey_Escape)) { cancel = true; accept = false; }
+    if (popup::dismissed(h.back)) { cancel = true; accept = false; h.b_used = h.b_used || h.back; }  // the X, a tap outside, Esc or B
     if (accept) {
         std::string error;
         if (mods::packages::remove(s.remove_id, error)) {
@@ -1230,7 +1233,7 @@ inline void remove_popup(const Host& h) {
         } else s.error = error;
     }
     if (accept || cancel) { s.remove_id.clear(); ImGui::CloseCurrentPopup(); }
-    ImGui::EndPopup();
+    popup::end();
 }
 inline void package_page(Host& h, const mods::packages::View& v) {
     using namespace mods::packages;
@@ -1469,7 +1472,7 @@ inline void more(Host& h) {
         if (button("Choose folder…##package")) pick(true);
         ImGui::Unindent();
     }
-    if (!h.console && section("GameCube game for mods")) {  // (this fork: a file chooser)
+    if (h.file_picker && section("GameCube game for mods")) {  // (chosen with a file picker)
         ImGui::Indent();
         muted("Some mods use files from the GameCube version of the game. They stay on your computer.");
         game_source_picker(h, "gc_wind_waker");
@@ -1477,13 +1480,13 @@ inline void more(Host& h) {
         if (!src.path.empty() && small_button("Forget it")) { std::string e; set_game_source("gc_wind_waker", "", e); }
         ImGui::Unindent();
     }
-    if (!h.console && section("Code-mod support")) {  // (this fork: no rebuild on the console)
+    if (h.code_mods && section("Code-mod support")) {
         ImGui::Indent();
         bool code = mods::code::enabled();
         // not the section's own label: two items with one ID
         if (ImGui::Checkbox("Use code mods##code_mods_switch", &code)) mods::code::request(code);
-        muted("Code mods need the game code rebuilt with mod support (about 5 minutes) and a restart. Installing a "
-              "code mod turns this on by itself.");
+        muted((std::string("Code mods need the game code rebuilt with mod support (") + mods::code::rebuild_duration() +
+               ") and a restart. Installing a code mod turns this on by itself.").c_str());
         ImGui::Unindent();
     }
     if (section("Save backups")) {
@@ -1491,7 +1494,7 @@ inline void more(Host& h) {
         if (experimental::backups_section(h.back)) h.b_used = true;
         ImGui::Unindent();
     }
-    if (!h.console && section("Mod list")) {  // (this fork: no downloads)
+    if (h.mod_downloads && section("Mod list")) {
         ImGui::Indent();
         if (ImGui::Checkbox("Check for new mods automatically", &s.auto_check))
             hostui::post([on = s.auto_check] { hostui::set("mod.catalogue.auto", on ? "1" : "0"); });

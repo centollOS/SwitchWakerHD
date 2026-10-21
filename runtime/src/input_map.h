@@ -36,6 +36,8 @@ enum Pad : int {
     kPadDUp, kPadDDown, kPadDLeft, kPadDRight,
     kPadLSUp, kPadLSDown, kPadLSLeft, kPadLSRight,
     kPadRSUp, kPadRSDown, kPadRSLeft, kPadRSRight,
+    kPadCapture, kPadRightPaddle1, kPadLeftPaddle1, kPadRightPaddle2, kPadLeftPaddle2, kPadTouchpad,
+    kPadMisc2, kPadMisc3, kPadMisc4, kPadMisc5, kPadMisc6,
     kPadCount
 };
 const char* pad_id(int p);     // JSON value, e.g. "LeftTrigger"
@@ -58,7 +60,29 @@ const char* reserved_key(int code);
 
 constexpr float kMinStickRange = 1.0f, kMaxStickRange = 1.5f;
 
+// Host actions share controls.json, but do not drive GamePad inputs.
+enum Shortcut { kSettings, kFullscreen, kPhoto, kSave1, kSave2, kSave3, kSave4, kSave5,
+    kLoad1, kLoad2, kLoad3, kLoad4, kLoad5, kResolution, kAO, kAOHires, kAniso,
+    kInterpolation, kTrue60, kFXAA, kPiP, kPerformance, kMute, kVolumeDown, kVolumeUp, kShortcutCount };
+enum KeyModifier { kModShift = 1, kModCtrl = 2, kModAlt = 4, kModSuper = 8 };
+struct ShortcutKey {
+    int code = kNoKey, mods = 0;
+    bool operator==(const ShortcutKey&) const = default;
+};
+struct ShortcutBinding {
+    std::array<ShortcutKey, 2> keys{};
+    int hold = kPadNone, button = kPadNone;
+    bool operator==(const ShortcutBinding&) const = default;
+};
+struct ShortcutInfo { const char* id; const char* name; const char* group; ShortcutKey primary, alternate; int button = kPadNone; };
+const ShortcutInfo& shortcut_info(int action);
+std::array<ShortcutBinding, kShortcutCount> shortcut_defaults();
+// controls.json "shortcuts_version": 2 shows Home under Settings, 3 moves an untouched F1 Settings key to Esc + F1.
+constexpr int kShortcutsVersion = 3;
+std::string shortcut_key_label(ShortcutKey key);
+
 struct Mapping {
+    std::array<ShortcutBinding, kShortcutCount> shortcuts = shortcut_defaults();
     std::array<std::array<int, kKeysPerAction>, kActionCount> keys;  // kNoKey = empty slot
     std::array<int, kActionCount> pad;                                // kPadNone = unbound
     // Real sticks do not reliably return exact zero. In particular, a tiny residual zoom input
@@ -152,9 +176,9 @@ PadFamily pad_family();
 
 // What the in-game button prompts look like (button_glyphs.cpp draws it). Resolved from the
 // mapping and the pad family; pure, so input_map_test and button_glyphs_test can cover it.
-//   face: the face buttons are restyled only while they are by label (the game's own prompts
-//     already match a by-position pad): Automatic picks PlayStation shapes on a PlayStation pad
-//     and the Xbox colours/positions on anything else; Original keeps the game's look.
+//   face: appearance and host-button identities follow the resolved face bindings. Automatic
+//     follows Xbox/PlayStation; position/custom on Nintendo or unknown retain original icons.
+//     By label retains its existing Xbox fallback. Original never changes face prompts.
 //   shoulders: Automatic follows the face style (Xbox: LB/RB/LT/RT, PlayStation: L1/R1/L2/R2,
 //     original: the game's L/R/ZL/ZR); a fixed choice applies with any face layout.
 enum class FaceStyle : uint8_t { kOriginal, kXbox, kPlayStation };
@@ -164,6 +188,7 @@ struct PromptStyle {
     bool colours = false;         // face colours (only with a face style)
     ShoulderStyle shoulders = ShoulderStyle::kOriginal;
     bool positions = false;       // HUD face cluster in the Xbox/PlayStation positions
+    std::array<int, 4> buttons = {0, 1, 2, 3};  // Wii U face -> host A/B/X/Y
     bool active() const { return face != FaceStyle::kOriginal || shoulders != ShoulderStyle::kOriginal; }
     bool operator==(const PromptStyle&) const = default;
 };
@@ -197,6 +222,17 @@ bool from_json(const std::string& text, Mapping& out, std::string* error = nullp
 bool load_file(const std::string& path, Mapping& out, std::string* error = nullptr);
 bool save_file(const std::string& path, const Mapping& m);
 std::string default_path();
+
+// Settings has a remappable Home default and a held-Select fallback unless Select is a modifier.
+bool settings_reachable(const Mapping& m, bool controller_settings = true);
+bool shortcut_conflict(const Mapping& m, int action);
+int shortcut_for_key(const Mapping& m, int code, int mods);
+// A single button or complete combination consumes its inputs only while held. One activation per press.
+struct ShortcutPoll {
+    std::array<bool, kShortcutCount> held{};
+    std::vector<int> poll(const Mapping& m, const float* raw, float* game);
+};
+void consume_shortcut_buttons(const Mapping& m, const float* raw, float* game);
 
 // The live mapping (thread safe). load_startup() reads default_path() if it exists.
 void load_startup();

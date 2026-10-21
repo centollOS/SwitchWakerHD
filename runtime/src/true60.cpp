@@ -1,4 +1,4 @@
-#include "mods/fast_forward.h"
+#include "mods/mods.h"
 // True 60 fps: game logic at 60 steps per second (not interpolation).
 //
 // Pass structure (shared with interp.cpp): the per-frame function runs every vsync. Passes alternate:
@@ -1029,10 +1029,7 @@ namespace {
 struct FcStep { uint64_t pass; uint32_t before, after, rate, range; };
 std::unordered_map<uint32_t, FcStep> g_fc;  // frame controls advanced on the last half pass
 }  // namespace
-extern "C" void hook_027F2FC4(Cpu* c) {
-    // drawing code advancing an animation on a hold/half pass: held back (interp_fx.cpp); inside
-    // game logic (e.g. Link at 60 Hz) the step is scaled by dt below
-    if (interp::fx_hold_anim()) return;
+static void advance_frame_ctrl(Cpu* c) {
     if (t_dt >= 1.0f) return f_027F2FC4_orig(c);
     uint32_t fc = c->r[3];
     uint32_t rate = ld32(fc), frame = ld32(fc + 4), range = ld32(fc + 8);
@@ -1065,6 +1062,13 @@ extern "C" void hook_027F2FC4(Cpu* c) {
     }
 }
 
+extern "C" void hook_027F2FC4(Cpu* c) {
+    // Render-only held previews still advance nothing. The optional quick-use multiplier wraps
+    // the existing dt/full-pass replay, and is gone before returning to any other guest caller.
+    if (interp::fx_hold_anim()) return;
+    mods::quick_use_animation_call(c, advance_frame_ctrl);
+}
+
 // J3DFrameCtrl::checkPass(f32 frame): true if `frame` lies in [frame, frame + rate), i.e. is passed
 // by the next 30 Hz step (key frames for footsteps, voices, effects, item models). With dt < 1 it
 // is answered on full passes only, where the frame is the exact 30 fps value (hook_027F2FC4): the
@@ -1072,7 +1076,7 @@ extern "C" void hook_027F2FC4(Cpu* c) {
 // once and at the same step as in the 30 fps game. Half passes find nothing.
 extern "C" void f_027F2BF8_orig(Cpu* c);
 extern "C" void hook_027F2BF8(Cpu* c) {
-    if (t_dt >= 1.0f || !half_pass()) return f_027F2BF8_orig(c);
+    if (t_dt >= 1.0f || !half_pass()) return mods::quick_use_animation_call(c, f_027F2BF8_orig, false);
     c->r[3] = 0;
 }
 
@@ -1352,11 +1356,16 @@ void true60_nan_probe(uint32_t addr) {
 
 // The HUD (d_meter) updates its state from the play scene's draw (02593B10, the per-step part of
 // the meter: button labels, gauges, the magic gauge sparkle with its random numbers), so at 60 fps
-// it stepped twice per logic step. With true 60 the update runs on full passes only (half passes
-// still draw it): HUD timing and its use of the shared random numbers are those of the 30 fps game.
+// it stepped on in-between passes as well (twice per logic step at 60 and 120 fps). The update runs
+// on full passes only, with frame interpolation as with true 60 (in-between passes still draw it):
+// HUD timing and its use of the shared random numbers are those of the 30 fps game. Its sounds depend
+// on this too: the Pirate's Charm ring while Tetra calls (JA_SE_ITM_OMAMORI_BLINK) starts from here
+// every 20 updates of the A-button counter. Sound starts on in-between passes are dropped
+// (interp.cpp), and with two updates per step every 20th update fell on an in-between pass, so with
+// 60/120 fps the charm shook without its ring (issue #262).
 extern "C" void f_02593B10_orig(Cpu* c);
 extern "C" void hook_02593B10(Cpu* c) {
     static const bool every = getenv("WWHD_HUD_EVERY_PASS") != nullptr;  // debug: old behaviour
-    if (enabled() && half_pass() && !every) return;
+    if (half_pass() && !every) return;
     f_02593B10_orig(c);
 }

@@ -138,6 +138,11 @@ macro(switch_port_executable)
     endif()
     # uam on the console: the game shaders that no DKSH cache has (gfx/deko/shaders_dk.cpp, its worker thread)
     target_link_libraries(wwhd PRIVATE uamlib)
+    # zstd for upstream's full-state codec (full_state_stream.h; full states stay off on the Switch, the code links):
+    # the pinned source (cmake/Zstd.cmake), devkitPro has no zstd port
+    set(WWHD_BUNDLED_ZSTD ON CACHE BOOL "" FORCE)
+    include(${CMAKE_SOURCE_DIR}/cmake/Zstd.cmake)
+    target_link_libraries(wwhd PRIVATE wwhd_zstd)
     # threads created without attributes get a large stack, newlib's C11 thrd_create results are fixed
     # (core.cpp), and abort() logs its caller first (main.cpp)
     target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create -Wl,--wrap=abort)

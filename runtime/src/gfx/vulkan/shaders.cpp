@@ -1,21 +1,30 @@
+#include "vertex_cpu_policy.h"
 #include "../stereo_projection.h"
 #include "../stereo.h"
 #include "atomic_temporary.h"
 // Real Latte microcode -> Cemu GLSL -> SPIR-V for the Vulkan backend.
 #include "shaders.h"
+#include "spirv_precision.h"
 #include "pipeline_identity.h"
 #include "shader_compiler.h"
 #include "shader_translation.h"
 #include "shader_binary.h"
+#include "shader_disk_cache.h"
 #include "worker_metrics.h"
 #include "backend.h"
+#include "vertex_formats.h"
+#include "vertex_format_shader.h"
 #include "headstart.h"
 #include "stutter_trace.h"
 #include "mods/cemu_pack.h"
 #include "mods/shader_interface.h"
 #include "graphic_pack_hash.h"
 #include "gfx/area_sample.h"
+#include "gfx/shader_linkage.h"
+#include "render_objects.h"
 #include "exact_state_memo.h"
+#include "program_hash_cache.h"
+#include "write_watch.h"
 #include "render_prof.h"
 #include "Cafe/HW/Latte/Core/FetchShader.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
@@ -37,6 +46,7 @@
 #include <future>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 LatteDecompilerShader* FinishDecompiledShader(LatteDecompilerOutput_t& output);
 LatteFetchShader* LatteShaderRecompiler_createFetchShader(LatteFetchShader::CacheHash hash,
@@ -73,8 +83,14 @@ std::vector<uint32_t> shader_binary_words_exact(const std::shared_ptr<ShaderBina
 namespace {
 std::unordered_map<uint64_t, std::unique_ptr<Shader>> shaders;
 std::unordered_map<uint64_t, LatteFetchShader*> fetchShaders;
-struct ProgramHash { uint64_t hash = 0, frame = ~uint64_t{0}; };
-std::unordered_map<uint64_t, ProgramHash> programHashes;
+// program bytes hashed again only after a write to them (program_hash_cache.h)
+struct ProgramWatch {
+    static bool active() { return wwatch::active(); }
+    static uint64_t arm(uint32_t a, uint32_t n) { return wwatch::arm(a, n); }
+    static bool written_since(uint32_t a, uint32_t n, uint64_t stamp) { return wwatch::written_since(a, n, stamp); }
+    static uint64_t write_seq() { return wwatch::write_seq(); }
+};
+ProgramHashCache<ProgramWatch> programHashes;
 struct LastShader {
     const uint32_t* regs = nullptr;
     LatteFetchShader* fetch = nullptr;
@@ -106,78 +122,30 @@ uint64_t hash_bytes(const void* bytes, size_t size, uint64_t hash = 0x9E3779B97F
     for (; i<size; ++i) hash=(hash^p[i])*0x100000001B3ull;
     return hash^(hash>>29);
 }
-// Disk entries retain exact GLSL to verify hash collisions and translator changes.
+// Disk entries keep SPIR-V and the final GLSL's identity (hash + length), not
+// the text (shader_disk_cache.h). Translator changes produce different GLSL and
+// therefore a different key and identity.
 // Bump this compile recipe whenever compilation options/defaults change.
 constexpr char cacheRecipe[] = "WWVKSC02:glsl450:vk1.1:spv1.3:noopt:resources1:strictmul1:"
     GLSLANG_VERSION_FLAVOR;
-constexpr size_t maxCacheBytes = 128u * 1024u * 1024u;
-constexpr size_t maxSourceBytes = 4u * 1024u * 1024u;
-constexpr size_t maxSpirvWords = 1024u * 1024u;
-constexpr size_t maxCacheEntries = 65536;
-struct DiskShader { std::string source; std::vector<uint32_t> words; bool vertex; bool fromDisk = false; };
+constexpr size_t maxCacheBytes = diskcache::kMaxBytes;
+constexpr size_t maxSourceBytes = diskcache::kMaxSourceBytes;
+constexpr size_t maxCacheEntries = diskcache::kMaxEntries;
+using DiskShader = diskcache::Entry;
 std::unordered_map<uint64_t, DiskShader> diskShaders;
 std::string diskPath;
 bool diskInitialized = false, diskDirty = false;
 uint64_t diskChangedFrame = 0, diskAttemptFrame = 0, diskRevision = 0;
-size_t diskBytes = 40;
-uint64_t cache_checksum(const uint8_t* p, size_t n) {
-    uint64_t h=14695981039346656037ull;
-    for(size_t i=0;i<n;++i) h=(h^p[i])*1099511628211ull;
-    return h;
-}
+size_t diskBytes = diskcache::kHeaderBytes;
+uint64_t cache_checksum(const uint8_t* p, size_t n) { return diskcache::checksum(p, n); }
 uint64_t cache_fingerprint() {
     return cache_checksum(reinterpret_cast<const uint8_t*>(cacheRecipe),sizeof(cacheRecipe)) ^
         (uint64_t(GLSLANG_VERSION_MAJOR)<<48) ^ (uint64_t(GLSLANG_VERSION_MINOR)<<32) ^
         (uint64_t(GLSLANG_VERSION_PATCH)<<16);
 }
-void cache_put(std::vector<uint8_t>& out,uint64_t value,size_t bytes) {
-    for(size_t i=0;i<bytes;++i) out.push_back(uint8_t(value>>(i*8)));
-}
-bool cache_take(const std::vector<uint8_t>& in,size_t& offset,uint64_t& value,size_t bytes) {
-    if(offset>in.size() || bytes>in.size()-offset) return false;
-    value=0; for(size_t i=0;i<bytes;++i) value|=uint64_t(in[offset++])<<(i*8);
-    return true;
-}
-bool cache_spirv_valid(const std::vector<uint32_t>& words) {
-    if(words.size()<5 || words.size()>maxSpirvWords || words[0]!=0x07230203 ||
-       words[1]!=0x00010300 || !words[3] || words[3]>0x400000 || words[4]!=0) return false;
-    for(size_t i=5;i<words.size();) {
-        size_t length=words[i]>>16;
-        if(!length || length>words.size()-i) return false;
-        i+=length;
-    }
-    return words.size()>5;
-}
-bool decode_disk_cache(const std::vector<uint8_t>& file,
-                      std::unordered_map<uint64_t,DiskShader>& result) {
-    // 8-byte schema, fingerprint, payload length, checksum, record count.
-    if(file.size()<40 || file.size()>maxCacheBytes || memcmp(file.data(),"WWVKSC02",8)) return false;
-    size_t pos=8; uint64_t fingerprint,length,checksum,count;
-    if(!cache_take(file,pos,fingerprint,8) || fingerprint!=cache_fingerprint() ||
-       !cache_take(file,pos,length,8) || length!=file.size()-40 ||
-       !cache_take(file,pos,checksum,8) || checksum!=cache_checksum(file.data()+40,file.size()-40) ||
-       !cache_take(file,pos,count,8) || count>maxCacheEntries) return false;
-    std::unordered_map<uint64_t,DiskShader> decoded;
-    for(uint64_t i=0;i<count;++i) {
-        uint64_t key,stage,sourceLength,wordCount;
-        if(!cache_take(file,pos,key,8) || !cache_take(file,pos,stage,4) || stage>1 ||
-           !cache_take(file,pos,sourceLength,4) || !sourceLength || sourceLength>maxSourceBytes ||
-           !cache_take(file,pos,wordCount,4) || wordCount<5 || wordCount>maxSpirvWords ||
-           sourceLength>file.size()-pos || wordCount>(file.size()-pos-sourceLength)/4) return false;
-        DiskShader entry;
-        entry.vertex=stage!=0;
-        entry.fromDisk=true;
-        entry.source.assign(reinterpret_cast<const char*>(file.data()+pos),size_t(sourceLength));
-        pos+=sourceLength;
-        entry.words.reserve(size_t(wordCount));
-        for(uint64_t j=0;j<wordCount;++j) {
-            uint64_t word; if(!cache_take(file,pos,word,4)) return false;
-            entry.words.push_back(uint32_t(word));
-        }
-        if(!cache_spirv_valid(entry.words) || !decoded.emplace(key,std::move(entry)).second) return false;
-    }
-    if(pos!=file.size()) return false;
-    result=std::move(decoded); return true;
+uint64_t source_cache_key(const std::string& text, bool vertex) {
+    return cache_checksum(reinterpret_cast<const uint8_t*>(text.data()), text.size()) ^
+        cache_fingerprint() ^ (vertex ? 0x9E3779B97F4A7C15ull : 0xD1B54A32D192ED03ull);
 }
 void initialize_disk_cache() {
     if(diskInitialized) return;
@@ -201,20 +169,44 @@ void initialize_disk_cache() {
         if(!file) return;
         bool read=fread(bytes.data(),1,bytes.size(),file)==bytes.size() && fgetc(file)==EOF && !ferror(file);
         fclose(file);
-        if(read && decode_disk_cache(bytes,diskShaders)) { ++stats.diskLoads; diskBytes=bytes.size(); }
+        if(read) {
+            const auto decoded=diskcache::decode(bytes,cache_fingerprint(),diskShaders);
+            if(decoded.ok) {
+                ++stats.diskLoads; diskBytes=decoded.bytes;
+                // An older file (with GLSL text) is rewritten smaller at the next checkpoint.
+                if(decoded.legacy) { ++diskRevision; diskDirty=true; diskChangedFrame=0; }
+            }
+        }
     } catch(...) { diskShaders.clear(); }
     stats.diskLoadNs+=std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now()-start).count();
 }
 
 uint64_t program_hash(uint32_t address, uint32_t size, uint64_t frame) {
-    // Include size: the same address can refer to different program ranges.
-    auto& entry = programHashes[(uint64_t(address) << 32) | size];
-    if (frame == ~uint64_t{0} || entry.frame != frame) {
-        entry.hash = hash_bytes(ppc_ptr(address), size);
-        entry.frame = frame;
+    // Include size: the same address can refer to different program ranges. Hashed again on a new
+    // frame only if the program's pages were written (WWHD_VK_PROGRAM_HASH_WATCH=0: every frame).
+    static const bool watch = [] {
+        const char* e = std::getenv("WWHD_VK_PROGRAM_HASH_WATCH");
+        return !e || std::strcmp(e, "0") != 0;
+    }();
+    static const bool verify = std::getenv("WWHD_VK_PROGRAM_HASH_VERIFY") != nullptr;
+    programHashes.watchEnabled = watch;
+    programHashes.verify = verify;
+    static const bool report = std::getenv("WWHD_VK_STATS") || std::getenv("WWHD_VK_CPU_ONLY_STATS");
+    static uint64_t reportedFrame = 0;
+    if (report && frame != ~uint64_t{0} && frame >= reportedFrame + 600) {
+        const auto& st = programHashes.stats;
+        if (reportedFrame)
+            ::log_msg("[vulkan program hash] %zu programs; lookups %llu, hashed %llu (every frame while written: %llu), "
+                      "unchanged by write watch %llu, same frame %llu; became dynamic %llu; verified %llu, mismatches %llu; hashed %.1f MiB, skipped %.1f MiB",
+                      programHashes.size(), (unsigned long long)st.lookups, (unsigned long long)st.hashes,
+                      (unsigned long long)st.dynamicHashes, (unsigned long long)st.watchedHits,
+                      (unsigned long long)st.frameHits, (unsigned long long)st.becameDynamic,
+                      (unsigned long long)st.verified, (unsigned long long)st.mismatches,
+                      st.hashedBytes / 1048576.0, st.skippedBytes / 1048576.0);
+        reportedFrame = frame;
     }
-    return entry.hash;
+    return programHashes.get(address, size, frame, [&] { return hash_bytes(ppc_ptr(address), size); });
 }
 // Shader keys (two levels, as Cemu's LatteShader.cpp base and auxiliary hashes, but exact about
 // what our GLSL path reads; docs/vulkan.md, "Shader keys"):
@@ -231,62 +223,33 @@ uint64_t program_hash(uint32_t address, uint32_t size, uint64_t frame) {
 // Render-target formats, buffer addresses, samplers and units the program does not sample are not
 // read by the GLSL translation (the Metal-only render-target-texture check is the one that does)
 // and are not in the key; the pipeline key has the attachment formats.
-constexpr size_t kLinkageWords = 3 + GPU7_PS_MAX_INPUTS + 32 + 4;
+constexpr size_t kLinkageWords = ::gfx::kShaderLinkageWords;
+// Depth clamp where the device has none (Mali-G52 and other GPUs without the depthClamp feature, or
+// WWHD_VK_FORCE_DEPTH_CLAMP_EMULATION=1): the game draws its shadow maps with far-plane clipping off
+// (PA_CL_CLIP_CNTL ZCLIP_FAR_DISABLE, which the pipeline turns into depth clamp), so casters in front
+// of a shadow cascade's near plane still land in the map at its nearest depth. Without the feature
+// the pipeline cannot clamp; the vertex shader is translated in a variant that clamps the position's
+// depth at the near plane, per vertex: exact for casters wholly in front of it, a triangle crossing
+// the plane comes out a little too deep (at worst a little less shadow). The far plane still clips:
+// nothing beyond it shadows anything in range, and big ground triangles clamped there per vertex
+// came out too near. The variant is part of the shader key (gather_linkage flag 64), so the shader
+// caches keep both. Approach from the GreenNaugahyde Android fork (v0.9.5, issue #45 there).
+bool depth_clamp_variant_wanted(const uint32_t* regs) {
+    return !R.enabledFeatures.depthClamp && (regs[REGADDR::PA_CL_CLIP_CNTL] & (1u << 27));  // ZCLIP_FAR_DISABLE
+}
+// the vertex shader variant: SET_POSITION (the Vulkan define of the decompiler's header) clamps z
+bool clamp_position_depth(std::string& glsl) {
+    static const std::string def = "#define SET_POSITION(_v) ";
+    const size_t d = glsl.find(def);
+    const size_t eol = d == std::string::npos ? d : glsl.find_first_of("\r\n", d);
+    if (eol == std::string::npos) return false;
+    glsl.insert(eol, "; if (gl_Position.w > 0.0) gl_Position.z = max(gl_Position.z, 0.0)");
+    return true;
+}
 size_t gather_linkage(const uint32_t* regs, bool vertex, const LatteFetchShader* fetch, uint32_t* out) {
-    size_t count = 0;
-    uint32_t flags = (regs[REGADDR::VGT_GS_MODE] & 3) != 0 ? 1u : 0u;
-    if (vertex) {
-        // Each fetch attribute is imported into the register after the first SQ_VTX_SEMANTIC slot
-        // holding its semantic id (LatteDecompiler_emitAttributeImport, analyzer relative reads);
-        // the other slots are never read. One byte per attribute, 0xFF when unmapped.
-        uint32_t attributes = 0;
-        if (fetch)
-            for (const auto& group : fetch->bufferGroups) attributes += group.attribCount;
-        if (attributes <= 4 * 32) {
-            uint32_t packed = 0, bytes = 0;
-            if (fetch)
-                for (const auto& group : fetch->bufferGroups)
-                    for (int i = 0; i < group.attribCount; ++i) {
-                        uint32_t location = 0xFF;
-                        for (uint32_t f = 0; f < 32; ++f)
-                            if (regs[mmSQ_VTX_SEMANTIC_0 + f] == group.attrib[i].semanticId) { location = f; break; }
-                        packed |= location << (8 * (bytes++ & 3));
-                        if ((bytes & 3) == 0) { out[count++] = packed; packed = 0; }
-                    }
-            if (bytes & 3) out[count++] = packed;
-            out[count++] = attributes;
-        } else {
-            std::memcpy(out + count, regs + mmSQ_VTX_SEMANTIC_0, 32 * sizeof(uint32_t));
-            count += 32;
-        }
-        // declared inputs no attribute fills turn the decompiler's strict multiplication on (only those keys change)
-        if (const uint32_t unfetched = LatteDecompiler_UnfetchedVertexInputs(regs, fetch)) out[count++] = unfetched;
-        const uint32_t vte = regs[REGADDR::PA_CL_VTE_CNTL];
-        const uint32_t primitive = regs[REGADDR::VGT_PRIMITIVE_TYPE] & 0x3F;
-        flags |= (primitive == 1 ? 2u : 0u) | (regs[mmVGT_STRMOUT_EN] ? 4u : 0u) |
-                 ((vte & 0x15) != 0x15 ? 8u : 0u) |                       // any viewport scale off
-                 (regs[REGADDR::PA_CL_CLIP_CNTL] & (1u << 19) ? 16u : 0u); // DX clip space (half Z)
-        if (mods::cemu::has_shaders()) {
-            // graphics-pack shader names hash the whole VTE word and rect primitives
-            out[count++] = vte;
-            out[count++] = primitive == 0x11 ? 1u : 0u;
-        }
-    } else {
-        // PS input table (latte_support.cpp LatteShader_CreatePSInputTable): input count, position
-        // import, parameter generation, and per input its semantic, flat and noperspective bits;
-        // every input is declared. Vertex shaders only need where their exports land (variant_hash).
-        const uint32_t control0 = regs[mmSPI_PS_IN_CONTROL_0];
-        out[count++] = control0 & 0x03FFFD3Fu;
-        const uint32_t inputs = std::min<uint32_t>(control0 & 0x3F, GPU7_PS_MAX_INPUTS);
-        for (uint32_t i = 0; i < inputs; ++i) out[count++] = regs[mmSPI_PS_INPUT_CNTL_0 + i] & 0x14FFu;
-        out[count++] = regs[mmSPI_PS_IN_CONTROL_1] & 0x1FF00u;  // front-face import
-        out[count++] = regs[mmCB_SHADER_MASK];
-        const uint32_t alpha = regs[REGADDR::SX_ALPHA_TEST_CONTROL];
-        out[count++] = alpha & 8 ? alpha & 0xF : 0;
-        flags |= regs[mmSPI_INTERP_CONTROL_0] & (1u << 1) ? 32u : 0u;  // point sprite
-    }
-    out[count++] = flags;
-    return count;
+    // flag 64: the emulated depth clamp variant (depth_clamp_variant_wanted)
+    return ::gfx::gather_shader_linkage(regs, vertex, fetch, mods::cemu::has_shaders(), out,
+                                        vertex && depth_clamp_variant_wanted(regs) ? 64u : 0u);
 }
 // What the program reads beyond the linkage, recorded from its first translation.
 struct ProgramUse {
@@ -395,7 +358,7 @@ uint64_t legacy_state_hash(const uint32_t* regs, uint64_t hash, bool vertex) {
     put(mmCB_SHADER_CONTROL, 1); put(mmDB_SHADER_CONTROL, 1);
     put(mmSPI_INPUT_Z, 1); put(REGADDR::SX_ALPHA_TEST_CONTROL, 1);
     uint32_t transformState[] = {regs[REGADDR::PA_CL_VTE_CNTL] & 0x3F,
-        regs[REGADDR::PA_CL_CLIP_CNTL] & (1u << 19),
+        regs[REGADDR::PA_CL_CLIP_CNTL] & ((1u << 19) | (depth_clamp_variant_wanted(regs) ? 1u << 27 : 0u)),
         regs[REGADDR::DB_DEPTH_CONTROL] & 0x83};
     append(transformState,3);
     put(REGADDR::CB_COLOR_CONTROL, 1); put(REGADDR::CB_TARGET_MASK, 1);
@@ -525,14 +488,25 @@ uint32_t key_verify_rate() {
     }();
     return rate;
 }
+// Verification modes keep each shader's final GLSL text so collisions and
+// key violations can be compared and shown byte for byte. Off by default:
+// shaders otherwise keep only the text's identity (hash + length).
+bool retain_shader_source() {
+    static const bool retain = [] {
+        const char* value = getenv("WWHD_VK_SHADER_SOURCE_VERIFY");
+        return (value && !strcmp(value, "1")) || key_verify_rate() != 0;
+    }();
+    return retain;
+}
 uint64_t output_hash(const Shader& shader) {
-    uint64_t hash = hash_bytes(shader.glsl.data(), shader.glsl.size(), shader.vertex ? 0x5151 : 0xA2A2);
+    const uint64_t source[3]{shader.sourceId.low, shader.sourceId.high, shader.sourceId.length};
+    uint64_t hash = hash_bytes(source, sizeof source, shader.vertex ? 0x5151 : 0xA2A2);
     hash = hash_bytes(&shader.mapping, sizeof shader.mapping, hash);
     hash = hash_bytes(&shader.uniforms, sizeof shader.uniforms, hash);
     return hash_bytes(&shader.descriptorRanks, sizeof shader.descriptorRanks, hash);
 }
 uint64_t portable_output_identity(const Shader& shader) {
-    PortableShaderIdentity id(shader.vertex, uint32_t(shader.kind), shader.glsl);
+    PortableShaderIdentity id(shader.vertex, uint32_t(shader.kind), shader.source_text());
     const auto& m=shader.mapping;
     id.words(m.textureUnitToBindingPoint); id.words(m.relBindingPointToRelTextureUnit);
     id.word(uint32_t(m.textureUnitBaseBindingPoint)); id.word(uint32_t(m.textureUnitCount));
@@ -552,10 +526,17 @@ uint64_t portable_output_identity(const Shader& shader) {
     return id.value();
 }
 bool same_output(const Shader& a, const Shader& b) {
-    return a.vertex == b.vertex && a.glsl == b.glsl &&
-           !std::memcmp(&a.mapping, &b.mapping, sizeof a.mapping) &&
-           !std::memcmp(&a.uniforms, &b.uniforms, sizeof a.uniforms) &&
-           !std::memcmp(&a.descriptorRanks, &b.descriptorRanks, sizeof a.descriptorRanks);
+    if (a.vertex != b.vertex || !(a.sourceId == b.sourceId) ||
+        std::memcmp(&a.mapping, &b.mapping, sizeof a.mapping) ||
+        std::memcmp(&a.uniforms, &b.uniforms, sizeof a.uniforms) ||
+        std::memcmp(&a.descriptorRanks, &b.descriptorRanks, sizeof a.descriptorRanks)) return false;
+    // Verification modes still have both texts: confirm the identity byte for byte.
+    if (retain_shader_source() && a.source_text() != b.source_text()) {
+        fprintf(stderr, "[vulkan] shader source hash collision (%u bytes); not shared\n",
+                unsigned(a.sourceId.length));
+        return false;
+    }
+    return true;
 }
 // A translation job owns every byte read by the legacy decompiler. Fetch
 // groups contain interior pointers, so a shallow fetch copy is insufficient.
@@ -663,6 +644,15 @@ bool decompile(Shader& shader, const uint32_t* regs, bool vertex, LatteFetchShad
     if(packReplacement && mods::cemu::has_shaders()) {
         auto packAux=cemu_pack_hash::auxiliary(*shader.dec,regs,vertex);
         auto custom=mods::cemu::shader_source(packBase,packAux,vertex);
+        // graphics-pack vertex shaders decode raw guest attributes themselves: not with CPU-converted ones
+        bool convertedInputs = false;
+        if (vertex) for (const auto& group : fetch->bufferGroups)
+            convertedInputs |= cpu_vertex_count(group, R.vertexDiagnostics.cpuClasses) != 0;
+        if(vertex&&!custom.empty()&&convertedInputs) {
+            fprintf(stderr,"[cemu-pack] %016llx_%016llx_vs skipped: Convert vertices on the CPU is on\n",
+                (unsigned long long)packBase,(unsigned long long)packAux);
+            custom.clear();
+        }
         if(!custom.empty()) {
             if(!vertex&&link.unfed) {
                 // the inputs the translation made constants (ps_link), with the same values
@@ -686,6 +676,41 @@ bool decompile(Shader& shader, const uint32_t* regs, bool vertex, LatteFetchShad
                 accepted?"applied":"rejected: ",accepted?"":error.c_str());
         }
     }
+    if (vertex && depth_clamp_variant_wanted(regs)) {
+        static int applied = 0, missed = 0;
+        if (clamp_position_depth(shader.glsl)) {
+            if (++applied <= 5 || (applied & (applied - 1)) == 0)
+                fprintf(stderr, "[vulkan] vertex shader %08X: near-plane depth clamp variant (%d so far)\n", address, applied);
+        } else if (missed++ < 10)  // a graphics-pack vertex shader without the decompiler's SET_POSITION: drawn unclamped
+            fprintf(stderr, "[vulkan] vertex shader %08X: depth clamp emulation not applied (no SET_POSITION)\n", address);
+    }
+    if (vertex && R.vertexFormats.fallbackMask) {
+        uint32_t tailLocation = vertex_tail_location(shader.mapping.attributeMapping);
+        // Rewrite the input declaration, leaving every existing endian/sign/
+        // normalization decoder intact. Vulkan supplies w=1 for native RGB.
+        // Apply after pack replacement too: packs use the same raw interface.
+        for (const auto& group : fetch->bufferGroups) {
+            for (int i = 0; i < group.attribCount; ++i) {
+                const auto& attribute = group.attrib[i];
+                if (cpu_vertex_selected(attribute, R.vertexDiagnostics.cpuClasses) || !R.vertexFormats.fallback(vertex_format(attribute.format))) continue;
+                const auto location = shader.mapping.attributeMapping[attribute.semanticId];
+                if (location < 0) continue;
+                const auto name = "attrDataSem" + std::to_string(attribute.semanticId);
+                if (!rewrite_vertex_fallback_input(shader.glsl, name, location, tailLocation) ||
+                    (!shader.translatedGlsl.empty() &&
+                     !rewrite_vertex_fallback_input(shader.translatedGlsl, name, location, tailLocation))) {
+                    shader.error = "cannot adapt graphics-pack vertex input for RGB fallback";
+                    return false;
+                }
+                ++tailLocation;
+            }
+        }
+    }
+    // Rewrites and graphics-pack validation above have consumed the original
+    // decompiler text. Keep its metadata, but release this independent copy;
+    // exact aliases, verification and debug export use glsl/translatedGlsl.
+    delete shader.dec->strBuf_shaderSource;
+    shader.dec->strBuf_shaderSource = nullptr;
     return true;
 }
 bool translate_owned(Shader& shader, const uint32_t* regs, bool vertex,
@@ -765,17 +790,17 @@ void verify_key(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, uint
     reference.vertex = vertex;
     bool built = translate_owned(reference, regs, vertex, fetch, address, size, base, false, link, ~uint64_t{0}, key);
     ++stats.verifyChecks;
-    const std::string& translated = shader.translatedGlsl.empty() ? shader.glsl : shader.translatedGlsl;
-    if (!built || reference.glsl != translated ||
+    const std::string& translated = shader.translatedGlsl.empty() ? shader.source_text() : shader.translatedGlsl;
+    if (!built || reference.source_text() != translated ||
         std::memcmp(&reference.mapping, &shader.mapping, sizeof shader.mapping) ||
         std::memcmp(&reference.uniforms, &shader.uniforms, sizeof shader.uniforms) ||
         std::memcmp(&reference.descriptorRanks, &shader.descriptorRanks, sizeof shader.descriptorRanks)) {
         ++stats.verifyViolations;
         std::string left, right;
-        first_difference(translated, reference.glsl, left, right);
+        first_difference(translated, reference.source_text(), left, right);
         fprintf(stderr, "[vulkan shader key] VIOLATION %s %08X key %016llx legacy %016llx: %s; cached \"%s\" vs now \"%s\"\n",
                 vertex ? "vs" : "ps", address, (unsigned long long)key, (unsigned long long)legacy,
-                !built ? reference.error.c_str() : reference.glsl != translated ? "GLSL differs" : "binding metadata differs",
+                !built ? reference.error.c_str() : reference.source_text() != translated ? "GLSL differs" : "binding metadata differs",
                 left.c_str(), right.c_str());
     }
     free_decompiler(reference.dec);
@@ -899,32 +924,45 @@ LatteFetchShader* get_fetch_shader(const uint32_t* regs, uint64_t* keyOut, uint6
 
 namespace {
 std::vector<Shader*> pendingShaderRecords;
-std::unordered_map<uint64_t, std::pair<std::string, std::weak_ptr<ShaderBinary>>> pendingBinarySources;
+// Pending compilations by source key: identical final GLSL (same identity)
+// shares one compile. Only the identity is kept; the compiler job owns its copy.
+std::unordered_map<uint64_t, std::pair<ShaderSourceId, std::weak_ptr<ShaderBinary>>> pendingBinarySources;
 void publish_shader_binary(Shader& shader, uint64_t frame) {
     if (!shader.binary) return;
     auto binary = shader.binary;
     auto result = binary->get();
-    shader.spirv = std::move(result.words);
     shader.error = std::move(result.error);
     if (!binary->accounted) {
         binary->accounted = true;
         ++stats.spirvCompiles;
         stats.spirvCompileNs += result.compileNs;
     }
-    const auto key = cache_checksum(reinterpret_cast<const uint8_t*>(shader.glsl.data()), shader.glsl.size()) ^
-        cache_fingerprint() ^ (shader.vertex ? 0x9E3779B97F4A7C15ull : 0xD1B54A32D192ED03ull);
+    const auto key = shader.spirvKey;
     auto cached = diskShaders.find(key);
-    if (shader.glsl.size() <= maxSourceBytes && cache_spirv_valid(shader.spirv) &&
-        diskShaders.size() < maxCacheEntries) {
-        const size_t oldBytes = cached == diskShaders.end() ? 0 :
-            20 + cached->second.source.size() + cached->second.words.size() * 4;
-        const size_t newBytes = 20 + shader.glsl.size() + shader.spirv.size() * 4;
-        if (newBytes <= maxCacheBytes - (diskBytes - oldBytes)) {
-            diskShaders.insert_or_assign(key, DiskShader{shader.glsl, shader.spirv, shader.vertex, false});
-            diskBytes = diskBytes - oldBytes + newBytes;
-            ++diskRevision; diskDirty = !diskPath.empty(); diskChangedFrame = frame;
+    if (cached != diskShaders.end() && cached->second.vertex == shader.vertex &&
+        cached->second.source == shader.sourceId && *cached->second.words == result.words) {
+        // Another variant with the same final GLSL already published these words.
+        shader.spirvWords = cached->second.words;
+    } else {
+        shader.spirvWords = result.words.empty() ? nullptr :
+            std::make_shared<const std::vector<uint32_t>>(std::move(result.words));
+        if (shader.spirvWords && shader.sourceId.length <= maxSourceBytes &&
+            diskcache::spirv_valid(*shader.spirvWords) && diskShaders.size() < maxCacheEntries) {
+            const size_t oldBytes = cached == diskShaders.end() ? 0 :
+                diskcache::record_bytes(cached->second.words->size());
+            const size_t newBytes = diskcache::record_bytes(shader.spirvWords->size());
+            if (newBytes <= maxCacheBytes - (diskBytes - oldBytes)) {
+                DiskShader entry;
+                entry.source = shader.sourceId; entry.words = shader.spirvWords; entry.vertex = shader.vertex;
+                diskShaders.insert_or_assign(key, std::move(entry));
+                diskBytes = diskBytes - oldBytes + newBytes;
+                ++diskRevision; diskDirty = !diskPath.empty(); diskChangedFrame = frame;
+            }
         }
     }
+    // Only this compilation's source lease has ended. A hash collision or a
+    // newer submission may have replaced the map entry while it was pending.
+    release_pending_shader_source(pendingBinarySources, key, binary);
     shader.binary.reset();
 }
 void poll_shader_binaries(uint64_t frame, bool drain = false) {
@@ -961,7 +999,8 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     // Level 1: program, fetch shader and linkage.
     std::array<uint32_t, kLinkageWords> words;
     const size_t count = gather_linkage(regs, vertex, fetch, words.data());
-    const uint64_t seed = base ^ (vertex ? fsKey * 31 : 0);
+    const uint64_t seed = base ^ (vertex ? (fsKey * 31) ^ R.vertexFormats.shader_salt() : 0) ^
+                          R.vertexDiagnostics.shader_salt();
     ++stats.stateHashLookups;
     static const bool memoEnabled = [] {
         const char* value = getenv("WWHD_VK_SHADER_STATE_MEMO");
@@ -1007,10 +1046,16 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         // Failures are per linkage: the variant words need the program's analysis.
         shader->key = shader->pipelineId = linkage ^ 0xFA17EDull;
         use.failed = shader;
+        std::string{}.swap(shader->glsl);
         shaders.emplace(shader->key, std::move(owned));
+        render_objects::set_shaders(shaders.size());
         fprintf(stderr, "[vulkan] shader %08X: %s\n", address, shader->error.c_str());
         return remember(shader);
     }
+    // Final GLSL identity: aliasing, the SPIR-V cache and pending compiles use
+    // it, so the text can be released once the compile has been requested.
+    shader->sourceId = shader_source_id(shader->glsl);
+    shader->spirvKey = source_cache_key(shader->glsl, vertex);
     record_shader_variant(regs, vertex, base, fsKey, shader->dec);
     record_headstart_shader(regs, vertex, !vertex && linkedVs && linkedVs->dec);
     if (!use.known) {
@@ -1051,22 +1096,29 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         }
     shader->key = key;
     shaders.emplace(key, std::move(owned));
+    render_objects::set_shaders(shaders.size());  // crash logs, performance report
     variants.emplace(key, shader);
     shadersByOutput.emplace(output, shader);
     remember(shader);
     initialize_disk_cache();
     // Guest variants retain distinct metadata, but identical final GLSL shares
-    // compilation even with persistence disabled. Exact source checks collisions.
-    uint64_t spirvKey=cache_checksum(reinterpret_cast<const uint8_t*>(shader->glsl.data()),shader->glsl.size()) ^
-        cache_fingerprint() ^ (vertex ? 0x9E3779B97F4A7C15ull : 0xD1B54A32D192ED03ull);
+    // compilation even with persistence disabled. The source identity (XXH3-128
+    // + length, besides the FNV key) decides sharing; the text is not kept.
+    const uint64_t spirvKey = shader->spirvKey;
     auto cached=diskShaders.find(spirvKey);
-    if(cached!=diskShaders.end() && cached->second.vertex==vertex && cached->second.source==shader->glsl) {
-        shader->spirv=cached->second.words;
+    if(cached!=diskShaders.end() && cached->second.vertex==vertex && cached->second.source==shader->sourceId) {
+        shader->spirvWords=cached->second.words;
+        // the cached words are shared with the disk cache: strip a private copy
+        if(full_precision_enabled() && shader->spirvWords) {
+            auto words=std::make_shared<std::vector<uint32_t>>(*shader->spirvWords);
+            note_relaxed_precision_stripped(strip_relaxed_precision(*words));
+            shader->spirvWords=std::move(words);
+        }
         if(cached->second.fromDisk) ++stats.diskHits;
         else ++stats.spirvReuseHits;
     } else {
         auto pending = pendingBinarySources.find(spirvKey);
-        if (pending != pendingBinarySources.end() && pending->second.first == shader->glsl)
+        if (pending != pendingBinarySources.end() && pending->second.first == shader->sourceId)
             shader->binary = pending->second.second.lock();
         if (shader->binary) ++stats.spirvReuseHits;
         else {
@@ -1082,7 +1134,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
             }
             shader->binary = std::make_shared<ShaderBinary>(std::move(*ticket));
             pendingBinarySources.insert_or_assign(spirvKey,
-                std::make_pair(shader->glsl, std::weak_ptr<ShaderBinary>(shader->binary)));
+                std::make_pair(shader->sourceId, std::weak_ptr<ShaderBinary>(shader->binary)));
         }
         if (frame == ~uint64_t{0} || !async_shaders_enabled()) {
             (void)shader_binary_words_exact(shader->binary, frame);
@@ -1092,7 +1144,13 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     // Stable before SPIR-V publication, and identical on cold/warm runs. Never
     // mutate a pipeline key when a pending compiler result becomes available.
     // Exact GLSL+metadata aliases above still share the same Shader object.
+    // Computed from the full text, so the recorded identity is unchanged.
     shader->pipelineId = portable_output_identity(*shader);
+    // The compiler job owns its own copy of the text; keep it here only for
+    // the verification modes.
+    if (retain_shader_source())
+        shader->retainedSource = std::make_shared<const std::string>(std::move(shader->glsl));
+    std::string{}.swap(shader->glsl);
     if (!shader->error.empty()) fprintf(stderr, "[vulkan] shader %08X: %s\n", address, shader->error.c_str());
     return shader;
 }
@@ -1103,7 +1161,7 @@ const Shader* find_pipeline_shader(uint64_t pipelineId, bool vertex) {
 }
 
 namespace {
-using DiskSnapshot = std::vector<std::pair<uint64_t,DiskShader>>;
+using DiskSnapshot = diskcache::Snapshot;
 struct DiskSaveResult { uint64_t revision=0, bytes=0, ns=0; bool saved=false; };
 std::future<DiskSaveResult> diskSaveJob;
 DiskSnapshot snapshot_disk_shaders() {
@@ -1127,35 +1185,19 @@ DiskSaveResult write_shader_snapshot(DiskSnapshot snapshot,std::string path,uint
     };
     std::string temporary;
     try {
-        std::vector<uint8_t> payload;
-        size_t expected=0;
-        for(const auto& [key,entry]:snapshot) {
-            size_t bytes=20+entry.source.size()+entry.words.size()*4;
-            if(bytes>maxCacheBytes-40-expected) return finish();
-            expected+=bytes;
-        }
-        payload.reserve(expected);
-        for(const auto& [key,entry]:snapshot) {
-            cache_put(payload,key,8); cache_put(payload,entry.vertex,4);
-            cache_put(payload,entry.source.size(),4); cache_put(payload,entry.words.size(),4);
-            payload.insert(payload.end(),entry.source.begin(),entry.source.end());
-            for(uint32_t word:entry.words) cache_put(payload,word,4);
-        }
-        std::vector<uint8_t> header={'W','W','V','K','S','C','0','2'};
-        cache_put(header,cache_fingerprint(),8); cache_put(header,payload.size(),8);
-        cache_put(header,cache_checksum(payload.data(),payload.size()),8);
-        cache_put(header,snapshot.size(),8);
+        // Shared SPIR-V words are immutable; the snapshot only holds references.
+        const auto bytes=diskcache::encode(snapshot,cache_fingerprint());
+        if(bytes.empty()) return finish();
         std::error_code ec;
         auto parent=std::filesystem::u8path(path).parent_path();
         if(!parent.empty()) std::filesystem::create_directories(parent,ec);
         if(ec) return finish();
         FILE* file=open_atomic_temporary(path,temporary);
         if(!file) return finish();
-        bool wrote=fwrite(header.data(),1,header.size(),file)==header.size() &&
-                   fwrite(payload.data(),1,payload.size(),file)==payload.size();
+        bool wrote=fwrite(bytes.data(),1,bytes.size(),file)==bytes.size();
         if(fclose(file)!=0) wrote=false;
         result.saved=wrote && host::replace_file(temporary,path);
-        if(result.saved) result.bytes=header.size()+payload.size();
+        if(result.saved) result.bytes=bytes.size();
     } catch(...) { result.saved=false; }
     if(!result.saved && !temporary.empty()) { std::error_code ec; std::filesystem::remove(std::filesystem::u8path(temporary),ec); }
     return finish();
@@ -1217,9 +1259,31 @@ ShaderStats shader_stats() {
     return result;
 }
 
+ShaderMemoryStats shader_memory_stats() {
+    ShaderMemoryStats result;
+    result.shaders = shaders.size();
+    std::unordered_set<const void*> spirv;
+    for (const auto& [key, shader] : shaders) {
+        if (shader->dec && shader->dec->strBuf_shaderSource)
+            result.decompilerText += shader->dec->strBuf_shaderSource->getLen();
+        result.glslCapacity += shader->glsl.capacity();
+        if (shader->retainedSource) result.retainedSourceCapacity += shader->retainedSource->capacity();
+        result.verifyCapacity += shader->translatedGlsl.capacity();
+        if (shader->spirvWords && spirv.insert(shader->spirvWords.get()).second)
+            result.spirvCapacity += shader->spirvWords->capacity() * sizeof(uint32_t);
+    }
+    result.diskEntries = diskShaders.size();
+    for (const auto& [key, shader] : diskShaders)
+        if (shader.words && spirv.insert(shader.words.get()).second)
+            result.diskSpirvCapacity += shader.words->capacity() * sizeof(uint32_t);
+    result.pendingCompiles = pendingBinarySources.size();
+    return result;
+}
+
 void pack_uniforms_into(const uint32_t* regs, const Shader& shader,
                         std::vector<uint8_t>& data, float scaleX, float scaleY,
-                        float eyeOffset, float convergence) {
+                        float eyeOffset, float convergence, stereo::EyeRows* eyeRows) {
+    if (stereo::layoutDrawDepth) eyeOffset = 0;
     const auto& offsets = shader.uniforms;
     data.resize((std::max(offsets.offset_endOfBlock, 16) + 15) & ~15);
     // Reused capacity may contain another shader's payload. Define every byte,
@@ -1236,14 +1300,16 @@ void pack_uniforms_into(const uint32_t* regs, const Shader& shader,
     auto projectionRow = [&](int offset, const void* bytes, size_t available) {
         if (!shader.vertex || eyeOffset == 0 || available < 64) return;
         float p[16]; memcpy(p,bytes,64);
-        if (stereo::project_eye(p,eyeOffset,convergence)) copy(offset,p,16);
+        const float unshifted[4] = {p[0],p[1],p[2],p[3]};
+        if (stereo::project_eye(p,eyeOffset,convergence)) {
+            copy(offset,p,16);
+            if (eyeRows && offset >= 0 && size_t(offset) + 16 <= data.size()) eyeRows->add(size_t(offset),unshifted);
+        }
     };
     if (offsets.offset_remapped >= 0) {
         for (const auto& entry : shader.dec->list_remappedUniformEntries_register) {
             copy(offsets.offset_remapped + entry.mappedIndexOffset, regs + aluBase + entry.indexOffset / 4, 16);
-            const bool layoutRow = eyeOffset != 0 && shader.vertex && stereo::is_layout(regs) &&
-                aluBase+entry.indexOffset/4 == stereo::layoutProjectionStart;
-            if (!layoutRow && entry.indexOffset <= 4096-64)
+            if (entry.indexOffset <= 4096-64)
                 projectionRow(offsets.offset_remapped+entry.mappedIndexOffset,
                     regs+aluBase+entry.indexOffset/4,4096-entry.indexOffset);
         }
@@ -1264,7 +1330,8 @@ void pack_uniforms_into(const uint32_t* regs, const Shader& shader,
         if (shader.vertex && eyeOffset != 0)
             stereo::project_uniform_block(data.data()+offsets.offset_uniformRegister,
                 size_t(offsets.count_uniformRegister)*16,eyeOffset,convergence,
-                stereo::is_layout(regs) ? stereo::layoutProjection.data() : nullptr);
+                nullptr,
+                eyeRows,size_t(offsets.offset_uniformRegister));
     }
     put(offsets.offset_alphaTestRef, bitsf(regs[Latte::REGADDR::SX_ALPHA_REF]));
     float point = float(regs[Latte::REGADDR::PA_SU_POINT_SIZE] & 0xFFFF) / 8.0f;

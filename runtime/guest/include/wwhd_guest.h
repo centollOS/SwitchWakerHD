@@ -101,6 +101,98 @@ s32 wwhd_file_write(const char* filename, const void* buffer, u32 size);
 /* Seconds in the current logic step (including true-60 scaling), and full-step count. */
 double wwhd_logic_dt(void);
 unsigned long long wwhd_logic_step(void);
+
+/* Mod actors: register an actor ID declared by this mod. Keep the registration
+ * table in this mod's static data or wwhd_malloc memory. Callbacks must be exact
+ * functions from this module. Handles are owner-scoped and never reused.
+ * Full restore calls create again with RESTORED, a fresh handle and preserved
+ * userdata; replace stored handles there. Room/progress recreation uses NEW.
+ * Execute runs once per actor game step. Draw must not advance behavior; actor
+ * mutation services reject calls from draw or while a scene owns the actor.
+ * A failing callback quarantines this actor registration until restart. */
+typedef u32 wwhd_actor_handle;
+enum { WWHD_ACTOR_NEW=0, WWHD_ACTOR_RESTORED=1 };
+enum { WWHD_ACTOR_TALK_BEGIN=0, WWHD_ACTOR_TALK_END=1, WWHD_ACTOR_TALK_CANCEL=2 };
+enum { WWHD_ACTOR_SOURCE_LINK=1, WWHD_ACTOR_SOURCE_MOD=2, WWHD_ACTOR_SOURCE_OTHER=3 };
+enum { WWHD_ACTOR_COLLISION_ENABLED=1, WWHD_ACTOR_PUSHABLE=2, WWHD_ACTOR_SCENE_OWNED=4 };
+typedef struct { f32 x,y,z; } wwhd_actor_vec3;
+typedef struct {
+    u32 size,version,sequence,attack_type,attack_power,source_kind;
+    wwhd_actor_handle source_handle;
+    wwhd_actor_vec3 position,reaction;
+    u32 reserved[3];
+} wwhd_actor_hit_v1; /* 64 bytes; informational native hit, no combat damage API. */
+typedef struct {
+    u32 size,version,userdata_size;
+    void (*create)(wwhd_actor_handle,void* userdata,u32 reason);
+    void (*execute)(wwhd_actor_handle,void* userdata,f32 dt_seconds);
+    void (*draw)(wwhd_actor_handle,void* userdata);
+    void (*talk)(wwhd_actor_handle,void* userdata,u32 phase);
+    void (*on_hit)(wwhd_actor_handle,void* userdata,const wwhd_actor_hit_v1* hit);
+} wwhd_actor_behavior_v1; /* size=32, version=1, userdata_size=0..256. */
+typedef struct {
+    u32 size,version;
+    wwhd_actor_vec3 position,rotation; /* rotation in degrees */
+    f32 collision_radius,collision_height;
+    u32 flags;
+    char animation[36];
+} wwhd_actor_state_v1; /* size=80, version=1 */
+u32 wwhd_actor_register(const char* actor_id,const wwhd_actor_behavior_v1* behavior);
+wwhd_actor_handle wwhd_actor_find(const char* actor_id); /* zero until create dispatch */
+u32 wwhd_actor_get(wwhd_actor_handle,wwhd_actor_state_v1* state);
+void* wwhd_actor_userdata(wwhd_actor_handle); /* valid only while the handle is live */
+u32 wwhd_actor_set_position(wwhd_actor_handle,f32 x,f32 y,f32 z);
+u32 wwhd_actor_set_rotation(wwhd_actor_handle,f32 x,f32 y,f32 z);
+u32 wwhd_actor_set_collision(wwhd_actor_handle,f32 radius,f32 height,u32 flags);
+u32 wwhd_actor_set_animation(wwhd_actor_handle,const char* clip,f32 blend_seconds,u32 loop);
+/* Points/state buffers must lie in this mod's region or its live actor userdata.
+ * Paths use game units, 2..16 points, speed>0..1500, loop=0/1. Native collision
+ * and ground checks can refuse movement. A quest place uses current-room X/Z. */
+u32 wwhd_actor_walk(wwhd_actor_handle,const wwhd_actor_vec3* points,u32 count,f32 speed,u32 loop);
+u32 wwhd_actor_walk_quest(wwhd_actor_handle,const char* quest_id,f32 speed);
+u32 wwhd_actor_stop(wwhd_actor_handle);
+/* One-shot native particles from the curated named list. The actor call takes
+ * the current position of a live owned handle; the place call takes explicit
+ * world XYZ in Link's current room. Neither follows the actor after emission.
+ * Return 1 only when the native bank accepts the emitter. Both refuse Draw. */
+u32 wwhd_actor_particle(wwhd_actor_handle,const char* effect,f32 scale,u32 alpha);
+u32 wwhd_particle_at(const char* effect,f32 x,f32 y,f32 z,f32 scale,u32 alpha);
+/* Combat is opt-in immutable manifest configuration. These additions preserve v1
+ * behavior/hit/state layouts. on_hit remains informational; execute may poll. */
+enum { WWHD_COMBAT_ALIVE=0, WWHD_COMBAT_FLINCH=1, WWHD_COMBAT_STUNNED=2,
+       WWHD_COMBAT_DYING=3, WWHD_COMBAT_DEFEATED=4 };
+enum { WWHD_COMBAT_FLAG_ALIVE=1, WWHD_COMBAT_FLAG_ATTACKING=2,
+       WWHD_COMBAT_FLAG_SCENE_OWNED=4, WWHD_COMBAT_FLAG_QUARANTINED=8 };
+enum { WWHD_COMBAT_REWARD_NONE=0, WWHD_COMBAT_REWARD_PENDING=1,
+       WWHD_COMBAT_REWARD_CLAIMING=2, WWHD_COMBAT_REWARD_COMMITTED=3,
+       WWHD_COMBAT_REWARD_FAILED=4 };
+enum { WWHD_COMBAT_DROP_UNISSUED=0, WWHD_COMBAT_DROP_ISSUING=1,
+       WWHD_COMBAT_DROP_QUEUED=2, WWHD_COMBAT_DROP_FAILED=3,
+       WWHD_COMBAT_DROP_ADMITTED=4 };
+typedef struct {
+    u32 size,version,health,max_health,phase,flags,last_damage_sequence;
+    u32 reward_status,native_drop_status;
+    u32 invulnerability_frames,reaction_frames,attack_active_frames,attack_cooldown_frames;
+    u32 reserved[3];
+} wwhd_actor_combat_state_v1; /* 64 bytes. Initialize size=64, version=1. */
+/* Output must be owned static/package memory or live owned actor userdata.
+ * Failed queries leave the output unchanged. Queries are permitted in draw.
+ * Frame counts round up and use native 30 Hz logic frames, never display frames. */
+u32 wwhd_actor_combat_get(wwhd_actor_handle,wwhd_actor_combat_state_v1* state);
+/* Begin uses the declared attack, fails while unavailable/leased/cooling down.
+ * Cancel disables an attack without refunding its cooldown. Both deny draw.
+ * Native queued heart status describes issuance, never successful pickup. */
+u32 wwhd_actor_attack_begin(wwhd_actor_handle);
+u32 wwhd_actor_attack_cancel(wwhd_actor_handle);
+
+
+/* A scene music cue invokes this mod's real hook. A music step fails preflight
+ * without one. RESTORE is sent once per distinct cue whose START or STOP callback
+ * was invoked when the scene releases its lease, including failure/abort/load.
+ * The callback owns playback through audio services
+ * or authored game bindings; return nonzero only after handling the event. */
+enum { WWHD_SCENE_MUSIC_START=0, WWHD_SCENE_MUSIC_STOP=1, WWHD_SCENE_MUSIC_RESTORE=2 };
+u32 wwhd_scene_music_register(u32 (*callback)(const char* cue,u32 phase,u32 fade_frames,u32 stop_reason));
 void* memcpy(void* dst, const void* src, unsigned long n);
 void* memmove(void* dst, const void* src, unsigned long n);
 void* memset(void* dst, int v, unsigned long n);
@@ -251,3 +343,43 @@ s32 wwhd_quest_carry(const char* quest_id, s32 carried);
  * name from the NPC catalogue (docs/mod-sdk-v2.md), e.g. "windfall-um1"; an unknown name is
  * refused (WWHD_QUEST_INVALID). */
 s32 wwhd_quest_talk(const char* quest_id, u32 step, const char* resident, const char* lines, u32 reward);
+
+/* Mod items v1: items the mod declares in its manifest ("items": id, name, description, icon, stack,
+ * use), kept in the Delivery Bag (its extra pages, or one of the game's places the player picks). The
+ * save file's story block records how many Link has; nothing is written to the game's items, so a save
+ * without the mod is a normal one. item_id: an id of the manifest's "items". A give shows the item's
+ * caption with the game's small get jingle. Results: the count now (0..254), or a negative error. */
+#define WWHD_ITEM_API_VERSION 1
+#define WWHD_ITEM_INVALID (-1)     /* not an item of the manifest, or a count of 0 or over 254 */
+#define WWHD_ITEM_NO_ROOM (-2)     /* no save loaded or its story block is full */
+#define WWHD_ITEM_NOT_ENOUGH (-3)  /* take: Link has fewer */
+s32 wwhd_item_give(const char* item_id, u32 count);  /* up to the item's "stack" */
+s32 wwhd_item_take(const char* item_id, u32 count);
+s32 wwhd_item_count(const char* item_id);
+/* An item with "use": {"action": "event"}: how often the player used it (X, Y or R, or the bag) since
+ * the last call (the count is read and cleared; at most 255). */
+s32 wwhd_item_used(const char* item_id);
+
+/* Optional current-room map from a mod stage. Returns 1 with a 808-byte output,
+ * 0 for no map or an older host. Call in a HUD callback. cached_revision is zero
+ * after an epoch change or release. A changed revision creates an owned HUD image;
+ * release the old one. Otherwise image is zero and the caller keeps its image.
+ * Markers are already compass/chest filtered. No game-owned pointers are exposed. */
+typedef struct {
+    u32 version, image, revision;
+    s32 floor;
+    f32 bounds[4];
+    u32 marker_count, reserved;
+    struct { f32 x, z; u32 kind; } markers[64]; /* 1 chest, 2 boss door */
+} wwhd_dungeon_room;
+#ifdef __cplusplus
+static_assert(sizeof(wwhd_dungeon_room) == 808, "wwhd_dungeon_room layout");
+#else
+_Static_assert(sizeof(wwhd_dungeon_room) == 808, "wwhd_dungeon_room layout");
+#endif
+/* Structured query type 5 on the existing optional settings/query transport.
+ * Hosts predating this key/type return zero without touching the output. */
+static inline u32 wwhd_dungeon_room_get(wwhd_dungeon_room* room, u32 cached_revision) {
+    room->revision = cached_revision;
+    return wwhd_setting_get("mod-stage.current-room-map", 5, room, sizeof(*room)) == sizeof(*room);
+}

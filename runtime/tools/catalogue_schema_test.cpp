@@ -16,6 +16,16 @@ template<class F> static void refused(F mutate,bool local=false) {
     assert(bad);
 }
 int main() {
+    {   // the running build's version for catalogue checks: a build ahead of its release counts as the next one
+        using catalogue::port_version_from_build;
+        assert(port_version_from_build("v0.2.14")==catalogue::Version::parse("0.2.14"));
+        assert(port_version_from_build("0.2.14")==catalogue::Version::parse("0.2.14"));
+        assert(port_version_from_build("v0.2.14+115")==catalogue::Version::parse("0.2.15"));
+        assert(port_version_from_build("v0.2.14+0")==catalogue::Version::parse("0.2.14"));
+        assert(port_version_from_build("v0.2.14-devel.1a2b3c4d")==catalogue::Version::parse("0.2.15"));
+        assert(port_version_from_build("0.2.9+meta")==catalogue::Version::parse("0.2.9"));
+        assert(port_version_from_build("dev")==catalogue::Version{});
+    }
     auto good=catalogue::parse(json::dump(fixture()));assert(good.entries.size()==1);
     auto& e=good.entries[0];auto version=catalogue::Version::parse("0.2.10");
     assert(e.compatible(version,"EU","windows-x86_64"));

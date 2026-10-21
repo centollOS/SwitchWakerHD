@@ -201,10 +201,22 @@ void tick(double t, bool ended) {
         LOG("[test] controller set %d at %.3f", mode, t);
         mode = 0;
     }
+    // the game's own controller mode (hdInputManager 101F5088 +0x1D0: 0 Pro Controller/TV, 1/2 GamePad, 3 both)
+    auto guest_mode = [] {
+        uint32_t m = ld32(GD(0x101F5088));
+        return m >= mem::kMem2Start && m < mem::kMem2End ? (int)ld32(m + 0x1D0) : -1;
+    };
     for (auto& [at, mode] : checks) if (mode && t >= at) {
-        LOG("[test] controller check %s expected %d actual %d at %.3f",
-            input::pro_controller() == (mode == 2) ? "PASS" : "FAIL", mode, input::pro_controller() ? 2 : 1, t);
+        LOG("[test] controller check %s expected %d actual %d at %.3f (game mode %d)",
+            input::pro_controller() == (mode == 2) ? "PASS" : "FAIL", mode, input::pro_controller() ? 2 : 1, t, guest_mode());
         mode = 0;
+    }
+    if (getenv("WWHD_TEST_CONTROLLER_TRACE")) {  // every change of the host or game controller mode
+        static int last_host = -1, last_game = -2;
+        int host = input::pro_controller() ? 2 : 1, game = guest_mode();
+        if (host != last_host || game != last_game)
+            LOG("[test] controller trace host %d game mode %d at %.3f", host, game, t);
+        last_host = host, last_game = game;
     }
     // WWHD_TEST_SAVE=t:slot,... uses the selected kind (WWHD_FULL_SAVE_STATES=0|1).
     static std::vector<std::pair<double, int>> saves = [] {

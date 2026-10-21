@@ -1,3 +1,4 @@
+#include "gfx/vulkan/vertex_cpu_policy.h"
 #pragma once
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LattePSInputDefault.h"
 
@@ -265,7 +266,13 @@ namespace LatteDecompilerGLSL
 					cemu_assert_debug(decompilerContext->output->resourceMappingVK.attributeMapping[i] >= 0);
 					cemu_assert_debug(decompilerContext->output->resourceMappingGL.attributeMapping[i] == decompilerContext->output->resourceMappingVK.attributeMapping[i]);
 
-					shaderSrc->addFmt("ATTR_LAYOUT({}) in uvec4 attrDataSem{};" _CRLF, (sint32)decompilerContext->output->resourceMappingVK.attributeMapping[i], i);
+					// WWHD (issue #207 diagnostic): CPU-converted float attributes arrive as vec4
+					bool cpuFloat = false;
+					if (g_latteCpuVertexDecode && decompilerContext->fetchShader)
+						for (auto& group : decompilerContext->fetchShader->bufferGroups)
+							for (sint32 j = 0; j < group.attribCount; ++j)
+								if (group.attrib[j].semanticId == i && group.attrib[j].nfa != 1 && gfxvk::vk::cpu_vertex_selected(group.attrib[j], g_latteCpuVertexClasses)) cpuFloat = true;
+					shaderSrc->addFmt("ATTR_LAYOUT({}) in {} attrDataSem{};" _CRLF, (sint32)decompilerContext->output->resourceMappingVK.attributeMapping[i], cpuFloat ? "vec4" : "uvec4", i);
 				}
 			}
 		}

@@ -12,8 +12,8 @@
 // no extra state of our own.
 //
 // Decision (gamepad_audible):
-//   TV play (GamePad fader at 0)          host = TV final mix, exactly as without a GamePad mix;
-//                                         sounds only on the GamePad stay unheard, as before
+//   TV play (GamePad fader at 0)          host = TV final mix,
+//                                         optionally plus host-selected GamePad-only effects
 //   Off-TV Play and the fades into and    host = TV + GamePad final mixes. Entering, the sum starts
 //   out of it                             as soon as the GamePad fader moves up (the TV fades out
 //                                         meanwhile); leaving, it lasts until the TV fader is back
@@ -25,10 +25,24 @@
 // GamePad d^2, the game's own crossfade (its middle is ~0.52 of full level, as on the hardware).
 // WWHD_AUDIO_OUTPUT=auto (default) | tv | gamepad overrides it (debug).
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
 namespace audio {
+
+// Test all channels and buses, including pending ramps, before advancing any mix.
+template<class Mix, std::size_t Channels, std::size_t Buses>
+inline bool has_device_mix(const Mix (&mix)[Channels][Buses]) {
+    for (const auto& channel : mix)
+        for (const auto& m : channel)
+            if (m.vol || m.delta) return true;
+    return false;
+}
+template<class Tv, class Drc>
+inline bool gamepad_only_voice(const Tv& tv, const Drc& drc) {
+    return !has_device_mix(tv) && has_device_mix(drc);
+}
 
 struct Fader {
     float value = 0, target = 0;
@@ -56,10 +70,13 @@ public:
     // per audio frame: which mixes go to the host. faders_ok false: the game's sound player is not
     // there (yet): TV only
     void update(bool faders_ok, const Fader& tv, const Fader& drc) {
+        // Only settled TV play. Neither "both" nor an Off-TV transition adds this path.
+        play_gamepad_only = faders_ok && source != kGamePad && tv.value >= 1 && tv.goal() >= 1 &&
+                            drc.value <= 0 && drc.goal() <= 0;
         play_tv = source != kGamePad;
         play_drc = source == kGamePad || (source == kAuto && faders_ok && gamepad_audible(tv, drc));
     }
-    bool play_tv = true, play_drc = false;
+    bool play_tv = true, play_drc = false, play_gamepad_only = false;
 
     // one frame of n samples per channel -> out (not clamped)
     void mix(const int32_t* tv_l, const int32_t* tv_r, const int32_t* drc_l, const int32_t* drc_r, int n, int32_t* out_l,

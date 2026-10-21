@@ -886,25 +886,37 @@ def repair_guest_python(data_dir):
             config = json.load(f)
     except (OSError, ValueError) as e:
         raise SetupError("No valid guest SDK configuration to repair: %s" % e)
-    if not isinstance(config, dict) or config.get("format_version") not in (1, 2):
+    if not isinstance(config, dict) or config.get("format_version") not in (1, 2, 3):
         raise SetupError("Unsupported guest SDK configuration version")
     executable = ensure_setup_python(data_dir)
-    if config["format_version"] == 2 and PORTABLE and os.path.isabs(executable):
-        for root in (PKG, data_dir):
-            try:
-                inside = os.path.commonpath([os.path.abspath(root), executable]) == os.path.abspath(root)
-            except ValueError:  # another Windows drive
-                inside = False
-            if inside:
-                executable = os.path.relpath(executable, data_dir)
-                if not executable.startswith("."):
-                    executable = "." + os.sep + executable
-                break
+    if config["format_version"] >= 2:
+        executable = guest_stored_path(executable, data_dir)
+        if appimage_release():
+            # issue #230: an AppImage setup up to format 2 stored the paths of that start's mount
+            config.update(guest_release_paths(data_dir), format_version=3)
     config["python"] = [executable]
     with open(path + ".tmp", "w", encoding="utf-8") as f:
         json.dump(config, f)
     os.replace(path + ".tmp", path)
     say("Local mod setup Python is ready (compression.zstd verified).")
+
+
+CLT_DIR = "/Library/Developer/CommandLineTools"
+
+
+def use_installed_clt(ok):
+    """Point xcrun at the installed Command Line Tools (DEVELOPER_DIR, for setup and what it starts) when the
+    developer folder macOS uses doesn't work. True when the tools are usable afterwards."""
+    if ok():
+        return True
+    if os.environ.get("DEVELOPER_DIR") or not os.path.exists(os.path.join(CLT_DIR, "usr", "bin", "clang")):
+        return False
+    os.environ["DEVELOPER_DIR"] = CLT_DIR
+    if ok():
+        say("  Using the Command Line Tools in %s (macOS points to another developer folder)." % CLT_DIR)
+        return True
+    del os.environ["DEVELOPER_DIR"]
+    return False
 
 
 def ensure_xcode_clt(ui):
@@ -918,6 +930,14 @@ def ensure_xcode_clt(ui):
 
     if ok():
         return
+    # macOS can point to another developer folder than the installed Command Line Tools: a removed Xcode, or one
+    # whose license hasn't been accepted (issue #219). The tools themselves work, so use them directly then.
+    if use_installed_clt(ok):
+        return
+    if os.path.exists(os.path.join(CLT_DIR, "usr", "bin", "clang")):
+        raise SetupError("Apple's Command Line Tools are installed, but macOS can't use them. Open Terminal and run: "
+                         "sudo xcode-select --switch " + CLT_DIR + "  (or, if you use Xcode: sudo xcodebuild -license "
+                         "accept), then run setup again")
     if not ui.interactive:
         raise SetupError("Apple's Command Line Tools are not installed (run: xcode-select --install)")
     say("  The game code is compiled with Apple's free Command Line Tools, which are not installed yet.")
@@ -928,6 +948,7 @@ def ensure_xcode_clt(ui):
         if time.time() - t0 > 3 * 3600:
             raise SetupError("the Command Line Tools installation did not finish; run setup again afterwards")
         time.sleep(5)
+    use_installed_clt(ok)
     say("  Command Line Tools installed.")
 
 
@@ -1821,26 +1842,61 @@ def mac_app(app_path, exe_src, data_dir, version, runtime_files=()):
     replace_dir(tmp, app_path)
 
 
+# guest-sdk.json (runtime/src/mods/guest_build.h): format 2 adds paths relative to its folder (portable
+# releases), format 3 "$RELEASE/<path>" for paths inside an AppImage (issue #230)
+GUEST_RELEASE_MARKER = "$RELEASE/"
+
+
+def path_inside(root, path):
+    try:
+        return os.path.commonpath([os.path.abspath(root), os.path.abspath(path)]) == os.path.abspath(root)
+    except ValueError:  # another Windows drive
+        return False
+
+
+def appimage_release():
+    """The AppImage's folder ($APPDIR) when setup runs from one, else None. Its mount point changes on
+    every start (/tmp/.mount_XXXXXX) and the game runs from the data folder, so paths inside it are stored
+    relative to $APPDIR, which the runtime reads again (guestmods::release_root)."""
+    image, appdir = os.environ.get("APPIMAGE"), os.environ.get("APPDIR")
+    if not image or not appdir or not os.path.isdir(appdir):
+        return None
+    appdir = os.path.realpath(appdir)
+    return appdir if path_inside(appdir, os.path.realpath(PKG)) else None
+
+
+def guest_stored_path(path, data_dir):
+    """How guest-sdk.json stores an absolute path: "$RELEASE/..." inside an AppImage, relative to the data
+    folder inside a portable release, else as it is."""
+    if not os.path.isabs(path):
+        return path
+    release = appimage_release()
+    if release and path_inside(release, os.path.realpath(path)):
+        return GUEST_RELEASE_MARKER + os.path.relpath(os.path.realpath(path), release).replace(os.sep, "/")
+    if PORTABLE:
+        for root in (PKG, data_dir):
+            if path_inside(root, path):
+                relative = os.path.relpath(path, data_dir)
+                return relative if relative.startswith(".") else "." + os.sep + relative
+    return path
+
+
+def guest_release_paths(data_dir):
+    """The guest-sdk.json entries for this release's own tools."""
+    return {"builder": guest_stored_path(os.path.join(PKG, "tools", "guestmod", "build_guest_mod.py"), data_dir),
+            "include": guest_stored_path(os.path.join(PKG, "sdk", "include"), data_dir),
+            "setup": guest_stored_path(os.path.join(PKG, "tools", "installer", "setup.py"), data_dir)}
+
+
 def write_guest_build_config(data_dir, tc):
     """Remember setup's real local toolchain for runtime guest builds (no shell command strings)."""
     def stored_path(path):
-        if PORTABLE and os.path.isabs(path):
-            for root in (PKG, data_dir):
-                try:
-                    inside = os.path.commonpath([os.path.abspath(root), path]) == os.path.abspath(root)
-                except ValueError:  # another Windows drive
-                    inside = False
-                if inside:
-                    relative = os.path.relpath(path, data_dir)
-                    return relative if relative.startswith(".") else "." + os.sep + relative
-        return path
+        return guest_stored_path(path, data_dir)
 
-    config = {"format_version": 2, "python": [stored_path(ensure_setup_python(data_dir))],
+    config = {"format_version": 3, "python": [stored_path(ensure_setup_python(data_dir))],
               "compiler": [stored_path(tc.cc[0])] + tc.cc[1:],
-              "builder": stored_path(os.path.join(PKG, "tools", "guestmod", "build_guest_mod.py")),
-              "include": stored_path(os.path.join(PKG, "sdk", "include")),
-              "setup": stored_path(os.path.join(PKG, "tools", "installer", "setup.py")),
               "data_dir": stored_path(os.path.abspath(data_dir))}
+    config.update(guest_release_paths(data_dir))
     if tc.env and tc.env.get("ZIG_GLOBAL_CACHE_DIR"):
         config["zig_cache"] = stored_path(tc.env["ZIG_GLOBAL_CACHE_DIR"])
     path = os.path.join(data_dir, "guest-sdk.json")

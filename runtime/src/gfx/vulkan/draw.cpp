@@ -1,5 +1,9 @@
+#include "vertex_cpu_policy.h"
+#include <set>
+#include <tuple>
 #include "pass.h"
 #include "../../exception_report.h"
+#include "../../render_objects.h"
 #include "aspect.h"
 #include "aspect_panes.h"
 #include "../renderer.h"
@@ -9,10 +13,14 @@
 #include "Cafe/HW/Latte/ISA/LatteReg.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "backend.h"
+#include "dynres.h"
 #include "stereo.h"
 #include "../stereo_projection.h"
+#include "sampler_filtering.h"
 #include "deferred_dispatch.h"
 #include "buffer_cache.h"
+#include "gx2/state_groups.h"
+#include "vertex_cpu_decode.h"
 #include "render_prof.h"
 #include "runtime.h"
 #include "gx2/gx2.h"
@@ -87,9 +95,57 @@ struct DrawBatchState {
 DrawBatchState drawBatchState;
 uint64_t drawBatchSubmissions = 0;
 bool aoPrivateReplay = false;
-uint32_t aoPrivateSource = 0;
-uint64_t aoPrivateFrame = ~0ull;
-Surface aoPrivateColor, aoPrivateDepth;
+struct AoPrivate {
+  uint32_t source = 0;
+  uint64_t frame = ~0ull;
+  Surface color, depth;
+};
+std::array<AoPrivate, 2> aoPrivateEyes;  // stereo: each eye replays into its own images
+AoPrivate& ao_private() { return aoPrivateEyes[stereoEye]; }
+// dynamic resolution (dynres.h): private AO images of other sizes, kept for a change back (private_ao_surface)
+static std::vector<Surface>& ao_kept() { static std::vector<Surface> kept; return kept; }
+// ... and made ahead for the sizes the target's kept images (the neighbouring levels) need, one a frame
+static void prepare_ao_neighbours(const Surface& dst, const Surface* like) {
+  if (!dynres::on()) return;
+  static uint64_t madeFrame = ~0ull;
+  if (madeFrame == R.frame) return;
+  auto& kept = ao_kept();
+  auto needed = [&](const Surface& e) {  // a size of this target's levels (current or kept), or another format's
+    if (e.fmt.pixel != like->fmt.pixel || e.width != dst.width || e.height != dst.height) return true;
+    if (e.extent.width == dst.extent.width && e.extent.height == dst.extent.height) return true;
+    for (auto& k : like->spares)
+      if (k->image && e.extent.width == k->extent.width * 3 / 2 && e.extent.height == k->extent.height * 3 / 2) return true;
+    return false;
+  };
+  for (size_t i = 0; i < kept.size();)
+    if (!needed(kept[i])) { destroy_surface_image(&kept[i]); kept.erase(kept.begin() + long(i)); } else ++i;
+  for (auto& k : like->spares) {
+    if (!k->image) continue;
+    const VkExtent3D extent{k->extent.width * 3 / 2, k->extent.height * 3 / 2, 1};
+    bool have = false;
+    for (auto& e : kept)
+      if (e.image && e.width == dst.width && e.height == dst.height && e.extent.width == extent.width &&
+          e.extent.height == extent.height && e.fmt.pixel == like->fmt.pixel) have = true;
+    if (have || !extent.width || !extent.height || extent.width > R.properties.limits.maxImageDimension2D ||
+        extent.height > R.properties.limits.maxImageDimension2D) continue;
+    Surface n = *like;
+    n.spares.clear(); n.mipChain.reset();
+    n.image = VK_NULL_HANDLE; n.memory = VK_NULL_HANDLE; n.view = VK_NULL_HANDLE;
+    n.layerViews.clear(); n.sampledViews.clear(); n.guestLayout.reset();
+    n.addr = n.mipAddr = 0;
+    n.width = dst.width; n.height = dst.height; n.slices = n.mips = 1;
+    n.dim = uint32_t(Latte::E_DIM::DIM_2D);
+    n.gpuWritten = true; n.dirty = false;
+    create_surface_image(&n, false, extent);
+    // (not cleared ahead as the other images made ahead: this runs between draws, and a clear would end the pass)
+    layer_view(&n, 0);  // the views the private image is used through, so its first use creates none
+    for (auto& [key, view] : dst.sampledViews) make_sampled_view(&n, key);
+    kept.push_back(n);
+    madeFrame = R.frame;
+    while (kept.size() > 8) { destroy_surface_image(&kept.front()); kept.erase(kept.begin()); }  // a safety bound
+    return;
+  }
+}
 Surface* private_ao_surface(Surface& dst, const Surface* like) {
   const uint64_t logicalWidth = uint64_t(like->width) * 3 / 2;
   const uint64_t logicalHeight = uint64_t(like->height) * 3 / 2;
@@ -106,6 +162,32 @@ Surface* private_ao_surface(Surface& dst, const Surface* like) {
       dst.extent.width != extent.width || dst.extent.height != extent.height ||
       dst.fmt.pixel != like->fmt.pixel) {
     end_encoder();
+    // dynamic resolution (dynres.h): the private images of other sizes are kept (a few), and one of the
+    // needed size is taken back instead of creating it (its contents are drawn again each frame)
+    auto& kept = ao_kept();
+    if (!dynres::on()) {
+      for (auto& k : kept) destroy_surface_image(&k);
+      kept.clear();
+    } else {
+      for (size_t i = 0; i < kept.size(); ++i) {
+        const Surface& k = kept[i];
+        if (k.width == width && k.height == height && k.extent.width == extent.width && k.extent.height == extent.height &&
+            k.fmt.pixel == like->fmt.pixel && k.image) {
+          Surface take = kept[i];
+          kept.erase(kept.begin() + long(i));
+          if (dst.image) kept.insert(kept.begin(), dst);
+          dst = take;
+          while (kept.size() > 8) { destroy_surface_image(&kept.back()); kept.pop_back(); }
+          return &dst;
+        }
+      }
+      if (dst.image) {
+        kept.insert(kept.begin(), dst);
+        dst.image = VK_NULL_HANDLE; dst.memory = VK_NULL_HANDLE; dst.view = VK_NULL_HANDLE;
+        dst.layerViews.clear(); dst.sampledViews.clear(); dst.mipChain.reset(); dst.allocationBytes = 0;
+        while (kept.size() > 8) { destroy_surface_image(&kept.back()); kept.pop_back(); }
+      }
+    }
     destroy_surface_image(&dst);
     dst = *like;
     dst.mipChain.reset();
@@ -119,6 +201,7 @@ Surface* private_ao_surface(Surface& dst, const Surface* like) {
     dst.dirty = false;
     create_surface_image(&dst, false, extent);
   }
+  prepare_ao_neighbours(dst, like);
   return &dst;
 }
 
@@ -217,6 +300,48 @@ UploadSlice vertex_snapshot(uint32_t binding, uint32_t address, uint32_t size,
   }
   return history.remember(address, size, mem::ptr(address), historyEnabled, R.uploadReadsDirect,
                           [](const void* bytes, size_t n) { return snapshot(bytes, n, 4); });
+}
+
+uint32_t vertex_format_bytes(VkFormat format);
+// Diagnostic "Convert vertices on the CPU" (issue #207): the group's attributes, decoded exactly like
+// the shader decoder would (vertex_cpu_decode.h), 16 bytes each, interleaved per element; elements:
+// 0..limit-1 when the draw's vertex extent is known (limit), else every element of the declared buffer.
+UploadSlice cpu_vertex_stream(const LatteParsedFetchShaderBufferGroup& g, uint32_t addr, uint32_t size,
+                              uint32_t stride, uint64_t limit) {
+  uint64_t elements = stride ? (uint64_t(size) + stride - 1) / stride : 1;
+  if (limit && limit < elements) elements = limit;
+  const uint32_t attributes = vk::cpu_vertex_count(g, R.vertexDiagnostics.cpuClasses);
+  const uint64_t bytes = elements * attributes * 16;
+  if (bytes > 0x10000000u) exception_report::raise("CPU vertex conversion exceeds 256 MiB");
+  auto slice = allocate_upload(std::max<size_t>(size_t(bytes), 16), 16);
+  auto* out = static_cast<uint32_t*>(slice.mapped);
+  if (bytes < slice.size) std::memset(static_cast<uint8_t*>(slice.mapped) + bytes, 0, slice.size - bytes);
+  const auto* guest = static_cast<const uint8_t*>(mem::ptr(addr));
+  for (int j = 0; j < g.attribCount; ++j) {
+    const auto& a = g.attrib[j];
+    if (!vk::cpu_vertex_selected(a, R.vertexDiagnostics.cpuClasses)) continue;
+    uint32_t probe[4];
+    static std::set<std::tuple<unsigned, unsigned, unsigned, unsigned>> unsupported;
+    uint8_t zero[16]{};
+    if (!vk::cpu_decode_attribute(a, zero, probe) &&
+        unsupported.insert({unsigned(a.format), unsigned(a.nfa), unsigned(a.isSigned), unsigned(a.endianSwap)}).second)
+      LOG("[vulkan cpu vertices] no decoder for format 0x%02x nfa %u signed %u endian %u (reads as zero, like the shader)",
+          unsigned(a.format), unsigned(a.nfa), unsigned(a.isSigned), unsigned(a.endianSwap));
+  }
+  for (uint64_t e = 0; e < elements; ++e) {
+    uint32_t slot = 0;
+    for (int j = 0; j < g.attribCount; ++j) {
+      const auto& a = g.attrib[j];
+      if (!vk::cpu_vertex_selected(a, R.vertexDiagnostics.cpuClasses)) continue;
+      const uint64_t at = e * stride + a.offset;
+      uint32_t value[4] = {0, 0, 0, 0};
+      if (at + vertex_format_bytes(vk::vertex_format(a.format)) <= size)
+        vk::cpu_decode_attribute(a, guest + at, value);
+      std::memcpy(out + (e * attributes + slot++) * 4, value, 16);
+    }
+  }
+  rprof::add_upload(rprof::kUpVertex, bytes);
+  return slice;
 }
 
 // Separate immutable window cache: a partially initialized reservation must
@@ -657,8 +782,12 @@ void capture_pipeline_failure(VkResult result, vk::Shader* vs, vk::Shader* ps,
       char name[96];
       snprintf(name,sizeof name,"captures/pipeline-failed-%s-%016llX",
           shaders[i]->vertex ? "vs" : "ps",(unsigned long long)shaders[i]->key);
-      if(FILE* f=fopen((std::string(name)+".glsl").c_str(),"wb")) {
-        fwrite(shaders[i]->glsl.data(),1,shaders[i]->glsl.size(),f); fclose(f);
+      // GLSL text is kept only with WWHD_VK_SHADER_SOURCE_VERIFY=1 (or key verify).
+      const auto& glsl=shaders[i]->source_text();
+      if(glsl.empty())
+        LOG("[vulkan] %s GLSL not kept; set WWHD_VK_SHADER_SOURCE_VERIFY=1 to capture it",name);
+      else if(FILE* f=fopen((std::string(name)+".glsl").c_str(),"wb")) {
+        fwrite(glsl.data(),1,glsl.size(),f); fclose(f);
       }
       if(FILE* f=fopen((std::string(name)+".spv").c_str(),"wb")) {
         fwrite(words[i]->data(),4,words[i]->size(),f); fclose(f);
@@ -730,6 +859,7 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
       return *value;
     }
   auto remember = [&](Pipeline& value) -> Pipeline& {
+    render_objects::set_pipelines(pipelines.size());  // crash logs, performance report
     lastPipelineLookup = {key, R.device, &value};
     if (useLookaside) pipelineLookaside.remember(lastPipelineLookup);
     return value;
@@ -778,7 +908,7 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
   std::vector<uint8_t> recipeKey(keyBytes, keyBytes + sizeof key);
   // Own prerequisite identities independently of the mutable shader cache.
   const std::array<std::shared_ptr<vk::ShaderBinary>, 2> shaderBinaries{vs->binary, ps->binary};
-  std::array<std::vector<uint32_t>, 2> recipeSpirv{vs->spirv, ps->spirv};
+  std::array<std::vector<uint32_t>, 2> recipeSpirv{vs->spirv(), ps->spirv()};
   for(size_t i=0;i<shaderBinaries.size();++i)
     if(recipeSpirv[i].empty() && shaderBinaries[i]) {
       if(!async_pipeline_enabled()) recipeSpirv[i]=vk::shader_binary_words_exact(shaderBinaries[i],R.frame);
@@ -818,23 +948,72 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
   p.trimFetch = fs;
   p.trimVertex = vs;
   p.bindingTrims.reserve(fs->bufferGroups.size());
+  uint32_t tailLocation = vk::vertex_tail_location(vs->mapping.attributeMapping);
   for (auto &g : fs->bufferGroups) {
+    const uint32_t cpuCount = vk::cpu_vertex_count(g, R.vertexDiagnostics.cpuClasses);
+    const uint32_t cpuBinding = cpuCount ? vk::cpu_vertex_binding(*fs, g, R.vertexDiagnostics.cpuClasses,
+        R.properties.limits.maxVertexInputBindings) : g.attributeBufferIndex;
+    if (cpuCount && cpuBinding >= R.properties.limits.maxVertexInputBindings)
+      exception_report::raise("CPU vertex classes exceed device vertex binding limit");
     bool instance = false;
     BindingTrimMetadata trim;
     std::optional<LatteConst::VertexFetchType2> fetchRate;
     for (int j = 0; j < g.attribCount; j++) {
       auto &a = g.attrib[j];
+      const bool cpu = vk::cpu_vertex_selected(a, R.vertexDiagnostics.cpuClasses);
+      const uint32_t cpuOffset = vk::cpu_vertex_offset(g, j, R.vertexDiagnostics.cpuClasses);
       int loc = vs->mapping.attributeMapping[a.semanticId];
       if (loc < 0)
         continue;
-      auto fmt = vk::vertex_format(a.format);
+      auto fmt = R.vertexFormats.fetch(vk::vertex_format(a.format));
       if (fmt == VK_FORMAT_UNDEFINED)
         exception_report::raise("unsupported vertex format");
+      if (cpu)
+        // CPU-converted stream: 16 bytes per attribute of the group (cpu_vertex_stream)
+        attributes.push_back({uint32_t(loc), cpuBinding, vk::cpu_vertex_format(a), cpuOffset});
+      else
       attributes.push_back(
           {uint32_t(loc), g.attributeBufferIndex, fmt, a.offset});
-      // Mirror the conservative prefix rules using the actual pipeline format.
+      const auto nativeFormat = vk::vertex_format(a.format);
+      // Metadata only: never record vertex contents, guest addresses, or save data.
+      static const bool observeVertexInputs = [] {
+#ifdef __ANDROID__
+        return true;
+#else
+        const char* setting = std::getenv("WWHD_VK_VERTEX_METADATA");
+        return setting && !std::strcmp(setting, "1");
+#endif
+      }();
+      if (observeVertexInputs) {
+        // Keep the offset and its own guest binding stride together. An offset-limit check
+        // alone says nothing about access beyond stride; zero stride is a constant input.
+        const uint32_t observedStride =
+            (r[mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.attributeBufferIndex * 7 + 2] >> 11) & 0xFFFF;
+        const uint64_t attributeEnd = uint64_t(a.offset) + vertex_format_bytes(nativeFormat);
+        static std::set<std::tuple<unsigned, unsigned, unsigned, unsigned, unsigned, unsigned>> seenVertexInputs;
+        const auto diagnostic = std::make_tuple(unsigned(a.format), unsigned(a.endianSwap),
+            unsigned(a.nfa), unsigned(a.isSigned), unsigned(a.offset), unsigned(observedStride));
+        if (seenVertexInputs.size() < 64 && seenVertexInputs.insert(diagnostic).second)
+          LOG("[vulkan vertex observed] guestFormat=0x%02x native=%s fetch=%s endian=%u numeric=%u signed=%u offset=%u offsetMod4=%u offsetWithinLimit=%u fallback=%u stride=%u attributeEnd=%llu offsetBeyondStride=%u attributeEndBeyondStride=%u cpu=%u",
+              unsigned(a.format), vk::vertex_format_name(nativeFormat),
+              cpu ? (vk::cpu_vertex_float(a) ? "R32G32B32A32_SFLOAT" : "R32G32B32A32_UINT") : vk::vertex_format_name(fmt), unsigned(a.endianSwap),
+              unsigned(a.nfa), unsigned(a.isSigned), a.offset, a.offset % 4, unsigned(a.offset <= R.properties.limits.maxVertexInputAttributeOffset),
+              unsigned(!cpu && R.vertexFormats.fallback(nativeFormat)), observedStride, static_cast<unsigned long long>(attributeEnd),
+              unsigned(observedStride && a.offset >= observedStride), unsigned(observedStride && attributeEnd > observedStride), unsigned(cpu));
+      }
+      if (!cpu && R.vertexFormats.fallback(nativeFormat)) {
+        if (tailLocation >= R.properties.limits.maxVertexInputAttributes ||
+            attributes.size() >= R.properties.limits.maxVertexInputAttributes)
+          exception_report::raise("RGB fallback exceeds device vertex attribute limit");
+        const uint64_t tailOffset = uint64_t(a.offset) + vk::vertex_tail_offset(nativeFormat);
+        if (tailOffset > R.properties.limits.maxVertexInputAttributeOffset)
+          exception_report::raise("RGB fallback exceeds device vertex attribute offset limit");
+        attributes.push_back({tailLocation++, g.attributeBufferIndex,
+            vk::vertex_tail_format(nativeFormat), uint32_t(tailOffset)});
+      }
+      // Split fetches cover exactly the native attribute bytes.
       if (trim.supported) {
-        const uint32_t width = vertex_format_bytes(fmt);
+        const uint32_t width = vertex_format_bytes(vk::vertex_format(a.format));
         if (!width || (trim.rate && *trim.rate != a.fetchType) ||
             (a.fetchType != LatteConst::VertexFetchType2::VERTEX_DATA &&
              a.fetchType != LatteConst::VertexFetchType2::INSTANCE_DATA) ||
@@ -858,12 +1037,20 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
         (r[mmSQ_VTX_ATTRIBUTE_BLOCK_START + g.attributeBufferIndex * 7 + 2] >>
          11) &
         0xFFFF;
-    bindings.push_back({g.attributeBufferIndex, stride,
-                        instance ? VK_VERTEX_INPUT_RATE_INSTANCE
-                                 : VK_VERTEX_INPUT_RATE_VERTEX});
+#ifdef __ANDROID__
+    static std::set<uint32_t> seenStrides;
+    if (seenStrides.size() < 32 && seenStrides.insert(stride).second)
+      LOG("[vulkan stride observed] stride=%u mod4=%u withinLimit=%u", stride, stride % 4,
+          stride <= R.properties.limits.maxVertexInputBindingStride);
+#endif
+    const auto rate = instance ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+    if (cpuCount < uint32_t(g.attribCount)) bindings.push_back({g.attributeBufferIndex, stride, rate});
+    if (cpuCount) bindings.push_back({cpuBinding, stride ? 16 * cpuCount : 0, rate});
     trim.stride = stride;
     p.bindingTrims.push_back(trim);
   }
+  if (R.vertexFormats.fallbackMask && attributes.size() > R.properties.limits.maxVertexInputAttributes)
+    exception_report::raise("RGB fallback exceeds device vertex attribute limit");
   VkPipelineVertexInputStateCreateInfo vi{
       VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
   vi.vertexBindingDescriptionCount = bindings.size();
@@ -886,11 +1073,10 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
   rs.polygonMode = VK_POLYGON_MODE_FILL;
   LATTE_PA_CL_CLIP_CNTL pipelineClip;
   std::memcpy(&pipelineClip, r + REGADDR::PA_CL_CLIP_CNTL, 4);
-  if (pipelineClip.get_ZCLIP_FAR_DISABLE()) {
-    if (!R.enabledFeatures.depthClamp)
-      exception_report::raise("device lacks depth clamp requested by guest");
+  // Far-plane clipping off: depth clamp, or without the device feature the vertex shader's clamp at
+  // the near plane (vk::depth_clamp_variant_wanted, part of the vertex shader's key)
+  if (pipelineClip.get_ZCLIP_FAR_DISABLE() && R.enabledFeatures.depthClamp)
     rs.depthClampEnable = VK_TRUE;
-  }
   rs.lineWidth = 1;
   rs.cullMode = (pm.get_CULL_FRONT() ? VK_CULL_MODE_FRONT_BIT : 0) |
                 (pm.get_CULL_BACK() ? VK_CULL_MODE_BACK_BIT : 0);
@@ -1167,24 +1353,25 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
 struct SamplerMemo {
   VkDevice device = VK_NULL_HANDLE;
   std::array<uint32_t, 3> words{};
-  bool compare = false, integer = false, forceAniso = false;
+  bool compare = false, integer = false, forceAniso = false, nearestOnly = false;
   VkSampler value = VK_NULL_HANDLE;
   bool matches(VkDevice nextDevice, const uint32_t* nextWords,
-               bool nextCompare, bool nextInteger, bool nextForceAniso) const {
+               bool nextCompare, bool nextInteger, bool nextForceAniso, bool nextNearestOnly) const {
     return value && device == nextDevice && compare == nextCompare &&
-        integer == nextInteger && forceAniso == nextForceAniso &&
+        integer == nextInteger && forceAniso == nextForceAniso && nearestOnly == nextNearestOnly &&
         words[0] == nextWords[0] && words[1] == nextWords[1] && words[2] == nextWords[2];
   }
   void remember(VkDevice nextDevice, const uint32_t* nextWords,
-                bool nextCompare, bool nextInteger, bool nextForceAniso, VkSampler nextValue) {
+                bool nextCompare, bool nextInteger, bool nextForceAniso, bool nextNearestOnly, VkSampler nextValue) {
     device = nextDevice;
     std::memcpy(words.data(), nextWords, sizeof(words));
-    compare = nextCompare; integer = nextInteger; forceAniso = nextForceAniso;
+    compare = nextCompare; integer = nextInteger; forceAniso = nextForceAniso; nearestOnly = nextNearestOnly;
     value = nextValue;
   }
 };
 SamplerMemo samplerMemo;
-VkSampler sampler(const uint32_t *words, bool compare, bool integer, bool allowAniso) {
+VkSampler sampler(const uint32_t *words, bool compare, bool integer, bool allowAniso, bool linearSupported) {
+  const bool nearestOnly = sampler_nearest_only(integer, compare, linearSupported);
   static const bool memo = [] {
     const char* e = std::getenv("WWHD_VK_SAMPLER_MEMO");
     return e && !std::strcmp(e, "1");
@@ -1192,19 +1379,20 @@ VkSampler sampler(const uint32_t *words, bool compare, bool integer, bool allowA
   const bool forceAniso = allowAniso && aniso_enabled();
   const bool stats = preparation_stats_enabled();
   if (stats) ++R.cpuPreparation.samplerRequests;
-  if (memo && samplerMemo.matches(R.device, words, compare, integer, forceAniso)) {
+  if (memo && samplerMemo.matches(R.device, words, compare, integer, forceAniso, nearestOnly)) {
     if (stats) ++R.cpuPreparation.samplerMemoHits;
     return samplerMemo.value;
   }
   if (stats) ++R.cpuPreparation.samplerMapLookups;
   auto remember = [&](VkSampler value) {
-    if (memo) samplerMemo.remember(R.device, words, compare, integer, forceAniso, value);
+    if (memo) samplerMemo.remember(R.device, words, compare, integer, forceAniso, nearestOnly, value);
     return value;
   };
   std::string key(reinterpret_cast<const char *>(words), 12);
   key.push_back(compare);
   key.push_back(integer);
   key.push_back(forceAniso);
+  key.push_back(nearestOnly);
   static std::unordered_map<std::string, VkSampler> cache;
   if (auto it = cache.find(key); it != cache.end())
     return remember(it->second);
@@ -1238,7 +1426,7 @@ VkSampler sampler(const uint32_t *words, bool compare, bool integer, bool allowA
   VkSamplerCreateInfo ci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
   ci.magFilter = filter(static_cast<uint32_t>(w.get_XY_MAG_FILTER()));
   ci.minFilter = filter(static_cast<uint32_t>(w.get_XY_MIN_FILTER()));
-  if (integer)
+  if (nearestOnly)
     ci.minFilter = ci.magFilter = VK_FILTER_NEAREST;
   ci.mipmapMode = static_cast<uint32_t>(w.get_MIP_FILTER()) == 2
                       ? VK_SAMPLER_MIPMAP_MODE_LINEAR
@@ -1269,7 +1457,7 @@ VkSampler sampler(const uint32_t *words, bool compare, bool integer, bool allowA
   if (forceAniso && uint32_t(w.get_MIP_FILTER()) != 0 && ci.minFilter == VK_FILTER_LINEAR &&
       uint32_t(w.get_DEPTH_COMPARE_FUNCTION()) == 0)
     anisotropy = 16;
-  if (R.enabledFeatures.samplerAnisotropy && !integer && anisotropy > 1) {
+  if (R.enabledFeatures.samplerAnisotropy && !nearestOnly && anisotropy > 1) {
     ci.anisotropyEnable = VK_TRUE;
     ci.maxAnisotropy = std::min(float(anisotropy), R.properties.limits.maxSamplerAnisotropy);
   }
@@ -1283,6 +1471,7 @@ VkSampler sampler(const uint32_t *words, bool compare, bool integer, bool allowA
     ci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     ci.borderColor = VkBorderColor(uint32_t(ci.borderColor) + 1);
   }
+  restrict_sampler_filtering(ci, nearestOnly);
   VkSampler s;
   vk_check(vkCreateSampler(R.device, &ci, nullptr, &s), "sampler");
   cache.emplace(std::move(key), s);
@@ -1293,6 +1482,34 @@ struct StageResources {
   std::array<uint32_t, 17> dynamicOffsets{};
   uint32_t dynamicOffsetCount = 0;
 };
+// Stereo: a stage of eye 0's draw that samples only textures both eyes share (stereo.h). Eye 1
+// binds the same descriptor set; only the uniform buffers eye 0's eye shift changed get eye 1's
+// copy, at another dynamic offset.
+struct EyeUniform {
+  uint32_t dynamicIndex = 0;  // in StageResources::dynamicOffsets
+  VkBuffer buffer = VK_NULL_HANDLE;  // the descriptor set's buffer
+  std::vector<uint8_t> bytes;  // eye 0's upload
+  stereo::EyeRows rows;
+};
+struct StageReplay {
+  bool valid = false;
+  StageResources resources;
+  std::array<EyeUniform, 4> uniforms;
+  uint32_t uniformCount = 0;
+  std::array<Surface*, LATTE_NUM_MAX_TEX_UNITS> textures{};  // shared with eye 1
+  uint32_t textureCount = 0;
+  // the other textures: eye 1 resolves its own images, then writes its own set from these writes
+  struct EyeTexture { uint32_t unit = 0; int binding = -1; float sx = 1, sy = 1; uint32_t write = 0; };
+  std::array<EyeTexture, LATTE_NUM_MAX_TEX_UNITS> eyeTextures{};
+  uint32_t eyeTextureCount = 0;
+  VkDescriptorSetLayout layout{};
+  uint32_t writeCount = 0;
+  std::array<VkWriteDescriptorSet, 17 + LATTE_NUM_MAX_TEX_UNITS> writes{};  // without info pointers
+  std::array<VkDescriptorBufferInfo, 17 + LATTE_NUM_MAX_TEX_UNITS> bufferInfos{};
+  std::array<VkDescriptorImageInfo, 17 + LATTE_NUM_MAX_TEX_UNITS> imageInfos{};
+};
+VkDescriptorSet stage_descriptor_set(bool vertex, VkDescriptorSetLayout layout,
+                                     VkWriteDescriptorSet* writes, uint32_t writeCount);
 // Exact consecutive descriptor state, optionally used to omit redundant binds.
 // Lifetime is the tracked draw pass; explicit generation/command/layout keys
 // also exclude repeated handles after command/descriptor pool resets.
@@ -1465,11 +1682,14 @@ struct FeedbackScratch {
   VkDevice device = VK_NULL_HANDLE;
   VkDeviceSize allocationBytes = 0;
 };
-std::array<FeedbackScratch, kFeedbackUnitsPerStage * 2> feedbackScratch;
+// per stereo eye: each eye's command stream reuses only its own copies (stereo.h)
+std::array<std::array<FeedbackScratch, kFeedbackUnitsPerStage * 2>, 2> feedbackScratchEyes;
 VkDeviceSize feedbackRetainedBytes = 0;
 // the draw (R.drawCount while it is prepared) that last used each retained slot
-std::array<uint64_t, kFeedbackUnitsPerStage * 2> feedbackUseDraw = [] {
-  std::array<uint64_t, kFeedbackUnitsPerStage * 2> a; a.fill(UINT64_MAX); return a; }();
+std::array<std::array<uint64_t, kFeedbackUnitsPerStage * 2>, 2> feedbackUseDrawEyes = [] {
+  std::array<std::array<uint64_t, kFeedbackUnitsPerStage * 2>, 2> a;
+  for (auto& eye : a) eye.fill(UINT64_MAX);
+  return a; }();
 bool feedback_compatible(const Surface& copy, const Surface& source) {
   return copy.image && copy.fmt.pixel == source.fmt.pixel &&
          copy.aspect == source.aspect && copy.imageType == source.imageType &&
@@ -1498,6 +1718,7 @@ void make_feedback_image(Surface& copy, const Surface& source) {
   create_surface_image(&copy, false);
 }
 void reset_feedback_scratch() {
+  for (auto& feedbackScratch : feedbackScratchEyes)
   for (auto& slot : feedbackScratch) {
     // Reset must run before replacing the device. Foreign handles cannot be
     // placed into this device's deferred retirement lists.
@@ -1586,9 +1807,19 @@ VkImageView feedback_view(Surface *source, const uint32_t *textureWords,
     const char* e = std::getenv("WWHD_VK_REUSE_FEEDBACK_IMAGES");
     return e && !std::strcmp(e, "1");
   }();
+  // Stereo retains allocations, never snapshot contents: every use still copies
+  // the source. Compatibility includes extent, format, aspects, mips and layers.
+  // Slots are per-eye; feedbackUseDraw prevents two units in one draw from
+  // aliasing a slot. transition_image preserves the earlier shader-read -> next
+  // transfer-write dependency (including held eye commands); replacements are
+  // fence-retired, and retained allocations are bounded by 128 MiB. Mono keeps
+  // its prior opt-in policy. This removes repeated allocation work in stereo;
+  // it does not establish a Quest performance result.
+  auto& feedbackScratch = feedbackScratchEyes[stereoEye];
+  auto& feedbackUseDraw = feedbackUseDrawEyes[stereoEye];
   Surface temporary;
   Surface* copy = &temporary;
-  FeedbackScratch* slot = reuse && unit < kFeedbackUnitsPerStage
+  FeedbackScratch* slot = (reuse || stereo::frame.mode != stereo::Off) && unit < kFeedbackUnitsPerStage
       ? &feedbackScratch[(vertex ? kFeedbackUnitsPerStage : 0) + unit]
       : nullptr;
   // Device recreation is not a supported lifecycle today; refuse to reuse or
@@ -1701,13 +1932,339 @@ VkImageView feedback_view(Surface *source, const uint32_t *textureWords,
   destroy_surface_image(&temporary); // Temporary snapshots remain fence-retired.
   return view;
 }
+// ---------------------------------------------------------------- continued-draw fast path
+// On by default (WWHD_VK_FASTPATH=0 turns it off): while only "continued" register groups changed since the previous resolved
+// draw (gx2/state_groups.h: ALU constants, uniform-block and vertex-buffer pointers, per-draw
+// dynamic words), in the same frame and surface epoch (backend.h), with the same primitive type and
+// graphics settings, a draw reuses that draw's fetch/vertex/pixel shaders, render targets, pipeline
+// and texture/sampler bindings (Cemu's continued draw pass: LatteCommandProcessor.cpp,
+// VulkanRendererCore.cpp). Uniforms, support uniforms (incl. texture scales), descriptor sets,
+// indices, vertex buffers and dynamic state are still prepared per draw, and every reused texture
+// still goes through upload_surface (write tracking/invalidations): an upload ends the epoch and the
+// draw resolves fully. Draws that sample one of their own targets' addresses (feedback loops and
+// lookups whose winner can change with the target's write sequence), AO replays and AO-substituted
+// textures are never continued.
+// WWHD_VK_FASTPATH_VERIFY=N (unless WWHD_VK_FASTPATH=0): on every Nth continued draw
+// also run the full resolution, compare shaders, targets, pipeline and texture/sampler bindings,
+// count and log mismatches (the draw then uses the full result). Statistics every 120 frames.
+struct FastPathConfig {
+  bool on = false;
+  uint32_t verifyEvery = 0;
+};
+const FastPathConfig& fastpath_config() {
+  static const FastPathConfig config = [] {
+    FastPathConfig c;
+    if (const char* v = std::getenv("WWHD_VK_FASTPATH_VERIFY")) c.verifyEvery = uint32_t(std::max(0, std::atoi(v)));
+    const char* e = std::getenv("WWHD_VK_FASTPATH");
+    c.on = e ? std::atoi(e) != 0 : true;
+    if (!c.on) c.verifyEvery = 0;
+    LOG("[vulkan] continued-draw fast path %s%s", c.on ? "on" : "off (WWHD_VK_FASTPATH=0)", c.verifyEvery ? " (verify mode)" : "");
+    return c;
+  }();
+  return config;
+}
+struct ContinuedTexture {
+  uint32_t unit = 0;
+  int binding = -1;
+  Surface* surface = nullptr;
+  VkImageView view = VK_NULL_HANDLE;
+  VkSampler sampler = VK_NULL_HANDLE;
+};
+struct ContinuedStage {
+  uint32_t count = 0;
+  bool continuable = true;
+  std::array<ContinuedTexture, LATTE_NUM_MAX_TEX_UNITS> textures{};
+  void add(const ContinuedTexture& t) {
+    if (count < textures.size()) textures[count++] = t;
+    else continuable = false;
+  }
+};
+struct DrawTargets {
+  std::array<Surface*, 8> colors{};
+  std::array<uint32_t, 8> slices{};
+  Surface* depth = nullptr;
+  Surface* target = nullptr;  // first colour target, else depth (before AO replay drops a mismatch)
+  uint32_t depthSlice = 0, width = 0, height = 0;
+  float sx = 1, sy = 1;
+  bool same(const DrawTargets& o) const {
+    return colors == o.colors && slices == o.slices && depth == o.depth && target == o.target && depthSlice == o.depthSlice &&
+           width == o.width && height == o.height && !std::memcmp(&sx, &o.sx, 4) && !std::memcmp(&sy, &o.sy, 4);
+  }
+};
+enum ContinuedReason : uint8_t {
+  kContinued, kNoState, kNewFrame, kRegisters, kSurfaces, kUpload, kPrimitive, kSettings,
+  kVerifyMismatch, kNotContinuable, kAoReplay, kReasons
+};
+const char* const continuedReasonNames[kReasons] = {
+  "continued", "no state", "new frame", "registers", "surfaces", "texture upload", "primitive",
+  "settings", "verify mismatch", "not continuable", "AO replay"};
+struct ContinuedDraw {
+  bool valid = false;
+  ContinuedReason invalidReason = kNoState;  // why the state is not valid
+  uint64_t stateVersion = 0, surfaceEpoch = 0, frame = ~uint64_t{0};
+  uint32_t prim = 0;
+  VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
+  int aoMode = 0;
+  bool aoHires = false, aniso = false;
+  LatteFetchShader* fs = nullptr;
+  uint64_t fsKey = 0;
+  vk::Shader *vs = nullptr, *ps = nullptr;
+  DrawTargets targets;
+  Pipeline* pipeline = nullptr;
+  ContinuedStage stages[2];
+};
+// Stereo: each eye's command stream continues its own previous draw (stereo.h).
+std::array<ContinuedDraw, 2> continuedEyes;
+// Stereo: eye 1 draws the same guest operation right after eye 0 (draw_stereo), with the same
+// registers, so it takes eye 0's fetch, vertex and pixel shaders instead of looking them up again.
+// When eye 0's draw completed in the same submission, eye 1 also replays its index and vertex
+// buffers, its pipeline and each stage that samples no texture (StageReplay): of its own, eye 1
+// resolves only its render targets and the textures its stages sample.
+struct StereoShaders {
+  LatteFetchShader* fs = nullptr;
+  uint64_t fsKey = 0;
+  vk::Shader *vs = nullptr, *ps = nullptr;
+  bool replay = false;
+  uint64_t submission = 0;
+  Pipeline* pipeline = nullptr;
+  VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
+  std::array<VkFormat, 9> formats{};  // the pipeline's colour and depth formats
+  float sx = 0, sy = 0;
+  uint32_t width = 0, height = 0;
+  VkViewport viewport{};
+  VkRect2D scissor{};
+  bool rasterReady = false;
+  StageReplay stages[2];
+  struct VertexBind { uint32_t binding; VkBuffer buffer; VkDeviceSize offset; };
+  std::array<VertexBind, 32> vertexBinds{};
+  uint32_t vertexBindCount = 0;
+  bool indexed = false;
+  VkBuffer indexBuffer = VK_NULL_HANDLE;
+  VkDeviceSize indexOffset = 0;
+  VkIndexType indexType = VK_INDEX_TYPE_UINT32;
+  uint32_t drawCount = 0;
+  void reset() {
+    fs = nullptr; fsKey = 0; vs = ps = nullptr;
+    replay = false; vertexBindCount = 0; rasterReady = false;
+    stages[0].valid = stages[1].valid = false;
+  }
+  void add_vertex_bind(uint32_t binding, VkBuffer buffer, VkDeviceSize offset) {
+    if (vertexBindCount < vertexBinds.size()) vertexBinds[vertexBindCount] = {binding, buffer, offset};
+    ++vertexBindCount;  // past capacity: no replay
+  }
+} stereoShaders;
+std::array<VkFormat, 9> target_formats(const std::array<Surface*, 8>& colors, const Surface* depth) {
+  std::array<VkFormat, 9> f{};
+  for (int i = 0; i < 8; ++i) f[i] = colors[i] ? colors[i]->fmt.pixel : VK_FORMAT_UNDEFINED;
+  f[8] = depth ? depth->fmt.pixel : VK_FORMAT_UNDEFINED;
+  return f;
+}
+StereoShaders* stereoShadersOut = nullptr;       // eye 0's draw records
+const StereoShaders* stereoShadersIn = nullptr;  // eye 1's draw reuses
+struct ContinuedStats {
+  uint64_t lastFrame = 0, draws = 0, verified = 0, mismatches = 0, totalMismatches = 0, totalVerified = 0;
+  std::array<uint64_t, kReasons> reasons{};
+  std::array<uint64_t, gx2::kSgCount> groups{};  // register groups that ended a continuation
+  std::array<uint64_t, 8> mismatchKinds{};
+} continuedStats;
+const char* const mismatchKindNames[8] = {"fetch shader", "vertex shader", "pixel shader", "targets",
+                                          "pipeline", "texture count", "texture binding", "topology"};
+void report_continued_stats() {
+  auto& st = continuedStats;
+  if (R.frame < st.lastFrame + 120) return;
+  const double frames = double(R.frame - st.lastFrame);
+  if (st.draws) {
+    char buf[1024];
+    int k = std::snprintf(buf, sizeof buf, "[vulkan fastpath] frame %llu: %.1f%% of %.0f draws/frame continued; full:",
+                          (unsigned long long)R.frame, 100.0 * st.reasons[kContinued] / st.draws, st.draws / frames);
+    for (int i = 1; i < kReasons && k < int(sizeof buf); ++i)
+      if (st.reasons[i]) k += std::snprintf(buf + k, sizeof buf - k, " %s %.1f%%", continuedReasonNames[i], 100.0 * st.reasons[i] / st.draws);
+    if (st.reasons[kRegisters] && k < int(sizeof buf)) {
+      k += std::snprintf(buf + k, sizeof buf - k, "; groups/frame:");
+      for (int g = 0; g < gx2::kSgCount && k < int(sizeof buf); ++g)
+        if (st.groups[g]) k += std::snprintf(buf + k, sizeof buf - k, " %s %.0f", gx2::state_group_name(g), st.groups[g] / frames);
+    }
+    if (fastpath_config().verifyEvery && k < int(sizeof buf))
+      k += std::snprintf(buf + k, sizeof buf - k, "; verify: %llu checked, %llu mismatches (total %llu of %llu)",
+                         (unsigned long long)st.verified, (unsigned long long)st.mismatches,
+                         (unsigned long long)st.totalMismatches, (unsigned long long)st.totalVerified);
+    LOG("%s", buf);
+  }
+  const uint64_t totalMismatches = st.totalMismatches, totalVerified = st.totalVerified;
+  const auto kinds = st.mismatchKinds;
+  st = {};
+  st.lastFrame = R.frame;
+  st.totalMismatches = totalMismatches;
+  st.totalVerified = totalVerified;
+  st.mismatchKinds = kinds;
+}
+// Render targets of a draw (both paths); false: the draw has no target.
+bool resolve_targets(const uint32_t* r, vk::Shader* ps, DrawTargets& t) {
+  t = {};
+  const uint32_t eyeSize = stereo_eye_size_generation();
+  const auto &lcr = *reinterpret_cast<const LatteContextRegister *>(r);
+  auto mask = LatteMRT::GetActiveColorBufferMask(ps->dec, lcr);
+  for (int i = 0; i < 8; i++)
+    if (mask & (1 << i))
+      t.colors[i] = color_target(r, i, &t.slices[i]);
+  t.depth = LatteMRT::GetActiveDepthBufferMask(lcr) ? depth_target(r, &t.depthSlice) : nullptr;
+  // a lookup switched stereo eyes to full size (an unscalable format, surfaces.cpp): the targets
+  // looked up before it still have the eye size; looked up again, they are rescaled
+  if (eyeSize != stereo_eye_size_generation()) return resolve_targets(r, ps, t);
+  if (t.depth && t.depth->width == 1280 && t.depth->height == 720) R.mainDepthAddr = t.depth->addr;
+  auto& colors = t.colors;
+  auto& depth = t.depth;
+  const uint32_t guestWidth = colors[0] ? colors[0]->width : 0;
+  const uint32_t guestHeight = colors[0] ? colors[0]->height : 0;
+  if (aoPrivateReplay && colors[0]) {
+    auto& ao = ao_private();
+    ao.source = colors[0]->addr;
+    colors[0] = private_ao_surface(ao.color, colors[0]);
+    t.slices[0] = 0;
+    if (depth) {
+      depth = private_ao_surface(ao.depth, depth);
+      t.depthSlice = 0;
+    }
+  }
+  Surface *target = depth;
+  for (auto *c : colors)
+    if (c) {
+      target = c;
+      break;
+    }
+  if (!target)
+    return false;
+  t.target = target;
+  t.width = target->extent.width;
+  t.height = target->extent.height;
+  t.sx = target->sx;
+  t.sy = target->sy;
+  if (aoPrivateReplay && guestWidth) {
+    // the viewport registers describe the game's smaller buffer (x and y differ at other aspect ratios)
+    t.sx = float(colors[0]->extent.width) / guestWidth;
+    t.sy = guestHeight ? float(colors[0]->extent.height) / guestHeight : t.sx;
+  }
+  for (auto *&c : colors)
+    if (c && (c->extent.width != t.width || c->extent.height != t.height)) {
+      if (aoPrivateReplay) c = nullptr;
+      else exception_report::raise("mismatched Vulkan attachments");
+    }
+  if (depth && (depth->extent.width < t.width || depth->extent.height < t.height))
+    depth = nullptr;
+  return true;
+}
+// Eye 1's geometry replay still needs its own attachments, but consecutive draws do
+// not need to resolve the same attachment registers again. This cache only owns
+// lookup results; uploads and transitions below remain in command order.
+bool resolve_replay_targets(const uint32_t* r, vk::Shader* ps, DrawTargets& targets) {
+  struct Cached {
+    uint64_t frame = ~0ull, version = 0, epoch = 0;
+    uint32_t eyeSize = 0;
+    vk::Shader* shader = nullptr;
+    DrawTargets targets;
+  };
+  static Cached cache;
+  if (cache.frame == R.frame && cache.version == gx2::g_full_state_version &&
+      cache.epoch == g_surface_epoch && cache.eyeSize == stereo_eye_size_generation() && cache.shader == ps) {
+    targets = cache.targets;
+    return true;
+  }
+  if (!resolve_targets(r, ps, targets)) return false;
+  cache = {R.frame, gx2::g_full_state_version, g_surface_epoch, stereo_eye_size_generation(), ps, targets};
+  return true;
+}
+// A sampled texture of a stage (both paths): lookup, AO substitution and the write-tracking check.
+// substituted: the private AO image replaced the guest texture.
+Surface* resolve_texture(const uint32_t* r, vk::Shader* sh, uint32_t unit, bool* substituted = nullptr) {
+  const uint32_t texbase = sh->vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
+  // the mip levels its sampler reaches (sampler(): no mip filter -> the base level, else up to MAX_LOD)
+  uint32_t reach = 16;
+  if (uint32_t si = sh->dec->textureUnitSamplerAssignment[unit]; si < 18) {
+    const uint32_t* smp = r + REGADDR::SQ_TEX_SAMPLER_WORD0_0 + ((sh->vertex ? 18 : 0) + si) * 3;
+    Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0 s0;
+    Latte::LATTE_SQ_TEX_SAMPLER_WORD1_0 s1;
+    memcpy(&s0, &smp[0], 4);
+    memcpy(&s1, &smp[1], 4);
+    if (uint32_t(s0.get_MIP_FILTER()) == 0) reach = 1;
+    else reach = std::max(uint32_t(s1.get_MIN_LOD()), uint32_t(s1.get_MAX_LOD())) / 64 + 2;
+  }
+  auto *s = sampled_texture(r + texbase + unit * 7, sh->dec->textureUsesDepthCompare[unit], reach);
+  if (!s)
+    exception_report::raise("missing sampled texture");
+  auto& ao = ao_private();
+  if (!sh->vertex && ao_hires_enabled() && ao.source &&
+      s->addr == ao.source && ao.frame == R.frame &&
+      sh->kind == gfx::ProgramKind::OcclusionPixel) {
+    s = &ao.color;
+    if (substituted) *substituted = true;
+  }
+  upload_surface(s);
+  return s;
+}
+bool aliases_target(const Surface* s, const std::array<Surface*, 8>& colors, const Surface* depth) {
+  bool aliases = depth && s->image == depth->image;
+  for (auto *color : colors)
+    if (color && s->image == color->image)
+      aliases = true;
+  return aliases;
+}
+// a lookup at one of the draw's own target addresses can pick another surface once the target's
+// write sequence advances (find_or_create_surface): such textures are not continued
+bool shares_target_address(const Surface* s, const std::array<Surface*, 8>& colors, const Surface* depth) {
+  if (depth && depth->addr == s->addr) return true;
+  for (auto *color : colors)
+    if (color && color->addr == s->addr) return true;
+  return false;
+}
+VkSampler resolve_sampler(const uint32_t* r, vk::Shader* sh, uint32_t unit, const Surface* s) {
+  uint32_t samplerId = sh->dec->textureUnitSamplerAssignment[unit];
+  if (samplerId >= 18)
+    exception_report::raise("missing texture sampler");
+  uint32_t samplerBase = sh->vertex ? 18 : 0;
+  const uint32_t* samplerWords = r + REGADDR::SQ_TEX_SAMPLER_WORD0_0 +
+                                  (samplerBase + samplerId) * 3;
+  uint32_t patchedSampler[3];
+  if (!sh->vertex && ao_mode() >= 1 && unit == 0 &&
+      sh->kind == gfx::ProgramKind::OcclusionPixel) {
+    memcpy(patchedSampler, samplerWords, sizeof patchedSampler);
+    patchedSampler[0] = (patchedSampler[0] & ~0x7E00u) | (1u << 9) | (1u << 12);
+    samplerWords = patchedSampler;
+  }
+  return sampler(samplerWords, sh->dec->textureUsesDepthCompare[unit],
+                 s->fmt.kind != FormatInfo::FLOAT,
+                 !s->gpuWritten && s->mips > 1, s->linearFiltering);
+}
 StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
                           VkDescriptorSetLayout layout, bool dynamicUniforms, float sx, float sy,
                           const std::array<Surface *, 8> &colors,
                           Surface *depth, FeedbackStatsProbe* feedbackProbe, float eyeOffset = 0,
-                          bool sunShadow = false) {
+                          bool sunShadow = false,
+                          const ContinuedStage* reuse = nullptr, ContinuedStage* record = nullptr,
+                          StageReplay* replayOut = nullptr) {
   StageResources out;
   auto &m = sh->mapping;
+  // stereo eye 0: what eye 1 needs to bind this stage again (replay_stage)
+  bool replayable = replayOut && dynamicUniforms && !(sunShadow && eyeOffset != 0);
+  if (replayOut) replayOut->valid = false, replayOut->uniformCount = 0, replayOut->textureCount = 0,
+                 replayOut->eyeTextureCount = 0;
+  // own: a feedback copy or the AO substitute, which eye 1 cannot resolve on its own
+  auto replayTexture = [&](Surface* s, uint32_t unit, int binding, bool own) {
+    if (!replayable) return;
+    if (own) replayable = false;
+    else if (stereo_shared_texture(s)) replayOut->textures[replayOut->textureCount++] = s;
+    else replayOut->eyeTextures[replayOut->eyeTextureCount++] = {unit, binding, s->sx, s->sy, 0};
+  };
+  std::array<int, 4> eyeUniformBindings{};
+  UploadSlice lastUpload;
+  auto eyeUniform = [&](int binding, const uint8_t* bytes, size_t size, const stereo::EyeRows& rows) {
+    if (!replayable || binding < 0 || !rows.count) return;
+    if (rows.overflow || replayOut->uniformCount >= replayOut->uniforms.size()) { replayable = false; return; }
+    eyeUniformBindings[replayOut->uniformCount] = binding;
+    auto& u = replayOut->uniforms[replayOut->uniformCount++];
+    u.buffer = lastUpload.buffer;
+    u.bytes.assign(bytes, bytes + size);
+    u.rows = rows;
+  };
   // Descriptor info pointers must remain stable until this stage's one update.
   std::array<VkDescriptorBufferInfo, 17> bufferInfos;
   std::array<VkDescriptorImageInfo, LATTE_NUM_MAX_TEX_UNITS> imageInfos;
@@ -1777,6 +2334,7 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
       R.cpuPreparation.uniformReuseHits = counts.hits;
       R.cpuPreparation.uniformReuseBytes = counts.reusedBytes;
     }
+    lastUpload = b;
     if (bufferCount >= bufferInfos.size())
       exception_report::raise("stage uniform descriptor capacity exceeded");
     auto &info = bufferInfos[bufferCount++];
@@ -1802,9 +2360,11 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
   // Separate stages retain capacity without retaining guest payload contents.
   static thread_local std::array<std::vector<uint8_t>, 2> supportScratch;
   auto& supportUniforms = supportScratch[sh->vertex ? 0 : 1];
+  stereo::EyeRows supportRows;
   if (m.uniformVarsBufferBindingPoint >= 0) {
     const size_t capacity=preparation_stats_enabled()?supportUniforms.capacity():0;
-    vk::pack_uniforms_into(r, *sh, supportUniforms, sx, sy, eyeOffset, stereo::frame.convergence);
+    vk::pack_uniforms_into(r, *sh, supportUniforms, sx, sy, eyeOffset, stereo::frame.convergence,
+                           replayOut ? &supportRows : nullptr);
     if(preparation_stats_enabled()) {
       ++R.cpuPreparation.packCalls;
       R.cpuPreparation.packBytes+=supportUniforms.size();
@@ -1845,11 +2405,17 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
     if (m.uniformBuffersBindingPoint[i] >= 0) {
       uint32_t addr = r[block + i * 7];
       uint32_t size = std::min<uint32_t>(r[block + i * 7 + 1] + 1, 0x10000);
-      if (sh->vertex && eyeOffset != 0 && addr) {
+      // Only a block holding a camera projection gets an eye copy; the others keep their
+      // buffer-cache upload by address.
+      if (sh->vertex && eyeOffset != 0 && addr &&
+          stereo::has_camera_projection(static_cast<const unsigned char*>(mem::ptr(addr)), size)) {
         static thread_local std::vector<uint8_t> eyeBlock;
         eyeBlock.resize(size);memcpy(eyeBlock.data(),mem::ptr(addr),size);
-        stereo::project_uniform_block(eyeBlock.data(),size,eyeOffset,stereo::frame.convergence);
+        stereo::EyeRows blockRows;
+        stereo::project_uniform_block(eyeBlock.data(),size,eyeOffset,stereo::frame.convergence,nullptr,
+                                      replayOut ? &blockRows : nullptr);
         uniform(m.uniformBuffersBindingPoint[i],eyeBlock.data(),size,size_t(i));
+        eyeUniform(m.uniformBuffersBindingPoint[i],eyeBlock.data(),size,blockRows);
       } else uniform(m.uniformBuffersBindingPoint[i], addr ? mem::ptr(addr) : nullptr,
               size, size_t(i), addr);
       if (addr) rprof::guest_read(rprof::kUpUbo, addr, size);
@@ -1857,6 +2423,36 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
   rprof::mark(rprof::kUniforms);
   uint32_t texbase = sh->vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS
                                 : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
+  auto bindTexture = [&](uint32_t unit, int binding, Surface* s, VkImageView view, VkSampler samplerValue) {
+    int scaleOffset = sh->uniforms.offset_texScale[unit];
+    if (scaleOffset >= 0 && size_t(scaleOffset) + 8 <= supportUniforms.size()) {
+      const float scale[] = {s->sx, s->sy};
+      memcpy(supportUniforms.data() + scaleOffset, scale, sizeof scale);
+    }
+    if (imageCount >= imageInfos.size())
+      exception_report::raise("stage image descriptor capacity exceeded");
+    auto &info = imageInfos[imageCount++];
+    info = {samplerValue, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    auto &write = appendWrite(rankPlan.textures[unit]);
+    write.dstBinding = binding;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &info;
+  };
+  if (reuse) {
+    // continued draw: the previous draw's textures (upload_surface already ran for this draw)
+    for (uint32_t i = 0; i < reuse->count; ++i) {
+      const auto& t = reuse->textures[i];
+      transition_image(t.surface, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       narrow_barriers()
+                           ? (sh->vertex ? VK_PIPELINE_STAGE_VERTEX_SHADER_BIT
+                                         : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                           : (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT),
+                       VK_ACCESS_SHADER_READ_BIT);
+      bindTexture(t.unit, t.binding, t.surface, t.view, t.sampler);
+      replayTexture(t.surface, t.unit, t.binding, false);  // continued: neither feedback nor AO
+    }
+  } else
   for (int i = 0; i < sh->dec->textureUnitListCount; i++) {
     uint32_t unit = sh->dec->textureUnitList[i];
     if (unit >= LATTE_NUM_MAX_TEX_UNITS)
@@ -1864,24 +2460,14 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
     int binding = m.textureUnitToBindingPoint[unit];
     if (binding < 0)
       continue;
-    auto *s = sampled_texture(r + texbase + unit * 7,
-                              sh->dec->textureUsesDepthCompare[unit]);
-    if (!s)
-      exception_report::raise("missing sampled texture");
-    if (!sh->vertex && ao_hires_enabled() && aoPrivateSource &&
-        s->addr == aoPrivateSource && aoPrivateFrame == R.frame &&
-        sh->kind == gfx::ProgramKind::OcclusionPixel)
-      s = &aoPrivateColor;
-    upload_surface(s);
+    bool substituted = false;
+    Surface* s = resolve_texture(r, sh, unit, &substituted);
+    bool aliases = aliases_target(s, colors, depth);
     int scaleOffset = sh->uniforms.offset_texScale[unit];
     if (scaleOffset >= 0 && size_t(scaleOffset) + 8 <= supportUniforms.size()) {
       const float scale[] = {s->sx, s->sy};
       memcpy(supportUniforms.data() + scaleOffset, scale, sizeof scale);
     }
-    bool aliases = depth && s->image == depth->image;
-    for (auto *color : colors)
-      if (color && s->image == color->image)
-        aliases = true;
     VkImageView sampledView =
         aliases ? feedback_view(s, r + texbase + unit * 7, sh->vertex, unit, feedbackProbe)
                 : sampled_texture_view(s, r + texbase + unit * 7);
@@ -1893,36 +2479,20 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
                            : (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT),
                        VK_ACCESS_SHADER_READ_BIT);
-    uint32_t samplerId = sh->dec->textureUnitSamplerAssignment[unit];
-    if (samplerId >= 18)
-      exception_report::raise("missing texture sampler");
-    uint32_t samplerBase = sh->vertex ? 18 : 0;
-    if (imageCount >= imageInfos.size())
-      exception_report::raise("stage image descriptor capacity exceeded");
-    auto &info = imageInfos[imageCount++];
-    const uint32_t* samplerWords = r + REGADDR::SQ_TEX_SAMPLER_WORD0_0 +
-                                    (samplerBase + samplerId) * 3;
-    uint32_t patchedSampler[3];
-    if (!sh->vertex && ao_mode() >= 1 && unit == 0 &&
-        sh->kind == gfx::ProgramKind::OcclusionPixel) {
-      memcpy(patchedSampler, samplerWords, sizeof patchedSampler);
-      patchedSampler[0] = (patchedSampler[0] & ~0x7E00u) | (1u << 9) | (1u << 12);
-      samplerWords = patchedSampler;
+    VkSampler samplerValue = resolve_sampler(r, sh, unit, s);
+    bindTexture(unit, binding, s, sampledView, samplerValue);
+    replayTexture(s, unit, binding, aliases || substituted);
+    if (record) {
+      if (aliases || substituted || shares_target_address(s, colors, depth)) record->continuable = false;
+      record->add({unit, binding, s, sampledView, samplerValue});
     }
-    info = {sampler(samplerWords, sh->dec->textureUsesDepthCompare[unit],
-                   s->fmt.kind != FormatInfo::FLOAT,
-                   !s->gpuWritten && s->mips > 1),
-                             sampledView,
-                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    auto &write = appendWrite(rankPlan.textures[unit]);
-    write.dstBinding = binding;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &info;
   }
   rprof::mark(rprof::kTextures);
-  if (m.uniformVarsBufferBindingPoint >= 0)
+  if (m.uniformVarsBufferBindingPoint >= 0) {
     uniform(m.uniformVarsBufferBindingPoint, supportUniforms.data(),
             supportUniforms.size(), 16);
+    eyeUniform(m.uniformVarsBufferBindingPoint, supportUniforms.data(), supportUniforms.size(), supportRows);
+  }
   rprof::mark(rprof::kUniforms);
   struct DescriptorMark { ~DescriptorMark() { rprof::mark(rprof::kDescriptors); } } descriptorMark;
   if (useRanks) {
@@ -1942,6 +2512,42 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
   out.dynamicOffsetCount = dynamicCount;
   for (uint32_t i = 0; i < dynamicCount; ++i)
     out.dynamicOffsets[i] = dynamicBindings[i].second;
+  if (replayOut && replayable) {
+    replayOut->valid = true;
+    for (uint32_t u = 0; u < replayOut->uniformCount; ++u) {
+      uint32_t i = 0;
+      while (i < dynamicCount && dynamicBindings[i].first != uint32_t(eyeUniformBindings[u])) ++i;
+      if (i == dynamicCount) replayOut->valid = false;
+      else replayOut->uniforms[u].dynamicIndex = i;
+    }
+    // eye 1 resolves its own image of the other textures and writes its own set with them
+    if (replayOut->eyeTextureCount) {
+      replayOut->layout = layout;
+      replayOut->writeCount = writeCount;
+      for (uint32_t i = 0; i < writeCount; ++i) {
+        auto& w = replayOut->writes[i];
+        w = writes[i];
+        if (w.pBufferInfo) replayOut->bufferInfos[i] = *w.pBufferInfo;
+        if (w.pImageInfo) replayOut->imageInfos[i] = *w.pImageInfo;
+        w.pBufferInfo = nullptr;
+        w.pImageInfo = nullptr;
+      }
+      for (uint32_t e = 0; e < replayOut->eyeTextureCount; ++e) {
+        auto& t = replayOut->eyeTextures[e];
+        uint32_t i = 0;
+        while (i < writeCount && (writes[i].dstBinding != uint32_t(t.binding) || !writes[i].pImageInfo)) ++i;
+        if (i == writeCount) replayOut->valid = false;
+        else t.write = i;
+      }
+    }
+  }
+  out.set = stage_descriptor_set(sh->vertex, layout, writes.data(), writeCount);
+  return out;
+}
+// The stage's descriptor set for these writes: reused within the submission, else written.
+VkDescriptorSet stage_descriptor_set(bool vertex, VkDescriptorSetLayout layout,
+                                     VkWriteDescriptorSet* writes, uint32_t writeCount) {
+  VkDescriptorSet set{};
   // Resource preparation above must always run, even when the descriptor set
   // itself is reusable. Pool reset/slot activation invalidates every old set.
   static uint64_t cacheGeneration = ~uint64_t{0};
@@ -1953,34 +2559,160 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
     cacheGeneration = R.submissionGeneration;
   }
   ++R.descriptorLookups;
-  auto &last = lastDescriptors[sh->vertex ? 0 : 1];
-  if (descriptor_matches(last, layout, writes.data(), writeCount)) {
+  auto &last = lastDescriptors[vertex ? 0 : 1];
+  if (descriptor_matches(last, layout, writes, writeCount)) {
     ++R.descriptorCacheHits;
     ++R.descriptorFastHits;
-    out.set = last.set;
-    return out;
+    return last.set;
   }
-  const uint64_t hash = descriptor_hash(layout, writes.data(), writeCount);
-  if (auto found = descriptorCache.find(hash, layout, writes.data(), writeCount)) {
+  const uint64_t hash = descriptor_hash(layout, writes, writeCount);
+  if (auto found = descriptorCache.find(hash, layout, writes, writeCount)) {
     ++R.descriptorCacheHits;
-    out.set = found;
-    remember_descriptors(last, layout, out.set, writes.data(), writeCount);
-    return out;
+    remember_descriptors(last, layout, found, writes, writeCount);
+    return found;
   }
   VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
   ai.descriptorPool = R.descriptorPool;
   ai.descriptorSetCount = 1;
   ai.pSetLayouts = &layout;
-  vk_check(vkAllocateDescriptorSets(R.device, &ai, &out.set), "descriptor set");
+  vk_check(vkAllocateDescriptorSets(R.device, &ai, &set), "descriptor set");
   ++R.descriptorAllocations;
-  for (uint32_t i = 0; i < writeCount; ++i) writes[i].dstSet = out.set;
+  for (uint32_t i = 0; i < writeCount; ++i) writes[i].dstSet = set;
   if (writeCount)
-    vkUpdateDescriptorSets(R.device, writeCount, writes.data(), 0, nullptr);
-  descriptorCache.insert(hash, layout, out.set, writes.data(), writeCount);
-  remember_descriptors(last, layout, out.set, writes.data(), writeCount);
-  return out;
+    vkUpdateDescriptorSets(R.device, writeCount, writes, 0, nullptr);
+  descriptorCache.insert(hash, layout, set, writes, writeCount);
+  remember_descriptors(last, layout, set, writes, writeCount);
+  return set;
+}
+// Eye 1's stage from eye 0's (StageReplay); false: eye 1 binds the stage itself.
+bool replay_stage(const StageReplay& in, const uint32_t* r, vk::Shader* sh, float eyeOffset,
+                  const std::array<Surface*, 8>& colors, const Surface* depth, StageResources& out) {
+  out = in.resources;
+  for (uint32_t i = 0; i < in.uniformCount; ++i) {
+    const auto& u = in.uniforms[i];
+    static thread_local std::vector<uint8_t> scratch;
+    scratch.assign(u.bytes.begin(), u.bytes.end());
+    stereo::apply_eye_rows(scratch.data(), u.rows, eyeOffset, stereo::frame.convergence);
+    rprof::UploadKind uploads(rprof::kUpUbo);
+    const auto b = snapshot(scratch.data(), scratch.size(), R.properties.limits.minUniformBufferOffsetAlignment);
+    if (b.buffer != u.buffer || b.offset > UINT32_MAX) return false;  // the set names another buffer
+    out.dynamicOffsets[u.dynamicIndex] = uint32_t(b.offset);
+  }
+  if (in.eyeTextureCount) {
+    std::array<VkWriteDescriptorSet, 17 + LATTE_NUM_MAX_TEX_UNITS> writes;
+    std::array<VkDescriptorImageInfo, 17 + LATTE_NUM_MAX_TEX_UNITS> images;
+    for (uint32_t i = 0; i < in.writeCount; ++i) {
+      writes[i] = in.writes[i];
+      if (writes[i].descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+        images[i] = in.imageInfos[i];
+        writes[i].pImageInfo = &images[i];
+      } else writes[i].pBufferInfo = &in.bufferInfos[i];
+    }
+    const uint32_t texbase = sh->vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
+    for (uint32_t e = 0; e < in.eyeTextureCount; ++e) {
+      const auto& t = in.eyeTextures[e];
+      bool substituted = false;
+      Surface* s = resolve_texture(r, sh, t.unit, &substituted);
+      // the texture scale in eye 0's uniforms
+      if (substituted || aliases_target(s, colors, depth) || s->sx != t.sx || s->sy != t.sy) return false;
+      transition_image(s, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       narrow_barriers()
+                           ? (sh->vertex ? VK_PIPELINE_STAGE_VERTEX_SHADER_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                           : (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT),
+                       VK_ACCESS_SHADER_READ_BIT);
+      images[t.write] = {resolve_sampler(r, sh, t.unit, s), sampled_texture_view(s, r + texbase + t.unit * 7),
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    }
+    out.set = stage_descriptor_set(sh->vertex, in.layout, writes.data(), in.writeCount);
+  }
+  for (uint32_t i = 0; i < in.textureCount; ++i) stereo_hold_texture(in.textures[i]);
+  return true;
+}
+// WWHD_VK_FASTPATH_VERIFY: the full resolution of a continued draw, compared with the reused state
+bool verify_continued(const uint32_t* r, uint32_t prim) {
+  const auto& c = continuedEyes[stereoEye];
+  int kind = -1;
+  char detail[200] = "";
+  uint64_t fsKey = 0;
+  auto* fs = vk::get_fetch_shader(r, &fsKey, R.frame);
+  vk::Shader* vs = fs ? vk::translate(r, true, fs, fsKey, R.frame, g_shader_state_gen) : nullptr;
+  vk::Shader* ps = fs ? vk::translate(r, false, fs, fsKey, R.frame, g_shader_state_gen,
+                                     vs && vs->ready() ? vs : nullptr) : nullptr;
+  DrawTargets t;
+  if (fs != c.fs || fsKey != c.fsKey) kind = 0;
+  else if (vs != c.vs || !vs || !vs->ready()) kind = 1;
+  else if (ps != c.ps || !ps || !ps->ready()) kind = 2;
+  else if (primitive_topology(prim) != c.topology) kind = 7;
+  else if (!resolve_targets(r, ps, t) || !t.same(c.targets)) kind = 3;
+  else if (&pipeline(r, vs, ps, fs, c.topology, t.colors, t.depth) != c.pipeline) kind = 4;
+  else
+    for (int stage = 0; stage < 2 && kind < 0; ++stage) {
+      vk::Shader* sh = stage ? ps : vs;
+      const auto& cs = c.stages[stage];
+      const uint32_t texbase = sh->vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
+      uint32_t n = 0;
+      for (int i = 0; i < sh->dec->textureUnitListCount && kind < 0; i++) {
+        const uint32_t unit = sh->dec->textureUnitList[i];
+        if (unit >= LATTE_NUM_MAX_TEX_UNITS) { kind = 6; break; }
+        const int binding = sh->mapping.textureUnitToBindingPoint[unit];
+        if (binding < 0) continue;
+        if (n >= cs.count) { kind = 5; break; }
+        const auto& e = cs.textures[n++];
+        Surface* s = resolve_texture(r, sh, unit);
+        const bool aliases = aliases_target(s, t.colors, t.depth);
+        VkImageView view = aliases ? VK_NULL_HANDLE : sampled_texture_view(s, r + texbase + unit * 7);
+        VkSampler smp = resolve_sampler(r, sh, unit, s);
+        if (e.unit != unit || e.binding != binding || e.surface != s || aliases || view != e.view || smp != e.sampler) {
+          kind = 6;
+          std::snprintf(detail, sizeof detail, " (%s unit %u: surface %08X%s/%08X, view %s, sampler %s%s)",
+                        stage ? "ps" : "vs", unit, s->addr, e.surface == s ? "" : " (cached differs)",
+                        e.surface ? e.surface->addr : 0, view == e.view ? "same" : "differs",
+                        smp == e.sampler ? "same" : "differs", aliases ? ", aliases a target" : "");
+        }
+      }
+      if (kind < 0 && n != cs.count) kind = 5;
+    }
+  if (kind < 0) return true;
+  auto& st = continuedStats;
+  ++st.mismatches;
+  ++st.totalMismatches;
+  ++st.mismatchKinds[kind];
+  static int logged = 0;
+  if (logged < 50) {
+    ++logged;
+    LOG("[vulkan fastpath] verify mismatch #%llu: %s%s; frame %llu draw %llu prim %u vs %08X ps %08X fs %08X",
+        (unsigned long long)st.totalMismatches, mismatchKindNames[kind], detail, (unsigned long long)R.frame,
+        (unsigned long long)R.drawCount, prim, r[mmSQ_PGM_START_VS] << 8, r[mmSQ_PGM_START_PS] << 8,
+        r[mmSQ_PGM_START_FS] << 8);
+  }
+  return false;
+}
+ContinuedReason continued_reason(uint32_t prim) {
+  const auto& c = continuedEyes[stereoEye];
+  if (!c.valid) return c.invalidReason;
+  if (c.frame != R.frame) return kNewFrame;
+  if (c.stateVersion != gx2::g_full_state_version) return kRegisters;
+  if (c.surfaceEpoch != g_surface_epoch) return kSurfaces;
+  if (c.prim != prim) return kPrimitive;
+  if (c.aoMode != ao_mode() || c.aoHires != ao_hires_enabled() || c.aniso != aniso_enabled()) return kSettings;
+  return kContinued;
 }
 } // namespace
+VkDescriptorSet texture_stage_smoke_bind(const uint32_t* registers,
+    VkDescriptorSetLayout layout, uint32_t textureCount) {
+  if (textureCount > LATTE_NUM_MAX_TEX_UNITS)
+    exception_report::raise("invalid smoke texture count");
+  LatteDecompilerShader decoded(LatteConst::ShaderType::Pixel);
+  vk::Shader shader;
+  shader.dec = &decoded;
+  decoded.textureUnitListCount = uint8_t(textureCount);
+  for (uint32_t i = 0; i < textureCount; ++i) {
+    decoded.textureUnitList[i] = uint8_t(i);
+    decoded.textureUnitSamplerAssignment[i] = uint16_t(i);
+    shader.mapping.textureUnitToBindingPoint[i] = int8_t(i);
+  }
+  return bind_stage(registers, &shader, layout, false, 1, 1, {}, nullptr, nullptr).set;
+}
 void reset_feedback_images() { reset_feedback_scratch(); }
 UploadSlice vertex_window_smoke_snapshot(uint32_t binding,uint32_t address,
     uint32_t reservation,uint32_t windowOffset,uint32_t windowLength,
@@ -1992,30 +2724,22 @@ UploadSlice vertex_window_smoke_snapshot(uint32_t binding,uint32_t address,
                                 windowLength,data,poisonUnused);
 }
 
-namespace {
-uint32_t stereoOtherAoSource = 0;
-uint64_t stereoOtherAoFrame = ~0ull;
-Surface stereoOtherAoColor, stereoOtherAoDepth;
-}
-void stereo_swap_ao() {
-  std::swap(aoPrivateSource, stereoOtherAoSource);
-  std::swap(aoPrivateFrame, stereoOtherAoFrame);
-  std::swap(aoPrivateColor, stereoOtherAoColor);
-  std::swap(aoPrivateDepth, stereoOtherAoDepth);
-}
 void stereo_release_ao() {
-  destroy_surface_image(&stereoOtherAoColor);
-  destroy_surface_image(&stereoOtherAoDepth);
-  stereoOtherAoColor={};
-  stereoOtherAoDepth={};
-  stereoOtherAoSource=0;
-  stereoOtherAoFrame=~0ull;
+  auto& ao = aoPrivateEyes[1];
+  destroy_surface_image(&ao.color);
+  destroy_surface_image(&ao.depth);
+  ao = {};
 }
-void reset_ao_private_cache() { aoPrivateFrame = ~0ull; aoPrivateSource = 0; }
+void reset_ao_private_cache() {
+  for (auto& ao : aoPrivateEyes) {
+    ao.frame = ~0ull;
+    ao.source = 0;
+  }
+}
 void drain_pending_guest_pipelines() {
   for (auto& [key, value] : pipelines) resolve_pending_pipeline(value);
 }
-void reset_pipeline_lookup_cache() { lastPipelineLookup = {}; pipelineLookaside = {}; samplerMemo = {}; drawBatchState = {}; }
+void reset_pipeline_lookup_cache() { lastPipelineLookup = {}; pipelineLookaside = {}; samplerMemo = {}; drawBatchState = {}; continuedEyes = {}; }
 uint64_t draw_batch_submissions() { return drawBatchSubmissions; }
 // WWHD_VK_TRACE_PASSES=1 (issue #144): log each new render pass shape once, just before the driver
 // sees it, so a crash inside vkCmdBeginRendering names the last pass in the crash report's log lines
@@ -2044,6 +2768,11 @@ static void trace_pass(const std::array<Surface *, 8> &colors, uint32_t ncolor, 
             (depth->fmt.stencil ? "/stencil" : "");
   LOG("[vulkan pass] %ux%u, %u colour attachment(s)%s", width, height, ncolor, text.c_str());
 }
+// The depth target is the light-space sun atlas both eyes share (stereo_light_atlas).
+static bool sun_atlas_target(const uint32_t* r) {
+  return r[mmDB_HTILE_DATA_BASE]==((1024u<<16)|1024u) && r[gx2::kDepthSlicesReg]==3 &&
+      LatteMRT::GetActiveDepthBufferMask(*reinterpret_cast<const LatteContextRegister*>(r));
+}
 void draw_stereo(const uint32_t *r,uint32_t prim,uint32_t count,uint32_t indexType,
                  uint32_t indexAddr,uint32_t baseVertex,uint32_t instances) {
   if(stereo::frame.mode==stereo::Off) {
@@ -2051,29 +2780,119 @@ void draw_stereo(const uint32_t *r,uint32_t prim,uint32_t count,uint32_t indexTy
     draw(r,prim,count,indexType,indexAddr,baseVertex,instances);
     return;
   }
+  // Eye 0 always draws first, so it makes every transition of the shared atlas in the
+  // renderer's stream. Eye 1's held commands may still sample the atlas: emit them before
+  // it is drawn again, and emit an eye 1 draw into it at once.
+  const bool atlas=sun_atlas_target(r);
+  if(atlas) stereo_flush();
   bool shared=false;
   try {
+    stereo_select_eye(0);
+    stereoShaders.reset();
+    stereoShadersOut=&stereoShaders;
     draw(r,prim,count,indexType,indexAddr,baseVertex,instances,&shared);
     if(shared) return; // keep the light-space render pass open
-    stereo_select_eye(1-stereoEye);
+    stereo_select_eye(1);
+    stereoShadersIn=stereoShaders.vs?&stereoShaders:nullptr;
     draw(r,prim,count,indexType,indexAddr,baseVertex,instances);
-  } catch(...) { stereo_select_eye(0);throw; }
+    if(atlas) stereo_flush();
+  } catch(...) { stereoShadersOut=nullptr;stereoShadersIn=nullptr;stereo_select_eye(0);throw; }
 }
+void clouds_before_draw(const uint32_t* r, const vk::Shader* ps, Surface* color0, uint32_t slice0, Surface* depth);
+bool clouds_skip_card();
 void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
           uint32_t indexAddr, uint32_t baseVertex, uint32_t instances, bool* viewIndependent) {
+  const uint32_t dirtyGroups = gx2::take_dirty_groups();  // register groups changed since the previous draw
+  auto& continued = continuedEyes[stereoEye];
+  // the top-level stereo draw only, never the AO replay below
+  StereoShaders* shadersOut = std::exchange(stereoShadersOut, nullptr);
+  const StereoShaders* shadersIn = std::exchange(stereoShadersIn, nullptr);
+  // eye 1: eye 0's draw, replayed (StereoShaders)
+  const StereoShaders* replay = shadersIn && shadersIn->replay && !aoPrivateReplay &&
+      shadersIn->submission == R.submissionGeneration ? shadersIn : nullptr;
+  if (clouds_skip_card()) return;  // clouds.cpp: toon clouds replace the game's cloud cards
   if (!count || !instances || ((prim == 0x13 || prim == 0x14) && count < 4))
     return;
   if (r[REGADDR::PA_CL_CLIP_CNTL] & (1 << 22))
     return;
   ((uint32_t *)r)[REGADDR::VGT_PRIMITIVE_TYPE] = prim;
+  // continued-draw fast path (see fastpath_config); the AO replay draw stays outside of it
+  const auto& fastPath = fastpath_config();
+  // a replayed eye 1 draw records no continuation of its own
+  const bool fastPathDraw = fastPath.on && !aoPrivateReplay && !replay;
+  if (replay) {
+    continued.valid = false;
+    continued.invalidReason = kNoState;
+  }
+  bool fast = false;
+  if (fastPathDraw) {
+    report_continued_stats();
+    ContinuedReason reason = continued_reason(prim);
+    if (reason == kContinued) {
+      // guest writes to the reused textures (write tracking, GX2Invalidate) upload here; an upload
+      // can change lookups, so it ends the continuation
+      for (const auto& stage : continued.stages)
+        for (uint32_t i = 0; i < stage.count; ++i) upload_surface(stage.textures[i].surface);
+      if (g_surface_epoch != continued.surfaceEpoch) reason = kUpload;
+    }
+    if (reason == kContinued && fastPath.verifyEvery) {
+      static uint64_t verifyCounter = 0;
+      if (++verifyCounter % fastPath.verifyEvery == 0) {
+        ++continuedStats.verified;
+        ++continuedStats.totalVerified;
+        if (!verify_continued(r, prim)) reason = kVerifyMismatch;
+      }
+    }
+    fast = reason == kContinued;
+    ++continuedStats.draws;
+    ++continuedStats.reasons[reason];
+    if (reason == kRegisters)
+      for (int g = 0; g < gx2::kSgCount; ++g)
+        if ((dirtyGroups & ~gx2::kSgContinuedMask) >> g & 1) ++continuedStats.groups[g];
+    // a full draw records a new state below; exceptions leave none
+    continued.valid = false;
+    continued.invalidReason = kNoState;
+  }
   uint64_t fsKey = 0;
-  auto *fs = vk::get_fetch_shader(r, &fsKey, R.frame);
-  if (!fs)
-    exception_report::raise("missing Vulkan fetch shader");
-  auto *vs = vk::translate(r, true, fs, fsKey, R.frame, g_shader_state_gen);
-  auto *ps = vk::translate(r, false, fs, fsKey, R.frame, g_shader_state_gen,
+  LatteFetchShader* fs;
+  vk::Shader *vs, *ps;
+  if (fast) {
+    fs = continued.fs;
+    fsKey = continued.fsKey;
+    vs = continued.vs;
+    ps = continued.ps;
+  } else if (shadersIn) {
+    fs = shadersIn->fs;
+    fsKey = shadersIn->fsKey;
+    vs = shadersIn->vs;
+    ps = shadersIn->ps;
+    static const bool verifyReplay=std::getenv("WWHD_VK_STEREO_REPLAY_VERIFY")!=nullptr;
+    if(verifyReplay) {
+      uint64_t checkedKey=0;
+      auto* checkedFetch=vk::get_fetch_shader(r,&checkedKey,R.frame);
+      auto* checkedVs=checkedFetch?vk::translate(r,true,checkedFetch,checkedKey,R.frame,g_shader_state_gen):nullptr;
+      auto* checkedPs=checkedVs?vk::translate(r,false,checkedFetch,checkedKey,R.frame,g_shader_state_gen,
+                                           checkedVs->ready()?checkedVs:nullptr):nullptr;
+      if(fs!=checkedFetch||fsKey!=checkedKey||vs!=checkedVs||ps!=checkedPs)
+        exception_report::raise("stereo shader reuse differs from independent second-eye resolution");
+      static uint64_t verified=0;
+      if(++verified%100000==0)LOG("[stereo verify] %llu second-eye shader resolutions matched",(unsigned long long)verified);
+    }
+  } else {
+    fs = vk::get_fetch_shader(r, &fsKey, R.frame);
+    if (!fs)
+      exception_report::raise("missing Vulkan fetch shader");
+    vs = vk::translate(r, true, fs, fsKey, R.frame, g_shader_state_gen);
+    ps = vk::translate(r, false, fs, fsKey, R.frame, g_shader_state_gen,
                            vs && vs->ready() ? vs : nullptr);
+  }
   rprof::mark(rprof::kShader);
+  if (shadersOut && vs && vs->ready() && ps && ps->ready()) {
+    shadersOut->fs = fs;
+    shadersOut->fsKey = fsKey;
+    shadersOut->vs = vs;
+    shadersOut->ps = ps;
+  }
   if (!vs || !vs->ready() || !ps || !ps->ready())
     exception_report::raise("Vulkan shader translation failed: " +
                              (vs && !vs->ready() ? vs->error
@@ -2082,9 +2901,7 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   // Both eyes use the same sun-cascade atlas, rendered from the light's view.
   // All camera-space passes, including the shadow mask, still draw twice.
   if(viewIndependent)
-    *viewIndependent = r[mmDB_HTILE_DATA_BASE]==((1024u<<16)|1024u) &&
-      r[gx2::kDepthSlicesReg]==3 &&
-      LatteMRT::GetActiveDepthBufferMask(*reinterpret_cast<const LatteContextRegister*>(r)) &&
+    *viewIndependent = sun_atlas_target(r) &&
       !LatteMRT::GetActiveColorBufferMask(ps->dec,*reinterpret_cast<const LatteContextRegister*>(r));
   const bool stripRestart = indexAddr &&
       (prim == 3 || prim == 6) &&
@@ -2128,13 +2945,17 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   // keyed by everything the conversion reads; a hit skips the conversion.
   bufcache::Entry* convertedEntry = nullptr;
   bool convertedHit = false;
+  bufcache::Key convertedKey{};
+  if (replay) {
+    topology = replay->topology;  // eye 0 prepared the indices
+  } else {
   if (indexAddr && !nativeIndices && !guestWrap && buffer_cache_enabled() &&
       guestBytes <= (8u << 20) && uint64_t(indexAddr) + guestBytes <= 0x100000000ull) {
-    const bufcache::Key key{indexAddr, bufcache::kIndexConverted,
+    convertedKey = {indexAddr, bufcache::kIndexConverted,
         uint64_t(count) | uint64_t(prim & 0xff) << 32 | uint64_t(indexType & 0xff) << 40 |
             uint64_t(stripRestart) << 48 | uint64_t(specializeIndices) << 49,
         stripRestart ? restartIndex : 0};
-    switch (buffer_cache().lookup(key, uint32_t(guestBytes), convertedEntry)) {
+    switch (buffer_cache().lookup(convertedKey, uint32_t(guestBytes), convertedEntry)) {
     case bufcache::kHit: convertedHit = true; break;
     case bufcache::kMiss: break;  // armed: convert below, then upload
     case bufcache::kBypass: convertedEntry = nullptr; break;
@@ -2246,53 +3067,22 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
         buffer_cache_mismatch("converted indices", *convertedEntry, uint32_t(indices.size() * 4), diff);
     }
   }
+  }
   rprof::mark(rprof::kIndices);
-  const auto &lcr = *reinterpret_cast<const LatteContextRegister *>(r);
-  std::array<Surface *, 8> colors{};
-  uint32_t slices[8]{}, depthSlice = 0;
-  auto mask = LatteMRT::GetActiveColorBufferMask(ps->dec, lcr);
-  for (int i = 0; i < 8; i++)
-    if (mask & (1 << i))
-      colors[i] = color_target(r, i, &slices[i]);
-  Surface *depth = LatteMRT::GetActiveDepthBufferMask(lcr)
-                       ? depth_target(r, &depthSlice)
-                       : nullptr;
-  if (depth && depth->width == 1280 && depth->height == 720) R.mainDepthAddr = depth->addr;
-  const uint32_t guestWidth = colors[0] ? colors[0]->width : 0;
-  const uint32_t guestHeight = colors[0] ? colors[0]->height : 0;
-  if (aoPrivateReplay && colors[0]) {
-    aoPrivateSource = colors[0]->addr;
-    colors[0] = private_ao_surface(aoPrivateColor, colors[0]);
-    slices[0] = 0;
-    if (depth) {
-      depth = private_ao_surface(aoPrivateDepth, depth);
-      depthSlice = 0;
-    }
-  }
-  Surface *target = depth;
-  for (auto *c : colors)
-    if (c) {
-      target = c;
-      break;
-    }
-  if (!target)
+  DrawTargets targets;
+  if (fast) targets = continued.targets;
+  else if (!(replay ? resolve_replay_targets(r, ps, targets) : resolve_targets(r, ps, targets)))
     return;
-  uint32_t width = target->extent.width, height = target->extent.height;
-  float sx = target->sx, sy = target->sy;
-  if (aoPrivateReplay && guestWidth) {
-    // the viewport registers describe the game's smaller buffer (x and y differ at other aspect ratios)
-    sx = float(colors[0]->extent.width) / guestWidth;
-    sy = guestHeight ? float(colors[0]->extent.height) / guestHeight : sx;
-  }
-  for (auto *&c : colors)
-    if (c && (c->extent.width != width || c->extent.height != height)) {
-      if (aoPrivateReplay) c = nullptr;
-      else exception_report::raise("mismatched Vulkan attachments");
-    }
-  if (depth && (depth->extent.width < width || depth->extent.height < height))
-    depth = nullptr;
+  auto& colors = targets.colors;
+  auto& slices = targets.slices;
+  Surface* depth = targets.depth;
+  const uint32_t depthSlice = targets.depthSlice, width = targets.width, height = targets.height;
+  const float sx = targets.sx, sy = targets.sy;
+  clouds_before_draw(r, ps, colors[0], slices[0], depth);  // clouds.cpp: cloud shadows
   rprof::mark(rprof::kTargets);
-  auto &p = pipeline(r, vs, ps, fs, topology, colors, depth);
+  auto &p = fast ? *continued.pipeline
+      : replay && replay->formats == target_formats(colors, depth) ? *replay->pipeline
+      : pipeline(r, vs, ps, fs, topology, colors, depth);
   rprof::mark(rprof::kPipeline);
   if (!p.pipeline && !p.pendingCompile) return;
   if (p.pendingCompile && !begin_exact_preparation()) resolve_pending_pipeline(p);
@@ -2301,12 +3091,61 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   if(vertex_window_stats_enabled()) report_vertex_window_stats();
   FeedbackStatsProbe feedbackProbe;
   auto* probe=feedback_stats_enabled()?&feedbackProbe:nullptr;
-  const float cameraEye = stereo::frame.mode != stereo::Off && stereo_screen_target(target->width,target->height)
+  const float cameraEye = stereo::frame.mode != stereo::Off && !stereo::layoutDrawDepth && stereo_screen_target(targets.target->width,targets.target->height)
       ? (stereoEye ? 1.0f : -1.0f)*stereo::frame.depth*stereo::eyeDistanceAtUnitDepth : 0.0f;
   const bool sunShadow = ps->kind == gfx::ProgramKind::SunShadowMask;
-  auto vres = bind_stage(r, vs, p.sets[0], p.dynamicUniforms, sx, sy, colors, depth, probe, cameraEye,sunShadow);
-  auto pres = bind_stage(r, ps, p.sets[1], p.dynamicUniforms, sx, sy, colors, depth, probe,
-      sunShadow ? cameraEye : 0,sunShadow);
+  const bool recordState = fastPathDraw && !fast;
+  if (recordState)
+    for (auto& stage : continued.stages) stage = {};
+  // eye 1 replays a stage of eye 0's draw at the same scale through the same pipeline
+  const bool replayStages = replay && &p == replay->pipeline && replay->sx == sx && replay->sy == sy;
+  StageResources vres, pres;
+  if (!replayStages || !replay->stages[0].valid ||
+      !replay_stage(replay->stages[0], r, vs, cameraEye, colors, depth, vres))
+    vres = bind_stage(r, vs, p.sets[0], p.dynamicUniforms, sx, sy, colors, depth, probe, cameraEye, sunShadow,
+                      fast ? &continued.stages[0] : nullptr, recordState ? &continued.stages[0] : nullptr,
+                      shadersOut ? &shadersOut->stages[0] : nullptr);
+  if (!replayStages || !replay->stages[1].valid ||
+      !replay_stage(replay->stages[1], r, ps, sunShadow ? cameraEye : 0, colors, depth, pres))
+    pres = bind_stage(r, ps, p.sets[1], p.dynamicUniforms, sx, sy, colors, depth, probe,
+                      sunShadow ? cameraEye : 0, sunShadow,
+                      fast ? &continued.stages[1] : nullptr, recordState ? &continued.stages[1] : nullptr,
+                      shadersOut ? &shadersOut->stages[1] : nullptr);
+  if (shadersOut) {
+    shadersOut->stages[0].resources = vres;
+    shadersOut->stages[1].resources = pres;
+    shadersOut->submission = R.submissionGeneration;
+    shadersOut->pipeline = &p;
+    shadersOut->topology = topology;
+    shadersOut->formats = target_formats(colors, depth);
+    shadersOut->sx = sx;
+    shadersOut->sy = sy;
+    shadersOut->width = width;
+    shadersOut->height = height;
+    shadersOut->vertexBindCount = 0;
+  }
+  if (fastPathDraw) {
+    // the resolved state of this draw: continued by the next draws while nothing breaking changes
+    auto& c = continued;
+    c.valid = fast || (c.stages[0].continuable && c.stages[1].continuable);
+    c.invalidReason = kNotContinuable;
+    if (!fast) {
+      c.stateVersion = gx2::g_full_state_version;
+      c.surfaceEpoch = g_surface_epoch;
+      c.frame = R.frame;
+      c.prim = prim;
+      c.topology = topology;
+      c.aoMode = ao_mode();
+      c.aoHires = ao_hires_enabled();
+      c.aniso = aniso_enabled();
+      c.fs = fs;
+      c.fsKey = fsKey;
+      c.vs = vs;
+      c.ps = ps;
+      c.targets = targets;
+      c.pipeline = &p;
+    }
+  }
   // Texture uploads, feedback copies, and sampling transitions above may have
   // ended the previous pass. Reuse only its exact active attachment set.
   bool reusePass = R.rendering && R.passTracked && R.passColors == colors &&
@@ -2321,6 +3160,9 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     reusePass = false;
   struct DrawStateCache {
     VkPipeline pipeline = VK_NULL_HANDLE;
+    VkBuffer indexBuffer = VK_NULL_HANDLE;
+    VkDeviceSize indexOffset = 0;
+    VkIndexType indexType = VK_INDEX_TYPE_MAX_ENUM;
     DescriptorBindProbe descriptorProbe;
     struct VertexBind { VkBuffer buffer=VK_NULL_HANDLE; VkDeviceSize offset=0; bool valid=false; };
     std::array<VertexBind,16> vertexBinds{};
@@ -2344,13 +3186,20 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     bool viewportValid = false, scissorValid = false;
     bool blendValid = false, stencilValid = false;
   };
-  static DrawStateCache state;
+  // per eye: while stereo is on, each eye's pass stays open in its own command stream
+  static std::array<DrawStateCache, 2> states;
+  auto& state = states[stereoEye];
   // A tracked active pass can only contain our draw commands. Every pass end,
   // including submit/fence/reset, makes reusePass false on the next draw.
   // Reset conservatively on a new pass so external command recording cannot
   // leave this cache claiming dynamic state that was never set in this buffer.
   if (!reusePass) state = {};
   auto cmd = command_buffer();
+  auto bindIndex = [&](VkBuffer buffer, VkDeviceSize offset, VkIndexType type) {
+    if (state.indexBuffer == buffer && state.indexOffset == offset && state.indexType == type) return;
+    record::vkCmdBindIndexBuffer(cmd, buffer, offset, type);
+    state.indexBuffer = buffer; state.indexOffset = offset; state.indexType = type;
+  };
   if (!reusePass) {
     end_encoder();
     std::array<VkRenderingAttachmentInfo, 8> attachments{};
@@ -2390,7 +3239,7 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     ri.pColorAttachments = attachments.data();
     ri.pDepthAttachment = depth ? &da : nullptr;
     ri.pStencilAttachment = depth && depth->fmt.stencil ? &da : nullptr;
-    if(R.gpuPassTimestampsEnabled) gpu_begin_render_scope(colors,depth,slices,depthSlice,width,height);
+    if(R.gpuPassTimestampsEnabled) gpu_begin_render_scope(colors,depth,slices.data(),depthSlice,width,height);
     trace_pass(colors, ncolor, depth, depthSlice, width, height);
     begin_pass(cmd, ri, [&] {
       PassBegin pass; pass.formats.colorCount = ncolor;
@@ -2455,6 +3304,14 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     record::vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,p.layout,
         bind.first,bind.count,sets+bind.first,bind.offsetCount,
         dynamicOffsets.data()+bind.offsetBegin);
+  VkViewport vp;
+  VkRect2D sc;
+  const bool reuseRaster = replay && replay->rasterReady && replay->sx == sx && replay->sy == sy &&
+      replay->width == width && replay->height == height;
+  if (reuseRaster) {
+    vp = replay->viewport;
+    sc = replay->scissor;
+  } else {
   float xs = f32(r[REGADDR::PA_CL_VPORT_XSCALE]),
         xo = f32(r[REGADDR::PA_CL_VPORT_XOFFSET]),
         ys = f32(r[REGADDR::PA_CL_VPORT_YSCALE]),
@@ -2463,18 +3320,12 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
         zo = f32(r[REGADDR::PA_CL_VPORT_ZOFFSET]);
   LATTE_PA_CL_CLIP_CNTL clip;
   std::memcpy(&clip, r + REGADDR::PA_CL_CLIP_CNTL, 4);
-  VkViewport vp{(xo - xs) * sx,
+  vp = {(xo - xs) * sx,
                 (yo - ys) * sy,
                 xs * 2 * sx,
                 ys * 2 * sy,
                 clip.get_DX_CLIP_SPACE_DEF() ? zo : zo - zs,
                 zo + zs};
-  // Bitwise comparison preserves distinct signed zeros and exact float state.
-  if (!state.viewportValid || std::memcmp(&state.viewport, &vp, sizeof(vp))) {
-    record::vkCmdSetViewport(cmd, 0, 1, &vp);
-    state.viewport = vp;
-    state.viewportValid = true;
-  }
   uint32_t tl = r[REGADDR::PA_SC_GENERIC_SCISSOR_TL],
            br = r[REGADDR::PA_SC_GENERIC_SCISSOR_BR];
   // As the Metal renderer: the scaled edges are rounded with a tolerance, not truncated. 720 * (1200/720)
@@ -2497,7 +3348,19 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     end_encoder();
     return;
   }
-  VkRect2D sc{{int32_t(x), int32_t(y)}, {ex - x, ey - y}};
+  sc = {{int32_t(x), int32_t(y)}, {ex - x, ey - y}};
+  }
+  if (shadersOut) {
+    shadersOut->viewport = vp;
+    shadersOut->scissor = sc;
+    shadersOut->rasterReady = true;
+  }
+  // Bitwise comparison preserves distinct signed zeros and exact float state.
+  if (!state.viewportValid || std::memcmp(&state.viewport, &vp, sizeof(vp))) {
+    record::vkCmdSetViewport(cmd, 0, 1, &vp);
+    state.viewport = vp;
+    state.viewportValid = true;
+  }
   if (!state.scissorValid || state.scissor.offset.x != sc.offset.x ||
       state.scissor.offset.y != sc.offset.y ||
       state.scissor.extent.width != sc.extent.width ||
@@ -2525,6 +3388,40 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   state.stencilValid = true;
   rprof::mark(rprof::kRecord);
   rprof::UploadKind indexUploads(rprof::kUpIndex);
+  if (replay) {
+    static const bool skipVertexBinds = [] {
+      const char* e = std::getenv("WWHD_VK_SKIP_VERTEX_BINDS");
+      return e && !std::strcmp(e, "1");
+    }();
+    for (uint32_t i = 0; i < replay->vertexBindCount; ++i) {
+      const auto& v = replay->vertexBinds[i];
+      const bool skip = skipVertexBinds && !R.vertexDiagnostics.noVertexReuse &&
+          state.vertex_bind_matches(cmd, R.submissionGeneration,
+          v.binding, v.buffer, v.offset);
+      if (!skip) record::vkCmdBindVertexBuffers(cmd, v.binding, 1, &v.buffer, &v.offset);
+      if (preparationStats) {
+        R.vertexBindCalls += !skip;
+        R.vertexBindSkips += skip;
+      }
+    }
+    rprof::mark(rprof::kVertex);
+    if (replay->indexed) {
+      bindIndex(replay->indexBuffer, replay->indexOffset, replay->indexType);
+      record::vkCmdDrawIndexed(cmd, replay->drawCount, instances, 0, int32_t(baseVertex), 0);
+    } else record::vkCmdDraw(cmd, replay->drawCount, instances, baseVertex, 0);
+  } else {
+  // eye 0: the draw eye 1 replays
+  auto recordDraw = [&](bool indexed, VkBuffer buffer, VkDeviceSize offset, VkIndexType type, size_t drawCount) {
+    if (!shadersOut) return;
+    shadersOut->indexed = indexed;
+    shadersOut->indexBuffer = buffer;
+    shadersOut->indexOffset = offset;
+    shadersOut->indexType = type;
+    shadersOut->drawCount = uint32_t(drawCount);
+    shadersOut->replay = !deferredPipelineDraw && drawCount <= UINT32_MAX &&
+        shadersOut->vertexBindCount <= shadersOut->vertexBinds.size() &&
+        shadersOut->submission == R.submissionGeneration;
+  };
   // Scan the actual immutable index snapshot, never a second guest read: the bytes of the buffer
   // cache entry's shadow, or of a CPU copy that the upload slice is written from. Never the slice's
   // mapped memory: upload memory is uncached or write-combined on discrete GPUs (issue #44). Unless it
@@ -2628,7 +3525,24 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
         attributeEnd && stride && extent.valid && vertexExtent.valid &&
         windowEnd<=copied && windowBegin<windowEnd && windowBegin!=0;
     UploadSlice b;
-    if (!buffer_cache_enabled() || !cached_guest_range(addr, copied, rprof::kUpVertex, b))
+    const uint32_t cpuCount = vk::cpu_vertex_count(g, R.vertexDiagnostics.cpuClasses);
+    if (cpuCount) {
+      const auto converted = cpu_vertex_stream(g, addr, size, stride,
+          supported && attributeEnd && extent.valid && vertexExtent.valid ? uint64_t(extent.maximum) + 1 : 0);
+      const uint32_t binding = vk::cpu_vertex_binding(*fs, g, R.vertexDiagnostics.cpuClasses,
+          R.properties.limits.maxVertexInputBindings);
+      if (binding >= R.properties.limits.maxVertexInputBindings)
+        exception_report::raise("CPU vertex classes exceed device vertex binding limit");
+      record::vkCmdBindVertexBuffers(cmd, binding, 1, &converted.buffer, &converted.offset);
+      if (shadersOut) shadersOut->add_vertex_bind(binding, converted.buffer, converted.offset);
+      // The extra bind bypasses the normal bind cache.
+      state.vertexBinds = {};
+      if (preparation_stats_enabled()) ++R.vertexBindCalls;
+      if (cpuCount == uint32_t(g.attribCount)) continue;
+    }
+    if (R.vertexDiagnostics.noVertexReuse)
+      b = snapshot(mem::ptr(addr), size, 4);  // the whole declared buffer, fresh every draw
+    else if (!buffer_cache_enabled() || !cached_guest_range(addr, copied, rprof::kUpVertex, b))
       b = copyWindow
         ? vertex_window_snapshot(g.attributeBufferIndex,addr,copied,
                                  uint32_t(windowBegin),uint32_t(windowEnd-windowBegin))
@@ -2641,55 +3555,74 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     }();
     // Snapshot preparation above stays fresh even when its immutable slice is
     // unchanged. Compare host binding identity, never guest addresses alone.
-    const bool skip=skipVertexBinds && state.vertex_bind_matches(cmd,
+    const bool skip=skipVertexBinds && !R.vertexDiagnostics.noVertexReuse && state.vertex_bind_matches(cmd,
         R.submissionGeneration,g.attributeBufferIndex,b.buffer,offset);
     if(preparation_stats_enabled()) {
       R.vertexBindCalls+=!skip;
       R.vertexBindSkips+=skip;
     }
+    if (shadersOut) shadersOut->add_vertex_bind(g.attributeBufferIndex, b.buffer, offset);
     if(!skip)
       record::vkCmdBindVertexBuffers(cmd,g.attributeBufferIndex,1,&b.buffer,&offset);
   }
+#ifdef __ANDROID__
+  static std::set<std::tuple<uint32_t, uint32_t, bool, bool, bool, bool>> seenIndexPaths;
+  const auto indexDiagnostic = std::make_tuple(prim, indexType, nativeIndices, bool(indexAddr), baseVertex != 0, stripRestart);
+  if (seenIndexPaths.size() < 32 && seenIndexPaths.insert(indexDiagnostic).second)
+    LOG("[vulkan index observed] guestPrimitive=0x%x guestIndexType=%u indexed=%u native=%u hostType=%s stripRestart=%u nonzeroBaseVertex=%u",
+        prim, indexType, bool(indexAddr), nativeIndices,
+        nativeIndices ? (indexType == 0 ? "uint16" : "uint32") : (convertedEntry || !indices.empty() ? "uint32-converted" : "none"),
+        stripRestart, baseVertex != 0);
+#endif
   rprof::g_upload_kind = rprof::kUpIndex;
   rprof::mark(rprof::kVertex);
   if (nativeIndices) {
-    record::vkCmdBindIndexBuffer(cmd, nativeIndexSlice.buffer, nativeIndexSlice.offset,
+    bindIndex(nativeIndexSlice.buffer, nativeIndexSlice.offset,
                          indexType == 0 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+    recordDraw(true, nativeIndexSlice.buffer, nativeIndexSlice.offset,
+               indexType == 0 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32, count);
     if(deferredPipelineDraw) { auto* pipeline=&p; record::emit_owned([=] { if(pipeline->pipeline) gfxvk::vkCmdDrawIndexed(cmd, count, instances, 0, int32_t(baseVertex), 0); }); }
     else record::vkCmdDrawIndexed(cmd, count, instances, 0, int32_t(baseVertex), 0);
   } else if (convertedEntry) {
     const uint32_t converted = convertedEntry->outSize / 4;
     auto b = buffer_cache_slice(*convertedEntry, convertedEntry->outSize);
     rprof::guest_read(rprof::kUpIndex, indexAddr, guestBytes);
-    record::vkCmdBindIndexBuffer(cmd, b.buffer, b.offset, VK_INDEX_TYPE_UINT32);
+    bindIndex(b.buffer, b.offset, VK_INDEX_TYPE_UINT32);
+    recordDraw(true, b.buffer, b.offset, VK_INDEX_TYPE_UINT32, converted);
     if(deferredPipelineDraw) { auto* pipeline=&p; record::emit_owned([=] { if(pipeline->pipeline) gfxvk::vkCmdDrawIndexed(cmd, converted, instances, 0, int32_t(baseVertex), 0); }); }
     else record::vkCmdDrawIndexed(cmd, converted, instances, 0, int32_t(baseVertex), 0);
   } else if (indices.empty()) {
+    recordDraw(false, VK_NULL_HANDLE, 0, VK_INDEX_TYPE_UINT32, count);
     if(deferredPipelineDraw) { auto* pipeline=&p; record::emit_owned([=] { if(pipeline->pipeline) gfxvk::vkCmdDraw(cmd, count, instances, baseVertex, 0); }); }
     else record::vkCmdDraw(cmd, count, instances, baseVertex, 0);
   } else {
     auto b = snapshot(indices.data(), indices.size() * 4, 4);
     if (indexAddr) rprof::guest_read(rprof::kUpIndex, indexAddr, guestBytes);
-    record::vkCmdBindIndexBuffer(cmd, b.buffer, b.offset, VK_INDEX_TYPE_UINT32);
+    bindIndex(b.buffer, b.offset, VK_INDEX_TYPE_UINT32);
+    recordDraw(true, b.buffer, b.offset, VK_INDEX_TYPE_UINT32, indices.size());
     const auto drawCount=indices.size(); if(deferredPipelineDraw) { auto* pipeline=&p; record::emit_owned([=] { if(pipeline->pipeline) gfxvk::vkCmdDrawIndexed(cmd, drawCount, instances, 0, int32_t(baseVertex), 0); }); }
     else record::vkCmdDrawIndexed(cmd, indices.size(), instances, 0, int32_t(baseVertex), 0);
   }
+  }
   if(R.gpuPassTimestampsEnabled) gpu_count_render_draw();
   for (auto *color : colors)
-    if (color) mark_gpu_written(color);
-  if (depth) mark_gpu_written(depth);
+    if (color) mark_draw_target_written(color);
+  if (depth) mark_draw_target_written(depth);
   R.drawCount++;
   if (aoPrivateReplay) {
-    aoPrivateFrame = R.frame;
+    ao_private().frame = R.frame;
     return;
   }
   if (ao_hires_enabled() && colors[0] &&
       ps->kind == gfx::ProgramKind::DepthDownsample) {
     struct ReplayGuard {
-      ReplayGuard() { aoPrivateReplay = true; aoPrivateFrame = ~0ull; }
+      ReplayGuard() { aoPrivateReplay = true; ao_private().frame = ~0ull; }
       ~ReplayGuard() { aoPrivateReplay = false; }
     } guard;
     draw(r, prim, count, indexType, indexAddr, baseVertex, instances);
+    // the replay changes later lookups (aoPrivateSource/aoPrivateFrame, private images)
+    continued.valid = false;
+    continued.invalidReason = kAoReplay;
   }
   static const uint32_t drawBatch = parse_draw_batch(std::getenv("WWHD_VK_DRAW_BATCH"));
   static const uint32_t drawBatchCap =

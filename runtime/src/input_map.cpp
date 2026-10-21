@@ -49,6 +49,10 @@ const PadInfo kPads[kPadCount] = {
     {"LeftStickLeft", "Left stick ←"}, {"LeftStickRight", "Left stick →"},
     {"RightStickUp", "Right stick ↑"}, {"RightStickDown", "Right stick ↓"},
     {"RightStickLeft", "Right stick ←"}, {"RightStickRight", "Right stick →"},
+    {"Capture", "Capture / Share"}, {"RightPaddle1", "Right paddle 1"}, {"LeftPaddle1", "Left paddle 1"},
+    {"RightPaddle2", "Right paddle 2"}, {"LeftPaddle2", "Left paddle 2"}, {"Touchpad", "Touchpad click"},
+    {"Misc2", "Extra button 2"}, {"Misc3", "Extra button 3"}, {"Misc4", "Extra button 4"},
+    {"Misc5", "Extra button 5"}, {"Misc6", "Extra button 6"},
 };
 
 struct KeyInfo { int code; const char* id; const char* label; };
@@ -151,21 +155,117 @@ int key_from_id(const std::string& id) {
 const char* reserved_key(int code) {
     // keep in sync with gfx::menu_hotkey (gfx/menu.mm)
     switch (code) {
-    case kVK_ANSI_O: return "Graphics › Ambient occlusion";
-    case kVK_ANSI_M: return "Graphics › Full-size occlusion depth";
-    case kVK_ANSI_N: return "Graphics › Anisotropic filtering";
-    case kVK_ANSI_R: return "Graphics › Internal resolution";
-    case kVK_ANSI_6: return "Graphics › 60 fps: frame interpolation";
-    case kVK_ANSI_7: return "Graphics › 60 fps: true 60";
-    case kVK_ANSI_8: return "Graphics › FXAA";
     case kVK_ANSI_9: return "Graphics › Record sound activity";
     case kVK_ANSI_P: case kVK_F12: return "Graphics › Capture frame";
-    case kVK_F1: return "the settings overlay (F1; Shift+F1 saves slot 1)";
-    case kVK_F2: case kVK_F3: case kVK_F4: case kVK_F5: return "Save States (F2-F5 load, Shift+F1-F5 save)";
-    case kVK_Escape: return "cancelling a key assignment";
     case kVK_Command: case kVK_RightCommand: return "menu shortcuts (⌘)";
     default: return nullptr;
     }
+}
+
+// All host action labels and defaults live here. F6 loads slot 1: no existing binding uses it.
+// Settings: Esc is the long-term key. F1 stays as the alternate during the transition; dropping it
+// later is this one line ({kVK_Escape}, {}). With a captured mouse the first Esc only frees the mouse
+// (overlay::key).
+static const ShortcutInfo kShortcuts[kShortcutCount] = {
+    {"Settings", "Settings", "General", {kVK_Escape}, {kVK_F1}, kPadHome},
+    {"Fullscreen", "Full screen", "General",
+#if defined(__APPLE__) && !defined(WWHD_SDL_HOST)
+     {kVK_ANSI_F, kModSuper}, {kVK_ANSI_F, kModCtrl | kModSuper}},
+#else
+     {kVK_F11}, {kVK_Return, kModAlt}},
+#endif
+    {"Screenshot", "Screenshot", "General", {kVK_F10}, {}},
+    {"Save1", "Save state 1", "Save states", {kVK_F1, kModShift}, {}},
+    {"Save2", "Save state 2", "Save states", {kVK_F2, kModShift}, {}},
+    {"Save3", "Save state 3", "Save states", {kVK_F3, kModShift}, {}},
+    {"Save4", "Save state 4", "Save states", {kVK_F4, kModShift}, {}},
+    {"Save5", "Save state 5", "Save states", {kVK_F5, kModShift}, {}},
+    {"Load1", "Load state 1", "Save states", {kVK_F6}, {}},
+    {"Load2", "Load state 2", "Save states", {kVK_F2}, {}},
+    {"Load3", "Load state 3", "Save states", {kVK_F3}, {}},
+    {"Load4", "Load state 4", "Save states", {kVK_F4}, {}},
+    {"Load5", "Load state 5", "Save states", {kVK_F5}, {}},
+    {"Resolution", "Internal resolution", "Graphics", {kVK_ANSI_R}, {}},
+    {"AO", "Ambient occlusion", "Graphics", {kVK_ANSI_O}, {}},
+    {"AOHires", "Full-size occlusion depth", "Graphics", {kVK_ANSI_M}, {}},
+    {"Aniso", "Anisotropic filtering", "Graphics", {kVK_ANSI_N}, {}},
+    {"Interpolation", "Frame interpolation", "Graphics", {kVK_ANSI_6}, {}},
+    {"True60", "True 60 fps", "Graphics", {kVK_ANSI_7}, {}},
+    {"FXAA", "FXAA", "Graphics", {kVK_ANSI_8}, {}},
+    {"PiP", "GamePad picture-in-picture", "Display and audio", {}, {}},
+    {"Performance", "Performance overlay", "Display and audio", {}, {}},
+    {"Mute", "Mute", "Display and audio", {}, {}},
+    {"VolumeDown", "Volume down", "Display and audio", {}, {}},
+    {"VolumeUp", "Volume up", "Display and audio", {}, {}},
+};
+const ShortcutInfo& shortcut_info(int a) { return kShortcuts[a]; }
+std::array<ShortcutBinding, kShortcutCount> shortcut_defaults() {
+    std::array<ShortcutBinding, kShortcutCount> out{};
+    for (int a = 0; a < kShortcutCount; ++a) {
+        out[a].keys = {kShortcuts[a].primary, kShortcuts[a].alternate};
+        out[a].button = kShortcuts[a].button;
+    }
+    return out;
+}
+std::string shortcut_key_label(ShortcutKey k) {
+    if (k.code == kNoKey) return "Unbound";
+    return std::string(k.mods & kModCtrl ? "Ctrl+" : "") + (k.mods & kModAlt ? "Alt+" : "") +
+        (k.mods & kModShift ? "Shift+" : "") + (k.mods & kModSuper ? "Cmd+" : "") + key_label(k.code);
+}
+int shortcut_for_key(const Mapping& m, int code, int mods) {
+    if (code == kNoKey) return -1;
+    for (int a = 0; a < kShortcutCount; ++a)
+        for (auto k : m.shortcuts[a].keys) if (k.code == code && k.mods == (mods & 15)) return a;
+    return -1;
+}
+bool settings_reachable(const Mapping& m, bool controller_settings) {
+    for (auto k : m.shortcuts[kSettings].keys) if (k.code >= 0 && k.code < kInputCount) return true;
+    const auto& b = m.shortcuts[kSettings];
+    if (b.button > 0 && b.button < kPadCount && b.hold >= 0 && b.hold < kPadCount && b.hold != b.button) return true;
+    // The existing held-Select shortcut remains unless Select is used as a combination modifier.
+    if (controller_settings) {
+        for (const auto& binding : m.shortcuts) if (binding.hold == kPadOptions && binding.button) return false;
+        return true;
+    }
+    return false;
+}
+bool shortcut_conflict(const Mapping& m, int a) {
+    const auto& b = m.shortcuts[a];
+    for (auto k : b.keys) {
+        if (k.code == kNoKey) continue;
+        if (reserved_key(k.code)) return true;
+        // Game bindings do not test modifiers, so a plain or Shift shortcut shares their key. A Ctrl/Alt/Cmd
+        // shortcut takes its key press before the game sees it (F11/Alt+Enter beside Plus on Enter).
+        if (!(k.mods & (kModCtrl | kModAlt | kModSuper)))
+            for (int g = 0; g < kScreenshot; ++g)
+                for (int v : m.keys[g]) if (v == k.code) return true;
+        for (int other = 0; other < kShortcutCount; ++other) if (other != a)
+            for (auto v : m.shortcuts[other].keys) if (v == k) return true;
+    }
+    if (b.button) for (int other = 0; other < kShortcutCount; ++other) if (other != a) {
+        const auto& v = m.shortcuts[other];
+        if ((!b.hold && (v.hold==b.button || v.button==b.button)) ||
+            (!v.hold && v.button && (b.hold==v.button || b.button==v.button))) return true;
+        if ((v.hold == b.hold && v.button == b.button) || (v.hold == b.button && v.button == b.hold)) return true;
+    }
+    return false;
+}
+static bool combo_down(const ShortcutBinding& b, const float* raw) {
+    return b.hold >= 0 && b.hold < kPadCount && b.button > 0 && b.button < kPadCount &&
+        b.hold != b.button && (!b.hold || raw[b.hold] > 0.5f) && raw[b.button] > 0.5f;
+}
+void consume_shortcut_buttons(const Mapping& m, const float* raw, float* game) {
+    for (const auto& b : m.shortcuts) if (combo_down(b, raw)) game[b.hold] = game[b.button] = 0;
+}
+std::vector<int> ShortcutPoll::poll(const Mapping& m, const float* raw, float* game) {
+    std::vector<int> pressed;
+    for (int a = 0; a < kShortcutCount; ++a) {
+        bool down = combo_down(m.shortcuts[a], raw);
+        if (down && !held[a]) pressed.push_back(a);
+        held[a] = down;
+    }
+    consume_shortcut_buttons(m, raw, game);
+    return pressed;
 }
 
 // ---- model
@@ -362,18 +462,31 @@ PadFamily pad_family_from_labels(const FaceLabel labels[4]) {
 
 PromptStyle prompt_style(const Mapping& m, PadFamily family) {
     PromptStyle s;
-    if (face_layout(m) == FaceLayout::kLabels) {
+    const bool labels = face_layout(m) == FaceLayout::kLabels;
+    bool unambiguous = true;
+    unsigned used = 0;
+    for (int i = 0; i < 4; ++i) {
+        const int button = m.pad[kA + i] - kPadA;
+        // Non-face inputs and duplicate bindings cannot describe a four-button pad picture.
+        // Fall back as a complete set rather than mixing original and restyled icons.
+        if (button < 0 || button >= 4 || (used & (1u << button))) { unambiguous = false; break; }
+        used |= 1u << button;
+        s.buttons[i] = button;
+    }
+    if (unambiguous) {
         switch (m.prompts) {
         case Mapping::Prompts::kAuto:
-            s.face = family == PadFamily::kPlayStation ? FaceStyle::kPlayStation : FaceStyle::kXbox;
+            s.face = family == PadFamily::kPlayStation ? FaceStyle::kPlayStation
+                   : labels || family == PadFamily::kXbox ? FaceStyle::kXbox : FaceStyle::kOriginal;
             break;
         case Mapping::Prompts::kXbox: s.face = FaceStyle::kXbox; break;
         case Mapping::Prompts::kPlayStation: s.face = FaceStyle::kPlayStation; break;
         case Mapping::Prompts::kOriginal: break;
         }
     }
-    s.positions = s.face != FaceStyle::kOriginal;
-    s.colours = s.positions && m.prompt_colours;
+    if (s.face == FaceStyle::kOriginal) s.buttons = {0, 1, 2, 3};
+    s.positions = s.face != FaceStyle::kOriginal && labels;
+    s.colours = s.face != FaceStyle::kOriginal && m.prompt_colours;
     switch (m.shoulder_names) {
     case Mapping::ShoulderNames::kAuto:
         s.shoulders = s.face == FaceStyle::kXbox ? ShoulderStyle::kXbox
@@ -433,6 +546,9 @@ bool has_conflict(const Mapping& m, int a) {
     if (a < 0 || a >= kActionCount) return false;
     for (int k : m.keys[a])
         if (k != kNoKey && !key_users(m, k, a).empty()) return true;
+    if (a < kScreenshot) for (int k : m.keys[a]) if (k != kNoKey)
+        for (const auto& b : m.shortcuts) for (auto key : b.keys)
+            if (key.code == k && !(key.mods & (kModCtrl | kModAlt | kModSuper))) return true;
     return m.pad[a] != kPadNone && !pad_users(m, m.pad[a], a).empty();
 }
 
@@ -473,6 +589,8 @@ const char* pad_short_label(int p) {
     static const char* const kShort[kPadCount] = {
         "", "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "Menu", "View", "Home", "L3", "R3",
         "D-pad ↑", "D-pad ↓", "D-pad ←", "D-pad →", "LS ↑", "LS ↓", "LS ←", "LS →", "RS ↑", "RS ↓", "RS ←", "RS →",
+        "Capture", "R paddle 1", "L paddle 1", "R paddle 2", "L paddle 2", "Touchpad",
+        "Extra 2", "Extra 3", "Extra 4", "Extra 5", "Extra 6",
     };
     return p > 0 && p < kPadCount ? kShort[p] : "";
 }
@@ -704,7 +822,20 @@ std::string to_json(const Mapping& m) {
              "    \"skip_controller_selection\": %s,\n    \"invert_camera_y\": %s%s",
              m.deadzone, m.left_range, m.right_range, m.skip_controller_selection ? "true" : "false", m.invert_camera_y ? "true" : "false",
              m.face_auto ? ",\n    \"face_layout\": \"auto\"" : "");
-    return o + opt + prompts + "\n  }\n}\n";
+    o += opt + prompts + "\n  },\n  \"shortcuts_version\": " + std::to_string(kShortcutsVersion) + ",\n  \"shortcuts\": {\n";
+    for (int a = 0; a < kShortcutCount; ++a) {
+        const auto& b = m.shortcuts[a];
+        o += "    " + quote(shortcut_info(a).id) + ": {\"keys\": [";
+        for (int slot = 0; slot < 2; ++slot) {
+            if (slot) o += ", ";
+            const auto k = b.keys[slot];
+            o += "{\"key\": " + (k.code == kNoKey ? std::string("null") : quote(key_id(k.code))) +
+                ", \"modifiers\": " + std::to_string(k.mods) + "}";
+        }
+        o += "], \"hold\": " + quote(pad_id(b.hold)) + ", \"button\": " + quote(pad_id(b.button)) + "}";
+        o += a + 1 < kShortcutCount ? ",\n" : "\n";
+    }
+    return o + "  }\n}\n";
 }
 
 bool from_json(const std::string& text, Mapping& out, std::string* error) {
@@ -783,6 +914,48 @@ bool from_json(const std::string& text, Mapping& out, std::string* error) {
             else if (n->s != "auto") warn += "unknown shoulder_names \"" + n->s + "\"; ";
         }
         if (const Json* c = op->get("button_colours"); c && c->type == Json::Bool) m.prompt_colours = c->b;
+    }
+    // Migration is one-way: an explicit shortcuts.Screenshot wins over the old Photo row.
+    for (int i = 0; i < 2; ++i) m.shortcuts[kPhoto].keys[i] = {m.keys[kScreenshot][i], 0};
+    // Legacy single-button controller screenshots retain their original path.
+    const Json* versionValue = root.get("shortcuts_version");
+    const double version = versionValue && versionValue->type == Json::Num ? versionValue->n : 0;
+    if (const Json* sc = root.get("shortcuts"); sc && sc->type == Json::Obj) {
+        for (int a = 0; a < kShortcutCount; ++a) {
+            const Json* v = sc->get(shortcut_info(a).id);
+            if (!v || v->type != Json::Obj) continue;
+            auto& b = m.shortcuts[a];
+            if (const Json* keys = v->get("keys"); keys && keys->type == Json::Arr) {
+                b.keys = {};
+                for (size_t i = 0; i < keys->arr.size() && i < 2; ++i) {
+                    const auto& e = keys->arr[i];
+                    const auto* key = e.get("key"); const auto* mods = e.get("modifiers");
+                    if (key && key->type == Json::Str) {
+                        int code = key_from_id(key->s);
+                        if (code >= 0 && code < kInputCount) b.keys[i].code = code;
+                    }
+                    if (mods && mods->type == Json::Num && mods->n >= 0 && mods->n <= 15 && std::floor(mods->n) == mods->n)
+                        b.keys[i].mods = int(mods->n);
+                }
+            }
+            if (const Json* h = v->get("hold"); h && h->type == Json::Str) b.hold = std::max(0, pad_from_id(h->s));
+            if (const Json* h = v->get("button"); h && h->type == Json::Str) b.button = std::max(0, pad_from_id(h->s));
+            if (!b.button || b.hold == b.button) b.hold = b.button = kPadNone;
+            // Old files could not edit the built-in Home shortcut. Make that implicit default visible.
+            if (a == kSettings && !b.button && version < 2) b.button = kPadHome;
+        }
+    }
+    // Files from before Esc opened Settings keep custom keys; the untouched old default (F1, plus
+    // Cmd+, in the macOS app) becomes the current one, unless a game input already uses Esc. Cmd+, stays
+    // available on macOS as the app menu's fixed Settings... key (gfx/menu_shortcuts.h).
+    if (version < 3) {
+        auto& keys = m.shortcuts[kSettings].keys;
+        bool escUsed = false;
+        for (int g = 0; g < kScreenshot; ++g) for (int v : m.keys[g]) escUsed |= v == kVK_Escape;
+        for (int a = 0; a < kShortcutCount; ++a) for (auto k : m.shortcuts[a].keys) escUsed |= k.code == kVK_Escape;
+        const bool legacy = keys[0] == ShortcutKey{kVK_F1} &&
+            (keys[1] == ShortcutKey{} || keys[1] == ShortcutKey{kVK_ANSI_Comma, kModSuper});
+        if (legacy && !escUsed) keys = shortcut_defaults()[kSettings].keys;
     }
     out = m;
     if (error) *error = warn;
@@ -898,7 +1071,14 @@ Mapping current() {
     return g_map;
 }
 
-void set_current(const Mapping& m, bool save) {
+void set_current(const Mapping& requested, bool save) {
+    Mapping m = requested;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        if (m.shortcuts[kPhoto] == g_map.shortcuts[kPhoto] && m.keys[kScreenshot] != g_map.keys[kScreenshot])
+            for (int i = 0; i < 2; ++i) m.shortcuts[kPhoto].keys[i] = {m.keys[kScreenshot][i], 0};
+    }
+
     {
         std::lock_guard<std::mutex> lk(g_mu);
         g_map = m;

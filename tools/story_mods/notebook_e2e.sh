@@ -17,7 +17,7 @@ MOD=${STORY_NOTEBOOK_PKG:?the story-notebook package folder from the mod reposit
 [ -f $MOD/mod.elf ] || { echo "build $MOD/mod.elf first"; exit 2; }
 rm -rf $OUT; mkdir -p $OUT/save $OUT/states $OUT/manager/Mods/story-notebook
 cp -R $SAVE $OUT/save/user
-cp $MOD/manifest.json $MOD/mod.elf $OUT/manager/Mods/story-notebook/
+cp -R $MOD/. $OUT/manager/Mods/story-notebook/  # the whole package: its icon and model files too
 echo '{"active": "Default", "format_version": 1, "profiles": {"Default": {"enabled": {"story-notebook": true}}}}' > $OUT/manager/profiles.json
 echo "{\"format_version\": 1, \"python\": [\"python3\"], \"compiler\": [\"clang\"], \"builder\": \"$REPO/tools/guestmod/build_guest_mod.py\", \"include\": \"$REPO/runtime/include\"}" > $OUT/guest-sdk.json
 PRESS=$(python3 -c "

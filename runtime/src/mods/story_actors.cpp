@@ -1,0 +1,1559 @@
+#include <cmath>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <string>
+#include <utility>
+#include <vector>
+#include "story_actors.h"
+#include "story_scene_needs.h"
+#include "story_world_visuals.h"
+#include "story_world_arrival.h"
+#include "story_chart.h"
+#include "mod_actor.h"
+#include "story_props.h"
+#include "story_switches.h"
+#include "story_enemies.h"
+#include "story_enemy_children.h"
+#include "story_enemy_projectiles.h"
+#include "native_actor_carry.h"
+#include "story_actor_identity.h"
+#include "actor_model_cache.h"
+#include "mod_actor_shadow_proof.h"
+#include "story_items.h"
+#include "story_notebook.h"
+#include "story_mail.h"
+#include "story_store.h"
+#include "story_scenes.h"
+#include "story_treasure.h"
+#include "story_treasure_chest.h"
+#include "story_resident_types.h"
+#include "story_game_objects.h"
+#include "story_room_paths.h"
+#include "story_enemies_summons.h"
+#include "story_resident_routes.h"
+#include "guest_addr.h"
+#include "runtime.h"
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <cstdlib>
+#include <map>
+#include <mutex>
+#include <set>
+
+namespace story_actors {
+static_assert(kPropsScratchOffset>=kModScratchOffset+mod_actor::kScratchBytes);
+static_assert(kIdentityScratchOffset>=kPropsScratchOffset+0x100);
+static_assert(kScratchBytes>=kIdentityScratchOffset+128*identity::kRecordBytes);
+std::function<void()> mod_talked(const std::string& mod,const std::string& id);
+mod_actor::TalkProvider mod_talk_provider(const std::string&,const std::string&);
+namespace {
+using story_notebook::ManifestActor;
+struct Actor {std::string mod; ManifestActor spec; uint32_t process=0xFFFFFFFFu; bool deleting=false; uint32_t mod_token=0; bool restore_talk=false;uint32_t prop_token=0,switch_token=0,switch_source=0,enemy_token=0;story_items::EnemyMarkerHandle combat_marker{};story_items::PropMarkerHandle carry_marker=0;identity::Fingerprint fingerprint{};bool restore_quarantined=false;bool respawn=false;bool removed=false;uint32_t resident_event_token=0;bool redeclare=false;uint32_t held_started=0xFFFFFFFFu;/* editor: the process whose first Execute a held pose ran */
+    // a game object (story_game_objects.h): created on the retail profile, tracked by process id, read back once made
+    bool game=false,game_batch=false,game_checked=false,game_mismatch=false;uint8_t game_attempts=0;uint32_t game_planted=0;story_game_objects::Native game_native{};
+    int route_slot=-1;/* a walking resident's route record (story_resident_routes) */};
+std::vector<Actor> g_actors;
+void native_redeclare(Actor& a);  // the editor: a changed native declaration, once its old copy is gone
+uint32_t g_next_resident_event_token=1;
+struct ModelResource {std::string archive;int index;story_notebook::WorldPoint minimum,maximum;bool skinned=false;std::vector<std::string> clips;mod_actor::ModelRig rig;};
+std::map<std::pair<std::string,std::string>,ModelResource> g_models;
+std::map<uint16_t,std::pair<std::string,std::string>> g_flag_names;
+struct VisualBinding {std::string mod,id;story_world_visuals::Role role;uint32_t token=0;};
+std::vector<VisualBinding> g_visual_bindings;
+std::set<std::string> g_island_mods;
+
+void(*g_original)(Cpu*,uint32_t)=nullptr;
+uint32_t(*g_call)(Cpu*,uint32_t,std::initializer_list<uint32_t>)=nullptr;
+uint32_t g_scratch=0; bool g_installed=false,g_resident_hooks=false,g_ym1_hooks=false;
+std::function<bool(const std::string&,const std::string&)> g_scene;
+std::function<bool(const std::string&,const std::string&,unsigned,unsigned)> g_stage;  // mod_stages::enter_stage
+const uint32_t kRoom=GC(0x025C2E8C),kCreate=GC(0x025D5834),kSearch=GC(0x025D54C4),kSearchName=GC(0x025C109C);
+const uint32_t kPlay=GC(0x025200D4),kDelete=GC(0x025D57E0),kCreateChild=GC(0x025D5A20);
+const uint32_t kStage=GD(0x1046F0B0)+0x5134,kSave=GD(0x101F84DC);
+const uint32_t kChestCheck=GC(0x024B4AB4),kChestOpen=GC(0x024B63A8),kOnBox=GC(0x025B8C0C);
+const uint32_t kSignExecute=GC(0x0218B234),kSignDelete=GC(0x0218C824);
+const uint32_t kPeopleMsg=GC(0x022C6C68),kPeopleNext=GC(0x022C6108),kPeopleExecute=GC(0x022C36D0);
+const uint32_t kPeopleTalk=GC(0x022C1BBC),kPeopleDelete=GC(0x022BFF00);
+const uint32_t kPhotoActor=GC(0x025BED80),kPhotoPosition=GC(0x025BEBB8),kPhotoSnapshot=GC(0x025BEB4C);
+const uint32_t kNamedCandidate=GC(0x025D9E64),kStaffCandidate=GC(0x02542A38),kExtraOn=GC(0x02542AF4),kExtraOff=GC(0x02542BE0),kStaffId=GC(0x02542D88);
+const uint32_t kPeopleCheckOrder=GC(0x022C045C),kPeopleEventMove=GC(0x022C2958),kPeopleEventOrder=GC(0x022C2A04);
+constexpr uint32_t kCarrier=0x2CF3,kYm1=story_resident_types::kSeatedYm1,kTalkLatchOffset=0x280;
+// a daNpcPeople_c character from the shared table (every resident but the seated ym1)
+bool people_type(unsigned resident){return resident<256&&story_resident_types::people(uint8_t(resident));}
+// a placed resident walking a mod route (manifest "path")
+// a patrolling Bokoblin: a native Bokoblin with its own route (d_a_bk walks it as its patrol path)
+bool patrols(const ManifestActor& a){return (a.actor=="bokoblin"||a.actor=="moblin")&&a.kind.empty()&&!a.path.points.empty();}
+// an actor following a port-owned route record: a walking resident or a patrolling Bokoblin
+bool walks(const ManifestActor& a){return (a.actor=="resident"&&!a.path.points.empty()&&a.resident<256&&story_resident_types::walker(uint8_t(a.resident)))||patrols(a);}
+static_assert(kTalkLatchOffset+128<=0x300); // Native PID slots precede this; room readiness follows it.
+const uint32_t kYm1Init=GC(0x022F75E4),kYm1SetAction=GC(0x022F7388),kYm1Pmf=GD(0x10023418);
+const uint32_t kYm1Msg=GC(0x022F9A48),kYm1Next=GC(0x022F9464),kYm1Talk=GC(0x022FA288),kYm1Execute=GC(0x022F8F2C),kYm1Delete=GC(0x022F82AC);
+const uint32_t kYm1Demo=GC(0x022F8344),kYm1Staff=GC(0x022F8504),kYm1CheckTalk=GC(0x022F9ACC);
+Actor* g_opening=nullptr;
+struct Talk {uint32_t npc=0; Actor* actor=nullptr;std::u16string text;bool started=false;bool terminal=false;std::vector<story_notebook::StoryAction> then;std::string flag;};
+Talk g_talk;
+bool enemy_kind(const ManifestActor& a,story_enemies::Kind& kind){if(a.actor=="chuchu")kind=story_enemies::Kind::ChuChu;else if(a.actor=="bokoblin")kind=story_enemies::Kind::Bokoblin;else if(a.actor=="moblin")kind=story_enemies::Kind::Moblin;else if(a.actor=="keese")kind=story_enemies::Kind::Keese;else if(a.actor=="miniblin")kind=story_enemies::Kind::Miniblin;else if(a.actor=="peahat")kind=story_enemies::Kind::Peahat;else if(a.actor=="darknut")kind=story_enemies::Kind::Darknut;else if(a.actor=="rat"&&!a.hole.empty())kind=story_enemies::Kind::Rat;else if(a.actor=="rat_hole")kind=story_enemies::Kind::RatHole;else if(a.actor=="bokobaba")kind=story_enemies::Kind::BokoBaba;else if(a.actor=="bubble")kind=story_enemies::Kind::Bubble;else if(a.actor=="octorok")kind=story_enemies::Kind::Octorok;else if(const auto*n=story_enemies_more::by_name(a.actor))kind=n->kind;else return false;return true;}
+// a declaration's actor parameters: its variant's, as a patrol when it walks a route
+uint32_t enemy_params(story_enemies::Kind kind,const ManifestActor& a);
+void enemy_spec_extras(story_enemies::Spec& spec,const ManifestActor& a);
+// an enemy on one of the mod's room paths: that path's number in its path byte (0xFF while the path has none)
+uint32_t enemy_params(story_enemies::Kind kind,const ManifestActor& a,const std::string& mod){uint32_t p=enemy_params(kind,a);const int shift=story_enemies::room_path_shift(kind);
+ if(shift>=0&&!a.room_path.empty()){const uint8_t n=story_room_paths::number(mod,a.room_path);p=(p&~(0xFFu<<shift))|(uint32_t(n?n:0xFF)<<shift);}return p;}
+uint32_t enemy_params(story_enemies::Kind kind,const ManifestActor& a){if(!a.rider_of.empty())return story_enemy_variants::kRiderParams;if(kind==story_enemies::Kind::Rat)return story_enemies::parameters(kind)|(a.rat_bomb?0x100u:0u);const uint32_t p=story_enemies::parameters(kind,a.variant);return patrols(a)&&p?(a.actor=="moblin"?story_enemy_variants::moblin_patrol(p):story_enemy_variants::bokoblin_patrol(p)):p;}
+// A rat hole is one declaration in the manifest and 1 + 3 actors here: the owned hole and its three rats,
+// each an owned enemy of its own (its marker, the hole's drops), created as the hole's children.
+std::vector<ManifestActor> expand_rat_holes(const std::vector<ManifestActor>& declared){
+    std::vector<ManifestActor> out;out.reserve(declared.size());
+    for(const auto& a:declared){out.push_back(a);if(a.actor!="rat_hole"||!a.kind.empty())continue;
+        for(unsigned n=0;n<story_enemy_variants::kRatsPerHole;++n){ManifestActor r=a;r.actor="rat";r.variant.clear();r.defeat_switch.clear();
+            r.id=a.id+".rat"+std::to_string(n+1);r.defeated_flag=a.defeated_flag+".rat"+std::to_string(n+1);r.hole=a.id;r.rat_bomb=story_enemy_variants::rat_bomb(a.variant,n);out.push_back(r);}}
+    // a Kargaroc's rider: an owned Moblin or Bokoblin of its own ("<id>.rider", its marker "<flag>.rider", the
+    // Kargaroc's drops), created only by the Kargaroc's own create (the request is redirected to it)
+    std::vector<ManifestActor> riders;
+    for(const auto& a:out){const std::string kind=a.kind.empty()?story_enemy_variants::rider_kind(a.actor,a.variant):std::string();if(kind.empty())continue;
+        ManifestActor r=a;r.actor=kind;r.variant.clear();r.defeat_switch.clear();r.room_path.clear();r.path={};
+        r.id=a.id+story_enemy_variants::kRiderSuffix;r.defeated_flag=a.defeated_flag+story_enemy_variants::kRiderSuffix;r.rider_of=a.id;riders.push_back(r);}
+    out.insert(out.end(),riders.begin(),riders.end());
+    // a Wizzrobe summoner's pool: its summon door's creates become these (story_enemies_summons.h)
+    std::vector<ManifestActor> summons;
+    for(const auto& a:out){if(!a.kind.empty()||!story_enemy_variants::summoner(a.actor,a.variant))continue;const auto* pool=story_enemies_summons::pool(story_enemy_variants::angle_z(a.actor,a.variant));if(!pool)continue;
+        unsigned n=0;for(const auto& m:pool->members)for(unsigned i=0;m.actor&&i<m.count;++i){ManifestActor r=a;r.actor=m.actor;r.variant=story_enemies_summons::variant(m.actor,i);r.defeat_switch.clear();r.room_path.clear();r.path={};r.drops.clear();
+            ++n;r.id=a.id+story_enemies_summons::suffix(n);r.defeated_flag=a.defeated_flag+story_enemies_summons::suffix(n);r.summon_of=a.id;summons.push_back(r);}}
+    out.insert(out.end(),summons.begin(),summons.end());
+    return out;
+}
+// each enemy kind's private profile in the scratch (0: a kind without one)
+std::array<uint32_t,story_enemy_ownership::kKindCount> enemy_profiles(){std::array<uint32_t,story_enemy_ownership::kKindCount> out{g_scratch+kEnemyProfilesScratchOffset,g_scratch+kEnemyProfilesScratchOffset+0x30,g_scratch+kEnemyProfilesScratchOffset+0x60,g_scratch+kEnemyProfilesScratchOffset+0x90,g_scratch+kMiniblinProfileScratchOffset,g_scratch+kExtraEnemyProfilesScratchOffset,g_scratch+kExtraEnemyProfilesScratchOffset+0x30,g_scratch+kDarknutProfileScratchOffset,g_scratch+kRatHoleProfileScratchOffset,g_scratch+kExtraEnemyProfilesScratchOffset+0xC0,g_scratch+kExtraEnemyProfilesScratchOffset+0xF0,g_scratch+kExtraEnemyProfilesScratchOffset+0x120};
+    static_assert(std::size(story_enemies_more::kNatives)<=kMoreEnemyProfiles);uint32_t slot=0;for(const auto&n:story_enemies_more::kNatives)out[unsigned(n.kind)]=g_scratch+kMoreEnemyProfilesScratchOffset+0x30*slot++;return out;}
+bool enemies_declared(){return std::any_of(g_actors.begin(),g_actors.end(),[](const Actor&a){return a.enemy_token!=0;});}
+bool combat_declared(){return enemies_declared()||std::any_of(g_actors.begin(),g_actors.end(),[](const Actor&a){return a.spec.kind=="mod"&&a.spec.combat_enabled;});}
+bool pure_link(uint32_t& actor,uint32_t& pid){actor=ld32(GD(0x1046F0B0)+0x5B34);if(actor<mem::kMem2Start||actor>mem::kMem2End-0x8260u||(actor&3)||ld16(actor+0xE)!=0xA8)return false;pid=ld32(actor+4);return pid&&pid!=0xFFFFFFFFu;}
+void refresh_link(){if(!combat_declared())return;uint32_t actor=0,pid=0;if(pure_link(actor,pid))story_enemy_ownership::set_link(actor,pid);}
+// Typed child routes passed source and real module composition contracts.
+// Native per-weapon/type/mode acceptance remains a separate proof gate.
+constexpr bool kEnemyChildRoutesReady=true;
+bool configure_enemy_declarations(){story_enemy_children::set_create_filter(story_enemies::deny_create);story_enemy_children::set_summon_filter(story_enemies::summon_create);return story_enemies::configure_children({story_enemy_children::enter,story_enemy_children::leave,story_enemy_children::ready,story_enemy_children::retire},kEnemyChildRoutesReady);}
+Actor* find(uint32_t address) {
+    if(!address||g_actors.empty())return nullptr;
+    const uint32_t id=ld32(address+4);
+    for(auto& a:g_actors)if(a.process==id){
+        if(story_props::is_prop(a.spec)&&(ld16(address+0xE)!=story_props::kProfile||ld32(address+0xB0)!=story_props::parameters(a.spec)||ld8(address+0x2DD)!=0xFF))return nullptr;
+        if(a.enemy_token){story_enemies::Kind kind;if(!enemy_kind(a.spec,kind)||ld16(address+0xE)!=story_enemy_ownership::descriptor(kind).profile||ld32(address+0xB0)!=story_enemies::parameters(a.enemy_token)||ld8(address+0x2DD)!=0xFF)return nullptr;}
+        if(a.switch_token&&(ld16(address+0xE)!=(a.spec.actor=="switch"?story_switches::kSwitchProfile:story_switches::kDoorProfile)||ld32(address+0xB0)!=story_switches::parameters(a.spec.actor=="switch"?story_switches::Kind::Switch:story_switches::Kind::Door)||ld8(address+0x2DD)!=0xFF))return nullptr;
+        if(a.game&&story_game_objects::read_back(address,a.game_native)!=story_game_objects::ReadBack::Match)return nullptr;
+        if(a.spec.actor=="resident"){const bool seated=a.spec.resident==kYm1;if(ld16(address+0xE)!=(seated?0x13B:0x175)||ld8(address+0x2DD)!=(seated?0xFF:a.spec.resident))return nullptr;if(seated&&ld32(address+0xB0)!=1)return nullptr;}
+        return &a;
+    }
+    return nullptr;
+}
+Actor* people(uint32_t address) {
+    Actor* a=find(address);
+    return a&&a->spec.actor=="resident"&&a->spec.resident!=kYm1&&ld8(address+0x905)==a->spec.resident?a:nullptr;
+}
+Actor* ym1(uint32_t address){Actor* a=find(address);return a&&a->spec.actor=="resident"&&a->spec.resident==kYm1&&ld8(address+0xA20)==1&&ld8(address+0xA21)==1?a:nullptr;}
+uint32_t talk_latch_address(const Actor* a){return g_scratch+kTalkLatchOffset+uint32_t(a-g_actors.data());}
+void talk_latch(const Actor* a,uint8_t value){if(a&&g_scratch)st8(talk_latch_address(a),value?uint8_t((ld8(talk_latch_address(a))&0xFC)|value):0);}
+uint8_t talk_latch(const Actor* a){return a&&g_scratch?(ld8(talk_latch_address(a))&3):0;}
+bool owned_resident(uint32_t address){Actor* a=find(address);return a&&a->spec.actor=="resident";}
+// Host-only opt-in diagnostics. Repeated draw/search ingress cannot consume the lifecycle reserve.
+void native_trace(Actor* a,uint32_t npc,const char* event,unsigned category=4){
+    const char* enabled=std::getenv("WWHD_NATIVE_ACTOR_TRACE");if(!enabled||std::strcmp(enabled,"1")!=0||!a)return;
+    static unsigned ingress_total=0,lifecycle_total=0;
+    static std::map<std::pair<uint32_t,unsigned>,unsigned> counts;
+    if(category<4){const unsigned n=++counts[{a->process,category}];if((n>4&&n%256)||ingress_total>=512)return;++ingress_total;}
+    else {if(lifecycle_total>=512)return;++lifecycle_total;}
+    LOG("[native_actor] %s:%s event=%s pid=%08X actor=%08X profile=%04X subtype=%u expected=%u",a->mod.c_str(),a->spec.id.c_str(),event,a->process,npc,npc?unsigned(ld16(npc+0xE)):0,npc?unsigned(ld8(npc+0x2DD)):255,a->spec.resident);
+}
+constexpr uint32_t kTalkProofMagic=0x544C4B31;
+uint32_t proof_checksum(){uint32_t hash=2166136261u;for(unsigned n=4;n<56;++n)hash=(hash^ld8(g_scratch+kTalkProofScratchOffset+n))*16777619u;return hash;}
+void clear_talk_proof(){if(g_scratch)st32(g_scratch+kTalkProofScratchOffset,0);}
+bool talk_proof(const Actor*a,uint32_t npc,unsigned choice){
+    if(!a||!g_scratch||!npc||!a->process||a->process==0xFFFFFFFFu||ld32(npc+4)!=a->process)return false;
+    const uint32_t p=g_scratch+kTalkProofScratchOffset;
+    const auto hash=identity::selected_talk(a->mod,a->spec,choice);
+    return ld32(p)==kTalkProofMagic&&ld32(p+4)==1&&ld32(p+8)==uint32_t(a-g_actors.data())+1&&ld32(p+12)==choice&&ld32(p+16)==npc&&ld32(p+20)==a->process&&
+        std::equal(hash.begin(),hash.end(),mem::ptr(p+24))&&ld32(p+56)==proof_checksum()&&!ld32(p+60);
+}
+void capture_talk_proof(const Actor*a,uint32_t npc,unsigned choice){
+    if(!g_scratch)return;const uint32_t p=g_scratch+kTalkProofScratchOffset;
+    std::memset(mem::ptr(p),0,kTalkProofBytes);st32(p+4,1);st32(p+8,uint32_t(a-g_actors.data())+1);st32(p+12,choice);st32(p+16,npc);st32(p+20,a->process);
+    const auto hash=identity::selected_talk(a->mod,a->spec,choice);std::memcpy(mem::ptr(p+24),hash.data(),hash.size());st32(p+56,proof_checksum());st32(p,kTalkProofMagic);
+}
+void cancel_talk(const char* reason="cancel",bool native_valid=true,bool keep_latch=false){if(g_talk.actor){if(!keep_latch)talk_latch(g_talk.actor,0);native_trace(g_talk.actor,native_valid?g_talk.npc:0,reason);if(!keep_latch)story_mail::unsay();}if(!keep_latch)clear_talk_proof();g_talk={};}
+template<class Condition> bool matches(const Actor&a,const Condition&c){
+    const uint32_t save=ld32(kSave);
+    if(!c.time.empty()&&!save)return false;
+    const float hour=save?u32_as_f32(ld32(save+0x44))/15.0f:12;
+    return story_notebook::condition_matches(c,
+        [&](const std::string&q){return story_notebook::state(a.mod,q);},
+        [&](const std::string&i){return story_items::count(a.mod,i);},
+        [&](const std::string&f){return flag(story_store::book(),a.mod,f);},hour>=6&&hour<18);
+}
+unsigned selected_talk(const Actor&a){for(size_t i=0;i<a.spec.talks.size();++i)if(matches(a,a.spec.talks[i]))return unsigned(i+1);return 0;}
+bool capture_talk(Actor*a,bool restored=false){
+    const unsigned choice=restored?(ld8(talk_latch_address(a))>>2):selected_talk(*a);
+    if(a->spec.talks.empty()){
+        if(restored&&choice)return false;
+        story_mail::append_utf16(a->spec.lines.empty()?"Hello.":a->spec.lines,true,g_talk.text);g_talk.then=a->spec.then;
+    }else{
+        if(!choice||choice>a->spec.talks.size())return false;
+        if(restored&&!talk_proof(a,g_talk.npc,choice))return false;
+        const auto&talk=a->spec.talks[choice-1];story_mail::append_utf16(talk.lines,true,g_talk.text);g_talk.then=talk.then;
+    }
+    g_talk.flag=a->spec.flag;
+    if(!restored&&g_scratch){st8(talk_latch_address(a),uint8_t(choice<<2));if(!a->spec.talks.empty())capture_talk_proof(a,g_talk.npc,choice);}
+    return true;
+}
+bool bind_talk(Actor* a,uint32_t npc,bool terminal=false,bool restored=false){
+    if(!restored&&g_talk.actor==a&&g_talk.npc==npc&&g_talk.started)return true;
+    const uint8_t saved_choice=g_scratch?ld8(talk_latch_address(a)):0;
+    const bool owned_restore=restored&&!a->spec.talks.empty();story_mail::SayOwner owner;
+    if(owned_restore&&(!story_mail::restore_say_owner(kCarrier,owner)||owner.actor!=npc||owner.pid!=a->process||owner.token!=uint32_t(a-g_actors.data())+1||owner.partner!=ld32(GD(0x1046F0B0)+0x529C))){talk_latch(a,3);a->restore_talk=false;return false;}
+    std::array<uint8_t,kTalkProofBytes>saved_proof{};if(restored&&g_scratch)std::copy_n(mem::ptr(g_scratch+kTalkProofScratchOffset),saved_proof.size(),saved_proof.begin());
+    cancel_talk("rebind",true,owned_restore);if(restored&&g_scratch){st8(talk_latch_address(a),saved_choice);std::copy(saved_proof.begin(),saved_proof.end(),mem::ptr(g_scratch+kTalkProofScratchOffset));}g_talk.npc=npc;g_talk.actor=a;g_talk.started=true;g_talk.terminal=terminal;
+    if(!capture_talk(a,restored)){g_talk={};if(restored){talk_latch(a,3);story_mail::unsay();clear_talk_proof();}return false;}
+    if(owned_restore){if(!story_mail::resume_say(kCarrier,&g_talk.text,owner)){g_talk={};talk_latch(a,3);return false;}}
+    else if(ld16(npc+0xF8)==1)story_mail::say_owned(kCarrier,&g_talk.text,{npc,a->process,uint32_t(a-g_actors.data())+1,ld32(GD(0x1046F0B0)+0x529C)});
+    else story_mail::say(kCarrier,&g_talk.text);talk_latch(a,terminal?2:1);return true;
+}
+bool eligible(const Actor& a) {
+    if(a.removed)return false;  // removed by the world editor (deleted from the game, kept for undo)
+    if(a.spec.combat_enabled&&story_items::enemy_defeated(a.combat_marker))return false;
+    if(a.spec.carry_break_on_impact&&story_items::prop_broken(a.carry_marker))return false;
+    if(!matches(a,a.spec))return false;
+    return true;
+}
+void room_hook(Cpu* c) {const int room=int32_t(c->r[5]);g_original(c,kRoom);native_room_loaded(c,room);}
+void chest_check(Cpu* c) {
+    Actor* a=find(c->r[3]);if(!a||a->spec.actor!="chest")return g_original(c,kChestCheck);
+    c->r[3]=flag(story_store::book(),a->mod,a->spec.flag)?1:0;
+}
+void chest_on(Cpu* c) {
+    if(!g_opening)return g_original(c,kOnBox);
+    if(!set_flag(story_store::book(),g_opening->mod,g_opening->spec.flag))LOG("[actors] cannot persist chest %s: story records full",g_opening->spec.id.c_str());
+}
+void chest_open(Cpu* c) {
+    Actor* a=find(c->r[3]);
+    Actor* keep=g_opening;g_opening=a&&a->spec.actor=="chest"?a:nullptr;
+    g_original(c,kChestOpen);g_opening=keep;
+}
+void end_talk() {
+    if(!g_talk.actor)return;
+    Actor* actor=g_talk.actor;
+    native_trace(actor,g_talk.npc,"completed");talk_latch(actor,0);clear_talk_proof();
+    auto completed_actions=std::move(g_talk.then);auto completed_flag=std::move(g_talk.flag);
+    story_mail::unsay();g_talk={};
+    LOG("[actors] %s:%s dialogue finished",actor->mod.c_str(),actor->spec.id.c_str());
+    if(!completed_flag.empty())set_flag(story_store::book(),actor->mod,completed_flag);
+    actions(actor->mod,completed_actions);
+    story_scenes::trigger("talk",actor->mod,actor->spec.id);
+}
+bool scene_is_deleting(uint32_t scene){
+    // Native delete_tag's in-queue flag is +0x4C+0x10. Follow layer ownership to include a
+    // parent stage already draining its children, before this room itself reaches the delete queue.
+    for(unsigned depth=0;scene&&depth<16;++depth){
+        if(ld8(scene+0x5C))return true;
+        const uint32_t parent_layer=ld32(scene+0x2C);
+        if(!parent_layer)return false;
+        scene=ld32(parent_layer+0x18);
+        if(!scene)return false;
+    }
+    return scene!=0;
+}
+bool player_present(Cpu* c){Cpu probe=*c;const uint32_t play=g_call(&probe,kPlay,{});return play&&ld32(play+0x5B34);}
+void sign_execute(Cpu* c) {
+    const uint32_t npc=c->r[3];Actor* a=find(npc);
+    if(!a||a->spec.actor!="sign")return g_original(c,kSignExecute);
+    if(!player_present(c)){c->r[3]=1;return;}
+    if(talk_latch(a)==3){if(ld16(npc+0xF8)==1){g_original(c,kSignExecute);return;}talk_latch(a,0);clear_talk_proof();}
+    if(ld16(npc+0xF8)==1&&g_talk.npc==0&&(!a->spec.lines.empty()||!a->spec.talks.empty())&&story_mail::can_say())bind_talk(a,npc,false,a->restore_talk&&talk_latch(a)!=0);
+    a->restore_talk=false;
+    // The NPC carrier requires next_msgStatus ENDS (16) at DISPLAYED (14).
+    // Vanilla sign execute only polls END (18), then performs its own ENDED
+    // (19) and event reset. ENDS still waits for the native A-button handler.
+    if(g_talk.actor==a&&g_talk.npc==npc&&ld16(npc+0xF8)==1&&
+       ld32(GD(0x101B7CB8))!=0xFFFFFFFFu){
+        const uint32_t manager=ld32(GD(0x101F4B5C));Cpu probe=*c;
+        if(manager&&g_call(&probe,GC(0x025F795C),{manager})==14){probe=*c;g_call(&probe,GC(0x025F74D0),{manager,16});}
+    }
+    g_original(c,kSignExecute);
+    if(g_talk.npc==npc&&ld16(npc+0xF8)==0)end_talk();
+}
+void sign_delete(Cpu* c) {
+    Actor* a=find(c->r[3]);if(a){if(g_talk.actor==a){story_mail::unsay();g_talk={};}a->process=0xFFFFFFFFu;}
+    g_original(c,kSignDelete);
+}
+// Um1 normally routes nighttime talks through a retail event script. Mod residents always
+// use the generic talk command instead, and never acquire a retail event staff/cut interpreter.
+void people_check_order(Cpu* c) {
+    const uint32_t actor=c->r[3];Actor* a=people(actor);
+    g_original(c,kPeopleCheckOrder);
+    if(!a||a->spec.actor!="resident")return;
+    st16(actor+0xFC,0xFFFF);  // eventInfo.mEventId: no retail event
+    st8(actor+0x910,1);      // m79C: generic native dialogue at either time of day
+}
+void people_event_move(Cpu* c) {
+    Actor* a=people(c->r[3]);
+    if(!a)g_original(c,kPeopleEventMove);
+}
+void people_event_order(Cpu* c) {
+    const uint32_t actor=c->r[3];Actor* a=people(actor);
+    if(a){
+        if(ld8(actor+0x901)>2)st8(actor+0x901,0); // permit native talk orders only
+        st16(actor+0x8F2,uint16_t(ld16(actor+0x8F2)&0x8000)); // drop retail reward/event transitions
+        st16(actor+0xFC,0xFFFF);
+    }
+    g_original(c,kPeopleEventOrder);
+    if(a&&a->spec.actor=="resident")st16(actor+0xFA,uint16_t(ld16(actor+0xFA)&~0x0020u)); // no retail item-show conversation
+}
+void people_msg_hook(Cpu* c){if(!people_message(c))g_original(c,kPeopleMsg);}
+void people_next_hook(Cpu* c){if(!people_next_message(c))g_original(c,kPeopleNext);}
+void people_execute_hook(Cpu* c){const uint32_t actor=c->r[3];if(people(actor)&&!player_present(c)){if(g_talk.npc==actor)cancel_talk("no-player");c->r[3]=1;return;}people_execute(c,true);g_original(c,kPeopleExecute);Cpu keep=*c;c->r[3]=actor;people_execute(c,false);*c=keep;}
+void people_delete(Cpu* c){const uint32_t actor=c->r[3];Actor* a=find(actor);if(a&&a->spec.actor=="resident"){if(a->route_slot>=0&&story_resident_routes::owner(unsigned(a->route_slot))==a->process)story_resident_routes::set_owner(unsigned(a->route_slot),0);if(g_talk.actor==a)cancel_talk("delete");native_trace(a,actor,"native-delete");a->process=0xFFFFFFFFu;a->restore_talk=false;if(g_scratch)st32(g_scratch+128+uint32_t(a-g_actors.data())*4,0xFFFFFFFFu);}g_original(c,kPeopleDelete);}
+void people_talk(Cpu* c){const uint32_t actor=c->r[3];Actor* a=people(actor);g_original(c,kPeopleTalk);if(a&&g_talk.npc==actor&&c->r[3]==0x12&&ld32(actor+0x7C0)==kCarrier&&ld32(actor+0x7C8)==0xFFFFFFFFu){g_talk.terminal=true;native_trace(a,actor,"terminal-12");}}
+void photo_actor(Cpu* c){if(owned_resident(c->r[4]))native_trace(find(c->r[4]),c->r[4],"blocked-photo-actor",0);else g_original(c,kPhotoActor);}
+void photo_position(Cpu* c){if(owned_resident(c->r[4]))native_trace(find(c->r[4]),c->r[4],"blocked-photo-position",0);else g_original(c,kPhotoPosition);}
+void photo_snapshot(Cpu* c){const uint32_t obj=c->r[3];if(obj){const uint32_t id=ld32(obj+0x14);for(const auto& a:g_actors)if(a.spec.actor=="resident"&&a.process==id){Cpu probe=*c;st32(g_scratch+0x40,0);g_call(&probe,kSearch,{id,g_scratch+0x40});if(owned_resident(ld32(g_scratch+0x40))){const uint32_t npc=ld32(g_scratch+0x40);native_trace(find(npc),npc,"blocked-photo-snapshot",0);return;}}}g_original(c,kPhotoSnapshot);}
+void named_candidate(Cpu* c){if(owned_resident(c->r[3])){native_trace(find(c->r[3]),c->r[3],"blocked-name",1);c->r[3]=0;}else g_original(c,kNamedCandidate);}
+void staff_candidate(Cpu* c){if(owned_resident(c->r[3])){native_trace(find(c->r[3]),c->r[3],"blocked-staff-candidate",2);c->r[3]=0;}else g_original(c,kStaffCandidate);}
+bool all_name(uint32_t name){return name&&ld8(name)=='A'&&ld8(name+1)=='L'&&ld8(name+2)=='L'&&ld8(name+3)==0;}
+void extra_on(Cpu* c){const uint32_t arg=c->r[4];if(owned_resident(c->r[3])&&arg&&!all_name(ld32(arg))){native_trace(find(c->r[3]),c->r[3],"blocked-extra-on",3);c->r[3]=0;}else g_original(c,kExtraOn);}
+void extra_off(Cpu* c){if(owned_resident(c->r[3])&&!all_name(c->r[4])){native_trace(find(c->r[3]),c->r[3],"blocked-extra-off",3);c->r[3]=0;}else g_original(c,kExtraOff);}
+void staff_id(Cpu* c){if(owned_resident(c->r[5])){native_trace(find(c->r[5]),c->r[5],"blocked-staff-id",2);c->r[3]=0xFFFFFFFFu;}else g_original(c,kStaffId);}
+
+uint32_t ym1_play(Cpu* c){Cpu probe=*c;return g_call(&probe,kPlay,{});}
+bool ym1_owns_event(Cpu* c,uint32_t npc){
+    if(ld16(npc+0xF8)!=1)return false;const uint32_t play=ym1_play(c);if(!play)return false;
+    Cpu probe=*c;return g_call(&probe,GC(0x0253EE04),{play+0x51D0,ld32(play+0x529C)})==npc;
+}
+uint32_t ym1_status(Cpu* c){Cpu probe=*c;const uint32_t manager=ld32(GD(0x101F4B5C));return manager?g_call(&probe,GC(0x025F795C),{manager}):0xFF;}
+void ym1_init(Cpu* c){
+    const uint32_t npc=c->r[3];Actor* a=ym1(npc);if(!a)return g_original(c,kYm1Init);
+    const bool empty=ld32(npc+0x86C)==0&&ld32(npc+0x870)==0;
+    const bool same=ld32(npc+0x86C)==ld32(kYm1Pmf)&&ld32(npc+0x870)==ld32(kYm1Pmf+4);
+    if(!empty&&!same){native_trace(a,npc,"rejected-seated-pmf");c->r[3]=0;return;}
+    Cpu probe=*c;const uint32_t ok=g_call(&probe,kYm1SetAction,{npc,kYm1Pmf,0});
+    c->r[3]=ok&&ld32(npc+0x86C)==ld32(kYm1Pmf)&&ld32(npc+0x870)==ld32(kYm1Pmf+4)&&ld8(npc+0xA22)>=1&&ld8(npc+0xA22)<=3&&ld8(npc+0xA1D)==11?1:0;
+    native_trace(a,npc,c->r[3]?"seated-init":"rejected-seated-init");
+}
+void ym1_message(Cpu* c){
+    const uint32_t npc=c->r[3];Actor* a=ym1(npc);if(!a)return g_original(c,kYm1Msg);
+    const uint32_t layer=ld32(npc+0x2C);
+    if(talk_latch(a)==3||!ym1_owns_event(c,npc)||!story_mail::can_say()||(layer&&scene_is_deleting(ld32(layer+0x18)))||(g_talk.actor&&g_talk.npc!=npc)){c->r[3]=0;return;}
+    if(!bind_talk(a,npc)){c->r[3]=0;return;}a->restore_talk=false;native_trace(a,npc,"ym1-text-bind");c->r[3]=kCarrier;
+}
+void ym1_next(Cpu* c){if(ym1(c->r[3]))c->r[3]=0x10;else g_original(c,kYm1Next);}
+void ym1_demo(Cpu* c){if(ym1(c->r[3])){st8(c->r[3]+0xA16,0);c->r[3]=0;}else g_original(c,kYm1Demo);}
+void ym1_staff(Cpu* c){if(ym1(c->r[3]))c->r[3]=0xFFFFFFFFu;else g_original(c,kYm1Staff);}
+void ym1_check_talk(Cpu* c){if(Actor* a=ym1(c->r[3])){st8(c->r[3]+0xA0A,0xFF);c->r[3]=talk_latch(a)==2?0:1;}else g_original(c,kYm1CheckTalk);}
+void ym1_talk(Cpu* c){
+    const uint32_t npc=c->r[3];Actor* a=ym1(npc);if(!a)return g_original(c,kYm1Talk);
+    Cpu probe=*c;const uint32_t still=g_call(&probe,GC(0x022F9B64),{npc});
+    const bool message_owned=ld32(npc+0x7C8)==0xFFFFFFFFu||(g_talk.npc==npc&&talk_latch(a)>0&&ld32(npc+0x7C0)==kCarrier&&ld8(npc+0x7CC)<=1);
+    if(!ym1_owns_event(c,npc)||!message_owned){
+        if(g_talk.npc==npc)cancel_talk("ym1-foreign-event");talk_latch(a,0);
+        st8(npc+0xA0A,0xFF);st8(npc+0xA13,0);st8(npc+0xA18,0xFF);st8(npc+0xA19,0xFF);
+        st32(npc+0x7C0,0);st32(npc+0x7C8,0xFFFFFFFFu);st8(npc+0x7CC,0);
+        probe=*c;g_call(&probe,GC(0x022F9C2C),{npc,11}); // Return only this seated copy to SITwai.
+        c->r[3]=still;return;
+    }
+    if(talk_latch(a)!=2){probe=*c;g_call(&probe,GC(0x025A11EC),{npc,1});}
+    if(talk_latch(a)==1&&g_talk.npc==npc&&ld8(npc+0x7CC)==1&&ld32(npc+0x7C0)==kCarrier&&ld32(npc+0x7C8)==0xFFFFFFFFu&&ym1_status(c)==0x13&&ym1_owns_event(c,npc)){
+        st8(npc+0xA0A,0xFF);st8(npc+0xA13,0);probe=*c;g_call(&probe,GC(0x022F9C2C),{npc,uint32_t(int32_t(int8_t(ld8(npc+0xA1E))))});
+        probe=*c;st16(npc+0x9FE,uint16_t(g_call(&probe,GC(0x021E1E78),{15,30})));
+        st8(npc+0xA18,0xFF);st8(npc+0xA19,0xFF);
+        const uint32_t play=ym1_play(c);st16(play+0x52B8,uint16_t(ld16(play+0x52B8)|8));
+        g_talk.terminal=true;talk_latch(a,2);native_trace(a,npc,"ym1-terminal-13");
+    }
+    c->r[3]=still;
+}
+bool ym1_cancel_restored(Cpu* c,uint32_t npc,Actor* a){
+    // Only the exact current native owner may request the same reset used by native Ym1 endEvent.
+    if(ld32(npc+0x7C0)!=kCarrier||!ym1_owns_event(c,npc))return false;
+    if(g_talk.npc==npc)cancel_talk("ym1-missing-restored-text");else if(!g_talk.actor)story_mail::unsay();
+    const uint32_t play=ym1_play(c);st16(play+0x52B8,uint16_t(ld16(play+0x52B8)|8));
+    st8(npc+0xA0A,0xFF);st8(npc+0xA13,0);st8(npc+0xA18,0xFF);st8(npc+0xA19,0xFF);
+    st32(npc+0x7C0,0);st32(npc+0x7C8,0xFFFFFFFFu);st8(npc+0x7CC,0);
+    Cpu probe=*c;g_call(&probe,GC(0x022F9C2C),{npc,11});
+    talk_latch(a,3); // Wait for the owned native reset; never reopen this cancelled message.
+    native_trace(a,npc,"ym1-restored-text-cancelled");return true;
+}
+void ym1_execute(Cpu* c){
+    const uint32_t npc=c->r[3];Actor* a=ym1(npc);if(!a)return g_original(c,kYm1Execute);
+    const uint32_t layer=ld32(npc+0x2C);const bool draining=layer&&scene_is_deleting(ld32(layer+0x18));
+    if(draining||!player_present(c)){if(g_talk.npc==npc)cancel_talk(draining?"draining":"no-player");talk_latch(a,0);a->restore_talk=false;c->r[3]=1;return;}
+    if(talk_latch(a)==3){if(ld16(npc+0xF8)==1){c->r[3]=1;return;}talk_latch(a,0);}
+    if(a->restore_talk){a->restore_talk=false;const uint8_t latch=talk_latch(a);
+        const bool open=latch==1&&ld8(npc+0xA1D)==5&&ld32(npc+0x7C8)!=0xFFFFFFFFu;
+        const bool terminal=latch==2&&ld32(npc+0x7C8)==0xFFFFFFFFu&&ld8(npc+0x7CC)==1&&ld8(npc+0xA1D)==11&&ld8(npc+0xA13)==0;
+        const bool valid=(open||terminal)&&ld32(npc+0x7C0)==kCarrier&&ld8(npc+0x7CC)<=1&&ym1_owns_event(c,npc)&&story_mail::can_say();
+        if(g_talk.actor==a&&g_talk.npc==npc){if(!valid)cancel_talk("ym1-invalid-restored-owner");}
+        else if(ld32(npc+0x7C8)!=0xFFFFFFFFu||latch==1||latch==2){
+            if(ym1_cancel_restored(c,npc,a)){c->r[3]=1;return;}
+            talk_latch(a,0); // Foreign/unknown native event is never reset here.
+        }else talk_latch(a,0);
+    }
+    st16(npc+0xFC,0xFFFF);st32(npc+0x100,0);st32(npc+0x104,0);st32(npc+0x108,0);st16(npc+0xFA,uint16_t(ld16(npc+0xFA)&~0x20u));
+    g_original(c,kYm1Execute);
+    if(g_talk.npc==npc&&ld16(npc+0xF8)==0){if(g_talk.terminal)end_talk();else cancel_talk("ym1-nonterminal-cancel");}
+}
+void ym1_delete(Cpu* c){Actor* a=find(c->r[3]);if(a&&a->spec.resident==kYm1){if(g_talk.actor==a)cancel_talk("delete");talk_latch(a,0);a->restore_talk=false;native_trace(a,c->r[3],"ym1-native-delete");a->process=0xFFFFFFFFu;st32(g_scratch+128+uint32_t(a-g_actors.data())*4,0xFFFFFFFFu);}g_original(c,kYm1Delete);}
+
+// The checks a mod's actor list must pass, shared by start-up loading and the world editor's live
+// reload so both validate identically. `replacing`: the list replaces the mod's own loaded actors.
+bool visual_ready(const std::string&mod,const ManifestActor&a,std::string&why){
+ if(a.distant.model.empty()&&a.shoreline.model.empty())return true;
+ const auto main=g_models.find({mod,a.model});if(main==g_models.end())return why="prepared island model missing",false;
+ for(const auto*id:{&a.distant.model,&a.shoreline.model}){if(id->empty())continue;const auto r=g_models.find({mod,*id});if(r==g_models.end()||r->second.skinned)return why="distant/shoreline model must be prepared and rigid",false;
+  // an island ground's distant model is the island's own distant view from its set (the converter checked its triangles)
+  if(id==&a.distant.model&&a.game_piece()&&*id==story_game_pieces::distant_key(a.piece))continue;
+  if(actor_model_cache::shoreline_for(r->second.archive)!=(id==&a.shoreline.model)||(id==&a.shoreline.model&&actor_model_cache::material_for(r->second.archive)!=a.shoreline.material))return why="shoreline material must be prepared for dedicated shoreline use; reload or restart",false;const unsigned triangles=actor_model_cache::triangles_for(r->second.archive);if(!triangles||triangles>1024)return why="distant/shoreline model exceeds 1024 triangles or is unavailable",false;
+  const auto&v=r->second;const auto&m=main->second;const float lo[]={v.minimum.x,v.minimum.y,v.minimum.z},hi[]={v.maximum.x,v.maximum.y,v.maximum.z},ml[]={m.minimum.x,m.minimum.y,m.minimum.z},mh[]={m.maximum.x,m.maximum.y,m.maximum.z};for(unsigned k=0;k<3;++k)if(lo[k]<ml[k]-512||hi[k]>mh[k]+512)return why="distant/shoreline model must stay within the main model bounds plus 512 units",false;
+ }return true;
+}
+ManifestActor visual_actor(const std::string&mod,const ManifestActor&parent,story_world_visuals::Role role){
+ ManifestActor v;const bool far=role==story_world_visuals::Role::Distant;v.id="island-view."+mods::hash::sha256_text(mod+std::string(1,'\0')+parent.id+(far?".distant":".shoreline")).substr(0,16);v.kind="mod";v.model=far?parent.distant.model:parent.shoreline.model;v.stage=parent.stage;v.room=parent.room;v.position=parent.position;v.rotation=parent.rotation;v.scale=parent.scale;return v;
+}
+bool sync_visuals(const std::string&mod,const std::vector<ManifestActor>&actors,bool apply,std::string&why){
+ struct Planned{const ManifestActor*parent;story_world_visuals::Role role;ManifestActor spec;VisualBinding*binding;};std::vector<Planned> plan;size_t missing=0;
+ for(const auto&a:actors){if(!visual_ready(mod,a,why))return false;for(const auto role:{story_world_visuals::Role::Distant,story_world_visuals::Role::Shoreline}){const auto&id=role==story_world_visuals::Role::Distant?a.distant.model:a.shoreline.model;if(id.empty())continue;VisualBinding*binding=nullptr;for(auto&old:g_visual_bindings)if(old.mod==mod&&old.id==a.id&&old.role==role){binding=&old;break;}missing+=!binding;plan.push_back({&a,role,visual_actor(mod,a,role),binding});}}
+ if(g_visual_bindings.size()+missing>128||mod_actor::checkpoint()+missing>128)return why="visual declaration history is full; restart to reclaim removed variants",false;
+ for(const auto&p:plan)if(p.binding){const auto&r=g_models.at({mod,p.spec.model});if(!mod_actor::redeclare(p.binding->token,p.spec,r.archive,r.index,r.minimum,r.maximum,false,{}, {},false))return why="visual model cannot serve the requested transform",false;}
+ std::vector<story_world_visuals::Spec> preview;uint32_t future=uint32_t(mod_actor::checkpoint()+1);for(const auto&p:plan)preview.push_back({mod,p.parent->id,p.role,p.binding?p.binding->token:future++,int(p.parent->room),p.parent->position,p.parent->rotation,p.parent->scale,identity::fingerprint(mod,*p.parent)});
+ if(g_installed&&!story_world_visuals::replace(mod,preview,why,false))return false;
+ if(!apply)return true;g_visual_bindings.reserve(128);std::vector<story_world_visuals::Spec> specs;
+ for(const auto&p:plan){const auto&r=g_models.at({mod,p.spec.model});uint32_t token=p.binding?p.binding->token:mod_actor::declare(mod,p.spec,r.archive,r.index,{},r.minimum,r.maximum);if(!token)return why="cannot reserve visual model declaration",false;if(p.binding&&!mod_actor::redeclare(token,p.spec,r.archive,r.index,r.minimum,r.maximum,false,{}, {},true))return why="cannot update visual model declaration",false;if(!mod_actor::visual_role(token,p.role==story_world_visuals::Role::Distant))return why="cannot make collision-free model variant",false;if(!p.binding)g_visual_bindings.push_back({mod,p.parent->id,p.role,token});specs.push_back({mod,p.parent->id,p.role,token,int(p.parent->room),p.parent->position,p.parent->rotation,p.parent->scale,identity::fingerprint(mod,*p.parent)});}
+ if(g_installed&&!story_world_visuals::replace(mod,specs,why))return false;for(const auto&a:actors){if(a.arrival.enabled||a.chart_marker.enabled)g_island_mods.insert(mod);if(a.arrival.enabled)story_world_arrival::note_declared();}return true;
+}
+void publish_islands(Cpu*c,uint32_t player){
+ const auto book=story_store::book();std::map<std::string,std::vector<story_chart::WorldMarker>> markers;for(const auto&mod:g_island_mods)markers[mod];const bool sea=std::strncmp(reinterpret_cast<const char*>(mem::ptr(kStage)),"sea",8)==0;const int room=int8_t(ld8(player+0x326));
+ for(const auto&a:g_actors){if(!a.spec.chart_marker.enabled&&!a.spec.arrival.enabled)continue;auto&own=markers[a.mod];if(!eligible(a))continue;
+  if(a.spec.arrival.enabled&&sea&&room==int(a.spec.room)&&book.usable()&&!flag(book,a.mod,a.spec.arrival.flag)){const double dx=double(ldf32(player+0x314))-a.spec.position.x,dz=double(ldf32(player+0x31C))-a.spec.position.z;if(dx*dx+dz*dz<=double(a.spec.arrival.radius)*a.spec.arrival.radius&&set_flag(book,a.mod,a.spec.arrival.flag,true)){story_world_arrival::show(a.spec.arrival.name);LOG("[world_island] arrived mod=%s id=%s name=%s",a.mod.c_str(),a.spec.id.c_str(),a.spec.arrival.name.c_str());}}
+  if(a.spec.chart_marker.enabled&&(a.spec.chart_marker.when_flag.empty()||flag(book,a.mod,a.spec.chart_marker.when_flag)))own.push_back({a.spec.id,a.spec.chart_marker.label,a.spec.position.x,a.spec.position.z});
+ }
+ for(const auto&[mod,list]:markers)story_chart::publish_world_markers(mod,list);
+}
+bool check_specs(const std::string& mod,const std::vector<ManifestActor>& actors,bool replacing,std::string& why){
+    for(const auto&a:actors)if(!a.talks.empty()&&a.actor!="resident"&&a.actor!="sign"&&!(a.kind=="mod"&&!a.combat_enabled&&!a.carry_enabled))return why="talks requires a dialogue actor",false;
+
+    for(size_t i=0;i<actors.size();++i){if(!replacing)for(const auto&old:g_actors)if(old.mod==mod&&old.spec.id==actors[i].id)return why="duplicate enabled actor identity",false;for(size_t j=0;j<i;++j)if(actors[j].id==actors[i].id)return why="duplicate actor identity",false;}
+    if(!replacing&&g_actors.size()+actors.size()>128)return why="enabled mods exceed 128 actors overall",false;
+    for(const auto& a:actors) {
+        // a summoner's pool is its own allowance (the overall capacity), not the room's 16
+        if(!a.summon_of.empty())continue;
+        unsigned count=0;for(const auto& old:g_actors)if((!replacing||old.mod!=mod)&&old.spec.stage==a.stage&&old.spec.room==a.room&&old.spec.summon_of.empty())++count;
+        for(const auto& other:actors)if(other.stage==a.stage&&other.room==a.room&&other.summon_of.empty())++count;
+        if(count>story_notebook::kMaxActorsPerRoom)return why="enabled mods exceed 16 actors per room",false;
+    }
+    size_t logical=actors.size(),visual=0;std::array<unsigned,50> views{};
+    auto count_visual=[&](const ManifestActor&a){visual+=story_notebook::visual_variant_count(a);if(a.stage!="sea"||a.room<1||a.room>49)return;const int col=(int(a.room)-1)%7,row=(int(a.room)-1)/7;if(!a.shoreline.model.empty())++views[a.room];if(!a.distant.model.empty())for(int z=std::max(0,row-1);z<=std::min(6,row+1);++z)for(int x=std::max(0,col-1);x<=std::min(6,col+1);++x)if(x!=col||z!=row)++views[1+z*7+x];};
+    for(const auto&old:g_actors)if(!replacing||old.mod!=mod){++logical;count_visual(old.spec);}for(const auto&a:actors)count_visual(a);
+    if(logical+visual>128)return why="actors and distant/shoreline variants exceed 128 declarations",false;
+    if(*std::max_element(views.begin(),views.end())>16)return why="distant/shoreline variants exceed 16 active views in a sea square",false;
+    for(const auto& a:actors){story_enemies::Kind kind;if(!a.variant.empty()&&!enemy_kind(a,kind)&&!a.game_object())return why="only native enemies and game objects have variants",false;}
+    for(const auto& a:actors)if(a.actor=="resident"&&(a.resident>255||!story_resident_types::supported(uint8_t(a.resident))))return why="unsupported resident subtype",false;
+    for(const auto& a:actors)if(a.actor=="resident")if(const char* no=story_resident_types::place_problem(uint8_t(a.resident),a.stage,a.position.x,a.position.z))return why=no,false;
+    for(const auto& a:actors)if(a.actor=="resident"&&!a.path.points.empty())if(const char* no=story_resident_types::no_walk(uint8_t(a.resident)))return why=no,false;
+    {size_t walkers=0;for(const auto&old:g_actors)if((!replacing||old.mod!=mod)&&!old.removed&&walks(old.spec))++walkers;for(const auto&a:actors)if(walks(a))++walkers;
+     if(walkers>story_resident_route::kSlots)return why="enabled mods give more than 32 residents a route",false;}
+    for(const auto&a:actors)if(a.kind=="mod"){
+        const auto resource=g_models.find({mod,a.model});if(resource==g_models.end())return why="prepared actor model missing",false;if(!visual_ready(mod,a,why))return false;
+        if(a.combat_enabled){
+            if(!resource->second.skinned||a.defeated_flag.empty()||!story_mail::valid_id(a.defeated_flag)||a.rotation.x!=0||a.rotation.z!=0||a.scale.x!=1||a.scale.y!=1||a.scale.z!=1||!a.flag.empty()||!a.lines.empty()||!a.then.empty())return why="unsupported generic combat configuration",false;
+            for(const auto* clip:{&a.combat.flinch.clip,&a.combat.stun.clip,&a.combat.death.clip})if(((clip==&a.combat.stun.clip||clip==&a.combat.death.clip)&&clip->empty())||(!clip->empty()&&std::find(resource->second.clips.begin(),resource->second.clips.end(),*clip)==resource->second.clips.end()))return why="combat reaction clip unavailable",false;
+            if(a.drops.size()>8)return why="too many generic combat drops",false;for(size_t n=0;n<a.drops.size();++n){const auto&drop=a.drops[n];if(!drop.quantity||drop.quantity>254||!story_items::find(mod,drop.item))return why="invalid generic combat item drop",false;for(size_t j=0;j<n;++j)if(a.drops[j].item==drop.item)return why="duplicate generic combat drop",false;}
+        }
+        const auto& rig=resource->second.rig;
+        if(a.look_at.enabled){const auto head=std::find(rig.joint_names.begin(),rig.joint_names.end(),a.look_at.head);if(head==rig.joint_names.end())return why="look_at head is not a model joint",false;if(rig.joint_look_compatible.size()!=rig.joint_names.size()||!rig.joint_look_compatible[size_t(head-rig.joint_names.begin())])return why="look_at requires identity bind rotation along the joint chain",false;if(std::fabs(std::remainder(a.rotation.x,360.f))>1e-4||std::fabs(std::remainder(a.rotation.z,360.f))>1e-4||a.scale.x<=0||std::fabs(a.scale.x-a.scale.y)>1e-4||std::fabs(a.scale.x-a.scale.z)>1e-4)return why="look_at requires upright actor and uniform positive scale",false;
+            if(!a.look_at.upper_bone.empty()){const auto upper=std::find(rig.joint_names.begin(),rig.joint_names.end(),a.look_at.upper_bone);if(upper==rig.joint_names.end())return why="look_at upper_body is not a model joint",false;if(!rig.joint_look_compatible[size_t(upper-rig.joint_names.begin())])return why="look_at upper_body has incompatible bind rotation",false;int parent=rig.joint_parents[size_t(head-rig.joint_names.begin())];const int target=int(upper-rig.joint_names.begin());while(parent>=0&&parent!=target)parent=rig.joint_parents[size_t(parent)];if(parent!=target)return why="look_at upper_body must be an ancestor of head",false;}}
+        if(!a.path.points.empty()){const auto has=[&](const std::string& clip){return std::find(resource->second.clips.begin(),resource->second.clips.end(),clip)!=resource->second.clips.end();};
+            if(!has(a.path.idle_clip.empty()?"idle":a.path.idle_clip)||!has(a.path.walk_clip.empty()?"walk":a.path.walk_clip))return why=a.path.walk_clip.empty()&&a.path.idle_clip.empty()?"authored paths require idle and walk clips":"the path's walk or idle clip is not in the model",false;}
+    }
+    for(size_t i=0;i<actors.size();++i){const auto&a=actors[i];if(a.actor!="switch"&&a.actor!="door")continue;
+        if(a.params||a.rotation.x!=0||a.rotation.z!=0||a.scale.x!=1||a.scale.y!=1||a.scale.z!=1||!a.flag.empty()||!a.lines.empty()||!a.then.empty()||!a.drops.empty()||!a.broken_flag.empty())return why="unsupported native switch/door configuration",false;
+        if(a.actor=="switch"){if(a.switch_flag.empty()||!a.switch_actor.empty())return why="invalid switch flag",false;if(!replacing)for(const auto&old:g_actors)if(old.mod==mod&&old.spec.actor=="switch"&&old.spec.switch_flag==a.switch_flag)return why="duplicate switch flag",false;for(size_t j=0;j<i;++j)if(actors[j].actor=="switch"&&actors[j].switch_flag==a.switch_flag)return why="duplicate switch flag",false;}
+        else if(a.switch_actor.empty()||!a.switch_flag.empty())return why="invalid door switch reference",false;
+    }
+    for(const auto&a:actors){story_enemies::Kind kind;if(!enemy_kind(a,kind))continue;if((!replacing&&!configure_enemy_declarations())||!story_enemies::supported(kind))return why="Native enemy child ownership route is not admitted",false;
+        if(!story_enemies::parameters(kind,a.variant))return why="Unsupported native enemy variant",false;
+        if(!a.kind.empty()||a.params||a.rotation.x!=0||a.rotation.z!=0||a.scale.x!=1||a.scale.y!=1||a.scale.z!=1||a.defeated_flag.empty()||!story_mail::valid_id(a.defeated_flag)||!a.flag.empty()||!a.broken_flag.empty()||!a.switch_flag.empty()||!a.switch_actor.empty()||!a.lines.empty()||!a.then.empty()||!a.model.empty()||!a.animation.empty()||a.look_at.enabled||(!a.path.points.empty()&&!patrols(a)))return why="Unsupported native enemy configuration",false;
+    }
+    // game objects: catalogued, a fixed parameter word and nothing else; every mod's together within each room's budget
+    if(std::any_of(actors.begin(),actors.end(),[](const ManifestActor&a){return a.game_object();})){
+        std::vector<ManifestActor> all;for(const auto&old:g_actors)if((!replacing||old.mod!=mod)&&old.spec.game_object())all.push_back(old.spec);
+        for(const auto&a:actors){if(!a.game_object())continue;const auto*e=story_game_objects::catalogue().find(story_game_objects::reference(a.actor));
+            if(!e||!e->variant(a.variant)||!a.kind.empty()||a.params||!a.flag.empty()||!a.broken_flag.empty()||!a.switch_flag.empty()||!a.switch_actor.empty()||!a.defeated_flag.empty()||!a.lines.empty()||!a.then.empty()||!a.talks.empty()||!a.drops.empty()||!a.path.points.empty()||
+               (e->yaw_only&&(a.rotation.x!=0||a.rotation.z!=0))||a.scale.x!=a.scale.y||a.scale.x!=a.scale.z||a.scale.x<e->scale_min||a.scale.x>e->scale_max)return why="unsupported game object configuration: "+a.id,false;
+            all.push_back(a);}
+        if(!story_notebook::world_manifest::game_object_budget(all,why))return false;
+    }
+    return true;
+}
+}
+// a mod actor's talk ended: its flag, then actions and talk scenes
+std::function<void()> mod_talked(const std::string& mod,const std::string& id){
+    return [mod,id](){
+        auto found=std::find_if(g_actors.begin(),g_actors.end(),[&](const Actor& a){return a.mod==mod&&a.spec.id==id;});if(found==g_actors.end())return;
+        if(!found->spec.flag.empty())set_flag(story_store::book(),mod,found->spec.flag);
+        actions(mod,found->spec.then);story_scenes::trigger("talk",mod,id);
+    };
+}
+mod_actor::TalkProvider mod_talk_provider(const std::string&mod,const std::string&id){
+ return [mod,id](uint32_t npc,bool resumed,mod_actor::TalkSelection&out){
+    auto found=std::find_if(g_actors.begin(),g_actors.end(),[&](const Actor&a){return a.mod==mod&&a.spec.id==id;});
+    if(found==g_actors.end()||found->removed||found->restore_quarantined||found->spec.kind!="mod"||found->spec.combat_enabled||found->spec.carry_enabled||found->spec.talks.empty()||
+       found->process==0xFFFFFFFFu||ld32(npc+4)!=found->process||ld16(npc+0xE)!=mod_actor::kProfile||ld32(npc+0xB0)!=found->mod_token||ld16(npc+0xF8)!=1)return false;
+    Actor*a=&*found;const auto choice=resumed?unsigned(ld8(talk_latch_address(a))>>2):selected_talk(*a);
+    if(!choice||choice>a->spec.talks.size()||(resumed&&!talk_proof(a,npc,choice)))return false;
+    const auto&selected=a->spec.talks[choice-1];
+    if(!resumed){st8(talk_latch_address(a),uint8_t(choice<<2));capture_talk_proof(a,npc,choice);}
+    out.lines=selected.lines;out.completed=[mod,id,flag_id=a->spec.flag,then=selected.then](){
+        clear_talk_proof();if(!flag_id.empty())set_flag(story_store::book(),mod,flag_id);actions(mod,then);story_scenes::trigger("talk",mod,id);
+    };return true;
+ };
+}
+bool load(const std::string& mod,const std::vector<ManifestActor>& actors,std::string& why) {return load(mod,actors,why,{});}
+bool load(const std::string& mod,const std::vector<ManifestActor>& declared,std::string& why,const std::vector<std::string>& scene_flags) {
+    const std::vector<ManifestActor> actors=expand_rat_holes(declared);
+    if(g_installed)return why="world actors require startup declaration",false;
+    if(!check_specs(mod,actors,false,why))return false;
+    if(g_actors.capacity()<128)g_actors.reserve(128);  // the world editor adds actors later: their addresses stay put
+    std::vector<std::string> flags=scene_flags;
+    for(const auto& a:actors){if(!a.when_flag.empty())flags.push_back(a.when_flag);if(!a.when_not_flag.empty())flags.push_back(a.when_not_flag);if(!a.flag.empty())flags.push_back(a.flag);if(!a.switch_flag.empty())flags.push_back(a.switch_flag);if(a.arrival.enabled)flags.push_back(a.arrival.flag);if(a.chart_marker.enabled&&!a.chart_marker.when_flag.empty())flags.push_back(a.chart_marker.when_flag);for(const auto&t:a.talks){if(!t.when_flag.empty())flags.push_back(t.when_flag);if(!t.when_not_flag.empty())flags.push_back(t.when_not_flag);for(const auto&action:t.then)if(action.kind==story_notebook::StoryAction::Kind::Flag)flags.push_back(action.id);}for(const auto& action:a.then)if(action.kind==story_notebook::StoryAction::Kind::Flag)flags.push_back(action.id);}
+    std::vector<Actor> staged;staged.reserve(actors.size());g_actors.reserve(g_actors.size()+actors.size());
+    struct LoadRollback {decltype(g_island_mods) island_mods=g_island_mods;size_t visuals=g_visual_bindings.size();size_t props=story_props::checkpoint(),models=mod_actor::checkpoint(),switches=story_switches::checkpoint(),enemies=story_enemies::checkpoint(),ownership=story_enemy_ownership::checkpoint();story_items::PropMarkerCheckpoint markers=story_items::prop_marker_checkpoint();decltype(g_flag_names) flags=g_flag_names;bool committed=false;~LoadRollback(){if(!committed){g_island_mods=std::move(island_mods);g_visual_bindings.resize(visuals);story_props::rollback(props);mod_actor::rollback(models);story_switches::rollback(switches);story_enemies::rollback(enemies);story_enemy_ownership::rollback(ownership);story_items::rollback_prop_markers(markers);g_flag_names=std::move(flags);}}} rollback;
+    if(!register_flags(mod,flags,why))return false;
+    for(const auto& a:actors){Actor added{mod,a};if(a.game_object()){added.game=true;const auto*e=story_game_objects::catalogue().find(story_game_objects::reference(a.actor));added.game_batch=e&&e->batch();added.fingerprint=identity::fingerprint(mod,a);}if(a.actor=="resident"&&people_type(a.resident)){if(!g_next_resident_event_token||g_next_resident_event_token==0xFFFFFFFFu)return why="resident event token exhausted",false;added.resident_event_token=g_next_resident_event_token++;added.fingerprint=identity::fingerprint(mod,a);}if(a.kind=="mod"&&a.combat_enabled){added.combat_marker=story_items::register_enemy_marker(mod,a.id,a.defeated_flag,why);if(!added.combat_marker.value)return false;added.fingerprint=identity::fingerprint(mod,a);}if(a.kind=="mod"&&a.carry_break_on_impact){added.carry_marker=story_items::register_prop_marker(mod,a.id,a.broken_flag,why);if(!added.carry_marker)return false;added.fingerprint=identity::fingerprint(mod,a);}story_enemies::Kind enemy;if(enemy_kind(a,enemy)){added.fingerprint=identity::fingerprint(mod,a);story_enemies::Spec spec{enemy,mod,a.id,a.defeated_flag,{},added.fingerprint,1,enemy_params(enemy,a,mod)};for(const auto&drop:a.drops)spec.drops.push_back({drop.item,drop.quantity});enemy_spec_extras(spec,a);added.enemy_token=story_enemies::declare(spec,why);if(!added.enemy_token)return false;}if(story_props::is_prop(a)){added.fingerprint=identity::fingerprint(mod,a);added.prop_token=story_props::declare(mod,a,why);if(!added.prop_token)return false;}if(a.actor=="switch"){if(a.switch_flag.empty())return why="switch requires an own flag",false;added.fingerprint=identity::fingerprint(mod,a);added.switch_token=story_switches::declare_switch(mod,a.id,why);added.switch_source=added.switch_token;if(!added.switch_token)return false;}staged.push_back(std::move(added));}
+    for(auto& a:staged)if(a.spec.actor=="door"){
+        const Actor* source=nullptr;for(const auto& candidate:staged)if(candidate.spec.actor=="switch"&&candidate.spec.id==a.spec.switch_actor)source=&candidate;
+        if(!source)for(const auto& candidate:g_actors)if(candidate.mod==mod&&candidate.spec.actor=="switch"&&candidate.spec.id==a.spec.switch_actor)source=&candidate;
+        if(!source||!source->switch_token)return why="door must reference a same-mod switch",false;
+        a.fingerprint=identity::fingerprint(mod,a.spec);a.switch_source=source->switch_token;a.switch_token=story_switches::declare_door(mod,a.spec.id,a.switch_source,why);if(!a.switch_token)return false;
+    }
+    if(!sync_visuals(mod,actors,true,why))return false;for(const auto&a:actors)if(a.chart_marker.enabled)story_chart::note_import();
+    for(const auto&a:actors)if(a.actor=="chest"&&!a.item_mod.empty())story_treasure_chest::note_placed_chests();  // the chest's item hook (story_treasure_chest.h)
+    for(auto& a:staged)g_actors.push_back(std::move(a));rollback.committed=true;return true;
+}
+// A placed chest that holds one of its mod's items: the chest actor at `address` (story_treasure_chest's
+// question when the chest creates its get-item demo item)
+bool placed_chest_item(uint32_t address,std::string& mod,std::string& item){
+    const Actor* a=find(address);if(!a||a->spec.actor!="chest"||a->spec.item_mod.empty())return false;
+    mod=a->mod;item=a->spec.item_mod;return true;
+}
+bool register_flags(const std::string& mod,const std::vector<std::string>& flags,std::string& why){
+    auto names=g_flag_names;
+    for(const auto& id:flags){
+        if(!story_mail::valid_id(id))return why="invalid mod-owned actor/scene flag id",false;
+        const auto key=flag_key(mod,id);auto found=names.find(key);
+        if(found!=names.end()&&found->second!=std::make_pair(mod,id))return why="mod-owned flag hash collision: "+mod+":"+id+" conflicts with "+found->second.first+":"+found->second.second,false;
+        names[key]={mod,id};
+    }
+    g_flag_names=std::move(names);return true;
+}
+bool declared(){return !g_actors.empty();}
+bool mod_declared(){return std::any_of(g_actors.begin(),g_actors.end(),[](const Actor& a){return a.spec.kind=="mod";});}
+bool register_model(const std::string& mod,const std::string& model,const std::string& archive,int index,std::string& why,story_notebook::WorldPoint minimum,story_notebook::WorldPoint maximum,bool skinned,std::vector<std::string> clips,mod_actor::ModelRig rig){
+    if(g_installed)return why="actor models must be registered before hooks are installed",false;
+    if(mod.empty()||model.empty()||archive.empty()||archive.size()>63||index<0||index>16)return why="invalid prepared actor model resource",false;
+    const float lo[]={minimum.x,minimum.y,minimum.z},hi[]={maximum.x,maximum.y,maximum.z};for(unsigned i=0;i<3;++i)if(!std::isfinite(lo[i])||!std::isfinite(hi[i])||lo[i]>hi[i])return why="invalid prepared model bounds",false;
+    if(rig.joint_names.size()!=rig.joint_parents.size()||rig.joint_names.size()>32||(!skinned&&!rig.joint_names.empty()))return why="invalid prepared model rig",false;
+    for(size_t i=0;i<rig.joint_parents.size();++i)if(rig.joint_parents[i]>=int(i)||(i&&rig.joint_parents[i]<0)||rig.joint_parents[i]<-1)return why="invalid prepared joint hierarchy",false;
+    if(clips.size()>8||(!skinned&&!clips.empty()))return why="invalid prepared animation list",false;
+    for(size_t i=0;i<clips.size();++i)if(!story_mail::valid_id(clips[i])||std::find(clips.begin(),clips.begin()+i,clips[i])!=clips.begin()+i)return why="invalid prepared animation name",false;
+    const auto key=std::make_pair(mod,model);if(g_models.contains(key))return why="duplicate prepared actor model",false;
+    for(const auto& entry:g_models)if(entry.second.archive==archive)return why="actor model archive identity collision",false;
+    g_models.emplace(key,ModelResource{archive,index,minimum,maximum,skinned,std::move(clips),std::move(rig)});return true;
+}
+bool editor_register_model(const std::string& mod,const std::string& model,const std::string& archive,bool skinned,std::string& why){
+    if(g_models.contains({mod,model}))return true;
+    story_notebook::WorldPoint minimum,maximum;
+    if(!actor_model_cache::bounds_for(archive,minimum,maximum))return why="the prepared model has no bounds",false;
+    for(const auto& entry:g_models)if(entry.second.archive==archive)return why="actor model archive identity collision",false;
+    auto clips=actor_model_cache::clips_for(archive);auto rig=actor_model_cache::rig_for(archive);
+    if(rig.joint_names.size()!=rig.joint_parents.size()||rig.joint_names.size()>32||clips.size()>8||(!skinned&&(!clips.empty()||!rig.joint_names.empty())))return why="invalid prepared model rig or clips",false;
+    g_models.emplace(std::make_pair(mod,model),ModelResource{archive,1,minimum,maximum,skinned,std::move(clips),std::move(rig)});
+    LOG("[actors] %s:%s model prepared for the editor (%s)",mod.c_str(),model.c_str(),archive.c_str());
+    return true;
+}
+bool has_model(const std::string& mod,const std::string& model){return g_models.contains({mod,model});}
+bool register_piece_model(const std::string& mod,const std::string& model,const std::string& archive,int index,story_notebook::WorldPoint minimum,story_notebook::WorldPoint maximum,bool editor,std::string& why){
+    if(g_installed&&!editor)return why="actor models must be registered before hooks are installed",false;
+    if(mod.empty()||model.rfind("piece:",0)!=0||archive.size()!=31||index<1||index>16)return why="invalid game piece model resource",false;
+    const float lo[]={minimum.x,minimum.y,minimum.z},hi[]={maximum.x,maximum.y,maximum.z};for(unsigned i=0;i<3;++i)if(!std::isfinite(lo[i])||!std::isfinite(hi[i])||lo[i]>hi[i])return why="invalid game piece bounds",false;
+    // a set's pieces share its archive; no mod model may use it
+    for(const auto& [key,entry]:g_models)if(entry.archive==archive&&key.second.rfind("piece:",0)!=0)return why="actor model archive identity collision",false;
+    if(auto found=g_models.find({mod,model});found!=g_models.end())return found->second.archive==archive&&found->second.index==index?true:(why="the game piece changed; restart",false);
+    g_models.emplace(std::make_pair(mod,model),ModelResource{archive,index,minimum,maximum,false,{},{}});return true;
+}
+void set_game_calls(void(*original)(Cpu*,uint32_t),uint32_t(*call)(Cpu*,uint32_t,std::initializer_list<uint32_t>)){g_original=original;g_call=call;}
+void set_scratch_memory(uint32_t guest){g_scratch=guest;story_mail::set_say_restore_record(guest?guest+0x320:0,128);for(size_t i=0;i<g_actors.size();++i)st32(g_scratch+128+uint32_t(i)*4,0xFFFFFFFFu);std::memset(mem::ptr(g_scratch+0x300),0,28);std::memset(mem::ptr(g_scratch+0x400),0,256);std::memset(mem::ptr(g_scratch+kIdentityScratchOffset),0,128*identity::kRecordBytes);std::memset(mem::ptr(g_scratch+kEnemyProfilesScratchOffset),0,kScratchBytes-kEnemyProfilesScratchOffset);for(size_t i=0;i<g_actors.size();++i)if(g_actors[i].enemy_token)st32(g_scratch+kEnemyEpochScratchOffset+uint32_t(i)*4,1);}
+void set_scene_start(std::function<bool(const std::string&,const std::string&)> start){g_scene=std::move(start);}
+void set_stage_enter(std::function<bool(const std::string&,const std::string&,unsigned,unsigned)> enter){g_stage=std::move(enter);}
+void native_room_loaded(Cpu* c,int room){
+    if(!g_scratch||room<0||room>63)return;
+    const uint32_t stage_process=ld32(GD(0x1047E6C4));
+    const uint32_t room_process=ld32(GD(0x1047E8F0)+uint32_t(room)*0x22C);
+    const bool new_prop_epoch=ld32(g_scratch+0x318)!=stage_process||ld32(g_scratch+0x400+uint32_t(room)*4)!=room_process||std::memcmp(mem::ptr(g_scratch+0x300),mem::ptr(kStage),8)!=0;
+    if(ld32(g_scratch+0x318)!=stage_process){std::memset(mem::ptr(g_scratch+0x308),0,8);std::memset(mem::ptr(g_scratch+0x400),0,256);st32(g_scratch+0x318,stage_process);}
+    st32(g_scratch+0x400+uint32_t(room)*4,ld32(GD(0x1047E8F0)+uint32_t(room)*0x22C));
+    if(new_prop_epoch&&combat_declared())story_enemy_projectiles::room_changed();
+    for(size_t i=0;i<g_actors.size();++i){auto&a=g_actors[i];if(!a.enemy_token||!new_prop_epoch||a.spec.room!=unsigned(room)||std::strncmp(reinterpret_cast<const char*>(mem::ptr(kStage)),a.spec.stage.c_str(),8)!=0)continue;uint32_t counter=g_scratch+kEnemyEpochScratchOffset+uint32_t(i)*4,epoch=ld32(counter);if(!epoch||epoch==0xFFFFFFFFu){a.restore_quarantined=true;story_enemies::quarantine(a.enemy_token);continue;}++epoch;if(story_enemies::begin_epoch(a.enemy_token,epoch)){st32(counter,epoch);a.restore_quarantined=false;a.process=0xFFFFFFFFu;a.deleting=false;st32(g_scratch+128+uint32_t(i)*4,0xFFFFFFFFu);}}
+    refresh_link();
+    for(auto& a:g_actors)if(a.spec.room==unsigned(room)){if(a.spec.kind=="mod"&&(!a.spec.combat_enabled||(new_prop_epoch&&std::strncmp(reinterpret_cast<const char*>(mem::ptr(kStage)),a.spec.stage.c_str(),8)==0)))mod_actor::retry(a.mod_token);if(a.prop_token&&new_prop_epoch&&std::strncmp(reinterpret_cast<const char*>(mem::ptr(kStage)),a.spec.stage.c_str(),8)==0){a.restore_quarantined=false;story_props::retry(a.prop_token);}if(a.switch_token&&new_prop_epoch&&std::strncmp(reinterpret_cast<const char*>(mem::ptr(kStage)),a.spec.stage.c_str(),8)==0){a.restore_quarantined=false;story_switches::retry(a.switch_token);}
+        if(a.game&&new_prop_epoch&&std::strncmp(reinterpret_cast<const char*>(mem::ptr(kStage)),a.spec.stage.c_str(),8)==0){a.game_attempts=0;a.restore_quarantined=a.game_mismatch;}}room_loaded(c,room);}
+// The route a resident walks: a villager with a borrowed walk walks at its table pace unless the route
+// gives a speed (the game's own route speed for them is a slow 30 units a second, made for gliding)
+story_notebook::ManifestPath walked_path(const ManifestActor& a){
+    auto p=a.path;
+    if(!p.speed_given&&a.actor=="resident"&&a.resident<256&&story_resident_types::borrowed_walk(uint8_t(a.resident))){p.speed_given=true;p.speed=story_resident_types::walker(uint8_t(a.resident))->pace;}
+    return p;}
+// A walking resident's route record: a free one is taken the first time; `fresh` writes the route
+// with its guard state cleared (a new copy starts at its position). False: no route (it stands).
+bool route_record(Actor& a,bool fresh){
+    if(!walks(a.spec)){if(a.route_slot>=0)story_resident_routes::clear(unsigned(a.route_slot));a.route_slot=-1;return false;}
+    if(!story_resident_routes::installed()){static bool told=false;if(!told)LOG("[actors] resident routes are not available in this session: residents with a path stand until a restart");told=true;return false;}
+    // a villager without a walk of its own walks only with its borrowed walk (built from the game files at start)
+    if(a.spec.actor=="resident"&&a.spec.resident<256)if(const int missing=story_resident_routes::missing_clip(uint8_t(a.spec.resident));missing>=0){
+        static std::set<std::string> told;if(told.insert(a.mod+":"+a.spec.id).second)LOG("[actors] %s:%s: its borrowed walk (%s) is not available in this session; it stands",a.mod.c_str(),a.spec.id.c_str(),story_resident_types::kBorrowedWalks[missing].name);
+        if(a.route_slot>=0)story_resident_routes::clear(unsigned(a.route_slot));a.route_slot=-1;return false;}
+    if(a.route_slot<0){
+        std::set<int> used;for(const auto& other:g_actors)if(other.route_slot>=0)used.insert(other.route_slot);
+        for(int s=0;s<int(story_resident_route::kSlots);++s)if(!used.contains(s)){a.route_slot=s;break;}
+        if(a.route_slot<0){LOG("[actors] %s:%s: no free route record; it stands",a.mod.c_str(),a.spec.id.c_str());return false;}
+    }
+    if(!story_resident_routes::write(unsigned(a.route_slot),walked_path(a.spec),a.spec.position,!fresh))return false;
+    if(fresh)story_resident_routes::set_owner(unsigned(a.route_slot),0);
+    return true;
+}
+// A rat hole's rats come out one at a time, as the hole's children (the game's own rat-hole rats: they
+// climb out of it), while the hole stands, the rats before them are defeated and Link is in the hole's
+// reach but not on top of it (d_a_nzg: within its range, farther than 200). The hole closes (its marker
+// is set, no drops) once its three rats are defeated.
+constexpr float kRatHoleReach=1275.0f,kRatHoleNear=200.0f;
+const Actor* rat_hole_of(const Actor& rat){for(const auto&h:g_actors)if(h.mod==rat.mod&&h.spec.id==rat.spec.hole&&h.spec.actor=="rat_hole")return &h;return nullptr;}
+uint32_t rat_hole_ready(Cpu* c,const Actor& rat){
+    const Actor* h=rat_hole_of(rat);if(!h||h->removed||!h->enemy_token||h->process==0xFFFFFFFFu||h->deleting||!story_enemies::available(h->enemy_token))return 0xFFFFFFFFu;
+    for(const auto&b:g_actors){if(&b==&rat)break;if(b.mod==rat.mod&&b.spec.hole==rat.spec.hole&&!b.removed&&b.enemy_token&&!story_enemies::is_defeated(b.enemy_token))return 0xFFFFFFFFu;}
+    Cpu probe=*c;st32(g_scratch+0x40,0);if(!g_call(&probe,kSearch,{h->process,g_scratch+0x40}))return 0xFFFFFFFFu;
+    const uint32_t hole=ld32(g_scratch+0x40);if(!hole||ld32(hole+4)!=h->process||!story_enemies::verify_actor(h->enemy_token,story_enemies::Kind::RatHole,hole))return 0xFFFFFFFFu;
+    probe=*c;const uint32_t play=g_call(&probe,kPlay,{});const uint32_t player=play?ld32(play+0x5B34):0;if(!player)return 0xFFFFFFFFu;
+    const float dx=ldf32(player+0x314)-ldf32(hole+0x314),dz=ldf32(player+0x31C)-ldf32(hole+0x31C),d=dx*dx+dz*dz;
+    if(!(d<kRatHoleReach*kRatHoleReach)||!(d>kRatHoleNear*kRatHoleNear))return 0xFFFFFFFFu;
+    return h->process;
+}
+// fopAcM_createChild(proc, parent, params, pos, room, angle, scale, subtype, createFunc): its ninth
+// argument (createFunc, none) is passed on the stack, at 8(r1) of the frame the call opens (guest_call
+// opens 0x40 bytes below the caller's r1); the place, angle and scale are in the scratch like kCreate's
+uint32_t create_child(Cpu& call,uint32_t proc,uint32_t parent,uint32_t params,uint32_t room){
+    st32(call.r[1]-0x40+8,0);
+    return g_call(&call,kCreateChild,{proc,parent,params,g_scratch,room,g_scratch+0xC,g_scratch+0x14,0xFFFFFFFFu});
+}
+void close_rat_holes(){
+    for(auto&h:g_actors){if(h.removed||h.spec.actor!="rat_hole"||!h.enemy_token||!story_enemies::available(h.enemy_token))continue;
+        bool rats=false,all=true;for(const auto&r:g_actors)if(r.mod==h.mod&&r.spec.hole==h.spec.id&&!r.removed&&r.enemy_token){rats=true;if(!story_enemies::is_defeated(r.enemy_token)){all=false;break;}}
+        if(rats&&all&&story_enemies::settle(h.enemy_token))LOG("[actors] %s:%s closed: its rats are defeated",h.mod.c_str(),h.spec.id.c_str());}
+}
+void room_loaded(Cpu* c,int room) {
+    if(!g_installed||!g_scratch)return;
+    if(room>=0&&room<=63)story_game_objects::note_room(ld32(GD(0x1047E8F0)+uint32_t(room)*0x22C));
+    refresh_link();
+    const char* stage=reinterpret_cast<const char*>(mem::ptr(kStage));
+    if(room<0||room>63)return;
+    if(ld32(g_scratch+0x318)!=ld32(GD(0x1047E6C4))||ld32(g_scratch+0x400+uint32_t(room)*4)!=ld32(GD(0x1047E8F0)+uint32_t(room)*0x22C))return;
+    // Remember native room setup in guest memory so state loads preserve the readiness gate.
+    if(std::memcmp(mem::ptr(g_scratch+0x300),stage,8)!=0){std::memcpy(mem::ptr(g_scratch+0x300),stage,8);std::memset(mem::ptr(g_scratch+0x308),0,8);}
+    st8(g_scratch+0x308+uint32_t(room)/8,uint8_t(ld8(g_scratch+0x308+uint32_t(room)/8)|(1u<<(uint32_t(room)%8))));
+    Cpu room_probe=*c;const uint32_t room_scene=g_call(&room_probe,GC(0x025DC80C),{ld32(GD(0x1047E8F0)+uint32_t(room)*0x22C)});
+    if(!room_scene||scene_is_deleting(room_scene))return; // Never enqueue new children into a draining room/stage.
+    const uint32_t room_layer=room_scene+0xC0;
+    unsigned count=0;
+    for(auto& a:g_actors) {
+        if(a.restore_quarantined||a.spec.room!=unsigned(room)||std::strncmp(stage,a.spec.stage.c_str(),8)!=0||!eligible(a))continue;
+        if(a.process!=0xFFFFFFFFu) {
+            Cpu probe=*c;st32(g_scratch+0x40,0);const uint32_t exists=g_call(&probe,kSearch,{a.process,g_scratch+0x40});
+            if(exists)continue;  // also true while asynchronous actor creation is pending
+        }
+        if(++count>story_notebook::kMaxActorsPerRoom)break;
+        std::string reserved_flag=a.spec.flag;
+        if(a.switch_token){const Actor* source=nullptr;for(const auto& candidate:g_actors)if(candidate.spec.actor=="switch"&&candidate.switch_token==a.switch_source&&candidate.mod==a.mod)source=&candidate;if(!source)continue;reserved_flag=source->spec.switch_flag;}
+        if(!reserved_flag.empty()){
+            const auto book=story_store::book();
+            if(!book.has(kRecordActorFlag,flag_key(a.mod,reserved_flag))&&!set_flag(book,a.mod,reserved_flag,false)){
+                LOG("[actors] %s:%s omitted: no story flag record available",a.mod.c_str(),a.spec.id.c_str());continue;
+            }
+        }
+        if(a.spec.kind=="mod"&&(!a.mod_token||mod_actor::failed(a.mod_token)))continue;
+        if(a.spec.carry_break_on_impact&&story_items::prop_broken(a.carry_marker))continue;
+        if(a.prop_token&&!story_props::available(a.prop_token))continue;
+        if(a.switch_token&&!story_switches::available(a.switch_token))continue;
+        if(a.enemy_token&&(!story_enemies::available(a.enemy_token)||!story_enemy_ownership::can_spawn(a.enemy_token)))continue;
+        if(!a.spec.rider_of.empty())continue;  // a Kargaroc's rider: only its Kargaroc's create makes it (rider_request)
+        if(!a.spec.summon_of.empty())continue;  // a summoner's pool member: only its summon door makes it (summon request)
+        // a Kargaroc with a rider waits until the rider's last copy is gone (deleted with the Kargaroc's last copy)
+        if(a.enemy_token&&a.spec.kind.empty()&&!story_enemy_variants::rider_kind(a.spec.actor,a.spec.variant).empty()&&
+           std::any_of(g_actors.begin(),g_actors.end(),[&](const Actor&r){return r.mod==a.mod&&r.spec.rider_of==a.spec.id&&!r.removed&&(r.process!=0xFFFFFFFFu||r.deleting);}))continue;
+        const uint32_t hole_pid=a.spec.hole.empty()?0xFFFFFFFFu:rat_hole_ready(c,a);if(!a.spec.hole.empty()&&hole_pid==0xFFFFFFFFu)continue;
+        if(a.game){
+            // the game's own object by name, like its stage loader; three creations the game gives up on in one room visit quarantine it
+            const auto*e=story_game_objects::catalogue().find(story_game_objects::reference(a.spec.actor));std::string why;
+            if(!e||!story_game_objects::resolve(c,g_call,g_scratch+0x50,*e,a.spec.variant,a.game_native,why)){LOG("[game_objects] %s:%s omitted: %s",a.mod.c_str(),a.spec.id.c_str(),e?why.c_str():"not in the catalogue");a.restore_quarantined=true;a.game_mismatch=true;continue;}
+            if(a.game_batch){
+                // grass, flowers, small trees: once per room visit, into the stage's own batch while it has room
+                // after the room's own placements (they plant in their first frames), and leaving a quarter of
+                // the stage's batch free for the rooms that load next
+                const uint32_t room_pid=ld32(GD(0x1047E8F0)+uint32_t(room)*0x22C),mark=story_game_objects::planted_mark(room_pid);
+                if(a.game_planted==mark||story_game_objects::room_age(room_pid)<story_game_objects::kBatchSettleSteps)continue;
+                const auto*v=e->variant(a.spec.variant);const int units=int(v?v->units:1),free=story_game_objects::batch_free(e->packet.kind);
+                if(free<units+int(e->packet.capacity/4)){a.game_planted=mark;LOG("[game_objects] %s:%s omitted this room visit: %s",a.mod.c_str(),a.spec.id.c_str(),free<0?("this stage has no "+e->packet.kind+" of its own").c_str():("the stage's "+e->packet.kind+" has "+std::to_string(free)+" units free, a quarter stays for the game").c_str());continue;}
+            }
+            else if(a.game_attempts>=3){LOG("[game_objects] %s:%s omitted until the room loads again: the game did not make it (3 tries)",a.mod.c_str(),a.spec.id.c_str());a.restore_quarantined=true;continue;}
+            if(!a.game_batch){++a.game_attempts;a.game_checked=false;story_game_objects::trace_before_create(c,g_call,a.mod,a.spec.id);}
+        }
+        story_enemies::Kind enemy{};(void)enemy_kind(a.spec,enemy);
+        uint32_t proc=a.game?uint32_t(a.game_native.process):a.enemy_token?story_enemy_ownership::descriptor(enemy).profile:a.switch_token?(a.spec.actor=="switch"?story_switches::kSwitchProfile:story_switches::kDoorProfile):a.prop_token?story_props::kProfile:a.spec.kind=="mod"?(a.spec.world_object()?mod_actor::kWorldProfile:mod_actor::kProfile):a.spec.actor=="sign"?0xB6u:a.spec.resident==kYm1?0x13Bu:0x175u;
+        if(a.spec.actor=="chest"&&!a.spec.item_mod.empty()&&!story_treasure_chest::item_hook_ready()){
+            static bool told=false;if(!told)LOG("[actors] %s:%s holds a mod item: it appears after a restart",a.mod.c_str(),a.spec.id.c_str());told=true;continue;
+        }
+        if(a.spec.actor=="chest") {
+            std::memcpy(mem::ptr(g_scratch+0x50),"takara",7);Cpu probe=*c;
+            const uint32_t entry=g_call(&probe,kSearchName,{g_scratch+0x50});
+            if(!entry){LOG("[actors] takara object name unavailable; chest omitted");continue;}proc=ld16(entry+8);
+        }
+        const float p[]={a.spec.position.x,a.spec.position.y,a.spec.position.z};
+        const float s[]={a.spec.scale.x,a.spec.scale.y,a.spec.scale.z};
+        const float r[]={a.spec.rotation.x,a.spec.rotation.y,a.spec.rotation.z};
+        for(unsigned i=0;i<3;++i){st32(g_scratch+i*4,f32_as_u32(p[i]));st32(g_scratch+0x14+i*4,f32_as_u32(s[i]));st16(g_scratch+0xC+i*2,uint16_t(int32_t(r[i]*65536.0f/360.0f)));}
+        if(a.prop_token||a.switch_token)st16(g_scratch+0x10,255);
+        if(a.enemy_token)st16(g_scratch+0x10,story_enemies::home_z(a.enemy_token));
+        if(a.enemy_token&&(enemy==story_enemies::Kind::Darknut||story_enemies::home_x(a.enemy_token)))st16(g_scratch+0xC,story_enemies::home_x(a.enemy_token));  // its equipment; a table kind's home x (the warship's)
+        if(a.spec.actor=="chest")st16(g_scratch+0x10,uint16_t((uint32_t(a.spec.item_game)<<8)|255));
+        uint32_t params=a.game?a.game_native.params:a.enemy_token?story_enemies::parameters(a.enemy_token):a.switch_token?story_switches::parameters(a.spec.actor=="switch"?story_switches::Kind::Switch:story_switches::Kind::Door):a.prop_token?story_props::parameters(a.spec):a.spec.kind=="mod"?a.mod_token:a.spec.actor=="sign"?kCarrier:a.spec.actor=="resident"?story_resident_types::params(uint8_t(a.spec.resident)):0;
+        // a walking resident: its route record, and the route marker as its route number; a patrolling
+        // Bokoblin's word already names the port's route (it is never created without its record)
+        if(route_record(a,true)){if(!patrols(a.spec))params=(params&~0x00FF0000u)|(uint32_t(story_resident_route::kRouteMarker)<<16);}
+        else if(patrols(a.spec)){LOG("[actors] %s:%s: no route record for its patrol; it waits",a.mod.c_str(),a.spec.id.c_str());continue;}
+        // an enemy that names one of the mod's room paths: that path's number as its path number (the
+        // room-path lookup answers it with the path's record, story_room_paths)
+        // (its declaration's parameters hold the number: enemy_params)
+        if(a.enemy_token&&!a.spec.room_path.empty()){const int shift=story_enemies::room_path_shift(enemy);const uint8_t number=story_room_paths::number(a.mod,a.spec.room_path);
+            if(shift<0||!number||!story_room_paths::record(a.mod,a.spec.room_path)||((params>>shift)&0xFF)!=number){LOG("[actors] %s:%s: its path %s is not in the game; it is not placed",a.mod.c_str(),a.spec.id.c_str(),a.spec.room_path.c_str());continue;}}
+        Cpu call=*c;a.deleting=false;
+        const uint32_t previous_layer=g_call(&call,GC(0x025DED64),{});
+        g_call(&call,GC(0x025DEAB4),{room_layer});
+        try{talk_latch(&a,0);a.process=hole_pid!=0xFFFFFFFFu?create_child(call,proc,hole_pid,params,uint32_t(room)):g_call(&call,kCreate,{proc,params,g_scratch,uint32_t(room),g_scratch+0xC,g_scratch+0x14,a.game?(a.game_native.subtype==0xFF?0xFFFFFFFFu:uint32_t(a.game_native.subtype)):a.spec.actor=="resident"&&a.spec.resident!=kYm1?a.spec.resident:0xFFFFFFFFu,0});}
+        catch(...){g_call(&call,GC(0x025DEAB4),{previous_layer});throw;}
+        g_call(&call,GC(0x025DEAB4),{previous_layer});
+        if(a.enemy_token&&a.process&&a.process!=0xFFFFFFFFu)story_enemies::bind(a.enemy_token,a.process);
+        if(a.prop_token)story_props::bind(a.prop_token,a.process);
+        if(a.switch_token)story_switches::bind(a.switch_token,a.process);
+        if(a.route_slot>=0&&walks(a.spec)&&a.process&&a.process!=0xFFFFFFFFu)story_resident_routes::set_owner(unsigned(a.route_slot),a.process);
+        if(a.game_batch&&a.process&&a.process!=0xFFFFFFFFu){
+            // the placement actor adds its units and is gone at once: the mark (this room visit) is all that is kept
+            a.game_planted=story_game_objects::planted_mark(ld32(GD(0x1047E8F0)+uint32_t(room)*0x22C));a.process=0xFFFFFFFFu;a.game_checked=true;
+            st32(g_scratch+128+uint32_t(&a-g_actors.data())*4,a.game_planted);LOG("[game_objects] %s:%s planted into the stage's batch (%s)",a.mod.c_str(),a.spec.id.c_str(),a.spec.variant.c_str());continue;
+        }
+        st32(g_scratch+128+uint32_t(&a-g_actors.data())*4,a.process);
+        // Residents reuse their previously unused existing 40-byte identity row.
+        // Distinct magic/token format: never interpret this as a prop record.
+        if(a.resident_event_token&&a.process&&a.process!=0xFFFFFFFFu){const uint32_t row=g_scratch+kIdentityScratchOffset+uint32_t(&a-g_actors.data())*identity::kRecordBytes;st32(row,0x52455631);st32(row+4,a.resident_event_token);std::memcpy(mem::ptr(row+8),a.fingerprint.data(),a.fingerprint.size());}
+        if((a.prop_token||a.switch_token||a.enemy_token||a.game)&&a.process&&a.process!=0xFFFFFFFFu){const auto record=identity::record(a.fingerprint);std::memcpy(mem::ptr(g_scratch+kIdentityScratchOffset+uint32_t(&a-g_actors.data())*identity::kRecordBytes),record.data(),record.size());}
+        LOG("[actors] %s:%s room %d process %08X room_layer=%08X",a.mod.c_str(),a.spec.id.c_str(),room,a.process,room_layer);
+    }
+}
+// test aid: WWHD_EDITOR_POSE_TRACE=1 logs each placed actor's place and where its model is drawn (the
+// translation of its cull matrix, the model's base matrix for most kinds) every 20 logic steps, and each
+// editor pose (in place or held)
+bool pose_trace(){static const bool on=[]{const char*v=std::getenv("WWHD_EDITOR_POSE_TRACE");return v&&*v=='1';}();return on;}
+void trace_drawn(Cpu* c,const Actor& a,const char* what){
+    const uint32_t at=actor_address(c,a.mod,a.spec.id);if(!at)return;
+    const uint32_t m=ld32(at+0x348);const bool ok=m>=mem::kMem2Start&&m<mem::kMem2End-0x30;
+    LOG("[actors] pose-trace %s %s pos %.1f %.1f %.1f drawn %.1f %.1f %.1f",a.spec.id.c_str(),what,double(u32_as_f32(ld32(at+0x314))),double(u32_as_f32(ld32(at+0x318))),double(u32_as_f32(ld32(at+0x31C))),
+        ok?double(u32_as_f32(ld32(m+0xC))):0.0,ok?double(u32_as_f32(ld32(m+0x1C))):0.0,ok?double(u32_as_f32(ld32(m+0x2C))):0.0);
+}
+// Enemies naming a mod switch (defeat_switch): when every enemy of the mod naming it is defeated, the
+// switch's own flag is set (once), so the doors following it open. Idempotent: checked again on the game
+// steps, so a defeat committed just before a save state or a room change is never lost; the markers and the
+// flag are both mod story records, restored together by every kind of state load.
+void apply_defeat_switches(){
+    if(std::none_of(g_actors.begin(),g_actors.end(),[](const Actor&a){return !a.spec.defeat_switch.empty();}))return;
+    const auto book=story_store::book();if(!book.usable())return;
+    for(const auto&sw:g_actors){
+        if(sw.removed||sw.spec.actor!="switch"||sw.spec.switch_flag.empty())continue;
+        bool named=false,all=true;
+        for(const auto&e:g_actors){
+            if(e.removed||e.mod!=sw.mod||e.spec.defeat_switch!=sw.spec.id)continue;
+            named=true;
+            const bool down=e.enemy_token?story_enemies::is_defeated(e.enemy_token):e.combat_marker.value?story_items::enemy_defeated(e.combat_marker):false;
+            if(!down){all=false;break;}
+        }
+        if(!named||!all||flag(book,sw.mod,sw.spec.switch_flag))continue;
+        if(set_flag(book,sw.mod,sw.spec.switch_flag,true))LOG("[actors] %s:%s set: every enemy naming it is defeated",sw.mod.c_str(),sw.spec.id.c_str());
+    }
+}
+void service(Cpu* c){
+    if(!g_installed||!g_scratch)return;
+    close_rat_holes();apply_defeat_switches();
+    if(pose_trace()){static unsigned n=0;if(n++%20==0)for(const auto& a:g_actors)if(!a.removed&&a.process!=0xFFFFFFFFu)trace_drawn(c,a,"step");}
+    refresh_link();
+    if(g_talk.actor&&g_talk.actor->spec.actor=="resident"){
+        Cpu lookup=*c;st32(g_scratch+0x40,0);g_call(&lookup,kSearch,{g_talk.actor->process,g_scratch+0x40});
+        const uint32_t npc=ld32(g_scratch+0x40);
+        const uint32_t layer=npc?ld32(npc+0x2C):0;
+        if(!npc||(g_talk.actor->spec.resident==kYm1?ym1(npc):people(npc))!=g_talk.actor)cancel_talk("missing-pid",false);
+        else if(layer&&scene_is_deleting(ld32(layer+0x18)))cancel_talk("draining");
+    }
+    Cpu probe=*c;const uint32_t play=g_call(&probe,kPlay,{});if(!play)return;
+    const uint32_t player=ld32(play+0x5B34);if(!player)return;
+    // the editor's changed actors: removed wherever they are, then created again by room_loaded below
+    // (not while a mod scene runs: a native scene's residents stay its own until it ends)
+    for(auto& a:g_actors){
+        if(!a.respawn||story_scenes::active())continue;
+        if(a.process==0xFFFFFFFFu){a.respawn=false;native_redeclare(a);continue;}
+        if(g_talk.actor==&a)continue;
+        st32(g_scratch+0x40,0);probe=*c;const uint32_t exists=g_call(&probe,kSearch,{a.process,g_scratch+0x40});
+        const uint32_t actor=ld32(g_scratch+0x40);
+        if(mod_actor::talking(actor))continue;
+        if(actor&&!a.deleting){probe=*c;if(g_call(&probe,kDelete,{actor}))a.deleting=true;}
+        if(!exists){a.process=0xFFFFFFFFu;st32(g_scratch+128+uint32_t(&a-g_actors.data())*4,a.process);a.respawn=false;a.deleting=false;native_redeclare(a);
+            if(a.mod_token)mod_actor::retry(a.mod_token);LOG("[actors] %s:%s removed for the editor; created again from its new spec",a.mod.c_str(),a.spec.id.c_str());}
+    }
+    const int room=int8_t(ld8(player+0x326));if(room<0||room>63)return;
+    if(ld32(g_scratch+0x318)!=ld32(GD(0x1047E6C4))||ld32(g_scratch+0x400+uint32_t(room)*4)!=ld32(GD(0x1047E8F0)+uint32_t(room)*0x22C))return;
+    if(std::memcmp(mem::ptr(g_scratch+0x300),mem::ptr(kStage),8)!=0||!(ld8(g_scratch+0x308+uint32_t(room)/8)&(1u<<(uint32_t(room)%8))))return;
+    for(auto& a:g_actors){
+        if(a.spec.room!=unsigned(room)||std::strncmp(reinterpret_cast<const char*>(mem::ptr(kStage)),a.spec.stage.c_str(),8)!=0||a.process==0xFFFFFFFFu||eligible(a))continue;
+        if(g_talk.actor==&a)continue; // finish native dialogue before removing its talk partner
+        if(a.removed&&story_scenes::active())continue; // an editor removal waits for a running mod scene
+        st32(g_scratch+0x40,0);probe=*c;const uint32_t exists=g_call(&probe,kSearch,{a.process,g_scratch+0x40});
+        const uint32_t actor=ld32(g_scratch+0x40);
+        if(mod_actor::talking(actor))continue; // native events retain their talk target until closure
+        if(actor&&!a.deleting){probe=*c;if(g_call(&probe,kDelete,{actor}))a.deleting=true;}
+        // Keep creating/queued-for-deletion IDs until native lookup confirms they are gone.
+        if(!exists){a.process=0xFFFFFFFFu;st32(g_scratch+128+uint32_t(&a-g_actors.data())*4,a.process);}
+    }
+    // game objects the game has made since: read back once (process, parameter word, subtype); a mismatch is deleted and quarantined
+    for(auto& a:g_actors){
+        if(!a.game||a.game_checked||a.process==0xFFFFFFFFu||a.deleting)continue;
+        st32(g_scratch+0x40,0);probe=*c;if(!g_call(&probe,kSearch,{a.process,g_scratch+0x40}))continue;
+        const uint32_t actor=ld32(g_scratch+0x40);if(!actor||ld32(actor+4)!=a.process)continue;  // still being created
+        if(story_game_objects::read_back(actor,a.game_native)!=story_game_objects::ReadBack::Match){
+            LOG("[game_objects] %s:%s quarantined: the game made process %04X params %08X subtype %u (wanted %04X %08X %u)",a.mod.c_str(),a.spec.id.c_str(),unsigned(ld16(actor+0xE)),ld32(actor+0xB0),unsigned(ld8(actor+0x2DD)),unsigned(a.game_native.process),a.game_native.params,unsigned(a.game_native.subtype));
+            probe=*c;if(g_call(&probe,kDelete,{actor}))a.deleting=true;a.restore_quarantined=a.game_mismatch=a.game_checked=true;continue;
+        }
+        if(!ld32(actor+0xF4))continue;  // its create phase hasn't made the object's own heap yet
+        a.game_checked=true;
+        LOG("[game_objects] %s:%s %s: %s process %04X params %08X at %.1f %.1f %.1f",a.mod.c_str(),a.spec.id.c_str(),a.game_attempts?"made":"read back after a state load",a.spec.actor.c_str(),unsigned(a.game_native.process),a.game_native.params,double(ldf32(actor+0x314)),double(ldf32(actor+0x318)),double(ldf32(actor+0x31C)));
+        story_game_objects::trace_created(c,g_call,a.mod,a.spec.id,actor);a.game_attempts=0;
+    }
+    room_loaded(c,room);publish_islands(c,player);
+    const float observer_x=ldf32(player+0x314),observer_z=ldf32(player+0x31C);
+    int observer_square=-1;if(std::isfinite(observer_x)&&std::isfinite(observer_z)){const auto place=story_chart::square_place(observer_x,observer_z);observer_square=1+(place.row+3)*7+place.column+3;}
+    story_world_visuals::service(c,reinterpret_cast<const char*>(mem::ptr(kStage)),room,observer_square);
+}
+void state_loaded(){if(combat_declared())story_enemy_ownership::state_loaded();if(enemies_declared()){story_enemies::state_loaded();story_enemy_children::state_loaded();}
+    story_world_visuals::state_loaded();story_world_arrival::state_loaded();mod_actor::state_loaded();story_props::state_loaded();story_switches::state_loaded();cancel_talk("state-load",false,true);g_opening=nullptr;
+    for(size_t i=0;i<g_actors.size();++i){auto&a=g_actors[i];const uint32_t slot=g_scratch?g_scratch+128+uint32_t(i)*4:0;const uint32_t id=slot?ld32(slot):0;a.process=id?id:0xFFFFFFFFu;a.deleting=false;a.restore_talk=a.spec.actor=="resident"||a.spec.actor=="sign";a.restore_quarantined=false;
+        if(a.enemy_token){story_enemy_ownership::Binding binding;const bool known=story_enemy_ownership::binding_state(a.enemy_token,binding);const uint32_t epoch=g_scratch?ld32(g_scratch+kEnemyEpochScratchOffset+uint32_t(i)*4):0;const bool queued=known&&(binding.state==story_enemy_ownership::BindingState::Queued||binding.state==story_enemy_ownership::BindingState::Active);const bool fresh=known&&binding.state==story_enemy_ownership::BindingState::Fresh;const bool retired=known&&binding.state==story_enemy_ownership::BindingState::Retired;const bool identity_ok=queued&&a.process==binding.pid&&identity::matches(mem::ptr(g_scratch+kIdentityScratchOffset+uint32_t(i)*identity::kRecordBytes),a.fingerprint);const bool no_pid=a.process==0xFFFFFFFFu;
+            if(!epoch||!known||epoch!=binding.epoch||(!identity_ok&&!(no_pid&&(fresh||retired)))){
+                if(known&&binding.actor&&story_enemy_ownership::lookup_actor(binding.actor)==a.enemy_token)story_enemy_ownership::retire_before_delete(binding.actor);
+                story_enemies::quarantine(a.enemy_token);a.process=0xFFFFFFFFu;a.restore_quarantined=true;if(slot)st32(slot,0xFFFFFFFFu);LOG("[native_enemy] %s:%s restored binding/epoch/fingerprint rejected",a.mod.c_str(),a.spec.id.c_str());
+            }else if(queued)story_enemies::bind(a.enemy_token,a.process,true);
+            else {a.process=0xFFFFFFFFu;a.restore_quarantined=retired;}
+        }
+        if(a.game_batch){a.game_planted=story_game_objects::is_planted_mark(id)?id:0;a.process=0xFFFFFFFFu;a.restore_quarantined=a.game_mismatch;}
+        else if(a.game){
+            a.game_checked=false;a.restore_quarantined=a.game_mismatch;const bool live=a.process!=0xFFFFFFFFu;
+            if(live&&(!g_scratch||!identity::matches(mem::ptr(g_scratch+kIdentityScratchOffset+uint32_t(i)*identity::kRecordBytes),a.fingerprint))){a.process=0xFFFFFFFFu;a.restore_quarantined=true;if(slot)st32(slot,0xFFFFFFFFu);LOG("[game_objects] %s:%s restored declaration fingerprint rejected",a.mod.c_str(),a.spec.id.c_str());}
+        }
+        if(a.prop_token||a.switch_token){
+            const bool live=a.process!=0xFFFFFFFFu;
+            if(live&&(!g_scratch||!identity::matches(mem::ptr(g_scratch+kIdentityScratchOffset+uint32_t(i)*identity::kRecordBytes),a.fingerprint))){a.process=0xFFFFFFFFu;a.restore_quarantined=true;if(slot)st32(slot,0xFFFFFFFFu);if(a.prop_token)story_props::quarantine(a.prop_token);if(a.switch_token)story_switches::quarantine(a.switch_token);LOG("[native_prop] %s:%s restored declaration fingerprint rejected",a.mod.c_str(),a.spec.id.c_str());}
+            else {if(a.prop_token)story_props::bind(a.prop_token,a.process);if(a.switch_token)story_switches::bind(a.switch_token,a.process,live);}
+        }
+    }
+    // walking residents: a restored copy keeps following the record that names it as its owner (the
+    // record's route is written again from the declaration; an unchanged route keeps its guard state)
+    if(story_resident_routes::installed()){
+        for(auto& a:g_actors){if(!walks(a.spec)||a.process==0xFFFFFFFFu)continue;
+            for(int s=0;s<int(story_resident_route::kSlots);++s)if(story_resident_routes::owner(unsigned(s))==a.process){
+                for(auto& other:g_actors)if(&other!=&a&&other.route_slot==s)other.route_slot=-1;
+                a.route_slot=s;break;}}
+        for(auto& a:g_actors)if(walks(a.spec)&&a.route_slot>=0){const uint32_t pid=story_resident_routes::owner(unsigned(a.route_slot));route_record(a,false);if(pid!=a.process)story_resident_routes::set_owner(unsigned(a.route_slot),a.process==0xFFFFFFFFu?0:a.process);}
+    }
+    story_room_paths::state_loaded();  // the mod paths' records again from their declarations
+    if(combat_declared())story_enemy_projectiles::state_loaded();
+}
+void restore_talk_text(){
+    story_mail::SayOwner owner;
+    if(!story_mail::restore_say_owner(kCarrier,owner)||owner.token>g_actors.size())return;
+    Actor* a=&g_actors[owner.token-1];const uint32_t npc=owner.actor;
+    if((a->spec.actor!="resident"&&a->spec.actor!="sign")||a->process!=owner.pid||find(npc)!=a||ld16(npc+0xF8)!=1||ld32(GD(0x1046F0B0)+0x529C)!=owner.partner)return;
+    if(a->spec.actor=="resident"&&((a->spec.resident==kYm1?ym1(npc):people(npc))!=a||ld32(npc+0x7C0)!=kCarrier||ld8(npc+0x7CC)>1))return;
+    const uint32_t layer=ld32(npc+0x2C);if(layer&&scene_is_deleting(ld32(layer+0x18)))return;
+    bool terminal=false;
+    if(a->spec.actor=="sign"){}
+    else if(a->spec.resident==kYm1){
+        const bool open=talk_latch(a)==1&&ld8(npc+0xA1D)==5&&ld32(npc+0x7C8)!=0xFFFFFFFFu;
+        terminal=talk_latch(a)==2&&ld32(npc+0x7C8)==0xFFFFFFFFu&&ld8(npc+0x7CC)==1&&ld8(npc+0xA1D)==11&&ld8(npc+0xA13)==0;
+        if(!open&&!terminal)return;
+    }else{terminal=ld16(npc+0x8F0)==0x12&&ld32(npc+0x7C8)==0xFFFFFFFFu;if(ld32(npc+0x7C8)==0xFFFFFFFFu&&!terminal)return;}
+    g_talk={};g_talk.npc=npc;g_talk.actor=a;g_talk.started=true;g_talk.terminal=terminal;
+    if(!capture_talk(a,true)){g_talk={};talk_latch(a,3);a->restore_talk=false;story_mail::unsay();clear_talk_proof();return;}
+    if(!story_mail::resume_say(kCarrier,&g_talk.text,owner)){g_talk={};return;}
+    native_trace(a,npc,"pre-resume-text-hydrated");
+}
+uint32_t actor_address(Cpu* c,const std::string& mod,const std::string& id) {
+    if(!g_call||!g_scratch)return 0;
+    for(auto& a:g_actors)if(a.mod==mod&&a.spec.id==id&&a.process!=0xFFFFFFFFu){Cpu call=*c;st32(g_scratch+0x40,0);g_call(&call,kSearch,{a.process,g_scratch+0x40});return ld32(g_scratch+0x40);}return 0;
+}
+namespace {
+bool g_live_kinds=false;  // --editor: native props, switches, doors, enemies and residents are installed for live placement
+// Actors whose game-side state is declared at start-up and that the running game can't take while it
+// runs: mod enemies and carried props always; native props, switches, doors and enemies unless their
+// profiles were installed for the editor (story_*::live()).
+const char* restart_kind(const ManifestActor& a){
+    story_enemies::Kind enemy;
+    if(enemy_kind(a,enemy))return story_enemies::live()?nullptr:"an enemy";
+    if(story_props::is_prop(a))return story_props::live()?nullptr:"a pot, barrel or crate";
+    if(a.actor=="switch")return story_switches::live(story_switches::Kind::Switch)?nullptr:"a switch or door";
+    if(a.actor=="door")return story_switches::live(story_switches::Kind::Door)?nullptr:"a switch or door";
+    if(a.kind=="mod"&&a.combat_enabled)return "a mod enemy (combat)";
+    if(a.kind=="mod"&&a.carry_enabled)return "a carried prop";
+    return nullptr;
+}
+// Whether `a` can be created while the game runs: the hooks its kind needs are installed and a mod
+// model is prepared. `why` says what waits for a restart otherwise.
+bool live_capable(const std::string& mod,const ManifestActor& a,std::string& why){
+    if(const char* kind=restart_kind(a))return why=std::string(kind)+" appears after a restart",false;
+    if(!g_installed)return why="the game had no mod actors at start-up: new actors appear after a restart",false;if(a.chart_marker.enabled&&!story_chart::installed())return why="the first island chart marker appears after a restart",false;
+    if(a.actor=="resident"&&!(a.resident==kYm1?g_ym1_hooks:g_resident_hooks))return why="the first resident of this kind appears after a restart",false;
+    if(a.kind=="mod"){
+        if(!mod_actor::live_ready())return why="the first mod model actor appears after a restart",false;
+        if(!g_models.contains({mod,a.model}))return why="model "+a.model+" is not prepared yet: it appears after a reload or restart",false;if(!visual_ready(mod,a,why))return false;
+    }
+    return true;
+}
+bool same_spec(const std::string& mod,const ManifestActor& a,const ManifestActor& b){return identity::fingerprint(mod,a)==identity::fingerprint(mod,b);}
+bool native_kind(const ManifestActor& a){story_enemies::Kind e;return enemy_kind(a,e)||story_props::is_prop(a)||a.actor=="switch"||a.actor=="door";}
+// Kinds with a solid background collision of their own: after a move they are created again (the
+// collision follows exactly), never only moved in place.
+bool solid_kind(const ManifestActor& a){return a.actor=="switch"||a.actor=="door"||a.actor=="chest"||a.game_object();}
+uint32_t pid_slot(const Actor& a){return g_scratch+128+uint32_t(&a-g_actors.data())*4;}
+uint32_t identity_row(const Actor& a){return g_scratch+kIdentityScratchOffset+uint32_t(&a-g_actors.data())*identity::kRecordBytes;}
+// The fingerprint and the saved identity row follow a changed spec (state loads compare them).
+void refingerprint(const std::string& mod,Actor& a){
+    if(a.resident_event_token||a.prop_token||a.switch_token||a.enemy_token||a.combat_marker.value||a.carry_marker||a.game)a.fingerprint=identity::fingerprint(mod,a.spec);
+    if(!g_scratch||a.process==0xFFFFFFFFu)return;
+    const uint32_t row=identity_row(a);
+    if(a.resident_event_token){st32(row,0x52455631);st32(row+4,a.resident_event_token);std::memcpy(mem::ptr(row+8),a.fingerprint.data(),a.fingerprint.size());}
+    else if(a.prop_token||a.switch_token||a.enemy_token||a.game){const auto record=identity::record(a.fingerprint);std::memcpy(mem::ptr(row),record.data(),record.size());}
+}
+// a summoner's pool member is transient (no flag, no drops); a summoner places with its wave as z rotation
+void enemy_spec_extras(story_enemies::Spec& spec,const ManifestActor& a){spec.transient=!a.summon_of.empty();if(spec.transient)spec.drops.clear();
+    if(story_enemy_variants::summoner(a.actor,a.variant))spec.home_z=story_enemy_variants::angle_z(a.actor,a.variant);}
+story_enemies::Spec enemy_spec(const std::string& mod,const ManifestActor& a,const identity::Fingerprint& fp,uint32_t epoch){
+    story_enemies::Kind kind{};enemy_kind(a,kind);story_enemies::Spec spec{kind,mod,a.id,a.defeated_flag,{},fp,epoch,enemy_params(kind,a,mod)};
+    for(const auto&drop:a.drops)spec.drops.push_back({drop.item,drop.quantity});enemy_spec_extras(spec,a);return spec;
+}
+// A new copy of an enemy needs a new epoch of its ownership record (the old copy retired it).
+void enemy_epoch(Actor& a){
+    if(!a.enemy_token||!g_scratch)return;
+    const uint32_t counter=g_scratch+kEnemyEpochScratchOffset+uint32_t(&a-g_actors.data())*4;uint32_t epoch=ld32(counter)+1;if(!epoch)epoch=1;
+    if(story_enemies::begin_epoch(a.enemy_token,epoch)){st32(counter,epoch);a.restore_quarantined=false;}
+}
+// After the old copy is gone: the native declaration takes the changed spec (props, enemies, doors).
+void native_redeclare(Actor& a){
+    if(!a.redeclare)return;
+    a.redeclare=false;std::string why;
+    if(a.prop_token&&!story_props::editor_redeclare(a.prop_token,a.mod,a.spec,why)){LOG("[actors] %s:%s: %s (it appears after a restart)",a.mod.c_str(),a.spec.id.c_str(),why.c_str());story_props::quarantine(a.prop_token);return;}
+    if(a.spec.actor=="door"&&a.switch_token){for(const auto& sw:g_actors)if(sw.mod==a.mod&&sw.spec.actor=="switch"&&sw.spec.id==a.spec.switch_actor&&sw.switch_token&&story_switches::editor_set_source(a.switch_token,sw.switch_token,why))a.switch_source=sw.switch_token;}
+    if(a.enemy_token){
+        story_enemies::Kind kind{};enemy_kind(a.spec,kind);a.fingerprint=identity::fingerprint(a.mod,a.spec);
+        if(!story_enemies::editor_redeclare(a.enemy_token,enemy_spec(a.mod,a.spec,a.fingerprint,1),why)){
+            // another kind (or a refused change): a declaration of its own
+            const uint32_t token=story_enemies::editor_declare(enemy_spec(a.mod,a.spec,a.fingerprint,1),why);
+            if(!token){LOG("[actors] %s:%s: %s (it appears after a restart)",a.mod.c_str(),a.spec.id.c_str(),why.c_str());story_enemies::quarantine(a.enemy_token);a.restore_quarantined=true;return;}
+            story_enemies::quarantine(a.enemy_token);a.enemy_token=token;
+            if(g_scratch)st32(g_scratch+kEnemyEpochScratchOffset+uint32_t(&a-g_actors.data())*4,1);
+            return;
+        }
+        enemy_epoch(a);
+    }
+    a.fingerprint=identity::fingerprint(a.mod,a.spec);
+}
+// A drag moved the actor in place and the change is that move only: the live copy takes the spec
+// without being created again (the drag's end check: it exists, is ours and stands where the spec
+// says; solid kinds are always created again).
+bool settle_in_place(Cpu* c,const std::string& mod,Actor& a,const ManifestActor& spec){
+    if(!c||a.removed||a.respawn||a.deleting||a.process==0xFFFFFFFFu||solid_kind(spec)||a.spec.actor!=spec.actor||a.spec.kind!=spec.kind)return false;
+    ManifestActor moved=a.spec;moved.position=spec.position;moved.rotation=spec.rotation;
+    if(!same_spec(mod,moved,spec))return false;  // more than the place changed
+    const uint32_t at=actor_address(c,mod,spec.id);if(!at||find(at)!=&a||ld8(at+0xC)==3)return false;
+    const float x=u32_as_f32(ld32(at+0x314)),y=u32_as_f32(ld32(at+0x318)),z=u32_as_f32(ld32(at+0x31C));
+    if(!(std::hypot(double(x)-spec.position.x,double(z)-spec.position.z)<=30&&std::fabs(double(y)-spec.position.y)<=300))return false;
+    const int yaw=int16_t(ld16(at+0x32A)),want=int16_t(uint16_t(int32_t(spec.rotation.y*65536.0f/360.0f)));
+    if(std::abs(int16_t(uint16_t(yaw-want)))>200)return false;
+    if(a.spec.kind=="mod"){const auto r=g_models.find({mod,spec.model});if(r==g_models.end()||!a.mod_token||!mod_actor::redeclare(a.mod_token,spec,r->second.archive,r->second.index,r->second.minimum,r->second.maximum,r->second.skinned,r->second.clips,r->second.rig,true))return false;}
+    a.spec=spec;refingerprint(mod,a);
+    if(a.enemy_token)story_enemies::editor_refingerprint(a.enemy_token,a.fingerprint);
+    if(a.route_slot>=0&&route_record(a,false))story_resident_routes::edited(c,at,unsigned(a.route_slot));  // its route starts where it now stands
+    LOG("[actors] %s:%s moved in place by the editor (%.1f %.1f %.1f)",mod.c_str(),spec.id.c_str(),x,y,z);
+    return true;
+}
+}
+// The editor changed a walking resident's route only (points, speed, mode, pauses): the live copy
+// takes the new route in place, no new copy (a route added or taken away creates it again: its route
+// number is part of its creation).
+bool route_in_place(Cpu* c,const std::string& mod,Actor& a,const ManifestActor& spec){
+    if(c&&!a.removed&&!a.respawn&&!a.deleting&&a.process!=0xFFFFFFFFu&&a.spec.kind=="mod"&&spec.kind=="mod"&&a.mod_token&&!a.spec.path.points.empty()&&!spec.path.points.empty()){
+        // a mod actor: the declaration takes the new path and its live copy walks it at once
+        ManifestActor same=a.spec;same.path=spec.path;if(!same_spec(mod,same,spec))return false;
+        const uint32_t at=actor_address(c,mod,spec.id);if(!at||find(at)!=&a)return false;
+        const auto r=g_models.find({mod,spec.model});if(r==g_models.end()||!mod_actor::redeclare(a.mod_token,spec,r->second.archive,r->second.index,r->second.minimum,r->second.maximum,r->second.skinned,r->second.clips,r->second.rig,true))return false;
+        a.spec=spec;refingerprint(mod,a);
+        if(!mod_actor::reload_path(at,a.mod_token))return false;
+        LOG("[actors] %s:%s route changed in place by the editor (%zu points, %s)",mod.c_str(),spec.id.c_str(),spec.path.points.size(),spec.path.mode());
+        return true;
+    }
+    if(!c||a.removed||a.respawn||a.deleting||a.process==0xFFFFFFFFu||!walks(a.spec)||!walks(spec)||a.route_slot<0)return false;
+    ManifestActor same=a.spec;same.path=spec.path;if(!same_spec(mod,same,spec))return false;
+    const uint32_t at=actor_address(c,mod,spec.id);if(!at||find(at)!=&a||ld8(at+0xC)==3||story_resident_routes::slot_of(at)!=a.route_slot)return false;
+    a.spec=spec;refingerprint(mod,a);
+    if(!story_resident_routes::write(unsigned(a.route_slot),walked_path(a.spec),a.spec.position,false))return false;
+    story_resident_routes::set_owner(unsigned(a.route_slot),a.process);
+    story_resident_routes::edited(c,at,unsigned(a.route_slot));
+    LOG("[actors] %s:%s route changed in place by the editor (%zu points, %s)",mod.c_str(),spec.id.c_str(),spec.path.points.size(),spec.path.mode());
+    return true;
+}
+bool editor_restart_only(const ManifestActor& a){return restart_kind(a)!=nullptr;}
+bool borrowed_walk_declared(unsigned kind){return std::any_of(g_actors.begin(),g_actors.end(),[kind](const Actor& a){if(!walks(a.spec)||a.spec.actor!="resident"||a.spec.resident>255)return false;const auto*w=story_resident_types::borrowed_walk(uint8_t(a.spec.resident));return w&&unsigned(w-story_resident_types::kBorrowedWalks)==kind;});}
+bool resident_routes_declared(){return std::any_of(g_actors.begin(),g_actors.end(),[](const Actor& a){return walks(a.spec);});}
+bool resident_route(const std::string& mod,const std::string& id,ResidentRoute& out){
+    out={};for(const auto& a:g_actors)if(a.mod==mod&&a.spec.id==id&&!a.removed){
+        out.declared=walks(a.spec);if(!out.declared||a.route_slot<0)return true;
+        const auto v=story_resident_routes::view(unsigned(a.route_slot));out.live=v.valid&&a.process!=0xFFFFFFFFu&&story_resident_routes::owner(unsigned(a.route_slot))==a.process;
+        out.status=story_resident_route::status_name(v.status);return true;}
+    return false;
+}
+bool editor_live_capable(const std::string& mod,const ManifestActor& a,std::string& why){return live_capable(mod,a,why);}
+void editor_live_kinds(){if(!g_installed)g_live_kinds=true;}
+bool editor_kind_live(const std::string& type,bool fallback){
+    if(type=="pot"||type=="barrel"||type=="crate")return g_installed&&story_props::live();
+    if(type=="switch")return g_installed&&story_switches::live(story_switches::Kind::Switch);
+    if(type=="door")return g_installed&&story_switches::live(story_switches::Kind::Door);
+    if(type=="chuchu"||type=="bokoblin"||type=="moblin"||type=="keese"||type=="miniblin"||type=="peahat"||type=="darknut"||type=="rat_hole"||type=="bokobaba"||type=="bubble"||type=="octorok"||story_enemies_more::by_name(type))return g_installed&&story_enemies::live();
+    if(type=="model_enemy"||type=="model_carry")return false;
+    if(type=="resident")return g_installed&&g_resident_hooks;
+    return fallback&&g_installed;
+}
+bool editor_update(const std::string& mod,const std::vector<ManifestActor>& declared,const std::vector<std::string>& changed_declared,std::string& why,std::vector<std::string>* pending,Cpu* cpu){
+    const std::vector<ManifestActor> actors=expand_rat_holes(declared);std::vector<std::string> changed=changed_declared;
+    for(const auto& a:actors)if(!a.hole.empty()&&std::find(changed.begin(),changed.end(),a.hole)!=changed.end())changed.push_back(a.id);  // a changed hole: its rats too
+    for(const auto& a:actors)if(!a.rider_of.empty()&&std::find(changed.begin(),changed.end(),a.rider_of)!=changed.end())changed.push_back(a.id);  // a changed Kargaroc: its rider too
+    for(const auto& a:actors)if(!a.summon_of.empty()&&std::find(changed.begin(),changed.end(),a.summon_of)!=changed.end())changed.push_back(a.id);  // a changed summoner: its pool too
+    std::map<std::string,Actor*> own;for(auto& a:g_actors)if(a.mod==mod)own[a.spec.id]=&a;
+    struct Step {const ManifestActor* spec=nullptr;Actor* actor=nullptr;bool create=false,update=false;};
+    std::vector<Step> plan;std::vector<std::string> later;std::vector<Actor*> remove;
+    std::vector<ManifestActor> effective;  // what the game will have: checked like a start-up list
+    std::set<std::string> listed;
+    const auto is_changed=[&](const std::string& id){return std::find(changed.begin(),changed.end(),id)!=changed.end();};
+    for(const auto& spec:actors){
+        // a world object (or island building) placed where it can't stand stays in the package but not in the game:
+        // the editor shows it as a preview until it is moved where it fits (an active copy leaves the game)
+        if(spec.world_object()&&spec.kind=="mod"&&g_models.contains({mod,spec.model})){
+            mods::json::Value status;std::string w;
+            if(mod_actor::world_object_query(mod,spec,false,status,w)&&!status.get("clear").boolean){
+                const auto& c=status.get("conflicts").array;
+                // what is in the way, with the game's own name and where it is (which of the island's places is meant)
+                std::string what;
+                if(!c.empty()){const auto& f=c.front();what=f.get("message").string();const std::string native=f.get("native").string();
+                    if(!native.empty()&&what.find(native)==std::string::npos)what+=" ["+native+"]";
+                    if(f.get("at").type==mods::json::Value::Object)what+=" at x "+std::to_string(int(std::lround(f.get("at").get("x").number)))+", y "+std::to_string(int(std::lround(f.get("at").get("y").number)))+", z "+std::to_string(int(std::lround(f.get("at").get("z").number)));
+                    if(c.size()>1)what+=" and "+std::to_string(c.size()-1)+" more";}
+                later.push_back(spec.id+": can't stand here"+(what.empty()?std::string():" ("+what+")")+"; it isn't in the game until it stands where it fits");
+                continue;}
+        }
+        listed.insert(spec.id);
+        const auto it=own.find(spec.id);
+        std::string reason;
+        if(it==own.end()){
+            if(!live_capable(mod,spec,reason)){later.push_back(spec.id+": "+reason);continue;}
+            plan.push_back({&spec,nullptr,true,false});effective.push_back(spec);continue;
+        }
+        Actor* a=it->second;
+        if(!a->removed&&!is_changed(spec.id)){effective.push_back(a->spec);continue;}
+        if(a->removed&&same_spec(mod,a->spec,spec)){plan.push_back({&spec,a,false,false});effective.push_back(spec);continue;}  // a removal undone
+        const char* kind=restart_kind(a->spec);if(!kind)kind=restart_kind(spec);
+        if(kind||(a->spec.kind=="mod")!=(spec.kind=="mod")||(spec.kind=="mod"&&!g_models.contains({mod,spec.model}))||
+           ((spec.actor=="resident"||!spec.distant.model.empty()||!spec.shoreline.model.empty()||spec.chart_marker.enabled)&&!live_capable(mod,spec,reason))||(native_kind(a->spec)!=native_kind(spec))||(a->spec.game_object()!=spec.game_object())||(story_props::is_prop(spec)&&spec.texture_token!=a->spec.texture_token)){
+            if(!kind&&native_kind(a->spec)!=native_kind(spec))reason="switching between a native prop, switch, door or enemy and another kind takes effect after a restart";
+            if(!kind&&a->spec.game_object()!=spec.game_object())reason="switching between a game object and another kind takes effect after a restart";
+            later.push_back(spec.id+": "+(kind?std::string(kind)+" takes changes after a restart":reason.empty()?std::string("takes this change after a restart"):reason));
+            if(!a->removed)effective.push_back(a->spec);
+            continue;
+        }
+        plan.push_back({&spec,a,false,true});effective.push_back(spec);
+    }
+    for(auto& [id,a]:own)if(!a->removed&&!listed.contains(id))remove.push_back(a);
+    size_t creates=0;for(const auto& step:plan)creates+=step.create;
+    if(g_actors.size()+creates>128)return why="more than 128 world actors in all",false;size_t new_views=0;for(const auto&a:effective)for(const auto role:{story_world_visuals::Role::Distant,story_world_visuals::Role::Shoreline}){const bool wanted=role==story_world_visuals::Role::Distant?!a.distant.model.empty():!a.shoreline.model.empty();if(wanted&&std::none_of(g_visual_bindings.begin(),g_visual_bindings.end(),[&](const VisualBinding&b){return b.mod==mod&&b.id==a.id&&b.role==role;}))++new_views;}if(g_actors.size()+creates+g_visual_bindings.size()+new_views>128)return why="actor/visual declaration history is full; restart to reclaim removed objects",false;
+    if(!check_specs(mod,effective,true,why))return false;if(!sync_visuals(mod,effective,false,why))return false;
+    std::vector<std::string> flags;for(const auto& a:effective){if(!a.when_flag.empty())flags.push_back(a.when_flag);if(!a.when_not_flag.empty())flags.push_back(a.when_not_flag);if(!a.flag.empty())flags.push_back(a.flag);if(!a.switch_flag.empty())flags.push_back(a.switch_flag);if(a.arrival.enabled)flags.push_back(a.arrival.flag);if(a.chart_marker.enabled&&!a.chart_marker.when_flag.empty())flags.push_back(a.chart_marker.when_flag);for(const auto&t:a.talks){if(!t.when_flag.empty())flags.push_back(t.when_flag);if(!t.when_not_flag.empty())flags.push_back(t.when_not_flag);for(const auto&action:t.then)if(action.kind==story_notebook::StoryAction::Kind::Flag)flags.push_back(action.id);}for(const auto& action:a.then)if(action.kind==story_notebook::StoryAction::Kind::Flag)flags.push_back(action.id);}
+    auto saved_flags=g_flag_names;if(!register_flags(mod,flags,why))return false;
+    // check every changed mod model first, then apply: a refusal leaves all declarations unchanged
+    for(const bool apply:{false,true})for(const auto& step:plan){if(!step.update||step.spec->kind!="mod")continue;
+        const auto& r=g_models.at({mod,step.spec->model});
+        if(!step.actor->mod_token||!mod_actor::redeclare(step.actor->mod_token,*step.spec,r.archive,r.index,r.minimum,r.maximum,r.skinned,r.clips,r.rig,apply)){
+            g_flag_names=saved_flags;return why="actor "+step.spec->id+": the model can't serve this spec (animation, look_at, rotation or scale)",false;}
+    }
+    // new actors: switches before doors (a door names its switch's declaration)
+    for(const int pass:{0,1})for(const auto& step:plan){
+        if(!step.create||(pass==0)==(step.spec->actor=="door"))continue;
+        Actor added{mod,*step.spec};std::string w;
+        if(step.spec->kind=="mod"){
+            const auto& r=g_models.at({mod,step.spec->model});
+            added.mod_token=mod_actor::declare(mod,added.spec,r.archive,r.index,mod_talked(mod,added.spec.id),r.minimum,r.maximum,r.skinned,r.clips,r.rig);
+            if(added.mod_token&&!added.spec.talks.empty())mod_actor::set_talk_provider(mod,added.spec.id,mod_talk_provider(mod,added.spec.id));
+            if(!added.mod_token){LOG("[actors] %s:%s: the model can't serve this spec; it appears after a restart",mod.c_str(),added.spec.id.c_str());later.push_back(added.spec.id+": the model can't serve this spec");continue;}
+        }
+        if(native_kind(added.spec)||added.spec.game_object()||(added.spec.actor=="resident"&&people_type(added.spec.resident)))added.fingerprint=identity::fingerprint(mod,added.spec);
+        added.game=added.spec.game_object();if(added.game){const auto*e=story_game_objects::catalogue().find(story_game_objects::reference(added.spec.actor));added.game_batch=e&&e->batch();}
+        if(added.spec.actor=="resident"&&people_type(added.spec.resident)&&g_next_resident_event_token&&g_next_resident_event_token!=0xFFFFFFFFu)added.resident_event_token=g_next_resident_event_token++;
+        story_enemies::Kind enemy{};
+        if(story_props::is_prop(added.spec)){added.prop_token=story_props::editor_declare(mod,added.spec,w);if(!added.prop_token){later.push_back(added.spec.id+": "+w);continue;}}
+        else if(enemy_kind(added.spec,enemy)){added.enemy_token=story_enemies::editor_declare(enemy_spec(mod,added.spec,added.fingerprint,1),w);if(!added.enemy_token){later.push_back(added.spec.id+": "+w);continue;}}
+        else if(added.spec.actor=="switch"){added.switch_token=story_switches::editor_declare_switch(mod,added.spec.id,w);added.switch_source=added.switch_token;if(!added.switch_token){later.push_back(added.spec.id+": "+w);continue;}}
+        else if(added.spec.actor=="door"){
+            const Actor* source=nullptr;for(const auto& c:g_actors)if(c.mod==mod&&c.spec.actor=="switch"&&c.spec.id==added.spec.switch_actor&&c.switch_token&&!c.removed)source=&c;
+            if(!source){later.push_back(added.spec.id+": its switch is not in the game yet");continue;}
+            added.switch_source=source->switch_token;added.switch_token=story_switches::editor_declare_door(mod,added.spec.id,added.switch_source,w);if(!added.switch_token){later.push_back(added.spec.id+": "+w);continue;}
+        }
+        g_actors.push_back(std::move(added));
+        const uint32_t i=uint32_t(g_actors.size()-1);
+        if(g_scratch){st32(g_scratch+128+i*4,0xFFFFFFFFu);st8(g_scratch+kTalkLatchOffset+i,0);std::memset(mem::ptr(g_scratch+kIdentityScratchOffset+i*identity::kRecordBytes),0,identity::kRecordBytes);st32(g_scratch+kEnemyEpochScratchOffset+i*4,g_actors.back().enemy_token?1u:0u);}
+        LOG("[actors] %s:%s added by the editor",mod.c_str(),g_actors.back().spec.id.c_str());
+    }
+    for(const auto& step:plan){
+        if(step.create)continue;
+        Actor* a=step.actor;
+        const bool was_removed=a->removed;
+        a->removed=false;
+        if(was_removed&&!step.update){
+            // a removal undone: a deleted enemy's next copy needs a new ownership epoch
+            if(a->enemy_token&&a->process==0xFFFFFFFFu)enemy_epoch(*a);
+            if(a->prop_token)story_props::retry(a->prop_token);
+            if(a->switch_token)story_switches::retry(a->switch_token);
+        }
+        if(step.update){
+            if(!was_removed&&(settle_in_place(cpu,mod,*a,*step.spec)||route_in_place(cpu,mod,*a,*step.spec)))continue;
+            a->spec=*step.spec;a->respawn=true;a->redeclare=native_kind(a->spec);
+            if(a->game_batch&&a->game_planted)later.push_back(a->spec.id+": grass, flowers and small trees change when the room loads again (Reload room)");
+            if(a->mod_token)mod_actor::set_talk_provider(mod,a->spec.id,a->spec.talks.empty()?mod_actor::TalkProvider{}:mod_talk_provider(mod,a->spec.id));
+            if(!a->redeclare)refingerprint(mod,*a);
+        }
+        LOG("[actors] %s:%s %s by the editor",mod.c_str(),a->spec.id.c_str(),was_removed?"restored":"changed");
+    }
+    for(Actor* a:remove){a->removed=true;a->respawn=false;if(a->game_batch&&a->game_planted)later.push_back(a->spec.id+": grass, flowers and small trees go when the room loads again (Reload room)");LOG("[actors] %s:%s removed by the editor",mod.c_str(),a->spec.id.c_str());}
+    if(!sync_visuals(mod,effective,true,why))return false;story_world_arrival::state_loaded();
+    if(pending)*pending=std::move(later);
+    return true;
+}
+// whether the game runs this actor's Execute now (dEvt_control_c::moveApproval != 0, as fopAc_Execute asks)
+bool editor_moves_in_place(Cpu* c,uint32_t actor){
+    const uint32_t play=g_call(c,GC(0x025200D4),{});
+    return play&&g_call(c,GC(0x02540158),{play+0x51D0,actor})!=0;
+}
+// A held actor's matrices at its new place: its own Execute runs once (fpcMtd_Execute with its
+// methods, as fopAc_Execute calls it, through the port's hooks for owned kinds), and its own record,
+// the whole process allocation (profile sizes), is put back as it was: its AI, timers, actions and
+// requests stay held with the world; what it drew from (its model and joint matrices, its weapon's
+// place) follows. An actor that never ran yet (created in the held world) keeps its first Execute,
+// its one-time start (a bokoblin takes up its weapon there; undone, it would hide the weapon again on
+// every step). False when the record can't be read safely.
+bool editor_redraw_held(Cpu* c,uint32_t actor,bool keep_first){
+    // the profile: the game's (MEM2) or the port's copy for owned kinds (runtime memory)
+    auto readable=[](uint32_t at,uint32_t bytes){return !(at&3)&&((at>=mem::kMem2Start&&at<=mem::kMem2End-bytes)||(at>=mem::kRuntimeStart&&at<=mem::kRuntimeEnd-bytes));};
+    const uint32_t profile=ld32(actor+0x10),methods=ld32(actor+0xF0);
+    if(!readable(profile,0x18)||!readable(methods,0x10))return false;
+    const uint32_t size=ld32(profile+0x10)+ld32(profile+0x14);
+    if(size<0x330||size>0x40000||uint64_t(actor)+size>mem::kMem2End)return false;
+    std::vector<uint8_t> record(size);std::memcpy(record.data(),mem::ptr(actor),size);
+    g_call(c,GC(0x025DFCC4),{methods,actor});
+    if(!keep_first)std::memcpy(mem::ptr(actor),record.data(),size);
+    return true;
+}
+bool editor_pose(Cpu* c,const std::string& mod,const std::string& id,const story_notebook::WorldPoint& p,const story_notebook::WorldPoint& r){
+    if(!c||!g_call||!g_scratch)return false;
+    Actor* a=nullptr;for(auto& x:g_actors)if(x.mod==mod&&x.spec.id==id)a=&x;
+    if(!a||a->removed||a->respawn||a->deleting||a->process==0xFFFFFFFFu){if(pose_trace())LOG("[actors] pose-trace %s no live copy to pose",id.c_str());return false;}
+    if(a->game)return false;  // a game object sets its model and collision matrices once, when made: it is made again at the new place
+    if(!std::isfinite(p.x)||!std::isfinite(p.y)||!std::isfinite(p.z)||!std::isfinite(r.y))return false;
+    const uint32_t at=actor_address(c,mod,id);if(!at||find(at)!=a||ld8(at+0xC)==3)return false;
+    if(a->spec.kind=="mod"){
+        mod_actor::Identity who;if(!mod_actor::identify(c,at,who))return false;
+        mod_actor::set_rotation(c,who,r);return mod_actor::set_position(c,who,p);
+    }
+    // home, old and current place; the turn about the vertical axis only (native kinds keep their own X/Z)
+    for(uint32_t off:{0x2ECu,0x300u,0x314u}){st32(at+off,f32_as_u32(p.x));st32(at+off+4,f32_as_u32(p.y));st32(at+off+8,f32_as_u32(p.z));}
+    const uint16_t yaw=uint16_t(int32_t(r.y*65536.0f/360.0f));
+    for(uint32_t off:{0x2FAu,0x30Eu,0x322u,0x32Au})st16(at+off,yaw);
+    // A native actor builds its model and joint matrices (and its held weapon's) from this place in its
+    // own Execute. The editor's view holds the world with an event, and the game then runs only the
+    // actors its event check lets move (dEvt_control_c::moveApproval: event members and actors with a
+    // run-in-events status, e.g. pots); a held one (an enemy...) would keep drawing at the old place.
+    const bool running=editor_moves_in_place(c,at);
+    // this copy's first held pose keeps its Execute (a copy created in the held world never ran yet)
+    const bool first=a->held_started!=a->process;
+    if(!running&&!editor_redraw_held(c,at,first)){if(pose_trace())LOG("[actors] pose-trace %s held, record not readable (profile %08X methods %08X)",id.c_str(),ld32(at+0x10),ld32(at+0xF0));return false;}
+    if(!running&&first){
+        a->held_started=a->process;
+        // the first Execute may have taken a step: the place and turn are the pose's again
+        for(uint32_t off:{0x2ECu,0x300u,0x314u}){st32(at+off,f32_as_u32(p.x));st32(at+off+4,f32_as_u32(p.y));st32(at+off+8,f32_as_u32(p.z));}
+        for(uint32_t off:{0x2FAu,0x30Eu,0x322u,0x32Au})st16(at+off,yaw);
+    }
+    if(pose_trace())trace_drawn(c,*a,running?"pose-running":first?"pose-held-first":"pose-held");
+    return true;
+}
+unsigned editor_pending(){unsigned n=0;for(const auto& a:g_actors)n+=a.respawn;return n;}
+bool position(Cpu* c,const std::string& mod,const std::string& id,story_notebook::WorldPoint& p){const uint32_t a=actor_address(c,mod,id);if(!a)return false;p={u32_as_f32(ld32(a+0x314)),u32_as_f32(ld32(a+0x318)),u32_as_f32(ld32(a+0x31C))};return true;}
+bool particle_position(Cpu* c,const std::string& mod,const std::string& id,unsigned room,story_notebook::WorldPoint& out){
+    out={};if(!c||!g_installed||!g_scratch||room>63)return false;
+    for(auto& entry:g_actors)if(entry.mod==mod&&entry.spec.id==id){
+        if(entry.process==0xFFFFFFFFu||entry.deleting||entry.restore_quarantined||entry.spec.room!=room||
+           std::strncmp(reinterpret_cast<const char*>(mem::ptr(kStage)),entry.spec.stage.c_str(),8)!=0||
+           std::memcmp(mem::ptr(g_scratch+0x300),mem::ptr(kStage),8)!=0)return false;
+        const uint32_t actor=actor_address(c,mod,id),pid=entry.process;
+        if((actor&3)||actor<mem::kMem2Start||uint64_t(actor)+0xA24>mem::kMem2End||
+           ld32(actor+4)!=pid||ld8(actor+0x326)!=room||find(actor)!=&entry)return false;
+        if(entry.spec.kind=="mod"){
+            mod_actor::Identity identity;
+            if(!entry.mod_token||!mod_actor::identify(c,actor,identity)||identity.mod!=mod||identity.id!=id||
+               identity.token!=entry.mod_token||identity.process_id!=pid)return false;
+        }else if(entry.spec.actor=="resident"){
+            if((entry.spec.resident==kYm1?ym1(actor):people(actor))!=&entry)return false;
+        }else if(!entry.prop_token&&!entry.enemy_token&&!entry.switch_token)return false;
+        if((entry.prop_token||entry.enemy_token||entry.switch_token)&&
+           !identity::matches(mem::ptr(g_scratch+kIdentityScratchOffset+uint32_t(&entry-g_actors.data())*identity::kRecordBytes),entry.fingerprint))return false;
+        const uint32_t stage=ld32(GD(0x1047E6C4)),active_room=ld32(GD(0x1047E8F0)+room*0x22C);
+        if(!stage||!active_room||ld32(g_scratch+0x318)!=stage||ld32(g_scratch+0x400+room*4)!=active_room)return false;
+        out={u32_as_f32(ld32(actor+0x314)),u32_as_f32(ld32(actor+0x318)),u32_as_f32(ld32(actor+0x31C))};
+        return std::isfinite(out.x)&&std::isfinite(out.y)&&std::isfinite(out.z);
+    }
+    return false;
+}
+bool resident_event_declaration(const std::string& mod,const std::string& id,ResidentEventDeclaration& out){
+    out={};for(const auto&a:g_actors)if(a.mod==mod&&a.spec.id==id){
+        if(a.spec.actor!="resident"||a.spec.resident!=1||!a.resident_event_token||a.spec.room>63||a.spec.stage.empty()||a.spec.stage.size()>8)return false;
+        out={a.resident_event_token,a.spec.room,1,a.spec.stage,a.fingerprint};return true;
+    }return false;
+}
+bool resident_event_process(const std::string&mod,const std::string&id,ResidentEventProcess&out){
+    out={};
+    if(!g_installed||!g_scratch||(g_scratch&15)||g_scratch<mem::kRuntimeStart||uint64_t(g_scratch)+kScratchBytes>mem::kHostStart)return false;
+    for(size_t index=0;index<g_actors.size();++index){const auto&a=g_actors[index];if(a.mod!=mod||a.spec.id!=id)continue;
+        if(index>=128||a.spec.actor!="resident"||a.spec.resident!=1||!a.resident_event_token||a.deleting||a.restore_quarantined||a.spec.room>63||a.spec.stage.empty()||a.spec.stage.size()>8)return false;
+        ResidentEventProcess p;p.declaration={a.resident_event_token,a.spec.room,1,a.spec.stage,a.fingerprint};p.pid=a.process;
+        p.pid_slot=g_scratch+128+uint32_t(index)*4;p.identity_row=g_scratch+kIdentityScratchOffset+uint32_t(index)*identity::kRecordBytes;p.scratch_window=g_scratch+0x300;
+        if(!p.pid||ld32(p.pid_slot)!=p.pid)return false;
+        const bool absent=p.pid==0xFFFFFFFFu;
+        const bool zero=std::all_of(mem::ptr(p.identity_row),mem::ptr(p.identity_row)+identity::kRecordBytes,[](uint8_t b){return b==0;});
+        const bool row=ld32(p.identity_row)==0x52455631&&ld32(p.identity_row+4)==a.resident_event_token&&std::memcmp(mem::ptr(p.identity_row+8),a.fingerprint.data(),a.fingerprint.size())==0;
+        if((!absent&&!row)||(absent&&!zero&&!row))return false;
+        p.presence=absent?ResidentEventProcess::Presence::Absent:ResidentEventProcess::Presence::Present;
+        std::copy_n(mem::ptr(p.pid_slot),p.pid_bytes.size(),p.pid_bytes.begin());
+        std::copy_n(mem::ptr(p.identity_row),p.identity_bytes.size(),p.identity_bytes.begin());
+        std::copy_n(mem::ptr(p.scratch_window),p.scratch_bytes.size(),p.scratch_bytes.begin());
+        if(a.process!=p.pid||a.deleting||a.restore_quarantined||ld32(p.pid_slot)!=p.pid||
+           std::memcmp(mem::ptr(p.identity_row),p.identity_bytes.data(),p.identity_bytes.size())||
+           std::memcmp(mem::ptr(p.scratch_window),p.scratch_bytes.data(),p.scratch_bytes.size()))return false;
+        out=std::move(p);return true;
+    }
+    return false;
+}
+uint32_t query_resident_event_address(Cpu*c,const std::string&mod,const std::string&id){
+    ResidentEventDeclaration declaration;
+    if(!c||!g_call||!g_installed||!g_scratch||(g_scratch&15)||g_scratch<mem::kRuntimeStart||uint64_t(g_scratch)+kScratchBytes>mem::kHostStart||!resident_event_declaration(mod,id,declaration))return 0;
+    const uint32_t output=g_scratch+0x40,before=ld32(output);const Cpu cpu=*c;
+    struct Restore{Cpu*c;Cpu cpu;uint32_t address,value;~Restore(){st32(address,value);*c=cpu;}}restore{c,cpu,output,before};
+    return actor_address(c,mod,id);
+}
+static bool resident_event_identity_impl(const std::string& mod,const std::string& id,uint32_t actor,uint32_t pid,ResidentEventIdentity& out,bool diagnostics){
+    out={};
+    // Private, bounded diagnosis only. This must never change admission or
+    // dereference an unbounded guest address on the entry-rejection path.
+    auto rejected=[&](const char* category,const Actor* a,uint32_t layer,uint32_t scene){
+        if(!diagnostics)return;
+        const char* enabled=std::getenv("WWHD_TEST_NATIVE_WAIT");
+        if(!enabled||std::strcmp(enabled,"1"))return;
+        try{
+            static std::mutex diagnostic_mutex;static std::set<std::string> seen;static unsigned total=0;
+            std::unique_lock lock(diagnostic_mutex,std::try_to_lock);if(!lock.owns_lock())return;
+            if(total>=16||!seen.insert(mod+":"+id+":"+category).second)return;
+            ++total;
+            if(!std::strcmp(category,"nativeABI")&&a){
+                LOG("[native_wait_identity] %s:%s reject=%s actor=%08X pid=%08X/%08X profile=%04X/%04X profileptr=%08X/%08X vtable=%08X/%08X params=%08X/%08X subtype=%u/%u tail=%u/%u room=%u/%u delete=%u",
+                    mod.c_str(),id.c_str(),category,actor,ld32(actor+4),pid,unsigned(ld16(actor+0xE)),0x175u,
+                    ld32(actor+0x10),GD(0x101C4CD0),ld32(actor+0xB4),GD(0x100209C4),
+                    ld32(actor+0xB0),0x00FF0000u,unsigned(ld8(actor+0x2DD)),1u,
+                    unsigned(ld8(actor+0x905)),1u,unsigned(ld8(actor+0x326)),a->spec.room,unsigned(ld8(actor+0xC)));
+            }else if(!std::strcmp(category,"profile")){
+                const uint32_t profile=GD(0x101C4CD0);
+                LOG("[native_wait_identity] %s:%s reject=profile actor=%08X meta_profile=%04X/%04X size=%08X/%08X methods=%08X",
+                    mod.c_str(),id.c_str(),actor,unsigned(ld16(profile+8)),0x175u,ld32(profile+0x10),0x920u,
+                    ld32(profile+0x3C));
+            }else if(!std::strcmp(category,"stage")&&a){
+                LOG("[native_wait_identity] %s:%s reject=stage actor=%08X stage=%08X scratch_stage=%08X room=%08X scratch_room=%08X expected_room=%u",
+                    mod.c_str(),id.c_str(),actor,ld32(GD(0x1047E6C4)),ld32(g_scratch+0x318),
+                    ld32(GD(0x1047E8F0)+a->spec.room*0x22C),ld32(g_scratch+0x400+a->spec.room*4),a->spec.room);
+            }else if(!std::strcmp(category,"scratchPID")&&a){
+                LOG("[native_wait_identity] %s:%s reject=scratchPID actor=%08X pid=%08X stored=%08X scratch=%08X deleting=%u quarantined=%u token=%u",
+                    mod.c_str(),id.c_str(),actor,pid,a->process,ld32(g_scratch+128+uint32_t(a-g_actors.data())*4),
+                    unsigned(a->deleting),unsigned(a->restore_quarantined),a->resident_event_token);
+            }else if(!std::strcmp(category,"fingerprint")&&a){
+                const uint32_t row=g_scratch+kIdentityScratchOffset+uint32_t(a-g_actors.data())*identity::kRecordBytes;
+                LOG("[native_wait_identity] %s:%s reject=fingerprint actor=%08X row_magic=%08X row_token=%08X expected_token=%08X",
+                    mod.c_str(),id.c_str(),actor,ld32(row),ld32(row+4),a->resident_event_token);
+            }else{
+                LOG("[native_wait_identity] %s:%s reject=%s actor=%08X pid=%08X layer=%08X scene=%08X",
+                    mod.c_str(),id.c_str(),category,actor,pid,layer,scene);
+            }
+        }catch(...){/* Diagnostic allocation/logging must not affect admission. */}
+    };
+    if(!g_installed||!g_scratch||(g_scratch&15)||g_scratch<mem::kRuntimeStart||uint64_t(g_scratch)+kScratchBytes>mem::kHostStart||
+       (actor&3)||actor<mem::kMem2Start||uint64_t(actor)+0x920>mem::kMem2End||!pid||pid==0xFFFFFFFFu){rejected("entry",nullptr,0,0);return false;}
+    for(size_t index=0;index<g_actors.size();++index){const auto&a=g_actors[index];if(a.mod!=mod||a.spec.id!=id)continue;
+        if(a.spec.actor!="resident"||a.spec.resident!=1||!a.resident_event_token||a.process!=pid||a.deleting||a.restore_quarantined||a.spec.room>63||
+           ld32(g_scratch+128+uint32_t(index)*4)!=pid){rejected("scratchPID",&a,0,0);return false;}
+        const uint32_t row=g_scratch+kIdentityScratchOffset+uint32_t(index)*identity::kRecordBytes;
+        if(ld32(row)!=0x52455631||ld32(row+4)!=a.resident_event_token||std::memcmp(mem::ptr(row+8),a.fingerprint.data(),a.fingerprint.size())!=0){rejected("fingerprint",&a,0,0);return false;}
+        const uint32_t stage=ld32(GD(0x1047E6C4)),room=ld32(GD(0x1047E8F0)+a.spec.room*0x22C);
+        if(!stage||!room||ld32(g_scratch+0x318)!=stage||ld32(g_scratch+0x400+a.spec.room*4)!=room||
+           std::strncmp(reinterpret_cast<const char*>(mem::ptr(kStage)),a.spec.stage.c_str(),8)!=0||std::memcmp(mem::ptr(g_scratch+0x300),mem::ptr(kStage),8)!=0){rejected("stage",&a,0,0);return false;}
+        if(ld32(actor+4)!=pid||ld16(actor+0xE)!=0x175||ld32(actor+0x10)!=GD(0x101C4CD0)||ld32(actor+0xB4)!=GD(0x100209C4)||ld32(actor+0xB0)!=0x00FF0000||
+           ld8(actor+0x2DD)!=1||ld8(actor+0x905)!=1||ld8(actor+0x326)!=a.spec.room||ld8(actor+0xC)==3){rejected("nativeABI",&a,0,0);return false;}
+        const uint32_t profile=GD(0x101C4CD0);if(ld16(profile+8)!=0x175||ld32(profile+0x10)!=0x920){rejected("profile",&a,0,0);return false;}
+        uint32_t layer=ld32(actor+0x2C);if(!layer){rejected("layer",&a,layer,0);return false;}
+        bool ended=false;for(unsigned depth=0;depth<16;++depth){
+            // fpcM_Init creates this root layer with no owning scene. A room
+            // actor reaches it through its scene's parent layer; the root is
+            // only a valid terminator after the first room scene was checked.
+            if(layer==GD(0x1048A9BC)){
+                ended=depth>0&&ld32(layer+0xC)==0&&ld32(layer+0x18)==0;
+                if(!ended)rejected("layer",&a,layer,0);
+                break;
+            }
+            if((layer&3)||layer<mem::kMem2Start||uint64_t(layer)+0x1C>mem::kMem2End){rejected("layer",&a,layer,0);return false;}
+            const uint32_t scene=ld32(layer+0x18);if(!scene||(scene&3)||scene<mem::kMem2Start||uint64_t(scene)+0x60>mem::kMem2End||ld8(scene+0x5C)){rejected("layer",&a,layer,scene);return false;}
+            if(depth==0&&ld32(scene+4)!=room){rejected("layer",&a,layer,scene);return false;}
+            layer=ld32(scene+0x2C);
+        }
+        if(!ended){rejected("layer",&a,layer,0);return false;}
+        out={a.resident_event_token,actor,pid,stage,room,a.spec.room,1,a.fingerprint};return true;
+    }
+    rejected("declaration",nullptr,0,0);
+    return false;
+}
+bool resident_event_identity(const std::string&mod,const std::string&id,uint32_t actor,uint32_t pid,ResidentEventIdentity&out){return resident_event_identity_impl(mod,id,actor,pid,out,true);}
+bool resident_event_identity_quiet(const std::string&mod,const std::string&id,uint32_t actor,uint32_t pid,ResidentEventIdentity&out){return resident_event_identity_impl(mod,id,actor,pid,out,false);}
+bool prop_texture_identity(uint32_t actor,uint32_t pid,uint32_t& token,uint32_t& epoch,uint32_t& generation){
+    token=epoch=generation=0;
+    if(!g_installed||!g_scratch||actor<mem::kMem2Start||actor>mem::kMem2End-story_props::kClassBytes||
+       !pid||pid==0xFFFFFFFFu||ld32(actor+4)!=pid||ld16(actor+0xE)!=story_props::kProfile)return false;
+    Actor* a=find(actor);if(!a||!a->prop_token||!a->spec.texture_token||a->process!=pid)return false;
+    const size_t index=size_t(a-g_actors.data());if(ld32(g_scratch+128+uint32_t(index)*4)!=pid||
+       !identity::matches(mem::ptr(g_scratch+kIdentityScratchOffset+uint32_t(index)*identity::kRecordBytes),a->fingerprint))return false;
+    if(a->spec.room>63||ld8(actor+0x326)!=a->spec.room||
+       std::strncmp(reinterpret_cast<const char*>(mem::ptr(kStage)),a->spec.stage.c_str(),8)!=0||
+       std::memcmp(mem::ptr(g_scratch+0x300),mem::ptr(kStage),8)!=0)return false;
+    const uint32_t stage=ld32(GD(0x1047E6C4)),room=ld32(GD(0x1047E8F0)+a->spec.room*0x22C);
+    if(!stage||!room||ld32(g_scratch+0x318)!=stage||ld32(g_scratch+0x400+a->spec.room*4)!=room)return false;
+    token=a->prop_token;epoch=stage;generation=room;return true;
+}
+bool actions(const std::string& mod,const std::vector<story_notebook::StoryAction>& list) {
+    using Kind=story_notebook::StoryAction::Kind;
+    const bool story_off=story_scene_needs::story_off().count(mod)>0;  // optional story content without the notebook
+    for(const auto& a:list){bool ok=false;
+        if(story_off&&a.kind!=Kind::EnterStage&&a.kind!=Kind::StartScene){LOG("[actors] %s: story action on %s skipped (the Story Notebook isn't installed)",mod.c_str(),a.id.c_str());continue;}
+        switch(a.kind){
+        case Kind::Give:ok=story_items::give(mod,a.id.substr(5),a.value,"actor dialogue")>=0;break;
+        case Kind::Take:ok=story_items::take(mod,a.id.substr(5),a.value)>=0;break;
+        case Kind::GiveChart:ok=story_chart::give(mod,a.id.substr(6))>=story_chart::kResultOwned;break;  // once: a chart Link has stays as it is
+        case Kind::QuestStep:ok=story_notebook::reach(mod,a.id,a.value)>=0;break;
+        case Kind::QuestDone:ok=story_notebook::done_action(mod,a.id)>=0;break;
+        case Kind::Flag:ok=set_flag(story_store::book(),mod,a.id,a.value!=0);break;
+        case Kind::StartScene:ok=g_scene&&g_scene(mod,a.id);break;
+        case Kind::EnterStage:ok=g_stage&&g_stage(mod,a.id,a.value>>8,a.value&0xFF);break;
+    }if(!ok){LOG("[actors] %s: action failed (%s)",mod.c_str(),a.id.c_str());return false;}}return true;
+}
+bool people_message(Cpu* c){Actor* a=people(c->r[3]);if(!a||a->spec.actor!="resident")return false;
+    // A placed resident never falls through to original dialogue (which sets first-talk bits).
+    const uint32_t layer=ld32(c->r[3]+0x2C);
+    if((layer&&scene_is_deleting(ld32(layer+0x18)))||!story_mail::can_say()){c->r[3]=0;return true;}
+    if(talk_latch(a)==3){c->r[3]=0;return true;}
+    if(g_talk.npc&&g_talk.npc!=c->r[3]){c->r[3]=0;return true;}
+    if(!bind_talk(a,c->r[3])){c->r[3]=0;return true;}a->restore_talk=false;native_trace(a,c->r[3],"text-bind");
+    LOG("[actors] %s:%s native dialogue uses mod text (%zu UTF-16 units)",a->mod.c_str(),a->spec.id.c_str(),g_talk.text.size());
+    st32(c->r[3]+0x8A8,0);st32(c->r[3]+0x8AC,0);c->r[3]=kCarrier;return true;
+}
+bool people_next_message(Cpu* c){Actor* a=people(c->r[3]);if(!a||a->spec.actor!="resident")return false;c->r[3]=0x10;return true;}
+bool owns_resident(uint32_t actor){return people(actor)!=nullptr||find(actor)!=nullptr;}
+bool people_execute(Cpu* c,bool before){Actor* a=people(c->r[3]);if(!a||a->spec.actor!="resident")return false;
+    if(before){
+        const uint32_t npc=c->r[3],layer=ld32(npc+0x2C);
+        if(talk_latch(a)==3&&ld16(npc+0xF8)==0){talk_latch(a,0);clear_talk_proof();}
+        if(layer&&scene_is_deleting(ld32(layer+0x18))){if(g_talk.npc==npc)cancel_talk("draining");a->restore_talk=false;}
+        else if(a->restore_talk){
+            a->restore_talk=false;
+            if(!g_talk.actor&&ld16(npc+0xF8)==1&&ld32(npc+0x7C0)==kCarrier&&ld8(npc+0x7CC)<=1&&
+               (ld32(npc+0x7C8)!=0xFFFFFFFFu||ld16(npc+0x8F0)==0x12)&&story_mail::can_say()){bind_talk(a,npc,ld16(npc+0x8F0)==0x12&&ld32(npc+0x7C8)==0xFFFFFFFFu,true);native_trace(a,npc,"restore-text-rebind");}
+        }
+        // Native wait/talk and visual/collision updates are retained. Script entry points are
+        // intercepted separately, so no game-save snapshot/rollback is needed.
+        st16(c->r[3]+0xFC,0xFFFF);st8(c->r[3]+0x910,1);
+        // Item-show and photography callbacks belong to the retail character's quests.
+        st32(c->r[3]+0x100,0);st32(c->r[3]+0x104,0);st32(c->r[3]+0x108,0);
+    } else if(g_talk.npc==c->r[3]&&ld16(c->r[3]+0xF8)==0){if(g_talk.terminal)end_talk();else cancel_talk("nonterminal-cancel");}
+    return true;
+}
+
+void install(const std::function<std::string(uint32_t)>& replaced_by,const std::function<void(uint32_t,void(*)(Cpu*))>& replace) {
+    if(g_installed||(!declared()&&!g_live_kinds)||!g_original||!g_call||!g_scratch)return;  // --editor: also without declarations
+    std::vector<std::pair<uint32_t,void(*)(Cpu*)>> hooks={{kChestCheck,chest_check},{kChestOpen,chest_open},{kOnBox,chest_on},{kSignExecute,sign_execute},{kSignDelete,sign_delete},{kPeopleCheckOrder,people_check_order},{kPeopleEventMove,people_event_move},{kPeopleEventOrder,people_event_order}};
+    if(g_live_kinds||std::any_of(g_actors.begin(),g_actors.end(),[](const Actor& a){return a.spec.actor=="resident";})){
+        const std::pair<uint32_t,void(*)(Cpu*)> resident_hooks[]={
+            {kPeopleDelete,people_delete},{kPeopleTalk,people_talk},
+            {kPhotoActor,photo_actor},{kPhotoPosition,photo_position},{kPhotoSnapshot,photo_snapshot},
+            {kNamedCandidate,named_candidate},{kStaffCandidate,staff_candidate},{kExtraOn,extra_on},{kExtraOff,extra_off},{kStaffId,staff_id}};
+        hooks.insert(hooks.end(),std::begin(resident_hooks),std::end(resident_hooks));
+        g_resident_hooks=true;
+    }
+    if(g_live_kinds||std::any_of(g_actors.begin(),g_actors.end(),[](const Actor& a){return a.spec.actor=="resident"&&a.spec.resident==kYm1;})){
+        const std::pair<uint32_t,void(*)(Cpu*)> seated_hooks[]={{kYm1Init,ym1_init},{kYm1Msg,ym1_message},{kYm1Next,ym1_next},{kYm1Talk,ym1_talk},{kYm1Execute,ym1_execute},{kYm1Delete,ym1_delete},{kYm1Demo,ym1_demo},{kYm1Staff,ym1_staff},{kYm1CheckTalk,ym1_check_talk}};
+        hooks.insert(hooks.end(),std::begin(seated_hooks),std::end(seated_hooks));
+        g_ym1_hooks=true;
+    }
+    if(!story_treasure::installed())hooks.push_back({kRoom,room_hook});
+    if(replaced_by(kPeopleMsg).empty()) {hooks.push_back({kPeopleMsg,people_msg_hook});hooks.push_back({kPeopleNext,people_next_hook});hooks.push_back({kPeopleExecute,people_execute_hook});}
+    for(const auto& h:hooks)if(!replaced_by(h.first).empty()){LOG("[actors] hook conflict %08X; world actors disabled",h.first);return;}
+    // --editor: the native kinds are set up for live placement before they are configured (shared guards)
+    if(g_live_kinds){story_props::editor_enable();story_switches::editor_enable();story_enemies::editor_enable();}
+    mod_actor::configure(g_original,g_call,g_scratch+kModScratchOffset,g_scratch+kGrappleScratchOffset);
+    story_props::configure(g_original,g_call,g_scratch+kPropsScratchOffset,[](uint32_t token,uint32_t pid){
+        if(!g_scratch)return;for(size_t i=0;i<g_actors.size();++i){auto&a=g_actors[i];const uint32_t slot=g_scratch+128+uint32_t(i)*4;if(a.prop_token==token&&a.process==pid&&ld32(slot)==pid){a.process=0xFFFFFFFFu;a.deleting=false;st32(slot,0xFFFFFFFFu);std::memset(mem::ptr(g_scratch+kIdentityScratchOffset+uint32_t(i)*identity::kRecordBytes),0,identity::kRecordBytes);return;}}
+    });
+    story_switches::configure(g_original,g_call,g_scratch+kSwitchScratchOffset,g_scratch+kDoorScratchOffset,
+        [](uint32_t token,bool& on){for(const auto& a:g_actors)if(a.spec.actor=="switch"&&a.switch_token==token){const auto book=story_store::book();if(!book.usable()||!book.has(kRecordActorFlag,flag_key(a.mod,a.spec.switch_flag)))return false;on=flag(book,a.mod,a.spec.switch_flag);return true;}return false;},
+        [](uint32_t token,bool on){for(const auto& a:g_actors)if(a.spec.actor=="switch"&&a.switch_token==token)return set_flag(story_store::book(),a.mod,a.spec.switch_flag,on);return false;},
+        [](uint32_t token,uint32_t pid){if(!g_scratch)return;for(size_t i=0;i<g_actors.size();++i){auto&a=g_actors[i];const uint32_t slot=g_scratch+128+uint32_t(i)*4;if(a.switch_token==token&&a.process==pid&&ld32(slot)==pid){a.process=0xFFFFFFFFu;a.deleting=false;st32(slot,0xFFFFFFFFu);std::memset(mem::ptr(g_scratch+kIdentityScratchOffset+uint32_t(i)*identity::kRecordBytes),0,identity::kRecordBytes);return;}}});
+    const bool has_enemies=enemies_declared(),has_combat=combat_declared();
+    // --editor without declared enemies: their profiles install anyway so the editor can place them live;
+    // a failure here only means they appear after a restart
+    bool live_enemies=false;
+    if(g_live_kinds&&!has_combat){
+        const auto profiles=enemy_profiles();
+        live_enemies=configure_enemy_declarations()&&story_enemy_ownership::configure(g_scratch+kEnemyOwnershipScratchOffset,story_enemy_ownership::kStorageBytes,g_original,story_enemies::verify_actor);
+        if(live_enemies){
+            story_enemy_ownership::initialize_storage();
+            story_enemies::configure(g_original,g_call,profiles,[](uint32_t token,uint32_t pid){if(!g_scratch)return;for(size_t i=0;i<g_actors.size();++i){auto&a=g_actors[i];const uint32_t slot=g_scratch+128+uint32_t(i)*4;if(a.enemy_token==token&&a.process==pid&&ld32(slot)==pid){a.process=0xFFFFFFFFu;a.deleting=false;st32(slot,0xFFFFFFFFu);return;}}});
+            live_enemies=story_enemy_projectiles::configure(g_original,pure_link,true)&&story_enemy_children::configure(g_original,g_call,story_enemies::child_retired)&&native_actor_carry::configure(g_original,g_call)&&
+                         native_actor_carry::register_guard("enemies",story_enemies::deny_carry)&&story_enemy_ownership::install(replaced_by,replace)&&story_enemy_projectiles::install(replaced_by,replace)&&
+                         story_enemy_children::install(replaced_by,replace)&&story_enemies::install(replaced_by,replace);
+        }
+        LOG("[actors] the editor's live enemies: %s",live_enemies?"ready":"not available (they appear after a restart)");
+    }
+    if(has_combat){
+        if(!story_enemy_ownership::configure(g_scratch+kEnemyOwnershipScratchOffset,story_enemy_ownership::kStorageBytes,g_original,story_enemies::verify_actor))exception_report::raise("Cannot configure combat snapshot ownership");
+        story_enemy_ownership::initialize_storage();
+        if(!story_enemy_projectiles::configure(g_original,pure_link,true))exception_report::raise("Cannot configure combat projectile ownership");
+        if(has_enemies){
+            const auto profiles=enemy_profiles();
+            story_enemies::configure(g_original,g_call,profiles,[](uint32_t token,uint32_t pid){if(!g_scratch)return;for(size_t i=0;i<g_actors.size();++i){auto&a=g_actors[i];const uint32_t slot=g_scratch+128+uint32_t(i)*4;if(a.enemy_token==token&&a.process==pid&&ld32(slot)==pid){a.process=0xFFFFFFFFu;a.deleting=false;st32(slot,0xFFFFFFFFu);return;}}});
+            if(!story_enemy_children::configure(g_original,g_call,story_enemies::child_retired)||!native_actor_carry::configure(g_original,g_call)||!native_actor_carry::register_guard("enemies",story_enemies::deny_carry))exception_report::raise("Cannot configure native enemy isolation bridges");
+        }
+        if(!story_enemy_ownership::install(replaced_by,replace)||!story_enemy_projectiles::install(replaced_by,replace)||(has_enemies&&!story_enemy_children::install(replaced_by,replace)))exception_report::raise("Cannot install combat ownership hooks");
+    }
+    if(!story_world_visuals::configure({g_call,g_scratch+kVisualScratchOffset,[](const std::string&mod,const std::string&id){for(const auto&a:g_actors)if(a.mod==mod&&a.spec.id==id)return eligible(a);return false;},mod_actor::owns_visual}))exception_report::raise("Cannot configure island visual lifecycle");
+    std::set<std::string> visual_mods;for(const auto&binding:g_visual_bindings)visual_mods.insert(binding.mod);for(const auto&mod:visual_mods){std::vector<ManifestActor> own;for(const auto&a:g_actors)if(a.mod==mod)own.push_back(a.spec);std::string why;g_installed=true;const bool ok=sync_visuals(mod,own,true,why);g_installed=false;if(!ok)exception_report::raise("Cannot publish island views: "+why);}
+    bool has_mod=false;
+    for(size_t i=0;i<g_actors.size();++i){auto& a=g_actors[i];if(a.spec.kind!="mod")continue;
+        auto model=g_models.find({a.mod,a.spec.model});if(model==g_models.end()){exception_report::raise("Prepared model unavailable for mod actor "+a.mod+":"+a.spec.id);}
+        const std::string mod=a.mod,id=a.spec.id;
+        a.mod_token=mod_actor::declare(mod,a.spec,model->second.archive,model->second.index,mod_talked(mod,id),model->second.minimum,model->second.maximum,model->second.skinned,model->second.clips,model->second.rig);if(!a.mod_token&&a.spec.world_object()){LOG("[world_collision] %s:%s is left out: its place is not clear (see the line above)",mod.c_str(),id.c_str());continue;}if(!a.mod_token)exception_report::raise("Cannot declare generic mod actor "+mod+":"+id);if(!a.spec.talks.empty())mod_actor::set_talk_provider(mod,id,mod_talk_provider(mod,id));has_mod=true;
+        if(a.spec.combat_enabled){const auto marker=a.combat_marker;std::vector<story_items::PropDrop> drops;for(const auto&drop:a.spec.drops)drops.push_back({drop.item,drop.quantity});
+            if(!mod_actor::set_combat_reward(mod,id,[marker,mod,drops](){const auto result=story_items::claim_enemy_drops(marker,mod,drops);return result==story_items::EnemyClaimStatus::Committed?mod_actor::CombatReward::Committed:result==story_items::EnemyClaimStatus::AlreadyDefeated?mod_actor::CombatReward::AlreadyDone:mod_actor::CombatReward::Failed;}))exception_report::raise("Cannot bind generic combat rewards");}
+        if(a.spec.carry_break_on_impact){const auto marker=a.carry_marker;std::vector<story_items::PropDrop> drops;for(const auto&drop:a.spec.drops)drops.push_back({drop.item,drop.quantity});
+            if(!mod_actor::set_carry_break(mod,id,[marker,mod,drops](){const auto result=story_items::claim_prop_drops(marker,mod,drops);return result==story_items::PropClaimStatus::Committed||result==story_items::PropClaimStatus::AlreadyBroken;}))exception_report::raise("Cannot bind generic carry impact rewards");}
+    }
+    // --editor: the mod actor profile also without a declared model actor, so the first one (or the first
+    // island building) placed in the editor appears at once; without --editor nothing changes
+    if(g_live_kinds&&!has_mod)mod_actor::editor_enable();
+    if((has_mod||g_live_kinds)&&!mod_actor::install(replaced_by,replace)){if(has_mod)exception_report::raise("Cannot install generic mod actor profile");LOG("[actors] the mod actor profile is not available for the editor: model actors appear after a restart");}
+    if(has_mod){mod_actor_shadow_proof::configure(g_original,g_call);mod_actor_shadow_proof::install(replaced_by,replace);}
+    const bool props=std::any_of(g_actors.begin(),g_actors.end(),[](const Actor&a){return a.prop_token!=0;});
+    const bool switches=std::any_of(g_actors.begin(),g_actors.end(),[](const Actor&a){return a.switch_token!=0;});
+    if(props&&!story_props::install(replaced_by,replace))exception_report::raise("Cannot install isolated native prop profile");
+    if(switches){std::string why;if(!story_switches::install(replaced_by,replace,&why))exception_report::raise("Cannot install isolated native switch/door profiles: "+why);}
+    // --editor: installed without declarations too (live placement); a failure means "after a restart"
+    if(g_live_kinds&&!props&&!story_props::install(replaced_by,replace))LOG("[actors] the editor's live props are not available (they appear after a restart)");
+    if(g_live_kinds&&!switches){std::string why;if(!story_switches::install(replaced_by,replace,&why))LOG("[actors] the editor's live switches and doors are not available (they appear after a restart): %s",why.c_str());}
+    if(has_enemies&&!story_enemies::install(replaced_by,replace))exception_report::raise("Cannot install isolated native enemy profiles");
+    // walking residents (only with their record memory: a declared route, or the editor)
+    const bool patrol=g_live_kinds||std::any_of(g_actors.begin(),g_actors.end(),[](const Actor&a){return patrols(a.spec);});
+    if((g_resident_hooks||patrol)&&story_resident_routes::memory()){story_resident_routes::configure(g_original,g_call);if(!story_resident_routes::install(replaced_by,replace))LOG("[actors] resident routes unavailable: residents with a path stand");}
+    if(patrol&&story_resident_routes::installed()&&true){
+        story_enemies::set_route_provider([](story_enemies::Token t)->uint32_t{for(const auto&a:g_actors)if(a.enemy_token==t&&patrols(a.spec)&&a.route_slot>=0)return story_resident_routes::route_address(unsigned(a.route_slot));return 0;});
+        if(!story_enemies::install_routes(replaced_by,replace))LOG("[actors] Bokoblin patrols unavailable: patrolling Bokoblins wait");
+    }
+    // Kargaroc riders: the Kargaroc's own request for its rider becomes the rider declaration ("<id>.rider"), bound
+    // like a created actor (its process, identity row and ownership binding)
+    story_enemies::set_rider_provider([](story_enemies::Token k)->story_enemies::RiderRequest{
+        const Actor* kargaroc=nullptr;for(const auto&a:g_actors)if(a.enemy_token==k)kargaroc=&a;if(!kargaroc)return {};
+        for(auto&r:g_actors){if(r.mod!=kargaroc->mod||r.spec.rider_of!=kargaroc->spec.id||r.removed||!r.enemy_token)continue;
+            // a rider the editor changed takes its new declaration now that its old copy is gone (the room's
+            // actors do this in their create; a rider is created only here)
+            if(r.redeclare&&r.process==0xFFFFFFFFu&&!r.deleting)native_redeclare(r);
+            if(!story_enemies::available(r.enemy_token)||story_enemies::is_defeated(r.enemy_token)){LOG("[actors] %s:%s: no rider (%s)",r.mod.c_str(),r.spec.id.c_str(),story_enemies::is_defeated(r.enemy_token)?"defeated":"unavailable");return {};}
+            // its last copy is gone (deleted with its Kargaroc, or by the editor): a new copy, as the room's enemies get one
+            if(!story_enemy_ownership::can_spawn(r.enemy_token)){if(r.process!=0xFFFFFFFFu||r.deleting){LOG("[actors] %s:%s: its last copy %08X is still there",r.mod.c_str(),r.spec.id.c_str(),r.process);return {};}native_redeclare(r);enemy_epoch(r);
+                if(!story_enemy_ownership::can_spawn(r.enemy_token)){LOG("[actors] %s:%s: no new copy (ownership)",r.mod.c_str(),r.spec.id.c_str());return {};}}
+            story_enemies::Kind kind{};if(!enemy_kind(r.spec,kind))return {};
+            return {r.enemy_token,story_enemy_ownership::descriptor(kind).profile,story_enemy_variants::kRiderParams};}
+        return {};
+    },[](story_enemies::Token t,uint32_t pid){
+        for(auto&a:g_actors){if(a.enemy_token!=t)continue;a.process=pid;a.deleting=false;story_enemies::bind(t,pid);
+            if(g_scratch){const uint32_t i=uint32_t(&a-g_actors.data());st32(g_scratch+128+i*4,pid);const auto record=identity::record(a.fingerprint);std::memcpy(mem::ptr(g_scratch+kIdentityScratchOffset+i*identity::kRecordBytes),record.data(),record.size());}
+            LOG("[actors] %s:%s carried by its Kargaroc, process %08X",a.mod.c_str(),a.spec.id.c_str(),pid);break;}
+    });
+    // Wizzrobe summoners: the door's summons become free members of the summoner's pool (a new copy each)
+    story_enemies::set_summon_provider([](story_enemies::Token s,uint16_t name,uint32_t word)->story_enemies::SummonRequest{
+        const Actor* summoner=nullptr;for(const auto&a:g_actors)if(a.enemy_token==s)summoner=&a;if(!summoner)return {};
+        const std::string wanted=story_enemies_summons::wanted_variant(name,word);Actor* pick=nullptr;
+        for(int pass=0;pass<2&&!pick;++pass)for(auto&r:g_actors){
+            if(r.mod!=summoner->mod||r.spec.summon_of!=summoner->spec.id||r.removed||!r.enemy_token||r.process!=0xFFFFFFFFu||r.deleting)continue;
+            story_enemies::Kind kind{};if(!enemy_kind(r.spec,kind)||story_enemy_ownership::descriptor(kind).native_profile!=name)continue;
+            if(pass==0&&!wanted.empty()&&r.spec.variant!=wanted)continue;
+            if(r.redeclare)native_redeclare(r);if(!story_enemy_ownership::can_spawn(r.enemy_token))enemy_epoch(r);
+            if(story_enemies::available(r.enemy_token)&&story_enemy_ownership::can_spawn(r.enemy_token)){pick=&r;break;}}
+        if(!pick)return {};story_enemies::Kind kind{};enemy_kind(pick->spec,kind);
+        return {pick->enemy_token,story_enemy_ownership::descriptor(kind).profile,story_enemies::parameters(pick->enemy_token),story_enemies::home_z(pick->enemy_token)};
+    },[](story_enemies::Token t,uint32_t pid){
+        for(auto&a:g_actors){if(a.enemy_token!=t)continue;a.process=pid;a.deleting=false;story_enemies::bind(t,pid);
+            if(g_scratch){const uint32_t i=uint32_t(&a-g_actors.data());st32(g_scratch+128+i*4,pid);const auto record=identity::record(a.fingerprint);std::memcpy(mem::ptr(g_scratch+kIdentityScratchOffset+i*identity::kRecordBytes),record.data(),record.size());}
+            break;}
+    },[](story_enemies::Token s){std::vector<story_enemies::Token> out;const Actor* summoner=nullptr;for(const auto&a:g_actors)if(a.enemy_token==s)summoner=&a;
+        if(summoner)for(const auto&r:g_actors)if(r.mod==summoner->mod&&r.spec.summon_of==summoner->spec.id&&r.enemy_token)out.push_back(r.enemy_token);return out;});
+    // enemies on a mod path (or the editor, which adds them live): the room-path lookup answers an owned
+    // enemy's own path after the game's lookup found none
+    if((g_live_kinds||std::any_of(g_actors.begin(),g_actors.end(),[](const Actor&a){return a.enemy_token&&!a.spec.room_path.empty();}))&&story_room_paths::memory()){
+        story_enemies::set_room_path_provider([](story_enemies::Token t,uint32_t number,int room)->uint32_t{
+            for(const auto&a:g_actors)if(a.enemy_token==t&&!a.spec.room_path.empty())
+                return story_room_paths::answer(a.mod,a.spec.room_path,number,room,std::string(reinterpret_cast<const char*>(mem::ptr(kStage)),strnlen(reinterpret_cast<const char*>(mem::ptr(kStage)),8)));
+            return 0;});
+        story_enemies::set_next_path_provider([](uint32_t path,int room,uint32_t& out){if(!story_room_paths::is_record(path))return false;out=story_room_paths::next_record(path,room);return true;});
+        if(!story_enemies::install_routes(replaced_by,replace))LOG("[actors] mod paths unavailable: enemies on a mod path are not placed");
+    }
+    for(const auto& h:hooks)replace(h.first,h.second);g_installed=true;
+}
+}

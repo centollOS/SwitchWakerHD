@@ -1069,6 +1069,8 @@ void _LatteDecompiler_Process(LatteDecompilerShaderContext* shaderContext, uint8
 		LatteDecompiler_analyze(shaderContext, shaderContext->shader);
 	if (shaderContext->shader->hasError == false)
 		LatteDecompiler_analyzeDataTypes(shaderContext);
+	if (shaderContext->shader->hasError == false)
+		LatteDecompiler_analyzeFiniteness(shaderContext);
 	// WWHD: a vertex shader register that no fetch attribute fills keeps what it held (here: 0). The game relies on
 	// the GPU's legacy multiplication (0 * inf = 0, as Cemu's accurate multiplication) there: the Rito post office's
 	// letters have no normals, so their lighting normalizes (0,0,0) and turned NaN (black) with IEEE multiplication.

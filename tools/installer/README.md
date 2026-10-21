@@ -23,7 +23,11 @@ A release folder contains `portable.txt`. Then everything stays in `<release>/da
 Guest builds use `data/guest-sdk.json`: setup's compiler argument vector, Python, translator
 and runtime headers. Version 2 stores paths inside the portable release relative to the config
 file, so moving the release folder preserves them; external/system tools remain absolute.
-The Zig global cache also stays in the selected toolchain directory. Version 1 configs remain
+The Zig global cache also stays in the selected toolchain directory. Version 3 (current) adds
+`$RELEASE/<path>` for paths inside an AppImage: its mount point (`/tmp/.mount_XXXXXX`) changes on
+every start, so the game resolves them against the running image's `$APPDIR`. A version 2 config
+written from an AppImage holds an earlier mount's absolute paths; the game maps those onto the
+running image too, and `--repair-guest-python` rewrites them as `$RELEASE/`. Versions 1 and 2 remain
 readable. Removing the downloaded compiler is optional, but guest builds then require running
 setup again to restore it. No environment secrets are persisted in this file.
 

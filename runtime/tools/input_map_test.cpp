@@ -429,11 +429,41 @@ static void test_prompts() {
 
     Mapping m = Mapping::defaults();
     CHECK(m.prompts == Mapping::Prompts::kAuto && m.shoulder_names == Mapping::ShoulderNames::kAuto && m.prompt_colours);
-    // by position: the game's own prompts, whatever the pad
-    for (PadFamily f : {PadFamily::kUnknown, PadFamily::kXbox, PadFamily::kPlayStation, PadFamily::kNintendo}) {
-        const PromptStyle s = prompt_style(m, f);
-        CHECK(!s.active() && !s.positions && !s.colours);
-    }
+    // Full layout x appearance x family matrix. Automatic layout is resolved from labels.
+    for (int layout = 0; layout < 4; ++layout)
+        for (auto prompts : {Mapping::Prompts::kAuto, Mapping::Prompts::kOriginal,
+                             Mapping::Prompts::kXbox, Mapping::Prompts::kPlayStation})
+            for (auto family : {PadFamily::kXbox, PadFamily::kPlayStation, PadFamily::kNintendo, PadFamily::kUnknown}) {
+                Mapping candidate = Mapping::defaults();
+                if (layout == 1) apply_face_layout(candidate, FaceLayout::kLabels);
+                if (layout == 2) {
+                    note_face_labels(family == PadFamily::kXbox ? xbox : family == PadFamily::kPlayStation ? ps
+                                     : family == PadFamily::kNintendo ? nintendo : none);
+                    set_face_auto(candidate, true);
+                }
+                if (layout == 3) {
+                    candidate.pad[kA] = kPadX; candidate.pad[kB] = kPadY;
+                    candidate.pad[kX] = kPadA; candidate.pad[kY] = kPadB;
+                }
+                candidate.prompts = prompts;
+                const bool labels = face_layout(candidate) == FaceLayout::kLabels;
+                const FaceStyle expected = prompts == Mapping::Prompts::kOriginal ? FaceStyle::kOriginal
+                    : prompts == Mapping::Prompts::kXbox ? FaceStyle::kXbox
+                    : prompts == Mapping::Prompts::kPlayStation ? FaceStyle::kPlayStation
+                    : family == PadFamily::kPlayStation ? FaceStyle::kPlayStation
+                    : labels || family == PadFamily::kXbox ? FaceStyle::kXbox : FaceStyle::kOriginal;
+                const auto actual = prompt_style(candidate, family);
+                CHECK(actual.face == expected);
+                CHECK(actual.positions == (labels && expected != FaceStyle::kOriginal));
+                CHECK(actual.colours == (expected != FaceStyle::kOriginal));
+                for (int i = 0; i < 4; ++i)
+                    CHECK(actual.buttons[i] == (expected == FaceStyle::kOriginal ? i : candidate.pad[kA+i] - kPadA));
+                // Every invalid/ambiguous face set falls back together.
+                for (int invalid : {int(kPadNone), int(kPadLB), candidate.pad[kB]}) {
+                    auto bad = candidate; bad.pad[kA] = invalid;
+                    CHECK(prompt_style(bad, family).face == FaceStyle::kOriginal);
+                }
+            }
     // by label, automatic: Xbox look (LB/RB/LT/RT) unless the pad is a PlayStation one (L1/R1/L2/R2)
     apply_face_layout(m, FaceLayout::kLabels);
     PromptStyle s = prompt_style(m, PadFamily::kXbox);
@@ -464,7 +494,7 @@ static void test_prompts() {
     apply_face_layout(m, FaceLayout::kPosition);
     m.shoulder_names = Mapping::ShoulderNames::kXbox;
     s = prompt_style(m, PadFamily::kXbox);
-    CHECK(s.face == FaceStyle::kOriginal && !s.positions && s.shoulders == ShoulderStyle::kXbox && s.active());
+    CHECK(s.face == FaceStyle::kXbox && !s.positions && s.shoulders == ShoulderStyle::kXbox && s.active());
     // custom face bindings: the game's face prompts
     apply_face_layout(m, FaceLayout::kLabels);
     m.pad[kX] = kPadLB;
@@ -549,8 +579,7 @@ static void test_names() {
 }
 
 static void test_reserved() {
-    for (int k : std::initializer_list<int>{kVK_ANSI_O, kVK_ANSI_M, kVK_ANSI_N, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9, kVK_ANSI_P,
-                  kVK_ANSI_R, kVK_F12, kVK_Escape})
+    for (int k : std::initializer_list<int>{kVK_ANSI_9, kVK_ANSI_P, kVK_F12})
         CHECK(reserved_key(k) != nullptr);
     CHECK(reserved_key(kVK_ANSI_K) == nullptr);
     CHECK(reserved_key(kVK_ANSI_5) == nullptr);
@@ -618,7 +647,7 @@ static void test_json_partial_and_bad() {
     // unknown names and app shortcuts are dropped with a warning, the rest still loads
     CHECK(from_json(R"({"keyboard": {"A": ["R", "K"], "Jump": ["J"], "B": ["Bogus"]}, "options": {"stick_deadzone": 5}})", r, &err));
     CHECK(!err.empty());
-    CHECK(r.keys[kA][0] == kVK_ANSI_K && r.keys[kA][1] == kNoKey);
+    CHECK(r.keys[kA][0] == kVK_ANSI_R && r.keys[kA][1] == kVK_ANSI_K);
     CHECK(r.keys[kB][0] == kNoKey);
     CHECK(r.deadzone == 0.9f);  // clamped
     // syntax errors fail and leave the output alone
@@ -905,7 +934,170 @@ static void test_settings_shortcut() {
     CHECK(opened == 0.5);
 }
 
+static void test_shortcuts() {
+    auto m = Mapping::defaults();
+    CHECK(shortcut_for_key(m, kVK_F6, 0) == kLoad1);
+    CHECK(shortcut_for_key(m, kVK_F1, 0) == kSettings);
+    CHECK(shortcut_for_key(m, kVK_Escape, 0) == kSettings);
+    CHECK(shortcut_for_key(m, kVK_F1, kModShift) == kSave1);
+    CHECK(shortcut_for_key(m, kVK_F10, 0) == kPhoto);
+    for (int a = 0; a < kShortcutCount; ++a) {
+        CHECK(*shortcut_info(a).id && *shortcut_info(a).name && *shortcut_info(a).group);
+        CHECK(!shortcut_conflict(m, a));
+        for (int b = a + 1; b < kShortcutCount; ++b) CHECK(std::string(shortcut_info(a).id) != shortcut_info(b).id);
+    }
+    for (int a = kPiP; a < kShortcutCount; ++a) {
+        CHECK(m.shortcuts[a].keys[0].code == kNoKey);
+        CHECK(m.shortcuts[a].keys[1].code == kNoKey);
+        CHECK(!m.shortcuts[a].hold && !m.shortcuts[a].button);
+    }
+    CHECK(m.shortcuts[kSettings].button==kPadHome && !m.shortcuts[kSettings].hold);
+    CHECK(!reserved_key(kVK_Escape));
+    // Settings: Esc first, F1 as the alternate, Home on a controller.
+    CHECK(m.shortcuts[kSettings].keys[0] == ShortcutKey{kVK_Escape} && m.shortcuts[kSettings].keys[1] == ShortcutKey{kVK_F1});
+    CHECK(shortcut_for_key(m, kVK_Escape, 0) == kSettings && settings_reachable(m, false));
+    {
+        // Files written before Esc opened Settings: only the untouched default moves to Esc + F1.
+        auto legacy = [](std::array<ShortcutKey, 2> keys, int escGameInput = -1) {
+            Mapping old = Mapping::defaults();
+            old.shortcuts[kSettings].keys = keys;
+            if (escGameInput >= 0) old.keys[escGameInput][1] = kVK_Escape;
+            std::string text = to_json(old);
+            const std::string now = "\"shortcuts_version\": " + std::to_string(kShortcutsVersion);
+            const size_t at = text.find(now);
+            CHECK(at != std::string::npos);
+            return std::pair{text.replace(at, now.size(), "\"shortcuts_version\": 2"), old};
+        };
+        const auto defaults = shortcut_defaults()[kSettings].keys;
+        Mapping loaded;
+        for (auto keys : {std::array<ShortcutKey, 2>{{{kVK_F1}, {}}}, std::array<ShortcutKey, 2>{{{kVK_F1}, {kVK_ANSI_Comma, kModSuper}}}}) {
+            auto [text, old] = legacy(keys);
+            CHECK(from_json(text, loaded) && loaded.shortcuts[kSettings].keys == defaults);
+            CHECK(loaded.shortcuts[kSettings].button == kPadHome);
+            loaded.shortcuts[kSettings].keys = old.shortcuts[kSettings].keys; CHECK(loaded == old); // nothing else changes
+        }
+        // Saved custom bindings are kept, as is F1 when a game input already uses Esc.
+        for (auto keys : {std::array<ShortcutKey, 2>{{{kVK_F9}, {kVK_F1}}}, std::array<ShortcutKey, 2>{{{kVK_F1}, {kVK_F8, kModAlt}}},
+                          std::array<ShortcutKey, 2>{{{}, {kVK_F1}}}, std::array<ShortcutKey, 2>{{{kVK_F1, kModCtrl}, {}}}}) {
+            auto [text, old] = legacy(keys);
+            CHECK(from_json(text, loaded) && loaded == old);
+        }
+        auto [text, old] = legacy({{{kVK_F1}, {}}}, kB);
+        CHECK(from_json(text, loaded) && loaded == old && loaded.shortcuts[kSettings].keys[0] == ShortcutKey{kVK_F1});
+        // A current file is never migrated: a player who removed Esc keeps F1 alone.
+        Mapping f1Only = Mapping::defaults(); f1Only.shortcuts[kSettings].keys = {{{kVK_F1}, {}}};
+        CHECK(to_json(f1Only).find("\"shortcuts_version\": 3") != std::string::npos);
+        CHECK(from_json(to_json(f1Only), loaded) && loaded == f1Only);
+        // A file without shortcuts gets the current defaults.
+        CHECK(from_json(R"({"keyboard":{"A":["K"]}})", loaded) && loaded.shortcuts[kSettings].keys == defaults);
+    }
+    for (int p=kPadCapture;p<kPadCount;++p) {
+        CHECK(*pad_id(p) && *pad_label(p) && *pad_short_label(p));
+        m.pad[kZR]=p; Mapping round; CHECK(from_json(to_json(m),round)); CHECK(round==m);
+        float raw[kPadCount]{};raw[p]=1;CHECK(controller_state(m,raw).buttons&input::kZR);
+    }
+    m=Mapping::defaults();
+    CHECK(from_json(R"({"shortcuts":{"Settings":{"keys":[{"key":"F9","modifiers":0}],"hold":"","button":""}}})",m));
+    CHECK(m.shortcuts[kSettings].keys[0].code==kVK_F9 && m.shortcuts[kSettings].button==kPadHome);
+    m.shortcuts[kSettings].button=0;
+    Mapping round;CHECK(from_json(to_json(m),round));CHECK(!round.shortcuts[kSettings].button);
+    m=Mapping::defaults();
+    m.shortcuts[kPhoto].keys[1] = {kVK_ANSI_K, kModCtrl};
+    CHECK(!shortcut_conflict(m, kPhoto)); // a Ctrl/Alt/Cmd shortcut takes its key press before the game
+    m.shortcuts[kPhoto].keys[1] = {kVK_ANSI_K, kModShift};
+    CHECK(shortcut_conflict(m, kPhoto) && has_conflict(m, kA)); // plain or Shift keys share the game's K
+    m.shortcuts[kPhoto].keys[1] = {kVK_ANSI_K, 0};
+    CHECK(shortcut_conflict(m, kPhoto));
+    m.shortcuts[kPhoto].keys[1] = m.shortcuts[kSettings].keys[0];
+    CHECK(shortcut_conflict(m, kPhoto) && shortcut_conflict(m, kSettings));
+    m.shortcuts[kSettings] = {};
+    CHECK(settings_reachable(m)); // immutable Home / Select fallback
+    CHECK(!settings_reachable(m, false));
+    m.shortcuts[kSettings].keys[1] = {kVK_F9, kModAlt};
+    CHECK(settings_reachable(m, false));
+    m.shortcuts[kPhoto].keys = {{{kVK_F9, kModShift | kModCtrl}, {kVK_F8, kModAlt}}};
+    m.shortcuts[kPhoto].hold = kPadOptions; m.shortcuts[kPhoto].button = kPadDUp;
+    CHECK(shortcut_for_key(m, kVK_F9, kModShift | kModCtrl) == kPhoto);
+    CHECK(shortcut_for_key(m, kVK_F10, 0) == -1);
+    Mapping out; CHECK(from_json(to_json(m), out)); CHECK(out == m);
+    CHECK(from_json(R"({"keyboard":{"Screenshot":["F9","F8"]},"controller":{"Screenshot":"RightStickButton"}})", out));
+    CHECK(out.shortcuts[kPhoto].keys[0].code == kVK_F9 && out.shortcuts[kPhoto].keys[1].code == kVK_F8);
+    CHECK(out.pad[kScreenshot] == kPadR3);
+    CHECK(from_json(R"({"keyboard":{"Screenshot":["Mouse4"]}})", out));
+    CHECK(out.shortcuts[kPhoto].keys[0].code == kMouse4);
+    CHECK(from_json(to_json(out), m)); CHECK(out == m);
+    m = Mapping::defaults();
+    m.shortcuts[kPhoto].hold = kPadOptions; m.shortcuts[kPhoto].button = kPadDUp;
+    float raw[kPadCount]{}, game[kPadCount]{}; ShortcutPoll poll;
+    raw[kPadOptions] = 1; std::copy(std::begin(raw), std::end(raw), game);
+    CHECK(poll.poll(m, raw, game).empty()); CHECK(game[kPadOptions] == 1);
+    raw[kPadDUp] = 1; raw[kPadA] = 1; std::copy(std::begin(raw), std::end(raw), game);
+    CHECK(poll.poll(m, raw, game) == std::vector<int>{kPhoto});
+    CHECK(game[kPadOptions] == 0 && game[kPadDUp] == 0 && game[kPadA] == 1);
+    CHECK(poll.poll(m, raw, game).empty());
+    raw[kPadDUp] = 0; std::copy(std::begin(raw), std::end(raw), game);
+    CHECK(poll.poll(m, raw, game).empty()); CHECK(game[kPadOptions] == 1);
+    raw[kPadDUp] = 1; CHECK(poll.poll(m, raw, game) == std::vector<int>{kPhoto});
+    m.shortcuts[kMute].hold = kPadDUp; m.shortcuts[kMute].button = kPadOptions;
+    CHECK(shortcut_conflict(m, kPhoto) && shortcut_conflict(m, kMute));
+}
+
+// Settings sizes by screen (mobile_ui.h): phones a compact layout, tablets and handhelds as before, desktop as before
+static void test_screen_layouts() {
+    struct Screen { const char* name; float w, h, dpi; bool phone; };
+    const Screen screens[] = {
+        {"OnePlus 8 Pro 6.78\" at 1080p", 2400, 1080, 388, true},
+        {"OnePlus 8 Pro portrait", 1080, 2400, 388, true},
+        {"OnePlus 8 Pro at 1440p", 3168, 1440, 513, true},
+        {"Galaxy S25 6.2\"", 2340, 1080, 416, true},
+        {"Galaxy S25 portrait", 1080, 2340, 416, true},
+        {"Pixel 2 XL 18:9 6\"", 2880, 1440, 538, true},
+        {"Retroid Pocket 5 5.5\" 16:9", 1920, 1080, 401, false},
+        {"AYN Thor / Odin 2 6\" 16:9", 1920, 1080, 367, false},
+        {"Odin 2 Portal 7\" 16:9", 1920, 1080, 315, false},
+        {"Retroid Pocket Mini 3.9\" 4:3-ish", 1240, 1080, 420, false},
+        {"tablet 11\" 16:10", 2560, 1600, 274, false},
+        {"foldable inner 7.6\"", 2208, 1768, 373, false},
+        {"a long tablet 10\" 21:9 (too large for a phone)", 2560, 1080, 278, false},
+    };
+    for (const Screen& s : screens) {
+        const mobile_ui::Layout a = mobile_ui::layout(s.dpi, s.dpi / 160, mobile_ui::kAutomatic, s.w, s.h);
+        CHECK(a.phone == s.phone);
+        const float classic = mobile_ui::scale(s.dpi, s.dpi / 160, 0);  // today's size
+        if (s.phone) {
+            // smaller text than before (2.2 mm instead of 2.8), controls still 48 dp = 7.6 mm to tap
+            CHECK(std::fabs(a.control_mm(s.dpi) - 7.62f) < 0.01f);
+            CHECK(std::fabs(a.text_mm(s.dpi) - 2.20f) < 0.02f);
+            CHECK(a.scale < classic * 0.81f);
+            // the player's choice decides: Small < Automatic < Medium < Large, every control at least 7 mm
+            const float mm[] = {0, 7, 8, 9};
+            float last = 0;
+            for (int p : {1, 0, 2, 3}) {
+                const mobile_ui::Layout l = mobile_ui::layout(s.dpi, s.dpi / 160, p, s.w, s.h);
+                CHECK(l.phone && l.scale > last && l.control_mm(s.dpi) >= 7.0f - 0.01f);
+                if (p) CHECK(std::fabs(l.control_mm(s.dpi) - mm[p]) < 0.01f);
+                last = l.scale;
+            }
+        } else {
+            // tablets and handhelds: today's size and padding, 8 mm controls, for every UI size
+            for (int p = 0; p < 4; ++p) {
+                const mobile_ui::Layout l = mobile_ui::layout(s.dpi, s.dpi / 160, p, s.w, s.h);
+                CHECK(!l.phone && l.pad_y == 16 && l.scale == mobile_ui::scale(s.dpi, s.dpi / 160, p));
+            }
+            CHECK(std::fabs(a.control_mm(s.dpi) - 8.0f) < 0.01f);
+        }
+        std::printf("  %-48s %s: scale %.2f (was %.2f), control %.1f mm, text %.1f mm, %4.0fx%-4.0f layout px\n", s.name,
+                    a.phone ? "phone   " : "handheld", a.scale, classic, a.control_mm(s.dpi), a.text_mm(s.dpi), s.w / a.scale, s.h / a.scale);
+    }
+    // an unknown screen shape keeps the tablet layout
+    CHECK(!mobile_ui::layout(400, 2.5f, 0).phone);
+    // desktop: unchanged (backing scale, larger on tall windows)
+    CHECK(mobile_ui::desktop_scale(1, 752) == 1.0f && mobile_ui::desktop_scale(2, 1504) == 2.0f);
+    CHECK(std::fabs(mobile_ui::desktop_scale(1, 2160) - 2160 / 820.0f) < 1e-5f);
+}
+
 int main() {
+    test_shortcuts();
     for (int mode : {touch_buttons::Automatic, touch_buttons::AlwaysShow, touch_buttons::Hide})
         for (bool controller : {false, true}) {
             CHECK(touch_buttons::visible(mode, controller, false) ==
@@ -920,6 +1112,7 @@ int main() {
         CHECK(mobile_ui::scale(dpi, 1, 3) > automatic);
     }
     CHECK(std::isfinite(mobile_ui::scale(NAN, NAN, 0)));
+    test_screen_layouts();
     test_settings_shortcut();
     test_android_odin_mapping();
     test_binding_capture_faces();

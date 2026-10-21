@@ -1,3 +1,4 @@
+#include "record_worker.h"
 #include "pass.h"
 #ifdef __ANDROID__
 #include "overlay/overlay.h"
@@ -45,6 +46,7 @@
 #include <string>
 #include <thread>
 
+namespace gx2 { void request_background_vulkan_cache_checkpoint(); }
 namespace gfxvk {
 extern uint64_t g_stat_full_checks, g_stat_uploads;
 void request_tv_dump(const std::string&,int);
@@ -306,15 +308,20 @@ void renderpass_retirement_check() {
   VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
   rendering.renderArea.extent={8,8};rendering.layerCount=1;
   rendering.colorAttachmentCount=1;rendering.pColorAttachments=&attachment;
-  DeferredCommands captured;captured.start_capture();
+  DeferredCommands captured;
+  auto* pod = record_worker_commands();
+  const size_t commandsBefore = pod ? pod->command_count() : 0;
+  if (!pod) captured.start_capture();
   begin_pass(cmd,rendering,[&] { return color_pass(surface.fmt.pixel,surface.layout); });
   end_pass(cmd);
-  require(captured.command_count()==2,"classic begin/end did not enter the deferred command stream");
+  require((pod ? pod->command_count()-commandsBefore : captured.command_count())==2,
+      "classic begin/end did not enter the owned command stream");
   require(pass_caches().framebuffer_count()==cached+1,"captured framebuffer was not resolved at recording time");
   destroy_surface_image(&surface);
   require(pass_caches().framebuffer_count()==cached,"view deferral retained a framebuffer cache entry");
   require(R.garbageFramebuffers.size()==retired+1,"framebuffer did not share its view's submission retirement");
-  captured.finish_exact();flush_async();
+  if (!pod) captured.finish_exact();
+  flush_async();
  }
  wait_idle();
  for(const auto& slot:R.submissions)
@@ -472,7 +479,10 @@ void volume_target_check() {
  require(other&&other!=s&&other->imageType==VK_IMAGE_TYPE_2D,"a 2D sampled view got the rendered volume");
  fprintf(stderr,"[renderer smoke] volume render target slice, clear isolation and 3D sampling passed\n");
 }
-float triangle(Surface& s, float eyeOffset=0, float clipW=1) {
+float triangle(Surface& s, float eyeOffset=0, float clipW=1,
+               VkFormat rgbFormat=VK_FORMAT_UNDEFINED, bool fallback=false,
+               std::vector<uint8_t>* image=nullptr,
+               VkDescriptorSetLayout textureLayout=VK_NULL_HANDLE, VkDescriptorSet textures=VK_NULL_HANDLE) {
  struct Resources {
   VkShaderModule vs=VK_NULL_HANDLE,ps=VK_NULL_HANDLE;VkPipelineLayout layout=VK_NULL_HANDLE;VkPipeline pipeline=VK_NULL_HANDLE;
   ~Resources(){if(pipeline)vkDestroyPipeline(R.device,pipeline,nullptr);if(layout)vkDestroyPipelineLayout(R.device,layout,nullptr);if(vs)vkDestroyShaderModule(R.device,vs,nullptr);if(ps)vkDestroyShaderModule(R.device,ps,nullptr);}
@@ -485,14 +495,40 @@ float triangle(Surface& s, float eyeOffset=0, float clipW=1) {
  if (clipW==1) { projection[11]=0;projection[14]=0;projection[15]=1; }
  stereo::project_eye(projection,eyeOffset,4);
  std::string vertexSource="#version 450\nlayout(push_constant) uniform Camera { vec4 row; } camera; void main(){vec2 p[3]=vec2[3](vec2(-0.8,-0.8),vec2(0.8,-0.8),vec2(0,0.8));float w="+std::to_string(clipW)+";vec4 view=vec4(p[gl_VertexIndex]*w,-w,1);gl_Position=vec4(dot(camera.row,view),view.y,0,w);}";
+ UploadSlice rgb;
+ uint32_t componentBytes=rgbFormat==VK_FORMAT_R8G8B8_UINT?1:rgbFormat==VK_FORMAT_R16G16B16_UINT?2:4;
+ if(rgbFormat!=VK_FORMAT_UNDEFINED) {
+  const std::string declaration=fallback?vk::vertex_fallback_declaration("attrDataSem0",1):"in uvec4 attrDataSem0;\n";
+  vertexSource.insert(vertexSource.find('\n')+1,"layout(location=0) "+declaration+"layout(location=0) flat out uint valid;\n");
+  vertexSource.insert(vertexSource.rfind('}'),"valid=all(equal(attrDataSem0,uvec4(17,93,201,1)))?1u:0u;");
+  // Three tightly packed RGB vertices; the split never fetches beyond RGB.
+  rgb=allocate_upload(9*componentBytes,4);
+  std::memset(rgb.mapped,0,rgb.size);
+  const uint32_t values[3]={17,93,201};
+  for(uint32_t v=0;v<3;++v)for(uint32_t lane=0;lane<3;++lane)
+   std::memcpy(static_cast<uint8_t*>(rgb.mapped)+(v*3+lane)*componentBytes,&values[lane],componentBytes);
+ }
  module(vertexSource.c_str(),true,objects.vs);
- module("#version 450\nlayout(location=0) out vec4 color;void main(){color=vec4(1,0,0,1);}",false,objects.ps);
+ module(textureLayout
+     ? "#version 450\nlayout(set=0,binding=0) uniform sampler2D a;layout(set=0,binding=1) uniform sampler2D b;layout(location=0) out vec4 color;void main(){color=(textureLod(a,vec2(.5),0)+textureLod(b,vec2(.5),1))*.5;}"
+     : rgbFormat==VK_FORMAT_UNDEFINED
+     ? "#version 450\nlayout(location=0) out vec4 color;void main(){color=vec4(1,0,0,1);}"
+     : "#version 450\nlayout(location=0) flat in uint valid;layout(location=0) out vec4 color;void main(){color=valid==1u?vec4(1,0,0,1):vec4(0,1,0,1);}",false,objects.ps);
  VkPushConstantRange stereoRange{VK_SHADER_STAGE_VERTEX_BIT,0,16};
- VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};layout.pushConstantRangeCount=1;layout.pPushConstantRanges=&stereoRange;vk_check(vkCreatePipelineLayout(R.device,&layout,nullptr,&objects.layout),"smoke pipeline layout");
+ VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};if(textureLayout){layout.setLayoutCount=1;layout.pSetLayouts=&textureLayout;}layout.pushConstantRangeCount=1;layout.pPushConstantRanges=&stereoRange;vk_check(vkCreatePipelineLayout(R.device,&layout,nullptr,&objects.layout),"smoke pipeline layout");
  VkPipelineShaderStageCreateInfo stages[2]{};
  for(auto& stage:stages){stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;stage.pName="main";}
  stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=objects.vs;stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=objects.ps;
  VkPipelineVertexInputStateCreateInfo vertex{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+ VkVertexInputBindingDescription rgbBinding{0,3*componentBytes,VK_VERTEX_INPUT_RATE_VERTEX};
+ VkVertexInputAttributeDescription rgbAttributes[2]={
+  {0,0,fallback?vk::split_vertex_format(rgbFormat):rgbFormat,0},
+  {1,0,vk::vertex_tail_format(rgbFormat),vk::vertex_tail_offset(rgbFormat)}};
+ if(rgbFormat!=VK_FORMAT_UNDEFINED) {
+  vertex.vertexBindingDescriptionCount=1;vertex.vertexAttributeDescriptionCount=fallback?2:1;
+  vertex.pVertexBindingDescriptions=&rgbBinding;vertex.pVertexAttributeDescriptions=rgbAttributes;
+ }
+
  VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};assembly.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
  VkViewport viewport{0,0,float(s.extent.width),float(s.extent.height),0,1};VkRect2D scissor{{0,0},{s.extent.width,s.extent.height}};
  VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};vp.viewportCount=vp.scissorCount=1;vp.pViewports=&viewport;vp.pScissors=&scissor;
@@ -508,8 +544,10 @@ float triangle(Surface& s, float eyeOffset=0, float clipW=1) {
  transition_image(&s,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
  VkRenderingAttachmentInfo target{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};target.imageView=layer_view(&s,0);target.imageLayout=s.layout;target.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;target.storeOp=VK_ATTACHMENT_STORE_OP_STORE;target.clearValue.color.float32[3]=1;
  VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea=scissor;ri.layerCount=1;ri.colorAttachmentCount=1;ri.pColorAttachments=&target;
- auto cmd=command_buffer();begin_pass(cmd,ri,[&] { return color_pass(s.fmt.pixel,s.layout); });R.rendering=true;record::vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,objects.pipeline);record::vkCmdPushConstants(cmd,objects.layout,VK_SHADER_STAGE_VERTEX_BIT,0,16,projection);record::vkCmdDraw(cmd,3,1,0,0);end_encoder();mark_gpu_written(&s);flush();
+ auto cmd=command_buffer();begin_pass(cmd,ri,[&] { return color_pass(s.fmt.pixel,s.layout); });R.rendering=true;record::vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,objects.pipeline);record::vkCmdPushConstants(cmd,objects.layout,VK_SHADER_STAGE_VERTEX_BIT,0,16,projection);if(textures)record::vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,objects.layout,0,1,&textures,0,nullptr);if(rgbFormat!=VK_FORMAT_UNDEFINED)record::vkCmdBindVertexBuffers(cmd,0,1,&rgb.buffer,&rgb.offset);
+ record::vkCmdDraw(cmd,3,1,0,0);end_encoder();mark_gpu_written(&s);flush();
  auto pixels=read_image(s,VK_IMAGE_ASPECT_COLOR_BIT,4);
+ if(image)*image=pixels;
  size_t center=(size_t(s.extent.height/2)*s.extent.width+s.extent.width/2)*4;
  require(pixels[center]==255&&pixels[center+1]==0&&pixels[center+2]==0&&pixels[center+3]==255,"triangle center pixel differs");
  require(pixels[0]==0&&pixels[1]==0&&pixels[2]==0&&pixels[3]==255,"triangle background pixel differs");
@@ -525,8 +563,10 @@ void stereo_geometry_check() {
  std::vector<uint32_t> regs(0x10000);
  const uint32_t base=mmSQ_ALU_CONSTANT0_0+0x400;
  const float camera[16]={2,0,0,0, 0,3,0,0, 0,0,-1.01f,-20, 0,0,-1,0};
+ // An HD layout's projection (fovy 40, near 1, far 10000), its x row narrowed for the TV.
+ const float layout[16]={1.4f,0,0,0, 0,2.74748f,0,0, 0,0,-1.0002f,-2.0002f, 0,0,-1,0};
  memcpy(regs.data()+base,camera,64);
- memcpy(regs.data()+base+32,camera,64);
+ memcpy(regs.data()+base+32,layout,64);
  const auto oldTag=stereo::layoutProjection;
  const auto oldStart=stereo::layoutProjectionStart;
  stereo::tag_layout(base+32,regs.data()+base+32);
@@ -535,12 +575,25 @@ void stereo_geometry_check() {
  vk::Shader shader;shader.vertex=true;shader.dec=&metadata;
  shader.uniforms.offset_remapped=0;shader.uniforms.offset_endOfBlock=80;
  std::vector<uint8_t> leftUniforms,rightUniforms;
- vk::pack_uniforms_into(regs.data(),shader,leftUniforms,1,1,-8,600);
+ stereo::EyeRows replayRows;
+ vk::pack_uniforms_into(regs.data(),shader,leftUniforms,1,1,-8,600,&replayRows);
  vk::pack_uniforms_into(regs.data(),shader,rightUniforms,1,1,8,600);
+ auto replayed=leftUniforms;
+ stereo::apply_eye_rows(replayed.data(),replayRows,8,600);
+ require(replayed==rightUniforms,"second-eye replay differs from independent uniform packing");
  float leftRow[4],rightRow[4];
  memcpy(leftRow,leftUniforms.data()+16,16);memcpy(rightRow,rightUniforms.data()+16,16);
  require(leftRow[3]==16 && rightRow[3]==-16,"stereo remapped world projection not applied");
- require(!memcmp(leftUniforms.data()+64,camera,16)&&!memcmp(rightUniforms.data()+64,camera,16),"stereo moved tagged HUD projection");
+ require(memcmp(leftUniforms.data()+64,rightUniforms.data()+64,16)!=0,"stale layout tag flattened a world camera");
+ stereo::layout_draw(true);
+ vk::pack_uniforms_into(regs.data(),shader,leftUniforms,1,1,-8,600);
+ vk::pack_uniforms_into(regs.data(),shader,rightUniforms,1,1,8,600);
+ stereo::layout_draw(false);
+ require(leftUniforms==rightUniforms&&!memcmp(leftUniforms.data()+64,layout,16),"scoped layout has disparity");
+ // A camera in a raw block must also retain depth despite matching the HUD lens.
+ float block[16];memcpy(block,layout,64);block[0]=1.54546f;
+ stereo::project_uniform_block(reinterpret_cast<unsigned char*>(block),64,8,600);
+ require(block[0]==1.54546f&&block[3]!=0,"HUD lens match flattened a uniform-block camera");
  require(!memcmp(regs.data()+base,camera,64),"stereo modified shared guest uniforms");
  stereo::layoutProjection=oldTag;stereo::layoutProjectionStart=oldStart;
  SurfaceDesc desc;desc.addr=0x3E000000;desc.width=64;desc.height=64;desc.pitch=64;desc.format=0x1a;
@@ -562,10 +615,24 @@ void stereo_geometry_check() {
  require(std::fabs(zeroLeft-zeroRight)<.01f,"convergence plane has disparity");
  require(farRight>farLeft+2,"far geometry has wrong disparity sign");
  require(std::fabs(hudLeft-hudRight)<.01f,"orthographic HUD has disparity");
+ // A captured photograph is canonical even when eye 1 already has a GPU
+ // image at the same guest address. Ordinary scene textures remain per-eye.
+ const auto photoMode=stereo::frame.mode;
+ stereo::frame.mode=stereo::HalfSBS;
+ transition_image(left,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+ stereo_select_eye(1);
+ require(!stereo_eye0_texture(desc),"ordinary GPU scene texture shared between eyes");
+ stereo::layoutPhotograph=true;
+ require(stereo_eye0_texture(desc)==left,"photo preview used the second camera's image");
+ require(left->eyeHeld==stereoFlushGeneration,"photo preview did not retain its source image");
+ stereo::layoutPhotograph=false;
+ require(!stereo_eye0_texture(desc),"photo sampling policy leaked into scene rendering");
+ stereo_select_eye(0);
+ stereo::frame.mode=photoMode;
  std::vector<int> order;
  stereo_pair([&]{order.push_back(stereoEye);},true);
  stereo_pair([&]{order.push_back(stereoEye);},true);
- require(order==std::vector<int>({0,1,1,0}),"stereo eye scheduling changed per-eye order");
+ require(order==std::vector<int>({0,1,0,1}),"stereo eye scheduling changed per-eye order");
  left->gpuWritten=right->gpuWritten=false;
  left->dirty=right->dirty=false;
  left->lastCheckedFrame=right->lastCheckedFrame=R.frame;
@@ -618,6 +685,225 @@ void stereo_geometry_check() {
  stereo::frame=oldFrame;stereo::requestedMode=oldMode;
  flush();
  fprintf(stderr,"[renderer smoke] stereo geometry, convergence, HUD, eye isolation and toggle cleanup PASS\n");
+}
+void stereo_resize_upload_check() {
+ const auto oldFrame=stereo::frame;
+ const int oldMode=stereo::requestedMode.load();
+ const float oldScale=res_scale();
+ set_res_scale(1);set_frame_aspect(16.0f/9.0f);latch_res_scale();
+ SurfaceDesc color;color.addr=mem::host_alloc(65536,256);color.width=color.pitch=64;
+ color.height=36;color.format=0x1a;
+ SurfaceDesc depth=color;depth.addr=mem::host_alloc(65536,256);depth.format=0x11;depth.isDepth=true;
+ require(!R.tv.scan&&!R.tv.buildingScan,"stereo resize test requires unpublished TV scans");
+ const uint32_t cb=mem::host_alloc(0x9c,256);
+ memset(mem::ptr(cb),0,0x9c);
+ st32(cb,1);st32(cb+4,64);st32(cb+8,36);st32(cb+12,1);st32(cb+16,1);
+ st32(cb+20,0x1a);st32(cb+0x24,color.addr);st32(cb+0x3c,64);st32(cb+0x7c,1);
+ const uint8_t rgba[4]={17,93,201,255};
+ const uint32_t packedDepth=0x5a800000;
+ for(uint32_t i=0;i<65536;i+=4) {
+  memcpy(mem::ptr(color.addr)+i,rgba,4);memcpy(mem::ptr(depth.addr)+i,&packedDepth,4);
+ }
+ // Same guest addresses through real mode latching and target lookup: full ->
+ // half width -> half height -> full -> off, including uploads at smaller sizes.
+ for(int mode:{stereo::FullSBS,stereo::HalfSBS,stereo::TAB,stereo::FullSBS,stereo::Off}) {
+  stereo::set_mode(mode);stereo_latch();
+  const uint32_t width=mode==stereo::HalfSBS?32:64,height=mode==stereo::TAB?18:36;
+  for(int eye=0;eye<(mode==stereo::Off?1:2);++eye) {
+   stereo_select_eye(eye);
+   for(const auto& desc:{color,depth}) {
+    auto* surface=find_or_create_surface(desc,true);
+    require(surface->extent.width==width&&surface->extent.height==height,"stereo mode switch kept an old target extent");
+    surface->gpuWritten=false;surface->dirty=true;surface->lastCheckedFrame=~uint64_t{0};
+    upload_surface(surface);
+    if(!desc.isDepth) rgba_is(read_image(*surface,VK_IMAGE_ASPECT_COLOR_BIT,4),rgba,"resampled stereo guest color upload differs");
+    else {
+     const auto values=read_image(*surface,VK_IMAGE_ASPECT_DEPTH_BIT,4);
+     const auto stencil=read_image(*surface,VK_IMAGE_ASPECT_STENCIL_BIT,1);
+     for(size_t i=0;i<stencil.size();++i) {
+      float value;memcpy(&value,values.data()+i*4,4);
+      require(std::abs(value-0.5f)<0.00001f&&stencil[i]==0x5a,"resampled stereo depth/stencil upload differs");
+     }
+    }
+    mark_gpu_written(surface);
+   }
+   const float eyeColor[4]={eye?0.0f:1.0f,0,eye?1.0f:0.0f,1};
+   clear_image(*find_or_create_surface(color,true),eyeColor);
+   copy_to_scan(cb,1);
+   auto& screen=eye?stereoRight:R.tv;
+   require(screen.buildingScan&&screen.buildingScan->extent.width==width&&
+       screen.buildingScan->extent.height==height,"scan expanded an eye-sized target");
+   require(screen.buildingScanDisplayExtent.width==64&&screen.buildingScanDisplayExtent.height==36,
+       "scan lost the eye's display aspect");
+   screen.scan.swap(screen.buildingScan);
+   std::swap(screen.scanDisplayExtent,screen.buildingScanDisplayExtent);
+   screen.scanSrgb=screen.buildingScanSrgb;screen.buildingScanDirty=false;
+  }
+  stereo_select_eye(0);
+  const uint32_t packedWidth=mode==stereo::FullSBS?128:64;
+  stereo_flush(); // swap/copy-to-scan's ordered boundary precedes presentation
+  const auto packed=compose_offscreen(R.tv,packedWidth,36,false);
+  auto pixel=[&](uint32_t x,uint32_t y,int channel) { return packed[(y*packedWidth+x)*4+channel]; };
+  const uint32_t leftX=mode==stereo::TAB?32:packedWidth/4,leftY=mode==stereo::TAB?9:18;
+  const uint32_t rightX=mode==stereo::TAB?32:packedWidth*3/4,rightY=mode==stereo::TAB?27:18;
+  require(pixel(leftX,leftY,0)==255&&pixel(leftX,leftY,2)==0,"left eye placement/capture differs");
+  require(pixel(rightX,rightY,mode==stereo::Off?0:2)==255,"right eye placement/capture differs");
+ }
+ // A device that can neither blit nor draw a screen format (here depth, WWHD_VK_DEPTH_COPY=none):
+ // Half SBS eyes keep the full size, so the upload is copied, never scaled into a cleared target,
+ // and the scan keeps one eye's shape.
+ const auto oldDepthCopy=g_depthCopyOverride;
+ g_depthCopyOverride=DepthCopyOverride::Unsupported;
+ stereo::set_mode(stereo::HalfSBS);stereo_latch();
+ for(int eye=0;eye<2;++eye) {
+  stereo_select_eye(eye);
+  for(const auto& desc:{depth,color}) {
+   auto* surface=find_or_create_surface(desc,true);
+   require(surface->extent.width==64&&surface->extent.height==36,"unscalable format kept an eye-sized target");
+   surface->gpuWritten=false;surface->dirty=true;surface->lastCheckedFrame=~uint64_t{0};
+   upload_surface(surface);
+   if(!desc.isDepth) rgba_is(read_image(*surface,VK_IMAGE_ASPECT_COLOR_BIT,4),rgba,"full-size stereo color upload differs");
+   else {
+    const auto values=read_image(*surface,VK_IMAGE_ASPECT_DEPTH_BIT,4);
+    const auto stencil=read_image(*surface,VK_IMAGE_ASPECT_STENCIL_BIT,1);
+    for(size_t i=0;i<stencil.size();++i) {
+     float value;memcpy(&value,values.data()+i*4,4);
+     require(std::abs(value-0.5f)<0.00001f&&stencil[i]==0x5a,"full-size stereo depth/stencil upload was cleared");
+    }
+   }
+   mark_gpu_written(surface);
+  }
+  const float eyeColor[4]={eye?0.0f:1.0f,0,eye?1.0f:0.0f,1};
+  clear_image(*find_or_create_surface(color,true),eyeColor);
+  copy_to_scan(cb,1);
+  auto& screen=eye?stereoRight:R.tv;
+  require(screen.buildingScan&&screen.buildingScan->extent.width==64&&
+      screen.buildingScanDisplayExtent.width==64&&screen.buildingScanDisplayExtent.height==36,
+      "full-size eye scan lost its shape");
+  screen.scan.swap(screen.buildingScan);
+  std::swap(screen.scanDisplayExtent,screen.buildingScanDisplayExtent);
+  screen.scanSrgb=screen.buildingScanSrgb;screen.buildingScanDirty=false;
+ }
+ stereo_select_eye(0);
+ stereo_flush();
+ {
+  const auto packed=compose_offscreen(R.tv,64,36,false);
+  require(packed[(18*64+16)*4]==255&&packed[(18*64+16)*4+2]==0&&packed[(18*64+48)*4+2]==255,
+      "full-size Half SBS eyes placed wrong");
+ }
+ g_depthCopyOverride=oldDepthCopy;
+ stereo_reset_eye_sized_targets();
+ stereo::set_mode(stereo::Off);stereo_latch();
+ stereo_select_eye(1);
+ require(R.surfaces.empty(),"mode-switch test retained eye 1 targets after switch-off");
+ stereo_select_eye(0);
+ for(uint32_t address:{color.addr,depth.addr}) {
+  auto found=R.surfaces.find(address);
+  require(found!=R.surfaces.end(),"mode-switch test primary target missing");
+  std::erase(R.linearTargets,found->second.get());
+  if(R.mainDepthAddr==address)R.mainDepthAddr=0;
+  destroy_surface_image(found->second.get());R.surfaces.erase(found);
+ }
+ ++g_surface_epoch;
+ destroy_surface_image(R.tv.scan.get());destroy_surface_image(R.tv.buildingScan.get());
+ R.tv.scan.reset();R.tv.buildingScan.reset();R.tv.scanDisplayExtent=R.tv.buildingScanDisplayExtent={};
+ set_res_scale(oldScale);latch_res_scale();
+ stereo::set_mode(oldFrame.mode);stereo_latch();stereo::frame=oldFrame;stereo::requestedMode=oldMode;
+ flush();
+ fprintf(stderr,"[renderer smoke] 1x stereo color/depth uploads, Half SBS/TAB resizes and switch-off PASS\n");
+}
+// Issue #248: switching eyes keeps both render passes open; eye 1's held commands follow eye 0's
+// at the submission, also behind a deferred capture of the renderer's own commands.
+void stereo_stream_check() {
+ const auto oldFrame=stereo::frame;
+ const int oldMode=stereo::requestedMode.load();
+ stereo::frame.mode=stereo::HalfSBS;
+ SurfaceDesc desc;desc.addr=0x3E100000;desc.width=desc.height=desc.pitch=16;desc.format=0x1a;
+ Surface* left=find_or_create_surface(desc,true);
+ stereo_select_eye(1);
+ Surface* right=find_or_create_surface(desc,true);
+ stereo_select_eye(0);
+ auto open=[](Surface* s,float red) {
+  transition_image(s,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+  VkRenderingAttachmentInfo target{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};target.imageView=layer_view(s,0);target.imageLayout=s->layout;target.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;target.storeOp=VK_ATTACHMENT_STORE_OP_STORE;target.clearValue.color.float32[0]=red;target.clearValue.color.float32[3]=1;
+  VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea={{0,0},{s->extent.width,s->extent.height}};ri.layerCount=1;ri.colorAttachmentCount=1;ri.pColorAttachments=&target;
+  auto cmd=command_buffer();begin_pass(cmd,ri,[&] { return color_pass(s->fmt.pixel,s->layout); });
+  R.rendering=R.passTracked=true;R.passColors={};R.passColors[0]=s;mark_gpu_written(s);
+ };
+ for(int captured=0;captured<2;++captured) {
+  if(captured) {
+   if(active_deferred_commands) break; // the record worker's stream: no capture to append to
+   deferred_commands().start_capture();
+  }
+  open(left,1);
+  stereo_select_eye(1);
+  require(!R.rendering,"eye 1 inherited eye 0's render pass");
+  open(right,captured?.25f:.5f);
+  require(eye_deferred_commands&&eye_deferred_commands->command_count(),"eye 1 commands were not held");
+  stereo_select_eye(0);
+  require(R.rendering&&R.passColors[0]==left,"eye switch ended eye 0's render pass");
+  stereo_select_eye(1);
+  require(R.rendering&&R.passColors[0]==right,"eye switch ended eye 1's render pass");
+  if(captured) {
+   const size_t before=active_deferred_commands->command_count();
+   stereo_flush();
+   require(active_deferred_commands->command_count()>before,"held eye 1 commands bypassed the renderer's capture");
+  }
+  flush();
+  require(!R.rendering&&!eye_deferred_commands->command_count(),"submission left eye 1's pass open");
+  stereo_select_eye(0);
+  require(!R.rendering,"submission left eye 0's pass open");
+  auto l=read_image(*left,VK_IMAGE_ASPECT_COLOR_BIT,4),r=read_image(*right,VK_IMAGE_ASPECT_COLOR_BIT,4);
+  require(l[0]==255&&std::abs(int(r[0])-(captured?64:128))<=1,"held eye 1 pass rendered the wrong image");
+ }
+ stereo_select_eye(0);
+ stereo::set_mode(stereo::Off);stereo_latch();
+ auto found=R.surfaces.find(desc.addr);
+ require(found!=R.surfaces.end()&&found->second.get()==left,"stream test primary surface missing");
+ std::erase(R.linearTargets,left);
+ destroy_surface_image(left);R.surfaces.erase(found);++g_surface_epoch;
+ stereo::set_mode(oldFrame.mode);stereo_latch();
+ stereo::frame=oldFrame;stereo::requestedMode=oldMode;
+ fprintf(stderr,"[renderer smoke] stereo eye streams keep both passes open PASS\n");
+}
+// Bind a rendered base first, then a mip-chain assembled from that same base.
+// The second resolution must not invalidate the first descriptor's read layout.
+void sampled_mip_order_check(bool bindRenderedLevel = false) {
+ SurfaceDesc base;
+ base.addr=mem::host_alloc(4096,256);base.mipAddr=mem::host_alloc(4096,256);
+ base.width=base.height=base.pitch=16;base.format=0x1a;base.tileMode=1;
+ auto* target=find_or_create_surface(base,true);
+ SurfaceDesc level=base;level.addr=base.mipAddr;level.mipAddr=0;
+ level.width=level.height=level.pitch=8;
+ auto* mip=find_or_create_surface(level,true);
+ const float red[4]={1,0,0,1};clear_image(*target,red);clear_image(*mip,red);
+ std::vector<uint32_t> registers(0x10000);
+ uint32_t words[7]={1u|(1u<<3)|(1u<<8)|(15u<<19),15u|(0x1au<<26),
+     base.addr>>8,base.mipAddr>>8,(1u<<19)|(2u<<22)|(3u<<25),0,0};
+ words[5]=1;
+ std::copy(words,words+7,registers.begin()+Latte::REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS+7);
+ // unit 1's sampler filters between mips up to LOD 1: the chain is built only as far as its sampler
+ // reaches (with_mip_chain), so a sampler without mips would never assemble the rendered level 1
+ registers[Latte::REGADDR::SQ_TEX_SAMPLER_WORD0_0+3]=1u<<17;  // MIP_FILTER point
+ registers[Latte::REGADDR::SQ_TEX_SAMPLER_WORD0_0+4]=64u<<10;  // MAX_LOD 1.0
+ words[5]=0;
+ if(bindRenderedLevel){words[0]=1u|(1u<<3)|(7u<<19);words[1]=7u|(0x1au<<26);words[2]=base.mipAddr>>8;words[3]=0;}
+ std::copy(words,words+7,registers.begin()+Latte::REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS);
+ struct Layout {
+   VkDescriptorSetLayout value=VK_NULL_HANDLE;
+   ~Layout(){if(value)vkDestroyDescriptorSetLayout(R.device,value,nullptr);}
+ } textureLayout;
+ VkDescriptorSetLayoutBinding bindings[2]{};
+ for(uint32_t i=0;i<2;++i){bindings[i].binding=i;bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;bindings[i].descriptorCount=1;bindings[i].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;}
+ VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+ info.bindingCount=2;info.pBindings=bindings;
+ vk_check(vkCreateDescriptorSetLayout(R.device,&info,nullptr,&textureLayout.value),"mip-order texture layout");
+ auto descriptors=texture_stage_smoke_bind(registers.data(),textureLayout.value,2);
+ require(target->mipChain && target->mipChain->mips==2,"mip-order fixture did not exercise generated rendered mips");
+ Image output(64,64,0x1a);
+ triangle(output.s,0,1,VK_FORMAT_UNDEFINED,false,nullptr,textureLayout.value,descriptors);
+ require(target->layout==VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && mip->layout==VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,"later mip resolution invalidated an earlier sampled source layout");
+ fprintf(stderr,"[renderer smoke] production multi-texture rendered-mip ordering passed\n");
 }
 void vertex_window_check(Surface& s) {
  struct Resources {
@@ -868,6 +1154,8 @@ int android_display_smoke_test() {
     if (value == "touchauto") { gfx::g_touch_buttons = 0; hostui::set("touchButtons", "0"); }
     if (value == "touchshow") { gfx::g_touch_buttons = 1; hostui::set("touchButtons", "1"); }
     if (value == "touchhide") { gfx::g_touch_buttons = 2; hostui::set("touchButtons", "2"); }
+    if (value == "show_drc") hostui::show_drc(true);
+    if (value == "hide_drc") hostui::show_drc(false);
     if (value == "swap1") hostui::set_displays_swapped(true);
     if (value == "swap0") hostui::set_displays_swapped(false);
     if (value == "filter0") hostui::set_scale_filter(0);
@@ -897,8 +1185,16 @@ int android_display_smoke_test() {
     if (value == "acquire0") R.secondaryAcquireHeld=false;
     if (value == "timestamps0") R.gpuTimestampsEnabled=false;
     if (value == "resize_primary") R.tv.resize=true;
-    if (value.size()==5 && value.starts_with("mode") && value[4]>='0' && value[4]<'0'+gfx::kDrcModeCount)
+    if (value.size()==5 && value.starts_with("mode") && value[4]>='0' && value[4]<'0'+gfx::kDrcModeCount) {
+      // a layout under test, not the player switching the second screen off (#222)
+      const bool secondOff=gfx::g_second_screen_off;
       hostui::set_drc_mode(value[4]-'0');
+      gfx::g_second_screen_off=secondOff;
+      hostui::save_pip_position();  // saves the display options again, with the player's choice
+    }
+    // the player choosing a mode in Settings: Off releases a connected second screen (#222)
+    if (value.size()==12 && value.starts_with("choose_mode") && value[11]>='0' && value[11]<'0'+gfx::kDrcModeCount)
+      hostui::set_drc_mode(value[11]-'0');
     if (value == "secondary_profile1") R.secondaryProfile=true;
     if (value == "secondary_profile0") R.secondaryProfile=false;
     if (value == "timing_reset") {
@@ -976,6 +1272,8 @@ int android_display_smoke_test() {
         << ",\"secondary_idle_waits\":" << R.secondaryIdleWaits.load()
         << ",\"secondary_retired\":" << R.secondaryRetired.load()
         << ",\"secondary_retirement_pending\":" << R.secondaryRetirementPending.load()
+        << ",\"second_available\":" << (gfx::g_second_display_available ? "true" : "false")
+        << ",\"second_off\":" << (gfx::drc_screen_off() ? "true" : "false")
         << ",\"dual\":" << (gfx::g_has_drc_window ? "true" : "false")
         << ",\"swap_requested\":" << (dual_display::requested_swap ? "true" : "false")
         << ",\"swap_active\":" << (dual_display::active_swap ? "true" : "false")
@@ -1016,7 +1314,27 @@ int renderer_smoke_test() {
    LOG("[renderer smoke] sync negative control submitted two unordered writes");
    command_buffer();flush();return 0;
   }
-  mem::init();bc_decode_smoke();bc_surface_check();upload_arena_check();asynchronous_submission_check();renderpass_retirement_check();buffer_cache_check();set_res_scale(1);latch_res_scale();
+  mem::init();
+  if(std::getenv("WWHD_VK_MIP_ORDER_SMOKE")) {
+   set_res_scale(1);latch_res_scale();sampled_mip_order_check();sampled_mip_order_check(true);
+   LOG("[renderer smoke] PASS: production rendered-mip texture ordering");return 0;
+  }
+  {
+   Image target(32,32,0x1a);
+   for(auto format:{VK_FORMAT_R8G8B8_UINT,VK_FORMAT_R16G16B16_UINT,VK_FORMAT_R32G32B32_UINT}) {
+    require((format_properties(vk::split_vertex_format(format)).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) &&
+        (format_properties(vk::vertex_tail_format(format)).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT),
+        "RGB fallback format unsupported");
+    std::vector<uint8_t> native,fallback;
+    triangle(target.s,0,1,format,true,&fallback);
+    if(format_properties(format).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) {
+     triangle(target.s,0,1,format,false,&native);
+     require(native==fallback,"native and fallback RGB images differ");
+     fprintf(stderr,"[renderer smoke] %s native/fallback exact image parity passed\n",vk::vertex_format_name(format));
+    } else fprintf(stderr,"[renderer smoke] %s fallback readback passed; native unsupported\n",vk::vertex_format_name(format));
+   }
+  }
+  bc_decode_smoke();bc_surface_check();upload_arena_check();asynchronous_submission_check();renderpass_retirement_check();buffer_cache_check();set_res_scale(1);latch_res_scale();
   {
    Image upload(16,16,0x1a,false,2,2);
    upload.s.addr=mem::host_alloc(65536,256);upload.s.mipAddr=mem::host_alloc(65536,256);
@@ -1132,7 +1450,7 @@ int renderer_smoke_test() {
     auto peek=std::make_unique<Surface>();
     peek->width=1280;peek->height=720;peek->pitch=1280;peek->format=0x11;peek->isDepth=true;peek->fmt=format_info(0x11,true);
     peek->addr=mem::host_alloc(256,256);create_surface_image(peek.get(),true,VkExtent3D{16,16,1});
-    auto* surface=peek.get();auto entry=R.surfaces.emplace(peek->addr,std::move(peek));
+    auto* surface=peek.get();auto entry=R.surfaces.emplace(peek->addr,std::move(peek));++g_surface_set_gen;
     uint32_t previousDepth=R.mainDepthAddr;R.mainDepthAddr=surface->addr;
     uint32_t result=mem::host_alloc(256,256);uint32_t cells[]={320,240,result,0,0,result+4};
     for(float z:{0.25f,1.0f}) {
@@ -1148,9 +1466,11 @@ int renderer_smoke_test() {
      peek_z(cells,6);flush_async();
     }
     flush();require(ld32(result)==0xFFFFFFu&&ld32(result+4)==0xFFFFFFu,"older GPU depth answer replaced newer answer");
-    R.mainDepthAddr=previousDepth;destroy_surface_image(surface);R.surfaces.erase(entry);
+    R.mainDepthAddr=previousDepth;destroy_surface_image(surface);R.surfaces.erase(entry);++g_surface_set_gen;
     fprintf(stderr,"[renderer smoke] asynchronous GPU depth peeks passed\n");
    }
+   stereo_stream_check();
+   stereo_resize_upload_check();
    stereo_geometry_check();
    Image rendered(64,64,0x1a);dynamic_uniform_check(rendered.s);vertex_window_check(rendered.s);triangle(rendered.s);
    if(R.tv.scan)destroy_surface_image(R.tv.scan.get());R.tv.scan=std::make_unique<Surface>();auto& scan=*R.tv.scan;scan.width=64;scan.height=64;scan.format=0x1a;scan.fmt=format_info(scan.format,false);create_surface_image(&scan,false);resample(&rendered.s,&scan,1);mark_gpu_written(&scan);
@@ -1209,10 +1529,18 @@ int renderer_smoke_test() {
         (unsigned long long)(measured.timestamp_writes - before.timestamp_writes));
   }
   test_hdr_presentation();
+  if (std::getenv("WWHD_TEST_CACHE_BACKGROUND")) {
+    // Synthetic durability test: let the caller kill this process after the
+    // background checkpoint reaches disk, bypassing orderly shutdown entirely.
+    gx2::request_background_vulkan_cache_checkpoint();
+    LOG("[renderer smoke] waiting for kill after background cache request");
+    for (;;) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
   save_pipeline_cache();
   wait_idle();
+  stop_record_worker();
   reset_pass_caches();
   LOG("[renderer smoke] PASS: actual device upload/clear/blit/depth/triangle/present");return 0;
- }catch(const std::exception& e){LOG("[renderer smoke] FAIL: %s",e.what());try {command_buffer();flush();}catch(...){}return 1;}
+ }catch(const std::exception& e){LOG("[renderer smoke] FAIL: %s",e.what());try {command_buffer();flush();}catch(...){}try {stop_record_worker();}catch(...){}return 1;}
 }
 } // namespace gfxvk

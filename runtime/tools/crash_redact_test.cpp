@@ -15,6 +15,10 @@ int main() {
     windows.write(0, "C:/users/ALICE/game D:\\USERS\\Other Person\\save", out);
     assert(result == "~/game ~\\save");
     result.clear();
+    crash_context::Redactor android; android.initialize(nullptr, nullptr);
+    android.write(0, "/storage/emulated/10/Android/data/app/files /data/user/10/app/cache /data/user_de/10/app", out);
+    assert(result == "~/Android/data/app/files ~/app/cache ~/app");
+    result.clear();
     r.write(0, "/Users/alice2/game /home/Bob Smith/save", out);
     assert(result == "~/game ~/save");
 }

@@ -4,6 +4,9 @@
 //   /vol/meta/...     -> <game>/meta/...
 //   /vol/save/...     -> <save dir>/...
 #include "../mods/story_mail.h"
+#include "../mods/actor_model_cache.h"
+#include "../mods/item_icons.h"
+#include "../mods/story_lyt_screen.h"
 #include "../mods/story_store.h"
 #include "../platform/filesystem.h"
 
@@ -14,16 +17,38 @@
 #ifndef _WIN32
 #include <strings.h>
 #endif
+#include <chrono>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <unordered_map>
 
 #include "../runtime.h"
 #include "../write_watch.h"
 #include "../mods/content.h"
+#include "../mods/mod_stages_files.h"
 #include "../game_languages.h"
 #include "../rtl_text.h"
 #include "fs_problems.h"  // (this fork, #47)
+#include "save_root.h"
+
+namespace hle_fs {
+namespace {
+std::mutex g_save_root_mutex;
+std::string g_save_root;
+std::atomic<bool> g_save_root_set{false};  // an override is set (the world editor's test mode): only then the lock
+}  // namespace
+void set_save_root(const std::string& dir) {
+    std::lock_guard<std::mutex> lk(g_save_root_mutex);
+    g_save_root = dir;
+    g_save_root_set.store(!dir.empty(), std::memory_order_release);
+}
+std::string save_root() {
+    if (!g_save_root_set.load(std::memory_order_acquire)) return config::save_dir;
+    std::lock_guard<std::mutex> lk(g_save_root_mutex);
+    return g_save_root.empty() ? config::save_dir : g_save_root;
+}
+}  // namespace hle_fs
 
 namespace {
 
@@ -88,7 +113,7 @@ std::string host_path_exact(const std::string& guest) {
     if (map("/vol/content", config::game_dir + "/content")) return p;
     if (map("/vol/code", config::game_dir + "/code")) return p;
     if (map("/vol/meta", config::game_dir + "/meta")) return p;
-    if (map("/vol/save", config::save_dir)) return p;
+    if (map("/vol/save", hle_fs::save_root())) return p;
     if (!p.empty() && p[0] != '/') return config::game_dir + "/content/" + p;  // relative to cwd (/vol/content)
     return config::game_dir + p;
 }
@@ -146,11 +171,18 @@ std::string host_path(const std::string& guest) {
 // the pack of the active language source (game_languages.h: the European or Japanese pack the player
 // chose, read under the name the game asks for), then the installed game.
 std::string read_path(const std::string& guest,const std::string& mode="rb") {
+    if(const char* trace=std::getenv("WWHD_MOD_ACTOR_HEAPS");trace&&std::string(trace)=="1"&&guest.find("/mod")!=std::string::npos)LOG("[mod_actor_fs] %s mode=%s override=%s",guest.c_str(),mode.c_str(),actor_model_cache::archive_for(guest).c_str());
+    if(mode=="r"||mode=="rb")if(auto model=actor_model_cache::archive_for(guest);!model.empty())return model;
     if(mode=="r"||mode=="rb")if(auto model=story_mail::model_override(guest);!model.empty())return model;  // the story notebook's model
+    if(mode=="r"||mode=="rb")if(auto lyt=story_lyt_screen::archive_for(guest);!lyt.empty())return lyt;  // a story layout (story_lyt_screen.h)
+    if(mode=="r"||mode=="rb")if(auto stage=mod_stages::archive_for(guest);!stage.empty())return stage;  // a mod stage (mod_stages.h)
     auto override=mods::content::replacement(guest,mode);
     if(!override.empty())if(const char* trace=std::getenv("WWHD_TEST_CONTENT_TRACE");trace&&std::string(trace)=="1")LOG("[content-mod] read %s -> %s",guest.c_str(),override.c_str());
     if(override.empty()&&(mode=="r"||mode=="rb"))override=game_lang::redirect(guest);
-    return override.empty()?host_path(guest):override;
+    const std::string path=override.empty()?host_path(guest):override;
+    // the 2D language pack with the mod items' icons (item_icons.h), built from the file the game would read
+    if(mode=="r"||mode=="rb")if(auto icons=item_icons::pack_for(guest,path);!icons.empty())return icons;
+    return path;
 }
 
 void make_parent_dirs(const std::string& path) {
@@ -306,6 +338,10 @@ HLE(coreinit, FSReadFile) {
         // (EFAULT) instead of faulting into the write tracker (write_watch.h)
         wwatch::HostWrite w(dst, (uint32_t)std::min<uint64_t>((uint64_t)size * count, 0x100000000ull - dst));
         n = fread(mem::ptr(dst), 1, (size_t)size * count, f);
+        // test only: WWHD_TEST_FS_MBPS=x reads at x MB/s (slow or cold storage, e.g. a phone's first
+        // start; used for the ResMgr boot race, runtime/src/resmgr_sync.cpp)
+        static const double mbps = getenv("WWHD_TEST_FS_MBPS") ? atof(getenv("WWHD_TEST_FS_MBPS")) : 0;
+        if (mbps > 0) std::this_thread::sleep_for(std::chrono::microseconds((int64_t)(n / mbps)));
     }
     ret(c, (uint32_t)(n / size));
 }
@@ -408,6 +444,7 @@ HLE(nn_save, SAVEOpenDir) {
 #include <vector>
 
 #include "../savestate.h"
+#include "../state_file_section.h"
 void fs_ss_save(ss::Writer& w) {
     std::lock_guard<std::mutex> lk(g_fs_mutex);
     w.u32(g_next_handle);
@@ -432,6 +469,8 @@ void fs_ss_save(ss::Writer& w) {
         w.u32(g_dirs[h].read);
     }
 }
+
+bool fs_ss_check(ss::Reader r,std::string& why) {return ss::check_file_section(r,why);}
 
 void fs_ss_load(ss::Reader& r) {
     std::lock_guard<std::mutex> lk(g_fs_mutex);

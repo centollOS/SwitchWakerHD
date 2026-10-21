@@ -6,6 +6,7 @@
 #include "mod_test_host.h"
 #include "overlay/mods_tab.h"
 #include "overlay/extensions.h"
+#include "overlay/quit_dialog.h"
 #include "mods/catalogue_client.h"
 #include "imgui_internal.h"
 #include "backends/imgui_impl_sdlrenderer3.h"
@@ -143,17 +144,17 @@ int main(int argc,char** argv) {
     int platform_area=0;
     if(ids||tabs)ext_tabs_for_test(platform_area);
     // the rest of the Settings window around the tab: the settings tabs above (every tab of the overlay,
-    // built-in and added); on Android the page ends above the full-width "Close Settings" button.
+    // built-in and added); the page ends above the bottom row (Quit Game; on Android Close Settings too).
     // shown_tab: the tab drawn, "mods" or an added one
     std::string shown_tab="mods";
     auto draw_tab=[&](ui::Host& h) {
         if(ImGui::BeginTabBar("settings_tabs")){for(const auto& t:overlay::ext::tabs())
             if(ImGui::BeginTabItem(t.name.c_str(),nullptr,t.id==shown_tab?ImGuiTabItemFlags_SetSelected:0))ImGui::EndTabItem();ImGui::EndTabBar();}
-        ImGui::BeginChild("page",ImVec2(0,android_style?-ImGui::GetFrameHeightWithSpacing():0),ImGuiChildFlags_NavFlattened);
+        ImGui::BeginChild("page",ImVec2(0,-ImGui::GetFrameHeightWithSpacing()),ImGuiChildFlags_NavFlattened);
         if(shown_tab=="mods")ui::draw(h,"");
         else for(const auto& t:overlay::ext::tabs())if(t.id==shown_tab&&t.draw)t.draw();
         ImGui::EndChild();
-        if(android_style)ImGui::Button("Close Settings",ImVec2(-FLT_MIN,0));
+        overlay::quit::bottom_row(android_style,nullptr);
     };
     auto window_size=[&]{return android_style?ImVec2(width*0.98f,height*0.97f):ImVec2(std::min(860.f,width*0.94f),std::min(620.f,height*0.92f));};
     assert(ImGui_ImplSDLRenderer3_Init(renderer));
@@ -217,6 +218,23 @@ int main(int argc,char** argv) {
         listed(ui::kMore);
         for(int i=0;i<3;i++){ImGui_ImplSDLRenderer3_NewFrame();ImGui::NewFrame();ImGui::Begin("Settings");draw_tab(host);ImGui::End();ImGui::Render();}
         assert(s.area==ui::kMore);
+        // Features::code_mods / mod_downloads / file_picker off (a platform without them, overlay/extensions.h):
+        // More has no Code-mod support, Mod list or GameCube game section, Community no mods to download
+        auto more_sections=[&] {
+            s.rects.clear();
+            ImGui_ImplSDLRenderer3_NewFrame();ImGui::NewFrame();
+            ImGui::SetNextWindowPos(ImVec2(0,0),ImGuiCond_Always);ImGui::SetNextWindowSize(ImVec2(float(width),float(height)));
+            ImGui::Begin("Settings");draw_tab(host);ImGui::End();ImGui::Render();
+            return std::set<std::string>{s.rects.contains("Code-mod support")?"code":"",s.rects.contains("Mod list")?"list":"",
+                                         s.rects.contains("GameCube game for mods")?"gc":""};
+        };
+        assert((more_sections()==std::set<std::string>{"code","list","gc"}));
+        host.code_mods=host.mod_downloads=host.file_picker=false;
+        assert((more_sections()==std::set<std::string>{""}));
+        assert((listed(ui::kCommunity)==std::set<std::string>{id}));  // the installed one only
+        host.code_mods=host.mod_downloads=host.file_picker=true;
+        listed(ui::kMore);
+        fprintf(stderr,"[tabs] Features off: Code-mod support, Mod list, GameCube game and downloads left out\n");
         // controller L / R over the tab bar as the overlay does it (ext::shoulder with the Mods areas): through
         // an added tab's own sub-tabs, into Mods and its areas, on to the next added tab, and back
         namespace ext=overlay::ext;
@@ -345,7 +363,9 @@ int main(int argc,char** argv) {
                 } else if(mode=="checkbox") {
                     if(s.page.empty())clicker.click("open_"+id);else if(s.rects.count("##on_page")){clicker.click("##on_page");switched=true;}
                 } else if(s.rects.count(switch_label)){clicker.click(switch_label);switched=true;}
-            } else if(has_review&&!accepted&&frame>8) {
+            } else if(has_review&&!accepted&&frame>8&&frame-review_since>=2) {
+                // (a player taps once the review is in place: on its first frame it is not placed yet, and a tap
+                // there would land outside it and close it, popup.h)
                 auto& r=s.review;
                 bool need_source=!r.source_game.empty()&&!ui::source_ready(r);
                 // missing: first the controller's A on the review's default button, which is Cancel

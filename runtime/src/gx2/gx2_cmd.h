@@ -41,6 +41,9 @@ enum Op : uint32_t {
     OP_LAYOUT_ROOT,     // nw::lyt root pane: drawn into the target bound now (which screen it goes to)
     OP_PEEK_Z,          // signed x/y in 640x480 space, guest result address (triples)
     OP_LAYOUT_CONTENT,  // DrawSelf scope: clip TV menu content to the native layout region
+    // cloud research prototype (cloud_proto.cpp): brackets drawVrkumo's draws; payload: snapshot seq
+    OP_CLOUDS_BEGIN,
+    OP_CLOUDS_END,
     // (this fork, round 45) single-register writes merged by the staging buffer: register, value, register,
     // value... (after upstream's ops, which keep their numbers)
     OP_SET_REG_PAIRS,
@@ -50,6 +53,8 @@ enum Op : uint32_t {
 // emit a command (records into the active display list, or executes now)
 void emit(Op op, const uint32_t* payload, uint32_t n);
 inline void emit(Op op, std::initializer_list<uint32_t> payload) { emit(op, payload.begin(), (uint32_t)payload.size()); }
+// Producer-thread state: recorded commands may be replayed after a mode change.
+bool recording_display_list();
 
 // register writes
 void set_reg(uint32_t reg, uint32_t value);

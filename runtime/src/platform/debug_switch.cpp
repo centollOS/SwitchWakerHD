@@ -350,6 +350,11 @@ void start() {
 }
 
 bool quit_requested() { return g_quit.load(std::memory_order_relaxed); }
+void request_quit() {
+    LOG("[quit] quit requested");
+    debugsrv::stop();
+    g_quit = true;
+}
 bool running() { return g_running; }
 int port() { return g_port; }
 

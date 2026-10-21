@@ -17,6 +17,8 @@
 #include "mods/story_store.h"
 #include "mods/story_mail.h"
 #include "mods/story_mail_book.h"
+#include "mods/story_items.h"
+#include "mods/story_item_buttons.h"
 #include "input.h"
 #include "runtime.h"
 
@@ -25,6 +27,8 @@
 #include <cstdio>
 #include <chrono>
 #include <cstring>
+#include <cstdarg>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -40,13 +44,18 @@ using namespace story_notebook;
 using story_mail::Book;
 
 void log_msg(const char* fmt, ...) {
-    (void)fmt;
+    if (!std::getenv("TLOG")) return;
+    va_list a; va_start(a, fmt); std::vfprintf(stderr, fmt, a); va_end(a); std::fputc('\n', stderr);
+}
+namespace mods {
+uint64_t step() { return 0; }  // story_item_buttons.cpp's research aid
 }
 namespace input {
 bool g_pro = false;
 bool pro_controller() { return g_pro; }  // the menu on the GamePad unless a test says otherwise
 }
 
+namespace story_notebook {void action_rewards(Cpu*);std::vector<Takeover> takeovers();}
 namespace {
 
 constexpr uint32_t kGlobals = 0x101F0000, kArena = 0x20000000, kSave = kArena;
@@ -176,6 +185,7 @@ void test_page() {
     std::vector<Quest> qs;
     for (int i = 0; i < 7; i++) qs.push_back(quest("m", "q" + std::to_string(i)));
     qs[2].has_place = true;
+    for (const Quest& q : qs) reach_step(b, q.key, 1);  // started: only a quest in progress can be tracked
     auto rs = rows(qs, b);
     Page page;
     assert(!page.open() && page.draw(rs).empty());
@@ -234,6 +244,10 @@ void test_page() {
     assert(page.mode() == Page::Mode::Detail && page.selected_key() == rs[1].quest->key);
     page.input(press(0), rs);
     tap.x = kTrackX + 20, tap.y = kTrackY + 20;
+    assert(!rs[1].quest->has_place && page.input(tap, rs).kind == Page::Action::None);  // no place: no Show on chart
+    for (Quest& q : qs)
+        if (&q == rs[1].quest) q.has_place = true;
+    page.input(press(0), rs);
     a = page.input(tap, rs);
     assert(a.kind == Page::Action::Toggle && a.key == rs[1].quest->key);
     page.input(press(0), rs);
@@ -324,6 +338,7 @@ void test_bag_place() {
 
 void test_services() {
     // no save loaded
+    float place_x=123,place_z=456;assert(!place_position("m","tale",place_x,place_z)&&place_x==123&&place_z==456);
     assert(define("m", "My mod", "tale", "The tale", "A heart piece", "") == kResultNew);
     assert(step("m", "tale", 1, "Talk to the storyteller.", "Windfall Island") == kResultNoRoom);
     st32(0x101F84DC, kSave);
@@ -345,6 +360,11 @@ void test_services() {
     assert(step("m", "tale", 1, "Talk to the storyteller.", "Windfall Island") == 1);
     assert(step("m", "tale", 1, "Talk to the storyteller.", "Windfall Island") == 1);  // idempotent
     assert(place("m", "tale", 0, -200000) == 1 && known("m", "tale", "A storyteller came to Windfall.\nHe looks for Link.") == 1);
+    const std::vector<uint8_t> before_place_area(story_store::area(),story_store::area()+story_block::kAreaSize);
+    const std::vector<uint8_t> before_place_save(mem::ptr(kSave),mem::ptr(kSave)+0x800);
+    assert(place_position("m","tale",place_x,place_z)&&place_x==0&&place_z==-200000);
+    assert(!place_position("foreign","tale",place_x,place_z)&&!place_position("m","unknown",place_x,place_z)&&!place_position("m","Tale",place_x,place_z));
+    assert(std::equal(before_place_area.begin(),before_place_area.end(),story_store::area())&&std::equal(before_place_save.begin(),before_place_save.end(),mem::ptr(kSave)));
     assert(saved_step(b, quest_key("m", "tale")) == 1);
     assert(define("m", "My mod", "later", "Later", "", "Finish the tale first") == kResultNew);
     std::vector<Quest> storage;
@@ -354,9 +374,11 @@ void test_services() {
     // the tracked quest on the sea chart (story_chart's source)
     assert(toggle_tracked(b, quest_key("m", "tale")));
     assert(no_place("m", "tale") == 1);
+    assert(!place_position("m","tale",place_x,place_z)&&place_x==0&&place_z==-200000);
     assert(step("m", "tale", 2, "Bring him a Skull Necklace.", "") == 2);
     assert(done("m", "tale") == kResultDone && done("m", "tale") == kResultDone && state("m", "tale") == kResultDone);
     assert(tracked_key(b) == 0 && step("m", "tale", 3, "", "") == kResultDone);
+    assert(!place_position("m","tale",place_x,place_z));
     // per-mod limit
     for (unsigned i = 2; i < kMaxQuestsPerMod; i++) assert(define("m", "My mod", "q" + std::to_string(i), "Q", "", "") == kResultNew);
     assert(define("m", "My mod", "one-more", "Q", "", "") == kResultNoRoom);
@@ -406,6 +428,7 @@ void original(Cpu* c, uint32_t fn) {
     case 0x0262F880: c->r[3] = c->r[4] == 0x99 ? 0x26 : c->r[4] == 0x9C ? 0x24 : 0x37; break;
     case 0x0268F060: calls.push_back("caption"); break;
     case 0x02630A64: calls.push_back("pick up"); break;
+    case 0x02630FC4: calls.push_back("put back"); break;
     case 0x0268FF50: calls.push_back("window"); break;
     case 0x026302B8: calls.push_back("float"); break;
     case 0x026333F0: {  // setVisible: the icon pane follows the item's visibility
@@ -427,6 +450,7 @@ uint32_t get_item_over = 0;
 uint32_t game_call(Cpu*, uint32_t fn, std::initializer_list<uint32_t> args) {
     std::vector<uint32_t> a(args);
     switch (fn) {
+    case 0x0254DA38: calls.push_back("action reward " + std::to_string(a.at(0)));return 0;
     case 0x025200D4: return kPlayObj;
     case 0x02006478: return ld32(a.at(0) + 4);  // hdStateMachine: the current state
     case 0x025D7DEC: calls.push_back("present item " + std::to_string(a.at(1))); return 77;
@@ -458,7 +482,7 @@ void test_hooks() {
             [](uint32_t, void (*)(Cpu*)) { assert(!"installed despite a conflict"); });
     assert(!installed());
     install([](uint32_t) { return std::string(); }, [](uint32_t a, void (*fn)(Cpu*)) { hooked[a] = fn; });
-    assert(installed() && hooked.size() == 12);
+    assert(installed() && hooked.size() == 13);
     Book b = story_store::book();
     // no notebook yet: the bag window shows the save as it is
     b.erase(story_mail::kRecordItem, story_mail::kItemNotebook);
@@ -505,12 +529,20 @@ void test_hooks() {
     p.buttons = input::kB;
     pad(p);
     assert(p.buttons == input::kB);  // a new press reaches the game
-    // a touch on the notebook: the game's pick-up, then the page; on a game item only the pick-up
+    // a tap on the notebook: the game's pick-up and put-back, then the page; on a game item only the
+    // game's; a touch that becomes a drag (lifted towards X/Y/R) opens nothing
     calls.clear();
     call(0x02630A64, kChild + 0x200);
-    assert(calls == std::vector<std::string>{"pick up"} && !page_open());
+    call(0x02630FC4, kChild + 0x200);
+    assert((calls == std::vector<std::string>{"pick up", "put back"}) && !page_open());
     call(0x02630A64, kChild);
-    assert(calls.size() == 2 && page_open());
+    assert(calls.size() == 3 && !page_open());
+    call(0x026302B8, kChild);  // lifted
+    call(0x02630FC4, kChild);
+    assert(!page_open());
+    call(0x02630A64, kChild);
+    call(0x02630FC4, kChild);
+    assert(page_open());
     close_page();
     p = {};
     pad(p);
@@ -524,12 +556,14 @@ void test_hooks() {
     call(0x026333F0, kChild, 1);
     call(0x026333F0, kChild + 0x200, 1);
     assert(calls.size() == 2 && !(ld8(kIconA + 0x44) & 1) && (ld8(kIconB + 0x44) & 1));
-    // the notebook can't go on X/Y/R
+    // the notebook goes on X/Y/R in the story block (record 15), never in the save's key; a game item
+    // put on the same button takes it back
     calls.clear();
-    assert(call(0x0268F420, kMenu, 0x31) == 0xFF && call(0x0268F420, kMenu, 0x30) == 0x30);
+    assert(call(0x0268F420, kMenu, 0x31) == 0x31 && call(0x0268F420, kMenu, 0x30) == 0x30);
     call(0x02714B0C, 0, 1, 0, 0x31);
+    assert(calls.empty() && story_items::notebook_on_button(1) && story_item_buttons::button_item(1) == 0xA0);
     call(0x02714B0C, 0, 1, 0, 0x30);
-    assert(calls == std::vector<std::string>{"assign 48"});
+    assert(calls == std::vector<std::string>{"assign 48"} && !story_items::notebook_on_button(1) && !story_item_buttons::button_item(1));
     // a full bag: no place for the notebook until one is free
     uint8_t keep[8];
     memcpy(keep, g_reserve, 8);
@@ -628,11 +662,11 @@ void test_hooks() {
         assert(!icon_place().shown);
         st8(kWin + 0x44, 1);
         assert(icon_place().shown);
-        // X/Y/R on the notebook doesn't lift it; on a game item it does
+        // X/Y/R lifts the notebook towards the button, as a game item
         calls.clear();
         call(0x026302B8, kChild);
         call(0x026302B8, kChild + 0x200);
-        assert(calls == std::vector<std::string>{"float"});
+        assert((calls == std::vector<std::string>{"float", "float"}));
         // a state load: nothing until the window runs again
         state_loaded();
         next_frame();
@@ -652,6 +686,7 @@ void test_hooks() {
             p2 = {};
             pad(p2);
             call(0x02630A64, kChild);
+            call(0x02630FC4, kChild);
             assert(page_open());
             pad(p2);  // the touch ended
             p2.buttons = input::kB;
@@ -1038,7 +1073,7 @@ void test_page_feel() {
     Book b(raw);
     std::vector<Quest> qs;
     for (int i = 0; i < 3; i++) qs.push_back(quest("m", "q" + std::to_string(i)));
-    qs[1].has_place = true;
+    for (Quest& q : qs) q.has_place = true, reach_step(b, q.key, 1);  // trackable: in progress, with a place
     auto rs = rows(qs, b);
     Page page;
     page.show();
@@ -1119,14 +1154,18 @@ void put_file(const std::filesystem::path& p, const std::vector<uint8_t>& b) {
 }
 std::map<uint32_t, void (*)(Cpu*)> store_hooks;
 std::vector<uint32_t> store_calls;
+// the guest stack of the store hooks' calls (the top of the arena): initdata_to_card's frame lies below it
+constexpr uint32_t kStoreStack = kArena + 0x3F000, kInitdataFrame = 0x420;
+bool g_initdata_frame_clear = false;  // what the last initdata_to_card call found in its frame
 void store_original(Cpu* c, uint32_t fn) {
     store_calls.push_back(fn);
     assert(fn == 0x025BA7B0 || fn == 0x025BA9FC || fn == 0x025BAC50);
-    (void)c;
+    assert(c->r[1] == kStoreStack);
+    if (fn == 0x025BAC50) g_initdata_frame_clear = story_block::all_zero(mem::ptr(c->r[1] - kInitdataFrame), kInitdataFrame);
 }
 void store_hook(uint32_t fn, uint32_t data_num) {
     Cpu c{};
-    c.r[3] = kSave + 0x20, c.r[4] = kArena + 0x30000, c.r[5] = data_num;
+    c.r[1] = kStoreStack, c.r[3] = kSave + 0x20, c.r[4] = kArena + 0x30000, c.r[5] = data_num;
     store_hooks.at(fn)(&c);
 }
 
@@ -1226,7 +1265,15 @@ void test_story_store() {
     }
     store_hook(0x025BA7B0, 1);
     assert(story_store::book().get(story_mail::kRecordQuest, 0x0BAD) == 4);
+    // a new Quest Log's data comes from initdata_to_card's stack frame, padding included: the hook clears
+    // the frame first, so stale bytes of earlier calls (0x14 -> 0xD4 in each status C's status A byte 0x17
+    // after the item menu) never reach the save; the caller's frame above it is left alone
+    memset(mem::ptr(kStoreStack - kInitdataFrame - 0x40), 0xC0, kInitdataFrame + 0x80);
+    g_initdata_frame_clear = false;
     store_hook(0x025BAC50, 1);
+    assert(g_initdata_frame_clear);
+    for (uint32_t o = 0; o < 0x40; o++)
+        assert(ld8(kStoreStack + o) == 0xC0 && ld8(kStoreStack - kInitdataFrame - 0x40 + o) == 0xC0);
     store_hook(0x025BA7B0, 1);
     assert(story_store::book().empty());
     // loading a Quest Log moves the old record out of the game's reserved bytes
@@ -1412,6 +1459,7 @@ void test_takeover_hooks() {
         constexpr uint32_t kLetterChild = kArena + 0x5000;
         st32(kLetterChild + 0xEC, 0xA1);
         call(0x02630A64, kLetterChild);
+        call(0x02630FC4, kLetterChild);
         assert(page_open() && caption_open());
         input::PadState held;
         held.touch = true;
@@ -1640,6 +1688,8 @@ void test_manifest() {
         }
     }
     assert(found);
+    float manifest_x=0,manifest_z=0;assert(place_position("lantern-mod","lantern",manifest_x,manifest_z)&&manifest_x==3827&&manifest_z==-202189);
+    assert(!place_position("lantern-mod","secret",manifest_x,manifest_z)); // hidden quest is not a navigation destination
     declared_tick();
     const uint16_t letter = story_mail::letter_key("lantern-mod", "lantern"), key = quest_key("lantern-mod", "lantern");
     assert(b.state(letter) == story_mail::kWaiting && saved_step(b, key) == 0);
@@ -1933,6 +1983,26 @@ void test_sail_hooks() {
 }
 }  // namespace
 
+// review5 fixes: Where for a quest not started yet, no Show on chart without a place
+void test_detail_texts() {
+    Quest q = quest("m", "w");
+    Row r{&q, Status::New, 0, false};
+    assert(where_text(r) == "This step has no place on the chart." && !trackable(r));
+    q.where = "Outset Island", q.has_place = true;
+    assert(where_text(r) == "Not started yet: Outset Island" && trackable(r));  // not started: step 1's place
+    r.tracked = true;
+    assert(trackable(r));
+    r.tracked = false;
+    r.status = Status::InProgress, r.step = 1;
+    assert(where_text(r) == "Outset Island" && trackable(r));
+    q.has_place = false;
+    assert(!trackable(r));
+    r.tracked = true;
+    assert(trackable(r));  // a tracked quest can always be untracked
+    r.status = Status::Done, r.tracked = false;
+    assert(!trackable(r));
+}
+
 // Mod charts in the manifest: the declarations, how quests give and finish them, the page's "Open chart".
 void test_manifest_charts() {
     const char* text = R"j({"charts": [{"id": "old-map", "name": "Old map", "description": "An X marks the lighthouse.",
@@ -1980,13 +2050,226 @@ void test_manifest_charts() {
     assert(page.input(press(kPadX), rs).kind == Page::Action::None && page.open());
 }
 
+// Public destination resolution must agree with notebook/chart state and
+// remain independent of local NPC coordinates for an interior entrance.
+void test_quest_destinations() {
+    auto manifest=mods::json::parse(R"({"quests_format":1,
+      "scenes":[{"id":"place-flags","steps":[{"type":"end","then":[
+        {"action":"flag","id":"opened"},{"action":"flag","id":"closed"}]}]}],
+      "quests":[{"id":"destinations","title":"Interior destination","steps":[
+        {"n":1,"text":"Enter the building","where":"Inside the building",
+         "place":{"stage":"Pnezumi","room":0,"point":3,"sea":{"x":-200000,"z":100000}},
+         "npc":{"who":"windfall-ub3","lines":["Meet me inside."]}},
+        {"n":2,"text":"Find the room","where":"The back room",
+         "available":{"flag":["opened"],"not_flag":"closed","text":"Open the entrance"},
+         "place":{"stage":"Pnezumi","room":1,"x":10,"y":20,"z":30,"sea":{"x":-200000,"z":100000}}},
+        {"n":3,"text":"Return to sea","place":{"x":1000,"z":2000},"npc":{"who":"windfall-ub3","lines":["Back at sea."]}}]}]})");
+    assert(declare("destination-test","Destinations",manifest));
+    assert(reach("destination-test","destinations",1)==1);
+    auto b=story_store::book();assert(toggle_tracked(b,quest_key("destination-test","destinations")));
+    QuestDestination destination;
+    assert(place_destination("destination-test","destinations",destination));
+    assert(destination.stage=="Pnezumi"&&destination.room==0&&destination.point==3);
+    float x=0,z=0;assert(place_position("destination-test","destinations",x,z)&&x==-200000&&z==100000);
+    auto marker=[] {for(const auto&m:story_chart::shown_markers())if(m.chart=="notebook"&&m.marker=="tracked")return m;assert(false);return story_chart::MarkerView{};};
+    auto before=marker();assert(before.x==-200000&&before.z==100000);
+    constexpr uint32_t npc=kArena+0xB000;
+    st8(npc+0x905,5);st8(npc+0x326,11);
+    st32(npc+0x314,f32_as_u32(12345));st32(npc+0x31C,f32_as_u32(67890));
+    memcpy(mem::ptr(kPlayObj+0x5134),"sea",4);
+    call(0x022C36D0,npc); // actual public hook updates the live resident cache
+    auto after=marker();assert(after.x==-200000&&after.z==100000);
+    std::vector<Quest> storage;const auto rows=rows_now(storage);
+    auto row=std::find_if(rows.begin(),rows.end(),[](const auto&r){return r.quest->mod=="destination-test";});
+    assert(row!=rows.end()&&row->quest->where=="Inside the building");
+    assert(reach("destination-test","destinations",2)==2);
+    destination.stage="unchanged";
+    assert(!place_destination("destination-test","destinations",destination)&&destination.stage=="unchanged");
+    assert(story_actors::set_flag(b,"another-mod","opened"));
+    assert(!place_destination("destination-test","destinations",destination));
+    assert(story_actors::set_flag(b,"destination-test","opened"));
+    assert(place_destination("destination-test","destinations",destination));
+    assert(destination.stage=="Pnezumi"&&destination.room==1&&destination.point==-1&&destination.position.x==10&&destination.position.y==20&&destination.position.z==30);
+    assert(story_actors::set_flag(b,"destination-test","closed"));
+    assert(!place_destination("destination-test","destinations",destination));
+    assert(story_actors::set_flag(b,"destination-test","closed",false));
+    assert(reach("destination-test","destinations",3)==3);
+    assert(place_destination("destination-test","destinations",destination)&&destination.stage=="sea"&&destination.position.x==1000&&destination.position.z==2000);
+    call(0x022C36D0,npc);
+    auto followed=marker();assert(followed.x==12345&&followed.z==67890); // positive control: sea following still updates the cache
+    assert(step("destination-test","destinations",3,"Code-owned direction","Elsewhere")==3);
+    assert(place("destination-test","destinations",500,-900)==3);
+    assert(place_destination("destination-test","destinations",destination)&&destination.stage=="sea"&&destination.position.x==500&&destination.position.z==-900);
+    assert(no_place("destination-test","destinations")==3);
+    destination.stage="unchanged";
+    assert(!place_destination("destination-test","destinations",destination)&&destination.stage=="unchanged");
+    assert(!place_destination("another-mod","destinations",destination));
+    // Code-only quests retain the existing sea-place counterpart too.
+    assert(define("destination-test","Destinations","code-only","Code only","","")==kResultNew);
+    assert(step("destination-test","code-only",1,"Go","Sea")==1);
+    assert(place("destination-test","code-only",3000,4000)==1);
+    assert(place_destination("destination-test","code-only",destination)&&destination.stage=="sea"&&destination.position.x==3000);
+    const std::vector<uint8_t> saved_area(story_store::area(),story_store::area()+story_block::kAreaSize);
+    const std::vector<uint8_t> game_save(mem::ptr(kSave),mem::ptr(kSave)+0x800);
+    assert(place_destination("destination-test","code-only",destination));
+    assert(std::equal(saved_area.begin(),saved_area.end(),story_store::area()));
+    assert(std::equal(game_save.begin(),game_save.end(),mem::ptr(kSave)));
+}
+
+
+// The world editor's live story update (redeclare): only the edited mod's tables change, the save's records
+// stay, a talk running keeps the story system busy, a removed talk gives the resident back to the game.
+std::string live_manifest(const std::string& lines, const std::string& extra = "") {
+    std::string npc = lines.empty() ? "" : R"(, "npc": {"who": "windfall-ub3", "lines": [")" + lines + R"("]})";
+    return R"({"quests_format": 1, "quests": [{"id": "kreeb", "title": "Kreeb's lamp", "steps": [{"n": 1, "text": "Talk to her.")" + npc +
+           R"(}, {"n": 2, "text": "Then sail on."}]})" + extra + R"(]})";
+}
+std::vector<Takeover> takeovers_of(const std::string& mod, const std::string& quest) {
+    std::vector<Takeover> out;
+    for (const Takeover& t : takeovers())
+        if (t.quest == quest_key(mod, quest)) out.push_back(t);
+    return out;
+}
+bool listed(const std::string& mod, const std::string& id) {
+    for (const Quest& q : quests())
+        if (q.mod == mod && q.id == id) return true;
+    return false;
+}
+void test_redeclare() {
+    constexpr uint32_t kNpc = kArena + 0x8000;
+    Book b = story_store::book();
+    while (tracked_key(b)) toggle_tracked(b, tracked_key(b));
+    for (const Quest& q : quests()) b.set(story_mail::kRecordQuest, q.key, kStepDone);  // the earlier tests' quests want her no more
+    st8(kNpc + 0x905, 5), st8(kNpc + 0x326, 11);  // the harbour lady at the harbour
+    memcpy(mem::ptr(kPlayObj + 0x5134), "sea", 4);
+    st32(kNpc + 0x8A8, 0x1234), st32(kNpc + 0x8AC, 0);
+    auto end_talk = [&] {
+        st16(kNpc + 0xF8, 1);
+        call(0x022C36D0, kNpc);
+        st16(kNpc + 0xF8, 0);
+        call(0x022C36D0, kNpc);
+    };
+    // another mod with a talk for the same resident (not started), a letter and a chart of its own
+    const char* other = R"({"charts": [{"id": "b-map", "name": "B's map", "place": {"x": 1000, "z": -200000}}],
+      "letters": [{"id": "b-note", "sender": "B", "text": "Hello."}],
+      "quests_format": 1, "quests": [{"id": "other", "title": "B's tale",
+        "steps": [{"n": 1, "text": "Talk.", "npc": {"who": "windfall-ub3", "lines": ["B speaks."]}}]}]})";
+    assert(declare("live-b", "B", mods::json::parse(other)));
+    assert(declare("live-a", "A", mods::json::parse(live_manifest("Hello from A."))));
+    const auto b_talks = takeovers_of("live-b", "other");
+    const auto charts_before = story_chart::charts();
+    assert(b_talks.size() == 1 && takeovers_of("live-a", "kreeb").size() == 1);
+    const uint16_t ka = quest_key("live-a", "kreeb");
+    assert(reach_step(b, ka, 1) == 1);
+    // the talk runs: not a calm moment; it ends: the quest is done (the game's rules)
+    std::string why;
+    assert(story_idle(why));
+    assert(call(0x022C6C68, kNpc) == 0x2CF3);
+    assert(!story_idle(why) && why.find("talk") != std::string::npos);
+    end_talk();
+    assert(story_idle(why) && state("live-a", "kreeb") == kResultDone);
+    // the edit: other lines; the progress the save has stays as it is (here: step 1 again, by hand)
+    assert(b.set(story_mail::kRecordQuest, ka, 1));
+    std::vector<uint8_t> area(story_store::area(), story_store::area() + story_block::kAreaSize);
+    Redeclared r;
+    assert(redeclare("live-a", "A", mods::json::parse(live_manifest("Edited line.")), r, why));
+    assert(r.quests == 1 && r.talks == 1 && r.letters == 0 && r.charts == 0);
+    assert(std::equal(area.begin(), area.end(), story_store::area()));  // nothing of the save written
+    auto a_talks = takeovers_of("live-a", "kreeb");
+    assert(a_talks.size() == 1 && a_talks[0].lines == "Edited line." && a_talks[0].step == 1);
+    assert(call(0x022C6C68, kNpc) == 0x2CF3);
+    end_talk();
+    assert(state("live-a", "kreeb") == kResultDone);
+    // the talk removed: the resident is the game's again, the quest stays where it is
+    assert(b.set(story_mail::kRecordQuest, ka, 1));
+    assert(redeclare("live-a", "A", mods::json::parse(live_manifest("")), r, why) && r.talks == 0);
+    assert(takeovers_of("live-a", "kreeb").empty() && state("live-a", "kreeb") == 1);
+    calls.clear();
+    assert(call(0x022C6C68, kNpc) == 0x2CF1 && calls == std::vector<std::string>{"getMsg"});
+    // the talk back (an undo): it speaks again
+    assert(redeclare("live-a", "A", mods::json::parse(live_manifest("Hello from A.")), r, why) && r.talks == 1);
+    assert(call(0x022C6C68, kNpc) == 0x2CF3);
+    end_talk();
+    // a letter and a chart of A's: added, changed, and the chart dropped (kept until a restart)
+    const std::string extra = R"(], "letters": [{"id": "a-note", "sender": "Kreeb", "text": "Thanks."}],
+      "charts": [{"id": "a-map", "name": "A's map", "place": {"x": 2000, "z": -200000}}], "x": [0)";
+    assert(redeclare("live-a", "A", mods::json::parse(live_manifest("", extra)), r, why) && r.letters == 1 && r.charts == 1);
+    declared_tick();  // the letter is registered with its send
+    auto sender_of = [](const std::string& id) {
+        for (const auto& l : story_mail::letters())
+            if (l.mod == "live-a" && l.id == id) return l.sender;
+        return std::string();
+    };
+    assert(sender_of("a-note") == "Kreeb");
+    std::string renamed = extra;
+    renamed.replace(renamed.find("\"Kreeb\""), 7, "\"Kreeb, the lamp keeper\"");
+    renamed.replace(renamed.find("A's map"), 7, "Old lamp");
+    assert(redeclare("live-a", "A", mods::json::parse(live_manifest("", renamed)), r, why));
+    assert(sender_of("a-note") == "Kreeb, the lamp keeper");
+    auto chart_named = [](const std::string& mod, const std::string& id) {
+        for (const auto& c : story_chart::charts())
+            if (c.mod == mod && c.chart == id) return c.name;
+        return std::string();
+    };
+    assert(chart_named("live-a", "a-map") == "Old lamp");
+    assert(redeclare("live-a", "A", mods::json::parse(live_manifest("")), r, why));
+    assert(sender_of("a-note").empty() && r.charts_kept == std::vector<std::string>{"a-map"} && chart_named("live-a", "a-map") == "Old lamp");
+    // a quest removed, another added; a quest the mod's code defined keeps its registration
+    assert(define("live-a", "A", "coded", "Coded quest", "", "") == kResultNew && step("live-a", "coded", 1, "By code.", "") == 1);
+    const char* swapped = R"({"quests_format": 1, "quests": [{"id": "fresh", "title": "A new tale", "steps": [{"n": 1, "text": "Go."}]}]})";
+    const uint8_t kreeb_was = b.get(story_mail::kRecordQuest, ka);
+    assert(kreeb_was == kStepDone);
+    assert(redeclare("live-a", "A", mods::json::parse(swapped), r, why));
+    assert(!listed("live-a", "kreeb") && listed("live-a", "fresh") && listed("live-a", "coded"));
+    assert(b.get(story_mail::kRecordQuest, ka) == kreeb_was);  // its record stays (an undo shows it again)
+    // a refused manifest changes nothing
+    assert(!redeclare("live-a", "A", mods::json::parse(R"({"quests_format": 1, "quests": [{"id": "", "title": "x"}]})"), r, why));
+    assert(listed("live-a", "fresh") && !listed("live-a", "kreeb"));
+    // the other mod: its quest, talk, chart and letter as they were
+    assert(listed("live-b", "other"));
+    const auto b_now = takeovers_of("live-b", "other");
+    assert(b_now.size() == 1 && b_now[0].lines == b_talks[0].lines && b_now[0].resident == b_talks[0].resident);
+    assert(chart_named("live-b", "b-map") == "B's map");
+    assert(sender_of("b-note").empty());  // (A's lookup) and B's letter is still B's:
+    bool b_letter = false;
+    for (const auto& l : story_mail::letters()) b_letter |= l.mod == "live-b" && l.id == "b-note" && l.sender == "B";
+    assert(b_letter);
+    (void)charts_before;
+}
+
 int main() {
+    {
+        QuestDestination d;std::string why;
+        auto v=mods::json::parse(R"({"stage":"Pnezumi","room":0,"sea":{"x":-200000,"z":100000}})");
+        assert(parse_quest_destination(v,d,why)&&d.stage=="Pnezumi"&&d.room==0&&d.point==-2&&d.sea_x==-200000);
+        v["point"]=3;assert(parse_quest_destination(v,d,why)&&d.point==3);
+        v["x"]=1;v["y"]=2;v["z"]=3;assert(!parse_quest_destination(v,d,why));v.object.erase("point");
+        assert(parse_quest_destination(v,d,why)&&d.point==-1&&d.position.y==2);
+        v.object.erase("sea");assert(!parse_quest_destination(v,d,why));
+        assert(!parse_quest_destination(mods::json::parse(R"({"stage":"../bad","room":0,"sea":{"x":0,"z":0}})"),d,why));
+        assert(!parse_quest_destination(mods::json::parse(R"({"x":0})"),d,why));
+        assert(parse_quest_destination(mods::json::parse(R"({"x":0,"z":0})"),d,why)&&d.stage=="sea"&&d.room==25&&d.point==-1);
+    }
+
+    {
+        std::array<uint8_t,1024> bytes{};story_mail::Book b(bytes.data());
+        Availability a;a.flag_mod="local";a.flags={"read"};a.not_flags={"blocked"};
+        assert(!available(a,nullptr,12,b));
+        assert(story_actors::set_flag(b,"foreign","read"));assert(!available(a,nullptr,12,b));
+        assert(story_actors::set_flag(b,"local","read"));assert(available(a,nullptr,12,b));
+        assert(story_actors::set_flag(b,"local","blocked"));assert(!available(a,nullptr,12,b));
+        assert(story_actors::set_flag(b,"local","blocked",false));assert(available(a,nullptr,12,b));
+        assert(!available(a,nullptr,12));
+    }
+
     assert(map(kGlobals, 0x10000) && map(kArena, 0x40000));
+    assert(map(0x10470000, 0x10000));  // g_dComIfG_gameInfo's play.mSelectItem (story_item_buttons.cpp)
     story_store::set_memory(kArena + 0x20000);
     test_list();
     test_record();
     test_text();
     test_page();
+    test_detail_texts();
     test_bag_place();
     test_services();
     test_hooks();
@@ -2007,6 +2290,22 @@ int main() {
     test_sail_manifest();
     test_sail_rules();
     test_sail_hooks();
+    test_quest_destinations();
+    test_redeclare();
+    {
+        auto m=mods::json::parse(R"({"quests_format":1,"quests":[{"id":"action","title":"Action reward","reward":{"item":"rupee_orange"},"steps":[{"n":1,"text":"Go","where":"Inside","place":{"stage":"Pnezumi","room":0,"point":1,"sea":{"x":0,"z":-200000}}}]}]})");
+        assert(declare("action-test","Action",m));auto b=story_store::book();
+        assert(reach("action-test","action",1)==1);assert(toggle_tracked(b,quest_key("action-test","action")));
+        QuestDestination destination;assert(place_destination("action-test","action",destination)&&destination.stage=="Pnezumi"&&destination.point==1);
+        assert(done_action("action-test","missing")==kResultInvalid);
+        assert(done_action("action-test","action")==255&&tracked_key(b)==0);
+        assert(done_action("action-test","action")==255);
+        calls.clear();Cpu c{};action_rewards(&c);action_rewards(&c);
+        assert(std::count(calls.begin(),calls.end(),"action reward 6")==1);
+        assert(done_action("action-test","action")==255);action_rewards(&c);
+        assert(std::count(calls.begin(),calls.end(),"action reward 6")==1);
+        assert(!place_destination("action-test","action",destination));
+    }
     std::puts("story_notebook_test: ok");
     return 0;
 }

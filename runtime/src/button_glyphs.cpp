@@ -2,6 +2,7 @@
 // using the game's HUD font, through common game/GX2 path. See docs/button-glyphs.md for hook points and layout semantics.
 #include "button_glyphs.h"
 #include "button_glyph_font.h"
+#include "button_glyph_art.h"
 
 #include <algorithm>
 #include <array>
@@ -41,7 +42,9 @@ void forget_rebuilt();
 // The look as of the last style change, packed; a different one rebuilds every cached text once.
 std::atomic<uint32_t> last_signature{0};
 uint32_t signature(const PromptStyle& s) {
-    return 0x100u | (uint32_t)s.face | (s.colours ? 4u : 0u) | (uint32_t)s.shoulders << 3 | (s.positions ? 0x20u : 0u);
+    uint32_t buttons = 0;
+    for (int i = 0; i < 4; ++i) buttons |= uint32_t(s.buttons[i]) << (10 + 2*i);
+    return buttons | 0x100u | (uint32_t)s.face | (s.colours ? 4u : 0u) | (uint32_t)s.shoulders << 3 | (s.positions ? 0x20u : 0u);
 }
 
 PromptStyle style() {
@@ -90,6 +93,7 @@ struct SavedWord {
 thread_local int hud_shoulder = -1;
 thread_local int hud_face = -1;  // a HUD face-letter pane (T_A_00 on P_A_00, ...)
 thread_local uint32_t hud_box = 0;
+thread_local int hud_action = -1;
 std::string_view pane_name(uint32_t pane);
 uint32_t child_named(uint32_t parent, std::string_view name);
 
@@ -380,14 +384,32 @@ void button_glyphs::draw_text_box(Cpu* c, PpcFunc draw) {
     const int previous = hud_shoulder;
     const uint32_t previous_box = hud_box;
     const int previous_face = hud_face;
+    const int previous_action = hud_action;
     hud_box = c->r[3];
     hud_shoulder = shoulder_box(hud_box);
     hud_face = face_box(hud_box);
+    hud_action = -1;
+    const auto name = pane_name(hud_box);
+    constexpr std::string_view commands[] = {"T_CommandA_00", "T_CommandB_00", "T_CommandX_00", "T_CommandY_00"};
+    constexpr std::string_view pictures[] = {"P_A_00", "P_B_00", "P_X_00", "P_Y_00"};
+    const uint32_t parent = ld32(hud_box + 0x0C);
+    for (int i = 0; i < 4; ++i)
+        if (name == commands[i] && parent && (button_glyphs::face_picture(pane_name(parent)) == i || child_named(parent, pictures[i])))
+            hud_action = i;
     prepare_text_box(hud_box, c);
+    // HUD letters can be emitted through the font's direct glyph path, bypassing Print.
+    // Supply the mapped letter to that rebuild too, then restore the authored Wii U text.
+    const auto look = style();
+    const uint32_t text = hud_face >= 0 ? ld32(hud_box + 0xA4) : 0;
+    const uint16_t authored_letter = text ? ld16(text) : 0;
+    const bool swap_letter = text && look.face == FaceStyle::kXbox && look.buttons[hud_face] != hud_face;
+    if (swap_letter) st16(text, "ABXY"[look.buttons[hud_face]]);
     draw(c);
+    if (swap_letter) st16(text, authored_letter);
     hud_shoulder = previous;
     hud_face = previous_face;
     hud_box = previous_box;
+    hud_action = previous_action;
 }
 
 // Group-3 tags print U+E000..E003 for A/B/X/Y and U+E083..E086 for L/R/ZL/ZR. The
@@ -399,6 +421,12 @@ extern "C" void hook_0286E9F0(Cpu* c) {
     const int shoulder = button_glyphs::shoulder_character(c->r[4]);
     const uint32_t list = face >= 0 || shoulder >= 0 ? ld32(c->r[3] + 0x2C) : 0;
     const uint32_t count = list ? ld16(list + 4) : 0;
+    const auto look = style();
+    const int identity = face >= 0 ? face : hud_face;
+    if (identity >= 0 && look.face == FaceStyle::kXbox) {
+        constexpr uint32_t letters[] = {'A', 'B', 'X', 'Y'};
+        c->r[4] = face >= 0 ? 0xE000 + look.buttons[identity] : letters[look.buttons[identity]];
+    }
     f_0286E9F0_orig(c);
     if (list && ld16(list + 4) == count + 1 && marking()) {
         const uint32_t flags = list + 0xA4 + count * 0x30 + 0x2F;
@@ -447,6 +475,8 @@ extern "C" void hook_028F7C7C(Cpu* c) {
             st16(list + 4, 1);  // one complete R1/R2/L1/L2 label, not the old separate Z and R/L
         }
     }
+    if (hud_face >= 0 && original_count && mark && !look.positions)
+        st8(list + 0xA4 + 0x2F, button_glyphs::mark(ld8(list + 0xA4 + 0x2F), hud_face));
     if (hud_face >= 0 && original_count && shape_ready) {
         // The HUD letter becomes the shape, square and centred on the letter, on the game's own
         // button picture. Coloured: white vertex colours, the shape carries its own colour.
@@ -471,18 +501,32 @@ extern "C" void hook_028F7C7C(Cpu* c) {
         const uint32_t quad = list + 0xA4 + i * 0x30;
         const int face = button_glyphs::marked_face(ld8(quad + 0x2F));
         const int shoulder = button_glyphs::marked_shoulder(ld8(quad + 0x2F));
+        // Action words belong to the same physical button as their neighbouring icon.
+        // Keep By label's authored words byte-identical; new position/custom styles tint ink.
+        if (hud_action >= 0 && !look.positions && look.face != FaceStyle::kOriginal && look.colours) {
+            const int button = look.buttons[hud_action];
+            const uint32_t rgb = look.face == FaceStyle::kPlayStation ? button_glyphs::kShapeColours[button]
+                                                                    : button_glyphs::colour(button);
+            for (uint32_t offset : {0x10u, 0x14u}) {
+                const uint32_t ink = ld32(quad + offset);
+                uint32_t tinted = ink & 255;
+                for (int shift = 24; shift > 0; shift -= 8)
+                    tinted |= (((ink >> shift) & 255) * ((rgb >> shift) & 255) / 255) << shift;
+                patch(saved, quad + offset, tinted);
+            }
+        }
         if (face < 0 && shoulder < 0) continue;
         if (mark) st8(quad + 0x2F, button_glyphs::rendered(ld8(quad + 0x2F), active));
         if (face >= 0 && hud_face < 0) {  // dialog/icon-font glyphs; HUD letters keep their ink
             if (look.face == FaceStyle::kXbox && look.colours) {
-                tint_word(saved, quad + 0x10, face);
-                tint_word(saved, quad + 0x14, face);
+                tint_word(saved, quad + 0x10, look.buttons[face]);
+                tint_word(saved, quad + 0x14, look.buttons[face]);
             } else if (shape_ready) {
-                atlas_quad(saved, quad, button_glyphs::shape_row(face, look.colours), true, c);
+                atlas_quad(saved, quad, button_glyphs::shape_row(look.buttons[face], look.colours), true, c);
             }
         }
         if (face >= 0 && hud_face >= 0 && shape_ready)
-            atlas_quad(saved, quad, button_glyphs::shape_row(face, look.colours), false, c, !look.colours);
+            atlas_quad(saved, quad, button_glyphs::shape_row(look.buttons[face], look.colours), false, c, !look.colours);
         // Dialogs: the framed label is an RGBA picture (#141). HUD shoulder plates: the bare
         // caption is a coverage glyph like the plate's own "R"/"ZR", so the game draws it in the
         // plate's dark letter colour and dims it with the button (#143); as a picture it was
@@ -507,7 +551,7 @@ extern "C" void hook_02874D54(Cpu* c) {
     for (uint32_t i = 0; i < saved.size(); i++) {
         const uint32_t address = picture + 0xA8 + 4 * i;
         saved[i] = ld32(address);
-        st32(address, button_glyphs::tint(saved[i], face));
+        st32(address, button_glyphs::tint(saved[i], look.buttons[face]));
     }
     f_02874D54_orig(c);
     for (uint32_t i = 0; i < saved.size(); i++) st32(picture + 0xA8 + 4 * i, saved[i]);

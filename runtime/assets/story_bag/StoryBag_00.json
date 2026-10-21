@@ -1,0 +1,2043 @@
+{
+ "name": "StoryBag_00",
+ "size": [
+  1280,
+  720
+ ],
+ "textures": {
+  "BagIcon0_00": {
+   "fill": {
+    "color": [
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "width": 128,
+   "height": 128,
+   "format": "rgba8"
+  },
+  "BagIcon1_00": {
+   "fill": {
+    "color": [
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "width": 128,
+   "height": 128,
+   "format": "rgba8"
+  },
+  "BagIcon2_00": {
+   "fill": {
+    "color": [
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "width": 128,
+   "height": 128,
+   "format": "rgba8"
+  },
+  "BagIcon3_00": {
+   "fill": {
+    "color": [
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "width": 128,
+   "height": 128,
+   "format": "rgba8"
+  },
+  "BagIcon4_00": {
+   "fill": {
+    "color": [
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "width": 128,
+   "height": 128,
+   "format": "rgba8"
+  },
+  "BagIcon5_00": {
+   "fill": {
+    "color": [
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "width": 128,
+   "height": 128,
+   "format": "rgba8"
+  },
+  "BagIcon6_00": {
+   "fill": {
+    "color": [
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "width": 128,
+   "height": 128,
+   "format": "rgba8"
+  },
+  "BagIcon7_00": {
+   "fill": {
+    "color": [
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "width": 128,
+   "height": 128,
+   "format": "rgba8"
+  },
+  "BagIcon8_00": {
+   "fill": {
+    "color": [
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "width": 128,
+   "height": 128,
+   "format": "rgba8"
+  }
+ },
+ "materials": {
+  "M_Window": {
+   "textures": [
+    {
+     "texture": "ItemBackBaseGlow_00^t.bflim"
+    }
+   ],
+   "black": [
+    228,
+    229,
+    238,
+    0
+   ],
+   "white": [
+    228,
+    229,
+    238,
+    255
+   ]
+  },
+  "M_Cursor": {
+   "textures": [
+    {
+     "texture": "Crsor_00^t.bflim"
+    }
+   ],
+   "black": [
+    42,
+    20,
+    6,
+    0
+   ],
+   "white": [
+    255,
+    255,
+    255,
+    255
+   ]
+  },
+  "M_Disc": {
+   "textures": [
+    {
+     "texture": "ItemNow_00^t.bflim"
+    }
+   ],
+   "black": [
+    255,
+    255,
+    255,
+    0
+   ],
+   "white": [
+    255,
+    255,
+    255,
+    255
+   ]
+  },
+  "M_DotOn": {
+   "textures": [
+    {
+     "texture": "ItemNow_00^t.bflim"
+    }
+   ],
+   "black": [
+    255,
+    225,
+    0,
+    0
+   ],
+   "white": [
+    255,
+    225,
+    0,
+    255
+   ]
+  },
+  "M_DotOff": {
+   "textures": [
+    {
+     "texture": "ItemNow_00^t.bflim"
+    }
+   ],
+   "black": [
+    150,
+    156,
+    178,
+    0
+   ],
+   "white": [
+    150,
+    156,
+    178,
+    255
+   ]
+  },
+  "M_Back": {
+   "textures": [
+    {
+     "texture": "Back_00^t.bflim"
+    }
+   ],
+   "black": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "white": [
+    246,
+    243,
+    225,
+    255
+   ]
+  },
+  "M_Paper": {
+   "textures": [
+    {
+     "texture": "PaperPattern_00^t.bflim",
+     "wrap": [
+      5,
+      5
+     ]
+    }
+   ],
+   "black": [
+    196,
+    198,
+    214,
+    0
+   ],
+   "white": [
+    228,
+    229,
+    238,
+    255
+   ]
+  },
+  "M_MenuSel": {
+   "textures": [
+    {
+     "texture": "ItemNow_00^t.bflim"
+    }
+   ],
+   "black": [
+    255,
+    225,
+    0,
+    0
+   ],
+   "white": [
+    255,
+    225,
+    0,
+    255
+   ]
+  },
+  "M_Icon0": {
+   "textures": [
+    {
+     "texture": "BagIcon0_00"
+    }
+   ]
+  },
+  "M_Icon1": {
+   "textures": [
+    {
+     "texture": "BagIcon1_00"
+    }
+   ]
+  },
+  "M_Icon2": {
+   "textures": [
+    {
+     "texture": "BagIcon2_00"
+    }
+   ]
+  },
+  "M_Icon3": {
+   "textures": [
+    {
+     "texture": "BagIcon3_00"
+    }
+   ]
+  },
+  "M_Icon4": {
+   "textures": [
+    {
+     "texture": "BagIcon4_00"
+    }
+   ]
+  },
+  "M_Icon5": {
+   "textures": [
+    {
+     "texture": "BagIcon5_00"
+    }
+   ]
+  },
+  "M_Icon6": {
+   "textures": [
+    {
+     "texture": "BagIcon6_00"
+    }
+   ]
+  },
+  "M_Icon7": {
+   "textures": [
+    {
+     "texture": "BagIcon7_00"
+    }
+   ]
+  },
+  "M_Icon8": {
+   "textures": [
+    {
+     "texture": "BagIcon8_00"
+    }
+   ]
+  },
+  "M_Frame0": {
+   "textures": [
+    {
+     "texture": "NotchedWindowLT_00^t.bflim"
+    }
+   ]
+  },
+  "M_Frame1": {
+   "textures": [
+    {
+     "texture": "NotchedWindowRT_00^t.bflim"
+    }
+   ]
+  },
+  "M_Frame2": {
+   "textures": [
+    {
+     "texture": "NotchedWindowLB_00^t.bflim"
+    }
+   ]
+  },
+  "M_Frame3": {
+   "textures": [
+    {
+     "texture": "NotchedWindowRB_00^t.bflim"
+    }
+   ]
+  },
+  "M_Frame4": {
+   "textures": [
+    {
+     "texture": "NotchedWindowL_00^t.bflim"
+    }
+   ]
+  },
+  "M_Frame5": {
+   "textures": [
+    {
+     "texture": "NotchedWindowR_00^t.bflim"
+    }
+   ]
+  },
+  "M_Frame6": {
+   "textures": [
+    {
+     "texture": "NotchedWindowT_00^t.bflim"
+    }
+   ]
+  },
+  "M_Frame7": {
+   "textures": [
+    {
+     "texture": "NotchedWindowB_00^t.bflim"
+    }
+   ]
+  }
+ },
+ "panes": [
+  {
+   "type": "null",
+   "name": "N_All",
+   "size": [
+    1280,
+    720
+   ],
+   "translate": [
+    0,
+    0
+   ],
+   "influence_alpha": true,
+   "children": [
+    {
+     "type": "null",
+     "name": "N_Bag",
+     "size": [
+      562,
+      494
+     ],
+     "translate": [
+      313,
+      -92
+     ],
+     "influence_alpha": true,
+     "children": [
+      {
+       "type": "null",
+       "name": "N_Page",
+       "size": [
+        562,
+        494
+       ],
+       "translate": [
+        0,
+        0
+       ],
+       "influence_alpha": true,
+       "children": [
+        {
+         "type": "window",
+         "name": "W_Bag",
+         "size": [
+          562,
+          494
+         ],
+         "frame_size": [
+          158,
+          158,
+          494,
+          494
+         ],
+         "frames": [
+          {
+           "material": "M_Window",
+           "flip": "none"
+          },
+          {
+           "material": "M_Window",
+           "flip": "flip_h"
+          },
+          {
+           "material": "M_Window",
+           "flip": "none"
+          },
+          {
+           "material": "M_Window",
+           "flip": "none"
+          }
+         ],
+         "content": {
+          "material": "M_Window"
+         },
+         "window_flags": 11
+        },
+        {
+         "type": "null",
+         "name": "N_Slots",
+         "size": [
+          562,
+          494
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "influence_alpha": true,
+         "children": [
+          {
+           "type": "null",
+           "name": "N_Slot0",
+           "size": [
+            140,
+            140
+           ],
+           "translate": [
+            -131,
+            130
+           ],
+           "influence_alpha": true,
+           "children": [
+            {
+             "type": "picture",
+             "name": "P_Disc0",
+             "size": [
+              138,
+              138
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Disc",
+             "visible": false
+            },
+            {
+             "type": "picture",
+             "name": "P_Icon0",
+             "size": [
+              104,
+              104
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Icon0",
+             "visible": false
+            },
+            {
+             "type": "text",
+             "name": "T_Num0",
+             "size": [
+              60,
+              42.0
+             ],
+             "translate": [
+              40,
+              -40
+             ],
+             "font": "CKingMain.bffnt",
+             "font_size": [
+              27.6,
+              30
+             ],
+             "text": "",
+             "capacity": 4,
+             "text_position": [
+              "right",
+              "center"
+             ],
+             "line_alignment": "right",
+             "text_material": {
+              "black": [
+               36,
+               40,
+               60,
+               255
+              ],
+              "white": [
+               255,
+               255,
+               255,
+               255
+              ]
+             },
+             "visible": false
+            }
+           ]
+          },
+          {
+           "type": "null",
+           "name": "N_Slot1",
+           "size": [
+            140,
+            140
+           ],
+           "translate": [
+            -175,
+            -6
+           ],
+           "influence_alpha": true,
+           "children": [
+            {
+             "type": "picture",
+             "name": "P_Disc1",
+             "size": [
+              138,
+              138
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Disc",
+             "visible": false
+            },
+            {
+             "type": "picture",
+             "name": "P_Icon1",
+             "size": [
+              104,
+              104
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Icon1",
+             "visible": false
+            },
+            {
+             "type": "text",
+             "name": "T_Num1",
+             "size": [
+              60,
+              42.0
+             ],
+             "translate": [
+              40,
+              -40
+             ],
+             "font": "CKingMain.bffnt",
+             "font_size": [
+              27.6,
+              30
+             ],
+             "text": "",
+             "capacity": 4,
+             "text_position": [
+              "right",
+              "center"
+             ],
+             "line_alignment": "right",
+             "text_material": {
+              "black": [
+               36,
+               40,
+               60,
+               255
+              ],
+              "white": [
+               255,
+               255,
+               255,
+               255
+              ]
+             },
+             "visible": false
+            }
+           ]
+          },
+          {
+           "type": "null",
+           "name": "N_Slot2",
+           "size": [
+            140,
+            140
+           ],
+           "translate": [
+            -127,
+            -142
+           ],
+           "influence_alpha": true,
+           "children": [
+            {
+             "type": "picture",
+             "name": "P_Disc2",
+             "size": [
+              138,
+              138
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Disc",
+             "visible": false
+            },
+            {
+             "type": "picture",
+             "name": "P_Icon2",
+             "size": [
+              104,
+              104
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Icon2",
+             "visible": false
+            },
+            {
+             "type": "text",
+             "name": "T_Num2",
+             "size": [
+              60,
+              42.0
+             ],
+             "translate": [
+              40,
+              -40
+             ],
+             "font": "CKingMain.bffnt",
+             "font_size": [
+              27.6,
+              30
+             ],
+             "text": "",
+             "capacity": 4,
+             "text_position": [
+              "right",
+              "center"
+             ],
+             "line_alignment": "right",
+             "text_material": {
+              "black": [
+               36,
+               40,
+               60,
+               255
+              ],
+              "white": [
+               255,
+               255,
+               255,
+               255
+              ]
+             },
+             "visible": false
+            }
+           ]
+          },
+          {
+           "type": "null",
+           "name": "N_Slot3",
+           "size": [
+            140,
+            140
+           ],
+           "translate": [
+            -3,
+            130
+           ],
+           "influence_alpha": true,
+           "children": [
+            {
+             "type": "picture",
+             "name": "P_Disc3",
+             "size": [
+              138,
+              138
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Disc",
+             "visible": false
+            },
+            {
+             "type": "picture",
+             "name": "P_Icon3",
+             "size": [
+              104,
+              104
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Icon3",
+             "visible": false
+            },
+            {
+             "type": "text",
+             "name": "T_Num3",
+             "size": [
+              60,
+              42.0
+             ],
+             "translate": [
+              40,
+              -40
+             ],
+             "font": "CKingMain.bffnt",
+             "font_size": [
+              27.6,
+              30
+             ],
+             "text": "",
+             "capacity": 4,
+             "text_position": [
+              "right",
+              "center"
+             ],
+             "line_alignment": "right",
+             "text_material": {
+              "black": [
+               36,
+               40,
+               60,
+               255
+              ],
+              "white": [
+               255,
+               255,
+               255,
+               255
+              ]
+             },
+             "visible": false
+            }
+           ]
+          },
+          {
+           "type": "null",
+           "name": "N_Slot4",
+           "size": [
+            140,
+            140
+           ],
+           "translate": [
+            -47,
+            -6
+           ],
+           "influence_alpha": true,
+           "children": [
+            {
+             "type": "picture",
+             "name": "P_Disc4",
+             "size": [
+              138,
+              138
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Disc",
+             "visible": false
+            },
+            {
+             "type": "picture",
+             "name": "P_Icon4",
+             "size": [
+              104,
+              104
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Icon4",
+             "visible": false
+            },
+            {
+             "type": "text",
+             "name": "T_Num4",
+             "size": [
+              60,
+              42.0
+             ],
+             "translate": [
+              40,
+              -40
+             ],
+             "font": "CKingMain.bffnt",
+             "font_size": [
+              27.6,
+              30
+             ],
+             "text": "",
+             "capacity": 4,
+             "text_position": [
+              "right",
+              "center"
+             ],
+             "line_alignment": "right",
+             "text_material": {
+              "black": [
+               36,
+               40,
+               60,
+               255
+              ],
+              "white": [
+               255,
+               255,
+               255,
+               255
+              ]
+             },
+             "visible": false
+            }
+           ]
+          },
+          {
+           "type": "null",
+           "name": "N_Slot5",
+           "size": [
+            140,
+            140
+           ],
+           "translate": [
+            1,
+            -142
+           ],
+           "influence_alpha": true,
+           "children": [
+            {
+             "type": "picture",
+             "name": "P_Disc5",
+             "size": [
+              138,
+              138
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Disc",
+             "visible": false
+            },
+            {
+             "type": "picture",
+             "name": "P_Icon5",
+             "size": [
+              104,
+              104
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Icon5",
+             "visible": false
+            },
+            {
+             "type": "text",
+             "name": "T_Num5",
+             "size": [
+              60,
+              42.0
+             ],
+             "translate": [
+              40,
+              -40
+             ],
+             "font": "CKingMain.bffnt",
+             "font_size": [
+              27.6,
+              30
+             ],
+             "text": "",
+             "capacity": 4,
+             "text_position": [
+              "right",
+              "center"
+             ],
+             "line_alignment": "right",
+             "text_material": {
+              "black": [
+               36,
+               40,
+               60,
+               255
+              ],
+              "white": [
+               255,
+               255,
+               255,
+               255
+              ]
+             },
+             "visible": false
+            }
+           ]
+          },
+          {
+           "type": "null",
+           "name": "N_Slot6",
+           "size": [
+            140,
+            140
+           ],
+           "translate": [
+            125,
+            130
+           ],
+           "influence_alpha": true,
+           "children": [
+            {
+             "type": "picture",
+             "name": "P_Disc6",
+             "size": [
+              138,
+              138
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Disc",
+             "visible": false
+            },
+            {
+             "type": "picture",
+             "name": "P_Icon6",
+             "size": [
+              104,
+              104
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Icon6",
+             "visible": false
+            },
+            {
+             "type": "text",
+             "name": "T_Num6",
+             "size": [
+              60,
+              42.0
+             ],
+             "translate": [
+              40,
+              -40
+             ],
+             "font": "CKingMain.bffnt",
+             "font_size": [
+              27.6,
+              30
+             ],
+             "text": "",
+             "capacity": 4,
+             "text_position": [
+              "right",
+              "center"
+             ],
+             "line_alignment": "right",
+             "text_material": {
+              "black": [
+               36,
+               40,
+               60,
+               255
+              ],
+              "white": [
+               255,
+               255,
+               255,
+               255
+              ]
+             },
+             "visible": false
+            }
+           ]
+          },
+          {
+           "type": "null",
+           "name": "N_Slot7",
+           "size": [
+            140,
+            140
+           ],
+           "translate": [
+            81,
+            -6
+           ],
+           "influence_alpha": true,
+           "children": [
+            {
+             "type": "picture",
+             "name": "P_Disc7",
+             "size": [
+              138,
+              138
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Disc",
+             "visible": false
+            },
+            {
+             "type": "picture",
+             "name": "P_Icon7",
+             "size": [
+              104,
+              104
+             ],
+             "translate": [
+              0,
+              0
+             ],
+             "material": "M_Icon7",
+             "visible": false
+            },
+            {
+             "type": "text",
+             "name": "T_Num7",
+             "size": [
+              60,
+              42.0
+             ],
+             "translate": [
+              40,
+              -40
+             ],
+             "font": "CKingMain.bffnt",
+             "font_size": [
+              27.6,
+              30
+             ],
+             "text": "",
+             "capacity": 4,
+             "text_position": [
+              "right",
+              "center"
+             ],
+             "line_alignment": "right",
+             "text_material": {
+              "black": [
+               36,
+               40,
+               60,
+               255
+              ],
+              "white": [
+               255,
+               255,
+               255,
+               255
+              ]
+             },
+             "visible": false
+            }
+           ]
+          },
+          {
+           "type": "null",
+           "name": "N_Back",
+           "size": [
+            128,
+            128
+           ],
+           "translate": [
+            129,
+            -142
+           ],
+           "influence_alpha": true,
+           "children": [
+            {
+             "type": "picture",
+             "name": "P_Back",
+             "size": [
+              92,
+              89
+             ],
+             "translate": [
+              0,
+              6
+             ],
+             "material": "M_Back"
+            },
+            {
+             "type": "text",
+             "name": "T_Back",
+             "size": [
+              128,
+              33.6
+             ],
+             "translate": [
+              0,
+              -44
+             ],
+             "font": "CKingMain.bffnt",
+             "font_size": [
+              22.08,
+              24
+             ],
+             "text": "Back",
+             "capacity": 16,
+             "text_position": [
+              "center",
+              "center"
+             ],
+             "line_alignment": "center",
+             "text_material": {
+              "black": [
+               36,
+               40,
+               60,
+               255
+              ],
+              "white": [
+               255,
+               255,
+               255,
+               255
+              ]
+             }
+            }
+           ]
+          }
+         ]
+        },
+        {
+         "type": "text",
+         "name": "T_Name",
+         "size": [
+          420,
+          36.4
+         ],
+         "translate": [
+          0,
+          186
+         ],
+         "font": "CKingMain.bffnt",
+         "font_size": [
+          23.92,
+          26
+         ],
+         "text": "",
+         "capacity": 48,
+         "text_position": [
+          "center",
+          "center"
+         ],
+         "line_alignment": "center",
+         "text_material": {
+          "black": [
+           255,
+           255,
+           255,
+           0
+          ],
+          "white": [
+           52,
+           58,
+           78,
+           255
+          ]
+         }
+        },
+        {
+         "type": "text",
+         "name": "T_Msg",
+         "size": [
+          460,
+          30.8
+         ],
+         "translate": [
+          0,
+          -222
+         ],
+         "font": "CKingMain.bffnt",
+         "font_size": [
+          20.24,
+          22
+         ],
+         "text": "",
+         "capacity": 96,
+         "text_position": [
+          "center",
+          "center"
+         ],
+         "line_alignment": "center",
+         "text_material": {
+          "black": [
+           255,
+           255,
+           255,
+           0
+          ],
+          "white": [
+           52,
+           58,
+           78,
+           255
+          ]
+         }
+        }
+       ]
+      },
+      {
+       "type": "null",
+       "name": "N_Dots",
+       "size": [
+        408,
+        18
+       ],
+       "translate": [
+        0,
+        210
+       ],
+       "influence_alpha": true,
+       "children": [
+        {
+         "type": "picture",
+         "name": "P_Dot0",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot1",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot2",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot3",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot4",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot5",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot6",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot7",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot8",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot9",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot10",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot11",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot12",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot13",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot14",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot15",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        },
+        {
+         "type": "picture",
+         "name": "P_Dot16",
+         "size": [
+          18,
+          18
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_DotOff",
+         "visible": false
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "name": "T_Hint",
+       "size": [
+        460,
+        36.4
+       ],
+       "translate": [
+        0,
+        186
+       ],
+       "font": "CKingMain.bffnt",
+       "font_size": [
+        23.92,
+        26
+       ],
+       "text": "",
+       "capacity": 64,
+       "text_position": [
+        "center",
+        "center"
+       ],
+       "line_alignment": "center",
+       "text_material": {
+        "black": [
+         36,
+         40,
+         60,
+         255
+        ],
+        "white": [
+         255,
+         255,
+         255,
+         255
+        ]
+       },
+       "visible": false
+      },
+      {
+       "type": "null",
+       "name": "N_Cursor",
+       "size": [
+        120,
+        120
+       ],
+       "translate": [
+        -131,
+        130
+       ],
+       "influence_alpha": true,
+       "children": [
+        {
+         "type": "window",
+         "name": "W_Cursor",
+         "size": [
+          120,
+          120
+         ],
+         "frame_size": 40,
+         "frames": [
+          {
+           "material": "M_Cursor"
+          }
+         ],
+         "content": {},
+         "draw_content": false
+        }
+       ],
+       "visible": false
+      },
+      {
+       "type": "picture",
+       "name": "P_Float",
+       "size": [
+        104,
+        104
+       ],
+       "translate": [
+        0,
+        0
+       ],
+       "material": "M_Icon8",
+       "visible": false
+      },
+      {
+       "type": "null",
+       "name": "N_Menu",
+       "size": [
+        380,
+        252
+       ],
+       "translate": [
+        0,
+        0
+       ],
+       "influence_alpha": true,
+       "children": [
+        {
+         "type": "window",
+         "name": "W_Menu",
+         "size": [
+          380,
+          252
+         ],
+         "frame_size": 30,
+         "frames": [
+          {
+           "material": "M_Frame0"
+          },
+          {
+           "material": "M_Frame1"
+          },
+          {
+           "material": "M_Frame2"
+          },
+          {
+           "material": "M_Frame3"
+          },
+          {
+           "material": "M_Frame4"
+          },
+          {
+           "material": "M_Frame5"
+          },
+          {
+           "material": "M_Frame6"
+          },
+          {
+           "material": "M_Frame7"
+          }
+         ],
+         "content": {
+          "material": "M_Paper"
+         }
+        },
+        {
+         "type": "picture",
+         "name": "P_MenuSel",
+         "size": [
+          340,
+          46
+         ],
+         "translate": [
+          0,
+          0
+         ],
+         "material": "M_MenuSel",
+         "alpha": 150
+        },
+        {
+         "type": "text",
+         "name": "T_Opt0",
+         "size": [
+          340,
+          39.2
+         ],
+         "translate": [
+          0,
+          72.0
+         ],
+         "font": "CKingMain.bffnt",
+         "font_size": [
+          25.76,
+          28
+         ],
+         "text": "",
+         "capacity": 40,
+         "text_position": [
+          "center",
+          "center"
+         ],
+         "line_alignment": "center",
+         "text_material": {
+          "black": [
+           255,
+           255,
+           255,
+           0
+          ],
+          "white": [
+           52,
+           58,
+           78,
+           255
+          ]
+         }
+        },
+        {
+         "type": "text",
+         "name": "T_Opt1",
+         "size": [
+          340,
+          39.2
+         ],
+         "translate": [
+          0,
+          24.0
+         ],
+         "font": "CKingMain.bffnt",
+         "font_size": [
+          25.76,
+          28
+         ],
+         "text": "",
+         "capacity": 40,
+         "text_position": [
+          "center",
+          "center"
+         ],
+         "line_alignment": "center",
+         "text_material": {
+          "black": [
+           255,
+           255,
+           255,
+           0
+          ],
+          "white": [
+           52,
+           58,
+           78,
+           255
+          ]
+         }
+        },
+        {
+         "type": "text",
+         "name": "T_Opt2",
+         "size": [
+          340,
+          39.2
+         ],
+         "translate": [
+          0,
+          -24.0
+         ],
+         "font": "CKingMain.bffnt",
+         "font_size": [
+          25.76,
+          28
+         ],
+         "text": "",
+         "capacity": 40,
+         "text_position": [
+          "center",
+          "center"
+         ],
+         "line_alignment": "center",
+         "text_material": {
+          "black": [
+           255,
+           255,
+           255,
+           0
+          ],
+          "white": [
+           52,
+           58,
+           78,
+           255
+          ]
+         }
+        },
+        {
+         "type": "text",
+         "name": "T_Opt3",
+         "size": [
+          340,
+          39.2
+         ],
+         "translate": [
+          0,
+          -72.0
+         ],
+         "font": "CKingMain.bffnt",
+         "font_size": [
+          25.76,
+          28
+         ],
+         "text": "",
+         "capacity": 40,
+         "text_position": [
+          "center",
+          "center"
+         ],
+         "line_alignment": "center",
+         "text_material": {
+          "black": [
+           255,
+           255,
+           255,
+           0
+          ],
+          "white": [
+           52,
+           58,
+           78,
+           255
+          ]
+         }
+        }
+       ],
+       "visible": false
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "groups": {
+  "G_Page": [
+   "N_Page"
+  ],
+  "G_Slots": [
+   "N_Slots"
+  ],
+  "G_Cursor": [
+   "N_Cursor"
+  ]
+ },
+ "animations": {
+  "Open": {
+   "frames": 6,
+   "groups": [
+    "G_Page"
+   ],
+   "tracks": [
+    {
+     "pane": "N_Page",
+     "target": "alpha",
+     "keys": [
+      [
+       0,
+       0
+      ],
+      [
+       6,
+       255
+      ]
+     ]
+    },
+    {
+     "pane": "N_Page",
+     "target": "sx",
+     "keys": [
+      [
+       0,
+       0.92
+      ],
+      [
+       6,
+       1
+      ]
+     ],
+     "interp": "ease"
+    },
+    {
+     "pane": "N_Page",
+     "target": "sy",
+     "keys": [
+      [
+       0,
+       0.92
+      ],
+      [
+       6,
+       1
+      ]
+     ],
+     "interp": "ease"
+    }
+   ]
+  },
+  "TurnLeft": {
+   "frames": 6,
+   "groups": [
+    "G_Slots"
+   ],
+   "tracks": [
+    {
+     "pane": "N_Slots",
+     "target": "tx",
+     "keys": [
+      [
+       0,
+       -60
+      ],
+      [
+       6,
+       0
+      ]
+     ],
+     "interp": "ease"
+    },
+    {
+     "pane": "N_Slots",
+     "target": "alpha",
+     "keys": [
+      [
+       0,
+       0
+      ],
+      [
+       6,
+       255
+      ]
+     ]
+    }
+   ]
+  },
+  "TurnRight": {
+   "frames": 6,
+   "groups": [
+    "G_Slots"
+   ],
+   "tracks": [
+    {
+     "pane": "N_Slots",
+     "target": "tx",
+     "keys": [
+      [
+       0,
+       60
+      ],
+      [
+       6,
+       0
+      ]
+     ],
+     "interp": "ease"
+    },
+    {
+     "pane": "N_Slots",
+     "target": "alpha",
+     "keys": [
+      [
+       0,
+       0
+      ],
+      [
+       6,
+       255
+      ]
+     ]
+    }
+   ]
+  },
+  "Breathe": {
+   "frames": 40,
+   "loop": true,
+   "groups": [
+    "G_Cursor"
+   ],
+   "tracks": [
+    {
+     "pane": "N_Cursor",
+     "target": "sx",
+     "keys": [
+      [
+       0,
+       1
+      ],
+      [
+       20,
+       1.07
+      ],
+      [
+       40,
+       1
+      ]
+     ],
+     "interp": "ease"
+    },
+    {
+     "pane": "N_Cursor",
+     "target": "sy",
+     "keys": [
+      [
+       0,
+       1
+      ],
+      [
+       20,
+       1.07
+      ],
+      [
+       40,
+       1
+      ]
+     ],
+     "interp": "ease"
+    }
+   ]
+  }
+ }
+}

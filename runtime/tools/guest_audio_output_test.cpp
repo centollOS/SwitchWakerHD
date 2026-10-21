@@ -12,10 +12,13 @@
 #include <vector>
 
 // The saved master volume (issue #124); set() calls are recorded for the persistence checks.
+static bool pad_saved = false;
 static std::string g_saved; static bool g_has_saved=false;
 static std::vector<std::pair<std::string,std::string>> g_sets;
 namespace hostui {
 bool get(const char* key,std::string& value) {
+    if (pad_saved && !std::strcmp(key, "audioGamepadSounds")) { value="0"; return true; }
+    if (pad_saved && !std::strcmp(key, "audioGamepadVolume")) { value="25"; return true; }
     if (g_has_saved&&!std::strcmp(key,"audioVolume")) { value=g_saved; return true; }
     return false;
 }
@@ -47,7 +50,28 @@ int main(int argc,char** argv) {
  if (mode=="mute") env("WWHD_AUDIO_VOLUME","0");
  if (mode=="volume") unenv("WWHD_AUDIO_VOLUME");  // nothing saved, no override: starts at full volume
  if (mode=="saved"||mode=="invalid") { unenv("WWHD_AUDIO_VOLUME"); g_has_saved=true; g_saved=mode=="saved"?"25":"not a number"; }
+ if (mode=="pad" || mode=="pad-saved" || mode=="pad-env") {
+  unenv("WWHD_AUDIO_GAMEPAD_SOUNDS"); unenv("WWHD_AUDIO_GAMEPAD_VOLUME");
+  pad_saved = mode!="pad";
+  if (mode=="pad-env") { env("WWHD_AUDIO_GAMEPAD_SOUNDS","1"); env("WWHD_AUDIO_GAMEPAD_VOLUME","0.6"); }
+ }
  audio::init();
+ if (mode=="pad" || mode=="pad-saved" || mode=="pad-env") {
+  assert(audio::gamepad_sounds() == (mode!="pad-saved"));
+  assert(audio::gamepad_sounds_volume() == (mode=="pad"?1.f:mode=="pad-env"?0.6f:0.25f));
+  audio::set_gamepad_sounds(false); assert(!audio::gamepad_sounds());
+  audio::set_gamepad_sounds_volume(0.5f,false); assert(audio::gamepad_sounds_volume()==0.5f);
+  assert(g_sets.size()==(mode=="pad-env"?0:1));
+  audio::set_gamepad_sounds_volume(0.3f);
+  if (mode!="pad-env") {
+   assert(g_sets.size()==2 && g_sets[0]==std::make_pair(std::string("audioGamepadSounds"),std::string("0")));
+   assert(g_sets[1]==std::make_pair(std::string("audioGamepadVolume"),std::string("30")));
+  } else assert(g_sets.empty());
+  audio::set_gamepad_sounds_volume(-1.f,false); assert(audio::gamepad_sounds_volume()==0.f);
+  audio::set_gamepad_sounds_volume(2.f,false); assert(audio::gamepad_sounds_volume()==1.f);
+  audio::finish_dump(); std::remove(argv[1]); return 0;
+ }
+
 
  // The saved volume starts the session; a broken value falls back to full volume.
  if (mode=="saved"||mode=="invalid") {

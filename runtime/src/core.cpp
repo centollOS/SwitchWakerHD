@@ -1,3 +1,4 @@
+#include "crash_memory.h"
 // Guest memory, RPX loading, function dispatch, logging and HLE registry.
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -27,6 +28,7 @@
 
 #include "recomp_table.h"
 #include "runtime.h"
+#include "native_text_startup_seal.h"
 
 bool g_trace_hle = false;
 namespace config {
@@ -212,6 +214,8 @@ bool load_rpx(const std::string& path, LoadedModule& out) {
     uint16_t shentsize = be16(&d[0x2E]), shnum = be16(&d[0x30]);
     out.entry = be32(&d[0x18]);
     out.data_end = 0;
+    std::vector<crash_memory::Section> diagnostic_sections;
+    size_t diagnostic_bytes = 0;
     for (int i = 0; i < shnum; i++) {
         const uint8_t* sh = &d[shoff + i * shentsize];
         uint32_t type = be32(sh + 4), flags = be32(sh + 8), addr = be32(sh + 12), off = be32(sh + 16), size = be32(sh + 20);
@@ -230,6 +234,13 @@ bool load_rpx(const std::string& path, LoadedModule& out) {
             out.sda2_base = be32(&data[0x28]);
             out.stack_size = be32(&data[0x2C]);
         }
+        if (crash_memory::enabled() && (flags & 2)) {
+            crash_memory::Section section{addr, flags, {}, type == 8 ? uint64_t(size) : uint64_t(data.size())};
+            if ((flags & 7) == 6 && addr >= 0x02000000 && uint64_t(addr) + data.size() <= 0x10000000 && data.size() <= 16 * 1024 * 1024 - diagnostic_bytes) {
+                section.bytes = data; diagnostic_bytes += data.size();
+            }
+            diagnostic_sections.push_back(std::move(section));
+        }
         // allocated sections in the text/data regions
         if ((flags & 2) && addr >= 0x02000000 && addr < 0xC0000000) {
             if (type == 8) {
@@ -241,11 +252,14 @@ bool load_rpx(const std::string& path, LoadedModule& out) {
             }
         }
     }
+    crash_memory::install(std::move(diagnostic_sections), PPC_MEM_BASE);
     return true;
 }
 
 // ---------------------------------------------------------------- dispatch
 namespace dispatch {
+static detail::StartupSeal native_text_seal;
+static PpcFunc* sealed_text_table=nullptr;
 static constexpr uint32_t kTextBase = 0x02000000;
 static constexpr uint32_t kTextSize = 0x01000000;  // 16 MiB covers cking.rpx .text
 static PpcFunc* g_text_table;                        // indexed by (addr - kTextBase) / 4
@@ -260,6 +274,8 @@ static std::atomic<uint32_t> g_next_host{mem::kHleFuncBase};
 static std::unordered_map<uint32_t, std::string> g_host_names;
 
 void init() {
+    auto mutation=native_text_seal.lock();
+    if(!native_text_seal.begin_initialize())return;
     g_text_table = (PpcFunc*)calloc(kTextSize / 4, sizeof(PpcFunc));
     for (unsigned i = 0; i < g_recomp_func_count; i++) set(g_recomp_funcs[i].addr, g_recomp_funcs[i].fn);
     // imported functions are reachable through their import slot addresses
@@ -269,6 +285,8 @@ void init() {
 
 void set(uint32_t addr, PpcFunc fn) {
     if (addr - kTextBase < kTextSize) {
+        auto mutation=native_text_seal.lock();
+        if(!native_text_seal.writable())return;
         g_text_table[(addr - kTextBase) >> 2] = fn;
         return;
     }
@@ -277,6 +295,14 @@ void set(uint32_t addr, PpcFunc fn) {
     std::unique_lock lk(g_other_mutex);
     g_other[addr] = fn;
 }
+
+bool seal_native_text() noexcept {try{
+    auto mutation=native_text_seal.lock();
+    if(!g_text_table||!native_text_seal.seal())return false;
+    if(!sealed_text_table)sealed_text_table=g_text_table;
+    return sealed_text_table==g_text_table;
+}catch(...){return false;}}
+bool native_text_sealed() noexcept{try{auto mutation=native_text_seal.lock();return native_text_seal.current()&&sealed_text_table&&sealed_text_table==g_text_table;}catch(...){return false;}}
 
 PpcFunc lookup(uint32_t addr) {
     if (addr - kTextBase < kTextSize) return g_text_table[(addr - kTextBase) >> 2];

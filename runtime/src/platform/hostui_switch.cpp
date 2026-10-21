@@ -12,6 +12,7 @@
 #include <mutex>
 
 #include "input.h"
+#include "platform/debug_switch.h"
 #include "platform/host.h"
 #include "platform/settings_ini.h"
 #include "runtime.h"
@@ -93,6 +94,7 @@ const char* name() { return "Switch"; }
 void choose_mod_source(bool, std::function<void(std::string)>) {}
 // no file picker, clipboard or file manager on the console (overlay::ext features off: overlay_switch.cpp)
 void choose_game_source(bool, std::function<void(std::string)>) {}
+void choose_file(const char*, const char*, bool, std::function<void(std::string)>) {}  // no file chooser
 void set_clipboard(const std::string&) {}
 bool can_open_folder() { return false; }
 void open_folder(const std::string&) {}
@@ -114,6 +116,9 @@ int drc_mode() { return 3; }  // off: the GamePad picture has no screen on the S
 void set_drc_mode(int) {}
 int pip_corner() { return 1; }
 void set_pip_corner(int) {}
+int pip_anchor() { return 1; }  // (no GamePad picture-in-picture on the Switch)
+void set_pip_anchor(int) {}
+void save_pip_position() {}
 float pip_size() { return 0.25f; }
 void set_pip_size(float) {}
 float pip_opacity() { return 1.0f; }
@@ -126,5 +131,6 @@ void load_saved_options() {}
 void toggle_drc() {}
 void drc_window_closed() {}
 void tv_fullscreen_changed() {}
+void quit() { debug_switch::request_quit(); }  // Settings > Quit Game: the host loop ends
 
 }  // namespace hostui

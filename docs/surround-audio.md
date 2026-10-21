@@ -10,6 +10,17 @@ must already be configured for multichannel playback. If six channels are unavai
 the game uses Stereo and shows a note in Audio settings. If the output changes during
 surround playback, audio is muted until you restart the game to negotiate that output.
 
+## GamePad sounds
+
+**GamePad sounds through main speakers** is on by default in **Settings → Audio**.
+It makes sounds from the GamePad speaker audible during TV play, including item
+selection and saving. Sounds already playing through the TV are played once.
+Use **GamePad sounds volume** beside Master volume to adjust these sounds from
+0–100%, or turn the option off. Both controls apply immediately and are remembered;
+Master volume also applies. Off-TV Play keeps its normal sound and volume.
+
+With Surround 5.1, these added sounds use the front left and right speakers.
+
 ## Check your speakers in one minute
 
 1. Select Surround 5.1, restart, and confirm **Current output: Surround 5.1**.
