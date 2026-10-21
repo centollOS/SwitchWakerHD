@@ -429,3 +429,13 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   Inside the noise everywhere (E's boots spread +-0.5 fps this session). The TLB idea does not show (the kernel
   may map the memory well already, or the loads are cache misses that larger pages do not help); the elision is
   correct (lockstep) but too small to see here. Rule 3: not kept on the PR branch.
+- 2026-10-21, **consolidation of the PR (#57) before the next optimization:**
+  - The native helpers (dComIfGp_get, getProjViewMtx) are reverted: +0.1 fps on top of the recompiler passes,
+    inside the noise (rule 3).
+  - Lockstep coverage: the scripted walk (20 s) is the deterministic window. The warp tour (`WWHD_WARP_TOUR=main,8`)
+    is not deterministic run to run even for the baseline (random numbers from 19.6 s, Link from 38 s), so it is a
+    smoke test: build D arrives at the same 17 places in the same order as the baseline, 0 error lines (5
+    `unimplemented` lines in both: the Miiverse stubs).
+  - Repo tests: `tools/recomp/test_coverage.py` and `test_builds.py` fail on main too (a constant of
+    `core_switch.cpp` not on the list; an upstream test of upstream's hook emission); not touched here.
+  - Next: the player's play session on the console (this branch's build), then the PR out of draft.
