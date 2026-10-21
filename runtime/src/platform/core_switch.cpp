@@ -153,8 +153,17 @@ void core_switch::init_memory() {
         fatal("guest memory needs svcMapProcessCodeMemory/svcSetProcessMemoryPermission (run from hbmenu over a game, "
               "not the album applet)");
     Handle self = envGetOwnProcessHandle();
+    // (this fork, docs/cpu-threading-plan.md) the window and every backing block on 2 MiB boundaries, so the kernel can
+    // map the guest memory with 2 MiB blocks instead of 4 KiB pages where the heap's pages allow it: with 4 KiB pages
+    // the CPU's TLBs cover a few MB of the game's 1.4 GB, and loads were ~43% of the main thread's game code.
+    // WWHD_GUEST_MEM_2M=0 ([dev]): the old 64 KiB / 4 KiB alignment
+    const bool big = [] {
+        const char* e = getenv("WWHD_GUEST_MEM_2M");
+        return !(e && *e == '0');
+    }();
+    const size_t align = big ? 0x200000 : 0x1000;
     virtmemLock();
-    void* window = virtmemFindCodeMemory(0x100000000ull, 0x10000);
+    void* window = virtmemFindCodeMemory(0x100000000ull, big ? 0x200000 : 0x10000);
     if (!window || !virtmemAddReservation(window, 0x100000000ull)) {
         virtmemUnlock();
         fatal("cannot reserve a 4 GiB guest address window");
@@ -168,7 +177,7 @@ void core_switch::init_memory() {
     if (const guestbuiltin::Region mods = guestbuiltin::memory(); mods.size) ranges[n++] = {mods.start, mods.size};
     for (size_t i = 0; i < n; i++) {
         const GuestRange& r = ranges[i];
-        void* backing = aligned_alloc(0x1000, r.size);
+        void* backing = aligned_alloc(align, (r.size + align - 1) & ~(align - 1));
         if (!backing)
             fatal("out of memory backing guest range %08X (+%X); start the game with full RAM (hold R on a title)",
                   r.start, r.size);
@@ -181,6 +190,7 @@ void core_switch::init_memory() {
         total += r.size;
     }
     ppc_mem_base_var = (uint8_t*)window;
-    LOG("[mem] guest window at %p, %llu MiB backed", window, (unsigned long long)(total >> 20));
+    LOG("[mem] guest window at %p, %llu MiB backed, %s alignment (WWHD_GUEST_MEM_2M)", window,
+        (unsigned long long)(total >> 20), big ? "2 MiB" : "4 KiB");
     log_heap("after the guest memory");
 }
