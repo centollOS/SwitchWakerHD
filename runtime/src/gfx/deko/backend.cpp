@@ -1481,7 +1481,13 @@ const DkShader* shader(ShaderId id) { return g_shaderOk[id] ? &g_shaders[id] : n
 }  // namespace gfxdk
 
 // ---- gfx/switch_renderer.h
+namespace gfxdk {  // shaders_dk.cpp
+int shader_compile_threads();
+void set_shader_compile_threads(int n);
+}  // namespace gfxdk
 namespace gfxsw {
+int shader_compile_threads() { return gfxdk::shader_compile_threads(); }
+void set_shader_compile_threads(int n) { gfxdk::set_shader_compile_threads(n); }
 PictureGrade picture_grade_now() { return gfxdk::picture_grade(); }
 void set_picture_grade(const PictureGrade& g) {
     std::lock_guard<std::mutex> lk(gfxdk::g_gradeMu);

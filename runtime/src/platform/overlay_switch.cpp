@@ -296,6 +296,20 @@ void tab_switch() {
     help("Turn them off and on again in the same spot: the log marks each change with its frame.\n"
          "Not saved: they are on again at the next start.");
     {
+        const int cur = gfxsw::shader_compile_threads();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Shader compile threads");
+        for (int n = 1; n <= 3; n++) {
+            ImGui::SameLine();
+            char label[8];
+            snprintf(label, sizeof label, "%d##shthr", n);
+            if (radio(label, cur == n)) gfxsw::set_shader_compile_threads(n);
+        }
+        help("Test: how many threads compile the shaders the game is waiting for (a new place, an item seen\n"
+             "for the first time). 1: one, as before. 2-3: they compile at once on cores 0 and 2.\n"
+             "Not saved.");
+    }
+    {
         // the render profiler's latest report (render_prof.h; on with "Render profiler" above) to the SD card,
         // with the build and settings header the desktop's "Copy performance report" puts on the clipboard
         static std::string saved;

@@ -223,6 +223,12 @@ debugsrv::Reply dspguard(const debugsrv::Args& a) {
     return debugsrv::ok(std::string("dspguard ") + (audio_guard::kept() ? "the game's own" : "off"));
 }
 
+// "shaderthreads [1-3]": threads that compile the shaders draws ask for (gfx/deko helper_main; not saved)
+debugsrv::Reply shaderthreads(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_shader_compile_threads(atoi(a[0].c_str()));
+    return debugsrv::ok("shaderthreads " + std::to_string(gfxsw::shader_compile_threads()));
+}
+
 // "stall <ms> [core] [count] [gap ms]": a host thread above every game thread spins on a core, as
 // the hitches that set off the game's "kill DSP channel" (issue #13) do; to test the guard at will
 Thread g_stallThread;
@@ -326,6 +332,7 @@ void start() {
     debugsrv::add_command("reload", "reload                 restart: the forwarder loads the NRO again (put it first)", reload);
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
+    debugsrv::add_command("shaderthreads", "shaderthreads [1-3]    threads compiling the shaders draws ask for", shaderthreads);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);

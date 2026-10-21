@@ -595,11 +595,24 @@ std::vector<Job> jobs;           // under workerMutex
 std::vector<JobResult> results;  // under workerMutex
 uint64_t jobSeq = 0;
 uint64_t workerCurrent = 0;      // the hash being compiled (0: none)
+int helpersBusy = 0;             // (this fork) helper threads compiling a job right now, under workerMutex
 uint64_t workerLastPartner = 0;  // compiled next if it is queued
 bool workerStop = false;
 bool workerReady = false;        // uam::init done and its self-test compiled
 size_t foregroundQueued = 0;     // jobs a draw asked for (not background), under workerMutex
 Thread workerThread;
+// (this fork) helper compile threads (uam is reentrant: PATCHES.md patch 10): they take only jobs a draw asked for,
+// never background ones, so a new place's (or an item's) shaders compile on up to three threads at once while play
+// is not burdened by the background list. The Switch tab's Debug section / debug server "shaderthreads N" /
+// WWHD_DK_SHADER_THREADS: 1 (no helpers, as before; the default) to 3.
+constexpr int kMaxHelpers = 2;
+std::atomic<int> g_compileThreads{[] {
+    const char* e = getenv("WWHD_DK_SHADER_THREADS");
+    const int n = e && *e ? atoi(e) : 1;
+    return n < 1 ? 1 : n > 1 + kMaxHelpers ? 1 + kMaxHelpers : n;
+}()};
+Thread helperThreads[kMaxHelpers];
+bool helperStarted[kMaxHelpers] = {};
 
 // the next job: the partner of the last one, else the most wanted (draw-requested before background, then
 // the oldest)
@@ -618,7 +631,7 @@ size_t pick_job() {
 
 // failed conversions and compiles: the converted GLSL and uam's log to shaderfail_dk_<hash>.glsl (16 at most)
 void dump_failure(uint64_t hash, const std::string& glsl, const std::string& log) {
-    static int dumped = 0;
+    static std::atomic<int> dumped{0};  // (the helper threads too)
     if (dumped++ >= 16) return;
     char path[64];
     snprintf(path, sizeof path, "shaderfail_dk_%016llx.glsl", (unsigned long long)hash);
@@ -729,12 +742,67 @@ void worker_main(void*) {
     }
 }
 
+// (this fork) a helper compile thread: the most wanted job a draw asked for, whenever its index is below the
+// threads chosen and the main worker is ready (uam initialised)
+void helper_main(void* arg) {
+    const int index = int(reinterpret_cast<intptr_t>(arg));
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 0x5);
+    host::set_thread_name("dk shader helper");
+    std::unique_lock<std::mutex> lk(workerMutex);
+    for (;;) {
+        workerCv.wait(lk, [index] {
+            return workerStop || (workerReady && index + 1 < g_compileThreads.load(std::memory_order_relaxed) &&
+                                  foregroundQueued > 0);
+        });
+        if (workerStop) break;
+        size_t best = SIZE_MAX;
+        for (size_t i = 0; i < jobs.size(); i++) {
+            const Job& j = jobs[i];
+            if (j.background) continue;
+            if (best == SIZE_MAX || j.priority > jobs[best].priority ||
+                (j.priority == jobs[best].priority && j.seq < jobs[best].seq))
+                best = i;
+        }
+        if (best == SIZE_MAX) continue;  // (another thread took it)
+        Job job = std::move(jobs[best]);
+        jobs[best] = std::move(jobs.back());
+        jobs.pop_back();
+        foregroundQueued--;
+        helpersBusy++;
+        lk.unlock();
+        JobResult r;
+        compile_job(job, r);
+        lk.lock();
+        helpersBusy--;
+        results.push_back(std::move(r));
+        doneCv.notify_all();
+    }
+}
+
+void start_helpers() {
+    for (int i = 0; i < kMaxHelpers; i++) {
+        if (helperStarted[i] || i + 1 >= g_compileThreads.load()) continue;
+        const Result rc = threadCreate(&helperThreads[i], helper_main, reinterpret_cast<void*>(intptr_t(i)), nullptr,
+                                       kWorkerStack, kWorkerPriority, 2);
+        if (R_FAILED(rc) || R_FAILED(threadStart(&helperThreads[i]))) {
+            LOG("[dk] shader helper thread %d: cannot start (result 0x%X): compiles stay on fewer threads", i + 1,
+                unsigned(rc));
+            g_compileThreads = i + 1;
+            return;
+        }
+        helperStarted[i] = true;
+        LOG("[dk] shader helper thread %d started (cores 0 and 2, %zu MiB stack): draws' shaders compile on up to %d "
+            "threads", i + 1, kWorkerStack >> 20, g_compileThreads.load());
+    }
+}
+
 void start_worker() {
     // the stack comes from the heap; core 2 to begin with (worker_main widens it to 0 and 2)
     const Result rc = threadCreate(&workerThread, worker_main, nullptr, nullptr, kWorkerStack, kWorkerPriority, 2);
     if (R_FAILED(rc) || R_FAILED(threadStart(&workerThread)))
         fatal("[dk] cannot start the shader compiler thread (%zu MiB stack, priority 0x%X): result 0x%X", kWorkerStack >> 20,
               kWorkerPriority, unsigned(rc));
+    start_helpers();
 }
 
 // queues code's job (render thread, or main thread at start-up)
@@ -983,7 +1051,7 @@ ShaderStats stats_since(ShaderStats& b) {
     d.skippedDraws = a.skippedDraws - b.skippedDraws;
     {
         std::lock_guard<std::mutex> lk(workerMutex);
-        d.pendingNow = jobs.size() + results.size() + (workerCurrent ? 1 : 0);
+        d.pendingNow = jobs.size() + results.size() + (workerCurrent ? 1 : 0) + size_t(helpersBusy);
     }
     d.codeBytes = g_codeBytes;
     b = a;
@@ -1001,7 +1069,7 @@ void log_total() {
     size_t queued, foreground, ready;
     {
         std::lock_guard<std::mutex> lk(workerMutex);
-        queued = jobs.size() + (workerCurrent ? 1 : 0);
+        queued = jobs.size() + (workerCurrent ? 1 : 0) + size_t(helpersBusy);
         foreground = foregroundQueued;
         ready = results.size();
     }
@@ -2035,7 +2103,18 @@ void shader_queue(size_t& forDraws, size_t& background) {
 
 uint64_t shaders_pending() {
     std::lock_guard<std::mutex> lk(workerMutex);
-    return jobs.size() + results.size() + (workerCurrent ? 1 : 0);
+    return jobs.size() + results.size() + (workerCurrent ? 1 : 0) + size_t(helpersBusy);
 }
+
+// (this fork) the compile threads for jobs draws asked for (helper_main): any thread
+void set_shader_compile_threads(int n) {
+    n = n < 1 ? 1 : n > 1 + kMaxHelpers ? 1 + kMaxHelpers : n;
+    static std::mutex startMutex;
+    std::lock_guard<std::mutex> lk(startMutex);
+    if (g_compileThreads.exchange(n) != n) LOG("[dk] shader compile threads: %d", n);
+    start_helpers();
+    workerCv.notify_all();
+}
+int shader_compile_threads() { return g_compileThreads.load(); }
 
 }  // namespace gfxdk
