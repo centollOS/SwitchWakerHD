@@ -5,6 +5,7 @@
 #include <malloc.h>
 #include <unistd.h>
 extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into (sbrk)
+#include "platform/bench_switch.h"  // (this fork) the performance test
 #include <switch.h>
 
 #include "dk.h"
@@ -1276,6 +1277,7 @@ void present() {
     g_times.submitNs += t4 - t3;
     frame_stats();
     dynamicRes.frame(now_ns(), gpuBehind, gpuPasses.lastIdleMs, gpuPasses.lastBusyMs, gpuPasses.collected);
+    bench::present(now_ns(), gpuBehind, gpuPasses.lastBusyMs, gpuPasses.collected, res_scale(), R.drawCount);  // (this fork)
     latch_res_scale();  // a new internal resolution from the next frame on
 }
 

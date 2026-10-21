@@ -88,6 +88,11 @@ void request_save_portable(int slot);
 void request_save_full(int slot);
 bool in_gameplay();                     // a save file is being played (quit_prompt.h: gameplay_stage)
 void request_load(int slot);
+// (this fork) the performance test (platform/bench_switch.cpp): a portable state written to `path` (not a
+// slot); the player's control check (game thread, frame boundary); portable loads that arrived so far
+void request_save_portable_path(const std::string& path, std::function<void(bool ok, const std::string& why)> done);
+bool control_check(Cpu* c, std::string& why);
+uint64_t portable_arrivals();
 void request_load_portable_file(const std::string& path);  // a .wwstate anywhere (WWHD_PORTABLE_LOAD)
 bool full_states();                     // save button / shortcuts make full states
 void set_full_states(bool on);          // the setting (kept in the states folder)

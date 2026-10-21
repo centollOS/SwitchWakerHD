@@ -956,6 +956,9 @@ bool write_portable(const std::string& path, const pstate::State& s, std::string
 }
 
 struct PendingPortable { std::shared_ptr<pstate::State> s; int slot = 0; std::string path; };
+constexpr int kPathSlot = 1000;   // (this fork) request_save_portable_path's pseudo slot
+std::string g_psave_path;         // (this fork) its file (under g_mu)
+std::atomic<uint64_t> g_arrivals{0};  // (this fork) portable loads that arrived (watch_arrival)
 std::atomic<int> g_psave_req{0};
 PendingPortable g_pload;          // under g_mu
 bool g_pload_waiting = false;     // the "waiting for gameplay" message was shown
@@ -980,6 +983,10 @@ void do_portable_save(Cpu* c, int slot) {
         return;
     }
     std::string path = slot_path(slot, pstate::kExtension);
+    if (slot == kPathSlot) {  // (this fork) request_save_portable_path: the benchmark's own file
+        std::lock_guard<std::mutex> lk(g_mu);
+        path = g_psave_path;
+    }
     if (!write_portable(path, s, why)) {
         message("Slot %d: not saved (%s)", slot, why.c_str());
         report_done(slot, false, why);
@@ -1002,12 +1009,13 @@ void do_portable_save(Cpu* c, int slot) {
         LOG("[savestate] slot %d also holds an older full state (%s, %.0f MB); it is kept", slot, slot_path(slot).c_str(),
             full.st_size / 1048576.0);
     }
-    render::request_tv_dump(slot_path(slot, "png"), 0);  // the slot's picture (stays on this computer)
-    {
+    render::request_tv_dump(slot == kPathSlot ? path + ".png" : slot_path(slot, "png"), 0);  // the slot's picture (stays on this computer)
+    if (slot != kPathSlot) {  // (this fork) a benchmark state is not the player's newest state (bug reports)
         std::lock_guard<std::mutex> lk(g_mu);
         g_last_portable = path;
     }
-    message("Saved to slot %d (%s)%s", slot, area_label(s.stage.c_str()).c_str(), older.c_str());
+    if (slot == kPathSlot) message("Benchmark state saved (%s)", area_label(s.stage.c_str()).c_str());  // (this fork)
+    else message("Saved to slot %d (%s)%s", slot, area_label(s.stage.c_str()).c_str(), older.c_str());
     report_done(slot, true, "");
 }
 
@@ -1075,6 +1083,7 @@ void watch_arrival(Cpu* c) {
     float dx = p[0] - g_arrival.pos[0], dy = p[1] - g_arrival.pos[1], dz = p[2] - g_arrival.pos[2];
     LOG("[savestate] portable load: arrived in %s room %d at %.1f %.1f %.1f (distance %.1f from the saved position)",
         stage_name().c_str(), (int8_t)ld8(link + kActorRoom), p[0], p[1], p[2], sqrtf(dx * dx + dy * dy + dz * dz));
+    g_arrivals++;  // (this fork) bench_switch.cpp waits for it
     if (g_arrival.s->has_ship) {
         const uint32_t ship = ld32(kShipPtr);
         const int proc = (int)ld32(link + kLinkProc);
@@ -1268,6 +1277,23 @@ void request_save(int slot, std::function<void(bool ok, const std::string& why)>
 }
 
 void request_save(int slot) { request_save(slot, nullptr); }
+
+// (this fork) the performance test (platform/bench_switch.cpp): a portable state in a file of its own, the
+// player's control check, and how many portable loads have arrived
+void request_save_portable_path(const std::string& path, std::function<void(bool ok, const std::string& why)> done) {
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        g_psave_path = path;
+        g_done_slot = kPathSlot;
+        g_done = std::move(done);
+    }
+    g_psave_req = kPathSlot;
+}
+bool control_check(Cpu* c, std::string& why) {
+    bool retry;
+    return gameplay_ready(why, retry) && player_has_control(c, why);
+}
+uint64_t portable_arrivals() { return g_arrivals.load(); }
 
 bool in_gameplay() { return quitprompt::gameplay_stage(stage_name()); }
 
