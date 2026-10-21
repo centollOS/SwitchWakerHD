@@ -10,11 +10,15 @@
 // tools/bench/thread_profile.py turns the files into a report.
 // On the Switch (thread_sampler_switch.cpp) the threads register always and sampling runs on request: the debug
 // server's "profile <seconds>" (tools/switch/main_profile.py).
+#include <cstdint>
 #include <string>
 namespace thread_sampler {
 void add_current_thread(const char* tag);  // tag: a short name for the report ("render", "game")
 #ifdef __SWITCH__
 std::string start(double seconds);  // "" or why not
 std::string status();               // "running", or the last run's file and counts
+// the thread registered last runs guest code with its r1 at *r1 (its Cpu): a sample also walks the guest stack's back
+// chain from there and keeps each frame's saved return address (the game's call stack, frames the host chain skips)
+void set_guest_stack(const uint32_t* r1);
 #endif
 }

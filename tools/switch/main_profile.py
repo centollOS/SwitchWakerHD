@@ -11,7 +11,9 @@ time, by function.
 The ELF must be the one of the build that ran (the samples hold the executable's base, not a build id).
 Self time: the function holding the pc. Inclusive time: every distinct function in the sample's pc, lr and
 frame-pointer chain (the chain is short where code is built without frame pointers: the inclusive column is a lower
-bound). Game functions are the recompiled ones (f_XXXXXXXX: the game's canonical address); names from the decomp's
+bound). When the sampler also walked the game's own stack (the main thread: its PowerPC back chain and the return
+addresses saved in it), those frames count too, and the inclusive column holds every game function on the call stack.
+Game functions are the recompiled ones (f_XXXXXXXX: the game's canonical address); names from the decomp's
 verify units and names.tsv when present (--names).
 """
 import argparse
@@ -75,6 +77,30 @@ def read_symbols(elf):
     return addrs, names
 
 
+GUEST = 1 << 63  # a sample frame of the guest stack: GUEST | the game's return address
+
+
+def is_guest(pc):
+    return pc >> 32 == GUEST >> 32
+
+
+def guest_functions(syms):
+    """the game functions' canonical addresses, sorted (from the f_XXXXXXXX symbols)"""
+    return sorted({int(m.group(1), 16) for m in (re.match(r"f_([0-9A-F]{8})", s) for s in syms) if m})
+
+
+def guest_sym(starts, pc):
+    """the game function holding a guest return address"""
+    i = bisect.bisect_right(starts, (pc & 0xFFFFFFFF) - 1) - 1  # (the address after the call; a call may end it)
+    return "f_%08X" % starts[i] if i >= 0 else None
+
+
+def canon(q):
+    """one name per game function: f_XXXXXXXX (its _orig and .localalias symbols, and its guest frames, alike)"""
+    m = re.match(r"(f_[0-9A-F]{8})", q)
+    return m.group(1) if m else q
+
+
 ADDR_RE = re.compile(r"^/\* ([0-9A-F]{8})\b")
 DEF_RE = re.compile(r"([A-Za-z_][\w:~<>]*)\s*\(")
 
@@ -107,6 +133,7 @@ def read_names(path, decomp):
 
 
 def compare(args, addrs, syms, names):
+    starts = guest_functions(syms)
     text_lo, text_hi = addrs[0], addrs[-1] + 0x100000
     cols, tables = [], []
     for path in args.samples:
@@ -117,6 +144,13 @@ def compare(args, addrs, syms, names):
         for fr in mine:
             seen = set()
             for k, pc in enumerate(fr):
+                if is_guest(pc):
+                    if args.inclusive:
+                        q = guest_sym(starts, pc)
+                        if q and q not in seen:
+                            seen.add(q)
+                            c[q] += 1
+                    continue
                 a = pc - base
                 if a < text_lo or a > text_hi:
                     if k == 0 and not args.inclusive:
@@ -126,6 +160,7 @@ def compare(args, addrs, syms, names):
                     continue
                 q = syms[bisect.bisect_right(addrs, a) - 1].split(".")[0]
                 if args.inclusive:
+                    q = canon(q)
                     if q not in seen:
                         seen.add(q)
                         c[q] += 1
@@ -165,7 +200,11 @@ def main():
     tags, base, samples = read_samples(args.samples[0])
     text_lo, text_hi = addrs[0], addrs[-1] + 0x100000
 
+    starts = guest_functions(syms)
+
     def sym(pc):
+        if is_guest(pc):
+            return guest_sym(starts, pc)
         a = pc - base
         if a < text_lo or a > text_hi:
             return None
@@ -188,7 +227,7 @@ def main():
         incl_c = collections.Counter()
         kind = collections.Counter()
         outside = 0
-        depth = 0
+        depth = gdepth = 0
         for fr in mine:
             s = sym(fr[0])
             if s is None:
@@ -200,10 +239,12 @@ def main():
             seen = set()
             for pc in fr:
                 q = sym(pc)
+                q = canon(q) if q else q
                 if q and q not in seen:
                     seen.add(q)
                     incl_c[q] += 1
-            depth += len(fr)
+            depth += sum(1 for pc in fr if not is_guest(pc))
+            gdepth += sum(1 for pc in fr if is_guest(pc))
         n = len(mine)
         if args.callers:
             chains = collections.Counter()
@@ -212,6 +253,7 @@ def main():
                 names_ = []
                 for pc in fr:
                     q = sym(pc)
+                    q = canon(q) if q else q
                     if q and (not names_ or names_[-1] != q):
                         names_.append(q)
                 idx = [i for i, q in enumerate(names_) if q.split(".")[0].startswith(args.callers)]
@@ -224,13 +266,14 @@ def main():
             for c, v in chains.most_common(args.top):
                 print("   %5.2f%%  %s" % (100.0 * v / n, c))
             continue
-        print("== thread %s: %d samples, mean chain %.1f frames" % (tag, n, depth / n))
+        print("== thread %s: %d samples, mean chain %.1f frames%s" % (
+            tag, n, depth / n, ", %.1f guest frames" % (gdepth / n) if gdepth else ""))
         for k, v in kind.most_common():
             print("   %5.1f%%  %s" % (100.0 * v / n, k))
         print("-- self time")
         for s, v in self_c.most_common(args.top):
             print("   %5.2f%%  %s" % (100.0 * v / n, label(s)))
-        print("-- inclusive (lower bound)")
+        print("-- inclusive" if gdepth else "-- inclusive (lower bound)")
         for s, v in incl_c.most_common(args.top):
             print("   %5.2f%%  %s" % (100.0 * v / n, label(s)))
         print()
