@@ -243,3 +243,25 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   `dComIfGp_get` 2.1%. The rest stays flat (no game function above ~2%).
   **First benchmark route:** warp 3 (sea, room 13: Dragon Roost) at night, Link standing, no event; ~2.5 fps under
   30. Done when its numbers repeat (next session).
+- 2026-10-21, **the night-sea route repeats** with the time of day fixed (save `dSv_info_c` + 0x44 = 15.0, 01:00,
+  poked before the warp; tools: a route script with the debug server). After the warp the draws climb from
+  ~2,600 to ~2,850 over ~15 s (the night sky fills in): only the steady part counts. Two runs: 26.9 and 27.5 fps
+  (core 1 95-96%); by day at the same spot 28.6-29.3. So the night sky costs ~1.5 fps there.
+- 2026-10-21, **first optimization: native fast paths for two accessors** (`native_helpers_switch.cpp`, phase 2.1):
+  `dComIfGp_get` (the game-info singleton) and `hdGameInfo_dComIfGd_getProjViewMtx` (the HD view-projection
+  matrix) reached through `-Wl,--wrap` (14,408 call sites redirected, 84 same-file calls stay direct), no change to
+  the generated code; Switch tab Debug "Native game helpers (A/B test)", debug server `native 0|1`, off by
+  default. **Night route, A B B A: off 27.52 / 27.33, on 27.77 / 27.79 fps: +0.35 fps (+1.3%).** Profile:
+  `dComIfGp_get` 2.00% -> 0.33% of the main thread, `getProjViewMtx` gone from the top. Less than the two
+  functions' share: the callers still pay for each call (registers written back and read again around it).
+- 2026-10-21, **next target found: the compiler's FPR save/restore helpers** (`f_028F6xxx`, the `_savefpr` /
+  `_restfpr` family; 66 entry points): **3.4-3.9% of the main thread by day at Outset and at night at sea**
+  (self time only). Float-heavy game functions call them in their prologue and epilogue; recompiled, each saved
+  register is two byte-swapped guest stores (ps0 as 8 bytes, ps1 as 4), and since recomp.py lists them as
+  functions that change callee-saved registers (`find_saved_clobbers`), every caller writes all its register
+  locals back to the Cpu before the call and reads them again after it. Plan (2.2): a recompiler pass that keeps
+  the saved FPRs in host locals at the save and puts them back at the restore, without the helper call or the
+  guest-memory traffic; generated into its own folder (~46 s for the EU build), checked function by function
+  against the current output, then the lockstep check and the routes.
+  Process note: a profile must be read with the ELF of the build that ran (symbols move between builds): each
+  profile's ELF is kept next to its samples from now on.
