@@ -54,6 +54,7 @@ jobs:
           python3 tools/installer/test_setup.py
           python3 tools/recomp/test_builds.py
           python3 tools/switch/test_game_files.py
+          python3 tools/switch/test_perf_test.py
 
       # Synthetic fixtures only: no game files, caches or performance runs.
       - name: Shader preparation and benchmark tooling unit tests
