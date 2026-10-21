@@ -34,7 +34,6 @@
 #include "background_shaders_switch.h"
 #include "debug_switch.h"
 #include "prepare_graphics_switch.h"
-#include "native_helpers_switch.h"
 #include "settings_switch.h"
 
 namespace overlay_switch {
@@ -296,12 +295,6 @@ void tab_switch() {
     }
     help("Turn them off and on again in the same spot: the log marks each change with its frame.\n"
          "Not saved: they are on again at the next start.");
-    {
-        bool v;
-        if (check("Native game helpers (A/B test)", native_helpers::on(), &v)) native_helpers::set_on(v);
-        help("Native fast paths for small game functions the main thread calls very often (the star field's\n"
-             "projection at night): docs/cpu-threading-plan.md. Off by default, not saved.");
-    }
     {
         // the render profiler's latest report (render_prof.h; on with "Render profiler" above) to the SD card,
         // with the build and settings header the desktop's "Copy performance report" puts on the clipboard
