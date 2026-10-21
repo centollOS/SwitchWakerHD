@@ -176,17 +176,17 @@ compiled before a player meets them. The sweep restores the Quest Log and restar
 research step first: the function, whether it can be called for every item id safely, and how long the gallery
 takes.
 
-## Order, size, checkpoints
+## Order and checkpoints
 
-| Step | Size (estimate) | Checkpoint |
-|---|---|---|
-| Phase 0 (0.1-0.5) | 1-2 weeks | console profiles of both limits; benchmark reproducible |
-| 1.1 parallel compile in waits | 2-3 days | #49 chest under 0.3 s |
-| 1.2 placement | 2-4 days | per move, on the routes |
-| Phase 2 | 2-4 weeks, iterative | each function: verify + lockstep; sea fps |
-| Phase 3 | 3-6 weeks, research first | per loop: proof, hashes, console |
-| Phase 4 | 2-4 weeks, only if still needed | Outset render thread |
-| Phase 5 | 1 week research, then build | the sweep's item gallery on the console |
+| Step | Checkpoint |
+|---|---|
+| Phase 0 (0.1-0.5) | console profiles of both limits; benchmark reproducible |
+| 1.1 parallel compile in waits | #49 chest under 0.3 s |
+| 1.2 placement | per move, on the routes |
+| Phase 2 | each function: verify + lockstep; sea fps |
+| Phase 3 | per loop: proof, hashes, console |
+| Phase 4 (only if still needed) | Outset render thread |
+| Phase 5 | the sweep's item gallery on the console |
 
 Full regression (every route, both games, audio, a sweep) at the end of each phase; bisect if it fails
 (AGENTS.md "Checks").
@@ -197,3 +197,26 @@ Full regression (every route, both games, audio, a sweep) at the end of each pha
 - Is `uam` thread-safe across compiler objects (1.1)?
 - How deterministic is the game on the desktop under scripted input (0.4)? What has to be masked.
 - Does core 3 give an application any time (0.5)?
+
+## Progress
+
+Newest last. Each entry: what was done, what was measured, what it decided.
+
+- 2026-10-21: plan written.
+- 2026-10-21, **0.2 done (first version): the console profiles the main thread.** `thread_sampler_switch.cpp`
+  (the Switch backend of `thread_sampler.h`): the debug server's `profile <s>` pauses each registered thread
+  (`svcSetThreadActivity`), reads it (`svcGetThreadContext3`), resumes it; pc, lr and the frame-pointer chain
+  (mean 8-11 frames: inclusive times work). `tools/switch/main_profile.py` names samples from the ELF and the
+  game's functions from the decomp's `/* ADDR */` lines. Cost: 9.8 us a pause, ~590 samples/s per thread, 0
+  failures in 11,720 samples; the frame rate did not move (29.3-30.0 during, 29.6-30.0 around). So the PCs of a
+  running thread are exact: no recompiler profiling build needed.
+- 2026-10-21, **first profile: sea at Dragon Roost** (EUR game, Quest Log 1, handheld, CPU 1224 MHz; 29.3-30 fps,
+  core 1 93-94%, render thread 742-773 ms/s, 3,300 draws). Main thread: 85.5% game code, 14.5% runtime; waiting
+  only ~5.5% (GX2DrawDone 3.0%, vsync 2.4%). Flat: the top function is 4.1%. Inclusive: the process manager
+  (`fpcM_Management`) 32%, of which the draw (`dScnPly_Draw`) 21%. Self-time leads:
+  - `dKyr_drawStar` 4.1% self / 5.9% incl (the star field; the fork hooks it);
+  - process searches by ID: `fpcSch_JudgeByID` 2.3% + `cNdIt_Judge` / `cTgIt_JudgeFilter` (linear walks of the
+    process lists) ~4.7% together;
+  - `dComIfGp_get` 1.8% self (a one-line accessor);
+  - grass binding (`Shape_bind`, `ModelBinding_build`, `Texture_bind`) ~4%; sea, weather, clouds, particles
+    (`JPAEmitterManager::calc` 2.9% incl) a few % each.
