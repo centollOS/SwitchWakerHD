@@ -1599,23 +1599,29 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
 
     // ---- the scissor (before anything is uploaded for a draw that would be discarded)
     uint32_t sx, sy, sex, sey;
+    // in image pixels, outward (again after the HUD switch below changes the scale)
+    const auto scale_scissor = [&](uint32_t x, uint32_t y, uint32_t ex, uint32_t ey) {
+        sx = x, sy = y, sex = ex, sey = ey;
+        if (g_drawScale != 1.0f) {
+            sx = uint32_t(float(x) * g_drawScale);
+            sy = uint32_t(float(y) * g_drawScale);
+            sex = std::min(scaled_size(ex, g_drawScale), target->img.pw);
+            sey = std::min(scaled_size(ey, g_drawScale), target->img.ph);
+        }
+    };
+    uint32_t gsx, gsy, gsex, gsey;  // the game's scissor, in the buffer's pixels
     {
         const uint32_t width = target->width, height = target->height;
         const uint32_t tl = r[REGADDR::PA_SC_GENERIC_SCISSOR_TL], br = r[REGADDR::PA_SC_GENERIC_SCISSOR_BR];
-        sx = std::min(tl & 0x7fff, width);
-        sy = std::min((tl >> 16) & 0x7fff, height);
-        sex = std::min(br & 0x7fff, width);
-        sey = std::min((br >> 16) & 0x7fff, height);
-        if (sex <= sx || sey <= sy) {
+        gsx = std::min(tl & 0x7fff, width);
+        gsy = std::min((tl >> 16) & 0x7fff, height);
+        gsex = std::min(br & 0x7fff, width);
+        gsey = std::min((br >> 16) & 0x7fff, height);
+        if (gsex <= gsx || gsey <= gsy) {
             skip(g_drawSkips.scissorEmpty);
             return;
         }
-        if (g_drawScale != 1.0f) {  // image pixels: outward
-            sx = uint32_t(float(sx) * g_drawScale);
-            sy = uint32_t(float(sy) * g_drawScale);
-            sex = std::min(scaled_size(sex, g_drawScale), target->img.pw);
-            sey = std::min(scaled_size(sey, g_drawScale), target->img.ph);
-        }
+        scale_scissor(gsx, gsy, gsex, gsey);
     }
 
     // a depth-only draw whose pixel shader changes nothing it writes: the empty pixel shader, no pixel-stage
@@ -1660,17 +1666,25 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     // after the post-processing that reads the scene. At a lower internal resolution, the first draw into the TV
     // picture's buffer that comes after a read of it this frame, has no depth buffer and samples only the game's
     // own textures (nothing rendered) switches that buffer to its full-size image, the scene scaled up into it;
-    // the next frame's clear (or 3D drawing) switches back
-    if (target->scale < 1.0f && target == S.tvSource && !depth && !g_drawSamplesRendered && colors[0] == target &&
-        target->readFrame == R.frame) {
+    // the next frame's clear (or 3D drawing) switches back. With edge smoothing on (issue #21), the scene goes
+    // through FXAA there, at any internal resolution (fxaa_scene), so the HUD drawn after it stays sharp
+    const bool smooth = fxaa_enabled();
+    if ((target->scale < 1.0f || smooth) && target == shown_source() && !depth && !g_drawSamplesRendered &&
+        colors[0] == target && target->readFrame == R.frame) {
         bool single = true;
         for (int i = 1; i < 8; i++)
             if (colors[i]) single = false;
         if (single) {
-            target->hudFull = true;
-            fit_scale(target, true, true);
-            g_drawScale = target->scale;
-            R.perf.hudSwitches++;
+            const bool scaled = target->scale < 1.0f;
+            if (!(smooth && fxaa_scene(target)) && target->scale < 1.0f) {
+                target->hudFull = true;
+                fit_scale(target, true, true);
+            }
+            if (g_drawScale != target->scale) {  // the scissor was scaled for the old image
+                g_drawScale = target->scale;
+                scale_scissor(gsx, gsy, gsex, gsey);
+            }
+            if (scaled) R.perf.hudSwitches++;
         }
     }
     // the loose uniforms (ufBlock) of each stage, packed at the targets' scale

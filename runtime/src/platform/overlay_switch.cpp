@@ -203,6 +203,15 @@ void tab_switch() {
     }
     {
         bool v;
+        if (check("Edge smoothing (FXAA)", gfxsw::fxaa(), &v)) {
+            gfxsw::set_fxaa(v);
+            hostui::post([v] { hostui::set(kKeyFxaa, v ? "1" : "0"); });
+        }
+        help("Smoother edges in the 3D world; the HUD stays sharp.\n"
+             "Costs a little GPU time (about 2 ms a frame).");
+    }
+    {
+        bool v;
         if (check("Bloom", gfxsw::bloom(), &v)) {
             gfxsw::set_bloom(v);
             hostui::post([v] { hostui::set(kKeyBloom, v ? "1" : "0"); });

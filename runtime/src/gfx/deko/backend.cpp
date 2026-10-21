@@ -50,6 +50,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 
 // the renderer's own shaders, compiled by uam at build time (CMakeLists.txt, gfx/deko/shaders)
 #include "depth_fsh_dksh.h"
+#include "fxaa_fsh_dksh.h"
 #include "imgui_fsh_dksh.h"
 #include "imgui_vsh_dksh.h"
 #include "present_fsh_dksh.h"
@@ -176,7 +177,7 @@ void load_shaders() {
     } kEmbedded[kShaderCount] = {
         {text_vsh_dksh, text_vsh_dksh_size, "text_vsh"},          {text_fsh_dksh, text_fsh_dksh_size, "text_fsh"},
         {imgui_vsh_dksh, imgui_vsh_dksh_size, "imgui_vsh"},       {imgui_fsh_dksh, imgui_fsh_dksh_size, "imgui_fsh"},
-        {depth_fsh_dksh, depth_fsh_dksh_size, "depth_fsh"},
+        {depth_fsh_dksh, depth_fsh_dksh_size, "depth_fsh"},        {fxaa_fsh_dksh, fxaa_fsh_dksh_size, "fxaa_fsh"},
     };
     size_t bytes = 0;
     int ok = 0;
@@ -1047,9 +1048,10 @@ void frame_stats() {
             (unsigned long long)ds.samplerWrites, (unsigned long long)ds.samplerHits,
             (unsigned long long)ds.samplerEvictions, (unsigned long long)g_hitches);
         LOG("[dk] internal resolution %.2f (requested %.2f; dynamic %s); %llu render targets resampled, %llu from kept "
-            "images (%zu MiB kept); HUD at full resolution in %.0f%% of frames",
+            "images (%zu MiB kept); HUD at full resolution in %.0f%% of frames; FXAA %s, in %.0f%% of frames",
             double(res_scale()), double(requested_res_scale()), dynamicRes.on ? "on" : "off", (unsigned long long)p.rescales,
-            (unsigned long long)p.poolHits, rescale_pool_bytes() >> 20, 100.0 * perFrame(p.hudSwitches));
+            (unsigned long long)p.poolHits, rescale_pool_bytes() >> 20, 100.0 * perFrame(p.hudSwitches),
+            fxaa_enabled() ? "on" : "off", 100.0 * perFrame(p.fxaaPasses));
         {  // (this fork, #37) what grows over a long session: malloc in use against its arena, and the containers
             const struct mallinfo mi = mallinfo();
             const ShaderMemory sm = shader_memory();
@@ -1086,6 +1088,52 @@ void frame_stats() {
 
 }  // namespace
 std::atomic<bool> g_padShown{false};  // the last frame presented the GamePad picture (skip_tv, draw.cpp)
+
+// ---- edge smoothing (FXAA, issue #21): off by default (WWHD_FXAA=1, the Switch tab's Picture)
+std::atomic<bool> g_fxaa{[] {
+    const char* e = getenv("WWHD_FXAA");
+    return e && atoi(e) != 0;
+}()};
+bool fxaa_enabled() { return g_fxaa.load(std::memory_order_relaxed); }
+void set_fxaa(bool on) {
+    if (g_fxaa.exchange(on) != on) LOG("[dk] edge smoothing (FXAA) %s (from the next frame)", on ? "on" : "off");
+}
+
+// one full-screen triangle (present_vsh) through fxaa_fsh, from src (linear filter, its own grid) into all of dst
+bool fxaa_pass(const SurfaceImage& src, const SurfaceImage& dst, bool linear) {
+    if (!g_presentOk || !g_shaderOk[kFxaaFs] || !src.valid || !dst.valid) return false;
+    constexpr uint32_t kUboSize = 256;
+    StreamAlloc u = stream_alloc(kUboSize, DK_UNIFORM_BUF_ALIGNMENT);
+    if (!u) return false;
+    const int32_t mode[4] = {linear ? 1 : 0, 0, 0, 0};  // fxaa_fsh.glsl, std140
+    memcpy(u.cpu, mode, sizeof mode);
+    if (g_traceFrame) trace_event("fxaa %ux%u -> %ux%u", src.pw, src.ph, dst.pw, dst.ph);
+    gpu_pass_mark("fxaa", nullptr, nullptr);
+    forget_state();  // the game's next draw binds its targets and state again
+    // the scene complete and the texture cache current before it is sampled
+    sync_barrier(DkBarrier_Fragments, DkInvalidateFlags_Image, SyncWhy::ReadAfterWrite);
+    commit_descriptors();
+    static const DkViewportSwizzle kIdentity = {DkSwizzle_PositiveX, DkSwizzle_PositiveY, DkSwizzle_PositiveZ,
+                                                DkSwizzle_PositiveW};
+    dkCmdBufSetViewportSwizzles(R.cmd, 0, &kIdentity, 1);
+    dkCmdBufSetPrimitiveRestart(R.cmd, false, 0);
+    DkImageView color;
+    dkImageViewDefaults(&color, &dst.image);
+    const DkImageView* colors[] = {&color};
+    dkCmdBufBindRenderTargets(R.cmd, colors, 1, nullptr);
+    bind_pass_state(false, false);
+    set_view(0, 0, dst.pw, dst.ph);
+    const DkShader* sh[] = {&g_presentShaders[0], &g_shaders[kFxaaFs]};
+    dkCmdBufBindShaders(R.cmd, DkStageFlag_GraphicsMask, sh, 2);
+    const DkBufExtents ubo = {u.gpu, kUboSize};
+    dkCmdBufBindUniformBuffers(R.cmd, DkStage_Fragment, 0, &ubo, 1);
+    const DkResHandle tex = dkMakeTextureHandle(src.imageId, kPresentLinearSamplerId);
+    dkCmdBufBindTextures(R.cmd, DkStage_Fragment, 0, &tex, 1);
+    dkCmdBufBindVtxAttribState(R.cmd, nullptr, 0);
+    dkCmdBufBindVtxBufferState(R.cmd, nullptr, 0);
+    dkCmdBufDraw(R.cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
+    return true;
+}
 
 // GPU time per render pass (dk_draw.h): a timestamp in sampled frames
 void gpu_pass_mark(const char* kind, const Surface* color, const Surface* depth) {
@@ -1268,6 +1316,7 @@ void present() {
     // the next frame draws into the buffer again: it gets its own copy only if the game copies it (gfx/gl)
     S.scanSrc = nullptr;
     if (S.tvSource) S.tvSource->hudFull = false;
+    if (S.drcSource) S.drcSource->hudFull = false;
     draw_fps();
     // the settings overlay (Minus held, overlay/overlay.h), over the picture and the FPS counter
     // (the window's real size: the UI grows with it, overlay.cpp)
@@ -1531,6 +1580,8 @@ int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }
 bool aniso() { return gfxdk::aniso_enabled(); }
 void set_aniso(bool on) { gfxdk::set_aniso(on); }
+bool fxaa() { return gfxdk::fxaa_enabled(); }
+void set_fxaa(bool on) { gfxdk::set_fxaa(on); }
 bool bloom() { return gfxdk::bloom_enabled(); }
 void set_bloom(bool on) { gfxdk::set_bloom(on); }
 bool distance_blur() { return gfxdk::blur_enabled(); }
@@ -1699,9 +1750,9 @@ const Backend& deko3d_backend() {
         b.set_ao_hires = [](bool) {};
         b.aniso = gfxdk::aniso_enabled;
         b.set_aniso = gfxdk::set_aniso;
-        b.fxaa = [] { return false; };
-        b.set_fxaa = [](bool) {};
-        b.feature_available = [](int f) { return f == render::kFeatureAniso; };
+        b.fxaa = gfxdk::fxaa_enabled;
+        b.set_fxaa = gfxdk::set_fxaa;
+        b.feature_available = [](int f) { return f == render::kFeatureAniso || f == render::kFeatureFXAA; };
         return b;
     }();
     return b;

@@ -101,6 +101,7 @@ constexpr MenuVariable kMenuVariables[] = {
          return true;
      }},
     {"WWHD_ANISO", [](const std::string& v, Settings& o) { o.push_back({switch_settings::kKeyAniso, on_atoi(v) ? "1" : "0"}); return true; }},
+    {"WWHD_FXAA", [](const std::string& v, Settings& o) { o.push_back({switch_settings::kKeyFxaa, on_atoi(v) ? "1" : "0"}); return true; }},
     {"WWHD_RUMBLE", [](const std::string& v, Settings& o) { o.push_back({"rumble", on_atoi(v) ? "1" : "0"}); return true; }},
     {"WWHD_PRO_CONTROLLER", [](const std::string& v, Settings& o) {  // (input_switch.cpp)
          o.push_back({"proController", v != "0" ? "1" : "0"});

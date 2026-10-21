@@ -27,6 +27,7 @@
 #include "shader_scan_switch.h"
 #include "background_shaders_switch.h"
 #include "audio_guard_switch.h"
+#include "thread_sampler.h"
 #include "bench_switch.h"  // (this fork) the performance test
 #include "shader_wait_switch.h"
 #include "host.h"
@@ -238,6 +239,13 @@ debugsrv::Reply shaderwait(const debugsrv::Args& a) {
                         shader_wait::label(shader_wait::mode()));
 }
 
+// "profile [seconds]": sample the frame threads (thread_sampler.h, docs/cpu-threading-plan.md 0.2); "profile status"
+debugsrv::Reply profile(const debugsrv::Args& a) {
+    if (!a.empty() && a[0] == "status") return debugsrv::ok("profile: " + thread_sampler::status());
+    const std::string why = thread_sampler::start(a.empty() ? 10 : atof(a[0].c_str()));
+    return why.empty() ? debugsrv::ok("profile: sampling") : debugsrv::err("profile: " + why);
+}
+
 // "stall <ms> [core] [count] [gap ms]": a host thread above every game thread spins on a core, as
 // the hitches that set off the game's "kill DSP channel" (issue #13) do; to test the guard at will
 Thread g_stallThread;
@@ -344,6 +352,8 @@ void start() {
     debugsrv::add_command("shaderthreads", "shaderthreads [0-3]    shader compile threads: 0 auto, 1-3", shaderthreads);
     debugsrv::add_command("shaderwait", "shaderwait [0-3]       draws of a compiling shader: 0 skip, 1 items, 2 +events, 3 always",
                           shaderwait);
+    debugsrv::add_command("profile", "profile [s] | status   sample the main and render threads (logs/prof_*.samples)",
+                          profile);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
