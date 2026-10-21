@@ -547,8 +547,12 @@ static bool park_wait(std::unique_lock<std::mutex>& lk, std::condition_variable&
             threads::SchedulerTick::TimedWait timed(g_tick);
             if (virtual_wait) {
                 const auto now = timebase::simulation_now();
-                const auto left = now < *simulation_deadline ? ticks_to_ns(*simulation_deadline - now) / game_clock::rate() : std::chrono::nanoseconds(0);
-                cv.wait_for(lk, std::min(left, std::chrono::nanoseconds(1000000)), pred);
+                const unsigned rate = game_clock::rate();
+                const auto left = now < *simulation_deadline ? ticks_to_ns(*simulation_deadline - now) / rate : std::chrono::nanoseconds(0);
+                // (this fork) at rate 1 the whole wait: a rate change wakes the event (wake_timed_events). The 1 ms
+                // slices woke every timed event wait of every thread a thousand times a second whenever the fast
+                // forward mod was enabled, used or not
+                cv.wait_for(lk, rate > 1 ? std::min(left, std::chrono::nanoseconds(1000000)) : left, pred);
             } else if (simulation_deadline) {
                 cv.wait_until(lk, *deadline, [&] { return pred() || game_clock::shifted(); });
             } else cv.wait_until(lk, *deadline, pred);
@@ -1066,8 +1070,13 @@ HLE(coreinit, OSSleepTicks) {
     for (;;) {
         const auto now = timebase::simulation_now();
         if (now >= end) break;
-        const auto left = ticks_to_ns(end - now) / game_clock::rate();
-        threads::park_sleep_until(std::chrono::steady_clock::now() + std::min(left, std::chrono::nanoseconds(1000000)));
+        const unsigned rate = game_clock::rate();
+        const auto left = ticks_to_ns(end - now) / rate;
+        // (this fork) 1 ms slices only while the clock runs faster (a rate change is not woken here): at rate 1 a
+        // sleep is up to 16 ms at a time (fast forward starts at most that late); every sleep of every guest thread
+        // woke each 1 ms whenever the mod was enabled
+        const auto slice = rate > 1 ? std::chrono::nanoseconds(1000000) : std::chrono::nanoseconds(16000000);
+        threads::park_sleep_until(std::chrono::steady_clock::now() + std::min(left, slice));
     }
 }
 HLE(coreinit, OSSetThreadName) { st32(arg(c, 0) + osthread::kName, arg(c, 1)); }

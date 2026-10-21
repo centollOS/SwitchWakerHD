@@ -1192,6 +1192,15 @@ TargetTrace& target_trace() {
     static TargetTrace t;
     return t;
 }
+// (this fork) whether WWHD_DK_TRACE_TARGET traces anything, known after the first draw: the trace's calls per draw
+// (its function-local static's guard, two address scans) were ~0.5% of the render thread with nothing to trace
+int8_t g_targetTraceOn = -1;
+inline bool target_trace_on() {
+    if (__builtin_expect(g_targetTraceOn >= 0, 1)) return g_targetTraceOn;
+    const TargetTrace& t = target_trace();
+    g_targetTraceOn = !t.addrs.empty() || !t.quiet.empty();
+    return g_targetTraceOn;
+}
 
 void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
                uint32_t baseVertex, uint32_t instances) {
@@ -1338,9 +1347,11 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         memo = {g_shader_state_gen, frame, R.shaderEpoch, primKey, fs, vs, ps, g_shader_regs_gen};
     }
     // (WWHD_DK_TRACE_TARGET) this draw in the frame trace's lines, whatever the frame
-    const bool targetTraced = target_trace().wants(r, frame);
-    target_trace().note_quiet(r, frame,
-                              !fs || !vs || !ps ? "none" : !vs->ready() || !ps->ready() ? "pending (skipped)" : "ready");
+    const bool targetTraceOn = target_trace_on();
+    const bool targetTraced = targetTraceOn && target_trace().wants(r, frame);
+    if (targetTraceOn)
+        target_trace().note_quiet(r, frame,
+                                  !fs || !vs || !ps ? "none" : !vs->ready() || !ps->ready() ? "pending (skipped)" : "ready");
     if (targetTraced) target_trace().dump_ring();
     struct TraceScope {
         bool on, frame, draws;
@@ -1668,9 +1679,10 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     // own textures (nothing rendered) switches that buffer to its full-size image, the scene scaled up into it;
     // the next frame's clear (or 3D drawing) switches back. With edge smoothing on (issue #21), the scene goes
     // through FXAA there, at any internal resolution (fxaa_scene), so the HUD drawn after it stays sharp
-    const bool smooth = fxaa_enabled();
-    if ((target->scale < 1.0f || smooth) && target == shown_source() && !depth && !g_drawSamplesRendered &&
-        colors[0] == target && target->readFrame == R.frame) {
+    // (FXAA's setting read only for the draws that can be the HUD switch: it was read on every draw)
+    if (!depth && colors[0] == target && target->readFrame == R.frame && !g_drawSamplesRendered &&
+        (target->scale < 1.0f || fxaa_enabled()) && target == shown_source()) {
+        const bool smooth = fxaa_enabled();
         bool single = true;
         for (int i = 1; i < 8; i++)
             if (colors[i]) single = false;
