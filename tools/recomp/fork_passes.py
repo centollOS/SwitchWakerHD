@@ -45,6 +45,11 @@ DEAD_TAIL = ppc2c.pass_on("WWHD_RECOMP_DEAD_TAIL")
 # WWHD_RECOMP_HELPER_INLINE=0
 HELPER_INLINE = ppc2c.pass_on("WWHD_RECOMP_HELPER_INLINE")
 HELPER_MAX_INSNS = 80
+# the original code of a function the runtime hooks (f_X_orig, called by hook_X) keeps registers in locals too: it is
+# ordinary code the hook calls (it reads the registers from the Cpu at its entry and writes them back when it returns,
+# as any function). Was struct form; the hottest hooked functions (the star field, the sea, the waves) are ~10% of the
+# Switch's main thread. On unless WWHD_RECOMP_HOOKED_LOCALS=0
+HOOKED_LOCALS = ppc2c.pass_on("WWHD_RECOMP_HOOKED_LOCALS")
 # return-address stores of direct calls to ordinary functions through PPC_SET_LR (nothing on the
 # Switch): on unless WWHD_RECOMP_LR=0
 LR_ELIDE = ppc2c.pass_on("WWHD_RECOMP_LR")
@@ -381,13 +386,14 @@ class ForkPasses:
         sites_done = False
         if self.fork_mod_check(start):  # (as upstream: a mod may hook or replace any function)
             return body, "", False
-        if LEAF and not hooked and not any(a in self.sites for a, _, _ in body) and leaflocal.eligible(stmts):
+        plain = HOOKED_LOCALS or not hooked  # (hooked: the f_X_orig body)
+        if LEAF and plain and not any(a in self.sites for a, _, _ in body) and leaflocal.eligible(stmts):
             prologue, stmts, tail_wb = leaflocal.transform(stmts)
             body = [(a, w, s) for (a, w, _), s in zip(body, stmts)]
             out += ["    %s" % p for p in prologue]
             self.leaf_count += 1
             self.emitted_leaf = True
-        elif NONLEAF and not hooked:
+        elif NONLEAF and plain:
             # instruction hooks become part of their statement, so they get the call treatment
             with_sites = [("site_%08X(c); " % self.sym(a) if a in self.sites else "") + s for a, _, s in body]
             done = leaflocal.transform_nonleaf(with_sites, start, [a for a, _, _ in body], self.saved_clobbers_sym)
@@ -492,7 +498,7 @@ class ForkPasses:
     def fork_table_head(self):
         """table.c, after the includes: which passes made this code (logged at boot)"""
         variant = ", ".join(n for n, on in (("cr liveness", CRLIVE), ("leaf locals", LEAF), ("nonleaf locals", NONLEAF),
-                                             ("hot layout", HOT), ("dead tails", DEAD_TAIL), ("helpers inlined", HELPER_INLINE), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
+                                             ("hot layout", HOT), ("dead tails", DEAD_TAIL), ("helpers inlined", HELPER_INLINE), ("hooked locals", HOOKED_LOCALS), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
                                              ("single-precision tracking", ppc2c.SINGLE),
                                              ("whole-program single precision", ppc2c.SINGLE and singleflow.INTERPROC),
                                              ("static GQRs", GQR_STATIC), ("jump-site caches", IJUMP)) if on)
