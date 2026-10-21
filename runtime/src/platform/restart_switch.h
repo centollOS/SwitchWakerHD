@@ -16,6 +16,7 @@ namespace restart_switch {
 bool from_forwarder();     // started from a HOME-menu forwarder: a restart loads the NRO again
 uint64_t program_id();     // the title the process runs as (0 when unknown)
 std::string launch_text(); // how the program was started, for the log and the debug server's info
-// appletRestartProgram from the forwarder; otherwise nothing is done and false comes back (why in the log)
+// appletRestartProgram from the forwarder, after the window is released (gfxsw::release_window: the picture
+// stops for good); otherwise nothing is done and false comes back (why in the log). Not from the render thread.
 bool restart(const char* arg);
 }  // namespace restart_switch

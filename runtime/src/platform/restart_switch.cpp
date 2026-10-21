@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../gfx/switch_renderer.h"
 #include "../runtime.h"
 
 namespace restart_switch {
@@ -59,6 +60,9 @@ bool restart(const char* arg) {
         LOG("[restart] not restarting: started as %s", launch_text().c_str());
         return false;
     }
+    // the window first: a process ended by the restart with a present in flight or its layer open could take vi
+    // down with it (2 of ~15 forwarder reloads on 2026-10-21; the new process then aborts in __nx_win_init)
+    gfxsw::release_window(3000);
     LOG("[restart] the program restarts (appletRestartProgram, title %016llx)", (unsigned long long)program_id());
     log_flush();
     const Result rc = appletRestartProgram(arg, strlen(arg) + 1);
