@@ -393,3 +393,15 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   and the render thread). Where the picture is held anyway (the #49 waits, the start-up's first draws, the loading
   card) that costs nothing: next, an "auto" setting that runs the helpers only while draws wait. Normal play keeps
   one thread.
+- 2026-10-21, **where the main thread's game code spends its time, by operation** (build D, night route; each
+  sampled PC through `addr2line -i`: the innermost inlined ppc.h helper, else the generated statement's kind):
+  guest loads ~43% (`ld32` 36.2%, `ld16` 3.3%, `ld8` 2.8%, `ld64` 0.9%), guest stores ~6% (`st32` 5.5%),
+  **registers written back to the Cpu around calls and returns 13.5%**, other integer work 11.2%, registers loaded
+  into locals at entry 3.4%, branches 2.6%, indirect calls 2.1%, float arithmetic and rounding ~3% (`fctiwz` 1.8%,
+  `to_single` 1.2%), condition registers ~2.4%.
+  Two leads: (1) the loads are memory stalls (a load is an `ldr` and a `rev`): check how the guest memory (1.4 GB)
+  is mapped; with 4 KiB pages the A57's TLBs cover a few MB and every miss is a page-table walk, so 2 MiB blocks
+  could help every load. (2) **Write-back elision (2.2):** before a call a function writes every register local back,
+  since any callee might read any register; an interprocedural pass with each callee's transitive live-in
+  registers (tools/verify/funcdb.py already computes live-ins for the harness) would write back only those.
+  The largest generic cost left; checked like the other passes (function-by-function diff, lockstep).
