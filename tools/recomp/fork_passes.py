@@ -50,6 +50,10 @@ HELPER_MAX_INSNS = 80
 # as any function). Was struct form; the hottest hooked functions (the star field, the sea, the waves) are ~10% of the
 # Switch's main thread. On unless WWHD_RECOMP_HOOKED_LOCALS=0
 HOOKED_LOCALS = ppc2c.pass_on("WWHD_RECOMP_HOOKED_LOCALS")
+# callee-saved registers' write-backs before direct calls to ordinary game functions as PPC_WB_SAVED (leaflocal.py
+# ELIDE_SAVED_REGS; empty on the Switch, kept on the desktop and in the checking build): on unless
+# WWHD_RECOMP_ELIDE_SAVED=0
+ELIDE_SAVED = ppc2c.pass_on("WWHD_RECOMP_ELIDE_SAVED")
 # return-address stores of direct calls to ordinary functions through PPC_SET_LR (nothing on the
 # Switch): on unless WWHD_RECOMP_LR=0
 LR_ELIDE = ppc2c.pass_on("WWHD_RECOMP_LR")
@@ -374,6 +378,15 @@ class ForkPasses:
         self.helper_inlined = getattr(self, "helper_inlined", 0) + 1
         return " ".join(parts) if tail else "{ %s }" % " ".join(parts)  # (translate's link code comes before)
 
+    def plain_callees(self):
+        """The call names ("f_XXXXXXXX") of ordinary game functions: not hooked by the runtime, not a save/restore
+        helper (ELIDE_SAVED)."""
+        if not hasattr(self, "_plain"):
+            hooked = {"f_%08X" % self.sym(a) for a in self.hooks}
+            self._plain = frozenset("f_%08X" % self.sym(a) for a in self.entries) - hooked - {
+                "f_%08X" % self.sym(a) for a in self.saved_clobbers}
+        return self._plain
+
     def fork_dead_tail(self):
         """emit_function: the body ends in an unconditional return or branch (no fall-through tail call)."""
         return getattr(self, "dead_tail", False)
@@ -396,7 +409,8 @@ class ForkPasses:
         elif NONLEAF and plain:
             # instruction hooks become part of their statement, so they get the call treatment
             with_sites = [("site_%08X(c); " % self.sym(a) if a in self.sites else "") + s for a, _, s in body]
-            done = leaflocal.transform_nonleaf(with_sites, start, [a for a, _, _ in body], self.saved_clobbers_sym)
+            done = leaflocal.transform_nonleaf(with_sites, start, [a for a, _, _ in body], self.saved_clobbers_sym,
+                                               self.plain_callees() if ELIDE_SAVED else None)
             if done:
                 prologue, stmts, tail_wb = done
                 body = [(a, w, s) for (a, w, _), s in zip(body, stmts)]
@@ -498,7 +512,7 @@ class ForkPasses:
     def fork_table_head(self):
         """table.c, after the includes: which passes made this code (logged at boot)"""
         variant = ", ".join(n for n, on in (("cr liveness", CRLIVE), ("leaf locals", LEAF), ("nonleaf locals", NONLEAF),
-                                             ("hot layout", HOT), ("dead tails", DEAD_TAIL), ("helpers inlined", HELPER_INLINE), ("hooked locals", HOOKED_LOCALS), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
+                                             ("hot layout", HOT), ("dead tails", DEAD_TAIL), ("helpers inlined", HELPER_INLINE), ("hooked locals", HOOKED_LOCALS), ("callee-saved write-backs elided", ELIDE_SAVED), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
                                              ("single-precision tracking", ppc2c.SINGLE),
                                              ("whole-program single precision", ppc2c.SINGLE and singleflow.INTERPROC),
                                              ("static GQRs", GQR_STATIC), ("jump-site caches", IJUMP)) if on)

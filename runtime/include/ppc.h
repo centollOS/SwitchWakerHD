@@ -144,12 +144,22 @@ void ppc_keep_failed(Cpu* c, int reg, uint32_t fn);
         double a_ = (c)->f[n].ps0, b_ = (c)->f[n].ps1, x_ = (v0), y_ = (v1);                             \
         if (memcmp(&a_, &x_, 8) || memcmp(&b_, &y_, 8)) ppc_keep_failed(c, 32 + (n), fn);              \
     } while (0)
-#elif defined(__SWITCH__)
+#elif defined(__SWITCH__) || defined(PPC_ELIDE_SAVED_WB)  /* PPC_ELIDE_SAVED_WB: a desktop test of the Switch's form */
 #define PPC_KEEP_R(c, n, v, fn) ((void)0)
 #define PPC_KEEP_F(c, n, v0, v1, fn) ((void)0)
 #else
 #define PPC_KEEP_R(c, n, v, fn) ((v) = (c)->r[n])
 #define PPC_KEEP_F(c, n, v0, v1, fn) ((v0) = (c)->f[n].ps0, (v1) = (c)->f[n].ps1)
+#endif
+
+/* (this fork) a callee-saved register's write-back before a direct call to an ordinary game function
+ * (tools/recomp/leaflocal.py ELIDE_SAVED_REGS): such a callee only saves and restores it, and the caller keeps
+ * its own copy (PPC_KEEP_R above), so the Switch leaves the store out. Desktop builds read the registers again
+ * after a call and keep it; so does the checking build. PPC_ELIDE_SAVED_WB: a desktop test of the Switch's form. */
+#if (defined(__SWITCH__) || defined(PPC_ELIDE_SAVED_WB)) && !defined(PPC_NONLEAF_CHECK)
+#define PPC_WB_SAVED(x) ((void)0)
+#else
+#define PPC_WB_SAVED(x) ((void)(x))
 #endif
 
 /* the return address of a direct call to an ordinary game function (tools/recomp/recomp.py link):
