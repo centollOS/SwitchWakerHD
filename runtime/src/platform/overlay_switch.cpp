@@ -300,15 +300,16 @@ void tab_switch() {
         const int cur = gfxsw::shader_compile_threads();
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Shader compile threads");
-        for (int n = 1; n <= 3; n++) {
+        for (int n = 0; n <= 3; n++) {
             ImGui::SameLine();
-            char label[8];
-            snprintf(label, sizeof label, "%d##shthr", n);
+            char label[16];
+            snprintf(label, sizeof label, n ? "%d##shthr" : "Auto##shthr", n);
             if (radio(label, cur == n)) gfxsw::set_shader_compile_threads(n);
         }
         help("Test: how many threads compile the shaders the game is waiting for (a new place, an item seen\n"
-             "for the first time). 1: one, as before. 2-3: they compile at once on cores 0 and 2.\n"
-             "Not saved.");
+             "for the first time). Auto (the default): three while the picture waits for its shaders (the\n"
+             "wait option above, the start-up), one otherwise. 1: one, as before. 2-3: always (in play they\n"
+             "take ~3 fps while they run). Not saved.");
     }
     {
         // the render profiler's latest report (render_prof.h; on with "Render profiler" above) to the SD card,

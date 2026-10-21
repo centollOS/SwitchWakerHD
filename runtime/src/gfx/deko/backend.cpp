@@ -1188,6 +1188,21 @@ void present() {
             frame_pacing::set_interval(want);
         }
     }
+    // (this fork, #49) a frame drawn while draws wait, with shaders still compiling: they are compiled now (all at
+    // once), the frame's passes are submitted (render targets the next frame reads), and it is not shown: the window
+    // keeps the last whole picture, and the next frame draws with every shader
+    if (finish_held_frame()) {
+        S.scanSrc = nullptr;
+        if (S.tvSource) S.tvSource->hudFull = false;
+        gpuPasses.frame_end();
+        frame_pacing::on_present(R.cmd, frame);
+        frame_end();
+        check_queue("the submit (frame held)", frame);
+        dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(R.cmd));
+        frame_stats();
+        latch_res_scale();
+        return;
+    }
     const uint64_t t1 = now_ns();
     int slot;
     {

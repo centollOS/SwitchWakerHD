@@ -224,7 +224,7 @@ debugsrv::Reply dspguard(const debugsrv::Args& a) {
     return debugsrv::ok(std::string("dspguard ") + (audio_guard::kept() ? "the game's own" : "off"));
 }
 
-// "shaderthreads [1-3]": threads that compile the shaders draws ask for (gfx/deko helper_main; not saved)
+// "shaderthreads [0-3]": threads that compile the shaders draws ask for (gfx/deko helper_main; 0 auto; not saved)
 debugsrv::Reply shaderthreads(const debugsrv::Args& a) {
     if (!a.empty()) gfxsw::set_shader_compile_threads(atoi(a[0].c_str()));
     return debugsrv::ok("shaderthreads " + std::to_string(gfxsw::shader_compile_threads()));
@@ -341,7 +341,7 @@ void start() {
     debugsrv::add_command("reload", "reload                 restart: the forwarder loads the NRO again (put it first)", reload);
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
-    debugsrv::add_command("shaderthreads", "shaderthreads [1-3]    threads compiling the shaders draws ask for", shaderthreads);
+    debugsrv::add_command("shaderthreads", "shaderthreads [0-3]    shader compile threads: 0 auto, 1-3", shaderthreads);
     debugsrv::add_command("shaderwait", "shaderwait [0-3]       draws of a compiling shader: 0 skip, 1 items, 2 +events, 3 always",
                           shaderwait);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);

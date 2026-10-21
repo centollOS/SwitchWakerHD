@@ -136,6 +136,17 @@ std::atomic<uint64_t> g_momentWaits{0}, g_momentWaitNs{0};  // waits since the s
 bool draws_wait() { return g_waitForWorker || g_drawsWait.load(std::memory_order_relaxed); }
 // the render thread waits for a shader a draw needs now (wait mode, the start-up's first draws, shader_wait)
 void wait_for_draw(ShaderCode* code, uint64_t hash);
+// (this fork, #49) while draws wait (shader_wait_switch.h, not the start-up's): a draw whose shader is pending does
+// not block; the shader goes first in the queue and the frame is held: present() waits for all of them at once (the
+// compile threads in parallel) and does not show that frame, so the window keeps the last whole picture
+std::vector<std::pair<ShaderCode*, uint64_t>> g_held;  // render thread: this frame's held shaders
+uint64_t g_heldFrames = 0, g_heldShaders = 0, g_heldNs = 0;  // render thread: since the switch went on
+void hold_for_draw(ShaderCode* code, uint64_t hash);
+// the shader a draw needs now: waited for (wait mode, the start-up's first draws) or the frame held (#49 waits)
+inline void need_now(ShaderCode* code, uint64_t hash) {
+    if (g_waitForWorker) wait_for_draw(code, hash);
+    else hold_for_draw(code, hash);
+}
 
 // ---- hashes (as gfx/gl/shaders.cpp: the same keys and the same GLSL hashes)
 uint64_t hash_bytes(const void* bytes, size_t size, uint64_t hash = 0x9E3779B97F4A7C15ull) {
@@ -612,14 +623,22 @@ Thread workerThread;
 // (this fork) helper compile threads (uam is reentrant: PATCHES.md patch 10): they take only jobs a draw asked for,
 // never background ones, so a new place's (or an item's) shaders compile on up to three threads at once while play
 // is not burdened by the background list. The Switch tab's Debug section / debug server "shaderthreads N" /
-// WWHD_DK_SHADER_THREADS: 1 (no helpers, as before; the default) to 3.
+// WWHD_DK_SHADER_THREADS: 0 auto (the default: the helpers only while draws wait for their shaders, when the picture
+// is held anyway: the #49 waits, the start-up's first draws; in play they took ~3 fps while they ran), 1 (no helpers,
+// as before) to 3 (always).
 constexpr int kMaxHelpers = 2;
+constexpr int kAuto = 0;
 constexpr size_t kCompileHeap = 24u << 20;  // each compile thread's own heap (thread_heap_switch.h): blocks <= 4 KiB
 std::atomic<int> g_compileThreads{[] {
     const char* e = getenv("WWHD_DK_SHADER_THREADS");
-    const int n = e && *e ? atoi(e) : 1;
-    return n < 1 ? 1 : n > 1 + kMaxHelpers ? 1 + kMaxHelpers : n;
+    const int n = e && *e ? atoi(e) : kAuto;
+    return n < 0 ? kAuto : n > 1 + kMaxHelpers ? 1 + kMaxHelpers : n;
 }()};
+// helper `index` takes jobs now: below the threads chosen, or (auto) while draws wait
+inline bool helper_active(int index) {
+    const int n = g_compileThreads.load(std::memory_order_relaxed);
+    return n == kAuto ? draws_wait() : index + 1 < n;
+}
 Thread helperThreads[kMaxHelpers];
 bool helperStarted[kMaxHelpers] = {};
 
@@ -763,8 +782,7 @@ void helper_main(void* arg) {
     std::unique_lock<std::mutex> lk(workerMutex);
     for (;;) {
         workerCv.wait(lk, [index] {
-            return workerStop || (workerReady && index + 1 < g_compileThreads.load(std::memory_order_relaxed) &&
-                                  foregroundQueued > 0);
+            return workerStop || (workerReady && helper_active(index) && foregroundQueued > 0);
         });
         if (workerStop) break;
         size_t best = SIZE_MAX;
@@ -793,7 +811,8 @@ void helper_main(void* arg) {
 
 void start_helpers() {
     for (int i = 0; i < kMaxHelpers; i++) {
-        if (helperStarted[i] || i + 1 >= g_compileThreads.load()) continue;
+        const int n = g_compileThreads.load();
+        if (helperStarted[i] || (n != kAuto && i + 1 >= n)) continue;
         const Result rc = threadCreate(&helperThreads[i], helper_main, reinterpret_cast<void*>(intptr_t(i)), nullptr,
                                        kWorkerStack, kWorkerPriority, 2);
         if (R_FAILED(rc) || R_FAILED(threadStart(&helperThreads[i]))) {
@@ -803,8 +822,8 @@ void start_helpers() {
             return;
         }
         helperStarted[i] = true;
-        LOG("[dk] shader helper thread %d started (cores 0 and 2, %zu MiB stack): draws' shaders compile on up to %d "
-            "threads", i + 1, kWorkerStack >> 20, g_compileThreads.load());
+        LOG("[dk] shader helper thread %d started (cores 0 and 2, %zu MiB stack; compile threads: %s)", i + 1,
+            kWorkerStack >> 20, g_compileThreads.load() == kAuto ? "auto, more while draws wait" : "fixed");
     }
 }
 
@@ -825,7 +844,7 @@ void queue_job(Job&& job) {
         if (!job.background) foregroundQueued++;
         jobs.push_back(std::move(job));
     }
-    workerCv.notify_one();
+    workerCv.notify_all();  // (this fork: the helpers wait on it too)
 }
 
 // ---- results -> code memory (render thread)
@@ -1032,7 +1051,7 @@ void wait_for(ShaderCode* code, uint64_t hash) {
                 }
             }
     }
-    workerCv.notify_one();
+    workerCv.notify_all();
     while (code->state == ShaderCode::Queued) {
         {
             std::unique_lock<std::mutex> lk(workerMutex);
@@ -1044,6 +1063,24 @@ void wait_for(ShaderCode* code, uint64_t hash) {
         }
         load_results(~size_t{0});
     }
+}
+
+void hold_for_draw(ShaderCode* code, uint64_t hash) {
+    for (const auto& h : g_held)
+        if (h.second == hash) return;
+    {
+        std::lock_guard<std::mutex> lk(workerMutex);
+        for (Job& j : jobs)
+            if (j.hash == hash) {
+                j.priority = ~0u;
+                if (j.background) {
+                    j.background = false;
+                    foregroundQueued++;
+                }
+            }
+    }
+    workerCv.notify_all();
+    g_held.push_back({code, hash});
 }
 
 void wait_for_draw(ShaderCode* code, uint64_t hash) {
@@ -1266,7 +1303,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         if (sh->pending()) {
             refresh(sh);
             if (draws_wait() && sh->pending() && sh->code) {
-                wait_for_draw(sh->code, sh->glslHash);
+                need_now(sh->code, sh->glslHash);
                 refresh(sh);
             }
         }
@@ -1355,7 +1392,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     shader->code = code_for(shader, std::move(glsl));
     refresh(shader);
     if (draws_wait() && shader->pending()) {
-        wait_for_draw(shader->code, shader->glslHash);
+        need_now(shader->code, shader->glslHash);
         refresh(shader);
     }
     return shader;
@@ -2123,13 +2160,16 @@ void shader_queue(size_t& forDraws, size_t& background) {
 // (this fork, #49) platform/shader_wait_switch.cpp, the game's main thread: draws wait for their shaders from now
 void set_draws_wait(bool on) {
     if (g_drawsWait.exchange(on) == on) return;
+    workerCv.notify_all();  // (auto compile threads: the helpers take jobs while draws wait)
     if (on) {
         g_momentWaits = 0;
         g_momentWaitNs = 0;
         LOG("[shader-wait] draws wait for their shaders (frame %llu)", (unsigned long long)R.frame);
     } else {
-        LOG("[shader-wait] draws skip again (frame %llu): %llu waited, %.0f ms in all", (unsigned long long)R.frame,
-            (unsigned long long)g_momentWaits.load(), double(g_momentWaitNs.load()) / 1e6);
+        LOG("[shader-wait] draws skip again (frame %llu): %llu waited, %.0f ms in all (%llu frames held, not shown)",
+            (unsigned long long)R.frame, (unsigned long long)g_momentWaits.load(), double(g_momentWaitNs.load()) / 1e6,
+            (unsigned long long)g_heldFrames);
+        g_heldFrames = 0;
     }
 }
 
@@ -2140,13 +2180,30 @@ uint64_t shaders_pending() {
 
 // (this fork) the compile threads for jobs draws asked for (helper_main): any thread
 void set_shader_compile_threads(int n) {
-    n = n < 1 ? 1 : n > 1 + kMaxHelpers ? 1 + kMaxHelpers : n;
+    n = n < 0 ? kAuto : n > 1 + kMaxHelpers ? 1 + kMaxHelpers : n;
     static std::mutex startMutex;
     std::lock_guard<std::mutex> lk(startMutex);
-    if (g_compileThreads.exchange(n) != n) LOG("[dk] shader compile threads: %d", n);
+    if (g_compileThreads.exchange(n) != n) LOG("[dk] shader compile threads: %s", n == kAuto ? "auto" : std::to_string(n).c_str());
     start_helpers();
     workerCv.notify_all();
 }
 int shader_compile_threads() { return g_compileThreads.load(); }
+
+// (this fork, #49) present(), render thread: true when this frame was drawn with shaders still compiling (held);
+// then they are all compiled and loaded before it returns, and the caller does not show the frame
+bool finish_held_frame() {
+    if (g_held.empty()) return false;
+    const uint64_t t0 = now_ns();
+    for (const auto& [code, hash] : g_held)
+        if (code->state == ShaderCode::Queued) wait_for(code, hash);
+    const uint64_t ns = now_ns() - t0;
+    g_heldFrames++;
+    g_heldShaders += g_held.size();
+    g_heldNs += ns;
+    g_momentWaits.fetch_add(g_held.size(), std::memory_order_relaxed);
+    g_momentWaitNs.fetch_add(ns, std::memory_order_relaxed);
+    g_held.clear();
+    return true;
+}
 
 }  // namespace gfxdk
