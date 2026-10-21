@@ -265,3 +265,16 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   against the current output, then the lockstep check and the routes.
   Process note: a profile must be read with the ELF of the build that ran (symbols move between builds): each
   profile's ELF is kept next to its samples from now on.
+- 2026-10-21, **2.2 first pass: dead tails** (`fork_passes.py trim_dead_tail`, `WWHD_RECOMP_DEAD_TAIL=0` off).
+  Why the helpers cost so much: they are entry points into one block of code, and each entry's generated body
+  ran on past its `blr` into the next entries' code. That code never runs from the entry, but the
+  register-locals pass saw it, so a helper that saves one register (f31) loaded f14-f31 from the Cpu (36
+  doubles) and wrote them all back. The pass cuts a body at its first unconditional `blr` / `bctr` / `b` with no
+  branch target after it (the labels translation collects, jump tables included). Checked: the recompiler run
+  from this branch without the pass reproduces `build/gen` byte for byte; with it, of 39,713 functions 39,660
+  differ only in the unreachable fall-through tail call (now `__builtin_unreachable()`) and 14 in trimmed code,
+  each read: 13 helpers and padding after returns, and `f_028F5E98` (a float routine next to the helpers that
+  loaded and stored f14-f31 on every call). Console A/B: next entry.
+  The bigger part stays for a second pass: callers still write all their registers back and read them again
+  around each helper call (`find_saved_clobbers`), and the save itself still stores each register to guest
+  memory.
