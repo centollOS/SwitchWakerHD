@@ -962,8 +962,10 @@ SurfaceImage g_fxaaImage;
 }  // namespace
 
 bool fxaa_scene(Surface* s) {
-    static uint64_t doneFrame = ~0ull;
+    static uint64_t doneFrame = ~0ull, noImageUntil = 0;
     if (!s || !s->img.valid || doneFrame == R.frame) return false;
+    // tried once a frame, even when it fails: a later HUD draw must not filter the HUD already drawn
+    doneFrame = R.frame;
     // what the shader decides edges on: the samples are linear light when the image decodes sRGB, or when the
     // present pass encodes them (an sRGB TV format)
     const bool linear = s->fmt.srgb || R.tvSrgb.load(std::memory_order_relaxed);
@@ -982,11 +984,13 @@ bool fxaa_scene(Surface* s) {
         if (t.valid && (t.pw != s->img.pw || t.ph != s->img.ph || t.format != s->img.format || t.flags != s->img.flags))
             free_image(t);
         if (!t.valid) {
+            if (R.frame < noImageUntil) return false;
             try {
                 make_image(s, t, s->img.pw, s->img.ph);
-            } catch (const std::exception& e) {  // (the image heap full: no FXAA this frame)
+            } catch (const std::exception& e) {  // (the image heap full: no FXAA for 300 frames, then a new try)
+                noImageUntil = R.frame + 300;
                 static int logged = 0;
-                if (logged++ < 4) LOG("[dk] FXAA: no image for %s (%s): the frame without it", describe(s).c_str(), e.what());
+                if (logged++ < 4) LOG("[dk] FXAA: no image for %s (%s): 300 frames without it", describe(s).c_str(), e.what());
                 return false;
             }
             LOG("[dk] FXAA: an image of %ux%u for the TV picture (%s)", t.pw, t.ph, describe(s).c_str());
@@ -999,7 +1003,6 @@ bool fxaa_scene(Surface* s) {
     // the pass wrote the buffer and read its other image: a later draw that samples it, or writes the other image,
     // gets the barrier it needs (dk_sync.h)
     s->syncWrite = s->syncRead = sync_epoch();
-    doneFrame = R.frame;
     R.perf.fxaaPasses++;
     return true;
 }
