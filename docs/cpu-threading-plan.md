@@ -316,3 +316,15 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   helpers inlined: A2 / C2 (same boot alignment) identical in everything, all 40,280 process hashes over 601
   steps; A1 / C1 identical but for 3 steps of process hashes; the cross pairs show exactly the baseline's
   noise.** The two passes do not change what the game does.
+- 2026-10-21, **profile of build C** (night route and Outset at night, 1020 MHz): the star field still leads
+  (`dKyr_drawStar` 3.1-3.5% self, `mDoLib_project` 1.8%), then flat. Instruction level (the sampler's PCs
+  through `addr2line` on the ELF): the hottest spots in the star code follow an `fdiv` and the return from
+  `sqrtf`; and the generated C showed why the function is slow at all: **it is in struct form**, every register
+  access a load or store on the Cpu, because the locals passes skipped hooked functions (`not hooked` in
+  `fork_locals`; no reason found in the docs or history). The hooked originals (`f_X_orig`) are **9.4-10.1% of
+  the main thread** (46-48 functions: the star field, `f_028766CC`, `wave_move`, the sea's `fillVtxBuf`,
+  `settingTevStruct` ...). A native port of the star function was ruled out: it would be the decomp's code
+  (Nintendo's) in the published runtime; generic recompiler work helps every function instead.
+- 2026-10-21, **2.2 third pass: hooked originals keep registers in locals** (`WWHD_RECOMP_HOOKED_LOCALS=0` off).
+  EU build: 180 more functions with locals (52 leaves, 128 with calls); the 173 functions that change are all
+  `f_X_orig`; `dKyr_drawStar`'s Cpu accesses 683 -> 53. Build D = C + this; console A/B and lockstep next.
