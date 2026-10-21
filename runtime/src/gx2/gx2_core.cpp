@@ -265,6 +265,15 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
     // decide per word. (Not with WWHD_VK_STATS, which counts these batches too.)
     if (first >= mmSQ_ALU_CONSTANT0_0 && first + n <= mmSQ_ALU_CONSTANT0_0 + 0x1000 && !g_collect_stats) {
         uint32* d = &g_regs[first];
+#ifdef __SWITCH__
+        // (this fork) copied without the comparison: nothing on the Switch reads the dirty group, and compared
+        // then copied these were the render thread's biggest memcmp (lava: +1.2% of its time)
+        g_dirty_groups |= 1u << kSgAluConst;
+        if (g_classify) rprof::g_reg_dirty |= 1;
+        copy_words(d, v, n);
+        if (g_shadow) copy_words(&g_shadow[first], v, n);
+        return;
+#endif
         if (memcmp(d, v, n * 4) != 0) {
             g_dirty_groups |= 1u << kSgAluConst;
             if (g_classify) rprof::g_reg_dirty |= 1;
@@ -355,19 +364,36 @@ static inline Recording* find_rec(uintptr_t id) {
         if (g_rec_owner[i].load(std::memory_order_relaxed) == id) return &g_recs[i];
     return nullptr;
 }
+#ifdef __SWITCH__
+// (this fork) each thread's own slot, kept by the thread: the main thread records ~70,000 GX2 calls a frame in
+// the lava room and the scan above cost each of them; a thread_local is one TPIDRRO_EL0 read in this static
+// executable (upstream avoids it for dlopened libraries)
+static thread_local Recording* t_my_rec = nullptr;
+#endif
 static inline Recording* recording() {
+#ifdef __SWITCH__
+    return t_my_rec;
+#endif
     if (!g_recording.load(std::memory_order_relaxed)) return nullptr;
     return find_rec(self_id());
 }
 static Recording* claim_rec() {
     const uintptr_t id = self_id();
-    if (Recording* r = find_rec(id)) return r;
+    if (Recording* r = find_rec(id)) {
+#ifdef __SWITCH__
+        t_my_rec = r;  // (this fork)
+#endif
+        return r;
+    }
     for (int i = 0; i < kMaxRecorders; i++) {
         uintptr_t free = 0;
         if (g_rec_owner[i].compare_exchange_strong(free, id)) {
             int n = g_rec_slots.load();
             while (n < i + 1 && !g_rec_slots.compare_exchange_weak(n, i + 1)) {}
             g_recording++;
+#ifdef __SWITCH__
+            t_my_rec = &g_recs[i];  // (this fork)
+#endif
             return &g_recs[i];
         }
     }
@@ -376,6 +402,9 @@ static Recording* claim_rec() {
 }
 static void release_rec(Recording* r) {
     *r = Recording{};
+#ifdef __SWITCH__
+    if (t_my_rec == r) t_my_rec = nullptr;  // (this fork: always the owner)
+#endif
     g_rec_owner[r - g_recs].store(0);
     g_recording--;
 }
