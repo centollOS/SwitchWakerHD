@@ -301,3 +301,18 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   Link's house, Windfall, Dragon Roost Cavern, Forest Haven, the Tower of the Gods, Hyrule, the Earth Temple):
   pictures normal, no new log errors. Not yet: the lockstep check (0.4), which this kind of change needs before
   it ships, and a longer play session.
+- 2026-10-21, **0.4 lockstep check: it already exists** as `tools/gametest` (run_scenario.sh + compare.py, made
+  for the decomp build): a headless desktop run with scripted input that traces Link, the camera, the random
+  numbers, sound starts, a 64-bit hash of every process's memory after each execute, and the save data, per
+  logic step. Used here on macOS (Apple silicon, Metal, Release), a test bench only: the same generated game code
+  as the Switch, compiled with clang instead of GCC; the console runs cover the Switch's compiler, and every
+  performance number comes from the console. (Local link workaround, not committed: `-Wl,-U,_f_027F4D5C_orig`,
+  the weak reference branch `fix/macos-link-weak-orig` is about.)
+  Method: `ALIGN=link` (the boot's length varies by a step or two; aligned on Link's first execute, Link, camera,
+  random numbers and sounds match from the first step). Baseline against itself (A1 / A2, origins 85 / 87): Link,
+  camera, 1,230 sound starts and the save identical; process hashes differ in 17 of 601 steps from 4.2 s, and
+  the random numbers in the last 0.4 s: what the runner's mask of uninitialised bytes does not cover yet.
+  **Result, scenario: Quest Log 1, walk 20 s (`WWHD_TEST_STICK=2-12:0:1`), A = both passes off, C = dead tails +
+  helpers inlined: A2 / C2 (same boot alignment) identical in everything, all 40,280 process hashes over 601
+  steps; A1 / C1 identical but for 3 steps of process hashes; the cross pairs show exactly the baseline's
+  noise.** The two passes do not change what the game does.
