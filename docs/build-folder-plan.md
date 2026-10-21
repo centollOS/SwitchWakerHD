@@ -8,7 +8,7 @@ the Mac/Linux installer in `~/SwitchWakerHD-Build`.
 
 The welcome page shows the work folder, the free space on its drive against what the build needs, and a
 **Change folder...** button. Picking a folder uses it as is when it is already a work folder (named
-`SwitchWakerHD-Build`, or holding a release or `installer.log`); otherwise a `SwitchWakerHD-Build` folder goes
+`SwitchWakerHD-Build`, or holding `installer.log`; not a folder with a release unzipped by hand, like Downloads); otherwise a `SwitchWakerHD-Build` folder goes
 inside it (picking `D:\` builds in `D:\SwitchWakerHD-Build`).
 
 A folder that cannot work is refused on the welcome page, with the reason, and **Get started** stays off:
@@ -27,7 +27,8 @@ a note: slower build, keep it connected, and when it is the Switch's own card it
 and the finished game, and the work folder stays on the card (user, 2026-10-21: keep it, the next update reuses
 it; the player can delete it).
 
-The choice is remembered (`SwitchWakerHD-Installer/build-folder.txt` under the local application data folder)
+The choice is remembered (`SwitchWakerHD-Installer/build-folder.txt` under the local application data folder;
+only a folder the player picked, the default is worked out again on every start)
 so a re-run reuses the build. When the remembered folder's drive is gone, the default is used and the welcome
 page says so.
 
