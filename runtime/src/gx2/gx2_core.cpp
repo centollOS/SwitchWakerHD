@@ -307,9 +307,14 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
         for (uint32 i = 0; i < n; i++) {
             const uint32 reg = first + i, old = g_regs[reg];
             if (old == v[i]) continue;
+#ifdef __SWITCH__
+            // (this fork) the state groups are the Vulkan renderer's: no class table lookup per changed register
+            if (classify) classify_reg(g_reg_class[reg], reg);
+#else
             const uint8 cls = g_reg_class[reg];
             note_state_change(cls, old, v[i]);
             if (classify) classify_reg(cls, reg);
+#endif
             const uint8 c = classes.kind[reg];
             cats |= c >> kRegCatShift;
             if (!(c & kRegShaderBits) || ((c & kRegMasked) && !((old ^ v[i]) & classes.mask[reg]))) continue;
