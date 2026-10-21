@@ -35,6 +35,10 @@ INLINE_MAX_INSNS = 24
 # functions with calls keep guest registers in locals too (leaflocal.transform_nonleaf): on unless
 # WWHD_RECOMP_NONLEAF=0
 NONLEAF = ppc2c.pass_on("WWHD_RECOMP_NONLEAF")
+# unreachable code after a function's last unconditional return or branch (no branch target after it: the next
+# functions' code, as in the compiler's save/restore helpers, where each entry falls into the next) is left out, so
+# the register locals and the tail call cover only the code that runs: on unless WWHD_RECOMP_DEAD_TAIL=0
+DEAD_TAIL = ppc2c.pass_on("WWHD_RECOMP_DEAD_TAIL")
 # return-address stores of direct calls to ordinary functions through PPC_SET_LR (nothing on the
 # Switch): on unless WWHD_RECOMP_LR=0
 LR_ELIDE = ppc2c.pass_on("WWHD_RECOMP_LR")
@@ -280,7 +284,8 @@ class ForkPasses:
         ppc2c.cur_addr = a
 
     def fork_translated(self, body):
-        """emit_function, the function translated: condition-register liveness."""
+        """emit_function, the function translated: the dead tail, then condition-register liveness."""
+        body = self.trim_dead_tail(body)
         if not CRLIVE or self.fork_mod_check(self.cur_start):  # (guest mod hooks: a mod may hook or replace any function)
             return body
         live_after, fields = crlive.analyze(body, self.cur_start, self.cur_end, self.p.jump_tables, branch_target,
@@ -289,6 +294,28 @@ class ForkPasses:
         self.cr_stats[0] += sum(1 for f in fields if f is not None)
         self.cr_stats[1] += sum(1 for i, f in enumerate(fields) if f is not None and (live_after[i] >> (4 * f)) & 0xF == 0)
         return body
+
+    def trim_dead_tail(self, body):
+        """The body up to its first unconditional return or branch (blr, bctr, b) after which no branch target lies:
+        what follows cannot run from this entry (DEAD_TAIL). Sets self.dead_tail for emit_function's fall-through."""
+        self.dead_tail = False
+        if not DEAD_TAIL or self.fork_mod_check(self.cur_start):
+            return body
+        last_label = max(self.labels) if self.labels else -1
+        for i, (a, w, _) in enumerate(body[:-1]):
+            terminator = w in (0x4E800020, 0x4E800420) or (w >> 26 == 18 and (w & 3) == 0)
+            if terminator and last_label <= a:
+                self.dead_tail = True
+                self.dead_tail_count = getattr(self, "dead_tail_count", 0) + 1
+                self.dead_tail_insns = getattr(self, "dead_tail_insns", 0) + len(body) - i - 1
+                return body[:i + 1]
+        if body and (body[-1][1] in (0x4E800020, 0x4E800420) or (body[-1][1] >> 26 == 18 and (body[-1][1] & 3) == 0)):
+            self.dead_tail = True  # (ends in one: the fall-through tail call is unreachable too)
+        return body
+
+    def fork_dead_tail(self):
+        """emit_function: the body ends in an unconditional return or branch (no fall-through tail call)."""
+        return getattr(self, "dead_tail", False)
 
     def fork_locals(self, start, hooked, body, out):
         """emit_function, after the function's header: guest registers in locals (leaflocal.py). Returns
@@ -409,7 +436,7 @@ class ForkPasses:
     def fork_table_head(self):
         """table.c, after the includes: which passes made this code (logged at boot)"""
         variant = ", ".join(n for n, on in (("cr liveness", CRLIVE), ("leaf locals", LEAF), ("nonleaf locals", NONLEAF),
-                                             ("hot layout", HOT), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
+                                             ("hot layout", HOT), ("dead tails", DEAD_TAIL), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
                                              ("single-precision tracking", ppc2c.SINGLE),
                                              ("whole-program single precision", ppc2c.SINGLE and singleflow.INTERPROC),
                                              ("static GQRs", GQR_STATIC), ("jump-site caches", IJUMP)) if on)
@@ -424,5 +451,7 @@ class ForkPasses:
                 "leaf functions with registers in locals: %d\n" % self.leaf_count +
                 "functions with calls with registers in locals: %d\n" % self.nonleaf_count +
                 "functions that change callee-saved registers (save/restore helpers): %d\n" % len(self.saved_clobbers) +
+                "dead tails left out: %d functions, %d instructions\n" % (getattr(self, "dead_tail_count", 0),
+                                                                     getattr(self, "dead_tail_insns", 0)) +
                 "small hot leaves inlined into callers: %d\n" % getattr(self, "inline_count", 0) +
                 "single-precision multiplier operands: %d rounded (round25), %d known single\n" % tuple(ppc2c.single_stats))

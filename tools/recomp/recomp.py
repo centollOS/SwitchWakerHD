@@ -320,7 +320,9 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
                 out.append("    site_%08X(c);" % self.sym(a))
             out.append("    %s /* %08X: %08X */" % (s, a, w))
         # fall through into the next function
-        if self.cur_end < self.p.text_hi:
+        if self.fork_dead_tail():  # (this fork: the body ends in an unconditional return or branch)
+            out.append("    __builtin_unreachable();")
+        elif self.cur_end < self.p.text_hi:
             # code falling into a hooked function continues with its original code
             nxt = ("f_%08X_orig" if self.cur_end in self.hooks else "f_%08X") % self.sym(self.cur_end)
             out.append("    %sMUSTTAIL return %s(c);" % (tail_wb, nxt))
