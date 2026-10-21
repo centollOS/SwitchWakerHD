@@ -14,6 +14,7 @@
 //     dksh_cache dump <shadercache_dksh.bin> <dir>
 //         writes each record's DKSH to <dir>/<hash>_vs.dksh or _ps.dksh (comparisons with the uam CLI)
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -22,6 +23,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -77,6 +79,52 @@ double pct(const std::vector<double>& sorted, double p) {
 // console loads every record into its 64 MiB of shader code memory at start-up, and what it compiles later goes
 // there too, so a cache built from a manifest's speculative variants must leave room: sources are taken in the
 // file's order (translate writes the recorded variants first) until the budget is used.
+// stress: uam and glsl_to_deko on several threads at once (uam patch 10, the renderer's parallel compiles): every
+// source compiled on one thread, then again on `threads` threads at once (each takes the next source); the DKSH must
+// be the same bytes and the failures the same sources. limit: the first N sources (0: all).
+int stress(const char* in, int threads, size_t limit) {
+    std::vector<Wgs1Source> src = load_wgs1(in);
+    if (limit && src.size() > limit) src.resize(limit);
+    uam::init(true);
+    auto compile_one = [&](size_t i) {
+        const Wgs1Source& s = src[i];
+        ConvertedBindings b;
+        const std::string glsl = glsl_to_deko(s.glsl, s.vertex, &b);
+        if (glsl.empty()) return std::vector<uint8_t>{0xFF};  // (a conversion failure: a marker no DKSH equals)
+        uam::Result res = uam::compile(s.vertex ? uam::Stage::Vertex : uam::Stage::Fragment, glsl.c_str());
+        return res.ok ? std::move(res.dksh) : std::vector<uint8_t>{0xFE};
+    };
+    std::vector<std::vector<uint8_t>> one(src.size()), many(src.size());
+    auto t0 = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < src.size(); i++) {
+        one[i] = compile_one(i);
+        if ((i + 1) % 2000 == 0) fprintf(stderr, "  one thread: %zu / %zu\n", i + 1, src.size());
+    }
+    const double oneS = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::atomic<size_t> next{0};
+    t0 = std::chrono::steady_clock::now();
+    std::vector<std::thread> pool;
+    for (int t = 0; t < threads; t++)
+        pool.emplace_back([&] {
+            for (size_t i; (i = next.fetch_add(1)) < src.size();) many[i] = compile_one(i);
+        });
+    for (auto& t : pool) t.join();
+    const double manyS = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    size_t differ = 0, failed = 0;
+    for (size_t i = 0; i < src.size(); i++) {
+        failed += one[i].size() == 1;
+        if (one[i] != many[i]) {
+            if (differ++ < 10)
+                fprintf(stderr, "  DIFFERENT: %s %016llx (%zu bytes on one thread, %zu on %d)\n",
+                        src[i].vertex ? "vertex" : "pixel", (unsigned long long)src[i].hash, one[i].size(),
+                        many[i].size(), threads);
+        }
+    }
+    printf("stress: %zu sources (%zu failed on one thread); one thread %.1f s, %d threads %.1f s (%.2fx); %zu differ\n",
+           src.size(), failed, oneS, threads, manyS, oneS / manyS, differ);
+    return differ ? 2 : 0;
+}
+
 constexpr size_t kCodeAlignment = 0x100;  // deko3d's DK_SHADER_CODE_ALIGNMENT: where code_load places each DKSH
 int build(const char* in, const char* out, double maxMiB = 0) {
     const auto t0 = std::chrono::steady_clock::now();
@@ -242,11 +290,14 @@ int translate(const char* manifest, const char* programs, const char* out, const
 int main(int argc, char** argv) {
     if ((argc == 4 || argc == 5) && !strcmp(argv[1], "build")) return build(argv[2], argv[3], argc == 5 ? atof(argv[4]) : 0);
     if (argc == 4 && !strcmp(argv[1], "coverage")) return coverage(argv[2], argv[3]);
+    if ((argc == 4 || argc == 5) && !strcmp(argv[1], "stress"))
+        return stress(argv[2], atoi(argv[3]), argc == 5 ? size_t(atoll(argv[4])) : 0);
     if (argc == 4 && !strcmp(argv[1], "dump")) return dump(argv[2], argv[3]);
     if ((argc == 5 || argc == 6) && !strcmp(argv[1], "translate"))
         return translate(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : nullptr);
     fprintf(stderr,
             "usage: dksh_cache build <shadercache_gl.bin> <shadercache_dksh.bin>\n"
+            "       dksh_cache stress <shadercache_gl.bin> <threads> [first N sources]\n"
             "       dksh_cache coverage <console shadercache_gl.bin> <harvest shadercache_gl.bin>\n"
             "       dksh_cache dump <shadercache_dksh.bin> <dir>\n");
     return 1;

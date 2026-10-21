@@ -2,9 +2,10 @@
 // The renderer's view of uam (devkitPro's deko3d shader compiler, vendored here with the patches in
 // PATCHES.md): GLSL source in, DKSH bytes out (the same bytes the uam command line tool writes).
 //
-// NOT thread-safe and NOT reentrant: Mesa's GLSL frontend inside uam keeps one static gl_context and
-// global tables, so init() and every compile() must run on ONE thread (the renderer's compile worker).
-// That thread needs a large stack (Mesa's parser and nv50_ir recurse deeply: 8 MB on the Switch).
+// Threads (PATCHES.md, patch 10): init(true) once, before any compile; then compile() may run on several threads
+// at once (one call per thread at a time; each thread gets its own Mesa context on its first compile). init(false)
+// (the frontend rebuilt and freed around every compile) is for one thread only. A compiling thread needs a large
+// stack (Mesa's parser and nv50_ir recurse deeply: 8 MB on the Switch).
 #include <cstdint>
 #include <string>
 #include <vector>
