@@ -106,19 +106,63 @@ def read_names(path, decomp):
     return names
 
 
+def compare(args, addrs, syms, names):
+    text_lo, text_hi = addrs[0], addrs[-1] + 0x100000
+    cols, tables = [], []
+    for path in args.samples:
+        tags, base, samples = read_samples(path)
+        ti = tags.index(args.thread)
+        mine = [fr for t, fr in samples if t == ti]
+        c = collections.Counter()
+        for fr in mine:
+            seen = set()
+            for k, pc in enumerate(fr):
+                a = pc - base
+                if a < text_lo or a > text_hi:
+                    if k == 0 and not args.inclusive:
+                        c["(outside the executable)"] += 1
+                    if not args.inclusive:
+                        break
+                    continue
+                q = syms[bisect.bisect_right(addrs, a) - 1].split(".")[0]
+                if args.inclusive:
+                    if q not in seen:
+                        seen.add(q)
+                        c[q] += 1
+                else:
+                    c[q] += 1
+                    break
+        cols.append(os.path.splitext(os.path.basename(path))[0])
+        tables.append({k: 100.0 * v / len(mine) for k, v in c.items()})
+    keys = set().union(*tables)
+    ranked = sorted(keys, key=lambda k: -sum(t.get(k, 0) for t in tables))
+    print("%-58s %s  mean" % ("function (%s time, thread %s)" % ("inclusive" if args.inclusive else "self", args.thread),
+                               " ".join("%11s" % c[:11] for c in cols)))
+    for k in ranked[: args.top]:
+        m = re.match(r"f_([0-9A-F]{8})", k)
+        lab = "%s %s" % (k, names.get(m.group(1), "")) if m else k
+        vals = [t.get(k, 0) for t in tables]
+        print("%-58s %s %5.2f" % (lab[:58], " ".join("%10.2f%%" % v for v in vals), sum(vals) / len(vals)))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("samples")
+    ap.add_argument("samples", nargs="+", help="one file, or several with --compare")
+    ap.add_argument("--compare", action="store_true", help="a table: self time per file, functions by their mean")
+    ap.add_argument("--inclusive", action="store_true", help="with --compare: inclusive time instead of self")
     ap.add_argument("--elf", default="build/switch-dk/wwhd.elf")
     ap.add_argument("--thread", default="game")
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--names", default="build/verify/names.tsv")
     ap.add_argument("--decomp", default="decomp", help="the decomp checkout (names from its sources)")
+    ap.add_argument("--callers", help="a function (f_XXXXXXXX or a symbol): the chains above it, by caller")
     args = ap.parse_args()
 
-    tags, base, samples = read_samples(args.samples)
     addrs, syms = read_symbols(args.elf)
     names = read_names(args.names, args.decomp)
+    if args.compare:
+        return compare(args, addrs, syms, names)
+    tags, base, samples = read_samples(args.samples[0])
     text_lo, text_hi = addrs[0], addrs[-1] + 0x100000
 
     def sym(pc):
@@ -161,6 +205,25 @@ def main():
                     incl_c[q] += 1
             depth += len(fr)
         n = len(mine)
+        if args.callers:
+            chains = collections.Counter()
+            hits = 0
+            for fr in mine:
+                names_ = []
+                for pc in fr:
+                    q = sym(pc)
+                    if q and (not names_ or names_[-1] != q):
+                        names_.append(q)
+                idx = [i for i, q in enumerate(names_) if q.split(".")[0].startswith(args.callers)]
+                if not idx:
+                    continue
+                hits += 1
+                i = idx[0]
+                chains[" < ".join(label(q) for q in names_[i:i + 4])] += 1
+            print("== thread %s: %s in %.2f%% of samples; chains (it < caller < ...)" % (tag, args.callers, 100.0 * hits / n))
+            for c, v in chains.most_common(args.top):
+                print("   %5.2f%%  %s" % (100.0 * v / n, c))
+            continue
         print("== thread %s: %d samples, mean chain %.1f frames" % (tag, n, depth / n))
         for k, v in kind.most_common():
             print("   %5.1f%%  %s" % (100.0 * v / n, k))

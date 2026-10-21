@@ -220,3 +220,18 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   - `dComIfGp_get` 1.8% self (a one-line accessor);
   - grass binding (`Shape_bind`, `ModelBinding_build`, `Texture_bind`) ~4%; sea, weather, clouds, particles
     (`JPAEmitterManager::calc` 2.9% incl) a few % each.
+- 2026-10-21, **five places compared** (`main_profile.py --compare`; same session, CPU 1224 MHz, warps from the
+  Warp tab, 10 s each, text dismissed). The main thread sleeps (waiting for the next frame, `svcSleepThread`)
+  **25.9% at Outset, 41.7% at Windfall, 25.1% in Forest Haven, 45.0% in the Tower of the Gods, 2.4% at sea at
+  night** (Dragon Roost, the arrival event). So by day in those places it has room; the night at sea is where it
+  is the limit. What the night adds: the star field. `dKyr_drawStar` 4.1% self and, per star, `mDoLib_project`
+  1.5%, `dComIfGp_get` 1.8%, `hdGameInfo_dComIfGd_getProjViewMtx` 1.1%, `mDoLib_projectViewport` 0.5% (all near 0
+  by day): **~9% of the main thread at night**. The HD projection reads the view-projection matrix through
+  `getProjViewMtx` five times per point (each through `dComIfGp_get`). The process searches by ID
+  (`fpcSch_JudgeByID`) are 2.3% at night at sea, under 0.2% elsewhere (the event's searches). Everything else is
+  flat: no game function above ~1.5% self in daytime places.
+  Next: benchmark routes (0.1) for the main-thread-limited cases (night at sea; sailing by day; Dragon Roost with
+  bombs; the volcano), then the first candidate, the star field's projection (2.1: native `mDoLib_project` and
+  accessors, checked with tools/verify and on the lockstep check).
+  Note for the routes: these warps arrive at the save's time of day, and the first sea profile ran during an
+  arrival event; a route needs a fixed time and no event.
