@@ -219,6 +219,14 @@ static inline void copy_words(uint32* d, const uint32* v, uint32 n) {
     }
     for (uint32 i = 0; i < n; ++i) d[i] = v[i];
 }
+// (this fork) the same for the comparison before them: memcmp was ~4% of the Switch's render thread, most
+// of it on writes of a few words
+static inline bool same_words(const uint32* d, const uint32* v, uint32 n) {
+    if (n > 8) return memcmp(d, v, n * 4) == 0;
+    uint32 diff = 0;
+    for (uint32 i = 0; i < n; ++i) diff |= d[i] ^ v[i];
+    return diff == 0;
+}
 
 #ifdef WWHD_HAS_VULKAN
 static void apply_small_regs(uint32 first, const uint32* v, uint32 n) {
@@ -289,7 +297,7 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
         return;
     }
 #endif
-    if (memcmp(&g_regs[first], v, n * 4) != 0) {
+    if (!same_words(&g_regs[first], v, n)) {  // (this fork: inline for short writes)
         const bool classify = g_classify;
         // (this fork) the shader-state counters and the register categories (gx2.h) from one table
         // (reg_classes: with the backend's shader_key_mask), in the same pass over the changed registers
