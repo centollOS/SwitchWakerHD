@@ -328,3 +328,13 @@ Newest last. Each entry: what was done, what was measured, what it decided.
 - 2026-10-21, **2.2 third pass: hooked originals keep registers in locals** (`WWHD_RECOMP_HOOKED_LOCALS=0` off).
   EU build: 180 more functions with locals (52 leaves, 128 with calls); the 173 functions that change are all
   `f_X_orig`; `dKyr_drawStar`'s Cpu accesses 683 -> 53. Build D = C + this; console A/B and lockstep next.
+- 2026-10-21, **build D (C + hooked locals) measured.** Night route, 1020 MHz, native helpers off: 28.33, 28.68
+  fps (mean 28.5; C 28.20 in an earlier session: +0.3). Profile, same route: the hooked originals 10.14% -> 8.42% of
+  the main thread; `dKyr_drawStar` itself only 3.14% -> 2.97%: struct form was not its main cost (its time is the
+  divides, the per-star projection and its loads). Lockstep (macOS): A2 / D2 identical in everything (40,280
+  process hashes), A1 / D1 the baseline's 3-step noise. Kept.
+  Restarts: the debug server's `reload` failed 3 times in ~14 today, never in the game's code: `vi` and
+  `overlayDisp` (12:57, the console went down), `hbloader` (sphaira) and `omm` (14:51), the forwarder
+  ("Application", `nn::diag::detail::Abort` in nnSdk, 15:27, the console rebooted). A separate issue; until it is
+  understood, comparisons that need a restart are done one build per session, and A/B within a session uses
+  runtime switches.
