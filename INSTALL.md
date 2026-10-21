@@ -38,6 +38,14 @@ user name has a space or an accented letter: the installer then works there).
 > **Windows SmartScreen** may show *"Windows protected your PC"* on first run because the installer is
 > not code-signed. Click **More info → Run anyway**. This is expected for open-source unsigned executables.
 > The [source code](installer/windows) and [build script](installer/build.ps1) are in this repository.
+>
+> **Microsoft Defender** (or another antivirus) may also flag it, for example as `Trojan:Win32/Wacatac.B!ml`.
+> The `!ml` means a guess by its machine-learning heuristic, not a known malware signature: an unsigned program
+> that downloads files and starts the devkitPro setup looks suspicious to it. The `.exe` is built by
+> [GitHub Actions](.github/workflows/release-installer.yml) from the source above; you can compare your download
+> with `SwitchWakerHD-Installer.exe.sha256` on the release page (PowerShell:
+> `Get-FileHash SwitchWakerHD-Installer.exe`). If you would rather not run it, follow the manual steps from
+> [1. What you need](#1-what-you-need) on: they use the release zip and need no installer.
 
 The installer is multilingual: it starts in **English** or **Spanish** based on your Windows display
 language, and the button in its corner switches between them.
