@@ -230,6 +230,9 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
 
     # --- callbacks used by ppc2c.translate ---
     def branch(self, addr, tgt):
+        inl = self.fork_inline_helper(addr, tgt, tail=True)  # (this fork: save/restore helpers inlined)
+        if inl:
+            return inl
         if addr in self.p.import_calls:  # tail call into an imported function
             lib, name, slot = self.p.import_calls[addr]
             self.used_imports.add(slot)
@@ -244,6 +247,9 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         return "c->pc = 0x%08Xu; MUSTTAIL return ppc_dispatch(c);" % tgt
 
     def call(self, addr, tgt):
+        inl = self.fork_inline_helper(addr, tgt, tail=False)  # (this fork: save/restore helpers inlined)
+        if inl:
+            return inl
         if addr in self.p.import_calls:
             lib, name, slot = self.p.import_calls[addr]
             self.used_imports.add(slot)
@@ -320,7 +326,9 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
                 out.append("    site_%08X(c);" % self.sym(a))
             out.append("    %s /* %08X: %08X */" % (s, a, w))
         # fall through into the next function
-        if self.cur_end < self.p.text_hi:
+        if self.fork_dead_tail():  # (this fork: the body ends in an unconditional return or branch)
+            out.append("    __builtin_unreachable();")
+        elif self.cur_end < self.p.text_hi:
             # code falling into a hooked function continues with its original code
             nxt = ("f_%08X_orig" if self.cur_end in self.hooks else "f_%08X") % self.sym(self.cur_end)
             out.append("    %sMUSTTAIL return %s(c);" % (tail_wb, nxt))

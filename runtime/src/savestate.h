@@ -93,7 +93,9 @@ void request_load(int slot);
 void request_save_portable_path(const std::string& path, std::function<void(bool ok, const std::string& why)> done);
 bool control_check(Cpu* c, std::string& why);
 uint64_t portable_arrivals();
-void request_load_portable_file(const std::string& path);  // a .wwstate anywhere (WWHD_PORTABLE_LOAD)
+// a .wwstate anywhere (WWHD_PORTABLE_LOAD); any_region (the performance test): a state of the other Wind Waker HD
+// region (USA / Europe) loads too
+void request_load_portable_file(const std::string& path, bool any_region = false);
 bool full_states();                     // save button / shortcuts make full states
 void set_full_states(bool on);          // the setting (kept in the states folder)
 bool full_states_forced();              // the environment decides (WWHD_FULL_SAVE_STATES or test variables)
