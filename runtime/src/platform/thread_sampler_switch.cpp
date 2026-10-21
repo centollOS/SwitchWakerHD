@@ -22,7 +22,9 @@
 namespace thread_sampler {
 namespace {
 constexpr int kMaxThreads = 8;
-constexpr int kMaxFrames = 32;
+constexpr int kMaxFrames = 64;    // host frames (up to kMaxHost), then guest return addresses
+constexpr int kMaxHost = 32;
+constexpr uint64_t kGuestTag = 1ull << 63;  // a guest return address in a sample: kGuestTag | address
 struct Sample {
     uint32_t thread;
     uint32_t count;
@@ -31,6 +33,7 @@ struct Sample {
 struct Target {
     Handle handle;
     char tag[16];
+    const uint32_t* guestR1;  // the thread's Cpu r1, or null
 };
 std::mutex g_mu;  // registration
 Target g_targets[kMaxThreads];
@@ -54,13 +57,39 @@ uint32_t capture(const ThreadContext& c, uint64_t* out) {
     if (R_FAILED(svcQueryMemory(&mi, &page, c.sp))) return n;
     const uint64_t lo = mi.addr, hi = mi.addr + mi.size;
     uint64_t fp = c.fp;
-    while (n < kMaxFrames && fp >= lo && fp + 16 <= hi && (fp & 7) == 0) {
+    while (n < kMaxHost && fp >= lo && fp + 16 <= hi && (fp & 7) == 0) {
         const uint64_t* rec = reinterpret_cast<const uint64_t*>(fp);
         const uint64_t next = rec[0], ret = rec[1];
         if (!ret) break;
         out[n++] = ret;
         if (next <= fp) break;
         fp = next;
+    }
+    return n;
+}
+
+inline uint32_t guest_word(uint32_t a) {
+    uint32_t v;
+    memcpy(&v, ppc_mem_base_var + a, 4);
+    return __builtin_bswap32(v);
+}
+
+// a word of the guest's stacks (MEM2 or the runtime's region, where the threads' stacks are)
+inline bool stack_word(uint32_t a) {
+    return (a & 3) == 0 && ((a >= mem::kMem2Start && a + 8 <= mem::kMem2End) ||
+                            (a >= mem::kRuntimeStart && a + 8 <= mem::kRuntimeEnd));
+}
+
+// the guest stack from r1: frame -> back chain; the word after the back chain's frame is the return address the frame's
+// function saved there (the PowerPC EABI's LR save word). Stops at a null or decreasing chain or outside guest RAM.
+uint32_t capture_guest(uint32_t sp, uint64_t* out, uint32_t n) {
+    for (int depth = 0; n < kMaxFrames && depth < 48; depth++) {
+        if (!stack_word(sp)) break;
+        const uint32_t next = guest_word(sp);
+        if (next <= sp || !stack_word(next)) break;
+        const uint32_t ret = guest_word(next + 4);
+        if (ret >= 0x02000000u && ret < 0x10000000u) out[n++] = kGuestTag | ret;
+        sp = next;
     }
     return n;
 }
@@ -106,7 +135,10 @@ void sampler_main(void*) {
                 svcSleepThread(0);
                 rc = svcGetThreadContext3(&c, h);
             }
-            if (R_SUCCEEDED(rc)) s.count = capture(c, s.frames);
+            if (R_SUCCEEDED(rc)) {
+                s.count = capture(c, s.frames);
+                if (const uint32_t* r1 = g_targets[i].guestR1) s.count = capture_guest(*r1, s.frames, s.count);
+            }
             svcSetThreadActivity(h, ThreadActivity_Runnable);
             const uint64_t ns = ticks_ns(armGetSystemTick() - t0);
             pausedNs += ns;
@@ -154,8 +186,14 @@ void add_current_thread(const char* tag) {
     const int i = g_count.load();
     if (i >= kMaxThreads) return;
     g_targets[i].handle = threadGetCurHandle();
+    g_targets[i].guestR1 = nullptr;
     snprintf(g_targets[i].tag, sizeof g_targets[i].tag, "%s", tag);
     g_count.store(i + 1);
+}
+
+void set_guest_stack(const uint32_t* r1) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (const int i = g_count.load(); i > 0) g_targets[i - 1].guestR1 = r1;
 }
 
 std::string start(double seconds) {

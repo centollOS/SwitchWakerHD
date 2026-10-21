@@ -439,3 +439,30 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   - Repo tests: `tools/recomp/test_coverage.py` and `test_builds.py` fail on main too (a constant of
     `core_switch.cpp` not on the list; an upstream test of upstream's hook emission); not touched here.
   - Next: the player's play session on the console (this branch's build), then the PR out of draft.
+- 2026-10-21, **3.1 candidates: the profiler now sees the game's whole call stack, and phase 3 finds no loop to
+  split.** The host frame-pointer chain skipped every recompiled function without a frame, so inclusive times
+  below the process manager were far too low (`fopAc_Execute` 4%). The sampler now also walks the main thread's
+  guest stack (its Cpu r1, the PowerPC back chain, the return address saved in each frame; 23.7 guest frames a
+  sample, the same 12 us a pause) and `main_profile.py` counts those frames (one name per game function, its
+  `_orig` / `.localalias` symbols merged). Main build (#57), 1020 MHz, 10-12 s each:
+
+  | | night at sea (Dragon Roost) | Windfall, noon | Outset, noon |
+  |---|---|---|---|
+  | main thread sleeping (waiting for the frame) | 0% | 33.9% | 15.8% |
+  | actors' execute (`fpcM_Management`'s execute list) | 35% | 30% | 30% |
+  | scene draw (`dScnPly_Draw`) | 25.3% | 12.0% | 20.2% |
+  | of it, actors' draw (`fopAc_Draw`) | 13.5% | 1.6% | 6.4% |
+  | HD render pass (`f_027C2DF0`: packets, sky, sea) | 25.2% | 10.9% | 17.1% |
+  | of it, the star field (`dKyr_drawStar`) | 9.6% | ~0 | ~0 |
+  | particles (`JPADraw::initParticle` + `JPAEmitterManager::calc`) | 6.9% | 2.1% | 6.1% |
+
+  What phase 3 needs (a loop over independent items, > 5% of the main thread, one function per item) is not
+  there. Actor execute is the large part, but it is ~50 actors of 1-3.5% each that touch one another (collision,
+  process searches, events, the player): no independence to prove. Actor draw is per-actor < 1% (by day) and
+  every draw appends to the shared J3D draw buffers, whose order is the draw order. Particles are 2-7% across
+  emitter calc and per-particle init, also writing the shared draw lists. The one large per-item computation is
+  the star field at night (9.6%: per star a projection and a GX vertex, in one function), and that is a single
+  function's inner loop, not a loop of calls a hook can split.
+  **Decision: phase 3 (fork-join of game loops) stops at 3.1**, nothing parallel was written. By day the main
+  thread waits 16-34% of the time (the render thread and the GPU set the frame rate), so phase 4 (the render
+  thread) is the next lever there; at night at sea the star field is the largest single cost on the main thread.
