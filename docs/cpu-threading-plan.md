@@ -374,3 +374,10 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   sequence draws more places the longer it runs.)
   Also: one restart through the forwarder failed at 17:40 (`vi` crashed, then the new process aborted in libnx's
   `__nx_win_init`, getting no window): rarer than through the title override, but not gone.
+- 2026-10-21, **why 3 compile threads are slower: newlib's malloc lock.** The sampler on the compile threads (a
+  test build that registers them; cold cache, 3 threads, 15 s of the title's compiles): each thread spends 62-73%
+  of its time in `svcArbitrateLock` / `svcArbitrateUnlock`, and the callers are `_malloc_r`, `_free_r` and
+  `_memalign_r` (~50% of each thread waiting on the one heap mutex); only about a third compiles. Mesa allocates
+  and frees constantly (its ralloc trees), so three compilers queue for the heap; macOS's allocator has per-thread
+  caches, which is why the Mac showed 2.5x. Next: a private heap per compile thread (dlmalloc mspaces), used only
+  by those threads; everything else keeps newlib's heap.
