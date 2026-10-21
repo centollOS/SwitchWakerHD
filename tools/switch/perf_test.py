@@ -79,6 +79,16 @@ class Console:
         except (OSError, dbg.ServerError, ValueError):
             return None
 
+    def reload(self):
+        """restart the game; stops when the game refuses (not started from the HOME-menu forwarder: a restart would
+        start the game whose title it borrowed, runtime/src/platform/restart_switch.h)"""
+        try:
+            self.cmd("reload", timeout=10.0)
+        except dbg.ServerError as e:
+            raise SystemExit(f"reload refused: {e}")
+        except (OSError, ValueError):
+            pass  # (the connection can end with the process)
+
     def kv(self, text):
         out = {}
         for line in (text or "").splitlines():
@@ -114,7 +124,7 @@ class Console:
     def deploy(self, nro):
         log(f"deploying {nro}")
         self.put(nro, dbg.REMOTE_NRO)
-        self.try_cmd("reload", timeout=10.0)
+        self.reload()
         time.sleep(4.0)
         if not self.wait_up(150):
             raise SystemExit("the game did not come back after the deploy (lastlog / crashes)")
@@ -193,7 +203,7 @@ def boot_to_gameplay(con, reload=False):
     memory only)"""
     if reload:
         log("reload")
-        con.try_cmd("reload", timeout=10.0)
+        con.reload()
         time.sleep(4.0)
         if not con.wait_up(150):
             raise SystemExit("the game did not come back after reload")
