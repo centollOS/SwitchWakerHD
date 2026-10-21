@@ -278,3 +278,26 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   The bigger part stays for a second pass: callers still write all their registers back and read them again
   around each helper call (`find_saved_clobbers`), and the save itself still stores each register to guest
   memory.
+- 2026-10-21, **2.2 second pass: save/restore helpers inlined** (`fork_passes.py fork_inline_helper`, hooks in
+  recomp.py's `call()` / `branch()`; `WWHD_RECOMP_HELPER_INLINE=0` off). A call of a helper becomes the
+  helper's straight-line run of loads and stores (through the next entries, to its `blr`; `isync` allowed) in
+  the caller; a tail jump takes the `blr` too and returns from the caller. EU build: 305 call sites (sqrtf's
+  save of f31 among them); 145 functions change; the 158 calls left go to larger routines with branches in the
+  same address range.
+  **Console, night route, stock CPU 1020 MHz (every session's log checked for the clock), native helpers off,
+  mean of the steady 5 s reports per run:**
+
+  | Build | Runs (fps) | Mean | vs A |
+  |---|---|---|---|
+  | A: main + profiler + native switch | 27.52, 27.33, 27.40, 27.50 | 27.44 | |
+  | B: + dead tails | 27.46, 27.67 | 27.57 | +0.13 (noise) |
+  | **C: + helpers inlined** | **28.22, 28.17** | **28.20** | **+0.76 (+2.8%)** |
+  | C with native helpers on | 28.27, 28.32 | 28.30 | +0.86 |
+
+  C's slowest run is above A's fastest. B alone is noise: GCC had already removed most of the dead tails'
+  register traffic itself (`f_028F5E98` came out the same size); the gain is the callers no longer writing back
+  and re-reading every register around a helper call. The native helpers add ~0.1 on top of C (+0.35 on A).
+  Checks so far: the generated code compared function by function (above); C warped through 8 places (Outset,
+  Link's house, Windfall, Dragon Roost Cavern, Forest Haven, the Tower of the Gods, Hyrule, the Earth Temple):
+  pictures normal, no new log errors. Not yet: the lockstep check (0.4), which this kind of change needs before
+  it ships, and a longer play session.
