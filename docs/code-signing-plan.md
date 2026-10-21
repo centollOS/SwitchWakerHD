@@ -35,8 +35,7 @@ Windows then shows "SignPath Foundation" as the publisher, not centollOS.
 - Built from source on GitHub-hosted runners: `.github/workflows/release-installer.yml`.
 - Product name and version enforced by the artifact configuration: `Product` = `SwitchWakerHD`, version =
   the release tag. `IncludeSourceRevisionInInformationalVersion` is off so the product version has no `+<commit>`.
-- MFA for every team member on GitHub and SignPath. **To do:** require 2FA in the centollOS organization
-  (Settings > Authentication security); it is off today.
+- MFA for every team member on GitHub and SignPath: the centollOS organization requires 2FA (since 2026-10-21).
 - Roles: authors and reviewers = the organization's members; approver = Pulpparty. Every signing request is
   approved by hand in SignPath.
 - System changes announced: the installer says it installs Python, devkitPro (and, for the icon, Git, Pillow,
@@ -94,4 +93,4 @@ HOME icon; the minimap mod if chosen) from GitHub and from those tools' own serv
 
 ## Status
 
-- 2026-10-21: plan, csproj and workflow on this branch (signing off until the variables exist); application to SignPath Foundation drafted, not sent; org 2FA still off.
+- 2026-10-21: plan, csproj and workflow on this branch (signing off until the variables exist); application to SignPath Foundation drafted, not sent; org 2FA required since 2026-10-21.
