@@ -381,3 +381,15 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   and frees constantly (its ralloc trees), so three compilers queue for the heap; macOS's allocator has per-thread
   caches, which is why the Mac showed 2.5x. Next: a private heap per compile thread (dlmalloc mspaces), used only
   by those threads; everything else keeps newlib's heap.
+- 2026-10-21, **per-thread heaps for the compile threads** (`thread_heap_switch.cpp` on `feature/parallel-shaders`:
+  64 KiB chunks per size class, owner lock-free, remote frees through a lock-free list; malloc and relatives
+  through `--wrap`; host test with TSan / ASan clean). Console, test build (profiler + parallel shaders + heaps),
+  cold cache each run, 1020 MHz:
+  - lock waits of each compile thread: 62-73% -> **1.45%** (they now compile: nv50_ir, Mesa's IR passes);
+  - the title's backlog (~370 shaders): 1 thread ~27 s, 2 threads ~22 s, 3 threads ~20 s (one boot each);
+  - a cold Windfall arrival (~208 shaders): 1 thread nothing missing after ~27 s (skipped draws a frame 104, 43,
+    23, 2; 27.5-29.8 fps), **2 threads after ~16 s (55, 54, 20) but 24.9-25.5 fps while compiling**.
+  So helpers shorten the missing pieces by ~40% at ~3 fps while they run (cores 0 and 2 are shared with the game
+  and the render thread). Where the picture is held anyway (the #49 waits, the start-up's first draws, the loading
+  card) that costs nothing: next, an "auto" setting that runs the helpers only while draws wait. Normal play keeps
+  one thread.
