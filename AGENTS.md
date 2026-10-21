@@ -40,6 +40,21 @@ Options and A/B switches for a test go into the in-game menu (Switch tab, Debug 
 
 The Switch-port agent's design and rules: [.github/agents/switch-port.agent.md](.github/agents/switch-port.agent.md).
 
+## Performance: is a change faster or slower?
+
+[docs/perf-test.md](docs/perf-test.md). With the console on the debug server (above):
+
+```sh
+tools/switch/perf_test.py compare-to main       # the checkout against origin/main
+tools/switch/perf_test.py compare-to last-tag   # against the last release (the newest tag on origin/main)
+```
+
+It builds the baseline in its own worktree under `build/perf/` (the first time it also needs the user's
+`cking.rpx`: `--rpx PATH`), builds the checkout, runs 4 interleaved boots of each (~35 minutes of console time)
+and prints a verdict per scene; the console is left on the checkout's build. macOS and Linux only. Tell the user
+before it starts (the game restarts several times; nobody should touch the console meanwhile), report the verdict
+lines as they are, and never call a difference inside the printed interval a gain or a loss.
+
 ## Defaults are for the player
 
 A fresh install (no `settings.ini`) must start with player defaults: debug server off, frame-rate counter
