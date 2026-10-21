@@ -29,6 +29,7 @@
 #include "audio_guard_switch.h"
 #include "thread_sampler.h"
 #include "native_helpers_switch.h"
+#include "bench_switch.h"  // (this fork) the performance test
 #include "host.h"
 #include "settings_switch.h"
 
@@ -350,6 +351,7 @@ void start() {
     debugsrv::add_command("stall", "stall <ms> [core] [n] [gap]  spin above the game threads (audio guard tests)", stall);
     debugsrv::add_command("evict", "evict [now | idle <n>] texture eviction: now, or after n unused frames", evict);
     debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);
+    bench::register_commands();  // (this fork) "bench": docs/perf-test.md
     debugsrv::add_command("quit", "quit                   end the program", quit);
     debugsrv::add_command("peek", "peek <addr> [bytes]    game memory (MEM2) as hex words", peek);
     debugsrv::add_command("poke", "poke <addr> <word>     write a word of game memory (MEM2)", poke);

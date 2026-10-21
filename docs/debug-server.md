@@ -76,6 +76,7 @@ WWHD_STATE_DIR=sdmc:/switch/wwhd/states-eu
 | `crashes [--fetch DIR]` | Atmosphère's crash reports (`/atmosphere/crash_reports`) |
 | `peek ADDR [BYTES]` | MEM2 (0x10000000–0x4FFFFFFF) as hex words, 16 bytes/line, up to 4 KiB |
 | `poke ADDR WORD` | write one big-endian word to MEM2; logs old and new value |
+| `raw bench status\|save NAME\|load NAME\|clock [freeze [T]\|run]\|rec N` | the performance test's console side (portable states in `bench/`, the clock held, per-frame recording): use `tools/switch/perf_test.py` ([perf-test.md](perf-test.md)) |
 | `wait`, `quit`, `reload`, `ping`, `help`, `raw CMD ...` | `raw logtext` prints the kept log text |
 
 Button names: `A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LS RS`. Presses go in where the controller is

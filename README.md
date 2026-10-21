@@ -101,7 +101,8 @@ tools/switch/wwhd_debug.py press A                           # also hold, releas
 ```
 
 `deploy` restarts the game, so start it from the HOME-screen icon (forwarder). Every command and the
-protocol: [docs/debug-server.md](docs/debug-server.md).
+protocol: [docs/debug-server.md](docs/debug-server.md). Whether a change is faster or slower than main or the
+last release: `tools/switch/perf_test.py compare-to main` ([docs/perf-test.md](docs/perf-test.md)).
 
 Developer and test variables (`WWHD_*`: traces, renderer switches) go in a `[dev]` section at the end
 of `settings.ini`, one `NAME=value` per line, read at the next start; the menu keeps that section as it
