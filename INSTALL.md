@@ -46,6 +46,7 @@ user name has a space or an accented letter: the installer then works there).
 > with `SwitchWakerHD-Installer.exe.sha256` on the release page (PowerShell:
 > `Get-FileHash SwitchWakerHD-Installer.exe`). If you would rather not run it, follow the manual steps from
 > [1. What you need](#1-what-you-need) on: they use the release zip and need no installer.
+> How the installer is signed: [Code signing policy](#code-signing-policy).
 
 The installer is multilingual: it starts in **English** or **Spanish** based on your Windows display
 language, and the button in its corner switches between them.
@@ -297,3 +298,21 @@ it). Saves (`save/`), settings (`settings.ini`) and the compiled graphics stay.
 | The game closes at once or says it is out of memory | Start it in title mode (hold R), not from the album |
 | No button works | The game's controller setting differs from the menu's Switch tab: set both to the same |
 | Something else | `sdmc:/switch/wwhd/wwhd.log` and `logs/` say what happened; include them in a report (they contain no game data) |
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org). (Applied for in October 2026: until SignPath accepts the project,
+the Windows installer is still unsigned.)
+
+- Committers and reviewers: [the members of centollOS](https://github.com/orgs/centollOS/people); every outside
+  pull request is reviewed by a member before it is merged.
+- Approvers: [Pulpparty](https://github.com/Pulpparty), who approves every signing by hand.
+
+Only the Windows installer, `SwitchWakerHD-Installer.exe`, is signed. It is built from this repository by
+[GitHub Actions](.github/workflows/release-installer.yml).
+
+Privacy policy: this program will not transfer any information to other networked systems unless specifically
+requested by the user or the person installing or operating it. To install, it downloads the release, the
+devkitPro updater and the tools it installs (Python, devkitPro's packages; Git, Pillow and MSYS2's gcc for the
+HOME-screen icon; the minimap mod if chosen) from GitHub and from those tools' own servers.
