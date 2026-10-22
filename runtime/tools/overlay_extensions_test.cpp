@@ -12,6 +12,7 @@
 #include "imgui_internal.h"
 #include "input_map.h"
 #include "overlay/extensions.h"
+#include "overlay/layer_escape.h"
 #include "overlay/release_gate.h"
 #include "overlay/text_entry.h"
 
@@ -35,10 +36,12 @@ void defaults() {
         assert(tabs[i].id == ext::kBuiltinTabs[i].id && tabs[i].name == ext::kBuiltinTabs[i].name);
         assert(tabs[i].builtin == i && ext::builtin_tab(i) == i && !tabs[i].draw);
     }
-    assert((ids() == std::vector<std::string>{"saves", "graphics", "display", "audio", "mods", "controls", "about"}));
+    assert((ids() == std::vector<std::string>{"saves", "graphics", "display", "audio", "mods", "controls", "shortcuts", "about"}));
     const ext::Features f = ext::features(), plain{};
     assert(f.clipboard && f.file_picker && f.screenshots && f.full_states);
     assert(plain.clipboard && plain.file_picker && plain.screenshots && plain.full_states);
+    assert(f.code_mods && f.mod_downloads && f.speaker_choice && f.keyboard);
+    assert(plain.code_mods && plain.mod_downloads && plain.speaker_choice && plain.keyboard);
     assert(!ext::font_loader() && ext::shortcuts().empty() && !ext::text_input() && ext::frame_layers().empty());
     // L / R wrap around the bar, as before
     assert(ext::next_tab(0, -1) == ext::kBuiltinCount - 1 && ext::next_tab(ext::kBuiltinCount - 1, +1) == 0);
@@ -61,12 +64,13 @@ void added_and_hidden() {
     ext::hide_tab("graphics");
     ext::hide_tab("display");
     ext::hide_tab("controls");
+    ext::hide_tab("shortcuts");
     ext::hide_tab("tools");  // an added tab can be hidden too
     // a later registration may still name a hidden tab as its place
     ext::add_tab({"early", "Early", [] {}, nullptr}, "graphics");
     assert((ids() == std::vector<std::string>{"saves", "early", "audio", "platform", "mods", "warp", "about"}));
     const auto& tabs = ext::tabs();
-    assert(tabs[3].builtin == -1 && tabs[3].name == "Platform" && tabs[4].builtin == 4 && tabs[6].builtin == 6);
+    assert(tabs[3].builtin == -1 && tabs[3].name == "Platform" && tabs[4].builtin == 4 && tabs[6].builtin == 7);
     tabs[3].draw();
     tabs[5].draw();
     assert(drawn == 11);
@@ -81,7 +85,19 @@ void added_and_hidden() {
     ext::reset_for_test();
     ext::hide_tab("about");
     ext::add_tab({"warp", "Warp", [] {}, nullptr});
-    assert((ids() == std::vector<std::string>{"saves", "graphics", "display", "audio", "mods", "controls", "warp"}));
+    assert((ids() == std::vector<std::string>{"saves", "graphics", "display", "audio", "mods", "controls", "shortcuts", "warp"}));
+
+    // a tab a setting turns on: in the list, but L / R skip it while it is off
+    ext::reset_for_test();
+    bool on = false;
+    ext::Tab editor{"editor", "Editor", [] {}, nullptr};
+    editor.shown = [&] { return on; };
+    ext::add_tab(editor, "about");
+    const int at = ext::tab_index("editor");
+    assert(at >= 0 && !ext::tabs()[at].visible());
+    assert(ext::next_tab(at - 1, +1) == at + 1 && ext::next_tab(at + 1, -1) == at - 1);
+    on = true;
+    assert(ext::tabs()[at].visible() && ext::next_tab(at - 1, +1) == at && ext::next_tab(at + 1, -1) == at);
 }
 
 void sealed_late() {
@@ -89,8 +105,11 @@ void sealed_late() {
     ext::Features f;
     f.clipboard = false;
     f.file_picker = false;
+    f.code_mods = false;
+    f.keyboard = false;
     ext::set_features(f);
     assert(!ext::features().clipboard && !ext::features().file_picker && ext::features().screenshots);
+    assert(!ext::features().code_mods && ext::features().mod_downloads && !ext::features().keyboard);
     assert(!ext::sealed());
     (void)ext::tabs();  // the overlay's first frame
     assert(ext::sealed());
@@ -104,6 +123,7 @@ void sealed_late() {
     ext::add_frame_layer({[](std::string&) { return true; }, [](float, float) { return true; }});
     assert(ext::tab_index("late") == -1 && ext::tab_index("saves") == 0);
     assert(!ext::features().clipboard && ext::shortcuts().empty() && !ext::font_loader() && !ext::text_input());
+    assert(!ext::features().code_mods && !ext::features().keyboard);
     assert(ext::frame_layers().empty());
 }
 
@@ -267,6 +287,41 @@ void text_fields() {
     ext::reset_for_test();
 }
 
+// Esc and a layer's action (layer_escape.h): the first Esc cancels the editor's placing, handle drag or
+// quest connection and is taken with its repeats and release; an Esc with nothing to cancel is Settings'.
+void layer_escape() {
+    using editor_escape::Cancel;
+    assert(editor_escape::what(true, true, true) == Cancel::Drag);
+    assert(editor_escape::what(false, true, true) == Cancel::Connect);
+    assert(editor_escape::what(false, false, true) == Cancel::Placing);
+    assert(editor_escape::what(false, false, false) == Cancel::None);
+    editor_escape::Gate gate;
+    LayerEscape esc;
+    const std::function<bool()> cancel = [&] { return gate.take(); };
+    // placing: the first Esc cancels it (taken), the release too; the render thread then stops placing
+    gate.publish(Cancel::Placing);
+    assert(esc.route(true, false, true, cancel));
+    assert(esc.route(true, true, true, cancel));   // a held Esc's repeats stay with it
+    assert(esc.route(false, false, true, cancel));  // and its release
+    assert(gate.requested() == Cancel::Placing && gate.requested() == Cancel::None);
+    // nothing going on: Esc is not the layer's (Settings opens)
+    gate.publish(Cancel::None);
+    assert(!esc.route(true, false, true, cancel) && !esc.route(false, false, true, cancel));
+    // a taken Esc waits for its frame: a second Esc before it is Settings', and a publish meanwhile is ignored
+    gate.publish(Cancel::Drag);
+    assert(esc.route(true, false, true, cancel) && esc.route(false, false, true, cancel));
+    gate.publish(Cancel::Drag);
+    assert(!esc.route(true, false, true, cancel));
+    esc.route(false, false, true, cancel);
+    assert(gate.requested() == Cancel::Drag);
+    // the layer off (Settings or the game's text prompt open, not the editor view): never the layer's
+    gate.publish(Cancel::Connect);
+    assert(!esc.route(true, false, false, cancel) && !esc.route(false, false, false, cancel));
+    assert(gate.requested() == Cancel::None);
+    // a layer without cancel
+    assert(!esc.route(true, false, true, nullptr));
+}
+
 }  // namespace
 
 int main() {
@@ -275,6 +330,7 @@ int main() {
     sealed_late();
     shortcuts();
     text_fields();
+    layer_escape();
     printf("overlay extensions: tabs, features, seal, shortcuts and text fields passed\n");
     return 0;
 }

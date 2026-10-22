@@ -235,6 +235,7 @@ font::Prompts prompts() {
     out.face = look.face == input_map::FaceStyle::kXbox ? font::Prompts::Xbox
              : look.face == input_map::FaceStyle::kPlayStation ? font::Prompts::PlayStation : font::Prompts::Original;
     out.colours = look.colours;
+    out.buttons = look.buttons;
     return out;
 }
 

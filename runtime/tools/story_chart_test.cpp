@@ -1,3 +1,13 @@
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <initializer_list>
+#include <map>
+#include <string>
+#include <vector>
 // Mod charts and their sea chart markers (runtime/src/mods/story_chart.*): the shared save record, the
 // services and the sea chart menu hooks on a synthetic menu with synthetic panes and save. The game's
 // own functions are stubbed; no game files are needed.
@@ -6,13 +16,6 @@
 #include "mods/story_store.h"
 #include "runtime.h"
 
-#include <cassert>
-#include <cmath>
-#include <cstdio>
-#include <cstring>
-#include <map>
-#include <string>
-#include <vector>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -179,7 +182,7 @@ void test_hooks() {
             [](uint32_t, void (*)(Cpu*)) { assert(!"installed despite a conflict"); });
     assert(!installed());
     install([](uint32_t) { return std::string(); }, [](uint32_t a, void (*fn)(Cpu*)) { hooked[a] = fn; });
-    assert(installed() && hooked.size() == 19);
+    assert(installed() && hooked.size() == 20);
 
     build_menu();
     set_tracked_source(tracked_source);
@@ -241,12 +244,51 @@ void test_hooks() {
     assert(calls == std::vector<std::string>{"destroy"});
     capture_begin();
     assert(visible(0));  // nothing written into the freed menu
+    // an unreadable story block (unknown version): no tracked ring, as before the world objects
+    reset_pane(0);
+    update();
+    assert(visible(0));
+    uint8_t* block = story_store::area();
+    const uint8_t magic = block[0];
+    block[0] = uint8_t(magic ^ 0xFF);
+    assert(!story_store::book().usable());
+    update();
+    for (unsigned i = 0; i < 8; i++) assert(!visible(i));
+    // ... while a world-object island (a fixed declaration, no record read) still shows
+    const WorldMarker unflagged{"island", "Mod Island", 100000, 0};
+    assert(publish_world_markers("world", {&unflagged, 1}));
+    update();
+    assert(visible(0) && close_to(tx(0), 144.0f) && !visible(1));
+    clear_world_markers("world");
+    update();
+    for (unsigned i = 0; i < 8; i++) assert(!visible(i));
+    block[0] = magic;
+    update();
+    assert(visible(0) && close_to(tx(0), 71.0f + 73.0f));
     // untracked: no ring
     reset_pane(0);
     tracked_on = false;
     update();
     for (unsigned i = 0; i < 8; i++) assert(!visible(i));
     set_tracked_source(nullptr);
+}
+
+void test_world_markers(){
+    const std::vector<uint8_t> save(mem::ptr(kSave),mem::ptr(kSave)+0x1000);
+    const WorldMarker island{"island","Mod Island",100000,0};
+    assert(publish_world_markers("world",{&island,1})&&world_markers().size()==1);
+    auto shown=shown_markers();assert(std::any_of(shown.begin(),shown.end(),[](const auto&m){return m.mod=="world"&&!m.done&&m.label=="Mod Island";}));
+    auto bad=island;bad.x=NAN;assert(!publish_world_markers("world",{&bad,1})&&world_markers().size()==1);bad=island;bad.label="bad\nlabel";assert(!publish_world_markers("world",{&bad,1}));
+    const WorldMarker duplicates[]={island,island};assert(!publish_world_markers("world",duplicates));
+    build_menu();game_shows={6};update();assert(visible(0)&&visible(6)&&close_to(tx(0),144)&&close_to(ty(0),-44));
+    capture_begin();assert(!visible(0)&&close_to(tx(0),home_x(0)));capture_end();assert(visible(0)&&close_to(tx(0),144));
+    // Pane transients disappear on load; immutable declarations remain available to republish.
+    state_loaded();build_menu();update();assert(visible(0)&&world_markers().size()==1);
+    clear_world_markers("world");update();assert(!visible(0));game_hides(6);
+    std::vector<WorldMarker> many;for(unsigned i=0;i<8;++i)many.push_back({"i"+std::to_string(i),"Island",float(i),0});
+    for(unsigned i=0;i<4;++i)assert(publish_world_markers("mod"+std::to_string(i),many));assert(world_markers().size()==32);assert(!publish_world_markers("overflow",{&island,1}));many.push_back(island);assert(!publish_world_markers("mod0",many)&&world_markers().size()==32);
+    for(unsigned i=0;i<4;++i)clear_world_markers("mod"+std::to_string(i));assert(world_markers().empty());
+    assert(std::memcmp(mem::ptr(kSave),save.data(),save.size())==0); // no treasure or retail progression writes
 }
 
 // ---- finished charts: the game's red circle (a salvaged treasure's mark) on the sea chart grid ----
@@ -452,6 +494,9 @@ void test_balloon() {
     calls.clear();
     run();
     assert((calls == std::vector<std::string>{"balloon", "circle hidden"}));
+    // An island needs no owned/finished treasure chart and uses the free native ring.
+    const WorldMarker island{"island","Island",1047,-201039};assert(publish_world_markers("world",{&island,1}));calls.clear();run();assert((calls==std::vector<std::string>{"balloon","circle shown"}));assert(close_to(ldf32(kCircle+0x1C),30.94f)&&close_to(ldf32(kCircle+0x20),40.78f));
+    st8(kIcon+0x158,1);stf32(kCircle+0x1C,7);run();assert(close_to(ldf32(kCircle+0x1C),7));st8(kIcon+0x158,0);clear_world_markers("world");
     // a state load: a circle the state holds is hidden once, if the game doesn't show it
     state_loaded();
     calls.clear();
@@ -471,6 +516,28 @@ void own(int save_no) { const int b = save_no - 1; st32(kSave + 0xF4 + 4 * uint3
 std::vector<std::string> list_calls;
 uint32_t armed_number = 0;
 uint32_t list_hook(uint32_t fn, std::initializer_list<uint32_t> args);
+// hdTreMapScreen_c::selectChart (hd_screen_tre_map.cpp), its geometry in world units: the view's window
+// is centred on the entry's square * 100000 + the origin of the view's variant (mChartKind, +0x90),
+// the X sits at the salvage point of that variant, relative to the window's centre (y up on screen)
+struct Selected {
+    int kind = -1;
+    float origin_x = 0, origin_z = 0;  // the window's centre in the world
+    float x = 0, y = 0;                // the X from the window's centre (world units; y up)
+} selected;
+void select_chart(uint32_t chart) {
+    const uint32_t e = list_hook(0x02687A64, {kCoord, chart});
+    if (!e) return void(selected = {});
+    const int kind = ld8(kView + 0x90);
+    auto at = [&](int i) { return float(int16_t(ld16(e + 6 + 2 * (4 * kind + i)))); };
+    selected.kind = kind;
+    selected.origin_x = float(int8_t(ld8(e + 4))) * 100000.0f + at(0);
+    selected.origin_z = float(int8_t(ld8(e + 5))) * 100000.0f + at(1);
+    selected.x = at(2) - at(0);
+    selected.y = -(at(3) - at(1));
+    st32(kView + 0x74, f32_as_u32(selected.origin_x)), st32(kView + 0x78, f32_as_u32(selected.origin_z));  // mOrigin
+}
+// the view shows the X: within half the window (hdTreMapScreen_c::updatePosition's test for Link's icon)
+bool x_in_window() { return std::fabs(selected.x) <= 0.5f * kViewSize && std::fabs(selected.y) <= 0.5f * kViewSize; }
 void list_original(Cpu* c, uint32_t fn) {
     switch (fn) {
     case 0x02687A64: c->r[3] = c->r[4] < 61 ? game_entry(c->r[4]) : 0; break;  // findChart: the game stops at 61
@@ -497,8 +564,9 @@ void list_original(Cpu* c, uint32_t fn) {
         }
         break;
     case 0x02698D74:  // the chart view: selectChart keeps the number it was given
-        if (c->r[5] < 61) st32(kView + 0x8C, c->r[5]), list_calls.push_back("view " + std::to_string(c->r[5]));
+        if (c->r[5] < 61) st32(kView + 0x8C, c->r[5]), list_calls.push_back("view " + std::to_string(c->r[5])), select_chart(c->r[5]);
         break;
+    case 0x026EBEF4: list_calls.push_back("view destroyed"); break;
     case 0x02699118: list_calls.push_back("reset"); break;
     default: original(c, fn);
     }
@@ -613,15 +681,108 @@ void test_chart_list() {
     set_game_calls(original, game_call);
 }
 
+// the chart view of a mod chart: the X at its spot, inside the window, whatever the save's variant
+uint32_t group(unsigned k) { return kList + 0x3800 + k * 0x40; }
+uint32_t picture(unsigned k) { return kList + 0x3C00 + k * 0x100; }
+bool picture_shown(unsigned k) { return ld8(picture(k) + 0x44) & 1; }
+// a square's entry with four variants: {origin x, origin z} each (the salvage points: the origins)
+void square(unsigned n, const int16_t origins[4][2]) {
+    for (unsigned k = 0; k < 4; k++)
+        for (unsigned a = 0; a < 2; a++) st16(game_entry(n) + 6 + 2 * (4 * k + a), uint16_t(origins[k][a])), st16(game_entry(n) + 10 + 2 * (4 * k + a), uint16_t(origins[k][a]));
+}
+void test_chart_view() {
+    // where a point is: its square (column, row from square D4) and its place from the square's centre, z south
+    SquarePlace p = square_place(-3500, -194000);  // the play test's spot, west-northwest of Windfall
+    assert(p.column == 0 && p.row == -2 && close_to(p.x, -3500) && close_to(p.z, 6000));
+    p = square_place(-198000, 8000);
+    assert(p.column == -2 && p.row == 0 && close_to(p.x, 2000) && close_to(p.z, 8000));
+    p = square_place(349000, -349000);
+    assert(p.column == 3 && p.row == -3 && close_to(p.x, 49000) && close_to(p.z, -49000));
+    p = square_place(-360000, 0);  // past the sea's edge: the outer square
+    assert(p.column == -3 && close_to(p.x, -60000));
+    // the game's windows (cmapdat.bin, USA): Windfall's square (sea 11) and sea 23
+    const int16_t windfall[4][2] = {{3600, 1100}, {2400, -4100}, {-1500, 1600}, {-5000, -6800}};
+    const int16_t sea23[4][2] = {{-3400, -2500}, {1200, 5500}, {-2600, 900}, {7700, -2700}};
+    assert(view_variant(windfall, -3500, 6000) == 2);  // (the save's variant 0: 7100 west of its centre)
+    assert(view_variant(sea23, 2000, 8000) == 1);
+    assert(view_variant(windfall, 3600, 1100) == 0 && view_variant(windfall, 40000, 40000) == -1);
+    const int16_t overlapping[4][2] = {{0, 0}, {3000, 0}, {-30000, 0}, {30000, 0}};
+    assert(view_variant(overlapping, 2000, 0) == 1);  // in two windows: the one it is most central in
+
+    // the view (hdTreMapScreen_c): its variant, its four pictures (one pane per G_MapPattern_0k group)
+    for (unsigned k = 0; k < 4; k++) {
+        const uint32_t node = group(k) + 0x20;
+        st32(kView + 0x50 + 4 * k, group(k));
+        st32(group(k) + 0xC, node), st32(node, group(k) + 0xC), st32(node + 8, picture(k));
+        st8(picture(k) + 0x44, k == 0 ? 0x01 : 0x00);
+    }
+    st8(kView + 0x90, 0);  // the save's variant
+    square(10, windfall);  // chart 10: sea 11
+    square(22, sea23);     // chart 22: sea 23
+    set_game_calls(list_original, list_call);
+    assert(define("cq", "windfall-x", "W", "", -3500, -194000) == kResultNone && give("cq", "windfall-x") == kResultOwned);
+    assert(define("cq", "sea23-x", "S", "", -198000, 8000) == kResultNone && give("cq", "sea23-x") == kResultOwned);
+    assert(define("cq", "far-x", "F", "", 40000, -160000) == kResultNone && give("cq", "far-x") == kResultOwned);
+    const uint32_t windfall_chart = 61 + 8, sea23_chart = 61 + 9, far_chart = 61 + 10;
+    auto view = [](uint32_t chart) {  // the window's centre: mOrigin as the view has it after the call
+        list_hook(0x02698D74, {kMapScreen, 0, chart});
+        selected.origin_x = u32_as_f32(ld32(kView + 0x74)), selected.origin_z = u32_as_f32(ld32(kView + 0x78));
+    };
+    auto spot_of_x = [](float& x, float& z) { x = selected.origin_x + selected.x, z = selected.origin_z - selected.y; };
+    float x, z;
+    // Windfall's spot: the picture of variant 2, the X inside the window at the spot
+    view(windfall_chart);
+    assert(selected.kind == 2 && x_in_window());
+    spot_of_x(x, z);
+    assert(close_to(x, -3500) && close_to(z, -194000));
+    assert(close_to(selected.x, -2000) && close_to(selected.y, -4400));  // west, and south (down)
+    assert(!picture_shown(0) && !picture_shown(1) && picture_shown(2) && !picture_shown(3));
+    assert(ld8(kView + 0x90) == 0 && ld32(kView + 0x8C) == windfall_chart);  // the game's variant again after the call
+    // (the save's window, variant 0, has that spot 7100 west of its centre: outside, on the paper's border)
+    assert(std::fabs(-3500.0f - windfall[0][0]) > 0.5f * kViewSize);
+    // another square, another variant
+    view(sea23_chart);
+    assert(selected.kind == 1 && x_in_window());
+    spot_of_x(x, z);
+    assert(close_to(x, -198000) && close_to(z, 8000));
+    assert(!picture_shown(0) && picture_shown(1) && !picture_shown(2));
+    // a spot no picture holds: no picture, the window centred on the spot (plain sea); 40000 from its
+    // square's centre, more than the entry's s16 origin holds
+    view(far_chart);
+    assert(x_in_window() && close_to(selected.x, 0) && close_to(selected.y, 0));
+    spot_of_x(x, z);
+    assert(close_to(x, 40000) && close_to(z, -160000));
+    for (unsigned k = 0; k < 4; k++) assert(!picture_shown(k));
+    // a game chart: the game's picture and variant again
+    view(14);
+    assert(selected.kind == 0 && picture_shown(0) && !picture_shown(1) && !picture_shown(2) && !picture_shown(3));
+    // full save states hold the game's picture
+    view(windfall_chart);
+    capture_begin();
+    assert(picture_shown(0) && !picture_shown(2));
+    capture_end();
+    assert(!picture_shown(0) && picture_shown(2));
+    // the view goes: forgotten (a new view at that address is the game's)
+    list_calls.clear();
+    list_hook(0x026EBEF4, {kView, 1});
+    assert((list_calls == std::vector<std::string>{"view destroyed"}));
+    capture_begin();
+    assert(!picture_shown(0) && picture_shown(2));  // nothing of ours touched it
+    capture_end();
+    set_game_calls(original, game_call);
+}
+
 int main() {
     assert(map(kGlobals, 0x10000) && map(kArena, 0x10000));
     story_store::set_memory(kArena + 0xE000);
     test_record();
     test_services();
     test_hooks();
+    test_world_markers();
     test_circles();
     test_balloon();
     test_chart_list();
+    test_chart_view();
     std::puts("story_chart_test: ok");
     return 0;
 }

@@ -3,7 +3,7 @@
 //
 // The drawing is an original, simplified schematic made in code (no artwork). Each button, d-pad
 // direction and stick direction / click on it can be clicked: the window then waits for a key or a
-// host-controller input and binds it (Esc cancels). Callouts on both sides show every binding (key,
+// host-controller input and binds it (the next input is recorded). Callouts on both sides show every binding (key,
 // alternate key, controller); clicking one of those binds just that slot, right-click or its × clears
 // it. Pressed inputs light up and sticks show their deflection, so the mapping can be tried out.
 // Bindings used twice are drawn in orange. Changes apply at once and are saved to controls.json.
@@ -26,6 +26,7 @@
 #include "../input_map.h"
 #include "../runtime.h"
 #include "../platform/host.h"
+#include "../overlay/overlay.h"
 
 namespace gfx { void show_drc_window(bool on); }
 
@@ -432,10 +433,6 @@ struct UIState {
     multi(@"Left stick (move)", {kLUp, kLDown, kLLeft, kLRight, kStickLClick}, {@"↑", @"↓", @"←", @"→", @"Click"}, PU(d.lstick), false);
     multi(@"Right stick (camera)", {kRUp, kRDown, kRLeft, kRRight, kStickRClick}, {@"↑", @"↓", @"←", @"→", @"Click"}, PU(d.rstick), true);
     multi(@"D-pad", {kDUp, kDDown, kDLeft, kDRight}, {@"↑", @"↓", @"←", @"→"}, PU(d.dpad), false);
-    // app actions: the bottom of the left column, no leader line ("Photo": the row label column is narrow;
-    // hovering shows "Screenshot (app)")
-    single(@"Photo", kScreenshot, NSMakePoint(0, sz.height), false);
-    g.groups.back().leader = false;
     for (auto& p : g.parts)
         if (p.kind == kPartRound) {
             bool right = p.action == kPlus || p.action == kA || p.action == kB || p.action == kX || p.action == kY ||
@@ -727,7 +724,23 @@ static NSRect x_rect(NSRect chip) { return NSMakeRect(NSMaxX(chip) - 7, chip.ori
             NSFont* f = p.action == kHome || p.action == kPlus || p.action == kMinus
                             ? [NSFont systemFontOfSize:std::max<CGFloat>(8, 0.021 * s) weight:NSFontWeightBold]
                             : bf;
-            draw_centered(p.text, p.c, f, [self lit:p.action] ? NSColor.whiteColor : P.buttonText);
+            NSString* caption = p.text;
+            NSColor* ink = [self lit:p.action] ? NSColor.whiteColor : P.buttonText;
+            const auto look = prompt_style(self.st->m, pad_family());
+            if (p.action >= kA && p.action <= kY && face_layout(self.st->m) != FaceLayout::kLabels && look.face != FaceStyle::kOriginal) {
+                const int host = look.buttons[p.action - kA];
+                NSArray<NSString*>* captions = look.face == FaceStyle::kPlayStation
+                    ? @[@"✕", @"○", @"□", @"△"] : @[@"A", @"B", @"X", @"Y"];
+                caption = captions[host];
+                if (look.colours) {
+                    constexpr uint32_t xbox[] = {0x58BE36, 0xE34B49, 0x3B91E5, 0xEBC52E};
+                    constexpr uint32_t ps[] = {0x3C7DD9, 0xD9413C, 0xD05FB0, 0x2AA67D};
+                    const uint32_t rgb = look.face == FaceStyle::kXbox ? xbox[host] : ps[host];
+                    ink = [NSColor colorWithRed:((rgb >> 16) & 255)/255.0 green:((rgb >> 8) & 255)/255.0
+                                          blue:(rgb & 255)/255.0 alpha:1];
+                }
+            }
+            draw_centered(caption, p.c, f, ink);
             break;
         }
         case kPartDpad: break;  // drawn as one cross below
@@ -1030,10 +1043,9 @@ static NSTextField* label(NSString* s) {
                                                                 trackingMode:NSSegmentSwitchTrackingSelectOne
                                                                       target:self
                                                                       action:@selector(faceLayoutChanged:)];
-    fl.toolTip = @"Which host face buttons drive the Wii U's A/B/X/Y (issue #78). By position: the bottom "
-                 @"button is B (Nintendo layout). By label: the button named A is A — on an Xbox pad that "
-                 @"makes A accept/act and B go back. Automatic reads the labels printed on the pad that was "
-                 @"plugged in first. Only these four bindings are rewritten.";
+    fl.toolTip = @"Which physical button performs each Wii U action. By position: right is A, bottom B, "
+                 @"top X and left Y. By label: A does A, B does B, X does X and Y does Y. Automatic "
+                 @"reads the connected pad's labels. Button prompts chooses how the icons look in the game.";
     self.faceLayout = fl;
     NSTextField* pi = label(@"");
     pi.textColor = NSColor.secondaryLabelColor;
@@ -1110,10 +1122,11 @@ static NSTextField* label(NSString* s) {
     }
     pp.target = self;
     pp.action = @selector(promptsChanged:);
-    pp.toolTip = @"How the game's button icons look while the face buttons are by label. Automatic: PlayStation "
-                 @"shapes on a PlayStation controller, the Xbox colours and positions on any other. Original keeps "
-                 @"the game's look. By position always keeps the game's look: its prompts then already match the "
-                 @"buttons' positions.";
+    pp.toolTip = @"How the game's button icons look, with any face-button setting. Xbox and PlayStation "
+                 @"show the button bound to each Wii U action. By position on Xbox: roll is B, sword is A. "
+                 @"Automatic follows the connected pad; Nintendo keeps the game's look. By label keeps its "
+                 @"existing Xbox fallback. Original keeps the game's look. Custom bindings need four "
+                 @"distinct face buttons; otherwise the original icons are used.";
     self.prompts = pp;
     NSTextField* snl = label(@"Shoulder names:");
     NSPopUpButton* sn = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -1220,7 +1233,7 @@ static NSTextField* label(NSString* s) {
         NSString* what = _st.capMode == kCapPad   ? @"press a controller button or move a stick"
                          : _st.capMode == kCapAny ? @"press a key, mouse button or controller button"
                                                   : (_st.capMode == kCapKey1 ? @"press an alternate key or mouse button" : @"press a key or mouse button");
-        s = [NSString stringWithFormat:@"%@: %@ (Esc cancels).", ns(action_label(_st.capAction)), what];
+        s = [NSString stringWithFormat:@"%@: %@ (the next input is recorded).", ns(action_label(_st.capAction)), what];
         if (_st.capMode != kCapKey0 && _st.capMode != kCapKey1 && !_st.padConnected)
             s = [s stringByAppendingString:@" No game controller connected."];
         level = 3;
@@ -1344,6 +1357,7 @@ static NSTextField* label(NSString* s) {
 // ---- capture
 
 - (void)beginCapture:(int)a mode:(int)mode {
+    overlay::external_binding_capture(true);
     _st.capAction = a;
     _st.capMode = mode;
     _message = nil;
@@ -1354,6 +1368,7 @@ static NSTextField* label(NSString* s) {
 
 - (void)cancelCapture {
     if (_st.capAction < 0) return;
+    overlay::external_binding_capture(false);
     _st.capAction = -1;
     [self refreshStatus];
     self.padView.needsDisplay = YES;
@@ -1385,7 +1400,7 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
 }
 
 - (BOOL)handleKeyEvent:(NSEvent*)e {
-    if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand) && e.keyCode == kVK_ANSI_W) {
+    if (_st.capAction < 0 && e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand) && e.keyCode == kVK_ANSI_W) {
         [self.window performClose:nil];  // Cmd-W, before the Window menu sees it
         return YES;
     }
@@ -1408,13 +1423,8 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
     } else if (e.isARepeat) {
         return YES;
     }
-    if (code == kVK_Escape) {
-        [self cancelCapture];
-        [self setStatus:@"Cancelled." level:0];
-        return YES;
-    }
     if (_st.capMode == kCapPad) {
-        [self setStatus:@"Waiting for a controller button — click a key field to bind a key (Esc cancels)." level:1];
+        [self setStatus:@"Waiting for a controller button — click a key field to bind a key (the next input is recorded)." level:1];
         return YES;
     }
     [self assignKey:code];
@@ -1426,13 +1436,14 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
     NSString* name = ns(key_label(code));
     if (const char* why = reserved_key(code)) {
         [self setStatus:[NSString stringWithFormat:@"“%@” is an app shortcut (%@) and can’t be used for game input. "
-                                                   @"Press another key, or Esc.", name, ns(why)]
+                                                   @"Press another key.", name, ns(why)]
                   level:2];
         NSBeep();
         return;  // still waiting
     }
     _st.m.keys[a][slot] = code;
     if (_st.m.keys[a][slot ^ 1] == code) _st.m.keys[a][slot ^ 1] = kNoKey;  // same key twice on one input
+    overlay::external_binding_capture(false);
     _st.capAction = -1;
     [self commit];
     auto others = key_users(_st.m, code, a);
@@ -1448,6 +1459,7 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
 - (void)assignPad:(int)p {
     int a = _st.capAction;
     set_pad_binding(_st.m, a, p);  // a hand-edited face binding drops the Automatic preset
+    overlay::external_binding_capture(false);
     _st.capAction = -1;
     [self commit];
     auto others = pad_users(_st.m, p, a);
@@ -1463,7 +1475,7 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
 // ---- clearing / reset
 
 - (void)clearAction:(int)a slot:(int)slot {
-    if (_st.capAction == a) _st.capAction = -1;
+    if (_st.capAction == a) { overlay::external_binding_capture(false); _st.capAction = -1; }
     if (slot == kSlotPad) set_pad_binding(_st.m, a, kPadNone);
     else _st.m.keys[a][slot] = kNoKey;
     [self commit];
@@ -1482,7 +1494,7 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
     case 3: _st.m.keys[a].fill(kNoKey); set_pad_binding(_st.m, a, kPadNone); break;
     case 4: _st.m.keys[a] = d.keys[a]; set_pad_binding(_st.m, a, d.pad[a]); break;
     }
-    if (_st.capAction == a) _st.capAction = -1;
+    if (_st.capAction == a) { overlay::external_binding_capture(false); _st.capAction = -1; }
     [self commit];
     static const char* done[] = {"", "Cleared the keys of", "Cleared the controller input of", "Cleared", "Reset"};
     [self setStatus:[NSString stringWithFormat:@"%s %@.", done[what], ns(action_label(a))] level:0];
@@ -1517,6 +1529,7 @@ static bool modifier_down(uint16_t code, NSEventModifierFlags f, bool* known) {
 
 - (void)resetNow {
     _st.m = Mapping::defaults();
+    overlay::external_binding_capture(false);
     _st.capAction = -1;
     [self commit];
     [self syncOptions];
@@ -1678,12 +1691,12 @@ static int self_test() {
     expect(current().keys[kB][0] == kVK_ANSI_K && conflict_count(current()) == 0, "B key 1 = K: A/B swapped, no conflict");
     // 3. an app hotkey is refused and capture continues
     [c beginCapture:kY mode:kCapKey1];
-    [w sendEvent:key_event(w, kVK_ANSI_R, @"r")];
-    expect(current().keys[kY][1] == kNoKey, "R (resolution hotkey) refused");
+    [w sendEvent:key_event(w, kVK_ANSI_P, @"p")];
+    expect(current().keys[kY][1] == kNoKey, "P (frame capture) refused");
     expect([c.status.stringValue containsString:@"app shortcut"], "hotkey warning shown");
-    // 4. Esc cancels
+    // 4. Esc is recorded without closing the window
     [w sendEvent:key_event(w, kVK_Escape, @"\x1b")];
-    expect(current().keys[kY][1] == kNoKey, "Esc cancels without binding");
+    expect(current().keys[kY][1] == kVK_Escape, "Esc binds without closing");
     // 5. clicking the drawing waits for a key or a controller button: a key replaces the main key
     [c beginCapture:kHome mode:kCapAny];
     [w sendEvent:key_event(w, kVK_ANSI_G, @"g")];

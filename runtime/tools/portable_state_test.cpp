@@ -85,14 +85,9 @@ int main() {
     CHECK(read(text, r, why));
     CHECK(r.title_id == s.title_id && r.runtime == s.runtime && r.created == s.created);
     CHECK(r.controller == 2);
-    bool pro = false; // switched to GamePad after saving
-    pro = ss::restored_pro_controller(r.controller, pro);
-    CHECK(pro);
     State legacy;
     CHECK(read(reseal(replace(text, "controller = 2\n", "")), legacy, why));
     CHECK(legacy.controller == 0);
-    CHECK(!ss::restored_pro_controller(legacy.controller, false));
-    CHECK(ss::restored_pro_controller(legacy.controller, true));
     for (const char* invalid : {"-1", "3", "Pro", "999999999999999999999"}) {
         State x;
         CHECK(!read(reseal(replace(text, "controller = 2", std::string("controller = ") + invalid)), x, why));

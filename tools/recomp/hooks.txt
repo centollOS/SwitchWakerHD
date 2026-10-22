@@ -41,6 +41,7 @@
 # sound listener updates from camera_draw: only the exact camera may move the listener
 025E1B44  # mDoAud_getCameraInfo -> JAIZelBasic::getCameraInfo (listener position/orientation)
 02027754  # JAIZelBasic::setCameraPolygonPos (ground point under the camera)
+021C4BB4  # Sploosh Kaboom board draw: cell identity for pooled hit/miss model histories
 027F55FC  # J3DModel::viewCalc: model matrices blended on logic passes
 027F5018  # J3DModel UBO update (update_ubo thread): halfway matrices on logic passes
 020315CC  # audio frame callback (calls JAIZelBasic::gframeProcess): once per logic step while interpolating
@@ -203,8 +204,11 @@
 0256BB6C  # cloud_shadow_move: fog (moya) drawn halfway
 0256CA54  # poison_move: poison fog drawn halfway
 0256DDF8  # vrkumo_move: sky clouds drawn halfway
+02575B6C  # drawVrkumo: cloud research prototype (cloud_proto.cpp) brackets the sky-cloud draws
 0256A388  # dKyr_star_move: star twinkle drawn halfway
 0251D864  # dCloth_packet_c vertex fill: cloth drawn halfway after a simulation step
+025EC62C  # mDoExt_3DlineMat1 control-point upload (width overload): ropes at pass_t
+025ED1BC  # mDoExt_3DlineMat1 control-point upload (per-point widths): ropes at pass_t
 021625DC  # KoRL sail: custom cloth vertices and placement, at upload
 0245F638  # pirate ship sail: custom cloth vertices and placement, at upload
 023D0E68  # pirate ship skull flag: custom cloth vertices and placement, at upload
@@ -241,3 +245,5 @@
 023D813C # daPy_sightPacket_c::setSight: aiming marker projection scope
 020CBB70 # daBoomerang_sightPacket_c::setSight: target marker projection scope
 025F1018 # mDoLib_projectViewport: project scoped interpolated marker points through the drawn camera
+
+023F22FC  # daPy_lk_c::setDemoData: event commands only on full steps (may replace model heaps)

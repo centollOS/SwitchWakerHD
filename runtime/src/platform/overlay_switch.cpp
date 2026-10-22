@@ -536,6 +536,10 @@ void register_ext() {
     f.file_picker = false;
     f.screenshots = false;  // the console's own capture button
     f.full_states = false;  // portable states only (savestate.cpp)
+    f.code_mods = false;       // the code mods built into the NRO instead (guest_builtin_ui.h)
+    f.mod_downloads = false;   // no catalogue or Story Notebook download: mods from the mods folder
+    f.speaker_choice = false;  // audout plays stereo
+    f.keyboard = false;        // a controller only
     ext::set_features(f);
     ext::set_font_loader(load_font);
     // ZL + ZR held, Minus: the window switches between the TV and the GamePad picture (not the menu)

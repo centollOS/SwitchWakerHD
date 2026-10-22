@@ -2,6 +2,7 @@
 // Controls window (gfx/controls_ui.mm: controller_def, pro_body, the callout columns), ported to
 // plain C++ and Dear ImGui's draw list; the colours are the overlay's.
 #include "controls_view.h"
+#include "binding_widget.h"
 
 #include <algorithm>
 #include <cmath>
@@ -268,10 +269,6 @@ Geo layout(bool pro, FaceLayout fl, ImVec2 org, float w, float h) {
     group("Left stick (move)", {kLUp, kLDown, kLLeft, kLRight, kStickLClick}, stickRows, PU(d.lstick), false);
     group("Right stick (camera)", {kRUp, kRDown, kRLeft, kRRight, kStickRClick}, stickRows, PU(d.rstick), true);
     group("D-pad", {kDUp, kDDown, kDLeft, kDRight}, dirs, PU(d.dpad), false);
-    // app actions: the bottom of the left column, no leader line ("Photo": the row label column is narrow;
-    // hovering shows "Screenshot (app)")
-    group("Photo", {kScreenshot}, {"Photo"}, ImVec2(org.x, org.y + h), false);
-    g.groups.back().leader = false;
     for (auto& p : g.parts)
         if (p.kind == kPartRound) {
             bool right = p.action == kPlus || p.action == kA || p.action == kB || p.action == kX || p.action == kY ||
@@ -419,13 +416,9 @@ void draw_controls(ControlsView& v, float w, float h) {
                                                           ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_EnableNav);
                     ch.focused = ImGui::IsItemFocused() && ImGui::GetIO().NavVisible;
                     ch.hovered = ImGui::IsItemHovered() || ch.focused;
-                    if (pressed && v.cap_action < 0) {
-                        if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) v.clear_action = ch.action, v.clear_col = c;
-                        else v.start_action = ch.action, v.start_col = c;
-                    }
-                    if (ImGui::IsItemFocused() && v.cap_action < 0 &&
-                        (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false) ||
-                         ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false)))
+                    if (pressed && v.cap_action < 0 && !ImGui::IsMouseReleased(ImGuiMouseButton_Right))
+                        v.start_action = ch.action, v.start_col = c;
+                    if (binding_clear_requested(v.cap_action >= 0, pressed && ImGui::IsMouseReleased(ImGuiMouseButton_Right)))
                         v.clear_action = ch.action, v.clear_col = c;
                     if (ch.hovered) v.hover_action = ch.action, v.hover_col = c;
                     ImGui::PopID();
@@ -526,7 +519,30 @@ void draw_controls(ControlsView& v, float w, float h) {
             dl->AddCircleFilled(p.c, p.R, lit(p.action) ? P.fill : P.button);
             dl->AddCircle(p.c, p.R, ring(p.action, &wd), 0, wd);
             bool small = p.action == kHome || p.action == kPlus || p.action == kMinus;
-            text_centered(dl, p.text, p.c, small ? std::max(10.0f, 0.021f * s) : bf, lit(p.action) ? P.white : P.buttonText);
+            const auto look = prompt_style(m, pad_family());
+            const bool styled = p.action >= kA && p.action <= kY && face_layout(m) != FaceLayout::kLabels
+                                && look.face != FaceStyle::kOriginal;
+            const int host = styled ? look.buttons[p.action - kA] : 0;
+            ImU32 ink = lit(p.action) ? P.white : P.buttonText;
+            if (styled && look.colours) {
+                constexpr uint32_t xbox[] = {0x58BE36, 0xE34B49, 0x3B91E5, 0xEBC52E};
+                constexpr uint32_t ps[] = {0x3C7DD9, 0xD9413C, 0xD05FB0, 0x2AA67D};
+                const uint32_t rgb = look.face == FaceStyle::kXbox ? xbox[host] : ps[host];
+                ink = col(((rgb >> 16) & 255)/255.0f, ((rgb >> 8) & 255)/255.0f, (rgb & 255)/255.0f);
+            }
+            if (styled && look.face == FaceStyle::kPlayStation) {
+                const float r = p.R * 0.5f, x = p.c.x, y = p.c.y;
+                if (host == 0) {
+                    dl->AddLine({x-r,y-r}, {x+r,y+r}, ink, 1.5f);
+                    dl->AddLine({x+r,y-r}, {x-r,y+r}, ink, 1.5f);
+                } else if (host == 1) dl->AddCircle(p.c, r, ink, 24, 1.5f);
+                else if (host == 2) dl->AddRect({x-r,y-r}, {x+r,y+r}, ink, 0, 1.5f);
+                else dl->AddTriangle({x,y-r}, {x+r,y+r}, {x-r,y+r}, ink, 1.5f);
+            } else {
+                constexpr const char* letters[] = {"A", "B", "X", "Y"};
+                text_centered(dl, styled ? letters[host] : p.text, p.c,
+                              small ? std::max(10.0f, 0.021f * s) : bf, ink);
+            }
         } else if (p.kind == kPartStick) {
             dl->AddCircleFilled(p.c, p.R, P.well);
             bool dirHot = false, conflict = false;

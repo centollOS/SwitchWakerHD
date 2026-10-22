@@ -18,7 +18,7 @@ struct FullStateHeader {
     uint32_t cpu_size;      // sizeof(Cpu)
     uint32_t blocks;        // compressed blocks that follow
     uint64_t raw_size;      // payload bytes
-    uint32_t controller = 0; // 0 absent/unknown, 1 GamePad, 2 Pro Controller
+    uint32_t controller = 0; // 0 absent/unknown, 1 GamePad, 2 Pro Controller (slot label only: a load keeps the host's choice)
     uint32_t reserved = 0;
 };
 constexpr size_t kLegacyHeaderSize = offsetof(FullStateHeader, controller);
@@ -40,9 +40,5 @@ inline bool read_full_state_header(FILE* file, FullStateHeader& h, std::string& 
 }
 inline const char* controller_label(int mode) {
     return mode == 2 ? "Pro Controller" : mode == 1 ? "GamePad" : "";
-}
-// Absent metadata leaves the host's choice intact (legacy states).
-inline bool restored_pro_controller(int mode, bool current) {
-    return mode == 0 ? current : mode == 2;
 }
 } // namespace ss

@@ -28,14 +28,14 @@ struct RenderingDriverRule {
     bool windowsOnly;
     const char* reason;
 };
-// Issue #144 reproduces on 101.2115 despite advertised dynamic rendering and
-// explicit attachment-view usage. 101.2121 is the next legacy-driver release,
-// NOT a proven fix. This is the conservative "one release after" cutoff, pending
-// reporter testing; extend this table rather than scattering driver conditions.
-// Release evidence: https://community.intel.com/t5/Graphics/Version-31-0-101-2121-Graphics-Driver/td-p/1479202
+// Intel Windows drivers that crash on the dynamic-rendering path despite advertising it:
+// 101.2115 (issue #144) and 101.3111 (issue #204, Iris Xe; the forced render-pass mode
+// works there). Drivers from before 101.5000 (2024) use render passes automatically; the
+// render-pass path costs no measurable performance, so the wider cut-off is the safe side.
+// Extend this table rather than scattering driver conditions.
 inline constexpr std::array renderingDriverRules{
-    RenderingDriverRule{0x8086, intel_windows_driver(101, 2121), true,
-        "driver rule: Intel Windows < 101.2121"},
+    RenderingDriverRule{0x8086, intel_windows_driver(101, 5000), true,
+        "driver rule: Intel Windows < 101.5000"},
 };
 inline RenderingChoice choose_rendering_path(RenderingCapabilities caps, uint32_t vendor,
         uint32_t driver, bool windows, const char* forceRenderPass) {

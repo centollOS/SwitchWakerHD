@@ -6,6 +6,7 @@
 namespace debug_switch {
 void start();           // main(), first thing once the log is open
 bool quit_requested();  // the host loop ends ("quit")
+void request_quit();    // (Settings > Quit Game)
 bool running();         // the server was started this session
 int port();
 }  // namespace debug_switch

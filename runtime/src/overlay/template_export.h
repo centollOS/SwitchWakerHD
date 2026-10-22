@@ -4,6 +4,7 @@
 // in the screenshots folder, to attach to issue #177. Raw caches and SPIR-V never leave their folder.
 #pragma once
 #include "../gfx/shader_prebuild.h"
+#include "../mods/guest_build.h"
 #include "../mods/mod_json.h"
 #include "../platform/host.h"
 #include "../platform/process.h"
@@ -47,22 +48,21 @@ inline bool locate(std::vector<std::string>& python, fs::path& script) {
             std::string text{std::istreambuf_iterator<char>(input), {}};
             auto json = mods::json::parse(text);
             const auto base = fs::absolute(config).parent_path();
+            const auto release = guestmods::release_root();
             const auto& command = json.get("python");
             if (command.type == mods::json::Value::Array && !command.array.empty()) {
                 for (const auto& arg : command.array) python.push_back(arg.string());
-                fs::path executable(python.front());
-                if (executable.is_relative() && executable.has_parent_path())
-                    python.front() = (base / executable).lexically_normal().string();
+                python.front() = guestmods::resolve_path(python.front(), base, release, true);
             }
-            fs::path setup(json.get("setup").string());
+            fs::path setup(guestmods::resolve_path(json.get("setup").string(), base, release));
             if (!setup.empty()) {
-                if (setup.is_relative()) setup = base / setup;
                 if (with_python(setup.lexically_normal().parent_path().parent_path())) return true;
             }
         }
     } catch (...) { python.clear(); }
     std::vector<fs::path> roots;
     if (const char* install = std::getenv("WWHD_INSTALL_DIR")) roots.push_back(fs::path(install).parent_path());
+    if (const auto release = guestmods::release_root(); !release.empty()) roots.push_back(release);  // AppImage
     for (fs::path dir = fs::path(host::exe_dir()); !dir.empty(); dir = dir.parent_path()) {
         roots.push_back(dir);
         if (dir == dir.parent_path() || roots.size() > 6) break;

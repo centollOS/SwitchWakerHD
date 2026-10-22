@@ -65,10 +65,12 @@ Existing keyboard/controller files load unchanged. Each wheel notch supplies one
 short press, with a release between successive notches; fractional trackpad
 scrolls accumulate to a notch.
 
-Enable **Mouse camera** and click the TV picture to capture the pointer. That
+Enable **Mouse camera** and click the TV picture to capture the pointer. Move the
+mouse to look around on foot or while sailing, at the same mouse sensitivity. That
 first click only captures; release it and click again to use its binding. Bound
 buttons work only in the TV window while the mouse camera has captured the
-pointer. Escape releases it. A left click in the GamePad window remains a touch;
+pointer. Escape releases it; with the pointer free, Escape opens Settings. A left
+click in the GamePad window remains a touch;
 settings and text prompts take priority over game bindings. A button held during
 these transitions stays blocked until released, without blocking other buttons
 or other SDL mice.
@@ -126,3 +128,23 @@ checks do not replace testing a particular physical device and its driver.
 Controls → **Skip controller selection** is on by default. At the title screen it chooses the
 configured Wii U GamePad or Pro Controller through the game's normal selection path; turn it off
 to choose manually. Unavailable options and controller-disconnect prompts remain interactive.
+
+## App shortcuts and extra buttons
+
+Open **Settings → Shortcuts** to change app actions. **Settings** shows Home as its default
+controller button. You can replace it with another button or a hold-and-press combination.
+The key, alternate key and controller binding are saved together. Esc (or F1) opens Settings.
+With a captured mouse, the first Esc frees the mouse and a second one opens Settings. Inside
+Settings, Esc closes it when you are not recording an input. If you already changed the
+Settings key, your choice is kept; if you move Settings away from Esc, Esc still frees the mouse.
+
+Select a controller field, then tap a button or hold one button and press another. During
+recording, L/R, Select and Home are captured without switching tabs or closing the menu.
+Capture/Share, rear paddles, touchpad clicks and other extra buttons can be assigned in both
+Controls and Shortcuts; they start unbound. Extra buttons without a standard name appear by
+number. Availability depends on the controller and its driver.
+
+Right-click a binding to clear it. Controller users can focus it and press the button mapped
+to X; keyboard users can press Delete or Backspace. The right mouse button remains assignable
+while a field is recording. A combination takes only its two buttons, and only while both
+are held. A single-button shortcut takes that button while held.

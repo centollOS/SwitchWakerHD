@@ -20,6 +20,14 @@ The project has three parts:
 
 ## What's new
 
+**v0.4.0: the world editor and a big Android update.**
+- **World editor** (a preview for mod makers): start the game with `--editor` to place the game's villagers,
+  enemies, chests, switches, doors and your own models while the game runs, and to build quests, letters, scenes,
+  islands and levels of your own. It also works with AI assistants through MCP (off by default).
+- **Android:** two-screen handhelds, a heat guard for handhelds with a fan, even frame pacing at 60 fps, code mods
+  and dynamic resolution.
+- **Faster on every platform**, a 40 fps mode, toon clouds, more comfort options and many fixes.
+
 The changes in each update are in [CHANGELOG.md](CHANGELOG.md) and in the release notes on the
 [Releases](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp/releases) page.
 
@@ -399,8 +407,7 @@ those languages from your own European or Japanese copy of the game played with 
 into Arabic or Hebrew are drawn right to left, see [docs/rtl-text.md](docs/rtl-text.md)).
 Mouse, keyboard (arrows, Enter, Esc) and controller (D-pad / stick, A, B; L / R switch tabs) all work.
 The game keeps running but gets no input while it is open; Esc, F1 or B closes it. On macOS it shows
-the same options as the menu bar, and both stay in sync. Shift+F1 still saves state slot 1; slot 1 is
-loaded from the overlay (F1 used to load it).
+the same options as the menu bar, and both stay in sync. Shift+F1 still saves state slot 1; **F6 loads slot 1**.
 
 **Entering text (the name screen):** when the game asks for text — your name when you start a new
 file — a text window appears under the game's own name field (also in the GamePad-only and
@@ -446,9 +453,24 @@ buttons light up and the sticks show their deflection, so you can test the mappi
 twice is marked with a warning. Changes apply immediately, also while playing. A dead zone for
 controller sticks and an option to invert the camera's up/down are at the bottom, with **Reset to
 Defaults…**. The mapping is saved to `~/Library/Application Support/WWHD/controls.json`
-(`WWHD_CONTROLS=<file>` uses another file); deleting it restores the defaults. The app's
-single-key shortcuts (R, O, M, N, 6–9, P, F1–F5, F12) and Esc can't be bound. The **Screenshot**
-key (row "Photo", **F10** by default) is bound here like a button, to a key or a controller input.
+(`WWHD_CONTROLS=<file>` uses another file); deleting it restores the defaults. The diagnostic keys P, F12 and 9, and Esc, remain reserved.
+
+**Settings → Shortcuts** remaps Settings, full screen, Screenshot (**F10**), saving and loading
+slots 1–5, and the graphics shortcuts. Each action has a key with Shift/Ctrl/Alt (also Cmd on
+macOS), an alternate key, and a controller combination: hold one button, then press another,
+for example **Select + D-pad Up**. Click a binding to capture it; Esc cancels, right-click or
+**Clear** unbinds it. Conflicting keys (including game controls) and duplicate combinations
+are marked. **Reset to defaults** resets this tab. The GamePad picture-in-picture, performance
+overlay, mute and volume actions start unbound. Defaults otherwise stay unchanged.
+
+A combination consumes only its two buttons, only while both are held; other game inputs keep
+working. Select used as a combination's hold button is reserved for combinations instead of the
+held-Select Settings shortcut. **Tapping Home always opens Settings**, even if its keys are cleared;
+if Home is a combination hold button, its Settings tap acts on release. Esc always closes Settings.
+On Android, shortcuts from a keyboard require `WWHD_ANDROID_KEYBOARD`; controller combinations always work. Shortcuts are saved in the
+`shortcuts` section of **controls.json**, with the game controls. An existing Screenshot key
+or controller binding is preserved when loading an older file. macOS shows the assigned keys
+in the **Shortcuts** menu.
 
 The **Graphics** menu in the menu bar switches fixes and enhancements while playing (the TV
 window title shows what is active and the current frame rate): 60 fps by frame interpolation
@@ -501,7 +523,7 @@ dungeon map/compass/boss key, a small key) can change or break story events, so 
 file. Cheats edit the live save data; save in game to keep them.
 
 The **Save States** menu (and the Saves tab of the settings overlay) saves to one of 5 slots and
-loads it back (**Shift+F1–F5** save, **F2–F5** load; slot 1 loads from the F1 settings overlay);
+loads it back (**Shift+F1–F5** save, **F2–F5** load; F6 loads slot 1);
 each slot shows its time and area. Slots are kept in `~/Library/Application Support/wwhd/states/`
 and survive restarts. By default a slot holds a **portable state** (`slotN.wwstate`, a few KB):
 your progress and Link's place, no game data, safe to attach to bug reports. Loading one works
@@ -584,7 +606,7 @@ In Gaming Mode the Steam button belongs to Steam and there is no keyboard, so ke
 - **Settings overlay:** hold the **View** button (two squares, left of the screen) for half a second.
   Save states are in its first tab (Saves).
 - **Save-state shortcuts:** in Steam, open the game's controller settings and map the back buttons
-  (L4/R4/L5/R5) to keyboard keys: **Shift+F1** saves slot 1, **F2–F5** load slots 2–5,
+  (L4/R4/L5/R5) to keyboard keys: **Shift+F1** saves slot 1, **F6** loads slot 1, **F2–F5** load slots 2–5,
   **Shift+F2–F5** save them. Steam sends those keys to the game.
 
 ## Mods
@@ -770,7 +792,7 @@ Switch issues on its tracker.
 ## License
 
 The code of this project is licensed under the Mozilla Public License 2.0 (see `LICENSE`).
-Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0), {fmt} (MIT) and Dear ImGui (MIT); see Credits. The extractor links zstd (BSD-3-Clause); releases build it from its pinned release source. The game itself is Nintendo's property and is not included.
+Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0), {fmt} (MIT), Dear ImGui (MIT) and ImGuizmo (MIT); see Credits. The extractor links zstd (BSD-3-Clause); releases build it from its pinned release source. The game itself is Nintendo's property and is not included.
 
 ## Credits
 
@@ -794,7 +816,9 @@ follow Cemu as noted in those files (in the Vulkan renderer: the vertex-format t
 shader parser glue). Also vendored: [metal-cpp](https://developer.apple.com/metal/cpp/)
 (Apache-2.0, `runtime/third_party/metal-cpp/LICENSE.txt`), [{fmt}](https://github.com/fmtlib/fmt)
 (MIT, `runtime/third_party/fmt/LICENSE`) and [Dear ImGui](https://github.com/ocornut/imgui) v1.92.9b by
-Omar Cornut and contributors, for the settings overlay (MIT, `runtime/third_party/imgui/LICENSE.txt`).
+Omar Cornut and contributors, for the settings overlay (MIT, `runtime/third_party/imgui/LICENSE.txt`), and
+[ImGuizmo](https://github.com/CedricGuillemet/ImGuizmo) by Cedric Guillemet, for the world editor's move and turn
+handles (MIT, `runtime/third_party/imguizmo/LICENSE`).
 The Cemu archive (`.wua`) reader in `tools/wudextract/zarchive.cpp` is written from the format of
 [ZArchive](https://github.com/Exzap/ZArchive) by Exzap (MIT No Attribution; nothing of it is
 vendored); [zstd](https://github.com/facebook/zstd) by Meta Platforms (BSD-3-Clause) decompresses

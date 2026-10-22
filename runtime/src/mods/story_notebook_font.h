@@ -59,6 +59,7 @@ inline std::vector<uint32_t> codes(const std::string& s) {
 struct Prompts {
     enum Face : uint8_t { Original, Xbox, PlayStation } face = Original;
     bool colours = false;
+    std::array<int, 4> buttons = {0, 1, 2, 3};
     bool operator==(const Prompts&) const = default;
 };
 
@@ -377,9 +378,11 @@ private:
         for (uint32_t cp : codes(text)) {
             if (style_code(cp)) continue;
             if (button(cp)) {
-                const game_glyph::Glyph* icon = icons ? icons->find(cp) : nullptr;
-                if (icon && icons->glyphs.find(cp) == icons->glyphs.end()) icon = nullptr;  // not the stand-in
-                const game_glyph::Bitmap b = button_picture(icon, cp == kButtonA ? 0 : 1, look, h);
+                const int face = look.buttons[cp == kButtonA ? 0 : 1];
+                const uint32_t picture = kButtonA + face;
+                const game_glyph::Glyph* icon = icons ? icons->find(picture) : nullptr;
+                if (icon && icons->glyphs.find(picture) == icons->glyphs.end()) icon = nullptr;  // not the stand-in
+                const game_glyph::Bitmap b = button_picture(icon, face, look, h);
                 blit(img, b, pen, y, h, h, as_is);
                 pen += h;
                 continue;

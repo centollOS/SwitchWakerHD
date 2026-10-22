@@ -1,5 +1,6 @@
 #include <exception>
 #include "shader_compiler.h"
+#include "spirv_precision.h"
 #include "stutter_trace.h"
 #include "worker_metrics.h"
 #include "platform/host.h"
@@ -8,6 +9,7 @@
 #include <glslang/SPIRV/GlslangToSpv.h>
 #include <condition_variable>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <limits>
@@ -23,6 +25,20 @@ struct ShaderCompileTicket::State {
     ShaderCompileResult result;
     std::exception_ptr error;
 };
+namespace {
+std::atomic<bool> fullPrecision{false};
+std::atomic<uint64_t> fullPrecisionModules{0}, fullPrecisionStripped{0};
+}
+void set_full_precision(bool on) { fullPrecision = on; }
+bool full_precision_enabled() { return fullPrecision.load(std::memory_order_relaxed); }
+void note_relaxed_precision_stripped(size_t removed) {
+    const uint64_t modules = ++fullPrecisionModules;
+    const uint64_t total = fullPrecisionStripped += removed;
+    // the first module, then every 256th: how many decorations the driver no longer sees
+    if (modules == 1 || modules % 256 == 0)
+        fprintf(stderr, "[vulkan diagnostics] full precision: %llu SPIR-V modules, %llu RelaxedPrecision decorations removed\n",
+                (unsigned long long)modules, (unsigned long long)total);
+}
 namespace {
 std::mutex glslangMutex; // Outlives the function-static worker.
 static std::vector<uint32_t> compile_stage(const std::string& source, EShLanguage stage, std::string* error) {
@@ -51,6 +67,7 @@ static std::vector<uint32_t> compile_stage(const std::string& source, EShLanguag
     options.disableOptimizer = true; // no SPIRV-Tools runtime dependency
     glslang::GlslangToSpv(*program.getIntermediate(stage), words, &options);
     if (words.empty()) return fail("glslang emitted empty SPIR-V");
+    if (full_precision_enabled()) note_relaxed_precision_stripped(strip_relaxed_precision(words));
     return words;
 }
 

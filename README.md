@@ -414,13 +414,6 @@ Be aware of this before you use or build on this repository:
   Dear ImGui MIT, xxHash BSD-2-Clause, metal-cpp Apache-2.0): [THIRD_PARTY.md](THIRD_PARTY.md).
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Code signing policy
-
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
-[SignPath Foundation](https://signpath.org), for the Windows installer (applied for in October 2026; unsigned
-until accepted). Team roles, what is signed and the privacy policy:
-[INSTALL.md, Code signing policy](INSTALL.md#code-signing-policy).
-
 ## Disclaimer
 
 Independent project, not affiliated with or endorsed by any video game company. Trademarks

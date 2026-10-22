@@ -1,5 +1,7 @@
 # Gameplay mods (runtime/src/mods/, Gameplay menu). Address = function entry, @ADDR = instruction hook.
-# Camera (mods/camera.cpp): dCamera_c::manualCamera (0250FDC8), the right-stick camera
+# Camera (mods/camera.cpp): manualCamera (0250FDC8), on foot and boat free look
+024FA9C8  # dCamera_c::nextMode: manual-start magnitude only in the mode decision (proportional pad fallback)
+0250D4E8  # dCamera_c::rideCamera: trace boat camera logic steps
 0250FDC8  # dCamera_c::manualCamera: remembers that the manual camera ran (mouse camera)
 @02510448 # manualCamera: after cLib_chaseF of the turning speed (this+0x154): direct stick / mouse yaw
 @025104A0 # manualCamera: the same on the other branch
@@ -7,6 +9,13 @@
 @02510EA0 # manualCamera: V smoothing factor (cSAngle * f1)
 @02510EE4 # manualCamera: U smoothing factor (cSAngle * f1)
 025071FC  # dCamera_c::subjectCamera: first person is active
+02515280  # dCamera_c::SetTrimSize: trace explicit size-1 callers
+024FBF9C  # dCamera_c::defaultTriming: trace normal-play trim provenance
+@024FC080 # defaultTriming: table-result store (normal targeting provenance)
+@024FF980 # CalcTrimSize: Vista height operand, normal targeting only
+@024FF8C0 # CalcTrimSize: opt-in size/height trace
+@024FF4C0 # eventCamera: event-data trim write, invalidate targeting provenance
+@024FF4E4 # eventCamera: alternate event-data trim write
 # Invert camera up/down (issue #167; runtime/src/camera_invert.h): after the camera's right-stick Y reads
 @024F9DA4 # dCamera_c::updatePad: after CPad_GET_SUBSTICK_POS_Y
 @0250074C # dCamera_c::initPad: after CPad_GET_SUBSTICK_POS_Y
@@ -14,10 +23,61 @@
 @02506C80 # dCamera_c::CalcSubjectAngle: the same on the game's inverted-aiming branch
 @02171B1C # new_himo2_move: after CPad_GET_SUBSTICK_POS_Y (rope-swing event camera)
 0240EBB0  # daPy_Execute: Link (left click while aiming, traces)
+# Enemy lock-on (mods/lock_on.cpp): scale only category-2 horizontal distance predicates.
+024ECCFC  # judgementButton: R3 cycles the freshly rebuilt native enemy list before state update
+@024EB4A8 # calcWeight: enemy acquisition distance, before check_distace
+@024ECC70 # chaseAttention: enemy release distance, before check_distace
+@024EB868 # EnemyDistance: enemy-only cutoff, without changing returned distance
+@024EE574 # LockonReleaseDistanse: camera advisory release radius
+# Quick-use locked items (mods/quick_use.cpp): local ready-checker input policy, no global pad edits.
+023F32E4  # setStickData: cancel stale requests after native input, before action dispatch
+@023EFB44 # accepted slot change: retain one intent through the native equip animation
+@023F05EC # completed hammer equip: one local ready-item trigger result, native choice follows
+@0243CB70 # hammer front strike: native attack key success, trace observation only
+@0243C6F4 # hammer side strike: native attack-key quake call, trace observation only
+@023DF7C0 # successful native inventory bomb publication (mEquipItem becomes 100)
+@023EA474 # held-bomb checker: local matching-item trigger predicate
+@023E88B0 # native bow MOVE mode entry (all three bow inventory variants)
+@023EB2B0 # bow ready animation: local held result, release once
+@023EB434 # bow redraw animation: local held result, spent prevents a second draw
+@023EB2C4 # native arrow actor launch: trace observation only
+@0242E14C # native held-bomb release after throw key: trace observation only
+@0242E198 # native held-bomb release on carry-flag branch: trace observation only
+@023F0624 # hookshot native draw dispatch
+@023F0670 # grappling rope native draw dispatch
+@023F06AC # boomerang native draw dispatch
+@023F1764 # checkNextMode: hookshot draw dispatch
+@023F1784 # checkNextMode: rope draw dispatch
+@023F1728 # checkNextMode: boomerang draw dispatch
+@023EAE30 # hookshot idle ready checker: itemButton result
+@023EAE78 # hookshot retry itemButton result
+@023EC12C # rope idle ready checker: itemButton result
+@023EC178 # rope retry itemButton result
+@023EAE84 # hookshot release latch predicate, local r11 only
+@023EC184 # rope release latch predicate, local r0 only
+@023EB548 # boomerang ready checker: local pad release word r8
+@023EB614 # boomerang ready checker: itemButton result
+# Camera-directed items (Leaf prototype, default off; accepted-use yaw only, no continuous/camera/input override)
+@023E7A70 # procFanSwing_init: accepted grounded use faces camera once, before fan-model setup
+@023E7CF4 # bow Subject accepted aim entry (initial yaw only; native FP/pitch afterward)
+@023E88F4 # bow Move accepted aim entry, before native strafing yaw offset
+@023E8D34 # boomerang Subject accepted aim entry
+@023E8E40 # boomerang Move accepted aim entry, before native strafing yaw offset
+@023E8A58 # hookshot Subject accepted aim entry
+@023E8B20 # hookshot Move accepted aim entry, before native strafing yaw offset
+@023E902C # grappling Subject accepted aim entry (not hang/swing/anchor)
+@023E9130 # grappling Move accepted aim entry, before native strafing yaw offset
+@023E9E98 # normal owned inventory-bomb throw, before native carry geometry
+@023EDFC4 # hammer accepted side strike, before native heading load
+@0243C830 # hammer accepted front strike (not ready/recovery), before native heading load
+@023EDE00 # empty bottle accepted grounded swing, before native heading load
+024076CC  # daPy_lk_c::setCollision: scope gust direction before native BG ray/capsule/effects
 # Quick doors / fast scene changes (mods/turbo.cpp; extra logic steps from interp.cpp's fpcEx_Handler hook)
 0252A684  # dDoor_info_c::getDemoAction: a door event cut is running
 021C0078  # daMbdoor_c::getDemoAction
 025DC86C  # fopScnM_ChangeReq: scene change trigger (traces)
 023DE788  # daPy_lk_c::setFrameCtrl: the run/swim boost scales the animation rate (mods.cpp)
+023DE7E8  # daPy_lk_c::setActAnimeUpper: identify scoped quick-use animation generations
+@023FB49C # native boomerang launch: optional trace observation only
 023E048C  # daPy_lk_c::getAnmData: the boost can swap ANM_WALK for ANM_DASH (mods.cpp)
 023D6B30  # daPy_lk_c::jointBeforeCB: additive sprint pose, restored by the native jointAfterCB

@@ -47,6 +47,26 @@ struct Entry {
     }
 };
 struct Index { std::vector<Entry> entries; };
+// The running port's version for catalogue checks, from build::version(): a release ("v0.2.14", or
+// "0.2.14+meta" with a commit count of 0) counts as itself; a build ahead of its release, a local
+// build "v0.2.14+115" or a development build "v0.2.14-devel.1a2b3c4d", carries what the next release
+// ships and counts as the next patch version (0.2.15), so packages that need that release install on
+// it. Anything unreadable counts as 0.0.0.
+inline Version port_version_from_build(std::string text) {
+    if(text.starts_with("v"))text.erase(0,1);
+    const size_t cut=text.find_first_of("+-");
+    const std::string suffix=cut==std::string::npos?std::string():text.substr(cut);
+    Version v;
+    try { v=Version::parse(text.substr(0,cut)); } catch (...) { return {}; }
+    bool ahead=suffix.starts_with("-devel");
+    if(suffix.starts_with("+")) {
+        const std::string n=suffix.substr(1);
+        ahead=!n.empty()&&std::all_of(n.begin(),n.end(),[](unsigned char c){return c>='0'&&c<='9';})&&n!="0";
+    }
+    if(ahead)v.parts[2]+=1;
+    return v;
+}
+
 inline void require(bool valid,const std::string& why) {if(!valid)exception_report::raise(why);}
 inline bool identifier(const std::string& id) {
     return !id.empty()&&id.size()<=64&&id.front()!='.'&&id.front()!='-'&&std::all_of(id.begin(),id.end(),[](unsigned char c){

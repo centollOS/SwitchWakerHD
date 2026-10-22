@@ -166,14 +166,6 @@ void add_wait(Wait w, uint64_t ns) {
 }
 void add_idle(uint64_t ns) { W.idleNs += ns; }
 
-bool fast_class_reg(uint32_t reg) {
-    // RegDefines.h: mmSQ_ALU_CONSTANT0_0 0xC000; mmSQ_TEX_RESOURCE_WORD0 0xE000 + 0x7E0 (VS uniform
-    // blocks), + 0x250 (PS), + 0xCB0 (GS), + 0x8C0 (vertex attribute buffers), 7 words each
-    if (reg >= 0xC000 && reg < 0xC000 + 0x1000) return true;
-    for (uint32_t base : {0xE7E0u, 0xE250u, 0xECB0u, 0xE8C0u})
-        if (reg >= base && reg < base + 7 * 16) return true;  // includes the vertex stride (pipeline-only)
-    return false;
-}
 void note_other_reg(uint32_t reg) {
     g_reg_dirty |= 2;
     if (reg < otherRegs.size()) otherRegs[reg]++;

@@ -61,6 +61,9 @@ void init();
 uint32_t register_host(PpcFunc fn, const char* name);
 void set(uint32_t addr, PpcFunc fn);
 PpcFunc lookup(uint32_t addr);
+// Private immutable native-text startup seal; no unseal or arbitrary allowlist.
+bool seal_native_text() noexcept;
+bool native_text_sealed() noexcept;
 }  // namespace dispatch
 
 // call a guest function from host code (on the current guest thread)
@@ -76,6 +79,7 @@ void block_end();     // take it back (waits for a turn)
 bool ensure_core();   // service threads entering guest code; true if the core was taken
 void release_core();
 void set_service_core(uint32_t core);
+uint32_t diagnostic_count(); // normal-thread numeric summary, no names/CPU contents
 void report_sched();  // log per-thread core usage
 // diagnostics the settings menu turns on and off while the game runs: the main thread's runtime calls every 5 s
 // (WWHD_MAIN_SAMPLER=1; on the Switch the menu's saved choice) and every game thread's core use every 5 s
@@ -101,6 +105,10 @@ void run_main(const LoadedModule& m, int argc, uint32_t argv);  // does not retu
 Cpu* current();          // Cpu of the calling host thread (null if not a guest thread)
 uint32_t current_thread();  // guest OSThread* of the calling thread
 int current_core();         // emulated core of the calling guest thread (-1: not a guest thread)
+// Host-captured creation-declared guest stack bounds for this exact current
+// Cpu. Fails for restored threads lacking a creation receipt, invalid ranges,
+// and an outgoing 0x40-byte frame outside the range. Not allocation ownership.
+bool current_stack_bounds(const Cpu* c, uint32_t& bottom, uint32_t& top);
 // a Cpu + guest stack for host-created threads that need to call guest code (alarms, audio)
 Cpu* make_service_cpu(const char* name, uint32_t stack_size = 0x10000);
 // service threads bracket their guest work (callbacks, guest memory access) with these, so a save

@@ -304,6 +304,10 @@ struct LatteDecompilerSubroutineInfo;
 // shader fills. Shader keys that the decompiler's strictMul choice depends on add it when it is not 0.
 uint32 LatteDecompiler_UnfetchedVertexInputs(const uint32* contextRegisters, const struct LatteFetchShader* fetchShader);
 
+// WWHD (issue #207 diagnostic, WWHD_VK_CPU_VERTICES): vertex attributes arrive already decoded by the
+// CPU; the GLSL decoder only copies them (LatteDecompilerEmitGLSLAttrDecoder.cpp)
+extern bool g_latteCpuVertexDecode;
+extern uint32_t g_latteCpuVertexClasses;
 void LatteDecompiler_DecompileVertexShader(uint64 shaderBaseHash, uint32* contextRegisters, uint8* programData, uint32 programSize, struct LatteFetchShader* fetchShader, LatteDecompilerOptions& options, LatteDecompilerOutput_t* output);
 void LatteDecompiler_DecompileGeometryShader(uint64 shaderBaseHash, uint32* contextRegisters, uint8* programData, uint32 programSize, uint8* gsCopyProgramData, uint32 gsCopyProgramSize, uint32 vsRingParameterCount, LatteDecompilerOptions& options, LatteDecompilerOutput_t* output);
 void LatteDecompiler_DecompilePixelShader(uint64 shaderBaseHash, uint32* contextRegisters, uint8* programData, uint32 programSize, LatteDecompilerOptions& options, LatteDecompilerOutput_t* output);

@@ -1,0 +1,21 @@
+{
+  "name": "StoryLyt_00",
+  "size": [1280, 720],
+  "textures": {
+    "StoryPlate_00": {"png": "plate.png", "format": "rgba8", "width": 512}
+  },
+  "materials": {
+    "StoryPlate_00": {"textures": [{"texture": "StoryPlate_00"}]}
+  },
+  "panes": [
+    {"type": "null", "name": "N_All_00", "size": [30, 40], "influence_alpha": true, "children": [
+      {"type": "picture", "name": "P_Plate_00", "size": [512, 171], "translate": [0, 160],
+       "material": "StoryPlate_00"}
+    ]}
+  ],
+  "groups": {"G_All_00": ["N_All_00"]},
+  "animations": {
+    "InAll": {"frames": 10, "groups": ["G_All_00"],
+              "tracks": [{"pane": "N_All_00", "target": "alpha", "keys": [[0, 0], [10, 255]]}]}
+  }
+}

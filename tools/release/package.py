@@ -51,7 +51,17 @@ TOOL_FILES = [
     "tools/guestmod/build_guest_mod.py",
     "tools/guestmod/guestmod.py",
     "tools/story_mods/npc_catalogue.py",  # the NPC catalogue from the player's game files (story_npc_catalogue.h)
-    "tools/story_mods/notebook_model.py",  # the story notebook's model from the Story Notebook package
+    "tools/story_mods/notebook_model.py",  # shared player-local BFRES template patching
+    "tools/story_mods/collision_mesh.py",  # original static collision geometry
+    "tools/story_mods/shoreline_model.py",  # player-local animated coast material
+    "tools/story_mods/actor_model.py",  # original static GLB models using the player's own materials
+    "tools/story_mods/multi_material.py",  # several materials and cut-outs for original static GLB models
+    "tools/story_mods/game_piece_model.py",  # island buildings from the player's own room archives (material copier)
+    "tools/story_mods/island_texture.py",  # a water body's banks painted with the island's own ground texture
+    "tools/story_mods/stage_builder.py",  # mod stages, list_kit_materials and stage templates from the player's own files
+    "tools/story_mods/export_glb.py",  # the editor's export_glb: a game room or piece as a GLB in the player's own exports folder
+    "tools/story_mods/skinned_actor_model.py",  # original rigged GLB and player-local skin material
+    "tools/story_mods/actor_animation.py",  # original skeletal clips in the native format
     "tools/savegame/gc2hd.py",
     "tools/savegame/wwsave.py",
     "tools/savegame/README.md",
@@ -132,6 +142,7 @@ VENDORED_LICENSES = {
     "Cemu (MPL-2.0)": "runtime/third_party/cemu/LICENSE.txt",
     "Dear ImGui (MIT)": "runtime/third_party/imgui/LICENSE.txt",
     "fmt (MIT)": "runtime/third_party/fmt/LICENSE",
+    "ImGuizmo (MIT)": "runtime/third_party/imguizmo/LICENSE",
     "metal-cpp (Apache-2.0)": "runtime/third_party/metal-cpp/LICENSE.txt",
     "xxHash (BSD-2-Clause)": "runtime/third_party/xxhash/LICENSE",
 }

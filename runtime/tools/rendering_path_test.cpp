@@ -31,15 +31,16 @@ int main() {
     for (const char* env : std::array<const char*, 5>{nullptr, "", "auto", "true", "10"}) {
         const auto choice = choose_rendering_path({VK_API_VERSION_1_3, true, true}, intel, oldIntel, true, env);
         assert(choice.path == RenderingPath::RenderPass); // #144, despite advertised support.
-        assert(!std::strcmp(choice.reason, "driver rule: Intel Windows < 101.2121"));
+        assert(!std::strcmp(choice.reason, "driver rule: Intel Windows < 101.5000"));
     }
     const RenderingCapabilities core{VK_API_VERSION_1_3, true, true};
     assert(choose_rendering_path(core, intel, oldIntel, true, "0").path == RenderingPath::Core);
     assert(choose_rendering_path(core, intel, oldIntel, false, nullptr).path == RenderingPath::Core);
     assert(choose_rendering_path(core, amd, oldIntel, true, nullptr).path == RenderingPath::Core);
-    for (auto version : {intel_windows_driver(100, 9999), intel_windows_driver(101, 2120)})
+    for (auto version : {intel_windows_driver(100, 9999), intel_windows_driver(101, 2120),
+            intel_windows_driver(101, 3111) /* #204 */, intel_windows_driver(101, 4999)})
         assert(choose_rendering_path(core, intel, version, true, nullptr).path == RenderingPath::RenderPass);
-    for (auto version : {intel_windows_driver(101, 2121), intel_windows_driver(101, 2125),
+    for (auto version : {intel_windows_driver(101, 5000), intel_windows_driver(101, 6083),
             intel_windows_driver(102, 0)})
         assert(choose_rendering_path(core, intel, version, true, nullptr).path == RenderingPath::Core);
 }

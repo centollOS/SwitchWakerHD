@@ -5,7 +5,10 @@
 #include "../crashrec.h"
 #include "../runtime.h"
 #include "../input.h"
+#include "../controller_reapply.h"
 #include "../mods/story_notebook.h"
+#include "../mods/story_bag.h"
+#include "../mods/story_scenes.h"
 #include "../motion/motion.h"
 #include "../rumble.h"
 
@@ -16,7 +19,10 @@ constexpr int32_t kWpadErrNone = 0, kWpadErrNoController = -1;
 constexpr int32_t kKpadErrNone = 0, kKpadErrNoController = -2;
 constexpr uint8_t kDevURCC = 31, kDevNone = 253, kFormatURCC = 22;
 
-bool connected(uint32_t chan) { return chan == 0 && input::pro_controller(); }
+// While the game is switched from the Pro Controller to the GamePad after a save-state load, its Pro
+// Controller stays connected but idle, as when a player changes the controller in the game's Options
+// (a missing controller would stop the game at its reconnect prompt before the switch completes).
+bool connected(uint32_t chan) { return chan == 0 && (input::pro_controller() || controller_reapply::holds_pro_controller()); }
 
 // VPAD button bits (input::PadState) -> Pro Controller (URCC) bits
 uint32_t pro_buttons(uint32_t v) {
@@ -44,7 +50,7 @@ HLE(padscore, WPADDisconnect) {}
 // Controller is only connected while the keyboard/controllers act as one (see connected).
 HLE(padscore, WPADControlMotor) {
     uint32_t chan = arg(c, 0), cmd = arg(c, 1);
-    if (connected(chan)) {
+    if (connected(chan) && input::pro_controller()) {
         TRACE("[pad] WPADControlMotor(%u, %u) -> %s", chan, cmd, cmd ? "rumble" : "stop");
         rumble::pro_motor(chan, cmd != 0);
     }
@@ -82,8 +88,13 @@ HLE(padscore, KPADReadEx) {
         p.lx = f.lx; p.ly = f.ly; p.rx = f.rx; p.ry = f.ry;
     }
     last_p = p;
+    if (!input::pro_controller()) p = input::PadState{};  // held connected for a controller switch: idle
     story_notebook::mute(p);  // the notebook's page has the controller (VPADRead drives it)
+    story_scenes::mute(p);
+    story_bag::mute(p);       // so do the Delivery Bag's extra pages
+    mods::moon_jump_input(p);
     mods::move_speed_input(p.buttons);
+    mods::jump_input(p.buttons);
     mods::fast_forward_input(p.buttons);
     if (!repeat) motion::right_stick(p.rx, p.ry);  // the Pro Controller's stick decides gyro use too (motion.h)
     uint32_t hold = pro_buttons(p.buttons);

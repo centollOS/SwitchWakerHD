@@ -1,3 +1,4 @@
+#include "platform/present_observer.h"
 // Display: the TV and GamePad windows, full screen, and the final composition of the TV and GamePad
 // images onto the screen (scale to fit with letterbox/pillarbox, scaling filter, GamePad screen as a
 // separate window or as a picture-in-picture overlay inside the TV window).
@@ -49,6 +50,7 @@
 #include "renderer.h"
 #include "runtime.h"
 #include "../interp.h"
+#include "../savestate.h"
 #ifdef WWHD_HAS_VULKAN
 #include "vulkan/api.h"
 #endif
@@ -87,6 +89,9 @@ static void set_dock_icon() {
 namespace mods { bool mouse_captured(); }
 
 namespace gfx {
+// the picture's size at the full internal resolution (dynamic resolution renders it smaller; the layout stays)
+static float nominal_w(const Screen& s) { return s.tex ? float(s.tex.width) / s.dyn : 0.0f; }
+static float nominal_h(const Screen& s) { return s.tex ? float(s.tex.height) / s.dyn : 0.0f; }
 extern Renderer R;
 void install_menu(NSWindow* tv);  // menu.mm
 Class tv_window_class();           // quit_prompt.mm: closing the TV window quits (after asking)
@@ -140,7 +145,9 @@ bool host_setting(const char* key, std::string& value) {
 void set_host_setting(const char* key, const std::string& value) { set_setting(@(key), @(value.c_str())); }
 static void save_options() {
     g_settings[@"drcMode"] = @(kModeNames[display_saved_mode()]);
-    g_settings[@"pipCorner"] = @(kCornerNames[g_corner]);
+    g_settings[@"pipAnchor"] = @(kAnchorNames[g_pip_anchor]);
+    g_settings[@"pipX"] = @(g_pip_x.load());
+    g_settings[@"pipY"] = @(g_pip_y.load());
     g_settings[@"pipSize"] = @(g_pip_size.load());
     g_settings[@"pipOpacity"] = @(g_pip_opacity.load());
     g_settings[@"scaleFilter"] = @(kFilterNames[g_filter]);
@@ -149,10 +156,15 @@ static void save_options() {
 static void load_options() {
     g_mode = find_name(kModeNames, kDrcModeCount, g_settings[@"drcMode"], kDrcWindow);
     if (!drc_mode_offered(g_mode)) g_mode = kDrcWindow;
-    g_corner = find_name(kCornerNames, 4, g_settings[@"pipCorner"], 3);
+    NSString* anchor = g_settings[@"pipAnchor"];
+    NSString* legacy = g_settings[@"pipCorner"];
+    g_pip_anchor = pip_load_anchor([anchor isKindOfClass:[NSString class]] ? anchor.UTF8String : nullptr,
+                                   [legacy isKindOfClass:[NSString class]] ? legacy.UTF8String : nullptr);
+    if (NSNumber* n = g_settings[@"pipX"]) g_pip_x = pip_clamp(n.floatValue, 0, 1, 0.5f);
+    if (NSNumber* n = g_settings[@"pipY"]) g_pip_y = pip_clamp(n.floatValue, 0, 1, 0.5f);
     g_filter = find_name(kFilterNames, 3, g_settings[@"scaleFilter"], kSmooth);
-    if (NSNumber* n = g_settings[@"pipSize"]) g_pip_size = std::clamp(n.floatValue, 0.1f, 0.5f);
-    if (NSNumber* n = g_settings[@"pipOpacity"]) g_pip_opacity = std::clamp(n.floatValue, 0.2f, 1.0f);
+    if (NSNumber* n = g_settings[@"pipSize"]) g_pip_size = pip_clamp_size(n.floatValue);
+    if (NSNumber* n = g_settings[@"pipOpacity"]) g_pip_opacity = pip_clamp_opacity(n.floatValue);
     display_env_overrides();  // start-up overrides for tests (not saved)
 }
 
@@ -309,7 +321,8 @@ static NSWindow* make_window(int index, NSString* title, NSView* view, int w, in
 static CAMetalLayer* attach_layer(int i) {
     NSWindow* win = g_windows[i];
     if (!win) return nil;
-    CAMetalLayer* layer = [CAMetalLayer layer];
+    CAMetalLayer* layer = i == 0 && present_observer::enabled() ? present_observer::make_layer(win) : [CAMetalLayer layer];
+    if (i == 0 && present_observer::enabled()) layer.frame = win.contentView.bounds;
     layer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
     [win.contentView setLayer:layer];
     g_layers[i] = layer;
@@ -416,8 +429,8 @@ static void create_windows() {
         beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical | NSActivityIdleDisplaySleepDisabled
                           reason:@"game running"];
     (void)activity;
-    // scripted test runs (WWHD_NO_HOST_INPUT) run as a background app: no Dock icon, never takes the
-    // keyboard focus from the user's game
+    // Scripted tests (WWHD_NO_HOST_INPUT) have no Dock icon. Native presentation
+    // observation activates the TV window; other tests leave keyboard focus alone.
     bool test = getenv("WWHD_NO_HOST_INPUT") != nullptr;
     [NSApp setActivationPolicy:test ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular];
     if (!test) set_dock_icon();
@@ -462,7 +475,17 @@ static void create_windows() {
     if (hidden_windows()) {
         // test run: never on screen
     } else if (test) {
-        [tv orderBack:nil];  // scripted test run: stay behind, don't take focus
+        if (present_observer::enabled()) {
+            // Native presentation timing requires an onscreen drawable. Merely
+            // ordering a background test window forward can leave it occluded
+            // in another Space, where presentedTime stays zero.
+            // Keep the observation drawable onscreen when another ordinary
+            // app takes focus. Occlusion/native-time gates still apply; this
+            // does not change window geometry or normal player windows.
+            tv.level = NSFloatingWindowLevel;
+            [tv makeKeyAndOrderFront:nil];
+            [NSApp activateIgnoringOtherApps:YES];
+        } else [tv orderBack:nil];  // scripted test run: stay behind, don't take focus
     } else {
         [tv makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
@@ -482,7 +505,7 @@ static void create_windows() {
         static bool hidden = false;
         NSPoint p = [NSEvent mouseLocation];
         if (!NSEqualPoints(p, last)) { last = p; moved = display_now(); hidden = false; }
-        if (!hidden && NSApp.active && g_tv_window.keyWindow && !mods::mouse_captured() && !overlay::is_open() &&
+        if (!hidden && NSApp.active && g_tv_window.keyWindow && !mods::mouse_captured() && !overlay::is_open() && !overlay::pointer_layer_active() &&
             display_now() - moved > 2.0) {
             [NSCursor setHiddenUntilMouseMoves:YES];
             hidden = true;
@@ -662,6 +685,7 @@ void run_appkit_loop() {
     // orderly exit (Quit, Cmd+Q): the renderer writes its caches (Vulkan pipeline / SPIR-V caches)
     [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationWillTerminateNotification object:nil queue:nil
                                                   usingBlock:^(NSNotification*) {
+        ss::save_last_session(1500);  // the "Last session" state (a few KB; skipped outside gameplay)
         render::shutdown();
         // leave without running static destructors: the GX2 render thread and the game threads may
         // still be using them (exit() here crashed in the renderer's caches, Metal and Vulkan alike)
@@ -717,8 +741,10 @@ void show_startup_notice(const std::string& title, const std::string& text) {
 static bool is_srgb(MTLPixelFormat f) { return f == MTLPixelFormatBGRA8Unorm_sRGB || f == MTLPixelFormatRGBA8Unorm_sRGB; }
 
 // draw `tex` into the target rectangle (pixels); src_linear: the image holds linear values (sRGB scan buffer)
+// dyn: the picture's dynamic resolution factor (Screen::dyn; below 1: always scaled filtered, as the Vulkan
+// presentation: integer scaling becomes smooth, sharp scaling takes its sharpness from the full size)
 static void draw_image(id<MTLRenderCommandEncoder> e, MTLPixelFormat fmt, float dw, float dh, id<MTLTexture> tex,
-                       bool src_linear, Box b, float alpha) {
+                       bool src_linear, Box b, float alpha, float dyn = 1.0f) {
     if (!tex || b.w <= 0 || b.h <= 0) return;
     float rect[4] = {b.x / dw, b.y / dh, b.w / dw, b.h / dh};
     bool blend = alpha < 0.999f;
@@ -730,7 +756,12 @@ static void draw_image(id<MTLRenderCommandEncoder> e, MTLPixelFormat fmt, float 
     p.conv = src_linear == dst_linear ? 0 : dst_linear ? 1 : 2;
     float scale = std::min(b.w / tex.width, b.h / tex.height);  // target pixels per source texel
     int filter = g_filter;
-    p.sharp = filter == kSmooth || scale <= 1.0f ? 1.0f : filter == kSharp ? scale : 1e4f;
+    float sharpScale = scale;
+    if (dyn < 1.0f) {
+        if (filter == kInteger) filter = kSmooth;
+        else if (filter == kSharp) sharpScale = std::min(b.w / (tex.width / dyn), b.h / (tex.height / dyn));
+    }
+    p.sharp = filter == kSmooth || sharpScale <= 1.0f ? 1.0f : filter == kSharp ? sharpScale : 1e4f;
     p.foot = scale < 1.0f ? 1.0f / scale : 1.0f;
     [e setVertexBytes:rect length:sizeof rect atIndex:0];
     [e setFragmentTexture:tex atIndex:0];
@@ -761,12 +792,12 @@ static void compose_tv(id<MTLTexture> target, const Layout& L) {
     id<MTLRenderCommandEncoder> e = [command_buffer() renderCommandEncoderWithDescriptor:rp];
     float dw = target.width, dh = target.height;
     MTLPixelFormat fmt = target.pixelFormat;
-    draw_image(e, fmt, dw, dh, R.tv.tex, R.tv.srgb, L.tv, 1.0f);
+    draw_image(e, fmt, dw, dh, R.tv.tex, R.tv.srgb, L.tv, 1.0f, R.tv.dyn);
     if (L.pip_on && R.drc.tex) {
         float op = L.drc_only ? 1.0f : g_pip_opacity.load(), bw = std::max(1.0f, roundf(L.pip.w / 200.0f));
         float frame[4] = {0, 0, 0, 0.6f * op};
         draw_solid(e, fmt, dw, dh, {L.pip.x - bw, L.pip.y - bw, L.pip.w + 2 * bw, L.pip.h + 2 * bw}, frame);
-        draw_image(e, fmt, dw, dh, R.drc.tex, R.drc.srgb, L.pip, op);
+        draw_image(e, fmt, dw, dh, R.drc.tex, R.drc.srgb, L.pip, op, R.drc.dyn);
         if(auto* draw=overlay::guesthud::gamepad_region(dw,dh,L.pip.x,L.pip.y,L.pip.w,L.pip.h,op)) {
             if(is_srgb(fmt))overlay::linearize_colors(draw,true);
             ImGui_ImplMetal_NewFrame(rp);
@@ -789,8 +820,8 @@ static void compose_drc(id<MTLTexture> target) {
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> e = [command_buffer() renderCommandEncoderWithDescriptor:rp];
-    Layout L = layout(target.width, target.height, R.drc.tex.width, R.drc.tex.height, 0, 0, false);
-    draw_image(e, target.pixelFormat, target.width, target.height, R.drc.tex, R.drc.srgb, L.tv, 1.0f);
+    Layout L = layout(target.width, target.height, nominal_w(R.drc), nominal_h(R.drc), 0, 0, false);
+    draw_image(e, target.pixelFormat, target.width, target.height, R.drc.tex, R.drc.srgb, L.tv, 1.0f, R.drc.dyn);
     if (auto* draw = overlay::guesthud::gamepad_region(target.width,target.height,L.tv.x,L.tv.y,L.tv.w,L.tv.h,1)) {
         if (is_srgb(target.pixelFormat)) overlay::linearize_colors(draw, true);
         ImGui_ImplMetal_NewFrame(rp);
@@ -846,7 +877,7 @@ static void screenshot_screen(Screen& scr, const std::string& path, bool tv) {
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> e = [command_buffer() renderCommandEncoderWithDescriptor:rp];
-    draw_image(e, t.pixelFormat, w, h, scr.tex, scr.srgb, Box{0, 0, (float)w, (float)h}, 1.0f);
+    draw_image(e, t.pixelFormat, w, h, scr.tex, scr.srgb, Box{0, 0, (float)w, (float)h}, 1.0f, scr.dyn);
     [e endEncoding];
     id<MTLBuffer> buf = [R.device newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
     id<MTLBlitCommandEncoder> b = [command_buffer() blitCommandEncoder];
@@ -880,7 +911,7 @@ static void take_screenshot(const PresentPlan& P) {
 // Metal, called from swap(): compose and present the TV window (with the GamePad overlay) and the GamePad window
 void present_screens() {
     CGSize ls = R.tv.layer ? R.tv.layer.drawableSize : CGSizeMake(0, 0);
-    PresentPlan P = display_plan(R.tv.tex != nil, R.tv.tex.width, R.tv.tex.height, R.drc.tex != nil, R.drc.tex.width, R.drc.tex.height,
+    PresentPlan P = display_plan(R.tv.tex != nil, nominal_w(R.tv), nominal_h(R.tv), R.drc.tex != nil, nominal_w(R.drc), nominal_h(R.drc),
                                  ls.width, ls.height, R.frame);
     Layout L;
     L.tv = P.tv;
@@ -917,8 +948,7 @@ void present_screens() {
     if (P.sim) {
         present_to_layer(R.tv, ^(id<MTLTexture> t) {
             CGSize ds = R.tv.layer.drawableSize;
-            compose_tv(t, layout(ds.width, ds.height, R.tv.tex.width, R.tv.tex.height, R.drc.tex ? R.drc.tex.width : 0,
-                                 R.drc.tex ? R.drc.tex.height : 0, pip, drc_only));
+            compose_tv(t, layout(ds.width, ds.height, nominal_w(R.tv), nominal_h(R.tv), nominal_w(R.drc), nominal_h(R.drc), pip, drc_only));
         });
     } else {
         present_to_layer(R.tv, ^(id<MTLTexture> t) { compose_tv(t, L); });
@@ -940,7 +970,7 @@ void present_screens() {
             p.insert(dot == std::string::npos ? p.size() : dot, "_drc");
             dump_texture(d, p.c_str(), true, false);
         }
-        display_log_present_dump(path, P, R.tv.tex.width, R.tv.tex.height);
+        display_log_present_dump(path, P, nominal_w(R.tv), nominal_h(R.tv));
     }
 }
 
@@ -952,10 +982,10 @@ void display_set_filter(int f) {
 }
 int display_drc_mode() { return g_mode; }
 // settings overlay: the Display menu's picture-in-picture choices
-void display_set_pip(int corner, float size, float opacity) {
-    g_corner = std::clamp(corner, 0, 3);
-    g_pip_size = std::clamp(size, 0.1f, 0.5f);
-    g_pip_opacity = std::clamp(opacity, 0.2f, 1.0f);
+void display_set_pip(int anchor, float size, float opacity) {
+    g_pip_anchor = std::clamp(anchor, 0, int(kPipCustom));
+    g_pip_size = pip_clamp_size(size);
+    g_pip_opacity = pip_clamp_opacity(opacity);
     save_options();
 }
 void display_set_tv_fullscreen(bool on) {
@@ -984,9 +1014,9 @@ bool drc_overlay_hit(void* window, double wx, double wy) {
 - (void)setFilter:(NSMenuItem*)item { gfx::g_filter = (int)item.tag; gfx::save_options(); }
 - (void)setMode:(NSMenuItem*)item { gfx::set_drc_mode((int)item.tag); }
 - (void)toggleDrc:(NSMenuItem*)item { gfx::toggle_drc_screen(); }
-- (void)setCorner:(NSMenuItem*)item { gfx::g_corner = (int)item.tag; gfx::save_options(); }
-- (void)setSize:(NSMenuItem*)item { gfx::g_pip_size = item.tag / 100.0f; gfx::save_options(); }
-- (void)setOpacity:(NSMenuItem*)item { gfx::g_pip_opacity = item.tag / 100.0f; gfx::save_options(); }
+- (void)setAnchor:(NSMenuItem*)item { gfx::g_pip_anchor = (int)item.tag; gfx::save_options(); }
+- (void)setSize:(NSMenuItem*)item { gfx::g_pip_size = gfx::pip_clamp_size(item.tag / 100.0f); gfx::save_options(); }
+- (void)setOpacity:(NSMenuItem*)item { gfx::g_pip_opacity = gfx::pip_clamp_opacity(item.tag / 100.0f); gfx::save_options(); }
 - (void)drcScreen:(NSMenuItem*)item {
     NSArray<NSScreen*>* s = NSScreen.screens;
     if (item.tag < 0 || item.tag >= (NSInteger)s.count) return;
@@ -1025,7 +1055,7 @@ bool drc_overlay_hit(void* window, double wx, double wy) {
         on(gfx::drc_window_shown());
         return gfx::g_mode != gfx::kDrcOff && gfx::drc_window_available();
     }
-    if (a == @selector(setCorner:)) on(gfx::g_corner == item.tag);
+    if (a == @selector(setAnchor:)) on(gfx::g_pip_anchor == item.tag);
     if (a == @selector(setSize:)) on(fabsf(gfx::g_pip_size * 100 - item.tag) < 0.5f);
     if (a == @selector(setOpacity:)) on(fabsf(gfx::g_pip_opacity * 100 - item.tag) < 0.5f);
     if (a == @selector(drcScreen:)) {
@@ -1074,18 +1104,17 @@ void install_display_menu(NSMenu* bar) {
     add(m, @"    Separate window", @selector(setMode:), kDrcWindow);
     add(m, @"    Picture-in-picture in the TV window", @selector(setMode:), kDrcPip).toolTip = @"Click the overlay to touch";
     add(m, @"    Automatic picture-in-picture", @selector(setMode:), kDrcAuto).toolTip =
-        @"Shows GamePad menus while open; follows Off-TV Play. Cmd+G pins the overlay";
+        @"Shows GamePad menus and the Wind Waker song list while open; follows Off-TV Play. Cmd+G pins the overlay";
     add(m, @"    Off", @selector(setMode:), kDrcOff).toolTip = @"Not shown; the game keeps drawing it";
     add(m, @"    GamePad only", @selector(setMode:), kDrcGamePad).toolTip =
         @"Only the GamePad picture in the TV window (click it to touch); in the game, Minus switches to Off-TV Play";
     add(m, @"Show GamePad screen", @selector(toggleDrc:), 0, @"g");
     NSMenuItem* pipItem = [m addItemWithTitle:@"Picture-in-picture" action:nil keyEquivalent:@""];
     NSMenu* pm = [[NSMenu alloc] initWithTitle:@"Picture-in-picture"];
-    header(pm, @"Corner");
-    add(pm, @"    Top left", @selector(setCorner:), 0);
-    add(pm, @"    Top right", @selector(setCorner:), 1);
-    add(pm, @"    Bottom left", @selector(setCorner:), 2);
-    add(pm, @"    Bottom right", @selector(setCorner:), 3);
+    header(pm, @"Position");
+    NSArray* positions = @[@"Top left", @"Top centre", @"Top right", @"Centre left", @"Centre", @"Centre right",
+                           @"Bottom left", @"Bottom centre", @"Bottom right"];
+    for (int i = 0; i < 9; ++i) add(pm, positions[i], @selector(setAnchor:), i);
     header(pm, @"Size (of the TV picture's width)");
     for (int s : {20, 25, 33, 40}) add(pm, [NSString stringWithFormat:@"    %d%%", s], @selector(setSize:), s);
     header(pm, @"Opacity");

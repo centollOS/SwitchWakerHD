@@ -12,3 +12,6 @@ bool text_prompt_active();
 // virtual touch screen for their buttons); its touches are not the player's fingers
 bool touch_from_controller(SDL_TouchID id);
 }
+
+// Stable physical key ID for an SDL scancode (or -1), shared with focused-window shortcuts.
+namespace input { int physical_keycode(int scancode); }

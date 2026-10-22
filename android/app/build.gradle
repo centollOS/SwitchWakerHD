@@ -11,6 +11,7 @@ android {
     ndkVersion "30.0.16248370"  // android/build_native.sh's default (the native libraries come from there)
     defaultConfig {
         applicationId "org.wwhdrecomp.wwhd"
+        buildConfigField 'boolean', 'QUEST_THEATER', providers.gradleProperty('wwhdQuestTheater').getOrElse('true')
         testInstrumentationRunner "org.wwhdrecomp.wwhd.SetupPolishInstrumentation"
         minSdk 33
         targetSdk 36
@@ -19,6 +20,7 @@ android {
         versionName providers.gradleProperty('wwhdVersionName').getOrElse('0.1')
         ndk { abiFilters providers.gradleProperty('wwhdAbi').getOrElse('arm64-v8a') }
     }
+    buildFeatures { buildConfig true }
     // Release signing (release.yml: the project's key, decoded to a temporary file for the build).
     // Environment WWHD_KEYSTORE, WWHD_KEYSTORE_PASSWORD, WWHD_KEY_ALIAS and optional WWHD_KEY_PASSWORD
     // (default: the store password), or -PwwhdKeystore=... etc. Without them (forks, your own build)
@@ -66,7 +68,8 @@ android {
     // the game's own icon (android/make_icon.py, from your game files; git-ignored), else the app icon (android/icon)
     def gameIcon = file('local-res').exists()
     if (gameIcon) sourceSets.main.res.srcDirs += ['local-res']
-    defaultConfig.manifestPlaceholders = [appIcon: gameIcon ? '@mipmap/ic_game' : '@mipmap/ic_launcher']
+    defaultConfig.manifestPlaceholders = [appIcon: gameIcon ? '@mipmap/ic_game' : '@mipmap/ic_launcher',
+        questTheaterEnabled: providers.gradleProperty('wwhdQuestTheater').getOrElse('true')]
     packaging {
         jniLibs {
             useLegacyPackaging = true  // libadrenotools needs extracted hooks in nativeLibraryDir
@@ -78,6 +81,8 @@ android {
 }
 
 dependencies {
+    if (providers.gradleProperty('wwhdQuestTheater').getOrElse('true') == 'true')
+        implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.63'
     implementation 'androidx.core:core:1.15.0'
     implementation 'androidx.window:window:1.5.1'
     implementation 'androidx.window:window-java:1.5.1'
@@ -98,3 +103,27 @@ tasks.register('verifyReleasePython') {
     }
 }
 tasks.matching { it.name == 'preReleaseBuild' }.configureEach { dependsOn 'verifyReleasePython' }
+
+// Debug-only side-by-side install (-PwwhdDebugSuffix=.labtest): the debug APK gets its own
+// applicationId so it never replaces an installed player build; its static launcher shortcuts point
+// at itself. Release builds ignore it.
+def debugSuffix = providers.gradleProperty('wwhdDebugSuffix').getOrElse('')
+if (!debugSuffix.isEmpty()) {
+    if (!(debugSuffix ==~ /\.[a-z][a-z0-9_]*/)) throw new GradleException('wwhdDebugSuffix must look like .labtest')
+    android.buildTypes.debug.applicationIdSuffix = debugSuffix
+    def suffixDir = layout.buildDirectory.dir('generated/debug-suffix').get().asFile
+    android.sourceSets.debug.res.srcDir(new File(suffixDir, 'res'))
+    def generateSuffix = tasks.register('generateDebugSuffixResources') {
+        inputs.property('suffix', debugSuffix)
+        inputs.file('src/main/res/xml/shortcuts.xml')
+        outputs.dir(suffixDir)
+        doLast {
+            new File(suffixDir, 'res/xml').mkdirs()
+            new File(suffixDir, 'res/xml/shortcuts.xml').text = file('src/main/res/xml/shortcuts.xml').text
+                .replace('android:targetPackage="org.wwhdrecomp.wwhd"',
+                         'android:targetPackage="org.wwhdrecomp.wwhd' + debugSuffix + '"')
+        }
+    }
+    tasks.matching { it.name in ['preDebugBuild', 'mergeDebugResources', 'generateDebugResources'] }
+        .configureEach { dependsOn generateSuffix }
+}

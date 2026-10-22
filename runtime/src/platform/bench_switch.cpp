@@ -105,7 +105,7 @@ debugsrv::Reply command(const debugsrv::Args& a) {
             struct stat st{};
             if (stat(path.c_str(), &st) != 0) return debugsrv::err("no " + path);
             LOG("[bench] loading %s", path.c_str());
-            ss::request_load_portable_file(path, true);  // (the states were made on a USA console)
+            ss::request_load_portable_file(path, {}, true);  // (the states were made on a USA console)
             return debugsrv::ok("load requested: " + path + " (bench status: arrivals goes up once Link is there)");
         }
         struct Wait {

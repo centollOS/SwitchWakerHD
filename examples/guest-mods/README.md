@@ -5,16 +5,24 @@ Small mods written in C and compiled for the game's CPU (32-bit big-endian Power
 game functions and variables are referenced by address only.
 
 Story mods (letters, quests, charts) live in the mod repository with their content: the required
-`story-notebook` package (the letter that brings the story notebook) and the `rito-letter` and
-`story-chart` examples are in [ZeldaWWHDMods](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods).
+`story-notebook` package (the letter that brings the story notebook), the `rito-letter` and
+`story-chart` examples are in
+[ZeldaWWHDMods](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods). So is the hooks example
+[`heart-ticker`](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods/tree/main/heart-ticker): entry and return hooks
+on Link's per-step function (`0240EBB0`), a call of a game function (`cLib_addCalc2`) and an option (`every`);
+Link's hearts tick down a quarter heart every `every` logic steps to half, then refill.
 
 | Mod | What it shows |
 | --- | --- |
-| `heart-ticker` | entry and return hooks on Link's per-step function (`0240EBB0`), a call of a game function (`cLib_addCalc2`), an option (`every`). Link's hearts tick down a quarter heart every `every` logic steps to half, then refill. |
 | `hud-demo` | rectangle, original PNG and heart-count text on TV and GamePad, with anchors and state-load handle renewal. |
 | `button-icons` | combined code/art package and face-layout setting reads; currently an overdraw candidate awaiting game-frame calibration. |
 | `hud-cost` | performance fixture: exactly 200 rectangles versus no HUD callback, selected by a restart-only option. |
 | `addcalc-replace` | a full replacement of a small game function (`cLib_addCalc2`, `0200ED84`) with an equivalent implementation; every other call goes to the game's own code (`WWHD_GAME_ORIGINAL`). No visible change; the log counts the calls. |
+
+The SDK v3 preview also includes the content-only [harbor meeting](sdk-v3-native-scene/README.md)
+example: two residents, a talk trigger, mandatory fallback steps and an experimental
+native alternative. It needs no C build; the game plays an eligible `turn_camera`
+alternative itself when its readiness checks pass, and the fallback steps otherwise.
 
 Build (needs clang with the PowerPC target and ld.lld; on macOS `brew install llvm lld`):
 
@@ -29,10 +37,10 @@ public HD function names and layouts from `runtime/guest/include/wwhd`.
 
 Install each folder through **Mods → Installed packages → Choose folder → Install package**,
 enable it, accept its code/package trust confirmation, and restart. Packages with artwork
-include the entire folder in one trust decision; they apply only with code mods on. Set heart-ticker's `every` option
-in the Mods tab. The manager builds and caches the translated modules on startup.
-Game code must have been translated with `--mod-hooks`. Android guest modules are
-currently unsupported.
+include the entire folder in one trust decision; they apply only with code mods on. A mod's options (heart-ticker's
+`every`, in the mod repository) are set in the Mods tab. The manager builds and caches the translated modules on startup.
+Game code must have been translated with `--mod-hooks` (on Android: the setup app's **Code mods**
+switch); on Android the modules are built on the device.
 
 ## Local HUD frame checks
 

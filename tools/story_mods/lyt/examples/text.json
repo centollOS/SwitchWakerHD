@@ -1,0 +1,36 @@
+{
+  "name": "StoryLyt_00",
+  "size": [1280, 720],
+  "textures": {
+    "StoryTextBack_00": {"fill": {"color": [24, 32, 48, 200], "border": [220, 190, 120, 255], "border_width": 4}, "format": "rgba8", "width": 64, "height": 64}
+  },
+  "materials": {
+    "StoryTextBack_00": {"textures": [{"texture": "StoryTextBack_00"}]}
+  },
+  "panes": [
+    {"type": "null", "name": "N_All_00", "size": [30, 40], "influence_alpha": true, "children": [
+      {"type": "picture", "name": "P_Back_00", "size": [1000, 600], "material": "StoryTextBack_00"},
+      {"type": "text", "name": "T_Title_00", "size": [960, 60], "translate": [0, 250],
+       "font": "CKingMain.bffnt", "font_size": [40, 48], "text": "Story notebook: a text pane in the game's font",
+       "colors": [[255, 236, 170, 255], [255, 200, 120, 255]],
+       "shadow": {"offset": [2, -2], "colors": [[0, 0, 0, 255], [0, 0, 0, 255]], "white": [255, 255, 255, 100]}},
+      {"type": "text", "name": "T_Count_00", "size": [900, 50], "translate": [0, 180], "capacity": 64,
+       "font_size": [34, 40], "text": "Counter: (not set yet)"},
+      {"type": "text", "name": "T_Wrap_00", "size": [900, 230], "translate": [0, 20], "capacity": 480,
+       "font_size": [30, 36], "line_space": 2, "text_position": ["left", "top"], "line_alignment": "left",
+       "text": "(runtime text)"},
+      {"type": "text", "name": "T_Clip_00", "size": [900, 40], "translate": [0, -140], "capacity": 48,
+       "font_size": [30, 36], "text_position": ["left", "center"], "text": "(runtime text)"},
+      {"type": "text", "name": "T_Fit_00", "size": [600, 40], "translate": [0, -200], "capacity": 100,
+       "font_size": [30, 36], "scalable": 50, "text": "(runtime text)"},
+      {"type": "text", "name": "T_Fixed_00", "size": [900, 40], "translate": [0, -255], "font_size": [26, 32],
+       "colors": [[180, 220, 255, 255], [180, 220, 255, 255]],
+       "text": "A fixed string from the layout file (UTF-16: éàüñ)"}
+    ]}
+  ],
+  "groups": {"G_All_00": ["N_All_00"]},
+  "animations": {
+    "InAll": {"frames": 10, "groups": ["G_All_00"],
+              "tracks": [{"pane": "N_All_00", "target": "alpha", "keys": [[0, 0], [10, 255]]}]}
+  }
+}

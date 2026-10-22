@@ -9,19 +9,21 @@ void record_executed_step(); // game thread; includes built-in turbo passes
 uint64_t executed_steps();    // actual actor logic passes, including true60 half steps
 int mode();                 // 0 off (30 fps), 1 frame interpolation (at fps()), 2 true 60
 void set_mode(int m);
-int fps();                  // frame interpolation's chosen frame rate: 60, 120 or 240
+int fps();                  // frame interpolation's chosen frame rate: 40, 60, 120 or 240
 void set_fps(int f);
 void toggle_fps(int f);     // frame interpolation at f on, or off if it is on at f (menus, the 6 key)
-const char* mode_name();    // "30 fps", "60 fps", "120 fps", "240 fps", "true 60"; "240 fps (120 shown)" when capped
+const char* mode_name();    // "30 fps", "40 fps", "60 fps", "120 fps", "240 fps", "true 60"; "240 fps (120 shown)" when capped
 int output_fps();           // the rate frame interpolation draws: fps() capped to the display
-int frames_per_step();      // frames drawn per 30 Hz logic step: 1, 2, 4 or 8
+int frames_per_step();      // frames drawn per 30 Hz logic step: 1, 2, 4 or 8 (40 fps: at most 2; 4 per 3 steps)
 
 // "Keep game speed": in-between frames that do not fit are skipped instead of slowing the game down;
-// one setting for 60 fps and one for 120/240 fps
+// one setting for 40/60 fps and one for 120/240 fps
 bool paced_interpolation();  // at the current rate
+bool paced_step_schedule();  // paced and frame interpolation on: the step schedule (gx2 step slots) is in use
 void set_paced_interpolation(bool on);
 bool paced_interpolation_at(int fps);
 void set_paced_interpolation_at(int fps, bool on);
+void load_paced_interpolation_at(int fps, bool on);  // the saved setting (hosts, at start; logged as such)
 float paced_drawn_share();  // share of in-between frames drawn lately (paced and on), -1 otherwise
 
 // the display (hosts and renderers): refresh rate of the TV window's screen (0: unknown), and
@@ -29,4 +31,10 @@ float paced_drawn_share();  // share of in-between frames drawn lately (paced an
 void set_display_hz(int hz);
 int display_hz();           // (WWHD_DISPLAY_HZ overrides the detected rate)
 void set_present_vsync(bool on);
+
+// even frame delivery (on by default on Android, WWHD_INTERP_EVEN_PACING=0/1; interp_pacing.h
+// EvenSchedule): the intended distance (ns) of the frame being swapped to the previous one, 0 when
+// frames go out as they come
+bool even_pacing();
+int64_t frame_interval_ns();
 }  // namespace interp

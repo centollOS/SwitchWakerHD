@@ -138,9 +138,21 @@ macro(switch_port_executable)
     endif()
     # uam on the console: the game shaders that no DKSH cache has (gfx/deko/shaders_dk.cpp, its worker thread)
     target_link_libraries(wwhd PRIVATE uamlib)
+    # zstd for upstream's full-state codec (full_state_stream.h; full states stay off on the Switch, the code links):
+    # the pinned source (cmake/Zstd.cmake), devkitPro has no zstd port
+    set(WWHD_BUNDLED_ZSTD ON CACHE BOOL "" FORCE)
+    include(${CMAKE_SOURCE_DIR}/cmake/Zstd.cmake)
+    target_link_libraries(wwhd PRIVATE wwhd_zstd)
     # threads created without attributes get a large stack, newlib's C11 thrd_create results are fixed
     # (core.cpp), and abort() logs its caller first (main.cpp)
     target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create -Wl,--wrap=abort)
+    # (this fork) the frame threads' hot functions together at the start of .text (tools/switch/hot_order.py, from
+    # thread sampler profiles); WWHD_HOT_ORDER=OFF links in the default order
+    option(WWHD_HOT_ORDER "Switch: link the profiled hot functions together (tools/switch/hot_sections.ld)" ON)
+    if(WWHD_HOT_ORDER AND EXISTS ${CMAKE_SOURCE_DIR}/tools/switch/hot_sections.ld)
+      target_link_options(wwhd PRIVATE -Wl,--section-ordering-file=${CMAKE_SOURCE_DIR}/tools/switch/hot_sections.ld)
+      set_property(TARGET wwhd APPEND PROPERTY LINK_DEPENDS ${CMAKE_SOURCE_DIR}/tools/switch/hot_sections.ld)
+    endif()
     # (this fork) the shader compile threads' own heaps (platform/thread_heap_switch.cpp); not with the heap census,
     # which wraps malloc itself
     if(NOT WWHD_HEAP_CENSUS)

@@ -1,10 +1,13 @@
+#include "render_objects.h"
 #include "tooltip.h"
+#include "controls_options.h"
 #include "gfx/display_modes.h"
 #include <mutex>
 // In-game settings overlay: the Dear ImGui user interface (see overlay.h). The renderers draw the
 // resulting ImDrawData (gfx/overlay_metal.mm, gfx/vulkan/overlay.cpp); the hosts feed input and apply
 // changes on their main thread (hostui.h).
 #include "overlay.h"
+#include "imgui_internal.h"
 #include "pointer.h"
 #ifdef WWHD_SDL_HOST
 #include "window_target.h"
@@ -16,12 +19,19 @@
 #include "setup_flow.h"
 #include "mods_tab.h"
 #include "guest_builtin_ui.h"  // (this fork)
+#include "editor_panel.h"
 #include "graphics_switch.h"
 #include "restart_dialog.h"
+#include "quit_dialog.h"
+#include "gyro_popup.h"
+#include "popup.h"
+#include "widgets.h"
 #include "gamepad_nav.h"
 #include "perf_average.h"
 #ifdef __ANDROID__
 #include "android_telemetry.h"
+#include <SDL3/SDL_system.h>
+#include <jni.h>
 #endif
 
 #include <algorithm>
@@ -45,6 +55,7 @@
 #include "hostui.h"
 #include "../mods/code_mods.h"
 #include "controls_view.h"
+#include "binding_widget.h"
 #include "extensions.h"
 #include "release_gate.h"
 #include "text_entry.h"
@@ -73,9 +84,15 @@ namespace gfxvk { bool buffer_cache_enabled(); }  // gfx/vulkan/buffer_cache.h
 #include "../motion/motion.h"
 #include "../platform/keycodes.h"
 #include "../rumble.h"
+#ifdef __ANDROID__
+#include "../platform/phone_rumble.h"
+#include "../platform/heat_guard.h"
+#endif
 #include "../interp.h"
+#include "../interp_pacing.h"
 #include "../runtime.h"
 #include "../savestate.h"
+#include "../save_convenience.h"
 #include "../screenshot.h"
 #ifndef __ANDROID__
 #include "template_export.h"
@@ -84,12 +101,14 @@ namespace gfxvk { bool buffer_cache_enabled(); }  // gfx/vulkan/buffer_cache.h
 #include "../perf_metrics.h"
 #include "../build_info.h"
 #include "settings_shortcut.h"
+#include "layer_escape.h"
 #include "toggle_guard.h"
 #include "open_reason.h"
 #include "host_focus.h"
 #include "binding_capture.h"
 #include "mobile_ui.h"
 #include "../report_header.h"
+#include "../dynres.h"
 
 namespace gx2 { uint64_t flips_presented(); bool uncapped(); void set_uncapped(bool on); }
 
@@ -111,7 +130,11 @@ const bool g_no_host = getenv("WWHD_NO_HOST_INPUT") != nullptr;  // test runs ig
 // ... except keys a test posts itself (WWHD_TEST_POST_KEYS, gfx/input.mm; the hidden test window never
 // has the user's keyboard)
 const bool g_no_host_keys = g_no_host && !getenv("WWHD_TEST_POST_KEYS");
+// ... and the mouse events a test posts (WWHD_TEST_POST_MOUSE, gfx/overlay_appkit.mm: only those reach here then)
+const bool g_no_host_mouse = g_no_host && !getenv("WWHD_TEST_POST_MOUSE");
 bool g_pad_b_used = false;  // B answered a dialog this frame: it does not also close the menu
+// a dialog (or a list) is open in Settings: Esc and Android's Back close it, not the menu (popup.h)
+std::atomic<bool> g_dialog_open{false};
 
 // input events from the host's main thread, replayed into ImGui on the render thread
 struct Event {
@@ -129,8 +152,11 @@ std::vector<Event> g_events;
 // Dear ImGui reads it on the render thread when Ctrl/Cmd+V reaches a text field
 std::string g_clipboard;
 std::atomic<bool> g_wants_text{false};  // a text field of the overlay has the keyboard
-std::atomic<int> g_capture_key{-2};  // remap: key pressed while capturing (-2 none, -1 cancel, -3 clear)
+std::atomic<bool> g_shortcut_capture{false};
+std::atomic<int> g_capture_mods{0};
+std::atomic<int> g_capture_key{-2};  // remap: key pressed while capturing (-2 means none)
 std::atomic<bool> g_capturing_keys{false};
+std::atomic<bool> g_external_capture{false}, g_external_capture_finished{false};
 // keys held while the overlay is open (the Controls tab lights them; the game never sees them)
 std::atomic<bool> g_held_keys[256];
 
@@ -175,7 +201,7 @@ ImGuiKey imgui_key(int code) {
 // ---------------------------------------------------------------- UI state (render thread)
 // the built-in tabs (extensions.h kBuiltinTabs: ids and names); the tab bar is ext::tabs(), which a
 // platform may extend (added tabs, hidden ones)
-enum Tab { kSaves, kGraphics, kDisplay, kAudio, kMods, kControls, kAbout, kTabs };
+enum Tab { kSaves, kGraphics, kDisplay, kAudio, kMods, kControls, kShortcuts, kAbout, kTabs };
 static_assert(kTabs == ext::kBuiltinCount, "a built-in tab per kBuiltinTabs entry");
 
 struct Ui {
@@ -187,6 +213,9 @@ struct Ui {
     // controller
     float values[input_map::kPadCount] = {};
     float prev[input_map::kPadCount] = {};
+    PadValues nav_values{}, nav_prev{};
+    ReleaseGate capture_navigation_gate;
+    bool capture_completed = false;
     GamepadNavigation gamepad_navigation;
     ImVec2 mouse_position = {-FLT_MAX, -FLT_MAX};
     // remap capture: action, column (0, 1 keys; 2 controller)
@@ -197,6 +226,7 @@ struct Ui {
     // save state slots, refreshed twice a second while the Saves tab is shown
     ss::SlotInfo slots[ss::kSlots + 1];
     crashrec::AutoInfo autos[crashrec::kAutoSlots + 1];
+    ss::SlotInfo last_session, auto_saves[ss::convenience::kAutoSaves + 1];
     double slots_time = -1;
     // performance
     double fps_t0 = 0, fps = 0;
@@ -217,12 +247,13 @@ struct Ui {
     bool list_view = false;
 #endif  // Controls: the table instead of the drawing
     int hover_action = -1;   // Controls: input under the cursor (status line)
+    float options_height = 0;  // Controls: the options under the drawing, last frame (they wrap when narrow)
 };
 Ui U;
 
 bool controller_down(int p) { return U.values[p] > 0.5f; }
 bool controller_pressed(int p) { return U.values[p] > 0.5f && U.prev[p] <= 0.5f; }
-bool navigation_pressed(int p) { return U.gamepad_navigation.pressed(U.values, U.prev, p); }
+bool navigation_pressed(int p) { return U.cap_action < 0 && !U.capture_completed && U.gamepad_navigation.pressed(U.nav_values.data(), U.nav_prev.data(), p); }
 int shown_builtin() { return ext::builtin_tab(U.tab); }  // the open tab's Tab, -1 for an added one
 
 void post_changed(std::function<void()> fn) {
@@ -245,10 +276,7 @@ void setup_style() {
     s.WindowPadding = ImVec2(16, 14);
     s.FramePadding = ImVec2(9, 5);
 #ifdef __ANDROID__
-    s.FramePadding = ImVec2(10, 16);
-    s.ItemInnerSpacing = ImVec2(10, 8);
-    s.ScrollbarSize = 49;
-    s.GrabMinSize = 49;
+    mobile_ui::apply_touch_style(s, mobile_ui::Layout{});  // touch-sized controls; each frame sizes them for the screen
 #endif
     s.ItemSpacing = ImVec2(10, 7);
     s.WindowBorderSize = 1;
@@ -351,7 +379,7 @@ void init_context() {
 
 // ---------------------------------------------------------------- test switch
 struct TestSwitch {
-    bool open = false, perf = false;
+    bool open = false, perf = false, quit = false;
     int tab = -1;
     uint64_t at = 1;
     bool done = false;
@@ -367,7 +395,9 @@ TestSwitch parse_test() {
     }
     std::string what = s, tab;
     if (size_t c = s.find(':'); c != std::string::npos) { what = s.substr(0, c); tab = s.substr(c + 1); }
-    t.open = what == "open";
+    // quit: open the menu and choose Quit Game (its confirmation stays up unless WWHD_TEST_QUIT_ANSWER answers)
+    t.quit = what == "quit";
+    t.open = what == "open" || t.quit;
     t.perf = what == "perf";
     if (!tab.empty()) t.tab = ext::tab_index(tab);  // built-in or added (extensions.h)
     return t;
@@ -413,6 +443,9 @@ void read_controller() {
     std::copy(std::begin(U.values), std::end(U.values), std::begin(U.prev));
     if (g_no_host) {
         std::fill(std::begin(U.values), std::end(U.values), 0.0f);
+#ifndef WWHD_SDL_HOST
+        if (getenv("WWHD_TEST_PAD")) { test_pad(U.values); poll_controller_shortcuts(U.values); }
+#endif
         return;
     }
     input::host_controller_values(U.values);
@@ -430,23 +463,16 @@ void read_controller() {
 }
 
 // ---------------------------------------------------------------- widgets
-void help(const char* text) {
-    if (overlay::tooltip_hovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("%s", text);
-}
+using widgets::help;
+using widgets::note;
+using widgets::radio;
+using widgets::check;
+using widgets::selectable;
 void heading(const char* text) {
     ImGui::Spacing();
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.95f, 0.85f, 1.0f));
     ImGui::SeparatorText(text);
     ImGui::PopStyleColor();
-}
-void note(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-void note(const char* fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.78f, 0.84f, 1.0f));
-    ImGui::TextWrappedV(fmt, ap);
-    ImGui::PopStyleColor();
-    va_end(ap);
 }
 void warn(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void warn(const char* fmt, ...) {
@@ -456,28 +482,6 @@ void warn(const char* fmt, ...) {
     ImGui::TextWrappedV(fmt, ap);
     ImGui::PopStyleColor();
     va_end(ap);
-}
-// a radio button that runs `set` on the main thread when chosen
-bool radio(const char* label, bool active, bool enabled = true) {
-    ImGui::BeginDisabled(!enabled);
-    bool clicked = ImGui::RadioButton(label, active) && !active;
-    ImGui::EndDisabled();
-    return clicked;
-}
-bool check(const char* label, bool value, bool* out, bool enabled = true) {
-    ImGui::BeginDisabled(!enabled);
-    bool v = value;
-    bool changed = ImGui::Checkbox(label, &v);
-    ImGui::EndDisabled();
-    *out = v;
-    return changed;
-}
-
-bool selectable(const char* label, bool selected = false, ImGuiSelectableFlags flags = 0, ImVec2 size = ImVec2(0, 0)) {
-#ifdef __ANDROID__
-    size.y = std::max(size.y, ImGui::GetFrameHeight());
-#endif
-    return ImGui::Selectable(label, selected, flags, size);
 }
 
 bool combo(const char* label, int* current, const char* items) {
@@ -507,28 +511,25 @@ void refresh_slots(bool force) {
     U.slots_time = t;
     for (int i = 1; i <= ss::kSlots; i++) U.slots[i] = ss::slot_info(i);
     for (int i = 1; i <= crashrec::kAutoSlots; i++) U.autos[i] = crashrec::auto_info(i);
+    U.last_session = ss::slot_info(ss::convenience::kLastSessionSlot);
+    for (int i = 1; i <= ss::convenience::kAutoSaves; i++) U.auto_saves[i] = ss::slot_info(ss::convenience::kAutoSaveBase + i);
 }
 
 void tab_saves_screenshots();
 void tab_saves_crash_recovery();
+void tab_saves_convenience();
 void tab_saves() {
     refresh_slots(false);
     std::string msg = ss::last_message();
     if (!msg.empty()) note("%s", msg.c_str());
     heading("Save states");
     const bool full = ss::full_states();
-#ifdef __SWITCH__  // (this fork: no keyboard)
-    (void)full;
-    note("A save state keeps your progress and where Link stands (a few KB, no game data). Loading enters that place "
-         "with that progress; enemies and cutscenes start fresh.");
-#else
+    const char* keys = ext::features().keyboard ? " Shift+F1..F5 save in game, F6 loads slot 1, F2..F5 load slots 2..5 (Esc or F1 opens this menu)." : "";
     if (full)
-        note("Full save states: the whole running game (large, contain game data: never share them). Shift+F1..F5 save in "
-             "game, F2..F5 load (F1 opens this menu).");
+        note("Full save states: the whole running game (large, contain game data: never share them).%s", keys);
     else
         note("A save state keeps your progress and where Link stands (a few KB, no game data). Loading enters that place "
-             "with that progress; enemies and cutscenes start fresh. Shift+F1..F5 save in game, F2..F5 load (F1 opens this menu).");
-#endif
+             "with that progress; enemies and cutscenes start fresh.%s", keys);
     if (ImGui::BeginTable("slots", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("Slot", ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableSetupColumn("Saved");
@@ -574,6 +575,7 @@ void tab_saves() {
         }
         ImGui::EndTable();
     }
+    tab_saves_convenience();
     // bug reports: the portable state and the save file, never a full state
     const ext::Features& features = ext::features();
     if (features.clipboard) {
@@ -609,6 +611,12 @@ void tab_saves() {
         help(ss::full_states_forced() ? "Set by WWHD_FULL_SAVE_STATES or a test variable for this start."
                                       : "Saves the whole running game instead (about 300 MB per slot), exactly as it is. "
                                         "These files contain game code and data: never attach them to a bug report.");
+        int savePath=int(ss::save_path());
+        if (ImGui::Combo("Full-state save path", &savePath, "Auto\0Streaming (less memory)\0Fast (background compression)\0"))
+            ss::set_save_path(ss::SavePath(savePath));
+        help("Auto uses less-memory streaming on Android and fast background compression on desktop. "
+             "Applies to manual full states and Crash Recovery; loading works with either path.");
+
     }
     if (features.screenshots) tab_saves_screenshots();
     if (features.full_states) tab_saves_crash_recovery();  // its automatic states are full states
@@ -617,14 +625,14 @@ void tab_saves() {
 void tab_saves_screenshots() {
     heading("Screenshots");
     {
-        // the Screenshot binding (Controls tab): its keys and controller input
+        // The Screenshot shortcut and any migrated single-button controller binding.
         const input_map::Mapping m = input_map::current();
         std::string keys;
-        for (int k : m.keys[input_map::kScreenshot])
-            if (k != input_map::kNoKey) keys += (keys.empty() ? "" : " or ") + input_map::key_label(k);
+        for (auto k : m.shortcuts[input_map::kPhoto].keys)
+            if (k.code != input_map::kNoKey) keys += (keys.empty() ? "" : " or ") + input_map::shortcut_key_label(k);
         if (m.pad[input_map::kScreenshot] != input_map::kPadNone)
             keys += (keys.empty() ? "controller " : " or controller ") + std::string(input_map::pad_short_label(m.pad[input_map::kScreenshot]));
-        if (keys.empty()) note("Screenshot is not bound: set a key in the Controls tab (Screenshot).");
+        if (keys.empty()) note("Screenshot is not bound: set a key in the Shortcuts tab.");
         else note("%s in game saves the TV picture as a PNG at the internal resolution, without this menu (change the key in Controls).", keys.c_str());
     }
     bool gp;
@@ -640,6 +648,52 @@ void tab_saves_screenshots() {
     }
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("%s", screenshot::dir().c_str());
+}
+
+// Last session, Auto save and At start (save_convenience.h): portable states in their own slots
+void tab_saves_convenience() {
+    namespace conv = ss::convenience;
+    heading("Last session and auto saves");
+    auto row = [](int id, const char* name, const ss::SlotInfo& s) {
+        ImGui::PushID(id);
+        ImGui::BeginDisabled(!s.used || !s.compatible);
+        if (ImGui::Button("Load")) {
+            ss::request_load(id);
+            set_open(false, OpenReason::LoadSlot);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        if (s.used && s.compatible) ImGui::Text("%s:  %s%s%s", name, s.when.c_str(), s.area.empty() ? "" : "  -  ", s.area.c_str());
+        else ImGui::TextDisabled("%s:  %s", name, s.used ? "incompatible" : "empty");
+        ImGui::PopID();
+    };
+    row(conv::kLastSessionSlot, "Last session", U.last_session);
+    help("Taken when you quit the game (on Android also when the app goes to the background), unless a cutscene or "
+         "dialogue is running then. A small portable state: your progress and where Link stands.");
+    for (int i = 1; i <= conv::kAutoSaves; i++) {
+        char name[32];
+        snprintf(name, sizeof name, "Auto save %d", i);
+        row(conv::kAutoSaveBase + i, name, U.auto_saves[i]);
+    }
+    const int minutes = ss::auto_save_minutes();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Auto save every");
+    for (int m : conv::kAutoSaveMinutes) {
+        ImGui::SameLine();
+        char label[16];
+        if (m) snprintf(label, sizeof label, "%d min", m);
+        else snprintf(label, sizeof label, "Off");
+        if (radio(label, minutes == m)) ss::set_auto_save_minutes(m);
+    }
+    help("Saves a small portable state in the background into Auto save 1 to 3, the oldest first. If the game is in a "
+         "cutscene or dialogue, it tries again a little later. Separate from Crash Recovery.");
+    const conv::StartChoice start = conv::parse_start(ss::at_start());
+    int current = start.what == conv::Start::kLastSession ? 1 : start.what == conv::Start::kSlot ? 1 + start.slot : 0;
+    if (combo("At start", &current, "Intro as usual\0Continue last session\0Slot 1\0Slot 2\0Slot 3\0Slot 4\0Slot 5\0\0"))
+        ss::set_at_start(current == 0 ? "intro" : current == 1 ? "last" : "slot" + std::to_string(current - 1));
+    help("Loads that state when the game starts, as soon as you continue a Quest Log on the title screen. An empty "
+         "slot starts the game as usual.");
 }
 
 void tab_saves_crash_recovery() {
@@ -684,6 +738,8 @@ std::string performance_report() {
     snprintf(frame, sizeof frame, "FPS %.1f (average %.1f), frame %.2f ms (worst %.2f), average logic steps/s %.1f\n",
              U.fps, g_average.fps, sum / 120.0f, worst, g_average.logic);
     std::string report = std::string(frame) + perf::summary();
+    report += render_objects::line() + "\n";  // live shaders/pipelines, memory mappings (render_objects.h)
+    report += dynres::status() + "\n";
 #ifdef __ANDROID__
     report += android_telemetry() + "\n";
 #endif
@@ -699,7 +755,8 @@ std::string performance_report() {
     h.gpu = performance_device();
     h.renderer = render::api_name(render::active());
     h.host = hostui::name();
-    h.fps = interp::mode() == 2 ? "true 60 fps" : interp::mode() == 1 ? "60 fps interpolation" : "30 fps";
+    h.fps = interp::mode() == 2 ? "true 60 fps" : interp::mode() == 1 ? std::to_string(interp::fps()) + " fps interpolation" : "30 fps";
+    if (interp::mode() == 1) h.keepGameSpeed = interp::paced_interpolation();  // at that rate
     h.scale = hostui::res_scale();
 #ifdef WWHD_HAS_VULKAN
     if (render::vulkan()) {
@@ -776,21 +833,27 @@ void tab_graphics() {
     heading("Frame rate");
     int m = interp::mode(), f = interp::fps();
     if (radio("30 fps (original)", m == 0)) post_changed([] { interp::set_mode(0); });
-    for (int r : {60, 120, 240}) {
+    for (int r : {40, 60, 120, 240}) {
         ImGui::SameLine();
         char label[16];
         snprintf(label, sizeof label, "%d fps", r);
         if (radio(label, m == 1 && f == r)) post_changed([r] { interp::set_fps(r); interp::set_mode(1); });
     }
-    help("60, 120 and 240 fps: frame interpolation. The game logic keeps its 30 steps a second, and the\n"
+    help("40, 60, 120 and 240 fps: frame interpolation. The game logic keeps its 30 steps a second, and the\n"
          "frames in between are drawn blended (1 in-between frame per step at 60 fps, 3 at 120 fps,\n"
-         "7 at 240 fps). The display shows at most its refresh rate: higher choices draw that many.");
+         "7 at 240 fps). The display shows at most its refresh rate: higher choices draw that many.\n"
+         "40 fps draws 4 frames for every 3 steps (1 in-between frame per 3 steps), for 40, 80 and\n"
+         "120 Hz screens (a Steam Deck set to 40 Hz or 80 Hz, phones with a 120 Hz panel).");
     if (radio("True 60 (experimental)", m == 2)) post_changed([] { interp::set_mode(2); });
     help("True 60 runs the game logic at 60 steps per second");
     // the display's refresh rate, and what the chosen rate draws on it (interp::output_fps)
     if (const int hz = interp::display_hz(); hz > 0) {
         const int out = interp::output_fps();
-        if (m == 1 && out < f)
+        if (m == 1 && f == 40 && !interp::pacing::even_on_display(40, hz))
+            note("Your display: %d Hz. 40 fps needs a 40, 80 or 120 Hz screen: here each frame stays on\n"
+                 "screen for 1 or 2 refreshes in turn (uneven motion). Choose 30 or 60 fps, or set the\n"
+                 "screen to 40, 80 or 120 Hz.", hz);
+        else if (m == 1 && out < f)
             note("Your display: %d Hz. %d fps needs a %d Hz display; %d fps are drawn (the display cannot show more).", hz, f, f, out);
         else if (m == 1 && f > hz + 2)
             note("Your display: %d Hz. Frames beyond %d a second are drawn but not shown (presentation without vsync).", hz, hz);
@@ -807,12 +870,30 @@ void tab_graphics() {
              "whole game down. The performance overlay shows how many are drawn.\n"
              "Off: every logic step waits for all of its frames, so if the frame target is not reached\n"
              "(e.g. 120/240 fps at a high internal resolution) the whole game runs in slow motion.\n"
-             "Saved separately for 60 fps (off by default; on by default on Android and Windows on ARM)\n"
+             "Saved separately for 40/60 fps (off by default; on by default on Android and Windows on ARM)\n"
              "and 120/240 fps (on by default).");
         if (!interp::paced_interpolation())
             note("Off: if this computer cannot reach %d fps, the whole game slows down (the performance\n"
                  "overlay then shows fewer than 30 logic steps/s). Turn it on to keep the game's speed.", interp::fps());
     }
+#ifdef __ANDROID__
+    // the heat guard exists on Android only (platform/perf_hint.cpp); WWHD_HEAT_GUARD wins and is not saved
+    {
+        const int hg = heat_guard::choice.load();
+        const bool editable = !heat_guard::env_override();
+        ImGui::TextUnformatted("Heat guard");
+        static const char* const hgNames[] = {"Normal", "Relaxed", "Off"};
+        for (int i = heat_guard::kNormal; i <= heat_guard::kOff; i++) {
+            ImGui::SameLine();
+            char label[24];
+            snprintf(label, sizeof label, "%s##heatguard", hgNames[i]);
+            if (radio(label, hg == i, editable)) post_changed([i] { heat_guard::choice = i; });
+        }
+        help("When the device gets hot, 60 fps pauses until it cools down. Relaxed and Off keep 60 fps\n"
+             "longer, but the device may slow down or get warm. Normal suits this device; Relaxed waits\n"
+             "longer on any device; Off never pauses 60 fps for heat.");
+    }
+#endif
     // debug only, not saved (gx2::uncapped)
     bool unc;
     if (check("Uncapped (debug: the game runs too fast)", gx2::uncapped(), &unc)) hostui::post([unc] { gx2::set_uncapped(unc); });
@@ -831,6 +912,24 @@ void tab_graphics() {
         if (radio(names[i], std::fabs(cur - s) < 0.01f)) post_changed([s] { hostui::set_res_scale(s); });
     }
 
+    heading("Dynamic resolution");
+    {
+        static const float mins[] = {0.0f, 0.75f, 0.5f};
+        static const char* const dnames[] = {"Off##dynres", "Down to 75%##dynres", "Down to 50%##dynres"};
+        const float dm = dynres::min_factor();
+        for (int i = 0; i < 3; i++) {
+            if (i) ImGui::SameLine();
+            const float m = mins[i];
+            if (radio(dnames[i], std::fabs(dm - m) < 0.01f, !dynres::min_from_env()))
+                post_changed([m] { dynres::set_min(m); hostui::set("dynResMin", m > 0 ? std::to_string(m) : "0"); });
+        }
+        help("Lowers the internal resolution while the graphics chip cannot keep up with the frame rate, down to\n"
+             "the chosen share of it, and raises it again when there is room. The picture is softer while it is\n"
+             "lower. Helps where the graphics chip is the limit (phones, older computers at a high resolution);\n"
+             "when the processor is the limit, the resolution stays.");
+        if (dynres::on()) note("%s", dynres::status().c_str());
+    }
+
     float fovPercent=aspect::fov_scale()*100.0f;
     if(ImGui::SliderFloat("Gameplay FOV", &fovPercent,75.0f,250.0f,"%.0f%%",ImGuiSliderFlags_AlwaysClamp))
         post_changed([fovPercent] { aspect::set_fov_scale(fovPercent/100.0f); hostui::set("gameplayFovScale",std::to_string(fovPercent/100.0f)); });
@@ -843,7 +942,7 @@ void tab_graphics() {
     heading("Aspect ratio");
     int am = aspect::mode();
     for (int i = aspect::kOriginal; i <= aspect::k32x9; i++) {
-        if (i) ImGui::SameLine();
+        if (i) flow::next(flow::check(aspect::mode_name(i)));
         if (radio(aspect::mode_name(i), am == i))
             post_changed([i] { aspect::set_mode(i); hostui::set("aspectMode", std::to_string(i)); });
     }
@@ -899,23 +998,42 @@ void tab_graphics() {
     ImGui::SetNextItemWidth(260);
     if (ImGui::SliderFloat("Bloom strength", &bloom, 0.0f, 200.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
         post_changed([bloom] { render::set_bloom_strength(bloom / 100.0f); });
-    ImGui::SameLine();
+    flow::next(flow::button("Off##bloom"));
     if (ImGui::Button("Off##bloom")) post_changed([] { render::set_bloom_strength(0.0f); });
-    ImGui::SameLine();
+    flow::next(flow::button("Default##bloom"));
     if (ImGui::Button("Default##bloom")) post_changed([] { render::set_bloom_strength(1.0f); });
     help("Glow around bright areas. 100% matches the original game; 0% turns bloom off. Applies immediately.");
+    float haze = render::horizon_haze() * 100.0f;
+    ImGui::SetNextItemWidth(260);
+    if (ImGui::SliderFloat("Horizon haze", &haze, 0.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
+        post_changed([haze] { render::set_horizon_haze(haze / 100.0f); });
+    flow::next(flow::button("Default##haze"));
+    if (ImGui::Button("Default##haze")) post_changed([] { render::set_horizon_haze(1.0f); });
+    help("The pale band low in the sky. 100% matches the original game; lower values give a clearer, deeper blue "
+         "sky near the horizon. Together with less bloom it gives a more vivid sky. Applies immediately.");
+    static const char* const cloudStyles[] = {"Clouds: original", "Toon clouds (Lite)", "Toon clouds (High)"};
+    for (int i = 0; i < 3; i++) {
+        if (i) flow::next(flow::check(cloudStyles[i]));
+        if (radio(cloudStyles[i], render::cloud_style() == i)) post_changed([i] { render::set_cloud_style(i); });
+    }
+    help("Original keeps the game's painted clouds. Toon clouds draws them as puffy cel-shaded clouds with sunlit "
+         "tops, shaded undersides and banks along the horizon, from the same clouds the game places, so weather and "
+         "time of day still drive them. Lite is lighter on the GPU (phones, handhelds); High adds self-shadowing.");
+    if (check("Cloud shadows", render::cloud_shadows(), &v)) post_changed([v] { render::set_cloud_shadows(v); });
+    help("Soft shadows of the drifting sky clouds on the sea, islands and characters. Weaker at dusk, off at night. "
+         "Off matches the original game.");
     const bool ao_ok = render::feature_available(render::kFeatureAO);
     static const char* const ao[] = {"AO: original", "AO: centre fix", "AO: centre + noise fix"};
     for (int i = 0; i < 3; i++) {
-        if (i) ImGui::SameLine();
+        if (i) flow::next(flow::check(ao[i]));
         if (radio(ao[i], render::ao_mode() == i, ao_ok)) post_changed([i] { render::set_ao_mode(i); });
     }
     if (check("Full-size occlusion depth", render::ao_hires(), &v, render::feature_available(render::kFeatureAOHires)))
         post_changed([v] { render::set_ao_hires(v); });
-    ImGui::SameLine(0, 30);
+    flow::next(flow::check("16x anisotropic filtering"), 30);
     if (check("16x anisotropic filtering", render::aniso(), &v, render::feature_available(render::kFeatureAniso)))
         post_changed([v] { render::set_aniso(v); });
-    ImGui::SameLine(0, 30);
+    flow::next(flow::check("Edge smoothing (FXAA)"), 30);
     if (check("Edge smoothing (FXAA)", render::fxaa(), &v, render::feature_available(render::kFeatureFXAA)))
         post_changed([v] { render::set_fxaa(v); });
 #if defined(WWHD_HAS_VULKAN) && !defined(__ANDROID__)
@@ -992,23 +1110,301 @@ void tab_graphics() {
         }
         help("Where the renderer spends its time over the last few seconds, as text for a bug report");
     }
+#ifdef WWHD_HAS_VULKAN
+    heading("Advanced");
+    // Vulkan commands recorded and submitted on a worker thread (gfx/vulkan/record_worker.h)
+    constexpr bool recordWorkerDefault = false;  // gfx/vulkan/record_worker.h record_worker_default()
+    static bool recordWorker = [] { std::string value; return hostui::get("vkRecordWorker", value) ? value == "1" : recordWorkerDefault; }();
+    if (check("Record graphics on a second thread", recordWorker, &v, !getenv("WWHD_VK_RECORD_WORKER"))) {
+        recordWorker = v;
+        hostui::post([v] { hostui::set("vkRecordWorker", v ? "1" : "0"); });
+    }
+    help("Applies after restarting the game. Hands the graphics work to a second CPU thread. This can raise "
+         "the frame rate on devices whose CPU holds it back (phones, handhelds). On other computers it can "
+         "make frame times less even (more short hitches). Uses a little more CPU and battery. Off by default.");
+    static bool forceVertexFallback = [] { std::string value; return hostui::get("vkVertexFallback", value) && value == "1"; }();
+    if (check("Force RGB vertex fallback", forceVertexFallback, &v, !getenv("WWHD_VK_VERTEX_FALLBACK"))) {
+        forceVertexFallback = v;
+        hostui::post([v] { hostui::set("vkVertexFallback", v ? "1" : "0"); });
+    }
+    help("Applies after restarting the game. Splits RGB vertex inputs for driver troubleshooting.");
+    // issue #207 driver troubleshooting (gfx/vulkan/vertex_format_policy.h VertexDiagnostics)
+    struct Diagnostic { const char* label; const char* key; const char* env; const char* tip; };
+    static const Diagnostic diagnostics[] = {
+        {"Convert vertices on the CPU", "vkCpuVertices", "WWHD_VK_CPU_VERTICES",
+         "Applies after restarting the game. Byte swap and format conversion of the game's vertices run on the "
+         "CPU instead of the vertex shader (slower; for driver troubleshooting)."},
+        {"Full precision in shaders", "vkFullPrecision", "WWHD_VK_FULL_PRECISION",
+         "Applies after restarting the game. Removes reduced-precision hints from every shader (driver troubleshooting)."},
+        {"No vertex reuse", "vkNoVertexReuse", "WWHD_VK_NO_VERTEX_REUSE",
+         "Applies after restarting the game. Copies and binds every vertex buffer in full for every draw "
+         "(slower; for driver troubleshooting)."},
+    };
+    static bool diagnosticOn[3] = {};
+    static bool diagnosticRead = false;
+    if (!diagnosticRead) {
+        diagnosticRead = true;
+        for (int i = 0; i < 3; ++i) { std::string value; diagnosticOn[i] = hostui::get(diagnostics[i].key, value) && value == "1"; }
+    }
+    static int cpuMode = [] { std::string value; hostui::get("vkCpuVertices", value);
+        return value == "1" ? 1 : value == "0" ? 2 : 0; }();
+    ImGui::BeginDisabled(getenv("WWHD_VK_CPU_VERTICES") != nullptr);
+    if (ImGui::Combo("Convert vertices on the CPU", &cpuMode, "Automatic\0On (all)\0Off\0")) {
+        const std::string value = cpuMode == 1 ? "1" : cpuMode == 2 ? "0" : "auto";
+        hostui::post([value] { hostui::set("vkCpuVertices", value); });
+    }
+    ImGui::EndDisabled();
+    help("Applies after restarting. Automatic converts only what PowerVR GPUs decode wrongly (32-bit byte-swapped data). On converts every attribute; Off disables it.");
+    if (ImGui::TreeNode("Vertex conversion diagnostics")) {
+        static int cpuClass = [] { std::string value; hostui::get("vkCpuVertexClasses", value);
+            const char* names[] = {"", "none", "swap16", "swap32", "snorm", "scaled", "3comp", "unaligned", "integer", "unorm", "all"};
+            for (int i = 0; i < 11; ++i) if (value == names[i]) return i;
+            return 0; }();
+        ImGui::BeginDisabled(cpuMode != 0 || getenv("WWHD_VK_CPU_VERTICES") || getenv("WWHD_VK_CPU_VERTEX_CLASSES"));
+        if (ImGui::Combo("CPU conversion class", &cpuClass,
+            "Driver default\0None\0Swap16\0Swap32\0SNORM\0Scaled integers\0Three components\0Unaligned offset\0Integer\0UNORM\0All\0")) {
+            const char* names[] = {"", "none", "swap16", "swap32", "snorm", "scaled", "3comp", "unaligned", "integer", "unorm", "all"};
+            const std::string value = names[cpuClass];
+            hostui::post([value] { hostui::set("vkCpuVertexClasses", value); });
+        }
+        ImGui::EndDisabled();
+        help("For driver testing. Use Automatic above, select one class, then restart. The log records the active classes.");
+        ImGui::TreePop();
+    }
+    for (int i = 1; i < 3; ++i) {
+        if (check(diagnostics[i].label, diagnosticOn[i], &v, !getenv(diagnostics[i].env))) {
+            diagnosticOn[i] = v;
+            const char* key = diagnostics[i].key;
+            hostui::post([key, v] { hostui::set(key, v ? "1" : "0"); });
+        }
+        help(diagnostics[i].tip);
+    }
+#endif
     heading("Bug reports");
+#ifdef __ANDROID__
+    if (ImGui::Button("Share log")) hostui::post([] {
+        auto* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+        auto activity = static_cast<jobject>(SDL_GetAndroidActivity());
+        if (!env || !activity) return;
+        auto cls = env->GetObjectClass(activity);
+        auto method = env->GetMethodID(cls, "shareLog", "()V");
+        if (method) env->CallVoidMethod(activity, method);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        env->DeleteLocalRef(activity);
+    });
+#endif
     // read once at start-up (main.cpp start_log_file); WWHD_LOG_FILE decides when set
-    static bool logFile = [] { std::string v; return hostui::get("logFile", v) && v == "1"; }();
+    static bool logFile = [] { std::string v;
+#ifdef __ANDROID__
+        return !hostui::get("logFile", v) || v != "0";
+#else
+        return hostui::get("logFile", v) && v == "1";
+#endif
+    }();
     if (check("Write a log file", logFile, &v, !getenv("WWHD_LOG_FILE"))) {
         logFile = v;
         hostui::post([v] { hostui::set("logFile", v ? "1" : "0"); });
     }
+#ifdef __ANDROID__
+    help("Logging is on by default. Share the current and previous run after reproducing a bug. "
+         "User paths are removed; each log stops at 64 MiB. Changes apply on the next start.");
+#else
     help("From the next start: captures/wwhd.log in the game's data folder (the previous run's is kept as "
          "wwhd-previous.log), with your user paths removed. Turn it on before reproducing a bug and attach "
          "the file to the bug report.");
+#endif
+}
+
+// Both previews use the exact same geometry as the host compositor.
+static gfx::Box pip_tv_box() {
+    float x = 0, y = 0, w = 1, h = 1;
+    gfx::main_picture(&x, &y, &w, &h);
+    const ImVec2 ds = ImGui::GetIO().DisplaySize;
+    return {x * ds.x, y * ds.y, w * ds.x, h * ds.y};
+}
+// Dragging and the D-pad place the picture freely (#221): passing over a preset never catches it.
+static void pip_move(gfx::Box tv, float x, float y) {
+    gfx::pip_set_position(gfx::pip_place(tv, gfx::g_drc_aspect, gfx::g_pip_size, x, y));
+}
+// The nine preset targets in the diagram: large enough to see and to hit with a finger.
+static float pip_target_radius() { return std::max(7.0f, ImGui::GetFontSize() * 0.5f); }
+static void pip_diagram() {
+    const gfx::Box screen = pip_tv_box();
+    const float w = std::min(320.0f, ImGui::GetContentRegionAvail().x);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const gfx::Box tv{origin.x, origin.y, w, w * screen.h / screen.w};
+    ImGui::InvisibleButton("Placement diagram", ImVec2(tv.w, tv.h), ImGuiButtonFlags_EnableNav);
+    const bool active = ImGui::IsItemActive(), focused = ImGui::IsItemFocused();
+    auto b = gfx::pip_box(tv, gfx::g_drc_aspect, gfx::g_pip_size, gfx::pip_position());
+    const float radius = pip_target_radius();
+    // A press only becomes a drag once the pointer moves past ImGui's drag threshold. A press that is
+    // released without dragging is a click/tap: on a preset target it snaps there, elsewhere outside the
+    // picture it moves the picture's centre to that point.
+    static ImVec2 offset;
+    static bool pointer = false, dragged = false, grabbed = false;
+    if (ImGui::IsItemActivated()) {
+        pointer = ImGui::GetCurrentContext()->ActiveIdSource == ImGuiInputSource_Mouse;
+        dragged = false;
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        grabbed = m.x >= b.x && m.x <= b.x + b.w && m.y >= b.y && m.y <= b.y + b.h;
+        offset = grabbed ? ImVec2(m.x - b.x - b.w / 2, m.y - b.y - b.h / 2) : ImVec2(0, 0);
+    }
+    if (active && pointer && ImGui::IsMouseDown(0) && ImGui::IsMouseDragging(0))
+        dragged = true;
+    if (active && pointer && dragged) {
+        const auto m = ImGui::GetIO().MousePos;
+        pip_move(tv, (m.x - offset.x - tv.x) / tv.w, (m.y - offset.y - tv.y) / tv.h);
+    }
+    if (ImGui::IsItemDeactivated()) {
+        if (pointer && !dragged) {
+            const ImVec2 m = ImGui::GetIO().MouseClickedPos[0];
+            const int a = gfx::pip_target_at(tv, m.x, m.y, radius * 1.5f);
+            if (a >= 0)
+                gfx::pip_set_position({a, gfx::g_pip_x, gfx::g_pip_y});
+            else if (!grabbed)
+                pip_move(tv, (m.x - tv.x) / tv.w, (m.y - tv.y) / tv.h);
+        }
+        pointer = dragged = false;
+        hostui::post([] { hostui::save_pip_position(); });
+    }
+    if (focused) {
+        for (auto key :
+             {ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadDpadRight, ImGuiKey_GamepadDpadUp, ImGuiKey_GamepadDpadDown,
+              ImGuiKey_LeftArrow, ImGuiKey_RightArrow, ImGuiKey_UpArrow, ImGuiKey_DownArrow})
+            ImGui::SetKeyOwner(key, ImGui::GetItemID(), ImGuiInputFlags_LockThisFrame);
+        auto pressed = [](ImGuiKey key) {
+            return ImGui::IsKeyPressed(key, ImGuiInputFlags_Repeat, ImGui::GetItemID());
+        };
+        float dx = 0, dy = 0;
+        if (pressed(ImGuiKey_GamepadDpadLeft) || pressed(ImGuiKey_LeftArrow))
+            dx = -0.01f;
+        if (pressed(ImGuiKey_GamepadDpadRight) || pressed(ImGuiKey_RightArrow))
+            dx = 0.01f;
+        if (pressed(ImGuiKey_GamepadDpadUp) || pressed(ImGuiKey_UpArrow))
+            dy = -0.01f;
+        if (pressed(ImGuiKey_GamepadDpadDown) || pressed(ImGuiKey_DownArrow))
+            dy = 0.01f;
+        if (dx || dy) {
+            pip_move(tv, (b.x - tv.x + b.w / 2) / tv.w + dx, (b.y - tv.y + b.h / 2) / tv.h + dy);
+            hostui::post([] { hostui::save_pip_position(); });
+        }
+    }
+    b = gfx::pip_box(tv, gfx::g_drc_aspect, gfx::g_pip_size, gfx::pip_position());
+    auto *d = ImGui::GetWindowDrawList();
+    d->AddRectFilled(origin, ImVec2(tv.x + tv.w, tv.y + tv.h), IM_COL32(18, 28, 36, 255));
+    d->AddRect(origin, ImVec2(tv.x + tv.w, tv.y + tv.h),
+               focused ? IM_COL32(255, 210, 80, 255) : IM_COL32(180, 190, 200, 255));
+    d->AddRectFilled(ImVec2(b.x, b.y), ImVec2(b.x + b.w, b.y + b.h),
+                     IM_COL32(75, 180, 220, int(255 * gfx::g_pip_opacity)));
+    d->AddRect(ImVec2(b.x, b.y), ImVec2(b.x + b.w, b.y + b.h), IM_COL32(235, 245, 255, 255));
+    // Targets on top of the picture, so they stay visible at large sizes; the chosen preset is filled.
+    const int anchor = gfx::g_pip_anchor;
+    for (int a = 0; a < gfx::kPipCustom; ++a) {
+        ImVec2 c;
+        gfx::pip_target_centre(tv, a, &c.x, &c.y);
+        d->AddCircleFilled(c, radius, a == anchor ? IM_COL32(255, 210, 80, 235) : IM_COL32(18, 28, 36, 170));
+        d->AddCircle(c, radius, a == anchor ? IM_COL32(255, 240, 200, 255) : IM_COL32(220, 230, 240, 230), 0,
+                     std::max(1.5f, radius * 0.22f));
+    }
+    note("Drag to place the picture anywhere. Click or tap a circle to snap it to that spot. "
+         "Focus the diagram and use the D-pad to move.");
+}
+static void pip_live_drag() {
+    if (!gfx::g_pip_preview)
+        return;
+    const auto tv = pip_tv_box();
+    const auto b = gfx::pip_box(tv, gfx::g_drc_aspect, gfx::g_pip_size, gfx::pip_position());
+    ImGui::SetNextWindowPos(ImVec2(b.x, b.y));
+    ImGui::SetNextWindowSize(ImVec2(b.w, b.h));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    const auto flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove |
+                       ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing;
+    ImGui::Begin("##pip_live_drag", nullptr, flags);
+    ImGui::InvisibleButton("##drag", ImVec2(b.w, b.h));
+    static ImVec2 offset;
+    if (ImGui::IsItemActivated()) {
+        const auto m = ImGui::GetIO().MousePos;
+        offset = ImVec2(m.x - b.x - b.w / 2, m.y - b.y - b.h / 2);
+    }
+    if (ImGui::IsItemActive() && ImGui::IsMouseDown(0)) {
+        const auto m = ImGui::GetIO().MousePos;
+        pip_move(tv, (m.x - offset.x - tv.x) / tv.w, (m.y - offset.y - tv.y) / tv.h);
+    }
+    if (ImGui::IsItemDeactivated())
+        hostui::post([] { hostui::save_pip_position(); });
+    ImGui::GetForegroundDrawList(ImGui::GetMainViewport())->AddRect(ImVec2(b.x, b.y), ImVec2(b.x + b.w, b.y + b.h), IM_COL32(255, 220, 90, 255),
+                                            0, 1.5f);
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
+// One slider per value; the bounds hold for mouse, touch, controller and ImGui's Ctrl+click typing.
+static void pip_percent(const char* label, float value, float minimum, float maximum, void (*save)(float)) {
+    const int lo = int(std::lround(minimum * 100)), hi = int(std::lround(maximum * 100));
+    int percent = std::clamp(int(std::lround(value * 100)), lo, hi);
+    if (ImGui::SliderInt(label, &percent, lo, hi, "%d%%", ImGuiSliderFlags_AlwaysClamp))
+        hostui::post([percent, save] { save(percent / 100.0f); });
 }
 
 void tab_display() {
     bool v;
+    heading("GamePad screen");
+#ifdef __ANDROID__
+    if (check("Swap TV and GamePad displays", hostui::displays_swapped(), &v))
+        hostui::post([v] { hostui::set_displays_swapped(v); });
+#endif
+    // Offer separate-window mode while Android has a usable display, including
+    // when its surface has been released.
+    const int mode = hostui::drc_mode();
+    if (hostui::drc_modes() >= 4) {
+        static const char* const modes[] = {"Separate window", "Picture-in-picture", "Automatic picture-in-picture", "Off", "GamePad only"};
+        if (ImGui::BeginCombo("View", modes[mode])) {
+            for (int i=0; i<5; ++i) {
+                if (hostui::drc_mode_offered(i) && ImGui::Selectable(modes[i],mode==i))
+                    hostui::post([i] { hostui::set_drc_mode(i); });
+            }
+            ImGui::EndCombo();
+        }
+        if (mode == 0)
+            note("Gaming Mode shows one window at a time. A separate GamePad window may make the game picture blurry.");
+        if (mode == 2)
+            note("Shows GamePad menus and the Wind Waker song list while open and follows Off-TV Play.");
+        if (mode == 4)
+            note("Only the GamePad picture. In the game, Minus switches to Off-TV "
+                 "Play (the game on the GamePad).");
+    }
+    if (check(mode == 2 ? "Pin GamePad picture-in-picture" : "Show GamePad screen", hostui::drc_shown(), &v,
+              hostui::drc_available() && (gfx::g_second_display_available ||
+                  !(hostui::drc_modes() >= 4 && (mode == 3 || mode == 4)))))
+        hostui::post([v] { hostui::show_drc(v); });
+    if (hostui::drc_modes() >= 4 && (mode == 1 || mode == 2 || mode == 3)) {
+        bool eligible = true;
+#ifdef __ANDROID__
+        eligible = !gfx::g_has_drc_window;
+#endif
+        if (eligible && ImGui::CollapsingHeader("Picture-in-picture placement", ImGuiTreeNodeFlags_DefaultOpen)) {
+            gfx::g_pip_preview = true;
+            static const char *const names[] = {"Top left",     "Top centre",   "Top right",   "Centre left",
+                                                "Centre",       "Centre right", "Bottom left", "Bottom centre",
+                                                "Bottom right", "Custom"};
+            if (ImGui::BeginCombo("Position", names[hostui::pip_anchor()])) {
+                for (int i = 0; i < 10; ++i)
+                    if (ImGui::Selectable(names[i], hostui::pip_anchor() == i))
+                        hostui::post([i] { hostui::set_pip_anchor(i); });
+                ImGui::EndCombo();
+            }
+            pip_diagram();
+            pip_percent("Size (%)", hostui::pip_size(), gfx::kPipSizeMin, gfx::kPipSizeMax, hostui::set_pip_size);
+            pip_percent("Opacity (%)", hostui::pip_opacity(), gfx::kPipOpacityMin, gfx::kPipOpacityMax,
+                        hostui::set_pip_opacity);
+            note("The game picture previews changes while this section is open.");
+        }
+    }
     heading("Window");
-    if (check("Full screen", hostui::fullscreen(), &v)) hostui::post([v] { hostui::set_fullscreen(v); });
-#ifndef __ANDROID__  // always full screen there
+    if (check("Full screen", hostui::fullscreen(), &v))
+        hostui::post([v] { hostui::set_fullscreen(v); });
+#ifndef __ANDROID__ // always full screen there
     help(!strcmp(hostui::name(), "AppKit") ? "The TV window (Cmd+F); remembered for the next start"
                                            : "The TV window (F11 or Alt+Enter); remembered for the next start");
 #endif
@@ -1016,86 +1412,42 @@ void tab_display() {
     heading("Interface");
     int uiSize = g_ui_size;
     if (combo("UI size", &uiSize, "Automatic\0Small\0Medium\0Large\0"))
-        hostui::post([uiSize] { g_ui_size = uiSize; hostui::set("uiSize", std::to_string(uiSize)); });
-    help("Automatic adapts Settings to your Android device's screen. Choose Small, Medium or Large to adjust the controls.");
+        hostui::post([uiSize] {
+            g_ui_size = uiSize;
+            hostui::set("uiSize", std::to_string(uiSize));
+        });
+    help("Automatic sizes Settings for your screen: more compact on a phone, larger on a tablet or handheld, "
+         "with every button at least 7 mm tall. Small, Medium and Large set the size yourself.");
     heading("Touch controls");
     int touchMode = gfx::g_touch_buttons;
     if (combo("Touch buttons", &touchMode, "Automatic\0Always show\0Hide\0"))
-        hostui::post([touchMode] { gfx::g_touch_buttons = touchMode; hostui::set("touchButtons", std::to_string(touchMode)); });
-    help("Automatic hides the floating buttons while a controller is connected. Tap near the top-left corner to reveal them for five seconds.");
+        hostui::post([touchMode] {
+            gfx::g_touch_buttons = touchMode;
+            hostui::set("touchButtons", std::to_string(touchMode));
+        });
+    help("Automatic hides the floating buttons while a controller is connected. "
+         "Tap near the top-left corner to reveal them for five seconds.");
     if (check("On-screen controls", gfx::g_touch_controls, &v))
-        hostui::post([v] { gfx::g_touch_controls = v; hostui::set("touchControls", v ? "1" : "0"); });
+        hostui::post([v] {
+            gfx::g_touch_controls = v;
+            hostui::set("touchControls", v ? "1" : "0");
+        });
 #endif
     heading("Picture scaling");
-    static const char* const f[] = {"Smooth", "Sharp", "Integer scale (pixel exact)"};
+    static const char *const f[] = {"Smooth", "Sharp", "Integer scale (pixel exact)"};
     const bool fok = hostui::scale_filter_available();
     for (int i = 0; i < 3; i++) {
-        if (i) ImGui::SameLine();
-        if (radio(f[i], hostui::scale_filter() == i, fok)) hostui::post([i] { hostui::set_scale_filter(i); });
+        if (i)
+            flow::next(flow::check(f[i]));
+        if (radio(f[i], hostui::scale_filter() == i, fok))
+            hostui::post([i] { hostui::set_scale_filter(i); });
     }
-    heading("GamePad screen");
-#ifdef __ANDROID__
-    if (check("Swap TV and GamePad displays", hostui::displays_swapped(), &v))
-        hostui::post([v] { hostui::set_displays_swapped(v); });
-#endif
-    // the modes of display_modes.h; a host offers those it can show (no "Separate window" without one,
-    // as on Android)
-    const int mode = hostui::drc_mode();
-    if (hostui::drc_modes() >= 4) {
-        static const char* const modes[] = {"Separate window", "Picture-in-picture", "Automatic picture-in-picture", "Off",
-                                            "GamePad only"};
-        bool first = true;
-        for (int i = 0; i < hostui::drc_modes() && i < 5; i++) {
-            if (!hostui::drc_mode_offered(i)) continue;
-#ifndef __ANDROID__
-            if (!first) ImGui::SameLine();
-#endif
-            first = false;
-            if (radio(modes[i], mode == i)) hostui::post([i] { hostui::set_drc_mode(i); });
-        }
-        if (mode == 2) note("Shows GamePad menus while open and follows Off-TV Play.");
-        if (mode == 4) note("Only the GamePad picture. In the game, Minus switches to Off-TV Play (the game on the GamePad).");
-    }
-    if (check(mode == 2 ? "Pin GamePad picture-in-picture" : "Show GamePad screen", hostui::drc_shown(), &v,
-              hostui::drc_available() && !(hostui::drc_modes() >= 4 && (mode == 3 || mode == 4))))
-        hostui::post([v] { hostui::show_drc(v); });
-    if (hostui::drc_modes() >= 4 && (mode == 1 || mode == 2)) {
-        // the overlay's corner, size and opacity (also in the Display menu on macOS)
-        static const char* const corners[] = {"Top left", "Top right", "Bottom left", "Bottom right"};
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Picture-in-picture corner:");
-        for (int i = 0; i < 4; i++) {
-#ifndef __ANDROID__
-            ImGui::SameLine();
-#endif
-            if (radio(corners[i], hostui::pip_corner() == i)) hostui::post([i] { hostui::set_pip_corner(i); });
-        }
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Size (of the TV picture's width):");
-        for (int s : {20, 25, 33, 40}) {
-            ImGui::SameLine();
-            char l[16];
-            snprintf(l, sizeof l, "%d%%##size", s);
-            if (radio(l, std::fabs(hostui::pip_size() * 100 - s) < 0.5f)) hostui::post([s] { hostui::set_pip_size(s / 100.0f); });
-        }
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Opacity:");
-        for (int o : {100, 85, 70, 50}) {
-            ImGui::SameLine();
-            char l[16];
-            snprintf(l, sizeof l, "%d%%##opacity", o);
-            if (radio(l, std::fabs(hostui::pip_opacity() * 100 - o) < 0.5f)) hostui::post([o] { hostui::set_pip_opacity(o / 100.0f); });
-        }
-        note("A click (or touch) on the GamePad picture touches the GamePad screen.");
-    }
+
 }
 
 mods::catalogue::Version catalogue_port_version() {
-    std::string version=build::version();
-    if(version.starts_with("v"))version.erase(0,1);
-    // "0.2.11+meta" and development builds "0.2.11-devel.<commit>" count as their release
-    version=version.substr(0,version.find_first_of("+-"));
-    try { return mods::catalogue::Version::parse(version); } catch (...) { return {}; }
+    // a build ahead of its release counts as the next one (mods::catalogue::port_version_from_build)
+    return mods::catalogue::port_version_from_build(build::version());
 }
 using setupflow::setup_run;
 using setupflow::setup_run_tick;
@@ -1109,27 +1461,42 @@ void code_mod_dialog() {
     if(g_no_host&&getenv("WWHD_TEST_CODE_MOD_REBUILD")&&!test_accepted&&!status.building&&!status.ready) {
         test_accepted=true;mods::code::begin();
     }
-    ImGui::OpenPopup("Rebuild code-mod support");
-    if(ImGui::BeginPopupModal("Rebuild code-mod support",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+#ifdef __ANDROID__
+    const bool closable=true;  // building: Hide
+#else
+    const bool closable=!status.building;  // building: Cancel rebuild, or wait for it
+#endif
+    if(popup::begin("Rebuild code-mod support",true,0,closable)) {
+        // the X, a tap outside, Esc or B: Later, Hide or Cancel (never cancels a rebuild on desktop)
+        const bool back=navigation_pressed(input_map::face_input(input_map::kB));
+        const bool dismissed=popup::dismissed(back);
+        if(dismissed&&back)g_pad_b_used=true;
+        ImGui::PushTextWrapPos(popup::wrap_pos(30));
         if(status.ready) {
             ImGui::TextWrapped("Game code is ready. Restart the game to apply the change.");
             if(!status.error.empty())ImGui::TextWrapped("%s",status.error.c_str());
             if(ImGui::Button("Restart now"))hostui::post([] {std::string error;if(!mods::code::restart(error))fprintf(stderr,"[code mods] %s\n",error.c_str());});
             ImGui::SameLine();
-            if(ImGui::Button("Later")){mods::code::dismiss();ImGui::CloseCurrentPopup();}
+            if(ImGui::Button("Later")||dismissed){mods::code::dismiss();ImGui::CloseCurrentPopup();}
         } else if(status.building) {
             ImGui::TextUnformatted(status.stage.c_str());
             if(status.total)ImGui::ProgressBar(float(status.done)/status.total,ImVec2(360,0));
+#ifdef __ANDROID__
+            ImGui::TextWrapped("The setup builds it in the background; you can keep playing. Its notification and screen can pause it.");
+            if(ImGui::Button("Hide")||dismissed){mods::code::cancel();mods::code::dismiss();ImGui::CloseCurrentPopup();}
+#else
             if(ImGui::Button("Cancel rebuild"))mods::code::cancel();
+#endif
         } else {
             if(status.target)ImGui::TextWrapped("This mod needs code-mod support. Enable it now?");
-            ImGui::TextWrapped("Code mods need the game code to be rebuilt %s mod support, about 5 minutes. Rebuild now?",status.target?"with":"without");
+            ImGui::TextWrapped("Code mods need the game code to be rebuilt %s mod support, %s. Rebuild now?",status.target?"with":"without",mods::code::rebuild_duration());
             if(!status.error.empty())ImGui::TextWrapped("%s",status.error.c_str());
             if(ImGui::Button("Rebuild now"))mods::code::begin();
             ImGui::SameLine();
-            if(ImGui::Button("Cancel")){mods::code::dismiss();ImGui::CloseCurrentPopup();}
+            if(ImGui::Button("Cancel")||dismissed){mods::code::dismiss();ImGui::CloseCurrentPopup();}
         }
-        ImGui::EndPopup();
+        ImGui::PopTextWrapPos();
+        popup::end();
     }
 }
 
@@ -1183,16 +1550,58 @@ void builtin_options(const std::string& id) {
         float speed = mods::camera_speed();
         if (ImGui::SliderFloat("Camera speed", &speed, .5f, 2.f, "%.2fx"))
             hostui::post([speed] { mods::set_camera_speed(speed); hostui::set("mod.direct-camera.speed", std::to_string(speed)); mods::packages::remember_option("direct-camera.speed", speed); });
+    } else if (id == "lock-on") {
+        float range = mods::lock_on_range();
+        if (ImGui::SliderFloat("Enemy lock-on range", &range, 1.f, 3.f, "%.2fx"))
+            hostui::post([range] { mods::set_lock_on_range(range); hostui::set("mod.lock-on.range", std::to_string(range)); mods::packages::remember_option("lock-on.range", range); });
+        bool cycling = mods::lock_on_cycling();
+        if (ImGui::Checkbox("Cycle enemy targets with R3", &cycling))
+            hostui::post([cycling] { mods::set_lock_on_cycling(cycling); hostui::set("mod.lock-on.cycling", cycling ? "1" : "0"); mods::packages::remember_option("lock-on.cycling", cycling); });
+        help("Range 1 keeps the original enemy targeting distance. Press R3 while locked on "
+             "to cycle enemy targets. Disabling this mod restores original targeting behavior.");
+        for (const char* env : {"WWHD_MOD_LOCK_ON_RANGE", "WWHD_MOD_LOCK_ON_CYCLING"})
+            if (const char* override = std::getenv(env))
+                note("%s=%s overrides the saved option at startup.", env, override);
+    } else if (id == "jump-anywhere") {
+        const char* names[] = {"L", "R", "ZL", "ZR", "L3", "R3"};
+        const uint32_t buttons[] = {input::kL, input::kR, input::kZL, input::kZR, input::kStickL, input::kStickR};
+        for (int i = 0; i < 6; ++i) {
+            if (i) flow::next(flow::check(names[i]));
+            if (radio(names[i], mods::jump_button() == buttons[i])) {
+                auto button = buttons[i];
+                hostui::post([button] { mods::set_jump_button(button); hostui::set("mod.jump-anywhere.button", std::to_string(button)); mods::packages::remember_option("jump-anywhere.button", button); });
+            }
+        }
+        bool dj = mods::double_jump();
+        if (ImGui::Checkbox("Double jump (once more in the air)", &dj))
+            hostui::post([dj] { mods::set_double_jump(dj); hostui::set("mod.jump-anywhere.double", dj ? "1" : "0"); mods::packages::remember_option("jump-anywhere.double", dj); });
+        bool no_auto = mods::no_auto_jump();
+        if (ImGui::Checkbox("No automatic jumps off ledges", &no_auto))
+            hostui::post([no_auto] { mods::set_no_auto_jump(no_auto); hostui::set("mod.jump-anywhere.no-auto", no_auto ? "1" : "0"); mods::packages::remember_option("jump-anywhere.no-auto", no_auto); });
+        help("The button also keeps its normal use. Link drops off ledges instead of jumping when automatic ledge jumps are off; press the button just after leaving the edge to jump. The moon jump cheat takes L while it is on.");
+    } else if (id == "quick-use") {
+        ImGui::TextUnformatted("Quick-use animation speed");
+        for (float speed : {1.f, 1.25f, 1.5f}) {
+            const char* label = speed == 1.f ? "1x (vanilla)" : speed == 1.25f ? "1.25x" : "1.5x";
+            if (speed != 1.f) flow::next(flow::check(label));
+            if (radio(label, mods::quick_use_speed() == speed))
+                hostui::post([speed] { mods::set_quick_use_speed(speed); hostui::set("mod.quick-use.speed", std::to_string(speed)); mods::packages::remember_option("quick-use.speed", speed); });
+        }
+        help("Only accelerates supported upper-body equip and boomerang wind-up for enemy-locked quick use. "
+             "Does not bypass native readiness or ammo, or change projectile speed or flight/return. "
+             "Default: vanilla 1x, with quick use off.");
+        if (const char* override = std::getenv("WWHD_MOD_QUICK_USE_SPEED"))
+            note("WWHD_MOD_QUICK_USE_SPEED=%s overrides the saved speed at startup.", override);
     } else if (id == "fast-forward") {
         for (unsigned rate : {2u, 3u, 4u}) {
-            if (rate != 2) ImGui::SameLine();
+            if (rate != 2) flow::next(flow::check(rate == 2 ? "2x" : rate == 3 ? "3x" : "4x"));
             if (radio(rate == 2 ? "2x" : rate == 3 ? "3x" : "4x", mods::fast_forward_rate() == rate))
                 hostui::post([rate] { mods::set_fast_forward_rate(rate); hostui::set("mod.fast-forward.rate", std::to_string(rate)); mods::packages::remember_option("fast-forward.rate", rate); });
         }
         const char* names[] = {"L3", "R3", "L", "R", "ZL", "ZR"};
         const uint32_t buttons[] = {input::kStickL, input::kStickR, input::kL, input::kR, input::kZL, input::kZR};
         for (int i = 0; i < 6; ++i) {
-            if (i) ImGui::SameLine();
+            if (i) flow::next(flow::check(names[i]));
             if (radio(names[i], mods::fast_forward_button() == buttons[i])) {
                 auto button = buttons[i];
                 hostui::post([button] { mods::set_fast_forward_button(button); hostui::set("mod.fast-forward.button", std::to_string(button)); mods::packages::remember_option("fast-forward.button", button); });
@@ -1205,7 +1614,7 @@ void builtin_options(const std::string& id) {
     } else if (id == "move-speed") {
         if (radio("Hold the button", mods::move_speed_mode() == mods::MoveMode::kHold))
             hostui::post([] { mods::set_move_speed_mode(mods::MoveMode::kHold); hostui::set("mod.move-speed.mode", "0"); mods::packages::remember_option("move-speed.mode", 0); });
-        ImGui::SameLine();
+        flow::next(flow::check("Press to toggle"));
         if (radio("Press to toggle", mods::move_speed_mode() == mods::MoveMode::kToggle))
             hostui::post([] { mods::set_move_speed_mode(mods::MoveMode::kToggle); hostui::set("mod.move-speed.mode", "1"); mods::packages::remember_option("move-speed.mode", 1); });
         if (radio("Native animation, played faster", mods::move_speed_anim() == mods::MoveAnim::kNative))
@@ -1227,25 +1636,38 @@ void builtin_options(const std::string& id) {
         float cooldown = mods::move_speed_cooldown_seconds();
         if (ImGui::SliderFloat("Cooldown", &cooldown, 0.f, 20.f, cooldown <= 0.f ? "none" : "%.1f s"))
             hostui::post([cooldown] { mods::set_move_speed_cooldown_seconds(cooldown); hostui::set("mod.move-speed.cooldown", std::to_string(cooldown)); mods::packages::remember_option("move-speed.cooldown", cooldown); });
+        bool bar = mods::move_speed_bar();
+        if (ImGui::Checkbox("Show boost bar", &bar))
+            hostui::post([bar] { mods::set_move_speed_bar(bar); hostui::set("mod.move-speed.bar", bar ? "1" : "0"); mods::packages::remember_option("move-speed.bar", bar); });
         const char* names[] = {"L3", "R3", "L", "R", "ZL", "ZR"};
         const uint32_t buttons[] = {input::kStickL, input::kStickR, input::kL, input::kR, input::kZL, input::kZR};
         for (int i = 0; i < 6; ++i) {
-            if (i) ImGui::SameLine();
+            if (i) flow::next(flow::check(names[i]));
             if (radio(names[i], mods::move_speed_button() == buttons[i])) {
                 auto button = buttons[i];
                 hostui::post([button] { mods::set_move_speed_button(button); hostui::set("mod.move-speed.button", std::to_string(button)); mods::packages::remember_option("move-speed.button", button); });
             }
         }
+        modsui::same_line_if_fits("Roll, then hold A");
+        if (radio("Roll, then hold A", mods::move_speed_button() == mods::kMoveButtonRollA))
+            hostui::post([] { mods::set_move_speed_button(mods::kMoveButtonRollA); hostui::set("mod.move-speed.button", std::to_string(mods::kMoveButtonRollA)); mods::packages::remember_option("move-speed.button", mods::kMoveButtonRollA); });
+        if (const char* override = std::getenv("WWHD_MOD_MOVE_BUTTON"))
+            note("WWHD_MOD_MOVE_BUTTON=%s overrides the saved button at startup.", override);
         help("A multiplier of 1 leaves that state alone. Boost time is how long a full bar lasts; "
              "0 has no limit, and the bar refills whenever you are not boosting. Cooldown is the "
-             "bar's refill time (0 for immediate refill). The dash option replaces the walk clip "
+             "bar's refill time (0 for immediate refill). With no limit, or with Show boost bar off, "
+             "no bar is shown; the boost works the same. The bar also hides while a menu, "
+             "a cutscene or a conversation is on screen. The dash option replaces the walk clip "
              "while boosting; full-speed running already uses dash. Sprint pose adds a forward "
              "lean and arm drive while running freely, blended with the boost. Rebind the "
-             "chosen game button in Controls.");
-    } else if (id == "ladder-speed" || id == "sidle-speed") {
-        const bool ladder = id == "ladder-speed";
-        const char* key = ladder ? "ladder-speed.factor" : "sidle-speed.factor";
-        float factor = ladder ? mods::ladder_speed_factor() : mods::sidle_speed_factor();
+             "chosen game button in Controls. Roll, then hold A: roll while running and keep A "
+             "held as you come out of the roll to boost until you let go. It is always held "
+             "(Press to toggle does not apply) and works on land only.");
+    } else if (id == "ladder-speed" || id == "sidle-speed" || id == "ivy-speed" || id == "hang-speed") {
+        const char* key = id == "ladder-speed" ? "ladder-speed.factor" : id == "sidle-speed" ? "sidle-speed.factor"
+                        : id == "ivy-speed" ? "ivy-speed.factor" : "hang-speed.factor";
+        float factor = id == "ladder-speed" ? mods::ladder_speed_factor() : id == "sidle-speed" ? mods::sidle_speed_factor()
+                     : id == "ivy-speed" ? mods::ivy_speed_factor() : mods::hang_speed_factor();
         if (ImGui::SliderFloat("Speed", &factor, 1.f, 3.f, "%.2fx"))
             hostui::post([key, factor] { mods::manager::set_traversal_option(key, factor); });
     } else if (id == "sail-speed") {
@@ -1274,11 +1696,17 @@ void cheats() {
     cheat("Give all items", mods::kCheatItems);
     cheat("Equip Master Sword + Mirror Shield (until reload)", mods::kCheatSword);
     cheat("20 hearts, double magic, 5000 rupees", mods::kCheatStats);
+    cheat("Fill the bags (spoils and bait)", mods::kCheatBags);
     static const std::pair<const char*, int> inf[] = {{"Infinite health", mods::kInfHealth}, {"Infinite magic", mods::kInfMagic},
-                                                      {"Infinite arrows and bombs", mods::kInfAmmo}};
-    for (int i = 0; i < 3; i++) {
-        int bit = inf[i].second;
-        if (check(inf[i].first, mods::infinite(bit), &v)) hostui::post([bit, v] { mods::set_infinite(bit, v); });
+                                                      {"Infinite arrows and bombs", mods::kInfAmmo},
+                                                      {"Infinite rupees", mods::kInfRupees},
+                                                      {"Infinite bait and spoils", mods::kInfBags},
+                                                      {"Infinite swimming", mods::kInfBreath},
+                                                      {"Moon jump (hold L; left stick steers)", mods::kMoonJump},
+                                                      {"No fall damage after moon jump", mods::kMoonNoFall}};
+    for (const auto& [label, which] : inf) {
+        int bit = which;
+        if (check(label, mods::infinite(bit), &v)) hostui::post([bit, v] { mods::set_infinite(bit, v); });
     }
     heading("Story cheats (can break story events; use a spare save file)");
     auto story = [first = true](const char* label, int which) mutable {
@@ -1308,11 +1736,12 @@ modsui::Host& mods_host() {
         h.android = true;
 #endif
 #ifdef __SWITCH__
-        h.console = true;  // (this fork)
         h.builtin_code_mods = [] { guestbuiltinui::draw(); };  // (this fork) the code mods built into the NRO
 #endif
         h.test = g_no_host && getenv("WWHD_MOD_MANAGER_DIR");
         h.file_picker = ext::features().file_picker;
+        h.code_mods = ext::features().code_mods;
+        h.mod_downloads = ext::features().mod_downloads;
         return h;
     }();
     h.back = false;
@@ -1327,14 +1756,97 @@ void tab_mods() {
     if (h.b_used) g_pad_b_used = true;
 }
 
+void tab_shortcuts() {
+    using namespace input_map;
+    static int capture_hold = 0;
+    auto m = current();
+    note("Tap a controller button, or hold one and press another. Right-click to clear; Delete, Backspace or X clears the focused binding. Home is listed under Settings. Select used as a hold button is reserved for combinations.");
+    if (ImGui::Button("Reset to defaults")) {
+        m.shortcuts = shortcut_defaults();
+        m.pad[kScreenshot] = kPadNone;
+        set_current(m);
+        U.cap_action = -1; g_capturing_keys = false; capture_hold = 0;
+    }
+    if (U.cap_action >= kActionCount) {
+        int a = U.cap_action - kActionCount;
+        int code = g_capture_key.exchange(-2);
+        bool done = false;
+        if (U.cap_col < 2 && code >= 0 && code < kInputCount && code != kVK_Shift && code != kVK_RightShift &&
+            code != kVK_Control && code != kVK_RightControl && code != kVK_Option && code != kVK_RightOption &&
+            code != kVK_Command && code != kVK_RightCommand) {
+            m.shortcuts[a].keys[U.cap_col] = {code, g_capture_mods.load() & 15};
+            done = true; set_current(m);
+        }
+        if (U.cap_col == 2 && !done) {
+            // Wait for the button that activated the UI to be released before capturing a hold.
+            int& hold = capture_hold;
+            if (U.binding_capture.poll(U.values) > 0 && !hold)
+                for (int p = 1; p < kPadCount; ++p) if (U.values[p] > 0.5f) { hold = p; break; }
+            if (hold && U.values[hold] <= 0.5f) {
+                m.shortcuts[a].hold = kPadNone; m.shortcuts[a].button = hold;
+                if (a == kPhoto) m.pad[kScreenshot] = kPadNone;
+                set_current(m); done = true; hold = 0;
+            }
+            if (hold) for (int p = 1; p < kPadCount; ++p) if (p != hold && U.values[p] > 0.5f) {
+                m.shortcuts[a].hold = hold; m.shortcuts[a].button = p;
+                if (a == kPhoto) m.pad[kScreenshot] = kPadNone;
+                set_current(m); done = true; hold = 0; break;
+            }
+            if (done) hold = 0;
+        }
+        if (done || now_s() - U.cap_started > 15) { U.capture_completed = true; U.cap_action = -1; g_capturing_keys = false; capture_hold = 0; g_pad_b_used = true; }
+        else note(U.cap_col == 2 ? "Tap a controller button, or hold one and press another." : "Press a key or mouse button with optional modifiers.");
+    }
+    if (ImGui::BeginTable("shortcut bindings", 4, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn("Key"); ImGui::TableSetupColumn("Alternate"); ImGui::TableSetupColumn("Controller");
+        ImGui::TableHeadersRow();
+        std::string group;
+        for (int a = 0; a < kShortcutCount; ++a) {
+            if (group != shortcut_info(a).group) {
+                group = shortcut_info(a).group;
+                ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextUnformatted(group.c_str());
+            }
+            ImGui::PushID(a); ImGui::TableNextRow(); ImGui::TableNextColumn();
+            const bool conflict = shortcut_conflict(m, a);
+            if (conflict) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.45f, 0.3f, 1));
+            ImGui::TextWrapped("%s%s", shortcut_info(a).name, conflict ? " (conflict)" : "");
+            if (conflict) ImGui::PopStyleColor();
+            for (int col = 0; col < 3; ++col) {
+                ImGui::TableNextColumn(); ImGui::PushID(col);
+                const auto& b = m.shortcuts[a];
+                std::string label = col < 2 ? shortcut_key_label(b.keys[col]) :
+                    b.hold ? "Hold " + std::string(pad_short_label(b.hold)) + " + " + pad_short_label(b.button) :
+                    b.button ? std::string(pad_short_label(b.button)) :
+                    a == kPhoto && m.pad[kScreenshot] ? std::string(pad_short_label(m.pad[kScreenshot])) + " (legacy)" : "Unbound";
+                if (U.cap_action == kActionCount + a && U.cap_col == col) label = "Press...";
+                if (ImGui::Button((label + "###shortcut_binding").c_str(), ImVec2(-FLT_MIN, 0)) && U.cap_action < 0) {
+                    U.cap_action = kActionCount + a; U.cap_col = col; U.cap_started = now_s();
+                    U.binding_capture.reset(); capture_hold = 0; g_capture_key = -2; g_shortcut_capture = true; g_capturing_keys = true;
+                }
+                if (binding_clear_requested(U.cap_action >= 0 || U.capture_completed)) {
+                    if (col < 2) m.shortcuts[a].keys[col] = {};
+                    else { m.shortcuts[a].hold = m.shortcuts[a].button = 0; if (a == kPhoto) m.pad[kScreenshot] = 0; }
+                    if (settings_reachable(m)) set_current(m);
+                    U.cap_action = -1; g_capturing_keys = false; capture_hold = 0;
+                }
+                ImGui::PopID();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+}
+
 void start_capture(int a, int col) {
+    g_shortcut_capture = false;
     U.cap_action = a;
     U.cap_col = col;
     U.binding_capture.reset();
     U.cap_started = now_s();
     U.cap_note.clear();
     g_capture_key = -2;
-    g_capturing_keys = col != kColPad;
+    g_capturing_keys = true;
 }
 
 void clear_binding(int a, int col) {
@@ -1345,19 +1857,14 @@ void clear_binding(int a, int col) {
 }
 
 void apply_capture() {
-    if (U.cap_action < 0) return;
+    // Shortcuts owns its encoded action IDs and must receive the pending input itself.
+    if (U.cap_action < 0 || U.cap_action >= input_map::kActionCount) return;
     using namespace input_map;
     input_map::Mapping m = input_map::current();
     const int a = U.cap_action, colm = U.cap_col;
     int code = g_capture_key.exchange(-2);
     bool done = false;
-    if (code == -1) done = true;  // Esc: cancel
-    else if (code == -3) {         // Backspace / Delete: clear
-        if (colm == kColPad) set_pad_binding(m, a, kPadNone);
-        else m.keys[a][colm == kColAny ? 0 : colm] = kNoKey;
-        input_map::set_current(m);
-        done = true;
-    } else if (code >= 0 && colm != kColPad) {
+    if (code >= 0 && colm != kColPad) {
         if (const char* r = input_map::reserved_key(code)) U.cap_note = std::string("That key is used for ") + r;
         else {
             m.keys[a][colm == kColAny ? 0 : colm] = code;
@@ -1380,6 +1887,7 @@ void apply_capture() {
     }
     if (!done && now_s() - U.cap_started > 8) done = true;  // nothing pressed: give up
     if (done) {
+        U.capture_completed = true;
         U.cap_action = -1;
         g_capturing_keys = false;
     }
@@ -1403,7 +1911,7 @@ void controls_list(input_map::Mapping& m, float h) {
         ImGui::TableSetupColumn("Key 2");
         ImGui::TableSetupColumn("Controller");
         ImGui::TableHeadersRow();
-        for (int a = 0; a < input_map::kActionCount; a++) {
+        for (int a = 0; a < input_map::kScreenshot; a++) {
             ImGui::PushID(a);
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
@@ -1420,9 +1928,7 @@ void controls_list(input_map::Mapping& m, float h) {
                 else label = m.pad[a] == input_map::kPadNone ? "-" : input_map::pad_label(m.pad[a]);
                 label += "##c" + std::to_string(col);
                 if (ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, 0)) && U.cap_action < 0) start_capture(a, col);
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right) ||
-                    (ImGui::IsItemFocused() && U.cap_action < 0 &&
-                     (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false))))
+                if (binding_clear_requested(U.cap_action >= 0 || U.capture_completed))
                     clear_binding(a, col);
             }
             ImGui::PopID();
@@ -1439,129 +1945,43 @@ void save_gyro(const motion::Settings& g) {
     });
 }
 void load_gyro() {
-    motion::Settings g;
+    std::vector<std::pair<std::string, std::string>> saved;
     std::string v;
-    bool saved = false, axis = false;
     for (const char* k : motion::kKeys)
-        if (hostui::get(k, v)) {
-            motion::from_kv(g, k, v);
-            saved = true;
-            axis |= !strcmp(k, "gyro.axis");
-        }
-    if (saved && !axis) motion::upgrade_from_first_release(g);
-    motion::set_settings(g);
+        if (hostui::get(k, v)) saved.emplace_back(k, v);
+    motion::set_settings(motion::from_saved(saved));
 }
-// the Gyro window (Controls tab > Gyro...): source, axis, sensitivity, invert, recalibrate, Cemuhook server
+// the Gyro dialog (Controls tab > Gyro..., gyro_popup.h): what it changes is saved at once
 void gyro_window(bool& open) {
-    const char* title = "Gyro aiming##gyro";
-    if (open) { ImGui::OpenPopup(title); open = false; }
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) return;
     motion::Settings g = motion::settings(), before = g;
-    bool v;
-    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 34);
-    note("On the Wii U you aim in first person (bow, hookshot, boomerang, telescope, Picto Box, grappling hook) by "
-         "moving the GamePad. This works with the GamePad and the Pro Controller choice alike. The game's own "
-         "Options > Gyro switch still decides whether it uses the motion, and it ignores the motion while the right "
-         "stick is pushed.");
-    for (int i = 0; i < motion::kSourceCount; i++)
-        if (radio(motion::source_label(i), g.source == i)) g.source = i;
-    if (motion::env_override()) note("WWHD_GYRO=%s overrides the saved source.", getenv("WWHD_GYRO"));
-    if (g.source == motion::kOff && motion::gyro_controllers() > 0) note("A controller with a gyro is connected: choose Controller gyro to use it.");
-    if (g.source == motion::kController || g.source == motion::kCemuhook) {
-        ImGui::TextUnformatted("Turn left/right by");
-        for (int a = 0; a < motion::kAxisModeCount; a++) {
-            ImGui::SameLine();
-            if (radio(motion::axis_label(a), g.tuning.axis == a)) g.tuning.axis = a;
-        }
-        help("Player space: turning the controller left or right about the real vertical, however you hold it "
-             "(recommended). Yaw: turning it about its own vertical axis (as if it lay flat). Roll: tilting it to "
-             "the side like a steering wheel. Tilting its top up or down always looks up or down.");
-    }
-    const float lo = motion::Tuning::kMinSensitivity, hi = motion::Tuning::kMaxSensitivity;
-    ImGui::SetNextItemWidth(220);
-    ImGui::SliderFloat("Sensitivity left/right", &g.tuning.sensitivity_x, lo, hi, "%.2fx", ImGuiSliderFlags_Logarithmic);
-    ImGui::SameLine(0, 16);
-    if (check("Invert##x", g.tuning.invert_x, &v)) g.tuning.invert_x = v;
-    ImGui::SetNextItemWidth(220);
-    ImGui::SliderFloat("Sensitivity up/down", &g.tuning.sensitivity_y, lo, hi, "%.2fx", ImGuiSliderFlags_Logarithmic);
-    ImGui::SameLine(0, 16);
-    if (check("Invert##y", g.tuning.invert_y, &v)) g.tuning.invert_y = v;
-    if (ImGui::Button("Default sensitivity"))
-        g.tuning.sensitivity_x = g.tuning.sensitivity_y = motion::Tuning::kDefaultSensitivity;
-    help("1.0 turns the view as far as moving a real Wii U GamePad by the same angle would (about twice the "
-         "controller's turn); the default 0.5 lets the view follow the controller about one to one.");
-    if (g.source == motion::kMouse) {
-        ImGui::SetNextItemWidth(220);
-        ImGui::SliderFloat("Mouse: degrees per point", &g.mouse_degrees, 0.01f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
-        help("How far one point of mouse movement turns the GamePad (before the sensitivity above). With Steam "
-             "Input's gyro to mouse, tune this and Steam's own sensitivity together.");
-        note("While the game aims, the pointer is captured and the mouse turns the GamePad (the mouse camera mod "
-             "leaves it alone then).");
-    }
-    if (g.source == motion::kCemuhook) {
-        static char host[256] = "";
-        static int port = 0;
-        static bool init = false;
-        if (!init || ImGui::IsWindowAppearing()) { snprintf(host, sizeof host, "%s", g.dsu_host.c_str()); port = g.dsu_port; init = true; }
-        ImGui::SetNextItemWidth(220);
-        if (text_entry::field("Server", host, sizeof host, ImGuiInputTextFlags_EnterReturnsTrue) || ImGui::IsItemDeactivatedAfterEdit())
-            g.dsu_host = host[0] ? host : "127.0.0.1";
-        ImGui::SetNextItemWidth(120);
-        if (ImGui::InputInt("Port", &port, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue) || ImGui::IsItemDeactivatedAfterEdit())
-            g.dsu_port = std::clamp(port, 1, 65535);
-        ImGui::SetNextItemWidth(120);
-        int slot = g.dsu_slot + 1;
-        if (ImGui::SliderInt("Controller slot", &slot, 1, 4)) g.dsu_slot = slot - 1;
-        note("A Cemuhook (DSU) server: DS4Windows, BetterJoy, SteamDeckGyroDSU or a phone app; default 127.0.0.1, port 26760.");
-    }
-    // recalibrate: a controller input and/or a key
-    const char* pad_name = g.recenter_pad > 0 ? input_map::pad_label(g.recenter_pad) : "None";
-    ImGui::SetNextItemWidth(220);
-    if (ImGui::BeginCombo("Recalibrate: controller", pad_name)) {
-        for (int p = 0; p < input_map::kPadCount; p++)
-            if (selectable(p ? input_map::pad_label(p) : "None", g.recenter_pad == p)) g.recenter_pad = p;
-        ImGui::EndCombo();
-    }
-    std::string key_name = g.recenter_key >= 0 ? input_map::key_label(g.recenter_key) : "None";
-    ImGui::SetNextItemWidth(220);
-    if (ImGui::BeginCombo("Recalibrate: key", key_name.c_str())) {
-        if (selectable("None", g.recenter_key < 0)) g.recenter_key = -1;
-        for (int k = 0; k < 256; k++) {
-            std::string id = input_map::key_id(k);
-            if (id.rfind("Key", 0) == 0) continue;  // unnamed codes
-            if (selectable(input_map::key_label(k).c_str(), g.recenter_key == k)) g.recenter_key = k;
-        }
-        ImGui::EndCombo();
-    }
-    help("If the view drifts while the controller rests, recalibrate and put the controller down for a second: "
-         "the gyro's offset is learnt anew. The button or key also reaches the game if the controls use it; pick "
-         "a free one.");
-    if (ImGui::Button("Recalibrate now")) motion::recalibrate();
-    ImGui::SameLine();
-    ImGui::TextUnformatted(motion::status().c_str());
-    ImGui::PopTextWrapPos();
+    const bool back = navigation_pressed(input_map::face_input(input_map::kB));
+    if (gyro::dialog(open, g, back)) g_pad_b_used = true;  // B closed the dialog: the menu stays open
+    open = false;
     if (!(g == before)) save_gyro(g);
-    if (ImGui::Button("Close") || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) ImGui::CloseCurrentPopup();
-    ImGui::EndPopup();
 }
 
 void tab_controls() {
     bool v;
+    // a grey note after a row's choices: on the same line when it fits (flow_layout.h)
+    auto disabled_after = [](const std::string& text) {
+        flow::next(flow::text(text.c_str()));
+        ImGui::TextDisabled("%s", text.c_str());
+    };
     input_map::Mapping m = input_map::current();
     // top: which controller the keyboard and controllers act as (the drawing follows), view switch
     const bool pro = input::pro_controller();
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Keyboard and controllers act as");
-    ImGui::SameLine();
+    flow::next(flow::check("Wii U GamePad"));
     // the choice is saved (issue #26: every start went back to the GamePad and showed its screen)
     if (radio("Wii U GamePad", !pro))
         hostui::post([] { hostui::set_pro_controller(false); hostui::set("proController", "0"); });
-    ImGui::SameLine();
+    flow::next(flow::check("Wii U Pro Controller"));
     if (radio("Wii U Pro Controller", pro))
         hostui::post([] { hostui::set_pro_controller(true); hostui::set("proController", "1"); });
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - ImGui::CalcTextSize("List view").x -
-                    ImGui::GetFrameHeight() - ImGui::GetStyle().ItemInnerSpacing.x);
+    // List view at the right edge, or on the next line when the row leaves no room (phones)
+    flow::next(flow::check("List view"));
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - flow::check("List view")));
     ImGui::Checkbox("List view", &U.list_view);
     help("A plain table of all inputs instead of the controller drawing");
     if (check("Skip controller selection", m.skip_controller_selection, &v)) {
@@ -1573,34 +1993,31 @@ void tab_controls() {
     const input_map::FaceLayout fl = input_map::face_layout(m);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Face buttons");
-    ImGui::SameLine();
+    flow::next(flow::check(input_map::face_layout_label(input_map::FaceLayout::kPosition)));
     if (radio(input_map::face_layout_label(input_map::FaceLayout::kPosition),
               !m.face_auto && fl == input_map::FaceLayout::kPosition)) {
         input_map::apply_face_layout(m, input_map::FaceLayout::kPosition);
         input_map::set_current(m);
     }
-    ImGui::SameLine();
+    flow::next(flow::check(input_map::face_layout_label(input_map::FaceLayout::kLabels)));
     if (radio(input_map::face_layout_label(input_map::FaceLayout::kLabels),
               !m.face_auto && fl == input_map::FaceLayout::kLabels)) {
         input_map::apply_face_layout(m, input_map::FaceLayout::kLabels);
         input_map::set_current(m);
     }
-    ImGui::SameLine();
+    flow::next(flow::check("automatic"));
     if (radio("automatic", m.face_auto)) {
         input_map::set_face_auto(m, true);
         input_map::set_current(m);
     }
-    help("How the controller's face buttons drive the Wii U's A/B/X/Y. By position: the bottom "
-         "button is B (Nintendo layout). By label: the button named A is A — on an Xbox pad that "
-         "makes A accept/act and B go back (issue #78). Automatic reads the labels printed on the "
-         "pad that was plugged in first and follows them. Only these four bindings are rewritten; "
-         "keyboard keys and the other inputs stay as they are.");
+    help("Which physical button does each Wii U action. By position: right is A, bottom B, "
+         "top X and left Y. By label: A does A, B does B, X does X and Y does Y. Automatic "
+         "reads the connected pad's labels. Button prompts below chooses how those buttons "
+         "look in the game. Only the four face bindings change.");
     if (m.face_auto) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(-> %s)", input_map::face_layout_label(fl));
+        disabled_after(std::string("(-> ") + input_map::face_layout_label(fl) + ")");
     } else if (fl == input_map::FaceLayout::kCustom) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(custom)");
+        disabled_after("(custom)");
     }
     // in-game button prompts (#110, #143): what the game's own button icons look like
     {
@@ -1611,26 +2028,27 @@ void tab_controls() {
         ImGui::TextUnformatted("Button prompts");
         ImGui::PushID("prompts");  // "automatic" is also a face-buttons choice
         for (P p : {P::kAuto, P::kOriginal, P::kXbox, P::kPlayStation}) {
-            ImGui::SameLine();
+            flow::next(flow::check(input_map::prompts_label(p)));
             if (radio(input_map::prompts_label(p), m.prompts == p)) {
                 m.prompts = p;
                 input_map::set_current(m);
             }
         }
         ImGui::PopID();
-        help("How the game's button icons look while the face buttons are by label. Automatic: "
-             "PlayStation shapes on a PlayStation controller, the Xbox colours and positions on any "
-             "other. Original keeps the game's look. By position always keeps the game's look: its "
-             "prompts then already match the buttons' positions.");
-        ImGui::SameLine();
-        ImGui::TextDisabled("(-> %s)", look.face == input_map::FaceStyle::kPlayStation ? "PlayStation"
+        help("How the game's button icons look, with any face-button setting. Xbox and "
+             "PlayStation show the button bound to each Wii U action. By position on Xbox, "
+             "roll shows B and sword shows A. Automatic follows the connected pad; Nintendo "
+             "keeps the game's look. By label keeps its existing automatic Xbox fallback. "
+             "Original keeps the game's look. Custom bindings need four distinct face buttons; "
+             "otherwise the original icons are used.");
+        disabled_after(std::string("(-> ") + (look.face == input_map::FaceStyle::kPlayStation ? "PlayStation"
                                        : look.face == input_map::FaceStyle::kXbox      ? "Xbox"
-                                                                                       : "original");
+                                                                                       : "original") + ")");
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Shoulder names");
         ImGui::PushID("shoulders");
         for (N n : {N::kAuto, N::kNintendo, N::kNumbered, N::kXbox}) {
-            ImGui::SameLine();
+            flow::next(flow::check(input_map::shoulder_names_label(n)));
             if (radio(input_map::shoulder_names_label(n), m.shoulder_names == n)) {
                 m.shoulder_names = n;
                 input_map::set_current(m);
@@ -1641,10 +2059,9 @@ void tab_controls() {
              "prompts: LB / RB / LT / RT with the Xbox look, L1 / R1 / L2 / R2 with the PlayStation "
              "shapes, the game's L / R / ZL / ZR otherwise. A fixed choice applies with any face "
              "buttons setting.");
-        ImGui::SameLine();
-        ImGui::TextDisabled("(-> %s)", look.shoulders == input_map::ShoulderStyle::kXbox       ? "LB / RB / LT / RT"
+        disabled_after(std::string("(-> ") + (look.shoulders == input_map::ShoulderStyle::kXbox       ? "LB / RB / LT / RT"
                                        : look.shoulders == input_map::ShoulderStyle::kNumbered ? "L1 / R1 / L2 / R2"
-                                                                                               : "L / R / ZL / ZR");
+                                                                                               : "L / R / ZL / ZR") + ")");
         bool colours = m.prompt_colours;
         if (ImGui::Checkbox("Coloured face buttons", &colours)) {
             m.prompt_colours = colours;
@@ -1660,9 +2077,9 @@ void tab_controls() {
     if (U.cap_action >= 0) {
         sc = ImVec4(1.0f, 0.85f, 0.35f, 1.0f);
         status = std::string(input_map::action_label(U.cap_action)) + ": " +
-                 (U.cap_col == kColPad   ? "press a controller button or stick direction (Esc cancels)"
-                  : U.cap_col == kColAny ? "press a key, mouse button or controller button (Esc cancels, Backspace clears)"
-                                         : "press a key or mouse button (Esc cancels, Backspace clears)");
+                 (U.cap_col == kColPad   ? "press a controller button or stick direction (the next input is recorded)"
+                  : U.cap_col == kColAny ? "press a key, mouse button or controller button (the next input is recorded)"
+                                         : "press a key or mouse button (the next input is recorded)");
     } else if (!U.cap_note.empty()) {
         status = U.cap_note;
     } else if (U.hover_action >= 0) {
@@ -1674,7 +2091,8 @@ void tab_controls() {
     } else {
         status = "Select a button on the controller or a chip to rebind it. Changes are saved to controls.json.";
     }
-    const float bottom = ImGui::GetFrameHeightWithSpacing() * 3 + 4;  // status, options, stick range
+    // status line and the options below (as tall as they came out last frame: more lines when they wrap)
+    const float bottom = ImGui::GetTextLineHeightWithSpacing() + std::max(U.options_height, ImGui::GetFrameHeightWithSpacing() * 2) + 4;
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float h = std::max(160.0f, avail.y - bottom);
     U.hover_action = -1;
@@ -1696,7 +2114,7 @@ void tab_controls() {
         static bool keys[256];
         for (int i = 0; i < 256; i++) keys[i] = g_held_keys[i].load(std::memory_order_relaxed);
         cv.keys = keys;
-        for (int a = 0; a < input_map::kActionCount; a++) {
+        for (int a = 0; a < input_map::kScreenshot; a++) {
             float x = 0;
             for (int key : m.keys[a])
                 if (key != input_map::kNoKey && keys[key]) x = 1;
@@ -1717,56 +2135,49 @@ void tab_controls() {
     ImGui::PushStyleColor(ImGuiCol_Text, sc);
     ImGui::TextUnformatted(status.c_str());
     ImGui::PopStyleColor();
-    float dz = m.deadzone * 100.0f;
-    ImGui::SetNextItemWidth(200);
-    if (ImGui::SliderFloat("Stick dead zone", &dz, 0.0f, 90.0f, "%.0f%%")) {
-        m.deadzone = std::clamp(dz / 100.0f, 0.0f, 0.9f);
-        input_map::set_current(m);
-    }
-    if (overlay::tooltip_hovered())
-        ImGui::SetTooltip("Default: 15%%. Filters resting-stick drift on both sticks.");
-    ImGui::SameLine(0, 24);
-    if (check("Invert camera up/down", m.invert_camera_y, &v)) {
-        m.invert_camera_y = v;
-        input_map::set_current(m);
-    }
-    if (overlay::tooltip_hovered())
-        ImGui::SetTooltip("Camera only, including first-person views and item aiming (bow, hookshot, telescope, Picto Box) and the mouse camera. The Wind Waker baton and other right-stick controls are not inverted.");
-    ImGui::SameLine(0, 24);
-    // issue #35: a way to keep the controller motors still (saved; WWHD_RUMBLE=0 starts with it off)
-    if (check("Rumble", rumble::enabled(), &v, input::has_rumble())) {
-        rumble::set_enabled(v);
-        hostui::post([v] { hostui::set("rumble", v ? "1" : "0"); });
-    }
-    help(input::has_rumble() ? "Controller vibration when the game asks for it. Off keeps the motors still."
-                             : "Controller vibration: this host does not drive controller motors yet.");
-    ImGui::SameLine(0, 24);
+    // the options below (controls_options.h): they wrap in a narrow window (phones)
+    const float optionsTop = ImGui::GetCursorPosY();
+    controls_options::Values o;
+    o.deadzone = m.deadzone;
+    o.invert_camera_y = m.invert_camera_y;
+    o.rumble = rumble::enabled();
+    o.rumble_available = input::has_rumble();
+#ifdef __ANDROID__
+    o.phone_vibration = phone_rumble::choice.load();
+#endif
     static bool gyro_open = false;
-    {
-        const motion::Settings g = motion::settings();
-        std::string label = std::string("Gyro: ") + (g.source == motion::kOff ? "off" : motion::source_label(g.source)) + "...";
-        if (ImGui::Button(label.c_str())) gyro_open = true;
-        help("Aim in first person by moving a controller with a gyro, a Cemuhook (DSU) source or the mouse (Steam Input)");
+    const motion::Settings gs = motion::settings();
+    const std::string gyro_label = std::string("Gyro: ") + (gs.source == motion::kOff ? "off" : motion::source_label(gs.source)) + "...";
+    o.gyro_label = gyro_label.c_str();
+    o.range[0] = m.left_range;
+    o.range[1] = m.right_range;
+    o.range_min = input_map::kMinStickRange;
+    o.range_max = input_map::kMaxStickRange;
+    const unsigned changed = controls_options::draw(o);
+    U.options_height = ImGui::GetCursorPosY() - optionsTop;
+    if (changed & (controls_options::kDeadzone | controls_options::kInvert | controls_options::kRangeLeft |
+                   controls_options::kRangeRight)) {
+        m.deadzone = o.deadzone;
+        m.invert_camera_y = o.invert_camera_y;
+        m.left_range = o.range[0];
+        m.right_range = o.range[1];
+        input_map::set_current(m);
     }
+    if (changed & controls_options::kRumble) {
+        const bool on = o.rumble;
+        rumble::set_enabled(on);
+        hostui::post([on] { hostui::set("rumble", on ? "1" : "0"); });
+    }
+#ifdef __ANDROID__
+    if (changed & controls_options::kPhone) {
+        const int phone = o.phone_vibration;
+        phone_rumble::choice = static_cast<phone_rumble::Mode>(phone);
+        hostui::post([phone] { hostui::set("phoneRumble", std::to_string(phone)); });
+    }
+#endif
+    if (changed & controls_options::kGyro) gyro_open = true;
     gyro_window(gyro_open);
-    ImGui::SameLine(0, 24);
-    if (ImGui::Button("Reset to defaults")) input_map::set_current(input_map::Mapping::defaults());
-    // issue #40: per-stick range, applied after the dead zone (live, saved with the controls)
-    float* ranges[2] = {&m.left_range, &m.right_range};
-    const char* const labels[2] = {"Left stick range", "Right stick range"};
-    for (int k = 0; k < 2; k++) {
-        if (k) ImGui::SameLine(0, 24);
-        float r = *ranges[k] * 100.0f;
-        ImGui::SetNextItemWidth(200);
-        if (ImGui::SliderFloat(labels[k], &r, input_map::kMinStickRange * 100.0f, input_map::kMaxStickRange * 100.0f, "%.0f%%")) {
-            *ranges[k] = std::clamp(std::round(r) / 100.0f, input_map::kMinStickRange, input_map::kMaxStickRange);
-            input_map::set_current(m);
-        }
-        help("Default: 100% (no change). Scales the stick after the dead zone so a short stick reaches full deflection.");
-    }
-    ImGui::SameLine(0, 24);
-    ImGui::AlignTextToFramePadding();
-    note("Raise if your stick can't reach full deflection, e.g. the Wind Waker baton's directions don't register.");
+    if (changed & controls_options::kReset) input_map::set_current(input_map::Mapping::defaults());
 }
 
 int saved_language() {
@@ -1834,7 +2245,7 @@ void tab_about() {
              "languages need a disc that carries them.", game_lang::region().c_str(), language_list(avail).c_str());
     ImGui::BeginDisabled(env_set);
     for (int i : {1, 2, 5, 3, 4, 8, 9, 10, 7, 0, 6, 11}) {
-        if (i != 1 && i != 3 && i != 9 && i != 0) ImGui::SameLine();  // rows of three
+        if (i != 1 && i != 3 && i != 9 && i != 0) flow::next(flow::check(game_lang::name(i)));  // rows of three
         if (radio(game_lang::name(i), U.language == i && U.language_region == game_lang::kNoRegion,
                   game_lang::is_available(i)))
             choose_language(i, game_lang::kNoRegion);
@@ -1880,24 +2291,33 @@ void tab_about() {
     if (*build::variant())  // the decomp build (docs/decomp-build.md)
         ImGui::Text("%s (%s), %s build: the game code runs from the decompiled source (experimental)", build::version(),
                     build::commit(), build::variant());
+    if (!ext::features().keyboard) {  // a controller only
 #ifdef __SWITCH__  // (this fork)
-    note("Settings overlay: hold Minus for half a second (a short Minus goes to the game). B or Minus closes. "
-#elif defined(__APPLE__)
-    note("Settings overlay: F1 (Fn+F1 on most Mac keyboards), Cmd+, or Settings... in the app menu, or hold Select / "
-         "press Home on a controller. Esc, F1 or B closes. "
+        note("Settings overlay: hold Minus for half a second (a short Minus goes to the game). B or Minus closes. "
+             "L / R switch tabs. The game keeps running and sees no input while this menu is open.");
 #else
-    note("Settings overlay: F1, or hold Select / press Home on a controller. Esc, F1 or B closes. "
+        note("Settings overlay: hold Select / press Home on a controller. B closes. L / R switch tabs. The game keeps "
+             "running and sees no input while this menu is open.");
 #endif
-         "L / R switch tabs on a controller. The game keeps running and sees no input while this menu is open.");
-#ifdef __SWITCH__  // (this fork: no keyboard or mouse)
-    note("When the game asks for text (your name), a text window appears over the game: D-pad / left stick choose a key, "
+        note("When the game asks for text (your name), a text window appears over the game: D-pad / left stick choose a "
+             "key, A types it, B deletes, X adds a space, Y is Shift, L / R switch between letters, accents and symbols, "
+             "Start confirms.");
+    } else {
+#ifdef __APPLE__
+        note("Settings overlay: Esc or F1 (Fn+F1 on most Mac keyboards), Cmd+, or Settings... in the app menu, or hold Select / "
+             "press Home on a controller. With a captured mouse, the first Esc frees the mouse. Esc, F1 or B closes. "
 #else
-    note("When the game asks for text (your name), a text window appears over the game: type on the keyboard "
-         "(Enter = OK, Esc = Cancel), click the on-screen keys, or use a controller: D-pad / left stick choose a key, "
+        note("Settings overlay: Esc or F1, or hold Select / press Home on a controller. With a captured mouse, the first "
+             "Esc frees the mouse. Esc, F1 or B closes. "
 #endif
-         "A types it, B deletes, X adds a space, Y is Shift, L / R switch between letters, accents and symbols, "
-         "Start confirms.");
+             "L / R switch tabs on a controller. The game keeps running and sees no input while this menu is open.");
+        note("When the game asks for text (your name), a text window appears over the game: type on the keyboard "
+             "(Enter = OK, Esc = Cancel), click the on-screen keys, or use a controller: D-pad / left stick choose a key, "
+             "A types it, B deletes, X adds a space, Y is Shift, L / R switch between letters, accents and symbols, "
+             "Start confirms.");
+    }
     note("Built with Dear ImGui %s (MIT License, Omar Cornut and contributors).", IMGUI_VERSION);
+    note("The world editor's handles use ImGuizmo (MIT License, Cedric Guillemet).");
 }
 
 void perf_window(bool menu_open) {
@@ -1920,11 +2340,20 @@ void perf_window(bool menu_open) {
         ImGui::Text("Average %.1f fps   %.1f logic steps/s", g_average.fps, g_average.logic);
         {
             // slow motion: frame interpolation without Keep game speed below its frame target
+            // Shown from the second 2-second window in a row below 29 logic steps/s (the game's rate is
+            // 29.97; a single hitch or load does not show it), hidden again from a window at 29.5: a game
+            // a few percent slow is noticeable over time, and the gap keeps it from flickering.
             static double t0 = 0; static uint64_t s0 = 0; static double rate = 30;
+            static int slowWindows = 0;
+            static bool slow = false;
             if (t0 == 0 || t - t0 < 0) { t0 = t; s0 = interp::executed_steps(); }
-            else if (t - t0 >= 2.0) { rate = (double)(interp::executed_steps() - s0) / (t - t0); t0 = t; s0 = interp::executed_steps(); }
-            if (interp::mode() == 1 && !interp::paced_interpolation() && rate > 1 && rate < 26)
-                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Slow motion: %.0f of 30 logic steps/s. Turn on Keep game speed", rate);
+            else if (t - t0 >= 2.0) {
+                rate = (double)(interp::executed_steps() - s0) / (t - t0); t0 = t; s0 = interp::executed_steps();
+                slowWindows = rate > 1 && rate < 29.0 ? slowWindows + 1 : 0;
+                slow = slow ? rate > 1 && rate < 29.5 : slowWindows >= 2;
+            }
+            if (slow && interp::mode() == 1 && !interp::paced_interpolation())
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Slow motion: %.1f of 30 logic steps/s. Turn on Keep game speed", rate);
         }
 #ifdef __ANDROID__
         ImGui::TextUnformatted(android_telemetry().c_str());
@@ -1934,6 +2363,7 @@ void perf_window(bool menu_open) {
         ImGui::TextUnformatted(perf::summary().c_str());
         ImGui::PlotLines("##ft", U.frame_ms, 120, U.frame_i, nullptr, 0.0f, 50.0f, ImVec2(220, 36));
         ImGui::TextDisabled("%s  %gx  %s", render::api_name(render::active()), hostui::res_scale(), interp::mode_name());
+        if (dynres::on()) ImGui::TextDisabled("%s", dynres::status().c_str());
         if (float share = interp::paced_drawn_share(); share >= 0)
             ImGui::TextDisabled("in-between frames drawn: %.0f%%", share * 100.0f);
     }
@@ -1956,12 +2386,24 @@ void tab_audio() {
     if (audio::master_volume_from_env())
         note("WWHD_AUDIO_VOLUME=%s is set for this start and takes precedence; changes here are not saved.",
              getenv("WWHD_AUDIO_VOLUME"));
-#ifndef __SWITCH__  // (this fork: audout plays stereo)
-    int speakers = audio::requested_surround() ? 1 : 0;
-    if (combo("Speakers", &speakers, "Stereo\0Surround 5.1\0"))
-        hostui::post([speakers] { audio::set_requested_surround(speakers == 1); });
-    note("Restart the game after changing Speakers.");
-#endif
+    bool pad_sounds = audio::gamepad_sounds();
+    if (ImGui::Checkbox("GamePad sounds through main speakers", &pad_sounds))
+        hostui::post([pad_sounds] { audio::set_gamepad_sounds(pad_sounds); });
+    float pad_volume = audio::gamepad_sounds_volume() * 100.0f;
+    ImGui::SetNextItemWidth(260);
+    if (ImGui::SliderFloat("GamePad sounds volume", &pad_volume, 0.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
+        hostui::post([pad_volume] { audio::set_gamepad_sounds_volume(pad_volume / 100.0f, false); });
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        hostui::post([pad_volume] { audio::set_gamepad_sounds_volume(pad_volume / 100.0f); });
+    help("Play sounds from the GamePad speaker through your main speakers during TV play. Applies immediately and is remembered. Master volume also applies.");
+    if (audio::gamepad_sounds_from_env() || audio::gamepad_sounds_volume_from_env())
+        note("GamePad audio test overrides are set for this start; overridden preferences are not saved.");
+    if (ext::features().speaker_choice) {
+        int speakers = audio::requested_surround() ? 1 : 0;
+        if (combo("Speakers", &speakers, "Stereo\0Surround 5.1\0"))
+            hostui::post([speakers] { audio::set_requested_surround(speakers == 1); });
+        note("Restart the game after changing Speakers.");
+    }
     if (audio::surround_fallback())
         note("Surround 5.1 unavailable on this output. Using stereo; restart after connecting a 5.1 device.");
     if (audio::output_device_changed())
@@ -1976,6 +2418,47 @@ void tab_audio() {
     note("Plays each active channel in turn at a low level. Subwoofer uses an 80 Hz tone.");
 }
 
+// The bottom row of the Settings window (every tab): Quit Game, and on Android Close Settings before it.
+// Quit Game asks first (quit_dialog.h); Quit then ends the game through the host (hostui::quit).
+bool g_test_quit = false;  // WWHD_TEST_OVERLAY=quit: choose Quit Game once the menu is up
+void quit_row(bool& open) {
+#ifdef __ANDROID__
+    bool close = false;
+    bool ask = quit::bottom_row(true, &close);
+    if (close) open = false;
+#else
+    (void)open;
+    bool ask = quit::bottom_row(false, nullptr);
+#endif
+    if (ask) LOG("[quit] Settings > Quit Game: asking");
+    if (g_test_quit && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+        g_test_quit = false;
+        ask = true;
+        LOG("[quit] test: Settings > Quit Game chosen");
+    }
+    // test runs: WWHD_TEST_QUIT_ANSWER=quit|cancel answers 1.5 s after the question shows (as on macOS)
+    static const quitprompt::Answer test = quitprompt::test_answer([](const char* n) -> const char* { return getenv(n); });
+    static double asked = -1;
+    if (ask) asked = ImGui::GetTime();
+    quit::Answer forced = quit::Answer::None;
+    if (asked >= 0 && ImGui::GetTime() - asked >= 1.5) {
+        if (test == quitprompt::Answer::Quit) forced = quit::Answer::Quit;
+        if (test == quitprompt::Answer::Cancel) forced = quit::Answer::Cancel;
+    }
+    const bool back = navigation_pressed(input_map::face_input(input_map::kB));
+    const auto answer = quit::dialog(ask, ss::in_gameplay(), back, forced);
+    if (answer == quit::Answer::None) return;
+    asked = -1;
+    if (answer == quit::Answer::Cancel) {
+        if (back) g_pad_b_used = true;  // B answered: the menu stays open
+        LOG("[quit] answer: Cancel; back to Settings");
+        return;
+    }
+    LOG("[quit] answer: Quit");
+    // posted: the settings changes posted before (each one saved as it is made) are done first
+    hostui::post([] { hostui::quit(); });
+}
+
 void settings_window() {
     ImGuiIO& io = ImGui::GetIO();
     const ImVec2 ds = io.DisplaySize;
@@ -1986,10 +2469,42 @@ void settings_window() {
     const ImVec2 size = shown_builtin() == kControls ? ImVec2(std::min(1240.0f, ds.x * 0.98f), std::min(720.0f, ds.y * 0.97f))
                                            : ImVec2(std::min(860.0f, ds.x * 0.94f), std::min(620.0f, ds.y * 0.92f));
 #endif
-    ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    ImVec2 panelSize = size, panelPos(ds.x * 0.5f, ds.y * 0.5f);
+    bool placement = shown_builtin() == kDisplay &&
+                     (gfx::g_mode == gfx::kDrcPip || gfx::g_mode == gfx::kDrcAuto || gfx::g_mode == gfx::kDrcOff);
+#ifdef __ANDROID__
+    placement = placement && !gfx::g_has_drc_window;
+#endif
+    // Moving the panel out of the preview's way: never while dragging (the panel would jump under the
+    // pointer), and only to a space that keeps it usable; otherwise it stays centred over the preview.
+    static ImVec2 lastPanelSize, lastPanelPos;
+    static bool lastPlaced = false;
+    if (placement && lastPlaced && ImGui::IsAnyItemActive()) {
+        panelSize = lastPanelSize, panelPos = lastPanelPos;
+    } else if (placement) {
+        const auto b = gfx::pip_box(pip_tv_box(), gfx::g_drc_aspect, gfx::g_pip_size, gfx::pip_position());
+        const float gap = 8;
+        const gfx::Box spaces[] = {
+            {0, 0, std::max(0.0f, b.x - gap), ds.y},
+            {b.x + b.w + gap, 0, std::max(0.0f, ds.x - b.x - b.w - gap), ds.y},
+            {0, 0, ds.x, std::max(0.0f, b.y - gap)},
+            {0, b.y + b.h + gap, ds.x, std::max(0.0f, ds.y - b.y - b.h - gap)}
+        };
+        auto usable = [&](gfx::Box area) { return std::min(area.w, size.x) * std::min(area.h, size.y); };
+        auto best = spaces[0];
+        for (auto area : spaces)
+            if (usable(area) > usable(best)) best = area;
+        const ImVec2 fitted(std::min(size.x, best.w), std::min(size.y, best.h));
+        if (fitted.x >= size.x * 0.75f && fitted.y >= size.y * 0.6f) {
+            panelSize = fitted;
+            panelPos = ImVec2(best.x + best.w / 2, best.y + best.h / 2);
+        }
+    }
+    lastPlaced = placement, lastPanelSize = panelSize, lastPanelPos = panelPos;
+    ImGui::SetNextWindowPos(panelPos, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(panelSize, ImGuiCond_Always);
     ImGuiWindowFlags fl = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                          ImGuiWindowFlags_NoSavedSettings;
+                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking;  // docking: the editor's panels only
     bool open = true;
     if (U.just_opened) {
         ImGui::SetNextWindowFocus();  // keyboard / controller navigation starts in the menu
@@ -2009,15 +2524,13 @@ void settings_window() {
         restart_notice_frame(true);
         if (ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_FittingPolicyShrink)) {
             for (int i = 0; i < int(tabs.size()); i++) {
+                if (!tabs[i].visible()) continue;  // a tab only some launches have (the world editor's, with --editor)
                 ImGuiTabItemFlags f = U.select_tab == i ? ImGuiTabItemFlags_SetSelected : 0;
                 if (ImGui::BeginTabItem(tabs[i].name.c_str(), nullptr, f)) {
                     if (U.tab != i) U.cap_action = -1, g_capturing_keys = false, U.cap_note.clear();
                     U.tab = i;
-#ifdef __ANDROID__
+                    // the page ends one row above the bottom of the window: the bottom row (quit_row)
                     ImGui::BeginChild("page", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), ImGuiChildFlags_NavFlattened);
-#else
-                    ImGui::BeginChild("page", ImVec2(0, 0), ImGuiChildFlags_NavFlattened);
-#endif
                     switch (tabs[i].builtin) {
                     case kSaves: tab_saves(); break;
                     case kGraphics: tab_graphics(); break;
@@ -2025,6 +2538,7 @@ void settings_window() {
                     case kAudio: tab_audio(); break;
                     case kMods: tab_mods(); break;
                     case kControls: tab_controls(); break;
+                    case kShortcuts: tab_shortcuts(); break;
                     case kAbout: tab_about(); break;
                     default: if (tabs[i].draw) tabs[i].draw(); break;  // an added tab
                     }
@@ -2035,9 +2549,7 @@ void settings_window() {
             U.select_tab = -1;
             ImGui::EndTabBar();
         }
-#ifdef __ANDROID__
-        if (ImGui::Button("Close Settings", ImVec2(-FLT_MIN, 0))) open = false;
-#endif
+        quit_row(open);
     }
     ImGui::End();
     // B (not while choosing an input or in a list) or the close button closes the menu
@@ -2052,16 +2564,80 @@ void settings_window() {
 // ---------------------------------------------------------------- API
 bool is_open() { return g_open.load(std::memory_order_relaxed); }
 static std::atomic<bool> g_shortcut_took{false};  // a platform shortcut took a poll's input (shortcut_took_input)
+void activate_shortcut(int action, KeyOrigin origin) {
+    using namespace input_map;
+    if (action < 0 || action >= kShortcutCount) return;
+    if (action == kSettings) { set_open(!is_open(), OpenReason::F1, origin); return; }
+    LOG("[shortcuts] %s", shortcut_info(action).id);
+    hostui::post([action] {
+        if (action >= kSave1 && action <= kSave5) { ss::request_save(action - kSave1 + 1); return; }
+        if (action >= kLoad1 && action <= kLoad5) { ss::request_load(action - kLoad1 + 1); return; }
+        switch (action) {
+        case kFullscreen: hostui::set_fullscreen(!hostui::fullscreen()); break;
+        case kPhoto: screenshot::request(); break;
+        case kResolution: {
+            const float scales[] = {1, 1.5f, 2, 3};
+            float next = scales[0];
+            for (float scale : scales) if (scale > hostui::res_scale() + 0.01f) { next = scale; break; }
+            hostui::set_res_scale(next); break;
+        }
+        case kAO: if (render::feature_available(render::kFeatureAO)) render::set_ao_mode((render::ao_mode() + 1) % 3); break;
+        case kAOHires: if (render::feature_available(render::kFeatureAOHires)) render::set_ao_hires(!render::ao_hires()); break;
+        case kAniso: if (render::feature_available(render::kFeatureAniso)) render::set_aniso(!render::aniso()); break;
+        case kInterpolation: interp::toggle_fps(60); break;
+        case kTrue60: interp::set_mode(interp::mode() == 2 ? 0 : 2); break;
+        case kFXAA: if (render::feature_available(render::kFeatureFXAA)) render::set_fxaa(!render::fxaa()); break;
+        case kPiP:
+            if (hostui::drc_mode() != gfx::kDrcPip) { hostui::set_drc_mode(gfx::kDrcPip); hostui::show_drc(true); }
+            else hostui::show_drc(!hostui::drc_shown());
+            break;
+        case kPerformance: set_perf_shown(!perf_shown()); break;
+        case kMute: {
+            static float before = 1;
+            float v = audio::master_volume(); if (v > 0) before = v;
+            audio::set_master_volume(v > 0 ? 0 : before); break;
+        }
+        case kVolumeDown: audio::set_master_volume(std::max(0.0f, audio::master_volume() - 0.05f)); break;
+        case kVolumeUp: audio::set_master_volume(std::min(1.0f, audio::master_volume() + 0.05f)); break;
+        default: break;
+        }
+        hostui::graphics_changed();
+    });
+}
+void external_binding_capture(bool active) {
+    if (active) { g_external_capture = true; g_external_capture_finished = false; }
+    else if (g_external_capture.load()) {
+        g_external_capture_finished = true; // publish before releasing the active capture flag
+        g_external_capture = false;
+    }
+}
 void poll_controller_shortcuts(const float* values) {
-    if (g_no_host) return;
+    if (g_no_host && !getenv("WWHD_TEST_PAD")) return;
     PadValues pad;
     std::copy(values, values + input_map::kPadCount, pad.begin());
+    static ReleaseGate capture_gate;
+    capture_gate.filter(pad.data(), g_capturing_keys.load() || g_external_capture.load() || g_external_capture_finished.exchange(false));
     // the platform's shortcuts (extensions.h) first: the inputs one takes stay from the settings shortcut
     // until released, and from the game (shortcut_took_input)
     if (!ext::shortcuts().empty() && ext::poll_shortcuts(pad, is_open())) g_shortcut_took = true;
+    static input_map::ShortcutPoll bindings;
+    const auto m = input_map::current();
+    const PadValues available = pad;
+    const auto pressed = bindings.poll(m, available.data(), pad.data());
+    auto activate = [&](int a) {
+        if (a == input_map::kSettings) {
+            const auto& b = m.shortcuts[a];
+            set_open(!is_open(), !b.hold && b.button == input_map::kPadHome ? OpenReason::Home : OpenReason::API);
+        } else activate_shortcut(a);
+    };
+    if (!captures()) for (int a : pressed) activate(a);
+    else for (int a : pressed) if (a == input_map::kSettings && !g_capturing_keys.load()) activate(a);
     static SettingsShortcut shortcut;
-    const auto action = shortcut.poll(now_s(), pad[input_map::kPadOptions] > 0.5f,
-                                     pad[input_map::kPadHome] > 0.5f, is_open());
+    bool selectModifier = false;
+    for (const auto& b : m.shortcuts) if (b.hold == input_map::kPadOptions && b.button) selectModifier = true;
+    const auto action = shortcut.poll(now_s(), !g_capturing_keys.load() && !selectModifier && pad[input_map::kPadOptions] > 0.5f,
+                                     false, is_open()); // Home is an ordinary, remappable Settings binding.
+
     if (action != SettingsShortcut::None) set_open(action == SettingsShortcut::Open, shortcut.reason());
 }
 bool shortcut_took_input() { return g_shortcut_took.exchange(false); }
@@ -2071,10 +2647,13 @@ void set_open(bool open, OpenReason reason, KeyOrigin origin) {
     if (open && window_target::selected.load() == window_target::Window::None) return;
 #endif
     if (g_open.exchange(open) == open) return;
+    if (!open) g_dialog_open = false;
     for (auto& k : g_held_keys) k = false;
     input::release_keys();  // keys held now belong to the menu (opening) or are not stuck in the game (closing)
     if (open) {
         mods::fast_forward_reset();
+        mods::lock_on_reset();
+        mods::quick_use_reset();
         mods::mouse_release();
         U.just_opened = true;
         U.slots_time = -1;
@@ -2084,7 +2663,21 @@ void set_open(bool open, OpenReason reason, KeyOrigin origin) {
 }
 // inputs still held when the overlay closes stay from the game in the hosts' input pumps (release_gate.h)
 bool blocks_input() { return captures(); }
+// A platform's input layer (extensions.h, the world editor): its mode while the menu is closed, and
+// whether its overlay windows were under the pointer at the last frame.
+std::atomic<bool> g_layer_mouse{false};
+int layer_mode() {
+    if (!ext::sealed() || is_open()) return 0;
+    const auto& layer = ext::input_layer();
+    return layer.mode ? layer.mode() : 0;
+}
+bool layer_takes_pointer() {
+    const int m = layer_mode();
+    return m == 1 || (m == 2 && g_layer_mouse.load());
+}
+bool pointer_layer_active() { return layer_mode() != 0; }
 bool captures() { return is_open() || text_entry::active(); }
+bool dialog_open() { return is_open() && g_dialog_open.load(); }
 bool alive() { return now_s() - g_last_frame.load(std::memory_order_relaxed) < 1.0; }
 bool perf_shown() { return g_perf.load(std::memory_order_relaxed); }
 void set_perf_shown(bool on) {
@@ -2099,19 +2692,51 @@ void focus_lost() {
 
 bool key(int code, bool down, bool repeat, int mods, KeyOrigin origin) {
     if (g_no_host_keys) return false;
-    static ToggleGuard f1;
-    const bool f1_press = code == kVK_F1 && f1.press(down, repeat, now_s());
-#ifdef __APPLE__
-    // Cmd+, (the macOS settings shortcut; the AppKit host gets it as the app menu's Settings... item)
-    if (code == kVK_ANSI_Comma && (mods & kSuper) && !g_capturing_keys.load()) {
-        if (down && !repeat) set_open(!is_open(), OpenReason::API, origin);
+#ifdef __ANDROID__
+    if (!getenv("WWHD_ANDROID_KEYBOARD") && !captures()) return false;
+#endif
+#ifdef __ANDROID__
+    const int action = getenv("WWHD_ANDROID_KEYBOARD") ? input_map::shortcut_for_key(input_map::current(), code, mods) : -1;
+#else
+    const int action = input_map::shortcut_for_key(input_map::current(), code, mods);
+#endif
+    const bool escape = code == kVK_Escape;
+    // Esc with a captured mouse (mouse camera) only frees the mouse, whatever it is bound to; Settings
+    // opens on the next Esc. Both hosts route keys here before their own mouse handling.
+    if (escape && !captures() && mods::mouse_captured()) {
+        if (down && !repeat) mods::mouse_release();
         return true;
     }
-#endif
-    // F1 (no modifiers; Shift+F1 saves slot 1) toggles; Esc closes
-    if (code == kVK_F1 && !(mods & (kShift | kCtrl | kAlt | kSuper))) {
-        if (f1_press && !g_capturing_keys.load()) set_open(!is_open(), OpenReason::F1, origin);
-        if (!g_capturing_keys.load()) return true;
+    // Next, an action of a platform layer (the world editor's placing, handle drag or quest connection):
+    // the first Esc cancels it, its release and repeats stay with it; Settings opens on an Esc with nothing
+    // to cancel.
+    static LayerEscape layer_escape;
+    if (escape) {
+        static const std::function<bool()> none;
+        const bool active = !captures() && layer_mode() != 0;  // layer_mode: only once the registry is sealed
+        if (layer_escape.route(down, repeat, active, active ? ext::input_layer().cancel : none)) return true;
+    }
+    // Inside Settings or the game's text prompt Esc keeps its own meaning (close, cancel) below,
+    // also when it is the Settings key.
+    const bool settings = action == input_map::kSettings && !(escape && captures());
+    if (!g_capturing_keys.load() && action >= 0 && (settings || !captures())) {
+        static ToggleGuard settingsGuard;
+        const bool activate = settings ? settingsGuard.press(down, repeat, now_s()) : down && !repeat;
+        if (activate && settings && escape) set_open(!is_open(), OpenReason::Esc, origin);
+        else if (activate) activate_shortcut(action, origin);
+        return true;
+    }
+    if (const int layer = text_entry::active() ? 0 : layer_mode()) {
+        // the world editor's overlays: their key handler first (Tab), then Dear ImGui sees the key too;
+        // the game keeps it unless a text field of the overlays has the keyboard
+        const bool typing = g_wants_text.load();
+        const auto& filter = ext::input_layer().key;
+        if (filter && filter(code, down, repeat, typing)) return true;
+        if (layer == 1 || typing) {
+            if (code >= 0 && code < 256 && !repeat) g_held_keys[code] = down;
+            push({Event::Key, code, down, 0, 0, mods});
+        }
+        if (typing) return true;
     }
     if (!is_open()) {
         // the game's text prompt (text_entry.h) has the keyboard while it shows; F1 above still opens the menu
@@ -2122,10 +2747,13 @@ bool key(int code, bool down, bool repeat, int mods, KeyOrigin origin) {
     if (code >= 0 && code < 256 && !repeat) g_held_keys[code] = down;
     if (g_capturing_keys.load()) {
         if (down && !repeat) {
-            if (code == kVK_Escape) g_capture_key = -1;
-            else if (code == kVK_Delete || code == kVK_ForwardDelete) g_capture_key = -3;
-            else g_capture_key = code;
+            g_capture_mods = mods; g_capture_key = code;
         }
+        return true;
+    }
+    // a dialog or a list in Settings: Esc closes that (popup.h), the menu stays
+    if (code == kVK_Escape && g_dialog_open.load()) {
+        push({Event::Key, code, down, 0, 0, mods});
         return true;
     }
     if (code == kVK_Escape && down && !repeat) {
@@ -2136,7 +2764,7 @@ bool key(int code, bool down, bool repeat, int mods, KeyOrigin origin) {
     return true;
 }
 bool text(const char* utf8) {
-    if (!is_open() || g_no_host_keys || !utf8 || !*utf8) return false;
+    if ((!is_open() && !(layer_mode() && g_wants_text.load())) || g_no_host_keys || !utf8 || !*utf8) return false;
     Event e{Event::Text};
     e.text = utf8;
     push(e);
@@ -2146,27 +2774,59 @@ void set_clipboard_text(const char* utf8) {
     std::lock_guard<std::mutex> lk(g_mu);
     g_clipboard = utf8 ? utf8 : "";
 }
-bool wants_text() { return is_open() && g_wants_text.load(); }
+bool wants_text() { return (is_open() || layer_mode() != 0) && g_wants_text.load(); }
 void set_stereo_pointer_visible(bool visible) { g_stereo_pointer_visible=visible; }
 bool mouse_move(float nx, float ny, bool touch) {
-    if (g_no_host || (!captures() && stereo::requestedMode==stereo::Off)) return false;
+    const int layer = layer_mode();
+    if (g_no_host_mouse || (!captures() && stereo::requestedMode==stereo::Off && !layer)) return false;
     push({Event::MousePos, 0, false, nx, ny, 0, touch});
-    return captures();
+    return captures() || layer_takes_pointer();
+}
+void test_pointer(float nx, float ny, bool down) {
+    push({Event::MousePos, 0, false, nx, ny, 0, false});
+    push({Event::MouseButton, 0, down, 0, 0, 0, false});
+}
+// The capture and navigation order is shared with the game-free SDL UI regression.
+void prepare_menu_input(ImGuiIO& io, bool open, bool mouse_used) {
+    U.capture_completed = false;
+    const bool capturing_at_start = U.cap_action >= 0;
+    apply_capture();
+    std::copy(std::begin(U.prev), std::end(U.prev), U.nav_prev.begin());
+    std::copy(std::begin(U.values), std::end(U.values), U.nav_values.begin());
+    U.capture_navigation_gate.filter(U.nav_values.data(), capturing_at_start || U.capture_completed);
+    const int face[4] = {input_map::face_input(input_map::kA), input_map::face_input(input_map::kB),
+                          input_map::face_input(input_map::kX), input_map::face_input(input_map::kY)};
+    U.gamepad_navigation.feed(io, U.nav_values.data(), U.nav_prev.data(), open && U.cap_action < 0 && !capturing_at_start, mouse_used, face);  // the text prompt reads the controller itself
+}
+bool pointer_shortcut(int code, bool down) {
+    if (g_no_host_mouse || captures()) return false;
+    const int action = input_map::shortcut_for_key(input_map::current(), code, 0);
+    if (action < 0) return false;
+    if (down) activate_shortcut(action);
+    return true;
 }
 bool mouse_button(int button, bool down, bool touch) {
-    if (!captures() || g_no_host) return false;
+    if (!captures() && layer_takes_pointer() && !g_no_host_mouse) {
+        if (button >= 0 && button < 5) push({Event::MouseButton, button, down, 0, 0, 0, touch});
+        return true;
+    }
+    if (!captures() || g_no_host_mouse) return false;
     if (button < 0 || button >= 5) return true;
     if (!touch && g_capturing_keys.load() && down) {
-        g_capture_key = input_map::kMouse1 + button;
+        g_capture_mods = 0; g_capture_key = input_map::kMouse1 + button;
         return true;
     }
     push({Event::MouseButton, button, down, 0, 0, 0, touch});
     return true;
 }
 bool mouse_wheel(float dx, float dy) {
-    if (!captures() || g_no_host) return false;
+    if (!captures() && layer_takes_pointer() && !g_no_host_mouse) {
+        push({Event::Wheel, 0, false, dx, dy, 0});
+        return true;
+    }
+    if (!captures() || g_no_host_mouse) return false;
     if (g_capturing_keys.load() && dy != 0) {
-        g_capture_key = dy > 0 ? input_map::kWheelUp : input_map::kWheelDown;
+        g_capture_mods = 0; g_capture_key = dy > 0 ? input_map::kWheelUp : input_map::kWheelDown;
         return true;
     }
     push({Event::Wheel, 0, false, dx, dy, 0});
@@ -2187,8 +2847,13 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
             hostui::post([pro = v == "1"] { hostui::set_pro_controller(pro); });
         // the saved rumble choice (WWHD_RUMBLE wins)
         if (!rumble::env_override() && hostui::get("rumble", v)) rumble::set_enabled(v != "0");
+#ifdef __ANDROID__
+        if (!phone_rumble::env_override() && hostui::get("phoneRumble", v)) phone_rumble::choice = phone_rumble::parse(v.c_str());
+#endif
         // the saved aspect ratio (WWHD_ASPECT wins; issue #108: it was not remembered)
         if(hostui::get("gameplayFovScale",v))aspect::set_fov_scale(strtof(v.c_str(),nullptr));
+        // the saved dynamic resolution (WWHD_DYNRES_MIN wins)
+        if (!dynres::min_from_env() && hostui::get("dynResMin", v)) dynres::set_min(strtof(v.c_str(), nullptr));
         if (!getenv("WWHD_ASPECT") && hostui::get("aspectMode", v)) {
             const int m = atoi(v.c_str());
             if (m >= aspect::kOriginal && m <= aspect::k32x9) aspect::set_mode(m);
@@ -2200,6 +2865,7 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
         test.done = true;
         if (test.tab >= 0) U.select_tab = U.tab = test.tab;
         if (test.open) set_open(true);
+        if (test.quit) g_test_quit = true;
         if (test.perf) g_perf = true;
         LOG("[overlay] test switch: %s", getenv("WWHD_TEST_OVERLAY"));
     }
@@ -2272,6 +2938,7 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
     U.linearized = false;
     // a mod install keeps running (and shows its progress) while the menu is closed
     const bool mods_busy = !setup_run.id.empty() || (U.init && modsui::wants_background());
+    if (!open) gfx::g_pip_preview=false;
     if (!open && !perf && !text && toast.empty() && !guesthud::active() && !mods_busy && !stereoPointer && drawn_layers.empty()) {
         if (U.init) {  // forget events and pressed keys while nothing is shown
             std::lock_guard<std::mutex> lk(g_mu);
@@ -2293,9 +2960,12 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
         return true;
     }();
     (void)loadedUiSize;
-    const float scale = mobile_ui::scale(g_android_dpi, g_density, g_ui_size);
+    // phones get a more compact layout than tablets and handhelds (mobile_ui.h); a UI size the player chose decides
+    const mobile_ui::Layout ui = mobile_ui::layout(g_android_dpi, g_density, g_ui_size, float(pw), float(ph));
+    mobile_ui::apply_touch_style(ImGui::GetStyle(), ui);
+    const float scale = ui.scale;
 #else
-    const float scale = std::max({1.0f, g_density.load(), ph / 820.0f});
+    const float scale = mobile_ui::desktop_scale(g_density.load(), float(ph));
 #endif
     io.DisplaySize = ImVec2(pw / scale, ph / scale);
     io.DisplayFramebufferScale = ImVec2(scale, scale);
@@ -2341,18 +3011,19 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
         default: break;
         }
     }
-    apply_capture();
-    const int face[4] = {input_map::face_input(input_map::kA), input_map::face_input(input_map::kB),
-                          input_map::face_input(input_map::kX), input_map::face_input(input_map::kY)};
-    U.gamepad_navigation.feed(io, U.values, U.prev, open && U.cap_action < 0, mouse_used, face);  // the text prompt reads the controller itself
+    prepare_menu_input(io, open, mouse_used);
     ImGui::NewFrame();
     setup_run_tick();
     modsui::tick(mods_host(), open);
     if (!open && !g_restart_notice.started()) restart_notice_frame(false);
-    g_wants_text = open && io.WantTextInput;
+    const int layer = open ? 0 : layer_mode();
+    g_wants_text = (open || layer) && io.WantTextInput;
     guesthud::frame();
+    gfx::g_pip_preview=false;
     if (open) settings_window();
     else modsui::background(mods_host());
+    g_dialog_open = open && ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+    pip_live_drag();
     if (text) {
         float pad[input_map::kPadCount];
         std::copy(std::begin(U.values), std::end(U.values), pad);
@@ -2377,6 +3048,26 @@ ImDrawData* frame(float pw, float ph, void (*renderer_init)()) {
             ImGui::PopTextWrapPos();
         }
         ImGui::End();
+    }
+    g_layer_mouse = !open && layer && io.WantCaptureMouse;
+    // test aid: WWHD_TEST_LOG_HOVER=1 logs the window under the pointer when it changes, and each click
+    static const bool log_hover = getenv("WWHD_TEST_LOG_HOVER") != nullptr;
+    if (log_hover) {
+        static std::string last;
+        const ImGuiWindow* hw = ImGui::GetCurrentContext()->HoveredWindow;
+        std::string now = hw ? hw->Name : "(none)";
+        const ImGuiID hid = ImGui::GetHoveredID();
+        if (now != last || io.MouseClicked[0] || io.MouseClicked[1])
+            LOG("[overlay] hover: %s id %08x at %.0f %.0f (layer %d, clicked %d/%d, open %d)", now.c_str(), hid, io.MousePos.x,
+                io.MousePos.y, layer, io.MouseClicked[0], io.MouseClicked[1], open);
+        if (io.MouseClicked[0]) {  // the windows under the pointer's reach, back to front
+            std::string order;
+            for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+                if (w->Active && (!(w->Flags & ImGuiWindowFlags_ChildWindow) || w->DockNode))
+                    order += std::string(w->Name) + (w->DockNode ? " (docked)" : "") + " | ";
+            LOG("[overlay] windows back to front: %s", order.c_str());
+        }
+        last = std::move(now);
     }
     ImGui::Render();
     overlay_trace::state();

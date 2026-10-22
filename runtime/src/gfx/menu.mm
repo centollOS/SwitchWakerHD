@@ -16,6 +16,7 @@
 #include "../savestate.h"
 #include "../screenshot.h"
 #include "../input_map.h"
+#include "menu_shortcuts.h"
 #include "../overlay/hostui.h"
 #include "../overlay/overlay.h"
 #include "../mods/code_mods.h"
@@ -108,13 +109,16 @@ static void load_prefs() {
     if (saved(@"aoHires", {"WWHD_AO_HIRES"})) render::set_ao_hires([pref(@"aoHires") boolValue]);
     if (saved(@"aniso", {"WWHD_ANISO"})) render::set_aniso([pref(@"aniso") boolValue]);
     if (saved(@"bloomStrength", {"WWHD_BLOOM_STRENGTH"})) render::set_bloom_strength([pref(@"bloomStrength") floatValue]);
+    if (saved(@"horizonHaze", {"WWHD_HORIZON_HAZE", "WWHD_SKY_HAZE"})) render::set_horizon_haze([pref(@"horizonHaze") floatValue]);
+    if (saved(@"cloudShadows", {"WWHD_CLOUD_SHADOWS"})) render::set_cloud_shadows([pref(@"cloudShadows") boolValue]);
+    if (saved(@"cloudStyle", {"WWHD_CLOUD_STYLE"})) render::set_cloud_style([pref(@"cloudStyle") intValue]);
     if (saved(@"fxaa", {"WWHD_FXAA"})) render::set_fxaa([pref(@"fxaa") boolValue]);
     // frame rate: fps60 is the mode (0 30 fps, 1 frame interpolation, 2 true 60; the key predates
     // 120/240 fps), interpFps the interpolation's rate; "keep game speed" for 60 and for 120/240 fps
     if (saved(@"interpFps", {"WWHD_INTERP_FPS"})) interp::set_fps([pref(@"interpFps") intValue]);
     if (saved(@"fps60", {"WWHD_INTERP", "WWHD_TRUE60", "WWHD_INTERP_FPS"})) interp::set_mode([pref(@"fps60") intValue]);
-    if (saved(@"fps60Paced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation_at(60, [pref(@"fps60Paced") boolValue]);
-    if (saved(@"fpsHighPaced", {"WWHD_INTERP_PACED"})) interp::set_paced_interpolation_at(120, [pref(@"fpsHighPaced") boolValue]);
+    if (saved(@"fps60Paced", {"WWHD_INTERP_PACED"})) interp::load_paced_interpolation_at(60, [pref(@"fps60Paced") boolValue]);
+    if (saved(@"fpsHighPaced", {"WWHD_INTERP_PACED"})) interp::load_paced_interpolation_at(120, [pref(@"fpsHighPaced") boolValue]);
 #ifdef WWHD_HAS_VULKAN
     if (saved(@"vkPresentMode", {"WWHD_VK_PRESENT_MODE"})) gfxvk::set_present_mode([pref(@"vkPresentMode") intValue]);
 #endif
@@ -126,6 +130,9 @@ static void save_prefs() {
     if (!env_set({"WWHD_AO_HIRES"})) set_pref(@"aoHires", @(render::ao_hires()));
     if (!env_set({"WWHD_ANISO"})) set_pref(@"aniso", @(render::aniso()));
     if (!env_set({"WWHD_BLOOM_STRENGTH"})) set_pref(@"bloomStrength", @(render::bloom_strength()));
+    if (!env_set({"WWHD_HORIZON_HAZE", "WWHD_SKY_HAZE"})) set_pref(@"horizonHaze", @(render::horizon_haze()));
+    if (!env_set({"WWHD_CLOUD_SHADOWS"})) set_pref(@"cloudShadows", @(render::cloud_shadows()));
+    if (!env_set({"WWHD_CLOUD_STYLE"})) set_pref(@"cloudStyle", @(render::cloud_style()));
     if (!env_set({"WWHD_FXAA"})) set_pref(@"fxaa", @(render::fxaa()));
     if (!env_set({"WWHD_INTERP", "WWHD_TRUE60", "WWHD_INTERP_FPS"})) set_pref(@"fps60", @(interp::mode()));
     if (!env_set({"WWHD_INTERP_FPS"})) set_pref(@"interpFps", @(interp::fps()));
@@ -193,6 +200,16 @@ static void choose_renderer(render::Api a) {
     }];
 }
 
+@interface WWShortcutMenu : NSObject <NSMenuDelegate>
+@end
+@implementation WWShortcutMenu
+- (void)activate:(NSMenuItem*)item { overlay::activate_shortcut((int)item.tag); }
+- (void)menuNeedsUpdate:(NSMenu*)menu {
+    menu_shortcuts::fill_shortcut_menu(menu, input_map::current(), self, @selector(activate:));
+}
+@end
+static WWShortcutMenu* g_shortcut_menu;
+
 // Save States menu: items are rebuilt each time it opens (slot time and area)
 @interface WWStateMenu : NSObject <NSMenuDelegate>
 @end
@@ -218,7 +235,7 @@ static void choose_renderer(render::Api a) {
         NSMenuItem* it = [m addItemWithTitle:[NSString stringWithFormat:@"Save to slot %d  (%@)", i, label(i)] action:@selector(save:) keyEquivalent:@""];
         it.target = self;
         it.tag = i;
-        it.toolTip = [NSString stringWithFormat:@"Shortcut in game: Shift+F%d", i];
+        it.toolTip = [NSString stringWithFormat:@"Shortcut in game: %s", input_map::shortcut_key_label(input_map::current().shortcuts[input_map::kSave1 + i - 1].keys[0]).c_str()];
     }
     [m addItem:[NSMenuItem separatorItem]];
     for (int i = 1; i <= ss::kSlots; i++) {
@@ -226,7 +243,7 @@ static void choose_renderer(render::Api a) {
         it.target = self;
         it.tag = i;
         it.enabled = info[i].used && info[i].compatible;
-        it.toolTip = i == 1 ? @"In game: F1 (or \u2318,) opens the settings overlay (Saves)" : [NSString stringWithFormat:@"Shortcut in game: F%d", i];
+        it.toolTip = [NSString stringWithFormat:@"Shortcut in game: %s", input_map::shortcut_key_label(input_map::current().shortcuts[input_map::kLoad1 + i - 1].keys[0]).c_str()];
     }
     // full save states (savestate.h): off by default, for debugging
     [m addItem:[NSMenuItem separatorItem]];
@@ -270,6 +287,9 @@ static WWStateMenu* g_state_menu;
     [alert runModal];
 }
 - (void)setBloom:(NSMenuItem*)item { render::set_bloom_strength(item.tag / 100.0f); update_title(); }
+- (void)setHaze:(NSMenuItem*)item { render::set_horizon_haze(item.tag / 100.0f); update_title(); }
+- (void)setCloudStyle:(NSMenuItem*)item { render::set_cloud_style((int)item.tag); update_title(); }
+- (void)toggleCloudShadows:(NSMenuItem*)item { render::set_cloud_shadows(!render::cloud_shadows()); update_title(); }
 - (void)setAO:(NSMenuItem*)item { render::set_ao_mode((int)item.tag); update_title(); }
 - (void)toggleAniso:(NSMenuItem*)item { render::set_aniso(!render::aniso()); update_title(); }
 - (void)capture:(NSMenuItem*)item { render::request_capture(); }
@@ -334,6 +354,12 @@ static WWStateMenu* g_state_menu;
     }
     if (item.action == @selector(setBloom:))
         item.state = fabsf(render::bloom_strength() * 100.0f - item.tag) < 0.5f ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(setCloudStyle:))
+        item.state = render::cloud_style() == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(toggleCloudShadows:))
+        item.state = render::cloud_shadows() ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(setHaze:))
+        item.state = fabsf(render::horizon_haze() * 100.0f - item.tag) < 0.5f ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(toggleFxaa:)) {
         item.state = render::fxaa() ? NSControlStateValueOn : NSControlStateValueOff;
         return render::feature_available(render::kFeatureFXAA);
@@ -348,11 +374,8 @@ static WWStateMenu* g_state_menu;
     }
     if (item.action == @selector(capture:)) return render::feature_available(render::kFeatureCapture);
     if (item.action == @selector(screenshot:)) {
-        // the Screenshot binding's key (Controls), shown in the title: it can be rebound
-        int k = input_map::current().keys[input_map::kScreenshot][0];
-        if (k == input_map::kNoKey) k = input_map::current().keys[input_map::kScreenshot][1];
-        item.title = k == input_map::kNoKey ? @"Take Screenshot"
-                                            : [NSString stringWithFormat:@"Take Screenshot (%s)", input_map::key_label(k).c_str()];
+        item.title = @"Take Screenshot";
+
     }
     if (item.action == @selector(toggleScreenshotGamePad:))
         item.state = screenshot::gamepad_too() ? NSControlStateValueOn : NSControlStateValueOff;
@@ -410,11 +433,9 @@ void install_menu(NSWindow* tv) {
 
     NSMenuItem* appItem = [bar addItemWithTitle:@"" action:nil keyEquivalent:@""];
     NSMenu* app = [NSMenu new];
-    // the settings overlay (overlay/overlay.h), at the place and with the shortcut macOS apps use;
-    // F1 also works (Fn+F1 unless the top row sends standard function keys)
-    NSMenuItem* settings = [app addItemWithTitle:@"Settings\u2026" action:@selector(openSettings:) keyEquivalent:@","];
-    settings.target = g_target;
-    settings.toolTip = @"In-game settings overlay over the picture (F1, or \u2318, in the game window)";
+    // the settings overlay (overlay/overlay.h), at the place and with the fixed Cmd+, macOS apps use;
+    // Esc and F1 work in the game window (Fn+F1 unless the top row sends standard function keys)
+    menu_shortcuts::add_settings_item(app, g_target, @selector(openSettings:));
     [app addItem:[NSMenuItem separatorItem]];
     [app addItemWithTitle:@"Quit Wind Waker HD" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = app;
@@ -432,7 +453,7 @@ void install_menu(NSWindow* tv) {
             [@"Vulkan through MoltenVK (included in the release; source builds: brew install vulkan-loader molten-vk glslang). Falls back to Metal if it cannot start." stringByAppendingString:why];
         [g addItem:[NSMenuItem separatorItem]];
     }
-    [g addItemWithTitle:@"Internal resolution (R cycles)" action:nil keyEquivalent:@""].enabled = NO;
+    [g addItemWithTitle:@"Internal resolution" action:nil keyEquivalent:@""].enabled = NO;
     add(g, @"    1x (1280x720, as on Wii U)", @selector(setRes:), @"R", 0);
     add(g, @"    1.5x (1920x1080)", @selector(setRes:), @"R", 1);
     add(g, @"    2x (2560x1440)", @selector(setRes:), @"R", 2);
@@ -446,11 +467,11 @@ void install_menu(NSWindow* tv) {
     add(g, @"    21:9", @selector(setAspect:), @"", aspect::k21x9);
     add(g, @"    32:9", @selector(setAspect:), @"", aspect::k32x9);
     [g addItem:[NSMenuItem separatorItem]];
-    [g addItemWithTitle:@"Ambient occlusion (O cycles)" action:nil keyEquivalent:@""].enabled = NO;
+    [g addItemWithTitle:@"Ambient occlusion" action:nil keyEquivalent:@""].enabled = NO;
     add(g, @"    Original (as on Wii U)", @selector(setAO:), @"O", 0);
     add(g, @"    Centre fix", @selector(setAO:), @"O", 1);
     add(g, @"    Centre + noise fix", @selector(setAO:), @"O", 2);
-    add(g, @"Full-size occlusion depth (M)", @selector(toggleHires:), @"M");
+    add(g, @"Full-size occlusion depth", @selector(toggleHires:), @"M");
     [g addItem:[NSMenuItem separatorItem]];
     NSMenuItem* bloomItem = [g addItemWithTitle:@"Bloom strength" action:nil keyEquivalent:@""];
     NSMenu* bloomMenu = [[NSMenu alloc] initWithTitle:@"Bloom strength"];
@@ -460,16 +481,33 @@ void install_menu(NSWindow* tv) {
     add(bloomMenu, @"100% (default)", @selector(setBloom:), @"", 100);
     add(bloomMenu, @"150%", @selector(setBloom:), @"", 150);
     add(bloomMenu, @"200%", @selector(setBloom:), @"", 200);
+    NSMenuItem* hazeItem = [g addItemWithTitle:@"Horizon haze" action:nil keyEquivalent:@""];
+    hazeItem.toolTip = @"The pale band low in the sky. Less haze gives a clearer, deeper blue sky.";
+    NSMenu* hazeMenu = [[NSMenu alloc] initWithTitle:@"Horizon haze"];
+    hazeItem.submenu = hazeMenu;
+    add(hazeMenu, @"Off (clear sky)", @selector(setHaze:), @"", 0);
+    add(hazeMenu, @"30%", @selector(setHaze:), @"", 30);
+    add(hazeMenu, @"60%", @selector(setHaze:), @"", 60);
+    add(hazeMenu, @"100% (default)", @selector(setHaze:), @"", 100);
+    NSMenuItem* cloudItem = [g addItemWithTitle:@"Cloud style" action:nil keyEquivalent:@""];
+    NSMenu* cloudMenu = [[NSMenu alloc] initWithTitle:@"Cloud style"];
+    cloudItem.submenu = cloudMenu;
+    add(cloudMenu, @"Original (default)", @selector(setCloudStyle:), @"", 0);
+    add(cloudMenu, @"Toon clouds (Lite)", @selector(setCloudStyle:), @"", 1);
+    add(cloudMenu, @"Toon clouds (High)", @selector(setCloudStyle:), @"", 2);
+    add(g, @"Cloud shadows", @selector(toggleCloudShadows:), @"").toolTip =
+        @"Soft shadows of the drifting sky clouds on the sea, islands and characters";
     add(g, @"16x anisotropic filtering (N)", @selector(toggleAniso:), @"N");
-    add(g, @"Edge smoothing, FXAA (8)", @selector(toggleFxaa:), @"8");
+    add(g, @"Edge smoothing, FXAA", @selector(toggleFxaa:), @"8");
+    add(g, @"40 fps: frame interpolation (for 40, 80 and 120 Hz screens)", @selector(toggleInterpFps:), @"", 40);
     add(g, @"60 fps: frame interpolation (6)", @selector(toggleInterpFps:), @"6", 60);
     add(g, @"120 fps: frame interpolation", @selector(toggleInterpFps:), @"", 120);
     add(g, @"240 fps: frame interpolation", @selector(toggleInterpFps:), @"", 240);
     add(g, @"60 fps: true 60, game logic at 60 steps/s (7, experimental)", @selector(toggleInterp:), @"7", 2);
     [g addItem:[NSMenuItem separatorItem]];
-    add(g, @"Take Screenshot (F10)", @selector(screenshot:), @"").toolTip =
+    add(g, @"Take Screenshot", @selector(screenshot:), @"").toolTip =
         @"Saves the TV picture as a PNG (internal resolution, without the settings overlay) in the screenshots folder. "
-        @"The key can be changed in Input > Controls (Screenshot).";
+        @"The key can be changed in Settings > Shortcuts.";
     add(g, @"    Also Save the GamePad Screen", @selector(toggleScreenshotGamePad:), @"").toolTip =
         @"A second file, ..._GamePad.png, while the GamePad picture is shown (its window or the overlay)";
     add(g, @"    Open Screenshots Folder", @selector(openScreenshots:), @"");
@@ -533,6 +571,10 @@ void install_menu(NSWindow* tv) {
             @"The climbing animation plays faster, so hands and feet stay in step", "ladder-speed.factor", mods::ladder_speed_factor);
     factors(@"Faster sidling", "sidle-speed", ^BOOL { return mods::sidle_speed(); },
             @"Sidling along walls is faster; the animation speeds up with the movement", "sidle-speed.factor", mods::sidle_speed_factor);
+    factors(@"Faster ivy climbing", "ivy-speed", ^BOOL { return mods::ivy_speed(); },
+            @"Climbing ivy and vines is faster, up, down and sideways", "ivy-speed.factor", mods::ivy_speed_factor);
+    factors(@"Faster ledge hanging", "hang-speed", ^BOOL { return mods::hang_speed(); },
+            @"Moving along a ledge while hanging from it is faster", "hang-speed.factor", mods::hang_speed_factor);
     toggle(gp, @"Sailing speed", ^BOOL { return mods::sail_speed(); }, ^(BOOL on) { mods::manager::set_enabled("sail-speed", on); },
            @"Multiplies the speed the wind gives the boat; the jump keeps its normal height");
     for (auto [title, key, value] : {std::tuple{@"    Normal sail", "sail-speed.normal", mods::sail_speed_normal_factor},
@@ -549,6 +591,9 @@ void install_menu(NSWindow* tv) {
            @"Makes the normal sail behave like the Swift Sail: the wind always blows the way the boat is heading");
     toggle(gp, @"Quick doors", ^BOOL { return mods::quick_doors(); }, ^(BOOL on) { mods::set_quick_doors(on); },
            @"Door events (walk-in, opening, closing) run at 4x speed");
+    toggle(gp, @"Jump anywhere (L by default)", ^BOOL { return mods::jump_anywhere(); },
+           ^(BOOL on) { mods::manager::set_enabled("jump-anywhere", on); },
+           @"Choose the button, double jump and automatic ledge jumps in Settings > Mods > Gameplay");
     toggle(gp, @"Fast forward cutscenes and dialogue (hold ZR by default)", ^BOOL { return mods::fast_forward(); },
            ^(BOOL on) { mods::manager::set_enabled("fast-forward", on); }, @"Choose the speed, hold button and audio setting in Settings > Mods > Gameplay");
     toggle(gp, @"Fast scene changes", ^BOOL { return mods::fast_scenes(); }, ^(BOOL on) { mods::set_fast_scenes(on); },
@@ -560,8 +605,11 @@ void install_menu(NSWindow* tv) {
     toggle(gp, @"    Equip Master Sword and Mirror Shield (until reload)", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatSword); });
     toggle(gp, @"    20 hearts, double magic, 5000 rupees", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatStats); },
            @"Also refills hearts and magic");
+    toggle(gp, @"    Fill the bags (spoils and bait)", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatBags); },
+           @"Spoils bag and bait bag (if missing), every kind of spoils x99, empty bait slots filled");
     for (auto [title, which] : {std::pair{@"    Infinite health", mods::kInfHealth}, {@"    Infinite magic", mods::kInfMagic},
-                                {@"    Infinite arrows and bombs", mods::kInfAmmo}}) {
+                                {@"    Infinite arrows and bombs", mods::kInfAmmo}, {@"    Infinite rupees", mods::kInfRupees},
+                                {@"    Infinite bait and spoils", mods::kInfBags}, {@"    Infinite swimming", mods::kInfBreath}}) {
         int bit = which;  // (blocks cannot capture structured bindings)
         toggle(gp, title, ^BOOL { return mods::infinite(bit); }, ^(BOOL on) { mods::set_infinite(bit, on); });
     }
@@ -595,6 +643,12 @@ void install_menu(NSWindow* tv) {
     winItem.submenu = wm;
     NSApp.windowsMenu = wm;  // macOS lists the open windows below
 
+    menu_shortcuts::clear_host_keys(bar);  // Settings... keeps its fixed Cmd+,
+    g_shortcut_menu = [WWShortcutMenu new];
+    NSMenu* shortcuts = [[NSMenu alloc] initWithTitle:@"Shortcuts"];
+    shortcuts.delegate = g_shortcut_menu;
+    [g_shortcut_menu menuNeedsUpdate:shortcuts];
+    [bar addItemWithTitle:@"Shortcuts" action:nil keyEquivalent:@""].submenu = shortcuts;
     NSApp.mainMenu = bar;
     install_overlay_input();  // settings overlay (F1): mouse in the TV window (overlay_appkit.mm)
     update_title();
@@ -606,6 +660,11 @@ void install_menu(NSWindow* tv) {
     });
     // live frame rate: presented frames over the last half second
     [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer*) {
+        static uint32_t shortcutGeneration = 0;
+        if (shortcutGeneration != input_map::generation()) {
+            shortcutGeneration = input_map::generation();
+            [g_shortcut_menu menuNeedsUpdate:shortcuts];
+        }
         static uint64_t last = gx2::flips_presented();
         static CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
         uint64_t n = gx2::flips_presented();
@@ -625,20 +684,7 @@ void menu_options_changed() { update_title(); }
 // single-key shortcuts from the game window; true if the key was used
 bool menu_hotkey(uint16_t code) {
     switch (code) {
-    case kVK_ANSI_O: if (render::feature_available(render::kFeatureAO)) render::set_ao_mode((render::ao_mode() + 1) % 3); break;
-    case kVK_ANSI_N: if (render::feature_available(render::kFeatureAniso)) render::set_aniso(!render::aniso()); break;
-    case kVK_ANSI_M: if (render::feature_available(render::kFeatureAOHires)) render::set_ao_hires(!render::ao_hires()); break;
-    case kVK_ANSI_6: interp::toggle_fps(60); break;
-    case kVK_ANSI_7: interp::set_mode(interp::mode() == 2 ? 0 : 2); break;
-    case kVK_ANSI_8: if (render::feature_available(render::kFeatureFXAA)) render::set_fxaa(!render::fxaa()); break;
-    case kVK_ANSI_R: cycle_res(); break;
     case kVK_ANSI_P: case kVK_F12: render::request_capture(); return true;
-    case kVK_F1: case kVK_F2: case kVK_F3: case kVK_F4: case kVK_F5: {
-        int slot = code == kVK_F1 ? 1 : code == kVK_F2 ? 2 : code == kVK_F3 ? 3 : code == kVK_F4 ? 4 : 5;
-        if ([NSEvent modifierFlags] & NSEventModifierFlagShift) ss::request_save(slot);
-        else if (slot != 1) ss::request_load(slot);  // F1: the settings overlay (overlay_appkit.mm)
-        return true;
-    }
     case kVK_ANSI_9: {
         // 3 s of sound activity (voice starts), without the frame capture's stall
         char path[96];

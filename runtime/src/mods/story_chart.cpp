@@ -77,6 +77,16 @@ const uint32_t kChartFrame = GC(0x02698D74);     // hdMenuMapUpdateChartFrame(ma
 const uint32_t kChartDetails = GC(0x0269B414);   // hdMenuMapUpdateChartDetails(map, slot, chart)
 const uint32_t kResetSelection = GC(0x02699118); // hdMenuMap_c::resetChartSelection()
 constexpr uint32_t kMapChartIcons = 0x84, kTreMapChartIndex = 0x8C;
+// The chart view (hdTreMapScreen_c, hd_screen_tre_map.cpp, layout TreMap_00) shows a window of the
+// chart's square, kViewSize units wide (sMapWorldSize; the "100x100" under it), centred on mOrigin:
+// selectChart sets mOrigin = the entry's square * 100000 + the origin of variant mChartKind, and puts
+// the X at (salvage - origin) / scale, z down (updatePosition places Link's icon the same way). It has
+// four pictures of the square, one per salvage variant (the panes of group G_MapPattern_0k, its
+// texture frame set by selectChart's animation kind + 3), each the window around that variant's origin;
+// mGroups (+0x50: group, its pane list at +0xC: next +0, pane +8). mChartKind (+0x90) is the save's
+// variant (initializePanes, once), and only the picture of that variant is shown.
+const uint32_t kTreMapDestroy = GC(0x026EBEF4);  // hdTreMapScreen_c::destroy(flags)
+constexpr uint32_t kTreMapGroups = 0x50, kTreMapOrigin = 0x74, kTreMapKind = 0x90, kGroupPanes = 0xC, kNodePane = 8;
 // the in-game menu (hdIngameUi_c, hd_scene_ingame_ui.h): its tab buttons and the map coordinator; the
 // MAP screen's list (hdMenuMap_c): the selected chart. The menu switches tabs itself
 // (hdIngameUi_c::changeActiveScreen): with no tab button selected this frame (hdMenuButtons::mSelected
@@ -132,6 +142,7 @@ struct Applied {
 };
 
 std::mutex g_mu;
+std::vector<MarkerView> g_world_markers;  // immutable declarations, g_mu
 std::vector<Marker> g_markers;  // placement order
 std::map<uint32_t, std::vector<Applied>> g_applied;  // per menu (game thread)
 bool g_imported = false, g_installed = false;
@@ -171,6 +182,8 @@ struct Def {
     uint16_t key;
     float x, z;
     std::u16string caption;  // the name as the caption shows it
+    std::string item_mod;    // its treasure chest: one of the mod's items, or ...
+    uint8_t item_game = 0;   // ... a game item (0: none declared)
 };
 std::vector<Def> g_defs;  // declaration order (g_mu)
 std::vector<Spot> done_spots() {
@@ -217,17 +230,20 @@ void apply(uint32_t menu) {
     applied.clear();
     const uint32_t main = ld32(menu + kMainPane);
     if (!main || !have_save()) return;
-    story_mail::Book b = book();
-    if (!b.usable()) return;
     struct Place {
         float x, z;
     };
     std::vector<Place> shown;
     bool tracked = false;
-    if (Place t{}; g_tracked) {  // the notebook's tracked quest comes first
+    // the notebook's tracked quest comes first, only with a story block the port can read (as before the
+    // world objects: an unreadable block shows no ring)
+    if (Place t{}; g_tracked && book().usable()) {
         std::string label;
         if (g_tracked(t.x, t.z, label)) shown.push_back(t), tracked = true;
     }
+    // world-object islands (publish_world_markers): fixed declarations that need no story record here;
+    // a marker behind a flag is published only once story_actors reads that flag from a usable block
+    for(const auto& m:world_markers())shown.push_back({m.x,m.z});
     if (shown.empty()) return;
     const float cx = float(ldf32(main + kPaneTranslate)), cy = float(ldf32(main + kPaneTranslate + 4));
     const float sx = float(ldf32(main + kPaneSize)) / kSquaresPerSide, sy = float(ldf32(main + kPaneSize + 4)) / kSquaresPerSide;
@@ -425,37 +441,80 @@ uint32_t square_entry(uint32_t coord, int column, int row) {  // the game's char
         if (const uint32_t e = ld32(table + 4 * uint32_t(i)); e && int8_t(ld8(e + kEntrySea)) == (row + 3) * 7 + column + 3 + 1) return e;
     return 0;
 }
-// the mod chart's entry, in its own guest memory: the game's entry of its square (art, origin), its
-// spot as the salvage point of every variant, its own number, a treasure chart's type, no save number
-uint32_t build_entry(uint32_t coord, uint32_t chart, size_t def) {
+// How a mod chart's view is made (story_chart.h, ChartView): its square, the picture of that square
+// that shows its spot (a salvage variant, or none) and the view's centre in the square
+struct ViewPlan {
+    SquarePlace place;
+    uint32_t square = 0;  // the game's entry of the square
+    int variant = -1;     // the picture; -1: none of the square's pictures shows the spot
+    float origin_x = 0, origin_z = 0;
+};
+ViewPlan view_plan(uint32_t coord, size_t def) {
+    ViewPlan p;
     float x, z;
     {
         std::lock_guard lock(g_mu);
+        if (def >= g_defs.size()) return p;
         x = g_defs[def].x, z = g_defs[def].z;
     }
-    const int column = int(std::lround(x / kSquare)), row = int(std::lround(z / kSquare));
-    const uint32_t square = square_entry(coord, column, row), treasure = chart_entry(coord, int(kProxyChart));
-    if (!square || !treasure || !g_entries) return 0;
+    p.place = square_place(x, z);
+    p.square = coord ? square_entry(coord, p.place.column, p.place.row) : 0;
+    if (!p.square) return p;
+    int16_t origins[4][2];
+    for (uint32_t k = 0; k < 4; k++)
+        for (uint32_t a = 0; a < 2; a++) origins[k][a] = int16_t(ld16(p.square + kEntryPositions + 2 * (4 * k + a)));
+    p.variant = view_variant(origins, p.place.x, p.place.z);
+    p.origin_x = p.variant >= 0 ? float(origins[p.variant][0]) : p.place.x;
+    p.origin_z = p.variant >= 0 ? float(origins[p.variant][1]) : p.place.z;
+    return p;
+}
+// the mod chart's entry, in its own guest memory: the game's entry of its square (its picture's number),
+// its own number, a treasure chart's type, no save number, and for every salvage variant the view's
+// centre and the spot (the X, and where its treasure is salvaged)
+uint32_t build_entry(uint32_t coord, uint32_t chart, size_t def) {
+    const ViewPlan p = view_plan(coord, def);
+    const uint32_t treasure = chart_entry(coord, int(kProxyChart));
+    if (!p.square || !treasure || !g_entries) return 0;
     const uint32_t e = g_entries + uint32_t(def) * 0x28;
-    for (uint32_t i = 0; i < kEntryBytes; i++) st8(e + i, ld8(square + i));
+    for (uint32_t i = 0; i < kEntryBytes; i++) st8(e + i, ld8(p.square + i));
     st8(e + kEntrySave, 0);  // none: the game's chart bits are never this chart's
     st8(e + kEntryNumber, uint8_t(chart + 1));
     st8(e + kEntryType, ld8(treasure + kEntryType));
     auto offset = [](float v) { return uint16_t(int16_t(std::clamp(std::lround(v), -32767L, 32767L))); };
     for (uint32_t k = 0; k < 4; k++) {  // {origin x, origin y, salvage x, salvage y} per salvage variant
-        st16(e + kEntryPositions + 2 * (4 * k + 2), offset(x - float(column) * kSquare));
-        st16(e + kEntryPositions + 2 * (4 * k + 3), offset(z - float(row) * kSquare));
+        st16(e + kEntryPositions + 2 * (4 * k + 0), offset(p.origin_x));
+        st16(e + kEntryPositions + 2 * (4 * k + 1), offset(p.origin_z));
+        st16(e + kEntryPositions + 2 * (4 * k + 2), offset(p.place.x));
+        st16(e + kEntryPositions + 2 * (4 * k + 3), offset(p.place.z));
     }
     if (trace()) {
         static std::map<uint32_t, std::string> last;
         char line[256];
-        snprintf(line, sizeof line, "mod chart %u: square %d,%d (sea %d), spot %.0f,%.0f; the square's entry: origin %d,%d salvage %d,%d", chart,
-                 column, row, int8_t(ld8(square + kEntrySea)), x, z, int16_t(ld16(square + kEntryPositions)),
-                 int16_t(ld16(square + kEntryPositions + 2)), int16_t(ld16(square + kEntryPositions + 4)), int16_t(ld16(square + kEntryPositions + 6)));
+        snprintf(line, sizeof line, "mod chart %u: square %d,%d (sea %d), spot %.0f,%.0f in it; the view: %s %d, centre %.0f,%.0f", chart,
+                 p.place.column, p.place.row, int8_t(ld8(p.square + kEntrySea)), p.place.x, p.place.z,
+                 p.variant >= 0 ? "the square's picture of salvage variant" : "no picture shows the spot, plain sea;", p.variant, p.origin_x,
+                 p.origin_z);
         if (last[chart] != line) LOG("[chart] %s", line), last[chart] = line;
     }
     return e;
 }
+// the chart view's pictures: only `variant`'s shown (-1: none); what the game set up when the view was made
+void show_picture(uint32_t view, int variant) {
+    for (uint32_t k = 0; k < 4; k++) {
+        const uint32_t group = ld32(view + kTreMapGroups + 4 * k);
+        if (!group) continue;
+        const uint32_t sentinel = group + kGroupPanes;
+        unsigned guard = 0;
+        for (uint32_t node = ld32(sentinel); node && node != sentinel && guard < 16; node = ld32(node), guard++)
+            if (const uint32_t pane = ld32(node + kNodePane))
+                st8(pane + kPaneFlags, uint8_t((ld8(pane + kPaneFlags) & ~kVisible) | (int(k) == variant ? kVisible : 0)));
+    }
+}
+// chart views showing another picture than the game's (a mod chart's): the game's picture, ours
+struct ViewPictures {
+    int game = 0, shown = 0;
+};
+std::map<uint32_t, ViewPictures> g_views;
 // the caption's message of a chart number (hdMenuMap_c::setChartCaption)
 uint32_t caption_message(uint32_t chart) {
     if (chart < 3) return chart + 0x31D8;
@@ -475,6 +534,22 @@ Marker* find(const std::string& mod, const std::string& chart, const std::string
 
 // the same 16-bit hash as the letters' keys; kinds keep the two apart
 uint16_t chart_key(const std::string& mod, const std::string& chart) { return story_mail::letter_key(mod, chart); }
+
+SquarePlace square_place(float x, float z) {
+    // (the sea's very edge, +-3.5 squares, belongs to the outer squares: as the salvage, story_treasure_salvage.cpp)
+    const long column = std::clamp(std::lround(x / kSquare), -3L, 3L), row = std::clamp(std::lround(z / kSquare), -3L, 3L);
+    return {int(column), int(row), x - float(column) * kSquare, z - float(row) * kSquare};
+}
+int view_variant(const int16_t origins[4][2], float x, float z) {
+    int best = -1;
+    float best_off = 0;
+    for (int k = 0; k < 4; k++) {
+        // the view's own test for Link's icon (hdTreMapScreen_c::updatePosition): inside while within half the view
+        const float off = std::max(std::fabs(x - float(origins[k][0])), std::fabs(z - float(origins[k][1])));
+        if (off <= 0.5f * kViewSize && (best < 0 || off < best_off)) best = k, best_off = off;
+    }
+    return best;
+}
 
 int32_t give(const std::string& mod, const std::string& chart) {
     if (!story_mail::valid_id(chart)) return kResultInvalid;
@@ -510,19 +585,52 @@ int32_t state(const std::string& mod, const std::string& chart) {
     return result_of(chart_value(book(), chart_key(mod, chart)));
 }
 
-int32_t define(const std::string& mod, const std::string& chart, const std::string& name, const std::string& description, float x, float z) {
+int32_t define(const std::string& mod, const std::string& chart, const std::string& name, const std::string& description, float x, float z,
+               const std::string& item_mod, uint8_t item_game) {
     std::u16string caption, ignored;
     if (!story_mail::valid_id(chart) || name.empty() || name.size() > kMaxNameBytes || !story_mail::append_utf16(name, false, caption) ||
         description.size() > kMaxDescriptionBytes || !story_mail::append_utf16(description, true, ignored))
         return kResultInvalid;
     if (!(x >= -kSeaHalf && x <= kSeaHalf && z >= -kSeaHalf && z <= kSeaHalf)) return kResultInvalid;
     std::lock_guard lock(g_mu);
-    Def d{mod, chart, name, description, chart_key(mod, chart), x, z, caption};
+    Def d{mod, chart, name, description, chart_key(mod, chart), x, z, caption, item_mod, item_game};
     for (Def& old : g_defs)
         if (old.mod == mod && old.id == chart) return old = d, kResultNone;
     if (g_defs.size() >= kMaxCharts) return kResultNoRoom;
     g_defs.push_back(d);
     return kResultNone;
+}
+
+bool redefine(const std::string& mod, const std::vector<Declared>& charts, std::vector<std::string>& kept, std::string& why) {
+    kept.clear();
+    std::vector<Def> made;
+    for (const Declared& c : charts) {
+        std::u16string caption, ignored;
+        if (!story_mail::valid_id(c.id) || c.name.empty() || c.name.size() > kMaxNameBytes || !story_mail::append_utf16(c.name, false, caption) ||
+            c.description.size() > kMaxDescriptionBytes || !story_mail::append_utf16(c.description, true, ignored) ||
+            !(c.x >= -kSeaHalf && c.x <= kSeaHalf && c.z >= -kSeaHalf && c.z <= kSeaHalf))
+            return why = "chart " + c.id + " is not valid", false;
+        made.push_back({mod, c.id, c.name, c.description, chart_key(mod, c.id), c.x, c.z, caption, c.item_mod, c.item_game});
+    }
+    std::lock_guard lock(g_mu);
+    std::vector<Def> next = g_defs;
+    for (const Def& d : made) {
+        bool replaced = false;
+        for (Def& old : next)
+            if (old.mod == mod && old.id == d.id) old = d, replaced = true;
+            else if (old.key == d.key && !(old.mod == mod && old.id == d.id)) return why = "chart " + d.id + " can't be told apart from another chart in the save file (same key); rename it", false;
+        if (!replaced) next.push_back(d);
+    }
+    if (next.size() > kMaxCharts) return why = "no room for more charts (" + std::to_string(kMaxCharts) + " in all)", false;
+    for (const Def& old : next)
+        if (old.mod == mod && std::none_of(made.begin(), made.end(), [&](const Def& d) { return d.id == old.id; })) kept.push_back(old.id);
+    g_defs = std::move(next);
+    return true;
+}
+
+size_t declared() {
+    std::lock_guard lock(g_mu);
+    return g_defs.size();
 }
 
 std::vector<ChartView> charts() {
@@ -531,7 +639,7 @@ std::vector<ChartView> charts() {
     std::lock_guard lock(g_mu);
     for (const Def& d : g_defs)
         out.push_back({d.mod, d.id, d.name, d.description, d.x, d.z, b.usable() ? result_of(chart_value(b, d.key)) : kResultNone,
-                       b.usable() && chart_value(b, d.key) == kChartOpened});
+                       b.usable() && chart_value(b, d.key) == kChartOpened, d.item_mod, d.item_game});
     return out;
 }
 
@@ -566,6 +674,24 @@ int32_t unmark(const std::string& mod, const std::string& chart, const std::stri
 
 void set_tracked_source(TrackedSource source) { g_tracked = source; }
 
+bool publish_world_markers(const std::string& mod,std::span<const WorldMarker> markers){
+    if(mod.empty()||mod.size()>128||markers.size()>kMaxMarkersPerMod)return false;
+    std::u16string checked;if(!story_mail::append_utf16(mod,false,checked))return false;
+    for(size_t i=0;i<markers.size();++i){const auto&m=markers[i];if(!story_mail::valid_id(m.id)||m.label.empty()||!valid_label(m.label)||
+        !std::isfinite(m.x)||!std::isfinite(m.z)||m.x<=-kSeaHalf||m.x>=kSeaHalf||m.z<=-kSeaHalf||m.z>=kSeaHalf)return false;
+        for(size_t j=0;j<i;++j)if(markers[j].id==m.id)return false;
+    }
+    std::lock_guard lock(g_mu);
+    const size_t others=std::count_if(g_world_markers.begin(),g_world_markers.end(),[&](const auto&m){return m.mod!=mod;});
+    if(others+markers.size()>kMaxMarkers)return false;
+    std::vector<MarkerView> next;next.reserve(others+markers.size());
+    for(const auto&m:g_world_markers)if(m.mod!=mod)next.push_back(m);
+    for(const auto&m:markers)next.push_back({mod,"islands",m.id,m.label,m.x,m.z,kIconStory,false});
+    g_world_markers.swap(next);if(!markers.empty())g_imported=true;return true;
+}
+void clear_world_markers(const std::string& mod){publish_world_markers(mod,{});}
+std::vector<MarkerView> world_markers(){std::lock_guard lock(g_mu);return g_world_markers;}
+
 std::vector<MarkerView> shown_markers() {
     std::vector<MarkerView> out;
     if (!have_save()) return out;
@@ -575,6 +701,7 @@ std::vector<MarkerView> shown_markers() {
     }
     story_mail::Book b = book();
     std::lock_guard lock(g_mu);
+    out.insert(out.end(),g_world_markers.begin(),g_world_markers.end());
     for (const Marker& m : g_markers)
         if (chart_value(b, m.key) == kChartDone) out.push_back({m.mod, m.chart, m.id, m.label, m.x, m.z, m.icon, true});
     return out;
@@ -618,7 +745,7 @@ void install(const std::function<std::string(uint32_t)>& replaced_by, const std:
         {kIsComplete, hooks::chart_complete}, {kObtainChart, hooks::obtain_chart}, {kCountObtained, hooks::count_obtained},
         {kMenuFindChart, hooks::menu_find_chart}, {kChartCaption, hooks::chart_caption}, {kChartKind, hooks::chart_kind},
         {kChartIcon, hooks::chart_icon}, {kChartFrame, hooks::chart_frame}, {kChartDetails, hooks::chart_details},
-        {kResetSelection, hooks::reset_selection}};
+        {kResetSelection, hooks::reset_selection}, {kTreMapDestroy, hooks::view_destroy}};
     // all or nothing: a pane moved without the hook that puts it back would stay moved
     for (const auto& [addr, fn] : hooks) {
         std::string other = replaced_by(addr);
@@ -637,6 +764,7 @@ void install(const std::function<std::string(uint32_t)>& replaced_by, const std:
 void capture_begin() {
     if (!g_installed) return;
     for (const auto& [menu, applied] : g_applied) revert(menu, applied);
+    for (const auto& [view, pictures] : g_views) show_picture(view, pictures.game);
     for (const auto& [grid, circles] : g_circles)
         for (const Circle& c : circles)
             if (grid_pane(grid, c.cell) == c.pane) st32(c.pane + kPaneTranslate, c.tx), st32(c.pane + kPaneTranslate + 4, c.ty);
@@ -649,8 +777,13 @@ void capture_end() {
     for (const auto& [grid, circles] : g_circles)
         for (const Circle& c : circles)
             if (grid_pane(grid, c.cell) == c.pane) st32(c.pane + kPaneTranslate, c.mx), st32(c.pane + kPaneTranslate + 4, c.my);
+    for (const auto& [view, pictures] : g_views) show_picture(view, pictures.shown);
 }
+uint32_t g_chart_menu = 0;  // the sea chart menu (hdSeaChartMenu_c) since it last ran, until destroyed
+
 void state_loaded() {
+    g_chart_menu = 0;  // the loaded memory has its own (seen again when it runs)
+    g_views.clear();
     g_coordinator = 0;
     g_applied.clear();
     g_borrowed.clear();
@@ -659,7 +792,6 @@ void state_loaded() {
     g_heal_grids = g_heal_balloons = true;
 }
 
-uint32_t g_chart_menu = 0;  // the sea chart menu (hdSeaChartMenu_c) since it last ran, until destroyed
 uint32_t sea_chart_menu() { return g_chart_menu; }
 
 namespace hooks {
@@ -729,6 +861,8 @@ void icon_update(Cpu* c) {
     // the tracked step's spot in this square first, else a finished chart's marker in it
     bool found = g_tracked && g_tracked(x, z, label) && place(x, z, px, py);
     const bool tracked = found;
+    bool world=false;
+    if(!found)for(const auto&m:world_markers())if(place(m.x,m.z,px,py)){x=m.x;z=m.z;found=world=true;break;}
     if (!found)
         for (const Spot& m : done_spots())
             if (place(m.x, m.z, px, py)) {
@@ -744,7 +878,7 @@ void icon_update(Cpu* c) {
     if (trace()) {  // the circle following a moving resident
         static float last_x = 1e9f, last_y = 1e9f;
         if (std::fabs(px - last_x) > 0.5f || std::fabs(py - last_y) > 0.5f)
-            LOG("[chart] balloon %08X: the %s circle at %.1f,%.1f (world %.0f,%.0f)", icon, tracked ? "tracked quest's" : "finished chart's", px, py, x,
+            LOG("[chart] balloon %08X: the %s circle at %.1f,%.1f (world %.0f,%.0f)", icon, tracked ? "tracked quest's" : world ? "world island's" : "finished chart's", px, py, x,
                 z),
                 last_x = px, last_y = py;
     }
@@ -752,7 +886,7 @@ void icon_update(Cpu* c) {
         Cpu call = keep;
         g_call(&call, kAnimStop, {anims, kFishAnim, kFishSlot});
         g_borrowed[icon] = anims;
-        LOG("[chart] the %s circle is in the zoomed square %d,%d at %.1f,%.1f (mode %u)", tracked ? "tracked quest's" : "finished chart's", cell_x,
+        LOG("[chart] the %s circle is in the zoomed square %d,%d at %.1f,%.1f (mode %u)", tracked ? "tracked quest's" : world ? "world island's" : "finished chart's", cell_x,
             cell_y, px, py, mode);
     }
 }
@@ -895,12 +1029,46 @@ void chart_kind(Cpu* c) {
 }
 void chart_icon(Cpu* c) { proxied(c, kChartIcon, 5); }
 void chart_details(Cpu* c) { proxied(c, kChartDetails, 5); }
-// the chart view: then it keeps the mod chart's own number (its "got" circle follows the record)
+// the chart view: a mod chart's view shows the picture of its square whose window holds its spot
+// (ViewPlan; selectChart takes the picture and the window from the view's variant, so the view has
+// that variant for this call), then the view keeps the mod chart's own number (its "got" circle
+// follows the record). A game chart's view: the game's picture again.
 void chart_frame(Cpu* c) {
     const uint32_t map = c->r[3], slot = c->r[4], chart = c->r[5];
+    const uint32_t view = ld32(map + kMapChartIcons + 4 * (slot < 3 ? slot : 0));
+    size_t def;
+    uint8_t value;
+    const bool mod = mod_chart(chart, def, value);
+    // the game's picture: the view's variant as the game set it (0xFF before the view is made)
+    const auto known = view ? g_views.find(view) : g_views.end();
+    const int game = known != g_views.end() ? known->second.game : view ? ld8(view + kTreMapKind) : 0xFF;
+    const bool ready = game < 4;
+    int picture = game;
+    ViewPlan plan;
+    if (mod && ready) {
+        uint32_t coord = g_coordinator;
+        if (const uint32_t ui = coord ? 0 : ld32(kIngameUi)) coord = ld32(ui + kUiCoordinator);
+        plan = view_plan(coord, def);
+        if (plan.square) picture = plan.variant;
+    }
+    if (ready && picture != (known != g_views.end() ? known->second.shown : game)) show_picture(view, picture);
+    if (ready && picture != game) g_views[view] = {game, picture};
+    else if (known != g_views.end()) g_views.erase(known);
+    if (ready && picture >= 0) st8(view + kTreMapKind, uint8_t(picture));
     proxied(c, kChartFrame, 5);
-    if (!mod_chart(chart)) return;
-    if (const uint32_t view = ld32(map + kMapChartIcons + 4 * (slot < 3 ? slot : 0))) st32(view + kTreMapChartIndex, chart);
+    if (ready) st8(view + kTreMapKind, uint8_t(game));
+    if (ready && plan.square) {
+        // the window's centre exactly: the entry's s16 origin can't hold a spot farther than 32767 from
+        // its square's centre (no picture's window reaches there: the plain sea's window, centred on it)
+        st32(view + kTreMapOrigin, f32_as_u32(float(plan.place.column) * kSquare + plan.origin_x));
+        st32(view + kTreMapOrigin + 4, f32_as_u32(float(plan.place.row) * kSquare + plan.origin_z));
+    }
+    if (mod && view) st32(view + kTreMapChartIndex, chart);
+}
+// hdTreMapScreen_c::destroy(flags): the view is gone
+void view_destroy(Cpu* c) {
+    g_views.erase(c->r[3]);
+    g_original(c, kTreMapDestroy);
 }
 // resetChartSelection(): the game shows its selected chart only below its last one: a mod chart too
 void reset_selection(Cpu* c) {

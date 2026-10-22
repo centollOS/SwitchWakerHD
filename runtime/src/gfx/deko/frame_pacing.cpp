@@ -23,7 +23,7 @@
 #include "dk.h"
 #include "runtime.h"
 
-namespace interp { uint32_t effective_swap_interval(uint32_t game); int vsync_rate(); }
+namespace interp { uint32_t effective_swap_interval(uint32_t game); uint32_t vsync_granule_ticks(); }
 
 namespace frame_pacing {
 using gfxdk::now_ns;
@@ -211,7 +211,7 @@ void on_present(DkCmdBuf cmd, uint64_t frame) {
 // (GX2SetSwapInterval) in every log so far (530 of 530 '[gx2] ... swap interval' lines, title and gameplay).
 constexpr uint32_t kGameSwapInterval = 2;
 uint32_t swap_interval() {
-    if (!mode() || interp::vsync_rate() > 1) return 1;
+    if (!mode() || interp::vsync_granule_ticks() <= 2) return 1;
     return std::clamp<uint32_t>(interp::effective_swap_interval(kGameSwapInterval), 1, 2);
 }
 

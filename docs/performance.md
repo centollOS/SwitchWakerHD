@@ -99,6 +99,12 @@ directory) to check that the run still renders correctly. The "Sort by top of st
 `sample.txt` shows where the CPU time goes. `run.log` prints the shader and pipeline counts every
 few seconds.
 
+Crash logs and the overlay's "Copy performance report" carry one line with the renderer's live
+objects (`runtime/src/render_objects.h`): `renderer objects: 572 shaders, 337 pipelines`, plus on
+Linux and Android `memory mappings N (limit L)` from `/proc/self/maps` and `vm.max_map_count`.
+Every pipeline and shader module maps driver memory on Android; a process that reaches the limit
+crashes (the GreenNaugahyde Android fork's crash #48).
+
 ### Windows on ARM64: sampling the frame threads
 
 macOS `sample` has no counterpart on Windows that works without administrator rights (ETW / WPR
@@ -290,6 +296,151 @@ Uneven/s is left out where every interval exceeds 1.4 frames. v0.2.12 is tag 5c3
 each with only the trace and load aids added.
 
 
+## Keep game speed at 60 fps (issue #178, 2026-10-19)
+
+With 60 fps frame interpolation and "Keep game speed" on, a computer whose render thread cannot draw
+60 frames a second still ran the game slower than real time: a Steam Deck reported 45 fps and 22.8
+logic steps/s (render thread ~21 ms a frame). Two causes, both at 60 fps only:
+
+- The in-between decision is taken when the logic pass has issued its frame, before the pass waits
+  for its flip. With the render thread behind, that wait is most of the pass, so every in-between
+  frame seemed to fit and every step took two render frames (here 24-25.5 steps/s at ~50 fps).
+- 60 fps had no step schedule: a step that ran late (by up to the 2 ms planning slack, or more) was
+  never made up for. 120/240 fps have used the step slots on the vsync grid since issue #164.
+
+Now 60 fps uses the same step slots and late-step rule as 120/240 fps (`gx2/vsync_pacing.h`; a logic
+pass less than a step late keeps the schedule), and the in-between decision of a 60 fps step counts
+the logic pass at least at its recent duration and lets the next step start at most one frame late
+(`interp_pacing.h` `logic_pass_elapsed`): that step then skips its own in-between frame if needed,
+so the game keeps 29.97 steps a second and the computer draws as many frames as it can. Without the
+load nothing changes.
+
+Apple M3 Max, Outset (the pier, standing), Vulkan, hidden windows (`WWHD_DISPLAY_HZ=0` at 120/240
+fps), "Keep game speed" on, three runs per build interleaved, ~60 s each after interpolation is
+switched on, 1-minute load 4-9. Cells: logic steps/s, fps (flips/s), flip interval p50 / p99,
+in-between frames drawn (median of the runs).
+
+| Case | before | after |
+|---|---|---|
+| 60 fps, render +15 ms | 25.52, 51.0, 19.58 / 20.23 ms, 100% | 29.96, 50.0, 19.86 / 22.09 ms, 67% |
+| 60 fps, render +19 ms (one run each; a Steam Deck's frame time) | 21.12, 42.3, 23.64 / 24.37 ms, 100% | 29.95, 42.0, 23.64 / 26.75 ms, 40% |
+| 60 fps, no load | 30.00, 59.9, 16.69 / 17.63 ms, 100% | 30.00, 59.9, 16.68 / 18.60 ms, 100% |
+| 120 fps, render +15 ms | 30.00, 50.7, 19.70 / 20.34 ms, 23% | 29.98, 50.7, 19.71 / 20.39 ms, 23% |
+| 240 fps, no load (~110 fps) | 30.00, 109.1, 8.93 / 15.38 ms, 38% | 30.00, 112.9, 8.29 / 14.02 ms, 39% |
+
+Logic steps/s here are the game's own 300-step averages (30.0 = 29.97 within their rounding). The
+60 fps p99 without load varies between runs of the same build (17.6-18.6 ms before, 17.6-20.6 ms
+after; one run of each build had a single interval over 25 ms). The simulation in
+`runtime/tools/interp_pacing_test.cpp` covers render loads of 15, 18 and 21 ms a frame and game
+passes a little over a vsync (before: 21-29 steps/s; after: 29.97, with the frames the renderer
+draws).
+
+## Keep game speed at 60 fps: skips at the deficit rate (issue #254, 2026-10-20)
+
+A phone whose passes take a little longer than a vsync (Xiaomi 14, ~17.2 ms) still lost game time at
+60 fps with Keep game speed on: 29.84-29.85 logic steps/s while it skipped fewer in-between frames
+than its frame time needs. Two causes, at 60 fps only:
+
+- After a skipped in-between frame the next logic pass slept until its step's time, so a skip that
+  came early saved less than a frame (waits after 3-4 % of the steps).
+- A step that one slow pass (a 20-40 ms hitch) left more than a step late started a new step schedule,
+  and that time was lost (5 restarts a minute).
+
+Now the next logic pass starts at once after a skip and keeps what the skip saved as a lead on the
+step schedule (`interp_pacing.h` `wait_after_drop`): the step lateness is the accumulated deficit,
+and every skip takes a whole in-between pass off it. A step up to two steps late keeps the schedule
+and catches up by skipping (`keep_window`; a scene load still restarts it). 120/240 fps and Keep
+game speed off are unchanged.
+
+Xiaomi 14 (adb), Windfall waters (portable state, scripted stick), 60 fps, Keep game speed on, warm
+shader cache, cool start (battery < 33 C), 60 s measured, runs interleaved C B B C A. A = before
+issue #178's fix, B = with it, C = this change. Steps/s: bench (frame trace) and the step trace;
+skipped: in-between frames skipped in the step trace, and the share that keeps the speed at the
+run's own mean frame time; restarts / waits: step trace N / W per run.
+
+| Run | steps/s | trace steps/s | fps | skipped (needed) | restarts / waits |
+|---|---|---|---|---|---|
+| A | 29.20 | 29.20 | 58.1 | 0 % (5.2 %) | (no schedule) |
+| B 1 | 29.90 | 29.84 | 57.0 | 8.4 % (9.3 %) | 5 / 69 |
+| B 2 | 29.90 | 29.85 | 57.9 | 5.9 % (6.7 %) | 5 / 53 |
+| C 1 | 30.00 | 29.97 | 57.6 | 7.4 % (7.4 %) | 0 / 0 |
+| C 2 | 30.00 | 29.94 | 57.9 | 6.4 % (6.6 %) | 1 / 0 |
+
+The skips still come in groups (a median of 5 steps apart, p90 25-31): the scene's cost changes from
+second to second, and the skips follow it.
+
+## 40 fps (2026-10-20)
+
+A frame-rate choice between 30 and 60 fps for 40, 80 and 120 Hz screens (Steam Deck LCD at 40 Hz,
+Steam Deck OLED at 80 Hz, phones with 120 Hz panels): 3 logic steps over 4 frames, a frame every 1.5
+vsyncs of 59.94 Hz (25.03 ms, 39.96 fps; the game keeps 29.97 steps a second, as at every rate).
+
+- The virtual vsync ticks every 6 quarter vsyncs, and a logic step's frame is due on its step slot
+  (every 8 quarter vsyncs) as at 60 fps. So one step in three has two frames before the next step's
+  slot and gets an in-between frame (logic pass halfway, record pass exact, as at 60 fps); the other
+  two are drawn once, their logic pass drawn exactly and recorded as the next step's "before" (a
+  record logic pass). Without slots (Keep game speed off) the first step of every three.
+- Keep game speed (the 60 fps setting) works as at 60 fps: a step with an in-between frame draws it
+  when the next step starts at most a frame late, a skip is followed at once by the next step (a
+  lead), and a step up to two steps late keeps the schedule. A device whose logic passes alone take
+  a step or longer draws no in-between frames (each restart of the schedule would otherwise let one
+  through).
+- On a display whose rate is not a multiple of 40 (60, 90, 144 Hz) the frames still go out every
+  25 ms, and the screen shows them for 1 and 2 refreshes in turn. Settings and the log say so; the
+  choice is left to the player (30 or 60 fps are even there). Android asks for 120 Hz and prefers the lowest
+  display mode above 60 Hz that is a multiple of 40 (80, else 120; 40 Hz only without one): asked
+  for 40 Hz, with its 40 Hz mode preferred, a Xiaomi 14 stayed at 60 Hz.
+- Android's automatic frame interpolation (Keep game speed off) pauses below 33.3 frames a second
+  at 40 fps (5/6 of the rate) instead of 50, and resumes at 21 ms of render thread per 30 fps
+  frame instead of 14. 60 fps and up are unchanged.
+- Motion: the in-between frame is drawn halfway, so the picture moves 1/2, 1/2, 1, 1 steps per frame
+  over a group (frames evenly spaced, motion not quite). Even motion (3/4 of a step per frame) would
+  need every frame blended and recorded.
+
+The simulation in `runtime/tools/interp_pacing_test.cpp` (`test_steps_40`): fast passes 39.96
+flips/s, 29.97 steps/s, every interval one frame; on 40/80/120 Hz (multiples of 39.96) every frame
+1/2/3 refreshes, on 60 Hz half 1 and half 2; 26/28/31 ms passes skip 17/44/79 % of the in-between
+frames (as many as keep the speed) at 29.97 steps/s with no wait after a skip; hitches of 25/40 ms
+every 300 passes are made up for.
+
+Xiaomi 14 (adb), Windfall waters (portable state, scripted stick), 40 fps, Keep game speed on, warm
+shader cache, 60 s measured after 10 s. The panel rate is HyperOS's choice (the display service
+ignores the app's preferred rate): 60 Hz in run 1 (frames shown for 1 and 2 refreshes in turn, the
+Settings note shown), 120 Hz in run 2. Flips: the virtual vsync trace over the whole run; steps/s:
+the game's 300-step log (and the logic frames in the trace, which include two scene-load restarts).
+
+| Run | panel | steps/s | fps | flip interval p1 / p50 / p99, sd | in-between drawn |
+|---|---|---|---|---|---|
+| 1 | 60 Hz | 30.00 (29.86) | 39.8 | 21.0 / 25.03 / 30.2 ms, 3.4 ms | 99.5 % |
+| 2 | 120 Hz | 30.00 (29.93) | 40.0 | 21.0 / 25.02 / 30.4 ms, 2.4 ms | 99.8 % |
+
+## Even frame pacing (2026-10-18)
+
+With frame interpolation the passes of a logic step take different times: the logic pass runs the
+game, an in-between pass only draws. Where the game thread is the limit (Xiaomi 14 with "Record
+graphics on a second thread": logic pass 19-20 ms, in-between pass 12-14 ms) frames were ready 20
+and 13 ms apart, and on the 120 Hz screen a third of the 60 fps frames stayed for one or three
+refreshes instead of two. Asking the compositor for present times did not help (the times were
+already past; a feedback on the measured interval fell to 24 fps; holds landed on wrong refreshes).
+
+Now each frame's swap carries its intended interval (the step's length over its planned frames).
+The Vulkan renderer submits the frame's work at once but holds its present call until one interval
+after the previous frame, less 1/128 of an interval, so the slower kind of frame sets the rhythm and
+a schedule pushed late by a hitch comes back within about a hundred frames. A late frame goes out at
+once, no frame waits longer than one interval, and the game never waits for a held frame. Paced
+steps plan only in-between counts that divide the display's refreshes per step (on a 120 Hz screen
+one or three, never two: 90 fps would stay 1, 1 and 2 refreshes). On by default on Android, off
+elsewhere; `WWHD_INTERP_EVEN_PACING=0/1` overrides, `WWHD_VK_PRESENT_TRACE=file` writes ready,
+planned and actual present times per frame, `WWHD_TEST_GAME_LOAD_MS=x:y` loads logic and in-between
+passes unevenly to reproduce the case on a computer.
+
+Xiaomi 14, Windfall, 120 fps setting paced to 60, frames shown for 1 / 2 / 3 refreshes
+(SurfaceFlinger): record worker on 11.5-16.8 / 66.5-75.8 / 12.2-16.0 % without, 0.9-2.1 / 92.0-95.6
+/ 2.0-5.0 % with it (five runs; in-between frames held about 4-5 ms, logic frames 1-2 ms); 60 fps
+setting 82-84 % -> 87-94 % two-refresh frames. Record worker off (render thread is the limit, frames
+already even): nothing is held, no change. fps unchanged; frame-time p99 about 1-2 ms higher. Mac
+(MoltenVK, ProMotion, `WWHD_TEST_GAME_LOAD_MS=12:5.5`): 49 % -> 88-97 % two-refresh frames.
+
 ## Desktop CPU/GPU overlap and CPU path defaults (2026-10-07)
 
 Apple M3 Max, MoltenVK, Vulkan renderer, `tools/bench/run_bench.py`, Outset (slot 3) and Windfall
@@ -459,6 +610,41 @@ and vertex and pixel shaders share it). Each lookup hashed all of them in a seri
 last gathered words and result are now kept per stage (two buffers, swapped on a change); an identical
 gather returns the previous result after a `memcmp`. Same input, same key, by construction.
 
+### Metal: narrow shader keys (2026-10-20)
+
+The Metal renderer translated a shader once per `stage_state_hash`: ~380 register words per stage,
+including all 18 texture units and 54 samplers, every render-target word and, for vertex shaders, the
+pixel-shader state. It now uses the two-level key of the Vulkan renderer (docs/vulkan.md, "Shader
+keys"; the linkage words are shared, `gfx/shader_linkage.h`) plus what the MSL translation reads
+beyond the GLSL one: for vertex shaders the whole PS input table (MSL declares every PS input in the
+vertex output, written or not), whether rasterization is enabled and rect emulation; for pixel
+shaders whether the depth buffer is active, the data type of each colour target the shader writes
+and, per sampled unit, the colour target it reads through framebuffer fetch. A shader keeps its wide
+key as its name in the recipe files (user cache, head start, template); replaying a record maps the
+wide key it names to the shared shader, so existing caches and templates keep resolving their
+pipelines. `WWHD_MTL_SHADER_KEY_VERIFY=1` translates again once per new wide key that the narrow key
+gives an existing shader and compares the MSL and the binding metadata (`[gfx shader key] VIOLATION`);
+`WWHD_MTL_WIDE_SHADER_KEYS=1` brings back the wide key for comparisons.
+
+Outset route (60 s from save state slot 3, empty caches, `WWHD_SYNC_SHADERS=1`, fixed seed):
+
+| Metal | wide key | narrow key |
+|---|---|---|
+| translations | 5,782 | 572 |
+| pipelines | 3,050 | 337 |
+| decompile time (ms) | 1,051 | 108 |
+| `shaders.bin` | 6.8 MB | 0.69 MB |
+
+The verify mode checked 5,210 wide keys on that route: no violations. Captured frames at Outset
++400 and +1,500 logic steps and Windfall +600 (TV, present and GamePad pictures and the target of
+every draw of the frame: 441, 395 and 127 images) are byte-identical to the wide key's.
+
+An existing user cache (82 MB, 67,279 shader and 35,607 pipeline records written with the wide key)
+still replays: 1,494 translations instead of 67,406 and 847 pipelines built ahead instead of ~17,900,
+in 0.7 s instead of 1.7–2.4 s (the remaining time is reading and hashing the records). The Metal
+`[gfx]` report also counts compile waits and draws skipped while compiling, since the start
+(`[gfx] compile waits: ...`).
+
 ### Metal: index conversion (`build_indices`)
 
 Indices were converted with a switch on the index format for every index and `insert` calls for every
@@ -486,8 +672,9 @@ Ranked by expected payoff. Sample counts are from the 20 s run above.
    - spread the decompiles across worker threads (the decompiler would need to be checked for
      shared state first);
    - store the translated MSL, so replay skips the decompile;
-   - narrow the key. That is a correctness risk: every register in it changes the generated code
-     somewhere.
+   - narrow the key: done (2026-10-20, "Metal: narrow shader keys" above). A replayed record whose
+     narrow key is known is mapped to that shader without a decompile, and new caches hold one
+     record per narrow key.
 2. **`OSSendMessage` (~300 samples, measured, not worth changing).** One job queue carries ~26,000
    messages a second (sender `0276035C`, one worker receiving). The `notify_all` almost always wakes
    a worker that is really waiting, which is necessary; macOS already skips the kernel call when no

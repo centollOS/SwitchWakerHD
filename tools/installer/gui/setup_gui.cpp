@@ -327,7 +327,8 @@ struct Child {
     }
 };
 
-static bool run_quick(const std::vector<std::string>& args) {
+// exit code of a short helper command (-1: could not start)
+static int run_code(const std::vector<std::string>& args) {
     std::vector<const char*> argv;
     for (auto& a : args) argv.push_back(a.c_str());
     argv.push_back(nullptr);
@@ -341,8 +342,9 @@ static bool run_quick(const std::vector<std::string>& args) {
     int code = -1;
     SDL_WaitProcess(p, true, &code);
     SDL_DestroyProcess(p);
-    return code == 0;
+    return code;
 }
+static bool run_quick(const std::vector<std::string>& args) { return run_code(args) == 0; }
 
 // ---------------------------------------------------------------------------------------------
 // starting the built game
@@ -495,6 +497,7 @@ struct App {
     // CLT (macOS)
     double clt_next_check = 0;
     bool clt_install_started = false;
+    std::string clt_problem;  // why the installed tools can't be used (empty: not installed yet)
 
     // automation
     bool self_test = false;
@@ -1076,16 +1079,57 @@ static void screen_starting() {
     if (!A.log.empty()) log_pane(260);
 }
 
-static bool clt_ok() { return run_quick({"/usr/bin/xcode-select", "-p"}) && run_quick({"/usr/bin/xcrun", "--find", "clang"}); }
+#ifdef __APPLE__
+static const char* const kCltDir = "/Library/Developer/CommandLineTools";
+
+static int clt_check() {  // 0: usable; otherwise the failing step's exit code (xcode-select: -2 when unset)
+    if (!run_quick({"/usr/bin/xcode-select", "-p"})) return -2;
+    return run_code({"/usr/bin/xcrun", "--find", "clang"});
+}
+
+static void set_developer_dir(const char* dir) {
+    // setup and the game it starts inherit it (SDL keeps its own copy of the environment for child processes)
+    if (dir) setenv("DEVELOPER_DIR", dir, 1), SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "DEVELOPER_DIR", dir, true);
+    else unsetenv("DEVELOPER_DIR"), SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "DEVELOPER_DIR");
+}
+
+// macOS can point to another developer folder than the installed Command Line Tools: a removed Xcode, or one
+// whose license hasn't been accepted (issue #219). The tools themselves work, so use them directly then.
+static bool clt_ok() {
+    int code = clt_check();
+    if (code == 0) return A.clt_problem.clear(), true;
+    SDL_PathInfo info;
+    const bool installed = SDL_GetPathInfo((std::string(kCltDir) + "/usr/bin/clang").c_str(), &info);
+    if (installed && !getenv("DEVELOPER_DIR")) {
+        set_developer_dir(kCltDir);
+        if (clt_check() == 0) return A.clt_problem.clear(), true;
+        set_developer_dir(nullptr);
+    }
+    if (!installed) A.clt_problem.clear();
+    else if (code == 69)
+        A.clt_problem = "The Command Line Tools are installed, but macOS uses Xcode, and Xcode's license hasn't been "
+                        "accepted yet. Open Terminal and run:  sudo xcodebuild -license accept";
+    else
+        A.clt_problem = "The Command Line Tools are installed, but macOS can't use them. Open Terminal and run:  sudo "
+                        "xcode-select --switch /Library/Developer/CommandLineTools";
+    return false;
+}
+#else
+static bool clt_ok() { return true; }  // only macOS builds with Apple's tools
+#endif
 
 static void start_child();
 
 static void screen_clt() {
     page_header("Apple's Command Line Tools are needed");
     ImGui::TextWrapped("Setup compiles the game on your Mac with Apple's free Command Line Tools (compiler and "
-                       "Python). They are not installed yet.");
+                       "Python).%s", A.clt_problem.empty() ? " They are not installed yet." : "");
     ImGui::Spacing();
-    if (!A.clt_install_started) {
+    if (!A.clt_problem.empty()) {
+        ImGui::TextWrapped("%s", A.clt_problem.c_str());
+        ImGui::Spacing();
+        ImGui::TextWrapped("It asks for your Mac password. Setup continues by itself afterwards.");
+    } else if (!A.clt_install_started) {
         ImGui::TextWrapped("Click the button: Apple's installer opens. Click \"Install\" there and accept the license; it "
                            "takes a few minutes. Setup continues by itself afterwards.");
     } else {
@@ -1095,6 +1139,12 @@ static void screen_clt() {
     if (ImGui::GetTime() > A.clt_next_check) {
         A.clt_next_check = ImGui::GetTime() + 3.0;
         if (clt_ok()) start_child();
+    }
+    if (!A.clt_problem.empty()) {
+        int b = footer({"Quit", "Check again"}, 1);
+        if (b == 0) A.exit_code = 0;
+        if (b == 1) A.clt_next_check = 0;  // checks on the next frame (it also checks every 3 s by itself)
+        return;
     }
     int b = footer({"Quit", A.clt_install_started ? "Open Apple's installer again" : "Install Command Line Tools"}, 1);
     if (b == 0) A.exit_code = 0;

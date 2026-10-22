@@ -1,3 +1,5 @@
+#include "crash_memory.h"
+#include "runtime.h"
 #include "crash_context.h"
 #include "crash_redact.h"
 #include "gfx/renderer.h"
@@ -5,6 +7,7 @@
 #include "interp.h"
 #include "mods/manager.h"
 #include "mods/packages.h"
+#include "render_objects.h"
 #include <atomic>
 #include <cstdlib>
 #include <sstream>
@@ -63,11 +66,14 @@ void initialize() {
     publish(out.str());
 }
 void refresh() {
+    if (crash_memory::enabled()) crash_memory::refresh(threads::diagnostic_count(), mem::runtime_top());
     std::ostringstream out;
     out << "\n--- crash context (latest game-thread snapshot) ---\n";
     out << "renderer=" << render::api_name(render::active()) << "\nresolution=" << (render::g_backend ? render::res_scale() : 1.f)
         << "\nframe_mode=" << interp::mode_name() << "\nframe_target=" << interp::fps()
         << "\ncontroller=" << (input::pro_controller() ? "Pro" : "GamePad") << '\n';
+    // live shaders/pipelines and memory mappings (render_objects.h): running out of driver mappings
+    out << render_objects::line() << '\n';
     for (const auto& entry : mods::manager::entries()) out << "builtin." << entry.id << '=' << entry.enabled() << '\n';
     for (const auto& package : mods::packages::list()) if (package.enabled || package.active)
         out << "package=" << package.id << " version=" << package.version << " enabled=" << package.enabled << " active=" << package.active << '\n';

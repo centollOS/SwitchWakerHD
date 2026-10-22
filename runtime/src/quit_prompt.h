@@ -8,6 +8,11 @@
 
 namespace quitprompt {
 
+// the wording of the question, shared by the macOS sheet (gfx/quit_prompt.mm) and Settings > Quit Game
+// (overlay/quit_dialog.h, every platform)
+constexpr const char* kTitle = "Quit Wind Waker HD?";
+constexpr const char* kProgressLost = "Progress since your last in-game save is lost.";
+
 // the save state slot "Save State and Quit" writes (Save States menu, Shift+F1)
 constexpr int kSaveSlot = 1;
 

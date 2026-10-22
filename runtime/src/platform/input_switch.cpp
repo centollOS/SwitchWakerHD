@@ -351,6 +351,12 @@ void update() {
 }
 
 void set_touch(bool, float, float) {}
+// the app runs only while it is in front (the console suspends it otherwise)
+bool gameplay_focused() { return true; }
+namespace {
+std::atomic<void (*)(bool)> g_controller_listener{nullptr};  // controller_reapply
+}  // namespace
+void set_controller_listener(void (*fn)(bool pro)) { g_controller_listener = fn; }
 bool pro_controller() { return g_pro.load(std::memory_order_relaxed); }
 void set_pro_controller(bool on) {
     g_pro = on;
@@ -358,6 +364,7 @@ void set_pro_controller(bool on) {
     // choice (TV play: the GamePad picture is its own screen, ZL + ZR + Minus) and the Pro Controller
     gfxsw::set_gamepad_view(!on && screen_mode::single_screen());
     LOG("[input] Switch controller acts as %s", on ? "Pro Controller" : "GamePad");
+    if (auto fn = g_controller_listener.load()) fn(on);
 }
 void release_keys() {}
 void controller_values(float* v) {

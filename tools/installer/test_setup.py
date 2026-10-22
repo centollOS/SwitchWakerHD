@@ -143,6 +143,72 @@ class GuestBuildConfig(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(d, "guest-sdk.json.tmp")))
 
 
+    def appimage_fixture(self, directory):
+        """A fake AppImage mount (/tmp/.mount_XXXXXX) holding a release, and a data folder outside it."""
+        mount = os.path.join(directory, ".mount_AAA")
+        for sub in (("tools", "guestmod"), ("tools", "installer"), ("sdk", "include")):
+            os.makedirs(os.path.join(mount, *sub))
+        data = os.path.join(directory, "home", ".local", "share", "wwhd")
+        os.makedirs(os.path.join(data, "toolchain"))
+        env = {"APPIMAGE": os.path.join(directory, "WWHD.AppImage"), "APPDIR": mount}
+        return mount, data, env
+
+    def test_appimage_stores_release_marker(self):
+        # issue #230: an AppImage is mounted somewhere else on every start; paths inside it are stored as
+        # "$RELEASE/...", the data folder's own paths stay absolute
+        with tempfile.TemporaryDirectory() as directory:
+            mount, data, env = self.appimage_fixture(directory)
+            compiler = os.path.join(data, "toolchain", "zig")
+            python = os.path.join(data, "python", "bin", "python3")
+            tc = setup.Toolchain([compiler, "cc"], [], [], env={"ZIG_GLOBAL_CACHE_DIR": os.path.join(data, "zig-cache")})
+            with mock.patch.dict(os.environ, env), mock.patch.multiple(setup, PKG=mount, PORTABLE=False), \
+                    mock.patch.object(setup, "ensure_setup_python", return_value=python):
+                setup.write_guest_build_config(data, tc)
+            with open(os.path.join(data, "guest-sdk.json"), encoding="utf-8") as f:
+                config = json.load(f)
+            self.assertEqual(config["format_version"], 3)
+            self.assertEqual(config["builder"], "$RELEASE/tools/guestmod/build_guest_mod.py")
+            self.assertEqual(config["include"], "$RELEASE/sdk/include")
+            self.assertEqual(config["setup"], "$RELEASE/tools/installer/setup.py")
+            self.assertEqual(config["python"], [python])
+            self.assertEqual(config["compiler"], [compiler, "cc"])
+            self.assertEqual(config["data_dir"], os.path.abspath(data))
+            self.assertEqual(config["zig_cache"], os.path.join(data, "zig-cache"))
+            self.assertNotIn(".mount_", json.dumps(config))
+
+    def test_appimage_marker_needs_release_inside_appdir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mount, data, env = self.appimage_fixture(directory)
+            tc = setup.Toolchain(["cc"], [], [])
+            elsewhere = os.path.join(directory, "source-tree")
+            with mock.patch.dict(os.environ, env), mock.patch.multiple(setup, PKG=elsewhere, PORTABLE=False), \
+                    mock.patch.object(setup, "ensure_setup_python", return_value="python3"):
+                setup.write_guest_build_config(data, tc)
+            with open(os.path.join(data, "guest-sdk.json"), encoding="utf-8") as f:
+                config = json.load(f)
+            self.assertEqual(config["builder"], os.path.join(elsewhere, "tools", "guestmod", "build_guest_mod.py"))
+
+    def test_appimage_repair_replaces_stale_mount_paths(self):
+        # a format 2 setup from an earlier start of the image: the repair stores the marker
+        with tempfile.TemporaryDirectory() as directory:
+            mount, data, env = self.appimage_fixture(directory)
+            stale = os.path.join(directory, ".mount_OLD")
+            path = os.path.join(data, "guest-sdk.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"format_version": 2, "python": ["old"], "compiler": ["cc"],
+                           "builder": os.path.join(stale, "tools", "guestmod", "build_guest_mod.py"),
+                           "include": os.path.join(stale, "sdk", "include"),
+                           "setup": os.path.join(stale, "tools", "installer", "setup.py"), "data_dir": data}, f)
+            with mock.patch.dict(os.environ, env), mock.patch.multiple(setup, PKG=mount, PORTABLE=False), \
+                    mock.patch.object(setup, "ensure_setup_python", return_value="python3"):
+                setup.repair_guest_python(data)
+            with open(path, encoding="utf-8") as f:
+                config = json.load(f)
+            self.assertEqual(config["format_version"], 3)
+            self.assertEqual(config["builder"], "$RELEASE/tools/guestmod/build_guest_mod.py")
+            self.assertEqual(config["setup"], "$RELEASE/tools/installer/setup.py")
+            self.assertEqual(config["data_dir"], data)
+
     def test_portable_paths_survive_release_move(self):
         with tempfile.TemporaryDirectory() as directory:
             release = os.path.join(directory, "release")
@@ -165,7 +231,7 @@ class GuestBuildConfig(unittest.TestCase):
             moved_data = os.path.join(moved, "data")
             with open(os.path.join(moved_data, "guest-sdk.json")) as f:
                 config = json.load(f)
-            self.assertEqual(config["format_version"], 2)
+            self.assertEqual(config["format_version"], 3)
             for key in ("python", "compiler"):
                 self.assertFalse(os.path.isabs(config[key][0]))
                 self.assertTrue(os.path.isfile(os.path.join(moved_data, config[key][0])))
