@@ -142,6 +142,12 @@ stock clocks they run below 30 fps on main (2026-10-22, main f1f3132: about 28.3
 The same build varies by up to ~2 fps from one boot to the next at these views: compare builds with `ab`
 (alternating boots), never with single runs.
 
+These four were saved with the European game. Builds since the v0.4.0 upstream sync load a benchmark state of the
+other region; v0.4.7 does not ("Portable state: made with another game", the scene times out). The same spots saved
+with the USA game (loaded on main and saved again with `bench save`, same position) are `outset_grass_us`,
+`outset_village_us`, `outset_lookout_us` and `outset_cliff_us`: use them against v0.4.7 with a USA game, e.g.
+`--scenes lava,windfall,dragonroost,outset_grass_us,outset_village_us,outset_lookout_us,outset_cliff_us`.
+
 Considered and left out: Quest Log 1 ("Pulpo", early game) as the progress, because warps from it start story events
 (warp 3 started a dialogue). Windfall's other spawn points face a house or the sea. A boss room was left out because
 the fight is random. Full save states (exact snapshots) do not work on the Switch (`savestate.cpp`), so the scenes
