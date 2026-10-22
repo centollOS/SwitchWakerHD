@@ -18,6 +18,7 @@
 #include "../build_info.h"
 #include "../gfx/switch_renderer.h"
 #include "../gfx/deko/frame_pacing.h"
+#include "../game_clock.h"
 #include "../mods/mods.h"
 #include "../mods/warps.h"
 #include "../runtime.h"
@@ -213,6 +214,13 @@ debugsrv::Reply blur(const debugsrv::Args& a) {
 
 // "pacing [0|1]": frame pacing mode (gfx/deko/frame_pacing.h, #23): 1 swap interval the game's (the default),
 // 0 swap interval 1 (as before); not saved
+// "clockrate [1-4]": the game clock's rate as the fast forward mod sets it (timebase::set_clock_rate): the
+// sessions after a fast forward, reproduced without a dialogue
+debugsrv::Reply clockrate(const debugsrv::Args& a) {
+    if (!a.empty()) timebase::set_clock_rate(unsigned(atoi(a[0].c_str())));
+    return debugsrv::ok("clockrate " + std::to_string(game_clock::rate()) + (game_clock::shifted() ? " (shifted)" : ""));
+}
+
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
     return debugsrv::ok("pacing " + std::to_string(frame_pacing::mode()) + ": swap interval " +
@@ -355,6 +363,7 @@ void start() {
     debugsrv::add_command("profile", "profile [s] | status   sample the main and render threads (logs/prof_*.samples)",
                           profile);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
+    debugsrv::add_command("clockrate", "clockrate [1-4]        the game clock's rate (as fast forward sets it)", clockrate);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);
