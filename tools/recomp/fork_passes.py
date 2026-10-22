@@ -28,11 +28,12 @@ LEAF = ppc2c.pass_on("WWHD_RECOMP_LEAF")
 # hot functions first (hot_functions.txt, from profiles) in their own files, in that order: on unless
 # WWHD_RECOMP_HOT=0
 HOT = ppc2c.pass_on("WWHD_RECOMP_HOT")
-# small hot leaf functions get an always-inline copy that hot callers use (inline_leaves.h): off unless
-# WWHD_RECOMP_INLINE=1 (an experiment: it removes the call overhead but makes the hot code 15% larger)
-INLINE = os.environ.get("WWHD_RECOMP_INLINE", "0") == "1"  # experimental: +15% hot code size
-# the largest leaf (guest instructions) that gets an inline copy: WWHD_RECOMP_INLINE_MAX, default 24
-INLINE_MAX_INSNS = int(os.environ.get("WWHD_RECOMP_INLINE_MAX", "24"))
+# small hot leaf functions get an always-inline copy that hot callers use (inline_leaves.h): on unless
+# WWHD_RECOMP_INLINE=0 (#63: on the console +0.2-0.7 fps, main thread -0.3-0.9 ms; .text +0.7 MB)
+INLINE = ppc2c.pass_on("WWHD_RECOMP_INLINE")
+# the largest leaf (guest instructions) that gets an inline copy: WWHD_RECOMP_INLINE_MAX, default 64
+# (24 and 160 measured too: 160 inlines few more leaves and was no faster)
+INLINE_MAX_INSNS = int(os.environ.get("WWHD_RECOMP_INLINE_MAX", "64"))
 # functions with calls keep guest registers in locals too (leaflocal.transform_nonleaf): on unless
 # WWHD_RECOMP_NONLEAF=0
 NONLEAF = ppc2c.pass_on("WWHD_RECOMP_NONLEAF")
