@@ -467,11 +467,11 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   thread waits 16-34% of the time (the render thread and the GPU set the frame rate), so phase 4 (the render
   thread) is the next lever there; at night at sea the star field is the largest single cost on the main thread.
 - 2026-10-22, **Outset regression hunt (render- and GPU-bound views)**. The player's four Outset save states (tools/switch
-  perf_states outset2-5, outset3b re-saved toward the heavy view), mods off, stock clocks, 450 frames each. Back to back
-  in one session, v0.4.7 against main: slot 2 29.3 / 26.6 fps, slot 3b 25.8 / 23.8; render thread 34.0 / 37.4 ms, GPU
+  perf_states, the demanding set of #75: outset_grass, outset_village, outset_lookout, outset_cliff), mods off, stock clocks, 450 frames each. Back to back
+  in one session, v0.4.7 against main: outset_grass 29.3 / 26.6 fps, outset_village 25.8 / 23.8; render thread 34.0 / 37.4 ms, GPU
   33.2-35.8 / 36.3-37.9 ms a frame; the renderer's own per-draw cost is the same (4.3-4.4 us a draw, same counts), both
   render threads 100% busy with "GPU behind" on every present.
-  - **Boot-to-boot spread is ~2 fps for the same build** (v0.4.7 at slot 2: 27.7-29.9 over 7 boots; main 26.0-27.1 over
+  - **Boot-to-boot spread is ~2 fps for the same build** (v0.4.7 at outset_grass: 27.7-29.9 over 7 boots; main 26.0-27.1 over
   5). Means: v0.4.7 28.7, main 26.4. Single-boot bisects are unreliable at this spread.
   - Bisect, one boot each (same session): v0.4.7 29.3; sync merge 68d7226 28.1-28.8 (another session); c2887fa 28.3;
   bfb4895 26.9; 3e4bdcc (FXAA) 28.3; 26850f8 (#57) 28.2; main (#60) 26.1. bfb4895 (the #60 branch's own base) is as
@@ -488,7 +488,7 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   whose placement moves with the build and the boot; the GPU maps 64 KiB big pages only where the CPU side allows).
   Test build O7: every block 2 MiB-aligned (WWHD_DK_BLOCK_ALIGN), CPU addresses logged.
 - 2026-10-22, **what was kept (branch perf/outset-recovery, on main f1f3132 = PR #71's upstream sync)**. Per draw at
-  Outset slot 2 (matched windows): v0.4.7 4.2 us, main before #71 4.4 us (targets 0.79, ufBlock 0.89); the gap was the
+  outset_grass (matched windows): v0.4.7 4.2 us, main before #71 4.4 us (targets 0.79, ufBlock 0.89); the gap was the
   render thread (~3 ms a frame of CPU) with the GPU waiting on it. Kept, each measured on the console:
   - render thread pinned to core 2 (it migrated between cores 0 and 2): +0.51 / +0.39 fps (8 alternations in one boot;
     pinned to core 0 is the same, so the cost was the migration);
