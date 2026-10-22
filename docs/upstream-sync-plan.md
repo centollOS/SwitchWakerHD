@@ -1,5 +1,21 @@
 # Upstream sync to devel (after v0.2.11): plan
 
+Status (2026-10-22): **second sync, to upstream `devel` 909337f7 (v0.4.0 + 2 commits)**, on
+feature/upstream-sync-v040 (62396830, the same method: `git diff 4dc4832 909337f7 | git apply -3`, 709 upstream
+commits); **the next sync starts from 909337f7**. main's PR #57 (CPU profiler, recompiler passes) and #60 (shader
+stalls) are merged into it. Switch-side choices: gx2_core keeps the fork's command staging, register-write merging
+and counters on top of upstream's register class tables; the overlay goes through upstream's `ext::Features`
+(code mods, mod downloads, speaker choice and keyboard off); zstd is linked on the Switch.
+The first build lost 0.5-0.65 fps against main (lava, Windfall). Fixed on the branch, each measured on the
+console: gx2's thread identity from the TLS register instead of `pthread_self()` (a syscall), display-list
+recording through a per-thread slot, short register writes compared inline, uniform registers emitted directly,
+no state-group bookkeeping per register on the render thread (the Switch does not use it), and the hot functions
+of seven scenes linked together (`tools/switch/hot_order.py` -> `tools/switch/hot_sections.ld`,
+`--section-ordering-file`; regenerate it after big changes). Final A/B against main e5bf129e (ABBA x2):
+lava -0.03 +-0.45 fps, Windfall -0.23 +-0.41, Dragon Roost +0.01 +-0.08 (no measurable change); the 71 new
+upstream hooks and sites cost nothing measurable. Checks: macOS build and tests 609/609; console (USA): boot,
+17-place warp tour, every menu tab, portable states (the perf runs' `bench load`); the EU NRO builds (EU recompiler output from this branch), its console boot is still to do. Menu reorganisation: #70.
+
 Status (2026-10-14): **phase 2 done on feature/upstream-sync** (bbd239c, then 27cff38 and 59a301c), with upstream
 `devel` **4dc4832**: the next sync starts from there (`git diff 4dc4832 upstream/devel | git apply -3`). #187 was
 merged, so step 2.5 registers deko3d through `render::ext`; the Switch's overlay parts go through `overlay::ext`
