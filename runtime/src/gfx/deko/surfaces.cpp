@@ -863,6 +863,10 @@ bool fit_scale(Surface* s, bool keepContents, bool force) {
     return true;
 }
 
+bool scale_settled(const Surface* s) {
+    return !s || !s->renderTarget || !s->img.valid || wanted_scale(s) == s->scale;
+}
+
 float res_scale() { return g_resFrame; }
 float requested_res_scale() { return g_resRequested.load(std::memory_order_relaxed); }
 float res_scale_shown() { return g_resShown.load(std::memory_order_relaxed); }

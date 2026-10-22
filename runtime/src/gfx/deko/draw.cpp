@@ -167,6 +167,10 @@ struct StateCache {
     uint32_t attribCount = ~0u, bufferStateCount = ~0u;
     DkVtxAttribState attribs[kVtxAttribs];
     DkVtxBufferState bufferStates[kVtxBuffers];
+    // (WWHD_DK_VTX_IDENTITY) the VertexLayout::build the bound attributes are (0: unknown); the one the buffer states
+    // were made with and its groups' strides
+    uint64_t attribBuild = 0, bufferBuild = 0;
+    uint32_t bufferStrides[kVtxBuffers]{};
     DkBufExtents vtx[kVtxBuffers];
     uint32_t vtxKnown = 0;  // bit per vertex buffer
     DkBufExtents ubo[2][kMaxUniformBuffers];
@@ -283,6 +287,11 @@ struct ResourcePerf {
     // round 41: depth-only draws that kept their pixel shader, by what its GLSL does (Shader::fragmentWhy)
     uint64_t keptAlphaTest = 0, keptDiscard = 0, keptDepthOrMemory = 0;
     uint64_t targetMemoHits = 0;  // draws whose render targets came from the last draw's lookup (WWHD_DK_REG_GENS)
+    // the draw-memo round: draws among them that skipped the targets' scale and upload checks (WWHD_DK_TARGET_MEMO2);
+    // draws whose rasterizer, depth/stencil and color output were the last ones' (WWHD_DK_FIXED_MEMO); vertex
+    // attribute and buffer states found bound by layout identity (WWHD_DK_VTX_IDENTITY)
+    uint64_t targetChecksSkipped = 0, fixedRasterHits = 0, fixedDepthHits = 0, fixedColorHits = 0;
+    uint64_t attribSame = 0, bufferStateSame = 0;
 } g_res;
 
 // the draw's stage timer: lap() adds the time since the last mark to a stage total; sub() to one part of the
@@ -792,6 +801,9 @@ std::atomic<bool> g_depthOnly{env_switch("DEPTH_ONLY", true)};
 std::atomic<bool> g_texSharedCache{env_switch("TEX_SHARED_CACHE", true)};
 std::atomic<bool> g_vtxLayoutCache{env_switch("VTX_LAYOUT_CACHE", true)};
 std::atomic<bool> g_regGens{env_switch("REG_GENS", true)};
+std::atomic<bool> g_targetMemo2{env_switch("TARGET_MEMO2", true)};
+std::atomic<bool> g_fixedMemo{env_switch("FIXED_MEMO", true)};
+std::atomic<bool> g_vtxIdentity{env_switch("VTX_IDENTITY", true)};
 std::atomic<bool> g_prefetch{env_switch("PREFETCH", true)};
 std::atomic<uint32_t> g_submitDraws{[] {
     const char* e = getenv("WWHD_DK_SUBMIT_DRAWS");
@@ -930,7 +942,9 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
         "textures %.2f calls %.2f handles of %.2f slots, uniform blocks %.2f calls %.2f buffers of %.2f slots; guest "
         "uniform blocks %.2f/draw (%.0f%% already in the stream, %.0f%% by the memo); ufBlock mode %d: %.0f/frame, "
         "%.0f%% unchanged, %.0f slices (%.0f KiB) + %.0f pushes (%.1f KiB) per frame; state us "
-        "per draw: ordering/targets/binds %.2f + fixed %.2f (%.0f%% skipped) + vertices %.2f",
+        "per draw: ordering/targets/binds %.2f + fixed %.2f (%.0f%% skipped; kept by part (%s): rasterizer %.0f%%, "
+        "depth/stencil %.0f%%, color %.0f%%) + vertices %.2f (by layout identity (%s): attributes %.0f%%, buffer states "
+        "%.0f%%)",
         us(p.targetNs), us(p.uboNs), us(p.textureNs), us(p.textureMissNs), perFrame(p.textureMisses),
         p.textureMisses ? double(p.textureMissNs) / 1e3 / double(p.textureMisses) : 0.0,
         pct(p.tableHits, p.tableLookups), perFrame(p.tableLookups), us(p.uniformNs), us(p.descriptorNs), us(p.bindNs),
@@ -939,17 +953,20 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
         pct(p.uboMemoHits, p.uboBlocks), g_ufMode,
         perFrame(u.blocks), pct(u.unchanged, u.blocks), perFrame(u.slices), perFrame(u.sliceBytes) / 1024.0,
         perFrame(u.pushes), perFrame(u.pushBytes) / 1024.0, us(p.stateBindNs), us(p.stateFixedNs),
-        100.0 * perDraw(p.fixedSkips), us(p.stateVertexNs));
+        100.0 * perDraw(p.fixedSkips), g_fixedMemo.load() ? "on" : "OFF", 100.0 * perDraw(p.fixedRasterHits),
+        100.0 * perDraw(p.fixedDepthHits), 100.0 * perDraw(p.fixedColorHits), us(p.stateVertexNs),
+        g_vtxIdentity.load() ? "on" : "OFF", 100.0 * perDraw(p.attribSame), 100.0 * perDraw(p.bufferStateSame));
     LOG("[dk] round 40 per frame: depth-only draws without their pixel shader %.0f (%s), with it %.0f (alpha test "
         "%.0f, other discard %.0f, depth output or memory writes %.0f); texture lookups at shared addresses %.1f (%s), "
         "cached hits %.0f; vertex layouts built %.1f (%s); submit every %u draws; render targets from the last "
-        "draw's lookup %.0f (register generations %s)",
+        "draw's lookup %.0f (register generations %s; state words by value %s), their scale/upload checks skipped %.0f",
         perFrame(p.depthOnlyDraws), g_depthOnly.load() ? "on" : "OFF",
         perFrame(std::max(std::max(p.keptAlphaTest, p.keptDiscard), p.keptDepthOrMemory)), perFrame(p.keptAlphaTest),
         perFrame(p.keptDiscard), perFrame(p.keptDepthOrMemory), perFrame(p.sharedLookups),
         g_texSharedCache.load() ? "cached" : "NOT cached", perFrame(p.sharedHits), perFrame(p.layoutBuilds),
         g_vtxLayoutCache.load() ? "kept per vertex shader" : "NOT kept", g_submitDraws.load(),
-        perFrame(p.targetMemoHits), g_regGens.load() ? "on" : "OFF");
+        perFrame(p.targetMemoHits), g_regGens.load() ? "on" : "OFF", g_targetMemo2.load() ? "on" : "OFF",
+        perFrame(p.targetChecksSkipped));
 }
 
 namespace {
@@ -1044,6 +1061,7 @@ struct VertexLayout {
         bool instance;          // read per instance
     } groups[kVtxBuffers];
     int groupCount = 0;
+    uint64_t build = 0;  // which build this is (unique over all layouts): draws compare it, not the attributes
 };
 namespace {
 const VertexLayout& vertex_layout(const uint32_t* r, LatteFetchShader* fs, Shader* vs) {
@@ -1060,6 +1078,8 @@ const VertexLayout& vertex_layout(const uint32_t* r, LatteFetchShader* fs, Shade
     }
     VertexLayout& L = cacheable ? *vs->vtx : scratch;
     g_res.layoutBuilds++;
+    static uint64_t builds = 0;
+    L.build = ++builds;
     L.fs = fs;
     L.bound = bound;
     L.attribCount = 0;
@@ -1475,10 +1495,15 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     bool srgbViews[8]{};  // a target bound in the sRGB twin of its surface's format
     Surface* depth = nullptr;
     // the last draw's lookup while no target register changed (gx2 g_reg_gen; WWHD_DK_REG_GENS), the surface set is
-    // the same and the pixel shader writes the same outputs
+    // the same and the pixel shader writes the same outputs. The registers LatteMRT's active-buffer masks read besides
+    // the buffers' (CB_COLOR_CONTROL, CB_TARGET_MASK, DB_DEPTH_CONTROL, PA_SC_GENERIC_SCISSOR_BR: kRegCatTargetState)
+    // change between many draws (depth writes, masks, scissors): compared by value (WWHD_DK_TARGET_MEMO2), else by
+    // their category's generation
     struct TargetMemo {
-        uint64_t gen = ~0ull, surfaceEpoch = 0, textureEpoch = 0;
+        uint64_t gen = ~0ull, stateGen = ~0ull, surfaceEpoch = 0, textureEpoch = 0;
         uint64_t shaderEpoch = 0;  // (this fork, memory round 2) a freed variant's dec address can come back
+        uint64_t serial = 0;       // which lookup this is (the same-frame skip below)
+        uint32_t words[4]{};
         const LatteDecompilerShader* dec = nullptr;
         std::array<Surface*, 8> colors{};
         uint32_t slices[8]{}, depthSlice = 0;
@@ -1487,8 +1512,16 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     };
     static TargetMemo tm;
     const bool regGens = g_regGens.load(std::memory_order_relaxed);
+    const bool memo2 = g_targetMemo2.load(std::memory_order_relaxed);
+    const uint32_t stateWords[4] = {r[REGADDR::CB_COLOR_CONTROL], r[REGADDR::CB_TARGET_MASK], r[REGADDR::DB_DEPTH_CONTROL],
+                                    r[REGADDR::PA_SC_GENERIC_SCISSOR_BR]};
+    bool targetHit = false;
     if (regGens && tm.gen == gx2::g_reg_gen[gx2::kRegCatTargets] && tm.surfaceEpoch == R.surfaceEpoch &&
-        tm.textureEpoch == R.textureEpoch && tm.shaderEpoch == R.shaderEpoch && tm.dec == ps->dec) {
+        tm.textureEpoch == R.textureEpoch && tm.shaderEpoch == R.shaderEpoch && tm.dec == ps->dec &&
+        (memo2 ? tm.words[0] == stateWords[0] && tm.words[1] == stateWords[1] && tm.words[2] == stateWords[2] &&
+                     tm.words[3] == stateWords[3]
+               : tm.stateGen == gx2::g_reg_gen[gx2::kRegCatTargetState])) {
+        targetHit = true;
         colors = tm.colors;
         memcpy(slices, tm.slices, sizeof slices);
         memcpy(srgbViews, tm.srgbViews, sizeof srgbViews);
@@ -1501,7 +1534,11 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             if (mask & (1 << i)) colors[i] = color_target(r, i, &slices[i], &srgbViews[i]);
         depth = LatteMRT::GetActiveDepthBufferMask(lcr) ? depth_target(r, &depthSlice) : nullptr;
         // (after the lookups, which may have made surfaces)
+        static uint64_t serials = 0;
         tm.gen = gx2::g_reg_gen[gx2::kRegCatTargets];
+        tm.stateGen = gx2::g_reg_gen[gx2::kRegCatTargetState];
+        memcpy(tm.words, stateWords, sizeof stateWords);
+        tm.serial = ++serials;
         tm.surfaceEpoch = R.surfaceEpoch;
         tm.textureEpoch = R.textureEpoch;
         tm.shaderEpoch = R.shaderEpoch;
@@ -1537,6 +1574,25 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             }
         }
     }
+    // Same-frame skip (WWHD_DK_TARGET_MEMO2): the memo's lookup, whose scale fits and uploads below already ran in this
+    // frame with nothing left to do (every target at the scale it should have, upload_surface checked them), with the
+    // same depth buffer after the test above: no surface or texture epoch moved since (a rescale, a new image, a first
+    // GPU write or a CPU write all move one), so they would do nothing again. Not when the scan buffer is one of them
+    // (before_write flushes it), nor for a target at its HUD size (hudFull: its wanted scale changes without an epoch
+    // when that ends, so neither the checks recorded nor the draw may have one).
+    struct TargetChecks {
+        uint64_t serial = 0, frame = ~0ull;
+        const Surface* depth = nullptr;
+    };
+    static TargetChecks tc;
+    bool checked = targetHit && memo2 && tc.serial == tm.serial && tc.frame == R.frame && tc.depth == depth &&
+                   (!S.scanSrc || S.scanSrc != depth);
+    if (checked)
+        for (auto* c : colors)
+            if (c && (c == S.scanSrc || c->hudFull)) checked = false;
+    bool settled = false;
+    if (checked) g_res.targetChecksSkipped++;
+    else {
     // each render target at the internal resolution it should have now (rescale_surface keeps contents); when
     // some could take it but others wait for an allocation budget, all of them take it now
     if (depth) {
@@ -1557,6 +1613,12 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         if (depth) fit_scale(depth, true, true);
         for (auto* c : colors)
             if (c) fit_scale(c, true, true);
+    }
+    if (memo2) {  // whether the memo's next hits in this frame can skip the checks
+        settled = scale_settled(depth);
+        for (auto* c : colors)
+            if (c) settled &= !c->hudFull && scale_settled(c);
+    }
     }
     Surface* target = depth;
     for (auto* c : colors)
@@ -1603,9 +1665,16 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             return;
         }
     }
-    for (auto* c : colors)
-        if (c) upload_surface(c);
-    if (depth) upload_surface(depth);
+    if (!checked) {
+        for (auto* c : colors)
+            if (c) upload_surface(c);
+        if (depth) upload_surface(depth);
+        // (after the uploads, which could rescale) the checks done for the memo's lookup in this frame
+        if (settled && memo2 && tm.surfaceEpoch == R.surfaceEpoch && tm.textureEpoch == R.textureEpoch)
+            tc = {tm.serial, R.frame, depth};
+        else
+            tc.serial = 0;
+    }
     lap.sub(g_res.targetNs);
 
     // ---- the scissor (before anything is uploaded for a draw that would be discarded)
@@ -1842,6 +1911,61 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     };
     static FixedKey lastFixed;
     static uint64_t lastFixedEpoch = ~0ull;
+    // In three parts (WWHD_DK_FIXED_MEMO): the rasterizer, the depth/stencil and the color output each skipped while
+    // their own register words (and the inputs from the targets) are the ones they were last built from in this state
+    // cache epoch; a draw that changes only the depth writes or a blend rebuilds that part alone, and A -> B -> A
+    // hits too. Each part is the only writer of its StateCache fields, so the last build of a part is what is bound.
+    struct RasterKey {
+        uint32_t words[4];  // PA_SU_SC_MODE_CNTL, PA_CL_CLIP_CNTL, the front poly offset and scale
+        uint32_t points, pointSize;
+        float pointScale;
+    };
+    struct DepthKey {
+        uint32_t words[3];  // DB_DEPTH_CONTROL, DB_STENCILREFMASK, DB_STENCILREFMASK_BF
+        uint32_t depth;     // 1: a depth buffer, 3: one with stencil
+    };
+    struct ColorKey {
+        uint32_t words[14];  // CB_COLOR_CONTROL, CB_TARGET_MASK, CB_BLEND0..7_CONTROL, CB_BLEND_RED..ALPHA
+        uint32_t colorMask, floatMask;
+    };
+    static RasterKey lastRaster;
+    static DepthKey lastDepth;
+    static ColorKey lastColor;
+    static uint64_t rasterEpoch = ~0ull, depthEpoch = ~0ull, colorEpoch = ~0ull;
+    const bool fixedParts = fixedSkipOn && g_fixedMemo.load(std::memory_order_relaxed);
+    bool doRaster = true, doDepth = true, doColor = true;
+    uint32_t colorMask = 0, floatMask = 0;
+    for (uint32_t i = 0; i < 8; i++)
+        if (colors[i]) {
+            colorMask |= 1u << i;
+            if (colors[i]->fmt.kind == FormatInfo::FLOAT) floatMask |= 1u << i;
+        }
+    if (fixedParts) {
+        const bool points = prim == 1;
+        const RasterKey rk = {{r[REGADDR::PA_SU_SC_MODE_CNTL], r[REGADDR::PA_CL_CLIP_CNTL],
+                               r[REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET], r[REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE]},
+                              points, points ? r[REGADDR::PA_SU_POINT_SIZE] : 0u, points ? g_drawScale : 0.0f};
+        const DepthKey dk = {{r[REGADDR::DB_DEPTH_CONTROL], r[REGADDR::DB_STENCILREFMASK], r[REGADDR::DB_STENCILREFMASK_BF]},
+                             depth ? (depth->fmt.stencil ? 3u : 1u) : 0u};
+        ColorKey ck;
+        ck.words[0] = r[REGADDR::CB_COLOR_CONTROL];
+        ck.words[1] = r[REGADDR::CB_TARGET_MASK];
+        for (uint32_t i = 0; i < 8; i++) ck.words[2 + i] = r[REGADDR::CB_BLEND0_CONTROL + i];
+        for (uint32_t i = 0; i < 4; i++) ck.words[10 + i] = r[REGADDR::CB_BLEND_RED + i];
+        ck.colorMask = colorMask;
+        ck.floatMask = floatMask;
+        doRaster = !(rasterEpoch == gs.epoch && gs.rasterKnown && same_bytes(rk, lastRaster));
+        doDepth = !(depthEpoch == gs.epoch && gs.depthStencilKnown && same_bytes(dk, lastDepth));
+        doColor = !(colorEpoch == gs.epoch && gs.colorKnown && gs.colorWriteKnown && same_bytes(ck, lastColor));
+        g_res.fixedRasterHits += !doRaster;
+        g_res.fixedDepthHits += !doDepth;
+        g_res.fixedColorHits += !doColor;
+        if (doRaster) lastRaster = rk, rasterEpoch = gs.epoch;  // (gs.epoch: the parts below change no epoch)
+        if (doDepth) lastDepth = dk, depthEpoch = gs.epoch;
+        if (doColor) lastColor = ck, colorEpoch = gs.epoch;
+        if (doRaster || doDepth || doColor) lastFixedEpoch = ~0ull;  // (the single memo's key no longer what is bound)
+        else g_res.fixedSkips++;
+    } else {
     FixedKey fk;
     memset(&fk, 0, sizeof fk);
     {
@@ -1862,20 +1986,24 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         } else
             for (int i = 0; i < 25; i++) fk.words[i] = r[kFixedRegs[i]];
         fk.depth = depth;
-        for (uint32_t i = 0; i < 8; i++)
-            if (colors[i]) {
-                fk.colorMask |= 1u << i;
-                if (colors[i]->fmt.kind == FormatInfo::FLOAT) fk.floatMask |= 1u << i;
-            }
+        fk.colorMask = colorMask;
+        fk.floatMask = floatMask;
         fk.stencilFmt = depth && depth->fmt.stencil;
         fk.points = prim == 1;
         fk.scale = g_drawScale;
     }
     const bool fixedSame = fixedSkipOn && lastFixedEpoch == gs.epoch && gs.rasterKnown && gs.depthStencilKnown &&
                            gs.colorKnown && gs.colorWriteKnown && !memcmp(&fk, &lastFixed, sizeof fk);
-    if (fixedSame) g_res.fixedSkips++;
-    else {
-    {
+    if (fixedSame) {
+        g_res.fixedSkips++;
+        doRaster = doDepth = doColor = false;
+    } else {
+        lastFixed = fk;
+        lastFixedEpoch = gs.epoch;
+        rasterEpoch = depthEpoch = colorEpoch = ~0ull;  // (the three memos' keys: not what this build binds)
+    }
+    }
+    if (doRaster) {
         DkRasterizerState rs = zeroed<DkRasterizerState>();
         dkRasterizerStateDefaults(&rs);
         // depth clamp (no far clipping) when the game turns far-plane clipping off; deko3d's depth clamp also
@@ -1908,7 +2036,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             }
         }
     }
-    if (prim == 1) {  // points: the fixed size (a shader that writes gl_PointSize overrides it)
+    if (doRaster && prim == 1) {  // points: the fixed size (a shader that writes gl_PointSize overrides it)
         float point = float(r[REGADDR::PA_SU_POINT_SIZE] & 0xFFFF) / 8.0f;
         point = (point == 0 ? 0.125f : point) * g_drawScale;
         if (gs.pointSize != point) {
@@ -1918,7 +2046,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }
 
     // ---- depth / stencil
-    {
+    if (doDepth) {
         LATTE_DB_DEPTH_CONTROL dc;
         memcpy((void*)&dc, r + REGADDR::DB_DEPTH_CONTROL, 4);
         DkDepthStencilState ds = zeroed<DkDepthStencilState>();
@@ -1956,7 +2084,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     }
 
     // ---- color output: blending (float targets only), write masks, logic op, blend constant
-    {
+    if (doColor) {
         DkColorState cs = zeroed<DkColorState>();
         dkColorStateDefaults(&cs);
         DkColorWriteState cw = zeroed<DkColorWriteState>();
@@ -2015,9 +2143,6 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
             }
         }
     }
-    lastFixed = fk;
-    lastFixedEpoch = gs.epoch;
-    }  // (fixed state)
     const uint64_t vertexStart = timed ? now_ns() : 0;
 
     rprof::mark(rprof::kPipeline);
@@ -2077,15 +2202,29 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         vtx[g.index] = {slice.gpu, slice.size};
         vtxMask |= 1u << g.index;
     }
-    if (gs.attribCount != attribCount || memcmp(gs.attribs, attribs, attribCount * sizeof(DkVtxAttribState))) {
+    // (WWHD_DK_VTX_IDENTITY) the attributes bound are this layout's while it is the build they came from (a layout only
+    // changes in a new build); the buffer states are made from its groups (slots, instancing) and the strides only
+    const bool identity = g_vtxIdentity.load(std::memory_order_relaxed);
+    if (identity && gs.attribBuild == layout.build) g_res.attribSame++;
+    else if (gs.attribCount != attribCount || memcmp(gs.attribs, attribs, attribCount * sizeof(DkVtxAttribState))) {
         dkCmdBufBindVtxAttribState(R.cmd, attribs, attribCount);
         memcpy(gs.attribs, attribs, attribCount * sizeof(DkVtxAttribState));
         gs.attribCount = attribCount;
-    }
-    if (gs.bufferStateCount != bufferCount || memcmp(gs.bufferStates, bufferStates, bufferCount * sizeof(DkVtxBufferState))) {
-        dkCmdBufBindVtxBufferState(R.cmd, bufferStates, bufferCount);
-        memcpy(gs.bufferStates, bufferStates, bufferCount * sizeof(DkVtxBufferState));
-        gs.bufferStateCount = bufferCount;
+        gs.attribBuild = layout.build;
+    } else
+        gs.attribBuild = layout.build;  // (the same attributes)
+    bool stridesSame = identity && gs.bufferBuild == layout.build;
+    for (int i = 0; stridesSame && i < groupCount; i++) stridesSame = gs.bufferStrides[i] == groups[i].stride;
+    if (stridesSame) g_res.bufferStateSame++;
+    else {
+        if (gs.bufferStateCount != bufferCount ||
+            memcmp(gs.bufferStates, bufferStates, bufferCount * sizeof(DkVtxBufferState))) {
+            dkCmdBufBindVtxBufferState(R.cmd, bufferStates, bufferCount);
+            memcpy(gs.bufferStates, bufferStates, bufferCount * sizeof(DkVtxBufferState));
+            gs.bufferStateCount = bufferCount;
+        }
+        gs.bufferBuild = layout.build;
+        for (int i = 0; i < groupCount; i++) gs.bufferStrides[i] = groups[i].stride;
     }
     bind_runs(vtx, vtxMask, gs.vtx, gs.vtxKnown, [&](uint32_t first, const DkBufExtents* e, uint32_t n) {
         dkCmdBufBindVtxBuffers(R.cmd, first, e, n);

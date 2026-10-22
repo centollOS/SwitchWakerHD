@@ -72,7 +72,7 @@ static const std::vector<uint8> g_reg_cat = [] {
     for (uint32 r = mmCB_COLOR0_BASE; r < mmCB_COLOR0_FRAG + 8; r++) add(r, kRegCatTargets);  // BASE..FRAG, 8 each
     for (uint32 r : {uint32(REGADDR::CB_COLOR_CONTROL), uint32(REGADDR::CB_TARGET_MASK), uint32(REGADDR::DB_DEPTH_CONTROL),
                      uint32(REGADDR::PA_SC_GENERIC_SCISSOR_BR)})
-        add(r, kRegCatTargets);
+        add(r, kRegCatTargetState);  // (the target memo compares their values: WWHD_DK_TARGET_MEMO2)
     for (uint32 r : {uint32(REGADDR::PA_SU_SC_MODE_CNTL), uint32(REGADDR::PA_CL_CLIP_CNTL),
                      uint32(REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET), uint32(REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE),
                      uint32(REGADDR::PA_SU_POLY_OFFSET_CLAMP), uint32(REGADDR::DB_DEPTH_CONTROL),
@@ -125,8 +125,9 @@ static bool shader_address_memo() {
 // With the backend's shader_key_mask (backend_hooks.h; deko3d's: the fields its shader key ignores, texture
 // addresses, viewport, blend, scissor, the alpha-test reference...) those don't count, so consecutive draws
 // that only change them reuse the shader lookup.
-// (bits 3-5: the register's categories, gx2.h RegCategory: one table and one pass in apply_regs)
+// (bits 3-7: the register's categories, gx2.h RegCategory: one table and one pass in apply_regs)
 enum : uint8 { kRegCounted = 1, kRegMasked = 2, kRegProgram = 4, kRegShaderBits = 7, kRegCatShift = 3 };
+static_assert(kRegCats <= 8 - kRegCatShift, "the categories fit in the kind byte");
 struct RegClasses {
     std::vector<uint8> kind = std::vector<uint8>(kNumRegs);
     std::vector<uint32> mask = std::vector<uint32>(kNumRegs);

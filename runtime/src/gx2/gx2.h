@@ -25,11 +25,12 @@ uint64_t game_syncs();             // how many times they did
 extern std::atomic<const char*> g_render_stage;
 // Register categories for the renderer's per-draw fast paths (round 41): g_reg_gen[c] advances whenever a register
 // of category c changes value (and at context and save-state loads), so a draw can tell a whole category unchanged
-// since an earlier draw with one compare. Targets: the CB_COLORn and DB_DEPTH buffer registers, CB_COLOR_CONTROL,
-// CB_TARGET_MASK, DB_DEPTH_CONTROL, the scissor's bottom right (LatteMRT's active-buffer masks). Fixed: deko3d
-// draw.cpp's fixed-state registers (rasterizer, depth/stencil, blend). Viewport: PA_CL_VPORT_*, PA_CL_CLIP_CNTL and
-// the scissor. Render thread only.
-enum RegCategory : int { kRegCatTargets, kRegCatFixed, kRegCatViewport, kRegCats };
+// since an earlier draw with one compare. Targets: the CB_COLORn and DB_DEPTH buffer registers. TargetState:
+// CB_COLOR_CONTROL, CB_TARGET_MASK, DB_DEPTH_CONTROL, the scissor's bottom right (LatteMRT's active-buffer masks; the
+// deko3d target memo compares their values instead unless WWHD_DK_TARGET_MEMO2=0). Fixed: deko3d draw.cpp's
+// fixed-state registers (rasterizer, depth/stencil, blend). Viewport: PA_CL_VPORT_*, PA_CL_CLIP_CNTL and the scissor.
+// Render thread only. (At most 5 categories: gx2_core.cpp keeps them in a register's kind byte, above 3 bits.)
+enum RegCategory : int { kRegCatTargets, kRegCatTargetState, kRegCatFixed, kRegCatViewport, kRegCats };
 extern uint64_t g_reg_gen[kRegCats];
 uint32_t color_buffer_address(const GX2::GX2ColorBuffer* cb);
 // the layers a color buffer is drawn as: a 2D array's slices, a 3D buffer's depth slices at its view's level, else 1

@@ -221,6 +221,16 @@ debugsrv::Reply clockrate(const debugsrv::Args& a) {
     return debugsrv::ok("clockrate " + std::to_string(game_clock::rate()) + (game_clock::shifted() ? " (shifted)" : ""));
 }
 
+// "targetmemo2 [0|1]", "fixedmemo [0|1]", "vtxident [0|1]": the draw-memo round's switches (gfx/deko dk_draw.h; the
+// Switch tab's Debug section has them too): on by default, not saved; each change is logged with its frame
+debugsrv::Reply draw_opt_reply(const char* name, int opt, const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_draw_opt(opt, a[0] != "0");
+    return debugsrv::ok(std::string(name) + (gfxsw::draw_opt(opt) ? " 1" : " 0"));
+}
+debugsrv::Reply targetmemo2(const debugsrv::Args& a) { return draw_opt_reply("targetmemo2", gfxsw::kOptTargetMemo2, a); }
+debugsrv::Reply fixedmemo(const debugsrv::Args& a) { return draw_opt_reply("fixedmemo", gfxsw::kOptFixedMemo, a); }
+debugsrv::Reply vtxident(const debugsrv::Args& a) { return draw_opt_reply("vtxident", gfxsw::kOptVtxIdentity, a); }
+
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
     return debugsrv::ok("pacing " + std::to_string(frame_pacing::mode()) + ": swap interval " +
@@ -364,6 +374,9 @@ void start() {
                           profile);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
     debugsrv::add_command("clockrate", "clockrate [1-4]        the game clock's rate (as fast forward sets it)", clockrate);
+    debugsrv::add_command("targetmemo2", "targetmemo2 [0|1]      target memo by state words + same-frame skip", targetmemo2);
+    debugsrv::add_command("fixedmemo", "fixedmemo [0|1]        fixed state in three memos", fixedmemo);
+    debugsrv::add_command("vtxident", "vtxident [0|1]         vertex states by layout identity", vtxident);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);

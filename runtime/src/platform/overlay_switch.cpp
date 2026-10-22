@@ -297,7 +297,8 @@ void tab_switch() {
                                             "Cache textures of shared surfaces", "Keep vertex layouts",
                                             "Submit every 1024 draws", "Render profiler (slower)",
                                             "Prefetch shader data", "Skip unchanged target/state registers",
-                                            "Skip the TV picture (Off-TV Play)"};
+                                            "Skip the TV picture (Off-TV Play)", "Target memo by state words",
+                                            "Fixed state in three parts", "Vertex states by layout"};
         static_assert(sizeof names / sizeof names[0] == gfxsw::kDrawOpts, "a name per switch");
         bool on;
         if (i % 2) ImGui::SameLine(0, 30);
