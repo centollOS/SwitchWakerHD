@@ -201,6 +201,20 @@ static inline void st16(uint32_t ea, uint16_t v) { v = __builtin_bswap16(v); mem
 static inline void st32(uint32_t ea, uint32_t v) { v = __builtin_bswap32(v); memcpy(ppc_ptr(ea), &v, 4); }
 static inline void st64(uint32_t ea, uint64_t v) { v = __builtin_bswap64(v); memcpy(ppc_ptr(ea), &v, 8); }
 
+/* D-form accesses (rA + signed 16-bit displacement): the address is formed in 64 bits, so the
+   displacement folds into the host load/store (ldr w0, [x28, x1] + imm) and rA + base is shared across
+   the fields of a struct. It differs from the 32-bit form only when rA + off wraps past 0 or 4 GiB, an
+   invalid access on the console too; the guest window has >= 64 KiB unmapped on both sides (guards). */
+static inline uint8_t* ppc_ptro(uint32_t ra, int32_t off) { return PPC_MEM_BASE + (uint64_t)ra + (int64_t)off; }
+static inline uint8_t ld8o(uint32_t ra, int32_t off) { return *ppc_ptro(ra, off); }
+static inline uint16_t ld16o(uint32_t ra, int32_t off) { uint16_t v; memcpy(&v, ppc_ptro(ra, off), 2); return __builtin_bswap16(v); }
+static inline uint32_t ld32o(uint32_t ra, int32_t off) { uint32_t v; memcpy(&v, ppc_ptro(ra, off), 4); return __builtin_bswap32(v); }
+static inline void st8o(uint32_t ra, int32_t off, uint8_t v) { *ppc_ptro(ra, off) = v; }
+static inline void st16o(uint32_t ra, int32_t off, uint16_t v) { v = __builtin_bswap16(v); memcpy(ppc_ptro(ra, off), &v, 2); }
+static inline void st32o(uint32_t ra, int32_t off, uint32_t v) { v = __builtin_bswap32(v); memcpy(ppc_ptro(ra, off), &v, 4); }
+static inline uint64_t ld64o(uint32_t ra, int32_t off) { uint64_t v; memcpy(&v, ppc_ptro(ra, off), 8); return __builtin_bswap64(v); }
+static inline void st64o(uint32_t ra, int32_t off, uint64_t v) { v = __builtin_bswap64(v); memcpy(ppc_ptro(ra, off), &v, 8); }
+
 /* ---- bit casts ---- */
 static inline double u64_as_f64(uint64_t u) { double d; memcpy(&d, &u, 8); return d; }
 static inline uint64_t f64_as_u64(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
@@ -241,6 +255,11 @@ static inline __attribute__((always_inline)) double snan_chk64(double d, uint32_
 
 static inline double ldf32(uint32_t ea) { return (double)u32_as_f32(snan_chk32(ld32(ea), ea, 0)); }
 static inline double ldf64(uint32_t ea) { return u64_as_f64(ld64(ea)); }
+static inline double ldf32o(uint32_t ra, int32_t off) { return (double)u32_as_f32(snan_chk32(ld32o(ra, off), ra + off, 0)); }
+static inline double ldf64o(uint32_t ra, int32_t off) { return u64_as_f64(ld64o(ra, off)); }
+static inline void stf32o(uint32_t ra, int32_t off, double d) { st32o(ra, off, f32_as_u32((float)snan_chk64(d, ra + off, 1))); }
+static inline void stf64o(uint32_t ra, int32_t off, double d) { st64o(ra, off, f64_as_u64(d)); }
+
 static inline void stf32(uint32_t ea, double d) { st32(ea, f32_as_u32((float)snan_chk64(d, ea, 1))); }
 static inline void stf64(uint32_t ea, double d) { st64(ea, f64_as_u64(d)); }
 

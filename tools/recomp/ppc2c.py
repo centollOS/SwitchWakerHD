@@ -288,14 +288,18 @@ def translate(addr, w, ctx):
         if upd:
             return "{ uint32_t ea = %s + 0x%08Xu; %s = %s%s(ea); %s = ea; }" % (
                 R(a), simm & 0xFFFFFFFF, R(d), cast, fn, R(a))
-        return "%s = %s%s(%s + 0x%08Xu);" % (R(d), cast, fn, ra0(a), simm & 0xFFFFFFFF)
+        if a == 0:
+            return "%s = %s%s(0x%08Xu);" % (R(d), cast, fn, simm & 0xFFFFFFFF)
+        return "%s = %s%so(%s, %d);" % (R(d), cast, fn, R(a), simm)
     st = {36: "st32", 38: "st8", 44: "st16"}
     if op in st or op in (37, 39, 45):
         upd = op in (37, 39, 45)
         fn = st[op - 1 if upd else op]
         if upd:
             return "{ uint32_t ea = %s + 0x%08Xu; %s(ea, %s); %s = ea; }" % (R(a), simm & 0xFFFFFFFF, fn, R(d), R(a))
-        return "%s(%s + 0x%08Xu, %s);" % (fn, ra0(a), simm & 0xFFFFFFFF, R(d))
+        if a == 0:
+            return "%s(0x%08Xu, %s);" % (fn, simm & 0xFFFFFFFF, R(d))
+        return "%so(%s, %d, %s);" % (fn, R(a), simm, R(d))
     if op == 46:  # lmw
         return "{ uint32_t ea = %s + 0x%08Xu; %s }" % (
             ra0(a), simm & 0xFFFFFFFF, " ".join("%s = ld32(ea + %d);" % (R(r), 4 * (r - d)) for r in range(d, 32)))
@@ -308,12 +312,17 @@ def translate(addr, w, ctx):
         upd = op in (49, 51)
         single = op in (48, 49)
         base = R(a) if upd else ra0(a)
+        if not upd and a != 0:
+            return ("{ double v = ldf32o(%s, %d); %s = v; %s = v; }" % (R(a), simm, F0(d), F1(d))) if single else \
+                "%s = ldf64o(%s, %d);" % (F0(d), R(a), simm)
         load = ("{ double v = ldf32(ea); %s = v; %s = v; }" % (F0(d), F1(d))) if single else ("%s = ldf64(ea);" % F0(d))
         return "{ uint32_t ea = %s + 0x%08Xu; %s%s }" % (base, simm & 0xFFFFFFFF, load, " %s = ea;" % R(a) if upd else "")
     if op in (52, 53, 54, 55):  # stfs stfsu stfd stfdu
         upd = op in (53, 55)
         fn = "stf32" if op in (52, 53) else "stf64"
         base = R(a) if upd else ra0(a)
+        if not upd and a != 0:
+            return "%so(%s, %d, %s);" % (fn, R(a), simm, F0(d))
         return "{ uint32_t ea = %s + 0x%08Xu; %s(ea, %s);%s }" % (
             base, simm & 0xFFFFFFFF, fn, F0(d), " %s = ea;" % R(a) if upd else "")
     if op in (56, 57, 60, 61):  # psq_l psq_lu psq_st psq_stu

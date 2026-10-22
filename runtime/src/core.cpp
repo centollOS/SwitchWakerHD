@@ -144,6 +144,18 @@ void init() {
     if(p != PPC_MEM_BASE) { if(p!=MAP_FAILED)munmap(p,0x100000000ull); fatal("cannot reserve guest address space at %p",PPC_MEM_BASE); }
     if(mprotect(PPC_MEM_BASE,0x10000,PROT_NONE))fatal("cannot protect guest null page");
 #endif
+    // D-form accesses are addressed as base + rA + off in 64 bits (ppc.h ld32o): an access a few KiB below
+    // or above the window must fault, so keep 64 KiB on both sides unmapped. Best effort: nothing is
+    // replaced, and a neighbour that is already mapped there is left alone.
+#if defined(__APPLE__) || (defined(__unix__) && !defined(__SWITCH__))
+    for (uint8_t* g : {PPC_MEM_BASE - 0x10000, PPC_MEM_BASE + 0x100000000ull}) {
+        void* gp = mmap(g, 0x10000, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (gp != g && gp != MAP_FAILED) munmap(gp, 0x10000);
+    }
+#elif defined(_WIN32)
+    for (uint8_t* g : {PPC_MEM_BASE - 0x10000, PPC_MEM_BASE + 0x100000000ull})
+        VirtualAlloc(g, 0x10000, MEM_RESERVE, PAGE_NOACCESS);
+#endif
     // texture change detection (write_watch.h): after the crash handler, which it chains to
     if (!wwatch::init(PPC_MEM_BASE, 0x100000000ull)) LOG("[mem] write tracking unavailable: textures use sampled change checks");
 }
