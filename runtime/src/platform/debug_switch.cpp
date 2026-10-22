@@ -231,6 +231,8 @@ debugsrv::Reply draw_opt_reply(const char* name, int opt, const debugsrv::Args& 
 debugsrv::Reply targetmemo2(const debugsrv::Args& a) { return draw_opt_reply("targetmemo2", gfxsw::kOptTargetMemo2, a); }
 debugsrv::Reply fixedmemo(const debugsrv::Args& a) { return draw_opt_reply("fixedmemo", gfxsw::kOptFixedMemo, a); }
 debugsrv::Reply vtxident(const debugsrv::Args& a) { return draw_opt_reply("vtxident", gfxsw::kOptVtxIdentity, a); }
+// "profiler [0|1]": the render-thread profiler (the Switch tab's A/B switch); its report goes to the log every 120 swaps
+debugsrv::Reply profiler(const debugsrv::Args& a) { return draw_opt_reply("profiler", gfxsw::kOptProfiler, a); }
 
 // "rtcores [preferred mask]" (test): the render thread's cores (svcSetThreadCoreMask; mask bit n = core n), and which
 // core it was last seen on (a context read)
@@ -392,6 +394,7 @@ void start() {
     debugsrv::add_command("clockrate", "clockrate [1-4]        the game clock's rate (as fast forward sets it)", clockrate);
     debugsrv::add_command("targetmemo2", "targetmemo2 [0|1]      target memo by state words + same-frame skip", targetmemo2);
     debugsrv::add_command("fixedmemo", "fixedmemo [0|1]        fixed state in three memos", fixedmemo);
+    debugsrv::add_command("profiler", "profiler [0|1]         render-thread profiler (report in the log)", profiler);
     debugsrv::add_command("vtxident", "vtxident [0|1]         vertex states by layout identity", vtxident);
     debugsrv::add_command("rtcores", "rtcores [pref mask]    (test) the render thread's preferred core and core mask", rtcores);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
