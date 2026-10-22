@@ -94,7 +94,7 @@ tools/switch/perf_test.py show build/perf/mybuild_YYYYMMDD_HHMMSS.json
 tools/switch/perf_test.py compare build/perf/a.json build/perf/b.json
 ```
 
-Options: `--scenes a,b` (default: the 7 standard ones; `all` adds the extras; `compare-to`: lava, windfall,
+Options: `--scenes a,b` (default: the 7 standard ones; `demanding` the four Outset stress spots; `all` adds the extras and those; `compare-to`: lava, windfall,
 dragonroost), `--frames N` (default 1800 = 60 s at 30 fps; `compare-to`: 900), `--settle S` (default 20 s after
 arriving), `--time T` (time of day held, default 200 degrees: the afternoon), `--no-boot` (the game is already in a
 Quest Log: no reload), `--quest-log N`.
@@ -127,6 +127,20 @@ cutscene and no dialogue. Link stands still, the camera is behind him, and the t
 | `forbidden` | Forbidden Woods entrance (warp 7) | dungeon, ~2500 draws |
 | `sea_totg` | the open sea on the boat before the Tower of the Gods (warp 8) | waves, light load (~960 draws) |
 | `hyrule` (extra) | Hyrule Castle (warp 12) | ~1700 draws, at the cap; not in the default set |
+
+**The demanding set** (`--scenes demanding`; `all` includes it): four spots of Outset where a player saw the frame
+rate drop most, saved from a late-game file. They are the views to watch for render-thread and GPU regressions: at
+stock clocks they run below 30 fps on main (2026-10-22, main f1f3132: about 28.3 / 24.7 / 29.0 / 30 fps).
+
+| State | Place | What it stresses |
+|---|---|---|
+| `outset_grass` | Outset, Link standing in the tall grass | ~6900 draws: render thread and GPU |
+| `outset_village` | Outset, by Sue-Belle's house, the pirate ship and the lookout in view | ~6400 draws: render thread, GPU and main thread all over 33 ms |
+| `outset_lookout` | Outset, in the grass facing the lookout tower | ~3000 draws: main thread |
+| `outset_cliff` | Outset, the cliff above the sea and the pirate ship | ~2250 draws: GPU |
+
+The same build varies by up to ~2 fps from one boot to the next at these views: compare builds with `ab`
+(alternating boots), never with single runs.
 
 Considered and left out: Quest Log 1 ("Pulpo", early game) as the progress, because warps from it start story events
 (warp 3 started a dialogue). Windfall's other spawn points face a house or the sea. A boss room was left out because
