@@ -802,8 +802,9 @@ std::atomic<bool> g_texSharedCache{env_switch("TEX_SHARED_CACHE", true)};
 std::atomic<bool> g_vtxLayoutCache{env_switch("VTX_LAYOUT_CACHE", true)};
 std::atomic<bool> g_regGens{env_switch("REG_GENS", true)};
 std::atomic<bool> g_targetMemo2{env_switch("TARGET_MEMO2", true)};
-std::atomic<bool> g_fixedMemo{env_switch("FIXED_MEMO", true)};
-std::atomic<bool> g_vtxIdentity{env_switch("VTX_IDENTITY", true)};
+// (fixed-state memos and vertex identity: off by default, no measurable gain at Outset, 2026-10-22: +0.03 / +0.09 fps)
+std::atomic<bool> g_fixedMemo{env_switch("FIXED_MEMO", false)};
+std::atomic<bool> g_vtxIdentity{env_switch("VTX_IDENTITY", false)};
 std::atomic<bool> g_prefetch{env_switch("PREFETCH", true)};
 std::atomic<uint32_t> g_submitDraws{[] {
     const char* e = getenv("WWHD_DK_SUBMIT_DRAWS");
