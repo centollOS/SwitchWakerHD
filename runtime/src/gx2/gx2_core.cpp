@@ -178,11 +178,9 @@ static bool g_reg_tables_ready = false;
 static bool g_fused_small = false;    // Vulkan: the per-word path for writes of up to 16 words
 static bool g_key_dirty = false;      // WWHD_VK_SHADER_KEY_DIRTY=1
 static bool g_collect_stats = false;  // WWHD_VK_STATS (Vulkan)
-static bool g_classify = false;       // render-thread profiler on (rprof::enabled())
 
 static void build_reg_tables() {
     g_reg_classes.build(shader_address_memo(), [](uint32 r) { return rprof::fast_class_reg(r); });
-    g_classify = rprof::enabled();
 #ifdef WWHD_HAS_VULKAN
     {
         const char* e = getenv("WWHD_VK_FUSE_SMALL_REGS");
@@ -231,7 +229,7 @@ static inline bool same_words(const uint32* d, const uint32* v, uint32 n) {
 
 #ifdef WWHD_HAS_VULKAN
 static void apply_small_regs(uint32 first, const uint32* v, uint32 n) {
-    const bool keyDirty = g_key_dirty, collectStats = g_collect_stats, classify = g_classify;
+    const bool keyDirty = g_key_dirty, collectStats = g_collect_stats, classify = rprof::enabled();
     bool changed = false, baselineBump = false, actualBump = false;
     uint64_t maskedWords = 0;
     for (uint32 i = 0; i < n; ++i) {
@@ -278,14 +276,14 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
         // (this fork) copied without the comparison: nothing on the Switch reads the dirty group, and compared
         // then copied these were the render thread's biggest memcmp (lava: +1.2% of its time)
         g_dirty_groups |= 1u << kSgAluConst;
-        if (g_classify) rprof::g_reg_dirty |= 1;
+        if (rprof::enabled()) rprof::g_reg_dirty |= 1;
         copy_words(d, v, n);
         if (g_shadow) copy_words(&g_shadow[first], v, n);
         return;
 #endif
         if (memcmp(d, v, n * 4) != 0) {
             g_dirty_groups |= 1u << kSgAluConst;
-            if (g_classify) rprof::g_reg_dirty |= 1;
+            if (rprof::enabled()) rprof::g_reg_dirty |= 1;
             copy_words(d, v, n);
         }
         if (g_shadow) copy_words(&g_shadow[first], v, n);
@@ -299,7 +297,7 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
     }
 #endif
     if (!same_words(&g_regs[first], v, n)) {  // (this fork: inline for short writes)
-        const bool classify = g_classify;
+        const bool classify = rprof::enabled();
         // (this fork) the shader-state counters and the register categories (gx2.h) from one table
         // (reg_classes: with the backend's shader_key_mask), in the same pass over the changed registers
         const RegClasses& classes = reg_classes();
