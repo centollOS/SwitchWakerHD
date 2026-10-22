@@ -59,6 +59,14 @@ SCENES = [
     ("sea_totg", "open sea on the boat at the Tower of the Gods (waves, light load)"),
 ]
 EXTRA_SCENES = ["hyrule"]
+# the demanding set (--scenes demanding; 'all' includes it): a player's Outset spots where the frame rate drops most,
+# saved from a late-game file (docs/perf-test.md, "The scenes")
+DEMANDING_SCENES = [
+    ("outset_grass", "Outset, Link in the tall grass: ~6900 draws (render thread and GPU)"),
+    ("outset_village", "Outset by Sue-Belle's house, ship and lookout in view: ~6400 draws (render, GPU and main thread)"),
+    ("outset_lookout", "Outset, in the grass facing the lookout: ~3000 draws (main thread)"),
+    ("outset_cliff", "Outset, the cliff above the sea: ~2250 draws (GPU)"),
+]
 FROZEN_TIME = 200.0  # time of day held during every scene (degrees: afternoon)
 
 
@@ -444,13 +452,16 @@ def scenes_arg(a):
     if not a.scenes:
         return [n for n, _ in SCENES]
     if a.scenes == "all":
-        return [n for n, _ in SCENES] + EXTRA_SCENES
+        return [n for n, _ in SCENES] + EXTRA_SCENES + [n for n, _ in DEMANDING_SCENES]
+    if a.scenes == "demanding":
+        return [n for n, _ in DEMANDING_SCENES]
     return a.scenes.split(",")
 
 
 def common(p):
     p.add_argument("--host", default=dbg.default_host())
-    p.add_argument("--scenes", help="comma-separated state names (default: the 7 standard ones; 'all' adds extras)")
+    p.add_argument("--scenes", help="comma-separated state names (default: the 7 standard ones; 'demanding': the four Outset "
+                   "stress spots; 'all': both and the extras)")
     p.add_argument("--frames", type=int, default=1800, help="frames recorded per scene (default 1800, 60 s at 30 fps)")
     p.add_argument("--settle", type=float, default=20.0, help="seconds after arriving before recording (default 20)")
     p.add_argument("--time", type=float, default=FROZEN_TIME, help="time of day held (degrees, default 200)")
