@@ -14,7 +14,7 @@ of seven scenes linked together (`tools/switch/hot_order.py` -> `tools/switch/ho
 `--section-ordering-file`; regenerate it after big changes). Final A/B against main e5bf129e (ABBA x2):
 lava -0.03 +-0.45 fps, Windfall -0.23 +-0.41, Dragon Roost +0.01 +-0.08 (no measurable change); the 71 new
 upstream hooks and sites cost nothing measurable. Checks: macOS build and tests 609/609; console (USA): boot,
-17-place warp tour, every menu tab, portable states (the perf runs' `bench load`); the EU NRO builds (EU recompiler output from this branch), its console boot is still to do. Menu reorganisation: #70.
+17-place warp tour, every menu tab, portable states (the perf runs' `bench load`); EU (recompiled from this branch, the EU files put in game/ for the test): boot, 17-place warp tour. Menu reorganisation: #70.
 
 Status (2026-10-14): **phase 2 done on feature/upstream-sync** (bbd239c, then 27cff38 and 59a301c), with upstream
 `devel` **4dc4832**: the next sync starts from there (`git diff 4dc4832 upstream/devel | git apply -3`). #187 was
