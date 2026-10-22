@@ -49,6 +49,7 @@ enum DrawOpt : int {
     // (WWHD_DK_TARGET_MEMO2), the fixed state in three memos (WWHD_DK_FIXED_MEMO), vertex states by layout identity
     // (WWHD_DK_VTX_IDENTITY)
     kOptTargetMemo2, kOptFixedMemo, kOptVtxIdentity,
+    kOptContinued,  // continued draws: a draw that follows one with the same shaders, targets and texture registers reuses its texture lookups (WWHD_DK_CONTINUED; off)
     kDrawOpts
 };
 // shader compile threads for the shaders draws ask for (gfx/deko/shaders_dk.cpp helper_main): 0 auto (the default:
@@ -58,6 +59,9 @@ int shader_compile_threads();
 void set_shader_compile_threads(int n);
 bool draw_opt(int which);
 void set_draw_opt(int which, bool on);
+// verify mode of the continued draws: every Nth is checked against the full lookups (0 = off); mismatches are counted and logged
+void set_continued_verify(uint32_t every);
+uint32_t continued_verify();
 // texture eviction (gfx/deko/surfaces.cpp, issue #11): frames a texture may stay unused before it leaves the image
 // heap (0: only under memory pressure); evict_textures_now: every texture unused for a few frames goes at the next
 // frame. Any thread (the debug server's "evict")

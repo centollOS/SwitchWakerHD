@@ -85,6 +85,12 @@ static const std::vector<uint8> g_reg_cat = [] {
     for (uint32 r : {uint32(REGADDR::PA_CL_CLIP_CNTL), uint32(REGADDR::PA_SC_GENERIC_SCISSOR_TL),
                      uint32(REGADDR::PA_SC_GENERIC_SCISSOR_BR)})
         add(r, kRegCatViewport);
+    for (uint32 base : {uint32(REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS), uint32(REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS),
+                        uint32(REGADDR::SQ_TEX_RESOURCE_WORD0_N_GS)})
+        for (uint32 r = base; r < base + 7 * LATTE_NUM_MAX_TEX_UNITS; r++) add(r, kRegCatTexture);
+    for (uint32 r = REGADDR::SQ_TEX_SAMPLER_WORD0_0; r < REGADDR::SQ_TEX_SAMPLER_WORD0_0 + 3 * 3 * LATTE_NUM_MAX_TEX_UNITS; r++)
+        add(r, kRegCatTexture);
+    for (uint32 r = REGADDR::TD_PS_SAMPLER0_BORDER_RED; r < REGADDR::TD_PS_SAMPLER0_BORDER_RED + 0x200; r++) add(r, kRegCatTexture);
     return c;
 }();
 static inline void bump_categories(uint32 cats) {

@@ -30,7 +30,9 @@ extern std::atomic<const char*> g_render_stage;
 // deko3d target memo compares their values instead unless WWHD_DK_TARGET_MEMO2=0). Fixed: deko3d draw.cpp's
 // fixed-state registers (rasterizer, depth/stencil, blend). Viewport: PA_CL_VPORT_*, PA_CL_CLIP_CNTL and the scissor.
 // Render thread only. (At most 5 categories: gx2_core.cpp keeps them in a register's kind byte, above 3 bits.)
-enum RegCategory : int { kRegCatTargets, kRegCatTargetState, kRegCatFixed, kRegCatViewport, kRegCats };
+// Texture: the texture resource and sampler registers (the continued-draw path reuses a draw's texture handles while it
+// is unchanged: WWHD_DK_CONTINUED).
+enum RegCategory : int { kRegCatTargets, kRegCatTargetState, kRegCatFixed, kRegCatViewport, kRegCatTexture, kRegCats };
 extern uint64_t g_reg_gen[kRegCats];
 uint32_t color_buffer_address(const GX2::GX2ColorBuffer* cb);
 // the layers a color buffer is drawn as: a 2D array's slices, a 3D buffer's depth slices at its view's level, else 1

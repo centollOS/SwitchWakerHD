@@ -1602,6 +1602,7 @@ bool draw_opt(int which) {
     case kOptTargetMemo2: return g_targetMemo2.load(std::memory_order_relaxed);
     case kOptFixedMemo: return g_fixedMemo.load(std::memory_order_relaxed);
     case kOptVtxIdentity: return g_vtxIdentity.load(std::memory_order_relaxed);
+    case kOptContinued: return g_continued.load(std::memory_order_relaxed);
     default: return false;
     }
 }
@@ -1618,7 +1619,8 @@ void set_draw_opt(int which, bool on) {
         "targets, fixed state and viewport skipped while their registers are unchanged (WWHD_DK_REG_GENS)",
         "the TV picture not drawn while the window shows the GamePad's (WWHD_DK_SKIP_TV)",
         "target memo by state words, same-frame target checks skipped (WWHD_DK_TARGET_MEMO2)",
-        "fixed state in three memos (WWHD_DK_FIXED_MEMO)", "vertex states by layout identity (WWHD_DK_VTX_IDENTITY)"};
+        "fixed state in three memos (WWHD_DK_FIXED_MEMO)", "vertex states by layout identity (WWHD_DK_VTX_IDENTITY)",
+        "continued draws: texture lookups reused (WWHD_DK_CONTINUED)"};
     switch (which) {
     case kOptFixedSkip: g_fixedSkip = on; break;
     case kOptDepthOnly: g_depthOnly = on; break;
@@ -1635,9 +1637,15 @@ void set_draw_opt(int which, bool on) {
     case kOptTargetMemo2: g_targetMemo2 = on; break;
     case kOptFixedMemo: g_fixedMemo = on; break;
     case kOptVtxIdentity: g_vtxIdentity = on; break;
+    case kOptContinued: g_continued = on; break;
     }
     LOG("[dk] A/B: %s %s from frame %llu (menu)", names[which], on ? "ON" : "OFF", (unsigned long long)R.frame + 1);
 }
+void set_continued_verify(uint32_t every) {
+    gfxdk::g_contVerify.store(every, std::memory_order_relaxed);
+    LOG("[dk] continued draws: verify every %u (0 = off)", every);
+}
+uint32_t continued_verify() { return gfxdk::g_contVerify.load(std::memory_order_relaxed); }
 void set_resolution_profile(float scale, bool dynamic) {
     gfxdk::g_profileScale.store(scale, std::memory_order_relaxed);
     gfxdk::g_profileDynamic.store(dynamic, std::memory_order_relaxed);

@@ -215,6 +215,34 @@ struct StageBindings {
     uint32_t uboMask = 0;
 };
 
+// ---- continued draws (WWHD_DK_CONTINUED): a draw that follows one with the same shaders, targets, texture and sampler
+// registers (gx2 kRegCatTexture), frame and surface/texture epochs gets its texture handles from it: prepare_stage's
+// lookups are skipped, what they do besides (the surfaces' use marks, reads, hazard tracking, the unit scales) is
+// replayed from this record. A draw whose textures took a path with other effects (a feedback copy, a mip chain or
+// volume view, the AO quirk, the bound depth buffer sampled, a missing texture) makes no record.
+struct TexRec {
+    Surface* s;
+    const uint64_t* shared;  // the surfaces at a shared address: the lookup holds while this still reads `seen`
+    uint64_t seen;
+    uint32_t smp, unit;
+    bool vertex, scale;
+};
+struct ContRec {
+    bool ok = true;
+    uint32_t n = 0;
+    TexRec recs[2 * kMaxSamplers];
+};
+struct ContMemo {
+    bool valid = false, depthOnly = false, gamepadDraw = false;
+    uint64_t frame = 0, texGen = 0, surfaceEpoch = 0, textureEpoch = 0, shaderEpoch = 0;
+    const Shader *vs = nullptr, *ps = nullptr;
+    std::array<Surface*, 8> colors{};
+    Surface* depth = nullptr;
+    StageBindings stage[2];  // (texture part)
+    bool samplesRendered = false;
+    ContRec rec;
+};
+
 struct TextureCacheEntry {
     uint64_t epoch = 0;  // R.surfaceEpoch when filled; 0: not reusable
     uint64_t textureEpoch = 0;
@@ -291,6 +319,7 @@ struct ResourcePerf {
     // draws whose rasterizer, depth/stencil and color output were the last ones' (WWHD_DK_FIXED_MEMO); vertex
     // attribute and buffer states found bound by layout identity (WWHD_DK_VTX_IDENTITY)
     uint64_t targetChecksSkipped = 0, fixedRasterHits = 0, fixedDepthHits = 0, fixedColorHits = 0;
+    uint64_t contDraws = 0, contVerified = 0, contMismatches = 0;
     uint64_t attribSame = 0, bufferStateSame = 0;
 } g_res;
 
@@ -378,7 +407,7 @@ UboMemo uboMemo[2][LATTE_NUM_MAX_UNIFORM_BUFFERS];
 
 // false: the stream slice is full (the draw is skipped)
 bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>& colors, Surface* depth,
-                   StageBindings& out, Lap& lap) {
+                   StageBindings& out, Lap& lap, ContRec* rec = nullptr, const StageBindings* reuse = nullptr) {
     const int stage = sh->vertex ? kVertexStage : kPixelStage;
     out.texMask = out.uboMask = 0;
     // ---- uniform blocks: the guest's bytes, then zeros up to a 256-byte multiple (as gfx/gl: shaders must
@@ -418,6 +447,12 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         out.uboMask |= 1u << slot;
     }
     lap.sub(g_res.uboNs);
+    if (reuse) {  // a continued draw: the earlier draw's handles (the caller replays the lookups' other effects)
+        out.texMask = reuse->texMask;
+        for (uint32_t m = out.texMask; m; m &= m - 1) out.tex[__builtin_ctz(m)] = reuse->tex[__builtin_ctz(m)];
+        lap.sub(g_res.textureNs);
+        return true;
+    }
     // ---- textures
     const uint32_t texbase = sh->vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
     for (int i = 0; i < sh->texCount; i++) {  // (the hot copies of the decompiler's lists, dk_shaders.h)
@@ -430,6 +465,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         uint32_t aoSampler[3];
         if (g_aoMode >= 1 && unit == 0 && !sh->vertex && is_occlusion(r, false)) {
             // AO quirk 1: the occlusion pass's centre depth fetch, bilinear (XY mag/min filter)
+            if (rec) rec->ok = false;
             memcpy(aoSampler, samplerWords, sizeof aoSampler);
             aoSampler[0] = (aoSampler[0] & ~0x7E00u) | (1u << 9) | (1u << 12);
             samplerWords = aoSampler;
@@ -466,6 +502,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             bool unique = false;
             s = sampled_texture(words, compare, &unique);
             if (!s) {  // nothing there: transparent black
+                if (rec) rec->ok = false;
                 out.tex[slot] = dkMakeTextureHandle(null_image_id(), sampler_id(samplerWords, compare, false));
                 out.texMask |= 1u << slot;
                 cached.epoch = 0;
@@ -491,6 +528,7 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
             if (cached.epoch) texture_table_entry(words, samplerWords, compare) = cached;
             if (lap.on) g_res.textureMissNs += (now_ns() - missStart) * kDrawTimeSample;
         }
+        Surface* const s0 = s;
         s->useFrame = R.frame + 1;  // (texture eviction: in use)
         if (g_gamepadDrawing) {  // a texture of the GamePad picture
             if (!s->gamepadSource) s->gamepadSourceSince = R.frame;
@@ -544,6 +582,10 @@ bool prepare_stage(const uint32_t* r, Shader* sh, const std::array<Surface*, 8>&
         }
         sync_draw_sample(s);
         if (s->gpuWritten) g_drawSamplesRendered = true;
+        if (rec) {
+            if (aliases || s != s0 || (depth && s == depth) || !cached.epoch || rec->n >= 2 * kMaxSamplers) rec->ok = false;
+            else rec->recs[rec->n++] = {s, cached.shared, cached.sharedSeen, smp, unit, sh->vertex, sh->scaleUniforms};
+        }
         if (sh->scaleUniforms) {
             g_unitScale[stage][unit][0] = float(s->img.pw) / float(s->width);
             g_unitScale[stage][unit][1] = float(s->img.ph) / float(s->height);
@@ -806,6 +848,12 @@ std::atomic<bool> g_targetMemo2{env_switch("TARGET_MEMO2", true)};
 std::atomic<bool> g_fixedMemo{env_switch("FIXED_MEMO", false)};
 std::atomic<bool> g_vtxIdentity{env_switch("VTX_IDENTITY", false)};
 std::atomic<bool> g_prefetch{env_switch("PREFETCH", true)};
+// continued draws (A/B switch off by default; the verify mode checks every Nth continued draw against the full path)
+std::atomic<bool> g_continued{env_switch("CONTINUED", false)};
+std::atomic<uint32_t> g_contVerify{[] {
+    const char* e = getenv("WWHD_DK_CONTINUED_VERIFY");
+    return e && *e ? uint32_t(strtoul(e, nullptr, 10)) : 0u;
+}()};
 std::atomic<uint32_t> g_submitDraws{[] {
     const char* e = getenv("WWHD_DK_SUBMIT_DRAWS");
     return e && *e ? uint32_t(strtoul(e, nullptr, 10)) : kDefaultSubmitDraws;
@@ -968,6 +1016,14 @@ void log_resource_stats(uint64_t executed, uint64_t frames) {
         g_vtxLayoutCache.load() ? "kept per vertex shader" : "NOT kept", g_submitDraws.load(),
         perFrame(p.targetMemoHits), g_regGens.load() ? "on" : "OFF", g_targetMemo2.load() ? "on" : "OFF",
         perFrame(p.targetChecksSkipped));
+    static uint64_t verifiedTotal = 0, mismatchTotal = 0;
+    verifiedTotal += p.contVerified;
+    mismatchTotal += p.contMismatches;
+    if (g_continued.load() || mismatchTotal)
+        LOG("[dk] continued draws (texture lookups reused): %s; %.0f of %.0f draws/frame continued; verify every %u: "
+            "%llu checked so far, %llu mismatches",
+            g_continued.load() ? "ON" : "off", perFrame(p.contDraws), perFrame(executed), g_contVerify.load(),
+            (unsigned long long)verifiedTotal, (unsigned long long)mismatchTotal);
 }
 
 namespace {
@@ -1737,11 +1793,111 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     if (g_capture) capture_draw_begin();
     lap.sub(g_res.targetNs);  // (the scissor)
     if (depthOnly) stages[kPixelStage].texMask = stages[kPixelStage].uboMask = 0;
-    if (!prepare_stage(r, vs, colors, depth, stages[kVertexStage], lap) ||
-        (!depthOnly && !prepare_stage(r, ps, colors, depth, stages[kPixelStage], lap))) {
+    // ---- continued draws (WWHD_DK_CONTINUED, ContMemo): the texture lookups of an earlier draw with the same
+    // shaders, targets and texture/sampler registers, in this frame with no surface or texture epoch moved since
+    static ContMemo cm;
+    static uint32_t verifyTick = 0;
+    const bool contOn = g_continued.load(std::memory_order_relaxed);
+    bool cont = false, verifyNow = false, replaySamples = false;
+    if (contOn) {
+        cont = cm.valid && cm.frame == frame && cm.vs == vs && cm.ps == ps && cm.shaderEpoch == R.shaderEpoch &&
+               cm.depthOnly == depthOnly && cm.gamepadDraw == gamepadDraw && cm.depth == depth && cm.colors == colors &&
+               cm.texGen == gx2::g_reg_gen[gx2::kRegCatTexture] && cm.surfaceEpoch == R.surfaceEpoch &&
+               cm.textureEpoch == R.textureEpoch && !g_capture && !g_traceFrame;
+        cm.valid = false;  // (set again below by a draw whose textures can be continued)
+        for (uint32_t i = 0; cont && i < cm.rec.n; i++)
+            if (cm.rec.recs[i].shared && *cm.rec.recs[i].shared != cm.rec.recs[i].seen) cont = false;  // (a write at its address)
+    }
+    if (cont) {  // what the lookups do besides finding the handles
+        for (uint32_t i = 0; i < cm.rec.n; i++) {
+            const TexRec& t = cm.rec.recs[i];
+            Surface* s = t.s;
+            if (s->img.valid && !s->gpuWritten && s->lastCheckedFrame != R.frame) upload_surface(s);
+            s->useFrame = R.frame + 1;
+            sampler_used(t.smp);
+            if (g_gamepadDrawing) {
+                if (!s->gamepadSource) s->gamepadSourceSince = R.frame;
+                s->gamepadSource = true;
+            } else if (s->drcScanFrame != ~0ull && gamepad_only(s)) {
+                for (auto* c : colors)
+                    if (c && c != s) c->derivedFrom = s;
+            } else
+                note_read(s);
+            sync_draw_sample(s);
+            if (s->gpuWritten) g_drawSamplesRendered = true;
+            if (t.scale) {
+                const int stage = t.vertex ? kVertexStage : kPixelStage;
+                g_unitScale[stage][t.unit][0] = float(s->img.pw) / float(s->width);
+                g_unitScale[stage][t.unit][1] = float(s->img.ph) / float(s->height);
+            }
+        }
+        if (R.surfaceEpoch != cm.surfaceEpoch || R.textureEpoch != cm.textureEpoch) {  // (a check above found a change)
+            cont = false;
+            g_drawSamplesRendered = false;
+        } else {
+            const uint32_t every = g_contVerify.load(std::memory_order_relaxed);
+            verifyNow = every && ++verifyTick % every == 0;
+            replaySamples = g_drawSamplesRendered;
+            if (verifyNow) g_drawSamplesRendered = false;  // (the full lookups below set it again)
+        }
+    }
+    if (cont && !verifyNow) g_res.contDraws++;
+    ContRec* const rec = contOn && (!cont || verifyNow) ? &cm.rec : nullptr;
+    static ContRec savedRec;
+    if (verifyNow) savedRec = cm.rec;  // (the record the replay used, kept while the full lookups write a new one)
+    if (rec) {
+        rec->ok = true;
+        rec->n = 0;
+    }
+    const StageBindings* const reuseV = cont && !verifyNow ? &cm.stage[kVertexStage] : nullptr;
+    const StageBindings* const reuseP = cont && !verifyNow ? &cm.stage[kPixelStage] : nullptr;
+    if (!prepare_stage(r, vs, colors, depth, stages[kVertexStage], lap, rec, reuseV) ||
+        (!depthOnly && !prepare_stage(r, ps, colors, depth, stages[kPixelStage], lap, rec, reuseP))) {
         R.perf.streamFullSkips++;
         skip(g_drawSkips.streamFull);
         return;
+    }
+    if (verifyNow) {  // the full lookups against the continued draw's handles
+        g_res.contVerified++;
+        bool same = replaySamples == g_drawSamplesRendered;
+        for (int st = 0; st < 2; st++) {
+            same &= stages[st].texMask == cm.stage[st].texMask;
+            for (uint32_t m = stages[st].texMask & cm.stage[st].texMask; m; m &= m - 1) {
+                const int i = __builtin_ctz(m);
+                same &= stages[st].tex[i] == cm.stage[st].tex[i];
+            }
+        }
+        if (!same) {
+            g_res.contMismatches++;
+            static uint32_t logged = 0;
+            if (logged++ < 8)
+                LOG("[dk] continued draw MISMATCH (frame %llu): vs %016llx ps %016llx; texMask %08x/%08x vs %08x/%08x, samples "
+                    "rendered %d vs %d, %u lookups recorded",
+                    (unsigned long long)frame, (unsigned long long)vs->glslHash, (unsigned long long)ps->glslHash,
+                    stages[0].texMask, stages[1].texMask, cm.stage[0].texMask, cm.stage[1].texMask, replaySamples,
+                    g_drawSamplesRendered, savedRec.n);
+        }
+    }
+    if (rec) {  // this draw's lookups as the next draw's starting point
+        cm.valid = rec->ok;
+        cm.frame = frame;
+        cm.vs = vs;
+        cm.ps = ps;
+        cm.shaderEpoch = R.shaderEpoch;
+        cm.depthOnly = depthOnly;
+        cm.gamepadDraw = gamepadDraw;
+        cm.depth = depth;
+        cm.colors = colors;
+        cm.texGen = gx2::g_reg_gen[gx2::kRegCatTexture];
+        cm.surfaceEpoch = R.surfaceEpoch;
+        cm.textureEpoch = R.textureEpoch;
+        cm.samplesRendered = g_drawSamplesRendered;
+        for (int st = 0; st < 2; st++) {
+            cm.stage[st].texMask = stages[st].texMask;
+            for (uint32_t m = stages[st].texMask; m; m &= m - 1) cm.stage[st].tex[__builtin_ctz(m)] = stages[st].tex[__builtin_ctz(m)];
+        }
+    } else if (cont) {
+        cm.valid = true;  // (the same record: nothing moved)
     }
     // The HUD at full resolution (gfx/gl draw.cpp): the game draws it into the same buffer as the scene, last,
     // after the post-processing that reads the scene. At a lower internal resolution, the first draw into the TV

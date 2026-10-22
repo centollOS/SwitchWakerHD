@@ -74,6 +74,10 @@ extern std::atomic<bool> g_skipTv;    // the TV picture not drawn while the wind
 extern std::atomic<bool> g_padShown;  // the last frame presented the GamePad picture (backend.cpp)
 // round 42: the draw's shaders' hot data prefetched once they are known (WWHD_DK_PREFETCH)
 extern std::atomic<bool> g_prefetch;
+// continued draws (draw.cpp ContMemo; WWHD_DK_CONTINUED, off by default) and its verify mode (every Nth continued draw
+// checked against the full lookups: WWHD_DK_CONTINUED_VERIFY=N, debug server "cdverify")
+extern std::atomic<bool> g_continued;
+extern std::atomic<uint32_t> g_contVerify;
 constexpr uint32_t kSmallSubmitDraws = 256, kBigSubmitDraws = 1024, kDefaultSubmitDraws = kBigSubmitDraws;
 extern std::atomic<uint32_t> g_submitDraws;
 

@@ -231,6 +231,13 @@ debugsrv::Reply draw_opt_reply(const char* name, int opt, const debugsrv::Args& 
 debugsrv::Reply targetmemo2(const debugsrv::Args& a) { return draw_opt_reply("targetmemo2", gfxsw::kOptTargetMemo2, a); }
 debugsrv::Reply fixedmemo(const debugsrv::Args& a) { return draw_opt_reply("fixedmemo", gfxsw::kOptFixedMemo, a); }
 debugsrv::Reply vtxident(const debugsrv::Args& a) { return draw_opt_reply("vtxident", gfxsw::kOptVtxIdentity, a); }
+// "continued [0|1]", "cdverify [N]": the continued-draw path (off by default) and its verify mode: every Nth continued draw is
+// checked against the full lookups; mismatches are counted and logged ([dk] continued draws line)
+debugsrv::Reply continued(const debugsrv::Args& a) { return draw_opt_reply("continued", gfxsw::kOptContinued, a); }
+debugsrv::Reply cdverify(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_continued_verify(uint32_t(strtoul(a[0].c_str(), nullptr, 10)));
+    return debugsrv::ok("cdverify " + std::to_string(gfxsw::continued_verify()));
+}
 // "profiler [0|1]": the render-thread profiler (the Switch tab's A/B switch); its report goes to the log every 120 swaps
 debugsrv::Reply profiler(const debugsrv::Args& a) { return draw_opt_reply("profiler", gfxsw::kOptProfiler, a); }
 
@@ -395,6 +402,8 @@ void start() {
     debugsrv::add_command("targetmemo2", "targetmemo2 [0|1]      target memo by state words + same-frame skip", targetmemo2);
     debugsrv::add_command("fixedmemo", "fixedmemo [0|1]        fixed state in three memos", fixedmemo);
     debugsrv::add_command("profiler", "profiler [0|1]         render-thread profiler (report in the log)", profiler);
+    debugsrv::add_command("continued", "continued [0|1]        continued draws: reuse texture lookups", continued);
+    debugsrv::add_command("cdverify", "cdverify [N]           continued draws: check every Nth against the full path", cdverify);
     debugsrv::add_command("vtxident", "vtxident [0|1]         vertex states by layout identity", vtxident);
     debugsrv::add_command("rtcores", "rtcores [pref mask]    (test) the render thread's preferred core and core mask", rtcores);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
