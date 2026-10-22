@@ -31,6 +31,7 @@
 #include "gfx/render_mips.h"
 #include "dk_draw.h"
 #include "dk_surfaces.h"
+#include "surface_hash.h"
 #include "dk_sync.h"
 #include "gx2/gx2.h"
 #include "gfx/switch_renderer.h"
@@ -114,22 +115,6 @@ GuestLayout& layout(Surface* s) {
         s->guest = std::move(g);
     }
     return *s->guest;
-}
-
-// four independent lanes: one multiply chain is latency-bound (the A57 hashes ~4x faster this way)
-uint64_t fnv(const uint8_t* p, size_t n) {
-    uint64_t h[4] = {0x9E3779B97F4A7C15ull, 0xC2B2AE3D27D4EB4Full, 0x165667B19E3779F9ull, 0x27D4EB2F165667C5ull};
-    size_t i = 0;
-    for (; n - i >= 32; i += 32)
-        for (int l = 0; l < 4; l++) {
-            uint64_t word;
-            memcpy(&word, p + i + l * 8, sizeof(word));
-            h[l] = (h[l] ^ word) * 0xFF51AFD7ED558CCDull;
-            h[l] ^= h[l] >> 32;
-        }
-    uint64_t r = h[0] ^ (h[1] * 31) ^ (h[2] * 1009) ^ (h[3] * 65537);
-    for (; i < n; ++i) r = (r ^ p[i]) * 0x100000001B3ull;
-    return r ^ (r >> 29) ^ uint64_t(n);
 }
 
 // 64 words sampled per level (each is usually a cache miss): CPU changes show up within a few
@@ -692,7 +677,7 @@ void upload_surface(Surface* s) {
     uint64_t hash = 1469598103934665603ull;
     for (uint32_t level = 0; level < levels; ++level) {
         if (!level) s->dataSize = uint32_t(g.info[level].surfSize);
-        hash = (hash ^ fnv(mem::ptr(g.address[level]), size_t(g.info[level].surfSize))) * 1099511628211ull;
+        hash = (hash ^ surface_hash(mem::ptr(g.address[level]), size_t(g.info[level].surfSize))) * 1099511628211ull;
     }
     s->sparseHash = sparse;
     if (!s->dirty && hash == s->contentHash) return;
@@ -736,7 +721,7 @@ bool capture_upload_data(Surface* s, std::vector<uint8_t>& out, bool& changed) {
     const uint32_t levels = s->mipAddr ? s->mips : 1;
     uint64_t hash = 1469598103934665603ull;
     for (uint32_t level = 0; level < levels; ++level)
-        hash = (hash ^ fnv(mem::ptr(g.address[level]), size_t(g.info[level].surfSize))) * 1099511628211ull;
+        hash = (hash ^ surface_hash(mem::ptr(g.address[level]), size_t(g.info[level].surfSize))) * 1099511628211ull;
     changed = hash != s->contentHash;
     return true;
 }
