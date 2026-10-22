@@ -465,9 +465,23 @@ static RenderProgress g_progress;
 static int64_t steady_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+#ifdef __SWITCH__
+// the render thread's handle: the debug server's "rtcores" moves it between cores while the game runs (a test)
+uint32_t g_render_thread_handle = 0;
+#endif
 static void render_thread_main() {
     host::set_thread_name("GX2 render");
     host::place_thread(2);  // (this fork) the render thread: host core 2, or 0 and 2 with WWHD_CORE_LAYOUT
+#ifdef __SWITCH__
+    g_render_thread_handle = threadGetCurHandle();
+    // (this fork) one core, not cores 0 and 2: allowed both, the thread moved between them and lost its caches each
+    // time; pinned to either core it was 0.4-0.5 fps faster at Outset (2026-10-22, A/B in one boot: core 2 26.18,
+    // core 0 26.15, cores 0 and 2 25.74). WWHD_RENDER_PIN=0 ([dev]) restores the two-core mask.
+    if (host::core_layout_on()) {
+        const char* e = getenv("WWHD_RENDER_PIN");
+        if (!(e && *e == '0')) host::set_thread_cores(2, 0x4);
+    }
+#endif
     if (!r5_slow_render::apply("GX2 render")) host::boost_thread_priority();
     perf_hint::add_current_thread();
     thread_sampler::add_current_thread("render");

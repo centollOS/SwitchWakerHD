@@ -19,6 +19,7 @@
 #include "../gfx/switch_renderer.h"
 #include "../gfx/deko/frame_pacing.h"
 #include "../game_clock.h"
+namespace gx2 { extern uint32_t g_render_thread_handle; }  // (gx2_core.cpp: rtcores)
 #include "../mods/mods.h"
 #include "../mods/warps.h"
 #include "../runtime.h"
@@ -231,6 +232,21 @@ debugsrv::Reply targetmemo2(const debugsrv::Args& a) { return draw_opt_reply("ta
 debugsrv::Reply fixedmemo(const debugsrv::Args& a) { return draw_opt_reply("fixedmemo", gfxsw::kOptFixedMemo, a); }
 debugsrv::Reply vtxident(const debugsrv::Args& a) { return draw_opt_reply("vtxident", gfxsw::kOptVtxIdentity, a); }
 
+// "rtcores [preferred mask]" (test): the render thread's cores (svcSetThreadCoreMask; mask bit n = core n), and which
+// core it was last seen on (a context read)
+debugsrv::Reply rtcores(const debugsrv::Args& a) {
+    if (!gx2::g_render_thread_handle) return debugsrv::err("rtcores: no render thread yet");
+    if (a.size() >= 2) {
+        const Result rc = svcSetThreadCoreMask(gx2::g_render_thread_handle, atoi(a[0].c_str()), strtoul(a[1].c_str(), nullptr, 0));
+        if (R_FAILED(rc)) return debugsrv::err("rtcores: svcSetThreadCoreMask 0x" + std::to_string(rc));
+        LOG("[debug] render thread cores: preferred %s, mask %s", a[0].c_str(), a[1].c_str());
+    }
+    s32 pref = -1;
+    u64 mask = 0;
+    svcGetThreadCoreMask(&pref, &mask, gx2::g_render_thread_handle);
+    return debugsrv::ok("rtcores preferred " + std::to_string(pref) + " mask 0x" + std::to_string(mask));
+}
+
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
     return debugsrv::ok("pacing " + std::to_string(frame_pacing::mode()) + ": swap interval " +
@@ -377,6 +393,7 @@ void start() {
     debugsrv::add_command("targetmemo2", "targetmemo2 [0|1]      target memo by state words + same-frame skip", targetmemo2);
     debugsrv::add_command("fixedmemo", "fixedmemo [0|1]        fixed state in three memos", fixedmemo);
     debugsrv::add_command("vtxident", "vtxident [0|1]         vertex states by layout identity", vtxident);
+    debugsrv::add_command("rtcores", "rtcores [pref mask]    (test) the render thread's preferred core and core mask", rtcores);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);
