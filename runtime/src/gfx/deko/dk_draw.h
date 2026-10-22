@@ -64,6 +64,12 @@ extern std::atomic<bool> g_depthOnly, g_texSharedCache, g_vtxLayoutCache;
 // round 41: render targets, fixed state and viewport skipped while their registers are unchanged (gx2.h g_reg_gen;
 // WWHD_DK_REG_GENS)
 extern std::atomic<bool> g_regGens;
+// the draw-memo round (draw.cpp): the target memo compares CB_COLOR_CONTROL, CB_TARGET_MASK, DB_DEPTH_CONTROL and the
+// scissor's bottom right by value (gx2 kRegCatTargetState no longer misses it) and, at a hit in the same frame,
+// skips the targets' scale and upload checks (WWHD_DK_TARGET_MEMO2); the fixed state as three memos (rasterizer,
+// depth/stencil, color output) keyed by their own register words (WWHD_DK_FIXED_MEMO); the vertex attribute and
+// buffer states compared by layout identity instead of memcmp (WWHD_DK_VTX_IDENTITY). On unless 0.
+extern std::atomic<bool> g_targetMemo2, g_fixedMemo, g_vtxIdentity;
 extern std::atomic<bool> g_skipTv;    // the TV picture not drawn while the window shows the GamePad's (draw.cpp)
 extern std::atomic<bool> g_padShown;  // the last frame presented the GamePad picture (backend.cpp)
 // round 42: the draw's shaders' hot data prefetched once they are known (WWHD_DK_PREFETCH)

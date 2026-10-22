@@ -18,6 +18,8 @@
 #include "../build_info.h"
 #include "../gfx/switch_renderer.h"
 #include "../gfx/deko/frame_pacing.h"
+#include "../game_clock.h"
+namespace gx2 { extern uint32_t g_render_thread_handle; }  // (gx2_core.cpp: rtcores)
 #include "../mods/mods.h"
 #include "../mods/warps.h"
 #include "../runtime.h"
@@ -213,6 +215,38 @@ debugsrv::Reply blur(const debugsrv::Args& a) {
 
 // "pacing [0|1]": frame pacing mode (gfx/deko/frame_pacing.h, #23): 1 swap interval the game's (the default),
 // 0 swap interval 1 (as before); not saved
+// "clockrate [1-4]": the game clock's rate as the fast forward mod sets it (timebase::set_clock_rate): the
+// sessions after a fast forward, reproduced without a dialogue
+debugsrv::Reply clockrate(const debugsrv::Args& a) {
+    if (!a.empty()) timebase::set_clock_rate(unsigned(atoi(a[0].c_str())));
+    return debugsrv::ok("clockrate " + std::to_string(game_clock::rate()) + (game_clock::shifted() ? " (shifted)" : ""));
+}
+
+// "targetmemo2 [0|1]", "fixedmemo [0|1]", "vtxident [0|1]": the draw-memo round's switches (gfx/deko dk_draw.h; the
+// Switch tab's Debug section has them too): on by default, not saved; each change is logged with its frame
+debugsrv::Reply draw_opt_reply(const char* name, int opt, const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_draw_opt(opt, a[0] != "0");
+    return debugsrv::ok(std::string(name) + (gfxsw::draw_opt(opt) ? " 1" : " 0"));
+}
+debugsrv::Reply targetmemo2(const debugsrv::Args& a) { return draw_opt_reply("targetmemo2", gfxsw::kOptTargetMemo2, a); }
+debugsrv::Reply fixedmemo(const debugsrv::Args& a) { return draw_opt_reply("fixedmemo", gfxsw::kOptFixedMemo, a); }
+debugsrv::Reply vtxident(const debugsrv::Args& a) { return draw_opt_reply("vtxident", gfxsw::kOptVtxIdentity, a); }
+
+// "rtcores [preferred mask]" (test): the render thread's cores (svcSetThreadCoreMask; mask bit n = core n), and which
+// core it was last seen on (a context read)
+debugsrv::Reply rtcores(const debugsrv::Args& a) {
+    if (!gx2::g_render_thread_handle) return debugsrv::err("rtcores: no render thread yet");
+    if (a.size() >= 2) {
+        const Result rc = svcSetThreadCoreMask(gx2::g_render_thread_handle, atoi(a[0].c_str()), strtoul(a[1].c_str(), nullptr, 0));
+        if (R_FAILED(rc)) return debugsrv::err("rtcores: svcSetThreadCoreMask 0x" + std::to_string(rc));
+        LOG("[debug] render thread cores: preferred %s, mask %s", a[0].c_str(), a[1].c_str());
+    }
+    s32 pref = -1;
+    u64 mask = 0;
+    svcGetThreadCoreMask(&pref, &mask, gx2::g_render_thread_handle);
+    return debugsrv::ok("rtcores preferred " + std::to_string(pref) + " mask 0x" + std::to_string(mask));
+}
+
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
     return debugsrv::ok("pacing " + std::to_string(frame_pacing::mode()) + ": swap interval " +
@@ -355,6 +389,11 @@ void start() {
     debugsrv::add_command("profile", "profile [s] | status   sample the main and render threads (logs/prof_*.samples)",
                           profile);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
+    debugsrv::add_command("clockrate", "clockrate [1-4]        the game clock's rate (as fast forward sets it)", clockrate);
+    debugsrv::add_command("targetmemo2", "targetmemo2 [0|1]      target memo by state words + same-frame skip", targetmemo2);
+    debugsrv::add_command("fixedmemo", "fixedmemo [0|1]        fixed state in three memos", fixedmemo);
+    debugsrv::add_command("vtxident", "vtxident [0|1]         vertex states by layout identity", vtxident);
+    debugsrv::add_command("rtcores", "rtcores [pref mask]    (test) the render thread's preferred core and core mask", rtcores);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);

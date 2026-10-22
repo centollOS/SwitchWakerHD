@@ -72,7 +72,7 @@ static const std::vector<uint8> g_reg_cat = [] {
     for (uint32 r = mmCB_COLOR0_BASE; r < mmCB_COLOR0_FRAG + 8; r++) add(r, kRegCatTargets);  // BASE..FRAG, 8 each
     for (uint32 r : {uint32(REGADDR::CB_COLOR_CONTROL), uint32(REGADDR::CB_TARGET_MASK), uint32(REGADDR::DB_DEPTH_CONTROL),
                      uint32(REGADDR::PA_SC_GENERIC_SCISSOR_BR)})
-        add(r, kRegCatTargets);
+        add(r, kRegCatTargetState);  // (the target memo compares their values: WWHD_DK_TARGET_MEMO2)
     for (uint32 r : {uint32(REGADDR::PA_SU_SC_MODE_CNTL), uint32(REGADDR::PA_CL_CLIP_CNTL),
                      uint32(REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET), uint32(REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE),
                      uint32(REGADDR::PA_SU_POLY_OFFSET_CLAMP), uint32(REGADDR::DB_DEPTH_CONTROL),
@@ -125,8 +125,9 @@ static bool shader_address_memo() {
 // With the backend's shader_key_mask (backend_hooks.h; deko3d's: the fields its shader key ignores, texture
 // addresses, viewport, blend, scissor, the alpha-test reference...) those don't count, so consecutive draws
 // that only change them reuse the shader lookup.
-// (bits 3-5: the register's categories, gx2.h RegCategory: one table and one pass in apply_regs)
+// (bits 3-7: the register's categories, gx2.h RegCategory: one table and one pass in apply_regs)
 enum : uint8 { kRegCounted = 1, kRegMasked = 2, kRegProgram = 4, kRegShaderBits = 7, kRegCatShift = 3 };
+static_assert(kRegCats <= 8 - kRegCatShift, "the categories fit in the kind byte");
 struct RegClasses {
     std::vector<uint8> kind = std::vector<uint8>(kNumRegs);
     std::vector<uint32> mask = std::vector<uint32>(kNumRegs);
@@ -464,9 +465,23 @@ static RenderProgress g_progress;
 static int64_t steady_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+#ifdef __SWITCH__
+// the render thread's handle: the debug server's "rtcores" moves it between cores while the game runs (a test)
+uint32_t g_render_thread_handle = 0;
+#endif
 static void render_thread_main() {
     host::set_thread_name("GX2 render");
     host::place_thread(2);  // (this fork) the render thread: host core 2, or 0 and 2 with WWHD_CORE_LAYOUT
+#ifdef __SWITCH__
+    g_render_thread_handle = threadGetCurHandle();
+    // (this fork) one core, not cores 0 and 2: allowed both, the thread moved between them and lost its caches each
+    // time; pinned to either core it was 0.4-0.5 fps faster at Outset (2026-10-22, A/B in one boot: core 2 26.18,
+    // core 0 26.15, cores 0 and 2 25.74). WWHD_RENDER_PIN=0 ([dev]) restores the two-core mask.
+    if (host::core_layout_on()) {
+        const char* e = getenv("WWHD_RENDER_PIN");
+        if (!(e && *e == '0')) host::set_thread_cores(2, 0x4);
+    }
+#endif
     if (!r5_slow_render::apply("GX2 render")) host::boost_thread_priority();
     perf_hint::add_current_thread();
     thread_sampler::add_current_thread("render");

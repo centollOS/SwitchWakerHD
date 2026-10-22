@@ -303,6 +303,8 @@ void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld = 
 // a render target about to be written: the scale it should have unless that needs a new image and this
 // frame's allocations are used up (false: still at its old scale); force: in any case
 bool fit_scale(Surface* s, bool keepContents, bool force = false);
+// fit_scale would leave s as it is (its scale is the one it should have now): draw.cpp's target memo (WWHD_DK_TARGET_MEMO2)
+bool scale_settled(const Surface* s);
 // FXAA on the TV picture's scene before the HUD is drawn into it (draw.cpp's HUD switch, issue #21): at a lower
 // internal resolution the scene goes to the full-size image through FXAA instead of the 2D engine's upscale; at
 // full resolution it goes through FXAA into a kept image of the same size, which takes the buffer's place.

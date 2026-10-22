@@ -1599,6 +1599,9 @@ bool draw_opt(int which) {
     case kOptPrefetch: return g_prefetch.load(std::memory_order_relaxed);
     case kOptRegGens: return g_regGens.load(std::memory_order_relaxed);
     case kOptSkipTv: return g_skipTv.load(std::memory_order_relaxed);
+    case kOptTargetMemo2: return g_targetMemo2.load(std::memory_order_relaxed);
+    case kOptFixedMemo: return g_fixedMemo.load(std::memory_order_relaxed);
+    case kOptVtxIdentity: return g_vtxIdentity.load(std::memory_order_relaxed);
     default: return false;
     }
 }
@@ -1613,7 +1616,9 @@ void set_draw_opt(int which, bool on) {
         "a submit every 1024 draws instead of 256 (WWHD_DK_SUBMIT_DRAWS)", "render-thread profiler (WWHD_PROFILE)",
         "shader data prefetched at each draw (WWHD_DK_PREFETCH)",
         "targets, fixed state and viewport skipped while their registers are unchanged (WWHD_DK_REG_GENS)",
-        "the TV picture not drawn while the window shows the GamePad's (WWHD_DK_SKIP_TV)"};
+        "the TV picture not drawn while the window shows the GamePad's (WWHD_DK_SKIP_TV)",
+        "target memo by state words, same-frame target checks skipped (WWHD_DK_TARGET_MEMO2)",
+        "fixed state in three memos (WWHD_DK_FIXED_MEMO)", "vertex states by layout identity (WWHD_DK_VTX_IDENTITY)"};
     switch (which) {
     case kOptFixedSkip: g_fixedSkip = on; break;
     case kOptDepthOnly: g_depthOnly = on; break;
@@ -1627,6 +1632,9 @@ void set_draw_opt(int which, bool on) {
     case kOptPrefetch: g_prefetch = on; break;
     case kOptRegGens: g_regGens = on; break;
     case kOptSkipTv: g_skipTv = on; break;
+    case kOptTargetMemo2: g_targetMemo2 = on; break;
+    case kOptFixedMemo: g_fixedMemo = on; break;
+    case kOptVtxIdentity: g_vtxIdentity = on; break;
     }
     LOG("[dk] A/B: %s %s from frame %llu (menu)", names[which], on ? "ON" : "OFF", (unsigned long long)R.frame + 1);
 }

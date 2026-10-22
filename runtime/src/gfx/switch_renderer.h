@@ -45,6 +45,10 @@ enum DrawOpt : int {
     kOptFixedSkip, kOptDepthOnly, kOptTexSharedCache, kOptVtxLayoutCache, kOptBigSubmits, kOptProfiler, kOptPrefetch,
     kOptRegGens,  // round 41: targets, fixed state and viewport skipped while their registers are unchanged
     kOptSkipTv,   // the TV picture not drawn while the window shows the GamePad's (Off-TV Play; WWHD_DK_SKIP_TV)
+    // the draw-memo round (gfx/deko dk_draw.h): the target memo by state words and its same-frame skip
+    // (WWHD_DK_TARGET_MEMO2), the fixed state in three memos (WWHD_DK_FIXED_MEMO), vertex states by layout identity
+    // (WWHD_DK_VTX_IDENTITY)
+    kOptTargetMemo2, kOptFixedMemo, kOptVtxIdentity,
     kDrawOpts
 };
 // shader compile threads for the shaders draws ask for (gfx/deko/shaders_dk.cpp helper_main): 0 auto (the default:
