@@ -7,6 +7,10 @@
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(PPC_NO_NEON_FLOAT)
+#include <arm_neon.h>
+#define PPC_NEON_FLOAT 1
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -239,9 +243,49 @@ static inline __attribute__((always_inline)) double snan_chk64(double d, uint32_
 #define snan_chk64(d, ea, kind) (d)
 #endif
 
+/* Big-endian float and paired-single memory access. On AArch64 they go through the FP/SIMD registers
+ * (ld1r / ldr d + rev32 + fcvt / fcvtl; fcvt / fcvtn + rev32 + str) instead of an integer load, rev
+ * and moves: the same bits as the generic path (the conversions are the same instructions; a
+ * signalling NaN is quieted by fcvt either way). The SNaN counter reads the raw bits first, as before. */
+#ifdef PPC_NEON_FLOAT
+static inline __attribute__((always_inline)) float ldbe_f32_raw(uint32_t ea) {
+    return vget_lane_f32(vreinterpret_f32_u8(vrev32_u8(vreinterpret_u8_u32(vld1_dup_u32((const uint32_t*)ppc_ptr(ea))))), 0);
+}
+/* two floats at ea, ea+4 (guest big-endian), as two doubles */
+static inline __attribute__((always_inline)) float64x2_t ldbe_f32x2(uint32_t ea) {
+    return vcvt_f64_f32(vreinterpret_f32_u8(vrev32_u8(vld1_u8(ppc_ptr(ea)))));
+}
+static inline __attribute__((always_inline)) void stbe_f32_raw(uint32_t ea, float f) {
+    vst1_lane_u32((uint32_t*)ppc_ptr(ea), vreinterpret_u32_u8(vrev32_u8(vreinterpret_u8_f32(vdup_n_f32(f)))), 0);
+}
+static inline __attribute__((always_inline)) void stbe_f32x2(uint32_t ea, double a, double b) {
+    float32x2_t f = vcvt_f32_f64(vsetq_lane_f64(b, vdupq_n_f64(a), 1));
+    vst1_u8(ppc_ptr(ea), vrev32_u8(vreinterpret_u8_f32(f)));
+}
+#endif
+
+#ifdef PPC_NEON_FLOAT
+static inline __attribute__((always_inline)) double ldf32_psq(uint32_t ea) {
+#ifdef WWHD_SNAN_COUNT
+    (void)snan_chk32(ld32(ea), ea, 2);
+#endif
+    return (double)ldbe_f32_raw(ea);
+}
+static inline double ldf32(uint32_t ea) {
+#ifdef WWHD_SNAN_COUNT
+    (void)snan_chk32(ld32(ea), ea, 0);
+#endif
+    return (double)ldbe_f32_raw(ea);
+}
+#else
 static inline double ldf32(uint32_t ea) { return (double)u32_as_f32(snan_chk32(ld32(ea), ea, 0)); }
+#endif
 static inline double ldf64(uint32_t ea) { return u64_as_f64(ld64(ea)); }
+#ifdef PPC_NEON_FLOAT
+static inline void stf32(uint32_t ea, double d) { stbe_f32_raw(ea, (float)snan_chk64(d, ea, 1)); }
+#else
 static inline void stf32(uint32_t ea, double d) { st32(ea, f32_as_u32((float)snan_chk64(d, ea, 1))); }
+#endif
 static inline void stf64(uint32_t ea, double d) { st64(ea, f64_as_u64(d)); }
 
 /* ---- integer helpers ---- */
@@ -475,16 +519,37 @@ static __attribute__((noinline)) void psq_store_slow_l(Cpu* c, double v0, double
 #endif
 static inline __attribute__((always_inline)) void psq_load_l(Cpu* c, double* p0, double* p1, uint32_t ea, int w, int i) {
     if (((PPC_GQR_STATIC_FLOAT >> i) & 1) || __builtin_expect(((c->gqr[i] >> 16) & 7) < 4, 1)) {
+#ifdef PPC_NEON_FLOAT
+        if (!w) {
+#ifdef WWHD_SNAN_COUNT
+            (void)snan_chk32(ld32(ea), ea, 2);
+            (void)snan_chk32(ld32(ea + 4), ea + 4, 2);
+#endif
+            float64x2_t v = ldbe_f32x2(ea);
+            *p0 = vgetq_lane_f64(v, 0);
+            *p1 = vgetq_lane_f64(v, 1);
+            return;
+        }
+        *p0 = ldf32_psq(ea);
+        *p1 = 1.0;
+        return;
+#else
         *p0 = u32_as_f32(snan_chk32(ld32(ea), ea, 2));
         *p1 = w ? 1.0 : (double)u32_as_f32(snan_chk32(ld32(ea + 4), ea + 4, 2));
         return;
+#endif
     }
     psq_load_slow_l(c, p0, p1, ea, w, i);
 }
 static inline __attribute__((always_inline)) void psq_store_l(Cpu* c, double v0, double v1, uint32_t ea, int w, int i) {
     if (((PPC_GQR_STATIC_FLOAT >> i) & 1) || __builtin_expect((c->gqr[i] & 7) < 4, 1)) {
+#ifdef PPC_NEON_FLOAT
+        if (!w) stbe_f32x2(ea, snan_chk64(v0, ea, 3), snan_chk64(v1, ea + 4, 3));
+        else stbe_f32_raw(ea, (float)snan_chk64(v0, ea, 3));
+#else
         st32(ea, f32_as_u32((float)snan_chk64(v0, ea, 3)));
         if (!w) st32(ea + 4, f32_as_u32((float)snan_chk64(v1, ea + 4, 3)));
+#endif
         return;
     }
     psq_store_slow_l(c, v0, v1, ea, w, i);
