@@ -321,10 +321,10 @@ void tab_performance() {
         ImGui::TextUnformatted("Shadow quality");
         struct Q { float f; const char* label; const char* tip; };
         static const Q quals[] = {
-            {0.5f, "Low", "Draws the shadow maps at half the size: a bit blockier shadows, and a faster frame rate in the busiest\n"
-                          "views (about 5-7% in Outset's tall grass and by the lookout)."},
+            {0.5f, "Low", "Draws the shadow maps at half the size: a bit blockier shadows, and about 5-7% more frames per second in\n"
+                          "the busiest views (Outset's tall grass, the lookout). No change in the village or at sea."},
             {1.0f, "Normal", "The game's own shadow quality."},
-            {2.0f, "High", "Draws the shadow maps at twice the size: sharper shadows, more GPU time and memory."}};
+            {2.0f, "High", "Draws the shadow maps at twice the size: sharper shadows, but about 17-20% slower in the busiest views\n(Outset's tall grass, the lookout) and more memory."}};
         for (const Q& q : quals) {
             if (q.f > 1.0f && !dev_options() && cur <= 1.0f) continue;  // High: a test, with developer options
             ImGui::SameLine();
@@ -505,11 +505,13 @@ void tab_developer() {
         bool skip;
         if (check("Skip ambient occlusion", gfxsw::skip_ao(), &skip)) gfxsw::set_skip_ao(skip);
         help("Test: the ambient-occlusion pass is not drawn and the game sees no occlusion (the soft dark corners\n"
-             "and creases); the real shadows stay. Saves GPU time. Not saved: off at the next start.");
+             "and creases); the real shadows stay.\n"
+             "Measured: about +1% fps in the busiest views, nothing elsewhere. Not saved: off at the next start.");
         bool stop;
         if (check("Stop the Miiverse thread", hle_olv::parked(), &stop)) hle_olv::set_parked(stop);
         help("Test: the game's Miiverse thread (Tingle Bottle and Miiverse requests, which always fail here) stops\n"
-             "instead of running a step every millisecond. Frees some of a CPU core. Not saved: off at the next start.");
+             "instead of running a step every millisecond. Measured: no change in fps or\n"
+             "main-thread time in the four Outset views. Not saved: off at the next start.");
     }
     heading("Controller and screen (test)");
     // (Debug: the GamePad view is not offered to players) which Wii U controller the Switch controller is: the game's own control mode must match it (with
