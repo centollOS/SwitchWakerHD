@@ -335,4 +335,7 @@ Only the Windows installer, `SwitchWakerHD-Installer.exe`, is signed. It is buil
 Privacy policy: this program will not transfer any information to other networked systems unless specifically
 requested by the user or the person installing or operating it. To install, it downloads the release, the
 devkitPro updater and the tools it installs (Python, devkitPro's packages; Git, Pillow and MSYS2's gcc for the
-HOME-screen icon; the minimap mod if chosen) from GitHub and from those tools' own servers.
+HOME-screen icon; MSYS2's gcc, ninja and zlib for the prepared graphics; the minimap mod if chosen) from GitHub and
+from those tools' own servers, and, unless *Prepare the graphics now* is unticked, the release's graphics template
+(`shader-template.sealed`: data, never run; encrypted with the game's own files, see
+[docs/shader-manifest-release-plan.md](docs/shader-manifest-release-plan.md)) from GitHub.
