@@ -244,6 +244,39 @@ void tab_picture() {
         }
         help("Far places softly out of focus, as on the Wii U.\nCosts a little GPU time.");
     }
+    heading("Experimental features");
+    warn("Unfinished: these can make the game slower or choppy, or behave oddly. They are not saved: 30 fps again\n"
+         "at the next start. Turn them off if something goes wrong.");
+    {
+        // the upstream 60 fps modes (the screen is 60 Hz: 60 fps only)
+        const int m = interp::mode();
+        auto choose = [](int mode) {
+            hostui::post([mode] {
+                if (mode == 1) interp::set_fps(60);
+                interp::set_mode(mode);
+                LOG("[interp] frame rate mode from the Switch tab: %s (not saved)", interp::mode_name());
+            });
+        };
+        if (radio_tip("30 fps (original)", m == 0, "The game as it was: 30 logic steps and 30 drawn frames a second.")) choose(0);
+        ImGui::SameLine();
+        if (radio_tip("60 fps interpolation", m == 1, "The game logic keeps 30 steps a second and a blended frame is drawn between them:\ndoubles the drawing work.")) choose(1);
+        ImGui::SameLine();
+        if (radio_tip("True 60 (experimental)", m == 2, "Runs the game logic at 60 steps a second. Needs much more CPU and GPU than 30 fps.")) choose(2);
+        help("Frame rate modes the game was not made for (the screen is 60 Hz). Not saved: 30 fps at the next start.");
+        if (m == 1) {
+            bool paced;
+            if (check("Keep game speed", interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))
+                hostui::post([paced] {
+                    interp::set_paced_interpolation(paced);
+                    LOG("[interp] keep game speed from the Switch tab: %s (not saved)", paced ? "on" : "off");
+                });
+            help("When the console cannot draw 60 frames a second, skip in-between frames instead of slowing\n"
+                 "the whole game down: the game logic keeps its 30 steps a second. Off: every in-between frame\n"
+                 "is drawn and the game runs slower than real time. Not saved: off at the next start.");
+            if (float share = interp::paced_drawn_share(); share >= 0)
+                note("In-between frames drawn lately: %.0f%%", share * 100.0f);
+        }
+    }
 }
 
 // Speed: shader preparation and the frame rate counter (clocks are sys-clk's job: no GPU profile here)
@@ -426,37 +459,6 @@ void tab_developer() {
         }
         help("Issue #49: what a draw does while its shader compiles. Saved. The log's [shader-wait] lines say how\n"
              "long it waited.");
-    }
-    heading("Frame rate (test)");
-    {
-        // the upstream 60 fps modes, for testing on the console (the screen is 60 Hz: 60 fps only)
-        const int m = interp::mode();
-        auto choose = [](int mode) {
-            hostui::post([mode] {
-                if (mode == 1) interp::set_fps(60);
-                interp::set_mode(mode);
-                LOG("[interp] frame rate mode from the Switch tab: %s (not saved)", interp::mode_name());
-            });
-        };
-        if (radio_tip("30 fps (original)", m == 0, "The game as it was: 30 logic steps and 30 drawn frames a second.")) choose(0);
-        ImGui::SameLine();
-        if (radio_tip("60 fps interpolation", m == 1, "The game logic keeps 30 steps a second and a blended frame is drawn between them:\ndoubles the drawing work.")) choose(1);
-        ImGui::SameLine();
-        if (radio_tip("True 60 (experimental)", m == 2, "Runs the game logic at 60 steps a second. Needs much more CPU and GPU than 30 fps.")) choose(2);
-        help("Test of the 60 fps modes (the screen is 60 Hz). Not saved: 30 fps at the next start.");
-        if (m == 1) {
-            bool paced;
-            if (check("Keep game speed", interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))
-                hostui::post([paced] {
-                    interp::set_paced_interpolation(paced);
-                    LOG("[interp] keep game speed from the Switch tab: %s (not saved)", paced ? "on" : "off");
-                });
-            help("When the console cannot draw 60 frames a second, skip in-between frames instead of slowing\n"
-                 "the whole game down: the game logic keeps its 30 steps a second. Off: every in-between frame\n"
-                 "is drawn and the game runs slower than real time. Not saved: off at the next start.");
-            if (float share = interp::paced_drawn_share(); share >= 0)
-                note("In-between frames drawn lately: %.0f%%", share * 100.0f);
-        }
     }
     heading("Controller and screen (test)");
     // (Debug: the GamePad view is not offered to players) which Wii U controller the Switch controller is: the game's own control mode must match it (with
