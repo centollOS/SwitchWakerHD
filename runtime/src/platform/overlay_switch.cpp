@@ -174,9 +174,9 @@ void tab_picture() {
     help("Each mode keeps its own internal resolution and dynamic resolution;\n"
          "they apply by themselves when the console is docked or undocked.");
     const ResProfile rp = res_profile(edit);
-    static const float scales[] = {0.75f, 1.0f, 1.25f, 1.5f};
-    static const char* const names[] = {"0.75x  (960x540)", "1x  (1280x720)", "1.25x  (1600x900)", "1.5x  (1920x1080)"};
-    for (int i = 0; i < 4; i++) {
+    static const float scales[] = {1.0f, 1.25f, 1.5f};  // (a saved 0.75 still applies; the menu no longer offers it)
+    static const char* const names[] = {"1x  (1280x720)", "1.25x  (1600x900)", "1.5x  (1920x1080)"};
+    for (int i = 0; i < 3; i++) {
         if (i) ImGui::SameLine();
         const float s = scales[i];
         if (radio(names[i], std::fabs(rp.scale - s) < 0.01f))
