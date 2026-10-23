@@ -248,8 +248,9 @@ Copy the **contents** of `build/sd/` to the root of the SD card, so the game end
 | **ZL + ZR + Minus** | In GamePad mode: switch between the TV picture and the GamePad screen (items, map). On the GamePad screen the touch screen works as the GamePad's. Or show the GamePad screen small in a corner of the TV picture: Minus held > Switch tab > "GamePad screen in a corner of the TV picture" (the touch screen then works inside that corner) |
 
 By default the controller acts as a **Wii U Pro Controller** and everything is on one screen. To play
-with the GamePad features (its screen, **gyro aiming**), choose *Wii U GamePad* in the menu's Switch tab
-**and** in the game's own options, then turn on *Gyro aiming* there.
+with the GamePad features (its screen, **gyro aiming**), choose *Wii U GamePad* in the menu's Dev tab
+(tick *Show developer options* first) **and** in the game's own options, then turn on *Gyro aiming* in the
+menu's Controls tab.
 
 ### The Picture and Controls tabs of the menu
 
@@ -288,5 +289,5 @@ it). Saves (`save/`), settings (`settings.ini`) and the compiled graphics stay.
 | Docker errors | Docker Desktop must be running (on Windows, with its WSL integration on) |
 | `Docker or Podman is needed ... or a native devkitPro` | On Windows, do the "Windows: devkitPro" setup above; elsewhere, install Docker |
 | The game closes at once or says it is out of memory | Start it in title mode (hold R), not from the album |
-| No button works | The game's controller setting differs from the menu's Switch tab: set both to the same |
+| No button works | The game's controller setting differs from the menu's Dev tab (*Show developer options*): set both to the same |
 | Something else | `sdmc:/switch/wwhd/wwhd.log` and `logs/` say what happened; include them in a report (they contain no game data) |

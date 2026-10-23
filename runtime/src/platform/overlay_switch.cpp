@@ -37,6 +37,7 @@
 #include "prepare_graphics_switch.h"
 #include "settings_switch.h"
 #include "shader_wait_switch.h"
+#include "ui_text_switch.h"
 
 namespace overlay_switch {
 namespace {
@@ -156,18 +157,14 @@ void tab_warp() {
 void tab_picture() {
     using namespace switch_settings;
     // first, as the most useful thing here: it removes the black or late-appearing effects of places seen the first time
-    // (the text is shown, not a tooltip, and says where a sweep stands)
-    note("Removes the black shadows and missing effects that appear the first time a place is drawn, because the console "
-         "has no shader cache yet, and prepares the Switch for much smoother play afterwards. It visits the whole game "
-         "once by itself (30-40 minutes, best docked). Over 90%% of the shaders can be prepared; a few cannot be compiled.");
+    // (the text is shown, not a tooltip, and says where a sweep stands; in the game's language, ui_text_switch.cpp)
+    note("%s", ui_text::tx().pictureIntro);
     {
         const prepare_graphics::Progress p = prepare_graphics::progress();
         if (p.next > 0 && p.next < p.total)
-            warn("Unfinished: place %zu of %zu. Continue below to carry on from there.", p.next, p.total);
-        else if (p.complete)
-            note("Done on this console. Repeating it only helps after an update that changes the graphics.");
+            warn(ui_text::tx().pictureUnfinished, p.next, p.total);
         else
-            note("Not done yet on this console.");
+            note("%s", p.complete ? ui_text::tx().pictureDone : ui_text::tx().pictureNotDone);
     }
     if (prepare_graphics::ui_section()) set_open(false);  // platform/prepare_graphics_ui_switch.cpp
     // one picture profile per mode (as SwitchWaker): the one shown starts as the active mode's

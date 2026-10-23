@@ -25,7 +25,7 @@ const Texts kEnglish = {
     "are not touched.",
     "Play now",
     "The console prepares the most common graphics first behind a loading screen (about 20 minutes; B there to play "
-    "at once). Prepare graphics stays in the settings menu: hold Minus (-) in the game, Switch tab.",
+    "at once). Prepare graphics stays in the settings menu: hold Minus (-) in the game, Picture tab.",
 
     "SwitchWakerHD: new in this version",
     "Prepare graphics: the console can now prepare the graphics of the whole game at once, so that places you have "
@@ -35,7 +35,7 @@ const Texts kEnglish = {
     "faster.",
     "Later",
     "This message does not show again. Prepare graphics stays in the settings menu: hold Minus (-) in the game, "
-    "Switch tab.",
+    "Picture tab.",
 
     "SwitchWakerHD: the game's files were not found",
     "SwitchWakerHD needs your own copy of the game in %s/ (the folders code/, content/ and meta/), as "
@@ -85,6 +85,13 @@ const Texts kEnglish = {
     "Reading the game's graphics...",
     "%zu of %zu",
     "B: play now (what is left goes on in the background)",
+    "Removes the black shadows and missing effects that appear the first time a place is drawn, because the "
+    "console has no shader cache yet, and prepares the Switch for much smoother play afterwards. It visits the "
+    "whole game once by itself (30-40 minutes, best docked). Over 90% of the shaders can be prepared; a few "
+    "cannot be compiled.",
+    "Unfinished: place %zu of %zu. Continue below to carry on from there.",
+    "Done on this console. Repeating it only helps after an update that changes the graphics.",
+    "Not done yet on this console.",
 };
 
 const Texts kSpanish = {
@@ -100,7 +107,7 @@ const Texts kSpanish = {
     "Jugar ahora",
     "La consola prepara primero los gráficos más comunes detrás de una pantalla de carga (unos 20 minutos; B allí "
     "para jugar enseguida). Preparar gráficos sigue en los ajustes: mantén pulsado Menos (-) en el juego, pestaña "
-    "Switch.",
+    "Picture.",
 
     "SwitchWakerHD: novedad en esta versión",
     "Preparar gráficos: la consola ya puede preparar de una vez los gráficos de todo el juego, para que los lugares "
@@ -110,7 +117,7 @@ const Texts kSpanish = {
     "consola ya tiene preparado va más rápido.",
     "Más tarde",
     "Este mensaje no volverá a aparecer. Preparar gráficos sigue en los ajustes: mantén pulsado Menos (-) en el "
-    "juego, pestaña Switch.",
+    "juego, pestaña Picture.",
 
     "SwitchWakerHD: no se encuentran los archivos del juego",
     "SwitchWakerHD necesita tu propia copia del juego en %s/ (las carpetas code/, content/ y meta/), tal como la "
@@ -161,6 +168,13 @@ const Texts kSpanish = {
     "Leyendo los gráficos del juego...",
     "%zu de %zu",
     "B: jugar ya (lo que falte sigue en segundo plano)",
+    "Quita las sombras negras y los efectos que faltan la primera vez que se dibuja un lugar, porque la consola "
+    "aún no tiene los shaders en caché, y hace que después el juego vaya mucho más fluido. Visita todo el juego "
+    "una vez por sí solo (30-40 minutos, mejor con la consola en la base). Se puede preparar más del 90% de los "
+    "shaders; unos pocos no se pueden compilar.",
+    "Sin terminar: lugar %zu de %zu. Sigue abajo para continuar desde ahí.",
+    "Hecho en esta consola. Repetirlo solo sirve después de una actualización que cambie los gráficos.",
+    "Aún no se ha hecho en esta consola.",
 };
 
 const Texts kFrench = {
@@ -176,7 +190,7 @@ const Texts kFrench = {
     "Jouer maintenant",
     "La console prépare d'abord les graphismes les plus courants derrière un écran de chargement (environ 20 "
     "minutes ; B pour jouer tout de suite). Préparer les graphismes reste dans les réglages : maintenez Moins (-) en "
-    "jeu, onglet Switch.",
+    "jeu, onglet Picture.",
 
     "SwitchWakerHD : nouveau dans cette version",
     "Préparer les graphismes : la console peut maintenant préparer en une fois les graphismes de tout le jeu, pour "
@@ -186,7 +200,7 @@ const Texts kFrench = {
     "préparé sur cette console va plus vite.",
     "Plus tard",
     "Ce message ne s'affichera plus. Préparer les graphismes reste dans les réglages : maintenez Moins (-) en jeu, "
-    "onglet Switch.",
+    "onglet Picture.",
 
     "SwitchWakerHD : fichiers du jeu introuvables",
     "SwitchWakerHD a besoin de votre propre copie du jeu dans %s/ (les dossiers code/, content/ et meta/), telle que "
@@ -237,6 +251,13 @@ const Texts kFrench = {
     "Lecture des graphismes du jeu...",
     "%zu sur %zu",
     "B : jouer maintenant (le reste continue en arrière-plan)",
+    "Supprime les ombres noires et les effets manquants qui apparaissent la première fois qu'un lieu est dessiné, "
+    "car la console n'a pas encore de shaders en cache, et rend le jeu bien plus fluide ensuite. Le jeu visite "
+    "tout seul chaque lieu une fois (30-40 minutes, de préférence sur la station d'accueil). Plus de 90 % des "
+    "shaders peuvent être préparés ; quelques-uns ne peuvent pas être compilés.",
+    "Inachevé : lieu %zu sur %zu. Continuez ci-dessous pour reprendre à partir de là.",
+    "Fait sur cette console. Recommencer n'est utile qu'après une mise à jour qui change les graphismes.",
+    "Pas encore fait sur cette console.",
 };
 
 const Texts kGerman = {
@@ -251,7 +272,7 @@ const Texts kGerman = {
     "fertig im Titelbildschirm neu. Deine Spielstände werden nicht verändert.",
     "Jetzt spielen",
     "Die Konsole bereitet zuerst die häufigsten Grafiken hinter einem Ladebildschirm vor (etwa 20 Minuten; B dort, "
-    "um sofort zu spielen). Grafik vorbereiten bleibt im Einstellungsmenü: Halte im Spiel Minus (-), Reiter Switch.",
+    "um sofort zu spielen). Grafik vorbereiten bleibt im Einstellungsmenü: Halte im Spiel Minus (-), Reiter Picture.",
 
     "SwitchWakerHD: neu in dieser Version",
     "Grafik vorbereiten: Die Konsole kann jetzt die Grafik des ganzen Spiels auf einmal vorbereiten, damit noch nicht "
@@ -261,7 +282,7 @@ const Texts kGerman = {
     "dieser Konsole schon vorbereitet ist, geht schneller.",
     "Später",
     "Diese Meldung erscheint nicht wieder. Grafik vorbereiten bleibt im Einstellungsmenü: Halte im Spiel Minus (-), "
-    "Reiter Switch.",
+    "Reiter Picture.",
 
     "SwitchWakerHD: Spieldateien nicht gefunden",
     "SwitchWakerHD braucht deine eigene Kopie des Spiels in %s/ (die Ordner code/, content/ und meta/), so wie "
@@ -313,6 +334,13 @@ const Texts kGerman = {
     "Grafik des Spiels wird gelesen...",
     "%zu von %zu",
     "B: jetzt spielen (der Rest läuft im Hintergrund weiter)",
+    "Entfernt die schwarzen Schatten und fehlenden Effekte, die erscheinen, wenn ein Ort zum ersten Mal "
+    "gezeichnet wird, weil die Konsole die Shader noch nicht im Cache hat, und sorgt danach für ein viel "
+    "flüssigeres Spiel. Das Spiel besucht jeden Ort einmal von selbst (30-40 Minuten, am besten in der Station). "
+    "Über 90 % der Shader lassen sich vorbereiten; einige wenige können nicht kompiliert werden.",
+    "Nicht fertig: Ort %zu von %zu. Unten fortsetzen, um dort weiterzumachen.",
+    "Auf dieser Konsole erledigt. Erneut lohnt sich nur nach einem Update, das die Grafik ändert.",
+    "Auf dieser Konsole noch nicht erledigt.",
 };
 
 const Texts kItalian = {
@@ -327,7 +355,7 @@ const Texts kItalian = {
     "del titolo, pronto. I tuoi salvataggi non vengono toccati.",
     "Gioca ora",
     "La console prepara prima la grafica più comune dietro una schermata di caricamento (circa 20 minuti; B lì per "
-    "giocare subito). Prepara la grafica resta nelle impostazioni: tieni premuto Meno (-) nel gioco, scheda Switch.",
+    "giocare subito). Prepara la grafica resta nelle impostazioni: tieni premuto Meno (-) nel gioco, scheda Picture.",
 
     "SwitchWakerHD: novità in questa versione",
     "Prepara la grafica: ora la console può preparare in una volta la grafica di tutto il gioco, così i luoghi non "
@@ -337,7 +365,7 @@ const Texts kItalian = {
     "Ciò che è già pronto su questa console va più veloce.",
     "Più tardi",
     "Questo messaggio non apparirà più. Prepara la grafica resta nelle impostazioni: tieni premuto Meno (-) nel "
-    "gioco, scheda Switch.",
+    "gioco, scheda Picture.",
 
     "SwitchWakerHD: file del gioco non trovati",
     "SwitchWakerHD ha bisogno della tua copia del gioco in %s/ (le cartelle code/, content/ e meta/), come la "
@@ -388,6 +416,13 @@ const Texts kItalian = {
     "Lettura della grafica del gioco...",
     "%zu di %zu",
     "B: gioca ora (il resto continua in background)",
+    "Elimina le ombre nere e gli effetti mancanti che compaiono la prima volta che un luogo viene disegnato, "
+    "perché la console non ha ancora gli shader in cache, e poi rende il gioco molto più fluido. Il gioco visita "
+    "da solo ogni luogo una volta (30-40 minuti, meglio con la console nella base). Si può preparare oltre il 90% "
+    "degli shader; alcuni non si possono compilare.",
+    "Non finito: luogo %zu di %zu. Continua qui sotto per riprendere da lì.",
+    "Fatto su questa console. Ripeterlo serve solo dopo un aggiornamento che cambia la grafica.",
+    "Non ancora fatto su questa console.",
 };
 
 // the game's "language" setting (Wii U codes, hle/coreinit_misc.cpp), else the console's language
