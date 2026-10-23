@@ -47,8 +47,10 @@ three files above) appears in the plaintext.
    - `from-template TEMPLATE GAME_DIR OUT_MANIFEST`: back to WSM1 records for the existing speculate / translate /
      build chain.
 3. Release: private repository `centollOS/SwitchWakerHD-shader-manifest` holding the sealed file; the public
-   repository pins it in `tools/shadercache/manifest.ref` (commit + SHA-256); packaging fetches it with a read-only
-   deploy key and attaches it to the release as an asset. Fork and PR builds attach none.
+   repository pins it in `tools/shadercache/manifest.ref` (commit + SHA-256). SwitchWakerHD releases are packaged by
+   a maintainer (`tools/switch/package_release.sh`, not CI), so a maintainer script fetches the pinned file with the
+   maintainer's own GitHub access, checks the hash and attaches it to the release as an asset: no deploy key or CI
+   secret. Forks have no access and attach none.
 4. Setup: `make_sd.py` downloads the release's asset (or takes `--shaders`), opens it with the dump, builds the cache;
    on by default with an opt-out; a missing or mismatched file means no prepared shaders, never an error. Installers
    follow.
@@ -63,6 +65,15 @@ three files above) appears in the plaintext.
   `dksh_cache coverage` against the console's own cache).
 - Console: a fresh install starts without the first-start screen; a first tour without black places.
 
+## Results so far (2026-10-23, Mac, the USA dump, the full-game console manifest)
+
+| | |
+|---|---|
+| Fetch shaders as semantic attributes | every variant translates to the same GLSL as with the console's microcode (164,243 map lines identical) |
+| Distilled template | 164,243 variants -> 8,565 states (2,985 vertex, 5,580 pixel), 131 MiB -> 767 KiB; translated again: the same 8,565 sources; no game bytes; `guard.py` accepts it |
+| Sealed | 767,273 bytes; sealed with the USA dump, opens with the European dump to the identical template; deterministic |
+| Cache from the sealed template (`make_sd.py --shaders`) | 23,380 shaders (38.9 of the 40 MiB budget), 101 s, byte-identical twice; the full console manifest gives 23,280, 22,736 in both (every recorded variant's shader is in both; the rest are speculative guesses) |
+
 ## Steps (one commit each)
 
 1. This plan.
@@ -70,5 +81,5 @@ three files above) appears in the plaintext.
 3. `shader_manifest.py distill` + game-bytes scan + tests.
 4. `seal` / `open` + tests.
 5. `from-template` and `make_sd.py --shaders` taking the sealed file; checks above on the Mac.
-6. Release packaging (private repository, deploy key: needs the owner's go-ahead) and the release checklist.
+6. Release packaging (the private repository: needs the owner's go-ahead) and the release checklist.
 7. Installers, docs, console test.

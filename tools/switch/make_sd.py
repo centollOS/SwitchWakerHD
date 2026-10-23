@@ -20,9 +20,11 @@ usage:
   make_sd.py --wua GAME.wua [--out DIR]       a Cemu Wii U archive (no keys; needs: pip install zstandard)
   make_sd.py --game-dir EXTRACTED [--out DIR] a folder with code/, content/, meta/ (e.g. from Cemu's
                                               mlc01/usr/title/00050000/10143500 or 10143600, without the update)
-  options: --shaders shader_manifest.bin      also build shadercache_dksh.bin from your console's shader manifest
+  options: --shaders FILE                     also build shadercache_dksh.bin: from the release's shader template
+                                              (shader-template.sealed: shader states without game code, opened with
+                                              your dump's files), or from your console's shader manifest
                                               (sdmc:/switch/wwhd/shader_manifest.bin, after playing a while): the
-                                              shaders you met, and guesses for the places you have not visited yet
+                                              shaders in it, and guesses for the places not in it
                                               (a shadercache_gl.bin is still accepted: its sources only)
            --jobs N                           parallel compiles (each needs ~1.5 GB of memory)
            --guest-mod PACKAGE                a code mod (Mod SDK v2) built into the NRO: its id in the mod catalogue
@@ -83,15 +85,21 @@ def shader_cache(src, game):
     shell = native_shell(env) if os.name == "nt" else ["bash"]
     tool = shell + [os.path.join("tools", "switch", "dksh_cache", "build.sh")]
     with open(src, "rb") as f:
-        manifest = f.read(4) == b"WSM1"
-    if not manifest:
+        head = f.read(8)
+    template = head in (b"WSME0001", b"WWHT0003")  # the release's sealed template, or one opened (issue #88)
+    if head[:4] != b"WSM1" and not template:
         run(tool + ["build", src, out], env=env)
         return out
     work = os.path.join(ROOT, "build", "shader-cache")
     os.makedirs(work, exist_ok=True)
     m, programs, gl = (os.path.join(work, n) for n in ("manifest.bin", "programs.bin", "shadercache_gl.bin"))
-    run([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "shader_manifest.py"), "speculate", src, game, m,
-         programs])
+    script = os.path.join(ROOT, "tools", "switch", "shader_manifest.py")
+    if template:
+        # the template's states with the dump's programs: a manifest as the console writes it, then as below
+        recorded = os.path.join(work, "template_manifest.bin")
+        run([sys.executable, "-I", script, "from-template", src, game, recorded, programs])
+        src = recorded
+    run([sys.executable, "-I", script, "speculate", src, game, m, programs])
     # (2: a few variants failed: speculative ones whose guessed state does not fit their program)
     run(tool + ["translate", m, programs, gl], env=env, ok=(0, 2))
     run(tool + ["build", gl, out, SHADER_CODE_MIB], env=env, ok=(0, 2))
