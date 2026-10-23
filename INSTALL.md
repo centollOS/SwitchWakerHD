@@ -254,8 +254,8 @@ with the GamePad features (its screen, **gyro aiming**), choose *Wii U GamePad* 
 ### The Picture and Controls tabs of the menu
 
 Picture: internal resolution per mode (dynamic resolution), picture adjustments, frame-rate counter.
-Controls: rumble, gyro aiming. The game runs at the console's stock clocks and GPU profile (a GPU profile
-saved by an older version is reset to stock); for more, use sys-clk. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
+Controls: rumble, gyro aiming. The game runs at the console's stock CPU clock and, in handheld, Nintendo's 384 MHz GPU
+profile (not a menu choice; one saved by an older version is reset to 384); for more, use sys-clk. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
 
 ## The first start: preparing the graphics
 

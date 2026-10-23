@@ -609,3 +609,10 @@ total ~1-2 ms de GPU por frame (3-7 % de ~27 ms); el tiled cache y la compresió
 Para el A/B: `WWHD_DK_LAZY_BARRIERS=0`, `WWHD_DK_ZCULL_KEEP=0`, `WWHD_DK_DEPTH_SAMPLE_BOUND=0`,
 `WWHD_DK_UPLOAD_BATCH=0` (todos a 0 = el camino de antes) y comparar `GPU busy` en el mismo sitio. Otro A/B barato del
 lado GPU: `WWHD_DK_SUBMIT_DRAWS=512` (cada envío a mitad de frame invalida L2 y corta la precarga del host).
+
+- **zcull otra vez encendido (2026-10-22, #72 D2).** `WWHD_DK_ZCULL=0` lo apaga. Antes de cada tanda de draws con depth bias
+  (polygon offset) se tira el zcull (`DkInvalidateFlags_Zcull`; `WWHD_DK_ZCULL_BIAS_FIX=0` lo quita). Medido en la consola
+  (reloj de serie, 720p fijo, 2 arranques por configuración, ABBA): Outset en la hierba 23,4 -> 29,4 fps y 41,9 -> 34,8 ms
+  de GPU; village y Windfall ~0,5-1,5 ms menos de GPU; el resto sin cambio. Con y sin el invalidate sale casi igual.
+  La comprobación de imagen (capturas, diferencia de píxeles contra el ruido entre arranques) no vio huecos, pero sin
+  pausa de frame no puede descartarlos.

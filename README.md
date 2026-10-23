@@ -207,9 +207,10 @@ and comes back at the next start.
 
 ### Performance
 
-The game is **perfectly playable at the console's stock clocks**, which are the default (CPU
-1020 MHz, GPU 307 MHz in handheld): 30 fps on the opening island, a smooth 26-29 fps in the busiest
-scenes. The game always uses the stock GPU profile (one saved by an older version is reset). The game no longer sets a CPU
+The game runs the console's stock CPU clock (1020 MHz) and, in handheld, **Nintendo's 384 MHz GPU
+profile**, one of the profiles Nintendo offers its own games: in Outset's tall grass it is ~5 fps faster
+than the stock 307 MHz (21.9 -> 26.7 fps), while 460 MHz adds only ~0.5 fps more there. It is not a menu
+choice (a GPU profile saved by an older version is reset to 384). The game no longer sets a CPU
 or GPU overclock itself (the CPU steps and GPU 614 MHz were removed: with the CPU raised that way the
 console did not wake from sleep, #33). If you want the busiest scenes at a steady 30, a mild CPU
 clock of 1224 MHz does it: set it with [sys-clk](https://github.com/retronx-team/sys-clk), which
@@ -254,10 +255,10 @@ The game speaks the console language you choose, from the languages your copy of
 Boots and plays on a Switch in handheld mode, with sound, controllers, saves, **working save
 states**, the options menu and mods. Played by hand mostly on the opening island, Dragon Roost and the sea
 around it, and areas reached with the Warp tab. **It is perfectly playable at the console's stock
-clocks** (CPU 1020 MHz, GPU 307 MHz): 30 fps on the opening island, and a smooth 26-29 fps in the
-busiest scenes, such as sailing near Dragon Roost and the volcano island. A CPU at about 1.2 GHz
-(1224 MHz, set with sys-clk) holds a steady 30 there. The game runs the CPU and GPU at their stock
-clocks and sets no overclock itself.
+clocks** (CPU 1020 MHz) with Nintendo's 384 MHz handheld GPU profile (the default): 30 fps on the
+opening island, and a smooth 26-29 fps in the busiest scenes, such as sailing near Dragon Roost and the
+volcano island. A CPU at about 1.2 GHz (1224 MHz, set with sys-clk) holds a steady 30 there. The game
+sets no overclock itself.
 Shader and texture stutters on first use are much reduced, and shaders seen in an earlier session
 no longer stutter. Docked it renders at 1080p (picture profile per mode in the Switch tab: handheld
 1x, docked 1.5x, with dynamic resolution), tested on a TV at a median of 29.9 fps. Known issues and
@@ -265,6 +266,14 @@ open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Round 47") and
 [docs/deko3d-plan.md](docs/deko3d-plan.md).
 
 ## Changelog
+
+### 2026-10-23: GPU 384 MHz in handheld
+
+- The handheld GPU profile is now always **Nintendo's 384 MHz** (was the stock 307 MHz). In Outset's tall
+  grass the GPU was the limit: 21.9 -> 26.7 fps (4 boots each). 460 MHz gives only ~0.5 fps more there, because the
+  game's main thread is then the limit. The menu no longer offers GPU profiles: one saved by an earlier version is
+  reset to 384 at start. For other clocks, use sys-clk.
+- For developers: `tools/switch/perf_test.py gpu-profile` compares GPU profiles between boots (docs/perf-test.md).
 
 ### 2026-10-10: native experience (GamePad mode)
 
