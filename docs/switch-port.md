@@ -1723,3 +1723,40 @@ warp: all OK (log `logs-switch/wwhd_2026-10-09_21-36-50_EU.log`). USA game, same
 29.9 fps in the session's reports), save states, a warp and the sun at sea (peekZ falls back to the game's function,
 no hang): all OK (`logs-switch/wwhd_2026-10-09_22-22-57_USA_r48.log`).
 
+
+### Round 49: CPU at the stock 1020 MHz: frame-free leaves, hidden symbols, write-back elision, profile-guided build (PR #87, hardware-tested)
+
+Goal: hold 30 fps at the stock CPU where 1200 MHz runs fine. Measured on a console at stock clocks (CPU 1020, GPU 307,
+memory 1331 MHz), `perf_test.py ab`, 4 boots per build, 900 frames per scene. Details, every measurement and the dead ends:
+[pgo-progress.md](pgo-progress.md); how to make a profile: [pgo.md](pgo.md).
+
+| Change | What it does | Evidence |
+|---|---|---|
+| Frame-free leaf functions (`PPC_ENTER_FN`) | the cold yield path of the entry check is a tail call, so a function with no other call has no stack frame | framed functions 35,648 -> 24,696 |
+| Hidden symbol visibility | `-fPIC` loaded `ppc_dispatch` through the GOT at every indirect call (26,203 sites) | GOT loads at call sites -> 0 |
+| Write-back elision before direct calls (`tools/recomp/calleeregs.py`) | callee read/write sets over the call graph: a store before a call stays only if the callee reads the register or the caller needs it afterwards | stores per call 7.0 -> 5.3, hot code -1.9% instructions; lockstep identical (70,430 process executions) |
+| PGO (`-DWWHD_PGO=GEN/USE`) | GCC profile of 26 scenes on the console, game code **and** runtime (render thread, GX2 path) | below |
+
+| Scene | main (113fa63) | + frame-free, hidden, elision | + PGO (game + runtime profile) |
+|---|---|---|---|
+| lava | 27.94 fps, main thread 34.2 ms | 28.36 | **29.28**, 31.7 ms |
+| windfall | 28.52 | 29.22 | **29.97** (the cap) |
+| dragonroost | 28.61 | 28.98 | **29.92** |
+| outset_village | 25.35, 37.7 ms | 26.04 | **27.98**, 34.3 ms |
+| outset_lookout / grass | 20.7 / 23.4 | GPU-bound, fps unchanged | main thread -3.2% / -2.0% |
+
+The PGO step alone is +3.3% / +2.6% / +3.2% / +7.5% fps (lava, windfall, dragonroost, village), all beyond the 95% interval, on
+scenes the profile was not made on. The runtime half of the profile is what moves the Outset village (+1.95 fps; the game-code
+profile alone gave +0.11). The PGO build is also steadier from boot to boot (sd 0.00-0.03 fps against 0.1-0.5).
+
+What we learned (so it is not repeated):
+1. **Check the clocks before any timing.** The first console numbers of this work were taken with sys-clk on and the game's GPU
+   profile at 460 MHz: the scenes sat at the 30 fps cap and the same changes looked "inside the noise". At stock clocks the
+   baseline reproduced the maintainer's reference (lava 27.9 fps). `[dk] clocks:` in the log header says what ran.
+2. **A guess about the ABI is not a measurement.** The game was compiled with Green Hills, which allocates registers across
+   calls; the elision therefore uses the callees' real read/write sets and treats everything unknown as "reads everything".
+3. **PGO traps:** libgcov's value profiling reads `tpidr_el0` (0 on Horizon) and crashes the first indirect call; stale objects
+   keep the old flags; GCC's default `-fprofile-use` options inflate the hot code 29%; the profile is found by the object's
+   relative path. See pgo.md.
+4. A profile fits the exact generated code it was made from: remake it after a recompiler or profiled-runtime change. A release
+   build with PGO needs its own profile; that decision is the maintainers'.

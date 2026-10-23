@@ -9,6 +9,13 @@ ignores the profile of a function that changed (`-Wno-coverage-mismatch`). Make 
 different recompiler, or after changing a profiled runtime file. It is derived from the player's own recompile, so it is
 not committed.
 
+## Result (stock clocks, console, 4 boots per build; full table in [switch-port.md](switch-port.md) "Round 49")
+
+PGO with a game + runtime profile, on top of the recompiler changes: lava 28.36 -> 29.28 fps (+3.3%), windfall 29.22 -> 29.97
+(+2.6%, the cap), dragonroost 28.98 -> 29.92 (+3.2%), outset_village 26.04 -> 27.98 (+7.5%); main thread -4.7% to -6.1%.
+The scenes the profile was made on exclude those four. The runtime half of the profile (render thread, GX2 command path) is
+what moves the Outset village.
+
 ## The three modes (`cmake -DWWHD_PGO=...`, `tools/switch/build.sh` passes it through)
 
 | Mode | What | Use |
