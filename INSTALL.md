@@ -23,6 +23,10 @@ download, and the build. You only need your own personal dump of the game.
    Optional, the **GameCube sea minimap**: choose your own GameCube Wind Waker (`.iso`, `.gcm`, `.rvz` or its
    folder); the installer downloads the mod and builds it into the game
    ([details](#optional-code-mods-the-gamecube-sea-minimap)).
+   **Prepare the graphics now** (ticked by default): the installer downloads the release's graphics template and
+   compiles the game's graphics on your computer, from your own copy of the game, a few minutes more. The console
+   then starts with them ready: no first-start screen and no black places
+   ([details](#the-first-start-preparing-the-graphics)).
 4. Press **Install**. If devkitPro is not installed yet, the installer asks you to open its setup: accept the
    license and keep the default path (`C:\devkitPro`).
 5. Wait for the build (10–30 minutes), then choose how the files reach the Switch:
@@ -183,12 +187,18 @@ homebrew in Docker, or with devkitPro on Windows (10 to 30 minutes the first tim
 toolchain image, about 1 GB).
 If the computer runs out of memory, add `--jobs 2`.
 
+**Prepared graphics (optional, recommended):** download `shader-template.sealed` from the same release and add
+`--shaders shader-template.sealed` to the command. It holds the game's graphics states without any of the game's code
+and only opens with your own copy of the game; `make_sd.py` compiles the graphics from it on your computer (a few
+minutes), so the console starts with them ready. Without it the console compiles them itself (below).
+
 At the end the folder `build/sd/` holds:
 
 ```
 build/sd/switch/wwhd/
-├── wwhd.nro     the game
-└── game/        your game's files
+├── wwhd.nro              the game
+├── shadercache_dksh.bin  the prepared graphics (with --shaders)
+└── game/                 your game's files
 ```
 
 ### Optional: code mods (the GameCube sea minimap)
@@ -259,6 +269,10 @@ Controls: rumble, gyro aiming. The game runs at the console's stock CPU clock an
 profile (not a menu choice; one saved by an older version is reset to 384); for more, use sys-clk. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
 
 ## The first start: preparing the graphics
+
+With the installer's **Prepare the graphics now** (or `make_sd.py --shaders shader-template.sealed`) the graphics
+were compiled on your computer: the console loads them at start-up and none of this applies (no first-start screen).
+Without them:
 
 The console compiles each of the game's graphics effects the first time it is drawn; until then a texture can look
 black or an object appear a moment late. So the **first start** asks how to prepare them, once:

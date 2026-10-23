@@ -97,10 +97,15 @@ translation. Not needed for uam, deko3d or runtime changes: players compile the 
 
 ## Steps (one commit each)
 
-1. This plan.
-2. `dksh_cache translate`: WWFA fetch and `--map`.
-3. `shader_manifest.py distill` + game-bytes scan + tests.
-4. `seal` / `open` + tests.
-5. `from-template` and `make_sd.py --shaders` taking the sealed file; checks above on the Mac.
-6. Release packaging (the private repository: needs the owner's go-ahead) and the release checklist.
-7. Installers, docs, console test.
+1. This plan. Done.
+2. `dksh_cache translate`: WWFA fetch and `--map`. Done (with the build fix: `runtime/src` on its include path).
+3. `shader_manifest.py distill` + game-bytes scan + tests. Done.
+4. `seal` / `open` + tests. Done.
+5. `from-template` and `make_sd.py --shaders` taking the sealed file; checks on the Mac. Done.
+6. Release: the private repository (created), `tools/switch/shader_template.ref`, `attach_shader_template.sh`,
+   `update_shader_template.sh` / `distill --base`, `guard.py` refusing a sealed template in the source zip, release
+   checklist A5/A6/H1. Done.
+7. Installers ("Preparar los gráficos ahora", the template download, MSYS2's gcc/ninja/zlib-devel on Windows), the
+   Windows CI job (`dksh_cache` in MSYS2, synthetic shaders), docs (README, INSTALL.md, AGENTS.md, the decision in
+   `docs/shader-cache-from-dump-plan.md`). Done. **Left: the Windows installer run on a real PC** (test kit with a
+   seed release zip and template) and the console check after it; then attach the template to the next release.

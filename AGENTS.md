@@ -74,6 +74,15 @@ from the code. Performance tests state the GPU profile they ran at, and check th
 overrides the port's clocks. The target is 720p
 (1280x720 internal) at 30 fps.
 
+## The shader template (issue #88)
+
+Releases attach `shader-template.sealed` from the private repository `centollOS/SwitchWakerHD-shader-manifest`,
+pinned by `tools/switch/shader_template.ref`. After the test console has played, `tools/switch/update_shader_template.sh
+GAME_DIR` says whether its recording adds shaders (and makes the new sealed template); `attach_shader_template.sh pin`
+/ `TAG` pin and attach it. Never commit the sealed or an unsealed template, a console's `shader_manifest.bin` or any
+`shadercache_*.bin` to this repository (`guard.py` refuses them). A change to the shader translation (the Latte
+decompiler, translation keys) means distilling the recordings again. [docs/shader-manifest-release-plan.md](docs/shader-manifest-release-plan.md).
+
 ## The SD card without the debug server
 
 - Best: hekate's USB mass storage (UMS). The SD mounts at `/Volumes/SWITCH SD` (FAT32): plain `cp`, then
