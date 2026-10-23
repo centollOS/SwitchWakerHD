@@ -261,6 +261,28 @@ void tab_picture() {
         }
         help("Far places softly out of focus, as on the Wii U.\nCosts a little GPU time.");
     }
+    {
+        // the shadow maps' size (gfxsw::shadow_scale); saved as switchShadowScale ("0.5", "1" or "2")
+        const float cur = gfxsw::shadow_scale();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Shadow quality");
+        struct Q { float f; const char* label; const char* tip; };
+        static const Q quals[] = {
+            {0.5f, "Low", "Draws the shadow maps at half the size: a bit blockier shadows, and about 5-7% more frames per second in\n"
+                          "the busiest views (Outset's tall grass, the lookout). No change in the village or at sea."},
+            {1.0f, "Normal", "The game's own shadow quality."},
+            {2.0f, "High", "Draws the shadow maps at twice the size: sharper shadows, but about 17-20% slower in the busiest views\n(Outset's tall grass, the lookout) and more memory."}};
+        for (const Q& q : quals) {
+            if (q.f > 1.0f && !dev_options() && cur <= 1.0f) continue;  // High: a test, with developer options
+            ImGui::SameLine();
+            char label[24];
+            snprintf(label, sizeof label, "%s##shadowq", q.label);
+            if (radio_tip(label, std::fabs(cur - q.f) < 0.01f, q.tip)) {
+                gfxsw::set_shadow_scale(q.f);
+                hostui::post([f = q.f] { hostui::set(kKeyShadowScale, f < 1 ? "0.5" : f > 1 ? "2" : "1"); });
+            }
+        }
+    }
     heading("Experimental features");
     warn("Unfinished: 60 fps needs a big overclock (sys-clk or similar) to hold. Not saved.");
     {
@@ -312,30 +334,6 @@ void tab_performance() {
         }
     }
     help("Shows the frames per second in the top left corner of the picture.");
-
-    heading("Shadows");
-    {
-        // the shadow maps' size (gfxsw::shadow_scale); saved as switchShadowScale ("0.5", "1" or "2")
-        const float cur = gfxsw::shadow_scale();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Shadow quality");
-        struct Q { float f; const char* label; const char* tip; };
-        static const Q quals[] = {
-            {0.5f, "Low", "Draws the shadow maps at half the size: a bit blockier shadows, and about 5-7% more frames per second in\n"
-                          "the busiest views (Outset's tall grass, the lookout). No change in the village or at sea."},
-            {1.0f, "Normal", "The game's own shadow quality."},
-            {2.0f, "High", "Draws the shadow maps at twice the size: sharper shadows, but about 17-20% slower in the busiest views\n(Outset's tall grass, the lookout) and more memory."}};
-        for (const Q& q : quals) {
-            if (q.f > 1.0f && !dev_options() && cur <= 1.0f) continue;  // High: a test, with developer options
-            ImGui::SameLine();
-            char label[24];
-            snprintf(label, sizeof label, "%s##shadowq", q.label);
-            if (radio_tip(label, std::fabs(cur - q.f) < 0.01f, q.tip)) {
-                gfxsw::set_shadow_scale(q.f);
-                hostui::post([f = q.f] { hostui::set(kKeyShadowScale, f < 1 ? "0.5" : f > 1 ? "2" : "1"); });
-            }
-        }
-    }
 
     heading("Advanced");
     bool dev;
