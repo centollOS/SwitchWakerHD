@@ -100,10 +100,7 @@ constexpr MenuVariable kMenuVariables[] = {
          for (int m = 0; m < 2; m++) o.push_back({both_modes(switch_settings::kKeyDynamicRes, m), on ? "1" : "0"});
          return true;
      }},
-    {"WWHD_ANISO", [](const std::string& v, Settings& o) { {
-            const int n = atoi(v.c_str());  // WWHD_ANISO: 1 = 16x (the old on/off), 2, 4, 8, 16 the level, 0 off
-            o.push_back({switch_settings::kKeyAnisoLevel, n == 1 ? "16" : n >= 2 ? std::to_string(n) : "1"});
-        } return true; }},
+    {"WWHD_ANISO", [](const std::string& v, Settings& o) { o.push_back({switch_settings::kKeyAniso, std::to_string(atoi(v.c_str()) > 0 ? atoi(v.c_str()) : 0)}); return true; }},
     {"WWHD_FXAA", [](const std::string& v, Settings& o) { o.push_back({switch_settings::kKeyFxaa, on_atoi(v) ? "1" : "0"}); return true; }},
     {"WWHD_RUMBLE", [](const std::string& v, Settings& o) { o.push_back({"rumble", on_atoi(v) ? "1" : "0"}); return true; }},
     {"WWHD_PRO_CONTROLLER", [](const std::string& v, Settings& o) {  // (input_switch.cpp)
