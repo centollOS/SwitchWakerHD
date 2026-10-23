@@ -97,3 +97,7 @@ three at the limit), lookout 28.77 (GPU 34.3 ms, behind 100%), cliff 29.95.
   game-code-only profile).
 - **Cumulative vs main 113fa63 (separate sessions, indicative):** lava 27.94 -> 29.28 (+4.8%), windfall 28.52 -> 29.97 (+5.1%),
   dragonroost 28.61 -> 29.92 (+4.6%), outset_village 25.35 -> 27.98 (+10.4%); main-thread time lava -7.2%, village -9.2%.
+- **Rebased build (17:30):** the same changes + the full profile built on origin/main 59a4741 (zcull, GPU 384 MHz, menu rework):
+  build/switch-final/wwhd.nro, 52,136,133 bytes, no instrumentation, 4,898 cold blocks split out. It compiles and links; it has NOT
+  been timed on a console (the measurements above are on 113fa63 + these changes). The profile still applies to every function whose
+  code did not change.
