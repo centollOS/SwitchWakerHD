@@ -156,8 +156,19 @@ void tab_warp() {
 void tab_picture() {
     using namespace switch_settings;
     // first, as the most useful thing here: it removes the black or late-appearing effects of places seen the first time
-    note("Recommended on the Switch: prepare the graphics once and new places stop showing black spots or objects that "
-         "appear late.");
+    // (the text is shown, not a tooltip, and says where a sweep stands)
+    note("Removes the black shadows and missing effects that appear the first time a place is drawn, because the console "
+         "has no shader cache yet, and prepares the Switch for much smoother play afterwards. It visits the whole game "
+         "once by itself (30-40 minutes, best docked). Over 90% of the shaders can be prepared; a few cannot be compiled.");
+    {
+        const prepare_graphics::Progress p = prepare_graphics::progress();
+        if (p.next > 0 && p.next < p.total)
+            warn("Unfinished: place %zu of %zu. Continue below to carry on from there.", p.next, p.total);
+        else if (p.complete)
+            note("Done on this console. Repeating it only helps after an update that changes the graphics.");
+        else
+            note("Not done yet on this console.");
+    }
     if (prepare_graphics::ui_section()) set_open(false);  // platform/prepare_graphics_ui_switch.cpp
     // one picture profile per mode (as SwitchWaker): the one shown starts as the active mode's
     heading("Resolution");
