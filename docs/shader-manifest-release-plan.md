@@ -47,7 +47,7 @@ three files above) appears in the plaintext.
    - `from-template TEMPLATE GAME_DIR OUT_MANIFEST`: back to WSM1 records for the existing speculate / translate /
      build chain.
 3. Release: private repository `centollOS/SwitchWakerHD-shader-manifest` holding the sealed file; the public
-   repository pins it in `tools/shadercache/manifest.ref` (commit + SHA-256). SwitchWakerHD releases are packaged by
+   repository pins it in `tools/switch/shader_template.ref` (commit + SHA-256; `attach_shader_template.sh pin`). SwitchWakerHD releases are packaged by
    a maintainer (`tools/switch/package_release.sh`, not CI), so a maintainer script fetches the pinned file with the
    maintainer's own GitHub access, checks the hash and attaches it to the release as an asset: no deploy key or CI
    secret. Forks have no access and attach none.
@@ -79,7 +79,7 @@ It pulls the private repository's clone (`../SwitchWakerHD-shader-manifest`), ta
 `shader_manifest.bin`, and runs `shader_manifest.py distill --base` with the current sealed template: the template's
 states stay, the recording adds the shaders the template does not have. Nothing new: it says so and stops. Otherwise
 it seals the new template into the clone and updates `provenance.json`; then commit and push the private repository
-and update `tools/shadercache/manifest.ref`. Also needed after a change of the shader translation (the Latte
+and update `tools/switch/shader_template.ref` (`attach_shader_template.sh pin`). Also needed after a change of the shader translation (the Latte
 decompiler, the translation keys): distill the recordings again, since one state per shader was chosen with the old
 translation. Not needed for uam, deko3d or runtime changes: players compile the states on their own computers.
 

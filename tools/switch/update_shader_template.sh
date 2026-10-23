@@ -61,5 +61,6 @@ PY
 cat <<MSG
 Next:
   1. git -C $repo commit -am "Template: shaders of a later recording" && git -C $repo push
-  2. tools/shadercache/manifest.ref here: the private commit and the sha256 above (the next release attaches it)
+  2. tools/switch/attach_shader_template.sh pin, and commit tools/switch/shader_template.ref (the next release
+     attaches that template)
 MSG

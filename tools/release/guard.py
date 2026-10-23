@@ -46,6 +46,8 @@ BAD_NAME = [
     (re.compile(r"(^|/)(shaders|headstart|template|shaderprep_template|spirv|vkpipelines|testcache|mycache)\.bin$", re.I), "shader cache"),
     (re.compile(r"\.(metallib|spv)$", re.I), "compiled shader cache"),
     (re.compile(r"(^|/)(shadercache|vulkan-shaders)/", re.I), "local shader cache tree"),
+    # (this fork, issue #88) the sealed shader template is a release asset from a private repository, never source
+    (re.compile(r"(^|/)shader-template[^/]*\.sealed$", re.I), "sealed shader template (a release asset only)"),
     (re.compile(r"(^|/)shadercache_[^/]*\.bin$", re.I), "shader cache (the Switch's, from the game's shaders)"),
     (re.compile(r"\.dksh$", re.I), "compiled shader (deko3d)"),
     (re.compile(r"(^|/)(game|content|meta)/"), "game file tree"),

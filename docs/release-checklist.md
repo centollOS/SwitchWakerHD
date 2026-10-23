@@ -23,6 +23,8 @@ Rules:
 | A3v | The SD card copy check (a card reader, each installer that ran in A3) | The log says "Copy checked: all N files on the card match"; a file changed on the card is copied again (#48) |
 | A3g | `make_sd.py` step 2 with the USA and EUR dumps | `content/: every file as in the USA/EU list: OK` (#48) |
 | A4 | The tag is new | Never re-publish or move a tag: bump the version (the installer caches zips by tag) |
+| A5 | Shader template (#88): `tools/switch/update_shader_template.sh GAME_DIR` after the test console's last play, and `tools/switch/shader_template.ref` at the private repository's newest template (`attach_shader_template.sh pin`) | "nothing new", or a new template pushed and pinned in the release commit |
+| A6 | Prepared graphics: an installer run with the release's template (seed it as `shader-template-vX.Y.Z.sealed` in the work folder before publishing), then the console with that SD card | The log says "Plantilla de gráficos lista" and "Preparando los gráficos", no "No se pudieron preparar"; `switch/wwhd/shadercache_dksh.bin` on the card; the first start has no first-start screen |
 
 ## B. Boot, screens and system
 
@@ -102,6 +104,8 @@ The perf test (kept out of the repo: `perf/benchmark` branch, `~/Documents/Switc
 ## H. Publish
 
 1. Tag, package (`package_release.sh vX.Y.Z`), publish with the `.zip` and `.sha256`.
+   Then `tools/switch/attach_shader_template.sh vX.Y.Z GAME_DIR`: the pinned shader template and its `.sha256` as
+   release assets (#88; the installers download them).
 2. Close every issue of the milestone with a link to the release, remove `fixed on main`, close the milestone and
    create the next one.
 
@@ -109,7 +113,7 @@ The perf test (kept out of the repo: `perf/benchmark` branch, `~/Documents/Switc
 
 ```
 Release vX.Y.Z  commit ...  tested YYYY-MM-DD  console: Erista/Mariko, firmware, Atmosphère
-A1 ok  A2 ok  A3 ok/skipped (why)  A4 ok
+A1 ok  A2 ok  A3 ok/skipped (why)  A4 ok  A5 ok  A6 ok
 B1 ok  B2 ok  B3 ok  B4 ok  B5 ok
 C1 ok  C2 ok  C3 ok  C4 ok  C5 ok  C6 ok
 D1 ..  E1 ..  F: malloc lap 1 N MiB, lap 2 +N MiB, chunks N  G: lava ±N, windfall ±N, dragonroost ±N fps
