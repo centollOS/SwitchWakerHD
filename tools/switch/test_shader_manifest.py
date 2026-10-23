@@ -80,5 +80,44 @@ class GameBytesTest(unittest.TestCase):
         self.assertIsNone(sm.game_bytes_found([], [os.urandom(64) + self.binary[10:25] + os.urandom(64)], self.game))
 
 
+class SealTest(unittest.TestCase):
+    def setUp(self):
+        self.games = [tempfile.mkdtemp(), tempfile.mkdtemp()]
+        for k, game in enumerate(self.games):
+            for i, rel in enumerate(sm.SEAL_KEY_FILES):
+                path = os.path.join(game, *rel.split("/"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as f:
+                    f.write(bytes([i, k]) * 1000)
+        self.plain = TF.encode({"version": 3, "states": [{"hash": 5, "vertex": 0, "fetch": None, "registers": [[0xA217, 3]]}],
+                                "pipelines": []})
+
+    def tearDown(self):
+        for g in self.games:
+            shutil.rmtree(g)
+
+    def test_round_trip(self):
+        sealed = sm.seal(self.plain, self.games[0])
+        self.assertTrue(sealed.startswith(sm.SEAL_MAGIC))
+        self.assertNotIn(self.plain[8:40], sealed)
+        self.assertEqual(sm.unseal(sealed, self.games[0]), self.plain)
+        self.assertEqual(sm.seal(self.plain, self.games[0]), sealed)  # the same template seals to the same file
+
+    def test_other_game(self):
+        with self.assertRaises(sm.SealError):
+            sm.unseal(sm.seal(self.plain, self.games[0]), self.games[1])
+
+    def test_damaged(self):
+        sealed = bytearray(sm.seal(self.plain, self.games[0]))
+        sealed[-1] ^= 1
+        with self.assertRaises(sm.SealError):
+            sm.unseal(bytes(sealed), self.games[0])
+
+    def test_missing_file(self):
+        os.remove(os.path.join(self.games[0], *sm.SEAL_KEY_FILES[1].split("/")))
+        with self.assertRaises(sm.SealError):
+            sm.seal(self.plain, self.games[0])
+
+
 if __name__ == "__main__":
     unittest.main()

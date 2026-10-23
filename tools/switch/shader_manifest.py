@@ -24,8 +24,14 @@
         banks), written as WWHT0003 (tools/shaderprep_format.py). Then checked: the template translated again gives
         the same sources, and no 16 bytes of the dump's shader programs occur in it (game_bytes_found).
     shader_manifest.py from-template TEMPLATE GAME_DIR OUT_MANIFEST OUT_PROGRAMS
-        a code-free template back into a manifest (fetch shaders as semantic attributes, compact flag 2) and the
-        programs it names from the dump's archives, for speculate / dksh_cache translate. Both stay on your computer.
+        a code-free template (sealed or not) back into a manifest (fetch shaders as semantic attributes, compact flag
+        2) and the programs it names from the dump's archives, for speculate / dksh_cache translate. Both stay on your
+        computer.
+    shader_manifest.py seal TEMPLATE GAME_DIR OUT
+    shader_manifest.py open SEALED GAME_DIR OUT
+        the release's form of a template (WSME0001, issue #88): encrypted with a key made from the dump's own shader
+        files (SEAL_KEY_FILES), so without the game it is meaningless bytes. Not secrecy against anyone: only someone
+        with the game can read it at all. A dump whose files differ is told so (an HMAC tag), never decrypted wrong.
 
 The manifest (runtime/src/gfx/deko/shader_manifest.cpp) names each program by hash_bytes() of its bytes, its
 size and an FNV-1a hash of its first 64 bytes; this script computes the same hashes over the files.
@@ -267,6 +273,61 @@ def read_map(path):
     return out
 
 
+# ---------------------------------------------------------------- the sealed template (issue #88)
+
+SEAL_MAGIC = b"WSME0001"
+# the dump's files the key is made from: the game's shader archives, byte-identical in the USA and European games
+SEAL_KEY_FILES = ("content/Common/Shaders/Prim/wii_pipeline.sharcfb",
+                  "content/Common/Shaders/particle/wii_pipeline.sharcfb",
+                  "content/Common/Shaders/render_buffer/render_buffer.sharcfb")
+
+
+class SealError(Exception):
+    pass
+
+
+def seal_key(game):
+    import hashlib
+    h = hashlib.sha256(SEAL_MAGIC)
+    for rel in SEAL_KEY_FILES:
+        path = os.path.join(game, *rel.split("/"))
+        if not os.path.isfile(path):
+            raise SealError("%s is not in the game folder" % rel)
+        with open(path, "rb") as f:
+            data = f.read()
+        h.update(struct.pack("<Q", len(data)) + data)
+    return h.digest()
+
+
+def _keystream(key, nonce, n):
+    import hashlib
+    return hashlib.shake_256(SEAL_MAGIC + key + nonce).digest(n)
+
+
+def seal(plain, game):
+    """WSME0001: magic, 16-byte nonce (from the plaintext: the same template seals to the same file), 32-byte
+    HMAC-SHA-256 of nonce + ciphertext, ciphertext (plaintext XOR a SHAKE-256 keystream of key + nonce)"""
+    import hashlib
+    import hmac
+    key = seal_key(game)
+    nonce = hashlib.sha256(b"nonce" + plain).digest()[:16]
+    cipher = bytes(a ^ b for a, b in zip(plain, _keystream(key, nonce, len(plain))))
+    return SEAL_MAGIC + nonce + hmac.new(key, nonce + cipher, hashlib.sha256).digest() + cipher
+
+
+def unseal(data, game):
+    import hashlib
+    import hmac
+    if not data.startswith(SEAL_MAGIC) or len(data) < 56:
+        raise SealError("not a sealed template (WSME0001)")
+    key = seal_key(game)
+    nonce, tag, cipher = data[8:24], data[24:56], data[56:]
+    if not hmac.compare_digest(tag, hmac.new(key, nonce + cipher, hashlib.sha256).digest()):
+        raise SealError("this template does not open with this game's files (another game, a damaged dump, or a "
+                        "damaged download)")
+    return bytes(a ^ b for a, b in zip(cipher, _keystream(key, nonce, len(cipher))))
+
+
 def write_programs(path, programs):
     with open(path, "wb") as f:
         f.write(b"WSP1" + struct.pack("<I", len(programs)))
@@ -422,12 +483,34 @@ def main():
             sys.exit(__doc__)
         tf = template_format()
         with open(sys.argv[2], "rb") as f:
-            doc = tf.decode(f.read(), compact=True)
+            data = f.read()
+        if data.startswith(SEAL_MAGIC):
+            try:
+                data = unseal(data, sys.argv[3])
+            except SealError as e:
+                sys.exit("%s: %s" % (sys.argv[2], e))
+        doc = tf.decode(data, compact=True)
         recs, used, missing = states_to_records(doc["states"], archive_programs(sys.argv[3]), tf)
         write_manifest(sys.argv[4], recs)
         write_programs(sys.argv[5], used)
         print("%d states -> %d variants, %d programs (%d states without their program in the dump) -> %s, %s" % (
             len(doc["states"]), len(recs), len(used), missing, sys.argv[4], sys.argv[5]))
+    elif cmd in ("seal", "open"):
+        if len(sys.argv) != 5:
+            sys.exit(__doc__)
+        with open(sys.argv[2], "rb") as f:
+            data = f.read()
+        try:
+            if cmd == "seal":
+                template_format().decode(data)  # only a valid code-free template is sealed
+                out = seal(data, sys.argv[3])
+            else:
+                out = unseal(data, sys.argv[3])
+        except (SealError, ValueError) as e:
+            sys.exit("%s: %s" % (sys.argv[2], e))
+        with open(sys.argv[4], "wb") as f:
+            f.write(out)
+        print("%s: %d bytes -> %s (%d bytes)" % (cmd, len(data), sys.argv[4], len(out)))
     else:
         sys.exit(__doc__)
 
