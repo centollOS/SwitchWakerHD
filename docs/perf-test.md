@@ -64,6 +64,12 @@ for few runs; it includes the boot-to-boot spread below):
 
 More boots narrow the interval: `--repeat 3` (6 boots each, ~50 minutes).
 
+## Defaults that change the numbers
+
+Since the Cemu graphic-pack PR the shadow maps are drawn at half size by default (`switchShadowScale`, Picture tab >
+Shadow maps; +5-7% fps in the Outset grass and lookout views). A baseline built before it draws them at full size: for a
+like-for-like comparison put `switchShadowScale=1` in the checkout's settings.ini (or `raw shadowscale 1` in a toggle).
+
 ## Rules for agents
 
 - Check first that the console answers and runs the USA game (`tools/switch/wwhd_debug.py info`).
