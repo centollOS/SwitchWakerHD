@@ -274,7 +274,7 @@ void tab_picture() {
         help(tx.blurHelp);
     }
     {
-        // the shadow maps' size (gfxsw::shadow_scale); saved as switchShadowScale ("0.5" the default, "1" or "2")
+        // the shadow maps' size (gfxsw::shadow_scale); saved as switchShadowScale ("0.5", "1" the default, or "2")
         const float cur = gfxsw::shadow_scale();
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(tx.shadowLabel);

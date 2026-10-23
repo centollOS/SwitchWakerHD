@@ -757,10 +757,11 @@ std::atomic<float> g_resRequested{[] {
     return f > 0 ? std::clamp(f, 0.5f, 2.0f) : 1.0f;
 }()};
 std::atomic<float> g_shadowRequested{[] {
-    // the default is half size (0.5): no visible difference in handheld play and +5-7% fps in the busiest views
+    // the default is the game's own size (1): half size gives +5-7% fps in the busiest views, but straight shadow
+    // edges turn wavy (seen in handheld play, 2026-10-23), so it is the player's choice (Picture tab, Fast)
     const char* e = getenv("WWHD_SHADOW_SCALE");
-    float f = e ? float(atof(e)) : 0.5f;
-    return f > 0 ? std::clamp(f, 0.5f, 2.0f) : 0.5f;
+    float f = e ? float(atof(e)) : 1.0f;
+    return f > 0 ? std::clamp(f, 0.5f, 2.0f) : 1.0f;
 }()};
 float g_shadowFrame = g_shadowRequested.load();  // latched at a frame's start with the resolution
 float g_resFrame = g_resRequested.load();

@@ -450,12 +450,12 @@ const MenuTexts kMenuEnglish = {
         "grass, the lookout): measured about 5% at 2x, 15% at 4x and 30% at 16x there; the village\n"
         "and the sea are not affected. Default: 1x (off).",
     .shadowLabel = "Shadow maps",
-    .shadowFast = "Fast (default)",
-    .shadowOriginal = "Original",
+    .shadowFast = "Fast",
+    .shadowOriginal = "Original (default)",
     .shadowHigh = "High",
-    .shadowFastTip = "Draws the shadow maps at half the size. Looks the same in handheld play, and gives about 5-7% more\n"
-        "frames per second in the busiest views (Outset's tall grass, the lookout).",
-    .shadowOriginalTip = "The game's own shadow map size: sharper shadow edges, a little slower in the busiest views.",
+    .shadowFastTip = "Draws the shadow maps at half the size: about 5-7% more frames per second in the busiest views\n"
+        "(Outset's tall grass, the lookout), but straight shadow edges look wavier.",
+    .shadowOriginalTip = "The game's own shadow map size, as on the Wii U. Default.",
     .shadowHighTip = "Draws the shadow maps at twice the size: sharper shadows, but about 17-20% slower in the busiest "
         "views\n"
         "(Outset's tall grass, the lookout) and more memory.",
@@ -585,14 +585,13 @@ const MenuTexts kMenuSpanish = {
         "mar\n"
         "no se ven afectados. Por defecto: 1x (desactivado).",
     .shadowLabel = "Mapas de sombras",
-    .shadowFast = "Rápido (por defecto)",
-    .shadowOriginal = "Original",
+    .shadowFast = "Rápido",
+    .shadowOriginal = "Original (por defecto)",
     .shadowHigh = "Alto",
-    .shadowFastTip = "Dibuja los mapas de sombras a la mitad de tamaño. Se ve igual jugando en portátil, y da un 5-7% "
-        "más\n"
-        "de fps en las vistas más cargadas (la hierba alta de Isla Initia, el mirador).",
-    .shadowOriginalTip = "El tamaño de mapas de sombras del propio juego: bordes de sombra más nítidos, algo más lento en las "
-        "vistas más cargadas.",
+    .shadowFastTip = "Dibuja los mapas de sombras a la mitad de tamaño: un 5-7% más de fps en las vistas más cargadas\n"
+        "(la hierba alta de Isla Initia, el mirador), pero los bordes rectos de las sombras se ven más "
+        "ondulados.",
+    .shadowOriginalTip = "El tamaño de mapas de sombras del propio juego, como en Wii U. Por defecto.",
     .shadowHighTip = "Dibuja los mapas de sombras al doble de tamaño: sombras más nítidas, pero un 17-20% más lento en las "
         "vistas\n"
         "más cargadas (la hierba alta de Isla Initia, el mirador) y más memoria.",
@@ -731,14 +730,14 @@ const MenuTexts kMenuFrench = {
         "30 % à 16x\n"
         "là-bas ; le village et la mer ne sont pas touchés. Par défaut : 1x (désactivé).",
     .shadowLabel = "Cartes d'ombres",
-    .shadowFast = "Rapide (par défaut)",
-    .shadowOriginal = "D'origine",
+    .shadowFast = "Rapide",
+    .shadowOriginal = "D'origine (par défaut)",
     .shadowHigh = "Élevé",
-    .shadowFastTip = "Dessine les cartes d'ombres à moitié taille. Rendu identique en mode portable, et environ 5-7 % de "
-        "fps\n"
-        "en plus dans les vues les plus chargées (les hautes herbes de l'île de l'Aurore, la tour de guet).",
-    .shadowOriginalTip = "La taille d'origine des cartes d'ombres : bords d'ombre plus nets, un peu plus lent dans les vues "
-        "les plus chargées.",
+    .shadowFastTip = "Dessine les cartes d'ombres à moitié taille : environ 5-7 % de fps en plus dans les vues les plus "
+        "chargées\n"
+        "(les hautes herbes de l'île de l'Aurore, la tour de guet), mais les bords droits des ombres sont "
+        "plus ondulés.",
+    .shadowOriginalTip = "La taille d'origine des cartes d'ombres, comme sur Wii U. Par défaut.",
     .shadowHighTip = "Dessine les cartes d'ombres à double taille : ombres plus nettes, mais environ 17-20 % plus lent "
         "dans les vues\n"
         "les plus chargées (les hautes herbes de l'île de l'Aurore, la tour de guet) et plus de mémoire.",
@@ -877,15 +876,14 @@ const MenuTexts kMenuGerman = {
         "16x;\n"
         "das Dorf und das Meer sind nicht betroffen. Standard: 1x (aus).",
     .shadowLabel = "Schattenkarten",
-    .shadowFast = "Schnell (Standard)",
-    .shadowOriginal = "Original",
+    .shadowFast = "Schnell",
+    .shadowOriginal = "Original (Standard)",
     .shadowHigh = "Hoch",
-    .shadowFastTip = "Zeichnet die Schattenkarten in halber Größe. Sieht im Handheld-Modus gleich aus und bringt etwa 5-7 "
-        "% mehr\n"
-        "Bilder pro Sekunde in den anspruchsvollsten Ansichten (das hohe Gras der Insel Präludien, der "
-        "Ausguck).",
-    .shadowOriginalTip = "Die Originalgröße der Schattenkarten: schärfere Schattenränder, etwas langsamer in den "
-        "anspruchsvollsten Ansichten.",
+    .shadowFastTip = "Zeichnet die Schattenkarten in halber Größe: etwa 5-7 % mehr Bilder pro Sekunde in den "
+        "anspruchsvollsten\n"
+        "Ansichten (das hohe Gras der Insel Präludien, der Ausguck), aber gerade Schattenkanten wirken "
+        "welliger.",
+    .shadowOriginalTip = "Die Originalgröße der Schattenkarten, wie auf der Wii U. Standard.",
     .shadowHighTip = "Zeichnet die Schattenkarten in doppelter Größe: schärfere Schatten, aber etwa 17-20 % langsamer in "
         "den\n"
         "anspruchsvollsten Ansichten (das hohe Gras der Insel Präludien, der Ausguck) und mehr Speicher.",
@@ -1024,14 +1022,14 @@ const MenuTexts kMenuItalian = {
         "lì;\n"
         "il villaggio e il mare non ne risentono. Predefinito: 1x (disattivato).",
     .shadowLabel = "Mappe delle ombre",
-    .shadowFast = "Veloce (predefinito)",
-    .shadowOriginal = "Originale",
+    .shadowFast = "Veloce",
+    .shadowOriginal = "Originale (predefinito)",
     .shadowHigh = "Alto",
-    .shadowFastTip = "Disegna le mappe delle ombre a metà dimensione. In modalità portatile si vede uguale, e dà circa il "
-        "5-7% di fps\n"
-        "in più nelle visuali più pesanti (l'erba alta dell'Isola Primula, la torre di vedetta).",
-    .shadowOriginalTip = "La dimensione originale delle mappe delle ombre: bordi delle ombre più nitidi, un po' più lento "
-        "nelle visuali più pesanti.",
+    .shadowFastTip = "Disegna le mappe delle ombre a metà dimensione: circa il 5-7% di fps in più nelle visuali più "
+        "pesanti\n"
+        "(l'erba alta dell'Isola Primula, la torre di vedetta), ma i bordi dritti delle ombre sono più "
+        "ondulati.",
+    .shadowOriginalTip = "La dimensione originale delle mappe delle ombre, come su Wii U. Predefinito.",
     .shadowHighTip = "Disegna le mappe delle ombre al doppio della dimensione: ombre più nitide, ma circa il 17-20% più "
         "lento nelle\n"
         "visuali più pesanti (l'erba alta dell'Isola Primula, la torre di vedetta) e più memoria.",

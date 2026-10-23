@@ -66,9 +66,10 @@ More boots narrow the interval: `--repeat 3` (6 boots each, ~50 minutes).
 
 ## Defaults that change the numbers
 
-Since the Cemu graphic-pack PR the shadow maps are drawn at half size by default (`switchShadowScale`, Picture tab >
-Shadow maps; +5-7% fps in the Outset grass and lookout views). A baseline built before it draws them at full size: for a
-like-for-like comparison put `switchShadowScale=1` in the checkout's settings.ini (or `raw shadowscale 1` in a toggle).
+The shadow maps are drawn at the game's own size by default. A player who chose Picture tab > Shadow maps > Fast
+(`switchShadowScale=0.5`: +5-7% fps in the Outset grass and lookout views, wavier shadow edges) measures more than a
+baseline built before that option: for a like-for-like comparison leave `switchShadowScale` out of the settings.ini
+(or `raw shadowscale 1` in a toggle).
 
 ## Rules for agents
 
