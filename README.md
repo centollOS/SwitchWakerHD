@@ -209,7 +209,7 @@ and comes back at the next start.
 
 The game is **perfectly playable at the console's stock clocks**, which are the default (CPU
 1020 MHz, GPU 307 MHz in handheld): 30 fps on the opening island, a smooth 26-29 fps in the busiest
-scenes. Nintendo's other handheld GPU profiles are in the Switch tab. The game no longer sets a CPU
+scenes. The game always uses the stock GPU profile (one saved by an older version is reset). The game no longer sets a CPU
 or GPU overclock itself (the CPU steps and GPU 614 MHz were removed: with the CPU raised that way the
 console did not wake from sleep, #33). If you want the busiest scenes at a steady 30, a mild CPU
 clock of 1224 MHz does it: set it with [sys-clk](https://github.com/retronx-team/sys-clk), which

@@ -251,11 +251,11 @@ By default the controller acts as a **Wii U Pro Controller** and everything is o
 with the GamePad features (its screen, **gyro aiming**), choose *Wii U GamePad* in the menu's Switch tab
 **and** in the game's own options, then turn on *Gyro aiming* there.
 
-### The Switch tab of the menu
+### The Picture and Controls tabs of the menu
 
-Handheld GPU profile (Nintendo's official profiles; stock by default), picture profile per mode
-(internal resolution, dynamic resolution), picture adjustments, frame-rate counter, controller (Pro
-Controller or GamePad), gyro aiming. The game sets no CPU or GPU overclock; for one, use sys-clk. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
+Picture: internal resolution per mode (dynamic resolution), picture adjustments, frame-rate counter.
+Controls: rumble, gyro aiming. The game runs at the console's stock clocks and GPU profile (a GPU profile
+saved by an older version is reset to stock); for more, use sys-clk. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
 
 ## The first start: preparing the graphics
 

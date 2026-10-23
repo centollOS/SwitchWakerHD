@@ -64,9 +64,9 @@ defaults again whenever the settings code changes; a player's saved `settings.in
 
 ## Clocks
 
-The defaults are the stock CPU 1020 MHz and the stock GPU profile (docs/switch-port.md, "Settings"). The
-higher CPU steps (up to 1785) and GPU profiles are opt-in menu choices for players who want them; do not
-make one the default or propose an overclock as a fix: speed comes from the code. The target is 720p
+The game runs at the stock CPU 1020 MHz and the stock GPU profile (docs/switch-port.md, "Settings"); the
+menu offers no clock or GPU profile choice (a profile saved by an older version is reset to stock at start),
+and players who want more use sys-clk. Do not propose an overclock as a fix: speed comes from the code. The target is 720p
 (1280x720 internal) at 30 fps.
 
 ## The SD card without the debug server
