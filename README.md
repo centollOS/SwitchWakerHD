@@ -68,7 +68,7 @@ loading screen, with no computer and nothing shipped: the title screen runs hidd
 upstream shaderprep's extractor in C++), speculates variants by family (`shader_list_switch.cpp`) and translates
 them the way a draw would (`gfx/deko translate_listed`); the worker compiles them at full speed behind the card
 (about 19 minutes on a stock console: 73.6% of a whole-game harvest's shader pairs), or gently in the background
-after B (core 0 only, a 50% duty cycle: the game keeps ~30 fps). **Prepare graphics** (settings menu, Switch tab;
+after B (core 0 only, a 50% duty cycle: the game keeps ~30 fps). **Prepare graphics** (settings menu, Picture tab, at the top;
 docs/prepare-graphics-plan.md) warps through every place (about 93% of the pairs); experimental. After it, the
 background list runs gently at the next starts for what the warps did not draw.
 
@@ -90,8 +90,8 @@ tools/switch/dksh_cache/build.sh build <shadercache_gl.bin> build/shadercache_dk
 For development there is a debug server: from the computer, over the local network, you can
 deploy a new build and restart the game without touching the console, follow the log as it is
 written, take screenshots, press buttons and warp. It is **off by default**: players never need it
-and the game opens no network port unless it is turned on in the options menu (**Switch** tab,
-**Debug** section, *Debug server (network)*; it starts at the next start). It has no password, so use
+and the game opens no network port unless it is turned on in the options menu (**Dev** tab, *Show developer options*, then
+**Dev** tab, *Debug server (network)*; it starts at the next start). It has no password, so use
 it only on your own network.
 
 ```sh
@@ -208,9 +208,9 @@ and comes back at the next start.
 ### Performance
 
 The game runs the console's stock CPU clock (1020 MHz) and, in handheld, **Nintendo's 384 MHz GPU
-profile by default**, one of the profiles Nintendo offers its own games: in Outset's tall grass it is
-~5 fps faster than the stock 307 MHz (21.9 -> 26.7 fps), while 460 MHz adds only ~0.5 fps more there.
-Stock 307 MHz (a little more battery) and the other profiles are in the Switch tab. The game no longer sets a CPU
+profile**, one of the profiles Nintendo offers its own games: in Outset's tall grass it is ~5 fps faster
+than the stock 307 MHz (21.9 -> 26.7 fps), while 460 MHz adds only ~0.5 fps more there. It is not a menu
+choice (a GPU profile saved by an older version is reset to 384). The game no longer sets a CPU
 or GPU overclock itself (the CPU steps and GPU 614 MHz were removed: with the CPU raised that way the
 console did not wake from sleep, #33). If you want the busiest scenes at a steady 30, a mild CPU
 clock of 1224 MHz does it: set it with [sys-clk](https://github.com/retronx-team/sys-clk), which
@@ -267,12 +267,12 @@ open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Round 47") and
 
 ## Changelog
 
-### 2026-10-23: GPU 384 MHz by default in handheld
+### 2026-10-23: GPU 384 MHz in handheld
 
-- The handheld GPU profile is now **Nintendo's 384 MHz** by default (was the stock 307 MHz). In Outset's tall
+- The handheld GPU profile is now always **Nintendo's 384 MHz** (was the stock 307 MHz). In Outset's tall
   grass the GPU was the limit: 21.9 -> 26.7 fps (4 boots each). 460 MHz gives only ~0.5 fps more there, because the
-  game's main thread is then the limit. A choice saved in the menu is kept; a saved "Stock" from an earlier version
-  was written as `default` and now means the new default: choose Stock again to keep 307 MHz.
+  game's main thread is then the limit. The menu no longer offers GPU profiles: one saved by an earlier version is
+  reset to 384 at start. For other clocks, use sys-clk.
 - For developers: `tools/switch/perf_test.py gpu-profile` compares GPU profiles between boots (docs/perf-test.md).
 
 ### 2026-10-10: native experience (GamePad mode)

@@ -170,19 +170,20 @@ class VerdictTest(unittest.TestCase):
 
 
 class GpuProfileTest(unittest.TestCase):
-    INI = "# Wind Waker HD settings\nswitchBloom=0\nswitchGpuProfile=460\n[dev]\nWWHD_X=1\n"
+    INI = "# Wind Waker HD settings\nswitchBloom=0\n\n[dev]\nWWHD_X=1\nWWHD_TEST_GPU_PROFILE=460\n"
 
     def test_profile_line(self):
         self.assertEqual(pt.settings_with_profile(self.INI, "384"),
-                         "# Wind Waker HD settings\nswitchBloom=0\nswitchGpuProfile=384\n[dev]\nWWHD_X=1\n")
+                         "# Wind Waker HD settings\nswitchBloom=0\n\n[dev]\nWWHD_TEST_GPU_PROFILE=384\nWWHD_X=1\n")
 
     def test_stock_is_explicit(self):
         out = pt.settings_with_profile(self.INI, "307")
-        self.assertIn("switchGpuProfile=307\n[dev]", out)
-        self.assertEqual(out.count("switchGpuProfile"), 1)
+        self.assertIn("[dev]\nWWHD_TEST_GPU_PROFILE=307\n", out)
+        self.assertEqual(out.count("WWHD_TEST_GPU_PROFILE"), 1)
 
     def test_without_dev_section(self):
-        self.assertEqual(pt.settings_with_profile("switchBloom=0\n", "1600"), "switchBloom=0\nswitchGpuProfile=1600\n")
+        self.assertEqual(pt.settings_with_profile("switchBloom=0\n", "1600"),
+                         "switchBloom=0\n\n[dev]\nWWHD_TEST_GPU_PROFILE=1600\n")
 
 
 if __name__ == "__main__":

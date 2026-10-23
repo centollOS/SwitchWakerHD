@@ -53,7 +53,6 @@ bool ui_section() {
         return false;
     }
     const Progress p = progress();
-    text(kNote, ui_text::tx().menuBody);
     uint32_t percent = 0;
     if (battery_low(percent)) {
         char b[120];
@@ -65,8 +64,6 @@ bool ui_section() {
         snprintf(label, sizeof label, ui_text::tx().continueButton, p.next, p.total);
     else
         snprintf(label, sizeof label, "%s", p.complete ? ui_text::tx().againButton : ui_text::tx().prepareButton);
-    if (p.complete && p.next == 0)
-        text(kNote, ui_text::tx().doneNote);
     static std::string why;
     bool close = false;
     if (ImGui::Button(label)) {
@@ -74,6 +71,11 @@ bool ui_section() {
         close = why.empty();
     }
     if (!why.empty()) text(kWarn, why.c_str());
+    // the one text, below the button: what it fixes and what it costs (pictureIntro; the older menuBody and the progress
+    // lines are not shown: the button's label says "x of y done"); when done, that again only helps after an update
+    std::string body = ui_text::tx().pictureIntro;
+    if (p.complete && p.next == 0) body += std::string(" ") + ui_text::tx().doneNote;
+    text(kNote, body.c_str());
     return close;
 }
 

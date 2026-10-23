@@ -10,11 +10,11 @@
 // on dock/undock, so a choice is set once. apm needs title mode (an application); in applet mode the
 // profile is skipped. A choice falls back to the next lower one when apm refuses it. The handheld
 // configuration found at start is restored at exit.
-// The menu's saved choice (307 | 384 | 460 | 1600 (460 with memory 1600)); without it, GPU 384 MHz (2026-10-23, the
-// owner: the profile with the best frame rate for its power; perf_test.py gpu-profile at Outset's tall grass: 307 ->
-// 384 +4.7 fps, 384 -> 460 +0.5 fps; docs/perf-test.md). From 2026-10-08 it was stock, before that 460 + memory 1600.
-// "307" is the system's own stock configuration (nothing set). A saved "default" (written by the menu before
-// 2026-10-23, when it meant stock) now means the default, 384 MHz.
+// The profile is not a choice: GPU 384 MHz for every player (2026-10-23, the owner; perf_test.py gpu-profile at
+// Outset's tall grass: 307 -> 384 +4.7 fps, 384 -> 460 +0.5 fps; docs/perf-test.md). From 2026-10-08 to 2026-10-23
+// it was the stock 307 MHz, before that 460 + memory 1600, and the menu offered the profiles. A switchGpuProfile
+// saved by those menus is not applied and is set to "384" at start. Test only: WWHD_TEST_GPU_PROFILE in settings.ini's
+// [dev] section (307 = stock, nothing set | 384 | 460 | 1600 (460 with memory 1600); perf_test.py gpu-profile).
 //
 // Clocks set through clkrst (CPU 1020-1785 MHz steps, GPU 614.4 MHz in handheld, as sys-clk does; 2026-10-07)
 // were removed 2026-10-13: with the CPU at 1224 MHz an Erista console did not wake from sleep (black screen,
@@ -43,13 +43,11 @@ namespace switch_settings {
 namespace {
 
 std::mutex g_mu;
-int g_profile = kGpuDefaultChoice;
+int g_profile = kGpuFixed;
 bool g_apm_ready = false, g_apm_failed = false;
 u32 g_apm_saved = 0x00020003, g_apm_now = 0;
 
 const char* const kIds[kGpuProfiles] = {"307", "384", "460", "1600"};
-const char* const kLabels[kGpuProfiles] = {"Stock (GPU 307 MHz)", "GPU 384 MHz (default)", "GPU 460 MHz",
-                                           "GPU 460 MHz + memory 1600 MHz"};
 
 // picture profiles per mode (g_mu); the mode whose profile the renderer has (-1: none yet)
 const char* const kModeIds[kModes] = {"handheld", "docked"};
@@ -139,7 +137,6 @@ bool saved_float(const char* key, float& out, float lo, float hi) {
 
 }  // namespace
 
-const char* gpu_profile_label(int p) { return p >= 0 && p < kGpuProfiles ? kLabels[p] : "?"; }
 int gpu_profile() {
     std::lock_guard<std::mutex> lk(g_mu);
     return g_profile;
@@ -150,16 +147,6 @@ std::string gpu_profile_status() {
     char b[64];
     snprintf(b, sizeof b, "handheld configuration 0x%08x", (unsigned)g_apm_now);
     return b;
-}
-
-void set_gpu_profile(int p) {
-    if (p < 0 || p >= kGpuProfiles) return;
-    std::lock_guard<std::mutex> lk(g_mu);
-    g_profile = p;
-    u32 chain[4];
-    chain_for(p, chain);
-    apply(kIds[p], chain);
-    hostui::set(kKeyGpuProfile, kIds[p]);
 }
 
 void tick() {
@@ -217,22 +204,29 @@ void set_gamepad_pip(bool on) {
 }
 
 void apply_at_start() {
-    // GPU profile: the saved choice, else the default (384 MHz)
+    // GPU profile: always 384 MHz. One saved by an older version's menu (default, 307, 460, 1600, 614) is not
+    // applied and the setting is set to 384, which older versions also read as 384
     std::string id;
-    const bool saved = hostui::get(kKeyGpuProfile, id) && !id.empty();
+    if (hostui::get(kKeyGpuProfile, id) && !id.empty() && id != kIds[kGpuFixed]) {
+        LOG("[switch] gpu profile %s (settings) is no longer a choice: 384 MHz, setting reset (for more, use sys-clk)",
+            id.c_str());
+        hostui::set(kKeyGpuProfile, kIds[kGpuFixed]);
+    }
     {
         std::lock_guard<std::mutex> lk(g_mu);
-        int p = kGpuDefaultChoice;
-        for (int i = 0; i < kGpuProfiles; i++)
-            if (id == kIds[i]) p = i;
-        if (id == "614") {
-            p = kGpu460Mem1600;
-            LOG("[switch] gpu profile 614 (settings) was removed: 1600 instead (GPU 460 MHz + memory 1600 MHz; overclocks: sys-clk)");
+        int p = kGpuFixed;
+        const char* test = getenv("WWHD_TEST_GPU_PROFILE");  // ([dev], perf_test.py gpu-profile)
+        if (test && *test) {
+            int t = -1;
+            for (int i = 0; i < kGpuProfiles; i++)
+                if (!strcmp(test, kIds[i])) t = i;
+            if (t < 0) LOG("[switch] WWHD_TEST_GPU_PROFILE=%s ignored: one of 307, 384, 460, 1600", test);
+            else p = t;
         }
         g_profile = p;
         u32 chain[4] = {};
         chain_for(p, chain);
-        LOG("[switch] gpu profile %s (%s)", kIds[p], saved && id != "default" ? "settings" : "default");
+        LOG("[switch] gpu profile %s (%s)", kIds[p], p != kGpuFixed || (test && *test) ? "test: WWHD_TEST_GPU_PROFILE" : "fixed");
         if (p != kGpuStock) apply(kIds[p], chain);
     }
     // a CPU clock saved by an older version: no longer set (#33)

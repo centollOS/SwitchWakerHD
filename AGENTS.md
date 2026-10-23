@@ -3,7 +3,7 @@
 ## Reaching the Switch: the debug server
 
 The console runs a TCP debug server (port 6543) when **Debug server (network)** is ticked in the settings
-menu (Minus, **Switch** tab, **Debug** section); it starts at the next start of the game. Full reference:
+menu (Minus, **Dev** tab: tick **Show developer options**, then **Debug server**); it starts at the next start of the game. Full reference:
 [docs/debug-server.md](docs/debug-server.md).
 
 - The console's address: `build/switch_host.txt` (first line), else `export WWHD_SWITCH_HOST=<ip>`, else
@@ -34,7 +34,7 @@ tools/switch/wwhd_debug.py get settings.ini build/settings.ini   # SD files, rel
 After a crash the server is gone with the game: ask the user to start it again, then
 `tools/switch/wwhd_debug.py lastlog` and `tools/switch/wwhd_debug.py crashes --fetch build/crashes`.
 
-Options and A/B switches for a test go into the in-game menu (Switch tab, Debug section), not into
+Options and A/B switches for a test go into the in-game menu (Dev tab, behind its "Show developer options" checkbox), not into
 `settings.ini`'s `[dev]` section; `[dev]` is for developer variables read at start (docs/switch-port.md,
 "Rule for test builds").
 
@@ -58,19 +58,20 @@ lines as they are, and never call a difference inside the printed interval a gai
 ## Defaults are for the player
 
 A fresh install (no `settings.ini`) must start with player defaults: debug server off, frame-rate counter
-and every diagnostic, perf or capture option off, stock CPU clock and the default GPU profile (384 MHz), mods off, no `[dev]` section. A new
-diagnostic or test option ships off and goes in the Switch tab's Debug section. Check the fresh-install
+and every diagnostic, perf or capture option off, stock CPU clock and the fixed GPU profile (384 MHz), mods off, no `[dev]` section. A new
+diagnostic or test option ships off and goes in the Dev tab (its content is hidden until "Show developer options"; that checkbox is off by default). Check the fresh-install
 defaults again whenever the settings code changes; a player's saved `settings.ini` keeps what they chose.
 
 ## Clocks
 
-The defaults are the stock CPU 1020 MHz and the GPU profile 384 MHz, one of Nintendo's handheld profiles for
-games (the owner's choice, 2026-10-23, from `perf_test.py gpu-profile`: at Outset's tall grass 307 -> 384 MHz is
-+4.7 fps, 384 -> 460 MHz +0.5 fps; docs/perf-test.md, docs/switch-port.md "Settings"). Stock 307 and 460 MHz stay
-menu choices. The
-port sets no overclock (no CPU above 1020, no GPU above Nintendo's profiles; sys-clk is the player's own): do
-not propose one as a fix; speed comes from the code. Performance tests state the GPU profile they ran at, and
-check the `[dk] clocks` lines: sys-clk overrides the port's clocks. The target is 720p
+The game runs at the stock CPU 1020 MHz and, in handheld, always at Nintendo's 384 MHz GPU profile, one of its
+handheld profiles for games (the owner's choice, 2026-10-23, from `perf_test.py gpu-profile`: at Outset's tall grass
+307 -> 384 MHz is +4.7 fps, 384 -> 460 MHz +0.5 fps; docs/perf-test.md, docs/switch-port.md "Settings"). It is the
+same for every player: the menu offers no clock or GPU profile choice (a profile saved by an older version is reset
+to 384 at start); only tests set another (`WWHD_TEST_GPU_PROFILE` in `[dev]`). The port sets no overclock (no CPU
+above 1020, no GPU above Nintendo's profiles; sys-clk is the player's own): do not propose one as a fix; speed comes
+from the code. Performance tests state the GPU profile they ran at, and check the `[dk] clocks` lines: sys-clk
+overrides the port's clocks. The target is 720p
 (1280x720 internal) at 30 fps.
 
 ## The SD card without the debug server

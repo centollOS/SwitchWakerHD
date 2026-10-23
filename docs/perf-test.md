@@ -71,7 +71,7 @@ More boots narrow the interval: `--repeat 3` (6 boots each, ~50 minutes).
   answer, ask them to start the game with the debug server on; do not guess.
 - Report the verdict lines and the table; never a single boot per build as a comparison, never a difference inside
   the interval as a gain or a loss.
-- The test never changes `settings.ini` (except `gpu-profile`, which writes `switchGpuProfile` for each boot and puts
+- The test never changes `settings.ini` (except `gpu-profile`, which writes `WWHD_TEST_GPU_PROFILE` in `[dev]` for each boot and puts
   the player's file back at the end, also after Ctrl+C or an error; a copy stays in `build/perf/settings.ini.backup_*`),
   never saves the game, never writes the save slots or the `states/` folder,
   and keeps the player's clocks: do not "fix" noise by changing any of those.
@@ -166,9 +166,10 @@ it to `SCENES` in `perf_test.py`.
 
 ## GPU profiles: is a view GPU-bound?
 
-`gpu-profile` measures one build (the one on the console; no deploy) with the menu's handheld GPU profiles
-(`switchGpuProfile` in `settings.ini`: `307` = the system's stock, `384` (the default since 2026-10-23), `460`,
-`1600` = 460 MHz with memory at 1600 MHz; `default` is not accepted, since what it means changed with the default) alternated between boots, ABBA twice by default (4 boots per profile). The profile is read at
+`gpu-profile` measures one build (the one on the console; no deploy) with apm's handheld GPU profiles
+(`WWHD_TEST_GPU_PROFILE` in `settings.ini`'s `[dev]` section: `307` = the system's stock, `384` (what the game always
+runs at since 2026-10-23), `460`, `1600` = 460 MHz with memory at 1600 MHz; builds from that day on, older ones read
+the menu's `switchGpuProfile` instead) alternated between boots, ABBA twice by default (4 boots per profile). The profile is read at
 start, so each boot writes `settings.ini` and reloads; after each boot the `[dk] clocks` line must show the profile's
 GPU and memory clocks, or the test stops (sys-clk on, or the game started from hbmenu, where apm is skipped). It
 also records the last `[cpu] cores busy` line of each boot: when the CPU cores sit well below 90% at a low profile
@@ -192,9 +193,9 @@ present (`behind` 100%) at both clocks. At 307 the cores were idle about a quart
 waited for the GPU (its "busy" time counts those waits), so the view is GPU-bound. At 384 the main thread takes 35.2
 ms of a 37.5 ms frame, so it becomes the next limit: 460 against 384 is only **+0.54 fps (+-0.40, +2.0%)**. At 460 the GPU is done
 before every present (`behind` 0%) and the cores are 95-96% busy. 384 MHz takes ~90% of what 460 MHz gains over
-stock with a 17% lower GPU clock, which is why it became the default.
+stock with a 17% lower GPU clock, which is why every player now runs at it.
 
-Rules: a clock is a player's choice, not a fix (AGENTS.md, "Clocks"). The defaults stay stock; use this to tell
+Rules: a clock is not a fix (AGENTS.md, "Clocks"): the game stays at stock CPU and 384 MHz GPU; use this to tell
 whether a view is GPU-bound and so what a GPU-side change (render passes, shaders, bandwidth) can gain there.
 
 ## What is measured (per presented frame, on the console)

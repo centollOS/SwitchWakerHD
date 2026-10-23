@@ -21,8 +21,9 @@ behind, draws, internal resolution, player control) and summarises them.
         build/perf/); the fast defaults (lava, windfall, dragonroost; 900 frames; ABBA twice), a verdict per scene,
         and the console left on the contributor's build. macOS and Linux (container build) only
   perf_test.py gpu-profile [--profiles 307,384] [--order ABBA] [--repeat 2] [--scenes outset_tallgrass]
-        one build, the handheld GPU profile alternated between boots (settings.ini's switchGpuProfile, put back
-        afterwards); each boot's clocks are checked against the profile (sys-clk must be off)
+        one build, the handheld GPU profile alternated between boots (WWHD_TEST_GPU_PROFILE in settings.ini's
+        [dev] section; the player's file is put back afterwards); each boot's clocks are checked against the
+        profile (sys-clk must be off). Builds from 2026-10-23 on (the profile fixed at 384 MHz)
   perf_test.py compare R1.json R2.json ...   the comparison table of saved results
   perf_test.py show R.json             a saved result's table
 
@@ -75,9 +76,8 @@ DEMANDING_SCENES = [
 # gpu-profile's default scene: Outset's tall grass seen from the sea stage (room 44), time of day 150, ~5200 draws;
 # GPU-bound at the stock 307 MHz (European game)
 GPU_SCENE, GPU_SCENE_TIME = "outset_tallgrass", 150.0
-# the menu's handheld GPU profiles (platform/settings_switch.cpp kIds): switchGpuProfile value -> (GPU, memory) MHz.
-# "307" is stock (builds before the 384 MHz default have no "307" id and read it as their default, stock); "default"
-# is left out on purpose: it means the build's default, which changed (stock until 2026-10-23, then 384)
+# the handheld GPU profiles a test can set (platform/settings_switch.cpp kIds; the game itself always runs at 384):
+# WWHD_TEST_GPU_PROFILE value -> (GPU, memory) MHz. "307" is stock
 GPU_PROFILES = {"307": (307, 1331), "384": (384, 1331), "460": (460, 1331), "1600": (460, 1600)}
 FROZEN_TIME = 200.0  # time of day held during every scene (degrees: afternoon)
 
@@ -546,7 +546,7 @@ def cmd_compare_to(a):
     con = Console(a.host)
     if con.try_cmd("ping", timeout=5.0) is None:
         raise SystemExit(f"the console at {a.host} does not answer: start the game with the debug server on "
-                         "(Switch tab, Debug section), or give --host")
+                         "(Dev tab > Show developer options), or give --host")
     repo = perf_baseline.REPO
     perf_baseline.fetch(repo)
     base_nro, base_name = perf_baseline.build(repo, a.baseline, a.rpx)
@@ -639,11 +639,13 @@ def get_text(con, remote):
 
 
 def settings_with_profile(text, profile):
-    """the player's settings.ini with switchGpuProfile set to profile"""
-    lines = [line for line in text.splitlines() if not line.startswith("switchGpuProfile=")]
-    # before a [dev] section, if any: the key belongs to the main part
-    at = next((i for i, line in enumerate(lines) if line.strip() == "[dev]"), len(lines))
-    lines.insert(at, f"switchGpuProfile={profile}")
+    """the player's settings.ini with WWHD_TEST_GPU_PROFILE=profile in its [dev] section (made when there is none)"""
+    lines = [line for line in text.splitlines() if not line.strip().startswith("WWHD_TEST_GPU_PROFILE=")]
+    at = next((i for i, line in enumerate(lines) if line.strip() == "[dev]"), None)
+    if at is None:
+        lines += ["", "[dev]"]
+        at = len(lines) - 1
+    lines.insert(at + 1, f"WWHD_TEST_GPU_PROFILE={profile}")
     return "\n".join(lines) + "\n"
 
 
@@ -757,7 +759,7 @@ def main():
                         "on the console; its own defaults: --scenes outset_tallgrass --time 150 --order ABBA --repeat 2")
     common(sp)
     sp.add_argument("--profiles", default="307,384",
-                    help="comma-separated switchGpuProfile values, A first: " + ", ".join(GPU_PROFILES)
+                    help="comma-separated WWHD_TEST_GPU_PROFILE values, A first: " + ", ".join(GPU_PROFILES)
                     + " (default: 307,384)")
     sp.add_argument("--order", default="ABBA")
     sp.add_argument("--repeat", type=int, default=2)
