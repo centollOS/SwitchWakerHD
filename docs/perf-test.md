@@ -71,7 +71,9 @@ More boots narrow the interval: `--repeat 3` (6 boots each, ~50 minutes).
   answer, ask them to start the game with the debug server on; do not guess.
 - Report the verdict lines and the table; never a single boot per build as a comparison, never a difference inside
   the interval as a gain or a loss.
-- The test never changes `settings.ini`, never saves the game, never writes the save slots or the `states/` folder,
+- The test never changes `settings.ini` (except `gpu-profile`, which writes `switchGpuProfile` for each boot and puts
+  the player's file back at the end, also after Ctrl+C or an error; a copy stays in `build/perf/settings.ini.backup_*`),
+  never saves the game, never writes the save slots or the `states/` folder,
   and keeps the player's clocks: do not "fix" noise by changing any of those.
 - A change that can be switched live (a debug-server command of the test build) is measured better inside one boot:
   `toggle` below (~15-20 minutes, no boot-to-boot spread).
@@ -88,6 +90,10 @@ tools/switch/perf_test.py ab base.nro new.nro --labels base,new --order ABBA --r
 
 # a live switch inside one boot (no boot-to-boot spread): ABBA x 3 recordings per scene
 tools/switch/perf_test.py toggle --nro some.nro --cmd-a "mycmd 0" --cmd-b "mycmd 1" --scenes lava,windfall --frames 900
+
+# one build, the handheld GPU profile alternated between boots (stock 307 MHz against 384): ABBA twice, the tall grass
+tools/switch/perf_test.py gpu-profile --profiles default,384
+tools/switch/perf_test.py gpu-profile --profiles 384,460
 
 # tables of saved results
 tools/switch/perf_test.py show build/perf/mybuild_YYYYMMDD_HHMMSS.json
@@ -157,6 +163,35 @@ position and heading, the camera, the progress, the date and the time of day are
 To make a new scene: play to the place (any Quest Log; the state takes its progress), stand still with control,
 then `wwhd_debug.py raw bench save NAME`, `wwhd_debug.py get bench/NAME.wwstate tools/switch/perf_states/`, and add
 it to `SCENES` in `perf_test.py`.
+
+## GPU profiles: is a view GPU-bound?
+
+`gpu-profile` measures one build (the one on the console; no deploy) with the menu's handheld GPU profiles
+(`switchGpuProfile` in `settings.ini`: `default` = the system's stock 307 MHz, `384`, `460`, `1600` = 460 MHz with
+memory at 1600 MHz) alternated between boots, ABBA twice by default (4 boots per profile). The profile is read at
+start, so each boot writes `settings.ini` and reloads; after each boot the `[dk] clocks` line must show the profile's
+GPU and memory clocks, or the test stops (sys-clk on, or the game started from hbmenu, where apm is skipped). It
+also records the last `[cpu] cores busy` line of each boot: when the CPU cores sit well below 90% at a low profile
+and fill up at a higher one, the CPU threads were waiting for the GPU.
+
+Its scene, `outset_tallgrass`, is Outset's tall grass as the sea stage loads it (room 44, time of day 150, ~5200
+draws; saved with the European game on 2026-10-23, so a USA game needs a twin saved with `bench save`). It is the
+view where the GPU profile matters most. Any other scene works with `--scenes` (and `--time`).
+
+Results on console 1 (2026-10-23, v0.4.7+194, CPU 1020 MHz, dynamic resolution off, 60 s per boot):
+
+| GPU profile | boots | fps (sd) | 1 s windows, p5 | frame p95 ms | render thread busy ms | main thread CPU ms | GPU ms | cores 0 / 1 / 2 busy |
+|---|---:|---|---:|---:|---:|---:|---:|---|
+| stock 307 MHz | 4 | 21.96 (0.14) | 21.7 | 47.6 | 42.5 | 34.7 | 45.1 | 34 / 77 / 76% |
+| 384 MHz | 4 | **26.70** (0.10) | 26.5 | 39.4 | 34.0 | 35.2 | 36.9 | 39 / 94 / 92% |
+
+384 against 307: **+4.74 fps (+-0.22 at 95%, +21.6%)**. The GPU was still busy with the previous frame at every
+present (`behind` 100%) at both clocks. At 307 the cores were idle about a quarter of the time: the render thread
+waited for the GPU (its "busy" time counts those waits), so the view is GPU-bound. At 384 the main thread takes 35.2
+ms of a 37.5 ms frame, so it becomes the next limit and a faster GPU can add only ~1-2 fps more there.
+
+Rules: a clock is a player's choice, not a fix (AGENTS.md, "Clocks"). The defaults stay stock; use this to tell
+whether a view is GPU-bound and so what a GPU-side change (render passes, shaders, bandwidth) can gain there.
 
 ## What is measured (per presented frame, on the console)
 

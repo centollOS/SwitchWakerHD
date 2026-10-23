@@ -20,17 +20,22 @@ behind, draws, internal resolution, player control) and summarises them.
         the contributor's build against main or the last published tag (perf_baseline.py builds the baseline in
         build/perf/); the fast defaults (lava, windfall, dragonroost; 900 frames; ABBA twice), a verdict per scene,
         and the console left on the contributor's build. macOS and Linux (container build) only
+  perf_test.py gpu-profile [--profiles default,384] [--order ABBA] [--repeat 2] [--scenes outset_tallgrass]
+        one build, the handheld GPU profile alternated between boots (settings.ini's switchGpuProfile, put back
+        afterwards); each boot's clocks are checked against the profile (sys-clk must be off)
   perf_test.py compare R1.json R2.json ...   the comparison table of saved results
   perf_test.py show R.json             a saved result's table
 
 Builds without the "bench" debug command cannot be measured (platform/bench_switch.cpp; v0.4.7 gets it from
 perf_baselines/v0.4.7.patch).
-The console's settings.ini is never changed; the player's saves are never written (a portable load only changes
+The console's settings.ini is never changed (except by gpu-profile, which puts the player's file back at the end, also
+after Ctrl+C or an error); the player's saves are never written (a portable load only changes
 the Quest Log in memory; nothing here saves the game).
 """
 import argparse
 import json
 import platform
+import re
 import subprocess
 import statistics as st
 import socket
@@ -67,6 +72,12 @@ DEMANDING_SCENES = [
     ("outset_lookout", "Outset, in the grass facing the lookout: ~3000 draws (main thread)"),
     ("outset_cliff", "Outset, the cliff above the sea: ~2250 draws (GPU)"),
 ]
+# gpu-profile's default scene: Outset's tall grass seen from the sea stage (room 44), time of day 150, ~5200 draws;
+# GPU-bound at the stock 307 MHz (European game)
+GPU_SCENE, GPU_SCENE_TIME = "outset_tallgrass", 150.0
+# the menu's handheld GPU profiles (platform/settings_switch.cpp kIds): switchGpuProfile value -> (GPU, memory) MHz;
+# "default" is the system's own (stock), written as no switchGpuProfile line
+GPU_PROFILES = {"default": (307, 1331), "384": (384, 1331), "460": (460, 1331), "1600": (460, 1600)}
 FROZEN_TIME = 200.0  # time of day held during every scene (degrees: afternoon)
 
 
@@ -618,6 +629,88 @@ def cmd_toggle(a):
          {"version": info.get("version"), "args": {k: v for k, v in vars(a).items() if k != "fn"}})
 
 
+def get_text(con, remote):
+    c = dbg.Conn(con.host, con.port, timeout=10.0)
+    try:
+        return c.command("get", remote, timeout=60.0).decode(errors="replace")
+    finally:
+        c.close()
+
+
+def settings_with_profile(text, profile):
+    """the player's settings.ini with switchGpuProfile set to profile (no line for "default")"""
+    lines = [line for line in text.splitlines() if not line.startswith("switchGpuProfile=")]
+    if profile != "default":
+        # before a [dev] section, if any: the key belongs to the main part
+        at = next((i for i, line in enumerate(lines) if line.strip() == "[dev]"), len(lines))
+        lines.insert(at, f"switchGpuProfile={profile}")
+    return "\n".join(lines) + "\n"
+
+
+def boot_clocks(con):
+    """(CPU, GPU, memory) MHz of the running boot's last '[dk] clocks' line, and its last per-core load"""
+    text = con.cmd("logtext", timeout=60.0)
+    clocks = re.findall(r"\[dk\] clocks: CPU (\d+) MHz, GPU (\d+) MHz, memory (\d+) MHz", text)
+    cores = re.findall(r"\[cpu\] cores busy \(since the last report\): core 0 (\d+)%, core 1 (\d+)%, core 2 (\d+)%", text)
+    return (tuple(int(x) for x in clocks[-1]) if clocks else None), (tuple(int(x) for x in cores[-1]) if cores else None)
+
+
+def cmd_gpu_profile(a):
+    """one build, the GPU profile alternated between boots: is a view GPU-bound, and what a profile gains there"""
+    con = Console(a.host)
+    profiles = a.profiles.split(",")
+    for prof in profiles:
+        if prof not in GPU_PROFILES:
+            raise SystemExit(f"unknown profile {prof}: one of {', '.join(GPU_PROFILES)}")
+    letters = "ABCD"[:len(profiles)]
+    names = dict(zip(letters, profiles))
+    order = (a.order or (letters + letters[::-1])) * a.repeat
+    if set(order) - set(letters):
+        raise SystemExit(f"--order uses letters {letters} only")
+    scenes = scenes_arg(a)
+    ensure_states(con, scenes)
+    info = con.info()
+    log(f"console: {info.get('version')}")
+    original = get_text(con, "settings.ini")
+    OUT.mkdir(parents=True, exist_ok=True)
+    backup = OUT / f"settings.ini.backup_{time.strftime('%Y%m%d_%H%M%S')}"
+    backup.write_text(original)
+    log(f"the console's settings.ini is kept in {backup} and put back at the end")
+    stem_name = "gpu_" + "_vs_".join(profiles)
+    results, raw = [], []
+    try:
+        for i, letter in enumerate(order):
+            prof = names[letter]
+            log(f"[{i + 1}/{len(order)}] GPU profile {prof}")
+            tmp = OUT / "settings.ini.run"
+            tmp.write_text(settings_with_profile(original, prof))
+            con.put(tmp, "settings.ini")
+            boot_to_gameplay(con, reload=True)
+            clocks, _ = boot_clocks(con)
+            gpu, mem = GPU_PROFILES[prof]
+            if not clocks or clocks[1] != gpu or clocks[2] != mem:
+                raise SystemExit(f"profile {prof} should give GPU {gpu} / memory {mem} MHz, the log says {clocks} "
+                                 "(sys-clk on? the game started from hbmenu, where apm is skipped?)")
+            n = len(results)
+            run_set(con, prof, scenes, 1, a.settle, a.frames, a.time, results, raw, rotate_from=i, warmup=a.warmup)
+            clocks, cores = boot_clocks(con)
+            for r in results[n:]:
+                r.update({"clocks": clocks, "cores": cores})
+            log(f"  clocks {clocks}, cores busy {cores} (core 1: the main thread; core 2 or 0: the render thread)")
+            save(results, raw, stem_name + "_partial", {"order": order, "profiles": profiles})
+    finally:
+        log("putting the console's settings.ini back")
+        con.put(backup, "settings.ini")
+        con.try_cmd("reload", timeout=10.0)
+    print(table(results, profiles))
+    for prof in profiles[1:]:
+        print(f"\n{prof} against {profiles[0]} (95% interval of the boot-to-boot spread):")
+        for line in verdict(results, profiles[0], prof):
+            print("  " + line)
+    save(results, raw, stem_name, {"version": info.get("version"), "order": order,
+                                   "args": {k: v for k, v in vars(a).items() if k != "fn"}})
+
+
 def load(path):
     return json.loads(Path(path).read_text())["results"]
 
@@ -660,6 +753,15 @@ def main():
     sp.add_argument("--repeat", type=int, default=3)
     sp.add_argument("--switch-settle", type=float, default=3.0, help="seconds after each switch (default 3)")
     sp.set_defaults(fn=cmd_toggle)
+    sp = sub.add_parser("gpu-profile", description="the handheld GPU profile alternated between boots of the build "
+                        "on the console; its own defaults: --scenes outset_tallgrass --time 150 --order ABBA --repeat 2")
+    common(sp)
+    sp.add_argument("--profiles", default="default,384",
+                    help="comma-separated switchGpuProfile values, A first: " + ", ".join(GPU_PROFILES)
+                    + " (default: default,384)")
+    sp.add_argument("--order", default="ABBA")
+    sp.add_argument("--repeat", type=int, default=2)
+    sp.set_defaults(fn=cmd_gpu_profile, scenes=GPU_SCENE, time=GPU_SCENE_TIME)
     sp = sub.add_parser("compare")
     sp.add_argument("files", nargs="+")
     sp.set_defaults(fn=lambda a: print(table([r for f in a.files for r in load(f)])))

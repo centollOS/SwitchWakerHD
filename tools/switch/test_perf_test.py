@@ -169,5 +169,20 @@ class VerdictTest(unittest.TestCase):
         self.assertIn("not enough runs", line)
 
 
+class GpuProfileTest(unittest.TestCase):
+    INI = "# Wind Waker HD settings\nswitchBloom=0\nswitchGpuProfile=460\n[dev]\nWWHD_X=1\n"
+
+    def test_profile_line(self):
+        self.assertEqual(pt.settings_with_profile(self.INI, "384"),
+                         "# Wind Waker HD settings\nswitchBloom=0\nswitchGpuProfile=384\n[dev]\nWWHD_X=1\n")
+
+    def test_default_has_no_line(self):
+        self.assertNotIn("switchGpuProfile", pt.settings_with_profile(self.INI, "default"))
+        self.assertIn("WWHD_X=1", pt.settings_with_profile(self.INI, "default"))
+
+    def test_without_dev_section(self):
+        self.assertEqual(pt.settings_with_profile("switchBloom=0\n", "1600"), "switchBloom=0\nswitchGpuProfile=1600\n")
+
+
 if __name__ == "__main__":
     unittest.main()
