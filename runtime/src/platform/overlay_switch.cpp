@@ -311,6 +311,30 @@ void tab_performance() {
     }
     help("Shows the frames per second in the top left corner of the picture.");
 
+    heading("Shadows");
+    {
+        // the shadow maps' size (gfxsw::shadow_scale); saved as switchShadowScale ("0.5", "1" or "2")
+        const float cur = gfxsw::shadow_scale();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Shadow quality");
+        struct Q { float f; const char* label; const char* tip; };
+        static const Q quals[] = {
+            {0.5f, "Low", "Draws the shadow maps at half the size: a bit blockier shadows, and a faster frame rate in the busiest\n"
+                          "views (about 5-7% in Outset's tall grass and by the lookout)."},
+            {1.0f, "Normal", "The game's own shadow quality."},
+            {2.0f, "High", "Draws the shadow maps at twice the size: sharper shadows, more GPU time and memory."}};
+        for (const Q& q : quals) {
+            if (q.f > 1.0f && !dev_options() && cur <= 1.0f) continue;  // High: a test, with developer options
+            ImGui::SameLine();
+            char label[24];
+            snprintf(label, sizeof label, "%s##shadowq", q.label);
+            if (radio_tip(label, std::fabs(cur - q.f) < 0.01f, q.tip)) {
+                gfxsw::set_shadow_scale(q.f);
+                hostui::post([f = q.f] { hostui::set(kKeyShadowScale, f < 1 ? "0.5" : f > 1 ? "2" : "1"); });
+            }
+        }
+    }
+
     heading("Advanced");
     bool dev;
     if (check("Show developer options", dev_options(), &dev)) set_dev_options(dev);
@@ -475,21 +499,7 @@ void tab_developer() {
     }
     heading("Performance tests");
     {
-        // not saved: back to the defaults at the next start (debug server: shadowscale, noao, miiverse)
-        const float cur = gfxsw::shadow_scale();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Shadow map size");
-        for (float f : {0.5f, 1.0f, 2.0f}) {
-            ImGui::SameLine();
-            char label[24];
-            snprintf(label, sizeof label, "%.1fx##shadow", f);
-            if (radio_tip(label, std::fabs(cur - f) < 0.01f,
-                          f < 1 ? "The three 1024x1024 shadow maps are drawn at half the size (512x512): cheaper, blockier shadows."
-                          : f > 1 ? "The shadow maps are drawn at twice the size (2048x2048): sharper shadows, more GPU time and memory."
-                                  : "The game's own shadow map size (1024x1024)."))
-                gfxsw::set_shadow_scale(f);
-        }
-        help("Test: how big the shadow maps are drawn. Not saved: 1x at the next start.");
+        // not saved: off at the next start (debug server: noao, miiverse; shadowscale is in the Speed tab)
         bool skip;
         if (check("Skip ambient occlusion", gfxsw::skip_ao(), &skip)) gfxsw::set_skip_ao(skip);
         help("Test: the ambient-occlusion pass is not drawn and the game sees no occlusion (the soft dark corners\n"
