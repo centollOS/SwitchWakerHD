@@ -64,6 +64,13 @@ for few runs; it includes the boot-to-boot spread below):
 
 More boots narrow the interval: `--repeat 3` (6 boots each, ~50 minutes).
 
+## Defaults that change the numbers
+
+The shadow maps are drawn at the game's own size by default. A player who chose Picture tab > Shadow maps > Fast
+(`switchShadowScale=0.5`: +5-7% fps in the Outset grass and lookout views, wavier shadow edges) measures more than a
+baseline built before that option: for a like-for-like comparison leave `switchShadowScale` out of the settings.ini
+(or `raw shadowscale 1` in a toggle).
+
 ## Rules for agents
 
 - Check first that the console answers and runs the USA game (`tools/switch/wwhd_debug.py info`).

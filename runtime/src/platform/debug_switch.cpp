@@ -22,6 +22,7 @@
 namespace gx2 { extern uint32_t g_render_thread_handle; }  // (gx2_core.cpp: rtcores)
 #include "../mods/mods.h"
 #include "../mods/warps.h"
+#include "../hle/olv_park.h"
 #include "../runtime.h"
 #include "../overlay/hostui.h"
 #include "debug_server.h"
@@ -273,6 +274,24 @@ debugsrv::Reply shaderwait(const debugsrv::Args& a) {
                         shader_wait::label(shader_wait::mode()));
 }
 
+// "shadowscale [0.5|1|2]", "noao [0|1]", "miiverse [0|1]": the Developer options' performance tests (not saved)
+debugsrv::Reply shadowscale(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_shadow_scale(float(atof(a[0].c_str())));
+    return debugsrv::ok("shadowscale " + std::to_string(gfxsw::shadow_scale()));
+}
+debugsrv::Reply aniso(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_aniso_level(atoi(a[0].c_str()));
+    return debugsrv::ok("aniso " + std::to_string(gfxsw::aniso_level()));
+}
+debugsrv::Reply noao(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_skip_ao(atoi(a[0].c_str()) != 0);
+    return debugsrv::ok(std::string("noao ") + (gfxsw::skip_ao() ? "1" : "0"));
+}
+debugsrv::Reply miiverse(const debugsrv::Args& a) {
+    if (!a.empty()) hle_olv::set_parked(atoi(a[0].c_str()) == 0);  // miiverse 0 = the thread stopped
+    return debugsrv::ok(std::string("miiverse ") + (hle_olv::parked() ? "0 (parked)" : "1 (running, 1 ms nap per step)"));
+}
+
 // "profile [seconds]": sample the frame threads (thread_sampler.h, docs/cpu-threading-plan.md 0.2); "profile status"
 debugsrv::Reply profile(const debugsrv::Args& a) {
     if (!a.empty() && a[0] == "status") return debugsrv::ok("profile: " + thread_sampler::status());
@@ -386,6 +405,10 @@ void start() {
     debugsrv::add_command("shaderthreads", "shaderthreads [0-3]    shader compile threads: 0 auto, 1-3", shaderthreads);
     debugsrv::add_command("shaderwait", "shaderwait [0-3]       draws of a compiling shader: 0 skip, 1 items, 2 +events, 3 always",
                           shaderwait);
+    debugsrv::add_command("shadowscale", "shadowscale [0.5|1|2]   (test) the shadow maps' scale", shadowscale);
+    debugsrv::add_command("aniso", "aniso [1|2|4|8|16]    anisotropic filtering level (not saved)", aniso);
+    debugsrv::add_command("noao", "noao [0|1]             (test) skip the ambient-occlusion pass", noao);
+    debugsrv::add_command("miiverse", "miiverse [0|1]         (test) 0 parks the Miiverse thread", miiverse);
     debugsrv::add_command("profile", "profile [s] | status   sample the main and render threads (logs/prof_*.samples)",
                           profile);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
