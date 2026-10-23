@@ -134,6 +134,17 @@ struct MenuTexts {
     const char* devWarn;
     const char* devShow;
     const char* devShowHelp;
+    // Dev tab > Updates (update_notice_switch.h); updateNotice / updateNewer: printf with the new tag, then this build's
+    const char* updateHeading;
+    const char* updateCheck;
+    const char* updateCheckHelp;
+    const char* updateNotice;
+    const char* updateNewer;
+    const char* updateCurrent;   // %s this build's version
+    const char* updateChecking;
+    const char* updateFailed;    // %s why (English)
+    const char* updateDevBuild;
+    const char* updateOff;
 };
 const MenuTexts& menu();
 // UTF-8 -> the libnx console's code page (437) for the start-up screens: accented Latin letters kept, others '?'
