@@ -73,6 +73,8 @@ three files above) appears in the plaintext.
 | Distilled template | 164,243 variants -> 8,565 states (2,985 vertex, 5,580 pixel), 131 MiB -> 767 KiB; translated again: the same 8,565 sources; no game bytes; `guard.py` accepts it |
 | Sealed | 767,273 bytes; sealed with the USA dump, opens with the European dump to the identical template; deterministic |
 | Cache from the sealed template (`make_sd.py --shaders`) | 23,380 shaders (38.9 of the 40 MiB budget), 101 s, byte-identical twice; the full console manifest gives 23,280, 22,736 in both (every recorded variant's shader is in both; the rest are speculative guesses) |
+| Console (2026-10-23, a fresh cache folder holding only that cache, `WWHD_DK_SHADER_CACHE_DIR`) | no first-start screen; 23,380 DKSH loaded in 0.8 s; title screen and a warp tour of 8 places (Outset, Windfall, Dragon Roost and its cavern, Forest Haven, Forbidden Woods, Tower of the Gods, Forsaken Fortress): **0 shaders compiled, 0 draws skipped** (1,080 translations to find their DKSH) |
+| Private repository | `centollOS/SwitchWakerHD-shader-manifest` created; `shader-template.sealed` (SHA-256 e7eaffcc...) at 3fe58156 |
 
 ## Steps (one commit each)
 
