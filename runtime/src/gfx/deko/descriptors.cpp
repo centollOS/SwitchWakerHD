@@ -51,16 +51,13 @@ std::unordered_map<SamplerKey, uint32_t, SamplerKeyHash> g_samplers;
 std::vector<SamplerSlot> g_samplerSlots(kSamplerDescriptors);
 uint32_t g_nextSampler = kReservedSamplerIds;
 
-// anisotropic filtering level (1 off, 2, 4, 8, 16; WWHD_ANISO=1 means 16, =2/4/8/16 that level, or the settings
-// overlay's Picture tab; off by default as in gfx/vulkan; gfx/gl has none): set from the overlay's thread, taken by
-// the render thread at a frame's start
-int aniso_clamp(int n) { return n >= 16 ? 16 : n >= 8 ? 8 : n >= 4 ? 4 : n >= 2 ? 2 : 1; }
-std::atomic<int> g_anisoWanted{[] {
+// 16x anisotropic filtering (WWHD_ANISO=1, or the settings overlay's Effects; off by default as in gfx/vulkan;
+// gfx/gl has none): set from the overlay's thread, taken by the render thread at a frame's start
+std::atomic<bool> g_anisoWanted{[] {
     const char* e = getenv("WWHD_ANISO");
-    const int n = e ? atoi(e) : 0;
-    return n == 1 ? 16 : n > 1 ? aniso_clamp(n) : 1;
+    return e && atoi(e) != 0;
 }()};
-int g_anisoFrame = 1;  // this frame's level (render thread)
+bool g_anisoFrame = false;  // this frame's (render thread)
 bool g_anisoLogged = false;
 
 // the frame being recorded (begin_commands opened it)
@@ -69,7 +66,7 @@ uint64_t recording() { return R.frame + 1; }
 bool frame_retired(uint64_t f) { return f <= R.frame && frame_done(f); }
 
 // GX2 sampler words -> DkSampler (gfx/gl/draw.cpp sampler(), with gfx/vulkan's 16x anisotropy option)
-DkSampler make_sampler(const uint32_t* words, bool compare, bool integer, int aniso) {
+DkSampler make_sampler(const uint32_t* words, bool compare, bool integer, bool aniso) {
     Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0 w;
     Latte::LATTE_SQ_TEX_SAMPLER_WORD1_0 w1;
     memcpy(static_cast<void*>(&w), words, 4);
@@ -104,8 +101,8 @@ DkSampler make_sampler(const uint32_t* words, bool compare, bool integer, int an
     s.lodClampMax = std::max(minLod, maxLod);
     // 16x anisotropy (gfx/vulkan's condition): mipmapped, linear minification, no depth compare; GL applies
     // none, and neither does this renderer when the option is off (Latte's MAX_ANISO_RATIO is ignored, as GL)
-    if (aniso > 1 && !integer && mip != 0 && min && !compare && uint32_t(w.get_DEPTH_COMPARE_FUNCTION()) == 0)
-        s.maxAnisotropy = float(aniso);
+    if (aniso && !integer && mip != 0 && min && !compare && uint32_t(w.get_DEPTH_COMPARE_FUNCTION()) == 0)
+        s.maxAnisotropy = 16.0f;
     const uint32_t border = uint32_t(w.get_BORDER_COLOR_TYPE());
     static const float colors[3][4] = {{0, 0, 0, 0}, {0, 0, 0, 1}, {1, 1, 1, 1}};
     for (int i = 0; i < 4; i++) s.borderColor[i].value_f = colors[border < 3 ? border : 0][i];
@@ -212,20 +209,17 @@ void commit_descriptors() {
     g_dirty = false;
 }
 
-bool aniso_enabled() { return g_anisoWanted.load(std::memory_order_relaxed) > 1; }
-void set_aniso(bool on) { set_aniso_level(on ? 16 : 1); }
-int aniso_level() { return g_anisoWanted.load(std::memory_order_relaxed); }
-void set_aniso_level(int level) {
-    const int n = aniso_clamp(level);
-    if (g_anisoWanted.exchange(n) != n) LOG("[dk] anisotropic filtering %dx (from the next frame)", n);
+bool aniso_enabled() { return g_anisoWanted.load(std::memory_order_relaxed); }
+void set_aniso(bool on) {
+    if (g_anisoWanted.exchange(on) != on) LOG("[dk] 16x anisotropic filtering %s (from the next frame)", on ? "on" : "off");
 }
 
 void descriptors_frame_start() {
     // the anisotropy option: samplers are looked up again under the new setting (their cache keys include it)
-    const int aniso = g_anisoWanted.load(std::memory_order_relaxed);
+    const bool aniso = g_anisoWanted.load(std::memory_order_relaxed);
     if (!g_anisoLogged || aniso != g_anisoFrame) {
-        LOG("[dk] anisotropic filtering: %dx on mipmapped linear samplers (WWHD_ANISO or the overlay's Picture tab; 1 = off, as gfx/gl); sampler LOD as gfx/gl",
-            aniso);
+        LOG("[dk] anisotropic filtering: %s (WWHD_ANISO=1 or the overlay's Effects); sampler LOD as gfx/gl",
+            aniso ? "16x on mipmapped linear samplers" : "off (as gfx/gl)");
         g_anisoLogged = true;
         g_anisoFrame = aniso;
         R.surfaceEpoch++;  // the draw path's texture caches hold sampler slots of the old setting

@@ -1578,16 +1578,8 @@ bool gamepad_touch(float x, float y, float& tx, float& ty) {
 }
 int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }
-bool skip_ao() { return gfxdk::g_skipAo.load(std::memory_order_relaxed); }
-void set_skip_ao(bool on) {
-    if (gfxdk::g_skipAo.exchange(on) != on) LOG("[dk] skip ambient occlusion %s (frame %llu)", on ? "on" : "off", (unsigned long long)gfxdk::R.frame);
-}
-float shadow_scale() { return gfxdk::shadow_scale(); }
-void set_shadow_scale(float s) { gfxdk::set_shadow_scale(s); }
 bool aniso() { return gfxdk::aniso_enabled(); }
 void set_aniso(bool on) { gfxdk::set_aniso(on); }
-int aniso_level() { return gfxdk::aniso_level(); }
-void set_aniso_level(int n) { gfxdk::set_aniso_level(n); }
 bool fxaa() { return gfxdk::fxaa_enabled(); }
 void set_fxaa(bool on) { gfxdk::set_fxaa(on); }
 bool bloom() { return gfxdk::bloom_enabled(); }

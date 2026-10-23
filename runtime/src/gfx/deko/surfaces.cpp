@@ -756,12 +756,6 @@ std::atomic<float> g_resRequested{[] {
     float f = e ? float(atof(e)) : 1.0f;
     return f > 0 ? std::clamp(f, 0.5f, 2.0f) : 1.0f;
 }()};
-std::atomic<float> g_shadowRequested{[] {
-    const char* e = getenv("WWHD_SHADOW_SCALE");
-    float f = e ? float(atof(e)) : 1.0f;
-    return f > 0 ? std::clamp(f, 0.5f, 2.0f) : 1.0f;
-}()};
-float g_shadowFrame = g_shadowRequested.load();  // latched at a frame's start with the resolution
 float g_resFrame = g_resRequested.load();
 std::atomic<float> g_resShown{g_resFrame};
 bool screen_shaped(const Surface* s) {
@@ -778,13 +772,7 @@ bool screen_shaped(const Surface* s) {
     float r = float(s->width) * 9.0f / (float(s->height) * 16.0f);
     return r > 0.97f && r < 1.03f;
 }
-// the 1024x1024 depth shadow maps (format 0x005), rendered at the test's own scale (g_shadowFrame)
-bool is_shadow_map(const Surface* s) {
-    return s->renderTarget && s->isDepth && s->format == 5 && s->width == 1024 && s->height == 1024 && s->slices <= 3 &&
-           s->mips <= 1;  // (the three maps are the slices of one array)
-}
 float wanted_scale(const Surface* s) {
-    if (is_shadow_map(s)) return g_shadowFrame;
     if (s->img.valid) return s->hudFull ? 1.0f : s->scalable ? g_resFrame : 1.0f;
     if (g_resFrame == 1.0f) return 1.0f;
     // before its image exists: a 2D one unless the description says otherwise
@@ -871,7 +859,6 @@ bool fit_scale(Surface* s, bool keepContents, bool force) {
         if (g_allocBudget <= 0) return false;  // a later frame (or a draw that needs it now)
         g_allocBudget--;
     }
-    if (is_shadow_map(s)) LOG("[dk] shadow map %08X: %.2f -> %.2f (%ux%u image)", s->addr, double(s->scale), double(want), unsigned(1024 * want), unsigned(1024 * want));
     rescale_surface(s, want, keepContents, s == S.tvSource || s == S.drcSource);
     return true;
 }
@@ -883,11 +870,6 @@ bool scale_settled(const Surface* s) {
 float res_scale() { return g_resFrame; }
 float requested_res_scale() { return g_resRequested.load(std::memory_order_relaxed); }
 float res_scale_shown() { return g_resShown.load(std::memory_order_relaxed); }
-float shadow_scale() { return g_shadowRequested.load(std::memory_order_relaxed); }
-void set_shadow_scale(float scale) {
-    const float f = std::clamp(scale, 0.5f, 2.0f);
-    if (g_shadowRequested.exchange(f) != f) LOG("[dk] shadow map scale %.2f (from the next frame)", double(f));
-}
 void set_res_scale(float scale) { g_resRequested.store(std::clamp(scale, 0.5f, 2.0f), std::memory_order_relaxed); }
 size_t rescale_pool_bytes() { return g_poolBytes; }
 
@@ -920,10 +902,6 @@ void latch_res_scale() {
             g_pool.erase(g_pool.begin() + long(i));
             break;
         }
-    if (const float sw = g_shadowRequested.load(std::memory_order_relaxed); sw != g_shadowFrame) {
-        g_shadowFrame = sw;
-        R.surfaceEpoch++;  // the shadow maps take the new scale at their next use
-    }
     const float want = g_resRequested.load(std::memory_order_relaxed);
     if (want == g_resFrame) return;
     LOG("[dk] internal resolution %.2f -> %.2f from frame %llu", double(g_resFrame), double(want),
@@ -935,8 +913,7 @@ void latch_res_scale() {
 
 void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
     if (!s->img.valid || s->scale == scale) return;
-    // (never scaled; the shadow maps' array is, without its contents: it is drawn anew every frame)
-    if (!is_shadow_map(s) && (s->img.type != DkImageType_2D || s->mips != 1 || s->img.layers != 1)) return;
+    if (s->img.type != DkImageType_2D || s->mips != 1 || s->img.layers != 1) return;  // (never scaled)
     before_write(s);
     SurfaceImage old = std::move(s->img);
     s->img = SurfaceImage{};
@@ -965,7 +942,7 @@ void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
             }
         }
     }
-    if (keepContents && !is_shadow_map(s)) resample(s, old, s->img);
+    if (keepContents) resample(s, old, s->img);
     if (keepOld) {
         s->twin = std::move(old);
         s->twinScale = oldScale;

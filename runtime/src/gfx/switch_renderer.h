@@ -15,17 +15,9 @@ void set_picture_grade(const PictureGrade& g);
 // the counter in the top-left corner: 0 off, 1 frame rate, 2 with render-thread load and draws (WWHD_FPS)
 int fps_overlay_mode();
 void set_fps_overlay_mode(int mode);
-// tests (Developer options; off / 1 by default, not saved): the ambient-occlusion pass replaced by "no occlusion", and
-// the shadow maps' scale (0.5, 1, 2 x their 1024x1024); any thread, from the next frame
-bool skip_ao();
-void set_skip_ao(bool on);
-float shadow_scale();
-void set_shadow_scale(float scale);
 // 16x anisotropic filtering on the game's mipmapped linear samplers (WWHD_ANISO): any thread, from the next frame
 bool aniso();
-void set_aniso(bool on);   // on: 16x
-int aniso_level();         // 1 (off), 2, 4, 8 or 16
-void set_aniso_level(int level);
+void set_aniso(bool on);
 // edge smoothing (FXAA, issue #21) on the 3D picture before the HUD (WWHD_FXAA): any thread, from the next frame
 bool fxaa();
 void set_fxaa(bool on);
