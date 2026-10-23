@@ -227,24 +227,19 @@ const char* aniso_level_setting(int level) {
 }
 
 void apply_at_start() {
-    // GPU profile: the saved choice, else the system's own (stock)
+    // GPU profile: always the system's own (stock). The menu no longer offers the others, so a profile saved by an
+    // older version (384, 460, 1600, 614) is not applied and the setting goes back to the default
     std::string id;
-    const bool saved = hostui::get(kKeyGpuProfile, id) && !id.empty();
+    if (hostui::get(kKeyGpuProfile, id) && !id.empty() && id != kIds[kGpuDefault]) {
+        LOG("[switch] gpu profile %s (settings) is no longer offered: stock instead, setting reset (for more, use sys-clk)",
+            id.c_str());
+        hostui::set(kKeyGpuProfile, kIds[kGpuDefault]);
+    }
     {
         std::lock_guard<std::mutex> lk(g_mu);
-        int p = kGpuDefault;
-        for (int i = 0; i < kGpuProfiles; i++)
-            if (id == kIds[i]) p = i;
-        if (id == "614") {
-            p = kGpu460Mem1600;
-            LOG("[switch] gpu profile 614 (settings) was removed: 1600 instead (GPU 460 MHz + memory 1600 MHz; overclocks: sys-clk)");
-        }
-        g_profile = p;
-        u32 chain[4] = {};
-        chain_for(p, chain);
-        LOG("[switch] gpu profile %s (%s)", kIds[p], saved ? "settings" : "default");
-        if (p != kGpuDefault) apply(kIds[p], chain);
+        g_profile = kGpuDefault;
     }
+    LOG("[switch] gpu profile %s (stock)", kIds[kGpuDefault]);
     // a CPU clock saved by an older version: no longer set (#33)
     {
         std::string c;
