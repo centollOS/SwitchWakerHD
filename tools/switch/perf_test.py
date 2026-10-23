@@ -20,7 +20,7 @@ behind, draws, internal resolution, player control) and summarises them.
         the contributor's build against main or the last published tag (perf_baseline.py builds the baseline in
         build/perf/); the fast defaults (lava, windfall, dragonroost; 900 frames; ABBA twice), a verdict per scene,
         and the console left on the contributor's build. macOS and Linux (container build) only
-  perf_test.py gpu-profile [--profiles default,384] [--order ABBA] [--repeat 2] [--scenes outset_tallgrass]
+  perf_test.py gpu-profile [--profiles 307,384] [--order ABBA] [--repeat 2] [--scenes outset_tallgrass]
         one build, the handheld GPU profile alternated between boots (settings.ini's switchGpuProfile, put back
         afterwards); each boot's clocks are checked against the profile (sys-clk must be off)
   perf_test.py compare R1.json R2.json ...   the comparison table of saved results
@@ -75,9 +75,10 @@ DEMANDING_SCENES = [
 # gpu-profile's default scene: Outset's tall grass seen from the sea stage (room 44), time of day 150, ~5200 draws;
 # GPU-bound at the stock 307 MHz (European game)
 GPU_SCENE, GPU_SCENE_TIME = "outset_tallgrass", 150.0
-# the menu's handheld GPU profiles (platform/settings_switch.cpp kIds): switchGpuProfile value -> (GPU, memory) MHz;
-# "default" is the system's own (stock), written as no switchGpuProfile line
-GPU_PROFILES = {"default": (307, 1331), "384": (384, 1331), "460": (460, 1331), "1600": (460, 1600)}
+# the menu's handheld GPU profiles (platform/settings_switch.cpp kIds): switchGpuProfile value -> (GPU, memory) MHz.
+# "307" is stock (builds before the 384 MHz default have no "307" id and read it as their default, stock); "default"
+# is left out on purpose: it means the build's default, which changed (stock until 2026-10-23, then 384)
+GPU_PROFILES = {"307": (307, 1331), "384": (384, 1331), "460": (460, 1331), "1600": (460, 1600)}
 FROZEN_TIME = 200.0  # time of day held during every scene (degrees: afternoon)
 
 
@@ -638,12 +639,11 @@ def get_text(con, remote):
 
 
 def settings_with_profile(text, profile):
-    """the player's settings.ini with switchGpuProfile set to profile (no line for "default")"""
+    """the player's settings.ini with switchGpuProfile set to profile"""
     lines = [line for line in text.splitlines() if not line.startswith("switchGpuProfile=")]
-    if profile != "default":
-        # before a [dev] section, if any: the key belongs to the main part
-        at = next((i for i, line in enumerate(lines) if line.strip() == "[dev]"), len(lines))
-        lines.insert(at, f"switchGpuProfile={profile}")
+    # before a [dev] section, if any: the key belongs to the main part
+    at = next((i for i, line in enumerate(lines) if line.strip() == "[dev]"), len(lines))
+    lines.insert(at, f"switchGpuProfile={profile}")
     return "\n".join(lines) + "\n"
 
 
@@ -756,9 +756,9 @@ def main():
     sp = sub.add_parser("gpu-profile", description="the handheld GPU profile alternated between boots of the build "
                         "on the console; its own defaults: --scenes outset_tallgrass --time 150 --order ABBA --repeat 2")
     common(sp)
-    sp.add_argument("--profiles", default="default,384",
+    sp.add_argument("--profiles", default="307,384",
                     help="comma-separated switchGpuProfile values, A first: " + ", ".join(GPU_PROFILES)
-                    + " (default: default,384)")
+                    + " (default: 307,384)")
     sp.add_argument("--order", default="ABBA")
     sp.add_argument("--repeat", type=int, default=2)
     sp.set_defaults(fn=cmd_gpu_profile, scenes=GPU_SCENE, time=GPU_SCENE_TIME)
