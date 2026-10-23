@@ -159,7 +159,7 @@ void tab_picture() {
     // (the text is shown, not a tooltip, and says where a sweep stands)
     note("Removes the black shadows and missing effects that appear the first time a place is drawn, because the console "
          "has no shader cache yet, and prepares the Switch for much smoother play afterwards. It visits the whole game "
-         "once by itself (30-40 minutes, best docked). Over 90% of the shaders can be prepared; a few cannot be compiled.");
+         "once by itself (30-40 minutes, best docked). Over 90%% of the shaders can be prepared; a few cannot be compiled.");
     {
         const prepare_graphics::Progress p = prepare_graphics::progress();
         if (p.next > 0 && p.next < p.total)
