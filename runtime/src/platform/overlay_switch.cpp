@@ -245,8 +245,8 @@ void tab_picture() {
         help("Far places softly out of focus, as on the Wii U.\nCosts a little GPU time.");
     }
     heading("Experimental features");
-    warn("Unfinished: these can make the game slower or choppy, or behave oddly. They are not saved: 30 fps again\n"
-         "at the next start. Turn them off if something goes wrong.");
+    warn("Unfinished. 60 fps needs a big CPU and GPU overclock (sys-clk or similar): at stock clocks the console cannot\n"
+         "keep it up, and the game runs slower and choppier than at 30 fps. Not saved: 30 fps again at the next start.");
     {
         // the upstream 60 fps modes (the screen is 60 Hz: 60 fps only)
         const int m = interp::mode();
@@ -259,9 +259,9 @@ void tab_picture() {
         };
         if (radio_tip("30 fps (original)", m == 0, "The game as it was: 30 logic steps and 30 drawn frames a second.")) choose(0);
         ImGui::SameLine();
-        if (radio_tip("60 fps interpolation", m == 1, "The game logic keeps 30 steps a second and a blended frame is drawn between them:\ndoubles the drawing work.")) choose(1);
+        if (radio_tip("60 fps interpolation", m == 1, "The game logic keeps 30 steps a second and a blended frame is drawn between them:\ndoubles the drawing work, so it also needs a big overclock to hold 60 fps.")) choose(1);
         ImGui::SameLine();
-        if (radio_tip("True 60 (experimental)", m == 2, "Runs the game logic at 60 steps a second. Needs much more CPU and GPU than 30 fps.")) choose(2);
+        if (radio_tip("True 60 (experimental)", m == 2, "Runs the game logic at 60 steps a second. Needs a big CPU and GPU overclock (sys-clk) to hold 60 fps.")) choose(2);
         help("Frame rate modes the game was not made for (the screen is 60 Hz). Not saved: 30 fps at the next start.");
         if (m == 1) {
             bool paced;
