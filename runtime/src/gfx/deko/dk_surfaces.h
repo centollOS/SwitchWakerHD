@@ -86,6 +86,8 @@ void set_bloom(bool on);
 bool blur_enabled();
 void set_blur(bool on);
 void set_aniso(bool on);
+int aniso_level();               // 1 (off), 2, 4, 8, 16
+void set_aniso_level(int level);  // the same from the next frame; others round down
 // edge smoothing (FXAA, issue #21; WWHD_FXAA=1, the Switch tab's Picture): any thread, from the next frame
 bool fxaa_enabled();
 void set_fxaa(bool on);
@@ -298,6 +300,10 @@ float res_scale();                // the factor render targets get this frame (r
 float requested_res_scale();      // the factor asked for (any thread)
 float res_scale_shown();          // the factor in use, for the settings overlay (any thread)
 void set_res_scale(float scale);  // from the next frame on (any thread)
+// the shadow maps' own factor (test, 0.5 / 1 / 2): the three 1024x1024 depth maps are rendered at this x their guest
+// size; sampling is normalized, so the shaders need nothing else
+float shadow_scale();             // any thread: the factor asked for
+void set_shadow_scale(float scale);
 void latch_res_scale();           // present: apply a requested change; the frame's allocation budget
 void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld = false);
 // a render target about to be written: the scale it should have unless that needs a new image and this

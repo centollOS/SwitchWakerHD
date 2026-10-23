@@ -63,6 +63,9 @@ constexpr const char* kKeyShaderWait = "switchShaderWait";
 // per mode: <key>.handheld / <key>.docked
 constexpr const char* kKeyResScale = "switchResScale";
 constexpr const char* kKeyDynamicRes = "switchDynamicRes";
+// switchAniso: "0" off (1x), "1" 16x (the old on/off choice), or the level itself: "2", "4", "8", "16"
+int aniso_from_setting(const std::string& v);
+const char* aniso_setting(int level);
 void save_picture();       // the current picture adjustments into settings.ini
 // debug: both sticks clicked capture the next frame (PNGs on the SD card, a few seconds' freeze); off by
 // default so it cannot happen by accident (Switch tab; saved)

@@ -1,12 +1,14 @@
 #include "mods/mods.h"
 // Libraries the game uses for system integration and online features.
 // Online services (Miiverse, SpotPass, accounts) report "unavailable".
+#include <atomic>
 #include "../crashrec.h"
 #include "../runtime.h"
 #include "../input.h"
 #include "../mods/story_notebook.h"
 #include "../mods/story_bag.h"
 #include "../mods/story_scenes.h"
+#include "olv_park.h"
 #include "../rumble.h"
 #include "../motion/motion.h"
 
@@ -56,7 +58,16 @@ HLE(nn_olv, Finalize__Q2_2nn3olvFv) { ret(c, kResultOk); }
 // 100k steps a second, a whole host core (on the console it only soaks up idle time on its core).
 // A 1 ms nap per step (releasing the guest core) keeps it to ~1000 steps a second.
 extern "C" void f_0203DEEC_orig(Cpu* c);
+namespace hle_olv {
+static std::atomic<bool> g_parked{false};
+bool parked() { return g_parked.load(std::memory_order_relaxed); }
+void set_parked(bool on) {
+    if (g_parked.exchange(on) != on) LOG("[olv] Miiverse thread %s", on ? "parked" : "running again (1 ms nap per step)");
+}
+}  // namespace hle_olv
 extern "C" void hook_0203DEEC(Cpu* c) {
+    // parked (a test switch): sleep in 50 ms steps, without running the step, until it is turned off
+    while (hle_olv::parked()) threads::park_sleep_until(std::chrono::steady_clock::now() + std::chrono::milliseconds(50));
     threads::park_sleep_until(std::chrono::steady_clock::now() + std::chrono::milliseconds(1));
     f_0203DEEC_orig(c);
 }
