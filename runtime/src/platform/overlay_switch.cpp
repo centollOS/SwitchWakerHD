@@ -157,16 +157,8 @@ void tab_warp() {
 // Picture: resolution per mode, colours and effects
 void tab_picture() {
     using namespace switch_settings;
-    // first, as the most useful thing here: it removes the black or late-appearing effects of places seen the first time
-    // (the text is shown, not a tooltip, and says where a sweep stands; in the game's language, ui_text_switch.cpp)
-    note("%s", ui_text::tx().pictureIntro);
-    {
-        const prepare_graphics::Progress p = prepare_graphics::progress();
-        if (p.next > 0 && p.next < p.total)
-            warn(ui_text::tx().pictureUnfinished, p.next, p.total);
-        else
-            note("%s", p.complete ? ui_text::tx().pictureDone : ui_text::tx().pictureNotDone);
-    }
+    // first, as the most useful thing here: it removes the black or late-appearing effects of places seen the first
+    // time. One text, below its button (in the game's language, ui_text_switch.cpp); the button says where a sweep stands
     if (prepare_graphics::ui_section()) set_open(false);  // platform/prepare_graphics_ui_switch.cpp
     // one picture profile per mode (as SwitchWaker): the one shown starts as the active mode's
     heading("Resolution");
