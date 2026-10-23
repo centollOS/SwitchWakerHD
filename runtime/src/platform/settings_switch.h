@@ -56,7 +56,7 @@ constexpr const char* kKeyGamepadPip = "switchGamepadPip";  // the GamePad pictu
 // Debug: the network debug server (debug_switch.h) and the main thread's runtime-call sampler (threads.cpp),
 // both off by default and read at the next start, before anything else (main.cpp)
 constexpr const char* kKeyDebugServer = "switchDebugServer";
-constexpr const char* kKeyDevOptions = "switchDevOptions";  // "Show developer options" (Speed tab): the Dev tab; off by default
+constexpr const char* kKeyDevOptions = "switchDevOptions";  // "Show developer options" (Picture tab): the Dev tab; off by default
 constexpr const char* kKeyMainSampler = "switchMainSampler";
 // Debug: draws wait for their shaders (shader_wait_switch.h, #49): 0 off (the default) .. 3 always
 constexpr const char* kKeyShaderWait = "switchShaderWait";

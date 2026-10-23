@@ -3,7 +3,7 @@
 ## Reaching the Switch: the debug server
 
 The console runs a TCP debug server (port 6543) when **Debug server (network)** is ticked in the settings
-menu (Minus, **Speed** tab: tick **Show developer options**; then the **Dev** tab, **Debug server**); it starts at the next start of the game. Full reference:
+menu (Minus, **Dev** tab: tick **Show developer options**, then **Debug server**); it starts at the next start of the game. Full reference:
 [docs/debug-server.md](docs/debug-server.md).
 
 - The console's address: `build/switch_host.txt` (first line), else `export WWHD_SWITCH_HOST=<ip>`, else
@@ -34,7 +34,7 @@ tools/switch/wwhd_debug.py get settings.ini build/settings.ini   # SD files, rel
 After a crash the server is gone with the game: ask the user to start it again, then
 `tools/switch/wwhd_debug.py lastlog` and `tools/switch/wwhd_debug.py crashes --fetch build/crashes`.
 
-Options and A/B switches for a test go into the in-game menu (Dev tab, shown by Speed tab > Show developer options), not into
+Options and A/B switches for a test go into the in-game menu (Dev tab, behind its "Show developer options" checkbox), not into
 `settings.ini`'s `[dev]` section; `[dev]` is for developer variables read at start (docs/switch-port.md,
 "Rule for test builds").
 
@@ -59,7 +59,7 @@ lines as they are, and never call a difference inside the printed interval a gai
 
 A fresh install (no `settings.ini`) must start with player defaults: debug server off, frame-rate counter
 and every diagnostic, perf or capture option off, stock clocks, mods off, no `[dev]` section. A new
-diagnostic or test option ships off and goes in the Dev tab (hidden until "Show developer options"; that checkbox is off by default). Check the fresh-install
+diagnostic or test option ships off and goes in the Dev tab (its content is hidden until "Show developer options"; that checkbox is off by default). Check the fresh-install
 defaults again whenever the settings code changes; a player's saved `settings.ini` keeps what they chose.
 
 ## Clocks
