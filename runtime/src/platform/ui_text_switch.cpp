@@ -443,9 +443,26 @@ const MenuTexts kMenuEnglish = {
     .gammaHelp = "Above 1 deepens mid-tones and shadows, below 1 lifts them",
     .originalColours = "Original colours",
     .vivid = "Vivid",
-    .aniso = "16x anisotropic filtering",
-    .anisoHelp = "Sharper ground, sand and water textures seen at an angle, mostly at a distance.\n"
-        "Costs some GPU time: if the frame rate drops, turn it off.",
+    .anisoLabel = "Anisotropic filtering",
+    .anisoOffTip = "Off, as the game draws it. Default.",
+    .anisoTip = "Sharpens textures seen at an angle (the ground ahead, walls along a path) instead of letting them\n"
+        "blur. It costs GPU time, which can lower the frame rate in the busiest views (Outset's tall\n"
+        "grass, the lookout): measured about 5% at 2x, 15% at 4x and 30% at 16x there; the village\n"
+        "and the sea are not affected. Default: 1x (off).",
+    .shadowLabel = "Shadow maps",
+    .shadowFast = "Fast",
+    .shadowOriginal = "Original (default)",
+    .shadowHigh = "High",
+    .shadowFastTip = "Draws the shadow maps at half the size: about 5-7% more frames per second in the busiest views\n"
+        "(Outset's tall grass, the lookout), but straight shadow edges look wavier.",
+    .shadowOriginalTip = "The game's own shadow map size, as on the Wii U. Default.",
+    .shadowHighTip = "Draws the shadow maps at twice the size: sharper shadows, but about 17-20% slower in the busiest "
+        "views\n"
+        "(Outset's tall grass, the lookout) and more memory.",
+    .ao = "Ambient occlusion",
+    .aoHelp = "The soft dark corners and creases the game adds where surfaces meet. Off draws them flat and is "
+        "about 1%\n"
+        "faster in the busiest views (Outset's tall grass, the lookout); the real shadows stay. Default: on.",
     .fxaa = "Edge smoothing (FXAA)",
     .fxaaHelp = "Smoother edges in the 3D world; the HUD stays sharp.\n"
         "Costs a little GPU time (about 2 ms a frame).",
@@ -558,9 +575,32 @@ const MenuTexts kMenuSpanish = {
     .gammaHelp = "Por encima de 1 oscurece los tonos medios y las sombras; por debajo de 1 los aclara",
     .originalColours = "Colores originales",
     .vivid = "Vivos",
-    .aniso = "Filtrado anisotrópico 16x",
-    .anisoHelp = "Texturas de suelo, arena y agua más nítidas vistas en ángulo, sobre todo a lo lejos.\n"
-        "Cuesta algo de GPU: si bajan los fps, desactívalo.",
+    .anisoLabel = "Filtrado anisotrópico",
+    .anisoOffTip = "Desactivado, como lo dibuja el juego. Por defecto.",
+    .anisoTip = "Hace más nítidas las texturas vistas en ángulo (el suelo de delante, las paredes de un camino) en "
+        "vez de\n"
+        "dejarlas borrosas. Cuesta tiempo de GPU, que puede bajar los fps en las vistas más cargadas (la "
+        "hierba alta\n"
+        "de Isla Initia, el mirador): medido, un 5% a 2x, un 15% a 4x y un 30% a 16x allí; el pueblo y el "
+        "mar\n"
+        "no se ven afectados. Por defecto: 1x (desactivado).",
+    .shadowLabel = "Mapas de sombras",
+    .shadowFast = "Rápido",
+    .shadowOriginal = "Original (por defecto)",
+    .shadowHigh = "Alto",
+    .shadowFastTip = "Dibuja los mapas de sombras a la mitad de tamaño: un 5-7% más de fps en las vistas más cargadas\n"
+        "(la hierba alta de Isla Initia, el mirador), pero los bordes rectos de las sombras se ven más "
+        "ondulados.",
+    .shadowOriginalTip = "El tamaño de mapas de sombras del propio juego, como en Wii U. Por defecto.",
+    .shadowHighTip = "Dibuja los mapas de sombras al doble de tamaño: sombras más nítidas, pero un 17-20% más lento en las "
+        "vistas\n"
+        "más cargadas (la hierba alta de Isla Initia, el mirador) y más memoria.",
+    .ao = "Oclusión ambiental",
+    .aoHelp = "Las esquinas y pliegues suavemente oscuros que el juego añade donde se juntan superficies. "
+        "Desactivada, se dibujan\n"
+        "planos y va un 1% más rápido en las vistas más cargadas (la hierba alta de Isla Initia, el mirador); "
+        "las sombras\n"
+        "reales se quedan. Por defecto: activada.",
     .fxaa = "Suavizado de bordes (FXAA)",
     .fxaaHelp = "Bordes más suaves en el mundo 3D; el HUD sigue nítido.\n"
         "Cuesta un poco de GPU (unos 2 ms por fotograma).",
@@ -680,9 +720,33 @@ const MenuTexts kMenuFrench = {
     .gammaHelp = "Au-dessus de 1, assombrit les tons moyens et les ombres ; en dessous de 1, les éclaircit",
     .originalColours = "Couleurs d'origine",
     .vivid = "Vives",
-    .aniso = "Filtrage anisotrope 16x",
-    .anisoHelp = "Textures du sol, du sable et de l'eau plus nettes vues de biais, surtout au loin.\n"
-        "Coûte du temps GPU : si les fps baissent, désactivez-le.",
+    .anisoLabel = "Filtrage anisotrope",
+    .anisoOffTip = "Désactivé, comme le jeu le dessine. Par défaut.",
+    .anisoTip = "Rend plus nettes les textures vues de biais (le sol devant, les murs le long d'un chemin) au lieu "
+        "de\n"
+        "les laisser floues. Cela coûte du temps GPU, ce qui peut baisser les fps dans les vues les plus "
+        "chargées\n"
+        "(les hautes herbes de l'île de l'Aurore, la tour de guet) : mesuré, environ 5 % à 2x, 15 % à 4x et "
+        "30 % à 16x\n"
+        "là-bas ; le village et la mer ne sont pas touchés. Par défaut : 1x (désactivé).",
+    .shadowLabel = "Cartes d'ombres",
+    .shadowFast = "Rapide",
+    .shadowOriginal = "D'origine (par défaut)",
+    .shadowHigh = "Élevé",
+    .shadowFastTip = "Dessine les cartes d'ombres à moitié taille : environ 5-7 % de fps en plus dans les vues les plus "
+        "chargées\n"
+        "(les hautes herbes de l'île de l'Aurore, la tour de guet), mais les bords droits des ombres sont "
+        "plus ondulés.",
+    .shadowOriginalTip = "La taille d'origine des cartes d'ombres, comme sur Wii U. Par défaut.",
+    .shadowHighTip = "Dessine les cartes d'ombres à double taille : ombres plus nettes, mais environ 17-20 % plus lent "
+        "dans les vues\n"
+        "les plus chargées (les hautes herbes de l'île de l'Aurore, la tour de guet) et plus de mémoire.",
+    .ao = "Occlusion ambiante",
+    .aoHelp = "Les coins et plis légèrement sombres que le jeu ajoute là où les surfaces se rejoignent. Désactivée, "
+        "ils sont\n"
+        "plats et c'est environ 1 % plus rapide dans les vues les plus chargées (les hautes herbes de l'île "
+        "de l'Aurore,\n"
+        "la tour de guet) ; les vraies ombres restent. Par défaut : activée.",
     .fxaa = "Lissage des contours (FXAA)",
     .fxaaHelp = "Contours plus doux dans le monde 3D ; l'interface reste nette.\n"
         "Coûte un peu de temps GPU (environ 2 ms par image).",
@@ -803,9 +867,32 @@ const MenuTexts kMenuGerman = {
     .gammaHelp = "Über 1 vertieft Mitteltöne und Schatten, unter 1 hellt sie auf",
     .originalColours = "Originalfarben",
     .vivid = "Kräftig",
-    .aniso = "16x anisotrope Filterung",
-    .anisoHelp = "Schärfere Boden-, Sand- und Wassertexturen im schrägen Blick, vor allem in der Ferne.\n"
-        "Kostet GPU-Zeit: Wenn die Bildrate sinkt, schalte es aus.",
+    .anisoLabel = "Anisotrope Filterung",
+    .anisoOffTip = "Aus, wie das Spiel es zeichnet. Standard.",
+    .anisoTip = "Macht schräg gesehene Texturen (der Boden vor dir, Wände entlang eines Weges) scharf, statt sie\n"
+        "verschwimmen zu lassen. Kostet GPU-Zeit und kann die Bildrate in den anspruchsvollsten Ansichten "
+        "senken\n"
+        "(das hohe Gras der Insel Präludien, der Ausguck): gemessen etwa 5 % bei 2x, 15 % bei 4x und 30 % bei "
+        "16x;\n"
+        "das Dorf und das Meer sind nicht betroffen. Standard: 1x (aus).",
+    .shadowLabel = "Schattenkarten",
+    .shadowFast = "Schnell",
+    .shadowOriginal = "Original (Standard)",
+    .shadowHigh = "Hoch",
+    .shadowFastTip = "Zeichnet die Schattenkarten in halber Größe: etwa 5-7 % mehr Bilder pro Sekunde in den "
+        "anspruchsvollsten\n"
+        "Ansichten (das hohe Gras der Insel Präludien, der Ausguck), aber gerade Schattenkanten wirken "
+        "welliger.",
+    .shadowOriginalTip = "Die Originalgröße der Schattenkarten, wie auf der Wii U. Standard.",
+    .shadowHighTip = "Zeichnet die Schattenkarten in doppelter Größe: schärfere Schatten, aber etwa 17-20 % langsamer in "
+        "den\n"
+        "anspruchsvollsten Ansichten (das hohe Gras der Insel Präludien, der Ausguck) und mehr Speicher.",
+    .ao = "Umgebungsverdeckung",
+    .aoHelp = "Die weichen dunklen Ecken und Falten, die das Spiel dort hinzufügt, wo Flächen aufeinandertreffen. "
+        "Aus: flach\n"
+        "gezeichnet und etwa 1 % schneller in den anspruchsvollsten Ansichten (das hohe Gras der Insel "
+        "Präludien, der\n"
+        "Ausguck); die echten Schatten bleiben. Standard: an.",
     .fxaa = "Kantenglättung (FXAA)",
     .fxaaHelp = "Weichere Kanten in der 3D-Welt; die Anzeige bleibt scharf.\n"
         "Kostet etwas GPU-Zeit (etwa 2 ms pro Bild).",
@@ -925,9 +1012,33 @@ const MenuTexts kMenuItalian = {
     .gammaHelp = "Sopra 1 scurisce i toni medi e le ombre, sotto 1 li schiarisce",
     .originalColours = "Colori originali",
     .vivid = "Vivaci",
-    .aniso = "Filtro anisotropico 16x",
-    .anisoHelp = "Texture di terreno, sabbia e acqua più nitide viste di sbieco, soprattutto in lontananza.\n"
-        "Costa tempo di GPU: se gli fps calano, disattivalo.",
+    .anisoLabel = "Filtro anisotropico",
+    .anisoOffTip = "Disattivato, come lo disegna il gioco. Predefinito.",
+    .anisoTip = "Rende più nitide le texture viste di sbieco (il terreno davanti, i muri lungo un sentiero) invece "
+        "di\n"
+        "lasciarle sfocate. Costa tempo di GPU e può abbassare gli fps nelle visuali più pesanti (l'erba "
+        "alta\n"
+        "dell'Isola Primula, la torre di vedetta): misurato circa il 5% a 2x, il 15% a 4x e il 30% a 16x "
+        "lì;\n"
+        "il villaggio e il mare non ne risentono. Predefinito: 1x (disattivato).",
+    .shadowLabel = "Mappe delle ombre",
+    .shadowFast = "Veloce",
+    .shadowOriginal = "Originale (predefinito)",
+    .shadowHigh = "Alto",
+    .shadowFastTip = "Disegna le mappe delle ombre a metà dimensione: circa il 5-7% di fps in più nelle visuali più "
+        "pesanti\n"
+        "(l'erba alta dell'Isola Primula, la torre di vedetta), ma i bordi dritti delle ombre sono più "
+        "ondulati.",
+    .shadowOriginalTip = "La dimensione originale delle mappe delle ombre, come su Wii U. Predefinito.",
+    .shadowHighTip = "Disegna le mappe delle ombre al doppio della dimensione: ombre più nitide, ma circa il 17-20% più "
+        "lento nelle\n"
+        "visuali più pesanti (l'erba alta dell'Isola Primula, la torre di vedetta) e più memoria.",
+    .ao = "Occlusione ambientale",
+    .aoHelp = "Gli angoli e le pieghe leggermente scuri che il gioco aggiunge dove le superfici si incontrano. "
+        "Disattivata, sono\n"
+        "piatti ed è circa l'1% più veloce nelle visuali più pesanti (l'erba alta dell'Isola Primula, la "
+        "torre di\n"
+        "vedetta); le ombre vere restano. Predefinito: attivata.",
     .fxaa = "Smussatura dei bordi (FXAA)",
     .fxaaHelp = "Bordi più morbidi nel mondo 3D; l'interfaccia resta nitida.\n"
         "Costa un po' di tempo di GPU (circa 2 ms per fotogramma).",
@@ -987,7 +1098,7 @@ const MenuTexts kMenuItalian = {
         "comunque lo tieni\n"
         "(consigliato). Imbardata: girarlo attorno al proprio asse verticale (come se fosse appoggiato). "
         "Rollio: inclinarlo\n"
-        "di lato come un volante. Inclinare la parte alta in su o in giù guarda sempre in su o in giù.",
+        "de lato come un volante. Inclinare la parte alta in su o in giù guarda sempre in su o in giù.",
     .sensX = "Sensibilità sinistra/destra",
     .sensY = "Sensibilità su/giù",
     .invert = "Inverti",

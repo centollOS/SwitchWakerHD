@@ -22,6 +22,7 @@
 #include "../mods/mods.h"
 #include "../mods/warps.h"
 #include "../motion/motion.h"
+#include "../hle/olv_park.h"
 #include "../input_map.h"
 #include "../overlay/extensions.h"
 #include "../overlay/release_gate.h"
@@ -234,12 +235,19 @@ void tab_picture() {
     }
     if (done) hostui::post([] { save_picture(); });
     {
-        bool v;
-        if (check(lbl(tx.aniso, "aniso").c_str(), gfxsw::aniso(), &v)) {
-            gfxsw::set_aniso(v);
-            hostui::post([v] { hostui::set(kKeyAniso, v ? "1" : "0"); });
+        // texture sharpness at an angle: 1x (off, the default) to 16x; saved as switchAnisoLevel
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(tx.anisoLabel);
+        const int cur = gfxsw::aniso_level();
+        for (int n : {1, 2, 4, 8, 16}) {
+            ImGui::SameLine();
+            char label[16];
+            snprintf(label, sizeof label, "%dx##aniso", n);
+            if (radio_tip(label, cur == n, n == 1 ? tx.anisoOffTip : tx.anisoTip)) {
+                gfxsw::set_aniso_level(n);
+                hostui::post([n] { hostui::set(kKeyAnisoLevel, aniso_level_setting(n)); });
+            }
         }
-        help(tx.anisoHelp);
     }
     {
         bool v;
@@ -264,6 +272,32 @@ void tab_picture() {
             hostui::post([v] { hostui::set(kKeyDistanceBlur, v ? "1" : "0"); });
         }
         help(tx.blurHelp);
+    }
+    {
+        // the shadow maps' size (gfxsw::shadow_scale); saved as switchShadowScale ("0.5", "1" the default, or "2")
+        const float cur = gfxsw::shadow_scale();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(tx.shadowLabel);
+        struct Q { float f; const char* label; const char* tip; const char* id; };
+        const Q quals[] = {{0.5f, tx.shadowFast, tx.shadowFastTip, "shadowq0"},
+                           {1.0f, tx.shadowOriginal, tx.shadowOriginalTip, "shadowq1"},
+                           {2.0f, tx.shadowHigh, tx.shadowHighTip, "shadowq2"}};
+        for (const Q& q : quals) {
+            ImGui::SameLine();
+            if (radio_tip(lbl(q.label, q.id).c_str(), std::fabs(cur - q.f) < 0.01f, q.tip)) {
+                gfxsw::set_shadow_scale(q.f);
+                hostui::post([f = q.f] { hostui::set(kKeyShadowScale, f < 1 ? "0.5" : f > 1 ? "2" : "1"); });
+            }
+        }
+    }
+    {
+        // ambient occlusion on (the game's own look, the default) or off; saved as switchAmbientOcclusion
+        bool on;
+        if (check(lbl(tx.ao, "ao").c_str(), !gfxsw::skip_ao(), &on)) {
+            gfxsw::set_skip_ao(!on);
+            hostui::post([on] { hostui::set(kKeyAmbientOcclusion, on ? "1" : "0"); });
+        }
+        help(tx.aoHelp);
     }
     heading(tx.fpsHeading);
     const char* const modes[] = {tx.fpsOff, tx.fpsRate, tx.fpsLoad};
@@ -467,6 +501,15 @@ void tab_developer() {
         }
         help("Issue #49: what a draw does while its shader compiles. Saved. The log's [shader-wait] lines say how\n"
              "long it waited.");
+    }
+    heading("Performance tests");
+    {
+        // not saved: off at the next start (debug server: miiverse; shadowscale and noao are in the Picture tab)
+        bool stop;
+        if (check("Stop the Miiverse thread", hle_olv::parked(), &stop)) hle_olv::set_parked(stop);
+        help("Test: the game's Miiverse thread (Tingle Bottle and Miiverse requests, which always fail here) stops\n"
+             "instead of running a step every millisecond. Measured: no change in fps or\n"
+             "main-thread time in the four Outset views. Not saved: off at the next start.");
     }
     heading("Controller and screen (test)");
     // (Debug: the GamePad view is not offered to players) which Wii U controller the Switch controller is: the game's own control mode must match it (with
