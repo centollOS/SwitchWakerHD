@@ -68,7 +68,7 @@ constexpr MenuVariable kMenuVariables[] = {
          return true;
      }},
     {"WWHD_GPU_PROFILE", [](const std::string& v, Settings& o) {
-         for (const char* id : {"default", "384", "460", "1600", "614"})  // (614: removed, read as 1600)
+         for (const char* id : {"default", "307", "384", "460", "1600", "614"})  // (614: removed, read as 1600)
              if (v == id) {
                  o.push_back({switch_settings::kKeyGpuProfile, v});
                  return true;

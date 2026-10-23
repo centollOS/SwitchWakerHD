@@ -9,7 +9,8 @@ namespace switch_settings {
 // GPU profiles offered in handheld (apm's official configurations; docked is left to the system).
 // No clock is set through clkrst any more (the CPU steps and GPU 614 MHz were removed 2026-10-13: a CPU clock
 // set that way kept an Erista console from waking from sleep, #33); overclocks are sys-clk's job.
-enum GpuProfile : int { kGpuDefault, kGpu384, kGpu460, kGpu460Mem1600, kGpuProfiles };
+enum GpuProfile : int { kGpuStock, kGpu384, kGpu460, kGpu460Mem1600, kGpuProfiles };
+constexpr int kGpuDefaultChoice = kGpu384;  // without a saved choice (Nintendo's 384 MHz handheld profile)
 const char* gpu_profile_label(int p);
 int gpu_profile();                // the one chosen (as the menu shows it)
 // apm's handheld configuration in use ("" before the first change); its id for the log and the menu

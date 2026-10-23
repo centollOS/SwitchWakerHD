@@ -153,8 +153,8 @@ void tab_switch() {
     const int gp = gpu_profile();
     for (int i = 0; i < kGpuProfiles; i++)
         if (radio(gpu_profile_label(i), gp == i)) hostui::post([i] { set_gpu_profile(i); });
-    help("Stock is the default: the game is perfectly playable at stock clocks.\n"
-         "These are Nintendo's own performance profiles for games.\n"
+    help("GPU 384 MHz is the default: the busiest views (Outset's tall grass) gain ~5 fps over stock;\n"
+         "460 MHz adds little more. Stock (307 MHz) saves some battery. These are Nintendo's own profiles for games.\n"
          "Docked, the console uses its docked clocks (GPU 768 MHz).\n"
          "The game sets no CPU or GPU overclock; for one, use sys-clk.");
     // the clocks, asked at most once a second (clkrst)
