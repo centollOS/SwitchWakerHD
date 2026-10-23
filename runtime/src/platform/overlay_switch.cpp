@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <atomic>
 #include <mutex>
 
 #include "imgui.h"
@@ -76,6 +77,12 @@ bool radio(const char* label, bool active, bool enabled = true) {
     ImGui::EndDisabled();
     return clicked;
 }
+// a radio button whose own tooltip says what that choice does
+bool radio_tip(const char* label, bool active, const char* tip, bool enabled = true) {
+    const bool clicked = radio(label, active, enabled);
+    help(tip);
+    return clicked;
+}
 bool check(const char* label, bool value, bool* out, bool enabled = true) {
     ImGui::BeginDisabled(!enabled);
     bool v = value;
@@ -91,13 +98,39 @@ void save_gyro(const motion::Settings& g) {
         for (const char* k : motion::kKeys) hostui::set(k, motion::value_of(g, k));
     });
 }
+// "Show developer options" (Speed tab): the Dev tab appears; saved as switchDevOptions, off by
+// default. Only the menu: a debug server that is running keeps running either way.
+std::atomic<int> g_dev{-1};  // -1: not read yet
 }  // namespace
 
-// Teleport (mods/warps.h): the game's own scene change to the chosen stage, room and spawn point
+bool dev_options() {
+    int v = g_dev.load(std::memory_order_relaxed);
+    if (v < 0) {
+        std::string s;
+        v = hostui::get(switch_settings::kKeyDevOptions, s) && s == "1" ? 1 : 0;
+        g_dev.store(v, std::memory_order_relaxed);
+    }
+    return v == 1;
+}
+void set_dev_options(bool on) {
+    g_dev.store(on ? 1 : 0, std::memory_order_relaxed);
+    hostui::post([on] { hostui::set(switch_settings::kKeyDevOptions, on ? "1" : "0"); });
+}
+namespace {
+}  // namespace
+
+// Warp (mods/warps.h): the game's own scene change to the chosen stage, room and spawn point. The list stays
+// hidden until the player ticks the box (not saved: it is off again at every start); the debug server's
+// `warp` command does not need it.
 void tab_warp() {
+    static bool unlocked = false;
+    warn("Warning: warping can break the story. Going somewhere before the game gets there can leave events in "
+         "that place stuck or out of order, and the game may save it. Try it on a copy of your save.");
+    bool v;
+    if (check("I understand, show the warp destinations", unlocked, &v)) unlocked = v;
+    if (!unlocked) return;
     const char* cur = reinterpret_cast<const char*>(mem::ptr(GD(0x1046F0B0) + 0x5134));  // the start stage
     note("Now in: %.8s%s", cur, mods::warp_pending() ? "   (a warp is waiting for a loaded file or the current scene change)" : "");
-    warn("Going somewhere before the story gets there can break events in that file. Try it on a copy of your save.");
     auto go = [](const mods::Warp& w) {
         mods::request_warp(w.stage, w.room, w.point);
         set_open(false);  // the game takes over: fade, load, spawn
@@ -116,12 +149,14 @@ void tab_warp() {
     }
 }
 
-// Switch: handheld GPU profile, picture adjustments and the corner counter (platform/settings_switch.h)
-void tab_switch() {
+// ---- tabs (registered in register_ext, in this order): Picture, Speed, Controls, then Warp and
+// Developer (hidden until "Show developer options" is ticked)
+
+// Picture: resolution per mode, colours and effects
+void tab_picture() {
     using namespace switch_settings;
-    if (prepare_graphics::ui_section()) set_open(false);  // platform/prepare_graphics_ui_switch.cpp
     // one picture profile per mode (as SwitchWaker): the one shown starts as the active mode's
-    heading("Picture profile");
+    heading("Resolution");
     static int edit = -1;
     const int active = active_mode();
     if (edit < 0) edit = active;
@@ -149,24 +184,7 @@ void tab_switch() {
     if (edit != active) note("Applies when the console is %s.", edit == kDocked ? "docked" : "in handheld mode");
     else note("Internal resolution now: %.2f.", gfxsw::dynamic_res_scale());
 
-    heading("Performance in handheld mode");
-    const int gp = gpu_profile();
-    for (int i = 0; i < kGpuProfiles; i++)
-        if (radio(gpu_profile_label(i), gp == i)) hostui::post([i] { set_gpu_profile(i); });
-    help("Stock is the default: the game is perfectly playable at stock clocks.\n"
-         "These are Nintendo's own performance profiles for games.\n"
-         "Docked, the console uses its docked clocks (GPU 768 MHz).\n"
-         "The game sets no CPU or GPU overclock; for one, use sys-clk.");
-    // the clocks, asked at most once a second (clkrst)
-    static double clocks_t = -10;
-    static std::string clocks;
-    if (now_s() - clocks_t >= 1.0) {
-        clocks_t = now_s();
-        clocks = gfxsw::clock_report_now();
-    }
-    if (!clocks.empty()) note("Now: %s (%s).", clocks.c_str(), gpu_profile_status().c_str());
-
-    heading("Picture");
+    heading("Colours and effects");
     gfxsw::PictureGrade g = gfxsw::picture_grade_now();
     bool changed = false, done = false;
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
@@ -226,18 +244,36 @@ void tab_switch() {
         }
         help("Far places softly out of focus, as on the Wii U.\nCosts a little GPU time.");
     }
+}
 
-    heading("Frame rate counter (top left)");
+// Speed: shader preparation and the frame rate counter (clocks are sys-clk's job: no GPU profile here)
+void tab_performance() {
+    using namespace switch_settings;
+    if (prepare_graphics::ui_section()) set_open(false);  // platform/prepare_graphics_ui_switch.cpp
+    heading("Frame rate counter");
     static const char* const modes[] = {"Off", "Frame rate", "Frame rate and load"};
     const int fm = gfxsw::fps_overlay_mode();
-    for (int i = 0; i < 3; i++) {
+    const int shown = dev_options() || fm == 2 ? 3 : 2;  // "and load" is a diagnostic: with developer options
+    for (int i = 0; i < shown; i++) {
         if (i) ImGui::SameLine();
-        if (radio(modes[i], fm == i)) {
+        static const char* const tips[] = {"No counter.", "Frames per second, top left.",
+                                           "Frames per second plus the render thread's load, draws and GPU lag."};
+        if (radio_tip(modes[i], fm == i, tips[i])) {
             gfxsw::set_fps_overlay_mode(i);
             hostui::post([i] { hostui::set(kKeyFpsCounter, std::to_string(i)); });
         }
     }
+    help("Shows the frames per second in the top left corner of the picture.");
 
+    heading("Advanced");
+    bool dev;
+    if (check("Show developer options", dev_options(), &dev)) set_dev_options(dev);
+    help("Adds a Dev tab with tests and diagnostics (debug server, A/B switches, captures).\n"
+         "Players do not need it. Off by default; a debug server that is already running keeps running.");
+}
+
+// Controls: rumble and gyro aiming
+void tab_controller() {
     // the controller's motors follow the game's rumble requests (input_switch.cpp update_rumble; saved as
     // "rumble" as on the desktop)
     heading("Rumble");
@@ -290,8 +326,35 @@ void tab_switch() {
         ImGui::TextUnformatted(motion::status().c_str());
         if (!(g == before)) save_gyro(g);
     }
-    heading("Debug");
-    ImGui::TextUnformatted("Draw optimizations (A/B test)");
+    heading("Menu");
+    note("Minus held half a second opens this menu (a short Minus goes to the game); B or Minus closes it.\n"
+         "L / R change tabs.");
+}
+
+// Developer: tests and diagnostics, none of it for normal play
+void tab_developer() {
+    using namespace switch_settings;
+    warn("Tests and diagnostics for developers. Nothing here is needed to play.");
+    heading("Debug server");
+    {
+        // the saved choice (read at start, debug_switch.cpp), not whether the server runs now
+        static int saved = -1;
+        if (saved < 0) {
+            std::string v;
+            saved = hostui::get(kKeyDebugServer, v) && v == "1" ? 1 : 0;
+        }
+        bool v;
+        if (check("Debug server (network)", saved == 1, &v)) {
+            saved = v ? 1 : 0;
+            hostui::post([v] { hostui::set(kKeyDebugServer, v ? "1" : "0"); });
+        }
+        help("Development only. From the next start, the game listens on port 6543 of the local network\n"
+             "for tools/switch/wwhd_debug.py (logs, files, screenshots, warps, restart), with NO password:\n"
+             "anyone on the same network can use it. Leave it off otherwise. See docs/debug-server.md.");
+        if (debug_switch::running()) note("Running now on port %d.", debug_switch::port());
+        if ((saved == 1) != debug_switch::running()) note("Applies at the next start.");
+    }
+    heading("Draw optimizations (A/B test)");
     for (int i = 0; i < gfxsw::kDrawOpts; i++) {
         static const char* const names[] = {"Skip unchanged fixed state", "Shadow draws without the pixel shader",
                                             "Cache textures of shared surfaces", "Keep vertex layouts",
@@ -300,12 +363,30 @@ void tab_switch() {
                                             "Skip the TV picture (Off-TV Play)", "Target memo by state words",
                                             "Fixed state in three parts", "Vertex states by layout"};
         static_assert(sizeof names / sizeof names[0] == gfxsw::kDrawOpts, "a name per switch");
+        static const char* const what[] = {
+            "Skips setting the GPU's fixed state (blend, depth, culling) again when a draw's is the same as the last.",
+            "Draws that only write depth (shadow maps) run without a pixel shader.",
+            "Texture lookups at addresses shared by several surfaces are remembered instead of searched again.",
+            "Each vertex shader keeps its vertex layout instead of building it for every draw.",
+            "Hands the GPU a batch of draws every 1024 draws instead of every 256: fewer submits, more latency.",
+            "The render thread's profiler: counts commands, draws and register changes and logs a [prof] line.\n"
+            "Slower while on; its report is what Save performance report writes.",
+            "Reads ahead the shader data a draw is about to use, so the memory is already in the cache.",
+            "Render targets, fixed state and viewport are looked up again only when their registers changed.",
+            "In Off-TV Play the TV picture nobody sees is not drawn (about 1.8 ms of GPU a frame docked).",
+            "Remembers the render target of a draw by the words of its state and skips repeats in the same frame.",
+            "Keeps the fixed state in three separate remembered parts instead of one.",
+            "Remembers vertex states by the identity of their layout.",
+        };
+        static_assert(sizeof what / sizeof what[0] == gfxsw::kDrawOpts, "a text per switch");
         bool on;
         if (i % 2) ImGui::SameLine(0, 30);
         if (check(names[i], gfxsw::draw_opt(i), &on)) gfxsw::set_draw_opt(i, on);
+        help(what[i]);
     }
     help("Turn them off and on again in the same spot: the log marks each change with its frame.\n"
          "Not saved: they are on again at the next start.");
+    heading("Shaders");
     {
         const int cur = gfxsw::shader_compile_threads();
         ImGui::AlignTextToFramePadding();
@@ -314,12 +395,143 @@ void tab_switch() {
             ImGui::SameLine();
             char label[16];
             snprintf(label, sizeof label, n ? "%d##shthr" : "Auto##shthr", n);
-            if (radio(label, cur == n)) gfxsw::set_shader_compile_threads(n);
+            static const char* const tips[] = {
+                "Automatic (default): three threads while the picture waits for its shaders (the option below, the\n"
+                "start-up), one otherwise.",
+                "One thread compiles the shaders the game is waiting for (how it was before the test).",
+                "Two threads, always. In play they take about 3 fps while they run.",
+                "Three threads, always. In play they take about 3 fps while they run."};
+            if (radio_tip(label, cur == n, tips[n])) gfxsw::set_shader_compile_threads(n);
         }
-        help("Test: how many threads compile the shaders the game is waiting for (a new place, an item seen\n"
-             "for the first time). Auto (the default): three while the picture waits for its shaders (the\n"
-             "wait option above, the start-up), one otherwise. 1: one, as before. 2-3: always (in play they\n"
-             "take ~3 fps while they run). Not saved.");
+        help("How many threads compile the shaders the game is waiting for (a new place, an item seen for the\n"
+             "first time). Not saved.");
+    }
+    {
+        // (#49) a model seen for the first time: wait for its shaders instead of drawing it piece by piece
+        const int cur = shader_wait::mode();
+        ImGui::TextUnformatted("Draws of a shader still compiling");
+        for (int m = 0; m < shader_wait::kModes; m++) {
+            if (m) ImGui::SameLine();
+            static const char* const tips[] = {
+                "Draws of a shader that is still compiling are skipped (as before): the item or clothes appear piece\n"
+                "by piece while the shaders compile.",
+                "The picture waits for the shaders (a short freeze, only the first time) while an item is shown: Link\n"
+                "holding up an item, opening a chest.",
+                "As the previous choice, and also in every cutscene, talk and door.",
+                "Always waits for the shaders, everywhere (new places freeze for a moment)."};
+            if (radio_tip(shader_wait::label(m), cur == m, tips[m])) {
+                shader_wait::set_mode(m);
+                hostui::post([m] { hostui::set(kKeyShaderWait, std::to_string(m)); });
+            }
+        }
+        help("Issue #49: what a draw does while its shader compiles. Saved. The log's [shader-wait] lines say how\n"
+             "long it waited.");
+    }
+    heading("Frame rate (test)");
+    {
+        // the upstream 60 fps modes, for testing on the console (the screen is 60 Hz: 60 fps only)
+        const int m = interp::mode();
+        auto choose = [](int mode) {
+            hostui::post([mode] {
+                if (mode == 1) interp::set_fps(60);
+                interp::set_mode(mode);
+                LOG("[interp] frame rate mode from the Switch tab: %s (not saved)", interp::mode_name());
+            });
+        };
+        if (radio_tip("30 fps (original)", m == 0, "The game as it was: 30 logic steps and 30 drawn frames a second.")) choose(0);
+        ImGui::SameLine();
+        if (radio_tip("60 fps interpolation", m == 1, "The game logic keeps 30 steps a second and a blended frame is drawn between them:\ndoubles the drawing work.")) choose(1);
+        ImGui::SameLine();
+        if (radio_tip("True 60 (experimental)", m == 2, "Runs the game logic at 60 steps a second. Needs much more CPU and GPU than 30 fps.")) choose(2);
+        help("Test of the 60 fps modes (the screen is 60 Hz). Not saved: 30 fps at the next start.");
+        if (m == 1) {
+            bool paced;
+            if (check("Keep game speed", interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))
+                hostui::post([paced] {
+                    interp::set_paced_interpolation(paced);
+                    LOG("[interp] keep game speed from the Switch tab: %s (not saved)", paced ? "on" : "off");
+                });
+            help("When the console cannot draw 60 frames a second, skip in-between frames instead of slowing\n"
+                 "the whole game down: the game logic keeps its 30 steps a second. Off: every in-between frame\n"
+                 "is drawn and the game runs slower than real time. Not saved: off at the next start.");
+            if (float share = interp::paced_drawn_share(); share >= 0)
+                note("In-between frames drawn lately: %.0f%%", share * 100.0f);
+        }
+    }
+    heading("Controller and screen (test)");
+    // (Debug: the GamePad view is not offered to players) which Wii U controller the Switch controller is: the game's own control mode must match it (with
+    // the Pro Controller chosen here the GamePad lies on the table and sends nothing, system_stubs.cpp)
+    {
+        // saved as controllerMode. The single screen is fixed at start (switch_settings::apply_at_start): the game's
+        // screen mode, its controller picker and its options follow it from the title on (screen_mode.cpp), not in
+        // the middle of play. Between the Wii U's own GamePad and Pro Controller the choice applies at once.
+        using switch_settings::ControllerMode;
+        const bool single = screen_mode::single_screen(), pro = input::pro_controller();
+        static int saved = -1;  // the saved choice (ControllerMode)
+        if (saved < 0) saved = int(single ? ControllerMode::kSingle : pro ? ControllerMode::kPro : ControllerMode::kGamePad);
+        auto choose = [&](ControllerMode m, const char* value) {
+            saved = int(m);
+            hostui::post([single, m, value] {
+                if (!single && m != ControllerMode::kSingle) hostui::set_pro_controller(m == ControllerMode::kPro);
+                hostui::set(switch_settings::kKeyControllerMode, value);
+            });
+        };
+        ImGui::TextUnformatted("The controller acts as");
+        if (radio_tip("GamePad, single screen", saved == int(ControllerMode::kSingle), "Plays in Off-TV Play from the title screen on: no controller choice, Minus is the item menu.\nTakes effect at the next start.")) choose(ControllerMode::kSingle, "single");
+        ImGui::SameLine();
+        if (radio_tip("Wii U GamePad", saved == int(ControllerMode::kGamePad), "The game as on the Wii U with the GamePad (TV play, its controller choice). Applies at once\nfrom the Pro Controller choice.")) choose(ControllerMode::kGamePad, "gamepad");
+        ImGui::SameLine();
+        if (radio_tip("Wii U Pro Controller", saved == int(ControllerMode::kPro), "The game as on the Wii U with the Pro Controller. The GamePad lies on the table and sends nothing.")) choose(ControllerMode::kPro, "pro");
+        help("For testing (not offered to players). GamePad, single screen: play in Off-TV Play from the\n"
+             "title screen on, no controller choice, Minus the item menu. Wii U GamePad and Pro Controller:\n"
+             "the game as on the Wii U (TV play, its controller choice); between those two the choice applies\n"
+             "at once, to or from the single screen from the next start.");
+        if ((saved == int(ControllerMode::kSingle)) != single) note("Applies at the next start.");
+        // the GamePad screen (items, map), full size instead of the TV picture
+        const bool view = gfxsw::gamepad_view();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("The screen shows");
+        ImGui::SameLine();
+        if (radio_tip("TV picture", !view, "The window shows the TV picture. ZL + ZR + Minus switches between the two while playing.")) gfxsw::set_gamepad_view(false);
+        ImGui::SameLine();
+        if (radio_tip("GamePad screen", view, "The window shows the GamePad screen (items, map) full size; the touch screen works as the GamePad's.")) gfxsw::set_gamepad_view(true);
+        help("ZL + ZR + Minus switches between them while playing. On the GamePad screen the touch\n"
+             "screen works as the GamePad's (items, map). With the Pro Controller chosen above, the GamePad\n"
+             "picture is drawn only while it is shown (test: what the game puts there in that mode).");
+        bool pip = false;
+        if (check("GamePad screen in a corner of the TV picture", gfxsw::gamepad_pip(), &pip, !pro))
+            hostui::post([pip] { switch_settings::set_gamepad_pip(pip); });
+        help("While the TV picture is shown, the GamePad's (items, map) also appears small in the\n"
+             "bottom right corner, and the touch screen works inside it. Only with the GamePad chosen above.");
+    }
+    heading("Diagnostics");
+    // the clocks, asked at most once a second (clkrst)
+    static double clocks_t = -10;
+    static std::string clocks;
+    if (now_s() - clocks_t >= 1.0) {
+        clocks_t = now_s();
+        clocks = gfxsw::clock_report_now();
+    }
+    if (!clocks.empty()) note("Now: %s (%s).", clocks.c_str(), gpu_profile_status().c_str());
+    {
+        bool v;
+        if (check("Log the main thread's runtime calls", threads::main_sampler(), &v)) {
+            threads::set_main_sampler(v);
+            hostui::post([v] { hostui::set(kKeyMainSampler, v ? "1" : "0"); });
+        }
+        help("Every 5 s the log says where the game's main thread spends its time in the runtime ([main] lines).\n"
+             "Saved: it also starts with the game when on.");
+        ImGui::SameLine(0, 30);
+        if (check("Log the game threads' CPU use", threads::sched_stats(), &v)) threads::set_sched_stats(v);
+        help("Every 5 s the log says each game thread's share of its core ([sched] lines).\n"
+             "Not saved: off at the next start.");
+    }
+    {
+        bool v;
+        if (check("Capture a frame with both sticks clicked", switch_settings::capture_combo(), &v))
+            hostui::post([v] { switch_settings::set_capture_combo(v); });
+        help("Writes the next frame's pictures to sdmc:/switch/wwhd/captures for a picture that\n"
+             "goes wrong; the game freezes for a few seconds meanwhile. Off: no accidental captures.");
     }
     {
         // the render profiler's latest report (render_prof.h; on with "Render profiler" above) to the SD card,
@@ -365,141 +577,6 @@ void tab_switch() {
         help("Where the renderer spends its time over the last few seconds, as text for a bug report:\n"
              "turn on \"Render profiler (slower)\", play in the spot, then save. File in sdmc:/switch/wwhd/logs/.");
     }
-    {
-        bool v;
-        if (check("Capture a frame with both sticks clicked", switch_settings::capture_combo(), &v))
-            hostui::post([v] { switch_settings::set_capture_combo(v); });
-        help("Writes the next frame's pictures to sdmc:/switch/wwhd/captures for a picture that\n"
-             "goes wrong; the game freezes for a few seconds meanwhile. Off: no accidental captures.");
-    }
-    {
-        bool v;
-        if (check("Log the main thread's runtime calls", threads::main_sampler(), &v)) {
-            threads::set_main_sampler(v);
-            hostui::post([v] { hostui::set(kKeyMainSampler, v ? "1" : "0"); });
-        }
-        ImGui::SameLine(0, 30);
-        if (check("Log the game threads' CPU use", threads::sched_stats(), &v)) threads::set_sched_stats(v);
-        help("Performance diagnostics for the log, every 5 s: where the game's main thread spends its\n"
-             "time in the runtime ([main] lines) and each game thread's share of its core ([sched] lines).\n"
-             "The first is saved (it also starts with the game when on); the second is off at the next start.");
-    }
-    {
-        // the saved choice (read at start, debug_switch.cpp), not whether the server runs now
-        static int saved = -1;
-        if (saved < 0) {
-            std::string v;
-            saved = hostui::get(kKeyDebugServer, v) && v == "1" ? 1 : 0;
-        }
-        bool v;
-        if (check("Debug server (network)", saved == 1, &v)) {
-            saved = v ? 1 : 0;
-            hostui::post([v] { hostui::set(kKeyDebugServer, v ? "1" : "0"); });
-        }
-        help("Development only. From the next start, the game listens on port 6543 of the local network\n"
-             "for tools/switch/wwhd_debug.py (logs, files, screenshots, warps, restart), with NO password:\n"
-             "anyone on the same network can use it. Leave it off otherwise. See docs/debug-server.md.");
-        if (debug_switch::running()) note("Running now on port %d.", debug_switch::port());
-        if ((saved == 1) != debug_switch::running()) note("Applies at the next start.");
-    }
-    {
-        // (#49) a model seen for the first time: wait for its shaders instead of drawing it piece by piece
-        const int cur = shader_wait::mode();
-        ImGui::TextUnformatted("Draws of a shader still compiling");
-        for (int m = 0; m < shader_wait::kModes; m++) {
-            if (m) ImGui::SameLine();
-            if (radio(shader_wait::label(m), cur == m)) {
-                shader_wait::set_mode(m);
-                hostui::post([m] { hostui::set(kKeyShaderWait, std::to_string(m)); });
-            }
-        }
-        help("Test (issue #49): an item or new clothes seen for the first time appear piece by piece while\n"
-             "their shaders compile. Off: those draws are skipped (as before). The others make them wait:\n"
-             "a short freeze instead, only the first time. While an item is shown: Link holding up an item,\n"
-             "opening a chest. Items and events: also every cutscene, talk and door. Always: everywhere\n"
-             "(new places freeze for a moment). Saved. The log's [shader-wait] lines say how long it waited.");
-    }
-    // (Debug: the GamePad view is not offered to players) which Wii U controller the Switch controller is: the game's own control mode must match it (with
-    // the Pro Controller chosen here the GamePad lies on the table and sends nothing, system_stubs.cpp)
-    {
-        // saved as controllerMode. The single screen is fixed at start (switch_settings::apply_at_start): the game's
-        // screen mode, its controller picker and its options follow it from the title on (screen_mode.cpp), not in
-        // the middle of play. Between the Wii U's own GamePad and Pro Controller the choice applies at once.
-        using switch_settings::ControllerMode;
-        const bool single = screen_mode::single_screen(), pro = input::pro_controller();
-        static int saved = -1;  // the saved choice (ControllerMode)
-        if (saved < 0) saved = int(single ? ControllerMode::kSingle : pro ? ControllerMode::kPro : ControllerMode::kGamePad);
-        auto choose = [&](ControllerMode m, const char* value) {
-            saved = int(m);
-            hostui::post([single, m, value] {
-                if (!single && m != ControllerMode::kSingle) hostui::set_pro_controller(m == ControllerMode::kPro);
-                hostui::set(switch_settings::kKeyControllerMode, value);
-            });
-        };
-        ImGui::TextUnformatted("The controller acts as");
-        if (radio("GamePad, single screen", saved == int(ControllerMode::kSingle))) choose(ControllerMode::kSingle, "single");
-        ImGui::SameLine();
-        if (radio("Wii U GamePad", saved == int(ControllerMode::kGamePad))) choose(ControllerMode::kGamePad, "gamepad");
-        ImGui::SameLine();
-        if (radio("Wii U Pro Controller", saved == int(ControllerMode::kPro))) choose(ControllerMode::kPro, "pro");
-        help("For testing (not offered to players). GamePad, single screen: play in Off-TV Play from the\n"
-             "title screen on, no controller choice, Minus the item menu. Wii U GamePad and Pro Controller:\n"
-             "the game as on the Wii U (TV play, its controller choice); between those two the choice applies\n"
-             "at once, to or from the single screen from the next start.");
-        if ((saved == int(ControllerMode::kSingle)) != single) note("Applies at the next start.");
-        // the GamePad screen (items, map), full size instead of the TV picture
-        const bool view = gfxsw::gamepad_view();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("The screen shows");
-        ImGui::SameLine();
-        if (radio("TV picture", !view)) gfxsw::set_gamepad_view(false);
-        ImGui::SameLine();
-        if (radio("GamePad screen", view)) gfxsw::set_gamepad_view(true);
-        help("ZL + ZR + Minus switches between them while playing. On the GamePad screen the touch\n"
-             "screen works as the GamePad's (items, map). With the Pro Controller chosen above, the GamePad\n"
-             "picture is drawn only while it is shown (test: what the game puts there in that mode).");
-        bool pip = false;
-        if (check("GamePad screen in a corner of the TV picture", gfxsw::gamepad_pip(), &pip, !pro))
-            hostui::post([pip] { switch_settings::set_gamepad_pip(pip); });
-        help("While the TV picture is shown, the GamePad's (items, map) also appears small in the\n"
-             "bottom right corner, and the touch screen works inside it. Only with the GamePad chosen above.");
-    }
-    {
-        // the upstream 60 fps modes, for testing on the console (the screen is 60 Hz: 60 fps only)
-        ImGui::TextUnformatted("Frame rate (test)");
-        const int m = interp::mode();
-        auto choose = [](int mode) {
-            hostui::post([mode] {
-                if (mode == 1) interp::set_fps(60);
-                interp::set_mode(mode);
-                LOG("[interp] frame rate mode from the Switch tab: %s (not saved)", interp::mode_name());
-            });
-        };
-        if (radio("30 fps (original)", m == 0)) choose(0);
-        ImGui::SameLine();
-        if (radio("60 fps interpolation", m == 1)) choose(1);
-        ImGui::SameLine();
-        if (radio("True 60 (experimental)", m == 2)) choose(2);
-        help("60 fps interpolation: the game logic keeps 30 steps a second and a blended frame is drawn\n"
-             "between them, which doubles the drawing work. True 60 runs the game logic at 60 steps a second.\n"
-             "Both need much more CPU and GPU than 30 fps; for testing only. Not saved: 30 fps at the next start.");
-        if (m == 1) {
-            bool paced;
-            if (check("Keep game speed", interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))
-                hostui::post([paced] {
-                    interp::set_paced_interpolation(paced);
-                    LOG("[interp] keep game speed from the Switch tab: %s (not saved)", paced ? "on" : "off");
-                });
-            help("When the console cannot draw 60 frames a second, skip in-between frames instead of slowing\n"
-                 "the whole game down: the game logic keeps its 30 steps a second. Off: every in-between frame\n"
-                 "is drawn and the game runs slower than real time. Not saved: off at the next start.");
-            if (float share = interp::paced_drawn_share(); share >= 0)
-                note("In-between frames drawn lately: %.0f%%", share * 100.0f);
-        }
-    }
-    heading("Menu");
-    note("Minus held half a second opens this menu (a short Minus goes to the game); B or Minus closes it.\n"
-         "L / R change tabs.");
 }
 
 bool load_font(ImGuiIO& io) {
@@ -529,9 +606,15 @@ void frame_layer_draw(float w, float h) {
 void register_ext() {
     namespace ext = overlay::ext;
     // the Switch renderer has its own options (Switch tab); one screen, and the controller maps by position
-    ext::add_tab({"switch", "Switch", tab_switch, nullptr}, "audio");
-    ext::add_tab({"warp", "Warp", tab_warp, nullptr}, "audio");
-    for (const char* id : {"graphics", "display", "controls"}) ext::hide_tab(id);
+    // Saves, Picture, Speed, Controls, Audio, Mods, Warp, Dev (only with "Show developer options"),
+    // Language / About
+    ext::add_tab({"picture", "Picture", tab_picture, nullptr}, "audio");
+    ext::add_tab({"speed", "Speed", tab_performance, nullptr}, "audio");
+    ext::add_tab({"controller", "Controls", tab_controller, nullptr}, "audio");
+    ext::add_tab({"warp", "Warp", tab_warp, nullptr});
+    ext::add_tab({"developer", "Dev", tab_developer, nullptr, [] { return dev_options(); }});
+    // Shortcuts: keyboard keys and desktop actions (full screen, screenshot); the controller column is unbound but for Home
+    for (const char* id : {"graphics", "display", "controls", "shortcuts"}) ext::hide_tab(id);
     ext::Features f;
     f.clipboard = false;    // the paths are shown instead
     f.file_picker = false;

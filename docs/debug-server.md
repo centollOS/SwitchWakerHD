@@ -6,7 +6,8 @@ It is off unless the settings menu turns it on. There is no password, so use it 
 
 ## Turning it on
 
-Hold Minus for the settings menu, **Switch** tab, **Debug** section: tick **Debug server (network)**. It is
+Hold Minus for the settings menu, **Speed** tab: tick **Show developer options** (under *Advanced*); a
+**Dev** tab appears, its first section is **Debug server**: tick **Debug server (network)**. It is
 saved (`switchDebugServer=1` in `sdmc:/switch/wwhd/settings.ini`) and the server starts at the **next** start
 of the game, on port 6543. At start the log says
 `[debug] server listening on <ip>:6543`. A fixed address for the console (a DHCP reservation in the router)

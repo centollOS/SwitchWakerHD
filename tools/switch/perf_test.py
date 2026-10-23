@@ -534,7 +534,7 @@ def cmd_compare_to(a):
     con = Console(a.host)
     if con.try_cmd("ping", timeout=5.0) is None:
         raise SystemExit(f"the console at {a.host} does not answer: start the game with the debug server on "
-                         "(Switch tab, Debug section), or give --host")
+                         "(Dev tab, shown by Speed tab > Show developer options), or give --host")
     repo = perf_baseline.REPO
     perf_baseline.fetch(repo)
     base_nro, base_name = perf_baseline.build(repo, a.baseline, a.rpx)

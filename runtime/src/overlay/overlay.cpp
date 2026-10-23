@@ -2467,7 +2467,7 @@ void settings_window() {
     const ImVec2 size(ds.x * 0.98f, ds.y * 0.97f);
 #else
     const ImVec2 size = shown_builtin() == kControls ? ImVec2(std::min(1240.0f, ds.x * 0.98f), std::min(720.0f, ds.y * 0.97f))
-                                           : ImVec2(std::min(860.0f, ds.x * 0.94f), std::min(620.0f, ds.y * 0.92f));
+                                           : ImVec2(std::min(960.0f, ds.x * 0.94f), std::min(620.0f, ds.y * 0.92f));
 #endif
     ImVec2 panelSize = size, panelPos(ds.x * 0.5f, ds.y * 0.5f);
     bool placement = shown_builtin() == kDisplay &&

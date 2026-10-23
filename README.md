@@ -68,7 +68,7 @@ loading screen, with no computer and nothing shipped: the title screen runs hidd
 upstream shaderprep's extractor in C++), speculates variants by family (`shader_list_switch.cpp`) and translates
 them the way a draw would (`gfx/deko translate_listed`); the worker compiles them at full speed behind the card
 (about 19 minutes on a stock console: 73.6% of a whole-game harvest's shader pairs), or gently in the background
-after B (core 0 only, a 50% duty cycle: the game keeps ~30 fps). **Prepare graphics** (settings menu, Switch tab;
+after B (core 0 only, a 50% duty cycle: the game keeps ~30 fps). **Prepare graphics** (settings menu, Speed tab;
 docs/prepare-graphics-plan.md) warps through every place (about 93% of the pairs); experimental. After it, the
 background list runs gently at the next starts for what the warps did not draw.
 
@@ -90,8 +90,8 @@ tools/switch/dksh_cache/build.sh build <shadercache_gl.bin> build/shadercache_dk
 For development there is a debug server: from the computer, over the local network, you can
 deploy a new build and restart the game without touching the console, follow the log as it is
 written, take screenshots, press buttons and warp. It is **off by default**: players never need it
-and the game opens no network port unless it is turned on in the options menu (**Switch** tab,
-**Debug** section, *Debug server (network)*; it starts at the next start). It has no password, so use
+and the game opens no network port unless it is turned on in the options menu (**Speed** tab, *Show developer options*, then
+**Dev** tab, *Debug server (network)*; it starts at the next start). It has no password, so use
 it only on your own network.
 
 ```sh
