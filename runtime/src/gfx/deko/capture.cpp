@@ -440,6 +440,9 @@ void log_capture_done(uint64_t frame) {  // (g_jobMutex held)
 }
 
 void worker_main(void*) {
+    // cores 0 and 2, core 0 first: the render thread holds core 2 (pinned there, gx2_core.cpp) and, alone on it at
+    // this priority, the writer took 15-18 s per picture in Outset's heavy views
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 0x5);
     for (;;) {
         Job job;
         {
@@ -480,8 +483,8 @@ void worker_main(void*) {
 // false: dropped (no writer, or its queue full)
 bool queue_job(Job&& job) {
     if (!g_workerStarted) {
-        // priority 0x3B (the game's own; an application may not go lower, shaders_dk.cpp), core 2
-        const Result rc = threadCreate(&g_worker, worker_main, nullptr, nullptr, 256u << 10, 0x3B, 2);
+        // priority 0x3B (the game's own; an application may not go lower, shaders_dk.cpp), cores 0 and 2 (worker_main)
+        const Result rc = threadCreate(&g_worker, worker_main, nullptr, nullptr, 256u << 10, 0x3B, 0);
         if (R_FAILED(rc) || R_FAILED(threadStart(&g_worker))) {
             LOG("[dk] capture: cannot start the PNG writer thread (result 0x%X): nothing written", unsigned(rc));
             return false;
