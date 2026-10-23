@@ -213,12 +213,17 @@ void set_gamepad_pip(bool on) {
     hostui::set(kKeyGamepadPip, on ? "1" : "0");
 }
 
-int aniso_from_setting(const std::string& v) {
-    const int n = atoi(v.c_str());
-    return n == 1 ? 16 : n >= 2 ? n : 1;
+int saved_aniso_level() {
+    std::string v;
+    if (hostui::get(kKeyAnisoLevel, v) && !v.empty()) {
+        const int n = atoi(v.c_str());
+        return n >= 16 ? 16 : n >= 8 ? 8 : n >= 4 ? 4 : n >= 2 ? 2 : 1;
+    }
+    if (hostui::get(kKeyAniso, v) && !v.empty()) return atoi(v.c_str()) != 0 ? 16 : 1;  // the old on/off choice
+    return 1;
 }
-const char* aniso_setting(int level) {
-    return level >= 16 ? "16" : level >= 8 ? "8" : level >= 4 ? "4" : level >= 2 ? "2" : "0";
+const char* aniso_level_setting(int level) {
+    return level >= 16 ? "16" : level >= 8 ? "8" : level >= 4 ? "4" : level >= 2 ? "2" : "1";
 }
 
 void apply_at_start() {
@@ -299,7 +304,7 @@ void apply_at_start() {
     }
     {
         std::string v;
-        if (hostui::get(kKeyAniso, v) && !v.empty()) gfxsw::set_aniso_level(aniso_from_setting(v));  // "1" (the old on/off) is 16x
+        gfxsw::set_aniso_level(saved_aniso_level());
         if (hostui::get(kKeyFxaa, v) && !v.empty()) gfxsw::set_fxaa(v == "1");
         if (hostui::get(kKeyBloom, v) && !v.empty()) gfxsw::set_bloom(v == "1");
         if (hostui::get(kKeyDistanceBlur, v) && !v.empty()) gfxsw::set_distance_blur(v == "1");

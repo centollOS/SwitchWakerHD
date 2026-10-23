@@ -212,7 +212,7 @@ void tab_picture() {
     }
     if (done) hostui::post([] { save_picture(); });
     {
-        // texture sharpness at an angle: 1x (off, the default) to 16x; saved as switchAniso (a saved "1" is 16x)
+        // texture sharpness at an angle: 1x (off, the default) to 16x; saved as switchAnisoLevel
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Anisotropic filtering");
         const int cur = gfxsw::aniso_level();
@@ -226,7 +226,7 @@ void tab_picture() {
                                    "Higher levels cost more GPU time: if the frame rate drops, lower it."))
                 {
                     gfxsw::set_aniso_level(n);
-                    hostui::post([n] { hostui::set(kKeyAniso, aniso_setting(n)); });
+                    hostui::post([n] { hostui::set(kKeyAnisoLevel, aniso_level_setting(n)); });
                 }
         }
     }
