@@ -156,7 +156,7 @@ void tab_warp() {
 void tab_picture() {
     using namespace switch_settings;
     // first, as the most useful thing here: it removes the black or late-appearing effects of places seen the first time
-    note("Recommended on the Switch: prepare the graphics once and new places stop showing black spots or objects that\n"
+    note("Recommended on the Switch: prepare the graphics once and new places stop showing black spots or objects that "
          "appear late.");
     if (prepare_graphics::ui_section()) set_open(false);  // platform/prepare_graphics_ui_switch.cpp
     // one picture profile per mode (as SwitchWaker): the one shown starts as the active mode's
