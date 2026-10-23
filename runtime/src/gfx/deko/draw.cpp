@@ -872,6 +872,7 @@ bool skip_gamepad() {
 // the GamePad picture. A buffer the game sends to the TV, never to the GamePad, and that nothing else reads is the
 // TV's only; its draws and color clears are skipped while the last frame presented the GamePad picture (so the
 // TV's is drawn again at once when the window needs it: before the first GamePad picture, the Pro Controller).
+std::atomic<bool> g_skipAo{env_switch("SKIP_AO", false)};
 std::atomic<bool> g_skipTv{env_switch("SKIP_TV", true)};
 bool skip_tv() {
     // the last frame showed the GamePad picture and this one will too (gamepad_view: what present() shows next), so
@@ -2243,6 +2244,22 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         g_shaderCodeLoaded = false;
         dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Shader);
     }
+    // test (Developer options "Skip ambient occlusion"): the occlusion pass's draw is not made; its target, a mask
+    // whose red and green channels hold the occlusion (1 = none, as on open ground), gets those channels set to 1
+    // instead (the draw's own scissor, the targets already bound), so the blur and the composite see no occlusion
+    // and the real shadows (the other channels) stay. The pass's inputs are still made.
+    if (g_skipAo.load(std::memory_order_relaxed) && is_occlusion(r, false) && is_occlusion(r, true)) {
+        int slot = 0;
+        for (int i = 0; i < 8; i++)
+            if (colors[i]) {
+                slot = i;
+                break;
+            }
+        dkCmdBufClearColorFloat(R.cmd, uint32_t(slot), DkColorMask_R | DkColorMask_G, 1.0f, 1.0f, 0.0f, 0.0f);
+        static uint64_t logged = 0;
+        if (!logged++) LOG("[dk] ambient occlusion skipped: the occlusion pass's target cleared to \"none\" instead");
+        R.perf.aoSkipped++;
+    } else
     if (indexed) {
         const int restart = stripRestart ? 1 : 0;
         const uint32_t hostRestart = indices.format == DkIdxFormat_Uint16 ? 0xFFFFu : 0xFFFFFFFFu;

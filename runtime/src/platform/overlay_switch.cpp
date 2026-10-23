@@ -22,6 +22,7 @@
 #include "../mods/mods.h"
 #include "../mods/warps.h"
 #include "../motion/motion.h"
+#include "../hle/olv_park.h"
 #include "../input_map.h"
 #include "../overlay/extensions.h"
 #include "../overlay/release_gate.h"
@@ -211,13 +212,23 @@ void tab_picture() {
     }
     if (done) hostui::post([] { save_picture(); });
     {
-        bool v;
-        if (check("16x anisotropic filtering", gfxsw::aniso(), &v)) {
-            gfxsw::set_aniso(v);
-            hostui::post([v] { hostui::set(kKeyAniso, v ? "1" : "0"); });
+        // texture sharpness at an angle: 1x (off, the default) to 16x; saved as switchAnisoLevel
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Anisotropic filtering");
+        const int cur = gfxsw::aniso_level();
+        for (int n : {1, 2, 4, 8, 16}) {
+            ImGui::SameLine();
+            char label[16];
+            snprintf(label, sizeof label, "%dx##aniso", n);
+            if (radio_tip(label, cur == n,
+                          n == 1 ? "Off, as the game draws it."
+                                 : "Sharper ground, sand and water textures seen at an angle, mostly at a distance.\n"
+                                   "Higher levels cost more GPU time: if the frame rate drops, lower it."))
+                {
+                    gfxsw::set_aniso_level(n);
+                    hostui::post([n] { hostui::set(kKeyAnisoLevel, aniso_level_setting(n)); });
+                }
         }
-        help("Sharper ground, sand and water textures seen at an angle, mostly at a distance.\n"
-             "Costs some GPU time: if the frame rate drops, turn it off.");
     }
     {
         bool v;
@@ -426,6 +437,32 @@ void tab_developer() {
         }
         help("Issue #49: what a draw does while its shader compiles. Saved. The log's [shader-wait] lines say how\n"
              "long it waited.");
+    }
+    heading("Performance tests");
+    {
+        // not saved: back to the defaults at the next start (debug server: shadowscale, noao, miiverse)
+        const float cur = gfxsw::shadow_scale();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Shadow map size");
+        for (float f : {0.5f, 1.0f, 2.0f}) {
+            ImGui::SameLine();
+            char label[24];
+            snprintf(label, sizeof label, "%.1fx##shadow", f);
+            if (radio_tip(label, std::fabs(cur - f) < 0.01f,
+                          f < 1 ? "The three 1024x1024 shadow maps are drawn at half the size (512x512): cheaper, blockier shadows."
+                          : f > 1 ? "The shadow maps are drawn at twice the size (2048x2048): sharper shadows, more GPU time and memory."
+                                  : "The game's own shadow map size (1024x1024)."))
+                gfxsw::set_shadow_scale(f);
+        }
+        help("Test: how big the shadow maps are drawn. Not saved: 1x at the next start.");
+        bool skip;
+        if (check("Skip ambient occlusion", gfxsw::skip_ao(), &skip)) gfxsw::set_skip_ao(skip);
+        help("Test: the ambient-occlusion pass is not drawn and the game sees no occlusion (the soft dark corners\n"
+             "and creases); the real shadows stay. Saves GPU time. Not saved: off at the next start.");
+        bool stop;
+        if (check("Stop the Miiverse thread", hle_olv::parked(), &stop)) hle_olv::set_parked(stop);
+        help("Test: the game's Miiverse thread (Tingle Bottle and Miiverse requests, which always fail here) stops\n"
+             "instead of running a step every millisecond. Frees some of a CPU core. Not saved: off at the next start.");
     }
     heading("Frame rate (test)");
     {

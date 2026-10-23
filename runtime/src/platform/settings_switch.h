@@ -44,7 +44,8 @@ constexpr const char* kKeySaturation = "switchSaturation";
 constexpr const char* kKeyGamma = "switchGamma";
 constexpr const char* kKeyFpsCounter = "switchFpsCounter";
 constexpr const char* kKeyCaptureCombo = "switchCaptureCombo";
-constexpr const char* kKeyAniso = "switchAniso";
+constexpr const char* kKeyAnisoLevel = "switchAnisoLevel";  // anisotropic filtering: 1 (off, the default), 2, 4, 8, 16
+constexpr const char* kKeyAniso = "switchAniso";  // the old on/off key: read only when switchAnisoLevel is absent ("1" = 16x), never written
 constexpr const char* kKeyFxaa = "switchFxaa";                   // gfxsw::fxaa (issue #21), off by default
 constexpr const char* kKeyBloom = "switchBloom";                 // gfxsw::bloom
 constexpr const char* kKeyDistanceBlur = "switchDistanceBlur";  // gfxsw::distance_blur
@@ -63,6 +64,9 @@ constexpr const char* kKeyShaderWait = "switchShaderWait";
 // per mode: <key>.handheld / <key>.docked
 constexpr const char* kKeyResScale = "switchResScale";
 constexpr const char* kKeyDynamicRes = "switchDynamicRes";
+// the saved anisotropic level: switchAnisoLevel, else the old switchAniso ("1" meant 16x, "0" off), else 1 (off)
+int saved_aniso_level();
+const char* aniso_level_setting(int level);  // "1", "2", "4", "8" or "16": what switchAnisoLevel holds
 void save_picture();       // the current picture adjustments into settings.ini
 // debug: both sticks clicked capture the next frame (PNGs on the SD card, a few seconds' freeze); off by
 // default so it cannot happen by accident (Switch tab; saved)
