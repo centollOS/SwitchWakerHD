@@ -7,6 +7,9 @@ else()
   set(WWHD_SWITCH OFF)
 endif()
 
+# (this fork) profile-guided optimisation: WWHD_PGO=GEN|USE (docs/pgo.md); off by default
+include(${CMAKE_SOURCE_DIR}/cmake/SwitchPgo.cmake)
+
 if(WWHD_SWITCH)
   # DEKO3D: deko3d (the Switch's own GPU API, docs/deko3d-plan.md) with the libnx host, the only renderer
   # there (the OpenGL renderer it replaced was removed after dev 207349b). Upstream's renderer choice is skipped.
@@ -94,6 +97,14 @@ macro(switch_port_executable)
     target_compile_definitions(gamecode PRIVATE PPC_BASE_REG=1)
     target_compile_options(wwhd PRIVATE -ffixed-x28)
     target_compile_definitions(wwhd PRIVATE PPC_BASE_REG=1)
+  endif()
+  # (this fork) the runtime's extern symbols hidden: devkitPro's toolchain is -fPIC, which loads every extern symbol
+  # with default visibility through the GOT (runtime/include/switch_visibility.h); the game code gets the same
+  # from switch_code_align.h. WWHD_SWITCH_HIDDEN=OFF for a build without it.
+  option(WWHD_SWITCH_HIDDEN "Switch: hidden symbol visibility in the runtime (no GOT loads of extern symbols)" ON)
+  if(WWHD_SWITCH AND WWHD_SWITCH_HIDDEN)
+    target_compile_options(wwhd PRIVATE -fvisibility=hidden
+                           "SHELL:-include \"${CMAKE_SOURCE_DIR}/runtime/include/switch_visibility.h\"")
   endif()
   # guest mods built into the NRO (tools/switch/guest_mods.py, docs/guest-mods-switch-plan.md): their modules are
   # compiled as game code (same flags, x28); without build/guest-mods/registry.c the NRO has none
@@ -261,4 +272,5 @@ macro(switch_port_executable)
 
     nx_create_nro(wwhd NACP "${WWHD_NACP_FILE}" ${WWHD_ICON_ARG} OUTPUT ${WWHD_NRO_OUTPUT})
   endif()
+  switch_pgo_configure()  # (this fork) cmake/SwitchPgo.cmake: after all the target's sources are known
 endmacro()

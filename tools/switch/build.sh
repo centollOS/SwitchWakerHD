@@ -72,7 +72,7 @@ for link in build/gen; do
         mounts+=(-v "$target":"$target":ro)
     fi
 done
-dir=build/switch-dk
+dir=${WWHD_BUILD_DIR:-build/switch-dk}  # (this fork) another folder for a second build next to the usual one (PGO: docs/pgo.md)
 # deko3d's release library unless WWHD_DEKO3D_DEBUG_LIB=ON (checks every call, readable errors)
 debuglib=${WWHD_DEKO3D_DEBUG_LIB:-OFF}
 out=wwhd.nro
@@ -83,6 +83,12 @@ options="-DWWHD_RENDERER=DEKO3D -DWWHD_DEKO3D_DEBUG_LIB=$debuglib -DWWHD_SWITCH_
 # (this fork) WWHD_HEAP_CENSUS=ON: a diagnostics build that counts malloc by call site (the debug server's heap
 # command); passed every time, so the next build without it is a normal one again
 options="$options -DWWHD_HEAP_CENSUS=${WWHD_HEAP_CENSUS:-OFF}"
+# (this fork) profile-guided optimisation, docs/pgo.md: WWHD_PGO=GEN (training build) or USE (with WWHD_PGO_DIR, the .gcda
+# files); passed every time like the options above
+options="$options -DWWHD_PGO=${WWHD_PGO:-OFF}"
+[[ -n ${WWHD_PGO_SCOPE:-} ]] && options="$options -DWWHD_PGO_SCOPE=$WWHD_PGO_SCOPE"
+[[ -n ${WWHD_PGO_DIR:-} ]] && options="$options -DWWHD_PGO_DIR=$WWHD_PGO_DIR"
+[[ -n ${WWHD_PGO_USE_FLAGS:-} ]] && options="$options \"-DWWHD_PGO_USE_FLAGS=$WWHD_PGO_USE_FLAGS\""
 # The NRO's icon is made here, on the host, as make_sd.py and the forwarder scripts do: the container has no
 # Pillow, so CMake gets a finished JPEG. Icon: --icon (any path), else made from the game's files (make_icon.py:
 # the title-screen logo, or meta/iconTex.tga) of WWHD_GAME_DIR (the extracted game, make_sd.py), else of build/sd,

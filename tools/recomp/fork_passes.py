@@ -12,6 +12,11 @@ import re
 import sys
 import time
 
+# a call that is not a tail call: a game function (direct or through the call-site cache), a runtime function, an import
+CALL_TOKEN = re.compile(r"(?<!MUSTTAIL return )\b(?:f_[0-9A-F]{8}(?:_orig)?|imp_\w+|hook_[0-9A-F]{8}|site_[0-9A-F]{8}"
+                        r"|ppc_(?!unimplemented\b)\w+)\(|\bPPC_ICALL\(|\bPPC_HOOK_CALL\(|\bPPC_IJUMP\(")
+
+import calleeregs
 import crlive
 import leaflocal
 import ppc2c
@@ -52,6 +57,13 @@ HELPER_MAX_INSNS = 80
 # as any function). Was struct form; the hottest hooked functions (the star field, the sea, the waves) are ~10% of the
 # Switch's main thread. On unless WWHD_RECOMP_HOOKED_LOCALS=0
 HOOKED_LOCALS = ppc2c.pass_on("WWHD_RECOMP_HOOKED_LOCALS")
+# callee-saved registers' write-backs before direct calls to ordinary game functions as PPC_WB_SAVED (leaflocal.py
+# ELIDE_SAVED_REGS; empty on the Switch, kept on the desktop and in the checking build): on unless
+# WWHD_RECOMP_ELIDE_SAVED=0
+ELIDE_SAVED = ppc2c.pass_on("WWHD_RECOMP_ELIDE_SAVED")
+# volatile registers' write-backs before direct calls to ordinary game functions left out where the callee neither
+# reads them nor the caller needs them afterwards (calleeregs.py, leaflocal.py): on unless WWHD_RECOMP_CALLEE_REGS=0
+CALLEE_REGS = ppc2c.pass_on("WWHD_RECOMP_CALLEE_REGS")
 # return-address stores of direct calls to ordinary functions through PPC_SET_LR (nothing on the
 # Switch): on unless WWHD_RECOMP_LR=0
 LR_ELIDE = ppc2c.pass_on("WWHD_RECOMP_LR")
@@ -376,6 +388,105 @@ class ForkPasses:
         self.helper_inlined = getattr(self, "helper_inlined", 0) + 1
         return " ".join(parts) if tail else "{ %s }" % " ".join(parts)  # (translate's link code comes before)
 
+    def plain_callees(self):
+        """The call names ("f_XXXXXXXX") of ordinary game functions: not hooked by the runtime, not a save/restore
+        helper (ELIDE_SAVED)."""
+        if not hasattr(self, "_plain"):
+            hooked = {"f_%08X" % self.sym(a) for a in self.hooks}
+            self._plain = frozenset("f_%08X" % self.sym(a) for a in self.entries) - hooked - {
+                "f_%08X" % self.sym(a) for a in self.saved_clobbers}
+        return self._plain
+
+    def fork_summaries(self):
+        """run(), after fork_prepare and before any function is emitted: what every game function reads and writes
+        (calleeregs.py). Each function is translated once more for it, up to the point where its locals are made."""
+        self.callee_summ = None
+        self.summary_pass = False
+        if not (CALLEE_REGS and NONLEAF and ELIDE_SAVED) or not hasattr(self, "saved_clobbers"):
+            return
+        if any(self.fork_mod_check(a) for a in self.sorted_entries):
+            sys.stderr.write("callee register summaries: off (guest mods may replace any function)\n")
+            return
+        t0 = time.time()
+        saved = (list(self.cr_stats), getattr(self, "helper_inlined", 0), self.unhandled.copy(), set(self.used_imports))
+        hooked = {"f_%08X" % self.sym(a) for a in self.hooks}
+        abi = self.runtime_abi_hooks() & hooked
+        self.callee_summ_build = calleeregs.Summaries(unknown=hooked - abi, abi_hooked=abi)
+        self.summary_pass = True
+        for start in self.sorted_entries:
+            self.emit_function(start)
+        self.summary_pass = False
+        self.cr_stats, self.helper_inlined, self.unhandled, self.used_imports = saved[0], saved[1], saved[2], saved[3]
+        summ = self.callee_summ_build.solve()
+        self.callee_summ = summ
+        dump = os.environ.get("WWHD_RECOMP_DUMP_SUMMARIES")  # a diagnostic: name, LI, MD, why (hex masks), one line each
+        if dump:
+            with open(dump, "w") as f:
+                for name in sorted(summ.nodes):
+                    nodes = summ.nodes[name]
+                    flags = "".join(c for c, on in (("U", any(nd.unknown for nd in nodes)), ("I", any(nd.indirect for nd in nodes)),
+                                                    ("T", any(nd.tail for nd in nodes)), ("C", any(nd.calls for nd in nodes))) if on)
+                    f.write("%s %x %x %s\n" % (name, summ.li[name], summ.md[name], flags))
+        if dump:
+            users = {}
+            for name, nodes in summ.nodes.items():
+                for nd in nodes:
+                    for c in nd.calls + ([nd.tail] if nd.tail else []):
+                        if c in summ.unknown or c not in summ.nodes:
+                            users.setdefault(c, set()).add(name)
+            with open(dump + ".unknown", "w") as f:
+                for c, who in sorted(users.items(), key=lambda kv: -len(kv[1])):
+                    f.write("%s %d\n" % (c, len(who)))
+        reads = sum(bin(v).count("1") for v in summ.li.values()) / max(1, len(summ.li))
+        writes = sum(bin(v).count("1") for v in summ.md.values()) / max(1, len(summ.md))
+        sys.stderr.write("callee register summaries: %d functions, %d updates, %.1f s; a function reads %.1f and writes "
+                         "%.1f volatile registers on average (of 25)\n"
+                         % (len(summ.li), summ.rounds, time.time() - t0, reads, writes))
+
+    def fork_stats(self):
+        """run(), done: what the volatile-register elision did"""
+        st = leaflocal.STATS
+        if st["calls"]:
+            sys.stderr.write("callee registers: %d direct calls; of %d dirty volatile registers %d stored, %d left out (%.0f%%); "
+                             "%d of %d read-backs left out\n" % (st["calls"], st["dirty"], st["stored"], st["skipped"],
+                                                                  100.0 * st["skipped"] / max(1, st["dirty"]),
+                                                                  st["reloads_skipped"], st["reloads"]))
+
+    def runtime_abi_hooks(self):
+        """The hooked functions ("f_XXXXXXXX") whose runtime hook reads only the calling convention's argument
+        registers, and whatever the original reads (it calls f_XXXXXXXX_orig). It holds for every hook today, and
+        the check keeps it so: the runtime's sources may read r0, r11, r12, f0 or f9-f13 of the guest only in an
+        instruction hook (site_XXXXXXXX, which a function reading everything is assumed to contain) or in store_aspect
+        (called from two of those); a hook whose definition is not in the sources is not assumed anything. If the
+        invariant is broken the set is empty: hooked functions read everything."""
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "runtime", "src")
+        text = {}
+        for dp, _, fns in os.walk(root):
+            for fn in fns:
+                if fn.endswith((".cpp", ".h", ".inc", ".c")):
+                    with open(os.path.join(dp, fn), errors="replace") as f:
+                        text[os.path.join(dp, fn)] = f.read()
+        mention = re.compile(r"c->r\[(?:0|11|12)\]|c->f\[(?:0|9|1[0-3])\]")
+        func = re.compile(r"\b(\w+)\(Cpu\* c\)\s*\{")
+        for path, t in text.items():
+            for m in mention.finditer(t):
+                owners = list(func.finditer(t, 0, m.start()))
+                owner = owners[-1].group(1) if owners else ""
+                if not (owner.startswith("site_") or owner == "store_aspect"):
+                    sys.stderr.write("callee registers: %s reads %s in %s: hooks are assumed to read everything\n"
+                                     % (os.path.relpath(path, root), m.group(0), owner or "?"))
+                    return set()
+        defined = set()
+        for t in text.values():
+            defined.update("f_" + h for h in re.findall(r"\bhook_([0-9A-F]{8})\(", t))
+        return defined
+
+    def fork_record_summary(self, start, fname, body):
+        """emit_function in the summary pass: the function's statements (as leaflocal will see them)"""
+        stmts = [("site_%08X(c); " % self.sym(a) if a in self.sites else "") + s for a, _, s in body]
+        nxt = ("f_%08X_orig" if self.cur_end in self.hooks else "f_%08X") % self.sym(self.cur_end)
+        self.callee_summ_build.add(fname, stmts, [a for a, _, _ in body], nxt)
+
     def fork_dead_tail(self):
         """emit_function: the body ends in an unconditional return or branch (no fall-through tail call)."""
         return getattr(self, "dead_tail", False)
@@ -398,7 +509,9 @@ class ForkPasses:
         elif NONLEAF and plain:
             # instruction hooks become part of their statement, so they get the call treatment
             with_sites = [("site_%08X(c); " % self.sym(a) if a in self.sites else "") + s for a, _, s in body]
-            done = leaflocal.transform_nonleaf(with_sites, start, [a for a, _, _ in body], self.saved_clobbers_sym)
+            done = leaflocal.transform_nonleaf(with_sites, start, [a for a, _, _ in body], self.saved_clobbers_sym,
+                                               self.plain_callees() if ELIDE_SAVED else None,
+                                               getattr(self, "callee_summ", None))
             if done:
                 prologue, stmts, tail_wb = done
                 body = [(a, w, s) for (a, w, _), s in zip(body, stmts)]
@@ -406,6 +519,15 @@ class ForkPasses:
                 self.nonleaf_count += 1
                 sites_done = True
         return body, (tail_wb + " " if tail_wb else ""), sites_done
+
+    def fork_frame_free(self, body):
+        """emit_function: whether the function makes no call except (in the slow path of its entry check) the yield, so
+        that PPC_ENTER_FN (ppc.h, the slow path as a tail call) saves it a stack frame. A leaf made into locals is
+        one; any other function counts when its statements hold no call (a tail call, MUSTTAIL return f(c), makes no
+        frame). A function with calls gets the plain PPC_ENTER: the same hot path, and a smaller cold one."""
+        if self.emitted_leaf:
+            return True
+        return not any(CALL_TOKEN.search(s) for _, _, s in body)
 
     def fork_end_function(self, hooked, body):
         """emit_function, done: an inline copy is possible for a leaf that ends in an unconditional return
@@ -454,6 +576,8 @@ class ForkPasses:
             for a in sorted(inline_src):
                 text = inline_src[a].replace("void f_%08X(Cpu* __restrict c) {" % self.sym(a),
                                              "static inline __attribute__((always_inline)) void fi_%08X(Cpu* __restrict c) {" % self.sym(a), 1)
+                # (a tail call cannot be inlined: the copy keeps the plain check, ppc.h PPC_ENTER_FN)
+                text = re.sub(r"PPC_ENTER_FN\((0x[0-9A-Fa-f]+u), f_[0-9A-Fa-f_a-z]+\)", r"PPC_ENTER(\1)", text, count=1)
                 lines = text.split("\n")
                 for i in range(len(lines) - 1, -1, -1):  # the unreachable fall-through
                     if "MUSTTAIL return" in lines[i]:
@@ -500,7 +624,7 @@ class ForkPasses:
     def fork_table_head(self):
         """table.c, after the includes: which passes made this code (logged at boot)"""
         variant = ", ".join(n for n, on in (("cr liveness", CRLIVE), ("leaf locals", LEAF), ("nonleaf locals", NONLEAF),
-                                             ("hot layout", HOT), ("dead tails", DEAD_TAIL), ("helpers inlined", HELPER_INLINE), ("hooked locals", HOOKED_LOCALS), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
+                                             ("hot layout", HOT), ("dead tails", DEAD_TAIL), ("helpers inlined", HELPER_INLINE), ("hooked locals", HOOKED_LOCALS), ("callee-saved write-backs elided", ELIDE_SAVED), ("volatile write-backs by callee", CALLEE_REGS and ELIDE_SAVED), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
                                              ("single-precision tracking", ppc2c.SINGLE),
                                              ("whole-program single precision", ppc2c.SINGLE and singleflow.INTERPROC),
                                              ("static GQRs", GQR_STATIC), ("jump-site caches", IJUMP)) if on)
