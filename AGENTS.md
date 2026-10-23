@@ -58,15 +58,17 @@ lines as they are, and never call a difference inside the printed interval a gai
 ## Defaults are for the player
 
 A fresh install (no `settings.ini`) must start with player defaults: debug server off, frame-rate counter
-and every diagnostic, perf or capture option off, stock clocks, mods off, no `[dev]` section. A new
+and every diagnostic, perf or capture option off, stock CPU clock and the default GPU profile (460 MHz), mods off, no `[dev]` section. A new
 diagnostic or test option ships off and goes in the Switch tab's Debug section. Check the fresh-install
 defaults again whenever the settings code changes; a player's saved `settings.ini` keeps what they chose.
 
 ## Clocks
 
-The defaults are the stock CPU 1020 MHz and the stock GPU profile (docs/switch-port.md, "Settings"). The
-higher CPU steps (up to 1785) and GPU profiles are opt-in menu choices for players who want them; do not
-make one the default or propose an overclock as a fix: speed comes from the code. The target is 720p
+The defaults are the stock CPU 1020 MHz and the GPU profile 460.8 MHz, Nintendo's highest handheld profile
+(the owner's choice, 2026-10-23; docs/switch-port.md, "Settings"). Stock 307 and 384 MHz stay menu choices. The
+port sets no overclock (no CPU above 1020, no GPU above Nintendo's profiles; sys-clk is the player's own): do
+not propose one as a fix; speed comes from the code. Performance tests state the GPU profile they ran at, and
+check the `[dk] clocks` lines: sys-clk overrides the port's clocks. The target is 720p
 (1280x720 internal) at 30 fps.
 
 ## The SD card without the debug server

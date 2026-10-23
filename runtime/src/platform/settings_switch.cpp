@@ -10,8 +10,10 @@
 // on dock/undock, so a choice is set once. apm needs title mode (an application); in applet mode the
 // profile is skipped. A choice falls back to the next lower one when apm refuses it. The handheld
 // configuration found at start is restored at exit.
-// The menu's saved choice (default | 384 | 460 | 1600 (460 with memory 1600)); without it, the system's own (stock:
-// GPU 307 MHz, memory 1331 MHz; 2026-10-08, the owner: stock clocks by default).
+// The menu's saved choice (307 | 384 | 460 | 1600 (460 with memory 1600)); without it, GPU 460 MHz (2026-10-23, the
+// owner: Nintendo's highest handheld profile by default; from 2026-10-08 it was stock, before that 460 + memory 1600).
+// "307" is the system's own stock configuration (nothing set). A saved "default" (written by the menu before
+// 2026-10-23, when it meant stock) now means the default, 460 MHz.
 //
 // Clocks set through clkrst (CPU 1020-1785 MHz steps, GPU 614.4 MHz in handheld, as sys-clk does; 2026-10-07)
 // were removed 2026-10-13: with the CPU at 1224 MHz an Erista console did not wake from sleep (black screen,
@@ -40,12 +42,12 @@ namespace switch_settings {
 namespace {
 
 std::mutex g_mu;
-int g_profile = kGpuDefault;
+int g_profile = kGpuDefaultChoice;
 bool g_apm_ready = false, g_apm_failed = false;
 u32 g_apm_saved = 0x00020003, g_apm_now = 0;
 
-const char* const kIds[kGpuProfiles] = {"default", "384", "460", "1600"};
-const char* const kLabels[kGpuProfiles] = {"Stock (GPU 307 MHz, default)", "GPU 384 MHz", "GPU 460 MHz",
+const char* const kIds[kGpuProfiles] = {"307", "384", "460", "1600"};
+const char* const kLabels[kGpuProfiles] = {"Stock (GPU 307 MHz)", "GPU 384 MHz", "GPU 460 MHz (default)",
                                            "GPU 460 MHz + memory 1600 MHz"};
 
 // picture profiles per mode (g_mu); the mode whose profile the renderer has (-1: none yet)
@@ -214,12 +216,12 @@ void set_gamepad_pip(bool on) {
 }
 
 void apply_at_start() {
-    // GPU profile: the saved choice, else the system's own (stock)
+    // GPU profile: the saved choice, else the default (460 MHz)
     std::string id;
     const bool saved = hostui::get(kKeyGpuProfile, id) && !id.empty();
     {
         std::lock_guard<std::mutex> lk(g_mu);
-        int p = kGpuDefault;
+        int p = kGpuDefaultChoice;
         for (int i = 0; i < kGpuProfiles; i++)
             if (id == kIds[i]) p = i;
         if (id == "614") {
@@ -229,8 +231,8 @@ void apply_at_start() {
         g_profile = p;
         u32 chain[4] = {};
         chain_for(p, chain);
-        LOG("[switch] gpu profile %s (%s)", kIds[p], saved ? "settings" : "default");
-        if (p != kGpuDefault) apply(kIds[p], chain);
+        LOG("[switch] gpu profile %s (%s)", kIds[p], saved && id != "default" ? "settings" : "default");
+        if (p != kGpuStock) apply(kIds[p], chain);
     }
     // a CPU clock saved by an older version: no longer set (#33)
     {
