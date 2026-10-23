@@ -281,7 +281,6 @@ void tab_picture() {
             {1.0f, "Original", "The game's own shadow map size: sharper shadow edges, a little slower in the busiest views."},
             {2.0f, "High", "Draws the shadow maps at twice the size: sharper shadows, but about 17-20% slower in the busiest views\n(Outset's tall grass, the lookout) and more memory."}};
         for (const Q& q : quals) {
-            if (q.f > 1.0f && !dev_options() && cur <= 1.0f) continue;  // High: a test, with developer options
             ImGui::SameLine();
             char label[24];
             snprintf(label, sizeof label, "%s##shadowq", q.label);
@@ -290,6 +289,16 @@ void tab_picture() {
                 hostui::post([f = q.f] { hostui::set(kKeyShadowScale, f < 1 ? "0.5" : f > 1 ? "2" : "1"); });
             }
         }
+    }
+    {
+        // ambient occlusion on (the game's own look, the default) or off; saved as switchAmbientOcclusion
+        bool on;
+        if (check("Ambient occlusion", !gfxsw::skip_ao(), &on)) {
+            gfxsw::set_skip_ao(!on);
+            hostui::post([on] { hostui::set(kKeyAmbientOcclusion, on ? "1" : "0"); });
+        }
+        help("The soft dark corners and creases the game adds where surfaces meet. Off draws them flat and is about 1%\n"
+             "faster in the busiest views (Outset's tall grass, the lookout); the real shadows stay. Default: on.");
     }
     heading("Frame rate counter");
     static const char* const modes[] = {"Off", "Frame rate", "Frame rate and load"};
@@ -501,12 +510,7 @@ void tab_developer() {
     }
     heading("Performance tests");
     {
-        // not saved: off at the next start (debug server: noao, miiverse; shadowscale is in the Speed tab)
-        bool skip;
-        if (check("Skip ambient occlusion", gfxsw::skip_ao(), &skip)) gfxsw::set_skip_ao(skip);
-        help("Test: the ambient-occlusion pass is not drawn and the game sees no occlusion (the soft dark corners\n"
-             "and creases); the real shadows stay.\n"
-             "Measured: about +1% fps in the busiest views, nothing elsewhere. Not saved: off at the next start.");
+        // not saved: off at the next start (debug server: miiverse; shadowscale and noao are in the Picture tab)
         bool stop;
         if (check("Stop the Miiverse thread", hle_olv::parked(), &stop)) hle_olv::set_parked(stop);
         help("Test: the game's Miiverse thread (Tingle Bottle and Miiverse requests, which always fail here) stops\n"

@@ -45,6 +45,7 @@ constexpr const char* kKeyGamma = "switchGamma";
 constexpr const char* kKeyFpsCounter = "switchFpsCounter";
 constexpr const char* kKeyCaptureCombo = "switchCaptureCombo";
 constexpr const char* kKeyShadowScale = "switchShadowScale";  // shadow map scale: "0.5" (Fast, the default), "1" (Original), "2" (High)
+constexpr const char* kKeyAmbientOcclusion = "switchAmbientOcclusion";  // "1" on (the default), "0" off (gfxsw::skip_ao)
 constexpr const char* kKeyAnisoLevel = "switchAnisoLevel";  // anisotropic filtering: 1 (off, the default), 2, 4, 8, 16
 constexpr const char* kKeyAniso = "switchAniso";  // the old on/off key: read only when switchAnisoLevel is absent ("1" = 16x), never written
 constexpr const char* kKeyFxaa = "switchFxaa";                   // gfxsw::fxaa (issue #21), off by default

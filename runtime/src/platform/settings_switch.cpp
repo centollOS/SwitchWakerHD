@@ -303,6 +303,7 @@ void apply_at_start() {
         std::string v;
         gfxsw::set_aniso_level(saved_aniso_level());
         if (hostui::get(kKeyShadowScale, v) && !v.empty()) gfxsw::set_shadow_scale(float(atof(v.c_str())));
+        if (hostui::get(kKeyAmbientOcclusion, v) && !v.empty()) gfxsw::set_skip_ao(v == "0");
         if (hostui::get(kKeyFxaa, v) && !v.empty()) gfxsw::set_fxaa(v == "1");
         if (hostui::get(kKeyBloom, v) && !v.empty()) gfxsw::set_bloom(v == "1");
         if (hostui::get(kKeyDistanceBlur, v) && !v.empty()) gfxsw::set_distance_blur(v == "1");
