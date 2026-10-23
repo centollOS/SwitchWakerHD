@@ -93,6 +93,24 @@ bool check(const char* label, bool value, bool* out, bool enabled = true) {
     *out = v;
     return changed;
 }
+// a widget's label in the player's language with a fixed ImGui id, so the id does not change with the language
+std::string lbl(const char* text, const char* id) { return std::string(text) + "##" + id; }
+// motion::status() (upstream's English) in the player's language; a text not known here stays as it is
+std::string gyro_status() {
+    const ui_text::MenuTexts& m = ui_text::menu();
+    std::string s = motion::status();
+    static const std::string kStick = " The right stick is pushed: the game ignores the gyro until it is released.";
+    const bool stick = s.size() > kStick.size() && s.compare(s.size() - kStick.size(), kStick.size(), kStick) == 0;
+    if (stick) s.resize(s.size() - kStick.size());
+    const char* t = s == "Receiving motion." ? m.gyroReceiving
+                    : s.rfind("Receiving motion; calibrating", 0) == 0 ? m.gyroCalibrating
+                    : s == "A controller with a gyro is connected, no motion yet." ? m.gyroNoMotion
+                    : s.rfind("No connected controller has a gyro", 0) == 0 ? m.gyroNone
+                    : s.rfind("Gyro off", 0) == 0 ? m.gyroOff
+                                                  : nullptr;
+    if (!t) return motion::status();
+    return std::string(t) + (stick ? m.gyroStick : "");
+}
 // the gyro settings, saved as the Controls tab saves them (overlay.cpp save_gyro)
 void save_gyro(const motion::Settings& g) {
     hostui::post([g] {
@@ -100,7 +118,7 @@ void save_gyro(const motion::Settings& g) {
         for (const char* k : motion::kKeys) hostui::set(k, motion::value_of(g, k));
     });
 }
-// "Show developer options" (Picture tab): the Dev tab appears; saved as switchDevOptions, off by
+// "Show developer options" (Dev tab): the Dev tab appears; saved as switchDevOptions, off by
 // default. Only the menu: a debug server that is running keeps running either way.
 std::atomic<int> g_dev{-1};  // -1: not read yet
 }  // namespace
@@ -125,28 +143,29 @@ namespace {
 // hidden until the player ticks the box (not saved: it is off again at every start); the debug server's
 // `warp` command does not need it.
 void tab_warp() {
+    const ui_text::MenuTexts& tx = ui_text::menu();
     static bool unlocked = false;
-    warn("Warning: warping can break the story. Going somewhere before the game gets there can leave events in "
-         "that place stuck or out of order, and the game may save it. Try it on a copy of your save.");
+    warn("%s", tx.warpWarning);
     bool v;
-    if (check("I understand, show the warp destinations", unlocked, &v)) unlocked = v;
+    if (check(lbl(tx.warpUnlock, "warpunlock").c_str(), unlocked, &v)) unlocked = v;
     if (!unlocked) return;
     const char* cur = reinterpret_cast<const char*>(mem::ptr(GD(0x1046F0B0) + 0x5134));  // the start stage
-    note("Now in: %.8s%s", cur, mods::warp_pending() ? "   (a warp is waiting for a loaded file or the current scene change)" : "");
+    note(tx.warpNowIn, cur, mods::warp_pending() ? tx.warpPending : "");
     auto go = [](const mods::Warp& w) {
         mods::request_warp(w.stage, w.room, w.point);
         set_open(false);  // the game takes over: fade, load, spawn
     };
-    heading("Main places");
+    heading(tx.warpMain);
     for (const mods::Warp& w : mods::kMainWarps) {
         char label[96];
         snprintf(label, sizeof label, "%s##main%s%d", w.label, w.stage, w.room);
         if (ImGui::Selectable(label)) go(w);
     }
-    heading("Every stage");
+    heading(tx.warpAll);
     for (const mods::Warp& w : mods::kAllWarps) {
-        char label[64];
-        snprintf(label, sizeof label, "%s  (room %d, point %d)##all", w.stage, w.room, w.point);
+        char label[96];
+        int n = snprintf(label, sizeof label, tx.warpRoomPoint, w.stage, w.room, w.point);
+        if (n >= 0 && size_t(n) < sizeof label) snprintf(label + n, sizeof label - size_t(n), "##all");
         if (ImGui::Selectable(label)) go(w);
     }
 }
@@ -157,22 +176,22 @@ void tab_warp() {
 // Picture: resolution per mode, colours and effects
 void tab_picture() {
     using namespace switch_settings;
+    const ui_text::MenuTexts& tx = ui_text::menu();
     // first, as the most useful thing here: it removes the black or late-appearing effects of places seen the first
     // time. One text, below its button (in the game's language, ui_text_switch.cpp); the button says where a sweep stands
     if (prepare_graphics::ui_section()) set_open(false);  // platform/prepare_graphics_ui_switch.cpp
     // one picture profile per mode (as SwitchWaker): the one shown starts as the active mode's
-    heading("Resolution");
+    heading(tx.resolution);
     static int edit = -1;
     const int active = active_mode();
     if (edit < 0) edit = active;
     for (int m = 0; m < kModes; m++) {
         if (m) ImGui::SameLine();
-        std::string label = mode_label(m);
-        if (m == active) label += "  (active)";
-        if (radio(label.c_str(), edit == m)) edit = m;
+        std::string label = m == kDocked ? tx.docked : tx.handheld;
+        if (m == active) label += tx.active;
+        if (radio(lbl(label.c_str(), kDocked == m ? "docked" : "handheld").c_str(), edit == m)) edit = m;
     }
-    help("Each mode keeps its own internal resolution and dynamic resolution;\n"
-         "they apply by themselves when the console is docked or undocked.");
+    help(tx.modeHelp);
     const ResProfile rp = res_profile(edit);
     static const float scales[] = {1.0f, 1.25f, 1.5f};  // (a saved 0.75 still applies; the menu no longer offers it)
     static const char* const names[] = {"1x  (1280x720)", "1.25x  (1600x900)", "1.5x  (1920x1080)"};
@@ -183,34 +202,34 @@ void tab_picture() {
             hostui::post([m = edit, rp, s] { set_res_profile(m, {s, rp.dynamic}); });
     }
     bool dyn;
-    if (check("Dynamic resolution", rp.dynamic, &dyn))
+    if (check(lbl(tx.dynamicRes, "dynres").c_str(), rp.dynamic, &dyn))
         hostui::post([m = edit, rp, dyn] { set_res_profile(m, {rp.scale, dyn}); });
-    help("Lowers the internal resolution while the GPU cannot hold 30 fps, and raises it again when it can.");
-    if (edit != active) note("Applies when the console is %s.", edit == kDocked ? "docked" : "in handheld mode");
-    else note("Internal resolution now: %.2f.", gfxsw::dynamic_res_scale());
+    help(tx.dynamicResHelp);
+    if (edit != active) note("%s", edit == kDocked ? tx.appliesDocked : tx.appliesHandheld);
+    else note(tx.resNow, gfxsw::dynamic_res_scale());
 
-    heading("Colours and effects");
+    heading(tx.colours);
     gfxsw::PictureGrade g = gfxsw::picture_grade_now();
     bool changed = false, done = false;
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
-    changed |= ImGui::SliderFloat("Exposure", &g.exposure, 0.5f, 1.5f, "%.2f");
+    changed |= ImGui::SliderFloat(lbl(tx.exposure, "exposure").c_str(), &g.exposure, 0.5f, 1.5f, "%.2f");
     done |= ImGui::IsItemDeactivatedAfterEdit();
-    help("Below 1 tames bright areas (sky, sea)");
-    changed |= ImGui::SliderFloat("Contrast", &g.contrast, 0.5f, 2.0f, "%.2f");
+    help(tx.exposureHelp);
+    changed |= ImGui::SliderFloat(lbl(tx.contrast, "contrast").c_str(), &g.contrast, 0.5f, 2.0f, "%.2f");
     done |= ImGui::IsItemDeactivatedAfterEdit();
-    changed |= ImGui::SliderFloat("Saturation", &g.saturation, 0.0f, 2.0f, "%.2f");
+    changed |= ImGui::SliderFloat(lbl(tx.saturation, "saturation").c_str(), &g.saturation, 0.0f, 2.0f, "%.2f");
     done |= ImGui::IsItemDeactivatedAfterEdit();
-    changed |= ImGui::SliderFloat("Gamma", &g.gamma, 0.5f, 2.0f, "%.2f");
+    changed |= ImGui::SliderFloat(lbl(tx.gamma, "gamma").c_str(), &g.gamma, 0.5f, 2.0f, "%.2f");
     done |= ImGui::IsItemDeactivatedAfterEdit();
-    help("Above 1 deepens mid-tones and shadows, below 1 lifts them");
+    help(tx.gammaHelp);
     ImGui::PopItemWidth();
     if (changed) gfxsw::set_picture_grade(g);
-    if (ImGui::Button("Original colours")) {
+    if (ImGui::Button(lbl(tx.originalColours, "origcolours").c_str())) {
         gfxsw::set_picture_grade(gfxsw::PictureGrade{});
         done = true;
     }
     ImGui::SameLine();
-    if (ImGui::Button("Vivid")) {
+    if (ImGui::Button(lbl(tx.vivid, "vivid").c_str())) {
         gfxsw::set_picture_grade(gfxsw::PictureGrade{0.85f, 1.3f, 1.1f, 1.0f});
         done = true;
     }
@@ -218,65 +237,54 @@ void tab_picture() {
     {
         // texture sharpness at an angle: 1x (off, the default) to 16x; saved as switchAnisoLevel
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Anisotropic filtering");
+        ImGui::TextUnformatted(tx.anisoLabel);
         const int cur = gfxsw::aniso_level();
         for (int n : {1, 2, 4, 8, 16}) {
             ImGui::SameLine();
             char label[16];
             snprintf(label, sizeof label, "%dx##aniso", n);
-            if (radio_tip(label, cur == n,
-                          n == 1 ? "Off, as the game draws it. Default."
-                                 : "Sharpens textures seen at an angle (the ground ahead, walls along a path) instead of letting them\n"
-                                   "blur. It costs GPU time, which can lower the frame rate in the busiest views (Outset's tall\n"
-                                   "grass, the lookout): measured about 5% at 2x, 15% at 4x and 30% at 16x there; the village\n"
-                                   "and the sea are not affected. Default: 1x (off)."))
-                {
-                    gfxsw::set_aniso_level(n);
-                    hostui::post([n] { hostui::set(kKeyAnisoLevel, aniso_level_setting(n)); });
-                }
+            if (radio_tip(label, cur == n, n == 1 ? tx.anisoOffTip : tx.anisoTip)) {
+                gfxsw::set_aniso_level(n);
+                hostui::post([n] { hostui::set(kKeyAnisoLevel, aniso_level_setting(n)); });
+            }
         }
     }
     {
         bool v;
-        if (check("Edge smoothing (FXAA)", gfxsw::fxaa(), &v)) {
+        if (check(lbl(tx.fxaa, "fxaa").c_str(), gfxsw::fxaa(), &v)) {
             gfxsw::set_fxaa(v);
             hostui::post([v] { hostui::set(kKeyFxaa, v ? "1" : "0"); });
         }
-        help("Smoother edges in the 3D world; the HUD stays sharp.\n"
-             "Costs a little GPU time (about 2 ms a frame).");
+        help(tx.fxaaHelp);
     }
     {
         bool v;
-        if (check("Bloom", gfxsw::bloom(), &v)) {
+        if (check(lbl(tx.bloom, "bloom").c_str(), gfxsw::bloom(), &v)) {
             gfxsw::set_bloom(v);
             hostui::post([v] { hostui::set(kKeyBloom, v ? "1" : "0"); });
         }
-        help("The glow around the sky and bright places, as on the Wii U.\nCosts a little GPU time.");
+        help(tx.bloomHelp);
     }
     {
         bool v;
-        if (check("Distance blur", gfxsw::distance_blur(), &v)) {
+        if (check(lbl(tx.blur, "blur").c_str(), gfxsw::distance_blur(), &v)) {
             gfxsw::set_distance_blur(v);
             hostui::post([v] { hostui::set(kKeyDistanceBlur, v ? "1" : "0"); });
         }
-        help("Far places softly out of focus, as on the Wii U.\nCosts a little GPU time.");
+        help(tx.blurHelp);
     }
     {
         // the shadow maps' size (gfxsw::shadow_scale); saved as switchShadowScale ("0.5" the default, "1" or "2")
         const float cur = gfxsw::shadow_scale();
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Shadow maps");
-        struct Q { float f; const char* label; const char* tip; };
-        static const Q quals[] = {
-            {0.5f, "Fast (default)", "Draws the shadow maps at half the size. Looks the same in handheld play, and gives about 5-7% more\n"
-                                     "frames per second in the busiest views (Outset's tall grass, the lookout)."},
-            {1.0f, "Original", "The game's own shadow map size: sharper shadow edges, a little slower in the busiest views."},
-            {2.0f, "High", "Draws the shadow maps at twice the size: sharper shadows, but about 17-20% slower in the busiest views\n(Outset's tall grass, the lookout) and more memory."}};
+        ImGui::TextUnformatted(tx.shadowLabel);
+        struct Q { float f; const char* label; const char* tip; const char* id; };
+        const Q quals[] = {{0.5f, tx.shadowFast, tx.shadowFastTip, "shadowq0"},
+                           {1.0f, tx.shadowOriginal, tx.shadowOriginalTip, "shadowq1"},
+                           {2.0f, tx.shadowHigh, tx.shadowHighTip, "shadowq2"}};
         for (const Q& q : quals) {
             ImGui::SameLine();
-            char label[24];
-            snprintf(label, sizeof label, "%s##shadowq", q.label);
-            if (radio_tip(label, std::fabs(cur - q.f) < 0.01f, q.tip)) {
+            if (radio_tip(lbl(q.label, q.id).c_str(), std::fabs(cur - q.f) < 0.01f, q.tip)) {
                 gfxsw::set_shadow_scale(q.f);
                 hostui::post([f = q.f] { hostui::set(kKeyShadowScale, f < 1 ? "0.5" : f > 1 ? "2" : "1"); });
             }
@@ -285,29 +293,29 @@ void tab_picture() {
     {
         // ambient occlusion on (the game's own look, the default) or off; saved as switchAmbientOcclusion
         bool on;
-        if (check("Ambient occlusion", !gfxsw::skip_ao(), &on)) {
+        if (check(lbl(tx.ao, "ao").c_str(), !gfxsw::skip_ao(), &on)) {
             gfxsw::set_skip_ao(!on);
             hostui::post([on] { hostui::set(kKeyAmbientOcclusion, on ? "1" : "0"); });
         }
-        help("The soft dark corners and creases the game adds where surfaces meet. Off draws them flat and is about 1%\n"
-             "faster in the busiest views (Outset's tall grass, the lookout); the real shadows stay. Default: on.");
+        help(tx.aoHelp);
     }
-    heading("Frame rate counter");
-    static const char* const modes[] = {"Off", "Frame rate", "Frame rate and load"};
+    heading(tx.fpsHeading);
+    const char* const modes[] = {tx.fpsOff, tx.fpsRate, tx.fpsLoad};
     const int fm = gfxsw::fps_overlay_mode();
     const int shown = dev_options() || fm == 2 ? 3 : 2;  // "and load" is a diagnostic: with developer options
     for (int i = 0; i < shown; i++) {
         if (i) ImGui::SameLine();
-        static const char* const tips[] = {"No counter.", "Frames per second, top left.",
-                                           "Frames per second plus the render thread's load, draws and GPU lag."};
-        if (radio_tip(modes[i], fm == i, tips[i])) {
+        const char* const tips[] = {tx.fpsOffTip, tx.fpsRateTip, tx.fpsLoadTip};
+        char id[8];
+        snprintf(id, sizeof id, "fps%d", i);
+        if (radio_tip(lbl(modes[i], id).c_str(), fm == i, tips[i])) {
             gfxsw::set_fps_overlay_mode(i);
             hostui::post([i] { hostui::set(kKeyFpsCounter, std::to_string(i)); });
         }
     }
-    help("Shows the frames per second in the top left corner of the picture.");
-    heading("Experimental features");
-    warn("Unfinished: 60 fps needs a big overclock (sys-clk or similar) to hold. Not saved.");
+    help(tx.fpsHelp);
+    heading(tx.experimental);
+    warn("%s", tx.experimentalWarn);
     {
         // the upstream 60 fps modes (the screen is 60 Hz: 60 fps only)
         const int m = interp::mode();
@@ -318,95 +326,89 @@ void tab_picture() {
                 LOG("[interp] frame rate mode from the Switch tab: %s (not saved)", interp::mode_name());
             });
         };
-        if (radio_tip("30 fps (original)", m == 0, "The game as it was: 30 logic steps and 30 drawn frames a second.")) choose(0);
+        if (radio_tip(lbl(tx.fps30, "interp0").c_str(), m == 0, tx.fps30Tip)) choose(0);
         ImGui::SameLine();
-        if (radio_tip("60 fps interpolation", m == 1, "The game logic keeps 30 steps a second and a blended frame is drawn between them:\ndoubles the drawing work, so it also needs a big overclock to hold 60 fps.")) choose(1);
+        if (radio_tip(lbl(tx.fpsInterp, "interp1").c_str(), m == 1, tx.fpsInterpTip)) choose(1);
         ImGui::SameLine();
-        if (radio_tip("True 60 (experimental)", m == 2, "Runs the game logic at 60 steps a second. Needs a big CPU and GPU overclock (sys-clk) to hold 60 fps.")) choose(2);
-        help("Frame rate modes the game was not made for (the screen is 60 Hz). Not saved: 30 fps at the next start.");
+        if (radio_tip(lbl(tx.fpsTrue60, "interp2").c_str(), m == 2, tx.fpsTrue60Tip)) choose(2);
+        help(tx.fpsModesHelp);
         if (m == 1) {
             bool paced;
-            if (check("Keep game speed", interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))
+            if (check(lbl(tx.keepSpeed, "paced").c_str(), interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))
                 hostui::post([paced] {
                     interp::set_paced_interpolation(paced);
                     LOG("[interp] keep game speed from the Switch tab: %s (not saved)", paced ? "on" : "off");
                 });
-            help("When the console cannot draw 60 frames a second, skip in-between frames instead of slowing\n"
-                 "the whole game down: the game logic keeps its 30 steps a second. Off: every in-between frame\n"
-                 "is drawn and the game runs slower than real time. Not saved: off at the next start.");
+            help(tx.keepSpeedHelp);
             if (float share = interp::paced_drawn_share(); share >= 0)
-                note("In-between frames drawn lately: %.0f%%", share * 100.0f);
+                note(tx.drawnLately, share * 100.0f);
         }
     }
 }
 
 // Controls: rumble and gyro aiming
 void tab_controller() {
+    const ui_text::MenuTexts& tx = ui_text::menu();
     // the controller's motors follow the game's rumble requests (input_switch.cpp update_rumble; saved as
     // "rumble" as on the desktop)
-    heading("Rumble");
+    heading(tx.rumbleHeading);
     {
         bool v;
-        if (check("Rumble", rumble::enabled(), &v)) {
+        if (check(lbl(tx.rumble, "rumble").c_str(), rumble::enabled(), &v)) {
             rumble::set_enabled(v);
             hostui::post([v] { hostui::set("rumble", v ? "1" : "0"); });
         }
-        help("The Joy-Con or the Pro Controller vibrates when the game asks for it, as the Wii U\n"
-             "controllers did. Off keeps the motors still.");
+        help(tx.rumbleHelp);
     }
 
     // gyro aiming with the controller's own motion sensors (input_switch.cpp feeds motion.h); the
     // Cemuhook and mouse sources of the desktop Controls tab make no sense on the console
-    heading("Gyro aiming");
+    heading(tx.gyroHeading);
     {
         motion::Settings g = motion::settings(), before = g;
         bool v;
-        if (check("Aim with the controller's gyro", g.source == motion::kController, &v))
+        if (check(lbl(tx.gyroAim, "gyroaim").c_str(), g.source == motion::kController, &v))
             g.source = v ? motion::kController : motion::kOff;
-        help("First-person aiming (bow, hookshot, boomerang, telescope, Picto Box, grappling hook) follows\n"
-             "the Joy-Con, the Pro Controller or the console in handheld mode, as with the Wii U GamePad.\n"
-             "The game's own Options > Gyro switch still applies, and the game ignores the motion while\n"
-             "the right stick is pushed.");
+        help(tx.gyroAimHelp);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Turn left/right by");
+        ImGui::TextUnformatted(tx.turnBy);
+        const char* const axes[] = {tx.axisPlayer, tx.axisYaw, tx.axisRoll};
+        static_assert(sizeof axes / sizeof axes[0] == motion::kAxisModeCount, "a name per axis mode");
         for (int a = 0; a < motion::kAxisModeCount; a++) {
             ImGui::SameLine();
-            if (radio(motion::axis_label(a), g.tuning.axis == a)) g.tuning.axis = a;
+            if (radio(lbl(axes[a], motion::axis_id(a)).c_str(), g.tuning.axis == a)) g.tuning.axis = a;
         }
-        help("Player space: turning the controller left or right about the real vertical, however you hold it\n"
-             "(recommended). Yaw: turning it about its own vertical axis (as if it lay flat). Roll: tilting it to\n"
-             "the side like a steering wheel. Tilting its top up or down always looks up or down.");
+        help(tx.axisHelp);
         const float lo = motion::Tuning::kMinSensitivity, hi = motion::Tuning::kMaxSensitivity;
         ImGui::SetNextItemWidth(220);
-        ImGui::SliderFloat("Sensitivity left/right", &g.tuning.sensitivity_x, lo, hi, "%.2fx", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat(lbl(tx.sensX, "sensx").c_str(), &g.tuning.sensitivity_x, lo, hi, "%.2fx", ImGuiSliderFlags_Logarithmic);
         ImGui::SameLine(0, 16);
-        if (check("Invert##gyrox", g.tuning.invert_x, &v)) g.tuning.invert_x = v;
+        if (check(lbl(tx.invert, "gyrox").c_str(), g.tuning.invert_x, &v)) g.tuning.invert_x = v;
         ImGui::SetNextItemWidth(220);
-        ImGui::SliderFloat("Sensitivity up/down", &g.tuning.sensitivity_y, lo, hi, "%.2fx", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat(lbl(tx.sensY, "sensy").c_str(), &g.tuning.sensitivity_y, lo, hi, "%.2fx", ImGuiSliderFlags_Logarithmic);
         ImGui::SameLine(0, 16);
-        if (check("Invert##gyroy", g.tuning.invert_y, &v)) g.tuning.invert_y = v;
-        if (ImGui::Button("Default sensitivity"))
+        if (check(lbl(tx.invert, "gyroy").c_str(), g.tuning.invert_y, &v)) g.tuning.invert_y = v;
+        if (ImGui::Button(lbl(tx.defaultSens, "defsens").c_str()))
             g.tuning.sensitivity_x = g.tuning.sensitivity_y = motion::Tuning::kDefaultSensitivity;
         ImGui::SameLine();
-        if (ImGui::Button("Recalibrate now")) motion::recalibrate();
-        help("Recalibrate if the view drifts while the controller rests, then put it down for a second:\n"
-             "the gyro's offset is learnt anew.");
-        ImGui::TextUnformatted(motion::status().c_str());
+        if (ImGui::Button(lbl(tx.recalibrate, "recal").c_str())) motion::recalibrate();
+        help(tx.recalibrateHelp);
+        ImGui::TextUnformatted(gyro_status().c_str());
         if (!(g == before)) save_gyro(g);
     }
-    heading("Menu");
-    note("Minus held half a second opens this menu (a short Minus goes to the game); B or Minus closes it.\n"
-         "L / R change tabs.");
+    heading(tx.menuHeading);
+    note("%s", tx.menuNote);
 }
 
 // Developer: tests and diagnostics, none of it for normal play
 void tab_developer() {
     using namespace switch_settings;
-    warn("Tests and diagnostics for developers. Nothing here is needed to play.");
+    // (what a player sees is in their language; the options behind the checkbox are for developers, in English)
+    const ui_text::MenuTexts& tx = ui_text::menu();
+    warn("%s", tx.devWarn);
     bool dev;
-    if (check("Show developer options", dev_options(), &dev)) set_dev_options(dev);
-    help("Shows the tests and diagnostics below (debug server, A/B switches, captures). Off by default.\n"
-         "A debug server that is already running keeps running whether this is ticked or not.");
+    if (check(lbl(tx.devShow, "devshow").c_str(), dev_options(), &dev)) set_dev_options(dev);
+    help(tx.devShowHelp);
     if (!dev_options()) return;
     heading("Debug server");
     {
