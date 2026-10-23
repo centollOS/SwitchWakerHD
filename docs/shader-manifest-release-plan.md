@@ -1,0 +1,74 @@
+# Shipping a shader state manifest with releases (issue #88)
+
+Goal: setup builds `shadercache_dksh.bin` on the player's computer from their own dump and a code-free manifest we
+ship, so the console's first start compiles almost nothing. Compiled or translated shaders never ship. This revisits
+the decision of 2026-10-10 in `docs/shader-cache-from-dump-plan.md`: upstream (v0.4.0) now packages a code-free
+shader state template into its releases from a private, pinned repository (`tools/shadercache/README.md` upstream).
+
+## What the console records today (measured on a full-game manifest, 2026-10-23)
+
+`shader_manifest.bin` (WSM1): 164,243 variants (141,487 vertex, 22,756 pixel), 8,432 distinct programs, 131 MiB.
+Each record: program hash/size/prefix hash, the fetch shader, ~191 non-zero context registers, the runtime's
+variant key.
+
+- **Fetch shaders:** 120,075 vertex records hold the GX2 fetch shader **microcode** (legacy form, `02 00 00 00`...);
+  21,412 hold the runtime's own compact description (`WWFS`). Microcode must not ship.
+- **Redundancy:** 154,537 distinct variant keys, but the console's caches hold ~11,000 compiled shaders: most
+  variants translate to the same shader.
+
+## The shipped file
+
+**Format: upstream's code-free schema** (`tools/shaderprep_format.py`, WWHT0003: bounded zlib canonical JSON of
+states `{hash, vertex, fetch, registers}`; fetch as semantic attributes; no byte or string fields). Our
+`tools/release/guard.py` already knows and validates it. Registers as upstream keeps them: every pair but the program
+addresses (`SQ_PGM_START_*`) and the constant banks (0xC000-0xDFFF).
+
+**Distilled:** one state per distinct translated shader (per stage), chosen on our computer with our dump: a few
+thousand states instead of 164,243.
+
+**Encrypted** with a key from the player's own dump: SHA-256 over `content/Common/Shaders/{Prim,particle}/
+wii_pipeline.sharcfb` and `content/Common/Shaders/render_buffer/render_buffer.sharcfb` (byte-identical in the USA and
+European games, checked 2026-10-23). File: `WSME0001`, a 16-byte nonce, the ciphertext (SHAKE-256 keystream over key
++ nonce, Python's `hashlib`), a SHA-256 tag of key + nonce + plaintext so a wrong dump is reported, not
+mis-decrypted. Not secrecy against attackers: the data only means something to someone who owns the game.
+
+**Checked for game bytes** before encryption: no 16-byte window of any program the dump's archives hold (and of the
+three files above) appears in the plaintext.
+
+## Pieces
+
+1. `dksh_cache translate`: accept semantic fetch attributes (WWFA0001, as the runtime's `gx2/fetch_attributes.cpp`)
+   besides compact (WWFS) and legacy fetch; report which variant gave which source (`--map`).
+2. `tools/switch/shader_manifest.py`:
+   - `distill CONSOLE_MANIFEST GAME_DIR OUT` (maintainers): translate everything, keep one state per distinct output,
+     convert fetch to semantic attributes, drop the program addresses and constants, write WWHT0003 JSON, run the
+     game-bytes scan.
+   - `seal PLAIN GAME_DIR OUT` / `open SEALED GAME_DIR OUT`: the encryption.
+   - `from-template TEMPLATE GAME_DIR OUT_MANIFEST`: back to WSM1 records for the existing speculate / translate /
+     build chain.
+3. Release: private repository `centollOS/SwitchWakerHD-shader-manifest` holding the sealed file; the public
+   repository pins it in `tools/shadercache/manifest.ref` (commit + SHA-256); packaging fetches it with a read-only
+   deploy key and attaches it to the release as an asset. Fork and PR builds attach none.
+4. Setup: `make_sd.py` downloads the release's asset (or takes `--shaders`), opens it with the dump, builds the cache;
+   on by default with an opt-out; a missing or mismatched file means no prepared shaders, never an error. Installers
+   follow.
+5. Console: unchanged (a present `shadercache_dksh.bin` already skips the first-start screen).
+6. Docs: README, INSTALL.md, `docs/shader-cache-from-dump-plan.md` (decision), AGENTS.md, release checklist.
+
+## Checks
+
+- Same manifest + same dump, twice: byte-identical `shadercache_dksh.bin`. Two different dumps of one region: the
+  same (needs a second dump; WUX vs extracted folder at least).
+- Coverage: the cache from the distilled manifest against the one from the full console manifest (shader count,
+  `dksh_cache coverage` against the console's own cache).
+- Console: a fresh install starts without the first-start screen; a first tour without black places.
+
+## Steps (one commit each)
+
+1. This plan.
+2. `dksh_cache translate`: WWFA fetch and `--map`.
+3. `shader_manifest.py distill` + game-bytes scan + tests.
+4. `seal` / `open` + tests.
+5. `from-template` and `make_sd.py --shaders` taking the sealed file; checks above on the Mac.
+6. Release packaging (private repository, deploy key: needs the owner's go-ahead) and the release checklist.
+7. Installers, docs, console test.
