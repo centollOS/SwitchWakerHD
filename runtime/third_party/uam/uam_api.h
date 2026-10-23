@@ -24,6 +24,9 @@ struct Result {
 // type tables alive between compiles (built on the first compile, a few MB); false rebuilds and frees
 // them around every compile, as the uam tool does.
 void init(bool resident_frontend = true);
+// A/B switch for patch 7 (PATCHES.md): true lets the Maxwell scheduler pair instructions (uam's own behaviour).
+// Default false; set it before the first compile, and give the DKSH another cache id (shader_files.h).
+void set_dual_issue(bool on);
 // frees what init() and the compiles kept; compile() works again after another init()
 void shutdown();
 

@@ -58,15 +58,20 @@ lines as they are, and never call a difference inside the printed interval a gai
 ## Defaults are for the player
 
 A fresh install (no `settings.ini`) must start with player defaults: debug server off, frame-rate counter
-and every diagnostic, perf or capture option off, stock clocks, mods off, no `[dev]` section. A new
+and every diagnostic, perf or capture option off, stock CPU clock and the fixed GPU profile (384 MHz), mods off, no `[dev]` section. A new
 diagnostic or test option ships off and goes in the Dev tab (its content is hidden until "Show developer options"; that checkbox is off by default). Check the fresh-install
 defaults again whenever the settings code changes; a player's saved `settings.ini` keeps what they chose.
 
 ## Clocks
 
-The game runs at the stock CPU 1020 MHz and the stock GPU profile (docs/switch-port.md, "Settings"); the
-menu offers no clock or GPU profile choice (a profile saved by an older version is reset to stock at start),
-and players who want more use sys-clk. Do not propose an overclock as a fix: speed comes from the code. The target is 720p
+The game runs at the stock CPU 1020 MHz and, in handheld, always at Nintendo's 384 MHz GPU profile, one of its
+handheld profiles for games (the owner's choice, 2026-10-23, from `perf_test.py gpu-profile`: at Outset's tall grass
+307 -> 384 MHz is +4.7 fps, 384 -> 460 MHz +0.5 fps; docs/perf-test.md, docs/switch-port.md "Settings"). It is the
+same for every player: the menu offers no clock or GPU profile choice (a profile saved by an older version is reset
+to 384 at start); only tests set another (`WWHD_TEST_GPU_PROFILE` in `[dev]`). The port sets no overclock (no CPU
+above 1020, no GPU above Nintendo's profiles; sys-clk is the player's own): do not propose one as a fix; speed comes
+from the code. Performance tests state the GPU profile they ran at, and check the `[dk] clocks` lines: sys-clk
+overrides the port's clocks. The target is 720p
 (1280x720 internal) at 30 fps.
 
 ## The SD card without the debug server

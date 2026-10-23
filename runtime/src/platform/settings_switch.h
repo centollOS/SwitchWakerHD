@@ -6,15 +6,15 @@
 
 namespace switch_settings {
 
-// GPU profiles offered in handheld (apm's official configurations; docked is left to the system).
+// Handheld GPU profiles (apm's official configurations; docked is left to the system). The game always runs at
+// kGpuFixed; the others only for tests (WWHD_TEST_GPU_PROFILE in [dev], perf_test.py gpu-profile).
 // No clock is set through clkrst any more (the CPU steps and GPU 614 MHz were removed 2026-10-13: a CPU clock
 // set that way kept an Erista console from waking from sleep, #33); overclocks are sys-clk's job.
-enum GpuProfile : int { kGpuDefault, kGpu384, kGpu460, kGpu460Mem1600, kGpuProfiles };
-const char* gpu_profile_label(int p);
-int gpu_profile();                // the one chosen (as the menu shows it)
+enum GpuProfile : int { kGpuStock, kGpu384, kGpu460, kGpu460Mem1600, kGpuProfiles };
+constexpr int kGpuFixed = kGpu384;  // every player's (Nintendo's 384 MHz handheld profile; not a menu choice)
+int gpu_profile();                // the one in use
 // apm's handheld configuration in use ("" before the first change); its id for the log and the menu
 std::string gpu_profile_status();
-void set_gpu_profile(int p);      // applies it now and saves it (host loop thread)
 
 // Picture profiles, one per mode (as SwitchWaker's [handheld]/[docked] options): the internal resolution and
 // dynamic resolution. The active mode's profile applies by itself on dock / undock. Defaults: handheld 1x
@@ -36,7 +36,7 @@ void tick();
 void apply_at_start();
 
 // settings.ini keys of the Switch tab
-constexpr const char* kKeyGpuProfile = "switchGpuProfile";
+constexpr const char* kKeyGpuProfile = "switchGpuProfile";  // written by older menus; reset to "384" at start
 constexpr const char* kKeyCpuClock = "switchCpuClock";  // removed option: only read to log that it is ignored
 constexpr const char* kKeyExposure = "switchExposure";
 constexpr const char* kKeyContrast = "switchContrast";
@@ -58,7 +58,7 @@ constexpr const char* kKeyGamepadPip = "switchGamepadPip";  // the GamePad pictu
 // Debug: the network debug server (debug_switch.h) and the main thread's runtime-call sampler (threads.cpp),
 // both off by default and read at the next start, before anything else (main.cpp)
 constexpr const char* kKeyDebugServer = "switchDebugServer";
-constexpr const char* kKeyDevOptions = "switchDevOptions";  // "Show developer options" (Picture tab): the Dev tab; off by default
+constexpr const char* kKeyDevOptions = "switchDevOptions";  // "Show developer options" (Dev tab): the Dev tab; off by default
 constexpr const char* kKeyMainSampler = "switchMainSampler";
 // Debug: draws wait for their shaders (shader_wait_switch.h, #49): 0 off (the default) .. 3 always
 constexpr const char* kKeyShaderWait = "switchShaderWait";

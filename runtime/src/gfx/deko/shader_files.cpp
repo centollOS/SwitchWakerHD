@@ -3,6 +3,7 @@
 #include <zlib.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_set>
 
@@ -65,10 +66,18 @@ bool read_wgs1(const std::vector<uint8_t>& data, std::vector<Wgs1Source>* out, s
     return true;
 }
 
+bool dksh_dual_issue() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_DK_DUAL_ISSUE");
+        return e && *e && *e != '0';
+    }();
+    return on;
+}
+
 uint64_t dksh_uam_id() {
     char conv[48];
     snprintf(conv, sizeof conv, "|glsl_to_deko %d|WDK%u", kConvertRevision, kWdk1Version);
-    return fnv(conv, fnv(kDkshCompilerName));
+    return fnv(conv, fnv(kDkshCompilerName, dksh_dual_issue() ? fnv("|dual issue") : 0xCBF29CE484222325ull));
 }
 
 DkshRecord::DkshRecord() {

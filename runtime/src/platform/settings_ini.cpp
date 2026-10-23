@@ -67,13 +67,8 @@ constexpr MenuVariable kMenuVariables[] = {
          o.push_back({switch_settings::kKeyMainSampler, v.empty() || v[0] != '0' ? "1" : "0"});
          return true;
      }},
-    {"WWHD_GPU_PROFILE", [](const std::string& v, Settings& o) {
-         for (const char* id : {"default", "384", "460", "1600", "614"})  // (614: removed, read as 1600)
-             if (v == id) {
-                 o.push_back({switch_settings::kKeyGpuProfile, v});
-                 return true;
-             }
-         return false;  // (a configuration id: not a menu choice)
+    {"WWHD_GPU_PROFILE", [](const std::string&, Settings&) {  // (removed menu choice: always 384 MHz; dropped. For tests
+         return false;                                        // WWHD_TEST_GPU_PROFILE in [dev], settings_switch.cpp)
      }},
     {"WWHD_CPU_CLOCK", [](const std::string& v, Settings& o) {  // (removed option: logged as ignored at start)
          o.push_back({switch_settings::kKeyCpuClock, v});

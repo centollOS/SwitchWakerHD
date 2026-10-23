@@ -86,6 +86,7 @@ int stress(const char* in, int threads, size_t limit) {
     std::vector<Wgs1Source> src = load_wgs1(in);
     if (limit && src.size() > limit) src.resize(limit);
     uam::init(true);
+    uam::set_dual_issue(dksh_dual_issue());  // WWHD_DK_DUAL_ISSUE=1: a cache for the test build
     auto compile_one = [&](size_t i) {
         const Wgs1Source& s = src[i];
         ConvertedBindings b;
@@ -136,6 +137,7 @@ int build(const char* in, const char* out, double maxMiB = 0) {
     size_t ok = 0, vs = 0, dkshBytes = 0, convertFail = 0, compileFail = 0, codeBytes = 0, leftOut = 0;
     const size_t budget = maxMiB > 0 ? size_t(maxMiB * 1048576.0) : SIZE_MAX;
     uam::init(true);
+    uam::set_dual_issue(dksh_dual_issue());  // WWHD_DK_DUAL_ISSUE=1: a cache for the test build
     for (size_t i = 0; i < src.size(); i++) {
         if (codeBytes >= budget) {
             leftOut = src.size() - i;
