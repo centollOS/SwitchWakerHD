@@ -17,12 +17,15 @@
         manifest and a programs file for `dksh_cache translate` (both stay on your computer).
     shader_manifest.py selftest GAME_DIR
         checks the search itself: programs cut from the dump's own files at known places are found there
-    shader_manifest.py distill MANIFEST GAME_DIR OUT [--work DIR]
+    shader_manifest.py distill MANIFEST GAME_DIR OUT [--base TEMPLATE] [--work DIR]
         (maintainers, issue #88) a console's manifest made into the code-free template a release ships: every variant
         translated (dksh_cache translate --map), one state kept per distinct GLSL source and stage, its fetch shader as
         semantic attributes, its registers as tools/shaderprep_format.py allows (no program addresses, no constant
         banks), written as WWHT0003 (tools/shaderprep_format.py). Then checked: the template translated again gives
         the same sources, and no 16 bytes of the dump's shader programs occur in it (game_bytes_found).
+        --base: the current template (sealed or not) first, then the console's new recording: says how many shaders
+        the recording adds, and writes OUT only when it adds any (exit status 3 when there is nothing new). The
+        maintainers' update after a test console played: docs/shader-manifest-release-plan.md, "Updating".
     shader_manifest.py from-template TEMPLATE GAME_DIR OUT_MANIFEST OUT_PROGRAMS
         a code-free template (sealed or not) back into a manifest (fetch shaders as semantic attributes, compact flag
         2) and the programs it names from the dump's archives, for speculate / dksh_cache translate. Both stay on your
@@ -429,13 +432,30 @@ def main():
         if "--work" in args:
             work = args[args.index("--work") + 1]
             del args[args.index("--work"):args.index("--work") + 2]
+        base_path = None
+        if "--base" in args:
+            base_path = args[args.index("--base") + 1]
+            del args[args.index("--base"):args.index("--base") + 2]
         if len(args) != 3:
             sys.exit(__doc__)
         manifest, game, out_path = args
         tf = template_format()
         os.makedirs(work, exist_ok=True)
-        recs = read_manifest_full(manifest)
         programs = archive_programs(game)
+        base = []
+        if base_path:
+            with open(base_path, "rb") as f:
+                data = f.read()
+            if data.startswith(SEAL_MAGIC):
+                try:
+                    data = unseal(data, game)
+                except SealError as e:
+                    sys.exit("%s: %s" % (base_path, e))
+            base, _, lost = states_to_records(tf.decode(data, compact=True)["states"], programs, tf)
+            if lost:
+                sys.exit("%s: %d states name programs this dump does not have" % (base_path, lost))
+        # the base's states first: where the recording gives a shader the base has, the base's state stays
+        recs = base + read_manifest_full(manifest)
         wanted = {(r[1], r[2]) for r in recs}
         found = {k: v for k, v in programs.items() if k in wanted}
         # the variants with their fetch shaders as semantic attributes (what the template keeps): translated as such,
@@ -454,6 +474,11 @@ def main():
             if h:
                 first.setdefault((vertex, h), i)
         keep = sorted(first.values())
+        added = sum(1 for i in keep if i >= len(base))
+        if base_path:
+            print("the recording adds %d shaders to the %d of %s" % (added, len(base), base_path))
+            if not added:
+                sys.exit(3)
         states = [state_of(recs[i], tf) for i in keep]
         doc = {"version": 3, "states": states, "pipelines": []}
         data = tf.encode(doc)
