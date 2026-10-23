@@ -90,7 +90,7 @@ tools/switch/dksh_cache/build.sh build <shadercache_gl.bin> build/shadercache_dk
 For development there is a debug server: from the computer, over the local network, you can
 deploy a new build and restart the game without touching the console, follow the log as it is
 written, take screenshots, press buttons and warp. It is **off by default**: players never need it
-and the game opens no network port unless it is turned on in the options menu (**Speed** tab, *Show developer options*, then
+and the game opens no network port unless it is turned on in the options menu (**Dev** tab, *Show developer options*, then
 **Dev** tab, *Debug server (network)*; it starts at the next start). It has no password, so use
 it only on your own network.
 

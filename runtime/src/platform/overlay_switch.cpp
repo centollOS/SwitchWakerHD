@@ -99,7 +99,7 @@ void save_gyro(const motion::Settings& g) {
         for (const char* k : motion::kKeys) hostui::set(k, motion::value_of(g, k));
     });
 }
-// "Show developer options" (Speed tab): the Dev tab appears; saved as switchDevOptions, off by
+// "Show developer options" (Picture tab): the Dev tab appears; saved as switchDevOptions, off by
 // default. Only the menu: a debug server that is running keeps running either way.
 std::atomic<int> g_dev{-1};  // -1: not read yet
 }  // namespace
@@ -150,7 +150,7 @@ void tab_warp() {
     }
 }
 
-// ---- tabs (registered in register_ext, in this order): Picture, Speed, Controls, then Warp and
+// ---- tabs (registered in register_ext, in this order): Picture, Controls, then Warp and
 // Developer (hidden until "Show developer options" is ticked)
 
 // Picture: resolution per mode, colours and effects
@@ -283,6 +283,20 @@ void tab_picture() {
             }
         }
     }
+    heading("Frame rate counter");
+    static const char* const modes[] = {"Off", "Frame rate", "Frame rate and load"};
+    const int fm = gfxsw::fps_overlay_mode();
+    const int shown = dev_options() || fm == 2 ? 3 : 2;  // "and load" is a diagnostic: with developer options
+    for (int i = 0; i < shown; i++) {
+        if (i) ImGui::SameLine();
+        static const char* const tips[] = {"No counter.", "Frames per second, top left.",
+                                           "Frames per second plus the render thread's load, draws and GPU lag."};
+        if (radio_tip(modes[i], fm == i, tips[i])) {
+            gfxsw::set_fps_overlay_mode(i);
+            hostui::post([i] { hostui::set(kKeyFpsCounter, std::to_string(i)); });
+        }
+    }
+    help("Shows the frames per second in the top left corner of the picture.");
     heading("Experimental features");
     warn("Unfinished: 60 fps needs a big overclock (sys-clk or similar) to hold. Not saved.");
     {
@@ -315,31 +329,6 @@ void tab_picture() {
                 note("In-between frames drawn lately: %.0f%%", share * 100.0f);
         }
     }
-}
-
-// Speed: shader preparation and the frame rate counter (clocks are sys-clk's job: no GPU profile here)
-void tab_performance() {
-    using namespace switch_settings;
-    heading("Frame rate counter");
-    static const char* const modes[] = {"Off", "Frame rate", "Frame rate and load"};
-    const int fm = gfxsw::fps_overlay_mode();
-    const int shown = dev_options() || fm == 2 ? 3 : 2;  // "and load" is a diagnostic: with developer options
-    for (int i = 0; i < shown; i++) {
-        if (i) ImGui::SameLine();
-        static const char* const tips[] = {"No counter.", "Frames per second, top left.",
-                                           "Frames per second plus the render thread's load, draws and GPU lag."};
-        if (radio_tip(modes[i], fm == i, tips[i])) {
-            gfxsw::set_fps_overlay_mode(i);
-            hostui::post([i] { hostui::set(kKeyFpsCounter, std::to_string(i)); });
-        }
-    }
-    help("Shows the frames per second in the top left corner of the picture.");
-
-    heading("Advanced");
-    bool dev;
-    if (check("Show developer options", dev_options(), &dev)) set_dev_options(dev);
-    help("Adds a Dev tab with tests and diagnostics (debug server, A/B switches, captures).\n"
-         "Players do not need it. Off by default; a debug server that is already running keeps running.");
 }
 
 // Controls: rumble and gyro aiming
@@ -405,6 +394,11 @@ void tab_controller() {
 void tab_developer() {
     using namespace switch_settings;
     warn("Tests and diagnostics for developers. Nothing here is needed to play.");
+    bool dev;
+    if (check("Show developer options", dev_options(), &dev)) set_dev_options(dev);
+    help("Shows the tests and diagnostics below (debug server, A/B switches, captures). Off by default.\n"
+         "A debug server that is already running keeps running whether this is ticked or not.");
+    if (!dev_options()) return;
     heading("Debug server");
     {
         // the saved choice (read at start, debug_switch.cpp), not whether the server runs now
@@ -659,13 +653,12 @@ void frame_layer_draw(float w, float h) {
 void register_ext() {
     namespace ext = overlay::ext;
     // the Switch renderer has its own options (Switch tab); one screen, and the controller maps by position
-    // Saves, Picture, Speed, Controls, Audio, Mods, Warp, Dev (only with "Show developer options"),
+    // Saves, Picture, Controls, Audio, Mods, Warp, Dev (its content only with "Show developer options"),
     // Language / About
     ext::add_tab({"picture", "Picture", tab_picture, nullptr}, "audio");
-    ext::add_tab({"speed", "Speed", tab_performance, nullptr}, "audio");
     ext::add_tab({"controller", "Controls", tab_controller, nullptr}, "audio");
     ext::add_tab({"warp", "Warp", tab_warp, nullptr});
-    ext::add_tab({"developer", "Dev", tab_developer, nullptr, [] { return dev_options(); }});
+    ext::add_tab({"developer", "Dev", tab_developer, nullptr});
     // Shortcuts: keyboard keys and desktop actions (full screen, screenshot); the controller column is unbound but for Home
     for (const char* id : {"graphics", "display", "controls", "shortcuts"}) ext::hide_tab(id);
     ext::Features f;

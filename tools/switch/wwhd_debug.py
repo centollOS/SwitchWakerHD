@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Client of the Switch debug server (runtime/src/platform/debug_server.h, docs/debug-server.md).
 
-The console runs it when the settings menu turns it on (Speed tab > Show developer options, then Dev tab > Debug server, at the next start); its
+The console runs it when the settings menu turns it on (Dev tab > Show developer options, then Debug server, at the next start); its
 log says '[debug] server listening on <ip>:6543'.
 The console's address: --host, else WWHD_SWITCH_HOST, else the first line of build/switch_host.txt.
 
@@ -35,7 +35,7 @@ REPO = Path(__file__).resolve().parents[2]
 DEFAULT_PORT = 6543
 # What differs between the two ports' copies of this client (SwitchWaker: scripts/switch/switchwaker_debug.py)
 PORT_NAME = "SwitchWakerHD"
-MENU_SWITCH = "Speed tab > Show developer options, then Dev tab > Debug server"  # the menu setting that starts the server
+MENU_SWITCH = "Dev tab > Show developer options, then Debug server"  # the menu setting that starts the server
 ENV_HOST = "WWHD_SWITCH_HOST"           # the console's address on this computer
 ENV_PORT = "WWHD_DEBUG_PORT"
 DEFAULT_NRO = REPO / "build" / "switch-dk" / "wwhd.nro"
