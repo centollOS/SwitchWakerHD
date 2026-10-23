@@ -117,7 +117,8 @@ sealed class LinuxEngine : DesktopEngine
         sb.AppendLine("set -e");
         sb.AppendLine("export DEBIAN_FRONTEND=noninteractive");
         sb.AppendLine("apt-get update");
-        sb.AppendLine("apt-get install -y make gcc git wget ca-certificates apt-transport-https");
+        // g++ and zlib1g-dev: the prepared graphics build tools/switch/dksh_cache natively (issue #88)
+        sb.AppendLine("apt-get install -y make gcc g++ zlib1g-dev git wget ca-certificates apt-transport-https");
         sb.AppendLine("if ! command -v dkp-pacman >/dev/null; then");
         sb.AppendLine("  mkdir -p /usr/share/keyring");
         sb.AppendLine($"  [ -s {key} ] || wget -nv -U 'dkp apt' -O {key} https://apt.devkitpro.org/devkitpro-pub.gpg");

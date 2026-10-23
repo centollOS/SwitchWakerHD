@@ -52,6 +52,13 @@ abstract class EngineBase
     // downloads the mod from the mod catalogue and builds it into the game (INSTALL.md, "Optional: code mods").
     public string? MinimapGame;
     public const string MinimapMod = "gc-minimap";
+    // "Prepare the graphics now" (issue #88): the release's shader template (shader-template.sealed, shader states
+    // without game code, opened with the game's own files) becomes shadercache_dksh.bin on this computer
+    // (make_sd.py --shaders), so the console's first start compiles almost nothing. Never a reason to stop: a
+    // release without it, a download or build that fails, or a game it does not open with only leave the console to
+    // compile its shaders as it always did. On Windows it also needs MSYS2's gcc, ninja and zlib-devel.
+    public bool PrepareShaders = true;
+    string? shaderTemplate;
 
     // What make_sd.py's check of the game's content/ found (tools/switch/game_files.py): how many files are missing,
     // cut off or damaged, and its lines naming them. A warning: the build goes on (#48).
@@ -326,6 +333,38 @@ abstract class EngineBase
             if (nested == null) throw new InstallException(Str.Get("rel_no_script"));
             ReleaseDir = nested;
         }
+        ShaderTemplate();
+    }
+
+    // The release's shader template, next to its zip (PrepareShaders): downloaded and checked against its .sha256 once;
+    // a release without one, or a failed download, only means no prepared graphics.
+    void ShaderTemplate()
+    {
+        shaderTemplate = null;
+        if (!PrepareShaders) return;
+        var file = Path.Combine(Work, $"shader-template-{releaseVer}.sealed");
+        if (!File.Exists(file))
+        {
+            var url = $"https://github.com/centollOS/SwitchWakerHD/releases/download/{releaseVer}/shader-template.sealed";
+            var part = file + ".part";
+            try
+            {
+                Say(Str.Get("shaders_downloading"));
+                Download(url, part);
+                Download(url + ".sha256", file + ".sha256");
+                VerifySha256(part, File.ReadAllText(file + ".sha256").Split(' ')[0].Trim());
+                File.Move(part, file);
+            }
+            catch (InstallException e)
+            {
+                try { File.Delete(part); } catch (IOException) { }
+                Log?.Invoke(e.Message, LogKind.Info);
+                Warn(Str.Get("shaders_none"));
+                return;
+            }
+        }
+        shaderTemplate = file;
+        Ok(Str.Get("shaders_ready"));
     }
 
     // The latest release's tag: GitHub's API, else where github.com/.../releases/latest redirects to (the API
@@ -392,6 +431,9 @@ abstract class EngineBase
             inBadFiles = false;
             if (line.StartsWith("[+] HOME-screen forwarder")) { Status?.Invoke(Str.Get("fwd_building")); return; }
             if (line.StartsWith("  " + MinimapMod + ": ")) { Status?.Invoke(Str.Get("mm_building")); return; }
+            // make_sd.py --shaders: the template becomes the console's shader cache (a few minutes)
+            if (line.Contains("shader_manifest.py from-template")) { Status?.Invoke(Str.Get("shaders_preparing")); return; }
+            if (line.StartsWith("make_sd: warning: the graphics were not prepared")) { Warn(Str.Get("shaders_failed")); return; }
             m = StageLine.Match(line);
             if (m.Success)
             {
@@ -424,7 +466,8 @@ abstract class EngineBase
         var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
         var minimap = MinimapGame != null ? $" --guest-mod {MinimapMod} --gc-game {Quote(MinimapGame)}" : "";
-        var rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}{minimap}", ReleaseDir, check: false,
+        var shaders = shaderTemplate != null ? " --shaders " + Quote(shaderTemplate) : "";
+        var rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}{minimap}{shaders}", ReleaseDir, check: false,
                       onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); }, env: env);
         Progress?.Invoke(rc == 0 ? 1 : (double?)null);
         if (rc != 0)

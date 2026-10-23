@@ -132,6 +132,8 @@ public partial class MainWindow : Window
         BtnFwdPick.Content = Str.Get("fwd_pick");
         BtnFwdClear.Content = Str.Get("fwd_clear");
         ShowKeys();
+        TxtShH.Text = Str.Get("sh_h");
+        TxtShD.Text = Str.Get("sh_d");
         TxtMmH.Text = Str.Get("mm_h");
         TxtMmD.Text = Str.Get("mm_d");
         BtnMmPick.Content = Str.Get("mm_pick");
@@ -369,6 +371,7 @@ public partial class MainWindow : Window
         engine.GameArg  = GameArg();
         engine.ForwarderKeys = keysPath != null && File.Exists(keysPath) ? keysPath : null;
         engine.MinimapGame = minimapGame;
+        engine.PrepareShaders = ChkShaders.IsChecked == true;
         running = true; failed = false;
         cts = new CancellationTokenSource();
         for (int i = 0; i < stepStates.Length; i++) SetStep(i, StepState.Pending);

@@ -316,7 +316,18 @@ def main():
         fail("the build made no %s" % nro)
     dksh = None
     if args.shaders:
-        dksh = shader_cache(os.path.abspath(args.shaders), game)
+        try:
+            dksh = shader_cache(os.path.abspath(args.shaders), game)
+        except SystemExit as e:
+            with open(args.shaders, "rb") as f:
+                if f.read(8) not in (b"WSME0001", b"WWHT0003"):
+                    raise  # the player's own manifest or cache: a failure stops, as always
+            # the release's template (issue #88): the game works without the prepared graphics, so this never stops
+            # the install (the installers show this line as a warning)
+            why = str(e.code).strip().replace("make_sd: ", "") if e.code else "see the messages above"
+            print("make_sd: warning: the graphics were not prepared (%s); the console compiles them as you play" % why,
+                  flush=True)
+            dksh = None
 
     step(5, "the SD card folder")
     out = os.path.abspath(args.out)

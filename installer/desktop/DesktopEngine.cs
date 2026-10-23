@@ -66,8 +66,9 @@ abstract class DesktopEngine : EngineBase
         Ok(Str.Get("py_found", $"Python {PyVersion} ({PyDir})"));
 
         Say(Str.Get("py_pkgs"));
-        // cmake: the host's (no Homebrew, no distribution package); Pillow: the HOME-screen icon and the NRO's own
-        const string pkgs = "zstandard pycryptodome pillow cmake";
+        // cmake: the host's (no Homebrew, no distribution package); Pillow: the HOME-screen icon and the NRO's own;
+        // ninja: the prepared graphics' tools/switch/dksh_cache build (issue #88)
+        const string pkgs = "zstandard pycryptodome pillow cmake ninja";
         if (Exec(pythonCmd, "-m pip install --disable-pip-version-check --no-warn-script-location " + pkgs, check: false) != 0)
             throw new InstallException(Str.Get("py_pkgs_fail", pkgs));
     }

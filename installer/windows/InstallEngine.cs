@@ -186,12 +186,17 @@ sealed class InstallEngine : EngineBase
         ClearStalePacmanLock();
         // cmake and make (MSYS2's): build.sh runs them, and no devkitPro package brings them (issue #28).
         // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it.
+        // gcc, ninja and zlib-devel (MSYS2's): the prepared graphics (PrepareShaders, issue #88) build
+        // tools/switch/dksh_cache with them; MSYS2's mirrors serve them, not pkg.devkitpro.org.
         // Only when missing: --needed still upgrades an installed one to the package list's version, without its
         // libraries (cmake 4.0.2 -> 4.4.4 without msys-jsoncpp-27.dll, so cmake no longer started). A partial
         // update of MSYS2 (RepairMsys mends one when the tools then don't start).
         var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
-        foreach (var tool in ForwarderKeys != null ? new[] { "cmake", "make", "gcc" } : new[] { "cmake", "make" })
-            if (!File.Exists(Path.Combine(DevkitRoot, @"msys2\usr\bin", tool + ".exe"))) packages += " " + tool;
+        var msysTools = new List<(string package, string file)> { ("cmake", @"usr\bin\cmake.exe"), ("make", @"usr\bin\make.exe") };
+        if (ForwarderKeys != null || PrepareShaders) msysTools.Add(("gcc", @"usr\bin\gcc.exe"));
+        if (PrepareShaders) msysTools.AddRange(new[] { ("ninja", @"usr\bin\ninja.exe"), ("zlib-devel", @"usr\include\zlib.h") });
+        foreach (var (package, file) in msysTools)
+            if (!File.Exists(Path.Combine(DevkitRoot, "msys2", file))) packages += " " + package;
         var output = new List<string>();
         string? reason = null;
         for (int attempt = 1; ; attempt++)
@@ -267,6 +272,13 @@ sealed class InstallEngine : EngineBase
         {
             Warn(Str.Get("fwd_gcc_fail"));
             ForwarderKeys = null;
+        }
+        // the prepared graphics (issue #88) without their tools: the game is built anyway, the console compiles them
+        if (PrepareShaders && new[] { @"usr\bin\gcc.exe", @"usr\bin\ninja.exe", @"usr\include\zlib.h" }
+                .Any(f => !File.Exists(Path.Combine(DevkitRoot, "msys2", f))))
+        {
+            Warn(Str.Get("shaders_tools_fail"));
+            PrepareShaders = false;
         }
         Ok(Str.Get("dkp_tools_ok"));
     }
