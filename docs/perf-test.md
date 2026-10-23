@@ -73,6 +73,11 @@ baseline built before that option: for a like-for-like comparison leave `switchS
 
 ## Rules for agents
 
+- **Check the clocks first.** Read the `[dk] clocks:` line of the session log (debug server `raw logtext`): it must say CPU 1020 MHz
+  and the GPU profile of the build under test (307 MHz before 2026-10-23, 384 MHz default since PR #85). sys-clk or a saved
+  460 MHz GPU profile makes the scenes sit at the 30 fps cap and hides real differences (2026-10-23: the same changes read
+  "inside the noise" at 1224/460 and +2% to +7% at stock). The lava room at stock should be near 27.9 fps (reference below).
+
 - Check first that the console answers and runs the USA game (`tools/switch/wwhd_debug.py info`).
 - Tell the user before the first deploy (the game restarts) and say how long it will take. If the console does not
   answer, ask them to start the game with the debug server on; do not guess.
