@@ -20,12 +20,15 @@ usage:
   make_sd.py --wua GAME.wua [--out DIR]       a Cemu Wii U archive (no keys; needs: pip install zstandard)
   make_sd.py --game-dir EXTRACTED [--out DIR] a folder with code/, content/, meta/ (e.g. from Cemu's
                                               mlc01/usr/title/00050000/10143500 or 10143600, without the update)
-  options: --shaders FILE                     also build shadercache_dksh.bin: from the release's shader template
-                                              (shader-template.sealed: shader states without game code, opened with
-                                              your dump's files), or from your console's shader manifest
-                                              (sdmc:/switch/wwhd/shader_manifest.bin, after playing a while): the
-                                              shaders in it, and guesses for the places not in it
-                                              (a shadercache_gl.bin is still accepted: its sources only)
+  The graphics (shadercache_dksh.bin) are prepared by default: from this release's shader template, downloaded
+  from its GitHub release (shader-template.sealed: shader states without game code, opened with your dump's files;
+  none there, or offline: the console compiles them as it always did).
+  options: --shaders FILE                     prepare them from FILE instead: the release's template downloaded by
+                                              hand, or your console's shader manifest (sdmc:/switch/wwhd/
+                                              shader_manifest.bin, after playing a while): the shaders in it, and
+                                              guesses for the places not in it (a shadercache_gl.bin is still
+                                              accepted: its sources only)
+           --no-shaders                       do not prepare them (the console compiles them)
            --jobs N                           parallel compiles (each needs ~1.5 GB of memory)
            --guest-mod PACKAGE                a code mod (Mod SDK v2) built into the NRO: its id in the mod catalogue
                                               (downloaded, e.g. gc-minimap), its .zip or its folder; repeat for
@@ -73,6 +76,55 @@ def run(cmd, env=None, ok=(0,)):
 # and what it compiles later goes there too (tools/switch/dksh_cache build). A whole game harvested on the console took
 # 14 MiB: 24 MiB stay free.
 SHADER_CODE_MIB = "40"
+
+
+def release_tag():
+    """this source's release tag: cmake/version.txt in a release zip (git archive fills it in: "v0.4.8"; "v0.4.7-55-g..."
+    in an archive of a later commit), else the newest v* tag before this commit (a git checkout); "" when unknown"""
+    import re
+    try:
+        with open(os.path.join(ROOT, "cmake", "version.txt")) as f:
+            line = f.readline().strip()
+    except OSError:
+        line = ""
+    if line.startswith("$Format") or not line:
+        try:
+            line = subprocess.run(["git", "-C", ROOT, "describe", "--tags", "--match", "v[0-9]*", "--abbrev=0"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout.strip()
+        except OSError:
+            line = ""
+    m = re.match(r"v\d+\.\d+\.\d+", line)
+    return m.group(0) if m else ""
+
+
+def release_template():
+    """this release's shader template (issue #88): shader-template.sealed of its GitHub release, checked against its
+    .sha256 and kept in build/; None (with a note) when there is none or it cannot be downloaded: the console then
+    compiles the graphics itself"""
+    import hashlib
+    import guest_mods
+    tag = release_tag()
+    if not tag:
+        print("  (no release version known: the graphics are not prepared; --shaders FILE to give a template)")
+        return None
+    out = os.path.join(ROOT, "build", "shader-template-%s.sealed" % tag)
+    if os.path.isfile(out):
+        return out
+    url = "https://github.com/centollOS/SwitchWakerHD/releases/download/%s/shader-template.sealed" % tag
+    try:
+        data = guest_mods.fetch(url, 64 << 20)
+        want = guest_mods.fetch(url + ".sha256", 4096).decode("ascii", "replace").split()[0].lower()
+    except (guest_mods.Fail, IndexError) as e:
+        print("  (no graphics template for %s: %s; the console compiles the graphics as you play)" % (tag, e))
+        return None
+    if hashlib.sha256(data).hexdigest() != want:
+        print("  (the downloaded graphics template does not match its .sha256: not used)")
+        return None
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "wb") as f:
+        f.write(data)
+    print("  graphics template of %s: %s" % (tag, out))
+    return out
 
 
 def shader_cache(src, game):
@@ -205,8 +257,10 @@ def main():
     src.add_argument("--wua", help="a Cemu Wii U archive (.wua; no keys needed)")
     src.add_argument("--game-dir", help="an extracted game folder (code/, content/, meta/)")
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "sd"), help="where the SD card folder goes")
-    ap.add_argument("--shaders", help="your console's shader_manifest.bin (or a shadercache_gl.bin), compiled into "
-                                      "shadercache_dksh.bin")
+    ap.add_argument("--shaders", help="prepare the graphics from this file (the release's shader-template.sealed, your "
+                                      "console's shader_manifest.bin or a shadercache_gl.bin) instead of the release's "
+                                      "template, downloaded by default")
+    ap.add_argument("--no-shaders", action="store_true", help="do not prepare the graphics (the console compiles them)")
     ap.add_argument("--jobs", type=int, help="parallel compiles")
     ap.add_argument("--keys", help="native build: your console's prod.keys, for the HOME-screen forwarder "
                     "(default: .switch\\prod.keys in your user folder; without it the forwarder is skipped)")
@@ -315,11 +369,12 @@ def main():
     if not os.path.isfile(nro):
         fail("the build made no %s" % nro)
     dksh = None
-    if args.shaders:
+    shaders = os.path.abspath(args.shaders) if args.shaders else None if args.no_shaders else release_template()
+    if shaders:
         try:
-            dksh = shader_cache(os.path.abspath(args.shaders), game)
+            dksh = shader_cache(shaders, game)
         except SystemExit as e:
-            with open(args.shaders, "rb") as f:
+            with open(shaders, "rb") as f:
                 if f.read(8) not in (b"WSME0001", b"WWHT0003"):
                     raise  # the player's own manifest or cache: a failure stops, as always
             # the release's template (issue #88): the game works without the prepared graphics, so this never stops

@@ -145,7 +145,8 @@ in a normal PowerShell or Command Prompt (write `python` where step 2 says `pyth
    `python -m pip install zstandard pycryptodome` (`zstandard` is for a `.wua`, `pycryptodome` for a `.wux`/`.wud`).
 2. Install devkitPro from <https://github.com/devkitPro/installer/releases> into the default `C:\devkitPro`.
 3. Open *devkitPro > MSYS2* from the Start menu and run
-   `pacman -Syu`, then `pacman -S --needed switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make`.
+   `pacman -Syu`, then `pacman -S --needed switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make`,
+   and for the prepared graphics `pacman -S --needed gcc ninja zlib-devel`.
 
 A Cemu `.wua` archive works directly, with no keys: `python tools/switch/make_sd.py --wua "C:\path\game.wua"`.
 The first build takes 10 to 30 minutes.
@@ -187,10 +188,13 @@ homebrew in Docker, or with devkitPro on Windows (10 to 30 minutes the first tim
 toolchain image, about 1 GB).
 If the computer runs out of memory, add `--jobs 2`.
 
-**Prepared graphics (optional, recommended):** download `shader-template.sealed` from the same release and add
-`--shaders shader-template.sealed` to the command. It holds the game's graphics states without any of the game's code
-and only opens with your own copy of the game; `make_sd.py` compiles the graphics from it on your computer (a few
-minutes), so the console starts with them ready. Without it the console compiles them itself (below).
+**Prepared graphics:** `make_sd.py` also downloads the release's graphics template (`shader-template.sealed`: the
+game's graphics states without any of the game's code; it only opens with your own copy of the game) and compiles the
+graphics from it on your computer, a few minutes, so the console starts with them ready. This needs, besides what the
+build needs, CMake, Ninja and a C++ compiler on the computer, or Docker: devkitPro's MSYS2 on Windows gets them with
+`pacman -S --needed gcc ninja zlib-devel` (above); macOS with Xcode's command line tools and `python3 -m pip install
+ninja`; Linux with its `g++`, `ninja-build` (or pip's `ninja`) and `zlib1g-dev`. Without them, offline, or with
+`--no-shaders`, the console compiles them itself (below); a template downloaded by hand goes in with `--shaders FILE`.
 
 At the end the folder `build/sd/` holds:
 

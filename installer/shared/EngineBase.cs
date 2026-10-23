@@ -466,7 +466,10 @@ abstract class EngineBase
         var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
         var minimap = MinimapGame != null ? $" --guest-mod {MinimapMod} --gc-game {Quote(MinimapGame)}" : "";
-        var shaders = shaderTemplate != null ? " --shaders " + Quote(shaderTemplate) : "";
+        // without a template here, --no-shaders: make_sd.py (since #88) would otherwise download it itself; an older
+        // release's make_sd.py does not know the option
+        var shaders = shaderTemplate != null ? " --shaders " + Quote(shaderTemplate)
+                    : File.ReadAllText(MakeSd(ReleaseDir)).Contains("--no-shaders") ? " --no-shaders" : "";
         var rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}{minimap}{shaders}", ReleaseDir, check: false,
                       onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); }, env: env);
         Progress?.Invoke(rc == 0 ? 1 : (double?)null);
