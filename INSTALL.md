@@ -42,6 +42,15 @@ user name has a space or an accented letter: the installer then works there).
 > **Windows SmartScreen** may show *"Windows protected your PC"* on first run because the installer is
 > not code-signed. Click **More info → Run anyway**. This is expected for open-source unsigned executables.
 > The [source code](installer/windows) and [build script](installer/build.ps1) are in this repository.
+>
+> **Microsoft Defender** (or another antivirus) may also flag it, for example as `Trojan:Win32/Wacatac.B!ml`.
+> The `!ml` means a guess by its machine-learning heuristic, not a known malware signature: an unsigned program
+> that downloads files and starts the devkitPro setup looks suspicious to it. The `.exe` is built by
+> [GitHub Actions](.github/workflows/release-installer.yml) from the source above; you can compare your download
+> with `SwitchWakerHD-Installer.exe.sha256` on the release page (PowerShell:
+> `Get-FileHash SwitchWakerHD-Installer.exe`). If you would rather not run it, follow the manual steps from
+> [1. What you need](#1-what-you-need) on: they use the release zip and need no installer.
+> How the installer is signed: [Code signing policy](#code-signing-policy).
 
 The installer is multilingual: it starts in **English** or **Spanish** based on your Windows display
 language, and the button in its corner switches between them.
@@ -309,3 +318,21 @@ it). Saves (`save/`), settings (`settings.ini`) and the compiled graphics stay.
 | The game closes at once or says it is out of memory | Start it in title mode (hold R), not from the album |
 | No button works | The game's controller setting differs from the menu's Dev tab (*Show developer options*): set both to the same |
 | Something else | `sdmc:/switch/wwhd/wwhd.log` and `logs/` say what happened; include them in a report (they contain no game data) |
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org). (SignPath Foundation accepted the project in October 2026; until the first
+release signed with its production certificate, the Windows installer is still unsigned.)
+
+- Committers and reviewers: [the members of centollOS](https://github.com/orgs/centollOS/people); every outside
+  pull request is reviewed by a member before it is merged.
+- Approvers: [Pulpparty](https://github.com/Pulpparty), who approves every signing by hand.
+
+Only the Windows installer, `SwitchWakerHD-Installer.exe`, is signed. It is built from this repository by
+[GitHub Actions](.github/workflows/release-installer.yml).
+
+Privacy policy: this program will not transfer any information to other networked systems unless specifically
+requested by the user or the person installing or operating it. To install, it downloads the release, the
+devkitPro updater and the tools it installs (Python, devkitPro's packages; Git, Pillow and MSYS2's gcc for the
+HOME-screen icon; the minimap mod if chosen) from GitHub and from those tools' own servers.
