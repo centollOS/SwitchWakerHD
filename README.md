@@ -68,7 +68,7 @@ loading screen, with no computer and nothing shipped: the title screen runs hidd
 upstream shaderprep's extractor in C++), speculates variants by family (`shader_list_switch.cpp`) and translates
 them the way a draw would (`gfx/deko translate_listed`); the worker compiles them at full speed behind the card
 (about 19 minutes on a stock console: 73.6% of a whole-game harvest's shader pairs), or gently in the background
-after B (core 0 only, a 50% duty cycle: the game keeps ~30 fps). **Prepare graphics** (settings menu, Speed tab;
+after B (core 0 only, a 50% duty cycle: the game keeps ~30 fps). **Prepare graphics** (settings menu, Picture tab, at the top;
 docs/prepare-graphics-plan.md) warps through every place (about 93% of the pairs); experimental. After it, the
 background list runs gently at the next starts for what the warps did not draw.
 
