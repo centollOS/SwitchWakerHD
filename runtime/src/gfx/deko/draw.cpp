@@ -2019,6 +2019,16 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         rs.provokingVertex = provoking_vertex(r);
         const bool offset = pm.get_OFFSET_FRONT_ENABLED();
         rs.depthBiasEnableMask = offset ? DkPolygonFlag_All : 0;
+        // (on with zcull; WWHD_DK_ZCULL_BIAS_FIX=0 turns it off, a test) zcull's per-tile depth range comes from draws
+        // without the bias, so a depth-biased decal can lose whole 4x8 tiles; the data is dropped before each run
+        // of depth-biased draws
+        static const bool biasFix = R.zcull && !(getenv("WWHD_DK_ZCULL_BIAS_FIX") && *getenv("WWHD_DK_ZCULL_BIAS_FIX") == '0');
+        static bool lastOffset = false;
+        if (biasFix && offset && !lastOffset) {
+            dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Zcull);
+            sync_zcull_dropped();
+        }
+        lastOffset = offset;
         if (!gs.rasterKnown || !same_bytes(gs.raster, rs)) {
             dkCmdBufBindRasterizerState(R.cmd, &rs);
             gs.raster = rs;

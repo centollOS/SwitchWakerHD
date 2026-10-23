@@ -42,6 +42,9 @@ constexpr size_t kWdk1RecordHeaderSize = 1 + 8 + 2 * kMaxVkBinding + 4 + 4;
 // the compiler's identity: uam's version, our patch set (runtime/third_party/uam/PATCHES.md) and
 // glsl_to_deko's revision (kConvertRevision); bump the strings when any of them changes the DKSH bytes
 constexpr char kDkshCompilerName[] = "uam 1.1.0 (devkitPro/uam 5a5afc2) + wwhd patches 1-8";
+// WWHD_DK_DUAL_ISSUE=1 (a test, start-time): uam pairs instructions again (undoes uam patch 7) and the DKSH get
+// another uamId, so the offline cache is ignored and the local cache is a file of its own (shaders_dk.cpp)
+bool dksh_dual_issue();
 uint64_t dksh_uam_id();
 
 struct DkshRecord {

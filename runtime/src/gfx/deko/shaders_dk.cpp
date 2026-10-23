@@ -92,7 +92,8 @@ constexpr char kTransMagic[4] = {'W', 'D', 'T', '1'};
 // record layout change: a file of another version is started again
 constexpr uint32_t kTransVersion = 2;  // (this fork, #37) 2: exact keys (variant_core), the exports mask in each record
 const char* const kOfflinePath = cache_path("shadercache_dksh.bin");
-const char* const kLocalPath = cache_path("shadercache_dksh_local.bin");
+const char* const kLocalPath =
+    cache_path(dksh_dual_issue() ? "shadercache_dksh_local_dual.bin" : "shadercache_dksh_local.bin");
 constexpr uint8_t kGlCacheMagic[4] = {'W', 'G', 'S', '1'};
 constexpr size_t kWorkerStack = 8u << 20;  // Mesa's GLSL parser and nv50_ir recurse deeply (uam_api.h)
 // 0x3B (59), the game's own threads' priority: an application's NPDM allows 0x1C-0x3B, and 0x3C (one below
@@ -708,6 +709,9 @@ void worker_main(void*) {
     if (!thread_heap::attach(kCompileHeap)) LOG("[dk] shader worker: no heap of its own (newlib's)");
     const uint64_t t0 = now_ns();
     uam::init(true);
+    uam::set_dual_issue(dksh_dual_issue());
+    if (dksh_dual_issue())
+        LOG("[dk] shader compiler: DUAL ISSUE on (WWHD_DK_DUAL_ISSUE=1, a test: uam patch 7 off; own cache id and local file)");
     // self-test: a small vertex shader through glsl_to_deko's output form and uam (also builds the resident
     // frontend's tables now rather than at the game's first new shader)
     static const char kTest[] =
