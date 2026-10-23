@@ -155,6 +155,10 @@ void tab_warp() {
 // Picture: resolution per mode, colours and effects
 void tab_picture() {
     using namespace switch_settings;
+    // first, as the most useful thing here: it removes the black or late-appearing effects of places seen the first time
+    note("Recommended on the Switch: prepare the graphics once and new places stop showing black spots or objects that\n"
+         "appear late.");
+    if (prepare_graphics::ui_section()) set_open(false);  // platform/prepare_graphics_ui_switch.cpp
     // one picture profile per mode (as SwitchWaker): the one shown starts as the active mode's
     heading("Resolution");
     static int edit = -1;
@@ -245,8 +249,7 @@ void tab_picture() {
         help("Far places softly out of focus, as on the Wii U.\nCosts a little GPU time.");
     }
     heading("Experimental features");
-    warn("Unfinished. 60 fps needs a big CPU and GPU overclock (sys-clk or similar): at stock clocks the console cannot\n"
-         "keep it up, and the game runs slower and choppier than at 30 fps. Not saved: 30 fps again at the next start.");
+    warn("Unfinished: 60 fps needs a big overclock (sys-clk or similar) to hold. Not saved.");
     {
         // the upstream 60 fps modes (the screen is 60 Hz: 60 fps only)
         const int m = interp::mode();
@@ -282,7 +285,6 @@ void tab_picture() {
 // Speed: shader preparation and the frame rate counter (clocks are sys-clk's job: no GPU profile here)
 void tab_performance() {
     using namespace switch_settings;
-    if (prepare_graphics::ui_section()) set_open(false);  // platform/prepare_graphics_ui_switch.cpp
     heading("Frame rate counter");
     static const char* const modes[] = {"Off", "Frame rate", "Frame rate and load"};
     const int fm = gfxsw::fps_overlay_mode();
