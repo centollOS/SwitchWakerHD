@@ -89,9 +89,6 @@ const Texts kEnglish = {
     "console has no shader cache yet, and prepares the Switch for much smoother play afterwards. It visits the "
     "whole game once by itself (30-40 minutes, best docked). Over 90% of the shaders can be prepared; a few "
     "cannot be compiled.",
-    "Unfinished: place %zu of %zu. Continue below to carry on from there.",
-    "Done on this console. Repeating it only helps after an update that changes the graphics.",
-    "Not done yet on this console.",
 };
 
 const Texts kSpanish = {
@@ -172,9 +169,6 @@ const Texts kSpanish = {
     "aún no tiene los shaders en caché, y hace que después el juego vaya mucho más fluido. Visita todo el juego "
     "una vez por sí solo (30-40 minutos, mejor con la consola en la base). Se puede preparar más del 90% de los "
     "shaders; unos pocos no se pueden compilar.",
-    "Sin terminar: lugar %zu de %zu. Sigue abajo para continuar desde ahí.",
-    "Hecho en esta consola. Repetirlo solo sirve después de una actualización que cambie los gráficos.",
-    "Aún no se ha hecho en esta consola.",
 };
 
 const Texts kFrench = {
@@ -255,9 +249,6 @@ const Texts kFrench = {
     "car la console n'a pas encore de shaders en cache, et rend le jeu bien plus fluide ensuite. Le jeu visite "
     "tout seul chaque lieu une fois (30-40 minutes, de préférence sur la station d'accueil). Plus de 90 % des "
     "shaders peuvent être préparés ; quelques-uns ne peuvent pas être compilés.",
-    "Inachevé : lieu %zu sur %zu. Continuez ci-dessous pour reprendre à partir de là.",
-    "Fait sur cette console. Recommencer n'est utile qu'après une mise à jour qui change les graphismes.",
-    "Pas encore fait sur cette console.",
 };
 
 const Texts kGerman = {
@@ -338,9 +329,6 @@ const Texts kGerman = {
     "gezeichnet wird, weil die Konsole die Shader noch nicht im Cache hat, und sorgt danach für ein viel "
     "flüssigeres Spiel. Das Spiel besucht jeden Ort einmal von selbst (30-40 Minuten, am besten in der Station). "
     "Über 90 % der Shader lassen sich vorbereiten; einige wenige können nicht kompiliert werden.",
-    "Nicht fertig: Ort %zu von %zu. Unten fortsetzen, um dort weiterzumachen.",
-    "Auf dieser Konsole erledigt. Erneut lohnt sich nur nach einem Update, das die Grafik ändert.",
-    "Auf dieser Konsole noch nicht erledigt.",
 };
 
 const Texts kItalian = {
@@ -420,9 +408,6 @@ const Texts kItalian = {
     "perché la console non ha ancora gli shader in cache, e poi rende il gioco molto più fluido. Il gioco visita "
     "da solo ogni luogo una volta (30-40 minuti, meglio con la console nella base). Si può preparare oltre il 90% "
     "degli shader; alcuni non si possono compilare.",
-    "Non finito: luogo %zu di %zu. Continua qui sotto per riprendere da lì.",
-    "Fatto su questa console. Ripeterlo serve solo dopo un aggiornamento che cambia la grafica.",
-    "Non ancora fatto su questa console.",
 };
 
 // the game's "language" setting (Wii U codes, hle/coreinit_misc.cpp), else the console's language

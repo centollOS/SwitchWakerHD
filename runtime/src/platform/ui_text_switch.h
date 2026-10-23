@@ -26,8 +26,8 @@ struct Texts {
         *errRunning, *errNoGame, *errCopy, *waitingForGame;
     // the first start's loading card (background shaders)
     const char *bgTitle, *bgBody, *bgStarting, *bgReading, *bgCompiling, *bgSkip;
-    // the Picture tab's recommendation above Prepare graphics, and where it stands (placeOfUnfinished: %zu of %zu)
-    const char *pictureIntro, *pictureUnfinished, *pictureDone, *pictureNotDone;
+    // Prepare graphics: the menu section's text below its button (prepare_graphics_ui_switch.cpp)
+    const char *pictureIntro;
 };
 
 const Texts& tx();
