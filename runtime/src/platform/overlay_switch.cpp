@@ -611,6 +611,16 @@ void tab_developer() {
     }
     {
         bool v;
+        if (check("FSR 1 upscale and sharpening", gfxsw::fsr(), &v)) {
+            gfxsw::set_fsr(v);
+            hostui::post([v] { hostui::set(kKeyFsr, v ? "1" : "0"); });
+        }
+        help("Test: AMD FSR 1 in the final picture. Smaller than the window (docked 720p on 1080p, or dynamic\n"
+             "resolution below 1.0): edge-adaptive upscale instead of a linear filter. Window-sized (handheld at\n"
+             "1.0): sharpening only. Costs GPU time.");
+    }
+    {
+        bool v;
         if (check("Capture a frame with both sticks clicked", switch_settings::capture_combo(), &v))
             hostui::post([v] { switch_settings::set_capture_combo(v); });
         help("Writes the next frame's pictures to sdmc:/switch/wwhd/captures for a picture that\n"

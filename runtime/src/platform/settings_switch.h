@@ -49,6 +49,7 @@ constexpr const char* kKeyAmbientOcclusion = "switchAmbientOcclusion";  // "1" o
 constexpr const char* kKeyAnisoLevel = "switchAnisoLevel";  // anisotropic filtering: 1 (off, the default), 2, 4, 8, 16
 constexpr const char* kKeyAniso = "switchAniso";  // the old on/off key: read only when switchAnisoLevel is absent ("1" = 16x), never written
 constexpr const char* kKeyFxaa = "switchFxaa";                   // gfxsw::fxaa (issue #21), off by default
+constexpr const char* kKeyFsr = "switchFsr";  // FSR 1 in the present pass (gfxsw::fsr), a developer option, off by default
 constexpr const char* kKeyBloom = "switchBloom";                 // gfxsw::bloom
 constexpr const char* kKeyDistanceBlur = "switchDistanceBlur";  // gfxsw::distance_blur
 // which Wii U controller the Switch controller is (Debug section): single (the GamePad, single screen; the default),
