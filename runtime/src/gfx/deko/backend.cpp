@@ -499,12 +499,13 @@ gfxsw::PictureGrade picture_grade() {
 // the picture adjustments and, for an sRGB TV format, sRGB encoding (as gfx/gl present)
 struct PresentUbo {  // present_fsh.glsl, std140
     float grade[4];
-    int32_t encode[4];  // x: encode as sRGB (sRGB TV format); y: the image is sRGB (sampling decoded it)
+    int32_t encode[4];  // x: encode as sRGB (sRGB TV format); y: the image is sRGB (sampling decoded it); z: FSR 1 (1 EASU, 2 RCAS)
 };
 // where the picture went in the window (GamePad touch, gfxsw::gamepad_touch): x, y, w, h; w 0 while the
 // GamePad picture is not the one shown
 std::atomic<int> g_padRect[4] = {0, 0, 0, 0};
 std::atomic<bool> g_gamepadView{true};  // the GamePad picture (the controller acts as the GamePad by default)
+std::atomic<bool> g_fsr{false};  // FSR 1's EASU for a picture smaller than the window (gfxsw::fsr)
 std::atomic<bool> g_gamepadPip{false};  // the GamePad picture in a corner of the TV's (gfxsw::gamepad_pip)
 // `corner`: the picture in the window's bottom right corner, a third of its width (the GamePad picture-in-picture)
 bool draw_picture(const PresentSource& src, bool capture, bool corner = false) {
@@ -528,7 +529,19 @@ bool draw_picture(const PresentSource& src, bool capture, bool corner = false) {
     if (!u) return false;
     const gfxsw::PictureGrade g = picture_grade();
     const bool encode = R.tvSrgb.load(std::memory_order_relaxed);
-    PresentUbo p{{g.exposure, g.contrast, g.saturation, g.gamma}, {encode ? 1 : 0, src.srgb ? 1 : 0, 0, 0}};
+    // a picture of the window's size is copied pixel for pixel; others are filtered (or, with FSR, upscaled by EASU
+    // when the picture is smaller than its place in the window)
+    const bool exact = src.pw == uint32_t(w) && src.ph == uint32_t(h);
+    const int fsr = g_fsr.load(std::memory_order_relaxed)
+                        ? (src.pw < uint32_t(w) && src.ph < uint32_t(h) ? 1 : exact ? 2 : 0)  // EASU, or RCAS alone at the window's size
+                        : 0;
+    static int fsrLogged = -1;
+    if (!corner && fsr != fsrLogged) {
+        fsrLogged = fsr;
+        LOG("[dk] present: FSR 1 %s (%s picture %ux%u in %dx%d)", fsr == 1 ? "EASU upscale" : fsr == 2 ? "RCAS sharpening" : "not applied",
+            pad ? "GamePad" : "TV", src.pw, src.ph, w, h);
+    }
+    PresentUbo p{{g.exposure, g.contrast, g.saturation, g.gamma}, {encode ? 1 : 0, src.srgb ? 1 : 0, fsr, 0}};
     memcpy(u.cpu, &p, sizeof p);
     static int encoded = -1;
     if (!pad && int(encode) * 2 + int(src.srgb) != encoded) {
@@ -536,8 +549,6 @@ bool draw_picture(const PresentSource& src, bool capture, bool corner = false) {
         LOG("[dk] presenting the game's picture (%ux%u, GX2 format %03X%s) with %s", src.width, src.height,
             src.surface->format, src.srgb ? ", sRGB" : "", encode ? "sRGB encoding (sRGB TV format)" : "no encoding");
     }
-    // a picture of the window's size is copied pixel for pixel; others are filtered
-    const bool exact = src.pw == uint32_t(w) && src.ph == uint32_t(h);
     const bool integer = src.surface->fmt.kind != FormatInfo::FLOAT;
     const DkResHandle tex =
         dkMakeTextureHandle(src.imageId, exact || integer ? kPresentNearestSamplerId : kPresentLinearSamplerId);
@@ -1565,6 +1576,10 @@ bool gamepad_picture_drawn() { return !input::pro_controller() || gfxdk::g_gamep
 bool gamepad_view() { return gfxdk::g_gamepadView.load(std::memory_order_relaxed); }
 void set_gamepad_view(bool on) {
     if (gfxdk::g_gamepadView.exchange(on) != on) LOG("[dk] window: %s picture asked for", on ? "GamePad" : "TV");
+}
+bool fsr() { return gfxdk::g_fsr.load(std::memory_order_relaxed); }
+void set_fsr(bool on) {
+    if (gfxdk::g_fsr.exchange(on) != on) LOG("[dk] present: FSR 1 upscale %s", on ? "on" : "off");
 }
 bool gamepad_pip() { return gfxdk::g_gamepadPip.load(std::memory_order_relaxed); }
 void set_gamepad_pip(bool on) {
