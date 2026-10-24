@@ -76,8 +76,9 @@ overrides the port's clocks. The target is 720p
 
 ## Faster builds: PGO and the recompiler passes
 
-The generated code and the runtime are optimised with a console-made profile (`-DWWHD_PGO=GEN` to train, `USE` to build;
-[docs/pgo.md](docs/pgo.md)); results and dead ends in [docs/pgo-progress.md](docs/pgo-progress.md). A profile fits the exact
+Optional profile-guided optimisation (`-DWWHD_PGO=GEN` to train, `USE` to build; [docs/pgo.md](docs/pgo.md)), **off by
+default**: a normal build and every release are not profiled (turning it on for players: issue #90). Results and dead ends in
+[docs/pgo-progress.md](docs/pgo-progress.md). A profile fits the exact
 code it was made from: remake it after a recompile with a changed recompiler or a change to a profiled runtime file. Never
 judge speed on a training build (several times slower), and never deploy one to a console nobody can restart: a crashing
 start-up needs the NRO put back by hand (FTP :5000 works when the game is not running). The write-back elision

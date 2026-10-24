@@ -1759,4 +1759,4 @@ What we learned (so it is not repeated):
    keep the old flags; GCC's default `-fprofile-use` options inflate the hot code 29%; the profile is found by the object's
    relative path. See pgo.md.
 4. A profile fits the exact generated code it was made from: remake it after a recompiler or profiled-runtime change. A release
-   build with PGO needs its own profile; that decision is the maintainers'.
+   build with PGO needs its own profile; for now PGO stays off by default and releases are not profiled (issue #90).

@@ -308,8 +308,7 @@ extern "C" void ppc_preempt_again(Cpu* c, PpcFunc self) {
         // ppc_preempt kept the request (interrupts disabled, or no core held): the function would stop here again
         // and again. Before, it went on, and every call inside it asked again and returned at once; so it runs with
         // the flag lowered and the request goes back up behind it (a request made meanwhile is not lost).
-        const uint8_t kept = c->preempt;
-        c->preempt = 0;
+        const uint8_t kept = __atomic_exchange_n(&c->preempt, 0, __ATOMIC_RELAXED);
         self(c);
         __atomic_fetch_or(&c->preempt, kept, __ATOMIC_RELAXED);
         return;

@@ -7,7 +7,7 @@ Measured results and the history of what failed: [pgo-progress.md](pgo-progress.
 **A profile only fits the exact sources it was made from.** GCC compares a checksum of each function's flow graph and
 ignores the profile of a function that changed (`-Wno-coverage-mismatch`). Make the profile again after a recompile with a
 different recompiler, or after changing a profiled runtime file. It is derived from the player's own recompile, so it is
-not committed.
+not committed. PGO is off by default and no release ships a PGO build; distributing profiles is issue #90.
 
 ## Result (stock clocks, console, 4 boots per build; full table in [switch-port.md](switch-port.md) "Round 49")
 
