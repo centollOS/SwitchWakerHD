@@ -503,3 +503,10 @@ Newest last. Each entry: what was done, what was measured, what it decided.
   main f1f3132 27.9-28.0 / 24.4-24.5 / 28.9-29.0; this branch's build (O12) 29.1 / 25.35 / 29.0 (one boot so far).
   PR #60 is not the cause: per draw before and after it 4.4 us, the same components; its single-boot bisect step was
   the boot-to-boot spread.
+- 2026-10-23, **CPU work at the stock 1020 MHz: PR #87** (frame-free leaves, hidden symbols, interprocedural write-back elision,
+  PGO). Phase 2.2's "write-back elision" is done with the callees' real read/write sets (the earlier callee-saved-only version,
+  K/L above, was too small to see at the time; the A/B then ran on a console whose clocks were not stock, which is also why it
+  read as noise). Stock-clock A/B, 4 boots per build: the three code changes +1.8% to +3.3% fps in the CPU-bound scenes,
+  PGO on top another +2.6% to +7.5% (outset_village 25.35 -> 27.98 fps in all; lava 27.94 -> 29.28; windfall and
+  dragonroost reach the 30 fps cap). Phase 4 (the render thread) got its first win from the runtime half of the PGO profile
+  rather than from a restructuring. Write-up: docs/switch-port.md "Round 49", docs/pgo.md, docs/pgo-progress.md.
