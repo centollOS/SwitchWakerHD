@@ -333,16 +333,22 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         hooked = start in self.hooks
         name = self.sym(start)
         fname = "f_%08X_orig" % name if hooked else "f_%08X" % name
+        if getattr(self, "summary_pass", False):  # (this fork) calleeregs.py: only what the function reads and writes
+            self.fork_record_summary(start, fname, body)
+            return "", 0
         out = []
         if hooked:
             # runtime hook: callers reach hook_X, which may call the original code (f_X_orig)
             out.append("void f_%08X(Cpu* __restrict c) { PPC_HOOK_CALL(c, hook_%08X); }\n" % (name, name))
-        out += ["void %s(Cpu* __restrict c) {" % fname, "    PPC_ENTER(0x%08Xu);" % start]
+        out += ["void %s(Cpu* __restrict c) {" % fname, "    PPC_ENTER_FN(0x%08Xu, %s);" % (start, fname)]  # (this fork: tail-call slow path)
+        enter_at = len(out) - 1
         if self.fork_mod_check(start):  # (this fork: or only the listed functions)
             # guest mods: the check sits in the game's code (f_X, or f_X_orig behind a port hook), so the
             # port's own hooks (interpolation, true 60) stay outermost and mods hook the game's code
             out.append("    PPC_MOD_HOOK(%d, 0x%08Xu);" % (self.ordinal[start], start))
         body, tail_wb, sites_done = self.fork_locals(start, hooked, body, out)  # (this fork)
+        if not self.fork_frame_free(body):  # (this fork) a function that calls has its frame anyway: the plain check is smaller
+            out[enter_at] = "    PPC_ENTER(0x%08Xu);" % start
         for a, w, s in body:
             if a in self.labels:
                 out.append("L_%08X: ;" % a)
@@ -372,7 +378,9 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         self.imm_override = self.imm_override
         self.fork_prepare()  # (this fork)
         self.ordinal = {e: i for i, e in enumerate(self.sorted_entries)}
+        self.fork_summaries()  # (this fork)
         files = self.fork_write_code(outdir, per_file)  # (this fork: hot layout, inline leaves)
+        self.fork_stats()  # (this fork)
         self.write_headers(outdir)
         self.write_report(outdir, len(files))
 
