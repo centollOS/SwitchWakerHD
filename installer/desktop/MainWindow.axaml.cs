@@ -1,5 +1,5 @@
 // The installer's window on macOS and Linux (Avalonia): the Windows installer's four pages (windows/MainWindow.xaml.cs),
-// with each system's ways to the SD card (DBI over MTP on Linux only: a Mac has no MTP).
+// with each system's way to the SD card.
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -150,14 +150,7 @@ public partial class MainWindow : Window
 
         TxtDoneH.Text     = Str.Get("done_h");
         TxtDoneBody.Text  = Str.Get("done_body");
-        TxtXferMtp.Text = Str.Get("xfer_mtp");       TxtXferMtpD.Text = Str.Get("xfer_mtp_d");
         TxtXferSd.Text  = Str.Get("xfer_sd");        TxtXferSdD.Text  = Str.Get("xfer_sd_d");
-        TxtMtpSteps.Text  = Str.Get("mtp_steps");
-        TxtMtpLabel.Text  = Str.Get("mtp_label");
-        TxtMtpNone.Text   = Str.Get("mtp_none");
-        TxtMtpReplace.Text = Str.Get("mtp_replace");
-        BtnCopyMtp.Content = Str.Get("btn_copy_mtp");
-        BtnMtpRefresh.Content = Str.Get("btn_refresh");
         TxtXferManual.Text = Str.Get("xfer_manual"); TxtXferManualD.Text = Str.Get("xfer_manual_d");
         TxtSdHint.Text    = Str.Get("sd_hint");
         TxtSdLabel.Text   = Str.Get("sd_label");
@@ -167,7 +160,7 @@ public partial class MainWindow : Window
         TxtManual.Text    = Str.Get("manual_body");
         BtnOpenOut.Content = Str.Get("btn_open_out");
         TxtNextH.Text = Str.Get("next_h");
-        TxtNext1.Text = Str.Get(XferMtp.IsChecked == true ? "next_1_mtp" : "next_1"); TxtNext2.Text = Str.Get("next_2");
+        TxtNext1.Text = Str.Get("next_1"); TxtNext2.Text = Str.Get("next_2");
         TxtNext3.Text = Str.Get("next_3"); TxtNext4.Text = Str.Get("next_4");
         BtnConfirmYes.Content = Str.Get("btn_yes_cancel");
         BtnConfirmNo.Content  = Str.Get("btn_no");
@@ -615,12 +608,12 @@ public partial class MainWindow : Window
     void BtnLogOpen_Click(object? sender, RoutedEventArgs e) => engine.Open(LogPath, text: true);
 
     // ── Done page: moving the files to the Switch ────────────────────────────
-    // DBI's MTP responder over USB (Linux, through gio), the microSD mounted on the computer (a card reader, or
-    // hekate's USB mass storage), or by hand. The lists refresh themselves while the page is open.
+    // The microSD mounted on the computer (a card reader, or hekate's USB mass storage), or by hand. The card list
+    // refreshes itself while the page is open. (No copy over DBI's MTP: it could not be read back.)
     readonly DispatcherTimer devicePoll = new() { Interval = TimeSpan.FromSeconds(3) };
-    bool xferBusy, sdScanning, mtpScanning, pollHooked;
+    bool xferBusy, sdScanning, pollHooked;
     string? copiedTo;   // after a copy, the button ejects that card
-    string[] sdKeys = Array.Empty<string>(), mtpKeys = Array.Empty<string>();
+    string[] sdKeys = Array.Empty<string>();
 
     void EnterDone()
     {
@@ -642,9 +635,7 @@ public partial class MainWindow : Window
             TxtXferSize.Text = Str.Get("xfer_size", files.Length, (files.Sum(f => new FileInfo(f).Length) / 1e9).ToString("0.0"));
         }
         catch { TxtXferSize.Text = ""; }
-        XferMtp.IsVisible = engine.HasMtp;
-        if (XferMtp.IsChecked != true && XferSd.IsChecked != true && XferManual.IsChecked != true)
-            (engine.HasMtp ? XferMtp : XferSd).IsChecked = true;
+        if (XferSd.IsChecked != true && XferManual.IsChecked != true) XferSd.IsChecked = true;
         ShowPage(Page.Done);
         UpdatePanels();
         RefreshDevices();
@@ -665,12 +656,10 @@ public partial class MainWindow : Window
 
     void UpdatePanels()
     {
-        PanelMtp.IsVisible    = XferMtp.IsChecked == true;
         PanelSd.IsVisible     = XferSd.IsChecked == true;
         PanelManual.IsVisible = XferManual.IsChecked == true;
         TxtXferStatus.IsVisible = false;
-        TxtNext1.Text = Str.Get(XferMtp.IsChecked == true ? "next_1_mtp" : "next_1");
-        var panel = PanelMtp.IsVisible ? PanelMtp : PanelSd.IsVisible ? PanelSd : (Control)PanelManual;
+        var panel = PanelSd.IsVisible ? PanelSd : (Control)PanelManual;
         Dispatcher.UIThread.Post(() => panel.BringIntoView(), DispatcherPriority.Background);
     }
 
@@ -679,20 +668,6 @@ public partial class MainWindow : Window
     void RefreshDevices()
     {
         if (XferSd.IsChecked == true) RefreshDrives();
-        if (XferMtp.IsChecked == true) RefreshMtp();
-    }
-
-    async void RefreshMtp()
-    {
-        if (mtpScanning) return;
-        mtpScanning = true;
-        System.Collections.Generic.List<MtpStorage> found;
-        try { found = await Task.Run(GioMtp.FindSdStorages); }
-        catch { found = new(); }
-        finally { mtpScanning = false; }
-        FillList(MtpList, ref mtpKeys, found.Select(m => ("mtp" + Math.Abs(m.Uri.GetHashCode()), m.Device, m.Name, (object)m)).ToArray());
-        TxtMtpNone.IsVisible = found.Count == 0;
-        BtnCopyMtp.IsEnabled = found.Count > 0 && !xferBusy;
     }
 
     // Rebuilds the list of card choices only when what is mounted changed, so the selection stays.
@@ -757,9 +732,8 @@ public partial class MainWindow : Window
     {
         xferBusy = busy;
         running = busy;   // closing the window asks first
-        foreach (var c in new Control[] { XferMtp, XferSd, XferManual, MtpList, SdList, BtnMtpRefresh, BtnSdRefresh })
+        foreach (var c in new Control[] { XferSd, XferManual, SdList, BtnSdRefresh })
             c.IsEnabled = !busy;
-        BtnCopyMtp.IsEnabled = !busy && MtpList.Children.Count > 0;
         XferBar.IsVisible = busy;
         UpdateCopyButton();
         UpdateFooter();
@@ -807,39 +781,6 @@ public partial class MainWindow : Window
             XferStatus(msg, "Bad");
             EnqueueLog(msg, LogKind.Error);
             if (!(ex is InstallException || ex is OperationCanceledException)) EnqueueLog(ex.ToString(), LogKind.Error);
-        }
-        finally { SetXferBusy(false); }
-    }
-
-    async void BtnCopyMtp_Click(object? sender, RoutedEventArgs e)
-    {
-        var target = MtpList.Children.OfType<RadioButton>().FirstOrDefault(r => r.IsChecked == true)?.Tag as MtpStorage;
-        if (target == null) return;
-        SetXferBusy(true);
-        XferBar.IsIndeterminate = false;
-        XferBar.Value = 0;
-        XferStatus(Str.Get("mtp_starting", target.Device), "Fg");
-        EnqueueLog(Str.Get("mtp_starting", target.Device) + $" ({target.Uri})", LogKind.Info);
-        cts = new CancellationTokenSource();
-        var token = cts.Token;
-        var src = engine.SdOut;
-        try
-        {
-            await Task.Run(() => GioMtp.Copy(src, target, (fd, ft, bd, bt, name) => Ui(() =>
-            {
-                XferBar.Value = bt > 0 ? bd * 100.0 / bt : 0;
-                TxtXferStatus.Text = Str.Get("mtp_progress", fd, ft, bd / 1048576, bt / 1048576);
-            }), line => EnqueueLog(line, LogKind.Output), token));
-            XferStatus(Str.Get("mtp_done"), "Good");
-            EnqueueLog(Str.Get("mtp_done"), LogKind.Ok);
-        }
-        catch (Exception ex)
-        {
-            var msg = ex is OperationCanceledException ? Str.Get("cancelled")
-                    : ex is InstallException ? ex.Message
-                    : Str.Get("mtp_error", ex.Message);
-            XferStatus(msg, "Bad");
-            EnqueueLog(msg, LogKind.Error);
         }
         finally { SetXferBusy(false); }
     }

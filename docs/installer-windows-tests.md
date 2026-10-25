@@ -24,7 +24,7 @@ drives and network shares.
 | 4 | EUR game (`.wua` or image) | Builds; log says "The Wind Waker HD (Europe)" |
 | 5 | Windows user name with a space ("Test User") | Working folder `C:\SwitchWakerHD-Build`; builds (#30) |
 | 6 | Re-run after a successful build | No new download; reuses the release; builds |
-| 7 | Copy to a normal SD card | `switch/wwhd/` at the card's root; the game starts from the Homebrew Menu (title mode) |
+| 7 | Copy to a normal SD card | The done page offers the SD card (selected) and "copy it myself", no USB copy with DBI; `switch/wwhd/` at the card's root; the game starts from the Homebrew Menu (title mode) |
 
 ## B. Keys and game files (stop before any download)
 

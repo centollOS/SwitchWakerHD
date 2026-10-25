@@ -257,6 +257,4 @@ sealed class LinuxEngine : DesktopEngine
         }
         catch (Exception) { }
     }
-
-    public override bool HasMtp => GioMtp.Available;
 }
