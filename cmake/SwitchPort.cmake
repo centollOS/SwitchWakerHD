@@ -153,6 +153,19 @@ macro(switch_port_executable)
     # zstd for upstream's full-state codec (full_state_stream.h; full states stay off on the Switch, the code links):
     # the pinned source (cmake/Zstd.cmake), devkitPro has no zstd port
     set(WWHD_BUNDLED_ZSTD ON CACHE BOOL "" FORCE)
+    # (this fork) only lib/ and LICENSE of the release tarball: its tests/ has symlinks, which MSYS2's cmake cannot
+    # create on Windows ("Can't create 'zstd-1.5.7/tests/cli-tests/bin/unzstd'", the installer's native build)
+    if(NOT FETCHCONTENT_SOURCE_DIR_ZSTD)
+      set(_wwhd_zstd_dir ${CMAKE_BINARY_DIR}/_deps/zstd-lib-only)
+      if(NOT EXISTS ${_wwhd_zstd_dir}/zstd-1.5.7/lib/zstd.h)
+        file(DOWNLOAD https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+             ${CMAKE_BINARY_DIR}/_deps/zstd-1.5.7.tar.gz
+             EXPECTED_HASH SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3 TLS_VERIFY ON)
+        file(ARCHIVE_EXTRACT INPUT ${CMAKE_BINARY_DIR}/_deps/zstd-1.5.7.tar.gz DESTINATION ${_wwhd_zstd_dir}
+             PATTERNS zstd-1.5.7/lib zstd-1.5.7/LICENSE)
+      endif()
+      set(FETCHCONTENT_SOURCE_DIR_ZSTD ${_wwhd_zstd_dir}/zstd-1.5.7)
+    endif()
     include(${CMAKE_SOURCE_DIR}/cmake/Zstd.cmake)
     target_link_libraries(wwhd PRIVATE wwhd_zstd)
     # threads created without attributes get a large stack, newlib's C11 thrd_create results are fixed
