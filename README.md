@@ -179,9 +179,11 @@ and comes back at the next start.
 | Tab | What you'll find there |
 |---|---|
 | **Saves** | Five save-state slots: save where you stand, come back to that spot in seconds |
-| **Switch** | Resolution, picture, performance, frame-rate counter, rumble and gyro aiming |
-| **Warp** | Travel straight to any island, dungeon or room |
+| **Picture** | Resolution, colours, frame-rate counter, 60 fps modes, Prepare graphics |
+| **Controls** | Rumble and gyro aiming |
 | **Mods** | Built-in gameplay and camera mods, and cheats |
+| **Warp** | Travel straight to any island, dungeon or room |
+| **Dev** | Update check; developer options behind *Show developer options* |
 | **Language / About** | The game's language, version information |
 
 ### Controls and gyro aiming
@@ -273,7 +275,7 @@ opening island, and a smooth 26-29 fps in the busiest scenes, such as sailing ne
 volcano island. A CPU at about 1.2 GHz (1224 MHz, set with sys-clk) holds a steady 30 there. The game
 sets no overclock itself.
 Shader and texture stutters on first use are much reduced, and shaders seen in an earlier session
-no longer stutter. Docked it renders at 1080p (picture profile per mode in the Switch tab: handheld
+no longer stutter. Docked it renders at 1080p (picture profile per mode in the Picture tab: handheld
 1x, docked 1.5x, with dynamic resolution), tested on a TV at a median of 29.9 fps. Known issues and
 open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Round 47") and
 [docs/deko3d-plan.md](docs/deko3d-plan.md).

@@ -72,8 +72,8 @@ the release, builds the game natively and copies it to the SD card.
    starts open directly.
 3. Pick your game dump (a `.wua`, a `.wux`/`.wud` with its keys, or an extracted folder), and if you like the
    **GameCube sea minimap** (your own GameCube Wind Waker: `.iso`, `.gcm`, `.rvz` or its folder) and the
-   **HOME-screen icon** (your console's `prod.keys`), as on Windows above. You can also drag the game onto the
-   window.
+   **HOME-screen icon** (your console's `prod.keys`), as on Windows above; **Prepare the graphics now** is ticked by
+   default there too. You can also drag the game onto the window.
 4. Press **Install**. On the way:
    - if Apple's **command line tools** are missing, macOS shows its own window: press *Install*, wait, then
      *Continue* in the installer;
@@ -100,7 +100,8 @@ desktop), one file with everything inside:
 
 1. Extract the archive (double-click it, or right-click > *Extract here*) and double-click
    **SwitchWakerHD-Installer** (if your file manager asks, choose *Run*).
-2. Pick your game dump and, if you like, the GameCube sea minimap and the HOME-screen icon, as on Windows above.
+2. Pick your game dump and, if you like, the GameCube sea minimap and the HOME-screen icon, as on Windows above
+   (**Prepare the graphics now** is ticked by default).
 3. Press **Install**. It sets up its own Python 3.14 in its working folder, then the Switch toolchain, the first
    that fits:
    - devkitPro already installed (`/opt/devkitpro` with the Switch packages): it builds natively;
@@ -265,7 +266,7 @@ Copy the **contents** of `build/sd/` to the root of the SD card, so the game end
 | | |
 |---|---|
 | **Minus, held half a second** | Settings menu (L / R change tabs, B or Minus closes it). A short Minus goes to the game |
-| **ZL + ZR + Minus** | In GamePad mode: switch between the TV picture and the GamePad screen (items, map). On the GamePad screen the touch screen works as the GamePad's. Or show the GamePad screen small in a corner of the TV picture: Minus held > Switch tab > "GamePad screen in a corner of the TV picture" (the touch screen then works inside that corner) |
+| **ZL + ZR + Minus** | In GamePad mode: switch between the TV picture and the GamePad screen (items, map). On the GamePad screen the touch screen works as the GamePad's. Or show the GamePad screen small in a corner of the TV picture: Minus held > Dev tab > *Show developer options* > "GamePad screen in a corner of the TV picture" (the touch screen then works inside that corner) |
 
 By default the controller acts as a **Wii U Pro Controller** and everything is on one screen. To play
 with the GamePad features (its screen, **gyro aiming**), choose *Wii U GamePad* in the menu's Dev tab
@@ -290,14 +291,14 @@ black or an object appear a moment late. So the **first start** asks how to prep
 - **A: Prepare graphics** (the most complete). Choose your Quest Log, or start a new game you do not save; the game
   then visits every place by itself behind a loading screen (30-40 minutes, best docked; hold B to stop) and restarts
   at the title screen with about 93% of the game's graphics ready. Your saves are not touched. Until a Quest Log is
-  loaded it waits, also after a restart; the settings menu (Minus, **Switch** tab) can cancel it.
+  loaded it waits, also after a restart; the settings menu (Minus, **Picture** tab) can cancel it.
 - **B: Play now.** A "Preparing the graphics" screen instead: behind it the game boots and its title screen runs, then
   the console reads the graphics programs of your own copy of the game and compiles about three quarters of the
   game's graphics, about 20 minutes. **B** on that screen plays at once; what is left goes on in the background while
   you play, gently (the frame rate stays), and in the next starts if needed.
 
 What is compiled is kept. The rest of the game's graphics compile the first time they show, in a few seconds, once.
-**Prepare graphics** stays in the settings menu (Minus, **Switch** tab) for later.
+**Prepare graphics** stays in the settings menu (Minus, **Picture** tab) for later.
 
 ## Updating
 
