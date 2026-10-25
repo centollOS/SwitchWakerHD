@@ -65,9 +65,9 @@ static class LinuxStrings
                                "The build stopped without a message: a tool did not start. Press Retry; if it happens again, share the log (installer.log) in an issue."),
 
         // Done page
-        ["sd_hint"]        = ("Pon la microSD en un lector de tarjetas, o en la Switch abre hekate > Tools > USB Tools > SD Card. Si no aparece, ábrela en el gestor de archivos para montarla.",
-                               "Put the microSD card in a card reader, or on the Switch open hekate > Tools > USB Tools > SD Card. If it does not show up, open it in the file manager to mount it."),
-        ["sd_fat32"]       = ("{0} está en FAT32, que no admite archivos de más de 4 GB. Formatea la tarjeta en exFAT (con hekate) o cópiala por USB con DBI.",
-                               "{0} is FAT32, which cannot hold files over 4 GB. Format the card as exFAT (with hekate) or copy over USB with DBI."),
+        ["sd_hint"]        = ("Pon la microSD en un lector de tarjetas. ¿No tienes lector? En la Switch abre hekate > Tools > USB Tools > SD Card y conecta el cable USB: la tarjeta aparece aquí como una unidad. Si no aparece, ábrela en el gestor de archivos para montarla.",
+                               "Put the microSD card in a card reader. No card reader? On the Switch open hekate > Tools > USB Tools > SD Card and plug in the USB cable: the card shows up here as a drive. If it does not show up, open it in the file manager to mount it."),
+        ["sd_fat32"]       = ("{0} está en FAT32, que no admite archivos de más de 4 GB. Formatea la tarjeta en exFAT (con hekate).",
+                               "{0} is FAT32, which cannot hold files over 4 GB. Format the card as exFAT (with hekate)."),
     };
 }
