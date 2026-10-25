@@ -26,9 +26,8 @@ download, and the build. You only need your own personal dump of the game.
 4. Press **Install**. If devkitPro is not installed yet, the installer asks you to open its setup: accept the
    license and keep the default path (`C:\devkitPro`).
 5. Wait for the build (10–30 minutes), then choose how the files reach the Switch:
-   - **Over a USB cable, with DBI**: on the Switch, open DBI and choose *Run MTP responder*, then connect the cable.
-   - **With the microSD card in the PC**: a card reader, or hekate's *USB Tools > SD Card* (UMS). After the copy
-     the installer reads every file back from the card and copies again any that differs.
+   - **With the microSD card in the PC**: a card reader, or hekate's *Tools > USB Tools > SD Card* (UMS).
+     After the copy the installer reads every file back from the card and copies again any that differs.
    - **By hand**: the installer opens the folder; copy its contents to the root of the SD card.
 
 If something fails, *Show details* shows what happened; the full log is in
@@ -80,7 +79,7 @@ the release, builds the game natively and copies it to the SD card.
 5. Wait for the build (10–30 minutes; keep the Mac plugged in), then:
    - **With the microSD card in the Mac**: a card reader, or on the Switch hekate's *Tools > USB Tools > SD Card*
      and the USB cable; the installer copies the files, reads every one back from the card (copying again any
-     that differs) and ejects the card. (A Mac has no MTP, so DBI's USB transfer is not offered.)
+     that differs) and ejects the card.
    - **By hand**: *Show in Finder* opens the folder; copy its contents to the root of the SD card.
 
 The full log is in `~/SwitchWakerHD-Build/installer.log`. The installer starts in Spanish or English from the
@@ -109,8 +108,6 @@ desktop), one file with everything inside:
    The password window comes from your desktop (polkit). Without one, the installer shows a command to paste in a
    terminal.
 4. Wait for the build (10–30 minutes), then:
-   - **Over a USB cable, with DBI**: on the Switch, open DBI and choose *Run MTP responder*, then connect the
-     cable (through `gio`, which most desktops have);
    - **With the microSD card in the computer**: a card reader, or hekate's *Tools > USB Tools > SD Card* (the
      installer reads every file back from the card and copies again any that differs);
    - **By hand**: *Open folder*, then copy its contents to the root of the SD card.
