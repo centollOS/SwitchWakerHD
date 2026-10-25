@@ -23,6 +23,10 @@ download, and the build. You only need your own personal dump of the game.
    Optional, the **GameCube sea minimap**: choose your own GameCube Wind Waker (`.iso`, `.gcm`, `.rvz` or its
    folder); the installer downloads the mod and builds it into the game
    ([details](#optional-code-mods-the-gamecube-sea-minimap)).
+   **Prepare the graphics now** (ticked by default): the installer downloads the release's graphics template and
+   compiles the game's graphics on your computer, from your own copy of the game, a few minutes more. The console
+   then starts with them ready: no first-start screen and no black places
+   ([details](#the-first-start-preparing-the-graphics)).
 4. Press **Install**. If devkitPro is not installed yet, the installer asks you to open its setup: accept the
    license and keep the default path (`C:\devkitPro`).
 5. Wait for the build (10–30 minutes), then choose how the files reach the Switch:
@@ -150,7 +154,8 @@ in a normal PowerShell or Command Prompt (write `python` where step 2 says `pyth
    `python -m pip install zstandard pycryptodome` (`zstandard` is for a `.wua`, `pycryptodome` for a `.wux`/`.wud`).
 2. Install devkitPro from <https://github.com/devkitPro/installer/releases> into the default `C:\devkitPro`.
 3. Open *devkitPro > MSYS2* from the Start menu and run
-   `pacman -Syu`, then `pacman -S --needed switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make`.
+   `pacman -Syu`, then `pacman -S --needed switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make`,
+   and for the prepared graphics `pacman -S --needed gcc ninja zlib-devel`.
 
 A Cemu `.wua` archive works directly, with no keys: `python tools/switch/make_sd.py --wua "C:\path\game.wua"`.
 The first build takes 10 to 30 minutes.
@@ -192,12 +197,21 @@ homebrew in Docker, or with devkitPro on Windows (10 to 30 minutes the first tim
 toolchain image, about 1 GB).
 If the computer runs out of memory, add `--jobs 2`.
 
+**Prepared graphics:** `make_sd.py` also downloads the release's graphics template (`shader-template.sealed`: the
+game's graphics states without any of the game's code; it only opens with your own copy of the game) and compiles the
+graphics from it on your computer, a few minutes, so the console starts with them ready. This needs, besides what the
+build needs, CMake, Ninja and a C++ compiler on the computer, or Docker: devkitPro's MSYS2 on Windows gets them with
+`pacman -S --needed gcc ninja zlib-devel` (above); macOS with Xcode's command line tools and `python3 -m pip install
+ninja`; Linux with its `g++`, `ninja-build` (or pip's `ninja`) and `zlib1g-dev`. Without them, offline, or with
+`--no-shaders`, the console compiles them itself (below); a template downloaded by hand goes in with `--shaders FILE`.
+
 At the end the folder `build/sd/` holds:
 
 ```
 build/sd/switch/wwhd/
-├── wwhd.nro     the game
-└── game/        your game's files
+├── wwhd.nro              the game
+├── shadercache_dksh.bin  the prepared graphics (with --shaders)
+└── game/                 your game's files
 ```
 
 ### Optional: code mods (the GameCube sea minimap)
@@ -269,6 +283,10 @@ profile (not a menu choice; one saved by an older version is reset to 384); for 
 
 ## The first start: preparing the graphics
 
+With the installer's **Prepare the graphics now** (or `make_sd.py --shaders shader-template.sealed`) the graphics
+were compiled on your computer: the console loads them at start-up and none of this applies (no first-start screen).
+Without them:
+
 The console compiles each of the game's graphics effects the first time it is drawn; until then a texture can look
 black or an object appear a moment late. So the **first start** asks how to prepare them, once:
 
@@ -317,4 +335,7 @@ Only the Windows installer, `SwitchWakerHD-Installer.exe`, is signed. It is buil
 Privacy policy: this program will not transfer any information to other networked systems unless specifically
 requested by the user or the person installing or operating it. To install, it downloads the release, the
 devkitPro updater and the tools it installs (Python, devkitPro's packages; Git, Pillow and MSYS2's gcc for the
-HOME-screen icon; the minimap mod if chosen) from GitHub and from those tools' own servers.
+HOME-screen icon; MSYS2's gcc, ninja and zlib for the prepared graphics; the minimap mod if chosen) from GitHub and
+from those tools' own servers, and, unless *Prepare the graphics now* is unticked, the release's graphics template
+(`shader-template.sealed`: data, never run; encrypted with the game's own files, see
+[docs/shader-manifest-release-plan.md](docs/shader-manifest-release-plan.md)) from GitHub.

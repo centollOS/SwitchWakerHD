@@ -76,6 +76,16 @@
             </Border>
             <TextBlock x:Name="TxtGameWarn" Foreground="{StaticResource Warn}" Margin="2,10,0,0" IsVisible="False"/>
 
+            <!-- Prepared graphics (issue #88): the release's shader template built into the console's shader cache -->
+            <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
+              <StackPanel>
+                <CheckBox x:Name="ChkShaders" IsChecked="True" Margin="0,0,0,4">
+                  <TextBlock x:Name="TxtShH" FontWeight="SemiBold"/>
+                </CheckBox>
+                <TextBlock x:Name="TxtShD" Classes="dim" FontSize="13" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
+
             <!-- Optional: the GameCube sea minimap (a code mod built into the game) -->
             <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
               <StackPanel>

@@ -129,6 +129,16 @@ play, plus the archives' programs, pre-translated at start-up. Upstream consider
 and does not ship it: each player records their own. Shipping our manifest (program hashes, register states, fetch
 shaders) would go further than upstream; that is a decision to make before step 5.
 
+## Revisited (2026-10-23, issue #88): a distilled, sealed template ships
+
+Upstream itself now packages a code-free shader state template into its releases (from a private, pinned repository;
+`tools/shadercache/README.md` upstream, since 2ce1e77c). SwitchWakerHD does the same with its own: one state per
+distinct shader of a whole-game recording, in upstream's WWHT0003 format, checked for game bytes, encrypted with a key
+made from the dump's shader archives, attached to each release from the private repository
+`centollOS/SwitchWakerHD-shader-manifest`; players are not asked for recordings. The decision below is superseded for
+that template; a console's raw manifest and every cache still never ship.
+[docs/shader-manifest-release-plan.md](shader-manifest-release-plan.md) has the plan and the measurements.
+
 ## Decision (2026-10-10): the prudent route, as upstream
 
 The manifest is **never shipped**. Like upstream's template, each player records their own on their console while

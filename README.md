@@ -22,7 +22,9 @@ repository; their instructions are in the upstream README, kept as
   versions at startup.
 - **This repository contains no game code, assets, keys or data.** The NRO you build contains the
   game's code recompiled from your dump, and the shader caches are made from the game's shaders:
-  they are for your own use only; do not share them.
+  they are for your own use only; do not share them. Releases attach `shader-template.sealed`, the game's
+  shader *states* without any game code, encrypted with a key made from the game's own files (so it opens only with
+  a copy of the game); setup compiles the shader cache from it on your computer (issue #88, below).
 - **No release binaries are provided** for the Switch, precisely because they carry the
   recompiled game.
 
@@ -72,6 +74,16 @@ after B (core 0 only, a 50% duty cycle: the game keeps ~30 fps). **Prepare graph
 docs/prepare-graphics-plan.md) warps through every place (about 93% of the pairs); experimental. After it, the
 background list runs gently at the next starts for what the warps did not draw.
 
+**Prepared at setup (issue #88).** Each release attaches `shader-template.sealed`: one recorded state per distinct
+shader of a whole-game recording on a test console (program hashes, register values, vertex fetch attributes as
+typed fields; upstream's code-free WWHT0003 format, checked by `tools/release/guard.py` and for game bytes), sealed with
+a key made from the dump's own shader archives. The installers (and `make_sd.py --shaders shader-template.sealed`)
+open it with the player's dump and build `shadercache_dksh.bin` on the computer (about 23,000 shaders, a few
+minutes); the console then has no first-start screen and compiles almost nothing. It lives in the private repository
+`centollOS/SwitchWakerHD-shader-manifest`, pinned by `tools/switch/shader_template.ref`; maintainers update it from
+the test console with `tools/switch/update_shader_template.sh` and attach it with `attach_shader_template.sh`.
+Plan, measurements and safeguards: [docs/shader-manifest-release-plan.md](docs/shader-manifest-release-plan.md).
+
 For developers, the console also writes `shader_manifest.bin` as it plays: for each shader variant, the program's hash and
 size, the GPU registers and the vertex fetch layout it was translated with (identifiers, no game code).
 `make_sd.py --shaders shader_manifest.bin` builds `shadercache_dksh.bin` from it on the computer: the
@@ -79,7 +91,8 @@ programs come from the player's own dump (every shader archive, with upstream's 
 extractor), `tools/switch/dksh_cache translate` runs the same Latte decompiler as the runtime (the result
 is byte-identical to the console's), and speculative variants (programs of the same family with the
 recorded states) cover places not visited yet. Details and measurements:
-[docs/shader-cache-from-dump-plan.md](docs/shader-cache-from-dump-plan.md). Neither file is ever shipped.
+[docs/shader-cache-from-dump-plan.md](docs/shader-cache-from-dump-plan.md). A console's manifest and the shader caches
+are never shipped; only the distilled, sealed template above is.
 
 ```sh
 tools/switch/dksh_cache/build.sh build <shadercache_gl.bin> build/shadercache_dksh.bin   # a GLSL list, as before
@@ -150,7 +163,7 @@ and copy the files.
 - Save states: `sdmc:/switch/wwhd/states/`.
 - Settings from the options menu: `settings.ini`. An `env.txt` from an earlier build is converted into
   it at the first start and renamed `env.txt.old`.
-- To update, replace `wwhd.nro` (and `shadercache_dksh.bin` if you rebuilt it). Saves, settings and
+- To update, replace `wwhd.nro` (and `shadercache_dksh.bin`, made again with the new release's template). Saves, settings and
   caches stay.
 - Logs, if something goes wrong: `logs/`, one `wwhd_<date>_<time>.log` per session (the newest is this
   run); the 10 most recent are kept.

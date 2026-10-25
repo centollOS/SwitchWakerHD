@@ -64,3 +64,37 @@ jobs:
       - name: Installer long path unit tests (python.org Python, as in the release)
         shell: pwsh
         run: python tools/installer/test_setup.py LongPaths
+
+  # (this fork, issue #88) The Windows installer builds the Switch shader cache with tools/switch/dksh_cache in
+  # devkitPro's MSYS2 (its MSYS environment, with MSYS2's gcc, cmake, ninja and zlib-devel). Here the same
+  # environment compiles it and builds a cache from two hand-written GLSL shaders (no game code); the shader template
+  # tools run under Windows' Python too.
+  dksh-cache:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: >-
+            gcc
+            cmake
+            ninja
+            zlib-devel
+            python
+
+      - name: dksh_cache (native build) and a cache from synthetic shaders
+        run: python tools/switch/dksh_cache/smoke.py
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Shader template tools (python.org Python, as the installer's)
+        shell: pwsh
+        run: python tools/switch/test_shader_manifest.py
