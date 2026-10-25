@@ -15,9 +15,14 @@ vec4 srgb_encode(vec4 c) { return mix(c * 12.92, 1.055 * pow(c, vec4(1.0 / 2.4))
 // ---- FSR 1 EASU (AMD FidelityFX Super Resolution 1.0, MIT; ffx_fsr1.h FsrEasuF, GLSL port): an edge-adaptive
 // upscale from 12 taps. It expects perceptual values: when the picture is still linear (encode.x) the taps are
 // taken to gamma 2.0 (sqrt) and back, which is cheaper than the sRGB curve on 12 texels.
+// (no clamps: the picture is UNORM, so the taps are in 0..1; the result is clamped at the end)
 vec4 easu_in(vec4 v) {
-    if (encode.y != 0) v = srgb_encode(clamp(v, 0.0, 1.0));
-    return encode.x != 0 ? sqrt(clamp(v, 0.0, 1.0)) : v;
+    if (encode.y != 0) v = srgb_encode(v);
+    return encode.x != 0 ? sqrt(v) : v;
+}
+vec3 rcas_in(vec3 v) {
+    if (encode.y != 0) v = srgb_encode(v);
+    return encode.x != 0 ? sqrt(v) : v;
 }
 void easu_tap(inout vec3 aC, inout float aW, vec2 off, vec2 dir, vec2 len, float lob, float clp, vec3 c) {
     vec2 v = vec2(off.x * dir.x + off.y * dir.y, off.x * -dir.y + off.y * dir.x) * len;
@@ -97,15 +102,17 @@ vec3 easu() {
 // ---- FSR 1 RCAS (ffx_fsr1.h FsrRcasF, GLSL port): contrast-adaptive sharpening from the pixel and its four
 // neighbours, on a picture of the window's size (encode.z == 2). 0.25 stops of sharpness (AMD's default is 0.2).
 vec3 rcas() {
-    ivec2 ip = ivec2(uv * vec2(textureSize(scan, 0))), hi = textureSize(scan, 0) - 1;
-    vec3 b = easu_in(vec4(texelFetch(scan, clamp(ip + ivec2(0, -1), ivec2(0), hi), 0).rgb, 0.0)).rgb;
-    vec3 d = easu_in(vec4(texelFetch(scan, clamp(ip + ivec2(-1, 0), ivec2(0), hi), 0).rgb, 0.0)).rgb;
-    vec3 e = easu_in(vec4(texelFetch(scan, ip, 0).rgb, 0.0)).rgb;
-    vec3 f = easu_in(vec4(texelFetch(scan, clamp(ip + ivec2(1, 0), ivec2(0), hi), 0).rgb, 0.0)).rgb;
-    vec3 h = easu_in(vec4(texelFetch(scan, clamp(ip + ivec2(0, 1), ivec2(0), hi), 0).rgb, 0.0)).rgb;
+    // the sampler is nearest and clamps to the edge, and the picture is the window's size: the output pixel's
+    // centre is the texel's centre, and a fixed offset reaches a neighbour (the edge repeats itself)
+    vec3 b = rcas_in(textureOffset(scan, uv, ivec2(0, -1)).rgb);
+    vec3 d = rcas_in(textureOffset(scan, uv, ivec2(-1, 0)).rgb);
+    vec3 e = rcas_in(texture(scan, uv).rgb);
+    vec3 f = rcas_in(textureOffset(scan, uv, ivec2(1, 0)).rgb);
+    vec3 h = rcas_in(textureOffset(scan, uv, ivec2(0, 1)).rgb);
     vec3 mn4 = min(min(min(b, d), f), h), mx4 = max(max(max(b, d), f), h);
-    vec3 hitMin = min(mn4, e) / (4.0 * mx4);
-    vec3 hitMax = (1.0 - max(mx4, e)) / (4.0 * mn4 - 4.0);
+    // (a tiny epsilon keeps black and white neighbourhoods from dividing by zero)
+    vec3 hitMin = min(mn4, e) / (4.0 * mx4 + 1.0e-5);
+    vec3 hitMax = (1.0 - max(mx4, e)) / (4.0 * mn4 - 4.0 - 1.0e-5);
     vec3 lobeC = max(-hitMin, hitMax);
     float lobe = max(-(0.25 - 1.0 / 16.0), min(max(max(lobeC.r, lobeC.g), lobeC.b), 0.0)) * exp2(-0.25);
     return clamp((lobe * (b + d + h + f) + e) / (4.0 * lobe + 1.0), 0.0, 1.0);
