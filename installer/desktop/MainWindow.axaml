@@ -173,13 +173,6 @@
             </StackPanel>
             <TextBlock x:Name="TxtDoneBody" Margin="0,8,0,4"/>
             <TextBlock x:Name="TxtXferSize" Classes="dim" FontSize="13" Margin="0,0,0,14"/>
-            <!-- Linux only (gio): DBI's MTP responder -->
-            <RadioButton x:Name="XferMtp" Classes="card" GroupName="xfer" IsCheckedChanged="Xfer_Changed" IsVisible="False">
-              <StackPanel>
-                <TextBlock x:Name="TxtXferMtp" FontWeight="SemiBold"/>
-                <TextBlock x:Name="TxtXferMtpD" Classes="dim" FontSize="13"/>
-              </StackPanel>
-            </RadioButton>
             <RadioButton x:Name="XferSd" Classes="card" GroupName="xfer" IsCheckedChanged="Xfer_Changed">
               <StackPanel>
                 <TextBlock x:Name="TxtXferSd" FontWeight="SemiBold"/>
@@ -195,18 +188,6 @@
             <Border Background="{StaticResource Card}" BorderBrush="{StaticResource Line}" BorderThickness="1"
                     CornerRadius="8" Padding="20,16" Margin="0,4,0,0">
               <StackPanel>
-                <!-- DBI over USB (Linux) -->
-                <StackPanel x:Name="PanelMtp" IsVisible="False">
-                  <TextBlock x:Name="TxtMtpSteps" LineHeight="22" Margin="0,0,0,12"/>
-                  <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,8">
-                    <TextBlock x:Name="TxtMtpLabel" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                    <Button x:Name="BtnMtpRefresh" Grid.Column="1" Classes="link" Click="BtnDevRefresh_Click"/>
-                  </Grid>
-                  <StackPanel x:Name="MtpList"/>
-                  <TextBlock x:Name="TxtMtpNone" Classes="dim" Margin="0,0,0,10"/>
-                  <TextBlock x:Name="TxtMtpReplace" Classes="dim" FontSize="12" Margin="0,0,0,10"/>
-                  <Button x:Name="BtnCopyMtp" Classes="primary" HorizontalAlignment="Left" Click="BtnCopyMtp_Click"/>
-                </StackPanel>
                 <!-- The microSD in the computer: a card reader, or hekate's USB mass storage -->
                 <StackPanel x:Name="PanelSd" IsVisible="False">
                   <TextBlock x:Name="TxtSdHint" LineHeight="21" Margin="0,0,0,12"/>

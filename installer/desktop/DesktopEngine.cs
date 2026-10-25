@@ -115,8 +115,6 @@ abstract class DesktopEngine : EngineBase
     public abstract bool Eject(string mount);
     // Opens a folder in the file manager, or a text file (the log) in an editor.
     public abstract void Open(string path, bool text = false);
-    // DBI's MTP responder over USB (Linux, through gio)
-    public virtual bool HasMtp => false;
 
     // A plain copy, file by file (no extended attributes: no ._ files from a Mac), of what is new or changed, then
     // every file read back (VerifyCard); progress(done bytes, total bytes, checking).
