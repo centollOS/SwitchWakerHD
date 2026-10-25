@@ -33,7 +33,5 @@
     <Reference Include="System.IO.Compression.FileSystem" />
     <!-- WinForms only for FolderBrowserDialog (WPF has no folder picker on .NET Framework) -->
     <Reference Include="System.Windows.Forms" />
-    <!-- dynamic, for the shell COM objects that reach DBI over MTP -->
-    <Reference Include="Microsoft.CSharp" />
   </ItemGroup>
 </Project>

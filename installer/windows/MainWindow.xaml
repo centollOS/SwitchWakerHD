@@ -224,12 +224,6 @@
           <TextBlock x:Name="TxtDoneBody" Margin="0,8,0,4"/>
           <TextBlock x:Name="TxtXferSize" Style="{StaticResource Dim}" FontSize="13" Margin="0,0,0,14"/>
 
-          <RadioButton x:Name="XferMtp" Style="{StaticResource ChoiceCard}" GroupName="xfer" Checked="Xfer_Checked">
-            <StackPanel>
-              <TextBlock x:Name="TxtXferMtp" FontWeight="SemiBold"/>
-              <TextBlock x:Name="TxtXferMtpD" Style="{StaticResource Dim}" FontSize="13"/>
-            </StackPanel>
-          </RadioButton>
           <RadioButton x:Name="XferSd" Style="{StaticResource ChoiceCard}" GroupName="xfer" Checked="Xfer_Checked">
             <StackPanel>
               <TextBlock x:Name="TxtXferSd" FontWeight="SemiBold"/>
@@ -246,22 +240,6 @@
           <Border Background="{StaticResource Card}" BorderBrush="{StaticResource Line}" BorderThickness="1"
                   CornerRadius="8" Padding="20,16" Margin="0,4,0,0">
             <StackPanel>
-              <!-- DBI over USB -->
-              <StackPanel x:Name="PanelMtp" Visibility="Collapsed">
-                <TextBlock x:Name="TxtMtpSteps" LineHeight="22" Margin="0,0,0,12"/>
-                <Grid Margin="0,0,0,8">
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                  </Grid.ColumnDefinitions>
-                  <TextBlock x:Name="TxtMtpLabel" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                  <Button x:Name="BtnMtpRefresh" Grid.Column="1" Style="{StaticResource Link}" Click="BtnDevRefresh_Click"/>
-                </Grid>
-                <StackPanel x:Name="MtpList"/>
-                <TextBlock x:Name="TxtMtpNone" Style="{StaticResource Dim}" Margin="0,0,0,10"/>
-                <TextBlock x:Name="TxtMtpReplace" Style="{StaticResource Dim}" FontSize="12" Margin="0,0,0,10"/>
-                <Button x:Name="BtnCopyMtp" Style="{StaticResource Primary}" HorizontalAlignment="Left" Click="BtnCopyMtp_Click"/>
-              </StackPanel>
               <!-- microSD in the PC -->
               <StackPanel x:Name="PanelSd" Visibility="Collapsed">
                 <TextBlock x:Name="TxtSdHint" Margin="0,0,0,12"/>
