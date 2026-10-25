@@ -12,6 +12,7 @@
 #include "background_shaders_switch.h"
 #include "settings_ini.h"
 #include "settings_switch.h"
+#include "update_notice_switch.h"
 #include <sys/stat.h>
 #include <dirent.h>
 #include <ctime>
@@ -311,6 +312,7 @@ void main_switch::start() {
     host::place_thread(0);
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
+    update_notice::start();  // asks GitHub for a newer release in the background (platform/update_notice_switch.h)
 }
 
 void main_switch::choose_dirs() {

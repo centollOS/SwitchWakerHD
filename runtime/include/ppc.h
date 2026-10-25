@@ -75,6 +75,11 @@ void ppc_host_call(Cpu* c, PpcFunc fn);           /* guarded native hook/site en
 #else
 #define PPC_HOOK_CALL(c, fn) ppc_host_call(c, fn)
 #endif
+#ifdef __SWITCH__
+/* hidden: its address is the base of every cached target (PPC_SITE_FN); a default-visibility symbol is loaded
+ * through the GOT in this -fPIC build, an extra load at each of the 15,000 indirect call sites */
+__attribute__((visibility("hidden")))
+#endif
 void ppc_dispatch(Cpu* c);                       /* call/jump to c->pc */
 /* Indirect call (bctrl/blrl) with a one-entry cache per call site: most are virtual calls that
  * always reach the same function, and the dispatch table (32 MB) costs a cache miss per lookup.
@@ -126,11 +131,22 @@ void ppc_preempt(Cpu* c);
 #define PPC_ENTER(a) do {                                                     \
         if (__builtin_expect(c->preempt, 0)) ppc_preempt(c);                  \
     } while (0)
+/* (this fork) The function entry of a recompiled game function (recomp.py): the same check, but the slow path is a
+ * tail call that starts the function again after the yield, so the function itself makes no call that needs a stack
+ * frame (11,000 of the 39,700 functions built a frame, x30 saved and restored on every call, for this one cold
+ * call). ppc_preempt_again (threads.cpp) yields and then runs `self` from the top. Not in the inlined copies of
+ * small leaves (a tail call cannot be inlined: PPC_ENTER stays there) nor off the Switch (the desktop's
+ * entry parking walks the host frames of a function that called ppc_preempt). */
+void ppc_preempt_again(Cpu* c, PpcFunc self);
+#define PPC_ENTER_FN(a, self) do {                                            \
+        if (__builtin_expect(c->preempt, 0)) MUSTTAIL return ppc_preempt_again(c, self); \
+    } while (0)
 #else
 #define PPC_ENTER(a) do {                                                     \
         if (__builtin_expect(g_ppc_trace, 0)) ppc_trace_enter(a);             \
         if (__builtin_expect(c->preempt, 0)) ppc_preempt(c);                  \
     } while (0)
+#define PPC_ENTER_FN(a, self) PPC_ENTER(a)
 #endif
 
 /* Callee-saved registers held in C locals across a call (tools/recomp/leaflocal.py
@@ -144,12 +160,30 @@ void ppc_keep_failed(Cpu* c, int reg, uint32_t fn);
         double a_ = (c)->f[n].ps0, b_ = (c)->f[n].ps1, x_ = (v0), y_ = (v1);                             \
         if (memcmp(&a_, &x_, 8) || memcmp(&b_, &y_, 8)) ppc_keep_failed(c, 32 + (n), fn);              \
     } while (0)
-#elif defined(__SWITCH__)
+#elif defined(__SWITCH__) || defined(PPC_ELIDE_SAVED_WB)  /* PPC_ELIDE_SAVED_WB: a desktop test of the Switch's form */
 #define PPC_KEEP_R(c, n, v, fn) ((void)0)
 #define PPC_KEEP_F(c, n, v0, v1, fn) ((void)0)
 #else
 #define PPC_KEEP_R(c, n, v, fn) ((v) = (c)->r[n])
 #define PPC_KEEP_F(c, n, v0, v1, fn) ((v0) = (c)->f[n].ps0, (v1) = (c)->f[n].ps1)
+#endif
+
+/* (this fork) a callee-saved register's write-back before a direct call to an ordinary game function
+ * (tools/recomp/leaflocal.py ELIDE_SAVED_REGS): such a callee only saves and restores it, and the caller keeps
+ * its own copy (PPC_KEEP_R above), so the Switch leaves the store out. Desktop builds read the registers again
+ * after a call and keep it; so does the checking build. PPC_ELIDE_SAVED_WB: a desktop test of the Switch's form. */
+#if (defined(__SWITCH__) || defined(PPC_ELIDE_SAVED_WB)) && !defined(PPC_NONLEAF_CHECK)
+#define PPC_WB_SAVED(x) ((void)0)
+#else
+#define PPC_WB_SAVED(x) ((void)(x))
+#endif
+/* (this fork) The volatile registers a caller reads back after a direct call to an ordinary game function although the
+ * callee cannot have written them (tools/recomp/calleeregs.py): the local is still right, so the Switch leaves the load
+ * out; the desktop reads them again with the rest, as before (save states). Same switches as PPC_WB_SAVED. */
+#if (defined(__SWITCH__) || defined(PPC_ELIDE_SAVED_WB)) && !defined(PPC_NONLEAF_CHECK)
+#define PPC_RELOAD_SKIPPED(...)
+#else
+#define PPC_RELOAD_SKIPPED(...) __VA_ARGS__
 #endif
 
 /* the return address of a direct call to an ordinary game function (tools/recomp/recomp.py link):

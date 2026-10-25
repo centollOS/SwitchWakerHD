@@ -31,7 +31,10 @@ namespace gx2 { extern uint32_t g_render_thread_handle; }  // (gx2_core.cpp: rtc
 #include "background_shaders_switch.h"
 #include "audio_guard_switch.h"
 #include "thread_sampler.h"
-#include "bench_switch.h"  // (this fork) the performance test
+#include "bench_switch.h"
+#ifdef WWHD_PGO_GEN
+namespace pgo { void register_commands(); }
+#endif  // (this fork) the performance test
 #include "shader_wait_switch.h"
 #include "host.h"
 #include "settings_switch.h"
@@ -424,6 +427,9 @@ void start() {
     debugsrv::add_command("evict", "evict [now | idle <n>] texture eviction: now, or after n unused frames", evict);
     debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);
     bench::register_commands();  // (this fork) "bench": docs/perf-test.md
+#ifdef WWHD_PGO_GEN
+    pgo::register_commands();  // (this fork) a training build (cmake WWHD_PGO=GEN, docs/pgo.md): "pgo"
+#endif
     debugsrv::add_command("quit", "quit                   end the program", quit);
     debugsrv::add_command("peek", "peek <addr> [bytes]    game memory (MEM2) as hex words", peek);
     debugsrv::add_command("poke", "poke <addr> <word>     write a word of game memory (MEM2)", poke);

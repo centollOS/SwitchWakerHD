@@ -539,6 +539,20 @@ const MenuTexts kMenuEnglish = {
     .devShow = "Show developer options",
     .devShowHelp = "Shows the tests and diagnostics below (debug server, A/B switches, captures). Off by default.\n"
         "A debug server that is already running keeps running whether this is ticked or not.",
+    // Dev tab > Updates (update_notice_switch.h)
+    .updateHeading = "Updates",
+    .updateCheck = "Check for updates at start",
+    .updateCheckHelp = "At start, asks GitHub whether a new SwitchWakerHD version is out and says so for a few seconds "
+        "(needs the internet; it never delays the game). Nothing is downloaded: you update with the "
+        "installer.",
+    .updateNotice = "SwitchWakerHD %s is out (you have %s): update it with the installer; your saves stay.",
+    .updateNewer = "%s is out (you have %s). Update it with the installer (or build it and copy wwhd.nro, INSTALL.md "
+        "\"Updating\"): your saves, settings and compiled graphics stay.",
+    .updateCurrent = "Up to date (%s).",
+    .updateChecking = "Checking...",
+    .updateFailed = "Could not check: %s.",
+    .updateDevBuild = "A development build: it does not check for updates.",
+    .updateOff = "Off.",
 };
 
 const MenuTexts kMenuSpanish = {
@@ -685,6 +699,19 @@ const MenuTexts kMenuSpanish = {
     .devShowHelp = "Muestra debajo las pruebas y diagnósticos (servidor de depuración, interruptores A/B, capturas). "
         "Desactivado por defecto.\n"
         "Un servidor de depuración que ya esté en marcha sigue funcionando, esté marcado o no.",
+    // Dev tab > Updates (update_notice_switch.h)
+    .updateHeading = "Actualizaciones",
+    .updateCheck = "Buscar actualizaciones al arrancar",
+    .updateCheckHelp = "Al arrancar pregunta a GitHub si hay una versión nueva de SwitchWakerHD y lo avisa unos segundos "
+        "(necesita internet; nunca retrasa el juego). No descarga nada: se actualiza con el instalador.",
+    .updateNotice = "Ya está SwitchWakerHD %s (tienes la %s): actualízalo con el instalador; tus partidas se conservan.",
+    .updateNewer = "Ya está la %s (tienes la %s). Actualízala con el instalador (o compílala y copia wwhd.nro, "
+        "INSTALL.md, \"Updating\"): partidas, ajustes y gráficos compilados se conservan.",
+    .updateCurrent = "Al día (%s).",
+    .updateChecking = "Buscando...",
+    .updateFailed = "No se pudo comprobar: %s.",
+    .updateDevBuild = "Versión de desarrollo: no busca actualizaciones.",
+    .updateOff = "Desactivado.",
 };
 
 const MenuTexts kMenuFrench = {
@@ -831,6 +858,21 @@ const MenuTexts kMenuFrench = {
     .devShowHelp = "Affiche ci-dessous les tests et diagnostics (serveur de débogage, interrupteurs A/B, captures). "
         "Désactivé par défaut.\n"
         "Un serveur de débogage déjà lancé continue de tourner, que la case soit cochée ou non.",
+    // Dev tab > Updates (update_notice_switch.h)
+    .updateHeading = "Mises à jour",
+    .updateCheck = "Rechercher les mises à jour au démarrage",
+    .updateCheckHelp = "Au démarrage, demande à GitHub si une nouvelle version de SwitchWakerHD est sortie et l'indique "
+        "quelques secondes (il faut Internet ; le jeu n'attend jamais). Rien n'est téléchargé : la mise à "
+        "jour se fait avec l'installateur.",
+    .updateNotice = "SwitchWakerHD %s est sortie (vous avez la %s) : mettez à jour avec l'installateur ; vos sauvegardes "
+        "sont conservées.",
+    .updateNewer = "La %s est sortie (vous avez la %s). Mettez à jour avec l'installateur (ou compilez-la et copiez "
+        "wwhd.nro, INSTALL.md « Updating ») : sauvegardes, réglages et graphismes compilés sont conservés.",
+    .updateCurrent = "À jour (%s).",
+    .updateChecking = "Recherche...",
+    .updateFailed = "Vérification impossible : %s.",
+    .updateDevBuild = "Version de développement : pas de recherche de mises à jour.",
+    .updateOff = "Désactivé.",
 };
 
 const MenuTexts kMenuGerman = {
@@ -976,6 +1018,21 @@ const MenuTexts kMenuGerman = {
     .devShow = "Entwickleroptionen anzeigen",
     .devShowHelp = "Zeigt unten die Tests und Diagnosen (Debug-Server, A/B-Schalter, Aufnahmen). Standardmäßig aus.\n"
         "Ein bereits laufender Debug-Server läuft weiter, ob dies angehakt ist oder nicht.",
+    // Dev tab > Updates (update_notice_switch.h)
+    .updateHeading = "Updates",
+    .updateCheck = "Beim Start nach Updates suchen",
+    .updateCheckHelp = "Fragt beim Start bei GitHub nach, ob eine neue SwitchWakerHD-Version erschienen ist, und zeigt es "
+        "ein paar Sekunden an (braucht Internet; das Spiel wartet nie). Es wird nichts heruntergeladen: "
+        "Aktualisiert wird mit dem Installer.",
+    .updateNotice = "SwitchWakerHD %s ist erschienen (du hast %s): aktualisiere mit dem Installer; deine Spielstände "
+        "bleiben.",
+    .updateNewer = "%s ist erschienen (du hast %s). Aktualisiere mit dem Installer (oder baue sie und kopiere wwhd.nro, "
+        "INSTALL.md \"Updating\"): Spielstände, Einstellungen und kompilierte Grafik bleiben.",
+    .updateCurrent = "Aktuell (%s).",
+    .updateChecking = "Suche...",
+    .updateFailed = "Prüfung fehlgeschlagen: %s.",
+    .updateDevBuild = "Entwicklerversion: sucht nicht nach Updates.",
+    .updateOff = "Aus.",
 };
 
 const MenuTexts kMenuItalian = {
@@ -1122,6 +1179,19 @@ const MenuTexts kMenuItalian = {
     .devShowHelp = "Mostra qui sotto test e diagnostica (server di debug, interruttori A/B, catture). Disattivato per "
         "impostazione predefinita.\n"
         "Un server di debug già avviato continua a funzionare, che la casella sia spuntata o no.",
+    // Dev tab > Updates (update_notice_switch.h)
+    .updateHeading = "Aggiornamenti",
+    .updateCheck = "Cerca aggiornamenti all'avvio",
+    .updateCheckHelp = "All'avvio chiede a GitHub se è uscita una nuova versione di SwitchWakerHD e lo segnala per qualche "
+        "secondo (serve Internet; il gioco non aspetta mai). Non scarica nulla: si aggiorna con l'installer.",
+    .updateNotice = "È uscito SwitchWakerHD %s (hai la %s): aggiornalo con l'installer; i salvataggi restano.",
+    .updateNewer = "È uscita la %s (hai la %s). Aggiorna con l'installer (o compilala e copia wwhd.nro, INSTALL.md "
+        "\"Updating\"): salvataggi, impostazioni e grafica compilata restano.",
+    .updateCurrent = "Aggiornato (%s).",
+    .updateChecking = "Ricerca...",
+    .updateFailed = "Impossibile controllare: %s.",
+    .updateDevBuild = "Versione di sviluppo: non cerca aggiornamenti.",
+    .updateOff = "Disattivato.",
 };
 
 // the game's language code (1 en, 2 fr, 3 de, 4 it, 5 es; others as English)

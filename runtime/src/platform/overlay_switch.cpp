@@ -39,6 +39,7 @@
 #include "settings_switch.h"
 #include "shader_wait_switch.h"
 #include "ui_text_switch.h"
+#include "update_notice_switch.h"
 
 namespace overlay_switch {
 namespace {
@@ -405,6 +406,35 @@ void tab_developer() {
     using namespace switch_settings;
     // (what a player sees is in their language; the options behind the checkbox are for developers, in English)
     const ui_text::MenuTexts& tx = ui_text::menu();
+    // updates (update_notice_switch.h): for every player, before the developer options
+    heading(tx.updateHeading);
+    {
+        bool on;
+        if (check(lbl(tx.updateCheck, "updatecheck").c_str(), update_notice::check_enabled(), &on))
+            update_notice::set_check_enabled(on);
+        help(tx.updateCheckHelp);
+        const update_notice::Info u = update_notice::info();
+        char line[512];
+        switch (u.state) {
+        case update_notice::State::kNewer:
+            snprintf(line, sizeof line, tx.updateNewer, u.latest.c_str(), u.current.c_str());
+            warn("%s", line);
+            break;
+        case update_notice::State::kUpToDate:
+            snprintf(line, sizeof line, tx.updateCurrent, u.current.c_str());
+            note("%s", line);
+            break;
+        case update_notice::State::kChecking: note("%s", tx.updateChecking); break;
+        case update_notice::State::kFailed:
+            snprintf(line, sizeof line, tx.updateFailed, u.detail.c_str());
+            note("%s", line);
+            break;
+        case update_notice::State::kDevBuild: note("%s", tx.updateDevBuild); break;
+        case update_notice::State::kOff: note("%s", tx.updateOff); break;
+        case update_notice::State::kIdle: break;
+        }
+    }
+    ImGui::Spacing();
     warn("%s", tx.devWarn);
     bool dev;
     if (check(lbl(tx.devShow, "devshow").c_str(), dev_options(), &dev)) set_dev_options(dev);
@@ -650,7 +680,10 @@ bool load_font(ImGuiIO& io) {
 
 bool frame_layer_wanted(std::string& toast) {
     if (!prepare_graphics::screen_line().empty()) toast = prepare_graphics::screen_line();
-    return prepare_graphics::running() || background_shaders::card().up;
+    const bool screen = prepare_graphics::running() || background_shaders::card().up;
+    // a new release (update_notice_switch.h): its line once nothing else covers the picture
+    if (!screen && toast.empty()) update_notice::notice(toast);
+    return screen;
 }
 void frame_layer_draw(float w, float h) {
     if (!background_shaders::draw_screen(w, h)) prepare_graphics::draw_screen(w, h);

@@ -22,6 +22,8 @@ instructions.
 import os
 import re
 
+import calleeregs
+
 # WWHD_RECOMP_LEAF_POISON=1: a checking build; at each return the scratch registers the function
 # used get garbage, so a caller that relied on one would break visibly
 POISON = os.environ.get("WWHD_RECOMP_LEAF_POISON", "0") == "1"
@@ -168,7 +170,25 @@ def _assigned(text):
     return regs
 
 
-def transform_nonleaf(stmts, start, addrs, clobbers=frozenset()):
+# (this fork) callee-saved registers (r14-r31, f14-f31; not r1) whose write-back before a direct call to an ordinary
+# game function is emitted as PPC_WB_SAVED (ppc.h): by the EABI such a callee only saves and restores them, and the
+# caller keeps its own copies, so the Switch leaves the stores out. They stay "dirty" in the analysis: the next call
+# that may read any register (an import, an instruction hook, an indirect call, a hooked function, a save/restore
+# helper) writes them back. tools/recomp/fork_passes.py ELIDE_SAVED.
+ELIDE_SAVED_REGS = frozenset(set(range(14, 32)) | {32 + n for n in range(14, 32)})
+# (this fork) The volatile registers (r0, r3-r12, f0-f13; the ids are 0-31 and 32 + n as everywhere here) and the
+# call statements the interprocedural write-back elision applies to: nothing but the return-address store and the call.
+# tools/recomp/calleeregs.py says what each callee reads and writes.
+VOLATILE_IDS = frozenset(VOLATILE_GPR | {32 + n for n in VOLATILE_FPR})
+_VOL_CALL = re.compile(r"(?:PPC_SET_LR\(c, 0x[0-9A-F]{8}u\); )?(f_[0-9A-F]{8}(?:_orig)?)\(c\);")
+STATS = {"calls": 0, "dirty": 0, "stored": 0, "skipped": 0, "reloads": 0, "reloads_skipped": 0}
+
+
+def _ids(mask):
+    return {r for r in range(64) if mask >> r & 1}
+
+
+def transform_nonleaf(stmts, start, addrs, clobbers=frozenset(), plain=None, summ=None):
     """stmts: the statements (site calls already prefixed to theirs), addrs: their guest addresses.
     Returns (prologue, statements, write-back for falling off the end), or None to keep the struct
     form. A forward analysis over the function's jumps tracks which registers may differ from the
@@ -191,6 +211,20 @@ def transform_nonleaf(stmts, start, addrs, clobbers=frozenset()):
     if not gprs and not fprs:
         return None
     used = gprs | {32 + n for n in fprs}
+    elide = ELIDE_SAVED_REGS & used if plain is not None else frozenset()
+
+    def is_plain(m):  # a direct call to an ordinary game function (not hooked, not a save/restore helper)
+        call = m.group(0)
+        return bool(elide) and call.startswith("f_") and call[:10] in plain
+
+    vol = {}  # statement -> (LI, MD, live after) of its callee: the volatile registers the call may leave alone
+
+    def after_call(d, m, i=None):  # what is still dirty after the call m (statement i)
+        keep = set(d) & elide if is_plain(m) else set()
+        if i in vol:  # the callee neither reads nor writes these: the local is still right, the store was skipped
+            li, md, _ = vol[i]
+            keep |= {r for r in d if r in VOLATILE_IDS and not (li | md) >> r & 1}
+        return keep
     n = len(out)
     index = {a: i for i, a in enumerate(addrs)}
     # per statement: segments between calls (assignments), the calls, successors
@@ -207,6 +241,24 @@ def transform_nonleaf(stmts, start, addrs, clobbers=frozenset()):
         nx = [i + 1] if i + 1 < n else []  # falling through (a superset after an unconditional jump: safe)
         nx += [index[int(t, 16)] for t in _GOTO.findall(s) if int(t, 16) in index]
         succ.append(nx)
+    if summ is not None and plain is not None:
+        nodes = calleeregs.build_nodes(stmts, addrs)
+        live_in = calleeregs.liveness(nodes, summ.lookup, ret_live=calleeregs.RET_MASK, tail_live=calleeregs.RET_MASK)
+        for i, s in enumerate(stmts):
+            if len(calls[i]) != 1:
+                continue
+            cm = _VOL_CALL.fullmatch(s.strip())
+            if not cm or cm.group(1)[:10] not in plain or cm.group(1).endswith("_orig"):
+                continue
+            r = summ.lookup(cm.group(1))
+            if r is None:
+                continue
+            lout = 0
+            for j in nodes[i].succ:
+                lout |= live_in[j]
+            if i + 1 >= n or nodes[i].term:
+                lout = calleeregs.VMASK  # falls into the next function, or leaves: everything may be read
+            vol[i] = (r[0], r[1], lout)
     # loop heads (targets of backward jumps): the edges entering them from before write back what is
     # dirty, so registers set up before a loop are not written back again at each call inside it
     heads = {j for i in range(n) for j in succ[i] if j <= i}
@@ -219,7 +271,7 @@ def transform_nonleaf(stmts, start, addrs, clobbers=frozenset()):
         for k, part in enumerate(segs[i]):
             d |= part
             if k < len(calls[i]):
-                d = set()  # written back, and the volatile ones read again
+                d = after_call(d, calls[i][k], i)  # written back (but PPC_WB_SAVED ones), the volatile ones read again
         for j in succ[i]:
             arrive = set() if (j in heads and j > i) else d  # a forward edge into a loop head syncs
             if d_in[j] is None or not arrive <= d_in[j]:
@@ -235,6 +287,12 @@ def transform_nonleaf(stmts, start, addrs, clobbers=frozenset()):
                   for r in sorted(r for r in regs if r >= 32)]
         return " ".join(parts)
 
+    def wb_saved(regs):  # the callee-saved write-backs a plain call may leave out (PPC_WB_SAVED, ppc.h)
+        parts = ["c->r[%d] = r%d" % (r, r) for r in sorted(r for r in regs if r < 32)]
+        parts += ["c->f[%d].ps0 = f%d_0, c->f[%d].ps1 = f%d_1" % (r - 32, r - 32, r - 32, r - 32)
+                  for r in sorted(r for r in regs if r >= 32)]
+        return "PPC_WB_SAVED((%s));" % ", ".join(parts) if parts else ""
+
     def rl(gset, fset):
         parts = ["r%d = c->r[%d];" % (r, r) for r in sorted(gset)]
         parts += ["f%d_0 = c->f[%d].ps0; f%d_1 = c->f[%d].ps1;" % (r, r, r, r) for r in sorted(fset)]
@@ -244,6 +302,9 @@ def transform_nonleaf(stmts, start, addrs, clobbers=frozenset()):
     keep = " ".join(["PPC_KEEP_R(c, %d, r%d, 0x%08Xu);" % (r, r, start) for r in sorted(gprs & SAVED_GPR)] +
                     ["PPC_KEEP_F(c, %d, f%d_0, f%d_1, 0x%08Xu);" % (r, r, r, start) for r in sorted(fprs & SAVED_FPR)])
     reload_all = rl(gprs, fprs)
+
+    def reload_volatile_of(i, md):  # the volatile registers the callee of statement i may have written
+        return rl({r for r in gprs & VOLATILE_GPR if md >> r & 1}, {r for r in fprs & VOLATILE_FPR if md >> (32 + r) & 1})
     ret_regs = RET_GPR | {32 + r for r in RET_FPR}
     final = []
     for i, s in enumerate(out):
@@ -259,9 +320,29 @@ def transform_nonleaf(stmts, start, addrs, clobbers=frozenset()):
                 guest = False  # a save/restore helper: it changes callee-saved registers on purpose
             after = (reload_volatile + " " + keep) if guest else reload_all
             pieces.append(s[pos:m.start()])
-            pieces.append("{ %s %s %s }" % (wb(d), call, after.strip()))
+            if i in vol:
+                li, md, lout = vol[i]
+                dv = {r for r in d if r in VOLATILE_IDS}
+                store = {r for r in dv if li >> r & 1 or (md >> r & 1 and lout >> r & 1)}
+                skip = dv - store
+                saved_e = d & elide
+                rest = {r for r in gprs | {32 + f for f in fprs} if r in VOLATILE_IDS and not md >> r & 1}
+                now = reload_volatile_of(i, md)
+                later = rl({r for r in rest if r < 32}, {r - 32 for r in rest if r >= 32})
+                STATS["calls"] += 1
+                STATS["dirty"] += len(dv)
+                STATS["stored"] += len(store)
+                STATS["skipped"] += len(skip)
+                STATS["reloads"] += len(rest) + len(now.split(";")) - 1
+                STATS["reloads_skipped"] += len(rest)
+                after = (now + (" PPC_RELOAD_SKIPPED(%s)" % later if later else "") + " " + keep).strip()
+                pieces.append("{ %s %s %s %s }" % (wb(store | (d - dv - saved_e)), wb_saved(skip | saved_e), call, after))
+            elif is_plain(m):
+                pieces.append("{ %s %s %s %s }" % (wb(d - elide), wb_saved(d & elide), call, after.strip()))
+            else:
+                pieces.append("{ %s %s %s }" % (wb(d), call, after.strip()))
             pos = m.end()
-            d = set()
+            d = after_call(d, m, i)
         pieces.append(s[pos:])
         exit_dirty |= segs[i][-1]
         s = "".join(pieces)
@@ -289,7 +370,7 @@ def transform_nonleaf(stmts, start, addrs, clobbers=frozenset()):
             for k, part in enumerate(segs[i]):
                 d_end |= part
                 if k < len(calls[i]):
-                    d_end = set()
+                    d_end = after_call(d_end, calls[i][k], i)
             if d_end:
                 s += " " + wb(d_end)
         final.append(s)
@@ -298,7 +379,7 @@ def transform_nonleaf(stmts, start, addrs, clobbers=frozenset()):
     for k, part in enumerate(segs[-1]):
         last |= part
         if k < len(calls[-1]):
-            last = set()
+            last = after_call(last, calls[-1][k], n - 1)
     prologue = []
     if gprs:
         prologue.append("uint32_t %s;" % ", ".join("r%d = c->r[%d]" % (r, r) for r in sorted(gprs)))

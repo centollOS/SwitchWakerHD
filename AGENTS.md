@@ -83,6 +83,20 @@ GAME_DIR` says whether its recording adds shaders (and makes the new sealed temp
 `shadercache_*.bin` to this repository (`guard.py` refuses them). A change to the shader translation (the Latte
 decompiler, translation keys) means distilling the recordings again. [docs/shader-manifest-release-plan.md](docs/shader-manifest-release-plan.md).
 
+## Faster builds: PGO and the recompiler passes
+
+Optional profile-guided optimisation (`-DWWHD_PGO=GEN` to train, `USE` to build; [docs/pgo.md](docs/pgo.md)), **off by
+default**: a normal build and every release are not profiled (turning it on for players: issue #90). Results and dead ends in
+[docs/pgo-progress.md](docs/pgo-progress.md). A profile fits the exact
+code it was made from: remake it after a recompile with a changed recompiler or a change to a profiled runtime file. Never
+judge speed on a training build (several times slower), and never deploy one to a console nobody can restart: a crashing
+start-up needs the NRO put back by hand (FTP :5000 works when the game is not running). The write-back elision
+(`tools/recomp/calleeregs.py`, `python3 tools/recomp/test_calleeregs.py`) assumes function hooks read only argument
+registers; the recompiler checks that against the runtime's sources.
+
+Before any timing, check the log's `[dk] clocks:` line: sys-clk or a saved GPU profile other than the build's default makes
+numbers meaningless (docs/perf-test.md).
+
 ## The SD card without the debug server
 
 - Best: hekate's USB mass storage (UMS). The SD mounts at `/Volumes/SWITCH SD` (FAT32): plain `cp`, then
