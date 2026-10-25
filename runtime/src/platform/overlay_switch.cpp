@@ -275,6 +275,14 @@ void tab_picture() {
         help(tx.blurHelp);
     }
     {
+        bool v;
+        if (check(lbl(tx.fsr, "fsr").c_str(), gfxsw::fsr(), &v)) {
+            gfxsw::set_fsr(v);
+            hostui::post([v] { hostui::set(kKeyFsr, v ? "1" : "0"); });
+        }
+        help(tx.fsrHelp);
+    }
+    {
         // the shadow maps' size (gfxsw::shadow_scale); saved as switchShadowScale ("0.5", "1" the default, or "2")
         const float cur = gfxsw::shadow_scale();
         ImGui::AlignTextToFramePadding();
@@ -608,16 +616,6 @@ void tab_developer() {
         if (check("Log the game threads' CPU use", threads::sched_stats(), &v)) threads::set_sched_stats(v);
         help("Every 5 s the log says each game thread's share of its core ([sched] lines).\n"
              "Not saved: off at the next start.");
-    }
-    {
-        bool v;
-        if (check("FSR 1 upscale and sharpening", gfxsw::fsr(), &v)) {
-            gfxsw::set_fsr(v);
-            hostui::post([v] { hostui::set(kKeyFsr, v ? "1" : "0"); });
-        }
-        help("Test: AMD FSR 1 in the final picture. Smaller than the window (docked 720p on 1080p, or dynamic\n"
-             "resolution below 1.0): edge-adaptive upscale instead of a linear filter. Window-sized (handheld at\n"
-             "1.0): sharpening only. Costs GPU time.");
     }
     {
         bool v;

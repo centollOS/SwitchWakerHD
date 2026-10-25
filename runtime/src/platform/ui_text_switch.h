@@ -82,6 +82,8 @@ struct MenuTexts {
     const char* bloomHelp;
     const char* blur;
     const char* blurHelp;
+    const char* fsr;
+    const char* fsrHelp;
     // Picture tab: frame rate counter
     const char* fpsHeading;
     const char* fpsOff;

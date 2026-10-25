@@ -79,6 +79,7 @@ WWHD_STATE_DIR=sdmc:/switch/wwhd/states-eu
 | `poke ADDR WORD` | write one big-endian word to MEM2; logs old and new value |
 | `raw bench status\|save NAME\|load NAME\|clock [freeze [T]\|run]\|rec N` | the performance test's console side (portable states in `bench/`, the clock held, per-frame recording): use `tools/switch/perf_test.py` ([perf-test.md](perf-test.md)) |
 | `raw aniso [1\|2\|4\|8\|16]`, `raw shadowscale [0.5\|1\|2]`, `raw noao [0\|1]`, `raw miiverse [0\|1]` | live and not saved (the Picture tab's aniso level, shadow maps and ambient occlusion, which the menu saves; and the Dev tab's Miiverse switch): anisotropic filtering level, the shadow maps' scale, the ambient-occlusion pass skipped, the Miiverse thread (`0` parks it); with `perf_test.py toggle` |
+| `raw fsr [0\|1]` | live and not saved (the Picture tab's FSR 1 upscale and sharpening, which the menu saves); no argument reports the state; with `perf_test.py toggle` |
 | `wait`, `quit`, `reload`, `ping`, `help`, `raw CMD ...` | `raw logtext` prints the kept log text |
 
 Button names: `A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LS RS`. Presses go in where the controller is

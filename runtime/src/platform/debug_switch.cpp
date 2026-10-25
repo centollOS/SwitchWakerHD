@@ -212,6 +212,11 @@ debugsrv::Reply bloom(const debugsrv::Args& a) {
     if (!a.empty()) gfxsw::set_bloom(a[0] != "0");
     return debugsrv::ok(std::string("bloom ") + (gfxsw::bloom() ? "on" : "off"));
 }
+// "fsr [0|1]": FSR 1 in the present pass (gfxsw::set_fsr), not saved
+debugsrv::Reply fsr(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_fsr(a[0] != "0");
+    return debugsrv::ok(std::string("fsr ") + (gfxsw::fsr() ? "on" : "off"));
+}
 debugsrv::Reply blur(const debugsrv::Args& a) {
     if (!a.empty()) gfxsw::set_distance_blur(a[0] != "0");
     return debugsrv::ok(std::string("blur ") + (gfxsw::distance_blur() ? "on" : "off"));
@@ -423,6 +428,7 @@ void start() {
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);
+    debugsrv::add_command("fsr", "fsr [0|1]              FSR 1 in the present pass (not saved)", fsr);
     debugsrv::add_command("stall", "stall <ms> [core] [n] [gap]  spin above the game threads (audio guard tests)", stall);
     debugsrv::add_command("evict", "evict [now | idle <n>] texture eviction: now, or after n unused frames", evict);
     debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);

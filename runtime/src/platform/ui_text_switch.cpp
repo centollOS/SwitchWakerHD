@@ -472,6 +472,9 @@ const MenuTexts kMenuEnglish = {
     .blur = "Distance blur",
     .blurHelp = "Far places softly out of focus, as on the Wii U.\n"
         "Costs a little GPU time.",
+    .fsr = "FSR 1 upscale and sharpening",
+    .fsrHelp = "Sharper picture and cleaner upscaling (AMD FSR 1). Below the window size (docked 720p on 1080p,\n"
+        "or dynamic resolution) it upscales along edges; at window size it only sharpens. Costs GPU time.",
     // Picture tab: frame rate counter
     .fpsHeading = "Frame rate counter",
     .fpsOff = "Off",
@@ -624,6 +627,9 @@ const MenuTexts kMenuSpanish = {
     .blur = "Desenfoque lejano",
     .blurHelp = "Los lugares lejanos, ligeramente desenfocados, como en Wii U.\n"
         "Cuesta un poco de GPU.",
+    .fsr = "Escalado y nitidez FSR 1",
+    .fsrHelp = "Imagen más nítida y mejor escalada (AMD FSR 1). Por debajo del tamaño de la ventana (720p en base\n"
+        "con 1080p, o resolución dinámica) escala siguiendo los bordes; a tamaño completo solo afina. Cuesta tiempo de GPU.",
     // Picture tab: frame rate counter
     .fpsHeading = "Contador de fps",
     .fpsOff = "No",
@@ -783,6 +789,9 @@ const MenuTexts kMenuFrench = {
     .blur = "Flou de distance",
     .blurHelp = "Les lieux lointains légèrement flous, comme sur Wii U.\n"
         "Coûte un peu de temps GPU.",
+    .fsr = "Upscaling et netteté FSR 1",
+    .fsrHelp = "Image plus nette et mise à l'échelle plus propre (AMD FSR 1). Sous la taille de la fenêtre (720p sur\n"
+        "1080p en dock, ou résolution dynamique) elle suit les contours ; à taille de fenêtre elle ne fait que nettoyer. Coûte du temps GPU.",
     // Picture tab: frame rate counter
     .fpsHeading = "Compteur de fps",
     .fpsOff = "Non",
@@ -944,6 +953,9 @@ const MenuTexts kMenuGerman = {
     .blur = "Ferne Unschärfe",
     .blurHelp = "Ferne Orte leicht unscharf, wie auf der Wii U.\n"
         "Kostet etwas GPU-Zeit.",
+    .fsr = "FSR-1-Hochskalierung und Schärfe",
+    .fsrHelp = "Schärferes Bild und sauberere Hochskalierung (AMD FSR 1). Unter der Fenstergröße (720p am Dock auf\n"
+        "1080p oder dynamische Auflösung) entlang der Kanten; in Fenstergröße nur Schärfen. Kostet GPU-Zeit.",
     // Picture tab: frame rate counter
     .fpsHeading = "Bildratenanzeige",
     .fpsOff = "Aus",
@@ -1105,6 +1117,9 @@ const MenuTexts kMenuItalian = {
     .blur = "Sfocatura in lontananza",
     .blurHelp = "I luoghi lontani leggermente sfocati, come su Wii U.\n"
         "Costa un po' di tempo di GPU.",
+    .fsr = "Upscaling e nitidezza FSR 1",
+    .fsrHelp = "Immagine più nitida e ridimensionamento più pulito (AMD FSR 1). Sotto la dimensione della finestra (720p\n"
+        "in dock su 1080p, o risoluzione dinamica) segue i bordi; a dimensione piena rende solo più nitido. Costa tempo di GPU.",
     // Picture tab: frame rate counter
     .fpsHeading = "Contatore di fps",
     .fpsOff = "No",
