@@ -475,8 +475,8 @@ abstract class EngineBase
             Has(@"Permission denied|Access is denied|PermissionError|Device or resource busy|Operation not permitted") ? "hint_av" :
             null;
         // #28: build.sh stopped and printed nothing at all (a tool that cannot start, such as an MSYS2 program
-        // whose library is missing after a partial update, or one blocked by an antivirus)
-        if (hint == null && why > 0 && lines[why].Contains("this step failed") &&
+        // whose library is missing after a partial update, or one blocked by an antivirus); CMake saying why is not that
+        if (hint == null && why > 0 && lines[why].Contains("this step failed") && !Has(@"CMake Error") &&
             (lines[why - 1].StartsWith("$ ") || Regex.IsMatch(lines[why - 1], @"^build\.sh: line \d+: .* failed \(exit code \d+\)$")))
             hint = "hint_silent";
         if (hint != null) msg.Append("\n\n").Append(Str.Get(hint));
