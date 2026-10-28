@@ -36,6 +36,7 @@
 #include "state_metadata_validation.h"
 #include "scheduler_tick.h"
 #include "render_prof.h"
+#include "hle/os_time.h"
 #include "platform/perf_hint.h"
 #include "platform/thread_sampler.h"
 
@@ -1735,7 +1736,8 @@ HLE(coreinit, OSSetAlarm) {
 }
 HLE(coreinit, OSSetPeriodicAlarm) {
     uint32_t alarm = arg(c, 0), cb = c->r[9];
-    uint64_t start = timebase::to_host(arg64(c, 5)), period = arg64(c, 7);
+    // the start is an OSTime (the game passes OSGetTime() + ..., JUTXfb 028A22D8)
+    uint64_t start = timebase::to_host(os_time::to_guest(arg64(c, 5))), period = arg64(c, 7);
     st32(alarm + 0x0C, cb);
     uint64_t now = timebase::simulation_now();
     uint64_t when = start;
@@ -1754,27 +1756,33 @@ HLE(coreinit, OSSetAlarmUserData) { st32(arg(c, 0) + 0x38, arg(c, 1)); }
 HLE(coreinit, OSGetAlarmUserData) { ret(c, ld32(arg(c, 0) + 0x38)); }
 
 // ---------------------------------------------------------------- time API
-HLE(coreinit, OSGetTime) { ret64(c, timebase::guest_now()); }
+// OSGetTime is the calendar clock (os_time.h): the guest timebase plus the boot bias, as on the
+// console (and Cemu), where OSGetSystemTime/OSGetTick/mftb count from the start. Earlier builds
+// returned the time since the start here and showed the host's current date for every
+// OSTicksToCalendarTime, so every Quest Log showed "now" (#322).
+namespace os_time {
+int64_t bias() {
+    static const int64_t b = host_now() - (int64_t)timebase::guest_now();
+    return b;
+}
+uint64_t now() { return timebase::guest_now() + (uint64_t)bias(); }
+uint64_t to_guest(uint64_t os_ticks) {
+    // a time from OSGetSystemTime (far below the bias) is already guest time
+    return os_ticks >= (uint64_t)bias() ? os_ticks - (uint64_t)bias() : os_ticks;
+}
+}  // namespace os_time
+
+HLE(coreinit, OSGetTime) { ret64(c, os_time::now()); }
 HLE(coreinit, OSGetSystemTime) { ret64(c, timebase::guest_now()); }
 HLE(coreinit, OSGetTick) { ret(c, (uint32_t)timebase::guest_now()); }
 
 HLE(coreinit, OSTicksToCalendarTime) {
     // OSCalendarTime: sec, min, hour, mday, mon, year, wday, yday, msec, usec (int32 each)
-    uint64_t ticks = arg64(c, 3);
-    uint32_t out = arg(c, 2);
-    // guest epoch is 2000-01-01; report the host's wall clock instead of time since boot
-    (void)ticks;
-    time_t t = time(nullptr);
-    struct tm tmv;
-#ifdef _WIN32
-    localtime_s(&tmv,&t);
-#else
-    localtime_r(&t, &tmv);
-#endif
-    uint32_t v[10] = {(uint32_t)tmv.tm_sec, (uint32_t)tmv.tm_min, (uint32_t)tmv.tm_hour, (uint32_t)tmv.tm_mday,
-                      (uint32_t)tmv.tm_mon, (uint32_t)(tmv.tm_year + 1900), (uint32_t)tmv.tm_wday,
-                      (uint32_t)tmv.tm_yday, 0, 0};
-    for (int i = 0; i < 10; i++) st32(out + 4 * i, v[i]);
+    const int64_t ticks = (int64_t)arg64(c, 3);
+    const uint32_t out = arg(c, 2);
+    const os_time::Calendar t = os_time::to_calendar(ticks);
+    const int32_t v[10] = {t.sec, t.min, t.hour, t.mday, t.mon, t.year, t.wday, t.yday, t.msec, t.usec};
+    for (int i = 0; i < 10; i++) st32(out + 4 * i, (uint32_t)v[i]);
 }
 
 // ---------------------------------------------------------------- save states
