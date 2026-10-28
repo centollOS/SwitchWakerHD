@@ -132,6 +132,8 @@ static class Str
         // Engine messages
         ["py_found"]       = ("Python encontrado: {0}",                              "Python found: {0}"),
         ["py_unsuitable"]  = ("No sirve: {0} (hace falta Python 3.8 o posterior, de 64 bits).", "Not usable: {0} (Python 3.8 or newer, 64-bit, is needed)."),
+        ["py_not_windows"] = ("No sirve: {0} (es el Python de MSYS2 o Cygwin; hace falta un Python de Windows).",
+                              "Not usable: {0} (MSYS2's or Cygwin's Python; a Windows Python is needed)."),
         ["py_installing"]  = ("Instalando Python 3.12...",                           "Installing Python 3.12..."),
         ["py_fail"]        = ("No se pudo instalar Python automáticamente. Instala Python 3 desde python.org (marca \"Add python.exe to PATH\") y vuelve a intentarlo.",
                                "Could not install Python automatically. Install Python 3 from python.org (tick \"Add python.exe to PATH\") and try again."),

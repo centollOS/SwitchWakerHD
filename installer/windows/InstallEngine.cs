@@ -120,13 +120,16 @@ sealed class InstallEngine : EngineBase
         }
         // 3.8 or newer (older ones get no pip wheels for zstandard and pycryptodome) and 64-bit (translating the
         // game code needs more memory than a 32-bit process has). The Microsoft Store's "python" stub prints nothing.
+        // A Windows Python only: MSYS2's or Cygwin's (devkitPro's msys2\usr\bin on the player's PATH) has no pip
+        // and no Windows paths.
         foreach (var cmd in candidates)
         {
-            var (code, output) = Capture(cmd, "-c \"import sys,struct;print('PY',sys.version_info[0],sys.version_info[1],struct.calcsize('P')*8)\"");
-            var m = Regex.Match(output, @"PY (\d+) (\d+) (\d+)");
+            var (code, output) = Capture(cmd, "-c \"import os,sys,struct;print('PY',sys.version_info[0],sys.version_info[1],struct.calcsize('P')*8,os.name)\"");
+            var m = Regex.Match(output, @"PY (\d+) (\d+) (\d+) (\w+)");
             if (code != 0 || !m.Success) continue;
             int major = int.Parse(m.Groups[1].Value), minor = int.Parse(m.Groups[2].Value), bits = int.Parse(m.Groups[3].Value);
             var desc = $"Python {major}.{minor} ({bits}-bit, {cmd})";
+            if (m.Groups[4].Value != "nt") { Info(Str.Get("py_not_windows", desc)); continue; }
             if (major != 3 || minor < 8 || bits != 64) { Info(Str.Get("py_unsuitable", desc)); continue; }
             pythonCmd = cmd;
             Ok(Str.Get("py_found", desc));
