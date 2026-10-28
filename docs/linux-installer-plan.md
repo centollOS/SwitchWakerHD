@@ -95,3 +95,11 @@ the Mac and Linux root scripts as a shell function, dkp_xfer, between the two. T
 the generated function on its own, package lists cleared): both lists and a 6 MiB package came through Python,
 rc 0; the script's error path prints pacman's "returned error: 404" and leaves no partial file. Not tested: Windows
 (MSYS2's path conversion of %o), the Mac root run.
+
+#28 follow-up (v1.0.0 on an old devkitPro, pacman 6.0): pacman before 6.1 never asks an XferCommand for a
+database's .sig, so the lists from Python were checked against the old signatures ("signature from fincs ... is
+invalid"), and stayed broken for later runs. pacman-fetch.py now fetches `<db>.sig` with each `.db` (a 404 drops a
+stale .sig; any other failure keeps the old list, which matches the old .sig). The same log showed Python's
+"unable to get local issuer certificate" for MSYS2's mirrors: the script then retries with Windows' curl, as
+setup.py does. Tested in devkitpro/devkita64 (dkp-pacman 6.0.2): with a mismatched dkp-libs.db.sig, main's script
+fails -Syy with the player's error, the new one syncs (rc 0). Not tested: the curl retry on Windows.
