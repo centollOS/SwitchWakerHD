@@ -115,11 +115,14 @@ tools/switch/perf_test.py compare build/perf/a.json build/perf/b.json
 Options: `--scenes a,b` (default: the 7 standard ones; `demanding` the four Outset stress spots; `all` adds the extras and those; `compare-to`: lava, windfall,
 dragonroost), `--frames N` (default 1800 = 60 s at 30 fps; `compare-to`: 900), `--settle S` (default 20 s after
 arriving), `--time T` (time of day held, default 200 degrees: the afternoon), `--no-boot` (the game is already in a
-Quest Log: no reload), `--quest-log N`.
+Quest Log: no reload), `--quest-log N`, `--expect perf/results/<file>.json` (after the table: each scene of your
+build against that release's record, "BELOW the record" when lower by more than `--expect-tolerance`, default
+0.5 fps; a check across sessions, not a verdict: see [perf-results.md](perf-results.md)).
 
 Each `run` / `ab` writes `build/perf/<label>_<time>.json` (summary per scene and run), `.csv` (the same) and
 `_frames.json` (every recorded frame). `ab` also saves a `_partial` file after every build so an interrupted
-session keeps its results.
+session keeps its results. Their `meta.boots` lists each boot's conditions: version, console mode and charge, the
+clocks the game logged and the settings that change the load.
 
 How a run gets to gameplay: it reloads, presses A on the title screen and the file select until a Quest Log is
 being played with the player in control. Then, for each scene: `bench clock freeze 200` → `bench load NAME` → waits
@@ -264,6 +267,9 @@ Anything that samples or traces the game while it runs (a profiler, a trace opti
 main-thread PC sampler took the lava room from ~28 to ~26-27 fps. Measure fps with such options off.
 
 ## Reference numbers
+
+Each release's own record (conditions, table against the previous release, memory tour) is in
+[perf-results.md](perf-results.md); the files in `perf/results/` are what `--expect` reads.
 
 The maintainer's console (handheld, charging, stock 1020 MHz CPU and GPU profile, the player's settings with
 dynamic resolution on), v0.4.7 with the bench command, mean of 4 boots, 60 s per scene (2026-10-16):

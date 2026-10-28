@@ -480,6 +480,10 @@ def common(p):
     p.add_argument("--warmup", type=float, default=8.0,
                    help="after booting, visit each scene unmeasured for this many seconds (default 8; 0: none)")
     p.add_argument("--no-boot", action="store_true", help="the game is already in a Quest Log: do not reload")
+    p.add_argument("--expect", help="a result file of perf/results/ (docs/perf-results.md): warn when a scene comes "
+                   "out below that release's record")
+    p.add_argument("--expect-tolerance", type=float, default=0.5, help="fps below the record still taken as the "
+                   "same (default 0.5)")
     p.add_argument("--quest-log", type=int, default=1, choices=(1, 2, 3),
                    help="the Quest Log the file select starts (default 1)")
 
@@ -496,9 +500,12 @@ def cmd_run(a):
     results, raw = [], []
     label = a.label or info.get("version", "build").split()[0]
     run_set(con, label, scenes, a.runs, a.settle, a.frames, a.time, results, raw, warmup=a.warmup)
+    boots = [boot_conditions(con)]
     con.try_cmd("bench", "clock", "run")
     print(table(results))
-    save(results, raw, label, {"version": info.get("version"), "nro": a.nro, "args": {k: v for k, v in vars(a).items() if k != "fn"}})
+    print_expect(a, results, label)
+    save(results, raw, label, {"version": info.get("version"), "nro": a.nro, "boots": boots,
+                               "args": {k: v for k, v in vars(a).items() if k != "fn"}})
 
 
 def run_ab(con, a, nro_list, names):
@@ -513,7 +520,7 @@ def run_ab(con, a, nro_list, names):
     if set(order) - set(letters):
         raise SystemExit(f"--order uses letters {letters} only")
     stem_name = "ab_" + "_vs_".join(names)
-    results, raw = [], []
+    results, raw, boots = [], [], []
     ensure_states(con, scenes)
     for i, letter in enumerate(order):
         con.deploy(nros[letter])
@@ -522,9 +529,11 @@ def run_ab(con, a, nro_list, names):
         boot_to_gameplay(con)
         run_set(con, labels[letter], scenes, 1, a.settle, a.frames, a.time, results, raw, rotate_from=i,
                 warmup=a.warmup)
-        save(results, raw, stem_name + "_partial", {"order": order, "nros": nros})
+        boots.append({"boot": i + 1, "build": labels[letter], **boot_conditions(con)})
+        save(results, raw, stem_name + "_partial", {"order": order, "nros": nros, "boots": boots})
     print(table(results, names))
-    save(results, raw, stem_name, {"order": order, "nros": nros,
+    print_expect(a, results, names[-1])
+    save(results, raw, stem_name, {"order": order, "nros": nros, "boots": boots,
                                    "args": {k: v for k, v in vars(a).items() if k != "fn"}})
     return results, nros
 
@@ -655,6 +664,67 @@ def boot_clocks(con):
     clocks = re.findall(r"\[dk\] clocks: CPU (\d+) MHz, GPU (\d+) MHz, memory (\d+) MHz", text)
     cores = re.findall(r"\[cpu\] cores busy \(since the last report\): core 0 (\d+)%, core 1 (\d+)%, core 2 (\d+)%", text)
     return (tuple(int(x) for x in clocks[-1]) if clocks else None), (tuple(int(x) for x in cores[-1]) if cores else None)
+
+
+# the settings that change the load or the clocks (platform/settings_switch.h); the rest is left out of the record
+LOAD_SETTINGS = ("switchGpuProfile", "switchResScale.handheld", "switchResScale.docked", "switchDynamicRes.handheld",
+                 "switchDynamicRes.docked", "switchShadowScale", "switchAmbientOcclusion", "switchAnisoLevel",
+                 "switchAniso", "switchFxaa", "switchFsr", "switchBloom", "switchDistanceBlur", "switchGamepadPip",
+                 "switchFpsCounter")
+
+
+def boot_conditions(con):
+    """what the running boot was measured under, for the result file: the version, the console's mode and charge
+    (info's battery line), the clocks the game logged and the load-changing settings of settings.ini"""
+    info = con.info()
+    out = {"version": info.get("version"), "power": info.get("battery")}
+    try:
+        clocks, _ = boot_clocks(con)
+        if clocks:
+            out["clocks"] = {"cpu": clocks[0], "gpu": clocks[1], "memory": clocks[2]}
+    except (OSError, dbg.ServerError, ValueError):
+        pass
+    try:
+        text = get_text(con, "settings.ini")
+        kv = dict(line.strip().split("=", 1) for line in text.splitlines()
+                  if "=" in line and not line.lstrip().startswith(("#", "[")))
+        out["settings"] = {k: kv[k] for k in LOAD_SETTINGS if k in kv}
+    except (OSError, dbg.ServerError, ValueError):
+        pass
+    return out
+
+
+def expect_check(results, path, label, tolerance):
+    """--expect: each scene of `label` against the same scene of the recorded release (the newest build in the
+    file: the one that file's comparison was about). A sanity check across sessions, not a verdict: lower by more
+    than `tolerance` fps means slower, or other conditions (mode, charge, settings, firmware)."""
+    ref = load(path)
+    builds = []
+    for r in ref:
+        if "error" not in r and r["build"] not in builds:
+            builds.append(r["build"])
+    if not builds:
+        return [f"{path}: no results"]
+    rb = builds[-1]
+    ok = [r for r in results if "error" not in r and r["build"] == label]
+    lines = []
+    for sc in dict.fromkeys(r["scene"] for r in ok):
+        mine = [r["fps"] for r in ok if r["scene"] == sc]
+        theirs = [r["fps"] for r in ref if "error" not in r and r["build"] == rb and r["scene"] == sc]
+        if not theirs:
+            lines.append(f"{sc}: not in {Path(path).name}")
+            continue
+        d = st.mean(mine) - st.mean(theirs)
+        word = "BELOW the record" if d < -tolerance else "as recorded"
+        lines.append(f"{sc}: {st.mean(mine):.2f} fps, {rb} recorded {st.mean(theirs):.2f} ({d:+.2f}): {word}")
+    return lines
+
+
+def print_expect(a, results, label):
+    if getattr(a, "expect", None):
+        print(f"\nAgainst the record {a.expect} (tolerance {a.expect_tolerance} fps; other conditions also move it):")
+        for line in expect_check(results, a.expect, label, a.expect_tolerance):
+            print("  " + line)
 
 
 def cmd_gpu_profile(a):

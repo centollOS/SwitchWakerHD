@@ -24,7 +24,9 @@ Wi-Fi at boot 6 of 8 and was run again from the start). Settings as the player's
 resolution 1.0 handheld, FPS counter on. CPU at the stock 1020 MHz in both. GPU at 384 MHz in both: v1.0.0 always
 runs the handheld GPU there (#85), and v0.4.7 took the profile saved in the console's settings.ini
 (`switchGpuProfile=384`). So this compares the CPU-side work of v1.0.0, not the GPU profile (+4.7 fps in Outset's
-tall grass over the stock 307 MHz, measured on its own with `perf_test.py gpu-profile`).
+tall grass over the stock 307 MHz, measured on its own with `perf_test.py gpu-profile`). The console's settings.ini,
+read after the runs, had FSR 1 on (`switchFsr=1`, the player's choice): v1.0.0 was measured with it (handheld:
+RCAS sharpening in the present pass), v0.4.7 has no FSR.
 
 ### G. Performance: v1.0.0 against v0.4.7
 
