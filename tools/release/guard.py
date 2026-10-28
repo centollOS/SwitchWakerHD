@@ -62,7 +62,10 @@ KEYLIKE = re.compile(rb"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 PUBLIC_HEX = {b"0114020000000000c000000000000046",
               # (this fork: the source zip) upstream's test placeholders (runtime/tools/*_test.cpp)
               b"99999999999999999999999999999999", b"00000000000000000000000000000000",
-              b"0123456789abcdef0123456789abcdef"}
+              b"0123456789abcdef0123456789abcdef",
+              # (this fork: the source zip) data words in upstream's tests: "Fix\0Scalable\0" in ASCII
+              # (tools/story_mods/test_lyt.py) and a layout animation record (runtime/tools/demo_scene_test.cpp)
+              b"466978005363616c61626c6500000000", b"00000004000000003200773903000004"}
 # a function body as tools/recomp/recomp.py emits it (stubgen placeholders call ppc_unimplemented)
 GEN_CODE = re.compile(rb"void f_[0-9A-F]{8}\(Cpu\* __restrict c\) \{\n")
 # and its translated instructions, each followed by its address and word (docs show a function's header only:
@@ -75,6 +78,9 @@ GEN_INSN = re.compile(rb"/\* [0-9A-F]{8}: [0-9A-F]{8} \*/")
 VENDORED = re.compile(r"(^|/)runtime/third_party/")
 # (this fork: the source zip) the shader template's notes and pin, not a cache
 SHADERCACHE_DOCS = re.compile(r"(^|/)tools/shadercache/(README\.md|template\.ref)$")
+# (this fork: the source zip) "content/" paths of upstream's that are not game files: the empty placeholder of a
+# guest-mod example's content folder, and the Java stubs of Android's android.content package
+NOT_GAME_TREE = re.compile(r"(^|/)(examples/guest-mods/[^/]+/content/\.gitkeep|runtime/tools/[^/]+_stubs/android/content/[^/]+\.java)$")
 PYTHON_FILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "python-windows-files.json")
 PYTHON_FILES_ARM64 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "python-windows-arm64-files.json")
 PYTHON_DIR = re.compile(r"(?:^|/)tools/python/(.+)$")
@@ -343,7 +349,8 @@ def check_entry(name, data, problems):
         if vendored and why.startswith("generated"):
             continue
         if rx.search(n) and not (safe_template and why in ("shader cache", "local shader cache tree")) \
-                and not (why == "local shader cache tree" and SHADERCACHE_DOCS.search(n)):
+                and not (why == "local shader cache tree" and SHADERCACHE_DOCS.search(n)) \
+                and not (why == "game file tree" and NOT_GAME_TREE.search(n) and (n.endswith(".java") or not data)):
             problems.append("%s: %s" % (name, why))
     ext = os.path.splitext(n)[1].lower()
     if not safe_template and data.startswith((b"WWHT", b"WWVKSC", b"WWVKPC", b"WWVKPR", b"WWVKST", b"WWFA", b"\x03\x02\x23\x07")):
