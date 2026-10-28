@@ -607,6 +607,8 @@ void install_menu(NSWindow* tv) {
            @"Also refills hearts and magic");
     toggle(gp, @"    Fill the bags (spoils and bait)", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatBags); },
            @"Spoils bag and bait bag (if missing), every kind of spoils x99, empty bait slots filled");
+    toggle(gp, @"    All Nintendo Gallery figurines", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatFigurines); },
+           @"Every figurine Carlov makes, in the gallery and in his count (once you are a member: Carlov took a picto)");
     for (auto [title, which] : {std::pair{@"    Infinite health", mods::kInfHealth}, {@"    Infinite magic", mods::kInfMagic},
                                 {@"    Infinite arrows and bombs", mods::kInfAmmo}, {@"    Infinite rupees", mods::kInfRupees},
                                 {@"    Infinite bait and spoils", mods::kInfBags}, {@"    Infinite swimming", mods::kInfBreath}}) {

@@ -30,6 +30,7 @@ static void map(uint32_t address, size_t size) {
     assert(p == mem::ptr(address));
 }
 int main() {
+    map(0x101C0000, 0x10000);
     map(0x101F0000, 0x10000);
     map(0x10470000, 0x10000);
     constexpr uint32_t base = 0x15000000, player = base + 0x20;
@@ -110,6 +111,35 @@ int main() {
         st8(player + 0xA4, 1);
         mods::cheats_service();
         assert(ld8(player + 0xA4) == 1);  // off: untouched
+    }
+    // All figurines: the 134 bits of l_figure_comp's registers (GameCube decompilation d_a_npc_mt.cpp),
+    // nothing else of the event flags.
+    {
+        static const uint16_t regs[17] = {0x95FF, 0x94FF, 0x93FF, 0x92FF, 0x91FF, 0x90FF, 0x8FFF, 0x8EFF, 0x8DFF,
+                                          0x8CFF, 0xB1FF, 0x9CFF, 0x84FF, 0x83FF, 0x82FF, 0x81FF, 0x80FF};
+        for (int i = 0; i < 17; i++) st16(0x101C2478 + 2 * i, regs[i]);
+        std::memset(mem::ptr(base), 0, 0x2000);
+        st16(player, 14); st16(player + 2, 14); st16(player + 4, 150);
+        std::memcpy(mem::ptr(player + 0x30), "sea\0\0\0\0\0", 8);
+        constexpr uint32_t event = base + 0x644;
+        st8(event + 0x93, 0x10);  // one figurine already made
+        // not a member yet (event 0x3401 off): nothing changes
+        std::array<uint8_t, 0x2000> before;
+        std::memcpy(before.data(), mem::ptr(base), before.size());
+        mods::request_cheat(mods::kCheatFigurines);
+        mods::cheats_service();
+        assert(!std::memcmp(before.data(), mem::ptr(base), before.size()));
+        st8(event + 0x34, 0x01);  // a member: Carlov took a picto
+        std::array<uint8_t, 0x2000> expected;
+        std::memcpy(expected.data(), mem::ptr(base), expected.size());
+        for (int i = 0; i < 17; i++) expected[0x644 + (regs[i] >> 8)] = i == 16 ? 0x3F : 0xFF;
+        expected[0x644 + 0x3A] |= 0x01;
+        mods::request_cheat(mods::kCheatFigurines);
+        mods::cheats_service();
+        assert(!std::memcmp(expected.data(), mem::ptr(base), expected.size()));
+        int made = 0;
+        for (int f = 0; f < 0x86; f++) made += (ld8(event + (regs[f / 8] >> 8)) >> (f % 8)) & 1;
+        assert(made == 0x86);  // daNpcMt_c::getFigureMakeNum
     }
     constexpr uint32_t link = 0x16000000, camera = 0x17000000;
     map(link, 0x10000); map(camera, 0x10000);
