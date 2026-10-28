@@ -102,4 +102,7 @@ invalid"), and stayed broken for later runs. pacman-fetch.py now fetches `<db>.s
 stale .sig; any other failure keeps the old list, which matches the old .sig). The same log showed Python's
 "unable to get local issuer certificate" for MSYS2's mirrors: the script then retries with Windows' curl, as
 setup.py does. Tested in devkitpro/devkita64 (dkp-pacman 6.0.2): with a mismatched dkp-libs.db.sig, main's script
-fails -Syy with the player's error, the new one syncs (rc 0). Not tested: the curl retry on Windows.
+fails -Syy with the player's error, the new one syncs (rc 0). Windows 11 (MSYS2 pacman 6.1.0, Python 3.13), the
+XferCommand built as InstallEngine does, every .sig overwritten: -Syy rc 0 and valid lists, also with Python's
+certificate store emptied (the player's "unable to get local issuer certificate"): curl.exe fetched MSYS2's and
+devkitPro's lists. Not tested: an MSYS2 with pacman 6.0 on Windows.
