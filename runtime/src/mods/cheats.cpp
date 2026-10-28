@@ -10,7 +10,7 @@
 // Note: the game itself takes the sword away in Forsaken Fortress (first visit) and the bow in the
 // Tower of the Gods when those stages load (d_s_play.cpp), cheat or not.
 //
-// Test switch: WWHD_CHEAT=items,sword,stats,songs,triforce,dungeon,key,bags applies those once a save
+// Test switch: WWHD_CHEAT=items,sword,stats,songs,triforce,dungeon,key,bags,figurines applies those once a save
 // file is loaded; WWHD_CHEAT_INFINITE=health,magic,ammo,rupees,bags,breath switches those on.
 //
 // Infinite rupees / bait and spoils / swimming and "Fill the bags": idea and offsets from
@@ -64,6 +64,9 @@ constexpr uint8_t kBirdBait = 0x82, kHyoiPear = 0x83;
 constexpr uint8_t kSpoils[8] = {0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x1F};
 // dSv_info_c::mMemory: the current stage's dSv_memBit_c (copied back to its save table on leaving)
 constexpr uint32_t kStageKeys = 0x778 + 0x20, kStageDungeonItems = 0x778 + 0x21;  // bits: map, compass, boss key
+// dSv_save_c::mEvent: the event flags (dSv_event_c, u8[0x100]; a flag or register is a u16, its high
+// byte the index and its low byte the mask)
+constexpr uint32_t kEvent = 0x624;
 
 uint32_t save_addr() {
     const char* override_addr = getenv("WWHD_CHEAT_SAVE_ADDR");
@@ -178,6 +181,23 @@ void fill_bags(uint32_t s) {
     st8(s + kBaitFlags, ld8(s + kBaitFlags) | 3);
 }
 
+// Complete the Nintendo Gallery: every figurine Carlov makes, as daNpcMt_c::setFigure does for one. The
+// figurines are bits in 17 event registers (l_figure_comp: register figure / 8, bit figure % 8); only the
+// 134 that exist are set (the last register holds 6). The gallery's figures (daObjFigure_c) and
+// Carlov's count (daNpcMt_c::isComp: 133 or more) read the same bits.
+const uint32_t kFigureRegs = GD(0x101C2478);  // daNpcMt_c's l_figure_comp: u16[17]
+constexpr int kFigures = 0x86;
+
+void all_figurines(uint32_t s) {
+    for (int i = 0; i < (kFigures + 7) / 8; i++) {
+        const uint16_t reg = ld16(kFigureRegs + 2 * i);
+        const int count = kFigures - 8 * i < 8 ? kFigures - 8 * i : 8;
+        const uint8_t bits = (uint8_t)(((1u << count) - 1) & (reg & 0xFF));
+        st8(s + kEvent + (reg >> 8), ld8(s + kEvent + (reg >> 8)) | bits);
+    }
+    st8(s + kEvent + 0x3A, ld8(s + kEvent + 0x3A) | 0x01);  // setFigure's event 0x3A01: a figurine was made
+}
+
 // Infinite bait and spoils, each frame: spoils counts stay at 99; bait that was used is put back. A
 // Hyoi Pear (or the last bait) empties its slot and the button it was on (setBaitItemEmpty): both are
 // restored, the button also in the play's copy of the item numbers.
@@ -239,7 +259,8 @@ int parse_env(const char* var, std::initializer_list<std::pair<const char*, int>
 
 std::atomic<int> g_pending{parse_env("WWHD_CHEAT", {{"items", kCheatItems}, {"sword", kCheatSword}, {"stats", kCheatStats},
                                                     {"songs", kCheatSongs}, {"triforce", kCheatTriforce},
-                                                    {"dungeon", kCheatDungeon}, {"key", kCheatKey}, {"bags", kCheatBags}})};
+                                                    {"dungeon", kCheatDungeon}, {"key", kCheatKey}, {"bags", kCheatBags},
+                                                    {"figurines", kCheatFigurines}})};
 std::atomic<int> g_infinite{parse_env("WWHD_CHEAT_INFINITE", {{"health", kInfHealth}, {"magic", kInfMagic}, {"ammo", kInfAmmo}, {"moonjump", kMoonJump}, {"nofall", kMoonNoFall},
                                                                {"rupees", kInfRupees}, {"bags", kInfBags}, {"breath", kInfBreath}})};
 std::atomic<uint32_t> moon_buttons{0}, moon_camera{0};
@@ -511,6 +532,7 @@ void cheats_service() {
     if (w & kCheatDungeon) st8(s + kStageDungeonItems, ld8(s + kStageDungeonItems) | 7);
     if (w & kCheatKey && ld8(s + kStageKeys) < 99) st8(s + kStageKeys, ld8(s + kStageKeys) + 1);
     if (w & kCheatBags) fill_bags(s);
+    if (w & kCheatFigurines) all_figurines(s);
     LOG("[cheats] applied %d in %s: life %u/%u, rupees %u, magic %u, items %02X..%02X, collect %02X %02X, songs %02X, triforce %02X, keys %u, dungeon items %02X",
         w, stage().c_str(), ld16(s + kLife), ld16(s + kMaxLife), ld16(s + kRupee), ld8(s + kMagic), ld8(s + kItems), ld8(s + kItems + 20),
         ld8(s + kCollect), ld8(s + kCollect + 1), ld8(s + kTact), ld8(s + kTriforce), ld8(s + kStageKeys), ld8(s + kStageDungeonItems));
