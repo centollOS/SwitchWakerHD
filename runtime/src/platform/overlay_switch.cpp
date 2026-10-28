@@ -275,6 +275,14 @@ void tab_picture() {
         help(tx.blurHelp);
     }
     {
+        bool v;
+        if (check(lbl(tx.fsr, "fsr").c_str(), gfxsw::fsr(), &v)) {
+            gfxsw::set_fsr(v);
+            hostui::post([v] { hostui::set(kKeyFsr, v ? "1" : "0"); });
+        }
+        help(tx.fsrHelp);
+    }
+    {
         // the shadow maps' size (gfxsw::shadow_scale); saved as switchShadowScale ("0.5", "1" the default, or "2")
         const float cur = gfxsw::shadow_scale();
         ImGui::AlignTextToFramePadding();
