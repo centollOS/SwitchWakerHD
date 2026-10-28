@@ -123,6 +123,13 @@ int main() {
         std::memcpy(mem::ptr(player + 0x30), "sea\0\0\0\0\0", 8);
         constexpr uint32_t event = base + 0x644;
         st8(event + 0x93, 0x10);  // one figurine already made
+        // not a member yet (event 0x3401 off): nothing changes
+        std::array<uint8_t, 0x2000> before;
+        std::memcpy(before.data(), mem::ptr(base), before.size());
+        mods::request_cheat(mods::kCheatFigurines);
+        mods::cheats_service();
+        assert(!std::memcmp(before.data(), mem::ptr(base), before.size()));
+        st8(event + 0x34, 0x01);  // a member: Carlov took a picto
         std::array<uint8_t, 0x2000> expected;
         std::memcpy(expected.data(), mem::ptr(base), expected.size());
         for (int i = 0; i < 17; i++) expected[0x644 + (regs[i] >> 8)] = i == 16 ? 0x3F : 0xFF;

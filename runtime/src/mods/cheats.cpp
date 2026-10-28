@@ -184,11 +184,17 @@ void fill_bags(uint32_t s) {
 // Complete the Nintendo Gallery: every figurine Carlov makes, as daNpcMt_c::setFigure does for one. The
 // figurines are bits in 17 event registers (l_figure_comp: register figure / 8, bit figure % 8); only the
 // 134 that exist are set (the last register holds 6). The gallery's figures (daObjFigure_c) and
-// Carlov's count (daNpcMt_c::isComp: 133 or more) read the same bits.
+// Carlov's count (daNpcMt_c::isComp: 133 or more) read the same bits. A complete collection makes Carlov leave
+// the next time his workshop loads (event 0x3D08, as in the game), so the membership he gives with the first
+// figurine (event 0x3401: he took a picto to make one) could never be had afterwards: without it, nothing is set.
 const uint32_t kFigureRegs = GD(0x101C2478);  // daNpcMt_c's l_figure_comp: u16[17]
 constexpr int kFigures = 0x86;
 
 void all_figurines(uint32_t s) {
+    if (!(ld8(s + kEvent + 0x34) & 0x01)) {
+        ss::notice("Become a member of the Nintendo Gallery first: give Carlov a color picto");
+        return;
+    }
     for (int i = 0; i < (kFigures + 7) / 8; i++) {
         const uint16_t reg = ld16(kFigureRegs + 2 * i);
         const int count = kFigures - 8 * i < 8 ? kFigures - 8 * i : 8;
