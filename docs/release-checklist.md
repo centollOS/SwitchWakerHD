@@ -75,7 +75,8 @@ Use the save states in `sdmc:/switch/wwhd/states/` (`docs/portable-save-states.m
 
 ## F. Memory (every release)
 
-The tour (memory round 2, `docs/memory-round2-plan.md`): 40 warps (every third of `warps`; all 136 hit the game's
+The tour (memory round 2, `docs/memory-round2-plan.md`; `tools/switch/memory_tour.py --out
+perf/results/<release>-memory.txt`, kept in the repo with the release's record, docs/perf-results.md): 40 warps (every third of `warps`; all 136 hit the game's
 own assert at M_DaiB, #18), 25 s each, **two laps (~35 min)**, the `[mem]` lines kept. One lap visits every place
 once, so the second lap only revisits: what still grows then is a leak. (The deko3d leak of round 2 showed as
 +21 MiB in a 14-minute tour; the image heap reaches its 4 chunks in ~3 minutes.)
@@ -92,14 +93,25 @@ free memory (texture/shader eviction, the image heap, deko3d patches): then the 
 
 ## G. Performance (renderer, CPU-side or recompiler changes)
 
-The perf test (kept out of the repo: `perf/benchmark` branch, `~/Documents/SwitchWakerHD-perf-test`):
-`perf_test.py ab` of the release against the last release's NRO, at least 4 interleaved boots
-(`--order ABCCBA --repeat 2`).
+The perf test (docs/perf-test.md): the release's NRO against the last release, rebuilt by the test, 4 interleaved
+boots each, with the last release's record as a sanity check:
+
+```sh
+tools/switch/perf_test.py compare-to <last release> --nro <the release's wwhd.nro> --label <release> \
+    --scenes lava,windfall,dragonroost,outset_grass_us,outset_lookout_us \
+    --expect perf/results/<last release>-vs-<the one before>.json
+```
+
+Run it charging, near the router (a Wi-Fi drop on battery stopped a v1.0.0 run), with the player's settings. Then
+copy the result's `.json` and `.csv` from `build/perf/` to `perf/results/<release>-vs-<last release>.*` (no local
+paths or console address in `meta`) and add the release's section to docs/perf-results.md, F included, in the
+release's commit or just after the tag.
 
 | # | Check | Expected |
 |---|---|---|
-| G1 | lava (`M_NewD2 2`), windfall, dragonroost | No scene slower by more than 0.3 fps |
+| G1 | lava (`M_NewD2 2`), windfall, dragonroost, the two Outset spots | No scene slower by more than 0.3 fps (the verdict) |
 | G2 | Frame pacing in those scenes | No new hitches; frametime even (#23) |
+| G3 | `--expect`: the last release's record | No scene "BELOW the record"; if one is, read `meta.boots` (mode, charge, clocks, settings) before blaming the build |
 
 ## H. Publish
 
@@ -117,5 +129,6 @@ A1 ok  A2 ok  A3 ok/skipped (why)  A4 ok  A5 ok  A6 ok
 B1 ok  B2 ok  B3 ok  B4 ok  B5 ok
 C1 ok  C2 ok  C3 ok  C4 ok  C5 ok  C6 ok
 D1 ..  E1 ..  F: malloc lap 1 N MiB, lap 2 +N MiB, chunks N  G: lava ±N, windfall ±N, dragonroost ±N fps
+F + G files: perf/results/vX.Y.Z-*, docs/perf-results.md
 Known open, not blocking: #..
 ```
