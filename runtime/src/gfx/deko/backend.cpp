@@ -1698,6 +1698,7 @@ const Backend& deko3d_backend() {
         b.api = Api::Platform;  // registered through renderer_ext.h (register_deko3d below)
         b.init = gfxdk::init;
         b.run_main_loop = gfxdk::run_main_loop;
+        b.peek_z = gfxdk::peek_z;  // (this fork, #94) the sun's corona and lens flare
         // GX2 render thread: the draw path (dk_draw.h) and the surfaces (dk_surfaces.h)
         b.draw = [](const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
                     uint32_t baseVertex, uint32_t instances) {

@@ -52,6 +52,8 @@ void frame_begin(uint64_t frame);   // waits for the slot's fence, resets its st
 void frame_end();                   // the fence after this frame's commands (recorded into the command buffer)
 bool frame_done(uint64_t frame);    // the GPU has finished that frame's commands (no wait)
 bool frame_open();                  // between frame_begin and frame_end: commands and stream memory may be used
+// (this fork, #94) depth peeks for the sun's corona and lens flare (depth_peek_dk.cpp; render::peek_z)
+void peek_z(const uint32_t* cells, uint32_t words);
 StreamAlloc stream_alloc(uint32_t size, uint32_t alignment);  // this frame's slice; empty when full (logged)
 ImageAlloc image_alloc(uint32_t size, uint32_t alignment);
 // Before dkImageLayoutInitialize of a block-linear 2D/array/cube image whose level 0 is `rows` rows tall
