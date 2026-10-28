@@ -89,6 +89,27 @@ int main() {
     // host_now is a real date (after 2020)
     assert(to_calendar(host_now()).year >= 2020);
 
+    // the bias: WWHD_OS_TIME, the fixed-seed default, the host clock
+    check_calendar(kFixedOSTime, 2026, 0, 1, 12, 0, 0, 4, 0);  // Thursday
+    const int64_t host = at(2026, 10, 28, 20, 0, 0);
+    const uint64_t guest = 5 * uint64_t(kTicksPerSec);
+    assert(start_bias(nullptr, false, host, guest) == host - int64_t(guest));
+    assert(start_bias("", false, host, guest) == host - int64_t(guest));
+    assert(start_bias(nullptr, true, host, guest) == kFixedOSTime);  // repeatable: no host time in it
+    assert(start_bias("host", true, host, guest) == host - int64_t(guest));
+    // seconds since 1970 read as console local time, whatever the host's time zone (TZ is Vienna here)
+    assert(start_bias("1793087040", false, host, guest) == at(2026, 10, 27, 7, 44, 0));
+    assert(start_bias("1793087040", true, host, guest) == at(2026, 10, 27, 7, 44, 0));
+    const char* why = nullptr;
+    assert(start_bias("tomorrow", true, host, guest, &why) == host - int64_t(guest) && why);
+    why = nullptr;
+    assert(start_bias("12", false, host, guest, &why) == host - int64_t(guest) && why);  // before 2000
+    // a full save state's bias: never backwards, absent (older states) = keep the current one
+    assert(restored_bias(100, false, 0) == 100);
+    assert(restored_bias(100, true, 50) == 100);
+    assert(restored_bias(100, true, 150) == 150);
+    assert(restored_bias(kFixedOSTime, true, kFixedOSTime) == kFixedOSTime);  // repeatable runs stay so
+
     // the save-date repair
     std::vector<uint8_t> block(kSaveBlock, 0);
     for (uint32_t i = 0; i < 0x768; i++) block[i] = uint8_t(i * 7 + 1);

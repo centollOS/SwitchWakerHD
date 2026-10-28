@@ -2,6 +2,7 @@
 #include "os_time.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 
@@ -82,6 +83,19 @@ int64_t host_now() {
                         std::chrono::system_clock::now().time_since_epoch()).count();
     const int64_t secs = floor_div(ns, 1000000000);
     return from_unix(secs, ns - secs * 1000000000);
+}
+
+int64_t start_bias(const char* env, bool fixed_seed, int64_t host_ostime, uint64_t guest, const char** why) {
+    const int64_t host = host_ostime - (int64_t)guest;
+    if (!env || !*env) return fixed_seed ? kFixedOSTime : host;
+    if (!std::strcmp(env, "host")) return host;
+    char* end = nullptr;
+    const long long unix_seconds = std::strtoll(env, &end, 10);
+    if (end == env || *end || unix_seconds < kUnixTo2000) {
+        if (why) *why = "WWHD_OS_TIME: not a number of seconds since 1970 (from 2000 on) or \"host\"; using the host clock";
+        return host;
+    }
+    return (int64_t(unix_seconds) - kUnixTo2000) * kTicksPerSec;
 }
 
 bool repair_save_stamp(uint8_t* block, int64_t stamp) {

@@ -32,9 +32,30 @@ int64_t from_unix(int64_t unix_seconds, int64_t nanoseconds = 0);
 // OSTime of the host's wall clock now
 int64_t host_now();
 
-// the guest clock (threads.cpp): the boot bias (OSTime when the guest timebase was 0, fixed for the
-// run), OSGetTime, and an OSTime back on the guest timebase (alarm starts)
+// The bias: OSGetTime = guest timebase + bias. Chosen once per run (start_bias):
+//   - WWHD_OS_TIME=<seconds since 1970>: that date and time read as the console's local time, the
+//     same on every host and in every time zone (tests);
+//   - WWHD_OS_TIME=host: the host's local wall clock;
+//   - unset: the host's clock, or kFixedOSTime under WWHD_TEST_FIXED_SEED, so that repeatable runs
+//     stay repeatable (OSGetTime then differs between runs only as the guest timebase does, as
+//     before this clock existed).
+// Full save states keep the bias; loading one sets restored_bias, so OSGetTime never runs
+// backwards against the times the state's memory holds (and a repeatable run that loads a state
+// stays repeatable). States of builds without the bias (OSGetTime was the guest timebase then)
+// keep the current bias: their clock jumps forward to this run's date.
+constexpr int64_t kUnixTo2000 = 946684800;  // 2000-01-01 00:00:00 UTC in seconds since 1970
+constexpr int64_t kFixedOSTime = (9497 * kSecondsPerDay + 12 * 3600) * kTicksPerSec;  // 2026-01-01 12:00
+// env: the value of WWHD_OS_TIME (null if unset); host_ostime: host_now(); guest: the guest
+// timebase now. `why` gets a note for an invalid value (the host clock is used then).
+int64_t start_bias(const char* env, bool fixed_seed, int64_t host_ostime, uint64_t guest, const char** why = nullptr);
+inline int64_t restored_bias(int64_t current, bool state_has_bias, int64_t state_bias) {
+    return state_has_bias && state_bias > current ? state_bias : current;
+}
+
+// the guest clock (threads.cpp): the bias, OSGetTime, and an OSTime back on the guest timebase
+// (alarm starts)
 int64_t bias();
+void set_bias(int64_t bias);  // a full save state's (restored_bias)
 uint64_t now();
 uint64_t to_guest(uint64_t os_ticks);
 
