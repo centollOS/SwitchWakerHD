@@ -686,8 +686,10 @@ void tab_saves_convenience() {
         else snprintf(label, sizeof label, "Off");
         if (radio(label, minutes == m)) ss::set_auto_save_minutes(m);
     }
-    help("Saves a small portable state in the background into Auto save 1 to 3, the oldest first. If the game is in a "
-         "cutscene or dialogue, it tries again a little later. Separate from Crash Recovery.");
+    help("Saves a small portable state into Auto save 1 to 3, the oldest first: every few minutes and shortly after "
+         "you enter a new area, once you have had control of Link for a few seconds (not in a cutscene or dialogue). "
+         "\"Autosaved\" is shown when it saves. It never changes your game's save file: after a crash, load the newest "
+         "auto save here, then save in game to keep it. Separate from Crash Recovery.");
     const conv::StartChoice start = conv::parse_start(ss::at_start());
     int current = start.what == conv::Start::kLastSession ? 1 : start.what == conv::Start::kSlot ? 1 + start.slot : 0;
     if (combo("At start", &current, "Intro as usual\0Continue last session\0Slot 1\0Slot 2\0Slot 3\0Slot 4\0Slot 5\0\0"))
