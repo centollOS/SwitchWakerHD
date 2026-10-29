@@ -77,9 +77,12 @@ abstract class DesktopEngine : EngineBase
         File.Exists(PyExe) && Capture(PyExe, "-c \"import compression.zstd,ssl;print('PYOK')\"").output.Contains("PYOK");
 
     // ── devkitPro ───────────────────────────────────────────────────────────
-    // What the native build needs from devkitPro, by its files (the same packages on macOS and Linux)
+    // What the native build needs from devkitPro, by its files (the same packages on macOS and Linux).
+    // devkitA64 by name: it is now a metapackage over devkita64-gcc, -binutils and -newlib, and switch-dev brings
+    // only -binutils. An older devkitA64 owns those files itself; without its upgrade in the same transaction,
+    // installing -binutils stops with "conflicting files" (#28).
     protected const string Dkp = "/opt/devkitpro";
-    protected const string DkpPackages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
+    protected const string DkpPackages = "devkitA64 switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
     static readonly (string what, string path)[] DkpFiles =
     {
         ("devkitA64", Dkp + "/devkitA64/bin/aarch64-none-elf-gcc"),

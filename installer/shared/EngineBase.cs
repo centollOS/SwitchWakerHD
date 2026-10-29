@@ -270,7 +270,8 @@ abstract class EngineBase
                Has(@"unable to lock database")                                 ? "dkp_why_lock" :
                Has(@"returned error: 429")                                     ? "dkp_why_429" :
                Has(@"Could not resolve host|timed out|Failed to connect|Connection reset|returned error: 5\d\d|Recv failure") ? "dkp_why_net" :
-               Has(@"signature .* (unknown trust|is invalid)|invalid or corrupted package|keyring") ? "dkp_why_sig" :
+               // not a bare "keyring": every transaction prints "checking keyring..." (#28 blamed the keys for a file conflict)
+               Has(@"signature .* (unknown trust|is invalid)|invalid or corrupted package|unknown public key|keyring is not writable") ? "dkp_why_sig" :
                "dkp_why_other";
     }
 

@@ -194,7 +194,9 @@ sealed class InstallEngine : EngineBase
         // Only when missing: --needed still upgrades an installed one to the package list's version, without its
         // libraries (cmake 4.0.2 -> 4.4.4 without msys-jsoncpp-27.dll, so cmake no longer started). A partial
         // update of MSYS2 (RepairMsys mends one when the tools then don't start).
-        var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
+        // devkitA64 by name: now a metapackage over devkita64-gcc, -binutils and -newlib. An older one owns those
+        // files itself, and installing -binutils (switch-dev) without its upgrade stopped with "conflicting files" (#28).
+        var packages = "devkitA64 switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
         var msysTools = new List<(string package, string file)> { ("cmake", @"usr\bin\cmake.exe"), ("make", @"usr\bin\make.exe") };
         if (ForwarderKeys != null || PrepareShaders) msysTools.Add(("gcc", @"usr\bin\gcc.exe"));
         if (PrepareShaders) msysTools.AddRange(new[] { ("ninja", @"usr\bin\ninja.exe"), ("zlib-devel", @"usr\include\zlib.h") });
@@ -213,7 +215,8 @@ sealed class InstallEngine : EngineBase
             for (int i = 0; i < 10; i++) { ct.ThrowIfCancellationRequested(); Thread.Sleep(1000); }
             ClearStalePacmanLock();
         }
-        if (reason == "dkp_why_403")
+        var throughPython = reason == "dkp_why_403";
+        if (throughPython)
         {
             Warn(Str.Get("dkp_403_xfer"));
             ClearStalePacmanLock();
@@ -226,9 +229,11 @@ sealed class InstallEngine : EngineBase
             // pkg.devkitpro.org often answers 403 (Cloudflare, devkitPro/pacman#63) and the whole -Sy gives up
             // without installing anything. The package lists it did refresh, and the ones from earlier runs,
             // are still on disk: install from those.
+            // After a 403 the packages come through Python too: pacman's own download gets the same 403 (#28).
             Warn(Str.Get("dkp_pkg_warn") + " " + Str.Get(reason));
             ClearStalePacmanLock();
-            Exec(pacman, "-S --needed --noconfirm " + packages, check: false);
+            if (throughPython) PacmanThroughPython("-S --needed --noconfirm " + packages, new List<string>());
+            else Exec(pacman, "-S --needed --noconfirm " + packages, check: false);
         }
         CheckDevkitTools(reason);
     }
