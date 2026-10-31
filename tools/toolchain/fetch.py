@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The pinned devkitPro toolchain for the players' build (docs/pinned-toolchain-plan.md, step 3): devkitPro's own
 package files at the versions of tools/toolchain/lock.json, downloaded from devkitPro's server, checked against
-their SHA-256 and unpacked into DEST/<id>/devkitpro, without pacman and without any devkitPro already installed.
+their SHA-256 and unpacked into DEST/<id>/devkitpro (with zig, the host compiler for the prepared graphics'
+dksh_cache, in DEST/<id>/zig), without pacman and without any devkitPro already installed.
 <id> names the lock's files for this platform; the NRO's toolchain line (cmake/SwitchToolchainInfo.cmake) shows it.
 
 usage: python3 -I tools/toolchain/fetch.py [--dest DIR] [--platform P] [--cache DIR]
@@ -40,25 +41,29 @@ def files_for(lock, plat):
     return lock["any"] + lock["hosts"][plat]
 
 
-def lock_id(files):
-    """12 hex digits naming exactly these files"""
+def lock_id(files, zig):
+    """12 hex digits naming exactly these files (and the zig archive)"""
     text = "\n".join("%s %s" % (f["path"], f["sha256"]) for f in sorted(files, key=lambda f: f["path"]))
+    text += "\nzig %s %s" % (zig["url"], zig["sha256"])
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
 def get(f, server, cache):
-    """the checked bytes of a locked file (from the cache when there and right)"""
-    cached = os.path.join(cache, f["path"]) if cache else None
+    """the checked bytes of a locked file (from the cache when there and right); f: a package (path on devkitPro's
+    server) or the zig archive (url)"""
+    url = f.get("url") or server + f["path"]
+    name = f.get("path") or "zig/" + url.rsplit("/", 1)[1]
+    cached = os.path.join(cache, name) if cache else None
     if cached and os.path.isfile(cached):
         with open(cached, "rb") as fh:
             data = fh.read()
         if dkp.sha256(data) == f["sha256"]:
             return data
-    data = dkp.download(server + f["path"])
+    data = dkp.download(url)
     got = dkp.sha256(data)
     if got != f["sha256"]:
-        sys.exit("%s: SHA-256 %s, the lock says %s (devkitPro changed the file? nothing was unpacked)"
-                 % (f["path"], got, f["sha256"]))
+        sys.exit("%s: SHA-256 %s, the lock says %s (the file changed on its server? nothing was unpacked)"
+                 % (name, got, f["sha256"]))
     if cached:
         os.makedirs(os.path.dirname(cached), exist_ok=True)
         with open(cached + ".part", "wb") as fh:
@@ -104,9 +109,43 @@ def unpack(data, dest):
             shutil.copy2(target, out)
 
 
+def unpack_zig(data, dest):
+    """zig's archive (.tar.xz, or .zip on Windows) into dest, without its top folder"""
+    import io
+    import tarfile
+    import zipfile
+    os.makedirs(dest, exist_ok=True)
+    if data[:2] == b"PK":
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for m in z.infolist():
+                rel = m.filename.split("/", 1)[1] if "/" in m.filename else ""
+                if not rel or m.is_dir() or ".." in rel.split("/"):
+                    continue
+                out = os.path.join(dest, *rel.split("/"))
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with z.open(m) as src, open(out, "wb") as fh:
+                    shutil.copyfileobj(src, fh)
+        return
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as t:
+        for m in t.getmembers():
+            rel = m.name.split("/", 1)[1] if "/" in m.name else ""
+            if not rel or ".." in rel.split("/"):
+                continue
+            out = os.path.join(dest, *rel.split("/"))
+            if m.isdir():
+                os.makedirs(out, exist_ok=True)
+            elif m.isfile():
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with t.extractfile(m) as src, open(out, "wb") as fh:
+                    shutil.copyfileobj(src, fh)
+                if m.mode & 0o111:
+                    os.chmod(out, os.stat(out).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 def fetch(lock, plat, dest_root, cache):
     files = files_for(lock, plat)
-    ident = lock_id(files)
+    zig = lock["zig"][plat]
+    ident = lock_id(files, zig)
     home = os.path.join(dest_root, ident)
     dkp_dir = os.path.join(home, "devkitpro")
     manifest = os.path.join(dkp_dir, "toolchain.json")
@@ -117,8 +156,10 @@ def fetch(lock, plat, dest_root, cache):
     for f in files:
         print("devkitPro: %s" % f["path"], file=sys.stderr, flush=True)
         unpack(get(f, lock["server"], cache), os.path.join(tmp, "devkitpro"))
+    print("zig: %s" % zig["url"], file=sys.stderr, flush=True)
+    unpack_zig(get(zig, lock["server"], cache), os.path.join(tmp, "zig"))
     with open(os.path.join(tmp, "devkitpro", "toolchain.json"), "w", newline="\n") as fh:
-        json.dump({"id": ident, "platform": plat, "packages": files}, fh, indent=1)
+        json.dump({"id": ident, "platform": plat, "packages": files, "zig": zig}, fh, indent=1)
     shutil.rmtree(home, ignore_errors=True)
     os.replace(tmp, home)
     # the previous toolchain stays (a rebuild of an older release); older ones go
@@ -133,16 +174,17 @@ def fetch(lock, plat, dest_root, cache):
 def check(lock, plats):
     seen, bad = set(), 0
     for plat in plats:
-        for f in files_for(lock, plat):
-            if f["path"] in seen:
+        for f in files_for(lock, plat) + [lock["zig"][plat]]:
+            key = f.get("path") or f["url"]
+            if key in seen:
                 continue
-            seen.add(f["path"])
+            seen.add(key)
             try:
-                data = dkp.download(lock["server"] + f["path"])
+                data = dkp.download(f.get("url") or lock["server"] + f["path"])
                 ok = dkp.sha256(data) == f["sha256"]
             except Exception as e:  # noqa: BLE001  (a report, not a crash)
                 ok, data = False, str(e)
-            print("%s %s" % ("ok  " if ok else "FAIL", f["path"]) + ("" if ok else "  (%s)" % (
+            print("%s %s" % ("ok  " if ok else "FAIL", key) + ("" if ok else "  (%s)" % (
                 data if isinstance(data, str) else "different SHA-256")), flush=True)
             bad += not ok
     print("%d files, %d missing or changed" % (len(seen), bad))

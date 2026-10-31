@@ -1,5 +1,6 @@
 # dksh_cache (host): WGS1 shadercache_gl.bin -> WDK1 shadercache_dksh.bin with glsl_to_deko + uamlib.
-# Built by build.sh in a Debian container; also builds anywhere with CMake, a C++17 compiler and zlib.
+# Built by build.sh in a Debian container, by build.py with the pinned zig (the players' build); also builds anywhere
+# with CMake, a C++20 compiler and zlib.
 cmake_minimum_required(VERSION 3.20)
 project(dksh_cache C CXX)
 if(NOT CMAKE_BUILD_TYPE)
@@ -7,7 +8,23 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 set(WWHD_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 add_subdirectory(${WWHD_ROOT}/runtime/third_party/uam ${CMAKE_BINARY_DIR}/uam EXCLUDE_FROM_ALL)
-find_package(ZLIB REQUIRED)
+# DKSH_BUNDLED_ZLIB=ON (build.py, the pinned build): zlib from its pinned source, never the computer's
+option(DKSH_BUNDLED_ZLIB "build zlib from its pinned source" OFF)
+if(DKSH_BUNDLED_ZLIB)
+  include(FetchContent)
+  if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+  endif()
+  set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(zlib
+    URL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz
+    URL_HASH SHA256=17e88863f3600672ab49182f217281b6fc4d3c762bde361935e436a95214d05c)  # as cmake/WindowsDependencies.cmake
+  FetchContent_MakeAvailable(zlib)
+  add_library(ZLIB::ZLIB ALIAS zlibstatic)
+  target_include_directories(zlibstatic PUBLIC "${zlib_SOURCE_DIR}" "${zlib_BINARY_DIR}")
+else()
+  find_package(ZLIB REQUIRED)
+endif()
 # translate (translate.cpp): the runtime's Latte decompiler (runtime/third_party/cemu, OpenGL mode as on deko3d)
 set(CEMU_DIR ${WWHD_ROOT}/runtime/third_party/cemu)
 file(GLOB_RECURSE CEMU_SOURCES CONFIGURE_DEPENDS ${CEMU_DIR}/*.cpp)

@@ -35,6 +35,20 @@ ANY_PACKAGES = {  # one file for every platform
 
 
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "build", "toolchain-cache")
+# the host compiler for tools/switch/dksh_cache (the prepared graphics): zig's clang, one archive per platform,
+# the version upstream's toolchains.json pins for Linux
+ZIG = {
+    "win-x64": ("https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip",
+                "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e"),
+    "osx-arm64": ("https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz",
+                  "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489"),
+    "osx-x64": ("https://ziglang.org/download/0.16.0/zig-x86_64-macos-0.16.0.tar.xz",
+                "0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7"),
+    "linux-x64": ("https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
+                  "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"),
+    "linux-arm64": ("https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz",
+                    "ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17"),
+}
 
 
 def find(folder, name, version, arch):
@@ -65,7 +79,8 @@ def entry(name, path, data):
 
 
 def main():
-    lock = {"server": dkp.SERVER, "any": [], "hosts": {}}
+    lock = {"server": dkp.SERVER, "any": [], "hosts": {},
+            "zig": {p: {"url": u, "sha256": h} for p, (u, h) in ZIG.items()}}
     print("any:")
     for name, version in ANY_PACKAGES.items():
         lock["any"].append(entry(name, *find("", name, version, "any")))
