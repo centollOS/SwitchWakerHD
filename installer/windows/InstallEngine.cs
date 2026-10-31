@@ -80,7 +80,10 @@ sealed class InstallEngine : EngineBase
             if (!FindPython()) throw new InstallException(Str.Get(rc == -1 ? "py_no_winget" : "py_fail"));
         }
         Say(Str.Get("py_pkgs"));
-        var pkgs = "zstandard pycryptodome" + (ForwarderKeys != null ? " pillow" : "");
+        // zstandard (a .wua) only for a Python without compression.zstd (before 3.14): a newer Python than its
+        // newest wheels makes pip build it from source, which needs Visual C++ (Python 3.15)
+        var stdZstd = Capture(pythonCmd, "-c \"import compression.zstd;print('ZSTD')\"").output.Contains("ZSTD");
+        var pkgs = (stdZstd ? "" : "zstandard ") + "pycryptodome" + (ForwarderKeys != null ? " pillow" : "");
         if (Exec(pythonCmd, "-m pip install --disable-pip-version-check " + pkgs, check: false) != 0)
             throw new InstallException(Str.Get("py_pkgs_fail", pkgs));
         if (MinimapGame != null && IsZstdRvz(MinimapGame)) Python314();

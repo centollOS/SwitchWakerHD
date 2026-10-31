@@ -17,7 +17,7 @@ usage:
   make_sd.py --image GAME.wux [--out DIR]     disc key: GAME.key next to the image (16 bytes or 32 hex digits);
                                               common key: WIIU_COMMON_KEY (32 hex digits) or common.key
                                               next to the image or in the current folder
-  make_sd.py --wua GAME.wua [--out DIR]       a Cemu Wii U archive (no keys; needs: pip install zstandard)
+  make_sd.py --wua GAME.wua [--out DIR]       a Cemu Wii U archive (no keys; needs Python 3.14+ or: pip install zstandard)
   make_sd.py --game-dir EXTRACTED [--out DIR] a folder with code/, content/, meta/ (e.g. from Cemu's
                                               mlc01/usr/title/00050000/10143500 or 10143600, without the update)
   The graphics (shadercache_dksh.bin) are prepared by default: from this release's shader template, downloaded
@@ -217,9 +217,12 @@ def extract(image):
 
 def extract_wua(archive):
     try:
-        import zstandard  # noqa: F401
+        from compression import zstd  # noqa: F401  (Python 3.14 and newer)
     except ImportError:
-        fail("extracting a .wua needs zstandard: python -m pip install zstandard")
+        try:
+            import zstandard  # noqa: F401
+        except ImportError:
+            fail("extracting a .wua needs Python 3.14 or newer, or zstandard: python -m pip install zstandard")
     dst = os.path.join(ROOT, "build", "sd-game")
     tmp = dst + ".partial"
     shutil.rmtree(tmp, ignore_errors=True)

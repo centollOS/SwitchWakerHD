@@ -149,7 +149,8 @@ WSL. `make_sd.py` uses it when neither Docker nor Podman is installed. Do this o
 in a normal PowerShell or Command Prompt (write `python` where step 2 says `python3`):
 
 1. Install [Python 3](https://www.python.org/downloads/) (tick *Add python.exe to PATH*), then
-   `python -m pip install zstandard pycryptodome` (`zstandard` is for a `.wua`, `pycryptodome` for a `.wux`/`.wud`).
+   `python -m pip install zstandard pycryptodome` (`zstandard` is for a `.wua` with a Python older than 3.14, which
+   has no `compression.zstd`; `pycryptodome` for a `.wux`/`.wud`).
 2. Install devkitPro from <https://github.com/devkitPro/installer/releases> into the default `C:\devkitPro`.
 3. Open *devkitPro > MSYS2* from the Start menu and run
    `pacman -Syu`, then `pacman -S --needed devkitA64 switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make`,
@@ -182,7 +183,7 @@ python3 -m pip install pycryptodome      # only needed for a .wux/.wud image
 # next to it too (or WIIU_COMMON_KEY=<32 hex digits> in the environment)
 python3 tools/switch/make_sd.py --image /path/to/game.wux
 
-# or from a Cemu archive (no keys; python3 -m pip install zstandard)
+# or from a Cemu archive (no keys; Python 3.14+, or python3 -m pip install zstandard)
 python3 tools/switch/make_sd.py --wua /path/to/game.wua
 
 # or from an extracted game folder
