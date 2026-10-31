@@ -33,12 +33,12 @@ the same game files, and a crash address in a player's log maps to our ELF.
 | Source | Today | Pinned |
 |---|---|---|
 | Python (version, packages, which one PATH finds) | the player's (Windows), python-build-standalone 3.14 (Mac/Linux installers) | python-build-standalone on every system, its packages as wheels pinned by hash |
-| devkitPro toolchain and libraries (devkitA64, libnx, deko3d, uam, portlibs) | the player's install or `pacman -S` from pkg.devkitpro.org; Docker's image | our toolchain bundle, a release asset of ours |
-| bash, make, cmake, ninja, host gcc for `tools/switch/dksh_cache` (Windows) | devkitPro's MSYS2 plus whatever is on PATH | a portable MSYS2 subset inside the bundle |
-| Docker or Podman installed | `build.sh` prefers a container | the installer and `make_sd.py` use the bundle; the container stays a developer option |
-| Environment (`DEVKITPRO`, `DEVKITARM`, `PATH`, `PYTHON*`, `CC`, ...) | inherited | each build process gets an environment built from scratch: the bundle, then the system's minimum |
+| devkitPro toolchain and libraries (devkitA64, libnx, uam, portlibs) | the player's install or `pacman -S` from pkg.devkitpro.org; Docker's image | devkitPro's package files at locked versions and hashes, unpacked into our folder |
+| bash, make, cmake, ninja, host compiler for `tools/switch/dksh_cache` | devkitPro's MSYS2 (Windows), Xcode / the distribution, whatever is on PATH | no bash or MSYS2 (a Python build driver); cmake and ninja from step 2; a pinned zig as host compiler |
+| Docker or Podman installed | `build.sh` prefers a container | the installer and `make_sd.py` use the pinned folder; the container (pinned by digest) stays a developer option |
+| Environment (`DEVKITPRO`, `DEVKITARM`, `PATH`, `PYTHON*`, `CC`, ...) | inherited | each build process gets an environment built from scratch: the pinned folder, then the system's minimum |
 | Game files (dump format, update, modified files) | checked by `tools/switch/game_files.py` (#48) | unchanged; stays a hard check |
-| Network to pkg.devkitpro.org and MSYS2 mirrors | needed on every install | not needed: only github.com (already needed for the release zip and the graphics template) |
+| Network to pkg.devkitpro.org and MSYS2 mirrors | pacman on every install, MSYS2 mirrors | pkg.devkitpro.org once for the locked files (kept in the work folder); no MSYS2 mirrors |
 
 Not covered (out of our hands): the console's firmware and Atmosphère, antivirus behaviour, how files get to the
 SD card (the log already records the first; the second and third get checks where we can, e.g. `._` files).
@@ -48,7 +48,7 @@ SD card (the log already records the first; the second and third get checks wher
 ### 1. Say what built it (small, first, also for v1.0.1)
 
 Every NRO logs, next to the version, the toolchain that built it: GCC version (`__VERSION__`), libnx version
-(its version header), deko3d and uam versions, the bundle id when built from the bundle, `docker`/`native`, the
+(its version header), deko3d and uam versions, the lock id when built from the pinned folder, `docker`/`native`, the
 host OS. One `[boot] toolchain ...` line. With it, #98's first log would have answered the question we are
 now waiting for. Also in `installer.log`.
 
@@ -60,53 +60,57 @@ Python; the packages come from a hash-pinned requirements file (`--require-hashe
 never builds anything. Replaces the PATH search (`FindPython`) and its patches on `fix/pacman-xfer-sig`
 (MSYS2 Python, Python 3.15).
 
-### 3. The toolchain bundle (v1.1.0)
+### 3. Pinned devkitPro packages (v1.1.0)
 
-A GitHub Actions workflow builds, for windows-x64, macos-arm64, macos-x64, linux-x64, linux-arm64:
+**Decision (2026-10-31): we do not build or rehost a toolchain.** devkitPro's buildscripts say toolchains built
+with them "are for personal use only and may not be distributed by entities other than devkitPro". Instead the
+build uses **devkitPro's own package files, from devkitPro's server, at exact versions**, checked by SHA-256 and
+unpacked into a folder of ours, without pacman and without the player's devkitPro.
 
-- devkitA64 (binutils, GCC, newlib) from devkitPro's public `buildscripts` at a pinned commit, with their
-  sources fetched from GNU's mirrors and GitHub (not pkg.devkitpro.org);
-- libnx, deko3d, uam, switch-tools (elf2nro, nacptool), and the portlibs we link (zlib, lz4) from source at
-  pinned commits;
-- Windows only: a portable MSYS2 subset (bash, coreutils, make, cmake, ninja, gcc for the host tools), from a
-  pinned msys2-base archive;
-- a manifest (`toolchain.json`: every component, its version and commit, the bundle id) and the sources archive
-  the GPL asks for.
+- `tools/toolchain/lock.json`: for each platform (win-x64, osx-arm64, osx-x64, linux-x64, linux-arm64) the
+  package files (`devkita64-gcc`, `-binutils`, `-newlib`, `-rules`, `-cmake`, `dkp-cmake-common-utils`,
+  `switch-cmake`, `libnx`, `switch-tools`, `general-tools`, `uam`, `switch-zlib`, `switch-lz4`) with their path
+  on pkg.devkitpro.org and SHA-256. The versions are the ones our Docker image has (devkitA64 r29.2: GCC
+  15.2.0-7, binutils 2.45.1-2, newlib 4.6.0.20260123-4, libnx 4.12.0-1, ...), so a player's NRO is ours.
+  deko3d and uam's compiler library are already built from our own copies (runtime/third_party).
+- `tools/toolchain/fetch.py` (standard library only; Python 3.14 for zstd): downloads each file (devkitPro's
+  Cloudflare refuses curl and Python's default client, and accepts pacman's user agent, as pacman-fetch.py
+  already sends), checks the SHA-256, unpacks `opt/devkitpro/...` into `<dir>/devkitpro`, writes
+  `toolchain.json` (the lock's id per platform: what step 1's log line names).
+- `tools/toolchain/make_lock.py` (maintainers): writes the lock from a list of versions.
+- On 2026-10-31 every r29.2 file was still there for Linux, Windows and macOS, though devkitPro's repository
+  database already lists r30. pacman only installs what the database lists, which is why fetch.py asks for the
+  exact files.
+- A weekly GitHub Actions check downloads the locked files: if devkitPro removes one, we hear it before players
+  do (and it reports newer versions to consider).
 
-It is published as release assets of a tools release (`toolchain-YYYYMMDD`), each with a `.sha256`. The repo
-pins one bundle id per platform in a lock file (`tools/toolchain.lock`); a new bundle is a reviewed change of
-that file, like any code change.
+**Updating** is a reviewed change of the lock, like code: only for a reason (a firmware that needs a newer libnx,
+a fixed bug, a measured improvement), built and checked on the console (start, memory tour, performance) before a
+release. The Docker image used by `build.sh` is pinned by digest to the same versions.
 
-Our own builds use the same bundle (developer machines and CI), or the Docker image pinned by digest only if it
-is proven to produce the same NRO.
+### 4. The build without bash, MSYS2 or Docker (v1.1.0)
 
-### 4. Installers and `make_sd.py` use the bundle (v1.1.0)
-
-- The installers download the bundle named in the release's `tools/toolchain.lock` from its direct release URL
-  (`github.com/.../releases/download/<tag>/<file>`, like the release zip and the graphics template: not GitHub's
-  API, whose asset endpoint counts against the 60 requests an hour an unauthenticated IP gets; resumable,
-  sha256-checked),
-  unpack it into the work folder (`toolchain/<bundle id>/`), keep one previous one, and never read or change the
-  player's devkitPro, pacman, Docker or PATH.
-- `tools/switch/build.sh` gets a bundle mode: an environment from scratch (`env -i` plus the bundle's paths and
-  the system's minimum), `DEVKITPRO` pointing into the bundle. `make_sd.py` uses it by default and fetches the
-  bundle itself; `--system-devkitpro` and `--docker` stay for developers.
-- The devkitPro/pacman steps leave the installers (the 403 retries, `pacman-fetch.py`, the keyring hints, the
-  package-conflict handling).
+- `tools/switch/build_switch.py`: the parts of `build.sh` the players' build needs (icon, NACP, CMake configure,
+  build), in Python, with the pinned cmake and ninja (step 2's packages) and the pinned devkitPro folder. Its
+  environment is built from scratch: `DEVKITPRO` pointing at the pinned folder, `PATH` = its tools + the system's
+  minimum; nothing inherited (`DEVKITPRO`, `DEVKITARM`, `CC`, ...). Windows needs no MSYS2: devkitPro's Windows
+  packages are native programs.
+- The host tool `tools/switch/dksh_cache` (prepared graphics) is compiled with a pinned zig (`zig c++`, one
+  archive per platform from ziglang.org, SHA-256 in the lock): no Xcode, distribution gcc or MSYS2 gcc.
+- `make_sd.py` uses this by default; `--system-devkitpro` and `--docker` stay for developers.
+- The installers: the devkitPro step becomes "download the pinned toolchain" (no pacman, keyring, 403 retries
+  through pacman, package conflicts). The 403 is still possible from devkitPro's server: the fetch retries, and
+  the files stay in the work folder once downloaded.
 
 ### 5. Prove it is the same build (v1.1.0)
 
-- Build the same commit and game with the bundle on Windows (test PC), macOS and Linux and in our CI-like setup:
+- Build the same commit and game with the pinned folder on Windows (test PC), macOS and Linux and in our CI-like setup:
   `wwhd.elf`'s code must be identical (compare the text section; timestamps aside).
-- A player's log (step 1) then names a bundle id; we keep the ELFs of each release built with it for crash
+- A player's log (step 1) then names a lock id; we keep the ELFs of each release built with it for crash
   addresses.
 
 ## Open questions (for the maintainers)
 
-1. **devkitPro.** Redistributing a toolchain built from their buildscripts is allowed by the licences (GPL with
-   sources), but devkitPro has asked projects not to rehost their tools, and already closes our PRs. Do we tell
-   them first? Name the bundle so it is clearly ours (not "devkitPro"), and point support questions to us.
-2. **Where the bundle lives**: this repo's releases (a `toolchain-*` pre-release) or a separate repo
-   (`centollOS/switch-toolchain`) that SwitchWaker could also use.
-3. **Size**: expected 300-500 MB download, 1-2 GB unpacked; acceptable?
-4. **SwitchWaker**: it builds in Docker (and players do not build it). Use the same bundle there later?
+1. ~~devkitPro / where the bundle lives / size~~: settled by step 3's decision (their files, from their server;
+   about 130 MB). Asking devkitPro for permission to rehost (which would also end the 403) stays possible later.
+2. **SwitchWaker**: it builds in Docker (and players do not build it). Pin its image by digest too?
