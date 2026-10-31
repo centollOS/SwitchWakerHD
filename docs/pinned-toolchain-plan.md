@@ -82,7 +82,10 @@ is proven to produce the same NRO.
 
 ### 4. Installers and `make_sd.py` use the bundle (v1.1.0)
 
-- The installers download the bundle named in the release's `tools/toolchain.lock` (resumable, sha256-checked),
+- The installers download the bundle named in the release's `tools/toolchain.lock` from its direct release URL
+  (`github.com/.../releases/download/<tag>/<file>`, like the release zip and the graphics template: not GitHub's
+  API, whose asset endpoint counts against the 60 requests an hour an unauthenticated IP gets; resumable,
+  sha256-checked),
   unpack it into the work folder (`toolchain/<bundle id>/`), keep one previous one, and never read or change the
   player's devkitPro, pacman, Docker or PATH.
 - `tools/switch/build.sh` gets a bundle mode: an environment from scratch (`env -i` plus the bundle's paths and
