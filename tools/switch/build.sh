@@ -131,6 +131,14 @@ if [[ $native == 1 && -n ${WWHD_PYTHON:-} ]]; then
     nro_opts+=("-DPython3_EXECUTABLE=$nacp_py")
 fi
 nro_opts_q=$(printf '%q ' "${nro_opts[@]}")
+# how this build ran, for the NRO's toolchain line (cmake/SwitchToolchainInfo.cmake)
+if [[ $native == 1 ]]; then
+    export WWHD_BUILD_ENV="native"
+else
+    image_id=$("$engine" image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)
+    image_id=${image_id#sha256:}
+    export WWHD_BUILD_ENV="$(basename "$engine") ${image_id:0:12}, host $(uname -s)"
+fi
 if [[ $native == 1 ]]; then
     export DEVKITA64=${DEVKITA64:-$DEVKITPRO/devkitA64}
     export PATH="$DEVKITPRO/tools/bin:$DEVKITA64/bin:$PATH"
@@ -146,7 +154,7 @@ if [[ $native == 1 ]]; then
     mkdir -p "$dir/dksh"  # uam writes there but nothing creates it with Makefiles
     cmake --build "$dir" -j $jobs
 else
-"$engine" run --rm "${mounts[@]}" -w /src "$image" bash -c "
+"$engine" run --rm "${mounts[@]}" -e WWHD_BUILD_ENV -w /src "$image" bash -c "
     # git refuses a repository owned by another user (the container runs as root; issue fixed by #36). From /:
     # in a git worktree /src/.git points outside the mount, and git run inside /src would stop the build
     git -C / config --global --add safe.directory /src &&
