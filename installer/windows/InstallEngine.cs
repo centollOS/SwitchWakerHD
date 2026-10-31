@@ -68,7 +68,7 @@ sealed class InstallEngine : EngineBase
     // ── Python ───────────────────────────────────────────────────────────────
     protected override void Python()
     {
-        if (!FindPython())
+        if (!FindPython(allowNewer: false))
         {
             Say(Str.Get("py_installing"));
             // PrependPath: winget's own silent switches leave python.exe off PATH.
@@ -77,7 +77,9 @@ sealed class InstallEngine : EngineBase
                                     "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1\"",
                           check: false);
             RefreshPath();
-            if (!FindPython()) throw new InstallException(Str.Get(rc == -1 ? "py_no_winget" : "py_fail"));
+            // a Python newer than the packages' wheels only when winget could not bring a 3.12
+            if (!FindPython(allowNewer: false) && !FindPython(allowNewer: true))
+                throw new InstallException(Str.Get(rc == -1 ? "py_no_winget" : "py_fail"));
         }
         Say(Str.Get("py_pkgs"));
         // zstandard (a .wua) only for a Python without compression.zstd (before 3.14): a newer Python than its
@@ -108,7 +110,12 @@ sealed class InstallEngine : EngineBase
         Ok(Str.Get("mm_py_ok"));
     }
 
-    bool FindPython()
+    // The newest Python the packages have Windows wheels for (zstandard: up to 3.14 for now). A newer one makes pip
+    // build zstandard from source, which needs Visual C++, and the release's make_sd.py still needs zstandard for a
+    // .wua: it is used only with allowNewer, when no 3.8-3.14 is installed and winget could not add one.
+    const int NewestWheelMinor = 14;
+
+    bool FindPython(bool allowNewer)
     {
         var candidates = new List<string> { "python", "py", "python3" };
         foreach (var root in new[] {
@@ -121,24 +128,35 @@ sealed class InstallEngine : EngineBase
                 .Select(d => Path.Combine(d, "python.exe"))
                 .Where(File.Exists));
         }
+        // every Python the py launcher knows (it runs the newest one, which may be too new)
+        foreach (Match p in Regex.Matches(Capture("py", "-0p").output, @"[A-Za-z]:\\[^\r\n]*?python\.exe", RegexOptions.IgnoreCase))
+            candidates.Add(p.Value);
         // 3.8 or newer (older ones get no pip wheels for zstandard and pycryptodome) and 64-bit (translating the
         // game code needs more memory than a 32-bit process has). The Microsoft Store's "python" stub prints nothing.
         // A Windows Python only: MSYS2's or Cygwin's (devkitPro's msys2\usr\bin on the player's PATH) has no pip
         // and no Windows paths.
-        foreach (var cmd in candidates)
+        string? best = null, bestDesc = null;
+        int bestMinor = -1;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var cmd in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            var (code, output) = Capture(cmd, "-c \"import os,sys,struct;print('PY',sys.version_info[0],sys.version_info[1],struct.calcsize('P')*8,os.name)\"");
-            var m = Regex.Match(output, @"PY (\d+) (\d+) (\d+) (\w+)");
+            var (code, output) = Capture(cmd, "-c \"import os,sys,struct;print('PY',sys.version_info[0],sys.version_info[1],struct.calcsize('P')*8,os.name,sys.executable)\"");
+            var m = Regex.Match(output, @"PY (\d+) (\d+) (\d+) (\w+) (.+)");
             if (code != 0 || !m.Success) continue;
+            if (!seen.Add(m.Groups[5].Value.Trim())) continue;  // the same python.exe through another name
             int major = int.Parse(m.Groups[1].Value), minor = int.Parse(m.Groups[2].Value), bits = int.Parse(m.Groups[3].Value);
             var desc = $"Python {major}.{minor} ({bits}-bit, {cmd})";
             if (m.Groups[4].Value != "nt") { Info(Str.Get("py_not_windows", desc)); continue; }
             if (major != 3 || minor < 8 || bits != 64) { Info(Str.Get("py_unsuitable", desc)); continue; }
-            pythonCmd = cmd;
-            Ok(Str.Get("py_found", desc));
-            return true;
+            if (minor > NewestWheelMinor && !allowNewer) { Info(Str.Get("py_too_new", desc)); continue; }
+            // the newest suitable one; among newer-than-wheels ones (allowNewer) the oldest
+            var better = best == null || (bestMinor > NewestWheelMinor ? minor < bestMinor : minor > bestMinor && minor <= NewestWheelMinor);
+            if (better) { best = cmd; bestDesc = desc; bestMinor = minor; }
         }
-        return false;
+        if (best == null) return false;
+        pythonCmd = best;
+        Ok(Str.Get("py_found", bestDesc!));
+        return true;
     }
 
     // ── devkitPro ────────────────────────────────────────────────────────────
