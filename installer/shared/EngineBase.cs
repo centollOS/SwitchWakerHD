@@ -26,7 +26,7 @@ sealed class InstallException : Exception
     public InstallException(string message) : base(message) { }
 }
 
-abstract class EngineBase
+abstract partial class EngineBase
 {
     // The work folder: the release, the build and the log go there.
     protected abstract string Work { get; }
@@ -238,24 +238,6 @@ abstract class EngineBase
     {
         var trailing = arg.Length - arg.TrimEnd('\\').Length;
         return "\"" + arg + new string('\\', trailing) + "\"";
-    }
-
-
-    // A Dolphin .rvz with Zstandard compression (its default): the minimap's map tool reads it with Python 3.14's own
-    // compression.zstd. 3.14 goes next to the Python above, reached through the py launcher (py -3.14), which
-    // make_sd.py's tools/switch/guest_mods.py looks for; the build keeps the Python above.
-    internal static bool IsZstdRvz(string path)
-    {
-        try
-        {
-            if (!File.Exists(path)) return false;
-            var head = new byte[0x50];
-            using (var f = File.OpenRead(path))
-                if (f.Read(head, 0, head.Length) != head.Length) return false;
-            if (head[0] != 'R' || head[1] != 'V' || head[2] != 'Z' || head[3] != 1) return false;
-            return head[0x4C] == 0 && head[0x4D] == 0 && head[0x4E] == 0 && head[0x4F] == 5;   // disc struct: compression
-        }
-        catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { return false; }
     }
 
     // Why pacman (devkitPro's: MSYS2 on Windows, its own on macOS) failed, from its output: a Str key that explains

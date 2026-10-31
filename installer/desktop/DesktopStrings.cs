@@ -15,10 +15,6 @@ static class DesktopStrings
 
     static readonly Dictionary<string, (string es, string en)> Common = new()
     {
-        ["py_desk_arch"]    = ("Este equipo ({0}) no es ARM64 ni x86-64.", "This computer ({0}) is neither ARM64 nor x86-64."),
-        ["py_desk_downloading"] = ("Descargando Python {0}...",                        "Downloading Python {0}..."),
-        ["py_desk_unpacking"] = ("Preparando Python...",                               "Setting up Python..."),
-        ["py_desk_fail"]    = ("Python no arranca desde {0}. Borra esa carpeta y pulsa Reintentar.", "Python does not start from {0}. Delete that folder and press Retry."),
         ["sd_desk_todo"]    = ("{0} archivos que copiar ({1} ya estaban en la tarjeta).", "{0} files to copy ({1} were already on the card)."),
         ["sd_fail_desk"]    = ("La copia falló ({0}): comprueba que la tarjeta sigue conectada y no está protegida contra escritura, y vuelve a copiar; o cópiala a mano.",
                                "The copy failed ({0}): check that the card is still connected and not write-protected, and copy again; or copy it by hand."),

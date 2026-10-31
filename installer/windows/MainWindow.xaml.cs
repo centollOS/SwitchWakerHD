@@ -278,10 +278,6 @@ public partial class MainWindow : Window
         TxtMmGame.Text = minimapGame ?? Str.Get("mm_none");
         TxtMmGame.Foreground = (Brush)FindResource(minimapGame == null ? "FgDim" : "Fg");
         BtnMmClear.Visibility = minimapGame == null ? Visibility.Collapsed : Visibility.Visible;
-        // a Dolphin .rvz (Zstandard) also gets Python 3.14, which the map tool needs for it
-        var rvz = minimapGame != null && InstallEngine.IsZstdRvz(minimapGame);
-        TxtMmNote.Text = rvz ? Str.Get("mm_rvz_note") : "";
-        TxtMmNote.Visibility = rvz ? Visibility.Visible : Visibility.Collapsed;
     }
 
     void BtnMmPick_Click(object sender, RoutedEventArgs e)

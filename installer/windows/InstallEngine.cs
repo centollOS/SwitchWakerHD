@@ -66,98 +66,13 @@ sealed class InstallEngine : EngineBase
     ProcessJob? currentJob;   // the running process and all it started; KillCurrent stops them
 
     // ── Python ───────────────────────────────────────────────────────────────
-    protected override void Python()
-    {
-        if (!FindPython(allowNewer: false))
-        {
-            Say(Str.Get("py_installing"));
-            // PrependPath: winget's own silent switches leave python.exe off PATH.
-            // -1: winget did not start (older Windows 10, or its App Execution Alias turned off).
-            var rc = Exec("winget", "install --id Python.Python.3.12 --source winget --accept-package-agreements " +
-                                    "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1\"",
-                          check: false);
-            RefreshPath();
-            // a Python newer than the packages' wheels only when winget could not bring a 3.12
-            if (!FindPython(allowNewer: false) && !FindPython(allowNewer: true))
-                throw new InstallException(Str.Get(rc == -1 ? "py_no_winget" : "py_fail"));
-        }
-        Say(Str.Get("py_pkgs"));
-        // zstandard (a .wua) only for a Python without compression.zstd (before 3.14): a newer Python than its
-        // newest wheels makes pip build it from source, which needs Visual C++ (Python 3.15)
-        var stdZstd = Capture(pythonCmd, "-c \"import compression.zstd;print('ZSTD')\"").output.Contains("ZSTD");
-        var pkgs = (stdZstd ? "" : "zstandard ") + "pycryptodome" + (ForwarderKeys != null ? " pillow" : "");
-        if (Exec(pythonCmd, "-m pip install --disable-pip-version-check " + pkgs, check: false) != 0)
-            throw new InstallException(Str.Get("py_pkgs_fail", pkgs));
-        if (MinimapGame != null && IsZstdRvz(MinimapGame)) Python314();
-    }
+    protected override void Python() => PinnedPython("zstandard", "pycryptodome", "pillow");
 
-    bool HasZstdPython()
-    {
-        foreach (var (cmd, args) in new[] { ("py", "-3.14 "), ("py", "-3 "), (pythonCmd, "") })
-            if (Capture(cmd, args + "-c \"import compression.zstd;print('ZSTD')\"").output.Contains("ZSTD")) return true;
-        return false;
-    }
-
-    void Python314()
-    {
-        if (HasZstdPython()) return;
-        Say(Str.Get("mm_py_installing"));
-        var rc = Exec("winget", "install --id Python.Python.3.14 --source winget --accept-package-agreements " +
-                                "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=0 Include_launcher=1\"",
-                      check: false);
-        RefreshPath();
-        if (!HasZstdPython()) throw new InstallException(Str.Get(rc == -1 ? "py_no_winget" : "mm_py_fail"));
-        Ok(Str.Get("mm_py_ok"));
-    }
-
-    // The newest Python the packages have Windows wheels for (zstandard: up to 3.14 for now). A newer one makes pip
-    // build zstandard from source, which needs Visual C++, and the release's make_sd.py still needs zstandard for a
-    // .wua: it is used only with allowNewer, when no 3.8-3.14 is installed and winget could not add one.
-    const int NewestWheelMinor = 14;
-
-    bool FindPython(bool allowNewer)
-    {
-        var candidates = new List<string> { "python", "py", "python3" };
-        foreach (var root in new[] {
-                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-                     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Python") })
-        {
-            if (!Directory.Exists(root)) continue;
-            candidates.AddRange(Directory.GetDirectories(root, "Python3*")
-                .OrderByDescending(d => d)
-                .Select(d => Path.Combine(d, "python.exe"))
-                .Where(File.Exists));
-        }
-        // every Python the py launcher knows (it runs the newest one, which may be too new)
-        foreach (Match p in Regex.Matches(Capture("py", "-0p").output, @"[A-Za-z]:\\[^\r\n]*?python\.exe", RegexOptions.IgnoreCase))
-            candidates.Add(p.Value);
-        // 3.8 or newer (older ones get no pip wheels for zstandard and pycryptodome) and 64-bit (translating the
-        // game code needs more memory than a 32-bit process has). The Microsoft Store's "python" stub prints nothing.
-        // A Windows Python only: MSYS2's or Cygwin's (devkitPro's msys2\usr\bin on the player's PATH) has no pip
-        // and no Windows paths.
-        string? best = null, bestDesc = null;
-        int bestMinor = -1;
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var cmd in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            var (code, output) = Capture(cmd, "-c \"import os,sys,struct;print('PY',sys.version_info[0],sys.version_info[1],struct.calcsize('P')*8,os.name,sys.executable)\"");
-            var m = Regex.Match(output, @"PY (\d+) (\d+) (\d+) (\w+) (.+)");
-            if (code != 0 || !m.Success) continue;
-            if (!seen.Add(m.Groups[5].Value.Trim())) continue;  // the same python.exe through another name
-            int major = int.Parse(m.Groups[1].Value), minor = int.Parse(m.Groups[2].Value), bits = int.Parse(m.Groups[3].Value);
-            var desc = $"Python {major}.{minor} ({bits}-bit, {cmd})";
-            if (m.Groups[4].Value != "nt") { Info(Str.Get("py_not_windows", desc)); continue; }
-            if (major != 3 || minor < 8 || bits != 64) { Info(Str.Get("py_unsuitable", desc)); continue; }
-            if (minor > NewestWheelMinor && !allowNewer) { Info(Str.Get("py_too_new", desc)); continue; }
-            // the newest suitable one; among newer-than-wheels ones (allowNewer) the oldest
-            var better = best == null || (bestMinor > NewestWheelMinor ? minor < bestMinor : minor > bestMinor && minor <= NewestWheelMinor);
-            if (better) { best = cmd; bestDesc = desc; bestMinor = minor; }
-        }
-        if (best == null) return false;
-        pythonCmd = best;
-        Ok(Str.Get("py_found", bestDesc!));
-        return true;
-    }
+    // System32's tar.exe (Windows 10 1803 and newer), by its full path: an MSYS2 or Git tar on PATH reads C:\ paths
+    // as relative ones
+    protected override void Untar(string archive, string intoDir) =>
+        Exec(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe"),
+             $"-xzf {Quote(archive)} -C {Quote(intoDir)}");
 
     // ── devkitPro ────────────────────────────────────────────────────────────
     protected override void Toolchain() => DevkitPro();

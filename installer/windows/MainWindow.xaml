@@ -123,7 +123,6 @@
                         Click="BtnMmFolder_Click"/>
                 <Button x:Name="BtnMmPick" Grid.Column="3" Style="{StaticResource Secondary}" Click="BtnMmPick_Click"/>
               </Grid>
-              <TextBlock x:Name="TxtMmNote" Style="{StaticResource Dim}" FontSize="12" Margin="0,8,0,0" Visibility="Collapsed"/>
             </StackPanel>
           </Border>
 

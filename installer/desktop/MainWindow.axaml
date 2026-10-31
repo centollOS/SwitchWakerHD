@@ -98,7 +98,6 @@
                   <Button x:Name="BtnMmFolder" Grid.Column="2" Classes="link" Margin="0,0,8,0" Click="BtnMmFolder_Click"/>
                   <Button x:Name="BtnMmPick" Grid.Column="3" Classes="secondary" Click="BtnMmPick_Click"/>
                 </Grid>
-                <TextBlock x:Name="TxtMmNote" Classes="dim" FontSize="12" Margin="0,8,0,0" IsVisible="False"/>
               </StackPanel>
             </Border>
 
