@@ -5,7 +5,8 @@ packages), in an environment built from scratch: no bash, MSYS2, Docker, or anyt
 (its devkitPro, PATH, DEVKITPRO, CC, ...). tools/switch/build.sh stays the developers' build (Docker, native).
 
 usage: python3 -I tools/switch/build_switch.py [--devkitpro DIR] [--icon PATH] [--name NAME]
-  --devkitpro   a pinned toolchain folder (fetch.py prints it); default: fetch.py's, fetched if missing
+  --devkitpro   a pinned toolchain folder (fetch.py prints it); default: fetch.py's in WWHD_TOOLCHAIN_DIR (the
+                installers' work folder) or build/toolchain, fetched if missing
   --icon        the NRO's icon: an image or a game folder (default: the title-screen logo from WWHD_GAME_DIR's game,
                 else build/sd's or Rom's; make_icon.py); without one, devkitPro's default icon
   --name        the name on the HOME screen (default: Wind Waker HD)
@@ -65,8 +66,10 @@ def pinned_toolchain(arg):
         if not os.path.isfile(os.path.join(arg, "toolchain.json")):
             fail("%s is not a pinned toolchain folder (no toolchain.json; tools/toolchain/fetch.py makes one)" % arg)
         return os.path.abspath(arg)
+    # WWHD_TOOLCHAIN_DIR: where the installers keep it (their work folder, shared by releases), else build/toolchain
+    dest = os.environ.get("WWHD_TOOLCHAIN_DIR") or os.path.join(ROOT, "build", "toolchain")
     out = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "toolchain", "fetch.py"),
-                          "--cache", os.path.join(ROOT, "build", "toolchain-cache")],
+                          "--dest", dest, "--cache", dest + "-cache"],
                          stdout=subprocess.PIPE, text=True)
     if out.returncode != 0:
         fail("the pinned devkitPro toolchain could not be fetched (tools/toolchain/fetch.py)")

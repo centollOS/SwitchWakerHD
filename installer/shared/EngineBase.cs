@@ -31,7 +31,7 @@ abstract partial class EngineBase
     // The work folder: the release, the build and the log go there.
     protected abstract string Work { get; }
 
-    public const int StepPython = 0, StepDevkit = 1, StepRelease = 2, StepBuild = 3;
+    public const int StepPython = 0, StepRelease = 1, StepDevkit = 2, StepBuild = 3;
 
     public event Action<string, LogKind>? Log;
     public event Action<int, StepState>? StepChanged;
@@ -87,8 +87,8 @@ abstract partial class EngineBase
         Info(Str.Get("welcome_dir", Work));
         Preflight();
         RunStep(StepPython,  Python);
-        RunStep(StepDevkit,  Toolchain);
         RunStep(StepRelease, Release);
+        RunStep(StepDevkit,  SwitchTools);
         RunStep(StepBuild,   Build);
     }
 
@@ -114,8 +114,33 @@ abstract partial class EngineBase
 
     // Python 3 with the packages make_sd.py needs; sets pythonCmd.
     protected abstract void Python();
-    // The Switch toolchain make_sd.py builds with.
+    // The computer's devkitPro, installed or updated with pacman: for a release without a pinned toolchain
+    // (tools/toolchain/lock.json, docs/pinned-toolchain-plan.md).
     protected abstract void Toolchain();
+
+    // The Switch tools: the release's pinned toolchain (devkitPro's own files at the versions the release was built
+    // and tested with, and zig), fetched into the work folder by the release's tools/toolchain/fetch.py, shared by
+    // the releases that pin the same files; the computer's devkitPro is not used. An older release: Toolchain().
+    string? pinnedToolchain;
+    string ToolchainDir => Path.Combine(Work, "toolchain");
+
+    void SwitchTools()
+    {
+        var fetch = Path.Combine(ReleaseDir, "tools", "toolchain", "fetch.py");
+        if (!File.Exists(Path.Combine(ReleaseDir, "tools", "toolchain", "lock.json")) || !File.Exists(fetch))
+        {
+            Toolchain();
+            return;
+        }
+        Say(Str.Get("tc_fetching"));
+        string? dir = null;
+        var rc = Exec(pythonCmd, $"-I {Quote(fetch)} --dest {Quote(ToolchainDir)} --cache {Quote(ToolchainDir + "-cache")}",
+                      ReleaseDir, check: false, onLine: line => { if (line.Contains("devkitpro")) dir = line.Trim(); });
+        if (rc != 0 || dir == null || !File.Exists(Path.Combine(dir, "toolchain.json")))
+            throw new InstallException(Str.Get("tc_fail"));
+        pinnedToolchain = dir;
+        Ok(Str.Get("tc_ready", dir));
+    }
     // Runs a process, streams its output to the log (and to onLine); with check, a non-zero exit is a failure. A
     // cancel stops it and everything it started, and throws OperationCanceledException.
     protected abstract int Exec(string exe, string args, string? workDir = null, bool check = true, Action<string>? onLine = null,
@@ -126,7 +151,7 @@ abstract partial class EngineBase
     // What the system adds to make_sd.py's environment (macOS: the native devkitPro and the installer's Python).
     protected virtual void BuildEnv(Dictionary<string, string> env) { }
 
-    public static readonly string[] StepKeys = { "step_python", "step_devkit", "step_release", "step_build" };
+    public static readonly string[] StepKeys = { "step_python", "step_release", "step_devkit", "step_build" };
 
     // ── Before anything: the game, its keys and the disk ────────────────────
     // What make_sd would only stop on after the downloads and the toolchain (#28: the disc key was not where it
@@ -446,6 +471,8 @@ abstract partial class EngineBase
             Info(Str.Get("build_jobs", jobs, Environment.ProcessorCount, ramGb.ToString("0")));
         }
         BuildEnv(env);
+        // the pinned toolchain where SwitchTools fetched it (make_sd.py's default, --toolchain pinned, uses it)
+        if (pinnedToolchain != null) env["WWHD_TOOLCHAIN_DIR"] = ToolchainDir;
         var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
         var minimap = MinimapGame != null ? $" --guest-mod {MinimapMod} --gc-game {Quote(MinimapGame)}" : "";

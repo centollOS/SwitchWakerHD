@@ -52,7 +52,9 @@ if [[ $native == 1 ]] && ! command -v cmake >/dev/null; then
     echo "cmake is missing: install it with: pacman -Syu, then pacman -S --needed cmake make (devkitPro's MSYS2 on Windows)" >&2
     exit 1
 fi
-image=docker.io/devkitpro/devkita64:latest
+# the devkitpro/devkita64 image by digest (devkitA64 r29.2): the versions tools/toolchain/lock.json pins for the
+# players' build, so this build and theirs are the same (docs/pinned-toolchain-plan.md); WWHD_DOCKER_IMAGE for another
+image=${WWHD_DOCKER_IMAGE:-docker.io/devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282}
 # MSYS2 (devkitPro's bash on Windows) rewrites /src-like arguments of native programs such as docker.exe into
 # C:/devkitPro/msys2/src (issue #22): keep the container paths as they are and give Docker Windows host paths.
 # Only for the container: the native build needs that conversion, or the Windows gcc gets /home/... paths.
