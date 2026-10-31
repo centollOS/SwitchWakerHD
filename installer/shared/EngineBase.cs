@@ -140,6 +140,13 @@ abstract partial class EngineBase
             throw new InstallException(Str.Get("tc_fail"));
         pinnedToolchain = dir;
         Ok(Str.Get("tc_ready", dir));
+        // the HOME-screen forwarder (optional) is still built with the computer's devkitPro (bash, make, a host C
+        // compiler: tools/switch/forwarder); the game does not use it
+        if (ForwarderKeys != null)
+        {
+            Info(Str.Get("tc_forwarder"));
+            Toolchain();
+        }
     }
     // Runs a process, streams its output to the log (and to onLine); with check, a non-zero exit is a failure. A
     // cancel stops it and everything it started, and throws OperationCanceledException.

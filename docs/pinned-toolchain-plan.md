@@ -1,6 +1,18 @@
 # Pinned build environment: the same tools on every player's computer
 
-Branch `feature/pinned-toolchain`. Plan only; nothing here is built yet.
+Branch `feature/pinned-toolchain`.
+
+**Status (2026-10-31):** steps 1-4 done on the branch (not merged, not released): the toolchain line in the log,
+the pinned Python in all installers, `tools/toolchain` (lock, fetch, weekly check), `build_switch.py` and
+`dksh_cache/build.py` with zig, `make_sd.py --toolchain pinned` by default, the installers' Switch tools step.
+Checked on macOS arm64: same NRO code as the Docker image's build (only address immediates differ), the same
+`shadercache_dksh.bin` byte for byte, `make_sd.py` end to end under `env -i`; Linux arm64 in a clean container
+and Windows: see the branch's last commits. Left: Windows run (test PC), a console check of a pinned build,
+step 5 across systems.
+
+**Still from the computer:** the HOME-screen forwarder (optional): it builds nx-hbloader with GNU make and
+hacBrewPack with a host C compiler through the computer's devkitPro (and MSYS2 on Windows). The installers set
+devkitPro up only when the player asks for the icon; the game never uses it.
 
 ## Why
 

@@ -7,17 +7,20 @@ share it.
 
 ## Windows: Easy Installer (recommended)
 
-On **Windows 10/11**, an automatic installer handles everything for you: Python, devkitPro, the release
-download, and the build. You only need your own personal dump of the game.
+On **Windows 10/11**, an automatic installer handles everything for you: its own Python, the Switch tools, the
+release download, and the build. You only need your own personal dump of the game. The Switch tools are
+[pinned](#the-switch-tools-pinned): the same ones the release was built and tested with, whatever is installed on
+the PC.
 
 **[⬇ Download SwitchWakerHD-Installer.exe](https://github.com/centollOS/SwitchWakerHD/releases/latest/download/SwitchWakerHD-Installer.exe)**
 
 1. Download the `.exe` above and double-click it.
-2. Accept the UAC prompt (the installer needs Administrator rights to install devkitPro).
+2. Accept the UAC prompt.
 3. Pick your game dump: a Cemu archive (`.wua`), a disc image (`.wux`/`.wud`, with its keys), or an
    extracted folder.
    Optional, for a **HOME-screen icon**: choose your console's `prod.keys` (dumped with Lockpick_RCM; they are
-   read where they are, never copied). The installer then also sets up Git, Pillow and MSYS2's gcc and builds
+   read where they are, never copied). The installer then also sets up devkitPro (the icon is still built with it),
+   Git and MSYS2's gcc and builds
    the forwarder `.nsp` ([details](tools/switch/forwarder/INSTALL.md)); it travels in `NSP\` with the rest: install it with
    DBI (*Browse SD card > NSP > wwhd_forwarder.nsp > Install*; it needs current Atmosphère sigpatches).
    Optional, the **GameCube sea minimap**: choose your own GameCube Wind Waker (`.iso`, `.gcm`, `.rvz` or its
@@ -27,8 +30,8 @@ download, and the build. You only need your own personal dump of the game.
    compiles the game's graphics on your computer, from your own copy of the game, a few minutes more. The console
    then starts with them ready: no first-start screen and no black places
    ([details](#the-first-start-preparing-the-graphics)).
-4. Press **Install**. If devkitPro is not installed yet, the installer asks you to open its setup: accept the
-   license and keep the default path (`C:\devkitPro`).
+4. Press **Install**. (Only with the HOME-screen icon, if devkitPro is not installed yet, the installer asks you to
+   open its setup: accept the license and keep the default path, `C:\devkitPro`.)
 5. Wait for the build (10–30 minutes), then choose how the files reach the Switch:
    - **With the microSD card in the PC**: a card reader, or hekate's *Tools > USB Tools > SD Card* (UMS).
      After the copy the installer reads every file back from the card and copies again any that differs.
@@ -44,7 +47,7 @@ user name has a space or an accented letter: the installer then works there).
 >
 > **Microsoft Defender** (or another antivirus) may also flag it, for example as `Trojan:Win32/Wacatac.B!ml`.
 > The `!ml` means a guess by its machine-learning heuristic, not a known malware signature: an unsigned program
-> that downloads files and starts the devkitPro setup looks suspicious to it. The `.exe` is built by
+> that downloads files and starts other programs looks suspicious to it. The `.exe` is built by
 > [GitHub Actions](.github/workflows/release-installer.yml) from the source above; you can compare your download
 > with `SwitchWakerHD-Installer.exe.sha256` on the release page (PowerShell:
 > `Get-FileHash SwitchWakerHD-Installer.exe`). If you would rather not run it, follow the manual steps from
@@ -57,8 +60,8 @@ language, and the button in its corner switches between them.
 ## macOS: Easy Installer (recommended)
 
 On a **Mac with macOS 12 or newer** (Apple Silicon or Intel), the same installer as on Windows, in a window: no
-Terminal, no Homebrew, no Docker. It sets up its own Python 3.14, Apple's command line tools and devkitPro, downloads
-the release, builds the game natively and copies it to the SD card.
+Terminal, no Homebrew, no Docker. It sets up its own Python 3.14 and the [pinned Switch
+tools](#the-switch-tools-pinned), downloads the release, builds the game natively and copies it to the SD card.
 
 **[⬇ Apple Silicon (M1 and newer)](https://github.com/centollOS/SwitchWakerHD/releases/latest/download/SwitchWakerHD-Installer-macOS-AppleSilicon.zip)**
 · **[⬇ Intel](https://github.com/centollOS/SwitchWakerHD/releases/latest/download/SwitchWakerHD-Installer-macOS-Intel.zip)**
@@ -75,9 +78,9 @@ the release, builds the game natively and copies it to the SD card.
    **HOME-screen icon** (your console's `prod.keys`), as on Windows above; **Prepare the graphics now** is ticked by
    default there too. You can also drag the game onto the window.
 4. Press **Install**. On the way:
-   - if Apple's **command line tools** are missing, macOS shows its own window: press *Install*, wait, then
-     *Continue* in the installer;
-   - macOS asks for **your password once**, to install devkitPro in `/opt/devkitpro`;
+   - only with the HOME-screen icon (it is still built with devkitPro and Apple's tools): if Apple's **command
+     line tools** are missing, macOS shows its own window (press *Install*, wait, then *Continue* in the
+     installer), and macOS asks for **your password once**, to install devkitPro in `/opt/devkitpro`;
    - if the game is on the Desktop, in Documents, Downloads or on an external disk, macOS may ask to let the
      installer read it: allow it.
 5. Wait for the build (10–30 minutes; keep the Mac plugged in), then:
@@ -102,16 +105,10 @@ desktop), one file with everything inside:
    **SwitchWakerHD-Installer** (if your file manager asks, choose *Run*).
 2. Pick your game dump and, if you like, the GameCube sea minimap and the HOME-screen icon, as on Windows above
    (**Prepare the graphics now** is ticked by default).
-3. Press **Install**. It sets up its own Python 3.14 in its working folder, then the Switch toolchain, the first
-   that fits:
-   - devkitPro already installed (`/opt/devkitpro` with the Switch packages): it builds natively;
-   - on Debian, Ubuntu and their derivatives: devkitPro's own apt route (it asks for your password once);
-   - else a Docker or Podman your user may use: it builds in the `devkitpro/devkita64` image (the first time it
-     downloads it, ~1.5 GB); Fedora, Arch and openSUSE get Podman (your password once). The HOME-screen icon
-     needs devkitPro installed, so it is skipped in a container.
-
-   The password window comes from your desktop (polkit). Without one, the installer shows a command to paste in a
-   terminal.
+3. Press **Install**. It sets up its own Python 3.14 and the [pinned Switch tools](#the-switch-tools-pinned) in
+   its working folder: no password, no devkitPro, Docker or Podman. Only the HOME-screen icon still needs devkitPro
+   installed (the installer sets it up the first way that fits: devkitPro's apt route on Debian and Ubuntu, asking
+   for your password once through your desktop's polkit window, or a command to paste in a terminal).
 4. Wait for the build (10–30 minutes), then:
    - **With the microSD card in the computer**: a card reader, or hekate's *Tools > USB Tools > SD Card* (the
      installer reads every file back from the card and copies again any that differs);
@@ -120,8 +117,19 @@ desktop), one file with everything inside:
 The full log is in `~/SwitchWakerHD-Build/installer.log`. Source: [installer/desktop](installer/desktop) and
 [installer/build-linux.sh](installer/build-linux.sh).
 
-> If `pkg.devkitpro.org` or `apt.devkitpro.org` answers *403*, devkitPro's servers blocked your connection while
-> fending off bots: try later or from another network (for example your phone's hotspot).
+> If `pkg.devkitpro.org` answers *403* while the Switch tools download, devkitPro's servers blocked your connection
+> while fending off bots: press *Retry* later or try from another network (for example your phone's hotspot); what
+> was downloaded is kept.
+
+### The Switch tools (pinned)
+
+The game is built with **devkitPro's own package files at the exact versions the release was built and tested with**
+(GCC 15.2, libnx 4.12, ...: [tools/toolchain/lock.json](tools/toolchain/lock.json)), downloaded once from
+devkitPro's server (about 130 MB), checked against their SHA-256 and unpacked into the working folder
+(`toolchain\`), with zig as the compiler for the prepared graphics' tool. A devkitPro, MSYS2, Docker, compiler or
+Python already on the computer is neither used nor changed. So your `wwhd.nro` is the one we would build from the same
+game, and a crash report from it points at the right place in the code. The game's log names the tools that built
+it (`[boot] toolchain: ...`). Details: [docs/pinned-toolchain-plan.md](docs/pinned-toolchain-plan.md).
 
 ---
 
@@ -136,7 +144,7 @@ The full log is in `~/SwitchWakerHD-Build/installer.log`. Source: [installer/des
 | **The game** | Your own dump of **The Wind Waker HD, USA or Europe** (title `00050000-10143500` or `00050000-10143600`), **version 0** (the disc, or the eShop release without the update): a disc image (`.wux`/`.wud`) with its disc key and your console's Wii U common key, or the extracted game folder (`code/`, `content/`, `meta/`) |
 | **A Switch** | Running Atmosphère with the Homebrew Menu, and about 3 GB free on the SD card |
 | **A computer** | Windows 10/11, macOS or Linux; 8 GB of RAM or more, 10 GB of free disk space |
-| **On the computer** | Python 3, this release unzipped, and the Switch toolchain: on **Windows**, [devkitPro](#windows-devkitpro-no-docker-or-wsl) (recommended: no Docker, no WSL); on **macOS**, the [Easy Installer](#macos-easy-installer-recommended) sets up devkitPro itself (or by hand: [Docker Desktop](https://www.docker.com/products/docker-desktop/)); on **Linux**, the [Easy Installer](#linux-easy-installer) (or by hand: Docker or Podman) |
+| **On the computer** | Python 3.14 with `cmake` and `ninja` (`python3 -m pip install cmake ninja`; `pycryptodome` too for a `.wux`/`.wud`), this release unzipped, and the internet once for the [pinned Switch tools](#the-switch-tools-pinned) (`make_sd.py` downloads them): no devkitPro, Docker or compiler needed |
 
 How to dump the game and the keys from your own Wii U is outside this guide: the
 [Cemu dumping guide](https://cemu.cfw.guide/dumping-games.html) (Dumpling) covers it. A dump made with
@@ -144,9 +152,10 @@ Dumpling gives you the extracted folder directly (the base game, `00050000/10143
 
 ### Windows: devkitPro (no Docker or WSL)
 
-The simplest way on Windows 10/11: a native [devkitPro](https://devkitpro.org) install, with no Docker and no
-WSL. `make_sd.py` uses it when neither Docker nor Podman is installed. Do this once, and then run step 2 below
-in a normal PowerShell or Command Prompt (write `python` where step 2 says `python3`):
+Not needed for the game any more (the [pinned Switch tools](#the-switch-tools-pinned) replace it); only for the
+HOME-screen icon below, or for developers who build with their own devkitPro (`make_sd.py --toolchain devkitpro`).
+Do this once, and then run step 2 below in a normal PowerShell or Command Prompt (write `python` where step 2 says
+`python3`):
 
 1. Install [Python 3](https://www.python.org/downloads/) (tick *Add python.exe to PATH*), then
    `python -m pip install zstandard pycryptodome` (`zstandard` is for a `.wua` with a Python older than 3.14, which
@@ -192,17 +201,16 @@ python3 tools/switch/make_sd.py --game-dir /path/to/10143500
 
 It checks the game version first, and every file of the game's `content/` against that version's list (a
 missing, cut-off or damaged file is a warning naming it: dump or extract the game again), then translates the game's code (about a minute) and builds the
-homebrew in Docker, or with devkitPro on Windows (10 to 30 minutes the first time; Docker downloads the
-toolchain image, about 1 GB).
+homebrew with the [pinned Switch tools](#the-switch-tools-pinned) (10 to 30 minutes the first time, which also
+downloads the tools, about 130 MB; `--toolchain devkitpro` or `--toolchain docker` builds with your own devkitPro or the
+`devkitpro/devkita64` image instead).
 If the computer runs out of memory, add `--jobs 2`.
 
 **Prepared graphics:** `make_sd.py` also downloads the release's graphics template (`shader-template.sealed`: the
 game's graphics states without any of the game's code; it only opens with your own copy of the game) and compiles the
-graphics from it on your computer, a few minutes, so the console starts with them ready. This needs, besides what the
-build needs, CMake, Ninja and a C++ compiler on the computer, or Docker: devkitPro's MSYS2 on Windows gets them with
-`pacman -S --needed gcc ninja zlib-devel` (above); macOS with Xcode's command line tools and `python3 -m pip install
-ninja`; Linux with its `g++`, `ninja-build` (or pip's `ninja`) and `zlib1g-dev`. Without them, offline, or with
-`--no-shaders`, the console compiles them itself (below); a template downloaded by hand goes in with `--shaders FILE`.
+graphics from it on your computer, a few minutes, so the console starts with them ready (its tool is compiled with the
+pinned tools' zig: nothing more to install). Offline, or with `--no-shaders`, the console compiles them itself
+(below); a template downloaded by hand goes in with `--shaders FILE`.
 
 At the end the folder `build/sd/` holds:
 
@@ -313,7 +321,8 @@ it). Saves (`save/`), settings (`settings.ini`) and the compiled graphics stay.
 | `make_sd: ... not the expected file` | The dump is not version 0 of the USA or European game, or the update was merged into it: use the base game only |
 | `the disc key was not found` / `common key not found` | Put `GAME.key` next to `GAME.wux`, and `common.key` next to it (or `WIIU_COMMON_KEY`) |
 | Docker errors | Docker Desktop must be running (on Windows, with its WSL integration on) |
-| `Docker or Podman is needed ... or a native devkitPro` | On Windows, do the "Windows: devkitPro" setup above; elsewhere, install Docker |
+| `Docker or Podman is needed ... or a native devkitPro` | Only with `--toolchain devkitpro` or `docker`: leave the option out to build with the pinned Switch tools |
+| `the pinned toolchain needs Python 3.14 or newer` / `cmake is missing next to this Python` | Install Python 3.14 from python.org, then `python -m pip install cmake ninja` (with that Python) |
 | The game closes at once or says it is out of memory | Start it in title mode (hold R), not from the album |
 | No button works | The game's controller setting differs from the menu's Dev tab (*Show developer options*): set both to the same |
 | Something else | `sdmc:/switch/wwhd/wwhd.log` and `logs/` say what happened; include them in a report (they contain no game data) |
