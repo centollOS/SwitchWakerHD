@@ -117,6 +117,13 @@ int main() {
     r = parse_options("junk\r\nstart=last\r\nautosave=7\r\nother=1");
     assert(r.start.what == Start::kLastSession && r.autosave_minutes == 5);
     assert(parse_options("start=slot2\nautosave=0\n").autosave_minutes == 5);  // a file from an older version
+    // the "Autosaved" notice: off by default (and in files from older versions), kept when chosen
+    assert(!parse_options("").autosave_notice && !parse_options("start=slot2\nautosave=0\n").autosave_notice);
+    o.autosave_notice = true;
+    assert(format_options(o).find("autosave_notice=on\n") != std::string::npos && parse_options(format_options(o)).autosave_notice);
+    o.autosave_notice = false;
+    assert(format_options(o).find("autosave_notice=off\n") != std::string::npos && !parse_options(format_options(o)).autosave_notice);
+    assert(!parse_options("autosave_notice=yes").autosave_notice);
 
     // Last session: on for players, off for scripted runs unless asked for
     assert(last_session_enabled(nullptr, false) && !last_session_enabled(nullptr, true));

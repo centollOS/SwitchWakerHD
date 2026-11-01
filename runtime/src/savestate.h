@@ -127,11 +127,14 @@ std::string at_start();
 void set_at_start(const std::string& choice);
 // Auto save every 2, 5 (the default) or 10 minutes (0: off), and shortly after Link enters a new area
 // (at most once a minute), into Auto save 1..3 (slots 111..113), oldest first. It waits until the
-// player has had control of Link for a few seconds, shows "Autosaved", and is retried a little later
-// when the game cannot save at that moment. Scripted runs (WWHD_NO_HOST_INPUT) have none unless
+// player has had control of Link for a few seconds, shows "Autosaved" only if auto_save_notice(), and is
+// retried a little later when the game cannot save at that moment. Scripted runs (WWHD_NO_HOST_INPUT) have none unless
 // WWHD_AUTO_SAVE=2|5|10 asks for it (WWHD_AUTO_SAVE=0 turns it off for a run).
 int auto_save_minutes();
 void set_auto_save_minutes(int minutes);
+// "Autosaved" on screen when an auto save is written (off by default: auto saves are quiet)
+bool auto_save_notice();
+void set_auto_save_notice(bool on);
 // ---- world editor (editor/editor_game.cpp) ----
 // A warp with the game's own stage change: a spawn point of the stage (point >= 0), or Link's restart
 // point at `pos` facing `angle` (at_position), the way a void-out restarts a room. Done at the next frame

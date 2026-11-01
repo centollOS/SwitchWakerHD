@@ -1904,7 +1904,7 @@ void service_auto_save(Cpu* c) {
         if (ours) g_conv_result = 0;
         const bool ok = ours && result > 0;
         g_auto_timer.done(conv_now(), ok);
-        if (ok) message("Autosaved");  // so the player knows there is something to load after a crash
+        if (ok && conv_options().autosave_notice) message("Autosaved");  // quiet unless the player asks for it
         g_auto_slot = 0;
     }
     // a portable state being loaded counts as no gameplay: its stage change is not a new area
@@ -1941,6 +1941,14 @@ void set_auto_save_minutes(int minutes) {
     o.autosave_minutes = conv::valid_auto_save_minutes(minutes) ? minutes : conv::kDefaultAutoSaveMinutes;
     store_conv(o);
     LOG("[savestate] auto save set to %s", o.autosave_minutes ? (std::to_string(o.autosave_minutes) + " min").c_str() : "off");
+}
+
+bool auto_save_notice() { return conv_options().autosave_notice; }
+void set_auto_save_notice(bool on) {
+    conv::Options o = conv_options();
+    o.autosave_notice = on;
+    store_conv(o);
+    LOG("[savestate] auto save notice %s", on ? "on" : "off");
 }
 
 bool save_last_session(int timeout_ms) {
