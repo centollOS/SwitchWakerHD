@@ -91,10 +91,11 @@ const NumberOption traversal_catalogue[] = {
 }  // namespace
 
 std::span<const NumberOption> traversal_options() { return traversal_catalogue; }
-void set_traversal_option(std::string_view profile_key, float value) {
+void set_traversal_option(std::string_view profile_key, float value, bool save) {
     for (const auto& option : traversal_catalogue) {
         if (profile_key != option.profile_key) continue;
         option.apply(value);
+        if (!save) return;
         const float applied = option.value();
         if (player_preferences()) hostui::set(option.key, std::to_string(applied));
         packages::remember_option(option.profile_key, applied);
