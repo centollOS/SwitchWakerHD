@@ -97,4 +97,6 @@ jobs:
 
       - name: Shader template tools (python.org Python, as the installer's)
         shell: pwsh
-        run: python tools/switch/test_shader_manifest.py
+        run: |
+          python tools/switch/test_shader_manifest.py
+          python tools/switch/test_ptbr_pack.py
