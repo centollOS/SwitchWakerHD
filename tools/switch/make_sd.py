@@ -10,7 +10,7 @@ your computer, from your own legally dumped copy (The Wind Waker HD, version 0: 
      of files (a missing or damaged file is a warning: the game may crash where it needs it);
   3. translates the game's PowerPC code to C (tools/recomp/recomp.py -> build/gen/);
   4. builds the Switch homebrew in the devkitPro container (tools/switch/build.sh -> build/switch-dk/wwhd.nro);
-  5. writes OUT/switch/wwhd/ (wwhd.nro, game/ and with --guest-mod mods/): copy OUT's contents to the root
+  5. writes OUT/switch/wwhd/ (wwhd.nro, game/, with --guest-mod mods/, with --ptbr translation/): copy OUT's contents to the root
      of the SD card.
 
 usage:
@@ -36,6 +36,12 @@ usage:
            --gc-game PATH                     your GameCube Wind Waker (.iso/.gcm/.rvz or extracted), for mods
                                               whose setup reads it (the GameCube sea minimap)
            --mod-option ID.KEY=VALUE          a mod's option (e.g. gc-minimap.size=260); repeat for more
+           --ptbr DOWNLOAD                    Brazilian Portuguese: Triforce-Heroes' fan translation as downloaded
+                                              from their page (the .rar, its extracted folder or its .pack), rebuilt
+                                              on your own English pack (tools/switch/ptbr_pack.py) into
+                                              switch/wwhd/translation/pt-BR/; the game offers it in the Language tab
+                                              (docs/ptbr-translation-plan.md). Without it an earlier one is kept.
+           --no-ptbr                          remove an earlier Brazilian Portuguese translation from OUT
 
 Needs Python 3 with pycryptodome (only for --image: pip install pycryptodome) and Docker or Podman, or
 a native devkitPro (Windows: INSTALL.md, "Windows: devkitPro").
@@ -76,6 +82,18 @@ def run(cmd, env=None, ok=(0,)):
 # and what it compiles later goes there too (tools/switch/dksh_cache build). A whole game harvested on the console took
 # 14 MiB: 24 MiB stay free.
 SHADER_CODE_MIB = "40"
+
+
+def ptbr(tool_args):
+    """ptbr_pack.py (the Portuguese translation): its refusal becomes make_sd's own message, for the installers"""
+    cmd = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "ptbr_pack.py")] + tool_args
+    print("  $ " + " ".join(cmd), flush=True)
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.stdout:
+        print(r.stdout.rstrip(), flush=True)
+    if r.returncode != 0:
+        why = (r.stderr.strip().splitlines() or ["exit code %d" % r.returncode])[-1].replace("ptbr: ", "", 1)
+        fail("the Portuguese translation cannot be used: " + why)
 
 
 def release_tag():
@@ -271,6 +289,9 @@ def main():
     ap.add_argument("--guest-mod", action="append", default=[], help="a code mod built into the NRO (catalogue id, .zip or folder)")
     ap.add_argument("--gc-game", help="your GameCube Wind Waker, for mods whose setup reads it")
     ap.add_argument("--mod-option", action="append", default=[], help="a mod's option: ID.KEY=VALUE")
+    ptbr_arg = ap.add_mutually_exclusive_group()
+    ptbr_arg.add_argument("--ptbr", help="Triforce-Heroes' PT-BR translation download (.rar, folder or .pack)")
+    ptbr_arg.add_argument("--no-ptbr", action="store_true", help="remove an earlier PT-BR translation from OUT")
     args = ap.parse_args()
     if not (args.image or args.wua or args.game_dir):
         ap.error("one of --image, --wua or --game-dir is required")
@@ -290,6 +311,9 @@ def main():
             (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []))
     elif args.mod_option or args.gc_game:
         fail("--mod-option and --gc-game go with --guest-mod")
+    if args.ptbr:  # the translation's download, checked before the slow steps (the wrong file picked, say)
+        args.ptbr = os.path.abspath(args.ptbr)
+        ptbr(["--check", args.ptbr])
 
     step(1, "the game files")
     if args.image:
@@ -330,6 +354,17 @@ def main():
               "where it is); a file you changed on purpose shows up here too.")
     else:
         print("  content/: every file as in the %s list: OK" % build.name)
+    ptbr_pack = None
+    if args.ptbr:  # Brazilian Portuguese on this game's own English pack (docs/ptbr-translation-plan.md)
+        english = "permanent_2d_%sEnglish.pack" % ("Us" if build.name == "USA" else "Eu")
+        pack_dir = os.path.join(game, "content", "Common", "Pack")
+        base = next((os.path.join(pack_dir, n) for n in sorted(os.listdir(pack_dir)) if n.lower() == english.lower()),
+                    None) if os.path.isdir(pack_dir) else None
+        if not base:
+            fail("the game has no content/Common/Pack/%s for the Portuguese translation" % english)
+        ptbr_pack = os.path.join(ROOT, "build", "ptbr", "permanent_2d_ptBR.pack")
+        shutil.rmtree(os.path.dirname(ptbr_pack), ignore_errors=True)
+        ptbr(["--translation", args.ptbr, "--base", base, "--out", ptbr_pack])
 
     step(3, "translating the game code to C (about a minute)")
     # code mods built into the NRO (docs/guest-mods-switch-plan.md): prepared and translated first, since the game
@@ -398,6 +433,12 @@ def main():
                 shutil.rmtree(dst, ignore_errors=True)
                 shutil.copytree(os.path.join(mods_dir, "sd", m["id"]), dst)
                 shutil.copytree(m["data"], os.path.join(dst, "data"))
+    ptbr_dst = os.path.join(wwhd, "translation", "pt-BR")  # read by runtime/src/fan_translation.cpp
+    if ptbr_pack:
+        shutil.rmtree(ptbr_dst, ignore_errors=True)
+        shutil.copytree(os.path.dirname(ptbr_pack), ptbr_dst)
+    elif args.no_ptbr:
+        shutil.rmtree(ptbr_dst, ignore_errors=True)
     gdst = os.path.join(wwhd, "game")
     if os.path.realpath(gdst) != os.path.realpath(game):
         shutil.rmtree(gdst, ignore_errors=True)
