@@ -93,6 +93,15 @@ struct MenuTexts {
     const char* fpsRateTip;
     const char* fpsLoadTip;
     const char* fpsHelp;
+    // Picture tab: video clips (#38, video_clips_switch.h)
+    const char* clipsHeading;
+    const char* clips;
+    const char* clipsHelp;
+    const char* clipsNotApplication;
+    const char* clipsOtherTitle;
+    const char* clipsUnsupported;
+    const char* clipsFailed;
+    const char* clipsKeptUntilRestart;
     // Picture tab: experimental features
     const char* experimental;
     const char* experimentalWarn;
