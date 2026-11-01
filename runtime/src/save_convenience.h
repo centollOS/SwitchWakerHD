@@ -147,6 +147,7 @@ inline bool last_session_enabled(const char* last_session_env, bool scripted) {
 struct Options {
     StartChoice start;
     int autosave_minutes = kDefaultAutoSaveMinutes;
+    bool autosave_notice = false;  // show "Autosaved" when one is written (off: auto saves are quiet)
 };
 inline Options parse_options(const std::string& text) {
     Options o;
@@ -161,13 +162,15 @@ inline Options parse_options(const std::string& text) {
             const std::string key = line.substr(0, eq), value = line.substr(eq + 1);
             if (key == "start") o.start = parse_start(value);
             else if (key == "autosave") o.autosave_minutes = parse_minutes(value);
+            else if (key == "autosave_notice") o.autosave_notice = value == "on";
         }
         at = end + 1;
     }
     return o;
 }
 inline std::string format_options(const Options& o) {
-    return "start=" + format_start(o.start) + "\nautosave=" + format_minutes(o.autosave_minutes) + "\n";
+    return "start=" + format_start(o.start) + "\nautosave=" + format_minutes(o.autosave_minutes) +
+           "\nautosave_notice=" + (o.autosave_notice ? "on" : "off") + "\n";
 }
 
 }  // namespace ss::convenience

@@ -63,10 +63,11 @@ slots 1–5 and Crash Recovery's automatic states are not touched.
   shortly after Link enters a new area (a stage change), at most once a minute so going in and out
   of doors doesn't use up the three slots. Either way it waits until you have had control of Link
   for about 3 seconds (90 frames in a row), so nothing is saved during a cutscene or dialogue or the
-  moment Link arrives; a save the game refuses is tried again 15 seconds later. "Autosaved" is
-  shown briefly when it saves. Auto saves never write `cking.sav`: after a crash, load the newest
-  one, then save in game to keep it. The choice is kept in `save_options.cfg` (`autosave=off`
-  for Off; the `autosave=0` older versions always wrote counts as the default).
+  moment Link arrives; a save the game refuses is tried again 15 seconds later. Auto saves are
+  quiet by default; **Show "Autosaved" when it saves** shows that message briefly. Auto saves never
+  write `cking.sav`: after a crash, load the newest one, then save in game to keep it. The choices
+  are kept in `save_options.cfg` (`autosave=off` for Off; the `autosave=0` older versions always
+  wrote counts as the default; `autosave_notice=on|off`).
 - **At start**: *Intro as usual* (default), *Continue last session* or a slot. The state is loaded
   as soon as you continue a Quest Log on the title screen, like any portable state. An empty slot
   starts the game as usual.

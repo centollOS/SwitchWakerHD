@@ -1260,6 +1260,9 @@ void cancel_portable_arrival(const std::string&why){
 }
 
 std::atomic<int> g_conv_result{0};  // a convenience slot's save finished: +slot written, -slot not
+// an auto save's file is being written on its own thread: set before the thread starts, cleared after
+// it set g_conv_result (so a reader that sees it cleared also sees the result)
+std::atomic<bool> g_auto_writing{false};
 
 void do_portable_save(Cpu* c, int slot) {
     // the convenience slots (last session, auto saves) save quietly: a log line, no message
@@ -1292,6 +1295,28 @@ void do_portable_save(Cpu* c, int slot) {
     if (slot == kPathSlot) {  // (this fork) request_save_portable_path: the benchmark's own file
         std::lock_guard<std::mutex> lk(g_mu);
         path = g_psave_path;
+    }
+    // auto saves: the file is written on its own thread. The capture above must run on the game thread
+    // (~10 ms on the Switch), the SD card write (~30 ms) need not: on the game thread it cost a frame
+    // at every auto save. service_auto_save waits for the result (g_auto_writing).
+    if (conv::is_auto_save(slot)) {
+        g_auto_writing = true;
+        std::thread([s = std::move(s), path, slot] {
+            std::string why;
+            const bool ok = write_portable(path, s, why);
+            if (ok) {
+                struct stat st{};
+                stat(path.c_str(), &st);
+                LOG("[savestate] %s written (%lld bytes; %s room %d at %.1f %.1f %.1f, Quest Log %d; %s)",
+                    slot_label(slot).c_str(), (long long)st.st_size, s.stage.c_str(), s.room, s.pos[0], s.pos[1], s.pos[2],
+                    s.file_slot + 1, path.c_str());
+            } else {
+                LOG("[savestate] %s: not saved (%s)", slot_label(slot).c_str(), why.c_str());
+            }
+            g_conv_result = ok ? slot : -slot;
+            g_auto_writing = false;
+        }).detach();
+        return;
     }
     if (!write_portable(path, s, why)) {
         fail("Slot " + std::to_string(slot) + ": not saved (" + why + ")", why);
@@ -1896,15 +1921,16 @@ int effective_auto_save_minutes() {
 
 // Auto save: the timer, and the result of the save it asked for
 void service_auto_save(Cpu* c) {
-    // do_portable_save runs right after this in the same service call, so by the next call the result
-    // is there; without it another request replaced ours (tried again a little later)
-    if (g_auto_slot) {
+    // do_portable_save runs right after this in the same service call and writes the file on its own
+    // thread: once that thread is done (g_auto_writing, read before the result) the result is there;
+    // without it another request replaced ours (tried again a little later)
+    if (g_auto_slot && !g_auto_writing.load()) {
         const int result = g_conv_result.load();
         const bool ours = result == g_auto_slot || result == -g_auto_slot;
         if (ours) g_conv_result = 0;
         const bool ok = ours && result > 0;
         g_auto_timer.done(conv_now(), ok);
-        if (ok) message("Autosaved");  // so the player knows there is something to load after a crash
+        if (ok && conv_options().autosave_notice) message("Autosaved");  // quiet unless the player asks for it
         g_auto_slot = 0;
     }
     // a portable state being loaded counts as no gameplay: its stage change is not a new area
@@ -1943,6 +1969,14 @@ void set_auto_save_minutes(int minutes) {
     LOG("[savestate] auto save set to %s", o.autosave_minutes ? (std::to_string(o.autosave_minutes) + " min").c_str() : "off");
 }
 
+bool auto_save_notice() { return conv_options().autosave_notice; }
+void set_auto_save_notice(bool on) {
+    conv::Options o = conv_options();
+    o.autosave_notice = on;
+    store_conv(o);
+    LOG("[savestate] auto save notice %s", on ? "on" : "off");
+}
+
 bool save_last_session(int timeout_ms) {
     if (!conv::last_session_enabled(getenv("WWHD_LAST_SESSION"), getenv("WWHD_NO_HOST_INPUT") != nullptr)) return false;
     if (!in_gameplay() || g_loading.load()) return false;
@@ -1966,6 +2000,18 @@ void service_file_save(Cpu* c);
 
 void service(Cpu* c) {
     crashrec::service();
+    // the game executable's hash (game_id, in every state's header) reads all of cking.rpx: ~0.2-0.8 s on
+    // the Switch's SD card, which the first save of a session used to spend on the game thread. Worked
+    // out once on its own thread at start-up instead (game_id's static waits for it if a save comes first).
+    static const bool game_id_started = [] {
+        std::thread([] {
+            game_id();
+            title_id();
+            meta_value("title_version");
+        }).detach();
+        return true;
+    }();
+    (void)game_id_started;
     if (g_fixed_seed && g_fixed_seed_boot.due(ld32(GD(0x101FF560)))) {
         fixed_seed::set_boot_frame(render::frame_count());
         LOG("[test] WWHD_TEST_FIXED_SEED: TV frame %llu counts as frame %llu for scripted test aids",
