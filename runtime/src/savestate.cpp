@@ -1882,20 +1882,46 @@ void service_at_start() {
     request_load(slot);
 }
 
+// the interval auto save runs with (save_convenience.h effective_auto_save_minutes)
+int effective_auto_save_minutes() {
+    const int m = conv::effective_auto_save_minutes(conv_options().autosave_minutes, getenv("WWHD_AUTO_SAVE"),
+                                                    getenv("WWHD_NO_HOST_INPUT") != nullptr);
+    static int logged = -1;
+    if (m != logged) {
+        logged = m;
+        LOG("[savestate] auto save: %s", m ? ("every " + std::to_string(m) + " min and on entering a new area").c_str() : "off");
+    }
+    return m;
+}
+
 // Auto save: the timer, and the result of the save it asked for
-void service_auto_save() {
+void service_auto_save(Cpu* c) {
     // do_portable_save runs right after this in the same service call, so by the next call the result
     // is there; without it another request replaced ours (tried again a little later)
     if (g_auto_slot) {
         const int result = g_conv_result.load();
         const bool ours = result == g_auto_slot || result == -g_auto_slot;
         if (ours) g_conv_result = 0;
-        g_auto_timer.done(conv_now(), ours && result > 0);
+        const bool ok = ours && result > 0;
+        g_auto_timer.done(conv_now(), ok);
+        if (ok) message("Autosaved");  // so the player knows there is something to load after a crash
         g_auto_slot = 0;
     }
-    const bool gameplay = in_gameplay() && !g_loading.load() && !g_save_req.load() && !g_psave_req.load();
-    if (g_auto_timer.due(conv_now(), conv_options().autosave_minutes, gameplay)) {
+    // a portable state being loaded counts as no gameplay: its stage change is not a new area
+    bool loading_portable;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        loading_portable = g_pload.s || g_load_ready || !g_arrival.stage.empty();
+    }
+    const bool gameplay = in_gameplay() && !g_loading.load() && !loading_portable && !g_save_req.load() && !g_psave_req.load();
+    auto control = [c] {
+        std::string why;
+        bool retry;
+        return gameplay_ready(why, retry) && player_has_control(c, why);
+    };
+    if (g_auto_timer.due(conv_now(), effective_auto_save_minutes(), gameplay, stage_name(), control)) {
         g_auto_slot = conv::kAutoSaveBase + g_auto_timer.next;
+        LOG("[savestate] auto save %d: %s", g_auto_timer.next, g_auto_timer.area ? "new area" : "interval");
         g_conv_result = 0;
         g_psave_req = g_auto_slot;
     }
@@ -1912,9 +1938,9 @@ void set_at_start(const std::string& choice) {
 int auto_save_minutes() { return conv_options().autosave_minutes; }
 void set_auto_save_minutes(int minutes) {
     conv::Options o = conv_options();
-    o.autosave_minutes = conv::valid_auto_save_minutes(minutes) ? minutes : 0;
+    o.autosave_minutes = conv::valid_auto_save_minutes(minutes) ? minutes : conv::kDefaultAutoSaveMinutes;
     store_conv(o);
-    LOG("[savestate] auto save: %s", o.autosave_minutes ? (std::to_string(o.autosave_minutes) + " min").c_str() : "off");
+    LOG("[savestate] auto save set to %s", o.autosave_minutes ? (std::to_string(o.autosave_minutes) + " min").c_str() : "off");
 }
 
 bool save_last_session(int timeout_ms) {
@@ -1971,7 +1997,7 @@ void service(Cpu* c) {
     (void)env_load;
     track_events();
     service_at_start();
-    service_auto_save();
+    service_auto_save(c);
     service_warp(c);       // world editor
     service_file_save(c);  // world editor test states
     if (int slot = g_psave_req.exchange(0)) do_portable_save(c, slot);

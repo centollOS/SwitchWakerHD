@@ -58,15 +58,22 @@ slots 1–5 and Crash Recovery's automatic states are not touched.
 - **Last session** is taken when you quit the game, and on Android also when the app goes to the
   background. If a cutscene or dialogue is running at that moment, the previous last session stays.
   It is stored as `last_session.wwstate` in the states folder.
-- **Auto save every** Off (default), 2, 5 or 10 minutes writes Auto save 1 to 3 in turn
-  (`autosave/autosave1.wwstate` ...), the oldest first. During a cutscene or dialogue it tries
-  again a few seconds later. Auto saves are quiet: no message on screen.
+- **Auto save every** Off, 2, 5 (default) or 10 minutes writes Auto save 1 to 3 in turn
+  (`autosave/autosave1.wwstate` ...), the oldest first, like Breath of the Wild. It also saves
+  shortly after Link enters a new area (a stage change), at most once a minute so going in and out
+  of doors doesn't use up the three slots. Either way it waits until you have had control of Link
+  for about 3 seconds (90 frames in a row), so nothing is saved during a cutscene or dialogue or the
+  moment Link arrives; a save the game refuses is tried again 15 seconds later. "Autosaved" is
+  shown briefly when it saves. Auto saves never write `cking.sav`: after a crash, load the newest
+  one, then save in game to keep it. The choice is kept in `save_options.cfg` (`autosave=off`
+  for Off; the `autosave=0` older versions always wrote counts as the default).
 - **At start**: *Intro as usual* (default), *Continue last session* or a slot. The state is loaded
   as soon as you continue a Quest Log on the title screen, like any portable state. An empty slot
   starts the game as usual.
 
 Test switches: `WWHD_LAST_SESSION=0|1` (scripted runs with `WWHD_NO_HOST_INPUT` take no last
-session unless it is 1), `WWHD_AT_START=intro|last|slotN` for one start.
+session unless it is 1), `WWHD_AUTO_SAVE=0|2|5|10` (scripted runs have no auto save unless it asks
+for one), `WWHD_AT_START=intro|last|slotN` for one start.
 
 ## Bug reports
 

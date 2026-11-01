@@ -125,8 +125,11 @@ bool save_last_session(int timeout_ms);
 // screen). Kept in the states folder.
 std::string at_start();
 void set_at_start(const std::string& choice);
-// Auto save every 2, 5 or 10 minutes (0: off, the default) into Auto save 1..3 (slots 111..113),
-// oldest first; quiet, and retried a little later when the game cannot save at that moment.
+// Auto save every 2, 5 (the default) or 10 minutes (0: off), and shortly after Link enters a new area
+// (at most once a minute), into Auto save 1..3 (slots 111..113), oldest first. It waits until the
+// player has had control of Link for a few seconds, shows "Autosaved", and is retried a little later
+// when the game cannot save at that moment. Scripted runs (WWHD_NO_HOST_INPUT) have none unless
+// WWHD_AUTO_SAVE=2|5|10 asks for it (WWHD_AUTO_SAVE=0 turns it off for a run).
 int auto_save_minutes();
 void set_auto_save_minutes(int minutes);
 // ---- world editor (editor/editor_game.cpp) ----
