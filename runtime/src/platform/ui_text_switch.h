@@ -1,5 +1,6 @@
 // The fork's own on-screen texts (start-up screens, Prepare graphics, the settings menu's Switch tabs) in the game's language: the "language" setting
-// the game uses (Wii U code: 1 en, 2 fr, 3 de, 4 it, 5 es), else the console's language; English otherwise (the
+// the game uses (Wii U code: 1 en, 2 fr, 3 de, 4 it, 5 es, 9 Brazilian Portuguese with its fan translation installed:
+// fan_translation.h), else the console's language; English otherwise (the
 // start-up screens' text console has no Japanese characters, nor the other scripts). The strings are UTF-8;
 // to_console() turns them into the start-up text console's code page.
 #pragma once
