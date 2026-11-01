@@ -115,8 +115,8 @@ static partial class Str
         ["ptbr_old_release"] = ("Esta versión de SwitchWakerHD todavía no admite la traducción al portugués: se instala sin ella.",
                                "This SwitchWakerHD release does not support the Portuguese translation yet: it is installed without it."),
         ["ptbr_building"]  = ("Aplicando la traducción al portugués sobre tu juego...", "Applying the Portuguese translation to your game..."),
-        ["ptbr_done"]      = ("Portugués de Brasil: el juego empieza en portugués. Para cambiar de idioma: mantén Menos > Language, elige otro y reinicia el juego.",
-                               "Brazilian Portuguese: the game starts in Portuguese. To change the language: hold Minus > Language, choose another one and restart the game."),
+        ["ptbr_done"]      = ("Portugués de Brasil: el juego empieza en portugués (si antes elegiste otro idioma en el juego, elige Português (Brasil) en Menos > Language). Para cambiar de idioma: mantén Menos > Language, elige otro y reinicia el juego.",
+                               "Brazilian Portuguese: the game starts in Portuguese (if you chose another language in the game before, choose Português (Brasil) in Minus > Language). To change the language: hold Minus > Language, choose another one and restart the game."),
 
         // Prepared graphics (issue #88: the release's shader template, make_sd.py --shaders)
         ["sh_h"]           = ("Preparar los gráficos ahora",                          "Prepare the graphics now"),

@@ -84,7 +84,7 @@ static partial class Str
         ["ptbr_no_file"]   = "A tradução escolhida não foi encontrada: {0}. Escolha-a de novo ou remova-a.",
         ["ptbr_old_release"] = "Esta versão do SwitchWakerHD ainda não aceita a tradução para português: ele é instalado sem ela.",
         ["ptbr_building"]  = "Aplicando a tradução para português sobre o seu jogo...",
-        ["ptbr_done"]      = "Português do Brasil: o jogo começa em português. Para trocar de idioma: segure Menos > Language, escolha outro e reinicie o jogo.",
+        ["ptbr_done"]      = "Português do Brasil: o jogo começa em português (se antes você escolheu outro idioma no jogo, escolha Português (Brasil) em Menos > Language). Para trocar de idioma: segure Menos > Language, escolha outro e reinicie o jogo.",
 
         // Prepared graphics (issue #88: the release's shader template, make_sd.py --shaders)
         ["sh_h"]           = "Preparar os gráficos agora",
