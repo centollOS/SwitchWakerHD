@@ -52,6 +52,10 @@ abstract class EngineBase
     // downloads the mod from the mod catalogue and builds it into the game (INSTALL.md, "Optional: code mods").
     public string? MinimapGame;
     public const string MinimapMod = "gc-minimap";
+    // Optional: Triforce-Heroes' Brazilian Portuguese fan translation as the player downloaded it (.rar, its folder or
+    // its .pack): make_sd.py --ptbr rebuilds it on the player's own English pack (docs/ptbr-translation-plan.md).
+    public string? PtbrDownload;
+    public const string PtbrPage = "https://triforce-heroes.com.br/traducoes/the-legend-of-zelda-the-wind-waker-hd";
     // "Prepare the graphics now" (issue #88): the release's shader template (shader-template.sealed, shader states
     // without game code, opened with the game's own files) becomes shadercache_dksh.bin on this computer
     // (make_sd.py --shaders), so the console's first start compiles almost nothing. Never a reason to stop: a
@@ -144,6 +148,12 @@ abstract class EngineBase
             Info(Str.Get("mm_pre", MinimapGame));
             if (!File.Exists(MinimapGame) && !Directory.Exists(MinimapGame))
                 throw new InstallException(Str.Get("mm_no_game", MinimapGame));
+        }
+        if (PtbrDownload != null)
+        {
+            Info(Str.Get("ptbr_pre", PtbrDownload));
+            if (!File.Exists(PtbrDownload) && !Directory.Exists(PtbrDownload))
+                throw new InstallException(Str.Get("ptbr_no_file", PtbrDownload));
         }
 
         CheckClock();
@@ -431,6 +441,7 @@ abstract class EngineBase
             inBadFiles = false;
             if (line.StartsWith("[+] HOME-screen forwarder")) { Status?.Invoke(Str.Get("fwd_building")); return; }
             if (line.StartsWith("  " + MinimapMod + ": ")) { Status?.Invoke(Str.Get("mm_building")); return; }
+            if (line.Contains("ptbr_pack.py") && line.Contains("--translation")) { Status?.Invoke(Str.Get("ptbr_building")); return; }
             // make_sd.py --shaders: the template becomes the console's shader cache (a few minutes)
             if (line.Contains("shader_manifest.py from-template")) { Status?.Invoke(Str.Get("shaders_preparing")); return; }
             if (line.StartsWith("make_sd: warning: the graphics were not prepared")) { Warn(Str.Get("shaders_failed")); return; }
@@ -466,11 +477,18 @@ abstract class EngineBase
         var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
         var minimap = MinimapGame != null ? $" --guest-mod {MinimapMod} --gc-game {Quote(MinimapGame)}" : "";
+        // the Portuguese translation, with a release whose make_sd.py knows it (an older one: installed without it)
+        var ptbr = "";
+        if (PtbrDownload != null)
+        {
+            if (File.ReadAllText(MakeSd(ReleaseDir)).Contains("--ptbr")) ptbr = " --ptbr " + Quote(PtbrDownload);
+            else Warn(Str.Get("ptbr_old_release"));
+        }
         // without a template here, --no-shaders: make_sd.py (since #88) would otherwise download it itself; an older
         // release's make_sd.py does not know the option
         var shaders = shaderTemplate != null ? " --shaders " + Quote(shaderTemplate)
                     : File.ReadAllText(MakeSd(ReleaseDir)).Contains("--no-shaders") ? " --no-shaders" : "";
-        var rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}{minimap}{shaders}", ReleaseDir, check: false,
+        var rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}{minimap}{ptbr}{shaders}", ReleaseDir, check: false,
                       onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); }, env: env);
         Progress?.Invoke(rc == 0 ? 1 : (double?)null);
         if (rc != 0)
