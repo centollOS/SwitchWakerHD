@@ -30,7 +30,7 @@ for pair in osx-arm64:AppleSilicon osx-x64:Intel; do
     app="$work/$name/SwitchWakerHD Installer.app"
     echo "== $rid -> $app"
     "$dotnet" publish "$here/desktop/SwitchWakerHD.Installer.Desktop.csproj" -c Release -r "$rid" --self-contained \
-        -p:Version="$version" -o "$app/Contents/MacOS" --nologo
+        -p:Version="$version" -p:WwhdRelease="${WWHD_RELEASE:-}" -o "$app/Contents/MacOS" --nologo
     mkdir -p "$app/Contents/Resources"
     cp "$work/AppIcon.icns" "$app/Contents/Resources/"
     sed "s/@VERSION@/$version/g" "$here/desktop/macos/Info.plist" > "$app/Contents/Info.plist"

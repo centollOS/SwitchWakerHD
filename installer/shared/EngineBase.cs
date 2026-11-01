@@ -11,6 +11,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -285,10 +286,17 @@ abstract partial class EngineBase
     }
 
     // ── Release ──────────────────────────────────────────────────────────────
+    // A test installer (built for a pre-release by release-installer.yml: -p:WwhdRelease=TAG) builds that
+    // pre-release's zip; a normal one the latest release
+    static string FixedRelease() =>
+        typeof(EngineBase).Assembly.GetCustomAttributes(typeof(AssemblyMetadataAttribute), false)
+            .Cast<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "WwhdRelease")?.Value ?? "";
+
     void Release()
     {
         Say(Str.Get("rel_checking"));
-        releaseVer = LatestRelease();
+        releaseVer = FixedRelease();
+        if (releaseVer == "") releaseVer = LatestRelease();
         if (releaseVer != "") Ok(Str.Get("rel_found", releaseVer));
         else
         {
