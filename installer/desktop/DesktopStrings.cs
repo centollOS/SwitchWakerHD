@@ -13,6 +13,14 @@ static class DesktopStrings
         return table;
     }
 
+    // the same keys in Brazilian Portuguese (DesktopStringsPt.cs)
+    public static Dictionary<string, string> PtFor(bool mac)
+    {
+        var table = new Dictionary<string, string>(DesktopStringsPt.Common);
+        foreach (var kv in mac ? DesktopStringsPt.Mac : DesktopStringsPt.Linux) table[kv.Key] = kv.Value;
+        return table;
+    }
+
     static readonly Dictionary<string, (string es, string en)> Common = new()
     {
         ["py_desk_arch"]    = ("Este equipo ({0}) no es ARM64 ni x86-64.", "This computer ({0}) is neither ARM64 nor x86-64."),

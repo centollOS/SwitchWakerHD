@@ -105,7 +105,7 @@ public partial class MainWindow : Window
     {
         Title             = Str.Get("title");
         TxtSubtitle.Text  = Str.Get("subtitle");
-        BtnLang.Content   = Str.Get("lang");
+        BtnLang.Content   = Str.NextLanguageName;
 
         TxtWelcomeH.Text     = Str.Get("welcome_h");
         TxtWelcomeBody.Text  = Str.Get("welcome_body");
@@ -164,7 +164,7 @@ public partial class MainWindow : Window
 
     void BtnLang_Click(object sender, RoutedEventArgs e)
     {
-        Str.Es = !Str.Es;
+        Str.SwitchLanguage();
         ApplyLanguage();
     }
 

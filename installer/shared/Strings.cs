@@ -3,10 +3,25 @@ using System.Globalization;
 
 namespace SwitchWakerHD.Installer;
 
-// Spanish / English. Starts in the system language; the welcome page can switch it.
-static class Str
+// Spanish / English / Brazilian Portuguese (StringsPt.cs). Starts in the system language; the welcome page's button
+// switches to the next one.
+enum Lang { Es, En, Pt }
+
+static partial class Str
 {
-    public static bool Es = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "es";
+    public static Lang Current = FromCode(CultureInfo.CurrentUICulture.TwoLetterISOLanguageName);
+    public static bool Es => Current == Lang.Es;
+    public static bool Pt => Current == Lang.Pt;
+
+    // "es", "pt-BR", "en_US.UTF-8"... -> the language; anything else is English
+    public static Lang FromCode(string code) =>
+        code.StartsWith("es", System.StringComparison.OrdinalIgnoreCase) ? Lang.Es :
+        code.StartsWith("pt", System.StringComparison.OrdinalIgnoreCase) ? Lang.Pt : Lang.En;
+
+    // the welcome page's button: it names the language it switches to
+    static Lang NextLang => Current == Lang.Es ? Lang.En : Current == Lang.En ? Lang.Pt : Lang.Es;
+    public static string NextLanguageName => NextLang == Lang.Es ? "Español" : NextLang == Lang.En ? "English" : "Português";
+    public static void SwitchLanguage() => Current = NextLang;
 
     static readonly Dictionary<string, (string es, string en)> Table = new()
     {
@@ -23,7 +38,6 @@ static class Str
         ["welcome_need"]   = ("Necesitas: tu dump personal de Wind Waker HD (USA o EUR, versión 0), conexión a internet y unos 10 GB libres.",
                                "You need: your personal dump of Wind Waker HD (USA or EUR, version 0), an internet connection and about 10 GB free."),
         ["welcome_dir"]    = ("Carpeta de trabajo: {0}",                             "Working folder: {0}"),
-        ["lang"]           = ("English",                                             "Español"),
         ["btn_start"]      = ("Comenzar",                                            "Get started"),
         ["btn_back"]       = ("Atrás",                                               "Back"),
         ["btn_install"]    = ("Instalar",                                            "Install"),
@@ -299,15 +313,34 @@ static class Str
                                "This installer needs administrator rights. Right-click the .exe and choose \"Run as administrator\"."),
     };
 
-    // Another system's wording (the macOS installer: desktop/MacStrings.cs): its keys win over Table's.
+    // Another system's wording (the macOS installer: desktop/MacStrings.cs): its keys win over Table's (and its
+    // Portuguese ones over PtTable's).
     static Dictionary<string, (string es, string en)>? overrides;
-    public static void Override(Dictionary<string, (string es, string en)> table) => overrides = table;
+    static Dictionary<string, string>? overridesPt;
+    public static void Override(Dictionary<string, (string es, string en)> table, Dictionary<string, string>? pt = null)
+    {
+        overrides = table;
+        overridesPt = pt;
+    }
 
     public static string Get(string key, params object[] args)
     {
-        if ((overrides == null || !overrides.TryGetValue(key, out var pair)) && !Table.TryGetValue(key, out pair))
-            return $"[{key}]";
-        var s = Es ? pair.es : pair.en;
+        bool own = overrides != null && overrides.ContainsKey(key);
+        if (!own && !Table.ContainsKey(key)) return $"[{key}]";
+        var pair = own ? overrides![key] : Table[key];
+        string s;
+        if (Current == Lang.Pt)  // a key without Portuguese is the English one
+            s = own ? (overridesPt != null && overridesPt.TryGetValue(key, out var p) ? p : pair.en)
+                    : (PtTable.TryGetValue(key, out var q) ? q : pair.en);
+        else
+            s = Current == Lang.Es ? pair.es : pair.en;
         return args.Length > 0 ? string.Format(s, args) : s;
+    }
+
+    // the keys of a language table that lack Portuguese (tests and the builds' check)
+    public static IEnumerable<string> MissingPortuguese()
+    {
+        foreach (var k in Table.Keys) if (!PtTable.ContainsKey(k) && !(overrides?.ContainsKey(k) ?? false)) yield return k;
+        if (overrides != null) foreach (var k in overrides.Keys) if (!(overridesPt?.ContainsKey(k) ?? false)) yield return k;
     }
 }
