@@ -171,9 +171,11 @@ def same_messages(base_szs, tr_szs, name):
 
 def bsdtar():
     """a tar that reads RAR (libarchive's bsdtar: macOS /usr/bin/tar, Windows 10+ tar.exe), or None"""
-    for name in ("bsdtar", "tar"):
-        exe = shutil.which(name)
-        if not exe:
+    candidates = [shutil.which("bsdtar"), shutil.which("tar")]
+    if os.name == "nt":  # Windows' own (MSYS2's or Git's GNU tar, earlier in PATH, cannot read RAR)
+        candidates.insert(0, os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "tar.exe"))
+    for exe in candidates:
+        if not exe or not os.path.isfile(exe):
             continue
         try:
             v = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
