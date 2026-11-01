@@ -240,7 +240,7 @@ def extract_wua(archive):
     return dst
 
 
-def forwarder(args, out, icon=None):
+def forwarder(args, out, icon=None, pinned=False):
     """Native build, last step: the HOME-screen icon (forwarder .nsp, tools/switch/forwarder). It needs the user's
     own prod.keys, so without them it is skipped; it never fails the build, since the game does not need it."""
     print("\n[+] HOME-screen forwarder (optional)", flush=True)
@@ -253,6 +253,8 @@ def forwarder(args, out, icon=None):
         cmd = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "forwarder",
                                                   "build_forwarder_windows.py"),
                "--keys", keys, "--sd", out]
+        if pinned:
+            cmd += ["--toolchain", "pinned"]  # nx-hbloader and hacBrewPack from the pinned toolchain too
         if icon:
             cmd += ["--icon", os.path.abspath(icon)]
         if subprocess.call(cmd, cwd=ROOT) != 0:
@@ -430,10 +432,9 @@ def main():
         shutil.rmtree(gdst, ignore_errors=True)
         for part in ("code", "content", "meta"):
             shutil.copytree(os.path.join(game, part), os.path.join(gdst, part))
-    # the forwarder is still built with this computer's devkitPro (bash, make, a C compiler): optional, it never
-    # stops the install (docs/pinned-toolchain-plan.md)
+    # the forwarder (optional, it never stops the install): with the pinned toolchain too when the game used it
     if (native or pinned) and not args.no_forwarder:
-        forwarder(args, out, args.icon or game)
+        forwarder(args, out, args.icon or game, pinned)
     print("""
 Done: %s
 

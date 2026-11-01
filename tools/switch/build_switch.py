@@ -67,8 +67,10 @@ def clean_env(dkp):
             "PATHEXT", "COMSPEC", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "HOME", "USER", "LOGNAME",
             "TMPDIR")
     env = {k: os.environ[k] for k in keep if k in os.environ}
-    tools = [os.path.join(dkp, "tools", "bin"), os.path.join(dkp, "devkitA64", "bin"),
-             os.path.dirname(python_tool("cmake")), os.path.dirname(sys.executable)]
+    # cmake's folder when there is one (the game's build needs it; the forwarder's pinned build does not)
+    tools = [os.path.join(dkp, "tools", "bin"), os.path.join(dkp, "devkitA64", "bin")] + \
+            [d for d in (os.path.join(sys.prefix, "Scripts"), os.path.join(sys.prefix, "bin"))
+             if os.path.isfile(os.path.join(d, "cmake" + EXE))] + [os.path.dirname(sys.executable)]
     if WINDOWS:
         root = os.environ.get("SystemRoot", r"C:\Windows")
         system = [os.path.join(root, "System32"), root]

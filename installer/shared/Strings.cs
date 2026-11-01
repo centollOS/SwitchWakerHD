@@ -121,8 +121,6 @@ static class Str
         ["tc_ready"]       = ("Herramientas de Switch listas: {0}",                    "Switch tools ready: {0}"),
         ["tc_fail"]        = ("No se pudieron descargar las herramientas de Switch fijadas (mira el registro). Pulsa Reintentar: lo ya descargado se conserva.",
                               "The pinned Switch tools could not be downloaded (see the log). Press Retry: what was already downloaded is kept."),
-        ["tc_forwarder"]   = ("El icono del menú HOME aún se construye con devkitPro instalado en el equipo: se prepara solo para él.",
-                              "The HOME-screen icon is still built with devkitPro installed on the computer: it is set up for that only."),
         ["step_release"]   = ("Descargar SwitchWakerHD",                             "Download SwitchWakerHD"),
         ["step_build"]     = ("Construir el juego",                                  "Build the game"),
         ["elapsed"]        = ("Tiempo: {0}",                                         "Elapsed: {0}"),

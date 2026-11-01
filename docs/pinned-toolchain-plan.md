@@ -11,9 +11,17 @@ in a clean Debian container (no system Python, gcc or make), the same NRO code a
 immediates differ: the toolchain line and dates move read-only data). Left: a Windows run (test PC), a console
 check of a pinned build.
 
-**Still from the computer:** the HOME-screen forwarder (optional): it builds nx-hbloader with GNU make and
-hacBrewPack with a host C compiler through the computer's devkitPro (and MSYS2 on Windows). The installers set
-devkitPro up only when the player asks for the icon; the game never uses it.
+**The HOME-screen forwarder too** (optional, 2026-11-01): with the pinned toolchain,
+`build_forwarder_windows.py --toolchain pinned` (make_sd.py passes it) downloads nx-hbloader and hacBrewPack as
+GitHub source archives checked by the SHA-256 of their file tree (forwarder.env), applies our patch without git,
+builds nx-hbloader with the pinned devkitA64 (its Makefile's commands; same .text/.rodata/.data as `make
+RELEASE=1`, only the build id differs, from the debug info's paths) and hacBrewPack with the pinned zig
+(`tools/switch/forwarder/pinned_tools.py`). The installers no longer set up the computer's devkitPro for it.
+Windows test PC (2026-11-01): the game's build needed two Windows-only fixes (cmake and ninja in the installer's
+Python; devkitPro's CMake files refuse a native Windows CMake: a copy without that check) and uam's CMake mirror
+had to follow meson.build on Windows (no _GNU_SOURCE there) for dksh_cache with zig. The prepared graphics came
+out byte-identical to v1.0.0's; the game's code is equivalent to the Mac's (address immediates, and GCC on
+Windows schedules ppc_fres differently).
 
 ## Why
 
