@@ -37,6 +37,30 @@ def python_tool(name):
     fail("%s is missing next to this Python (%s): python -m pip install cmake ninja" % (name, sys.executable))
 
 
+# devkitPro's CMake files refuse a native Windows CMake (dkp-initialize-path.cmake: "CMake must be installed and
+# launched from msys2"): they expect MSYS2's, with /opt/devkitpro paths. With the pinned toolchain's native paths and
+# the cmake next to this Python, only that check is in the way. On Windows the toolchain file comes from a copy of the
+# pinned cmake/ folder (its files find each other by their own folder) with that one check left out.
+WINDOWS_GUARD = 'if(CMAKE_HOST_WIN32)\n\tmessage(FATAL_ERROR "CMake must be installed and launched from msys2: pacman -S cmake")\nendif()\n'
+
+
+def windows_toolchain_file(dkp):
+    import shutil
+    src = os.path.join(dkp, "cmake")
+    dst = os.path.join("build", "dkp-cmake-windows")
+    if os.path.isdir(dst):
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+    path = os.path.join(dst, "dkp-initialize-path.cmake")
+    with open(path, newline="") as f:
+        text = f.read().replace("\r\n", "\n")
+    if text.count(WINDOWS_GUARD) != 1:
+        fail("dkp-initialize-path.cmake changed (the msys2 check is not where it was): update windows_toolchain_file")
+    with open(path, "w", newline="") as f:
+        f.write(text.replace(WINDOWS_GUARD, "# (build_switch.py: the msys2-only check left out)\n"))
+    return os.path.abspath(os.path.join(dst, "Switch.cmake"))
+
+
 def clean_env(dkp):
     """the build's whole environment: the pinned toolchain's folders first, then the system's own minimum"""
     keep = ("SystemRoot", "SYSTEMROOT", "windir", "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
@@ -131,7 +155,7 @@ def main(argv=None):
         print("build_switch.py: devkitPro toolchain %s (%s)" % (json.load(f)["id"], dkp), flush=True)
     env = clean_env(dkp)
     build_dir = os.path.join("build", "switch-dk")
-    toolchain_file = os.path.join(dkp, "cmake", "Switch.cmake").replace("\\", "/")
+    toolchain_file = (windows_toolchain_file(dkp) if WINDOWS else os.path.join(dkp, "cmake", "Switch.cmake")).replace("\\", "/")
     # a folder configured by another generator (build.sh's Makefiles) or another toolchain starts over
     gen, tc = configured_for(build_dir)
     if (gen and gen != "Ninja") or (tc and os.path.normcase(tc) != os.path.normcase(toolchain_file)):
