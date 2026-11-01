@@ -40,6 +40,7 @@
 #include "shader_wait_switch.h"
 #include "ui_text_switch.h"
 #include "update_notice_switch.h"
+#include "video_clips_switch.h"
 
 namespace overlay_switch {
 namespace {
@@ -323,6 +324,20 @@ void tab_picture() {
         }
     }
     help(tx.fpsHelp);
+    {
+        // (#38) video clips: the Capture button held records the last 30 s; 96 MiB of memory, off by default
+        heading(tx.clipsHeading);
+        const video_clips::Availability a = video_clips::availability();
+        bool on;
+        if (check(lbl(tx.clips, "clips").c_str(), video_clips::enabled(), &on, a == video_clips::Availability::kAvailable))
+            hostui::post([on] { video_clips::set_enabled(on); });
+        help(tx.clipsHelp);
+        if (a == video_clips::Availability::kNotApplication) note("%s", tx.clipsNotApplication);
+        else if (a == video_clips::Availability::kOtherTitle) note("%s", tx.clipsOtherTitle);
+        else if (a == video_clips::Availability::kUnsupported) note("%s", tx.clipsUnsupported);
+        else if (video_clips::failed()) warn("%s", tx.clipsFailed);
+        else if (video_clips::reserved() && !video_clips::enabled()) note("%s", tx.clipsKeptUntilRestart);
+    }
     heading(tx.experimental);
     warn("%s", tx.experimentalWarn);
     {

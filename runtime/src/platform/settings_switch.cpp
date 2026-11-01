@@ -37,6 +37,7 @@
 #include "input.h"
 #include "overlay/hostui.h"
 #include "screen_mode.h"
+#include "video_clips_switch.h"  // (#38)
 #include "runtime.h"
 
 namespace switch_settings {
@@ -287,6 +288,7 @@ void apply_at_start() {
         std::string v;
         if (hostui::get(kKeyGamepadPip, v)) gfxsw::set_gamepad_pip(v == "1");
     }
+    video_clips::apply_at_start();  // (#38) the saved video clips option: the 96 MiB buffer early, while the heap is free
     // the saved controller choice, before the game starts (screen_mode.cpp decides the first title screen's mode from
     // it): controllerMode single (the default: the GamePad, single screen), gamepad or pro (the Wii U's own GamePad /
     // Pro Controller play). An older proController=1 is pro, =0 single; WWHD_PRO_CONTROLLER wins.

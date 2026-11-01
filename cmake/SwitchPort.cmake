@@ -78,6 +78,7 @@ macro(switch_port_sources)
     file(GLOB DEKO3D_SOURCES CONFIGURE_DEPENDS runtime/src/gfx/deko/*.cpp)
     list(APPEND GFX_SOURCES ${DEKO3D_SOURCES} runtime/src/platform/input_switch.cpp runtime/src/platform/hostui_switch.cpp
                             runtime/src/platform/settings_switch.cpp runtime/src/platform/settings_ini.cpp
+                            runtime/src/platform/video_clips_switch.cpp
                             runtime/src/platform/debug_server.cpp
                             runtime/src/platform/debug_switch.cpp runtime/src/platform/posix_stubs_switch.cpp
                             runtime/src/platform/startup_checks_switch.cpp runtime/src/platform/prepare_graphics_switch.cpp runtime/src/platform/audio_guard_switch.cpp runtime/src/platform/thread_heap_switch.cpp runtime/src/platform/shader_wait_switch.cpp runtime/src/platform/thread_sampler_switch.cpp
