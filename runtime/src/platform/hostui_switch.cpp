@@ -51,17 +51,16 @@ void post(std::function<void()> fn) {
     g_posted.push_back(std::move(fn));
 }
 
+// Only the changes queued when this starts: ones posted meanwhile wait for the next pass of the host loop, which
+// reads the controllers in between. Draining until empty let a slider that posts SD card writes faster than they
+// finish keep this thread here for good, the menu stuck with the last controller state it saw (#101).
 void run_posted() {
-    for (;;) {
-        std::function<void()> fn;
-        {
-            std::lock_guard<std::mutex> lk(g_post_mu);
-            if (g_posted.empty()) return;
-            fn = std::move(g_posted.front());
-            g_posted.pop_front();
-        }
-        fn();
+    std::deque<std::function<void()>> batch;
+    {
+        std::lock_guard<std::mutex> lk(g_post_mu);
+        batch.swap(g_posted);
     }
+    for (auto& fn : batch) fn();
 }
 
 bool get(const char* key, std::string& value) {
