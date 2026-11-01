@@ -66,7 +66,8 @@ sealed class InstallEngine : EngineBase
     ProcessJob? currentJob;   // the running process and all it started; KillCurrent stops them
 
     // ── Python ───────────────────────────────────────────────────────────────
-    protected override void Python() => PinnedPython("zstandard", "pycryptodome", "pillow");
+    // cmake and ninja: the pinned build (tools/switch/build_switch.py) runs the ones next to this Python
+    protected override void Python() => PinnedPython("zstandard", "pycryptodome", "pillow", "cmake", "ninja");
 
     // System32's tar.exe (Windows 10 1803 and newer), by its full path: an MSYS2 or Git tar on PATH reads C:\ paths
     // as relative ones
