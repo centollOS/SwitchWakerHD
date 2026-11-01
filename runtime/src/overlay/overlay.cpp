@@ -63,6 +63,7 @@
 #include "gfx/stereo.h"
 #include "gfx/hdr.h"
 #include "../crashrec.h"
+#include "../fan_translation.h"  // (this fork)
 #include "../game_languages.h"
 #include "../gfx/renderer.h"
 #ifdef __ANDROID__
@@ -2209,7 +2210,7 @@ int saved_language() {
         int l = atoi(v.c_str());
         if (l >= 0 && l < game_lang::kLanguages) return l;
     }
-    return 1;
+    return fan_translation::default_language(1);  // (this fork) the PT-BR translation when installed
 }
 
 // the region of the saved language when it comes from a language source (game_lang::kNoRegion: the game's own)
@@ -2249,7 +2250,7 @@ void tab_about() {
         U.language = saved_language();
         U.language_region = saved_language_region();
         const game_lang::Start now = game_lang::current();
-        U.language_at_start = now.language;  // the game reads it early in the boot
+        U.language_at_start = fan_translation::shown_language(now.language);  // the game reads it early in the boot (this fork: PT-BR)
         U.language_region_at_start = now.pack ? now.region : game_lang::kNoRegion;
         if (U.language_at_start < 0) {
             const game_lang::Start s = game_lang::choose(env_set ? env_language : U.language,
