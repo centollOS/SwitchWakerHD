@@ -263,6 +263,26 @@ void post_changed(std::function<void()> fn) {
     });
 }
 
+// (this fork, #101) A slider for an option that the host thread applies and saves. While held it shows and moves
+// its own value: the option changes only when the host thread gets to the post, so reading it back would tweak a
+// stale value. Each step posts apply (in memory); letting go posts save (apply + the files) once. Saving on
+// every step wrote the SD card faster than it could keep up on Switch, and the menu locked up.
+bool option_slider(const char* label, float current, float lo, float hi, const char* fmt,
+                   std::function<void(float)> apply, std::function<void(float)> save, ImGuiSliderFlags flags = 0) {
+    static ImGuiID held_id = 0;
+    static float held = 0.0f;
+    const ImGuiID id = ImGui::GetID(label);
+    float v = held_id == id ? held : current;
+    const bool changed = ImGui::SliderFloat(label, &v, lo, hi, fmt, flags);
+    const bool active = ImGui::IsItemActive();
+    if (active) held_id = id, held = v;
+    else if (held_id == id) held_id = 0;
+    // let go after a change, or changed without being held: saved now
+    if (ImGui::IsItemDeactivatedAfterEdit() || (changed && !active)) hostui::post([save, v] { save(v); });
+    else if (changed) hostui::post([apply, v] { apply(v); });
+    return changed;
+}
+
 // ---------------------------------------------------------------- style
 void setup_style() {
     ImGuiStyle& s = ImGui::GetStyle();
@@ -930,9 +950,10 @@ void tab_graphics() {
         if (dynres::on()) note("%s", dynres::status().c_str());
     }
 
-    float fovPercent=aspect::fov_scale()*100.0f;
-    if(ImGui::SliderFloat("Gameplay FOV", &fovPercent,75.0f,250.0f,"%.0f%%",ImGuiSliderFlags_AlwaysClamp))
-        post_changed([fovPercent] { aspect::set_fov_scale(fovPercent/100.0f); hostui::set("gameplayFovScale",std::to_string(fovPercent/100.0f)); });
+    option_slider("Gameplay FOV", aspect::fov_scale() * 100.0f, 75.0f, 250.0f, "%.0f%%",
+        [](float p) { aspect::set_fov_scale(p / 100.0f); hostui::graphics_changed(); },
+        [](float p) { aspect::set_fov_scale(p / 100.0f); hostui::set("gameplayFovScale", std::to_string(p / 100.0f)); hostui::graphics_changed(); },
+        ImGuiSliderFlags_AlwaysClamp);
     help("100% keeps the original field of view. Higher values show more of the world and make Link\n"
          "appear smaller. Applies to gameplay and combat in 2D and 3D. Cutscenes, dialogue,\n"
          "scene transitions and menus keep their authored FOV. First-person view, item aiming and\n"
@@ -1547,13 +1568,11 @@ void restart_notice_frame(bool draw) {
 // A built-in mod's options on its page (Mods > the mod).
 void builtin_options(const std::string& id) {
     if (id == "direct-camera") {
-        float speed = mods::camera_speed();
-        if (ImGui::SliderFloat("Camera speed", &speed, .5f, 2.f, "%.2fx"))
-            hostui::post([speed] { mods::set_camera_speed(speed); hostui::set("mod.direct-camera.speed", std::to_string(speed)); mods::packages::remember_option("direct-camera.speed", speed); });
+        option_slider("Camera speed", mods::camera_speed(), .5f, 2.f, "%.2fx", mods::set_camera_speed,
+            [](float speed) { mods::set_camera_speed(speed); hostui::set("mod.direct-camera.speed", std::to_string(speed)); mods::packages::remember_option("direct-camera.speed", speed); });
     } else if (id == "lock-on") {
-        float range = mods::lock_on_range();
-        if (ImGui::SliderFloat("Enemy lock-on range", &range, 1.f, 3.f, "%.2fx"))
-            hostui::post([range] { mods::set_lock_on_range(range); hostui::set("mod.lock-on.range", std::to_string(range)); mods::packages::remember_option("lock-on.range", range); });
+        option_slider("Enemy lock-on range", mods::lock_on_range(), 1.f, 3.f, "%.2fx", mods::set_lock_on_range,
+            [](float range) { mods::set_lock_on_range(range); hostui::set("mod.lock-on.range", std::to_string(range)); mods::packages::remember_option("lock-on.range", range); });
         bool cycling = mods::lock_on_cycling();
         if (ImGui::Checkbox("Cycle enemy targets with R3", &cycling))
             hostui::post([cycling] { mods::set_lock_on_cycling(cycling); hostui::set("mod.lock-on.cycling", cycling ? "1" : "0"); mods::packages::remember_option("lock-on.cycling", cycling); });
@@ -1624,18 +1643,16 @@ void builtin_options(const std::string& id) {
             hostui::post([] { mods::set_move_speed_anim(mods::MoveAnim::kDash); hostui::set("mod.move-speed.anim", "dash"); mods::packages::remember_option("move-speed.anim", std::string("dash")); });
         if (radio("Sprint pose (lean and arm drive)", mods::move_speed_anim() == mods::MoveAnim::kSprint))
             hostui::post([] { mods::set_move_speed_anim(mods::MoveAnim::kSprint); hostui::set("mod.move-speed.anim", "sprint"); mods::packages::remember_option("move-speed.anim", std::string("sprint")); });
-        float running = mods::move_speed_land_factor();
-        if (ImGui::SliderFloat("Running", &running, 1.f, 4.f, "%.2fx"))
-            hostui::post([running] { mods::set_move_speed_land_factor(running); hostui::set("mod.move-speed.land", std::to_string(running)); mods::packages::remember_option("move-speed.land", running); });
-        float swimming = mods::move_speed_swim_factor();
-        if (ImGui::SliderFloat("Swimming", &swimming, 1.f, 4.f, "%.2fx"))
-            hostui::post([swimming] { mods::set_move_speed_swim_factor(swimming); hostui::set("mod.move-speed.swim", std::to_string(swimming)); mods::packages::remember_option("move-speed.swim", swimming); });
-        float seconds = mods::move_speed_stamina_seconds();
-        if (ImGui::SliderFloat("Boost time", &seconds, 0.f, 20.f, seconds <= 0.f ? "no limit" : "%.1f s"))
-            hostui::post([seconds] { mods::set_move_speed_stamina_seconds(seconds); hostui::set("mod.move-speed.stamina", std::to_string(seconds)); mods::packages::remember_option("move-speed.stamina", seconds); });
-        float cooldown = mods::move_speed_cooldown_seconds();
-        if (ImGui::SliderFloat("Cooldown", &cooldown, 0.f, 20.f, cooldown <= 0.f ? "none" : "%.1f s"))
-            hostui::post([cooldown] { mods::set_move_speed_cooldown_seconds(cooldown); hostui::set("mod.move-speed.cooldown", std::to_string(cooldown)); mods::packages::remember_option("move-speed.cooldown", cooldown); });
+        option_slider("Running", mods::move_speed_land_factor(), 1.f, 4.f, "%.2fx", mods::set_move_speed_land_factor,
+            [](float running) { mods::set_move_speed_land_factor(running); hostui::set("mod.move-speed.land", std::to_string(running)); mods::packages::remember_option("move-speed.land", running); });
+        option_slider("Swimming", mods::move_speed_swim_factor(), 1.f, 4.f, "%.2fx", mods::set_move_speed_swim_factor,
+            [](float swimming) { mods::set_move_speed_swim_factor(swimming); hostui::set("mod.move-speed.swim", std::to_string(swimming)); mods::packages::remember_option("move-speed.swim", swimming); });
+        const float seconds = mods::move_speed_stamina_seconds();
+        option_slider("Boost time", seconds, 0.f, 20.f, seconds <= 0.f ? "no limit" : "%.1f s", mods::set_move_speed_stamina_seconds,
+            [](float seconds) { mods::set_move_speed_stamina_seconds(seconds); hostui::set("mod.move-speed.stamina", std::to_string(seconds)); mods::packages::remember_option("move-speed.stamina", seconds); });
+        const float cooldown = mods::move_speed_cooldown_seconds();
+        option_slider("Cooldown", cooldown, 0.f, 20.f, cooldown <= 0.f ? "none" : "%.1f s", mods::set_move_speed_cooldown_seconds,
+            [](float cooldown) { mods::set_move_speed_cooldown_seconds(cooldown); hostui::set("mod.move-speed.cooldown", std::to_string(cooldown)); mods::packages::remember_option("move-speed.cooldown", cooldown); });
         bool bar = mods::move_speed_bar();
         if (ImGui::Checkbox("Show boost bar", &bar))
             hostui::post([bar] { mods::set_move_speed_bar(bar); hostui::set("mod.move-speed.bar", bar ? "1" : "0"); mods::packages::remember_option("move-speed.bar", bar); });
@@ -1668,20 +1685,20 @@ void builtin_options(const std::string& id) {
                         : id == "ivy-speed" ? "ivy-speed.factor" : "hang-speed.factor";
         float factor = id == "ladder-speed" ? mods::ladder_speed_factor() : id == "sidle-speed" ? mods::sidle_speed_factor()
                      : id == "ivy-speed" ? mods::ivy_speed_factor() : mods::hang_speed_factor();
-        if (ImGui::SliderFloat("Speed", &factor, 1.f, 3.f, "%.2fx"))
-            hostui::post([key, factor] { mods::manager::set_traversal_option(key, factor); });
+        option_slider("Speed", factor, 1.f, 3.f, "%.2fx",
+            [key](float f) { mods::manager::set_traversal_option(key, f, false); },
+            [key](float f) { mods::manager::set_traversal_option(key, f); });
     } else if (id == "sail-speed") {
-        float normal = mods::sail_speed_normal_factor();
-        if (ImGui::SliderFloat("Normal sail", &normal, 1.f, 3.f, "%.2fx"))
-            hostui::post([normal] { mods::manager::set_traversal_option("sail-speed.normal", normal); });
-        float swift = mods::sail_speed_swift_factor();
-        if (ImGui::SliderFloat("Swift Sail", &swift, 1.f, 3.f, "%.2fx"))
-            hostui::post([swift] { mods::manager::set_traversal_option("sail-speed.swift", swift); });
+        option_slider("Normal sail", mods::sail_speed_normal_factor(), 1.f, 3.f, "%.2fx",
+            [](float f) { mods::manager::set_traversal_option("sail-speed.normal", f, false); },
+            [](float f) { mods::manager::set_traversal_option("sail-speed.normal", f); });
+        option_slider("Swift Sail", mods::sail_speed_swift_factor(), 1.f, 3.f, "%.2fx",
+            [](float f) { mods::manager::set_traversal_option("sail-speed.swift", f, false); },
+            [](float f) { mods::manager::set_traversal_option("sail-speed.swift", f); });
         help("Multiplies the speed the wind gives the boat. The jump (R) keeps its normal height.");
     } else if (id == "mouse-camera") {
-        float sensitivity = mods::mouse_sensitivity();
-        if (ImGui::SliderFloat("Sensitivity", &sensitivity, .08f, .3f, "%.3f"))
-            hostui::post([sensitivity] { mods::set_mouse_sensitivity(sensitivity); hostui::set("mod.mouse-camera.sensitivity", std::to_string(sensitivity)); mods::packages::remember_option("mouse-camera.sensitivity", sensitivity); });
+        option_slider("Sensitivity", mods::mouse_sensitivity(), .08f, .3f, "%.3f", mods::set_mouse_sensitivity,
+            [](float sensitivity) { mods::set_mouse_sensitivity(sensitivity); hostui::set("mod.mouse-camera.sensitivity", std::to_string(sensitivity)); mods::packages::remember_option("mouse-camera.sensitivity", sensitivity); });
     }
 }
 
