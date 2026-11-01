@@ -38,10 +38,12 @@ const char* availability_name(Availability a) {
     return "?";
 }
 
-// the buffer once, then recording on or off
-void apply(bool on, const char* why) {
-    if (availability() != Availability::kAvailable) return;
-    if (on && !g_reserved) {
+// the buffer once, then recording on. Never off while the game runs: a start that initialized recording after an
+// earlier process had switched it off hung inside appletInitializeGamePlayRecording until the console was reset
+// (2026-11-01). Turning the option off is saved and applies at the next start (no buffer, no recording).
+void start_recording(const char* why) {
+    if (availability() != Availability::kAvailable || g_recording) return;
+    if (!g_reserved) {
         const size_t before = heap_never_used_mib();
         const Result rc = appletInitializeGamePlayRecording();
         if (R_FAILED(rc)) {
@@ -54,10 +56,9 @@ void apply(bool on, const char* why) {
         LOG("[clips] %u MiB video buffer given to the system (%s): heap never used %zu -> %zu MiB", kBufferMiB, why,
             before, heap_never_used_mib());
     }
-    if (!g_reserved) return;
-    const Result rc = appletSetGamePlayRecordingState(on);
-    g_recording = on && R_SUCCEEDED(rc);
-    LOG("[clips] recording %s (%s): rc 0x%x", on ? "on" : "off", why, (unsigned)rc);
+    const Result rc = appletSetGamePlayRecordingState(true);
+    g_recording = R_SUCCEEDED(rc);
+    LOG("[clips] recording on (%s): rc 0x%x", why, (unsigned)rc);
 }
 
 }  // namespace
@@ -75,13 +76,14 @@ void apply_at_start() {
     std::string v;
     g_enabled = hostui::get(kKeyVideoClips, v) && v == "1";
     LOG("[clips] video clips: %s, %s", g_enabled ? "on" : "off (the default)", availability_name(availability()));
-    if (g_enabled) apply(true, "saved option");
+    if (g_enabled) start_recording("saved option");
 }
 
 void set_enabled(bool on) {
     g_enabled = on;
     hostui::set(kKeyVideoClips, on ? "1" : "0");
-    apply(on, "Picture tab");
+    if (on) start_recording("Picture tab");
+    else if (g_recording) LOG("[clips] option off (Picture tab): recording stays on until the game restarts");
 }
 
 }  // namespace video_clips

@@ -56,5 +56,24 @@ is free, or when the option is switched on.
 4. Restarted with the option on: at start, `video clips: on, available`, buffer given (`3224 -> 3128 MiB`), and
    `recording on: rc 0x0` without opening the menu.
 - The help tooltip was too wide for the screen on one line: a line break added in all five languages. Checked.
-- Not done yet: check 5 (memory, worst case: first start with empty shader caches plus the warp tour, with the
-  option on), and checking that holding Capture saves nothing while the option is off.
+
+## The hang and the change (2026-11-01)
+
+A start with the option on hung inside `appletInitializeGamePlayRecording` (the frame counter stayed at 0, and a
+hard reset of the console was needed). The sessions of that console boot were: init from the menu OK, a restart with
+init OK then recording switched **off** (`appletSetGamePlayRecordingState(false)`), a restart without init, then a
+restart with init: hang. After the hard reset, a clean start with the option on was fine.
+
+Change: recording is never switched off while the game runs. Turning the option off is saved and applies at the
+next start (no buffer, no recording), and the note says so ("Off from the next start: until then clips still work
+and the 96 MiB stay in use"). Checked on the console with the same sequence: (1) on from the menu, then off (log
+`option off ... recording stays on until the game restarts`, the note shows, `switchVideoClips=0` saved);
+(2) restart with the option off, then on from the menu: buffer and `recording on: rc 0x0`, no hang; (3) restart
+with the option on: buffer at start and `recording on: rc 0x0`.
+
+Not covered: libnx itself switches recording off when the program ends normally (`_appletCleanup`, e.g. Quit Game);
+the next start from the HOME menu is a new application launch. Not tested.
+
+Not done (the user's call, 2026-11-01: not needed): check 5, the worst-case memory test (first start with empty
+shader caches plus the warp tour, with the option on). Its first part ran (the first-start card with the option on,
+no problem until it was stopped).

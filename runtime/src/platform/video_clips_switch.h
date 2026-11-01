@@ -15,12 +15,12 @@ enum class Availability {
 
 Availability availability();
 bool enabled();   // the option (what is saved)
-bool recording(); // the system was asked to record and said yes
+bool recording(); // the system was asked to record and said yes; stays so until the program ends
 bool reserved();  // the 96 MiB are held (until the program ends)
 bool failed();    // the system refused the buffer: see the log
 
 void apply_at_start();     // settings_switch::apply_at_start: the saved option
-void set_enabled(bool on); // the host loop's thread (hostui::post); saves it
+void set_enabled(bool on); // the host loop's thread (hostui::post); saves it. Off applies at the next start
 
 constexpr const char* kKeyVideoClips = "switchVideoClips";
 constexpr unsigned kBufferMiB = 96;  // libnx: 0x6000000 bytes

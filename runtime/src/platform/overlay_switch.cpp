@@ -336,7 +336,7 @@ void tab_picture() {
         else if (a == video_clips::Availability::kOtherTitle) note("%s", tx.clipsOtherTitle);
         else if (a == video_clips::Availability::kUnsupported) note("%s", tx.clipsUnsupported);
         else if (video_clips::failed()) warn("%s", tx.clipsFailed);
-        else if (video_clips::reserved() && !video_clips::enabled()) note("%s", tx.clipsKeptUntilRestart);
+        else if (video_clips::recording() && !video_clips::enabled()) note("%s", tx.clipsKeptUntilRestart);
     }
     heading(tx.experimental);
     warn("%s", tx.experimentalWarn);

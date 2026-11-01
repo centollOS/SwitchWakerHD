@@ -491,7 +491,7 @@ const MenuTexts kMenuEnglish = {
     .clipsOtherTitle = "Started through another game: video clips follow that game's setting.",
     .clipsUnsupported = "This console does not support video recording.",
     .clipsFailed = "The console did not accept the video buffer: clips are off (details in the log).",
-    .clipsKeptUntilRestart = "Recording is off. The 96 MiB stay in use until the game is restarted.",
+    .clipsKeptUntilRestart = "Off from the next start: until then clips still work and the 96 MiB stay in use.",
     // Picture tab: experimental features
     .experimental = "Experimental features",
     .experimentalWarn = "Unfinished: 60 fps needs a big overclock (sys-clk or similar) to hold. Not saved.",
@@ -655,7 +655,7 @@ const MenuTexts kMenuSpanish = {
     .clipsOtherTitle = "Iniciado a través de otro juego: los clips de vídeo siguen el ajuste de ese juego.",
     .clipsUnsupported = "Esta consola no admite la grabación de vídeo.",
     .clipsFailed = "La consola no aceptó el búfer de vídeo: los clips están desactivados (detalles en el log).",
-    .clipsKeptUntilRestart = "La grabación está desactivada. Los 96 MiB siguen en uso hasta que reinicies el juego.",
+    .clipsKeptUntilRestart = "Desactivado desde el próximo arranque: hasta entonces los clips siguen funcionando y los 96 MiB siguen en uso.",
     // Picture tab: experimental features
     .experimental = "Funciones experimentales",
     .experimentalWarn = "Sin terminar: mantener 60 fps necesita un gran overclock (sys-clk o similar). No se guarda.",
@@ -824,7 +824,7 @@ const MenuTexts kMenuFrench = {
     .clipsOtherTitle = "Lancé via un autre jeu : les clips vidéo suivent le réglage de ce jeu.",
     .clipsUnsupported = "Cette console ne prend pas en charge l'enregistrement vidéo.",
     .clipsFailed = "La console n'a pas accepté la mémoire vidéo : les clips sont désactivés (détails dans le journal).",
-    .clipsKeptUntilRestart = "L'enregistrement est désactivé. Les 96 Mio restent utilisés jusqu'au redémarrage du jeu.",
+    .clipsKeptUntilRestart = "Désactivé au prochain démarrage : d'ici là, les clips fonctionnent encore et les 96 Mio restent utilisés.",
     // Picture tab: experimental features
     .experimental = "Fonctions expérimentales",
     .experimentalWarn = "Inachevé : tenir 60 fps demande un fort overclock (sys-clk ou équivalent). Non enregistré.",
@@ -996,7 +996,7 @@ const MenuTexts kMenuGerman = {
     .clipsOtherTitle = "Über ein anderes Spiel gestartet: Videoclips folgen der Einstellung dieses Spiels.",
     .clipsUnsupported = "Diese Konsole unterstützt keine Videoaufnahme.",
     .clipsFailed = "Die Konsole hat den Videopuffer nicht angenommen: Clips sind aus (Details im Log).",
-    .clipsKeptUntilRestart = "Die Aufnahme ist aus. Die 96 MiB bleiben belegt, bis das Spiel neu gestartet wird.",
+    .clipsKeptUntilRestart = "Aus ab dem nächsten Start: bis dahin funktionieren Clips weiter und die 96 MiB bleiben belegt.",
     // Picture tab: experimental features
     .experimental = "Experimentelle Funktionen",
     .experimentalWarn = "Unfertig: 60 fps zu halten braucht starkes Übertakten (sys-clk o. Ä.). Wird nicht gespeichert.",
@@ -1169,7 +1169,7 @@ const MenuTexts kMenuItalian = {
     .clipsOtherTitle = "Avviato tramite un altro gioco: le clip video seguono l'impostazione di quel gioco.",
     .clipsUnsupported = "Questa console non supporta la registrazione video.",
     .clipsFailed = "La console non ha accettato il buffer video: le clip sono disattivate (dettagli nel log).",
-    .clipsKeptUntilRestart = "La registrazione è disattivata. I 96 MiB restano in uso fino al riavvio del gioco.",
+    .clipsKeptUntilRestart = "Disattivato dal prossimo avvio: fino ad allora le clip funzionano ancora e i 96 MiB restano in uso.",
     // Picture tab: experimental features
     .experimental = "Funzioni sperimentali",
     .experimentalWarn = "Incompleto: tenere 60 fps richiede un forte overclock (sys-clk o simili). Non viene salvato.",
