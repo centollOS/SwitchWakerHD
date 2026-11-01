@@ -552,6 +552,11 @@ target_include_directories(savestate_native_gate_test PRIVATE runtime/src runtim
 target_compile_options(savestate_native_gate_test PRIVATE -UNDEBUG)
 add_test(NAME savestate_native_gate_contract COMMAND savestate_native_gate_test)
 
+# the Wii U calendar clock and the save-date repair (runtime/src/hle/os_time.h, #322)
+add_executable(os_time_test runtime/tools/os_time_test.cpp runtime/src/hle/os_time.cpp)
+target_include_directories(os_time_test PRIVATE runtime/src)
+target_compile_options(os_time_test PRIVATE -UNDEBUG)
+add_test(NAME os_time COMMAND os_time_test)
 add_executable(portable_state_test runtime/tools/portable_state_test.cpp runtime/src/portable_state.cpp)
 target_include_directories(portable_state_test PRIVATE runtime/src)
 target_compile_options(portable_state_test PRIVATE -UNDEBUG)
