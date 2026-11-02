@@ -1275,6 +1275,14 @@ std::atomic<int> g_conv_result{0};  // a convenience slot's save finished: +slot
 // an auto save's file is being written on its own thread: set before the thread starts, cleared after
 // it set g_conv_result (so a reader that sees it cleared also sees the result)
 std::atomic<bool> g_auto_writing{false};
+// (this fork) the thread that wrote the last auto save. It is joined, never detached: on the Switch a detached
+// thread is never reclaimed (core_switch.cpp: libnx has no pthread_detach) and kept its 4 MiB stack, 4 MiB more
+// memory in use at every auto save. The next auto save starts only once this one is done (g_auto_writing), so
+// the join there does not wait; the last one is joined at exit.
+struct AutoWriter {
+    std::thread thread;
+    ~AutoWriter() { if (thread.joinable()) thread.join(); }
+} g_auto_writer;
 
 void do_portable_save(Cpu* c, int slot) {
     // the convenience slots (last session, auto saves) save quietly: a log line, no message
@@ -1313,7 +1321,8 @@ void do_portable_save(Cpu* c, int slot) {
     // at every auto save. service_auto_save waits for the result (g_auto_writing).
     if (conv::is_auto_save(slot)) {
         g_auto_writing = true;
-        std::thread([s = std::move(s), path, slot] {
+        if (g_auto_writer.thread.joinable()) g_auto_writer.thread.join();  // (this fork) done already (above)
+        g_auto_writer.thread = std::thread([s = std::move(s), path, slot] {
             std::string why;
             const bool ok = write_portable(path, s, why);
             if (ok) {
@@ -1327,7 +1336,7 @@ void do_portable_save(Cpu* c, int slot) {
             }
             g_conv_result = ok ? slot : -slot;
             g_auto_writing = false;
-        }).detach();
+        });
         return;
     }
     if (!write_portable(path, s, why)) {
