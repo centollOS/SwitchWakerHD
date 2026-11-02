@@ -17,8 +17,10 @@
     <AssemblyDescription>Automatic installer for SwitchWakerHD - Wind Waker HD on Nintendo Switch</AssemblyDescription>
     <Company>centollOS</Company>
     <Product>SwitchWakerHD</Product>
-    <Copyright>SwitchWakerHD by centollOS (GPLv3) - github.com/centollOS/SwitchWakerHD</Copyright>
+    <Copyright>SwitchWakerHD by centollOS (MPL-2.0) - github.com/centollOS/SwitchWakerHD</Copyright>
     <Version>1.0.0</Version>
+    <!-- the product version is the release's alone (no "+<commit>"): SignPath's artifact configuration checks it -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="Assets\logo.png" />

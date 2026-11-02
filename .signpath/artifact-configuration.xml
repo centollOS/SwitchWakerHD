@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SignPath artifact configuration for the Windows installer (docs/code-signing-plan.md): paste it into the
+     SignPath project. release-installer.yml uploads the .exe with actions/upload-artifact, which zips it. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="SwitchWakerHD-Installer.exe" product-name="SwitchWakerHD" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
