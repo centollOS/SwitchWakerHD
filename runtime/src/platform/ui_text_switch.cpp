@@ -1547,6 +1547,8 @@ const MenuTexts* choose_menu() {
 
 }  // namespace
 
+long language_code() { return language(); }
+
 const Texts& tx() {
     static const Texts* t = choose();
     return *t;

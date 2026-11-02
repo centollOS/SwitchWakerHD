@@ -1,0 +1,10 @@
+// {English, Spanish, Brazilian Portuguese}
+{"Wind Waker HD  -  Settings", "Wind Waker HD  -  Ajustes", "Wind Waker HD  -  Configurações"},
+{"Saves", "Partidas", "Salvamentos"},
+{"Picture", "Imagen", "Imagem"},
+{"Controls", "Controles", "Controles"},
+{"Audio", "Audio", "Áudio"},
+{"Mods", "Mods", "Mods"},
+{"Warp", "Warp", "Warp"},
+{"Dev", "Dev", "Dev"},
+{"Language / About", "Idioma / Acerca de", "Idioma / Sobre"},

@@ -4,6 +4,8 @@
 #pragma once
 #include "../mods/code_mods.h"
 #include "../mods/packages.h"
+#include "../menu_i18n.h"
+#include "mods_model.h"  // textf
 #include <algorithm>
 #include <set>
 #include <string>
@@ -21,29 +23,35 @@ struct Item {
 // restore: the save backup staged for the next start (mods/save_backup.h), described for the player.
 inline std::vector<Item> pending(const std::vector<mods::packages::View>& packages, const mods::code::Status& code,
                                  const std::string& restore = {}) {
+    using modsmodel::textf;
+    using menu_i18n::tr;
     std::vector<Item> out;
     if (!restore.empty())
-        out.push_back({"restore:" + restore, "Your saves will be restored from the backup of " + restore + " at the next start.",
-                       "save restore"});
+        out.push_back({"restore:" + restore, textf(tr("Your saves will be restored from the backup of %s at the next start."), restore.c_str()),
+                       tr("save restore")});
     if (code.ready) {
         std::string name;
         for (const auto& p : packages) if (!code.mod.empty() && p.id == code.mod) name = p.name;
         if (code.target && !name.empty())
-            out.push_back({"code:on:" + code.mod, name + " and code-mod support will be turned on after a restart.",
-                           name + " and code-mod support on"});
+            out.push_back({"code:on:" + code.mod, textf(tr("%s and code-mod support will be turned on after a restart."), name.c_str()),
+                           textf(tr("%s and code-mod support on"), name.c_str())});
         else
             out.push_back({code.target ? "code:on" : "code:off",
-                           std::string("Code-mod support will be turned ") + (code.target ? "on" : "off") + " after a restart.",
-                           std::string("code-mod support ") + (code.target ? "on" : "off")});
+                           code.target ? tr("Code-mod support will be turned on after a restart.")
+                                       : tr("Code-mod support will be turned off after a restart."),
+                           code.target ? tr("code-mod support on") : tr("code-mod support off")});
     }
     for (const auto& p : packages) {
         if (!p.pending_restart) continue;
         if (p.enabled && !p.active)
-            out.push_back({"pkg:" + p.id + ":on", p.name + " will be turned on after a restart.", p.name + " on"});
+            out.push_back({"pkg:" + p.id + ":on", textf(tr("%s will be turned on after a restart."), p.name.c_str()),
+                           textf(tr("%s on"), p.name.c_str())});
         else if (!p.enabled && p.active)
-            out.push_back({"pkg:" + p.id + ":off", p.name + " will be turned off after a restart.", p.name + " off"});
+            out.push_back({"pkg:" + p.id + ":off", textf(tr("%s will be turned off after a restart."), p.name.c_str()),
+                           textf(tr("%s off"), p.name.c_str())});
         else
-            out.push_back({"pkg:" + p.id + ":settings", p.name + " settings will change after a restart.", p.name + " settings"});
+            out.push_back({"pkg:" + p.id + ":settings", textf(tr("%s settings will change after a restart."), p.name.c_str()),
+                           textf(tr("%s settings"), p.name.c_str())});
     }
     return out;
 }

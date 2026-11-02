@@ -100,3 +100,4 @@ jobs:
         run: |
           python tools/switch/test_shader_manifest.py
           python tools/switch/test_ptbr_pack.py
+          python runtime/tools/menu_i18n_check.py

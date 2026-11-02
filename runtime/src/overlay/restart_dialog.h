@@ -2,6 +2,7 @@
 // the host supplies controller B.
 #pragma once
 #include "restart_notice.h"
+#include "../menu_i18n.h"
 #include "imgui.h"
 #include "popup.h"
 
@@ -12,7 +13,7 @@ enum class Answer { None, RestartNow, Later };
 // itself (Windows without a finished code-mod build, Android): then only OK.
 // Keyboard and controller start on Later (or OK); Esc and B answer Later.
 inline Answer dialog(Notice& notice, bool open, bool can_restart, bool controller_back) {
-    if (!popup::begin("Restart required", open)) return Answer::None;
+    if (!popup::begin(menu_i18n::tr("Restart required"), open)) return Answer::None;
     if (!notice.showing()) {  // the change was undone meanwhile
         ImGui::CloseCurrentPopup();
         popup::end();
@@ -20,16 +21,16 @@ inline Answer dialog(Notice& notice, bool open, bool can_restart, bool controlle
     }
     ImGui::PushTextWrapPos(popup::wrap_pos(28));
     for (const auto& item : notice.fresh()) ImGui::TextWrapped("%s", item.text.c_str());
-    if (can_restart) ImGui::TextDisabled("Progress since your last save is lost.");
-    else ImGui::TextWrapped("Restart the game to apply.");
+    if (can_restart) ImGui::TextDisabled("%s", menu_i18n::tr("Progress since your last save is lost."));
+    else ImGui::TextWrapped("%s", menu_i18n::tr("Restart the game to apply."));
     ImGui::PopTextWrapPos();
     ImGui::Spacing();
     auto answer = Answer::None;
     if (can_restart) {
-        if (ImGui::Button("Restart now", ImVec2(120, 0))) answer = Answer::RestartNow;
+        if (ImGui::Button(menu_i18n::tr("Restart now"), ImVec2(120, 0))) answer = Answer::RestartNow;
         ImGui::SameLine();
     }
-    if (ImGui::Button(can_restart ? "Later" : "OK", ImVec2(120, 0))) answer = Answer::Later;
+    if (ImGui::Button(can_restart ? menu_i18n::tr("Later") : "OK", ImVec2(120, 0))) answer = Answer::Later;
     ImGui::SetItemDefaultFocus();
     if (popup::dismissed(controller_back)) answer = Answer::Later;  // the X, a tap outside, Esc or B
     if (answer != Answer::None) {

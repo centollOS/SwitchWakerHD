@@ -5,12 +5,28 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
 
+#include "../menu_i18n.h"
+
 namespace overlay::modsmodel {
+
+// (this fork) a translated format string (menu_i18n::tr) filled in: textf(menu_i18n::tr("%s is on."), name)
+inline std::string textf(const char* format, ...) {
+    va_list ap, again;
+    va_start(ap, format);
+    va_copy(again, ap);
+    const int n = vsnprintf(nullptr, 0, format, ap);
+    va_end(ap);
+    std::string out(n > 0 ? size_t(n) : 0, '\0');
+    if (n > 0) vsnprintf(out.data(), out.size() + 1, format, again);
+    va_end(again);
+    return out;
+}
 
 // ---------------------------------------------------------------- words (same everywhere)
 inline constexpr const char* kSwitchOffFirst = "Switch the mod off first to change its setup.";
@@ -54,27 +70,27 @@ inline Row row(const Facts& f) {
     r.switch_on = f.enabled;
     if (f.working) {
         r.status = Status::Installing;
-        r.text = (f.downloading ? "Installing… " : "Setting up… ") + percent_text(f.percent);
+        r.text = textf(f.downloading ? menu_i18n::tr("Installing… %s") : menu_i18n::tr("Setting up… %s"), percent_text(f.percent).c_str());
         r.switch_enabled = false;
-        r.switch_reason = "Wait until it is installed.";
+        r.switch_reason = menu_i18n::tr("Wait until it is installed.");
     } else if (f.failed || !f.error.empty() || !f.compatible) {
         r.status = Status::Error;
-        r.text = "Error";
+        r.text = menu_i18n::tr("Error");
         // a broken mod can always be switched off; switching it on again asks for setup or shows the problem
         r.switch_enabled = f.enabled || f.compatible;
-        if (!r.switch_enabled) r.switch_reason = "It can't run on this version of the game.";
+        if (!r.switch_enabled) r.switch_reason = menu_i18n::tr("It can't run on this version of the game.");
     } else if (f.pending_restart) {
         r.status = Status::RestartToApply;
-        r.text = "Restart to apply";
+        r.text = menu_i18n::tr("Restart to apply");
     } else if (!f.enabled && f.needs_setup) {
         r.status = Status::NeedsSetup;
-        r.text = "Needs setup";
+        r.text = menu_i18n::tr("Needs setup");
     } else if (f.update_available && !f.enabled && !f.active) {
         r.status = Status::UpdateAvailable;
-        r.text = "Update available";
+        r.text = menu_i18n::tr("Update available");
     } else {
         r.status = f.enabled ? Status::On : Status::Off;
-        r.text = f.enabled ? "On" : "Off";
+        r.text = f.enabled ? menu_i18n::tr("On") : menu_i18n::tr("Off");
     }
     return r;
 }
@@ -83,10 +99,10 @@ inline Row row(const Facts& f) {
 enum class StepState { Done, NotDone, Working, Failed };
 inline const char* step_text(StepState s) {
     switch (s) {
-    case StepState::Done: return "Done";
-    case StepState::NotDone: return "Not done yet";
-    case StepState::Working: return "Working…";
-    default: return "Failed";
+    case StepState::Done: return menu_i18n::tr("Done");
+    case StepState::NotDone: return menu_i18n::tr("Not done yet");
+    case StepState::Working: return menu_i18n::tr("Working…");
+    default: return menu_i18n::tr("Failed");
     }
 }
 
@@ -124,15 +140,15 @@ struct Page {
 inline Page page(const PageFacts& f) {
     Page p;
     p.setup_locked = f.enabled || f.active;
-    if (f.enabled) p.lock_line = kSwitchOffFirst;
+    if (f.enabled) p.lock_line = menu_i18n::tr(kSwitchOffFirst);
     else if (f.active) {
-        p.lock_line = kOffAfterRestart;
+        p.lock_line = menu_i18n::tr(kOffAfterRestart);
         p.offer_restart = f.can_restart;
-        if (!f.can_restart) p.restart_hint = "Restart the game to finish.";
+        if (!f.can_restart) p.restart_hint = menu_i18n::tr("Restart the game to finish.");
     }
     if (f.has_setup) {
         p.setup_done = f.setup_done;
-        p.setup_summary = f.working ? "Setting up…" : f.setup_done ? kSetUpDone : "Needs setup";
+        p.setup_summary = f.working ? menu_i18n::tr("Setting up…") : f.setup_done ? menu_i18n::tr(kSetUpDone) : menu_i18n::tr("Needs setup");
         p.offer_set_up = !f.working && !f.setup_done && !p.setup_locked;
         p.offer_run_again = !f.working && !p.setup_locked;
     }
@@ -142,14 +158,14 @@ inline Page page(const PageFacts& f) {
             // switched off and on again while the game runs
             p.offer_update = !f.working && (!p.setup_locked || (f.enabled && f.live));
             if (p.offer_update) p.update_line.clear();
-            else if (f.enabled) p.update_line = "Switch the mod off first to update it.";
-            else if (f.active) p.update_line = kOffAfterRestart;
-            else if (f.working) p.update_line = "Wait until the current setup has finished.";
+            else if (f.enabled) p.update_line = menu_i18n::tr("Switch the mod off first to update it.");
+            else if (f.active) p.update_line = menu_i18n::tr(kOffAfterRestart);
+            else if (f.working) p.update_line = menu_i18n::tr("Wait until the current setup has finished.");
         }
         p.offer_remove = !p.setup_locked && !f.working;
-        if (f.enabled) p.remove_line = "Switch the mod off first to remove it.";
-        else if (f.active) p.remove_line = kOffAfterRestart;
-        else if (f.working) p.remove_line = "Wait until the current setup has finished.";
+        if (f.enabled) p.remove_line = menu_i18n::tr("Switch the mod off first to remove it.");
+        else if (f.active) p.remove_line = menu_i18n::tr(kOffAfterRestart);
+        else if (f.working) p.remove_line = menu_i18n::tr("Wait until the current setup has finished.");
     }
     return p;
 }
@@ -160,7 +176,7 @@ struct OptionState { bool shown = true, editable = true; std::string note; };
 inline OptionState option_state(bool setup_option, bool locked, bool applies_after_restart) {
     OptionState o;
     if (setup_option && locked) { o.shown = false; o.editable = false; return o; }  // the lock line explains it
-    if (applies_after_restart) o.note = "Changes apply after a restart.";
+    if (applies_after_restart) o.note = menu_i18n::tr("Changes apply after a restart.");
     return o;
 }
 
@@ -193,14 +209,14 @@ inline double expected_seconds(StepKind k, uint64_t download_bytes = 0) {
 }
 inline const char* default_title(StepKind k) {
     switch (k) {
-    case StepKind::SwitchOff: return "Switch off for the update";
-    case StepKind::Download: return "Download";
-    case StepKind::Check: return "Check";
-    case StepKind::Backup: return "Back up saves";
-    case StepKind::Prepare: return "Prepare";
-    case StepKind::Support: return "Add code-mod support (restarts the game)";
-    case StepKind::Build: return "Build code mod";
-    default: return "Switch on";
+    case StepKind::SwitchOff: return menu_i18n::tr("Switch off for the update");
+    case StepKind::Download: return menu_i18n::tr("Download");
+    case StepKind::Check: return menu_i18n::tr("Check");
+    case StepKind::Backup: return menu_i18n::tr("Back up saves");
+    case StepKind::Prepare: return menu_i18n::tr("Prepare");
+    case StepKind::Support: return menu_i18n::tr("Add code-mod support (restarts the game)");
+    case StepKind::Build: return menu_i18n::tr("Build code mod");
+    default: return menu_i18n::tr("Switch on");
     }
 }
 
@@ -371,12 +387,10 @@ private:
 
 // "about 2 minutes", "less than a minute"
 inline std::string duration_text(double seconds) {
-    if (seconds < 50) return "less than a minute";
+    if (seconds < 50) return menu_i18n::tr("less than a minute");
     int minutes = int(std::lround(seconds / 60));
-    if (minutes <= 1) return "about 1 minute";
-    char b[32];
-    snprintf(b, sizeof b, "about %d minutes", minutes);
-    return b;
+    if (minutes <= 1) return menu_i18n::tr("about 1 minute");
+    return textf(menu_i18n::tr("about %d minutes"), minutes);
 }
 inline std::string elapsed_text(double seconds) {
     int s = int(seconds);

@@ -33,6 +33,9 @@ struct Texts {
 
 const Texts& tx();
 
+// the language tx() and menu() use (a Wii U code: 1 en, 2 fr, 3 de, 4 it, 5 es, 9 Brazilian Portuguese)
+long language_code();
+
 // The settings menu's Picture, Controls and Warp tabs and the Dev tab's first lines (overlay_switch.cpp), in the
 // same language as tx(). A field a language leaves out is the English one.
 struct MenuTexts {
