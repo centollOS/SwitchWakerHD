@@ -124,7 +124,10 @@ player's original files; the Language tab can still pick it). `--no-ptbr` remove
 
 ## Open
 
-* The console A/B test decides whether the repack is what fixes #42's crash (if the raw pack
-  crashes and ours doesn't) — or whether the translated content itself crashes (then we look further
-  before shipping).
+* Console result (2026-11-02, handheld, USA): the title, file select and Minus menus show in
+  Portuguese, and the #42 statue state passes the last pearl scene with the rebuilt pack AND with
+  Triforce-Heroes' pack as downloaded (served through the same redirect). So the translation itself
+  does not crash on this build; #42's crash came from something else in the bundles that reporters
+  used (other files copied over the game, or the older port build). The rebuilt layout stays (it is
+  the game's own), but it is not the #42 fix.
 * The Wii U download's layout (accepted if it holds the pack).
