@@ -17,6 +17,43 @@ which on the same console means something got slower, or the console's condition
 From v1.0.1 on, `perf_test.py` keeps the conditions of each boot in the result file (`meta.boots`: the version, the
 console mode and charge, the clocks the game logged, the picture settings that change the load).
 
+## v1.1.0 (68358e90), 2026-11-02
+
+Console: the maintainers' Switch, now on HOS 22.1.0 (v1.0.0's record was on 19.0.1), handheld, charging. Settings
+as the player's (the same as v1.0.0's run): dynamic resolution on, internal resolution 1.0 handheld, FSR 1 on, FPS
+counter on. CPU at the stock 1020 MHz, GPU at 384 MHz in both builds.
+
+### G. Performance: v1.1.0 against v1.0.0
+
+`perf_test.py compare-to v1.0.0 --scenes lava,windfall,dragonroost,outset_grass_us,outset_lookout_us --expect
+perf/results/v1.0.0-vs-v0.4.7.json`: 4 boots of each, interleaved (ABBAABBA), 900 frames per scene, time of day
+held at 200, on v1.1.0-rc.2 (the tagged commit). File:
+[`perf/results/v1.1.0-vs-v1.0.0.json`](../perf/results/v1.1.0-vs-v1.0.0.json).
+
+| Scene | v1.0.0 fps | v1.1.0 fps | Change (95% interval) | Main thread |
+|---|---|---|---|---|
+| lava (`M_NewD2` 2) | 29.20 | 29.22 | +0.01 (+-0.21): no measurable change | 32.84 -> 32.83 ms |
+| windfall | 29.91 | 29.93 | +0.02 (+-0.13): at the 30 fps cap | 32.30 -> 32.31 ms |
+| dragonroost | 29.66 | 29.75 | +0.09 (+-0.41): no measurable change | 32.48 -> 32.30 ms |
+| outset_grass_us | 29.54 | 29.97 | +0.43 (+-0.50): no measurable change | 20.59 -> 20.65 ms |
+| outset_lookout_us | 29.97 | 29.97 | 0.00: at the 30 fps cap | 31.84 -> 31.69 ms |
+
+Every scene came out as v1.0.0's record (`--expect`, within 0.5 fps), so HOS 22 did not move the numbers.
+
+### F. Memory
+
+Two laps of the 40-warp tour (`perf/results/v1.1.0-memory.txt`), no crash:
+
+| | End of lap 1 | End of lap 2 |
+|---|---|---|
+| malloc in use | 2472 MiB | 2472 MiB (+0) |
+| Image heap | 3 chunks, 192 MiB | 3 chunks, 192 MiB |
+| Shader variants alive | 1291 (5592 freed) | 1275 (12123 freed) |
+
+The first tour, on v1.0.1-rc.1, grew 60 MiB in lap 2: every auto save (on by default since this release) kept its
+writer thread's 4 MiB stack, since a detached thread is never reclaimed on the Switch. Fixed before the tag
+(8618a1ff: the writer thread is joined); the tour above is with the fix.
+
 ## v1.0.0 (62bee4fb), 2026-10-28
 
 Console: the maintainers' Switch (Atmosphère), handheld, charging (the first attempt, on battery at 12%, lost the
