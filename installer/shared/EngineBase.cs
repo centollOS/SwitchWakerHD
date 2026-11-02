@@ -11,6 +11,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -26,12 +27,12 @@ sealed class InstallException : Exception
     public InstallException(string message) : base(message) { }
 }
 
-abstract class EngineBase
+abstract partial class EngineBase
 {
     // The work folder: the release, the build and the log go there.
     protected abstract string Work { get; }
 
-    public const int StepPython = 0, StepDevkit = 1, StepRelease = 2, StepBuild = 3;
+    public const int StepPython = 0, StepRelease = 1, StepDevkit = 2, StepBuild = 3;
 
     public event Action<string, LogKind>? Log;
     public event Action<int, StepState>? StepChanged;
@@ -91,8 +92,8 @@ abstract class EngineBase
         Info(Str.Get("welcome_dir", Work));
         Preflight();
         RunStep(StepPython,  Python);
-        RunStep(StepDevkit,  Toolchain);
         RunStep(StepRelease, Release);
+        RunStep(StepDevkit,  SwitchTools);
         RunStep(StepBuild,   Build);
     }
 
@@ -118,8 +119,35 @@ abstract class EngineBase
 
     // Python 3 with the packages make_sd.py needs; sets pythonCmd.
     protected abstract void Python();
-    // The Switch toolchain make_sd.py builds with.
+    // The computer's devkitPro, installed or updated with pacman: for a release without a pinned toolchain
+    // (tools/toolchain/lock.json, docs/pinned-toolchain-plan.md).
     protected abstract void Toolchain();
+
+    // The Switch tools: the release's pinned toolchain (devkitPro's own files at the versions the release was built
+    // and tested with, and zig), fetched into the work folder by the release's tools/toolchain/fetch.py, shared by
+    // the releases that pin the same files; the computer's devkitPro is not used. An older release: Toolchain().
+    string? pinnedToolchain;
+    string ToolchainDir => Path.Combine(Work, "toolchain");
+
+    void SwitchTools()
+    {
+        var fetch = Path.Combine(ReleaseDir, "tools", "toolchain", "fetch.py");
+        if (!File.Exists(Path.Combine(ReleaseDir, "tools", "toolchain", "lock.json")) || !File.Exists(fetch))
+        {
+            Toolchain();
+            return;
+        }
+        Say(Str.Get("tc_fetching"));
+        string? dir = null;
+        var rc = Exec(pythonCmd, $"-I {Quote(fetch)} --dest {Quote(ToolchainDir)} --cache {Quote(ToolchainDir + "-cache")}",
+                      ReleaseDir, check: false, onLine: line => { if (line.Contains("devkitpro")) dir = line.Trim(); });
+        if (rc != 0 || dir == null || !File.Exists(Path.Combine(dir, "toolchain.json")))
+            throw new InstallException(Str.Get("tc_fail"));
+        pinnedToolchain = dir;
+        Ok(Str.Get("tc_ready", dir));
+        // the HOME-screen forwarder is built from the same pinned toolchain (make_sd.py passes --toolchain pinned to
+        // tools/switch/forwarder/build_forwarder_windows.py): nothing from the computer's devkitPro either
+    }
     // Runs a process, streams its output to the log (and to onLine); with check, a non-zero exit is a failure. A
     // cancel stops it and everything it started, and throws OperationCanceledException.
     protected abstract int Exec(string exe, string args, string? workDir = null, bool check = true, Action<string>? onLine = null,
@@ -130,7 +158,7 @@ abstract class EngineBase
     // What the system adds to make_sd.py's environment (macOS: the native devkitPro and the installer's Python).
     protected virtual void BuildEnv(Dictionary<string, string> env) { }
 
-    public static readonly string[] StepKeys = { "step_python", "step_devkit", "step_release", "step_build" };
+    public static readonly string[] StepKeys = { "step_python", "step_release", "step_devkit", "step_build" };
 
     // ── Before anything: the game, its keys and the disk ────────────────────
     // What make_sd would only stop on after the downloads and the toolchain (#28: the disc key was not where it
@@ -250,24 +278,6 @@ abstract class EngineBase
         return "\"" + arg + new string('\\', trailing) + "\"";
     }
 
-
-    // A Dolphin .rvz with Zstandard compression (its default): the minimap's map tool reads it with Python 3.14's own
-    // compression.zstd. 3.14 goes next to the Python above, reached through the py launcher (py -3.14), which
-    // make_sd.py's tools/switch/guest_mods.py looks for; the build keeps the Python above.
-    internal static bool IsZstdRvz(string path)
-    {
-        try
-        {
-            if (!File.Exists(path)) return false;
-            var head = new byte[0x50];
-            using (var f = File.OpenRead(path))
-                if (f.Read(head, 0, head.Length) != head.Length) return false;
-            if (head[0] != 'R' || head[1] != 'V' || head[2] != 'Z' || head[3] != 1) return false;
-            return head[0x4C] == 0 && head[0x4D] == 0 && head[0x4E] == 0 && head[0x4F] == 5;   // disc struct: compression
-        }
-        catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { return false; }
-    }
-
     // Why pacman (devkitPro's: MSYS2 on Windows, its own on macOS) failed, from its output: a Str key that explains
     // it to the player.
     internal static string PacmanFailure(IEnumerable<string> output)
@@ -280,15 +290,23 @@ abstract class EngineBase
                Has(@"unable to lock database")                                 ? "dkp_why_lock" :
                Has(@"returned error: 429")                                     ? "dkp_why_429" :
                Has(@"Could not resolve host|timed out|Failed to connect|Connection reset|returned error: 5\d\d|Recv failure") ? "dkp_why_net" :
-               Has(@"signature .* (unknown trust|is invalid)|invalid or corrupted package|keyring") ? "dkp_why_sig" :
+               // not a bare "keyring": every transaction prints "checking keyring..." (#28 blamed the keys for a file conflict)
+               Has(@"signature .* (unknown trust|is invalid)|invalid or corrupted package|unknown public key|keyring is not writable") ? "dkp_why_sig" :
                "dkp_why_other";
     }
 
     // ── Release ──────────────────────────────────────────────────────────────
+    // A test installer (built for a pre-release by release-installer.yml: -p:WwhdRelease=TAG) builds that
+    // pre-release's zip; a normal one the latest release
+    static string FixedRelease() =>
+        typeof(EngineBase).Assembly.GetCustomAttributes(typeof(AssemblyMetadataAttribute), false)
+            .Cast<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "WwhdRelease")?.Value ?? "";
+
     void Release()
     {
         Say(Str.Get("rel_checking"));
-        releaseVer = LatestRelease();
+        releaseVer = FixedRelease();
+        if (releaseVer == "") releaseVer = LatestRelease();
         if (releaseVer != "") Ok(Str.Get("rel_found", releaseVer));
         else
         {
@@ -474,6 +492,8 @@ abstract class EngineBase
             Info(Str.Get("build_jobs", jobs, Environment.ProcessorCount, ramGb.ToString("0")));
         }
         BuildEnv(env);
+        // the pinned toolchain where SwitchTools fetched it (make_sd.py's default, --toolchain pinned, uses it)
+        if (pinnedToolchain != null) env["WWHD_TOOLCHAIN_DIR"] = ToolchainDir;
         var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
         var minimap = MinimapGame != null ? $" --guest-mod {MinimapMod} --gc-game {Quote(MinimapGame)}" : "";
@@ -612,30 +632,61 @@ abstract class EngineBase
     //   XferCommand = <python> <script> <root> %u %o
     // <root> is MSYS2's folder on Windows, for an %o that reaches a Windows Python as a POSIX path ("/" elsewhere).
     // Its "returned error: 403" lines are the ones PacmanFailure reads in pacman's own output.
+    // pacman before 6.1 (devkitPro's older MSYS2) never asks an XferCommand for a database's signature: the new
+    // list would be checked against the old .sig ("signature ... is invalid", #28). The script fetches the .sig
+    // with each .db itself; a newer pacman then asks for it again, which only rewrites it.
+    // A Windows Python reads the certificate store as it is (no root fetched on demand, "unable to get local
+    // issuer certificate" for MSYS2's mirrors in #28): Windows' curl is tried then, as setup.py does.
     const string PacmanFetchScript = """
         # SwitchWakerHD installer: pacman's XferCommand, the download through Python with a pacman user agent
-        import os, platform, shutil, sys, urllib.error, urllib.request
+        import os, platform, shutil, subprocess, sys, urllib.error, urllib.request
         root, url, out = sys.argv[1:4]
         if os.name == "nt" and out.startswith("/"):
             out = root.rstrip("/") + out
         system = "MSYS_NT-10.0" if os.name == "nt" else platform.system()
         agent = f"pacman/6.0.2 ({system} {platform.machine()}) libalpm/13.0.2"
-        try:
-            request = urllib.request.Request(url, headers={"User-Agent": agent})
-            with urllib.request.urlopen(request, timeout=60) as response, open(out, "wb") as f:
-                shutil.copyfileobj(response, f)
-        except urllib.error.HTTPError as e:
-            print(f"error: failed retrieving file '{os.path.basename(url)}': The requested URL returned error: {e.code}",
-                  file=sys.stderr)
-        except (OSError, urllib.error.URLError) as e:
-            print(f"error: failed retrieving file '{os.path.basename(url)}': {e}", file=sys.stderr)
-        else:
-            sys.exit(0)
-        try:
-            os.remove(out)
-        except OSError:
-            pass
-        sys.exit(1)
+        curl = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "curl.exe")
+
+        def remove(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+        # True when url is in path; None for a 404; False otherwise, with pacman's error line printed
+        def fetch(url, path):
+            try:
+                request = urllib.request.Request(url, headers={"User-Agent": agent})
+                with urllib.request.urlopen(request, timeout=60) as response, open(path, "wb") as f:
+                    shutil.copyfileobj(response, f)
+                return True
+            except urllib.error.HTTPError as e:
+                error = f"The requested URL returned error: {e.code}"
+                code = e.code
+            except (OSError, urllib.error.URLError) as e:
+                error, code = e, 0
+                if "CERTIFICATE_VERIFY_FAILED" in str(e) and os.name == "nt" and os.path.isfile(curl):
+                    cmd = [curl, "--location", "--fail", "--silent", "--show-error", "--user-agent", agent,
+                           "--output", path, url]
+                    if subprocess.run(cmd).returncode == 0:
+                        return True
+            remove(path)
+            print(f"error: failed retrieving file '{os.path.basename(url)}': {error}", file=sys.stderr)
+            return None if code == 404 else False
+
+        if not fetch(url, out):
+            sys.exit(1)
+        if url.endswith(".db"):
+            sig = (out[:-len(".part")] if out.endswith(".part") else out) + ".sig"
+            got = fetch(url + ".sig", sig + ".part")
+            if got:
+                os.replace(sig + ".part", sig)
+            elif got is None:
+                remove(sig)                 # the repository has no signatures: no stale one either
+            else:
+                remove(out)                 # keep the old list, which matches the old .sig
+                sys.exit(1)
+        sys.exit(0)
         """;
 
     // Writes the script to the work folder; returns its path.

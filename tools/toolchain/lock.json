@@ -1,0 +1,209 @@
+{
+ "server": "https://pkg.devkitpro.org/packages/",
+ "any": [
+  {
+   "name": "devkita64-newlib",
+   "path": "devkita64-newlib-4.6.0.20260123-4-any.pkg.tar.zst",
+   "sha256": "fc97ba1009a94b68f8714c3cc548ef697ca82687b72fe0c05a7ca3df81beb53e"
+  },
+  {
+   "name": "devkita64-rules",
+   "path": "devkita64-rules-1.1.1-1-any.pkg.tar.zst",
+   "sha256": "2649cf7827243447070073acc2aa2fee152a0592fc30e827ceed803c565a1ede"
+  },
+  {
+   "name": "devkita64-cmake",
+   "path": "devkita64-cmake-1.1.3-1-any.pkg.tar.zst",
+   "sha256": "f2baa41f2b776ea5e7c5340464d2ba1bcccbc73a96c3293c91ae13df9ee5d467"
+  },
+  {
+   "name": "dkp-cmake-common-utils",
+   "path": "dkp-cmake-common-utils-1.5.3-1-any.pkg.tar.zst",
+   "sha256": "9ddb64ff16962e6532d2a2bce1d7ae8eef4f6f5b859f145c2e58b87b7b164701"
+  },
+  {
+   "name": "switch-cmake",
+   "path": "switch-cmake-1.5.2-1-any.pkg.tar.zst",
+   "sha256": "7eee6a98312991faac73246f93d88740fb234d90ac5bd19ca969d6e227a59c8f"
+  },
+  {
+   "name": "switch-pkg-config",
+   "path": "switch-pkg-config-0.28-4-any.pkg.tar.xz",
+   "sha256": "ccba20970fcd151d0212b44913e04df76b5cf295c1d48df686aa9991f5490b2e"
+  },
+  {
+   "name": "libnx",
+   "path": "libnx-4.12.0-1-any.pkg.tar.zst",
+   "sha256": "c6950bdf8e4b872ece492225368c03e633776329548a7494f91aa1e8f239cd8a"
+  },
+  {
+   "name": "switch-zlib",
+   "path": "switch-zlib-1.3.1-1-any.pkg.tar.zst",
+   "sha256": "53cb5dc4006c96cd4195dabc15b46f07a63ad99c91939ce921db33556396442c"
+  },
+  {
+   "name": "switch-lz4",
+   "path": "switch-lz4-1.9.3-1-any.pkg.tar.xz",
+   "sha256": "9fc240f00b3f50573ca0188b5d01d26790a8cfbdbc0e8643d6bca9008144505a"
+  }
+ ],
+ "hosts": {
+  "win-x64": [
+   {
+    "name": "devkita64-gcc",
+    "path": "windows/x86_64/devkita64-gcc-15.2.0-7-x86_64.pkg.tar.zst",
+    "sha256": "3485ade0a8be199c0842a18c49516319137141bd2a84ab5135c198874f55c03b"
+   },
+   {
+    "name": "devkita64-binutils",
+    "path": "windows/x86_64/devkita64-binutils-2.45.1-2-x86_64.pkg.tar.zst",
+    "sha256": "ca9a5b2a7065085834a7260b0e4723fd34c7bc7c261314205b992bba42dc3695"
+   },
+   {
+    "name": "switch-tools",
+    "path": "windows/x86_64/switch-tools-1.13.1-1-x86_64.pkg.tar.zst",
+    "sha256": "c9c5fc60e3dd2f82d7c6592611bd37cc610d150ef4fa75fe09ce329df998084d"
+   },
+   {
+    "name": "general-tools",
+    "path": "windows/x86_64/general-tools-1.4.4-1-x86_64.pkg.tar.zst",
+    "sha256": "a0fcea1a26c4f472c2ac98c409847dbec9d8e86ed82cd8b02131454f63d239f1"
+   },
+   {
+    "name": "uam",
+    "path": "windows/x86_64/uam-1.1.0-1-x86_64.pkg.tar.xz",
+    "sha256": "0affe6d0eda5a494224a772faae437d647b864e507b0a7d725efa551a06890a6"
+   }
+  ],
+  "osx-arm64": [
+   {
+    "name": "devkita64-gcc",
+    "path": "osx/arm64/devkita64-gcc-15.2.0-7-arm64.pkg.tar.zst",
+    "sha256": "1917899845602cc5c43a74196032ed924bd03751aba2f6405532ec796fd65639"
+   },
+   {
+    "name": "devkita64-binutils",
+    "path": "osx/arm64/devkita64-binutils-2.45.1-2-arm64.pkg.tar.zst",
+    "sha256": "ab164a57abbc8bef8423b5bfe1ce542d82bf9e8c7c40ddd6cee87dbd5d37e165"
+   },
+   {
+    "name": "switch-tools",
+    "path": "osx/arm64/switch-tools-1.13.1-1-arm64.pkg.tar.zst",
+    "sha256": "5f046c5dbf0ed080edead1ecf2275f71b691f30235eca2e4e03e679934f00c51"
+   },
+   {
+    "name": "general-tools",
+    "path": "osx/arm64/general-tools-1.4.4-1-arm64.pkg.tar.zst",
+    "sha256": "86f3107f313d1b8e12091b1a257c3b5c2dc4ee457e129145f81fe8afb6956b02"
+   },
+   {
+    "name": "uam",
+    "path": "osx/arm64/uam-1.1.0-1-arm64.pkg.tar.xz",
+    "sha256": "ac1c51e13832e1d629cbe41f072f438be009f79bebb6a216dca9a00f07f2c5b5"
+   }
+  ],
+  "osx-x64": [
+   {
+    "name": "devkita64-gcc",
+    "path": "osx/x86_64/devkita64-gcc-15.2.0-7-x86_64.pkg.tar.zst",
+    "sha256": "c84cd0a736a79f3b1699ef966a0a12a411a4dacf35049d5922a3f38c8c74ea45"
+   },
+   {
+    "name": "devkita64-binutils",
+    "path": "osx/x86_64/devkita64-binutils-2.45.1-2-x86_64.pkg.tar.zst",
+    "sha256": "f67eba96a99b9c089697dfb4f537c5c71245e22038a5814475ab7a908cdb0817"
+   },
+   {
+    "name": "switch-tools",
+    "path": "osx/x86_64/switch-tools-1.13.1-1-x86_64.pkg.tar.zst",
+    "sha256": "eb5facfb3468228968ad34a3ff949bf7e5e95b47a3bf29b0e5878cf26ab64ee0"
+   },
+   {
+    "name": "general-tools",
+    "path": "osx/x86_64/general-tools-1.4.4-1-x86_64.pkg.tar.zst",
+    "sha256": "71c1aa8d3e178cd6b921f169272bf61abcad1af98f28b0296e83ccff720226b6"
+   },
+   {
+    "name": "uam",
+    "path": "osx/x86_64/uam-1.1.0-1-x86_64.pkg.tar.xz",
+    "sha256": "6129f683a5694e4935e7d853a5416587d56714713617f42f555ff2134ed0fa32"
+   }
+  ],
+  "linux-x64": [
+   {
+    "name": "devkita64-gcc",
+    "path": "linux/x86_64/devkita64-gcc-15.2.0-7-x86_64.pkg.tar.zst",
+    "sha256": "7a791f22db17d9085232c95926020c2a551fe29cd107b0a193aac65608fd3c1a"
+   },
+   {
+    "name": "devkita64-binutils",
+    "path": "linux/x86_64/devkita64-binutils-2.45.1-2-x86_64.pkg.tar.zst",
+    "sha256": "4349c8e64381818c0da8d8d633ce0b0e809a6e07c1a0aa575468c8d0c10852a9"
+   },
+   {
+    "name": "switch-tools",
+    "path": "linux/x86_64/switch-tools-1.13.1-1-x86_64.pkg.tar.zst",
+    "sha256": "de0a9473764d3c5205a7cc9b640e9e913c371b5684d526133384eb7e545c7dab"
+   },
+   {
+    "name": "general-tools",
+    "path": "linux/x86_64/general-tools-1.4.4-1-x86_64.pkg.tar.zst",
+    "sha256": "b6b59bd3d22d4f83a7f0668f749df7cf97b1f05083031e629d43ca4f4377c7b5"
+   },
+   {
+    "name": "uam",
+    "path": "linux/x86_64/uam-1.1.0-1-x86_64.pkg.tar.xz",
+    "sha256": "ef1b6882021445c52f8b8feb2c1b20c973a0f8be49b0aa96895d643e1374fc62"
+   }
+  ],
+  "linux-arm64": [
+   {
+    "name": "devkita64-gcc",
+    "path": "linux/aarch64/devkita64-gcc-15.2.0-7-aarch64.pkg.tar.zst",
+    "sha256": "d16a558b1f1f0c36d55bcda141a8f37237c0a2beab664404b0fcd5391fc59ee4"
+   },
+   {
+    "name": "devkita64-binutils",
+    "path": "linux/aarch64/devkita64-binutils-2.45.1-2-aarch64.pkg.tar.zst",
+    "sha256": "589ddcac75ac1c32c18ba01cdf71e34d552af50d2d346cdb7f20001a6ea8c8eb"
+   },
+   {
+    "name": "switch-tools",
+    "path": "linux/aarch64/switch-tools-1.13.1-1-aarch64.pkg.tar.zst",
+    "sha256": "65c35883c273b1b1bf092802ca68c0a878f12a8b3177c41c01681dbd95333129"
+   },
+   {
+    "name": "general-tools",
+    "path": "linux/aarch64/general-tools-1.4.4-1-aarch64.pkg.tar.zst",
+    "sha256": "ebfad3ddf84ff47d6e5518f44f6942e97af547e6a143f12192d6f074f7c51990"
+   },
+   {
+    "name": "uam",
+    "path": "linux/aarch64/uam-1.1.0-1-aarch64.pkg.tar.xz",
+    "sha256": "b01478682922bb6c816834ea7d1bc544ff309bc3b61188b693e5eb897d8e5a6a"
+   }
+  ]
+ },
+ "zig": {
+  "win-x64": {
+   "url": "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip",
+   "sha256": "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e"
+  },
+  "osx-arm64": {
+   "url": "https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz",
+   "sha256": "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489"
+  },
+  "osx-x64": {
+   "url": "https://ziglang.org/download/0.16.0/zig-x86_64-macos-0.16.0.tar.xz",
+   "sha256": "0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7"
+  },
+  "linux-x64": {
+   "url": "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
+   "sha256": "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+  },
+  "linux-arm64": {
+   "url": "https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz",
+   "sha256": "ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17"
+  }
+ }
+}

@@ -45,8 +45,8 @@ drives and network shares.
 | 15 | devkitPro installed in `D:\devkitPro` (not `C:`) | Found; builds |
 | 16 | Game image on an OneDrive Desktop, "online only" | Warning; builds |
 | 17 | Less than 10 GB free on `C:` | Stops before any download |
-| 18 | Only a 32-bit Python installed | "Not usable" in the log, Python 3.12 installed, builds |
-| 19 | No winget (older Windows 10, or its alias off) and no Python | "this Windows has no winget", install Python from python.org |
+| 18 | Other Pythons installed: a 32-bit one, Python 3.15 (py launcher), devkitPro's MSYS2 python on PATH, a `PIP_INDEX_URL` / `pip.ini` | All ignored: the installer's own Python 3.14.7 in `SwitchWakerHD-Build\python`, packages from `python-requirements.txt`, builds |
+| 19 | No Python at all | The same: Python 3.14.7 downloaded into the working folder, builds |
 | 20 | Defender "Controlled folder access" on, working folder not allowed | The access-denied / antivirus hint |
 
 ## D. devkitPro and network problems (#28)

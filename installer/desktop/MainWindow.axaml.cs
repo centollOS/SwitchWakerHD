@@ -320,9 +320,6 @@ public partial class MainWindow : Window
         TxtMmGame.Text = minimapGame ?? Str.Get("mm_none");
         TxtMmGame.Foreground = Res(minimapGame == null ? "FgDim" : "Fg");
         BtnMmClear.IsVisible = minimapGame != null;
-        var rvz = minimapGame != null && EngineBase.IsZstdRvz(minimapGame);
-        TxtMmNote.Text = rvz ? Str.Get("mm_rvz_note") : "";
-        TxtMmNote.IsVisible = rvz;
     }
 
     async void BtnMmPick_Click(object? sender, RoutedEventArgs e)

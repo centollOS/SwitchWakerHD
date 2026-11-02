@@ -19,7 +19,7 @@ for rid in linux-x64 linux-arm64; do
     echo "== $rid -> $dir"
     # one file, its native libraries inside; no libicu needed (the language comes from LANG)
     "$dotnet" publish "$here/desktop/SwitchWakerHD.Installer.Desktop.csproj" -c Release -r "$rid" --self-contained \
-        -p:Version="$version" -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+        -p:Version="$version" -p:WwhdRelease="${WWHD_RELEASE:-}" -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
         -p:EnableCompressionInSingleFile=true -p:InvariantGlobalization=true -o "$dir" --nologo
     chmod +x "$dir/SwitchWakerHD-Installer"
     tgz="$out/SwitchWakerHD-Installer-$rid.tar.gz"

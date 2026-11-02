@@ -15,6 +15,9 @@ loader's `hbl.json` edit for both.
 
 On Windows without Docker, `tools/switch/forwarder/build_forwarder_windows.py` does the same with a native devkitPro
 (keys: `%USERPROFILE%\.switch\prod.keys` by default, or `--keys PATH`; never inside the checkout); `make_sd.py` runs it after a native build.
+With `--toolchain pinned` (what `make_sd.py` and the installers use) it needs nothing from the computer but Python with
+Pillow: `pinned_tools.py` downloads nx-hbloader and hacBrewPack as source archives checked by the SHA-256 of their
+file tree (`*_TREE_SHA256` in `forwarder.env`), applies the patch, and builds them with the pinned devkitA64 and zig.
 See [INSTALL.md](../../../INSTALL.md), "Windows: devkitPro (no Docker or WSL)".
 
 ## Requirements

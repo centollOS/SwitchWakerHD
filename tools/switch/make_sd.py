@@ -9,7 +9,8 @@ your computer, from your own legally dumped copy (The Wind Waker HD, version 0: 
   2. checks that code/cking.rpx is the version the port is made for, and content/ against that version's list
      of files (a missing or damaged file is a warning: the game may crash where it needs it);
   3. translates the game's PowerPC code to C (tools/recomp/recomp.py -> build/gen/);
-  4. builds the Switch homebrew in the devkitPro container (tools/switch/build.sh -> build/switch-dk/wwhd.nro);
+  4. builds the Switch homebrew with the pinned devkitPro toolchain (tools/switch/build_switch.py ->
+     build/switch-dk/wwhd.nro; docs/pinned-toolchain-plan.md);
   5. writes OUT/switch/wwhd/ (wwhd.nro, game/, with --guest-mod mods/, with --ptbr translation/): copy OUT's contents to the root
      of the SD card.
 
@@ -17,7 +18,7 @@ usage:
   make_sd.py --image GAME.wux [--out DIR]     disc key: GAME.key next to the image (16 bytes or 32 hex digits);
                                               common key: WIIU_COMMON_KEY (32 hex digits) or common.key
                                               next to the image or in the current folder
-  make_sd.py --wua GAME.wua [--out DIR]       a Cemu Wii U archive (no keys; needs: pip install zstandard)
+  make_sd.py --wua GAME.wua [--out DIR]       a Cemu Wii U archive (no keys; needs Python 3.14+ or: pip install zstandard)
   make_sd.py --game-dir EXTRACTED [--out DIR] a folder with code/, content/, meta/ (e.g. from Cemu's
                                               mlc01/usr/title/00050000/10143500 or 10143600, without the update)
   The graphics (shadercache_dksh.bin) are prepared by default: from this release's shader template, downloaded
@@ -43,8 +44,10 @@ usage:
                                               (docs/ptbr-translation-plan.md). Without it an earlier one is kept.
            --no-ptbr                          remove an earlier Brazilian Portuguese translation from OUT
 
-Needs Python 3 with pycryptodome (only for --image: pip install pycryptodome) and Docker or Podman, or
-a native devkitPro (Windows: INSTALL.md, "Windows: devkitPro").
+Needs Python 3.14 with cmake and ninja (pip install cmake ninja; pycryptodome too for --image) and the internet
+once, for the pinned devkitPro toolchain (devkitPro's own files, ~130 MB, kept in build/toolchain): nothing from a
+devkitPro already installed. --toolchain devkitpro|docker: this computer's devkitPro or the devkitpro/devkita64
+image instead (INSTALL.md).
 What it makes contains the game: it is for your own console only; do not share it.
 """
 import argparse
@@ -145,15 +148,18 @@ def release_template():
     return out
 
 
-def shader_cache(src, game):
+def shader_cache(src, game, pinned):
     """build/shadercache_dksh.bin from the console's shader manifest (docs/shader-cache-from-dump-plan.md) or a
     shadercache_gl.bin. The files in build/shader-cache/ hold game code: they stay on this computer."""
     out = os.path.join(ROOT, "build", "shadercache_dksh.bin")
-    # natively when CMake, Ninja and a C++ compiler are there (on Windows devkitPro's MSYS2 ones: INSTALL.md), else in
-    # a container (tools/switch/dksh_cache/build.sh)
     env = dict(os.environ)
-    shell = native_shell(env) if os.name == "nt" else ["bash"]
-    tool = shell + [os.path.join("tools", "switch", "dksh_cache", "build.sh")]
+    if pinned:  # the pinned toolchain's zig (tools/switch/dksh_cache/build.py)
+        tool = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "dksh_cache", "build.py")]
+    else:
+        # natively when CMake, Ninja and a C++ compiler are there (on Windows devkitPro's MSYS2 ones: INSTALL.md),
+        # else in a container (tools/switch/dksh_cache/build.sh)
+        shell = native_shell(env) if os.name == "nt" else ["bash"]
+        tool = shell + [os.path.join("tools", "switch", "dksh_cache", "build.sh")]
     with open(src, "rb") as f:
         head = f.read(8)
     template = head in (b"WSME0001", b"WWHT0003")  # the release's sealed template, or one opened (issue #88)
@@ -178,7 +184,7 @@ def shader_cache(src, game):
 
 # Native build (no Docker/Podman): used when neither is installed, and on Windows whenever devkitPro is there (issue
 # #22: Docker from devkitPro's MSYS2 bash got its container paths rewritten). On Windows it needs a devkitPro install
-# (C:/devkitPro, https://devkitpro.org) with: pacman -S switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make
+# (C:/devkitPro, https://devkitpro.org) with: pacman -S devkitA64 switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make
 def find_devkitpro_win():
     """C:/devkitPro (devkitPro's default), or X:/devkitPro on another fixed drive when it was installed there"""
     if os.name != "nt":
@@ -235,9 +241,12 @@ def extract(image):
 
 def extract_wua(archive):
     try:
-        import zstandard  # noqa: F401
+        from compression import zstd  # noqa: F401  (Python 3.14 and newer)
     except ImportError:
-        fail("extracting a .wua needs zstandard: python -m pip install zstandard")
+        try:
+            import zstandard  # noqa: F401
+        except ImportError:
+            fail("extracting a .wua needs Python 3.14 or newer, or zstandard: python -m pip install zstandard")
     dst = os.path.join(ROOT, "build", "sd-game")
     tmp = dst + ".partial"
     shutil.rmtree(tmp, ignore_errors=True)
@@ -249,7 +258,7 @@ def extract_wua(archive):
     return dst
 
 
-def forwarder(args, out, icon=None):
+def forwarder(args, out, icon=None, pinned=False):
     """Native build, last step: the HOME-screen icon (forwarder .nsp, tools/switch/forwarder). It needs the user's
     own prod.keys, so without them it is skipped; it never fails the build, since the game does not need it."""
     print("\n[+] HOME-screen forwarder (optional)", flush=True)
@@ -262,6 +271,8 @@ def forwarder(args, out, icon=None):
         cmd = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "forwarder",
                                                   "build_forwarder_windows.py"),
                "--keys", keys, "--sd", out]
+        if pinned:
+            cmd += ["--toolchain", "pinned"]  # nx-hbloader and hacBrewPack from the pinned toolchain too
         if icon:
             cmd += ["--icon", os.path.abspath(icon)]
         if subprocess.call(cmd, cwd=ROOT) != 0:
@@ -292,12 +303,27 @@ def main():
     ptbr_arg = ap.add_mutually_exclusive_group()
     ptbr_arg.add_argument("--ptbr", help="Triforce-Heroes' PT-BR translation download (.rar, folder or .pack)")
     ptbr_arg.add_argument("--no-ptbr", action="store_true", help="remove an earlier PT-BR translation from OUT")
+    ap.add_argument("--toolchain", choices=("pinned", "devkitpro", "docker"),
+                    default=os.environ.get("WWHD_TOOLCHAIN") or "pinned",
+                    help="pinned (default): devkitPro's package files at the versions we build with, fetched into "
+                         "build/toolchain (tools/toolchain/fetch.py), nothing from this computer's devkitPro; "
+                         "devkitpro: this computer's devkitPro; docker: the devkitpro/devkita64 image (developers)")
     args = ap.parse_args()
     if not (args.image or args.wua or args.game_dir):
         ap.error("one of --image, --wua or --game-dir is required")
+    pinned = args.toolchain == "pinned"
+    if pinned:
+        # fetch.py unpacks devkitPro's zstd packages with Python 3.14's own zstd; the build runs the cmake and ninja
+        # installed next to this Python (the installers' pinned packages)
+        if sys.version_info < (3, 14):
+            fail("the pinned toolchain needs Python 3.14 or newer (this is %d.%d); or --toolchain devkitpro|docker"
+                 % sys.version_info[:2])
+        sys.path.insert(0, os.path.join(ROOT, "tools", "switch"))
+        import build_switch
+        build_switch.python_tool("cmake"), build_switch.python_tool("ninja")
     # WWHD_NATIVE=1 (build.sh's switch; the macOS and Linux installers set it): native even with docker/podman around
-    native = (not have_container_engine() or (os.name == "nt" and native_toolchain_ok()) or
-              os.environ.get("WWHD_NATIVE") == "1")
+    native = not pinned and (args.toolchain == "devkitpro" or not have_container_engine() or
+                             (os.name == "nt" and native_toolchain_ok()) or os.environ.get("WWHD_NATIVE") == "1")
     if native:
         if not native_toolchain_ok():
             fail("Docker or Podman is needed (the Switch toolchain runs in the devkitpro/devkita64 image), or "
@@ -399,7 +425,10 @@ def main():
     env["WWHD_GAME_DIR"] = game  # where build.sh makes the icon from
     if args.name:
         env["WWHD_NACP_NAME"] = args.name
-    run((native_shell(env) if native else ["bash"]) + ["tools/switch/build.sh"], env=env)
+    if pinned:
+        run([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "build_switch.py")], env=env)
+    else:
+        run((native_shell(env) if native else ["bash"]) + ["tools/switch/build.sh"], env=env)
     nro = os.path.join(ROOT, "build", "switch-dk", "wwhd.nro")
     if not os.path.isfile(nro):
         fail("the build made no %s" % nro)
@@ -407,7 +436,7 @@ def main():
     shaders = os.path.abspath(args.shaders) if args.shaders else None if args.no_shaders else release_template()
     if shaders:
         try:
-            dksh = shader_cache(shaders, game)
+            dksh = shader_cache(shaders, game, pinned)
         except SystemExit as e:
             with open(shaders, "rb") as f:
                 if f.read(8) not in (b"WSME0001", b"WWHT0003"):
@@ -444,8 +473,9 @@ def main():
         shutil.rmtree(gdst, ignore_errors=True)
         for part in ("code", "content", "meta"):
             shutil.copytree(os.path.join(game, part), os.path.join(gdst, part))
-    if native and not args.no_forwarder:
-        forwarder(args, out, args.icon or game)
+    # the forwarder (optional, it never stops the install): with the pinned toolchain too when the game used it
+    if (native or pinned) and not args.no_forwarder:
+        forwarder(args, out, args.icon or game, pinned)
     print("""
 Done: %s
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Pure-Python Cemu .wua (ZArchive) extractor: a stand-in for the C++ wwhd-extract on machines without it.
-Port of tools/wudextract/zarchive.cpp. Needs: pip install zstandard
+Port of tools/wudextract/zarchive.cpp. Needs Python 3.14 or newer (compression.zstd), or: pip install zstandard
 
 usage: wuaextract.py ARCHIVE.wua list
        wuaextract.py ARCHIVE.wua extract OUTDIR [TITLE]    TITLE: 16 hex digits or folder name
@@ -12,7 +12,11 @@ import re
 import struct
 import sys
 
-import zstandard
+try:
+    from compression import zstd  # Python 3.14 and newer (zstandard may have no wheel for a new Python)
+except ImportError:
+    zstd = None
+    import zstandard
 
 MAGIC, VERSION1, FOOTER, BLOCK = 0x169F52D6, 0x61BF3A01, 144, 65536
 DEFAULT_TITLES = ("0005000010143500", "0005000010143600")  # the base games the port builds from (USA, Europe)
@@ -68,7 +72,7 @@ class Zar:
                 self.nodes.append((name, True, w1 | (w3 & 0xFFFF) << 32, w2 | (w3 & 0xFFFF0000) << 16))
             else:
                 self.nodes.append((name, False, w1, w2))
-        self.dz = zstandard.ZstdDecompressor()
+        self.dz = None if zstd else zstandard.ZstdDecompressor()
         self.cached = None, None
 
     def read(self, off, n):
@@ -83,7 +87,7 @@ class Zar:
             return self.cached[1]
         raw = self.read(self.data_off + self.boff[i], self.blen[i])
         if self.blen[i] != BLOCK:
-            raw = self.dz.decompress(raw, max_output_size=BLOCK)
+            raw = zstd.decompress(raw) if zstd else self.dz.decompress(raw, max_output_size=BLOCK)
             if len(raw) != BLOCK:
                 sys.exit("block %d is damaged" % i)
         self.cached = i, raw

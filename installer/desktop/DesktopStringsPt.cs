@@ -7,10 +7,6 @@ static class DesktopStringsPt
 {
     public static readonly Dictionary<string, string> Common = new()
     {
-        ["py_desk_arch"]    = "Este computador ({0}) não é ARM64 nem x86-64.",
-        ["py_desk_downloading"] = "Baixando o Python {0}...",
-        ["py_desk_unpacking"] = "Preparando o Python...",
-        ["py_desk_fail"]    = "O Python não inicia a partir de {0}. Apague essa pasta e clique em Tentar novamente.",
         ["sd_desk_todo"]    = "{0} arquivos para copiar ({1} já estavam no cartão).",
         ["sd_fail_desk"]    = "A cópia falhou ({0}): verifique se o cartão continua conectado e não está protegido contra gravação, e copie de novo; ou copie manualmente.",
         ["sd_ejected"]     = "Cartão ejetado: você já pode retirá-lo (ou sair do hekate).",

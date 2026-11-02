@@ -10,6 +10,8 @@ name=SwitchWakerHD-${ref}
 out=build/release
 mkdir -p "$out"
 rm -f "$out/$name.zip"
-git archive --format=zip --prefix="$name/" -o "$out/$name.zip" "$ref"
+# a zip's dates have no time zone: written in the earliest one (UTC-12), they are in the past wherever it is
+# unpacked (local-time dates read in the Americas were hours in the future, and ninja re-ran CMake for ever)
+TZ=Etc/GMT+12 git archive --format=zip --prefix="$name/" -o "$out/$name.zip" "$ref"
 python3 -I tools/release/guard.py "$out/$name.zip"
 (cd "$out" && shasum -a 256 "$name.zip" > "$name.zip.sha256" && cat "$name.zip.sha256")

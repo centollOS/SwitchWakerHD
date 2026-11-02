@@ -108,6 +108,18 @@ macro(switch_port_executable)
     target_compile_options(wwhd PRIVATE -fvisibility=hidden
                            "SHELL:-include \"${CMAKE_SOURCE_DIR}/runtime/include/switch_visibility.h\"")
   endif()
+  # the toolchain that built the NRO, for the log and crash reports (switch_toolchain.h; docs/pinned-toolchain-plan.md)
+  if(WWHD_SWITCH)
+    set(WWHD_TOOLCHAIN_INFO ${CMAKE_BINARY_DIR}/generated/switch_toolchain.cpp)
+    add_custom_target(wwhd_toolchain_info
+      COMMAND ${CMAKE_COMMAND} -DOUT=${WWHD_TOOLCHAIN_INFO} -DCC=${CMAKE_C_COMPILER} -DDEVKITPRO=${DEVKITPRO}
+              -DUAM=${NX_UAM_EXE} -DHOST=${CMAKE_HOST_SYSTEM_NAME}
+              -P ${CMAKE_SOURCE_DIR}/cmake/SwitchToolchainInfo.cmake
+      BYPRODUCTS ${WWHD_TOOLCHAIN_INFO}
+      COMMENT "Toolchain info" VERBATIM)
+    target_sources(wwhd PRIVATE ${WWHD_TOOLCHAIN_INFO})
+    add_dependencies(wwhd wwhd_toolchain_info)
+  endif()
   # guest mods built into the NRO (tools/switch/guest_mods.py, docs/guest-mods-switch-plan.md): their modules are
   # compiled as game code (same flags, x28); without build/guest-mods/registry.c the NRO has none
   set(WWHD_GUEST_MODS_DIR "${CMAKE_SOURCE_DIR}/build/guest-mods" CACHE PATH "guest mods for the NRO (guest_mods.py)")
