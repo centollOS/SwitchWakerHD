@@ -1064,9 +1064,17 @@ void frame_stats() {
             (unsigned long long)p.poolHits, rescale_pool_bytes() >> 20, 100.0 * perFrame(p.hudSwitches),
             fxaa_enabled() ? "on" : "off", 100.0 * perFrame(p.fxaaPasses));
         {  // (this fork, #37) what grows over a long session: malloc in use against its arena, and the containers
+            // (this fork) mallinfo walks every free chunk with malloc's lock held, stalling every allocating thread:
+            // its own time is in the line, to see what it costs on a fragmented heap (renut-nx measured 25-46 ms)
+            static uint64_t mallinfoMaxNs = 0;
+            const uint64_t mi0 = now_ns();
             const struct mallinfo mi = mallinfo();
+            const uint64_t miNs = now_ns() - mi0;
+            mallinfoMaxNs = std::max(mallinfoMaxNs, miNs);
             const ShaderMemory sm = shader_memory();
             const ImageHeapFigures ih = image_heap_figures();
+            LOG("[mem] mallinfo %.2f ms (max %.2f), %zu free chunks", double(miNs) / 1e6, double(mallinfoMaxNs) / 1e6,
+                size_t(mi.ordblks));
             LOG("[mem] malloc %zu MiB in use of %zu MiB taken (heap never used %zu MiB); shader variants %zu (%zu freed), GLSL %zu, "
                 "programs %zu, translation records %zu (%zu KiB); surfaces %zu (with evicted ones); image heap %llu "
                 "chunks, %llu MiB, %.1f MiB free, largest free %.1f MiB",
