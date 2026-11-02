@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 WINDOWS = os.name == "nt"
@@ -127,6 +128,27 @@ def nro_icon(icon_src):
     return icon
 
 
+def future_dates_to_now():
+    """Source files dated in the future (a zip's local-time dates read in an earlier time zone, a wrong clock) get
+    the current time: newer than build.ninja for ever, they make ninja re-run CMake until it gives up ("manifest
+    'build.ninja' still dirty after 100 tries"). build/ and .git are left alone."""
+    now = time.time()
+    fixed = 0
+    for top, dirs, files in os.walk(ROOT):
+        if top == ROOT:
+            dirs[:] = [d for d in dirs if d not in ("build", ".git")]
+        for name in files:
+            path = os.path.join(top, name)
+            try:
+                if os.stat(path).st_mtime > now + 1:
+                    os.utime(path, (now, now))
+                    fixed += 1
+            except OSError:
+                pass
+    if fixed:
+        print("build_switch.py: %d source file(s) were dated in the future; now dated today" % fixed, flush=True)
+
+
 def configured_for(build_dir):
     """(generator, toolchain file) an existing build folder was configured with"""
     cache = os.path.join(build_dir, "CMakeCache.txt")
@@ -156,6 +178,7 @@ def main(argv=None):
     with open(os.path.join(dkp, "toolchain.json")) as f:
         print("build_switch.py: devkitPro toolchain %s (%s)" % (json.load(f)["id"], dkp), flush=True)
     env = clean_env(dkp)
+    future_dates_to_now()
     build_dir = os.path.join("build", "switch-dk")
     toolchain_file = (windows_toolchain_file(dkp) if WINDOWS else os.path.join(dkp, "cmake", "Switch.cmake")).replace("\\", "/")
     # a folder configured by another generator (build.sh's Makefiles) or another toolchain starts over
