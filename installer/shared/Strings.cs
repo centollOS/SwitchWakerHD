@@ -3,10 +3,25 @@ using System.Globalization;
 
 namespace SwitchWakerHD.Installer;
 
-// Spanish / English. Starts in the system language; the welcome page can switch it.
-static class Str
+// Spanish / English / Brazilian Portuguese (StringsPt.cs). Starts in the system language; the welcome page's button
+// switches to the next one.
+enum Lang { Es, En, Pt }
+
+static partial class Str
 {
-    public static bool Es = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "es";
+    public static Lang Current = FromCode(CultureInfo.CurrentUICulture.TwoLetterISOLanguageName);
+    public static bool Es => Current == Lang.Es;
+    public static bool Pt => Current == Lang.Pt;
+
+    // "es", "pt-BR", "en_US.UTF-8"... -> the language; anything else is English
+    public static Lang FromCode(string code) =>
+        code.StartsWith("es", System.StringComparison.OrdinalIgnoreCase) ? Lang.Es :
+        code.StartsWith("pt", System.StringComparison.OrdinalIgnoreCase) ? Lang.Pt : Lang.En;
+
+    // the welcome page's button: it names the language it switches to
+    static Lang NextLang => Current == Lang.Es ? Lang.En : Current == Lang.En ? Lang.Pt : Lang.Es;
+    public static string NextLanguageName => NextLang == Lang.Es ? "Español" : NextLang == Lang.En ? "English" : "Português";
+    public static void SwitchLanguage() => Current = NextLang;
 
     static readonly Dictionary<string, (string es, string en)> Table = new()
     {
@@ -23,7 +38,6 @@ static class Str
         ["welcome_need"]   = ("Necesitas: tu dump personal de Wind Waker HD (USA o EUR, versión 0), conexión a internet y unos 10 GB libres.",
                                "You need: your personal dump of Wind Waker HD (USA or EUR, version 0), an internet connection and about 10 GB free."),
         ["welcome_dir"]    = ("Carpeta de trabajo: {0}",                             "Working folder: {0}"),
-        ["lang"]           = ("English",                                             "Español"),
         ["btn_start"]      = ("Comenzar",                                            "Get started"),
         ["btn_back"]       = ("Atrás",                                               "Back"),
         ["btn_install"]    = ("Instalar",                                            "Install"),
@@ -82,6 +96,28 @@ static class Str
         ["mm_py_ok"]       = ("Python 3.14 listo para el .rvz del minimapa.",         "Python 3.14 ready for the minimap's .rvz."),
         ["mm_py_fail"]     = ("No se pudo instalar Python 3.14, que hace falta para leer un .rvz de Dolphin. Instálalo desde python.org, o convierte el disco a .iso en Dolphin (clic derecho en el juego > Convertir archivo..., formato ISO) y elige ese.",
                                "Could not install Python 3.14, which is needed to read a Dolphin .rvz. Install it from python.org, or turn the disc into an .iso in Dolphin (right-click the game > Convert File..., format ISO) and choose that."),
+        // Brazilian Portuguese: Triforce-Heroes' fan translation, downloaded by the player (make_sd.py --ptbr,
+        // docs/ptbr-translation-plan.md)
+        ["ptbr_h"]         = ("Traducción al portugués de Brasil (opcional)",          "Brazilian Portuguese translation (optional)"),
+        ["ptbr_d"]         = ("Pone el juego en portugués de Brasil con la traducción hecha por fans de Triforce-Heroes. No viene con el instalador: descárgala tú de su página (la versión «Emulador») y elige aquí el archivo descargado (.rar) o la carpeta donde lo extrajiste. Se aplica sobre tu propio juego original.",
+                               "Plays the game in Brazilian Portuguese with Triforce-Heroes' fan translation. It does not come with the installer: download it yourself from their page (the \"Emulador\" version) and choose the downloaded file (.rar) here, or the folder you extracted it to. It is applied on your own original game."),
+        ["ptbr_link"]      = ("Abrir la página de Triforce-Heroes",                     "Open Triforce-Heroes' page"),
+        ["ptbr_none"]      = ("Sin traducción",                                         "No translation"),
+        ["ptbr_pick"]      = ("Elegir descarga...",                                     "Choose download..."),
+        ["ptbr_folder"]    = ("Carpeta...",                                             "Folder..."),
+        ["ptbr_dlg_title"] = ("Selecciona la traducción descargada de Triforce-Heroes", "Select the translation downloaded from Triforce-Heroes"),
+        ["ptbr_dlg_folder"] = ("Selecciona la carpeta donde extrajiste la traducción",  "Select the folder you extracted the translation to"),
+        ["ptbr_dlg_filter"] = ("Traducción (*.rar;*.zip;*.7z;*.pack)|*.rar;*.zip;*.7z;*.pack|Todos (*.*)|*.*", "Translation (*.rar;*.zip;*.7z;*.pack)|*.rar;*.zip;*.7z;*.pack|All files (*.*)|*.*"),
+        ["ptbr_type"]      = ("Traducción (.rar, .zip, .7z, .pack)",                    "Translation (.rar, .zip, .7z, .pack)"),
+        ["ptbr_pre"]       = ("Portugués de Brasil: la traducción de {0}",              "Brazilian Portuguese: the translation from {0}"),
+        ["ptbr_no_file"]   = ("No se encuentra la traducción elegida: {0}. Elígela otra vez o quítala.",
+                               "The chosen translation is not there: {0}. Choose it again or remove it."),
+        ["ptbr_old_release"] = ("Esta versión de SwitchWakerHD todavía no admite la traducción al portugués: se instala sin ella.",
+                               "This SwitchWakerHD release does not support the Portuguese translation yet: it is installed without it."),
+        ["ptbr_building"]  = ("Aplicando la traducción al portugués sobre tu juego...", "Applying the Portuguese translation to your game..."),
+        ["ptbr_done"]      = ("Portugués de Brasil: el juego empieza en portugués (si antes elegiste otro idioma en el juego, elige Português (Brasil) en Menos > Language). Para cambiar de idioma: mantén Menos > Language, elige otro y reinicia el juego.",
+                               "Brazilian Portuguese: the game starts in Portuguese (if you chose another language in the game before, choose Português (Brasil) in Minus > Language). To change the language: hold Minus > Language, choose another one and restart the game."),
+
         // Prepared graphics (issue #88: the release's shader template, make_sd.py --shaders)
         ["sh_h"]           = ("Preparar los gráficos ahora",                          "Prepare the graphics now"),
         ["sh_d"]           = ("Compila en este ordenador los gráficos del juego a partir de tus propios archivos, para que la consola no tenga que hacerlo la primera vez: sin pantalla de carga ni lugares en negro. Tarda unos minutos más.",
@@ -299,15 +335,34 @@ static class Str
                                "This installer needs administrator rights. Right-click the .exe and choose \"Run as administrator\"."),
     };
 
-    // Another system's wording (the macOS installer: desktop/MacStrings.cs): its keys win over Table's.
+    // Another system's wording (the macOS installer: desktop/MacStrings.cs): its keys win over Table's (and its
+    // Portuguese ones over PtTable's).
     static Dictionary<string, (string es, string en)>? overrides;
-    public static void Override(Dictionary<string, (string es, string en)> table) => overrides = table;
+    static Dictionary<string, string>? overridesPt;
+    public static void Override(Dictionary<string, (string es, string en)> table, Dictionary<string, string>? pt = null)
+    {
+        overrides = table;
+        overridesPt = pt;
+    }
 
     public static string Get(string key, params object[] args)
     {
-        if ((overrides == null || !overrides.TryGetValue(key, out var pair)) && !Table.TryGetValue(key, out pair))
-            return $"[{key}]";
-        var s = Es ? pair.es : pair.en;
+        bool own = overrides != null && overrides.ContainsKey(key);
+        if (!own && !Table.ContainsKey(key)) return $"[{key}]";
+        var pair = own ? overrides![key] : Table[key];
+        string s;
+        if (Current == Lang.Pt)  // a key without Portuguese is the English one
+            s = own ? (overridesPt != null && overridesPt.TryGetValue(key, out var p) ? p : pair.en)
+                    : (PtTable.TryGetValue(key, out var q) ? q : pair.en);
+        else
+            s = Current == Lang.Es ? pair.es : pair.en;
         return args.Length > 0 ? string.Format(s, args) : s;
+    }
+
+    // the keys of a language table that lack Portuguese (tests and the builds' check)
+    public static IEnumerable<string> MissingPortuguese()
+    {
+        foreach (var k in Table.Keys) if (!PtTable.ContainsKey(k) && !(overrides?.ContainsKey(k) ?? false)) yield return k;
+        if (overrides != null) foreach (var k in overrides.Keys) if (!(overridesPt?.ContainsKey(k) ?? false)) yield return k;
     }
 }

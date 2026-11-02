@@ -105,7 +105,7 @@ public partial class MainWindow : Window
     {
         Title             = Str.Get("title");
         TxtSubtitle.Text  = Str.Get("subtitle");
-        BtnLang.Content   = Str.Get("lang");
+        BtnLang.Content   = Str.NextLanguageName;
 
         TxtWelcomeH.Text     = Str.Get("welcome_h");
         TxtWelcomeBody.Text  = Str.Get("welcome_body");
@@ -136,6 +136,13 @@ public partial class MainWindow : Window
         BtnMmFolder.Content = Str.Get("mm_folder");
         BtnMmClear.Content = Str.Get("fwd_clear");
         ShowMinimap();
+        TxtPtH.Text = Str.Get("ptbr_h");
+        TxtPtD.Text = Str.Get("ptbr_d");
+        BtnPtLink.Content = Str.Get("ptbr_link");
+        BtnPtPick.Content = Str.Get("ptbr_pick");
+        BtnPtFolder.Content = Str.Get("ptbr_folder");
+        BtnPtClear.Content = Str.Get("fwd_clear");
+        ShowPtbr();
 
         TxtProgH.Text    = Str.Get("prog_h");
         TxtProgBody.Text = Str.Get("prog_body");
@@ -164,7 +171,7 @@ public partial class MainWindow : Window
 
     void BtnLang_Click(object sender, RoutedEventArgs e)
     {
-        Str.Es = !Str.Es;
+        Str.SwitchLanguage();
         ApplyLanguage();
     }
 
@@ -305,6 +312,43 @@ public partial class MainWindow : Window
         ShowMinimap();
     }
 
+    // ── Optional Brazilian Portuguese: the player's download of Triforce-Heroes' translation ─────
+    string? ptbrDownload;
+
+    void ShowPtbr()
+    {
+        TxtPtFile.Text = ptbrDownload ?? Str.Get("ptbr_none");
+        TxtPtFile.Foreground = (Brush)FindResource(ptbrDownload == null ? "FgDim" : "Fg");
+        BtnPtClear.Visibility = ptbrDownload == null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    void BtnPtLink_Click(object sender, RoutedEventArgs e)
+    {
+        try { Process.Start(new ProcessStartInfo(InstallEngine.PtbrPage) { UseShellExecute = true }); }
+        catch (Exception) { Clipboard.SetText(InstallEngine.PtbrPage); }
+    }
+
+    void BtnPtPick_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog { Title = Str.Get("ptbr_dlg_title"), Filter = Str.Get("ptbr_dlg_filter") };
+        if (dlg.ShowDialog(this) == true) ptbrDownload = dlg.FileName;
+        ShowPtbr();
+    }
+
+    void BtnPtFolder_Click(object sender, RoutedEventArgs e)
+    {
+        using var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = Str.Get("ptbr_dlg_folder"), ShowNewFolderButton = false };
+        if (ptbrDownload != null && Directory.Exists(ptbrDownload)) dlg.SelectedPath = ptbrDownload;
+        if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK) ptbrDownload = dlg.SelectedPath;
+        ShowPtbr();
+    }
+
+    void BtnPtClear_Click(object sender, RoutedEventArgs e)
+    {
+        ptbrDownload = null;
+        ShowPtbr();
+    }
+
     // Dropping the game file or folder on the window picks it and its format.
     void Window_Drop(object sender, DragEventArgs e)
     {
@@ -328,6 +372,7 @@ public partial class MainWindow : Window
         engine.GameArg  = GameArg();
         engine.ForwarderKeys = keysPath != null && File.Exists(keysPath) ? keysPath : null;
         engine.MinimapGame = minimapGame;
+        engine.PtbrDownload = ptbrDownload;
         engine.PrepareShaders = ChkShaders.IsChecked == true;
         running = true; failed = false;
         cts = new CancellationTokenSource();
@@ -579,6 +624,8 @@ public partial class MainWindow : Window
         TxtFwdDone.Foreground = (Brush)FindResource(nspFresh ? "Fg" : "Warn");
         TxtMmDone.Visibility = minimapGame != null ? Visibility.Visible : Visibility.Collapsed;
         TxtMmDone.Text = Str.Get("mm_done");
+        TxtPtDone.Visibility = ptbrDownload != null ? Visibility.Visible : Visibility.Collapsed;
+        TxtPtDone.Text = Str.Get("ptbr_done");
         TxtGameFilesDone.Visibility = engine.BadGameFiles > 0 ? Visibility.Visible : Visibility.Collapsed;
         TxtGameFilesDone.Text = Str.Get("game_files_done", engine.BadGameFiles, string.Join("\n", engine.BadGameFileLines.Take(3)));
         TxtGameFilesDone.Foreground = (Brush)FindResource("Warn");

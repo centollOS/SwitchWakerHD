@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <string>
 
+#include "../menu_i18n.h"
 #include "../mods/guest_builtin.h"
 #include "imgui.h"
 
@@ -45,19 +46,19 @@ static void option_control(guestbuiltin::Mod& m, guestbuiltin::Option& o, std::s
 void draw() {
     auto& list = guestbuiltin::list();
     if (list.empty()) return;
-    ImGui::SeparatorText("Code mods in this build");
-    wrapped(kMuted, "Built into the game when it was made (make_sd.py --guest-mod). To add or remove one, build the "
-                    "game again.");
+    ImGui::SeparatorText(menu_i18n::tr("Code mods in this build"));
+    wrapped(kMuted, menu_i18n::tr("Built into the game when it was made (make_sd.py --guest-mod). To add or remove one, build the "
+                                  "game again."));
     // above the options: the last one a controller reaches is at the bottom of the tab, where a line under it is
     // out of view
     if (std::any_of(list.begin(), list.end(), [](const guestbuiltin::Mod& m) { return m.changed; }))
-        wrapped(kWarn, "Saved. The mods read their options when the game starts: close the game (HOME) and start it "
-                       "again to see the change.");
+        wrapped(kWarn, menu_i18n::tr("Saved. The mods read their options when the game starts: close the game (HOME) and start it "
+                                     "again to see the change."));
     for (auto& m : list) {
         ImGui::PushID(m.id.c_str());
         ImGui::Spacing();
         ImGui::TextUnformatted((m.name + "  " + m.version).c_str());
-        if (!m.status.empty()) wrapped(kBad, "Not running: " + m.status);
+        if (!m.status.empty()) wrapped(kBad, menu_i18n::tr("Not running: ") + m.status);
         else if (!m.description.empty()) wrapped(kMuted, m.description);
         static std::string error;
         for (auto& o : m.options) {

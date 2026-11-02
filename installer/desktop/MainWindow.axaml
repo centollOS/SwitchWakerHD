@@ -102,6 +102,22 @@
               </StackPanel>
             </Border>
 
+            <!-- Optional: Brazilian Portuguese (the player's own download of Triforce-Heroes' fan translation) -->
+            <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
+              <StackPanel>
+                <TextBlock x:Name="TxtPtH" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                <TextBlock x:Name="TxtPtD" Classes="dim" FontSize="13" Margin="0,0,0,6"/>
+                <Button x:Name="BtnPtLink" Classes="link" HorizontalAlignment="Left" Margin="0,0,0,10" Click="BtnPtLink_Click"/>
+                <Grid ColumnDefinitions="*,Auto,Auto,Auto">
+                  <TextBlock x:Name="TxtPtFile" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                             TextWrapping="NoWrap" Margin="0,0,12,0"/>
+                  <Button x:Name="BtnPtClear" Grid.Column="1" Classes="link" Margin="0,0,8,0" Click="BtnPtClear_Click" IsVisible="False"/>
+                  <Button x:Name="BtnPtFolder" Grid.Column="2" Classes="link" Margin="0,0,8,0" Click="BtnPtFolder_Click"/>
+                  <Button x:Name="BtnPtPick" Grid.Column="3" Classes="secondary" Click="BtnPtPick_Click"/>
+                </Grid>
+              </StackPanel>
+            </Border>
+
             <!-- Optional: the HOME-screen forwarder -->
             <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
               <StackPanel>
@@ -232,6 +248,7 @@
                 <TextBlock x:Name="TxtNext4" Classes="dim"/>
                 <TextBlock x:Name="TxtFwdDone" Margin="0,4,0,0" IsVisible="False"/>
                 <TextBlock x:Name="TxtMmDone" Margin="0,4,0,0" IsVisible="False"/>
+                <TextBlock x:Name="TxtPtDone" Margin="0,4,0,0" IsVisible="False"/>
                 <TextBlock x:Name="TxtGameFilesDone" Margin="0,4,0,0" TextWrapping="Wrap" IsVisible="False"/>
               </StackPanel>
             </Border>

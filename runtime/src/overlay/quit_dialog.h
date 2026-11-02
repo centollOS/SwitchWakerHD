@@ -5,6 +5,7 @@
 // way closing the TV window (or the app menu's Quit) does (hostui::quit). Kept free of the game so
 // runtime/tools/quit_menu_ui_test.cpp can drive it offscreen.
 #pragma once
+#include "../menu_i18n.h"
 #include "../quit_prompt.h"
 #include "imgui.h"
 #include "popup.h"
@@ -20,34 +21,35 @@ constexpr const char* kCancel = "Cancel##quit_game";
 // Quit Game was chosen; *close is set when Close Settings was.
 inline bool bottom_row(bool with_close, bool* close) {
     const ImGuiStyle& st = ImGui::GetStyle();
-    const float w = ImGui::CalcTextSize(kButton).x + st.FramePadding.x * 2 + ImGui::GetFontSize() * 2;
+    const char* button = menu_i18n::tr(kButton);
+    const float w = ImGui::CalcTextSize(button, nullptr, true).x + st.FramePadding.x * 2 + ImGui::GetFontSize() * 2;
     if (with_close) {
-        if (ImGui::Button("Close Settings", ImVec2(-(w + st.ItemSpacing.x), 0)) && close) *close = true;
+        if (ImGui::Button(menu_i18n::tr("Close Settings"), ImVec2(-(w + st.ItemSpacing.x), 0)) && close) *close = true;
         ImGui::SameLine();
     } else {
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - w);
     }
-    return ImGui::Button(kButton, ImVec2(w, 0));
+    return ImGui::Button(button, ImVec2(w, 0));
 }
 
 // The confirmation. open: Quit Game was chosen this frame. in_game: a save file is being played (then it
 // says that unsaved progress is lost). controller_back: B this frame (answers Cancel, as Esc does).
 // forced: a test run's answer (WWHD_TEST_QUIT_ANSWER), given once the dialog is up.
 inline Answer dialog(bool open, bool in_game, bool controller_back, Answer forced = Answer::None) {
-    if (!popup::begin(quitprompt::kTitle, open)) return Answer::None;
+    if (!popup::begin(menu_i18n::tr(quitprompt::kTitle), open)) return Answer::None;
     ImGui::PushTextWrapPos(popup::wrap_pos(26));
-    if (in_game) ImGui::TextWrapped("%s", quitprompt::kProgressLost);
-    else ImGui::TextWrapped("The game closes.");
+    if (in_game) ImGui::TextWrapped("%s", menu_i18n::tr(quitprompt::kProgressLost));
+    else ImGui::TextWrapped("%s", menu_i18n::tr("The game closes."));
     ImGui::PopTextWrapPos();
     ImGui::Spacing();
     auto answer = Answer::None;
     const ImVec2 size(ImGui::GetFontSize() * 7, 0);
     // Cancel first: keyboard and controller start on it (A or Enter right away keeps playing), and so does
     // a controller after the mouse or a touch (Dear ImGui then lands on the first button, not the default)
-    if (ImGui::Button(kCancel, size)) answer = Answer::Cancel;
+    if (ImGui::Button(menu_i18n::tr(kCancel), size)) answer = Answer::Cancel;
     ImGui::SetItemDefaultFocus();
     ImGui::SameLine();
-    if (ImGui::Button(kQuit, size)) answer = Answer::Quit;
+    if (ImGui::Button(menu_i18n::tr(kQuit), size)) answer = Answer::Quit;
     if (popup::dismissed(controller_back)) answer = Answer::Cancel;  // the X, a tap outside, Esc or B
     if (answer == Answer::None) answer = forced;
     if (answer != Answer::None) ImGui::CloseCurrentPopup();

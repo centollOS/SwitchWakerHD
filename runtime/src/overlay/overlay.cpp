@@ -63,6 +63,8 @@
 #include "gfx/stereo.h"
 #include "gfx/hdr.h"
 #include "../crashrec.h"
+#include "../fan_translation.h"  // (this fork)
+#include "../menu_i18n.h"  // (this fork) the menu's texts in Spanish / Portuguese
 #include "../game_languages.h"
 #include "../gfx/renderer.h"
 #ifdef __ANDROID__
@@ -542,14 +544,14 @@ void tab_saves() {
     refresh_slots(false);
     std::string msg = ss::last_message();
     if (!msg.empty()) note("%s", msg.c_str());
-    heading("Save states");
+    heading(menu_i18n::tr("Save states"));
     const bool full = ss::full_states();
     const char* keys = ext::features().keyboard ? " Shift+F1..F5 save in game, F6 loads slot 1, F2..F5 load slots 2..5 (Esc or F1 opens this menu)." : "";
     if (full)
         note("Full save states: the whole running game (large, contain game data: never share them).%s", keys);
     else
-        note("A save state keeps your progress and where Link stands (a few KB, no game data). Loading enters that place "
-             "with that progress; enemies and cutscenes start fresh.%s", keys);
+        note(menu_i18n::tr("A save state keeps your progress and where Link stands (a few KB, no game data). Loading enters that place "
+             "with that progress; enemies and cutscenes start fresh.%s"), keys);
     if (ImGui::BeginTable("slots", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("Slot", ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableSetupColumn("Saved");
@@ -560,33 +562,33 @@ void tab_saves() {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
-            ImGui::Text("Slot %d", i);
+            ImGui::Text(menu_i18n::tr("Slot %d"), i);
             ImGui::TableNextColumn();
-            if (!s.used) ImGui::TextDisabled("empty");
+            if (!s.used) ImGui::TextDisabled("%s", menu_i18n::tr("empty"));
             else {
                 std::string d = s.when + (s.area.empty() ? "" : "  -  " + s.area);
                 if (!s.controller.empty()) d += "  -  " + s.controller;
-                if (!s.portable) d += "  (full)";
-                if (!s.compatible) d += "  (incompatible)";
+                if (!s.portable) d += menu_i18n::tr("  (full)");
+                if (!s.compatible) d += menu_i18n::tr("  (incompatible)");
                 ImGui::TextUnformatted(d.c_str());
                 if (s.older_other && s.portable) {
                     // decision: an older full state stays on disk; say so (it is large and must not be shared)
-                    ImGui::TextDisabled("also holds an older full state (slot%d.bin, %.0f MB)", i, s.older_bytes / 1048576.0);
+                    ImGui::TextDisabled(menu_i18n::tr("also holds an older full state (slot%d.bin, %.0f MB)"), i, s.older_bytes / 1048576.0);
                     if (overlay::tooltip_hovered())
-                        ImGui::SetTooltip("Kept on disk, not loaded: the newer portable state is. It contains game data: "
-                                          "don't share it. Delete it in the states folder if you no longer need it.");
+                        ImGui::SetTooltip("%s", menu_i18n::tr("Kept on disk, not loaded: the newer portable state is. It contains game data: "
+                                          "don't share it. Delete it in the states folder if you no longer need it."));
                 } else if (s.older_other) {
-                    ImGui::TextDisabled("also holds an older portable state (slot%d.wwstate)", i);
+                    ImGui::TextDisabled(menu_i18n::tr("also holds an older portable state (slot%d.wwstate)"), i);
                 }
             }
             ImGui::TableNextColumn();
-            if (ImGui::Button("Save")) {
+            if (ImGui::Button(menu_i18n::tr("Save"))) {
                 ss::request_save(i);
                 U.slots_time = -1;
             }
             ImGui::SameLine();
             ImGui::BeginDisabled(!s.used || !s.compatible);
-            if (ImGui::Button("Load")) {
+            if (ImGui::Button(menu_i18n::tr("Load"))) {
                 ss::request_load(i);
                 set_open(false, OpenReason::LoadSlot);
             }
@@ -619,11 +621,11 @@ void tab_saves() {
             paths = ss::bug_report_text();
             pathsAt = ImGui::GetTime();
         }
-        note("For a bug report, attach your newest save state and your save file (cking.sav). Save a state at the "
-             "place of the problem first.");
+        note("%s", menu_i18n::tr("For a bug report, attach your newest save state and your save file (cking.sav). Save a state at the "
+             "place of the problem first."));
         note("%s", paths.c_str());
     }
-    note("States folder: %s", ss::states_dir().c_str());
+    note(menu_i18n::tr("States folder: %s"), ss::states_dir().c_str());
     if (features.full_states) {
         bool fs;
         if (check("Full save states (large, contain game data, don't share) - for debugging", full, &fs, !ss::full_states_forced()))
@@ -673,11 +675,11 @@ void tab_saves_screenshots() {
 // Last session, Auto save and At start (save_convenience.h): portable states in their own slots
 void tab_saves_convenience() {
     namespace conv = ss::convenience;
-    heading("Last session and auto saves");
+    heading(menu_i18n::tr("Last session and auto saves"));
     auto row = [](int id, const char* name, const ss::SlotInfo& s) {
         ImGui::PushID(id);
         ImGui::BeginDisabled(!s.used || !s.compatible);
-        if (ImGui::Button("Load")) {
+        if (ImGui::Button(menu_i18n::tr("Load"))) {
             ss::request_load(id);
             set_open(false, OpenReason::LoadSlot);
         }
@@ -685,40 +687,48 @@ void tab_saves_convenience() {
         ImGui::SameLine();
         ImGui::AlignTextToFramePadding();
         if (s.used && s.compatible) ImGui::Text("%s:  %s%s%s", name, s.when.c_str(), s.area.empty() ? "" : "  -  ", s.area.c_str());
-        else ImGui::TextDisabled("%s:  %s", name, s.used ? "incompatible" : "empty");
+        else ImGui::TextDisabled("%s:  %s", name, s.used ? menu_i18n::tr("incompatible") : menu_i18n::tr("empty"));
         ImGui::PopID();
     };
-    row(conv::kLastSessionSlot, "Last session", U.last_session);
-    help("Taken when you quit the game (on Android also when the app goes to the background), unless a cutscene or "
-         "dialogue is running then. A small portable state: your progress and where Link stands.");
+    row(conv::kLastSessionSlot, menu_i18n::tr("Last session"), U.last_session);
+    help(menu_i18n::tr("Taken when you quit the game (on Android also when the app goes to the background), unless a cutscene or "
+         "dialogue is running then. A small portable state: your progress and where Link stands."));
     for (int i = 1; i <= conv::kAutoSaves; i++) {
         char name[32];
-        snprintf(name, sizeof name, "Auto save %d", i);
+        snprintf(name, sizeof name, menu_i18n::tr("Auto save %d"), i);
         row(conv::kAutoSaveBase + i, name, U.auto_saves[i]);
     }
     const int minutes = ss::auto_save_minutes();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted("Auto save every");
+    ImGui::TextUnformatted(menu_i18n::tr("Auto save every"));
     for (int m : conv::kAutoSaveMinutes) {
         ImGui::SameLine();
         char label[16];
         if (m) snprintf(label, sizeof label, "%d min", m);
-        else snprintf(label, sizeof label, "Off");
+        else snprintf(label, sizeof label, "%s", menu_i18n::tr("Off"));
         if (radio(label, minutes == m)) ss::set_auto_save_minutes(m);
     }
-    help("Saves a small portable state into Auto save 1 to 3, the oldest first: every few minutes and shortly after "
+    help(menu_i18n::tr("Saves a small portable state into Auto save 1 to 3, the oldest first: every few minutes and shortly after "
          "you enter a new area, once you have had control of Link for a few seconds (not in a cutscene or dialogue). "
          "It never changes your game's save file: after a crash, load the newest auto save here, then save in game to "
-         "keep it. Separate from Crash Recovery.");
+         "keep it. Separate from Crash Recovery."));
     bool notice = ss::auto_save_notice();
-    if (ImGui::Checkbox("Show \"Autosaved\" when it saves", &notice)) ss::set_auto_save_notice(notice);
-    help("Off by default: auto saves happen quietly.");
+    if (ImGui::Checkbox(menu_i18n::tr("Show \"Autosaved\" when it saves"), &notice)) ss::set_auto_save_notice(notice);
+    help(menu_i18n::tr("Off by default: auto saves happen quietly."));
     const conv::StartChoice start = conv::parse_start(ss::at_start());
     int current = start.what == conv::Start::kLastSession ? 1 : start.what == conv::Start::kSlot ? 1 + start.slot : 0;
-    if (combo("At start", &current, "Intro as usual\0Continue last session\0Slot 1\0Slot 2\0Slot 3\0Slot 4\0Slot 5\0\0"))
+    // (this fork) the choices in the player's language, '\0' between them and two at the end
+    std::string choices = std::string(menu_i18n::tr("Intro as usual")) + '\0' + menu_i18n::tr("Continue last session") + '\0';
+    for (int k = 1; k <= 5; k++) {
+        char slot[32];
+        snprintf(slot, sizeof slot, menu_i18n::tr("Slot %d"), k);
+        choices += slot;
+        choices += '\0';
+    }
+    if (combo(menu_i18n::tr("At start"), &current, choices.c_str()))
         ss::set_at_start(current == 0 ? "intro" : current == 1 ? "last" : "slot" + std::to_string(current - 1));
-    help("Loads that state when the game starts, as soon as you continue a Quest Log on the title screen. An empty "
-         "slot starts the game as usual.");
+    help(menu_i18n::tr("Loads that state when the game starts, as soon as you continue a Quest Log on the title screen. An empty "
+         "slot starts the game as usual."));
 }
 
 void tab_saves_crash_recovery() {
@@ -753,7 +763,7 @@ std::string performance_device() {
     const auto driver = gfxvk::drivers::active_name();
     if (!driver.empty()) device += " (" + driver + ")";
 #endif
-    return device.empty() ? "GPU/driver: n/a" : device;
+    return device.empty() ? std::string(menu_i18n::tr("GPU/driver: n/a")) : device;
 }
 
 std::string performance_report() {
@@ -1492,18 +1502,18 @@ void code_mod_dialog() {
 #else
     const bool closable=!status.building;  // building: Cancel rebuild, or wait for it
 #endif
-    if(popup::begin("Rebuild code-mod support",true,0,closable)) {
+    if(popup::begin(menu_i18n::tr("Rebuild code-mod support###code-mod-rebuild"),true,0,closable)) {
         // the X, a tap outside, Esc or B: Later, Hide or Cancel (never cancels a rebuild on desktop)
         const bool back=navigation_pressed(input_map::face_input(input_map::kB));
         const bool dismissed=popup::dismissed(back);
         if(dismissed&&back)g_pad_b_used=true;
         ImGui::PushTextWrapPos(popup::wrap_pos(30));
         if(status.ready) {
-            ImGui::TextWrapped("Game code is ready. Restart the game to apply the change.");
+            ImGui::TextWrapped("%s",menu_i18n::tr("Game code is ready. Restart the game to apply the change."));
             if(!status.error.empty())ImGui::TextWrapped("%s",status.error.c_str());
-            if(ImGui::Button("Restart now"))hostui::post([] {std::string error;if(!mods::code::restart(error))fprintf(stderr,"[code mods] %s\n",error.c_str());});
+            if(ImGui::Button(menu_i18n::tr("Restart now")))hostui::post([] {std::string error;if(!mods::code::restart(error))fprintf(stderr,"[code mods] %s\n",error.c_str());});
             ImGui::SameLine();
-            if(ImGui::Button("Later")||dismissed){mods::code::dismiss();ImGui::CloseCurrentPopup();}
+            if(ImGui::Button(menu_i18n::tr("Later"))||dismissed){mods::code::dismiss();ImGui::CloseCurrentPopup();}
         } else if(status.building) {
             ImGui::TextUnformatted(status.stage.c_str());
             if(status.total)ImGui::ProgressBar(float(status.done)/status.total,ImVec2(360,0));
@@ -1511,15 +1521,15 @@ void code_mod_dialog() {
             ImGui::TextWrapped("The setup builds it in the background; you can keep playing. Its notification and screen can pause it.");
             if(ImGui::Button("Hide")||dismissed){mods::code::cancel();mods::code::dismiss();ImGui::CloseCurrentPopup();}
 #else
-            if(ImGui::Button("Cancel rebuild"))mods::code::cancel();
+            if(ImGui::Button(menu_i18n::tr("Cancel rebuild")))mods::code::cancel();
 #endif
         } else {
-            if(status.target)ImGui::TextWrapped("This mod needs code-mod support. Enable it now?");
-            ImGui::TextWrapped("Code mods need the game code to be rebuilt %s mod support, %s. Rebuild now?",status.target?"with":"without",mods::code::rebuild_duration());
+            if(status.target)ImGui::TextWrapped("%s",menu_i18n::tr("This mod needs code-mod support. Enable it now?"));
+            ImGui::TextWrapped(menu_i18n::tr("Code mods need the game code to be rebuilt %s mod support, %s. Rebuild now?"),status.target?menu_i18n::tr("with"):menu_i18n::tr("without"),mods::code::rebuild_duration());
             if(!status.error.empty())ImGui::TextWrapped("%s",status.error.c_str());
-            if(ImGui::Button("Rebuild now"))mods::code::begin();
+            if(ImGui::Button(menu_i18n::tr("Rebuild now")))mods::code::begin();
             ImGui::SameLine();
-            if(ImGui::Button("Cancel")||dismissed){mods::code::dismiss();ImGui::CloseCurrentPopup();}
+            if(ImGui::Button(menu_i18n::tr("Cancel"))||dismissed){mods::code::dismiss();ImGui::CloseCurrentPopup();}
         }
         ImGui::PopTextWrapPos();
         popup::end();
@@ -1573,19 +1583,19 @@ void restart_notice_frame(bool draw) {
 // A built-in mod's options on its page (Mods > the mod).
 void builtin_options(const std::string& id) {
     if (id == "direct-camera") {
-        option_slider("Camera speed", mods::camera_speed(), .5f, 2.f, "%.2fx", mods::set_camera_speed,
+        option_slider(menu_i18n::tr("Camera speed"), mods::camera_speed(), .5f, 2.f, "%.2fx", mods::set_camera_speed,
             [](float speed) { mods::set_camera_speed(speed); hostui::set("mod.direct-camera.speed", std::to_string(speed)); mods::packages::remember_option("direct-camera.speed", speed); });
     } else if (id == "lock-on") {
-        option_slider("Enemy lock-on range", mods::lock_on_range(), 1.f, 3.f, "%.2fx", mods::set_lock_on_range,
+        option_slider(menu_i18n::tr("Enemy lock-on range"), mods::lock_on_range(), 1.f, 3.f, "%.2fx", mods::set_lock_on_range,
             [](float range) { mods::set_lock_on_range(range); hostui::set("mod.lock-on.range", std::to_string(range)); mods::packages::remember_option("lock-on.range", range); });
         bool cycling = mods::lock_on_cycling();
-        if (ImGui::Checkbox("Cycle enemy targets with R3", &cycling))
+        if (ImGui::Checkbox(menu_i18n::tr("Cycle enemy targets with R3"), &cycling))
             hostui::post([cycling] { mods::set_lock_on_cycling(cycling); hostui::set("mod.lock-on.cycling", cycling ? "1" : "0"); mods::packages::remember_option("lock-on.cycling", cycling); });
-        help("Range 1 keeps the original enemy targeting distance. Press R3 while locked on "
-             "to cycle enemy targets. Disabling this mod restores original targeting behavior.");
+        help(menu_i18n::tr("Range 1 keeps the original enemy targeting distance. Press R3 while locked on "
+             "to cycle enemy targets. Disabling this mod restores original targeting behavior."));
         for (const char* env : {"WWHD_MOD_LOCK_ON_RANGE", "WWHD_MOD_LOCK_ON_CYCLING"})
             if (const char* override = std::getenv(env))
-                note("%s=%s overrides the saved option at startup.", env, override);
+                note(menu_i18n::tr("%s=%s overrides the saved option at startup."), env, override);
     } else if (id == "jump-anywhere") {
         const char* names[] = {"L", "R", "ZL", "ZR", "L3", "R3"};
         const uint32_t buttons[] = {input::kL, input::kR, input::kZL, input::kZR, input::kStickL, input::kStickR};
@@ -1597,25 +1607,25 @@ void builtin_options(const std::string& id) {
             }
         }
         bool dj = mods::double_jump();
-        if (ImGui::Checkbox("Double jump (once more in the air)", &dj))
+        if (ImGui::Checkbox(menu_i18n::tr("Double jump (once more in the air)"), &dj))
             hostui::post([dj] { mods::set_double_jump(dj); hostui::set("mod.jump-anywhere.double", dj ? "1" : "0"); mods::packages::remember_option("jump-anywhere.double", dj); });
         bool no_auto = mods::no_auto_jump();
-        if (ImGui::Checkbox("No automatic jumps off ledges", &no_auto))
+        if (ImGui::Checkbox(menu_i18n::tr("No automatic jumps off ledges"), &no_auto))
             hostui::post([no_auto] { mods::set_no_auto_jump(no_auto); hostui::set("mod.jump-anywhere.no-auto", no_auto ? "1" : "0"); mods::packages::remember_option("jump-anywhere.no-auto", no_auto); });
-        help("The button also keeps its normal use. Link drops off ledges instead of jumping when automatic ledge jumps are off; press the button just after leaving the edge to jump. The moon jump cheat takes L while it is on.");
+        help(menu_i18n::tr("The button also keeps its normal use. Link drops off ledges instead of jumping when automatic ledge jumps are off; press the button just after leaving the edge to jump. The moon jump cheat takes L while it is on."));
     } else if (id == "quick-use") {
-        ImGui::TextUnformatted("Quick-use animation speed");
+        ImGui::TextUnformatted(menu_i18n::tr("Quick-use animation speed"));
         for (float speed : {1.f, 1.25f, 1.5f}) {
-            const char* label = speed == 1.f ? "1x (vanilla)" : speed == 1.25f ? "1.25x" : "1.5x";
+            const char* label = speed == 1.f ? menu_i18n::tr("1x (vanilla)") : speed == 1.25f ? "1.25x" : "1.5x";
             if (speed != 1.f) flow::next(flow::check(label));
             if (radio(label, mods::quick_use_speed() == speed))
                 hostui::post([speed] { mods::set_quick_use_speed(speed); hostui::set("mod.quick-use.speed", std::to_string(speed)); mods::packages::remember_option("quick-use.speed", speed); });
         }
-        help("Only accelerates supported upper-body equip and boomerang wind-up for enemy-locked quick use. "
+        help(menu_i18n::tr("Only accelerates supported upper-body equip and boomerang wind-up for enemy-locked quick use. "
              "Does not bypass native readiness or ammo, or change projectile speed or flight/return. "
-             "Default: vanilla 1x, with quick use off.");
+             "Default: vanilla 1x, with quick use off."));
         if (const char* override = std::getenv("WWHD_MOD_QUICK_USE_SPEED"))
-            note("WWHD_MOD_QUICK_USE_SPEED=%s overrides the saved speed at startup.", override);
+            note(menu_i18n::tr("WWHD_MOD_QUICK_USE_SPEED=%s overrides the saved speed at startup."), override);
     } else if (id == "fast-forward") {
         for (unsigned rate : {2u, 3u, 4u}) {
             if (rate != 2) flow::next(flow::check(rate == 2 ? "2x" : rate == 3 ? "3x" : "4x"));
@@ -1632,34 +1642,34 @@ void builtin_options(const std::string& id) {
             }
         }
         bool mute = mods::fast_forward_mute();
-        if (ImGui::Checkbox("Mute audio while fast forwarding", &mute))
+        if (ImGui::Checkbox(menu_i18n::tr("Mute audio while fast forwarding"), &mute))
             hostui::post([mute] { mods::set_fast_forward_mute(mute); hostui::set("mod.fast-forward.mute", mute ? "1" : "0"); mods::packages::remember_option("fast-forward.mute", mute); });
-        help("Hold during a cutscene or conversation. Prompts still wait for input. Rebind the selected game button in Controls. Unmuted audio plays at a higher pitch.");
+        help(menu_i18n::tr("Hold during a cutscene or conversation. Prompts still wait for input. Rebind the selected game button in Controls. Unmuted audio plays at a higher pitch."));
     } else if (id == "move-speed") {
-        if (radio("Hold the button", mods::move_speed_mode() == mods::MoveMode::kHold))
+        if (radio(menu_i18n::tr("Hold the button"), mods::move_speed_mode() == mods::MoveMode::kHold))
             hostui::post([] { mods::set_move_speed_mode(mods::MoveMode::kHold); hostui::set("mod.move-speed.mode", "0"); mods::packages::remember_option("move-speed.mode", 0); });
-        flow::next(flow::check("Press to toggle"));
-        if (radio("Press to toggle", mods::move_speed_mode() == mods::MoveMode::kToggle))
+        flow::next(flow::check(menu_i18n::tr("Press to toggle")));
+        if (radio(menu_i18n::tr("Press to toggle"), mods::move_speed_mode() == mods::MoveMode::kToggle))
             hostui::post([] { mods::set_move_speed_mode(mods::MoveMode::kToggle); hostui::set("mod.move-speed.mode", "1"); mods::packages::remember_option("move-speed.mode", 1); });
-        if (radio("Native animation, played faster", mods::move_speed_anim() == mods::MoveAnim::kNative))
+        if (radio(menu_i18n::tr("Native animation, played faster"), mods::move_speed_anim() == mods::MoveAnim::kNative))
             hostui::post([] { mods::set_move_speed_anim(mods::MoveAnim::kNative); hostui::set("mod.move-speed.anim", "native"); mods::packages::remember_option("move-speed.anim", std::string("native")); });
-        modsui::same_line_if_fits("Dash instead of walk while boosting");
-        if (radio("Dash instead of walk while boosting", mods::move_speed_anim() == mods::MoveAnim::kDash))
+        modsui::same_line_if_fits(menu_i18n::tr("Dash instead of walk while boosting"));
+        if (radio(menu_i18n::tr("Dash instead of walk while boosting"), mods::move_speed_anim() == mods::MoveAnim::kDash))
             hostui::post([] { mods::set_move_speed_anim(mods::MoveAnim::kDash); hostui::set("mod.move-speed.anim", "dash"); mods::packages::remember_option("move-speed.anim", std::string("dash")); });
-        if (radio("Sprint pose (lean and arm drive)", mods::move_speed_anim() == mods::MoveAnim::kSprint))
+        if (radio(menu_i18n::tr("Sprint pose (lean and arm drive)"), mods::move_speed_anim() == mods::MoveAnim::kSprint))
             hostui::post([] { mods::set_move_speed_anim(mods::MoveAnim::kSprint); hostui::set("mod.move-speed.anim", "sprint"); mods::packages::remember_option("move-speed.anim", std::string("sprint")); });
-        option_slider("Running", mods::move_speed_land_factor(), 1.f, 4.f, "%.2fx", mods::set_move_speed_land_factor,
+        option_slider(menu_i18n::tr("Running"), mods::move_speed_land_factor(), 1.f, 4.f, "%.2fx", mods::set_move_speed_land_factor,
             [](float running) { mods::set_move_speed_land_factor(running); hostui::set("mod.move-speed.land", std::to_string(running)); mods::packages::remember_option("move-speed.land", running); });
-        option_slider("Swimming", mods::move_speed_swim_factor(), 1.f, 4.f, "%.2fx", mods::set_move_speed_swim_factor,
+        option_slider(menu_i18n::tr("Swimming"), mods::move_speed_swim_factor(), 1.f, 4.f, "%.2fx", mods::set_move_speed_swim_factor,
             [](float swimming) { mods::set_move_speed_swim_factor(swimming); hostui::set("mod.move-speed.swim", std::to_string(swimming)); mods::packages::remember_option("move-speed.swim", swimming); });
         const float seconds = mods::move_speed_stamina_seconds();
-        option_slider("Boost time", seconds, 0.f, 20.f, seconds <= 0.f ? "no limit" : "%.1f s", mods::set_move_speed_stamina_seconds,
+        option_slider(menu_i18n::tr("Boost time"), seconds, 0.f, 20.f, seconds <= 0.f ? menu_i18n::tr("no limit") : "%.1f s", mods::set_move_speed_stamina_seconds,
             [](float seconds) { mods::set_move_speed_stamina_seconds(seconds); hostui::set("mod.move-speed.stamina", std::to_string(seconds)); mods::packages::remember_option("move-speed.stamina", seconds); });
         const float cooldown = mods::move_speed_cooldown_seconds();
-        option_slider("Cooldown", cooldown, 0.f, 20.f, cooldown <= 0.f ? "none" : "%.1f s", mods::set_move_speed_cooldown_seconds,
+        option_slider(menu_i18n::tr("Cooldown"), cooldown, 0.f, 20.f, cooldown <= 0.f ? menu_i18n::tr("none") : "%.1f s", mods::set_move_speed_cooldown_seconds,
             [](float cooldown) { mods::set_move_speed_cooldown_seconds(cooldown); hostui::set("mod.move-speed.cooldown", std::to_string(cooldown)); mods::packages::remember_option("move-speed.cooldown", cooldown); });
         bool bar = mods::move_speed_bar();
-        if (ImGui::Checkbox("Show boost bar", &bar))
+        if (ImGui::Checkbox(menu_i18n::tr("Show boost bar"), &bar))
             hostui::post([bar] { mods::set_move_speed_bar(bar); hostui::set("mod.move-speed.bar", bar ? "1" : "0"); mods::packages::remember_option("move-speed.bar", bar); });
         const char* names[] = {"L3", "R3", "L", "R", "ZL", "ZR"};
         const uint32_t buttons[] = {input::kStickL, input::kStickR, input::kL, input::kR, input::kZL, input::kZR};
@@ -1670,12 +1680,12 @@ void builtin_options(const std::string& id) {
                 hostui::post([button] { mods::set_move_speed_button(button); hostui::set("mod.move-speed.button", std::to_string(button)); mods::packages::remember_option("move-speed.button", button); });
             }
         }
-        modsui::same_line_if_fits("Roll, then hold A");
-        if (radio("Roll, then hold A", mods::move_speed_button() == mods::kMoveButtonRollA))
+        modsui::same_line_if_fits(menu_i18n::tr("Roll, then hold A"));
+        if (radio(menu_i18n::tr("Roll, then hold A"), mods::move_speed_button() == mods::kMoveButtonRollA))
             hostui::post([] { mods::set_move_speed_button(mods::kMoveButtonRollA); hostui::set("mod.move-speed.button", std::to_string(mods::kMoveButtonRollA)); mods::packages::remember_option("move-speed.button", mods::kMoveButtonRollA); });
         if (const char* override = std::getenv("WWHD_MOD_MOVE_BUTTON"))
-            note("WWHD_MOD_MOVE_BUTTON=%s overrides the saved button at startup.", override);
-        help("A multiplier of 1 leaves that state alone. Boost time is how long a full bar lasts; "
+            note(menu_i18n::tr("WWHD_MOD_MOVE_BUTTON=%s overrides the saved button at startup."), override);
+        help(menu_i18n::tr("A multiplier of 1 leaves that state alone. Boost time is how long a full bar lasts; "
              "0 has no limit, and the bar refills whenever you are not boosting. Cooldown is the "
              "bar's refill time (0 for immediate refill). With no limit, or with Show boost bar off, "
              "no bar is shown; the boost works the same. The bar also hides while a menu, "
@@ -1684,42 +1694,42 @@ void builtin_options(const std::string& id) {
              "lean and arm drive while running freely, blended with the boost. Rebind the "
              "chosen game button in Controls. Roll, then hold A: roll while running and keep A "
              "held as you come out of the roll to boost until you let go. It is always held "
-             "(Press to toggle does not apply) and works on land only.");
+             "(Press to toggle does not apply) and works on land only."));
     } else if (id == "ladder-speed" || id == "sidle-speed" || id == "ivy-speed" || id == "hang-speed") {
         const char* key = id == "ladder-speed" ? "ladder-speed.factor" : id == "sidle-speed" ? "sidle-speed.factor"
                         : id == "ivy-speed" ? "ivy-speed.factor" : "hang-speed.factor";
         float factor = id == "ladder-speed" ? mods::ladder_speed_factor() : id == "sidle-speed" ? mods::sidle_speed_factor()
                      : id == "ivy-speed" ? mods::ivy_speed_factor() : mods::hang_speed_factor();
-        option_slider("Speed", factor, 1.f, 3.f, "%.2fx",
+        option_slider(menu_i18n::tr("Speed"), factor, 1.f, 3.f, "%.2fx",
             [key](float f) { mods::manager::set_traversal_option(key, f, false); },
             [key](float f) { mods::manager::set_traversal_option(key, f); });
     } else if (id == "sail-speed") {
-        option_slider("Normal sail", mods::sail_speed_normal_factor(), 1.f, 3.f, "%.2fx",
+        option_slider(menu_i18n::tr("Normal sail"), mods::sail_speed_normal_factor(), 1.f, 3.f, "%.2fx",
             [](float f) { mods::manager::set_traversal_option("sail-speed.normal", f, false); },
             [](float f) { mods::manager::set_traversal_option("sail-speed.normal", f); });
-        option_slider("Swift Sail", mods::sail_speed_swift_factor(), 1.f, 3.f, "%.2fx",
+        option_slider(menu_i18n::tr("Swift Sail"), mods::sail_speed_swift_factor(), 1.f, 3.f, "%.2fx",
             [](float f) { mods::manager::set_traversal_option("sail-speed.swift", f, false); },
             [](float f) { mods::manager::set_traversal_option("sail-speed.swift", f); });
-        help("Multiplies the speed the wind gives the boat. The jump (R) keeps its normal height.");
+        help(menu_i18n::tr("Multiplies the speed the wind gives the boat. The jump (R) keeps its normal height."));
     } else if (id == "mouse-camera") {
-        option_slider("Sensitivity", mods::mouse_sensitivity(), .08f, .3f, "%.3f", mods::set_mouse_sensitivity,
+        option_slider(menu_i18n::tr("Sensitivity"), mods::mouse_sensitivity(), .08f, .3f, "%.3f", mods::set_mouse_sensitivity,
             [](float sensitivity) { mods::set_mouse_sensitivity(sensitivity); hostui::set("mod.mouse-camera.sensitivity", std::to_string(sensitivity)); mods::packages::remember_option("mouse-camera.sensitivity", sensitivity); });
     }
 }
 
 void cheats() {
     bool v;
-    note("Save in the game to keep them.");
+    note("%s", menu_i18n::tr("Save in the game to keep them."));
     auto cheat = [first = true](const char* label, int which) mutable {
         if (!first) modsui::same_line_if_fits(label);
         first = false;
         if (ImGui::Button(label)) mods::request_cheat(which);
     };
-    cheat("Give all items", mods::kCheatItems);
-    cheat("Equip Master Sword + Mirror Shield (until reload)", mods::kCheatSword);
-    cheat("20 hearts, double magic, 5000 rupees", mods::kCheatStats);
-    cheat("Fill the bags (spoils and bait)", mods::kCheatBags);
-    cheat("All Nintendo Gallery figurines", mods::kCheatFigurines);
+    cheat(menu_i18n::tr("Give all items"), mods::kCheatItems);
+    cheat(menu_i18n::tr("Equip Master Sword + Mirror Shield (until reload)"), mods::kCheatSword);
+    cheat(menu_i18n::tr("20 hearts, double magic, 5000 rupees"), mods::kCheatStats);
+    cheat(menu_i18n::tr("Fill the bags (spoils and bait)"), mods::kCheatBags);
+    cheat(menu_i18n::tr("All Nintendo Gallery figurines"), mods::kCheatFigurines);
     static const std::pair<const char*, int> inf[] = {{"Infinite health", mods::kInfHealth}, {"Infinite magic", mods::kInfMagic},
                                                       {"Infinite arrows and bombs", mods::kInfAmmo},
                                                       {"Infinite rupees", mods::kInfRupees},
@@ -1729,18 +1739,19 @@ void cheats() {
                                                       {"No fall damage after moon jump", mods::kMoonNoFall}};
     for (const auto& [label, which] : inf) {
         int bit = which;
-        if (check(label, mods::infinite(bit), &v)) hostui::post([bit, v] { mods::set_infinite(bit, v); });
+        // (this fork) the labels' rows are in menu_i18n_overlay.inc
+        if (check(menu_i18n::tr(label), mods::infinite(bit), &v)) hostui::post([bit, v] { mods::set_infinite(bit, v); });
     }
-    heading("Story cheats (can break story events; use a spare save file)");
+    heading(menu_i18n::tr("Story cheats (can break story events; use a spare save file)"));
     auto story = [first = true](const char* label, int which) mutable {
         if (!first) modsui::same_line_if_fits(label);
         first = false;
         if (ImGui::Button(label)) mods::request_cheat(which);
     };
-    story("All songs", mods::kCheatSongs);
-    story("All Triforce shards", mods::kCheatTriforce);
-    story("Map, compass, boss key", mods::kCheatDungeon);
-    story("Small key", mods::kCheatKey);
+    story(menu_i18n::tr("All songs"), mods::kCheatSongs);
+    story(menu_i18n::tr("All Triforce shards"), mods::kCheatTriforce);
+    story(menu_i18n::tr("Map, compass, boss key"), mods::kCheatDungeon);
+    story(menu_i18n::tr("Small key"), mods::kCheatKey);
 }
 
 modsui::Host& mods_host() {
@@ -2209,7 +2220,7 @@ int saved_language() {
         int l = atoi(v.c_str());
         if (l >= 0 && l < game_lang::kLanguages) return l;
     }
-    return 1;
+    return fan_translation::default_language(1);  // (this fork) the PT-BR translation when installed
 }
 
 // the region of the saved language when it comes from a language source (game_lang::kNoRegion: the game's own)
@@ -2226,7 +2237,7 @@ int saved_language_region() {
 std::string language_list(const std::vector<int>& langs) {
     std::string s;
     for (size_t k = 0; k < langs.size(); k++)
-        s += std::string(k == 0 ? "" : k + 1 == langs.size() ? " and " : ", ") + game_lang::name(langs[k]);
+        s += std::string(k == 0 ? "" : k + 1 == langs.size() ? menu_i18n::tr(" and ") : ", ") + game_lang::name(langs[k]);
     return s;
 }
 
@@ -2249,7 +2260,7 @@ void tab_about() {
         U.language = saved_language();
         U.language_region = saved_language_region();
         const game_lang::Start now = game_lang::current();
-        U.language_at_start = now.language;  // the game reads it early in the boot
+        U.language_at_start = fan_translation::shown_language(now.language);  // the game reads it early in the boot (this fork: PT-BR)
         U.language_region_at_start = now.pack ? now.region : game_lang::kNoRegion;
         if (U.language_at_start < 0) {
             const game_lang::Start s = game_lang::choose(env_set ? env_language : U.language,
@@ -2259,13 +2270,13 @@ void tab_about() {
         }
     }
     const std::vector<int>& avail = game_lang::available();
-    heading("Console language (applies on the next start)");
+    heading(menu_i18n::tr("Console language (applies on the next start)"));
     if (avail.empty())
-        note("The game picks its text language from the console language. Its language packs (content/Common/Pack) "
-             "were not found, so every language is offered; the game shows only those its disc carries.");
+        note("%s", menu_i18n::tr("The game picks its text language from the console language. Its language packs (content/Common/Pack) "
+             "were not found, so every language is offered; the game shows only those its disc carries."));
     else
-        note("The game picks its text language from the console language. This game (%s) contains %s; the other "
-             "languages need a disc that carries them.", game_lang::region().c_str(), language_list(avail).c_str());
+        note(menu_i18n::tr("The game picks its text language from the console language. This game (%s) contains %s; the other "
+             "languages need a disc that carries them."), game_lang::region().c_str(), language_list(avail).c_str());
     ImGui::BeginDisabled(env_set);
     for (int i : {1, 2, 5, 3, 4, 8, 9, 10, 7, 0, 6, 11}) {
         if (i != 1 && i != 3 && i != 9 && i != 0) flow::next(flow::check(game_lang::name(i)));  // rows of three
@@ -2278,8 +2289,8 @@ void tab_about() {
     for (int region : {(int)game_lang::kEurope, (int)game_lang::kJapan}) {
         const std::vector<int> langs = game_lang::source_languages(region);
         if (langs.empty()) continue;
-        heading(region == game_lang::kEurope ? "From your European game (language source, experimental)"
-                                             : "From your Japanese game (language source, experimental)");
+        heading(region == game_lang::kEurope ? menu_i18n::tr("From your European game (language source, experimental)")
+                                             : menu_i18n::tr("From your Japanese game (language source, experimental)"));
         for (size_t k = 0; k < langs.size(); k++) {
             if (k % 3) ImGui::SameLine();
             const std::string label = std::string(game_lang::name(langs[k])) + " (" + game_lang::region_name(region) + ")";
@@ -2288,43 +2299,43 @@ void tab_about() {
         }
     }
     if (!game_lang::source_languages(game_lang::kJapan).empty())
-        note("Japanese language sources are untested so far: report what looks wrong.");
+        note("%s", menu_i18n::tr("Japanese language sources are untested so far: report what looks wrong."));
     ImGui::EndDisabled();
     const bool from_source = U.language_region != game_lang::kNoRegion &&
                              game_lang::source_pack(U.language, U.language_region) != nullptr;
     if (env_set) {
-        note("WWHD_LANGUAGE=%s is set for this start and takes precedence.", env);
+        note(menu_i18n::tr("WWHD_LANGUAGE=%s is set for this start and takes precedence."), env);
         if (!game_lang::is_available(env_language))
-            warn("%s is not on this disc: the game runs in %s.", game_lang::name(env_language),
+            warn(menu_i18n::tr("%s is not on this disc: the game runs in %s."), game_lang::name(env_language),
                  game_lang::name(game_lang::usable(env_language)));
     } else if (U.language_region != game_lang::kNoRegion && !from_source) {
-        warn("%s (%s) is saved but its language source is missing (%s): the game runs in %s.",
+        warn(menu_i18n::tr("%s (%s) is saved but its language source is missing (%s): the game runs in %s."),
              game_lang::name(U.language), game_lang::region_name(U.language_region),
              game_lang::sources_dir().c_str(), game_lang::name(game_lang::usable(U.language)));
     } else if (!from_source && !game_lang::is_available(U.language)) {
-        warn("%s is saved but is not on this disc: the game runs in %s. Choose one of the languages above.",
+        warn(menu_i18n::tr("%s is saved but is not on this disc: the game runs in %s. Choose one of the languages above."),
              game_lang::name(U.language), game_lang::name(game_lang::usable(U.language)));
     } else if (U.language != U.language_at_start || (from_source ? U.language_region : 0) != U.language_region_at_start) {
-        warn("%s is saved. Restart the game to apply it: the game reads the console language only when it starts.",
+        warn(menu_i18n::tr("%s is saved. Restart the game to apply it: the game reads the console language only when it starts."),
              game_lang::name(U.language));
     }
-    heading("About");
-    ImGui::Text("The Legend of Zelda: The Wind Waker HD - native port (%s host, %s renderer)", hostui::name(),
+    heading(menu_i18n::tr("About"));
+    ImGui::Text(menu_i18n::tr("The Legend of Zelda: The Wind Waker HD - native port (%s host, %s renderer)"), hostui::name(),
                 render::api_name(render::active()));
     if (*build::variant())  // the decomp build (docs/decomp-build.md)
-        ImGui::Text("%s (%s), %s build: the game code runs from the decompiled source (experimental)", build::version(),
+        ImGui::Text(menu_i18n::tr("%s (%s), %s build: the game code runs from the decompiled source (experimental)"), build::version(),
                     build::commit(), build::variant());
     if (!ext::features().keyboard) {  // a controller only
 #ifdef __SWITCH__  // (this fork)
-        note("Settings overlay: hold Minus for half a second (a short Minus goes to the game). B or Minus closes. "
-             "L / R switch tabs. The game keeps running and sees no input while this menu is open.");
+        note("%s", menu_i18n::tr("Settings overlay: hold Minus for half a second (a short Minus goes to the game). B or Minus closes. "
+             "L / R switch tabs. The game keeps running and sees no input while this menu is open."));
 #else
         note("Settings overlay: hold Select / press Home on a controller. B closes. L / R switch tabs. The game keeps "
              "running and sees no input while this menu is open.");
 #endif
-        note("When the game asks for text (your name), a text window appears over the game: D-pad / left stick choose a "
+        note("%s", menu_i18n::tr("When the game asks for text (your name), a text window appears over the game: D-pad / left stick choose a "
              "key, A types it, B deletes, X adds a space, Y is Shift, L / R switch between letters, accents and symbols, "
-             "Start confirms.");
+             "Start confirms."));
     } else {
 #ifdef __APPLE__
         note("Settings overlay: Esc or F1 (Fn+F1 on most Mac keyboards), Cmd+, or Settings... in the app menu, or hold Select / "
@@ -2339,8 +2350,8 @@ void tab_about() {
              "A types it, B deletes, X adds a space, Y is Shift, L / R switch between letters, accents and symbols, "
              "Start confirms.");
     }
-    note("Built with Dear ImGui %s (MIT License, Omar Cornut and contributors).", IMGUI_VERSION);
-    note("The world editor's handles use ImGuizmo (MIT License, Cedric Guillemet).");
+    note(menu_i18n::tr("Built with Dear ImGui %s (MIT License, Omar Cornut and contributors)."), IMGUI_VERSION);
+    note("%s", menu_i18n::tr("The world editor's handles use ImGuizmo (MIT License, Cedric Guillemet)."));
 }
 
 void perf_window(bool menu_open) {
@@ -2359,8 +2370,8 @@ void perf_window(bool menu_open) {
     ImGuiWindowFlags fl = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
                           ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
     if (ImGui::Begin("##perf", nullptr, fl)) {
-        ImGui::Text("%.0f fps   %.1f ms (worst %.1f)", U.fps, sum / 120.0f, worst);
-        ImGui::Text("Average %.1f fps   %.1f logic steps/s", g_average.fps, g_average.logic);
+        ImGui::Text(menu_i18n::tr("%.0f fps   %.1f ms (worst %.1f)"), U.fps, sum / 120.0f, worst);
+        ImGui::Text(menu_i18n::tr("Average %.1f fps   %.1f logic steps/s"), g_average.fps, g_average.logic);
         {
             // slow motion: frame interpolation without Keep game speed below its frame target
             // Shown from the second 2-second window in a row below 29 logic steps/s (the game's rate is
@@ -2376,7 +2387,7 @@ void perf_window(bool menu_open) {
                 slow = slow ? rate > 1 && rate < 29.5 : slowWindows >= 2;
             }
             if (slow && interp::mode() == 1 && !interp::paced_interpolation())
-                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Slow motion: %.1f of 30 logic steps/s. Turn on Keep game speed", rate);
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), menu_i18n::tr("Slow motion: %.1f of 30 logic steps/s. Turn on Keep game speed"), rate);
         }
 #ifdef __ANDROID__
         ImGui::TextUnformatted(android_telemetry().c_str());
@@ -2388,7 +2399,7 @@ void perf_window(bool menu_open) {
         ImGui::TextDisabled("%s  %gx  %s", render::api_name(render::active()), hostui::res_scale(), interp::mode_name());
         if (dynres::on()) ImGui::TextDisabled("%s", dynres::status().c_str());
         if (float share = interp::paced_drawn_share(); share >= 0)
-            ImGui::TextDisabled("in-between frames drawn: %.0f%%", share * 100.0f);
+            ImGui::TextDisabled(menu_i18n::tr("in-between frames drawn: %.0f%%"), share * 100.0f);
     }
     ImGui::End();
     (void)menu_open;
@@ -2397,30 +2408,30 @@ void perf_window(bool menu_open) {
 void tab_audio() {
     float volume = audio::master_volume() * 100.0f;
     ImGui::SetNextItemWidth(260);
-    if (ImGui::SliderFloat("Master volume", &volume, 0.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
+    if (ImGui::SliderFloat(menu_i18n::tr("Master volume"), &volume, 0.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
         hostui::post([volume] { audio::set_master_volume(volume / 100.0f, false); });  // live while dragging
     if (ImGui::IsItemDeactivatedAfterEdit())
         hostui::post([volume] { audio::set_master_volume(volume / 100.0f); });  // saved once on release
     ImGui::SameLine();
-    if (ImGui::Button("Mute##volume")) hostui::post([] { audio::set_master_volume(0.0f); });
+    if (ImGui::Button(menu_i18n::tr("Mute##volume"))) hostui::post([] { audio::set_master_volume(0.0f); });
     ImGui::SameLine();
-    if (ImGui::Button("Default##volume")) hostui::post([] { audio::set_master_volume(1.0f); });
-    help("Master volume for the game's sound and mod audio. Applies immediately and is remembered for the next start.");
+    if (ImGui::Button(menu_i18n::tr("Default##volume"))) hostui::post([] { audio::set_master_volume(1.0f); });
+    help(menu_i18n::tr("Master volume for the game's sound and mod audio. Applies immediately and is remembered for the next start."));
     if (audio::master_volume_from_env())
-        note("WWHD_AUDIO_VOLUME=%s is set for this start and takes precedence; changes here are not saved.",
+        note(menu_i18n::tr("WWHD_AUDIO_VOLUME=%s is set for this start and takes precedence; changes here are not saved."),
              getenv("WWHD_AUDIO_VOLUME"));
     bool pad_sounds = audio::gamepad_sounds();
-    if (ImGui::Checkbox("GamePad sounds through main speakers", &pad_sounds))
+    if (ImGui::Checkbox(menu_i18n::tr("GamePad sounds through main speakers"), &pad_sounds))
         hostui::post([pad_sounds] { audio::set_gamepad_sounds(pad_sounds); });
     float pad_volume = audio::gamepad_sounds_volume() * 100.0f;
     ImGui::SetNextItemWidth(260);
-    if (ImGui::SliderFloat("GamePad sounds volume", &pad_volume, 0.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
+    if (ImGui::SliderFloat(menu_i18n::tr("GamePad sounds volume"), &pad_volume, 0.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
         hostui::post([pad_volume] { audio::set_gamepad_sounds_volume(pad_volume / 100.0f, false); });
     if (ImGui::IsItemDeactivatedAfterEdit())
         hostui::post([pad_volume] { audio::set_gamepad_sounds_volume(pad_volume / 100.0f); });
-    help("Play sounds from the GamePad speaker through your main speakers during TV play. Applies immediately and is remembered. Master volume also applies.");
+    help(menu_i18n::tr("Play sounds from the GamePad speaker through your main speakers during TV play. Applies immediately and is remembered. Master volume also applies."));
     if (audio::gamepad_sounds_from_env() || audio::gamepad_sounds_volume_from_env())
-        note("GamePad audio test overrides are set for this start; overridden preferences are not saved.");
+        note("%s", menu_i18n::tr("GamePad audio test overrides are set for this start; overridden preferences are not saved."));
     if (ext::features().speaker_choice) {
         int speakers = audio::requested_surround() ? 1 : 0;
         if (combo("Speakers", &speakers, "Stereo\0Surround 5.1\0"))
@@ -2428,17 +2439,17 @@ void tab_audio() {
         note("Restart the game after changing Speakers.");
     }
     if (audio::surround_fallback())
-        note("Surround 5.1 unavailable on this output. Using stereo; restart after connecting a 5.1 device.");
+        note("%s", menu_i18n::tr("Surround 5.1 unavailable on this output. Using stereo; restart after connecting a 5.1 device."));
     if (audio::output_device_changed())
-        note("Output device changed. Audio is muted; restart the game to use the current device.");
-    note("Current output: %s", audio::channels() == 6 ? "Surround 5.1" : "Stereo");
+        note("%s", menu_i18n::tr("Output device changed. Audio is muted; restart the game to use the current device."));
+    note(menu_i18n::tr("Current output: %s"), audio::channels() == 6 ? "Surround 5.1" : "Stereo");
     if (const char *ch = audio::speaker_test_channel()) {
-        note("Speaker test: %s", ch);
-        if (ImGui::Button("Stop speaker test"))
+        note(menu_i18n::tr("Speaker test: %s"), ch);
+        if (ImGui::Button(menu_i18n::tr("Stop speaker test")))
             audio::stop_speaker_test();
-    } else if (ImGui::Button("Test speakers"))
+    } else if (ImGui::Button(menu_i18n::tr("Test speakers")))
         audio::start_speaker_test();
-    note("Plays each active channel in turn at a low level. Subwoofer uses an 80 Hz tone.");
+    note("%s", menu_i18n::tr("Plays each active channel in turn at a low level. Subwoofer uses an 80 Hz tone."));
 }
 
 // The bottom row of the Settings window (every tab): Quit Game, and on Android Close Settings before it.
@@ -2533,7 +2544,7 @@ void settings_window() {
         ImGui::SetNextWindowFocus();  // keyboard / controller navigation starts in the menu
         U.just_opened = false;
     }
-    if (ImGui::Begin("Wind Waker HD  -  Settings", &open, fl)) {
+    if (ImGui::Begin(menu_i18n::tr("Wind Waker HD  -  Settings###settings"), &open, fl)) {  // (this fork) translated
         const std::vector<ext::ShownTab>& tabs = ext::tabs();  // built-in and added (extensions.h)
         // L / R on a controller switch tabs
         if (U.cap_action < 0 && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
@@ -2549,7 +2560,9 @@ void settings_window() {
             for (int i = 0; i < int(tabs.size()); i++) {
                 if (!tabs[i].visible()) continue;  // a tab only some launches have (the world editor's, with --editor)
                 ImGuiTabItemFlags f = U.select_tab == i ? ImGuiTabItemFlags_SetSelected : 0;
-                if (ImGui::BeginTabItem(tabs[i].name.c_str(), nullptr, f)) {
+                // (this fork) the name in the player's language; the id stays the tab's
+                const std::string tab_label = std::string(menu_i18n::tr(tabs[i].name.c_str())) + "###" + tabs[i].id;
+                if (ImGui::BeginTabItem(tab_label.c_str(), nullptr, f)) {
                     if (U.tab != i) U.cap_action = -1, g_capturing_keys = false, U.cap_note.clear();
                     U.tab = i;
                     // the page ends one row above the bottom of the window: the bottom row (quit_row)

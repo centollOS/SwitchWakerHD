@@ -108,7 +108,7 @@ public partial class MainWindow : Window
     {
         Title             = Str.Get("title");
         TxtSubtitle.Text  = Str.Get("subtitle");
-        BtnLang.Content   = Str.Get("lang");
+        BtnLang.Content   = Str.NextLanguageName;
 
         TxtWelcomeH.Text     = Str.Get("welcome_h");
         TxtWelcomeBody.Text  = Str.Get("welcome_body");
@@ -140,6 +140,13 @@ public partial class MainWindow : Window
         BtnMmFolder.Content = Str.Get("mm_folder");
         BtnMmClear.Content = Str.Get("fwd_clear");
         ShowMinimap();
+        TxtPtH.Text = Str.Get("ptbr_h");
+        TxtPtD.Text = Str.Get("ptbr_d");
+        BtnPtLink.Content = Str.Get("ptbr_link");
+        BtnPtPick.Content = Str.Get("ptbr_pick");
+        BtnPtFolder.Content = Str.Get("ptbr_folder");
+        BtnPtClear.Content = Str.Get("fwd_clear");
+        ShowPtbr();
 
         TxtProgH.Text    = Str.Get("prog_h");
         TxtProgBody.Text = Str.Get("prog_body");
@@ -170,7 +177,7 @@ public partial class MainWindow : Window
 
     void BtnLang_Click(object? sender, RoutedEventArgs e)
     {
-        Str.Es = !Str.Es;
+        Str.SwitchLanguage();
         ApplyLanguage();
     }
 
@@ -338,6 +345,42 @@ public partial class MainWindow : Window
         ShowMinimap();
     }
 
+    // ── Optional Brazilian Portuguese: the player's download of Triforce-Heroes' translation ─────
+    string? ptbrDownload;
+
+    void ShowPtbr()
+    {
+        TxtPtFile.Text = ptbrDownload ?? Str.Get("ptbr_none");
+        TxtPtFile.Foreground = Res(ptbrDownload == null ? "FgDim" : "Fg");
+        BtnPtClear.IsVisible = ptbrDownload != null;
+    }
+
+    async void BtnPtLink_Click(object? sender, RoutedEventArgs e)
+    {
+        try { await Launcher.LaunchUriAsync(new Uri(EngineBase.PtbrPage)); }
+        catch (Exception) { }
+    }
+
+    async void BtnPtPick_Click(object? sender, RoutedEventArgs e)
+    {
+        var p = await PickFile("ptbr_dlg_title", "ptbr_type", "rar", "zip", "7z", "pack");
+        if (p != null) ptbrDownload = p;
+        ShowPtbr();
+    }
+
+    async void BtnPtFolder_Click(object? sender, RoutedEventArgs e)
+    {
+        var p = await PickFolder("ptbr_dlg_folder");
+        if (p != null) ptbrDownload = p;
+        ShowPtbr();
+    }
+
+    void BtnPtClear_Click(object? sender, RoutedEventArgs e)
+    {
+        ptbrDownload = null;
+        ShowPtbr();
+    }
+
     // Dropping the game file or folder on the window picks it and its format.
     void Window_Drop(object? sender, DragEventArgs e)
     {
@@ -364,6 +407,7 @@ public partial class MainWindow : Window
         engine.GameArg  = GameArg();
         engine.ForwarderKeys = keysPath != null && File.Exists(keysPath) ? keysPath : null;
         engine.MinimapGame = minimapGame;
+        engine.PtbrDownload = ptbrDownload;
         engine.PrepareShaders = ChkShaders.IsChecked == true;
         running = true; failed = false;
         cts = new CancellationTokenSource();
@@ -626,6 +670,8 @@ public partial class MainWindow : Window
         TxtFwdDone.Foreground = Res(nspFresh ? "Fg" : "Warn");
         TxtMmDone.IsVisible = minimapGame != null;
         TxtMmDone.Text = Str.Get("mm_done");
+        TxtPtDone.IsVisible = ptbrDownload != null;
+        TxtPtDone.Text = Str.Get("ptbr_done");
         TxtGameFilesDone.IsVisible = engine.BadGameFiles > 0;
         TxtGameFilesDone.Text = Str.Get("game_files_done", engine.BadGameFiles, string.Join("\n", engine.BadGameFileLines.Take(3)));
         TxtGameFilesDone.Foreground = Res("Warn");

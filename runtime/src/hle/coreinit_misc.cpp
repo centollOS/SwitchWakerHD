@@ -2,6 +2,7 @@
 // coreinit: logging, dynamic loading, system info, and small odds and ends.
 #include "../overlay/hostui.h"
 #include "../crashrec.h"
+#include "../fan_translation.h"  // (this fork)
 #include "../game_languages.h"
 #include "../console_language.h"
 #include <cstdlib>
@@ -118,7 +119,7 @@ uint32_t console_language() {
             e = saved.c_str();
             why = "saved setting";
         }
-        long v = 1;
+        long v = fan_translation::default_language(1);  // (this fork) the PT-BR translation when installed
         if (e && *e) {
             char* end = nullptr;
             v = strtol(e, &end, 10);
@@ -135,7 +136,7 @@ uint32_t console_language() {
         if (const char* r = getenv("WWHD_LANGUAGE_REGION"); r && *r) region_text = r;
         else if ((!env_language || !*env_language) && !hostui::get("language_region", region_text)) region_text.clear();
         const int region = game_lang::region_from_code(region_text);
-        const game_lang::Start s = game_lang::choose((int)v, region);
+        game_lang::Start s = game_lang::choose((int)v, region);
         if (s.pack) {
             LOG("[config] %s from the language source (%s): %s%s", game_lang::name(s.language),
                 game_lang::region_name(s.region), s.pack->host.c_str(),
@@ -148,6 +149,7 @@ uint32_t console_language() {
                 LOG("[config] %s is not on this disc (%s); the game gets %s", game_lang::name((int)v),
                     game_lang::region().c_str(), game_lang::name(s.language));
         }
+        if (!s.pack) s.language = fan_translation::game_language(s.language);  // (this fork) PT-BR: English + its pack
         game_lang::begin(s);
         return (uint32_t)s.language;
     }();

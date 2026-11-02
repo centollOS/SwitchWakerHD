@@ -23,6 +23,11 @@ download, and the build. You only need your own personal dump of the game.
    Optional, the **GameCube sea minimap**: choose your own GameCube Wind Waker (`.iso`, `.gcm`, `.rvz` or its
    folder); the installer downloads the mod and builds it into the game
    ([details](#optional-code-mods-the-gamecube-sea-minimap)).
+   Optional, **Brazilian Portuguese**: download Triforce-Heroes' fan translation yourself from
+   [their page](https://triforce-heroes.com.br/traducoes/the-legend-of-zelda-the-wind-waker-hd) (the *Emulador*
+   version) and choose the downloaded `.rar` (or the folder you extracted it to)
+   ([details](#optional-brazilian-portuguese-fan-translation)). The installer itself is in Spanish, English and
+   Portuguese (the button at the top of the first page).
    **Prepare the graphics now** (ticked by default): the installer downloads the release's graphics template and
    compiles the game's graphics on your computer, from your own copy of the game, a few minutes more. The console
    then starts with them ready: no first-start screen and no black places
@@ -71,8 +76,9 @@ the release, builds the game natively and copies it to the SD card.
    *"SwitchWakerHD Installer was blocked…"* and press **Open Anyway**, then **Open** and your password. Later
    starts open directly.
 3. Pick your game dump (a `.wua`, a `.wux`/`.wud` with its keys, or an extracted folder), and if you like the
-   **GameCube sea minimap** (your own GameCube Wind Waker: `.iso`, `.gcm`, `.rvz` or its folder) and the
-   **HOME-screen icon** (your console's `prod.keys`), as on Windows above; **Prepare the graphics now** is ticked by
+   **GameCube sea minimap** (your own GameCube Wind Waker: `.iso`, `.gcm`, `.rvz` or its folder), **Brazilian
+   Portuguese** (the translation you downloaded) and the **HOME-screen icon** (your console's `prod.keys`), as on
+   Windows above; **Prepare the graphics now** is ticked by
    default there too. You can also drag the game onto the window.
 4. Press **Install**. On the way:
    - if Apple's **command line tools** are missing, macOS shows its own window: press *Install*, wait, then
@@ -100,7 +106,9 @@ desktop), one file with everything inside:
 
 1. Extract the archive (double-click it, or right-click > *Extract here*) and double-click
    **SwitchWakerHD-Installer** (if your file manager asks, choose *Run*).
-2. Pick your game dump and, if you like, the GameCube sea minimap and the HOME-screen icon, as on Windows above
+2. Pick your game dump and, if you like, the GameCube sea minimap, Brazilian Portuguese and the HOME-screen icon,
+   as on Windows above (a `.rar` needs `bsdtar`, from the `libarchive-tools` package, or extract it yourself and
+   choose the folder)
    (**Prepare the graphics now** is ticked by default).
 3. Press **Install**. It sets up its own Python 3.14 in its working folder, then the Switch toolchain, the first
    that fits:
@@ -245,6 +253,29 @@ The Switch cannot build code mods (Mod SDK v2, "guest" mods) itself, so they go 
 - To add or remove a mod, run `make_sd.py` again (without `--guest-mod`: no mods) and copy `wwhd.nro` and `mods/`
   again.
 - Mods that replace game functions are not supported on the Switch; `make_sd.py` says so.
+
+### Optional: Brazilian Portuguese (fan translation)
+
+The game was never released in Portuguese. Triforce-Heroes made a Brazilian Portuguese fan translation; it is not
+part of SwitchWakerHD: download it yourself from
+[their page](https://triforce-heroes.com.br/traducoes/the-legend-of-zelda-the-wind-waker-hd) (the **Emulador**
+version, a `.rar`), then:
+
+```
+python3 tools/switch/make_sd.py --wua GAME.wua --ptbr "TriforceHeroes_WWHD VERSÃO FINAL (3.0) - USA - EUROPA.rar"
+```
+
+- `--ptbr` takes the `.rar` as downloaded (opened with `bsdtar`/`tar`: macOS and Windows 10 or later have it; on
+  Linux install `libarchive-tools`), the folder you extracted it to, or its `.pack`.
+- Do **not** copy the translation's files over the game: its pack is laid out differently from the game's (and one
+  of its layouts is cut short). `make_sd.py` takes only the translated texts and fonts and puts them in your own
+  game's English pack, laid out as the game's, in `switch/wwhd/translation/pt-BR/`; your game files stay as they are.
+- In the game it is **Português (Brasil)** in the settings (hold Minus) > Language: chosen by default after
+  installing it, unless you chose another language there before (then choose it there); pick English (or another
+  language) there to go back, and restart the game. The menus of SwitchWakerHD
+  itself follow it.
+- Without `--ptbr` a translation installed earlier stays on the card; `--no-ptbr` removes it from the SD folder
+  (on the card, delete `switch/wwhd/translation/`).
 
 ## 3. Copy it to the SD card
 

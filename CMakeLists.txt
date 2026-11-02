@@ -508,16 +508,21 @@ target_link_libraries(guest_png_test PRIVATE ZLIB::ZLIB)
 add_test(NAME guest_png COMMAND guest_png_test "${CMAKE_SOURCE_DIR}/examples/guest-mods")
 
 # Synthetic integration tests call the real guest filesystem HLE handlers.
-add_executable(mod_content_fs_test runtime/tools/mod_content_fs_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c)
+add_executable(mod_content_fs_test runtime/tools/mod_content_fs_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/fan_translation.cpp runtime/src/guest_addr_identity.c runtime/src/hle/os_time.cpp)
 target_include_directories(mod_content_fs_test PRIVATE runtime/src runtime/include)
 target_compile_options(mod_content_fs_test PRIVATE -UNDEBUG)
 target_link_libraries(mod_content_fs_test PRIVATE ZLIB::ZLIB Threads::Threads)
 
 # language sources: synthetic European/Japanese packs read through the guest file system (game_languages.h)
-add_executable(language_source_test runtime/tools/language_source_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c)
+add_executable(language_source_test runtime/tools/language_source_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/fan_translation.cpp runtime/src/guest_addr_identity.c runtime/src/hle/os_time.cpp)
 target_include_directories(language_source_test PRIVATE runtime/src runtime/include)
 target_compile_options(language_source_test PRIVATE -UNDEBUG)
 target_link_libraries(language_source_test PRIVATE ZLIB::ZLIB Threads::Threads)
+# (this fork) the PT-BR fan translation read through the guest file system (fan_translation.h)
+add_executable(fan_translation_test runtime/tools/fan_translation_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/fan_translation.cpp runtime/src/guest_addr_identity.c runtime/src/hle/os_time.cpp)
+target_include_directories(fan_translation_test PRIVATE runtime/src runtime/include)
+target_compile_options(fan_translation_test PRIVATE -UNDEBUG)
+target_link_libraries(fan_translation_test PRIVATE ZLIB::ZLIB Threads::Threads)
 
 # register state groups of the Vulkan continued-draw fast path (runtime/src/gx2/state_groups.h)
 add_executable(state_groups_test runtime/tools/state_groups_test.cpp)
@@ -648,12 +653,12 @@ add_test(NAME item_icons COMMAND item_icons_test)
 add_executable(rtl_text_test runtime/tools/rtl_text_test.cpp runtime/src/rtl_text.cpp)
 target_include_directories(rtl_text_test PRIVATE runtime/src)
 target_compile_options(rtl_text_test PRIVATE -UNDEBUG)
-add_executable(game_font_test runtime/tools/game_font_test.cpp runtime/src/overlay/game_font.cpp runtime/src/game_languages.cpp)
+add_executable(game_font_test runtime/tools/game_font_test.cpp runtime/src/overlay/game_font.cpp runtime/src/game_languages.cpp runtime/src/fan_translation.cpp)
 target_include_directories(game_font_test PRIVATE runtime/src runtime/include)
 target_compile_options(game_font_test PRIVATE -UNDEBUG)
 target_link_libraries(game_font_test PRIVATE Threads::Threads)
 # the game's languages from its language packs (runtime/src/game_languages.cpp)
-add_executable(game_languages_test runtime/tools/game_languages_test.cpp runtime/src/game_languages.cpp)
+add_executable(game_languages_test runtime/tools/game_languages_test.cpp runtime/src/game_languages.cpp runtime/src/fan_translation.cpp)
 target_include_directories(game_languages_test PRIVATE runtime/src runtime/include)
 target_compile_options(game_languages_test PRIVATE -UNDEBUG)
 target_link_libraries(game_languages_test PRIVATE Threads::Threads)
@@ -1087,7 +1092,7 @@ target_compile_options(editor_resident_ui_test PRIVATE -UNDEBUG)
 target_link_libraries(editor_resident_ui_test PRIVATE imgui)
 add_test(NAME editor_resident_ui COMMAND editor_resident_ui_test)
 if(APPLE)
-  add_executable(pip_preview_ui_test runtime/tools/pip_preview_ui_test.cpp runtime/src/gfx/display_modes.cpp)
+  add_executable(pip_preview_ui_test runtime/tools/pip_preview_ui_test.cpp runtime/src/menu_i18n.cpp runtime/src/menu_i18n_table.cpp runtime/src/gfx/display_modes.cpp)
   target_include_directories(pip_preview_ui_test PRIVATE ${IMGUI_DIR} runtime/src runtime/include
     ${CEMU_DIR} ${CEMU_DIR}/Cafe runtime/third_party/fmt/include)
   target_compile_options(pip_preview_ui_test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
@@ -1234,6 +1239,15 @@ add_test(NAME game_font COMMAND game_font_test)
 add_test(NAME rtl_text COMMAND rtl_text_test)
 add_test(NAME game_languages COMMAND game_languages_test ${CMAKE_BINARY_DIR}/game_languages_test_work)
 add_test(NAME language_sources COMMAND language_source_test)
+add_test(NAME fan_translation COMMAND fan_translation_test)  # (this fork)
+# (this fork) the settings menu's texts in Spanish / Portuguese (menu_i18n.h): the table, and every tr() text in it
+add_executable(menu_i18n_test runtime/tools/menu_i18n_test.cpp runtime/src/menu_i18n.cpp runtime/src/menu_i18n_table.cpp)
+target_include_directories(menu_i18n_test PRIVATE runtime/src)
+target_compile_options(menu_i18n_test PRIVATE -UNDEBUG)
+add_test(NAME menu_i18n COMMAND menu_i18n_test)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME menu_i18n_table COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/runtime/tools/menu_i18n_check.py")
+endif()
 add_test(NAME interp_pacing COMMAND interp_pacing_test)
 add_test(NAME vsync_pacing COMMAND vsync_pacing_test)
 add_test(NAME fixed_seed COMMAND fixed_seed_test)
@@ -2060,13 +2074,13 @@ foreach(mode surround default-stereo override-stereo stereo-device start-failure
 endforeach()
 
 # Mods tab "Restart required": pending set and popup timing, without UI.
-add_executable(restart_notice_test runtime/tools/restart_notice_test.cpp)
+add_executable(restart_notice_test runtime/tools/restart_notice_test.cpp runtime/src/menu_i18n.cpp runtime/src/menu_i18n_table.cpp)
 target_include_directories(restart_notice_test PRIVATE runtime/src)
 target_compile_options(restart_notice_test PRIVATE -UNDEBUG)
 add_test(NAME restart_notice COMMAND restart_notice_test)
 
 # Mods tab: row / page states, install flow, progress, catalogue cache and background check (no UI).
-add_executable(mods_model_test runtime/tools/mods_model_test.cpp runtime/src/mods/mod_archive.cpp)
+add_executable(mods_model_test runtime/tools/mods_model_test.cpp runtime/src/menu_i18n.cpp runtime/src/menu_i18n_table.cpp runtime/src/mods/mod_archive.cpp)
 target_include_directories(mods_model_test PRIVATE runtime/src)
 target_compile_options(mods_model_test PRIVATE -UNDEBUG)
 target_link_libraries(mods_model_test PRIVATE ZLIB::ZLIB Threads::Threads)
@@ -2087,7 +2101,7 @@ endforeach()
 if(NOT ANDROID)
   find_package(SDL3 CONFIG QUIET)
   if(SDL3_FOUND)
-    add_executable(mod_restart_ui_test runtime/tools/mod_restart_ui_test.cpp runtime/third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp)
+    add_executable(mod_restart_ui_test runtime/tools/mod_restart_ui_test.cpp runtime/src/menu_i18n.cpp runtime/src/menu_i18n_table.cpp runtime/third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp)
     target_include_directories(mod_restart_ui_test PRIVATE runtime/src)
     target_compile_options(mod_restart_ui_test PRIVATE -UNDEBUG)
     target_link_libraries(mod_restart_ui_test PRIVATE imgui SDL3::SDL3)
@@ -2099,7 +2113,7 @@ if(NOT ANDROID)
     target_link_libraries(game_objects_palette_ui_test PRIVATE imgui SDL3::SDL3)
     add_test(NAME game_objects_palette_ui COMMAND game_objects_palette_ui_test)
     # issue #231: Settings > Quit Game (overlay/quit_dialog.h): the button, controller reach, Cancel first
-    add_executable(quit_menu_ui_test runtime/tools/quit_menu_ui_test.cpp runtime/third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp)
+    add_executable(quit_menu_ui_test runtime/tools/quit_menu_ui_test.cpp runtime/src/menu_i18n.cpp runtime/src/menu_i18n_table.cpp runtime/third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp)
     target_include_directories(quit_menu_ui_test PRIVATE runtime/src)
     target_compile_options(quit_menu_ui_test PRIVATE -UNDEBUG)
     target_link_libraries(quit_menu_ui_test PRIVATE imgui SDL3::SDL3)
@@ -2112,7 +2126,7 @@ if(NOT ANDROID)
     add_test(NAME controls_options_ui COMMAND controls_options_ui_test)
     # Settings dialogs close by their X, a tap outside, Esc and B; the Gyro dialog's Close stays on screen;
     # Android's Settings sizes by screen (overlay/popup.h, gyro_popup.h, mobile_ui.h)
-    add_executable(settings_popup_ui_test runtime/tools/settings_popup_ui_test.cpp runtime/third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp
+    add_executable(settings_popup_ui_test runtime/tools/settings_popup_ui_test.cpp runtime/src/menu_i18n.cpp runtime/src/menu_i18n_table.cpp runtime/third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp
       runtime/src/input_map.cpp runtime/src/overlay/text_field.cpp runtime/src/overlay/extensions.cpp ${MOTION_SOURCES})
     target_include_directories(settings_popup_ui_test PRIVATE runtime/src runtime/include)
     target_compile_options(settings_popup_ui_test PRIVATE -UNDEBUG)
@@ -2125,7 +2139,7 @@ if(NOT ANDROID)
 endif()
 
 if(NOT ANDROID AND SDL3_FOUND AND Python3_Interpreter_FOUND)
-  add_executable(mod_oneclick_flow_test runtime/tools/mod_oneclick_flow_test.cpp
+  add_executable(mod_oneclick_flow_test runtime/tools/mod_oneclick_flow_test.cpp runtime/src/menu_i18n.cpp runtime/src/menu_i18n_table.cpp
     runtime/third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp runtime/src/mods/code_mods.cpp
     runtime/src/mods/manager.cpp runtime/src/mods/traversal_settings.cpp runtime/src/mods/packages.cpp ${WWHD_NPC_CATALOGUE} runtime/src/mods/guest_png.cpp
     runtime/src/mods/mod_archive.cpp runtime/src/mods/content.cpp runtime/src/mods/cemu_pack.cpp runtime/src/guest_addr_identity.c
@@ -2236,7 +2250,7 @@ if(WWHD_SDL_HOST AND UNIX AND NOT ANDROID)
   target_link_libraries(gaming_mode_settings_test PRIVATE SDL3::SDL3 Vulkan::Vulkan Threads::Threads)
   add_test(NAME gaming_mode_settings COMMAND gaming_mode_settings_test)
   set_tests_properties(gaming_mode_settings PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy")
-  add_executable(overlay_input_integration_test runtime/tools/overlay_input_integration_test.cpp
+  add_executable(overlay_input_integration_test runtime/tools/overlay_input_integration_test.cpp runtime/src/menu_i18n.cpp runtime/src/menu_i18n_table.cpp
     runtime/src/overlay/controls_view.cpp
     runtime/src/gfx/display_modes.cpp runtime/src/overlay/extensions.cpp runtime/src/input_map.cpp
     runtime/src/rumble.cpp runtime/src/fixed_seed.cpp runtime/src/platform/input_sdl.cpp runtime/src/platform/mouse_sdl.cpp ${MOTION_SOURCES})
@@ -3546,6 +3560,7 @@ endif()
 target_sources(mod_content_fs_test PRIVATE runtime/src/mods/story_world_collision_mesh.cpp)
 
 target_sources(language_source_test PRIVATE runtime/src/mods/story_world_collision_mesh.cpp)
+target_sources(fan_translation_test PRIVATE runtime/src/mods/story_world_collision_mesh.cpp)  # (this fork)
 
 target_sources(actor_model_cache_test PRIVATE runtime/src/mods/story_world_collision_mesh.cpp)
 

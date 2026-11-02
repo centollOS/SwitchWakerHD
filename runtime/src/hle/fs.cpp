@@ -27,6 +27,7 @@
 #include "../write_watch.h"
 #include "../mods/content.h"
 #include "../mods/mod_stages_files.h"
+#include "../fan_translation.h"  // (this fork)
 #include "../game_languages.h"
 #include "../rtl_text.h"
 #include "fs_problems.h"  // (this fork, #47)
@@ -180,6 +181,7 @@ std::string read_path(const std::string& guest,const std::string& mode="rb") {
     auto override=mods::content::replacement(guest,mode);
     if(!override.empty())if(const char* trace=std::getenv("WWHD_TEST_CONTENT_TRACE");trace&&std::string(trace)=="1")LOG("[content-mod] read %s -> %s",guest.c_str(),override.c_str());
     if(override.empty()&&(mode=="r"||mode=="rb"))override=game_lang::redirect(guest);
+    if(override.empty()&&(mode=="r"||mode=="rb"))override=fan_translation::redirect(guest);  // (this fork) the PT-BR translation
     const std::string path=override.empty()?host_path(guest):override;
     // the 2D language pack with the mod items' icons (item_icons.h), built from the file the game would read
     if(mode=="r"||mode=="rb")if(auto icons=item_icons::pack_for(guest,path);!icons.empty())return icons;
