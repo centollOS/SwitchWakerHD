@@ -37,6 +37,19 @@ What decides the design (measured, `docs/pgo.md` "Is the generated code the same
 
    A function's id also hashes the object's name for `static` functions; the object names are relative to the
    build folder (`CMakeFiles/...`), the same for every player.
+
+   **The toolchain's headers** (found with the pinned toolchain): both checkouts above used `/opt/devkitpro`. With the
+   pinned toolchain, which is inside the checkout under `build/toolchain/<id>` (the id names its host system's
+   files, so it differs between Windows, macOS and Linux), 36,245 of the 58,067 profiled functions come from its
+   headers (the C++ library's templates, libnx), and GCC names them by absolute path even when its own path is
+   relative. So a PGO build copies devkitPro's header folders (the compiler's implicit ones from CMake, libnx's,
+   the portlibs'; 19 MB) into `<build>/pgo-sysinc/<path in devkitPro>`, and the launcher compiles the profiled files
+   with `-nostdinc` and those copies, in the compiler's order (`pgo-sysinc.cmake`). Paths in the build folder (its
+   generated headers) are given relative to it: the training build and the players' build have different names.
+
+   | Two checkouts, each with its own pinned toolchain (GCC 15.2.0), build folders `switch-pgo-gen` and `switch-dk` | Functions | Differing |
+   |---|---|---|
+   | through `cmake/pgo_compile.cmake` (36,245 from `pgo-sysinc/`, 21,812 from `../../`) | 58,067 | 0 |
 2. **The profile as a release asset.** `tools/switch/pgo_pack.py pack` writes `pgo-profile-<region>.zip` from the
    `.gcda` files `pgo_train.py` fetched, with a manifest: the commit, the region, the GCC version, the scope, the
    file count. Its `.sha256` next to it, as the shader template (#88). The counters hold no game code (function ids,

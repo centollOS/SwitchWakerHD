@@ -148,7 +148,57 @@ macro(switch_pgo_configure)
       message(WARNING "WWHD_PGO: the build folder is not a folder of build/ (the checkout is ${_pgo_rel} from it): a profile "
                       "made in this folder fits only builds in folders as deep")
     endif()
+    # The toolchain's headers too: the C++ library's templates are more than half the profiled functions, and the pinned
+    # toolchain is in the checkout under a folder named after its host's files (build/toolchain/<id>, another on every
+    # host system). They are copied into the build folder under their path in devkitPro (pgo-sysinc/devkitA64/...), and
+    # the profiled files are compiled with -nostdinc and those copies (cmake/pgo_compile.cmake).
+    get_filename_component(_pgo_dkp "${CMAKE_C_COMPILER}" DIRECTORY)  # <devkitPro>/devkitA64/bin
+    get_filename_component(_pgo_dkp "${_pgo_dkp}/../.." ABSOLUTE)
+    set(_pgo_sysinc "${CMAKE_BINARY_DIR}/pgo-sysinc")
+    set(_pgo_roots)
+    foreach(_d ${CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES} ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES}
+               "${_pgo_dkp}/libnx/include" "${_pgo_dkp}/portlibs/switch/include")
+      get_filename_component(_d "${_d}" ABSOLUTE)
+      if(IS_DIRECTORY "${_d}")
+        list(APPEND _pgo_roots "${_d}")
+      endif()
+    endforeach()
+    list(REMOVE_DUPLICATES _pgo_roots)
+    set(_pgo_copied)
+    foreach(_d ${_pgo_roots})
+      file(RELATIVE_PATH _r "${_pgo_dkp}" "${_d}")
+      if(_r MATCHES "^\\.\\.")
+        message(FATAL_ERROR "WWHD_PGO: the include folder ${_d} is not in devkitPro (${_pgo_dkp})")
+      endif()
+      set(_inside FALSE)  # a folder inside another one copied (the C++ headers inside aarch64-none-elf/include)
+      foreach(_o ${_pgo_roots})
+        file(RELATIVE_PATH _ro "${_o}" "${_d}")
+        if(NOT _o STREQUAL _d AND NOT _ro MATCHES "^\\.\\.")
+          set(_inside TRUE)
+        endif()
+      endforeach()
+      if(NOT _inside)
+        file(COPY "${_d}/" DESTINATION "${_pgo_sysinc}/${_r}")
+      endif()
+      list(APPEND _pgo_copied "${_r}")
+    endforeach()
+    set(_pgo_c_implicit)
+    foreach(_d ${CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES})
+      get_filename_component(_d "${_d}" ABSOLUTE)
+      file(RELATIVE_PATH _r "${_pgo_dkp}" "${_d}")
+      list(APPEND _pgo_c_implicit "${_r}")
+    endforeach()
+    set(_pgo_cxx_implicit)
+    foreach(_d ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
+      get_filename_component(_d "${_d}" ABSOLUTE)
+      file(RELATIVE_PATH _r "${_pgo_dkp}" "${_d}")
+      list(APPEND _pgo_cxx_implicit "${_r}")
+    endforeach()
+    file(WRITE "${CMAKE_BINARY_DIR}/pgo-sysinc.cmake"
+         "set(WWHD_PGO_DKP \"${_pgo_dkp}\")\nset(WWHD_PGO_COPIED \"${_pgo_copied}\")\n"
+         "set(WWHD_PGO_C_IMPLICIT \"${_pgo_c_implicit}\")\nset(WWHD_PGO_CXX_IMPLICIT \"${_pgo_cxx_implicit}\")\n")
     set(_pgo_launcher "${CMAKE_COMMAND}" "-DWWHD_PGO_ROOT=${CMAKE_SOURCE_DIR}" "-DWWHD_PGO_REL=${_pgo_rel}"
+                      "-DWWHD_PGO_BUILD=${CMAKE_BINARY_DIR}" "-DWWHD_PGO_SYSINC=${CMAKE_BINARY_DIR}/pgo-sysinc.cmake"
                       -P "${CMAKE_SOURCE_DIR}/cmake/pgo_compile.cmake" --)
     foreach(_t wwhd gamecode)
       set_target_properties(${_t} PROPERTIES C_COMPILER_LAUNCHER "${_pgo_launcher}" CXX_COMPILER_LAUNCHER "${_pgo_launcher}")
