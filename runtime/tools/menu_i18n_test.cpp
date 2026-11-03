@@ -1,4 +1,4 @@
-// (this fork) menu_i18n: the settings menu's texts in Spanish / Portuguese (runtime/src/menu_i18n.h).
+// (this fork) menu_i18n: the settings menu's texts in Spanish, Portuguese, Italian, German, French (runtime/src/menu_i18n.h).
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -24,12 +24,19 @@ int main() {
     assert(tr(saves) == saves);
     set_language_source(portuguese);  // read at the first text
     assert(strcmp(tr("Saves"), "Salvamentos") == 0 && language() == kPortuguese);
-    set_language(3);  // German: English menu
-    assert(tr(saves) == saves);
+    set_language(4);
+    assert(language() == kItalian && tr(saves) != saves);
+    set_language(3);
+    assert(language() == kGerman && tr(saves) != saves);
+    assert(strncmp(tr("Saves##tab"), tr("Saves"), strlen(tr("Saves"))) == 0);
+    set_language(2);
+    assert(language() == kFrench && tr(saves) != saves);
+    set_language(0);  // Japanese: the English menu
+    assert(language() == kEnglish && tr(saves) == saves);
     int n = 0;
     const Row* r = rows(&n);
     assert(r && n > 0);
-    for (int i = 0; i < n; i++) assert(r[i].en && r[i].es && r[i].pt);
+    for (int i = 0; i < n; i++) assert(r[i].en && r[i].es && r[i].pt && r[i].it && r[i].de && r[i].fr);
     printf("menu_i18n_test: OK (%d rows)\n", n);
     return 0;
 }

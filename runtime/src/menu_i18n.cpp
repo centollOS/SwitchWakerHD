@@ -1,4 +1,4 @@
-// (this fork) The settings menu's texts in Spanish or Brazilian Portuguese (menu_i18n.h).
+// (this fork) The settings menu's texts in Spanish, Brazilian Portuguese, Italian, German or French (menu_i18n.h).
 #include "menu_i18n.h"
 
 #include <atomic>
@@ -30,7 +30,8 @@ const std::unordered_map<std::string_view, const Row*>& table() {  // under g_mu
 }
 
 const char* column(const Row& r, int lang) {
-    const char* s = lang == kSpanish ? r.es : r.pt;
+    const char* s = lang == kSpanish ? r.es : lang == kPortuguese ? r.pt : lang == kItalian ? r.it
+                  : lang == kGerman  ? r.de : r.fr;
     return s && *s ? s : nullptr;
 }
 
@@ -39,7 +40,9 @@ const char* column(const Row& r, int lang) {
 void set_language_source(long (*code)()) { g_source.store(code); }
 
 void set_language(long code) {
-    g_language.store(code == 5 ? kSpanish : code == 9 ? kPortuguese : kEnglish, std::memory_order_relaxed);
+    const Language l = code == 5 ? kSpanish : code == 9 ? kPortuguese : code == 4 ? kItalian : code == 3 ? kGerman
+                     : code == 2 ? kFrench : kEnglish;
+    g_language.store(l, std::memory_order_relaxed);
 }
 
 Language language() {
@@ -60,7 +63,7 @@ const char* tr(const char* english) {
     if (!translated) return english;
     if (id == std::string_view::npos) return translated;
     // "Label##id": the translated label with the same id, kept for the next frames (node addresses stay put)
-    static std::unordered_map<std::string, std::string> joined[3];
+    static std::unordered_map<std::string, std::string> joined[6];
     auto [pos, added] = joined[lang].try_emplace(std::string(text));
     if (added) pos->second = std::string(translated) + std::string(text.substr(id));
     return pos->second.c_str();
