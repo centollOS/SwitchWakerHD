@@ -57,3 +57,25 @@ that the performance test can judge the result on places the profile never saw; 
 - Forcing night on the Outset benchmark states makes the game halt on its own assertion (`d_event_data.cpp:1103`); the
   trainer uses night only for states that survive it.
 - Training needs the console at any clock, but compare speed only at stock clocks (sys-clk off, GPU profile default).
+
+## Is the generated code the same on every player's computer? (issue #90)
+
+Yes, for the same repository commit and the same region (Mac, 2026-11-03, main 8db8e2a6). The installer accepts a
+`cking.rpx` only when its SHA-256 is one `tools/recomp/builds.py` knows, so every player translates the same bytes, and
+the translation is deterministic:
+
+| Comparison (`recomp.py`, the installer's options) | Files differing |
+|---|---|
+| USA, `PYTHONHASHSEED` 1 against 98765 (Python 3.12) | 0 of 85 |
+| USA, Python 3.12 against 3.14 (the installers' Python) | 0 of 85 |
+| USA, a fresh translation against an older `build/gen` of the same commit's recompiler | 0 of 85 |
+| EUR, `PYTHONHASHSEED` 7 against 31337 | 0 of 85 |
+| USA against EUR | 83 of 85 |
+
+So a profile made by the maintainers fits players' builds, under these conditions:
+- **One profile per region**: the USA and EUR code differ in almost every file.
+- **Pinned to the commit**: the translation also reads the runtime's sources (`fork_passes.py runtime_abi_hooks`,
+  `singleflow.py runtime_addresses`: sets, so the order of the directory walk does not matter), so a change to the
+  recompiler, the hook lists or the runtime can change the generated code.
+- **Same GCC**: the pinned toolchain (`docs/pinned-toolchain-plan.md`) gives every build the same compiler.
+- Code mods (`--mod-hooks`) and the decomp build translate differently: a normal build for them.
