@@ -1240,7 +1240,7 @@ add_test(NAME rtl_text COMMAND rtl_text_test)
 add_test(NAME game_languages COMMAND game_languages_test ${CMAKE_BINARY_DIR}/game_languages_test_work)
 add_test(NAME language_sources COMMAND language_source_test)
 add_test(NAME fan_translation COMMAND fan_translation_test)  # (this fork)
-# (this fork) the settings menu's texts in Spanish / Portuguese (menu_i18n.h): the table, and every tr() text in it
+# (this fork) the settings menu's texts in Spanish, Portuguese, Italian, German, French (menu_i18n.h): the table, and every tr() text in it
 add_executable(menu_i18n_test runtime/tools/menu_i18n_test.cpp runtime/src/menu_i18n.cpp runtime/src/menu_i18n_table.cpp)
 target_include_directories(menu_i18n_test PRIVATE runtime/src)
 target_compile_options(menu_i18n_test PRIVATE -UNDEBUG)

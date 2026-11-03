@@ -105,7 +105,7 @@ const Texts kSpanish = {
     "Jugar ahora",
     "La consola prepara primero los gráficos más comunes detrás de una pantalla de carga (unos 20 minutos; B allí "
     "para jugar enseguida). Preparar gráficos sigue en los ajustes: mantén pulsado Menos (-) en el juego, pestaña "
-    "Picture.",
+    "Imagen.",
 
     "SwitchWakerHD: novedad en esta versión",
     "Preparar gráficos: la consola ya puede preparar de una vez los gráficos de todo el juego, para que los lugares "
@@ -115,7 +115,7 @@ const Texts kSpanish = {
     "consola ya tiene preparado va más rápido.",
     "Más tarde",
     "Este mensaje no volverá a aparecer. Preparar gráficos sigue en los ajustes: mantén pulsado Menos (-) en el "
-    "juego, pestaña Picture.",
+    "juego, pestaña Imagen.",
 
     "SwitchWakerHD: no se encuentran los archivos del juego",
     "SwitchWakerHD necesita tu propia copia del juego en %s/ (las carpetas code/, content/ y meta/), tal como la "
@@ -185,7 +185,7 @@ const Texts kFrench = {
     "Jouer maintenant",
     "La console prépare d'abord les graphismes les plus courants derrière un écran de chargement (environ 20 "
     "minutes ; B pour jouer tout de suite). Préparer les graphismes reste dans les réglages : maintenez Moins (-) en "
-    "jeu, onglet Picture.",
+    "jeu, onglet Image.",
 
     "SwitchWakerHD : nouveau dans cette version",
     "Préparer les graphismes : la console peut maintenant préparer en une fois les graphismes de tout le jeu, pour "
@@ -195,7 +195,7 @@ const Texts kFrench = {
     "préparé sur cette console va plus vite.",
     "Plus tard",
     "Ce message ne s'affichera plus. Préparer les graphismes reste dans les réglages : maintenez Moins (-) en jeu, "
-    "onglet Picture.",
+    "onglet Image.",
 
     "SwitchWakerHD : fichiers du jeu introuvables",
     "SwitchWakerHD a besoin de votre propre copie du jeu dans %s/ (les dossiers code/, content/ et meta/), telle que "
@@ -264,7 +264,7 @@ const Texts kGerman = {
     "fertig im Titelbildschirm neu. Deine Spielstände werden nicht verändert.",
     "Jetzt spielen",
     "Die Konsole bereitet zuerst die häufigsten Grafiken hinter einem Ladebildschirm vor (etwa 20 Minuten; B dort, "
-    "um sofort zu spielen). Grafik vorbereiten bleibt im Einstellungsmenü: Halte im Spiel Minus (-), Reiter Picture.",
+    "um sofort zu spielen). Grafik vorbereiten bleibt im Einstellungsmenü: Halte im Spiel Minus (-), Reiter Bild.",
 
     "SwitchWakerHD: neu in dieser Version",
     "Grafik vorbereiten: Die Konsole kann jetzt die Grafik des ganzen Spiels auf einmal vorbereiten, damit noch nicht "
@@ -274,7 +274,7 @@ const Texts kGerman = {
     "dieser Konsole schon vorbereitet ist, geht schneller.",
     "Später",
     "Diese Meldung erscheint nicht wieder. Grafik vorbereiten bleibt im Einstellungsmenü: Halte im Spiel Minus (-), "
-    "Reiter Picture.",
+    "Reiter Bild.",
 
     "SwitchWakerHD: Spieldateien nicht gefunden",
     "SwitchWakerHD braucht deine eigene Kopie des Spiels in %s/ (die Ordner code/, content/ und meta/), so wie "
@@ -344,7 +344,7 @@ const Texts kItalian = {
     "del titolo, pronto. I tuoi salvataggi non vengono toccati.",
     "Gioca ora",
     "La console prepara prima la grafica più comune dietro una schermata di caricamento (circa 20 minuti; B lì per "
-    "giocare subito). Prepara la grafica resta nelle impostazioni: tieni premuto Meno (-) nel gioco, scheda Picture.",
+    "giocare subito). Prepara la grafica resta nelle impostazioni: tieni premuto Meno (-) nel gioco, scheda Immagine.",
 
     "SwitchWakerHD: novità in questa versione",
     "Prepara la grafica: ora la console può preparare in una volta la grafica di tutto il gioco, così i luoghi non "
@@ -354,7 +354,7 @@ const Texts kItalian = {
     "Ciò che è già pronto su questa console va più veloce.",
     "Più tardi",
     "Questo messaggio non apparirà più. Prepara la grafica resta nelle impostazioni: tieni premuto Meno (-) nel "
-    "gioco, scheda Picture.",
+    "gioco, scheda Immagine.",
 
     "SwitchWakerHD: file del gioco non trovati",
     "SwitchWakerHD ha bisogno della tua copia del gioco in %s/ (le cartelle code/, content/ e meta/), come la "
@@ -424,7 +424,7 @@ const Texts kPortuguese = {
     "Jogar agora",
     "O console prepara primeiro os gráficos mais comuns por trás de uma tela de carregamento (cerca de 20 minutos; B "
     "ali para jogar na hora). Preparar gráficos continua no menu de configurações: segure Menos (-) no jogo, aba "
-    "Picture.",
+    "Imagem.",
 
     "SwitchWakerHD: novidade nesta versão",
     "Preparar gráficos: agora o console pode preparar de uma vez os gráficos do jogo inteiro, para que os lugares "
@@ -434,7 +434,7 @@ const Texts kPortuguese = {
     "neste console vai mais rápido.",
     "Mais tarde",
     "Esta mensagem não aparecerá de novo. Preparar gráficos continua no menu de configurações: segure Menos (-) no "
-    "jogo, aba Picture.",
+    "jogo, aba Imagem.",
 
     "SwitchWakerHD: os arquivos do jogo não foram encontrados",
     "O SwitchWakerHD precisa da sua própria cópia do jogo em %s/ (as pastas code/, content/ e meta/), do jeito que "

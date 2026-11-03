@@ -64,7 +64,7 @@
 #include "gfx/hdr.h"
 #include "../crashrec.h"
 #include "../fan_translation.h"  // (this fork)
-#include "../menu_i18n.h"  // (this fork) the menu's texts in Spanish / Portuguese
+#include "../menu_i18n.h"  // (this fork) the menu's texts in the game's language (menu_i18n.h)
 #include "../game_languages.h"
 #include "../gfx/renderer.h"
 #ifdef __ANDROID__
