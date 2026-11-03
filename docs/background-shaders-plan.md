@@ -47,3 +47,22 @@ compiled at full speed: **18.8 minutes** in all, no failures. Then the console's
 against the whole-game harvest: **73.6% of the vertex/pixel pairs, 74.4% of the shaders** (the computer predicted
 73.5% / 74.2%). Gently, during play (core 0, 50% duty), the game keeps 27.5-29.9 fps in a heavy view (25 without
 the duty cycle) at ~5 compiles a second.
+
+## Not after graphics prepared on a computer (#102, 2026-11-03)
+
+A player whose installer prepared the graphics (`shadercache_dksh.bin`: the release's template and its speculation)
+got the background list anyway at the second start: `later_start` only asked for a recorded manifest and no
+`done.txt`, and the first session records one. Measured on the computer (`build/i102/`: `shader_manifest.py
+speculate` + `dksh_cache translate --map`, the v1.1.0 template):
+
+| | Shaders |
+|---|---|
+| The installer's cache (template 8,565 states + speculation) | 23,380 |
+| Drawn by the test console in all its play to 2026-11-03 (its manifest, recorded after the template was made) | 9,525 |
+| ... of them not in the installer's cache (compiled when first drawn, then in the local cache) | 340 |
+| The list after a first session (title screen manifest), not in the installer's cache | 2,015, none ever drawn |
+| The list from today's whole manifest, not in the installer's cache | 1,653 (the 340 already compiled, 1,313 never drawn) |
+
+So with that cache the list cost a second start 1.4 GB of SD reads, ~19,000 translations and ~2,000 compiles during
+play for nothing. `later_start` now skips it when `shadercache_dksh.bin` is there (in `WWHD_DK_SHADER_CACHE_DIR` when
+set); the debug server's `bgshaders start` still runs it.
