@@ -1,6 +1,6 @@
 # PGO builds for players (plan, issue #90)
 
-Branch `feature/pgo-release`. Status: steps 1-4 done (2026-11-03); step 5 (console) next.
+Branch `feature/pgo-release`. Status: steps 1-5 done (2026-11-03): +0.7% to +10.2% fps on scenes the profile never saw.
 
 ## Why
 
@@ -80,6 +80,25 @@ What decides the design (measured, `docs/pgo.md` "Is the generated code the same
    it (its log, `[boot] pgo: profile` in the NRO's boot log).
 5. **Console**: re-time on current main at the default GPU profile (`perf_test.py ab`, PGO against no PGO), USA; the
    gain decides whether the release ships it.
+
+   Console (2026-11-03, 4efd11a7, USA, handheld, charging, stock CPU, default GPU profile). Both builds made on the
+   Mac with the pinned toolchain (GCC 15.2.0, `build_switch.py`). The profile: the training build in
+   `build/switch-pgo-gen`, `pgo_train.py train --plan default` (26 of 26 scenes, 370 `.gcda` files, 2.5 MB; ~27 min),
+   then the release path: `pgo_pack.py pack` (a 0.95 MB zip), `unpack` into `build/pgo-release`, and the PGO build in
+   a third folder, `build/switch-pgo-use`. Every profiled file recompiled with the mismatch warnings on: no function
+   with a different checksum; 222 small game functions (0.4%) have no entry (none in the training build's profile).
+   `perf_test.py ab`, the four scenes the `default` plan leaves out, 900 frames, ABBA twice (4 boots per build):
+
+   | Scene | No PGO fps | PGO fps | fps (95% CI) | Main thread ms |
+   |---|---|---|---|---|
+   | lava | 29.18 | 29.97 | +0.79 (+-0.07), +2.7% | 32.85 -> 30.55 (-7.0%) |
+   | windfall | 29.95 | 29.97 | +0.02 (+-0.06), cap | 32.10 -> 30.68 (-4.4%) |
+   | dragonroost | 29.76 | 29.97 | +0.20 (+-0.28), +0.7% | 32.34 -> 29.95 (-7.4%) |
+   | outset_village | 26.24 | 28.90 | +2.67 (+-0.84), +10.2% | 35.88 -> 33.93 (-5.5%) |
+
+   The render thread gains too (outset_village 38.7 -> ~31.8 ms per frame, one boot each). Three scenes reach the
+   30 fps cap with PGO. Results: `build/perf/ab_base_vs_pgo_20261103_161419.*` (Mac). The console was left on main
+   (0c16d6d).
 
 ## To decide
 
