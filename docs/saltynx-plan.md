@@ -35,6 +35,6 @@ so this one is written from SaltyNX's and Status Monitor's behaviour (their publ
    resolutions; a restart of the game reuses its block; the log's `[saltynx]` lines. Without SaltyNX: one line,
    nothing else.
    Console (2026-11-03, 9e7c4f3b, USA, handheld, SaltyNX 2.1.3, Status Monitor 1.4.1+r4 through Ultrahand): the
-   Full mode shows 30 FPS. Log: `[saltynx] sessions 1 of 1 in use: limit raised to 5`, the block reserved, and on
+   Full mode shows 30 FPS, and the resolutions once the API field is 1 (64637b4d). Log: `[saltynx] sessions 1 of 1 in use: limit raised to 5`, the block reserved, and on
    the next starts `the block of an earlier start at offset 312` (reused).
 3. Later, if wanted: ReverseNX-RT's block (the handheld/docked mode from its overlay).
