@@ -66,9 +66,36 @@ Result request(Service& s, uint32_t cmd, const uint64_t* in, uint64_t* out, Hand
     return serviceDispatch(&s, cmd, .in_send_pid = true);
 }
 
+// the process has no session left (0x10801, console: the forwarder's application pool): one more, when the NPDM
+// allows svcSetResourceLimitLimitValue (0x7E; calling an SVC it does not allow ends the process)
+bool raise_session_limit() {
+    if (!envIsSyscallHinted(0x7E)) return false;
+    u64 value = 0;
+    if (R_FAILED(svcGetInfo(&value, InfoType_ResourceLimit, INVALID_HANDLE, 0)) || !value) return false;
+    const Handle limit = Handle(value);
+    s64 max = 0, used = 0;
+    bool ok = R_SUCCEEDED(svcGetResourceLimitLimitValue(&max, limit, LimitableResource_Sessions)) &&
+              R_SUCCEEDED(svcGetResourceLimitCurrentValue(&used, limit, LimitableResource_Sessions));
+    if (ok) {
+        const Result rc = svcSetResourceLimitLimitValue(limit, LimitableResource_Sessions, max + 4);
+        LOG("[saltynx] sessions %lld of %lld in use: limit raised to %lld (result 0x%X)", (long long)used,
+            (long long)max, (long long)(max + 4), rc);
+        ok = R_SUCCEEDED(rc);
+    }
+    svcCloseHandle(limit);
+    return ok;
+}
+
 bool connect_once(Result& why) {
     Handle port;
     why = svcConnectToNamedPort(&port, "SaltySD");
+    if (why == 0x10801 && raise_session_limit()) why = svcConnectToNamedPort(&port, "SaltySD");
+    if (why == 0x10801) {  // else sm's session lent for a moment (NFSMW-NX's way)
+        smExit();
+        why = svcConnectToNamedPort(&port, "SaltySD");
+        smInitialize();
+        if (R_SUCCEEDED(why)) LOG("[saltynx] connected with sm's session lent");
+    }
     if (R_FAILED(why)) return false;
     Service s;
     serviceCreate(&s, port);
