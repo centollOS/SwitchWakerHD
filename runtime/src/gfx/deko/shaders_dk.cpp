@@ -833,8 +833,8 @@ void start_helpers() {
             return;
         }
         helperStarted[i] = true;
-        LOG("[dk] shader helper thread %d started (cores 0 and 2, %zu MiB stack; compile threads: %s)", i + 1,
-            kWorkerStack >> 20, g_compileThreads.load() == kAuto ? "auto, more while draws wait" : "fixed");
+        LOG("[dk] shader helper thread %d started (cores %s, %zu MiB stack; compile threads: %s)", i + 1,
+            cores::core3() ? "0, 2 and 3" : "0 and 2", kWorkerStack >> 20, g_compileThreads.load() == kAuto ? "auto, more while draws wait" : "fixed");
     }
 }
 
