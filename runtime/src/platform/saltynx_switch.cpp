@@ -143,7 +143,9 @@ bool connect_once(Result& why) {
         }
         Block* b = reinterpret_cast<Block*>(base + at);
         b->magic = kMagic;
-        b->api = 0;  // (1 NVN, 2 EGL, 3 Vulkan: deko3d is none of them)
+        // 1 NVN, 2 EGL, 3 Vulkan: deko3d is NVN's level on the same GPU. Status Monitor shows the resolutions only for
+        // 1 and above ("Game is not running or it's incompatible" with 0, console); the value is not shown
+        b->api = 1;
         b->expectedSetBuffers = -1;
         g_block.store(b, std::memory_order_release);
         ok = true;

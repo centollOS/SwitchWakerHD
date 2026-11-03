@@ -25,7 +25,8 @@ so this one is written from SaltyNX's and Status Monitor's behaviour (their publ
   average rate, the frames of the last second, `pluginActive` (the overlay clears it and waits 100 ms to see it set
   again); the resolutions once an overlay asks for them (0xFFFF in `renderCalls[0].calls`): the game's picture
   (1280x720 x the internal resolution scale) and the window.
-- `WWHD_SALTYNX=0` (settings.ini `[dev]`) turns it off. API field 0 (deko3d is none of NVN, EGL, Vulkan).
+- `WWHD_SALTYNX=0` (settings.ini `[dev]`) turns it off. API field 1 (NVN: deko3d works at NVN's level on the
+  same GPU); Status Monitor shows the resolutions only for an API of 1 and above, and does not print the value.
 
 ## Steps
 
