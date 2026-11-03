@@ -19,8 +19,8 @@ What decides the design (measured, `docs/pgo.md` "Is the generated code the same
 
 ## Steps
 
-1. **Path-independent profiled compiles.** In a `WWHD_PGO=GEN|USE` build, every profiled file is compiled from the
-   checkout's root with paths relative to it (`cmake/pgo_compile.cmake`, a compiler launcher run with `cmake -P`:
+1. **Path-independent profiled compiles.** In a `WWHD_PGO=GEN|USE` build, every profiled file is compiled with the
+   checkout's paths relative to the build folder, `../../runtime/...` (`cmake/pgo_compile.cmake`, a compiler launcher run with `cmake -P`:
    every environment that builds has CMake, unlike bash or Python on the pinned Windows build). It changes nothing
    for files the profile does not cover, nor for `WWHD_PGO=OFF`. Check (Mac): the `.gcno` checksums of the profiled
    files from two checkouts in different folders are identical (`gcov-dump`).
