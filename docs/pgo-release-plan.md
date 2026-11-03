@@ -1,6 +1,6 @@
 # PGO builds for players (plan, issue #90)
 
-Branch `feature/pgo-release`. Status: step 1 done (2026-11-03).
+Branch `feature/pgo-release`. Status: steps 1-2 done (2026-11-03).
 
 ## Why
 
@@ -41,6 +41,15 @@ What decides the design (measured, `docs/pgo.md` "Is the generated code the same
    `.gcda` files `pgo_train.py` fetched, with a manifest: the commit, the region, the GCC version, the scope, the
    file count. Its `.sha256` next to it, as the shader template (#88). The counters hold no game code (function ids,
    checksums and arc counts).
+
+   Done: the training build writes `pgo-build.json` (the compiler, the scope, the hot files' fingerprint), `pgo_pack.py
+   pack|unpack` (`test_pgo_pack.py`, in CI: a round trip, a reproducible zip, and the zips it refuses: another region,
+   a path in a name, a changed file, no manifest, a file list that differs, another format). A `WWHD_PGO=USE` build
+   with a `manifest.json` in `WWHD_PGO_DIR` checks it (`cmake/SwitchPgo.cmake`); the boot log says `[boot] pgo: profile
+   <region> <commit>`. Configured on the Mac against an unpacked made-up profile:
+   - the training build's own compiler and code: 374 files profiled, the boot-log definition set;
+   - another compiler in the manifest: a warning and a normal build (no file profiled);
+   - other generated code: a note, the profile still used (the functions that did not change keep it).
 3. **The installer builds with it** (`make_sd.py`): it downloads its release's profile for the dump's region, checks
    the `.sha256` and the manifest (region, GCC version of the toolchain it builds with) and builds with
    `WWHD_PGO=USE`; anything missing or not matching gives a normal build, with one line saying why. `--no-pgo` turns
