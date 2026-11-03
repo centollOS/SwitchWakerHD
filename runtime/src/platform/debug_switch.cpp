@@ -27,6 +27,7 @@ namespace gx2 { extern uint32_t g_render_thread_handle; }  // (gx2_core.cpp: rtc
 #include "../runtime.h"
 #include "../overlay/hostui.h"
 #include "debug_server.h"
+#include "cores_switch.h"
 #include "prepare_graphics_switch.h"
 #include "shader_scan_switch.h"
 #include "background_shaders_switch.h"
@@ -272,6 +273,64 @@ debugsrv::Reply malloc_info(const debugsrv::Args&) {
     return debugsrv::ok(line);
 }
 
+// "coreprobe [core] [seconds] [priority]" (test, docs/cpu-threading-plan.md 0.5): a thread on that core spins for the
+// seconds and counts the time it did not run (gaps over 20 us between two reads of the tick counter): how much of the
+// core an application thread gets (core 3 needs the forwarder's NPDM to allow it: the process's core mask)
+debugsrv::Reply coreprobe(const debugsrv::Args& a) {
+    struct Probe {
+        double seconds;
+        uint64_t wallNs = 0, lostNs = 0, longestNs = 0, gaps = 0, gapsOver1ms = 0;
+    };
+    const int core = a.size() > 0 ? atoi(a[0].c_str()) : 3;
+    const double seconds = a.size() > 1 ? std::clamp(atof(a[1].c_str()), 0.5, 30.0) : 5.0;
+    const int prio = a.size() > 2 ? int(strtol(a[2].c_str(), nullptr, 0)) : 0x2C;
+    u64 mask = 0;
+    svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+    static Probe probe;
+    probe = Probe{seconds};
+    Thread t;
+    Result rc = threadCreate(&t, [](void* arg) {
+        Probe& p = *static_cast<Probe*>(arg);
+        const uint64_t start = armGetSystemTick(), end = start + uint64_t(p.seconds * 19'200'000.0);
+        uint64_t last = start;
+        for (;;) {
+            const uint64_t now = armGetSystemTick();
+            const uint64_t gap = armTicksToNs(now - last);
+            if (gap > 20'000) {
+                p.lostNs += gap;
+                p.gaps++;
+                p.gapsOver1ms += gap > 1'000'000;
+                p.longestNs = std::max(p.longestNs, gap);
+            }
+            last = now;
+            if (now >= end) break;
+        }
+        p.wallNs = armTicksToNs(last - start);
+    }, &probe, nullptr, 0x4000, prio, core);
+    if (R_FAILED(rc))
+        return debugsrv::err("coreprobe: threadCreate on core " + std::to_string(core) + " refused (0x" +
+                             std::to_string(rc) + "); process core mask " + std::to_string(mask));
+    threadStart(&t);
+    threadWaitForExit(&t);
+    threadClose(&t);
+    char b[300];
+    snprintf(b, sizeof b, "coreprobe core %d priority 0x%X, %.1f s: ran %.1f%% of the time; %llu gaps over 20 us "
+             "(%llu over 1 ms, longest %.2f ms); process core mask 0x%llx", core, prio, double(probe.wallNs) / 1e9,
+             probe.wallNs ? 100.0 * double(probe.wallNs - probe.lostNs) / double(probe.wallNs) : 0.0,
+             (unsigned long long)probe.gaps, (unsigned long long)probe.gapsOver1ms, double(probe.longestNs) / 1e6,
+             (unsigned long long)mask);
+    LOG("[debug] %s", b);
+    return debugsrv::ok(b);
+}
+
+// "core3 [0|1]" (test, docs/core3-plan.md): background shader compiles on core 3 or as before (cores 0-2)
+debugsrv::Reply core3(const debugsrv::Args& a) {
+    if (!a.empty()) cores::wanted() = atoi(a[0].c_str()) != 0;
+    if (!a.empty()) LOG("[debug] core 3 for background work: %s", cores::core3() ? "on" : "off");
+    return debugsrv::ok(std::string("core3 ") + (cores::core3() ? "on" : "off") +
+                        (cores::allowed() ? "" : " (the process has no core 3: the forwarder's NPDM)"));
+}
+
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
     return debugsrv::ok("pacing " + std::to_string(frame_pacing::mode()) + ": swap interval " +
@@ -442,6 +501,8 @@ void start() {
     debugsrv::add_command("vtxident", "vtxident [0|1]         vertex states by layout identity", vtxident);
     debugsrv::add_command("rtcores", "rtcores [pref mask]    (test) the render thread's preferred core and core mask", rtcores);
     debugsrv::add_command("malloc", "malloc                 heap use (mallinfo; stalls allocations for ms)", malloc_info);
+    debugsrv::add_command("coreprobe", "coreprobe [core] [s] [prio]  how much of a core a spinning thread gets (test)", coreprobe);
+    debugsrv::add_command("core3", "core3 [0|1]            background shader compiles on core 3 (test)", core3);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);

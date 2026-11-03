@@ -14,6 +14,7 @@
 // shadercache_gl.bin (WGS1) keeps getting the sources and translations (records 1 and 3) exactly as gfx/gl
 // writes them, so the OpenGL build reads what this one saw; its sources without DKSH are compiled in the
 // background (lowest priority) from start-up.
+#include "../../platform/cores_switch.h"  // (this fork) core 3
 #include "dk_shaders.h"
 #include "shader_manifest.h"
 #include "../../platform/thread_heap_switch.h"
@@ -701,9 +702,12 @@ void compile_job(Job& job, JobResult& r) {
     r.dksh = std::move(res.dksh);
 }
 
+// (this fork) the cores a compile a draw waits for may use: 0 and 2 (core 1 runs the main thread and the guest
+// threads placed there, WWHD_CORE_LAYOUT), and 3 when the process has it (platform/cores_switch.h)
+int foreground_mask() { return cores::core3() ? 0xD : 0x5; }
+
 void worker_main(void*) {
-    // cores 0 and 2: core 1 runs the main thread and the guest threads placed there (WWHD_CORE_LAYOUT)
-    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 0x5);
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, foreground_mask());
     host::set_thread_name("dk shader compiler");
     // (this fork) a heap of its own: Mesa allocates constantly, and the compile threads queued on newlib's one lock
     if (!thread_heap::attach(kCompileHeap)) LOG("[dk] shader worker: no heap of its own (newlib's)");
@@ -723,8 +727,9 @@ void worker_main(void*) {
     const uint64_t t2 = now_ns();
     if (test.ok && !test.dksh.empty())
         LOG("[dk] shader worker: uam ready (init %.0f ms; self-test vertex shader %zu bytes of DKSH in %.0f ms); "
-            "priority 0x%X, cores 0 and 2, %zu MiB stack",
-            double(t1 - t0) / 1e6, test.dksh.size(), double(t2 - t1) / 1e6, kWorkerPriority, kWorkerStack >> 20);
+            "priority 0x%X, cores %s, %zu MiB stack",
+            double(t1 - t0) / 1e6, test.dksh.size(), double(t2 - t1) / 1e6, kWorkerPriority,
+            cores::core3() ? "0, 2 and 3 (background jobs: core 3)" : "0 and 2", kWorkerStack >> 20);
     else
         LOG("[dk] shader worker: uam's SELF-TEST FAILED (%.0f ms): %s -- new shaders will likely fail too",
             double(t2 - t1) / 1e6, test.log.c_str());
@@ -748,10 +753,12 @@ void worker_main(void*) {
         JobResult r;
         // (this fork) a background job (no draw waits for it) only on core 0: on core 2 it took the render thread's
         // time (the game at 27 fps while docs/background-shaders-plan.md's list compiled)
-        static int mask = 0x5;
+        // (this fork, docs/core3-plan.md) with core 3: background jobs there, nothing else of the game's runs on it
+        static int mask = foreground_mask();
         const bool fast = g_bgFast.load(std::memory_order_relaxed);
-        const int want = job.background && !fast ? 0x1 : 0x5;
-        if (want != mask) svcSetThreadCoreMask(CUR_THREAD_HANDLE, want == 0x1 ? 0 : -1, mask = want);
+        const int bgMask = cores::core3() ? 0x8 : 0x1;
+        const int want = job.background && !fast ? bgMask : foreground_mask();
+        if (want != mask) svcSetThreadCoreMask(CUR_THREAD_HANDLE, want == bgMask ? (bgMask == 0x8 ? 3 : 0) : -1, mask = want);
         const uint64_t c0 = now_ns();
         compile_job(job, r);
         const uint64_t took = now_ns() - c0;
@@ -764,11 +771,12 @@ void worker_main(void*) {
         // game threads on core 0 that the main thread waits for every frame lost their time to a busy worker. A job a
         // draw asks for ends the rest (it used to wait behind it: more black textures in a new place)
         if (job.background && !fast) {
-            static const int duty = [] {
+            static const int envDuty = [] {
                 const char* e = getenv("WWHD_DK_BG_DUTY");
-                const int d = e && *e ? atoi(e) : 50;
-                return d < 5 ? 5 : d > 100 ? 100 : d;
+                const int d = e && *e ? atoi(e) : 0;
+                return d <= 0 ? 0 : d < 5 ? 5 : d > 100 ? 100 : d;
             }();
+            const int duty = envDuty ? envDuty : cores::core3() ? 100 : 50;  // (core 3: no game thread to yield to)
             if (duty < 100)
                 workerCv.wait_for(lk, std::chrono::nanoseconds(took * uint64_t(100 - duty) / uint64_t(duty)),
                                   [] { return workerStop || foregroundQueued > 0; });
@@ -780,7 +788,7 @@ void worker_main(void*) {
 // threads chosen and the main worker is ready (uam initialised)
 void helper_main(void* arg) {
     const int index = int(reinterpret_cast<intptr_t>(arg));
-    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 0x5);
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, foreground_mask());
     host::set_thread_name("dk shader helper");
     if (!thread_heap::attach(kCompileHeap)) LOG("[dk] shader helper %d: no heap of its own (newlib's)", index + 1);
     std::unique_lock<std::mutex> lk(workerMutex);
@@ -826,8 +834,8 @@ void start_helpers() {
             return;
         }
         helperStarted[i] = true;
-        LOG("[dk] shader helper thread %d started (cores 0 and 2, %zu MiB stack; compile threads: %s)", i + 1,
-            kWorkerStack >> 20, g_compileThreads.load() == kAuto ? "auto, more while draws wait" : "fixed");
+        LOG("[dk] shader helper thread %d started (cores %s, %zu MiB stack; compile threads: %s)", i + 1,
+            cores::core3() ? "0, 2 and 3" : "0 and 2", kWorkerStack >> 20, g_compileThreads.load() == kAuto ? "auto, more while draws wait" : "fixed");
     }
 }
 

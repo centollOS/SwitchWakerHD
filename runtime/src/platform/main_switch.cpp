@@ -314,6 +314,11 @@ void main_switch::start() {
     host::place_thread(0);
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
     LOG("[boot] toolchain: %s", switch_toolchain::info());  // which ELF the crash addresses fit (switch_toolchain.h)
+    {  // (this fork) the cores the process may use: 0x7 (0-2) from the usual NPDM, 0xF when the forwarder allows core 3
+        u64 mask = 0;
+        svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+        LOG("[boot] process core mask 0x%llx", (unsigned long long)mask);
+    }
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
     update_notice::start();  // asks GitHub for a newer release in the background (platform/update_notice_switch.h)
 }
