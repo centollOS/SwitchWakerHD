@@ -78,4 +78,24 @@ So a profile made by the maintainers fits players' builds, under these condition
   `singleflow.py runtime_addresses`: sets, so the order of the directory walk does not matter), so a change to the
   recompiler, the hook lists or the runtime can change the generated code.
 - **Same GCC**: the pinned toolchain (`docs/pinned-toolchain-plan.md`) gives every build the same compiler.
-- Code mods (`--mod-hooks`) and the decomp build translate differently: a normal build for them.
+- **The other Switch installer options**: the Brazilian Portuguese translation (a data pack), the shader template,
+  the forwarder, the icon and the name do not touch the game code. A code mod built into the NRO does: the GameCube
+  sea minimap (`gc-minimap`, one hook, `daPy_Execute`) makes the recompiler assume more registers are read across
+  calls, and 20,201 of 39,713 functions change. In the hot files, 547 of 3,894 functions get a different checksum
+  (193 a different flow graph), so with the minimap ~86% of the hot functions keep their profile. Desktop code mods
+  (`--mod-hooks`) and the decomp build translate differently again: a normal build for them.
+
+### The build folder is part of the checksum
+
+GCC accepts a function's profile only when both its `cfg_checksum` and its `lineno_checksum` match (`gcov-dump` of
+the `.gcno` files, devkitA64 GCC 16.1, the 13 hot files, the same generated code):
+
+| Compiled from | Functions whose checksums differ |
+|---|---|
+| two different absolute folders | 3,859 of 3,894 (the `lineno_checksum` hashes the file's path) |
+| the same, with `-fprofile-prefix-map` or `-ffile-prefix-map` | still 3,859 (one file: 188 of 192) |
+| the source folder, with a relative file name | 4 of 192 (`static` helpers from `ppc.h`: only their id, which hashes the input name) |
+
+The container build always compiles from `/src`, but the installers build natively (macOS, Linux and Windows) from
+the player's own folder. A shared profile needs the game files compiled under one fixed name: from the generated
+code's folder with relative names, or from a fixed path.
