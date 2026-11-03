@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <dirent.h>
+#include <malloc.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -256,6 +257,21 @@ debugsrv::Reply rtcores(const debugsrv::Args& a) {
     return debugsrv::ok("rtcores preferred " + std::to_string(pref) + " mask 0x" + std::to_string(mask));
 }
 
+// "malloc": the heap's use (mallinfo) and what the call cost. Not in the 5 s [mem] line any more: mallinfo walks every
+// free chunk with malloc's lock held (console: ~9 ms after a 10 min warp tour), stalling every allocating thread.
+// The same "[mem] malloc ..." start as before in the log (memory_tour.py)
+debugsrv::Reply malloc_info(const debugsrv::Args&) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const struct mallinfo mi = mallinfo();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    char line[200];
+    snprintf(line, sizeof line, "[mem] malloc %zu MiB in use of %zu MiB taken (heap never used %zu MiB), %zu free chunks, "
+             "mallinfo %.2f ms", size_t(mi.uordblks) >> 20, size_t(mi.arena) >> 20, heap_never_used_mib(),
+             size_t(mi.ordblks), ms);
+    LOG("%s", line);
+    return debugsrv::ok(line);
+}
+
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
     return debugsrv::ok("pacing " + std::to_string(frame_pacing::mode()) + ": swap interval " +
@@ -425,6 +441,7 @@ void start() {
     debugsrv::add_command("fixedmemo", "fixedmemo [0|1]        fixed state in three memos", fixedmemo);
     debugsrv::add_command("vtxident", "vtxident [0|1]         vertex states by layout identity", vtxident);
     debugsrv::add_command("rtcores", "rtcores [pref mask]    (test) the render thread's preferred core and core mask", rtcores);
+    debugsrv::add_command("malloc", "malloc                 heap use (mallinfo; stalls allocations for ms)", malloc_info);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);
