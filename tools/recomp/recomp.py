@@ -129,6 +129,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
             raise SystemExit(unknown_build_message(path))
         self.mod_hooks = mod_hooks
         self.fork_mod_hooks_only(game_builds.read_hooks)  # (this fork)
+        self.fork_count_calls(game_builds.read_hooks)  # (this fork)
         self.p = Program(path)
         self.p.discover()
         self.entries = set(self.p.entries)
@@ -342,6 +343,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
             out.append("void f_%08X(Cpu* __restrict c) { PPC_HOOK_CALL(c, hook_%08X); }\n" % (name, name))
         out += ["void %s(Cpu* __restrict c) {" % fname, "    PPC_ENTER_FN(0x%08Xu, %s);" % (start, fname)]  # (this fork: tail-call slow path)
         enter_at = len(out) - 1
+        self.fork_count_call(start, out)  # (this fork)
         if self.fork_mod_check(start):  # (this fork: or only the listed functions)
             # guest mods: the check sits in the game's code (f_X, or f_X_orig behind a port hook), so the
             # port's own hooks (interpolation, true 60) stay outermost and mods hook the game's code

@@ -70,6 +70,14 @@ two runs of the same build agree within 0.3 fps.
   cost is measured and reported with the profile.
 - Output: `tools/switch/main_profile.py`: functions by self time and by inclusive time, with names from the decomp
   (`tools/verify/funcdb.py`) where known.
+- Cost per call (#65): a counting build, the game code made with `WWHD_RECOMP_COUNT_CALLS=FILE` (canonical
+  addresses, one per line, as `hooks.txt`), adds one to a counter at the entry of each listed function (and of its
+  inline copy). Its "profile" also writes `logs/prof_<n>.counts` (the calls during the run, the seconds and the
+  frames); fetched next to the samples file, `main_profile.py` adds calls per frame and ns per call (self and
+  inclusive: the function's share of the thread's samples times the run's seconds, over its calls). The counters
+  are plain (any thread, unsynchronised): close, not exact, for a function called from several threads at once. A
+  leaf with an inline copy has most of its time in its callers, and the report says so. Without the variable the
+  generated code is the same as before (table.c has an empty list), so a player's build has no counter.
 
 **0.3 Desktop cross-check.** The same save states on the macOS (Apple silicon) build with Instruments' Time
 Profiler, and Windows on ARM with `thread_sampler`. Same game code, a similar ARM64 compiler: the hot list should

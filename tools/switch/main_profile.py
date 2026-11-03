@@ -20,6 +20,14 @@ bound). When the sampler also walked the game's own stack (the main thread: its 
 addresses saved in it), those frames count too, and the inclusive column holds every game function on the call stack.
 Game functions are the recompiled ones (f_XXXXXXXX: the game's canonical address); names from the decomp's
 verify units and names.tsv when present (--names).
+
+Cost per call (#65): with a counting build (the game code made with WWHD_RECOMP_COUNT_CALLS=FILE, a list of
+canonical addresses as hooks.txt), "profile" also writes logs/prof_<n>.counts; fetched next to the samples (or
+--counts), the report adds each counted function's calls per frame and its time per call (its share of the thread's
+samples times the run's seconds, over its calls), which tells a slow function from one called too often:
+
+  WWHD_RECOMP_COUNT_CALLS=build/count.txt python3 tools/recomp/recomp.py game/code/cking.rpx build/gen
+  tools/switch/wwhd_debug.py get logs/prof_<n>.counts build/prof/sea.counts
 """
 import argparse
 import bisect
@@ -61,6 +69,41 @@ def read_samples(path):
         pos += 8 * count
         samples.append((thread, frames))
     return tags, base, samples
+
+
+def read_counts(path):
+    """a counts file (WWHDCALLS1): (seconds, frames, [(f_XXXXXXXX, calls, inline copy)])"""
+    with open(path) as f:
+        lines = f.read().split("\n")
+    if lines[0] != "WWHDCALLS1":
+        sys.exit(path + ": not a WWHDCALLS1 file")
+    head = dict(l.split(" ", 1) for l in lines[1:3])
+    rows = []
+    for l in lines[3:]:
+        p = l.split()
+        if len(p) == 3:
+            rows.append(("f_" + p[0], int(p[1]), p[2] == "1"))
+    return float(head["seconds"]), int(head["frames"]), rows
+
+
+def cost_per_call(counts, n, self_c, incl_c, label, tag):
+    """the counted functions: calls per frame, time per call (self and inclusive) and per frame (self)"""
+    seconds, frames, rows = counts
+    own = collections.Counter()
+    for k, v in self_c.items():
+        own[canon(k)] += v  # (f_X_orig and .localalias count as f_X, as the counts do)
+    print("-- cost per call (%d functions counted over %.1f s, %d frames; calls of every thread, time of thread %s)" % (
+        len(rows), seconds, frames, tag))
+    print("   %12s %11s %11s %10s  function" % ("calls/frame", "self ns", "incl ns", "self ms/f"))
+    per = seconds * 1e9 / n  # ns a sample of this thread stands for
+    for q, calls, inline in sorted(rows, key=lambda r: -incl_c.get(r[0], 0)):
+        if not calls:
+            print("   %12s %11s %11s %10s  %s" % ("0", "-", "-", "-", label(q)))
+            continue
+        note = "  (inline copy: most of its time is in its callers)" if inline else ""
+        print("   %12.1f %11.0f %11.0f %10.3f  %s%s" % (
+            calls / max(frames, 1), own.get(q, 0) * per / calls, incl_c.get(q, 0) * per / calls,
+            own.get(q, 0) * per / 1e6 / max(frames, 1), label(q), note))
 
 
 def read_symbols(elf):
@@ -274,6 +317,8 @@ def main():
     ap.add_argument("--callers", help="a function (f_XXXXXXXX or a symbol): the chains above it, by caller")
     ap.add_argument("--hitches", action="store_true", help="a hitch file (logs/hitch_*.samples): the slow frames")
     ap.add_argument("--each", type=int, default=10, help="with --hitches: the longest frames shown one by one")
+    ap.add_argument("--counts", help="a counts file (logs/prof_<n>.counts, a counting build's): the cost per call "
+                                     "(default: the samples file's name with .counts, when there is one)")
     args = ap.parse_args()
 
     addrs, syms = read_symbols(args.elf)
@@ -282,6 +327,8 @@ def main():
         return compare(args, addrs, syms, names)
     tags, base, samples = read_samples(args.samples[0])
     text_lo, text_hi = addrs[0], addrs[-1] + 0x100000
+    counts_path = args.counts or os.path.splitext(args.samples[0])[0] + ".counts"
+    counts = read_counts(counts_path) if args.counts or os.path.exists(counts_path) else None
 
     starts = guest_functions(syms)
 
@@ -362,6 +409,8 @@ def main():
         print("-- inclusive" if gdepth else "-- inclusive (lower bound)")
         for s, v in incl_c.most_common(args.top):
             print("   %5.2f%%  %s" % (100.0 * v / n, label(s)))
+        if counts:
+            cost_per_call(counts, n, self_c, incl_c, label, tag)
         print()
 
 

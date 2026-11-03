@@ -3,7 +3,8 @@
 // second: each thread is paused (svcSetThreadActivity), its registers read (svcGetThreadContext3), and resumed. A
 // sample keeps the pc, the lr and the frame-pointer chain inside the thread's stack. No allocation or lock while a
 // thread is paused. Files: logs/prof_<n>.samples (the Windows backend's format, WWHDSAMP1, plus the executable's
-// base on a "base" line) for tools/switch/main_profile.py.
+// base on a "base" line) for tools/switch/main_profile.py. A counting build (WWHD_RECOMP_COUNT_CALLS, #65) also gets
+// logs/prof_<n>.counts: the listed functions' calls during the run, for the cost per call.
 #include "thread_sampler.h"
 
 #include <switch.h>
@@ -18,6 +19,15 @@
 
 #include "../runtime.h"
 #include "host.h"
+
+// the recompiler's call counters (table.c; none unless the game code was made with WWHD_RECOMP_COUNT_CALLS)
+extern "C" {
+extern const unsigned g_recomp_count_n;
+extern const uint32_t g_recomp_count_addrs[];
+extern const uint8_t g_recomp_count_inline[];
+extern unsigned long long g_recomp_counts[];
+}
+namespace render { uint64_t frame_count(); }
 
 namespace thread_sampler {
 namespace {
@@ -147,6 +157,22 @@ FILE* open_samples(const char* kind, int n, char* path, size_t pathSize) {
     return out;
 }
 
+// logs/prof_<n>.counts beside the samples (WWHDCALLS1): the run's seconds and frames, then per counted function its
+// canonical address, its calls during the run (every thread's) and 1 when its callers use an inline copy
+void write_counts(const char* samplesPath, const std::vector<unsigned long long>& before, double seconds,
+                  uint64_t frames) {
+    std::string path(samplesPath);
+    path.replace(path.size() - strlen(".samples"), std::string::npos, ".counts");
+    FILE* f = fopen(path.c_str(), "w");
+    if (!f) return;
+    fprintf(f, "WWHDCALLS1\nseconds %.3f\nframes %llu\n", seconds, (unsigned long long)frames);
+    for (unsigned i = 0; i < g_recomp_count_n; i++)
+        fprintf(f, "%08X %llu %d\n", unsigned(g_recomp_count_addrs[i]), g_recomp_counts[i] - before[i],
+                int(g_recomp_count_inline[i]));
+    fclose(f);
+    LOG("[profile] %s: calls of %u functions", path.c_str(), g_recomp_count_n);
+}
+
 void sampler_main(void*) {
     const int n = g_count.load();
     char path[96];
@@ -156,6 +182,9 @@ void sampler_main(void*) {
         g_running = false;
         return;
     }
+    // (plain counters, read while the game runs: a count can be off by the calls in flight)
+    std::vector<unsigned long long> counts(g_recomp_counts, g_recomp_counts + g_recomp_count_n);
+    const uint64_t firstFrame = render::frame_count();
     std::vector<Sample> batch;
     batch.reserve(2048);
     uint64_t samples = 0, failed = 0, pausedNs = 0, worstNs = 0;
@@ -182,6 +211,8 @@ void sampler_main(void*) {
     }
     for (const Sample& s : batch) write_sample(out, s);
     fclose(out);
+    if (g_recomp_count_n)
+        write_counts(path, counts, double(ticks_ns(armGetSystemTick() - start)) / 1e9, render::frame_count() - firstFrame);
     char b[256];
     snprintf(b, sizeof b, "%s: %llu samples, %llu failed (last 0x%x), paused %.1f us a sample (worst %.0f us)", path,
              (unsigned long long)samples, (unsigned long long)failed, unsigned(lastError),
