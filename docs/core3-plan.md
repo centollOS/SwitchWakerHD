@@ -1,6 +1,6 @@
 # Core 3 for background work (plan)
 
-Branch `feature/core3`. Status: steps 1-2 done (2026-11-03), step 3 (the A/B) next.
+Branch `feature/core3`. Status: steps 1-3 done (2026-11-03); step 4 to decide.
 
 ## Why
 
@@ -39,6 +39,27 @@ pipeline prebuilds there.
    settings.ini's `[dev]`, so the console's own caches are untouched), the first start's list compiling gently in
    play; `core3 1` / `core3 0` alternating every 60 s at Outset and Windfall: the game's fps and the compiles per
    minute. Then a warp tour on a cold cache: draws skipped for shaders and the time they waited.
+
+   Console (2026-11-03, 0ed6bb0a, USA, handheld, stock clocks; empty cache folder, "Play now" on the first-start
+   card, then the list compiling gently in play; 45 s phases, ABBA, 5 s stats lines without the first of each phase):
+
+   | Place | core3 | fps (min) | compiles/s |
+   |---|---|---|---|
+   | Outset | on | 30.00 (30.0) | 2.50 |
+   | Outset | off | 29.74 (29.4) | 0.93 |
+   | Outset | off | 29.89 (29.6) | 0.55 |
+   | Outset | on | 29.65* | 6.91 |
+   | Windfall | on | 30.00 (30.0) | 2.92 |
+   | Windfall | off | 30.00 (30.0) | 1.42 |
+   | Windfall | off | 30.00 (30.0) | 1.27 |
+   | Windfall | on | 30.00 (30.0) | 1.48 |
+
+   (*) the last phase of a place runs into the warp to the next one (its 27.9 fps minimum is the warp).
+   The background list compiles 2-4x faster with core 3 (Outset 2.5-6.9 against 0.6-0.9 compiles/s), and the game
+   keeps its frame rate (Outset's off phases lost 0.1-0.3 fps to the compiles on core 0). The worker's queue was
+   empty most of the time: the list's thread (on core 3 in both modes) feeds it gently, so the compile rate is
+   bounded by the feed, not by the worker. A compile takes ~150 ms on core 3 (56 ms at full speed on 0/2 with
+   helpers: core 3 gives ~4/5 of its time, and the cores share the L2).
 
 4. Then decide: the audio threads (`hle/ax.cpp` frame thread, audout), the log writer, the update check and the
    debug server could follow; the forwarder change ships with the next release (players reinstall the NSP once:
