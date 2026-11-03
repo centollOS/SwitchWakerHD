@@ -408,6 +408,22 @@ Switch.
 - **[nx-hbloader](https://github.com/switchbrew/nx-hbloader)**,
   **[hacBrewPack](https://github.com/TooTallNate/hacBrewPack)** and
   **[hactool](https://github.com/SciresM/hactool)**: the HOME-menu forwarder.
+- **[SaltyNX](https://github.com/masagrator/SaltyNX)** and
+  **[Status Monitor Overlay](https://github.com/masagrator/Status-Monitor-Overlay)** (masagrator):
+  the shared-memory block this port fills so the overlay shows its frame rate and resolutions.
+
+Ideas and findings from other Switch ports (no code taken; each written up in the docs named):
+
+- **[NFSMW-NX](https://github.com/StevensND/nfsmw-nx)** (Stevens): a sampling profiler turned on
+  by a file on the SD card that records what the threads did in the slow frames
+  ([docs/hitch-profiler-plan.md](docs/hitch-profiler-plan.md)), and writing SaltyNX's block from a
+  homebrew program ([docs/saltynx-plan.md](docs/saltynx-plan.md)).
+- **[renut-nx](https://github.com/ChanseyIsTheBest/renut-nx)** (ChanseyIsTheBest): core 3 through
+  the forwarder's NPDM ([docs/core3-plan.md](docs/core3-plan.md)), and the cost of calling
+  `mallinfo` on a fragmented heap. Its sister ports
+  **[bejeweled3-nx](https://github.com/ChanseyIsTheBest/bejeweled3-nx)** and
+  **[sa2-nx](https://github.com/ChanseyIsTheBest/sa2-nx)**: inlining the hottest leaf functions
+  (#63) and the profiling ideas in #64-#69.
 
 If you enjoy this port, the projects above are where the credit belongs. Every component and its
 license: [THIRD_PARTY.md](THIRD_PARTY.md).

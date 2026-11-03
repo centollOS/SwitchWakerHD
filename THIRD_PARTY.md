@@ -19,6 +19,7 @@ build recompiles the game from the player's own dump.
 | `runtime/third_party/xxhash/` | [xxHash](https://github.com/Cyan4973/xxHash) (Yann Collet) | BSD-2-Clause |
 | `runtime/third_party/metal-cpp/` | [metal-cpp](https://developer.apple.com/metal/cpp/) (Apple; macOS builds only) | Apache-2.0 |
 | `tools/wudextract/zarchive.cpp` | Written from the format of [ZArchive](https://github.com/Exzap/ZArchive) (Exzap); nothing of it is vendored | project's (MPL-2.0); format: MIT No Attribution |
+| `runtime/src/platform/saltynx_switch.cpp` | Written from the shared-memory block and IPC of [SaltyNX](https://github.com/masagrator/SaltyNX) and how [Status Monitor Overlay](https://github.com/masagrator/Status-Monitor-Overlay) reads it (masagrator), and the approach of [NFSMW-NX](https://github.com/StevensND/nfsmw-nx)'s `docs/console-overlays.md` (Stevens); nothing of them is vendored | project's (MPL-2.0); SaltyNX states no license, NFSMW-NX is GPL-3.0 (its template was not used) |
 | `tools/switch/forwarder/nx-hbloader-forwarder.patch` | Patch to nx-hbloader | same as nx-hbloader (ISC) |
 
 ## Fetched at build time (not in the repository)
