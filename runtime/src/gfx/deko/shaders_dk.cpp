@@ -771,11 +771,12 @@ void worker_main(void*) {
         // game threads on core 0 that the main thread waits for every frame lost their time to a busy worker. A job a
         // draw asks for ends the rest (it used to wait behind it: more black textures in a new place)
         if (job.background && !fast) {
-            static const int duty = [] {
+            static const int envDuty = [] {
                 const char* e = getenv("WWHD_DK_BG_DUTY");
-                const int d = e && *e ? atoi(e) : cores::core3() ? 100 : 50;  // (core 3: no game thread to yield to)
-                return d < 5 ? 5 : d > 100 ? 100 : d;
+                const int d = e && *e ? atoi(e) : 0;
+                return d <= 0 ? 0 : d < 5 ? 5 : d > 100 ? 100 : d;
             }();
+            const int duty = envDuty ? envDuty : cores::core3() ? 100 : 50;  // (core 3: no game thread to yield to)
             if (duty < 100)
                 workerCv.wait_for(lk, std::chrono::nanoseconds(took * uint64_t(100 - duty) / uint64_t(duty)),
                                   [] { return workerStop || foregroundQueued > 0; });
