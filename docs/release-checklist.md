@@ -124,9 +124,18 @@ release's commit or just after the tag.
    # the players' compiler (the pinned toolchain); the build folder must be a folder of build/
    WWHD_BUILD_DIR=build/switch-pgo-gen WWHD_PGO=GEN python3.14 tools/switch/build_switch.py
    tools/switch/pgo_train.py clean && tools/switch/pgo_train.py train --plan all --nro build/switch-pgo-gen/wwhd.nro --out build/pgo
-   tools/switch/pgo_pack.py pack --region USA   # (EU: the EU game's recompile in build/gen, its own training)
+   tools/switch/pgo_pack.py pack --region USA   # (EU: below)
    gh release upload vX.Y.Z build/pgo-profile-USA.zip build/pgo-profile-USA.zip.sha256
    ```
+   EU: put the USA `build/gen` aside, recompile the EU `cking.rpx` into `build/gen` (the same folder name: the profile's
+   names come from it), `WWHD_BUILD_DIR=build/switch-pgo-gen-eu` for the training build, and on the console the EU
+   game through settings.ini's `[dev]` (`WWHD_GAME_DIR=game-eu`, `WWHD_STATE_DIR=sdmc:/switch/wwhd/states-eu`). The
+   trainer needs a Quest Log in slot 1: the console's `save-eu` has none, so copy the USA `save/user/` files into a
+   new folder (`save-pgo-eu`, the EU game loads them) and set `WWHD_SAVE_DIR=save-pgo-eu`; never write into `save` or
+   `save-eu`. Afterwards: settings.ini back from its copy (compare it), `save-pgo-eu` removed, the USA `build/gen` back.
+   `pgo_pack.py pack --region EU --gcda build/pgo-eu --build-dir build/switch-pgo-gen-eu`. If the console's Wi-Fi
+   drops during training, the game keeps running: dump the scene by hand (`pgo reset`, 30 s, `pgo dump`), then
+   `pgo_train.py fetch`.
    Check: an installer run says "PGO profile of vX.Y.Z for the USA game", and the NRO's boot log
    `[boot] pgo: profile USA <commit>`. A region without a profile gets a normal build.
    Check on Windows (the pinned Windows toolchain, the test PC) with the profile trained from the Mac's build: an
