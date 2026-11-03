@@ -35,10 +35,10 @@ pipeline prebuilds there.
    - jobs a draw waits for, and the helper compile threads, on cores 0, 2 and 3 (0 and 2 before);
    - the background list's thread (reading, speculation, translation) on core 3 (core 0 before).
 
-3. **A/B on the console** (next): with an empty shader cache directory (`WWHD_DK_SHADER_CACHE_DIR` in
+3. **A/B on the console** (done): with an empty shader cache directory (`WWHD_DK_SHADER_CACHE_DIR` in
    settings.ini's `[dev]`, so the console's own caches are untouched), the first start's list compiling gently in
-   play; `core3 1` / `core3 0` alternating every 60 s at Outset and Windfall: the game's fps and the compiles per
-   minute. Then a warp tour on a cold cache: draws skipped for shaders and the time they waited.
+   play; `core3 1` / `core3 0` alternating at Outset and Windfall: the game's fps and the compiles per second. Not
+   done yet: a warp tour on a cold cache (draws skipped for shaders and the time they waited).
 
    Console (2026-11-03, 0ed6bb0a, USA, handheld, stock clocks; empty cache folder, "Play now" on the first-start
    card, then the list compiling gently in play; 45 s phases, ABBA, 5 s stats lines without the first of each phase):
