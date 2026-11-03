@@ -16,6 +16,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "dk_sync.h"
 #include "frame_pacing.h"  // (this fork, #23) vblank statistics and pacing modes
 #include "../../platform/background_shaders_switch.h"  // (this fork) the counter's shader line
+#include "../../platform/thread_sampler.h"  // (this fork) the sampler's hitch mode
 
 #include <algorithm>
 #include <atomic>
@@ -1379,6 +1380,8 @@ void check_hitch(uint64_t now) {
     static uint64_t lastSwap = 0, lastDraws = 0, lastSkipped = 0, lastRenderWait = 0;
     static int logged = 0;
     const uint64_t renderWait = gx2::render_thread_wait_ns();
+    // (this fork) hitch mode of the sampler: a slow frame's samples to logs/hitch_*.samples (now_ns: ticks * 625 / 12)
+    if (lastSwap) thread_sampler::mark_frame(lastSwap * 12 / 625, now * 12 / 625, R.frame);
     if (lastSwap && now - lastSwap > 55'000'000ull) {
         g_hitches++;
         if (logged < 300) {
@@ -1408,6 +1411,7 @@ void check_hitch(uint64_t now) {
 void swap() {
     const uint64_t start = now_ns();
     check_hitch(start);
+    if (R.frame == 120) thread_sampler::start_flagged();  // (this fork) logs/hitch_profile.flag: the hitch mode
     present();
     R.perf.presentNs += now_ns() - start;
     g_times.presentNs += now_ns() - start;
