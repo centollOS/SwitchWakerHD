@@ -331,6 +331,15 @@ debugsrv::Reply core3(const debugsrv::Args& a) {
                         (cores::allowed() ? "" : " (the process has no core 3: the forwarder's NPDM)"));
 }
 
+// "guestcore3 [0|1]" (test, docs/guest-core3-plan.md): the game's threads of emulated cores 0 and 2 also on core 3
+debugsrv::Reply guestcore3(const debugsrv::Args& a) {
+    if (!a.empty()) cores::guest_wanted() = atoi(a[0].c_str()) != 0;
+    const bool on = cores::allowed() && cores::guest_wanted().load();
+    if (!a.empty()) LOG("[debug] guest threads of cores 0 and 2 on core 3 too: %s", on ? "on" : "off");
+    return debugsrv::ok(std::string("guestcore3 ") + (on ? "on" : "off") +
+                        (cores::allowed() ? "" : " (the process has no core 3: the forwarder's NPDM)"));
+}
+
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
     return debugsrv::ok("pacing " + std::to_string(frame_pacing::mode()) + ": swap interval " +
@@ -503,6 +512,7 @@ void start() {
     debugsrv::add_command("malloc", "malloc                 heap use (mallinfo; stalls allocations for ms)", malloc_info);
     debugsrv::add_command("coreprobe", "coreprobe [core] [s] [prio]  how much of a core a spinning thread gets (test)", coreprobe);
     debugsrv::add_command("core3", "core3 [0|1]            background shader compiles on core 3 (test)", core3);
+    debugsrv::add_command("guestcore3", "guestcore3 [0|1]       guest threads of cores 0/2 also on core 3 (test)", guestcore3);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);
