@@ -223,6 +223,14 @@ def hitches(args, tags, sym, label):
                     incl_c[q] += 1
         return self_c, incl_c
 
+    def below(incl_c, n, limit):
+        """inclusive entries under 98%: the thread's entry chain (on every sample's stack) says nothing"""
+        return [(k, v) for k, v in incl_c.most_common() if v < 0.98 * n][:limit]
+
+    empty = [w for w in wins if not w[3]]
+    if empty:
+        print("   %d of them without samples (the sampler thread did not run in them: %s ms)" % (
+            len(empty), ", ".join("%.0f" % w[1] for w in sorted(empty, key=lambda w: -w[1])[:8])))
     threads = [i for i, tag in enumerate(tags) if args.thread == "all" or tag == args.thread]
     for ti in threads:
         rows = [fr for w in wins for t, fr in w[3] if t == ti]
@@ -234,19 +242,23 @@ def hitches(args, tags, sym, label):
         print("-- self time")
         for k, v in self_c.most_common(args.top):
             print("   %5.2f%%  %s" % (100.0 * v / n, label(k)))
-        print("-- inclusive")
-        for k, v in incl_c.most_common(args.top):
+        print("-- inclusive (without the functions on 98%+ of the stacks)")
+        for k, v in below(incl_c, n, args.top):
             print("   %5.2f%%  %s" % (100.0 * v / n, label(k)))
-    print("\n== the %d longest frames, one by one (inclusive, the top %d per thread)" % (min(args.each, len(wins)), 6))
-    for frame, wms, rounds, recs in sorted(wins, key=lambda w: -w[1])[: args.each]:
+    print("\n== the %d longest frames with samples, one by one (per thread: self, then inclusive under 98%%)" %
+          min(args.each, len(wins) - len(empty)))
+    for frame, wms, rounds, recs in sorted([w for w in wins if w[3]], key=lambda w: -w[1])[: args.each]:
         print("-- frame %d: %.1f ms, %d rounds sampled" % (frame, wms, rounds))
         for ti in threads:
             rows = [fr for t, fr in recs if t == ti]
             if not rows:
                 continue
-            _, incl_c = tables(rows)
-            top = ", ".join("%s %.0f%%" % (label(k), 100.0 * v / len(rows)) for k, v in incl_c.most_common(6))
-            print("   %-6s %s" % (tags[ti], top))
+            self_c, incl_c = tables(rows)
+            n = len(rows)
+            print("   %-6s self: %s" % (tags[ti], ", ".join("%s %.0f%%" % (label(k), 100.0 * v / n)
+                                                          for k, v in self_c.most_common(4))))
+            print("   %-6s in:   %s" % ("", ", ".join("%s %.0f%%" % (label(k), 100.0 * v / n)
+                                                      for k, v in below(incl_c, n, 6))))
 
 
 def main():

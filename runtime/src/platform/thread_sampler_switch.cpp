@@ -210,11 +210,48 @@ std::atomic<bool> g_hitchMode{false};
 std::atomic<uint32_t> g_thresholdMs{40};
 uint64_t g_droppedMarks = 0;  // (under g_markMu) frames not queued: the queue was full
 
+// the file is written by its own thread: the sampler must not wait for the SD card (a warp's slow frames come in a row
+// while the game loads from it, and a sampler blocked in fwrite took no samples in them: 34 of 136 frames, console)
+constexpr size_t kMaxPending = 16u << 20;  // bytes waiting for the writer; more are dropped (counted)
+std::mutex g_writeMu;
+CondVar g_writeCv;
+Mutex g_writeCvMu;
+std::vector<uint8_t> g_pending;
+uint64_t g_droppedBytes = 0;  // (under g_writeMu)
+char g_hitchPath[96];
+
+void append(std::vector<uint8_t>& b, const Sample& s) {
+    const size_t at = b.size();
+    b.resize(at + 8 + 8 * size_t(s.count));
+    memcpy(b.data() + at, &s.thread, 4);
+    memcpy(b.data() + at + 4, &s.count, 4);
+    memcpy(b.data() + at + 8, s.frames, 8 * size_t(s.count));
+}
+
+void writer_main(void*) {
+    std::vector<uint8_t> take;
+    for (;;) {
+        mutexLock(&g_writeCvMu);
+        condvarWaitTimeout(&g_writeCv, &g_writeCvMu, 1'000'000'000ull);
+        mutexUnlock(&g_writeCvMu);
+        {
+            std::lock_guard<std::mutex> lk(g_writeMu);
+            take.swap(g_pending);
+        }
+        if (take.empty()) continue;
+        // opened for each write and closed after it: the console's file system refuses to read a file open for
+        // writing (the debug server's "get" during the session), and a HOME close keeps what was written
+        if (FILE* out = fopen(g_hitchPath, "ab")) {
+            fwrite(take.data(), 1, take.size(), out);
+            fclose(out);
+        }
+        take.clear();
+    }
+}
+
 void hitch_main(void*) {
     const int n = g_count.load();
     char path[96];
-    // the file is opened for each write and closed after it: the console's file system refuses to read a file open
-    // for writing (the debug server's "get" during the session), and a HOME close keeps what was written
     FILE* out = open_samples("hitch", n, path, sizeof path);
     if (!out) {
         LOG("[profile] hitch mode: cannot write logs/");
@@ -223,7 +260,18 @@ void hitch_main(void*) {
         return;
     }
     fclose(out);
-    out = nullptr;
+    snprintf(g_hitchPath, sizeof g_hitchPath, "%s", path);
+    mutexInit(&g_writeCvMu);
+    condvarInit(&g_writeCv);
+    static Thread writer;
+    // below the game's threads (it only waits for the SD card), on core 0 as the sampler
+    if (R_FAILED(threadCreate(&writer, writer_main, nullptr, nullptr, 64 * 1024, 0x3B, 0)) || R_FAILED(threadStart(&writer))) {
+        LOG("[profile] hitch mode: cannot start the writer thread");
+        g_hitchMode = false;
+        g_running = false;
+        return;
+    }
+    std::vector<uint8_t> chunk;
     LOG("[profile] hitch mode: %d threads sampled every ms, frames over %u ms written to %s", n, g_thresholdMs.load(),
         path);
     std::vector<Sample> ring(size_t(kRing) * n);
@@ -256,8 +304,8 @@ void hitch_main(void*) {
             }
             g_markCount = keep;
         }
-        if (count && written < uint64_t(kMaxWritten)) out = fopen(path, "ab");
-        for (int k = 0; out && k < count && written < uint64_t(kMaxWritten); k++) {
+        chunk.clear();
+        for (int k = 0; k < count && written < uint64_t(kMaxWritten); k++) {
             const Mark& m = marks[k];
             const uint64_t first = round > uint64_t(kRing) ? round - kRing : 0;
             uint64_t inside = 0;
@@ -271,31 +319,41 @@ void hitch_main(void*) {
             marker.frames[1] = m.end;
             marker.frames[2] = m.frame;
             marker.frames[3] = inside;
-            write_sample(out, marker);
+            append(chunk, marker);
             for (uint64_t r = first; r < round; r++) {
                 const int sl = int(r % kRing);
                 if (ringTick[sl] < m.start || ringTick[sl] > m.end) continue;
                 for (int i = 0; i < n; i++)
-                    if (ringOk[size_t(sl) * n + i]) write_sample(out, ring[size_t(sl) * n + i]);
+                    if (ringOk[size_t(sl) * n + i]) append(chunk, ring[size_t(sl) * n + i]);
             }
             written++;
             if (written == uint64_t(kMaxWritten)) LOG("[profile] hitch mode: %d slow frames written, no more", kMaxWritten);
         }
-        if (out) {
-            fclose(out);
-            out = nullptr;
+        if (!chunk.empty()) {
+            {
+                std::lock_guard<std::mutex> lk(g_writeMu);
+                if (g_pending.size() + chunk.size() <= kMaxPending) g_pending.insert(g_pending.end(), chunk.begin(), chunk.end());
+                else g_droppedBytes += chunk.size();
+            }
+            condvarWakeOne(&g_writeCv);
         }
         // a line a minute: what it costs and what it wrote
         if (ticks_ns(armGetSystemTick() - lastReport) >= 60'000'000'000ull) {
             lastReport = armGetSystemTick();
-            uint64_t dropped;
+            uint64_t dropped, droppedBytes;
             {
                 std::lock_guard<std::mutex> lk(g_markMu);
                 dropped = g_droppedMarks;
             }
-            LOG("[profile] hitch mode: %llu slow frames written (%llu longer than the ring, %llu not queued); %llu "
-                "samples, %llu failed (last 0x%x), paused %.1f us a sample (worst %.0f us)",
+            {
+                std::lock_guard<std::mutex> lk(g_writeMu);
+                droppedBytes = g_droppedBytes;
+            }
+            LOG("[profile] hitch mode: %llu slow frames written (%llu longer than the ring, %llu not queued, %llu KiB "
+                "not written: the SD card behind); %llu samples, %llu failed (last 0x%x), paused %.1f us a sample "
+                "(worst %.0f us)",
                 (unsigned long long)written, (unsigned long long)truncated, (unsigned long long)dropped,
+                (unsigned long long)(droppedBytes >> 10),
                 (unsigned long long)samples, (unsigned long long)failed, unsigned(lastError),
                 samples ? double(pausedNs) / 1e3 / double(samples + failed) : 0.0, double(worstNs) / 1e3);
         }
