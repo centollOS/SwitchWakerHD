@@ -213,6 +213,8 @@ uint64_t g_droppedMarks = 0;  // (under g_markMu) frames not queued: the queue w
 void hitch_main(void*) {
     const int n = g_count.load();
     char path[96];
+    // the file is opened for each write and closed after it: the console's file system refuses to read a file open
+    // for writing (the debug server's "get" during the session), and a HOME close keeps what was written
     FILE* out = open_samples("hitch", n, path, sizeof path);
     if (!out) {
         LOG("[profile] hitch mode: cannot write logs/");
@@ -220,6 +222,8 @@ void hitch_main(void*) {
         g_running = false;
         return;
     }
+    fclose(out);
+    out = nullptr;
     LOG("[profile] hitch mode: %d threads sampled every ms, frames over %u ms written to %s", n, g_thresholdMs.load(),
         path);
     std::vector<Sample> ring(size_t(kRing) * n);
@@ -252,7 +256,8 @@ void hitch_main(void*) {
             }
             g_markCount = keep;
         }
-        for (int k = 0; k < count && written < uint64_t(kMaxWritten); k++) {
+        if (count && written < uint64_t(kMaxWritten)) out = fopen(path, "ab");
+        for (int k = 0; out && k < count && written < uint64_t(kMaxWritten); k++) {
             const Mark& m = marks[k];
             const uint64_t first = round > uint64_t(kRing) ? round - kRing : 0;
             uint64_t inside = 0;
@@ -276,7 +281,10 @@ void hitch_main(void*) {
             written++;
             if (written == uint64_t(kMaxWritten)) LOG("[profile] hitch mode: %d slow frames written, no more", kMaxWritten);
         }
-        if (count) fflush(out);
+        if (out) {
+            fclose(out);
+            out = nullptr;
+        }
         // a line a minute: what it costs and what it wrote
         if (ticks_ns(armGetSystemTick() - lastReport) >= 60'000'000'000ull) {
             lastReport = armGetSystemTick();
