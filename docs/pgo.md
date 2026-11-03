@@ -57,3 +57,45 @@ that the performance test can judge the result on places the profile never saw; 
 - Forcing night on the Outset benchmark states makes the game halt on its own assertion (`d_event_data.cpp:1103`); the
   trainer uses night only for states that survive it.
 - Training needs the console at any clock, but compare speed only at stock clocks (sys-clk off, GPU profile default).
+
+## Is the generated code the same on every player's computer? (issue #90)
+
+Yes, for the same repository commit and the same region (Mac, 2026-11-03, main 8db8e2a6). The installer accepts a
+`cking.rpx` only when its SHA-256 is one `tools/recomp/builds.py` knows, so every player translates the same bytes, and
+the translation is deterministic:
+
+| Comparison (`recomp.py`, the installer's options) | Files differing |
+|---|---|
+| USA, `PYTHONHASHSEED` 1 against 98765 (Python 3.12) | 0 of 85 |
+| USA, Python 3.12 against 3.14 (the installers' Python) | 0 of 85 |
+| USA, a fresh translation against an older `build/gen` of the same commit's recompiler | 0 of 85 |
+| EUR, `PYTHONHASHSEED` 7 against 31337 | 0 of 85 |
+| USA against EUR | 83 of 85 |
+
+So a profile made by the maintainers fits players' builds, under these conditions:
+- **One profile per region**: the USA and EUR code differ in almost every file.
+- **Pinned to the commit**: the translation also reads the runtime's sources (`fork_passes.py runtime_abi_hooks`,
+  `singleflow.py runtime_addresses`: sets, so the order of the directory walk does not matter), so a change to the
+  recompiler, the hook lists or the runtime can change the generated code.
+- **Same GCC**: the pinned toolchain (`docs/pinned-toolchain-plan.md`) gives every build the same compiler.
+- **The other Switch installer options**: the Brazilian Portuguese translation (a data pack), the shader template,
+  the forwarder, the icon and the name do not touch the game code. A code mod built into the NRO does: the GameCube
+  sea minimap (`gc-minimap`, one hook, `daPy_Execute`) makes the recompiler assume more registers are read across
+  calls, and 20,201 of 39,713 functions change. In the hot files, 547 of 3,894 functions get a different checksum
+  (193 a different flow graph), so with the minimap ~86% of the hot functions keep their profile. Desktop code mods
+  (`--mod-hooks`) and the decomp build translate differently again: a normal build for them.
+
+### The build folder is part of the checksum
+
+GCC accepts a function's profile only when both its `cfg_checksum` and its `lineno_checksum` match (`gcov-dump` of
+the `.gcno` files, devkitA64 GCC 16.1, the 13 hot files, the same generated code):
+
+| Compiled from | Functions whose checksums differ |
+|---|---|
+| two different absolute folders | 3,859 of 3,894 (the `lineno_checksum` hashes the file's path) |
+| the same, with `-fprofile-prefix-map` or `-ffile-prefix-map` | still 3,859 (one file: 188 of 192) |
+| the source folder, with a relative file name | 4 of 192 (`static` helpers from `ppc.h`: only their id, which hashes the input name) |
+
+The container build always compiles from `/src`, but the installers build natively (macOS, Linux and Windows) from
+the player's own folder. A shared profile needs the game files compiled under one fixed name: from the generated
+code's folder with relative names, or from a fixed path.
