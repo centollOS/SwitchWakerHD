@@ -1,6 +1,6 @@
 # PGO builds for players (plan, issue #90)
 
-Branch `feature/pgo-release`. Status: steps 1-5 done (2026-11-03): +0.7% to +10.2% fps on scenes the profile never saw.
+Branch `feature/pgo-release`. Status: steps 1-5 done (2026-11-03), USA and EUR: up to +10.2% (USA) and +8.7% (EUR) fps on scenes the profile never saw.
 
 ## Why
 
@@ -99,6 +99,24 @@ What decides the design (measured, `docs/pgo.md` "Is the generated code the same
    The render thread gains too (outset_village 38.7 -> ~31.8 ms per frame, one boot each). Three scenes reach the
    30 fps cap with PGO. Results: `build/perf/ab_base_vs_pgo_20261103_161419.*` (Mac). The console was left on main
    (0c16d6d).
+
+   **EUR** (2026-11-03, 54c38052, the same console and clocks, every boot CPU 1020 / GPU 384 / memory 1331 MHz): the
+   European recompile in `build/gen`, the training and baseline builds with the pinned toolchain, `game-eu` through
+   settings.ini's `[dev]` folder variables (put back afterwards). `save-eu` had no Quest Log, so a copy of the USA
+   save in a new folder (`save-pgo-eu`, removed afterwards): the European game loads it. The training (26 scenes) lost
+   the console's Wi-Fi at the last warp; the game kept running and that scene was dumped by hand. Packed, unpacked
+   (an EU profile is refused for a USA game) and built in `build/switch-pgo-use-eu`; the hot code's fingerprint
+   matched. Same scenes and runs:
+
+   | Scene | No PGO fps | PGO fps | fps (95% CI) | Main thread ms |
+   |---|---|---|---|---|
+   | lava | 29.23 | 29.97 | +0.73 (+-0.18), +2.5% | 32.78 -> 30.66 (-6.5%) |
+   | windfall | 29.93 | 29.97 | +0.04 (+-0.10), cap | 32.25 -> 30.95 (-4.0%) |
+   | dragonroost | 29.66 | 29.97 | +0.31 (+-0.31), +1.0% | 32.46 -> 30.43 (-6.3%) |
+   | outset_village | 26.50 | 28.79 | +2.29 (+-0.21), +8.7% | 35.86 -> 34.05 (-5.0%) |
+
+   In outset_village the main thread is still above the 33.3 ms of a 30 fps frame (34.1 ms): the CPU stays the
+   limit there.
 
 ## To decide
 
