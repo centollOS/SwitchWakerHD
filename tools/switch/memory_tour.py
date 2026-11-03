@@ -3,7 +3,8 @@
 
 Warps through every third destination of the Warp tab (40 places; all of them hit the game's own assert at
 M_DaiB, #18), stays 25 s in each, two laps by default, and at the end of each lap takes the game's log and its last
-`[mem] malloc` line. One lap visits every place once, so what still grows in lap 2 is a leak.
+`[mem] malloc` line (the debug server's "malloc": mallinfo is not in the 5 s [mem] line, it stalls the game for ms)
+and the last 5 s `[mem]` line. One lap visits every place once, so what still grows in lap 2 is a leak.
 
     tools/switch/memory_tour.py --out perf/results/v1.0.1-memory.txt
 
@@ -57,11 +58,15 @@ def main():
                 sys.exit(2)
             note(f"{time.time() - t0:7.0f}s lap {lap} warp {n:3d} stage {con.kv(s).get('stage', '?')}")
         note(f"--- end of lap {lap}: {time.time() - t0:.0f} s")
+        # the heap's use on request: the 5 s [mem] line no longer calls mallinfo (it stalls the game for ms)
+        malloc = con.try_cmd("malloc", timeout=20.0)
         log = logs / f"lap{lap}.log"
         subprocess.run([sys.executable, str(HERE / "wwhd_debug.py"), "--host", a.host, "lastlog", str(log)],
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-        mem = [l for l in log.read_text(errors="replace").splitlines() if l.startswith("[mem] malloc")] \
-            if log.exists() else []
+        lines = log.read_text(errors="replace").splitlines() if log.exists() else []
+        mem = [l for l in lines if l.startswith("[mem] malloc")]
+        note("    " + (mem[-1] if mem else (malloc or "").strip() or "no [mem] malloc line"))
+        mem = [l for l in lines if l.startswith("[mem] heap never used")]
         note("    " + (mem[-1] if mem else "no [mem] line"))
     note("tour done")
     print(f"logs: {logs}")

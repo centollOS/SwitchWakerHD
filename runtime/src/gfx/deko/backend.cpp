@@ -2,7 +2,6 @@
 // Every GX2 swap presents the game's TV picture (present_source, dk_surfaces.h) with the picture adjustments,
 // the FPS counter and the settings overlay (hold Minus); black until the game has copied a picture to the TV
 // scan buffer. Also here: submits, the statistics, hitch log and trace.
-#include <malloc.h>
 #include <unistd.h>
 extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into (sbrk)
 #include "platform/bench_switch.h"  // (this fork) the performance test
@@ -1064,21 +1063,16 @@ void frame_stats() {
             (unsigned long long)p.poolHits, rescale_pool_bytes() >> 20, 100.0 * perFrame(p.hudSwitches),
             fxaa_enabled() ? "on" : "off", 100.0 * perFrame(p.fxaaPasses));
         {  // (this fork, #37) what grows over a long session: malloc in use against its arena, and the containers
-            // (this fork) mallinfo walks every free chunk with malloc's lock held, stalling every allocating thread:
-            // its own time is in the line, to see what it costs on a fragmented heap (renut-nx measured 25-46 ms)
-            static uint64_t mallinfoMaxNs = 0;
-            const uint64_t mi0 = now_ns();
-            const struct mallinfo mi = mallinfo();
-            const uint64_t miNs = now_ns() - mi0;
-            mallinfoMaxNs = std::max(mallinfoMaxNs, miNs);
+            // (this fork) no mallinfo here: it walks every free chunk with malloc's lock held, stalling every
+            // allocating thread, and the heap fragments as the game plays (console, 10 min warp tour: 2,300 ->
+            // 41,000 free chunks, 0.3 -> 8.9 ms a call, on the render thread every 5 s). The debug server's
+            // "malloc" asks for it (memory_tour.py); the line keeps the heap's top (O(1))
             const ShaderMemory sm = shader_memory();
             const ImageHeapFigures ih = image_heap_figures();
-            LOG("[mem] mallinfo %.2f ms (max %.2f), %zu free chunks", double(miNs) / 1e6, double(mallinfoMaxNs) / 1e6,
-                size_t(mi.ordblks));
-            LOG("[mem] malloc %zu MiB in use of %zu MiB taken (heap never used %zu MiB); shader variants %zu (%zu freed), GLSL %zu, "
+            LOG("[mem] heap never used %zu MiB; shader variants %zu (%zu freed), GLSL %zu, "
                 "programs %zu, translation records %zu (%zu KiB); surfaces %zu (with evicted ones); image heap %llu "
                 "chunks, %llu MiB, %.1f MiB free, largest free %.1f MiB",
-                size_t(mi.uordblks) >> 20, size_t(mi.arena) >> 20, heap_never_used_mib(), sm.variants, sm.evicted, sm.codes,
+                heap_never_used_mib(), sm.variants, sm.evicted, sm.codes,
                 sm.programs, sm.storedRecords, sm.storedBytes >> 10, surface_structs(), (unsigned long long)ih.chunks,
                 (unsigned long long)(ih.total >> 20), double(ih.free) / 1048576.0, double(ih.largestFree) / 1048576.0);
             image_trace_flush();
