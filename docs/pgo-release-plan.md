@@ -1,6 +1,6 @@
 # PGO builds for players (plan, issue #90)
 
-Branch `feature/pgo-release`. Status: steps 1-2 done (2026-11-03).
+Branch `feature/pgo-release`. Status: steps 1-4 done (2026-11-03); step 5 (console) next.
 
 ## Why
 
@@ -54,9 +54,17 @@ What decides the design (measured, `docs/pgo.md` "Is the generated code the same
    the `.sha256` and the manifest (region, GCC version of the toolchain it builds with) and builds with
    `WWHD_PGO=USE`; anything missing or not matching gives a normal build, with one line saying why. `--no-pgo` turns
    it off. Guest mods (the GameCube minimap) keep it: ~86% of the hot functions keep their profile.
-4. **Release checklist**: after the last change to the recompiler or a profiled runtime file, train each region on
-   the console (`pgo_train.py`, ~30 min each), pack, upload with the template; an installer run checks the build
-   used it (its log, the `[pgo]` line in the NRO's boot log).
+
+   Done: `make_sd.py` (`release_pgo`) caches the zip as `build/pgo-profile-<tag>-<region>.zip` (seed it there to test
+   an installer run before publishing, as the shader template) and unpacks it into `build/pgo-release`, passed
+   relative to the checkout (`/src/...` in the container); `build_switch.py` (the pinned toolchain) and `build.sh`
+   pass it to CMake. Mac: a seeded USA zip is used, EUR (no asset: HTTP 404) gives a normal build; a full native
+   `build.sh` USE build with `WWHD_PGO_DIR=build/pgo-release` builds, 374 files profiled, the boot-log line in the NRO.
+   The compiler matters: the pinned toolchain and the devkitpro/devkita64 image have GCC 15.2.0 (this Mac's devkitPro
+   16.1.0), so the release's training build is made with `build_switch.py` (`WWHD_PGO=GEN`, `WWHD_BUILD_DIR`).
+4. **Release checklist** (done, `docs/release-checklist.md` H1): from the tagged commit, train each region on the
+   console (`pgo_train.py`, ~30 min each), pack, upload next to the template; an installer run checks the build used
+   it (its log, `[boot] pgo: profile` in the NRO's boot log).
 5. **Console**: re-time on current main at the default GPU profile (`perf_test.py ab`, PGO against no PGO), USA; the
    gain decides whether the release ships it.
 
