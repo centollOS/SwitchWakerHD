@@ -12,6 +12,9 @@
 #endif
 #include "platform/host.h"
 #include "platform/sleep.h"
+#ifdef __SWITCH__
+#include "platform/cores_switch.h"  // (this fork) guest threads on core 3 (docs/guest-core3-plan.md)
+#endif
 #ifdef __APPLE__
 #include <pthread/qos.h>
 #endif
@@ -246,6 +249,9 @@ static void core_acquire(HostThread* t) {
     t->cpu.core = core;
     HostThread* next = best_ready(k);
     t->cpu.preempt = next && next->prio < t->prio;
+#ifdef __SWITCH__
+    if (host::core_layout_on()) cores::place_guest_thread(core);  // (this fork) docs/guest-core3-plan.md
+#endif
 }
 
 static void core_release(HostThread* t) {
