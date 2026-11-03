@@ -20,5 +20,11 @@ std::string status();               // "running", or the last run's file and cou
 // the thread registered last runs guest code with its r1 at *r1 (its Cpu): a sample also walks the guest stack's back
 // chain from there and keeps each frame's saved return address (the game's call stack, frames the host chain skips)
 void set_guest_stack(const uint32_t* r1);
+// hitch mode (docs/hitch-profiler-plan.md): with logs/hitch_profile.flag on the SD card (empty, or a threshold in ms,
+// 40 by default), sampling runs for the whole session and only the frames longer than the threshold are written,
+// to logs/hitch_<n>.samples (tools/switch/main_profile.py --hitches). start_flagged: once the frame threads run.
+void start_flagged();
+// the render thread's present: a frame from startTick to endTick (armGetSystemTick); cheap when hitch mode is off
+void mark_frame(uint64_t startTick, uint64_t endTick, uint64_t frame);
 #endif
 }
