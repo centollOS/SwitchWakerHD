@@ -1,6 +1,6 @@
 # Hitch profiler: what the frame threads did in the slow frames (plan)
 
-Branch `feature/hitch-profiler`. Status: step 1 built (2026-11-03).
+Branch `feature/hitch-profiler`. Status: steps 1-2 done, checked on the console (2026-11-03).
 
 ## Why
 
@@ -23,7 +23,9 @@ what each thread did in the frames over 45 ms). Ours reuses the existing sampler
   ring of the last 512 rounds (~0.5 s, ~530 KB for two threads).
 - **The render thread's present** (`check_hitch`, a marked hook) passes each frame's start and end ticks
   (`thread_sampler::mark_frame`); frames over the threshold are queued (16 at most; the rest counted).
-- **Each queued frame** is written once it has ended: a marker record (thread `0xFFFFFFFE`: start tick, end tick,
+- **Each queued frame** is handed, once it has ended, to a writer thread (0x3B, core 0; 16 MiB queued at most) that
+  appends it to the file and closes it: the sampler never waits for the SD card, and the file can be fetched during
+  the session (the console's file system refuses to read a file open for writing). The records: a marker record (thread `0xFFFFFFFE`: start tick, end tick,
   frame number, rounds inside) and then the ring's samples inside the frame. File: `logs/hitch_<n>.samples`, the
   usual WWHDSAMP1 format, so the old readers skip the markers (no thread of that index). At most 2,000 frames.
 - **A line a minute** in the log: frames written, frames longer than the ring, frames not queued, samples, failures,
@@ -44,3 +46,19 @@ what each thread did in the frames over 45 ms). Ours reuses the existing sampler
 1. Hitch mode in the sampler, the two hooks, `--hitches` in the report (this branch).
 2. Console check: flag on, a warp tour (warps make long frames), the file read with `--hitches`; the cost line.
 3. Then decide: the audio thread too; the threshold; a note in `docs/reporting-bugs.md` for reporters.
+
+## Console check (2026-11-03, USA, handheld, stock clocks, empty flag: 40 ms)
+
+Warp tours of 10 places (`memory_tour.py --laps 1 --dwell 15 --warps 10`):
+
+| Build | Slow frames | Without samples | Pause per sample |
+|---|---|---|---|
+| d809bc1e (the sampler wrote the file itself) | 136 | 34 (up to 462 ms) | ~10 us |
+| fe76634b (writer thread) | 119 | **0** | 10.0-10.6 us (worst 4 ms) |
+
+Two threads every millisecond at ~10 us each: about 1% of each thread. `--hitches` on the second file: the warps'
+long frames are the game thread in `f_02759564` (the J3D draw-list loop, #64) and sleeping in `GX2WaitForVsync`, the
+render thread waiting. One finding: frame 166 (418 ms, title screen), the render thread spent 61% in `log_flush`
+called by the depth peek's one-time memory block creation (`depth_peek_dk.cpp:43`: the whole boot log written to the
+SD card at once). One-off at boot, not a gameplay hitch; the other `log_flush` calls before deko3d creations on the
+render thread could be checked the same way.
