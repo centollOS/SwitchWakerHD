@@ -17,6 +17,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "frame_pacing.h"  // (this fork, #23) vblank statistics and pacing modes
 #include "../../platform/background_shaders_switch.h"  // (this fork) the counter's shader line
 #include "../../platform/thread_sampler.h"  // (this fork) the sampler's hitch mode
+#include "../../platform/saltynx_switch.h"  // (this fork) the overlays' frame rate
 
 #include <algorithm>
 #include <atomic>
@@ -1346,6 +1347,8 @@ void present() {
         check_queue("the present", frame);
         dkQueuePresentImage(R.queue, g_swapchain, slot);
     }
+    // (this fork) the frame rate for the console's overlays (SaltyNX's block; the game's picture is 720p x the scale)
+    saltynx::frame(uint32_t(1280.0f * res_scale() + 0.5f), uint32_t(720.0f * res_scale() + 0.5f), g_winW, g_winH);
     const uint64_t t4 = now_ns();
     if (capture) LOG("[dk] capture frame %llu: recorded in %.2f ms, submitted and presented in %.2f ms", (unsigned long long)frame,
                      double(t3 - t2) / 1e6, double(t4 - t3) / 1e6);
