@@ -16,8 +16,11 @@ so this one is written from SaltyNX's and Status Monitor's behaviour (their publ
   (once a second for a minute; nothing at all when the port does not exist), asks for the shared page's handle
   (command 7, the process ID sent) and maps it (4 KiB).
 - **The block**: the first one with the magic 0x465053 already in the page is reused (an overlay reads the first
-  one, and reservations are never given back for a homebrew program); else command 6 reserves 310 bytes (SaltyNX
-  2.1.3's block). Then command 0 ends the session (the port takes one session at a time: the overlays need it).
+  one, and reservations are never given back for a homebrew program); else command 6 reserves 314 bytes (SaltyNX
+  2.1.3's block, 310, and 4 more: the page's first word is SaltyNX's own, the display's refresh rate in its second
+  byte, so a block given offset 0 starts at 4; console: a block at 0 lost its magic and the next start reserved
+  another). The process had no IPC session left for the port (0x10801, the forwarder's application pool): the
+  limit is raised by 4 (svcSetResourceLimitLimitValue, allowed by hbloader's NPDM), else sm's session is lent. Then command 0 ends the session (the port takes one session at a time: the overlays need it).
 - **At every present** (`backend.cpp present()`): frameNumber, the ring of ticks between the last 10 frames, the
   average rate, the frames of the last second, `pluginActive` (the overlay clears it and waits 100 ms to see it set
   again); the resolutions once an overlay asks for them (0xFFFF in `renderCalls[0].calls`): the game's picture

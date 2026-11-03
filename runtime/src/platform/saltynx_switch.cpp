@@ -109,6 +109,17 @@ bool connect_once(Result& why) {
             break;
         }
         uint8_t* base = static_cast<uint8_t*>(shmemGetAddr(&g_shm));
+        {  // (what the page holds: the overlays' blocks and SaltyNX's own words)
+            uint32_t w[4];
+            memcpy(w, base, sizeof w);
+            int blocks = 0;
+            for (size_t o = 0; o + 4 <= kPage; o += 4) {
+                uint32_t m;
+                memcpy(&m, base + o, 4);
+                blocks += m == kMagic;
+            }
+            LOG("[saltynx] shared page: %08X %08X %08X %08X ..., %d block(s) with the magic", w[0], w[1], w[2], w[3], blocks);
+        }
         // a block left by an earlier start (the first one is the one the overlays read)
         size_t at = kPage;
         for (size_t o = 0; o + sizeof(Block) <= kPage; o += 4) {
@@ -120,9 +131,11 @@ bool connect_once(Result& why) {
             }
         }
         if (at == kPage) {
-            uint64_t size = kReserve, offset = 0;
-            if (R_FAILED(why = request(s, 6, &size, &offset, nullptr)) || offset + kReserve > kPage) break;
-            at = size_t(offset);
+            // 4 bytes more: the page's first word is SaltyNX's own (the display's refresh rate in its second byte,
+            // console: a block at offset 0 lost its magic), so a block given offset 0 starts at 4
+            uint64_t size = kReserve + 4, offset = 0;
+            if (R_FAILED(why = request(s, 6, &size, &offset, nullptr)) || offset + kReserve + 4 > kPage) break;
+            at = offset < 4 ? 4 : size_t(offset);
             memset(base + at, 0, kReserve);
             LOG("[saltynx] a new block at offset %zu of the shared page", at);
         } else {
