@@ -359,12 +359,15 @@ std::atomic<void (*)(bool)> g_controller_listener{nullptr};  // controller_reapp
 void set_controller_listener(void (*fn)(bool pro)) { g_controller_listener = fn; }
 bool pro_controller() { return g_pro.load(std::memory_order_relaxed); }
 void set_pro_controller(bool on) {
-    g_pro = on;
+    const bool was = g_pro.exchange(on);
     // the GamePad picture in the single screen (the game itself, in Off-TV Play); the TV's with the Wii U GamePad
     // choice (TV play: the GamePad picture is its own screen, ZL + ZR + Minus) and the Pro Controller
     gfxsw::set_gamepad_view(!on && screen_mode::single_screen());
     LOG("[input] Switch controller acts as %s", on ? "Pro Controller" : "GamePad");
-    if (auto fn = g_controller_listener.load()) fn(on);
+    // (upstream sync bfd7dd6) upstream's controller_reapply listens: as the SDL host, only a change, and not before
+    // the guest memory exists (the start's choice comes from main_switch::start; the listener reads the game's mode)
+    if (was != on && ppc_mem_base_var)
+        if (auto fn = g_controller_listener.load()) fn(on);
 }
 void release_keys() {}
 void controller_values(float* v) {

@@ -41,6 +41,11 @@ Found while building for the Switch:
 - `main_profile.h`: its layout check moved to the fork's `Cpu` (`main_thread` at 173, after `preempt`); no thread CPU
   clock on the Switch (0). `host.h lower_thread_priority`: nothing on the Switch. `editor_shell.cpp`: a
   `std::string(first, last)` with a `char*` last that GCC rejects (a fix to offer upstream).
+- **Controller change listener** (upstream's `controller_reapply`, #330): the Switch's `set_pro_controller` called it
+  at every call, also at start before the guest memory exists (a data abort reading the game's input manager,
+  `*101F5088`, at boot on the console); now, as the SDL host, only on a change, and not before the guest memory.
+- Console (2026-11-03, USA, handheld): boot, the 17-place warp tour (every place reached and drawn), the settings
+  menu (the new Save file section in Brazilian Portuguese).
 - Tests: `tools/recomp` passes (94, 2 skipped: `test_preserve_registers`' default cases need fork_prepare's
   whole-program data the test's hand-made Recompiler lacks; the randomizer profile's hook digest is upstream's hook
   list, so randomized RPX files are not taken by the fork until it ships its own profile).
