@@ -30,12 +30,13 @@ inline bool core3() { return allowed() && wanted().load(std::memory_order_relaxe
 
 // The game's threads of emulated cores 0 and 2 (WorkerMgr, update_ubo, resource and audio threads) on host cores 0, 2
 // and 3 instead of 0 and 2, where the render thread and the host service threads preempt them; the main thread, alone
-// on core 1, waits for their jobs (docs/guest-core3-plan.md). WWHD_GUEST_CORE3=1 (settings.ini [dev]) or the debug
-// server's "guestcore3 0|1": read each time a thread takes its emulated core. Off until measured.
+// on core 1, waits for their jobs (docs/guest-core3-plan.md: +1.9% fps at the Outset village with PGO). On when the
+// process has core 3; WWHD_GUEST_CORE3=0 (settings.ini [dev]) or the debug server's "guestcore3 0|1": read each time a
+// thread takes its emulated core. The background shader list (also core 3) then goes about half as fast.
 inline std::atomic<bool>& guest_wanted() {
     static std::atomic<bool> w{[] {
         const char* e = getenv("WWHD_GUEST_CORE3");
-        return e && *e && atoi(e) != 0;
+        return !(e && *e && atoi(e) == 0);
     }()};
     return w;
 }

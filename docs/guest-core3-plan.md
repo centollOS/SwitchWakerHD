@@ -1,6 +1,6 @@
 # The game's worker threads on core 3 too (plan)
 
-Branch `feature/guest-core3`. Status: steps 1-2 done (2026-11-03): +1.9% fps at the Outset village on top of PGO; step 3 next.
+Branch `feature/guest-core3`. Status: steps 1-3 done (2026-11-03): on by default with core 3; +1.9% fps at the Outset village on top of PGO.
 
 ## Why
 
@@ -43,3 +43,23 @@ the render thread and the host service threads, which have a higher priority. Si
    `build/perf/toggle_pgo-off_vs_pgo-core3_20261103_201252.*` (Mac).
 3. If it gains: on by default when the process has core 3; check that the background shader compiles (also on
    core 3) do not cost the game frames.
+
+   Done: on by default (`WWHD_GUEST_CORE3=0` turns it off). Console (2026-11-03, the PGO build + this, USA): the
+   shader cache pointed at an empty folder (`WWHD_DK_SHADER_CACHE_DIR` in settings.ini's `[dev]`, put back
+   afterwards), the first start's "play now", the list then translating gently (25,270 shaders) while
+   `perf_test.py toggle` ran:
+
+   | Scene | Off fps | On fps | fps (95% CI) | Main thread ms |
+   |---|---|---|---|---|
+   | outset_village | 28.62 | 29.17 | +0.55 (+-0.12), +1.9% | 34.24 -> 33.53 |
+   | windfall | 29.96 | 29.96 | cap | 31.03 -> 31.10 |
+
+   So the gain holds with the list running. The list itself: at the village it waits all the time in both modes
+   (the game below 98.7% of its best rate: `game_needs_time`); at Windfall (30 fps) it ran, 2 minutes per mode,
+   ABAB: off 223 and 401 translated, on 112 and 171, so **about half as fast** with the game's threads also on
+   core 3 (both at priority 0x3B there). The list only runs on a first start without the installer's prepared
+   graphics (#102), where the frame rate matters more than how soon the list ends.
+
+   The test run wrote the console's `background_shaders/progress.txt` (the list's position, in the console's own
+   folder, not the cache folder); it was put back from the morning's copy, `done.txt` was untouched.
+   The default-on build on the console: `guestcore3` reports "on" at boot, the game reaches play.
