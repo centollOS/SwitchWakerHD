@@ -163,6 +163,14 @@ def configured_for(build_dir):
     return gen, tc
 
 
+def pgo_mode():
+    """WWHD_PGO: GEN, USE (only with WWHD_PGO_DIR) or OFF"""
+    mode = os.environ.get("WWHD_PGO", "OFF")
+    if mode == "GEN" or (mode == "USE" and os.environ.get("WWHD_PGO_DIR")):
+        return mode
+    return "OFF"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--devkitpro")
@@ -179,7 +187,8 @@ def main(argv=None):
         print("build_switch.py: devkitPro toolchain %s (%s)" % (json.load(f)["id"], dkp), flush=True)
     env = clean_env(dkp)
     future_dates_to_now()
-    build_dir = os.path.join("build", "switch-dk")
+    # (this fork) another folder for the PGO training build (docs/pgo-release-plan.md): a folder of build/, as the players'
+    build_dir = os.environ.get("WWHD_BUILD_DIR") or os.path.join("build", "switch-dk")
     toolchain_file = (windows_toolchain_file(dkp) if WINDOWS else os.path.join(dkp, "cmake", "Switch.cmake")).replace("\\", "/")
     # a folder configured by another generator (build.sh's Makefiles) or another toolchain starts over
     gen, tc = configured_for(build_dir)
@@ -200,10 +209,15 @@ def main(argv=None):
                  "-DCMAKE_BUILD_TYPE=Release",
                  # the players' build: what build.sh passes by default, every time (a cached value must not outlive it)
                  "-DWWHD_RENDERER=DEKO3D", "-DWWHD_DEKO3D_DEBUG_LIB=OFF", "-DWWHD_SWITCH_BASE_REG=ON",
-                 "-DWWHD_HEAP_CENSUS=OFF", "-DWWHD_PGO=OFF",
+                 "-DWWHD_HEAP_CENSUS=OFF",
+                 # the release's PGO profile when make_sd.py found one (WWHD_PGO=USE, WWHD_PGO_DIR), or the release's
+                 # training build (WWHD_PGO=GEN, with the players' compiler; issue #90)
+                 "-DWWHD_PGO=" + pgo_mode(),
                  "-DWWHD_NACP_NAME=" + a.name,
                  "-DWWHD_NRO_ICON=" + icon.replace("\\", "/"),
                  "-DPython3_EXECUTABLE=" + sys.executable.replace("\\", "/")]
+    if pgo_mode() == "USE":
+        configure.append("-DWWHD_PGO_DIR=" + os.path.abspath(os.environ["WWHD_PGO_DIR"]).replace("\\", "/"))
     if WINDOWS:
         # devkitPro's pkg-config wrapper is a shell script, which CMake's find_program does not take on Windows;
         # Switch.cmake only insists that it exists, and the build uses no pkg-config

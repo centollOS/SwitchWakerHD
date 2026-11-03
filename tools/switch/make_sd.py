@@ -30,6 +30,10 @@ usage:
                                               guesses for the places not in it (a shadercache_gl.bin is still
                                               accepted: its sources only)
            --no-shaders                       do not prepare them (the console compiles them)
+  The game code is optimised with this release's PGO profile for your dump's region when the release has one
+  (pgo-profile-USA.zip / -EU.zip: counts of which branches the game takes, measured on a console, no game code;
+  docs/pgo-release-plan.md); none there, or offline: a normal build.
+           --no-pgo                           a normal build, without the profile
            --jobs N                           parallel compiles (each needs ~1.5 GB of memory)
            --guest-mod PACKAGE                a code mod (Mod SDK v2) built into the NRO: its id in the mod catalogue
                                               (downloaded, e.g. gc-minimap), its .zip or its folder; repeat for
@@ -146,6 +150,45 @@ def release_template():
         f.write(data)
     print("  graphics template of %s: %s" % (tag, out))
     return out
+
+
+PGO_DIR = os.path.join("build", "pgo-release")  # relative to ROOT: the same for the container (/src) and the native builds
+
+
+def release_pgo(region):
+    """this release's PGO profile for `region` (issue #90): pgo-profile-<region>.zip of its GitHub release, checked
+    against its .sha256 and unpacked into PGO_DIR. True when the build can use it; False (with a note) when there is
+    none, it cannot be downloaded or it does not fit: a normal build"""
+    import hashlib
+    import guest_mods
+    import pgo_pack
+    tag = release_tag()
+    if not tag:
+        print("  (no release version known: a normal build, without the PGO profile)")
+        return False
+    name = pgo_pack.zip_name(region)
+    cached = os.path.join(ROOT, "build", "pgo-profile-%s-%s.zip" % (tag, region))
+    if not os.path.isfile(cached):
+        url = "https://github.com/centollOS/SwitchWakerHD/releases/download/%s/%s" % (tag, name)
+        try:
+            data = guest_mods.fetch(url, 64 << 20)
+            want = guest_mods.fetch(url + ".sha256", 4096).decode("ascii", "replace").split()[0].lower()
+        except (guest_mods.Fail, IndexError) as e:
+            print("  (no PGO profile for %s %s: %s; a normal build)" % (tag, region, e))
+            return False
+        if hashlib.sha256(data).hexdigest() != want:
+            print("  (the downloaded PGO profile does not match its .sha256: a normal build)")
+            return False
+        os.makedirs(os.path.dirname(cached), exist_ok=True)
+        with open(cached, "wb") as f:
+            f.write(data)
+    try:
+        m = pgo_pack.unpack(cached, os.path.join(ROOT, PGO_DIR), region)
+    except pgo_pack.Fail as e:
+        print("  (the PGO profile of %s %s cannot be used: %s; a normal build)" % (tag, region, e))
+        return False
+    print("  PGO profile of %s for the %s game (%d files, %s)" % (tag, region, len(m["files"]), m["compiler"]))
+    return True
 
 
 def shader_cache(src, game, pinned):
@@ -290,6 +333,7 @@ def main():
                                       "console's shader_manifest.bin or a shadercache_gl.bin) instead of the release's "
                                       "template, downloaded by default")
     ap.add_argument("--no-shaders", action="store_true", help="do not prepare the graphics (the console compiles them)")
+    ap.add_argument("--no-pgo", action="store_true", help="a normal build, without the release's PGO profile")
     ap.add_argument("--jobs", type=int, help="parallel compiles")
     ap.add_argument("--keys", help="native build: your console's prod.keys, for the HOME-screen forwarder "
                     "(default: .switch\\prod.keys in your user folder; without it the forwarder is skipped)")
@@ -423,6 +467,14 @@ def main():
     if args.icon:
         env["WWHD_ICON"] = os.path.abspath(args.icon)
     env["WWHD_GAME_DIR"] = game  # where build.sh makes the icon from
+    # the release's PGO profile (issue #90): build.sh and build_switch.py build with it (cmake/SwitchPgo.cmake checks
+    # the compiler and gives a normal build if it differs)
+    env.pop("WWHD_BUILD_DIR", None)  # the players' build folder, build/switch-dk (the NRO is taken from there)
+    if not args.no_pgo and release_pgo(build.name):
+        env["WWHD_PGO"], env["WWHD_PGO_DIR"] = "USE", PGO_DIR
+    else:
+        env["WWHD_PGO"] = "OFF"
+        env.pop("WWHD_PGO_DIR", None)
     if args.name:
         env["WWHD_NACP_NAME"] = args.name
     if pinned:

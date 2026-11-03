@@ -6,8 +6,11 @@ Measured results and the history of what failed: [pgo-progress.md](pgo-progress.
 
 **A profile only fits the exact sources it was made from.** GCC compares a checksum of each function's flow graph and
 ignores the profile of a function that changed (`-Wno-coverage-mismatch`). Make the profile again after a recompile with a
-different recompiler, or after changing a profiled runtime file. It is derived from the player's own recompile, so it is
-not committed. PGO is off by default and no release ships a PGO build; distributing profiles is issue #90.
+different recompiler, or after changing a profiled runtime file. It is not committed: the release ships one profile per
+region as a release asset (`pgo-profile-USA.zip`, `pgo-profile-EU.zip`), trained from the tagged commit, and the
+installer (`make_sd.py`) builds with it; without one (or offline, or with another compiler) it makes a normal build.
+How that works, and why the profiled files are compiled through `cmake/pgo_compile.cmake` (path-independent
+checksums): [pgo-release-plan.md](pgo-release-plan.md) (issue #90).
 
 ## Result (stock clocks, console, 4 boots per build; full table in [switch-port.md](switch-port.md) "Round 49")
 
@@ -20,9 +23,9 @@ what moves the Outset village.
 
 | Mode | What | Use |
 |---|---|---|
-| `OFF` (default) | a normal build | releases |
+| `OFF` (default) | a normal build | `build.sh`; the installer when the release has no profile for the region |
 | `GEN` | the hot game files (`code_hot_*.c`) and, with scope `runtime`, the runtime's own C++ are instrumented | training only, never released |
-| `USE` | the same files compiled with the profile in `WWHD_PGO_DIR` | the optimised build |
+| `USE` | the same files compiled with the profile in `WWHD_PGO_DIR` | the optimised build; the installer with the release's profile |
 
 `WWHD_PGO_SCOPE` is `game`, `runtime` or `game;runtime` (default both).
 
