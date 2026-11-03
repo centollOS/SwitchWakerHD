@@ -13,6 +13,7 @@
 #include "settings_ini.h"
 #include "settings_switch.h"
 #include "update_notice_switch.h"
+#include "saltynx_switch.h"
 #include <sys/stat.h>
 #include <dirent.h>
 #include <ctime>
@@ -316,6 +317,7 @@ void main_switch::start() {
     LOG("[boot] toolchain: %s", switch_toolchain::info());  // which ELF the crash addresses fit (switch_toolchain.h)
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
     update_notice::start();  // asks GitHub for a newer release in the background (platform/update_notice_switch.h)
+    saltynx::start();  // the frame rate for the console's overlays, when SaltyNX runs (platform/saltynx_switch.h)
 }
 
 void main_switch::choose_dirs() {
