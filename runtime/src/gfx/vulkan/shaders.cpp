@@ -4,6 +4,7 @@
 #include "atomic_temporary.h"
 // Real Latte microcode -> Cemu GLSL -> SPIR-V for the Vulkan backend.
 #include "shaders.h"
+#include "clip_emulation.h"
 #include "spirv_precision.h"
 #include "pipeline_identity.h"
 #include "shader_compiler.h"
@@ -20,12 +21,14 @@
 #include "mods/shader_interface.h"
 #include "graphic_pack_hash.h"
 #include "gfx/area_sample.h"
+#include "gfx/sampler_lod_bias.h"
 #include "gfx/shader_linkage.h"
 #include "render_objects.h"
 #include "exact_state_memo.h"
 #include "program_hash_cache.h"
 #include "write_watch.h"
 #include "render_prof.h"
+#include "gx2/gx2_cmd.h"
 #include "Cafe/HW/Latte/Core/FetchShader.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
@@ -96,6 +99,7 @@ struct LastShader {
     LatteFetchShader* fetch = nullptr;
     uint64_t frame = 0, generation = 0, fsKey = 0;
     uint32_t primitive = 0;
+    bool clip = false;  // translate's clipping variant (clipAllowed)
     Shader* shader = nullptr;
 };
 LastShader lastShaders[2];
@@ -133,6 +137,7 @@ constexpr size_t maxSourceBytes = diskcache::kMaxSourceBytes;
 constexpr size_t maxCacheEntries = diskcache::kMaxEntries;
 using DiskShader = diskcache::Entry;
 std::unordered_map<uint64_t, DiskShader> diskShaders;
+diskcache::WordPool diskWords;  // one copy of each distinct module among diskShaders
 std::string diskPath;
 bool diskInitialized = false, diskDirty = false;
 uint64_t diskChangedFrame = 0, diskAttemptFrame = 0, diskRevision = 0;
@@ -170,7 +175,7 @@ void initialize_disk_cache() {
         bool read=fread(bytes.data(),1,bytes.size(),file)==bytes.size() && fgetc(file)==EOF && !ferror(file);
         fclose(file);
         if(read) {
-            const auto decoded=diskcache::decode(bytes,cache_fingerprint(),diskShaders);
+            const auto decoded=diskcache::decode(bytes,cache_fingerprint(),diskShaders,&diskWords);
             if(decoded.ok) {
                 ++stats.diskLoads; diskBytes=decoded.bytes;
                 // An older file (with GLSL text) is rewritten smaller at the next checkpoint.
@@ -246,10 +251,33 @@ bool clamp_position_depth(std::string& glsl) {
     glsl.insert(eol, "; if (gl_Position.w > 0.0) gl_Position.z = max(gl_Position.z, 0.0)");
     return true;
 }
-size_t gather_linkage(const uint32_t* regs, bool vertex, const LatteFetchShader* fetch, uint32_t* out) {
-    // flag 64: the emulated depth clamp variant (depth_clamp_variant_wanted)
+// Depth clipping in shaders (panvk, R.clipEmulation). Mali has no geometric clipper: panvk clips
+// depth by culling each fragment whose depth leaves [0,1]. Depth that is interpolated in screen space
+// drifts past 1.0 on far-plane geometry whose triangles pass beside or behind the camera (the title
+// screen's cloud band, z = w - 0.0002), and pieces are culled along straight edges, flickering with
+// the camera. Depth clamp avoids that cull but also lets through what only it removes: the game draws
+// primitives on the camera plane (w = 0; at sea near Outset a quad that then fills the 16:9 picture).
+// So pipelines without depth writes clamp depth, and their shaders clip instead: the vertex shader
+// passes (z, w - z, w) of the Vulkan clip position, interpolated perspective-correctly like the point
+// on the triangle, and the pixel shader discards outside 0 <= z <= w (and NaN, as at w = 0). Depth
+// writes stay with the hardware so opaque geometry keeps the early depth test; draws the game itself
+// clamps or doesn't near-clip (PA_CL_CLIP_CNTL ZCLIP_FAR/NEAR_DISABLE) are unchanged. The varying
+// takes location 31, so draws using all 32 pixel shader inputs are left out. Shader key flag 128.
+// The rewrite is clip_emulation::rewrite. A stage it can't change (a graphics-pack shader without the
+// decompiler's SET_POSITION) keeps its normal text, and the draw falls back to the normal path for
+// both stages and its pipeline (clip_emulation::translate_stages, pair_clips).
+bool clip_emulation_wanted_regs(const uint32_t* regs) {
+    using Latte::REGADDR;
+    const uint32_t clip = regs[REGADDR::PA_CL_CLIP_CNTL], depth = regs[REGADDR::DB_DEPTH_CONTROL];
+    return R.clipEmulation && !(clip & ((1u << 26) | (1u << 27))) && !((depth & 2) && (depth & 4)) &&
+           (regs[mmSPI_PS_IN_CONTROL_0] & 0x3F) < 32;
+}
+// clip: this translation's clipping variant (translate: clipAllowed && clip_emulation_wanted_regs)
+size_t gather_linkage(const uint32_t* regs, bool vertex, const LatteFetchShader* fetch, uint32_t* out, bool clip) {
+    // flag 64: the emulated depth clamp variant (depth_clamp_variant_wanted); 128: clipping in shaders
     return ::gfx::gather_shader_linkage(regs, vertex, fetch, mods::cemu::has_shaders(), out,
-                                        vertex && depth_clamp_variant_wanted(regs) ? 64u : 0u);
+                                        (vertex && depth_clamp_variant_wanted(regs) ? 64u : 0u) |
+                                        (clip ? 128u : 0u));
 }
 // What the program reads beyond the linkage, recorded from its first translation.
 struct ProgramUse {
@@ -336,7 +364,7 @@ uint64_t variant_hash(const uint32_t* regs, bool vertex, const ProgramUse& use, 
 // The key before the narrowing (all 18 units, all 54 samplers, render-target words): kept for
 // the verify mode (WWHD_VK_SHADER_KEY_VERIFY), which checks that the narrow key never gives one
 // shader to two of these keys that translate differently.
-uint64_t legacy_state_hash(const uint32_t* regs, uint64_t hash, bool vertex) {
+uint64_t legacy_state_hash(const uint32_t* regs, uint64_t hash, bool vertex, bool clip) {
     std::array<uint32_t,105+5*LATTE_NUM_MAX_TEX_UNITS> state;
     size_t count=0;
     auto append = [&](const uint32_t* words,size_t length) {
@@ -358,7 +386,8 @@ uint64_t legacy_state_hash(const uint32_t* regs, uint64_t hash, bool vertex) {
     put(mmCB_SHADER_CONTROL, 1); put(mmDB_SHADER_CONTROL, 1);
     put(mmSPI_INPUT_Z, 1); put(REGADDR::SX_ALPHA_TEST_CONTROL, 1);
     uint32_t transformState[] = {regs[REGADDR::PA_CL_VTE_CNTL] & 0x3F,
-        regs[REGADDR::PA_CL_CLIP_CNTL] & ((1u << 19) | (depth_clamp_variant_wanted(regs) ? 1u << 27 : 0u)),
+        (regs[REGADDR::PA_CL_CLIP_CNTL] & ((1u << 19) | (depth_clamp_variant_wanted(regs) ? 1u << 27 : 0u))) |
+            (clip ? 1u << 31 : 0u),
         regs[REGADDR::DB_DEPTH_CONTROL] & 0x83};
     append(transformState,3);
     put(REGADDR::CB_COLOR_CONTROL, 1); put(REGADDR::CB_TARGET_MASK, 1);
@@ -519,7 +548,7 @@ uint64_t portable_output_identity(const Shader& shader) {
     id.word(uint32_t(u.count_uniformRegister)); id.word(uint32_t(u.offset_alphaTestRef));
     id.word(uint32_t(u.offset_pointSize)); id.word(uint32_t(u.offset_fragCoordScale));
     id.words(u.offset_framebufferFetchSize); id.word(uint32_t(u.offset_windowSpaceToClipSpaceTransform));
-    id.words(u.offset_texScale); id.word(uint32_t(u.offset_verticesPerInstance));
+    id.words(u.offset_texScale); id.words(u.offset_texLodBias); id.word(uint32_t(u.offset_verticesPerInstance));
     id.words(u.offset_streamoutBufferBase); id.word(uint32_t(u.offset_endOfBlock));
     const auto& r=shader.descriptorRanks;
     id.words(r.blocks); id.words(r.textures); id.word(r.support); id.word(r.count); id.word(r.valid ? 1 : 0);
@@ -581,7 +610,7 @@ std::mutex decompilerMutex;
 // translates again under the current registers and compares.
 bool decompile(Shader& shader, const uint32_t* regs, bool vertex, LatteFetchShader* fetch,
                uint32_t address, uint32_t size, uint64_t base, bool packReplacement, const PsLink& link,
-               uint8_t* program) {
+               uint8_t* program, bool clip) {
     std::lock_guard translationLock(decompilerMutex);
     if (!g_renderer || g_renderer->GetType() != RendererAPI::Vulkan) {
         shader.error = "Vulkan renderer was not selected before shader translation"; return false;
@@ -608,22 +637,27 @@ bool decompile(Shader& shader, const uint32_t* regs, bool vertex, LatteFetchShad
     const uint64_t decompilerBase=mods::cemu::has_shaders()?packBase:base;
     const auto fixes = vertex ? ::gfx::area_sample::Program{} : ::gfx::area_sample::pixel_program(program, size);
     options.areaSampledTextures = fixes.units;
+    // MoltenVK can't apply the sampler's mipLodBias: the shader adds it (gfx/sampler_lod_bias.h)
+    options.emulateSamplerLodBias = !R.samplerMipLodBias;
     LatteDecompilerOutput_t output{};
-    if (vertex) LatteDecompiler_DecompileVertexShader(decompilerBase, const_cast<uint32_t*>(regs),
-        program, size, fetch, options, &output);
-    else LatteDecompiler_DecompilePixelShader(decompilerBase, const_cast<uint32_t*>(regs),
-        program, size, options, &output);
-    if (!output.shader || output.shader->hasError || !output.shader->strBuf_shaderSource) {
+    auto translate = [&] {
+        if (vertex) LatteDecompiler_DecompileVertexShader(decompilerBase, const_cast<uint32_t*>(regs),
+            program, size, fetch, options, &output);
+        else LatteDecompiler_DecompilePixelShader(decompilerBase, const_cast<uint32_t*>(regs),
+            program, size, options, &output);
+        return output.shader && !output.shader->hasError && output.shader->strBuf_shaderSource;
+    };
+    if (!translate()) {
         free_decompiler(output.shader); shader.error = "Latte GLSL translation failed"; return false;
     }
-    if (options.areaSampledTextures && packReplacement && mods::cemu::has_shaders() &&
+    if ((options.areaSampledTextures || options.emulateSamplerLodBias) && packReplacement && mods::cemu::has_shaders() &&
         !mods::cemu::shader_source(packBase, cemu_pack_hash::auxiliary(*output.shader, regs, vertex), vertex).empty()) {
         // a graphics pack replaces this shader: translate it as Cemu does, so its interface matches
         free_decompiler(output.shader);
         options.areaSampledTextures = 0;
+        options.emulateSamplerLodBias = false;
         output = LatteDecompilerOutput_t{};
-        LatteDecompiler_DecompilePixelShader(decompilerBase, const_cast<uint32_t*>(regs), program, size, options, &output);
-        if (!output.shader || output.shader->hasError || !output.shader->strBuf_shaderSource) {
+        if (!translate()) {
             free_decompiler(output.shader); shader.error = "Latte GLSL translation failed"; return false;
         }
     }
@@ -634,6 +668,7 @@ bool decompile(Shader& shader, const uint32_t* regs, bool vertex, LatteFetchShad
     shader.glsl = shader.dec->strBuf_shaderSource->c_str();
     if (options.areaSampledTextures && ::gfx::area_sample::rewrite(shader.glsl, fixes, false) <= 0)
         fprintf(stderr, "[vulkan] pixel shader %08X: upscaling fix not applied\n", address);
+    shader.gatherUnits = vertex ? 0 : ::gfx::area_sample::gathered_units(shader.glsl, false);
     if (vertex) {
         // Depth-only and shaded variants must rasterize identical positions.
         // Match Metal's [[invariant]] position output for multipass depth tests.
@@ -668,7 +703,7 @@ bool decompile(Shader& shader, const uint32_t* regs, bool vertex, LatteFetchShad
             bool accepted=!replacement.empty()&&!original.empty()&&
                 mods::cemu::compatible_shader_interface(original,replacement,error);
             if(accepted && key_verify_rate()) shader.translatedGlsl=shader.glsl;
-            if(accepted)shader.glsl=std::move(custom);
+            if(accepted) { shader.glsl=std::move(custom); shader.gatherUnits=0; }  // its own uniforms
             if(error.empty()&&!accepted)error=originalError.empty()?"Shader compilation failed":originalError;
             mods::cemu::report_shader(packBase,packAux,vertex,accepted,error);
             fprintf(stderr,"[cemu-pack] %016llx_%016llx_%s %s%s\n",
@@ -683,6 +718,16 @@ bool decompile(Shader& shader, const uint32_t* regs, bool vertex, LatteFetchShad
                 fprintf(stderr, "[vulkan] vertex shader %08X: near-plane depth clamp variant (%d so far)\n", address, applied);
         } else if (missed++ < 10)  // a graphics-pack vertex shader without the decompiler's SET_POSITION: drawn unclamped
             fprintf(stderr, "[vulkan] vertex shader %08X: depth clamp emulation not applied (no SET_POSITION)\n", address);
+    }
+    // A stage the rewrite can't change (a graphics-pack shader without the decompiler's SET_POSITION
+    // or main) keeps its normal text; translate_stages then takes both stages of its draws without
+    // the rewrite, and their pipeline without the clamp (pair_clips): the normal path, not a failure.
+    if (clip) {
+        static int missed = 0;  // decompilerMutex
+        if (clip_emulation::rewrite(shader.glsl, vertex)) shader.clipVarying = true;
+        else if (missed++ < 10)
+            fprintf(stderr, "[vulkan] %s shader %08X: depth clipping in shaders not applied (%s); its draws use "
+                    "the normal path\n", vertex ? "vertex" : "pixel", address, vertex ? "no SET_POSITION" : "no main");
     }
     if (vertex && R.vertexFormats.fallbackMask) {
         uint32_t tailLocation = vertex_tail_location(shader.mapping.attributeMapping);
@@ -716,9 +761,9 @@ bool decompile(Shader& shader, const uint32_t* regs, bool vertex, LatteFetchShad
 bool translate_owned(Shader& shader, const uint32_t* regs, bool vertex,
                      LatteFetchShader* fetch, uint32_t address, uint32_t size,
                      uint64_t base, bool packReplacement, const PsLink& link,
-                     uint64_t frame, uint64_t key) {
+                     uint64_t frame, uint64_t key, bool clip) {
     auto input = std::make_shared<TranslationInput>(regs, address, size, fetch);
-    auto work = [&, input, vertex, address, size, base, packReplacement, link, frame, key] {
+    auto work = [&, input, vertex, address, size, base, packReplacement, link, frame, key, clip] {
         const auto cpu = stutter::trace().enabled() ? stutter::thread_cpu_now() : 0;
         const auto start = stutter::now();
         // Never let a borrowed fetch pointer escape the owned job, including
@@ -730,7 +775,7 @@ bool translate_owned(Shader& shader, const uint32_t* regs, bool vertex,
         try {
             const bool ok = decompile(shader, input->regs.data(), vertex,
                 input->hasFetch ? &input->fetch : nullptr, address, size, base,
-                packReplacement, link, input->program.data());
+                packReplacement, link, input->program.data(), clip);
             stutter::trace().add("shader_translation", frame, key, start, stutter::now(),
                 ok ? 0 : -1, stutter::cpu_elapsed(cpu));
         } catch (...) {
@@ -773,10 +818,10 @@ void first_difference(const std::string& a, const std::string& b, std::string& l
 }
 void verify_key(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, uint64_t fsKey,
                 uint32_t address, uint32_t size, uint64_t base, uint64_t key, const Shader& shader,
-                const PsLink& link) {
+                const PsLink& link, bool clip) {
     const uint32_t rate = key_verify_rate();
     if (!rate || !shader.dec) return;
-    uint64_t legacy = legacy_state_hash(regs, base, vertex) ^ (vertex ? fsKey * 31 : 0);
+    uint64_t legacy = legacy_state_hash(regs, base, vertex, clip) ^ (vertex ? fsKey * 31 : 0);
     if (vertex && mods::cemu::has_shaders())
         legacy ^= uint64_t(regs[REGADDR::PA_CL_VTE_CNTL]) * 0x9E3779B97F4A7C15ull;
     auto [it, inserted] = verifiedKeys.emplace(legacy, key);
@@ -788,7 +833,7 @@ void verify_key(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, uint
     auto started = std::chrono::steady_clock::now();
     Shader reference;
     reference.vertex = vertex;
-    bool built = translate_owned(reference, regs, vertex, fetch, address, size, base, false, link, ~uint64_t{0}, key);
+    bool built = translate_owned(reference, regs, vertex, fetch, address, size, base, false, link, ~uint64_t{0}, key, clip);
     ++stats.verifyChecks;
     const std::string& translated = shader.translatedGlsl.empty() ? shader.source_text() : shader.translatedGlsl;
     if (!built || reference.source_text() != translated ||
@@ -948,9 +993,11 @@ void publish_shader_binary(Shader& shader, uint64_t frame) {
             std::make_shared<const std::vector<uint32_t>>(std::move(result.words));
         if (shader.spirvWords && shader.sourceId.length <= maxSourceBytes &&
             diskcache::spirv_valid(*shader.spirvWords) && diskShaders.size() < maxCacheEntries) {
-            const size_t oldBytes = cached == diskShaders.end() ? 0 :
-                diskcache::record_bytes(cached->second.words->size());
-            const size_t newBytes = diskcache::record_bytes(shader.spirvWords->size());
+            // Variants with the same final words share one copy (and one module in the file).
+            bool fresh;
+            shader.spirvWords = diskWords.intern(shader.spirvWords, fresh);
+            const size_t oldBytes = cached == diskShaders.end() ? 0 : diskcache::record_bytes(0, false);
+            const size_t newBytes = diskcache::record_bytes(shader.spirvWords->size(), fresh);
             if (newBytes <= maxCacheBytes - (diskBytes - oldBytes)) {
                 DiskShader entry;
                 entry.source = shader.sourceId; entry.words = shader.spirvWords; entry.vertex = shader.vertex;
@@ -974,8 +1021,12 @@ void poll_shader_binaries(uint64_t frame, bool drain = false) {
     pendingShaderRecords.resize(retained);
 }
 }
+namespace { thread_local uint64_t lastVariantKey = 0; }
+uint64_t last_translated_variant_key() { return lastVariantKey; }
 Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, uint64_t fsKey,
-                  uint64_t frame, uint64_t stateGeneration, const Shader* linkedVs) {
+                  uint64_t frame, uint64_t stateGeneration, const Shader* linkedVs, bool clipAllowed) {
+    lastVariantKey = 0;
+    const bool clip = clipAllowed && clip_emulation_wanted_regs(regs);
     poll_shader_binaries(frame);
     ++stats.lookups;
     auto& last = lastShaders[vertex ? 0 : 1];
@@ -984,12 +1035,12 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     if (!cacheLast) { last = {}; stateMemo.reset(); }
     if (cacheLast && last.shader && last.regs == regs && last.frame == frame &&
         last.generation == stateGeneration && last.fsKey == fsKey &&
-        last.fetch == fetch && last.primitive == primitive) {
+        last.fetch == fetch && last.primitive == primitive && last.clip == clip) {
         ++stats.lastHits;
         return last.shader;
     }
     auto remember = [&](Shader* shader) {
-        if (cacheLast) last = {regs, fetch, frame, stateGeneration, fsKey, primitive, shader};
+        if (cacheLast) last = {regs, fetch, frame, stateGeneration, fsKey, primitive, clip, shader};
         return shader;
     };
     uint32_t start = vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS;
@@ -998,7 +1049,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     uint64_t base = program_hash(address, size, frame) ^ (vertex ? 0x1111 : 0x2222);
     // Level 1: program, fetch shader and linkage.
     std::array<uint32_t, kLinkageWords> words;
-    const size_t count = gather_linkage(regs, vertex, fetch, words.data());
+    const size_t count = gather_linkage(regs, vertex, fetch, words.data(), clip);
     const uint64_t seed = base ^ (vertex ? (fsKey * 31) ^ R.vertexFormats.shader_salt() : 0) ^
                           R.vertexDiagnostics.shader_salt();
     ++stats.stateHashLookups;
@@ -1020,10 +1071,10 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     auto& use = programUses[linkage];
     if (use.failed) return remember(use.failed);
     if (use.known) {
-        const uint64_t key = variant_hash(regs, vertex, use, linkage, link);
+        const uint64_t key = lastVariantKey = variant_hash(regs, vertex, use, linkage, link);
         if (auto it = variants.find(key); it != variants.end()) {
             ++stats.variantHits;
-            verify_key(regs, vertex, fetch, fsKey, address, size, base, key, *it->second, link);
+            verify_key(regs, vertex, fetch, fsKey, address, size, base, key, *it->second, link, clip);
             return remember(it->second);
         }
     }
@@ -1041,7 +1092,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     shader->vertex = vertex;
     shader->kind = gfx::program_kind(ppc_ptr(address), size, vertex);
     const bool decompiled = translate_owned(*shader, regs, vertex, fetch, address, size,
-        base, true, link, frame, linkage);
+        base, true, link, frame, linkage, clip);
     if (!decompiled) {
         // Failures are per linkage: the variant words need the program's analysis.
         shader->key = shader->pipelineId = linkage ^ 0xFA17EDull;
@@ -1067,7 +1118,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
         use.streamout = vertex && dec.hasStreamoutBufferWrite;
         use.known = true;
     }
-    const uint64_t key = variant_hash(regs, vertex, use, linkage, link);
+    const uint64_t key = lastVariantKey = variant_hash(regs, vertex, use, linkage, link);
     if (link.unfed) {
         static int reported = 0;
         if (reported < 20) {
@@ -1079,7 +1130,7 @@ Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, ui
     stats.decompileNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now()-started).count();
     if (key_verify_rate()) {
-        uint64_t legacy = legacy_state_hash(regs, base, vertex) ^ (vertex ? fsKey * 31 : 0);
+        uint64_t legacy = legacy_state_hash(regs, base, vertex, clip) ^ (vertex ? fsKey * 31 : 0);
         if (vertex && mods::cemu::has_shaders())
             legacy ^= uint64_t(regs[REGADDR::PA_CL_VTE_CNTL]) * 0x9E3779B97F4A7C15ull;
         verifiedKeys.emplace(legacy, key);
@@ -1317,11 +1368,16 @@ void pack_uniforms_into(const uint32_t* regs, const Shader& shader,
             uint32_t address = regs[blockBase + group.kcacheBankIdOffset / 4];
             if (!address) continue;
             const size_t blockSize = std::min<uint32_t>(regs[blockBase+group.kcacheBankIdOffset/4+1]+1,0x10000);
+            // a block of a display list: its bytes as submitted (gx2/submitted_uniforms.h); entries
+            // past the block's end still read guest memory, as before
+            const uint8_t* submitted = gx2::submitted_uniform_block(address, uint32_t(blockSize));
             for (const auto& entry : group.entries) {
-                copy(offsets.offset_remapped + entry.mappedIndexOffset, ppc_ptr(address + entry.indexOffset), 16);
+                const void* src = submitted && entry.indexOffset + 16 <= blockSize
+                    ? static_cast<const void*>(submitted + entry.indexOffset) : ppc_ptr(address + entry.indexOffset);
+                copy(offsets.offset_remapped + entry.mappedIndexOffset, src, 16);
                 if (entry.indexOffset < blockSize)
                     projectionRow(offsets.offset_remapped+entry.mappedIndexOffset,
-                        ppc_ptr(address+entry.indexOffset),blockSize-entry.indexOffset);
+                        src,blockSize-entry.indexOffset);
             }
         }
     }
@@ -1350,6 +1406,15 @@ void pack_uniforms_into(const uint32_t* regs, const Shader& shader,
         if (offsets.offset_texScale[unit] < 0) continue;
         float scale[] = {1, 1}; // Surfaces currently preserve the guest texture dimensions.
         copy(offsets.offset_texScale[unit], scale, sizeof scale);
+    }
+    // the sampler's LOD bias where the device can't apply it (MoltenVK; gfx/sampler_lod_bias.h)
+    for (int unit = 0; unit < LATTE_NUM_MAX_TEX_UNITS; ++unit) {
+        if (offsets.offset_texLodBias[unit] < 0) continue;
+        const uint32_t samplerId = shader.dec->textureUnitSamplerAssignment[unit];
+        const bool add = ::gfx::sampler_lod_bias::mode() == ::gfx::sampler_lod_bias::Mode::Shader && samplerId < 18;
+        put(offsets.offset_texLodBias[unit],
+            add ? ::gfx::sampler_lod_bias::host(regs[Latte::REGADDR::SQ_TEX_SAMPLER_WORD0_0 + ((shader.vertex ? 18 : 0) + samplerId) * 3 + 1])
+                : 0.0f);
     }
 }
 
@@ -1382,5 +1447,11 @@ void clear_shader_cache() {
     reset_shader_memoization();
     // Fetch parsing allocations have shared interior pointers and no owning
     // destructor in the adapted Cemu parser. Keep its process-lifetime cache.
+}
+bool translate_stages(const uint32_t* regs, LatteFetchShader* fetch, uint64_t fsKey, uint64_t frame,
+                      uint64_t stateGeneration, Shader*& vs, Shader*& ps) {
+    return clip_emulation::translate_stages<Shader>([&](bool vertex, bool clipAllowed, Shader* linkedVs) {
+        return translate(regs, vertex, fetch, fsKey, frame, stateGeneration, linkedVs, clipAllowed);
+    }, vs, ps);
 }
 } // namespace gfxvk::vk

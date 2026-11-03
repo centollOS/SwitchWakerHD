@@ -180,10 +180,6 @@
  "GPU/driver: n/d",
  "GPU/Treiber: k. A.",
  "GPU/pilote : n/d"},
-{"%.0f fps   %.1f ms (worst %.1f)", "%.0f fps   %.1f ms (peor %.1f)", "%.0f fps   %.1f ms (pior %.1f)",
- "%.0f fps   %.1f ms (peggiore %.1f)",
- "%.0f fps   %.1f ms (schlechtester %.1f)",
- "%.0f fps   %.1f ms (pire %.1f)"},
 {"Average %.1f fps   %.1f logic steps/s", "Media %.1f fps   %.1f pasos lógicos/s", "Média %.1f fps   %.1f passos lógicos/s",
  "Media %.1f fps   %.1f passi di logica/s",
  "Schnitt %.1f fps   %.1f Logikschritte/s",
@@ -220,25 +216,6 @@
  "Annulla la ricompilazione",
  "Kompilieren abbrechen",
  "Annuler la recompilation"},
-{"This mod needs code-mod support. Enable it now?", "Este mod necesita el soporte de mods de código. ¿Activarlo ahora?",
- "Este mod precisa do suporte a mods de código. Ativar agora?",
- "Questa mod richiede il supporto per le mod di codice. Attivarlo ora?",
- "Dieser Mod braucht Code-Mod-Unterstützung. Jetzt einschalten?",
- "Ce mod a besoin de la prise en charge des mods de code. L'activer maintenant ?"},
-{"Code mods need the game code to be rebuilt %s mod support, %s. Rebuild now?",
- "Los mods de código necesitan recompilar el código del juego %s soporte de mods, %s. ¿Recompilar ahora?",
- "Os mods de código precisam que o código do jogo seja recompilado %s suporte a mods, %s. Recompilar agora?",
- "Le mod di codice richiedono che il codice del gioco venga ricompilato %s supporto per le mod, %s. Ricompilare ora?",
- "Für Code-Mods muss der Spielcode %s Mod-Unterstützung neu kompiliert werden, %s. Jetzt neu kompilieren?",
- "Les mods de code nécessitent de recompiler le code du jeu %s prise en charge des mods, %s. Recompiler maintenant ?"},
-{"with", "con", "com",
- "con il",
- "mit",
- "avec"},
-{"without", "sin", "sem",
- "senza il",
- "ohne",
- "sans"},
 {"Rebuild now", "Recompilar ahora", "Recompilar agora",
  "Ricompila ora",
  "Jetzt neu kompilieren",
@@ -285,21 +262,6 @@
  "Niente salti automatici dai bordi",
  "Keine automatischen Sprünge von Kanten",
  "Pas de sauts automatiques depuis les rebords"},
-{"The button also keeps its normal use. Link drops off ledges instead of jumping when automatic ledge jumps are off; "
- "press the button just after leaving the edge to jump. The moon jump cheat takes L while it is on.",
- "El botón también mantiene su uso normal. Sin saltos automáticos, Link se deja caer de los bordes en vez de saltar; "
- "pulsa el botón justo después de salir del borde para saltar. El truco de salto lunar usa L mientras está activado.",
- "O botão também mantém seu uso normal. Sem pulos automáticos, Link cai das beiradas em vez de pular; aperte o botão "
- "logo depois de sair da beirada para pular. A trapaça de pulo lunar usa L enquanto está ativada.",
- "Il tasto mantiene anche il suo uso normale. Senza salti automatici, Link si lascia cadere dai bordi invece di "
- "saltare; premi il tasto subito dopo aver lasciato il bordo per saltare. Il trucco del salto lunare usa L finché è "
- "attivo.",
- "Die Taste behält auch ihre normale Funktion. Ohne automatische Kantensprünge lässt sich Link von Kanten fallen, "
- "statt zu springen; drücke die Taste kurz nach dem Verlassen der Kante, um zu springen. Der Mondsprung-Cheat belegt "
- "L, solange er an ist.",
- "Le bouton garde aussi son usage normal. Sans sauts automatiques, Link se laisse tomber des rebords au lieu de "
- "sauter ; appuyez sur le bouton juste après avoir quitté le bord pour sauter. La triche du super saut utilise L "
- "tant qu'elle est activée."},
 {"Quick-use animation speed", "Velocidad de la animación de uso rápido", "Velocidade da animação de uso rápido",
  "Velocità dell'animazione di uso rapido",
  "Animationstempo der Schnellnutzung",
@@ -789,3 +751,219 @@
  "Riproduce a turno ogni canale attivo a basso volume. Il subwoofer usa un tono a 80 Hz.",
  "Spielt jeden aktiven Kanal nacheinander leise ab. Der Subwoofer nutzt einen 80-Hz-Ton.",
  "Joue chaque canal actif à tour de rôle à faible volume. Le caisson de basses utilise une tonalité de 80 Hz."},
+// ---- upstream sync bfd7dd6 (overlay.cpp): Save file / Link's name, the code-mod rebuild question, story items,
+// the figurine cheat's tooltip, the frame-time line, menu sounds
+{"Save file",
+ "Partida",
+ "Salvamento",
+ "Salvataggio",
+ "Spielstand",
+ "Sauvegarde"},
+{"Link's name: %s",
+ "Nombre de Link: %s",
+ "Nome do Link: %s",
+ "Nome di Link: %s",
+ "Links Name: %s",
+ "Nom de Link : %s"},
+{"Link's name",
+ "Nombre de Link",
+ "Nome do Link",
+ "Nome di Link",
+ "Links Name",
+ "Nom de Link"},
+{"Change...",
+ "Cambiar...",
+ "Mudar...",
+ "Cambia...",
+ "Ändern...",
+ "Changer..."},
+{"Gives your hero a new name on this save file. It's kept the next time you save.",
+ "Da a tu héroe un nombre nuevo en esta partida. Se conserva la próxima vez que guardes.",
+ "Dá um novo nome ao seu herói neste salvamento. Ele é mantido na próxima vez que você salvar.",
+ "Dà un nuovo nome al tuo eroe in questo salvataggio. Viene conservato la prossima volta che salvi.",
+ "Gibt deinem Helden in diesem Spielstand einen neuen Namen. Er bleibt beim nächsten Speichern erhalten.",
+ "Donne un nouveau nom à votre héros dans cette sauvegarde. Il est conservé la prochaine fois que vous sauvegardez."},
+{"Load a save file first.",
+ "Carga una partida primero.",
+ "Carregue um salvamento primeiro.",
+ "Carica prima un salvataggio.",
+ "Lade zuerst einen Spielstand.",
+ "Chargez d'abord une sauvegarde."},
+{"This mod needs code mods turned on.",
+ "Este mod necesita los mods de código activados.",
+ "Este mod precisa dos mods de código ativados.",
+ "Questa mod richiede le mod di codice attivate.",
+ "Dieser Mod braucht eingeschaltete Code-Mods.",
+ "Ce mod nécessite que les mods de code soient activés."},
+{"To use code mods, the game code is rebuilt with mod support. This takes %s. Rebuild now?",
+ "Para usar mods de código, el código del juego se recompila con soporte de mods. Tarda %s. ¿Recompilar ahora?",
+ "Para usar mods de código, o código do jogo é recompilado com suporte a mods. Isso leva %s. Recompilar agora?",
+ "Per usare le mod di codice, il codice del gioco viene ricompilato con il supporto per le mod. Richiede %s. "
+ "Ricompilare ora?",
+ "Für Code-Mods wird der Spielcode mit Mod-Unterstützung neu kompiliert. Das dauert %s. Jetzt neu kompilieren?",
+ "Pour utiliser les mods de code, le code du jeu est recompilé avec la prise en charge des mods. Cela prend %s. "
+ "Recompiler maintenant ?"},
+{"To turn code mods off, the game code is rebuilt without mod support. This takes %s. Rebuild now?",
+ "Para desactivar los mods de código, el código del juego se recompila sin soporte de mods. Tarda %s. ¿Recompilar "
+ "ahora?",
+ "Para desativar os mods de código, o código do jogo é recompilado sem suporte a mods. Isso leva %s. Recompilar "
+ "agora?",
+ "Per disattivare le mod di codice, il codice del gioco viene ricompilato senza il supporto per le mod. Richiede %s. "
+ "Ricompilare ora?",
+ "Zum Ausschalten der Code-Mods wird der Spielcode ohne Mod-Unterstützung neu kompiliert. Das dauert %s. Jetzt neu "
+ "kompilieren?",
+ "Pour désactiver les mods de code, le code du jeu est recompilé sans la prise en charge des mods. Cela prend %s. "
+ "Recompiler maintenant ?"},
+{"Link drops off ledges instead of jumping when automatic ledge jumps are off; press the button just after leaving "
+ "the edge to jump. On one input with the moon jump cheat, the moon jump wins while it is on.",
+ "Sin saltos automáticos en los bordes, Link se deja caer en vez de saltar; pulsa el botón justo después de salir "
+ "del borde para saltar. Si comparte botón con el truco de salto lunar, gana el salto lunar mientras esté activado.",
+ "Sem pulos automáticos nas beiradas, Link cai em vez de pular; aperte o botão logo depois de sair da beirada para "
+ "pular. Se o botão for o mesmo da trapaça de pulo lunar, o pulo lunar vence enquanto estiver ativado.",
+ "Senza salti automatici dai bordi, Link si lascia cadere invece di saltare; premi il tasto subito dopo aver "
+ "lasciato il bordo per saltare. Se il tasto è lo stesso del trucco del salto lunare, vince il salto lunare finché è "
+ "attivo.",
+ "Ohne automatische Sprünge lässt sich Link von Kanten fallen, statt zu springen; drücke die Taste direkt nach dem "
+ "Verlassen der Kante, um zu springen. Teilt sie sich die Taste mit dem Mondsprung-Cheat, gewinnt der Mondsprung, "
+ "solange er an ist.",
+ "Sans sauts automatiques, Link se laisse tomber des rebords au lieu de sauter ; appuyez sur le bouton juste après "
+ "avoir quitté le rebord pour sauter. Sur le même bouton que la triche du super saut, le super saut l'emporte tant "
+ "qu'il est activé."},
+{"Once you are a member (Carlov took a picto). Carlov then leaves his workshop, as in the game's ending; this can't "
+ "be undone.",
+ "Cuando ya eres socio (Carlov te ha hecho una pictografía). Después Carlov deja su taller, como en el final del "
+ "juego; no se puede deshacer.",
+ "Quando você já é membro (Carlov tirou uma foto sua). Depois Carlov deixa a oficina, como no final do jogo; isso "
+ "não pode ser desfeito.",
+ "Quando sei già socio (Carlov ti ha fatto una foto). Poi Carlov lascia il suo laboratorio, come nel finale del "
+ "gioco; non si può annullare.",
+ "Sobald du Mitglied bist (Carlov hat ein Foto gemacht). Carlov verlässt dann seine Werkstatt wie im Spielende; das "
+ "kann nicht rückgängig gemacht werden.",
+ "Une fois que vous êtes membre (Carlov a pris une photo). Carlov quitte alors son atelier, comme à la fin du jeu ; "
+ "c'est irréversible."},
+{"Story items",
+ "Objetos de la historia",
+ "Itens da história",
+ "Strumenti della storia",
+ "Story-Items",
+ "Objets de l'histoire"},
+{"Inventory only. Place the pearls at the statues yourself.",
+ "Solo el inventario. Coloca tú las perlas en las estatuas.",
+ "Só o inventário. Coloque você mesmo as pérolas nas estátuas.",
+ "Solo l'inventario. Le perle sulle statue mettile tu.",
+ "Nur das Inventar. Setze die Perlen selbst in die Statuen ein.",
+ "Inventaire uniquement. Placez vous-même les perles sur les statues."},
+{"A backup of your last in-game save is made before the first grant this session.",
+ "Antes de la primera entrega de esta sesión se hace una copia de seguridad de tu última partida guardada en el "
+ "juego.",
+ "Antes da primeira entrega desta sessão é feito um backup do seu último salvamento no jogo.",
+ "Prima della prima consegna di questa sessione viene fatto un backup del tuo ultimo salvataggio nel gioco.",
+ "Vor der ersten Vergabe in dieser Sitzung wird dein letzter Spielstand aus dem Spiel gesichert.",
+ "Une copie de votre dernière sauvegarde en jeu est faite avant le premier don de cette session."},
+{"Nayru's Pearl",
+ "Perla de Nayru",
+ "Pérola de Nayru",
+ "Perla di Nayru",
+ "Nayrus Perle",
+ "Perle de Nayru"},
+{"Din's Pearl",
+ "Perla de Din",
+ "Pérola de Din",
+ "Perla di Din",
+ "Dins Perle",
+ "Perle de Din"},
+{"Farore's Pearl",
+ "Perla de Farore",
+ "Pérola de Farore",
+ "Perla di Farore",
+ "Farores Perle",
+ "Perle de Farore"},
+{"Own the fully upgraded Master Sword",
+ "Tener la Espada Maestra con todo su poder",
+ "Ter a Espada Mestra com todo o poder",
+ "Possedere la Spada Suprema al massimo potere",
+ "Das voll aufgeladene Master-Schwert besitzen",
+ "Posséder l'Épée de légende à pleine puissance"},
+{"Story item warning",
+ "Aviso sobre objetos de la historia",
+ "Aviso sobre itens da história",
+ "Avviso sugli strumenti della storia",
+ "Warnung zu Story-Items",
+ "Avertissement sur les objets de l'histoire"},
+{"Story checks can react to ownership alone. Sword upgrades can remove characters from earlier locations. Restore a "
+ "backup from Mods > More > Save backups if needed; loading an older save state can also restore old item flags.",
+ "Las comprobaciones de la historia pueden reaccionar solo con tener el objeto. Las mejoras de la espada pueden "
+ "quitar personajes de lugares anteriores. Si hace falta, restaura una copia desde Mods > Más > Copias de seguridad "
+ "de partidas; cargar un estado guardado anterior también puede restaurar los antiguos indicadores de objetos.",
+ "As verificações da história podem reagir só por você ter o item. As melhorias da espada podem tirar personagens de "
+ "lugares anteriores. Se precisar, restaure um backup em Mods > Mais > Backups dos salvamentos; carregar um estado "
+ "salvo mais antigo também pode restaurar os antigos marcadores de itens.",
+ "I controlli della storia possono reagire al solo possesso. I potenziamenti della spada possono togliere personaggi "
+ "da luoghi precedenti. Se serve, ripristina un backup da Mod > Altro > Backup dei salvataggi; caricare uno stato "
+ "salvato precedente può anche ripristinare i vecchi indicatori degli strumenti.",
+ "Story-Prüfungen können schon auf den bloßen Besitz reagieren. Schwert-Upgrades können Figuren von früheren Orten "
+ "entfernen. Stelle bei Bedarf eine Sicherung unter Mods > Mehr > Spielstand-Sicherungen wieder her; auch das Laden "
+ "eines älteren Speicherstands kann alte Item-Flags wiederherstellen.",
+ "Les vérifications de l'histoire peuvent réagir à la seule possession. Les améliorations de l'épée peuvent faire "
+ "disparaître des personnages de lieux précédents. Si besoin, restaurez une copie depuis Mods > Plus > Copies de "
+ "sauvegarde ; charger un état sauvegardé plus ancien peut aussi restaurer les anciens indicateurs d'objets."},
+{"This can change or break the story's order. A save backup is made first.",
+ "Esto puede cambiar o romper el orden de la historia. Antes se hace una copia de seguridad de tus partidas.",
+ "Isso pode mudar ou quebrar a ordem da história. Antes é feito um backup dos seus salvamentos.",
+ "Può cambiare o rompere l'ordine della storia. Prima viene fatto un backup dei salvataggi.",
+ "Das kann die Reihenfolge der Story ändern oder kaputt machen. Vorher wird eine Spielstand-Sicherung erstellt.",
+ "Cela peut changer ou casser l'ordre de l'histoire. Une copie de sauvegarde est faite d'abord."},
+{"The backup contains your last in-game save. No item is granted if the backup fails. Pearls still need placing at "
+ "the statues. Upgraded sword ownership can change which characters appear.",
+ "La copia contiene tu última partida guardada en el juego. Si la copia falla, no se da ningún objeto. Las perlas "
+ "aún hay que colocarlas en las estatuas. Tener la espada mejorada puede cambiar qué personajes aparecen.",
+ "O backup contém seu último salvamento no jogo. Se o backup falhar, nenhum item é dado. As pérolas ainda precisam "
+ "ser colocadas nas estátuas. Ter a espada melhorada pode mudar quais personagens aparecem.",
+ "Il backup contiene il tuo ultimo salvataggio nel gioco. Se il backup non riesce, non viene dato nessuno strumento. "
+ "Le perle vanno ancora messe sulle statue. Possedere la spada potenziata può cambiare quali personaggi compaiono.",
+ "Die Sicherung enthält deinen letzten Spielstand aus dem Spiel. Schlägt die Sicherung fehl, wird kein Item "
+ "vergeben. Die Perlen müssen noch in die Statuen eingesetzt werden. Der Besitz des verbesserten Schwerts kann "
+ "ändern, welche Figuren erscheinen.",
+ "La copie contient votre dernière sauvegarde en jeu. Aucun objet n'est donné si la copie échoue. Les perles doivent "
+ "encore être placées sur les statues. Posséder l'épée améliorée peut changer les personnages qui apparaissent."},
+{"Back up and give item",
+ "Copiar y dar objeto",
+ "Fazer backup e dar item",
+ "Fai il backup e dai lo strumento",
+ "Sichern und Item geben",
+ "Copier et donner l'objet"},
+{"%.0f fps   Render interval %.1f ms (worst %.1f)",
+ "%.0f fps   Intervalo de render %.1f ms (peor %.1f)",
+ "%.0f fps   Intervalo de renderização %.1f ms (pior %.1f)",
+ "%.0f fps   Intervallo di rendering %.1f ms (peggiore %.1f)",
+ "%.0f fps   Renderintervall %.1f ms (schlechtestes %.1f)",
+ "%.0f fps   Intervalle de rendu %.1f ms (pire %.1f)"},
+{"Menu sounds",
+ "Sonidos del menú",
+ "Sons do menu",
+ "Suoni del menu",
+ "Menütöne",
+ "Sons du menu"},
+{"Settings plays the game's own menu sounds when you move, choose, change an option or go back. They play like the "
+ "game's other sounds: Master volume applies, and in TV play the game sends them to the GamePad, so they need "
+ "GamePad sounds through main speakers (and its volume) there. Never while the game is in the background or muted.",
+ "El menú de ajustes reproduce los sonidos de menú propios del juego al moverte, elegir, cambiar una opción o "
+ "volver. Suenan como los demás sonidos del juego: se aplica el volumen general y, al jugar en la tele, el juego los "
+ "envía al GamePad, así que ahí necesitan Sonidos del GamePad por los altavoces principales (y su volumen). Nunca "
+ "suenan con el juego en segundo plano o silenciado.",
+ "O menu de configurações toca os próprios sons de menu do jogo quando você se move, escolhe, muda uma opção ou "
+ "volta. Eles tocam como os outros sons do jogo: o volume geral se aplica e, ao jogar na TV, o jogo os envia ao "
+ "GamePad, então lá eles precisam de Sons do GamePad pelos alto-falantes principais (e do seu volume). Nunca com o "
+ "jogo em segundo plano ou silenciado.",
+ "Il menu delle impostazioni riproduce i suoni dei menu del gioco quando ti sposti, scegli, cambi un'opzione o torni "
+ "indietro. Suonano come gli altri suoni del gioco: si applica il volume generale e, quando giochi sulla TV, il "
+ "gioco li manda al GamePad, quindi lì servono Suoni del GamePad dagli altoparlanti principali (e il suo volume). "
+ "Mai con il gioco in background o silenziato.",
+ "Das Einstellungsmenü spielt die eigenen Menütöne des Spiels, wenn du dich bewegst, etwas wählst, eine Option "
+ "änderst oder zurückgehst. Sie klingen wie die anderen Spieltöne: Die Gesamtlautstärke gilt, und beim Spielen am "
+ "Fernseher schickt das Spiel sie ans GamePad, daher brauchen sie dort GamePad-Töne über die Hauptlautsprecher (und "
+ "deren Lautstärke). Nie, wenn das Spiel im Hintergrund oder stumm ist.",
+ "Le menu des réglages joue les propres sons de menu du jeu quand vous vous déplacez, choisissez, changez une option "
+ "ou revenez en arrière. Ils sont joués comme les autres sons du jeu : le volume général s'applique et, pendant le "
+ "jeu sur la TV, le jeu les envoie au GamePad, donc il leur faut Sons du GamePad par les haut-parleurs principaux "
+ "(et son volume). Jamais quand le jeu est en arrière-plan ou en sourdine."},

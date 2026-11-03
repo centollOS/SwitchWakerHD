@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Statically recompile a Wii U RPX into C.
 
-usage: recomp.py game/code/cking.rpx OUTDIR [--insns-per-file N] [--build NAME] [--mod-hooks] [--decomp-hooks FILE]
+usage: recomp.py game/code/cking.rpx OUTDIR [--insns-per-file N] [--build NAME] [--mod-hooks] [--preserve-registers] [--decomp-hooks FILE] [--ppc-nan-propagation]
 
 The rpx is identified by its SHA-256 (tools/recomp/builds.py). Functions are named by their
 *canonical* (USA) address, so the runtime refers to the same f_XXXXXXXX whichever build of the game
@@ -11,7 +11,14 @@ it was translated from; the dispatch table maps this build's real addresses to t
 g_mod_hook_flags (runtime/src/mods/guest_mods.cpp), so guest mods (docs/mod-sdk-v2.md) can hook or
 replace any game function at runtime without rebuilding the game code.
 
---decomp-hooks FILE: the code for the decomp build (CMake WWHD_DECOMP=ON, docs/decomp-build.md). FILE
+--preserve-registers: experimental patched-RPX builds whose assembly helpers do not follow the
+PowerPC EABI. Keep all guest register writes across function returns and calls, including scratch
+GPRs/FPRs and CR bits. Disables the CR liveness and leaf/nonleaf register-local passes, without
+adding mod hooks or changing RPX identification. Vanilla builds retain their normal optimizations.
+
+--decomp-hooks FILE: the code for the decomp build (CMake WWHD_DECOMP=ON, docs/decomp-build.md); it also
+routes the roots in tools/recomp/decomp_hostrt_hooks.txt (the port-owned guest runtime) to their host
+replacements (runtime/src/hostrt), which only the decomp build has. FILE
 (written by tools/decomp_build/gen.py) lists the decompiled functions; each becomes a hook (f_X calls
 hook_X in the runtime, which runs the decompiled function or the recompiled f_X_orig). A listed address
 that is not a function entry, or a function containing an instruction-level hook ("@ADDR"; the
@@ -20,11 +27,20 @@ listed in g_recomp_decomp_kept (table.c), so the runtime keeps it recompiled. FI
 OUTDIR/decomp_hooks.txt (CMakeLists.txt checks that the build's list matches). USA build only (the
 decompiled code uses the USA build's addresses).
 
+--ppc-nan-propagation (or WWHD_RECOMP_PPC_NAN=1): verification builds only, off for the game port. The
+arithmetic float instructions (fadd fsub fmul fdiv fmadd fmsub fnmadd fnmsub, their single forms and the
+paired-single ps_add ps_sub ps_mul ps_div ps_madd ps_msub ps_nmadd ps_nmsub ps_muls0/1 ps_madds0/1
+ps_sum0/1) return the NaN the PowerPC returns: frA, else frB, else frC (fmadd family: A, B, C), quieted,
+and the default QNaN 0x7FF8000000000000 for an invalid operation (tools/recomp/ppc_nan.h, copied to
+OUTDIR and included by funcs.h). Without it the host compiler's operand order decides which of two NaNs
+survives. Off, the output is byte for byte what it was before the option existed.
+
 Code-quality passes (each on by default; the variable set to 0 when generating turns it off):
   WWHD_RECOMP_CRLIVE       condition-register liveness: compares store only the CR bits read later (crlive.py)
   WWHD_RECOMP_LEAF         leaf functions keep guest registers and CR bits in C locals (leaflocal.py)
   WWHD_RECOMP_NONLEAF      functions with calls keep guest registers in C locals between calls (leaflocal.py)
   WWHD_RECOMP_GQR          paired-single loads/stores through GQRs the game never writes skip the GQR check
+  WWHD_RECOMP_RAWSTORE     an stfs of a register still holding an lfs value stores the loaded word (rawstore.py)
 WWHD_RECOMP_PLAIN=1 turns them all off: the output is then the same as without these passes (the
 plain c->r[N] form that tools/true60 and tools/verify read).
 Checking builds (set to 1): WWHD_RECOMP_CR_CHECK (a dropped CR bit that is read aborts),
@@ -46,6 +62,7 @@ import json
 import os
 import re
 import shutil
+from pathlib import Path
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -57,6 +74,7 @@ from rpx import R_PPC_ADDR16_HA, R_PPC_ADDR16_LO, R_PPC_ADDR16_HI
 import ppc2c
 import crlive
 import leaflocal
+import rawstore
 
 
 class _Output(io.StringIO):
@@ -93,6 +111,8 @@ NONLEAF = ppc2c.pass_on("WWHD_RECOMP_NONLEAF")
 # paired-single loads and stores through GQRs the game never writes skip the GQR check
 # (static_float_gqrs): on unless WWHD_RECOMP_GQR=0
 GQR_STATIC = ppc2c.pass_on("WWHD_RECOMP_GQR")
+# lfs -> stfs copies store the loaded word, bit-identical (rawstore.py): on unless WWHD_RECOMP_RAWSTORE=0
+RAWSTORE = ppc2c.pass_on("WWHD_RECOMP_RAWSTORE")
 
 
 def unknown_build_message(path):
@@ -121,15 +141,27 @@ DATA_IMPORT_STRIDE = 0x1000
 
 
 class Recompiler(fork_passes.ForkPasses):  # (this fork)
-    def __init__(self, path, build=None, mod_hooks=False, decomp_hooks=None):
+    raw_stores = 0     # rawstore.py statistics (report.txt)
+    single_stores = 0
+
+    def __init__(self, path, build=None, mod_hooks=False, decomp_hooks=None, preserve_registers=False):
         """`build` is which build of the game `path` is (tools/recomp/builds.py); by default it is
         identified by its SHA-256, and an rpx that is none of them is refused."""
         self.build = build or game_builds.identify(path)
         if self.build is None:
             raise SystemExit(unknown_build_message(path))
+        if getattr(self.build, "randomizer", False) and decomp_hooks:
+            raise ValueError("randomized builds cannot use decompiled function replacements")
         self.mod_hooks = mod_hooks
         self.fork_mod_hooks_only(game_builds.read_hooks)  # (this fork)
-        self.p = Program(path)
+        self.preserve_registers = preserve_registers or getattr(self.build, "randomizer", False)
+        if getattr(self.build, "randomizer", False):
+            from randomizer_compat import RPX_LIMITS
+            self.p = Program(path, rpx_limits=RPX_LIMITS)
+            if self.p.rpx.buffer_sha256 != self.build.sha256:
+                raise ValueError("randomized RPX changed before translation parsed its input buffer")
+        else:
+            self.p = Program(path)
         self.p.discover()
         self.entries = set(self.p.entries)
         self.imports = {}  # slot address -> (lib, name, kind)
@@ -144,7 +176,14 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         # canonical i.e. USA) plus the extra lists (hooks_*.txt). "@ADDR" is an instruction-level
         # hook: site_ADDR(c) runs just before the instruction at ADDR (also when ADDR is reached by
         # a branch), so it can adjust what that instruction uses.
-        hook_entries, self.skipped_hooks = game_builds.read_hooks(game_builds.hook_files(), self.build)
+        # the decomp build adds its own runtime replacements (decomp_only_hooks_*.txt, and the port-owned
+        # guest runtime's host replacements in decomp_hostrt_hooks.txt, runtime/src/hostrt); the normal
+        # build keeps the game's code there and never reads these lists
+        hook_list = game_builds.hook_files()
+        if decomp_hooks:
+            hook_list += game_builds.decomp_only_hook_files() + [
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "decomp_hostrt_hooks.txt")]
+        hook_entries, self.skipped_hooks = game_builds.read_hooks(hook_list, self.build)
         self.canon_of = {}              # this build's address -> canonical address (for symbol names)
         self.hooks, self.sites = set(), set()
         for site, canon, addr, _ in hook_entries:
@@ -327,7 +366,12 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
                 self.unhandled[str(e)] += 1
                 s = "ppc_unimplemented(c, 0x%08Xu, 0x%08Xu);" % (a, w)
             body.append((a, w, s))
-        body = self.fork_translated(body)  # (this fork)
+        body = self.fork_translated(body)  # (this fork: dead tails, CR liveness)
+        raws = set()
+        if RAWSTORE:
+            body, raws = rawstore.transform(body, self.labels, self.sites)
+            self.raw_stores += sum(1 for _, _, s in body if "st32(ea, fw" in s)
+            self.single_stores += sum(1 for _, _, s in body if "st32(ea, f32_as_u32((float)" in s)
         # restrict: guest memory never aliases the register file, so the compiler may keep
         # registers in host registers across guest loads/stores
         hooked = start in self.hooks
@@ -346,6 +390,8 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
             # guest mods: the check sits in the game's code (f_X, or f_X_orig behind a port hook), so the
             # port's own hooks (interpolation, true 60) stay outermost and mods hook the game's code
             out.append("    PPC_MOD_HOOK(%d, 0x%08Xu);" % (self.ordinal[start], start))
+        if raws:
+            out.append("    uint32_t %s;" % ", ".join("fw%d" % n for n in sorted(raws)))
         body, tail_wb, sites_done = self.fork_locals(start, hooked, body, out)  # (this fork)
         if not self.fork_frame_free(body):  # (this fork) a function that calls has its frame anyway: the plain check is smaller
             out[enter_at] = "    PPC_ENTER(0x%08Xu);" % start
@@ -382,6 +428,15 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         files = self.fork_write_code(outdir, per_file)  # (this fork: hot layout, inline leaves)
         self.fork_stats()  # (this fork)
         self.write_headers(outdir)
+        if ppc2c.NAN_PROPAGATION:  # the helpers, next to funcs.h (the decomp's verify build has its own runtime)
+            with _Output(os.path.join(outdir, "ppc_nan.h")) as f:
+                f.write(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ppc_nan.h"), encoding="utf-8").read())
+        if getattr(self.build, "randomizer", False):
+            with _Output(os.path.join(outdir, "randomizer.json")) as output:
+                json.dump(self.build.randomizer_report, output, indent=2)
+                output.write("\n")
+        else:
+            Path(outdir, "randomizer.json").unlink(missing_ok=True)
         self.write_report(outdir, len(files))
 
     def static_float_gqrs(self):
@@ -401,6 +456,8 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         func_slots = sorted(s for s, (lib, name, kind) in self.imports.items() if kind == "f")
         with _Output(os.path.join(outdir, "funcs.h")) as f:
             f.write('#pragma once\n%s#include "ppc.h"\n\n' % self.fork_funcs_defines())  # (this fork)
+            if ppc2c.NAN_PROPAGATION:  # --ppc-nan-propagation: the helpers the float instructions call
+                f.write('#include "ppc_nan.h"\n\n')
             for e in self.sorted_entries:
                 f.write("void f_%08X(Cpu* __restrict c);\n" % self.sym(e))
             f.write("\n/* hooked functions: hook_X is implemented in the runtime, f_X_orig is the game's code */\n")
@@ -473,6 +530,13 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         kept = sorted(self.canon_of.get(a, a) for a, _ in self.decomp_kept)
         f.write("const uint32_t g_recomp_decomp_kept[] = {%s};\n" % (", ".join("0x%08Xu" % a for a in kept) or "0u"))
         f.write("const unsigned g_recomp_decomp_kept_count = %d;\n" % len(kept))
+        # every call of an imported function (bl, REL24 into an import section) -> its import slot: the code in
+        # guest memory is not relocated there, so the runtime cannot tell which import a bl calls
+        # (runtime/src/decomp: the LR of a decompiled function's guest call is the original's return address)
+        calls = sorted((self.canon_of.get(a) or self.build.canon_code(a), slot) for a, (_, _, slot) in self.p.import_calls.items())
+        f.write("const uint32_t g_recomp_decomp_import_calls[][2] = {%s};\n" % (
+            ", ".join("{0x%08Xu, 0x%08Xu}" % c for c in calls) or "{0u, 0u}"))
+        f.write("const unsigned g_recomp_decomp_import_call_count = %d;\n" % len(calls))
         shutil.copyfile(self.decomp_hooks_file, os.path.join(outdir, "decomp_hooks.txt"))
 
     def write_build_map(self, f):
@@ -481,6 +545,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         f.write('\n/* %s build: canonical (USA) address -> this build\'s (tools/recomp/builds.py) */\n' % b.name)
         f.write('const char g_guest_build_name[] = "%s";\n' % b.name)
         f.write('const char g_guest_build_title_id[] = "%s";\n' % b.title_id)
+        f.write('const char g_guest_build_rpx_sha256[] = "%s";\n' % b.sha256)
         for kind, steps in (("code", b.code_steps()), ("data", b.data_steps())):
             f.write("const GuestStep g_guest_%s_steps[] = {%s};\n" % (
                 kind, ", ".join("{0x%08Xu, %d}" % (a, d) for a, d in steps)))
@@ -508,7 +573,16 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
             f.write("functions: %d\nfiles: %d\nfixpoint rounds: %d\n" % (len(self.sorted_entries), nfiles, self.fixpoint_rounds))
             f.write(self.fork_report_hot())  # (this fork)
             f.write("imports used: %d of %d\n" % (len(self.used_imports), len(self.imports)))
+            if ppc2c.NAN_PROPAGATION:
+                f.write("PowerPC NaN propagation: on (verification build, ppc_nan.h)\n")
+            if getattr(self.build, "randomizer", False):
+                f.write("randomizer compatibility: %s; RPX %s\n" %
+                        (self.build.randomizer_report["profile"], self.build.sha256))
+            if self.preserve_registers:
+                f.write("guest register preservation: on (CR liveness and ABI register-local passes off)\n")
             f.write(self.fork_report())  # (this fork)
+            if RAWSTORE:
+                f.write("raw lfs->stfs copies (rawstore.py): %d, stores of single results: %d\n" % (self.raw_stores, self.single_stores))
             f.write("unhandled instruction kinds:\n")
             for k, v in self.unhandled.most_common():
                 f.write("  %6d  %s\n" % (v, k))
@@ -523,11 +597,31 @@ if __name__ == "__main__":
     ap.add_argument("--build", help="which build the rpx is, when it should not be identified by "
                                     "its SHA-256 (%s)" % ", ".join(b.name for b in game_builds.all_builds()))
     ap.add_argument("--mod-hooks", action="store_true", default=os.environ.get("WWHD_RECOMP_MOD_HOOKS") == "1")
+    ap.add_argument("--randomizer", action="store_true", help="validate and translate a compatible USA randomized RPX")
+    ap.add_argument("--expected-rpx-sha256", help="randomizer: require the exact RPX checked by setup")
+    ap.add_argument("--preserve-registers", action="store_true",
+                    help="experimental patched RPX: preserve scratch GPR/FPR/CR writes across guest calls")
     ap.add_argument("--decomp-hooks", help="the decomp build's function list (tools/decomp_build/gen.py)")
+    ap.add_argument("--ppc-nan-propagation", action="store_true", default=os.environ.get("WWHD_RECOMP_PPC_NAN") == "1",
+                    help="verification builds: float instructions return the NaN operand the PowerPC would (ppc_nan.h)")
     a = ap.parse_args()
+    ppc2c.NAN_PROPAGATION = a.ppc_nan_propagation
+    if a.randomizer and a.build:
+        ap.error("--randomizer and --build cannot be combined")
+    if a.randomizer and a.decomp_hooks:
+        ap.error("--randomizer and --decomp-hooks cannot be combined")
+    if a.expected_rpx_sha256 and not a.randomizer:
+        ap.error("--expected-rpx-sha256 requires --randomizer")
     build = None
+    if a.randomizer:
+        import randomizer_compat
+        try:
+            build = randomizer_compat.identify(a.rpx, expected_sha256=a.expected_rpx_sha256)
+        except (ValueError, OSError, KeyError) as error:
+            ap.exit(1, "randomizer compatibility check failed: %s\n" % error)
     if a.build:
         build = game_builds.by_name(a.build)
         if build is None:
             sys.exit("unknown build %r; known: %s" % (a.build, ", ".join(b.name for b in game_builds.all_builds())))
-    Recompiler(a.rpx, build, mod_hooks=a.mod_hooks, decomp_hooks=a.decomp_hooks).run(a.outdir, a.insns_per_file)
+    Recompiler(a.rpx, build, mod_hooks=a.mod_hooks, decomp_hooks=a.decomp_hooks,
+               preserve_registers=a.preserve_registers).run(a.outdir, a.insns_per_file)

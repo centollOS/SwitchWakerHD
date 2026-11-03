@@ -3,6 +3,18 @@
 // Plain C++ (no AppKit) so it can be unit-tested (runtime/tools/input_map_test.cpp). input.mm
 // evaluates the current mapping on every read; the Controls window (gfx/controls_ui.mm) edits it.
 // Persisted as JSON in ~/Library/Application Support/WWHD/controls.json ($WWHD_CONTROLS overrides).
+//
+// Format 2 (P6 of the controls plan; idea from the GreenNaugahyde Android fork, reimplemented):
+//   - per-controller bindings: "controllers": [{"guid", "name", "controller": {...}}]. A controller
+//     uses the profile with its SDL GUID and name, else one with its GUID, else one with its name (a
+//     host without GUIDs, or the same model on another bus), else the shared "controller" bindings;
+//   - the virtual actions Jump and MoonJump (Jump anywhere, the moon jump): bound like Wii U buttons,
+//     never sent to the game (input::PadState::virt);
+//   - "options": "l_turns_gamepad_page" (written only when on) and the controllers that asked not to
+//     be offered the controller setup again ("controller_setup_declined").
+// A format 1 file (no "version": 2) reads as before; its Jump and MoonJump take the inputs of the
+// Wii U's L (where both mods used to sit), and the old Jump anywhere button choice is applied by
+// adopt_legacy_jump_button().
 #pragma once
 #include <array>
 #include <cstdint>
@@ -21,8 +33,16 @@ enum Action : int {
     kLUp, kLDown, kLLeft, kLRight,   // left stick (move)
     kRUp, kRDown, kRLeft, kRRight,   // right stick (camera)
     kScreenshot,                     // app action, not a GamePad input: save a screenshot (screenshot.h)
+    kJump, kMoonJump,                // virtual inputs (input::kVirt*): Jump anywhere, the moon jump
     kActionCount
 };
+constexpr int kFirstVirtual = kJump;
+inline bool is_virtual(int a) { return a == kJump || a == kMoonJump; }
+// a Wii U button the game does not use while Link plays (L only turns the GamePad page, d-pad down
+// is free): a virtual action or a moved item button may share its input (see play_buttons)
+inline bool free_in_play(int a) { return a == kL || a == kDDown; }
+inline bool is_item_action(int a) { return a == kX || a == kY || a == kR; }
+uint32_t action_virtual(int a);   // input::kVirt* bit, 0 for the others
 const char* action_id(int a);     // JSON key, e.g. "ZL", "LeftStickUp"
 const char* action_label(int a);  // for the UI, e.g. "Left stick ↑ (move)"
 uint32_t action_bit(int a);       // VPAD button bit, 0 for stick directions
@@ -38,6 +58,7 @@ enum Pad : int {
     kPadRSUp, kPadRSDown, kPadRSLeft, kPadRSRight,
     kPadCapture, kPadRightPaddle1, kPadLeftPaddle1, kPadRightPaddle2, kPadLeftPaddle2, kPadTouchpad,
     kPadMisc2, kPadMisc3, kPadMisc4, kPadMisc5, kPadMisc6,
+    kPadGCL, kPadGCR, kPadStartUp, kPadStartDown, kPadStartLeft, kPadStartRight,
     kPadCount
 };
 const char* pad_id(int p);     // JSON value, e.g. "LeftTrigger"
@@ -81,7 +102,15 @@ std::array<ShortcutBinding, kShortcutCount> shortcut_defaults();
 constexpr int kShortcutsVersion = 3;
 std::string shortcut_key_label(ShortcutKey key);
 
+struct PadPreset {
+    bool gamecube = false;
+    bool saved = false, saved_auto = false;
+    std::array<int, kActionCount> previous{};
+    bool operator==(const PadPreset&) const = default;
+};
+
 struct Mapping {
+    PadPreset preset;
     std::array<ShortcutBinding, kShortcutCount> shortcuts = shortcut_defaults();
     std::array<std::array<int, kKeysPerAction>, kActionCount> keys;  // kNoKey = empty slot
     std::array<int, kActionCount> pad;                                // kPadNone = unbound
@@ -94,21 +123,53 @@ struct Mapping {
     // so a worn stick that only reaches 0.9 delivers full deflection at about 1.11.
     float left_range = 1.0f;
     float right_range = 1.0f;
+    bool file_select_quit = true; // show the controller/mouse Quit button on file select
     bool skip_controller_selection = true; // title: choose the configured Wii U controller
+    // Issue #267: controllers keep driving the game while no game window has the focus (a second
+    // screen, streaming, remote play). Controllers only: keyboard and mouse are still released on
+    // focus loss. Off by default; the host applies it (SDL's background-events hint, GameController's
+    // shouldMonitorBackgroundEvents).
+    bool background_controllers = false;
     // Camera only (issue #167): applied where the game's camera reads the right stick
     // (camera_invert.h, mods/camera.cpp), never to the stick itself, so the baton is not inverted
     bool invert_camera_y = false;
     bool face_auto = false;         // Automatic face preset: follow the dominant pad's labels
     // In-game button prompts (issues #110, #141, #143; runtime/src/button_glyphs.cpp)
-    enum class Prompts : uint8_t { kAuto, kOriginal, kXbox, kPlayStation };
+    enum class Prompts : uint8_t { kAuto, kOriginal, kXbox, kPlayStation, kGameCube, kKeyboard };
     enum class ShoulderNames : uint8_t { kAuto, kNintendo, kNumbered, kXbox };
-    Prompts prompts = Prompts::kAuto;            // face-button look while the face buttons are by label
+    Prompts prompts = Prompts::kAuto;            // in-game face-button look
     ShoulderNames shoulder_names = ShoulderNames::kAuto;
     bool prompt_colours = true;                  // coloured face buttons (Xbox / PlayStation colours)
+    // Controls > Controller > "L turns the GamePad page" (off): in play the game reads L only to turn
+    // its GamePad screen between Items and Map; off, L reaches the game only outside play, so L1 can
+    // jump without turning the page (play_buttons)
+    bool l_turns_page = false;
+    bool settings_pause_page = true; // offer the settings page in the pause menu
+    // per-controller bindings (format 2): see profile_index()
+    struct Controller {
+        std::string guid;   // SDL GUID (32 hex digits); empty on hosts without one (AppKit)
+        std::string name;   // as the host names the controller
+        std::array<int, kActionCount> pad{};
+        PadPreset preset;
+        bool operator==(const Controller&) const = default;
+    };
+    std::vector<Controller> controllers;
+    std::vector<std::string> setup_declined;  // controller_key()s that asked "Don't ask again"
+    bool prompt_text_colours = true;             // action words in their button's colour; off keeps the game's
     static Mapping defaults();
     bool operator==(const Mapping&) const = default;
 };
 
+// GameCube physical inputs are SDL's AXBY convention (A south, X east, B west, Y north).
+// Old PC-mode SDL database mappings without GameCube classification, and native Apple
+// GameCube framework elements, use ABXY instead. Existing host inputs are never normalized.
+bool is_gamecube(bool sdl_gamecube_type, uint16_t vendor, uint16_t product);
+bool legacy_gamecube_faces(const input::ControllerInfo& controller);
+void apply_gamecube(Mapping& m, bool legacy_pc_faces = false);
+bool restore_pad_preset(Mapping& m);  // one retained pre-preset set, persisted in controls.json
+// Only Automatic and a previously unconfigured dominant pad may create an automatic profile.
+bool auto_gamecube(Mapping& m, const std::string& guid, const std::string& name,
+                   bool detected, bool legacy_pc_faces = false);
 // Which host face buttons drive the Wii U's A/B/X/Y (issue #78). Not stored: it is the shape of
 // the four face bindings, so a hand-edited mapping simply reads back as kCustom.
 //   kPosition (default): by position — the bottom host button (Xbox A) is the Wii U's B, the right
@@ -171,28 +232,42 @@ void set_face_auto(Mapping& m, bool on);
 // The dominant pad's family, from the labels note_face_labels last reported: PlayStation when it
 // names Cross/Circle/Square/Triangle, Xbox when its bottom button is A, Nintendo when it is B.
 enum class PadFamily { kUnknown, kXbox, kPlayStation, kNintendo };
+// The dominant device GameCube-adapter identity, separate from its face labels.
+void note_gamecube(bool detected);
+bool gamecube_pad();
 PadFamily pad_family_from_labels(const FaceLabel labels[4]);
 PadFamily pad_family();
 
 // What the in-game button prompts look like (button_glyphs.cpp draws it). Resolved from the
 // mapping and the pad family; pure, so input_map_test and button_glyphs_test can cover it.
 //   face: appearance and host-button identities follow the resolved face bindings. Automatic
-//     follows Xbox/PlayStation; position/custom on Nintendo or unknown retain original icons.
+//     follows Xbox/PlayStation and detected GameCube adapters; other Nintendo/unknown pads retain
+//     original icons unless by label selects its existing Xbox fallback.
 //     By label retains its existing Xbox fallback. Original never changes face prompts.
 //   shoulders: Automatic follows the face style (Xbox: LB/RB/LT/RT, PlayStation: L1/R1/L2/R2,
-//     original: the game's L/R/ZL/ZR); a fixed choice applies with any face layout.
-enum class FaceStyle : uint8_t { kOriginal, kXbox, kPlayStation };
-enum class ShoulderStyle : uint8_t { kOriginal, kNumbered, kXbox };
+//     GameCube: L/R/Z; Original: the game's L/R/ZL/ZR; a fixed choice applies with any face layout.
+enum class FaceStyle : uint8_t { kOriginal, kXbox, kPlayStation, kGameCube, kKeyboard };
+enum class ShoulderStyle : uint8_t { kOriginal, kNumbered, kXbox, kGameCube };
 struct PromptStyle {
     FaceStyle face = FaceStyle::kOriginal;
     bool colours = false;         // face colours (only with a face style)
+    bool text_colours = false;    // action words in their button's colour (only with a face style)
     ShoulderStyle shoulders = ShoulderStyle::kOriginal;
-    bool positions = false;       // HUD face cluster in the Xbox/PlayStation positions
-    std::array<int, 4> buttons = {0, 1, 2, 3};  // Wii U face -> host A/B/X/Y
+    bool positions = false;       // by label's look: the HUD cluster follows the host face buttons
+    std::array<int, 4> buttons = {0, 1, 2, 3};  // Wii U face -> host A/B/X/Y, or identity for GameCube art
+    std::array<int, 4> spots = {0, 1, 2, 3};    // HUD cluster: Wii U face -> destination spot
     bool active() const { return face != FaceStyle::kOriginal || shoulders != ShoulderStyle::kOriginal; }
     bool operator==(const PromptStyle&) const = default;
 };
 PromptStyle prompt_style(const Mapping& m, PadFamily family);
+// The game's prompts: prompt_style of the bindings the controller in use plays with (active_view)
+// and the pad family. generation() bumps when the controller in use changes, so a cached style
+// follows a switch to a controller with other bindings.
+PromptStyle active_prompt_style();
+// Where each Wii U face's HUD button is drawn, so the cluster matches the pad: an action on a
+// host face button takes that button's spot (Xbox A south is where the game draws B, and so on);
+// any other action keeps its own spot if it is free, else takes the first free one (A, B, X, Y).
+std::array<int, 4> hud_spots(const Mapping& m);
 const char* prompts_label(Mapping::Prompts p);              // for the UI
 const char* shoulder_names_label(Mapping::ShoulderNames n);  // for the UI
 
@@ -209,16 +284,79 @@ bool has_conflict(const Mapping& m, int a);
 int conflict_count(const Mapping& m);
 // short labels for compact UI chips, e.g. "L ⇧", "Num 5" / "LB", "LS ↑"
 std::string key_short_label(int code);
+// ASCII labels for game-font keycaps; first bound slot, or an explicit unbound label.
+int prompt_key_code(const Mapping& m, int action);
+std::string prompt_key_label(const Mapping& m, int action);
 const char* pad_short_label(int p);
 
 // Evaluate a mapping. keys[code] = held (count entries, 256 for legacy keyboard callers).
 // values[p] = 0..1 for each Pad input (max over controllers).
 input::PadState keyboard_state(const Mapping& m, const bool* keys, int count = 256);
 input::PadState controller_state(const Mapping& m, const float values[kPadCount]);
+input::PadState controller_state(const Mapping& m, const float values[kPadCount], const std::array<int, kActionCount>& pad);
+
+// Defer a lone Start until release, so Start chords never open pause first.
+// One gate per physical device; reset when changing layouts or suppressing host input.
+bool gamecube_settings_chord(const Mapping& m, const float values[kPadCount]);
+struct StartGate {
+    bool held = false, used = false;
+    uint8_t directions = 0;
+    std::array<int, kActionCount> bindings{};
+    double tap_until = 0;
+    input::PadState read(const Mapping& m, const float values[kPadCount], double seconds = -1);
+};
+
+// ---- per-controller bindings (format 2) ----
+std::string controller_key(const std::string& guid, const std::string& name);  // "guid name"
+// the profile a controller uses: the same GUID and name, else the same GUID, else the same name; -1: none
+int profile_index(const Mapping& m, const std::string& guid, const std::string& name);
+// the controller bindings a controller plays with: its profile's, else the shared ones
+const std::array<int, kActionCount>& pads_for(const Mapping& m, const std::string& guid, const std::string& name);
+// give a controller its own bindings (a copy of the shared ones), or find the ones it has; the index
+int ensure_profile(Mapping& m, const std::string& guid, const std::string& name);
+void remove_profile(Mapping& m, int index);
+// the Controls tab edits one set of controller bindings: `view` is `m` with profile `index`'s bindings
+// in pad (-1: the shared ones); store_view puts an edited view back (the profile gets pad, everything
+// else is shared)
+Mapping view_for(const Mapping& m, int index);
+// `m` with the bindings the controller in use (active_controller) plays with: its profile's, else the
+// shared ones; no controller in use (keyboard only) or none of its own: `m`'s shared bindings
+Mapping active_view(const Mapping& m);
+void store_view(Mapping& m, const Mapping& view, int index);
+// controller setup offer (controller_setup.h): a new controller (no profile, not declined, not virtual)
+bool setup_offer_due(const Mapping& m, const std::string& guid, const std::string& name, bool is_virtual);
+
+// several controllers at once, each through its own bindings: buttons and virtual inputs add up,
+// each stick follows the controller that pushes it furthest
+input::PadState combine(const input::PadState& a, const input::PadState& b);
+
+// ---- virtual actions on game buttons (Jump anywhere, the moon jump) ----
+// Binding Jump or the moon jump to a controller input that a game button uses asks what happens to
+// that button's own function:
+//   kMove: to a free input, L1 first, else d-pad down (both unused in play);
+//   kMoveToL1: the button goes to L1 (with its item, for an item button); L1 then no longer presses
+//     the Wii U's L (no page turns with L1, as on the fork);
+//   kMoveToDDown: to d-pad down, which stays d-pad down outside play (play_buttons);
+//   kTakeOff: no controller input presses it any more.
+enum class Displace { kMove, kMoveToL1, kMoveToDDown, kTakeOff };
+// the game actions a virtual action would take `pad` from (free-in-play and virtual ones share it)
+std::vector<int> displaced_by(const Mapping& m, int pad);
+// where kMove would put action `a` (kPadNone: nowhere free)
+int move_target(const Mapping& m, int a);
+// bind virtual action `v` to `pad`, doing `d` with the displaced game actions; false: nothing changed
+bool bind_virtual(Mapping& m, int v, int pad, Displace d);
+// The buttons the game gets in play or outside it: L leaves in play unless l_turns_page; an input
+// shared by a game button and L or d-pad down presses, in play, the game button only and, outside
+// play, L or d-pad down only.
+uint32_t play_buttons(const Mapping& m, uint32_t buttons, bool in_play);
+// Format 1 migration: Jump on the inputs of the Wii U button `vpad_bit` (the old Jump anywhere button
+// choice, one of L, R, ZL, ZR, L3, R3). The game button keeps them too, as it did.
+void jump_from_legacy(Mapping& m, uint32_t vpad_bit);
 
 // JSON. from_json starts from defaults: inputs missing from the file keep their default binding.
 std::string to_json(const Mapping& m);
 bool from_json(const std::string& text, Mapping& out, std::string* error = nullptr);
+int json_version(const std::string& text);  // the file's "version" (1 when missing or unreadable)
 bool load_file(const std::string& path, Mapping& out, std::string* error = nullptr);
 bool save_file(const std::string& path, const Mapping& m);
 std::string default_path();
@@ -238,8 +376,19 @@ void consume_shortcut_buttons(const Mapping& m, const float* raw, float* game);
 void load_startup();
 Mapping current();
 void set_current(const Mapping& m, bool save = true);  // applies immediately; saves to default_path()
-uint32_t generation();  // bumps on every set_current
+uint32_t generation();  // bumps on every set_current, a new pad family and a new controller in use
 bool skip_controller_selection();
+bool background_controllers();  // current().background_controllers, any thread (hosts poll it)
+bool file_select_quit();
 bool invert_camera_y();  // current().invert_camera_y without copying the mapping (camera hooks)
+bool settings_pause_page(); // current().settings_pause_page, any thread
+bool l_turns_page();     // current().l_turns_page, any thread
+// The old Jump anywhere button (mods: traversal_settings): applied once to a format 1 (or missing)
+// controls.json; a format 2 file has its own Jump bindings and ignores it.
+void adopt_legacy_jump_button(uint32_t vpad_bit);
+// The controller in use (hosts: the one that pressed something last), for the overlay's confirm and
+// back buttons (face_input) and the Controls tab's first choice. Empty: none.
+void set_active_controller(const std::string& guid, const std::string& name);
+void active_controller(std::string& guid, std::string& name);
 
 }  // namespace input_map

@@ -22,8 +22,12 @@ NON_ADDRESS = {
     ("hle/system_stubs.cpp", 0x02000000): "executable memory lower bound",
     ("mods/mod_archive.cpp", 0x02014B50): "ZIP central directory signature",
     ("platform/core_switch.cpp", 0x02100000): "size of the import/host function window at 0xC0000000 (the Switch's guest map)",
+    ("platform/thread_sampler_switch.cpp", 0x02000000): "(this fork) executable memory lower bound: a guest return address",
     ("mods/lyt_build.cpp", 0x02020000): "the layout files' format version (BFLYT / BFLAN)",
+    ("mods/item_ring.cpp", 0x10101CC0): "RGBA colour of the item ring's entry discs",
 }
+NON_ADDRESS.update({("trace.cpp", value): "WWHD_HOSTRT_TRACE: USA ranges of the port-owned guest runtime (decomp-build diagnostic)"
+                    for value in (0x0286C590, 0x0286DB50, 0x028EA038, 0x028F626C)})
 NON_ADDRESS.update({("espresso_fp.c", value): "frsqrte mantissa lookup table"
                     for value in (0x02FB7000, 0x02D26000, 0x02AC0000, 0x02881000,
                                   0x02665000, 0x02468000, 0x02287000, 0x020C1000)})

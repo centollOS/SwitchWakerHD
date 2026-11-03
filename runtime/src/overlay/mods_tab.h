@@ -21,11 +21,14 @@
 #include "hostui.h"
 #include "mods_model.h"
 #include "setup_flow.h"
+#include "startup_notices.h"
 #include "setup_test.h"
 #include "text_entry.h"
 #include "../mods/code_mods.h"
+#include "../mods/compiler_notice.h"
 #include "../mods/manager.h"
 #include "../mods/packages.h"
+#include "../mods/picked_source.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "popup.h"
@@ -49,6 +52,7 @@ using menu_i18n::tr;
 // ---------------------------------------------------------------- what the host supplies
 struct Host {
     std::function<void(bool folder, std::function<void(std::string)>)> choose_game_source, choose_mod_source;
+    mods::picked::CopyDocument copy_document;     // Android: a picked content:// document to a temporary file
     mods::catalogue::Fetch fetch;                 // HTTPS transport (empty: local catalogues only)
     std::function<bool()> can_restart;            // the game can relaunch itself
     std::function<void(bool code_build)> restart; // relaunch now
@@ -589,12 +593,43 @@ inline void keep_off_steps(Flow& f, const mods::packages::View& v, double now) {
     j.finished_at = now;
     fprintf(stderr, "[mods] %s updated; it stays off\n", f.id.c_str());
 }
+// Once per start, over the game: start-up notices from before the overlay (startup_notices.h), the
+// code mods that couldn't start because the mod compiler is missing (mods/compiler_notice.h) and the
+// mods skipped because a requirement can't be met (packages.h
+// startup_problems); the Mods tab says each next to its mod. Read at the overlay's first frames, after
+// the mods started; pending until shown, so the overlay draws a frame for it.
+struct StartupNotice {
+    bool read = false, shown = false;
+    std::string text;
+};
+inline StartupNotice& startup_notice() {
+    static StartupNotice n;
+    if (!n.read) {
+        n.read = true;
+        n.text = startup_notices::text();  // the renderer's (a GPU fallback, for example)
+        const std::string compiler = guestmods::compiler_notice_for(mods::packages::list());
+        if (!compiler.empty()) n.text += (n.text.empty() ? "" : "\n") + compiler;
+        for (const auto& line : mods::packages::startup_problems()) n.text += (n.text.empty() ? "" : "\n") + line;
+    }
+    return n;
+}
+inline bool startup_notice_pending() {
+    const auto& n = startup_notice();
+    return !n.shown && !n.text.empty();
+}
 inline void tick(const Host& h, bool menu_open) {
     using namespace mods::packages;
     auto& s = state();
     auto& j = s.job;
     auto& f = j.flow;
     const double now = ImGui::GetTime();
+    for (const auto& t : mods::packages::take_toasts()) notify(t);
+    if (startup_notice_pending() && !menu_open) {
+        auto& n = startup_notice();
+        n.shown = true;
+        s.toast = n.text;
+        s.toast_until = now + 12;  // a long line: read twice
+    }
     adopt_resumed_run(now);
     if (f.phase != Phase::Working) return;
     f.tick(now);
@@ -1000,10 +1035,16 @@ inline std::string unavailable_reason(const Host& h, const mods::catalogue::Entr
     return compatible ? "" : "Not available for this version of the game.";
 }
 // Built-in: the mods compiled into the game, each with its switch.
+// the camera mods are switched on Settings > Controls, not in the Built-in list
+inline bool on_controls_tab(std::string_view id) {
+    return id == "mouse-camera" || id == "direct-camera" || id == "first-person";
+}
+
 inline void builtin_list(Host& h) {
     muted(tr(kAreaCaptions[kBuiltin]));
     if (!begin_list("builtin")) return;
     for (const auto& e : mods::manager::entries()) {
+        if (on_controls_tab(e.id)) continue;
         // the story system needs the Story Notebook package, which only the mod list provides
         if (e.id == "story-system" && !h.mod_downloads && !find_view(mods::packages::list(), mods::required::kStoryNotebook))
             continue;
@@ -1410,7 +1451,11 @@ inline void install_picked(Host& h) {
     if (test_local) { picked = test_local; test_local = nullptr; }
     if (!picked.empty()) {
         std::string id, error;
-        if (install(picked, error, &id)) {
+        mods::picked::Local local;  // Android: a copy of the picked document, removed once it is installed
+        if (!mods::picked::resolve(picked, h.copy_document, local, error)) { s.error = error; return; }
+        const bool installed = install(local.path, error, &id);
+        mods::picked::release(local);
+        if (installed) {
             s.error.clear();
             for (const auto& v : list()) if (v.id == id) {
                 s.message = v.name + " was installed.";
@@ -1461,9 +1506,11 @@ inline void more(Host& h) {
         ImGui::EndDisabled();
         ImGui::Unindent();
     }
-    if (h.file_picker && section("Install from a file or folder")) {
+    if (h.file_picker && section(h.android ? "Install from a file" : "Install from a file or folder")) {
         ImGui::Indent();
-        muted("A mod package (.wwhdmod or ZIP), a mod folder, or a replacement .pack file.");
+        // Android's chooser has no folders (SDL answers a folder request with nothing)
+        if (h.android) muted("A mod package (.wwhdmod or ZIP) or a replacement .pack file.");
+        else muted("A mod package (.wwhdmod or ZIP), a mod folder, or a replacement .pack file.");
         auto pick = [&h](bool folder) {
             if (!h.choose_mod_source) return;
             h.choose_mod_source(folder, [](std::string path) {
@@ -1472,8 +1519,10 @@ inline void more(Host& h) {
             });
         };
         if (button("Choose file…##package")) pick(false);
-        same_line_if_fits("Choose folder…");
-        if (button("Choose folder…##package")) pick(true);
+        if (!h.android) {
+            same_line_if_fits("Choose folder…");
+            if (button("Choose folder…##package")) pick(true);
+        }
         ImGui::Unindent();
     }
     if (h.file_picker && section("GameCube game for mods")) {  // (chosen with a file picker)

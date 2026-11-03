@@ -311,7 +311,8 @@ class ForkPasses:
     def fork_translated(self, body):
         """emit_function, the function translated: the dead tail, then condition-register liveness."""
         body = self.trim_dead_tail(body)
-        if not CRLIVE or self.fork_mod_check(self.cur_start) or not hasattr(self, "saved_clobbers"):
+        if (not CRLIVE or self.fork_mod_check(self.cur_start) or not hasattr(self, "saved_clobbers")
+                or getattr(self, "preserve_registers", False)):  # (upstream: the randomizer's patched code keeps every write)
             return body  # (guest mod hooks: a mod may hook or replace any function; no fork_prepare: tests)
         live_after, fields = crlive.analyze(body, self.cur_start, self.cur_end, self.p.jump_tables, branch_target,
                                             self.sites)
@@ -497,8 +498,9 @@ class ForkPasses:
         tail_wb = ""
         stmts = [s for _, _, s in body]
         sites_done = False
-        if self.fork_mod_check(start) or not hasattr(self, "saved_clobbers"):  # (as upstream: a mod may hook or
-            return body, "", False  # replace any function; no fork_prepare: tests)
+        if (self.fork_mod_check(start) or not hasattr(self, "saved_clobbers")  # (as upstream: a mod may hook or
+                or getattr(self, "preserve_registers", False)):  # replace any function; no fork_prepare: tests;
+            return body, "", False  # the randomizer's patched code keeps every write)
         plain = HOOKED_LOCALS or not hooked  # (hooked: the f_X_orig body)
         if LEAF and plain and not any(a in self.sites for a, _, _ in body) and leaflocal.eligible(stmts):
             prologue, stmts, tail_wb = leaflocal.transform(stmts)

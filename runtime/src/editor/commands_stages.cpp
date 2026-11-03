@@ -205,7 +205,7 @@ Value Session::dispatch_stages(const std::string& command, const Value& p, std::
                 e["size"] = point_value(200, 200, 200);
                 e["to"]["room"] = p.get("to_room").type == Value::Number ? p.get("to_room").number : 0.0;
                 e["to"]["point"] = p.get("to_point").type == Value::Number ? p.get("to_point").number : 0.0;
-                if (p.get("style").type == Value::String) e["style"] = p.get("style").text;  // walk or updraft
+                if (p.get("style").type == Value::String) e["style"] = p.get("style").text;  // walk, updraft or hole
                 if (p.get("height").type == Value::Number) e["height"] = p.get("height").number;
                 if (p.get("size").type == Value::Object) e["size"] = p.get("size");
                 else if (e.get("style").string() == "updraft") e["size"] = point_value(400, 800, 400);  // a column of wind
@@ -224,8 +224,30 @@ Value Session::dispatch_stages(const std::string& command, const Value& p, std::
                 a["angle"] = std::round(std::fmod(yaw + 180, 360));
                 list(*rv, "actors").array.push_back(a);
                 r["added"] = a;
+            } else if (what == "lava" || what == "heat_shimmer") {
+                // the game's lava floor where Link stands (its surface at his feet: model the room's col_lava there),
+                // turned his way, `size` x and z (default 10 m square); the heat haze over it
+                Value a;
+                a["id"] = p.get("id").type == Value::String ? p.get("id").text : what == "lava" ? std::string("lava") : std::string("heat");
+                for (const auto& v : rv->get("actors").array)
+                    if (v.get("id").string() == a.get("id").string()) a["id"] = a.get("id").string() + "-" + std::to_string(rv->get("actors").array.size() + 1);
+                a["actor"] = what;
+                a["position"] = point_value(place.position.x, place.position.y, place.position.z);
+                if (what == "lava") {
+                    Value size;
+                    size["x"] = p.get("size").get("x").type == Value::Number ? p.get("size").get("x").number : 1000.0;
+                    size["z"] = p.get("size").get("z").type == Value::Number ? p.get("size").get("z").number : 1000.0;
+                    for (const char* k : {"x", "z"})
+                        if (!(size.get(k).number >= mod_stages::kLavaStep && size.get(k).number <= 255 * mod_stages::kLavaStep))
+                            return w = "lava's size is {\"x\", \"z\"}, 100 to 25500 game units each", false;
+                    a["size"] = size;
+                    a["angle"] = std::round(yaw);
+                    r["note"] = "the lava's picture: give the room's model a col_lava surface at this height (its floor around it a little higher) and Rebuild";
+                }
+                list(*rv, "actors").array.push_back(a);
+                r["added"] = a;
             } else
-                return w = "\"what\" is spawn, exit, door, warp, entry, chest, enemy, pot or big_pot", false;
+                return w = "\"what\" is spawn, exit, door, warp, entry, chest, enemy, pot, big_pot, lava or heat_shimmer", false;
             return true;
         });
         return r;

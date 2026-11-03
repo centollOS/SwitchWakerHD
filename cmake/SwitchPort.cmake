@@ -72,11 +72,15 @@ macro(switch_port_sources)
   if(WWHD_SWITCH)
     # desktop crash logs (module names through dladdr); the Switch has its own handler in main.cpp
     list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "runtime/src/crash_addr\\.cpp$")
+    # (upstream sync bfd7dd6) upstream's one screen mode (mods/one_screen.cpp, from this fork's #5) hooks the same game
+    # functions as the Switch's own single-screen mode (screen_mode.cpp, its settings and the Dev tab's controller
+    # choice): the Switch keeps its own until it moves to upstream's
+    list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "runtime/src/mods/one_screen\\.cpp$")
   endif()
   if(WWHD_HAS_DEKO3D)
     # deko3d renderer and the libnx host
     file(GLOB DEKO3D_SOURCES CONFIGURE_DEPENDS runtime/src/gfx/deko/*.cpp)
-    list(APPEND GFX_SOURCES ${DEKO3D_SOURCES} runtime/src/platform/input_switch.cpp runtime/src/platform/hostui_switch.cpp
+    list(APPEND GFX_SOURCES ${DEKO3D_SOURCES} runtime/src/platform/input_switch.cpp runtime/src/platform/hostui_switch.cpp runtime/src/platform/mic_switch.cpp runtime/src/platform/one_screen_switch.cpp
                             runtime/src/platform/settings_switch.cpp runtime/src/platform/settings_ini.cpp
                             runtime/src/platform/video_clips_switch.cpp
                             runtime/src/platform/debug_server.cpp

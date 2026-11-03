@@ -10,7 +10,7 @@ What it exports
                           an island part or an island ground), selected exactly as the game pieces converter does,
                           its origin where a placed piece's origin is.
   --collision             adds the collision as one more object, "<name>_col", one primitive per ground type with
-                          the world-object surface names (col_grass, col_sand, col_wood, col_water ...).
+                          the world-object surface names (col_grass, col_sand, col_wood, col_water, col_lava ...).
   --actors                adds an empty object per placed actor of the room (its name and parameters; no model).
 
 The GLB holds positions, normals, texture coordinates (TEXCOORD_0/1), vertex colours (COLOR_0) where the game has
@@ -430,7 +430,8 @@ def collision_parts(dzb, room_origin, center, keep=None, void=()):
         i0, i1 = infos[info][:2] if info < len(infos) else (0x3F << 13, 0)
         if keep and not keep(names[group], pts, (i0 >> 13) & 0x3F):
             continue
-        surface = gp.triangle_surface(pts, (i1 >> 16) & 0x1F, group_info[group] & gp.WATER_GROUP, names[group] in void)
+        surface = gp.triangle_surface(pts, (i1 >> 16) & 0x1F, group_info[group] & gp.WATER_GROUP, names[group] in void,
+                                      group_info[group] & gp.LAVA_GROUP)
         if surface is None:
             continue
         p = by_surface.setdefault(surface, Part('collision', surface))
@@ -619,7 +620,7 @@ def write_glb(name, parts, materials, textures, collision=None, actors=None, ext
 
 SURFACE_COLOURS = {'col_grass': (0.3, 0.7, 0.25), 'col_sand': (0.9, 0.8, 0.5), 'col_wood': (0.6, 0.4, 0.2), 'col_stone': (0.55, 0.55, 0.55),
                    'col_wall': (0.4, 0.4, 0.45), 'col_water': (0.2, 0.4, 0.9), 'col_shallow': (0.4, 0.7, 0.9), 'col_metal': (0.7, 0.7, 0.8),
-                   'col_ice': (0.8, 0.9, 1.0), 'col_void': (0.1, 0.1, 0.1), 'col_waterfall': (0.5, 0.7, 1.0)}
+                   'col_ice': (0.8, 0.9, 1.0), 'col_void': (0.1, 0.1, 0.1), 'col_waterfall': (0.5, 0.7, 1.0), 'col_lava': (0.95, 0.35, 0.05)}
 
 
 # ---- the two kinds of export ----------------------------------------------------------------------------------

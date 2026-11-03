@@ -32,6 +32,7 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include "../exception_report.h"
+#include "../tv_pointer.h"
 #include <atomic>
 #include <cmath>
 #include <map>
@@ -41,6 +42,7 @@
 #include <vector>
 
 #include "../aspect.h"
+#include "../mods/fast_forward.h"
 #include "display.h"
 #include "display_modes.h"
 #include "headless_compose.h"
@@ -59,6 +61,8 @@
 #include "../overlay/overlay.h"
 #include "../overlay/guest_hud.h"
 #include "../screenshot.h"
+#include "../dsweep.h"
+#include "hidden_presentation.h"
 
 // The game's own icon in the Dock: meta/iconTex.tga of the game folder (uncompressed 32-bit TGA,
 // 128x128 in Wind Waker HD), as the SDL host does for its windows. Nothing happens without it.
@@ -86,7 +90,7 @@ static void set_dock_icon() {
     NSApp.applicationIconImage = image;
 }
 
-namespace mods { bool mouse_captured(); }
+namespace mods { bool mouse_captured(); bool mouse_camera(); }
 
 namespace gfx {
 // the picture's size at the full internal resolution (dynamic resolution renders it smaller; the layout stays)
@@ -191,9 +195,11 @@ static void load_options() {
 - (void)mouseUp:(NSEvent*)e { [self touch:e down:false]; }
 @end
 
-// TV window: clicks on the GamePad overlay are touches
+// TV window: clicks on the GamePad overlay are touches; while a port page on the TV wants the pointer
+// (tv_pointer.h), clicks on the TV picture are that page's
 @interface WWTvView : NSView
 @property bool touching;
+@property bool pointing;
 @end
 @implementation WWTvView
 - (bool)map:(NSEvent*)e x:(float*)tx y:(float*)ty clamp:(bool)c {
@@ -206,21 +212,99 @@ static void load_options() {
     float x, y;
     return [self map:e x:&x y:&y clamp:false];
 }
+// the picture-in-picture GamePad: a right-button or Option drag moves it (from its bottom-right corner:
+// resizes it), the scroll wheel over it resizes it (display_modes.h)
+- (void)point:(NSEvent*)e x:(float*)nx y:(float*)ny {
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    NSSize sz = self.bounds.size;
+    *nx = sz.width > 0 ? p.x / sz.width : 0;
+    *ny = sz.height > 0 ? 1.0f - p.y / sz.height : 0;
+}
+- (bool)pipBegin:(NSEvent*)e {
+    float nx, ny;
+    [self point:e x:&nx y:&ny];
+    if (!gfx::pip_drag_begin(nx, ny)) return false;
+    [NSCursor.closedHandCursor push];
+    return true;
+}
+- (bool)pipMove:(NSEvent*)e {
+    if (!gfx::pip_dragging()) return false;
+    float nx, ny;
+    [self point:e x:&nx y:&ny];
+    gfx::pip_drag_move(nx, ny);
+    return true;
+}
+- (bool)pipEnd {
+    if (!gfx::pip_drag_end()) return false;
+    [NSCursor pop];
+    gfx::save_options();
+    return true;
+}
+- (void)rightMouseDown:(NSEvent*)e {
+    if (![self pipBegin:e]) [super rightMouseDown:e];
+}
+- (void)rightMouseDragged:(NSEvent*)e {
+    if (![self pipMove:e]) [super rightMouseDragged:e];
+}
+- (void)rightMouseUp:(NSEvent*)e {
+    if (![self pipEnd]) [super rightMouseUp:e];
+}
+- (void)scrollWheel:(NSEvent*)e {
+    float nx, ny;
+    [self point:e x:&nx y:&ny];
+    const float steps = e.hasPreciseScrollingDeltas ? e.scrollingDeltaY / 20.0f : e.scrollingDeltaY;
+    float px, py, aspect;
+    if (gfx::pip_wheel(nx, ny, steps)) gfx::save_options();
+    else if (gfx::wheel_on_mod_claim(nx, ny, &px, &py, &aspect)) tv_pointer::add_wheel(steps, px, py, aspect);
+    else [super scrollWheel:e];
+}
+- (bool)picture:(NSEvent*)e down:(bool)down clamp:(bool)c {
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    NSSize sz = self.bounds.size;
+    float x, y, aspect;
+    if (sz.width <= 0 || sz.height <= 0 || !gfx::game_picture_hit(p.x / sz.width, 1.0f - p.y / sz.height, &x, &y, &aspect, c)) return false;
+    tv_pointer::set(down, x, y, aspect);
+    return true;
+}
 - (void)mouseDown:(NSEvent*)e {
     float x, y;
+    if ((e.modifierFlags & NSEventModifierFlagOption) && [self pipBegin:e]) return;
+    // a left button bound to a game button wins over the pointer's other users (tv_pointer.h, issue #315; the
+    // mouse camera's event monitor, mods/mouse.mm, sees the click first and normally keeps it from here)
+    const bool bound = tv_pointer::left_button_bound();
+    const bool picture = tv_pointer::picture_takes_click(bound, mods::mouse_camera());
+    if (!tv_pointer::gamepad_takes_click(bound, mods::mouse_captured())) {
+        [super mouseDown:e];
+        return;
+    }
+    // One screen's Off-TV Play: the GamePad picture is the game's; a talk by mouse takes it first (touch_talk.h)
+    if (picture && gfx::g_one_screen_off_tv.load() && tv_pointer::wanted(tv_pointer::kOwnerTalk) && [self picture:e down:true clamp:false]) {
+        self.pointing = true;
+        return;
+    }
     if ([self map:e x:&x y:&y clamp:false]) {
         self.touching = true;
         input::set_touch(true, x, y);
+    } else if (picture && tv_pointer::wanted() && [self picture:e down:true clamp:false]) {
+        self.pointing = true;
     } else {
         [super mouseDown:e];
     }
 }
 - (void)mouseDragged:(NSEvent*)e {
     float x, y;
+    if ([self pipMove:e]) return;
+    if (self.pointing) { [self picture:e down:true clamp:true]; return; }
     if (self.touching && [self map:e x:&x y:&y clamp:true]) input::set_touch(true, x, y);
 }
 - (void)mouseUp:(NSEvent*)e {
     float x, y;
+    if ([self pipEnd]) return;
+    if (self.pointing) {
+        self.pointing = false;
+        if (![self picture:e down:false clamp:true]) tv_pointer::set(false, 0, 0, 16.0f / 9.0f);
+        return;
+    }
     if (!self.touching) return;
     self.touching = false;
     if (![self map:e x:&x y:&y clamp:true]) x = y = 0;
@@ -290,7 +374,7 @@ static void screen_changed(int i) {
         scr.visible = screen_visible(win);
     }
 #ifdef WWHD_HAS_VULKAN
-    else gfxvk::screen_changed(i, screen_visible(win));
+    else gfxvk::screen_changed(i, screen_visible(win) || (i == 0 && gfx::hidden::mode().test_present));
 #endif
 }
 
@@ -346,7 +430,7 @@ static void attach_metal_layers() {
         layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         layer.framebufferOnly = YES;
         layer.maximumDrawableCount = 3;
-        if (hidden_windows()) scr.visible = false;  // never on screen: no drawables
+        if (!gfx::hidden::mode().presents()) scr.visible = false;  // never on screen: no drawables
     }
 }
 
@@ -668,8 +752,10 @@ void display_attach_vulkan(void** tv, void** drc) {
 // after the Vulkan renderer started: windows that are never shown get no presentation
 void display_vulkan_started() {
 #ifdef WWHD_HAS_VULKAN
-    if (hidden_windows())
+    if (!gfx::hidden::mode().presents())
         for (int i = 0; i < 2; i++) gfxvk::screen_changed(i, false);
+    else if (hidden_windows())  // proof runs (WWHD_TEST_PRESENT_HIDDEN): the hidden TV window presents
+        gfxvk::screen_changed(0, true);
 #endif
 }
 void display_detach() {
@@ -685,6 +771,7 @@ void run_appkit_loop() {
     // orderly exit (Quit, Cmd+Q): the renderer writes its caches (Vulkan pipeline / SPIR-V caches)
     [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationWillTerminateNotification object:nil queue:nil
                                                   usingBlock:^(NSNotification*) {
+        input::shutdown_rumble();
         ss::save_last_session(1500);  // the "Last session" state (a few KB; skipped outside gameplay)
         render::shutdown();
         // leave without running static destructors: the GX2 render thread and the game threads may
@@ -704,6 +791,14 @@ void run_appkit_loop() {
                 [NSApp terminate:nil];
             }];
     }
+    // D-sweep (WWHD_DSWEEP_EXIT): quits (orderly, caches saved) once the sweep is done
+    if (getenv("WWHD_DSWEEP_EXIT"))
+        [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer* t) {
+            if (!dsweep::exit_requested()) return;
+            [t invalidate];
+            LOG("[display] D-sweep done: quitting");
+            [NSApp terminate:nil];
+        }];
     // test runs: WWHD_TEST_RENDERER_SWITCH=frame:metal|vulkan does what Graphics > Renderer > Restart Now does
     if (const char* e = getenv("WWHD_TEST_RENDERER_SWITCH")) {
         uint64_t at = strtoull(e, nullptr, 10);
@@ -843,8 +938,9 @@ static void present_to_layer(Screen& scr, void (^draw)(id<MTLTexture>)) {
     if (!scr.layer || !scr.tex) return;
     MTLPixelFormat want = scr.srgb ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
     if (scr.layer.pixelFormat != want) scr.layer.pixelFormat = want;
-    // uncapped (gx2::uncapped, debug): presentation does not wait for the display
-    const bool sync = !gx2::uncapped();
+    // Fast Forward retains the accelerated guest-vsync schedule, but must not also
+    // wait for the physical display (90/120 logic frames/s on a 60 Hz display).
+    const bool sync = !gx2::uncapped() && !mods::fast_forward_active();
     if (scr.layer.displaySyncEnabled != sync) {
         scr.layer.displaySyncEnabled = sync;
         if (&scr == &R.tv) interp::set_present_vsync(sync);
@@ -921,7 +1017,9 @@ void present_screens() {
     L.scale = P.scale;
     float dw = P.dw, dh = P.dh;
     bool pip = P.pip_wanted, drc_only = P.drc_only;
-    if(overlay::guesthud::active())overlay::guesthud::set_tv_region(P.tv.x,P.tv.y,P.tv.w,P.tv.h,!P.drc_only);
+    Box game_box;
+    const bool game_shown = game_picture_box(P, &game_box);
+    overlay::guesthud::set_regions(P.tv.x,P.tv.y,P.tv.w,P.tv.h,!P.drc_only,game_box.x,game_box.y,game_box.w,game_box.h,game_shown);
     g_overlay_draw = overlay::frame(dw, dh, overlay_metal_init);  // settings overlay, drawn by compose_tv
     // Hidden test-only composition: one reused GPU target, no drawable/readback/disk.
     // Like Metal's other resources this target is process-lifetime; replace on device/format change.

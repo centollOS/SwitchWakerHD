@@ -46,8 +46,9 @@ typedef struct { u32 kind, target; void* func; u32 flags; } wwhd_hook_desc;
     WWHD__DESC(WWHD_KIND_REPLACE, addr, name); \
     __attribute__((noinline, used)) static ret name params
 
-/* Run before the function (gets its arguments; changes to argument registers are discarded, write
- * through pointers instead) or after it (gets the arguments again; the return value is kept). */
+/* Run before the function (gets its arguments) or after it (gets the original arguments again).
+ * Observer register changes are discarded, including scratch registers and condition bits;
+ * all of the game's return registers are kept. Write through pointers for memory effects. */
 #define WWHD_HOOK(addr, name, params) \
     static void name params;          \
     WWHD__DESC(WWHD_KIND_ENTRY, addr, name); \
@@ -76,12 +77,16 @@ void wwhd_log_hex(const char* label, u32 value);
 void wwhd_log_float(const char* label, double value);
 /* integer option `id` of this mod, or `fallback` */
 int wwhd_config_int(const char* id, int fallback);
-/* Other typed manager options (values are frozen until restart). Strings include enum options.
+/* Other typed manager options. Values are those of the start, except options the manifest marks "live": true,
+ * which follow changes made in Settings or the item menu's page while the game runs. Strings include enum options.
  * config_string copies at most capacity-1 bytes, terminates them and returns bytes copied;
  * a missing/wrong-type option returns zero without modifying the buffer. */
 int wwhd_config_bool(const char* id, int fallback);
 double wwhd_config_float(const char* id, double fallback);
 u32 wwhd_config_string(const char* id, char* buffer, u32 capacity);
+/* Live options: the option's revision, 1 at start and one more per change of a "live" option; 0 for an option
+ * the mod doesn't have. Compare with the last revision seen (each logic step is fine) and read the value again. */
+unsigned long long wwhd_config_changed(const char* id);
 /* Per-mod heap: 16-byte aligned, default 256 KiB (manifest guest.heap_size changes it).
  * malloc returns null on exhaustion; free accepts null. Heap/data are part of full states. */
 void* wwhd_malloc(u32 size);
@@ -94,6 +99,55 @@ typedef struct {
     f32 tx, ty;
 } wwhd_input_state;
 void wwhd_input_read(wwhd_input_state* state);
+/* Input filter: `filter` gets the controller state of each of the game's controller reads (full logic steps)
+ * after the port's own rules (touch controls, talks by touch) and before the game sees it, and may change its
+ * buttons and sticks (touch fields are read only). Mods' filters run in load order. One per mod; 0 removes it.
+ * The callback must be this mod's own function. Returns 1 when registered. */
+typedef void (*wwhd_input_filter_fn)(wwhd_input_state* state);
+int wwhd_input_filter_register(wwhd_input_filter_fn filter);
+/* Touches on the TV picture (the device's touch screen, or the mouse on the desktop): the mod claims rectangles
+ * in layout units (1280 x 720 around the picture's centre, +y up; a wider picture extends x) with
+ * wwhd_touch_claim; a finger landing in one goes to `callback` (down, moves, up or cancel) and to nothing else
+ * (no on-screen stick, no talk by touch) until it lifts. The newest claim wins where claims overlap. Events
+ * arrive on the next controller read, before the input filters. Up to 8 rectangles per mod (slots 0..7); a
+ * rectangle with x1 <= x0 or y1 <= y0 removes the slot's claim. Register first (0 removes the callback and the
+ * claims). Returns 1 when done. */
+#define WWHD_TOUCH_DOWN 0
+#define WWHD_TOUCH_MOVE 1
+#define WWHD_TOUCH_UP 2
+#define WWHD_TOUCH_CANCEL 3
+/* Pinches (newer hosts): a second finger next to the mod's finger (Android), or the mouse wheel over a claim (desktop).
+ * WWHD_TOUCH_PINCH: x = the spread now / at the pinch's start (> 1: fingers apart, wheel away from the player), y = 0;
+ * WWHD_TOUCH_PINCH_END: the pinch is over. A pinch goes to the mod that has the finger, else to the claim under it. */
+#define WWHD_TOUCH_PINCH 4
+#define WWHD_TOUCH_PINCH_END 5
+typedef struct {
+    u32 kind;  /* WWHD_TOUCH_* */
+    f32 x, y;  /* layout units (WWHD_TOUCH_PINCH: the spread, 0) */
+} wwhd_touch_event;
+typedef void (*wwhd_touch_fn)(const wwhd_touch_event* event);
+int wwhd_touch_register(wwhd_touch_fn callback);
+int wwhd_touch_claim(u32 slot, f32 x0, f32 y0, f32 x1, f32 y1);
+/* Where the drawn camera shows a point of the world (x, y, z of the current room): out[0], out[1] in the same layout
+ * units as touches, with the picture's shape and field of view as drawn. Returns 1, or 0 when the point is behind the
+ * camera or no camera is drawn (out unchanged). Read it on the logic step you use it (the camera moves). */
+int wwhd_screen_point(const f32* world, f32* out);
+/* The microphone (newer hosts), for singing and the like. Only a mod with a bool option marked "permission":
+ * "microphone" in its manifest may open it, and only while that option is on: the first open asks the system for
+ * permission (Android's runtime permission, macOS's prompt); declined, the port turns the option off again with a
+ * notice. Close it when the option goes off (the port closes it then anyway). The sound is analysed for its pitch
+ * and dropped: mods get only the pitch, never samples. wwhd_mic_pitch writes out[0] the pitch in Hz (0: none),
+ * out[1] the loudness (RMS, 0..1), out[2] the clarity (0..1) of the newest analysed window (~21 ms) and returns how
+ * many windows were analysed so far (a new value: a new window; 0 while not listening). */
+#define WWHD_MIC_CLOSED 0
+#define WWHD_MIC_ASKING 1      /* waiting for the player's answer or the device */
+#define WWHD_MIC_OPEN 2
+#define WWHD_MIC_DENIED 3      /* the player declined (the option is being turned off) */
+#define WWHD_MIC_UNAVAILABLE 4 /* no microphone, or this mod may not open it now */
+int wwhd_mic_open(void);
+int wwhd_mic_close(void);
+int wwhd_mic_state(void);
+unsigned long long wwhd_mic_pitch(f32* out);
 /* Flat filenames in this mod's Data/<id> folder; no paths or symlinks. At most 1 MiB per call.
  * read returns bytes read (zero at EOF), write replaces the file; -1 indicates failure. */
 s32 wwhd_file_read(const char* filename, void* buffer, u32 size);
@@ -218,7 +272,7 @@ enum { WWHD_HUD_RECT=0,WWHD_HUD_TEXT=1,WWHD_HUD_IMAGE=2,WWHD_HUD_RECT_OUTLINE=3,
 enum { WWHD_HUD_CENTER=0,WWHD_HUD_TOP_LEFT=1,WWHD_HUD_TOP=2,WWHD_HUD_TOP_RIGHT=3,
        WWHD_HUD_LEFT=4,WWHD_HUD_RIGHT=5,WWHD_HUD_BOTTOM_LEFT=6,WWHD_HUD_BOTTOM=7,WWHD_HUD_BOTTOM_RIGHT=8 };
 enum { WWHD_HUD_ALPHA=0,WWHD_HUD_ADDITIVE=1 };
-enum { WWHD_HUD_PACKAGE=0,WWHD_HUD_DATA=1 };
+enum { WWHD_HUD_PACKAGE=0,WWHD_HUD_DATA=1,WWHD_HUD_GAME=2 };
 typedef struct {
     u32 kind,anchor,blend;
     f32 x,y,w,h,size,thickness,rotation;
@@ -239,6 +293,10 @@ u32 wwhd_hud_emit(u32 list,const wwhd_hud_element* element);
  * refuse the module at load, rather than silently drawing without clipping. */
 u32 wwhd_hud_clip(u32 list,const wwhd_hud_element* element);
 /* PNG path relative to this package's assets/ or textures/, or this mod's Data folder.
+ * WWHD_HUD_GAME: a texture of the game's own layout art, read from the player's installed 2D pack of
+ * the running language: "<Layout>/<texture>" (e.g. "Map_00/MapShip_00^t"), optionally "#<material>" to
+ * colour it with that material's black/white colours as the game does, and "@2".."@4" at the end to get it
+ * enlarged that many times (Lanczos-3, sharpened; for small art drawn large). Older hosts return zero.
  * Returns an owned handle, zero on failure. Reuse handles between logic steps. */
 u32 wwhd_hud_texture(u32 source,const char* path);
 u32 wwhd_hud_release(u32 image);
@@ -360,6 +418,28 @@ s32 wwhd_item_count(const char* item_id);
  * the last call (the count is read and cleared; at most 255). */
 s32 wwhd_item_used(const char* item_id);
 
+/* A pane of the game's own layout art (see WWHD_HUD_GAME): centre and size in the layout's root
+ * coordinates (+y up; parents' translation and scale applied, rotation not), its own Z rotation in
+ * degrees, alpha, and for a picture pane its first texture's name (without ".bflim").
+ * Returns 1 when found; 0 for a missing pane or an older host. Read it once, it doesn't change. */
+typedef struct {
+    u32 version, flags; /* flags: 1 visible (with its parents), 2 picture pane */
+    f32 x, y, w, h, rotation;
+    u32 alpha;
+    char texture[32];
+} wwhd_game_pane;
+#ifdef __cplusplus
+static_assert(sizeof(wwhd_game_pane) == 64, "wwhd_game_pane layout");
+#else
+_Static_assert(sizeof(wwhd_game_pane) == 64, "wwhd_game_pane layout");
+#endif
+/* Structured query type 6: key "layout-pane:<Layout>/<pane>" (at most 63 bytes). The key
+ * "layout-texture:<Layout>/<texture>" instead checks that a texture exists without loading it:
+ * flags 4, w/h its size. */
+static inline u32 wwhd_game_pane_get(const char* key, wwhd_game_pane* pane) {
+    return wwhd_setting_get(key, 6, pane, sizeof(*pane)) == sizeof(*pane);
+}
+
 /* Optional current-room map from a mod stage. Returns 1 with a 808-byte output,
  * 0 for no map or an older host. Call in a HUD callback. cached_revision is zero
  * after an epoch change or release. A changed revision creates an owned HUD image;
@@ -372,6 +452,41 @@ typedef struct {
     u32 marker_count, reserved;
     struct { f32 x, z; u32 kind; } markers[64]; /* 1 chest, 2 boss door */
 } wwhd_dungeon_room;
+/* Optional native map/HUD bridge v1. Default helpers return -1 on old hosts,
+ * including with older installers. Query the unsigned capability first. */
+#define WWHD_MAP_HUD_API_VERSION 1
+#define WWHD_MAP_HUD_UNSUPPORTED (-1)
+#define WWHD_MAP_HUD_INVALID (-2)
+#define WWHD_MAP_HUD_BUSY (-3)
+#define WWHD_MAP_HUD_PHASE (-4)
+typedef struct {u32 size,version;f32 x,y,w,h;} wwhd_boat_compasses_rect;
+/* Default helpers use the existing optional query transport, including with
+ * older installers. DIRECT_IMPORTS is for bindings using translator >=0.3. */
+#ifdef WWHD_MAP_HUD_DIRECT_IMPORTS
+s32 wwhd_hud_boat_compasses(u32 replace);
+s32 wwhd_hud_boat_compasses_rect(wwhd_boat_compasses_rect* out);
+s32 wwhd_map_chart_selected(void);
+s32 wwhd_map_chart_select(u32 native_chart_index);
+s32 wwhd_map_chart_cancel(void);
+
+#else
+static inline s32 wwhd_map_hud_request(u32 action,u32 argument,wwhd_boat_compasses_rect* rect) {
+    static struct {u32 size,version,action,argument;s32 result;f32 x,y,w,h;} request;
+    request.size=36;request.version=1;request.action=action;request.argument=argument;
+    if(wwhd_setting_get("native-map-hud.v1",7,&request,36)!=36)return WWHD_MAP_HUD_UNSUPPORTED;
+    if(rect&&request.result==1){rect->x=request.x;rect->y=request.y;rect->w=request.w;rect->h=request.h;}
+    return request.result;
+}
+static inline s32 wwhd_hud_boat_compasses(u32 replace){return wwhd_map_hud_request(1,replace,0);}
+static inline s32 wwhd_hud_boat_compasses_rect(wwhd_boat_compasses_rect* out){
+    if(!out||out->size!=24||out->version!=1)return WWHD_MAP_HUD_INVALID;
+    return wwhd_map_hud_request(2,0,out);
+}
+static inline s32 wwhd_map_chart_selected(void){return wwhd_map_hud_request(3,0,0);}
+static inline s32 wwhd_map_chart_select(u32 index){return wwhd_map_hud_request(4,index,0);}
+static inline s32 wwhd_map_chart_cancel(void){return wwhd_map_hud_request(5,0,0);}
+#endif
+
 #ifdef __cplusplus
 static_assert(sizeof(wwhd_dungeon_room) == 808, "wwhd_dungeon_room layout");
 #else

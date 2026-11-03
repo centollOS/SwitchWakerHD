@@ -405,8 +405,8 @@ std::vector<BuildResult> rebuild(const std::string& mod, const Value& manifest, 
     std::vector<std::string> python;
     std::string tool;
     try {
-        const auto bridge = guestmods::BuildBridge::installed(std::string());
-        python = bridge.python;
+        const auto bridge = guestmods::BuildBridge::installed(std::string(),false);
+        python = bridge.tool_python();
         tool = (std::filesystem::path(bridge.builder).parent_path().parent_path() / "story_mods" / "stage_builder.py").string();
     } catch (const std::exception& e) {
         return {BuildResult{only, "", std::string("the stage builder is unavailable: ") + e.what()}};
@@ -555,9 +555,9 @@ void logic(Cpu*) {
                 LOG("[mod-stages] updraft %s/%s: the wind lifts Link (%.0f units)", b.info.mod.c_str(), e.id.c_str(), e.height);
                 return;
             }
-            enter(b.info.name, e.to_room, e.to_point, 0);  // wipe: fade
-            LOG("[mod-stages] entry %s/%s: Link goes into %s (%s room %u point %u)", b.info.mod.c_str(), e.id.c_str(), b.info.id.c_str(),
-                b.info.name.c_str(), e.to_room, e.to_point);
+            enter(b.info.name, e.to_room, e.to_point, 0);  // wipe: fade (a hole's too: he falls on through the dark into the stage)
+            LOG("[mod-stages] %s %s/%s: Link %s %s (%s room %u point %u)", e.style == "hole" ? "hole" : "entry", b.info.mod.c_str(), e.id.c_str(),
+                e.style == "hole" ? "falls into" : "goes into", b.info.id.c_str(), b.info.name.c_str(), e.to_room, e.to_point);
             return;
         }
     // the return warps of the stage Link is in
@@ -598,8 +598,8 @@ Value templates(const std::string& game_dir, std::string& why) {
     if (cached.type == Value::Array) return cached;
     std::vector<std::string> command;
     try {
-        const auto bridge = guestmods::BuildBridge::installed(std::string());
-        command = bridge.python;
+        const auto bridge = guestmods::BuildBridge::installed(std::string(),false);
+        command = bridge.tool_python();
         command.push_back((std::filesystem::path(bridge.builder).parent_path().parent_path() / "story_mods" / "stage_builder.py").string());
     } catch (const std::exception& e) {
         return why = std::string("the stage builder is unavailable: ") + e.what(), Value();
@@ -623,8 +623,8 @@ Value kit_materials(const std::string& game_dir, const std::string& stage, unsig
         return why = "a kit room is a stage of the game and a room number", Value();
     std::vector<std::string> command;
     try {
-        const auto bridge = guestmods::BuildBridge::installed(std::string());
-        command = bridge.python;
+        const auto bridge = guestmods::BuildBridge::installed(std::string(),false);
+        command = bridge.tool_python();
         command.push_back((std::filesystem::path(bridge.builder).parent_path().parent_path() / "story_mods" / "stage_builder.py").string());
     } catch (const std::exception& e) {
         return why = std::string("the stage builder is unavailable: ") + e.what(), Value();
@@ -645,8 +645,8 @@ Value kit_materials(const std::string& game_dir, const std::string& stage, unsig
 Value export_glb(const std::string& game_dir, const std::string& out, const std::vector<std::string>& what, std::string& why) {
     std::vector<std::string> command;
     try {
-        const auto bridge = guestmods::BuildBridge::installed(std::string());
-        command = bridge.python;
+        const auto bridge = guestmods::BuildBridge::installed(std::string(),false);
+        command = bridge.tool_python();
         command.push_back((std::filesystem::path(bridge.builder).parent_path().parent_path() / "story_mods" / "export_glb.py").string());
     } catch (const std::exception& e) {
         return why = std::string("the exporter is unavailable: ") + e.what(), Value();

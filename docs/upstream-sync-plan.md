@@ -1,5 +1,50 @@
 # Upstream sync to devel (after v0.2.11): plan
 
+Status (2026-11-03): **third sync, to upstream `devel` bfd7dd6f (v0.5.0 + 248 commits)**, on
+feature/upstream-sync-bfd7dd6 (worktree `~/Documents/SwitchWakerHD-sync`; the same method: `git diff 909337f7 bfd7dd6f
+| git apply -3`, 751 upstream commits, 760 files); **the next sync starts from bfd7dd6f**. 26 files conflicted; the
+choices:
+- **Depth peeks** (`peekz.cpp`, `depth_peek.h`, `renderer.h`): upstream's new deterministic timing (answers written at
+  the game's swap after the next one, the game waiting for the renderer to answer every request) on the other
+  platforms; on the Switch the fork's #94 model stays (an answer written at the game's next peekData, only to an
+  address it asks for again; nothing counted, so the game never waits at its swap: deko3d answers at a later peek).
+- **HLE calls** (`runtime.h`): upstream took the fork's HleMark idea as `mainprof::Mark`; on the Switch the call stays
+  direct with the fork's HleMark (no exception boundary: ~0.25 ms a frame), elsewhere upstream's.
+- **Threads** (`threads.cpp`): the fork's `Cpu::preempt` and message queue stay; upstream's `mainprof` counters are
+  added to them (off on the Switch).
+- **Recompiler** (`recomp.py`, `ppc2c.py`, `fork_passes.py`): fork_passes stays; upstream's `rawstore` pass runs after
+  the fork's dead tails and CR liveness, `preserve_registers` (the randomizer's builds) turns the fork's passes off as
+  upstream's, and the float instructions get upstream's NaN wrappers (off by default: the decomp verification) around
+  the fork's `M()` (round25 left out for operands known to be single precision).
+- **Render profiler** (`render_prof.*`): upstream's setting (`detailedProfiling`, off by default, applied at a swap);
+  the fork keeps `enabled()` inline (asked at every command) and `set_enabled` for the Dev tab's switch.
+- **Settings menu** (`overlay.cpp`): upstream's `game_settings::set_*` save the options, through the fork's
+  `option_slider` (#101: apply while held, save when let go); the new texts (Link's name, story items, menu sounds,
+  the code-mod rebuild question) go through `menu_i18n::tr` with rows in all six languages; five replaced rows removed.
+- `main.cpp`: upstream's `enter_data_folder` (desktop and Android) is not called on the Switch (`main_switch::start`).
+- Kept as they were: README (upstream's README refreshed in `docs/upstream-README.md`), the Android toolchain workflow
+  (by hand only); merged: test source lists, the CI workflows (`unittest discover` replaces the explicit recompiler
+  test), savestate (upstream's particle section, the fork's arrivals counter), cheats (upstream's story items next to
+  the fork's warps and tour), fs (upstream's save-folder temporary next to the fork's `HostFsCall`).
+
+Found while building for the Switch:
+- **One screen**: upstream's one screen mode (`mods/one_screen.cpp`, a reimplementation of this fork's #5) hooks the
+  same game functions as the Switch's single-screen mode (`screen_mode.cpp`, the Dev tab's controller choice). The
+  Switch keeps its own: `one_screen.cpp` is left out of its build and `platform/one_screen_switch.cpp` answers "off"
+  to upstream's callers. Moving the Switch to upstream's is a later step.
+- **Watchdog**: upstream took this fork's hang watchdog (`gx2_core.cpp`, credited); the fork's copy is removed, and
+  on the Switch upstream's starts with `host::start_thread` (a 256 KiB stack: Horizon's default is small).
+  `threads::dump_state` and `HostThread::is_main`, defined on both sides, are kept once.
+- **Host functions** upstream added for its desktop hosts (`input::controllers/window_focused/background_controllers`,
+  `hostui::choose_save_folder`, the microphone backend): Switch versions in its own files (no controller list, always
+  in front, no folder chooser: Saves > Save folder is left out there, no microphone).
+- `main_profile.h`: its layout check moved to the fork's `Cpu` (`main_thread` at 173, after `preempt`); no thread CPU
+  clock on the Switch (0). `host.h lower_thread_priority`: nothing on the Switch. `editor_shell.cpp`: a
+  `std::string(first, last)` with a `char*` last that GCC rejects (a fix to offer upstream).
+- Tests: `tools/recomp` passes (94, 2 skipped: `test_preserve_registers`' default cases need fork_prepare's
+  whole-program data the test's hand-made Recompiler lacks; the randomizer profile's hook digest is upstream's hook
+  list, so randomized RPX files are not taken by the fork until it ships its own profile).
+
 Status (2026-10-22): **second sync, to upstream `devel` 909337f7 (v0.4.0 + 2 commits)**, on
 feature/upstream-sync-v040 (62396830, the same method: `git diff 4dc4832 909337f7 | git apply -3`, 709 upstream
 commits); **the next sync starts from 909337f7**. main's PR #57 (CPU profiler, recompiler passes) and #60 (shader

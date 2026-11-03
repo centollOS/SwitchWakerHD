@@ -52,6 +52,7 @@ functions.
 | `gc2hd.py SAVE.gci -o OUTDIR` | GameCube memory-card save (`.gci`, USA GZLE01, Japan GZLJ01 or Europe GZLP01) → `OUTDIR/cking.sav` for HD. `--batch SRC_DIR -o ROOT` converts every `.gci` below `SRC_DIR` into `ROOT/<path>/user/cking.sav`. Options: `--drop-tingle-tuner`, `--name NAME`. |
 | `hd_save_info.py PATH` | progress of each file: hearts, rupees, magic, items, sword/shield, arrows/bombs, songs, Triforce shards, pearls, sail (Sail / Swift Sail), islands visited and charted, charts owned, dungeon items and bosses, return stage, time of day, deaths, New Game+ count, save counter. `PATH` = `cking.sav`, a `save/` or `save/user/` folder, or a `.gci`. `--short` (one line per file), `--json`, `--file N`. |
 | `hd2gc.py cking.sav -o OUT.gci` | the reverse direction (shared fields only), mainly for the round-trip check. `--set-gc-name` writes the HD name into the GameCube name field, `--template X.gci` copies the banner/icon block. `--code GZLP01` writes PAL; `--pal-language english\|german\|french\|spanish\|italian` chooses its card-wide language (default: recover HD per-slot language; mixed used Quest Logs require an override). |
+| `picto_quest_test.py` | Lenzo's Picto Box test across the conversion (#306): synthetic GameCube saves, one per quest stage. |
 | `roundtrip_test.py cking.sav ...` | HD → GameCube layout → HD; every shared field must come back bit-identical (GameCube and HD checksums are verified on the way). |
 | `wwstate.py info STATE.wwstate` / `wwstate.py to-sav STATE.wwstate -o OUTDIR [--into cking.sav] [--file N]` | a portable save state (`slotN.wwstate`, [docs/portable-save-states.md](../../docs/portable-save-states.md), e.g. from a bug report): check it and show its place and progress, or write its save data as Quest Log N of a `cking.sav`. |
 | `wwsave.py repair-medli cking.sav -o OUTDIR [--file N]` | repair an early save whose premature Master Sword ownership hides Medli (#85). Writes a repaired `OUTDIR/cking.sav` and an exact `OUTDIR/cking.sav.before-medli.bak`; never changes the input or overwrites existing output files. Quest Log N defaults to 1. |
@@ -85,6 +86,27 @@ An old portable state still contains the old flags: do not load it over the repa
 a fresh portable state after loading the repair. If your only current progress is in a portable
 state, first use `wwstate.py to-sav STATE.wwstate -o state-copy --into /path/to/cking.sav`, then repair
 `state-copy/cking.sav` as above, choosing the state's Quest Log. Neither step changes its input.
+
+## Lenzo's Picto Box test (#306)
+
+Both games count the test in event register 0xC407 (event byte 0xC4, bits 0–2): 0 no order,
+1/3/5 order 1/2/3 given, 2/4 picto 1/2 accepted, 6 picto 3 accepted (7: a day later, set by the
+day change; New Game+ sets 7 and gives the Deluxe Picto Box in both games). Flags 0x1208 (first
+talk), 0x1701 (talked with a Picto Box) and 0x1601 (test started) mean the same in both.
+
+| | third picto accepted (register 5 → 6) | Forest Firefly shown afterwards |
+|---|---|---|
+| GameCube (tww `d_a_npc_photo.cpp`) | Joy Pendant | Deluxe Picto Box (register ≥ 6, no Deluxe yet; the bottle is emptied) |
+| HD (WWHD 022CFA00 `executeTalk`, 022CC690 `XyEventCB`) | Deluxe Picto Box | never the Deluxe Picto Box (the firefly event is gone; with register ≥ 6 Lenzo has no Deluxe Picto Box to give) |
+
+So only "register ≥ 6 with the black-and-white Picto Box (0x23) in slot 8 and no Deluxe get-bit"
+is a GameCube-only state. `gc2hd.py` turns it into HD's state after the test, what
+`item_func_camera2` (WWHD 0254E3F0) writes: slot 8 = Deluxe Picto Box (0x26) and get-item slot 8
+bit 1; the register stays. Files converted before this rule are repaired the same way by the game
+when it reads `cking.sav` (`runtime/src/hle/picto_quest.h`, log line `[save] Quest Log N (converted
+GameCube save): ...`); the next save keeps it. HD's own files never hold that state, and `hd2gc.py`
+needs no rule (HD's finished state is valid on the GameCube too). `picto_quest_test.py` covers
+every stage with synthetic saves.
 
 ## File formats
 
@@ -130,6 +152,7 @@ field by field through them. Group by group:
 | config (furigana, sound, Z-targeting, vibration) | copied (HD sets the sound mode itself on load) |
 | dungeon memory (16 stages: chests, switches, items, rooms, keys, map/compass/boss key/boss), ocean, event flags, reserve | copied |
 | Tingle Tuner (item 0x21 in slot 7) | HD uses the same item number and slot for the **Tingle Bottle**, given by the same Tingle Island event, so the item is kept and becomes the Tingle Bottle. `--drop-tingle-tuner` clears the slot, its get-item flag and any item button on it instead |
+| Lenzo's Picto Box test (#306) | GameCube gives the Deluxe Picto Box only after the test **and** a Forest Firefly; HD gives it for the third picto and has no firefly step. A file saved in between (test passed, black-and-white Picto Box) gets the Deluxe Picto Box, as HD would have given it; every other stage is copied. See below |
 | GameCube pictures | dropped (different format; HD has its own album) |
 | HD-only per-file data (player, status, event, map) | the values of a fresh HD file (HD's init 0271FF4C) |
 | HD player name (UTF-16) | the GameCube name; Japanese names are folded to ASCII when possible (full-width letters), otherwise "Link" (the USA HD font is Latin only) |

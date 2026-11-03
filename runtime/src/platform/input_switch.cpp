@@ -390,4 +390,10 @@ PadState read() {
     mods::filter_pad(s);
     return s;
 }
+
+// (upstream sync bfd7dd6) the host focus and controller list of the desktop hosts: the game is always in front on
+// the console (HOME suspends it), and upstream's Controls tab (its controller list) is not shown here
+bool window_focused() { return true; }
+bool background_controllers() { return false; }
+std::vector<ControllerInfo> controllers() { return {}; }
 }  // namespace input

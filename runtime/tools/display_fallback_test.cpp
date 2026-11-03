@@ -1,10 +1,14 @@
 #include "gfx/display_modes.h"
 #include <cassert>
+#include <cmath>
 
 // Host effects are irrelevant to the actual shared layout/state exercised here.
 void log_msg(const char*, ...) {}
 namespace input { void set_touch(bool, float, float) {} }
 namespace aspect { void set_window_aspect(float) {} }
+// the mouse wheel over a mod's touch claim (QoL M2 pinches): no mods and no TV pointer owners in this test
+namespace tv_pointer { bool wanted(unsigned) { return false; } }
+namespace mods { bool guest_touch_claimed_at(float, float) { return false; } }
 
 static gfx::PresentPlan frame(unsigned i) {
     return gfx::display_plan(true, 1280, 720, true, 854, 480, 1920, 1080, i);
@@ -31,6 +35,34 @@ int main() {
     gfx::display_set_mode(gfx::kDrcOff);
     assert(!gfx::drc_screen_off());
     assert(!gfx::drc_mode_offered(gfx::kDrcWindow));
+    // Android file-select/name entry must be touchable with the default TV-only setting.
+    // Exercise the actual presentation plan and its published touchscreen mapping.
+    assert(!frame(0).pip_on);
+    gfx::g_startup_gamepad = true;
+    const auto startup = frame(1);
+    assert(startup.drc_only && startup.pip_on);
+    assert(gfx::g_mode == gfx::kDrcOff && gfx::display_saved_mode() == gfx::kDrcOff);
+    float tx = -1, ty = -1;
+    const float nx = (startup.pip.x + startup.pip.w * .25f) / startup.dw;
+    const float ny = (startup.pip.y + startup.pip.h * .75f) / startup.dh;
+    assert(gfx::overlay_hit(nx, ny, &tx, &ty));
+    assert(std::fabs(tx-.25f) < .001f && std::fabs(ty-.75f) < .001f);
+    // Gameplay restores the chosen TV-only layout without writing or changing that choice.
+    gfx::g_startup_gamepad = false;
+    assert(!frame(2).pip_on && gfx::g_mode == gfx::kDrcOff);
+    assert(!gfx::overlay_hit(nx, ny, &tx, &ty));
+    // The temporary primary-screen override never replaces a connected secondary display.
+    gfx::g_has_drc_window = true;
+    gfx::g_startup_gamepad = true;
+    assert(!frame(3).drc_only);
+    gfx::g_has_drc_window = false;
+    gfx::g_second_display_available = true;
+    gfx::g_second_screen_off = true;
+    assert(frame(4).drc_only); // a released second display leaves the primary touchscreen usable
+    gfx::g_startup_gamepad = false;
+    assert(!frame(5).drc_only);
+    gfx::g_second_screen_off = false;
+    gfx::g_second_display_available = false;
     // A released surface must not remove the Settings choice or prevent reacquisition.
     gfx::g_second_display_available = true;
     gfx::g_has_drc_window = false;

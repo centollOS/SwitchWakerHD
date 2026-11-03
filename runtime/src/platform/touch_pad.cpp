@@ -7,6 +7,8 @@
 #include <mutex>
 #include "../runtime.h"
 #include "touch_face.h"
+#include "touch_options.h"
+#include "../mods/mods.h"
 #include "phone_rumble.h"
 #include "../gfx/display_modes.h"
 #include "../overlay/hostui.h"
@@ -69,6 +71,10 @@ extern "C" JNIEXPORT void JNICALL Java_org_wwhdrecomp_wwhd_TouchControls_nativeD
 #endif
 
 #ifdef __ANDROID__
+// Match the SDL routing: the view button belongs to the host only on a single display.
+extern "C" JNIEXPORT jboolean JNICALL Java_org_wwhdrecomp_wwhd_TouchControls_nativeViewButtonHit(JNIEnv*, jclass, jfloat x, jfloat y) {
+    return !gfx::g_has_drc_window && gfx::view_button_hit(x, y);
+}
 extern "C" JNIEXPORT jint JNICALL Java_org_wwhdrecomp_wwhd_TouchControls_nativeTouchState(JNIEnv*, jclass) {
     return (gfx::touch_buttons_visible() ? 1 : 0) | (gfx::g_touch_controls ? 2 : 0) | (overlay::captures() ? 4 : 0);
 }
@@ -90,5 +96,26 @@ extern "C" JNIEXPORT void JNICALL Java_org_wwhdrecomp_wwhd_TouchControls_nativeS
 #ifdef __ANDROID__
 extern "C" JNIEXPORT void JNICALL Java_org_wwhdrecomp_wwhd_TouchControls_nativeControllerConnected(JNIEnv*, jclass, jboolean connected) {
     gfx::g_touch_controller = connected;
+}
+#endif
+
+#ifdef __ANDROID__
+// TouchControls.nativeTouchOptions(int[] out): the touch options as touch_style.h pack() lays them out;
+// returns the layout's version
+extern "C" JNIEXPORT jint JNICALL Java_org_wwhdrecomp_wwhd_TouchControls_nativeTouchOptions(JNIEnv* env, jclass, jintArray out) {
+    int32_t v[touch_style::kPackLen];
+    touch_style::pack(touch_options::get(), v, touch_style::kPackLen);
+    if (out) {
+        const jsize n = env->GetArrayLength(out);
+        env->SetIntArrayRegion(out, 0, n < touch_style::kPackLen ? n : touch_style::kPackLen, reinterpret_cast<const jint*>(v));
+    }
+    return touch_style::kPackVersion;
+}
+// TouchControls.nativeFreeTouch (a finger on no control: touch_style::Free) is in gfx/vulkan/backend.cpp,
+// next to the finger routing whose GamePad-touch areas it must agree with.
+// the swipe camera: the finger moved by (dx, dy) pixels on a display of dpi
+extern "C" JNIEXPORT void JNICALL Java_org_wwhdrecomp_wwhd_TouchControls_nativeSwipe(JNIEnv*, jclass, jfloat dx, jfloat dy, jfloat dpi) {
+    phone_rumble::last_input_touch = true;
+    mods::swipe_add(dx, dy, dpi);
 }
 #endif

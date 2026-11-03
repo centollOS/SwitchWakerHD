@@ -20,6 +20,7 @@
 #pragma once
 #include "mod_json.h"
 
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -126,6 +127,27 @@ inline uint32_t link_mode(const std::string& name) {
     return 0;
 }
 inline constexpr const char* kLinkClipArchives[] = {"LkD00", "LkD01"};  // Link's demo animations (one is loaded at a time)
+// A point of the demo's own coordinates in the world: turned by the demo's angle (degrees, the game's
+// OffsetAngY) around the origin (OffsetPos), as the game places the tracks.
+inline Vec to_world(const Vec& origin, float angle, const Vec& v) {
+    const float a = angle * 3.14159265f / 180.f, cs = std::cos(a), sn = std::sin(a);
+    return {origin.x + v.x * cs + v.z * sn, origin.y + v.y, origin.z - v.x * sn + v.z * cs};
+}
+// Where Link stands when a demo with his position track starts: its first key, in the world, and his
+// heading (degrees) from the first rotation key (origin and angle as the demo started; none: the
+// world). The game moves Link onto his track only in a few of his demo modes (its own cutscenes start
+// with a placing mode); in wait, walk and the other modes he stays where he stood, or walks there from
+// wherever that is, so the port places him first.
+struct LinkStart { Vec position; std::optional<float> heading; };
+inline std::optional<LinkStart> link_start(const Demo& d, const Vec& origin, float angle) {
+    for (const auto& a : d.actors) {
+        if (a.kind != Actor::Kind::Link || a.position.keys.empty()) continue;
+        LinkStart s{to_world(origin, angle, a.position.keys.front().value), std::nullopt};
+        if (!a.rotation.keys.empty()) s.heading = std::remainder(a.rotation.keys.front().value.y + angle, 360.f);
+        return s;
+    }
+    return std::nullopt;
+}
 struct Cast { std::string name; bool spawn = true; uint32_t params = 0; bool placed = false; Vec position; bool own = false; };  // a game actor the demo names
 struct CharacterRef { std::string name, character; std::vector<NamedClip> clips; };                       // "MA00".. -> a mod-placed actor
 struct Compiled {

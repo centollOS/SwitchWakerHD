@@ -272,7 +272,9 @@ struct Theater {
  }
  void button(int selected,const XrPosef& head) {
   switch(selected) {
-   case 0:{const int mode=stereo::requestedMode.load()==stereo::Off?stereo::HalfSBS:stereo::Off;
+   // 3D in the theater is Full SBS: each eye gets the full width, which looks much cleaner on the
+   // big virtual screen than Half SBS at about the same cost (Quest 3 measurements in #248)
+   case 0:{const int mode=stereo::requestedMode.load()==stereo::Off?stereo::FullSBS:stereo::Off;
     hostui::post([mode]{stereo::set_mode(mode);});break;}
    case 1:if(cylinderSupported)curved=!curved;break;
    case 2:if(passthrough.available())passthrough.requested=!passthrough.requested;break;

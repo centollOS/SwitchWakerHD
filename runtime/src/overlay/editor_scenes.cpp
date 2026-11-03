@@ -412,6 +412,7 @@ void timeline_view(const Value& m, const Value& sc, const Value& timeline) {
     else ImGui::TextColored(kMuted, "click the ruler to put the cursor");
     if (demo) {
         if (lanes.get("problem").type == Value::String) ImGui::TextColored(kBad, "The game would refuse this demo: %s", lanes.get("problem").text.c_str());
+        for (const auto& w : lanes.get("warnings").array) ImGui::TextColored(kHead, "Not in the picture: %s", w.string().c_str());
     }
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float avail = std::max(200.0f, ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ScrollbarSize);
@@ -1197,6 +1198,9 @@ void demo_inspector(int n, const Value& m, const Value& st) {
                 }
             }
             p["value"] = v;
+            // an actor's first position key: at Link (in the demo's own coordinates), not at the world's
+            // (0,0,0), far out at sea (the command falls back to the value when the game isn't running)
+            if (!tr && C.d_new_lane.size() > 9 && C.d_new_lane.compare(C.d_new_lane.size() - 9, 9, ".position") == 0) p["from"] = std::string("link");
         }
         command("set_demo_key", p, [lane = C.d_new_lane, at](const Value& r) {
             if (r.get("ok").boolean) demo_select_key(lane, int(at));

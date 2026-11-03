@@ -41,6 +41,15 @@
 #include "guest_files.h"
 #include "guest_settings.h"
 #include "guest_hud.h"
+#include "guest_live.h"
+#include "map_hud.h"
+#include "../aspect.h"
+#include "../interp.h"
+#include "../mic.h"
+#include "../fixed_seed.h"
+#include "../gfx/renderer.h"
+#include "../overlay/hostui.h"
+#include "game_layouts.h"
 #include <fstream>
 #include <filesystem>
 #include "guest_audio.h"
@@ -60,6 +69,7 @@
 #include "story_resident_routes.h"
 #include "story_resident_walk_files.h"
 #include "story_game_pieces.h"
+#include "story_kit_models.h"
 #include "mod_stages.h"
 #include "mod_actor.h"
 #include "mod_actor_behavior_core.h"
@@ -68,6 +78,7 @@
 #include "story_notebook.h"
 #include "story_items.h"
 #include "story_item_models.h"
+#include "story_item_get_icon.h"
 #include "story_actor_textures.h"
 #include "story_prop_textures.h"
 #include "story_props.h"
@@ -169,7 +180,9 @@ struct Loaded {
     bool hud_called=false;
     const WWHDGuestModuleV1* m=nullptr;
     uint32_t region_size=0;
-    mods::json::Value options;
+    mods::json::Value options;  // the start values; live options change here while the game runs (g_options_mutex)
+    std::vector<std::pair<std::string,std::string>> mic_options;  // its options with "permission": "microphone"
+    uint32_t input_filter=0, touch_callback=0, scratch=0;  // live features (guest_live.h): callbacks, a 32-byte exchange area
     std::unique_ptr<Heap> heap;
     std::unique_ptr<Files> files;
 };
@@ -180,6 +193,8 @@ bool g_world_scenes=false;
 bool g_native_scenes=false;  // native scene playback can run (set once in init): the game-thread binding
 bool g_particle_import=false;  // a loaded code mod imports wwhd_actor_particle or wwhd_particle_at
 std::mutex g_hud_mutex;
+thread_local bool g_map_hud_draw=false;
+uint32_t map_hud_owner(const Loaded& mod){return uint32_t(&mod-g_loaded.data())+1;}
 Loaded& owner(Cpu* c) {
     for(auto& mod:g_loaded)
         if(c->pc>=mod.m->mem_base&&c->pc-mod.m->mem_base<mod.m->mem_size)return mod;
@@ -480,7 +495,7 @@ void load_world(const std::string& mod,const mods::json::Value& manifest,const s
     // served to the game; a stage the player's files can't make is left out with a line in the log
     if(manifest.get("stages").type!=mods::json::Value::Null){
         std::vector<std::string> python;std::string tool;
-        try{const auto bridge=BuildBridge::installed(std::string());python=bridge.python;tool=(std::filesystem::path(bridge.builder).parent_path().parent_path()/"story_mods"/"stage_builder.py").string();}
+        try{const auto bridge=BuildBridge::installed(std::string(),false);python=bridge.tool_python();tool=(std::filesystem::path(bridge.builder).parent_path().parent_path()/"story_mods"/"stage_builder.py").string();}
         catch(const std::exception& e){LOG("[mod-stages] %s: the stage builder is unavailable: %s",mod.c_str(),e.what());}
         mod_stages::declare(mod,manifest,package_dir,data_dir,python,tool,config::game_dir);
     }
@@ -520,9 +535,9 @@ void load_world(const std::string& mod,const mods::json::Value& manifest,const s
     for(const auto& id:story_game_pieces::used(actors)) {
         std::string failure;
         try {
-            const auto bridge=BuildBridge::installed(std::string());
+            const auto bridge=BuildBridge::installed(std::string(),false);
             const auto tool=std::filesystem::path(bridge.builder).parent_path().parent_path()/"story_mods"/"game_piece_model.py";
-            const auto set=story_game_pieces::build(id,story_game_pieces::cache_directory(data_dir),bridge.python,tool.string(),config::game_dir);
+            const auto set=story_game_pieces::build(id,story_game_pieces::cache_directory(data_dir),bridge.tool_python(),tool.string(),config::game_dir);
             if(!story_game_pieces::register_for_mod(mod,*set,id,false,why))failure=why;
         } catch(const std::exception& e) {failure=e.what();}
         if(failure.empty())continue;
@@ -539,19 +554,39 @@ void load_world(const std::string& mod,const mods::json::Value& manifest,const s
         const bool collision_uses=std::any_of(actors.begin(),actors.end(),[&](const auto& actor){return actor.collision_mesh==model.id;});
         const bool visual_uses=std::any_of(actors.begin(),actors.end(),[&](const auto& actor){return actor.distant.model==model.id||actor.shoreline.model==model.id;});
         const bool shoreline_uses=std::any_of(actors.begin(),actors.end(),[&](const auto& actor){return actor.shoreline.model==model.id;});
-        // the shoreline's material: coast foam ("") or a water, river or waterfall surface; one per model
+        // the shoreline's material: coast foam ("") or a water, river, waterfall or lava surface; one per model
         std::string shoreline_material;
         for(const auto& actor:actors)if(actor.shoreline.model==model.id){shoreline_material=actor.shoreline.material;break;}
         if(std::any_of(actors.begin(),actors.end(),[&](const auto& actor){return actor.shoreline.model==model.id&&actor.shoreline.material!=shoreline_material;}))exception_report::raise("A shoreline model is either coast foam or one kind of water surface");
         const bool distant_uses=std::any_of(actors.begin(),actors.end(),[&](const auto& actor){return actor.distant.model==model.id;});
         if(shoreline_uses&&(actor_uses||item_uses||collision_uses||distant_uses))exception_report::raise("A shoreline model must be dedicated to shoreline use");
         if(!actor_uses&&!item_uses&&!collision_uses&&!visual_uses)continue;
+        // a kit model (story_kit_models.h): built from the player's game files like a game piece, drawn with the
+        // background light of its room; only static world objects place it (the manifest's rules)
+        if(model.kind=="kit") {
+            if(item_uses||shoreline_uses)exception_report::raise("A kit model is placed as a world object or a distant model; it can't be held or a shoreline");
+            try {
+                const auto bridge=BuildBridge::installed(std::string());
+                const auto tool=std::filesystem::path(bridge.builder).parent_path().parent_path()/"story_mods"/"kit_model.py";
+                // only a distant model: its game textures at the size of the game's own distant views
+                const bool distant_only=distant_uses&&!actor_uses&&!collision_uses;
+                const auto set=story_kit_models::build(mod,model,package_dir,story_kit_models::cache_directory(data_dir),bridge.tool_python(),tool.string(),config::game_dir,distant_only);
+                if(distant_uses&&set->pieces[0].triangles>1024)throw std::runtime_error("a distant model may have 1 to 1024 triangles");
+                if(!story_kit_models::register_for_mod(mod,model.id,*set,false,why))throw std::runtime_error(why);
+            } catch(const std::exception& e) {
+                LOG("[world] %s: model %s is not ready and its actors are left out: %s",mod.c_str(),model.id.c_str(),e.what());
+                {std::lock_guard guard(g_world_model_notes_mutex);g_world_model_notes.push_back({mod,"Model "+model.id+" is not ready: "+e.what()});}
+                actor_model_cache::note_failure(mod,model.id,e.what());
+                failed_models.push_back(model.id);
+            }
+            continue;
+        }
         if(visual_uses&&model.kind!="static")exception_report::raise("Distant and shoreline models require static kind");
         if(item_uses&&model.kind!="static")exception_report::raise("Held item models currently require static kind; skinned needs a separate Morf lifetime");
         try {
-            const auto bridge=BuildBridge::installed(std::string());
+            const auto bridge=BuildBridge::installed(std::string(),false);
             const auto tool=std::filesystem::path(bridge.builder).parent_path().parent_path()/"story_mods"/(model.kind=="skinned"?"skinned_actor_model.py":"actor_model.py");
-            const auto archive=actor_model_cache::prepare(mod,model,package_dir,data_dir,bridge.python,tool.string(),config::game_dir,collision_uses,shoreline_uses,shoreline_material);
+            const auto archive=actor_model_cache::prepare(mod,model,package_dir,data_dir,bridge.tool_python(),tool.string(),config::game_dir,collision_uses,shoreline_uses,shoreline_material);
             if(visual_uses&&(actor_model_cache::triangles_for(archive)==0||actor_model_cache::triangles_for(archive)>1024))exception_report::raise("Distant and shoreline models must contain 1..1024 render triangles");
             if(collision_uses&&!mod_actor::register_collision(mod,model.id,actor_model_cache::collision_for(archive)))exception_report::raise("Prepared collision unavailable");
             story_notebook::WorldPoint minimum,maximum;
@@ -561,6 +596,7 @@ void load_world(const std::string& mod,const mods::json::Value& manifest,const s
         } catch(const std::exception& e) {
             LOG("[world] %s: model %s is not ready and its actors are left out: %s",mod.c_str(),model.id.c_str(),e.what());
             {std::lock_guard guard(g_world_model_notes_mutex);g_world_model_notes.push_back({mod,"Model "+model.id+" is not ready: "+e.what()});}
+            actor_model_cache::note_failure(mod,model.id,e.what());
             failed_models.push_back(model.id);
         }
     }
@@ -597,16 +633,99 @@ void svc_log_hex(Cpu* c) { LOG("[guestmod:%s] %s %08X",owner(c).id.c_str(),cstr(
 void svc_log_float(Cpu* c) { LOG("[guestmod:%s] %s %g",owner(c).id.c_str(),cstr(c->r[3]).c_str(),c->f[1].ps0); }
 void svc_memcpy(Cpu* c) { memmove(mem::ptr(c->r[3]), mem::ptr(c->r[4]), c->r[5]); }
 void svc_memset(Cpu* c) { memset(mem::ptr(c->r[3]), (int)(c->r[4] & 0xFF), c->r[5]); }
-const mods::json::Value& option(Cpu* c) {return owner(c).options.get(cstr(c->r[3]));}
+// ---- live options, input filters, touches (guest_live.h; QoL track M0)
+std::mutex g_options_mutex;  // Loaded::options (the main thread changes live ones), g_revisions
+guestlive::Revisions g_revisions;
+std::mutex g_touch_mutex;    // g_touch, g_touch_queue
+guestlive::Touch g_touch;
+std::vector<std::pair<int,guestlive::Event>> g_touch_queue;  // (mod index, event) for the next pad read
+mods::json::Value option(Cpu* c) {std::lock_guard lock(g_options_mutex);return owner(c).options.get(cstr(c->r[3]));}
+void svc_config_changed(Cpu* c) {
+    auto& mod=owner(c);uint64_t revision;
+    {std::lock_guard lock(g_options_mutex);revision=g_revisions.revision(mod.id,cstr(c->r[3]));}
+    c->r[3]=uint32_t(revision>>32);c->r[4]=uint32_t(revision);
+}
+bool own_function(const Loaded& mod,uint32_t fn) {
+    for(uint32_t i=0;i<mod.m->func_count;++i)if(mod.m->funcs[i].addr==fn)return true;
+    return false;
+}
+bool exchange_area(Loaded& mod) {
+    if(!mod.scratch)mod.scratch=mod.heap->allocate(32);
+    return mod.scratch!=0;
+}
+void svc_input_filter_register(Cpu* c) {
+    auto& mod=owner(c);uint32_t fn=c->r[3];c->r[3]=0;
+    if(fn&&(!own_function(mod,fn)||!exchange_area(mod))){LOG("[guestmod:%s] input filter refused: the callback must be the mod's own",mod.id.c_str());return;}
+    mod.input_filter=fn;c->r[3]=1;
+}
+void svc_touch_register(Cpu* c) {
+    auto& mod=owner(c);uint32_t fn=c->r[3];c->r[3]=0;
+    if(fn&&(!own_function(mod,fn)||!exchange_area(mod))){LOG("[guestmod:%s] touch callback refused: the callback must be the mod's own",mod.id.c_str());return;}
+    mod.touch_callback=fn;
+    if(!fn){std::lock_guard lock(g_touch_mutex);g_touch.drop(int(&mod-g_loaded.data()));}
+    c->r[3]=1;
+}
+void svc_touch_claim(Cpu* c) {
+    auto& mod=owner(c);const int slot=int32_t(c->r[3]);c->r[3]=0;
+    if(!mod.touch_callback||slot<0||slot>=guestlive::kSlots)return;
+    const guestlive::Rect r{float(c->f[1].ps0),float(c->f[2].ps0),float(c->f[3].ps0),float(c->f[4].ps0)};
+    std::lock_guard lock(g_touch_mutex);
+    g_touch.claim(int(&mod-g_loaded.data()),slot,r);c->r[3]=1;
+}
+// wwhd_screen_point(world xyz, out xy): a point of the world where the drawn camera shows it, in layout units (guest_live.h);
+// the camera_draw camera (interp::last_camera: eye +0xDC, center +0xE8, up +0xF4, fovy +0xD4) and the picture's aspect
+// and FOV as drawn (aspect::layout_scale). 1 when in front of the camera, 0 otherwise (out unchanged).
+void svc_project(Cpu* c) {
+    const uint32_t in=c->r[3],out=c->r[4];c->r[3]=0;
+    const uint32_t cam=interp::last_camera();
+    if(!in||!out||cam<0x10000000u||cam>=0x50000000u)return;
+    auto v3=[](uint32_t a){return guestlive::V3{float(ldf32(a)),float(ldf32(a+4)),float(ldf32(a+8))};};
+    guestlive::View view;
+    if(!view.set(v3(cam+0xDC),v3(cam+0xE8),v3(cam+0xF4),aspect::layout_scale(float(ldf32(cam+0xD4)))))return;
+    float x,y;
+    if(!view.project(v3(in),x,y))return;
+    stf32(out,x);stf32(out+4,y);c->r[3]=1;
+}
+// ---- the microphone (mic.h): only a mod with a "permission": "microphone" option that is on now may open it
+int mod_index(const Loaded& mod) { return int(&mod - g_loaded.data()); }
+bool mic_option_on(const Loaded& mod) {
+    std::lock_guard lock(g_options_mutex);
+    for (const auto& [id, name] : mod.mic_options) {
+        const auto v = mod.options.get(id);
+        if (v.type == mods::json::Value::Bool && v.boolean) return true;
+    }
+    return false;
+}
+void svc_mic_open(Cpu* c) {
+    auto& mod = owner(c);
+    if (!mic_option_on(mod)) {
+        LOG("[guestmod:%s] microphone refused: no microphone option of this mod is on", mod.id.c_str());
+        c->r[3] = uint32_t(mic::kUnavailable);
+        return;
+    }
+    mic::want(mod_index(mod), true);
+    c->r[3] = uint32_t(mic::wanted(mod_index(mod)) && mic::state() == mic::kClosed ? mic::kAsking : mic::state());
+}
+void svc_mic_close(Cpu* c) { mic::want(mod_index(owner(c)), false); c->r[3] = 0; }
+void svc_mic_state(Cpu* c) { c->r[3] = uint32_t(mic::wanted(mod_index(owner(c))) ? mic::state() : mic::kClosed); }
+// wwhd_mic_pitch(f32 out[3]): hz (0 none), level, clarity of the newest window; returns the window count (u64)
+void svc_mic_pitch(Cpu* c) {
+    const uint32_t out = c->r[3];
+    mic::Pitch p;
+    uint64_t serial = 0;
+    if (!mic::wanted(mod_index(owner(c))) || mic::state() != mic::kOpen || !mic::latest(p, serial)) p = {}, serial = 0;
+    if (out) stf32(out, p.hz), stf32(out + 4, p.level), stf32(out + 8, p.clarity);
+    c->r[3] = uint32_t(serial >> 32), c->r[4] = uint32_t(serial);
+}
 void svc_config_int(Cpu* c) {
-    const auto& v=option(c);
+    const auto v=option(c);
     if(v.type==mods::json::Value::Number&&v.number>=INT32_MIN&&v.number<=INT32_MAX&&std::floor(v.number)==v.number)c->r[3]=uint32_t(int32_t(v.number));
     else c->r[3]=c->r[4];
 }
-void svc_config_bool(Cpu* c) {const auto& v=option(c);c->r[3]=v.type==mods::json::Value::Bool?v.boolean:!!c->r[4];}
-void svc_config_float(Cpu* c) {const auto& v=option(c);if(v.type==mods::json::Value::Number)c->f[1].ps0=v.number;}
+void svc_config_bool(Cpu* c) {const auto v=option(c);c->r[3]=v.type==mods::json::Value::Bool?v.boolean:!!c->r[4];}
+void svc_config_float(Cpu* c) {const auto v=option(c);if(v.type==mods::json::Value::Number)c->f[1].ps0=v.number;}
 void svc_config_string(Cpu* c) {
-    const auto& v=option(c);uint32_t dst=c->r[4],size=c->r[5];
+    const auto v=option(c);uint32_t dst=c->r[4],size=c->r[5];
     if(v.type!=mods::json::Value::String||!dst||!size||size>1024*1024){c->r[3]=0;return;}
     uint32_t n=uint32_t(std::min<size_t>(v.text.size(),size-1));
     memcpy(mem::ptr(dst),v.text.data(),n);mem::ptr(dst)[n]=0;c->r[3]=n;
@@ -636,6 +755,31 @@ std::string setting_key(const Loaded& mod,uint32_t address) {
     return {};
 }
 void query_dungeon_room(Cpu* c, uint32_t address);
+// "layout-pane:<Layout>/<pane>" (structured type 6): 64 bytes, see wwhd_game_pane in wwhd_guest.h;
+// "layout-texture:<Layout>/<texture>" (same type and size): flags 4, the texture's width and height
+void query_layout_pane(Cpu* c, const std::string& key, uint32_t address) {
+    auto& mod = owner(c);
+    c->r[3] = 0;
+    if (!setting_buffer(mod, address, 64)) return;
+    if (key.rfind("layout-texture:", 0) == 0) {
+        uint32_t w = 0, h = 0;
+        if (!game_layouts::texture_size(key.substr(15), w, h)) return;
+        for (uint32_t i = 0; i < 64; i += 4) st32(address + i, 0);
+        st32(address, 1); st32(address + 4, 4);
+        stf32(address + 16, float(w)); stf32(address + 20, float(h));
+        c->r[3] = 64;
+        return;
+    }
+    game_layouts::Pane pane;
+    if (!game_layouts::pane(key.substr(12), pane)) return;
+    const uint32_t flags = (pane.visible ? 1u : 0u) | (pane.kind == "pic1" ? 2u : 0u);
+    st32(address, 1); st32(address + 4, flags);
+    stf32(address + 8, pane.x); stf32(address + 12, pane.y);
+    stf32(address + 16, pane.width); stf32(address + 20, pane.height);
+    stf32(address + 24, pane.rotation); st32(address + 28, pane.alpha);
+    for (uint32_t i = 0; i < 32; ++i) st8(address + 32 + i, i < pane.texture.size() && i < 31 ? uint8_t(pane.texture[i]) : 0);
+    c->r[3] = 64;
+}
 void svc_setting_get(Cpu* c) {
     auto& mod=owner(c);auto key=setting_key(mod,c->r[3]);
     uint32_t expected=c->r[4],destination=c->r[5],capacity=c->r[6];
@@ -644,6 +788,32 @@ void svc_setting_get(Cpu* c) {
         if (!destination && !capacity) { c->r[3] = 808; return; }
         if (capacity >= 808) query_dungeon_room(c, destination);
         return;
+    }
+    if ((key.rfind("layout-pane:", 0) == 0 || key.rfind("layout-texture:", 0) == 0) && expected == 6) {  // the game's layout art (game_layouts.h)
+        c->r[3] = 0;
+        if (!destination && !capacity) { c->r[3] = 64; return; }
+        if (capacity >= 64) query_layout_pane(c, key, destination);
+        return;
+    }
+    if(key=="native-map-hud.v1"&&expected==7){
+        c->r[3]=0;
+        if(capacity<36||!setting_buffer(mod,destination,36)||ld32(destination)!=36||ld32(destination+4)!=1)return;
+        uint32_t action=ld32(destination+8),argument=ld32(destination+12),id=map_hud_owner(mod);
+        int result=-2;maphud::Rect rect{};
+        switch(action){
+        case 1:result=maphud::compasses(c,id,argument,g_map_hud_draw);break;
+        case 2:result=maphud::rectangle(id,rect);if(result==1){st32(destination+20,f32_as_u32(rect.x));st32(destination+24,f32_as_u32(rect.y));st32(destination+28,f32_as_u32(rect.w));st32(destination+32,f32_as_u32(rect.h));}break;
+        case 3:result=maphud::selected(c,g_map_hud_draw);break;
+        case 4:result=maphud::select(c,id,argument,g_map_hud_draw);break;
+        case 5:result=maphud::cancel(c,id,g_map_hud_draw);break;
+        }
+        st32(destination+16,uint32_t(result));c->r[3]=36;return;
+    }
+    if(key=="hud.boat-compasses.version"||key=="map.chart-selection.version"){
+        c->r[3]=0;if(expected!=3)return;
+        if(!destination&&!capacity){c->r[3]=4;return;}
+        if(capacity<4||!setting_buffer(mod,destination,4))return;
+        st32(destination,maphud::capability());c->r[3]=4;return;
     }
     auto value=settings::read(key);c->r[3]=0;
     if(!value||value->type()!=expected)return;
@@ -692,8 +862,22 @@ std::string hud_path(const Loaded& mod,uint32_t address) {
     }
     return {};
 }
+void svc_boat_compasses(Cpu* c){auto& m=owner(c);c->r[3]=maphud::compasses(c,map_hud_owner(m),c->r[3],g_map_hud_draw);}
+void svc_boat_compasses_rect(Cpu* c){
+    auto& m=owner(c);uint32_t out=c->r[3];c->r[3]=uint32_t(-2);
+    if(!setting_buffer(m,out,24)||ld32(out)!=24||ld32(out+4)!=1)return;
+    maphud::Rect r{};int result=maphud::rectangle(map_hud_owner(m),r);
+    if(result==1){st32(out+8,f32_as_u32(r.x));st32(out+12,f32_as_u32(r.y));st32(out+16,f32_as_u32(r.w));st32(out+20,f32_as_u32(r.h));}
+    c->r[3]=uint32_t(result);
+}
+void svc_map_chart_selected(Cpu* c){c->r[3]=maphud::selected(c,g_map_hud_draw);}
+void svc_map_chart_select(Cpu* c){auto& m=owner(c);c->r[3]=maphud::select(c,map_hud_owner(m),c->r[3],g_map_hud_draw);}
+void svc_map_chart_cancel(Cpu* c){auto& m=owner(c);c->r[3]=maphud::cancel(c,map_hud_owner(m),g_map_hud_draw);}
 void svc_hud_register(Cpu* c) {
     auto& mod=owner(c);uint32_t callback=c->r[3],screen=c->r[4];c->r[3]=0;
+    // Map/UI hooks may call HUD services: never acquire their mutex while
+    // holding g_hud_mutex (native event dispatch takes them in the other order).
+    if(!callback&&screen<=2)maphud::revoke(map_hud_owner(mod));
     std::lock_guard lock(g_hud_mutex);
     if(screen>2){hud::store().note(mod.id,"HUD registration failed: invalid screen");return;}
     if(callback) {
@@ -708,6 +892,13 @@ void svc_hud_register(Cpu* c) {
 }
 void svc_hud_texture(Cpu* c) {
     auto& mod=owner(c);uint32_t source=c->r[3];auto path=hud_path(mod,c->r[4]);c->r[3]=0;
+    if(source==2) {  // the game's own layout art (game_layouts.h), read from the installed 2D pack
+        game_layouts::Image image;std::string error;
+        if(!game_layouts::texture(path,image,error)){hud::store().note(mod.id,"HUD game texture load failed: "+error);return;}
+        c->r[3]=hud::store().create_image(mod.id,image.width,image.height,image.width*4,image.rgba.data(),image.rgba.size());
+        if(!c->r[3])hud::store().note(mod.id,"HUD game texture load failed: per-mod image quota exceeded");
+        return;
+    }
     if(source>1||path.empty()){hud::store().note(mod.id,"HUD PNG load failed: invalid source or path");return;}
     // Package textures are deliberately restricted to the two artwork folders.
     if(source==0&&!path.starts_with("assets/")&&!path.starts_with("textures/")){hud::store().note(mod.id,"HUD PNG load failed: package images must be in assets/ or textures/");return;}
@@ -914,9 +1105,12 @@ const std::unordered_map<std::string, PpcFunc> kServices = {
     {"wwhd_audio_available",svc_audio_available},{"wwhd_audio_submit",svc_audio_submit},{"wwhd_audio_close",svc_audio_close},
     {"wwhd_log", svc_log},       {"wwhd_log_int", svc_log_int}, {"wwhd_log_hex", svc_log_hex},
     {"wwhd_log_float", svc_log_float}, {"wwhd_config_int", svc_config_int},
-    {"wwhd_config_bool",svc_config_bool},{"wwhd_config_float",svc_config_float},{"wwhd_config_string",svc_config_string},
+    {"wwhd_config_bool",svc_config_bool},{"wwhd_config_changed",svc_config_changed},
+    {"wwhd_input_filter_register",svc_input_filter_register},{"wwhd_touch_register",svc_touch_register},{"wwhd_touch_claim",svc_touch_claim},{"wwhd_screen_point",svc_project},{"wwhd_mic_open",svc_mic_open},{"wwhd_mic_close",svc_mic_close},{"wwhd_mic_state",svc_mic_state},{"wwhd_mic_pitch",svc_mic_pitch},{"wwhd_config_float",svc_config_float},{"wwhd_config_string",svc_config_string},
     {"wwhd_malloc",svc_malloc},{"wwhd_free",svc_free},{"wwhd_input_read",svc_input},
     {"wwhd_file_read",svc_file_read},{"wwhd_file_write",svc_file_write},
+    {"wwhd_hud_boat_compasses",svc_boat_compasses},{"wwhd_hud_boat_compasses_rect",svc_boat_compasses_rect},
+    {"wwhd_map_chart_selected",svc_map_chart_selected},{"wwhd_map_chart_select",svc_map_chart_select},{"wwhd_map_chart_cancel",svc_map_chart_cancel},
     {"wwhd_hud_register",svc_hud_register},{"wwhd_hud_texture",svc_hud_texture},
     {"wwhd_hud_clip",svc_hud_clip},{"wwhd_hud_release",svc_hud_release},{"wwhd_hud_epoch",svc_hud_epoch},{"wwhd_hud_emit",svc_hud_emit},
     {"wwhd_setting_get",svc_setting_get},{"wwhd_setting_changed",svc_setting_changed},
@@ -932,9 +1126,14 @@ const std::unordered_map<std::string, PpcFunc> kServices = {
     {"wwhd_item_give",svc_item_give},{"wwhd_item_take",svc_item_take},{"wwhd_item_count",svc_item_count},{"wwhd_item_used",svc_item_used},
     {"memcpy", svc_memcpy},      {"memmove", svc_memcpy},       {"memset", svc_memset},
 };
+// the first host service a module being loaded asked for and this port doesn't have (its load error names it)
+std::string g_missing_service;
 PpcFunc service(const char* name) {
     auto it = kServices.find(name);
-    if (it == kServices.end()) return nullptr;
+    if (it == kServices.end()) {
+        if (g_missing_service.empty()) g_missing_service = name ? name : "?";
+        return nullptr;
+    }
     if (!strcmp(name, "wwhd_actor_particle") || !strcmp(name, "wwhd_particle_at")) g_particle_import = true;  // particle scratch
     if (!strncmp(name, "wwhd_mail_", 10)) story_mail::note_import();  // the postbox hooks are needed
     if (!strncmp(name, "wwhd_chart_", 11)) {  // the sea chart hooks are needed, and the chart list's captions
@@ -983,10 +1182,10 @@ void prepare_npc_catalogue() {
     std::error_code ec;
     if(!std::filesystem::is_regular_file(file,ec)) {
         try {
-            const auto bridge=BuildBridge::installed(std::string());
+            const auto bridge=BuildBridge::installed(std::string(),false);
             const auto tool=std::filesystem::path(bridge.builder).parent_path().parent_path()/"story_mods"/"npc_catalogue.py";
             std::filesystem::create_directories(dir/"recipes",ec);
-            auto command=bridge.python;command.push_back(tool.string());command.insert(command.end(),{"--game",config::game_dir,"--out",file.string(),"--json"});
+            auto command=bridge.tool_python();command.push_back(tool.string());command.insert(command.end(),{"--game",config::game_dir,"--out",file.string(),"--json"});
             for(const auto& [place,text]:story_notebook::npc_recipes()) {
                 const auto recipe=dir/"recipes"/(place+".recipe.json");
                 std::ofstream(recipe,std::ios::binary)<<text;
@@ -1012,10 +1211,10 @@ std::string notebook_model(const std::filesystem::path& glb,const std::string& d
     const auto out=std::filesystem::path(data_dir)/("notebook_model-"+std::string(tag)+".szs");
     if(std::filesystem::is_regular_file(out,ec))return out.string();
     try {
-        const auto bridge=BuildBridge::installed(std::string());
+        const auto bridge=BuildBridge::installed(std::string(),false);
         const auto tool=std::filesystem::path(bridge.builder).parent_path().parent_path()/"story_mods"/"notebook_model.py";
         std::filesystem::create_directories(data_dir,ec);
-        auto command=bridge.python;command.push_back(tool.string());
+        auto command=bridge.tool_python();command.push_back(tool.string());
         command.insert(command.end(),{"--game",config::game_dir,"--glb",glb.string(),"--out",out.string()});
         const auto process=host::run_process(command);
         LOG("[notebook] the notebook's model built from %s: %s",glb.filename().string().c_str(),process.code==0?"ok":(process.output+process.error).c_str());
@@ -1057,7 +1256,12 @@ bool load_one(const std::string& path, std::string& err,const mods::packages::Gu
         }
     } guard{lib};
     if (!init) { err = "not a guest mod module (no " WWHD_GUEST_INIT_SYMBOL ")"; return false; }
+    g_missing_service.clear();
     const WWHDGuestModuleV1* m = init(&kHost);
+    if (!m && !g_missing_service.empty()) {  // (a service of a newer port: rebuilding doesn't help)
+        err = "this mod needs a newer version of the game: it uses " + g_missing_service + ", which this version doesn't have";
+        return false;
+    }
     if (!m || m->size < sizeof(WWHDGuestModuleV1) || m->abi_version != WWHD_GUEST_ABI_VERSION) {
         err = "module ABI does not match this game version: rebuild the mod";
         return false;
@@ -1076,7 +1280,8 @@ bool load_one(const std::string& path, std::string& err,const mods::packages::Gu
             return false;
         }
     Loaded loaded;
-    loaded.path=path;loaded.package_path=pkg.path;loaded.data_path=pkg.data_path;loaded.id=pkg.id;loaded.name=pkg.name;loaded.version=pkg.version;loaded.m=m;loaded.region_size=reserved;loaded.options=pkg.options;
+    loaded.path=path;loaded.package_path=pkg.path;loaded.data_path=pkg.data_path;loaded.id=pkg.id;loaded.name=pkg.name;loaded.version=pkg.version;loaded.m=m;loaded.region_size=reserved;loaded.options=pkg.options;loaded.mic_options=pkg.mic_options;
+    {std::lock_guard lock(g_options_mutex);for(const auto& [key,value]:pkg.options.object)g_revisions.declare(pkg.id,key);}
     loaded.files=std::make_unique<Files>(pkg.data_path);
     uint32_t heap_base=(m->mem_base+m->mem_size+15)&~15u;
     loaded.heap=std::make_unique<Heap>(mem::ptr(heap_base),heap_base,pkg.heap_size);
@@ -1141,6 +1346,30 @@ bool load_one(const std::string& path, std::string& err,const mods::packages::Gu
         m->translator, m->func_count, m->hook_count, m->mem_base, m->mem_base + m->mem_size);
     return true;
 }
+
+// Observer callbacks may themselves call guest functions and clobber any EABI
+// scratch register. None of that is an output of an entry/return observer: in
+// patched assembly even r12, f0 or CR0 may carry a value across the boundary.
+// Restore register bits, including on exceptions, but keep memory effects,
+// reservation changes and scheduler/dispatch bookkeeping from callback work.
+class ObserverRegisters {
+    Cpu* cpu;
+    Cpu saved;
+public:
+    explicit ObserverRegisters(Cpu* c) : cpu(c), saved(*c) {}
+    ObserverRegisters(const ObserverRegisters&) = delete;
+    ObserverRegisters& operator=(const ObserverRegisters&) = delete;
+    ~ObserverRegisters() {
+        std::memcpy(cpu->r,saved.r,sizeof saved.r);
+        std::memcpy(cpu->f,saved.f,sizeof saved.f);
+        std::memcpy(cpu->cr,saved.cr,sizeof saved.cr);
+        std::memcpy(cpu->gqr,saved.gqr,sizeof saved.gqr);
+        cpu->lr=saved.lr;cpu->ctr=saved.ctr;cpu->pc=saved.pc;
+        cpu->fpscr=saved.fpscr;
+        cpu->xer_so=saved.xer_so;cpu->xer_ov=saved.xer_ov;
+        cpu->xer_ca=saved.xer_ca;cpu->xer_bc=saved.xer_bc;
+    }
+};
 
 struct Args {
     uint32_t r[8];
@@ -1207,6 +1436,16 @@ void init() {
     std::lock_guard mutation(native_hook_mutex());
     if(guest_init_started.exchange(true)||native_hooks_sealed.load()){native_hooks_fault=true;return;}
     namespace packages=mods::packages;
+    // live options (guest_live.h): a change of a "live" option reaches the running mod
+    packages::set_option_observer([](const std::string& id,const std::string& option,const mods::json::Value& value,bool live) {
+        if(!live)return;
+        std::lock_guard lock(g_options_mutex);
+        for(auto& mod:g_loaded)
+            if(mod.id==id&&g_revisions.bump(id,option)){
+                mod.options[option]=value;
+                LOG("[guestmod:%s] live option %s changed (revision %llu)",id.c_str(),option.c_str(),(unsigned long long)g_revisions.revision(id,option));
+            }
+    });
     // start_guests invokes callbacks under the package-manager mutex. Resolve its
     // directory before entering those callbacks to avoid recursively locking it.
 #ifdef __ANDROID__
@@ -1254,6 +1493,9 @@ void init() {
         if(result.module.empty()||!load_one(result.module,error,pkg,base,result.allocation_size))
             exception_report::raise(error.empty()?"Guest builder returned no module":error);
     });
+    // code mods the missing compiler stopped (issue #266): the Mods tab says it next to each, and shows this
+    // line once over the game (overlay/mods_tab.h startup_notice)
+    if(const auto notice=compiler_notice_for(packages::list());!notice.empty())LOG("[code mods] %s",notice.c_str());
     // Content packages have no ELF; their enabled startup snapshot still declares world data.
     for(const auto& pkg:packages::list()) if(pkg.kind=="content"&&pkg.active&&pkg.compatible) {
         std::ifstream file(std::filesystem::path(packages::directory())/pkg.id/"manifest.json",std::ios::binary);
@@ -1281,6 +1523,13 @@ void init() {
         if(!items.empty()){story_items::note_import();story_notebook::note_import();story_mail::note_import();}
         load_world(pkg.id,manifest,path.string(),packages::package_data_directory(pkg.id));
     }
+    // The world editor (--editor, #270): mod items and chests that hold them work while the game runs. The item
+    // hooks and the chest item hook are there from the start even when no package declared an item or such a
+    // chest, so an item or a chest added in the editor needs no restart (story_actors no longer leaves the
+    // chest out). Inert until something uses them; only with the Story Notebook (items need it).
+    if(editor::launch_mode()&&g_story_package){
+        story_items::note_import();story_notebook::note_import();story_mail::note_import();story_treasure_chest::note_placed_chests();
+    }
     // The item icons (item_icons.h): the notebook (key 0), then the mod items in declaration order (frames
     // 56...), built into the game's 2D pack before the game opens it; the mod items draw from those frames.
     // (test aid WWHD_TEST_ITEM_ICONS=a.png,b.png adds pictures as more items)
@@ -1293,7 +1542,8 @@ void init() {
             for(size_t a=0;a<list.size();){size_t b=list.find(',',a);if(b==std::string::npos)b=list.size();
                 if(b>a)icons.push_back({key++,list.substr(a,b-a)});a=b+1;}
         }
-        item_icons::set_items(icons,g_icon_cache);
+        // the world editor: spare frames for items added while the game runs (item_icons.h, live icons)
+        item_icons::set_items(icons,g_icon_cache,editor::launch_mode()?item_icons::kSpareFrames:0);
         story_items::set_frame_source(item_icons::frame);
     }
     // Every service below claims game functions in the hook-flag table (g_mod_hook_flags), which only game
@@ -1528,6 +1778,7 @@ void init() {
     // Mod items (story_items.h): the game's item tables answer for the port's item numbers, only when a
     // loaded mod declares items.
     story_items::set_game_calls(call_original,[](Cpu* c,uint32_t fn,std::initializer_list<uint32_t> args){return guest_call(c,fn,args);});
+    if(editor::launch_mode())item_icons::set_game_calls([](Cpu* c,uint32_t fn,std::initializer_list<uint32_t> args){return guest_call(c,fn,args);},story_lyt_screen::safe_string("BtnItemIcon_00"));
     story_items::set_presenter(story_notebook::show_info);
     if(story_items::imported())story_mail::set_item_get_next(story_items::hooks::exec_item_get);
     // a mod treasure chart's chest (story_treasure_chest.h): its stand-in's execItemGet, before the mod items'
@@ -1556,6 +1807,17 @@ void init() {
     story_items::set_get_text(story_mail::item_get_text);
     story_item_models::set_text(story_items::arm_get_text);
     if(!story_item_models::install([](uint32_t fn){auto it=g_chains.find(fn);return it==g_chains.end()?std::string():it->second.replace_mod;},[](uint32_t fn,PpcFunc hook){int i=ordinal_of(fn);if(i<0)fatal("item model hook missing");auto&ch=g_chains[fn];ch.addr=fn;ch.ordinal=uint32_t(i);ch.replace=hook;ch.replace_mod="the port's item models";g_mod_hook_flags[i]=1;}))exception_report::raise("Item model hook conflict");
+    // a mod item's get moment from a chest (story_item_get_icon.h): its icon over Link's head in the place of
+    // the stand-in's card; the demo item's draw hook also asks the held models first. With mod items, chests
+    // of them, or in the editor launch mode (an item added there gets its chest at once).
+    story_item_get_icon::configure(call_original,[]{
+        const editor::CameraView v=editor::camera_view();story_item_get_icon::Camera c;c.valid=v.valid;
+        for(int i=0;i<3;i++)c.eye[i]=v.eye[i],c.center[i]=v.center[i],c.up[i]=v.up[i];
+        c.fovy=v.fovy;c.aspect=v.aspect;for(int i=0;i<16;i++)c.proj[i]=v.proj[i];return c;
+    },item_icons::picture);
+    story_treasure_chest::set_icon_presenter([](uint16_t key,const std::string& png,bool on){if(on)story_item_get_icon::show(key,png);else story_item_get_icon::hide();});
+    if(story_items::imported()||story_treasure_chest::placed_chests()||story_item_models::declared()||editor::launch_mode())
+        story_item_get_icon::install([](uint32_t fn){auto it=g_chains.find(fn);return it==g_chains.end()?std::string():it->second.replace_mod;},[](uint32_t fn,PpcFunc hook){int i=ordinal_of(fn);if(i<0)fatal("[guestmods] item get: %08X is not a game function",fn);auto&ch=g_chains[fn];ch.addr=fn;ch.ordinal=uint32_t(i);ch.replace=hook;ch.replace_mod="the port's item get";g_mod_hook_flags[i]=1;});
     story_item_buttons::set_game_calls(call_original,[](Cpu* c,uint32_t fn,std::initializer_list<uint32_t> args){return guest_call(c,fn,args);});
     story_item_buttons::install([](uint32_t addr) {
         auto it=g_chains.find(addr);return it==g_chains.end()?std::string():it->second.replace_mod;
@@ -1599,6 +1861,12 @@ void init() {
         NativeSceneRequestIssuer::startup(stage_pass_through,[]() -> uint64_t {
             return g_logic_step.load(std::memory_order_relaxed);
         });
+    if(!g_loaded.empty())maphud::install(call_original,[](uint32_t fn,bool replacing){
+        auto it=g_chains.find(fn);return ordinal_of(fn)>=0&&(!replacing||it==g_chains.end()||!it->second.replace);
+    },[](uint32_t fn,PpcFunc hook){
+        int ordinal=ordinal_of(fn);auto& ch=g_chains[fn];ch.addr=fn;ch.ordinal=uint32_t(ordinal);
+        ch.replace=hook;ch.replace_mod="the port's map/HUD bridge";g_mod_hook_flags[ordinal]=1;
+    });
     seal_startup();
 }
 
@@ -1614,23 +1882,38 @@ void set_package_observer(PackageObserver observer){g_package_observer=observer;
 bool editor_prepare_model(const std::string& mod,const std::string& package_dir,const std::string& data_dir,const mods::json::Value& entry,std::string& archive,std::string& why){
     story_notebook::ManifestModel model;model.id=entry.get("id").string();model.source=entry.get("source").string();model.kind=entry.get("kind").string("static");
     if(model.id.empty()||model.source.empty())return why="the model has no id or source",false;
+    if(model.kind=="kit")return why="a kit model is prepared with editor_build_kit_model",false;
     const bool collision=entry.get("collision").boolean;
     if(collision&&model.kind!="static")return why="collision requires a static model",false;
     // a shoreline (preparation option, never a manifest field): "foam" or a water surface's material
     const auto& shore=entry.get("shoreline");const bool shoreline=shore.type==mods::json::Value::String;
-    if(shoreline&&(collision||model.kind!="static"||(shore.text!="foam"&&!story_notebook::water_surface_material(shore.text))))return why="a shoreline is a collision-free static model with the material foam, water, pond, river or waterfall",false;
+    if(shoreline&&(collision||model.kind!="static"||(shore.text!="foam"&&!story_notebook::water_surface_material(shore.text))))return why="a shoreline is a collision-free static model with the material foam, water, pond, river, waterfall or lava",false;
     try {
-        const auto bridge=BuildBridge::installed(std::string());
+        const auto bridge=BuildBridge::installed(std::string(),false);
         const auto tool=std::filesystem::path(bridge.builder).parent_path().parent_path()/"story_mods"/(model.kind=="skinned"?"skinned_actor_model.py":"actor_model.py");
-        archive=actor_model_cache::prepare(mod,model,package_dir,data_dir,bridge.python,tool.string(),config::game_dir,collision,shoreline,shoreline?shore.text:std::string());
+        // "generation" (the editor's replace_model): an archive of its own for a file replaced while the game runs
+        const unsigned generation=entry.get("generation").type==mods::json::Value::Number&&entry.get("generation").number>0&&entry.get("generation").number<1e6?unsigned(entry.get("generation").number):0u;
+        archive=actor_model_cache::prepare(mod,model,package_dir,data_dir,bridge.tool_python(),tool.string(),config::game_dir,collision,shoreline,shoreline?shore.text:std::string(),generation);
         return true;
     } catch(const std::exception& e) {return why=e.what(),false;}
 }
 
-std::shared_ptr<const story_game_pieces::BuiltSet> editor_build_piece(const std::string& id,const std::string& cache_dir){
+std::shared_ptr<const story_game_pieces::BuiltSet> editor_build_kit_model(const std::string& mod,const std::string& package_dir,const std::string& data_dir,const mods::json::Value& entry){
+    // only the declaration: the editor's request may carry preparation options ("replace" after Replace from file, Watch
+    // file or an import under a removed model's id), which a declaration doesn't take (issue #281)
+    mods::json::Value manifest;manifest["models"].type=mods::json::Value::Array;manifest["models"].array.push_back(story_notebook::model_declaration(entry));
+    std::vector<story_notebook::ManifestModel> models;std::string why;
+    if(!story_notebook::parse_models(manifest,models,why))throw std::runtime_error(why);
+    if(models.size()!=1||models[0].kind!="kit")throw std::runtime_error("not a kit model");
     const auto bridge=BuildBridge::installed(std::string());
+    const auto tool=std::filesystem::path(bridge.builder).parent_path().parent_path()/"story_mods"/"kit_model.py";
+    return story_kit_models::build(mod,models[0],package_dir,story_kit_models::cache_directory(data_dir),bridge.tool_python(),tool.string(),config::game_dir);
+}
+
+std::shared_ptr<const story_game_pieces::BuiltSet> editor_build_piece(const std::string& id,const std::string& cache_dir){
+    const auto bridge=BuildBridge::installed(std::string(),false);
     const auto tool=std::filesystem::path(bridge.builder).parent_path().parent_path()/"story_mods"/"game_piece_model.py";
-    return story_game_pieces::build(id,cache_dir,bridge.python,tool.string(),config::game_dir);
+    return story_game_pieces::build(id,cache_dir,bridge.tool_python(),tool.string(),config::game_dir);
 }
 
 std::vector<ModIdentity> enabled_mods() {
@@ -1712,7 +1995,101 @@ bool native_camera_run_original_pending(const Cpu*c,const story_native_event_dep
 
 bool hooks_built() { return g_mod_hook_count != 0 && g_mod_hook_flags && g_mod_bodies; }
 
-void frame(uint64_t step) {g_logic_step.store(step,std::memory_order_relaxed);story_notebook::logic_step(step);}
+// ---- live features (guest_live.h): touches routed to the mods' claims, the input filters
+int touch_route(uint32_t kind,float x,float y) {
+    std::lock_guard lock(g_touch_mutex);
+    const guestlive::Event e{kind,x,y};
+    const int owner=g_touch.route(e);
+    if(owner>=0&&size_t(owner)<g_loaded.size()&&g_touch_queue.size()<64)g_touch_queue.push_back({owner,e});
+    return owner;
+}
+int touch_pinch(uint32_t kind,float scale,float x,float y) {
+    std::lock_guard lock(g_touch_mutex);
+    const int owner=g_touch.route_pinch(kind,x,y);
+    if(owner>=0&&size_t(owner)<g_loaded.size()&&g_touch_queue.size()<64)g_touch_queue.push_back({owner,guestlive::Event{kind,scale,0}});
+    return owner;
+}
+bool touch_claimed_at(float x,float y) {std::lock_guard lock(g_touch_mutex);return g_touch.owner_at(x,y)>=0;}
+bool touch_claims() {std::lock_guard lock(g_touch_mutex);return g_touch.any();}
+// test aid: WWHD_TEST_MOD_OPTION=frame:mod:option:json,... changes a mod's option at that (scripted) TV frame, as the
+// Settings window would (packages::configure on the main thread: a live option reaches the mod)
+void test_option_changes() {
+    struct Change {uint64_t frame;std::string mod,option,value;bool done=false;};
+    static std::vector<Change> changes=[] {
+        std::vector<Change> v;
+        const char* e=std::getenv("WWHD_TEST_MOD_OPTION");
+        std::string s=e?e:"";
+        size_t at=0;
+        while(at<s.size()) {
+            size_t end=s.find(',',at);if(end==std::string::npos)end=s.size();
+            const std::string item=s.substr(at,end-at);at=end+1;
+            size_t a=item.find(':'),b=a==std::string::npos?a:item.find(':',a+1),d=b==std::string::npos?b:item.find(':',b+1);
+            if(d==std::string::npos)continue;
+            v.push_back({std::strtoull(item.c_str(),nullptr,10),item.substr(a+1,b-a-1),item.substr(b+1,d-b-1),item.substr(d+1)});
+        }
+        return v;
+    }();
+    if(changes.empty())return;
+    const uint64_t f=fixed_seed::script_frame(render::frame_count());
+    for(auto& ch:changes) {
+        if(ch.done||f<ch.frame)continue;
+        ch.done=true;
+        hostui::post([ch] {
+            std::string error;
+            mods::json::Value v;
+            try{v=mods::json::parse(ch.value);}catch(...){LOG("[guestmods] test option: bad value %s",ch.value.c_str());return;}
+            if(!mods::packages::configure(ch.mod,ch.option,v,error))LOG("[guestmods] test option %s.%s: %s",ch.mod.c_str(),ch.option.c_str(),error.c_str());
+            else LOG("[guestmods] test option %s.%s = %s",ch.mod.c_str(),ch.option.c_str(),ch.value.c_str());
+        });
+    }
+}
+// the microphone each controller read: a mod whose option is off lets go (the device closes at once); a declined
+// permission turns the asking options off again, with a notice
+void mic_step() {
+    for(auto& mod:g_loaded) if(!mod.mic_options.empty()&&mic::wanted(mod_index(mod))&&!mic_option_on(mod)) mic::want(mod_index(mod),false);
+    mic::service();
+    if(!mic::take_denied())return;
+    for(auto& mod:g_loaded) {
+        if(!mic::wanted(mod_index(mod)))continue;
+        mic::want(mod_index(mod),false);
+        for(const auto& [id,name]:mod.mic_options) {
+            const std::string mod_id=mod.id,option=id,label=name;
+            hostui::post([mod_id,option,label] {
+                std::string error;
+                if(!mods::packages::configure(mod_id,option,mods::json::Value(false),error))LOG("[guestmods] %s.%s: %s",mod_id.c_str(),option.c_str(),error.c_str());
+                mods::packages::post_toast("\""+label+"\" is off again: the microphone was not allowed. You can allow it in the system settings and turn it on again.");
+            });
+        }
+    }
+}
+void pad_filter(Cpu* c,input::PadState& p,bool repeat) {
+    if(!repeat)test_option_changes();
+    if(!repeat)mic_step();
+    if(!c||repeat||g_loaded.empty())return;
+    std::vector<std::pair<int,guestlive::Event>> events;
+    {std::lock_guard lock(g_touch_mutex);events.swap(g_touch_queue);}
+    for(const auto& [index,e]:events) {  // the touches first: a mod may claim and filter in the same read
+        Loaded& mod=g_loaded[size_t(index)];
+        if(!mod.touch_callback||!mod.scratch)continue;
+        st32(mod.scratch,e.kind);stf32(mod.scratch+4,e.x);stf32(mod.scratch+8,e.y);
+        Cpu saved=*c;
+        try{guest_call(c,mod.touch_callback,{mod.scratch});}catch(...){LOG("[guestmod:%s] touch callback failed",mod.id.c_str());}
+        *c=saved;
+    }
+    for(auto& mod:g_loaded) {  // in load order
+        if(!mod.input_filter||!mod.scratch)continue;
+        const uint32_t a=mod.scratch;
+        st32(a,p.buttons);stf32(a+4,p.lx);stf32(a+8,p.ly);stf32(a+12,p.rx);stf32(a+16,p.ry);
+        st32(a+20,p.touch);stf32(a+24,p.tx);stf32(a+28,p.ty);
+        Cpu saved=*c;
+        try{guest_call(c,mod.input_filter,{a});}catch(...){LOG("[guestmod:%s] input filter failed",mod.id.c_str());*c=saved;continue;}
+        *c=saved;
+        auto stick=[](float v){return std::isfinite(v)?std::clamp(v,-1.0f,1.0f):0.0f;};
+        p.buttons=ld32(a);p.lx=stick(float(ldf32(a+4)));p.ly=stick(float(ldf32(a+8)));p.rx=stick(float(ldf32(a+12)));p.ry=stick(float(ldf32(a+16)));
+    }
+}
+
+void frame(uint64_t step) {g_logic_step.store(step,std::memory_order_relaxed);hud::store().set_step(step);story_notebook::logic_step(step);}
 void draw_frame(Cpu* c,uint64_t step) {
     if(!c||!g_hud_callbacks.load(std::memory_order_acquire))return;
     for(auto& mod:g_loaded) {
@@ -1723,10 +2100,12 @@ void draw_frame(Cpu* c,uint64_t step) {
             mod.hud_step=step;mod.hud_called=true;callback=mod.hud_callback;screen=mod.hud_screen;
         }
         auto list=hud::store().begin(mod.id,screen);
-        if(!list){hud::store().drop(mod.id);continue;}
+        if(!list){maphud::revoke(map_hud_owner(mod));hud::store().drop(mod.id);continue;}
         Cpu saved=*c;
-        try {guest_call(c,callback,{list});hud::store().commit(mod.id,list);}
-        catch(...) {hud::store().fail(mod.id,list,"HUD callback failed; draw list dropped");hud::store().commit(mod.id,list);}
+        g_map_hud_draw=true;
+        try {guest_call(c,callback,{list});if(!hud::store().commit(mod.id,list))maphud::revoke(map_hud_owner(mod));}
+        catch(...) {maphud::revoke(map_hud_owner(mod));hud::store().fail(mod.id,list,"HUD callback failed; draw list dropped");hud::store().commit(mod.id,list);}
+        g_map_hud_draw=false;
         *c=saved;
     }
 }
@@ -1749,13 +2128,14 @@ void logic_service(Cpu* c) {
             }
         }
     }
-    story_item_models::tick(c);mod_actor::heap_sample(c);actor_sweep(c);story_scenes::tick(c,false,2);story_actors::service(c);
+    story_item_models::tick(c);story_item_get_icon::logic(hud::store().step());item_icons::service(c);mod_actor::heap_sample(c);actor_sweep(c);story_scenes::tick(c,false,2);story_actors::service(c);
     mod_stages::logic(c);
     story_native_wait_runtime::logic(c);
     story_scenes::demo_tick(c);
 }
 void service(Cpu* c) { story_lyt_screen::service(c); }
 void state_loaded() {
+    maphud::state_loaded();
     story_native_event_game_thread::state_loaded();
     story_native_wait_runtime::state_loaded();
     std::lock_guard lock(g_hud_mutex);
@@ -1763,6 +2143,7 @@ void state_loaded() {
     hud::store().reset();
     pcm::store().reset();
     story_item_models::state_loaded();
+    story_item_get_icon::state_loaded();
     story_mail::state_loaded();
     story_scenes::state_loaded();
     story_actors::state_loaded();
@@ -1776,12 +2157,17 @@ void state_loaded() {
 }
 
 }  // namespace guestmods
+namespace mods {
+void guest_pad_filter(Cpu* c, input::PadState& p, bool repeat) { guestmods::pad_filter(c, p, repeat); }
+bool guest_touch_claimed_at(float x, float y) { return guestmods::touch_claimed_at(x, y); }
+}  // namespace mods
 
 using namespace guestmods;
 
 // A hooked or replaced game function. The calling convention is the game's: hooks get the function's
 // arguments (r3..r10, f1..f8 are restored for every hook), a return hook also leaves the return value
-// (r3, r4, f1) as the function produced it. r1/r2/r13 are preserved by every callee (ABI).
+// as the function produced it, including non-EABI assembly returns. Observer
+// register writes are discarded; their memory and runtime scheduling effects remain.
 extern "C" void ppc_mod_run(Cpu* c) {
     uint32_t addr = c->pc;
     auto it = g_chains.find(addr);
@@ -1792,19 +2178,15 @@ extern "C" void ppc_mod_run(Cpu* c) {
     Args a;
     a.save(c);
     for (PpcFunc h : ch.entry) {
+        ObserverRegisters preserve(c);
         h(c);
-        a.load(c);
     }
     if (ch.replace) ch.replace(c);
     else { c->mod_skip = addr; story_native_stage_owner_hooks::invoke_original(c,addr,[&]{guestmods::original_started(c,addr);g_mod_bodies[ch.ordinal](c);guestmods::original_completed(c,addr);}); }
-    if (!ch.ret.empty()) {
-        uint32_t r3 = c->r[3], r4 = c->r[4];
-        double f1a = c->f[1].ps0, f1b = c->f[1].ps1;
-        for (PpcFunc h : ch.ret) {
-            a.load(c);
-            h(c);
-        }
-        c->r[3] = r3; c->r[4] = r4; c->f[1].ps0 = f1a; c->f[1].ps1 = f1b;
+    for (PpcFunc h : ch.ret) {
+        ObserverRegisters preserve(c); // save the body's result before restoring arguments
+        a.load(c);
+        h(c);
     }
     });
     });

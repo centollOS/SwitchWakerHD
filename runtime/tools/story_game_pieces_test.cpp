@@ -72,6 +72,13 @@ int main() {
         // every island part of the three sets fits one room together
         assert(all_sets < story_game_pieces::kRoomBudgetBytes);
         assert(c.version >= 3);
+        // more of Dragon Roost's sea rocks and Fire Mountain's two volcanic rocks (their own set), since version 6
+        for (const char* id : {"sea-rock-broad", "sea-rock-low", "sea-rock-small", "sea-rock-mid", "fire-mountain-rock", "fire-mountain-rock-small"}) {
+            const auto* p = c.find(id);
+            assert(p && p->category == "Island parts" && p->since == 6 && p->parts.size() == 1 && p->parts[0].light == 1 && p->collision_triangles > 0);
+        }
+        assert(c.find("fire-mountain-rock")->set == "fire-mountain-kit" && c.set("fire-mountain-kit")->room == 20 && c.find("sea-rock-low")->set == "dragon-roost-kit");
+        assert(c.version >= 6);
     }
     assert(story_game_pieces::reference("piece:outset-house-small") == "outset-house-small" && story_game_pieces::reference("game:palm").empty());
     assert(story_game_pieces::model_key("x") == "piece:x");
