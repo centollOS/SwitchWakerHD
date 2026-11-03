@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 
+#include "cores_switch.h"  // (this fork) core 3
 #include "../mods/mods.h"
 #include "../runtime.h"
 #include "debug_server.h"
@@ -347,7 +348,9 @@ std::string start_thread(bool firstStart) {
     g_firstStart = firstStart;
     // the lowest priority the app has (0x3B, as the shader worker), on core 0 (the game's main thread has core 1, the
     // renderer core 2); 4 MiB of stack for the decompiler
-    Result rc = threadCreate(&g_thread, thread_main, nullptr, nullptr, 4 * 1024 * 1024, 0x3B, 0);
+    // (this fork, docs/core3-plan.md) core 3 when the process has it: no game thread runs there
+    Result rc = threadCreate(&g_thread, thread_main, nullptr, nullptr, 4 * 1024 * 1024, 0x3B, cores::core3() ? 3 : 0);
+    if (R_SUCCEEDED(rc)) LOG("[bg-shaders] the list's thread on core %d", cores::core3() ? 3 : 0);
     if (R_SUCCEEDED(rc)) rc = threadStart(&g_thread);
     if (R_FAILED(rc)) {
         g_running = false;

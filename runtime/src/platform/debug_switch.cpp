@@ -27,6 +27,7 @@ namespace gx2 { extern uint32_t g_render_thread_handle; }  // (gx2_core.cpp: rtc
 #include "../runtime.h"
 #include "../overlay/hostui.h"
 #include "debug_server.h"
+#include "cores_switch.h"
 #include "prepare_graphics_switch.h"
 #include "shader_scan_switch.h"
 #include "background_shaders_switch.h"
@@ -322,6 +323,14 @@ debugsrv::Reply coreprobe(const debugsrv::Args& a) {
     return debugsrv::ok(b);
 }
 
+// "core3 [0|1]" (test, docs/core3-plan.md): background shader compiles on core 3 or as before (cores 0-2)
+debugsrv::Reply core3(const debugsrv::Args& a) {
+    if (!a.empty()) cores::wanted() = atoi(a[0].c_str()) != 0;
+    if (!a.empty()) LOG("[debug] core 3 for background work: %s", cores::core3() ? "on" : "off");
+    return debugsrv::ok(std::string("core3 ") + (cores::core3() ? "on" : "off") +
+                        (cores::allowed() ? "" : " (the process has no core 3: the forwarder's NPDM)"));
+}
+
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
     return debugsrv::ok("pacing " + std::to_string(frame_pacing::mode()) + ": swap interval " +
@@ -493,6 +502,7 @@ void start() {
     debugsrv::add_command("rtcores", "rtcores [pref mask]    (test) the render thread's preferred core and core mask", rtcores);
     debugsrv::add_command("malloc", "malloc                 heap use (mallinfo; stalls allocations for ms)", malloc_info);
     debugsrv::add_command("coreprobe", "coreprobe [core] [s] [prio]  how much of a core a spinning thread gets (test)", coreprobe);
+    debugsrv::add_command("core3", "core3 [0|1]            background shader compiles on core 3 (test)", core3);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);
