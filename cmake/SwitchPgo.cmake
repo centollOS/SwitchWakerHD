@@ -77,7 +77,21 @@ macro(switch_pgo_configure)
         set_property(SOURCE ${_f} APPEND_STRING PROPERTY COMPILE_FLAGS " -g0")
       endif()
     endforeach()
+    # the profiled files are compiled with the checkout's paths relative to the build folder (cmake/pgo_compile.cmake), so
+    # that a profile made in one checkout fits another (docs/pgo-release-plan.md step 1). The release's profile is made in
+    # a folder of build/, as the installers' build (build/switch-dk): "../.." on both sides
+    file(RELATIVE_PATH _pgo_rel "${CMAKE_BINARY_DIR}" "${CMAKE_SOURCE_DIR}")
+    string(REGEX REPLACE "/$" "" _pgo_rel "${_pgo_rel}")
+    if(NOT _pgo_rel STREQUAL "../..")
+      message(WARNING "WWHD_PGO: the build folder is not a folder of build/ (the checkout is ${_pgo_rel} from it): a profile "
+                      "made in this folder fits only builds in folders as deep")
+    endif()
+    set(_pgo_launcher "${CMAKE_COMMAND}" "-DWWHD_PGO_ROOT=${CMAKE_SOURCE_DIR}" "-DWWHD_PGO_REL=${_pgo_rel}"
+                      -P "${CMAKE_SOURCE_DIR}/cmake/pgo_compile.cmake" --)
+    foreach(_t wwhd gamecode)
+      set_target_properties(${_t} PROPERTIES C_COMPILER_LAUNCHER "${_pgo_launcher}" CXX_COMPILER_LAUNCHER "${_pgo_launcher}")
+    endforeach()
     list(LENGTH _pgo_files _pgo_n)
-    message(STATUS "WWHD_PGO=${WWHD_PGO}: ${_pgo_n} files (${WWHD_PGO_SCOPE})")
+    message(STATUS "WWHD_PGO=${WWHD_PGO}: ${_pgo_n} files (${WWHD_PGO_SCOPE}), compiled with paths from ${_pgo_rel}")
   endif()
 endmacro()
