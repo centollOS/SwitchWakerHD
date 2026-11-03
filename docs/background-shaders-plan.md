@@ -66,3 +66,8 @@ speculate` + `dksh_cache translate --map`, the v1.1.0 template):
 So with that cache the list cost a second start 1.4 GB of SD reads, ~19,000 translations and ~2,000 compiles during
 play for nothing. `later_start` now skips it when `shadercache_dksh.bin` is there (in `WWHD_DK_SHADER_CACHE_DIR` when
 set); the debug server's `bgshaders start` still runs it.
+
+Console check (2026-11-03, 0c16d6d7, USA, handheld): a cache folder (`WWHD_DK_SHADER_CACHE_DIR`) holding the
+installer's `shadercache_dksh.bin` built on the Mac from the v1.1.0 template (23,380 shaders, the console's uamId),
+`done.txt` moved away: both starts log `[bg-shaders] graphics prepared on a computer (...): no background list`;
+the console's own files were put back afterwards.
