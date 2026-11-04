@@ -42,7 +42,7 @@ endforeach()
 function(_pgo_map value out)
   # the build folder first (its generated headers: the release's training build and the players' build have different
   # names), then devkitPro (the pinned toolchain is inside the checkout), then the checkout
-  foreach(_base "${WWHD_PGO_BUILD}" "${WWHD_PGO_DKP}" "${WWHD_PGO_ROOT}")
+  foreach(_base "${WWHD_PGO_BUILD}" "${WWHD_PGO_DKP}" "${WWHD_PGO_DKP_ALIAS}" "${WWHD_PGO_ROOT}")
     string(LENGTH "${_base}/" _blen)
     string(SUBSTRING "${value}" 0 ${_blen} _head)
     if(_head STREQUAL "${_base}/")
