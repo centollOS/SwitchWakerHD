@@ -1,3 +1,4 @@
+#include "background_shaders.h"
 #include "perf_metrics.h"
 #include "gfx/capture_schedule.h"
 #include "savestate.h"
@@ -9,6 +10,8 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include <atomic>
+#include <functional>
+#include <memory>
 
 #include "gx2/gx2.h"
 #include "gx2_texture_regs.h"
@@ -24,7 +27,21 @@ namespace mods { void draw_overlay(id<MTLCommandBuffer> cmd, id<MTLTexture> tex)
 namespace gfx {
 Renderer R;
 // GPU depth peeks for the game's sun visibility test (fork 73b54e1, Metal adaptation).
+// Peek command buffers committed early, with their answer, for peek_retire (render thread only).
+struct PendingPeek { id<MTLCommandBuffer> cmd; std::function<void(bool)> answer; };
+static std::vector<PendingPeek> g_pending_peeks;
+void flush();
+void peek_retire() {
+    auto pending = std::move(g_pending_peeks);
+    g_pending_peeks.clear();
+    for (auto& p : pending) {
+        [p.cmd waitUntilCompleted];
+        p.answer(p.cmd.status == MTLCommandBufferStatusCompleted);  // once: the handler may have done it
+    }
+}
 void peek_z(const uint32_t* cells, uint32_t n) {
+    depth_peek::AnswerGuard guard;  // answered here unless the copy's completion takes it over
+    const uint64_t ticket = depth_peek::next_ticket();  // one per request, in request order
     Surface* depth = nullptr;
     auto range = R.surfaces.equal_range(R.mainDepthAddr);
     for (auto it = range.first; it != range.second; ++it) {
@@ -34,6 +51,11 @@ void peek_z(const uint32_t* cells, uint32_t n) {
     }
     uint32_t points = std::min(n / 3,64u);
     if (!depth || !points) return;
+    // Shader compile Fast: the game reads this depth buffer back, so draws into it keep the exact
+    // wait from now on; if one was left out in this frame already, the frame answers no peek and the
+    // game keeps its previous answers, from a complete frame
+    if (bgshaders::enabled()) bgshaders::tracker().peeked(depth->addr, R.frame);
+    if (bgshaders::tracker().left_out_in(depth->addr, R.frame)) { bgshaders::peek_withheld(); return; }
     auto format = depth->tex.pixelFormat;
     if (format != MTLPixelFormatDepth16Unorm && format != MTLPixelFormatDepth32Float &&
         format != MTLPixelFormatDepth32Float_Stencil8) return;
@@ -52,9 +74,7 @@ void peek_z(const uint32_t* cells, uint32_t n) {
         destinations[i] = cells[i*3+2];
     }
     [b endEncoding];
-    uint64_t ticket = depth_peek::next_ticket();
-    [command_buffer() addCompletedHandler:^(id<MTLCommandBuffer> cb) {
-        if (cb.status != MTLCommandBufferStatusCompleted) return;
+    auto answer = [staging, destinations, points, format, ticket] {
         const uint8_t* raw = static_cast<const uint8_t*>(staging.contents);
         std::vector<uint32_t> depths(points);
         for (uint32_t i=0; i<points; i++) {
@@ -66,7 +86,27 @@ void peek_z(const uint32_t* cells, uint32_t n) {
             }
         }
         depth_peek::publish(ticket,destinations,depths);
-    }];
+    };
+    // answered once: by the completion handler or by peek_retire, whichever comes first
+    auto once = std::make_shared<std::atomic<bool>>(false);
+    std::function<void(bool)> answerOnce = [answer, once](bool completed) {
+        if (once->exchange(true)) return;
+        if (completed) answer();  // a failed command buffer leaves the previous answers
+        depth_peek::answered();
+    };
+    id<MTLCommandBuffer> cmd = command_buffer();
+    [cmd addCompletedHandler:^(id<MTLCommandBuffer> cb) { answerOnce(cb.status == MTLCommandBufferStatusCompleted); }];
+    guard.handed = true;
+    // the game reads the answers at its next step: commit this copy now; the render thread retires
+    // it while the game waits for it at its swap (peek_retire, depth_peek.h)
+    if (depth_peek::mode() == 2) {  // test: the former synchronous copy
+        void wait_idle();
+        wait_idle();
+        answerOnce(cmd.status == MTLCommandBufferStatusCompleted);
+    } else if (depth_peek::synchronous()) {
+        flush();
+        g_pending_peeks.push_back({cmd, answerOnce});
+    }
 }
 
 

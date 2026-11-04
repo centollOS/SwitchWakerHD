@@ -49,7 +49,7 @@ can also be dragged while placement is open. See [GamePad screen modes](gamepad-
 | Scaling smooth / sharp / integer, FXAA | yes | yes |
 | Internal resolution, AO modes, full-size AO depth, 16x AF | yes | yes |
 | Dynamic resolution (Settings → Graphics: off, down to 75 % or 50 %) | yes | yes |
-| Aspect ratio (16:10, 21:9, 32:9, match window) | yes | yes |
+| Aspect ratio (16:9, 4:3, 16:10, 21:9, 32:9, match window) | yes | yes |
 | 60 fps interpolation, true 60 | yes | yes |
 | Save states (menu, Shift+F1..F5 / F6, F2..F5) | yes | yes (a state loads with either renderer) |
 | Controls window, keyboard, game controllers, mouse camera, mods | yes | yes |
@@ -256,24 +256,57 @@ atomically after 120 frames without new pipelines. First-time shader translation
 and pipeline creation can still cause stalls.
 
 Successful guest pipelines also retain local, pointer-free recipes in
-`<pipeline-cache-file>.recipes`, bounded to 16,384 entries / 256 MiB. A background writer saves
+`<pipeline-cache-file>.recipes`, bounded to 16,384 entries / 256 MiB. The file (format version 2)
+stores each distinct SPIR-V program once, compressed, and recipes name it; in memory recipes share
+that compressed copy (a whole-game file from setup's model step: about 15 MB on disk, 11 MB of
+programs in memory). Version 1 files still load and are rewritten as version 2 at the next save.
+A background writer saves
 an atomic snapshot every two minutes while entries change, and a final checkpoint saves the latest
 entries at orderly shutdown or the scripted test endpoint. A crash can lose entries added since the
 last completed snapshot; the previous complete file remains usable. On the next start, a
-worker reads compatible recipes and compiles them while the title screen runs.
-It owns separate modules, descriptor layouts and a pipeline cache; the render
-thread takes a ready pipeline only after the exact key, both SPIR-V programs and
-descriptor layouts match. `WWHD_VK_PIPELINE_WARMUP=0` disables this recording and
-replay. Missing or unfinished pipelines use a separate demand compiler with an
-owned state snapshot and independent native cache. Exact guest draws remain at
+worker reads compatible recipes and compiles them while the title screen runs. Recipes from setup's
+model step also name the object archives whose models use them: those wait until the game loads
+one of their archives, then a few compiler threads (one on Android) build them before the models
+first appear, giving way whenever the game needs a pipeline at once. When more unused pipelines are
+ready than the limit allows (1,024; 256 on Android), those of archives no longer loaded go first.
+It compiles into the demand compiler's driver cache (below; its own cache only until that one exists). When a
+draw needs a pipeline the worker has ready and the exact key, both SPIR-V programs and descriptor layouts match,
+the render thread builds its own pipeline, a driver-cache hit (about 0.25 ms on an Adreno 750), and the worker's
+copy is destroyed: on Qualcomm's driver, frames drawn with the worker's pipeline objects themselves were about
+1.4 times as costly (issue #334, `warm_handover.h`). `WWHD_VK_WARM_HANDOVER=1` hands the worker's pipelines over
+again (measurements). `WWHD_VK_PIPELINE_WARMUP=0` disables this recording and replay. Missing or unfinished pipelines use a separate demand compiler with an
+owned state snapshot and independent native cache. With Shader compile Off, exact guest draws remain at
 the head of the ordered command stream until ready; the renderer can repeat the
 last complete scan image while waiting. It never substitutes state or drops that
-draw. This still delays new guest frames and input response. Presentation/overlay
+draw. This still delays new guest frames and input response. **Shader compile** Fast (below) lets
+draws skip that wait. Presentation/overlay
 pipeline misses currently wait without repeat pumping; this is a remaining
 limitation. BC texture decoding still creates its compute pipeline synchronously;
 its cost is recorded as `bc_decode_compute_pipeline` when tracing is enabled.
 `WWHD_VK_ASYNC_PIPELINES=0` selects diagnostic synchronous graphics creation.
 Recipe files contain game-derived shader code and must stay local.
+
+The head start's Metal pipeline recipes (the shaders by the Metal renderer's keys, target formats, blend, write
+mask and vertex strides) are guest-level too. With `WWHD_VK_METAL_RECIPES=1` the setup's Vulkan preparation
+(`--warm-shaders`) rebuilds each one's draw state from its two shaders' recorded registers (the pixel shader's state
+with the vertex stage's programs, fetch shader, resources and primitive type) and makes the Vulkan pipeline through
+the same code a draw uses (`draw.cpp derive_guest_pipeline_recipe`), in the head start's order; the recipes join
+the local database. With the full template: 38,094 Metal recipes give 1,160 distinct Vulkan pipelines beyond the
+template's own Vulkan ones, and in four test scenes the share of pipelines the game asks for that the database
+already has rose from 54–84 % to 66–95 % (`[vulkan pipelines] ... new keys N, K of them in the recipe database`,
+with `WWHD_VK_STATS` or `WWHD_VK_CPU_ONLY_STATS=1`), the same pipelines the Metal head start lacks in those scenes.
+In play these Metal-derived recipes are not part of the start queue (compiling ~1,000 of them there took the 1 % lows
+down on a phone): they carry a mark in the database and are compiled ahead by one low-priority thread, back to back
+before play and throttled once a play stage is drawing (after each compile it rests four times as long, at least
+8 ms: `WWHD_VK_METAL_QUEUE_REST`, `WWHD_VK_METAL_QUEUE_REST_MS`), waiting while the game's own compiles run, and only
+while the pool of ready pipelines has room. A recipe the game asks for loses the mark and joins the start queue from
+the next start. `WWHD_VK_METAL_QUEUE=start` (with the start queue, as before), `off` (demand only; the driver cache
+still has them) and `play` (measurements: no run before play) compare the choices.
+`WWHD_VK_WARM_PRUNE=1` (preparation only) starts the driver pipeline cache empty and compiles every recipe of the
+database into it, so entries no recipe uses any more are not carried over. `WWHD_VK_DEMAND_PROMOTE=1`: a pipeline
+the game needs while the warm-up worker's driver compile of it is running waits for that compile (at most
+`WWHD_VK_DEMAND_PROMOTE_MS`, default 1000) instead of compiling it a second time. `WWHD_VK_RECIPE_KEY_DUMP=file`
+(debug) lists derived keys, missed keys and the head start's shader identities.
 
 Every demanded draw remains Exact. While a pipeline is pending, owned native
 commands can be prepared ahead of it. Ordered emission waits for the exact
@@ -282,9 +315,56 @@ resource retirement drain the retained commands first. This overlap can shorten
 some waits; it does not guarantee removal of cold shader stutter.
 
 Cemu informed the worker, cache and startup precompile design; no implementation
-code was copied. Cemu can skip pending draws using renderer heuristics. This
-renderer always waits for demanded state and draws every object. Cemu shader and
-pipeline cache files are never inputs to this workflow.
+code was copied. Cemu shader and pipeline cache files are never inputs to this workflow.
+
+## Shader compile: Off or Fast
+
+Settings → Graphics → **Shader compile** decides what happens when a draw needs a shader or pipeline
+that is not ready yet. It works with both renderers and on every platform, is saved with the other
+settings and takes effect at once.
+
+- **Off (exact, default):** the draw waits for its shader. Every frame is complete, but the first
+  visit to a place can stutter. Vulkan repeats the last finished picture meanwhile. Metal keeps its
+  long-standing rule: it waits up to 25 ms per frame (`WWHD_COMPILE_WAIT_MS`) and then leaves a draw
+  out for a moment, but always waits for a target's first frame.
+- **Fast (not exact):** smoother first visits, but objects, shadows or effects may be missing for a
+  moment. The draw waits at most 4 ms per frame (quick results from a warm cache do not count), is
+  then left out of that frame and appears once its shader is ready, usually a frame or two later.
+  Shadow maps, reflections, post effects, full-screen passes and the first frame after a load can be
+  left out.
+
+What Fast still waits for, so nothing wrong lasts and game logic does not change:
+
+- targets the game reads back, including the depth buffer of the game's sun check (its glare);
+- targets it copies from now and then (snapshots, photos);
+- targets that are new or drawn only now and then (a one-off capture).
+
+Presentation and overlay never wait for game shaders.
+
+The game's sun check reads depth from the picture (a "depth peek"). Its answers now always reach
+the game two steps after the request, whatever the timing: with Off and Fast, with or without load,
+the game sees the same answers. The sun glare reacts one game step later than on the Wii U, for no
+cost (see [performance.md](performance.md)).
+
+In a test on a Mac (MoltenVK; title screen, Windfall, a Hyrule room and the open sea at dusk, each
+a first visit with empty game shader caches, two runs each), the frames waited 2.1 to 3.6 s in all
+for shaders with Off and 0.4 to 0.5 s with Fast; Fast's longest frame per place was 81 to 422 ms
+against 105 to 740 ms with Off. Fast left out about 810 draws in 38 frames, mostly for one to three
+frames; the most visible were a fade overlay missing for one frame (a flash on the file screen and
+when entering the Hyrule room) and enemies on the sea. With warm caches Fast left no draw out.
+
+`WWHD_BG_SHADERS=0|fast` sets the level for that start (the buttons are then greyed out; `safe`,
+a former level, reads as 0). `WWHD_BG_SHADER_WAIT_MS` sets Fast's per-frame wait. The log records
+the level at start-up and each change (`[shaders] shader compile off|fast`). **Copy performance
+report** has a line with the level, the draws left out, the waits, and why the other draws waited.
+`WWHD_TEST_BG_SHADERS=fast@<frame>` (or `0@`) sets it at a TV frame in a scripted test.
+`WWHD_BG_SHADERS_DUMP=<n>` (Vulkan) writes the TV image of the first n frames that left a draw out,
+and of the two frames after each, to see what was missing.
+
+Fast is close to Cemu's **Async shader compile**: Cemu leaves a draw out while its pipeline
+compiles and draws it once ready, at once (no wait), keeping only very small draws without a depth
+buffer (full-screen quads) and one game-specific target size exact. Fast waits a short budget first,
+which catches most quick compiles, and keeps read-back, copied and one-off targets exact.
 
 ## Preparing shaders
 
@@ -311,6 +391,46 @@ refreshing. Player caches persist in `shader-prebuild/live` across preparation g
 lives under the host configuration directory's `shader-prebuild` folder; portable installations use their
 user directory. Cache overrides take precedence over this selection.
 
+**Preparing shaders: models** is an optional setup step, off by default on desktops (experimental there)
+and recommended on Android (see below): switch it on with "Also prepare model shaders (experimental)" in setup (the setup window, the
+question of the text setup, or `--model-sweep`); setup remembers the choice, so Repair (which also
+carries out Rebuild shader cache) runs it again. It runs for each prepared renderer (on macOS Metal and
+Vulkan at the same time, on one bar): the game starts hidden and muted from its title screen (no save is
+needed or touched), loads every object archive and every stage's rooms named in your game files and
+draws each of their models once, shows the title's sea and sky at other times of day and in a storm,
+shows every actor the rooms place for a few frames (made by the game, drawn, never running its logic,
+then removed) and the grass they plant with and without its wind animation, enters every stage at its first
+room (the sea at every island) and shows it under its own lighting, fog and sky (the game's own stage change, as
+starting a game does), and
+finally opens the file select, so the pipelines they need are recorded for this build and this computer
+(about 20 minutes on a recent Mac, Metal and Vulkan at the same time; the game runs without a frame limit
+meanwhile). Metal builds the recorded pipelines in the
+background at start; Vulkan builds an archive's pipelines when the game loads it (a room's when the room loads,
+a stage's when it is entered; the latest load first); pipelines of the title's own scene are built at start.
+Nothing from the game is shipped: the archive list is read from your own files and only names are stored.
+Cancelling keeps everything prepared so far; the next setup continues where it stopped. A model, actor or stage
+that makes the game stop is skipped the next time (`shader-prebuild/model-sweep/<renderer>/skip.txt`, names
+only; `tools/installer/model_sweep_skip.txt` lists those known already). The actor placements read from the rooms
+stay in that folder too (`actors.txt`). Particle effects, Link's own drawing while he moves and sailing are not
+part of it yet; they are prepared when first seen in play. `WWHD_SETUP_MODEL_SWEEP=1` (or `0`) overrides the
+choice; `WWHD_SETUP_MODEL_SWEEP_VISITS=0` leaves the stage visits out.
+
+On Android the step is the setup screen's "Prepare model shaders (recommended)" switch, ticked until the player
+unticks it (`ModelsStep.RECOMMENDED`; the choice is remembered). On a Xiaomi 14 the 25-place test route had about
+35 pipeline waits with the step and about 1000 without; the step took about 40 minutes there. It runs after the
+graphics are prepared (or at once on a ready game when ticked later), inside the app. The setup service drives the
+same sweep (`tools/android/android_models.py` around `model_sweep.py`); each attempt of the game runs in its own
+process (`ModelPrepareActivity`, `:modelprep`), which the setup screen starts, so a model that stops the game ends
+only that attempt. The player sees only setup's progress screen (the phase or stage, the bar, the time left and
+Cancel) in landscape: the game renders the sweep hidden (`WWHD_HIDDEN_WINDOWS`: into its own render targets, as in
+play, with nothing presented; `gfx/hidden_presentation.h`). The recorded pipelines do not depend on the screen: a
+pipeline key holds the shaders, the formats of the game's render targets and the fixed-function state, never the
+swapchain's. Cancel stops the attempt in order and keeps what was prepared (ticking the switch again continues
+it); setup's heat and battery pauses and Pause stop it the same way, and it goes on with Continue. Leaving the
+screen pauses the step until setup is shown again. `tools/installer/model_sweep_keys.py` compares the key logs
+(`WWHD_VK_KEY_LOG`) of a hidden and a presenting run of the same slice (`WWHD_TEST_PRESENT_HIDDEN=1` makes hidden
+windows present).
+
 The template covers recorded states rather than every possible scene. Uncovered shaders and pipelines
 can still cause a first-use hitch. Pending draws wait for their exact state; the renderer can repeat the
 last complete picture during that wait. For local template selection and recording commands, see the
@@ -322,9 +442,11 @@ an isolated directory; `WWHD_VK_SHADER_CACHE=0` disables disk storage. An explic
 directory overrides `WWHD_SHADER_CACHE=0`. Canonical GLSL and stage deduplication
 remains active in memory when disk storage is disabled. Fresh decompiler metadata
 is kept for every guest variant; identical final shader programs share compilation.
-The file (format `WWVKSC03`) stores SPIR-V with a hash and the length of the GLSL it was
-compiled from, not the GLSL text; files from older versions (`WWVKSC02`) still load and are
-rewritten in the new format. In memory, shaders likewise keep the SPIR-V (shared with the
+The file (format `WWVKSC04`) stores each distinct SPIR-V program once (compressed) and, per
+translated shader, a hash and the length of the GLSL it was compiled from, not the GLSL text;
+shaders with the same final program share one copy, also in memory. Files from older versions
+(`WWVKSC03`, `WWVKSC02`) still load and are rewritten in the new format. The 128 MiB limit
+counts distinct programs. In memory, shaders likewise keep the SPIR-V (shared with the
 cache) and the GLSL hash; the text is released once its compilation has started.
 `WWHD_VK_SHADER_SOURCE_VERIFY=1` keeps it, confirms every hash match between translated
 shaders byte for byte and lets failed-pipeline captures include the GLSL. Key verification
@@ -443,6 +565,9 @@ wait timers disabled. CPU time excludes sleeping and GPU waits.
 | Environment option | Scope and correctness constraints |
 | --- | --- |
 | `WWHD_VK_REUSE_UNIFORM_SNAPSHOTS` | Reuses immutable uniform slices after full fresh byte comparison within the same device/submission generation. Support uniforms are packed and texture/AO patches applied before lookup; allocation alignment and zero padding remain unchanged. |
+| `WWHD_VK_UNIFORM_VERIFY` | Debug check. Packs each stage's support uniforms a second time and compares the bytes with those the draw uses; logs mismatches and a count every 2^20 checks. |
+| `WWHD_GX2_SUBMITTED_UNIFORMS` | On by default (both renderers). Draws in a called display list read their uniform blocks as they were when the game submitted the call, as the console's GPU does; `0` reads them whenever the render thread gets to the draw (the old behaviour, which made pictures depend on thread timing). See `runtime/src/gx2/submitted_uniforms.h`. |
+| `WWHD_GX2_SUBMITTED_STATS` | Debug. Logs, every 1000 display-list calls, how many uniform blocks and bytes their submissions copied. |
 | `WWHD_VK_REUSE_FEEDBACK_IMAGES` | Retains compatible feedback-copy images in separate shader-stage/texture-unit slots, bounded to 128 MiB of retained image allocations. Every attachment alias still receives a fresh copy, with barriers preserving prior reads before overwrite. Replaced resources remain fence-retired. |
 | `WWHD_VK_SKIP_REDUNDANT_BINDS` | Omits only exact consecutive descriptor bindings, including layout, sets, dynamic offsets, command buffer, and submission generation. It can bind just the changed stage; resource preparation still runs. Pass changes reset the tracked state. |
 | `WWHD_VK_DESCRIPTOR_RANKS` | Precomputes descriptor binding ranks and compacts active writes/offsets in binding order. Invalid or duplicate metadata falls back to the original sorting path. |
@@ -453,6 +578,9 @@ wait timers disabled. CPU time excludes sleeping and GPU waits.
 | `WWHD_VK_SHADER_STATE_MEMO` | Retains four exact gathered linkage-key entries per shader stage. Every lookup freshly gathers all linkage words and compares every active byte, count, and program hash seed. Misses use the identical hash mixer; save-state and sentinel calls clear the memo. |
 | `WWHD_VK_SKIP_VERTEX_BINDS` | Omits only identical host vertex buffer/offset bindings after fresh snapshot preparation. Sixteen binding slots are guarded by command buffer, submission generation, and pass resets. Index bindings remain fresh. Combine with exact vertex snapshot reuse to make unchanged slice identities available. |
 | `WWHD_VK_SAMPLER_MEMO` | Reuses immutable sampler handles after exact device, fresh sampler-word, compare/integer, and effective anisotropy matching. Texture preparation still runs before lookup. |
+| `WWHD_VK_TEXTURE_STAGING` | `ring`: texture levels are staged through the recording submission's upload arena (only blocks it already has; at most `WWHD_VK_TEXTURE_STAGING_MB`, default 16, per submission) instead of one staging buffer per level. The texture stats line counts levels and MiB per path. |
+| `WWHD_VK_TEXTURE_BUDGET` | `1`: images of CPU-written textures (never GPU-written surfaces or attachments) are released, least recently looked up first, while they exceed `WWHD_VK_TEXTURE_BUDGET_MB` (default a quarter of the device memory budget); `WWHD_VK_TEXTURE_IDLE_FRAMES=n` also releases those unused for n frames; textures used in the last `WWHD_VK_TEXTURE_PIN_FRAMES` (3) frames stay. A released texture keeps its surface; its next lookup makes the image again and uploads it from guest memory. |
+| `WWHD_ARTISTIC_MIPS` | `1` (Metal and Vulkan): textures whose mip levels are not box downscales of each other (gfx/artistic_mips.h; checked at upload on the first levels of at most 64x64 down to 4x4, mean RMS difference over 15 %) get log2 of the target's internal resolution scale added to their LOD bias and no forced anisotropy. `WWHD_ARTISTIC_MIPS_LOG=1` logs verdict changes (`=2` on Metal: every verdict). |
 | `WWHD_VK_SPARSE_HASH_MEMO` | Only used where page write tracking is unavailable (texture changes are detected by `runtime/src/write_watch.h`; the sparse check is its fallback). Compares all freshly read, ordered sparse texture samples before reusing their hash. Full texture checks, invalidation, and uploads remain unchanged. Retains 64 entries by default; `WWHD_VK_SPARSE_HASH_ENTRIES=256` selects a bounded 16 MiB sample store. Oversized sample sets stream through the original mixer. |
 | `WWHD_VK_SHADER_KEY_DIRTY` | Avoids shader-generation bumps only for explicitly classified register bits absent from the current Vulkan shader key. Program headers, fetch strides, unknown registers, and context/save-state invalidation remain conservative. |
 | `WWHD_VK_VERTEX_HISTORY_REUSE` | Adds a second distinct vertex snapshot key per binding, requiring `WWHD_VK_REUSE_VERTEX_SNAPSHOTS=1`. Every candidate receives a fresh full payload comparison within the same device/submission generation; changed bytes allocate a fresh slice. |
@@ -599,7 +727,7 @@ Startup overrides match Metal: `WWHD_RES_SCALE` selects the initial internal sca
 (1–4); `WWHD_AO_MODE` selects AO mode 0–2. If `WWHD_AO_MODE` is absent, presence of
 `WWHD_NO_AO_QUIRK` selects mode 0, otherwise mode 2 is the default. The explicit AO
 mode takes precedence over the legacy flag, whose value is ignored.
-`WWHD_AO_HIRES` defaults to on (off on Android, where the phone GPU is the limit in heavy views, issue #56); `0` disables it, `1` enables it. `WWHD_ANISO` defaults to off and a
+`WWHD_AO_HIRES` defaults to on (off on Android, where the phone GPU is the limit in heavy views, issue #56); `0` disables it, `1` enables it. `WWHD_FULL_LIGHT` (Full-size torchlight: the point-light buffer at the screen's resolution) defaults to on (off on Android, like `WWHD_AO_HIRES`); `0` disables it, `1` enables it. `WWHD_ANISO` defaults to off and a
 nonzero value enables it. `WWHD_FXAA` defaults to off and its presence enables it,
 including a value of `0`, matching Metal's existing behavior.
 `WWHD_SCALE_FILTER=smooth|sharp|integer` selects the initial presentation filter;
@@ -711,6 +839,21 @@ Since 2026-10-07 every platform uses the two paths that were Android defaults be
 
 The Metal renderer keeps its GX2DrawDone wait: it binds large vertex buffers straight from guest
 memory. See `docs/performance.md` ("Desktop CPU/GPU overlap defaults") for the measurements.
+
+## Submission pool
+
+The renderer records into a ring of submission slots (command buffer, fence, descriptor pool and
+upload memory each). When the render thread comes back round to a slot the GPU has not finished, it
+waits for it. `WWHD_VK_SUBMISSION_POOL=N` sets the number of slots at start, 4 to 16 (default 4);
+`WWHD_VK_SUBMISSION_POOL8=1` (8 slots) and `=0` (4) are accepted as an older name. The log names the
+active size (`[vulkan] submission pool 4 slots`) and so does the performance report header. With
+`WWHD_VK_STATS=1`, `[vulkan submission ring]` reports the waits for a free slot and the submissions
+and frames still in flight at each swap.
+
+More slots don't make frames faster: when the CPU is the limit the ring is never full, and when the
+GPU is the limit the render thread only queues more work ahead of it, which adds up to a frame of
+input latency and about 32 MiB of upload memory per extra slot. See `docs/performance.md`
+("Submission pool size") for the measurements.
 
 ## Draw batching (all platforms)
 
@@ -852,25 +995,48 @@ private; they contain game imagery.
 
 ## Render-thread profiler
 
-`runtime/src/render_prof.h` (both renderers) is on by default and cheap (`WWHD_PROFILE=0` turns it
-off). Every 120 frames it builds a report that `WWHD_PROFILE=1`, `WWHD_VK_STATS` or
+`runtime/src/render_prof.h` (both renderers) is **off by default**. Settings → Graphics → Overlay →
+**Detailed performance profiling** turns it on (saved with the other settings, on every platform). It
+takes effect at once, between two frames; the first detailed report is ready about 120 frames later.
+`WWHD_PROFILE=1` forces it on and `WWHD_PROFILE=0` off for that start; the checkbox is then greyed
+out. The log records the state at start-up and each change (`[prof] detailed performance profiling
+on|off`). When on, every 120 frames it builds a report that `WWHD_PROFILE=1`, `WWHD_VK_STATS` or
 `WWHD_VK_CPU_ONLY_STATS=1` log as `[prof]` lines, and that the settings overlay's
 **Copy performance report** button (Graphics tab) puts on the clipboard. Its two header lines
 (`runtime/src/report_header.h`) say where the report comes from: the version and commit (release
 builds: the tag; others `git describe`, e.g. `v0.2.5+3`), the OS and version, the GPU with its driver
 version (decoded as vulkaninfo does) and Vulkan version, or the Metal device; then the renderer, host,
 frame mode, internal scale, buffer cache on/off, the gyro source when not off, and as `overrides:` the
-CPU paths not set to `1` and lazy DrawDone / async present when turned off. The report itself:
+CPU paths not set to `1` and lazy DrawDone / async present when turned off. With profiling off,
+**Copy performance report** leaves out the detailed timing/upload/draw-class sections below and says
+in one line that the setting turns them on. `WWHD_VK_STATS` alone does not turn on the profiler.
+
+Periodic interpolation, swap-rate and continued-draw logging is also opt-in. Set
+`WWHD_LOG_FLIP_PACING` to restore interpolation and swap-rate lines; set
+`WWHD_INTERP_PASS_STATS` to add interpolation pass CPU timing. Set `WWHD_VK_STATS` to enable
+continued-draw statistics and the periodic interpolation/swap lines (and additional Vulkan
+diagnostics). `WWHD_SCHED_STATS` also restores the swap-rate line and enables scheduler statistics;
+setting it to `2` additionally enables timed scheduler statistics. These logging switches check
+whether the variable is set, so even a value of `0` enables them. For a detailed shared report, turn
+on **Detailed performance profiling**, play a few seconds, then copy the report. The detailed report
+contains:
 
 - frame time, swaps/s, logic steps/s, render-thread CPU, time in GX2 ops and idle;
 - ms per frame per op and, sampled on one draw in 64, per draw phase (shader lookup, index
   conversion, targets, pipeline, uniforms, textures, descriptors, pass, recording, vertex
   snapshots, draw/submit);
+- the uniforms phase in parts (stage setup, packing the support uniforms, guest uniform blocks,
+  the support-uniform upload), timed on another one draw in 64 so that the phase totals do not
+  carry these timers; one timer call's cost is taken off each part;
 - render-thread waits for the GPU and the swapchain; game-thread waits for the render thread
   (DrawDone, CopySurface, flips);
 - uploads per frame by kind (vertex, index, uniform blocks, packed uniforms, texture staging; logic
   and interpolation hold frames apart) and, on one frame in 16, the unique guest bytes those
   copies read;
+- the texture cache: full checks of CPU textures per frame and the guest bytes they hash, how many were
+  served from the cache and how many uploaded again, and the texture budget's releases and remakes;
+- the GPU timeline: GPU busy time per frame and the idle gaps between command buffers (Metal: each
+  command buffer's GPU start/end; Vulkan: the submission timestamps, when GPU timestamps are on);
 - draw classes: draws with no register change since the previous draw, draws where only ALU
   constants, uniform-block or vertex-buffer words changed (continued-draw candidates), and the most
   written other registers;
@@ -996,6 +1162,26 @@ It is **off** by default.
 - The current resolution is shown in the performance overlay and in the copied performance report.
 
 Both renderers (Metal and Vulkan) support it. The idea comes from GreenNaugahyde's Android fork.
+
+## Depth clipping in shaders on panvk (Mali)
+
+Mali GPUs have no geometric clipper: panvk clips depth by culling each fragment whose depth leaves the
+viewport's depth range. That cull works on depth interpolated in screen space, which drifts past 1.0 on
+far-plane geometry whose triangles pass beside or behind the camera: the sky's cloud band on the title
+screen and at sea lost pieces along straight edges, flickering as the camera moved. Turning on depth
+clamp avoids the cull but also lets through what only it removes: the game draws primitives on the
+camera plane (w = 0), which clipping discards; with clamp, one of them filled the 16:9 picture with a
+single colour at sea near Outset.
+
+On panvk, draws that don't write depth therefore clamp depth and clip in their shaders: the vertex
+shader passes the clip-space distances to the near and far planes, interpolated like the point on the
+triangle, and the pixel shader discards outside them (and at w = 0). Draws that write depth keep the
+hardware path, so opaque geometry keeps the early depth test; draws whose own state turns off near or
+far clipping are unchanged. A draw with a stage that can't take the change (a graphics-pack shader
+without the decompiler's `SET_POSITION`) keeps the hardware path for both stages and is drawn as before;
+the log names the shader. `WWHD_VK_CLIP_EMULATION=0` turns this off, `=1` turns it on for other
+drivers with the depthClamp feature; the log names the choice. It is part of the shader key, so shader
+caches keep both variants.
 
 ## Choosing the GPU
 

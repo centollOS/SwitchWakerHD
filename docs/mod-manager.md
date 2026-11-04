@@ -53,6 +53,26 @@ mod's page), the *Experimental* tag where it applies and a one-word status (*On*
   and the Mods folder. Notices from the manager (for example a graphics pack that
   was switched off) appear at the top of the tab until OK.
 
+### Story items
+
+**Mods › More › Cheats › Story items** contains separate one-shot grants for Nayru's,
+Din's and Farore's Pearls, and real ownership of the fully upgraded Master Sword.
+They are unused by default and are separate from **Give all items** and the temporary
+sword-equipping cheat.
+
+The first use each session asks for confirmation: “This can change or break the
+story's order. A save backup is made first.” A complete backup of the last in-game
+save must succeed before any story item is granted. Save in the game first if no
+save exists yet. The backup appears under **Mods › More › Save backups** and can be
+staged for restoration at the next start.
+
+These grants change inventory only. Pearl placement and the Tower of the Gods still
+follow the game's statue interactions. The sword grant records only its final native
+ownership phase and equips it; it does not grant the intermediate ownership phase
+that hid Medli in #85, or change the shield. Ownership itself can still affect story
+checks and character availability. Save in the game to keep a grant; loading a save
+state restores the item flags recorded in that state.
+
 **Switching a mod on is the one way to get it running.** A built-in mod or a mod
 that needs nothing switches on at once. Otherwise one review opens with
 everything at once: what the mod does, the experimental warning (saves are backed
@@ -198,14 +218,16 @@ the game runs its original code. These mods work the same at 30 fps, with 60/120
 interpolation and with true 60: they change animation rates and speed targets inside the game's
 own steps, never amounts added per frame.
 
-Jump anywhere makes Link jump from standing or running with a button of your choice (L by
-default; also R, ZL, ZR, L3 or R3), using the game's own jump off a ledge, a little higher. The
-button keeps its normal use. Options on its mod page: **Double jump** allows one more jump in the
-air, and **No automatic jumps off ledges** makes Link drop off an edge instead of jumping by
-himself; press the button just after leaving the edge to jump. It does not work in cutscenes or
-dialogue or while swimming, climbing or on a ladder, and the moon jump cheat keeps L while it is
-on. `WWHD_MOD_JUMP=1` switches it on at startup (`WWHD_MOD_JUMP_DOUBLE`, `WWHD_MOD_JUMP_NO_AUTO`,
-`WWHD_MOD_JUMP_BUTTON`).
+Jump anywhere makes Link jump from standing or running with an input of its own (L1 and Q by
+default; any controller button, key or, on a touch screen, a Jump button: see
+[controller-input.md](controller-input.md#jump-anywhere-and-the-moon-jump-on-inputs-of-their-own)),
+using the game's own jump off a ledge, a little higher. It never presses the game's L. Options on
+its mod page: **Double jump** allows one more jump in the air, and **No automatic jumps off
+ledges** makes Link drop off an edge instead of jumping by himself; press the button just after
+leaving the edge to jump. It does not work in cutscenes or dialogue or while swimming, climbing or
+on a ladder; with the moon jump cheat on the same input, the moon jump wins. `WWHD_MOD_JUMP=1`
+switches it on at startup (`WWHD_MOD_JUMP_DOUBLE`, `WWHD_MOD_JUMP_NO_AUTO`; `WWHD_MOD_JUMP_BUTTON`
+only for a controls file from before the Jump input).
 
 **More > Install from a file or folder** accepts a local folder or `.wwhdmod` ZIP
 from the file/folder picker; the review for switching it on opens right away
@@ -313,7 +335,8 @@ not ask.
 
 **Mods > More > Save backups** lists every backup with its date, reason and size.
 **Back up now** makes a manual backup. Backups live in `save-backups` next to the
-save folder (on Android in the app's files folder, next to `save`), one folder
+save folder (on Android in the app's files folder, next to `save`; with a save folder chosen in
+the Saves tab, for example a cloud folder, they stay in the usual local `save-backups`), one folder
 per backup named after its date and reason (for example
 `2026-10-11_14-03-12-mod-dragon` before a mod, with its id cut to 7 characters,
 `…-restore` or `…-manual`), with the copied files under `save/` and

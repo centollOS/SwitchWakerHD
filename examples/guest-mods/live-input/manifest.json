@@ -1,0 +1,14 @@
+{
+  "format_version": 1,
+  "id": "live-input",
+  "name": "Live input demo",
+  "version": "0.1.0",
+  "game_id": "wwhd",
+  "minimum_manager_version": "1.5.0",
+  "kind": "guest",
+  "guest": {"api_version": 1, "elf": "mod.elf"},
+  "options": [
+    {"id": "swap", "type": "bool", "name": "Swap A and B", "default": false, "menu": true, "live": true, "section": "Demo",
+     "description": "A live option: the mod follows it at once."}
+  ]
+}

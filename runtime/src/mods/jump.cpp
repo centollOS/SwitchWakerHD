@@ -10,19 +10,27 @@
 // drops off the edge and the player jumps with the button (a short grace window counts as ground).
 //
 // procAutoJump_init (GameCube 80115EA4, USA 023F7958) clamps speedF to at least the auto jump's
-// minimum, so from standing he hops forward a little; speed.y comes from speedF. His collision's
-// ground flags are cleared as for the moon jump (cheats.cpp), or the jump would land at once.
-// The moon jump cheat on the same button wins. Off means identical: no guest reads or writes.
+// minimum (speed.y comes from it) and leaves the air step running Link up to full speed along his
+// facing; ours then follows the stick instead, and goes straight up when the stick is released
+// (jump_policy.h straight_up). His collision's ground flags are cleared as for the moon jump
+// (cheats.cpp), or the jump would land at once.
+// The jump has its own input (input_map kJump, the virtual input::kVirtJump): it never presses the
+// game's own L, and any controller button, key or the on-screen Jump button can be it (Controls). The
+// moon jump held at the same time wins. Off means identical: no guest reads or writes.
 // True 60: decisions and guest calls happen on full steps only; previews are rolled back by true60.
+// The input is read on every pass (also the half steps): a press that begins on a half step reaches
+// the next full step once (jump_policy::Latch).
 //
 // Idea/code from GreenNaugahyde/ZeldaWWHDRecompAndroid (MPL-2.0), mods/jump.cpp.
 // WWHD_JUMP_LOG=1 logs each jump.
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 #include "guest_addr.h"
 #include "input.h"
+#include "input_map.h"
 #include "jump_policy.h"
 #include "mods.h"
 #include "runtime.h"
@@ -35,26 +43,34 @@ constexpr uint32_t kCurProc = 0x65F0;  // daPy_lk_c::mCurProc
 constexpr uint32_t kModeFlg = 0x6A70, kModeSwim = 0x40000;
 constexpr uint32_t kAcchFlags = 0x80C + 0x28, kAcchGround = 0x20 | 0x40 | 0x80;  // as in cheats.cpp
 constexpr uint32_t kSpeedF = 0x370, kSpeedY = 0x340;
+constexpr uint32_t kNormalSpeed = 0x6A14, kStickDistance = 0x6A08;  // daPy_lk_c: mNormalSpeed, mStickDistance
+constexpr uint32_t kProcTimer = 0x6916;                             // mProcVar0 (s16; GameCube 0x34D0)
+constexpr uint32_t kPosX = 0x314, kFacing = 0x32A;  // current.pos (x, +8 z), shape_angle.y
+constexpr uint32_t kRoot = 0x7308, kRootMode = 0x68DE;              // m3700 (GameCube 0x3700), m34C2 (u8)
+const uint32_t kHeldPos = GD(0x1046CD48);  // the HD's retained copy of his position (0240D130; editor_game.cpp)
 const uint32_t kAutoJumpInit = GC(0x023F7958);  // daPy_lk_c::procAutoJump_init()
 const uint32_t kFallInit = GC(0x023F6564);      // daPy_lk_c::procFall_init(int, f32)
 const uint32_t kPlay = GD(0x1046F0B0);
 constexpr uint32_t kStage = 0x5134, kEventMode = 0x5292;  // as in fast_forward.cpp
 
-std::atomic<uint32_t> g_buttons{0};
+std::mutex g_input_mu;
+Latch g_latch;  // input::kVirt* bits between full steps
 State g_state;
 uint32_t g_link = 0;
+bool g_straight = false;  // our jump goes straight up: posMove's take-off root motion is taken back
+float g_root_x = 0, g_root_z = 0;  // m3700 before Link's execute (every pass, previews too)
 
 bool log_on() {
     static const bool on = getenv("WWHD_JUMP_LOG") != nullptr;
     return on;
 }
 
-bool blocked(uint32_t link) {
+bool blocked(uint32_t link, uint32_t held) {
     const char* stage = reinterpret_cast<const char*>(mem::ptr(kPlay + kStage));
     if (!*stage || !strncmp(stage, "sea_T", 8) || !strncmp(stage, "Name", 8)) return true;  // title, file select
     if (ld8(kPlay + kEventMode) != 0) return true;  // dialogue, cutscenes
     if (ld32(link + kModeFlg) & kModeSwim) return true;
-    return infinite(kMoonJump) && jump_button() == input::kL;  // the moon jump owns L
+    return infinite(kMoonJump) && (held & input::kVirtMoonJump);  // the moon jump on the same input wins
 }
 
 void jump(Cpu* c, uint32_t link, Action a) {
@@ -62,20 +78,32 @@ void jump(Cpu* c, uint32_t link, Action a) {
     guest_call(c, kAutoJumpInit, {link});
     *c = saved;
     if (a != Action::kDoubleJump) stf32(link + kSpeedY, ground_speed_y(ldf32(link + kSpeedY)));
+    st16(link + kProcTimer, uint16_t(kAirStick));  // the air step follows the stick
+    g_straight = straight_up(ldf32(link + kStickDistance));
+    if (g_straight) {
+        stf32(link + kSpeedF, 0.f);
+        stf32(link + kNormalSpeed, 0.f);
+        g_root_x = ldf32(link + kRoot), g_root_z = ldf32(link + kRoot + 8);  // (the init zeroed it)
+    }
     st32(link + kAcchFlags, ld32(link + kAcchFlags) & ~kAcchGround);  // off the ground: no landing at once
     if (log_on())
-        LOG("[jump] %s: speedF %.1f, speed.y %.1f", a == Action::kJump ? "jump" : a == Action::kGraceJump ? "grace jump" : "double jump",
-            ldf32(link + kSpeedF), ldf32(link + kSpeedY));
+        LOG("[jump] %s: speedF %.1f, speed.y %.1f, stick %.2f", a == Action::kJump ? "jump" : a == Action::kGraceJump ? "grace jump" : "double jump",
+            ldf32(link + kSpeedF), ldf32(link + kSpeedY), ldf32(link + kStickDistance));
 }
 }  // namespace
 
-void jump_input(uint32_t buttons) {
-    if (jump_anywhere()) g_buttons.store(buttons, std::memory_order_relaxed);
+void jump_input(uint32_t virt) {
+    if (!jump_anywhere()) return;
+    std::lock_guard<std::mutex> lk(g_input_mu);
+    g_latch.see(virt);
 }
 
 void jump_reset() {
     g_state = {};
     g_link = 0;
+    g_straight = false;
+    std::lock_guard<std::mutex> lk(g_input_mu);
+    g_latch = {};
 }
 
 void jump_step(Cpu* c, uint32_t link, bool before) {
@@ -92,13 +120,35 @@ void jump_step(Cpu* c, uint32_t link, bool before) {
     }
     const uint32_t proc = ld32(link + kCurProc);
     if (before) {
+        if (g_straight) g_root_x = ldf32(link + kRoot), g_root_z = ldf32(link + kRoot + 8);
         if (preview) return;
-        const bool button = (g_buttons.load(std::memory_order_relaxed) & jump_button()) != 0;
-        const Action a = step(g_state, {proc, button, blocked(link), double_jump()});
+        // the old Jump anywhere button choice becomes the Jump binding of an old controls.json (once)
+        static const bool adopted = (input_map::adopt_legacy_jump_button(jump_button()), true);
+        (void)adopted;
+        uint32_t held, pressed;
+        {
+            std::lock_guard<std::mutex> lk(g_input_mu);
+            held = g_latch.last;
+            pressed = g_latch.take();
+        }
+        const bool button = (held & input::kVirtJump) != 0;
+        const Action a = step(g_state, {proc, button, blocked(link, held), double_jump(), (pressed & input::kVirtJump) ? 1 : 0});
         if (a != Action::kNone) jump(c, link, a);
         return;
     }
-    // after the execute: the game's own ledge jump began in this step: a plain fall instead
+    // after the execute: a straight-up jump takes back what the take-off animation moved him this pass
+    if (g_straight) {
+        if (proc != kProcAutoJump) {
+            if (!preview) g_straight = false;
+        } else if (ld8(link + kRootMode) == 1) {
+            const Xz d = root_motion(ldf32(link + kRoot) - g_root_x, ldf32(link + kRoot + 8) - g_root_z, int16_t(ld16(link + kFacing)));
+            for (uint32_t x : {link + kPosX, kHeldPos}) {  // (and the HD's retained copy the next execute reads)
+                stf32(x, ldf32(x) - d.x);
+                stf32(x + 8, ldf32(x + 8) - d.z);
+            }
+        }
+    }
+    // the game's own ledge jump began in this step: a plain fall instead
     const bool convert = preview ? proc == kProcAutoJump && !g_state.own && no_auto_jump()
                                  : after_step(g_state, proc, no_auto_jump());
     if (!convert) return;

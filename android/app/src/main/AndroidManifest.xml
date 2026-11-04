@@ -18,6 +18,9 @@
         <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
     </queries>
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- code mods' microphone (Mod SDK wwhd_mic_*): asked only when the player turns a singing option on -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -99,6 +102,16 @@
             android:exported="false" android:label="Preparing shaders"
             android:screenOrientation="sensorLandscape"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|density" />
+        <!-- setup's models step: one attempt of the game, drawing hidden under setup's progress screen, in its own
+             process so a model that stops the game ends only that attempt (ModelsStep). Translucent: the setup
+             screen underneath stays drawn, so an attempt that ends (or a model that stops the game) shows it at
+             once instead of a black frame while it redraws; the attempt's own progress screen is opaque. -->
+        <activity android:name=".ModelPrepareActivity" android:process=":modelprep"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar.Fullscreen"
+            android:label="@string/setup_models_running"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density|colorMode" />
         <activity android:name=".QuestActivity"
             android:label="@string/app_name"
             android:enabled="${questTheaterEnabled}"

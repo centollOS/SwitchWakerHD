@@ -26,7 +26,15 @@ public class WwhdActivity extends SDLActivity {
         // Only the two concrete gameplay entry points participate in routing.
         if (getClass() != WwhdActivity.class && getClass() != QuestActivity.class) return false;
         Intent selected = QuestActivity.gameIntent(this);
-        if (selected.getComponent().getClassName().equals(getClass().getName())) return false;
+        if (selected.getComponent().getClassName().equals(getClass().getName())) {
+            try { SaveSession.enterGame(this); }
+            catch (java.io.IOException failure) {
+                android.widget.Toast.makeText(this, failure.getMessage(), android.widget.Toast.LENGTH_LONG).show();
+                finish();
+                return true;
+            }
+            return false;
+        }
         // Includes explicit intents and shortcuts created before the theater existed.
         // SDL has not acquired any global state, so finishing this Activity cannot quit it.
         Log.i("wwhd", "redirecting game activity to " + selected.getComponent().getClassName());
@@ -39,6 +47,12 @@ public class WwhdActivity extends SDLActivity {
     public boolean isQuestDevice() { return QuestActivity.isQuest(this); }
     public static String downloadCatalogue(String url, String destination, long limit) {
         return HttpsDownload.download(url, destination, limit);
+    }
+
+    /** Settings > Mods > More > Install from a file (runtime/src/platform/android_documents.cpp, game
+     *  thread): the picked content:// document copied to the app's cache. "ok:" + path or "error:" + message. */
+    public static String copyPickedDocument(String uri, long limit) {
+        return PickedDocuments.copy(mSingleton.getApplicationContext(), uri, limit);
     }
 
     // Public thermal/battery APIs, sampled by the overlay/report via JNI at most once a second.
@@ -61,7 +75,7 @@ public class WwhdActivity extends SDLActivity {
             android.content.Context context = mSingleton.getApplicationContext();
             File job = SetupStore.current(context);
             if (job == null || !new File(job, "host.json").isFile() || !new File(AndroidGame.storage(context), "active.json").isFile())
-                return "This game was built on a computer: build it there again with code-mod support";
+                return "This game was built on a computer: build it there again " + (enabled ? "with" : "without") + " code-mod support";
             AndroidGame.chooseCodeMods(context, enabled);
             codeModRequest = System.currentTimeMillis();
             if (AndroidGame.needsRebuild(context)) SetupService.start(context, null);
@@ -110,6 +124,7 @@ public class WwhdActivity extends SDLActivity {
     }
 
     private volatile PhoneRumble phoneRumble;
+    private MemoryPressure memoryPressure;  // UI thread (lifecycle callbacks)
     public static void phoneRumble(int level) {
         if (mSingleton instanceof WwhdActivity) {
             PhoneRumble output = ((WwhdActivity)mSingleton).phoneRumble;
@@ -126,6 +141,10 @@ public class WwhdActivity extends SDLActivity {
     @Override protected boolean retainNativeSessionOnRecreation() { return true; }
 
     @Override public void loadLibraries() {
+        if (getClass() == WwhdActivity.class || getClass() == QuestActivity.class) {
+            try { SaveSession.enterGame(this); }
+            catch (java.io.IOException failure) { throw new IllegalStateException(failure.getMessage(), failure); }
+        }
         if (isReusingNativeSession()) {
             // A setup update must not change the loaded engine or assets mid-session.
             selection = sessionSelection;
@@ -134,10 +153,12 @@ public class WwhdActivity extends SDLActivity {
         }
         selection = AndroidGame.selected(this);
         onDeviceGame = selection != null ? selection.library : null;
+        if (getClass() == WwhdActivity.class || getClass() == QuestActivity.class) gameStarted = true;
         // debug builds: WWHD_* intent extras (benchmark starts over adb), set once SDL's JNI is
         // there but before the game library loads, so its static initializers see them too
         System.loadLibrary("SDL3");
         DebugLaunch.apply(this);
+        applyLaunchEnvironment();
         if (onDeviceGame == null) {
             super.loadLibraries();
         } else {
@@ -148,6 +169,18 @@ public class WwhdActivity extends SDLActivity {
         sessionSelection = selection;
         sessionLibrary = onDeviceGame;
     }
+
+    private static volatile boolean gameStarted;
+    /** The game itself (not setup's preparation activities, which have processes of their own) runs in this
+     *  process: setup's models step must not write the shader caches meanwhile. */
+    public static boolean gameLoaded() { return gameStarted; }
+
+    /** Options for this start of the game, set before its library loads (setup's models step). */
+    protected void applyLaunchEnvironment() { }
+    /** The GamePad picture on a second display (setup's models step: nothing is shown). */
+    protected boolean usesSecondScreen() { return true; }
+    /** The share offer for the last crash report when the game starts. */
+    protected boolean offersCrashReports() { return true; }
 
     @Override protected String getMainSharedObject() {
         return onDeviceGame != null ? onDeviceGame.getAbsolutePath() : super.getMainSharedObject();
@@ -222,9 +255,10 @@ public class WwhdActivity extends SDLActivity {
         super.onResume();
         if (isRedirectedActivity()) return;
         if (phoneRumble != null) phoneRumble.setActive(true);
+        if (memoryPressure != null) memoryPressure.start();
         applyFullScreen();
         // Only start after SDL successfully loaded the native game library.
-        if (!mBrokenLibraries) {
+        if (!mBrokenLibraries && usesSecondScreen()) {
             if (gamePadDisplay == null) gamePadDisplay = new GamePadDisplay(this, mLayout, mSurface);
             gamePadDisplay.start();
         }
@@ -245,9 +279,15 @@ public class WwhdActivity extends SDLActivity {
 
     @Override protected void onPause() {
         if (phoneRumble != null) phoneRumble.setActive(false);
+        if (memoryPressure != null) memoryPressure.stop();
         if (gamePadDisplay != null) gamePadDisplay.stop();
         super.onPause();
     }
+    @Override public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (memoryPressure != null) memoryPressure.onTrimMemory(level);
+    }
+
     @Override
     protected String[] getLibraries() {
         return new String[] { "SDL3", "main" };
@@ -260,14 +300,16 @@ public class WwhdActivity extends SDLActivity {
         File files = getExternalFilesDir(null);
         if (files != null) {
             new File(files, "game").mkdirs();
-            new File(files, "save").mkdirs();
+            // SaveSession creates save/ only after interrupted-import recovery under the lease.
             Log.i("wwhd", "game folder: " + new File(files, "game"));
         }
         super.onCreate(savedInstanceState);
         if (isRedirectedActivity()) return;
         phoneRumble = new PhoneRumble(this);
+        // low memory: the renderer frees what it can make again (onTrimMemory below, and a free-memory check)
+        if (!mBrokenLibraries) memoryPressure = new MemoryPressure(this);
         // GamePad screen saved Off: known before onResume acquires a second display (AYN Thor, #222)
-        if (!mBrokenLibraries && !isReusingNativeSession())
+        if (!mBrokenLibraries && !isReusingNativeSession() && usesSecondScreen())
             GamePadDisplay.seedSavedOff(SavedSecondScreen.off(files));
         // heat guard: fan-cooled handhelds pause 60 fps later than phones (#247)
         if (!mBrokenLibraries) {
@@ -285,7 +327,7 @@ public class WwhdActivity extends SDLActivity {
         if (mLayout != null)
             mLayout.addView(new TouchControls(this), new RelativeLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        if (savedInstanceState == null) CrashReports.offer(this);
+        if (savedInstanceState == null && offersCrashReports()) CrashReports.offer(this);
     }
 
     public void shareLog() { runOnUiThread(() -> LogShare.share(this)); }
@@ -300,8 +342,13 @@ public class WwhdActivity extends SDLActivity {
         runOnUiThread(() -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT)
             .addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), GPU_DRIVER_REQUEST));
     }
+    TouchControls touchControls;  // set when it is attached (its layouts' export and import files)
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == TouchControls.EXPORT_REQUEST || request == TouchControls.IMPORT_REQUEST) {
+            if (touchControls != null) touchControls.layoutFile(request, result == RESULT_OK && data != null ? data.getData() : null);
+            return;
+        }
         if (request != GPU_DRIVER_REQUEST) return;
         final boolean afterFailure = driverAfterFailure;
         if (result != RESULT_OK || data == null || data.getData() == null) {

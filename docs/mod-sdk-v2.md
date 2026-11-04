@@ -17,9 +17,12 @@ supported.
 - [Hooks and replacements](#hooks-and-replacements)
 - [Game functions, data and objects](#game-functions-data-and-objects)
 - [Host services](#host-services)
+- [Live options, input filters and touches](#live-options-input-filters-and-touches)
 - [Port settings](#port-settings)
-- [Drawing on screen (HUD API v1)](#drawing-on-screen-hud-api-v1)
+- [Drawing on screen (HUD API v2)](#drawing-on-screen-hud-api-v2)
 - [Letters](#letters)
+- [Native boat compass lease](#native-boat-compass-lease)
+- [Native GamePad chart selection](#native-gamepad-chart-selection)
 - [Charts and markers](#charts-and-markers)
 - [Items](#items)
 - [The story notebook](#the-story-notebook)
@@ -136,6 +139,25 @@ package's details in the Mods tab.
 Options, dependencies and conflicts use the normal manifest schema
 ([mod-manager.md](mod-manager.md)); read options with `wwhd_config_*`. To update a mod,
 disable it, restart and install the new version with the same ID; its settings stay.
+
+**Options on the item menu's Settings page.** An option with `"menu": true` also shows in the
+**Mods** tab of the Settings page in the game's item menu (press + and go left of the items), so
+players can switch it without leaving the game. Switches (`bool`), choices (`enum`) and numbers
+(`number`, with its `min`, `max` and `step`) are shown; other types stay in the Mods tab of the
+Settings window. Optional fields:
+
+- `"section"`: a group name shown with the option (`"Songs"`); options are listed by section.
+- `"live": true`: your mod follows a change while the game runs. Without it the page says that the
+  change applies at the next start, because `wwhd_config_*` values are read at startup.
+
+The page and the Settings window change the same value, saved in the player's mod profile.
+
+```json
+"options": [
+  {"id": "replay", "type": "enum", "name": "Replay conducted songs", "choices": ["Off", "Once", "Always"],
+   "default": "Off", "menu": true, "section": "Songs"}
+]
+```
 Distribute only your manifest, your ELF and resources you are allowed to share, never game
 files.
 
@@ -169,8 +191,11 @@ with their content:
 | `WWHD_GAME_ORIGINAL(...)` | the game's own code, below all mod hooks |
 
 - Every game function can be hooked, including calls through function pointers.
-- Hooks can't change the arguments or the result. To change them, replace the function and
-  call the original yourself.
+- Observer hooks preserve the game's register state, including scratch registers, paired
+  floating-point values and condition bits. Return hooks receive the original argument
+  registers, while the game's result (including nonstandard assembly returns) is kept.
+  Memory writes through pointers remain visible. To change arguments or results, replace
+  the function and call the original yourself.
 - Only one mod may replace a function; a second one is an error naming both mods. Any number
   of mods may hook one.
 - Entry hooks run in load order, return hooks in reverse order.
@@ -208,9 +233,14 @@ use object fields that are the same in both versions.
 | Service | What it does |
 | --- | --- |
 | `wwhd_log`, `_int`, `_hex`, `_float` | Log lines tagged with your mod's ID |
-| `wwhd_config_int`, `_bool`, `_float`, `_string` | Your mod's options (values from startup; fallback on missing or wrong type; strings copy into your buffer) |
+| `wwhd_config_int`, `_bool`, `_float`, `_string` | Your mod's options (values from startup, or as they are now for `"live"` options; fallback on missing or wrong type; strings copy into your buffer) |
+| `wwhd_config_changed` | A live option's revision, below |
 | `wwhd_malloc`, `wwhd_free` | Per-mod heap, 16-byte aligned; size from `guest.heap_size` (default 256 KiB, max 8 MiB); null when full |
 | `wwhd_input_read` | Buttons, sticks and touch (read-only) |
+| `wwhd_input_filter_register` | Change the controller state the game reads, below |
+| `wwhd_touch_register`, `wwhd_touch_claim` | Touches (or mouse clicks) on parts of the TV picture your mod claims, and pinches there, below |
+| `wwhd_screen_point` | Where the drawn camera shows a point of the world, in the touches' layout units, below |
+| `wwhd_mic_open`, `_close`, `_state`, `_pitch` | The microphone's pitch, for an option the player turned on (asks for permission then), below |
 | `wwhd_file_read`, `wwhd_file_write` | Flat file names in your mod's own data folder, at most 1 MiB per call; write replaces the file; return bytes or -1 |
 | `wwhd_logic_dt`, `wwhd_logic_step` | Length of the current logic step in seconds (60 fps modes included) and the step counter |
 | `wwhd_setting_get`, `wwhd_setting_changed` | Read-only port settings, below |
@@ -222,6 +252,86 @@ use object fields that are the same in both versions.
 | `memcpy`, `memmove`, `memset` | As usual |
 
 Your mod can also call any game function. Original synthesized audio can use the PCM stream service below.
+
+## Live options, input filters and touches
+
+These let one package hold several small features that the player switches while playing (the QoL
+package in the mod repository is built this way).
+
+**Live options.** Mark an option `"live": true` in the manifest. `wwhd_config_*` then return its value as it is
+now, and `wwhd_config_changed(id)` returns its revision: 1 at start, one more each time the player changes it
+in Settings or on the item menu's page (0 for an option your mod doesn't have). Compare it with the last
+revision you saw, once per logic step, and read the value again when it changed. Keep your hooks installed and
+return early while a feature is off. Options without `"live"` keep their start value.
+
+```c
+static unsigned long long seen;
+void step(void) {
+    unsigned long long r = wwhd_config_changed("clothes");
+    if (r != seen) { seen = r; clothes_on = wwhd_config_bool("clothes", 0); }
+}
+```
+
+**Input filters.** `wwhd_input_filter_register(fn)` calls `fn(state)` on each of the game's controller reads
+(full logic steps, also at 60 fps), after the port's own rules (the touch controls, talks by touch) and before
+the game sees it. Change `buttons` and the sticks; the touch fields are read only. Filters of several mods run
+in their load order. One filter per mod; register 0 to remove it. The function must be your mod's own.
+
+**Touches on the TV picture.** Register a callback with `wwhd_touch_register(fn)`, then claim rectangles with
+`wwhd_touch_claim(slot, x0, y0, x1, y1)`: layout units, 1280 x 720 around the picture's centre with +y up (a
+wider picture extends x), up to 8 slots. A finger (on Android with the on-screen controls shown or hidden) or a
+mouse click on the desktop that lands in a claim goes
+to your callback as `WWHD_TOUCH_DOWN`, `_MOVE`, `_UP` or `_CANCEL` with its position, and to nothing else: no
+on-screen stick, no talk by touch. It stays yours until it lifts, even outside the rectangle. Where claims
+overlap the newest wins. Claim only while your feature shows something to touch, and remove the claim (an
+empty rectangle, x1 <= x0) when it doesn't, so the player's thumbs work the game again. Events arrive at the
+next controller read, before the input filters, so a touch can become a button in the same read.
+
+**Pinches.** A second finger next to your mod's finger (Android, with the on-screen controls shown or hidden), or the
+mouse wheel over one of your claims (desktop), comes as `WWHD_TOUCH_PINCH` with `x` = the spread now divided by the
+spread when the pinch began (above 1: the fingers moved apart, or the wheel turned away from the player; each notch is
+15 % more or less), then `WWHD_TOUCH_PINCH_END` (on the desktop 0.3 s after the last notch). The finger itself keeps
+its own events: its moves pause while the pinch lasts, and its `WWHD_TOUCH_UP` comes when it lifts. Hosts from before
+pinches never send them.
+
+**Points of the world on the picture.** `wwhd_screen_point(world, out)` takes a point of the current room (`world`:
+x, y, z) and writes where the drawn camera shows it into `out[0]`, `out[1]`, in the same layout units as touches,
+with the picture's shape and field of view as drawn (wider screens, the field-of-view setting). It returns 1, or 0
+when the point is behind the camera or no camera is drawn. Compare touches with it on the logic step you use it:
+the camera moves.
+
+```c
+f32 square[3] = {x, y, z}, at[2];
+if (wwhd_screen_point(square, at) && (e->x - at[0]) * (e->x - at[0]) + (e->y - at[1]) * (e->y - at[1]) < 40 * 40) {
+    /* the finger is on the square */
+}
+```
+
+**The microphone.** For features like singing the songs. A mod may open the microphone only through an option
+the player turns on: mark a bool option `"permission": "microphone"` in the manifest, and call `wwhd_mic_open()`
+while it is on (the port refuses it otherwise). Nothing asks for the microphone before that: the first open asks
+the system (Android's runtime permission, the macOS prompt; Windows and Linux open the default recording device).
+If the player declines, the state becomes `WWHD_MIC_DENIED` and the port turns the option off again with a notice
+over the game; the player can allow the microphone in the system settings and turn the option on again. Call
+`wwhd_mic_close()` when you no longer listen (the port also closes it when the option goes off). Keep it closed
+when nothing listens: the QoL package opens it once when the option is turned on (for the question), then only
+while Link conducts.
+
+```json
+{"id": "sing", "type": "bool", "name": "Sing the songs", "default": false, "live": true, "permission": "microphone"}
+```
+
+The port analyses the sound for its pitch and drops it: a mod never gets samples, and nothing keeps, writes, logs
+or sends the sound. `wwhd_mic_pitch(out)` writes the newest analysed window's (about 21 ms, every 1024 samples at
+48 kHz) pitch in Hz to `out[0]` (0 when there is none: silence, noise), its loudness (RMS, 0..1) to `out[1]` and its
+clarity (0..1, how clean a tone it is) to `out[2]`, and returns how many windows were analysed so far; a new value
+means a new window. `wwhd_mic_state()` is one of `WWHD_MIC_CLOSED`, `_ASKING`, `_OPEN`, `_DENIED`, `_UNAVAILABLE`.
+Test aids for scripted runs: `WWHD_TEST_MIC=from-to:hz,...` (TV frames) feeds tones instead of a device without
+asking; `WWHD_TEST_MIC_DENY=1` answers the question with "declined".
+
+Hosts with these calls (and `wwhd_screen_point`, pinches and `"permission"`) have mod manager version 1.6.0: set
+`"minimum_manager_version": "1.6.0"` in a manifest that uses them, so older ports refuse the package up front ("needs
+a newer version of the game"). A module built for services the port doesn't have says which one when it fails to load.
 
 ## Port settings
 
@@ -241,6 +351,7 @@ settings once per logic step.
 | `display.aspect` | F64 | Aspect ratio of the current frame |
 | `render.interp_fps` | U32 | Frame rate shown: 30, the interpolation rate, or 60 in true 60 mode |
 | `render.true60` | BOOL | 0 or 1 |
+| `settings.<id>` | BOOL, U32 or F64 | A setting of the item menu's Settings page by its ID: switches are BOOL, choices U32 (the choice's index), numbers F64. For example `settings.camera.invert-y`, `settings.direct-camera.speed`, `settings.screen.fov` |
 
 ```c
 static char layout[16];
@@ -310,6 +421,107 @@ It draws on Metal and Vulkan, in the TV picture and the GamePad screen (window o
 picture-in-picture); the settings overlay stays on top. Positions are not interpolated
 between logic steps.
 
+### Native boat compass lease
+
+`WWHD_MAP_HUD_API_VERSION` is 1; module ABI and `guest.api_version` remain 1.
+Read the unsigned capability setting `hud.boat-compasses.version`: missing or 0
+means use the existing above-compasses position. The C helpers use the existing
+optional `wwhd_setting_get` transport (fixed 36-byte versioned request, query type
+7, key `native-map-hud.v1`); older hosts return -1 without performing an action,
+including when an older installer translates the ELF. No installer upgrade is
+needed for the fallback. Direct service imports are also available for bindings:
+define `WWHD_MAP_HUD_DIRECT_IMPORTS` and use translator 0.3 or newer to get optional
+imports; older translators treat those direct imports as mandatory.
+
+`s32 wwhd_hud_boat_compasses(u32 replace)` is a per-mod lease, called from actor
+logic. `(1)` renews for this logic step; 1 means active, 0 means no eligible boat
+HUD. Errors are `WWHD_MAP_HUD_UNSUPPORTED` (-1), `INVALID` (-2, bad argument),
+`BUSY` (-3, another owner including its release delay), and `PHASE` (-4, outside
+actor logic or during drawing). First successful caller owns the lease; load
+order does not let a later mod steal it.
+
+Renew through the minimap's entry, display and 250ms exit, then call `(0)` once.
+The host delays normal return by 200ms. Repeated `(0)` does not restart that delay;
+`(1)` during it cancels release immediately. Keep your own map tween's displayed
+fraction when reversing. A missed renewal without explicit release revokes
+immediately. Disable/unload (currently restart), HUD unregister, state load,
+stage/UI/HUD/layout replacement, a failed HUD callback/list, or loss of boat
+eligibility revokes without delay.
+Hidden-to-hidden handoffs should request no lease.
+
+Native visibility/menu/first-person/cutscene gates still apply. Native compass
+updates, animations and cannon/grappling-hook controls continue; only this exact
+native compass layout's draw is suppressed. Revocation reveals the current native state,
+without saved transforms or pane reparenting. No pane pointers cross the API.
+
+`s32 wwhd_hud_boat_compasses_rect(wwhd_boat_compasses_rect* out)` reports the
+owner's current live rectangle: initialize `size=24`, `version=1`. Return 1 means
+x/y/w/h are filled (TV 1280x720 HUD units, top-left origin, y down; use
+`WWHD_HUD_CENTER` anchoring). Return 0 means no current owned rectangle; -1 means
+unsupported, -2 means a bad output buffer/structure, -4 means an unbound thread. The output must be in static mod storage or its SDK heap, as for other HUD
+services. The rectangle encloses the native compass/clock pictures and follows their layout animations. Read it in logic for placement, and check it again in your draw callback to
+confirm ownership survived any intervening lifecycle change. Do not draw replacement
+contents after lease loss.
+
+```c
+static int replacing;
+static wwhd_boat_compasses_rect where = {24, 1};
+void map_step(int visible_or_exiting, int exit_just_completed) {
+    static u32 version;
+    wwhd_setting_get("hud.boat-compasses.version", WWHD_SETTING_U32, &version, 4);
+    replacing = version && visible_or_exiting && wwhd_hud_boat_compasses(1) == 1;
+    if (replacing) replacing = wwhd_hud_boat_compasses_rect(&where) == 1;
+    if (version && exit_just_completed) wwhd_hud_boat_compasses(0);
+    /* Draw at where only while replacing; otherwise retain the fallback. */
+}
+```
+
+### Native GamePad chart selection
+
+Read unsigned capability `map.chart-selection.version` (1 supported, missing/0
+unsupported). The C helpers use the same optional query transport and older-host
+fallback as the compass lease.
+All three calls require actor logic and reject drawing with `PHASE` (-4).
+
+- `s32 wwhd_map_chart_selected(void)`: current native index 0..60; -1 unsupported,
+  -2 missing/invalid native MenuMap, -4 wrong phase. Cache this for drawing.
+- `s32 wwhd_map_chart_select(u32 native_chart_index)`: 1 queued, 0 already selected;
+  -1 unsupported, -2 invalid/unowned/unopened/undeciphered/wrong-kind chart or
+  unavailable native menu, -3 another mod's pending request, -4 wrong phase.
+  Accepted targets are native treasure-chart indices 0..48, as used by MenuMap,
+  rather than printed chart numbers or raw archive indices.
+- `s32 wwhd_map_chart_cancel(void)`: 1 cancelled this mod's pending request,
+  0 nothing pending; -1 unsupported, -3 another pending owner, -4 wrong phase.
+
+A request binds to the current menu instance and stage generation. At the normal
+native event boundary, real GamePad input runs first. A changed native selection
+cancels the pending request. Otherwise, when the carousel is idle, the host
+commits its outgoing/selected/direction event and lets the native carousel update
+caption/art and finish processing. Busy animations are never reset. A newer
+request from the same mod replaces the uncommitted target; other mods get BUSY.
+If the map screen is inactive the request waits for its native display event path.
+
+Cancel, disable/unload, state load or stage/UI/menu/layout destruction/replacement
+cancels uncommitted requests and leaves native selection unchanged. After commit,
+the choice is an ordinary player choice: later GamePad input changes it, and
+unloading restores nothing. Ownership/deciphering are checked again at commit.
+
+```c
+void choose_chart(u32 native_index) { /* a chart edge in a logic hook */
+    static u32 version;
+    wwhd_setting_get("map.chart-selection.version", WWHD_SETTING_U32, &version, 4);
+    if (version) {
+        s32 result = wwhd_map_chart_select(native_index);
+        /* 1: pending; selected() reports the index once committed. */
+        (void)result;
+    }
+}
+void cancel_choice(void) { wwhd_map_chart_cancel(); }
+```
+
+[Native integration and minimap note](mod-sdk-map-hud.md) records the addresses,
+identification, lifecycle and exact fallback rules.
+
 ### Current-room maps for mod dungeons
 
 `wwhd_dungeon_room_get(&room, cached_revision)` returns the current mod-stage
@@ -335,6 +547,31 @@ The helper uses the existing `wwhd_setting_get` query transport with key
 unknown key/type, so the guest keeps working with no new import or translator
 requirement. Querying a null buffer with zero capacity reports 808 on hosts that
 support the query. The guest module ABI remains unchanged.
+
+### The game's layout art
+
+A mod can draw with the game's own 2D art without shipping it. The port reads that art from the
+player's installed 2D pack, in the language the game uses, while the game runs:
+
+- `wwhd_hud_texture(WWHD_HUD_GAME, "<Layout>/<texture>")` loads a texture of one of the game's layout
+  archives as an owned HUD image (for example `"Map_00/MapShip_00^t"`). Add `#<material>`
+  (`"BtnMapBalloon_00/r2c_b^t#P_DummyMapBig_00"`) to colour it with that material's black and white
+  colours, the way the game draws it. End the name with `@2`, `@3` or `@4`
+  (`"BtnMapBalloon_00/r2c_b^t#P_DummyMapBig_00@3"`) to get the picture enlarged that many times with
+  Lanczos-3 resampling (premultiplied alpha) and sharpened (an alpha-weighted unsharp mask on the colour,
+  a steeper alpha ramp at outlines), crisper than the HUD's own scaling when small soft art is drawn
+  large. Images count towards the usual per-mod limits; release them as usual.
+- `wwhd_game_pane_get("layout-pane:<Layout>/<pane>", &pane)` reads a pane of such a layout. It gives
+  the centre and size in the layout's root coordinates, with +y up and the parents' translation and
+  scale applied. It also gives the pane's own rotation and alpha, whether it and its parents are
+  visible, and, for a picture pane, its texture's name. The result is a 64-byte `wwhd_game_pane`.
+  The key `layout-texture:<Layout>/<texture>` checks that a texture exists, without loading it. It
+  sets flag 4 and returns the texture's size in `w` and `h`.
+
+Names may contain letters, digits and `_ ^ + - .` only. A missing layout, texture or pane returns 0,
+with the reason in the Mods tab. Older hosts return 0 for both: the texture source and the query key
+are unknown to them, and nothing new is imported. Only the names belong in your mod; never copy the
+pictures or layout data into a package. The example is `hd-minimap` in the mod repository.
 
 ## Letters
 
@@ -1077,7 +1314,7 @@ from before 2026-10-17 load again.
   support (its **Code mods** switch, see [setup-code-mods.md](setup-code-mods.md)), and each mod is built
   on the device with the app's own compiler. Mod preparation tools written in Python run there too;
   other programs in a mod package don't run on Android.
-- Changing enabled mods or their options needs a restart.
+- Changing enabled mods or their options needs a restart, except options the manifest marks `"live": true`.
 - Mods live in a 16 MiB region of game memory (`0x7F000000`–`0x80000000`); each mod gets its
   own 64 KiB-aligned part.
 - No events or exports between mods yet. Audio streams support 48 kHz mono/stereo PCM.

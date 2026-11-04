@@ -1,108 +1,62 @@
-# In-game button prompts that follow your controller
+# Button prompts
 
-**Controls → Face buttons** chooses which physical button performs each Wii U action.
-**Button prompts** chooses how the game's icons look. They work together with both presets
-and custom face bindings. Original always keeps the game's icons.
+Choose a button style in **Controls → Prompts → Button prompts**. The setting works with the GameCube
+controller layout, other controller layouts and custom button bindings.
 
-| Face buttons | Xbox prompts, Wii U A / B / X / Y | PlayStation prompts, Wii U A / B / X / Y |
-|---|---|---|
-| By position | red B / green A / yellow Y / blue X | Circle / Cross / Triangle / Square |
-| By label | green A / red B / blue X / yellow Y | Cross / Circle / Square / Triangle |
-| Automatic | Uses the resolved face bindings | Uses the resolved face bindings |
-| Custom | Uses each bound host face button | Uses each bound host face button |
+| Style | What you see |
+| --- | --- |
+| **Automatic** | Prompts that match the connected controller. A recognized GameCube adapter uses the GameCube style. |
+| **Original** | The game's usual buttons and colours. |
+| **Xbox** | Xbox-style letters and colours. |
+| **PlayStation** | Cross, circle, square and triangle. |
+| **GameCube** | A large green A, small red B, grey X and Y, purple Z, grey L/R, yellow C-stick and a Start button. |
+| **Keyboard / mouse** | The assigned keyboard or mouse inputs on HUD, item-menu and dialog face/shoulder prompts. |
 
-By position keeps the HUD cluster in its authored positions: roll is right, sword is bottom.
-By label keeps its existing rearrangement, including item art and action words. The new position/custom
-styles also tint face-action words to match their icons when colours are enabled. Custom bindings
-must use four distinct host face buttons; duplicate bindings or non-face inputs fall back to the
-complete original icon set because they cannot describe a four-button controller picture.
+**Face buttons** is a separate setting. It chooses which controller buttons perform the game's
+A, B, X and Y actions. **Button prompts** chooses how those actions look on screen. You can use
+GameCube prompts with any controller or binding.
 
-Automatic prompts follow Xbox and PlayStation pads. Nintendo and unknown pads keep the original
-look with By position or custom bindings. By label retains its existing Xbox fallback for those
-families. Switching takes effect immediately, including cached message text.
+The GameCube style arranges the HUD buttons like a GameCube controller: A is large and to the
+right, B is down-left, X is to the right of A, and Y is above A. An action, its item and its word
+stay together when they move. The GameCube artwork replaces the original button plates, and
+its labels remain visible in front of large item pictures. Messages and menu prompts use the
+same button style. The item menu's OK and Back prompts stay close together to fit its Wii U
+layout, and the item ring keeps its existing layout.
 
-## Options
+**Coloured face buttons** controls the button pictures. **Coloured face button text** controls
+the colours of action words such as “Roll” and “Attack,” including GameCube shoulder actions
+such as “Defend.” Turn the text option off to keep the game's usual word colours. Original
+prompts always keep the game's usual colours.
 
-In the settings overlay's **Controls** tab (and the Controls window on macOS), saved in
-`controls.json`:
+**Shoulder names** can follow the prompt style automatically or use Nintendo, numbered or Xbox
+labels. GameCube prompts use L, R and Z. Your choices are saved.
 
-| Option | Choices | Default |
-|---|---|---|
-| **Button prompts** | Automatic, Original, Xbox, PlayStation | Automatic: follows the pad family; By label retains its Xbox fallback |
-| **Shoulder names** | Automatic, L / R / ZL / ZR, L1 / R1 / L2 / R2, LB / RB / LT / RT | Automatic: follows the button prompts |
-| **Coloured face buttons** | on, off | on; off keeps the game's white buttons (in the Xbox positions with by label) |
+## Where to change it
 
-A fixed **Shoulder names** choice applies with any face-buttons setting. Automatic shoulder
-names follow the resolved prompt style.
+Open **Controls → Prompts** in Settings, then choose **Button prompts**. On macOS, the same choice
+is available in the Controls window. Changes apply to messages and the HUD as well as menus.
 
-No Nintendo, Microsoft or Sony artwork or font is shipped: the colours are applied while the game
-draws, the shoulder captions are composed at runtime from your own copy's HUD font, and the
-PlayStation shapes are simple geometry (two strokes, a ring, a square, a triangle) drawn by the
-port.
+## Keyboard and mouse bindings
 
-## How it works (technical notes)
+Choose **Controls → Prompts → Button prompts → Keyboard / mouse** to replace A/B/X/Y and
+L/R/ZL/ZR prompts in the HUD, item menu and dialog text with keycaps. Native
+Plus/Minus and individual D-pad/stick direction icons show their mapped keys too.
+Labelled left/right-stick and D-pad icons show the four directional keys in a cross.
+The unlabelled stick glyph retains its native artwork because it does not identify a stick. This is an
+explicit choice; Automatic continues to follow the controller. The first assigned
+keyboard/mouse slot supplies the caption, with the second used if the first is empty.
+Bindings update immediately. `M1`–`M5` identify mouse buttons and `Wh+`/`Wh-` the wheel;
+`None` means the action has no keyboard or mouse binding. Key names use the same
+physical-key identities as Controls. The game font supplies all lettering.
 
-Three function hooks (`tools/recomp/hooks_glyphs.txt`), plus wrappers around the existing aspect
-(`0x028766CC`) and RTL text (`0x028785C8`) hooks:
+Keyboard prompts take priority over the item ring's A1/A2/A3 captions. Controller
+colour/placement settings remain saved and apply again when a controller style is chosen.
+Mouse camera, Direct right-stick camera and First-person shortcut now live in Controls,
+along with camera speed and mouse sensitivity. Existing saved settings still apply.
+The existing first-person mouse-wheel behavior is retained.
 
-- `0x0286E9F0` (`CharWriter::Print`) marks button glyphs (A/B/X/Y: U+E000–E003; L/R/ZL/ZR:
-  U+E083–E086) in unused bits of the cached glyph quad's byte `+0x2F`. It selects mapped Xbox
-  icon characters while retaining the original Wii U identity in that marker.
-- `0x028F7C7C` (TextBox vertex generation) tints marked quads and swaps shoulder captions and
-  PlayStation shapes to the composed atlas for the vertex build, then restores everything it changed.
-- `0x02874D54` (`Picture::DrawSelf`) tints the HUD button backgrounds (`P_A_00`, `P_B_00`, `P_X_00`,
-  `P_Y_00`, `P_ASpecial_00`) and restores their authored vertex colours afterwards.
-- `0x028785C8` (`lyt::TextBox::DrawSelf`, the existing RTL wrapper) also recognises
-  `CommandA_00`'s floating action hint: `T_A_00` and `P_A_00` are **siblings** under
-  `N_Center_01`, unlike the cluster's parent/child pair. The same check supports B/X/Y
-  with matching sibling pictures and a single matching letter. `T_A_01` on
-  `P_ASpecial_00` covers the special-A prompt in both command layouts. These are plain
-  `CKingMain` letters, so `CharWriter::Print` does not mark them as U+E000 icons.
-  The scoped face identity feeds the existing `0x028F7C7C` vertex hook (bare PS shape,
-  coloured RGBA or plain coverage); Xbox colours still use `Picture::DrawSelf`. Xbox HUD
-  text is temporarily changed to the mapped letter during a rebuild, then restored, because
-  the direct font path can bypass `CharWriter::Print`. Action-word panes are scoped to their
-  matching button pictures and tinted during vertex generation, with alpha retained.
-  The HD screen uses `hdParts_c::draw` (`0x026F8B54`) → `drawLayout`
-  (`0x026F8D08`) → the NW4F layout traversal → `TextBox::DrawSelf`.
-  No new recompiler hook is needed. The wrapper returns directly to the original draw
-  before pane recognition while the session gate is closed.
-- The text-box draw wrapper recognises the HUD's shoulder captions (`T_L_00` … `T_ZR_00`) and face
-  letters (`T_A_00` … `T_Y_00` on their `P_?_00` pictures), which the game prints as plain text.
-- The pane-matrix hook moves the complete CommandGuide cluster (`N_All_00`) for the Xbox positions;
-  only the computed global matrices keep the new layout, the authored locals are restored.
-
-**Untouched until used:** none of the hooks write to game memory until a different look has been
-selected once in the session; the first activation rebuilds each cached text box once so its glyphs
-get marked. A loaded save state, or a change from one look to another (colours, shapes, shoulder
-names), clears that rebuild list. The look is resolved once per controls change or new controller
-family (`input_map::prompt_style`), so drawing costs nothing extra per frame.
-
-**Why the marker bits are safe:** each cached glyph quad is 0x30 bytes, and its last word (`+0x2C`) is
-only touched by three functions in the game code: the emitter `0x0286E4FC` writes the 16-bit value at
-`+0x2C` and the page byte at `+0x2E`, stores zero to `+0x2F` and then sets only bit 0 (a coverage
-glyph of an alpha font, which takes the text colours; the icon font's RGBA glyphs have it clear);
-batch grouping `0x028F7A4C` reads `+0x2F` masked with `& 1`; vertex generation `0x028F7C7C` reads
-`+0x2C`/`+0x2E` and never `+0x2F`. Bits 1–7 of `+0x2F` are therefore free, and every new build of a
-quad clears them.
-
-**Shoulder captions and shapes:** the characters L, R, 1, 2, B, T are read from the player's
-`CKingMain` font through the game's `Font::GetGlyph`; its BC4 (or plain alpha) sheets are decoded on
-the CPU and composed into a small host-side atlas (128×1024, keyed by font) next to the PlayStation
-shapes (`button_glyph_art.h`). If the font isn't available, the original labels and letters are kept.
-The atlas is an RGBA sheet like the game's icon font: its sheet byte `+0x0E` and the quads' bit 0
-stay clear. With them set, the batch (`0x028F7A4C`) takes the text-colour path, which maps the
-texture through the text box's colours: a dialog's white text then drew the framed label as a white
-box (#141). Two kinds of HUD quad use a coverage twin of the same sheet (`+0x100`, sheet byte set)
-and keep bit 0 set instead: the plain PlayStation shapes and the bare L1/R1/L2/R2 (LB/RB/LT/RT)
-captions on the HUD's shoulder plates. The game then draws them in the colours of the letter they
-replace, including the dimming of an unassigned button; as RGBA pictures the white captions were
-unreadable on the white shoulder plates (#143).
-
-The hook behaviour is covered by `runtime/tools/button_glyphs_test.cpp` (synthetic guest memory: face
-and shoulder marking, colour restoration, live switches, the untouched-until-used gate, *Automatic*,
-HUD positions including 21:9, font fallback, every option, the PlayStation shapes, CommandA sibling letters for all
-four faces in coloured/plain PS and Xbox/Original looks, and special A);
-`runtime/tools/input_map_test.cpp` covers the option resolution and the `controls.json` keys
-(`button_prompts`, `shoulder_names`, `button_colours`). The EU build maps all three hooks. After a change to the
-hook list, regenerate the game code (setup does this on update).
+If the game font cannot supply a caption, that keycap shows a question mark (or a
+crossed keycap if the question mark is also missing), and the runtime logs the font
+and first unavailable caption. Other bindings still render. Text that would exceed
+the game's eight texture batches retains its native icons until its contents or
+bindings change; it does not rebuild every frame.

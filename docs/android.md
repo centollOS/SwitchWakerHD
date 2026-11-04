@@ -11,7 +11,8 @@ game; this project never provides game files.
 | | |
 |---|---|
 | **On-screen controls** | Both sticks, the D-pad, A B X Y, L R ZL ZR and + −. The 🎮 button under the view button (top left) shows or hides them. They hide while a controller is connected and come back on the next touch. A Bluetooth or USB controller works too. Hold 🎮 to edit the touch layout: drag a control, tap it and use Size −/+ to resize it, then tap Done. Reset restores the original layout. Positions and sizes are saved on this device and stay on screen after rotation. Editing releases held controls and does not send touches to the game. |
-| **Phone vibration** | Controls → Phone vibration defaults to **Touch only**: game rumble vibrates the phone while playing by touch. Controller or keyboard input stops phone feedback; using touch controls selects the phone again. **Touch or no rumble controller** also vibrates the phone when no connected controller has rumble. **Off** disables phone feedback; the main **Rumble** switch silences both phone and controllers. Android's vibration settings and touch-feedback switch apply. `WWHD_PHONE_RUMBLE=0`, `touch` or `fallback` overrides the saved startup choice. |
+| **Touch styles** | Settings → Display → Touch controls → **Touch style**. **Flexible** (the default) keeps the buttons where the layout puts them, but a stick appears where your thumb lands: the left half moves Link, the right half turns the camera, by swiping (the default; **Swipe speed**, and **Swipe speed on the boat** while sailing) or as a camera stick (**Right half**). **Classic** keeps both sticks at fixed places, as before; once chosen, it stays. **Show sticks** off makes the floating sticks invisible. **Left stick follows the thumb** (both styles) pulls the stick along when your thumb slides past its edge. The view button and the GamePad picture keep their touches. Each style has its own layout; a layout you made before the styles existed is used for both. In the layout editor, Size −/+ sets 75–130 % of a control's size, and **Shape**, **Opacity** and **Fill** change its look; **Grid** snaps controls to a grid mirrored about the screen's centre; **Layouts…** has the default and Arc layouts, saved layouts, and export or import as a file. (Idea from the GreenNaugahyde Android fork.) |
+| **Phone vibration** | Controls → Controller → Phone vibration defaults to **Touch only**: game rumble vibrates the phone while playing by touch. Controller or keyboard input stops phone feedback; using touch controls selects the phone again. **Touch or no rumble controller** also vibrates the phone when no connected controller has rumble. **Off** disables phone feedback; the main **Rumble** switch silences both phone and controllers. Android's vibration settings and touch-feedback switch apply. `WWHD_PHONE_RUMBLE=0`, `touch` or `fallback` overrides the saved startup choice. |
 | **The GamePad screen on pause** | Press + and the picture switches to the GamePad screen (map and items), like the pause menu of the GameCube version. Press + again to go back. |
 | **60 fps that keeps the game's speed** | On fast Android devices the game shows 60 frames a second. When the Android device gets hot it switches to a steady 30 by itself, so the game never slows down. |
 | **Older Android devices** | If your Adreno GPU's driver is too old, the error screen offers to install a custom driver such as Mesa Turnip. |
@@ -91,7 +92,7 @@ itself down, which can make the game stutter or run slower. If that happens, go 
 
 ## Gyro aiming with your phone
 
-Open **Settings > Controls > Gyro**, then choose **Device gyro (phone/tablet)**.
+Open **Settings > Controls > Controller > Gyro**, then choose **Device gyro (phone/tablet)**.
 This is off by default and needs both a gyroscope and an accelerometer. Rest the
 phone for a second to calibrate. Enable **Options > Gyro** in the game and aim in
 first person, keeping the right stick at rest. The axes follow the displayed screen
@@ -132,6 +133,13 @@ your saves and settings (the Android device prepares the game again when an upda
 Code mods (for example the story quests) need the game built with code-mod support: turn on
 **Code mods** in the setup app, before or after the first setup. See
 [Choosing code-mod support](setup-code-mods.md#android).
+
+
+**Prepare model shaders (recommended)** is ticked by default. After setup, the game draws every model, room and
+placed actor once and visits every stage, hidden behind the setup's progress screen, so far fewer stutters happen
+the first time you see a place (on a Xiaomi 14: about 35 shader waits on a 25-place test route instead of about
+1000). It takes about 40 minutes on a recent phone, longer on older ones; keep the screen on. Untick it to skip
+the step. **Cancel** stops it at any time and keeps what was prepared; ticking it again continues.
 
 ### Or: build it on your PC
 
@@ -195,6 +203,15 @@ the existing fast path with background compression. All new builds load streamin
 states from any platform; old builds reject v3 states.
 
 **Full-state save path:** In Save states, choose **Auto** (default), **Streaming** or **Fast**. Auto uses less-memory streaming on Android and the existing fast background-compression path on Windows, macOS and Linux, including Crash Recovery. The choice is stored as `auto`, `streaming` or `fast` in `full_save_path.cfg` beside `full_save_states.cfg` in the states folder. All new builds load v3 streaming states regardless of this setting; compatible legacy states remain readable.
+
+**What happens when my Android device runs low on memory?**
+The game frees memory it can rebuild, so Android is less likely to close it: spare upload buffers,
+graphics pipelines prepared ahead that nothing has drawn yet, and textures that haven't been drawn
+for a while. It does this when Android reports low memory, when you switch to another app, and
+when it sees that little memory is free while you play (Android 14 and newer no longer report this
+to running apps, so the game checks every two seconds). Anything freed comes back when it's needed
+again, which can cause a short stutter. The log shows each step as a `[memory]` line.
+`WWHD_TEST_MEMORY_TRIM=frame,...` triggers it at those render frames for testing.
 
 **Something doesn't work.**
 Please open an [issue](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp/issues) with your Android device

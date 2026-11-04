@@ -412,6 +412,44 @@ STAGES = ["Sea", "Sea (alt)", "Forsaken Fortress", "Dragon Roost Cavern", "Forbi
 DUNGEON_BITS = ["map", "compass", "boss key", "boss defeated", "heart container", "boss intro"]
 
 
+# Lenzo's Picto Box test (#306). Both games keep the test's progress in event register 0xC407
+# (event byte 0xC4, mask 0x07; tww d_a_npc_photo.cpp l_save_dat, WWHD 022CFE34/022D031C): 0 no
+# order, 1/3/5 order 1/2/3 given, 2/4 picto 1/2 accepted, 6 picto 3 accepted. Both raise it to 6
+# when the third picto is accepted; the reward differs:
+#   GameCube: the Joy Pendant (executeTalk mItemNo 0x1F); the Deluxe Picto Box only when a Forest
+#             Firefly in a bottle (0x58) is then shown to Lenzo (register >= 6, no Deluxe yet);
+#   HD:       the Deluxe Picto Box at once (WWHD 022CFA00: mItemNo 0x26). The firefly branch is gone
+#             (XyEventCB 022CC690), and with register >= 6 nothing gives the Deluxe Picto Box.
+# A GameCube file saved between the two steps (register 6, black-and-white Picto Box) cannot get
+# the Deluxe Picto Box in HD. HD's own state after the test: register 6 and the Deluxe Picto Box,
+# given by item_func_camera2 (WWHD 0254E3F0): inventory slot 8 = 0x26, get-item slot 8 bit 1.
+# The item buttons hold the inventory slot (8), so they show the new box without a change.
+# runtime/src/hle/picto_quest.h applies the same rule to already-converted saves when HD reads them.
+LENZO_REG_BYTE, LENZO_REG_MASK = 0xC4, 0x07
+LENZO_TEST_PASSED = 6
+PICTO_BOX, DELUXE_PICTO_BOX = 0x23, 0x26
+CAMERA_SLOT, DELUXE_GET_BIT = 8, 0x02
+
+
+def lenzo_stage(data, table):
+    """Lenzo's register (0..7) of one packed save data"""
+    return get(data, table, "event.flags")[LENZO_REG_BYTE] & LENZO_REG_MASK
+
+
+def picto_test_stuck(data, table):
+    """True for the GameCube-only state 'test passed, waiting for the Forest Firefly'"""
+    return (lenzo_stage(data, table) >= LENZO_TEST_PASSED and
+            get(data, table, "item.slot%02d" % CAMERA_SLOT)[0] == PICTO_BOX and
+            not get(data, table, "get_item.slot%02d" % CAMERA_SLOT)[0] & DELUXE_GET_BIT)
+
+
+def grant_deluxe_picto_box(buf, table):
+    """the HD result of Lenzo's test (item_func_camera2): Deluxe Picto Box in its slot, owned"""
+    put(buf, table, "item.slot%02d" % CAMERA_SLOT, bytes([DELUXE_PICTO_BOX]))
+    got = get(buf, table, "get_item.slot%02d" % CAMERA_SLOT)[0]
+    put(buf, table, "get_item.slot%02d" % CAMERA_SLOT, bytes([got | DELUXE_GET_BIT]))
+
+
 def repair_medli(raw, file=1):
     """Undo premature sword ownership in an early Dragon Roost save (#85).
 

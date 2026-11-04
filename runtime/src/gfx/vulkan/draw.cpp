@@ -16,16 +16,24 @@
 #include "dynres.h"
 #include "stereo.h"
 #include "../stereo_projection.h"
+#include "../sampler_lod_bias.h"
+#include "../artistic_mips.h"
 #include "sampler_filtering.h"
 #include "deferred_dispatch.h"
 #include "buffer_cache.h"
 #include "gx2/state_groups.h"
 #include "vertex_cpu_decode.h"
 #include "render_prof.h"
+#include "background_shaders.h"
 #include "runtime.h"
 #include "gx2/gx2.h"
+#include "gx2/gx2_cmd.h"
 #include "shaders.h"
+#include "clip_emulation.h"
+#include "shader_binary.h"
 #include "stutter_trace.h"
+#include "../../dsweep.h"
+#include "../../pipeline_groups.h"
 #include "pipeline_state.h"
 #include "pipeline_worker.h"
 #include "pipeline_demand.h"
@@ -149,8 +157,10 @@ static void prepare_ao_neighbours(const Surface& dst, const Surface* like) {
 Surface* private_ao_surface(Surface& dst, const Surface* like) {
   const uint64_t logicalWidth = uint64_t(like->width) * 3 / 2;
   const uint64_t logicalHeight = uint64_t(like->height) * 3 / 2;
-  const uint64_t physicalWidth = uint64_t(like->extent.width) * 3 / 2;
-  const uint64_t physicalHeight = uint64_t(like->extent.height) * 3 / 2;
+  // Full-size torchlight doubles the depth copy (target_scale): the private image keeps the AO pass's size
+  const uint64_t light = like->sizeClaim.size == gfx::TargetSize::Light && render::full_light() ? 2 : 1;
+  const uint64_t physicalWidth = uint64_t(like->extent.width) * 3 / (2 * light);
+  const uint64_t physicalHeight = uint64_t(like->extent.height) * 3 / (2 * light);
   const auto limit = R.properties.limits.maxImageDimension2D;
   if (!logicalWidth || !logicalHeight || logicalWidth > UINT32_MAX ||
       logicalHeight > UINT32_MAX || !physicalWidth || !physicalHeight ||
@@ -732,7 +742,8 @@ PipelineKey pipeline_key(const uint32_t* r, const vk::Shader* vs, const vk::Shad
   if (mode & 0x800)
     key.depthBias = {r[REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE], r[REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET],
                      r[REGADDR::PA_SU_POLY_OFFSET_CLAMP]};
-  key.clip = r[REGADDR::PA_CL_CLIP_CNTL] & (1u << 27);  // depth clamp
+  key.clip = (r[REGADDR::PA_CL_CLIP_CNTL] & (1u << 27)) |   // depth clamp
+             (vk::clip_emulation::pair_clips(vs, ps) ? 1u : 0u);  // and clipping in shaders (both stages)
   if (fs->bufferGroups.size() > kMaxPipelineStrides)
     exception_report::raise("fetch shader has more vertex buffers than a pipeline key holds");
   for (auto& g : fs->bufferGroups)
@@ -795,14 +806,26 @@ void capture_pipeline_failure(VkResult result, vk::Shader* vs, vk::Shader* ps,
     }
   } catch(...) { /* Diagnostic capture must never replace driver recovery with a crash. */ }
 }
-Pipeline& resolve_pending_pipeline(Pipeline& pipeline, bool wait = true, bool present = false) {
+// wait=false: poll, or wait at most budgetNs (Shader compile Fast), and return with the
+// compile still pending when it is not done by then
+Pipeline& resolve_pending_pipeline(Pipeline& pipeline, bool wait = true, bool present = false, uint64_t budgetNs = 0) {
   if (pipeline.compileError) std::rethrow_exception(pipeline.compileError);
   if (!pipeline.pendingCompile) return pipeline;
   try {
     auto& pending = *pipeline.pendingCompile;
-    std::optional<PipelineBuildResult> built = pending.ticket->wait_for(0);
+    std::optional<PipelineBuildResult> built = pending.ticket->wait_for(wait ? 0 : budgetNs);
     if (!built && !wait) return pipeline;
     if (!built) {
+      // something must wait for this pipeline now: its compile and its shaders' SPIR-V jump the queues
+      // (Shader compile Fast queues the work of draws that were left out)
+      if (bgshaders::enabled()) {
+        for (auto* shader : pending.shaders)
+          if (shader && shader->binary) {
+            std::lock_guard lock(shader->binary->mutex);
+            if (shader->binary->ticket) shader->binary->ticket->prioritize();
+          }
+        pending.ticket->prioritize();
+      }
       if (present) begin_pipeline_pending_frame();
       built = pending.ticket->wait(present ? std::function<void()>(present_completed_frame_while_pipeline_pending)
                                            : std::function<void()>{});
@@ -830,11 +853,66 @@ Pipeline& resolve_pending_pipeline(Pipeline& pipeline, bool wait = true, bool pr
     throw;
   }
 }
+// Shader compile (background_shaders.h): the targets a draw writes
+static bool writes_color(const uint32_t* r, int i) { return (r[REGADDR::CB_TARGET_MASK] >> (4 * i)) & 15; }
+static bool writes_depth(const uint32_t* r, const Surface* depth) {
+  const uint32_t dc = r[REGADDR::DB_DEPTH_CONTROL];  // bit 0 stencil, bit 2 depth write
+  return depth && ((dc & 4) || ((dc & 1) && depth->fmt.stencil));
+}
+static void track_drawn(const uint32_t* r, const std::array<Surface*, 8>& colors, Surface* depth) {
+  auto& t = bgshaders::tracker();
+  for (int i = 0; i < 8; i++)
+    if (colors[i] && writes_color(r, i)) t.drawn(colors[i]->addr, R.frame);
+  if (writes_depth(r, depth)) t.drawn(depth->addr, R.frame);
+}
+// The pipeline is still compiling: wait the frame's budget if this draw may be left out (true: draw
+// it now, ready or with the exact wait that follows), false: left out of this frame.
+static bool background_wait(const uint32_t* r, Pipeline& p, const std::array<Surface*, 8>& colors, Surface* depth) {
+  auto& t = bgshaders::tracker();
+  bgshaders::TargetFacts written[8], depthFacts;
+  int count = 0;
+  for (int i = 0; i < 8; i++)
+    if (colors[i] && writes_color(r, i)) written[count++] = t.facts(colors[i]->addr, R.frame);
+  const bool depthWritten = writes_depth(r, depth);
+  if (depthWritten) depthFacts = t.facts(depth->addr, R.frame);
+  // the depth buffer the game's sun check peeks (peek_z) waits even before the first peek
+  if (depthWritten && depth->addr == R.mainDepthAddr) depthFacts.peeked = true;
+  const auto verdict = bgshaders::classify(bgshaders::level(), written, count, depthWritten ? &depthFacts : nullptr);
+  if (verdict != bgshaders::kSkippable) { bgshaders::exact(verdict); return true; }
+  const uint64_t left = bgshaders::budget_left_ns(R.frame);
+  const auto started = std::chrono::steady_clock::now();
+  resolve_pending_pipeline(p, false, false, left);
+  const bool ready = !p.pendingCompile;
+  bgshaders::spent(R.frame, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now() - started).count()), !ready);
+  if (ready) return true;
+  bgshaders::skipped(R.frame);
+  for (int i = 0; i < 8; i++)
+    if (colors[i] && writes_color(r, i)) t.left_out(colors[i]->addr, R.frame);
+  if (depthWritten) t.left_out(depth->addr, R.frame);
+  return false;
+}
+// Setup's Vulkan preparation (derive_guest_pipeline_recipe): pipeline() hands the recipe it would compile to this
+// sink instead of compiling it or taking a warmed pipeline. Render thread only.
+std::vector<std::shared_ptr<PipelineRecipe>>* g_recipeSink = nullptr;
 Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
                    LatteFetchShader *fs, VkPrimitiveTopology topology,
                    const std::array<Surface *, 8> &colors, Surface *depth) {
   if(preparation_stats_enabled())++R.cpuPreparation.pipelineLookups;
   const PipelineKey key = pipeline_key(r, vs, ps, fs, topology, colors, depth);
+  // the setup's model sweep: every pipeline a swept archive's models use is filed under that archive (once each)
+  if (pipeline_groups::sweeping() && !pipeline_groups::sweeping_new_only()) {
+    static std::unordered_set<uint64_t> noted;
+    for (const uint32_t group : pipeline_groups::sweeping_all()) {
+      const uint64_t id = PipelineKeyHash{}(key) * 1099511628211ull ^ group;
+      if (noted.insert(id).second) {
+        auto portable = key;
+        portable.vs = vs->pipelineId; portable.ps = ps->pipelineId;
+        const auto* bytes = reinterpret_cast<const uint8_t*>(&portable);
+        note_pipeline_group(std::vector<uint8_t>(bytes, bytes + sizeof portable), group);
+      }
+    }
+  }
   std::array<VkFormat, 8> formats{};
   uint32_t ncolor = 0;
   for (int i = 0; i < 8; i++) {
@@ -906,6 +984,25 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
   portableKey.vs = vs->pipelineId; portableKey.ps = ps->pipelineId;
   const auto* keyBytes = reinterpret_cast<const uint8_t*>(&portableKey);
   std::vector<uint8_t> recipeKey(keyBytes, keyBytes + sizeof key);
+  // debug: WWHD_VK_KEY_LOG=file appends one line per pipeline this run creates: steady-clock ns, renderer frame,
+  // portable key digest (FNV-1a of the recipe key), in-memory key hash (as in the stutter trace), D-sweep tag
+  static FILE* keyLog = [] { const char* p = getenv("WWHD_VK_KEY_LOG"); return p && *p ? std::fopen(p, "a") : nullptr; }();
+  if (keyLog) {
+    uint64_t digest = 1469598103934665603ull;
+    for (uint8_t byte : recipeKey) digest = (digest ^ byte) * 1099511628211ull;
+    std::fprintf(keyLog, "%lld %llu %016llx %016llx %d\n",
+        (long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+        (unsigned long long)R.frame, (unsigned long long)digest, (unsigned long long)PipelineKeyHash{}(key), dsweep::tag());
+    std::fflush(keyLog);
+  }
+  // debug: WWHD_VK_PIPELINE_WHO=file: per pipeline created, the renderer frame, the key hash (as in the stutter trace)
+  // and what draws it (gx2::current_draw_context, described by dsweep.cpp: guest call chain, archive resources, actors)
+  static FILE* whoLog = [] { const char* p = getenv("WWHD_VK_PIPELINE_WHO"); return p && *p ? std::fopen(p, "a") : nullptr; }();
+  if (whoLog) {
+    std::fprintf(whoLog, "%llu %016llx %s\n", (unsigned long long)R.frame, (unsigned long long)PipelineKeyHash{}(key),
+                 gx2::current_draw_context().c_str());
+    std::fflush(whoLog);
+  }
   // Own prerequisite identities independently of the mutable shader cache.
   const std::array<std::shared_ptr<vk::ShaderBinary>, 2> shaderBinaries{vs->binary, ps->binary};
   std::array<std::vector<uint32_t>, 2> recipeSpirv{vs->spirv(), ps->spirv()};
@@ -1076,6 +1173,10 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
   // Far-plane clipping off: depth clamp, or without the device feature the vertex shader's clamp at
   // the near plane (vk::depth_clamp_variant_wanted, part of the vertex shader's key)
   if (pipelineClip.get_ZCLIP_FAR_DISABLE() && R.enabledFeatures.depthClamp)
+    rs.depthClampEnable = VK_TRUE;
+  // panvk: both shaders clip this draw, so its depth is clamped instead of culled (clip_emulation.h);
+  // a draw whose stages couldn't both take the rewrite keeps the hardware path (translate_stages)
+  if (vk::clip_emulation::pair_clips(vs, ps))
     rs.depthClampEnable = VK_TRUE;
   rs.lineWidth = 1;
   rs.cullMode = (pm.get_CULL_FRONT() ? VK_CULL_MODE_FRONT_BIT : 0) |
@@ -1257,6 +1358,40 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
   ci.layout = p.layout;
   GraphicsPipelineState pipelineState(ci, &rc);
   WarmPipeline warmed;
+  // debug: WWHD_VK_RECIPE_KEY_DUMP=file appends the portable key (hex) of every pipeline derived for the setup's
+  // preparation ("D") and of every pipeline the game asks for that the recipe database does not have ("M")
+  static FILE* keyDump = [] { const char* p = getenv("WWHD_VK_RECIPE_KEY_DUMP"); return p && *p ? std::fopen(p, "a") : nullptr; }();
+  auto dumpKey = [&](char kind) {
+    if (!keyDump) return;
+    std::fputc(kind, keyDump); std::fputc(' ', keyDump);
+    for (uint8_t byte : recipeKey) std::fprintf(keyDump, "%02x", byte);
+    std::fputc('\n', keyDump); std::fflush(keyDump);
+  };
+  if (!g_recipeSink) {
+    ++R.pipelineKeysNew;
+    const bool known = pipeline_recipe_known(recipeKey);
+    R.pipelineKeysKnown += known;
+    if (!known) dumpKey('M');
+  } else dumpKey('D');
+  if (g_recipeSink) {
+    for (size_t i = 0; i < shaderBinaries.size(); ++i)
+      if (recipeSpirv[i].empty() && shaderBinaries[i]) recipeSpirv[i] = vk::shader_binary_words_exact(shaderBinaries[i], R.frame);
+    for (auto module : modules) if (module) vkDestroyShaderModule(R.device, module, nullptr);
+    vkDestroyPipelineLayout(R.device, p.layout, nullptr);
+    for (auto set : p.sets) vkDestroyDescriptorSetLayout(R.device, set, nullptr);
+    if (!recipeSpirv[0].empty() && !recipeSpirv[1].empty()) {
+      auto recipe = std::make_shared<PipelineRecipe>();
+      recipe->key = std::move(recipeKey); recipe->spirv = std::move(recipeSpirv);
+      recipe->descriptors = std::move(descriptorBindings);
+      recipe->dynamicUniforms = p.dynamicUniforms;
+      recipe->state = std::make_unique<GraphicsPipelineState>(std::move(pipelineState));
+      g_recipeSink->push_back(std::move(recipe));
+    }
+    // (not kept in the map: the same key from another recipe is derived again and dropped as a repeat by the caller)
+    static Pipeline none;
+    none = Pipeline{};
+    return none;
+  }
   if (!recipeSpirv[0].empty() && !recipeSpirv[1].empty() &&
       take_warm_pipeline(recipeKey, recipeSpirv, descriptorBindings, p.dynamicUniforms, pipelineState, warmed)) {
     for (auto module : modules) if (module) vkDestroyShaderModule(R.device, module, nullptr);
@@ -1268,6 +1403,26 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
       const auto now = stutter::now();
       stutter::trace().add("startup_pipeline_hit", R.frame, PipelineKeyHash{}(key), now, now, 0);
     }
+    return remember(pipelines.emplace(key, std::move(p)).first->second);
+  }
+  pipeline_groups::note_created();
+  // the setup's model sweep, record only (WWHD_DSWEEP_RECORD_ONLY=1): the recipe is recorded as when the pipeline is
+  // made, but the driver never compiles it; its draws are left out (nobody sees the hidden sweep)
+  static const bool recordOnly = [] { const char* e = getenv("WWHD_DSWEEP_RECORD_ONLY"); return e && *e == '1'; }();
+  if (recordOnly) {
+    for (size_t i = 0; i < shaderBinaries.size(); ++i)
+      if (recipeSpirv[i].empty() && shaderBinaries[i]) recipeSpirv[i] = vk::shader_binary_words_exact(shaderBinaries[i], R.frame);
+    for (auto module : modules) if (module) vkDestroyShaderModule(R.device, module, nullptr);
+    if (!recipeSpirv[0].empty() && !recipeSpirv[1].empty()) {
+      auto recipe = std::make_shared<PipelineRecipe>();
+      recipe->key = std::move(recipeKey); recipe->spirv = std::move(recipeSpirv);
+      recipe->descriptors = std::move(descriptorBindings);
+      recipe->dynamicUniforms = p.dynamicUniforms;
+      recipe->state = std::make_unique<GraphicsPipelineState>(std::move(pipelineState));
+      for (const uint32_t group : pipeline_groups::sweeping_all()) recipe->add_group(group);
+      remember_pipeline_recipe(std::move(recipe));
+    }
+    p.pipeline = VK_NULL_HANDLE;
     return remember(pipelines.emplace(key, std::move(p)).first->second);
   }
   const auto pipelineStarted = std::chrono::steady_clock::now();
@@ -1282,6 +1437,7 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
     recipe->descriptors = std::move(descriptorBindings);
     recipe->dynamicUniforms = p.dynamicUniforms;
     recipe->state = std::make_unique<GraphicsPipelineState>(std::move(pipelineState));
+    for (const uint32_t group : pipeline_groups::sweeping_all()) recipe->add_group(group);
     pending->recipe = std::move(recipe);
     // The owner waits for its ticket before destroying modules or itself.
     // Capturing a shared owner here would form an owner/ticket/job cycle.
@@ -1344,6 +1500,7 @@ Pipeline &pipeline(const uint32_t *r, vk::Shader *vs, vk::Shader *ps,
     recipe->descriptors = std::move(descriptorBindings);
     recipe->dynamicUniforms = p.dynamicUniforms;
     recipe->state = std::make_unique<GraphicsPipelineState>(std::move(pipelineState));
+    for (const uint32_t group : pipeline_groups::sweeping_all()) recipe->add_group(group);
     remember_pipeline_recipe(std::move(recipe));
   }
   R.pipelineCacheDirty = true;
@@ -1370,7 +1527,11 @@ struct SamplerMemo {
   }
 };
 SamplerMemo samplerMemo;
-VkSampler sampler(const uint32_t *words, bool compare, bool integer, bool allowAniso, bool linearSupported) {
+// what samplers of hand-drawn mip textures add to their LOD bias in the draw being prepared: log2 of its targets'
+// internal resolution scale (gfx/artistic_mips.h; set by draw() before its stages are bound)
+float g_artisticBias = 0;
+VkSampler sampler(const uint32_t *words, bool compare, bool integer, bool allowAniso, bool linearSupported,
+                  float extraBias = 0) {
   const bool nearestOnly = sampler_nearest_only(integer, compare, linearSupported);
   static const bool memo = [] {
     const char* e = std::getenv("WWHD_VK_SAMPLER_MEMO");
@@ -1379,13 +1540,13 @@ VkSampler sampler(const uint32_t *words, bool compare, bool integer, bool allowA
   const bool forceAniso = allowAniso && aniso_enabled();
   const bool stats = preparation_stats_enabled();
   if (stats) ++R.cpuPreparation.samplerRequests;
-  if (memo && samplerMemo.matches(R.device, words, compare, integer, forceAniso, nearestOnly)) {
+  if (memo && extraBias == 0 && samplerMemo.matches(R.device, words, compare, integer, forceAniso, nearestOnly)) {
     if (stats) ++R.cpuPreparation.samplerMemoHits;
     return samplerMemo.value;
   }
   if (stats) ++R.cpuPreparation.samplerMapLookups;
   auto remember = [&](VkSampler value) {
-    if (memo) samplerMemo.remember(R.device, words, compare, integer, forceAniso, nearestOnly, value);
+    if (memo && extraBias == 0) samplerMemo.remember(R.device, words, compare, integer, forceAniso, nearestOnly, value);
     return value;
   };
   std::string key(reinterpret_cast<const char *>(words), 12);
@@ -1393,6 +1554,7 @@ VkSampler sampler(const uint32_t *words, bool compare, bool integer, bool allowA
   key.push_back(integer);
   key.push_back(forceAniso);
   key.push_back(nearestOnly);
+  if (extraBias != 0) key.append(reinterpret_cast<const char*>(&extraBias), sizeof extraBias);
   static std::unordered_map<std::string, VkSampler> cache;
   if (auto it = cache.find(key); it != cache.end())
     return remember(it->second);
@@ -1434,15 +1596,15 @@ VkSampler sampler(const uint32_t *words, bool compare, bool integer, bool allowA
   ci.addressModeU = addr(static_cast<uint32_t>(w.get_CLAMP_X()));
   ci.addressModeV = addr(static_cast<uint32_t>(w.get_CLAMP_Y()));
   ci.addressModeW = addr(static_cast<uint32_t>(w.get_CLAMP_Z()));
-  ci.mipLodBias = std::clamp(float(w1.get_LOD_BIAS()) / 64.f,
+  ci.mipLodBias = std::clamp(::gfx::sampler_lod_bias::levels(words[1]) + extraBias,
                              -R.properties.limits.maxSamplerLodBias,
                              R.properties.limits.maxSamplerLodBias);
   if (!R.samplerMipLodBias && ci.mipLodBias != 0) {
-    // MoltenVK cannot apply sampler LOD bias. Match the existing Metal renderer
-    // there; native Vulkan devices retain the requested bias.
+    // MoltenVK cannot apply sampler LOD bias: the translated shaders add it
+    // (gfx/sampler_lod_bias.h, uf_texNLodBias); native Vulkan devices keep it here.
     static bool reported = false;
     if (!reported) {
-      LOG("[vulkan] device lacks sampler LOD bias; using zero bias (Metal-compatible fallback)");
+      LOG("[vulkan] device lacks sampler LOD bias; the shaders add it");
       reported = true;
     }
     ci.mipLodBias = 0;
@@ -1946,9 +2108,11 @@ VkImageView feedback_view(Surface *source, const uint32_t *textureWords,
 // textures are never continued.
 // WWHD_VK_FASTPATH_VERIFY=N (unless WWHD_VK_FASTPATH=0): on every Nth continued draw
 // also run the full resolution, compare shaders, targets, pipeline and texture/sampler bindings,
-// count and log mismatches (the draw then uses the full result). Statistics every 120 frames.
+// count and log mismatches (the draw then uses the full result). Statistics every 120 frames
+// only with WWHD_VK_STATS or verification: synchronous console writes can stall rendering.
 struct FastPathConfig {
   bool on = false;
+  bool stats = false;
   uint32_t verifyEvery = 0;
 };
 const FastPathConfig& fastpath_config() {
@@ -1958,6 +2122,7 @@ const FastPathConfig& fastpath_config() {
     const char* e = std::getenv("WWHD_VK_FASTPATH");
     c.on = e ? std::atoi(e) != 0 : true;
     if (!c.on) c.verifyEvery = 0;
+    c.stats = preparation_stats_enabled() || c.verifyEvery;
     LOG("[vulkan] continued-draw fast path %s%s", c.on ? "on" : "off (WWHD_VK_FASTPATH=0)", c.verifyEvery ? " (verify mode)" : "");
     return c;
   }();
@@ -2104,9 +2269,10 @@ bool resolve_targets(const uint32_t* r, vk::Shader* ps, DrawTargets& t) {
   const uint32_t eyeSize = stereo_eye_size_generation();
   const auto &lcr = *reinterpret_cast<const LatteContextRegister *>(r);
   auto mask = LatteMRT::GetActiveColorBufferMask(ps->dec, lcr);
+  const auto claim = gfx::size_request(ps->kind);
   for (int i = 0; i < 8; i++)
     if (mask & (1 << i))
-      t.colors[i] = color_target(r, i, &t.slices[i]);
+      t.colors[i] = color_target(r, i, &t.slices[i], claim);
   t.depth = LatteMRT::GetActiveDepthBufferMask(lcr) ? depth_target(r, &t.depthSlice) : nullptr;
   // a lookup switched stereo eyes to full size (an unscalable format, surfaces.cpp): the targets
   // looked up before it still have the eye size; looked up again, they are rescaled
@@ -2189,8 +2355,21 @@ Surface* resolve_texture(const uint32_t* r, vk::Shader* sh, uint32_t unit, bool*
     else reach = std::max(uint32_t(s1.get_MIN_LOD()), uint32_t(s1.get_MAX_LOD())) / 64 + 2;
   }
   auto *s = sampled_texture(r + texbase + unit * 7, sh->dec->textureUsesDepthCompare[unit], reach);
+  // debug D-sweep (WWHD_DSWEEP): a swept model can sample a texture its actor sets by code. An earlier texture stands
+  // in (pipelines do not depend on the texture); its texture words replace the missing ones in this draw's
+  // register copy, so the view matches.
+  static const bool sweep = getenv("WWHD_DSWEEP") && *getenv("WWHD_DSWEEP");
+  struct StandIn { Surface* surface = nullptr; uint32_t words[7] = {}; };
+  static StandIn standIn[2];
+  const bool depthCompare = sh->dec->textureUsesDepthCompare[unit];
+  uint32_t* words = const_cast<uint32_t*>(r + texbase + unit * 7);
+  if (!s && sweep && standIn[depthCompare].surface) {
+    s = standIn[depthCompare].surface;
+    memcpy(words, standIn[depthCompare].words, sizeof standIn[depthCompare].words);
+  }
   if (!s)
     exception_report::raise("missing sampled texture");
+  if (sweep) { standIn[depthCompare].surface = s; memcpy(standIn[depthCompare].words, words, sizeof standIn[depthCompare].words); }
   auto& ao = ao_private();
   if (!sh->vertex && ao_hires_enabled() && ao.source &&
       s->addr == ao.source && ao.frame == R.frame &&
@@ -2230,9 +2409,12 @@ VkSampler resolve_sampler(const uint32_t* r, vk::Shader* sh, uint32_t unit, cons
     patchedSampler[0] = (patchedSampler[0] & ~0x7E00u) | (1u << 9) | (1u << 12);
     samplerWords = patchedSampler;
   }
+  // hand-drawn mip levels (gfx/artistic_mips.h): no forced anisotropy; the resolution-aware bias in the sampler where
+  // the device applies sampler biases (else in the shader's uniform, bind_stage)
   return sampler(samplerWords, sh->dec->textureUsesDepthCompare[unit],
                  s->fmt.kind != FormatInfo::FLOAT,
-                 !s->gpuWritten && s->mips > 1, s->linearFiltering);
+                 !s->gpuWritten && s->mips > 1 && !s->artisticMips, s->linearFiltering,
+                 s->artisticMips && R.samplerMipLodBias ? g_artisticBias : 0.0f);
 }
 StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
                           VkDescriptorSetLayout layout, bool dynamicUniforms, float sx, float sy,
@@ -2241,6 +2423,7 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
                           bool sunShadow = false,
                           const ContinuedStage* reuse = nullptr, ContinuedStage* record = nullptr,
                           StageReplay* replayOut = nullptr) {
+  const uint64_t stageEntered = rprof::sub_begin();
   StageResources out;
   auto &m = sh->mapping;
   // stereo eye 0: what eye 1 needs to bind this stage again (replay_stage)
@@ -2297,8 +2480,9 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
     return write;
   };
   // guestAddr: a guest uniform block (bytes == mem::ptr(guestAddr)), served by the buffer cache if on
+  // known: an upload slice already holding these bytes (a submitted block uploaded by an earlier draw)
   auto uniform = [&](int binding, const void *bytes, size_t size, size_t logicalSlot,
-                     uint32_t guestAddr = 0) {
+                     uint32_t guestAddr = 0, const UploadSlice* known = nullptr) {
     if (binding < 0)
       return;
     if (size > R.properties.limits.maxUniformBufferRange)
@@ -2319,8 +2503,9 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
       return snapshot(source, length, R.properties.limits.minUniformBufferOffsetAlignment);
     };
     UploadSlice cachedSlice;
-    const bool cached = guestAddr && buffer_cache_enabled() &&
-        cached_guest_range(guestAddr, uint32_t(size), rprof::kUpUbo, cachedSlice);
+    const bool cached = known || (guestAddr && buffer_cache_enabled() &&
+        cached_guest_range(guestAddr, uint32_t(size), rprof::kUpUbo, cachedSlice));
+    if (known) cachedSlice = *known;
     const auto b = cached ? cachedSlice
         : reuseUniforms
         ? uniformCache.get(R.device, R.submissionGeneration,
@@ -2361,10 +2546,44 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
   static thread_local std::array<std::vector<uint8_t>, 2> supportScratch;
   auto& supportUniforms = supportScratch[sh->vertex ? 0 : 1];
   stereo::EyeRows supportRows;
+  rprof::sub_end(rprof::kSubUniformSetup, stageEntered);
+  const uint64_t packStarted = rprof::sub_begin();
   if (m.uniformVarsBufferBindingPoint >= 0) {
     const size_t capacity=preparation_stats_enabled()?supportUniforms.capacity():0;
     vk::pack_uniforms_into(r, *sh, supportUniforms, sx, sy, eyeOffset, stereo::frame.convergence,
                            replayOut ? &supportRows : nullptr);
+    // WWHD_VK_UNIFORM_VERIFY=1 (debug): packs again into a separate buffer and compares, byte for
+    // byte, with what this draw uploads; any change to how support uniforms are packed or reused
+    // must keep "0 mismatches"
+    static const bool verifyPack = [] {
+      const char* e = std::getenv("WWHD_VK_UNIFORM_VERIFY");
+      return e && std::strcmp(e, "1") == 0;
+    }();
+    if (verifyPack) {
+      static thread_local std::vector<uint8_t> fresh;
+      static uint64_t checks = 0, mismatches = 0;
+      vk::pack_uniforms_into(r, *sh, fresh, sx, sy, eyeOffset, stereo::frame.convergence);
+      ++checks;
+      if (fresh != supportUniforms && mismatches++ < 16) {
+        // where: the first differing byte, and the guest uniform-block entry it was copied from (if any)
+        size_t at = 0;
+        while (at < fresh.size() && at < supportUniforms.size() && fresh[at] == supportUniforms[at]) ++at;
+        uint32_t source = 0;
+        const int base = sh->uniforms.offset_remapped;
+        const uint32_t blockBase = sh->vertex ? mmSQ_VTX_UNIFORM_BLOCK_START : mmSQ_PS_UNIFORM_BLOCK_START;
+        if (sh->dec && base >= 0)
+          for (const auto& group : sh->dec->list_remappedUniformEntries_bufferGroups)
+            for (const auto& entry : group.entries)
+              if (at >= size_t(base + entry.mappedIndexOffset) && at < size_t(base + entry.mappedIndexOffset + 16))
+                source = r[blockBase + group.kcacheBankIdOffset / 4] + entry.indexOffset;
+        LOG("[vulkan uniform verify] MISMATCH: %s shader %016llx, %zu vs %zu bytes, first difference at +%zu%s%08X",
+            sh->vertex ? "vertex" : "pixel", (unsigned long long)sh->key, supportUniforms.size(), fresh.size(), at,
+            source ? ", read from guest memory at " : ", from registers ", source);
+      }
+      if ((checks & 0xFFFFF) == 0)
+        LOG("[vulkan uniform verify] %llu checks, %llu mismatches", (unsigned long long)checks,
+            (unsigned long long)mismatches);
+    }
     if(preparation_stats_enabled()) {
       ++R.cpuPreparation.packCalls;
       R.cpuPreparation.packBytes+=supportUniforms.size();
@@ -2399,27 +2618,53 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
     memcpy(supportUniforms.data() + remapped + 12, &noiseScale, sizeof noiseScale);
   }
 
+  rprof::sub_end(rprof::kSubUniformPack, packStarted);
+  const uint64_t blocksStarted = rprof::sub_begin();
   uint32_t block =
       sh->vertex ? mmSQ_VTX_UNIFORM_BLOCK_START : mmSQ_PS_UNIFORM_BLOCK_START;
   for (int i = 0; i < 16; i++)
     if (m.uniformBuffersBindingPoint[i] >= 0) {
       uint32_t addr = r[block + i * 7];
       uint32_t size = std::min<uint32_t>(r[block + i * 7 + 1] + 1, 0x10000);
+      // a block of a display list: its bytes as submitted (gx2/submitted_uniforms.h), uploaded once
+      // per submission and upload generation, not through the buffer cache (which holds guest memory)
+      const uint8_t* submitted = addr ? gx2::submitted_uniform_block(addr, size) : nullptr;
+      const unsigned char* source = submitted ? submitted : static_cast<const unsigned char*>(addr ? mem::ptr(addr) : nullptr);
       // Only a block holding a camera projection gets an eye copy; the others keep their
       // buffer-cache upload by address.
       if (sh->vertex && eyeOffset != 0 && addr &&
-          stereo::has_camera_projection(static_cast<const unsigned char*>(mem::ptr(addr)), size)) {
+          stereo::has_camera_projection(source, size)) {
         static thread_local std::vector<uint8_t> eyeBlock;
-        eyeBlock.resize(size);memcpy(eyeBlock.data(),mem::ptr(addr),size);
+        eyeBlock.resize(size);memcpy(eyeBlock.data(),source,size);
         stereo::EyeRows blockRows;
         stereo::project_uniform_block(eyeBlock.data(),size,eyeOffset,stereo::frame.convergence,nullptr,
                                       replayOut ? &blockRows : nullptr);
         uniform(m.uniformBuffersBindingPoint[i],eyeBlock.data(),size,size_t(i));
         eyeUniform(m.uniformBuffersBindingPoint[i],eyeBlock.data(),size,blockRows);
+      } else if (submitted) {
+        struct Uploaded { uint32_t size; UploadSlice slice; };
+        static std::unordered_map<uint32_t, Uploaded> uploaded;
+        static uint64_t uploadedFor = 0, uploadedGeneration = 0;
+        static VkDevice uploadedDevice = VK_NULL_HANDLE;
+        if (uploadedFor != gx2::submitted_uniforms_id() || uploadedGeneration != R.submissionGeneration ||
+            uploadedDevice != R.device) {
+          uploaded.clear();
+          uploadedFor = gx2::submitted_uniforms_id();
+          uploadedGeneration = R.submissionGeneration;
+          uploadedDevice = R.device;
+        }
+        auto it = uploaded.find(addr);
+        if (it != uploaded.end() && it->second.size == size)
+          uniform(m.uniformBuffersBindingPoint[i], submitted, size, size_t(i), 0, &it->second.slice);
+        else {
+          uniform(m.uniformBuffersBindingPoint[i], submitted, size, size_t(i));
+          if (lastUpload.buffer) uploaded[addr] = {size, lastUpload};
+        }
       } else uniform(m.uniformBuffersBindingPoint[i], addr ? mem::ptr(addr) : nullptr,
               size, size_t(i), addr);
       if (addr) rprof::guest_read(rprof::kUpUbo, addr, size);
     }
+  rprof::sub_end(rprof::kSubUniformBlocks, blocksStarted);
   rprof::mark(rprof::kUniforms);
   uint32_t texbase = sh->vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS
                                 : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
@@ -2429,6 +2674,20 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
       const float scale[] = {s->sx, s->sy};
       memcpy(supportUniforms.data() + scaleOffset, scale, sizeof scale);
     }
+    // hand-drawn mip levels where the shader applies the bias (MoltenVK): the resolution-aware part on top
+    const int biasOffset = sh->uniforms.offset_texLodBias[unit];
+    if (s->artisticMips && !R.samplerMipLodBias && biasOffset >= 0 && size_t(biasOffset) + 4 <= supportUniforms.size()) {
+      float bias;
+      memcpy(&bias, supportUniforms.data() + biasOffset, 4);
+      bias += g_artisticBias;
+      memcpy(supportUniforms.data() + biasOffset, &bias, 4);
+    }
+    // the half-size light buffer's grid on an upscaled buffer (gfx/area_sample.h)
+    if ((sh->gatherUnits >> unit & 1) && sh->uniforms.offset_remapped >= 0 &&
+        size_t(sh->uniforms.offset_remapped) < supportUniforms.size())
+      ::gfx::area_sample::scale_gather_grid(reinterpret_cast<float*>(supportUniforms.data() + sh->uniforms.offset_remapped),
+                                            (supportUniforms.size() - sh->uniforms.offset_remapped) / 16, s->width, s->height,
+                                            s->sx, s->sy);
     if (imageCount >= imageInfos.size())
       exception_report::raise("stage image descriptor capacity exceeded");
     auto &info = imageInfos[imageCount++];
@@ -2462,6 +2721,10 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
       continue;
     bool substituted = false;
     Surface* s = resolve_texture(r, sh, unit, &substituted);
+    // the point-light passes read the buffer's depth copy on unit 0: they claim the buffer's size for it,
+    // which it gets from the next time it is drawn (target_scale)
+    if (sh->kind == gfx::ProgramKind::PointLight && unit == 0 && s && s->gpuWritten && !substituted)
+      s->sizeClaim.request(gfx::size_request(sh->kind), R.frame);
     bool aliases = aliases_target(s, colors, depth);
     int scaleOffset = sh->uniforms.offset_texScale[unit];
     if (scaleOffset >= 0 && size_t(scaleOffset) + 8 <= supportUniforms.size()) {
@@ -2489,8 +2752,10 @@ StageResources bind_stage(const uint32_t *r, vk::Shader *sh,
   }
   rprof::mark(rprof::kTextures);
   if (m.uniformVarsBufferBindingPoint >= 0) {
+    const uint64_t uploadStarted = rprof::sub_begin();
     uniform(m.uniformVarsBufferBindingPoint, supportUniforms.data(),
             supportUniforms.size(), 16);
+    rprof::sub_end(rprof::kSubUniformSupportUpload, uploadStarted);
     eyeUniform(m.uniformVarsBufferBindingPoint, supportUniforms.data(), supportUniforms.size(), supportRows);
   }
   rprof::mark(rprof::kUniforms);
@@ -2635,9 +2900,9 @@ bool verify_continued(const uint32_t* r, uint32_t prim) {
   char detail[200] = "";
   uint64_t fsKey = 0;
   auto* fs = vk::get_fetch_shader(r, &fsKey, R.frame);
-  vk::Shader* vs = fs ? vk::translate(r, true, fs, fsKey, R.frame, g_shader_state_gen) : nullptr;
-  vk::Shader* ps = fs ? vk::translate(r, false, fs, fsKey, R.frame, g_shader_state_gen,
-                                     vs && vs->ready() ? vs : nullptr) : nullptr;
+  vk::Shader* vs = nullptr;
+  vk::Shader* ps = nullptr;
+  if (fs) vk::translate_stages(r, fs, fsKey, R.frame, g_shader_state_gen, vs, ps);
   DrawTargets t;
   if (fs != c.fs || fsKey != c.fsKey) kind = 0;
   else if (vs != c.vs || !vs || !vs->ready()) kind = 1;
@@ -2698,6 +2963,15 @@ ContinuedReason continued_reason(uint32_t prim) {
   return kContinued;
 }
 } // namespace
+// Sizing (WWHD_VK_MEMORY_LOG_FRAMES): the game's pipelines (never freed), those still compiling (each holds its two
+// VkShaderModules until done; a finished pipeline keeps none) and the failed ones.
+void guest_pipeline_counts(size_t& total, size_t& compiling, size_t& failed) {
+  total = pipelines.size(); compiling = failed = 0;
+  for (const auto& [key, p] : pipelines) {
+    if (p.pendingCompile) ++compiling;
+    else if (!p.pipeline) ++failed;
+  }
+}
 VkDescriptorSet texture_stage_smoke_bind(const uint32_t* registers,
     VkDescriptorSetLayout layout, uint32_t textureCount) {
   if (textureCount > LATTE_NUM_MAX_TEX_UNITS)
@@ -2826,7 +3100,7 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   }
   bool fast = false;
   if (fastPathDraw) {
-    report_continued_stats();
+    if (fastPath.stats) report_continued_stats();
     ContinuedReason reason = continued_reason(prim);
     if (reason == kContinued) {
       // guest writes to the reused textures (write tracking, GX2Invalidate) upload here; an upload
@@ -2844,11 +3118,13 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
       }
     }
     fast = reason == kContinued;
-    ++continuedStats.draws;
-    ++continuedStats.reasons[reason];
-    if (reason == kRegisters)
-      for (int g = 0; g < gx2::kSgCount; ++g)
-        if ((dirtyGroups & ~gx2::kSgContinuedMask) >> g & 1) ++continuedStats.groups[g];
+    if (fastPath.stats) {
+      ++continuedStats.draws;
+      ++continuedStats.reasons[reason];
+      if (reason == kRegisters)
+        for (int g = 0; g < gx2::kSgCount; ++g)
+          if ((dirtyGroups & ~gx2::kSgContinuedMask) >> g & 1) ++continuedStats.groups[g];
+    }
     // a full draw records a new state below; exceptions leave none
     continued.valid = false;
     continued.invalidReason = kNoState;
@@ -2870,9 +3146,9 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     if(verifyReplay) {
       uint64_t checkedKey=0;
       auto* checkedFetch=vk::get_fetch_shader(r,&checkedKey,R.frame);
-      auto* checkedVs=checkedFetch?vk::translate(r,true,checkedFetch,checkedKey,R.frame,g_shader_state_gen):nullptr;
-      auto* checkedPs=checkedVs?vk::translate(r,false,checkedFetch,checkedKey,R.frame,g_shader_state_gen,
-                                           checkedVs->ready()?checkedVs:nullptr):nullptr;
+      vk::Shader* checkedVs=nullptr;
+      vk::Shader* checkedPs=nullptr;
+      if(checkedFetch)vk::translate_stages(r,checkedFetch,checkedKey,R.frame,g_shader_state_gen,checkedVs,checkedPs);
       if(fs!=checkedFetch||fsKey!=checkedKey||vs!=checkedVs||ps!=checkedPs)
         exception_report::raise("stereo shader reuse differs from independent second-eye resolution");
       static uint64_t verified=0;
@@ -2882,9 +3158,7 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     fs = vk::get_fetch_shader(r, &fsKey, R.frame);
     if (!fs)
       exception_report::raise("missing Vulkan fetch shader");
-    vs = vk::translate(r, true, fs, fsKey, R.frame, g_shader_state_gen);
-    ps = vk::translate(r, false, fs, fsKey, R.frame, g_shader_state_gen,
-                           vs && vs->ready() ? vs : nullptr);
+    vk::translate_stages(r, fs, fsKey, R.frame, g_shader_state_gen, vs, ps);
   }
   rprof::mark(rprof::kShader);
   if (shadersOut && vs && vs->ready() && ps && ps->ready()) {
@@ -3085,7 +3359,14 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
       : pipeline(r, vs, ps, fs, topology, colors, depth);
   rprof::mark(rprof::kPipeline);
   if (!p.pipeline && !p.pendingCompile) return;
+  // Shader compile Fast (background_shaders.h): a draw that may be left out only waits the frame's
+  // budget and is left out of this frame if its pipeline is not ready by then
+  const bool trackTargets = bgshaders::enabled() && !aoPrivateReplay;
+  if (p.pendingCompile && trackTargets && !background_wait(r, p, colors, depth)) return;
+  if (p.pendingCompile && !bgshaders::enabled()) bgshaders::exact(bgshaders::kOff);  // (the AO pass's private
+                                                                                      // copy of a draw waits)
   if (p.pendingCompile && !begin_exact_preparation()) resolve_pending_pipeline(p);
+  if (trackTargets) track_drawn(r, colors, depth);
   if (!p.pipeline && !p.pendingCompile) return; // terminal driver failure, not pending
   if(feedback_stats_enabled()) report_feedback_stats();
   if(vertex_window_stats_enabled()) report_vertex_window_stats();
@@ -3100,6 +3381,7 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
   // eye 1 replays a stage of eye 0's draw at the same scale through the same pipeline
   const bool replayStages = replay && &p == replay->pipeline && replay->sx == sx && replay->sy == sy;
   StageResources vres, pres;
+  g_artisticBias = ::gfx::artistic_mips::resolution_bias(sx, sy);
   if (!replayStages || !replay->stages[0].valid ||
       !replay_stage(replay->stages[0], r, vs, cameraEye, colors, depth, vres))
     vres = bind_stage(r, vs, p.sets[0], p.dynamicUniforms, sx, sy, colors, depth, probe, cameraEye, sunShadow,
@@ -3634,5 +3916,60 @@ void draw(const uint32_t *r, uint32_t prim, uint32_t count, uint32_t indexType,
     ++drawBatchSubmissions;
   }
   rprof::mark(rprof::kSubmit);
+}
+// Setup's Vulkan preparation (headstart.cpp, the head start's Metal pipeline recipes): the recipe of the pipeline a
+// draw with these registers would make, by the live derivation: fetch shader, vertex and pixel translation, active
+// targets, pipeline key and state as draw() finds them. colorFormats/depthFormat: GX2 surface formats of the targets
+// (0: none). nullptr with *why when the state does not make a pipeline here.
+std::shared_ptr<PipelineRecipe> derive_guest_pipeline_recipe(const uint32_t* r, const uint32_t colorFormats[8],
+    uint32_t depthFormat, const char** why) {
+  auto fail = [&](const char* reason) { *why = reason; return std::shared_ptr<PipelineRecipe>{}; };
+  const uint32_t prim = r[REGADDR::VGT_PRIMITIVE_TYPE] & 0x3F;
+  VkPrimitiveTopology topology;
+  switch (prim) {
+  case 1: topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
+  case 2: topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
+  case 3: case 0x12: topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
+  case 4: case 5: case 0x13: case 0x14: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;
+  case 6: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
+  default: return fail("primitive");
+  }
+  uint64_t fsKey = 0;
+  auto* fs = vk::get_fetch_shader(r, &fsKey, ~uint64_t{0});
+  if (!fs) return fail("fetch shader");
+  vk::Shader* vs = nullptr;
+  vk::Shader* ps = nullptr;
+  vk::translate_stages(r, fs, fsKey, ~uint64_t{0}, ~uint64_t{0}, vs, ps);
+  if (!vs || !vs->ready()) return fail("vertex shader");
+  if (!ps || !ps->ready()) return fail("pixel shader");
+  const auto& lcr = *reinterpret_cast<const LatteContextRegister*>(r);
+  const auto mask = LatteMRT::GetActiveColorBufferMask(ps->dec, lcr);
+  static std::array<Surface, 9> stubs;
+  std::array<Surface*, 8> colors{};
+  for (int i = 0; i < 8; ++i) {
+    if (!(mask & (1u << i))) continue;
+    if (!colorFormats[i]) return fail("targets");  // the draw has a target the recipe does not name
+    stubs[i] = Surface{};
+    stubs[i].format = colorFormats[i]; stubs[i].fmt = format_info(colorFormats[i], false);
+    colors[i] = &stubs[i];
+  }
+  Surface* depth = nullptr;
+  if (LatteMRT::GetActiveDepthBufferMask(lcr) && depthFormat) {
+    stubs[8] = Surface{};
+    stubs[8].format = depthFormat; stubs[8].isDepth = true; stubs[8].fmt = format_info(depthFormat, true);
+    depth = &stubs[8];
+  }
+  if (!colors[0] && !depth) {
+    bool any = false;
+    for (auto* c : colors) any |= c != nullptr;
+    if (!any) return fail("targets");
+  }
+  std::vector<std::shared_ptr<PipelineRecipe>> sink;
+  g_recipeSink = &sink;
+  try { pipeline(r, vs, ps, fs, topology, colors, depth); }
+  catch (...) { g_recipeSink = nullptr; return fail("pipeline state"); }
+  g_recipeSink = nullptr;
+  if (sink.empty()) return fail("shader binaries");
+  return sink.front();
 }
 } // namespace gfxvk

@@ -6,6 +6,7 @@
 @02510448 # manualCamera: after cLib_chaseF of the turning speed (this+0x154): direct stick / mouse yaw
 @025104A0 # manualCamera: the same on the other branch
 @0251053C # manualCamera: f28 = vertical stick rate (mouse pitch)
+@02510DEC # manualCamera: latitude delta before limited_range_addition (normalize descending limits)
 @02510EA0 # manualCamera: V smoothing factor (cSAngle * f1)
 @02510EE4 # manualCamera: U smoothing factor (cSAngle * f1)
 025071FC  # dCamera_c::subjectCamera: first person is active
@@ -81,3 +82,20 @@
 @023FB49C # native boomerang launch: optional trace observation only
 023E048C  # daPy_lk_c::getAnmData: the boost can swap ANM_WALK for ANM_DASH (mods.cpp)
 023D6B30  # daPy_lk_c::jointBeforeCB: additive sprint pose, restored by the native jointAfterCB
+# Calm water (mods/story_world_calm.cpp): a mod island's calm_water zone feeds the sea's own flat factor
+0246B848  # daSea_packet_c::CalcFlatInterTarget: min with the mods' calm-water zones around the player
+# Shops by touch (controls plan P5; mods/touch_talk.cpp): the shop's item choice runs, r4 = its ShopItems_c
+025BB698  # dShop_now_triggercheck(stick, ShopItems_c*, msg*, cb, arg): notes the ShopItems_c (read only)
+# Walking direction (controls plan P7; mods/steer.cpp): the two `sth r9, 0x6930(r31)` of daPy_lk_c::setStickData
+@023F35BC # setStickData: r9 = stick angle (r10) + camera angle (r3), the direction Link walks to
+@023F3610 # setStickData: the same on the other branch
+# One screen (handheld) mode (controls plan P2b; one_screen.cpp): the GamePad in Off-TV Play from the first frame
+02618094  # hdInputManager::setMode(this, mode): TV play (1) and the picture on both (3) become Off-TV Play (2)
+@02617874 # hdInputManager setup: stw r0 (3, both screens) to +0x1D0: Off-TV Play from the first title screen
+@0270AC04 # file select ControllerSelect: changeState(picker+0x18, StateID_Display): answered "GamePad" instead
+@0270ADD0 # file select SaveDataSelect, Back: changeState(this+0x10, StateID_ControllerSelect): to the title instead
+026D7828  # hdSequenceOption_c constructor: the Options items without Controller (descriptor order)
+@026D8514 # Options list setup: stw r7 (6 items) to +0x120: 5 without Controller
+@026D5D84 # Options values loaded (+0x104..+0x109), before the rows are filled: into the new order
+026D6DD4  # Options values saved (fixed offsets): the game's order around it
+026D87D0  # Options Controller item callback (its value +0x107): the game's order around it

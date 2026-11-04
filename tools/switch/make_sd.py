@@ -442,6 +442,9 @@ def main():
     mods_dir = os.path.join(ROOT, "build", "guest-mods")
     tool = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "guest_mods.py"), "--out", mods_dir]
     renv = dict(os.environ)
+    # (upstream sync bfd7dd6) the Switch build leaves out the frame-interpolation hooks main did not have
+    # (tools/recomp/switch_skip_hooks.txt: at 30 fps they only cost the main thread)
+    renv.setdefault("WWHD_RECOMP_SWITCH_SKIP", "1")
     if args.guest_mod:
         run(tool + mods + ["--build", build.name] +
             (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []) +

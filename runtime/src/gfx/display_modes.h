@@ -53,10 +53,21 @@ void pip_target_centre(Box tv, int anchor, float* x, float* y);
 int pip_target_at(Box tv, float px, float py, float radius);
 PipPosition pip_position();
 void pip_set_position(PipPosition position);
+// Pointer gestures on the picture-in-picture GamePad in the TV window (0..1 from the top left):
+// begin is true when the point is on the picture (a drag from its bottom-right corner resizes it,
+// any other drag moves it); end is true when a drag ended (the host saves the placement); wheel
+// resizes the picture under the point by 10% per step and is true when it did.
+bool pip_drag_begin(float nx, float ny);
+bool pip_dragging();
+void pip_drag_move(float nx, float ny);
+bool pip_drag_end();
+bool pip_wheel(float nx, float ny, float steps);
 extern const char* const kFilterNames[3];             // smooth, sharp, integer
 
 // the options (read from any thread; changed on the host's main thread)
 extern std::atomic<int> g_mode;
+// Android startup menus temporarily require the GamePad picture. Presentation only; never saved.
+extern std::atomic<bool> g_startup_gamepad;
 extern std::atomic<int> g_pip_anchor;
 extern std::atomic<float> g_pip_x, g_pip_y;
 extern std::atomic<bool> g_pip_preview;
@@ -68,6 +79,10 @@ extern std::atomic<bool> g_auto_pin;       // auto mode: Cmd+G keeps the overlay
 extern std::atomic<double> g_auto_until;   // auto mode: closing grace expires at this time (display_now)
 extern std::atomic<float> g_drc_aspect;    // of the GamePad image, for the GamePad window's touch
 extern std::atomic<bool> g_has_drc_window; // the host made a GamePad window (window mode possible)
+// One screen (handheld) mode is on (mods/one_screen.cpp, decided at start): the window shows the GamePad
+// picture while the game plays Off-TV, in any mode, and the view button hides then
+extern std::atomic<bool> g_one_screen;
+extern std::atomic<bool> g_one_screen_off_tv;  // ... and the game plays Off-TV (also on the title screen): set each pad read
 // a physical second screen (Android) switched off by the player while it was connected: Off chosen, or the
 // GamePad screen hidden (#222). Not the single-screen mode, which is Off by default on Android.
 extern std::atomic<bool> g_second_screen_off;
@@ -109,12 +124,25 @@ int display_saved_mode();
 bool display_gamepad_state_needed();
 void display_read_gamepad_ui(); // guest thread, once at swap; returns immediately outside auto/pause
 void display_gamepad_ui(GamePadUiState state); // publish a host-only snapshot
+bool gamepad_ui_menu();                          // that snapshot: a GamePad menu is open (any thread)
 
 // pixel rectangles in the target (drawable), top-left origin
 struct Layout { Box tv, pip; bool pip_on = false; bool drc_only = false; float scale = 1; };
 // the TV window's layout: TV picture (tw x th) scaled to fit dw x dh, GamePad picture (pw x ph) in
 // the selected anchor (pip_on) or alone, fitted (drc_only)
 Layout layout(float dw, float dh, float tw, float th, float pw, float ph, bool pip_on, bool drc_only = false);
+// The game's picture in a layout: the TV picture, or in One screen mode's Off-TV Play (one_screen.h) the GamePad
+// picture, which is the game then; false while the window shows the GamePad picture alone otherwise, or before a
+// layout. Touches (game_picture_hit) and the code mods' TV HUD layer (overlay/guest_hud.cpp) both use this box, so
+// a mod's drawing shows where its touch lands.
+inline bool game_picture_box(const Box& tv, const Box& pip, bool drc_only, bool one_screen_off_tv, Box* box) {
+    if (drc_only && !one_screen_off_tv) return false;
+    const Box& b = drc_only ? pip : tv;
+    if (b.w <= 0 || b.h <= 0) return false;
+    *box = b;
+    return true;
+}
+bool game_picture_box(const PresentPlan& plan, Box* box);  // the same for a plan, with the current One screen state
 // a point in the TV window (0..1 from top left) on the GamePad picture -> touch position (0..1),
 // from the last display_plan; clamp_outside: a drag that left the picture keeps touching its edge
 bool overlay_hit(float nx, float ny, float* tx, float* ty, bool clamp_outside = false);
@@ -123,6 +151,15 @@ void display_input_plan(const PresentPlan& plan); // publish the logical canvas 
 // mode), 0..1 of the TV window from the top left; false before the first layout (the settings
 // overlay's text prompt places itself on it)
 bool main_picture(float* x, float* y, float* w, float* h);
+// a point in the TV window (0..1 from the top left) on the TV picture -> 0..1 of that picture and its
+// width / height (tv_pointer.h); false off the picture (clamp_outside: a drag keeps its edge) or when
+// the window shows the GamePad picture alone
+bool tv_picture_hit(float nx, float ny, float* px, float* py, float* aspect, bool clamp_outside = false);
+// the same for the game's picture: the TV picture, or in One screen mode's Off-TV Play the GamePad picture
+bool game_picture_hit(float nx, float ny, float* px, float* py, float* aspect, bool clamp_outside = false);
+// the mouse wheel at (nx, ny) of the TV window is over a code mod's touch claim (guest_live.h): its point on the
+// picture as game_picture_hit gives it (the hosts hand the wheel to tv_pointer::add_wheel then)
+bool wheel_on_mod_claim(float nx, float ny, float* px, float* py, float* aspect);
 
 // Touch screens (Android; WWHD_VIEW_BUTTON=1 elsewhere for tests): a button in the TV window's top
 // left corner. A tap cycles the views offered there (picture-in-picture, GamePad only, TV only);

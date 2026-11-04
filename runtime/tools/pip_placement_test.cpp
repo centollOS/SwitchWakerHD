@@ -1,4 +1,7 @@
 #include "gfx/display_modes.h"
+#include "mods/guest_hud.h"
+#include "tv_pointer.h"
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
@@ -129,4 +132,88 @@ int main() {
     assert(p.pip_on && !p.drc_only);
     g_pip_preview = false;
     assert(!display_plan(true, 1280, 720, true, 854, 480, 1920, 1080, 2).pip_on);
+
+    // Moving and resizing the picture with the pointer (macOS TV window: right-button or Option drag,
+    // scroll wheel). The last published layout is a 1280x720 TV picture with a 320x180 GamePad at (900, 500).
+    {
+        PresentPlan plan;
+        plan.dw = 1280, plan.dh = 720;
+        plan.tv = {0, 0, 1280, 720};
+        plan.pip = {900, 500, 320, 180};
+        plan.pip_on = true;
+        display_input_plan(plan);
+        g_pip_anchor = kPipBR;
+        g_pip_size = 0.25f;
+        assert(!pip_drag_begin(0.1f, 0.1f) && !pip_dragging());  // off the picture: not taken
+        assert(!pip_drag_end());
+        // a drag from inside moves the picture by the pointer's motion and makes the placement Custom
+        assert(pip_drag_begin(1000 / 1280.0f, 550 / 720.0f) && pip_dragging());
+        pip_drag_move(600 / 1280.0f, 350 / 720.0f);
+        assert(g_pip_anchor == kPipCustom && near(g_pip_size, 0.25f));
+        assert(near(g_pip_x, (1060 - 400) / 1280.0f) && near(g_pip_y, (590 - 200) / 720.0f));
+        // the picture stays inside the TV picture
+        pip_drag_move(-1, -1);
+        Box b = pip_box(plan.tv, 320.0f / 180, g_pip_size, pip_position());
+        assert(near(b.x, 0) && near(b.y, 0));
+        assert(pip_drag_end() && !pip_dragging());
+        // a drag from the bottom-right corner resizes it; the top-left corner stays
+        assert(pip_drag_begin(1215 / 1280.0f, 675 / 720.0f));
+        pip_drag_move(1220 / 1280.0f, 700 / 720.0f);
+        const float w = std::max(1220.0f - 900, (700.0f - 500) * (320.0f / 180));
+        assert(near(g_pip_size, w / 1280));
+        b = pip_box(plan.tv, 320.0f / 180, g_pip_size, pip_position());
+        assert(std::fabs(b.x - 900) < 0.5f && std::fabs(b.y - 500) < 0.5f && std::fabs(b.w - w) < 0.5f);
+        assert(pip_drag_end());
+        // the wheel resizes the picture under the pointer by 10% a step, within the size limits
+        g_pip_size = 0.25f;
+        assert(pip_wheel(1000 / 1280.0f, 550 / 720.0f, 1) && near(g_pip_size, 0.275f));
+        assert(pip_wheel(1000 / 1280.0f, 550 / 720.0f, -100) && near(g_pip_size, kPipSizeMin));
+        assert(!pip_wheel(0.1f, 0.1f, 1) && !pip_wheel(1000 / 1280.0f, 550 / 720.0f, 0));
+        // GamePad only: the picture fills the window and is not moved
+        plan.drc_only = true;
+        display_input_plan(plan);
+        assert(!pip_drag_begin(1000 / 1280.0f, 550 / 720.0f));
+    }
+    // The game's picture: where the code mods' TV HUD layer is drawn (overlay/guest_hud.cpp) and where their
+    // touches map (game_picture_hit); both must agree in every view
+    {
+        Box b;
+        // TV play, and picture-in-picture: the TV picture, whatever One screen says
+        Layout L = layout(1920, 1080, 1280, 720, 854, 480, false);
+        assert(game_picture_box(L.tv, L.pip, L.drc_only, false, &b) && b.x == L.tv.x && b.w == L.tv.w && b.h == L.tv.h);
+        L = layout(1920, 1080, 1280, 720, 854, 480, true);
+        assert(L.pip_on && game_picture_box(L.tv, L.pip, L.drc_only, true, &b) && b.x == L.tv.x && b.w == L.tv.w);
+        // the GamePad picture alone (desktop GamePad mode, automatic Off-TV): no game picture, the layer hides
+        L = layout(1920, 1080, 1280, 720, 854, 480, false, true);
+        assert(L.drc_only && !game_picture_box(L.tv, L.pip, L.drc_only, false, &b));
+        // One screen in Off-TV Play on a 20:9 phone: the GamePad picture, fitted with bars at the sides
+        assert(game_picture_box(L.tv, L.pip, L.drc_only, true, &b) && b.x == L.pip.x && b.w == L.pip.w);
+        PresentPlan plan;
+        plan.dw = 2400, plan.dh = 1080;
+        L = layout(plan.dw, plan.dh, 1280, 720, 854, 480, false, true);
+        plan.tv = L.tv, plan.pip = L.pip, plan.pip_on = L.pip_on, plan.drc_only = L.drc_only;
+        assert(plan.pip.x > 0 && plan.pip.h == 1080);
+        display_input_plan(plan);
+        g_one_screen_off_tv = true;
+        assert(game_picture_box(plan, &b) && b.x == plan.pip.x && b.w == plan.pip.w);
+        // a mod's drawing (layout units, 1280x720, as the HUD lays it out on that box) and a touch on the
+        // drawn spot (game_picture_hit -> tv_pointer::to_page) land on the same layout point (the centre anchor,
+        // which touches use)
+        for (auto anchor : {guestmods::hud::Anchor::Center})
+            for (float lx : {40.0f, 640.0f, 1240.0f})
+                for (float ly : {20.0f, 360.0f, 700.0f}) {
+                    auto p = guestmods::hud::anchored(lx, ly, anchor, b.w, b.h, 1280, 720);
+                    tv_pointer::State s;
+                    assert(game_picture_hit((b.x + p.x) / plan.dw, (b.y + p.y) / plan.dh, &s.x, &s.y, &s.aspect));
+                    float px, py;
+                    tv_pointer::to_page(s, px, py);
+                    assert(std::fabs(px - lx) < 0.01f && std::fabs(py - ly) < 0.01f);
+                }
+        // off the picture (the side bars): no touch
+        float x, y, a;
+        assert(!game_picture_hit(1 / plan.dw, 0.5f, &x, &y, &a));
+        // One screen off again (TV play came back): the layer hides with the GamePad picture alone
+        g_one_screen_off_tv = false;
+        assert(!game_picture_box(plan, &b) && !game_picture_hit(0.5f, 0.5f, &x, &y, &a));
+    }
 }

@@ -29,8 +29,10 @@
 #include <vector>
 
 #include "../aspect.h"
+#include "../tv_pointer.h"
 #include "input.h"
 #include "runtime.h"
+
 
 namespace gfx {
 
@@ -62,8 +64,11 @@ static GamePadUiState gamepad_ui() {
     const unsigned bits = g_gamepad_ui.load();
     return {bool(bits & 1), bool(bits & 2), bool(bits & 4), bool(bits & 8), bool(bits & 16)};
 }
+bool gamepad_ui_menu() { return gamepad_ui().menu; }
 std::atomic<float> g_drc_aspect{854.0f / 480.0f};
 std::atomic<bool> g_has_drc_window{false};
+std::atomic<bool> g_startup_gamepad{false};
+std::atomic<bool> g_one_screen{false}, g_one_screen_off_tv{false};
 std::atomic<bool> g_second_screen_off{false};
 std::atomic<bool> g_second_display_available{false};
 static std::mutex g_second_screen_seed_mu;
@@ -374,6 +379,58 @@ void display_input_plan(const PresentPlan& p) {
     g_tv_dw=p.dw;
     g_tv_dh=p.dh;
 }
+// ---- the picture-in-picture GamePad moved and resized with the pointer (display_modes.h)
+static int g_pip_drag = 0;  // 0 none, 1 move, 2 resize
+static float g_pip_grab_x = 0, g_pip_grab_y = 0;  // moving: the pointer minus the picture's centre
+static bool pip_under(const Layout& L, float x, float y) {
+    const Box& P = L.pip;
+    return L.pip_on && !L.drc_only && P.w > 0 && P.h > 0 && L.tv.w > 0 && L.tv.h > 0 && x >= P.x && y >= P.y &&
+        x <= P.x + P.w && y <= P.y + P.h;
+}
+// the picture with its centre at (cx, cy) in display units, `size` of the TV picture's width
+static void pip_put(const Layout& L, float cx, float cy, float size) {
+    g_pip_size = pip_clamp_size(size);
+    pip_set_position(pip_place(L.tv, L.pip.w / L.pip.h, g_pip_size, (cx - L.tv.x) / L.tv.w, (cy - L.tv.y) / L.tv.h));
+}
+bool pip_drag_begin(float nx, float ny) {
+    std::lock_guard<std::mutex> lk(g_layout_mu);
+    const Layout& L = g_tv_layout;
+    const float x = nx * g_tv_dw, y = ny * g_tv_dh;
+    if (!pip_under(L, x, y)) return false;
+    const Box& P = L.pip;
+    const float corner = std::max(12.0f, std::min(P.w, P.h) * 0.2f);
+    g_pip_drag = x > P.x + P.w - corner && y > P.y + P.h - corner ? 2 : 1;
+    g_pip_grab_x = x - (P.x + P.w / 2);
+    g_pip_grab_y = y - (P.y + P.h / 2);
+    return true;
+}
+bool pip_dragging() { return g_pip_drag != 0; }
+void pip_drag_move(float nx, float ny) {
+    std::lock_guard<std::mutex> lk(g_layout_mu);
+    const Layout& L = g_tv_layout;
+    if (!g_pip_drag || L.pip.w <= 0 || L.pip.h <= 0 || L.tv.w <= 0 || L.tv.h <= 0) return;
+    const float x = nx * g_tv_dw, y = ny * g_tv_dh;
+    if (g_pip_drag == 1) {
+        pip_put(L, x - g_pip_grab_x, y - g_pip_grab_y, g_pip_size);
+        return;
+    }
+    // resizing: the top-left corner stays, the bottom-right one follows the pointer
+    const float aspect = L.pip.w / L.pip.h;
+    const float w = pip_clamp_size(std::max({x - L.pip.x, (y - L.pip.y) * aspect, 1.0f}) / L.tv.w) * L.tv.w;
+    pip_put(L, L.pip.x + w / 2, L.pip.y + w / aspect / 2, w / L.tv.w);
+}
+bool pip_drag_end() {
+    const bool was = g_pip_drag != 0;
+    g_pip_drag = 0;
+    return was;
+}
+bool pip_wheel(float nx, float ny, float steps) {
+    std::lock_guard<std::mutex> lk(g_layout_mu);
+    const Layout& L = g_tv_layout;
+    if (!pip_under(L, nx * g_tv_dw, ny * g_tv_dh) || steps == 0) return false;
+    pip_put(L, L.pip.x + L.pip.w / 2, L.pip.y + L.pip.h / 2, g_pip_size * std::pow(1.1f, steps));
+    return true;
+}
 bool overlay_hit(float nx, float ny, float* tx, float* ty, bool clamp_outside) {
     std::lock_guard<std::mutex> lk(g_layout_mu);
     const Layout& L = g_tv_layout;
@@ -392,6 +449,39 @@ bool main_picture(float* x, float* y, float* w, float* h) {
     if (g_tv_dw <= 0 || g_tv_dh <= 0 || b.w <= 0 || b.h <= 0) return false;
     *x = b.x / g_tv_dw, *y = b.y / g_tv_dh, *w = b.w / g_tv_dw, *h = b.h / g_tv_dh;
     return true;
+}
+
+bool tv_picture_hit(float nx, float ny, float* px, float* py, float* aspect, bool clamp_outside) {
+    std::lock_guard<std::mutex> lk(g_layout_mu);
+    const Layout& L = g_tv_layout;
+    const Box& b = L.tv;
+    if (L.drc_only || g_tv_dw <= 0 || g_tv_dh <= 0 || b.w <= 0 || b.h <= 0) return false;
+    float x = (nx * g_tv_dw - b.x) / b.w, y = (ny * g_tv_dh - b.y) / b.h;
+    if (x < 0 || y < 0 || x > 1 || y > 1) {
+        if (!clamp_outside) return false;
+        x = std::clamp(x, 0.0f, 1.0f), y = std::clamp(y, 0.0f, 1.0f);
+    }
+    *px = x, *py = y, *aspect = b.w / b.h;
+    return true;
+}
+
+bool game_picture_hit(float nx, float ny, float* px, float* py, float* aspect, bool clamp_outside) {
+    std::lock_guard<std::mutex> lk(g_layout_mu);
+    const Layout& L = g_tv_layout;
+    Box b;
+    if (g_tv_dw <= 0 || g_tv_dh <= 0 ||
+        !game_picture_box(L.tv, L.pip, L.drc_only, g_one_screen_off_tv.load(std::memory_order_relaxed), &b))
+        return false;
+    float x = (nx * g_tv_dw - b.x) / b.w, y = (ny * g_tv_dh - b.y) / b.h;
+    if (x < 0 || y < 0 || x > 1 || y > 1) {
+        if (!clamp_outside) return false;
+        x = std::clamp(x, 0.0f, 1.0f), y = std::clamp(y, 0.0f, 1.0f);
+    }
+    *px = x, *py = y, *aspect = b.w / b.h;
+    return true;
+}
+bool game_picture_box(const PresentPlan& p, Box* box) {
+    return game_picture_box(p.tv, p.pip, p.drc_only, g_one_screen_off_tv.load(std::memory_order_relaxed), box);
 }
 
 // ---------------------------------------------------------------- view button (touch screens)
@@ -414,7 +504,8 @@ bool view_button_enabled() {
         return e && atoi(e) != 0;
 #endif
     }();
-    return on && touch_buttons_visible();
+    // (One screen in Off-TV Play: one picture, nothing to switch)
+    return on && touch_buttons_visible() && !g_one_screen_off_tv;
 }
 // a square of 9% of the window's shorter side in the top left corner (rhemfur's Android layout)
 static Box view_button(float dw, float dh) {
@@ -548,11 +639,16 @@ PresentPlan display_plan(bool have_tv, float tw, float th, bool have_drc, float 
     // that window returns, keep the GamePad accessible in the primary picture.
     bool window_fallback = g_mode == kDrcWindow && !g_has_drc_window && g_shown;
     bool pip = (g_pip_preview || ((g_mode == kDrcPip || g_mode == kDrcAuto) && pip_shown_now()) || window_fallback) && have_drc;
-    bool drc_only = !g_pip_preview && (g_mode == kDrcGamePad ||
-        (g_mode == kDrcAuto && gamepad_ui().available && gamepad_ui().off_tv)) && have_drc;
+    // One screen (handheld) mode (one_screen.h): the GamePad picture whenever the game plays Off-TV, whatever the mode
+    const bool off_tv = gamepad_ui().available && gamepad_ui().off_tv;
+    const bool startup_gamepad = g_startup_gamepad.load() && !g_has_drc_window;
+    bool drc_only = !g_pip_preview && (startup_gamepad || g_mode == kDrcGamePad || (g_mode == kDrcAuto && off_tv) || g_one_screen_off_tv) && have_drc;
     // Releasing a connected Android display also suspends its single-screen
     // fallback (including a hidden GamePad-only or pinned automatic view).
-    if (g_second_display_available && g_second_screen_off) pip = drc_only = false;
+    if (g_second_display_available && g_second_screen_off) {
+        pip = false;
+        if (!startup_gamepad) drc_only = false; // keep startup touch usable on the remaining primary screen
+    }
     float dw = 0, dh = 0;
     bool sim = sim_screen(&dw, &dh);
     if (!sim) dw = layer_w, dh = layer_h;

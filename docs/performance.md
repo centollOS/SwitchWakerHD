@@ -99,6 +99,10 @@ directory) to check that the run still renders correctly. The "Sort by top of st
 `sample.txt` shows where the CPU time goes. `run.log` prints the shader and pipeline counts every
 few seconds.
 
+For a performance bug report, turn on Settings → Graphics → **Detailed performance profiling**, play
+a few seconds, then press **Copy performance report**. The setting is off by default and takes effect
+at once; without it the report leaves out the detailed timings, uploads and draw classes.
+
 Crash logs and the overlay's "Copy performance report" carry one line with the renderer's live
 objects (`runtime/src/render_objects.h`): `renderer objects: 572 shaders, 337 pipelines`, plus on
 Linux and Android `memory mappings N (limit L)` from `/proc/self/maps` and `vm.max_map_count`.
@@ -498,6 +502,35 @@ copies, but the copied guest ranges hold only 2.2 MiB of unique bytes; an interp
 copies the same 18.6 MiB again. 55% of Outset draws (12% on Windfall) change only buffer pointers
 or ALU constants since the previous draw.
 
+## Submission pool size (2026-10-21)
+
+`WWHD_VK_SUBMISSION_POOL` (4 by default; `docs/vulkan.md`, "Submission pool") was tried at 8 after a
+report that 8 slots made a build much faster. Apple M3 Max, MoltenVK, `tools/bench/run_bench.py`,
+Outset (slot 3), uncapped with immediate present, one warm cache, variants interleaved, medians:
+
+| Outset, 40 s, 5 runs each | 4 slots | 8 slots |
+|---|---|---|
+| CPU-bound (1x scale): frame time avg / 1% / 0.1% / longest | 7.30 / 9.95 / 13.2 / 19.3 ms | 7.31 / 10.1 / 12.5 / 18.9 ms |
+| render thread CPU; waits for a free slot | 7.40 ms; 0.00 ms | 7.26 ms; 0.00 ms |
+| frames in flight at swap, avg (max) | 1.00 (1-2) | 1.00 (1-4) |
+
+| Outset, 30 s, 3 / 2 runs | 4 slots | 8 slots |
+|---|---|---|
+| GPU-bound (4x scale): frame time avg / 1% / 0.1% | 20.7 / 28.9 / 47.2 ms | 20.7 / 31.6 / 55.1 ms |
+| GPU submission intervals; waits for a free slot | 20.5 ms; 6.0 ms | 20.6 ms; 5.3 ms |
+| frames in flight at swap, avg (max) | 1.6 (2) | 2.6 (4) |
+
+Memory: 8 slots keep 96-128 MiB more upload blocks (256 MiB against 128-160 MiB). A frame here has
+about 3 submissions, so with the CPU as the limit the GPU has finished each slot long before the ring
+comes back to it. With the GPU as the limit, more slots only let the render thread run further ahead:
+same frame rate, about one frame more latency and slightly worse 1% frames. The default stays at 4.
+Xiaomi 14 (Adreno 750), Outset, 120 fps interpolation uncapped (not at a cap: median 17 ms), one
+run each after a cool start: 57.0 / 56.3 fps, 1% 28.7 / 29.8 ms, render thread 14.1 / 14.6 ms, GPU
+12.3 / 12.1 ms, no waits for a free slot with 4 slots, 3 submissions per frame in flight with either;
+8 slots cost 64 MiB of upload blocks and about 55 MiB more app memory (PSS).
+The Metal renderer has no fixed ring (command buffers from one queue, upload pools returned at
+completion), so there is nothing to change there.
+
 ## Where the time goes
 
 Busy (non-waiting) samples in one 20 s in-game run with 60 fps interpolation on, after all the fixes
@@ -570,8 +603,11 @@ set). In the 20 s run, memchr/memcmp under `compile_msl` dropped from ~670 sampl
 
 ### Render thread polled for compiles (`wait_compiled`)
 
-When a draw needs a shader or pipeline that's still compiling, the render thread waits up to 25 ms
-per frame (`WWHD_COMPILE_WAIT_MS`) before skipping the draw. It used to poll: `usleep(100)` plus a
+When a draw needs a shader or pipeline that's still compiling, the render thread waits for it. With
+Settings → Graphics → **Shader compile** Off (the default) Metal waits up to 25 ms per frame
+(`WWHD_COMPILE_WAIT_MS`) before skipping a draw into a target redrawn every frame; with Fast, both
+renderers wait up to 4 ms (`WWHD_BG_SHADER_WAIT_MS`) and then leave the draw out until its compile is
+done (see [vulkan.md](vulkan.md#shader-compile-off-or-fast)). It used to poll: `usleep(100)` plus a
 clock read in a loop. Metal's completion handlers now publish the result through `compile_done`,
 which signals a condition variable that `wait_compiled` sleeps on until the result arrives or the
 time runs out.
@@ -660,6 +696,24 @@ with and without an index buffer, counts 0–64); the new one is ~5× faster on 
 | `build_indices` self time | 291 | 57 |
 | renderer samples | 2,701 | 2,262 |
 | busy samples, whole process | 9,242 | 8,812 |
+
+## Sun check: the same answers every time (2026-10-22)
+
+The game checks whether the sun is hidden by reading the depth of five points around it (a "depth
+peek"). On the Wii U the game asks during one step and reads the answers at the start of the next:
+`peekData` reads the depth buffer on the CPU after the draw lists and writes the answers at once,
+and `dKyr_sun_move` reads them one step later before asking again. The port answered whenever the
+GPU finished the frame, usually two steps after the request and sometimes one. Then the sun's glare
+could differ between runs, even with Shader compile Off, depending on load or frame dumps.
+
+Now the answers are written at a fixed point, the game's swap after the next one: the sun glare
+reacts one game step later than on the Wii U, for no measurable cost and fully deterministic. In
+fixed-seed runs (Off with and without frame dumps, 25 ms render load, Fast; Vulkan and Metal) the
+game saw the same answers and its state matched step for step.
+
+`WWHD_PEEKZ_SYNC` selects other timings for tests: `1` answers one step later as on the Wii U (the
+game waits at its swap for the GPU; measured 3 to 15 % slower uncapped on a Mac), `2` the same with
+a synchronous copy (8 to 12 % slower), `0` the former timing (not deterministic).
 
 ## Open leads
 

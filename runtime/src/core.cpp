@@ -341,6 +341,7 @@ extern "C" void ppc_keep_failed(Cpu* c, int reg, uint32_t fn) {
 }
 
 extern "C" void ppc_dispatch(Cpu* c) {
+    if (mainprof::on(c)) mainprof::bump(mainprof::g_dispatches);
     PpcFunc f = dispatch::lookup(c->pc);
     if (!f) fatal("indirect branch to unknown address %08X (lr=%08X ctr=%08X)", c->pc, c->lr, c->ctr);
     if (c->pc - dispatch::kSlotBase < dispatch::kSlotSize ||

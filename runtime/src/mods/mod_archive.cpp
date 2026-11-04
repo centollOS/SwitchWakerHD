@@ -8,7 +8,7 @@
 #include <zlib.h>
 namespace mods::archive {
 namespace fs=std::filesystem;
-constexpr uint64_t kFileLimit=128ull*1024*1024,kTotalLimit=512ull*1024*1024;
+constexpr uint64_t kFileLimit=128ull*1024*1024,kTotalLimit=kArchiveLimit;
 bool relative_path(const std::string& name) {
     if(name.empty()||name.size()>512||name.find('\\')!=std::string::npos||name.find(':')!=std::string::npos||name.find('\0')!=std::string::npos)return false;
     fs::path p(name);if(p.is_absolute())return false;

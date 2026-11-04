@@ -43,7 +43,7 @@ const std::vector<CommandInfo> kCommands = {
      false, true},
     {"list_actors", "The open mod's placed actors (game actors and mod models).", {{"mod", "string", "another mod than the open one"}}},
     {"get_actor", "One placed actor as the manifest declares it.", {{"id", "string", "the actor's id", true}, {"mod", "string", ""}}},
-    {"set_actor", "Sets one property of a placed actor (null removes it): position, rotation, scale, model, lines, collision, behaviour, buoyancy, drift, anchor, grapple_points, distant, shoreline, chart_marker, arrival, attention, animation, flag, stage, room, when, then, talks, look_at, path, parameters, defeated_flag, broken_flag, drops, native_drops, combat, carry, switch_flag, switch, texture, variant (a game object's). when: {quest, step, quests: [{quest, step}] (all must hold), item, time, flag, not_flag (a flag id)}. talks: up to 8 [{when?, lines, then?}], the first that matches is said (one without when last; not with lines or then). A chest's parameters: {item: rupee_green (1), rupee_blue (5), rupee_yellow (10), rupee_red (20), rupee_purple (50), rupee_orange (100, the default), rupee_silver (200), heart_piece, heart_container, or item:<id> (one of the mod's items; with hold_up Link holds its model up)}.",
+    {"set_actor", "Sets one property of a placed actor (null removes it): position, rotation, scale, model, lines, collision, behaviour, buoyancy, drift, anchor, grapple_points, distant, shoreline, chart_marker, arrival, calm_water, attention, animation, flag, stage, room, when, then, talks, look_at, path, parameters, defeated_flag, broken_flag, drops, native_drops, combat, carry, switch_flag, switch, texture, variant (a game object's). when: {quest, step, quests: [{quest, step}] (all must hold), item, time, flag, not_flag (a flag id)}. talks: up to 8 [{when?, lines, then?}], the first that matches is said (one without when last; not with lines or then). A chest's parameters: {item: rupee_green (1), rupee_blue (5), rupee_yellow (10), rupee_red (20), rupee_purple (50), rupee_orange (100, the default), rupee_silver (200), heart_piece, heart_container, or item:<id> (one of the mod's items; with hold_up Link holds its model up)}.",
      {{"id", "string", "the actor's id", true}, {"property", "string", "the manifest field", true}, {"value", "any", "the new value; null removes the field", true}, {"mod", "string", ""}},
      true},
     {"move_actor", "Moves a placed actor.", {{"id", "string", "", true}, {"position", "point", "{x, y, z} in world units", true}, {"mod", "string", ""}}, true},
@@ -63,6 +63,8 @@ const std::vector<CommandInfo> kCommands = {
     {"history", "The undo and redo steps.", {}},
     {"validate", "Checks the open mod as the mod manager does.", {{"mod", "string", ""}}},
     {"save_package", "Writes the open mod's manifest into its package folder (replaces manifest.json).", {{"mod", "string", ""}, {"confirm", "boolean", "must be true: the file is replaced", true}}, false, true},
+    {"restart_and_return", "Saves every changed package, then starts the game again with the same arguments and puts Link back where he is now (after the Quest Log is picked on the title screen), in Play or test mode as before: for changes that take effect only after a restart.",
+     {{"confirm", "boolean", "must be true: the game restarts", true}}, false, true},
     {"revert_package", "Forgets the unsaved changes (an undo step).", {{"mod", "string", ""}, {"confirm", "boolean", "must be true", true}}, true, true},
     {"reload_room", "Leaves and enters the current room again (Link stays where he is): every actor of the room is created again.", {}},
     {"list_locations", "Warp destinations: the islands, the game's stages and rooms, the installed packages' stages, and the open mod's actors and quest places.", {{"group", "string", "Islands, Rooms, Mod stages or Quest"}}},
@@ -112,13 +114,13 @@ const std::vector<CommandInfo> kCommands = {
     // ---- the mod's stages (commands_stages.cpp, docs/mod-stages.md): new places built from the package's models
     {"import_ground", "Copies a room's .glb (from Blender, say) into the package (assets/<name>.glb, or \"as\") for add_stage, add_room or a rebuild; reports its parts, the parts without UVs and its material names.",
      {{"file", "string", "the .glb", true}, {"as", "string", "its path in the package"}, {"confirm", "boolean", "replace a different file of that name"}, {"mod", "string", ""}}},
-    {"place_in_stage", "Places something of a stage where Link (or the fly camera, or a position) is: a spawn (\"point\" moves one), an exit box on the floor (\"to\": where it leads), a door facing his way (\"to_room\", \"lock\"), a return warp, a chest 1.5 m ahead facing him (\"item\"), an enemy (\"actor\", \"variant\"), a pot; or, standing in a game room, an entry (the way in, \"to_room\", \"to_point\").",
-     {{"stage", "string", "", true}, {"what", "string", "spawn, exit, door, warp, entry, chest, enemy, pot or big_pot", true}, {"at", "string", "link (default), camera or position"},
+    {"place_in_stage", "Places something of a stage where Link (or the fly camera, or a position) is: a spawn (\"point\" moves one), an exit box on the floor (\"to\": where it leads), a door facing his way (\"to_room\", \"lock\"), a return warp, a chest 1.5 m ahead facing him (\"item\"), an enemy (\"actor\", \"variant\"), a pot, the game's lava floor at his feet (\"size\" {x, z}, default 10 m square) or the heat haze over it; or, standing in a game room, an entry (the way in, \"to_room\", \"to_point\").",
+     {{"stage", "string", "", true}, {"what", "string", "spawn, exit, door, warp, entry, chest, enemy, pot, big_pot, lava or heat_shimmer", true}, {"at", "string", "link (default), camera or position"},
       {"position", "point", "with at = position"}, {"room", "integer", "with at = position"}, {"id", "string", "its id"}, {"point", "integer", "a spawn's point"},
       {"to", "object", "an exit's or warp's place"}, {"to_room", "integer", "a door's other room, an entry's room"}, {"to_point", "integer", "an entry's spawn point"},
       {"lock", "string", "none, small_key, boss or shutter"}, {"switch", "integer", "a shutter's switch"}, {"item", "string", "a chest's: small_key, map, compass, boss_key, heart_container"},
-      {"actor", "string", "an enemy: chuchu, bokoblin, keese, darknut"}, {"variant", "string", ""}, {"size", "point", "a box's size"},
-      {"style", "string", "an entry's: walk (default) or updraft (the wind lifts Link first)"}, {"height", "number", "an updraft's lift in units (200..5000, default 1500)"}, {"after", "string", "a warp's: the chest (its id) that must be open first"}, {"angle", "number", ""}, {"mod", "string", ""}},
+      {"actor", "string", "an enemy: chuchu, bokoblin, keese, darknut"}, {"variant", "string", ""}, {"size", "object", "a box's size {x, y, z}; lava's area {x, z}"},
+      {"style", "string", "an entry's: walk (default), updraft (the wind lifts Link first) or hole (Link falls in; the spawn is a fall spawn)"}, {"height", "number", "an updraft's lift in units (200..5000, default 1500)"}, {"after", "string", "a warp's: the chest (its id) that must be open first"}, {"angle", "number", ""}, {"mod", "string", ""}},
      true},
     {"notebook_page", "Opens (or closes) the Story Notebook's page over the game, as the player opens it from the Delivery Bag: the quests, their steps and where; take a screenshot to see it.",
      {{"open", "boolean", "true (default) opens it, false closes it"}, {"give", "boolean", "test mode: the notebook goes into the loaded save first, as its letter would put it"}}},
@@ -201,23 +203,24 @@ const std::vector<CommandInfo> kCommands = {
       {"behaviour", "string", "static (default), floating or drifting"}, {"buoyancy", "object", "draft, damping seconds and max_tilt degrees"},
       {"drift", "object", "wind_speed, current {x,z}, max_speed in units per second"}, {"anchor", "object", "world point and tether radius; drifting only"}, {"grapple_points", "array|null", "up to eight local grapple points {id,position,yaw}; null clears"},
       {"distant", "object|null", "{model}: original low-detail model for adjacent sea squares"}, {"shoreline", "object|null", "{model, material?}: original coast foam model, or with material \"water\" a still-water surface"},
-      {"chart_marker", "object|null", "{label,when_flag?}: mod island marker"}, {"arrival", "object|null", "{name,radius,flag}: mod-owned arrival notice"}, {"stage", "string", "stage name", true}, {"room", "integer", "room number", true},
+      {"chart_marker", "object|null", "{label,when_flag?}: mod island marker"}, {"arrival", "object|null", "{name,radius,flag}: mod-owned arrival notice"}, {"calm_water", "object|null", "{radius, falloff?, offset?: {x, z}}: still sea around the island (waves fade out over falloff, default 12800)"}, {"stage", "string", "stage name", true}, {"room", "integer", "room number", true},
       {"position", "point", "world position", true}, {"rotation", "point", "degrees"}, {"scale", "point", "positive scale"}, {"mod", "string", ""}}, true},
     {"set_world_object", "Changes world-object collision, behaviour and motion parameters atomically.",
      {{"id", "string", "placed actor id", true}, {"collision", "object", "mesh reference or simple shape; unchanged when omitted"}, {"behaviour", "string", "static, floating or drifting; unchanged when omitted"},
       {"buoyancy", "object|null", "draft, damping seconds and max_tilt degrees"}, {"drift", "object|null", "wind_speed, current {x,z}, max_speed in units per second"}, {"anchor", "object|null", "world point and tether radius; null removes it"}, {"grapple_points", "array|null", "local grapple points; omitted preserves, null clears"},
       {"distant", "object|null", "low-detail model; null removes it"}, {"shoreline", "object|null", "coast foam or water surface model; null removes it"},
-      {"chart_marker", "object|null", "island marker; null removes it"}, {"arrival", "object|null", "arrival notice; null removes it"}, {"mod", "string", ""}}, true},
+      {"chart_marker", "object|null", "island marker; null removes it"}, {"arrival", "object|null", "arrival notice; null removes it"}, {"calm_water", "object|null", "{radius, falloff?, offset?}: still sea around it; null removes it"}, {"mod", "string", ""}}, true},
     {"preview_collision", "Returns world-space collision vertices and edges for a wireframe preview, with placement findings.",
      {{"id", "string", "placed world object", true}, {"position", "point", "a trial position (default: its own)"}, {"yaw", "number", "a trial turn in degrees"}, {"mod", "string", ""}}},
-    {"placement_conflicts", "Returns placement conflicts and collision budget findings for a world object.",
+    {"placement_conflicts", "Returns placement conflicts and collision budget findings for a world object; a conflict caused by the model's own faces lists them (triangles: collision mesh indices, faces: their world corners).",
      {{"id", "string", "placed world object", true}, {"position", "point", "a trial position (default: its own)"}, {"yaw", "number", "a trial turn in degrees"}, {"mod", "string", ""}}},
     {"prepare_collision", "Prepares a static model's collision for live world-object placement.",
      {{"model", "string", "declared static model id", true}, {"mod", "string", ""}}},
     {"check_water", "What a pond, river or waterfall would be (the water tool), and every problem with it (errors and warnings), without changing anything: its place, triangles, memory, a river's steps and levels.",
      {{"kind", "string", "pond, river or waterfall", true}, {"points", "array", "pond: the outline; river: the centre line, in the flow's order; waterfall: the top edge's 2 points (or \"river\" and \"step\"). Each {x, z} (or {x, y, z}) in world units"},
       {"level", "number", "pond: the water's height (world); default: depth above the lowest ground along the shore (swimmable)"}, {"depth", "number", "pond: floor below the level; river: water above the bed (20 to 480; default 200)"},
-      {"rim", "number", "pond: banks above the water (0 to 300; default 0)"}, {"foam", "boolean", "pond: a foam ring at the shore"}, {"floor", "string", "the floor's (river bed's, rock's) colour \"#rrggbb\""},
+      {"rim", "number", "pond: banks above the water (0 to 300; default 0)"}, {"foam", "boolean", "pond: a foam ring at the shore"}, {"lava", "boolean", "pond: a lava pool instead of water (Link burns in it)"},
+      {"floor", "string", "the floor's (river bed's, rock's) colour \"#rrggbb\""},
       {"width", "number", "river: 100 to 2000 (default 400)"}, {"shallow", "any", "river: true / false per section (point i to i+1), or one for all: wading water"},
       {"top", "number", "waterfall: the top edge's height (default: the ground there)"}, {"bottom", "number", "waterfall: the ground below (default: the ground in front of the edge)"},
       {"side", "integer", "waterfall: 1 or -1, the side it falls to (default: the lower one)"}, {"river", "string", "waterfall: at this river's step (instead of points)"}, {"step", "integer", "waterfall: the river's step (1-based)"},
@@ -225,7 +228,7 @@ const std::vector<CommandInfo> kCommands = {
     {"add_pond", "Makes a pond (the water tool): its outline at the water's level, with a floor, banks and optional foam; the water surface and swimmable collision as two generated models; one undo step.",
      {{"id", "string", "the new actor's id (default pond, pond-2...)"}, {"points", "array", "the outline: 3 to 48 world points {x, z}", true}, {"level", "number", "the water's height (default: depth above the lowest ground along the shore, swimmable)"},
       {"depth", "number", "floor below the level (20 to 480, default 200)"}, {"rim", "number", "banks above the water (0 to 300)"}, {"foam", "boolean", "a foam ring at the shore"},
-      {"floor", "string", "the floor's colour \"#rrggbb\""}, {"mod", "string", ""}}, true},
+      {"lava", "boolean", "a lava pool instead of water: the game's lava (Link burns in it), rock floor and banks"}, {"floor", "string", "the floor's colour \"#rrggbb\""}, {"mod", "string", ""}}, true},
     {"add_river", "Makes a river (the water tool): a centre line (the flow goes from the first point to the last) with a width; it follows the ground and steps down where the ground drops; shallow sections are for wading; one undo step.",
      {{"id", "string", "the new actor's id (default river...)"}, {"points", "array", "the centre line: 2 to 32 world points {x, z}", true}, {"width", "number", "100 to 2000 (default 400)"},
       {"depth", "number", "water above the bed in deep sections (default 200)"}, {"shallow", "any", "true / false per section, or one for all"}, {"floor", "string", "the bed's colour \"#rrggbb\""}, {"mod", "string", ""}}, true},
@@ -235,7 +238,7 @@ const std::vector<CommandInfo> kCommands = {
       {"floor", "string", "the rock's colour \"#rrggbb\""}, {"mod", "string", ""}}, true},
     {"edit_water", "Changes a pond, river or waterfall made with the water tool: give the parameters that change (as for add_pond, add_river, add_waterfall); it is built again where it stands; one undo step.",
      {{"id", "string", "the body of water's actor", true}, {"points", "array", "the new outline, centre line or top edge"}, {"level", "number", "pond"}, {"depth", "number", ""}, {"rim", "number", "pond"},
-      {"foam", "boolean", "pond"}, {"floor", "string", "\"#rrggbb\""}, {"width", "number", "river"}, {"shallow", "any", "river"}, {"top", "number", "waterfall"}, {"bottom", "number", "waterfall"},
+      {"foam", "boolean", "pond"}, {"lava", "boolean", "pond"}, {"floor", "string", "\"#rrggbb\""}, {"width", "number", "river"}, {"shallow", "any", "river"}, {"top", "number", "waterfall"}, {"bottom", "number", "waterfall"},
       {"side", "integer", "waterfall"}, {"mod", "string", ""}}, true},
     {"get_water", "A body of water's parameters as the water tool keeps them (world points, level, depth...), and a river's steps and levels.",
      {{"id", "string", "the body of water's actor", true}, {"mod", "string", ""}}},
@@ -248,10 +251,30 @@ const std::vector<CommandInfo> kCommands = {
     {"set_drops", "Sets what an enemy or prop drops: up to eight of the mod's items.", {{"id", "string", "", true}, {"drops", "array", "[{item: item:<id>, quantity}]", true}, {"mod", "string", ""}}, true},
     {"preview_dialogue", "Shows an actor's dialogue (or given lines) in the game's own message box; close hides it.",
      {{"id", "string", "the actor"}, {"lines", "any", "lines instead of the actor's"}, {"close", "boolean", "hide the box"}, {"mod", "string", ""}}},
-    {"check_model", "Checks a .glb file for the game: size, triangles, texture, bones, clips and material.", {{"file", "string", "the .glb file", true}}},
-    {"import_model", "Copies a .glb file into the open mod's models folder, adds it to the package and prepares it for the game.",
-     {{"file", "string", "the .glb file", true}, {"id", "string", "the model's id (default: the file name)"}, {"confirm", "boolean", "replace a different file of the same name"}, {"mod", "string", ""}},
+    {"check_model", "Checks a .glb file for the game: size, triangles, texture, bones, clips and material; import_fixes lists what the import changes to make it fit (several objects merged, strips and loose edges, vertex colours, blended materials, texture sizes). With kit, it is checked as import_model with kit checks it and kit_report says which of its materials are the room's (game), have their own texture (own) or are neither (unknown: import_model refuses those).",
+     {{"file", "string", "the .glb file", true},
+      {"kit", "object", "{stage, room}: check it as a model with that room's materials"},
+      {"materials", "object", "a kit model's material names -> the kit room's materials"},
+      {"material", "string", "the kit room's material for a texture-free material that names none"}}},
+    {"import_model", "Copies a .glb file into the open mod's models folder (fixed where it breaks a rule the editor can repair; fixes says what changed), adds it to the package and prepares it for the game. A model made away from its origin (on an island export) is placed at the room's origin by add_actor. With kit, its texture-free materials are game materials of that room (docs/world-objects.md#game-materials), built from your game files.",
+     {{"file", "string", "the .glb file", true}, {"id", "string", "the model's id (default: the file name)"}, {"confirm", "boolean", "replace a different file of the same name"},
+      {"kit", "object", "{stage, room}: the room of the game whose materials the model's texture-free materials name (a kit model)"},
+      {"materials", "object", "a kit model's material names -> the kit room's materials (default: a material's own name)"},
+      {"material", "string", "a kit model's kit material for its other texture-free materials"}, {"mod", "string", ""}},
      true},
+    {"set_model_kit", "Changes a kit model's kit room and material names, and builds it again from your game files; the actors drawing it take it while the game runs.",
+     {{"model", "string", "the model's id", true}, {"kit", "object", "{stage, room}"}, {"materials", "object", "material names -> kit materials (null: none)"},
+      {"material", "string", "the kit material for its other texture-free materials (\"\": none)"}, {"mod", "string", ""}},
+     true},
+    {"reload_model", "Takes a model's changed file in the package (after you exported it again from Blender): the import's fixes are applied to it; a kit model is built again from your game files and the actors drawing it take it while the game runs, another model at the next start.",
+     {{"model", "string", "the model's id", true}, {"mod", "string", ""}}},
+    {"replace_model", "Replaces an imported model's file with a new .glb under the same id (fixed as import_model fixes it; a kit model keeps its room and names): every placement using it keeps its place and shows the new version, its collision included, as soon as it is prepared. The file before is kept as models/.previous/<file>. Not an undo step (replace it again to go back). Without file: the file it was last imported or replaced from.",
+     {{"model", "string", "the model's id", true}, {"file", "string", "the new .glb file"}, {"mod", "string", ""}}},
+    {"remove_model", "Removes an imported model from the mod (an undo step). Refused while placements use it (the error lists them) unless actors is true, which removes those placements in the same step; refused while an item holds it. Its file goes to models/.removed and an undo brings it back.",
+     {{"model", "string", "the model's id", true}, {"actors", "boolean", "also remove the placements that use it"}, {"confirm", "boolean", "must be true", true}, {"mod", "string", ""}}, true, true},
+    {"watch_model", "Watches an imported model's file (for this editor session; off by default): when the file changes on disk and has stayed the same for a second, replace_model runs by itself. Without file: the file it was last imported or replaced from.",
+     {{"model", "string", "the model's id", true}, {"on", "boolean", "true watches, false stops", true}, {"file", "string", "the .glb file to watch"}, {"mod", "string", ""}}},
+    {"list_model_files", "The open mod's models: the file each was imported or replaced from in this session, whether it is watched, the placements that use it and the items that hold it.", {{"mod", "string", ""}}},
     {"model_clips", "A model's animation clips (for a route's walk and idle clips).", {{"model", "string", "the model's id", true}, {"mod", "string", ""}}},
     {"check_package", "Every problem of the open mod's package, each with the actor, model, scene or quest it is about.", {{"mod", "string", ""}}},
     {"export_package", "Checks the open mod and writes its package (manifest and its own files) into a new or empty folder.",
@@ -335,7 +358,7 @@ const std::vector<CommandInfo> kCommands = {
      {{"scene", "string", "", true}, {"type", "string", "none, talk, quest_step, room, area or salvage", true}, {"actor", "string", "talk: the actor"},
       {"quest", "string", "quest_step: the quest"}, {"step", "integer", "quest_step: the step"}, {"chart", "string", "salvage: the chart"},
       {"at", "string", "room / area: link (default) or camera"}, {"stage", "string", "room / area"}, {"room", "integer", "room / area"},
-      {"position", "point", "area: its centre"}, {"radius", "number", "area: its radius (default 500)"}, {"mod", "string", ""}},
+      {"position", "point", "area: its centre"}, {"radius", "number", "area: its radius (default 500)"}, {"again", "boolean", "area: plays again once Link has left the area"}, {"mod", "string", ""}},
      true},
     {"add_scene_step", "Adds a step to a scene, with defaults that fit (a camera takes the fly camera's view; a choice comes with its two branches).",
      {{"scene", "string", "", true}, {"type", "string", "camera, say, move, face, wait, sound, fade, end, camera_path, camera_follow, animation, walk, choice, music, particle or demo", true},
@@ -367,7 +390,7 @@ const std::vector<CommandInfo> kCommands = {
      {{"scene", "string", "", true}, {"step", "any", "number or id", true}, {"frame", "number", "frames from the demo's start", true}, {"move", "boolean", "move the fly camera (default true)"}, {"mod", "string", ""}}},
     {"set_demo_key", "Sets a key of a demo lane (added when the lane has none at that frame): lanes camera.eye, camera.target, camera.fovy, camera.roll, <actor>.position, <actor>.rotation, <actor>.scale.",
      {{"scene", "string", "", true}, {"step", "any", "number or id", true}, {"lane", "string", "", true}, {"frame", "integer", "0..the demo's frames", true},
-      {"value", "any", "{x, y, z} in the demo's own coordinates, or a number (fovy, roll)"}, {"from", "string", "camera (the fly camera's eye for camera.eye, its target for camera.target) or link (Link's position): instead of value"},
+      {"value", "any", "{x, y, z} in the demo's own coordinates, or a number (fovy, roll)"}, {"from", "string", "camera (the fly camera's eye for camera.eye, its target for camera.target) or link (Link's position): instead of value (given both, value is used when that isn't available)"},
       {"curve", "string", "linear, smooth, bspline or step"}, {"mod", "string", ""}},
      true},
     {"move_demo_key", "Moves a demo key to another frame.", {{"scene", "string", "", true}, {"step", "any", "", true}, {"lane", "string", "", true}, {"frame", "integer", "", true}, {"to", "integer", "", true}, {"mod", "string", ""}}, true},
@@ -640,6 +663,12 @@ bool world_placements(Host* host, const std::string& mod, const Value& before, c
             // a body of water from the water tool whose models are still being prepared: check_water cleared its
             // place already, and the game checks it again when they are ready (mod_actor::declare)
             if (actor.water_body()) {
+                why.clear();
+                continue;
+            }
+            // a model whose collision is still being prepared ("Your model" with its own _col meshes, issue #280): the
+            // game checks its place when the collision is ready (mod_actor::declare), as above
+            if (!actor.collision_mesh.empty() && host->collision_preparing(mod, actor.collision_mesh)) {
                 why.clear();
                 continue;
             }
@@ -1016,6 +1045,10 @@ const Value* Session::manifest(const std::string& mod) const {
     auto* p = find(mod);
     return p ? &p->manifest : nullptr;
 }
+const Value* Session::started(const std::string& mod) const {
+    auto* p = find(mod);
+    return p ? &p->started : nullptr;
+}
 std::string Session::package_dir(const std::string& mod) const {
     auto* p = find(mod);
     return p ? p->dir : std::string();
@@ -1175,10 +1208,32 @@ void Session::apply_live(const Package& p, const Value& before, Value& result) {
         result["live"] = false;
         return;
     }
+    // a changed placement drawing a model the game started without (no placement used it then): the model is prepared
+    // now, and the placement takes it when it is ready (issue #281: a model chosen in the properties waited for a
+    // restart). A model that failed to prepare is not asked for again: its placements say why.
+    std::string preparing;
+    std::set<std::string> asked;
+    for (const auto& a : actors) {
+        if (a.kind != "mod" || a.model.empty() || std::find(changed.begin(), changed.end(), a.id) == changed.end()) continue;
+        if (asked.contains(a.model) || host_->model_ready(p.mod, a.model) || !host_->model_failure(p.mod, a.model).empty()) continue;
+        const Value* model = find_by_id(p.manifest.get("models"), a.model);
+        if (!model) continue;
+        asked.insert(a.model);
+        Value request = *model;
+        // with its collision when a world object stands on it (a preparation option, never a manifest field)
+        if (request.get("kind").string("static") == "static")
+            for (const auto& other : actors)
+                if (other.collision_mesh == a.model) request["collision"] = true;
+        std::string prepared, w;
+        preparing += (preparing.empty() ? "" : " ") +
+                     (host_->prepare_model(p.mod, p.dir, request, prepared, w) ? "Model " + a.model + " is being prepared; " + a.id + " shows it when it is ready."
+                                                                             : "Model " + a.model + " is prepared when the game starts (" + w + ").");
+    }
     const bool live = host_->apply_actors(p.mod, actors, changed, note, why);
     result["live"] = live;
     if (!live) result["note"] = why;
     else if (!note.empty()) result["note"] = note;
+    if (!preparing.empty()) add_note(result, preparing);
 }
 
 void Session::apply_paths(const Package& p, Value& result) {
@@ -1285,6 +1340,7 @@ bool Session::restore(const std::string& mod, const Value& manifest, Value& resu
     const bool story_changed = story_reload::story_changed(p->manifest, manifest);
     const Value before = p->manifest;
     p->manifest = manifest;
+    sync_model_files(*p, before);  // a removed model's file back (undo), or aside again (redo)
     result["mod"] = mod;
     if (paths_changed) apply_paths(*p, result);
     if (actors_changed) apply_live(*p, before, result);
@@ -1300,8 +1356,34 @@ std::vector<Location> Session::locations() const {
     return build_locations(stage_rooms_, open, host_ ? host_->mod_stages() : std::vector<Host::ModStage>{});
 }
 
-bool Session::warp_to(const Location& to, std::string& why) {
+bool resolve_warp_stage(Location& to, const std::vector<Host::ModStage>& mod_stages, std::string& why) {
+    const Host::ModStage* stage = nullptr;
+    if (to.stage.rfind("stage:", 0) == 0) {  // a package's stage, by the package's own ids
+        const std::string rest = to.stage.substr(6);
+        const size_t slash = rest.find('/');
+        unsigned matches = 0;
+        for (const auto& ms : mod_stages)
+            if (slash == std::string::npos ? ms.id == rest : (ms.mod == rest.substr(0, slash) && ms.id == rest.substr(slash + 1))) stage = &ms, ++matches;
+        if (matches > 1) return why = "more than one package has a stage \"" + rest + "\": name it as stage:<mod>/" + rest, false;
+        if (!stage) return why = "no installed package makes the stage \"" + to.stage + "\" (list_locations, group Mod stages)", false;
+        to.stage = stage->name;
+    } else {
+        for (const auto& ms : mod_stages)
+            if (ms.name == to.stage) stage = &ms;
+    }
+    if (to.stage.empty() || to.stage.size() > 7 || to.stage.find_first_of(":/") != std::string::npos)
+        return why = "\"" + to.stage + "\" is not a stage name (up to 7 characters, or stage:<mod>/<id>)", false;
+    if (to.room < 0 || to.room > 63) return why = "a room is 0..63", false;
+    if (stage && std::find(stage->rooms.begin(), stage->rooms.end(), to.room) == stage->rooms.end())
+        return why = "the stage " + stage->id + " (" + stage->mod + ") has no room " + std::to_string(to.room), false;
+    return true;
+}
+
+bool Session::warp_to(const Location& place, std::string& why) {
     if (!host_) return why = "the game is not running", false;
+    // every editor warp (warp, warp_to, warp_back) names its stage as the game does
+    Location to = place;
+    if (!resolve_warp_stage(to, host_->mod_stages(), why)) return false;
     if (host_->busy(why)) return false;
     const Place from = host_->link();
     if (!host_->warp(to, why)) return false;
@@ -1452,9 +1534,48 @@ Value Session::dispatch(const std::string& command, const Value& p, std::string&
         static const std::set<std::string> allowed = {"actor", "kind", "model", "animation", "look_at", "path", "collision", "attention",
                                                       "stage", "room", "position", "rotation", "scale", "params", "parameters", "flag",
                                                       "when", "lines", "then", "talks", "defeated_flag", "broken_flag", "drops",
-                                                      "native_drops", "combat", "carry", "switch_flag", "switch", "defeat_switch", "texture", "variant", "behaviour", "buoyancy", "drift", "anchor", "grapple_points", "distant", "shoreline", "chart_marker", "arrival"};
+                                                      "native_drops", "combat", "carry", "switch_flag", "switch", "defeat_switch", "texture", "variant", "behaviour", "buoyancy", "drift", "anchor", "grapple_points", "distant", "shoreline", "chart_marker", "arrival", "calm_water"};
         const std::string property = text(p, "property");
         if (!allowed.contains(property)) return why = "\"" + property + "\" is not an actor property the editor sets", r;
+        if (property == "model" && p.get("value").type == Value::String) {
+            // A placement standing on its model's own collision (a "<name>_col" mesh, or a kit model, whose collision is
+            // always its own) stands on the new model's when the model changes (issue #281: a kit placement's model
+            // could not be changed at all, "collision mesh must name a declared static model"; a static one kept the
+            // old model's collision under the new model).
+            Package* pkg = package(p, why);
+            if (!pkg) return r;
+            const Value* actor = find_by_id(pkg->manifest.get("actors"), text(p, "id"));
+            const std::string to = p.get("value").text;
+            const Value* model = find_by_id(pkg->manifest.get("models"), to);
+            if (actor && model && actor->get("model").type == Value::String && actor->get("model").text != to &&
+                actor->get("collision").get("mesh").type == Value::String && actor->get("collision").get("mesh").text == actor->get("model").text) {
+                const std::string kind = model->get("kind").string("static"), old = actor->get("model").text;
+                const bool own = kind == "kit" || (kind == "static" && model_has_collision_mesh(pkg->dir, pkg->manifest, to));
+                const Value* before = find_by_id(pkg->manifest.get("models"), old);
+                if (!own && before && before->get("kind").string() == "kit")
+                    return why = text(p, "id") + " stands on its kit model's own collision; model " + to +
+                                 " has no collision of its own (a \"<name>_col\" mesh): give it one in Blender, or place it as a new object", r;
+                if (own) {
+                    // its collision prepared first, as add_actor does: the game checks the place when it is ready
+                    if (host_ && kind == "static") {
+                        Value request = *model;
+                        request["collision"] = true;  // a preparation option, never a manifest field
+                        std::string prepared, w;
+                        host_->prepare_model(pkg->mod, pkg->dir, request, prepared, w);
+                    } else if (host_ && kind == "kit" && !host_->model_ready(pkg->mod, to) && host_->model_failure(pkg->mod, to).empty()) {
+                        std::string prepared, w;  // a kit model the game started without: built (with its collision) first
+                        host_->prepare_model(pkg->mod, pkg->dir, *model, prepared, w);
+                    }
+                    actor_edit("Set model of " + text(p, "id"), [&](Value& a, std::string&) {
+                        a["model"] = p.get("value");
+                        a["collision"]["mesh"] = p.get("value");
+                        return true;
+                    });
+                    if (ok) r["note"] = (r.get("note").string().empty() ? std::string() : r.get("note").string() + " ") + "It stands on " + to + "'s own collision now.";
+                    return r;
+                }
+            }
+        }
         return actor_edit("Set " + property + " of " + text(p, "id"), [&](Value& a, std::string&) {
             if (p.get("value").type == Value::Null) a.object.erase(property);
             else a[property] = p.get("value");
@@ -1546,6 +1667,28 @@ Value Session::dispatch(const std::string& command, const Value& p, std::string&
         ok = true;
         return r;
     }
+    if (command == "restart_and_return") {
+        if (!host_) return why = "the game is not running", r;
+        if (!p.get("confirm").boolean) return why = "needs \"confirm\": true (the game restarts)", r;
+        // the changes that wait for a restart are in the packages: saved first
+        Value saved;
+        saved.type = Value::Array;
+        for (const auto& pkg : packages_) {
+            if (!dirty(pkg.mod)) continue;
+            Value sp;
+            sp["mod"] = pkg.mod, sp["confirm"] = true;
+            std::string w;
+            bool sok = false;
+            dispatch("save_package", sp, w, sok);
+            if (!sok) return why = "not restarted: " + pkg.mod + " could not be saved (" + w + ")", r;
+            saved.array.push_back(Value(pkg.mod));
+        }
+        if (!host_->restart_and_return(why)) return r;
+        r["saved"] = saved;
+        r["requested"] = true;
+        ok = true;
+        return r;
+    }
     if (command == "save_package") {
         Package* pkg = package(p, why);
         if (!pkg) return r;
@@ -1620,14 +1763,9 @@ Value Session::dispatch(const std::string& command, const Value& p, std::string&
             to.id = "manual";
             to.stage = text(p, "stage");
             to.room = int(p.get("room").number);
-            if (to.stage.rfind("stage:", 0) == 0 && host_) {  // a package's stage: "stage:<mod>/<id>"
-                std::string name;
-                for (const auto& ms : host_->mod_stages())
-                    if ("stage:" + ms.mod + "/" + ms.id == to.stage) name = ms.name;
-                if (name.empty()) return why = "no mod stage \"" + to.stage + "\" is installed (list_locations, group Mod stages)", r;
-                to.stage = name;
-            }
-            if (to.stage.empty() || to.stage.size() > 7 || to.room < 0 || to.room > 63) return why = "a stage name of up to 7 characters and a room 0..63", r;
+            // a package's stage ("stage:<mod>/<id>") by its game name; warp_to checks it again
+            if (!host_) return why = "the game is not running", r;
+            if (!resolve_warp_stage(to, host_->mod_stages(), why)) return r;
             if (p.get("point").type == Value::Number) to.point = int(p.get("point").number);
             if (p.get("position").type != Value::Null) {
                 read_point(p.get("position"), to.position);

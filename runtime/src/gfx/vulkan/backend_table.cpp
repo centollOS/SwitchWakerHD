@@ -55,6 +55,7 @@ const Backend& vulkan_backend() {
         // eye 1's held commands precede the presentation recorded into the frame's last submission
         b.swap = [] { gfxvk::stereo_flush(); gfxvk::stereo_select_eye(0); gfxvk::swap(); gfxvk::stereo_latch(); };
         b.peek_z = [](const uint32_t* c, uint32_t n) { gfxvk::stereo_select_eye(0); gfxvk::peek_z(c,n); };
+        b.peek_retire = [] { gfxvk::peek_retire(); };
         b.set_frame_aspect = gfxvk::set_frame_aspect;
         b.target_aspect_factors = gfxvk::target_aspect_factors;
         b.frames_completed = gfxvk::frames_completed;

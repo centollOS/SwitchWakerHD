@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace input {
 
@@ -15,11 +16,16 @@ enum : uint32_t {
     kStickR = 0x00020000, kStickL = 0x00040000,
 };
 
+// Virtual inputs (PadState::virt): the host's own actions, bound like Wii U buttons (input_map kJump,
+// kMoonJump) but never sent to the game. A button shared with the game's L presses only the jump.
+enum : uint32_t { kVirtJump = 1, kVirtMoonJump = 2 };
+
 struct PadState {
     uint32_t buttons = 0;
     float lx = 0, ly = 0, rx = 0, ry = 0;  // -1..1, +y = up
     bool touch = false;
     float tx = 0, ty = 0;                  // touch position on the GamePad screen, 0..1 from top left
+    uint32_t virt = 0;                     // kVirt* bits (never reach the game); last: positional initialisers stay
 };
 
 // Mouse button order: left, right, middle, side 4, side 5 (converted by the host).
@@ -28,6 +34,7 @@ void mouse_binding_button(uint64_t device, int button, bool down, bool eligible)
 void mouse_binding_wheel(float delta, bool eligible);
 void release_mouse_bindings();
 void set_touch(bool down, float x, float y);  // mouse on the GamePad window
+void set_touch_virtual(uint32_t bits);         // the on-screen Jump / Moon jump buttons (kVirt* bits held)
 
 // Which Wii U controller the keyboard and host controllers act as. In Pro Controller mode the
 // GamePad stays connected (its screen and touch still work) but its buttons and sticks are idle.
@@ -40,10 +47,36 @@ void init();       // main thread, after NSApplication exists
 PadState read();   // any thread
 // Any thread: main-thread host focus snapshot; false until a game window is focused.
 bool gameplay_focused();
+// Any thread: a game window has the keyboard focus (the app is in front); false until one has.
+bool window_focused();
+// Controls > "Controller input when the game isn't focused" (issue #267) as this host applies it:
+// controllers keep driving the game (and rumble) while no game window has the focus. Keyboard and
+// mouse are released on focus loss either way. Always false on Android (the app is in front or paused).
+bool background_controllers();
 void release_keys();                // forget held keys (another window took the keyboard)
 void controller_values(float* v);   // main thread: input_map::kPadCount host controller inputs, 0..1
 void host_controller_values(float* v);  // any thread: the latest controller_values (settings overlay)
 void held_keys(bool* keys);         // 256 entries: keys held for the game (keyboard + WWHD_KEYS script)
+
+// The connected host controllers as the host reports them (Controls > Controller details, the
+// controller setup). Any thread: the latest poll. The on-screen controls (a virtual pad) are listed
+// with is_virtual. AppKit has no SDL GUID: guid stays empty there and the name identifies the pad.
+struct ControllerInfo {
+    uint64_t id = 0;             // the host's device id (SDL joystick id)
+    std::string guid, name;      // input_map profiles key on these
+    std::string type, path, serial;
+    uint16_t vendor = 0, product = 0, version = 0;
+    bool is_virtual = false;
+    bool active = false;         // pressed something last (input_map::active_controller)
+    bool rumble = false, trigger_rumble = false, gyro = false, accel = false, led = false;
+    int battery = -1;            // percent, -1: unknown
+    const char* power = "unknown";       // "wired", "on battery", "charging", "charged", "no battery"
+    const char* connection = "unknown";  // "wired", "wireless"
+    int buttons = 0, axes = 0, hats = 0, touchpads = 0;
+    uint8_t labels[4] = {};      // printed letters (input_map::FaceLabel) of the south, east, west, north buttons
+    std::vector<float> values;   // input_map::kPadCount inputs, 0..1, ungated
+};
+std::vector<ControllerInfo> controllers();
 
 // Ask the user for a line of text (software keyboard). Non-blocking: `done` runs on the
 // main thread with ok = false when cancelled. Text is UTF-16.
@@ -55,5 +88,7 @@ void prompt_text(const std::u16string& initial, int max_len,
 bool has_rumble();
 // Any thread: the motors still at once and for good; the process ends (quit, exit, crash handler).
 void stop_rumble_now();
+// AppKit normal shutdown only, separate from the async-signal-safe crash hook.
+void shutdown_rumble();
 
 }  // namespace input

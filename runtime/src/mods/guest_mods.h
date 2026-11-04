@@ -12,6 +12,7 @@ namespace story_game_pieces {struct BuiltSet;}
 #include "story_native_refresh_dispatch_guard.h"
 #include "story_native_manager_cancel_dispatch_guard.h"
 struct Cpu;
+namespace input { struct PadState; }
 namespace story_native_event_depth {class Tracker;struct Call;}
 namespace story_native_outer_return {class OuterReturn;}
 namespace story_native_restore_resume {class Boundary;}
@@ -54,6 +55,18 @@ bool install_native_wait_routes(NativeWaitDispatch);
 bool routes_owned();
 NativeWaitRouteCoverage native_wait_route_coverage();
 bool hooks_built();  // marker registered by the running generated game code, never the setting
+// Live features (guest_live.h; Mod SDK, QoL track M0)
+// a finger change on the TV picture (layout units): the mod whose claim has it (queued for the next pad read), -1
+// none (the port's own rules have it)
+int touch_route(uint32_t kind, float x, float y);
+// a pinch change (guestlive::kPinch with the spread now / at its start, or kPinchEnd) at (x, y) (layout units: the
+// wheel's pointer; ignored while a mod has the finger): the mod that gets it, -1 none (the port's own pinch has it)
+int touch_pinch(uint32_t kind, float scale, float x, float y);
+bool touch_claimed_at(float x, float y);  // any thread
+bool touch_claims();                      // a mod claims some part of the picture now
+// the game's controller reads (VPADRead / KPADReadEx, after the port's own filters): the mods' touch callbacks
+// for the queued fingers, then their input filters in load order; `repeat`: true 60's repeated read (nothing)
+void pad_filter(Cpu* c, input::PadState& p, bool repeat);
 inline constexpr uint32_t kRegionStart=0x7F000000,kRegionSize=0x01000000;
 std::vector<ModIdentity> enabled_mods();
 void init(); // after dispatch::init, before guest threads start
@@ -68,6 +81,9 @@ bool editor_prepare_model(const std::string& mod,const std::string& package_dir,
 // The world editor's island building (any thread but the game's: it runs the building converter): the
 // set of piece `id` built into `cache_dir` (story_game_pieces::build); throws with a player-facing reason.
 std::shared_ptr<const story_game_pieces::BuiltSet> editor_build_piece(const std::string& id,const std::string& cache_dir);
+// The world editor: a kit model (a manifest model entry of kind "kit") built from the player's game files, as load_world builds
+// it; any thread but the game's. Throws std::runtime_error with the converter's reason.
+std::shared_ptr<const story_game_pieces::BuiltSet> editor_build_kit_model(const std::string& mod,const std::string& package_dir,const std::string& data_dir,const mods::json::Value& entry);
 void logic_service(Cpu* cpu); // once per game logic pass, never interpolation-only
 void frame(uint64_t step); // original full-step clock
 void draw_frame(Cpu* cpu,uint64_t executed_step); // once per actual logic pass, including true60

@@ -88,13 +88,13 @@ int main() {
     // TV coordinates are relative to the fitted game region, including wide anchors.
     list=store.begin("anchor",0);rect={};rect.x=1260;rect.y=20;rect.w=10;rect.h=10;
     rect.anchor=guestmods::hud::Anchor::TopRight;assert(store.append("anchor",list,rect)&&store.commit("anchor",list));
-    overlay::guesthud::set_tv_region(50,60,1680,720,true);
+    overlay::guesthud::set_regions(50,60,1680,720,true,50,60,1680,720,true);
     ImGui::NewFrame();overlay::guesthud::frame();ImGui::Render();
     draw=ImGui::GetDrawData();assert(draw->TotalVtxCount==4);
     assert(std::abs(draw->CmdLists[0]->VtxBuffer[0].pos.x-1710)<.01f);
     assert(draw->CmdLists[0]->VtxBuffer[0].pos.y==80);
     io.DisplaySize=ImVec2(640,360);io.DisplayFramebufferScale=ImVec2(2,2);
-    overlay::guesthud::set_tv_region(0,0,1280,720,true);
+    overlay::guesthud::set_regions(0,0,1280,720,true,0,0,1280,720,true);
     ImGui::NewFrame();overlay::guesthud::frame();ImGui::Render();
     draw=ImGui::GetDrawData();assert(draw->TotalVtxCount==4);
     assert(std::abs(draw->CmdLists[0]->VtxBuffer[0].pos.x-630)<.01f);
@@ -102,7 +102,7 @@ int main() {
     store.reset();overlay::guesthud::backend_destroyed();
     // Nested clipping changes scissor rectangles, never image geometry/UVs.
     io.DisplaySize=ImVec2(1280,720);io.DisplayFramebufferScale=ImVec2(1,1);
-    overlay::guesthud::set_tv_region(0,0,1280,720,true);
+    overlay::guesthud::set_regions(0,0,1280,720,true,0,0,1280,720,true);
     image=store.create_image("clip-a",1,1,4,pixel,4);list=store.begin("clip-a",0);
     rect={};rect.kind=guestmods::hud::Command::ClipPush;rect.x=10;rect.y=20;rect.w=100;rect.h=80;
     assert(store.append("clip-a",list,rect));

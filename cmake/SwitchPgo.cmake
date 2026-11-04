@@ -153,12 +153,13 @@ macro(switch_pgo_configure)
     # host system). They are copied into the build folder under their path in devkitPro (pgo-sysinc/devkitA64/...), and
     # the profiled files are compiled with -nostdinc and those copies (cmake/pgo_compile.cmake).
     get_filename_component(_pgo_dkp "${CMAKE_C_COMPILER}" DIRECTORY)  # <devkitPro>/devkitA64/bin
-    get_filename_component(_pgo_dkp "${_pgo_dkp}/../.." ABSOLUTE)
+    get_filename_component(_pgo_dkp_alias "${_pgo_dkp}/../.." ABSOLUTE)  # as the commands name it
+    get_filename_component(_pgo_dkp "${_pgo_dkp}/../.." REALPATH)  # (real paths: build/toolchain may be a link)
     set(_pgo_sysinc "${CMAKE_BINARY_DIR}/pgo-sysinc")
     set(_pgo_roots)
     foreach(_d ${CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES} ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES}
                "${_pgo_dkp}/libnx/include" "${_pgo_dkp}/portlibs/switch/include")
-      get_filename_component(_d "${_d}" ABSOLUTE)
+      get_filename_component(_d "${_d}" REALPATH)
       if(IS_DIRECTORY "${_d}")
         list(APPEND _pgo_roots "${_d}")
       endif()
@@ -184,18 +185,18 @@ macro(switch_pgo_configure)
     endforeach()
     set(_pgo_c_implicit)
     foreach(_d ${CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES})
-      get_filename_component(_d "${_d}" ABSOLUTE)
+      get_filename_component(_d "${_d}" REALPATH)
       file(RELATIVE_PATH _r "${_pgo_dkp}" "${_d}")
       list(APPEND _pgo_c_implicit "${_r}")
     endforeach()
     set(_pgo_cxx_implicit)
     foreach(_d ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
-      get_filename_component(_d "${_d}" ABSOLUTE)
+      get_filename_component(_d "${_d}" REALPATH)
       file(RELATIVE_PATH _r "${_pgo_dkp}" "${_d}")
       list(APPEND _pgo_cxx_implicit "${_r}")
     endforeach()
     file(WRITE "${CMAKE_BINARY_DIR}/pgo-sysinc.cmake"
-         "set(WWHD_PGO_DKP \"${_pgo_dkp}\")\nset(WWHD_PGO_COPIED \"${_pgo_copied}\")\n"
+         "set(WWHD_PGO_DKP \"${_pgo_dkp}\")\nset(WWHD_PGO_DKP_ALIAS \"${_pgo_dkp_alias}\")\nset(WWHD_PGO_COPIED \"${_pgo_copied}\")\n"
          "set(WWHD_PGO_C_IMPLICIT \"${_pgo_c_implicit}\")\nset(WWHD_PGO_CXX_IMPLICIT \"${_pgo_cxx_implicit}\")\n")
     set(_pgo_launcher "${CMAKE_COMMAND}" "-DWWHD_PGO_ROOT=${CMAKE_SOURCE_DIR}" "-DWWHD_PGO_REL=${_pgo_rel}"
                       "-DWWHD_PGO_BUILD=${CMAKE_BINARY_DIR}" "-DWWHD_PGO_SYSINC=${CMAKE_BINARY_DIR}/pgo-sysinc.cmake"

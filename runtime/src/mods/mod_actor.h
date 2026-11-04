@@ -22,11 +22,15 @@ bool world_object_query(const std::string& mod,const story_notebook::ManifestAct
                         std::shared_ptr<const story_world_collision::mesh::Mesh> geometry=nullptr);
 // The ground of the declared static world objects of `stage` (their own collision: island grounds, terraces, piers,
 // buildings; not bodies of water) under each of `above`: the highest at or below each point. False: none anywhere.
+// The editor removed (true) or restored (false) the actor of `token`: its own collision is no ground for object_grounds.
+void set_removed(uint32_t token,bool removed);
 bool object_grounds(const std::string& stage,const std::vector<story_notebook::WorldPoint>& above,std::vector<float>& heights,std::vector<bool>& found);
 // The height range of a room's own collision (its triangles' lowest and highest point, world space), from the
 // player's stage files: the game looks for a body of water only within it. False: unknown for that room.
 bool room_height_range(const std::string& stage,int room,float& low,float& high,std::string& why);
 bool register_collision(const std::string& mod,const std::string& model,std::shared_ptr<const story_world_collision::mesh::Mesh>);
+// whether a model of `mod` has its collision registered (register_collision)
+bool has_collision(const std::string& mod,const std::string& model);
 struct ModelRig {std::vector<std::string> joint_names;std::vector<int> joint_parents;std::vector<bool> joint_look_compatible;};
 struct Identity {std::string mod,id;uint32_t token=0,process_id=0;};
 struct State {
@@ -60,6 +64,10 @@ bool set_combat_reward(const std::string& mod,const std::string& id,CombatReward
 bool set_carry_break(const std::string& mod,const std::string& id,std::function<bool()>);
 using BehaviorSink=std::function<void(Cpu*,uint32_t,BehaviorEvent,const Hit*)>;
 void set_behavior_sink(BehaviorSink);
+// Why an actor could not be created (its archive did not load, the game heap or the mod budget refused its model): the
+// world editor says it, so a placement that is not in the game is never silent. Game thread.
+using CreateFailureSink=std::function<void(const std::string& mod,const std::string& id,const std::string& why)>;
+void set_create_failure_sink(CreateFailureSink);
 uint32_t declaration_token(const std::string& mod,const std::string& id);
 bool identify(Cpu*,uint32_t actor,Identity&);
 uint32_t resolve(Cpu*,const Identity&);
@@ -110,7 +118,9 @@ bool visual_role(uint32_t token,bool distant);
 // as <name>.btk); a piece's declaration names its first model's slot, and its second model, the light set
 // of each part (settingTevStruct BG types 1..4) and its second model's animation slot (an island's moving
 // water) are registered here. Before install or on the game thread.
-struct PieceDraw {int second_index=-1;int light[2]={1,4};int animation=-1;};
+// light 0: an object's light at the actor's place on the actors' draw lists (a kit model's own-texture part); animated: the
+// part (0, 1) the animation slot plays on.
+struct PieceDraw {int second_index=-1;int light[2]={1,4};int animation=-1;int animated=1;};
 bool register_piece_set(const std::string& archive,std::vector<std::string> models,std::vector<std::string> animations={});
 bool set_piece_draw(const std::string& archive,int index,PieceDraw);
 bool owns_visual(uint32_t actor,uint32_t token);

@@ -115,15 +115,109 @@ bool double_jump();                       // once more in the air
 void set_double_jump(bool on);
 bool no_auto_jump();                      // the game's own jump off ledges becomes a plain fall
 void set_no_auto_jump(bool on);
-uint32_t jump_button();                   // one of L3, R3, L, R, ZL, ZR (default L)
+// Format 1 controls.json only (input_map::adopt_legacy_jump_button): the Wii U button Jump anywhere
+// used before it had an input of its own (input_map kJump). One of L3, R3, L, R, ZL, ZR (default L).
+uint32_t jump_button();
 void set_jump_button(uint32_t button);
 inline bool valid_jump_button(uint32_t b) {
     constexpr uint32_t allowed = 0x40000 | 0x20000 | 0x20 | 0x10 | 0x80 | 0x40;
     return b && !(b & (b - 1)) && (b & allowed);
 }
-void jump_input(uint32_t buttons);                  // the active controller's buttons (VPAD/KPAD read)
+void jump_input(uint32_t virt);                     // the virtual inputs (input::kVirt*) of every VPAD/KPAD read
 void jump_step(Cpu* c, uint32_t link, bool before); // around daPy_lk_c::execute (climb.cpp)
 void jump_reset();                                  // game thread after a state load
+// controller_play.cpp: L and d-pad down by whether Link plays (VPAD/KPAD full reads), and which
+// on-screen Jump / Moon jump buttons show (input::kVirt* bits)
+void pad_play_rules(input::PadState& p);
+uint32_t jump_touch_buttons();
+// ---- the item ring (item_ring.cpp; rules in item_ring.h) ----
+// the active controller's pad read (VPADRead, or KPADReadEx in Pro Controller mode), after the play rules:
+// X / Y / R held back or opening the ring; `repeat`: true 60's repeated buttons (only the stick is kept)
+void item_ring_pad(input::PadState& p, bool repeat);
+// frame boundary (interp.cpp, every pass): the equip, the pace, the ring drawn. `full`: a full logic step
+// follows; `half60`: true 60's half pass (Link's 60 Hz half step) follows
+void item_ring_service(Cpu* c, bool full, bool half60);
+void item_ring_reset();          // a state load
+bool item_ring_open();
+void item_ring_finger(int button, bool down, float dx, float dy);  // Android: the finger on X / Y / R
+int item_ring_mode();            // item_ring::Mode: 0 off, 1 touch only (default), 2 touch and controllers
+void set_item_ring_mode(int mode);
+int item_ring_pace();            // item_ring::Pace: 0 normal, 1 slow motion (default), 2 paused
+void set_item_ring_pace(int pace);
+int item_button_names();         // item_ring::Names: 0 X Y R, 1 A1 A2 A3, 2 auto (default)
+void set_item_button_names(int names);
+const char* item_button_name(int button);  // as the names are now: "X" or "A1" ...
+bool item_names_on_hud();                  // A1 A2 A3 now: the HUD's X, Y and R show them (button_glyphs.cpp)
+// ---- the context buttons on the touch controls (context_touch.cpp; rules in touch_play.h) ----
+// the active controller's pad read, after the item ring: items by tap, auto put-away, the ZL latch (touch play only)
+void context_touch_pad(input::PadState& p, bool repeat);
+namespace playctx { struct PlayContext; }
+void context_touch_step(const playctx::PlayContext& c);  // each logic step, after the context was read
+void context_touch_service();                            // frame boundary (tests: WWHD_CONTEXT_ASSETS)
+bool context_touch_hide_cluster();  // the game's own button cluster is hidden now (aspect.cpp)
+bool context_touch_aim_latched();   // an item is latched by a tap (no jump buttons then)
+void context_touch_pack(int32_t* out, int n);       // context_touch.h pack (Java)
+int context_touch_assets(const std::string& dir);   // 0 not yet, -1 failed, > 0 generation
+bool context_buttons_on();
+void set_context_buttons_on(bool on);
+bool item_tap_on();
+void set_item_tap_on(bool on);
+bool aim_only_on();
+void set_aim_only_on(bool on);
+bool auto_put_away_on();
+void set_auto_put_away_on(bool on);
+int zl_latch_mode();  // touchplay::ZlLatch: 0 off, 1 let go (default), 2 next target
+void set_zl_latch_mode(int mode);
+// ---- talks, answers, shops... by touch or mouse, and hold to go on (touch_talk.cpp; rules in touch_talk.h) ----
+// the active controller's pad read, after the touch controls' rules: the fingers' presses and stick pushes,
+// the held A; `repeat`: true 60's repeated read (the pushed stick stays)
+void touch_talk_pad(input::PadState& p, bool repeat);
+void touch_talk_reset();  // a state load
+// code mods (guest_mods.cpp, guest_live.h): the touches their claims got and their input filters, on the game's
+// controller reads after the port's own filters
+void guest_pad_filter(Cpu* c, input::PadState& p, bool repeat);
+// a finger on the TV picture (Finger::Kind: 0 down, 1 move, 2 up, 3 cancel), layout units (centre, +y up)
+void touch_talk_finger(int kind, float x, float y);
+bool touch_talk_claims();  // a finger landing on the picture is the talk's now
+bool touch_talk_claims_at(float x, float y);  // ... or a code mod's at this point (Android: nativeFreeTouch)
+bool guest_touch_claimed_at(float x, float y);
+bool touch_talk_mod_pinch(int phase, float scale, float x, float y);  // Android: two fingers, the first a code mod's  // a code mod's claim alone (Android: a finger the hidden controls pass on)
+bool touch_talk_on();
+void set_touch_talk_on(bool on);
+bool talk_hold_ff_on();
+void set_talk_hold_ff_on(bool on);
+bool pad_hold_a_on();
+void set_pad_hold_a_on(bool on);
+// ---- camera extras (steer.cpp; rules in steer.h): walking direction, camera swing, boat speed, pinch FOV ----
+int steer_mode();                  // steer::Mode: 0 as the game (default), 1 kept while the player turns the camera, 2 while the stick is held
+void set_steer_mode(int mode);
+bool camera_swing();               // the camera swings behind Link while he runs
+void set_camera_swing(bool on);
+bool direct_boat_speed();          // the direct camera as fast on the boat as on foot (default on)
+void set_direct_boat_speed(bool on);
+bool pinch_fov_on();               // Android: a pinch changes the field of view (default on)
+void set_pinch_fov_on(bool on);
+float steer_swing_degrees(bool player_camera);  // camera.cpp, once per logic step
+bool steer_pinch(int phase, float d);           // 0 begin (true: on), 1 move, 2 end
+void steer_reset();                // a state load
+bool camera_turned_by_player();    // camera.cpp: the right stick, the mouse or a swipe turned the camera in the last steps
+// ---- One screen (handheld) mode (one_screen.cpp; rules in ../one_screen.h) ----
+bool one_screen_enabled();         // on for this session (decided at start)
+bool one_screen_active();          // ... and the controller acts as the GamePad
+bool one_screen_off_tv();          // ... and the game plays Off-TV now
+bool one_screen_next();            // the choice for the next start
+void set_one_screen_next(bool on);
+void one_screen_pad(input::PadState& p);         // VPADRead full reads: Minus as Plus
+bool one_screen_hidden_pane(const char* name);   // the GamePad's slide-conducting guide in Off-TV Play
+// ---- HUD fades (hud_fade.cpp; rules in hud_fade.h): the game's hearts, rupees, magic bar ----
+bool hud_fade_on(int element);  // hudfade::Element
+void set_hud_fade_on(int element, bool on);
+void hud_fade_step(const playctx::PlayContext& c);  // each logic step, after the context was read
+bool hud_fade_any();  // (this fork) some element is faded now (below 1): else every alpha is 1
+float hud_fade_alpha_of(uint32_t pane);  // Pane::CalculateMtx: the alpha factor of a faded pane (1: none)
+int hud_pane_hide(uint32_t pane);
+bool large_picto_on();  // the large Picto Box view: its finder's frame not drawn (hud_fade.cpp)
+void set_large_picto_on(bool on);  // Pane::Draw: 0 draw, 1 skip (a faded-out element), 2 skip in TV layouts (the hidden cluster)
 bool story_system();                      // letters, quests, the story notebook, mod charts (mods/required.h)
 void set_story_system(bool on);
 void set_auto_wind(bool on);
@@ -151,9 +245,16 @@ MoveHud move_hud();
 // once per frame on the game thread (interp.cpp, frame start): reads whether a game menu, an event
 // or a message is up and advances the HUDs' fade over it
 void hud_service();
+// what the game shows over gameplay now: an event, a message, a menu (hud_visibility.h GameUi); game thread
+struct GameUi;
+GameUi game_ui_now();
 // 0..1, multiplies the boost bar's and the climb wheel's own alpha (mod_hud.mm, vulkan/present.cpp):
 // 0 while a game menu, a cutscene/event or a dialogue is shown. Any thread.
 float game_ui_hud_alpha();
+// frame interpolation: after each drawn pass (interp.cpp), its fraction between the logic steps; the
+// HUDs as that frame shows them (render thread; climb.h ClimbHud)
+void hud_drawn(float t, uint64_t step, bool interpolating);
+MoveHud move_hud_drawn();
 
 // ---- input (input.mm) ----
 // called at the end of input::read(): synthetic stick and buttons (mouse camera, R3 pulses)
@@ -164,6 +265,9 @@ bool host_key_down(uint16_t code);
 // ---- mouse (mouse.mm -> camera.cpp) ----
 void mouse_add(float dx, float dy);  // points moved while captured (dy > 0 = down)
 void mouse_wheel(float dy);          // wheel / scroll (dy > 0 = forward)
+// swipe camera (Android touch controls): a finger moved by (dx, dy) pixels on a display of `dpi`
+// (dy > 0 = down); turned into degrees by camera_swipe.h with the touch options' swipe speed
+void swipe_add(float dx_px, float dy_px, float dpi);
 void mouse_button(int button, bool down);  // 0 left, 1 right
 bool mouse_captured();
 void mouse_init(void* tv_window);  // NSWindow* of the TV picture (menu.mm, main thread)
@@ -179,9 +283,13 @@ enum Cheat {
     // story progress (can change or break story events)
     kCheatSongs = 8, kCheatTriforce = 16, kCheatDungeon = 32, kCheatKey = 64,
     kCheatBags = 128,  // spoils and bait bag filled (not story progress)
-    kCheatFigurines = 256,  // every Nintendo Gallery figurine (not story progress)
+    kCheatFigurines = 256,  // every Nintendo Gallery figurine (Carlov then leaves, as in the game's ending)
 };
 void request_cheat(int which);  // any thread
+// Explicit, one-shot inventory grants. The first request needs consent; no grant precedes a backup.
+enum StoryItem { kStoryNayru = 1, kStoryDin = 2, kStoryFarore = 4, kStorySword = 8 };
+bool story_item_confirmation_needed();
+void request_story_item(int which, bool confirmed = false);
 enum Infinite {
     kInfHealth = 1, kInfMagic = 2, kInfAmmo = 4, kMoonJump = 8, kMoonNoFall = 16,
     kInfRupees = 32, kInfBags = 64, kInfBreath = 128,

@@ -239,6 +239,7 @@ HLE(gx2, GX2SetFetchShader) {
 
 // ---------------------------------------------------------------- uniforms and attribute buffers
 static void uniform_block(uint32 blockStart, uint32 index, uint32 addr, uint32 size) {
+    gx2::note_uniform_block(addr, size);
     uint32 w[7] = {addr, size - 1, 0, 1, 0, 0, 0xC0000000};
     set_regs(blockStart + index * 7, w, 7);
 }

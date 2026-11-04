@@ -507,6 +507,9 @@ void tick(Cpu* cpu,bool skip,unsigned frames){
             g_suppress_loaded_room=false;
         }
         for(size_t i=0;i<g_entries.size();++i){const auto& s=g_entries[i].scene;
+            // an area scene with "again" plays again once Link has left its area (not while it is queued or playing)
+            if(s.again&&s.trigger=="area"&&g_fired.count(i)&&!g_pending.count(i)&&s.stage==stage&&s.room==room){const WorldPoint p=position(link);
+                const float dx=p.x-s.position.x,dy=p.y-s.position.y,dz=p.z-s.position.z;if(area_rearmed(dx*dx+dy*dy+dz*dz,s.radius))g_fired.erase(i);}
             if(g_fired.count(i)||s.stage!=stage||s.room!=room)continue;
             bool match=s.trigger=="room";
             if(s.trigger=="area"){const WorldPoint p=position(link);const float dx=p.x-s.position.x,dy=p.y-s.position.y,dz=p.z-s.position.z;match=dx*dx+dy*dy+dz*dz<=s.radius*s.radius;}

@@ -33,6 +33,7 @@ struct Shader {
     gfx::ProgramKind kind = gfx::ProgramKind::Other;
     uint64_t pipelineId = 0;  // portable canonical GLSL+metadata identity, stable before SPIR-V
     bool vertex = false;
+    uint32_t gatherUnits = 0;  // pixel: the units it gathers from (area_sample::gathered_units)
     LatteDecompilerShader* dec = nullptr;
     LatteDecompilerShaderResourceMapping mapping;
     DescriptorRankPlan descriptorRanks;
@@ -50,6 +51,9 @@ struct Shader {
     const std::string& source_text() const { return retainedSource ? *retainedSource : glsl; }
     std::string translatedGlsl;  // verify mode only: the translation a graphics pack replaced
     std::string error;
+    // depth clipping in shaders (clip_emulation.h): this stage carries the rewrite (vertex: writes the
+    // clip varying, pixel: reads it and discards). Decided by the final text, so aliases agree.
+    bool clipVarying = false;
     const std::vector<uint32_t>& spirv() const {
         static const std::vector<uint32_t> none;
         return spirvWords ? *spirvWords : none;
@@ -58,14 +62,23 @@ struct Shader {
 };
 // Render-thread-only lookup; recorded pipeline identity, never program hash.
 const Shader* find_pipeline_shader(uint64_t pipelineId, bool vertex);
+// the variant key (the identity pipeline recipes name a shader by) of the last translate() on this thread; 0 if none
+uint64_t last_translated_variant_key();
 void select_renderer();
 // Pass the renderer frame to revalidate program bytes once per frame. Omitting
 // it keeps immediate revalidation for standalone callers and shader tools.
 LatteFetchShader* get_fetch_shader(const uint32_t* regs, uint64_t* keyOut, uint64_t frame = ~uint64_t{0});
 // linkedVs (pixel shaders): the draw's vertex shader; inputs it has no output for read the GPU's
 // default value for them (SPI_PS_INPUT_CNTL DEFAULT_VAL), as constants.
+// clipAllowed=false: never the depth-clipping-in-shaders variant (translate_stages' fallback).
 Shader* translate(const uint32_t* regs, bool vertex, LatteFetchShader* fetchShader, uint64_t fsKey,
-    uint64_t frame = ~uint64_t{0}, uint64_t stateGeneration = ~uint64_t{0}, const Shader* linkedVs = nullptr);
+    uint64_t frame = ~uint64_t{0}, uint64_t stateGeneration = ~uint64_t{0}, const Shader* linkedVs = nullptr,
+    bool clipAllowed = true);
+// A draw's vertex and pixel shader, consistent about depth clipping in shaders (panvk): when only one
+// stage could take the rewrite, both come back without it (clip_emulation::translate_stages; true then).
+// Its pipeline clamps depth only when both carry it (clip_emulation::pair_clips).
+bool translate_stages(const uint32_t* regs, LatteFetchShader* fetch, uint64_t fsKey, uint64_t frame,
+                      uint64_t stateGeneration, Shader*& vs, Shader*& ps);
 // Generation must advance for every shader-relevant register write (every register the key
 // reads must be covered by gx2's shader_irrelevant()/vulkan_shader_key_mask()). Primitive
 // mode is checked separately because draw submission writes it directly.

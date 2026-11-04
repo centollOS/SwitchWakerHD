@@ -93,6 +93,8 @@ def tr_uses():
         for fn in fns:
             if not fn.endswith((".cpp", ".h", ".mm")) or fn.startswith("menu_i18n"):
                 continue
+            if fn.startswith("game_settings_"):  # upstream's own tr() (game_settings_text.h: the in-game settings page)
+                continue
             path = os.path.join(dp, fn)
             text = open(path, encoding="utf-8", errors="replace").read()
             for m in re.finditer(r"\btr\(\s*", text):

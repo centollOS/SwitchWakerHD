@@ -18,6 +18,7 @@ Link's hearts tick down a quarter heart every `every` logic steps to half, then 
 | `button-icons` | combined code/art package and face-layout setting reads; currently an overdraw candidate awaiting game-frame calibration. |
 | `hud-cost` | performance fixture: exactly 200 rectangles versus no HUD callback, selected by a restart-only option. |
 | `addcalc-replace` | a full replacement of a small game function (`cLib_addCalc2`, `0200ED84`) with an equivalent implementation; every other call goes to the game's own code (`WWHD_GAME_ORIGINAL`). No visible change; the log counts the calls. |
+| `live-input` | a live option (`swap`, followed at once through `wwhd_config_changed`), an input filter that swaps A and B, and a touch claim: a finger (or click) in the picture's top-right corner holds Y. |
 
 The SDK v3 preview also includes the content-only [harbor meeting](sdk-v3-native-scene/README.md)
 example: two residents, a talk trigger, mandatory fallback steps and an experimental
