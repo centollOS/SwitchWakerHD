@@ -46,6 +46,18 @@ Found while building for the Switch:
   `*101F5088`, at boot on the console); now, as the SDL host, only on a change, and not before the guest memory.
 - Console (2026-11-03, USA, handheld): boot, the 17-place warp tour (every place reached and drawn), the settings
   menu (the new Save file section in Brazilian Portuguese).
+- **Performance** (console, USA, handheld, stock CPU, GPU 384; `perf_test.py ab`, lava, Windfall, Dragon Roost, the
+  Outset village). The first build's main thread was 6-7 ms a frame slower than main (2.7-4.8 fps). Found and fixed,
+  each measured: upstream's bit-exact `lfs`/`stfs` (`ppc.h`: the hot code 4.4 -> 6.1 MB; the Switch keeps the host
+  conversions, `-DPPC_EXACT_F32` for the exact ones), the submitted uniform snapshots (off on the Switch: deko3d
+  does not read them), the hook ABI scan turned off by `runtime/src/hostrt` (the decomp build's only), per-call costs
+  in `emit`, display-list calls, the button glyph marking, the HUD fade and particle walks, the actor draw hook
+  (a `Cpu` copy and D-sweep bookkeeping at every draw) and the culling hook (a view swap at every check), the
+  in-game settings page (off on the Switch). Upstream's interpolation hooks main did not have cost nothing
+  measurable; the Switch build leaves them out anyway (`WWHD_RECOMP_SWITCH_SKIP`, set by `make_sd.py`). Last A/B
+  (ABCDDCBA, 2 boots each): without PGO the main thread +0.4-0.7 ms (lava 29.10 vs 29.25 fps, Windfall 29.32 vs
+  29.79, Dragon Roost 28.96 vs 29.39, village 25.19 vs 25.55); with PGO (each its own profile) +0.2-0.9 ms (lava
+  29.95 vs 29.87, Windfall 29.97 both, Dragon Roost 29.92 vs 29.97, village 28.77 vs 29.09).
 - Tests: `tools/recomp` passes (94, 2 skipped: `test_preserve_registers`' default cases need fork_prepare's
   whole-program data the test's hand-made Recompiler lacks; the randomizer profile's hook digest is upstream's hook
   list, so randomized RPX files are not taken by the fork until it ships its own profile).

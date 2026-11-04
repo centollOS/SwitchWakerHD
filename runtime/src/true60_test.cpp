@@ -42,7 +42,7 @@
 #include "input.h"
 #include "input_map.h"
 
-namespace interp { uint64_t logic_steps(); uint64_t pass_count(); bool hold_pass(); }
+namespace interp { uint64_t logic_steps(); uint64_t pass_count(); bool hold_pass(); bool enabled(); }  // (this fork: enabled)
 
 namespace true60_test {
 namespace {
@@ -646,6 +646,13 @@ void interp_exact_cull(Cpu* c, void (*orig)(Cpu*));  // interp.cpp
 extern "C" void f_025D6CE8_orig(Cpu* c);
 namespace true60_test { uint64_t origin_step(); }
 extern "C" void hook_025D6CE8(Cpu* c) {
+#ifdef __SWITCH__
+    // (this fork) at 30 fps without these debug aids the check is the game's, as in main: interp_exact_cull swaps the
+    // view in guest memory at every actor's culling check (the main thread ~2 ms a frame; docs/upstream-sync-plan.md)
+    static const bool debug = getenv("WWHD_T60_PAGEHASH") || getenv("WWHD_CULLLOG") || getenv("WWHD_INTERP_CULL_ACTOR") ||
+                              getenv("WWHD_INTERP_CULL_TRACE");
+    if (!debug && !interp::enabled()) { f_025D6CE8_orig(c); return; }
+#endif
     // debug: WWHD_T60_PAGEHASH=step:actor:path writes a hash per 4 KB page of 10000000..4A000000 at that
     // actor's culling check on the full pass of that scenario step (to diff two runs)
     static const char* ph = getenv("WWHD_T60_PAGEHASH");
