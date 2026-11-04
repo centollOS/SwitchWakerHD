@@ -79,6 +79,11 @@ NONLEAF_CHECK = os.environ.get("WWHD_RECOMP_NONLEAF_CHECK", "0") == "1"
 # addresses, one per line, as hooks.txt; written by tools/switch/guest_mods.py) puts the guest mods' flag check
 # (recomp.py --mod-hooks) only into the listed functions; every other function stays as without --mod-hooks
 MOD_HOOKS_ONLY = os.environ.get("WWHD_RECOMP_MOD_HOOKS_ONLY", "")
+# call counters for the cost per call (#65): WWHD_RECOMP_COUNT_CALLS=FILE (canonical addresses, one per line, as
+# hooks.txt) makes a counting build: each listed function's code (and its inline copy) adds one to its counter at
+# its entry; table.c lists them for the runtime (the debug server's "profile" writes logs/prof_<n>.counts). Not set:
+# no counter anywhere, and table.c's list is empty
+COUNT_CALLS = os.environ.get("WWHD_RECOMP_COUNT_CALLS", "")
 
 
 def load_hot_functions():
@@ -121,6 +126,41 @@ class ForkPasses:
         self.mod_hooks = True
         self.mod_checked = {addr for _, _, addr, _ in entries}
         self.mod_checked_canon = sorted({canon for _, canon, _, _ in entries})
+
+    def fork_count_calls(self, read_hooks):
+        """__init__: the functions WWHD_RECOMP_COUNT_CALLS lists, by this build's address -> (counter, canonical)"""
+        self.counted = {}
+        if not COUNT_CALLS:
+            return
+        if not os.path.exists(COUNT_CALLS):
+            raise SystemExit("WWHD_RECOMP_COUNT_CALLS: no file %s" % COUNT_CALLS)
+        entries, _ = read_hooks([COUNT_CALLS], self.build)
+        if any(site for site, _, _, _ in entries):
+            raise SystemExit("%s: call counters count functions, not instructions (@ADDR)" % COUNT_CALLS)
+        for _, canon, addr, _ in entries:
+            if addr not in self.counted:
+                self.counted[addr] = (len(self.counted), canon)
+
+    def fork_count_call(self, start, out):
+        """emit_function, after the entry check: the function's counter (WWHD_RECOMP_COUNT_CALLS)"""
+        counted = getattr(self, "counted", {})  # a Recompiler made without __init__ (the tests) has none
+        if start in counted:
+            out.append("    PPC_COUNT_CALL(%d);" % counted[start][0])
+
+    def fork_count_table(self):
+        """table.c: the counted functions (canonical addresses, whether callers use an inline copy) and their
+        counters, read by the runtime's profiler (thread_sampler_switch.cpp); none without WWHD_RECOMP_COUNT_CALLS"""
+        missing = sorted(a for a in self.counted if a not in self.ordinal)
+        if missing:
+            raise SystemExit("%s: not function entries: %s" % (COUNT_CALLS, ", ".join("%08X" % a for a in missing)))
+        rows = sorted(self.counted.items(), key=lambda kv: kv[1][0])
+        inlined = getattr(self, "inlined", set())
+        n = len(rows)
+        return ("\n/* (this fork) call counters (WWHD_RECOMP_COUNT_CALLS, #65): canonical address, inline copy */\n"
+                "const unsigned g_recomp_count_n = %d;\n" % n +
+                "const uint32_t g_recomp_count_addrs[%d] = {%s};\n" % (max(n, 1), ", ".join("0x%08Xu" % c for _, (_, c) in rows) or "0") +
+                "const uint8_t g_recomp_count_inline[%d] = {%s};\n" % (max(n, 1), ", ".join("1" if a in inlined else "0" for a, _ in rows) or "0") +
+                "unsigned long long g_recomp_counts[%d];\n" % max(n, 1))
 
     def fork_switch_skip(self, entries, read_hooks):
         """__init__: the hook entries without the ones WWHD_RECOMP_SWITCH_SKIP lists (function hooks only)"""
@@ -621,6 +661,7 @@ class ForkPasses:
         # only in the hot callers: cold code would grow for nothing (the instruction cache is small)
         hot_src = {a: (use_inline(src), count) for a, (src, count) in hot_src.items()}
         self.inline_count = len(inline_src)
+        self.inlined = set(inline_src)
         files = split(normal)
         hot_files = split([hot_src[a] for a in sorted(hot_src, key=hot_rank.get)])
         for name in os.listdir(outdir):  # a smaller split must not leave old files behind
@@ -647,8 +688,11 @@ class ForkPasses:
                              "#define PPC_ELIDE_LR 1\n" if NONLEAF_CHECK else "", gqr)
 
     def fork_funcs_tail(self):
-        """funcs.h, at the end"""
-        return '\n#include "inline_leaves.h"\n'
+        """funcs.h, at the end (the call counters' macro before the inline copies that use it)"""
+        count = ("\n/* call counters (WWHD_RECOMP_COUNT_CALLS, table.c): one per listed function, any thread */\n"
+                 "extern unsigned long long g_recomp_counts[];\n#define PPC_COUNT_CALL(k) (g_recomp_counts[k]++)\n"
+                 if self.counted else "")
+        return count + '\n#include "inline_leaves.h"\n'
 
     def fork_table_head(self):
         """table.c, after the includes: which passes made this code (logged at boot)"""
@@ -656,8 +700,9 @@ class ForkPasses:
                                              ("hot layout", HOT), ("dead tails", DEAD_TAIL), ("helpers inlined", HELPER_INLINE), ("hooked locals", HOOKED_LOCALS), ("callee-saved write-backs elided", ELIDE_SAVED), ("volatile write-backs by callee", CALLEE_REGS and ELIDE_SAVED), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
                                              ("single-precision tracking", ppc2c.SINGLE),
                                              ("whole-program single precision", ppc2c.SINGLE and singleflow.INTERPROC),
-                                             ("static GQRs", GQR_STATIC), ("jump-site caches", IJUMP)) if on)
-        return 'const char g_recomp_variant[] = "%s";\n\n' % variant
+                                             ("static GQRs", GQR_STATIC), ("jump-site caches", IJUMP),
+                                             ("call counters (%d functions)" % len(self.counted), self.counted)) if on)
+        return 'const char g_recomp_variant[] = "%s";\n%s\n' % (variant, self.fork_count_table())
 
     def fork_report_hot(self):
         return "hot functions (hot_functions.txt) in code_hot_*.c: %d\n" % getattr(self, "hot_count", 0)
@@ -672,5 +717,6 @@ class ForkPasses:
                 "dead tails left out: %d functions, %d instructions\n" % (getattr(self, "dead_tail_count", 0),
                                                                      getattr(self, "dead_tail_insns", 0)) +
                 "small hot leaves inlined into callers: %d\n" % getattr(self, "inline_count", 0) +
+                "functions with a call counter (WWHD_RECOMP_COUNT_CALLS): %d\n" % len(self.counted) +
                 "single-precision multiplier operands: %d rounded (round25), %d known single\n" % tuple(ppc2c.single_stats) +
                 "hooks left out for the Switch (switch_skip_hooks.txt): %d\n" % len(getattr(self, "switch_skipped", ())))
