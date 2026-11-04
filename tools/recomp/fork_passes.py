@@ -639,7 +639,7 @@ class ForkPasses:
                 normal.append((src, count))
         # always-inline copies of the small hot leaves; every call of one (not tail jumps) uses the copy
         inline_names = {"f_%08X" % self.sym(a) for a in inline_src}
-        with open(os.path.join(outdir, "inline_leaves.h"), "w") as f:
+        with open(os.path.join(outdir, "inline_leaves.h"), "w", newline="\n") as f:
             f.write("/* small hot leaf functions, inlined into their callers (recomp.py INLINE); the out-of-line\n"
                     " * f_X stays for indirect calls and the dispatch table */\n#pragma once\n\n")
             for a in sorted(inline_src):
@@ -669,7 +669,8 @@ class ForkPasses:
                 os.remove(os.path.join(outdir, name))
         for prefix, groups in (("code_%03d.c", files), ("code_hot_%03d.c", hot_files)):
             for i, funcs in enumerate(groups):
-                with open(os.path.join(outdir, prefix % i), "w") as f:
+                # "\n" on every host: the PGO check hashes these files (cmake/SwitchPgo.cmake), and Windows wrote CRLF (#118)
+                with open(os.path.join(outdir, prefix % i), "w", newline="\n") as f:
                     f.write('#include "funcs.h"\n\n')
                     f.write("\n\n".join(funcs))
                     f.write("\n")

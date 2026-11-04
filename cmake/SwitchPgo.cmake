@@ -99,7 +99,14 @@ macro(switch_pgo_configure)
     endif()
     # the object paths (and so the .gcda names) are relative to the build folder: a profile made in one build
     # folder is found by another
-    set(_pgo_common -fprofile-prefix-path=${CMAKE_BINARY_DIR})
+    # On Windows GCC writes the object's absolute name with backslashes (C:\...\switch-dk\CMakeFiles/...): a prefix with
+    # forward slashes never matches, so every file looked for a .gcda named after its whole path and none was used
+    # (#118). The prefix in the form GCC compares it with:
+    set(_pgo_prefix "${CMAKE_BINARY_DIR}")
+    if(CMAKE_HOST_WIN32)
+      file(TO_NATIVE_PATH "${_pgo_prefix}" _pgo_prefix)
+    endif()
+    set(_pgo_common -fprofile-prefix-path=${_pgo_prefix})
     if(_pgo_mode STREQUAL "GEN")
       # what tools/switch/pgo_pack.py puts in a release profile's manifest: the compiler, the scope, the generated code
       _switch_pgo_hot_sha256(_pgo_hot_sha)
