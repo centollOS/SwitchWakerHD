@@ -65,7 +65,12 @@ PUBLIC_HEX = {b"0114020000000000c000000000000046",
               b"0123456789abcdef0123456789abcdef",
               # (this fork: the source zip) data words in upstream's tests: "Fix\0Scalable\0" in ASCII
               # (tools/story_mods/test_lyt.py) and a layout animation record (runtime/tools/demo_scene_test.cpp)
-              b"466978005363616c61626c6500000000", b"00000004000000003200773903000004"}
+              b"466978005363616c61626c6500000000", b"00000004000000003200773903000004",
+              # (this fork: the source zip) SDL controller GUIDs in upstream's tests (runtime/tools/input_map_test.cpp,
+              # button_glyphs_test.cpp, controller_setup_test.cpp): made-up ones and public vendor/product ids
+              b"03000000000000000000000000000001", b"03000000000000000000000000000002",
+              b"03000000000000000000000000000003", b"0300000000000000000000000000ffff",
+              b"030000005e0400008e02000014010000", b"050000004c050000e60c000000810000"}
 # a function body as tools/recomp/recomp.py emits it (stubgen placeholders call ppc_unimplemented)
 GEN_CODE = re.compile(rb"void f_[0-9A-F]{8}\(Cpu\* __restrict c\) \{\n")
 # and its translated instructions, each followed by its address and word (docs show a function's header only:
@@ -77,7 +82,7 @@ GEN_INSN = re.compile(rb"/\* [0-9A-F]{8}: [0-9A-F]{8} \*/")
 # the name rules for generated code skip them; every content check still applies
 VENDORED = re.compile(r"(^|/)runtime/third_party/")
 # (this fork: the source zip) the shader template's notes and pin, not a cache
-SHADERCACHE_DOCS = re.compile(r"(^|/)tools/shadercache/(README\.md|template\.ref)$")
+SHADERCACHE_DOCS = re.compile(r"(^|/)tools/shadercache/(README\.md|template\.ref|distill_template\.py)$")  # (this fork: distill_template.py, upstream's maintainer script)
 # (this fork: the source zip) "content/" paths of upstream's that are not game files: the empty placeholder of a
 # guest-mod example's content folder, and the Java stubs of Android's android.content package
 NOT_GAME_TREE = re.compile(r"(^|/)(examples/guest-mods/[^/]+/content/\.gitkeep|runtime/tools/[^/]+_stubs/android/content/[^/]+\.java)$")
