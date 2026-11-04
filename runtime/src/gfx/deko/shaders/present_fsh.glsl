@@ -15,7 +15,9 @@ vec4 srgb_encode(vec4 c) { return mix(c * 12.92, 1.055 * pow(c, vec4(1.0 / 2.4))
 // ---- FSR 1 EASU (AMD FidelityFX Super Resolution 1.0, MIT; ffx_fsr1.h FsrEasuF, GLSL port): an edge-adaptive
 // upscale from 12 taps. It expects perceptual values: when the picture is still linear (encode.x) the taps are
 // taken to gamma 2.0 (sqrt) and back, which is cheaper than the sRGB curve on 12 texels.
-// (no clamps: the picture is UNORM, so the taps are in 0..1; the result is clamped at the end)
+// (no clamps: draw_picture applies FSR to UNORM pictures only, so the taps are in 0..1; the result is clamped at
+// the end. The picture fills its whole image: surfaces are allocated at their scaled size and present_source's view
+// is the whole image, so textureSize is the picture's size and the edge taps clamp to the picture's own edge.)
 vec4 easu_in(vec4 v) {
     if (encode.y != 0) v = srgb_encode(v);
     return encode.x != 0 ? sqrt(v) : v;
@@ -38,11 +40,13 @@ void easu_tap(inout vec3 aC, inout float aW, vec2 off, vec2 dir, vec2 len, float
 void easu_set(inout vec2 dir, inout float len, float w, float lA, float lB, float lC, float lD, float lE) {
     float lenX = max(abs(lD - lC), abs(lC - lB)), dirX = lD - lB;
     dir.x += dirX * w;
-    lenX = clamp(abs(dirX) / lenX, 0.0, 1.0);
+    // (AMD's approximate reciprocal gives a large finite number for a flat neighbourhood, 0 / 0 here: the epsilon
+    // keeps it 0 instead of NaN, whose clamp is hardware-defined)
+    lenX = clamp(abs(dirX) / (lenX + 1.0e-5), 0.0, 1.0);
     len += lenX * lenX * w;
     float lenY = max(abs(lE - lC), abs(lC - lA)), dirY = lE - lA;
     dir.y += dirY * w;
-    lenY = clamp(abs(dirY) / lenY, 0.0, 1.0);
+    lenY = clamp(abs(dirY) / (lenY + 1.0e-5), 0.0, 1.0);
     len += lenY * lenY * w;
 }
 vec3 easu() {
@@ -52,8 +56,8 @@ vec3 easu() {
     pp -= fp;
     vec2 p0 = fp * inv + vec2(inv.x, -inv.y);
     vec2 p1 = p0 + vec2(-inv.x, 2.0 * inv.y), p2 = p0 + vec2(inv.x, 2.0 * inv.y), p3 = p0 + vec2(0.0, 4.0 * inv.y);
-    //   b c        gathers: (x y z w) = (upper left, upper right, lower right, lower left)
-    // e f g h
+    //   b c        gathers: (x y z w) = (lower left, lower right, upper right, upper left) of the 2x2 texels
+    // e f g h      around the gather point, row 0 at the top (p0 returns b c as x y, p1: i j f e as x y z w)
     // i j k l
     //   n o
     vec4 bcR = easu_in(textureGather(scan, p0, 0)), bcG = easu_in(textureGather(scan, p0, 1)), bcB = easu_in(textureGather(scan, p0, 2));
@@ -102,8 +106,9 @@ vec3 easu() {
 // ---- FSR 1 RCAS (ffx_fsr1.h FsrRcasF, GLSL port): contrast-adaptive sharpening from the pixel and its four
 // neighbours, on a picture of the window's size (encode.z == 2). 0.25 stops of sharpness (AMD's default is 0.2).
 vec3 rcas() {
-    // the sampler is nearest and clamps to the edge, and the picture is the window's size: the output pixel's
-    // centre is the texel's centre, and a fixed offset reaches a neighbour (the edge repeats itself)
+    // the sampler is nearest and clamps to the edge, and the picture is the window's size and fills its image (see
+    // easu_in): the output pixel's centre is the texel's centre, and a fixed offset reaches a neighbour (the edge
+    // repeats itself)
     vec3 b = rcas_in(textureOffset(scan, uv, ivec2(0, -1)).rgb);
     vec3 d = rcas_in(textureOffset(scan, uv, ivec2(-1, 0)).rgb);
     vec3 e = rcas_in(texture(scan, uv).rgb);

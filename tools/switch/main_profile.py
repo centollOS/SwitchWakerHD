@@ -20,10 +20,17 @@ bound). When the sampler also walked the game's own stack (the main thread: its 
 addresses saved in it), those frames count too, and the inclusive column holds every game function on the call stack.
 Game functions are the recompiled ones (f_XXXXXXXX: the game's canonical address); names from the decomp's
 verify units and names.tsv when present (--names).
+
+Comparing two builds (issue #66): two runs can differ more from the scene than from the code. --normalise scales
+each file by the functions whose code is the same in both builds (one --elf per file; the first file is the
+reference), so a function's normalised share is its cost in the reference run's time:
+
+  tools/switch/main_profile.py --compare --normalise main.samples sync.samples --elf main.elf --elf sync.elf
 """
 import argparse
 import bisect
 import collections
+import hashlib
 import os
 import re
 import struct
@@ -82,6 +89,80 @@ def read_symbols(elf):
     return addrs, names
 
 
+def read_elf_functions(elf):
+    """[(name, address, code bytes)] from the ELF's symbol table (FUNC symbols with a size; a static function's
+    name can appear more than once)"""
+    with open(elf, "rb") as f:
+        data = f.read()
+    if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        sys.exit(elf + ": not a 64-bit little-endian ELF")
+    shoff, = struct.unpack_from("<Q", data, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
+    secs = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize) for i in range(shnum)]
+    out = []
+    for sec in secs:
+        if sec[1] != 2:  # SHT_SYMTAB
+            continue
+        strtab = secs[sec[6]]
+        for off in range(sec[4], sec[4] + sec[5], 24):
+            name, info, _, shndx, value, size = struct.unpack_from("<IBBHQQ", data, off)
+            if info & 0xF != 2 or not size or not 0 < shndx < shnum:  # STT_FUNC
+                continue
+            code = secs[shndx]
+            if code[1] != 1:  # SHT_PROGBITS
+                continue
+            end = data.index(b"\0", strtab[4] + name)
+            start = code[4] + value - code[3]
+            out.append((data[strtab[4] + name:end].decode(errors="replace"), value, data[start:start + size]))
+    return out
+
+
+def masked_code(code):
+    """the code with the immediates that depend on where things were linked set to 0 (AArch64): branches,
+    ADR/ADRP and literal loads, and the ADD/LDR/STR offsets from an ADRP's page or an address made from it (the
+    :lo12: part, and offsets into merged strings or a section anchor); what is left changes with the code only.
+    (An address kept on the stack and loaded again is not followed: such a function can look changed, which only
+    leaves it out of --normalise's yardstick; between main and main plus a one-file change, 2 of 59938 differed,
+    one of them really changed.)"""
+    words = struct.unpack("<%dI" % (len(code) // 4), code[: len(code) // 4 * 4])
+    pages = set()  # registers an ADRP wrote, or an ADD or MOV made from one
+    out = []
+    for w in words:
+        if w & 0x7C000000 == 0x14000000:  # B, BL
+            w &= 0xFC000000
+        elif w & 0xFF000010 == 0x54000000 or w & 0x7E000000 == 0x34000000:  # B.cond, CBZ/CBNZ
+            w &= 0xFF00001F
+        elif w & 0x7E000000 == 0x36000000:  # TBZ/TBNZ
+            w &= 0xFFF8001F
+        elif w & 0x1F000000 == 0x10000000:  # ADR, ADRP
+            if w & 0x80000000:
+                pages.add(w & 0x1F)
+            w &= 0x9F00001F
+        elif w & 0x3B000000 == 0x18000000:  # LDR (literal)
+            w &= 0xFF00001F
+        elif w & 0xFFE0FFE0 == 0xAA0003E0:  # MOV (register): a copy of an address is one
+            if (w >> 16) & 0x1F in pages:
+                pages.add(w & 0x1F)
+        elif (w & 0xFF800000 == 0x91000000 or w & 0x3B000000 == 0x39000000) and (w >> 5) & 0x1F in pages:
+            if w & 0xFF800000 == 0x91000000:  # ADD (immediate): its result is an address too
+                pages.add(w & 0x1F)
+            w &= 0xFFC003FF  # ADD (immediate) / LDR, STR (unsigned offset): the 12-bit offset
+        out.append(w)
+    return struct.pack("<%dI" % len(out), *out)
+
+
+def code_fingerprints(elf):
+    """a function's name (as the self-time table writes it: before any ".") -> a hash of its masked code, with
+    its .cold and other parts"""
+    parts = collections.defaultdict(list)
+    for name, _, code in read_elf_functions(elf):
+        base, _, suffix = name.partition(".")
+        if suffix.startswith("localalias"):  # the same code as the function
+            continue
+        parts[base].append((suffix, hashlib.sha1(masked_code(code)).digest()))
+    return {k: hashlib.sha1(b"".join(s.encode() + h for s, h in sorted(v))).hexdigest() for k, v in parts.items()}
+
+
 GUEST = 1 << 63  # a sample frame of the guest stack: GUEST | the game's return address
 
 
@@ -137,15 +218,23 @@ def read_names(path, decomp):
     return names
 
 
-def compare(args, addrs, syms, names):
-    starts = guest_functions(syms)
-    text_lo, text_hi = addrs[0], addrs[-1] + 0x100000
-    cols, tables = [], []
-    for path in args.samples:
+def compare(args, names):
+    elfs = args.elf or ["build/switch-dk/wwhd.elf"]
+    if len(elfs) not in (1, len(args.samples)):
+        sys.exit("--compare takes one --elf, or one per samples file (in the same order)")
+    elfs = elfs * len(args.samples) if len(elfs) == 1 else elfs
+    symbols, prints = {}, {}
+    cols, tables, selfs = [], [], []
+    for path, elf in zip(args.samples, elfs):
+        if elf not in symbols:
+            symbols[elf] = read_symbols(elf)
+        addrs, syms = symbols[elf]
+        starts = guest_functions(syms)
+        text_lo, text_hi = addrs[0], addrs[-1] + 0x100000
         tags, base, samples = read_samples(path)
         ti = tags.index(args.thread)
         mine = [fr for t, fr in samples if t == ti]
-        c = collections.Counter()
+        c, own = collections.Counter(), collections.Counter()  # the table's time; self time (for --normalise)
         for fr in mine:
             seen = set()
             for k, pc in enumerate(fr):
@@ -158,12 +247,16 @@ def compare(args, addrs, syms, names):
                     continue
                 a = pc - base
                 if a < text_lo or a > text_hi:
-                    if k == 0 and not args.inclusive:
-                        c["(outside the executable)"] += 1
+                    if k == 0:
+                        own["(outside the executable)"] += 1
+                        if not args.inclusive:
+                            c["(outside the executable)"] += 1
                     if not args.inclusive:
                         break
                     continue
                 q = syms[bisect.bisect_right(addrs, a) - 1].split(".")[0]
+                if k == 0:
+                    own[q] += 1
                 if args.inclusive:
                     q = canon(q)
                     if q not in seen:
@@ -174,15 +267,43 @@ def compare(args, addrs, syms, names):
                     break
         cols.append(os.path.splitext(os.path.basename(path))[0])
         tables.append({k: 100.0 * v / len(mine) for k, v in c.items()})
+        selfs.append({k: 100.0 * v / len(mine) for k, v in own.items()})
+    scale = [1.0] * len(tables)
+    if args.normalise:
+        for elf in set(elfs):
+            prints[elf] = code_fingerprints(elf)
+        # unchanged: the same code in every file's build; their self time is the yardstick (each sample counts
+        # once in self time, so the total is not inflated by call chains)
+        same = {k for k, h in prints[elfs[0]].items() if all(prints[e].get(k) == h for e in elfs[1:])}
+        changed = sum(1 for k in prints[elfs[0]] if k not in same)
+        totals = [sum(v for k, v in t.items() if k in same) for t in selfs]
+        if not all(totals):
+            sys.exit("--normalise: no sampled function has the same code in every build")
+        scale = [totals[0] / u for u in totals]
+        sampled = sum(1 for k in same if any(k in t for t in selfs))
+        print("normalised by the %d functions with the same code in every build (%d of them sampled; %d changed or "
+              "missing in a build)" % (len(same), sampled, changed))
+        print("their self time: %s" % ", ".join("%s %.2f%%" % (c, u) for c, u in zip(cols, totals)))
+        print("each file's time for the same unchanged work, against %s's (the n: columns' scale): %s" % (
+            cols[0], ", ".join("%.1f%%" % (100.0 * f) for f in scale)))
+        print()
     keys = set().union(*tables)
     ranked = sorted(keys, key=lambda k: -sum(t.get(k, 0) for t in tables))
+    head = " ".join("%11s" % c[:11] for c in cols)
+    if args.normalise:
+        head += "  " + " ".join("%11s" % ("n:" + c)[:11] for c in cols[1:])
     print("%-58s %s  mean" % ("function (%s time, thread %s)" % ("inclusive" if args.inclusive else "self", args.thread),
-                               " ".join("%11s" % c[:11] for c in cols)))
+                               head))
     for k in ranked[: args.top]:
         m = re.match(r"f_([0-9A-F]{8})", k)
         lab = "%s %s" % (k, names.get(m.group(1), "")) if m else k
         vals = [t.get(k, 0) for t in tables]
-        print("%-58s %s %5.2f" % (lab[:58], " ".join("%10.2f%%" % v for v in vals), sum(vals) / len(vals)))
+        row = " ".join("%10.2f%%" % v for v in vals)
+        if args.normalise:
+            # the function's share scaled to the reference run's time; * a function whose code changed
+            mark = "" if k in same or canon(k) in same or k.startswith("(") else "*"
+            row += "  " + " ".join("%10.2f%%" % (v * f) for v, f in zip(vals[1:], scale[1:])) + mark
+        print("%-58s %s %5.2f" % (lab[:58], row, sum(vals) / len(vals)))
 
 
 MARKER = 0xFFFFFFFE  # a hitch file's marker record: frames (start tick, end tick, frame, rounds)
@@ -266,7 +387,11 @@ def main():
     ap.add_argument("samples", nargs="+", help="one file, or several with --compare")
     ap.add_argument("--compare", action="store_true", help="a table: self time per file, functions by their mean")
     ap.add_argument("--inclusive", action="store_true", help="with --compare: inclusive time instead of self")
-    ap.add_argument("--elf", default="build/switch-dk/wwhd.elf")
+    ap.add_argument("--normalise", action="store_true",
+                    help="with --compare: scale each file by the functions whose code is the same in every build "
+                         "(the first file is the reference; --elf once per file when the builds differ)")
+    ap.add_argument("--elf", action="append",
+                    help="the build's ELF (default build/switch-dk/wwhd.elf); with --compare, once per file")
     ap.add_argument("--thread", default="game")
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--names", default="build/verify/names.tsv")
@@ -276,10 +401,14 @@ def main():
     ap.add_argument("--each", type=int, default=10, help="with --hitches: the longest frames shown one by one")
     args = ap.parse_args()
 
-    addrs, syms = read_symbols(args.elf)
     names = read_names(args.names, args.decomp)
     if args.compare:
-        return compare(args, addrs, syms, names)
+        return compare(args, names)
+    if args.normalise:
+        sys.exit("--normalise goes with --compare")
+    if args.elf and len(args.elf) > 1:
+        sys.exit("one --elf without --compare")
+    addrs, syms = read_symbols(args.elf[0] if args.elf else "build/switch-dk/wwhd.elf")
     tags, base, samples = read_samples(args.samples[0])
     text_lo, text_hi = addrs[0], addrs[-1] + 0x100000
 
