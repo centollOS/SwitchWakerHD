@@ -2,6 +2,9 @@
 // using the game's HUD font, through common game/GX2 path. See docs/button-glyphs.md for hook points and layout semantics.
 #include "button_glyphs.h"
 #include "gfx/renderer.h"  // (this fork) render::frame_count
+#ifdef __SWITCH__
+#include <switch.h>  // (this fork) armGetSystemTick
+#endif
 #include "button_glyph_font.h"
 #include "button_glyph_art.h"
 
@@ -98,7 +101,12 @@ bool marking_now() { return restyled() || item_names() || labels_used.load(std::
 std::atomic<uint64_t> g_marking_frame{~0ull};
 std::atomic<bool> g_marking{false}, g_positions{false};
 void marking_refresh() {
+#ifdef __SWITCH__
+    // (this fork) the system tick (a register read) in 8 ms windows: render::frame_count is a call into the backend
+    const uint64_t now = armGetSystemTick() / (19200000 / 125);
+#else
     const uint64_t now = render::frame_count();
+#endif
     if (g_marking_frame.load(std::memory_order_relaxed) == now) return;
     g_marking.store(marking_now(), std::memory_order_relaxed);
     g_positions.store(style().positions, std::memory_order_relaxed);

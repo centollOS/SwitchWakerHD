@@ -1622,6 +1622,10 @@ HLE(gx2, GX2GetCurrentDisplayList) {
 // A list called while another is recorded runs with that one (its blocks are noted for it); a call
 // from the command stream takes the blocks of the list as they are now with it (submitted_uniforms.h).
 static void call_display_list(uint32 list, uint32 size) {
+    if (!submitted_uniforms_on()) {  // (this fork) the Switch's default: the call as before (no recording slot look-up)
+        emit(OP_CALL, {list, size});
+        return;
+    }
     if (Recording* rec = recording(); rec && rec->start) {
         if (submitted_uniforms_on()) g_rec_calls[rec - g_recs].push_back(list);
         emit(OP_CALL, {list, size});
