@@ -95,6 +95,7 @@ abstract partial class EngineBase
         RunStep(StepRelease, Release);
         RunStep(StepDevkit,  SwitchTools);
         RunStep(StepBuild,   Build);
+        SaveChoices();
     }
 
     void RunStep(int step, Action body)
@@ -397,28 +398,33 @@ abstract partial class EngineBase
 
     // The latest release's tag: GitHub's API, else where github.com/.../releases/latest redirects to (the API
     // allows 60 calls an hour per address). "" when neither answers.
-    string LatestRelease()
+    string LatestRelease() => FetchLatestRelease(ct, msg => Log?.Invoke(msg, LogKind.Output));
+
+    // (also the welcome page's, before any Run: SavedChoices.cs ReleaseToOffer)
+    static string FetchLatestRelease(CancellationToken token, Action<string>? log)
     {
         try
         {
-            var json = Http.GetStringAsync("https://api.github.com/repos/centollOS/SwitchWakerHD/releases/latest").GetAwaiter().GetResult();
+            using var api = Http.GetAsync("https://api.github.com/repos/centollOS/SwitchWakerHD/releases/latest", token)
+                                .GetAwaiter().GetResult();
+            var json = api.EnsureSuccessStatusCode().Content.ReadAsStringAsync().GetAwaiter().GetResult();
             var m = Regex.Match(json, "\"tag_name\":\\s*\"([^\"]+)\"");
             if (m.Success) return m.Groups[1].Value;
         }
-        catch (Exception e) when (e is HttpRequestException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+        catch (Exception e) when (e is HttpRequestException || (e is OperationCanceledException && !token.IsCancellationRequested))
         {
-            Log?.Invoke(e.Message, LogKind.Output);
+            log?.Invoke(e.Message);
         }
         try
         {
-            using var resp = Http.GetAsync("https://github.com/centollOS/SwitchWakerHD/releases/latest", HttpCompletionOption.ResponseHeadersRead, ct)
+            using var resp = Http.GetAsync("https://github.com/centollOS/SwitchWakerHD/releases/latest", HttpCompletionOption.ResponseHeadersRead, token)
                                  .GetAwaiter().GetResult();
             var m = Regex.Match(resp.RequestMessage?.RequestUri?.AbsolutePath ?? "", @"/releases/tag/([^/]+)$");
             if (resp.IsSuccessStatusCode && m.Success) return Uri.UnescapeDataString(m.Groups[1].Value);
         }
-        catch (Exception e) when (e is HttpRequestException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+        catch (Exception e) when (e is HttpRequestException || (e is OperationCanceledException && !token.IsCancellationRequested))
         {
-            Log?.Invoke(e.Message, LogKind.Output);
+            log?.Invoke(e.Message);
         }
         return "";
     }

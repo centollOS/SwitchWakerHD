@@ -637,8 +637,8 @@ const MenuTexts kMenuEnglish = {
     .updateCheckHelp = "At start, asks GitHub whether a new SwitchWakerHD version is out and says so for a few seconds "
         "(needs the internet; it never delays the game). Nothing is downloaded: you update with the "
         "installer.",
-    .updateNotice = "SwitchWakerHD %s is out (you have %s): update it with the installer; your saves stay.",
-    .updateNewer = "%s is out (you have %s). Update it with the installer (or build it and copy wwhd.nro, INSTALL.md "
+    .updateNotice = "SwitchWakerHD %s is out (you have %s): run the installer and choose Update; your saves stay.",
+    .updateNewer = "%s is out (you have %s). Run the installer and choose Update (or build it and copy wwhd.nro, INSTALL.md "
         "\"Updating\"): your saves, settings and compiled graphics stay.",
     .updateCurrent = "Up to date (%s).",
     .updateChecking = "Checking...",
@@ -807,8 +807,8 @@ const MenuTexts kMenuSpanish = {
     .updateCheck = "Buscar actualizaciones al arrancar",
     .updateCheckHelp = "Al arrancar pregunta a GitHub si hay una versión nueva de SwitchWakerHD y lo avisa unos segundos "
         "(necesita internet; nunca retrasa el juego). No descarga nada: se actualiza con el instalador.",
-    .updateNotice = "Ya está SwitchWakerHD %s (tienes la %s): actualízalo con el instalador; tus partidas se conservan.",
-    .updateNewer = "Ya está la %s (tienes la %s). Actualízala con el instalador (o compílala y copia wwhd.nro, "
+    .updateNotice = "Ya está SwitchWakerHD %s (tienes la %s): abre el instalador y elige Actualizar; tus partidas se conservan.",
+    .updateNewer = "Ya está la %s (tienes la %s). Abre el instalador y elige Actualizar (o compílala y copia wwhd.nro, "
         "INSTALL.md, \"Updating\"): partidas, ajustes y gráficos compilados se conservan.",
     .updateCurrent = "Al día (%s).",
     .updateChecking = "Buscando...",
@@ -979,9 +979,9 @@ const MenuTexts kMenuFrench = {
     .updateCheckHelp = "Au démarrage, demande à GitHub si une nouvelle version de SwitchWakerHD est sortie et l'indique "
         "quelques secondes (il faut Internet ; le jeu n'attend jamais). Rien n'est téléchargé : la mise à "
         "jour se fait avec l'installateur.",
-    .updateNotice = "SwitchWakerHD %s est sortie (vous avez la %s) : mettez à jour avec l'installateur ; vos sauvegardes "
+    .updateNotice = "SwitchWakerHD %s est sortie (vous avez la %s) : lancez l'installateur et choisissez Update ; vos sauvegardes "
         "sont conservées.",
-    .updateNewer = "La %s est sortie (vous avez la %s). Mettez à jour avec l'installateur (ou compilez-la et copiez "
+    .updateNewer = "La %s est sortie (vous avez la %s). Lancez l'installateur et choisissez Update (ou compilez-la et copiez "
         "wwhd.nro, INSTALL.md « Updating ») : sauvegardes, réglages et graphismes compilés sont conservés.",
     .updateCurrent = "À jour (%s).",
     .updateChecking = "Recherche...",
@@ -1150,9 +1150,9 @@ const MenuTexts kMenuGerman = {
     .updateCheckHelp = "Fragt beim Start bei GitHub nach, ob eine neue SwitchWakerHD-Version erschienen ist, und zeigt es "
         "ein paar Sekunden an (braucht Internet; das Spiel wartet nie). Es wird nichts heruntergeladen: "
         "Aktualisiert wird mit dem Installer.",
-    .updateNotice = "SwitchWakerHD %s ist erschienen (du hast %s): aktualisiere mit dem Installer; deine Spielstände "
+    .updateNotice = "SwitchWakerHD %s ist erschienen (du hast %s): starte den Installer und wähle Update; deine Spielstände "
         "bleiben.",
-    .updateNewer = "%s ist erschienen (du hast %s). Aktualisiere mit dem Installer (oder baue sie und kopiere wwhd.nro, "
+    .updateNewer = "%s ist erschienen (du hast %s). Starte den Installer und wähle Update (oder baue sie und kopiere wwhd.nro, "
         "INSTALL.md \"Updating\"): Spielstände, Einstellungen und kompilierte Grafik bleiben.",
     .updateCurrent = "Aktuell (%s).",
     .updateChecking = "Suche...",
@@ -1321,8 +1321,8 @@ const MenuTexts kMenuItalian = {
     .updateCheck = "Cerca aggiornamenti all'avvio",
     .updateCheckHelp = "All'avvio chiede a GitHub se è uscita una nuova versione di SwitchWakerHD e lo segnala per qualche "
         "secondo (serve Internet; il gioco non aspetta mai). Non scarica nulla: si aggiorna con l'installer.",
-    .updateNotice = "È uscito SwitchWakerHD %s (hai la %s): aggiornalo con l'installer; i salvataggi restano.",
-    .updateNewer = "È uscita la %s (hai la %s). Aggiorna con l'installer (o compilala e copia wwhd.nro, INSTALL.md "
+    .updateNotice = "È uscito SwitchWakerHD %s (hai la %s): apri l'installer e scegli Update; i salvataggi restano.",
+    .updateNewer = "È uscita la %s (hai la %s). Apri l'installer e scegli Update (o compilala e copia wwhd.nro, INSTALL.md "
         "\"Updating\"): salvataggi, impostazioni e grafica compilata restano.",
     .updateCurrent = "Aggiornato (%s).",
     .updateChecking = "Ricerca...",
@@ -1489,8 +1489,8 @@ const MenuTexts kMenuPortuguese = {
     .updateCheckHelp = "Ao iniciar, pergunta ao GitHub se saiu uma versão nova do SwitchWakerHD e avisa por alguns "
         "segundos (precisa de internet; nunca atrasa o jogo). Nada é baixado: a atualização é feita com o "
         "instalador.",
-    .updateNotice = "Saiu o SwitchWakerHD %s (você tem a %s): atualize com o instalador; seus salvamentos ficam.",
-    .updateNewer = "Saiu a %s (você tem a %s). Atualize com o instalador (ou compile e copie o wwhd.nro, INSTALL.md, "
+    .updateNotice = "Saiu o SwitchWakerHD %s (você tem a %s): abra o instalador e escolha Atualizar; seus salvamentos ficam.",
+    .updateNewer = "Saiu a %s (você tem a %s). Abra o instalador e escolha Atualizar (ou compile e copie o wwhd.nro, INSTALL.md, "
         "\"Updating\"): seus salvamentos, configurações e gráficos compilados ficam.",
     .updateCurrent = "Atualizado (%s).",
     .updateChecking = "Procurando...",
