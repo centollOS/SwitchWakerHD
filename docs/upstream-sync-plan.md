@@ -58,6 +58,13 @@ Found while building for the Switch:
   (ABCDDCBA, 2 boots each): without PGO the main thread +0.4-0.7 ms (lava 29.10 vs 29.25 fps, Windfall 29.32 vs
   29.79, Dragon Roost 28.96 vs 29.39, village 25.19 vs 25.55); with PGO (each its own profile) +0.2-0.9 ms (lava
   29.95 vs 29.87, Windfall 29.97 both, Dragon Roost 29.92 vs 29.97, village 28.77 vs 29.09).
+- **The residual** (2026-11-04, profiles of both builds with `update_ubo` sampled too): `update_ubo` waits 85% of
+  its time in both, so it is not the cause. The recompiled game code is the same (39,928 functions, same sizes
+  but 703, -3.6 KB); its +0.27 ms a frame is placement (cache), which PGO's layout removes. The runtime's +0.3 ms
+  is spread over upstream's per-pane and per-command additions (0.01-0.1 ms each). Taken out on the Switch:
+  emit's debug draw-context load, the button glyph and HUD hide name checks when unused. Kept (they do
+  something): the fog pin (#178, ~0.05 ms), the play context for the L rule (~0.02 ms). After them (sync15,
+  ABBA x2): main thread +0.2-0.8 ms without PGO, as before: within what placement moves.
 - Tests: `tools/recomp` passes (94, 2 skipped: `test_preserve_registers`' default cases need fork_prepare's
   whole-program data the test's hand-made Recompiler lacks; the randomizer profile's hook digest is upstream's hook
   list, so randomized RPX files are not taken by the fork until it ships its own profile).
