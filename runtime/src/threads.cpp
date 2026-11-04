@@ -884,6 +884,13 @@ static void* thread_main(void* p) {
 #endif
         }
     }
+#ifdef __SWITCH__
+    // (this fork) the threads the main thread hands work to ("update_ubo") in the profiles too
+    if (boosted_thread(name)) {
+        thread_sampler::add_current_thread(name.c_str());
+        thread_sampler::set_guest_stack(&ht->cpu.r[1]);
+    }
+#endif
 #ifdef __APPLE__
     ht->mach = pthread_mach_thread_np(pthread_self());
 #endif
