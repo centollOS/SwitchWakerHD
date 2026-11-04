@@ -17,6 +17,48 @@ which on the same console means something got slower, or the console's condition
 From v1.0.1 on, `perf_test.py` keeps the conditions of each boot in the result file (`meta.boots`: the version, the
 console mode and charge, the clocks the game logged, the picture settings that change the load).
 
+## v1.2.0, 2026-11-04
+
+Console: the maintainers' Switch, HOS 22.1.0, handheld, charging; the player's settings as in v1.1.0's run (dynamic
+resolution on, internal resolution 1.0 handheld, FSR 1 on, FPS counter on). CPU at the stock 1020 MHz, GPU at
+384 MHz in both builds. Measured on 8f5fe253, built as a player gets it: with a PGO profile (#90) trained on this
+console from that commit (`pgo_train.py train --plan default`). The tagged commit adds the installers' update mode
+(#113) and the update notice's text, nothing the game runs per frame.
+
+### G. Performance: v1.2.0 against v1.1.0
+
+`perf_test.py ab build/v110.nro <v1.2.0 PGO build> --scenes lava,windfall,dragonroost,outset_grass_us,outset_lookout_us
+--frames 900 --order ABBA --repeat 2 --expect perf/results/v1.1.0-vs-v1.0.0.json` (`ab` with v1.1.0's own NRO,
+since `compare-to` needs a container build on this Mac): 4 boots of each, interleaved, time of day held at 200. File:
+[`perf/results/v1.2.0-vs-v1.1.0.json`](../perf/results/v1.2.0-vs-v1.1.0.json).
+
+| Scene | v1.1.0 fps | v1.2.0 fps | Change (95% interval) | Main thread |
+|---|---|---|---|---|
+| lava (`M_NewD2` 2) | 29.13 | 29.92 | +0.78 (+-0.05) | 33.10 -> 31.21 ms (-5.7%) |
+| windfall | 29.89 | 29.97 | +0.08 (+-0.05): at the 30 fps cap | 32.49 -> 31.33 ms (-3.6%) |
+| dragonroost | 29.50 | 29.96 | +0.46 (+-0.15) | 32.89 -> 31.00 ms (-5.8%) |
+| outset_grass_us | 29.93 | 29.97 | +0.04 (+-0.15): at the cap | 20.77 -> 19.44 ms (-6.4%) |
+| outset_lookout_us | 29.97 | 29.97 | 0.00: at the cap | 31.93 -> 31.17 ms (-2.4%) |
+
+The main thread is faster everywhere (PGO and the fourth core); `--expect`: every scene as v1.1.0's record or above.
+
+### F. Memory
+
+Two laps of the 40-warp tour (`perf/results/v1.2.0-memory.txt`), no crash:
+
+| | End of lap 1 | End of lap 2 |
+|---|---|---|
+| malloc in use | 2503 MiB | 2567 MiB (+64) |
+| Image heap | 3 chunks, 192 MiB (15.3 MiB free) | 4 chunks, 256 MiB (27.5 MiB free) |
+| Shader variants alive | 1287 (5588 freed) | 1288 (12115 freed) |
+
+The +64 MiB of lap 2 is the image heap's fourth chunk, nothing else. It came from fragmentation, the case F3
+allows: early in lap 2 a 10.7 MiB image found no free run long enough after the evictions (largest free 3.5 MiB),
+so the heap took a chunk (`creating a memory block: image heap chunk 3`). With the room, idle textures stay
+resident longer before the heap fills, so its use rises to ~250 MiB in places, and no fifth chunk came. v1.1.0's
+tour stayed at 3 chunks; v1.2.0 is 31 MiB higher at the end of lap 1 (not looked into: within the heap's
+589 MiB never used).
+
 ## v1.1.0 (68358e90), 2026-11-02
 
 Console: the maintainers' Switch, now on HOS 22.1.0 (v1.0.0's record was on 19.0.1), handheld, charging. Settings
