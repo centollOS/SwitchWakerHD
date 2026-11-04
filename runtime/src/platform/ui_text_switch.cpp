@@ -888,7 +888,8 @@ const MenuTexts kMenuFrench = {
         "Coûte un peu de temps GPU.",
     .fsr = "Upscaling et netteté FSR 1",
     .fsrHelp = "Image plus nette et mise à l'échelle plus propre (AMD FSR 1). Sous la taille de la fenêtre (720p sur\n"
-        "1080p en dock, ou résolution dynamique) elle suit les contours ; à taille de fenêtre elle ne fait que nettoyer. Coûte du temps GPU.",
+        "1080p en dock, ou résolution dynamique) elle suit les contours ; à taille de fenêtre elle ne fait que\n"
+        "rendre l'image plus nette. Coûte du temps GPU.",
     // Picture tab: frame rate counter
     .fpsHeading = "Compteur de fps",
     .fpsOff = "Non",
