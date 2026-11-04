@@ -70,6 +70,11 @@ two runs of the same build agree within 0.3 fps.
   cost is measured and reported with the profile.
 - Output: `tools/switch/main_profile.py`: functions by self time and by inclusive time, with names from the decomp
   (`tools/verify/funcdb.py`) where known.
+- Two builds (an upstream sync, an optimisation): `--compare --normalise a.samples b.samples --elf a.elf --elf
+  b.elf` (#66). The scene moves the shares more than most changes do, so each file is scaled by the self time of
+  the functions whose code is the same in both builds (their AArch64 code with the link-dependent immediates
+  masked: branches, ADRP and its :lo12:). An `n:` column is a function's share in the first file's time; `*`
+  marks a function whose code changed.
 
 **0.3 Desktop cross-check.** The same save states on the macOS (Apple silicon) build with Instruments' Time
 Profiler, and Windows on ARM with `thread_sampler`. Same game code, a similar ARM64 compiler: the hot list should
