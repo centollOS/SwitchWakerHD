@@ -78,6 +78,7 @@ bool large_picto_option() {
 std::mutex g_mu;
 Rules g_rules;
 std::atomic<float> g_alpha[kCount] = {1.f, 1.f, 1.f};
+std::atomic<bool> g_any_faded{false};  // (this fork) an element below 1 now: hud_fade_alpha_of's fast path
 std::chrono::steady_clock::time_point g_last;
 
 int element_of(const char* n) {
@@ -130,15 +131,20 @@ void hud_fade_step(const playctx::PlayContext& c) {
     bool want[kCount];
     std::lock_guard<std::mutex> lk(g_mu);
     g_rules.step(in, c.step, want);
+    bool any = false;
     for (int e = 0; e < kCount; e++) {
         const float a = option(e) ? fade(g_alpha[e].load(std::memory_order_relaxed), want[e], seconds) : 1.f;
         if (log_on() && (a == 0.f || a == 1.f) && a != g_alpha[e].load(std::memory_order_relaxed))
             LOG("[hudfade] %s %s (step %llu)", kNames[e], a ? "shown" : "faded out", (unsigned long long)c.step);
         g_alpha[e].store(a, std::memory_order_relaxed);
+        any = any || a < 1.f;
     }
+    g_any_faded.store(any, std::memory_order_relaxed);
 }
 
+bool hud_fade_any() { return g_any_faded.load(std::memory_order_relaxed); }
 float hud_fade_alpha_of(uint32_t pane) {
+    if (!g_any_faded.load(std::memory_order_relaxed)) return 1.f;  // (this fork) nothing faded: asked for every pane
     const int e = element_of(reinterpret_cast<const char*>(mem::ptr(pane + kPaneName)));
     return e < 0 ? 1.f : g_alpha[e].load(std::memory_order_relaxed);
 }

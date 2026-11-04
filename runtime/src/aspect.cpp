@@ -729,6 +729,7 @@ std::pair<float,float> particle_pane_offset(uint32_t pane) {
 // HUD particles are separate from the layout draw tree. Follow the source pane's ancestors
 // explicitly so a sparkle emitted by a child inherits the counter/heart/magic fade as well.
 float particle_pane_fade(uint32_t pane) {
+    if (!mods::hud_fade_any()) return 1.f;  // (this fork) nothing faded: no walk up the panes for every particle
     float alpha=1.f;
     for(unsigned depth=0;pane && depth<32;++depth,pane=ld32(pane+aspect::kPaneParent))
         alpha*=mods::hud_fade_alpha_of(pane);

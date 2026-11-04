@@ -2414,6 +2414,13 @@ namespace interp { bool exact_cull_on(); void edge_draw(const Cpu& call, Cpu* c,
 extern "C" void f_025D4654_orig(Cpu* c);
 static interp::OneShotNoDraw g_nodraw;
 extern "C" void hook_025D4654(Cpu* c) {
+#ifdef __SWITCH__
+    // (this fork) at 30 fps without the debug tools (the interpolation off: its requests, kept conditions and edge
+    // draws do nothing) the draw is the game's, as in main: without the Cpu copy (over 1 KB) and the D-sweep
+    // bookkeeping at every actor draw (docs/upstream-sync-plan.md)
+    static const bool debug = getenv("WWHD_DSWEEP") || getenv("WWHD_DSWEEP_PROFILES") || getenv("WWHD_INTERP_LINK_DRAW_TRACE");
+    if (!debug && !interp::enabled()) { f_025D4654_orig(c); return; }
+#endif
     const uint32_t actor = c->r[3];
     const uint32_t status_in = ld32(actor + interp::OneShotNoDraw::kStatus);
     // On passes without logic the draw's culling result does not reach the actor: actor_condition

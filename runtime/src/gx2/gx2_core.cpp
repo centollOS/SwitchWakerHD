@@ -461,7 +461,7 @@ static bool submitted_uniforms_compute() {
     return on;
 }
 // (this fork) asked at every uniform-block bind and display-list call: a plain read after the first
-static int g_submitted_uniforms = -1;
+int g_submitted_uniforms = -1;  // (gx2_cmd.h)
 static inline bool submitted_uniforms_on() {
     int v = g_submitted_uniforms;
     if (__builtin_expect(v < 0, 0)) g_submitted_uniforms = v = submitted_uniforms_compute() ? 1 : 0;
@@ -476,7 +476,7 @@ static std::vector<submitted::Snapshot*> g_snap_free;
 static uint64_t g_snap_ids = 0;  // submitting thread (the game's GX2 thread)
 static submitted::Snapshot* g_snap_active = nullptr;  // render thread
 
-void note_uniform_block(uint32 addr, uint32 size) {
+void note_uniform_block_on(uint32 addr, uint32 size) {
     if (!submitted_uniforms_on()) return;
     if (Recording* rec = recording(); rec && rec->start) g_rec_blocks[rec - g_recs].push_back({addr, size});
 }

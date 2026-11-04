@@ -213,6 +213,7 @@ bool one_screen_hidden_pane(const char* name);   // the GamePad's slide-conducti
 bool hud_fade_on(int element);  // hudfade::Element
 void set_hud_fade_on(int element, bool on);
 void hud_fade_step(const playctx::PlayContext& c);  // each logic step, after the context was read
+bool hud_fade_any();  // (this fork) some element is faded now (below 1): else every alpha is 1
 float hud_fade_alpha_of(uint32_t pane);  // Pane::CalculateMtx: the alpha factor of a faded pane (1: none)
 int hud_pane_hide(uint32_t pane);
 bool large_picto_on();  // the large Picto Box view: its finder's frame not drawn (hud_fade.cpp)

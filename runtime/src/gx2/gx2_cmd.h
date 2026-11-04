@@ -67,7 +67,12 @@ inline void emit(Op op, std::initializer_list<uint32_t> payload) { emit(op, payl
 bool recording_display_list();
 
 // a uniform block bound by GX2Set*UniformBlock (noted for the display list being recorded)
-void note_uniform_block(uint32_t addr, uint32_t size);
+void note_uniform_block_on(uint32_t addr, uint32_t size);
+// (this fork) asked at every uniform-block bind: the call only while submitted uniforms are on (gx2_core.cpp)
+extern int g_submitted_uniforms;  // -1 not decided yet, 0 off, 1 on
+inline void note_uniform_block(uint32_t addr, uint32_t size) {
+    if (g_submitted_uniforms != 0) note_uniform_block_on(addr, size);
+}
 // render thread: the bytes the block at addr held when the display list being executed was submitted
 // (submitted_uniforms.h); nullptr: read guest memory. id: changes with every submission (0: none).
 const uint8_t* submitted_uniform_block(uint32_t addr, uint32_t size);
