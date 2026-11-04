@@ -36,7 +36,7 @@ can change is how little the player has to do for it: one click on the computer,
 ### 1. Update from the computer, in one step (recommended)
 
 **1a. Update mode in the installers.** The installers remember the player's choices in the work folder
-(`installer-choices.json`: the dump path and format, the optional files, the shader choice; no keys' contents,
+(`installer-choices.txt`, one `key=value` a line: the dump path and format, the optional files, the shader choice; no keys' contents,
 only their paths) after a successful build. At the next start, when the work folder has a build and a newer
 release is out, the first page offers **"Update to vX (same game and options)"**: one click runs the same
 steps with the saved choices (each path checked again; a missing one goes back to the normal pages), then the
@@ -44,7 +44,7 @@ Done page as today. The in-game notice then says "run the installer and choose U
 
 - Where: `installer/shared/EngineBase.cs` (save and load the choices, checked like the pages check them), the
   Windows UI (`installer/windows/MainWindow.xaml.cs`) and the desktop UI (`installer/desktop/MainWindow.axaml.cs`,
-  macOS and Linux), `Strings.cs` (+ PT), `ui_text_switch.cpp` (the notice text, five languages).
+  macOS and Linux), `Strings.cs` (+ PT), `ui_text_switch.cpp` (the notice text, six languages).
 - Cost: **about 2-3 days** with the three platforms' tests. No console work.
 
 **1b. Send it to the console over Wi-Fi.** The step players find hardest is the card: out of the console, into a
