@@ -99,6 +99,12 @@ def branch_target(addr, w):
     return None
 
 
+# (upstream sync bfd7dd6) WWHD_RECOMP_SWITCH_SKIP=1 (tools/switch/make_sd.py) or =FILE: the hooks listed in
+# switch_skip_hooks.txt (or FILE) are left out: their functions are translated as the game's, and f_X_orig forwards to
+# f_X so that the runtime's hook_X still links (it is never called)
+SWITCH_SKIP = os.environ.get("WWHD_RECOMP_SWITCH_SKIP", "")
+
+
 class ForkPasses:
     ijump_call = IJUMP_CALL  # what an indirect jump (bctr) tail-calls: the per-site cache or the dispatcher
     mod_checked = None  # WWHD_RECOMP_MOD_HOOKS_ONLY: this build's addresses of the functions with the check
@@ -115,6 +121,23 @@ class ForkPasses:
         self.mod_hooks = True
         self.mod_checked = {addr for _, _, addr, _ in entries}
         self.mod_checked_canon = sorted({canon for _, canon, _, _ in entries})
+
+    def fork_switch_skip(self, entries, read_hooks):
+        """__init__: the hook entries without the ones WWHD_RECOMP_SWITCH_SKIP lists (function hooks only)"""
+        self.switch_skipped = set()
+        if not SWITCH_SKIP or SWITCH_SKIP == "0":
+            return entries
+        path = (os.path.join(os.path.dirname(os.path.abspath(__file__)), "switch_skip_hooks.txt")
+                if SWITCH_SKIP == "1" else SWITCH_SKIP)
+        listed, _ = read_hooks([path], self.build)
+        skip = {addr for site, _, addr, _ in listed if not site}
+        self.switch_skipped = {addr for site, _, addr, _ in entries if not site and addr in skip}
+        return [e for e in entries if e[0] or e[2] not in skip]
+
+    def fork_skip_forwarders(self):
+        """table.c: f_X_orig for each hook left out (WWHD_RECOMP_SWITCH_SKIP): the runtime's hook_X refers to it"""
+        return "".join("void f_%08X_orig(Cpu* c) { f_%08X(c); }  /* hook left out (switch_skip_hooks.txt) */\n"
+                       % (self.sym(a), self.sym(a)) for a in sorted(getattr(self, "switch_skipped", ())))
 
     def fork_mod_check(self, start):
         """whether the function at `start` gets the mod hook check (and upstream's conservative code for it)"""
@@ -462,7 +485,11 @@ class ForkPasses:
         invariant is broken the set is empty: hooked functions read everything."""
         root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "runtime", "src")
         text = {}
-        for dp, _, fns in os.walk(root):
+        for dp, dirs, fns in os.walk(root):
+            # runtime/src/hostrt: the decomp build's guest runtime (cmake/Decomp.cmake, recomp.py --decomp-hooks), not
+            # in any other build; its emulated C++ start-up reads r0 (upstream sync bfd7dd6)
+            if not getattr(self, "decomp_hooks_file", None) and "hostrt" in dirs:
+                dirs.remove("hostrt")
             for fn in fns:
                 if fn.endswith((".cpp", ".h", ".inc", ".c")):
                     with open(os.path.join(dp, fn), errors="replace") as f:
@@ -645,4 +672,5 @@ class ForkPasses:
                 "dead tails left out: %d functions, %d instructions\n" % (getattr(self, "dead_tail_count", 0),
                                                                      getattr(self, "dead_tail_insns", 0)) +
                 "small hot leaves inlined into callers: %d\n" % getattr(self, "inline_count", 0) +
-                "single-precision multiplier operands: %d rounded (round25), %d known single\n" % tuple(ppc2c.single_stats))
+                "single-precision multiplier operands: %d rounded (round25), %d known single\n" % tuple(ppc2c.single_stats) +
+                "hooks left out for the Switch (switch_skip_hooks.txt): %d\n" % len(getattr(self, "switch_skipped", ())))

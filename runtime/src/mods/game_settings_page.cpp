@@ -441,7 +441,13 @@ void mute(input::PadState& p) {
 }
 
 void pad(input::PadState& p, Cpu* c) {
+#ifdef __SWITCH__
+    // (this fork) off unless WWHD_GAME_SETTINGS=1: not tried on the console yet (the Switch has its own menu), and it
+    // reads the game's menu and allocates at every VPADRead
+    static bool disabled = !(getenv("WWHD_GAME_SETTINGS") && *getenv("WWHD_GAME_SETTINGS") == '1');
+#else
     static bool disabled = getenv("WWHD_GAME_SETTINGS") && *getenv("WWHD_GAME_SETTINGS") == '0';
+#endif
     if (disabled) return;
     if (g_swallow_x.load(std::memory_order_relaxed)) {
         if (std::fabs(p.lx) <= 0.5f) g_swallow_x.store(false, std::memory_order_relaxed);

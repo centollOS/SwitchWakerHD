@@ -324,6 +324,15 @@ static inline __attribute__((always_inline)) double snan_chk64(double d, uint32_
  *     normalized double and "store zero" for a denormalized double, which both give a signed zero.
  * For every double that is exactly a single the host conversion gives the same bits, so the fast
  * path is one conversion plus a well-predicted "round trip equal" check (false for NaNs). */
+#if defined(__SWITCH__) && !defined(PPC_EXACT_F32)
+/* (this fork, upstream sync bfd7dd6) The Switch keeps the host conversions (main's, before upstream's bit-exact ones
+ * below): those cost every lfs a NaN check and every stfs a round trip and a compare, in all of the game's code, and
+ * the hot code grew from 4.4 to 6.1 MB; the main thread lost 3-5 ms a frame (docs/upstream-sync-plan.md). They
+ * differ only for signalling NaNs (quieted) and doubles that are not singles (rounded, not truncated).
+ * -DPPC_EXACT_F32 gives the exact ones. */
+static inline uint32_t ppc_stfs_bits(double d) { return f32_as_u32((float)d); }
+static inline double ppc_lfs_value(uint32_t w) { return (double)u32_as_f32(w); }
+#else
 static __attribute__((noinline, cold)) uint32_t ppc_stfs_bits_slow(uint64_t b) {
     uint32_t e = (uint32_t)(b >> 52) & 0x7FF;
     if (e > 896 || (b & 0x7FFFFFFFFFFFFFFFull) == 0)
@@ -346,6 +355,7 @@ static inline double ppc_lfs_value(uint32_t w) {
                           ((uint64_t)(w & 0x3FFFFFFFu) << 29));
     return (double)u32_as_f32(w);
 }
+#endif
 
 static inline double ldf32(uint32_t ea) { return ppc_lfs_value(snan_chk32(ld32(ea), ea, 0)); }
 static inline double ldf64(uint32_t ea) { return u64_as_f64(ld64(ea)); }

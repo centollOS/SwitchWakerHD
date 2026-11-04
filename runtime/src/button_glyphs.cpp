@@ -1,6 +1,7 @@
 // Draw-time face styling (Xbox colours and positions, PlayStation shapes) and shoulder labels
 // using the game's HUD font, through common game/GX2 path. See docs/button-glyphs.md for hook points and layout semantics.
 #include "button_glyphs.h"
+#include "gfx/renderer.h"  // (this fork) render::frame_count
 #include "button_glyph_font.h"
 #include "button_glyph_art.h"
 
@@ -91,7 +92,27 @@ PromptStyle style() {
 bool restyled() { return style().active(); }
 
 // Restyled now, or it has been at least once in this session.
-bool marking() { return restyled() || item_names() || labels_used.load(std::memory_order_relaxed); }
+bool marking_now() { return restyled() || item_names() || labels_used.load(std::memory_order_relaxed); }
+// (this fork) asked for every pane the game calculates and draws (Pane::CalculateMtx, its draw): once a frame. style()
+// reads two thread_locals (a call each on the Switch) and item_names() an atomic exchange; a change shows a frame later
+std::atomic<uint64_t> g_marking_frame{~0ull};
+std::atomic<bool> g_marking{false}, g_positions{false};
+void marking_refresh() {
+    const uint64_t now = render::frame_count();
+    if (g_marking_frame.load(std::memory_order_relaxed) == now) return;
+    g_marking.store(marking_now(), std::memory_order_relaxed);
+    g_positions.store(style().positions, std::memory_order_relaxed);
+    g_marking_frame.store(now, std::memory_order_relaxed);
+}
+bool marking() {
+    marking_refresh();
+    return g_marking.load(std::memory_order_relaxed);
+}
+// style().positions as of this frame (the same cache)
+bool positions_now() {
+    marking_refresh();
+    return g_positions.load(std::memory_order_relaxed);
+}
 
 // The first activation happens against text cached in stock mode, which carries no markers the
 // hooks could recognise. Each text box is therefore rebuilt once: the game re-runs Print, which
@@ -528,7 +549,7 @@ extern "C" void hook_026F8CD0(Cpu* c) {
 void button_glyphs::calculate_pane(Cpu* c, PpcFunc calculate) {
     // (this fork) every pane's matrix passes here (thousands a frame): in a session that never
     // restyled the prompts nothing below applies, so the name compares are skipped (docs/perf-test.md)
-    if (!marking() && !style().positions) return calculate(c);
+    if (!marking() && !positions_now()) return calculate(c);  // (this fork: once a frame)
     const uint32_t pane = c->r[3];
     const int face = face_group(pane_name(pane));
     if (face < 0) return calculate(c);

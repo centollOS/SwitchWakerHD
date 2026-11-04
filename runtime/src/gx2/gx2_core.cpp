@@ -445,14 +445,27 @@ static void execute_one(Op op, const uint32* p, uint32 n);
 // ---------------------------------------------------------------- submitted uniform blocks
 // (submitted_uniforms.h) WWHD_GX2_SUBMITTED_UNIFORMS=0 turns it off: draws in display lists then read
 // uniform blocks from guest memory whenever the render thread executes them (the old behaviour).
-static bool submitted_uniforms_on() {
+static bool submitted_uniforms_compute() {
     static const bool on = [] {
         const char* e = getenv("WWHD_GX2_SUBMITTED_UNIFORMS");
+#ifdef __SWITCH__
+        // (this fork) off by default: deko3d does not read the snapshots (only the Vulkan and Metal renderers do), and
+        // copying them cost the Switch's main thread ~2.4 ms a frame in the lava room (memmove, sort, dedupe, lock)
+        const bool v = e && atoi(e) != 0;
+#else
         const bool v = !e || atoi(e) != 0;
+#endif
         LOG("[gx2] display-list uniform blocks: %s", v ? "as submitted (default)" : "read when executed (WWHD_GX2_SUBMITTED_UNIFORMS=0)");
         return v;
     }();
     return on;
+}
+// (this fork) asked at every uniform-block bind and display-list call: a plain read after the first
+static int g_submitted_uniforms = -1;
+static inline bool submitted_uniforms_on() {
+    int v = g_submitted_uniforms;
+    if (__builtin_expect(v < 0, 0)) g_submitted_uniforms = v = submitted_uniforms_compute() ? 1 : 0;
+    return v != 0;
 }
 static submitted::DisplayListIndex g_dl_index;
 // per recording slot: the blocks bound and lists called while recording
@@ -825,22 +838,27 @@ std::string current_draw_context() {
     const uint32_t id = g_draw_context.load(std::memory_order_relaxed);
     return id < g_draw_context_texts.size() ? g_draw_context_texts[id] : "-";
 }
-void emit(Op op, const uint32* payload, uint32 n) {
+// (this fork) emit's debug draw context (WWHD_VK_PIPELINE_WHO), out of its hot path
+static __attribute__((noinline, cold)) void describe_draw_context(Op op) {
     static thread_local bool describing = false;
-    if (g_draw_context_provider && !describing && (op == OP_DRAW || op == OP_DRAW_INDEXED || op == OP_CALL) &&
-        !(recording() && recording()->start)) {
-        describing = true;
-        const std::string text = g_draw_context_provider();
-        uint32 id;
-        {
-            std::lock_guard<std::mutex> lk(g_draw_context_mutex);
-            auto [it, fresh] = g_draw_context_ids.try_emplace(text, uint32_t(g_draw_context_texts.size()));
-            if (fresh) g_draw_context_texts.push_back(text);
-            id = it->second;
-        }
-        emit(OP_DEBUG_CONTEXT, &id, 1);
-        describing = false;
+    if (describing || !(op == OP_DRAW || op == OP_DRAW_INDEXED || op == OP_CALL) || (recording() && recording()->start))
+        return;
+    describing = true;
+    const std::string text = g_draw_context_provider();
+    uint32 id;
+    {
+        std::lock_guard<std::mutex> lk(g_draw_context_mutex);
+        auto [it, fresh] = g_draw_context_ids.try_emplace(text, uint32_t(g_draw_context_texts.size()));
+        if (fresh) g_draw_context_texts.push_back(text);
+        id = it->second;
     }
+    emit(OP_DEBUG_CONTEXT, &id, 1);
+    describing = false;
+}
+void emit(Op op, const uint32* payload, uint32 n) {
+    // (this fork) the debug draw context (WWHD_VK_PIPELINE_WHO) in a cold function: here only the provider's null
+    // check (the thread_local it reads is a call on the Switch, at every command)
+    if (__builtin_expect(g_draw_context_provider != nullptr, 0)) describe_draw_context(op);
     if (Recording* rec = recording(); rec && rec->start) {
         rec->recorded++;
         // (this fork, round 45) a register write merged into the list's last command, as in the staging buffer: most

@@ -184,6 +184,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
             hook_list += game_builds.decomp_only_hook_files() + [
                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "decomp_hostrt_hooks.txt")]
         hook_entries, self.skipped_hooks = game_builds.read_hooks(hook_list, self.build)
+        hook_entries = self.fork_switch_skip(hook_entries, game_builds.read_hooks)  # (this fork)
         self.canon_of = {}              # this build's address -> canonical address (for symbol names)
         self.hooks, self.sites = set(), set()
         for site, canon, addr, _ in hook_entries:
@@ -477,6 +478,7 @@ class Recompiler(fork_passes.ForkPasses):  # (this fork)
         with _Output(os.path.join(outdir, "table.c")) as f:
             f.write('#include "funcs.h"\n#include "recomp_table.h"\n#include "guest_addr.h"\n\n')
             f.write(self.fork_table_head())  # (this fork)
+            f.write(self.fork_skip_forwarders())  # (this fork: the hooks left out for the Switch)
             f.write("const RecompEntry g_recomp_funcs[] = {\n")
             for e in self.sorted_entries:
                 f.write("    {0x%08Xu, f_%08X},\n" % (e, self.sym(e)))
