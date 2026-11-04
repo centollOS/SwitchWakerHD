@@ -18,6 +18,8 @@
 #include "runtime.h"
 
 namespace hostui {
+// (upstream sync bfd7dd6) no folder chooser on the console (Settings > Saves > Save folder is left out there)
+void choose_save_folder(std::function<void(std::string)>) {}
 namespace {
 std::mutex g_mu;
 std::map<std::string, std::string> g_values;

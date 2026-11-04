@@ -1,5 +1,80 @@
 # Upstream sync to devel (after v0.2.11): plan
 
+Status (2026-11-03): **third sync, to upstream `devel` bfd7dd6f (v0.5.0 + 248 commits)**, on
+feature/upstream-sync-bfd7dd6 (worktree `~/Documents/SwitchWakerHD-sync`; the same method: `git diff 909337f7 bfd7dd6f
+| git apply -3`, 751 upstream commits, 760 files); **the next sync starts from bfd7dd6f**. 26 files conflicted; the
+choices:
+- **Depth peeks** (`peekz.cpp`, `depth_peek.h`, `renderer.h`): upstream's new deterministic timing (answers written at
+  the game's swap after the next one, the game waiting for the renderer to answer every request) on the other
+  platforms; on the Switch the fork's #94 model stays (an answer written at the game's next peekData, only to an
+  address it asks for again; nothing counted, so the game never waits at its swap: deko3d answers at a later peek).
+- **HLE calls** (`runtime.h`): upstream took the fork's HleMark idea as `mainprof::Mark`; on the Switch the call stays
+  direct with the fork's HleMark (no exception boundary: ~0.25 ms a frame), elsewhere upstream's.
+- **Threads** (`threads.cpp`): the fork's `Cpu::preempt` and message queue stay; upstream's `mainprof` counters are
+  added to them (off on the Switch).
+- **Recompiler** (`recomp.py`, `ppc2c.py`, `fork_passes.py`): fork_passes stays; upstream's `rawstore` pass runs after
+  the fork's dead tails and CR liveness, `preserve_registers` (the randomizer's builds) turns the fork's passes off as
+  upstream's, and the float instructions get upstream's NaN wrappers (off by default: the decomp verification) around
+  the fork's `M()` (round25 left out for operands known to be single precision).
+- **Render profiler** (`render_prof.*`): upstream's setting (`detailedProfiling`, off by default, applied at a swap);
+  the fork keeps `enabled()` inline (asked at every command) and `set_enabled` for the Dev tab's switch.
+- **Settings menu** (`overlay.cpp`): upstream's `game_settings::set_*` save the options, through the fork's
+  `option_slider` (#101: apply while held, save when let go); the new texts (Link's name, story items, menu sounds,
+  the code-mod rebuild question) go through `menu_i18n::tr` with rows in all six languages; five replaced rows removed.
+- `main.cpp`: upstream's `enter_data_folder` (desktop and Android) is not called on the Switch (`main_switch::start`).
+- Kept as they were: README (upstream's README refreshed in `docs/upstream-README.md`), the Android toolchain workflow
+  (by hand only); merged: test source lists, the CI workflows (`unittest discover` replaces the explicit recompiler
+  test), savestate (upstream's particle section, the fork's arrivals counter), cheats (upstream's story items next to
+  the fork's warps and tour), fs (upstream's save-folder temporary next to the fork's `HostFsCall`).
+
+Found while building for the Switch:
+- **One screen**: upstream's one screen mode (`mods/one_screen.cpp`, a reimplementation of this fork's #5) hooks the
+  same game functions as the Switch's single-screen mode (`screen_mode.cpp`, the Dev tab's controller choice). The
+  Switch keeps its own: `one_screen.cpp` is left out of its build and `platform/one_screen_switch.cpp` answers "off"
+  to upstream's callers. Moving the Switch to upstream's is a later step.
+- **Watchdog**: upstream took this fork's hang watchdog (`gx2_core.cpp`, credited); the fork's copy is removed, and
+  on the Switch upstream's starts with `host::start_thread` (a 256 KiB stack: Horizon's default is small).
+  `threads::dump_state` and `HostThread::is_main`, defined on both sides, are kept once.
+- **Host functions** upstream added for its desktop hosts (`input::controllers/window_focused/background_controllers`,
+  `hostui::choose_save_folder`, the microphone backend): Switch versions in its own files (no controller list, always
+  in front, no folder chooser: Saves > Save folder is left out there, no microphone).
+- `main_profile.h`: its layout check moved to the fork's `Cpu` (`main_thread` at 173, after `preempt`); no thread CPU
+  clock on the Switch (0). `host.h lower_thread_priority`: nothing on the Switch. `editor_shell.cpp`: a
+  `std::string(first, last)` with a `char*` last that GCC rejects (a fix to offer upstream).
+- **Controller change listener** (upstream's `controller_reapply`, #330): the Switch's `set_pro_controller` called it
+  at every call, also at start before the guest memory exists (a data abort reading the game's input manager,
+  `*101F5088`, at boot on the console); now, as the SDL host, only on a change, and not before the guest memory.
+- Console (2026-11-03, USA, handheld): boot, the 17-place warp tour (every place reached and drawn), the settings
+  menu (the new Save file section in Brazilian Portuguese).
+- **Performance** (console, USA, handheld, stock CPU, GPU 384; `perf_test.py ab`, lava, Windfall, Dragon Roost, the
+  Outset village). The first build's main thread was 6-7 ms a frame slower than main (2.7-4.8 fps). Found and fixed,
+  each measured: upstream's bit-exact `lfs`/`stfs` (`ppc.h`: the hot code 4.4 -> 6.1 MB; the Switch keeps the host
+  conversions, `-DPPC_EXACT_F32` for the exact ones), the submitted uniform snapshots (off on the Switch: deko3d
+  does not read them), the hook ABI scan turned off by `runtime/src/hostrt` (the decomp build's only), per-call costs
+  in `emit`, display-list calls, the button glyph marking, the HUD fade and particle walks, the actor draw hook
+  (a `Cpu` copy and D-sweep bookkeeping at every draw) and the culling hook (a view swap at every check), the
+  in-game settings page (off on the Switch). Upstream's interpolation hooks main did not have cost nothing
+  measurable; the Switch build leaves them out anyway (`WWHD_RECOMP_SWITCH_SKIP`, set by `make_sd.py`). Last A/B
+  (ABCDDCBA, 2 boots each): without PGO the main thread +0.4-0.7 ms (lava 29.10 vs 29.25 fps, Windfall 29.32 vs
+  29.79, Dragon Roost 28.96 vs 29.39, village 25.19 vs 25.55); with PGO (each its own profile) +0.2-0.9 ms (lava
+  29.95 vs 29.87, Windfall 29.97 both, Dragon Roost 29.92 vs 29.97, village 28.77 vs 29.09).
+- **The residual** (2026-11-04, profiles of both builds with `update_ubo` sampled too): `update_ubo` waits 85% of
+  its time in both, so it is not the cause. The recompiled game code is the same (39,928 functions, same sizes
+  but 703, -3.6 KB); its +0.27 ms a frame is placement (cache), which PGO's layout removes. The runtime's +0.3 ms
+  is spread over upstream's per-pane and per-command additions (0.01-0.1 ms each). Taken out on the Switch:
+  emit's debug draw-context load, the button glyph and HUD hide name checks when unused. Kept (they do
+  something): the fog pin (#178, ~0.05 ms), the play context for the L rule (~0.02 ms). After them (sync15,
+  ABBA x2): main thread +0.2-0.8 ms without PGO, as before: within what placement moves.
+- **Final A/B/C** (2026-11-04, ABCCBA x2, each PGO build with its own fresh profile, `--plan default`; v1.1.0
+  built from its tag as the installer does): main thread v1.1.0 / main 358ff8ad PGO / sync PGO: lava 33.00 /
+  30.74 / 30.68 ms (29.14 / 29.97 / 29.95 fps), Windfall 32.34 / 30.87 / 31.13 (29.94 / 29.97 / 29.97), Dragon
+  Roost 32.55 / 30.79 / 30.99 (29.64 / 29.96 / 29.95), village 36.36 / 33.66 / 33.56 (26.27 / 29.07 / 29.15).
+  Both PGO builds beat v1.1.0 by 1.2-2.8 ms; sync vs main is -0.1..+0.26 ms, inside the 95% intervals (0.5-0.7 ms),
+  fps the same. The sync costs nothing measurable once PGO is on (the release build).
+- Tests: `tools/recomp` passes (94, 2 skipped: `test_preserve_registers`' default cases need fork_prepare's
+  whole-program data the test's hand-made Recompiler lacks; the randomizer profile's hook digest is upstream's hook
+  list, so randomized RPX files are not taken by the fork until it ships its own profile).
+
 Status (2026-10-22): **second sync, to upstream `devel` 909337f7 (v0.4.0 + 2 commits)**, on
 feature/upstream-sync-v040 (62396830, the same method: `git diff 4dc4832 909337f7 | git apply -3`, 709 upstream
 commits); **the next sync starts from 909337f7**. main's PR #57 (CPU profiler, recompiler passes) and #60 (shader

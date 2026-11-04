@@ -32,6 +32,9 @@ the game itself is still built from the USA game. Its languages then appear in t
 (Language). Tested with the European game; untested with the Japanese game so far.
 Keys can also come from the WIIU_COMMON_KEY environment variable / IMAGE.key next to the image.
 Keys are never printed, logged or stored.
+
+Game options: --editor, --trace, --warm-shaders, --renderer NAME and everything after "--" are not for
+setup. Setup passes them on to the game when it starts it (setup.py --editor, setup.py -- --user-dir DIR).
 """
 import argparse
 import getpass
@@ -40,6 +43,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -58,6 +62,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # directory to sys.path. Resolve shipped sibling modules explicitly.
 sys.path.insert(0, HERE)
 import code_mods  # noqa: E402
+from code_mods import atomic_replace  # noqa: E402
 import decomp_setup  # noqa: E402
 PKG = os.path.normpath(os.path.join(HERE, "..", ".."))
 # Portable release (portable.txt in the release folder): everything setup and the game create stays
@@ -98,6 +103,8 @@ WINDOWS_MAX_PATH = 259  # characters of a full path without the extended-length 
 # deletes the compiler with \\?\ paths (its unused Python/lldb files are 128 deep, 139 while unpacking).
 DEEPEST_DATA_PATH = 78
 MAX_DATA_DIR_CHARS = WINDOWS_MAX_PATH - 1 - DEEPEST_DATA_PATH  # 180 (the 1: the separator after it)
+# Seed save/backup roots are siblings suffixed by the full-hash namespace.
+RANDOMIZER_PATH_EXTRA = len("-randomizer-" + "0" * 64)
 
 
 # Extended-length paths need a Python whose own path functions join with backslashes: shutil, os.walk
@@ -167,7 +174,7 @@ def plain_text(text):
     return text
 
 
-def path_length_problem(data_dir, package=None, windows=None):
+def path_length_problem(data_dir, package=None, windows=None, extra_path_chars=0):
     """None, or the message that stops setup before it downloads anything when the data folder is too
     deep for Windows: the game, wwhd-extract and the compiler would fail on their deepest files
     (DEEPEST_DATA_PATH). package: the release folder; when the data folder is inside it (a portable
@@ -175,16 +182,17 @@ def path_length_problem(data_dir, package=None, windows=None):
     if not (IS_WIN if windows is None else windows):
         return None
     data_dir = windows_path(plain_path(data_dir))
-    if len(data_dir) <= MAX_DATA_DIR_CHARS:
+    data_limit = MAX_DATA_DIR_CHARS - extra_path_chars
+    if len(data_dir) <= data_limit:
         return None
     if package and data_dir.rsplit("\\", 1)[0].lower() == windows_path(package).lower():
         package = windows_path(package)
-        limit = MAX_DATA_DIR_CHARS - (len(data_dir) - len(package))
+        limit = data_limit - (len(data_dir) - len(package))
         return ("This folder's path is too long for Windows (%d characters, at most %d work). Move the Wind "
                 "Waker HD folder to a shorter place such as C:\\Games\\WindWakerHD and start it again."
                 % (len(package), limit))
     return ("The install folder's path is too long for Windows (%d characters, at most %d work). Choose a "
-            "shorter place such as C:\\Games\\WindWakerHD and start it again." % (len(data_dir), MAX_DATA_DIR_CHARS))
+            "shorter place such as C:\\Games\\WindWakerHD and start it again." % (len(data_dir), data_limit))
 
 
 APP_NAME = "Wind Waker HD"
@@ -197,6 +205,8 @@ TITLE_IDS = {
 # canonical one, every other is translated through its own address map (tools/recomp/builds/*.json).
 sys.path.insert(0, os.path.join(PKG, "tools", "recomp"))
 import builds as game_builds  # noqa: E402
+import randomizer_compat  # noqa: E402
+RANDOMIZER_TITLE = randomizer_compat.TITLE_ID
 SUPPORTED_BUILDS = {b.title_id: b for b in game_builds.all_builds()}
 SUPPORTED_TITLE = game_builds.canonical_build().title_id
 # The translated code (tools/recomp, the hooks in tools/recomp/hooks*.txt, the runtime) is made for
@@ -897,7 +907,7 @@ def repair_guest_python(data_dir):
     config["python"] = [executable]
     with open(path + ".tmp", "w", encoding="utf-8") as f:
         json.dump(config, f)
-    os.replace(path + ".tmp", path)
+    atomic_replace(path + ".tmp", path)
     say("Local mod setup Python is ready (compression.zstd verified).")
 
 
@@ -1037,7 +1047,7 @@ def disc_info(image, keys):
 
 def check_title(title_id):
     """Raises SetupError unless this is a version of the game the port can be built from."""
-    if title_id in SUPPORTED_BUILDS:
+    if title_id in SUPPORTED_BUILDS or title_id == RANDOMIZER_TITLE:
         return
     region = TITLE_IDS.get(title_id)
     if region:
@@ -1049,6 +1059,8 @@ def check_title(title_id):
 def title_desc(tid, version=None):
     """'The Wind Waker HD (USA), version 0', 'the update for The Wind Waker HD (USA), version 16', ..."""
     tid = tid.lower()
+    if tid == RANDOMIZER_TITLE:
+        return "The Wind Waker HD Randomizer" + ("" if version is None else ", version %d" % version)
     region = TITLE_IDS.get("00050000" + tid[8:])
     name = "The Wind Waker HD (%s)" % region if region else "title %s-%s" % (tid[:8].upper(), tid[8:].upper())
     kind = tid[:8]
@@ -1072,7 +1084,7 @@ def archive_info(path, title=_ANY_SUPPORTED):
     if title is _ANY_SUPPORTED:
         # which build is in there (one pass that only lists), then ask for that one
         _, _, listed = _archive_info_one(path, None)
-        title = next((t["id"] for t in listed.get("titles", []) if t["id"] in SUPPORTED_BUILDS), SUPPORTED_TITLE)
+        title = next((t["id"] for t in listed.get("titles", []) if t["id"] in SUPPORTED_BUILDS or t["id"] == RANDOMIZER_TITLE), SUPPORTED_TITLE)
     return _archive_info_one(path, title)
 
 
@@ -1135,6 +1147,18 @@ def archive_choice(info):
     return info["selected"], notes
 
 
+def selected_game_folder(path):
+    """A complete extracted game selected by its root, code folder, or cking.rpx."""
+    path = os.path.abspath(path)
+    candidates = [path] if os.path.isdir(path) else []
+    if os.path.isdir(path):
+        candidates.append(os.path.dirname(path))
+    elif (os.path.isfile(path) and os.path.basename(path).lower() == "cking.rpx" and
+          os.path.basename(os.path.dirname(path)).lower() == "code"):
+        candidates.append(os.path.dirname(os.path.dirname(path)))
+    return next((p for p in candidates if valid_game_folder(p)), None)
+
+
 def game_folder_title(path):
     meta = os.path.join(path, "meta", "meta.xml")
     try:
@@ -1188,10 +1212,21 @@ def check_game_version(path):
         digest = file_sha256(rpx)
     except OSError as e:
         raise SetupError("cannot read %s: %s" % (rpx, e))
+    tid, ver = code_title_version(path)
+    folder_title = game_folder_title(path)
+    if tid == RANDOMIZER_TITLE or folder_title == RANDOMIZER_TITLE:
+        if ver != SUPPORTED_VERSION or tid != RANDOMIZER_TITLE or folder_title != RANDOMIZER_TITLE:
+            raise SetupError("The randomized game's code and metadata do not match. Select the complete output folder from the official randomizer.")
+        try:
+            build = randomizer_compat.identify(rpx, expected_sha256=digest)
+        except (ValueError, OSError, KeyError, struct.error) as error:
+            LOG.write("Randomizer compatibility: %s" % error)
+            raise SetupError("This randomized game is not compatible with this port version. Update the port or use a supported seed configuration. See the setup log for the clash details.") from error
+        LOG.write("Randomizer compatibility passed: %s" % json.dumps(build.randomizer_report, sort_keys=True))
+        return build
     build = game_builds.by_sha256(digest)
     if build:
         return build
-    tid, ver = code_title_version(path)
     updates = ["0005000e" + t[8:] for t in SUPPORTED_BUILDS]
     if tid and tid not in SUPPORTED_BUILDS and tid not in updates:
         found = "the game code (code/cking.rpx) is from %s (title %s-%s)" % (title_desc(tid, ver), tid[:8].upper(),
@@ -1586,19 +1621,56 @@ def decomp_hooks_file():
 def recompile(game_dir, gen_dir, hooks=False):
     shutil.rmtree(longpath(gen_dir), ignore_errors=True)
     rpx = os.path.join(game_dir, "code", "cking.rpx")
-    decomp = decomp_hooks_file()
+    randomized = game_folder_title(game_dir) == RANDOMIZER_TITLE or code_title_version(game_dir)[0] == RANDOMIZER_TITLE
+    build = check_game_version(game_dir) if randomized else None
+    decomp = None if randomized else decomp_hooks_file()
     if decomp:
         build = game_builds.identify(rpx)
         if build is not None and not build.canonical:
             raise SetupError("this is the decomp build of the port, which works with the USA game only (yours is the %s "
                              "build); use the regular release" % build.name)
     out = run_logged([sys.executable, os.path.join(PKG, "tools", "recomp", "recomp.py"), rpx, gen_dir] +
-                     (["--mod-hooks"] if hooks else []) + (["--decomp-hooks", decomp] if decomp else []),
+                     (["--mod-hooks"] if hooks else []) + (["--decomp-hooks", decomp] if decomp else []) +
+                     (["--randomizer", "--expected-rpx-sha256", build.sha256] if randomized else []),
                      env=dict(os.environ, WWHD_RECOMP_MOD_HOOKS="0"), what="translating the game code")
     n = len(glob.glob(os.path.join(glob.escape(gen_dir), "code_*.c")))
     if n == 0:
         raise SetupError("the recompiler wrote no code")
     return n
+
+
+def translated_randomizer_identity(gen_dir):
+    """Read the identity emitted beside the actual sources that will be linked.
+
+    The selected folder can change while setup runs; it is not authoritative
+    for install.json. Cross-check the compiler report against its build map.
+    """
+    report_path = os.path.join(gen_dir, "randomizer.json")
+    if not os.path.isfile(report_path):
+        table = os.path.join(gen_dir, "table.c")
+        if os.path.isfile(table):
+            with open(table, encoding="utf-8") as stream:
+                for line in stream:
+                    if re.fullmatch(r'const char g_guest_build_title_id\[\] = "'+RANDOMIZER_TITLE+r'";\s*', line):
+                        raise SetupError("The randomized translated build has no identity report; run setup again.")
+        return None
+    try:
+        with open(report_path, encoding="utf-8") as stream:
+            report = json.load(stream)
+        identity = report["rpx_sha256"]
+        if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity):
+            raise ValueError("invalid RPX identity")
+        fields = {}
+        with open(os.path.join(gen_dir, "table.c"), encoding="utf-8") as stream:
+            for line in stream:
+                match = re.fullmatch(r'const char g_guest_build_(title_id|rpx_sha256)\[\] = "([0-9a-f]+)";\s*', line)
+                if match:
+                    fields[match.group(1)] = match.group(2)
+        if fields != {"title_id": RANDOMIZER_TITLE, "rpx_sha256": identity}:
+            raise ValueError("compiler identity report and build map differ")
+        return report
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise SetupError("Cannot verify the translated randomizer identity: %s" % error) from error
 
 
 def default_jobs():
@@ -1637,13 +1709,39 @@ def fwd(p):
     return p.replace("\\", "/")
 
 
+# Debug information in the game code. Player installs compile it without (-g0): zig cc, the Linux toolchain,
+# writes DWARF unless told otherwise, which made the Linux game about 500 MB, and nobody debugs the generated
+# code on a player's computer. Function names stay (the symbol table), so crash reports still name functions.
+# Developers get it back with WWHD_SETUP_DEBUG_INFO=1 or setup's --debug-info.
+DEBUG_INFO_FLAG = re.compile(r"-g(|[0-3]|gdb[0-3]?|line-tables-only|line-directives-only|dwarf(-[0-9]+)?|codeview|full)$")
+
+
+def debug_info_wanted():
+    return os.environ.get("WWHD_SETUP_DEBUG_INFO", "") not in ("", "0")
+
+
+def debug_info_flags(flags, debug=None):
+    """`flags` (a compile command's options) with debug information off, or on for developers (`debug`,
+    default: debug_info_wanted())."""
+    if debug is None:
+        debug = debug_info_wanted()
+    if debug:
+        return list(flags) + ([] if any(DEBUG_INFO_FLAG.match(a) for a in flags) else ["-g"])
+    return [a for a in flags if not DEBUG_INFO_FLAG.match(a)] + ["-g0"]
+
+
+def gamecode_compile_flags(manifest):
+    """The options the game code is compiled with: the release's (manifest), debug information as above."""
+    return debug_info_flags(manifest["gamecode_cflags"])
+
+
 def compile_gamecode(tc, manifest, gen_dir, obj_dir, jobs, cancel=None, progress=None):
     os.makedirs(obj_dir, exist_ok=True)
     srcs = sorted(glob.glob(os.path.join(glob.escape(gen_dir), "code_*.c")))
     srcs += [os.path.join(gen_dir, f) for f in ("table.c", "imports.c")]
     srcs.sort(key=lambda s: -os.path.getsize(s))  # big files first: better use of the cores
     m = {"sdk": fwd(os.path.join(PKG, "sdk")), "gen": fwd(gen_dir)}
-    flags = [sub(a, m) for a in manifest["gamecode_cflags"]]
+    flags = [sub(a, m) for a in gamecode_compile_flags(manifest)]
     objs = []
     pr = Progress("compiling")
     total = len(srcs)
@@ -1768,7 +1866,7 @@ def link_game(tc, manifest, objs, work, out_exe, recipe=None, glue=()):
     for a in (recipe or manifest["link"]):
         args += [fwd(g) for g in glue] if a == "{decomp_glue}" else [sub(a, m)]
     if IS_LINUX:
-        args += ["-Wl,-rpath,$ORIGIN"]
+        args += ["-Wl,-rpath,$ORIGIN,--strip-debug"]
     elif IS_MAC:
         # the runtime libraries the release installs next to the game (manifest runtime_files: the Vulkan
         # loader and MoltenVK) are found there, never in Homebrew or elsewhere on the Mac
@@ -1822,6 +1920,7 @@ def mac_app(app_path, exe_src, data_dir, version, runtime_files=()):
   <key>CFBundleVersion</key><string>%s</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Only when you turn on a code mod's singing option: the sound is analysed for its pitch while you play and never stored or sent.</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.games</string>%s
 </dict></plist>
 """
@@ -1902,7 +2001,7 @@ def write_guest_build_config(data_dir, tc):
     path = os.path.join(data_dir, "guest-sdk.json")
     with open(path + ".tmp", "w", encoding="utf-8") as f:
         json.dump(config, f)
-    os.replace(path + ".tmp", path)
+    atomic_replace(path + ".tmp", path)
 
 
 def game_icon_png(data_dir):
@@ -1947,20 +2046,33 @@ def write_game_icon(data_dir, ico):
     return path
 
 
+def desktop_exec(path):
+    """path as a quoted argument of a .desktop file's Exec key: the quoting rule escapes " ` $ \\, then the
+    string rule escapes \\ again, and a literal % is %% (not a field code)."""
+    quoted = '"%s"' % re.sub(r'(["`$\\])', r"\\\1", path)
+    return quoted.replace("\\", "\\\\").replace("%", "%%")
+
+
+def desktop_string(value):
+    """value for a string key of a .desktop file (Path, Icon): a backslash is written \\\\."""
+    return value.replace("\\", "\\\\")
+
+
 def linux_launchers(data_dir, exe):
     play = os.path.join(data_dir, "play.sh")
     with open(play, "w") as f:
-        f.write('#!/bin/sh\n# written by the Wind Waker HD setup\ncd "%s" || exit 1\nexec "%s" --game game --save save "$@"\n'
-                % (data_dir, exe))
+        f.write('#!/bin/sh\n# written by the Wind Waker HD setup\ncd %s || exit 1\nexec %s --game game --save save "$@"\n'
+                % (shlex.quote(data_dir), shlex.quote(exe)))
     os.chmod(play, 0o755)
     apps = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "applications")
     os.makedirs(apps, exist_ok=True)
     with open(os.path.join(apps, "wwhd.desktop"), "w") as f:
         f.write("[Desktop Entry]\nType=Application\nName=%s\nComment=The Wind Waker HD, native PC port\n"
-                "Exec=\"%s\"\nPath=%s\nTerminal=false\nCategories=Game;\n" % (APP_NAME, play, data_dir))
+                "Exec=%s\nPath=%s\nTerminal=false\nCategories=Game;\n"
+                % (APP_NAME, desktop_exec(play), desktop_string(data_dir)))
         icon = write_game_icon(data_dir, ico=False)
         if icon:
-            f.write("Icon=%s\n" % icon)
+            f.write("Icon=%s\n" % desktop_string(icon))
     return play
 
 
@@ -1975,21 +2087,57 @@ def windows_shortcuts(data_dir, exe):
             LOG.write("shortcut not created (folder 0x%x): %s" % (csidl, e))
 
 
-def launch(state, data_dir, decomp=None):
-    """decomp: start the decomp version (docs/decomp-build.md); None: as chosen in setup (start_decomp)"""
+# Game options (issue #266): the launcher (Wind Waker HD.exe, Wind Waker HD.app, wind-waker-hd) and setup pass
+# them on to the game; setup's own argparse never sees them. The same rule is in tools/installer/gui/game_args.h.
+GAME_FLAGS = ("--editor", "--trace", "--warm-shaders")
+GAME_VALUE_OPTIONS = ("--renderer",)  # --renderer NAME or --renderer=NAME
+GAME_ARGS = []  # this run's game options (main)
+
+
+def split_game_args(argv):
+    """(setup's own arguments, the game options): GAME_FLAGS, GAME_VALUE_OPTIONS with their value and
+    everything after "--" go to the game, in their order"""
+    own, game = [], []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            game += argv[i + 1:]
+            break
+        if a in GAME_FLAGS or any(a.startswith(o + "=") for o in GAME_VALUE_OPTIONS):
+            game.append(a)
+        elif a in GAME_VALUE_OPTIONS and i + 1 < len(argv):
+            game += [a, argv[i + 1]]
+            i += 1
+        else:
+            own.append(a)
+        i += 1
+    return own, game
+
+
+def with_options(game_args):
+    return " with " + " ".join(game_args) if game_args else ""
+
+
+def launch(state, data_dir, decomp=None, game_args=None):
+    """decomp: start the decomp version (docs/decomp-build.md); None: as chosen in setup (start_decomp).
+    game_args: options for the game (None: this run's GAME_ARGS)"""
+    game_args = list(GAME_ARGS if game_args is None else game_args)
     say("")
     if decomp is None:
         decomp = bool(state.get("start_decomp"))
     exe = state["exe"]
     if decomp and state.get("decomp_exe") and os.path.isfile(state["decomp_exe"]):
         exe = state["decomp_exe"]
-        say("Starting the decomp version of the game...")
+        say("Starting the decomp version of the game%s..." % with_options(game_args))
     else:
-        say("Starting the game...")
+        say("Starting the game%s..." % with_options(game_args))
         if IS_MAC and state.get("app") and os.path.isdir(state["app"]):
-            subprocess.Popen(["open", state["app"]])
+            # the app's launcher passes its arguments on ("$@", mac_app)
+            subprocess.Popen(["open", state["app"]] + (["--args"] + game_args if game_args else []))
             return
     args = [exe, "--game", state.get("game_dir") or os.path.join(data_dir, "game"), "--save", os.path.join(data_dir, "save")]
+    args += game_args
     if IS_WIN:
         subprocess.Popen(args, cwd=data_dir, creationflags=0x00000008 | 0x00000200)  # DETACHED_PROCESS | NEW_GROUP
     else:
@@ -2020,9 +2168,9 @@ def create_shortcut():
         os.makedirs(apps, exist_ok=True)
         link = os.path.join(apps, "wwhd.desktop")
         with open(link, "w") as f:
-            f.write("[Desktop Entry]\nType=Application\nName=%s\nExec=\"%s\"\nPath=%s\nTerminal=false\nCategories=Game;\n"
+            f.write("[Desktop Entry]\nType=Application\nName=%s\nExec=%s\nPath=%s\nTerminal=false\nCategories=Game;\n"
                     "Actions=setup;\n\n[Desktop Action setup]\nName=Setup (repair, update, change game)\n"
-                    "Exec=\"%s\" --setup\n" % (APP_NAME, target, PKG, target))
+                    "Exec=%s --setup\n" % (APP_NAME, desktop_exec(target), desktop_string(PKG), desktop_exec(target)))
     else:
         link = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs", APP_NAME + ".lnk")
         try:
@@ -2051,7 +2199,14 @@ def remove_toolchain(data_dir):
 
 
 def save_user_dir(data_dir):
-    return os.path.join(data_dir, "save", "user")
+    root = os.path.join(data_dir, "save")
+    identity = read_state(data_dir).get("randomizer", {}).get("rpx_sha256", "")
+    if re.fullmatch(r"[0-9a-f]{64}", identity):
+        legacy = os.path.join(root, "randomizer-" + identity)
+        root += "-randomizer-" + identity
+        if os.path.exists(legacy):
+            raise SetupError("An older randomized save folder exists at %s. Move it to the separate sibling folder %s before continuing. Do not merge or overwrite an existing folder; both copies have been left unchanged." % (legacy, root))
+    return os.path.join(root, "user")
 
 
 def have_save(data_dir):
@@ -2355,6 +2510,29 @@ def decomp_wanted(ctx):
     return bool(ctx.state().get("decomp", False) if choice is None else choice)
 
 
+MODEL_SWEEP_TEXT = (
+    "Experimental: after the shaders, start the game hidden, draw every model, room and placed actor once and "
+    "visit every stage, so their pipelines are ready before they first appear (fewer hitches in play). About 20 "
+    "minutes on a Mac.")
+
+
+def model_sweep_wanted(ctx, ui=None):
+    """Setup's optional, experimental step "Preparing shaders: models (experimental)" (model_sweep.py), off by
+    default everywhere: WWHD_SETUP_MODEL_SWEEP=1/0 overrides; else --model-sweep / --no-model-sweep (or the setup
+    window's choice); else the question (interactive), defaulting to what the last setup did."""
+    env = os.environ.get("WWHD_SETUP_MODEL_SWEEP")
+    if env in ("0", "1"):
+        return env == "1"
+    choice = getattr(ctx.args, "model_sweep", None)
+    if choice is not None:
+        return bool(choice)
+    default = bool(ctx.state().get("model_sweep", False))
+    if ui and ui.interactive and not getattr(ctx.args, "skip_shader_prebuild", False):
+        say(MODEL_SWEEP_TEXT)
+        return ui.yesno("Also prepare model shaders (experimental)?", default)
+    return default
+
+
 CODE_MODS_TEXT = (
     "For mods in the catalogue or Mods tab marked as code mods. Built-in mods, graphics packs and "
     "content mods do not need this. The game code gets a small check in every function, which can "
@@ -2398,7 +2576,7 @@ def write_code_mods_setting(data_dir, hooks):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_bytes(payload)
-    os.replace(tmp, path)
+    atomic_replace(tmp, path)
 
 
 def shader_progress_callback(progress):
@@ -2448,7 +2626,13 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
     args, manifest, data_dir = ctx.args, ctx.manifest, ctx.data_dir
     args.code_mods = "1" if setup_code_mods(ctx, ui) else "0"
     kind = source[0]
+    want_models = kind != "gen" and model_sweep_wanted(ctx, ui)
     want_decomp = kind != "gen" and decomp_wanted(ctx)
+    if kind in ("folder", "installed") and game_folder_title(source[1]) == RANDOMIZER_TITLE:
+        want_decomp = False
+        problem = path_length_problem(data_dir, PKG, extra_path_chars=RANDOMIZER_PATH_EXTRA)
+        if problem:
+            raise SetupError(problem)
     old_state = ctx.state()
     steps = plan_steps(kind, want_decomp)
     total = len(steps)
@@ -2520,6 +2704,15 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
             game_dir = os.path.join(data_dir, "game")
             say("  Game files are in %s (%d s)" % (game_dir, time.time() - t0))
     ctx.game_dir = game_dir
+    source_build = check_game_version(game_dir) if kind != "gen" else None
+    if getattr(source_build, "randomizer", False) is True:
+        problem = path_length_problem(data_dir, PKG, extra_path_chars=RANDOMIZER_PATH_EXTRA)
+        if problem:
+            raise SetupError(problem)
+        if manifest.get("variant") == "decomp":
+            raise SetupError("Randomized games require the regular port release, not the decomp runtime.")
+        want_decomp = False
+        say("  Randomized game: compatibility check passed; building this seed's code.")
     keys = None
 
     work = os.path.join(data_dir, "work")
@@ -2536,6 +2729,13 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
         nfiles = recompile(ctx.game_dir, gen_dir, hooks=code_mods.hooks_option(getattr(args, "code_mods", None)))
         say("  %d source files (%d s)" % (nfiles, time.time() - t0))
 
+    compiled_randomizer = translated_randomizer_identity(gen_dir)
+    if getattr(source_build, "randomizer", False) is True and not compiled_randomizer:
+        raise SetupError("The translator did not record this randomized build identity; run setup again.")
+    if compiled_randomizer:
+        problem = path_length_problem(data_dir, PKG, extra_path_chars=RANDOMIZER_PATH_EXTRA)
+        if problem:
+            raise SetupError(problem)
     begin("compile")
     jobs = args.jobs or default_jobs()
     t0 = time.time()
@@ -2560,6 +2760,8 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
              "installed": time.strftime("%Y-%m-%d %H:%M:%S"), "toolchain": manifest["toolchain"],
              "placeholder_code": kind == "gen",
              "code_mods": code_mods.hooks_option(getattr(args, "code_mods", None))}
+    if compiled_randomizer:
+        state["randomizer"] = compiled_randomizer
     if manifest.get("variant"):
         state["variant"] = manifest["variant"]  # "decomp": the decomp build (docs/decomp-build.md)
     if os.environ.get("APPIMAGE"):
@@ -2621,9 +2823,12 @@ def install(ctx, source, keys=None, info=None, ui=None, check_keys=None):
             renderer="metal" if IS_MAC else "vulkan", progress=shader_progress_callback(shader_progress), log=LOG.write,
             # macOS: the player chooses Metal or Vulkan (MoltenVK) in Graphics > Renderer: prepare both
             renderers=["metal", "vulkan"] if IS_MAC else ["vulkan"],
+            # "Preparing shaders: models (experimental)" (model_sweep.py): opt-in, off by default everywhere
+            models=want_models,
             skip=bool(getattr(args, "skip_shader_prebuild", False)),
             cancel=lambda: bool(getattr(args, "shader_prebuild_cancel", None) and
                                 Path(args.shader_prebuild_cancel).exists()))
+        state["model_sweep"] = want_models  # remembered: a repair (Rebuild shader cache) offers it again
         prepared = state["shader_prebuild"]
         states = prepared.get("renderers") or {}
         ready = [name.capitalize() for name, value in sorted(states.items()) if value == "ready"]
@@ -2714,7 +2919,7 @@ def main():
     ap.add_argument("--archive", help="Cemu Wii U archive (.wua): no keys needed")
     ap.add_argument("--disc-key", help="disc key file or Cemu keys.txt (default: IMAGE.key)")
     ap.add_argument("--common-key", help="Wii U common key file or Cemu keys.txt (or WIIU_COMMON_KEY)")
-    ap.add_argument("--game-dir", help="an already extracted game folder (code/, content/, meta/) instead of an image")
+    ap.add_argument("--game-dir", help="an extracted game folder or randomized code/cking.rpx with its content/meta folders")
     ap.add_argument("--gen-dir", help="use this generated code instead of recompiling (build checks)")
     ap.add_argument("--data-dir", help="where the game is installed (default: %s)" % default_data_dir())
     ap.add_argument("--app-dir", help="macOS: where the app goes (default: ~/Applications)")
@@ -2732,6 +2937,11 @@ def main():
     ap.add_argument("--repair-guest-python", action="store_true", help="upgrade local mod setup Python without rebuilding game code")
     ap.add_argument("--shader-template", help="local shader template (or WWHD_SHADER_TEMPLATE); optional")
     ap.add_argument("--skip-shader-prebuild", action="store_true", help="skip optional shader preparation; compile during play")
+    ap.add_argument("--model-sweep", dest="model_sweep", action="store_const", const=True, default=None,
+                    help="experimental: also prepare the shaders of every model (Preparing shaders: models; about "
+                         "20 minutes on a Mac); remembered for repairs (WWHD_SETUP_MODEL_SWEEP=1/0 overrides)")
+    ap.add_argument("--no-model-sweep", dest="model_sweep", action="store_const", const=False,
+                    help="do not prepare model shaders (the default)")
     ap.add_argument("--shader-prebuild-cancel", help="skip shader preparation when this file exists")
     ap.add_argument("--repair", action="store_true", help="rebuild the game code from the installed game files")
     ap.add_argument("--jobs", type=int, help="parallel compiler processes")
@@ -2741,6 +2951,8 @@ def main():
     ap.add_argument("--shortcuts", action="store_true",
                     help="portable release: also add a shortcut (Applications / Start menu / applications menu)")
     ap.add_argument("--keep-work", action="store_true", help="keep the generated code and objects")
+    ap.add_argument("--debug-info", action="store_true",
+                    help="developers: compile the game code with debug information (also WWHD_SETUP_DEBUG_INFO=1)")
     ap.add_argument("--language-source", metavar="PATH",
                     help="experimental: take the language files (text, fonts, 2D layouts) of your European or "
                          "Japanese game (.wux/.wud, .wua or extracted folder) into the installation; the game is "
@@ -2750,11 +2962,14 @@ def main():
     ap.add_argument("--remove-language-source", metavar="EU|JP", help="remove a language source")
     ap.add_argument("--gui-protocol", action="store_true",
                     help="machine interface for the graphical installer (JSON lines; see tools/installer/README.md)")
-    args = ap.parse_args()
+    own, GAME_ARGS[:] = split_game_args(sys.argv[1:])
+    args = ap.parse_args(own)
     try:
         sys.stdout.reconfigure(errors="replace")
     except AttributeError:
         pass
+    if args.debug_info:
+        os.environ["WWHD_SETUP_DEBUG_INFO"] = "1"
     if args.gui_protocol:
         return gui_main(args)
     interactive = not (args.yes or os.environ.get("WWHD_SETUP_NONINTERACTIVE")) and sys.stdin.isatty()
@@ -2829,7 +3044,7 @@ def run(args, ui):
     elif args.image:
         source = ("image", os.path.abspath(args.image))
     elif args.game_dir:
-        source = ("folder", os.path.abspath(args.game_dir))
+        source = ("folder", selected_game_folder(args.game_dir) or os.path.abspath(args.game_dir))
     elif args.repair or decomp_change:
         if not valid_game_folder(game_dir):
             raise SetupError("no installed game files to repair from; run setup with your disc image")
@@ -2910,7 +3125,7 @@ def run(args, ui):
                                             "run setup again to restore it." % human(folder_size(tdir)), False):
             remove_toolchain(data_dir)
     say("")
-    say("Done. Saves are in %s" % os.path.join(data_dir, "save"))
+    say("Done. Saves are in %s" % os.path.dirname(save_user_dir(data_dir)))
     if source[0] == "gen":
         say("(built with placeholder code: this executable cannot run the game)")
         return 0
@@ -3071,6 +3286,8 @@ def gui_main(args):
                   "legacy": bool(legacy_save or legacy_items), "free_bytes": free_space(ctx.data_dir),
                   "language_sources": sources_reply(),
                   "code_mods": setup_code_mods(ctx),
+                  # "Preparing shaders: models (experimental)": opt-in, off by default
+                  "model_sweep": model_sweep_wanted(ctx), "model_sweep_text": MODEL_SWEEP_TEXT,
                   # the decomp version (decomp_setup.py): offered on macOS in development builds only
                   "decomp_offered": decomp_offered(ctx.manifest), "decomp": decomp_wanted(ctx),
                   "decomp_text": decomp_setup.DECOMP_TEXT, "decomp_docs": decomp_setup.DOCS_URL,
@@ -3085,21 +3302,26 @@ def gui_main(args):
 
     def probe(req):
         p = req.get("path") or ""
-        if os.path.isdir(p):
-            folder = p if valid_game_folder(p) else (os.path.dirname(p) if valid_game_folder(os.path.dirname(p)) else None)
+        if os.path.isdir(p) or os.path.basename(p).lower() == "cking.rpx":
+            folder = selected_game_folder(p)
             if not folder:
                 return fail(req, "invalid", "This folder does not contain an extracted game (code, content and meta).")
             tid = game_folder_title(folder)
-            if tid and tid not in SUPPORTED_BUILDS:
+            if tid and tid not in SUPPORTED_BUILDS and tid != RANDOMIZER_TITLE:
                 try:
                     check_title(tid)
                 except SetupError as e:
                     return fail(req, "wrong_title", str(e))
             try:
-                check_game_version(folder)
+                checked_build = check_game_version(folder)
+                if getattr(checked_build, "randomizer", False) is True:
+                    problem = path_length_problem(ctx.data_dir, PKG, extra_path_chars=RANDOMIZER_PATH_EXTRA)
+                    if problem:
+                        return fail(req, "path_length", problem)
             except SetupError as e:
                 return fail(req, "wrong_version", str(e)[0].upper() + str(e)[1:])
             return reply(req, kind="folder", path=folder, title=title_desc(tid) if tid else "The Wind Waker HD",
+                         randomizer=getattr(checked_build, "randomizer", False) is True,
                          in_place=PORTABLE, bytes=folder_size(folder))
         if not os.path.isfile(p):
             return fail(req, "invalid", "File not found.")
@@ -3115,6 +3337,7 @@ def gui_main(args):
                    "this folder (about %s)." % (title_desc(info["title_id"], int(info["version"])), folder,
                                                 human(int(info.get("bytes", 0)))))
             return reply(req, kind="archive", path=p, title=title_desc(info["title_id"], int(info["version"])),
+                         randomizer=info["title_id"] == RANDOMIZER_TITLE,
                          folder=folder, bytes=int(info.get("bytes", 0)), message=" ".join([msg] + notes))
         if not p.lower().endswith((".wux", ".wud")):
             return fail(req, "invalid", "Choose a .wux or .wud disc image, a .wua Cemu archive, or an extracted game "
@@ -3183,6 +3406,10 @@ def gui_main(args):
             ctx.args.decomp = req["decomp"]
         if "skip_shader_prebuild" in req:
             ctx.args.skip_shader_prebuild = bool(req["skip_shader_prebuild"])
+        if "model_sweep" in req:
+            if not isinstance(req["model_sweep"], bool):
+                return fail(req, "bad_request", "model_sweep must be a boolean")
+            ctx.args.model_sweep = req["model_sweep"]
         if req.get("shader_prebuild_cancel"):
             # GUI marker is confined to this installation, not an arbitrary path.
             ctx.args.shader_prebuild_cancel = str(Path(ctx.data_dir) / "shader-prebuild-cancel")

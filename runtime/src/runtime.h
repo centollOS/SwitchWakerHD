@@ -9,6 +9,7 @@
 
 #include "ppc.h"
 #include "exception_report.h"
+#include "main_profile.h"
 
 // ---- guest memory layout ----
 namespace mem {
@@ -32,7 +33,7 @@ void init();
 uint32_t runtime_alloc(uint32_t size, uint32_t align = 16);
 uint32_t host_alloc(uint32_t size, uint32_t align = 16);
 // fixed 0x100-byte guest buffer number `id` (lazily used features: same address in every session)
-enum FixedSlot : uint32_t { kFixInterpEye = 0, kFixInterpMtx, kFixFxMidPos, kFixLinkScratch, kFixCount };
+enum FixedSlot : uint32_t { kFixInterpEye = 0, kFixInterpMtx, kFixFxMidPos, kFixLinkScratch, kFixShadowCam, kFixCount };
 inline uint32_t fixed_slot(FixedSlot id) { return kFixedStart + 0x100 * id; }
 uint32_t runtime_top();
 void raise_runtime_top(uint32_t top);
@@ -89,6 +90,9 @@ bool main_sampler();
 void set_sched_stats(bool on);
 bool sched_stats();
 void dump_state();    // log every guest thread's state and guest call stack, and each core's owner (watchdog)
+// for a hang (gx2 watchdog): every guest thread's state, wait object, lr and guest call chain, and each
+// core's owner and waiters. Locks are only tried, so the values may be slightly inconsistent.
+void dump_state();
 }  // namespace threads
 struct BlockingScope {
     BlockingScope() { threads::block_begin(); }
@@ -176,20 +180,31 @@ struct HleMark {
 struct GuestExit { uint32_t value; };
 // (this fork) on the Switch an HLE call runs its body directly, as before the upstream sync: the
 // console's crash report is its own, and the guarded entry (a lambda in a try block) cost ~0.25 ms
-// of the main thread a frame in the lava room (thousands of GX2 calls; docs/perf-test.md)
+// of the main thread a frame in the lava room (thousands of GX2 calls; docs/perf-test.md). Its
+// runtime-call marker is the fork's HleMark (the Dev tab's main-thread sampler), not mainprof::Mark.
 #ifdef __SWITCH__
 #define HLE_BODY_CALL(lib, name, c) hle_impl_##lib##_##name(c)
+#define HLE_CALL_MARK(c, name) HleMark hle_mark_(c, #name);
 #else
 #define HLE_BODY_CALL(lib, name, c)                                           \
         exception_report::boundary<GuestExit>("HLE " #lib "." #name, [&] {      \
             hle_impl_##lib##_##name(c);                                       \
         })
+#define HLE_CALL_MARK(c, name) mainprof::Mark main_mark_(c, #name);
+#endif
+#ifdef WWHD_WRITE_WATCH  // diagnostic build: a raw write made by an import is named by that import (guest_write_watch.cpp)
+void wwhd_ww_after_import(const char* name, uint32_t lr, uint32_t ret, uint32_t a0, uint32_t a1);
+struct WwImportScan { const char* n; uint32_t lr; Cpu* c; uint32_t a0, a1; ~WwImportScan() { wwhd_ww_after_import(n, lr, c->r[3], a0, a1); } };
+#define WWHD_WW_IMPORT_SCAN(name) WwImportScan ww_scan_{#name, c->lr, c, c->r[3], c->r[4]};
+#else
+#define WWHD_WW_IMPORT_SCAN(name)
 #endif
 #define HLE(lib, name)                                                        \
     static void hle_impl_##lib##_##name(Cpu* c);                               \
     extern "C" void imp_##lib##_##name(Cpu* c) {                               \
-        HleMark hle_mark_(c, #name);                                           \
-        HLE_BODY_CALL(lib, name, c);                                           \
+        WWHD_WW_IMPORT_SCAN(name)                                             \
+        HLE_CALL_MARK(c, name)                                                \
+        HLE_BODY_CALL(lib, name, c);                                          \
     }                                                                        \
     static HleReg hle_reg_##lib##_##name(#lib, #name, imp_##lib##_##name);       \
     static void hle_impl_##lib##_##name(Cpu* c)

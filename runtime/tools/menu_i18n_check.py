@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """(this fork) The settings menu's translation table (runtime/src/menu_i18n*.{cpp,inc}) against the sources.
 
-Every tr("...") literal in runtime/src must have a row (its label: the text before "##") with a Spanish and a
-Portuguese text; each translation keeps the English text's printf conversions in the same order; no English text has
+Every tr("...") literal in runtime/src must have a row (its label: the text before "##") with a Spanish, Portuguese,
+Italian, German and French text; each translation keeps the English text's printf conversions in the same order; no English text has
 two rows. Exits 1 with the problems listed.
 """
 import os
@@ -11,6 +11,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC = os.path.join(ROOT, "runtime", "src")
+LANGUAGES = ("Spanish", "Portuguese", "Italian", "German", "French")  # the columns after English
 ESCAPES = {"n": "\n", "t": "\t", "\\": "\\", '"': '"', "'": "'", "0": "\0", "r": "\r", "a": "\a"}
 
 
@@ -75,7 +76,7 @@ def table_rows():
         text = open(os.path.join(SRC, name), encoding="utf-8").read()
         for m in re.finditer(r"^\{", text, re.M):
             cols, j = [], m.end()
-            for _ in range(3):
+            for _ in range(len(LANGUAGES) + 1):
                 v, j = literals(text, j)
                 if v is None:
                     break
@@ -92,6 +93,8 @@ def tr_uses():
         for fn in fns:
             if not fn.endswith((".cpp", ".h", ".mm")) or fn.startswith("menu_i18n"):
                 continue
+            if fn.startswith("game_settings_"):  # upstream's own tr() (game_settings_text.h: the in-game settings page)
+                continue
             path = os.path.join(dp, fn)
             text = open(path, encoding="utf-8", errors="replace").read()
             for m in re.finditer(r"\btr\(\s*", text):
@@ -107,16 +110,16 @@ def main():
     seen = {}
     for name, line, cols in rows:
         where = "%s:%d" % (name, line)
-        if len(cols) != 3:
-            problems.append("%s: a row needs 3 texts (English, Spanish, Portuguese)" % where)
+        if len(cols) != len(LANGUAGES) + 1:
+            problems.append("%s: a row needs %d texts (English, %s)" % (where, len(LANGUAGES) + 1, ", ".join(LANGUAGES)))
             continue
-        en, es, pt = cols
+        en = cols[0]
         if en in seen:
             problems.append("%s: %r has another row at %s" % (where, en, seen[en]))
         seen[en] = where
         if "##" in en:
             problems.append("%s: %r: the row's English text is the label only (no ##id)" % (where, en))
-        for lang, t in (("Spanish", es), ("Portuguese", pt)):
+        for lang, t in zip(LANGUAGES, cols[1:]):
             if not t:
                 problems.append("%s: %r has no %s text" % (where, en, lang))
             elif conversions(t) != conversions(en):

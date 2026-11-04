@@ -320,6 +320,9 @@ void main_switch::start() {
         svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
         LOG("[boot] process core mask 0x%llx", (unsigned long long)mask);
     }
+#ifdef WWHD_PGO_PROFILE  // (this fork) built with a release's PGO profile (cmake/SwitchPgo.cmake, docs/pgo-release-plan.md)
+    LOG("[boot] pgo: profile %s", WWHD_PGO_PROFILE);
+#endif
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
     update_notice::start();  // asks GitHub for a newer release in the background (platform/update_notice_switch.h)
     saltynx::start();  // the frame rate for the console's overlays, when SaltyNX runs (platform/saltynx_switch.h)

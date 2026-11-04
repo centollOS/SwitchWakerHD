@@ -22,9 +22,65 @@ set(WWHD_PGO_SCOPE "game;runtime" CACHE STRING "what the profile covers: game (c
 # extra flags for the USE build only, to try variants without editing this file (e.g. -fno-tracer -fno-peel-loops)
 set(WWHD_PGO_USE_FLAGS "" CACHE STRING "WWHD_PGO=USE: extra compiler flags for the profiled files")
 
+# the generated hot files' fingerprint: one SHA-256 over each file's name and SHA-256 (a profile made from other generated
+# code, another region or code mods, fits only the functions that did not change)
+function(_switch_pgo_hot_sha256 out)
+  file(GLOB _hot ${GEN_DIR}/code_hot_*.c)
+  list(SORT _hot)
+  set(_text "")
+  foreach(_f ${_hot})
+    file(SHA256 "${_f}" _h)
+    get_filename_component(_n "${_f}" NAME)
+    string(APPEND _text "${_n} ${_h}\n")
+  endforeach()
+  string(SHA256 _all "${_text}")
+  set(${out} "${_all}" PARENT_SCOPE)
+endfunction()
+
+# WWHD_PGO=USE with a release's profile (tools/switch/pgo_pack.py unpack: manifest.json next to the .gcda files,
+# docs/pgo-release-plan.md): the compiler must be the profile's, else this is a normal build. Sets _pgo_mode.
+function(_switch_pgo_check_manifest)
+  set(_m "${WWHD_PGO_DIR}/manifest.json")
+  if(NOT EXISTS "${_m}")
+    return()  # a maintainer's own profile (pgo_train.py fetch): used as it is
+  endif()
+  file(READ "${_m}" _json)
+  string(JSON _compiler ERROR_VARIABLE _e GET "${_json}" compiler)
+  string(JSON _region ERROR_VARIABLE _e2 GET "${_json}" region)
+  string(JSON _commit ERROR_VARIABLE _e3 GET "${_json}" commit)
+  string(JSON _hot ERROR_VARIABLE _e4 GET "${_json}" hot_sha256)
+  string(JSON _scope ERROR_VARIABLE _e5 GET "${_json}" scope)
+  set(_here "${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
+  if(_e OR NOT _compiler STREQUAL _here)
+    message(WARNING "WWHD_PGO=USE: the profile (${_m}) was made with ${_compiler}, this build has ${_here}: a normal build")
+    set(_pgo_mode OFF PARENT_SCOPE)
+    return()
+  endif()
+  if(NOT _e5)
+    set(WWHD_PGO_SCOPE "${_scope}" PARENT_SCOPE)  # the files the profile covers
+  endif()
+  _switch_pgo_hot_sha256(_here_hot)
+  if(_e4 OR NOT _hot STREQUAL _here_hot)
+    message(STATUS "WWHD_PGO=USE: the generated code differs from the profile's (code mods, or another recompile): the "
+                   "functions that changed are compiled without it")
+  endif()
+  set(_pgo_profile "${_region} ${_commit}" PARENT_SCOPE)
+endfunction()
+
 macro(switch_pgo_configure)
-  if(WWHD_SWITCH AND NOT WWHD_PGO STREQUAL "OFF")
-    if(NOT WWHD_PGO STREQUAL "GEN" AND NOT WWHD_PGO STREQUAL "USE")
+  set(_pgo_mode "${WWHD_PGO}")
+  set(_pgo_profile "")
+  if(WWHD_SWITCH AND _pgo_mode STREQUAL "USE")
+    if(NOT IS_ABSOLUTE "${WWHD_PGO_DIR}")  # make_sd.py's build/pgo-release, relative to the checkout
+      set(WWHD_PGO_DIR "${CMAKE_SOURCE_DIR}/${WWHD_PGO_DIR}")
+    endif()
+    if(NOT IS_DIRECTORY "${WWHD_PGO_DIR}")
+      message(FATAL_ERROR "WWHD_PGO=USE: ${WWHD_PGO_DIR} is not a folder (fetch the profile: tools/switch/pgo_train.py)")
+    endif()
+    _switch_pgo_check_manifest()
+  endif()
+  if(WWHD_SWITCH AND NOT _pgo_mode STREQUAL "OFF")
+    if(NOT _pgo_mode STREQUAL "GEN" AND NOT _pgo_mode STREQUAL "USE")
       message(FATAL_ERROR "WWHD_PGO must be OFF, GEN or USE")
     endif()
     set(_pgo_files)
@@ -44,7 +100,12 @@ macro(switch_pgo_configure)
     # the object paths (and so the .gcda names) are relative to the build folder: a profile made in one build
     # folder is found by another
     set(_pgo_common -fprofile-prefix-path=${CMAKE_BINARY_DIR})
-    if(WWHD_PGO STREQUAL "GEN")
+    if(_pgo_mode STREQUAL "GEN")
+      # what tools/switch/pgo_pack.py puts in a release profile's manifest: the compiler, the scope, the generated code
+      _switch_pgo_hot_sha256(_pgo_hot_sha)
+      file(WRITE "${CMAKE_BINARY_DIR}/pgo-build.json"
+           "{\n  \"compiler\": \"${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}\",\n  \"scope\": \"${WWHD_PGO_SCOPE}\",\n"
+           "  \"hot_sha256\": \"${_pgo_hot_sha}\"\n}\n")
       # not atomic: three cores increment the same counters, a few lost increments do not change a layout
       # -fno-profile-values: no value profiling (indirect-call targets, divisors). Its counters are thread-local, and the
       # runtime's first code (libnx's init hooks, the heap) runs before the console has set up thread-local storage;
@@ -54,8 +115,9 @@ macro(switch_pgo_configure)
       target_sources(wwhd PRIVATE runtime/src/platform/pgo_switch.cpp)
       target_link_options(wwhd PRIVATE -fprofile-generate)
     else()
-      if(NOT IS_DIRECTORY "${WWHD_PGO_DIR}")
-        message(FATAL_ERROR "WWHD_PGO=USE: ${WWHD_PGO_DIR} is not a folder (fetch the profile: tools/switch/pgo_train.py)")
+      if(_pgo_profile)
+        # the boot log names the release profile the build was made with (main_switch.cpp)
+        target_compile_definitions(wwhd PRIVATE "WWHD_PGO_PROFILE=\"${_pgo_profile}\"")
       endif()
       # -fno-reorder-functions / -fno-profile-reorder-functions: the profile would rename the functions' sections
       # (.text.hot.*, .text.sorted.*) and tools/switch/hot_sections.ld, which lists .text.<function>, would no
@@ -73,11 +135,76 @@ macro(switch_pgo_configure)
       set_property(SOURCE ${_f} APPEND_STRING PROPERTY COMPILE_FLAGS " ${_pgo_flags_text}")
       # the instrumented allocator wrappers leave a relocation against posix_memalign in .debug_info, which --wrap does
       # not redirect (undefined reference at the link): no debug information for that one file in a training build
-      if(WWHD_PGO STREQUAL "GEN" AND _f MATCHES "thread_heap_switch\\.cpp$")
+      if(_pgo_mode STREQUAL "GEN" AND _f MATCHES "thread_heap_switch\\.cpp$")
         set_property(SOURCE ${_f} APPEND_STRING PROPERTY COMPILE_FLAGS " -g0")
       endif()
     endforeach()
+    # the profiled files are compiled with the checkout's paths relative to the build folder (cmake/pgo_compile.cmake), so
+    # that a profile made in one checkout fits another (docs/pgo-release-plan.md step 1). The release's profile is made in
+    # a folder of build/, as the installers' build (build/switch-dk): "../.." on both sides
+    file(RELATIVE_PATH _pgo_rel "${CMAKE_BINARY_DIR}" "${CMAKE_SOURCE_DIR}")
+    string(REGEX REPLACE "/$" "" _pgo_rel "${_pgo_rel}")
+    if(NOT _pgo_rel STREQUAL "../..")
+      message(WARNING "WWHD_PGO: the build folder is not a folder of build/ (the checkout is ${_pgo_rel} from it): a profile "
+                      "made in this folder fits only builds in folders as deep")
+    endif()
+    # The toolchain's headers too: the C++ library's templates are more than half the profiled functions, and the pinned
+    # toolchain is in the checkout under a folder named after its host's files (build/toolchain/<id>, another on every
+    # host system). They are copied into the build folder under their path in devkitPro (pgo-sysinc/devkitA64/...), and
+    # the profiled files are compiled with -nostdinc and those copies (cmake/pgo_compile.cmake).
+    get_filename_component(_pgo_dkp "${CMAKE_C_COMPILER}" DIRECTORY)  # <devkitPro>/devkitA64/bin
+    get_filename_component(_pgo_dkp_alias "${_pgo_dkp}/../.." ABSOLUTE)  # as the commands name it
+    get_filename_component(_pgo_dkp "${_pgo_dkp}/../.." REALPATH)  # (real paths: build/toolchain may be a link)
+    set(_pgo_sysinc "${CMAKE_BINARY_DIR}/pgo-sysinc")
+    set(_pgo_roots)
+    foreach(_d ${CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES} ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES}
+               "${_pgo_dkp}/libnx/include" "${_pgo_dkp}/portlibs/switch/include")
+      get_filename_component(_d "${_d}" REALPATH)
+      if(IS_DIRECTORY "${_d}")
+        list(APPEND _pgo_roots "${_d}")
+      endif()
+    endforeach()
+    list(REMOVE_DUPLICATES _pgo_roots)
+    set(_pgo_copied)
+    foreach(_d ${_pgo_roots})
+      file(RELATIVE_PATH _r "${_pgo_dkp}" "${_d}")
+      if(_r MATCHES "^\\.\\.")
+        message(FATAL_ERROR "WWHD_PGO: the include folder ${_d} is not in devkitPro (${_pgo_dkp})")
+      endif()
+      set(_inside FALSE)  # a folder inside another one copied (the C++ headers inside aarch64-none-elf/include)
+      foreach(_o ${_pgo_roots})
+        file(RELATIVE_PATH _ro "${_o}" "${_d}")
+        if(NOT _o STREQUAL _d AND NOT _ro MATCHES "^\\.\\.")
+          set(_inside TRUE)
+        endif()
+      endforeach()
+      if(NOT _inside)
+        file(COPY "${_d}/" DESTINATION "${_pgo_sysinc}/${_r}")
+      endif()
+      list(APPEND _pgo_copied "${_r}")
+    endforeach()
+    set(_pgo_c_implicit)
+    foreach(_d ${CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES})
+      get_filename_component(_d "${_d}" REALPATH)
+      file(RELATIVE_PATH _r "${_pgo_dkp}" "${_d}")
+      list(APPEND _pgo_c_implicit "${_r}")
+    endforeach()
+    set(_pgo_cxx_implicit)
+    foreach(_d ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
+      get_filename_component(_d "${_d}" REALPATH)
+      file(RELATIVE_PATH _r "${_pgo_dkp}" "${_d}")
+      list(APPEND _pgo_cxx_implicit "${_r}")
+    endforeach()
+    file(WRITE "${CMAKE_BINARY_DIR}/pgo-sysinc.cmake"
+         "set(WWHD_PGO_DKP \"${_pgo_dkp}\")\nset(WWHD_PGO_DKP_ALIAS \"${_pgo_dkp_alias}\")\nset(WWHD_PGO_COPIED \"${_pgo_copied}\")\n"
+         "set(WWHD_PGO_C_IMPLICIT \"${_pgo_c_implicit}\")\nset(WWHD_PGO_CXX_IMPLICIT \"${_pgo_cxx_implicit}\")\n")
+    set(_pgo_launcher "${CMAKE_COMMAND}" "-DWWHD_PGO_ROOT=${CMAKE_SOURCE_DIR}" "-DWWHD_PGO_REL=${_pgo_rel}"
+                      "-DWWHD_PGO_BUILD=${CMAKE_BINARY_DIR}" "-DWWHD_PGO_SYSINC=${CMAKE_BINARY_DIR}/pgo-sysinc.cmake"
+                      -P "${CMAKE_SOURCE_DIR}/cmake/pgo_compile.cmake" --)
+    foreach(_t wwhd gamecode)
+      set_target_properties(${_t} PROPERTIES C_COMPILER_LAUNCHER "${_pgo_launcher}" CXX_COMPILER_LAUNCHER "${_pgo_launcher}")
+    endforeach()
     list(LENGTH _pgo_files _pgo_n)
-    message(STATUS "WWHD_PGO=${WWHD_PGO}: ${_pgo_n} files (${WWHD_PGO_SCOPE})")
+    message(STATUS "WWHD_PGO=${_pgo_mode}: ${_pgo_n} files (${WWHD_PGO_SCOPE}), compiled with paths from ${_pgo_rel}")
   endif()
 endmacro()

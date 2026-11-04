@@ -122,6 +122,8 @@ of the Great Sea: `{"stage": "sea", "room": 44}` is Outset Island's). The stage 
 that place does: bright at noon, golden in the evening, dark at night. The template still gives the sky's models,
 the camera and the doors.
 
+A stage in the open reached from the sea (a hall under an island, a mountain top) can take `"light": {"stage":
+"sea", "room": 44}`, so it has the same light as the sea round Outset that Link came from.
 
 ### Rooms
 
@@ -148,7 +150,7 @@ A place `to` is:
 - a spawn of the same stage: `{"room": 1, "point": 3}` (no `stage`);
 - a spawn of another of the package's stages: `{"stage": "stage:<id>", "room": 0, "point": 0}`.
 
-A kit room used as it is (`"ground": "kit"`) keeps its floors, walls and its surfaces (lava hurts, water
+A kit room used as it is (`"ground": "kit"`) keeps its floors, walls and its surfaces (lava burns, water
 is swimmable); its own ways out of its stage are removed, and the room's `exits` boxes work on its floor as
 on a model's. Its actors are not taken over: place the ones you want with `actors`. A kit room of another
 stage than the template is lit by the template's first room's light.
@@ -189,6 +191,8 @@ A room's `actors` are the game's own actors, created by the game when the room l
 | `darknut` | `variant` `darknut` (default), `shield`, `helmet` or `mighty`. |
 | `pot`, `big_pot` | A pot Link can lift and throw. |
 | `tree` | The game's own trees, with their own collision, sway and cutting: `variant` `small` (default; one small tree), `small_3` or `small_5` (a group), `bushy`, `large` (the big leafy tree; `"scale"` 0.5 to 1.5 sizes it) or `palm`. |
+| `lava` | The game's lava: its glowing, moving surface, drawn at the actor's height over an area `size` (`{"x": ..., "z": ...}`, game units, 100 to 25500 each, centred on its position, turned by `angle`). It is only the picture: give the room's model a `col_lava` surface at the same height (see [Lava](#lava)). |
+| `heat_shimmer` | The heat haze over the game's lava (Dragon Roost's): the picture shimmers while Link is in the room. One per room is enough. |
 
 A heart container from a mod's chest raises Link's maximum hearts in the player's real save file, as the
 game's own do, and turning the mod off does not take it back. Give one deliberately: one per boss room at
@@ -229,6 +233,18 @@ a spot Link can walk or swim into: off an island's shore, at the foot of a water
  "position": {"x": -194845, "y": 0, "z": 315400}, "size": {"x": 400, "y": 800, "z": 400}, "to": {"room": 0, "point": 0}}
 ```
 
+`"style": "hole"` makes the entry a hole Link falls into, as into the game's holes into caves: its box is the
+shaft under an opening in the ground (an opening in a world object's model and its collision, say), below the
+ground Link walks on, so only a fall reaches it. The screen fades as he falls, and he arrives at a spawn with
+`"start": "fall"`, dropping in from above (Check refuses a hole that leads to another spawn). Leave the shaft open
+at the bottom: a fall that doesn't take the hole (the game busy with a scene) goes on through the dark and out
+of the shaft rather than leaving Link stuck in it.
+
+```json
+{"id": "hole", "stage": "sea", "room": 44, "style": "hole", "position": {"x": -200300, "y": 6750, "z": 301900},
+ "size": {"x": 150, "y": 220, "z": 150}, "to": {"room": 0, "point": 0}}
+```
+
 ### Getting there by a scene
 
 A talk's or a scene's `then` can take Link into one of the package's own stages:
@@ -262,6 +278,10 @@ A boss room is a room behind the boss door, with something to beat, a reward and
 3. **The reward**: a chest with `heart_container` (see the note under [Actors](#actors)).
 4. **The way out**: a return warp with `"after"` naming that chest, so it opens once the reward is taken.
 
+Rooms can take materials from different kit rooms: a hall drawn with Hyrule Castle's stone and an open-air
+arena with the Tower of the Gods' paving, say. Two rooms drawn as one place (a ground and the ruins on it, each
+with its own kit) can be joined with `joins`, so both are drawn together; one of them can leave the collision
+to the other (a small floor far below) so Link never leaves the first room there.
 
 ### A quest through the stage
 
@@ -297,6 +317,12 @@ the package's stages and its wordless scenes play just the same, its quest and l
 story actions are skipped (a line in the game's log says so); `stage` and `scene` actions still run. Only
 the Story Notebook can be an optional dependency.
 
+A package whose scene or quest uses world objects or story actions needs the Story Notebook (a plain
+dependency, `set_package_info` `"value": "required"`). A quest through a stage might go: a letter sends Link
+to a pier, a scene or a hole takes him into the stage, the boss key's chest moves the quest to the guardian,
+the darknut's defeat to the heart container, the big chest to the way home, and the return warp finishes it
+with its reward, given once.
+
 ## The ground model
 
 A room's ground model is one `.glb` file (glTF 2.0, up to 16 MiB). As for [world objects](world-objects.md),
@@ -309,7 +335,7 @@ want it around the origin, and make the spawns, exits and doors fit it.
 - **Collision**: meshes or nodes whose name ends in `_col` are the room's collision and are not drawn. Their
   material names choose the surface, as for world objects: `col_stone`, `col_grass`, `col_wood`, `col_sand`,
   `col_metal`, `col_wall`, `col_objects`, `col_climb`, `col_hookshot`, `col_water` (swimmable), `col_shallow`,
-  `col_waterfall`, `col_ice`, `col_void`. Without a `_col` mesh, the visible triangles are the collision, on
+  `col_waterfall`, `col_ice`, `col_void`, `col_lava` (see [Lava](#lava)). Without a `_col` mesh, the visible triangles are the collision, on
   stone (or on the surface a `col_` material name gives). Up to 20000 collision triangles per room.
 - Faces are seen from the side their normal points to; for a room seen from inside, the walls and ceiling
   face inwards.
@@ -318,6 +344,40 @@ want it around the origin, and make the spawns, exits and doors fit it.
   the same.
 - **Unwrap every visible mesh** (UVs; in Blender **UV → Smart UV Project** or **Cube Projection**). A surface
   without texture coordinates shows a single colour of its texture. The editor's `check_stage` reports both.
+
+### Lava
+
+A `col_lava` surface in the room's collision is lava, as in the game's lava rooms: Link burns, jumps out, loses
+half a heart and starts again where he came into the room; a bomb that falls in explodes, a pot breaks, other
+things are gone. Model it as upward-facing faces at the lava's level, lower than the floor around it, so that
+Link walks off the edge into it. The surface is no ground: the lava gets a bottom 1 metre (100 units) below it,
+where things sink to. Keep that space free, and count lava's triangles twice towards the room's 20000.
+
+The game draws its lava with an actor of its own, not with the room's model. Place a `lava` actor at the
+surface's height, as large as the pool (it may be larger: the room's floors and walls hide what reaches under
+them), and add `heat_shimmer` for the heat haze:
+
+```json
+"actors": [
+  {"id": "lava", "actor": "lava", "position": {"x": 0, "y": -50, "z": 400}, "size": {"x": 2000, "z": 1200}},
+  {"id": "heat", "actor": "heat_shimmer", "position": {"x": 0, "y": 0, "z": 0}}
+]
+```
+
+The room's lava faces can also be drawn with a lava material of a kit room (under the `lava` actor's surface, or
+on their own for an even glow). These are the kit materials of the game's lava (the material name, and kit rooms
+that have it):
+
+| Material | Kit rooms | |
+|---|---|---|
+| `E3mYOGAN_v` | `Cave01` rooms 0 and 1 (the lava cave) | the lava cave's lava: an even orange glow |
+| `R00_1015_3_lambert6_v` | `MiniKaz` room 0 (inside Fire Mountain) | Fire Mountain's lava: an even orange glow |
+| `E3mYOGAN_v` | `M_NewD2` rooms 2, 7, 8, 10, 11, 12, 13 and 15 (Dragon Roost Cavern), `Adanmae` room 0 (Dragon Roost's mountain path) | the moving glow along the lava's rocks: the game lights it by where it stands, so on a model of your own it glows only in parts |
+
+Map them with `materials`, for example `"materials": {"col_lava": "E3mYOGAN_v"}` for faces whose material is
+`col_lava` (they are then drawn and are the lava's collision). A kit room used as it is (`"ground": "kit"`) keeps
+its own lava; place `lava` and `heat_shimmer` actors in it as you would in a room of your own (its own are not
+taken over).
 
 ### Kit materials
 
@@ -344,7 +404,8 @@ A kit material keeps the game's drawing of it: an opaque one stays opaque, a cut
 one stays see-through (`list_kit_materials` does not show which is which; the export tool's GLB marks it in each
 material's `alphaMode`). The game's falling water (Forest Haven's, the castle's, the sea's islands') is a cut-out,
 drawn white with moving streaks; for water that shows the sky through it, use a blended water material of the kit,
-such as Forest Haven's spray (`SC_00_m_2_`) or coast foam (`SC_00_m`).
+such as Forest Haven's spray (`SC_00_m_2_`) or coast foam (`SC_00_m`). A waterfall can be a thin stream of the falling water
+with a curtain of the spray over it.
 
 Give the model **vertex colours** (glTF `COLOR_0`) to shade it as the game's rooms are: the kit materials
 multiply their texture by them, and the game's own rooms darken corners, the foot of cliffs and the
@@ -414,6 +475,11 @@ The editor's **Stages** tab (in the Outliner and under **Settings → Editor**) 
   copies the model into the mod, adds the stage, builds it and takes Link to its first spawn.
 - Each stage's rooms, **Add room** (another model), **Rebuild**, **Warp in** and **Check** (the problems, as
   a list).
+- **Lava**: **Lava floor here** puts the game's lava floor at Link's feet (its size in the fields next to the
+  button) and **Heat shimmer here** the heat haze. In the picture a lava floor shows as an orange outline with
+  two round marks: the middle one moves it, the corner one sizes it (letting go is one undo step). Selecting it
+  shows its size in the Stages tab, and **Remove this lava floor**. Give the room's model a `col_lava` surface at
+  the same height and **Rebuild**.
 - **Where Link stands**: inside the stage, a spawn, a return warp, an exit (to the sea outside the lava cave
   or to a spawn of the stage), a door to another room with its lock, a chest with its item, an enemy or a
   pot. In a room of the game, the stage's entry.

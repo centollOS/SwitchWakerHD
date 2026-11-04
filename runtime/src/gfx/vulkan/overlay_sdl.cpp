@@ -18,6 +18,7 @@
 #include "platform/dual_display.h"
 #include "runtime.h"
 #include "platform/gaming_mode.h"
+#include "platform/touch_options.h"
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <atomic>
@@ -162,6 +163,17 @@ void choose_mod_source(bool folder, std::function<void(std::string)> chosen) {
         else SDL_ShowOpenFileDialog(done, callback, nullptr, nullptr, 0, nullptr, false);
     });
 }
+void choose_save_folder(std::function<void(std::string)> chosen) {
+    post([chosen] {
+        auto callback = new std::function<void(std::string)>(chosen);
+        auto done = [](void* context, const char* const* files, int) {
+            auto fn = static_cast<std::function<void(std::string)>*>(context);
+            if (files && files[0]) (*fn)(files[0]);
+            delete fn;
+        };
+        SDL_ShowOpenFolderDialog(done, callback, nullptr, nullptr, false);
+    });
+}
 void choose_game_source(bool folder, std::function<void(std::string)> chosen) {
     post([folder, chosen] {
         auto callback = new std::function<void(std::string)>(chosen);
@@ -221,6 +233,7 @@ void graphics_changed() {
     put("bloomStrength", {"WWHD_BLOOM_STRENGTH"}, std::to_string(render::bloom_strength()));
     put("horizonHaze", {"WWHD_HORIZON_HAZE", "WWHD_SKY_HAZE"}, std::to_string(render::horizon_haze()));
     put("cloudShadows", {"WWHD_CLOUD_SHADOWS"}, render::cloud_shadows() ? "1" : "0");
+    put("fullLight", {"WWHD_FULL_LIGHT"}, render::full_light() ? "1" : "0");
     put("cloudStyle", {"WWHD_CLOUD_STYLE"}, std::to_string(render::cloud_style()));
     put("fxaa", {"WWHD_FXAA"}, gfxvk::fxaa_enabled() ? "1" : "0");
 #ifdef __ANDROID__
@@ -284,6 +297,7 @@ void load_saved_options() {
 #ifdef __ANDROID__
     if (saved("touchButtons", {})) gfx::g_touch_buttons = std::clamp((int)num("touchButtons"), 0, 2);
     if (saved("touchControls", {})) gfx::g_touch_controls = num("touchControls") != 0;
+    touch_options::load(v);
 #endif
     gfxvk::load_saved_stereo_hdr();  // shared with the AppKit host (init_appkit)
     if (saved("resScale", {"WWHD_RES_SCALE"})) gfxvk::set_res_scale((float)num("resScale"));
@@ -293,6 +307,7 @@ void load_saved_options() {
     if (saved("bloomStrength", {"WWHD_BLOOM_STRENGTH"})) render::set_bloom_strength((float)num("bloomStrength"));
     if (saved("horizonHaze", {"WWHD_HORIZON_HAZE", "WWHD_SKY_HAZE"})) render::set_horizon_haze((float)num("horizonHaze"));
     if (saved("cloudShadows", {"WWHD_CLOUD_SHADOWS"})) render::set_cloud_shadows(num("cloudShadows") != 0);
+    if (saved("fullLight", {"WWHD_FULL_LIGHT"})) render::set_full_light(num("fullLight") != 0);
     if (saved("cloudStyle", {"WWHD_CLOUD_STYLE"})) render::set_cloud_style((int)num("cloudStyle"));
     if (saved("fxaa", {"WWHD_FXAA"})) gfxvk::set_fxaa(num("fxaa") != 0);
     if (saved("interpFps", {"WWHD_INTERP_FPS"})) interp::set_fps((int)num("interpFps"));
@@ -499,5 +514,6 @@ void open_folder(const std::string& path) {
 
 namespace gfxvk {
 void load_device_setting() { std::string value; if (hostui::get("vkDevice", value)) set_device_setting(value); }
+void save_device_setting() { if (!device_from_env()) hostui::set("vkDevice", device_setting()); }
 }
 #endif  // WWHD_SDL_HOST

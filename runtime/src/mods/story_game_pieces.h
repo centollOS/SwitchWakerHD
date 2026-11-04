@@ -23,7 +23,8 @@ struct Built {
     std::string id;                   // the piece
     int body_index = 0;               // its first model's resource slot in the set archive
     int second_index = -1;            // its second model's slot (-1: none)
-    int light[2] = {1, 4};            // settingTevStruct type of each part
+    int light[2] = {1, 4};            // settingTevStruct type of each part (0: an object's light, a kit model's own-texture part)
+    int animated_part = 1;            // the part its texture animation plays on (0: the first, 1: the second)
     int animation_index = -1;         // its second model's texture animation slot (-1: none)
     story_notebook::WorldPoint minimum, maximum;
     unsigned triangles = 0;

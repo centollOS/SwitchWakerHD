@@ -68,6 +68,12 @@ def convert_slot(g, code, drop_tingle_tuner=False, name=None):
                 notes.append("Tingle Tuner removed")
             else:
                 notes.append("Tingle Tuner -> Tingle Bottle (same item number 0x21)")
+        # Lenzo's Picto Box test (#306, wwsave.lenzo_stage): HD gives the Deluxe Picto Box for the
+        # third picto and has no Forest Firefly step, so a file saved while Lenzo waited for the
+        # firefly gets the Deluxe Picto Box, as HD would have given it (the test stays passed).
+        if W.picto_test_stuck(hd, W.HD_FIELDS):
+            W.grant_deluxe_picto_box(hd, W.HD_FIELDS)
+            notes.append("Lenzo's test passed, Forest Firefly not shown -> Deluxe Picto Box (as in HD)")
 
     extras = W.hd_extra_defaults()
     extras["name"] = hd_name

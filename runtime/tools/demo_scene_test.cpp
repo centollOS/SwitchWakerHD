@@ -333,6 +333,24 @@ int main() {
         g.arm();
         assert(g.step(false, true) == G::Step::GiveUp);  // another demo took over meanwhile
     }
+    {
+        // issue #285: Link starts a demo at his first position key (world keys: the world; an origin:
+        // turned by the demo's angle around it), facing his first rotation key; without a position
+        // track he stays where he is
+        const D::Demo world = parsed(R"({"type":"demo","frames":120,"actors":[{"id":"link","actor":"Link",
+            "position":{"keys":[{"frame":0,"value":{"x":-1800,"y":95,"z":-199300}},{"frame":41,"value":{"x":-1500,"y":95,"z":-199300}}]}}]})");
+        auto start = D::link_start(world, {}, 0);
+        assert(start && start->position == (D::Vec{-1800, 95, -199300}) && !start->heading);
+        const D::Demo turned = parsed(R"({"type":"demo","frames":120,"origin":"link","angle":90,"actors":[{"id":"link","actor":"Link",
+            "position":{"keys":[{"frame":30,"value":{"x":100,"y":0,"z":0}}]},"rotation":{"keys":[{"frame":0,"value":{"x":0,"y":135,"z":0}}]},
+            "modes":[{"frame":0,"mode":"walk"}]}]})");
+        start = D::link_start(turned, {1000, 50, -2000}, 90);
+        assert(start && std::fabs(start->position.x - 1000) < 0.01f && start->position.y == 50 && std::fabs(start->position.z - (-2100)) < 0.01f);
+        assert(start->heading && std::fabs(*start->heading - (-135)) < 0.01f);  // 135 + 90, as -180..180
+        const D::Demo still = parsed(R"({"type":"demo","frames":120,"actors":[{"id":"link","actor":"Link","modes":[{"frame":0,"mode":"walk"}]},
+            {"id":"bird","actor":"Dk","position":{"keys":[{"frame":0,"value":{"x":1,"y":2,"z":3}}]}}]})");
+        assert(!D::link_start(still, {}, 0));
+    }
     std::puts("demo_scene: ok");
     return 0;
 }

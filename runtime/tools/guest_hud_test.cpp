@@ -71,6 +71,19 @@ int main() {
     auto old=quota.snapshot(0);assert(quota.release("q",handles[0]));quota.drop("q");
     assert(!quota.create_image("q",1,1,4,pixel,4));old.clear();
     assert(quota.create_image("q",1,1,4,pixel,4));
+    // A raised limit (the port's own pages) is its owner's alone, and only rises.
+    Store raised;std::vector<uint8_t> full(kMaxPixels);
+    assert(raised.create_image("port:a",2048,2048,2048*4,full.data(),full.size()));
+    assert(!raised.create_image("port:a",1,1,4,pixel,4));
+    raised.raise_pixel_quota("port:a",kMaxPixels+4);raised.raise_pixel_quota("port:a",1);
+    assert(raised.create_image("port:a",1,1,4,pixel,4)&&!raised.create_image("port:a",1,1,4,pixel,4));
+    assert(raised.create_image("mod",2048,2048,2048*4,full.data(),full.size()));
+    assert(!raised.create_image("mod",1,1,4,pixel,4));
+    // at most kMaxPortPixels, however much is asked
+    Store ceiling;
+    ceiling.raise_pixel_quota("port:b",SIZE_MAX);
+    for(size_t i=0;i<kMaxPortPixels/kMaxPixels;++i)assert(ceiling.create_image("port:b",2048,2048,2048*4,full.data(),full.size()));
+    assert(!ceiling.create_image("port:b",1,1,4,pixel,4));
     auto capped=store.begin("caps",0);command=Command{};
     for(unsigned i=0;i<kMaxCommands;++i)assert(store.append("caps",capped,command));
     assert(!store.append("caps",capped,command)&&!store.commit("caps",capped));
@@ -87,6 +100,18 @@ int main() {
     }
     auto drc=anchored(834,460,Anchor::BottomRight,1708,960,854,480);
     assert(drc.x==1668&&drc.y==920);
+    {   // Frame interpolation: a list committed per logic step is drawn between the step before and this one.
+        Store blend;Command e;e.kind=Command::Rect;e.x=100;e.y=50;e.w=10;e.h=10;
+        auto commit=[&](uint64_t step,float x){blend.set_step(step);auto h=blend.begin("m",0);e.x=x;assert(blend.append("m",h,e)&&blend.commit("m",h));};
+        commit(7,100);commit(8,140);
+        blend.set_fraction(.25f);auto f=blend.snapshot(0);assert(f.size()==1&&std::abs(f[0]->commands[0].x-110)<1e-4f&&f[0]->commands[0].y==50);
+        blend.set_fraction(1.f);assert(blend.snapshot(0)[0]->commands[0].x==140);  // exact frames, interpolation off
+        blend.set_fraction(.5f);blend.set_step(9);assert(blend.snapshot(0)[0]->commands[0].x==140);  // a step without a new list
+        commit(9,140+kSnap+1);assert(blend.snapshot(0)[0]->commands[0].x==140+kSnap+1);  // a jump is drawn as it is
+        commit(11,0);commit(12,10);blend.set_step(12);assert(std::abs(blend.snapshot(0)[0]->commands[0].x-5)<1e-4f);
+        blend.set_step(13);e.kind=Command::Circle;e.size=4;commit(13,20);assert(blend.snapshot(0)[0]->commands[0].x==20);  // other elements
+        assert(!blend_lists(List{},*blend.snapshot(0)[0],.5f));
+    }
     // Publication and rendering may occur on separate threads.
     std::thread reader([&]{for(int i=0;i<1000;++i)store.snapshot(0);});
     for(int i=0;i<1000;++i){auto h=store.begin("a",0);assert(h);assert(store.commit("a",h));}

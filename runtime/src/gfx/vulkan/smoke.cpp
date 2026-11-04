@@ -10,6 +10,8 @@
 #include "bc_reference.h"
 // No game assets: assertions inspect data returned by the actual Vulkan device.
 #include "backend.h"
+#include "gfx/renderer.h"
+#include "gfx/depth_peek.h"
 #include "stereo.h"
 #include "../stereo_projection.h"
 #include "android_shared_image.h"
@@ -117,6 +119,37 @@ void colour_comparison_check() {
  fprintf(stderr,"[renderer smoke] colour comparison conversion, colour tiling and rendered depth alias passed\n");
 }
 
+// Texture upload paths against the guest bytes (the CPU side): a linear and a micro-tiled RGBA8 texture with random
+// texels, staged through own buffers and through the upload arena (WWHD_VK_TEXTURE_STAGING), and once more after the
+// texture budget released its image and the next lookup made it again (WWHD_VK_TEXTURE_BUDGET).
+void texture_path_check() {
+ constexpr uint32_t W=64,H=64;
+ uint32_t seed=0x2545F491u;
+ auto next=[&]{seed=seed*1664525u+1013904223u;return uint8_t(seed>>24);};
+ for(uint32_t tile:{1u,2u}) for(int staging:{0,1}) {
+  const uint32_t addr=mem::host_alloc(W*H*4,256);
+  auto offset=[&](uint32_t x,uint32_t y) {
+   if(tile==1)return (y*W+x)*4;
+   return LatteAddrLib::ComputeSurfaceAddrFromCoordMicroTiled(x,y,0,32,W,H,Latte::E_HWTILEMODE::TM_1D_TILED_THIN1,false);
+  };
+  std::vector<uint8_t> expected(W*H*4);
+  for(uint32_t y=0;y<H;++y)for(uint32_t x=0;x<W;++x)for(uint32_t c=0;c<4;++c){
+   const uint8_t v=next();expected[(y*W+x)*4+c]=v;mem::ptr(addr)[offset(x,y)+c]=v;
+  }
+  SurfaceDesc d;d.addr=addr;d.width=W;d.height=H;d.pitch=W;d.format=0x1a;d.tileMode=tile;d.dim=1;
+  g_texture_staging_override=staging;
+  auto* s=find_or_create_surface(d,false);
+  upload_surface(s);
+  require(read_image(*s,VK_IMAGE_ASPECT_COLOR_BIT,4)==expected,staging?"texture staged through the upload arena differs":"texture staged through its own buffer differs");
+  release_texture_image(s);
+  require(s->evicted&&!s->image,"texture budget did not release the image");
+  require(find_or_create_surface(d,false)==s&&s->image&&!s->evicted,"released texture was not made again by its lookup");
+  upload_surface(s);
+  require(read_image(*s,VK_IMAGE_ASPECT_COLOR_BIT,4)==expected,"texture made again after its release differs");
+ }
+ g_texture_staging_override=-1;
+ fprintf(stderr,"[renderer smoke] texture uploads through own buffers and the upload arena, and after a budget release, match the guest bytes\n");
+}
 void bc_surface_check() {
  for (uint32_t format : {0x31u,0x431u,0x32u,0x432u,0x33u,0x433u,0x34u,0x234u,0x35u,0x235u}) {
   SurfaceDesc d;d.addr=mem::host_alloc(65536,256);d.mipAddr=mem::host_alloc(65536,256);
@@ -233,9 +266,11 @@ void buffer_cache_check() {
  fprintf(stderr,"[renderer smoke] buffer cache hit, write fault, GX2Invalidate, reset and index readback passed\n");
 }
 void asynchronous_submission_check() {
- constexpr uint32_t submissions=10, payloadSize=16, regionSize=payloadSize*3;
+ // every ring size (WWHD_VK_SUBMISSION_POOL): each slot is used at least twice
+ const uint32_t ring=uint32_t(R.submissions.size()), submissions=ring+6;
+ constexpr uint32_t payloadSize=16, regionSize=payloadSize*3;
  Buffer out=create_readback_buffer(submissions*regionSize);
- std::array<UploadSlice,4> firstSlices{};
+ std::vector<UploadSlice> firstSlices(ring);
  for(uint32_t submission=0;submission<submissions;++submission) {
   auto a=allocate_upload(payloadSize,256),b=allocate_upload(payloadSize,256);
   require(a.buffer==b.buffer&&a.offset!=b.offset,"async submission slices alias");
@@ -287,7 +322,7 @@ void asynchronous_submission_check() {
  for(const auto& slot:R.submissions)
   require(!slot.pending&&slot.garbageBuffers.empty()&&slot.garbageImages.empty()&&slot.garbageFramebuffers.empty(),"async drain left pending resources");
  defer_buffer(out);flush();
- fprintf(stderr,"[renderer smoke] ten async submissions, immutable snapshots, slot wrap and deferred retirement passed\n");
+ fprintf(stderr,"[renderer smoke] %u async submissions on %u slots, immutable snapshots, slot wrap and deferred retirement passed\n",submissions,ring);
 }
 // The fallback must resolve framebuffer handles before capture, then invalidate
 // them at view deferral even though their native begin commands are not emitted.
@@ -435,6 +470,66 @@ void depth_copy_check() {
  require(find_or_create_surface(d,true)==target&&target->extent.width==64,"depth target did not return to its guest size");
  g_depthCopyOverride=override;
  fprintf(stderr,"[renderer smoke] depth/stencil target resized by aspect ratio and resolution without blits passed\n");
+}
+// The bloom chain's targets keep the console's size (issue #307) while the chain draws them, also
+// through the other passes into its levels; a target the game later puts at the same address gets
+// the internal resolution once the chain has left it. After the chain has been idle (the pause
+// menu), its helper pass drawing a level first keeps the level as it is.
+void bloom_chain_size_check() {
+ set_res_scale(2);latch_res_scale();
+ const gfx::SizeRequest chain=gfx::size_request(gfx::ProgramKind::BloomChain),
+                        helper=gfx::size_request(gfx::ProgramKind::BloomHelper);
+ SurfaceDesc d;d.addr=mem::host_alloc(60*40*4,256);d.width=60;d.height=33;d.pitch=64;d.format=0x1A;d.dim=1;d.slices=1;
+ d.sizeRequest=chain;Surface* level=find_or_create_surface(d,true);
+ require(level&&level->extent.width==60&&level->extent.height==33,"bloom chain level is not at the console's size");
+ d.sizeRequest={};
+ require(find_or_create_surface(d,true)==level&&level->extent.width==60,"a pass between the chain's levels rescaled a level");
+ R.frame+=gfx::SizeClaim::kIdleFrames+1;
+ require(find_or_create_surface(d,true)==level&&level->extent.width==120&&level->extent.height==66,
+         "a target at a level's address the chain has left kept the console's size");
+ d.sizeRequest=chain;
+ require(find_or_create_surface(d,true)==level&&level->extent.width==60,"the chain's next draw did not restore the console's size");
+ const VkImage image=level->image;
+ R.frame+=80;
+ d.sizeRequest=helper;
+ require(find_or_create_surface(d,true)==level&&level->image==image,"the chain's helper pass after an idle chain resized a level");
+ d.sizeRequest={};
+ require(find_or_create_surface(d,true)==level&&level->image==image,"the helper pass did not renew the chain's claim");
+ set_res_scale(1);latch_res_scale();
+ fprintf(stderr,"[renderer smoke] bloom chain targets keep the console's size until the chain leaves them\n");
+}
+// Full-size torchlight: the point-light buffer's depth copy gets twice the internal resolution once the
+// lights claim it, keeps it while only its own pass draws it (no light on screen, the pause menu), and
+// returns to the internal resolution once only other passes draw it. A clear of the light buffer
+// leaves its claim alone.
+void light_target_size_check() {
+ const bool fullLight=render::full_light();render::set_full_light(true);
+ set_res_scale(2);latch_res_scale();
+ const gfx::SizeRequest lights=gfx::size_request(gfx::ProgramKind::PointLight),
+                        depthCopy=gfx::size_request(gfx::ProgramKind::DepthDownsample);
+ SurfaceDesc d;d.addr=mem::host_alloc(64*36*4,256);d.width=64;d.height=36;d.pitch=64;d.format=0x1A;d.dim=1;d.slices=1;
+ d.sizeRequest=depthCopy;Surface* copy=find_or_create_surface(d,true);
+ require(copy&&copy->extent.width==128&&copy->extent.height==72,"the depth downsample claimed the light size by itself");
+ copy->sizeClaim.request(lights,R.frame);  // a point-light pass reads it
+ require(find_or_create_surface(d,true)==copy&&copy->extent.width==256&&copy->extent.height==144,
+         "the lights' claim did not double the depth copy");
+ const VkImage image=copy->image;
+ for(int i=0;i<80;++i) {
+  ++R.frame;
+  require(find_or_create_surface(d,true)==copy&&copy->image==image,"the depth copy was resized while no light was drawn");
+ }
+ R.frame+=gfx::SizeClaim::kIdleFrames+1;d.sizeRequest={};
+ require(find_or_create_surface(d,true)==copy&&copy->extent.width==128,"a target at the depth copy's address kept the light size");
+ // the light buffer: the game clears it before the lights draw it, also after the pause menu
+ SurfaceDesc b=d;b.addr=mem::host_alloc(64*36*4,256);b.sizeRequest=lights;Surface* buffer=find_or_create_surface(b,true);
+ require(buffer&&buffer->extent.width==256,"the point lights' draw did not double the light buffer");
+ const VkImage bufferImage=buffer->image;
+ R.frame+=157;b.sizeRequest={};b.sizeRequest.keeps=true;
+ require(find_or_create_surface(b,true)==buffer&&buffer->image==bufferImage,"a clear after the pause menu resized the light buffer");
+ b.sizeRequest=lights;
+ require(find_or_create_surface(b,true)==buffer&&buffer->image==bufferImage,"the lights' draw after the clear resized the light buffer");
+ render::set_full_light(fullLight);set_res_scale(1);latch_res_scale();
+ fprintf(stderr,"[renderer smoke] the point-light depth copy keeps the light size while the lights claim it\n");
 }
 // Volume render targets (issue #53, the Picto Box): the game renders 8x8x8 colour-grading volumes
 // slice by slice (GX2 colour buffers of a 3D surface, the view selecting the slice) and samples them
@@ -1334,7 +1429,7 @@ int renderer_smoke_test() {
     } else fprintf(stderr,"[renderer smoke] %s fallback readback passed; native unsupported\n",vk::vertex_format_name(format));
    }
   }
-  bc_decode_smoke();bc_surface_check();upload_arena_check();asynchronous_submission_check();renderpass_retirement_check();buffer_cache_check();set_res_scale(1);latch_res_scale();
+  bc_decode_smoke();bc_surface_check();texture_path_check();upload_arena_check();asynchronous_submission_check();renderpass_retirement_check();buffer_cache_check();set_res_scale(1);latch_res_scale();
   {
    Image upload(16,16,0x1a,false,2,2);
    upload.s.addr=mem::host_alloc(65536,256);upload.s.mipAddr=mem::host_alloc(65536,256);
@@ -1447,6 +1542,10 @@ int renderer_smoke_test() {
    depth_copy_check();
    colour_comparison_check();
    {
+    // the peek checks read the answers as soon as each frame's fence retires (mode 0); the default
+    // (answers two game steps later, written at the game's swap) has no swaps here
+    ::gfx::depth_peek::force_mode_for_test(0);
+    struct RestorePeekMode { ~RestorePeekMode() { ::gfx::depth_peek::force_mode_for_test(-1); } } restorePeekMode;
     auto peek=std::make_unique<Surface>();
     peek->width=1280;peek->height=720;peek->pitch=1280;peek->format=0x11;peek->isDepth=true;peek->fmt=format_info(0x11,true);
     peek->addr=mem::host_alloc(256,256);create_surface_image(peek.get(),true,VkExtent3D{16,16,1});
@@ -1493,6 +1592,8 @@ int renderer_smoke_test() {
    fprintf(stderr,"[renderer smoke] queued GPU PNG capture passed: %s\n",capturePath.string().c_str());
    require(R.tv.swapchain!=VK_NULL_HANDLE,"smoke presentation did not create a swapchain");LOG("[renderer smoke] scan-buffer swapchain presentation and PNG readback passed");
    volume_target_check();
+   bloom_chain_size_check();
+   light_target_size_check();
    completed_scan_retention_check();
   }
   // Ensure deferred objects left by readback and stack-owned images are actually reclaimed.

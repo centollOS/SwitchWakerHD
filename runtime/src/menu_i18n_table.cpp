@@ -1,5 +1,5 @@
-// (this fork) The settings menu's texts: English (as upstream writes it), Spanish, Brazilian Portuguese
-// (menu_i18n.h). One row per text; a format string keeps its conversions in the same order
+// (this fork) The settings menu's texts: English (as upstream writes it), Spanish, Brazilian Portuguese, Italian,
+// German, French (menu_i18n.h). One row per text; a format string keeps its conversions in the same order
 // (runtime/tools/menu_i18n_check.py). The rows are split by where the texts are.
 #include "menu_i18n.h"
 

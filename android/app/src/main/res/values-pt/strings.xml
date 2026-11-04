@@ -60,6 +60,8 @@
     <string name="setup_paused_battery">Pausado: a bateria está fraca</string>
     <string name="setup_paused_detail">Toque em Continuar quando quiser seguir.</string>
     <string name="setup_paused_auto_detail">A instalação continua sozinha quando o dispositivo Android estiver pronto.</string>
+    <string name="setup_paused_heat_detail">A instalação espera por você. Toque em Continuar mesmo assim para seguir agora.</string>
+    <string name="setup_paused_heat_cooled">O dispositivo esfriou. Toque em Continuar para seguir.</string>
     <string name="setup_failed">A instalação parou</string>
     <string name="setup_failed_detail">Toque em Detalhes para ver o motivo. Você pode escolher o jogo de novo ou tocar em Continuar.</string>
     <string name="setup_ready">Seu jogo está pronto</string>
@@ -75,8 +77,6 @@
     <string name="game_icon_present">O ícone já está na tela inicial. Segure-o e abra as configurações dele.</string>
     <string name="game_icon_present_shortcut">O ícone já está na tela inicial. Segure-o para ver os saves e a instalação.</string>
     <string name="game_icon_none">Instale o jogo primeiro</string>
-    <string name="controller_settings_hint">Segure Select/− para abrir Configurações</string>
-    <string name="controller_settings_hint_home">Segure Select/− ou pressione Home para abrir Configurações</string>
     <string name="touch_layout_access">Controles na tela. Segure o botão do controle para editar o layout.</string>
     <string name="touch_layout_hint">Arraste um controle para movê-lo. Selecione-o e altere seu tamanho.</string>
     <string name="touch_layout_smaller">Tamanho −</string>
@@ -86,4 +86,24 @@
     <string name="setup_code_mods">Mods de código</string>
     <string name="setup_code_mods_detail">Permite ativar mods de código (por exemplo as missões de história) em Configurações › Mods. O código do jogo é compilado de novo com suporte a mods, o que leva mais ou menos o mesmo tempo que a primeira instalação, e o jogo fica um pouco mais lento. Enquanto isso, você pode continuar jogando a versão atual.</string>
     <string name="game_icon_unsupported">Este launcher não permite adicionar ícones de apps.</string>
+    <string name="setup_models">Preparar os shaders dos modelos (recomendado)</string>
+    <string name="setup_models_detail">Muito menos travadas na primeira vez que você vê um lugar. Leva cerca de 40 minutos depois da instalação num celular recente, atrás de uma tela de progresso; mantenha a tela ligada. Desmarque para pular; Cancelar mantém o que já foi preparado (marque de novo para continuar).</string>
+    <string name="setup_models_running">Preparando os shaders: modelos</string>
+    <string name="setup_models_hidden">O jogo desenha os modelos atrás desta tela. Mantenha a tela ligada; se você sair, esta etapa pausa até a instalação voltar à tela. Cancelar a interrompe e mantém o que já foi preparado.</string>
+    <string name="setup_models_stopping">Parando… (o que já foi preparado é mantido)</string>
+    <string name="setup_models_estimating">\u0020· calculando o tempo restante</string>
+    <string name="setup_models_phase_starting">Iniciando o jogo</string>
+    <string name="setup_models_phase_objects">Modelos de objetos</string>
+    <string name="setup_models_phase_rooms">Salas</string>
+    <string name="setup_models_phase_environment">Céu e clima</string>
+    <string name="setup_models_phase_actors">Atores posicionados</string>
+    <string name="setup_models_phase_plants">Plantas</string>
+    <string name="setup_models_phase_particles">Efeitos</string>
+    <string name="setup_models_phase_visits">Visitas aos cenários</string>
+    <string name="setup_models_phase_visit">Visitas aos cenários: %1$s</string>
+    <string name="setup_models_phase_file_select">Seleção de arquivo</string>
+    <string name="setup_cancel">Cancelar</string>
+    <string name="setup_paused_screen">Pausado: preparar os shaders dos modelos precisa desta tela</string>
+    <string name="setup_paused_screen_detail">Continua sozinho enquanto a instalação estiver na tela.</string>
+    <string name="setup_models_game_open">Feche o jogo primeiro (Configurações › Quit Game); depois a preparação dos shaders dos modelos continua aqui.</string>
 </resources>

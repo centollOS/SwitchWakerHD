@@ -37,6 +37,7 @@ struct Backend {
     void (*copy_to_scan)(uint32_t colorBuffer, uint32_t target);
     void (*swap)();
     void (*peek_z)(const uint32_t* cells, uint32_t words);
+    void (*peek_retire)();         // complete submitted depth-peek copies now (render thread, while idle)
     void (*set_frame_aspect)(float a);
     bool (*target_aspect_factors)(uint32_t w, uint32_t h, float& kx, float& ky);
     uint64_t (*frames_completed)();
@@ -140,6 +141,7 @@ inline void service_present() { if (g_backend->service_present) g_backend->servi
 inline void peek_z(const uint32_t* cells, uint32_t words) { g_backend->peek_z(cells, words); }
 // (this fork) deko3d has no depth readback yet: peekz.cpp then keeps the game's own function
 inline bool can_peek_z() { return g_backend && g_backend->peek_z; }
+inline void peek_retire() { if (g_backend->peek_retire) g_backend->peek_retire(); }
 inline void set_frame_aspect(float a) { g_backend->set_frame_aspect(a); }
 inline bool target_aspect_factors(uint32_t w, uint32_t h, float& kx, float& ky) { return g_backend->target_aspect_factors(w, h, kx, ky); }
 inline uint64_t frames_completed() { return g_backend->frames_completed(); }
@@ -176,6 +178,11 @@ bool cloud_shadows();
 int cloud_style();
 void set_cloud_style(int style);
 void set_cloud_shadows(bool on);
+// Full-size torchlight: the half-size point-light buffer at the screen's resolution, so lit objects get no
+// blocky, flickering outlines (on by default, off on Android; off: the original game). WWHD_FULL_LIGHT=0|1.
+// gfx/area_sample.h.
+bool full_light();
+void set_full_light(bool on);
 void set_horizon_haze(float haze);
 // The bloom extract shader's remapped[2].z is cThresholdParam.z (intensity).
 void scale_bloom_uniforms(void* remapped, size_t size);

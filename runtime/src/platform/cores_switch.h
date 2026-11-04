@@ -27,4 +27,27 @@ inline std::atomic<bool>& wanted() {
 }
 // true when background work goes to core 3 now
 inline bool core3() { return allowed() && wanted().load(std::memory_order_relaxed); }
+
+// The game's threads of emulated cores 0 and 2 (WorkerMgr, update_ubo, resource and audio threads) on host cores 0, 2
+// and 3 instead of 0 and 2, where the render thread and the host service threads preempt them; the main thread, alone
+// on core 1, waits for their jobs (docs/guest-core3-plan.md: +1.9% fps at the Outset village with PGO). On when the
+// process has core 3; WWHD_GUEST_CORE3=0 (settings.ini [dev]) or the debug server's "guestcore3 0|1": read each time a
+// thread takes its emulated core. The background shader list (also core 3) then goes about half as fast.
+inline std::atomic<bool>& guest_wanted() {
+    static std::atomic<bool> w{[] {
+        const char* e = getenv("WWHD_GUEST_CORE3");
+        return !(e && *e && atoi(e) == 0);
+    }()};
+    return w;
+}
+// a guest thread of emulated core `core` that just took it: its host cores follow guest_wanted() (the thread's own
+// setting is changed, so a switch at run time reaches every thread the next time it runs)
+inline void place_guest_thread(uint32_t core) {
+    if (core % 3 == 1) return;  // the main thread's core keeps its own placement
+    thread_local int applied = -1;
+    const int want = int(core % 3) * 2 + (allowed() && guest_wanted().load(std::memory_order_relaxed) ? 1 : 0);
+    if (want == applied) return;
+    applied = want;
+    svcSetThreadCoreMask(threadGetCurHandle(), s32(core % 3), (want & 1) ? 0xD : 0x5);
+}
 }  // namespace cores

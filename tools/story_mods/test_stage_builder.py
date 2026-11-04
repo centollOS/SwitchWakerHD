@@ -187,7 +187,9 @@ class Phase2(unittest.TestCase):
         r['joins'] = [[1, 2]]
         r['keys'] = True
         r['rooms'][0]['actors'] = [{'tag': 'TRES', 'name': 'takara2', 'params': 0xFF000080, 'position': [1, 2, 3], 'angle': 90, 'angle_z': 0x15FF},
-                                   {'tag': 'ACTR', 'name': 'Bk', 'params': 0xFFFFFF04, 'position': [4, 5, 6], 'angle': 0, 'angle_x': 0, 'angle_z': 0xFF}]
+                                   {'tag': 'ACTR', 'name': 'Bk', 'params': 0xFFFFFF04, 'position': [4, 5, 6], 'angle': 0, 'angle_x': 0, 'angle_z': 0xFF},
+                                   {'tag': 'SCOB', 'name': 'magma', 'params': 0xFFFFFF00, 'position': [0, -50, 400], 'angle': 90, 'angle_x': 0, 'angle_z': 0,
+                                    'scale': [20, 10, 12]}]
         sb.check_recipe(r)
         d = sb.build_dzs(template_dzs(), r)
         sb.check_room_table(d, r['doors'], r['joins'])
@@ -207,6 +209,16 @@ class Phase2(unittest.TestCase):
         self.assertEqual(struct.unpack_from('>HhH', tres, 0x18), (2, 16384, 0x15FF))  # x: the room, y: the heading, z: the item
         actr = sb.chunk(rc, 'ACTR')[2]
         self.assertEqual((actr[:2], struct.unpack_from('>I', actr, 8)[0]), (b'Bk', 0xFFFFFF04))
+        # the game's lava floor: a scaled SCOB entry (0x24 bytes) with its scale bytes, as the game's lava rooms have it
+        scob = sb.chunk(rc, 'SCOB')
+        self.assertEqual((scob[1], len(scob[2]) >= 0x24, scob[2][:5]), (1, True, b'magma'))
+        self.assertEqual(struct.unpack_from('>I3fHhH', scob[2], 8), (0xFFFFFF00, 0.0, -50.0, 400.0, 0, 16384, 0))
+        self.assertEqual(scob[2][0x20:0x24], bytes([20, 10, 12, 0xFF]))
+        bad = dict(r['rooms'][0]['actors'][2], scale=[0, 10, 10])
+        r2 = recipe(3, doors=True)
+        r2['rooms'][0]['actors'] = [bad]
+        with self.assertRaises(sb.BuildError):
+            sb.check_recipe(r2)
         with self.assertRaises(sb.BuildError):
             sb.check_room_table(d, [], [[0, 2]])  # 0 and 2 aren't joined
 
@@ -257,6 +269,13 @@ class Map(unittest.TestCase):
         self.assertEqual(sb.png(w, h, rows)[:8], b'\x89PNG\r\n\x1a\n')
 
 
+def depth_two(d):
+    """the room's children (depth two: where dBgW::ChkGrpThrough filters water, lava and ordinary ground) and their
+    group info"""
+    groups, _ = sb.read_dzb_summary(d)
+    return {g[0]: g[4] for g in groups if g[1] == 0}
+
+
 class Collision(unittest.TestCase):
     def test_groups_exits_water(self):
         pos, tris = box_room(-10, 10)
@@ -269,14 +288,17 @@ class Collision(unittest.TestCase):
         self.assertEqual(taken, [2])            # the far floor strip, not the walls beside it
         d = sb.build_dzb(verts, ctris, 3)
         groups, out = sb.read_dzb_summary(d)
-        self.assertEqual([g[0] for g in groups], ['R03_check', 'ground', 'floor', 'water'])
+        self.assertEqual([g[0] for g in groups], ['R03_check', 'ground', 'floor', 'Water', 'water'])
         # a triangle's room is its group's grandparent's
         for grp, _ in out:
             self.assertEqual(groups[groups[groups[grp][1]][1]][3], 3)
         self.assertEqual(groups[2][4], 3)            # the room table row
-        self.assertEqual(groups[3][4], 3 | 0x100)    # the water bit
+        # the water's group is the room's child (depth two, where the game's water filter looks) with the water bit
+        self.assertEqual((groups[3][1], groups[3][4]), (0, 3 | 0x100))
+        self.assertEqual((groups[4][1], groups[4][4]), (3, 3 | 0x100))
         self.assertEqual(sorted(e for _, e in out if e != sb.NO_EXIT), [0, 0])
-        self.assertEqual(sum(1 for g, _ in out if g == 3), 1)
+        self.assertEqual(sum(1 for g, _ in out if g == 4), 1)
+        self.assertEqual(depth_two(d), {'ground': 0, 'Water': 3 | 0x100})
 
     def test_surface_codes(self):
         codes = sb.surface_codes()
@@ -285,10 +307,67 @@ class Collision(unittest.TestCase):
             self.assertEqual(gp.ATTRIBUTE_CLASS[code], cls)
 
     def test_unknown_collision_material(self):
-        prims = [{'collision': True, 'material': 'col_lava', 'positions': [(0, 0, 0), (1, 0, 0), (0, 0, 1)], 'triangles': [(0, 2, 1)]},
+        prims = [{'collision': True, 'material': 'col_magma', 'positions': [(0, 0, 0), (1, 0, 0), (0, 0, 1)], 'triangles': [(0, 2, 1)]},
                  {'collision': False, 'material': 'rock', 'positions': [], 'triangles': []}]
         with self.assertRaises(sb.BuildError):
             sb.collision_from(prims, [])
+
+    def test_lava(self):
+        # a floor with water and a lava pool: the lava's surface in its own group with the game's lava bit, its bottom
+        # 100 units lower in the ground group, both with the game's lava info words (attribute code 6, material
+        # sound 23, no exit), as Dragon Roost Cavern's lava floors are
+        pos, tris = box_room(-10, 10)
+        prims = [{'collision': False, 'material': 'rock', 'positions': [tuple(100 * x for x in p) for p in pos], 'triangles': tris},
+                 {'collision': True, 'material': 'col_water', 'positions': [(0, -50, 0), (100, -50, 0), (0, -50, 100)], 'triangles': [(0, 2, 1)]},
+                 {'collision': True, 'material': 'col_lava', 'positions': [(200, -30, 0), (300, -30, 0), (200, -30, 100), (300, -30, 100)],
+                  'triangles': [(0, 2, 1), (1, 2, 3)]}]
+        exits = [{'min': [-2000, -100, -2000], 'max': [2000, 100, 2000]}]  # covers the lava too: lava takes no exit
+        verts, ctris, taken = sb.collision_from(prims, exits)
+        self.assertEqual(sum(1 for t in ctris if t[3] == sb.LAVA), 2)
+        self.assertTrue(all(t[4] == sb.NO_EXIT for t in ctris if t[3] in (sb.LAVA, sb.WATER)))
+        d = sb.build_dzb(verts, ctris, 3)
+        groups, out = sb.read_dzb_summary(d)
+        self.assertEqual([g[0] for g in groups], ['R03_check', 'ground', 'floor', 'Water', 'water', 'Yogan', 'lava'])
+        self.assertEqual(groups[4][4], 3 | 0x100)
+        self.assertEqual(groups[6][4], 3 | 0x200)    # the lava bit
+        for grp, _ in out:
+            self.assertEqual(groups[groups[groups[grp][1]][1]][3], 3)
+        # what the game's special-group filters look at (the room's children): the lava bit on the lava's group, as
+        # Dragon Roost Cavern's Yogan_07 has it; ordinary ground and wall checks pass through it
+        self.assertEqual(depth_two(d), {'ground': 0, 'Water': 3 | 0x100, 'Yogan': 3 | 0x200})
+        verts2, tris2, names, infos, ginfo = gp.read_dzb(d)
+        lava_surface = [t for t in tris2 if t[4] == 6]
+        self.assertEqual(len(lava_surface), 2)
+        for t in lava_surface:
+            self.assertEqual(infos[t[3]], (0x07FFF7FF, 0x000600FF, 0xFFFFFF00, 0))   # the game's lava words
+            self.assertEqual(gp.ATTRIBUTE_CLASS[(infos[t[3]][1] >> 16) & 0x1F], 6)
+            self.assertTrue(all(verts2[v][1] == -30 for v in t[:3]))
+        bottom = [t for t in tris2 if t[4] == 2 and infos[t[3]][1] == 0x000600FF]
+        self.assertEqual(len(bottom), 2)
+        self.assertTrue(all(verts2[v][1] == -130 for t in bottom for v in t[:3]))   # 100 units below
+        # the room's children: ground -> water -> lava
+        nv, ov, nt, ot, nb, ob, nn, on, ng, og, ni, oi = struct.unpack_from('>12I', d, 0)
+        siblings = [struct.unpack_from('>H', d, og + 52 * i + 0x26)[0] for i in range(ng)]
+        self.assertEqual(siblings[1:], [3, 0xFFFF, 5, 0xFFFF, 0xFFFF, 0xFFFF])
+        # the lava's surface is not a floor (the map, the spawns), its bottom is
+        floors = sb.floor_triangles(d)
+        self.assertFalse(any(p[1] == -30 for t in floors for p in t))
+        self.assertTrue(any(p[1] == -130 for t in floors for p in t))
+        # lava alone: floor -> lava
+        d = sb.build_dzb(verts, [t for t in ctris if t[3] != sb.WATER], 0)
+        groups, _ = sb.read_dzb_summary(d)
+        self.assertEqual([g[0] for g in groups], ['R00_check', 'ground', 'floor', 'Yogan', 'lava'])
+        self.assertEqual(depth_two(d), {'ground': 0, 'Yogan': 0x200})
+        # without lava there is no lava group
+        d = sb.build_dzb(verts, [t for t in ctris if t[3] != sb.LAVA], 0)
+        self.assertEqual([g[0] for g in sb.read_dzb_summary(d)[0]], ['R00_check', 'ground', 'floor', 'Water', 'water'])
+
+    def test_game_lava_classified(self):
+        # the game's lava (its group's lava bit) and its bottom (attribute class 6) export as col_lava
+        flat = [(0, 0, 0), (0, 0, 1), (1, 0, 0)]
+        self.assertEqual(gp.triangle_surface(flat, 3, 0, False, 0x200), 'col_lava')
+        self.assertEqual(gp.triangle_surface(flat, 6, 0), 'col_lava')
+        self.assertEqual(gp.triangle_surface([(0, 0, 0), (0, 1, 0), (1, 0, 0)], 6, 0), 'col_wall')
 
 
 class Ground(unittest.TestCase):

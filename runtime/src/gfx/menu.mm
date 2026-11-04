@@ -98,6 +98,11 @@ void load_device_setting() {
     if (g_prefs) if (id value = pref(@"vkDevice"))
         if ([value isKindOfClass:[NSString class]]) set_device_setting([value UTF8String]);
 }
+void save_device_setting() {
+    if (!g_prefs || env_set({"WWHD_VK_DEVICE"})) return;
+    set_pref(@"vkDevice", [NSString stringWithUTF8String:device_setting().c_str()]);
+    if (NSString* p = portable_prefs_path()) [g_portable_prefs writeToFile:p atomically:YES];
+}
 }
 #endif
 static void load_prefs() {
@@ -111,6 +116,7 @@ static void load_prefs() {
     if (saved(@"bloomStrength", {"WWHD_BLOOM_STRENGTH"})) render::set_bloom_strength([pref(@"bloomStrength") floatValue]);
     if (saved(@"horizonHaze", {"WWHD_HORIZON_HAZE", "WWHD_SKY_HAZE"})) render::set_horizon_haze([pref(@"horizonHaze") floatValue]);
     if (saved(@"cloudShadows", {"WWHD_CLOUD_SHADOWS"})) render::set_cloud_shadows([pref(@"cloudShadows") boolValue]);
+    if (saved(@"fullLight", {"WWHD_FULL_LIGHT"})) render::set_full_light([pref(@"fullLight") boolValue]);
     if (saved(@"cloudStyle", {"WWHD_CLOUD_STYLE"})) render::set_cloud_style([pref(@"cloudStyle") intValue]);
     if (saved(@"fxaa", {"WWHD_FXAA"})) render::set_fxaa([pref(@"fxaa") boolValue]);
     // frame rate: fps60 is the mode (0 30 fps, 1 frame interpolation, 2 true 60; the key predates
@@ -132,6 +138,7 @@ static void save_prefs() {
     if (!env_set({"WWHD_BLOOM_STRENGTH"})) set_pref(@"bloomStrength", @(render::bloom_strength()));
     if (!env_set({"WWHD_HORIZON_HAZE", "WWHD_SKY_HAZE"})) set_pref(@"horizonHaze", @(render::horizon_haze()));
     if (!env_set({"WWHD_CLOUD_SHADOWS"})) set_pref(@"cloudShadows", @(render::cloud_shadows()));
+    if (!env_set({"WWHD_FULL_LIGHT"})) set_pref(@"fullLight", @(render::full_light()));
     if (!env_set({"WWHD_CLOUD_STYLE"})) set_pref(@"cloudStyle", @(render::cloud_style()));
     if (!env_set({"WWHD_FXAA"})) set_pref(@"fxaa", @(render::fxaa()));
     if (!env_set({"WWHD_INTERP", "WWHD_TRUE60", "WWHD_INTERP_FPS"})) set_pref(@"fps60", @(interp::mode()));
@@ -290,6 +297,7 @@ static WWStateMenu* g_state_menu;
 - (void)setHaze:(NSMenuItem*)item { render::set_horizon_haze(item.tag / 100.0f); update_title(); }
 - (void)setCloudStyle:(NSMenuItem*)item { render::set_cloud_style((int)item.tag); update_title(); }
 - (void)toggleCloudShadows:(NSMenuItem*)item { render::set_cloud_shadows(!render::cloud_shadows()); update_title(); }
+- (void)toggleFullLight:(NSMenuItem*)item { render::set_full_light(!render::full_light()); update_title(); }
 - (void)setAO:(NSMenuItem*)item { render::set_ao_mode((int)item.tag); update_title(); }
 - (void)toggleAniso:(NSMenuItem*)item { render::set_aniso(!render::aniso()); update_title(); }
 - (void)capture:(NSMenuItem*)item { render::request_capture(); }
@@ -307,7 +315,14 @@ static WWStateMenu* g_state_menu;
 - (void)setFaceLayout:(NSMenuItem*)item {
     // issue #78: which host face buttons drive the Wii U's A/B/X/Y (the same as the Controls window)
     input_map::Mapping m = input_map::current();
-    if (item.tag == 2) input_map::set_face_auto(m, true);
+    if (item.tag == 4) input_map::restore_pad_preset(m);
+    else if (item.tag == 3) {
+        bool legacy = false;std::string guid,name;input_map::active_controller(guid,name);
+        for (const auto& pad : input::controllers())
+            if (pad.guid == guid && pad.name == name) legacy = input_map::legacy_gamecube_faces(pad);
+        input_map::apply_gamecube(m,legacy);
+    }
+    else if (item.tag == 2) input_map::set_face_auto(m, true);
     else input_map::apply_face_layout(m, item.tag == 1 ? input_map::FaceLayout::kLabels : input_map::FaceLayout::kPosition);
     input_map::set_current(m);
 }
@@ -341,8 +356,12 @@ static WWStateMenu* g_state_menu;
     if (item.action == @selector(setController:))
         item.state = (item.tag == 1) == input::pro_controller() ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(setFaceLayout:)) {
-        input_map::FaceLayout fl = input_map::face_layout(input_map::current());
-        bool on = fl == (item.tag == 1 ? input_map::FaceLayout::kLabels : input_map::FaceLayout::kPosition);
+        const auto m = input_map::current();
+        input_map::FaceLayout fl = input_map::face_layout(m);
+        bool on = item.tag == 3 ? m.preset.gamecube : item.tag == 2 ? m.face_auto :
+            item.tag < 2 && !m.face_auto && !m.preset.gamecube &&
+            fl == (item.tag == 1 ? input_map::FaceLayout::kLabels : input_map::FaceLayout::kPosition);
+        if (item.tag == 4) return m.preset.saved;
         item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
     }
     if (item.action == @selector(toggleInterp:)) item.state = interp::mode() == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
@@ -358,6 +377,8 @@ static WWStateMenu* g_state_menu;
         item.state = render::cloud_style() == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(toggleCloudShadows:))
         item.state = render::cloud_shadows() ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(toggleFullLight:))
+        item.state = render::full_light() ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(setHaze:))
         item.state = fabsf(render::horizon_haze() * 100.0f - item.tag) < 0.5f ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(toggleFxaa:)) {
@@ -463,6 +484,7 @@ void install_menu(NSWindow* tv) {
     add(g, @"    16:9 (original)", @selector(setAspect:), @"", aspect::kOriginal);
     add(g, @"    Match window", @selector(setAspect:), @"", aspect::kWindow).toolTip =
         @"The picture takes the shape of the TV window (or the screen in full screen): wider shows more to the sides";
+    add(g, @"    4:3", @selector(setAspect:), @"", aspect::k4x3);
     add(g, @"    16:10", @selector(setAspect:), @"", aspect::k16x10);
     add(g, @"    21:9", @selector(setAspect:), @"", aspect::k21x9);
     add(g, @"    32:9", @selector(setAspect:), @"", aspect::k32x9);
@@ -472,6 +494,8 @@ void install_menu(NSWindow* tv) {
     add(g, @"    Centre fix", @selector(setAO:), @"O", 1);
     add(g, @"    Centre + noise fix", @selector(setAO:), @"O", 2);
     add(g, @"Full-size occlusion depth", @selector(toggleHires:), @"M");
+    add(g, @"Full-size torchlight", @selector(toggleFullLight:), @"").toolTip =
+        @"Torches and other point lights at the screen's resolution: no blocky, flickering outlines around lit objects";
     [g addItem:[NSMenuItem separatorItem]];
     NSMenuItem* bloomItem = [g addItemWithTitle:@"Bloom strength" action:nil keyEquivalent:@""];
     NSMenu* bloomMenu = [[NSMenu alloc] initWithTitle:@"Bloom strength"];
@@ -531,6 +555,8 @@ void install_menu(NSWindow* tv) {
     add(in, @"    Automatic", @selector(setFaceLayout:), @"", 2).toolTip =
         @"Follows the labels printed on the pad that was plugged in first: by label on an Xbox pad, "
         @"by position on a Nintendo one";
+    add(in, @"    GameCube", @selector(setFaceLayout:), @"", 3).toolTip = @"GameCube controls; keeps previous bindings for Restore.";
+    add(in, @"    Restore previous controller bindings", @selector(setFaceLayout:), @"", 4);
     [in addItem:[NSMenuItem separatorItem]];
     add(in, @"Show GamePad screen (\u2318G)", @selector(toggleDrcWindow:), @"");
     [in addItem:gfx::controls_menu_item()];
@@ -608,7 +634,7 @@ void install_menu(NSWindow* tv) {
     toggle(gp, @"    Fill the bags (spoils and bait)", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatBags); },
            @"Spoils bag and bait bag (if missing), every kind of spoils x99, empty bait slots filled");
     toggle(gp, @"    All Nintendo Gallery figurines", ^BOOL { return NO; }, ^(BOOL) { mods::request_cheat(mods::kCheatFigurines); },
-           @"Every figurine Carlov makes, in the gallery and in his count (once you are a member: Carlov took a picto)");
+           @"Every figurine Carlov makes, in the gallery and in his count (once you are a member: Carlov took a picto). Carlov then leaves his workshop, as in the game's ending; this can't be undone");
     for (auto [title, which] : {std::pair{@"    Infinite health", mods::kInfHealth}, {@"    Infinite magic", mods::kInfMagic},
                                 {@"    Infinite arrows and bombs", mods::kInfAmmo}, {@"    Infinite rupees", mods::kInfRupees},
                                 {@"    Infinite bait and spoils", mods::kInfBags}, {@"    Infinite swimming", mods::kInfBreath}}) {

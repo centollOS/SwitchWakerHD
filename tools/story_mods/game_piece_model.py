@@ -54,9 +54,10 @@ FORMATS = {0x811: 12, 0x813: 16, 0x80D: 8, 0x00A: 4, 0x80F: 8, 0x808: 4, 0x007: 
 # game treats it as (footsteps, effects, damage). Several raw codes share a class (12, 13, 14, 16 and 26 are wood;
 # 17, 20 and 24 metal); 9 is damage, not metal. A fact about the format, like the runtime's NativeResultIds.
 ATTRIBUTE_CLASS = (0, 1, 2, 3, 4, 5, 6, 1, 8, 9, 10, 11, 2, 2, 2, 15, 2, 20, 1, 19, 20, 21, 22, 23, 20, 10, 2, 0, 0, 0, 0, 0)
-CLASS_SURFACES = {2: 'col_wood', 3: 'col_stone', 4: 'col_grass', 11: 'col_sand', 20: 'col_metal', 15: 'col_ice', 19: 'col_shallow',
-                  23: 'col_waterfall'}
+CLASS_SURFACES = {2: 'col_wood', 3: 'col_stone', 4: 'col_grass', 6: 'col_lava', 11: 'col_sand', 20: 'col_metal', 15: 'col_ice',
+                  19: 'col_shallow', 23: 'col_waterfall'}
 WATER_GROUP = 0x100  # a collision group's info bit: the game's swimmable water
+LAVA_GROUP = 0x200   # and the game's lava (its surface; the lava's bottom below it is a floor of attribute class 6)
 # raw attribute code -> WCOL surface (codes of other classes: stone on floors, a plain wall otherwise)
 SURFACES = {code: CLASS_SURFACES[c] for code, c in enumerate(ATTRIBUTE_CLASS) if c in CLASS_SURFACES}
 MAX_ARCHIVE = 12 * 1024 * 1024
@@ -674,10 +675,11 @@ def read_dzb(d):
     return verts, tris, names, infos, group_info
 
 
-def triangle_surface(pts, code, water, void=False):
+def triangle_surface(pts, code, water, void=False, lava=False):
     """The world-object surface (col_*) of one room collision triangle: its raw attribute code's class on a floor
     (stone for the other classes), a plain wall (wood stays wood) on a slope steeper than 60 degrees; the group's
-    water bit makes it swimmable water and a void group a void floor. None for a collapsed triangle."""
+    water bit makes it swimmable water, its lava bit lava's surface and a void group a void floor (a floor of the lava
+    class, the bottom under the game's lava, is lava too). None for a collapsed triangle."""
     u = [pts[1][k] - pts[0][k] for k in range(3)]
     v = [pts[2][k] - pts[0][k] for k in range(3)]
     n = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
@@ -690,6 +692,8 @@ def triangle_surface(pts, code, water, void=False):
         surface = 'col_wood' if surface == 'col_wood' else 'col_wall'
     if water:
         surface = 'col_water'
+    elif lava:
+        surface = 'col_lava' if floor else 'col_wall'
     elif void:
         surface = 'col_void' if floor else 'col_wall'
     return surface
@@ -718,7 +722,7 @@ def piece_collision(dzb, piece, room_origin, center):
         exit_id = (i0 >> 13) & 0x3F
         if strip_exits and exit_id != 0x3F and names[group] not in void:
             continue
-        surface = triangle_surface(pts, code, group_info[group] & WATER_GROUP, names[group] in void)
+        surface = triangle_surface(pts, code, group_info[group] & WATER_GROUP, names[group] in void, group_info[group] & LAVA_GROUP)
         if surface is None:
             continue
         row = []

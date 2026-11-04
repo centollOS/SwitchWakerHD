@@ -155,7 +155,9 @@ int main() {
              "spawns": [{"point": 0, "position": {"x": 0, "y": 0, "z": 0}}],
              "actors": [{"id": "key", "actor": "chest", "item": "small_key", "position": {"x": 1, "y": 0, "z": 2}, "angle": 90},
                         {"id": "boko", "actor": "bokoblin", "variant": "shield", "position": {"x": 3, "y": 0, "z": 0}},
-                        {"id": "pot", "actor": "pot", "position": {"x": 5, "y": 0, "z": 0}}]},
+                        {"id": "pot", "actor": "pot", "position": {"x": 5, "y": 0, "z": 0}},
+                        {"id": "lava", "actor": "lava", "position": {"x": 0, "y": -50, "z": 400}, "size": {"x": 2000, "z": 1240}, "angle": 90},
+                        {"id": "heat", "actor": "heat_shimmer", "position": {"x": 0, "y": 0, "z": 0}}]},
             {"room": 1, "ground": "assets/b.glb", "spawns": [{"point": 1, "position": {"x": 0, "y": 0, "z": 0}}],
              "actors": [{"id": "big", "actor": "chest", "item": "boss_key", "position": {"x": 0, "y": 0, "z": 0}}]},
             {"room": 2, "ground": "assets/c.glb", "spawns": [{"point": 2, "position": {"x": 0, "y": 0, "z": 0}}]},
@@ -179,7 +181,15 @@ int main() {
         const auto& r0 = kr.get("rooms").array[0];
         assert(r0.get("kit_ground").boolean && r0.get("ground").string().empty() && r0.get("kit").get("stage").string() == "M_NewD2");
         const auto& acts = r0.get("actors").array;
-        assert(acts.size() == 3 && acts[0].get("tag").string() == "TRES" && acts[0].get("name").string() == "takara2");
+        assert(acts.size() == 5 && acts[0].get("tag").string() == "TRES" && acts[0].get("name").string() == "takara2");
+        // the game's lava floor (magma: no bubbles, its size in scale steps of 100 units) and Dragon Roost's heat haze
+        assert(acts[3].get("tag").string() == "SCOB" && acts[3].get("name").string() == "magma" && uint32_t(acts[3].get("params").number) == 0xFFFFFF00u);
+        assert(acts[3].get("scale").array.size() == 3 && acts[3].get("scale").array[0].number == 20 && acts[3].get("scale").array[1].number == 10 &&
+               acts[3].get("scale").array[2].number == 12 && acts[3].get("angle").number == 90 && acts[3].get("position").array[1].number == -50);
+        assert(acts[4].get("tag").string() == "ACTR" && acts[4].get("name").string() == "YkgrON" && uint32_t(acts[4].get("params").number) == 0x0010FF00u &&
+               acts[4].get("scale").type == Value::Null);
+        {NativeActor n;std::string w2;assert(!native_actor("lava", "", "", 0, n, w2) && w2.find("size") != std::string::npos);
+         assert(native_actor("lava", "", "", 0, n, w2, 99999, 50) && n.scale[0] == 255 && n.scale[2] == 1);}
         assert(uint32_t(acts[0].get("params").number) == 0xFF000000u && uint32_t(acts[0].get("angle_z").number) == 0x15FF);
         assert(acts[1].get("tag").string() == "ACTR" && acts[1].get("name").string() == "Bk" && uint32_t(acts[1].get("params").number) == 0xFFFFFF24u);
         assert(acts[2].get("name").string() == "kotubo");
@@ -215,6 +225,9 @@ int main() {
         bad2 += !refuse("\"lock\": \"shutter\", \"switch\": 5", "\"lock\": \"shutter\", \"switch\": 100", "shutter opens on a switch");
         bad2 += !refuse("\"lock\": \"boss\"}", "\"lock\": \"golden\"}", "lock is none");
         bad2 += !refuse("\"joins\": [[2, 3]]", "\"joins\": []", "room 3 can't be reached");
+        bad2 += !refuse(", \"size\": {\"x\": 2000, \"z\": 1240}", "", "lava needs its size");
+        bad2 += !refuse("\"size\": {\"x\": 2000, \"z\": 1240}", "\"size\": {\"x\": 50, \"z\": 1240}", "lava's size is");
+        bad2 += !refuse("\"actor\": \"heat_shimmer\", \"position\"", "\"actor\": \"heat_shimmer\", \"size\": {\"x\": 500, \"z\": 500}, \"position\"", "only lava has a size");
         {  // while editing (the editor's validation) a room nothing leads to yet is kept; the game's parse refuses it
             std::string text = dungeon;
             text.replace(text.find("\"joins\": [[2, 3]]"), std::strlen("\"joins\": [[2, 3]]"), "\"joins\": []");
@@ -371,7 +384,7 @@ int main() {
         };
         int bad = 0;
         bad += !refuse("\"after\": \"heart\"", "\"after\": \"boss-key-x\"", "names a chest of the stage");
-        bad += !refuse("\"style\": \"updraft\"", "\"style\": \"geyser\"", "style is walk or updraft");
+        bad += !refuse("\"style\": \"updraft\"", "\"style\": \"geyser\"", "style is walk, updraft or hole");
         bad += !refuse("\"height\": 1500", "\"height\": 9000", "height is 200..5000");
         bad += !refuse("\"style\": \"updraft\", \"height\": 1500", "\"height\": 1500", "only an updraft has a height");
         bad += !refuse("\"shaders\": \"assets/sky.wwht\"", "\"shaders\": \"../sky.wwht\"", "is a .wwht file in the package");
@@ -383,6 +396,24 @@ int main() {
         pot.replace(pot.find("\"actor\": \"chest\", \"item\": \"heart_container\""), std::strlen("\"actor\": \"chest\", \"item\": \"heart_container\""), "\"actor\": \"pot\"");
         std::vector<Stage> o;
         assert(!parse(parse_json(pot), o, w) && w.find("names a chest") != std::string::npos);
+    }
+
+    // a hole into the stage: Link falls into the shaft under an opening and arrives falling ("fall" spawn only)
+    {
+        const std::string hole = R"({"stages": [{"id": "depths", "template": "GTower", "kind": "dungeon", "entrance": {"stage": "sea", "room": 44, "point": 0},
+          "rooms": [{"room": 0, "ground": "assets/hall.glb", "spawns": [{"point": 0, "position": {"x": 0, "y": 200, "z": 1600}, "start": "fall"},
+                                                                        {"point": 1, "position": {"x": 0, "y": 200, "z": 800}}]}],
+          "entries": [{"id": "hole", "stage": "sea", "room": 44, "style": "hole", "position": {"x": -200400, "y": 6700, "z": 302000},
+                       "size": {"x": 140, "y": 250, "z": 140}, "to": {"room": 0, "point": 0}}]}]})";
+        std::vector<Stage> o;
+        std::string why2;
+        assert(parse(parse_json(hole), o, why2) && o[0].entries[0].style == "hole");
+        std::string stand = hole;
+        stand.replace(stand.find("\"to\": {\"room\": 0, \"point\": 0}"), std::strlen("\"to\": {\"room\": 0, \"point\": 0}"), "\"to\": {\"room\": 0, \"point\": 1}");
+        assert(!parse(parse_json(stand), o, why2) && why2.find("isn't a \"fall\" spawn") != std::string::npos);
+        std::string high = hole;
+        high.replace(high.find("\"style\": \"hole\""), std::strlen("\"style\": \"hole\""), "\"style\": \"hole\", \"height\": 1500");
+        assert(!parse(parse_json(high), o, why2) && why2.find("only an updraft has a height") != std::string::npos);
     }
 
     // the quest of a sky stage: a chest opened, a darknut defeated, an entry and a warp taken run the package's story

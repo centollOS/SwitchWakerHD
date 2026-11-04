@@ -12,6 +12,9 @@
 #endif
 #include "platform/host.h"
 #include "platform/sleep.h"
+#ifdef __SWITCH__
+#include "platform/cores_switch.h"  // (this fork) guest threads on core 3 (docs/guest-core3-plan.md)
+#endif
 #ifdef __APPLE__
 #include <pthread/qos.h>
 #endif
@@ -35,6 +38,7 @@
 #include "savestate.h"
 #include "state_metadata_validation.h"
 #include "scheduler_tick.h"
+#include "rendezvous.h"
 #include "render_prof.h"
 #include "hle/os_time.h"
 #include "fixed_seed.h"
@@ -102,7 +106,6 @@ struct HostThread {
     // thread that runs next, not every waiter (they all sat on the main thread's host core, each
     // waking for nothing at every release)
     std::condition_variable sched_cv;
-    bool is_main = false;  // the game's main thread (run_main)
     int suspend = 1;
     std::atomic<bool> initialized{false};
     std::atomic<bool> started{false};
@@ -125,6 +128,7 @@ struct HostThread {
     // statistics
     std::chrono::steady_clock::time_point acquired;
     std::atomic<uint64_t> held_ns{0}, wait_ns{0};
+    bool is_main = false;      // the game's main thread (run_main; main_profile.h)
 #ifdef __APPLE__
     mach_port_t mach = 0;     // for CPU time statistics
     uint64_t last_cpu_us = 0;
@@ -209,6 +213,7 @@ static void mem_watch_thread();
 
 static void core_acquire(HostThread* t) {
     if (!g_sched_on || t->holds_core) return;
+    mainprof::Mark main_mark(&t->cpu, "core wait");
     static std::once_flag tick;
     std::call_once(tick, [] {
         std::thread(sched_tick_thread).detach();
@@ -246,6 +251,9 @@ static void core_acquire(HostThread* t) {
     t->cpu.core = core;
     HostThread* next = best_ready(k);
     t->cpu.preempt = next && next->prio < t->prio;
+#ifdef __SWITCH__
+    if (host::core_layout_on()) cores::place_guest_thread(core);  // (this fork) docs/guest-core3-plan.md
+#endif
 }
 
 static void core_release(HostThread* t) {
@@ -259,7 +267,9 @@ static void core_release(HostThread* t) {
         std::lock_guard<std::mutex> lk(k.m);
         if (k.owner == t) k.owner = nullptr;
         t->holds_core = false;
-        t->held_ns += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t->acquired).count();
+        const uint64_t held = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t->acquired).count();
+        t->held_ns += held;
+        if (mainprof::on(&t->cpu)) mainprof::note_release(held);
         t->cpu.preempt = 0;
         next = best_ready(k);
     }
@@ -556,6 +566,10 @@ static bool park_wait(std::unique_lock<std::mutex>& lk, std::condition_variable&
         const bool virtual_wait = simulation_deadline && (mods::fast_forward() || game_clock::shifted());
         if (virtual_wait ? timebase::simulation_now() >= *simulation_deadline :
             deadline && std::chrono::steady_clock::now() >= *deadline) return false;
+        static const char* const kWaitNames[] = {"wait", "wait: mutex", "wait: event", "wait: message send",
+                                                 "wait: message receive", "wait: sleep queue", "wait: join", "wait: rendezvous",
+                                                 "wait: sleep", "wait: service", "wait: entry"};
+        mainprof::Mark main_mark(t ? &t->cpu : nullptr, kind < 11 ? kWaitNames[kind] : "wait");
         if (t) {
             t->wait_kind = kind;
             t->wait_obj = obj;
@@ -870,12 +884,20 @@ static void* thread_main(void* p) {
 #endif
         }
     }
+#ifdef __SWITCH__
+    // (this fork) the threads the main thread hands work to ("update_ubo") in the profiles too
+    if (boosted_thread(name)) {
+        thread_sampler::add_current_thread(name.c_str());
+        thread_sampler::set_guest_stack(&ht->cpu.r[1]);
+    }
+#endif
 #ifdef __APPLE__
     ht->mach = pthread_mach_thread_np(pthread_self());
 #endif
 #ifdef __SWITCH__
     ht->nx = threadGetCurHandle();
 #endif
+    if (ht->is_main) mainprof::start(&ht->cpu);
     // keep guest threads on performance cores (see host::boost_thread_priority): the default QoS
     // let macOS park them on efficiency cores, which showed up as the main thread holding its core
     // without getting CPU time
@@ -999,6 +1021,7 @@ void run_main(const LoadedModule& m, int argc, uint32_t argv) {
     uint32_t stack = mem::runtime_alloc(stack_size, 0x100);
     uint32_t t = mem::runtime_alloc(osthread::kSize, 8);
     HostThread* ht = create_thread(t, m.entry, argc, argv, stack + stack_size, stack_size, 16, 0x2 /* core 1 */);
+    ht->is_main = true;
     mem::write_cstr(mem::runtime_alloc(16), "{ Main thread }", 16);
     ht->is_main = true;
     ht->suspend = 0;
@@ -1487,6 +1510,8 @@ HLE(coreinit, OSSendMessage) {
         const uint64_t lockStart = stats ? mono_ns() : 0;
         const bool contended = lock_spinning(q->m);
         std::unique_lock<std::mutex> lk(q->m, std::adopt_lock);
+        const bool profiled = mainprof::on(c);  // (upstream's main-thread profile)
+        if (profiled) mainprof::bump(mainprof::g_sends);
         if (stats && contended) {
             add_stat(g_send_stats.contended, 1);
             add_stat(g_send_stats.contendedNs, mono_ns() - lockStart);
@@ -1501,10 +1526,14 @@ HLE(coreinit, OSSendMessage) {
                 ret(c, 0);
                 return;
             }
-            const uint64_t fullStart = stats ? mono_ns() : 0;
+            const uint64_t fullStart = stats || profiled ? mono_ns() : 0;
             q->senders++;
             park_wait(lk, q->notFull, [&] { return !q->msgs.full(); }, W_MSG_SEND, arg(c, 0));
             q->senders--;
+            if (profiled) {
+                mainprof::bump(mainprof::g_send_full);
+                mainprof::bump(mainprof::g_send_full_ns, mono_ns() - fullStart);
+            }
             if (stats) {
                 add_stat(g_send_stats.full, 1);
                 add_stat(g_send_stats.fullNs, mono_ns() - fullStart);
@@ -1609,27 +1638,54 @@ void os_wakeup_thread_queue(uint32_t queue) {
     if (wake) q->cv.notify_all();
 }
 
-// OSRendezvous
+// OSRendezvous: one arrival flag per core (rendezvous.h). A waiter marks the core it runs on (the
+// core OSGetCoreId reports) and waits until every core in its mask has arrived. WWHD's sound
+// start-up depends on it: the main thread (core 1) starts a thread on core 0 and waits with mask 1
+// until that thread has finished its set-up; the started thread waits with mask 3.
+// WWHD_TRACE_RDV=1 logs every wait (caller core, mask, arrived cores, time waited).
 struct HRendezvous {
     std::mutex m;
     std::condition_variable cv;
-    uint32_t arrived = 0;
+    threads::RendezvousCores cores;
 };
 static ObjTable<HRendezvous> g_rdv;
+static const bool g_trace_rdv = getenv("WWHD_TRACE_RDV") != nullptr;
 HLE(coreinit, OSInitRendezvous) {
     HRendezvous* r = g_rdv.get(arg(c, 0));
     std::lock_guard<std::mutex> lk(r->m);
-    r->arrived = 0;
+    r->cores.reset();
+}
+// timeout_ns < 0: no timeout. False on timeout (the caller's core stays marked, as on Cafe OS).
+static bool rendezvous_wait(Cpu* c, uint32_t addr, uint32_t mask, int64_t timeout_ns) {
+    HRendezvous* r = g_rdv.get(addr);
+    const uint32_t core = t_self ? t_self->core : 1u;  // as OSGetCoreId
+    const auto t0 = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lk(r->m);
+    if (g_trace_rdv) LOG("[rdv] wait %08X core %u mask %X arrived %X lr %08X", addr, core, mask, r->cores.arrived, c->lr);
+    r->cores.arrive(core);
+    r->cv.notify_all();
+    auto done = [&] { return r->cores.complete(mask); };
+    bool ok;
+    if (timeout_ns < 0) ok = park_wait(lk, r->cv, done, W_RDV, addr);
+    else {
+        const auto deadline = t0 + std::chrono::nanoseconds(timeout_ns);
+        const uint64_t simulation_deadline =
+            timebase::simulation_now() + (uint64_t)((unsigned __int128)timeout_ns * timebase::kTicksPerSec / 1000000000ull);
+        ok = park_wait(lk, r->cv, done, W_RDV, addr, &deadline, &simulation_deadline);
+    }
+    if (g_trace_rdv)
+        LOG("[rdv] %s %08X core %u mask %X arrived %X after %.3f ms lr %08X", ok ? "pass" : "timeout", addr, core, mask, r->cores.arrived,
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), c->lr);
+    return ok;
 }
 HLE(coreinit, OSWaitRendezvous) {
-    // arg1 is a core mask; we treat each set bit as one participant
-    HRendezvous* r = g_rdv.get(arg(c, 0));
-    uint32_t need = __builtin_popcount(arg(c, 1) & 7);
-    std::unique_lock<std::mutex> lk(r->m);
-    r->arrived++;
-    r->cv.notify_all();
-    park_wait(lk, r->cv, [&] { return r->arrived >= need; }, W_RDV, arg(c, 0));
+    rendezvous_wait(c, arg(c, 0), arg(c, 1), -1);
     ret(c, 1);
+}
+// OSWaitRendezvousWithTimeout(rendezvous, coreMask, OSTimeNanoseconds timeout); -1 waits forever
+HLE(coreinit, OSWaitRendezvousWithTimeout) {
+    const int64_t timeout = (int64_t)arg64(c, 5);
+    ret(c, rendezvous_wait(c, arg(c, 0), arg(c, 1), timeout == -1 ? -1 : std::max<int64_t>(timeout, 0)) ? 1 : 0);
 }
 
 // ---------------------------------------------------------------- alarms
@@ -2114,7 +2170,7 @@ bool threads_ss_save(ss::Writer& w, std::string& why) {
     for (auto& [a, r] : rv) {
         std::lock_guard<std::mutex> l(r->m);
         w.u32(a);
-        w.u32(r->arrived);
+        w.u32(r->cores.arrived);  // core mask (bit n = core n arrived)
     }
     {
         std::lock_guard<std::mutex> l(g_alarm_mutex);
@@ -2229,7 +2285,7 @@ void threads_ss_load(ss::Reader& r) {
             void* self = t->cpu.thread;
             t->cpu = s.cpu;
             t->cpu.thread = t;
-            t->cpu.main_thread = t->is_main;
+            t->cpu.main_thread = t->is_main ? 1 : 0;  // (not the saved byte)
             t->cpu.core = t->holds_core ? t->held_core : s.core;
             t->suspend = s.suspend;
             t->prio = s.prio;
@@ -2312,13 +2368,13 @@ void threads_ss_load(ss::Reader& r) {
     cnt = r.u32();
     for (auto& [a, x] : sorted<HRendezvous>(g_rdv)) {
         std::lock_guard<std::mutex> l(x->m);
-        x->arrived = 0;
+        x->cores.reset();
     }
     for (uint32_t i = 0; i < cnt; i++) {
         uint32_t a = r.u32(), arrived = r.u32();
         HRendezvous* x = g_rdv.get(a);
         std::lock_guard<std::mutex> l(x->m);
-        x->arrived = arrived;
+        x->cores.arrived = arrived & threads::RendezvousCores::kCoreMask;
     }
     // alarms; the guest clock continues from the saved time
     uint64_t saved_now;
@@ -2378,6 +2434,9 @@ void threads_ss_load(ss::Reader& r) {
         t->cv.notify_all();
     }
 }
+
+namespace threads {
+}  // namespace threads
 
 static void thread_dump_loop(int secs) {
     host::set_thread_name("thread dump");

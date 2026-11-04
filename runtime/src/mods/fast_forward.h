@@ -22,4 +22,8 @@ bool fast_forward_active();
 void fast_forward_input(uint32_t& buttons); // consume only the boost button, during events
 void fast_forward_service();               // game frame boundary
 void fast_forward_reset();                 // release required after save/load, overlay, focus loss
+// a talk held to go on with its fast forward option (touch_talk.cpp): the event runs fast while it asks,
+// with the same gates as the button (events only, no menu, overlay or scene change), also when the
+// Fast forward mod itself is off. Game thread, each pad read.
+void fast_forward_hold(bool on);
 }

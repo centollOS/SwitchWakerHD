@@ -4,6 +4,7 @@
 // Idea from GreenNaugahyde/ZeldaWWHDRecompAndroid (MPL-2.0), mods/jump.cpp.
 #pragma once
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace mods::jump_policy {
@@ -43,6 +44,26 @@ constexpr int kGraceSteps = 6;
 constexpr float kGroundBoost = 1.15f, kGroundMin = 16.f;
 inline float ground_speed_y(float game_speed_y) { return std::max(game_speed_y * kGroundBoost, kGroundMin); }
 
+// The speed along the ground. procAutoJump_init raises speedF to 9..17 (HD; USA 023F7958) and sets the air
+// step's timer (mProcVar0) to -1; with -1 procAutoJump speeds Link up to a full run (17, +0.4 a step) along his
+// facing whatever the stick says. Right for the game's jump off a ledge (he is running), but from standing it
+// carried him about 180 units forward (measured on the Outset pier), and a double jump as far again. Ours set
+// the timer to 0, the air step's stick rule in the same function: stick pushed keeps the run speed (or gains
+// it), back brakes, released slows down slowly; and with the stick released at the jump no speed along the
+// ground at all: straight up.
+constexpr float kStickDead = 0.05f;  // procAutoJump's own threshold on mStickDistance
+constexpr int16_t kAirStick = 0;     // mProcVar0 for procAutoJump's stick rule
+inline bool straight_up(float stick_distance) { return stick_distance <= kStickDead; }
+// The take-off animation (ANM_JMPST) also moves him: procAutoJump keeps posMove's root-motion mode 1, which
+// adds the animation's root translation (m3700, model space) turned by his facing; about 37 units forward in
+// its first steps, measured. A straight-up jump takes that step back: the world x/z posMove added for the
+// root translation's change (lx, lz) at facing `angle` (s16), as posMove computes it.
+struct Xz { float x, z; };
+inline Xz root_motion(float lx, float lz, int16_t angle) {
+    const float a = float(angle) * 3.14159265358979f / 32768.f, sn = std::sin(a), cs = std::cos(a);
+    return {lz * sn + lx * cs, lz * cs - lx * sn};
+}
+
 enum class Action { kNone, kJump, kGraceJump, kDoubleJump };
 
 // Host state across Link's steps (full 30 Hz steps only; true 60 previews never change it).
@@ -55,14 +76,15 @@ struct State {
 
 struct Input {
     uint32_t proc;
-    bool button;      // the jump button is held now
-    bool blocked;     // event, menu, swimming, title screen or the moon jump on the same button
+    bool button;      // the jump input is held now
+    bool blocked;     // event, menu, swimming, title screen or the moon jump held with it
     bool double_jump; // the option
+    int press = -1;   // 1 / 0: a new press since the last full step (Latch::take); -1: from `button`
 };
 
 // One full step, before Link's execute: what to do. Updates the state.
 inline Action step(State& s, const Input& in) {
-    const bool press = in.button && !s.held;
+    const bool press = in.press >= 0 ? in.press != 0 : in.button && !s.held;
     s.held = in.button;
     if (ground_proc(in.proc)) {
         s.doubled = false;
@@ -84,6 +106,24 @@ inline Action step(State& s, const Input& in) {
     }
     return Action::kNone;
 }
+
+// The jump inputs between full steps (input::kVirt* bits). Under true 60 the controller is read on
+// every pass, also on the half steps the game only previews; a full step must see a press that began
+// on a half step (also one already let go again: never lost) exactly once (never doubled). see() takes
+// every read, take() runs once per full step.
+struct Latch {
+    uint32_t last = 0;     // the bits as last read
+    uint32_t pressed = 0;  // off -> on since the last take()
+    void see(uint32_t bits) {
+        pressed |= bits & ~last;
+        last = bits;
+    }
+    uint32_t take() {
+        const uint32_t p = pressed;
+        pressed = 0;
+        return p;
+    }
+};
 
 // After Link's execute (full step): whether the game's own ledge jump just began and should become a
 // plain fall (option "no automatic ledge jumps"). Updates `own` (our jump ended when the proc changed).

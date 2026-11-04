@@ -104,6 +104,12 @@ def branch_target(addr, w):
     return None
 
 
+# (upstream sync bfd7dd6) WWHD_RECOMP_SWITCH_SKIP=1 (tools/switch/make_sd.py) or =FILE: the hooks listed in
+# switch_skip_hooks.txt (or FILE) are left out: their functions are translated as the game's, and f_X_orig forwards to
+# f_X so that the runtime's hook_X still links (it is never called)
+SWITCH_SKIP = os.environ.get("WWHD_RECOMP_SWITCH_SKIP", "")
+
+
 class ForkPasses:
     ijump_call = IJUMP_CALL  # what an indirect jump (bctr) tail-calls: the per-site cache or the dispatcher
     mod_checked = None  # WWHD_RECOMP_MOD_HOOKS_ONLY: this build's addresses of the functions with the check
@@ -137,8 +143,9 @@ class ForkPasses:
 
     def fork_count_call(self, start, out):
         """emit_function, after the entry check: the function's counter (WWHD_RECOMP_COUNT_CALLS)"""
-        if start in self.counted:
-            out.append("    PPC_COUNT_CALL(%d);" % self.counted[start][0])
+        counted = getattr(self, "counted", {})  # a Recompiler made without __init__ (the tests) has none
+        if start in counted:
+            out.append("    PPC_COUNT_CALL(%d);" % counted[start][0])
 
     def fork_count_table(self):
         """table.c: the counted functions (canonical addresses, whether callers use an inline copy) and their
@@ -154,6 +161,23 @@ class ForkPasses:
                 "const uint32_t g_recomp_count_addrs[%d] = {%s};\n" % (max(n, 1), ", ".join("0x%08Xu" % c for _, (_, c) in rows) or "0") +
                 "const uint8_t g_recomp_count_inline[%d] = {%s};\n" % (max(n, 1), ", ".join("1" if a in inlined else "0" for a, _ in rows) or "0") +
                 "unsigned long long g_recomp_counts[%d];\n" % max(n, 1))
+
+    def fork_switch_skip(self, entries, read_hooks):
+        """__init__: the hook entries without the ones WWHD_RECOMP_SWITCH_SKIP lists (function hooks only)"""
+        self.switch_skipped = set()
+        if not SWITCH_SKIP or SWITCH_SKIP == "0":
+            return entries
+        path = (os.path.join(os.path.dirname(os.path.abspath(__file__)), "switch_skip_hooks.txt")
+                if SWITCH_SKIP == "1" else SWITCH_SKIP)
+        listed, _ = read_hooks([path], self.build)
+        skip = {addr for site, _, addr, _ in listed if not site}
+        self.switch_skipped = {addr for site, _, addr, _ in entries if not site and addr in skip}
+        return [e for e in entries if e[0] or e[2] not in skip]
+
+    def fork_skip_forwarders(self):
+        """table.c: f_X_orig for each hook left out (WWHD_RECOMP_SWITCH_SKIP): the runtime's hook_X refers to it"""
+        return "".join("void f_%08X_orig(Cpu* c) { f_%08X(c); }  /* hook left out (switch_skip_hooks.txt) */\n"
+                       % (self.sym(a), self.sym(a)) for a in sorted(getattr(self, "switch_skipped", ())))
 
     def fork_mod_check(self, start):
         """whether the function at `start` gets the mod hook check (and upstream's conservative code for it)"""
@@ -350,7 +374,8 @@ class ForkPasses:
     def fork_translated(self, body):
         """emit_function, the function translated: the dead tail, then condition-register liveness."""
         body = self.trim_dead_tail(body)
-        if not CRLIVE or self.fork_mod_check(self.cur_start) or not hasattr(self, "saved_clobbers"):
+        if (not CRLIVE or self.fork_mod_check(self.cur_start) or not hasattr(self, "saved_clobbers")
+                or getattr(self, "preserve_registers", False)):  # (upstream: the randomizer's patched code keeps every write)
             return body  # (guest mod hooks: a mod may hook or replace any function; no fork_prepare: tests)
         live_after, fields = crlive.analyze(body, self.cur_start, self.cur_end, self.p.jump_tables, branch_target,
                                             self.sites)
@@ -500,7 +525,11 @@ class ForkPasses:
         invariant is broken the set is empty: hooked functions read everything."""
         root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "runtime", "src")
         text = {}
-        for dp, _, fns in os.walk(root):
+        for dp, dirs, fns in os.walk(root):
+            # runtime/src/hostrt: the decomp build's guest runtime (cmake/Decomp.cmake, recomp.py --decomp-hooks), not
+            # in any other build; its emulated C++ start-up reads r0 (upstream sync bfd7dd6)
+            if not getattr(self, "decomp_hooks_file", None) and "hostrt" in dirs:
+                dirs.remove("hostrt")
             for fn in fns:
                 if fn.endswith((".cpp", ".h", ".inc", ".c")):
                     with open(os.path.join(dp, fn), errors="replace") as f:
@@ -536,8 +565,9 @@ class ForkPasses:
         tail_wb = ""
         stmts = [s for _, _, s in body]
         sites_done = False
-        if self.fork_mod_check(start) or not hasattr(self, "saved_clobbers"):  # (as upstream: a mod may hook or
-            return body, "", False  # replace any function; no fork_prepare: tests)
+        if (self.fork_mod_check(start) or not hasattr(self, "saved_clobbers")  # (as upstream: a mod may hook or
+                or getattr(self, "preserve_registers", False)):  # replace any function; no fork_prepare: tests;
+            return body, "", False  # the randomizer's patched code keeps every write)
         plain = HOOKED_LOCALS or not hooked  # (hooked: the f_X_orig body)
         if LEAF and plain and not any(a in self.sites for a, _, _ in body) and leaflocal.eligible(stmts):
             prologue, stmts, tail_wb = leaflocal.transform(stmts)
@@ -688,4 +718,5 @@ class ForkPasses:
                                                                      getattr(self, "dead_tail_insns", 0)) +
                 "small hot leaves inlined into callers: %d\n" % getattr(self, "inline_count", 0) +
                 "functions with a call counter (WWHD_RECOMP_COUNT_CALLS): %d\n" % len(self.counted) +
-                "single-precision multiplier operands: %d rounded (round25), %d known single\n" % tuple(ppc2c.single_stats))
+                "single-precision multiplier operands: %d rounded (round25), %d known single\n" % tuple(ppc2c.single_stats) +
+                "hooks left out for the Switch (switch_skip_hooks.txt): %d\n" % len(getattr(self, "switch_skipped", ())))

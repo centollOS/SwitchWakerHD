@@ -5,6 +5,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <tuple>
 #include "input.h"
@@ -25,6 +26,7 @@ static int savedSlot=0, loadedSlot=0, saveRequests=0, loadRequests=0;
 namespace ss { void request_save(int slot){savedSlot=slot;++saveRequests;} void request_load(int slot){loadedSlot=slot;++loadRequests;} }
 static int graphicsRequests=0; static char graphicsKey=0;
 namespace render { uint64_t frame_count(){return 0;} Api active(){return Api::Vulkan;} }
+namespace dsweep { uint32_t pad_buttons(uint64_t){return 0;} }
 namespace gx2 { void checkpoint_vulkan_caches(){} void checkpoint_present_observer(){} }
 namespace gfxvk { bool graphics_hotkey(char key,bool activate){if(activate){++graphicsRequests;graphicsKey=key;}return true;} }
 namespace gfx { bool drc_window_wanted(){return true;} int plusPresses=0; void display_plus_pressed(){++plusPresses;} }  // display_modes.cpp: GamePad screen while paused
@@ -57,7 +59,7 @@ static double shortcutClock=0;
 // press; the overlay keeps the inputs it took from the settings shortcut and reports the poll as taken
 static bool platformShortcut=false,shortcutTook=false;static int platformShortcuts=0;
 namespace screenshot { bool key_down(int); }
-namespace overlay { bool pointer_shortcut(int,bool){return false;} void set_open(bool open,OpenReason,KeyOrigin){overlayOpen=open;} void focus_lost(){}
+namespace overlay { void offer_controller_setup(const std::string&,const std::string&){} bool pointer_shortcut(int,bool){return false;} void set_open(bool open,OpenReason,KeyOrigin){overlayOpen=open;} void focus_lost(){}
  void poll_controller_shortcuts(const float* v){static SettingsShortcut sc;static bool latched=false;
   using namespace input_map;bool select=v[kPadOptions]>0.5f;
   if(platformShortcut&&v[kPadLB]>0.5f&&v[kPadRB]>0.5f&&select){if(!latched){latched=true;shortcutTook=true;++platformShortcuts;}}
@@ -159,8 +161,159 @@ static int menu_matrix(){
  key(drc,true,1,SDL_KMOD_SHIFT);key(drc,true,2);assert(saveRequests==saved&&loadRequests==loaded);promptShown=false;
  SDL_DestroyWindow(drc);SDL_DestroyWindow(tv);SDL_Quit();return 0;
 }
+// Issue #267: "Controller input when the game isn't focused". A hidden dummy-driver window never gets the
+// keyboard focus, so SDL's own focus filter is live here: a background controller press reaches the game
+// only with the option on. Keyboard and mouse are released on focus loss either way.
+static int background_controllers(){
+ // a scratch user folder: input::init() reads controls.json from it, never the player's
+ const auto userDir=std::filesystem::temp_directory_path()/"wwhd-input-sdl-test-267";
+ std::filesystem::create_directories(userDir);set_env("WWHD_USER_DIR",userDir.string().c_str());
+ SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy");assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS));
+ assert(!input_map::Mapping::defaults().background_controllers);  // off by default
+ input::init();input_map::set_current(input_map::Mapping::defaults(),false);
+ auto* tv=SDL_CreateWindow("TV",32,32,SDL_WINDOW_HIDDEN);assert(tv);input::set_prompt_window(tv);
+ assert(SDL_GetKeyboardFocus()==nullptr);  // the game is in the background
+ input::update();
+ auto hint=[]{return std::string(SDL_GetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS)?SDL_GetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS):"(unset)");};
+ assert(!input::background_controllers()&&hint()=="0");
+ static std::atomic<Uint16> motor{0};
+ SDL_VirtualJoystickDesc d;SDL_INIT_INTERFACE(&d);
+ d.type=SDL_JOYSTICK_TYPE_GAMEPAD;d.naxes=SDL_GAMEPAD_AXIS_COUNT;d.nbuttons=SDL_GAMEPAD_BUTTON_COUNT;d.name="background #267 pad";
+ d.Rumble=[](void*,Uint16 low,Uint16){motor=low;return true;};
+ const SDL_JoystickID id=SDL_AttachVirtualJoystick(&d);assert(id);
+ for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);
+ auto* pad=SDL_OpenJoystick(id);assert(pad);
+ auto poll=[&](){SDL_UpdateJoysticks();for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);input::update();return input::read();};
+ auto south=[&](bool down){assert(SDL_SetJoystickVirtualButton(pad,SDL_GAMEPAD_BUTTON_SOUTH,down));return poll();};
+ auto pressed=[&]{float v[input_map::kPadCount];input::controller_values(v);return v[input_map::kPadA]>0.5f;};
+ auto focusLost=[&]{SDL_Event e{};e.type=SDL_EVENT_WINDOW_FOCUS_LOST;e.window.windowID=SDL_GetWindowID(tv);input::handle_event(e);};
+ auto key=[&](bool down){SDL_Event e{};e.type=down?SDL_EVENT_KEY_DOWN:SDL_EVENT_KEY_UP;e.key.windowID=SDL_GetWindowID(tv);e.key.scancode=SDL_SCANCODE_K;input::handle_event(e);};
+ // keyboard (K = A) and the mouse camera's capture: released on focus loss, the option off and on alike
+ mods::mouse_init(tv);mouseCamera=true;
+ auto click=[&](bool down){SDL_Event e{};e.type=down?SDL_EVENT_MOUSE_BUTTON_DOWN:SDL_EVENT_MOUSE_BUTTON_UP;e.button.windowID=SDL_GetWindowID(tv);e.button.which=1;e.button.button=SDL_BUTTON_LEFT;input::handle_event(e);};
+ auto keyboardAndMouseReleased=[&]{
+  key(true);assert(input::read().buttons&input::kA);
+  click(true);click(false);assert(mods::mouse_captured());
+  focusLost();bool held[256];input::held_keys(held);
+  assert(!held[input_map::key_from_id("K")]&&!(input::read().buttons&input::kA)&&!mods::mouse_captured());
+  key(false);
+ };
+ keyboardAndMouseReleased();
+ // option off: SDL drops the background press, and no rumble there
+ assert(!pressed());south(true);assert(!pressed()&&poll().buttons==0);south(false);
+ const uint8_t on[15]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+ rumble::set_enabled(true);rumble::gamepad_pattern(0,on,120);input::update();assert(motor==0);
+ // option on (saved with the controls): the hint follows at once, at run time
+ auto m=input_map::Mapping::defaults();m.background_controllers=true;input_map::set_current(m,false);
+ assert(input::background_controllers());
+ input::update();assert(hint()=="1");
+ auto p=south(true);assert(pressed()&&p.buttons!=0);
+ printf("#267 background press with the option on: buttons=%08X (focus window: %s)\n",p.buttons,SDL_GetKeyboardFocus()?"yes":"none");
+ focusLost();p=poll();assert(pressed()&&p.buttons!=0);  // focus loss leaves the controller alone
+ input::update();assert(motor==0xFFFF);  // rumble keeps running in the background
+ keyboardAndMouseReleased();assert(pressed());  // keyboard and mouse: unchanged
+ south(false);assert(!pressed());
+ // Settings never opens from a background controller press with the option on (overlay.cpp)
+ assert(!overlay::controller_may_open_settings(false,true));
+ assert(overlay::controller_may_open_settings(false,false)&&overlay::controller_may_open_settings(true,true));
+ // off again: the hint and the drop come back
+ input_map::set_current(input_map::Mapping::defaults(),false);input::update();assert(hint()=="0");
+ south(true);assert(!pressed());south(false);
+ input::update();assert(motor==0);
+ mouseCamera=false;rumble::gamepad_stop(0);
+ SDL_CloseJoystick(pad);SDL_DetachVirtualJoystick(id);input::set_prompt_window(nullptr);SDL_DestroyWindow(tv);
+ SDL_Quit();puts("input_sdl_test --background: hint follows the option (default off), background controller presses and rumble only with it on, keyboard and mouse released on focus loss either way: passed");
+ return 0;
+}
+static int gamecube_preset() {
+ SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy");
+ SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
+ assert(SDL_Init(SDL_INIT_EVENTS|SDL_INIT_VIDEO));input::init();input::release_keys();
+ auto m=input_map::Mapping::defaults();input_map::apply_gamecube(m);input_map::set_current(m,false);
+ SDL_VirtualJoystickDesc d;SDL_INIT_INTERFACE(&d);
+ d.type=SDL_JOYSTICK_TYPE_GAMEPAD;d.naxes=6;d.nbuttons=12;d.vendor_id=0x057e;d.product_id=0x0337;
+ d.name="GameCube WUP-028 synthetic";
+ auto id=SDL_AttachVirtualJoystick(&d);assert(id);
+ char guid[33]{};SDL_GUIDToString(SDL_GetGamepadGUIDForID(id),guid,sizeof guid);
+ // SDL HIDAPI WUP-028 physical button order, independent of printed button labels.
+ std::string mapping=std::string(guid)+",GC fixture,a:b0,b:b2,x:b1,y:b3,dpleft:b4,dpright:b5,dpdown:b6,dpup:b7,start:b8,rightshoulder:b9,misc3:b11,misc4:b10,leftx:a0,lefty:a1~,rightx:a2,righty:a3~,lefttrigger:a4,righttrigger:a5,type:gamecube,hint:!SDL_GAMECONTROLLER_USE_GAMECUBE_LABELS:=1,";
+ assert(SDL_AddGamepadMapping(mapping.c_str())>=0);
+ for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);
+ auto* joy=SDL_OpenJoystick(id);assert(joy);
+ auto poll=[&](){SDL_UpdateJoysticks();for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);input::update();return input::read();};
+ SDL_SetJoystickVirtualAxis(joy,4,-32768);SDL_SetJoystickVirtualAxis(joy,5,-32768);poll();
+ const int buttons[]={0,1,2,3,9,11,10};
+ const uint32_t bits[]={input::kA,input::kB,input::kX,input::kY,input::kR,input::kZL,input::kZR};
+ for(int i=0;i<7;++i){SDL_SetJoystickVirtualButton(joy,buttons[i],true);assert(poll().buttons==bits[i]);SDL_SetJoystickVirtualButton(joy,buttons[i],false);assert(poll().buttons==0);}
+ // The settings keyboard and menu use the exact same physical A/B as gameplay.
+ assert(input_map::face_input(input_map::kA)==input_map::kPadA);
+ assert(input_map::face_input(input_map::kB)==input_map::kPadX);
+ SDL_SetJoystickVirtualAxis(joy,4,-17000);assert(!(poll().buttons&input::kZL));
+ SDL_SetJoystickVirtualAxis(joy,4,-15000);assert(poll().buttons==input::kZL);
+ SDL_SetJoystickVirtualAxis(joy,4,-32768);poll();
+ SDL_SetJoystickVirtualAxis(joy,2,32767);assert(poll().rx>.99f);
+ SDL_SetJoystickVirtualAxis(joy,2,0);poll();
+ SDL_SetJoystickVirtualButton(joy,8,true);assert(poll().buttons==0);
+ SDL_SetJoystickVirtualButton(joy,8,false);assert(poll().buttons==input::kPlus);SDL_Delay(110);assert(poll().buttons==0);
+ SDL_SetJoystickVirtualButton(joy,8,true);poll();SDL_SetJoystickVirtualButton(joy,7,true);
+ assert(poll().buttons==input::kStickR);
+ SDL_SetJoystickVirtualButton(joy,8,false);assert(poll().buttons==0);
+ SDL_SetJoystickVirtualButton(joy,7,false);assert(poll().buttons==0);
+ // Home reaches the host shortcut before gameplay evaluation, even on a pad without Home.
+ SDL_SetJoystickVirtualButton(joy,8,true);poll();SDL_SetJoystickVirtualButton(joy,5,true);
+ poll();assert(overlayOpen);
+ SDL_SetJoystickVirtualButton(joy,8,false);SDL_SetJoystickVirtualButton(joy,5,false);poll();overlayOpen=false;poll();
+ assert(input::read().buttons==0);
+ // Per-pad custom bindings survive polling / Automatic; shared GameCube mapping stays separate.
+ m=input_map::current();int index=input_map::ensure_profile(m,guid,d.name);
+ auto view=input_map::view_for(m,index);input_map::set_pad_binding(view,input_map::kA,input_map::kPadY);
+ input_map::store_view(m,view,index);input_map::set_current(m,false);
+ SDL_SetJoystickVirtualButton(joy,3,true);assert(poll().buttons&input::kA);
+ SDL_SetJoystickVirtualButton(joy,3,false);poll();
+ std::puts("GameCube SDL physical faces, Z, dual triggers, camera, Start/chords, Settings, confirm/back and custom profile passed");
+ return 0;
+}
+
+static int gamecube_auto_prompts() {
+ SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy");
+ SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
+ assert(SDL_Init(SDL_INIT_EVENTS|SDL_INIT_VIDEO));input::init();input::release_keys();
+ auto m=input_map::Mapping::defaults();input_map::set_face_auto(m,true);input_map::set_current(m,false);
+ assert(!input_map::gamecube_pad());
+ set_env("WWHD_TEST_VIRTUAL_GAMEPAD_DETECTION","1");
+ SDL_VirtualJoystickDesc d;SDL_INIT_INTERFACE(&d);
+ d.type=SDL_JOYSTICK_TYPE_GAMEPAD;d.naxes=6;d.nbuttons=12;d.vendor_id=0x057e;d.product_id=0x0337;
+ d.name="GameCube WUP-028 automatic fixture";
+ auto id=SDL_AttachVirtualJoystick(&d);assert(id);
+ char guid[33]{};SDL_GUIDToString(SDL_GetGamepadGUIDForID(id),guid,sizeof guid);
+ std::string mapping=std::string(guid)+",GC automatic fixture,a:b0,b:b2,x:b1,y:b3,dpleft:b4,dpright:b5,dpdown:b6,dpup:b7,start:b8,rightshoulder:b9,misc3:b11,misc4:b10,leftx:a0,lefty:a1~,rightx:a2,righty:a3~,lefttrigger:a4,righttrigger:a5,type:gamecube,hint:!SDL_GAMECONTROLLER_USE_GAMECUBE_LABELS:=1,";
+ assert(SDL_AddGamepadMapping(mapping.c_str())>=0);
+ for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);
+ assert(input_map::gamecube_pad());
+ auto current=input_map::current();
+ assert(current.prompts==input_map::Mapping::Prompts::kAuto&&current.controllers.size()==1);
+ const int profile=input_map::profile_index(current,guid,d.name);assert(profile>=0);
+ const auto view=input_map::view_for(current,profile);
+ assert(view.preset.gamecube);
+ assert(view.pad[input_map::kA]==input_map::kPadA);
+ assert(view.pad[input_map::kB]==input_map::kPadX);
+ assert(view.pad[input_map::kX]==input_map::kPadB);
+ assert(input_map::prompt_style(view,input_map::PadFamily::kNintendo).face==input_map::FaceStyle::kGameCube);
+ SDL_DetachVirtualJoystick(id);
+ for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);
+ set_env("WWHD_TEST_VIRTUAL_GAMEPAD_DETECTION",nullptr);
+ assert(!input_map::gamecube_pad());
+ assert(input_map::prompt_style(input_map::Mapping::defaults(),input_map::PadFamily::kXbox).face==input_map::FaceStyle::kXbox);
+ SDL_Quit();
+ std::puts("SDL GameCube detection selects GameCube prompts under Automatic and creates the matching per-pad layout profile: passed");
+ return 0;
+}
+
 int main(int argc,char** argv){
+ if(argc>1&&std::string(argv[1])=="--gamecube")return gamecube_preset();
+ if(argc>1&&std::string(argv[1])=="--gamecube-auto")return gamecube_auto_prompts();
  if(argc>1&&std::string(argv[1])=="--menu-matrix")return menu_matrix();
+ if(argc>1&&std::string(argv[1])=="--background")return background_controllers();
  SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy");
  assert(SDL_Init(SDL_INIT_EVENTS|SDL_INIT_VIDEO));
  SDL_Event device{};device.type=SDL_EVENT_AUDIO_DEVICE_REMOVED;device.adevice.recording=false;
