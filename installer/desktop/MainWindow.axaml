@@ -30,6 +30,18 @@
           <StackPanel MaxWidth="680" HorizontalAlignment="Left">
             <TextBlock x:Name="TxtWelcomeH" Classes="h1"/>
             <TextBlock x:Name="TxtWelcomeBody" FontSize="15" LineHeight="22" Margin="0,0,0,22"/>
+            <!-- an update with the last build's choices (#110): shown when a newer release is out -->
+            <Border x:Name="UpdatePanel" Background="{StaticResource Card}" BorderBrush="{StaticResource Accent}" BorderThickness="1"
+                    CornerRadius="8" Padding="20,16" Margin="0,0,0,18" IsVisible="False">
+              <StackPanel Spacing="6">
+                <TextBlock x:Name="TxtUpdH" FontWeight="SemiBold" FontSize="17" Margin="0,0,0,2"/>
+                <TextBlock x:Name="TxtUpdBody" Classes="dim"/>
+                <TextBlock x:Name="TxtUpdChoices" Margin="0,0,0,4"/>
+                <TextBlock x:Name="TxtUpdSame" Classes="dim" Margin="0,0,0,6"/>
+                <TextBlock x:Name="TxtUpdMissing" Foreground="{StaticResource Warn}" Margin="0,0,0,6" IsVisible="False"/>
+                <Button x:Name="BtnUpdate" Classes="primary" HorizontalAlignment="Left" Click="BtnUpdate_Click"/>
+              </StackPanel>
+            </Border>
             <Border Background="{StaticResource Card}" CornerRadius="8" Padding="20,16" Margin="0,0,0,18">
               <StackPanel Spacing="6">
                 <TextBlock x:Name="TxtWelcomeListH" FontWeight="SemiBold" Margin="0,0,0,4"/>

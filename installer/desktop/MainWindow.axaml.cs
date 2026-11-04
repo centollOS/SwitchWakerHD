@@ -67,6 +67,7 @@ public partial class MainWindow : Window
         OptWua.IsChecked = true;
         ShowPage(Page.Welcome);
         ApplyLanguage();
+        LoadSaved();
     }
 
     static void Ui(Action a) => Dispatcher.UIThread.Post(a);
@@ -172,6 +173,7 @@ public partial class MainWindow : Window
         BtnConfirmYes.Content = Str.Get("btn_yes_cancel");
         BtnConfirmNo.Content  = Str.Get("btn_no");
 
+        ShowUpdate();
         UpdateFooter();
     }
 
@@ -395,6 +397,70 @@ public partial class MainWindow : Window
         gamePath = path;
         if (page != Page.Game) ShowPage(Page.Game);
         ValidateGame();
+    }
+
+    // ── The last build's choices (#110, SavedChoices.cs) ────────────────────
+    // At start the pages get the choices of the last build that worked; when a newer release is out, the welcome
+    // page offers it with them in one click. A saved path that is gone is named there, and the normal pages pick it.
+    readonly SavedChoices? saved = SavedChoices.Load(DesktopEngine.WorkDir);
+    string offered = "";   // the release the welcome page offers ("": none)
+
+    void LoadSaved()
+    {
+        if (saved == null) return;
+        ApplySaved(saved);
+        CheckForUpdate();
+    }
+
+    void ApplySaved(SavedChoices c)
+    {
+        (c.GameArg == "--image" ? OptImg : c.GameArg == "--wua" ? OptWua : OptDir).IsChecked = true;
+        gamePath = c.GamePath;
+        keysPath = c.ForwarderKeys;
+        minimapGame = c.MinimapGame;
+        ptbrDownload = c.PtbrDownload;
+        ChkShaders.IsChecked = c.PrepareShaders;
+        ValidateGame();
+        ShowKeys();
+        ShowMinimap();
+        ShowPtbr();
+    }
+
+    async void CheckForUpdate()
+    {
+        string tag;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            tag = await Task.Run(() => EngineBase.ReleaseToOffer(timeout.Token));
+        }
+        catch (Exception) { return; }   // offline: the normal pages, filled in
+        if (saved == null || !SavedChoices.IsNewer(tag, saved.Release)) return;
+        offered = tag;
+        ShowUpdate();
+    }
+
+    void ShowUpdate()
+    {
+        if (offered == "" || saved == null) { UpdatePanel.IsVisible = false; return; }
+        TxtUpdH.Text = Str.Get("upd_h", offered);
+        TxtUpdBody.Text = saved.Release != "" ? Str.Get("upd_body", saved.Release) : Str.Get("upd_body_new");
+        TxtUpdChoices.Text = saved.Describe();
+        TxtUpdSame.Text = Str.Get("upd_same", offered);
+        var missing = saved.Missing();
+        TxtUpdMissing.Text = missing == null ? "" : Str.Get("upd_missing", missing);
+        TxtUpdMissing.IsVisible = missing != null;
+        BtnUpdate.Content = Str.Get("btn_update", offered);
+        BtnUpdate.IsVisible = missing == null;
+        UpdatePanel.IsVisible = true;
+    }
+
+    void BtnUpdate_Click(object? sender, RoutedEventArgs e)
+    {
+        if (saved == null || running) return;
+        ApplySaved(saved);   // (the game page may have been changed since)
+        if (saved.Missing() != null || !GameReady()) { ShowPage(Page.Game); return; }
+        StartInstall();
     }
 
     // ── Install ──────────────────────────────────────────────────────────────
