@@ -983,11 +983,14 @@ void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
 }
 
 // ---------------------------------------------------------------- edge smoothing before the HUD (issue #21)
-// At full resolution the FXAA pass needs a second image of the TV buffer's size: kept while FXAA is on
-// (surfaces_frame_start frees it when it is turned off), and swapped with the buffer's image after each pass,
-// so no copy back is needed.
+// At full resolution the FXAA pass needs a second image of the TV buffer's size: kept while FXAA is on and the
+// full-resolution path uses it (surfaces_frame_start frees it when FXAA is turned off, or after kFxaaImageIdle
+// frames without that path: below internal resolution 1 the pass draws into the buffer's own full-size image), and
+// swapped with the buffer's image after each pass, so no copy back is needed. surface_memory counts it.
 namespace {
 SurfaceImage g_fxaaImage;
+uint64_t g_fxaaImageUsed = 0;  // the last frame the full-resolution path used it
+constexpr uint64_t kFxaaImageIdle = 300;
 }  // namespace
 
 bool fxaa_scene(Surface* s) {
@@ -1024,14 +1027,18 @@ bool fxaa_scene(Surface* s) {
             }
             LOG("[dk] FXAA: an image of %ux%u for the TV picture (%s)", t.pw, t.ph, describe(s).c_str());
         }
+        g_fxaaImageUsed = R.frame;
         if (!fxaa_pass(s->img, t, linear)) return false;
         std::swap(s->img, t);
         R.surfaceEpoch++;  // views and lookups cached by the draws
         R.textureEpoch++;  // render targets bound again
     }
-    // the pass wrote the buffer and read its other image: a later draw that samples it, or writes the other image,
-    // gets the barrier it needs (dk_sync.h)
-    s->syncWrite = s->syncRead = sync_epoch();
+    // the pass wrote the buffer: a later draw that samples it gets the barrier it needs (dk_sync.h). Its read needs
+    // no mark: fxaa_pass's own barrier comes before it, and the image it read (g_fxaaImage, or the twin below 1) is
+    // not drawn into again this frame (the next FXAA pass, or the next frame's scene once the HUD switch's full
+    // size ends at the frame start, come after the frame-start barrier; rescales are transfers, with their own).
+    // A read mark would give the first HUD draw a write-after-read barrier it does not need.
+    s->syncWrite = sync_epoch();
     R.perf.fxaaPasses++;
     return true;
 }
@@ -2296,9 +2303,10 @@ void surfaces_frame_start() {
     S.scanSrc = nullptr;
     if (S.tvSource) S.tvSource->hudFull = false;
     if (S.drcSource) S.drcSource->hudFull = false;
-    if (g_fxaaImage.valid && !fxaa_enabled()) {  // (FXAA turned off: its image goes)
+    if (g_fxaaImage.valid && (!fxaa_enabled() || R.frame - g_fxaaImageUsed > kFxaaImageIdle)) {
+        LOG("[dk] FXAA: its %ux%u image freed (%s)", g_fxaaImage.pw, g_fxaaImage.ph,
+            fxaa_enabled() ? "unused at full resolution for a while" : "FXAA off");
         free_image(g_fxaaImage);
-        LOG("[dk] FXAA off: its image freed");
     }
     evict_idle();
     surface_stats();
@@ -2314,6 +2322,10 @@ void surface_memory(size_t& total, size_t& targets, size_t& count) {
         total += bytes;
         if (s->renderTarget || s->gpuWritten) targets += bytes;
         count++;
+    }
+    if (g_fxaaImage.valid) {  // (FXAA's second image: a render target of the TV buffer's size)
+        total += g_fxaaImage.mem.size;
+        targets += g_fxaaImage.mem.size;
     }
 }
 
