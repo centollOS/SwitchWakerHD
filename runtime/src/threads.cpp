@@ -25,6 +25,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -945,8 +946,10 @@ static void start_host_thread(HostThread* ht) {
 #else
     pthread_attr_setstacksize(&attr, 64 << 20);  // deep guest call chains recurse on the host stack
 #endif
-    pthread_create(&ht->pt, &attr, thread_main, ht);
+    const int rc = pthread_create(&ht->pt, &attr, thread_main, ht);
     pthread_attr_destroy(&attr);
+    // (this fork) a failed create left ht->pt unset: run_main's join then read a null thread (a data abort at start)
+    if (rc) fatal("cannot create guest thread (error=%d: %s)", rc, strerror(rc));
 #endif
 }
 
