@@ -54,6 +54,9 @@ that the performance test can judge the result on places the profile never saw; 
   does not always notice, and an object compiled without the flag crashes the game.
 - **Profile names come from the object's relative path** (`-fprofile-prefix-path` = the build folder). Compile from the
   build folder with relative `-o`, as CMake does, or the profile is not found (`-Wmissing-profile` says so).
+  On Windows GCC compares the prefix with the object's absolute name in backslashes (`C:\...\switch-dk\CMakeFiles/...`):
+  the prefix must be the native path, or every `.gcda` is looked for under the whole path and none is found, silently
+  under `-Wno-missing-profile` (#118: v1.2.0's Windows builds had no profile).
 - **GCC's default `-fprofile-use` options inflate the hot code 29%** (unrolling, peeling, tail duplication). The USE defaults
   turn them off and enable block partitioning (`cmake/SwitchPgo.cmake`); `WWHD_PGO_USE_FLAGS` appends more.
 - `-fno-reorder-functions` keeps the sections named `.text.<function>`, which `tools/switch/hot_sections.ld` orders.
