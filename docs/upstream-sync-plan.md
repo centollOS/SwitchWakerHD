@@ -65,6 +65,12 @@ Found while building for the Switch:
   emit's debug draw-context load, the button glyph and HUD hide name checks when unused. Kept (they do
   something): the fog pin (#178, ~0.05 ms), the play context for the L rule (~0.02 ms). After them (sync15,
   ABBA x2): main thread +0.2-0.8 ms without PGO, as before: within what placement moves.
+- **Final A/B/C** (2026-11-04, ABCCBA x2, each PGO build with its own fresh profile, `--plan default`; v1.1.0
+  built from its tag as the installer does): main thread v1.1.0 / main 358ff8ad PGO / sync PGO: lava 33.00 /
+  30.74 / 30.68 ms (29.14 / 29.97 / 29.95 fps), Windfall 32.34 / 30.87 / 31.13 (29.94 / 29.97 / 29.97), Dragon
+  Roost 32.55 / 30.79 / 30.99 (29.64 / 29.96 / 29.95), village 36.36 / 33.66 / 33.56 (26.27 / 29.07 / 29.15).
+  Both PGO builds beat v1.1.0 by 1.2-2.8 ms; sync vs main is -0.1..+0.26 ms, inside the 95% intervals (0.5-0.7 ms),
+  fps the same. The sync costs nothing measurable once PGO is on (the release build).
 - Tests: `tools/recomp` passes (94, 2 skipped: `test_preserve_registers`' default cases need fork_prepare's
   whole-program data the test's hand-made Recompiler lacks; the randomizer profile's hook digest is upstream's hook
   list, so randomized RPX files are not taken by the fork until it ships its own profile).
