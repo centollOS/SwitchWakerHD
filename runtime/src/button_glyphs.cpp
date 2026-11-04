@@ -695,6 +695,9 @@ bool inside(uint32_t pane, uint32_t ancestor) {
 // neighbour, which then covered the word when it came later. With a restyled look, the words of a
 // complete cluster are held back and drawn after the rest of it, with the same DrawInfo.
 void button_glyphs::draw_pane(Cpu* c, PpcFunc draw) {
+    // (this fork) every pane drawn passes here: a session that never restyled the prompts (the original faces and
+    // shoulders, so no keycap, GameCube plate or word, and no cluster held back) draws it as the game does
+    if (!marking() && !deferring_cluster) return draw(c);
     const uint32_t pane = c->r[3];
     // CommandGuide's A disc is a Window, not a Picture. Pane::Draw tests +0x46
     // only for DrawSelf, then still draws the children. Suppress the stock frame

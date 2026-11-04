@@ -839,7 +839,7 @@ std::string current_draw_context() {
     return id < g_draw_context_texts.size() ? g_draw_context_texts[id] : "-";
 }
 // (this fork) emit's debug draw context (WWHD_VK_PIPELINE_WHO), out of its hot path
-static __attribute__((noinline, cold)) void describe_draw_context(Op op) {
+[[maybe_unused]] static __attribute__((noinline, cold)) void describe_draw_context(Op op) {
     static thread_local bool describing = false;
     if (describing || !(op == OP_DRAW || op == OP_DRAW_INDEXED || op == OP_CALL) || (recording() && recording()->start))
         return;
@@ -858,7 +858,9 @@ static __attribute__((noinline, cold)) void describe_draw_context(Op op) {
 void emit(Op op, const uint32* payload, uint32 n) {
     // (this fork) the debug draw context (WWHD_VK_PIPELINE_WHO) in a cold function: here only the provider's null
     // check (the thread_local it reads is a call on the Switch, at every command)
+#ifndef __SWITCH__  // (this fork) a debug of the Vulkan backend (dsweep.cpp): no load at every command on the Switch
     if (__builtin_expect(g_draw_context_provider != nullptr, 0)) describe_draw_context(op);
+#endif
     if (Recording* rec = recording(); rec && rec->start) {
         rec->recorded++;
         // (this fork, round 45) a register write merged into the list's last command, as in the staging buffer: most

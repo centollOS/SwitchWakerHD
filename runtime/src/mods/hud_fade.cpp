@@ -113,6 +113,7 @@ void hud_fade_step(const playctx::PlayContext& c) {
     g_picto_frame_hidden.store(large_picto_option() && c.has(playctx::kPictoFinder) && !c.has(playctx::kAlbum), std::memory_order_relaxed);
     if (!any_on()) {
         for (auto& a : g_alpha) a.store(1.f, std::memory_order_relaxed);
+        g_any_faded.store(false, std::memory_order_relaxed);  // (this fork)
         return;
     }
     static const bool wanted = (play_context_want(true), true);  // (the reading starts with the next step)
@@ -150,6 +151,13 @@ float hud_fade_alpha_of(uint32_t pane) {
 }
 
 int hud_pane_hide(uint32_t pane) {
+#ifdef __SWITCH__
+    // (this fork) asked for every pane drawn: nothing faded, no Picto frame hidden, no touch cluster (and no One
+    // screen on the Switch) hides none, without the name compares
+    if (!g_any_faded.load(std::memory_order_relaxed) && !g_picto_frame_hidden.load(std::memory_order_relaxed) &&
+        !context_touch_hide_cluster())
+        return 0;
+#endif
     const char* n = reinterpret_cast<const char*>(mem::ptr(pane + kPaneName));
     if (const int e = element_of(n); e >= 0) return g_alpha[e].load(std::memory_order_relaxed) <= 0.f ? 1 : 0;
     if (one_screen_hidden_pane(n)) return 1;
