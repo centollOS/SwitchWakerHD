@@ -308,6 +308,9 @@ void cheats_service();          // game main thread, frame start (interp.cpp)
 void request_warp(const char* stage, int room, int point);  // any thread
 bool warp_pending();
 std::string current_stage();  // the stage the game is in ("sea", "LinkRM"...; any thread, "" before the game data)
+// Beedle's Shop Ship and the other ships entered from the sea: the sea room their way out sails back to is made sure
+// of (mods/shop_ship.h); game main thread, frame start (interp.cpp)
+void shop_ship_service();
 
 // shared helpers (mods.cpp)
 uint64_t step();    // full logic steps so far (interp::logic_steps)

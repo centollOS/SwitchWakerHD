@@ -2032,6 +2032,7 @@ extern "C" void hook_0203593C(Cpu* c) {
     bench::game_frame(c);        // (this fork) the performance test: the clock held, main-thread time (bench_switch.h)
     shader_wait::frame();  // (this fork) draws wait for their shaders while an item is shown (#49)
 #endif
+    mods::shop_ship_service();  // the ships' way back to the sea (mods/shop_ship.h)
     // the item ring: its equip, the game's pace while open (full logic passes, and true 60's half passes,
     // which also run Link), the ring drawn
     mods::item_ring_service(c, !enabled() || !g_hold_next, enabled() && g_hold_next && true60::enabled());
