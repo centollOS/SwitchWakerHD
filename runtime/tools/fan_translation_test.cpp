@@ -29,6 +29,10 @@
 #endif
 // hle/fs.cpp reports opened language packs to the right-to-left text support (not under test)
 namespace rtl_text { void language_pack_opened(const std::string&) {} }
+// hle/fs.cpp reports opened 2D layout / 3D pose packs to the HUD mods (not under test; the same stubs as
+// mod_content_fs_test.cpp and language_source_test.cpp)
+namespace game_layouts { void note_open(const std::string&, const std::string&) {} }
+namespace link_poses { void note_open(const std::string&, const std::string&) {} }
 namespace fs = std::filesystem;
 namespace {
 std::map<std::string, PpcFunc>& functions() {
