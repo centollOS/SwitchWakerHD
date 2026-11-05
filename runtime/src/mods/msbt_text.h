@@ -63,6 +63,7 @@ inline std::map<std::string, std::string> texts(const std::vector<uint8_t>& m, b
             if (ch == 0) break;
             if (ch == 0x0E) {  // group, type, parameter size, parameters
                 if (q + 6 > e) break;
+                if (marks && be16(txt + q) == 0 && be16(txt + q + 2) == 3) t += '*';
                 q += 6 + be16(txt + q + 4);
                 continue;
             }
