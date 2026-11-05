@@ -406,9 +406,16 @@ std::string setup_identity_unlocked(const std::string& id) {
 const char* kUnconfirmed="Not loaded: it contains native code you have not confirmed. Enable it again to review.";
 Value config(const Manifest& m){Value out;out.type=Value::Object;for(const auto& o:m.options){const auto& saved=profile().get("config").get(m.id).get(o.id);out[o.id]=valid_option(o,saved)?saved:o.default_value;}return out;}
 void save(){if(!ready)return;fs::create_directories(root);auto tmp=root/"profiles.json.tmp";std::ofstream f(tmp,std::ios::binary|std::ios::trunc);f<<json::dump(database)<<'\n';f.close();require(bool(f)&&host::replace_file(tmp.string(),(root/"profiles.json").string()),"Cannot save mod profiles");}
-// (this fork) upstream's letterbox modes (4e26b392, target-letterbox.mode) are not ported: the profile keeps no mode
-void save_letterbox_options(Value&) {}
-void load_letterbox_options(const Value&) {}
+void save_letterbox_options(Value& options) {
+    options["target-letterbox.mode"] = double(targeting_letterbox_mode());
+}
+void load_letterbox_options(const Value& options) {
+    if (std::getenv("WWHD_TARGET_LETTERBOX") || std::getenv("WWHD_TARGET_LETTERBOX_MODE")) return;
+    const auto& value = options.get("target-letterbox.mode");
+    // The legacy boolean remains authoritative for old profiles and settings presets.
+    if (!letterbox_while_targeting() && value.type == Value::Number &&
+        (value.number == 1 || value.number == 2)) set_targeting_letterbox_mode(int(value.number));
+}
 void save_fast_forward_options(Value& options) {
     options["fast-forward.rate"] = double(fast_forward_rate());
     options["fast-forward.button"] = double(fast_forward_button());
