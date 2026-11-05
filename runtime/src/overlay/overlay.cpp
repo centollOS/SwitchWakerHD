@@ -1848,6 +1848,19 @@ void builtin_options(const std::string& id) {
         for (const char* env : {"WWHD_MOD_DOOR_MODE", "WWHD_MOD_WALK_DOORS_A"})
             if (const char* override = std::getenv(env))
                 note("%s=%s overrides the saved option at startup.", env, override);
+    } else if (id == "leaf-rise") {
+        ImGui::TextUnformatted("Height of one wave");
+        for (int pct : {50, 100, 150, 200}) {
+            char label[16];
+            std::snprintf(label, sizeof label, "%d%%", pct);
+            if (pct != 50) flow::next(flow::check(label));
+            if (radio(label, int(mods::leaf_rise_height()) == pct))
+                hostui::post([pct] { mods::set_leaf_rise_height(float(pct)); hostui::set("mod.leaf-rise.height", std::to_string(pct)); mods::packages::remember_option("leaf-rise.height", float(pct)); });
+        }
+        help("100% lifts Link about his own height per wave. Holding the leaf's button waves on every 0.3 s. "
+             "The glide uses magic as usual, so the magic meter is still the limit. Idea from the GreenNaugahyde Android fork.");
+        if (const char* override = std::getenv("WWHD_MOD_LEAF_HEIGHT"))
+            note("WWHD_MOD_LEAF_HEIGHT=%s overrides the saved height at startup.", override);
     } else if (id == "quick-use") {
         ImGui::TextUnformatted(menu_i18n::tr("Quick-use animation speed"));
         for (float speed : {1.f, 1.25f, 1.5f}) {

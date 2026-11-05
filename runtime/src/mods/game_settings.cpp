@@ -616,6 +616,7 @@ void register_game() {
         {"no-text-pauses", "No pauses in texts", "Texts go on without their short pauses."},
         {"fix-game-bugs", "Fix original game bugs", "Fixes bugs of the original game. Off, it plays exactly like the original."},
         {"jump-anywhere", "Jump anywhere", "A button of its own makes Link jump, standing or running."},
+        {"leaf-rise", "Deku Leaf: wave to rise", "While gliding, each wave of the leaf lifts Link a little."},
         {"wall-climb", "Climb any wall", "Grab and climb walls with a stamina wheel; A or B lets go."},
         {"move-speed", "Run/swim speed", "A boost for running and swimming, with a stamina bar."},
         {"lock-on", "Extended enemy lock-on", "Target enemies from further away; R3 cycles targets while locked on."},

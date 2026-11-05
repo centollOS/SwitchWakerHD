@@ -109,7 +109,8 @@ int main() {
     for(const auto& entry:entries()) env(entry.startup_env,nullptr);
     env("WWHD_MOD_CAMERA_SPEED",nullptr);env("WWHD_MOD_MOUSE_SENS",nullptr);
     env("WWHD_MOD_MOVE_FACTOR",nullptr);env("WWHD_MOD_MOVE_SWIM",nullptr);env("WWHD_MOD_MOVE_STAMINA",nullptr);
-    assert(entries().size()==23);  // with camera-directed-items (#203), quick-use (#196), instant-text, no-text-pauses and fix-game-bugs (#336)
+    assert(entries().size()==24);  // with camera-directed-items (#203), quick-use (#196), leaf-rise, instant-text, no-text-pauses and fix-game-bugs (#336)
+    assert(find("leaf-rise") && !find("leaf-rise")->default_enabled);
     assert(find("instant-text") && !find("instant-text")->default_enabled && find("no-text-pauses"));
     // Fix original game bugs (#336): on by default, saved like the others, the start-up switch wins
     assert(find("fix-game-bugs") && std::string(find("fix-game-bugs")->category)=="Game" && find("fix-game-bugs")->default_enabled);
