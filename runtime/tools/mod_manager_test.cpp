@@ -1,4 +1,5 @@
 // Standalone host-side tests; no game files, player settings or guest code needed.
+#include "mods/achievements_host.h"
 #include "mods/manager.h"
 #include "mods/mods.h"
 #include "mods/climb.h"
@@ -86,6 +87,13 @@ void set_quick_use_speed(float f) { if (f == 1.f || f == 1.25f || f == 1.5f) qui
 void set_camera_speed(float f) { speed=f; }
 void set_mouse_sensitivity(float f) { sensitivity=f; }
 }
+// the built-in Achievements (mods/achievements.cpp)
+namespace achievements {
+static bool ach_on = false;
+static Settings ach_settings;
+bool enabled() { return ach_on; } void set_enabled(bool b) { ach_on = b; }
+Settings settings() { return ach_settings; } void set_settings(const Settings& s) { ach_settings = s; }
+}
 // the built-in Game progress (mods/game_progress.cpp)
 namespace game_progress {
 static bool gp_on = false, gp_screen = false;
@@ -117,7 +125,7 @@ int main() {
     for(const auto& entry:entries()) env(entry.startup_env,nullptr);
     env("WWHD_MOD_CAMERA_SPEED",nullptr);env("WWHD_MOD_MOUSE_SENS",nullptr);
     env("WWHD_MOD_MOVE_FACTOR",nullptr);env("WWHD_MOD_MOVE_SWIM",nullptr);env("WWHD_MOD_MOVE_STAMINA",nullptr);
-    assert(entries().size()==26);  // with camera-directed-items (#203), quick-use (#196), game-progress, leaf-rise, instant-text, no-text-pauses, fix-game-bugs (#336) and classic-wind-waker
+    assert(entries().size()==27);  // with camera-directed-items (#203), quick-use (#196), game-progress, achievements, leaf-rise, instant-text, no-text-pauses, fix-game-bugs (#336) and classic-wind-waker
     // Classic Wind Waker (Speedrun, #405; the real switch of mods/speedrun.cpp): off by default, saved, back after a
     // restart, the start-up switch wins
     assert(find("classic-wind-waker") && std::string(find("classic-wind-waker")->category)=="Speedrun");
@@ -160,6 +168,14 @@ int main() {
     load_saved(); assert(game_progress::on_screen() && game_progress::enabled());
     assert(set_enabled("game-progress",false) && !game_progress::enabled() && preferences["mod.game-progress.enabled"]=="0");
     preferences.erase("mod.game-progress.on-screen"); preferences.erase("mod.game-progress.enabled"); game_progress::set_on_screen(false);
+    // Achievements: off by default; its options read from the settings (the pop-up's volume within 0..1)
+    assert(find("achievements") && std::string(find("achievements")->category)=="Game" && !find("achievements")->default_enabled);
+    preferences["mod.achievements.volume"]="0.25"; preferences["mod.achievements.with-cheats"]="1"; preferences["mod.achievements.link"]="0";
+    load_saved();
+    assert(achievements::settings().volume==0.25f && achievements::settings().with_cheats && !achievements::settings().link && achievements::settings().popup);
+    preferences["mod.achievements.volume"]="7"; load_saved(); assert(achievements::settings().volume==0.25f);  // (out of range: kept)
+    for (const char* k : {"mod.achievements.volume","mod.achievements.with-cheats","mod.achievements.link"}) preferences.erase(k);
+    achievements::set_settings({});
     for(const auto& option:traversal_options()) env(option.startup_env,nullptr);
     env("WWHD_MOD_LOCK_ON_RANGE",nullptr);env("WWHD_MOD_LOCK_ON_CYCLING",nullptr);
     assert(find("target-letterbox") && find("target-letterbox")->default_enabled);
