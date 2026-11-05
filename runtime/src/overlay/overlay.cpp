@@ -574,7 +574,7 @@ void tab_saves() {
             hostui::post([] { player_name::ask(); });
         }
         ImGui::EndDisabled();
-        if (loaded) help(menu_i18n::tr("Gives your hero a new name on this save file. It's kept the next time you save."));
+        if (loaded) help(menu_i18n::tr("Gives your hero a new name on this save file, up to 16 characters (the file select shows the first 8). It's kept the next time you save."));
         else note("%s", menu_i18n::tr("Load a save file first."));
     }
     heading(menu_i18n::tr("Save states"));
