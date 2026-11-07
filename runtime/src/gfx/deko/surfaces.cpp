@@ -208,7 +208,8 @@ void decode_level(Surface* s, uint32_t level, uint8_t* dst) {
     uint32_t pitch = level == 0 && s->pitch ? s->pitch : info.pitch, height = info.height;
     auto tm = (Latte::E_HWTILEMODE)info.hwTileMode;
     uint32_t bpp = f.bytesPerBlock * 8;
-    bool depthData = s->isDepth || f.convert == Convert::D24_R32F;
+    // (an RGBA8 texture read as depth, RGBA8_DEPTH, keeps its color layout in guest memory)
+    bool depthData = (s->isDepth && f.convert != Convert::RGBA8_DEPTH) || f.convert == Convert::D24_R32F;
     uint32_t pipeSwizzle = (s->swizzle >> 8) & 1, bankSwizzle = (s->swizzle >> 9) & 3;
     static std::vector<uint8_t> row, converted;
     row.resize(size_t(lg.bw) * f.bytesPerBlock);
@@ -493,7 +494,7 @@ bool is_layered(DkImageType t) {
 // the image of s at pw x ph pixels (its mips and layers) and its default descriptor
 void make_image(Surface* s, SurfaceImage& img, uint32_t pw, uint32_t ph) {
     if (s->fmt.image == DkImageFormat_None)
-        throw std::runtime_error("[dk] unsupported GX2 surface format 0x" + std::to_string(s->format) + " (" + describe(s) + ")");
+        throw std::runtime_error("[dk] unsupported GX2 surface format: " + describe(s));
     DkImageType viewType;
     img.type = image_type(s, &viewType);
     img.pw = pw;
@@ -1207,7 +1208,7 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
     s->tileMode = d.tileMode;
     s->swizzle = d.swizzle;
     s->isDepth = d.isDepth;
-    s->fmt = format_info(d.format, d.isDepth);
+    s->fmt = d.isDepth && !forRendering ? comparison_format_info(d.format) : format_info(d.format, d.isDepth);
     s->renderTarget = forRendering;
     s->scale = forRendering ? wanted_scale(s.get()) : 1.0f;
     create_surface_image(s.get());  // (throws for an unsupported format: the GX2 command is skipped and logged)
@@ -1396,6 +1397,23 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
     if (unique) *unique = false;
     const SurfaceDesc d = texture_desc(w, isDepthSampler);
     if (!d.addr) return nullptr;
+    // a comparison sampler whose descriptor spells a color format (RGBA8) at memory the GPU wrote as depth: that
+    // depth image, before a converted color texture (comparison_format_info; as gfx/vulkan)
+    if (isDepthSampler && format_lookup(d.format, true).image == DkImageFormat_None) {
+        Surface* rendered = nullptr;
+        auto range = S.byAddr.equal_range(d.addr);
+        for (auto it = range.first; it != range.second; ++it) {
+            Surface* c = it->second.get();
+            if (!c->isDepth || !c->gpuWritten || !c->fmt.depth || c->fmt.convert == Convert::RGBA8_DEPTH ||
+                c->width != d.width || c->height != d.height || c->slices != d.slices)
+                continue;
+            if (!rendered || c->writeSeq > rendered->writeSeq) rendered = c;
+        }
+        if (rendered) {
+            if (unique) *unique = S.byAddr.count(d.addr) == 1;
+            return found(rendered);
+        }
+    }
     Surface* s = find_or_create_surface(d, false);
     if (unique) *unique = S.byAddr.count(d.addr) == 1;
     upload_surface(s);
