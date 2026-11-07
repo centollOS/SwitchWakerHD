@@ -17,6 +17,45 @@ which on the same console means something got slower, or the console's condition
 From v1.0.1 on, `perf_test.py` keeps the conditions of each boot in the result file (`meta.boots`: the version, the
 console mode and charge, the clocks the game logged, the picture settings that change the load).
 
+## v1.2.2, 2026-11-07
+
+Hotfix (#126: Puppet Ganon's cutscene; #127: an RGBA8 texture read by a shadow sampler, and PGO builds without
+`-freorder-blocks-and-partition`, whose cold parts' exception tables were wrong). It changes the renderer and the PGO
+flags, so F and G were run. Console: the maintainers' second Switch, HOS 20.1.1, handheld, charging, the player's
+settings (a fresh `settings.ini`: only the language and the debug server), CPU 1020 MHz, GPU 384 MHz in every boot.
+Both builds made from their release zips with `make_sd.py` as a player gets them, each with v1.2.1's profile for the
+region (the tagged tree, 1aaa237 = a8e2539, has the same code; v1.2.2's own profiles were trained afterwards).
+
+### G. Performance: v1.2.2 against v1.2.1
+
+`perf_test.py ab <v1.2.1 USA build> <v1.2.2 USA build> --scenes lava,windfall,dragonroost,outset_grass_us,outset_lookout_us
+--order ABBA --repeat 2 --expect perf/results/v1.2.0-vs-v1.1.0.json` (1800 frames per scene; USA game through
+`[dev] WWHD_GAME_DIR`): 4 boots of each, interleaved, time of day held at 200. File:
+[`perf/results/v1.2.2-vs-v1.2.1.json`](../perf/results/v1.2.2-vs-v1.2.1.json).
+
+| Scene | v1.2.1 fps | v1.2.2 fps | Change (95% interval) | Main thread |
+|---|---|---|---|---|
+| lava (`M_NewD2` 2) | 29.55 | 29.63 | +0.07 (+-0.20) | 31.06 -> 31.00 ms (-0.2%) |
+| windfall | 29.95 | 29.96 | +0.01 (+-0.03): at the 30 fps cap | 31.56 -> 31.47 ms (-0.3%) |
+| dragonroost | 29.69 | 29.74 | +0.05 (+-0.16) | 31.71 -> 31.53 ms (-0.6%) |
+| outset_grass_us | 29.97 | 29.97 | 0.00: at the cap | 19.48 -> 19.51 ms (+0.1%) |
+| outset_lookout_us | 29.97 | 29.97 | 0.00: at the cap | 31.43 -> 31.23 ms (-0.6%) |
+
+No scene slower: dropping block partitioning costs nothing measurable. `--expect`: every scene as v1.2.0's record
+(within 0.5 fps; lava -0.29 and dragonroost -0.22 against that run, on another console).
+
+### F. Memory
+
+Two laps of the 40-warp tour on the EU game (`perf/results/v1.2.2-memory.txt`), no crash:
+
+| | End of lap 1 | End of lap 2 |
+|---|---|---|
+| malloc in use | 2489 MiB | 2553 MiB (+64) |
+| Image heap | 3 chunks, 192 MiB (4.4 MiB free) | 4 chunks, 256 MiB (33.4 MiB free) |
+| Shader variants alive | 1334 (5365 freed) | 1321 (11652 freed) |
+
+As v1.2.0: the +64 MiB of lap 2 is the image heap's fourth chunk (fragmentation, F3), and nothing else grew.
+
 ## v1.2.0, 2026-11-04
 
 Console: the maintainers' Switch, HOS 22.1.0, handheld, charging; the player's settings as in v1.1.0's run (dynamic
