@@ -42,6 +42,7 @@ enum class Convert : uint8_t {
     D24S8,      // 24-bit depth + 8-bit stencil -> ZF32_X24S8 (kept at first, plan section 3)
     D24_R32F,   // 24-bit depth sampled as a color texture -> R32F
     X24_8_32F,  // 32F depth + 8 stencil in 64 bits -> ZF32_X24S8
+    RGBA8_DEPTH,  // RGBA8 read by a comparison sampler: the red channel, normalized -> ZF32 (as gfx/vulkan)
 };
 struct FormatInfo {
     DkImageFormat image = DkImageFormat_None;  // the DkImage's format (render targets, uploads)
@@ -54,6 +55,9 @@ struct FormatInfo {
 };
 // isDepth: the surface is used as a depth buffer (selects depth formats). image None: unsupported (logged once)
 FormatInfo format_info(uint32_t gx2Format, bool isDepth);
+// a texture read by a comparison (shadow) sampler: its depth format, else for RGBA8 (an unrendered shadow-map
+// placeholder: Puppet Ganon's cutscene, issue #126) a ZF32 image of its red channel, as gfx/vulkan's
+FormatInfo comparison_format_info(uint32_t gx2Format);
 void convert_row(Convert c, const uint8_t* src, uint8_t* dst, uint32_t count);
 
 // ---- descriptors (descriptors.cpp). The image and sampler descriptor sets of memory.cpp are bound once

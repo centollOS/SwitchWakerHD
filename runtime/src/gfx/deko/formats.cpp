@@ -132,6 +132,17 @@ FormatInfo format_info(uint32_t fmt, bool isDepth) {
     return f;
 }
 
+FormatInfo comparison_format_info(uint32_t fmt) {
+    FormatInfo f = format_lookup(fmt, true);
+    if (f.image != DkImageFormat_None) return f;
+    if (fmt == 0x1A) {  // RGBA8 UNORM: the comparison reads the normalized red component
+        f = make(DkImageFormat_ZF32, 4, FormatInfo::FLOAT, Convert::RGBA8_DEPTH);
+        f.depth = true;
+        return f;
+    }
+    return format_info(fmt, true);  // (logs the unsupported format once)
+}
+
 // What deko3d allows each image format (its formatTraits, deko3d 0.5.0 source/maxwell/format_traits.inc):
 // rendering (DkImageFlags_UsageRender) and the 2D engine (DkImageFlags_Usage2DEngine, dkCmdBufBlitImage). The
 // debug library rejects an image whose flags its format does not support.
@@ -228,6 +239,12 @@ void convert_row(Convert c, const uint8_t* src, uint8_t* dst, uint32_t n) {
         break;
     case Convert::X24_8_32F:
         memcpy(dst, src, n * 8);
+        break;
+    case Convert::RGBA8_DEPTH:
+        for (uint32_t i = 0; i < n; i++) {
+            const float d = float(src[4 * i]) / 255.0f;
+            memcpy(dst + 4 * i, &d, 4);
+        }
         break;
     }
 }

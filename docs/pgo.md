@@ -58,8 +58,13 @@ that the performance test can judge the result on places the profile never saw; 
   the prefix must be the native path, or every `.gcda` is looked for under the whole path and none is found, silently
   under `-Wno-missing-profile` (#118: v1.2.0's Windows builds had no profile).
 - **GCC's default `-fprofile-use` options inflate the hot code 29%** (unrolling, peeling, tail duplication). The USE defaults
-  turn them off and enable block partitioning (`cmake/SwitchPgo.cmake`); `WWHD_PGO_USE_FLAGS` appends more.
+  turn them off (`cmake/SwitchPgo.cmake`); `WWHD_PGO_USE_FLAGS` appends more.
 - `-fno-reorder-functions` keeps the sections named `.text.<function>`, which `tools/switch/hot_sections.ld` orders.
+- **No `-freorder-blocks-and-partition` with `-fno-reorder-functions`** (issue #126): GCC 15 then keeps each function's
+  cold part in the function's own section but counts the cold part's exception table from the hot part's start, while
+  its unwind entry starts at the cold code. A throw from cold code is in no call-site range, and the unwinder calls
+  `std::terminate` instead of the `catch` (v1.2.1: 4,070 of 10,136 exception tables, every `.cold` part; Puppet Ganon's
+  cutscene ended the game where the renderer should have skipped one draw).
 - Forcing night on the Outset benchmark states makes the game halt on its own assertion (`d_event_data.cpp:1103`); the
   trainer uses night only for states that survive it.
 - Training needs the console at any clock, but compare speed only at stock clocks (sys-clk off, GPU profile default).

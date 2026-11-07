@@ -128,13 +128,18 @@ macro(switch_pgo_configure)
       endif()
       # -fno-reorder-functions / -fno-profile-reorder-functions: the profile would rename the functions' sections
       # (.text.hot.*, .text.sorted.*) and tools/switch/hot_sections.ld, which lists .text.<function>, would no
-      # longer put them together. Cold basic blocks are still moved out of the functions (.text.unlikely.*).
+      # longer put them together. Cold basic blocks still go to the end of each function (-freorder-blocks).
+      # No -freorder-blocks-and-partition (issue #126): with -fno-reorder-functions GCC 15 keeps the cold part in the
+      # function's own section and puts the label its exception table counts from (.LCOLDB) at the hot part's start,
+      # while the cold part's unwind entry starts at the cold code: no throw from cold code (a `throw`, std::bad_alloc)
+      # is found in its table and the unwinder calls std::terminate instead of the catch (v1.2.1: 4,070 of 10,136
+      # exception tables wrong, every ".cold" part)
       set(_pgo_flags ${_pgo_common} -fprofile-use=${WWHD_PGO_DIR} -fprofile-correction -fprofile-partial-training
                      -fno-reorder-functions -fno-profile-reorder-functions -Wno-missing-profile -Wno-coverage-mismatch
                      # -fprofile-use turns on loop unrolling, peeling and tail duplication: on one hot file (code_hot_012)
                      # the object grew 29% (40,180 -> 51,900 bytes), and the hot code is already bigger than the A57's
-                     # 2 MiB L2. Without them it is +3%; the block partitioning moves cold blocks out (.text.unlikely).
-                     -fno-tracer -fno-unroll-loops -fno-peel-loops -freorder-blocks-and-partition
+                     # 2 MiB L2. Without them it is +3%.
+                     -fno-tracer -fno-unroll-loops -fno-peel-loops
                      ${WWHD_PGO_USE_FLAGS})
     endif()
     string(REPLACE ";" " " _pgo_flags_text "${_pgo_flags}")
