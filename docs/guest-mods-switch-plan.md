@@ -133,7 +133,7 @@ D (installer build; a Windows run by the user).
 
 ## The HD minimap (issue #121, 2026-11-08)
 
-`hd-minimap` 0.2.5 from the catalogue (upstream's code-mod port of Chironeyes' Minimap HD Cemu pack): no setup step,
+`hd-minimap` 0.2.5 from the catalogue (upstream's code-mod port of Chironeyes' Minimap HD Cemu pack, [GameBanana](https://gamebanana.com/mods/727687), MIT; credited in INSTALL.md, the installers' box and the mod's page in the Mods tab): no setup step,
 no GameCube disc; it draws the HD game's own GamePad map art through the layout-art services (`WWHD_HUD_GAME`,
 `layout-pane:` / `layout-texture:`, game_layouts.cpp) and the map/HUD bridge (docs/mod-sdk-map-hud.md).
 

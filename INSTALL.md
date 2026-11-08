@@ -238,8 +238,8 @@ Two minimaps from the mod catalogue can be built into the game. Both are off unl
 one of them: they use the same corner of the screen (the installer offers one at a time; with `make_sd.py`, give only
 one of the two).
 
-**The HD minimap** (`hd-minimap`, based on [Minimap HD](https://github.com/Chironeyes/The.Wind.Waker.HD-Minimap.HD) by
-Chironeyes) draws a minimap in the bottom-left corner with the HD game's own GamePad maps: the island of the sea square
+**The HD minimap** (`hd-minimap`, based on **Minimap HD by Chironeyes**, the Cemu mod on
+[GameBanana](https://gamebanana.com/mods/727687) and [GitHub](https://github.com/Chironeyes/The.Wind.Waker.HD-Minimap.HD)) draws a minimap in the bottom-left corner with the HD game's own GamePad maps: the island of the sea square
 you are in, the floor plan of a dungeon once you have its map, and while sailing (D-pad down) a treasure chart you own.
 It reads the maps from your own game while it runs, so it needs nothing besides your Wind Waker HD. In the
 [Easy Installer](#windows-easy-installer-recommended), tick *HD minimap*; with `make_sd.py`:

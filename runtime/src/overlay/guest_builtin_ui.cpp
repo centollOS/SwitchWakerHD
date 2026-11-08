@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -33,7 +34,9 @@ void wrapped(const ImVec4& colour, const std::string& text) {
 // "Other". Names and groups go through menu_i18n::tr (rows in menu_i18n_mods.inc).
 struct Group { const char* name; std::vector<const char*> options; };
 struct Choice { const char* option; const char* value; const char* label; };
-struct Layout { const char* mod; std::vector<Group> groups; std::vector<const char*> developer; std::vector<Choice> choices; };
+// credit: the original work the mod is based on, shown on its page (name and where to find it, not translated)
+struct Layout { const char* mod; std::vector<Group> groups; std::vector<const char*> developer; std::vector<Choice> choices;
+                const char* credit = nullptr; };
 
 const std::vector<Layout>& layouts() {
     static const std::vector<Layout> all = {
@@ -46,7 +49,8 @@ const std::vector<Layout>& layouts() {
          {{"zoom_turn_with", "camera", "Camera"}, {"zoom_turn_with", "link", "Link"},
           {"*key", "left", "D-pad left"}, {"*key", "right", "D-pad right"}, {"*key", "up", "D-pad up"},
           {"*key", "down", "D-pad down"}, {"*key", "l3", "Left stick click"}, {"*key", "r3", "Right stick click"},
-          {"*key", "none", "None"}}},
+          {"*key", "none", "None"}},
+         "Minimap HD by Chironeyes (gamebanana.com/mods/727687)"},
         {"gc-minimap",
          {{"Position and size", {"x", "y", "size"}}, {"Look", {"opacity", "style"}}, {"Dungeons", {"dungeons"}}},
          {},
@@ -173,6 +177,11 @@ bool page(bool back, bool& back_used) {
     ImGui::TextDisabled("%s", m.version.c_str());
     if (!m.status.empty()) wrapped(kBad, menu_i18n::tr("Not running: ") + m.status);
     else if (!m.description.empty()) ImGui::TextWrapped("%s", menu_i18n::tr(m.description.c_str()));
+    if (l && l->credit) {
+        char line[256];
+        std::snprintf(line, sizeof line, menu_i18n::tr("Based on %s"), l->credit);
+        wrapped(kMuted, line);
+    }
     // the mods read their options when the game starts
     if (m.changed)
         wrapped(kWarn, menu_i18n::tr("Saved. The mods read their options when the game starts: close the game (HOME) and start it "

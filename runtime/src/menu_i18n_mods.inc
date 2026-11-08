@@ -266,6 +266,7 @@
  "Incluso in questo gioco: per toglierlo, crea di nuovo il gioco senza.",
  "In dieses Spiel eingebaut: Um es zu entfernen, erstelle das Spiel ohne es neu.",
  "Intégré à ce jeu : pour le retirer, recréez le jeu sans lui."},
+{"Based on %s", "Basado en %s", "Baseado em %s", "Basato su %s", "Basiert auf %s", "Basé sur %s"},
 {"Position and size",
  "Posición y tamaño",
  "Posição e tamanho",
