@@ -119,13 +119,6 @@ bool g_scroll_top = false;
 
 void draw() {
     auto& list = guestbuiltin::list();
-    if (list.empty()) return;
-    ImGui::SeparatorText(menu_i18n::tr("Code mods in this build"));
-    wrapped(kMuted, menu_i18n::tr("Built into the game when it was made (make_sd.py --guest-mod). To add or remove one, build the "
-                                  "game again."));
-    if (!ImGui::BeginTable("code_mods", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_PadOuterX)) return;
-    ImGui::TableSetupColumn("on", ImGuiTableColumnFlags_WidthFixed);
-    ImGui::TableSetupColumn("mod", ImGuiTableColumnFlags_WidthStretch);
     for (auto& m : list) {
         ImGui::PushID(m.id.c_str());
         ImGui::TableNextRow();
@@ -155,7 +148,6 @@ void draw() {
         else wrapped(kGood, menu_i18n::tr("On"));
         ImGui::PopID();
     }
-    ImGui::EndTable();
 }
 
 bool page(bool back, bool& back_used) {

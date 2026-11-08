@@ -243,18 +243,6 @@
  "Sicherung gelöscht.",
  "Copie supprimée."},
 // ---- guest_builtin_ui.cpp (the code mods built into the NRO)
-{"Code mods in this build", "Mods de código de esta versión", "Mods de código desta versão",
- "Mod di codice in questa versione",
- "Code-Mods in dieser Version",
- "Mods de code de cette version"},
-{"Built into the game when it was made (make_sd.py --guest-mod). To add or remove one, build the game again.",
- "Incluidos en el juego al crearlo (make_sd.py --guest-mod). Para añadir o quitar uno, vuelve a crear el juego.",
- "Incluídos no jogo quando ele foi gerado (make_sd.py --guest-mod). Para adicionar ou remover um, gere o jogo de novo.",
- "Incluse nel gioco quando è stato creato (make_sd.py --guest-mod). Per aggiungerne o toglierne una, crea di nuovo "
- "il gioco.",
- "Beim Erstellen ins Spiel eingebaut (make_sd.py --guest-mod). Um einen hinzuzufügen oder zu entfernen, erstelle das "
- "Spiel neu.",
- "Intégrés au jeu lors de sa création (make_sd.py --guest-mod). Pour en ajouter ou en retirer un, recréez le jeu."},
 {"Saved. The mods read their options when the game starts: close the game (HOME) and start it again to see the "
  "change.",
  "Guardado. Los mods leen sus opciones al arrancar el juego: cierra el juego (HOME) y vuelve a abrirlo para ver el "

@@ -61,7 +61,7 @@ struct Host {
     mods::catalogue::Version port_version;
     std::string build_name = "USA";
     bool android = false;
-    std::function<void()> builtin_code_mods;  // (this fork) the Switch NRO's code mods (guest_builtin_ui.h)
+    std::function<void()> builtin_code_mods;  // (this fork) the Switch NRO's code mods: rows of the Built-in list (guest_builtin_ui.h)
     // (this fork, #121) a code mod's page in place of the Built-in list: false when none is open (guest_builtin_ui.h)
     std::function<bool(bool back, bool& back_used)> builtin_code_mod_page;
     bool file_picker = true; // the host has file and folder choosers (overlay/extensions.h Features)
@@ -1060,13 +1060,9 @@ inline void builtin_list(Host& h) {
         h.b_used = h.b_used || used;
         if (open || used) return;
     }
-    // (this fork, #121) the code mods built into this game first (guest_builtin_ui.h), then the built-in mods
-    if (h.builtin_code_mods) {
-        h.builtin_code_mods();
-        ImGui::Spacing();
-    }
     muted(tr(kAreaCaptions[kBuiltin]));
     if (!begin_list("builtin")) return;
+    if (h.builtin_code_mods) h.builtin_code_mods();  // (this fork, #121) the code mods built into this game, first
     for (const auto& e : mods::manager::entries()) {
         if (on_controls_tab(e.id)) continue;
         // the story system needs the Story Notebook package, which only the mod list provides

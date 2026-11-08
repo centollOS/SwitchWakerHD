@@ -280,7 +280,7 @@ The Switch cannot build code mods (Mod SDK v2, "guest" mods) itself, so they go 
   [python.org](https://www.python.org/downloads/), or make an `.iso` in Dolphin (right-click the game, *Convert
   File...*, format *ISO*) and give that. An `.iso`, a `.gcm` or a folder works with any Python 3.
 - **Its options** (position, size, opacity, map style) are changed on the console: hold **Minus** > **Mods** >
-  **Built-in**, at the top, *Code mods in this build*; then close the game and start it again. Or set them when you
+  **Built-in**, at the top, *GameCube minimap*; then close the game and start it again. Or set them when you
   build: `--mod-option gc-minimap.size=260` (`x`, `y`, `size`, `opacity`, `style` = `vector` or `original`).
 - The maps it prepares are kept in your user folder (macOS: `~/Library/Application Support/SwitchWakerHD/guest-mods`,
   Windows: `%LOCALAPPDATA%\SwitchWakerHD\guest-mods`, Linux: `~/.local/share/SwitchWakerHD/guest-mods`), and
