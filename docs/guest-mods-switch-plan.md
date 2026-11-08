@@ -172,10 +172,13 @@ no GameCube disc; it draws the HD game's own GamePad map art through the layout-
   of rounding: 193 of 6.5 million bytes differ, by 1), and the finished pictures are kept (up to 4 MiB). On the console:
   pack index 1.3 ms, the file-select art ~65 ms in all, an island map 35.9 ms the first time (one 94 ms frame) and
   0.2 ms after; textures from the real EU pack are byte-identical to before except the enlarged ones.
-- **Size (the owner's report: "so low res").** Every island picture in the 2D pack is 100 x 100 (`rXX_b`, the GamePad's
-  `rXX_Full`, the treasure charts' `rXX_col_N`); the minimap drew it at 190 px (300 expanded), so its outline steps
-  and names showed. Compared on the console at 190, 150 and 130: `guest_mods.py` writes 150 / 240 into the mod's
-  `options.json` (`SWITCH_DEFAULTS`; `--mod-option` still wins). Dungeon plans are larger pictures (up to 780 x 780).
+- **Picture quality (the owner's report: "so low res").** Every island picture in the 2D pack is 100 x 100
+  (`rXX_b`, the GamePad's `rXX_Full`, the treasure charts' `rXX_col_N`); dungeon plans are larger (up to 780 x 780).
+  Compared on the console at Windfall: a smaller panel (150, 130) hid the steps but was too small for the owner; the
+  mod's "Smooth island maps" (the port's 3x Lanczos with sharpening and a steeper alpha ramp) is what made the outline
+  stair-stepped. The overlay draws mod pictures with a linear, clamped sampler (deko3d sampler 0), so with the option
+  off the art keeps the game's soft outline: `guest_mods.py` writes `smooth: false` into hd-minimap's `options.json`
+  (`SWITCH_DEFAULTS`; `--mod-option` still wins), sizes as the manifest (190 / 300).
 - **Installers.** An "HD minimap (optional)" box on the game page (off by default; saved with the other choices),
   `--guest-mod hd-minimap`; strings in Spanish, English and Portuguese.
 - **With gc-minimap.** Both hook daPy_Execute's return (chained) and get consecutive guest regions, but both default

@@ -170,10 +170,11 @@ def unpack(src, work):
 
 
 # the Switch's own defaults for some mods' options, over their manifests' (an option the manifest no longer declares,
-# or a value outside its range, is left to the manifest). hd-minimap (#121): the island maps are the game's 100 x 100
-# GamePad art, so the compact panel is drawn at 150 px (1.5x the art, the outline and names stay clean on the 720p
-# screen) instead of 190, and the expanded one at 240 instead of 300.
-SWITCH_DEFAULTS = {"hd-minimap": {"size": 150, "size_expanded": 240}}
+# or a value of another type or outside its range, is left to the manifest). hd-minimap (#121): "Smooth island maps"
+# off. The island maps are the game's 100 x 100 GamePad art; smoothed (enlarged 3x with sharpening and a hardened
+# outline) their edges came out stair-stepped on the console's 720p screen, while the art itself drawn with the
+# overlay's linear filtering keeps the soft outline the game gives it (compared on the console, 2026-11-08).
+SWITCH_DEFAULTS = {"hd-minimap": {"smooth": False}}
 
 
 def option_values(man, given):
@@ -183,7 +184,11 @@ def option_values(man, given):
     values = {k: o["default"] for k, o in decl.items() if "default" in o}
     for key, v in SWITCH_DEFAULTS.get(man.get("id"), {}).items():
         o = decl.get(key)
-        if o and o.get("type") == "number" and o.get("min", v) <= v <= o.get("max", v):
+        if not o:
+            continue
+        if o.get("type") in ("bool", "boolean") and isinstance(v, bool):
+            values[key] = v
+        elif o.get("type") == "number" and not isinstance(v, bool) and o.get("min", v) <= v <= o.get("max", v):
             values[key] = v
     for key, text in given.items():
         o = decl.get(key)
