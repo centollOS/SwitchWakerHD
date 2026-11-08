@@ -116,6 +116,7 @@ public partial class MainWindow : Window
         TxtWelcomeLi3.Text   = "•  " + Str.Get("welcome_li3");
         TxtWelcomeNeed.Text  = Str.Get("welcome_need");
         BtnWorkDir.Content   = Str.Get("btn_change_dir");
+        BtnWorkDirDefault.Content = Str.Get("btn_default_dir");
         ShowWorkDir();
 
         TxtGameH.Text    = Str.Get("game_h");
@@ -133,7 +134,6 @@ public partial class MainWindow : Window
         TxtShH.Text = Str.Get("sh_h");
         TxtShD.Text = Str.Get("sh_d");
         TxtOldH.Text = Str.Get("old_h");
-        TxtOldD.Text = Str.Get("old_d", InstallEngine.WorkDir);
         TxtMmH.Text = Str.Get("mm_h");
         TxtMmD.Text = Str.Get("mm_d");
         BtnMmPick.Content = Str.Get("mm_pick");
@@ -214,9 +214,14 @@ public partial class MainWindow : Window
         var warn = workDirProblem ?? (BuildFolder.SavedGone != null ? Str.Get("dir_saved_gone", BuildFolder.SavedGone) : null);
         TxtWelcomeDirWarn.Text = warn ?? "";
         TxtWelcomeDirWarn.Visibility = warn == null ? Visibility.Collapsed : Visibility.Visible;
-        var removable = workDirProblem == null && BuildFolder.IsRemovable(dir);
-        TxtWelcomeDirNote.Text = removable ? Str.Get("dir_removable", BuildFolder.NeedGb(dir) + 2) : "";
-        TxtWelcomeDirNote.Visibility = removable ? Visibility.Visible : Visibility.Collapsed;
+        var notes = new List<string>();
+        if (workDirProblem == null && BuildFolder.FatFormat(dir) is string fat) notes.Add(Str.Get("dir_fat", fat));
+        if (workDirProblem == null && BuildFolder.IsRemovable(dir)) notes.Add(Str.Get("dir_removable", BuildFolder.NeedGb(dir) + 2));
+        TxtWelcomeDirNote.Text = string.Join("\n\n", notes);
+        TxtWelcomeDirNote.Visibility = notes.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        BtnWorkDirDefault.Visibility = !BuildFolder.IsDefault(dir) ? Visibility.Visible : Visibility.Collapsed;
+        TxtOldD.Text = Str.Get("old_d", dir);
+        ShowUpdate();   // (its button needs a folder the build can use)
         if (page == Page.Welcome) UpdateFooter();
     }
 
@@ -227,8 +232,23 @@ public partial class MainWindow : Window
         if (parent != null && Directory.Exists(parent)) dlg.SelectedPath = parent;
         if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
         InstallEngine.WorkDir = BuildFolder.ForPick(dlg.SelectedPath);
-        BuildFolder.SavedGone = null;
+        WorkDirChanged();
+    }
+
+    void BtnWorkDirDefault_Click(object sender, RoutedEventArgs e)
+    {
+        InstallEngine.WorkDir = BuildFolder.UseDefault();
+        WorkDirChanged();
+    }
+
+    // Another folder: its own last build's choices and update offer (#110), when it has them; else the pages as they are
+    void WorkDirChanged()
+    {
+        saved = SavedChoices.Load(InstallEngine.WorkDir);
+        offered = "";
+        if (saved != null) ApplySaved(saved);
         ShowWorkDir();
+        if (saved != null) CheckForUpdate();
     }
 
     // ── Game page ────────────────────────────────────────────────────────────
@@ -400,8 +420,9 @@ public partial class MainWindow : Window
     // ── The last build's choices (#110, SavedChoices.cs) ────────────────────
     // At start the pages get the choices of the last build that worked; when a newer release is out, the welcome
     // page offers it with them in one click. A saved path that is gone is named there, and the normal pages pick it.
-    readonly SavedChoices? saved = SavedChoices.Load(InstallEngine.WorkDir);
+    SavedChoices? saved = SavedChoices.Load(InstallEngine.WorkDir);   // (another folder's on a pick: WorkDirChanged)
     string offered = "";   // the release the welcome page offers ("": none)
+    string? latestTag;     // the release an update would build, once looked up (the same for every folder)
 
     void LoadSaved()
     {
@@ -427,15 +448,17 @@ public partial class MainWindow : Window
 
     async void CheckForUpdate()
     {
-        string tag;
-        try
+        if (latestTag == null)
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            tag = await Task.Run(() => EngineBase.ReleaseToOffer(timeout.Token));
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                latestTag = await Task.Run(() => EngineBase.ReleaseToOffer(timeout.Token));
+            }
+            catch (Exception) { return; }   // offline: the normal pages, filled in
         }
-        catch (Exception) { return; }   // offline: the normal pages, filled in
-        if (saved == null || !SavedChoices.IsNewer(tag, saved.Release)) return;
-        offered = tag;
+        if (saved == null || !SavedChoices.IsNewer(latestTag, saved.Release)) return;
+        offered = latestTag;
         ShowUpdate();
     }
 
@@ -450,13 +473,14 @@ public partial class MainWindow : Window
         TxtUpdMissing.Text = missing == null ? "" : Str.Get("upd_missing", missing);
         TxtUpdMissing.Visibility = missing == null ? Visibility.Collapsed : Visibility.Visible;
         BtnUpdate.Content = Str.Get("btn_update", offered);
+        BtnUpdate.IsEnabled = workDirProblem == null;
         BtnUpdate.Visibility = missing == null ? Visibility.Visible : Visibility.Collapsed;
         UpdatePanel.Visibility = Visibility.Visible;
     }
 
     void BtnUpdate_Click(object sender, RoutedEventArgs e)
     {
-        if (saved == null || running) return;
+        if (saved == null || running || workDirProblem != null) return;
         ApplySaved(saved);   // (the game page may have been changed since)
         if (saved.Missing() != null || !GameReady()) { ShowPage(Page.Game); return; }
         StartInstall();

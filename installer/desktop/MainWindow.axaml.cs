@@ -1,6 +1,7 @@
 // The installer's window on macOS and Linux (Avalonia): the Windows installer's four pages (windows/MainWindow.xaml.cs),
 // with each system's way to the SD card.
 using System;
+using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
@@ -120,6 +121,7 @@ public partial class MainWindow : Window
         TxtWelcomeNeed.Text  = Str.Get("welcome_need");
         TxtWelcomeAdmin.Text = Str.Get("welcome_admin");
         BtnWorkDir.Content   = Str.Get("btn_change_dir");
+        BtnWorkDirDefault.Content = Str.Get("btn_default_dir");
         ShowWorkDir();
 
         TxtGameH.Text    = Str.Get("game_h");
@@ -137,7 +139,6 @@ public partial class MainWindow : Window
         TxtShH.Text = Str.Get("sh_h");
         TxtShD.Text = Str.Get("sh_d");
         TxtOldH.Text = Str.Get("old_h");
-        TxtOldD.Text = Str.Get("old_d", DesktopEngine.WorkDir);
         TxtMmH.Text = Str.Get("mm_h");
         TxtMmD.Text = Str.Get("mm_d");
         BtnMmPick.Content = Str.Get("mm_pick");
@@ -279,9 +280,14 @@ public partial class MainWindow : Window
         var warn = workDirProblem ?? (BuildFolder.SavedGone != null ? Str.Get("dir_saved_gone", BuildFolder.SavedGone) : null);
         TxtWelcomeDirWarn.Text = warn ?? "";
         TxtWelcomeDirWarn.IsVisible = warn != null;
-        var removable = workDirProblem == null && BuildFolder.IsRemovable(dir);
-        TxtWelcomeDirNote.Text = removable ? Str.Get("dir_removable", BuildFolder.NeedGb(dir) + 2) : "";
-        TxtWelcomeDirNote.IsVisible = removable;
+        var notes = new List<string>();
+        if (workDirProblem == null && BuildFolder.FatFormat(dir) is string fat) notes.Add(Str.Get("dir_fat", fat));
+        if (workDirProblem == null && BuildFolder.IsRemovable(dir)) notes.Add(Str.Get("dir_removable", BuildFolder.NeedGb(dir) + 2));
+        TxtWelcomeDirNote.Text = string.Join("\n\n", notes);
+        TxtWelcomeDirNote.IsVisible = notes.Count > 0;
+        BtnWorkDirDefault.IsVisible = !BuildFolder.IsDefault(dir);
+        TxtOldD.Text = Str.Get("old_d", dir);
+        ShowUpdate();   // (its button needs a folder the build can use)
         if (page == Page.Welcome) UpdateFooter();
     }
 
@@ -290,8 +296,23 @@ public partial class MainWindow : Window
         var p = await PickFolder("dlg_build_dir");
         if (p == null) return;
         DesktopEngine.WorkDir = BuildFolder.ForPick(p);
-        BuildFolder.SavedGone = null;
+        WorkDirChanged();
+    }
+
+    void BtnWorkDirDefault_Click(object? sender, RoutedEventArgs e)
+    {
+        DesktopEngine.WorkDir = BuildFolder.UseDefault();
+        WorkDirChanged();
+    }
+
+    // Another folder: its own last build's choices and update offer (#110), when it has them; else the pages as they are
+    void WorkDirChanged()
+    {
+        saved = SavedChoices.Load(DesktopEngine.WorkDir);
+        offered = "";
+        if (saved != null) ApplySaved(saved);
         ShowWorkDir();
+        if (saved != null) CheckForUpdate();
     }
 
     async Task<string?> PickFile(string titleKey, string typeKey, params string[] extensions)
@@ -434,8 +455,9 @@ public partial class MainWindow : Window
     // ── The last build's choices (#110, SavedChoices.cs) ────────────────────
     // At start the pages get the choices of the last build that worked; when a newer release is out, the welcome
     // page offers it with them in one click. A saved path that is gone is named there, and the normal pages pick it.
-    readonly SavedChoices? saved = SavedChoices.Load(DesktopEngine.WorkDir);
+    SavedChoices? saved = SavedChoices.Load(DesktopEngine.WorkDir);   // (another folder's on a pick: WorkDirChanged)
     string offered = "";   // the release the welcome page offers ("": none)
+    string? latestTag;     // the release an update would build, once looked up (the same for every folder)
 
     void LoadSaved()
     {
@@ -461,15 +483,17 @@ public partial class MainWindow : Window
 
     async void CheckForUpdate()
     {
-        string tag;
-        try
+        if (latestTag == null)
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            tag = await Task.Run(() => EngineBase.ReleaseToOffer(timeout.Token));
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                latestTag = await Task.Run(() => EngineBase.ReleaseToOffer(timeout.Token));
+            }
+            catch (Exception) { return; }   // offline: the normal pages, filled in
         }
-        catch (Exception) { return; }   // offline: the normal pages, filled in
-        if (saved == null || !SavedChoices.IsNewer(tag, saved.Release)) return;
-        offered = tag;
+        if (saved == null || !SavedChoices.IsNewer(latestTag, saved.Release)) return;
+        offered = latestTag;
         ShowUpdate();
     }
 
@@ -484,13 +508,14 @@ public partial class MainWindow : Window
         TxtUpdMissing.Text = missing == null ? "" : Str.Get("upd_missing", missing);
         TxtUpdMissing.IsVisible = missing != null;
         BtnUpdate.Content = Str.Get("btn_update", offered);
+        BtnUpdate.IsEnabled = workDirProblem == null;
         BtnUpdate.IsVisible = missing == null;
         UpdatePanel.IsVisible = true;
     }
 
     void BtnUpdate_Click(object? sender, RoutedEventArgs e)
     {
-        if (saved == null || running) return;
+        if (saved == null || running || workDirProblem != null) return;
         ApplySaved(saved);   // (the game page may have been changed since)
         if (saved.Missing() != null || !GameReady()) { ShowPage(Page.Game); return; }
         StartInstall();

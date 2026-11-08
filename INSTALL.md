@@ -51,7 +51,8 @@ card): the page shows the free space there against the ~10 GB the build needs (5
 have spaces or accented letters and must be short (the build tools); pick for example `D:\` and the installer
 works in `D:\SwitchWakerHD-Build`. It remembers the folder for the next update. devkitPro still installs in
 `C:\devkitPro`. On the Switch's own SD card the build needs about 12 GB free there, and the working folder stays
-on the card for the next update (delete it when you like).
+on the card for the next update (delete it when you like). Network drives are refused (the build is too slow or
+fails there); *Use the default folder* goes back to the usual one.
 
 > **Windows SmartScreen** may show *"Windows protected your PC"* on first run because the installer is
 > not code-signed. Click **More info → Run anyway**. This is expected for open-source unsigned executables.
@@ -103,7 +104,8 @@ tools](#the-switch-tools-pinned), downloads the release, builds the game nativel
    - **By hand**: *Show in Finder* opens the folder; copy its contents to the root of the SD card.
 
 The full log is `installer.log` in the working folder, `~/SwitchWakerHD-Build` unless you picked another one
-with *Change folder...* on the welcome page (an external disk works too). The installer starts in Spanish or English from the
+with *Change folder...* on the welcome page (an external disk works too; its name must have no spaces, so rename
+`SWITCH SD` to `SWITCHSD` in Finder to build on the card). The installer starts in Spanish or English from the
 Mac's language; the button in its corner switches. Source: [installer/desktop](installer/desktop) and
 [installer/build-mac.sh](installer/build-mac.sh).
 

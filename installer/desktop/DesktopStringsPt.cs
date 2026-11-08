@@ -17,6 +17,8 @@ static class DesktopStringsPt
         ["mm_rvz_note"]    = "Um .rvz do Dolphin é lido com o Python 3.14, o mesmo que este instalador usa.",
         ["rel_no_script"]  = "A versão baixada não contém tools/switch/make_sd.py.",
         ["step_python"]    = "Python 3.14",
+        ["dir_no_links"]   = "A unidade de {0} não aceita links simbólicos nem programas (costuma ser FAT ou exFAT), e o jogo não pode ser gerado ali. Escolha uma pasta em outro disco.",
+        ["dir_bad_chars"]  = "O caminho {0} tem espaços, acentos ou outros caracteres que as ferramentas de compilação não aceitam. Escolha uma pasta cujo caminho tenha só letras sem acento, números, - e _. Num disco cujo nome tem espaços (/Volumes/SWITCH SD), mude antes o nome do disco.",
     };
 
     public static readonly Dictionary<string, string> Mac = new()

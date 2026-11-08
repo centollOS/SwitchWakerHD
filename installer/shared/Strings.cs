@@ -40,6 +40,7 @@ static partial class Str
         ["welcome_dir"]    = ("Carpeta de trabajo: {0}",                             "Working folder: {0}"),
         // The work folder (#59)
         ["btn_change_dir"] = ("Cambiar carpeta...",                                  "Change folder..."),
+        ["btn_default_dir"] = ("Usar la de siempre",                                 "Use the default folder"),
         ["dlg_build_dir"]  = ("Elige dónde construir el juego (dentro se crea una carpeta SwitchWakerHD-Build)",
                                "Choose where to build the game (a SwitchWakerHD-Build folder is made inside)"),
         ["dir_space"]      = ("Espacio libre en {0}: {1} GB (hacen falta unos {2} GB).", "Free space on {0}: {1} GB (about {2} GB needed)."),
@@ -50,6 +51,10 @@ static partial class Str
         ["dir_too_long"]   = ("La ruta {0} es demasiado larga para las herramientas de compilación (como mucho {1} caracteres). Elige una carpeta más cerca de la raíz de la unidad, por ejemplo D:\\.",
                                "The path {0} is too long for the build tools (at most {1} characters). Choose a folder closer to the root of the drive, for example D:\\."),
         ["dir_no_write"]   = ("No se puede escribir en {0} ({1}). Elige otra carpeta.", "Cannot write to {0} ({1}). Choose another folder."),
+        ["dir_network"]    = ("{0} está en una unidad de red: las herramientas de compilación van muy lentas o fallan ahí. Elige una carpeta en un disco de este ordenador (un disco USB o una tarjeta SD sirven).",
+                               "{0} is on a network drive: the build tools are very slow or fail there. Choose a folder on a disk of this computer (a USB disk or an SD card will do)."),
+        ["dir_fat"]        = ("La unidad está en {0}: el juego se construye bien ahí, pero más despacio que en el disco del sistema.",
+                               "The drive is {0}: the game builds fine there, only more slowly than on the system disk."),
         ["dir_removable"]  = ("Está en una unidad extraíble: el juego tardará más en construirse y la unidad tiene que seguir conectada hasta el final. Si es la tarjeta SD de la Switch, necesita unos {0} GB libres (la carpeta de trabajo y el juego terminado), y la carpeta de trabajo se queda en la tarjeta para la próxima actualización (puedes borrarla cuando quieras).",
                                "It is on a removable drive: the game takes longer to build and the drive has to stay connected until the end. If it is the Switch's SD card, it needs about {0} GB free (the working folder and the finished game), and the working folder stays on the card for the next update (you can delete it any time)."),
         ["dir_saved_gone"] = ("La carpeta de la última vez ({0}) no está (¿unidad desconectada?); se usa la de siempre. Conéctala y vuelve a abrir el instalador, o elige otra.",
