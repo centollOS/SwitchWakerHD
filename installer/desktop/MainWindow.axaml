@@ -126,7 +126,7 @@
             <!-- Optional: the HD minimap (#121, a code mod built into the game; off unless ticked) -->
             <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
               <StackPanel>
-                <CheckBox x:Name="ChkHdMinimap" IsChecked="False" Margin="0,0,0,4">
+                <CheckBox x:Name="ChkHdMinimap" IsChecked="False" Margin="0,0,0,4" IsCheckedChanged="ChkHdMinimap_Changed">
                   <TextBlock x:Name="TxtHmH" FontWeight="SemiBold"/>
                 </CheckBox>
                 <TextBlock x:Name="TxtHmD" Classes="dim" FontSize="13" TextWrapping="Wrap"/>

@@ -168,3 +168,5 @@ no GameCube disc; it draws the HD game's own GamePad map art through the layout-
 - **With gc-minimap.** Both hook daPy_Execute's return (chained) and get consecutive guest regions, but both default
   to the bottom-left corner (gc-minimap 0.3.1: x 6, y 18, size 225; hd-minimap: x 12, y 20, size 190) and both draw
   on the sea and in dungeons: on together they overlap unless one is moved in the options.
+  The owner's choice (2026-11-08): one at a time. The installers clear the GameCube disc when the HD box is ticked and
+  untick it when a disc is chosen; INSTALL.md says to give `make_sd.py` only one of them.

@@ -74,7 +74,7 @@ static partial class Str
         ["mm_no_game"]     = "O Wind Waker de GameCube escolhido para o minimapa não foi encontrado: {0}. Escolha-o de novo ou remova-o.",
         // The HD minimap (#121: a code mod built into the game, make_sd.py --guest-mod hd-minimap; off by default)
         ["hm_h"]           = "Minimapa HD (opcional)",
-        ["hm_d"]           = "Adiciona um minimapa em um canto da tela com os mapas do próprio jogo HD (os do GamePad): ilhas, andares das masmorras e cartas do tesouro enquanto você navega. Baseado no Minimap HD de Chironeyes. Não precisa de mais nada: o mod é baixado do catálogo de mods.",
+        ["hm_d"]           = "Adiciona um minimapa em um canto da tela com os mapas do próprio jogo HD (os do GamePad): ilhas, andares das masmorras e cartas do tesouro enquanto você navega. Baseado no Minimap HD de Chironeyes. Não precisa de mais nada: o mod é baixado do catálogo de mods. Ele fica no mesmo canto que o minimapa do GameCube, então só pode haver um: marcar este remove o outro.",
         // Brazilian Portuguese: Triforce-Heroes' fan translation, downloaded by the player (make_sd.py --ptbr)
         ["ptbr_h"]         = "Tradução para português do Brasil (opcional)",
         ["ptbr_d"]         = "Deixa o jogo em português do Brasil com a tradução feita por fãs da Triforce-Heroes. Ela não vem com o instalador: baixe-a você mesmo na página deles (a versão \"Emulador\") e escolha aqui o arquivo baixado (.rar) ou a pasta onde você o extraiu. Ela é aplicada sobre o seu próprio jogo original.",

@@ -291,6 +291,15 @@ public partial class MainWindow : Window
         TxtMmGame.Text = minimapGame ?? Str.Get("mm_none");
         TxtMmGame.Foreground = (Brush)FindResource(minimapGame == null ? "FgDim" : "Fg");
         BtnMmClear.Visibility = minimapGame == null ? Visibility.Collapsed : Visibility.Visible;
+        if (minimapGame != null) ChkHdMinimap.IsChecked = false;   // one minimap at a time (#121: both use the same corner)
+    }
+
+    // The HD minimap (#121): ticking it removes the GameCube minimap's disc (one minimap at a time)
+    void ChkHdMinimap_Checked(object sender, RoutedEventArgs e)
+    {
+        if (minimapGame == null) return;
+        minimapGame = null;
+        ShowMinimap();
     }
 
     void BtnMmPick_Click(object sender, RoutedEventArgs e)

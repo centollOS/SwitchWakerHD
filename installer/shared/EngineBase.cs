@@ -508,7 +508,7 @@ abstract partial class EngineBase
         var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
         var minimap = (MinimapGame != null ? $" --guest-mod {MinimapMod} --gc-game {Quote(MinimapGame)}" : "")
-                    + (HdMinimap ? $" --guest-mod {HdMinimapMod}" : "");
+                    + (HdMinimap && MinimapGame == null ? $" --guest-mod {HdMinimapMod}" : "");   // one minimap at a time
         // the Portuguese translation, with a release whose make_sd.py knows it (an older one: installed without it)
         var ptbr = "";
         if (PtbrDownload != null)
