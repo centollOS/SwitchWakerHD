@@ -111,7 +111,7 @@ static Settings read_settings(const WWHDGuestBuiltin& b) {
     std::string error;
     if (!write_settings(b.id, s, error)) LOG("[guestmods] %s: %s", b.id, error.c_str());
     else LOG("[guestmods] %s: settings written to %s (%s)", b.id, settings_path(b.id).c_str(),
-             old_options.type == mods::json::Value::Object ? "taken over from the earlier mods/" + std::string(b.id) + "/" : "the defaults");
+             old_options.type == mods::json::Value::Object ? "taken over from the earlier build's folder" : "the defaults");
     return s;
 }
 // the package's files built into the NRO, under the package path "builtin:<id>" (load()); false for another path
