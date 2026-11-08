@@ -115,6 +115,15 @@ void option_control(guestbuiltin::Mod& m, guestbuiltin::Option& o, const Layout*
     if (!o.description.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", menu_i18n::tr(o.description.c_str()));
 }
 
+std::string g_switch_error;  // the last switch that could not be saved
+// a code mod's state under its name: why it isn't running, a change for the next start, or on / off
+void status_line(const guestbuiltin::Mod& m) {
+    if (!m.status.empty()) wrapped(kBad, menu_i18n::tr("Not running: ") + m.status);
+    else if (m.enabled != m.loaded || m.changed) wrapped(kWarn, menu_i18n::tr("Changes apply after a restart."));
+    else if (m.enabled) wrapped(kGood, menu_i18n::tr("On"));
+    else wrapped(kMuted, menu_i18n::tr("Off"));
+    if (!g_switch_error.empty()) wrapped(kBad, g_switch_error);
+}
 std::string g_open;      // the mod whose page is open ("" the list)
 int g_page_frame = -10;  // the frame its page was last drawn: a page not drawn last frame (another tab) is closed
 bool g_scroll_top = false;
@@ -127,8 +136,7 @@ void draw() {
         ImGui::PushID(m.id.c_str());
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
-        // the whole row opens the page: one item that starts in the switches' column, so a controller going down
-        // the built-in mods' switches reaches it (a disabled switch can't take the focus)
+        // the whole row opens the page (the name and status column), the switch on top of it in the first column
         const ImVec2 at = ImGui::GetCursorPos();
         const float height = ImGui::GetTextLineHeightWithSpacing() + ImGui::GetTextLineHeight();
         if (ImGui::Selectable("##open", false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
@@ -137,19 +145,13 @@ void draw() {
             g_page_frame = ImGui::GetFrameCount();  // drawn from the next frame on: not taken for a page left behind
             g_scroll_top = true;
         }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", menu_i18n::tr("Built into this game: to remove it, build the game again without it."));
-        // always on: it is part of this build (the mod's own options turn its parts off)
+        // (#121) the player's switch, for the next start (a code mod is loaded once, when the game starts)
         ImGui::SetCursorPos(at);
-        bool on = m.status.empty();
-        ImGui::BeginDisabled();
-        ImGui::Checkbox("##on", &on);
-        ImGui::EndDisabled();
+        bool on = m.enabled;
+        if (ImGui::Checkbox("##on", &on)) { g_switch_error.clear(); guestbuiltin::set_enabled(m, on, g_switch_error); }
         ImGui::TableNextColumn();
         ImGui::TextUnformatted((m.name + "  \xE2\x80\xBA").c_str());
-        if (!m.status.empty()) wrapped(kBad, menu_i18n::tr("Not running: ") + m.status);
-        else if (m.changed) wrapped(kWarn, menu_i18n::tr("Changes apply after a restart."));
-        else wrapped(kGood, menu_i18n::tr("On"));
+        status_line(m);
         ImGui::PopID();
     }
 }
@@ -175,8 +177,12 @@ bool page(bool back, bool& back_used) {
     ImGui::TextUnformatted(m.name.c_str());
     ImGui::SameLine();
     ImGui::TextDisabled("%s", m.version.c_str());
-    if (!m.status.empty()) wrapped(kBad, menu_i18n::tr("Not running: ") + m.status);
-    else if (!m.description.empty()) ImGui::TextWrapped("%s", menu_i18n::tr(m.description.c_str()));
+    // (#121) the switch, as a built-in mod's page has it
+    bool on = m.enabled;
+    if (ImGui::Checkbox("##page_on", &on)) { g_switch_error.clear(); guestbuiltin::set_enabled(m, on, g_switch_error); }
+    ImGui::SameLine();
+    status_line(m);
+    if (m.status.empty() && !m.description.empty()) ImGui::TextWrapped("%s", menu_i18n::tr(m.description.c_str()));
     if (l && l->credit) {
         char line[256];
         std::snprintf(line, sizeof line, menu_i18n::tr("Based on %s"), l->credit);

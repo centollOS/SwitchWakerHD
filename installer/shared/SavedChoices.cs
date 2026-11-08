@@ -16,8 +16,7 @@ sealed class SavedChoices
     public string GamePath = "";
     public string GameArg = "";           // --image, --wua or --game-dir
     public string? ForwarderKeys;
-    public string? MinimapGame;
-    public bool HdMinimap;                // (#121)
+    public bool HdMinimap;                // (#121) the HD minimap switched on from the first start
     public string? PtbrDownload;
     public bool PrepareShaders = true;
     public bool RemoveOldBuilds = true;   // (#120)
@@ -42,7 +41,7 @@ sealed class SavedChoices
                     case "game": c.GamePath = v; break;
                     case "format": c.GameArg = v; break;
                     case "forwarder_keys": c.ForwarderKeys = v == "" ? null : v; break;
-                    case "minimap_game": c.MinimapGame = v == "" ? null : v; break;
+                    // "minimap_game" (the GameCube sea minimap's disc): the installer no longer offers it (#121)
                     case "hd_minimap": c.HdMinimap = v == "1"; break;
                     case "ptbr_download": c.PtbrDownload = v == "" ? null : v; break;
                     case "prepare_shaders": c.PrepareShaders = v == "1"; break;
@@ -63,7 +62,6 @@ sealed class SavedChoices
         Put("game", GamePath);
         Put("format", GameArg);
         Put("forwarder_keys", ForwarderKeys);
-        Put("minimap_game", MinimapGame);
         Put("hd_minimap", HdMinimap ? "1" : "0");
         Put("ptbr_download", PtbrDownload);
         Put("prepare_shaders", PrepareShaders ? "1" : "0");
@@ -83,7 +81,7 @@ sealed class SavedChoices
             ? Directory.Exists(GamePath) && Directory.Exists(Path.Combine(GamePath, "code"))
             : File.Exists(GamePath);
         if (!gameThere) return GamePath;
-        foreach (var p in new[] { ForwarderKeys, MinimapGame, PtbrDownload })
+        foreach (var p in new[] { ForwarderKeys, PtbrDownload })
             if (p != null && !File.Exists(p) && !Directory.Exists(p)) return p;
         return null;
     }
@@ -96,7 +94,6 @@ sealed class SavedChoices
         var format = GameArg == "--image" ? "game_opt_img" : GameArg == "--wua" ? "game_opt_wua" : "game_opt_dir";
         sb.Append("•  ").Append(Str.Get(format)).Append(": ").Append(GamePath);
         if (ForwarderKeys != null) sb.Append("\n•  ").Append(Name("fwd_h")).Append(": ").Append(ForwarderKeys);
-        if (MinimapGame != null) sb.Append("\n•  ").Append(Name("mm_h")).Append(": ").Append(MinimapGame);
         if (HdMinimap) sb.Append("\n•  ").Append(Name("hm_h"));
         if (PtbrDownload != null) sb.Append("\n•  ").Append(Name("ptbr_h")).Append(": ").Append(PtbrDownload);
         if (PrepareShaders) sb.Append("\n•  ").Append(Name("sh_h"));
@@ -138,7 +135,7 @@ abstract partial class EngineBase
         {
             new SavedChoices
             {
-                GamePath = GamePath, GameArg = GameArg, ForwarderKeys = ForwarderKeys, MinimapGame = MinimapGame,
+                GamePath = GamePath, GameArg = GameArg, ForwarderKeys = ForwarderKeys,
                 HdMinimap = HdMinimap, PtbrDownload = PtbrDownload, PrepareShaders = PrepareShaders, RemoveOldBuilds = RemoveOldBuilds,
                 Release = releaseVer,
             }.Save(Work);

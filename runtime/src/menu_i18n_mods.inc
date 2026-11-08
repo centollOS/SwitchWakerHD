@@ -260,12 +260,6 @@
  "Ne fonctionne pas : "},
 // (#121) a code mod's page: its option groups, and the names, values and descriptions of the code mods this fork
 // knows (guest_builtin_ui.cpp layouts(); the manifests are in English)
-{"Built into this game: to remove it, build the game again without it.",
- "Incluido en este juego: para quitarlo, vuelve a crear el juego sin él.",
- "Incluído neste jogo: para removê-lo, gere o jogo de novo sem ele.",
- "Incluso in questo gioco: per toglierlo, crea di nuovo il gioco senza.",
- "In dieses Spiel eingebaut: Um es zu entfernen, erstelle das Spiel ohne es neu.",
- "Intégré à ce jeu : pour le retirer, recréez le jeu sans lui."},
 {"Based on %s", "Basado en %s", "Baseado em %s", "Basato su %s", "Basiert auf %s", "Basé sur %s"},
 {"Position and size",
  "Posición y tamaño",

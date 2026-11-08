@@ -23,11 +23,8 @@ the PC.
    Git and MSYS2's gcc and builds
    the forwarder `.nsp` ([details](tools/switch/forwarder/INSTALL.md)); it travels in `NSP\` with the rest: install it with
    DBI (*Browse SD card > NSP > wwhd_forwarder.nsp > Install*; it needs current Atmosphère sigpatches).
-   Optional, the **GameCube sea minimap**: choose your own GameCube Wind Waker (`.iso`, `.gcm`, `.rvz` or its
-   folder); the installer downloads the mod and builds it into the game
-   ([details](#optional-code-mods-the-minimaps)).
-   Optional, the **HD minimap**: tick its box; it needs nothing else
-   ([details](#optional-code-mods-the-minimaps)).
+   The **HD minimap** (new) is always built into the game: tick *Turn it on now* to have it from the first start,
+   or turn it on later in the game's menu ([details](#optional-code-mods-the-minimaps)).
    Optional, **Brazilian Portuguese**: download Triforce-Heroes' fan translation yourself from
    [their page](https://triforce-heroes.com.br/traducoes/the-legend-of-zelda-the-wind-waker-hd) (the *Emulador*
    version) and choose the downloaded `.rar` (or the folder you extracted it to)
@@ -234,19 +231,24 @@ build/sd/switch/wwhd/
 
 ### Optional: code mods (the minimaps)
 
-Two minimaps from the mod catalogue can be built into the game. Both are off unless you choose them, and you choose
-one of them: they use the same corner of the screen (the installer offers one at a time; with `make_sd.py`, give only
-one of the two).
+Two minimaps from the mod catalogue can be built into the game. The installers build in the HD minimap; the GameCube
+sea minimap is built only with `make_sd.py` by hand. Use one of them: they use the same corner of the screen.
 
 **The HD minimap** (`hd-minimap`, based on **Minimap HD by Chironeyes**, the Cemu mod on
 [GameBanana](https://gamebanana.com/mods/727687) and [GitHub](https://github.com/Chironeyes/The.Wind.Waker.HD-Minimap.HD)) draws a minimap in the bottom-left corner with the HD game's own GamePad maps: the island of the sea square
 you are in, the floor plan of a dungeon once you have its map, and while sailing (D-pad down) a treasure chart you own.
-It reads the maps from your own game while it runs, so it needs nothing besides your Wind Waker HD. In the
-[Easy Installer](#windows-easy-installer-recommended), tick *HD minimap*; with `make_sd.py`:
+It reads the maps from your own game while it runs, so it needs nothing besides your Wind Waker HD. The
+[Easy Installer](#windows-easy-installer-recommended) always builds it into the game: tick *Turn it on now* to have it
+from the first start; otherwise it is there switched off. With `make_sd.py`:
 
 ```sh
 python3 tools/switch/make_sd.py --game-dir /path/to/10143500 --guest-mod hd-minimap
 ```
+
+(add `--guest-mod-off hd-minimap` to build it in switched off.)
+
+- **On or off** in the game: hold **Minus** > **Mods** > **Built-in**, its switch at the top (*HD minimap*); it
+  applies when you start the game again. Switched off it is not loaded at all.
 
 - On foot, D-pad left shows or hides it and D-pad right makes it bigger or smaller; in a dungeon, D-pad down zooms.
   On the boat, D-pad left and right stay the cannon and the grappling hook, and D-pad down switches between the
@@ -262,8 +264,8 @@ things besides your Wind Waker HD**:
 
 - **Your own GameCube Wind Waker** (USA, Europe or Japan): a disc image (`.iso`, `.gcm`, `.rvz`) or its extracted
   folder. The mod draws its maps from it, on your computer.
-On Windows, the [Easy Installer](#windows-easy-installer-recommended) has a box for it: choose your GameCube disc
-there. With `make_sd.py`, add the mod and the disc to the command:
+The installers no longer offer it (since the HD minimap, issue #121); with `make_sd.py`, add the mod and the disc to
+the command:
 
 ```sh
 python3 tools/switch/make_sd.py --game-dir /path/to/10143500 \

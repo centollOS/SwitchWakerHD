@@ -41,6 +41,8 @@ usage:
            --gc-game PATH                     your GameCube Wind Waker (.iso/.gcm/.rvz or extracted), for mods
                                               whose setup reads it (the GameCube sea minimap)
            --mod-option ID.KEY=VALUE          a mod's option (e.g. gc-minimap.size=260); repeat for more
+           --guest-mod-off ID                 a --guest-mod built in switched off: the player turns it on in the
+                                              game's menu (Mods > Built-in) when they want it (issue #121)
            --ptbr DOWNLOAD                    Brazilian Portuguese: Triforce-Heroes' fan translation as downloaded
                                               from their page (the .rar, its extracted folder or its .pack), rebuilt
                                               on your own English pack (tools/switch/ptbr_pack.py) into
@@ -344,6 +346,8 @@ def main():
     ap.add_argument("--guest-mod", action="append", default=[], help="a code mod built into the NRO (catalogue id, .zip or folder)")
     ap.add_argument("--gc-game", help="your GameCube Wind Waker, for mods whose setup reads it")
     ap.add_argument("--mod-option", action="append", default=[], help="a mod's option: ID.KEY=VALUE")
+    ap.add_argument("--guest-mod-off", action="append", default=[], metavar="ID",
+                    help="a --guest-mod built in switched off (the game's menu turns it on)")
     ptbr_arg = ap.add_mutually_exclusive_group()
     ptbr_arg.add_argument("--ptbr", help="Triforce-Heroes' PT-BR translation download (.rar, folder or .pack)")
     ptbr_arg.add_argument("--no-ptbr", action="store_true", help="remove an earlier PT-BR translation from OUT")
@@ -379,8 +383,8 @@ def main():
         run([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "guest_mods.py"), "--check"] +
             mods +
             (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []))
-    elif args.mod_option or args.gc_game:
-        fail("--mod-option and --gc-game go with --guest-mod")
+    elif args.mod_option or args.gc_game or args.guest_mod_off:
+        fail("--mod-option, --gc-game and --guest-mod-off go with --guest-mod")
     if args.ptbr:  # the translation's download, checked before the slow steps (the wrong file picked, say)
         args.ptbr = os.path.abspath(args.ptbr)
         ptbr(["--check", args.ptbr])
@@ -447,7 +451,8 @@ def main():
     if args.guest_mod:
         run(tool + mods + ["--build", build.name] +
             (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []) +
-            sum((["--option", o] for o in args.mod_option), []))
+            sum((["--option", o] for o in args.mod_option), []) +
+            sum((["--off", m] for m in args.guest_mod_off), []))
         renv["WWHD_RECOMP_MOD_HOOKS_ONLY"] = os.path.join(mods_dir, "hooks.txt")
     else:
         run(tool + ["--clear"])

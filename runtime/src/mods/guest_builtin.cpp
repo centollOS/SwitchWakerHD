@@ -25,13 +25,19 @@ extern "C" unsigned g_mod_hook_count;
 
 namespace guestbuiltin {
 
-static std::map<std::string, std::string> g_status;  // load()'s outcome per mod: "" loaded
+static std::map<std::string, std::string> g_status;  // load()'s outcome per mod: "" loaded or switched off
+static std::vector<std::string> g_loaded;             // the mods load() installed
 
 static std::string read_file(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     return in ? std::string{std::istreambuf_iterator<char>(in), {}} : std::string();
 }
 static std::string mod_dir(const char* id) { return host::config_dir() + "/mods/" + id; }
+// (#121) the player's switch: mods/<id>/enabled holds "0" (off) or "1"; no file is on (installs from before the switch)
+static bool switched_on(const std::string& dir) {
+    const std::string v = read_file(dir + "/enabled");
+    return v.empty() || v[0] != '0';
+}
 
 #if WWHD_GUEST_BUILTIN
 static const WWHDGuestBuiltin* begin() { return g_guest_builtin; }
@@ -76,6 +82,11 @@ void load(const Install& install) {
     }
     for (const WWHDGuestBuiltin* b = begin(); b != end(); ++b) {
         const std::string dir = mod_dir(b->id);
+        if (!switched_on(dir)) {  // (#121) built in, switched off by the player (Mods tab) or the installer
+            LOG("[guestmods] %s %s (built into the NRO) switched off: not loaded", b->id, b->version);
+            g_status[b->id] = "";
+            continue;
+        }
         mods::packages::GuestPackage pkg;
         pkg.id = b->id;
         pkg.name = b->name;
@@ -101,6 +112,7 @@ void load(const Install& install) {
             g_status[b->id] = error.empty() ? "not loaded" : error;
         } else {
             g_status[b->id] = "";
+            g_loaded.push_back(b->id);
         }
     }
 }
@@ -118,6 +130,8 @@ std::vector<Mod>& list() {
         auto st = g_status.find(b->id);
         m.status = st == g_status.end() ? "not loaded: the game code has no mod hooks (see wwhd.log)" : st->second;
         const std::string dir = mod_dir(b->id);
+        m.enabled = switched_on(dir);
+        m.loaded = std::find(g_loaded.begin(), g_loaded.end(), m.id) != g_loaded.end();
         mods::json::Value man, values;
         try {
             man = mods::json::parse(read_file(dir + "/package/manifest.json"));
@@ -182,6 +196,26 @@ bool set_option(Mod& mod, Option& option, const mods::json::Value& value, bool s
         return false;
     }
     mod.changed = true;
+    return true;
+}
+
+bool set_enabled(Mod& mod, bool on, std::string& error) {
+    const std::string dir = mod_dir(mod.id.c_str());
+    const std::string tmp = dir + "/enabled.tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        f << (on ? "1" : "0") << '\n';
+        f.close();
+        if (!f) {
+            error = "cannot write " + tmp;
+            return false;
+        }
+    }
+    if (!host::replace_file(tmp, dir + "/enabled")) {
+        error = "cannot save " + dir + "/enabled";
+        return false;
+    }
+    mod.enabled = on;
     return true;
 }
 

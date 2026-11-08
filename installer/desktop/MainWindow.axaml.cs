@@ -137,14 +137,10 @@ public partial class MainWindow : Window
         TxtShD.Text = Str.Get("sh_d");
         TxtOldH.Text = Str.Get("old_h");
         TxtOldD.Text = Str.Get("old_d", DesktopEngine.WorkDir);
-        TxtMmH.Text = Str.Get("mm_h");
-        TxtMmD.Text = Str.Get("mm_d");
         TxtHmH.Text = Str.Get("hm_h");
+        TxtHmNew.Text = Str.Get("hm_new");
         TxtHmD.Text = Str.Get("hm_d");
-        BtnMmPick.Content = Str.Get("mm_pick");
-        BtnMmFolder.Content = Str.Get("mm_folder");
-        BtnMmClear.Content = Str.Get("fwd_clear");
-        ShowMinimap();
+        TxtHmOn.Text = Str.Get("hm_on");
         TxtPtH.Text = Str.Get("ptbr_h");
         TxtPtD.Text = Str.Get("ptbr_d");
         BtnPtLink.Content = Str.Get("ptbr_link");
@@ -318,45 +314,6 @@ public partial class MainWindow : Window
         ShowKeys();
     }
 
-    // ── Optional GameCube sea minimap: the player's GameCube Wind Waker ─────
-    string? minimapGame;
-
-    void ShowMinimap()
-    {
-        TxtMmGame.Text = minimapGame ?? Str.Get("mm_none");
-        TxtMmGame.Foreground = Res(minimapGame == null ? "FgDim" : "Fg");
-        BtnMmClear.IsVisible = minimapGame != null;
-        if (minimapGame != null) ChkHdMinimap.IsChecked = false;   // one minimap at a time (#121: both use the same corner)
-    }
-
-    // The HD minimap (#121): ticking it removes the GameCube minimap's disc (one minimap at a time)
-    void ChkHdMinimap_Changed(object? sender, RoutedEventArgs e)
-    {
-        if (ChkHdMinimap.IsChecked != true || minimapGame == null) return;
-        minimapGame = null;
-        ShowMinimap();
-    }
-
-    async void BtnMmPick_Click(object? sender, RoutedEventArgs e)
-    {
-        var p = await PickFile("mm_dlg_title", "mm_h", "iso", "gcm", "rvz");
-        if (p != null) minimapGame = p;
-        ShowMinimap();
-    }
-
-    async void BtnMmFolder_Click(object? sender, RoutedEventArgs e)
-    {
-        var p = await PickFolder("mm_dlg_folder");
-        if (p != null) minimapGame = p;
-        ShowMinimap();
-    }
-
-    void BtnMmClear_Click(object? sender, RoutedEventArgs e)
-    {
-        minimapGame = null;
-        ShowMinimap();
-    }
-
     // ── Optional Brazilian Portuguese: the player's download of Triforce-Heroes' translation ─────
     string? ptbrDownload;
 
@@ -430,14 +387,12 @@ public partial class MainWindow : Window
         (c.GameArg == "--image" ? OptImg : c.GameArg == "--wua" ? OptWua : OptDir).IsChecked = true;
         gamePath = c.GamePath;
         keysPath = c.ForwarderKeys;
-        minimapGame = c.MinimapGame;
         ptbrDownload = c.PtbrDownload;
         ChkShaders.IsChecked = c.PrepareShaders;
         ChkOldBuilds.IsChecked = c.RemoveOldBuilds;
         ChkHdMinimap.IsChecked = c.HdMinimap;
         ValidateGame();
         ShowKeys();
-        ShowMinimap();
         ShowPtbr();
     }
 
@@ -484,7 +439,6 @@ public partial class MainWindow : Window
         engine.GamePath = gamePath;
         engine.GameArg  = GameArg();
         engine.ForwarderKeys = keysPath != null && File.Exists(keysPath) ? keysPath : null;
-        engine.MinimapGame = minimapGame;
         engine.HdMinimap = ChkHdMinimap.IsChecked == true;
         engine.PtbrDownload = ptbrDownload;
         engine.PrepareShaders = ChkShaders.IsChecked == true;
@@ -748,10 +702,8 @@ public partial class MainWindow : Window
         TxtFwdDone.IsVisible = keysPath != null;
         TxtFwdDone.Text = Str.Get(nspFresh ? "fwd_done" : "fwd_missing");
         TxtFwdDone.Foreground = Res(nspFresh ? "Fg" : "Warn");
-        TxtMmDone.IsVisible = minimapGame != null;
-        TxtMmDone.Text = Str.Get("mm_done");
-        TxtHmDone.IsVisible = ChkHdMinimap.IsChecked == true;
-        TxtHmDone.Text = Str.Get("hm_done");
+        TxtHmDone.IsVisible = true;   // (#121: always built in; on or off)
+        TxtHmDone.Text = Str.Get(ChkHdMinimap.IsChecked == true ? "hm_done" : "hm_done_off");
         TxtPtDone.IsVisible = ptbrDownload != null;
         TxtPtDone.Text = Str.Get("ptbr_done");
         TxtGameFilesDone.IsVisible = engine.BadGameFiles > 0;

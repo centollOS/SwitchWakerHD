@@ -32,11 +32,16 @@ struct Option {
 };
 struct Mod {
     std::string id, name, version, description;
-    std::string status;   // "" running, else why not (load()'s error)
+    std::string status;   // "" running or switched off, else why not (load()'s error)
     std::vector<Option> options;
     bool changed = false; // an option was saved since the start
+    // (#121) switched on or off (mods/<id>/enabled: "0" off; missing or anything else on, as before the switch);
+    // loaded: running in this session. A change applies at the next start.
+    bool enabled = true, loaded = false;
 };
 std::vector<Mod>& list();  // read on the first call (UI thread)
 // sets an option of a list() mod; save: also writes options.json (a slider saves when it is let go)
 bool set_option(Mod& mod, Option& option, const mods::json::Value& value, bool save, std::string& error);
+// switches a list() mod on or off for the next start (writes mods/<id>/enabled)
+bool set_enabled(Mod& mod, bool on, std::string& error);
 }  // namespace guestbuiltin

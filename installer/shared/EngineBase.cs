@@ -49,12 +49,9 @@ abstract partial class EngineBase
     // Optional: the console's prod.keys, for the HOME-screen forwarder (.nsp). Only with it are Git, Pillow
     // and MSYS2's gcc installed (INSTALL.md, "HOME-screen icon"); without it make_sd.py gets --no-forwarder.
     public string? ForwarderKeys;
-    // Optional: the player's GameCube Wind Waker (disc image or folder), for the GameCube sea minimap: make_sd.py
-    // downloads the mod from the mod catalogue and builds it into the game (INSTALL.md, "Optional: code mods").
-    public string? MinimapGame;
-    public const string MinimapMod = "gc-minimap";
-    // Optional: the HD minimap (issue #121), a code mod drawn with the HD game's own GamePad map art, so it needs no
-    // other game: make_sd.py --guest-mod hd-minimap (INSTALL.md, "Optional: code mods"). Off unless the player ticks it.
+    // The HD minimap (#121), a code mod drawn with the HD game's own GamePad map art: always built into the game
+    // (make_sd.py --guest-mod hd-minimap), switched on from the first start when the player ticks it, else switched
+    // off (--guest-mod-off) for the game's menu (Mods > Built-in) to switch on later (INSTALL.md, "Optional: code mods").
     public bool HdMinimap;
     public const string HdMinimapMod = "hd-minimap";
     // Optional: Triforce-Heroes' Brazilian Portuguese fan translation as the player downloaded it (.rar, its folder or
@@ -177,12 +174,6 @@ abstract partial class EngineBase
         if (GameArg == "--image" && CheckImageKeys(GamePath) is string keys)
             throw new InstallException(keys);
 
-        if (MinimapGame != null)
-        {
-            Info(Str.Get("mm_pre", MinimapGame));
-            if (!File.Exists(MinimapGame) && !Directory.Exists(MinimapGame))
-                throw new InstallException(Str.Get("mm_no_game", MinimapGame));
-        }
         if (PtbrDownload != null)
         {
             Info(Str.Get("ptbr_pre", PtbrDownload));
@@ -469,7 +460,7 @@ abstract partial class EngineBase
             if (inBadFiles && line.StartsWith("    ")) { BadGameFileLines.Add(line.Trim()); return; }
             inBadFiles = false;
             if (line.StartsWith("[+] HOME-screen forwarder")) { Status?.Invoke(Str.Get("fwd_building")); return; }
-            if (line.StartsWith("  " + MinimapMod + ": ")) { Status?.Invoke(Str.Get("mm_building")); return; }
+            if (line.StartsWith("  " + HdMinimapMod + " ")) { Status?.Invoke(Str.Get("hm_building")); return; }
             if (line.Contains("ptbr_pack.py") && line.Contains("--translation")) { Status?.Invoke(Str.Get("ptbr_building")); return; }
             // make_sd.py --shaders: the template becomes the console's shader cache (a few minutes)
             if (line.Contains("shader_manifest.py from-template")) { Status?.Invoke(Str.Get("shaders_preparing")); return; }
@@ -507,8 +498,10 @@ abstract partial class EngineBase
         if (pinnedToolchain != null) env["WWHD_TOOLCHAIN_DIR"] = ToolchainDir;
         var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
-        var minimap = (MinimapGame != null ? $" --guest-mod {MinimapMod} --gc-game {Quote(MinimapGame)}" : "")
-                    + (HdMinimap && MinimapGame == null ? $" --guest-mod {HdMinimapMod}" : "");   // one minimap at a time
+        // the HD minimap: built in, on or switched off; a release whose make_sd.py can't build a mod in switched off
+        // gets it only when the player chose it
+        var minimap = HdMinimap ? $" --guest-mod {HdMinimapMod}"
+                    : File.ReadAllText(MakeSd(ReleaseDir)).Contains("--guest-mod-off") ? $" --guest-mod {HdMinimapMod} --guest-mod-off {HdMinimapMod}" : "";
         // the Portuguese translation, with a release whose make_sd.py knows it (an older one: installed without it)
         var ptbr = "";
         if (PtbrDownload != null)
@@ -522,6 +515,15 @@ abstract partial class EngineBase
                     : File.ReadAllText(MakeSd(ReleaseDir)).Contains("--no-shaders") ? " --no-shaders" : "";
         var rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}{minimap}{ptbr}{shaders}", ReleaseDir, check: false,
                       onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); }, env: env);
+        // (#121) the HD minimap the player left off is not worth a failed install: when its step (guest_mods.py, before
+        // the compile) stopped the build, the game is built again without it
+        if (rc != 0 && !HdMinimap && minimap != "" && tail.Any(l => l.TrimStart().StartsWith("guest_mods: ")))
+        {
+            Warn(Str.Get("hm_skipped"));
+            tail.Clear();
+            rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}{ptbr}{shaders}", ReleaseDir, check: false,
+                      onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); }, env: env);
+        }
         Progress?.Invoke(rc == 0 ? 1 : (double?)null);
         if (rc != 0)
         {

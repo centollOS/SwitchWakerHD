@@ -179,6 +179,13 @@ no GameCube disc; it draws the HD game's own GamePad map art through the layout-
   stair-stepped. The overlay draws mod pictures with a linear, clamped sampler (deko3d sampler 0), so with the option
   off the art keeps the game's soft outline: `guest_mods.py` writes `smooth: false` into hd-minimap's `options.json`
   (`SWITCH_DEFAULTS`; `--mod-option` still wins), sizes as the manifest (190 / 300).
+- **Always built in, a switch in the game (the owner's choice).** The installers offer only the HD minimap (the
+  GameCube card is gone; `make_sd.py --guest-mod gc-minimap` still works by hand) and always build it in: "Turn it on
+  now" (off by default) or switched off (`make_sd.py --guest-mod-off ID`, `guest_mods.py --off ID`: `mods/<id>/enabled`
+  is `0`). The Mods tab's row and page have a working switch (`guestbuiltin::set_enabled`); a switched-off mod is not
+  loaded at the next start (its hook checks stay in the game code: nothing runs). No `enabled` file is on (installs
+  from before). If the mod's step fails (the catalogue unreachable) and the player left it off, the installer builds
+  the game again without it. A release whose `make_sd.py` has no `--guest-mod-off` gets it only when ticked.
 - **Installers.** An "HD minimap (optional)" box on the game page (off by default; saved with the other choices),
   `--guest-mod hd-minimap`; strings in Spanish, English and Portuguese.
 - **With gc-minimap.** Both hook daPy_Execute's return (chained) and get consecutive guest regions, but both default

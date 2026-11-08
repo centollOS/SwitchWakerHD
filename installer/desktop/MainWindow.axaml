@@ -108,28 +108,20 @@
               </StackPanel>
             </Border>
 
-            <!-- Optional: the GameCube sea minimap (a code mod built into the game) -->
+            <!-- The HD minimap (#121): always built into the game; this box switches it on from the first start, else
+                 the player switches it on in the game's menu (Mods > Built-in) -->
             <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
               <StackPanel>
-                <TextBlock x:Name="TxtMmH" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                <TextBlock x:Name="TxtMmD" Classes="dim" FontSize="13" Margin="0,0,0,10"/>
-                <Grid ColumnDefinitions="*,Auto,Auto,Auto">
-                  <TextBlock x:Name="TxtMmGame" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                             TextWrapping="NoWrap" Margin="0,0,12,0"/>
-                  <Button x:Name="BtnMmClear" Grid.Column="1" Classes="link" Margin="0,0,8,0" Click="BtnMmClear_Click" IsVisible="False"/>
-                  <Button x:Name="BtnMmFolder" Grid.Column="2" Classes="link" Margin="0,0,8,0" Click="BtnMmFolder_Click"/>
-                  <Button x:Name="BtnMmPick" Grid.Column="3" Classes="secondary" Click="BtnMmPick_Click"/>
-                </Grid>
-              </StackPanel>
-            </Border>
-
-            <!-- Optional: the HD minimap (#121, a code mod built into the game; off unless ticked) -->
-            <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
-              <StackPanel>
-                <CheckBox x:Name="ChkHdMinimap" IsChecked="False" Margin="0,0,0,4" IsCheckedChanged="ChkHdMinimap_Changed">
-                  <TextBlock x:Name="TxtHmH" FontWeight="SemiBold"/>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                  <TextBlock x:Name="TxtHmH" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                  <Border Background="{StaticResource Accent}" CornerRadius="4" Padding="6,1" Margin="8,0,0,0" VerticalAlignment="Center">
+                    <TextBlock x:Name="TxtHmNew" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource OnAccent}"/>
+                  </Border>
+                </StackPanel>
+                <TextBlock x:Name="TxtHmD" Classes="dim" FontSize="13" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                <CheckBox x:Name="ChkHdMinimap" IsChecked="False">
+                  <TextBlock x:Name="TxtHmOn"/>
                 </CheckBox>
-                <TextBlock x:Name="TxtHmD" Classes="dim" FontSize="13" TextWrapping="Wrap"/>
               </StackPanel>
             </Border>
 
@@ -278,7 +270,6 @@
                 <TextBlock x:Name="TxtNext3" Classes="dim"/>
                 <TextBlock x:Name="TxtNext4" Classes="dim"/>
                 <TextBlock x:Name="TxtFwdDone" Margin="0,4,0,0" IsVisible="False"/>
-                <TextBlock x:Name="TxtMmDone" Margin="0,4,0,0" IsVisible="False"/>
                 <TextBlock x:Name="TxtHmDone" Margin="0,4,0,0" IsVisible="False"/>
                 <TextBlock x:Name="TxtPtDone" Margin="0,4,0,0" IsVisible="False"/>
                 <TextBlock x:Name="TxtGameFilesDone" Margin="0,4,0,0" TextWrapping="Wrap" IsVisible="False"/>

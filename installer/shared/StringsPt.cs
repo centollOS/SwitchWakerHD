@@ -61,20 +61,14 @@ static partial class Str
         ["dlg_folder"]     = "Selecione a pasta do jogo (contém code, content e meta)",
 
         // HOME-screen forwarder (optional)
-        // The GameCube sea minimap (a code mod built into the game: make_sd.py --guest-mod gc-minimap)
-        ["mm_h"]           = "Minimapa do mar do GameCube (opcional)",
-        ["mm_d"]           = "Adiciona ao jogo a carta das ilhas do Grande Mar da versão de GameCube, em um canto da tela. Ela é desenhada a partir do seu próprio Wind Waker de GameCube (USA, EUR ou JPN): escolha a imagem de disco dele (.iso, .gcm, .rvz) ou a pasta extraída. O mod é baixado do catálogo de mods.",
-        ["mm_none"]        = "Sem minimapa",
-        ["mm_pick"]        = "Escolher disco...",
-        ["mm_folder"]      = "Pasta...",
-        ["mm_dlg_title"]   = "Selecione o seu Wind Waker de GameCube",
-        ["mm_dlg_folder"]  = "Selecione a pasta extraída do seu Wind Waker de GameCube",
-        ["mm_dlg_filter"]  = "Disco de GameCube (*.iso;*.gcm;*.rvz)|*.iso;*.gcm;*.rvz|Todos os arquivos (*.*)|*.*",
-        ["mm_pre"]         = "Minimapa: Wind Waker de GameCube em {0}",
-        ["mm_no_game"]     = "O Wind Waker de GameCube escolhido para o minimapa não foi encontrado: {0}. Escolha-o de novo ou remova-o.",
-        // The HD minimap (#121: a code mod built into the game, make_sd.py --guest-mod hd-minimap; off by default)
-        ["hm_h"]           = "Minimapa HD (opcional)",
-        ["hm_d"]           = "Adiciona um minimapa em um canto da tela com os mapas do próprio jogo HD (os do GamePad): ilhas, andares das masmorras e cartas do tesouro enquanto você navega. Baseado no Minimap HD de Chironeyes (mod do Cemu no GameBanana). Não precisa de mais nada: o mod é baixado do catálogo de mods. Ele fica no mesmo canto que o minimapa do GameCube, então só pode haver um: marcar este remove o outro.",
+        // The HD minimap (#121: always built into the game; on from the first start when ticked)
+        ["hm_h"]         = "Minimapa HD",
+        ["hm_d"]         = "Um minimapa em um canto da tela com os mapas do próprio jogo HD (os do GamePad): ilhas, andares das masmorras e cartas do tesouro enquanto você navega. Baseado no Minimap HD de Chironeyes (mod do Cemu no GameBanana). Ele sempre vem incluído no jogo: se não ativar agora, você pode ativá-lo e ajustá-lo quando quiser no menu do jogo (segure Menos > Mods > Integrados).",
+        ["hm_new"]       = "Novo",
+        ["hm_on"]        = "Ativar agora",
+        ["hm_done_off"]  = "Minimapa HD: incluído, desativado. Ative quando quiser no jogo: segure Menos > Mods > Integrados, no topo.",
+        ["hm_building"]  = "Preparando o minimapa HD...",
+        ["hm_skipped"]   = "Não foi possível adicionar o minimapa HD (veja o registro): o jogo é instalado sem ele.",
         // Brazilian Portuguese: Triforce-Heroes' fan translation, downloaded by the player (make_sd.py --ptbr)
         ["ptbr_h"]         = "Tradução para português do Brasil (opcional)",
         ["ptbr_d"]         = "Deixa o jogo em português do Brasil com a tradução feita por fãs da Triforce-Heroes. Ela não vem com o instalador: baixe-a você mesmo na página deles (a versão \"Emulador\") e escolha aqui o arquivo baixado (.rar) ou a pasta onde você o extraiu. Ela é aplicada sobre o seu próprio jogo original.",
@@ -109,10 +103,8 @@ static partial class Str
         ["shaders_tools_fail"] = "Não foi possível instalar as ferramentas para preparar os gráficos (gcc, ninja, zlib do MSYS2): o jogo é instalado mesmo assim, e o console vai compilá-los na primeira vez.",
         ["shaders_preparing"] = "Preparando os gráficos (alguns minutos)...",
         ["shaders_failed"] = "Não foi possível preparar os gráficos: o jogo funciona do mesmo jeito, e o console vai compilá-los na primeira vez.",
-        ["mm_building"]    = "Preparando o minimapa a partir do seu Wind Waker de GameCube...",
-        ["mm_done"]        = "Minimapa: aparece no mar, nos setores que têm carta. As opções dele (posição, tamanho, opacidade, estilo) ficam no jogo: segure o botão Menos > Mods > Integrados, no topo.",
-        ["hm_done"]        = "Minimapa HD: o direcional para a esquerda mostra ou esconde, para a direita muda o tamanho. As opções dele (posição, tamanhos, opacidade, botões) estão no jogo: segure Menos > Mods > Integrados, no topo.",
-        ["hint_minimap"]   = "O que falhou foi o minimapa (a linha guest_mods acima). Para instalar sem ele: feche o instalador, abra-o de novo e deixe o minimapa sem escolher (o que já foi baixado é aproveitado).",
+        ["hm_done"]      = "Minimapa HD: ativado. O direcional para a esquerda mostra ou esconde, para a direita muda o tamanho. As opções dele (posição, tamanhos, opacidade, botões) estão no jogo: segure Menos > Mods > Integrados, no topo.",
+        ["hint_minimap"] = "O que falhou foi o minimapa HD (a linha guest_mods acima). Para instalar sem ativá-lo: desmarque \"Ativar agora\" e comece de novo (o que já foi baixado é aproveitado).",
         ["fwd_h"]          = "Ícone no menu HOME (opcional)",
         ["fwd_d"]          = "Cria um forwarder .nsp para abrir o jogo pelo menu HOME, sem segurar o botão R. Precisa das prod.keys do seu Switch (extraídas com o Lockpick_RCM): elas são lidas de onde estão, nunca copiadas.",
         ["fwd_none"]       = "Sem ícone",
