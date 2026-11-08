@@ -110,9 +110,23 @@ macro(switch_pgo_configure)
     if(_pgo_mode STREQUAL "GEN")
       # what tools/switch/pgo_pack.py puts in a release profile's manifest: the compiler, the scope, the generated code
       _switch_pgo_hot_sha256(_pgo_hot_sha)
+      # whether the generated code is the players' (tools/switch/players_gen.py: recomp.py with
+      # WWHD_RECOMP_SWITCH_SKIP=1 writes a forwarder per hook it leaves out into table.c). A profile trained on other
+      # code fits no player's build (#130: v1.2.1's EU profile)
+      set(_pgo_players false)
+      if(EXISTS "${GEN_DIR}/table.c")
+        file(STRINGS "${GEN_DIR}/table.c" _pgo_skip LIMIT_COUNT 1 REGEX "hook left out \\(switch_skip_hooks\\.txt\\)")
+        if(_pgo_skip)
+          set(_pgo_players true)
+        endif()
+      endif()
+      if(NOT _pgo_players)
+        message(WARNING "WWHD_PGO=GEN: ${GEN_DIR} was not made with the players' options (WWHD_RECOMP_SWITCH_SKIP=1): "
+                        "a profile trained on it fits no player's build. Make it with tools/switch/players_gen.py (#130)")
+      endif()
       file(WRITE "${CMAKE_BINARY_DIR}/pgo-build.json"
            "{\n  \"compiler\": \"${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}\",\n  \"scope\": \"${WWHD_PGO_SCOPE}\",\n"
-           "  \"hot_sha256\": \"${_pgo_hot_sha}\"\n}\n")
+           "  \"hot_sha256\": \"${_pgo_hot_sha}\",\n  \"players_code\": ${_pgo_players}\n}\n")
       # not atomic: three cores increment the same counters, a few lost increments do not change a layout
       # -fno-profile-values: no value profiling (indirect-call targets, divisors). Its counters are thread-local, and the
       # runtime's first code (libnx's init hooks, the heap) runs before the console has set up thread-local storage;

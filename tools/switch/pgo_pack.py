@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """SwitchWakerHD: a PGO profile as a release asset (docs/pgo-release-plan.md, issue #90).
 
-  pgo_pack.py pack --region USA|EU [--gcda build/pgo] [--build-dir build/switch-pgo-gen] [--out build]
+  pgo_pack.py pack --region USA|EU [--gcda build/pgo] [--build-dir build/switch-pgo-gen] [--out build] [--other-code]
         writes OUT/pgo-profile-<region>.zip and its .sha256 (upload both to the release): the .gcda files that
         pgo_train.py fetched, and manifest.json (the region, the commit, the compiler, the scope and the generated
-        hot code's fingerprint, from the training build's pgo-build.json)
+        hot code's fingerprint, from the training build's pgo-build.json). It refuses a training build whose
+        generated code is not the players' (tools/switch/players_gen.py, #130) unless --other-code
   pgo_pack.py unpack ZIP --out DIR [--region USA|EU]
         checks the zip (only flat .gcda files and the manifest, each file's SHA-256, the region) and extracts it
         for a WWHD_PGO=USE build (WWHD_PGO_DIR=DIR): cmake/SwitchPgo.cmake then checks the compiler
@@ -50,7 +51,7 @@ def git_commit():
     return out.strip() + ("-dirty" if dirty else "")
 
 
-def pack(gcda_dir, build_dir, region, out_dir):
+def pack(gcda_dir, build_dir, region, out_dir, other_code=False):
     if region not in REGIONS:
         raise Fail("region must be one of %s" % ", ".join(REGIONS))
     info_path = os.path.join(build_dir, "pgo-build.json")
@@ -59,6 +60,15 @@ def pack(gcda_dir, build_dir, region, out_dir):
             info = json.load(f)
     except (OSError, ValueError) as e:
         raise Fail("%s: %s (the WWHD_PGO=GEN build writes it)" % (info_path, e))
+    # #130: a profile trained on code no player builds (recomp.py without WWHD_RECOMP_SWITCH_SKIP=1) is useless to them
+    players = info.get("players_code")
+    if players is False and not other_code:
+        raise Fail("%s: the training build's generated code is not the players' (made without "
+                   "WWHD_RECOMP_SWITCH_SKIP=1): make build/gen with tools/switch/players_gen.py, build and train again "
+                   "(or --other-code to pack it anyway)" % info_path)
+    if players is None:
+        print("pgo_pack: warning: %s does not say whether the training build used the players' code (an older build "
+              "folder): check its hot_sha256 against tools/switch/players_gen.py --fingerprint build/gen" % info_path)
     names = sorted(n for n in os.listdir(gcda_dir) if n.endswith(".gcda")) if os.path.isdir(gcda_dir) else []
     if not names:
         raise Fail("no .gcda files in %s (pgo_train.py fetch)" % gcda_dir)
@@ -158,6 +168,8 @@ def main(argv=None):
     p.add_argument("--gcda", default=os.path.join(ROOT, "build", "pgo"))
     p.add_argument("--build-dir", default=os.path.join(ROOT, "build", "switch-pgo-gen"))
     p.add_argument("--out", default=os.path.join(ROOT, "build"))
+    p.add_argument("--other-code", action="store_true",
+                   help="pack a profile trained on code that is not the players' (a developer's own experiment)")
     u = sub.add_parser("unpack")
     u.add_argument("zip")
     u.add_argument("--out", required=True)
@@ -165,7 +177,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     try:
         if a.cmd == "pack":
-            pack(a.gcda, a.build_dir, a.region, a.out)
+            pack(a.gcda, a.build_dir, a.region, a.out, a.other_code)
         else:
             m = unpack(a.zip, a.out, a.region)
             print("pgo_pack: %s profile (%d files, %s, commit %s) in %s"

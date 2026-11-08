@@ -32,6 +32,11 @@ what moves the Outset village.
 ## Procedure
 
 ```sh
+# 0. the players' generated code: recomp.py with make_sd.py's options (WWHD_RECOMP_SWITCH_SKIP=1). A plain recomp.py
+#    keeps the frame-interpolation hooks the players' build leaves out, and a profile trained on that code fits no
+#    player's build (#130: v1.2.1's EU profile). The GEN configure warns, and pgo_pack.py pack refuses such a build.
+python3 -I tools/switch/players_gen.py GAME_DIR/code/cking.rpx build/gen
+
 # 1. the training build, in its own folder so the normal build stays
 WWHD_BUILD_DIR=build/switch-pgo-gen WWHD_PGO=GEN tools/switch/build.sh
 
