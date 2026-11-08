@@ -96,6 +96,7 @@ sealed class SavedChoices
         if (MinimapGame != null) sb.Append("\n•  ").Append(Name("mm_h")).Append(": ").Append(MinimapGame);
         if (PtbrDownload != null) sb.Append("\n•  ").Append(Name("ptbr_h")).Append(": ").Append(PtbrDownload);
         if (PrepareShaders) sb.Append("\n•  ").Append(Name("sh_h"));
+        if (RemoveOldBuilds) sb.Append("\n•  ").Append(Name("old_h"));   // (#120: the one-click update removes them too)
         return sb.ToString();
     }
 
