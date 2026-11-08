@@ -255,7 +255,10 @@ python3 tools/switch/make_sd.py --game-dir /path/to/10143500 --guest-mod hd-mini
   compasses, the minimap and the minimap with a chart. It hides in menus, cutscenes and first person.
 - Its options (position, both sizes, opacity, fading, the buttons) are in the game: hold **Minus** > **Mods** >
   **Built-in**, at the top, *HD minimap*; then close the game and start it again. Or `--mod-option hd-minimap.size=220` when
-  you build.
+  you build (that sets the first start's values).
+- Everything it needs is inside `wwhd.nro` (its images, with their MIT notice: the frame, wind arrow and D-pad icons
+  are Chironeyes' artwork; the maps are read from your own game). Your choices are kept in
+  `switch/wwhd/mods/hd-minimap-options.json`, which the game writes the first time: a new build or update keeps them.
 - Cost on the console (EU, handheld, stock 1020 MHz CPU, 2026-11-08): about 0.15-0.4 ms of the main thread's
   33 ms per frame, and one longer frame (under 0.1 s) the first time an island's map is shown in a session.
 
@@ -286,9 +289,10 @@ The Switch cannot build code mods (Mod SDK v2, "guest" mods) itself, so they go 
   build: `--mod-option gc-minimap.size=260` (`x`, `y`, `size`, `opacity`, `style` = `vector` or `original`).
 - The maps it prepares are kept in your user folder (macOS: `~/Library/Application Support/SwitchWakerHD/guest-mods`,
   Windows: `%LOCALAPPDATA%\SwitchWakerHD\guest-mods`, Linux: `~/.local/share/SwitchWakerHD/guest-mods`), and
-  copied to `build/sd/switch/wwhd/mods/`.
-- To add or remove a mod, run `make_sd.py` again (without `--guest-mod`: no mods) and copy `wwhd.nro` and `mods/`
-  again.
+  copied to `build/sd/switch/wwhd/mods/gc-minimap/data/`: copy that folder to the SD card with `wwhd.nro`.
+- A code mod's code, images and default settings are inside `wwhd.nro`; its settings on the console are
+  `switch/wwhd/mods/<id>-options.json` (kept by new builds). To add or remove a mod, run `make_sd.py` again (without
+  `--guest-mod`: no mods) and copy `wwhd.nro` again.
 - Mods that replace game functions are not supported on the Switch; `make_sd.py` says so.
 
 ### Optional: Brazilian Portuguese (fan translation)

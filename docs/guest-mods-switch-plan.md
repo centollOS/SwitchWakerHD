@@ -186,6 +186,15 @@ no GameCube disc; it draws the HD game's own GamePad map art through the layout-
   loaded at the next start (its hook checks stay in the game code: nothing runs). No `enabled` file is on (installs
   from before). If the mod's step fails (the catalogue unreachable) and the player left it off, the installer builds
   the game again without it. A release whose `make_sd.py` has no `--guest-mod-off` gets it only when ticked.
+- **The package inside the NRO (the owner's choice).** Copying only `wwhd.nro` is enough: `guest_mods.py` writes each
+  mod's package files (the manifest, the image folders, the top-level licence/notice files: the HD minimap's images
+  are Chironeyes' MIT artwork, whose notice must travel with them) and its default settings into `mod_<id>.c`
+  (`WWHDGuestBuiltinFile`, registry fields `files`/`defaults`); its package path is `builtin:<id>` and
+  `guestbuiltin::package_file` answers the HUD's package images and the manifest read. The settings are one file,
+  `mods/<id>-options.json` (`{"enabled", "options"}`), written by the game the first time from the NRO's defaults (an
+  earlier build's `mods/<id>/options.json` and `enabled` are taken over once), so a new build keeps the player's
+  choices; options the file lacks take the NRO's defaults. Only a setup's output still goes to the SD card
+  (`mods/<id>/data/`, gc-minimap's maps). The mod's page shows "Artwork: (c) 2026 Chironeyes, MIT".
 - **Installers.** An "HD minimap (optional)" box on the game page (off by default; saved with the other choices),
   `--guest-mod hd-minimap`; strings in Spanish, English and Portuguese.
 - **With gc-minimap.** Both hook daPy_Execute's return (chained) and get consecutive guest regions, but both default

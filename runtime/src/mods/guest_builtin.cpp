@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <span>
+#include <filesystem>
 #include <iterator>
 #include <map>
 
@@ -32,12 +34,8 @@ static std::string read_file(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     return in ? std::string{std::istreambuf_iterator<char>(in), {}} : std::string();
 }
-static std::string mod_dir(const char* id) { return host::config_dir() + "/mods/" + id; }
-// (#121) the player's switch: mods/<id>/enabled holds "0" (off) or "1"; no file is on (installs from before the switch)
-static bool switched_on(const std::string& dir) {
-    const std::string v = read_file(dir + "/enabled");
-    return v.empty() || v[0] != '0';
-}
+static std::string mods_dir() { return host::config_dir() + "/mods"; }
+static std::string mod_dir(const char* id) { return mods_dir() + "/" + id; }  // its prepared data (data/)
 
 #if WWHD_GUEST_BUILTIN
 static const WWHDGuestBuiltin* begin() { return g_guest_builtin; }
@@ -46,6 +44,88 @@ static const WWHDGuestBuiltin* end() { return g_guest_builtin + g_guest_builtin_
 static const WWHDGuestBuiltin* begin() { return nullptr; }
 static const WWHDGuestBuiltin* end() { return nullptr; }
 #endif
+static const WWHDGuestBuiltin* find(const std::string& id) {
+    for (const WWHDGuestBuiltin* b = begin(); b != end(); ++b)
+        if (id == b->id) return b;
+    return nullptr;
+}
+
+// (#121) a built-in mod's settings, one file on the SD card: mods/<id>-options.json, {"enabled": bool, "options": {...}}.
+// The game writes it the first time from the NRO's defaults (guest_mods.py: the manifest's, the Switch's, --option and
+// --guest-mod-off), so a new build never overwrites what the player chose. Settings of earlier builds (mods/<id>/
+// options.json and enabled) are taken over once. An option the file lacks (a newer mod) takes the NRO's default.
+static std::string settings_path(const std::string& id) { return mods_dir() + "/" + id + "-options.json"; }
+struct Settings {
+    bool enabled = true;
+    mods::json::Value options;
+};
+static const WWHDGuestBuiltin* find(const std::string& id);
+static mods::json::Value parse_or_null(const std::string& text) {
+    try {
+        return text.empty() ? mods::json::Value() : mods::json::parse(text);
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+static bool write_settings(const std::string& id, const Settings& s, std::string& error) {
+    std::error_code ec;
+    std::filesystem::create_directories(mods_dir(), ec);
+    mods::json::Value all;
+    all["enabled"] = mods::json::Value(s.enabled);
+    all["options"] = s.options;
+    if (s.options.type != mods::json::Value::Object) all["options"].type = mods::json::Value::Object;
+    const std::string path = settings_path(id), tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        f << mods::json::dump(all) << '\n';
+        f.close();
+        if (!f) {
+            error = "cannot write " + tmp;
+            return false;
+        }
+    }
+    if (!host::replace_file(tmp, path)) {
+        error = "cannot save " + path;
+        return false;
+    }
+    return true;
+}
+static Settings read_settings(const WWHDGuestBuiltin& b) {
+    const mods::json::Value defaults = parse_or_null(b.defaults ? b.defaults : "");
+    Settings s;
+    s.enabled = defaults.get("enabled").type != mods::json::Value::Bool || defaults.get("enabled").boolean;
+    s.options = defaults.get("options");
+    if (s.options.type != mods::json::Value::Object) s.options.type = mods::json::Value::Object;
+    const mods::json::Value saved = parse_or_null(read_file(settings_path(b.id)));
+    if (saved.type == mods::json::Value::Object) {
+        if (saved.get("enabled").type == mods::json::Value::Bool) s.enabled = saved.get("enabled").boolean;
+        for (const auto& [k, v] : saved.get("options").object) s.options[k] = v;
+        return s;
+    }
+    // the first start of this build: an earlier build's settings, else the defaults; written either way
+    const std::string old = mod_dir(b.id);
+    const mods::json::Value old_options = parse_or_null(read_file(old + "/options.json"));
+    for (const auto& [k, v] : old_options.object) s.options[k] = v;
+    const std::string old_switch = read_file(old + "/enabled");
+    if (!old_switch.empty()) s.enabled = old_switch[0] != '0';
+    std::string error;
+    if (!write_settings(b.id, s, error)) LOG("[guestmods] %s: %s", b.id, error.c_str());
+    else LOG("[guestmods] %s: settings written to %s (%s)", b.id, settings_path(b.id).c_str(),
+             old_options.type == mods::json::Value::Object ? "taken over from the earlier mods/" + std::string(b.id) + "/" : "the defaults");
+    return s;
+}
+// the package's files built into the NRO, under the package path "builtin:<id>" (load()); false for another path
+bool package_file(const std::string& package_path, const std::string& relative, std::span<const uint8_t>& out) {
+    if (package_path.rfind("builtin:", 0) != 0) return false;
+    const WWHDGuestBuiltin* b = find(package_path.substr(8));
+    if (!b) return false;
+    for (uint32_t i = 0; i < b->file_count; i++)
+        if (relative == b->files[i].path) {
+            out = std::span<const uint8_t>(b->files[i].data, b->files[i].size);
+            return true;
+        }
+    return false;
+}
 
 Region memory() {
     Region r;
@@ -81,8 +161,8 @@ void load(const Install& install) {
         return;
     }
     for (const WWHDGuestBuiltin* b = begin(); b != end(); ++b) {
-        const std::string dir = mod_dir(b->id);
-        if (!switched_on(dir)) {  // (#121) built in, switched off by the player (Mods tab) or the installer
+        const Settings settings = read_settings(*b);
+        if (!settings.enabled) {  // (#121) built in, switched off by the player (Mods tab) or the installer
             LOG("[guestmods] %s %s (built into the NRO) switched off: not loaded", b->id, b->version);
             g_status[b->id] = "";
             continue;
@@ -91,21 +171,10 @@ void load(const Install& install) {
         pkg.id = b->id;
         pkg.name = b->name;
         pkg.version = b->version;
-        pkg.path = dir + "/package";
-        pkg.data_path = dir + "/data";
+        pkg.path = std::string("builtin:") + b->id;  // (#121) its package files are in the NRO (package_file)
+        pkg.data_path = mod_dir(b->id) + "/data";
         pkg.heap_size = b->heap_size;
-        pkg.options = mods::json::Value();
-        std::ifstream in(dir + "/options.json", std::ios::binary);
-        if (in) {
-            try {
-                pkg.options = mods::json::parse(std::string{std::istreambuf_iterator<char>(in), {}});
-            } catch (const std::exception& e) {
-                LOG("[guestmods] %s: options.json not read (%s): the mod's defaults", b->id, e.what());
-            }
-        } else {
-            LOG("[guestmods] %s: no %s/ (its images and data): copy build/sd/switch/wwhd/mods/ to the SD card", b->id,
-                dir.c_str());
-        }
+        pkg.options = settings.options;
         std::string error;
         if (!install(pkg, b->base, b->region_size, b->init, error)) {
             LOG("[guestmods] %s %s (built into the NRO) not loaded: %s", b->id, b->version, error.c_str());
@@ -129,18 +198,14 @@ std::vector<Mod>& list() {
         m.version = b->version;
         auto st = g_status.find(b->id);
         m.status = st == g_status.end() ? "not loaded: the game code has no mod hooks (see wwhd.log)" : st->second;
-        const std::string dir = mod_dir(b->id);
-        m.enabled = switched_on(dir);
+        const Settings settings = read_settings(*b);
+        m.enabled = settings.enabled;
         m.loaded = std::find(g_loaded.begin(), g_loaded.end(), m.id) != g_loaded.end();
-        mods::json::Value man, values;
-        try {
-            man = mods::json::parse(read_file(dir + "/package/manifest.json"));
-        } catch (const std::exception&) {
-            m.status = "its files are missing: copy build/sd/switch/wwhd/mods/ to the SD card";
-        }
-        try {
-            values = mods::json::parse(read_file(dir + "/options.json"));
-        } catch (const std::exception&) {}
+        mods::json::Value man;
+        std::span<const uint8_t> bytes;
+        if (package_file(std::string("builtin:") + b->id, "manifest.json", bytes))
+            man = parse_or_null(std::string(bytes.begin(), bytes.end()));
+        const mods::json::Value& values = settings.options;
         m.description = man.get("description").string();
         for (const auto& o : man.get("options").array) {
             Option op;
@@ -176,45 +241,23 @@ bool set_option(Mod& mod, Option& option, const mods::json::Value& value, bool s
     }
     option.value = v;
     if (!save) return true;
-    mods::json::Value all;
-    all.type = mods::json::Value::Object;
+    Settings st;
+    st.enabled = mod.enabled;
+    st.options.type = mods::json::Value::Object;
     for (const auto& o : mod.options)
-        if (o.value.type != mods::json::Value::Null) all[o.id] = o.value;
-    const std::string dir = mod_dir(mod.id.c_str());
-    const std::string tmp = dir + "/options.json.tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        f << mods::json::dump(all) << '\n';
-        f.close();
-        if (!f) {
-            error = "cannot write " + tmp;
-            return false;
-        }
-    }
-    if (!host::replace_file(tmp, dir + "/options.json")) {
-        error = "cannot save " + dir + "/options.json";
-        return false;
-    }
+        if (o.value.type != mods::json::Value::Null) st.options[o.id] = o.value;
+    if (!write_settings(mod.id, st, error)) return false;
     mod.changed = true;
     return true;
 }
 
 bool set_enabled(Mod& mod, bool on, std::string& error) {
-    const std::string dir = mod_dir(mod.id.c_str());
-    const std::string tmp = dir + "/enabled.tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        f << (on ? "1" : "0") << '\n';
-        f.close();
-        if (!f) {
-            error = "cannot write " + tmp;
-            return false;
-        }
-    }
-    if (!host::replace_file(tmp, dir + "/enabled")) {
-        error = "cannot save " + dir + "/enabled";
-        return false;
-    }
+    Settings st;
+    st.enabled = on;
+    st.options.type = mods::json::Value::Object;
+    for (const auto& o : mod.options)
+        if (o.value.type != mods::json::Value::Null) st.options[o.id] = o.value;
+    if (!write_settings(mod.id, st, error)) return false;
     mod.enabled = on;
     return true;
 }

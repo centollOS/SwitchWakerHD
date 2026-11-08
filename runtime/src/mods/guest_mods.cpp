@@ -903,7 +903,11 @@ void svc_hud_texture(Cpu* c) {
     // Package textures are deliberately restricted to the two artwork folders.
     if(source==0&&!path.starts_with("assets/")&&!path.starts_with("textures/")){hud::store().note(mod.id,"HUD PNG load failed: package images must be in assets/ or textures/");return;}
     try {
-        auto pixels=hud::load_png(source?mod.data_path:mod.package_path,path);
+        // (this fork, #121) a mod built into the NRO has its package images there (guest_builtin.h package_file)
+        std::span<const uint8_t> builtin;
+        if(!source&&mod.package_path.rfind("builtin:",0)==0&&!guestbuiltin::package_file(mod.package_path,path,builtin))
+            throw std::runtime_error("missing");
+        auto pixels=builtin.data()?hud::decode_png(builtin):hud::load_png(source?mod.data_path:mod.package_path,path);
         c->r[3]=hud::store().create_image(mod.id,pixels.width,pixels.height,pixels.width*4,pixels.rgba.data(),pixels.rgba.size());
         if(!c->r[3])hud::store().note(mod.id,"HUD PNG load failed: per-mod image quota exceeded");
     }catch(const std::exception&){hud::store().note(mod.id,"HUD PNG load failed: missing, invalid or oversized texture");}
@@ -1305,8 +1309,11 @@ bool load_one(const std::string& path, std::string& err,const mods::packages::Gu
     // The story system runs only with its required package, the Story Notebook (it brings the notebook
     // and its look); without it no mod's quests are declared.
     try {
-        std::ifstream manifest_file(std::filesystem::path(pkg.path)/"manifest.json",std::ios::binary);
-        std::string manifest_text{std::istreambuf_iterator<char>(manifest_file),{}};
+        std::string manifest_text;
+        std::span<const uint8_t> builtin;  // (this fork, #121) a mod built into the NRO: its manifest is there
+        if(guestbuiltin::package_file(pkg.path,"manifest.json",builtin))manifest_text.assign(builtin.begin(),builtin.end());
+        else {std::ifstream manifest_file(std::filesystem::path(pkg.path)/"manifest.json",std::ios::binary);
+              manifest_text.assign(std::istreambuf_iterator<char>(manifest_file),{});}
         const auto manifest=mods::json::parse(manifest_text);
         if(loaded.id==story_notebook::kNotebookPackage) {
             g_story_package=true;

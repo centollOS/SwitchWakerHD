@@ -10,6 +10,14 @@
 extern "C" {
 #endif
 
+/* (#121) a file of the mod's package, built into the NRO: its path in the package ("manifest.json",
+ * "assets/frame.png", "LICENSE") and its bytes */
+typedef struct WWHDGuestBuiltinFile {
+    const char* path;
+    const unsigned char* data;
+    uint32_t size;
+} WWHDGuestBuiltinFile;
+
 typedef struct WWHDGuestBuiltin {
     const char* id;
     const char* name;
@@ -17,6 +25,9 @@ typedef struct WWHDGuestBuiltin {
     WWHDGuestInitV1 init;
     uint32_t base, region_size;  /* guest memory: module and heap, 64 KiB aligned */
     uint32_t heap_size;
+    const WWHDGuestBuiltinFile* files;  /* (#121) the package's manifest, images and notices */
+    uint32_t file_count;
+    const char* defaults;               /* (#121) {"enabled": bool, "options": {...}}: the settings of a first start */
 } WWHDGuestBuiltin;
 
 extern const WWHDGuestBuiltin g_guest_builtin[];

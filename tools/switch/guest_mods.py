@@ -7,10 +7,9 @@ what the build and the SD card need (docs/guest-mods-switch-plan.md):
 
   OUT/hooks.txt                 the game functions the mods hook (canonical addresses): the recompile's
                                 WWHD_RECOMP_MOD_HOOKS_ONLY, so only those get the mods' check
-  OUT/registry.c, OUT/mod_*.c   compiled into the NRO when OUT is build/guest-mods (cmake/SwitchPort.cmake)
-  OUT/sd/<id>/                  sdmc:/switch/wwhd/mods/<id>/: package/ (manifest, images), options.json, enabled
-                                (1, or 0 with --off ID: the player's switch in the game's menu)
-  DATA/<id>/                    the mod's setup output (its data/ on the SD card): outside the checkout, since a
+  OUT/registry.c, OUT/mod_*.c   compiled into the NRO when OUT is build/guest-mods (cmake/SwitchPort.cmake): each
+                                mod's code, its package files (manifest, images, notices) and its default settings
+  DATA/<id>/                    the mod's setup output (sdmc:/switch/wwhd/mods/<id>/data/): outside the checkout, since a
                                 mod's files derived from your games must not land in a Git repository; DATA is
                                 --data, by default a per-user folder (user_data_root)
   OUT/guest-mods.json           what was built (each mod's data folder too)
@@ -217,6 +216,55 @@ def option_values(man, given):
     return values
 
 
+# (#121) what of a package goes into the NRO: its manifest, the image folders the HUD reads (PACKAGE_DIRS) and the
+# package's licence and notice files (the images' licences ask for their notice to travel with them)
+NOTICE_FILES = re.compile(r"(LICEN[CS]E|NOTICE|COPYING)(\.[A-Za-z]+)?", re.I)
+MAX_PACKAGE_BYTES = 4 << 20
+
+
+def package_files(pkg):
+    """[(path in the package, bytes)]: manifest.json, the files under PACKAGE_DIRS, licence/notice files at the top"""
+    out = [("manifest.json", open(os.path.join(pkg, "manifest.json"), "rb").read())]
+    for name in sorted(os.listdir(pkg)):
+        if NOTICE_FILES.fullmatch(name) and os.path.isfile(os.path.join(pkg, name)):
+            out.append((name, open(os.path.join(pkg, name), "rb").read()))
+    for d in PACKAGE_DIRS:
+        top = os.path.join(pkg, d)
+        for root, dirs, names in os.walk(top):
+            dirs.sort()
+            for n in sorted(names):
+                path = os.path.join(root, n)
+                if os.path.islink(path):
+                    continue
+                out.append((os.path.relpath(path, pkg).replace(os.sep, "/"), open(path, "rb").read()))
+    if sum(len(b) for _, b in out) > MAX_PACKAGE_BYTES:
+        raise Fail("%s: the package's files are over %d MiB" % (os.path.basename(pkg), MAX_PACKAGE_BYTES >> 20))
+    return out
+
+
+def c_string(text):
+    """a C string literal of text's UTF-8 bytes (printable ASCII as is, the rest as three-digit octal escapes)"""
+    out = []
+    for b in text.encode("utf-8"):
+        out.append(chr(b) if 32 <= b < 127 and chr(b) not in '"\\?' else "\\%03o" % b)
+    return '"' + "".join(out) + '"'
+
+
+def write_package(f, cn, files, defaults):
+    """the package's files and the default settings, in the mod's C file (wwhd_guest_builtin.h WWHDGuestBuiltinFile)"""
+    f.write('\n#include "wwhd_guest_builtin.h"\n')
+    for i, (_, data) in enumerate(files):
+        f.write("static const unsigned char gm_%s_file%d[%d] = {" % (cn, i, max(1, len(data))))
+        for j in range(0, len(data), 24):
+            f.write("\n    " + ",".join(str(b) for b in data[j:j + 24]) + ",")
+        f.write("\n};\n")
+    f.write("const WWHDGuestBuiltinFile wwhd_guest_builtin_files_%s[] = {\n" % cn)
+    for i, (name, data) in enumerate(files):
+        f.write("    {%s, gm_%s_file%d, %du},\n" % (c_string(name), cn, i, len(data)))
+    f.write("};\n")
+    f.write("const char wwhd_guest_builtin_defaults_%s[] = %s;\n" % (cn, c_string(json.dumps(defaults, ensure_ascii=False))))
+
+
 def rvz_codec(path):
     """A WIA/RVZ image's compression (the disc struct after the 0x48-byte header: 5 is Zstandard); None for others."""
     try:
@@ -330,22 +378,15 @@ def build(args):
         source = t.emit(mid)
         if GQR_WRITE.search(source):
             raise Fail("%s writes a GQR (paired-single quantization register): not supported in the Switch build" % mid)
-        sd = os.path.join(out, "sd", mid)
-        os.makedirs(sd)
         data = os.path.join(os.path.abspath(args.data), mid)
         shutil.rmtree(data, ignore_errors=True)
         os.makedirs(data)
         run_setup(man, pkg, data, args.gc_game, python)
-        os.makedirs(os.path.join(sd, "package"))
-        shutil.copyfile(os.path.join(pkg, "manifest.json"), os.path.join(sd, "package", "manifest.json"))
-        for d in PACKAGE_DIRS:
-            if os.path.isdir(os.path.join(pkg, d)):
-                shutil.copytree(os.path.join(pkg, d), os.path.join(sd, "package", d))
-        with open(os.path.join(sd, "options.json"), "w") as f:
-            json.dump(option_values(man, given.pop(mid, {})), f, indent=1)
-        # (#121) the player's switch (mods/<id>/enabled on the SD card, guest_builtin.cpp): on unless --off
-        with open(os.path.join(sd, "enabled"), "w") as f:
-            f.write("0\n" if mid in args.off else "1\n")
+        # (#121) the package's files the console reads (the manifest, its images and their notices) go into the NRO
+        # (package_files); the player's switch and options are one file on the SD card, written by the game from these
+        # defaults the first time (mods/<id>-options.json, guest_builtin.cpp)
+        files = package_files(pkg)
+        defaults = {"enabled": mid not in args.off, "options": option_values(man, given.pop(mid, {}))}
         cn = c_name(mid)
         os.makedirs(os.path.join(out, "translated"), exist_ok=True)
         with open(os.path.join(out, "translated", cn + ".c"), "w") as f:
@@ -357,7 +398,9 @@ def build(args):
                 f.write("#define %s gm_%s_%s\n" % (s, cn, s))
             f.write("#define wwhd_guest_module_v1 wwhd_guest_builtin_%s\n" % cn)
             f.write('#include "translated/%s.c"\n' % cn)
+            write_package(f, cn, files, defaults)
         mods.append({"id": mid, "name": man.get("name", mid), "version": man.get("version", ""), "c_name": cn, "data": data,
+                     "files": [n for n, _ in files], "defaults": defaults,
                      "base": base, "region": region, "heap": heap, "memory": t.end - base,
                      "hooks": ["%08X" % tg for _, tg, _, _ in canon.hooks], "services": t.services})
         print("  %s %s: %d functions, %d hooks, guest memory %08X-%08X (module %d bytes, heap %d)" % (
@@ -378,10 +421,14 @@ def build(args):
         f.write('#include "wwhd_guest_builtin.h"\n\n')
         for m in mods:
             f.write("const WWHDGuestModuleV1* wwhd_guest_builtin_%s(const WWHDGuestHostV1* host);\n" % m["c_name"])
+            f.write("extern const WWHDGuestBuiltinFile wwhd_guest_builtin_files_%s[];\n" % m["c_name"])
+            f.write("extern const char wwhd_guest_builtin_defaults_%s[];\n" % m["c_name"])
         f.write("\nconst WWHDGuestBuiltin g_guest_builtin[] = {\n")
         for m in mods:
-            f.write('    {"%s", "%s", "%s", wwhd_guest_builtin_%s, 0x%08Xu, 0x%Xu, 0x%Xu},\n' % (
-                m["id"], m["name"].replace('"', "'"), m["version"], m["c_name"], m["base"], m["region"], m["heap"]))
+            f.write('    {"%s", "%s", "%s", wwhd_guest_builtin_%s, 0x%08Xu, 0x%Xu, 0x%Xu,\n'
+                    '     wwhd_guest_builtin_files_%s, %du, wwhd_guest_builtin_defaults_%s},\n' % (
+                m["id"], m["name"].replace('"', "'"), m["version"], m["c_name"], m["base"], m["region"], m["heap"],
+                m["c_name"], len(m["files"]), m["c_name"]))
         f.write("};\nconst unsigned g_guest_builtin_count = %d;\n" % len(mods))
     with open(os.path.join(out, "guest-mods.json"), "w") as f:
         json.dump({"build": game_build.name, "mods": mods}, f, indent=1)
@@ -429,7 +476,7 @@ def main():
     ap.add_argument("--gc-game", help="your GameCube Wind Waker, for mods whose setup reads it")
     ap.add_argument("--option", action="append", default=[], help="a mod option: ID.KEY=VALUE")
     ap.add_argument("--off", action="append", default=[], metavar="ID",
-                    help="built in switched off (OUT/sd/ID/enabled is 0): the game's menu turns it on")
+                    help="built in switched off (the defaults in the NRO): the game's menu turns it on")
     ap.add_argument("--clear", action="store_true", help="remove OUT: the NRO without guest mods")
     ap.add_argument("--check", action="store_true", help="only check the packages and the GameCube disc")
     args = ap.parse_args()

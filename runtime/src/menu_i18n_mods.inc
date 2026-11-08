@@ -260,6 +260,7 @@
  "Ne fonctionne pas : "},
 // (#121) a code mod's page: its option groups, and the names, values and descriptions of the code mods this fork
 // knows (guest_builtin_ui.cpp layouts(); the manifests are in English)
+{"Artwork: %s", "Gráficos: %s", "Gráficos: %s", "Grafica: %s", "Grafiken: %s", "Graphismes : %s"},
 {"Based on %s", "Basado en %s", "Baseado em %s", "Basato su %s", "Basiert auf %s", "Basé sur %s"},
 {"Position and size",
  "Posición y tamaño",

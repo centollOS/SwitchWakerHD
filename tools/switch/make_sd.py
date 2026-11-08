@@ -514,13 +514,14 @@ def main():
     shutil.copyfile(nro, os.path.join(wwhd, "wwhd.nro"))
     if dksh:
         shutil.copyfile(dksh, os.path.join(wwhd, "shadercache_dksh.bin"))
-    if args.guest_mod:  # sdmc:/switch/wwhd/mods/<id>/: each mod's images and options, and its prepared data
+    if args.guest_mod:  # (#121) the code mods' package files and settings are in the NRO (the game writes the settings
+        # to sdmc:/switch/wwhd/mods/<id>-options.json); only a mod's prepared data goes to mods/<id>/data/
         with open(os.path.join(mods_dir, "guest-mods.json")) as f:
             for m in json.load(f)["mods"]:
-                dst = os.path.join(wwhd, "mods", m["id"])
-                shutil.rmtree(dst, ignore_errors=True)
-                shutil.copytree(os.path.join(mods_dir, "sd", m["id"]), dst)
-                shutil.copytree(m["data"], os.path.join(dst, "data"))
+                if os.path.isdir(m["data"]) and os.listdir(m["data"]):
+                    dst = os.path.join(wwhd, "mods", m["id"], "data")
+                    shutil.rmtree(dst, ignore_errors=True)
+                    shutil.copytree(m["data"], dst)
     ptbr_dst = os.path.join(wwhd, "translation", "pt-BR")  # read by runtime/src/fan_translation.cpp
     if ptbr_pack:
         shutil.rmtree(ptbr_dst, ignore_errors=True)

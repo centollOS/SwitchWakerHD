@@ -36,7 +36,8 @@ struct Group { const char* name; std::vector<const char*> options; };
 struct Choice { const char* option; const char* value; const char* label; };
 // credit: the original work the mod is based on, shown on its page (name and where to find it, not translated)
 struct Layout { const char* mod; std::vector<Group> groups; std::vector<const char*> developer; std::vector<Choice> choices;
-                const char* credit = nullptr; };
+                const char* credit = nullptr;
+                const char* artwork = nullptr; };  // the package images' copyright and licence (their notice is in the NRO)
 
 const std::vector<Layout>& layouts() {
     static const std::vector<Layout> all = {
@@ -50,7 +51,7 @@ const std::vector<Layout>& layouts() {
           {"*key", "left", "D-pad left"}, {"*key", "right", "D-pad right"}, {"*key", "up", "D-pad up"},
           {"*key", "down", "D-pad down"}, {"*key", "l3", "Left stick click"}, {"*key", "r3", "Right stick click"},
           {"*key", "none", "None"}},
-         "Minimap HD by Chironeyes (gamebanana.com/mods/727687)"},
+         "Minimap HD by Chironeyes (gamebanana.com/mods/727687)", "\xC2\xA9 2026 Chironeyes, MIT"},
         {"gc-minimap",
          {{"Position and size", {"x", "y", "size"}}, {"Look", {"opacity", "style"}}, {"Dungeons", {"dungeons"}}},
          {},
@@ -186,6 +187,11 @@ bool page(bool back, bool& back_used) {
     if (l && l->credit) {
         char line[256];
         std::snprintf(line, sizeof line, menu_i18n::tr("Based on %s"), l->credit);
+        wrapped(kMuted, line);
+    }
+    if (l && l->artwork) {
+        char line[256];
+        std::snprintf(line, sizeof line, menu_i18n::tr("Artwork: %s"), l->artwork);
         wrapped(kMuted, line);
     }
     // the mods read their options when the game starts
