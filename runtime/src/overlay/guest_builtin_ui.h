@@ -3,5 +3,10 @@
 #pragma once
 
 namespace guestbuiltinui {
-void draw();  // in the Mods tab's Built-in area (modsui::Host::builtin_code_mods); nothing without built-in mods
+// In the Mods tab's Built-in list (modsui::Host::builtin_code_mods): one row per built-in code mod, as the built-in
+// mods' rows; its name opens the mod's page. Nothing without built-in mods.
+void draw();
+// The open code mod's page in place of the Built-in list (modsui::Host::builtin_code_mod_page): false when no page is
+// open. back: the controller's B this frame; back_used is set when the page took it.
+bool page(bool back, bool& back_used);
 }

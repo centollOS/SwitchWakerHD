@@ -62,6 +62,8 @@ struct Host {
     std::string build_name = "USA";
     bool android = false;
     std::function<void()> builtin_code_mods;  // (this fork) the Switch NRO's code mods (guest_builtin_ui.h)
+    // (this fork, #121) a code mod's page in place of the Built-in list: false when none is open (guest_builtin_ui.h)
+    std::function<bool(bool back, bool& back_used)> builtin_code_mod_page;
     bool file_picker = true; // the host has file and folder choosers (overlay/extensions.h Features)
     bool code_mods = true;      // code mods can run here (Features::code_mods)
     bool mod_downloads = true;  // the online mod list (Features::mod_downloads)
@@ -1041,6 +1043,12 @@ inline bool on_controls_tab(std::string_view id) {
 }
 
 inline void builtin_list(Host& h) {
+    if (h.builtin_code_mod_page) {  // (this fork, #121)
+        bool used = false;
+        const bool open = h.builtin_code_mod_page(h.back, used);
+        h.b_used = h.b_used || used;
+        if (open || used) return;
+    }
     muted(tr(kAreaCaptions[kBuiltin]));
     if (!begin_list("builtin")) return;
     for (const auto& e : mods::manager::entries()) {

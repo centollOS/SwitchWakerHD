@@ -2025,6 +2025,7 @@ modsui::Host& mods_host() {
 #endif
 #ifdef __SWITCH__
         h.builtin_code_mods = [] { guestbuiltinui::draw(); };  // (this fork) the code mods built into the NRO
+        h.builtin_code_mod_page = [](bool back, bool& used) { return guestbuiltinui::page(back, used); };  // (this fork, #121)
 #endif
         h.test = g_no_host && getenv("WWHD_MOD_MANAGER_DIR");
         h.file_picker = ext::features().file_picker;
