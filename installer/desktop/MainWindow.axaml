@@ -98,6 +98,16 @@
               </StackPanel>
             </Border>
 
+            <!-- Older builds (#120): removed after a successful build -->
+            <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
+              <StackPanel>
+                <CheckBox x:Name="ChkOldBuilds" IsChecked="True" Margin="0,0,0,4">
+                  <TextBlock x:Name="TxtOldH" FontWeight="SemiBold"/>
+                </CheckBox>
+                <TextBlock x:Name="TxtOldD" Classes="dim" FontSize="13" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
+
             <!-- Optional: the GameCube sea minimap (a code mod built into the game) -->
             <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
               <StackPanel>

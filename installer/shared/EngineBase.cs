@@ -96,6 +96,7 @@ abstract partial class EngineBase
         RunStep(StepDevkit,  SwitchTools);
         RunStep(StepBuild,   Build);
         SaveChoices();
+        RemoveOlderBuilds();   // (#120: with the option on; never fails the install)
     }
 
     void RunStep(int step, Action body)
