@@ -52,7 +52,10 @@ void emit(Op op, const uint32_t* words, uint32_t count) {
 }
 namespace mods::cemu { float aspect_ratio() { return 0; } }
 namespace mods { void play_context_pane(uint32_t) {} }  // the context buttons' pane observer (mods/play_context.cpp)
-namespace mods { float hud_fade_alpha_of(uint32_t) { return 1.f; } int hud_pane_hide(uint32_t) { return 0; } }  // HUD fades (mods/hud_fade.cpp)
+namespace mods { float hud_fade_alpha_of(uint32_t) { return 1.f; } int hud_pane_hide(uint32_t) { return 0; } bool hud_fade_any() { return false; } }  // HUD fades (mods/hud_fade.cpp)
+// the renderer's frame (gfx/renderer.cpp): a new one at every call, so the once-a-frame marking cache (button_glyphs.cpp
+// marking_refresh) sees each change at once
+namespace render { uint64_t frame_count() { static uint64_t n = 0; return ++n; } }
 namespace mods { bool g_test_item_names = false; bool item_names_on_hud() { return g_test_item_names; } }  // the item ring's names (mods/item_ring.cpp)
 extern "C" void f_025A847C_orig(Cpu*) {}
 extern "C" void f_02704D2C_orig(Cpu*) {}
