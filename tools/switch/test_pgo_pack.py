@@ -12,7 +12,7 @@ import pgo_pack  # noqa: E402
 
 GCDA = {"#CMakeFiles#gamecode.dir#build#gen#code_hot_000.gcda": b"adcg" + b"\1" * 60,
         "#CMakeFiles#wwhd.dir#runtime#src#gfx#deko#backend.gcda": b"adcg" + b"\2" * 90}
-INFO = {"compiler": "GNU 16.1.0", "scope": "game;runtime", "hot_sha256": "ab" * 32}
+INFO = {"compiler": "GNU 16.1.0", "scope": "game;runtime", "hot_sha256": "ab" * 32, "players_code": True}
 
 
 def refuses(zip_path, out, why, region=None):
@@ -88,6 +88,19 @@ def main():
             raise AssertionError("packed an empty folder")
         except pgo_pack.Fail as e:
             assert "no .gcda files" in str(e)
+
+        # #130: a training build on code that is not the players' is refused, unless asked for
+        with open(os.path.join(build, "pgo-build.json"), "w") as f:
+            json.dump(dict(INFO, players_code=False), f)
+        try:
+            pgo_pack.pack(gcda, build, "EU", t)
+            raise AssertionError("packed a profile trained on code no player builds")
+        except pgo_pack.Fail as e:
+            assert "not the players'" in str(e)
+        pgo_pack.pack(gcda, build, "EU", t, other_code=True)
+        with open(os.path.join(build, "pgo-build.json"), "w") as f:  # an older build folder: packed, with a warning
+            json.dump({k: v for k, v in INFO.items() if k != "players_code"}, f)
+        pgo_pack.pack(gcda, build, "EU", t)
     print("test_pgo_pack: OK")
 
 
