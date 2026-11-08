@@ -64,6 +64,10 @@ bool hidden_pane(uint32_t pane) {
 }
 }  // namespace screen_mode
 
+// The game hooks below are the Switch's (gamepad_mode() is false elsewhere). The desktop and Android builds hook the
+// same functions with upstream's one screen mode (mods/one_screen.cpp, which the Switch build leaves out:
+// cmake/SwitchPort.cmake), so only one of the two may define them.
+#ifdef __SWITCH__
 // file select: changeState(picker widget machine (widget+0x18), r4 = StateID_Display)
 extern "C" void site_0270AC04(Cpu* c) {
     if (c->r[4] != GD(0x1049AA74) || !gamepad_mode()) return;  // StateID_Display
@@ -183,3 +187,4 @@ extern "C" void hook_026D87D0(Cpu* c) {  // the Controller item's callback: its 
     f_026D87D0_orig(c);
     if (swap) values_to_reordered(win);
 }
+#endif  // __SWITCH__
