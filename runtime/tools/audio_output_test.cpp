@@ -171,6 +171,23 @@ int main() {
         assert(!o.play_tv && o.play_drc);
         printf("overrides: tv / gamepad\n");
     }
+    {
+        OutputSelect o;
+        o.update(true, Fader{1,1,0}, Fader{});
+        assert(o.play_gamepad_only);
+        o.update(true, Fader{1,1,0}, Fader{1,1,0});
+        assert(!o.play_gamepad_only); // both
+        o.update(true, Fader{0,0,0}, Fader{1,1,0});
+        assert(!o.play_gamepad_only); // Off-TV
+        o.update(true, Fader{1,1,0}, Fader{0,1,5});
+        assert(!o.play_gamepad_only); // beginning Off-TV transition
+        o.update(false, Fader{1,1,0}, Fader{});
+        assert(!o.play_gamepad_only); // no sound player
+        o.source = OutputSelect::kGamePad;
+        o.update(true, Fader{1,1,0}, Fader{});
+        assert(!o.play_gamepad_only);
+        printf("GamePad-only path: settled TV play only\n");
+    }
     printf("audio output: all passed\n");
     return 0;
 }

@@ -75,6 +75,11 @@ void ppc_host_call(Cpu* c, PpcFunc fn);           /* guarded native hook/site en
 #else
 #define PPC_HOOK_CALL(c, fn) ppc_host_call(c, fn)
 #endif
+#ifdef __SWITCH__
+/* hidden: its address is the base of every cached target (PPC_SITE_FN); a default-visibility symbol is loaded
+ * through the GOT in this -fPIC build, an extra load at each of the 15,000 indirect call sites */
+__attribute__((visibility("hidden")))
+#endif
 void ppc_dispatch(Cpu* c);                       /* call/jump to c->pc */
 /* Indirect call (bctrl/blrl) with a one-entry cache per call site: most are virtual calls that
  * always reach the same function, and the dispatch table (32 MB) costs a cache miss per lookup.
@@ -126,11 +131,22 @@ void ppc_preempt(Cpu* c);
 #define PPC_ENTER(a) do {                                                     \
         if (__builtin_expect(c->preempt, 0)) ppc_preempt(c);                  \
     } while (0)
+/* (this fork) The function entry of a recompiled game function (recomp.py): the same check, but the slow path is a
+ * tail call that starts the function again after the yield, so the function itself makes no call that needs a stack
+ * frame (11,000 of the 39,700 functions built a frame, x30 saved and restored on every call, for this one cold
+ * call). ppc_preempt_again (threads.cpp) yields and then runs `self` from the top. Not in the inlined copies of
+ * small leaves (a tail call cannot be inlined: PPC_ENTER stays there) nor off the Switch (the desktop's
+ * entry parking walks the host frames of a function that called ppc_preempt). */
+void ppc_preempt_again(Cpu* c, PpcFunc self);
+#define PPC_ENTER_FN(a, self) do {                                            \
+        if (__builtin_expect(c->preempt, 0)) MUSTTAIL return ppc_preempt_again(c, self); \
+    } while (0)
 #else
 #define PPC_ENTER(a) do {                                                     \
         if (__builtin_expect(g_ppc_trace, 0)) ppc_trace_enter(a);             \
         if (__builtin_expect(c->preempt, 0)) ppc_preempt(c);                  \
     } while (0)
+#define PPC_ENTER_FN(a, self) PPC_ENTER(a)
 #endif
 
 /* Callee-saved registers held in C locals across a call (tools/recomp/leaflocal.py
@@ -144,12 +160,30 @@ void ppc_keep_failed(Cpu* c, int reg, uint32_t fn);
         double a_ = (c)->f[n].ps0, b_ = (c)->f[n].ps1, x_ = (v0), y_ = (v1);                             \
         if (memcmp(&a_, &x_, 8) || memcmp(&b_, &y_, 8)) ppc_keep_failed(c, 32 + (n), fn);              \
     } while (0)
-#elif defined(__SWITCH__)
+#elif defined(__SWITCH__) || defined(PPC_ELIDE_SAVED_WB)  /* PPC_ELIDE_SAVED_WB: a desktop test of the Switch's form */
 #define PPC_KEEP_R(c, n, v, fn) ((void)0)
 #define PPC_KEEP_F(c, n, v0, v1, fn) ((void)0)
 #else
 #define PPC_KEEP_R(c, n, v, fn) ((v) = (c)->r[n])
 #define PPC_KEEP_F(c, n, v0, v1, fn) ((v0) = (c)->f[n].ps0, (v1) = (c)->f[n].ps1)
+#endif
+
+/* (this fork) a callee-saved register's write-back before a direct call to an ordinary game function
+ * (tools/recomp/leaflocal.py ELIDE_SAVED_REGS): such a callee only saves and restores it, and the caller keeps
+ * its own copy (PPC_KEEP_R above), so the Switch leaves the store out. Desktop builds read the registers again
+ * after a call and keep it; so does the checking build. PPC_ELIDE_SAVED_WB: a desktop test of the Switch's form. */
+#if (defined(__SWITCH__) || defined(PPC_ELIDE_SAVED_WB)) && !defined(PPC_NONLEAF_CHECK)
+#define PPC_WB_SAVED(x) ((void)0)
+#else
+#define PPC_WB_SAVED(x) ((void)(x))
+#endif
+/* (this fork) The volatile registers a caller reads back after a direct call to an ordinary game function although the
+ * callee cannot have written them (tools/recomp/calleeregs.py): the local is still right, so the Switch leaves the load
+ * out; the desktop reads them again with the rest, as before (save states). Same switches as PPC_WB_SAVED. */
+#if (defined(__SWITCH__) || defined(PPC_ELIDE_SAVED_WB)) && !defined(PPC_NONLEAF_CHECK)
+#define PPC_RELOAD_SKIPPED(...)
+#else
+#define PPC_RELOAD_SKIPPED(...) __VA_ARGS__
 #endif
 
 /* the return address of a direct call to an ordinary game function (tools/recomp/recomp.py link):
@@ -196,10 +230,31 @@ static inline uint8_t ld8(uint32_t ea) { return *ppc_ptr(ea); }
 static inline uint16_t ld16(uint32_t ea) { uint16_t v; memcpy(&v, ppc_ptr(ea), 2); return __builtin_bswap16(v); }
 static inline uint32_t ld32(uint32_t ea) { uint32_t v; memcpy(&v, ppc_ptr(ea), 4); return __builtin_bswap32(v); }
 static inline uint64_t ld64(uint32_t ea) { uint64_t v; memcpy(&v, ppc_ptr(ea), 8); return __builtin_bswap64(v); }
+/* Local diagnostic (not for releases; CMake -DWWHD_WRITE_WATCH=ON, runtime/src/guest_write_watch.cpp): every store into the
+ * blocks named by WWHD_WW_WINDOWS goes through a noinline function whose return address is the exact writer. Without the
+ * define these are the plain stores and the code is unchanged. */
+#ifdef WWHD_WRITE_WATCH
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern uint8_t wwhd_ww_bm[1u << 21]; /* one bit per 256-byte block of the guest address space */
+void wwhd_ww_store(uint32_t ea, const void* bytes, unsigned n);
+void wwhd_ww_note(uint32_t ea, unsigned n); /* the bytes were stored already (stwcx.): take them over with this writer */
+#ifdef __cplusplus
+}
+#endif
+static inline __attribute__((always_inline)) int wwhd_ww_block(uint32_t ea) { return wwhd_ww_bm[ea >> 11] >> ((ea >> 8) & 7) & 1; }
+#define WWHD_WW_HIT(ea, n) __builtin_expect(wwhd_ww_block(ea) | wwhd_ww_block((ea) + (n) - 1), 0)
+static inline __attribute__((always_inline)) void st8(uint32_t ea, uint8_t v) { if (WWHD_WW_HIT(ea, 1)) wwhd_ww_store(ea, &v, 1); else *ppc_ptr(ea) = v; }
+static inline __attribute__((always_inline)) void st16(uint32_t ea, uint16_t v) { v = __builtin_bswap16(v); if (WWHD_WW_HIT(ea, 2)) wwhd_ww_store(ea, &v, 2); else memcpy(ppc_ptr(ea), &v, 2); }
+static inline __attribute__((always_inline)) void st32(uint32_t ea, uint32_t v) { v = __builtin_bswap32(v); if (WWHD_WW_HIT(ea, 4)) wwhd_ww_store(ea, &v, 4); else memcpy(ppc_ptr(ea), &v, 4); }
+static inline __attribute__((always_inline)) void st64(uint32_t ea, uint64_t v) { v = __builtin_bswap64(v); if (WWHD_WW_HIT(ea, 8)) wwhd_ww_store(ea, &v, 8); else memcpy(ppc_ptr(ea), &v, 8); }
+#else
 static inline void st8(uint32_t ea, uint8_t v) { *ppc_ptr(ea) = v; }
 static inline void st16(uint32_t ea, uint16_t v) { v = __builtin_bswap16(v); memcpy(ppc_ptr(ea), &v, 2); }
 static inline void st32(uint32_t ea, uint32_t v) { v = __builtin_bswap32(v); memcpy(ppc_ptr(ea), &v, 4); }
 static inline void st64(uint32_t ea, uint64_t v) { v = __builtin_bswap64(v); memcpy(ppc_ptr(ea), &v, 8); }
+#endif
 
 /* ---- bit casts ---- */
 static inline double u64_as_f64(uint64_t u) { double d; memcpy(&d, &u, 8); return d; }
@@ -208,8 +263,8 @@ static inline float u32_as_f32(uint32_t u) { float f; memcpy(&f, &u, 4); return 
 static inline uint32_t f32_as_u32(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
 
 /* ---- signalling-NaN counter (local diagnostic, CMake -DWWHD_SNAN_COUNT=ON, logs with WWHD_SNAN_COUNT=1):
- * counts every float load/store where the host conversion would quiet a signalling NaN (f32 -> double on
- * lfs / psq_l, double -> f32 on stfs / psq_st), per call site (snan_count.cpp, captures/snan.log).
+ * counts every float load/store of a signalling NaN (which the host float<->double conversions used to quiet;
+ * ldf32 / stf32 / psq_* now move it bit-exactly), per call site (snan_count.cpp, captures/snan.log).
  * Not compiled in by default: then these are no-ops and the code is unchanged. */
 #ifdef WWHD_SNAN_COUNT
 #ifdef __cplusplus
@@ -239,9 +294,72 @@ static inline __attribute__((always_inline)) double snan_chk64(double d, uint32_
 #define snan_chk64(d, ea, kind) (d)
 #endif
 
-static inline double ldf32(uint32_t ea) { return (double)u32_as_f32(snan_chk32(ld32(ea), ea, 0)); }
+/* ---- single-precision float load/store: bit-exact PowerPC semantics ----
+ * lfs/lfsx/lfsu/lfsux and stfs/stfsx/stfsu/stfsux are not arithmetic on the PowerPC: they move bits.
+ * A host (double)float or (float)double conversion is arithmetic: it quiets a signalling NaN (the
+ * clang optimizer folds some load->store pairs into plain copies and some not, so the host even did
+ * it inconsistently), and (float)d rounds where stfs truncates.
+ *
+ * Load (PowerPC User Instruction Set Architecture, Book I v2.01, 4.6.2 "Floating-Point Load
+ * Instructions", p. 96): WORD in single format becomes FRT as
+ *   normalized (0 < WORD1:8 < 255) and zero / infinity / NaN (WORD1:8 = 255 or WORD1:31 = 0):
+ *     FRT0:1 = WORD0:1, FRT2:4 = 3 x WORD1 (normalized: 3 x not WORD1), FRT5:63 = WORD2:31 || 29 zeros
+ *     -> a NaN keeps sign and payload and stays signalling;
+ *   denormalized (WORD1:8 = 0, WORD9:31 != 0): normalized into double format (exact value).
+ * The IBM 750CL User's Manual (Espresso's paired-single 750 family), "Paired-Single Load and Store
+ * Instructions" p. 108: psq_l with a float GQR type passes the value "directly to the register
+ * without any conversion. This includes the case where the operand is a denorm."
+ * For every non-NaN word the IEEE single->double conversion of the host is exact and gives the same
+ * bits, so only NaNs need the bit move (one well-predicted branch).
+ *
+ * Store (Book I v2.01, 4.6.3 "Floating-Point Store Instructions", p. 100; 750CL Table 2-44 "Store
+ * Floating-Point Single Behavior", p. 105):
+ *   no denormalization required (FRS1:11 > 896 or FRS1:63 = 0; includes zero / infinity / NaN):
+ *     WORD0:1 = FRS0:1, WORD2:31 = FRS5:34  (a plain bit selection: no rounding, the low 29 fraction
+ *     bits are dropped (truncation), a NaN is not quieted; a value too large for single format gives
+ *     the "well-defined value" Book I describes, not infinity);
+ *   denormalization required (874 <= FRS1:11 <= 896): sign, exponent 0, and the mantissa 1.FRS12:63
+ *     shifted right one bit at a time until the exponent is -126, WORD9:31 = frac1:23 (truncated);
+ *   FRS1:11 < 874: Book I says "undefined"; the 750CL table says "denormalize and store" for a
+ *     normalized double and "store zero" for a denormalized double, which both give a signed zero.
+ * For every double that is exactly a single the host conversion gives the same bits, so the fast
+ * path is one conversion plus a well-predicted "round trip equal" check (false for NaNs). */
+#if defined(__SWITCH__) && !defined(PPC_EXACT_F32)
+/* (this fork, upstream sync bfd7dd6) The Switch keeps the host conversions (main's, before upstream's bit-exact ones
+ * below): those cost every lfs a NaN check and every stfs a round trip and a compare, in all of the game's code, and
+ * the hot code grew from 4.4 to 6.1 MB; the main thread lost 3-5 ms a frame (docs/upstream-sync-plan.md). They
+ * differ only for signalling NaNs (quieted) and doubles that are not singles (rounded, not truncated).
+ * -DPPC_EXACT_F32 gives the exact ones. */
+static inline uint32_t ppc_stfs_bits(double d) { return f32_as_u32((float)d); }
+static inline double ppc_lfs_value(uint32_t w) { return (double)u32_as_f32(w); }
+#else
+static __attribute__((noinline, cold)) uint32_t ppc_stfs_bits_slow(uint64_t b) {
+    uint32_t e = (uint32_t)(b >> 52) & 0x7FF;
+    if (e > 896 || (b & 0x7FFFFFFFFFFFFFFFull) == 0)
+        return (uint32_t)((b >> 32) & 0xC0000000u) | (uint32_t)((b >> 29) & 0x3FFFFFFFu);
+    uint32_t sign = (uint32_t)(b >> 32) & 0x80000000u;
+    if (e < 874) return sign;
+    uint64_t frac = 0x0010000000000000ull | (b & 0x000FFFFFFFFFFFFFull); /* 1.FRS12:63, 53 bits */
+    return sign | (uint32_t)(frac >> (897 - e + 29));                   /* shift 897-e: exp -> -126 */
+}
+/* stfs conversion: double in an FPR -> single-format word */
+static inline uint32_t ppc_stfs_bits(double d) {
+    float f = (float)d;
+    if (__builtin_expect((double)f == d, 1)) return f32_as_u32(f);
+    return ppc_stfs_bits_slow(f64_as_u64(d));
+}
+/* lfs conversion: single-format word -> double in an FPR */
+static inline double ppc_lfs_value(uint32_t w) {
+    if (__builtin_expect((w & 0x7FFFFFFFu) > 0x7F800000u, 0)) /* NaN: FRT0:1 = WORD0:1, FRT2:4 = 111 */
+        return u64_as_f64(((uint64_t)(w & 0xC0000000u) << 32) | 0x3800000000000000ull |
+                          ((uint64_t)(w & 0x3FFFFFFFu) << 29));
+    return (double)u32_as_f32(w);
+}
+#endif
+
+static inline double ldf32(uint32_t ea) { return ppc_lfs_value(snan_chk32(ld32(ea), ea, 0)); }
 static inline double ldf64(uint32_t ea) { return u64_as_f64(ld64(ea)); }
-static inline void stf32(uint32_t ea, double d) { st32(ea, f32_as_u32((float)snan_chk64(d, ea, 1))); }
+static inline void stf32(uint32_t ea, double d) { st32(ea, ppc_stfs_bits(snan_chk64(d, ea, 1))); }
 static inline void stf64(uint32_t ea, double d) { st64(ea, f64_as_u64(d)); }
 
 /* ---- integer helpers ---- */
@@ -320,12 +438,23 @@ static inline void ppc_stwcx(Cpu* c, uint32_t ea, uint32_t v) {
         uint32_t expected = c->res_val;
         ok = __atomic_compare_exchange_n((uint32_t*)ppc_ptr(ea), &expected, __builtin_bswap32(v), 0,
                                          __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+#ifdef WWHD_WRITE_WATCH
+        if (ok && WWHD_WW_HIT(ea, 4)) wwhd_ww_note(ea, 4);
+#endif
     }
     c->res_addr = 0xFFFFFFFFu;
     c->cr[0] = 0; c->cr[1] = 0; c->cr[2] = (uint8_t)ok; c->cr[3] = c->xer_so;
 }
 
+#ifdef WWHD_WRITE_WATCH
+static inline __attribute__((always_inline)) void ppc_dcbz(uint32_t ea) {
+    ea &= ~31u;
+    if (WWHD_WW_HIT(ea, 32)) { static const uint8_t z[32] = {0}; wwhd_ww_store(ea, z, 32); }
+    else memset(ppc_ptr(ea), 0, 32);
+}
+#else
 static inline void ppc_dcbz(uint32_t ea) { memset(ppc_ptr(ea & ~31u), 0, 32); }
+#endif
 
 /* ---- floating point ---- */
 static inline double round25(double d) {
@@ -421,26 +550,33 @@ static inline double ppc_fsel(double a, double b, double cc) { return a >= 0.0 ?
 /* ---- paired single quantization ---- */
 /* 2^e for the 6-bit signed GQR scale, built from float bits (no libm call) */
 static inline float psq_pow2(int e) { return u32_as_f32((uint32_t)(127 + e) << 23); }
-static inline float psq_dequant(uint32_t data, uint32_t type, uint32_t scale) {
-    if (type < 4) return u32_as_f32(data);  /* float: no scaling */
+/* float GQR types (0, and the reserved 1-3) move the word like lfs / stfs (750CL p. 108: "passed
+ * directly to the register without any conversion"); see ppc_lfs_value / ppc_stfs_bits. */
+static inline double psq_dequant(uint32_t data, uint32_t type, uint32_t scale) {
+    if (type < 4) return ppc_lfs_value(data);  /* float: no scaling */
     float s = psq_pow2(-(int)((int32_t)(scale << 26) >> 26));
     switch (type) {
     case 4: return (float)(uint8_t)data * s;
     case 5: return (float)(uint16_t)data * s;
     case 6: return (float)(int8_t)data * s;
     case 7: return (float)(int16_t)data * s;
-    default: return u32_as_f32(data);
+    default: return ppc_lfs_value(data);
     }
 }
-static inline uint32_t psq_quant(float v, uint32_t type, uint32_t scale) {
-    if (type < 4) return f32_as_u32(v);
+/* Integer GQR types: 750CL "Paired-Single Load and Store Instructions" p. 108: +Inf and a NaN with
+ * the sign bit 0 give the positive overflow value, -Inf and a NaN with the sign bit 1 the negative
+ * one (a NaN used to reach an undefined host float->int cast). */
+static inline uint32_t psq_quant(double d, uint32_t type, uint32_t scale) {
+    if (type < 4) return ppc_stfs_bits(d);
+    float v = (float)d;
+    if (__builtin_expect(v != v, 0)) v = (f64_as_u64(d) >> 63) ? -INFINITY : INFINITY;
     float s = psq_pow2((int)((int32_t)(scale << 26) >> 26));
     switch (type) {
     case 4: v *= s; v = v < 0 ? 0 : v > 255 ? 255 : v; return (uint8_t)(uint32_t)v;
     case 5: v *= s; v = v < 0 ? 0 : v > 65535 ? 65535 : v; return (uint16_t)(uint32_t)v;
     case 6: v *= s; v = v < -128 ? -128 : v > 127 ? 127 : v; return (uint8_t)(int32_t)v;
     case 7: v *= s; v = v < -32768 ? -32768 : v > 32767 ? 32767 : v; return (uint16_t)(int32_t)v;
-    default: return f32_as_u32(v);
+    default: return ppc_stfs_bits(d);
     }
 }
 /* quantized formats (GQR type 4-7): out of line, so the float case below stays small and inline.
@@ -459,10 +595,10 @@ static __attribute__((noinline)) void psq_load_slow_l(Cpu* c, double* p0, double
 static __attribute__((noinline)) void psq_store_slow_l(Cpu* c, double v0, double v1, uint32_t ea, int w, int i) {
     uint32_t g = c->gqr[i], type = g & 7, scale = (g >> 8) & 0x3F;
     int sz = (type == 4 || type == 6) ? 1 : (type == 5 || type == 7) ? 2 : 4;
-    uint32_t d0 = psq_quant((float)(sz == 4 ? snan_chk64(v0, ea, 3) : v0), type, scale);
+    uint32_t d0 = psq_quant(sz == 4 ? snan_chk64(v0, ea, 3) : v0, type, scale);
     if (sz == 1) st8(ea, d0); else if (sz == 2) st16(ea, d0); else st32(ea, d0);
     if (!w) {
-        uint32_t d1 = psq_quant((float)(sz == 4 ? snan_chk64(v1, ea + 4, 3) : v1), type, scale);
+        uint32_t d1 = psq_quant(sz == 4 ? snan_chk64(v1, ea + 4, 3) : v1, type, scale);
         if (sz == 1) st8(ea + 1, d1); else if (sz == 2) st16(ea + 2, d1); else st32(ea + 4, d1);
     }
 }
@@ -475,16 +611,16 @@ static __attribute__((noinline)) void psq_store_slow_l(Cpu* c, double v0, double
 #endif
 static inline __attribute__((always_inline)) void psq_load_l(Cpu* c, double* p0, double* p1, uint32_t ea, int w, int i) {
     if (((PPC_GQR_STATIC_FLOAT >> i) & 1) || __builtin_expect(((c->gqr[i] >> 16) & 7) < 4, 1)) {
-        *p0 = u32_as_f32(snan_chk32(ld32(ea), ea, 2));
-        *p1 = w ? 1.0 : (double)u32_as_f32(snan_chk32(ld32(ea + 4), ea + 4, 2));
+        *p0 = ppc_lfs_value(snan_chk32(ld32(ea), ea, 2));
+        *p1 = w ? 1.0 : ppc_lfs_value(snan_chk32(ld32(ea + 4), ea + 4, 2));
         return;
     }
     psq_load_slow_l(c, p0, p1, ea, w, i);
 }
 static inline __attribute__((always_inline)) void psq_store_l(Cpu* c, double v0, double v1, uint32_t ea, int w, int i) {
     if (((PPC_GQR_STATIC_FLOAT >> i) & 1) || __builtin_expect((c->gqr[i] & 7) < 4, 1)) {
-        st32(ea, f32_as_u32((float)snan_chk64(v0, ea, 3)));
-        if (!w) st32(ea + 4, f32_as_u32((float)snan_chk64(v1, ea + 4, 3)));
+        st32(ea, ppc_stfs_bits(snan_chk64(v0, ea, 3)));
+        if (!w) st32(ea + 4, ppc_stfs_bits(snan_chk64(v1, ea + 4, 3)));
         return;
     }
     psq_store_slow_l(c, v0, v1, ea, w, i);

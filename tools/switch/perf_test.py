@@ -20,17 +20,23 @@ behind, draws, internal resolution, player control) and summarises them.
         the contributor's build against main or the last published tag (perf_baseline.py builds the baseline in
         build/perf/); the fast defaults (lava, windfall, dragonroost; 900 frames; ABBA twice), a verdict per scene,
         and the console left on the contributor's build. macOS and Linux (container build) only
+  perf_test.py gpu-profile [--profiles 307,384] [--order ABBA] [--repeat 2] [--scenes outset_tallgrass]
+        one build, the handheld GPU profile alternated between boots (WWHD_TEST_GPU_PROFILE in settings.ini's
+        [dev] section; the player's file is put back afterwards); each boot's clocks are checked against the
+        profile (sys-clk must be off). Builds from 2026-10-23 on (the profile fixed at 384 MHz)
   perf_test.py compare R1.json R2.json ...   the comparison table of saved results
   perf_test.py show R.json             a saved result's table
 
 Builds without the "bench" debug command cannot be measured (platform/bench_switch.cpp; v0.4.7 gets it from
 perf_baselines/v0.4.7.patch).
-The console's settings.ini is never changed; the player's saves are never written (a portable load only changes
+The console's settings.ini is never changed (except by gpu-profile, which puts the player's file back at the end, also
+after Ctrl+C or an error); the player's saves are never written (a portable load only changes
 the Quest Log in memory; nothing here saves the game).
 """
 import argparse
 import json
 import platform
+import re
 import subprocess
 import statistics as st
 import socket
@@ -59,6 +65,20 @@ SCENES = [
     ("sea_totg", "open sea on the boat at the Tower of the Gods (waves, light load)"),
 ]
 EXTRA_SCENES = ["hyrule"]
+# the demanding set (--scenes demanding; 'all' includes it): a player's Outset spots where the frame rate drops most,
+# saved from a late-game file (docs/perf-test.md, "The scenes")
+DEMANDING_SCENES = [
+    ("outset_grass", "Outset, Link in the tall grass: ~6900 draws (render thread and GPU)"),
+    ("outset_village", "Outset by Sue-Belle's house, ship and lookout in view: ~6400 draws (render, GPU and main thread)"),
+    ("outset_lookout", "Outset, in the grass facing the lookout: ~3000 draws (main thread)"),
+    ("outset_cliff", "Outset, the cliff above the sea: ~2250 draws (GPU)"),
+]
+# gpu-profile's default scene: Outset's tall grass seen from the sea stage (room 44), time of day 150, ~5200 draws;
+# GPU-bound at the stock 307 MHz (European game)
+GPU_SCENE, GPU_SCENE_TIME = "outset_tallgrass", 150.0
+# the handheld GPU profiles a test can set (platform/settings_switch.cpp kIds; the game itself always runs at 384):
+# WWHD_TEST_GPU_PROFILE value -> (GPU, memory) MHz. "307" is stock
+GPU_PROFILES = {"307": (307, 1331), "384": (384, 1331), "460": (460, 1331), "1600": (460, 1600)}
 FROZEN_TIME = 200.0  # time of day held during every scene (degrees: afternoon)
 
 
@@ -444,19 +464,26 @@ def scenes_arg(a):
     if not a.scenes:
         return [n for n, _ in SCENES]
     if a.scenes == "all":
-        return [n for n, _ in SCENES] + EXTRA_SCENES
+        return [n for n, _ in SCENES] + EXTRA_SCENES + [n for n, _ in DEMANDING_SCENES]
+    if a.scenes == "demanding":
+        return [n for n, _ in DEMANDING_SCENES]
     return a.scenes.split(",")
 
 
 def common(p):
     p.add_argument("--host", default=dbg.default_host())
-    p.add_argument("--scenes", help="comma-separated state names (default: the 7 standard ones; 'all' adds extras)")
+    p.add_argument("--scenes", help="comma-separated state names (default: the 7 standard ones; 'demanding': the four Outset "
+                   "stress spots; 'all': both and the extras)")
     p.add_argument("--frames", type=int, default=1800, help="frames recorded per scene (default 1800, 60 s at 30 fps)")
     p.add_argument("--settle", type=float, default=20.0, help="seconds after arriving before recording (default 20)")
     p.add_argument("--time", type=float, default=FROZEN_TIME, help="time of day held (degrees, default 200)")
     p.add_argument("--warmup", type=float, default=8.0,
                    help="after booting, visit each scene unmeasured for this many seconds (default 8; 0: none)")
     p.add_argument("--no-boot", action="store_true", help="the game is already in a Quest Log: do not reload")
+    p.add_argument("--expect", help="a result file of perf/results/ (docs/perf-results.md): warn when a scene comes "
+                   "out below that release's record")
+    p.add_argument("--expect-tolerance", type=float, default=0.5, help="fps below the record still taken as the "
+                   "same (default 0.5)")
     p.add_argument("--quest-log", type=int, default=1, choices=(1, 2, 3),
                    help="the Quest Log the file select starts (default 1)")
 
@@ -473,9 +500,12 @@ def cmd_run(a):
     results, raw = [], []
     label = a.label or info.get("version", "build").split()[0]
     run_set(con, label, scenes, a.runs, a.settle, a.frames, a.time, results, raw, warmup=a.warmup)
+    boots = [boot_conditions(con)]
     con.try_cmd("bench", "clock", "run")
     print(table(results))
-    save(results, raw, label, {"version": info.get("version"), "nro": a.nro, "args": {k: v for k, v in vars(a).items() if k != "fn"}})
+    print_expect(a, results, label)
+    save(results, raw, label, {"version": info.get("version"), "nro": a.nro, "boots": boots,
+                               "args": {k: v for k, v in vars(a).items() if k != "fn"}})
 
 
 def run_ab(con, a, nro_list, names):
@@ -490,7 +520,7 @@ def run_ab(con, a, nro_list, names):
     if set(order) - set(letters):
         raise SystemExit(f"--order uses letters {letters} only")
     stem_name = "ab_" + "_vs_".join(names)
-    results, raw = [], []
+    results, raw, boots = [], [], []
     ensure_states(con, scenes)
     for i, letter in enumerate(order):
         con.deploy(nros[letter])
@@ -499,9 +529,11 @@ def run_ab(con, a, nro_list, names):
         boot_to_gameplay(con)
         run_set(con, labels[letter], scenes, 1, a.settle, a.frames, a.time, results, raw, rotate_from=i,
                 warmup=a.warmup)
-        save(results, raw, stem_name + "_partial", {"order": order, "nros": nros})
+        boots.append({"boot": i + 1, "build": labels[letter], **boot_conditions(con)})
+        save(results, raw, stem_name + "_partial", {"order": order, "nros": nros, "boots": boots})
     print(table(results, names))
-    save(results, raw, stem_name, {"order": order, "nros": nros,
+    print_expect(a, results, names[-1])
+    save(results, raw, stem_name, {"order": order, "nros": nros, "boots": boots,
                                    "args": {k: v for k, v in vars(a).items() if k != "fn"}})
     return results, nros
 
@@ -523,7 +555,7 @@ def cmd_compare_to(a):
     con = Console(a.host)
     if con.try_cmd("ping", timeout=5.0) is None:
         raise SystemExit(f"the console at {a.host} does not answer: start the game with the debug server on "
-                         "(Switch tab, Debug section), or give --host")
+                         "(Dev tab > Show developer options), or give --host")
     repo = perf_baseline.REPO
     perf_baseline.fetch(repo)
     base_nro, base_name = perf_baseline.build(repo, a.baseline, a.rpx)
@@ -607,6 +639,150 @@ def cmd_toggle(a):
          {"version": info.get("version"), "args": {k: v for k, v in vars(a).items() if k != "fn"}})
 
 
+def get_text(con, remote):
+    c = dbg.Conn(con.host, con.port, timeout=10.0)
+    try:
+        return c.command("get", remote, timeout=60.0).decode(errors="replace")
+    finally:
+        c.close()
+
+
+def settings_with_profile(text, profile):
+    """the player's settings.ini with WWHD_TEST_GPU_PROFILE=profile in its [dev] section (made when there is none)"""
+    lines = [line for line in text.splitlines() if not line.strip().startswith("WWHD_TEST_GPU_PROFILE=")]
+    at = next((i for i, line in enumerate(lines) if line.strip() == "[dev]"), None)
+    if at is None:
+        lines += ["", "[dev]"]
+        at = len(lines) - 1
+    lines.insert(at + 1, f"WWHD_TEST_GPU_PROFILE={profile}")
+    return "\n".join(lines) + "\n"
+
+
+def boot_clocks(con):
+    """(CPU, GPU, memory) MHz of the running boot's last '[dk] clocks' line, and its last per-core load"""
+    text = con.cmd("logtext", timeout=60.0)
+    clocks = re.findall(r"\[dk\] clocks: CPU (\d+) MHz, GPU (\d+) MHz, memory (\d+) MHz", text)
+    cores = re.findall(r"\[cpu\] cores busy \(since the last report\): core 0 (\d+)%, core 1 (\d+)%, core 2 (\d+)%", text)
+    return (tuple(int(x) for x in clocks[-1]) if clocks else None), (tuple(int(x) for x in cores[-1]) if cores else None)
+
+
+# the settings that change the load or the clocks (platform/settings_switch.h); the rest is left out of the record
+LOAD_SETTINGS = ("switchGpuProfile", "switchResScale.handheld", "switchResScale.docked", "switchDynamicRes.handheld",
+                 "switchDynamicRes.docked", "switchShadowScale", "switchAmbientOcclusion", "switchAnisoLevel",
+                 "switchAniso", "switchFxaa", "switchFsr", "switchBloom", "switchDistanceBlur", "switchGamepadPip",
+                 "switchFpsCounter")
+
+
+def boot_conditions(con):
+    """what the running boot was measured under, for the result file: the version, the console's mode and charge
+    (info's battery line), the clocks the game logged and the load-changing settings of settings.ini"""
+    info = con.info()
+    out = {"version": info.get("version"), "power": info.get("battery")}
+    try:
+        clocks, _ = boot_clocks(con)
+        if clocks:
+            out["clocks"] = {"cpu": clocks[0], "gpu": clocks[1], "memory": clocks[2]}
+    except (OSError, dbg.ServerError, ValueError):
+        pass
+    try:
+        text = get_text(con, "settings.ini")
+        kv = dict(line.strip().split("=", 1) for line in text.splitlines()
+                  if "=" in line and not line.lstrip().startswith(("#", "[")))
+        out["settings"] = {k: kv[k] for k in LOAD_SETTINGS if k in kv}
+    except (OSError, dbg.ServerError, ValueError):
+        pass
+    return out
+
+
+def expect_check(results, path, label, tolerance):
+    """--expect: each scene of `label` against the same scene of the recorded release (the newest build in the
+    file: the one that file's comparison was about). A sanity check across sessions, not a verdict: lower by more
+    than `tolerance` fps means slower, or other conditions (mode, charge, settings, firmware)."""
+    ref = load(path)
+    builds = []
+    for r in ref:
+        if "error" not in r and r["build"] not in builds:
+            builds.append(r["build"])
+    if not builds:
+        return [f"{path}: no results"]
+    rb = builds[-1]
+    ok = [r for r in results if "error" not in r and r["build"] == label]
+    lines = []
+    for sc in dict.fromkeys(r["scene"] for r in ok):
+        mine = [r["fps"] for r in ok if r["scene"] == sc]
+        theirs = [r["fps"] for r in ref if "error" not in r and r["build"] == rb and r["scene"] == sc]
+        if not theirs:
+            lines.append(f"{sc}: not in {Path(path).name}")
+            continue
+        d = st.mean(mine) - st.mean(theirs)
+        word = "BELOW the record" if d < -tolerance else "as recorded"
+        lines.append(f"{sc}: {st.mean(mine):.2f} fps, {rb} recorded {st.mean(theirs):.2f} ({d:+.2f}): {word}")
+    return lines
+
+
+def print_expect(a, results, label):
+    if getattr(a, "expect", None):
+        print(f"\nAgainst the record {a.expect} (tolerance {a.expect_tolerance} fps; other conditions also move it):")
+        for line in expect_check(results, a.expect, label, a.expect_tolerance):
+            print("  " + line)
+
+
+def cmd_gpu_profile(a):
+    """one build, the GPU profile alternated between boots: is a view GPU-bound, and what a profile gains there"""
+    con = Console(a.host)
+    profiles = a.profiles.split(",")
+    for prof in profiles:
+        if prof not in GPU_PROFILES:
+            raise SystemExit(f"unknown profile {prof}: one of {', '.join(GPU_PROFILES)}")
+    letters = "ABCD"[:len(profiles)]
+    names = dict(zip(letters, profiles))
+    order = (a.order or (letters + letters[::-1])) * a.repeat
+    if set(order) - set(letters):
+        raise SystemExit(f"--order uses letters {letters} only")
+    scenes = scenes_arg(a)
+    ensure_states(con, scenes)
+    info = con.info()
+    log(f"console: {info.get('version')}")
+    original = get_text(con, "settings.ini")
+    OUT.mkdir(parents=True, exist_ok=True)
+    backup = OUT / f"settings.ini.backup_{time.strftime('%Y%m%d_%H%M%S')}"
+    backup.write_text(original)
+    log(f"the console's settings.ini is kept in {backup} and put back at the end")
+    stem_name = "gpu_" + "_vs_".join(profiles)
+    results, raw = [], []
+    try:
+        for i, letter in enumerate(order):
+            prof = names[letter]
+            log(f"[{i + 1}/{len(order)}] GPU profile {prof}")
+            tmp = OUT / "settings.ini.run"
+            tmp.write_text(settings_with_profile(original, prof))
+            con.put(tmp, "settings.ini")
+            boot_to_gameplay(con, reload=True)
+            clocks, _ = boot_clocks(con)
+            gpu, mem = GPU_PROFILES[prof]
+            if not clocks or clocks[1] != gpu or clocks[2] != mem:
+                raise SystemExit(f"profile {prof} should give GPU {gpu} / memory {mem} MHz, the log says {clocks} "
+                                 "(sys-clk on? the game started from hbmenu, where apm is skipped?)")
+            n = len(results)
+            run_set(con, prof, scenes, 1, a.settle, a.frames, a.time, results, raw, rotate_from=i, warmup=a.warmup)
+            clocks, cores = boot_clocks(con)
+            for r in results[n:]:
+                r.update({"clocks": clocks, "cores": cores})
+            log(f"  clocks {clocks}, cores busy {cores} (core 1: the main thread; core 2 or 0: the render thread)")
+            save(results, raw, stem_name + "_partial", {"order": order, "profiles": profiles})
+    finally:
+        log("putting the console's settings.ini back")
+        con.put(backup, "settings.ini")
+        con.try_cmd("reload", timeout=10.0)
+    print(table(results, profiles))
+    for prof in profiles[1:]:
+        print(f"\n{prof} against {profiles[0]} (95% interval of the boot-to-boot spread):")
+        for line in verdict(results, profiles[0], prof):
+            print("  " + line)
+    save(results, raw, stem_name, {"version": info.get("version"), "order": order,
+                                   "args": {k: v for k, v in vars(a).items() if k != "fn"}})
+
+
 def load(path):
     return json.loads(Path(path).read_text())["results"]
 
@@ -649,6 +825,15 @@ def main():
     sp.add_argument("--repeat", type=int, default=3)
     sp.add_argument("--switch-settle", type=float, default=3.0, help="seconds after each switch (default 3)")
     sp.set_defaults(fn=cmd_toggle)
+    sp = sub.add_parser("gpu-profile", description="the handheld GPU profile alternated between boots of the build "
+                        "on the console; its own defaults: --scenes outset_tallgrass --time 150 --order ABBA --repeat 2")
+    common(sp)
+    sp.add_argument("--profiles", default="307,384",
+                    help="comma-separated WWHD_TEST_GPU_PROFILE values, A first: " + ", ".join(GPU_PROFILES)
+                    + " (default: 307,384)")
+    sp.add_argument("--order", default="ABBA")
+    sp.add_argument("--repeat", type=int, default=2)
+    sp.set_defaults(fn=cmd_gpu_profile, scenes=GPU_SCENE, time=GPU_SCENE_TIME)
     sp = sub.add_parser("compare")
     sp.add_argument("files", nargs="+")
     sp.set_defaults(fn=lambda a: print(table([r for f in a.files for r in load(f)])))

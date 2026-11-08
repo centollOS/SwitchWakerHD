@@ -24,6 +24,16 @@ public final class GameShortcut {
 
     static final String ID = "game";
 
+    static boolean horizonOs(Context context) {
+        return context.getPackageManager().hasSystemFeature("horizonos.software.horizon_os");
+    }
+
+    /** A game icon can be added. Not on Meta Horizon OS (Quest): its Library accepts a pinned
+     *  shortcut but never shows it for a sideloaded app, and shows no pinned widgets. */
+    static boolean supported(Context context) {
+        return !horizonOs(context);
+    }
+
     /** The game shortcut (the icon on launchers that can't pin widgets) is on the home screen. */
     static boolean pinned(Context context) {
         try {
@@ -38,6 +48,7 @@ public final class GameShortcut {
     /** Asks the launcher to pin the shortcut, unless it is pinned already or pinning is unsupported.
      *  False when Android refused the request (the app must be in front) or no launcher can pin. */
     public static boolean offer(Context context, File game) {
+        if (!supported(context)) return false;
         try {
             android.appwidget.AppWidgetManager widgets = android.appwidget.AppWidgetManager.getInstance(context);
             android.content.ComponentName provider = new android.content.ComponentName(context, GameWidget.class);
@@ -52,7 +63,7 @@ public final class GameShortcut {
             for (ShortcutInfo pinned : shortcuts.getPinnedShortcuts())
                 if (pinned.getId().equals(ID)) return true;
             Bitmap art = icon(new File(game, "meta/iconTex.tga"));
-            Intent play = new Intent(Intent.ACTION_MAIN).setClass(context, WwhdActivity.class)
+            Intent play = QuestActivity.gameIntent(context).setAction(Intent.ACTION_MAIN)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             ShortcutInfo.Builder info = new ShortcutInfo.Builder(context, ID)
                 .setShortLabel(context.getString(R.string.app_name))

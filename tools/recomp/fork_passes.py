@@ -12,6 +12,11 @@ import re
 import sys
 import time
 
+# a call that is not a tail call: a game function (direct or through the call-site cache), a runtime function, an import
+CALL_TOKEN = re.compile(r"(?<!MUSTTAIL return )\b(?:f_[0-9A-F]{8}(?:_orig)?|imp_\w+|hook_[0-9A-F]{8}|site_[0-9A-F]{8}"
+                        r"|ppc_(?!unimplemented\b)\w+)\(|\bPPC_ICALL\(|\bPPC_HOOK_CALL\(|\bPPC_IJUMP\(")
+
+import calleeregs
 import crlive
 import leaflocal
 import ppc2c
@@ -28,13 +33,37 @@ LEAF = ppc2c.pass_on("WWHD_RECOMP_LEAF")
 # hot functions first (hot_functions.txt, from profiles) in their own files, in that order: on unless
 # WWHD_RECOMP_HOT=0
 HOT = ppc2c.pass_on("WWHD_RECOMP_HOT")
-# small hot leaf functions get an always-inline copy that hot callers use (inline_leaves.h): off unless
-# WWHD_RECOMP_INLINE=1 (an experiment: it removes the call overhead but makes the hot code 15% larger)
-INLINE = os.environ.get("WWHD_RECOMP_INLINE", "0") == "1"  # experimental: +15% hot code size
-INLINE_MAX_INSNS = 24
+# small hot leaf functions get an always-inline copy that hot callers use (inline_leaves.h): on unless
+# WWHD_RECOMP_INLINE=0 (#63: on the console +0.2-0.7 fps, main thread -0.3-0.9 ms; .text +0.7 MB)
+INLINE = ppc2c.pass_on("WWHD_RECOMP_INLINE")
+# the largest leaf (guest instructions) that gets an inline copy: WWHD_RECOMP_INLINE_MAX, default 64
+# (24 and 160 measured too: 160 inlines few more leaves and was no faster)
+INLINE_MAX_INSNS = int(os.environ.get("WWHD_RECOMP_INLINE_MAX", "64"))
 # functions with calls keep guest registers in locals too (leaflocal.transform_nonleaf): on unless
 # WWHD_RECOMP_NONLEAF=0
 NONLEAF = ppc2c.pass_on("WWHD_RECOMP_NONLEAF")
+# unreachable code after a function's last unconditional return or branch (no branch target after it: the next
+# functions' code, as in the compiler's save/restore helpers, where each entry falls into the next) is left out, so
+# the register locals and the tail call cover only the code that runs: on unless WWHD_RECOMP_DEAD_TAIL=0
+DEAD_TAIL = ppc2c.pass_on("WWHD_RECOMP_DEAD_TAIL")
+# calls of the compiler's register save/restore helpers (find_saved_clobbers: straight-line runs of loads and
+# stores that end in blr) become those instructions in the caller: no call, and the caller keeps its registers in
+# locals across it (a call to one made it write every register back and read it again): on unless
+# WWHD_RECOMP_HELPER_INLINE=0
+HELPER_INLINE = ppc2c.pass_on("WWHD_RECOMP_HELPER_INLINE")
+HELPER_MAX_INSNS = 80
+# the original code of a function the runtime hooks (f_X_orig, called by hook_X) keeps registers in locals too: it is
+# ordinary code the hook calls (it reads the registers from the Cpu at its entry and writes them back when it returns,
+# as any function). Was struct form; the hottest hooked functions (the star field, the sea, the waves) are ~10% of the
+# Switch's main thread. On unless WWHD_RECOMP_HOOKED_LOCALS=0
+HOOKED_LOCALS = ppc2c.pass_on("WWHD_RECOMP_HOOKED_LOCALS")
+# callee-saved registers' write-backs before direct calls to ordinary game functions as PPC_WB_SAVED (leaflocal.py
+# ELIDE_SAVED_REGS; empty on the Switch, kept on the desktop and in the checking build): on unless
+# WWHD_RECOMP_ELIDE_SAVED=0
+ELIDE_SAVED = ppc2c.pass_on("WWHD_RECOMP_ELIDE_SAVED")
+# volatile registers' write-backs before direct calls to ordinary game functions left out where the callee neither
+# reads them nor the caller needs them afterwards (calleeregs.py, leaflocal.py): on unless WWHD_RECOMP_CALLEE_REGS=0
+CALLEE_REGS = ppc2c.pass_on("WWHD_RECOMP_CALLEE_REGS")
 # return-address stores of direct calls to ordinary functions through PPC_SET_LR (nothing on the
 # Switch): on unless WWHD_RECOMP_LR=0
 LR_ELIDE = ppc2c.pass_on("WWHD_RECOMP_LR")
@@ -50,6 +79,11 @@ NONLEAF_CHECK = os.environ.get("WWHD_RECOMP_NONLEAF_CHECK", "0") == "1"
 # addresses, one per line, as hooks.txt; written by tools/switch/guest_mods.py) puts the guest mods' flag check
 # (recomp.py --mod-hooks) only into the listed functions; every other function stays as without --mod-hooks
 MOD_HOOKS_ONLY = os.environ.get("WWHD_RECOMP_MOD_HOOKS_ONLY", "")
+# call counters for the cost per call (#65): WWHD_RECOMP_COUNT_CALLS=FILE (canonical addresses, one per line, as
+# hooks.txt) makes a counting build: each listed function's code (and its inline copy) adds one to its counter at
+# its entry; table.c lists them for the runtime (the debug server's "profile" writes logs/prof_<n>.counts). Not set:
+# no counter anywhere, and table.c's list is empty
+COUNT_CALLS = os.environ.get("WWHD_RECOMP_COUNT_CALLS", "")
 
 
 def load_hot_functions():
@@ -70,6 +104,12 @@ def branch_target(addr, w):
     return None
 
 
+# (upstream sync bfd7dd6) WWHD_RECOMP_SWITCH_SKIP=1 (tools/switch/make_sd.py) or =FILE: the hooks listed in
+# switch_skip_hooks.txt (or FILE) are left out: their functions are translated as the game's, and f_X_orig forwards to
+# f_X so that the runtime's hook_X still links (it is never called)
+SWITCH_SKIP = os.environ.get("WWHD_RECOMP_SWITCH_SKIP", "")
+
+
 class ForkPasses:
     ijump_call = IJUMP_CALL  # what an indirect jump (bctr) tail-calls: the per-site cache or the dispatcher
     mod_checked = None  # WWHD_RECOMP_MOD_HOOKS_ONLY: this build's addresses of the functions with the check
@@ -86,6 +126,58 @@ class ForkPasses:
         self.mod_hooks = True
         self.mod_checked = {addr for _, _, addr, _ in entries}
         self.mod_checked_canon = sorted({canon for _, canon, _, _ in entries})
+
+    def fork_count_calls(self, read_hooks):
+        """__init__: the functions WWHD_RECOMP_COUNT_CALLS lists, by this build's address -> (counter, canonical)"""
+        self.counted = {}
+        if not COUNT_CALLS:
+            return
+        if not os.path.exists(COUNT_CALLS):
+            raise SystemExit("WWHD_RECOMP_COUNT_CALLS: no file %s" % COUNT_CALLS)
+        entries, _ = read_hooks([COUNT_CALLS], self.build)
+        if any(site for site, _, _, _ in entries):
+            raise SystemExit("%s: call counters count functions, not instructions (@ADDR)" % COUNT_CALLS)
+        for _, canon, addr, _ in entries:
+            if addr not in self.counted:
+                self.counted[addr] = (len(self.counted), canon)
+
+    def fork_count_call(self, start, out):
+        """emit_function, after the entry check: the function's counter (WWHD_RECOMP_COUNT_CALLS)"""
+        counted = getattr(self, "counted", {})  # a Recompiler made without __init__ (the tests) has none
+        if start in counted:
+            out.append("    PPC_COUNT_CALL(%d);" % counted[start][0])
+
+    def fork_count_table(self):
+        """table.c: the counted functions (canonical addresses, whether callers use an inline copy) and their
+        counters, read by the runtime's profiler (thread_sampler_switch.cpp); none without WWHD_RECOMP_COUNT_CALLS"""
+        missing = sorted(a for a in self.counted if a not in self.ordinal)
+        if missing:
+            raise SystemExit("%s: not function entries: %s" % (COUNT_CALLS, ", ".join("%08X" % a for a in missing)))
+        rows = sorted(self.counted.items(), key=lambda kv: kv[1][0])
+        inlined = getattr(self, "inlined", set())
+        n = len(rows)
+        return ("\n/* (this fork) call counters (WWHD_RECOMP_COUNT_CALLS, #65): canonical address, inline copy */\n"
+                "const unsigned g_recomp_count_n = %d;\n" % n +
+                "const uint32_t g_recomp_count_addrs[%d] = {%s};\n" % (max(n, 1), ", ".join("0x%08Xu" % c for _, (_, c) in rows) or "0") +
+                "const uint8_t g_recomp_count_inline[%d] = {%s};\n" % (max(n, 1), ", ".join("1" if a in inlined else "0" for a, _ in rows) or "0") +
+                "unsigned long long g_recomp_counts[%d];\n" % max(n, 1))
+
+    def fork_switch_skip(self, entries, read_hooks):
+        """__init__: the hook entries without the ones WWHD_RECOMP_SWITCH_SKIP lists (function hooks only)"""
+        self.switch_skipped = set()
+        if not SWITCH_SKIP or SWITCH_SKIP == "0":
+            return entries
+        path = (os.path.join(os.path.dirname(os.path.abspath(__file__)), "switch_skip_hooks.txt")
+                if SWITCH_SKIP == "1" else SWITCH_SKIP)
+        listed, _ = read_hooks([path], self.build)
+        skip = {addr for site, _, addr, _ in listed if not site}
+        self.switch_skipped = {addr for site, _, addr, _ in entries if not site and addr in skip}
+        return [e for e in entries if e[0] or e[2] not in skip]
+
+    def fork_skip_forwarders(self):
+        """table.c: f_X_orig for each hook left out (WWHD_RECOMP_SWITCH_SKIP): the runtime's hook_X refers to it"""
+        return "".join("void f_%08X_orig(Cpu* c) { f_%08X(c); }  /* hook left out (switch_skip_hooks.txt) */\n"
+                       % (self.sym(a), self.sym(a)) for a in sorted(getattr(self, "switch_skipped", ())))
 
     def fork_mod_check(self, start):
         """whether the function at `start` gets the mod hook check (and upstream's conservative code for it)"""
@@ -267,7 +359,7 @@ class ForkPasses:
     def fork_begin_function(self, start):
         """emit_function, before translating: the single-precision state at each instruction."""
         self.emitted_leaf = False
-        if not ppc2c.SINGLE:
+        if not ppc2c.SINGLE or not hasattr(self, "saved_clobbers"):  # (no fork_prepare: emit_function alone, tests)
             self.single_in = None
         elif self.singleflow:
             self.single_in = self.singleflow.states(start)
@@ -280,9 +372,11 @@ class ForkPasses:
         ppc2c.cur_addr = a
 
     def fork_translated(self, body):
-        """emit_function, the function translated: condition-register liveness."""
-        if not CRLIVE or self.fork_mod_check(self.cur_start):  # (guest mod hooks: a mod may hook or replace any function)
-            return body
+        """emit_function, the function translated: the dead tail, then condition-register liveness."""
+        body = self.trim_dead_tail(body)
+        if (not CRLIVE or self.fork_mod_check(self.cur_start) or not hasattr(self, "saved_clobbers")
+                or getattr(self, "preserve_registers", False)):  # (upstream: the randomizer's patched code keeps every write)
+            return body  # (guest mod hooks: a mod may hook or replace any function; no fork_prepare: tests)
         live_after, fields = crlive.analyze(body, self.cur_start, self.cur_end, self.p.jump_tables, branch_target,
                                             self.sites)
         body = [(a, w, crlive.rewrite(s, fields[i], live_after[i], CR_CHECK, a)) for i, (a, w, s) in enumerate(body)]
@@ -290,24 +384,203 @@ class ForkPasses:
         self.cr_stats[1] += sum(1 for i, f in enumerate(fields) if f is not None and (live_after[i] >> (4 * f)) & 0xF == 0)
         return body
 
+    def trim_dead_tail(self, body):
+        """The body up to its first unconditional return or branch (blr, bctr, b) after which no branch target lies:
+        what follows cannot run from this entry (DEAD_TAIL). Sets self.dead_tail for emit_function's fall-through."""
+        self.dead_tail = False
+        if not DEAD_TAIL or self.fork_mod_check(self.cur_start):
+            return body
+        last_label = max(self.labels) if self.labels else -1
+        for i, (a, w, _) in enumerate(body[:-1]):
+            terminator = w in (0x4E800020, 0x4E800420) or (w >> 26 == 18 and (w & 3) == 0)
+            if terminator and last_label <= a:
+                self.dead_tail = True
+                self.dead_tail_count = getattr(self, "dead_tail_count", 0) + 1
+                self.dead_tail_insns = getattr(self, "dead_tail_insns", 0) + len(body) - i - 1
+                return body[:i + 1]
+        if body and (body[-1][1] in (0x4E800020, 0x4E800420) or (body[-1][1] >> 26 == 18 and (body[-1][1] & 3) == 0)):
+            self.dead_tail = True  # (ends in one: the fall-through tail call is unreachable too)
+        return body
+
+    def helper_run(self, tgt):
+        """The instructions a save/restore helper entry runs: from tgt, straight on (through the next entries)
+        to its blr; None if tgt is not one or the run has anything but plain instructions (no branch, call,
+        trap or system call before the blr, no instruction hook)."""
+        cache = self.__dict__.setdefault("_helper_runs", {})
+        if tgt in cache:
+            return cache[tgt]
+        run = None
+        if tgt in getattr(self, "saved_clobbers", ()) and tgt not in self.hooks:
+            words = []
+            for a in range(tgt, tgt + 4 * HELPER_MAX_INSNS, 4):
+                if not (self.p.text_lo <= a < self.p.text_hi) or a in self.sites:
+                    break
+                w = self.p.word(a)
+                op = w >> 26
+                if w == 0x4E800020:
+                    words.append((a, w))
+                    run = words
+                    break
+                if w != 0x4C00012C and (op in (2, 3, 16, 17, 18, 19) or (op == 31 and (w >> 1) & 0x3FF == 4)):
+                    break  # traps, branches, sc (an isync is fine: the restore helpers end with one)
+                    break
+                words.append((a, w))
+        cache[tgt] = run
+        return run
+
+    def fork_inline_helper(self, addr, tgt, tail):
+        """recomp.py call()/branch(): a call (bl) or tail jump (b) to a save/restore helper as the helper's own
+        instructions, translated here; the blr returns from the caller for a tail jump and is left out for a
+        call. None: an ordinary call or branch."""
+        if (not HELPER_INLINE or not hasattr(self, "saved_clobbers") or self.fork_mod_check(self.cur_start)
+                or self.cur_start <= tgt < self.cur_end):
+            return None  # (find_saved_clobbers translates before the list exists: calls as they are then)
+        run = self.helper_run(tgt)
+        if not run:
+            return None
+        saved = (ppc2c.fp_state, ppc2c.cur_addr)
+        try:
+            parts = []
+            for a, w in (run if tail else run[:-1]):
+                ppc2c.fp_state = 0  # (the helpers do no multiplication: the single-precision state is not used)
+                ppc2c.cur_addr = a
+                parts.append(translate(a, w, self))
+        except Unhandled:
+            return None
+        finally:
+            ppc2c.fp_state, ppc2c.cur_addr = saved
+        self.helper_inlined = getattr(self, "helper_inlined", 0) + 1
+        return " ".join(parts) if tail else "{ %s }" % " ".join(parts)  # (translate's link code comes before)
+
+    def plain_callees(self):
+        """The call names ("f_XXXXXXXX") of ordinary game functions: not hooked by the runtime, not a save/restore
+        helper (ELIDE_SAVED)."""
+        if not hasattr(self, "_plain"):
+            hooked = {"f_%08X" % self.sym(a) for a in self.hooks}
+            self._plain = frozenset("f_%08X" % self.sym(a) for a in self.entries) - hooked - {
+                "f_%08X" % self.sym(a) for a in self.saved_clobbers}
+        return self._plain
+
+    def fork_summaries(self):
+        """run(), after fork_prepare and before any function is emitted: what every game function reads and writes
+        (calleeregs.py). Each function is translated once more for it, up to the point where its locals are made."""
+        self.callee_summ = None
+        self.summary_pass = False
+        if not (CALLEE_REGS and NONLEAF and ELIDE_SAVED) or not hasattr(self, "saved_clobbers"):
+            return
+        if any(self.fork_mod_check(a) for a in self.sorted_entries):
+            sys.stderr.write("callee register summaries: off (guest mods may replace any function)\n")
+            return
+        t0 = time.time()
+        saved = (list(self.cr_stats), getattr(self, "helper_inlined", 0), self.unhandled.copy(), set(self.used_imports))
+        hooked = {"f_%08X" % self.sym(a) for a in self.hooks}
+        abi = self.runtime_abi_hooks() & hooked
+        self.callee_summ_build = calleeregs.Summaries(unknown=hooked - abi, abi_hooked=abi)
+        self.summary_pass = True
+        for start in self.sorted_entries:
+            self.emit_function(start)
+        self.summary_pass = False
+        self.cr_stats, self.helper_inlined, self.unhandled, self.used_imports = saved[0], saved[1], saved[2], saved[3]
+        summ = self.callee_summ_build.solve()
+        self.callee_summ = summ
+        dump = os.environ.get("WWHD_RECOMP_DUMP_SUMMARIES")  # a diagnostic: name, LI, MD, why (hex masks), one line each
+        if dump:
+            with open(dump, "w") as f:
+                for name in sorted(summ.nodes):
+                    nodes = summ.nodes[name]
+                    flags = "".join(c for c, on in (("U", any(nd.unknown for nd in nodes)), ("I", any(nd.indirect for nd in nodes)),
+                                                    ("T", any(nd.tail for nd in nodes)), ("C", any(nd.calls for nd in nodes))) if on)
+                    f.write("%s %x %x %s\n" % (name, summ.li[name], summ.md[name], flags))
+        if dump:
+            users = {}
+            for name, nodes in summ.nodes.items():
+                for nd in nodes:
+                    for c in nd.calls + ([nd.tail] if nd.tail else []):
+                        if c in summ.unknown or c not in summ.nodes:
+                            users.setdefault(c, set()).add(name)
+            with open(dump + ".unknown", "w") as f:
+                for c, who in sorted(users.items(), key=lambda kv: -len(kv[1])):
+                    f.write("%s %d\n" % (c, len(who)))
+        reads = sum(bin(v).count("1") for v in summ.li.values()) / max(1, len(summ.li))
+        writes = sum(bin(v).count("1") for v in summ.md.values()) / max(1, len(summ.md))
+        sys.stderr.write("callee register summaries: %d functions, %d updates, %.1f s; a function reads %.1f and writes "
+                         "%.1f volatile registers on average (of 25)\n"
+                         % (len(summ.li), summ.rounds, time.time() - t0, reads, writes))
+
+    def fork_stats(self):
+        """run(), done: what the volatile-register elision did"""
+        st = leaflocal.STATS
+        if st["calls"]:
+            sys.stderr.write("callee registers: %d direct calls; of %d dirty volatile registers %d stored, %d left out (%.0f%%); "
+                             "%d of %d read-backs left out\n" % (st["calls"], st["dirty"], st["stored"], st["skipped"],
+                                                                  100.0 * st["skipped"] / max(1, st["dirty"]),
+                                                                  st["reloads_skipped"], st["reloads"]))
+
+    def runtime_abi_hooks(self):
+        """The hooked functions ("f_XXXXXXXX") whose runtime hook reads only the calling convention's argument
+        registers, and whatever the original reads (it calls f_XXXXXXXX_orig). It holds for every hook today, and
+        the check keeps it so: the runtime's sources may read r0, r11, r12, f0 or f9-f13 of the guest only in an
+        instruction hook (site_XXXXXXXX, which a function reading everything is assumed to contain) or in store_aspect
+        (called from two of those); a hook whose definition is not in the sources is not assumed anything. If the
+        invariant is broken the set is empty: hooked functions read everything."""
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "runtime", "src")
+        text = {}
+        for dp, dirs, fns in os.walk(root):
+            # runtime/src/hostrt: the decomp build's guest runtime (cmake/Decomp.cmake, recomp.py --decomp-hooks), not
+            # in any other build; its emulated C++ start-up reads r0 (upstream sync bfd7dd6)
+            if not getattr(self, "decomp_hooks_file", None) and "hostrt" in dirs:
+                dirs.remove("hostrt")
+            for fn in fns:
+                if fn.endswith((".cpp", ".h", ".inc", ".c")):
+                    with open(os.path.join(dp, fn), errors="replace") as f:
+                        text[os.path.join(dp, fn)] = f.read()
+        mention = re.compile(r"c->r\[(?:0|11|12)\]|c->f\[(?:0|9|1[0-3])\]")
+        func = re.compile(r"\b(\w+)\(Cpu\* c\)\s*\{")
+        for path, t in text.items():
+            for m in mention.finditer(t):
+                owners = list(func.finditer(t, 0, m.start()))
+                owner = owners[-1].group(1) if owners else ""
+                if not (owner.startswith("site_") or owner == "store_aspect"):
+                    sys.stderr.write("callee registers: %s reads %s in %s: hooks are assumed to read everything\n"
+                                     % (os.path.relpath(path, root), m.group(0), owner or "?"))
+                    return set()
+        defined = set()
+        for t in text.values():
+            defined.update("f_" + h for h in re.findall(r"\bhook_([0-9A-F]{8})\(", t))
+        return defined
+
+    def fork_record_summary(self, start, fname, body):
+        """emit_function in the summary pass: the function's statements (as leaflocal will see them)"""
+        stmts = [("site_%08X(c); " % self.sym(a) if a in self.sites else "") + s for a, _, s in body]
+        nxt = ("f_%08X_orig" if self.cur_end in self.hooks else "f_%08X") % self.sym(self.cur_end)
+        self.callee_summ_build.add(fname, stmts, [a for a, _, _ in body], nxt)
+
+    def fork_dead_tail(self):
+        """emit_function: the body ends in an unconditional return or branch (no fall-through tail call)."""
+        return getattr(self, "dead_tail", False)
+
     def fork_locals(self, start, hooked, body, out):
         """emit_function, after the function's header: guest registers in locals (leaflocal.py). Returns
         (body, the write-back before the fall-through's tail call, whether instruction hooks are in body)."""
         tail_wb = ""
         stmts = [s for _, _, s in body]
         sites_done = False
-        if self.fork_mod_check(start):  # (as upstream: a mod may hook or replace any function)
-            return body, "", False
-        if LEAF and not hooked and not any(a in self.sites for a, _, _ in body) and leaflocal.eligible(stmts):
+        if (self.fork_mod_check(start) or not hasattr(self, "saved_clobbers")  # (as upstream: a mod may hook or
+                or getattr(self, "preserve_registers", False)):  # replace any function; no fork_prepare: tests;
+            return body, "", False  # the randomizer's patched code keeps every write)
+        plain = HOOKED_LOCALS or not hooked  # (hooked: the f_X_orig body)
+        if LEAF and plain and not any(a in self.sites for a, _, _ in body) and leaflocal.eligible(stmts):
             prologue, stmts, tail_wb = leaflocal.transform(stmts)
             body = [(a, w, s) for (a, w, _), s in zip(body, stmts)]
             out += ["    %s" % p for p in prologue]
             self.leaf_count += 1
             self.emitted_leaf = True
-        elif NONLEAF and not hooked:
+        elif NONLEAF and plain:
             # instruction hooks become part of their statement, so they get the call treatment
             with_sites = [("site_%08X(c); " % self.sym(a) if a in self.sites else "") + s for a, _, s in body]
-            done = leaflocal.transform_nonleaf(with_sites, start, [a for a, _, _ in body], self.saved_clobbers_sym)
+            done = leaflocal.transform_nonleaf(with_sites, start, [a for a, _, _ in body], self.saved_clobbers_sym,
+                                               self.plain_callees() if ELIDE_SAVED else None,
+                                               getattr(self, "callee_summ", None))
             if done:
                 prologue, stmts, tail_wb = done
                 body = [(a, w, s) for (a, w, _), s in zip(body, stmts)]
@@ -315,6 +588,15 @@ class ForkPasses:
                 self.nonleaf_count += 1
                 sites_done = True
         return body, (tail_wb + " " if tail_wb else ""), sites_done
+
+    def fork_frame_free(self, body):
+        """emit_function: whether the function makes no call except (in the slow path of its entry check) the yield, so
+        that PPC_ENTER_FN (ppc.h, the slow path as a tail call) saves it a stack frame. A leaf made into locals is
+        one; any other function counts when its statements hold no call (a tail call, MUSTTAIL return f(c), makes no
+        frame). A function with calls gets the plain PPC_ENTER: the same hot path, and a smaller cold one."""
+        if self.emitted_leaf:
+            return True
+        return not any(CALL_TOKEN.search(s) for _, _, s in body)
 
     def fork_end_function(self, hooked, body):
         """emit_function, done: an inline copy is possible for a leaf that ends in an unconditional return
@@ -357,12 +639,14 @@ class ForkPasses:
                 normal.append((src, count))
         # always-inline copies of the small hot leaves; every call of one (not tail jumps) uses the copy
         inline_names = {"f_%08X" % self.sym(a) for a in inline_src}
-        with open(os.path.join(outdir, "inline_leaves.h"), "w") as f:
+        with open(os.path.join(outdir, "inline_leaves.h"), "w", newline="\n") as f:
             f.write("/* small hot leaf functions, inlined into their callers (recomp.py INLINE); the out-of-line\n"
                     " * f_X stays for indirect calls and the dispatch table */\n#pragma once\n\n")
             for a in sorted(inline_src):
                 text = inline_src[a].replace("void f_%08X(Cpu* __restrict c) {" % self.sym(a),
                                              "static inline __attribute__((always_inline)) void fi_%08X(Cpu* __restrict c) {" % self.sym(a), 1)
+                # (a tail call cannot be inlined: the copy keeps the plain check, ppc.h PPC_ENTER_FN)
+                text = re.sub(r"PPC_ENTER_FN\((0x[0-9A-Fa-f]+u), f_[0-9A-Fa-f_a-z]+\)", r"PPC_ENTER(\1)", text, count=1)
                 lines = text.split("\n")
                 for i in range(len(lines) - 1, -1, -1):  # the unreachable fall-through
                     if "MUSTTAIL return" in lines[i]:
@@ -377,6 +661,7 @@ class ForkPasses:
         # only in the hot callers: cold code would grow for nothing (the instruction cache is small)
         hot_src = {a: (use_inline(src), count) for a, (src, count) in hot_src.items()}
         self.inline_count = len(inline_src)
+        self.inlined = set(inline_src)
         files = split(normal)
         hot_files = split([hot_src[a] for a in sorted(hot_src, key=hot_rank.get)])
         for name in os.listdir(outdir):  # a smaller split must not leave old files behind
@@ -384,7 +669,8 @@ class ForkPasses:
                 os.remove(os.path.join(outdir, name))
         for prefix, groups in (("code_%03d.c", files), ("code_hot_%03d.c", hot_files)):
             for i, funcs in enumerate(groups):
-                with open(os.path.join(outdir, prefix % i), "w") as f:
+                # "\n" on every host: the PGO check hashes these files (cmake/SwitchPgo.cmake), and Windows wrote CRLF (#118)
+                with open(os.path.join(outdir, prefix % i), "w", newline="\n") as f:
                     f.write('#include "funcs.h"\n\n')
                     f.write("\n\n".join(funcs))
                     f.write("\n")
@@ -403,17 +689,21 @@ class ForkPasses:
                              "#define PPC_ELIDE_LR 1\n" if NONLEAF_CHECK else "", gqr)
 
     def fork_funcs_tail(self):
-        """funcs.h, at the end"""
-        return '\n#include "inline_leaves.h"\n'
+        """funcs.h, at the end (the call counters' macro before the inline copies that use it)"""
+        count = ("\n/* call counters (WWHD_RECOMP_COUNT_CALLS, table.c): one per listed function, any thread */\n"
+                 "extern unsigned long long g_recomp_counts[];\n#define PPC_COUNT_CALL(k) (g_recomp_counts[k]++)\n"
+                 if self.counted else "")
+        return count + '\n#include "inline_leaves.h"\n'
 
     def fork_table_head(self):
         """table.c, after the includes: which passes made this code (logged at boot)"""
         variant = ", ".join(n for n, on in (("cr liveness", CRLIVE), ("leaf locals", LEAF), ("nonleaf locals", NONLEAF),
-                                             ("hot layout", HOT), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
+                                             ("hot layout", HOT), ("dead tails", DEAD_TAIL), ("helpers inlined", HELPER_INLINE), ("hooked locals", HOOKED_LOCALS), ("callee-saved write-backs elided", ELIDE_SAVED), ("volatile write-backs by callee", CALLEE_REGS and ELIDE_SAVED), ("inline leaves", INLINE), ("lr elision", LR_ELIDE),
                                              ("single-precision tracking", ppc2c.SINGLE),
                                              ("whole-program single precision", ppc2c.SINGLE and singleflow.INTERPROC),
-                                             ("static GQRs", GQR_STATIC), ("jump-site caches", IJUMP)) if on)
-        return 'const char g_recomp_variant[] = "%s";\n\n' % variant
+                                             ("static GQRs", GQR_STATIC), ("jump-site caches", IJUMP),
+                                             ("call counters (%d functions)" % len(self.counted), self.counted)) if on)
+        return 'const char g_recomp_variant[] = "%s";\n%s\n' % (variant, self.fork_count_table())
 
     def fork_report_hot(self):
         return "hot functions (hot_functions.txt) in code_hot_*.c: %d\n" % getattr(self, "hot_count", 0)
@@ -424,5 +714,10 @@ class ForkPasses:
                 "leaf functions with registers in locals: %d\n" % self.leaf_count +
                 "functions with calls with registers in locals: %d\n" % self.nonleaf_count +
                 "functions that change callee-saved registers (save/restore helpers): %d\n" % len(self.saved_clobbers) +
+                "save/restore helper calls inlined: %d\n" % getattr(self, "helper_inlined", 0) +
+                "dead tails left out: %d functions, %d instructions\n" % (getattr(self, "dead_tail_count", 0),
+                                                                     getattr(self, "dead_tail_insns", 0)) +
                 "small hot leaves inlined into callers: %d\n" % getattr(self, "inline_count", 0) +
-                "single-precision multiplier operands: %d rounded (round25), %d known single\n" % tuple(ppc2c.single_stats))
+                "functions with a call counter (WWHD_RECOMP_COUNT_CALLS): %d\n" % len(self.counted) +
+                "single-precision multiplier operands: %d rounded (round25), %d known single\n" % tuple(ppc2c.single_stats) +
+                "hooks left out for the Switch (switch_skip_hooks.txt): %d\n" % len(getattr(self, "switch_skipped", ())))

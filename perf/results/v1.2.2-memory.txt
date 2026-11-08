@@ -1,0 +1,88 @@
+# checklist F, v1.2.2 (measured on 1aaa237 = the tagged tree, built from the release zip as a player gets it, EU game, v1.2.1's EU profile), 2026-11-07: 40 warps x 25 s, two laps
+     25s lap 1 warp   0 stage sea
+     50s lap 1 warp   3 stage sea
+     75s lap 1 warp   6 stage Omori
+    100s lap 1 warp   9 stage Siren
+    125s lap 1 warp  12 stage Hyrule
+    150s lap 1 warp  15 stage sea
+    175s lap 1 warp  18 stage A_mori
+    201s lap 1 warp  21 stage Abesso
+    226s lap 1 warp  24 stage Asoko
+    251s lap 1 warp  27 stage Cave02
+    276s lap 1 warp  30 stage Cave05
+    301s lap 1 warp  33 stage Cave09
+    326s lap 1 warp  36 stage Comori
+    351s lap 1 warp  39 stage Edaichi
+    376s lap 1 warp  42 stage Fairy02
+    401s lap 1 warp  45 stage Fairy05
+    426s lap 1 warp  48 stage GanonA
+    451s lap 1 warp  51 stage GanonD
+    476s lap 1 warp  54 stage GanonL
+    501s lap 1 warp  57 stage Hyroom
+    526s lap 1 warp  60 stage ITest62
+    551s lap 1 warp  63 stage LinkRM
+    576s lap 1 warp  66 stage M_Dai
+    601s lap 1 warp  69 stage M_Dra09
+    627s lap 1 warp  72 stage MajyuE
+    652s lap 1 warp  75 stage Mukao
+    677s lap 1 warp  78 stage Obshop
+    702s lap 1 warp  81 stage Ocrogh
+    727s lap 1 warp  84 stage Omasao
+    752s lap 1 warp  87 stage Opub
+    777s lap 1 warp  90 stage PShip2
+    802s lap 1 warp  93 stage Pfigure
+    827s lap 1 warp  96 stage ShipD
+    852s lap 1 warp  99 stage SirenMB
+    877s lap 1 warp 102 stage SubD44
+    902s lap 1 warp 105 stage TF_01
+    927s lap 1 warp 108 stage TF_04
+    952s lap 1 warp 111 stage WarpD
+    977s lap 1 warp 114 stage Xboss2
+   1002s lap 1 warp 117 stage figureB
+--- end of lap 1: 1002 s
+    [mem] malloc 2489 MiB in use of 2506 MiB taken (heap never used 622 MiB), 44893 free chunks, mallinfo 7.70 ms
+    [mem] heap never used 622 MiB; shader variants 1334 (5365 freed), GLSL 20770, programs 31764, translation records 8826 (6454 KiB); surfaces 1519 (with evicted ones); image heap 3 chunks, 192 MiB, 4.4 MiB free, largest free 1.3 MiB
+   1028s lap 2 warp   0 stage sea
+   1053s lap 2 warp   3 stage sea
+   1078s lap 2 warp   6 stage Omori
+   1103s lap 2 warp   9 stage Siren
+   1128s lap 2 warp  12 stage Hyrule
+   1153s lap 2 warp  15 stage sea
+   1178s lap 2 warp  18 stage A_mori
+   1203s lap 2 warp  21 stage Abesso
+   1228s lap 2 warp  24 stage Asoko
+   1253s lap 2 warp  27 stage Cave02
+   1279s lap 2 warp  30 stage Cave05
+   1304s lap 2 warp  33 stage Cave09
+   1329s lap 2 warp  36 stage Comori
+   1354s lap 2 warp  39 stage Edaichi
+   1379s lap 2 warp  42 stage Fairy02
+   1404s lap 2 warp  45 stage Fairy05
+   1429s lap 2 warp  48 stage GanonA
+   1454s lap 2 warp  51 stage GanonD
+   1479s lap 2 warp  54 stage GanonL
+   1504s lap 2 warp  57 stage Hyroom
+   1529s lap 2 warp  60 stage ITest62
+   1554s lap 2 warp  63 stage LinkRM
+   1579s lap 2 warp  66 stage M_Dai
+   1604s lap 2 warp  69 stage M_Dra09
+   1630s lap 2 warp  72 stage MajyuE
+   1655s lap 2 warp  75 stage Mukao
+   1680s lap 2 warp  78 stage Obshop
+   1705s lap 2 warp  81 stage Ocrogh
+   1730s lap 2 warp  84 stage Omasao
+   1755s lap 2 warp  87 stage Opub
+   1780s lap 2 warp  90 stage PShip2
+   1805s lap 2 warp  93 stage Pfigure
+   1830s lap 2 warp  96 stage ShipD
+   1855s lap 2 warp  99 stage SirenMB
+   1881s lap 2 warp 102 stage SubD44
+   1906s lap 2 warp 105 stage TF_01
+   1931s lap 2 warp 108 stage TF_04
+   1956s lap 2 warp 111 stage WarpD
+   1981s lap 2 warp 114 stage Xboss2
+   2006s lap 2 warp 117 stage figureB
+--- end of lap 2: 2006 s
+    [mem] malloc 2553 MiB in use of 2574 MiB taken (heap never used 554 MiB), 48653 free chunks, mallinfo 8.38 ms
+    [mem] heap never used 554 MiB; shader variants 1321 (11652 freed), GLSL 20770, programs 35430, translation records 8827 (6455 KiB); surfaces 1573 (with evicted ones); image heap 4 chunks, 256 MiB, 33.4 MiB free, largest free 6.0 MiB
+tour done

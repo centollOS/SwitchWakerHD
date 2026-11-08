@@ -147,7 +147,12 @@ fits it skips to the record pass (without one the next step has no "before" and 
 showing the same picture twice), otherwise drops the rest and the next logic pass waits for its
 time. Pass durations are averaged per kind (a slow logic pass must not keep cheap in-between
 passes out), a single sample counts at most twice the average (one hitch kept them out for 10 s),
-and after 10 s without an in-between pass one probe re-measures them.
+and after 10 s without an in-between pass one probe re-measures them. At every paced rate (60, 120
+and 240 fps) a step's logic frame is due on its step slot, two vsyncs after the previous step's
+(`gx2/vsync_pacing.h`); a logic pass that starts late, but less than a step late, keeps that
+schedule, so the step counts its lateness and skips the in-between frames that no longer fit
+until the game has caught up. At 60 fps a step after a skipped in-between frame starts at once (the
+time the skip saved counts as a lead), and a logic pass up to two steps late keeps the schedule.
 
 One-shot hides (`runtime/src/interp_nodraw.h`, `runtime/tools/interp_nodraw_test.cpp`): logic can
 hide an actor for one frame with `fopAcStts_NODRAW_e` (actor status `+0x2E0`, bit `0x01000000`);
@@ -420,6 +425,45 @@ Debug aids, all off by default:
 - `WWHD_COPYDBG=1`: logs each GX2CopySurface (thread, lr, images) and each CPU-path execution;
 - in true60_test.cpp: `WWHD_BOOTDBG=1`, `WWHD_BOOTDBG_SLOW=ms`, `WWHD_BOOTDBG_PROT=1` (write-protects the
   first program array's page and logs the writing thread) and `WWHD_HEAPLOG=1`.
+
+## ResMgr pack requests finish before the load task continues
+
+HD's resource manager (ResMgr, singleton at `101F4F7C`, decomp `wwhd_src/d/hd_res_mgr.cpp`) loads
+archives on two threads: ResMgrThread (`02613394`, priority 14) for requests and ResMgrPackLoadThread
+(`026134B4`, priority 19) for the three permanent packs, both on core 2. The request state at
+`+0x11248` is 1 while ResMgrThread loads a request and 2 while the permanent packs load.
+
+ResLoadTask (decomp `hd_res_load_task.cpp`) asks for an archive in `startLoad` (`0260C4CC`): it creates an
+ExpHeap with all the free space of its parent and calls `ResMgr_requestObjectAsync` (`026127D4`) or
+`ResMgr_requestStageAsync` (`02612908`). If ResMgr is busy, the request only sets "from pack"
+(`+0x112D8`) and ResMgrThread runs `ResMgr_loadFromPack` (`02610258`): no lock, and the request state is
+neither set nor cleared. `waitLoad` (`0260C67C`) waits only while the state is 1, so on the next frame
+it shrinks the heap (ExpHeap adjust) and registers the archive whether ResMgrThread is done or not.
+
+During boot this happens for the title scene's archives (Bridge, Lwood, Kanban, Kamome, Oyashi) when the
+permanent packs are still loading, i.e. when storage is slow (a phone's first start with a cold file
+cache). On the console ResMgrThread, woken by the message, takes core 2 at once and finishes in well
+under a frame. In the port it is a host thread; when the host OS runs it late (a busy phone during
+boot, e.g. while the Vulkan driver is being probed), the load task went on first:
+- adjust before the archive buffer: the buffer allocation fails, the archive is missing, and the actor
+  asserts (`d_a_bridge.cpp` line 2455, `modelData != (0)`);
+- adjust between the buffer and the 0x44-byte SharcArchiveRes: that allocation fails and
+  `0275D21C` (SharcArchiveRes setBuffer) writes through null: signal 11 at guest address `00000014`,
+  guest call chain `02613400 02760014 02760AF8` (the crash reported on PR #206 from a OnePlus 8 Pro).
+
+`runtime/src/resmgr_sync.cpp` keeps the order the console guarantees: ResMgrThread clears "from pack"
+when its load returns, and `waitLoad` reports "not done" while the flag is set. The flag is guest memory
+(ResMgr's constructor zeroes it), so save states need nothing extra. The decomp build leaves the hooked
+functions recompiled (tools/decomp_build/gen.py skips runtime hooks), so the hooks apply there too.
+
+Test switches, all off by default (`tools/gametest/resmgr_boot_race.sh` uses them):
+- `WWHD_TEST_FS_MBPS=x` (hle/fs.cpp): game file reads at x MB/s (slow storage: the title scene's
+  requests then arrive while the permanent packs load);
+- `WWHD_TEST_RESMGR_DELAY_MS=ms`: ResMgrThread starts a "from pack" load late (its core stays free);
+- `WWHD_TEST_RESMGR_MID_DELAY_MS=ms`: ResMgrThread pauses between the archive buffer and the
+  SharcArchiveRes allocation (the reported crash point);
+- `WWHD_RESMGR_NO_WAIT=1`: the old behaviour; `WWHD_RESMGR_LOG=1`: logs each "from pack" request, each
+  wait, and (with `NO_WAIT`) each time the load task went on too early.
 
 ## Effects interpolation (runtime/src/interp_fx.cpp)
 

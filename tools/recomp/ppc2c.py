@@ -140,6 +140,22 @@ def pass_on(var):
 
 
 
+# PowerPC NaN propagation (recomp.py --ppc-nan-propagation; off for the game port): the arithmetic float
+# instructions return the NaN operand the hardware would (ppc_nan.h) instead of whichever NaN the host
+# compiler's operand order gives. Off, every expression is emitted exactly as before.
+NAN_PROPAGATION = False
+
+
+def nan2(x, y, e):
+    """e (an expression of two NaN-relevant operands, x before y) under the PowerPC NaN rule, if on."""
+    return "ppc_nan2(%s, %s, %s)" % (x, y, e) if NAN_PROPAGATION else e
+
+
+def nan3(a, b, c, e):
+    """e (an fmadd-family expression of frA, frB, frC) under the PowerPC NaN rule, if on."""
+    return "ppc_nan3(%s, %s, %s, %s)" % (a, b, c, e) if NAN_PROPAGATION else e
+
+
 def ra0(a):
     """(rA|0) operand."""
     return "0u" if a == 0 else R(a)
@@ -561,19 +577,19 @@ def translate59(w, d, a, b, cc):
     xo = (w >> 1) & 31
     fa, fb, fc = F0(a), F0(b), F0(cc)
     ex = {
-        18: "%s / %s" % (fa, fb),
-        20: "%s - %s" % (fa, fb),
-        21: "%s + %s" % (fa, fb),
+        18: nan2(fa, fb, "%s / %s" % (fa, fb)),
+        20: nan2(fa, fb, "%s - %s" % (fa, fb)),
+        21: nan2(fa, fb, "%s + %s" % (fa, fb)),
         24: "ppc_fres(%s)" % fb,
     }
     if xo in (25, 28, 29, 30, 31):
         mc = M(cc, 0)
         ex.update({
-            25: "%s * %s" % (fa, mc),
-            28: "%s * %s - %s" % (fa, mc, fb),
-            29: "%s * %s + %s" % (fa, mc, fb),
-            30: "-(%s * %s - %s)" % (fa, mc, fb),
-            31: "-(%s * %s + %s)" % (fa, mc, fb),
+            25: nan2(fa, fc, "%s * %s" % (fa, mc)),
+            28: nan3(fa, fb, fc, "%s * %s - %s" % (fa, mc, fb)),
+            29: nan3(fa, fb, fc, "%s * %s + %s" % (fa, mc, fb)),
+            30: nan3(fa, fb, fc, "-(%s * %s - %s)" % (fa, mc, fb)),
+            31: nan3(fa, fb, fc, "-(%s * %s + %s)" % (fa, mc, fb)),
         })
     if xo not in ex:
         raise Unhandled("op59 xo=%d" % xo)
@@ -585,17 +601,17 @@ def translate63(w, d, a, b, cc):
     fa, fb, fc = F0(a), F0(b), F0(cc)
     if xo5 in (18, 20, 21, 22, 23, 25, 26, 28, 29, 30, 31):
         ex = {
-            18: "%s / %s" % (fa, fb),
-            20: "%s - %s" % (fa, fb),
-            21: "%s + %s" % (fa, fb),
+            18: nan2(fa, fb, "%s / %s" % (fa, fb)),
+            20: nan2(fa, fb, "%s - %s" % (fa, fb)),
+            21: nan2(fa, fb, "%s + %s" % (fa, fb)),
             22: "sqrt(%s)" % fb,
             23: "ppc_fsel(%s, %s, %s)" % (fa, fb, fc),
-            25: "%s * %s" % (fa, fc),
+            25: nan2(fa, fc, "%s * %s" % (fa, fc)),
             26: "ppc_frsqrte(%s)" % fb,
-            28: "fma(%s, %s, -%s)" % (fa, fc, fb),
-            29: "fma(%s, %s, %s)" % (fa, fc, fb),
-            30: "-fma(%s, %s, -%s)" % (fa, fc, fb),
-            31: "-fma(%s, %s, %s)" % (fa, fc, fb),
+            28: nan3(fa, fb, fc, "fma(%s, %s, -%s)" % (fa, fc, fb)),
+            29: nan3(fa, fb, fc, "fma(%s, %s, %s)" % (fa, fc, fb)),
+            30: nan3(fa, fb, fc, "-fma(%s, %s, -%s)" % (fa, fc, fb)),
+            31: nan3(fa, fb, fc, "-fma(%s, %s, %s)" % (fa, fc, fb)),
         }[xo5]
         return "%s = %s;%s" % (F0(d), ex, fp_rc(w))
     xo = (w >> 1) & 0x3FF
@@ -661,25 +677,33 @@ def translate4(w, d, a, b, cc):
         return "{ double v0 = to_single(%s), v1 = to_single(%s); %s = v0; %s = v1; }%s" % (e0, e1, F0(d), F1(d), fp_rc(w))
 
     if xo5 in (10, 11, 12, 13, 14, 15, 18, 20, 21, 23, 24, 25, 26, 28, 29, 30, 31):
-        if xo5 == 10: return "{ double v0 = to_single(%s + %s), v1 = %s; %s = v0; %s = v1; }" % (A0, B1, C1, F0(d), F1(d))
-        if xo5 == 11: return "{ double v0 = %s, v1 = to_single(%s + %s); %s = v0; %s = v1; }" % (C0, A0, B1, F0(d), F1(d))
-        if xo5 == 12: return pair("%s * %s" % (A0, M(cc, 0)), "%s * %s" % (A1, M(cc, 0)))
-        if xo5 == 13: return pair("%s * %s" % (A0, M(cc, 1)), "%s * %s" % (A1, M(cc, 1)))
-        if xo5 == 14: return pair("%s * %s + %s" % (A0, M(cc, 0), B0), "%s * %s + %s" % (A1, M(cc, 0), B1))
-        if xo5 == 15: return pair("%s * %s + %s" % (A0, M(cc, 1), B0), "%s * %s + %s" % (A1, M(cc, 1), B1))
-        if xo5 == 18: return pair("%s / %s" % (A0, B0), "%s / %s" % (A1, B1))
-        if xo5 == 20: return pair("%s - %s" % (A0, B0), "%s - %s" % (A1, B1))
-        if xo5 == 21: return pair("%s + %s" % (A0, B0), "%s + %s" % (A1, B1))
+        if xo5 == 10: return "{ double v0 = to_single(%s), v1 = %s; %s = v0; %s = v1; }" % (
+            nan2(A0, B1, "%s + %s" % (A0, B1)), C1, F0(d), F1(d))
+        if xo5 == 11: return "{ double v0 = %s, v1 = to_single(%s); %s = v0; %s = v1; }" % (
+            C0, nan2(A0, B1, "%s + %s" % (A0, B1)), F0(d), F1(d))
+        if xo5 == 12: return pair(nan2(A0, C0, "%s * %s" % (A0, M(cc, 0))), nan2(A1, C0, "%s * %s" % (A1, M(cc, 0))))
+        if xo5 == 13: return pair(nan2(A0, C1, "%s * %s" % (A0, M(cc, 1))), nan2(A1, C1, "%s * %s" % (A1, M(cc, 1))))
+        if xo5 == 14: return pair(nan3(A0, B0, C0, "%s * %s + %s" % (A0, M(cc, 0), B0)),
+                                  nan3(A1, B1, C0, "%s * %s + %s" % (A1, M(cc, 0), B1)))
+        if xo5 == 15: return pair(nan3(A0, B0, C1, "%s * %s + %s" % (A0, M(cc, 1), B0)),
+                                  nan3(A1, B1, C1, "%s * %s + %s" % (A1, M(cc, 1), B1)))
+        if xo5 == 18: return pair(nan2(A0, B0, "%s / %s" % (A0, B0)), nan2(A1, B1, "%s / %s" % (A1, B1)))
+        if xo5 == 20: return pair(nan2(A0, B0, "%s - %s" % (A0, B0)), nan2(A1, B1, "%s - %s" % (A1, B1)))
+        if xo5 == 21: return pair(nan2(A0, B0, "%s + %s" % (A0, B0)), nan2(A1, B1, "%s + %s" % (A1, B1)))
         if xo5 == 23:
             return "{ double v0 = ppc_fsel(%s, %s, %s), v1 = ppc_fsel(%s, %s, %s); %s = v0; %s = v1; }" % (
                 A0, B0, C0, A1, B1, C1, F0(d), F1(d))
         if xo5 == 24: return pair("ppc_fres(%s)" % B0, "ppc_fres(%s)" % B1)
-        if xo5 == 25: return pair("%s * %s" % (A0, M(cc, 0)), "%s * %s" % (A1, M(cc, 1)))
+        if xo5 == 25: return pair(nan2(A0, C0, "%s * %s" % (A0, M(cc, 0))), nan2(A1, C1, "%s * %s" % (A1, M(cc, 1))))
         if xo5 == 26: return pair("ppc_frsqrte(%s)" % B0, "ppc_frsqrte(%s)" % B1)
-        if xo5 == 28: return pair("%s * %s - %s" % (A0, M(cc, 0), B0), "%s * %s - %s" % (A1, M(cc, 1), B1))
-        if xo5 == 29: return pair("%s * %s + %s" % (A0, M(cc, 0), B0), "%s * %s + %s" % (A1, M(cc, 1), B1))
-        if xo5 == 30: return pair("-(%s * %s - %s)" % (A0, M(cc, 0), B0), "-(%s * %s - %s)" % (A1, M(cc, 1), B1))
-        if xo5 == 31: return pair("-(%s * %s + %s)" % (A0, M(cc, 0), B0), "-(%s * %s + %s)" % (A1, M(cc, 1), B1))
+        if xo5 == 28: return pair(nan3(A0, B0, C0, "%s * %s - %s" % (A0, M(cc, 0), B0)),
+                                  nan3(A1, B1, C1, "%s * %s - %s" % (A1, M(cc, 1), B1)))
+        if xo5 == 29: return pair(nan3(A0, B0, C0, "%s * %s + %s" % (A0, M(cc, 0), B0)),
+                                  nan3(A1, B1, C1, "%s * %s + %s" % (A1, M(cc, 1), B1)))
+        if xo5 == 30: return pair(nan3(A0, B0, C0, "-(%s * %s - %s)" % (A0, M(cc, 0), B0)),
+                                  nan3(A1, B1, C1, "-(%s * %s - %s)" % (A1, M(cc, 1), B1)))
+        if xo5 == 31: return pair(nan3(A0, B0, C0, "-(%s * %s + %s)" % (A0, M(cc, 0), B0)),
+                                  nan3(A1, B1, C1, "-(%s * %s + %s)" % (A1, M(cc, 1), B1)))
     if xo5 in (6, 7):  # psq_lx psq_stx psq_lux psq_stux
         xo6 = (w >> 1) & 0x3F
         upd = xo6 in (38, 39)

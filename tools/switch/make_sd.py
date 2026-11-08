@@ -9,21 +9,31 @@ your computer, from your own legally dumped copy (The Wind Waker HD, version 0: 
   2. checks that code/cking.rpx is the version the port is made for, and content/ against that version's list
      of files (a missing or damaged file is a warning: the game may crash where it needs it);
   3. translates the game's PowerPC code to C (tools/recomp/recomp.py -> build/gen/);
-  4. builds the Switch homebrew in the devkitPro container (tools/switch/build.sh -> build/switch-dk/wwhd.nro);
-  5. writes OUT/switch/wwhd/ (wwhd.nro, game/ and with --guest-mod mods/): copy OUT's contents to the root
+  4. builds the Switch homebrew with the pinned devkitPro toolchain (tools/switch/build_switch.py ->
+     build/switch-dk/wwhd.nro; docs/pinned-toolchain-plan.md);
+  5. writes OUT/switch/wwhd/ (wwhd.nro, game/, with --guest-mod mods/, with --ptbr translation/): copy OUT's contents to the root
      of the SD card.
 
 usage:
   make_sd.py --image GAME.wux [--out DIR]     disc key: GAME.key next to the image (16 bytes or 32 hex digits);
                                               common key: WIIU_COMMON_KEY (32 hex digits) or common.key
                                               next to the image or in the current folder
-  make_sd.py --wua GAME.wua [--out DIR]       a Cemu Wii U archive (no keys; needs: pip install zstandard)
+  make_sd.py --wua GAME.wua [--out DIR]       a Cemu Wii U archive (no keys; needs Python 3.14+ or: pip install zstandard)
   make_sd.py --game-dir EXTRACTED [--out DIR] a folder with code/, content/, meta/ (e.g. from Cemu's
                                               mlc01/usr/title/00050000/10143500 or 10143600, without the update)
-  options: --shaders shader_manifest.bin      also build shadercache_dksh.bin from your console's shader manifest
-                                              (sdmc:/switch/wwhd/shader_manifest.bin, after playing a while): the
-                                              shaders you met, and guesses for the places you have not visited yet
-                                              (a shadercache_gl.bin is still accepted: its sources only)
+  The graphics (shadercache_dksh.bin) are prepared by default: from this release's shader template, downloaded
+  from its GitHub release (shader-template.sealed: shader states without game code, opened with your dump's files;
+  none there, or offline: the console compiles them as it always did).
+  options: --shaders FILE                     prepare them from FILE instead: the release's template downloaded by
+                                              hand, or your console's shader manifest (sdmc:/switch/wwhd/
+                                              shader_manifest.bin, after playing a while): the shaders in it, and
+                                              guesses for the places not in it (a shadercache_gl.bin is still
+                                              accepted: its sources only)
+           --no-shaders                       do not prepare them (the console compiles them)
+  The game code is optimised with this release's PGO profile for your dump's region when the release has one
+  (pgo-profile-USA.zip / -EU.zip: counts of which branches the game takes, measured on a console, no game code;
+  docs/pgo-release-plan.md); none there, or offline: a normal build.
+           --no-pgo                           a normal build, without the profile
            --jobs N                           parallel compiles (each needs ~1.5 GB of memory)
            --guest-mod PACKAGE                a code mod (Mod SDK v2) built into the NRO: its id in the mod catalogue
                                               (downloaded, e.g. gc-minimap), its .zip or its folder; repeat for
@@ -31,9 +41,17 @@ usage:
            --gc-game PATH                     your GameCube Wind Waker (.iso/.gcm/.rvz or extracted), for mods
                                               whose setup reads it (the GameCube sea minimap)
            --mod-option ID.KEY=VALUE          a mod's option (e.g. gc-minimap.size=260); repeat for more
+           --ptbr DOWNLOAD                    Brazilian Portuguese: Triforce-Heroes' fan translation as downloaded
+                                              from their page (the .rar, its extracted folder or its .pack), rebuilt
+                                              on your own English pack (tools/switch/ptbr_pack.py) into
+                                              switch/wwhd/translation/pt-BR/; the game offers it in the Language tab
+                                              (docs/ptbr-translation-plan.md). Without it an earlier one is kept.
+           --no-ptbr                          remove an earlier Brazilian Portuguese translation from OUT
 
-Needs Python 3 with pycryptodome (only for --image: pip install pycryptodome) and Docker or Podman, or
-a native devkitPro (Windows: INSTALL.md, "Windows: devkitPro").
+Needs Python 3.14 with cmake and ninja (pip install cmake ninja; pycryptodome too for --image) and the internet
+once, for the pinned devkitPro toolchain (devkitPro's own files, ~130 MB, kept in build/toolchain): nothing from a
+devkitPro already installed. --toolchain devkitpro|docker: this computer's devkitPro or the devkitpro/devkita64
+image instead (INSTALL.md).
 What it makes contains the game: it is for your own console only; do not share it.
 """
 import argparse
@@ -73,25 +91,134 @@ def run(cmd, env=None, ok=(0,)):
 SHADER_CODE_MIB = "40"
 
 
-def shader_cache(src, game):
+def ptbr(tool_args):
+    """ptbr_pack.py (the Portuguese translation): its refusal becomes make_sd's own message, for the installers"""
+    cmd = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "ptbr_pack.py")] + tool_args
+    print("  $ " + " ".join(cmd), flush=True)
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.stdout:
+        print(r.stdout.rstrip(), flush=True)
+    if r.returncode != 0:
+        why = (r.stderr.strip().splitlines() or ["exit code %d" % r.returncode])[-1].replace("ptbr: ", "", 1)
+        fail("the Portuguese translation cannot be used: " + why)
+
+
+def release_tag():
+    """this source's release tag: cmake/version.txt in a release zip (git archive fills it in: "v0.4.8"; "v0.4.7-55-g..."
+    in an archive of a later commit), else the newest v* tag before this commit (a git checkout); "" when unknown"""
+    import re
+    try:
+        with open(os.path.join(ROOT, "cmake", "version.txt")) as f:
+            line = f.readline().strip()
+    except OSError:
+        line = ""
+    if line.startswith("$Format") or not line:
+        try:
+            line = subprocess.run(["git", "-C", ROOT, "describe", "--tags", "--match", "v[0-9]*", "--abbrev=0"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout.strip()
+        except OSError:
+            line = ""
+    m = re.match(r"v\d+\.\d+\.\d+", line)
+    return m.group(0) if m else ""
+
+
+def release_template():
+    """this release's shader template (issue #88): shader-template.sealed of its GitHub release, checked against its
+    .sha256 and kept in build/; None (with a note) when there is none or it cannot be downloaded: the console then
+    compiles the graphics itself"""
+    import hashlib
+    import guest_mods
+    tag = release_tag()
+    if not tag:
+        print("  (no release version known: the graphics are not prepared; --shaders FILE to give a template)")
+        return None
+    out = os.path.join(ROOT, "build", "shader-template-%s.sealed" % tag)
+    if os.path.isfile(out):
+        return out
+    url = "https://github.com/centollOS/SwitchWakerHD/releases/download/%s/shader-template.sealed" % tag
+    try:
+        data = guest_mods.fetch(url, 64 << 20)
+        want = guest_mods.fetch(url + ".sha256", 4096).decode("ascii", "replace").split()[0].lower()
+    except (guest_mods.Fail, IndexError) as e:
+        print("  (no graphics template for %s: %s; the console compiles the graphics as you play)" % (tag, e))
+        return None
+    if hashlib.sha256(data).hexdigest() != want:
+        print("  (the downloaded graphics template does not match its .sha256: not used)")
+        return None
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "wb") as f:
+        f.write(data)
+    print("  graphics template of %s: %s" % (tag, out))
+    return out
+
+
+PGO_DIR = os.path.join("build", "pgo-release")  # relative to ROOT: the same for the container (/src) and the native builds
+
+
+def release_pgo(region):
+    """this release's PGO profile for `region` (issue #90): pgo-profile-<region>.zip of its GitHub release, checked
+    against its .sha256 and unpacked into PGO_DIR. True when the build can use it; False (with a note) when there is
+    none, it cannot be downloaded or it does not fit: a normal build"""
+    import hashlib
+    import guest_mods
+    import pgo_pack
+    tag = release_tag()
+    if not tag:
+        print("  (no release version known: a normal build, without the PGO profile)")
+        return False
+    name = pgo_pack.zip_name(region)
+    cached = os.path.join(ROOT, "build", "pgo-profile-%s-%s.zip" % (tag, region))
+    if not os.path.isfile(cached):
+        url = "https://github.com/centollOS/SwitchWakerHD/releases/download/%s/%s" % (tag, name)
+        try:
+            data = guest_mods.fetch(url, 64 << 20)
+            want = guest_mods.fetch(url + ".sha256", 4096).decode("ascii", "replace").split()[0].lower()
+        except (guest_mods.Fail, IndexError) as e:
+            print("  (no PGO profile for %s %s: %s; a normal build)" % (tag, region, e))
+            return False
+        if hashlib.sha256(data).hexdigest() != want:
+            print("  (the downloaded PGO profile does not match its .sha256: a normal build)")
+            return False
+        os.makedirs(os.path.dirname(cached), exist_ok=True)
+        with open(cached, "wb") as f:
+            f.write(data)
+    try:
+        m = pgo_pack.unpack(cached, os.path.join(ROOT, PGO_DIR), region)
+    except pgo_pack.Fail as e:
+        print("  (the PGO profile of %s %s cannot be used: %s; a normal build)" % (tag, region, e))
+        return False
+    print("  PGO profile of %s for the %s game (%d files, %s)" % (tag, region, len(m["files"]), m["compiler"]))
+    return True
+
+
+def shader_cache(src, game, pinned):
     """build/shadercache_dksh.bin from the console's shader manifest (docs/shader-cache-from-dump-plan.md) or a
     shadercache_gl.bin. The files in build/shader-cache/ hold game code: they stay on this computer."""
     out = os.path.join(ROOT, "build", "shadercache_dksh.bin")
-    # natively when CMake, Ninja and a C++ compiler are there (on Windows devkitPro's MSYS2 ones: INSTALL.md), else in
-    # a container (tools/switch/dksh_cache/build.sh)
     env = dict(os.environ)
-    shell = native_shell(env) if os.name == "nt" else ["bash"]
-    tool = shell + [os.path.join("tools", "switch", "dksh_cache", "build.sh")]
+    if pinned:  # the pinned toolchain's zig (tools/switch/dksh_cache/build.py)
+        tool = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "dksh_cache", "build.py")]
+    else:
+        # natively when CMake, Ninja and a C++ compiler are there (on Windows devkitPro's MSYS2 ones: INSTALL.md),
+        # else in a container (tools/switch/dksh_cache/build.sh)
+        shell = native_shell(env) if os.name == "nt" else ["bash"]
+        tool = shell + [os.path.join("tools", "switch", "dksh_cache", "build.sh")]
     with open(src, "rb") as f:
-        manifest = f.read(4) == b"WSM1"
-    if not manifest:
+        head = f.read(8)
+    template = head in (b"WSME0001", b"WWHT0003")  # the release's sealed template, or one opened (issue #88)
+    if head[:4] != b"WSM1" and not template:
         run(tool + ["build", src, out], env=env)
         return out
     work = os.path.join(ROOT, "build", "shader-cache")
     os.makedirs(work, exist_ok=True)
     m, programs, gl = (os.path.join(work, n) for n in ("manifest.bin", "programs.bin", "shadercache_gl.bin"))
-    run([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "shader_manifest.py"), "speculate", src, game, m,
-         programs])
+    script = os.path.join(ROOT, "tools", "switch", "shader_manifest.py")
+    if template:
+        # the template's states with the dump's programs: a manifest as the console writes it, then as below
+        recorded = os.path.join(work, "template_manifest.bin")
+        run([sys.executable, "-I", script, "from-template", src, game, recorded, programs])
+        src = recorded
+    run([sys.executable, "-I", script, "speculate", src, game, m, programs])
     # (2: a few variants failed: speculative ones whose guessed state does not fit their program)
     run(tool + ["translate", m, programs, gl], env=env, ok=(0, 2))
     run(tool + ["build", gl, out, SHADER_CODE_MIB], env=env, ok=(0, 2))
@@ -100,7 +227,7 @@ def shader_cache(src, game):
 
 # Native build (no Docker/Podman): used when neither is installed, and on Windows whenever devkitPro is there (issue
 # #22: Docker from devkitPro's MSYS2 bash got its container paths rewritten). On Windows it needs a devkitPro install
-# (C:/devkitPro, https://devkitpro.org) with: pacman -S switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make
+# (C:/devkitPro, https://devkitpro.org) with: pacman -S devkitA64 switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make
 def find_devkitpro_win():
     """C:/devkitPro (devkitPro's default), or X:/devkitPro on another fixed drive when it was installed there"""
     if os.name != "nt":
@@ -157,9 +284,12 @@ def extract(image):
 
 def extract_wua(archive):
     try:
-        import zstandard  # noqa: F401
+        from compression import zstd  # noqa: F401  (Python 3.14 and newer)
     except ImportError:
-        fail("extracting a .wua needs zstandard: python -m pip install zstandard")
+        try:
+            import zstandard  # noqa: F401
+        except ImportError:
+            fail("extracting a .wua needs Python 3.14 or newer, or zstandard: python -m pip install zstandard")
     dst = os.path.join(ROOT, "build", "sd-game")
     tmp = dst + ".partial"
     shutil.rmtree(tmp, ignore_errors=True)
@@ -171,7 +301,7 @@ def extract_wua(archive):
     return dst
 
 
-def forwarder(args, out, icon=None):
+def forwarder(args, out, icon=None, pinned=False):
     """Native build, last step: the HOME-screen icon (forwarder .nsp, tools/switch/forwarder). It needs the user's
     own prod.keys, so without them it is skipped; it never fails the build, since the game does not need it."""
     print("\n[+] HOME-screen forwarder (optional)", flush=True)
@@ -184,6 +314,8 @@ def forwarder(args, out, icon=None):
         cmd = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "forwarder",
                                                   "build_forwarder_windows.py"),
                "--keys", keys, "--sd", out]
+        if pinned:
+            cmd += ["--toolchain", "pinned"]  # nx-hbloader and hacBrewPack from the pinned toolchain too
         if icon:
             cmd += ["--icon", os.path.abspath(icon)]
         if subprocess.call(cmd, cwd=ROOT) != 0:
@@ -197,8 +329,11 @@ def main():
     src.add_argument("--wua", help="a Cemu Wii U archive (.wua; no keys needed)")
     src.add_argument("--game-dir", help="an extracted game folder (code/, content/, meta/)")
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "sd"), help="where the SD card folder goes")
-    ap.add_argument("--shaders", help="your console's shader_manifest.bin (or a shadercache_gl.bin), compiled into "
-                                      "shadercache_dksh.bin")
+    ap.add_argument("--shaders", help="prepare the graphics from this file (the release's shader-template.sealed, your "
+                                      "console's shader_manifest.bin or a shadercache_gl.bin) instead of the release's "
+                                      "template, downloaded by default")
+    ap.add_argument("--no-shaders", action="store_true", help="do not prepare the graphics (the console compiles them)")
+    ap.add_argument("--no-pgo", action="store_true", help="a normal build, without the release's PGO profile")
     ap.add_argument("--jobs", type=int, help="parallel compiles")
     ap.add_argument("--keys", help="native build: your console's prod.keys, for the HOME-screen forwarder "
                     "(default: .switch\\prod.keys in your user folder; without it the forwarder is skipped)")
@@ -209,12 +344,30 @@ def main():
     ap.add_argument("--guest-mod", action="append", default=[], help="a code mod built into the NRO (catalogue id, .zip or folder)")
     ap.add_argument("--gc-game", help="your GameCube Wind Waker, for mods whose setup reads it")
     ap.add_argument("--mod-option", action="append", default=[], help="a mod's option: ID.KEY=VALUE")
+    ptbr_arg = ap.add_mutually_exclusive_group()
+    ptbr_arg.add_argument("--ptbr", help="Triforce-Heroes' PT-BR translation download (.rar, folder or .pack)")
+    ptbr_arg.add_argument("--no-ptbr", action="store_true", help="remove an earlier PT-BR translation from OUT")
+    ap.add_argument("--toolchain", choices=("pinned", "devkitpro", "docker"),
+                    default=os.environ.get("WWHD_TOOLCHAIN") or "pinned",
+                    help="pinned (default): devkitPro's package files at the versions we build with, fetched into "
+                         "build/toolchain (tools/toolchain/fetch.py), nothing from this computer's devkitPro; "
+                         "devkitpro: this computer's devkitPro; docker: the devkitpro/devkita64 image (developers)")
     args = ap.parse_args()
     if not (args.image or args.wua or args.game_dir):
         ap.error("one of --image, --wua or --game-dir is required")
+    pinned = args.toolchain == "pinned"
+    if pinned:
+        # fetch.py unpacks devkitPro's zstd packages with Python 3.14's own zstd; the build runs the cmake and ninja
+        # installed next to this Python (the installers' pinned packages)
+        if sys.version_info < (3, 14):
+            fail("the pinned toolchain needs Python 3.14 or newer (this is %d.%d); or --toolchain devkitpro|docker"
+                 % sys.version_info[:2])
+        sys.path.insert(0, os.path.join(ROOT, "tools", "switch"))
+        import build_switch
+        build_switch.python_tool("cmake"), build_switch.python_tool("ninja")
     # WWHD_NATIVE=1 (build.sh's switch; the macOS and Linux installers set it): native even with docker/podman around
-    native = (not have_container_engine() or (os.name == "nt" and native_toolchain_ok()) or
-              os.environ.get("WWHD_NATIVE") == "1")
+    native = not pinned and (args.toolchain == "devkitpro" or not have_container_engine() or
+                             (os.name == "nt" and native_toolchain_ok()) or os.environ.get("WWHD_NATIVE") == "1")
     if native:
         if not native_toolchain_ok():
             fail("Docker or Podman is needed (the Switch toolchain runs in the devkitpro/devkita64 image), or "
@@ -228,6 +381,9 @@ def main():
             (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []))
     elif args.mod_option or args.gc_game:
         fail("--mod-option and --gc-game go with --guest-mod")
+    if args.ptbr:  # the translation's download, checked before the slow steps (the wrong file picked, say)
+        args.ptbr = os.path.abspath(args.ptbr)
+        ptbr(["--check", args.ptbr])
 
     step(1, "the game files")
     if args.image:
@@ -268,13 +424,26 @@ def main():
               "where it is); a file you changed on purpose shows up here too.")
     else:
         print("  content/: every file as in the %s list: OK" % build.name)
+    ptbr_pack = None
+    if args.ptbr:  # Brazilian Portuguese on this game's own English pack (docs/ptbr-translation-plan.md)
+        english = "permanent_2d_%sEnglish.pack" % ("Us" if build.name == "USA" else "Eu")
+        pack_dir = os.path.join(game, "content", "Common", "Pack")
+        base = next((os.path.join(pack_dir, n) for n in sorted(os.listdir(pack_dir)) if n.lower() == english.lower()),
+                    None) if os.path.isdir(pack_dir) else None
+        if not base:
+            fail("the game has no content/Common/Pack/%s for the Portuguese translation" % english)
+        ptbr_pack = os.path.join(ROOT, "build", "ptbr", "permanent_2d_ptBR.pack")
+        shutil.rmtree(os.path.dirname(ptbr_pack), ignore_errors=True)
+        ptbr(["--translation", args.ptbr, "--base", base, "--out", ptbr_pack])
 
     step(3, "translating the game code to C (about a minute)")
     # code mods built into the NRO (docs/guest-mods-switch-plan.md): prepared and translated first, since the game
     # code gets their check in the functions they hook; without --guest-mod an earlier set is removed
     mods_dir = os.path.join(ROOT, "build", "guest-mods")
     tool = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "guest_mods.py"), "--out", mods_dir]
-    renv = dict(os.environ)
+    # the players' options (the Switch's hook skip list), shared with the PGO training build (#130)
+    import players_gen
+    renv = players_gen.players_env()
     if args.guest_mod:
         run(tool + mods + ["--build", build.name] +
             (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []) +
@@ -300,15 +469,38 @@ def main():
     if args.icon:
         env["WWHD_ICON"] = os.path.abspath(args.icon)
     env["WWHD_GAME_DIR"] = game  # where build.sh makes the icon from
+    # the release's PGO profile (issue #90): build.sh and build_switch.py build with it (cmake/SwitchPgo.cmake checks
+    # the compiler and gives a normal build if it differs)
+    env.pop("WWHD_BUILD_DIR", None)  # the players' build folder, build/switch-dk (the NRO is taken from there)
+    if not args.no_pgo and release_pgo(build.name):
+        env["WWHD_PGO"], env["WWHD_PGO_DIR"] = "USE", PGO_DIR
+    else:
+        env["WWHD_PGO"] = "OFF"
+        env.pop("WWHD_PGO_DIR", None)
     if args.name:
         env["WWHD_NACP_NAME"] = args.name
-    run((native_shell(env) if native else ["bash"]) + ["tools/switch/build.sh"], env=env)
+    if pinned:
+        run([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "build_switch.py")], env=env)
+    else:
+        run((native_shell(env) if native else ["bash"]) + ["tools/switch/build.sh"], env=env)
     nro = os.path.join(ROOT, "build", "switch-dk", "wwhd.nro")
     if not os.path.isfile(nro):
         fail("the build made no %s" % nro)
     dksh = None
-    if args.shaders:
-        dksh = shader_cache(os.path.abspath(args.shaders), game)
+    shaders = os.path.abspath(args.shaders) if args.shaders else None if args.no_shaders else release_template()
+    if shaders:
+        try:
+            dksh = shader_cache(shaders, game, pinned)
+        except SystemExit as e:
+            with open(shaders, "rb") as f:
+                if f.read(8) not in (b"WSME0001", b"WWHT0003"):
+                    raise  # the player's own manifest or cache: a failure stops, as always
+            # the release's template (issue #88): the game works without the prepared graphics, so this never stops
+            # the install (the installers show this line as a warning)
+            why = str(e.code).strip().replace("make_sd: ", "") if e.code else "see the messages above"
+            print("make_sd: warning: the graphics were not prepared (%s); the console compiles them as you play" % why,
+                  flush=True)
+            dksh = None
 
     step(5, "the SD card folder")
     out = os.path.abspath(args.out)
@@ -324,13 +516,20 @@ def main():
                 shutil.rmtree(dst, ignore_errors=True)
                 shutil.copytree(os.path.join(mods_dir, "sd", m["id"]), dst)
                 shutil.copytree(m["data"], os.path.join(dst, "data"))
+    ptbr_dst = os.path.join(wwhd, "translation", "pt-BR")  # read by runtime/src/fan_translation.cpp
+    if ptbr_pack:
+        shutil.rmtree(ptbr_dst, ignore_errors=True)
+        shutil.copytree(os.path.dirname(ptbr_pack), ptbr_dst)
+    elif args.no_ptbr:
+        shutil.rmtree(ptbr_dst, ignore_errors=True)
     gdst = os.path.join(wwhd, "game")
     if os.path.realpath(gdst) != os.path.realpath(game):
         shutil.rmtree(gdst, ignore_errors=True)
         for part in ("code", "content", "meta"):
             shutil.copytree(os.path.join(game, part), os.path.join(gdst, part))
-    if native and not args.no_forwarder:
-        forwarder(args, out, args.icon or game)
+    # the forwarder (optional, it never stops the install): with the pinned toolchain too when the game used it
+    if (native or pinned) and not args.no_forwarder:
+        forwarder(args, out, args.icon or game, pinned)
     print("""
 Done: %s
 

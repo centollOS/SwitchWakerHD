@@ -25,60 +25,20 @@ abstract class DesktopEngine : EngineBase
     // button, command. Blocks this thread until the button.
     public Action<string, string, string, string>? AskCommand;
 
-    // ── Python ───────────────────────────────────────────────────────────────
-    // python-build-standalone (Astral): a relocatable CPython for the user's own folder, no administrator, no
-    // python3-venv, no pip on the system's Python (PEP 668). 3.14 for the minimap's Dolphin .rvz (compression.zstd).
-    const string PyRelease = "20260929", PyVersion = "3.14.7";
-    static readonly Dictionary<(bool mac, Architecture arch), (string triple, string sha256)> PyBuilds = new()
-    {
-        [(true,  Architecture.Arm64)] = ("aarch64-apple-darwin",      "0211ccf04c5e0a0feb0b9bf1148030e1f6a31b8eae624f13919a7752a4e3dc79"),
-        [(true,  Architecture.X64)]   = ("x86_64-apple-darwin",       "18b12f5836c6a5cee8223f1759d26bd3174c1271bb3b7882dc09e2d961f3c863"),
-        [(false, Architecture.Arm64)] = ("aarch64-unknown-linux-gnu", "08a224bc0bcadfee3eab55db618343e6ba221f3595000e0894aae163648abc9d"),
-        [(false, Architecture.X64)]   = ("x86_64-unknown-linux-gnu",  "0056208b5fdfcec939bc5b3908f5e7c89d11c6e2f1fdf02c9cc6aa98d10c5d05"),
-    };
-    protected static string PyDir => Path.Combine(WorkDir, "python");
-    static string PyExe => Path.Combine(PyDir, "bin", "python3");
+    // ── Python ── the shared pinned Python (shared/PinnedPython.cs). cmake: the host's (no Homebrew, no distribution
+    // package); Pillow: the HOME-screen icon and the NRO's own; ninja: the prepared graphics' tools/switch/dksh_cache
+    // build (issue #88)
+    protected override void Python() => PinnedPython("zstandard", "pycryptodome", "pillow", "cmake", "ninja");
 
-    protected override void Python()
-    {
-        var arch = RuntimeInformation.OSArchitecture;
-        if (!PyBuilds.TryGetValue((OperatingSystem.IsMacOS(), arch), out var build))
-            throw new InstallException(Str.Get("py_desk_arch", arch));
-        if (!PythonWorks())
-        {
-            var name = $"cpython-{PyVersion}+{PyRelease}-{build.triple}-install_only.tar.gz";
-            var tgz = Path.Combine(WorkDir, name);
-            if (!File.Exists(tgz))
-            {
-                Say(Str.Get("py_desk_downloading", PyVersion));
-                var part = tgz + ".part";
-                Download($"https://github.com/astral-sh/python-build-standalone/releases/download/{PyRelease}/{Uri.EscapeDataString(name)}", part);
-                VerifySha256(part, build.sha256);
-                File.Move(part, tgz);
-            }
-            Say(Str.Get("py_desk_unpacking"));
-            if (Directory.Exists(PyDir)) Directory.Delete(PyDir, true);
-            // the archive holds python/: unpacked next to it, as WorkDir/python
-            Exec("tar", $"-xzf {Quote(tgz)} -C {Quote(WorkDir)}");
-            if (!PythonWorks()) throw new InstallException(Str.Get("py_desk_fail", PyDir));
-        }
-        pythonCmd = PyExe;
-        Ok(Str.Get("py_found", $"Python {PyVersion} ({PyDir})"));
-
-        Say(Str.Get("py_pkgs"));
-        // cmake: the host's (no Homebrew, no distribution package); Pillow: the HOME-screen icon and the NRO's own
-        const string pkgs = "zstandard pycryptodome pillow cmake";
-        if (Exec(pythonCmd, "-m pip install --disable-pip-version-check --no-warn-script-location " + pkgs, check: false) != 0)
-            throw new InstallException(Str.Get("py_pkgs_fail", pkgs));
-    }
-
-    static bool PythonWorks() =>
-        File.Exists(PyExe) && Capture(PyExe, "-c \"import compression.zstd,ssl;print('PYOK')\"").output.Contains("PYOK");
+    protected override void Untar(string archive, string intoDir) => Exec("tar", $"-xzf {Quote(archive)} -C {Quote(intoDir)}");
 
     // ── devkitPro ───────────────────────────────────────────────────────────
-    // What the native build needs from devkitPro, by its files (the same packages on macOS and Linux)
+    // What the native build needs from devkitPro, by its files (the same packages on macOS and Linux).
+    // devkitA64 by name: it is now a metapackage over devkita64-gcc, -binutils and -newlib, and switch-dev brings
+    // only -binutils. An older devkitA64 owns those files itself; without its upgrade in the same transaction,
+    // installing -binutils stops with "conflicting files" (#28).
     protected const string Dkp = "/opt/devkitpro";
-    protected const string DkpPackages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
+    protected const string DkpPackages = "devkitA64 switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
     static readonly (string what, string path)[] DkpFiles =
     {
         ("devkitA64", Dkp + "/devkitA64/bin/aarch64-none-elf-gcc"),
@@ -115,8 +75,6 @@ abstract class DesktopEngine : EngineBase
     public abstract bool Eject(string mount);
     // Opens a folder in the file manager, or a text file (the log) in an editor.
     public abstract void Open(string path, bool text = false);
-    // DBI's MTP responder over USB (Linux, through gio)
-    public virtual bool HasMtp => false;
 
     // A plain copy, file by file (no extended attributes: no ._ files from a Mac), of what is new or changed, then
     // every file read back (VerifyCard); progress(done bytes, total bytes, checking).

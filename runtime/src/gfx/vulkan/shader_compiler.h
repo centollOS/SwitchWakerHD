@@ -23,6 +23,9 @@ public:
     ShaderCompileTicket(const ShaderCompileTicket&) = delete;
     ShaderCompileTicket& operator=(const ShaderCompileTicket&) = delete;
     bool ready() const;
+    // Move a still queued job to the front: something now waits for it (Shader compile Fast queues
+    // the work of draws that were left out ahead of the ones that must wait).
+    void prioritize() const;
     std::optional<ShaderCompileResult> wait_for(uint64_t budgetNs);
     ShaderCompileResult consume();
 private:
@@ -38,6 +41,10 @@ ShaderCompileResult compile_shader(const std::string& source, ShaderStage stage,
     uint64_t frame, uint64_t key, const std::function<void()>& whilePending = {},
     bool background = true);
 bool async_shaders_enabled();
+// issue #207 diagnostic: strip RelaxedPrecision from every module (spirv_precision.h); set once at start
+void set_full_precision(bool on);
+bool full_precision_enabled();
+void note_relaxed_precision_stripped(size_t removed);
 bool shader_compiler_active();
 // Drains and joins CPU-only work. A later request can restart the worker.
 void finish_shader_compiler();

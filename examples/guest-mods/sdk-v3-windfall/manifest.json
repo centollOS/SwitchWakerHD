@@ -1,0 +1,370 @@
+{
+  "format_version": 1,
+  "id": "sdk-v3-windfall",
+  "name": "Windfall lantern walk (SDK v3 preview)",
+  "version": "0.1.0",
+  "author": "Lukas S",
+  "description": "Experimental SDK v3 example: native residents, an original carved post, a rigged tide sprite and bounded scenes on Windfall.",
+  "game_id": "wwhd",
+  "minimum_manager_version": "1.5.0",
+  "kind": "content",
+  "content_dir": "content",
+  "experimental": true,
+  "dependencies": [
+    {
+      "id": "story-notebook",
+      "minimum_version": "0.0.0"
+    }
+  ],
+  "actors": [
+    {
+      "id": "lantern-sign",
+      "actor": "sign",
+      "stage": "sea",
+      "room": 11,
+      "position": {
+        "x": -800,
+        "y": 1040,
+        "z": -201500
+      },
+      "rotation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "scale": {
+        "x": 1,
+        "y": 1,
+        "z": 1
+      },
+      "flag": "lantern-sign-read",
+      "lines": [
+        "A light is a promise:",
+        "someone is waiting for you."
+      ]
+    },
+    {
+      "id": "lantern-guide",
+      "actor": "resident",
+      "parameters": {
+        "resident": 9
+      },
+      "stage": "sea",
+      "room": 11,
+      "position": {
+        "x": -500,
+        "y": 1200,
+        "z": -201500
+      },
+      "rotation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "scale": {
+        "x": 1,
+        "y": 1,
+        "z": 1
+      },
+      "lines": [
+        "Have you watched the lighthouse",
+        "when the evening wind settles?"
+      ],
+      "then": [
+        {
+          "action": "scene",
+          "id": "lighthouse"
+        }
+      ]
+    },
+    {
+      "id": "carved-post",
+      "kind": "mod",
+      "model": "carved-post",
+      "stage": "sea",
+      "room": 11,
+      "position": {
+        "x": 100,
+        "y": 1040,
+        "z": -201500
+      },
+      "collision": {
+        "radius": 42,
+        "height": 160,
+        "mode": "solid"
+      },
+      "attention": {
+        "prompt": "check"
+      },
+      "flag": "carved-post-checked",
+      "lines": [
+        "A diamond is carved into the wood.",
+        "Below it: Follow the evening light."
+      ],
+      "then": [
+        {
+          "action": "flag",
+          "id": "carved-post-checked",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "tide-sprite",
+      "kind": "mod",
+      "model": "tide-sprite",
+      "stage": "sea",
+      "room": 11,
+      "position": {
+        "x": 300,
+        "y": 1040,
+        "z": -201500
+      },
+      "collision": {
+        "radius": 35,
+        "height": 140,
+        "mode": "solid"
+      },
+      "attention": {
+        "prompt": "talk"
+      },
+      "look_at": {
+        "head": "head",
+        "yaw_degrees": 65,
+        "pitch_degrees": 30,
+        "rate_degrees": 120,
+        "radius": 650,
+        "upper_body": {
+          "bone": "body",
+          "yaw_degrees": 25,
+          "fraction": 0.3
+        }
+      },
+      "path": {
+        "points": [
+          {
+            "x": 300,
+            "y": 1040,
+            "z": -201500
+          },
+          {
+            "x": 500,
+            "y": 1040,
+            "z": -201500
+          }
+        ],
+        "speed": 45,
+        "mode": "loop"
+      },
+      "lines": [
+        "The tide always brings another story.",
+        "Shall we follow it?"
+      ],
+      "then": [
+        {
+          "action": "scene",
+          "id": "tide-story"
+        }
+      ]
+    }
+  ],
+  "scenes": [
+    {
+      "id": "lighthouse",
+      "steps": [
+        {
+          "type": "camera",
+          "eye": {
+            "x": -3500,
+            "y": 3600,
+            "z": -205000
+          },
+          "target": {
+            "x": -1500,
+            "y": 3000,
+            "z": -202000
+          },
+          "frames": 120
+        },
+        {
+          "type": "say",
+          "actor": "lantern-guide",
+          "text": [
+            "From here, the light reaches",
+            "beyond the island."
+          ],
+          "frames": 600
+        },
+        {
+          "type": "say",
+          "actor": "lantern-guide",
+          "text": [
+            "Perhaps it will help someone",
+            "find their way home."
+          ],
+          "frames": 600
+        },
+        {
+          "type": "fade",
+          "direction": "out",
+          "frames": 30
+        },
+        {
+          "type": "fade",
+          "direction": "in",
+          "frames": 30
+        },
+        {
+          "type": "end",
+          "then": [
+            {
+              "action": "flag",
+              "id": "lighthouse-seen"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tide-story",
+      "steps": [
+        {
+          "id": "opening",
+          "type": "camera_path",
+          "easing": "smoothstep",
+          "points": [
+            {
+              "eye": {
+                "x": 700,
+                "y": 1300,
+                "z": -201850
+              },
+              "target": {
+                "x": 350,
+                "y": 1140,
+                "z": -201500
+              },
+              "frames": 90
+            },
+            {
+              "eye": {
+                "x": 550,
+                "y": 1250,
+                "z": -201750
+              },
+              "target": {
+                "x": 350,
+                "y": 1140,
+                "z": -201500
+              }
+            }
+          ]
+        },
+        {
+          "type": "animation",
+          "actor": "tide-sprite",
+          "clip": "wave",
+          "blend_seconds": 0.2,
+          "loop": false
+        },
+        {
+          "type": "choice",
+          "text": [
+            "Which story would you like?"
+          ],
+          "options": [
+            {
+              "text": "Walk",
+              "next": "walk-story"
+            },
+            {
+              "text": "Tide",
+              "next": "tide-answer"
+            }
+          ],
+          "default": 0,
+          "frames": 900
+        },
+        {
+          "id": "walk-story",
+          "type": "animation",
+          "actor": "tide-sprite",
+          "clip": "walk",
+          "blend_seconds": 0.2
+        },
+        {
+          "type": "walk",
+          "actor": "tide-sprite",
+          "points": [
+            {
+              "x": 300,
+              "y": 1040,
+              "z": -201500
+            },
+            {
+              "x": 500,
+              "y": 1040,
+              "z": -201500
+            }
+          ],
+          "speed": 60,
+          "frames": 600
+        },
+        {
+          "type": "animation",
+          "actor": "tide-sprite",
+          "clip": "idle",
+          "blend_seconds": 0.2
+        },
+        {
+          "id": "walk-end",
+          "type": "end",
+          "then": [
+            {
+              "action": "flag",
+              "id": "tide-walk-chosen",
+              "value": true
+            }
+          ]
+        },
+        {
+          "id": "tide-answer",
+          "type": "animation",
+          "actor": "tide-sprite",
+          "clip": "talk",
+          "blend_seconds": 0.2
+        },
+        {
+          "type": "say",
+          "actor": "tide-sprite",
+          "text": [
+            "Even the smallest wave finds a shore."
+          ],
+          "frames": 600
+        },
+        {
+          "id": "tide-end",
+          "type": "end",
+          "then": [
+            {
+              "action": "flag",
+              "id": "tide-story-chosen",
+              "value": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "models": [
+    {
+      "id": "carved-post",
+      "source": "assets/carved_post.glb"
+    },
+    {
+      "id": "tide-sprite",
+      "kind": "skinned",
+      "source": "assets/tide_sprite.glb"
+    }
+  ]
+}

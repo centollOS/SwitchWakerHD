@@ -141,7 +141,11 @@ def main():
             sampler = None
             samples = report["resource_samples"]
             if not samples["complete_native_child_samples"]:
-                raise AssertionError("Resource capture missed all complete memory samples containing native children")
+                reasons = sorted({json.dumps(reason, sort_keys=True) for sample in samples["samples"]
+                                  for reason in sample.get("missing_reasons", {}).values()
+                                  if reason["role"] == "native_child"})
+                raise AssertionError("Resource capture missed all complete memory samples containing native children"
+                                     + ("; unreadable native children: " + ", ".join(reasons[:5]) if reasons else ""))
         report["worker_metrics"] = json.loads(shell("run-as", PACKAGE, "cat", job + "/state.json"))
         resources = report["worker_metrics"]["resources_latest"]
         if min(resources["worker_peak_rss_bytes"], resources["largest_reaped_child_peak_rss_bytes"]) <= 0:
@@ -160,13 +164,31 @@ def main():
             raise AssertionError("Activated library must be read-only")
         library_path = "no_backup/ondevice/" + active["library"]
         modification = shell("run-as", PACKAGE, "stat", "-c", "%Y", library_path)
-        # A second service instance must reuse the completed link rather than rewrite it.
+        completed = report["observations"][1]["updated"]
+        # A start without an action (the setup screen's recovery check, an update check) on a complete
+        # setup with nothing to rebuild starts nothing: the completed record stays as it is.
+        shell("am", "force-stop", PACKAGE)
+        time.sleep(1.1)
+        idle_line = b"setup complete; nothing to start"
+        idle_before = shell("logcat", "-d", "-s", "wwhd-setup:I").count(idle_line)
+        control("synthetic-build")
+        deadline = time.monotonic() + 30
+        while shell("logcat", "-d", "-s", "wwhd-setup:I").count(idle_line) <= idle_before:
+            if time.monotonic() >= deadline: raise AssertionError("Automatic start on a complete setup did not stay idle")
+            time.sleep(.1)
+        time.sleep(1)
+        idle = json.loads(shell("run-as", PACKAGE, "cat", job + "/host.json"))
+        if idle.get("state") != "complete" or idle.get("updated") != completed:
+            raise AssertionError("Automatic start reran a complete setup: " + repr(idle))
+        report["observations"].append({"check": "automatic start on a complete setup stays idle", **idle})
+        # The player's explicit start (Resume) runs a second service instance, which must reuse the
+        # completed link rather than rewrite it.
         shell("am", "force-stop", PACKAGE)
         time.sleep(1.1)
         resumed = time.monotonic()
-        control("synthetic-build")
+        control("synthetic-resume")
         until("fresh service reuses completed generation", lambda s:
-              s.get("state") == "complete" and s.get("updated", 0) > report["observations"][1]["updated"])
+              s.get("state") == "complete" and s.get("updated", 0) > completed)
         if json.loads(shell("run-as", PACKAGE, "cat", "no_backup/ondevice/active.json")) != active:
             raise AssertionError("Restart changed the completed selection")
         if shell("run-as", PACKAGE, "stat", "-c", "%Y", library_path) != modification:

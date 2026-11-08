@@ -33,7 +33,7 @@ struct BuiltinTab {
 };
 inline constexpr BuiltinTab kBuiltinTabs[] = {
     {"saves", "Saves"}, {"graphics", "Graphics"}, {"display", "Display"}, {"audio", "Audio"},
-    {"mods", "Mods"},   {"controls", "Controls"}, {"about", "Language / About"},
+    {"mods", "Mods"},   {"controls", "Controls"}, {"shortcuts", "Shortcuts"}, {"about", "Language / About"},
 };
 inline constexpr int kBuiltinCount = int(sizeof kBuiltinTabs / sizeof kBuiltinTabs[0]);
 
@@ -47,6 +47,9 @@ struct Tab {
     // optional: controller L / R while the tab is selected (-1 / +1), for a tab with its own sub-tabs
     // as Mods has. True: the tab moved inside itself; false (at its ends): the overlay changes tabs.
     std::function<bool(int direction)> shoulder;
+    // optional (any thread, cheap): false leaves the tab out of the tab bar for now (a setting turns it
+    // on later, as the world editor's tab); L / R skip it then. Null: always shown.
+    std::function<bool()> shown;
 };
 // Places the tab before the tab `before_id` (built-in or added); null or an unknown id: before "about"
 // (at the end if "about" is hidden). Ids already taken are ignored.
@@ -61,6 +64,12 @@ struct Features {
     bool file_picker = true;  // file and folder choosers (Mods: install from a file, the GameCube game)
     bool screenshots = true;  // the Screenshots section of Saves
     bool full_states = true;  // full save states and Crash Recovery's automatic states (both are full states)
+    bool code_mods = true;    // code mods (Mods > More > Code-mod support); without: that section is left out and
+                              // a catalogue code mod says it can't run on this platform
+    bool mod_downloads = true;  // the online mod list (Mod list settings, mods available to download, the Story
+                                // Notebook download); without: only the mods already in the mods folder
+    bool speaker_choice = true; // Audio: the Speakers choice (stereo / surround 5.1); without: the host's output as is
+    bool keyboard = true;       // keyboard and mouse hints (Saves, Language / About); without: the controller's only
 };
 void set_features(const Features& features);
 const Features& features();  // any thread
@@ -99,6 +108,24 @@ struct FrameLayer {
 };
 void add_frame_layer(FrameLayer layer);
 
+// Overlays drawn by a frame layer that people work with by mouse and keyboard while the settings menu is
+// closed (the world editor's). Both callbacks are optional and cheap; null mode: no such layer.
+struct InputLayer {
+    // any thread: 0 off; 1 the overlays own the mouse (every click, the wheel and the keys go to Dear
+    // ImGui; keys still reach the game unless a text field has them); 2 only where an overlay window is
+    // under the pointer (a small button over the running game)
+    std::function<int()> mode;
+    // input thread, before the game sees a key (and before Dear ImGui): true takes it. `typing`: a text
+    // field of the overlays has the keyboard.
+    std::function<bool(int code, bool down, bool repeat, bool typing)> key;
+    // input thread, Esc pressed while the settings menu is closed (after a captured mouse was freed, the
+    // first Esc's own use): true when the layer had an action going (placing, dragging, connecting) and
+    // cancels it; that Esc (and its release) is then taken, and Settings opens only on an Esc with nothing
+    // to cancel. Optional.
+    std::function<bool()> cancel;
+};
+void set_input_layer(InputLayer layer);
+
 // ---------------------------------------------------------------- read by the overlay (and the tests)
 // Each call seals the registry (see the top of this file).
 struct ShownTab {
@@ -106,11 +133,13 @@ struct ShownTab {
     int builtin = -1;  // index in kBuiltinTabs; -1: an added tab (draw and shoulder from its Tab)
     std::function<void()> draw;
     std::function<bool(int direction)> shoulder;
+    std::function<bool()> shown;  // null: always
+    bool visible() const { return !shown || shown(); }
 };
-const std::vector<ShownTab>& tabs();  // the tab bar, in order
+const std::vector<ShownTab>& tabs();  // the tab bar, in order (check visible() for each)
 int tab_index(const std::string& id);  // in tabs(); -1 if not shown
 int builtin_tab(int index);            // kBuiltinTabs index of tabs()[index]; -1 for an added tab or out of range
-// Controller L / R on the tab bar: the tab after (direction +1) or before (-1) `index`, wrapping around.
+// Controller L / R on the tab bar: the visible tab after (direction +1) or before (-1) `index`, wrapping around.
 int next_tab(int index, int direction);
 // Controller L / R while tabs()[index] is open: the tab to switch to, or -1 when the tab moved between
 // its own sub-tabs instead (an added tab's shoulder, or `builtin_shoulder` for a built-in tab: Mods).
@@ -123,6 +152,7 @@ const std::vector<Shortcut>& shortcuts();
 bool poll_shortcuts(PadValues& pad, bool menu_open);
 const TextInput& text_input();
 const std::vector<FrameLayer>& frame_layers();
+const InputLayer& input_layer();
 void seal();
 bool sealed();
 

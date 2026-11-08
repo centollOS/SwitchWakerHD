@@ -329,11 +329,16 @@ initialize_context(struct gl_context *ctx, gl_api api)
 	ctx->Driver.NewProgram = new_program;
 }
 
-static struct gl_context gl_ctx;
+// SwitchWakerHD patch 10: one context per compiling thread (it was one static context, rebuilt by every compile:
+// two threads compiling at once overwrote each other's). On the heap, not in every thread's TLS block.
+static thread_local struct gl_context* t_gl_ctx;
+#define gl_ctx (*t_gl_ctx)
 
 void glsl_frontend_init()
 {
-	initialize_context(&gl_ctx, API_OPENGL_CORE);
+	if (!t_gl_ctx)
+		t_gl_ctx = (struct gl_context*)calloc(1, sizeof(struct gl_context));
+	initialize_context(t_gl_ctx, API_OPENGL_CORE);
 }
 
 void glsl_frontend_exit()

@@ -12,11 +12,14 @@
 #include <mutex>
 
 #include "input.h"
+#include "platform/debug_switch.h"
 #include "platform/host.h"
 #include "platform/settings_ini.h"
 #include "runtime.h"
 
 namespace hostui {
+// (upstream sync bfd7dd6) no folder chooser on the console (Settings > Saves > Save folder is left out there)
+void choose_save_folder(std::function<void(std::string)>) {}
 namespace {
 std::mutex g_mu;
 std::map<std::string, std::string> g_values;
@@ -50,17 +53,16 @@ void post(std::function<void()> fn) {
     g_posted.push_back(std::move(fn));
 }
 
+// Only the changes queued when this starts: ones posted meanwhile wait for the next pass of the host loop, which
+// reads the controllers in between. Draining until empty let a slider that posts SD card writes faster than they
+// finish keep this thread here for good, the menu stuck with the last controller state it saw (#101).
 void run_posted() {
-    for (;;) {
-        std::function<void()> fn;
-        {
-            std::lock_guard<std::mutex> lk(g_post_mu);
-            if (g_posted.empty()) return;
-            fn = std::move(g_posted.front());
-            g_posted.pop_front();
-        }
-        fn();
+    std::deque<std::function<void()>> batch;
+    {
+        std::lock_guard<std::mutex> lk(g_post_mu);
+        batch.swap(g_posted);
     }
+    for (auto& fn : batch) fn();
 }
 
 bool get(const char* key, std::string& value) {
@@ -93,6 +95,7 @@ const char* name() { return "Switch"; }
 void choose_mod_source(bool, std::function<void(std::string)>) {}
 // no file picker, clipboard or file manager on the console (overlay::ext features off: overlay_switch.cpp)
 void choose_game_source(bool, std::function<void(std::string)>) {}
+void choose_file(const char*, const char*, bool, std::function<void(std::string)>) {}  // no file chooser
 void set_clipboard(const std::string&) {}
 bool can_open_folder() { return false; }
 void open_folder(const std::string&) {}
@@ -114,6 +117,9 @@ int drc_mode() { return 3; }  // off: the GamePad picture has no screen on the S
 void set_drc_mode(int) {}
 int pip_corner() { return 1; }
 void set_pip_corner(int) {}
+int pip_anchor() { return 1; }  // (no GamePad picture-in-picture on the Switch)
+void set_pip_anchor(int) {}
+void save_pip_position() {}
 float pip_size() { return 0.25f; }
 void set_pip_size(float) {}
 float pip_opacity() { return 1.0f; }
@@ -126,5 +132,6 @@ void load_saved_options() {}
 void toggle_drc() {}
 void drc_window_closed() {}
 void tv_fullscreen_changed() {}
+void quit() { debug_switch::request_quit(); }  // Settings > Quit Game: the host loop ends
 
 }  // namespace hostui

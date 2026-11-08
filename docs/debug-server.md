@@ -6,7 +6,8 @@ It is off unless the settings menu turns it on. There is no password, so use it 
 
 ## Turning it on
 
-Hold Minus for the settings menu, **Switch** tab, **Debug** section: tick **Debug server (network)**. It is
+Hold Minus for the settings menu, **Dev** tab: tick **Show developer options**; its first section is **Debug server**:
+tick **Debug server (network)**. It is
 saved (`switchDebugServer=1` in `sdmc:/switch/wwhd/settings.ini`) and the server starts at the **next** start
 of the game, on port 6543. At start the log says
 `[debug] server listening on <ip>:6543`. A fixed address for the console (a DHCP reservation in the router)
@@ -22,7 +23,7 @@ them) go at the end of `sdmc:/switch/wwhd/settings.ini`, under a `[dev]` header,
 
 ```
 # Wind Waker HD settings
-switchGpuProfile=1600
+switchFpsCounter=1
 switchDebugServer=1
 
 [dev]
@@ -77,6 +78,8 @@ WWHD_STATE_DIR=sdmc:/switch/wwhd/states-eu
 | `peek ADDR [BYTES]` | MEM2 (0x10000000–0x4FFFFFFF) as hex words, 16 bytes/line, up to 4 KiB |
 | `poke ADDR WORD` | write one big-endian word to MEM2; logs old and new value |
 | `raw bench status\|save NAME\|load NAME\|clock [freeze [T]\|run]\|rec N` | the performance test's console side (portable states in `bench/`, the clock held, per-frame recording): use `tools/switch/perf_test.py` ([perf-test.md](perf-test.md)) |
+| `raw aniso [1\|2\|4\|8\|16]`, `raw shadowscale [0.5\|1\|2]`, `raw noao [0\|1]`, `raw miiverse [0\|1]` | live and not saved (the Picture tab's aniso level, shadow maps and ambient occlusion, which the menu saves; and the Dev tab's Miiverse switch): anisotropic filtering level, the shadow maps' scale, the ambient-occlusion pass skipped, the Miiverse thread (`0` parks it); with `perf_test.py toggle` |
+| `raw fsr [0\|1]` | live and not saved (the Picture tab's FSR 1 upscale and sharpening, which the menu saves); no argument reports the state; with `perf_test.py toggle` |
 | `wait`, `quit`, `reload`, `ping`, `help`, `raw CMD ...` | `raw logtext` prints the kept log text |
 
 Button names: `A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LS RS`. Presses go in where the controller is

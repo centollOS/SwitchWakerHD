@@ -1,6 +1,7 @@
 #pragma once
 #include "overlay/window_target.h"
 #include <cstdint>
+#include <cstddef>
 #include <string>
 #include <vector>
 #include <optional>
@@ -25,6 +26,8 @@ void compose_headless_diagnostic(Screen& screen);
 std::vector<ComposeQuad> screen_quads(Screen& screen,VkExtent2D target,int& filter);
 // the composition of a window into an offscreen image, read back as display-encoded RGBA8
 std::vector<uint8_t> compose_offscreen(Screen& screen,uint32_t width,uint32_t height,bool srgb);
+// Opt-in frame-dump diagnostic: raw RGBA32F scRGB for all three SDR curves.
+void dump_hdr_curves(Screen& screen,const std::string& path);
 // screenshot.h: the picture of `screen` at its own size (as the window composition draws it: FXAA,
 // display encoding; no overlay) into an 8-bit image of the window's swapchain format (its pipeline
 // exists already; RGBA8 like the present dumps without a swapchain; `bgra` says which), copied into
@@ -33,7 +36,7 @@ std::vector<uint8_t> compose_offscreen(Screen& screen,uint32_t width,uint32_t he
 bool record_screenshot(Screen& screen,Buffer& buffer,uint32_t& width,uint32_t& height,bool& bgra);
 // the gameplay mod HUDs (climb's stamina wheel, the run/swim boost's bar), drawn into the TV scan
 // image (as mods/mod_hud.mm does on Metal)
-void draw_mod_overlay(Surface& scan);
+void draw_mod_overlay(Surface& scan, VkExtent2D displayExtent);
 // capture.cpp: a colour surface read back as RGBA8 (encodeSrgb: linear values to display encoding)
 std::vector<uint8_t> read_surface_rgba(Surface& source,bool encodeSrgb);
 // Swapchain replacement calls reset only after the device is idle. Views and
@@ -47,8 +50,14 @@ bool draw_present_screen(Screen& screen, uint32_t imageIndex);
 struct PresentImageParams {
  int32_t aa=0,conv=0;
  float sharp=1,foot=1,alpha=1;
- float hdrWhite=0,hdrPeak=0,hdrExposure=0,hdrHighlights=0,pad[3]{};
+ float hdrWhite=0,hdrPeak=0,hdrExposure=0,hdrHighlights=0;
+ int32_t pq=0; // encode linear scRGB input as HDR10 PQ (the final HDR10 pass)
+ int32_t hdrSdrCurve=0;
+ float pad[1]{};
 };
+static_assert(sizeof(PresentImageParams)==48);
+static_assert(alignof(PresentImageParams)==4);
+static_assert(offsetof(PresentImageParams,hdrSdrCurve)==40);
 // Prepared on the renderer thread. Recording reads only these copied handles
 // and values; the caller retains all referenced objects through GPU completion.
 struct PresentImageDraw {

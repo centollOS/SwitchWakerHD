@@ -19,6 +19,10 @@ Needs (besides the native build of INSTALL.md): git, Pillow (pip install pillow)
 MSYS2 (open devkitPro > MSYS2, then: pacman -S gcc). Output: build\\forwarder\\wwhd_forwarder.nsp, and with
 --sd DIR a copy in DIR\\NSP\\. Install it with DBI or Goldleaf; it needs up-to-date Atmosphere sigpatches.
 Not verified offline with hactool, unlike build_forwarder.sh.
+--toolchain pinned|DIR: everything from the pinned toolchain instead (pinned_tools.py, docs/pinned-toolchain-plan.md):
+the sources downloaded and checked by their SHA-256, nx-hbloader with the pinned devkitA64, hacBrewPack with the
+pinned zig; no git, MSYS2, make or C compiler from this computer. "pinned": tools/toolchain/fetch.py's folder
+(WWHD_TOOLCHAIN_DIR, as make_sd.py), DIR: a pinned devkitpro folder.
 --icon: custom icon (TGA, PNG, JPG, or a game folder) (default: made from the extracted game in build\\ by make_icon.py:
 the title-screen logo, else meta/iconTex.tga)
 """
@@ -126,6 +130,8 @@ def main():
                     "in build\\)")
     ap.add_argument("--sd", help="also copy the NSP into DIR\\NSP\\ (the SD card folder make_sd.py made)")
     ap.add_argument("--version", help="the version shown on the HOME screen (default: from the folder name)")
+    ap.add_argument("--toolchain", help="pinned, or a pinned devkitpro folder: build with the pinned toolchain "
+                    "(nothing from this computer's devkitPro, git or C compiler)")
     args = ap.parse_args()
 
     keys = os.path.abspath(args.keys or os.path.join(os.path.expanduser("~"), ".switch", "prod.keys"))
@@ -137,21 +143,31 @@ def main():
     if os.path.normcase(os.path.realpath(keys)).startswith(os.path.normcase(os.path.realpath(ROOT)) + os.sep):
         fail("keep prod.keys outside this folder (%s): it is easy to zip or share it with the build by mistake" % ROOT)
     secrets = key_values(keys)
+    pinned = bool(args.toolchain)
 
     fdir = FDIR
     for f in ("make_nacp.py", "make_icon.py", "patch_hbl.py", "nx-hbloader-forwarder.patch"):
         if not os.path.isfile(os.path.join(fdir, f)):
             fail("missing %s next to this script" % os.path.join(fdir, f))
-    need = {"devkitA64": DKP + "/devkitA64/bin/aarch64-none-elf-gcc" + EXE, "libnx": DKP + "/libnx/lib/libnx.a",
+    if pinned:
+        sys.path[:0] = [FDIR, os.path.join(ROOT, "tools", "switch")]  # (python -I adds neither)
+        import build_switch
+        import pinned_tools
+        dkp = build_switch.pinned_toolchain(None if args.toolchain == "pinned" else args.toolchain)
+        zig = os.path.join(os.path.dirname(dkp), "zig", "zig" + EXE)
+        if not os.path.isfile(zig):
+            fail("no zig next to the pinned toolchain (%s): fetch it again (tools/toolchain/fetch.py)" % zig)
+        tool_env = build_switch.clean_env(dkp)
+    need = {} if pinned else {"devkitA64": DKP + "/devkitA64/bin/aarch64-none-elf-gcc" + EXE, "libnx": DKP + "/libnx/lib/libnx.a",
             "npdmtool (switch-tools)": DKP + "/tools/bin/npdmtool" + EXE}
-    if WINDOWS:
+    if WINDOWS and not pinned:  # (the pinned build runs no MSYS2: #122)
         need.update({"devkitPro MSYS2": DKP + "/msys2/usr/bin/bash.exe", "gcc in MSYS2 (pacman -S gcc)": DKP + "/msys2/usr/bin/gcc.exe"})
     missing = [n for n, p in need.items() if not os.path.exists(p)]
-    if not WINDOWS:
+    if not WINDOWS and not pinned:
         missing += [t + " (Apple's Command Line Tools: xcode-select --install)" for t in ("cc", "make") if not shutil.which(t)]
     if missing:
         fail("devkitPro is not set up at %s (missing: %s); see INSTALL.md" % (DKP, ", ".join(missing)))
-    if not shutil.which("git"):
+    if not pinned and not shutil.which("git"):
         fail("git is needed (https://git-scm.com/download/win): it fetches nx-hbloader and hacBrewPack")
     try:
         import PIL  # noqa: F401
@@ -170,9 +186,11 @@ def main():
     # without the hash when that is too long; a release zip has no git, so then the folder name's version
     version = args.version
     if not version:
-        p = subprocess.run(["git", "-C", ROOT, "describe", "--tags", "--always", "--dirty"],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        version = p.stdout.decode().strip().lstrip("v") if p.returncode == 0 else ""
+        version = ""
+        if shutil.which("git"):
+            p = subprocess.run(["git", "-C", ROOT, "describe", "--tags", "--always", "--dirty"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            version = p.stdout.decode().strip().lstrip("v") if p.returncode == 0 else ""
         if not version:
             m = re.search(r"(\d+(?:\.\d+)+)", os.path.basename(ROOT))
             version = m.group(1) if m else "1.0"
@@ -184,13 +202,33 @@ def main():
     src = os.path.join(out, "src")
     hbl, hbp = os.path.join(src, "nx-hbloader"), os.path.join(src, "hacBrewPack")
     print("[1/4] fetching nx-hbloader %s and hacBrewPack %s" % (HBLOADER[1][:7], HACBREWPACK[1][:7]), flush=True)
-    fetch(hbl, *HBLOADER)
-    fetch(hbp, *HACBREWPACK)
-    run(["git", "-C", hbl, "apply", "--ignore-whitespace", os.path.join(fdir, "nx-hbloader-forwarder.patch")])
+    if pinned:
+        try:
+            # always from a pristine tree: the patch below changes it
+            for d, (url, rev), tree in ((hbl, HBLOADER, ENV["HBLOADER_TREE_SHA256"]),
+                                        (hbp, HACBREWPACK, ENV["HACBREWPACK_TREE_SHA256"])):
+                if os.path.isdir(d):
+                    shutil.rmtree(d)
+                pinned_tools.fetch_source(d, url, rev, tree)
+            pinned_tools.apply_patch(hbl, os.path.join(fdir, "nx-hbloader-forwarder.patch"))
+        except pinned_tools.ToolError as e:
+            fail(str(e))
+    else:
+        fetch(hbl, *HBLOADER)
+        fetch(hbp, *HACBREWPACK)
+        run(["git", "-C", hbl, "apply", "--ignore-whitespace", os.path.join(fdir, "nx-hbloader-forwarder.patch")])
 
     print("\n[2/4] building the loader and the packer", flush=True)
     run([sys.executable, "-I", os.path.join(fdir, "patch_hbl.py"), os.path.join(hbl, "hbl.json"), TITLE_ID])
-    rc, text = msys('''export DEVKITA64=$DEVKITPRO/devkitA64
+    if pinned:
+        try:
+            pinned_tools.build_hbloader(hbl, dkp, tool_env)
+            pinned_tools.build_hacbrewpack(hbp, zig, tool_env)
+            rc, text = 0, ""
+        except pinned_tools.ToolError as e:
+            rc, text = 1, str(e)
+    else:
+        rc, text = msys('''export DEVKITA64=$DEVKITPRO/devkitA64
 export PATH="$DEVKITPRO/tools/bin:$DEVKITA64/bin:$PATH"
 cd "$(cygpath -u "$HBL")" && make -s RELEASE=1 >/dev/null
 cd "$(cygpath -u "$HBP")" && cp config.mk.template config.mk && (make -s >/dev/null 2>&1 || make)
@@ -220,7 +258,10 @@ cd "$(cygpath -u "$HBP")" && cp config.mk.template config.mk && (make -s >/dev/n
         shutil.copyfile(icon, os.path.join(pack, "control", "icon_%s.dat" % lang))
 
     print("\n[4/4] packing (your prod.keys is read by path only)", flush=True)
-    rc, text = msys('''cd "$(cygpath -u "$PACK")"
+    if pinned:
+        rc, text = pinned_tools.pack(hbp_exe, pack, keys, TITLE_ID, tool_env)
+    else:
+        rc, text = msys('''cd "$(cygpath -u "$PACK")"
 "$(cygpath -u "$HBPEXE")" -k "$(cygpath -u "$KEYS")" --titleid %s --nologo --exefsdir exefs --romfsdir romfs \\
     --controldir control --nspdir nsp --ncadir nca --tempdir temp --backupdir backup 2>&1
 ''' % TITLE_ID, {"PACK": pack, "HBPEXE": hbp_exe, "KEYS": keys}, capture=True)

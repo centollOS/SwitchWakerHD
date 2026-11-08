@@ -17,6 +17,15 @@ void set_requested_surround(bool enabled);      // save for next start
 float master_volume();
 bool master_volume_from_env();
 void set_master_volume(float gain, bool save = true);
+// GamePad-only effects in TV play. Live host preferences, never part of a save state.
+// WWHD_AUDIO_GAMEPAD_SOUNDS=0|1 and WWHD_AUDIO_GAMEPAD_VOLUME=0..1 override startup preferences;
+// live edits to overridden preferences are not saved (same rule as the master volume).
+bool gamepad_sounds();
+float gamepad_sounds_volume();
+bool gamepad_sounds_from_env();
+bool gamepad_sounds_volume_from_env();
+void set_gamepad_sounds(bool enabled);
+void set_gamepad_sounds_volume(float gain, bool save = true);
 bool surround_fallback();
 bool output_device_changed();
 void start_speaker_test();

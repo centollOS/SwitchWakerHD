@@ -1,3 +1,4 @@
+#include "background_shaders.h"
 #include "aspect.h"
 #include "aspect_panes.h"
 #include "renderer.h"
@@ -8,6 +9,10 @@ extern "C" uint64_t g_shader_state_gen;  // gx2_core.cpp: bumped by shader-relev
 // MSL the decompiler emits (as used by Cemu's Metal renderer).
 #include "Cafe/HW/Latte/Core/FetchShader.h"
 #include "gfx/area_sample.h"
+#include "gfx/sampler_lod_bias.h"
+#include "gfx/shader_linkage.h"
+#include "render_objects.h"
+#include "pipeline_groups.h"
 #include "gfx/shader_identity.h"
 #include "gfx/target_draw_history.h"
 #include "Cafe/HW/Latte/Core/LatteCachedFBO.h"
@@ -21,6 +26,10 @@ extern "C" uint64_t g_shader_state_gen;  // gx2_core.cpp: bumped by shader-relev
 #include "gx2/gx2_cmd.h"
 #include "write_watch.h"
 #include "metal.h"
+#include "metal_cache_file.h"
+#include "metal_recipe_keys.h"
+#include "gfx/artistic_mips.h"
+#include "cloud_proto.h"
 #include "runtime.h"
 #include "util/helpers/StringBuf.h"
 
@@ -34,6 +43,8 @@ extern "C" uint64_t g_shader_state_gen;  // gx2_core.cpp: bumped by shader-relev
 #include <zlib.h>
 
 LatteDecompilerShader* FinishDecompiledShader(LatteDecompilerOutput_t& decompilerOutput);
+Latte::E_GX2SURFFMT LatteTexture_ReconstructGX2Format(const Latte::LATTE_SQ_TEX_RESOURCE_WORD1_N& texUnitWord1,
+                                                      const Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N& texUnitWord4);
 LatteFetchShader* LatteShaderRecompiler_createFetchShader(LatteFetchShader::CacheHash fsHash, uint32* contextRegister,
                                                            uint32* fsProgramCode, uint32 fsProgramSize);
 
@@ -89,18 +100,9 @@ const char* capture_begin_frame() {
     return g_capture_dir.c_str();
 }
 
-// fast 64-bit hash over 8-byte words (tail handled bytewise)
+// fast 64-bit hash over 8-byte words (shared with the Vulkan setup preparation: metal_recipe_keys.h)
 static uint64_t hash_bytes(const void* data, size_t n, uint64_t h = 0x9E3779B97F4A7C15ull) {
-    const uint8_t* p = (const uint8_t*)data;
-    size_t i = 0;
-    for (; i + 8 <= n; i += 8) {
-        uint64_t v;
-        memcpy(&v, p + i, 8);
-        h = (h ^ v) * 0xFF51AFD7ED558CCDull;
-        h ^= h >> 32;
-    }
-    for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
-    return h ^ (h >> 29);
+    return gfx::mtlkey::hash_bytes(data, n, h);
 }
 
 // shader programs rarely change in place: cache their hash per address, revalidated once per frame
@@ -134,11 +136,14 @@ static std::mutex g_pool_mutex;
 static std::vector<id<MTLBuffer>> g_pool_free;
 static std::vector<id<MTLBuffer>> g_pool_used;
 static id<MTLBuffer> g_pool_cur = nil;
+// bumped whenever the current chunk changes: a recycled chunk can come back as the same object, so
+// "still the current chunk" is a generation, not a pointer comparison
+static uint64_t g_pool_gen = 0;
 static uint32_t g_pool_pos = 0;
 constexpr uint32_t kPoolChunk = 8 << 20;
 
-static Upload upload(const void* data, uint32_t size) {
-    size = (size + 255) & ~255u;
+// room for size bytes (a multiple of 256) in the current chunk, starting a new one when it is full
+static Upload reserve(uint32_t size) {
     if (!g_pool_cur || g_pool_pos + size > g_pool_cur.length) {
         std::lock_guard<std::mutex> lk(g_pool_mutex);
         if (g_pool_cur) g_pool_used.push_back(g_pool_cur);
@@ -151,23 +156,142 @@ static Upload upload(const void* data, uint32_t size) {
                 break;
             }
         if (!g_pool_cur) g_pool_cur = [R.device newBufferWithLength:want options:MTLResourceStorageModeShared];
+        ++g_pool_gen;
         g_pool_pos = 0;
     }
     Upload u{g_pool_cur, g_pool_pos};
-    memcpy((uint8_t*)g_pool_cur.contents + g_pool_pos, data, size);
-    rprof::add_upload(size);
     g_pool_pos += size;
     return u;
 }
 
+static Upload upload(const void* data, uint32_t size) {
+    size = (size + 255) & ~255u;
+    Upload u = reserve(size);
+    memcpy((uint8_t*)u.buf.contents + u.offset, data, size);
+    rprof::add_upload(size);
+    return u;
+}
+
+// Texture staging (WWHD_MTL_TEXTURE_STAGING): "pool" copies each level through the upload pool (recycled
+// when the command buffer completes) while the command buffer's texture staging stays within
+// WWHD_MTL_TEXTURE_STAGING_MB (default 16) and the level fits a pool chunk; anything else, and "buffer" (the
+// default), gets its own buffer (newBufferWithBytes). Idea after aurora's per-frame staging (MIT;
+// lib/gfx/texture.cpp); no code taken.
+static size_t g_texture_staging_bytes;  // in the recording command buffer (pool_retire resets it)
+uint64_t g_stat_staging_pool, g_stat_staging_pool_bytes, g_stat_staging_buffers, g_stat_staging_buffer_bytes;
+bool texture_staging(const void* data, size_t size, id<MTLBuffer>* buf, NSUInteger* offset) {
+    static const bool pool = [] {
+        const char* e = getenv("WWHD_MTL_TEXTURE_STAGING");
+        if (e && *e) LOG("[gfx] texture staging: %s (WWHD_MTL_TEXTURE_STAGING=%s)", strcmp(e, "pool") ? "own buffers" : "upload pool", e);
+        return e && !strcmp(e, "pool");
+    }();
+    static const size_t budget = [] {
+        const char* e = getenv("WWHD_MTL_TEXTURE_STAGING_MB");
+        return size_t(e && *e ? std::max(0, atoi(e)) : 16) << 20;
+    }();
+    if (!pool || !size || size > kPoolChunk || g_texture_staging_bytes + size > budget) {
+        ++g_stat_staging_buffers;
+        g_stat_staging_buffer_bytes += size;
+        return false;
+    }
+    Upload u = reserve(uint32_t((size + 255) & ~size_t(255)));
+    memcpy((uint8_t*)u.buf.contents + u.offset, data, size);
+    rprof::add_upload(rprof::kUpTexture, size);
+    g_texture_staging_bytes += size;
+    ++g_stat_staging_pool;
+    g_stat_staging_pool_bytes += size;
+    *buf = u.buf;
+    *offset = u.offset;
+    return true;
+}
+
+// Submitted uniform blocks (gx2/submitted_uniforms.h): uploaded once per submission and reused by
+// the draws of the call while the upload chunk they are in is still the current one (a retired
+// chunk is recycled when its command buffer completes)
+static Upload submitted_upload(uint32_t addr, uint32_t size, const uint8_t* bytes) {
+    struct Item { uint32_t size; Upload u; };
+    static std::unordered_map<uint32_t, Item> items;
+    static uint64_t itemsFor = 0;
+    static uint64_t itemsChunk = ~0ull;  // g_pool_gen of the chunk the items are in
+    if (itemsFor != gx2::submitted_uniforms_id() || itemsChunk != g_pool_gen) {
+        items.clear();
+        itemsFor = gx2::submitted_uniforms_id();
+    }
+    auto it = items.find(addr);
+    if (it != items.end() && it->second.size == size) return it->second.u;
+    Upload u = upload(bytes, size);
+    if (itemsChunk != g_pool_gen) {  // the upload began a new chunk: the earlier items are in a retired one
+        items.clear();
+        itemsChunk = g_pool_gen;
+    }
+    items[addr] = {size, u};
+    return u;
+}
+
+// Vertex buffers and uniform blocks the CPU rewrites. Metal binds them straight from guest memory,
+// and the GPU reads them when it runs, after the render thread recorded the draw; by then the game may
+// already have written the next frame's data into a dynamic buffer, so what a draw showed depended on
+// GPU timing (pictures differed from run to run). A range is bound from guest memory while the CPU
+// never writes it after its first use (static meshes: no copy); once a write to it is seen
+// (write_watch.h), it is copied at record time like Vulkan does, and that copy is reused by later
+// draws while the range is unchanged and its upload chunk is current. Without write tracking: as
+// before. (Uniform blocks of display lists use their submitted bytes, gx2/submitted_uniforms.h.)
+// WWHD_METAL_VB_COPY=0 / WWHD_METAL_UBO_COPY=0 bind those from guest memory again (comparisons).
+enum GuestRangeKind { kRangeVertex, kRangeUniform, kRangeKinds };
+struct GuestRange {
+    uint64_t stamp = 0;          // write stamp when armed (static) or when copied (dynamic)
+    uint64_t checkedFrame = ~0ull, seq = 0;
+    bool dynamic = false;
+    Upload copy{nil, 0};
+    uint64_t copyGen = ~0ull;    // g_pool_gen of the chunk holding the copy
+};
+static std::unordered_map<uint64_t, GuestRange> g_guest_ranges[kRangeKinds];
+static uint64_t g_range_copy_bytes[kRangeKinds], g_range_copies[kRangeKinds];
+static bool rewritten_copy(GuestRangeKind kind, uint32_t addr, uint32_t size, Upload& out) {
+    static const bool off[kRangeKinds] = {
+        getenv("WWHD_METAL_VB_COPY") && !atoi(getenv("WWHD_METAL_VB_COPY")),
+        getenv("WWHD_METAL_UBO_COPY") && !atoi(getenv("WWHD_METAL_UBO_COPY"))};
+    if (off[kind] || !wwatch::active() || !size) return false;
+    GuestRange& r = g_guest_ranges[kind][(uint64_t)addr << 32 | size];
+    if (!r.dynamic) {
+        if (r.checkedFrame == ~0ull) { r.stamp = wwatch::arm(addr, size); r.checkedFrame = R.frame; return false; }
+        if (r.checkedFrame == R.frame) return false;  // checked this frame
+        r.checkedFrame = R.frame;
+        if (!wwatch::written_since(addr, size, r.stamp)) return false;
+        r.dynamic = true;
+        r.copy = Upload{nil, 0};
+    }
+    const uint64_t seq = wwatch::write_seq();
+    if (r.copy.buf && r.copyGen == g_pool_gen && (r.seq == seq || !wwatch::written_since(addr, size, r.stamp))) {
+        r.seq = seq;
+        out = r.copy;
+        return true;
+    }
+    r.stamp = wwatch::arm(addr, size);  // arm before reading (write_watch.h)
+    r.seq = wwatch::write_seq();
+    out = r.copy = upload(mem::ptr(addr), size);
+    r.copyGen = g_pool_gen;
+    g_range_copy_bytes[kind] += size;
+    ++g_range_copies[kind];
+    return true;
+}
+
 // called before a command buffer commits: buffers used so far are recycled when it completes
 void pool_retire(id<MTLCommandBuffer> cmd) {
+    g_texture_staging_bytes = 0;
+    // the GPU timeline of the performance report (render_prof.h add_gpu_span): this command buffer's GPU interval
+    if (rprof::enabled())
+        [cmd addCompletedHandler:^(id<MTLCommandBuffer> done) {
+            if (done.GPUEndTime > done.GPUStartTime && done.GPUStartTime > 0)
+                rprof::add_gpu_span(done.GPUStartTime * 1e9, done.GPUEndTime * 1e9);
+        }];
     std::vector<id<MTLBuffer>> used;
     {
         std::lock_guard<std::mutex> lk(g_pool_mutex);
         if (g_pool_cur) {
             g_pool_used.push_back(g_pool_cur);
             g_pool_cur = nil;
+            ++g_pool_gen;
         }
         used.swap(g_pool_used);
     }
@@ -194,9 +318,7 @@ static LatteFetchShader* get_fetch_shader(const uint32_t* regs, uint64_t* keyOut
             uint32_t(q[2]) << 16 | uint32_t(q[3]) << 24; };
         const uint32_t count = word(p + 16);
         if (count > 64) return nullptr;
-        uint64_t h = uint64_t(word(p + 24)) | uint64_t(word(p + 28)) << 32;
-        for (uint32_t b = 0; b < 16; ++b)
-            h = (h ^ ((regs[mmSQ_VTX_ATTRIBUTE_BLOCK_START + b * 7 + 2] >> 11) & 0xFFFF)) * 1099511628211ull;
+        const uint64_t h = gfx::mtlkey::mix_strides(regs, uint64_t(word(p + 24)) | uint64_t(word(p + 28)) << 32);
         *keyOut = h;
         if (auto it = g_fetch.find(h); it != g_fetch.end()) return it->second;
         auto* fs = gx2::decode_fetch_attributes(prog, 32 + count * 52, nullptr);
@@ -210,9 +332,8 @@ static LatteFetchShader* get_fetch_shader(const uint32_t* regs, uint64_t* keyOut
     bool ours = ld32(prog) == 0x57574653;
     uint32_t size = ours ? 16 + ld32(prog + 4) * 16 : regs[mmSQ_PGM_START_FS + 1] << 3;
     if (size > 0x1000) return nullptr;
-    uint64_t h = hash_bytes(mem::ptr(prog), size);
     // strides decide between vertex-descriptor fetch and manual fetch in the shader
-    for (uint32_t b = 0; b < 16; b++) h = (h ^ ((regs[mmSQ_VTX_ATTRIBUTE_BLOCK_START + b * 7 + 2] >> 11) & 0xFFFF)) * 1099511628211ull;
+    const uint64_t h = gfx::mtlkey::mix_strides(regs, hash_bytes(mem::ptr(prog), size));
     *keyOut = h;
     auto it = g_fetch.find(h);
     if (it != g_fetch.end()) return it->second;
@@ -251,6 +372,7 @@ static void compile_done(std::atomic<int>& st, int v) {
 struct Shader {
     uint64_t key = 0;
     gfx::ProgramKind kind = gfx::ProgramKind::Other;
+    uint32_t gatherUnits = 0;                 // pixel: the units it gathers from (area_sample::gathered_units)
     LatteDecompilerShader* dec = nullptr;
     id<MTLFunction> fn = nil;                 // valid once state == CS_READY
     std::atomic<int> state{CS_PENDING};
@@ -415,48 +537,11 @@ static uint64_t stage_state_hash(const uint32_t* regs, uint64_t h, uint32_t texB
     // most lookups gather the same words as the previous one for this stage (the state generation
     // also moves for registers that don't end up here): gather into the spare buffer and compare
     // instead of rehashing. Render thread only.
-    struct Last { uint64_t in = 0, out = 0; uint32_t n = 0, cur = 0; uint32_t buf[2][400]; };
+    struct Last { uint64_t in = 0, out = 0; uint32_t n = 0, cur = 0; uint32_t buf[2][gfx::mtlkey::kStageWords]; };
     static Last last[2];
     Last& L = last[texBase == REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS ? 0 : 1];
     uint32_t* buf = L.buf[L.cur ^ 1];
-    uint32_t n = 0;
-    auto put = [&](uint32_t first, uint32_t count) { memcpy(&buf[n], &regs[first], count * 4); n += count; };
-    put(mmSQ_VTX_SEMANTIC_0, 32);
-    put(mmSPI_VS_OUT_ID_0, 10);
-    put(mmSPI_VS_OUT_CONFIG, 1);
-    put(mmPA_CL_VS_OUT_CNTL, 1);
-    put(mmSPI_PS_IN_CONTROL_0, 2);
-    put(mmSPI_PS_INPUT_CNTL_0, 32);
-    put(REGADDR::SQ_CONFIG, 1);
-    put(mmCB_SHADER_MASK, 1);
-    put(mmCB_SHADER_CONTROL, 1);
-    put(mmDB_SHADER_CONTROL, 1);
-    put(mmSPI_INPUT_Z, 1);
-    put(REGADDR::SX_ALPHA_TEST_CONTROL, 1);
-    put(REGADDR::PA_CL_VTE_CNTL, 1);
-    put(REGADDR::PA_CL_CLIP_CNTL, 1);
-    put(REGADDR::CB_COLOR_CONTROL, 1);
-    put(REGADDR::CB_TARGET_MASK, 1);
-    put(mmCB_COLOR0_INFO, 8);
-    uint32_t cbBase[8];
-    for (int i = 0; i < 8; i++) {
-        cbBase[i] = regs[mmCB_COLOR0_BASE + i] & ~0xFFu;
-        buf[n++] = cbBase[i] != 0;
-    }
-    buf[n++] = regs[REGADDR::DB_DEPTH_CONTROL] & 0x83;
-    // texture types and formats; sampling a bound render target switches to framebuffer fetch
-    for (int t = 0; t < 18; t++) {
-        const uint32_t* w = &regs[texBase + t * 7];
-        buf[n++] = (w[0] & 7) | (w[4] & 0x300);
-        buf[n++] = w[1] & 0x3F00000;
-        uint32_t fb = 0, base = w[2] << 8;
-        if (base)
-            for (int i = 0; i < 8; i++)
-                if (base == cbBase[i]) fb = 1 + i;
-        buf[n++] = fb;
-    }
-    // depth-compare samplers
-    for (int i = 0; i < 18 * 3; i++) buf[n++] = regs[REGADDR::SQ_TEX_SAMPLER_WORD0_0 + i * 3] & 0xF8000000;
+    const uint32_t n = gfx::mtlkey::stage_words(regs, texBase, buf);  // (metal_recipe_keys.h)
     if (L.n == n && L.in == h && !memcmp(L.buf[L.cur], buf, n * 4)) return L.out;
     L.cur ^= 1;
     L.in = h;
@@ -467,13 +552,15 @@ static uint64_t stage_state_hash(const uint32_t* regs, uint64_t h, uint32_t texB
 static Shader* get_shader_uncached(const uint32_t* regs, bool vertex, LatteFetchShader* fs, uint64_t fsKey);
 
 static Shader* get_shader(const uint32_t* regs, bool vertex, LatteFetchShader* fs, uint64_t fsKey) {
-    // nothing shader-relevant changed since the previous draw: same shader
-    struct Last { uint64_t gen = 0, frame = ~0ull, fsKey = 0; Shader* s = nullptr; };
+    // nothing shader-relevant changed since the previous draw: same shader. The draw sets the
+    // primitive type without a register write (no generation bump); vertex keys read it (points, rects)
+    struct Last { uint64_t gen = 0, frame = ~0ull, fsKey = 0; uint32_t prim = 0; Shader* s = nullptr; };
     static Last last[2];
     Last& L = last[vertex ? 0 : 1];
-    if (L.gen == g_shader_state_gen && L.frame == R.frame && (!vertex || L.fsKey == fsKey)) return L.s;
+    const uint32_t prim = vertex ? regs[REGADDR::VGT_PRIMITIVE_TYPE] & 0x3F : 0;
+    if (L.gen == g_shader_state_gen && L.frame == R.frame && (!vertex || (L.fsKey == fsKey && L.prim == prim))) return L.s;
     Shader* s = get_shader_uncached(regs, vertex, fs, fsKey);
-    L = Last{g_shader_state_gen, R.frame, fsKey, s};
+    L = Last{g_shader_state_gen, R.frame, fsKey, prim, s};
     return s;
 }
 
@@ -496,26 +583,140 @@ static void retry_failed_compile(Shader* s, bool now = false) {
     compile_msl(s, s->dec->strBuf_shaderSource->c_str(), s->key);
 }
 
-static Shader* get_shader_uncached(const uint32_t* regs, bool vertex, LatteFetchShader* fs, uint64_t fsKey) {
-    uint32_t addr = regs[vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS] << 8;
-    uint32_t size = regs[(vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS) + 1] << 3;
-    if (!addr || !size) return nullptr;
-    uint64_t key = program_hash(addr, size) ^ (vertex ? 0x1111 : 0x2222);
-    uint64_t base = key;
-    key = stage_state_hash(regs, key, vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS);
-    if (vertex) key ^= fsKey * 31;
-    auto it = g_shaders.find(key);
-    if (it != g_shaders.end()) return it->second;
+// ---------------------------------------------------------------- shader keys
+// Two levels, as the Vulkan renderer's (gfx/vulkan/shaders.cpp; docs/vulkan.md, "Shader keys"), plus
+// what the MSL translation reads beyond the GLSL one:
+// - linkage: the program, the fetch shader (its key has the vertex strides, which choose between
+//   vertex-descriptor and manual fetch) and gfx::gather_shader_linkage; for vertex shaders also the
+//   whole PS input table (VertexOut declares every PS input, written or not), whether rasterization
+//   is enabled (LatteContextRegister::IsRasterizationEnabled) and rect emulation; for pixel shaders
+//   whether the depth buffer is active (the analyzer drops a depth export without it).
+// - variant: per used texture unit its dimension and integer format; for vertex shaders, per export
+//   its semantic id and the PS input it lands in, and streamout strides when it writes streamout; for
+//   pixel shaders, per colour output its target's data type (float4/int4/uint4 outputs) and, per used
+//   unit, the colour target it reads through framebuffer fetch (found as the analyzer finds it) with
+//   that target's data type. Units, exports and colour outputs come from the program's first
+//   translation.
+// Render-target formats of targets the shader doesn't write or read, samplers and units it doesn't
+// sample are not in the key. Shader::key stays the wide key (stage_state_hash) of the state the shader
+// was translated with: recipe files (the user cache, the head start and its template) name shaders by
+// it, and replaying a record maps the wide key it names to the shared shader.
+// WWHD_MTL_SHADER_KEY_VERIFY=1 translates again once per new wide key the narrow key gives an existing
+// shader, and compares the MSL and the binding metadata ("[gfx shader key] VIOLATION").
+struct ProgramUse {
+    bool known = false;
+    uint8_t unitCount = 0;
+    std::array<uint8_t, LATTE_NUM_MAX_TEX_UNITS> units{};
+    uint32_t exports = 0;
+    bool streamout = false;
+    const LatteDecompilerShader* dec = nullptr;  // the first translation: its colour outputs
+    Shader* failed = nullptr;
+};
+namespace { extern bool g_cache_replaying; }  // persistent shader cache (below)
+static std::unordered_map<uint64_t, ProgramUse> g_program_uses;  // linkage key -> use
+static std::unordered_map<uint64_t, Shader*> g_variants;         // narrow key -> shader
+static size_t g_translations = 0;
+static uint64_t g_key_checks = 0, g_key_violations = 0;
+static std::unordered_set<uint64_t> g_verified_wide;
 
-    auto* s = new Shader();
-    s->kind = gfx::program_kind(mem::ptr(addr), size, vertex);
-    s->key = key;
-    g_shaders[key] = s;
-    double t0 = now_ms();
+static bool key_verify() {
+    static const bool on = [] { const char* e = getenv("WWHD_MTL_SHADER_KEY_VERIFY"); return e && *e && strcmp(e, "0"); }();
+    return on;
+}
+
+static uint64_t wide_key(const uint32_t* regs, bool vertex, uint64_t base, uint64_t fsKey) {
+    uint64_t key = stage_state_hash(regs, base, vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS);
+    return vertex ? key ^ fsKey * 31 : key;
+}
+
+static uint64_t linkage_key(const uint32_t* regs, bool vertex, const LatteFetchShader* fs, uint64_t seed) {
+    std::array<uint32_t, gfx::kShaderLinkageWords + 1 + GPU7_PS_MAX_INPUTS + 1> words;
+    size_t n = gfx::gather_shader_linkage(regs, vertex, fs, false, words.data());
+    const auto& lcr = *(const LatteContextRegister*)regs;
+    if (vertex) {
+        n += gfx::gather_ps_input_table(regs, words.data() + n);
+        words[n++] = (lcr.IsRasterizationEnabled() ? 1u : 0u) | (UseRectEmulation(lcr) ? 2u : 0u);
+    } else {
+        words[n++] = LatteMRT::GetActiveDepthBufferMask(lcr) ? 1u : 0u;
+    }
+    return hash_bytes(words.data(), n * 4, seed);
+}
+
+// the colour target a pixel shader's texture unit reads through framebuffer fetch, 255 for none
+// (LatteDecompilerAnalyzer.cpp, "check if textures are used as render targets")
+static uint32_t fetched_target(const LatteContextRegister& lcr, const uint32_t* regs, uint8_t colorMask, uint32_t unit) {
+    const auto& tex = lcr.SQ_TEX_START_PS[unit];
+    const uint32_t physAddr = tex.word2.get_BASE_ADDRESS() << 8;
+    if (!physAddr || tex.word0.get_DIM() != Latte::E_DIM::DIM_2D || tex.word5.get_LAST_LEVEL() != 0) return 255;
+    const auto format = LatteTexture_ReconstructGX2Format(tex.word1, tex.word4);
+    const uint32_t tileMode = (uint32_t)tex.word0.get_TILE_MODE();
+    for (uint32_t i = 0; i < 8; i++) {
+        if (!(colorMask & (1u << i))) continue;
+        if ((regs[mmCB_COLOR0_BASE + i] & 0xFFFFFF00) == physAddr && LatteMRT::GetColorBufferFormat(i, lcr) == format &&
+            ((regs[mmCB_COLOR0_INFO + i] >> 8) & 0xF) == tileMode)
+            return i;
+    }
+    return 255;
+}
+
+static uint64_t variant_key(const uint32_t* regs, bool vertex, const ProgramUse& use, uint64_t linkage) {
+    std::array<uint32_t, 2 * LATTE_NUM_MAX_TEX_UNITS + 32 + 4 + 1> words;
+    size_t n = 0;
+    const uint32_t base = vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
+    for (uint32_t i = 0; i < use.unitCount; ++i) {
+        const uint32_t* w = regs + base + use.units[i] * 7;
+        // dimension (sampler type) and NUM_FORMAT_ALL == INT (integer sampler); analyzer.cpp
+        words[n++] = (w[0] & 7) | (((w[4] >> 8) & 3) == 1 ? 8u : 0u);
+    }
+    if (vertex) {
+        // per exported parameter its semantic id and the PS input it lands in (location, flat,
+        // noperspective), as _emitVSOutputs resolves it against the PS input table
+        if (use.exports) {
+            const uint32_t control0 = regs[mmSPI_PS_IN_CONTROL_0];
+            const uint32_t inputs = std::min<uint32_t>(control0 & 0x3F, GPU7_PS_MAX_INPUTS);
+            const uint32_t position = (control0 >> 8) & 1 ? (control0 >> 10) & 0x1F : 0xFFFFFFFFu;
+            for (uint32_t i = 0; i < 32; ++i) {
+                if (!(use.exports & (1u << i))) continue;
+                const uint32_t semantic = (regs[mmSPI_VS_OUT_ID_0 + i / 4] >> (8 * (i % 4))) & 0xFF;
+                uint32_t word = 0x7F000000u | semantic;  // no PS input (the export still names its semantic)
+                for (uint32_t f = 0; f < inputs; ++f) {
+                    if (f == position) continue;
+                    const uint32_t control = regs[mmSPI_PS_INPUT_CNTL_0 + f];
+                    if ((control & 0xFF) != semantic) continue;
+                    word = 0x80000000u | semantic | (f << 8) | (control & (1u << 10) ? 1u << 16 : 0) |
+                           (control & (1u << 12) ? 1u << 17 : 0);
+                    break;
+                }
+                words[n++] = word;
+            }
+        }
+        if (use.streamout)
+            for (uint32_t buffer = 0; buffer < 4; ++buffer) words[n++] = regs[mmVGT_STRMOUT_VTX_STRIDE_0 + buffer * 4];
+    } else {
+        const auto& lcr = *(const LatteContextRegister*)regs;
+        uint32_t types = 0;
+        for (uint32_t i = 0; i < 8; i++)
+            if (use.dec->pixelColorOutputMask & (1u << i)) types |= (uint32_t)GetColorBufferDataType(i, lcr) << (2 * i);
+        words[n++] = types;
+        if (use.unitCount) {
+            const uint8_t mask = LatteMRT::GetActiveColorBufferMask(use.dec, lcr);
+            for (uint32_t i = 0; i < use.unitCount; ++i) {
+                const uint32_t target = fetched_target(lcr, regs, mask, use.units[i]);
+                words[n++] = target == 255 ? 255 : target | (uint32_t)GetColorBufferDataType(target, lcr) << 8;
+            }
+        }
+    }
+    return hash_bytes(words.data(), n * 4, linkage ^ 0xC2B2AE3D27D4EB4Full);
+}
+
+// GX2 program -> MSL (with the upscaling fix); nullptr if the translation failed
+static LatteDecompilerShader* translate_msl(const uint32_t* regs, bool vertex, LatteFetchShader* fs, uint32_t addr, uint32_t size,
+                                            uint64_t base) {
     LatteShader_UpdatePSInputs((uint32*)regs);
     LatteDecompilerOptions opt;
     const auto fixes = vertex ? gfx::area_sample::Program{} : gfx::area_sample::pixel_program(mem::ptr(addr), size);
     opt.areaSampledTextures = fixes.units;
+    opt.emulateSamplerLodBias = true;  // Metal samplers have no LOD bias (gfx/sampler_lod_bias.h)
     // the GPU's MUL/MULADD give 0*anything=0 (rsqrt(0)*0 is NaN otherwise: black letter in the Rito
     // mail sorting game); Cemu's default too. WWHD_STRICT_MUL=0 turns it off for comparisons
     static const bool strictMul = !getenv("WWHD_STRICT_MUL") || strcmp(getenv("WWHD_STRICT_MUL"), "0");
@@ -525,24 +726,116 @@ static Shader* get_shader_uncached(const uint32_t* regs, bool vertex, LatteFetch
         LatteDecompiler_DecompileVertexShader(base, (uint32*)regs, mem::ptr(addr), size, fs, opt, &out);
     else
         LatteDecompiler_DecompilePixelShader(base, (uint32*)regs, mem::ptr(addr), size, opt, &out);
-    if (!out.shader || out.shader->hasError || !out.shader->strBuf_shaderSource) {
-        LOG("[gfx] %s shader %08X failed to translate", vertex ? "vertex" : "pixel", addr);
-        s->state = CS_FAILED;
-        return s;
-    }
-    s->dec = FinishDecompiledShader(out);
+    if (!out.shader || out.shader->hasError || !out.shader->strBuf_shaderSource) return nullptr;
+    LatteDecompilerShader* dec = FinishDecompiledShader(out);
     if (opt.areaSampledTextures) {
-        std::string src = s->dec->strBuf_shaderSource->c_str();
+        std::string src = dec->strBuf_shaderSource->c_str();
         if (gfx::area_sample::rewrite(src, fixes, true) > 0) {
-            s->dec->strBuf_shaderSource->reset();
-            s->dec->strBuf_shaderSource->add(std::string_view(src));
+            dec->strBuf_shaderSource->reset();
+            dec->strBuf_shaderSource->add(std::string_view(src));
         } else {
             LOG("[gfx] pixel shader %08X: upscaling fix not applied", addr);
         }
     }
+    return dec;
+}
+
+// verify mode: the shared shader against a translation under the current registers
+static void verify_key(const uint32_t* regs, bool vertex, LatteFetchShader* fs, uint32_t addr, uint32_t size, uint64_t base,
+                       uint64_t wide, const Shader* shared) {
+    if (!shared->dec || !g_verified_wide.insert(wide).second) return;
+    g_key_checks++;
+    LatteDecompilerShader* ref = translate_msl(regs, vertex, fs, addr, size, base);
+    const LatteDecompilerShader* a = shared->dec;
+    const char* why = nullptr;
+    if (!ref) why = "translation failed now";
+    else if (strcmp(ref->strBuf_shaderSource->c_str(), a->strBuf_shaderSource->c_str())) why = "MSL differs";
+    else if (memcmp(&ref->resourceMapping, &a->resourceMapping, sizeof a->resourceMapping)) why = "resource mapping differs";
+    else if (memcmp(ref->textureRenderTargetIndex, a->textureRenderTargetIndex, sizeof a->textureRenderTargetIndex) ||
+             memcmp(ref->textureUnitDim, a->textureUnitDim, sizeof a->textureUnitDim) ||
+             memcmp(ref->textureIsIntegerFormat, a->textureIsIntegerFormat, sizeof a->textureIsIntegerFormat) ||
+             memcmp(ref->textureUsesDepthCompare, a->textureUsesDepthCompare, sizeof a->textureUsesDepthCompare) ||
+             memcmp(ref->textureUnitSamplerAssignment, a->textureUnitSamplerAssignment, sizeof a->textureUnitSamplerAssignment) ||
+             ref->textureUnitListCount != a->textureUnitListCount ||
+             memcmp(ref->textureUnitList, a->textureUnitList, sizeof a->textureUnitList))
+        why = "texture metadata differs";
+    else if (ref->pixelColorOutputMask != a->pixelColorOutputMask || ref->depthMask != a->depthMask ||
+             ref->outputParameterMask != a->outputParameterMask)
+        why = "output metadata differs";
+    else {
+        const auto &u = ref->uniform, &v = a->uniform;
+        if (u.loc_remapped != v.loc_remapped || u.loc_uniformRegister != v.loc_uniformRegister ||
+            u.count_uniformRegister != v.count_uniformRegister || u.loc_windowSpaceToClipSpaceTransform != v.loc_windowSpaceToClipSpaceTransform ||
+            u.loc_alphaTestRef != v.loc_alphaTestRef || u.loc_pointSize != v.loc_pointSize || u.loc_fragCoordScale != v.loc_fragCoordScale ||
+            memcmp(u.loc_framebufferFetchSize, v.loc_framebufferFetchSize, sizeof u.loc_framebufferFetchSize) ||
+            u.uniformRangeSize != v.uniformRangeSize || u.list_ufTexRescale.size() != v.list_ufTexRescale.size() ||
+            ref->list_remappedUniformEntries_register.size() != a->list_remappedUniformEntries_register.size() ||
+            ref->list_remappedUniformEntries_bufferGroups.size() != a->list_remappedUniformEntries_bufferGroups.size())
+            why = "uniform layout differs";
+    }
+    if (why) {
+        g_key_violations++;
+        LOG("[gfx shader key] VIOLATION %s %08X wide %016llx (shared from %016llx): %s", vertex ? "vs" : "ps", addr,
+            (unsigned long long)wide, (unsigned long long)shared->key, why);
+    }
+    if (ref) {
+        delete ref->strBuf_shaderSource;
+        delete ref;
+    }
+}
+
+static Shader* get_shader_uncached(const uint32_t* regs, bool vertex, LatteFetchShader* fs, uint64_t fsKey) {
+    uint32_t addr = regs[vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS] << 8;
+    uint32_t size = regs[(vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS) + 1] << 3;
+    if (!addr || !size) return nullptr;
+    const uint64_t base = program_hash(addr, size) ^ (vertex ? 0x1111 : 0x2222);
+    // the old, wide keys (WWHD_MTL_WIDE_SHADER_KEYS=1): one translation per wide key, for comparisons
+    static const bool wideKeys = getenv("WWHD_MTL_WIDE_SHADER_KEYS") && strcmp(getenv("WWHD_MTL_WIDE_SHADER_KEYS"), "0");
+    const uint64_t linkage = wideKeys ? wide_key(regs, vertex, base, fsKey)
+                                      : linkage_key(regs, vertex, fs, base ^ (vertex ? fsKey * 31 : 0));
+    ProgramUse& use = g_program_uses[linkage];
+    // replayed records name shaders by their wide key: map it to the shader this state shares
+    auto alias = [&](Shader* s) {
+        if (!g_cache_replaying && !key_verify()) return s;
+        const uint64_t wide = wide_key(regs, vertex, base, fsKey);
+        if (g_shaders.emplace(wide, s).second && key_verify() && s->key != wide) verify_key(regs, vertex, fs, addr, size, base, wide, s);
+        return s;
+    };
+    if (use.failed) return alias(use.failed);
+    if (use.known) {
+        auto it = g_variants.find(wideKeys ? linkage : variant_key(regs, vertex, use, linkage));
+        if (it != g_variants.end()) return alias(it->second);
+    }
+
+    auto* s = new Shader();
+    s->kind = gfx::program_kind(mem::ptr(addr), size, vertex);
+    s->key = wide_key(regs, vertex, base, fsKey);
+    g_shaders.emplace(s->key, s);
+    g_translations++;
+    render_objects::set_shaders(g_translations);  // crash logs, performance report
+    double t0 = now_ms();
+    s->dec = translate_msl(regs, vertex, fs, addr, size, base);
+    if (!s->dec) {
+        LOG("[gfx] %s shader %08X failed to translate", vertex ? "vertex" : "pixel", addr);
+        s->state = CS_FAILED;
+        use.failed = s;  // per linkage: the variant words need the program's analysis
+        return s;
+    }
+    if (!vertex) s->gatherUnits = gfx::area_sample::gathered_units(s->dec->strBuf_shaderSource->c_str(), true);
+    if (!use.known) {
+        const auto& dec = *s->dec;
+        use.unitCount = (uint8_t)std::clamp((int)dec.textureUnitListCount, 0, (int)LATTE_NUM_MAX_TEX_UNITS);
+        for (uint32_t i = 0; i < use.unitCount; ++i) use.units[i] = std::min<uint8_t>(dec.textureUnitList[i], LATTE_NUM_MAX_TEX_UNITS - 1);
+        use.exports = vertex ? dec.outputParameterMask : 0;
+        use.streamout = vertex && dec.hasStreamoutBufferWrite;
+        use.dec = s->dec;
+        use.known = true;
+    }
+    g_variants.emplace(wideKeys ? linkage : variant_key(regs, vertex, use, linkage), s);
     cache_record_shader(regs, vertex);
     double t1 = now_ms();
     g_t_decompile += t1 - t0;
+    const uint64_t key = s->key;
     if (getenv("WWHD_DUMP_SHADERS")) {
         mkdir("shaders", 0755);
         char name[96];
@@ -630,29 +923,39 @@ static std::atomic<int> g_ao_mode{[] {
 int ao_mode() { return g_ao_mode.load(std::memory_order_relaxed); }
 void set_ao_mode(int m) { g_ao_mode = m % 3; LOG("[gfx] ambient occlusion mode %d", m % 3); }
 
-// Draws whose shaders or pipeline are still compiling used to be skipped, which makes objects blink
-// for a few frames after entering a new area. Instead wait for the compile, up to a per-frame budget
-// (WWHD_COMPILE_WAIT_MS, default 25; the game's frame is 33 ms and the GPU needs ~4 ms of it).
+// Settings > Graphics > Shader compile (background_shaders.h).
+// Off (default): draws whose shaders or pipeline are still compiling used to be skipped, which makes
+// objects blink for a few frames after entering a new area. Instead wait for the compile, up to a
+// per-frame budget (WWHD_COMPILE_WAIT_MS, default 25; the game's frame is 33 ms and the GPU needs ~4 ms
+// of it; a large value makes every draw wait). Skipping is only harmless for targets the game redraws
+// every frame. A draw into a target that is new or wasn't drawn in the previous frame may be the only
+// one its result gets (a buffer rendered once, at a load or after a photo, or a pass's first frame),
+// and a skipped one would leave that result missing for as long as the game keeps using it (issue #47:
+// the light buffer sampled before its first render, black shadows for the session; the Picto Box
+// colour-grading volume). Those draws wait for their compile without the budget.
+// Fast: the shared classification and budget (bgshaders::classify, WWHD_BG_SHADER_WAIT_MS), as on
+// Vulkan; draws it keeps exact wait without a budget.
 // Pipelines built ahead of use (cache replay, head start) never wait.
-// Skipping is only harmless for targets the game redraws every frame. A draw into a target that is
-// new or wasn't drawn in the previous frame may be the only one its result gets (a buffer rendered
-// once, at a load or after a photo, or a pass's first frame), and a skipped one would leave that
-// result missing for as long as the game keeps using it (issue #47: the light buffer sampled before
-// its first render, black shadows for the session; the Picto Box colour-grading volume). Those draws
-// wait for their compile without the budget, like the Vulkan renderer does for every draw.
 static bool g_building_ahead = false;
-static bool g_draw_must_run = false;  // the current draw writes a target that isn't redrawn every frame
-static std::unordered_map<uint32_t, gfx::TargetDrawHistory> g_target_drawn;
+static bool g_draw_must_run = false;  // the current draw waits for its compile without a budget
+static std::unordered_map<uint32_t, gfx::TargetDrawHistory> g_target_drawn;  // Off: redrawn every frame?
+static bgshaders::Verdict g_draw_verdict = bgshaders::kOff;  // ... and why (counted once a draw)
+static bool g_draw_counted = false;
 static uint64_t g_must_run_waits = 0;
 static double g_must_run_wait_ms = 0;
+// every wait for a compile (budgeted and must-run) and the budgeted ones that ran out (the draw is skipped)
+static uint64_t g_compile_waits = 0, g_compile_wait_timeouts = 0;
+static double g_compile_wait_ms = 0;
 static bool wait_compiled(const std::atomic<int>& st) {
     static const double budgetMs = getenv("WWHD_COMPILE_WAIT_MS") ? atof(getenv("WWHD_COMPILE_WAIT_MS")) : 25.0;
     if (g_building_ahead) return st.load(std::memory_order_acquire) == CS_READY;
     static uint64_t frame = ~0ull;
-    static double spent = 0;
+    static double spent = 0;  // Off: the frame's waits
     if (frame != R.frame) { frame = R.frame; spent = 0; }
     if (st.load(std::memory_order_acquire) != CS_PENDING) return st.load(std::memory_order_acquire) == CS_READY;
+    const bool fast = bgshaders::enabled();
     if (g_draw_must_run) {
+        if (fast && !g_draw_counted) { g_draw_counted = true; bgshaders::exact(g_draw_verdict); }
         double t0 = now_ms();
         {
             std::unique_lock<std::mutex> lk(g_compile_mu);
@@ -662,19 +965,42 @@ static bool wait_compiled(const std::atomic<int>& st) {
         spent += dt;
         g_must_run_waits++;
         g_must_run_wait_ms += dt;
+        g_compile_waits++;
+        g_compile_wait_ms += dt;
         static int logged = 0;
         if (dt >= 30 && logged++ < 50)
-            LOG("[gfx] frame %llu: waited %.0f ms for a compile (draw into a target not redrawn every frame)", (unsigned long long)R.frame, dt);
+            LOG("[gfx] frame %llu: waited %.0f ms for a compile (%s)", (unsigned long long)R.frame, dt,
+                fast ? bgshaders::verdict_name(g_draw_verdict) : "draw into a target not redrawn every frame");
         return st.load(std::memory_order_acquire) == CS_READY;
     }
-    if (spent >= budgetMs) return false;
+    if (!fast) {  // Off: the frame's budget, then the draw is skipped
+        if (spent >= budgetMs) { g_compile_wait_timeouts++; return false; }
+        double t0 = now_ms();
+        {
+            std::unique_lock<std::mutex> lk(g_compile_mu);
+            g_compile_cv.wait_for(lk, std::chrono::duration<double, std::milli>(budgetMs - spent),
+                                  [&] { return st.load(std::memory_order_acquire) != CS_PENDING; });
+        }
+        const double dt = now_ms() - t0;
+        spent += dt;
+        g_compile_waits++;
+        g_compile_wait_ms += dt;
+        if (st.load(std::memory_order_acquire) == CS_PENDING) g_compile_wait_timeouts++;
+        return st.load(std::memory_order_acquire) == CS_READY;
+    }
+    const uint64_t left = bgshaders::budget_left_ns(R.frame);
     double t0 = now_ms();
-    {
+    if (left) {
         std::unique_lock<std::mutex> lk(g_compile_mu);
-        g_compile_cv.wait_for(lk, std::chrono::duration<double, std::milli>(budgetMs - spent),
+        g_compile_cv.wait_for(lk, std::chrono::nanoseconds(left),
                               [&] { return st.load(std::memory_order_acquire) != CS_PENDING; });
     }
-    spent += now_ms() - t0;
+    const double dt = now_ms() - t0;
+    const bool ranOut = st.load(std::memory_order_acquire) == CS_PENDING;
+    bgshaders::spent(R.frame, uint64_t(dt * 1e6), ranOut);
+    g_compile_waits++;
+    g_compile_wait_ms += dt;
+    if (ranOut) g_compile_wait_timeouts++;
     return st.load(std::memory_order_acquire) == CS_READY;
 }
 
@@ -715,7 +1041,17 @@ static id<MTLRenderPipelineState> get_pipeline(const uint32_t* regs, Shader* vs,
     } else {
         pl = new Pipeline();
         g_pipelines[h] = pl;
+        render_objects::set_pipelines(g_pipelines.size());
         cache_record_pipeline(regs, vs, ps, fsKey, tf);
+        pipeline_groups::note_created();
+        // the setup's model sweep, record only (WWHD_DSWEEP_RECORD_ONLY=1): the recipe is appended, the pipeline never
+        // built; its draws are left out (nobody sees the hidden sweep)
+        static const bool recordOnly = [] { const char* e = getenv("WWHD_DSWEEP_RECORD_ONLY"); return e && *e == '1'; }();
+        if (recordOnly && !g_cache_replaying) {
+            pl->attempts = kCompileAttempts;
+            pl->status = CS_FAILED;
+            return nil;
+        }
     }
     const int attempt = ++pl->attempts;
     const bool injectFailure = attempt <= g_test_fail_compiles;
@@ -902,6 +1238,7 @@ static id<MTLSamplerState> get_sampler(const uint32_t* w, bool allowAniso = fals
         d.maxAnisotropy = 16;
     d.lodMinClamp = w1.get_MIN_LOD() / 64.0f;
     d.lodMaxClamp = w1.get_MAX_LOD() / 64.0f;
+    // no LOD bias here: Metal samplers can't apply it, the shader adds it (gfx/sampler_lod_bias.h)
     uint32_t border = (uint32_t)w0.get_BORDER_COLOR_TYPE();
     d.borderColor = border == 1 ? MTLSamplerBorderColorOpaqueBlack : border == 2 ? MTLSamplerBorderColorOpaqueWhite
                                                                                   : MTLSamplerBorderColorTransparentBlack;
@@ -1007,8 +1344,10 @@ static Surface g_hires_color, g_hires_depth;
 
 static Surface* hires_surface(Surface& dst, const Surface* like) {
     uint32_t w = like->width * 3 / 2, h = like->height * 3 / 2;
-    // texture: 1.5x the game's buffer as allocated (which may already be scaled for the internal resolution)
-    uint32_t pw = (uint32_t)like->tex.width * 3 / 2, ph = (uint32_t)like->tex.height * 3 / 2;
+    // texture: 1.5x the game's buffer as allocated (which may already be scaled for the internal resolution;
+    // Full-size torchlight doubles the depth copy, target_scale, and the private copy keeps the AO pass's size)
+    const uint32_t light = like->sizeClaim.size == gfx::TargetSize::Light && render::full_light() ? 2 : 1;
+    uint32_t pw = (uint32_t)like->tex.width * 3 / (2 * light), ph = (uint32_t)like->tex.height * 3 / (2 * light);
     if (!dst.tex || dst.width != w || dst.height != h || dst.tex.width != pw || dst.tex.height != ph ||
         dst.fmt.pixel != like->fmt.pixel) {
         MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:like->fmt.pixel width:pw height:ph
@@ -1058,6 +1397,13 @@ static void bind_stage(id<MTLRenderCommandEncoder> enc, const uint32_t* regs, Sh
     LatteDecompilerShader* dec = sh->dec;
     float texScale[18][2];
     for (auto& t : texScale) t[0] = t[1] = 1.0f;
+    // hand-drawn mip levels (artistic_mips.h): the units sampling such a texture, and what their bias gets at the
+    // target's internal resolution
+    bool artistic[18] = {};
+    float artisticBias = 0.0f;
+    for (int i = 0; i < 8; i++)
+        if (colors && colors[i]) { artisticBias = gfx::artistic_mips::resolution_bias(colors[i]->sx, colors[i]->sy); break; }
+    uint32_t texGuest[18][2] = {};  // guest size per unit, for the half-size light buffer's grid
     auto& rm = dec->resourceMapping;
     uint32_t texBase = vertex ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
     uint32_t samplerBase = vertex ? SAMPLER_BASE_INDEX_VERTEX : SAMPLER_BASE_INDEX_PIXEL;
@@ -1071,11 +1417,18 @@ static void bind_stage(id<MTLRenderCommandEncoder> enc, const uint32_t* regs, Sh
         MTLTextureType type = texture_type_for_dim(dec->textureUnitDim[unit]);
         const uint32_t* tw = &regs[texBase + unit * 7];
         Surface* s = sampled_texture(tw, dec->textureUsesDepthCompare[unit]);
+        // the point-light passes read the buffer's depth copy on unit 0: they claim the buffer's size for it,
+        // which it gets from the next time it is drawn (target_scale)
+        if (!vertex && sh->kind == gfx::ProgramKind::PointLight && unit == 0 && s && s->gpuWritten)
+            s->sizeClaim.request(gfx::size_request(sh->kind), R.frame);
         if (!vertex && s && g_hires_src && s->addr == g_hires_src && g_hires_frame == R.frame && ao_hires_enabled() &&
             sh->kind == gfx::ProgramKind::OcclusionPixel)
             s = &g_hires_color;
         id<MTLTexture> tex = s && s->tex ? texture_view(s, type, tw[4]) : nil;
-        if (s && unit < 18) { texScale[unit][0] = s->sx; texScale[unit][1] = s->sy; }
+        if (s && unit < 18) {
+            texScale[unit][0] = s->sx; texScale[unit][1] = s->sy;
+            texGuest[unit][0] = s->width; texGuest[unit][1] = s->height;
+        }
         uint32_t samplerIdx = dec->textureUnitSamplerAssignment[unit];
         DLOG("[draw]   %s tex%u %08X %ux%u fmt %X gpu=%d view=%d smp %08X %08X %08X", vertex ? "VS" : "PS", unit, tw[2] << 8,
              s ? s->width : 0, s ? s->height : 0, s ? s->format : 0, s ? s->gpuWritten : -1, tex != nil,
@@ -1093,7 +1446,21 @@ static void bind_stage(id<MTLRenderCommandEncoder> enc, const uint32_t* regs, Sh
             patched[0] = (patched[0] & ~0x7E00u) | (1u << 9) | (1u << 12);  // XY mag/min filter: bilinear
             sw = patched;
         }
-        id<MTLSamplerState> smp = get_sampler(sw, s && !s->gpuWritten && s->mips > 1);
+        // (hand-drawn mip levels: no forced anisotropy, artistic_mips.h)
+        id<MTLSamplerState> smp = get_sampler(sw, s && !s->gpuWritten && s->mips > 1 && !s->artisticMips);
+        if (unit < 18) artistic[unit] = s && s->artisticMips;
+        // WWHD_LOD_BIAS_LOG=1: each distinct texture/sampler pair with a LOD bias, once (gfx/sampler_lod_bias.h)
+        static const bool logBias = getenv("WWHD_LOD_BIAS_LOG") != nullptr;
+        if (logBias && gfx::sampler_lod_bias::raw(sw[1]) != 0) {
+            static std::unordered_set<uint64_t> seen;
+            const uint32_t pgm = regs[vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS] << 8;
+            const uint32_t seenKey[5] = {pgm, (uint32_t)unit, sw[0], sw[1], tw[2]};
+            if (seen.insert(hash_bytes(seenKey, sizeof seenKey)).second)
+                LOG("[lod bias] %s %08X tex%u %08X %ux%u fmt %X mips %u smp %08X %08X bias %+.4f%s", vertex ? "VS" : "PS", pgm, unit,
+                    tw[2] << 8, s ? s->width : 0, s ? s->height : 0, s ? s->format : 0, s ? s->mips : 0, sw[0], sw[1],
+                    gfx::sampler_lod_bias::levels(sw[1]),
+                    dec->uniform.loc_texLodBias[unit] >= 0 ? "" : " (not applied: no filtered sample with a level of detail)");
+        }
         if (vertex) {
             [enc setVertexTexture:tex atIndex:binding];
             [enc setVertexSamplerState:smp atIndex:binding];
@@ -1130,7 +1497,13 @@ static void bind_stage(id<MTLRenderCommandEncoder> enc, const uint32_t* regs, Sh
             for (auto& g : dec->list_remappedUniformEntries_bufferGroups) {
                 uint32_t addr = regs[blockBase + g.kcacheBankIdOffset / 4];
                 if (!addr) continue;
-                for (auto& e : g.entries) memcpy(dst + e.mappedIndexOffset, mem::ptr(addr + e.indexOffset), 16);
+                // a block of a display list: its bytes as submitted (gx2/submitted_uniforms.h);
+                // entries past the block's end still read guest memory, as before
+                const uint32_t blockSize = std::min<uint32_t>(regs[blockBase + g.kcacheBankIdOffset / 4 + 1] + 1, 0x10000);
+                const uint8_t* submitted = gx2::submitted_uniform_block(addr, blockSize);
+                for (auto& e : g.entries)
+                    memcpy(dst + e.mappedIndexOffset,
+                           submitted && e.indexOffset + 16 <= blockSize ? submitted + e.indexOffset : mem::ptr(addr + e.indexOffset), 16);
             }
             // Apply once before the Gaussian/mip chain, preserving the game's threshold and haze.
             if (!vertex && (regs[mmSQ_PGM_START_PS] << 8) == 0x44F91200)
@@ -1139,6 +1512,11 @@ static void bind_stage(id<MTLRenderCommandEncoder> enc, const uint32_t* regs, Sh
             // for a 640x360 grid; the pass draws 960x540, so tile the 4x4 noise per output pixel instead
             if (vertex && ao_mode() == 2 && sh->kind == gfx::ProgramKind::OcclusionVertex)
                 ((float*)dst)[3] *= 1.5f;
+            // the half-size light buffer's grid on an upscaled buffer (gfx/area_sample.h)
+            for (uint32_t unit = 0; !vertex && unit < 18; unit++)
+                if (sh->gatherUnits >> unit & 1)
+                    gfx::area_sample::scale_gather_grid((float*)dst, (buf.size() - dec->uniform.loc_remapped) / 16, texGuest[unit][0],
+                                                        texGuest[unit][1], texScale[unit][0], texScale[unit][1]);
         }
         if (dec->uniform.loc_uniformRegister >= 0)
             memcpy(at(dec->uniform.loc_uniformRegister), &regs[aluBase], dec->uniform.count_uniformRegister * 16);
@@ -1159,6 +1537,15 @@ static void bind_stage(id<MTLRenderCommandEncoder> enc, const uint32_t* regs, Sh
             bool ok = e.texUnit < 18;
             at(e.uniformLocation)[0] = ok ? texScale[e.texUnit][0] : 1.0f;
             at(e.uniformLocation)[1] = ok ? texScale[e.texUnit][1] : 1.0f;
+        }
+        // the sampler's LOD bias, which Metal samplers can't apply (gfx/sampler_lod_bias.h)
+        for (int t = 0; t < 18; t++) {
+            if (dec->uniform.loc_texLodBias[t] < 0) continue;
+            const uint32_t samplerIdx = dec->textureUnitSamplerAssignment[t];
+            const bool add = gfx::sampler_lod_bias::mode() == gfx::sampler_lod_bias::Mode::Shader && samplerIdx < 18;
+            *at(dec->uniform.loc_texLodBias[t]) =
+                (add ? gfx::sampler_lod_bias::host(regs[REGADDR::SQ_TEX_SAMPLER_WORD0_0 + (samplerIdx + samplerBase) * 3 + 1]) : 0.0f) +
+                (artistic[t] ? artisticBias : 0.0f);
         }
         for (int t = 0; t < 18; t++) {
             if (dec->uniform.loc_framebufferFetchSize[t] < 0) continue;
@@ -1187,8 +1574,17 @@ static void bind_stage(id<MTLRenderCommandEncoder> enc, const uint32_t* regs, Sh
         uint32_t off = 0;
         id<MTLBuffer> gb = addr ? guest_buffer(addr, &off) : nil;
         if (!gb) continue;
-        if (g_snapshot) {
-            Upload u = upload(mem::ptr(addr), size);
+        // a block of a display list: its bytes as submitted (gx2/submitted_uniforms.h), uploaded
+        // once per submission and upload pool chunk (guest memory is what the GPU reads later)
+        if (const uint8_t* submitted = gx2::submitted_uniform_block(addr, size)) {
+            Upload u = submitted_upload(addr, size, submitted);
+            if (vertex) [enc setVertexBuffer:u.buf offset:u.offset atIndex:binding];
+            else [enc setFragmentBuffer:u.buf offset:u.offset atIndex:binding];
+            continue;
+        }
+        Upload u;
+        if (g_snapshot || rewritten_copy(kRangeUniform, addr, size, u)) {
+            if (g_snapshot) u = upload(mem::ptr(addr), size);
             if (vertex) [enc setVertexBuffer:u.buf offset:u.offset atIndex:binding];
             else [enc setFragmentBuffer:u.buf offset:u.offset atIndex:binding];
         } else {
@@ -1243,6 +1639,20 @@ static bool ensure_pass(Surface* const* colors, const uint32_t* colorSlices, Sur
     R.passDepth = depth;
     R.passDepthSlice = depthSlice;
     return R.enc != nil;
+}
+
+// cloud prototype (metal_clouds.mm): opens a pass on colour target 0 of the registers (and their depth
+// buffer), when the sky-cloud hook finds no open pass
+bool open_target_pass(const uint32_t* regs) {
+    uint32_t slice = 0, depthSlice = 0;
+    Surface* colors[8] = {};
+    uint32_t slices[8] = {};
+    colors[0] = color_target(regs, 0, &slice);
+    slices[0] = slice;
+    if (!colors[0]) return false;
+    Surface* depth = regs[mmDB_DEPTH_BASE] ? depth_target(regs, &depthSlice) : nullptr;
+    if (depth && (depth->tex.width < colors[0]->tex.width || depth->tex.height < colors[0]->tex.height)) depth = nullptr;
+    return ensure_pass(colors, slices, depth, depthSlice);
 }
 
 // ---------------------------------------------------------------- indices
@@ -1339,6 +1749,15 @@ std::vector<PipelineRecipe> g_pending_pipelines;
 // hashes of the pipeline recipes already in the cache file or head start, so a pipeline the game asks
 // for before its queued recipe is built isn't appended again
 std::unordered_set<uint64_t> g_known_pipelines;
+// versioned file (metal_cache_file.h; WWHD_SHADER_CACHE_VERSIONING=0: the unversioned file as before)
+bool cache_versioning() {
+    static const bool on = [] { const char* e = getenv("WWHD_SHADER_CACHE_VERSIONING"); return !e || strcmp(e, "0"); }();
+    return on;
+}
+// recipes of the user's own file, and those of them the background build found unresolvable (their
+// shaders or fetch shader are not in the cache): tombstoned when the build is done
+std::unordered_set<uint64_t> g_user_pipelines;
+std::vector<uint64_t> g_stale_pipelines;
 
 std::string cache_path() {
     if (const char* e = getenv("WWHD_SHADER_CACHE")) return e;
@@ -1419,15 +1838,68 @@ static void cache_record_pipeline(const uint32_t* regs, Shader* vs, Shader* ps, 
     cache_write(kRecPipeline, v);
 }
 
+// the system the cache was written on: compiled Metal code (the OS's own cache) is per macOS and GPU
+static std::string cache_fingerprint() {
+    @autoreleasepool {
+        NSString* os = [[NSProcessInfo processInfo] operatingSystemVersionString];
+        NSString* gpu = R.device ? R.device.name : @"?";
+        return std::string("macOS ") + (os ? os.UTF8String : "?") + " | " + (gpu ? gpu.UTF8String : "?");
+    }
+}
+
+// The versioned file: what its header says, and the tombstones (recipe hash -> index of the last tombstone
+// naming it; a recipe recorded again after its tombstone is kept). Reads record headers only, plus the
+// header and tombstone records.
+struct CacheScan {
+    bool hasHeader = false;
+    mtlcache::Header header;
+    std::unordered_map<uint64_t, size_t> tombstones;
+};
+static CacheScan cache_scan(const std::string& path) {
+    CacheScan scan;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return scan;
+    mtlcache::Record r;
+    std::vector<uint8_t> raw;
+    for (size_t index = 0; mtlcache::read_record(f, r); index++) {
+        if (r.type == mtlcache::kRecHeader && index == 0 && mtlcache::inflate(r, raw))
+            scan.hasHeader = mtlcache::decode_header(raw.data(), raw.size(), scan.header);
+        else if (r.type == mtlcache::kRecTombstone && mtlcache::inflate(r, raw))
+            for (uint64_t h : mtlcache::decode_tombstone(raw)) scan.tombstones[h] = index;
+    }
+    fclose(f);
+    return scan;
+}
+
 // load and replay the recipes; runs once on the render thread before the first draw
 static void cache_load() {
     std::string path = cache_path();
     if (path == "0") { g_cache_disabled = true; return; }
     double t0 = now_ms();
     size_t shaders = 0, pipelines = 0;
+    // the setup's model sweep, record only (WWHD_DSWEEP_RECORD_ONLY=1): known, so not appended again, but never
+    // built. Its processes start from copies of one file and are merged by appended length
+    // (tools/installer/sweep_merge.py), so they never rewrite it.
+    static const bool recordOnly = [] { const char* e = getenv("WWHD_DSWEEP_RECORD_ONLY"); return e && *e == '1'; }();
+    const bool versioned = cache_versioning();
+    const mtlcache::Header ours = mtlcache::current(sizeof(PipelineRecipe), versioned ? cache_fingerprint() : std::string());
+    CacheScan scan;
+    mtlcache::Policy policy;
+    if (versioned) {
+        scan = cache_scan(path);
+        policy = mtlcache::policy(scan.hasHeader, scan.header, ours);
+    }
+    // rows the rewrite leaves out besides the policy's: damaged, torn, of the wrong size, tombstoned, repeated
+    size_t staleRows = 0, repeatedRows = 0;
+    bool damaged = false;
+    auto stalePipeline = [&](uint64_t h, size_t index) {
+        auto t = scan.tombstones.find(h);
+        return t != scan.tombstones.end() && t->second > index;
+    };
     if (FILE* f = fopen(path.c_str(), "rb")) {
         static std::vector<uint32_t> regs(0x10000);
         std::unordered_map<std::string, uint32_t> copies;
+        std::unordered_set<uint64_t> rows;
         auto guest_copy = [&](const uint8_t* src, uint32_t size) {
             uint32_t& addr = copies[std::string((const char*)src, size)];
             if (!addr) {
@@ -1439,22 +1911,37 @@ static void cache_load() {
         g_cache_replaying = true;
         g_defer_compiles = true;
         uint32_t hdr[3];
-        while (fread(hdr, sizeof hdr, 1, f) == 1) {
+        for (size_t index = 0;; index++) {
+            if (fread(hdr, sizeof hdr, 1, f) != 1) break;
             std::vector<uint8_t> comp(hdr[2]), raw(hdr[1]);
-            if (fread(comp.data(), 1, hdr[2], f) != hdr[2]) break;
+            if (fread(comp.data(), 1, hdr[2], f) != hdr[2]) { damaged = true; break; }
+            if (versioned && (hdr[0] == mtlcache::kRecHeader || hdr[0] == mtlcache::kRecTombstone)) continue;
             uLongf rsize = hdr[1];
-            if (uncompress(raw.data(), &rsize, comp.data(), hdr[2]) != Z_OK || rsize != hdr[1]) break;
+            if (uncompress(raw.data(), &rsize, comp.data(), hdr[2]) != Z_OK || rsize != hdr[1]) { damaged = true; break; }
+            // a repeated row (after the stale checks: a recipe recorded again after its tombstone is kept)
+            auto repeated = [&] {
+                if (!versioned || rows.insert(mtlcache::fnv(comp.data(), comp.size(), mtlcache::fnv(&hdr[0], 4))).second)
+                    return false;
+                repeatedRows++;
+                return true;
+            };
             const uint8_t* p = raw.data();
             const uint8_t* end = p + raw.size();
             if (hdr[0] == kRecPipeline) {
+                if (!policy.pipelines) continue;
+                if (versioned && raw.size() != sizeof(PipelineRecipe)) { staleRows++; continue; }
+                const uint64_t h = hash_bytes(raw.data(), raw.size());
+                if (versioned && stalePipeline(h, index)) { staleRows++; continue; }
+                if (repeated()) continue;
                 PipelineRecipe r;
-                if (get(p, end, r) && g_known_pipelines.insert(hash_bytes(raw.data(), raw.size())).second) {
+                g_user_pipelines.insert(h);
+                if (get(p, end, r) && g_known_pipelines.insert(h).second && !recordOnly) {
                     g_pending_pipelines.push_back(r);
                     pipelines++;
                 }
                 continue;
             }
-            if (hdr[0] != kRecShader) continue;
+            if (hdr[0] != kRecShader || !policy.shaders || repeated()) continue;
             uint32_t vertex, size, fsSize, n;
             if (!get(p, end, vertex) || !get(p, end, size) || !get(p, end, fsSize) || !get(p, end, n)) break;
             if (p + size + fsSize + n * 8 > end) break;
@@ -1483,16 +1970,69 @@ static void cache_load() {
             get_shader_uncached(regs.data(), vertex, fs, fsKey);
             shaders++;
         }
+        if (!damaged && fgetc(f) != EOF) damaged = true;  // a torn record header at the end
         fclose(f);
         g_cache_replaying = false;
         g_defer_compiles = false;
     }
     void headstart_load();  // shader_headstart.mm
     headstart_load();
-    g_cache_out = fopen(path.c_str(), "ab");
+    if (versioned && policy.writable && !recordOnly) {
+        struct stat st {};
+        const bool exists = stat(path.c_str(), &st) == 0 && st.st_size > 0;
+        if (exists && (policy.rewrite || staleRows || repeatedRows || damaged || !scan.tombstones.empty())) {
+            // the same decisions as the replay above, applied to the file
+            mtlcache::RewriteStats rs;
+            const double tw = now_ms();
+            std::vector<uint8_t> raw;
+            const bool ok = mtlcache::rewrite(path, ours, [&](const mtlcache::Record& r, size_t index) {
+                if (r.type == kRecShader) return policy.shaders;
+                if (r.type != kRecPipeline) return true;  // other types: kept as they are
+                if (!policy.pipelines || r.raw != sizeof(PipelineRecipe) || !mtlcache::inflate(r, raw)) return false;
+                return !stalePipeline(hash_bytes(raw.data(), raw.size()), index);
+            }, rs);
+            LOG("[gfx] shader cache %s: %s; %zu rows kept, %zu stale and %zu repeated left out%s (%.0f ms)",
+                ok ? "rewritten" : "NOT rewritten (write failed)", policy.reason ? policy.reason : "stale rows",
+                rs.kept, rs.dropped, rs.duplicates, rs.damaged ? ", damaged end cut" : "",
+                now_ms() - tw);
+        } else if (policy.reason) {
+            LOG("[gfx] shader cache: %s", policy.reason);
+        }
+        g_cache_out = fopen(path.c_str(), "ab");
+        if (g_cache_out && !exists) {
+            mtlcache::Record hr;
+            if (mtlcache::make_record(mtlcache::kRecHeader, mtlcache::encode_header(ours), hr)) {
+                mtlcache::write_compressed(g_cache_out, hr);
+                fflush(g_cache_out);
+            }
+        }
+    } else if (!versioned || policy.writable) {
+        g_cache_out = fopen(path.c_str(), "ab");
+    } else {
+        LOG("[gfx] shader cache: %s", policy.reason);
+    }
     if (shaders || pipelines)
         LOG("[gfx] shader cache: replayed %zu shaders, %zu pipelines queued (%.0f ms) from %s", shaders, pipelines,
             now_ms() - t0, path.c_str());
+}
+
+// the background build is done: recipes of the user's file it couldn't resolve get a tombstone, so the next
+// start leaves them out of the file. Not while the head start is switched off (WWHD_HEADSTART=0): the
+// user's recipes may name head-start shaders.
+static void cache_tombstone_stale() {
+    if (g_stale_pipelines.empty()) return;
+    std::vector<uint64_t> stale;
+    stale.swap(g_stale_pipelines);
+    const char* hs = getenv("WWHD_HEADSTART");
+    static const bool recordOnly = [] { const char* e = getenv("WWHD_DSWEEP_RECORD_ONLY"); return e && *e == '1'; }();
+    if (!cache_versioning() || !g_cache_out || recordOnly || (hs && !strcmp(hs, "0"))) return;
+    mtlcache::Record r;
+    if (!mtlcache::make_record(mtlcache::kRecTombstone, mtlcache::encode_tombstone(stale), r)) return;
+    mtlcache::write_compressed(g_cache_out, r);
+    fflush(g_cache_out);
+    // a live use of one of them records it again (after the tombstone, so it is kept)
+    for (uint64_t h : stale) g_known_pipelines.erase(h);
+    LOG("[gfx] shader cache: %zu unresolvable pipeline recipes marked stale", stale.size());
 }
 
 // build queued pipelines whose shaders have finished compiling, at most `budget` of them and only
@@ -1513,8 +2053,13 @@ static void build_pending_pipelines(int budget, int maxInFlight) {
         auto vi = g_shaders.find(r.vsKey), pi = g_shaders.find(r.psKey);
         auto fi = g_fetch.find(r.fsKey);
         auto finallyFailed = [](Shader* sh) { return sh->state == CS_FAILED && (!sh->dec || sh->attempts >= kCompileAttempts); };
-        if (vi == g_shaders.end() || pi == g_shaders.end() || fi == g_fetch.end() || !fi->second ||
-            finallyFailed(vi->second) || finallyFailed(pi->second)) {
+        const bool missing = vi == g_shaders.end() || pi == g_shaders.end() || fi == g_fetch.end() || !fi->second;
+        if (missing || finallyFailed(vi->second) || finallyFailed(pi->second)) {
+            // stale only when something it names is gone: a failed compile may work on another macOS
+            if (missing && cache_versioning()) {
+                const uint64_t h = hash_bytes(&r, sizeof r);
+                if (g_user_pipelines.count(h)) g_stale_pipelines.push_back(h);
+            }
             g_pending_pipelines[i] = g_pending_pipelines.back();  // unusable recipe
             g_pending_pipelines.pop_back();
             g_recipes_dropped++;
@@ -1555,6 +2100,7 @@ void cache_warm_step() {
         queued = false;
         LOG("[gfx] background pipelines done by frame %llu: %zu built, %zu unresolved", (unsigned long long)R.frame,
             g_recipes_built, g_recipes_dropped);
+        cache_tombstone_stale();
     }
 }
 
@@ -1570,8 +2116,17 @@ void report_skips() {
     for (int i = 0; i < SK_COUNT; i++)
         if (g_skip[i]) n += snprintf(buf + n, sizeof buf - n, " %s=%llu", kSkipNames[i], (unsigned long long)g_skip[i]);
     if (n) LOG("[gfx] skipped draws:%s", buf);
-    LOG("[gfx] %zu shaders, %zu pipelines; ms decompile %.0f, msl %.0f, pipeline %.0f", g_shaders.size(), g_pipelines.size(),
-        g_t_decompile, g_t_msl, g_t_pipeline);
+    LOG("[gfx] %zu shaders (%zu wide keys known), %zu pipelines; ms decompile %.0f, msl %.0f, pipeline %.0f", g_translations,
+        g_shaders.size(), g_pipelines.size(), g_t_decompile, g_t_msl, g_t_pipeline);
+    if (g_key_checks)
+        LOG("[gfx shader key] %llu wide keys verified, %llu violations", (unsigned long long)g_key_checks,
+            (unsigned long long)g_key_violations);
+    // since the start: compile waits of draws (the frame's budget, WWHD_COMPILE_WAIT_MS, or without one for
+    // targets not redrawn every frame), budgeted waits that ran out, and draws skipped while compiling
+    LOG("[gfx] compile waits: %llu (%.0f ms in all), %llu ran out of the frame's budget; draws skipped while compiling: "
+        "%llu shader, %llu pipeline", (unsigned long long)g_compile_waits, g_compile_wait_ms,
+        (unsigned long long)g_compile_wait_timeouts, (unsigned long long)g_skip[SK_COMPILING],
+        (unsigned long long)g_skip[SK_PIPE_COMPILING]);
     if (g_must_run_waits)
         LOG("[gfx] draws that waited for their compile (targets not redrawn every frame): %llu, %.0f ms in all",
             (unsigned long long)g_must_run_waits, g_must_run_wait_ms);
@@ -1580,13 +2135,36 @@ void report_skips() {
     uint64_t faults, protectedPages;
     wwatch::take_stats(faults, protectedPages);
     LOG("[gfx] last 300 frames: %llu full texture checks (%.1f MiB hashed), %llu uploads, %llu invalidates marking %llu surfaces, "
-        "%llu texture page write faults, %llu pages protected",
+        "%llu texture page write faults, %llu pages protected; staging: %llu levels from the upload pool (%.1f MiB), "
+        "%llu own buffers (%.1f MiB)",
         (unsigned long long)g_stat_full_checks, g_stat_hashed_bytes / 1048576.0, (unsigned long long)g_stat_uploads,
         (unsigned long long)g_stat_invalidates, (unsigned long long)g_stat_invalidated_surfaces, (unsigned long long)faults,
-        (unsigned long long)protectedPages);
+        (unsigned long long)protectedPages, (unsigned long long)g_stat_staging_pool, g_stat_staging_pool_bytes / 1048576.0,
+        (unsigned long long)g_stat_staging_buffers, g_stat_staging_buffer_bytes / 1048576.0);
+    g_stat_staging_pool = g_stat_staging_pool_bytes = g_stat_staging_buffers = g_stat_staging_buffer_bytes = 0;
     g_stat_full_checks = g_stat_uploads = g_stat_invalidates = g_stat_invalidated_surfaces = g_stat_hashed_bytes = 0;
+    for (int k = 0; k < kRangeKinds; k++) {
+        size_t dynamicRanges = 0;
+        for (auto& [key, r] : g_guest_ranges[k]) dynamicRanges += r.dynamic;
+        LOG("[gfx] last 300 frames: %llu rewritten %s copies (%.1f MiB); %zu of %zu ranges rewritten by the CPU",
+            (unsigned long long)g_range_copies[k], k == kRangeVertex ? "vertex buffer" : "uniform block",
+            g_range_copy_bytes[k] / 1048576.0, dynamicRanges, g_guest_ranges[k].size());
+        g_range_copies[k] = g_range_copy_bytes[k] = 0;
+    }
 }
 
+
+// cloud research prototype (metal_clouds.mm)
+bool clouds_draw(id<MTLRenderCommandEncoder> enc, const MTLViewport& vp, Surface* const* colors, const uint32_t* colorSlices,
+                 Surface* depth, uint32_t depthSlice, bool (*ensure)(Surface* const*, const uint32_t*, Surface*, uint32_t));
+bool clouds_sky_surface(Surface* s);
+bool clouds_shadow_target(Surface* s);
+bool clouds_shadow_depth(Surface* s);
+void clouds_shadows_now();
+void clouds_after_sky_composite(id<MTLRenderCommandEncoder> enc, const uint32_t* regs, const MTLViewport& vp, bool hasDepth,
+                                id<MTLDepthStencilState> depthState, bool (*ensure)(Surface* const*, const uint32_t*, Surface*, uint32_t));
+void clouds_mark_start(Surface* const* colors, const uint32_t* colorSlices, Surface* depth, uint32_t depthSlice,
+                       bool (*ensure)(Surface* const*, const uint32_t*, Surface*, uint32_t));
 void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr, uint32_t baseVertex,
           uint32_t instances) {
     static bool cacheLoaded = (cache_load(), true);
@@ -1616,10 +2194,22 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
     Shader* vs = get_shader(regs, true, fs, fsKey);
     Shader* ps = get_shader(regs, false, fs, fsKey);
     if (!vs || !ps || !vs->dec || !ps->dec) { g_skip[SK_NO_SHADER]++; return; }  // translation failed
-    // must this draw run even if its compile takes longer than the budget? (see wait_compiled)
     const LatteContextRegister& lcr = *(const LatteContextRegister*)regs;
     uint8_t mask = LatteMRT::GetActiveColorBufferMask(ps->dec, lcr);
-    {
+    Surface* colors[8] = {};
+    uint32_t colorSlices[8] = {}, depthSlice = 0;
+    const auto claim = gfx::size_request(ps->kind);
+    for (int i = 0; i < 8; i++)
+        if (mask & (1 << i)) colors[i] = color_target(regs, i, &colorSlices[i], claim);
+    Surface* depth = LatteMRT::GetActiveDepthBufferMask(lcr) ? depth_target(regs, &depthSlice) : nullptr;
+    if (depth && depth->width == 1280 && depth->height == 720) R.mainDepthAddr = depth->addr;
+    // must this draw run even if its compile takes longer than the budget? (see wait_compiled)
+    const bool fast = bgshaders::enabled();
+    const bool bgOn = fast && !g_hires_redraw;  // the AO pass's hires redraw of a draw always waits
+    auto writesColor = [&](int i) { return colors[i] && ((regs[REGADDR::CB_TARGET_MASK] >> (4 * i)) & 15); };
+    const uint32_t depthControl = regs[REGADDR::DB_DEPTH_CONTROL];  // bit 0 stencil, bit 2 depth write
+    const bool writesDepth = depth && ((depthControl & 4) || ((depthControl & 1) && depth->fmt.stencil));
+    if (!fast) {  // Off: the long-standing rule (see wait_compiled)
         auto notRedrawn = [](uint32_t addr) {
             auto it = g_target_drawn.find(addr);
             return it == g_target_drawn.end() || it->second.must_wait(R.frame);
@@ -1629,8 +2219,31 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
             if ((mask & (1 << i)) && regs[mmCB_COLOR0_BASE + i]) must = notRedrawn(regs[mmCB_COLOR0_BASE + i]);
         if (!must && LatteMRT::GetActiveDepthBufferMask(lcr) && regs[mmDB_DEPTH_BASE]) must = notRedrawn(regs[mmDB_DEPTH_BASE]);
         g_draw_must_run = must;
+        g_draw_verdict = bgshaders::kOff;
+    } else {
+        g_draw_verdict = bgshaders::kOff;  // the hires redraw: always waits
+        if (bgOn) {
+            bgshaders::TargetFacts written[8], depthFacts;
+            int n = 0;
+            for (int i = 0; i < 8; i++)
+                if (writesColor(i)) written[n++] = bgshaders::tracker().facts(colors[i]->addr, R.frame);
+            if (writesDepth) depthFacts = bgshaders::tracker().facts(depth->addr, R.frame);
+            // the depth buffer the game's sun check peeks (peek_z) waits even before the first peek
+            if (writesDepth && depth->addr == R.mainDepthAddr) depthFacts.peeked = true;
+            g_draw_verdict = bgshaders::classify(bgshaders::level(), written, n, writesDepth ? &depthFacts : nullptr);
+        }
+        g_draw_must_run = g_draw_verdict != bgshaders::kSkippable;
+        g_draw_counted = false;
     }
     struct MustRunReset { ~MustRunReset() { g_draw_must_run = false; } } mustRunReset;
+    // a draw left out while its compile goes on (Shader compile Fast)
+    auto leftOut = [&] {
+        if (!fast) return;
+        bgshaders::skipped(R.frame);
+        for (int i = 0; i < 8; i++)
+            if (writesColor(i)) bgshaders::tracker().left_out(colors[i]->addr, R.frame);
+        if (writesDepth) bgshaders::tracker().left_out(depth->addr, R.frame);
+    };
     retry_failed_compile(vs, g_draw_must_run);
     retry_failed_compile(ps, g_draw_must_run);
     if (vs->state == CS_FAILED || ps->state == CS_FAILED) { g_skip[SK_NO_SHADER]++; return; }
@@ -1638,16 +2251,11 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
     compile_deferred(ps);
     if (!wait_compiled(vs->state) || !wait_compiled(ps->state)) {
         g_skip[SK_COMPILING]++;
+        if (vs->state == CS_PENDING || ps->state == CS_PENDING) leftOut();
         return;
     }
     rprof::mark(rprof::kShader);
 
-    Surface* colors[8] = {};
-    uint32_t colorSlices[8] = {}, depthSlice = 0;
-    for (int i = 0; i < 8; i++)
-        if (mask & (1 << i)) colors[i] = color_target(regs, i, &colorSlices[i]);
-    Surface* depth = LatteMRT::GetActiveDepthBufferMask(lcr) ? depth_target(regs, &depthSlice) : nullptr;
-    if (depth && depth->width == 1280 && depth->height == 720) R.mainDepthAddr = depth->addr;
     uint32_t guestW = colors[0] ? colors[0]->width : 0;  // the game's target size (viewport registers refer to it)
     uint32_t guestH = colors[0] ? colors[0]->height : 0;
     if (g_hires_redraw) {
@@ -1680,24 +2288,44 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
     MTLPrimitiveType ptype;
     if (!build_indices(prim, count, indexType, indexAddr, indices, ptype)) { g_skip[SK_PRIM]++; return; }
     rprof::mark(rprof::kIndices);
+    bool samplesSky = false;  // cloud prototype: this draw reads the half-res sky buffer (its composite)
+    bool readsPicture = false;  // ... or the picture the cloud shadows go into
     for (Shader* sh : {vs, ps}) {
         uint32_t texBase = sh == vs ? REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS : REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS;
         for (int u = 0; u < sh->dec->textureUnitListCount; u++) {
             uint8_t unit = sh->dec->textureUnitList[u];
             Surface* s = sampled_texture(&regs[texBase + unit * 7], sh->dec->textureUsesDepthCompare[unit]);
-            (void)s;
+            if (s && clouds_sky_surface(s)) samplesSky = true;
+            if (s && clouds_shadow_target(s)) readsPicture = true;
         }
     }
 
     rprof::mark(rprof::kTextures);
+    {
+        static const uint64_t traceFrame = getenv("WWHD_CLOUDS_TRACE_FRAME") ? strtoull(getenv("WWHD_CLOUDS_TRACE_FRAME"), nullptr, 10) : 0;
+        if (traceFrame && R.frame == traceFrame)
+            LOG("[ctrace] draw %llu: target %08X %ux%u depth %08X/%p fmt %lu ps %08X sky %d picture %d prim %X count %u dctl %08X",
+                (unsigned long long)R.drawCount, colors[0] ? colors[0]->addr : 0, colors[0] ? colors[0]->width : 0,
+                colors[0] ? colors[0]->height : 0, depth ? depth->addr : 0, (void*)depth, depth ? (unsigned long)depth->tex.pixelFormat : 0,
+                regs[mmSQ_PGM_START_PS] << 8, samplesSky, readsPicture, prim, count, regs[REGADDR::DB_DEPTH_CONTROL]);
+    }
+    // ... or a depth-only draw into its depth buffer is next (the game rewrites the depth there before its
+    // post effects, which would lose the islands and characters)
+    if (!readsPicture && !colors[0] && depth && clouds_shadow_depth(depth)) readsPicture = true;
+    if (readsPicture) clouds_shadows_now();
     if (!ensure_pass(colors, colorSlices, depth, depthSlice)) { g_skip[SK_PASS]++; return; }
     rprof::mark(rprof::kPass);
+    if (cloud_proto::g_active_seq) clouds_mark_start(colors, colorSlices, depth, depthSlice, ensure_pass);
     TargetFormats tf;
     for (int i = 0; i < 8; i++)
         if (colors[i]) tf.color[i] = colors[i]->format;
     if (depth) tf.depth = depth->format;
     id<MTLRenderPipelineState> pipe = get_pipeline(regs, vs, ps, fs, fsKey, tf);
-    if (!pipe) { g_skip[SK_PIPE_COMPILING]++; return; }
+    if (!pipe) {
+        g_skip[SK_PIPE_COMPILING]++;
+        if (!g_draw_must_run) leftOut();  // else the build failed for good
+        return;
+    }
     rprof::mark(rprof::kPipeline);
     id<MTLRenderCommandEncoder> enc = R.enc;
     [enc setRenderPipelineState:pipe];
@@ -1752,6 +2380,7 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
         aspect::panes::clip(w, h, ax, ay, sx, sy, ex, ey);
     if (ex <= sx || ey <= sy) { g_skip[SK_SCISSOR]++; return; }
     [enc setScissorRect:MTLScissorRect{sx, sy, ex - sx, ey - sy}];
+    if (cloud_proto::g_active_seq && clouds_draw(enc, vp, colors, colorSlices, depth, depthSlice, ensure_pass)) return;
     rprof::mark(rprof::kRecord);
     rprof::UploadKind vertexUploads(rprof::kUpVertex);
 
@@ -1764,8 +2393,11 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
         uint32_t off = 0;
         id<MTLBuffer> b = guest_buffer(addr, &off);
         if (!b) continue;
+        Upload u;
         if (g_snapshot && size <= kSnapshotLimit) {
-            Upload u = upload(mem::ptr(addr), size);
+            u = upload(mem::ptr(addr), size);
+            [enc setVertexBuffer:u.buf offset:u.offset atIndex:GET_MTL_VERTEX_BUFFER_INDEX(g.attributeBufferIndex)];
+        } else if (rewritten_copy(kRangeVertex, addr, size, u)) {
             [enc setVertexBuffer:u.buf offset:u.offset atIndex:GET_MTL_VERTEX_BUFFER_INDEX(g.attributeBufferIndex)];
         } else {
             [enc setVertexBuffer:b offset:off atIndex:GET_MTL_VERTEX_BUFFER_INDEX(g.attributeBufferIndex)];
@@ -1805,6 +2437,12 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
     for (int i = 0; i < 8; i++)
         if (colors[i] && regs[mmCB_COLOR0_BASE + i]) g_target_drawn[regs[mmCB_COLOR0_BASE + i]].drawn(R.frame);
     if (depth && regs[mmDB_DEPTH_BASE]) g_target_drawn[regs[mmDB_DEPTH_BASE]].drawn(R.frame);
+    if (bgOn) {  // Shader compile Fast: which targets are redrawn regularly
+        for (int i = 0; i < 8; i++)
+            if (writesColor(i)) bgshaders::tracker().drawn(colors[i]->addr, R.frame);
+        if (writesDepth) bgshaders::tracker().drawn(depth->addr, R.frame);
+    }
+    if (samplesSky) clouds_after_sky_composite(enc, regs, vp, depth != nullptr, get_depth_state(regs, depth != nullptr), ensure_pass);
     // debug: WWHD_DUMP_DRAWS=frame:i,j,k dumps color target 0 after those draws
     static uint64_t dumpFrame = ~0ull;
     static std::set<uint64_t> dumpDraws = [] {
@@ -1925,7 +2563,7 @@ void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexTyp
 // Translate one program from a head-start record: regs hold its state, with the program (and the
 // fetch shader) already placed in guest memory. Not recorded into the user cache. compileNow starts
 // the Metal compile right away instead of deferring it to first use.
-bool headstart_translate(const uint32_t* regs, bool vertex, bool compileNow) {
+bool headstart_translate(const uint32_t* regs, bool vertex, bool compileNow, uint64_t* sharedKey, uint64_t* wideKey) {
     bool replaying = g_cache_replaying, defer = g_defer_compiles;
     g_cache_replaying = true;
     g_defer_compiles = !compileNow;
@@ -1933,6 +2571,12 @@ bool headstart_translate(const uint32_t* regs, bool vertex, bool compileNow) {
     LatteFetchShader* fs = vertex ? get_fetch_shader(regs, &fsKey) : nullptr;
     Shader* s = (!vertex || fs) ? get_shader_uncached(regs, vertex, fs, fsKey) : nullptr;
     if (s && compileNow) compile_deferred(s);
+    if (sharedKey) *sharedKey = s ? s->key : 0;  // the shader this state shares (its first state's wide key)
+    if (wideKey && (!vertex || fs)) {  // this state's own wide key (pipeline recipes name shaders by it)
+        const uint32_t start = vertex ? mmSQ_PGM_START_VS : mmSQ_PGM_START_PS;
+        const uint64_t base = program_hash(regs[start] << 8, regs[start + 1] << 3) ^ (vertex ? 0x1111 : 0x2222);
+        *wideKey = wide_key(regs, vertex, base, fsKey);
+    }
     g_cache_replaying = replaying;
     g_defer_compiles = defer;
     return s && s->state != CS_FAILED;
@@ -1944,9 +2588,18 @@ size_t headstart_compiling() { return std::max(0, g_compiles_in_flight.load()); 
 // final state before decrementing it, so setup can report actual compile failures.
 size_t headstart_failures() {
     size_t failed = 0;
-    for (const auto& [key, shader] : g_shaders) failed += shader->state.load(std::memory_order_acquire) == CS_FAILED;
+    std::unordered_set<const Shader*> seen;  // g_shaders maps several wide keys to a shared shader
+    for (const auto& [key, shader] : g_shaders)
+        if (seen.insert(shader).second) failed += shader->state.load(std::memory_order_acquire) == CS_FAILED;
     for (const auto& [key, pipeline] : g_pipelines) failed += pipeline->status.load(std::memory_order_acquire) == CS_FAILED;
     return failed;
+}
+// distinct shaders (translations) and pipelines the Metal renderer holds
+void headstart_counts(size_t& shaders, size_t& pipelines) {
+    std::unordered_set<const Shader*> seen;
+    for (const auto& [key, shader] : g_shaders) seen.insert(shader);
+    shaders = seen.size();
+    pipelines = g_pipelines.size();
 }
 
 

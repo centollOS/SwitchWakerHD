@@ -1,0 +1,108 @@
+{
+  "format_version": 1,
+  "id": "sdk-v3-creature",
+  "name": "Coral wanderer (SDK v3 preview)",
+  "version": "0.1.0",
+  "author": "Lukas S",
+  "description": "Original rigged creature with bounded wandering, informational hit reactions and an original PCM scene cue.",
+  "game_id": "wwhd",
+  "minimum_manager_version": "1.5.0",
+  "kind": "guest",
+  "experimental": true,
+  "guest": {
+    "api_version": 1,
+    "elf": "mod.elf"
+  },
+  "dependencies": [
+    {
+      "id": "story-notebook",
+      "minimum_version": "0.0.0"
+    }
+  ],
+  "models": [
+    {
+      "id": "coral-creature",
+      "kind": "skinned",
+      "source": "assets/creature.glb"
+    }
+  ],
+  "actors": [
+    {
+      "id": "coral-wanderer",
+      "kind": "mod",
+      "model": "coral-creature",
+      "stage": "sea",
+      "room": 11,
+      "position": {
+        "x": 800,
+        "y": 1040,
+        "z": -201500
+      },
+      "collision": {
+        "radius": 35,
+        "height": 140,
+        "mode": "solid"
+      },
+      "attention": {
+        "prompt": "talk"
+      },
+      "look_at": {
+        "head": "head",
+        "yaw_degrees": 60,
+        "pitch_degrees": 25,
+        "rate_degrees": 120,
+        "radius": 600,
+        "upper_body": {
+          "bone": "body",
+          "yaw_degrees": 20,
+          "fraction": 0.25
+        }
+      },
+      "lines": [
+        "The coral remembers every wave."
+      ],
+      "then": [
+        {
+          "action": "scene",
+          "id": "coral-cue"
+        }
+      ]
+    }
+  ],
+  "scenes": [
+    {
+      "id": "coral-cue",
+      "steps": [
+        {
+          "type": "music",
+          "cue": "coral",
+          "action": "start",
+          "fade_frames": 0
+        },
+        {
+          "type": "camera_follow",
+          "actor": "coral-wanderer",
+          "eye_offset": {
+            "x": 250,
+            "y": 180,
+            "z": -300
+          },
+          "target_offset": {
+            "x": 0,
+            "y": 100,
+            "z": 0
+          },
+          "half_life": 0.2,
+          "frames": 120
+        },
+        {
+          "type": "wait",
+          "frames": 60
+        },
+        {
+          "type": "end"
+        }
+      ]
+    }
+  ]
+}

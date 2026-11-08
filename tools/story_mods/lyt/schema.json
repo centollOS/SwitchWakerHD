@@ -1,0 +1,118 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Story UI layout description",
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": false,
+  "definitions": {
+    "vec2": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+    "vec3": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 3},
+    "rgba": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255}, "minItems": 3, "maxItems": 4},
+    "name24": {"type": "string", "maxLength": 23},
+    "pane": {
+      "type": "object",
+      "required": ["name", "size"],
+      "properties": {
+        "type": {"enum": ["null", "picture", "window", "text", "bounding", "parts"], "default": "null"},
+        "name": {"$ref": "#/definitions/name24"},
+        "size": {"$ref": "#/definitions/vec2"},
+        "translate": {"$ref": "#/definitions/vec3"},
+        "rotate": {"oneOf": [{"type": "number"}, {"$ref": "#/definitions/vec3"}]},
+        "scale": {"$ref": "#/definitions/vec2"},
+        "alpha": {"type": "integer", "minimum": 0, "maximum": 255},
+        "visible": {"type": "boolean"},
+        "influence_alpha": {"type": "boolean"},
+        "origin": {"type": "integer", "minimum": 0, "maximum": 255},
+        "user": {"type": "string", "maxLength": 7},
+        "material": {"type": "string", "description": "picture: material name"},
+        "vertex_colors": {"type": "array", "items": {"$ref": "#/definitions/rgba"}, "minItems": 4, "maxItems": 4},
+        "uvs": {"type": "array", "items": {"type": "array", "items": {"$ref": "#/definitions/vec2"}, "minItems": 4, "maxItems": 4}},
+        "children": {"type": "array", "items": {"$ref": "#/definitions/pane"}}
+      },
+      "additionalProperties": true,
+      "description": "Window (wnd1), text (txt1) and parts (prt1) panes add their own keys; see sections/wnd1.py, sections/txt1.py and sections/prt1.py."
+    },
+    "track": {
+      "type": "object",
+      "required": ["target", "keys"],
+      "properties": {
+        "pane": {"type": "string"},
+        "material": {"type": "string"},
+        "target": {"oneOf": [{"type": "string"}, {"type": "integer"}], "description": "a name from anim/tracks.py TARGETS, or a number with \"tag\""},
+        "tag": {"type": "string", "minLength": 4, "maxLength": 4},
+        "type": {"enum": [0, 1]},
+        "index": {"type": "integer", "minimum": 0},
+        "curve": {"enum": [1, 2]},
+        "interp": {"enum": ["linear", "ease"]},
+        "keys": {"type": "array", "minItems": 1, "items": {"type": "array", "minItems": 2, "maxItems": 3}}
+      },
+      "oneOf": [{"required": ["pane"]}, {"required": ["material"]}]
+    }
+  },
+  "properties": {
+    "name": {"type": "string", "maxLength": 23},
+    "size": {"$ref": "#/definitions/vec2"},
+    "part_size": {"$ref": "#/definitions/vec2"},
+    "color_space": {"enum": ["srgb", "linear"], "default": "srgb"},
+    "textures": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "oneOf": [{"required": ["png"]}, {"required": ["fill", "width", "height"]}],
+        "properties": {
+          "png": {"type": "string"},
+          "fill": {"type": "object", "required": ["color"], "additionalProperties": false,
+                   "properties": {"color": {"$ref": "#/definitions/rgba"}, "border": {"$ref": "#/definitions/rgba"},
+                                  "border_width": {"type": "integer", "minimum": 0}}},
+          "format": {"enum": ["rgba8", "bc1", "bc3", "bc4a", "bc4l", "bc5la"], "default": "rgba8"},
+          "tile": {"enum": ["linear", "1d", "tiled"], "default": "linear"},
+          "swizzle": {"type": "integer", "minimum": 0, "maximum": 7, "description": "tiled mode: pipe + 2 x bank swizzle"},
+          "width": {"type": "integer", "minimum": 1},
+          "height": {"type": "integer", "minimum": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "fonts": {"type": "array", "items": {"type": "string"}},
+    "materials": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "textures": {"type": "array", "maxItems": 3, "items": {
+            "type": "object", "required": ["texture"],
+            "properties": {
+              "texture": {"type": "string"},
+              "wrap": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+              "srt": {"type": "object", "properties": {
+                "translate": {"$ref": "#/definitions/vec2"}, "rotate": {"type": "number"}, "scale": {"$ref": "#/definitions/vec2"}}}
+            }}},
+          "black": {"$ref": "#/definitions/rgba"},
+          "white": {"$ref": "#/definitions/rgba"},
+          "flags_extra": {"type": "integer"},
+          "raw_tail": {"type": "string", "pattern": "^([0-9a-fA-F]{2})*$"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "panes": {"type": "array", "items": {"$ref": "#/definitions/pane"}},
+    "groups": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+    "animations": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["frames"],
+        "properties": {
+          "frames": {"type": "integer", "minimum": 1},
+          "start": {"type": "integer"},
+          "loop": {"type": "boolean"},
+          "order": {"type": "integer"},
+          "child_binding": {"type": "integer"},
+          "groups": {"type": "array", "items": {"type": "string"}},
+          "tracks": {"type": "array", "items": {"$ref": "#/definitions/track"}}
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

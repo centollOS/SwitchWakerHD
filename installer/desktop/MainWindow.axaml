@@ -30,6 +30,18 @@
           <StackPanel MaxWidth="680" HorizontalAlignment="Left">
             <TextBlock x:Name="TxtWelcomeH" Classes="h1"/>
             <TextBlock x:Name="TxtWelcomeBody" FontSize="15" LineHeight="22" Margin="0,0,0,22"/>
+            <!-- an update with the last build's choices (#110): shown when a newer release is out -->
+            <Border x:Name="UpdatePanel" Background="{StaticResource Card}" BorderBrush="{StaticResource Accent}" BorderThickness="1"
+                    CornerRadius="8" Padding="20,16" Margin="0,0,0,18" IsVisible="False">
+              <StackPanel Spacing="6">
+                <TextBlock x:Name="TxtUpdH" FontWeight="SemiBold" FontSize="17" Margin="0,0,0,2"/>
+                <TextBlock x:Name="TxtUpdBody" Classes="dim"/>
+                <TextBlock x:Name="TxtUpdChoices" Margin="0,0,0,4"/>
+                <TextBlock x:Name="TxtUpdSame" Classes="dim" Margin="0,0,0,6"/>
+                <TextBlock x:Name="TxtUpdMissing" Foreground="{StaticResource Warn}" Margin="0,0,0,6" IsVisible="False"/>
+                <Button x:Name="BtnUpdate" Classes="primary" HorizontalAlignment="Left" Click="BtnUpdate_Click"/>
+              </StackPanel>
+            </Border>
             <Border Background="{StaticResource Card}" CornerRadius="8" Padding="20,16" Margin="0,0,0,18">
               <StackPanel Spacing="6">
                 <TextBlock x:Name="TxtWelcomeListH" FontWeight="SemiBold" Margin="0,0,0,4"/>
@@ -76,6 +88,26 @@
             </Border>
             <TextBlock x:Name="TxtGameWarn" Foreground="{StaticResource Warn}" Margin="2,10,0,0" IsVisible="False"/>
 
+            <!-- Prepared graphics (issue #88): the release's shader template built into the console's shader cache -->
+            <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
+              <StackPanel>
+                <CheckBox x:Name="ChkShaders" IsChecked="True" Margin="0,0,0,4">
+                  <TextBlock x:Name="TxtShH" FontWeight="SemiBold"/>
+                </CheckBox>
+                <TextBlock x:Name="TxtShD" Classes="dim" FontSize="13" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
+
+            <!-- Older builds (#120): removed after a successful build -->
+            <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
+              <StackPanel>
+                <CheckBox x:Name="ChkOldBuilds" IsChecked="True" Margin="0,0,0,4">
+                  <TextBlock x:Name="TxtOldH" FontWeight="SemiBold"/>
+                </CheckBox>
+                <TextBlock x:Name="TxtOldD" Classes="dim" FontSize="13" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
+
             <!-- Optional: the GameCube sea minimap (a code mod built into the game) -->
             <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
               <StackPanel>
@@ -88,7 +120,22 @@
                   <Button x:Name="BtnMmFolder" Grid.Column="2" Classes="link" Margin="0,0,8,0" Click="BtnMmFolder_Click"/>
                   <Button x:Name="BtnMmPick" Grid.Column="3" Classes="secondary" Click="BtnMmPick_Click"/>
                 </Grid>
-                <TextBlock x:Name="TxtMmNote" Classes="dim" FontSize="12" Margin="0,8,0,0" IsVisible="False"/>
+              </StackPanel>
+            </Border>
+
+            <!-- Optional: Brazilian Portuguese (the player's own download of Triforce-Heroes' fan translation) -->
+            <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
+              <StackPanel>
+                <TextBlock x:Name="TxtPtH" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                <TextBlock x:Name="TxtPtD" Classes="dim" FontSize="13" Margin="0,0,0,6"/>
+                <Button x:Name="BtnPtLink" Classes="link" HorizontalAlignment="Left" Margin="0,0,0,10" Click="BtnPtLink_Click"/>
+                <Grid ColumnDefinitions="*,Auto,Auto,Auto">
+                  <TextBlock x:Name="TxtPtFile" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                             TextWrapping="NoWrap" Margin="0,0,12,0"/>
+                  <Button x:Name="BtnPtClear" Grid.Column="1" Classes="link" Margin="0,0,8,0" Click="BtnPtClear_Click" IsVisible="False"/>
+                  <Button x:Name="BtnPtFolder" Grid.Column="2" Classes="link" Margin="0,0,8,0" Click="BtnPtFolder_Click"/>
+                  <Button x:Name="BtnPtPick" Grid.Column="3" Classes="secondary" Click="BtnPtPick_Click"/>
+                </Grid>
               </StackPanel>
             </Border>
 
@@ -173,13 +220,6 @@
             </StackPanel>
             <TextBlock x:Name="TxtDoneBody" Margin="0,8,0,4"/>
             <TextBlock x:Name="TxtXferSize" Classes="dim" FontSize="13" Margin="0,0,0,14"/>
-            <!-- Linux only (gio): DBI's MTP responder -->
-            <RadioButton x:Name="XferMtp" Classes="card" GroupName="xfer" IsCheckedChanged="Xfer_Changed" IsVisible="False">
-              <StackPanel>
-                <TextBlock x:Name="TxtXferMtp" FontWeight="SemiBold"/>
-                <TextBlock x:Name="TxtXferMtpD" Classes="dim" FontSize="13"/>
-              </StackPanel>
-            </RadioButton>
             <RadioButton x:Name="XferSd" Classes="card" GroupName="xfer" IsCheckedChanged="Xfer_Changed">
               <StackPanel>
                 <TextBlock x:Name="TxtXferSd" FontWeight="SemiBold"/>
@@ -195,18 +235,6 @@
             <Border Background="{StaticResource Card}" BorderBrush="{StaticResource Line}" BorderThickness="1"
                     CornerRadius="8" Padding="20,16" Margin="0,4,0,0">
               <StackPanel>
-                <!-- DBI over USB (Linux) -->
-                <StackPanel x:Name="PanelMtp" IsVisible="False">
-                  <TextBlock x:Name="TxtMtpSteps" LineHeight="22" Margin="0,0,0,12"/>
-                  <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,8">
-                    <TextBlock x:Name="TxtMtpLabel" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                    <Button x:Name="BtnMtpRefresh" Grid.Column="1" Classes="link" Click="BtnDevRefresh_Click"/>
-                  </Grid>
-                  <StackPanel x:Name="MtpList"/>
-                  <TextBlock x:Name="TxtMtpNone" Classes="dim" Margin="0,0,0,10"/>
-                  <TextBlock x:Name="TxtMtpReplace" Classes="dim" FontSize="12" Margin="0,0,0,10"/>
-                  <Button x:Name="BtnCopyMtp" Classes="primary" HorizontalAlignment="Left" Click="BtnCopyMtp_Click"/>
-                </StackPanel>
                 <!-- The microSD in the computer: a card reader, or hekate's USB mass storage -->
                 <StackPanel x:Name="PanelSd" IsVisible="False">
                   <TextBlock x:Name="TxtSdHint" LineHeight="21" Margin="0,0,0,12"/>
@@ -241,6 +269,7 @@
                 <TextBlock x:Name="TxtNext4" Classes="dim"/>
                 <TextBlock x:Name="TxtFwdDone" Margin="0,4,0,0" IsVisible="False"/>
                 <TextBlock x:Name="TxtMmDone" Margin="0,4,0,0" IsVisible="False"/>
+                <TextBlock x:Name="TxtPtDone" Margin="0,4,0,0" IsVisible="False"/>
                 <TextBlock x:Name="TxtGameFilesDone" Margin="0,4,0,0" TextWrapping="Wrap" IsVisible="False"/>
               </StackPanel>
             </Border>

@@ -10,8 +10,8 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
-        Str.Override(DesktopStrings.For(OperatingSystem.IsMacOS()));
-        Str.Es = SystemLanguage().StartsWith("es", StringComparison.OrdinalIgnoreCase);
+        Str.Override(DesktopStrings.For(OperatingSystem.IsMacOS()), DesktopStrings.PtFor(OperatingSystem.IsMacOS()));
+        Str.Current = Str.FromCode(SystemLanguage());
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 

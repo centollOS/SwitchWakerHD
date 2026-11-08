@@ -1,7 +1,11 @@
+#include "gfx/depth_peek.h"
+#include "platform/present_observer.h"
+#include "platform/r5_slow_render.h"
 #include "gfx/display_modes.h"
 #include "../game_clock.h"
 #include "vsync_pacing.h"
 #include "../mods/fast_forward.h"
+#include "../mods/mod_actor_shadow_proof.h"
 #include "../platform/host.h"
 #ifdef __APPLE__
 #include <pthread/qos.h>
@@ -13,24 +17,35 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <atomic>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <string>
+#include <vector>
 #include <vector>
 
 #include "gx2.h"
 #include "gx2_cmd.h"
+#include "submitted_uniforms.h"
+#include "../cloud_proto.h"
 #include "gx2_regs.h"
 #include "gx2_texture_regs.h"
 #include "register_blocks.h"
 #include "shader_key_dirty.h"
 #include "backend_hooks.h"
+#include "state_groups.h"
+#include "register_class.h"
+#include "thread_identity.h"
 #ifdef WWHD_HAS_VULKAN
 #include "gfx/vulkan/api.h"
+#include "gfx/vulkan/background_checkpoint.h"
 #endif
 #include "runtime.h"
 #include "savestate.h"
+#include "state_metadata_validation.h"
 #include "guest_addr.h"
 #include "../aspect.h"
 #include "gfx/stereo.h"
@@ -61,7 +76,7 @@ static const std::vector<uint8> g_reg_cat = [] {
     for (uint32 r = mmCB_COLOR0_BASE; r < mmCB_COLOR0_FRAG + 8; r++) add(r, kRegCatTargets);  // BASE..FRAG, 8 each
     for (uint32 r : {uint32(REGADDR::CB_COLOR_CONTROL), uint32(REGADDR::CB_TARGET_MASK), uint32(REGADDR::DB_DEPTH_CONTROL),
                      uint32(REGADDR::PA_SC_GENERIC_SCISSOR_BR)})
-        add(r, kRegCatTargets);
+        add(r, kRegCatTargetState);  // (the target memo compares their values: WWHD_DK_TARGET_MEMO2)
     for (uint32 r : {uint32(REGADDR::PA_SU_SC_MODE_CNTL), uint32(REGADDR::PA_CL_CLIP_CNTL),
                      uint32(REGADDR::PA_SU_POLY_OFFSET_FRONT_OFFSET), uint32(REGADDR::PA_SU_POLY_OFFSET_FRONT_SCALE),
                      uint32(REGADDR::PA_SU_POLY_OFFSET_CLAMP), uint32(REGADDR::DB_DEPTH_CONTROL),
@@ -95,31 +110,18 @@ static bool program_reg(uint32 reg) {
            (reg >= mmSQ_PGM_CF_OFFSET_PS && reg <= mmSQ_PGM_CF_OFFSET_FS);
 }
 
-static bool shader_irrelevant(uint32 reg) {
+// shader_irrelevant_reg (register_class.h); WWHD_VK_SHADER_ADDRESS_MEMO=1 (Vulkan) adds the texture
+// address words, which bind_stage resolves freshly
+static bool shader_address_memo() {
 #ifdef WWHD_HAS_VULKAN
-    // Vulkan resolves texture addresses freshly in bind_stage. These words do
-    // not participate in shader translation; keep Metal's broader dirty gate.
     static const bool addressMemo = [] {
         const char* e = getenv("WWHD_VK_SHADER_ADDRESS_MEMO");
         return render::vulkan() && e && !strcmp(e, "1");
     }();
-    if (addressMemo)
-        for (uint32 base : {uint32(REGADDR::SQ_TEX_RESOURCE_WORD0_N_PS),
-                            uint32(REGADDR::SQ_TEX_RESOURCE_WORD0_N_VS),
-                            uint32(REGADDR::SQ_TEX_RESOURCE_WORD0_N_GS)})
-            if (reg >= base && reg < base + 7 * 18) {
-                uint32 word = (reg - base) % 7;
-                if (word == 2 || word == 3) return true;
-            }
-#endif
-    if (reg >= mmSQ_ALU_CONSTANT0_0 && reg < mmSQ_ALU_CONSTANT0_0 + 0x1000) return true;
-    for (uint32 base : {(uint32)mmSQ_VTX_UNIFORM_BLOCK_START, (uint32)mmSQ_PS_UNIFORM_BLOCK_START, (uint32)mmSQ_GS_UNIFORM_BLOCK_START})
-        if (reg >= base && reg < base + 7 * 16) return true;
-    if (reg >= mmSQ_VTX_ATTRIBUTE_BLOCK_START && reg < mmSQ_VTX_ATTRIBUTE_BLOCK_START + 7 * 16) {
-        uint32 w = (reg - mmSQ_VTX_ATTRIBUTE_BLOCK_START) % 7;
-        return w != 2;  // word 2 holds the stride
-    }
+    return addressMemo;
+#else
     return false;
+#endif
 }
 // How a register change counts for the shader-state counters, looked up per register (the game sets
 // millions of registers per second): 0 = not at all, else counted; kRegMasked: only changes of the
@@ -127,8 +129,9 @@ static bool shader_irrelevant(uint32 reg) {
 // With the backend's shader_key_mask (backend_hooks.h; deko3d's: the fields its shader key ignores, texture
 // addresses, viewport, blend, scissor, the alpha-test reference...) those don't count, so consecutive draws
 // that only change them reuse the shader lookup.
-// (bits 3-5: the register's categories, gx2.h RegCategory: one table and one pass in apply_regs)
+// (bits 3-7: the register's categories, gx2.h RegCategory: one table and one pass in apply_regs)
 enum : uint8 { kRegCounted = 1, kRegMasked = 2, kRegProgram = 4, kRegShaderBits = 7, kRegCatShift = 3 };
+static_assert(kRegCats <= 8 - kRegCatShift, "the categories fit in the kind byte");
 struct RegClasses {
     std::vector<uint8> kind = std::vector<uint8>(kNumRegs);
     std::vector<uint32> mask = std::vector<uint32>(kNumRegs);
@@ -140,7 +143,7 @@ static const RegClasses& reg_classes() {
         RegClasses c;
         for (uint32 reg = 0; reg < kNumRegs; reg++) {
             uint32 mask = ~0u;
-            uint8 kind = shader_irrelevant(reg) ? 0 : kRegCounted;
+            uint8 kind = shader_irrelevant_reg(reg, shader_address_memo()) ? 0 : kRegCounted;
             if (kind && keyMask && keyMask(reg, mask)) kind = mask ? kRegCounted | kRegMasked : 0;
             if (kind && program_reg(reg)) kind |= kRegProgram;
             c.kind[reg] = uint8(kind | g_reg_cat[reg] << kRegCatShift);
@@ -152,6 +155,14 @@ static const RegClasses& reg_classes() {
 }
 
 static ShaderKeyDirtyStats shaderKeyDirtyStats;
+
+// register state groups (state_groups.h): the continued-draw fast path of the Vulkan renderer
+uint64_t g_full_state_version = 1;
+uint32_t g_dirty_groups = 0;
+static inline void note_full_state_change() {
+    g_dirty_groups |= 1u << kSgOther;
+    ++g_full_state_version;
+}
 ShaderKeyDirtyStats shader_key_dirty_stats() { return shaderKeyDirtyStats; }
 
 // which register changes count for the shader key (backend_hooks.h), picked once the renderer runs
@@ -160,38 +171,93 @@ static ShaderKeyMask shader_key_mask() {
     return keyMask;
 }
 
+// ---------------------------------------------------------------- register classes
+// register_class.h: per-register tables built on the first register command (the renderer is
+// chosen by then), with the switches the apply paths read, so they are not looked up per write
+static RegisterClasses g_reg_classes;
+static const uint8* const g_reg_class = g_reg_classes.cls;
+static ShaderKeyBits g_key_bits;     // shader_key_mask(): set-context restore and bulk writes
+static ShaderKeyBits g_vk_key_bits;  // vulkan_shader_key_mask with WWHD_VK_SHADER_KEY_DIRTY=1: small writes
+static bool g_reg_tables_ready = false;
+static bool g_fused_small = false;    // Vulkan: the per-word path for writes of up to 16 words
+static bool g_key_dirty = false;      // WWHD_VK_SHADER_KEY_DIRTY=1
+static bool g_collect_stats = false;  // WWHD_VK_STATS (Vulkan)
+static bool g_classify = false;       // render-thread profiler on (rprof::enabled(); updated at each swap)
+
+static void build_reg_tables() {
+    g_reg_classes.build(shader_address_memo(), [](uint32 r) { return rprof::fast_class_reg(r); });
+    g_classify = rprof::enabled();
+#ifdef WWHD_HAS_VULKAN
+    {
+        const char* e = getenv("WWHD_VK_FUSE_SMALL_REGS");
+        // Enabled by default; explicit zero retains the original bulk path.
+        g_fused_small = render::vulkan() && (!e || strcmp(e, "0") != 0);
+        e = getenv("WWHD_VK_SHADER_KEY_DIRTY");
+        g_key_dirty = e && !strcmp(e, "1");
+        g_collect_stats = render::vulkan() && getenv("WWHD_VK_STATS") != nullptr;
+    }
+    if (g_key_dirty) g_vk_key_bits.build(vulkan_shader_key_mask);
+#endif
+    g_key_bits.build(shader_key_mask());
+    g_reg_tables_ready = true;
+}
+static inline void ensure_reg_tables() {
+    if (__builtin_expect(!g_reg_tables_ready, 0)) build_reg_tables();
+}
+
+static inline void note_state_change(uint8 cls, uint32 old, uint32 value) {
+    const uint32 g = state_group_change(cls & kRcGroup, old, value);
+    g_dirty_groups |= 1u << g;
+    g_full_state_version += !((kSgContinuedMask >> g) & 1);
+}
+static inline void classify_reg(uint8 cls, uint32 reg) {  // render-thread profiler's draw classifier
+    if (cls & kRcProfFast) rprof::g_reg_dirty |= 1;
+    else rprof::note_other_reg(reg);
+}
+
+// register writes copy a few words mostly (display lists set registers in groups of 1-7): short
+// ones are copied inline instead of calling memcpy
+static inline void copy_words(uint32* d, const uint32* v, uint32 n) {
+    if (n > 8) {
+        memcpy(d, v, n * 4);
+        return;
+    }
+    for (uint32 i = 0; i < n; ++i) d[i] = v[i];
+}
+// (this fork) the same for the comparison before them: memcmp was ~4% of the Switch's render thread, most
+// of it on writes of a few words
+static inline bool same_words(const uint32* d, const uint32* v, uint32 n) {
+    if (n > 8) return memcmp(d, v, n * 4) == 0;
+    uint32 diff = 0;
+    for (uint32 i = 0; i < n; ++i) diff |= d[i] ^ v[i];
+    return diff == 0;
+}
+
 #ifdef WWHD_HAS_VULKAN
 static void apply_small_regs(uint32 first, const uint32* v, uint32 n) {
-    static const bool keyDirty = [] {
-        const char* e = getenv("WWHD_VK_SHADER_KEY_DIRTY");
-        return e && !strcmp(e, "1");
-    }();
-    static const bool collectStats = getenv("WWHD_VK_STATS") != nullptr;
-    const bool classify = rprof::enabled();
+    const bool keyDirty = g_key_dirty, collectStats = g_collect_stats, classify = g_classify;
     bool changed = false, baselineBump = false, actualBump = false;
     uint64_t maskedWords = 0;
     for (uint32 i = 0; i < n; ++i) {
         const uint32 reg = first + i, value = v[i], old = g_regs[reg];
         if (old != value) {
+            const uint8 cls = g_reg_class[reg];
             changed = true;
-            if (const uint32 cats = g_reg_cat[reg]) bump_categories(cats);
-            if (classify) {
-                if (rprof::fast_class_reg(reg)) rprof::g_reg_dirty |= 1;
-                else rprof::note_other_reg(reg);
-            }
-            if ((collectStats || !actualBump) && !shader_irrelevant(reg)) {
+            note_state_change(cls, old, value);
+            if (const uint32 cats = g_reg_cat[reg]) bump_categories(cats);  // (this fork)
+            if (classify) classify_reg(cls, reg);
+            if ((collectStats || !actualBump) && !(cls & kRcShaderIrrelevant)) {
                 baselineBump = true;
-                uint32 mask;
-                if (keyDirty && vulkan_shader_key_mask(reg, mask) && !((old ^ value) & mask)) {
+                if (keyDirty && !g_vk_key_bits.changed(reg, old, value)) {
                     if (collectStats) ++maskedWords;
                 } else actualBump = true;
             }
             g_regs[reg] = value;
         }
-        // Shadow can differ even when registers already match: draw mutates
-        // primitive type directly, and context setup initializes only shadow.
-        if (g_shadow) g_shadow[reg] = value;
     }
+    // Shadow can differ even when registers already match: draw mutates
+    // primitive type directly, and context setup initializes only shadow.
+    if (g_shadow) copy_words(&g_shadow[first], v, n);
     if (actualBump) { ++g_shader_state_gen; ++g_shader_regs_gen; }
     if (changed && collectStats) {
         ++shaderKeyDirtyStats.changedBatches;
@@ -205,45 +271,71 @@ static void apply_small_regs(uint32 first, const uint32* v, uint32 n) {
 
 static void apply_regs(uint32 first, const uint32* v, uint32 n) {
     if (first >= kNumRegs || n > kNumRegs - first) return;
+    ensure_reg_tables();
     g_register_blocks.touch(first, n);
-    // (this fork) uniform registers (often hundreds of words a call) never move the shader-state counters,
-    // so the comparison that decides those is skipped: compared and then copied, they were ~15% of the
-    // render thread on the desktop
-    if (!n) return;
-    if (first >= (uint32)mmSQ_ALU_CONSTANT0_0 && first + n <= (uint32)mmSQ_ALU_CONSTANT0_0 + 0x1000) {
-        memcpy(&g_regs[first], v, n * 4);
-        if (g_shadow) memcpy(&g_shadow[first], v, n * 4);
+    // ALU constants (uniform registers, most of the register traffic): continued state (one dirty
+    // group), shader-irrelevant, a buffer/constant word for the draw classifier; nothing else to
+    // decide per word. (Not with WWHD_VK_STATS, which counts these batches too.)
+    if (first >= mmSQ_ALU_CONSTANT0_0 && first + n <= mmSQ_ALU_CONSTANT0_0 + 0x1000 && !g_collect_stats) {
+        uint32* d = &g_regs[first];
+#ifdef __SWITCH__
+        // (this fork) copied without the comparison: nothing on the Switch reads the dirty group, and compared
+        // then copied these were the render thread's biggest memcmp (lava: +1.2% of its time)
+        g_dirty_groups |= 1u << kSgAluConst;
+        if (g_classify) rprof::g_reg_dirty |= 1;
+        copy_words(d, v, n);
+        if (g_shadow) copy_words(&g_shadow[first], v, n);
+        return;
+#endif
+        if (memcmp(d, v, n * 4) != 0) {
+            g_dirty_groups |= 1u << kSgAluConst;
+            if (g_classify) rprof::g_reg_dirty |= 1;
+            copy_words(d, v, n);
+        }
+        if (g_shadow) copy_words(&g_shadow[first], v, n);
         return;
     }
 #ifdef WWHD_HAS_VULKAN
     // Vulkan renderer only (the Metal renderer keeps the original bulk path)
-    static const bool fusedSmall = [] {
-        const char* e = getenv("WWHD_VK_FUSE_SMALL_REGS");
-        // Enabled by default; explicit zero retains the original bulk path.
-        return render::vulkan() && (!e || strcmp(e, "0") != 0);
-    }();
-    if (fusedSmall && n <= 16) {
+    if (g_fused_small && n <= 16) {
         apply_small_regs(first, v, n);
         return;
     }
 #endif
-    if (memcmp(&g_regs[first], v, n * 4) != 0) {
-        if (rprof::enabled())  // draw classifier (render_prof.h)
-            for (uint32 i = 0; i < n; i++)
-                if (g_regs[first + i] != v[i]) {
-                    if (rprof::fast_class_reg(first + i)) rprof::g_reg_dirty |= 1;
-                    else rprof::note_other_reg(first + i);
-                }
-        const ShaderKeyMask keyMask = shader_key_mask();
-        static const bool collectStats = render::vulkan() && getenv("WWHD_VK_STATS") != nullptr;
-        if(collectStats) {
+    if (!same_words(&g_regs[first], v, n)) {  // (this fork: inline for short writes)
+        const bool classify = g_classify;
+        // (this fork) the shader-state counters and the register categories (gx2.h) from one table
+        // (reg_classes: with the backend's shader_key_mask), in the same pass over the changed registers
+        const RegClasses& classes = reg_classes();
+        bool stateBump = false, regsBump = false;
+        uint32 cats = 0;
+        for (uint32 i = 0; i < n; i++) {
+            const uint32 reg = first + i, old = g_regs[reg];
+            if (old == v[i]) continue;
+#ifdef __SWITCH__
+            // (this fork) the state groups are the Vulkan renderer's: no class table lookup per changed register
+            if (classify) classify_reg(g_reg_class[reg], reg);
+#else
+            const uint8 cls = g_reg_class[reg];
+            note_state_change(cls, old, v[i]);
+            if (classify) classify_reg(cls, reg);
+#endif
+            const uint8 c = classes.kind[reg];
+            cats |= c >> kRegCatShift;
+            if (!(c & kRegShaderBits) || ((c & kRegMasked) && !((old ^ v[i]) & classes.mask[reg]))) continue;
+            stateBump = true;
+            if (!(c & kRegProgram)) regsBump = true;
+        }
+        if (cats) bump_categories(cats);
+        const bool collectStats = g_collect_stats;
+        if(collectStats) {  // (this fork: otherwise the counters above)
             bool baselineBump = false, actualBump = false;
             uint64_t maskedWords = 0;
             for(uint32 i = 0; i < n; ++i) {
                 uint32 reg = first + i;
-                if(g_regs[reg] == v[i] || shader_irrelevant(reg)) continue;
+                if(g_regs[reg] == v[i] || (g_reg_class[reg] & kRcShaderIrrelevant)) continue;
                 baselineBump = true;
-                if(!shader_key_changed(keyMask, reg, g_regs[reg], v[i])) {
+                if(!g_key_bits.changed(reg, g_regs[reg], v[i])) {
                     if(collectStats) ++maskedWords;
                 } else actualBump = true;
                 if(actualBump && !collectStats) break;
@@ -257,24 +349,9 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
                 shaderKeyDirtyStats.maskedWords += maskedWords;
             }
         } else
-        // (this fork; writes that lie wholly in the uniform registers took the fast path above): the shader-state counters
-        // and the register categories (gx2.h) from one table, in one pass over the changed registers
         {
-            const RegClasses& classes = reg_classes();
-            bool stateBump = false, regsBump = false;
-            uint32 cats = 0;
-            for (uint32 i = 0; i < n; i++) {
-                const uint32 reg = first + i, old = g_regs[reg];
-                if (old == v[i]) continue;
-                const uint8 c = classes.kind[reg];
-                cats |= c >> kRegCatShift;
-                if (!(c & kRegShaderBits) || ((c & kRegMasked) && !((old ^ v[i]) & classes.mask[reg]))) continue;
-                stateBump = true;
-                if (!(c & kRegProgram)) regsBump = true;
-            }
-            g_shader_state_gen += stateBump;
+            g_shader_state_gen += stateBump;  // (this fork)
             g_shader_regs_gen += regsBump;
-            if (cats) bump_categories(cats);
         }
         memcpy(&g_regs[first], v, n * 4);
     }
@@ -282,14 +359,171 @@ static void apply_regs(uint32 first, const uint32* v, uint32 n) {
 }
 
 // ---------------------------------------------------------------- display list recording
-struct Recording {
+// Display lists being recorded: one slot per recording thread, found by the thread's identity (its
+// thread pointer where there is one) instead of a thread_local, which cost a TLS lookup on every
+// emit of every thread (in a dlopened library, as on Android, a call into the TLS resolver). A slot
+// is written only by its owner; an emit while no thread records skips the scan. The owners sit
+// apart from the positions, which the recording thread advances per command. Idea from the
+// GreenNaugahyde Android fork (v0.9.5).
+struct alignas(64) Recording {
     uint32 start = 0, pos = 0, end = 0;
+    uint32 dropped = 0;  // bytes of commands that didn't fit (said once, when the list ends)
     uint32 last = 0;  // the last recorded command's header (round 45: register writes merge into it), 0 = none
     uint32 recorded = 0, merged = 0;  // (the [gx2] line's counts: per thread, added up at GX2EndDisplayList)
 };
-static thread_local Recording t_rec;
+constexpr int kMaxRecorders = 64;
+alignas(64) static std::atomic<uintptr_t> g_rec_owner[kMaxRecorders];
+static Recording g_recs[kMaxRecorders];
+alignas(64) static std::atomic<int> g_recording{0};  // slots in use
+static std::atomic<int> g_rec_slots{0};               // slots ever claimed (the scan's end)
+static inline uintptr_t self_id() { return thread_identity(); }
+static inline Recording* find_rec(uintptr_t id) {
+    for (int i = 0, n = g_rec_slots.load(std::memory_order_relaxed); i < n; i++)
+        if (g_rec_owner[i].load(std::memory_order_relaxed) == id) return &g_recs[i];
+    return nullptr;
+}
+#ifdef __SWITCH__
+// (this fork) each thread's own slot, kept by the thread: the main thread records ~70,000 GX2 calls a frame in
+// the lava room and the scan above cost each of them; a thread_local is one TPIDRRO_EL0 read in this static
+// executable (upstream avoids it for dlopened libraries)
+static thread_local Recording* t_my_rec = nullptr;
+#endif
+static inline Recording* recording() {
+#ifdef __SWITCH__
+    return t_my_rec;
+#endif
+    if (!g_recording.load(std::memory_order_relaxed)) return nullptr;
+    return find_rec(self_id());
+}
+static Recording* claim_rec() {
+    const uintptr_t id = self_id();
+    if (Recording* r = find_rec(id)) {
+#ifdef __SWITCH__
+        t_my_rec = r;  // (this fork)
+#endif
+        return r;
+    }
+    for (int i = 0; i < kMaxRecorders; i++) {
+        uintptr_t free = 0;
+        if (g_rec_owner[i].compare_exchange_strong(free, id)) {
+            int n = g_rec_slots.load();
+            while (n < i + 1 && !g_rec_slots.compare_exchange_weak(n, i + 1)) {}
+            g_recording++;
+#ifdef __SWITCH__
+            t_my_rec = &g_recs[i];  // (this fork)
+#endif
+            return &g_recs[i];
+        }
+    }
+    LOG("[gx2] too many threads recording display lists");
+    return nullptr;
+}
+static void release_rec(Recording* r) {
+    *r = Recording{};
+#ifdef __SWITCH__
+    if (t_my_rec == r) t_my_rec = nullptr;  // (this fork: always the owner)
+#endif
+    g_rec_owner[r - g_recs].store(0);
+    g_recording--;
+}
+// a display list is being recorded on this thread
+bool recording_display_list() {
+    const Recording* rec = recording();
+    return rec && rec->start;
+}
+// a command that does not fit: dropped, counted for the line at GX2EndDisplayList
+static void record_overflow(Recording* rec, uint32 bytes) {
+    if (!rec->dropped) {
+        static std::atomic<unsigned> full{0};
+        if (full.fetch_add(1) < 8) LOG("[gx2] display list at %08X (%u bytes) is full; its further commands are dropped", rec->start, rec->end - rec->start);
+    }
+    rec->dropped += bytes;  // the total is said at GX2EndDisplayList (a line per command filled the disk)
+}
 
 static void execute_one(Op op, const uint32* p, uint32 n);
+
+// ---------------------------------------------------------------- submitted uniform blocks
+// (submitted_uniforms.h) WWHD_GX2_SUBMITTED_UNIFORMS=0 turns it off: draws in display lists then read
+// uniform blocks from guest memory whenever the render thread executes them (the old behaviour).
+static bool submitted_uniforms_compute() {
+    static const bool on = [] {
+        const char* e = getenv("WWHD_GX2_SUBMITTED_UNIFORMS");
+#ifdef __SWITCH__
+        // (this fork) off by default: deko3d does not read the snapshots (only the Vulkan and Metal renderers do), and
+        // copying them cost the Switch's main thread ~2.4 ms a frame in the lava room (memmove, sort, dedupe, lock)
+        const bool v = e && atoi(e) != 0;
+#else
+        const bool v = !e || atoi(e) != 0;
+#endif
+        LOG("[gx2] display-list uniform blocks: %s", v ? "as submitted (default)" : "read when executed (WWHD_GX2_SUBMITTED_UNIFORMS=0)");
+        return v;
+    }();
+    return on;
+}
+// (this fork) asked at every uniform-block bind and display-list call: a plain read after the first
+int g_submitted_uniforms = -1;  // (gx2_cmd.h)
+static inline bool submitted_uniforms_on() {
+    int v = g_submitted_uniforms;
+    if (__builtin_expect(v < 0, 0)) g_submitted_uniforms = v = submitted_uniforms_compute() ? 1 : 0;
+    return v != 0;
+}
+static submitted::DisplayListIndex g_dl_index;
+// per recording slot: the blocks bound and lists called while recording
+static std::vector<submitted::Range> g_rec_blocks[kMaxRecorders];
+static std::vector<uint32> g_rec_calls[kMaxRecorders];
+static std::mutex g_snap_mutex;
+static std::vector<submitted::Snapshot*> g_snap_free;
+static uint64_t g_snap_ids = 0;  // submitting thread (the game's GX2 thread)
+static submitted::Snapshot* g_snap_active = nullptr;  // render thread
+
+void note_uniform_block_on(uint32 addr, uint32 size) {
+    if (!submitted_uniforms_on()) return;
+    if (Recording* rec = recording(); rec && rec->start) g_rec_blocks[rec - g_recs].push_back({addr, size});
+}
+const uint8_t* submitted_uniform_block(uint32 addr, uint32 size) {
+    return g_snap_active ? g_snap_active->find(addr, size) : nullptr;
+}
+uint64_t submitted_uniforms_id() { return g_snap_active ? g_snap_active->id() : 0; }
+static bool snapshot_readable(uint32 addr, uint32 size) {
+    const uint64_t end = uint64_t(addr) + size + submitted::Snapshot::kTail;
+    auto in = [&](uint64_t lo, uint64_t hi) { return addr >= lo && end <= hi; };
+    return in(mem::kMem2Start, mem::kMem2End) || in(mem::kRuntimeStart, mem::kRuntimeEnd) ||
+           in(mem::kMem1, uint64_t(mem::kMem1) + mem::kMem1Size) || in(mem::kFgBucket, uint64_t(mem::kFgBucket) + mem::kFgBucketSize);
+}
+// a display-list call from the command stream: its blocks as they are now go with it
+static submitted::Snapshot* submit_snapshot(uint32 list, uint32 size) {
+    if (!submitted_uniforms_on()) return nullptr;
+    static thread_local std::vector<submitted::Range> ranges;
+    ranges.clear();
+    if (!g_dl_index.blocks(list, size, ranges) || ranges.empty()) return nullptr;
+    submitted::Snapshot* s = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_snap_mutex);
+        if (!g_snap_free.empty()) { s = g_snap_free.back(); g_snap_free.pop_back(); }
+    }
+    if (!s) s = new submitted::Snapshot;
+    const size_t bytes = s->build(++g_snap_ids, ranges, [](uint32 a) { return (const uint8_t*)mem::ptr(a); }, snapshot_readable);
+    // debug: WWHD_GX2_SUBMITTED_STATS=1 logs the copies made, every 1000 submissions
+    static const bool stats = getenv("WWHD_GX2_SUBMITTED_STATS") != nullptr;
+    if (stats) {
+        static uint64_t blocks = 0, total = 0;
+        blocks += s->blocks();
+        total += bytes;
+        if (g_snap_ids % 1000 == 0) {
+            LOG("[gx2] submitted uniforms: %llu submissions, last 1000: %.1f blocks and %.1f KB each; %zu lists indexed",
+                (unsigned long long)g_snap_ids, blocks / 1000.0, total / 1000.0 / 1024, g_dl_index.size());
+            blocks = total = 0;
+        }
+    }
+    return s;
+}
+static void set_active_snapshot(submitted::Snapshot* s) {  // render thread
+    if (g_snap_active) {
+        std::lock_guard<std::mutex> lk(g_snap_mutex);
+        g_snap_free.push_back(g_snap_active);
+    }
+    g_snap_active = s;
+}
 
 // ---------------------------------------------------------------- render thread
 // Like the real GPU, command execution runs asynchronously to the game: GX2 calls append to a
@@ -315,10 +549,30 @@ struct alignas(64) RenderProgress {
 };
 static RenderProgress g_progress;
 
+static int64_t steady_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+#ifdef __SWITCH__
+// the render thread's handle: the debug server's "rtcores" moves it between cores while the game runs (a test)
+uint32_t g_render_thread_handle = 0;
+#endif
 static void render_thread_main() {
     host::set_thread_name("GX2 render");
-    host::place_thread(2);  // the render thread: host core 2, or 0 and 2 with WWHD_CORE_LAYOUT
-    host::boost_thread_priority();
+    host::place_thread(2);  // (this fork) the render thread: host core 2, or 0 and 2 with WWHD_CORE_LAYOUT
+#ifdef __SWITCH__
+    g_render_thread_handle = threadGetCurHandle();
+    // (this fork) one core, not cores 0 and 2: allowed both, the thread moved between them and lost its caches each
+    // time; pinned to either core it was 0.4-0.5 fps faster at Outset (2026-10-22, A/B in one boot: core 2 26.18,
+    // core 0 26.15, cores 0 and 2 25.74). WWHD_RENDER_PIN=0 ([dev]) restores the two-core mask.
+    if (host::core_layout_on()) {
+        const char* e = getenv("WWHD_RENDER_PIN");
+        if (!(e && *e == '0')) host::set_thread_cores(2, 0x4);
+    }
+#endif
+    // the game thread waits at its swap for depth-peek answers: wake this thread's command wait so it
+    // retires the copies (gfx/depth_peek.h)
+    gfx::depth_peek::set_render_wake([] { { std::lock_guard<std::mutex> lk(g_q_mutex); } g_q_cv.notify_all(); });
+    if (!r5_slow_render::apply("GX2 render")) host::boost_thread_priority();
     perf_hint::add_current_thread();
     thread_sampler::add_current_thread("render");
     for (;;) {
@@ -329,7 +583,39 @@ static void render_thread_main() {
                 g_progress.idle.store(true, std::memory_order_relaxed);
                 auto waitStart = std::chrono::steady_clock::now();
                 const uint64_t idle = rprof::enabled() ? rprof::now_ns() : 0;
-                g_q_cv.wait(lk, [] { return !g_q_pending.empty(); });
+                // even frame delivery: a held frame is presented at its time while no commands come
+                // (a timed wait wakes up to a millisecond late: it ends 0.3 ms early, the rest yields)
+                for (int64_t due; g_q_pending.empty() && (due = render::present_due()) != 0;) {
+                    const int64_t now = steady_ns();
+                    if (now < due - 300'000) {
+                        g_q_cv.wait_until(lk, std::chrono::steady_clock::time_point(std::chrono::nanoseconds(due - 300'000)));
+                        continue;
+                    }
+                    if (now < due) {
+                        lk.unlock();
+                        std::this_thread::yield();
+                        lk.lock();
+                        continue;
+                    }
+                    lk.unlock();
+                    {
+                        std::lock_guard<std::recursive_mutex> ex(g_exec_mutex);
+                        render::with_autorelease_pool([] { render::service_present(); });
+                    }
+                    lk.lock();
+                }
+                // the game waits at its swap for depth-peek answers: retire their copy now (depth_peek.h)
+                while (g_q_pending.empty() && gfx::depth_peek::wanted()) {
+                    lk.unlock();
+                    {
+                        std::lock_guard<std::recursive_mutex> ex(g_exec_mutex);
+                        render::with_autorelease_pool([] { render::peek_retire(); });
+                    }
+                    lk.lock();
+                    if (gfx::depth_peek::wanted()) g_q_cv.wait_for(lk, std::chrono::microseconds(200));
+                }
+                g_q_cv.wait(lk, [] { return !g_q_pending.empty() || gfx::depth_peek::wanted(); });
+                if (g_q_pending.empty()) { lk.unlock(); continue; }  // woken for depth-peek answers: retire them
                 if (idle) rprof::add_idle(rprof::now_ns() - idle);
                 g_progress.idle.store(false, std::memory_order_relaxed);
                 g_render_wait_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -447,11 +733,14 @@ static bool stage_regs(Staging& s, uint32 first, const uint32* values, uint32 co
     return false;
 }
 
-static void enqueue(Op op, const uint32* payload, uint32 n) {
+static void start_render_thread() {
     static std::once_flag once;
     std::call_once(once, [] {
         host::start_thread([] { exception_report::boundary("GX2 render thread", render_thread_main); }, 8 << 20);
     });
+}
+static void enqueue(Op op, const uint32* payload, uint32 n) {
+    start_render_thread();
     Staging& s = t_stage;
     if (s.eligible < 0) {
         s.eligible = staging_on() && threads::current_core() == 1;
@@ -539,43 +828,75 @@ static void render_sync(int site = kSyncShutdown) {
     g_q_done_cv.wait(lk, [&] { return g_fence_done >= id; });
 }
 
+std::string (*g_draw_context_provider)() = nullptr;
+static std::mutex g_draw_context_mutex;
+static std::vector<std::string> g_draw_context_texts{"-"};
+static std::unordered_map<std::string, uint32_t> g_draw_context_ids;
+static std::atomic<uint32_t> g_draw_context{0};
+std::string current_draw_context() {
+    std::lock_guard<std::mutex> lk(g_draw_context_mutex);
+    const uint32_t id = g_draw_context.load(std::memory_order_relaxed);
+    return id < g_draw_context_texts.size() ? g_draw_context_texts[id] : "-";
+}
+// (this fork) emit's debug draw context (WWHD_VK_PIPELINE_WHO), out of its hot path
+[[maybe_unused]] static __attribute__((noinline, cold)) void describe_draw_context(Op op) {
+    static thread_local bool describing = false;
+    if (describing || !(op == OP_DRAW || op == OP_DRAW_INDEXED || op == OP_CALL) || (recording() && recording()->start))
+        return;
+    describing = true;
+    const std::string text = g_draw_context_provider();
+    uint32 id;
+    {
+        std::lock_guard<std::mutex> lk(g_draw_context_mutex);
+        auto [it, fresh] = g_draw_context_ids.try_emplace(text, uint32_t(g_draw_context_texts.size()));
+        if (fresh) g_draw_context_texts.push_back(text);
+        id = it->second;
+    }
+    emit(OP_DEBUG_CONTEXT, &id, 1);
+    describing = false;
+}
 void emit(Op op, const uint32* payload, uint32 n) {
-    if (t_rec.start) {
-        t_rec.recorded++;
-        // (round 45) a register write merged into the list's last command, as in the staging buffer: most of the
-        // game's commands come from display lists (~44,000 executed a frame at Outset for ~85 staged calls)
-        if (g_coalesce && op == OP_SET_REGS && n >= 2 && t_rec.last) {
-            uint32* hdr = (uint32*)mem::ptr(t_rec.last);
+    // (this fork) the debug draw context (WWHD_VK_PIPELINE_WHO) in a cold function: here only the provider's null
+    // check (the thread_local it reads is a call on the Switch, at every command)
+#ifndef __SWITCH__  // (this fork) a debug of the Vulkan backend (dsweep.cpp): no load at every command on the Switch
+    if (__builtin_expect(g_draw_context_provider != nullptr, 0)) describe_draw_context(op);
+#endif
+    if (Recording* rec = recording(); rec && rec->start) {
+        rec->recorded++;
+        // (this fork, round 45) a register write merged into the list's last command, as in the staging buffer: most
+        // of the game's commands come from display lists (~44,000 executed a frame at Outset for ~85 staged calls)
+        if (g_coalesce && op == OP_SET_REGS && n >= 2 && rec->last) {
+            uint32* hdr = (uint32*)mem::ptr(rec->last);
             const uint32 lastOp = *hdr & 0xFF, lastN = *hdr >> 8, count = n - 1;
             if (lastOp == OP_SET_REGS && lastN >= 1 && hdr[1] + (lastN - 1) == payload[0] &&
-                t_rec.pos + 4 * count <= t_rec.end && lastN + count < (1u << 24)) {
-                memcpy(mem::ptr(t_rec.pos), payload + 1, count * 4);  // the next registers: one longer write
-                t_rec.pos += 4 * count;
+                rec->pos + 4 * count <= rec->end && lastN + count < (1u << 24)) {
+                memcpy(mem::ptr(rec->pos), payload + 1, count * 4);  // the next registers: one longer write
+                rec->pos += 4 * count;
                 *hdr = OP_SET_REGS | ((lastN + count) << 8);
-                t_rec.merged++;
+                rec->merged++;
                 return;
             }
-            if (count == 1 && lastOp == OP_SET_REG_PAIRS && t_rec.pos + 8 <= t_rec.end && lastN + 2 < (1u << 24)) {
-                uint32* w = (uint32*)mem::ptr(t_rec.pos);
+            if (count == 1 && lastOp == OP_SET_REG_PAIRS && rec->pos + 8 <= rec->end && lastN + 2 < (1u << 24)) {
+                uint32* w = (uint32*)mem::ptr(rec->pos);
                 w[0] = payload[0];
                 w[1] = payload[1];
-                t_rec.pos += 8;
+                rec->pos += 8;
                 *hdr = OP_SET_REG_PAIRS | ((lastN + 2) << 8);
-                t_rec.merged++;
+                rec->merged++;
                 return;
             }
             if (count == 1) op = OP_SET_REG_PAIRS;  // (same words: the next single writes can join it)
         }
         uint32 bytes = 4 * (n + 1);
-        if (t_rec.pos + bytes > t_rec.end) {
-            LOG("[gx2] display list overflow at %08X", t_rec.start);
+        if (rec->pos + bytes > rec->end) {
+            record_overflow(rec, bytes);
             return;
         }
-        uint32* w = (uint32*)mem::ptr(t_rec.pos);
+        uint32* w = (uint32*)mem::ptr(rec->pos);
         w[0] = op | (n << 8);
         memcpy(w + 1, payload, n * 4);
-        t_rec.last = t_rec.pos;
-        t_rec.pos += bytes;
+        rec->last = rec->pos;  // (this fork)
+        rec->pos += bytes;
         return;
     }
     if (g_render_thread) {
@@ -597,12 +918,50 @@ static void emit_host(Op op, std::initializer_list<uint32> payload) {
 }
 
 #ifdef WWHD_HAS_VULKAN
+static gfxvk::BackgroundCheckpoint& background_cache_checkpoint() {
+    static gfxvk::BackgroundCheckpoint worker([] {
+        host::set_thread_name("Vulkan cache save");
+        // If a periodic write was already in flight, wait outside execution
+        // and take a second snapshot for any newer revision before returning.
+        for (int pass = 0; pass < 2; ++pass) {
+            std::function<void()> wait;
+            {
+                std::lock_guard<std::recursive_mutex> lk(g_exec_mutex);
+                host::with_autorelease_pool([&] { wait = gfxvk::background_renderer_caches(); });
+            }
+            if (wait) wait();
+        }
+    });
+    return worker;
+}
+void request_background_vulkan_cache_checkpoint() {
+    // SDL can send lifecycle events while main-thread Vulkan initialization is still running.
+    // Do not create the saver or inspect renderer/cache objects until publication completes.
+    if (!gfxvk::background_renderer_caches_ready()) return;
+    background_cache_checkpoint().request();
+}
+#ifdef __ANDROID__
+void quiesce_quest_presentation() {
+    if (!gfxvk::background_renderer_caches_ready()) return;
+    std::lock_guard<std::recursive_mutex> lk(g_exec_mutex);
+    gfxvk::wait_idle();
+}
+#endif
+void checkpoint_present_observer() {
+    if (!present_observer::enabled()) return;
+    render_sync();
+    std::lock_guard<std::recursive_mutex> lk(g_exec_mutex);
+    host::with_autorelease_pool([] { gfxvk::flush_present_observer(); });
+}
 void checkpoint_vulkan_caches() {
     render_sync();
     std::lock_guard<std::recursive_mutex> lk(g_exec_mutex);
     host::with_autorelease_pool([] { gfxvk::save_renderer_caches(); });
 }
 void shutdown_vulkan_caches() {
+    // The background saver may be waiting for g_exec_mutex. Join before locking.
+    gfxvk::disable_background_renderer_caches();
+    background_cache_checkpoint().stop();
     render_sync();
     std::lock_guard<std::recursive_mutex> lk(g_exec_mutex);
     host::with_autorelease_pool([] { gfxvk::shutdown_renderer_caches(); });
@@ -611,18 +970,20 @@ void shutdown_vulkan_caches() {
 
 void set_regs(uint32 first, const uint32* values, uint32 count) {
     if (!count) return;
-    uint32 small[1 + 64];  // (most writes: up to 64 registers without the thread's heap buffer)
+    // (this fork) through emit: a recorded write can merge into the list's last command and a staged one into the
+    // staging buffer's (round 45); most writes: up to 64 registers on the stack
+    const uint32 n = count + 1;
+    uint32 small[1 + 64];
     if (count <= 64) {
         small[0] = first;
         memcpy(&small[1], values, count * 4);
-        emit(OP_SET_REGS, small, count + 1);
+        emit(OP_SET_REGS, small, n);
         return;
     }
-    static thread_local std::vector<uint32> buf;
-    buf.resize(count + 1);
+    std::vector<uint32> buf(n);
     buf[0] = first;
     memcpy(&buf[1], values, count * 4);
-    emit(OP_SET_REGS, buf.data(), count + 1);
+    emit(OP_SET_REGS, buf.data(), n);
 }
 void set_reg(uint32 reg, uint32 value) { emit(OP_SET_REGS, {reg, value}); }
 
@@ -665,9 +1026,11 @@ static void set_context(uint32 ctx) {
     g_shadow = it->second.data();
     // Draw writes primitive type without updating the context shadow.
     g_register_blocks.touch(uint32(REGADDR::VGT_PRIMITIVE_TYPE), 1);
+    ensure_reg_tables();
     if (g_register_blocks.restore(g_regs, g_shadow, [](uint32 reg, uint32 old, uint32 value) {
-        return !shader_irrelevant(reg) && shader_key_changed(shader_key_mask(), reg, old, value);
+        return !(g_reg_class[reg] & kRcShaderIrrelevant) && g_key_bits.changed(reg, old, value);
     })) { ++g_shader_state_gen; ++g_shader_regs_gen; }
+    note_full_state_change();
     bump_all_categories();  // (this fork) gx2.h RegCategory
     rprof::g_reg_dirty |= 2;  // draw classifier: a context load counts as a full state change
 }
@@ -700,6 +1063,10 @@ static void execute_op(Op op, const uint32* p, uint32 n);
 static void execute_one(Op op, const uint32* p, uint32 n) {
     rprof::Op kind;
     switch (op) {
+    case OP_DEBUG_CONTEXT: g_draw_context.store(n ? p[0] : 0, std::memory_order_relaxed); return;
+    case OP_SUBMITTED_UNIFORMS:
+        set_active_snapshot(n >= 2 ? (submitted::Snapshot*)(uintptr_t(p[0]) | (uint64_t(p[1]) << 32)) : nullptr);
+        return;
     case OP_CALL: execute_op(op, p, n); return;
     case OP_SET_REGS: case OP_SET_PROJ_REGS: case OP_SET_REG_PAIRS: kind = rprof::kOpRegs; break;
     case OP_DRAW: case OP_DRAW_INDEXED: kind = rprof::kOpDraw; rprof::classify_draw(); break;
@@ -713,18 +1080,30 @@ static void execute_one(Op op, const uint32* p, uint32 n) {
     case OP_SWAP: kind = rprof::kOpSwap; break;
     default: kind = rprof::kOpOther; break;
     }
+    // even frame delivery: a held frame is presented when its time has come (checked before each
+    // draw, clear and copy, which is fine-grained enough: one takes a few microseconds)
+    if (kind != rprof::kOpOther && kind != rprof::kOpRegs) {
+        const int64_t due = render::present_due();
+        if (due && steady_ns() >= due) render::service_present();
+    }
     const uint64_t started = rprof::op_begin(kind);
     execute_op(op, p, n);
     rprof::op_end(kind, started);
-    if (op == OP_SWAP) rprof::frame_end(n >= 2 && p[1]);
+    if (op == OP_SWAP) {
+        rprof::frame_end(n >= 2 && p[1]);  // applies a change of the profiling setting
+        g_classify = rprof::enabled();
+    }
 }
 
 // Test only: WWHD_TEST_RENDER_LOAD_MS=x / WWHD_TEST_GAME_LOAD_MS=x busy-wait x ms per frame on the
 // render thread (before each swap is executed) / on the game thread (at each GX2SwapScanBuffers):
 // the frame time of a slower computer, for measuring frame pacing (docs/performance.md).
-static void test_frame_load(const char* name) {
+// WWHD_TEST_GAME_LOAD_MS=x:y busy-waits x ms at the swap of a logic step's frame and y ms at an
+// in-between frame's (the uneven passes of a phone whose game thread is the bottleneck).
+static void test_frame_load(const char* name, bool hold = false) {
     const char* e = getenv(name);
-    const double ms = e ? atof(e) : 0;
+    const char* colon = e ? strchr(e, ':') : nullptr;
+    const double ms = e ? (hold && colon ? atof(colon + 1) : atof(e)) : 0;
     if (ms <= 0) return;
     const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(int64_t(ms * 1e6));
     while (std::chrono::steady_clock::now() < until) {}
@@ -775,7 +1154,7 @@ static void execute_op(Op op, const uint32* p, uint32 n) {
     case OP_SET_CONTEXT: set_context(p[0]); break;
     case OP_INVALIDATE: render::invalidate(p[0], p[1], p[2]); break;
     case OP_EXPAND_COLOR: case OP_EXPAND_DEPTH: break;  // MSAA/HiZ decompression: nothing to do on the host
-    case OP_PEEK_Z: render::peek_z(p, n); break;
+    case OP_PEEK_Z: render::peek_z(p, n); break;  // answered (gfx::depth_peek) when its copy completes
     case OP_FLUSH: render::guest_flush(); break;  // Vulkan: asynchronous submission
     case OP_DRAW_DONE:
         // The Vulkan renderer writes GPU results back to guest memory only for linear surfaces (guest data is copied
@@ -791,6 +1170,9 @@ static void execute_op(Op op, const uint32* p, uint32 n) {
         if (load) test_frame_load("WWHD_TEST_RENDER_LOAD_MS");
         if (n) render::set_frame_aspect(gx2::bitsf(p[0]));  // aspect ratio from the next frame on (aspect.cpp)
         if (n >= 3 && p[2]) render::request_capture();
+        if (n >= 5 && present_observer::enabled())
+            present_observer::render_swap(uint64_t(p[3]) | (uint64_t(p[4]) << 32), render::frame_count());
+        render::set_present_interval(n >= 6 ? p[5] : 0u, n >= 2 && p[1]);
         render::swap();
         break;
     }
@@ -809,6 +1191,23 @@ static void execute_op(Op op, const uint32* p, uint32 n) {
     }
     case OP_LAYOUT_CONTENT:
         aspect::set_content_clip(n && p[0]);
+        if (n >= 2) stereo::layout_draw(p[1] != 0);
+        // A photo pane samples the canonical captured image. Changing that
+        // policy invalidates continued texture bindings, even with identical registers.
+        if (const bool photo = n >= 3 && p[2]; photo != stereo::layoutPhotograph) {
+            stereo::layoutPhotograph = photo;
+            note_full_state_change();
+        }
+        break;
+    case OP_CLOUDS_BEGIN:
+        cloud_proto::g_active_seq = n ? p[0] : 0;
+        cloud_proto::g_drawn = false;
+        if (render::g_backend->sky_clouds_begin && cloud_proto::g_active_seq)
+            render::g_backend->sky_clouds_begin(g_regs, cloud_proto::g_active_seq);
+        break;
+    case OP_CLOUDS_END:
+        if (cloud_proto::g_on_end && cloud_proto::g_active_seq) cloud_proto::g_on_end();
+        cloud_proto::g_active_seq = 0;
         break;
     case OP_LAYOUT_ROOT: {
         float kx, ky;
@@ -871,59 +1270,15 @@ using namespace gx2;
 // flip executes on the first vsync that is at least `swap interval` vsyncs after the previous flip.
 // Games pace themselves by waiting for vsync until their flips have executed.
 // 120/240 fps frame interpolation needs 4/8 flips per logic step: the virtual vsync then ticks 2/4
-// times per 59.94 Hz vsync (interp::vsync_rate()). The clock counts quarter vsyncs ("ticks"); a
-// vsync at the current rate is a granule of 4/rate ticks, and every vsync count below is in ticks,
-// rounded to granules, so at 30/60 fps (granule 4) the timing is the 59.94 Hz one exactly.
+// times per 59.94 Hz vsync, and 40 fps (4 flips per 3 steps) every 1.5 vsyncs. The clock counts
+// quarter vsyncs ("ticks"); a vsync at the current rate is a granule of ticks (interp::
+// vsync_granule_ticks: 4, 2, 1; 6 at 40 fps), and every vsync count below is in ticks, rounded to
+// granules, so at 30/60 fps (granule 4) the timing is the 59.94 Hz one exactly.
 static uint64_t g_swap_count = 0, g_flip_count = 0;
 
-// Hang watchdog: when no frame has been swapped for 3 s, log what the render thread and every guest
-// thread are doing (again every 15 s, at most 6 times), and write the log out at once.
-static std::atomic<uint64_t> g_watch_swaps{0};
-static void watchdog_thread() {
-    host::set_thread_name("watchdog");
-    uint64_t lastSwaps = 0, lastCommands = 0;
-    auto lastChange = std::chrono::steady_clock::now();
-    auto nextReport = lastChange;
-    int reports = 0;
-    for (;;) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        const auto now = std::chrono::steady_clock::now();
-        const uint64_t swaps = g_watch_swaps.load(std::memory_order_relaxed);
-        if (swaps != lastSwaps) {
-            lastSwaps = swaps;
-            lastChange = now;
-            nextReport = now + std::chrono::seconds(3);
-            continue;
-        }
-        if (now < nextReport || reports >= 6) continue;
-        reports++;
-        nextReport = now + std::chrono::seconds(15);
-        const uint64_t commands = g_progress.commands.load(std::memory_order_relaxed);
-        const char* stage = g_render_stage.load(std::memory_order_relaxed);
-        const uint32 op = g_progress.op.load(std::memory_order_relaxed);
-        size_t pending = 0;
-        uint64_t issued = 0, done = 0;
-        {
-            std::unique_lock<std::mutex> lk(g_q_mutex, std::defer_lock);
-            if (lk.try_lock()) {
-                pending = g_q_pending.size();
-                issued = g_fence_issued;
-                done = g_fence_done;
-            }
-        }
-        LOG("[watchdog] no frame for %.1f s (frame %llu). Render thread: %s%s, command %u, %llu commands since the last "
-            "report; queued words %zu, game syncs issued %llu done %llu",
-            std::chrono::duration<double>(now - lastChange).count(), (unsigned long long)swaps,
-            g_progress.idle.load() ? "waiting for commands" : "executing", stage ? (std::string(" (") + stage + ")").c_str() : "",
-            op, (unsigned long long)(commands - lastCommands), pending, (unsigned long long)issued, (unsigned long long)done);
-        lastCommands = commands;
-        threads::dump_state();
-        log_flush();
-    }
-}
 namespace gx2 { uint64_t flips_presented() { return __atomic_load_n(&g_flip_count, __ATOMIC_RELAXED); } }  // live fps in the title
 static uint32 g_swap_interval = 1;  // as set by the game (frame interpolation halves it)
-namespace interp { uint32_t effective_swap_interval(uint32_t game); uint64_t logic_steps(); int vsync_rate(); int frames_per_step(); bool paced_interpolation(); }
+namespace interp { uint32_t effective_swap_interval(uint32_t game); uint64_t logic_steps(); uint32_t vsync_granule_ticks(); uint64_t step_ticks(uint32_t game); bool paced_step_schedule(); int64_t frame_interval_ns(); }
 static std::mutex g_flip_mutex;
 static const auto g_vsync_epoch = std::chrono::steady_clock::now();
 static constexpr std::chrono::nanoseconds kVsyncPeriod(16683333);  // 59.94 Hz
@@ -949,9 +1304,8 @@ static uint64_t vsync_index() {  // in ticks
     return kVsyncClock.index(vsync_clock_now(), g_vsync_shift.load(std::memory_order_relaxed));
 }
 static uint64_t g_late_flips = 0;  // (this fork) flips that moved the vsync grid (vsync_pacing.h), for the [gx2] line
-static uint64_t vsync_granule() {  // ticks per vsync at the current rate: 4 (30/60 fps), 2 (120), 1 (240)
-    const int rate = interp::vsync_rate();
-    return rate >= 4 ? 1 : rate >= 2 ? 2 : kTicksPerVsync;
+static uint64_t vsync_granule() {  // ticks per vsync at the current rate: 4 (30/60 fps), 6 (40), 2 (120), 1 (240)
+    return interp::vsync_granule_ticks();
 }
 static std::chrono::steady_clock::time_point tick_time(uint64_t tick) {
     const auto at = std::chrono::nanoseconds(kVsyncClock.time(tick, g_vsync_shift.load(std::memory_order_relaxed)));
@@ -962,13 +1316,13 @@ static std::chrono::steady_clock::time_point tick_time(uint64_t tick) {
     const auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(target.time_since_epoch()).count() - sample.guest;
     return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(sample.host + std::max<int64_t>(0, (left + sample.rate - 1) / sample.rate)));
 }
-// Step slots (vsync_pacing.h): with paced frame interpolation at 120/240 fps a logic step's first
-// frame is due on its step's slot (ns on the vsync's clock, -1: none), two vsyncs after the previous
-// step's
+// Step slots (vsync_pacing.h): with paced frame interpolation (60, 120 and 240 fps) a logic step's
+// first frame is due on its step's slot (ns on the vsync's clock, -1: none), two vsyncs after the
+// previous step's
 static int64_t g_step_slot = -1;  // g_flip_mutex held
-static bool step_slots() { return interp::frames_per_step() > 2 && interp::paced_interpolation(); }
+static bool step_slots() { return interp::paced_step_schedule(); }
 static int64_t step_ns() {  // the frames of a step, one (virtual) vsync each: the game's swap interval, two vsyncs
-    return kVsyncClock.granule_ns(uint64_t(interp::frames_per_step()) * interp::effective_swap_interval(g_swap_interval) * vsync_granule());
+    return kVsyncClock.granule_ns(interp::step_ticks(g_swap_interval));
 }
 // the first tick at which this flip may execute: `swap interval` vsyncs after the previous flip, and
 // a step's first frame not before its step's slot. (On hardware also the vsync after its swap, which
@@ -993,6 +1347,13 @@ bool gx2::next_step_time(std::chrono::steady_clock::time_point& at) {
     at = tick_time(vsync_pacing::slot_tick(kVsyncClock, g_step_slot, g_vsync_shift.load(std::memory_order_relaxed), vsync_granule()));
     return true;
 }
+// paced interpolation at 40 fps (interp.cpp): the frames the next logic step has before the step
+// after it is due (1 or 2), 0 without a slot
+int gx2::step_frames() {
+    std::lock_guard<std::mutex> lk(g_flip_mutex);
+    if (g_step_slot < 0 || !step_slots()) return 0;
+    return vsync_pacing::step_frames(kVsyncClock, g_step_slot, step_ns(), g_vsync_shift.load(std::memory_order_relaxed), vsync_granule());
+}
 // Uncapped (gx2.h): debug, to see how fast the renderer can go; GPU completion ordering is kept
 static std::atomic<int> g_uncapped{-1};  // -1: not read from the environment yet
 bool gx2::uncapped() {
@@ -1012,7 +1373,9 @@ void gx2::set_uncapped(bool on) {
     g_uncapped = on ? 1 : 0;
     LOG("[gx2] uncapped %s", on ? "on (debug: no frame limit, no vsync; the game runs faster than real time)" : "off");
 }
-static bool uncapped_benchmark() { return gx2::uncapped(); }
+// Fast Forward has a selected rate even when debug uncapped is selected: remove
+// only the host presentation limit, retaining the accelerated virtual-vsync waits.
+static bool uncapped_benchmark() { return gx2::uncapped() && !mods::fast_forward_active(); }
 
 // debug: WWHD_LOG_FLIP_PACING=1 logs, every 300 flips, the intervals between flips (the frame times
 // the game sees) and what the flips waited for
@@ -1055,12 +1418,15 @@ static void trace_flip(const PendingFlip& f, std::chrono::steady_clock::time_poi
             (unsigned long long)at, int(!f.step), int(vsync_granule()));
 }
 static void update_flips() {  // g_flip_mutex held
+    static const bool observeDeadlines = present_observer::enabled();
     uint64_t now = vsync_index();
     while (!g_pending_flips.empty()) {
         const uint64_t due = flip_due(g_pending_flips.front());
         if ((!uncapped_benchmark() && due > now) || render::frames_completed() < g_pending_flips.front().swap) break;
         uint64_t at = now / vsync_granule() * vsync_granule();
-        const auto dueAt = trace_flips_file() ? tick_time(due) : std::chrono::steady_clock::time_point{};
+        // Preserve the actual scheduler target BEFORE this flip may move its grid.
+        const auto dueAt = (trace_flips_file() || observeDeadlines) ? tick_time(due) : std::chrono::steady_clock::time_point{};
+        const int64_t shiftBefore = observeDeadlines ? g_vsync_shift.load(std::memory_order_relaxed) : 0;
         if (!uncapped_benchmark()) {  // on its vsync, or late: then the grid may move (vsync_pacing.h)
             int64_t shift = g_vsync_shift.load(std::memory_order_relaxed);
             const int64_t t = vsync_clock_now();
@@ -1077,6 +1443,11 @@ static void update_flips() {  // g_flip_mutex held
         } else {
             g_step_slot = -1;
         }
+        if (observeDeadlines)
+            present_observer::scheduler_due(g_pending_flips.front().swap,
+                std::chrono::duration_cast<std::chrono::nanoseconds>(dueAt.time_since_epoch()).count(),
+                due, shiftBefore, g_vsync_shift.load(std::memory_order_relaxed), uint32_t(vsync_granule()),
+                game_clock::shifted(), uncapped_benchmark());
         log_flip_pacing(g_pending_flips.front());
         trace_flip(g_pending_flips.front(), dueAt, due, at);
         g_pending_flips.pop_front();
@@ -1129,7 +1500,67 @@ static void ready_flip_before_resume() {
 }
 #endif
 
+// Hang watchdog: when the game has not swapped a frame for 3 s, log what the render thread and every
+// guest thread are doing (again every 15 s, at most 6 times per stall); the log file is written
+// line by line, so the dump survives a force-stop. WWHD_NO_WATCHDOG=1 turns it off. A legitimate
+// pause (the app in the background, a debugger) logs it too, at most 6 times.
+// Idea from SwitchWakerHD (thanks @Pulpparty / @depende3000).
+static std::atomic<uint64_t> g_watch_swaps{0};
+static void watchdog_thread() {
+    host::set_thread_name("watchdog");
+    uint64_t lastSwaps = g_watch_swaps.load();
+    auto lastChange = std::chrono::steady_clock::now();
+    auto nextReport = lastChange + std::chrono::seconds(3);
+    int reports = 0;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        const auto now = std::chrono::steady_clock::now();
+        const uint64_t swaps = g_watch_swaps.load(std::memory_order_relaxed);
+        if (swaps != lastSwaps) {
+            if (reports) LOG("[watchdog] frames again after %.1f s", std::chrono::duration<double>(now - lastChange).count());
+            lastSwaps = swaps;
+            lastChange = now;
+            nextReport = now + std::chrono::seconds(3);
+            reports = 0;
+            continue;
+        }
+        if (now < nextReport || reports >= 6) continue;
+        reports++;
+        nextReport = now + std::chrono::seconds(15);
+        size_t pending = 0;
+        uint64_t issued = 0, done = 0;
+        bool idle = false, locked = false;
+        {
+            std::unique_lock<std::mutex> lk(g_q_mutex, std::defer_lock);
+            if ((locked = lk.try_lock())) {
+                pending = g_q_pending.size();
+                issued = g_fence_issued;
+                done = g_fence_done;
+                idle = g_q_waiting;
+            }
+        }
+        if (locked)
+            LOG("[watchdog] no frame for %.1f s (swap %llu). Render thread: %s; %zu command words queued; game syncs issued %llu, "
+                "done %llu", std::chrono::duration<double>(now - lastChange).count(), (unsigned long long)swaps,
+                idle ? "waiting for commands" : "executing", pending, (unsigned long long)issued, (unsigned long long)done);
+        else
+            LOG("[watchdog] no frame for %.1f s (swap %llu). Render queue locked", std::chrono::duration<double>(now - lastChange).count(),
+                (unsigned long long)swaps);
+        threads::dump_state();
+    }
+}
+
 HLE(gx2, GX2Init) {
+    static std::once_flag watchdog;
+    std::call_once(watchdog, [] {
+        const char* e = getenv("WWHD_NO_WATCHDOG");
+        if (e && *e && strcmp(e, "0")) LOG("[watchdog] off (WWHD_NO_WATCHDOG)");
+#ifdef __SWITCH__
+        else host::start_thread(watchdog_thread, 256 << 10);  // (this fork) Horizon's default thread stack is small
+#else
+        else std::thread(watchdog_thread).detach();
+#endif
+    });
     set_default_state();
     LOG("[gx2] initialized (native GX2 -> %s)", render::api_name(render::active()));
     if(uncapped_benchmark())
@@ -1154,29 +1585,65 @@ HLE(gx2, GX2GetContextStateDisplayList) {
 
 // ---------------------------------------------------------------- display lists
 HLE(gx2, GX2BeginDisplayListEx) {
-    t_rec.start = t_rec.pos = arg(c, 0);
-    t_rec.end = arg(c, 0) + arg(c, 1);
-    t_rec.last = 0;
-    t_rec.recorded = t_rec.merged = 0;
+    if (Recording* rec = claim_rec()) {
+        rec->start = rec->pos = arg(c, 0);
+        rec->end = arg(c, 0) + arg(c, 1);
+        g_rec_blocks[rec - g_recs].clear();
+        g_rec_calls[rec - g_recs].clear();
+        if (!rec->start) release_rec(rec);  // as before: a null list records nothing
+    }
 }
 HLE(gx2, GX2EndDisplayList) {
-    uint32 size = t_rec.pos - t_rec.start;
-    if (t_rec.recorded) g_recorded.fetch_add(t_rec.recorded, std::memory_order_relaxed);
-    if (t_rec.merged) g_merged.fetch_add(t_rec.merged, std::memory_order_relaxed);
-    t_rec = Recording{};
+    uint32 size = 0;
+    if (Recording* rec = recording()) {
+        size = rec->pos - rec->start;
+        if (rec->recorded) g_recorded.fetch_add(rec->recorded, std::memory_order_relaxed);  // (this fork)
+        if (rec->merged) g_merged.fetch_add(rec->merged, std::memory_order_relaxed);
+        if (submitted_uniforms_on() && rec->start) {
+            const size_t slot = rec - g_recs;
+            g_dl_index.publish(rec->start, size, g_rec_blocks[slot], g_rec_calls[slot]);
+            g_rec_blocks[slot].clear();
+            g_rec_calls[slot].clear();
+        }
+        if (rec->dropped) {
+            static unsigned said = 0;
+            if (said < 32 && ++said) LOG("[gx2] display list overflow at %08X (%u bytes): %u bytes of commands dropped%s", rec->start, rec->end - rec->start, rec->dropped,
+                                         said == 32 ? " (no more of these lines)" : "");
+        }
+        release_rec(rec);
+    }
     ret(c, size);
 }
 HLE(gx2, GX2GetCurrentDisplayList) {
-    if (arg(c, 0)) st32(arg(c, 0), t_rec.start);
-    if (arg(c, 1)) st32(arg(c, 1), t_rec.start ? t_rec.end - t_rec.start : 0);
-    ret(c, t_rec.start != 0);
+    const Recording* rec = recording();
+    const uint32 start = rec ? rec->start : 0;
+    if (arg(c, 0)) st32(arg(c, 0), start);
+    if (arg(c, 1)) st32(arg(c, 1), start ? rec->end - rec->start : 0);
+    ret(c, start != 0);
 }
-HLE(gx2, GX2CallDisplayList) { emit(OP_CALL, {arg(c, 0), arg(c, 1)}); }
-HLE(gx2, GX2DirectCallDisplayList) { emit(OP_CALL, {arg(c, 0), arg(c, 1)}); }
+// A list called while another is recorded runs with that one (its blocks are noted for it); a call
+// from the command stream takes the blocks of the list as they are now with it (submitted_uniforms.h).
+static void call_display_list(uint32 list, uint32 size) {
+    if (!submitted_uniforms_on()) {  // (this fork) the Switch's default: the call as before (no recording slot look-up)
+        emit(OP_CALL, {list, size});
+        return;
+    }
+    if (Recording* rec = recording(); rec && rec->start) {
+        if (submitted_uniforms_on()) g_rec_calls[rec - g_recs].push_back(list);
+        emit(OP_CALL, {list, size});
+        return;
+    }
+    submitted::Snapshot* s = submit_snapshot(list, size);
+    if (s) emit_host(OP_SUBMITTED_UNIFORMS, {uint32(uintptr_t(s)), uint32(uint64_t(uintptr_t(s)) >> 32)});
+    emit(OP_CALL, {list, size});
+    if (s) emit_host(OP_SUBMITTED_UNIFORMS, {});
+}
+HLE(gx2, GX2CallDisplayList) { call_display_list(arg(c, 0), arg(c, 1)); }
+HLE(gx2, GX2DirectCallDisplayList) { call_display_list(arg(c, 0), arg(c, 1)); }
 
 // ---------------------------------------------------------------- draws
-HLE(gx2, GX2DrawEx) { emit(OP_DRAW, {arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3)}); }
-HLE(gx2, GX2DrawIndexedEx) { emit(OP_DRAW_INDEXED, {arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5)}); }
+HLE(gx2, GX2DrawEx) { mod_actor_shadow_proof::draw_submitted(arg(c,1));emit(OP_DRAW, {arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3)}); }
+HLE(gx2, GX2DrawIndexedEx) { mod_actor_shadow_proof::draw_submitted(arg(c,1));emit(OP_DRAW_INDEXED, {arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5)}); }
 
 // ---------------------------------------------------------------- clears and copies
 static float farg(Cpu* c, int i) { return (float)c->f[1 + i].ps0; }
@@ -1230,7 +1697,7 @@ HLE(gx2, GX2CopySurface) {
     // OSBlockMoves it back and frees it at once; executed later on the render thread, the copy
     // wrote into the freed memory after the heap had reused it (boot crash: agl shader program
     // array 21EFE28C, program 0's +0x7c zeroed). Not for display lists (they run when called).
-    if (!t_rec.start) {
+    if (Recording* rec = recording(); !rec || !rec->start) {
         BlockingScope b;
         render_sync(kSyncCopySurface);
     }
@@ -1253,7 +1720,21 @@ HLE(gx2, GX2DrawDone) {
     render_sync(kSyncDrawDone);
     ret(c, 1);
 }
+namespace dtrace { void on_swap(uint64_t swap, uint64_t steps); }
 HLE(gx2, GX2SwapScanBuffers) {
+    const uint64_t watchSwap = g_watch_swaps.fetch_add(1, std::memory_order_relaxed) + 1;
+    // test aid for the watchdog: WWHD_TEST_HANG_AT=<swap>:<seconds> stops the game's thread in that swap
+    static const std::pair<uint64_t, unsigned> hangAt = [] {
+        const char* e = getenv("WWHD_TEST_HANG_AT");
+        unsigned long long at = 0;
+        unsigned secs = 0;
+        if (e && sscanf(e, "%llu:%u", &at, &secs) == 2) return std::pair<uint64_t, unsigned>{at, secs};
+        return std::pair<uint64_t, unsigned>{0, 0};
+    }();
+    if (hangAt.first && watchSwap == hangAt.first) {
+        LOG("[test] WWHD_TEST_HANG_AT: the game's thread stops for %u s at swap %llu", hangAt.second, (unsigned long long)watchSwap);
+        std::this_thread::sleep_for(std::chrono::seconds(hangAt.second));
+    }
     // debug: WWHD_TRACE_SWAP=n logs the guest call chain of the first n swaps
     static int trace = getenv("WWHD_TRACE_SWAP") ? atoi(getenv("WWHD_TRACE_SWAP")) : 0;
     if (trace > 0) {
@@ -1268,10 +1749,6 @@ HLE(gx2, GX2SwapScanBuffers) {
             sp = prev;
         }
         LOG("%s", buf);
-    }
-    {
-        static const bool load = getenv("WWHD_TEST_GAME_LOAD_MS") != nullptr;
-        if (load) test_frame_load("WWHD_TEST_GAME_LOAD_MS");
     }
     gfx::display_read_gamepad_ui(); // read-only; no guest reads outside auto or a pending pause view
     float a = aspect::on_swap();  // aspect ratio of the next frame (game projections, render targets)
@@ -1288,17 +1765,23 @@ HLE(gx2, GX2SwapScanBuffers) {
     const uint64_t steps = interp::logic_steps();
     const bool hold = steps == lastSteps;
     lastSteps = steps;
+    {
+        static const bool load = getenv("WWHD_TEST_GAME_LOAD_MS") != nullptr;
+        if (load) test_frame_load("WWHD_TEST_GAME_LOAD_MS", hold);
+    }
     // Opt-in correctness capture: select the guest frame before it enters
     // the asynchronous render queue. Renderer-frame parity is not a game clock.
     static const char* captureCounter = getenv("WWHD_TEST_CAPTURE_LOAD_COUNTER");
     static const char* captureStep = getenv("WWHD_TEST_CAPTURE_LOAD_STEP");
     bool capture = false;
-    if ((captureCounter || captureStep) && ss::last_load_frame()) {
+    // the last full-state load; without one, a portable state's first frame in its stage (fixed seed)
+    const bool fullLoad = ss::last_load_frame() != 0;
+    const uint64_t loaded = fullLoad ? ss::last_load_frame() : ss::seeded_arrival_frame();
+    if ((captureCounter || captureStep) && loaded) {
         static uint64_t capturedLoad = 0;
-        const auto loaded = ss::last_load_frame();
         const uint32_t counter = ld32(GD(0x101FF560));
-        const uint64_t offset = captureStep ? steps - ss::last_load_step()
-                                            : uint32_t(counter - ss::last_load_counter());
+        const uint64_t offset = captureStep ? steps - (fullLoad ? ss::last_load_step() : ss::seeded_arrival_step())
+                                            : uint32_t(counter - (fullLoad ? ss::last_load_counter() : ss::seeded_arrival_counter()));
         const uint64_t target = strtoull(captureStep ? captureStep : captureCounter, nullptr, 10);
         if (capturedLoad != loaded && !hold && offset == target) {
             capturedLoad = loaded;
@@ -1307,19 +1790,36 @@ HLE(gx2, GX2SwapScanBuffers) {
                 captureStep ? "logic step" : "game counter",(unsigned long long)offset,counter);
         }
     }
-    if (capture) emit_host(OP_SWAP, {ab, hold ? 1u : 0u, 1u});
+    static const bool observeSwap = present_observer::enabled();
+    uint64_t observedSwap = 0;
+    // even frame delivery (interp.h frame_interval_ns): the frame's intended distance to the
+    // previous one travels with its swap (ns; 0: present it as soon as it is ready)
+    const uint32_t interval = uncapped_benchmark() ? 0u : uint32_t(std::clamp<int64_t>(interp::frame_interval_ns(), 0, 1'000'000'000));
+    if (observeSwap) {
+        {
+            std::lock_guard<std::mutex> lk(g_flip_mutex);
+            if (g_swap_count == UINT64_MAX) present_observer::fail("diagnostic swap ID overflow");
+            else observedSwap = g_swap_count + 1;
+        }
+        // Explicit ID travels with this command; never sample mutable producer
+        // counters or drawable-acquisition timing on the render thread.
+        emit_host(OP_SWAP, {ab, hold ? 1u : 0u, capture ? 1u : 0u,
+                           uint32_t(observedSwap), uint32_t(observedSwap >> 32), interval});
+    } else if (interval) emit_host(OP_SWAP, {ab, hold ? 1u : 0u, capture ? 1u : 0u, 0u, 0u, interval});
+    else if (capture) emit_host(OP_SWAP, {ab, hold ? 1u : 0u, 1u});
     else emit_host(OP_SWAP, {ab, hold ? 1u : 0u});
     {
         std::lock_guard<std::mutex> lk(g_flip_mutex);
         update_flips();
         g_swap_count++;
+        if (observeSwap && (!observedSwap || observedSwap != g_swap_count))
+            present_observer::fail("diagnostic swap ID ordering/reset mismatch");
         g_pending_flips.push_back({g_swap_count, std::chrono::steady_clock::now(), !hold});
     }
-    g_watch_swaps.store(g_swap_count, std::memory_order_relaxed);
-    static std::once_flag watchdog;
-    std::call_once(watchdog, [] {
-        if (!getenv("WWHD_NO_WATCHDOG")) host::start_thread(watchdog_thread, 256 << 10);
-    });
+    // depth peeks of this frame (the sun's glare test) are answered before the game's next step reads
+    // them, as on the Wii U (gfx/depth_peek.h)
+    gfx::depth_peek::wait_answered();
+    dtrace::on_swap(g_swap_count, steps);
     // debug: WWHD_LOG_SLOW_SWAP=ms logs swaps that came more than ms after the previous one
     static const double slow_ms = getenv("WWHD_LOG_SLOW_SWAP") ? atof(getenv("WWHD_LOG_SLOW_SWAP")) : 0;
     if (slow_ms > 0) {
@@ -1329,7 +1829,10 @@ HLE(gx2, GX2SwapScanBuffers) {
         prev = now;
         if (ms > slow_ms) LOG("[gx2] slow swap %llu: %.1f ms", (unsigned long long)g_swap_count, ms);
     }
-    if (g_swap_count % 300 == 1) {
+    // Console/file output is synchronous: routine performance reporting must not
+    // introduce a stall on the game thread during ordinary play.
+    static const bool report_stats = getenv("WWHD_VK_STATS") || getenv("WWHD_LOG_FLIP_PACING") || getenv("WWHD_SCHED_STATS");
+    if (report_stats && g_swap_count % 300 == 1) {
         static auto last = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
         double s = std::chrono::duration<double>(now - last).count();
@@ -1515,7 +2018,13 @@ void gx2_ss_save(ss::Writer& w) {
     w.u64(g_swap_count + g_count_offset);
 }
 
+bool gx2_ss_validate(ss::Reader r, std::string& why) {
+    if (!ss::metadata::gx2(r,kNumRegs)) { why = "corrupt gx2 section"; return false; }
+    return true;
+}
+
 bool gx2_ss_check(ss::Reader r, std::string& why) {
+    if (!gx2_ss_validate(r,why)) return false;
     if (r.u32() != kNumRegs) { why = "GX2 register file size differs"; return false; }
     return r.ok;
 }
@@ -1540,12 +2049,16 @@ void gx2_ss_load(ss::Reader& r) {
     g_shadow = active && it != g_contexts.end() ? it->second.data() : nullptr;
     bump_all_categories();
     g_shader_state_gen++;
+    note_full_state_change();
     g_shader_regs_gen++;
     g_swap_interval = std::max<uint32>(r.u32(), 1);
+    stereo::layoutDrawDepth = 0;
     uint64_t guest_swaps = r.u64();
     {
         std::lock_guard<std::mutex> fl(g_flip_mutex);
         g_count_offset = (int64_t)guest_swaps - (int64_t)g_swap_count;
     }
     render::ss_reset();  // the renderer forgets surface contents and shader memos (Vulkan)
+    g_dl_index.clear();  // lists recorded before the load say nothing about the loaded ones
+    set_active_snapshot(nullptr);
 }

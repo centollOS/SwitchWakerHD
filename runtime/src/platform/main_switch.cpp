@@ -12,6 +12,8 @@
 #include "background_shaders_switch.h"
 #include "settings_ini.h"
 #include "settings_switch.h"
+#include "update_notice_switch.h"
+#include "saltynx_switch.h"
 #include <sys/stat.h>
 #include <dirent.h>
 #include <ctime>
@@ -30,6 +32,7 @@
 #include "recomp_table.h"
 #include "../runtime.h"
 #include "host.h"
+#include "switch_toolchain.h"
 
 // CPU exceptions (a bad memory access, a jump to a bad address, abort's trap): the kernel sends them
 // to the process's entry point, which is hbloader's; hbloader passes them to the NRO's entry point
@@ -120,6 +123,7 @@ static void crash_report(const char* kind, uint64_t pc, uint64_t lr, uint64_t sp
     if (fake_heap_end && top && top != reinterpret_cast<char*>(-1))
         put("[crash] heap never used: %llu MiB\n", (unsigned long long)((fake_heap_end - top) >> 20));
     put("[crash] build %s %s; symbols: addr2line -f -C -e wwhd.elf <offset> with the ELF of this build\n", __DATE__, __TIME__);
+    put("[crash] toolchain: %s\n", switch_toolchain::info());
     log_crash_write(buf, n);
 }
 void __libnx_exception_handler(ThreadExceptionDump* ctx) {
@@ -310,7 +314,18 @@ void main_switch::start() {
     early_settings::log_messages();  // settings.ini's [dev] section, env.txt converted
     host::place_thread(0);
     LOG("[boot] code at %p (for crash reports)", (void*)host::executable_base());
+    LOG("[boot] toolchain: %s", switch_toolchain::info());  // which ELF the crash addresses fit (switch_toolchain.h)
+    {  // (this fork) the cores the process may use: 0x7 (0-2) from the usual NPDM, 0xF when the forwarder allows core 3
+        u64 mask = 0;
+        svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+        LOG("[boot] process core mask 0x%llx", (unsigned long long)mask);
+    }
+#ifdef WWHD_PGO_PROFILE  // (this fork) built with a release's PGO profile (cmake/SwitchPgo.cmake, docs/pgo-release-plan.md)
+    LOG("[boot] pgo: profile %s", WWHD_PGO_PROFILE);
+#endif
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
+    update_notice::start();  // asks GitHub for a newer release in the background (platform/update_notice_switch.h)
+    saltynx::start();  // the frame rate for the console's overlays, when SaltyNX runs (platform/saltynx_switch.h)
 }
 
 void main_switch::choose_dirs() {
@@ -324,9 +339,14 @@ void main_switch::after_boot_line() {
     // the game's files, else an error on screen and the app closes; the first start's shader warning
     startup_checks::game_files(config::game_dir);
     prepare_graphics::startup();  // a cut "Prepare graphics" sweep: the Quest Log files put back
-    // the first start prepares the graphics behind a loading card; later starts finish a list left over
-    if (startup_checks::first_start()) background_shaders::first_start();
-    else background_shaders::later_start();
+    // the first start: Prepare graphics (the warp sweep, once a Quest Log is loaded) or the loading card; later
+    // starts finish a list left over (not while a sweep waits: its places wait for the shader worker to be idle)
+    if (startup_checks::first_start()) {
+        if (startup_checks::first_start_prepare()) prepare_graphics::start_when_loaded();
+        else background_shaders::first_start();
+    } else if (!prepare_graphics::waiting()) {
+        background_shaders::later_start();
+    }
 }
 
 void main_switch::after_mods() { early_settings::apply_migrated_mods(); }

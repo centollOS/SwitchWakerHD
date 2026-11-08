@@ -38,8 +38,12 @@ struct Redactor {
                 }
             }
             if (!skip) {
+                // Android storage roots contain a user ID. Filter it in both crash and game logs.
                 size_t begin = 0;
-                if (prefix(rest, "/Users/", true, false)) begin = 7;
+                if (prefix(rest, "/storage/emulated/", false, false)) begin = 18;
+                else if (prefix(rest, "/data/user/", false, false)) begin = 11;
+                else if (prefix(rest, "/data/user_de/", false, false)) begin = 14;
+                else if (prefix(rest, "/Users/", true, false)) begin = 7;
                 else if (prefix(rest, "/home/", true, false)) begin = 6;
                 else if (rest.size() >= 9 && lower(rest[0]) >= 'a' && lower(rest[0]) <= 'z' && rest[1] == ':' &&
                          prefix(rest.substr(2), "/Users/", true, true)) begin = 9;

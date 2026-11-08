@@ -213,6 +213,29 @@ def vulkan_db(recipes, fingerprint=b'\x11'*48):
     return b'WWVKPR01'+fingerprint+struct.pack('<II',len(recipes),zlib.crc32(body))+body
 
 
+def vulkan_local_v2(p, groups=()):
+    """the runtime's version 2 record of code-free pipeline p: raw key, shader 0 for both stages, archive groups"""
+    raw=fmt.vulkan_payload(p)
+    words=list(struct.unpack('<%dI'%((len(raw)-8)//4),raw[8:]))
+    key=bytes(words[1:209])
+    out=list(struct.unpack('<52I',key))+[words[209]]
+    at=210
+    for _ in range(2):
+        out.append(0)                                # shader index (code-free payload: empty code vector)
+        at+=1
+        n=words[at];out.extend(words[at:at+1+4*n]);at+=1+4*n
+    out.extend(words[at:])
+    out.extend([len(groups),*groups])
+    return struct.pack('<%dI'%len(out),*out)
+
+
+def vulkan_db_v2(recipes, fingerprint=b'\x11'*48):
+    code=struct.pack('<6I',0x07230203,0x00010300,0,1,0,0x00010000);packed=zlib.compress(code,1)
+    table=struct.pack('<I',1)+struct.pack('<IIII',6,len(packed),0,0)+packed+b'\0'*(-len(packed)%4)
+    body=table+b''.join(struct.pack('<I',len(r))+r for r in recipes)
+    return b'WWVKPR02'+fingerprint+struct.pack('<II',len(recipes),zlib.crc32(body))+body
+
+
 def legacy_fetch():
     words=[1|(160<<8),5|(1<<9)|(2<<12)|(3<<15)|(4<<18)|(1<<22),8|(2<<16),0]
     return struct.pack('<4I',*words)
@@ -257,6 +280,20 @@ class PlayerCaches(unittest.TestCase):
             self.assertNotIn(code,zlib.decompress(data[8:]))
         prep.guard_template(data)
 
+    def test_versioned_metal_cache_markers_are_skipped(self):
+        # the runtime's versioned shaders.bin starts with a header (type 7) and may hold tombstones (type 8):
+        # neither is a state, a pipeline or damage (runtime/src/gfx/metal_cache_file.h)
+        header=b'WWMTLHDR'+struct.pack('<5I',1,1,1,168,5)+b'macOS'
+        tomb=struct.pack('<2Q',1,2)
+        path=self.stream('shaders.bin',[(7,header)]+self.every_kind()+[(8,tomb)])
+        b=prep.TemplateBuilder();b.add_cache(str(path))
+        doc=b.document()
+        self.assertEqual(len(doc['states']),4)
+        self.assertEqual(len(doc['pipelines']),3)
+        self.assertEqual(sum(b.report.skipped.values()),1)  # the speculative record only
+        self.assertEqual(b.report.ignored_bytes,0)
+        self.assertNotIn(7,b.report.records);self.assertNotIn(8,b.report.records)
+
     def test_vulkan_recipes_file_any_count(self):
         # *.bin.recipes is a whole database (not a record stream); runtime allows 16384 recipes (512 earlier)
         recipes=[]
@@ -272,6 +309,23 @@ class PlayerCaches(unittest.TestCase):
         b=prep.TemplateBuilder();b.add_cache(str(path))
         self.assertEqual(len(b.document()['pipelines']),2)
         self.assertEqual(sum(b.report.skipped.values()),2)
+
+    def test_local_database_version_2(self):
+        # the runtime's local database stores each shader once and adds archive groups; templates read it alike
+        recipes=[]
+        for i in range(40):
+            p=vulkan();p['shader_hashes']=[i,i+1,i+2];recipes.append((p,vulkan_local_v2(p,(7,i+1) if i%2 else ())))
+        path=self.root/'vk-0123456789ab.bin.recipes';path.write_bytes(vulkan_db_v2([r for _,r in recipes]))
+        decoded=fmt.vulkan_database(path.read_bytes())
+        self.assertEqual([d['shader_hashes'] for d in decoded],[p['shader_hashes'] for p,_ in recipes])
+        b=prep.TemplateBuilder();b.add_cache(str(path))
+        self.assertEqual(len(b.document()['pipelines']),40)
+        self.assertEqual(sum(b.report.skipped.values()),0)
+        # an index past the shader table is rejected (one recipe), the rest kept
+        bad=bytearray(vulkan_local_v2(recipes[0][0]));bad[4*53:4*54]=struct.pack('<I',5)
+        path.write_bytes(vulkan_db_v2([bytes(bad)]+[r for _,r in recipes[1:]]))
+        b=prep.TemplateBuilder();b.add_cache(str(path))
+        self.assertEqual(len(b.document()['pipelines']),39)
 
     def test_more_records_than_the_old_limit(self):
         # the original #162 failure: the Metal recorder appends forever (real caches: 181,208 records)
@@ -415,6 +469,23 @@ class PlayerCaches(unittest.TestCase):
         # merge accepts only code-free templates: never a raw cache
         with patch('sys.stdout'):self.assertEqual(prep.cmd_merge(str(self.root/'bad.bin'),[str(first),str(live/'shaders.bin')]),1)
         self.assertFalse((self.root/'bad.bin').exists())
+
+    def test_stage_template_keeps_only_what_the_base_lacks(self):
+        # a mod stage's template (docs/mod-stages.md, "Shaders"): the caches' states beyond the base template
+        live=self.player_folder(self.root/'a')
+        base=self.root/'base.bin';self.assertEqual(self.export(live,base),0)
+        other=self.root/'b'/'shader-prebuild'/'live';other.mkdir(parents=True)
+        self.stream('s',[(1,prep.shader_record(0,b'stage pixel',b'',[(0xa214,9)]))]).replace(other/'shaders.bin')
+        out=self.root/'stage.wwht'
+        with patch('sys.stdout'):self.assertEqual(prep.cmd_stage_template(str(out),str(other/'shaders.bin'),str(base)),0)
+        data=out.read_bytes();prep.guard_template(data)
+        doc=fmt.decode(data)
+        self.assertEqual((len(doc['states']),len(doc['pipelines'])),(1,0))
+        self.assertNotIn(b'stage pixel',zlib.decompress(data[8:]))
+        # nothing beyond the base: an empty template; no base: refused
+        with patch('sys.stdout'):self.assertEqual(prep.cmd_stage_template(str(self.root/'none.wwht'),str(live/'shaders.bin'),str(base)),0)
+        self.assertEqual(len(fmt.decode((self.root/'none.wwht').read_bytes())['states']),0)
+        with patch('sys.stdout'):self.assertEqual(prep.cmd_stage_template(str(self.root/'x.wwht'),str(other/'shaders.bin'),str(self.root/'missing.bin')),1)
 
     def test_export_writes_nothing_the_guard_rejects(self):
         live=self.player_folder(self.root/'a');out=self.root/'out.bin'
@@ -575,3 +646,92 @@ class Yaz0Loader(unittest.TestCase):
             self.assertTrue(prep._load_yaz0().endswith('build/libyaz0'+prep.YAZ0_SUFFIX))
 
 if __name__=='__main__':unittest.main()
+
+
+class Distill(unittest.TestCase):
+    """Synthetic: one state per distinct shader, recipes renamed to the kept states' keys."""
+    def state(self, h, vertex, value):
+        return (h, vertex, None, [(0xa214, value)], None)
+
+    def test_one_state_per_shader_and_renamed_recipes(self):
+        states = [self.state(10, 0, v) for v in (1, 2, 3)] + [self.state(20, 1, 1), self.state(20, 1, 2)]
+        record_states = [0, 1, 2, 3, 4]
+        # Metal: records 0, 1 share shader 0xa (wide keys 0xa, 0xb), record 2 is its own; VS records share 0xc
+        metal_map = ({0: ('M', 0, 0xa, 0xa), 1: ('M', 0, 0xa, 0xb), 2: ('M', 0, 0xd, 0xd),
+                      3: ('M', 1, 0xc, 0xc), 4: ('M', 1, 0xc, 0xe)}, {})
+        # Vulkan: all three pixel records give one shader (variant keys 0x100..0x102)
+        vulkan_map = ({0: ('V', 0, 0x55, 0x100), 1: ('V', 0, 0x55, 0x101), 2: ('V', 0, 0x55, 0x102),
+                       3: ('V', 1, 0x66, 0x200), 4: ('V', 1, 0x66, 0x201)}, {})
+        m1 = dict(metal(), shader_hashes=[0xc, 0xa, 3])
+        m2 = dict(metal(), shader_hashes=[0xe, 0xb, 3])  # the same shaders by other states' keys
+        v1 = dict(vulkan(), shader_hashes=[0x201, 0x102, 0])
+        pipelines = [(prep.REC_PIPELINE, m1), (prep.REC_PIPELINE, m2), (5, v1)]
+        kept, kept_pipelines, report = prep.distill(states, pipelines, record_states, [metal_map, vulkan_map])
+        self.assertEqual(kept, [states[0], states[2], states[3]])
+        self.assertEqual([p['shader_hashes'] for _, p in kept_pipelines], [[0xc, 0xa, 3], [0x200, 0x100, 0]])
+        self.assertEqual(report['pipelines merged'], 1)
+
+    def test_derived_pipelines_keep_their_states_and_recipe(self):
+        states = [self.state(10, 0, v) for v in (1, 2)] + [self.state(20, 1, 1)]
+        metal_map = ({0: ('M', 0, 0xa, 0xa), 1: ('M', 0, 0xa, 0xb), 2: ('M', 1, 0xc, 0xc)}, {})
+        # the recipe naming the second pixel state gives its own Vulkan pipeline
+        vulkan_map = ({0: ('V', 0, 0x55, 0x100), 1: ('V', 0, 0x55, 0x101), 2: ('V', 1, 0x66, 0x200)},
+                      {0: (0, 2, 0x777), 1: (1, 2, 0x888)})
+        pipelines = [(prep.REC_PIPELINE, dict(metal(), shader_hashes=[0xc, 0xa, 3])),
+                     (prep.REC_PIPELINE, dict(metal(), shader_hashes=[0xc, 0xb, 3]))]
+        kept, kept_pipelines, _ = prep.distill(states, pipelines, [0, 1, 2], [metal_map, vulkan_map])
+        self.assertEqual(kept, states)
+        self.assertEqual([p['shader_hashes'] for _, p in kept_pipelines], [[0xc, 0xa, 3], [0xc, 0xb, 3]])
+
+    def test_map_must_cover_every_record(self):
+        with self.assertRaises(ValueError):
+            prep.distill([self.state(1, 0, 1)], [], [0, 0], [({0: ('M', 0, 1, 1)}, {})])
+
+
+class Sealed(unittest.TestCase):
+    def game(self, d, salt=b''):
+        for rel in fmt.SEAL_KEY_FILES:
+            path = os.path.join(d, 'content', *rel.split('/'))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            pathlib.Path(path).write_bytes(b'synthetic archive ' + rel.encode() + salt)
+        return d
+
+    def test_seal_open_and_wrong_game(self):
+        plain = fmt.encode({'version': 3, 'states': [], 'pipelines': [metal()]})
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            key = fmt.game_key(self.game(a))
+            self.assertEqual(key, fmt.game_key(os.path.join(a, 'content')))
+            sealed = fmt.seal(plain, key)
+            self.assertEqual(sealed, fmt.seal(plain, key))  # deterministic
+            self.assertTrue(fmt.is_sealed(sealed) and plain not in sealed)
+            self.assertEqual(fmt.open_sealed(sealed, key), plain)
+            with self.assertRaises(ValueError):
+                fmt.open_sealed(sealed, fmt.game_key(self.game(b, b'other')))
+            with self.assertRaises(ValueError):
+                fmt.open_sealed(sealed[:-1] + bytes([sealed[-1] ^ 1]), key)
+            with self.assertRaises(ValueError):
+                fmt.seal(b'not a template', key)
+
+    def test_build_reads_a_sealed_template_with_the_game(self):
+        plain = fmt.encode({'version': 3, 'states': [], 'pipelines': [metal()]})
+        with tempfile.TemporaryDirectory() as d:
+            self.game(d)
+            path = os.path.join(d, 'sealed.bin')
+            pathlib.Path(path).write_bytes(fmt.seal(plain, fmt.game_key(d)))
+            with self.assertRaises(ValueError):
+                prep.read_template(path)
+            self.assertEqual(prep.read_template(path, game=os.path.join(d, 'content')),
+                             prep.read_template(self.plain(d, plain)))
+
+    def plain(self, d, data):
+        path = os.path.join(d, 'plain.bin')
+        pathlib.Path(path).write_bytes(data)
+        return path
+
+    def test_game_bytes_scan(self):
+        program = bytes(range(64))
+        with patch.object(prep, 'game_shaders', return_value={(prep.PS, program): (None, 'x')}), \
+                tempfile.TemporaryDirectory() as d:
+            self.game(d)
+            self.assertEqual(prep.game_bytes_found([b'clean' * 10, bytes(64)], d), 0)
+            self.assertGreater(prep.game_bytes_found([b'xx' + program[5:30] + b'yy'], d), 0)

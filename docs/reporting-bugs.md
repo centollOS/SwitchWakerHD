@@ -15,7 +15,7 @@ If the console showed *"The software was closed because an error occurred"*, als
 
 - The version is in the options menu's **Language / About** tab (hold **Minus** while playing).
 - Write down where you were (island or dungeon, which room), what you did just before, and whether you had
-  changed anything in the options menu (Switch tab: clocks, GPU profile, resolution).
+  changed anything in the options menu (Picture tab: resolution, effects; sys-clk clocks).
 
 ## 2. Make a save state where the problem happens
 

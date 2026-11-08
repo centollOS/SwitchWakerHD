@@ -86,10 +86,11 @@ class SDKPackage(unittest.TestCase):
         self.assertTrue(any("game file tree" in problem for problem in problems))
         problems = []
         guard.check_entry("sdk/guest/include/wwhd/bindings.h",
-                          b"void f_02000000(Cpu* __restrict c) {\n", problems)
+                          # (this fork) guard.py wants a translated instruction too (GEN_INSN)
+                          b"void f_02000000(Cpu* __restrict c) {\n    /* 02000000: 38600000 */\n", problems)
         self.assertTrue(any("recompiled game functions" in problem for problem in problems))
         problems = []
-        guard.check_entry("sdk/guest/include/wwhd/functions.h", b"0" * 32, problems)
+        guard.check_entry("sdk/guest/include/wwhd/functions.h", b"a5" * 16, problems)  # (this fork: zeros are in PUBLIC_HEX)
         self.assertTrue(any("key-like" in problem for problem in problems))
 
 

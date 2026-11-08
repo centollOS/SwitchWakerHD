@@ -22,7 +22,8 @@ void uam_vlogf(const char* fmt, va_list ap);
 
 // set by CompileGlsl while it runs (NULL otherwise); uam_fatal() logs and jumps there, or aborts
 // when nothing is armed (uam used outside CompileGlsl)
-extern jmp_buf* uam_fatal_jmp;
+// (per thread: SwitchWakerHD patch 10; __thread, the same in C and C++ for GCC and clang)
+extern __thread jmp_buf* uam_fatal_jmp;
 #if defined(__GNUC__)
 __attribute__((noreturn, format(printf, 1, 2)))
 #endif

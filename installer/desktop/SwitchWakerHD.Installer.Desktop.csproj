@@ -17,6 +17,10 @@
     <Copyright>SwitchWakerHD by centollOS (GPLv3) - github.com/centollOS/SwitchWakerHD</Copyright>
     <Version>1.0.0</Version>
   </PropertyGroup>
+  <!-- WwhdRelease (release-installer.yml, for a pre-release): the release this installer builds instead of the latest -->
+  <ItemGroup Condition="'$(WwhdRelease)' != ''">
+    <AssemblyMetadata Include="WwhdRelease" Value="$(WwhdRelease)" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="11.3.22" />
     <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />

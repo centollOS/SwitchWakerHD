@@ -208,7 +208,8 @@ void decode_level(Surface* s, uint32_t level, uint8_t* dst) {
     uint32_t pitch = level == 0 && s->pitch ? s->pitch : info.pitch, height = info.height;
     auto tm = (Latte::E_HWTILEMODE)info.hwTileMode;
     uint32_t bpp = f.bytesPerBlock * 8;
-    bool depthData = s->isDepth || f.convert == Convert::D24_R32F;
+    // (an RGBA8 texture read as depth, RGBA8_DEPTH, keeps its color layout in guest memory)
+    bool depthData = (s->isDepth && f.convert != Convert::RGBA8_DEPTH) || f.convert == Convert::D24_R32F;
     uint32_t pipeSwizzle = (s->swizzle >> 8) & 1, bankSwizzle = (s->swizzle >> 9) & 3;
     static std::vector<uint8_t> row, converted;
     row.resize(size_t(lg.bw) * f.bytesPerBlock);
@@ -493,7 +494,7 @@ bool is_layered(DkImageType t) {
 // the image of s at pw x ph pixels (its mips and layers) and its default descriptor
 void make_image(Surface* s, SurfaceImage& img, uint32_t pw, uint32_t ph) {
     if (s->fmt.image == DkImageFormat_None)
-        throw std::runtime_error("[dk] unsupported GX2 surface format 0x" + std::to_string(s->format) + " (" + describe(s) + ")");
+        throw std::runtime_error("[dk] unsupported GX2 surface format: " + describe(s));
     DkImageType viewType;
     img.type = image_type(s, &viewType);
     img.pw = pw;
@@ -756,6 +757,14 @@ std::atomic<float> g_resRequested{[] {
     float f = e ? float(atof(e)) : 1.0f;
     return f > 0 ? std::clamp(f, 0.5f, 2.0f) : 1.0f;
 }()};
+std::atomic<float> g_shadowRequested{[] {
+    // the default is the game's own size (1): half size gives +5-7% fps in the busiest views, but straight shadow
+    // edges turn wavy (seen in handheld play, 2026-10-23), so it is the player's choice (Picture tab, Fast)
+    const char* e = getenv("WWHD_SHADOW_SCALE");
+    float f = e ? float(atof(e)) : 1.0f;
+    return f > 0 ? std::clamp(f, 0.5f, 2.0f) : 1.0f;
+}()};
+float g_shadowFrame = g_shadowRequested.load();  // latched at a frame's start with the resolution
 float g_resFrame = g_resRequested.load();
 std::atomic<float> g_resShown{g_resFrame};
 bool screen_shaped(const Surface* s) {
@@ -772,7 +781,13 @@ bool screen_shaped(const Surface* s) {
     float r = float(s->width) * 9.0f / (float(s->height) * 16.0f);
     return r > 0.97f && r < 1.03f;
 }
+// the 1024x1024 depth shadow maps (format 0x005), rendered at the test's own scale (g_shadowFrame)
+bool is_shadow_map(const Surface* s) {
+    return s->renderTarget && s->isDepth && s->format == 5 && s->width == 1024 && s->height == 1024 && s->slices <= 3 &&
+           s->mips <= 1;  // (the three maps are the slices of one array)
+}
 float wanted_scale(const Surface* s) {
+    if (is_shadow_map(s)) return g_shadowFrame;
     if (s->img.valid) return s->hudFull ? 1.0f : s->scalable ? g_resFrame : 1.0f;
     if (g_resFrame == 1.0f) return 1.0f;
     // before its image exists: a 2D one unless the description says otherwise
@@ -859,13 +874,23 @@ bool fit_scale(Surface* s, bool keepContents, bool force) {
         if (g_allocBudget <= 0) return false;  // a later frame (or a draw that needs it now)
         g_allocBudget--;
     }
+    if (is_shadow_map(s)) LOG("[dk] shadow map %08X: %.2f -> %.2f (%ux%u image)", s->addr, double(s->scale), double(want), unsigned(1024 * want), unsigned(1024 * want));
     rescale_surface(s, want, keepContents, s == S.tvSource || s == S.drcSource);
     return true;
+}
+
+bool scale_settled(const Surface* s) {
+    return !s || !s->renderTarget || !s->img.valid || wanted_scale(s) == s->scale;
 }
 
 float res_scale() { return g_resFrame; }
 float requested_res_scale() { return g_resRequested.load(std::memory_order_relaxed); }
 float res_scale_shown() { return g_resShown.load(std::memory_order_relaxed); }
+float shadow_scale() { return g_shadowRequested.load(std::memory_order_relaxed); }
+void set_shadow_scale(float scale) {
+    const float f = std::clamp(scale, 0.5f, 2.0f);
+    if (g_shadowRequested.exchange(f) != f) LOG("[dk] shadow map scale %.2f (from the next frame)", double(f));
+}
 void set_res_scale(float scale) { g_resRequested.store(std::clamp(scale, 0.5f, 2.0f), std::memory_order_relaxed); }
 size_t rescale_pool_bytes() { return g_poolBytes; }
 
@@ -898,6 +923,10 @@ void latch_res_scale() {
             g_pool.erase(g_pool.begin() + long(i));
             break;
         }
+    if (const float sw = g_shadowRequested.load(std::memory_order_relaxed); sw != g_shadowFrame) {
+        g_shadowFrame = sw;
+        R.surfaceEpoch++;  // the shadow maps take the new scale at their next use
+    }
     const float want = g_resRequested.load(std::memory_order_relaxed);
     if (want == g_resFrame) return;
     LOG("[dk] internal resolution %.2f -> %.2f from frame %llu", double(g_resFrame), double(want),
@@ -909,7 +938,8 @@ void latch_res_scale() {
 
 void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
     if (!s->img.valid || s->scale == scale) return;
-    if (s->img.type != DkImageType_2D || s->mips != 1 || s->img.layers != 1) return;  // (never scaled)
+    // (never scaled; the shadow maps' array is, without its contents: it is drawn anew every frame)
+    if (!is_shadow_map(s) && (s->img.type != DkImageType_2D || s->mips != 1 || s->img.layers != 1)) return;
     before_write(s);
     SurfaceImage old = std::move(s->img);
     s->img = SurfaceImage{};
@@ -938,7 +968,7 @@ void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
             }
         }
     }
-    if (keepContents) resample(s, old, s->img);
+    if (keepContents && !is_shadow_map(s)) resample(s, old, s->img);
     if (keepOld) {
         s->twin = std::move(old);
         s->twinScale = oldScale;
@@ -954,11 +984,14 @@ void rescale_surface(Surface* s, float scale, bool keepContents, bool keepOld) {
 }
 
 // ---------------------------------------------------------------- edge smoothing before the HUD (issue #21)
-// At full resolution the FXAA pass needs a second image of the TV buffer's size: kept while FXAA is on
-// (surfaces_frame_start frees it when it is turned off), and swapped with the buffer's image after each pass,
-// so no copy back is needed.
+// At full resolution the FXAA pass needs a second image of the TV buffer's size: kept while FXAA is on and the
+// full-resolution path uses it (surfaces_frame_start frees it when FXAA is turned off, or after kFxaaImageIdle
+// frames without that path: below internal resolution 1 the pass draws into the buffer's own full-size image), and
+// swapped with the buffer's image after each pass, so no copy back is needed. surface_memory counts it.
 namespace {
 SurfaceImage g_fxaaImage;
+uint64_t g_fxaaImageUsed = 0;  // the last frame the full-resolution path used it
+constexpr uint64_t kFxaaImageIdle = 300;
 }  // namespace
 
 bool fxaa_scene(Surface* s) {
@@ -995,14 +1028,18 @@ bool fxaa_scene(Surface* s) {
             }
             LOG("[dk] FXAA: an image of %ux%u for the TV picture (%s)", t.pw, t.ph, describe(s).c_str());
         }
+        g_fxaaImageUsed = R.frame;
         if (!fxaa_pass(s->img, t, linear)) return false;
         std::swap(s->img, t);
         R.surfaceEpoch++;  // views and lookups cached by the draws
         R.textureEpoch++;  // render targets bound again
     }
-    // the pass wrote the buffer and read its other image: a later draw that samples it, or writes the other image,
-    // gets the barrier it needs (dk_sync.h)
-    s->syncWrite = s->syncRead = sync_epoch();
+    // the pass wrote the buffer: a later draw that samples it gets the barrier it needs (dk_sync.h). Its read needs
+    // no mark: fxaa_pass's own barrier comes before it, and the image it read (g_fxaaImage, or the twin below 1) is
+    // not drawn into again this frame (the next FXAA pass, or the next frame's scene once the HUD switch's full
+    // size ends at the frame start, come after the frame-start barrier; rescales are transfers, with their own).
+    // A read mark would give the first HUD draw a write-after-read barrier it does not need.
+    s->syncWrite = sync_epoch();
     R.perf.fxaaPasses++;
     return true;
 }
@@ -1171,7 +1208,7 @@ Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering) {
     s->tileMode = d.tileMode;
     s->swizzle = d.swizzle;
     s->isDepth = d.isDepth;
-    s->fmt = format_info(d.format, d.isDepth);
+    s->fmt = d.isDepth && !forRendering ? comparison_format_info(d.format) : format_info(d.format, d.isDepth);
     s->renderTarget = forRendering;
     s->scale = forRendering ? wanted_scale(s.get()) : 1.0f;
     create_surface_image(s.get());  // (throws for an unsupported format: the GX2 command is skipped and logged)
@@ -1360,6 +1397,23 @@ Surface* sampled_texture(const uint32_t* w, bool isDepthSampler, bool* unique) {
     if (unique) *unique = false;
     const SurfaceDesc d = texture_desc(w, isDepthSampler);
     if (!d.addr) return nullptr;
+    // a comparison sampler whose descriptor spells a color format (RGBA8) at memory the GPU wrote as depth: that
+    // depth image, before a converted color texture (comparison_format_info; as gfx/vulkan)
+    if (isDepthSampler && format_lookup(d.format, true).image == DkImageFormat_None) {
+        Surface* rendered = nullptr;
+        auto range = S.byAddr.equal_range(d.addr);
+        for (auto it = range.first; it != range.second; ++it) {
+            Surface* c = it->second.get();
+            if (!c->isDepth || !c->gpuWritten || !c->fmt.depth || c->fmt.convert == Convert::RGBA8_DEPTH ||
+                c->width != d.width || c->height != d.height || c->slices != d.slices)
+                continue;
+            if (!rendered || c->writeSeq > rendered->writeSeq) rendered = c;
+        }
+        if (rendered) {
+            if (unique) *unique = S.byAddr.count(d.addr) == 1;
+            return found(rendered);
+        }
+    }
     Surface* s = find_or_create_surface(d, false);
     if (unique) *unique = S.byAddr.count(d.addr) == 1;
     upload_surface(s);
@@ -2267,9 +2321,10 @@ void surfaces_frame_start() {
     S.scanSrc = nullptr;
     if (S.tvSource) S.tvSource->hudFull = false;
     if (S.drcSource) S.drcSource->hudFull = false;
-    if (g_fxaaImage.valid && !fxaa_enabled()) {  // (FXAA turned off: its image goes)
+    if (g_fxaaImage.valid && (!fxaa_enabled() || R.frame - g_fxaaImageUsed > kFxaaImageIdle)) {
+        LOG("[dk] FXAA: its %ux%u image freed (%s)", g_fxaaImage.pw, g_fxaaImage.ph,
+            fxaa_enabled() ? "unused at full resolution for a while" : "FXAA off");
         free_image(g_fxaaImage);
-        LOG("[dk] FXAA off: its image freed");
     }
     evict_idle();
     surface_stats();
@@ -2285,6 +2340,10 @@ void surface_memory(size_t& total, size_t& targets, size_t& count) {
         total += bytes;
         if (s->renderTarget || s->gpuWritten) targets += bytes;
         count++;
+    }
+    if (g_fxaaImage.valid) {  // (FXAA's second image: a render target of the TV buffer's size)
+        total += g_fxaaImage.mem.size;
+        targets += g_fxaaImage.mem.size;
     }
 }
 

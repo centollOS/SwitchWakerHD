@@ -1,3 +1,4 @@
+#include "gfx/vulkan/vertex_cpu_policy.h"
 #pragma once
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LattePSInputDefault.h"
 
@@ -152,6 +153,17 @@ namespace LatteDecompilerGLSL
 			}
 		}
 
+		// WWHD: sampler LOD bias the shader adds (gfx/sampler_lod_bias.h); last, so the members above
+		// keep their offsets (std140: a float aligns to 4)
+		for (sint32 t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++)
+		{
+			if (!decompilerContext->analyzer.texUnitUsesLodBias.test(t))
+				continue;
+			uniformCurrentOffset = (uniformCurrentOffset + 3) & ~3;
+			shaderSrc->addFmt("uniform float uf_tex{}LodBias;" _CRLF, t);
+			uniformOffsets.offset_texLodBias[t] = uniformCurrentOffset;
+			uniformCurrentOffset += 4;
+		}
 		uniformOffsets.offset_endOfBlock = uniformCurrentOffset;
 		if (rendererType == RendererAPI::Vulkan)
 		{
@@ -265,7 +277,13 @@ namespace LatteDecompilerGLSL
 					cemu_assert_debug(decompilerContext->output->resourceMappingVK.attributeMapping[i] >= 0);
 					cemu_assert_debug(decompilerContext->output->resourceMappingGL.attributeMapping[i] == decompilerContext->output->resourceMappingVK.attributeMapping[i]);
 
-					shaderSrc->addFmt("ATTR_LAYOUT({}) in uvec4 attrDataSem{};" _CRLF, (sint32)decompilerContext->output->resourceMappingVK.attributeMapping[i], i);
+					// WWHD (issue #207 diagnostic): CPU-converted float attributes arrive as vec4
+					bool cpuFloat = false;
+					if (g_latteCpuVertexDecode && decompilerContext->fetchShader)
+						for (auto& group : decompilerContext->fetchShader->bufferGroups)
+							for (sint32 j = 0; j < group.attribCount; ++j)
+								if (group.attrib[j].semanticId == i && group.attrib[j].nfa != 1 && gfxvk::vk::cpu_vertex_selected(group.attrib[j], g_latteCpuVertexClasses)) cpuFloat = true;
+					shaderSrc->addFmt("ATTR_LAYOUT({}) in {} attrDataSem{};" _CRLF, (sint32)decompilerContext->output->resourceMappingVK.attributeMapping[i], cpuFloat ? "vec4" : "uvec4", i);
 				}
 			}
 		}

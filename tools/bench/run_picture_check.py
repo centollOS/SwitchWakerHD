@@ -87,6 +87,10 @@ def capture(args, name, binary, revision):
         WWHD_PRESS=','.join('%d-%d:8000' % (frame, frame + 8) for frame in range(120, args.load_frame, 30)),
         WWHD_TEST_ORIGIN_LOAD=str(args.origin_load_steps), WWHD_TEST_END=str(args.seconds),
         WWHD_TEST_CAPTURE_LOAD_STEP=str(args.capture_load_step))
+    if getattr(args, 'candidate_vertex_fallback', False):
+        env['WWHD_VK_SHADER_KEY_VERIFY'] = '1'
+        if name.startswith('candidate'):
+            env['WWHD_VK_VERTEX_FALLBACK'] = '1'
     preparation = None
     generation = getattr(args, 'candidate_prebuild_generation', None)
     if name.startswith('candidate') and generation:
@@ -153,6 +157,8 @@ def main():
     parser.add_argument('--seconds', type=float, default=2)
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--validation', action='store_true')
+    parser.add_argument('--candidate-vertex-fallback', action='store_true',
+        help='force RGB vertex format fallback in candidate runs only')
     parser.add_argument('--candidate-prebuild-generation', type=Path,
         help='copy a local setup generation into each candidate run only; baseline remains headstart-disabled')
     args = parser.parse_args()

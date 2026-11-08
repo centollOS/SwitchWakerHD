@@ -52,6 +52,8 @@ void frame_begin(uint64_t frame);   // waits for the slot's fence, resets its st
 void frame_end();                   // the fence after this frame's commands (recorded into the command buffer)
 bool frame_done(uint64_t frame);    // the GPU has finished that frame's commands (no wait)
 bool frame_open();                  // between frame_begin and frame_end: commands and stream memory may be used
+// (this fork, #94) depth peeks for the sun's corona and lens flare (depth_peek_dk.cpp; render::peek_z)
+void peek_z(const uint32_t* cells, uint32_t words);
 StreamAlloc stream_alloc(uint32_t size, uint32_t alignment);  // this frame's slice; empty when full (logged)
 ImageAlloc image_alloc(uint32_t size, uint32_t alignment);
 // Before dkImageLayoutInitialize of a block-linear 2D/array/cube image whose level 0 is `rows` rows tall
@@ -135,10 +137,11 @@ struct Renderer {
     // image possibly in the heap memory of an earlier one): the zcull data deko3d keeps for the bound depth
     // target (invalidated by deko3d only when the target's address changes) is dropped before the next draw
     uint64_t zcullEpoch = 1;
-    // zcull (the 3D engine's per-tile early depth rejection) is off unless WWHD_DK_ZCULL=1 (backend.cpp, queue
+    // zcull (the 3D engine's per-tile early depth rejection) is on unless WWHD_DK_ZCULL=0 (backend.cpp, queue
     // creation): gfx/gl's driver (Mesa nouveau) never enables it, and with it deko3d dropped the ground's
-    // depth-biased decal layers in whole 4x8-pixel tiles (the likely cause of Outset's flickering grass specks, 2026-10-07)
-    bool zcull = false;
+    // depth-biased decal layers in whole 4x8-pixel tiles (the likely cause of Outset's flickering grass specks, 2026-10-07);
+    // it is on again since 2026-10-22 with a zcull invalidate before each run of depth-biased draws (draw.cpp)
+    bool zcull = true;
     uint64_t drawCount = 0, skippedDraws = 0, scanCopies = 0;
     bool timedDraw = true;      // this draw is one the per-draw timers measure (SampledTime)
     // render-thread time and work since the last 5 s report. Each lane adds to its own fields only.
@@ -148,7 +151,7 @@ struct Renderer {
         uint64_t memoHits = 0, comboHits = 0, textureLookups = 0, textureCacheHits = 0;
         uint64_t uboBytes = 0, indexBytes = 0, vertexBytes = 0, streamBytes = 0, reusedBytes = 0, copyNs = 0;
         uint64_t streamFullSkips = 0;  // draws skipped because the stream slice was full
-        uint64_t gamepadDraws = 0, gamepadDrawNs = 0, gamepadSkipped = 0, gamepadClearsSkipped = 0, tvSkipped = 0, tvClearsSkipped = 0;
+        uint64_t gamepadDraws = 0, gamepadDrawNs = 0, gamepadSkipped = 0, gamepadClearsSkipped = 0, tvSkipped = 0, tvClearsSkipped = 0, aoSkipped = 0;
         uint64_t flushNs = 0, flushes = 0, midFrameSubmits = 0;
         // surface lane (surfaces.cpp, formats.cpp, descriptors)
         uint64_t uploadNs = 0, uploads = 0, uploadBytes = 0;

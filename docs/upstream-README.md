@@ -1,5 +1,7 @@
 # The Legend of Zelda: The Wind Waker HD — native port (macOS, Linux, Windows, Android)
 
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/zZzkNhWQ)
+
 A static recompilation of the Wii U version (USA or European) that runs natively on **macOS** (Apple Silicon),
 **Linux**, **Windows** and **Android** (arm64; the setup app builds the game on the phone, see
 [Android](#android-build-it-yourself)). The
@@ -19,6 +21,15 @@ The project has three parts:
   and a catalogue of community mods, installed from inside the game; see [Mods](#mods).
 
 ## What's new
+
+**v0.5.0: settings in the pause menu, new touch controls and a sharper picture.**
+- **Settings in the game's own pause menu**, drawn like the game's menus, with Camera, Controls, Screen, Graphics,
+  Game and Mods tabs.
+- **Touch and controllers:** floating touch sticks and context buttons on Android, an item wheel, a One screen
+  (handheld) mode, a setup for each controller, and button prompts that follow your own face buttons.
+- **Graphics:** smooth bloom and sharp torchlight at higher resolutions, sharper textures on the Mac, smoother frame
+  interpolation that plays exactly like 30 fps, and fewer shader stutters. HDR on Linux and a Meta Quest theater.
+- Many fixes, and more for mod makers and the world editor.
 
 The changes in each update are in [CHANGELOG.md](CHANGELOG.md) and in the release notes on the
 [Releases](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp/releases) page.
@@ -125,6 +136,11 @@ First start, per system:
   its own. Ubuntu 24.04 and newer have no FUSE by default: install `libfuse2t64` (`libfuse2` on older
   releases), or start it with `--appimage-extract-and-run`. Repair or change the game with `--setup`.
   Everything it creates is listed under "Everything stays in the release folder" below.
+- **Linux with an NVIDIA GPU on Wayland** (issue #309): on Wayland the game turns on NVIDIA's older
+  sync method by itself (`__NV_DISABLE_EXPLICIT_SYNC=1`), because the newer one can make the desktop
+  close the game's window. If you see flicker or slowdown, start it with `__NV_DISABLE_EXPLICIT_SYNC=0`
+  to switch that off; if the window still closes, start it with `SDL_VIDEO_DRIVER=x11` (XWayland). A
+  hybrid laptop also needs `prime-run` to use the NVIDIA GPU.
 
 **Everything stays in the release folder** (in `data/`): the built game, the extracted game files,
 saves (`data/save`), settings, controls, save states and shader caches (`data/user`), crash logs
@@ -399,8 +415,7 @@ those languages from your own European or Japanese copy of the game played with 
 into Arabic or Hebrew are drawn right to left, see [docs/rtl-text.md](docs/rtl-text.md)).
 Mouse, keyboard (arrows, Enter, Esc) and controller (D-pad / stick, A, B; L / R switch tabs) all work.
 The game keeps running but gets no input while it is open; Esc, F1 or B closes it. On macOS it shows
-the same options as the menu bar, and both stay in sync. Shift+F1 still saves state slot 1; slot 1 is
-loaded from the overlay (F1 used to load it).
+the same options as the menu bar, and both stay in sync. Shift+F1 still saves state slot 1; **F6 loads slot 1**.
 
 **Entering text (the name screen):** when the game asks for text — your name when you start a new
 file — a text window appears under the game's own name field (also in the GamePad-only and
@@ -446,15 +461,30 @@ buttons light up and the sticks show their deflection, so you can test the mappi
 twice is marked with a warning. Changes apply immediately, also while playing. A dead zone for
 controller sticks and an option to invert the camera's up/down are at the bottom, with **Reset to
 Defaults…**. The mapping is saved to `~/Library/Application Support/WWHD/controls.json`
-(`WWHD_CONTROLS=<file>` uses another file); deleting it restores the defaults. The app's
-single-key shortcuts (R, O, M, N, 6–9, P, F1–F5, F12) and Esc can't be bound. The **Screenshot**
-key (row "Photo", **F10** by default) is bound here like a button, to a key or a controller input.
+(`WWHD_CONTROLS=<file>` uses another file); deleting it restores the defaults. The diagnostic keys P, F12 and 9, and Esc, remain reserved.
+
+**Settings → Shortcuts** remaps Settings, full screen, Screenshot (**F10**), saving and loading
+slots 1–5, and the graphics shortcuts. Each action has a key with Shift/Ctrl/Alt (also Cmd on
+macOS), an alternate key, and a controller combination: hold one button, then press another,
+for example **Select + D-pad Up**. Click a binding to capture it; Esc cancels, right-click or
+**Clear** unbinds it. Conflicting keys (including game controls) and duplicate combinations
+are marked. **Reset to defaults** resets this tab. The GamePad picture-in-picture, performance
+overlay, mute and volume actions start unbound. Defaults otherwise stay unchanged.
+
+A combination consumes only its two buttons, only while both are held; other game inputs keep
+working. Select used as a combination's hold button is reserved for combinations instead of the
+held-Select Settings shortcut. **Tapping Home always opens Settings**, even if its keys are cleared;
+if Home is a combination hold button, its Settings tap acts on release. Esc always closes Settings.
+On Android, shortcuts from a keyboard require `WWHD_ANDROID_KEYBOARD`; controller combinations always work. Shortcuts are saved in the
+`shortcuts` section of **controls.json**, with the game controls. An existing Screenshot key
+or controller binding is preserved when loading an older file. macOS shows the assigned keys
+in the **Shortcuts** menu.
 
 The **Graphics** menu in the menu bar switches fixes and enhancements while playing (the TV
 window title shows what is active and the current frame rate): 60 fps by frame interpolation
 (**6**; 120 and 240 fps in the menu and the settings overlay), true 60 fps (**7**, experimental), internal resolution 1x / 1.5x / 2x / 3x (**R**
 cycles; the game renders at 1280x720, 2x renders at 2560x1440), edge smoothing (FXAA, **8**),
-ambient-occlusion mode (**O** cycles), full-size occlusion depth (**M**), 16x anisotropic
+ambient-occlusion mode (**O** cycles), full-size occlusion depth (**M**), full-size torchlight, 16x anisotropic
 filtering (**N**), the aspect ratio, the renderer (Metal or Vulkan), **Take Screenshot** (**F10**,
 rebindable in Controls: the TV picture as a PNG at the internal resolution, without the settings
 overlay, in `~/Library/Application Support/wwhd/screenshots`; also *Open Screenshots Folder* and an
@@ -476,9 +506,15 @@ and culling projections, including both stereo eyes; cutscenes, dialogue, menus 
 retain their authored FOV. First-person view, item aiming and the Telescope are widened by the
 same factor, so their zoom is weaker above 100%. The setting is saved between launches.
 
-**HDR output** (Windows/Vulkan-only) offers scRGB presentation when Windows HDR is enabled
-and the display supports it. Paper white, peak brightness, exposure, highlight expansion and
-settings-menu brightness are adjustable. This expands the game's SDR output into HDR; it does
+**HDR output** (Vulkan, Windows and Linux) offers scRGB presentation when Windows HDR is
+enabled and the display supports it. Where the surface has no scRGB (Mesa on Wayland), it
+presents HDR10 (BT.2020, PQ) instead; enable HDR for the output in your compositor. When SDL
+runs the game through XWayland (sway and other compositors without `wp_fifo_v1`), choosing
+HDR starts the game on Wayland from the next launch; SDL prefers XWayland there for frame
+pacing, so pacing may change. `SDL_VIDEO_DRIVER` still overrides this, and under gamescope
+(Steam Deck), which provides HDR to XWayland itself, the game stays on XWayland.
+Paper white, peak brightness, exposure, highlight expansion and settings-menu brightness are
+adjustable. This expands the game's SDR output into HDR; it does
 not recover already-clipped lighting or provide native pre-tonemap HDR rendering. The in-game
 HUD follows paper white, while the settings menu has a separate brightness control. HDR starts
 off and must be enabled explicitly. If HDR is unavailable, output falls back to SDR with a
@@ -501,7 +537,7 @@ dungeon map/compass/boss key, a small key) can change or break story events, so 
 file. Cheats edit the live save data; save in game to keep them.
 
 The **Save States** menu (and the Saves tab of the settings overlay) saves to one of 5 slots and
-loads it back (**Shift+F1–F5** save, **F2–F5** load; slot 1 loads from the F1 settings overlay);
+loads it back (**Shift+F1–F5** save, **F2–F5** load; F6 loads slot 1);
 each slot shows its time and area. Slots are kept in `~/Library/Application Support/wwhd/states/`
 and survive restarts. By default a slot holds a **portable state** (`slotN.wwstate`, a few KB):
 your progress and Link's place, no game data, safe to attach to bug reports. Loading one works
@@ -523,6 +559,8 @@ plays the recorded input back to reproduce the crash. Automatic states can also 
 
 Game controllers (Xbox, PlayStation, Switch Pro, MFi) work too; by default buttons map by
 position (the bottom face button is the Wii U's B), and they can be remapped in the Controls window.
+On macOS the app also reads generic HID gamepads through IOKit (for example a Steam Controller as
+Steam Input's virtual pad), which GameController.framework does not surface.
 **Face buttons** in the settings overlay (F1 → Controls) or the Input menu switches that preset:
 *by position (Nintendo)* is the default; *by label (Xbox)* makes the button named A drive the Wii
 U's A instead — on an Xbox pad that means A accepts/acts and B goes back (issue #78), and the X/Y
@@ -535,20 +573,57 @@ In *by label* (including when *Automatic* resolves to it), in-game dialog icons 
 backgrounds use Xbox-style colours (green A, red B, blue X, yellow Y); changing the setting updates
 cached prompts without a restart. The HUD button cluster also follows the Xbox positions: A bottom,
 B right, X left, Y top. In-game shoulder prompts use R1/R2 for R/ZR and L1/L2 for L/ZL in this mode.
-*By position* and *custom* keep the game's colours and positions. See [in-game glyphs](docs/button-glyphs.md).
+*By position* keeps the game's positions. With Xbox or PlayStation prompts, action words take their
+button's colour (**Coloured face button text** off keeps the game's), and a *custom* set of face
+bindings shows each action's own button, with the HUD cluster drawing each button where it sits on the
+pad (sword on Xbox X: the sword is on the left). See [in-game glyphs](docs/button-glyphs.md).
 The **Input** menu switches whether keyboard and controllers act as the Wii U GamePad (default)
 or as a Wii U Pro Controller (`WWHD_PRO_CONTROLLER=1` starts in that mode); with the Pro
 Controller, the GamePad window keeps its screen and touch input.
 When the game asks for text (e.g. your name), the text window described above opens.
 
-Rumble works too (SDL hosts): what the game asks its controller's motor to do is passed to the
-connected controllers that have one, which includes the Pro Controller's. A host controller has a
-single motor, so a GamePad rumble pattern plays as on/off (or half strength where it alternates),
-and the motors stay still while the settings overlay is open, while no game window has focus and
-once the app quits. **Controls > Rumble** in the settings overlay (F1) turns it off and is
-remembered (`WWHD_RUMBLE=0` starts with it off). The macOS app does not drive controller motors yet.
+**GameCube layout** (Controls, or macOS Input menu) changes the whole controller layout. Select a
+controller under **Bindings for** to keep its layout separate; **Restore previous controller bindings**
+keeps the old buttons available, even after restarting. With **Automatic** selected for shared bindings,
+the first connected GameCube pad gets its own preset only if it has no saved custom profile and the
+shared non-face bindings are unchanged. Existing custom profiles win. This does not change keyboard bindings.
 
-**Gyro aiming** (settings overlay → **Controls** → **Gyro…**, off by default): in first person the
+| GameCube input | HD action |
+| --- | --- |
+| A / B | A action/confirm / B sword/back |
+| X / Y / Z | X / Y / R item slots (hold for the optional item ring) |
+| L / R, including full click | ZL target / ZR shield, crouch, rope and boat actions |
+| Control stick / C-stick | Move / camera, aim and baton directions |
+| Start (tap, then release) | Plus: items, collection and maps; use the GamePad window for touch pages |
+| D-pad up / down / left / right | HD up (baton) / down / left (ship cannon) / right (salvage) |
+| Hold Start + D-pad up | Right stick click: first-person view (Picto Box uses its assigned item button) |
+| Hold Start + D-pad down / left / right | Minus (Off-TV Play) / L (GamePad page option) / Home (Settings by default) |
+| Left stick click; screenshot; Jump / Moon jump | Unbound on the pad; existing keyboard shortcuts remain |
+
+L and R activate at **25% travel**, or at their digital click. Light L already locks on: HD has no
+separate analog camera-centering stage. Clicking further adds no second action. The C-stick is passed
+through like a modern right stick; the preset keeps your camera inversion settings. For the original
+camera feel, choose horizontal inversion in the game's camera options. Start is deferred until release
+so a chord does not also open the menu. HD's D-pad and menu navigation are retained; the original
+GameCube D-pad map shortcuts are reached through Start's menu instead.
+
+Based on the original GameCube manual, pp. 8–12, listed on
+[Nintendo's manual index](https://en-americas-support.nintendo.com/app/answers/detail/a_id/16961/~/nintendo-gamecube-and-game-boy-advance-manuals).
+**No real adapters have been tested yet.** Nintendo WUP-028 / compatible Wii U mode, recognized PC-mode
+adapters and Switch Online GameCube mappings are based on SDL's driver/database; an 8BitDo receiver's
+Xbox/Switch mode cannot identify the attached controller automatically. Choose GameCube manually if
+needed. See [adapter coverage, full action table and design notes](docs/gamecube-controller.md).
+
+Rumble works too: what the game asks its controller's motor to do is passed to the connected
+controllers that have one, which includes the Pro Controller's. A host controller has a single
+motor, so a GamePad rumble pattern plays as on/off (or half strength where it alternates), and the
+motors stay still while the settings overlay is open, while no game window has focus and once the
+app quits. **Controls > Controller > Rumble** in the settings overlay (F1) turns it off and is
+remembered (`WWHD_RUMBLE=0` starts with it off). On macOS the motors are driven through
+GameController haptics, so any pad the framework reports haptics for rumbles (the Steam Controller
+on macOS 27 and newer, a DualSense, and others).
+
+**Gyro aiming** (settings overlay → **Controls** → **Controller** → **Gyro…**, off by default): in first person the
 game turns the camera when the GamePad moves. The port turns its virtual GamePad with a host
 controller's gyro (SDL3; on the macOS app through GameController.framework), a Cemuhook (DSU) server
 or the mouse (Steam Input "gyro to mouse": while the game aims, the pointer is captured and the mouse
@@ -584,7 +659,7 @@ In Gaming Mode the Steam button belongs to Steam and there is no keyboard, so ke
 - **Settings overlay:** hold the **View** button (two squares, left of the screen) for half a second.
   Save states are in its first tab (Saves).
 - **Save-state shortcuts:** in Steam, open the game's controller settings and map the back buttons
-  (L4/R4/L5/R5) to keyboard keys: **Shift+F1** saves slot 1, **F2–F5** load slots 2–5,
+  (L4/R4/L5/R5) to keyboard keys: **Shift+F1** saves slot 1, **F6** loads slot 1, **F2–F5** load slots 2–5,
   **Shift+F2–F5** save them. Steam sends those keys to the game.
 
 ## Mods
@@ -623,7 +698,7 @@ The SDK reference is [docs/mod-sdk-v2.md](docs/mod-sdk-v2.md), the mod manager i
 - Useful environment variables: `WWHD_NO_AUDIO=1`, `WWHD_NO_GAMEPAD=1` (no second window), `WWHD_NO_CONTROLLERS=1` (SDL builds: ignore host game controllers), `WWHD_LANGUAGE=<code>` (console language: 1 English, 2 French, 5 Spanish, … — the USA/Asia disc carries English, French and Spanish; a language the game doesn't contain starts in English; with `WWHD_LANGUAGE_REGION=eu` or `jp` from a language source, docs/language-packs.md), `WWHD_RTL=0` / `1` (right-to-left text for Arabic and Hebrew packs off / forced on, docs/rtl-text.md),
   `WWHD_DRC_MODE=window|pip|auto|off|gamepad`, `WWHD_FULLSCREEN=0|1` (the TV window starts windowed / in
   full screen this time instead of as it was left; that session's full screen is not remembered), `WWHD_ASPECT=16:9|window|16:10|21:9|32:9|<w:h>`,
-  `WWHD_AUDIO_VOLUME=0..1` (the master volume the session starts at, whatever the Audio slider saved), `WWHD_AUDIO_OUTPUT=auto|tv|gamepad` (the host plays the TV's sound, plus the GamePad's in Off-TV Play: auto; or only one of them), `WWHD_SHADER_CACHE=<file>|0`, `WWHD_AO_MODE=0..2`, `WWHD_AO_HIRES=0|1`, `WWHD_ANISO=0|1`, `WWHD_RES_SCALE=1|1.5|2|3`,
+  `WWHD_AUDIO_VOLUME=0..1` (the master volume the session starts at, whatever the Audio slider saved), `WWHD_AUDIO_OUTPUT=auto|tv|gamepad` (the host plays the TV's sound, plus the GamePad's in Off-TV Play: auto; or only one of them), `WWHD_SHADER_CACHE=<file>|0`, `WWHD_AO_MODE=0..2`, `WWHD_AO_HIRES=0|1`, `WWHD_FULL_LIGHT=0|1`, `WWHD_ANISO=0|1`, `WWHD_RES_SCALE=1|1.5|2|3`,
   `WWHD_FXAA=0|1`, `WWHD_QUIT_PROMPT=0` (macOS: quit without asking, also during a game), `WWHD_INTERP=1`, `WWHD_INTERP_FPS=60|120|240` (frame interpolation at that rate),
   `WWHD_INTERP_PACED=0|1`, `WWHD_TRUE60=1` (start values for the Graphics menu; they
   override the remembered choices); `WWHD_DISPLAY_HZ=n` replaces the detected display refresh rate
@@ -634,7 +709,7 @@ The SDK reference is [docs/mod-sdk-v2.md](docs/mod-sdk-v2.md), the mod manager i
   console's 1024x1024 and uses much less GPU memory at 2x/3x, useful on weaker hardware; `WWHD_STATE_DIR=<dir>`
   stores save states elsewhere; `WWHD_FULL_SAVE_STATES=0|1` full or portable save states for this
   start; `WWHD_PORTABLE_LOAD=<file.wwstate>` loads that portable state (e.g. from a bug report) as
-  soon as a Quest Log is being played; `WWHD_RUMBLE=0|1` (SDL builds) start value for Controls > Rumble (overrides the remembered
+  soon as a Quest Log is being played; `WWHD_RUMBLE=0|1` (all hosts) start value for Controls > Controller > Rumble (overrides the remembered
   choice); `WWHD_LOG_RUMBLE=1` logs the game's motor requests and what the motors do.
   `WWHD_STRICT_MUL=0` turns off the GPU's 0×anything=0 multiply rule in shaders (on by default, as in
   Cemu; off only for performance comparisons, it brings back e.g. the black letter in the Rito mail sorting game).
@@ -645,6 +720,35 @@ The SDK reference is [docs/mod-sdk-v2.md](docs/mod-sdk-v2.md), the mod manager i
   overlay's Vulkan layer; the log lists the Vulkan layers at start (`[vulkan] layers:`).
 - Debugging aids (frame/draw dumps, traces, scheduler statistics) are documented next to their
   code: grep for `WWHD_` in `runtime/src`.
+
+## Optional: keep your save in a cloud folder
+
+**Settings → Saves → Save folder → Choose save folder...** (Windows, macOS, Linux) puts your save in a
+folder you choose, for example in OneDrive, Dropbox, iCloud Drive or Google Drive, so the cloud app
+keeps it the same on all your computers. Choose the same folder on each computer.
+
+- The change takes effect at the next start: your save is copied there then (never moved). If that
+  folder already has a save, the game shows both dates and asks which one to keep; the other one is
+  kept in `save-backups`.
+- Only the save (`user/cking.sav`, the pictographs and the story progress inside it) goes there. Save
+  states, settings and backups stay on the computer. The choice itself is per computer
+  (`save-folder.json` in the config folder), and **Back to default** returns to the usual folder.
+- If the cloud app kept both sides of a conflict (`cking-PCNAME.sav`, `cking (conflicted copy).sav`,
+  `cking 2.sav`), the next start backs up the folder and asks which save to play with.
+- While the game runs, a small `wwhd-playing.lock` in the folder names the computer. Another computer
+  starting with the same folder warns first. Close the game on one computer before playing on another.
+- If the save can't be read (a cloud file that isn't on this computer yet), the folder is missing
+  (the cloud app signed out, a drive unplugged) or a save that was there is gone, the game asks
+  first (try again, or quit) instead of starting a new, empty save there.
+- The game writes the save to a temporary file next to it and renames it into place, so the cloud app
+  never uploads half a save. If the cloud app holds the file and the rename keeps failing, the new save
+  stays next to it (`cking.sav.wwhd-part`) and the next start offers it. A write that fails (a full
+  disk) never replaces the save. Nothing is replaced or removed without a backup first, and without
+  your answer nothing is removed at all.
+- A folder inside the current save folder (or the other way round) can't be chosen. Choosing a
+  folder that already holds other files (such as the OneDrive folder itself) puts the save in a
+  `Wind Waker HD` folder inside it.
+- `--save DIR` on the command line still wins over the choice.
 
 ## Optional: bring your GameCube save to HD
 
@@ -757,8 +861,7 @@ and Android, and bugs are fixed as they are reported (see the [changelog](CHANGE
 [issues](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp/issues)). Rendering is compared with
 Cemu side by side. It runs at the console's 30 fps or, with frame interpolation, at 60, 120 or
 240 fps (up to the display's refresh rate); true 60 fps is experimental. Known gaps: geometry
-shaders and rectangle primitives are not implemented yet (not encountered in the game so far),
-and the macOS app does not drive controller rumble yet.
+shaders and rectangle primitives are not implemented yet (not encountered in the game so far).
 
 ## Other platforms
 
@@ -770,7 +873,7 @@ Switch issues on its tracker.
 ## License
 
 The code of this project is licensed under the Mozilla Public License 2.0 (see `LICENSE`).
-Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0), {fmt} (MIT) and Dear ImGui (MIT); see Credits. The extractor links zstd (BSD-3-Clause); releases build it from its pinned release source. The game itself is Nintendo's property and is not included.
+Vendored third-party code keeps its own license: Cemu (MPL-2.0), metal-cpp (Apache-2.0), {fmt} (MIT), Dear ImGui (MIT) and ImGuizmo (MIT); see Credits. The extractor links zstd (BSD-3-Clause); releases build it from its pinned release source. The game itself is Nintendo's property and is not included.
 
 ## Credits
 
@@ -794,7 +897,9 @@ follow Cemu as noted in those files (in the Vulkan renderer: the vertex-format t
 shader parser glue). Also vendored: [metal-cpp](https://developer.apple.com/metal/cpp/)
 (Apache-2.0, `runtime/third_party/metal-cpp/LICENSE.txt`), [{fmt}](https://github.com/fmtlib/fmt)
 (MIT, `runtime/third_party/fmt/LICENSE`) and [Dear ImGui](https://github.com/ocornut/imgui) v1.92.9b by
-Omar Cornut and contributors, for the settings overlay (MIT, `runtime/third_party/imgui/LICENSE.txt`).
+Omar Cornut and contributors, for the settings overlay (MIT, `runtime/third_party/imgui/LICENSE.txt`), and
+[ImGuizmo](https://github.com/CedricGuillemet/ImGuizmo) by Cedric Guillemet, for the world editor's move and turn
+handles (MIT, `runtime/third_party/imguizmo/LICENSE`).
 The Cemu archive (`.wua`) reader in `tools/wudextract/zarchive.cpp` is written from the format of
 [ZArchive](https://github.com/Exzap/ZArchive) by Exzap (MIT No Attribution; nothing of it is
 vendored); [zstd](https://github.com/facebook/zstd) by Meta Platforms (BSD-3-Clause) decompresses

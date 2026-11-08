@@ -4,9 +4,11 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <functional>
 
 namespace gfxvk {
 void peek_z(const uint32_t*, uint32_t);
+void peek_retire();  // depth peeks: retire the submission of the latest peek copy now (backend.cpp)
 void init();                     // SDL host: windows + device; AppKit host: see init_appkit
 void run_main_loop();            // SDL host only (the AppKit host runs [NSApp run])
 void draw(const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
@@ -21,6 +23,12 @@ void swap();
 void set_frame_aspect(float a);  // aspect ratio of the TV picture from the next frame on (aspect.cpp)
 bool target_aspect_factors(uint32_t w, uint32_t h, float& kx, float& ky);
 uint64_t frames_completed();
+// even frame delivery (backend.cpp; interp_pacing.h EvenSchedule), render thread: the next swap's
+// intended frame interval (ns, 0: none) and whether it is an in-between frame; the steady-clock time
+// (ns) a held TV frame is due (0: none); present it if its time has come
+void set_present_interval(uint32_t ns, bool hold);
+int64_t present_due();
+void service_present();
 void with_autorelease_pool(void (*fn)());
 void set_tv_format(uint32_t gx2Format, bool tv);
 void invalidate(uint32_t flags, uint32_t addr, uint32_t size);
@@ -33,6 +41,11 @@ void request_tv_dump(const std::string& path, int frames_ahead);
 void request_capture();
 void ss_reset_surfaces();
 void save_renderer_caches();
+// Opt-in endpoint, called under the GX2 execution mutex after render_sync.
+void flush_present_observer();
+bool background_renderer_caches_ready(); // acquire-only; safe on lifecycle threads before init
+void disable_background_renderer_caches(); // withdraw before joining the background saver
+std::function<void()> background_renderer_caches(); // completion wait, outside the execution lock
 void shutdown_renderer_caches();
 int renderer_smoke_test();
 std::string device_description();  // "<GPU>, driver <version>, Vulkan <version>" ("" before init)

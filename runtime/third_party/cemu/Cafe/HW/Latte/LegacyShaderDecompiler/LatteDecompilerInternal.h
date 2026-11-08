@@ -35,6 +35,7 @@ struct LatteDecompilerALUInstruction
 	uint8 aluUnit{}; // 0-3 -> ALU.x/y/u/w (PV), 4 -> Trans unit (PS)
 	uint8 indexInGroup{}; // index of instruction within instruction group
 	bool isLastInstructionOfGroup{};
+	uint8 srcMayBeNonFinite{7}; // WWHD: per source operand, may be infinite or NaN (LatteDecompiler_analyzeFiniteness)
 };
 
 struct LatteDecompilerTEXInstruction
@@ -230,6 +231,8 @@ struct LatteDecompilerShaderContext
 		bool hasSSBOWrite; // shader has instructions that write to SSBO
 		// textures
 		std::bitset<LATTE_NUM_MAX_TEX_UNITS> texUnitUsesTexelCoordinates;
+		std::bitset<LATTE_NUM_MAX_TEX_UNITS> texUnitUsesLodBias; // WWHD: declares texNLodBias (options->emulateSamplerLodBias)
+		std::bitset<LATTE_NUM_MAX_TEX_UNITS> texUnitSetsCubeMapIndex; // WWHD: units a SET_CUBEMAP_INDEX writes (declares cubeMapArrayIndexN)
 		bool hasCubeMapTexture; // set to true if a cubemap texture is used
 		bool hasGradientLookup; // set to true if texture lookup with custom gradients is used
 		// misc
@@ -267,6 +270,7 @@ struct LatteDecompilerShaderContext
 
 void LatteDecompiler_analyze(LatteDecompilerShaderContext* shaderContext, LatteDecompilerShader* shader);
 void LatteDecompiler_analyzeDataTypes(LatteDecompilerShaderContext* shaderContext);
+void LatteDecompiler_analyzeFiniteness(LatteDecompilerShaderContext* shaderContext);
 void LatteDecompiler_emitGLSLShader(LatteDecompilerShaderContext* shaderContext, LatteDecompilerShader* shader);
 #ifdef ENABLE_METAL
 void LatteDecompiler_emitMSLShader(LatteDecompilerShaderContext* shaderContext, LatteDecompilerShader* shader);

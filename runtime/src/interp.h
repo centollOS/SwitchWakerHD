@@ -5,28 +5,50 @@
 
 namespace interp {
 uint64_t logic_steps();      // saved/restored 30 Hz scenario clock
+// the camera process camera_draw (024FFC40) drew last (0: none yet): eye +0xDC, center +0xE8, up +0xF4,
+// fovy +0xD4 (touch_talk.cpp projects shop items with it)
+uint32_t last_camera();
+bool frame_is_hold();        // this frame's per-frame function runs a hold pass (no logic): for tasks that calc before it
 void record_executed_step(); // game thread; includes built-in turbo passes
 uint64_t executed_steps();    // actual actor logic passes, including true60 half steps
 int mode();                 // 0 off (30 fps), 1 frame interpolation (at fps()), 2 true 60
 void set_mode(int m);
-int fps();                  // frame interpolation's chosen frame rate: 60, 120 or 240
+int fps();                  // frame interpolation's chosen frame rate: 40, 60, 120 or 240
 void set_fps(int f);
 void toggle_fps(int f);     // frame interpolation at f on, or off if it is on at f (menus, the 6 key)
-const char* mode_name();    // "30 fps", "60 fps", "120 fps", "240 fps", "true 60"; "240 fps (120 shown)" when capped
+const char* mode_name();    // "30 fps", "40 fps", "60 fps", "120 fps", "240 fps", "true 60"; "240 fps (120 shown)" when capped
 int output_fps();           // the rate frame interpolation draws: fps() capped to the display
-int frames_per_step();      // frames drawn per 30 Hz logic step: 1, 2, 4 or 8
+int frames_per_step();      // frames drawn per 30 Hz logic step: 1, 2, 4 or 8 (40 fps: at most 2; 4 per 3 steps)
 
 // "Keep game speed": in-between frames that do not fit are skipped instead of slowing the game down;
-// one setting for 60 fps and one for 120/240 fps
+// one setting for 40/60 fps and one for 120/240 fps
 bool paced_interpolation();  // at the current rate
+bool paced_step_schedule();  // paced and frame interpolation on: the step schedule (gx2 step slots) is in use
 void set_paced_interpolation(bool on);
 bool paced_interpolation_at(int fps);
 void set_paced_interpolation_at(int fps, bool on);
+void load_paced_interpolation_at(int fps, bool on);  // the saved setting (hosts, at start; logged as such)
 float paced_drawn_share();  // share of in-between frames drawn lately (paced and on), -1 otherwise
 
 // the display (hosts and renderers): refresh rate of the TV window's screen (0: unknown), and
 // whether presenting waits for its vsync (Metal, Vulkan FIFO)
 void set_display_hz(int hz);
 int display_hz();           // (WWHD_DISPLAY_HZ overrides the detected rate)
+bool display_hz_overridden(); // WWHD_DISPLAY_HZ is set
+// the lowest and highest refresh rate the host reported since start or reset_display_hz_seen() (the
+// overlay's "Reset performance averages"); 0 / 0 when none yet. For the performance report: a vendor
+// may drop the screen to 60 Hz in the middle of a run.
+void display_hz_seen(int* lo, int* hi);
+void reset_display_hz_seen();
+// the refresh rate the host asked the system for (Android: android_display_rate::requested_hz; 0: the
+// system's choice); -1 when the host requests none (desktop)
+void set_requested_display_hz(int hz);
+int requested_display_hz();
 void set_present_vsync(bool on);
+
+// even frame delivery (on by default on Android, WWHD_INTERP_EVEN_PACING=0/1; interp_pacing.h
+// EvenSchedule): the intended distance (ns) of the frame being swapped to the previous one, 0 when
+// frames go out as they come
+bool even_pacing();
+int64_t frame_interval_ns();
 }  // namespace interp

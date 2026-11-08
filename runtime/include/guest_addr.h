@@ -34,6 +34,7 @@ extern const GuestChanged g_guest_changed_code[];
 extern const unsigned g_guest_changed_code_count;
 extern const char g_guest_build_name[];     /* "USA", "EU", ... */
 extern const char g_guest_build_title_id[];
+extern const char g_guest_build_rpx_sha256[];
 #ifdef __cplusplus
 }
 #endif
@@ -84,3 +85,5 @@ static inline int guest_code_range_ok(uint32_t canon_lo, uint32_t canon_hi) {
 
 #define GC(a) guest_code((uint32_t)(a))
 #define GD(a) guest_data((uint32_t)(a))
+/* Optional code hook: unsupported builds leave the caller on its fallback. */
+#define GC_OPTIONAL(a) (guest_code_valid((uint32_t)(a)) ? guest_code((uint32_t)(a)) : 0)

@@ -26,6 +26,9 @@
 
 //#define GM107_DEBUG_SCHED_DATA
 
+// wwhd: A/B switch for patch 7 (uam_api.h, uam::set_dual_issue); off = the patch's behaviour
+bool uam_dual_issue = false;
+
 namespace nv50_ir {
 
 class CodeEmitterGM107 : public CodeEmitter
@@ -4135,7 +4138,7 @@ SchedDataCalculatorGM107::setDelay(Instruction *insn, int delay,
    // wwhd patch 7: no dual issue. On the console a dual-issued pair in the lit (sunlight) terms of the game's
    // shaders made whole 32-thread fragment warps (4x8-pixel screen blocks) flicker with wrong lighting;
    // gfx/gl's Mesa 20.1 never dual-issues. See runtime/third_party/uam/PATCHES.md.
-   static const bool kDualIssue = false;
+   const bool kDualIssue = uam_dual_issue;
    if (!kDualIssue || lastDualIssued || !next || delay > 1 || !targ->canDualIssue(insn, next)) {
       delay = CLAMP(delay, GM107_MIN_ISSUE_DELAY, GM107_MAX_ISSUE_DELAY);
       lastDualIssued = false;

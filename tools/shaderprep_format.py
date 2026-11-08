@@ -280,16 +280,26 @@ class Words:
         if n>max_count: raise ValueError('recipe count')
         return self.take(n)
 
-def vulkan_recipe(data, codefree=False):
-    w=Words(data);key=w.vec(208)
-    if len(key)!=208 or any(v>255 for v in key): raise ValueError('pipeline key schema')
-    key=bytes(key)
+def vulkan_recipe(data, codefree=False, shaders=None):
+    """One recipe record. shaders: the shader count of a version 2 database ("WWVKPR02"), whose records hold the
+    key as raw bytes, a shader index per stage instead of the SPIR-V, and the recipe's archive groups at the end."""
+    w=Words(data)
+    if shaders is not None:
+        key=struct.pack('<52I',*w.take(52))
+    else:
+        key=w.vec(208)
+        if len(key)!=208 or any(v>255 for v in key): raise ValueError('pipeline key schema')
+        key=bytes(key)
     p={'backend':'vulkan','shader_hashes':list(struct.unpack_from('<3Q',key)),
        'key_words':list(struct.unpack_from('<46I',key,24)), 'dynamic_uniforms':w.scalar()}
     p['descriptors']=[]
     for _ in range(2):
-        code=w.vec(262144)
-        if codefree:
+        if shaders is not None:
+            if w.scalar()>=shaders: raise ValueError('recipe shader index')
+            code=None
+        else: code=w.vec(262144)
+        if code is None: pass
+        elif codefree:
             if code: raise ValueError('code in stripped Vulkan recipe')
         elif len(code)<6 or code[0]!=0x07230203: raise ValueError('invalid local SPIR-V')
         n=w.scalar()
@@ -306,22 +316,37 @@ def vulkan_recipe(data, codefree=False):
     n=w.scalar()
     if n>8: raise ValueError('attachment count')
     p['attachments']=[w.take(8) for _ in range(n)];p['dynamics']=w.vec(4)
+    if shaders is not None: w.vec(8)  # archive groups: local prefetch hints, not part of the pipeline
     if w.at!=len(w.words): raise ValueError('trailing recipe')
     return validate_vulkan(p)
 
 VK_DATABASE_MAX = 16384
 
+def vulkan_database_shaders(data):
+    """(shader count or None, offset of the first recipe) of a Vulkan recipe database: version 2 ("WWVKPR02", the
+    runtime's local database) starts with its shader table (words, packed size, digest, zlib bytes padded to 4)."""
+    if data[:8]==b'WWVKPR01': return None,64
+    if data[:8]!=b'WWVKPR02': raise ValueError('unsupported Vulkan database')
+    if len(data)<68: raise ValueError('truncated database')
+    n=struct.unpack_from('<I',data,64)[0];at=68
+    if n>2*VK_DATABASE_MAX: raise ValueError('shader count')
+    for _ in range(n):
+        if at+16>len(data): raise ValueError('truncated database')
+        size=struct.unpack_from('<I',data,at+4)[0];at+=16+((size+3)&~3)
+        if at>len(data): raise ValueError('truncated database')
+    return n,at
+
 def vulkan_database(data):
-    if len(data)<64 or data[:8]!=b'WWVKPR01': raise ValueError('unsupported Vulkan database')
+    if len(data)<64 or data[:8] not in (b'WWVKPR01',b'WWVKPR02'): raise ValueError('unsupported Vulkan database')
     n,crc=struct.unpack_from('<II',data,56)
     # runtime kPipelineRecipeMaxCount (the first recipe databases allowed 512)
     if n>VK_DATABASE_MAX or zlib.crc32(data[64:])!=crc: raise ValueError('invalid Vulkan database')
-    out=[];at=64
+    shaders,at=vulkan_database_shaders(data);out=[]
     for _ in range(n):
         if at+4>len(data): raise ValueError('truncated database')
         size=struct.unpack_from('<I',data,at)[0];at+=4
         if size>4*1024*1024 or size>len(data)-at: raise ValueError('recipe bounds')
-        out.append(vulkan_recipe(data[at:at+size]));at+=size
+        out.append(vulkan_recipe(data[at:at+size],shaders=shaders));at+=size
     if at!=len(data): raise ValueError('trailing database')
     return out
 
@@ -341,3 +366,58 @@ def vulkan_payload(p):
     for d in p['attachments']: words.extend(d)
     words.extend([len(p['dynamics']),*p['dynamics']])
     return b'WWVKST01'+struct.pack('<%dI'%len(words),*words)
+
+# ---------------------------------------------------------------- sealed template
+# A release template can be sealed with a key only the player's own game files give: SHA-256 over three of the game's
+# shader archives (the same in the USA and European games). Not secrecy against attackers (anyone with the game
+# opens it); the shipped file only means something next to the game it belongs to. Layout: SEAL_MAGIC, a 16-byte
+# nonce, a 32-byte HMAC-SHA256 tag over magic + nonce + ciphertext (a wrong game is reported, not mis-read), the
+# ciphertext (the WWHT0003 bytes XOR a SHAKE-256 keystream of key + nonce). The nonce is derived from the key and
+# the content, so sealing is deterministic. Idea after SwitchWakerHD's sealed shader manifest
+# (thanks @Pulpparty / @depende3000); this is its own design.
+SEAL_MAGIC = b'WWHS0001'
+SEAL_KEY_FILES = ('Common/Shaders/Prim/wii_pipeline.sharcfb', 'Common/Shaders/particle/wii_pipeline.sharcfb',
+                  'Common/Shaders/render_buffer/render_buffer.sharcfb')
+
+def game_key(content):
+    """The sealing key from the game's content folder; ValueError when a key file is missing."""
+    import hashlib, os
+    if os.path.isdir(os.path.join(content, 'content')): content = os.path.join(content, 'content')  # the game folder
+    h = hashlib.sha256(b'WWHD shader template key 1\0')
+    for rel in SEAL_KEY_FILES:
+        path = os.path.join(content, *rel.split('/'))
+        try:
+            with open(path, 'rb') as f: digest = hashlib.sha256(f.read()).digest()
+        except OSError:
+            raise ValueError('game file missing for the shader template key: %s' % rel)
+        h.update(rel.encode('ascii') + b'\0' + digest)
+    return h.digest()
+
+def _keystream(key, nonce, size):
+    import hashlib
+    return hashlib.shake_256(b'WWHD shader template stream 1\0' + key + nonce).digest(size)
+
+def _xor(data, stream):
+    return (int.from_bytes(data, 'little') ^ int.from_bytes(stream, 'little')).to_bytes(len(data), 'little')
+
+def seal(plain, key):
+    import hashlib, hmac
+    if not plain.startswith(MAGIC): raise ValueError('only a code-free template can be sealed')
+    nonce = hmac.new(key, b'nonce\0' + plain, hashlib.sha256).digest()[:16]
+    body = _xor(plain, _keystream(key, nonce, len(plain)))
+    tag = hmac.new(key, SEAL_MAGIC + nonce + body, hashlib.sha256).digest()
+    return SEAL_MAGIC + nonce + tag + body
+
+def is_sealed(data):
+    return data.startswith(SEAL_MAGIC)
+
+def open_sealed(data, key):
+    import hashlib, hmac
+    if not data.startswith(SEAL_MAGIC) or len(data) < 56 or len(data) > MAX_BYTES:
+        raise ValueError('not a sealed shader template')
+    nonce, tag, body = data[8:24], data[24:56], data[56:]
+    if not hmac.compare_digest(tag, hmac.new(key, SEAL_MAGIC + nonce + body, hashlib.sha256).digest()):
+        raise ValueError('the shader template does not belong to these game files')
+    plain = _xor(body, _keystream(key, nonce, len(body)))
+    if not plain.startswith(MAGIC): raise ValueError('sealed shader template holds no code-free template')
+    return plain

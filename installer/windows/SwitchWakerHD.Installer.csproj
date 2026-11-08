@@ -22,6 +22,10 @@
     <!-- the product version is the release's alone (no "+<commit>"): SignPath's artifact configuration checks it -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
+  <!-- WwhdRelease (release-installer.yml, for a pre-release): the release this installer builds instead of the latest -->
+  <ItemGroup Condition="'$(WwhdRelease)' != ''">
+    <AssemblyMetadata Include="WwhdRelease" Value="$(WwhdRelease)" />
+  </ItemGroup>
   <ItemGroup>
     <Resource Include="Assets\logo.png" />
   </ItemGroup>
@@ -35,7 +39,5 @@
     <Reference Include="System.IO.Compression.FileSystem" />
     <!-- WinForms only for FolderBrowserDialog (WPF has no folder picker on .NET Framework) -->
     <Reference Include="System.Windows.Forms" />
-    <!-- dynamic, for the shell COM objects that reach DBI over MTP -->
-    <Reference Include="Microsoft.CSharp" />
   </ItemGroup>
 </Project>

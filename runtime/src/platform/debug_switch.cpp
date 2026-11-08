@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <dirent.h>
+#include <malloc.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -18,16 +19,25 @@
 #include "../build_info.h"
 #include "../gfx/switch_renderer.h"
 #include "../gfx/deko/frame_pacing.h"
+#include "../game_clock.h"
+namespace gx2 { extern uint32_t g_render_thread_handle; }  // (gx2_core.cpp: rtcores)
 #include "../mods/mods.h"
 #include "../mods/warps.h"
+#include "../hle/olv_park.h"
 #include "../runtime.h"
 #include "../overlay/hostui.h"
 #include "debug_server.h"
+#include "cores_switch.h"
 #include "prepare_graphics_switch.h"
 #include "shader_scan_switch.h"
 #include "background_shaders_switch.h"
 #include "audio_guard_switch.h"
-#include "bench_switch.h"  // (this fork) the performance test
+#include "thread_sampler.h"
+#include "bench_switch.h"
+#ifdef WWHD_PGO_GEN
+namespace pgo { void register_commands(); }
+#endif  // (this fork) the performance test
+#include "shader_wait_switch.h"
 #include "host.h"
 #include "settings_switch.h"
 
@@ -204,6 +214,11 @@ debugsrv::Reply bloom(const debugsrv::Args& a) {
     if (!a.empty()) gfxsw::set_bloom(a[0] != "0");
     return debugsrv::ok(std::string("bloom ") + (gfxsw::bloom() ? "on" : "off"));
 }
+// "fsr [0|1]": FSR 1 in the present pass (gfxsw::set_fsr), not saved
+debugsrv::Reply fsr(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_fsr(a[0] != "0");
+    return debugsrv::ok(std::string("fsr ") + (gfxsw::fsr() ? "on" : "off"));
+}
 debugsrv::Reply blur(const debugsrv::Args& a) {
     if (!a.empty()) gfxsw::set_distance_blur(a[0] != "0");
     return debugsrv::ok(std::string("blur ") + (gfxsw::distance_blur() ? "on" : "off"));
@@ -211,6 +226,120 @@ debugsrv::Reply blur(const debugsrv::Args& a) {
 
 // "pacing [0|1]": frame pacing mode (gfx/deko/frame_pacing.h, #23): 1 swap interval the game's (the default),
 // 0 swap interval 1 (as before); not saved
+// "clockrate [1-4]": the game clock's rate as the fast forward mod sets it (timebase::set_clock_rate): the
+// sessions after a fast forward, reproduced without a dialogue
+debugsrv::Reply clockrate(const debugsrv::Args& a) {
+    if (!a.empty()) timebase::set_clock_rate(unsigned(atoi(a[0].c_str())));
+    return debugsrv::ok("clockrate " + std::to_string(game_clock::rate()) + (game_clock::shifted() ? " (shifted)" : ""));
+}
+
+// "targetmemo2 [0|1]", "fixedmemo [0|1]", "vtxident [0|1]": the draw-memo round's switches (gfx/deko dk_draw.h; the
+// Switch tab's Debug section has them too): on by default, not saved; each change is logged with its frame
+debugsrv::Reply draw_opt_reply(const char* name, int opt, const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_draw_opt(opt, a[0] != "0");
+    return debugsrv::ok(std::string(name) + (gfxsw::draw_opt(opt) ? " 1" : " 0"));
+}
+debugsrv::Reply targetmemo2(const debugsrv::Args& a) { return draw_opt_reply("targetmemo2", gfxsw::kOptTargetMemo2, a); }
+debugsrv::Reply fixedmemo(const debugsrv::Args& a) { return draw_opt_reply("fixedmemo", gfxsw::kOptFixedMemo, a); }
+debugsrv::Reply vtxident(const debugsrv::Args& a) { return draw_opt_reply("vtxident", gfxsw::kOptVtxIdentity, a); }
+
+// "rtcores [preferred mask]" (test): the render thread's cores (svcSetThreadCoreMask; mask bit n = core n), and which
+// core it was last seen on (a context read)
+debugsrv::Reply rtcores(const debugsrv::Args& a) {
+    if (!gx2::g_render_thread_handle) return debugsrv::err("rtcores: no render thread yet");
+    if (a.size() >= 2) {
+        const Result rc = svcSetThreadCoreMask(gx2::g_render_thread_handle, atoi(a[0].c_str()), strtoul(a[1].c_str(), nullptr, 0));
+        if (R_FAILED(rc)) return debugsrv::err("rtcores: svcSetThreadCoreMask 0x" + std::to_string(rc));
+        LOG("[debug] render thread cores: preferred %s, mask %s", a[0].c_str(), a[1].c_str());
+    }
+    s32 pref = -1;
+    u64 mask = 0;
+    svcGetThreadCoreMask(&pref, &mask, gx2::g_render_thread_handle);
+    return debugsrv::ok("rtcores preferred " + std::to_string(pref) + " mask 0x" + std::to_string(mask));
+}
+
+// "malloc": the heap's use (mallinfo) and what the call cost. Not in the 5 s [mem] line any more: mallinfo walks every
+// free chunk with malloc's lock held (console: ~9 ms after a 10 min warp tour), stalling every allocating thread.
+// The same "[mem] malloc ..." start as before in the log (memory_tour.py)
+debugsrv::Reply malloc_info(const debugsrv::Args&) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const struct mallinfo mi = mallinfo();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    char line[200];
+    snprintf(line, sizeof line, "[mem] malloc %zu MiB in use of %zu MiB taken (heap never used %zu MiB), %zu free chunks, "
+             "mallinfo %.2f ms", size_t(mi.uordblks) >> 20, size_t(mi.arena) >> 20, heap_never_used_mib(),
+             size_t(mi.ordblks), ms);
+    LOG("%s", line);
+    return debugsrv::ok(line);
+}
+
+// "coreprobe [core] [seconds] [priority]" (test, docs/cpu-threading-plan.md 0.5): a thread on that core spins for the
+// seconds and counts the time it did not run (gaps over 20 us between two reads of the tick counter): how much of the
+// core an application thread gets (core 3 needs the forwarder's NPDM to allow it: the process's core mask)
+debugsrv::Reply coreprobe(const debugsrv::Args& a) {
+    struct Probe {
+        double seconds;
+        uint64_t wallNs = 0, lostNs = 0, longestNs = 0, gaps = 0, gapsOver1ms = 0;
+    };
+    const int core = a.size() > 0 ? atoi(a[0].c_str()) : 3;
+    const double seconds = a.size() > 1 ? std::clamp(atof(a[1].c_str()), 0.5, 30.0) : 5.0;
+    const int prio = a.size() > 2 ? int(strtol(a[2].c_str(), nullptr, 0)) : 0x2C;
+    u64 mask = 0;
+    svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+    static Probe probe;
+    probe = Probe{seconds};
+    Thread t;
+    Result rc = threadCreate(&t, [](void* arg) {
+        Probe& p = *static_cast<Probe*>(arg);
+        const uint64_t start = armGetSystemTick(), end = start + uint64_t(p.seconds * 19'200'000.0);
+        uint64_t last = start;
+        for (;;) {
+            const uint64_t now = armGetSystemTick();
+            const uint64_t gap = armTicksToNs(now - last);
+            if (gap > 20'000) {
+                p.lostNs += gap;
+                p.gaps++;
+                p.gapsOver1ms += gap > 1'000'000;
+                p.longestNs = std::max(p.longestNs, gap);
+            }
+            last = now;
+            if (now >= end) break;
+        }
+        p.wallNs = armTicksToNs(last - start);
+    }, &probe, nullptr, 0x4000, prio, core);
+    if (R_FAILED(rc))
+        return debugsrv::err("coreprobe: threadCreate on core " + std::to_string(core) + " refused (0x" +
+                             std::to_string(rc) + "); process core mask " + std::to_string(mask));
+    threadStart(&t);
+    threadWaitForExit(&t);
+    threadClose(&t);
+    char b[300];
+    snprintf(b, sizeof b, "coreprobe core %d priority 0x%X, %.1f s: ran %.1f%% of the time; %llu gaps over 20 us "
+             "(%llu over 1 ms, longest %.2f ms); process core mask 0x%llx", core, prio, double(probe.wallNs) / 1e9,
+             probe.wallNs ? 100.0 * double(probe.wallNs - probe.lostNs) / double(probe.wallNs) : 0.0,
+             (unsigned long long)probe.gaps, (unsigned long long)probe.gapsOver1ms, double(probe.longestNs) / 1e6,
+             (unsigned long long)mask);
+    LOG("[debug] %s", b);
+    return debugsrv::ok(b);
+}
+
+// "core3 [0|1]" (test, docs/core3-plan.md): background shader compiles on core 3 or as before (cores 0-2)
+debugsrv::Reply core3(const debugsrv::Args& a) {
+    if (!a.empty()) cores::wanted() = atoi(a[0].c_str()) != 0;
+    if (!a.empty()) LOG("[debug] core 3 for background work: %s", cores::core3() ? "on" : "off");
+    return debugsrv::ok(std::string("core3 ") + (cores::core3() ? "on" : "off") +
+                        (cores::allowed() ? "" : " (the process has no core 3: the forwarder's NPDM)"));
+}
+
+// "guestcore3 [0|1]" (test, docs/guest-core3-plan.md): the game's threads of emulated cores 0 and 2 also on core 3
+debugsrv::Reply guestcore3(const debugsrv::Args& a) {
+    if (!a.empty()) cores::guest_wanted() = atoi(a[0].c_str()) != 0;
+    const bool on = cores::allowed() && cores::guest_wanted().load();
+    if (!a.empty()) LOG("[debug] guest threads of cores 0 and 2 on core 3 too: %s", on ? "on" : "off");
+    return debugsrv::ok(std::string("guestcore3 ") + (on ? "on" : "off") +
+                        (cores::allowed() ? "" : " (the process has no core 3: the forwarder's NPDM)"));
+}
+
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
     return debugsrv::ok("pacing " + std::to_string(frame_pacing::mode()) + ": swap interval " +
@@ -221,6 +350,45 @@ debugsrv::Reply pacing(const debugsrv::Args& a) {
 debugsrv::Reply dspguard(const debugsrv::Args& a) {
     if (!a.empty()) audio_guard::set_kept(a[0] != "0");
     return debugsrv::ok(std::string("dspguard ") + (audio_guard::kept() ? "the game's own" : "off"));
+}
+
+// "shaderthreads [0-3]": threads that compile the shaders draws ask for (gfx/deko helper_main; 0 auto; not saved)
+debugsrv::Reply shaderthreads(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_shader_compile_threads(atoi(a[0].c_str()));
+    return debugsrv::ok("shaderthreads " + std::to_string(gfxsw::shader_compile_threads()));
+}
+
+// "shaderwait [0-3]": draws of a shader still compiling (shader_wait_switch.h, #49): 0 skipped (the default), 1 wait
+// while an item is shown, 2 also during events, 3 always; not saved (the menu saves it)
+debugsrv::Reply shaderwait(const debugsrv::Args& a) {
+    if (!a.empty()) shader_wait::set_mode(atoi(a[0].c_str()));
+    return debugsrv::ok(std::string("shaderwait ") + std::to_string(shader_wait::mode()) + ": " +
+                        shader_wait::label(shader_wait::mode()));
+}
+
+// "shadowscale [0.5|1|2]", "noao [0|1]", "miiverse [0|1]": the Developer options' performance tests (not saved)
+debugsrv::Reply shadowscale(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_shadow_scale(float(atof(a[0].c_str())));
+    return debugsrv::ok("shadowscale " + std::to_string(gfxsw::shadow_scale()));
+}
+debugsrv::Reply aniso(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_aniso_level(atoi(a[0].c_str()));
+    return debugsrv::ok("aniso " + std::to_string(gfxsw::aniso_level()));
+}
+debugsrv::Reply noao(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_skip_ao(atoi(a[0].c_str()) != 0);
+    return debugsrv::ok(std::string("noao ") + (gfxsw::skip_ao() ? "1" : "0"));
+}
+debugsrv::Reply miiverse(const debugsrv::Args& a) {
+    if (!a.empty()) hle_olv::set_parked(atoi(a[0].c_str()) == 0);  // miiverse 0 = the thread stopped
+    return debugsrv::ok(std::string("miiverse ") + (hle_olv::parked() ? "0 (parked)" : "1 (running, 1 ms nap per step)"));
+}
+
+// "profile [seconds]": sample the frame threads (thread_sampler.h, docs/cpu-threading-plan.md 0.2); "profile status"
+debugsrv::Reply profile(const debugsrv::Args& a) {
+    if (!a.empty() && a[0] == "status") return debugsrv::ok("profile: " + thread_sampler::status());
+    const std::string why = thread_sampler::start(a.empty() ? 10 : atof(a[0].c_str()));
+    return why.empty() ? debugsrv::ok("profile: sampling") : debugsrv::err("profile: " + why);
 }
 
 // "stall <ms> [core] [count] [gap ms]": a host thread above every game thread spins on a core, as
@@ -326,14 +494,36 @@ void start() {
     debugsrv::add_command("reload", "reload                 restart: the forwarder loads the NRO again (put it first)", reload);
     debugsrv::add_command("prepare", "prepare start|stop|status  the Prepare graphics sweep", prepare);
     debugsrv::add_command("scanbench", "scanbench              time reading the game's shader programs (log)", scanbench);
+    debugsrv::add_command("shaderthreads", "shaderthreads [0-3]    shader compile threads: 0 auto, 1-3", shaderthreads);
+    debugsrv::add_command("shaderwait", "shaderwait [0-3]       draws of a compiling shader: 0 skip, 1 items, 2 +events, 3 always",
+                          shaderwait);
+    debugsrv::add_command("shadowscale", "shadowscale [0.5|1|2]   (test) the shadow maps' scale", shadowscale);
+    debugsrv::add_command("aniso", "aniso [1|2|4|8|16]    anisotropic filtering level (not saved)", aniso);
+    debugsrv::add_command("noao", "noao [0|1]             (test) skip the ambient-occlusion pass", noao);
+    debugsrv::add_command("miiverse", "miiverse [0|1]         (test) 0 parks the Miiverse thread", miiverse);
+    debugsrv::add_command("profile", "profile [s] | status   sample the main and render threads (logs/prof_*.samples)",
+                          profile);
     debugsrv::add_command("dspguard", "dspguard [0|1]         the game's DSP-overload guard: 1 its own, 0 off", dspguard);
+    debugsrv::add_command("clockrate", "clockrate [1-4]        the game clock's rate (as fast forward sets it)", clockrate);
+    debugsrv::add_command("targetmemo2", "targetmemo2 [0|1]      target memo by state words + same-frame skip", targetmemo2);
+    debugsrv::add_command("fixedmemo", "fixedmemo [0|1]        fixed state in three memos", fixedmemo);
+    debugsrv::add_command("vtxident", "vtxident [0|1]         vertex states by layout identity", vtxident);
+    debugsrv::add_command("rtcores", "rtcores [pref mask]    (test) the render thread's preferred core and core mask", rtcores);
+    debugsrv::add_command("malloc", "malloc                 heap use (mallinfo; stalls allocations for ms)", malloc_info);
+    debugsrv::add_command("coreprobe", "coreprobe [core] [s] [prio]  how much of a core a spinning thread gets (test)", coreprobe);
+    debugsrv::add_command("core3", "core3 [0|1]            background shader compiles on core 3 (test)", core3);
+    debugsrv::add_command("guestcore3", "guestcore3 [0|1]       guest threads of cores 0/2 also on core 3 (test)", guestcore3);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);
+    debugsrv::add_command("fsr", "fsr [0|1]              FSR 1 in the present pass (not saved)", fsr);
     debugsrv::add_command("stall", "stall <ms> [core] [n] [gap]  spin above the game threads (audio guard tests)", stall);
     debugsrv::add_command("evict", "evict [now | idle <n>] texture eviction: now, or after n unused frames", evict);
     debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);
     bench::register_commands();  // (this fork) "bench": docs/perf-test.md
+#ifdef WWHD_PGO_GEN
+    pgo::register_commands();  // (this fork) a training build (cmake WWHD_PGO=GEN, docs/pgo.md): "pgo"
+#endif
     debugsrv::add_command("quit", "quit                   end the program", quit);
     debugsrv::add_command("peek", "peek <addr> [bytes]    game memory (MEM2) as hex words", peek);
     debugsrv::add_command("poke", "poke <addr> <word>     write a word of game memory (MEM2)", poke);
@@ -350,6 +540,11 @@ void start() {
 }
 
 bool quit_requested() { return g_quit.load(std::memory_order_relaxed); }
+void request_quit() {
+    LOG("[quit] quit requested");
+    debugsrv::stop();
+    g_quit = true;
+}
 bool running() { return g_running; }
 int port() { return g_port; }
 

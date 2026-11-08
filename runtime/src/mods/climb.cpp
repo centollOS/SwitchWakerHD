@@ -30,6 +30,7 @@
 //   stay at 30 Hz; stamina is counted per original step (true60::dt()).
 #include "guest_addr.h"
 #include "mods/climb.h"
+#include "mods/mod_stages.h"
 
 #include <algorithm>
 #include <atomic>
@@ -37,6 +38,7 @@
 #include <cstdlib>
 
 #include "input.h"
+#include "mods/mods.h"
 #include "runtime.h"
 #include "true60.h"
 
@@ -248,7 +250,12 @@ extern "C" void hook_02429408(Cpu* c) {
 // ---- daPy_lk_c::execute (0240CDD0): stamina, re-grab block, HUD state ----
 extern "C" void hook_0240CDD0(Cpu* c) {
     uint32_t self = c->r[3];
+    mods::moon_jump_step(c, self, true);
+    mods::jump_step(c, self, true);
+    mod_stages::link_step(c, self, true);
     f_0240CDD0_orig(c);
+    mods::jump_step(c, self, false);
+    mods::moon_jump_step(c, self, false);
     if (!g_on) {
         g_stamina = 1.0f;
         g_alpha = 0.0f;

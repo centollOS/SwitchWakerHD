@@ -1,3 +1,4 @@
+#include "platform/present_observer.h"
 // Display: the TV and GamePad windows, full screen, and the final composition of the TV and GamePad
 // images onto the screen (scale to fit with letterbox/pillarbox, scaling filter, GamePad screen as a
 // separate window or as a picture-in-picture overlay inside the TV window).
@@ -31,6 +32,7 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include "../exception_report.h"
+#include "../tv_pointer.h"
 #include <atomic>
 #include <cmath>
 #include <map>
@@ -40,6 +42,7 @@
 #include <vector>
 
 #include "../aspect.h"
+#include "../mods/fast_forward.h"
 #include "display.h"
 #include "display_modes.h"
 #include "headless_compose.h"
@@ -49,6 +52,7 @@
 #include "renderer.h"
 #include "runtime.h"
 #include "../interp.h"
+#include "../savestate.h"
 #ifdef WWHD_HAS_VULKAN
 #include "vulkan/api.h"
 #endif
@@ -57,6 +61,8 @@
 #include "../overlay/overlay.h"
 #include "../overlay/guest_hud.h"
 #include "../screenshot.h"
+#include "../dsweep.h"
+#include "hidden_presentation.h"
 
 // The game's own icon in the Dock: meta/iconTex.tga of the game folder (uncompressed 32-bit TGA,
 // 128x128 in Wind Waker HD), as the SDL host does for its windows. Nothing happens without it.
@@ -84,9 +90,12 @@ static void set_dock_icon() {
     NSApp.applicationIconImage = image;
 }
 
-namespace mods { bool mouse_captured(); }
+namespace mods { bool mouse_captured(); bool mouse_camera(); }
 
 namespace gfx {
+// the picture's size at the full internal resolution (dynamic resolution renders it smaller; the layout stays)
+static float nominal_w(const Screen& s) { return s.tex ? float(s.tex.width) / s.dyn : 0.0f; }
+static float nominal_h(const Screen& s) { return s.tex ? float(s.tex.height) / s.dyn : 0.0f; }
 extern Renderer R;
 void install_menu(NSWindow* tv);  // menu.mm
 Class tv_window_class();           // quit_prompt.mm: closing the TV window quits (after asking)
@@ -140,7 +149,9 @@ bool host_setting(const char* key, std::string& value) {
 void set_host_setting(const char* key, const std::string& value) { set_setting(@(key), @(value.c_str())); }
 static void save_options() {
     g_settings[@"drcMode"] = @(kModeNames[display_saved_mode()]);
-    g_settings[@"pipCorner"] = @(kCornerNames[g_corner]);
+    g_settings[@"pipAnchor"] = @(kAnchorNames[g_pip_anchor]);
+    g_settings[@"pipX"] = @(g_pip_x.load());
+    g_settings[@"pipY"] = @(g_pip_y.load());
     g_settings[@"pipSize"] = @(g_pip_size.load());
     g_settings[@"pipOpacity"] = @(g_pip_opacity.load());
     g_settings[@"scaleFilter"] = @(kFilterNames[g_filter]);
@@ -149,10 +160,15 @@ static void save_options() {
 static void load_options() {
     g_mode = find_name(kModeNames, kDrcModeCount, g_settings[@"drcMode"], kDrcWindow);
     if (!drc_mode_offered(g_mode)) g_mode = kDrcWindow;
-    g_corner = find_name(kCornerNames, 4, g_settings[@"pipCorner"], 3);
+    NSString* anchor = g_settings[@"pipAnchor"];
+    NSString* legacy = g_settings[@"pipCorner"];
+    g_pip_anchor = pip_load_anchor([anchor isKindOfClass:[NSString class]] ? anchor.UTF8String : nullptr,
+                                   [legacy isKindOfClass:[NSString class]] ? legacy.UTF8String : nullptr);
+    if (NSNumber* n = g_settings[@"pipX"]) g_pip_x = pip_clamp(n.floatValue, 0, 1, 0.5f);
+    if (NSNumber* n = g_settings[@"pipY"]) g_pip_y = pip_clamp(n.floatValue, 0, 1, 0.5f);
     g_filter = find_name(kFilterNames, 3, g_settings[@"scaleFilter"], kSmooth);
-    if (NSNumber* n = g_settings[@"pipSize"]) g_pip_size = std::clamp(n.floatValue, 0.1f, 0.5f);
-    if (NSNumber* n = g_settings[@"pipOpacity"]) g_pip_opacity = std::clamp(n.floatValue, 0.2f, 1.0f);
+    if (NSNumber* n = g_settings[@"pipSize"]) g_pip_size = pip_clamp_size(n.floatValue);
+    if (NSNumber* n = g_settings[@"pipOpacity"]) g_pip_opacity = pip_clamp_opacity(n.floatValue);
     display_env_overrides();  // start-up overrides for tests (not saved)
 }
 
@@ -179,9 +195,11 @@ static void load_options() {
 - (void)mouseUp:(NSEvent*)e { [self touch:e down:false]; }
 @end
 
-// TV window: clicks on the GamePad overlay are touches
+// TV window: clicks on the GamePad overlay are touches; while a port page on the TV wants the pointer
+// (tv_pointer.h), clicks on the TV picture are that page's
 @interface WWTvView : NSView
 @property bool touching;
+@property bool pointing;
 @end
 @implementation WWTvView
 - (bool)map:(NSEvent*)e x:(float*)tx y:(float*)ty clamp:(bool)c {
@@ -194,21 +212,99 @@ static void load_options() {
     float x, y;
     return [self map:e x:&x y:&y clamp:false];
 }
+// the picture-in-picture GamePad: a right-button or Option drag moves it (from its bottom-right corner:
+// resizes it), the scroll wheel over it resizes it (display_modes.h)
+- (void)point:(NSEvent*)e x:(float*)nx y:(float*)ny {
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    NSSize sz = self.bounds.size;
+    *nx = sz.width > 0 ? p.x / sz.width : 0;
+    *ny = sz.height > 0 ? 1.0f - p.y / sz.height : 0;
+}
+- (bool)pipBegin:(NSEvent*)e {
+    float nx, ny;
+    [self point:e x:&nx y:&ny];
+    if (!gfx::pip_drag_begin(nx, ny)) return false;
+    [NSCursor.closedHandCursor push];
+    return true;
+}
+- (bool)pipMove:(NSEvent*)e {
+    if (!gfx::pip_dragging()) return false;
+    float nx, ny;
+    [self point:e x:&nx y:&ny];
+    gfx::pip_drag_move(nx, ny);
+    return true;
+}
+- (bool)pipEnd {
+    if (!gfx::pip_drag_end()) return false;
+    [NSCursor pop];
+    gfx::save_options();
+    return true;
+}
+- (void)rightMouseDown:(NSEvent*)e {
+    if (![self pipBegin:e]) [super rightMouseDown:e];
+}
+- (void)rightMouseDragged:(NSEvent*)e {
+    if (![self pipMove:e]) [super rightMouseDragged:e];
+}
+- (void)rightMouseUp:(NSEvent*)e {
+    if (![self pipEnd]) [super rightMouseUp:e];
+}
+- (void)scrollWheel:(NSEvent*)e {
+    float nx, ny;
+    [self point:e x:&nx y:&ny];
+    const float steps = e.hasPreciseScrollingDeltas ? e.scrollingDeltaY / 20.0f : e.scrollingDeltaY;
+    float px, py, aspect;
+    if (gfx::pip_wheel(nx, ny, steps)) gfx::save_options();
+    else if (gfx::wheel_on_mod_claim(nx, ny, &px, &py, &aspect)) tv_pointer::add_wheel(steps, px, py, aspect);
+    else [super scrollWheel:e];
+}
+- (bool)picture:(NSEvent*)e down:(bool)down clamp:(bool)c {
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    NSSize sz = self.bounds.size;
+    float x, y, aspect;
+    if (sz.width <= 0 || sz.height <= 0 || !gfx::game_picture_hit(p.x / sz.width, 1.0f - p.y / sz.height, &x, &y, &aspect, c)) return false;
+    tv_pointer::set(down, x, y, aspect);
+    return true;
+}
 - (void)mouseDown:(NSEvent*)e {
     float x, y;
+    if ((e.modifierFlags & NSEventModifierFlagOption) && [self pipBegin:e]) return;
+    // a left button bound to a game button wins over the pointer's other users (tv_pointer.h, issue #315; the
+    // mouse camera's event monitor, mods/mouse.mm, sees the click first and normally keeps it from here)
+    const bool bound = tv_pointer::left_button_bound();
+    const bool picture = tv_pointer::picture_takes_click(bound, mods::mouse_camera());
+    if (!tv_pointer::gamepad_takes_click(bound, mods::mouse_captured())) {
+        [super mouseDown:e];
+        return;
+    }
+    // One screen's Off-TV Play: the GamePad picture is the game's; a talk by mouse takes it first (touch_talk.h)
+    if (picture && gfx::g_one_screen_off_tv.load() && tv_pointer::wanted(tv_pointer::kOwnerTalk) && [self picture:e down:true clamp:false]) {
+        self.pointing = true;
+        return;
+    }
     if ([self map:e x:&x y:&y clamp:false]) {
         self.touching = true;
         input::set_touch(true, x, y);
+    } else if (picture && tv_pointer::wanted() && [self picture:e down:true clamp:false]) {
+        self.pointing = true;
     } else {
         [super mouseDown:e];
     }
 }
 - (void)mouseDragged:(NSEvent*)e {
     float x, y;
+    if ([self pipMove:e]) return;
+    if (self.pointing) { [self picture:e down:true clamp:true]; return; }
     if (self.touching && [self map:e x:&x y:&y clamp:true]) input::set_touch(true, x, y);
 }
 - (void)mouseUp:(NSEvent*)e {
     float x, y;
+    if ([self pipEnd]) return;
+    if (self.pointing) {
+        self.pointing = false;
+        if (![self picture:e down:false clamp:true]) tv_pointer::set(false, 0, 0, 16.0f / 9.0f);
+        return;
+    }
     if (!self.touching) return;
     self.touching = false;
     if (![self map:e x:&x y:&y clamp:true]) x = y = 0;
@@ -278,7 +374,7 @@ static void screen_changed(int i) {
         scr.visible = screen_visible(win);
     }
 #ifdef WWHD_HAS_VULKAN
-    else gfxvk::screen_changed(i, screen_visible(win));
+    else gfxvk::screen_changed(i, screen_visible(win) || (i == 0 && gfx::hidden::mode().test_present));
 #endif
 }
 
@@ -309,7 +405,8 @@ static NSWindow* make_window(int index, NSString* title, NSView* view, int w, in
 static CAMetalLayer* attach_layer(int i) {
     NSWindow* win = g_windows[i];
     if (!win) return nil;
-    CAMetalLayer* layer = [CAMetalLayer layer];
+    CAMetalLayer* layer = i == 0 && present_observer::enabled() ? present_observer::make_layer(win) : [CAMetalLayer layer];
+    if (i == 0 && present_observer::enabled()) layer.frame = win.contentView.bounds;
     layer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
     [win.contentView setLayer:layer];
     g_layers[i] = layer;
@@ -333,7 +430,7 @@ static void attach_metal_layers() {
         layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         layer.framebufferOnly = YES;
         layer.maximumDrawableCount = 3;
-        if (hidden_windows()) scr.visible = false;  // never on screen: no drawables
+        if (!gfx::hidden::mode().presents()) scr.visible = false;  // never on screen: no drawables
     }
 }
 
@@ -416,8 +513,8 @@ static void create_windows() {
         beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical | NSActivityIdleDisplaySleepDisabled
                           reason:@"game running"];
     (void)activity;
-    // scripted test runs (WWHD_NO_HOST_INPUT) run as a background app: no Dock icon, never takes the
-    // keyboard focus from the user's game
+    // Scripted tests (WWHD_NO_HOST_INPUT) have no Dock icon. Native presentation
+    // observation activates the TV window; other tests leave keyboard focus alone.
     bool test = getenv("WWHD_NO_HOST_INPUT") != nullptr;
     [NSApp setActivationPolicy:test ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular];
     if (!test) set_dock_icon();
@@ -462,7 +559,17 @@ static void create_windows() {
     if (hidden_windows()) {
         // test run: never on screen
     } else if (test) {
-        [tv orderBack:nil];  // scripted test run: stay behind, don't take focus
+        if (present_observer::enabled()) {
+            // Native presentation timing requires an onscreen drawable. Merely
+            // ordering a background test window forward can leave it occluded
+            // in another Space, where presentedTime stays zero.
+            // Keep the observation drawable onscreen when another ordinary
+            // app takes focus. Occlusion/native-time gates still apply; this
+            // does not change window geometry or normal player windows.
+            tv.level = NSFloatingWindowLevel;
+            [tv makeKeyAndOrderFront:nil];
+            [NSApp activateIgnoringOtherApps:YES];
+        } else [tv orderBack:nil];  // scripted test run: stay behind, don't take focus
     } else {
         [tv makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
@@ -482,7 +589,7 @@ static void create_windows() {
         static bool hidden = false;
         NSPoint p = [NSEvent mouseLocation];
         if (!NSEqualPoints(p, last)) { last = p; moved = display_now(); hidden = false; }
-        if (!hidden && NSApp.active && g_tv_window.keyWindow && !mods::mouse_captured() && !overlay::is_open() &&
+        if (!hidden && NSApp.active && g_tv_window.keyWindow && !mods::mouse_captured() && !overlay::is_open() && !overlay::pointer_layer_active() &&
             display_now() - moved > 2.0) {
             [NSCursor setHiddenUntilMouseMoves:YES];
             hidden = true;
@@ -645,8 +752,10 @@ void display_attach_vulkan(void** tv, void** drc) {
 // after the Vulkan renderer started: windows that are never shown get no presentation
 void display_vulkan_started() {
 #ifdef WWHD_HAS_VULKAN
-    if (hidden_windows())
+    if (!gfx::hidden::mode().presents())
         for (int i = 0; i < 2; i++) gfxvk::screen_changed(i, false);
+    else if (hidden_windows())  // proof runs (WWHD_TEST_PRESENT_HIDDEN): the hidden TV window presents
+        gfxvk::screen_changed(0, true);
 #endif
 }
 void display_detach() {
@@ -662,6 +771,8 @@ void run_appkit_loop() {
     // orderly exit (Quit, Cmd+Q): the renderer writes its caches (Vulkan pipeline / SPIR-V caches)
     [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationWillTerminateNotification object:nil queue:nil
                                                   usingBlock:^(NSNotification*) {
+        input::shutdown_rumble();
+        ss::save_last_session(1500);  // the "Last session" state (a few KB; skipped outside gameplay)
         render::shutdown();
         // leave without running static destructors: the GX2 render thread and the game threads may
         // still be using them (exit() here crashed in the renderer's caches, Metal and Vulkan alike)
@@ -680,6 +791,14 @@ void run_appkit_loop() {
                 [NSApp terminate:nil];
             }];
     }
+    // D-sweep (WWHD_DSWEEP_EXIT): quits (orderly, caches saved) once the sweep is done
+    if (getenv("WWHD_DSWEEP_EXIT"))
+        [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer* t) {
+            if (!dsweep::exit_requested()) return;
+            [t invalidate];
+            LOG("[display] D-sweep done: quitting");
+            [NSApp terminate:nil];
+        }];
     // test runs: WWHD_TEST_RENDERER_SWITCH=frame:metal|vulkan does what Graphics > Renderer > Restart Now does
     if (const char* e = getenv("WWHD_TEST_RENDERER_SWITCH")) {
         uint64_t at = strtoull(e, nullptr, 10);
@@ -717,8 +836,10 @@ void show_startup_notice(const std::string& title, const std::string& text) {
 static bool is_srgb(MTLPixelFormat f) { return f == MTLPixelFormatBGRA8Unorm_sRGB || f == MTLPixelFormatRGBA8Unorm_sRGB; }
 
 // draw `tex` into the target rectangle (pixels); src_linear: the image holds linear values (sRGB scan buffer)
+// dyn: the picture's dynamic resolution factor (Screen::dyn; below 1: always scaled filtered, as the Vulkan
+// presentation: integer scaling becomes smooth, sharp scaling takes its sharpness from the full size)
 static void draw_image(id<MTLRenderCommandEncoder> e, MTLPixelFormat fmt, float dw, float dh, id<MTLTexture> tex,
-                       bool src_linear, Box b, float alpha) {
+                       bool src_linear, Box b, float alpha, float dyn = 1.0f) {
     if (!tex || b.w <= 0 || b.h <= 0) return;
     float rect[4] = {b.x / dw, b.y / dh, b.w / dw, b.h / dh};
     bool blend = alpha < 0.999f;
@@ -730,7 +851,12 @@ static void draw_image(id<MTLRenderCommandEncoder> e, MTLPixelFormat fmt, float 
     p.conv = src_linear == dst_linear ? 0 : dst_linear ? 1 : 2;
     float scale = std::min(b.w / tex.width, b.h / tex.height);  // target pixels per source texel
     int filter = g_filter;
-    p.sharp = filter == kSmooth || scale <= 1.0f ? 1.0f : filter == kSharp ? scale : 1e4f;
+    float sharpScale = scale;
+    if (dyn < 1.0f) {
+        if (filter == kInteger) filter = kSmooth;
+        else if (filter == kSharp) sharpScale = std::min(b.w / (tex.width / dyn), b.h / (tex.height / dyn));
+    }
+    p.sharp = filter == kSmooth || sharpScale <= 1.0f ? 1.0f : filter == kSharp ? sharpScale : 1e4f;
     p.foot = scale < 1.0f ? 1.0f / scale : 1.0f;
     [e setVertexBytes:rect length:sizeof rect atIndex:0];
     [e setFragmentTexture:tex atIndex:0];
@@ -761,12 +887,12 @@ static void compose_tv(id<MTLTexture> target, const Layout& L) {
     id<MTLRenderCommandEncoder> e = [command_buffer() renderCommandEncoderWithDescriptor:rp];
     float dw = target.width, dh = target.height;
     MTLPixelFormat fmt = target.pixelFormat;
-    draw_image(e, fmt, dw, dh, R.tv.tex, R.tv.srgb, L.tv, 1.0f);
+    draw_image(e, fmt, dw, dh, R.tv.tex, R.tv.srgb, L.tv, 1.0f, R.tv.dyn);
     if (L.pip_on && R.drc.tex) {
         float op = L.drc_only ? 1.0f : g_pip_opacity.load(), bw = std::max(1.0f, roundf(L.pip.w / 200.0f));
         float frame[4] = {0, 0, 0, 0.6f * op};
         draw_solid(e, fmt, dw, dh, {L.pip.x - bw, L.pip.y - bw, L.pip.w + 2 * bw, L.pip.h + 2 * bw}, frame);
-        draw_image(e, fmt, dw, dh, R.drc.tex, R.drc.srgb, L.pip, op);
+        draw_image(e, fmt, dw, dh, R.drc.tex, R.drc.srgb, L.pip, op, R.drc.dyn);
         if(auto* draw=overlay::guesthud::gamepad_region(dw,dh,L.pip.x,L.pip.y,L.pip.w,L.pip.h,op)) {
             if(is_srgb(fmt))overlay::linearize_colors(draw,true);
             ImGui_ImplMetal_NewFrame(rp);
@@ -789,8 +915,8 @@ static void compose_drc(id<MTLTexture> target) {
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> e = [command_buffer() renderCommandEncoderWithDescriptor:rp];
-    Layout L = layout(target.width, target.height, R.drc.tex.width, R.drc.tex.height, 0, 0, false);
-    draw_image(e, target.pixelFormat, target.width, target.height, R.drc.tex, R.drc.srgb, L.tv, 1.0f);
+    Layout L = layout(target.width, target.height, nominal_w(R.drc), nominal_h(R.drc), 0, 0, false);
+    draw_image(e, target.pixelFormat, target.width, target.height, R.drc.tex, R.drc.srgb, L.tv, 1.0f, R.drc.dyn);
     if (auto* draw = overlay::guesthud::gamepad_region(target.width,target.height,L.tv.x,L.tv.y,L.tv.w,L.tv.h,1)) {
         if (is_srgb(target.pixelFormat)) overlay::linearize_colors(draw, true);
         ImGui_ImplMetal_NewFrame(rp);
@@ -812,8 +938,9 @@ static void present_to_layer(Screen& scr, void (^draw)(id<MTLTexture>)) {
     if (!scr.layer || !scr.tex) return;
     MTLPixelFormat want = scr.srgb ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
     if (scr.layer.pixelFormat != want) scr.layer.pixelFormat = want;
-    // uncapped (gx2::uncapped, debug): presentation does not wait for the display
-    const bool sync = !gx2::uncapped();
+    // Fast Forward retains the accelerated guest-vsync schedule, but must not also
+    // wait for the physical display (90/120 logic frames/s on a 60 Hz display).
+    const bool sync = !gx2::uncapped() && !mods::fast_forward_active();
     if (scr.layer.displaySyncEnabled != sync) {
         scr.layer.displaySyncEnabled = sync;
         if (&scr == &R.tv) interp::set_present_vsync(sync);
@@ -846,7 +973,7 @@ static void screenshot_screen(Screen& scr, const std::string& path, bool tv) {
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> e = [command_buffer() renderCommandEncoderWithDescriptor:rp];
-    draw_image(e, t.pixelFormat, w, h, scr.tex, scr.srgb, Box{0, 0, (float)w, (float)h}, 1.0f);
+    draw_image(e, t.pixelFormat, w, h, scr.tex, scr.srgb, Box{0, 0, (float)w, (float)h}, 1.0f, scr.dyn);
     [e endEncoding];
     id<MTLBuffer> buf = [R.device newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
     id<MTLBlitCommandEncoder> b = [command_buffer() blitCommandEncoder];
@@ -880,7 +1007,7 @@ static void take_screenshot(const PresentPlan& P) {
 // Metal, called from swap(): compose and present the TV window (with the GamePad overlay) and the GamePad window
 void present_screens() {
     CGSize ls = R.tv.layer ? R.tv.layer.drawableSize : CGSizeMake(0, 0);
-    PresentPlan P = display_plan(R.tv.tex != nil, R.tv.tex.width, R.tv.tex.height, R.drc.tex != nil, R.drc.tex.width, R.drc.tex.height,
+    PresentPlan P = display_plan(R.tv.tex != nil, nominal_w(R.tv), nominal_h(R.tv), R.drc.tex != nil, nominal_w(R.drc), nominal_h(R.drc),
                                  ls.width, ls.height, R.frame);
     Layout L;
     L.tv = P.tv;
@@ -890,7 +1017,9 @@ void present_screens() {
     L.scale = P.scale;
     float dw = P.dw, dh = P.dh;
     bool pip = P.pip_wanted, drc_only = P.drc_only;
-    if(overlay::guesthud::active())overlay::guesthud::set_tv_region(P.tv.x,P.tv.y,P.tv.w,P.tv.h,!P.drc_only);
+    Box game_box;
+    const bool game_shown = game_picture_box(P, &game_box);
+    overlay::guesthud::set_regions(P.tv.x,P.tv.y,P.tv.w,P.tv.h,!P.drc_only,game_box.x,game_box.y,game_box.w,game_box.h,game_shown);
     g_overlay_draw = overlay::frame(dw, dh, overlay_metal_init);  // settings overlay, drawn by compose_tv
     // Hidden test-only composition: one reused GPU target, no drawable/readback/disk.
     // Like Metal's other resources this target is process-lifetime; replace on device/format change.
@@ -917,8 +1046,7 @@ void present_screens() {
     if (P.sim) {
         present_to_layer(R.tv, ^(id<MTLTexture> t) {
             CGSize ds = R.tv.layer.drawableSize;
-            compose_tv(t, layout(ds.width, ds.height, R.tv.tex.width, R.tv.tex.height, R.drc.tex ? R.drc.tex.width : 0,
-                                 R.drc.tex ? R.drc.tex.height : 0, pip, drc_only));
+            compose_tv(t, layout(ds.width, ds.height, nominal_w(R.tv), nominal_h(R.tv), nominal_w(R.drc), nominal_h(R.drc), pip, drc_only));
         });
     } else {
         present_to_layer(R.tv, ^(id<MTLTexture> t) { compose_tv(t, L); });
@@ -940,7 +1068,7 @@ void present_screens() {
             p.insert(dot == std::string::npos ? p.size() : dot, "_drc");
             dump_texture(d, p.c_str(), true, false);
         }
-        display_log_present_dump(path, P, R.tv.tex.width, R.tv.tex.height);
+        display_log_present_dump(path, P, nominal_w(R.tv), nominal_h(R.tv));
     }
 }
 
@@ -952,10 +1080,10 @@ void display_set_filter(int f) {
 }
 int display_drc_mode() { return g_mode; }
 // settings overlay: the Display menu's picture-in-picture choices
-void display_set_pip(int corner, float size, float opacity) {
-    g_corner = std::clamp(corner, 0, 3);
-    g_pip_size = std::clamp(size, 0.1f, 0.5f);
-    g_pip_opacity = std::clamp(opacity, 0.2f, 1.0f);
+void display_set_pip(int anchor, float size, float opacity) {
+    g_pip_anchor = std::clamp(anchor, 0, int(kPipCustom));
+    g_pip_size = pip_clamp_size(size);
+    g_pip_opacity = pip_clamp_opacity(opacity);
     save_options();
 }
 void display_set_tv_fullscreen(bool on) {
@@ -984,9 +1112,9 @@ bool drc_overlay_hit(void* window, double wx, double wy) {
 - (void)setFilter:(NSMenuItem*)item { gfx::g_filter = (int)item.tag; gfx::save_options(); }
 - (void)setMode:(NSMenuItem*)item { gfx::set_drc_mode((int)item.tag); }
 - (void)toggleDrc:(NSMenuItem*)item { gfx::toggle_drc_screen(); }
-- (void)setCorner:(NSMenuItem*)item { gfx::g_corner = (int)item.tag; gfx::save_options(); }
-- (void)setSize:(NSMenuItem*)item { gfx::g_pip_size = item.tag / 100.0f; gfx::save_options(); }
-- (void)setOpacity:(NSMenuItem*)item { gfx::g_pip_opacity = item.tag / 100.0f; gfx::save_options(); }
+- (void)setAnchor:(NSMenuItem*)item { gfx::g_pip_anchor = (int)item.tag; gfx::save_options(); }
+- (void)setSize:(NSMenuItem*)item { gfx::g_pip_size = gfx::pip_clamp_size(item.tag / 100.0f); gfx::save_options(); }
+- (void)setOpacity:(NSMenuItem*)item { gfx::g_pip_opacity = gfx::pip_clamp_opacity(item.tag / 100.0f); gfx::save_options(); }
 - (void)drcScreen:(NSMenuItem*)item {
     NSArray<NSScreen*>* s = NSScreen.screens;
     if (item.tag < 0 || item.tag >= (NSInteger)s.count) return;
@@ -1025,7 +1153,7 @@ bool drc_overlay_hit(void* window, double wx, double wy) {
         on(gfx::drc_window_shown());
         return gfx::g_mode != gfx::kDrcOff && gfx::drc_window_available();
     }
-    if (a == @selector(setCorner:)) on(gfx::g_corner == item.tag);
+    if (a == @selector(setAnchor:)) on(gfx::g_pip_anchor == item.tag);
     if (a == @selector(setSize:)) on(fabsf(gfx::g_pip_size * 100 - item.tag) < 0.5f);
     if (a == @selector(setOpacity:)) on(fabsf(gfx::g_pip_opacity * 100 - item.tag) < 0.5f);
     if (a == @selector(drcScreen:)) {
@@ -1074,18 +1202,17 @@ void install_display_menu(NSMenu* bar) {
     add(m, @"    Separate window", @selector(setMode:), kDrcWindow);
     add(m, @"    Picture-in-picture in the TV window", @selector(setMode:), kDrcPip).toolTip = @"Click the overlay to touch";
     add(m, @"    Automatic picture-in-picture", @selector(setMode:), kDrcAuto).toolTip =
-        @"Shows GamePad menus while open; follows Off-TV Play. Cmd+G pins the overlay";
+        @"Shows GamePad menus and the Wind Waker song list while open; follows Off-TV Play. Cmd+G pins the overlay";
     add(m, @"    Off", @selector(setMode:), kDrcOff).toolTip = @"Not shown; the game keeps drawing it";
     add(m, @"    GamePad only", @selector(setMode:), kDrcGamePad).toolTip =
         @"Only the GamePad picture in the TV window (click it to touch); in the game, Minus switches to Off-TV Play";
     add(m, @"Show GamePad screen", @selector(toggleDrc:), 0, @"g");
     NSMenuItem* pipItem = [m addItemWithTitle:@"Picture-in-picture" action:nil keyEquivalent:@""];
     NSMenu* pm = [[NSMenu alloc] initWithTitle:@"Picture-in-picture"];
-    header(pm, @"Corner");
-    add(pm, @"    Top left", @selector(setCorner:), 0);
-    add(pm, @"    Top right", @selector(setCorner:), 1);
-    add(pm, @"    Bottom left", @selector(setCorner:), 2);
-    add(pm, @"    Bottom right", @selector(setCorner:), 3);
+    header(pm, @"Position");
+    NSArray* positions = @[@"Top left", @"Top centre", @"Top right", @"Centre left", @"Centre", @"Centre right",
+                           @"Bottom left", @"Bottom centre", @"Bottom right"];
+    for (int i = 0; i < 9; ++i) add(pm, positions[i], @selector(setAnchor:), i);
     header(pm, @"Size (of the TV picture's width)");
     for (int s : {20, 25, 33, 40}) add(pm, [NSString stringWithFormat:@"    %d%%", s], @selector(setSize:), s);
     header(pm, @"Opacity");

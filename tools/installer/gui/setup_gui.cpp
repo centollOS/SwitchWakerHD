@@ -15,7 +15,8 @@
 // Keys: a pasted Wii U common key is sent once over the stdin pipe and the buffer is cleared;
 // it is never shown, logged, stored or put on a command line.
 //
-// Options (any other arguments are passed on to setup.py, e.g. --data-dir DIR --app-dir DIR):
+// Options (any other arguments are passed on to setup.py, e.g. --data-dir DIR --app-dir DIR; game options such
+// as --editor and everything after "--" also go to the game when this program or setup.py starts it, game_args.h):
 //   --automate FILE      scripted run for tests (see run_automation below)
 //   --screenshots DIR    where --automate / --self-test write PNG screenshots
 //   --self-test          start setup.py, wait for its hello, render the welcome screen, exit 0
@@ -53,6 +54,7 @@
 #endif
 
 #include "../../../runtime/src/platform/appimage_notice.h"  // the v0.2.13 .data hint (issue #55)
+#include "game_args.h"
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
@@ -327,7 +329,8 @@ struct Child {
     }
 };
 
-static bool run_quick(const std::vector<std::string>& args) {
+// exit code of a short helper command (-1: could not start)
+static int run_code(const std::vector<std::string>& args) {
     std::vector<const char*> argv;
     for (auto& a : args) argv.push_back(a.c_str());
     argv.push_back(nullptr);
@@ -341,8 +344,9 @@ static bool run_quick(const std::vector<std::string>& args) {
     int code = -1;
     SDL_WaitProcess(p, true, &code);
     SDL_DestroyProcess(p);
-    return code == 0;
+    return code;
 }
+static bool run_quick(const std::vector<std::string>& args) { return run_code(args) == 0; }
 
 // ---------------------------------------------------------------------------------------------
 // starting the built game
@@ -350,11 +354,14 @@ static bool run_quick(const std::vector<std::string>& args) {
 static std::string g_exe, g_game_dir, g_data_dir;  // set when the game is ready to start
 static std::string g_exe_normal_path;                // the normal game (g_exe may be the decomp version)
 static std::string g_exe_normal() { return g_exe_normal_path; }
+static std::vector<std::string> g_game_args;         // game options from this program's command line (game_args.h)
 
 // Replaces this process with the game (macOS, Linux; the Dock keeps showing "Wind Waker HD") or starts
 // it and returns (Windows). The game runs in the data folder (its crash logs go to data/captures).
 static bool launch_game() {
     std::string save = g_data_dir + "/save";
+    std::vector<std::string> args = {g_exe, "--game", g_game_dir, "--save", save};
+    args.insert(args.end(), g_game_args.begin(), g_game_args.end());
 #ifdef _WIN32
     auto wide = [](const std::string& u) {
         int n = MultiByteToWideChar(CP_UTF8, 0, u.c_str(), -1, nullptr, 0);
@@ -362,7 +369,8 @@ static bool launch_game() {
         if (n > 1) MultiByteToWideChar(CP_UTF8, 0, u.c_str(), -1, w.data(), n);
         return w;
     };
-    std::wstring cmd = L"\"" + wide(g_exe) + L"\" --game \"" + wide(g_game_dir) + L"\" --save \"" + wide(save) + L"\"";
+    std::wstring cmd;
+    for (auto& a : args) cmd += (cmd.empty() ? L"" : L" ") + quote_arg(wide(a));
     STARTUPINFOW si = {sizeof si};
     PROCESS_INFORMATION pi = {};
     std::wstring cwd = wide(g_data_dir);
@@ -373,8 +381,10 @@ static bool launch_game() {
     return true;
 #else
     if (chdir(g_data_dir.c_str()) != 0) return false;
-    const char* argv[] = {g_exe.c_str(), "--game", g_game_dir.c_str(), "--save", save.c_str(), nullptr};
-    execv(g_exe.c_str(), (char* const*)argv);
+    std::vector<char*> argv;
+    for (auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+    execv(g_exe.c_str(), argv.data());
     return false;  // only reached when exec failed
 #endif
 }
@@ -442,6 +452,7 @@ struct App {
     std::string source_path, source_kind;  // kind: image | archive (Cemu .wua, no keys) | folder
     std::string probe_msg;
     bool probe_ok = false;
+    bool source_randomizer = false;
     std::string disc_key_found, disc_key_file, common_key_found, common_key_file;
     int disc_mode = 0;
     char disc_paste[128] = {};
@@ -466,6 +477,8 @@ struct App {
     bool decomp_offered = false, decomp = false, start_decomp = false;
     std::string decomp_text, decomp_docs, decomp_exe, decomp_error;
     bool prepare_shaders = true;
+    bool model_sweep = false;  // "Preparing shaders: models (experimental)": opt-in, off by default
+    std::string model_sweep_text;
     bool shader_skip_requested = false;
     std::deque<std::pair<std::string, std::string>> queue;  // requests to send one after another
     std::string after;                                       // then: play | quit | open
@@ -495,6 +508,7 @@ struct App {
     // CLT (macOS)
     double clt_next_check = 0;
     bool clt_install_started = false;
+    std::string clt_problem;  // why the installed tools can't be used (empty: not installed yet)
 
     // automation
     bool self_test = false;
@@ -825,9 +839,10 @@ static void start_install(const std::string& source) {
     A.current = -1;
     std::string f = "\"source\":" + jstr(source);
     f += std::string(",\"code_mods\":") + (A.code_mods ? "true" : "false");
-    if (A.decomp_offered) f += std::string(",\"decomp\":") + (A.decomp ? "true" : "false");
+    if (A.decomp_offered) f += std::string(",\"decomp\":") + (A.decomp && !A.source_randomizer ? "true" : "false");
     if (source != "installed") f += ",\"path\":" + jstr(A.source_path);
     f += std::string(",\"skip_shader_prebuild\":") + (A.prepare_shaders ? "false" : "true");
+    f += std::string(",\"model_sweep\":") + (A.prepare_shaders && A.model_sweep ? "true" : "false");
     f += ",\"shader_prebuild_cancel\":" + jstr(A.data_dir + "/shader-prebuild-cancel");
     request("install", f);
     go(Screen::Installing);
@@ -861,6 +876,7 @@ static void handle_reply(const J& ev) {
     if ((int)ev.num("id") == A.pending_id) A.pending_id = 0, A.pending_cmd.clear();
     if (cmd == "probe") {
         A.probe_ok = ok;
+        A.source_randomizer = ok && ev.boolean("randomizer");
         if (!ok) {
             A.probe_msg = ev.str("message");
             return;
@@ -873,9 +889,8 @@ static void handle_reply(const J& ev) {
         if (A.source_kind == "archive")  // setup.py says which title is used and why
             A.probe_msg = ev.str("message");
         else if (A.source_kind == "folder")
-            A.probe_msg = ev.boolean("in_place") ? "Extracted game folder: The Wind Waker HD (USA). It is used where it is; "
-                                                   "nothing is copied."
-                                                 : "Extracted game folder: The Wind Waker HD (USA)";
+            A.probe_msg = "Extracted game folder: " + ev.str("title", "The Wind Waker HD") +
+                          (ev.boolean("in_place") ? ". It is used where it is; nothing is copied." : "");
         else
             A.probe_msg = "Wii U disc image. The game files are extracted from it into this folder (about 1.7 GB).";
     } else if (cmd == "check_keys") {
@@ -935,6 +950,8 @@ static void handle_event(const J& ev) {
         A.log_path = ev.str("log");
         A.platform = ev.str("platform");
         A.code_mods = ev.boolean("code_mods");
+        A.model_sweep = ev.boolean("model_sweep");
+        A.model_sweep_text = ev.str("model_sweep_text");
         A.decomp_offered = ev.boolean("decomp_offered");
         A.decomp = ev.boolean("decomp");
         A.decomp_text = ev.str("decomp_text");
@@ -1076,16 +1093,57 @@ static void screen_starting() {
     if (!A.log.empty()) log_pane(260);
 }
 
-static bool clt_ok() { return run_quick({"/usr/bin/xcode-select", "-p"}) && run_quick({"/usr/bin/xcrun", "--find", "clang"}); }
+#ifdef __APPLE__
+static const char* const kCltDir = "/Library/Developer/CommandLineTools";
+
+static int clt_check() {  // 0: usable; otherwise the failing step's exit code (xcode-select: -2 when unset)
+    if (!run_quick({"/usr/bin/xcode-select", "-p"})) return -2;
+    return run_code({"/usr/bin/xcrun", "--find", "clang"});
+}
+
+static void set_developer_dir(const char* dir) {
+    // setup and the game it starts inherit it (SDL keeps its own copy of the environment for child processes)
+    if (dir) setenv("DEVELOPER_DIR", dir, 1), SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "DEVELOPER_DIR", dir, true);
+    else unsetenv("DEVELOPER_DIR"), SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "DEVELOPER_DIR");
+}
+
+// macOS can point to another developer folder than the installed Command Line Tools: a removed Xcode, or one
+// whose license hasn't been accepted (issue #219). The tools themselves work, so use them directly then.
+static bool clt_ok() {
+    int code = clt_check();
+    if (code == 0) return A.clt_problem.clear(), true;
+    SDL_PathInfo info;
+    const bool installed = SDL_GetPathInfo((std::string(kCltDir) + "/usr/bin/clang").c_str(), &info);
+    if (installed && !getenv("DEVELOPER_DIR")) {
+        set_developer_dir(kCltDir);
+        if (clt_check() == 0) return A.clt_problem.clear(), true;
+        set_developer_dir(nullptr);
+    }
+    if (!installed) A.clt_problem.clear();
+    else if (code == 69)
+        A.clt_problem = "The Command Line Tools are installed, but macOS uses Xcode, and Xcode's license hasn't been "
+                        "accepted yet. Open Terminal and run:  sudo xcodebuild -license accept";
+    else
+        A.clt_problem = "The Command Line Tools are installed, but macOS can't use them. Open Terminal and run:  sudo "
+                        "xcode-select --switch /Library/Developer/CommandLineTools";
+    return false;
+}
+#else
+static bool clt_ok() { return true; }  // only macOS builds with Apple's tools
+#endif
 
 static void start_child();
 
 static void screen_clt() {
     page_header("Apple's Command Line Tools are needed");
     ImGui::TextWrapped("Setup compiles the game on your Mac with Apple's free Command Line Tools (compiler and "
-                       "Python). They are not installed yet.");
+                       "Python).%s", A.clt_problem.empty() ? " They are not installed yet." : "");
     ImGui::Spacing();
-    if (!A.clt_install_started) {
+    if (!A.clt_problem.empty()) {
+        ImGui::TextWrapped("%s", A.clt_problem.c_str());
+        ImGui::Spacing();
+        ImGui::TextWrapped("It asks for your Mac password. Setup continues by itself afterwards.");
+    } else if (!A.clt_install_started) {
         ImGui::TextWrapped("Click the button: Apple's installer opens. Click \"Install\" there and accept the license; it "
                            "takes a few minutes. Setup continues by itself afterwards.");
     } else {
@@ -1095,6 +1153,12 @@ static void screen_clt() {
     if (ImGui::GetTime() > A.clt_next_check) {
         A.clt_next_check = ImGui::GetTime() + 3.0;
         if (clt_ok()) start_child();
+    }
+    if (!A.clt_problem.empty()) {
+        int b = footer({"Quit", "Check again"}, 1);
+        if (b == 0) A.exit_code = 0;
+        if (b == 1) A.clt_next_check = 0;  // checks on the next frame (it also checks every 3 s by itself)
+        return;
     }
     int b = footer({"Quit", A.clt_install_started ? "Open Apple's installer again" : "Install Command Line Tools"}, 1);
     if (b == 0) A.exit_code = 0;
@@ -1154,16 +1218,22 @@ static void screen_welcome() {
 static void code_mods_choice() {
     checkbox("Prepare shaders now (recommended)", &A.prepare_shaders);
     muted("You can skip this and rebuild the shader cache later in Graphics settings.");
+    if (!A.prepare_shaders) ImGui::BeginDisabled();
+    checkbox("Also prepare model shaders (experimental)", &A.model_sweep);
+    if (!A.prepare_shaders) ImGui::EndDisabled();
+    muted(A.model_sweep_text);
     checkbox("Build with code-mod support", &A.code_mods);
     muted("For mods in the catalogue or Mods tab marked as code mods. Built-in mods, graphics packs and "
           "content mods do not need this. The game code gets a small check in every function, which can "
           "cost some performance, and the build takes a bit longer. You can switch this later in "
           "Settings > Mods; that requires another rebuild.");
-    if (A.decomp_offered) {
+    if (A.decomp_offered && !A.source_randomizer) {
         checkbox("Also build the decomp version (experimental)", &A.decomp);
         muted(A.decomp_text);
         if (button("About the decomp version (docs/decomp-build.md)")) SDL_OpenURL(A.decomp_docs.c_str());
     }
+    if (A.source_randomizer)
+        muted("Randomized games use their own translated code. The decomp version is unavailable for them.");
     ImGui::Spacing();
 }
 
@@ -1203,13 +1273,14 @@ static void screen_menu() {
 
 static void screen_source() {
     page_header("Choose your game",
-                "A Wii U disc image (.wux or .wud), a Cemu archive (.wua) or an already extracted game folder.");
-    static const SDL_DialogFileFilter filters[] = {{"Wii U disc image or Cemu archive (.wux, .wud, .wua)", "wux;wud;wua"},
+                "A Wii U disc image, a Cemu archive or an extracted game folder. For a randomized game, choose the official randomizer output folder or its code/cking.rpx.");
+    static const SDL_DialogFileFilter filters[] = {{"Wii U game or randomized RPX (.wux, .wud, .wua, .rpx)", "wux;wud;wua;rpx"},
                                                    {"Wii U disc image (.wux, .wud)", "wux;wud"},
                                                    {"Cemu Wii U archive (.wua)", "wua"},
+                                                   {"Randomizer game code (.rpx)", "rpx"},
                                                    {"All files", "*"}};
-    if (button("Choose disc image or archive...", ImVec2(320, 0), A.source_path.empty()))
-        choose_file("source", filters, 4);
+    if (button("Choose game file...", ImVec2(320, 0), A.source_path.empty()))
+        choose_file("source", filters, 5);
     ImGui::SameLine();
     if (button("Choose extracted game folder...", ImVec2(320, 0))) choose_folder("source");
     ImGui::Spacing();
@@ -1702,6 +1773,7 @@ static bool pkg_is_portable(const std::string& pkg) {
 static std::string data_dir_of(const std::string& pkg, const std::vector<std::string>& passthru) {
     for (size_t i = 0; i < passthru.size(); i++) {
         const std::string& s = passthru[i];
+        if (s == "--") break;  // game options
         if (s == "--data-dir" && i + 1 < passthru.size() && !passthru[i + 1].empty()) return passthru[i + 1];
         if (s.rfind("--data-dir=", 0) == 0 && s.size() > strlen("--data-dir=")) return s.substr(strlen("--data-dir="));
     }
@@ -1847,7 +1919,7 @@ static void start_child() {
 // automation (tests): a JSON array of steps, each run when its screen is showing:
 //   {"screen": "keys", "set": {"common_mode": "file", "common_key_file": "..."}, "when_step": "compile",
 //    "idle": true, "shot": "03-keys.png", "click": "Check keys and install"}
-// "set" fields: code_mods (boolean), decomp (boolean), source (as if chosen in the dialog), disc_key_file, common_key_file, common_mode
+// "set" fields: code_mods (boolean), decomp (boolean), model_sweep (boolean), source (as if chosen in the dialog), disc_key_file, common_key_file, common_mode
 // (file|paste), save_kind (none|hd|gc|legacy|other), save_path, open_details (true). Screenshots are PNG files
 // of the window. The run ends (exit 0) after the last step, or with exit 2 on a 45-minute timeout.
 
@@ -1886,6 +1958,7 @@ static void automation_frame() {
             else if (k == "save_path") set_save_path(v);
             else if (k == "code_mods") A.code_mods = kv.second.t == J::Bool && kv.second.b;
             else if (k == "decomp") A.decomp = kv.second.t == J::Bool && kv.second.b;
+            else if (k == "model_sweep") A.model_sweep = kv.second.t == J::Bool && kv.second.b;
             else if (k == "open_details") details_open = true;
         }
     }
@@ -1969,7 +2042,18 @@ int main(int argc, char** argv) {
         else if (a == "--setup") want_setup = true;
         else if (a == "--decomp") want_decomp = true;  // start the decomp version (setup.py's --decomp builds it)
         else if (a.rfind("-psn_", 0) == 0) continue;  // macOS Finder's process serial number
-        else A.passthru.push_back(a);
+        else if (a == "--") {  // the rest is for the game, as it is
+            A.passthru.insert(A.passthru.end(), argv + i, argv + argc);
+            break;
+        } else A.passthru.push_back(a);
+    }
+    // game options (--editor, ...; game_args.h) go to the game when this program starts it; setup.py gets
+    // them with the other arguments and passes them on itself when it starts the game (launch request)
+    g_game_args = game_args::of(A.passthru);
+    if (!g_game_args.empty()) {
+        std::string list;
+        for (auto& a : g_game_args) list += " " + a;
+        SDL_Log("game options:%s", list.c_str());
     }
     if (!automate.empty()) {
         std::string text = read_file(automate);

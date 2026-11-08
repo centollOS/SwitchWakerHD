@@ -19,11 +19,6 @@ int main() {
         if (legacy || mode <= 2) {
             assert(loaded.controller == (legacy ? 0 : mode));
             assert(fgetc(file) == 0x42);
-            bool pro = true; // save in Pro, then switch to GamePad, load
-            pro = false;
-            pro = ss::restored_pro_controller(loaded.controller, pro);
-            assert(pro == (!legacy && mode == 2));
-            if (legacy) assert(ss::restored_pro_controller(loaded.controller, true));
         }
         fclose(file);
     }
@@ -36,5 +31,5 @@ int main() {
     std::string why;
     assert(!ss::read_full_state_header(file, h, why));
     fclose(file);
-    puts("legacy/new full-state headers, controller round trip and truncation pass");
+    puts("legacy/new full-state headers, controller metadata round trip and truncation pass");
 }

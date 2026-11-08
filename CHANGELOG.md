@@ -7,6 +7,1245 @@ what is on `devel` and not released yet (also in the
 
 ## Next update
 
+- **For testers: scripted Android runs no longer open Settings** (#379). Runs started with `WWHD_NO_HOST_INPUT` (for
+  example `tools/android/bench_phone.py`) skip the first-start touch-controls question, which had left the Settings
+  window open over every scripted run. `WWHD_TEST_TOUCH_QUESTION=1` still asks it. Normal starts are unchanged.
+- **Experimental: randomized USA games in setup** (#366, for #117). Setup now accepts a compatible USA output folder
+  of the TWWHD Randomizer (or its `code/cking.rpx` with the content around it). It checks automatically that the
+  randomized game is compatible with the port, builds that seed's game code, and keeps its saves, save backups,
+  state slots and cloud-folder choice apart from your normal game and from other seeds; settings and controls stay
+  shared. Your existing saves stay where they are. Randomized EU output is not supported (the randomizer supports
+  USA only). This is experimental: only a few seeds have been tested, Windows not yet, and a full playthrough is
+  still outstanding.
+- **Fixed: Match window keeps exact preset ratios** (#372, for #349, thanks @plxjammerplx for the report). A window or
+  screen shaped exactly like a preset (for example 1280×960) now uses that preset's exact ratio instead of a rounded
+  one (1.335 instead of 4:3), so the picture matches the dedicated 4:3, 16:10, 21:9 and 32:9 presets. The 4:3
+  clipping reported on Android in #349 is still being investigated.
+- **Decomp build (experimental): host versions of the game's runtime library** (#373). In the `-DWWHD_DECOMP=ON`
+  build, 63 functions of the game's compiler runtime and nn wrappers (exact math helpers, array construction, string
+  and printf functions, list helpers and others) now run as host code, each matched to the original by measurement.
+  `WWHD_HOSTRT=0` runs the originals and `WWHD_HOSTRT_CHECK=1` runs both and logs any difference. The normal build is
+  unchanged and keeps the game's own code.
+- **Fixed on macOS: Steam Controllers launched through Steam** (#348, fixes #342, thanks @davidsgullick for the change
+  and @jamesmendel for testing every step on real hardware). The macOS app now reads Steam Input's virtual pad, which
+  GameController never shows, so a Steam Controller started from Steam works, appears once in Controller details and
+  is found again after a reconnect. Other joysticks and generic devices stay ignored, and each ignored device gets one
+  `[input]` log line. Not yet tested: a DualSense or Xbox pad with Steam Input turned on for it.
+- **Improved: GameCube button prompts in the HUD** (#374, for #355). With GameCube prompts, the HUD now draws complete
+  GameCube buttons instead of small letters inside the Wii U plates: full A and B discs, grey and purple shoulder
+  plates, and the Y prompt stays readable in front of large item pictures such as the telescope. With **Coloured face
+  button text** on, shoulder actions such as "Defend" take their button's colour. The GameCube action-word font is not
+  reproduced yet. Other prompt styles are unchanged.
+- **Changed: the Controls settings are split into pages** (#371). Settings › Controls now has five tabs: Bindings,
+  Controller, Prompts, Camera and Gameplay, instead of one long list. Every setting keeps its value; only its place
+  changed (for example Rumble and Gyro are under Controller, the item ring under Gameplay, button prompts under
+  Prompts). The docs name the new places.
+- **Fixed on Linux: the launcher and menu entry for data folders with special characters** (#377, fixes #376, thanks
+  @RaphaelFakhri for the report and the fix). Setup now quotes the data folder correctly in `play.sh` and in the menu
+  entry, so a folder name containing `$`, `` ` ``, `"`, `\` or `%` (for example `Games 100%`) no longer breaks the
+  launcher or makes the menu entry invalid. Ordinary folder names produce the same files as before.
+- **Decomp build (experimental): a stand-in for the scalable font** (#370). The game's scalable font takes its data
+  from the Wii U's system font, which the port doesn't provide. In the `-DWWHD_DECOMP=ON` build, the font module's
+  entry points now draw with the game's own main font instead, so its metrics are sane; `WWHD_FONT_GUARD=1` stops if
+  the original font code runs. The normal build is unchanged and keeps running the game's own font code.
+- **Fixed: loading a portable state made while crawling** (#365, fixes #361, thanks @thejorro for the report and the
+  state). Link now arrives still crawling instead of standing inside the tunnel's ceiling, which caused damage and a
+  respawn loop. Existing states work without conversion; standing and boat states load as before.
+- **Fixed for mod authors: hooks can no longer change the game's registers** (#367). A `WWHD_HOOK` or `WWHD_HOOK_RETURN`
+  hook now leaves every register of the hooked game function as it was, including its result; only writes through
+  pointers stay. Before, a hook could clobber values that some game or patch code relies on. Existing mods don't need
+  changes.
+- **New: keyboard and mouse button prompts** (#364, for #265, thanks @Eggtooth for the idea). Choose **Keyboard / mouse**
+  under Controls › Button prompts and the game's prompts show the key or mouse button you bound (for example Tab, M1,
+  LShift, Wh+), drawn in the game's own font; an unbound action shows None. The camera mods (mouse camera, direct
+  camera, first person) moved from Mods › Built-in to Controls, with their settings unchanged.
+- **Decomp build (experimental) fixes** (#368). The `-DWWHD_DECOMP=ON` build now reads the decompilation's unit specs the
+  way its own checks do (specs in sub-folders and `include` lines), skips verification-only sources, works without
+  model data, and gives calls from decompiled code back into the game the same return address as the original, so
+  runtime checks that identify their caller (for example the Story mods' text check) work in that build too.
+- **New: a 4:3 aspect-ratio preset** (#359). Settings › Graphics (and the macOS Graphics menu) now offer 4:3 next to the
+  widescreen presets, and it's remembered on the next launch. `WWHD_ASPECT=4:3` selects it too. Your saved aspect
+  choice keeps its meaning.
+- **New: story-item cheats** (#362, for #289). Mods › More › Cheats › Story items can grant Nayru's, Din's or Farore's
+  Pearl, or the fully powered Master Sword, one at a time. The first use each session asks for confirmation, because it
+  can change the story's order, and a backup of your save is made first (Mods › More › Save backups). Statue placement
+  and the Tower still happen through normal play.
+- **New: aim the boat cannon with the mouse** (#360, for #332, thanks @AnythingVocaloid for the idea). With Mouse
+  camera on and the pointer captured, moving the mouse now aims the cannon on the King of Red Lions. Mouse sensitivity
+  and invert-Y apply; the keyboard or a left stick still takes priority, and firing keeps its binding.
+- **Safer save import on Android** (#339, thanks @GenissonEmilio). An imported save is now checked completely before it
+  replaces yours, and your previous save is kept as a backup. If the import is interrupted, your old save comes back.
+  Oversized or damaged archives are refused, and import and export only run while the game is closed.
+- **New on Windows: the Wii U GameCube adapter works** (#357, fixes #354, thanks @itsarahtonin). Windows builds now
+  include libusb, which SDL needs to reach the adapter. Install the WinUSB driver for it with Zadig (the same driver
+  Dolphin uses); Windows' own driver isn't supported. See the GameCube controller guide.
+- **New on macOS: controller rumble** (#347, fixes #346, thanks @davidsgullick). The macOS app now drives controller
+  motors through Apple's GameController haptics, so any pad macOS reports haptics for rumbles, for example a DualSense.
+  Strength, the Rumble setting and the quiet rules (settings open, window in the background, quitting) work as on the
+  other platforms.
+- **Fixed: the rupee sparkle fades out with the rupee counter** (#358, fixes #353, thanks @thejorro for the report). With
+  "Rupees only when they change" on, the counter faded out but its sparkle stayed on screen. HUD effects now fade with
+  the part of the HUD they belong to; effects in the world and on the GamePad are unchanged.
+- **New on Android: tap the title screen to start, and touch works on file select and name entry** (#340, thanks
+  @GenissonEmilio). A tap on the title screen now starts the game, and on the file-selection and name-entry screens your
+  touches reach the game's own GamePad touchscreen. With no second display, the GamePad picture shows on the main screen
+  for those two screens and your view comes back afterwards; your settings don't change. The gameplay touch controls
+  stay hidden until the game starts.
+- **Fixed: touch controls stay visible on the Poco M8 Pro** (#338, thanks @GenissonEmilio). The phone's built-in key
+  injector reports itself as a gamepad, so the game hid the touch controls as if a controller were connected. That one
+  internal device is now ignored; real controllers still hide the touch controls as before.
+- **New: HDR metadata for the output range** (#337, thanks @mkopec, and @findel77 for testing). With HDR on, the game
+  now tells the display its brightness range, so HDR TVs and monitors tone-map it correctly. **Auto Peak** (on by default)
+  reads the display's peak from the system and stays within the manual slider's 4000 nits; each HDR option has its own
+  help. See the HDR guide for the Windows SDR-white note.
+- **Fixed: long help lines no longer make the settings page flicker at high resolutions** (#345, thanks @itsarahtonin).
+  At 4K, the Controls tab's long help rows made the whole page redraw over and over. Long lines now stay as sharp as the
+  rest, whatever the display's density, and L / R between tabs no longer redraws the text.
+- **Fixed: the settings page in the pause menu no longer takes Left from the game.** In the item menu, Left from the
+  slot next to the bottom-left one opened the settings page instead of moving to that slot. Left now always goes to the
+  game first. Only where the game has nothing further left does the cursor move onto the page arrow; A or Left again
+  opens the page, and Right or B goes back. ZL no longer opens it, and Controls has a new option, **Settings page in the
+  pause menu**, to turn the arrow off (Esc and holding Select still open Settings). The arrow's design follows the
+  GreenNaugahyde Android fork (thanks @GreenNaugahyde).
+- **Fixed: the new-game name screen refuses `%` too** (#351, thanks @itsarahtonin). The game reads `%` in a name as a
+  format code, which could read or write game memory; the keyboard now leaves it out, as the rename already did.
+- **New: GameCube button prompts** (#301, thanks @MattPlays02 for the idea). Choose **GameCube** under Button prompts
+  in Controls (or leave it on Automatic with a GameCube pad): the HUD, item menu and dialogue show the GameCube's
+  buttons, with the big green A, the red B, the kidney-shaped X and Y curving around A, the purple Z and the R and L
+  shoulder captions. The in-game settings page offers GameCube too.
+- **Fixed: start-up audio threads now sync like on the console.** At boot the game waits for its audio threads to
+  finish setting up before it continues; the port let it run ahead. It now waits as the Wii U does (about 2 ms once at
+  start-up), so the sound system is always ready before the game first uses it.
+- **New: change Link's name mid-game** (#328, thanks @itsarahtonin). The settings page in the pause menu (Game tab)
+  and the Settings window's Saves tab can now rename Link on the save file being played. The new name shows right
+  away and is kept with your next save. `%` isn't accepted, because the game reads it as a format code, and
+  characters the game's font can't show are refused.
+- **New: keep your save in a cloud folder** (#190, thanks @rhemfur). Settings → Saves → **Save folder** (Windows,
+  macOS, Linux) puts your save in a folder you choose, for example in OneDrive, Dropbox, iCloud Drive or Google Drive,
+  so it stays the same on all your computers. The save is written to a temporary file and only replaces the real one
+  once it is fully on disk, a lock warns when the folder is in use on another computer, and cloud conflict copies are
+  offered at the next start. Nothing is replaced or removed without a backup first and without your answer; on macOS
+  the questions show as a native alert. See the README section "Optional: keep your save in a cloud folder".
+- **Fixed: controller dead after switching it in a menu** (#330, thanks @itsarahtonin). Switching **Keyboard and
+  controllers act as** between Wii U GamePad and Wii U Pro Controller while the pause menu or the file select was open
+  left the game ignoring every button until you switched back or restarted. The controller you switched away from now
+  keeps working until the game has followed the switch, so you can close the menu or open your save as usual.
+- **Fixed: Android running at about half speed since v0.5.0** (#334, thanks @SpicyAwesomeSauce). From the second
+  launch on, the shaders prepared in the background made every frame slower on Snapdragon (Qualcomm) phones: Windfall
+  at 40 fps ran at about 22 fps. The game now builds those shaders itself from the prepared cache, which takes well
+  under a millisecond each, so it holds 40 fps again with no extra stutter when new areas load. The workaround
+  `WWHD_VK_PIPELINE_WARMUP=0` is no longer needed.
+- **Fixed: Story Notebook leaving the menu broken** (mods issue #9, thanks @francosang). After the notebook closed, the
+  menu cursor or bait icons in the bag could stay hidden, and using the notebook from an item button opened it without
+  showing it, so Link didn't respond until Go back. The menu is now restored on every way the notebook closes, and the
+  item button shows the notebook on the TV and the GamePad.
+- **Fixed: code mods "not available" in Android development builds** (mods issue #6, thanks @alexander-beepx).
+  Development builds for Android didn't know their own version, so every mod in Mods → Community looked too new for
+  them. Releases weren't affected.
+- **HDR: darker, truer shadows and a choice of HDR format** (#333, thanks @findel77). With HDR on, the game's picture
+  is now turned into HDR with a gamma 2.2 curve, like most monitors show it in SDR, so shadows no longer look washed
+  out. Settings → Graphics → **SDR curve in HDR**: Gamma 2.2 (default), Gamma 2.4 for a darker TV-like look, or sRGB
+  for the previous look. **HDR format** picks the signal: Auto (as before), scRGB or HDR10 (PQ); if the choice isn't
+  available, the game says so and uses the other one. SDR output is unchanged. See [docs/hdr.md](docs/hdr.md).
+- **Touch controls: Link in the button pictures.** Action buttons show a small picture of Link in that action's pose:
+  jumping on Jump, swinging the sword on the sword button, crouching, rolling, lifting, talking, defending and more,
+  with the game's word under him. The pictures are drawn from your own game files when the game starts; nothing is
+  shipped. Settings → Display → Touch controls → **Link in the button pictures** (on by default). Idea from
+  GreenNaugahyde's Android fork, thanks @GreenNaugahyde.
+- **Settings plays the game's menu sounds.** Moving, choosing, changing an option, switching tabs, going back and
+  opening or closing Settings play the game's own menu sounds, mixed like its other sounds; in TV play they follow
+  **GamePad sounds through main speakers**. Settings → Audio → **Menu sounds** (on by default); silent while the game
+  is in the background or muted. Idea from GreenNaugahyde's Android fork, thanks @GreenNaugahyde.
+- **Mod SDK: boat compasses and chart selection.** Code mods can take over the boat compass corner while sailing
+  (`wwhd_hud_boat_compasses`, with the corner's position) and select a sea chart the same way the GamePad does
+  (`wwhd_map_chart_selected` / `_select` / `_cancel`). The game's own compasses come back as soon as the mod lets go,
+  and mods on older ports keep working without these calls. See docs/mod-sdk-v2.md. Used by the HD minimap mod.
+- **GameCube controller layout** (#301, thanks @MattPlays02 for the idea). Choose **GameCube** in Controls, or let
+  Automatic pick it for a GameCube pad that has no custom bindings yet: A acts, B is the sword, X, Y and Z use the
+  item slots, L targets and R shields (from 25% travel), the C-stick turns the camera and a tap of Start opens the
+  menus. The extra Wii U buttons sit on Start plus the D-pad. Each controller can keep its own layout, and
+  **Restore previous controller bindings** brings back the old buttons. Not yet tested on real adapters; details in
+  [docs/gamecube-controller.md](docs/gamecube-controller.md).
+- **Fixed: NVIDIA on Wayland closing the game** (#309, thanks @Froggjarl). With an NVIDIA GPU under Wayland (for
+  example KDE Plasma), the desktop could close the game's window shortly after start with an "explicit sync"
+  error. The game now turns on NVIDIA's older sync method on Wayland by itself (`__NV_DISABLE_EXPLICIT_SYNC=1`,
+  NVIDIA driver 575 or newer); a value you set yourself is kept. The log now names the video driver and whether the
+  desktop offers explicit sync. If it still closes, `SDL_VIDEO_DRIVER=x11` runs the game through XWayland.
+- **Fixed: Picto Box at wide and tall screens.** With a window wider than 16:9 (21:9, 32:9) or taller (16:10, 4:3,
+  phones), the Picto Box now takes the same 16:9 picture as on the Wii U instead of squeezing the whole wide view, and
+  its subject check only counts what is inside that 16:9 frame. Normal play keeps your full view. (#303, thanks
+  @aaronlink127)
+- **Fixed: Linux on Mali (panvk): one colour over the whole picture at sea** (#317, follow-up to #310, thanks
+  @mkopec). v0.5.0's fix for the flickering sky clamped depth for every draw, which also let through a shape the game
+  draws right at the camera: near Outset, as soon as gameplay started, the picture became one solid colour. The sky
+  is now fixed differently: on panvk, draws that don't write depth clip in their shaders, as the Wii U's clipper does,
+  so clouds and haze stay whole and the camera-plane shape stays hidden; draws that write depth keep the GPU's own
+  path. A draw whose graphics-pack shader can't take this change is drawn the normal way. `WWHD_VK_CLIP_EMULATION=0`
+  turns it off, `=1` turns it on for other drivers that support depth clamp (`WWHD_VK_DEPTH_CLAMP_ALL` is gone).
+  Details in [docs/vulkan.md](docs/vulkan.md).
+
+## v0.5.0
+
+- **Fixed: frame interpolation glitches.** With interpolation on (above 30 fps), the hookshot no longer leaves
+  stray chain links from the last shot (#304, thanks @aaronlink127); the sun, moon and lens flare follow the drawn
+  camera instead of juddering while you move (#320, thanks @CaptainLibrary); and the first loading screen runs at
+  game speed instead of too fast (#300, thanks @CaptainLibrary).
+- **Button prompts follow your custom face buttons.** With Xbox or PlayStation prompts, the HUD button cluster and the
+  prompts in menus and dialogue now show the button each action is really on, for any face-button setup, and each
+  controller with buttons of its own gets its own prompts. The HUD cluster draws each button where it sits on your
+  pad, and action words take their button's colour (new setting: Controls → Coloured face button text; off keeps the
+  game's white text). Also fixes Xbox button colours getting darker and darker in "play on GamePad" mode (#326).
+  (#319, #326, thanks @itsarahtonin)
+- **Quest Log dates are right again.** The file select showed today's date for every save, and saves were stamped
+  with the time since the game started instead of the real date; both are fixed. A Quest Log saved with an older
+  build shows the save file's date until you save it again. (thanks @koenada, #322)
+- **Cheat: all Nintendo Gallery figurines.** Settings → Mods → Cheats completes Carlov's collection for a save that
+  is already a gallery member (give him a color picto first). As in the game's ending, Carlov then leaves his
+  workshop the next time it loads. (#327, thanks @Pulpparty)
+- **File select: Quit is part of the game's selection.** Press Down on Quest Log 3 (or Up on Quest Log 1) and the
+  game's own selector moves onto Quit; A asks "Quit the game?" just like X. Keyboard, controller and mouse all work.
+  (#315, thanks @Eggtooth)
+- **Settings page: a Graphics tab.** The settings page in the pause menu gains internal resolution, frame rate (30 to
+  240 fps or True 60), dynamic resolution, bloom, FXAA, texture filtering, clouds, cloud shadows and full-size
+  torchlight. Changes apply at once and match the Esc menu. (#315)
+- **Fixed: a left mouse button bound to a button stopped working in menus** (Windows, Linux, Steam Deck). The
+  settings page grabbed the click first; a bound mouse button now always works as that button. (#315, thanks
+  @Eggtooth)
+- **Fixed: choosing a GPU that can't show the picture crashed the game** (seen on Linux laptops with an NVIDIA GPU
+  beside the built-in one). The game tries once more, then goes back to the automatic GPU choice and tells you why,
+  instead of crashing at every start. (#309, thanks @Froggjarl)
+- **Fixed: Picto Box quest stuck after importing a GameCube save.** On the GameCube the Deluxe Picto Box needs a Forest
+  Firefly after Lenzo's test; HD gives it with the third picto. The save converter now gives the HD result, and saves
+  converted earlier are repaired when the game loads them. (#306, thanks @pontesryan)
+- **For mod makers: points on the picture, pinches and the microphone.** `wwhd_screen_point` projects a world point
+  onto the drawn picture, touches get pinch events (two fingers, or the mouse wheel on desktop), and a mod can listen
+  to the microphone for pitch while one of its options marked `"permission": "microphone"` is on. The game only asks
+  for the microphone at that moment, never at the start, and turns the option off again if you decline; audio is
+  analysed live and never stored. A mod that needs a newer game now says so clearly. See docs/mod-sdk-v2.md.
+- **Talks, answers and shops by touch or mouse.** While a talk, a choice, a shop or the wind compass is up, tap
+  the picture: a tap goes on, a held finger goes on by itself each time the text waits (never at a question), a
+  tap on a line picks that answer, a tap on a shop item steers to it and a second tap asks its price (buying
+  still needs "yes"), and the auction's numbers and the wind compass follow a drag. On by default on Android; for
+  the mouse on desktop it is an option. Controllers get "Hold A to go on in talks" (off by default). Idea from
+  GreenNaugahyde's Android fork.
+- **One screen (handheld) mode.** The game plays as on the GamePad in Off-TV Play from the start: no "GamePad or
+  Pro Controller?" question, Plus or Minus pauses, the Wii U leftovers (the Controller option, the slide-conducting
+  guide) are hidden, and your finger works the game's own GamePad touch in its menus. On by default on Android
+  (unless you chose the Pro Controller there), an option on desktop and the Steam Deck (Display; applies at the
+  next start). Idea from SwitchWakerHD (thanks @l0nkDev).
+- **Walking and camera options.** Walking direction (Controls) can stay as you pushed the stick while you turn the
+  camera; the camera can swing behind Link while he runs; the direct camera is as fast on the boat as on foot; on
+  Android a pinch changes the field of view. Idea from GreenNaugahyde's Android fork.
+- **First start on a phone** asks "Use the new touch controls?" (new ones recommended, classic fixed sticks
+  possible). New option: **Large Picto Box view** (Display → Screen (HUD)) drops the finder's black frame so the
+  picture fills the screen.
+- **Touch: B goes back while conducting the Wind Waker.** The song screen showed no way out by touch; B now shows
+  the game's own "Return" whenever the game offers it.
+- **Jump anywhere: a standing jump goes straight up.** It used to carry Link forward like the game's ledge jump,
+  which could throw him off a narrow pier on a double jump; a jump while moving keeps your run.
+- **Android: install a mod from a file.** Mods → More → Install from a file now works with the phone's file picker
+  (it couldn't read the picked file before). Folders can't be picked on Android; choose the mod's file.
+- **Android: less likely to be closed when memory runs low.** The game frees renderer caches it can rebuild when
+  the system asks for memory. Idea from GreenNaugahyde's Android fork.
+- **Meta Quest theater: 3D is Full SBS.** The theater's 3D button now gives each eye the full width, which looks
+  much cleaner on the big virtual screen at about the same cost (thanks @rhemfur for the measurements, #248).
+- **For mod makers: live options, input filters and touches.** Options marked `"live": true` change while the game
+  runs, a code mod can adjust the controller state of each read, and it can claim areas of the picture for
+  touches and clicks (also with the on-screen controls hidden, and drawn on the GamePad picture in One screen
+  mode). See docs/mod-sdk-v2.md, "Live options, input filters and touches".
+- **Meta Quest: no game icon offer.** The Quest's Library accepts a game icon but never shows it for a sideloaded
+  app, so setup no longer offers one there and hides the "Add the game icon" button. Other Android launchers are
+  unchanged. (#325, thanks @rhemfur)
+- **Android: new Flexible touch controls, now the default.** A stick appears where your thumb lands: the left half
+  of the screen moves Link, the right half turns the camera by swiping (Swipe speed, with its own speed on the boat)
+  or as a camera stick. The buttons stay where your layout puts them. Classic keeps both sticks at fixed places as
+  before, and once you pick it, it stays. New options: Show sticks (invisible floating sticks) and Left stick follows
+  the thumb. The layout editor gains per-control size (75–130 %), shape, opacity and fill, a mirrored grid, and
+  saved layouts with export and import; each touch style keeps its own layout, and a layout you made earlier is used
+  for both. Settings → Display → Touch controls; details in [docs/android.md](docs/android.md). Idea from
+  GreenNaugahyde's Android fork.
+- **Touch: context buttons.** While you play by touch, a button shows only when it does something, with the game's own
+  word or item icon on it (taken from your copy of the game), and golden rings play when A gets a new action. Items by
+  tap: tap the bow, boomerang or hookshot to take it out and aim, tap again to shoot, B to put it away; while aiming
+  only the buttons you need show. The sword goes back on its own a few seconds after the last swing, and the Deku Leaf
+  when Link stands still. A tap on ZL with a target in reach keeps the lock until the next tap (or until the enemy is
+  defeated). Each part has its own option under Touch controls. Idea from GreenNaugahyde's Android fork.
+- **Item wheel.** Hold X, Y or R to pick an item from a ring and put it on that button: bags open as their own ring,
+  the Wind Waker conducts at once, and on the boat the cannon and salvage arm are there too; an empty entry clears the
+  button, and a short tap still uses the item. While the ring is open the game runs in slow motion (or normally, or
+  paused). On by default for touch, and one switch in Controls turns it on for controllers. With touch controls the
+  item buttons are named A1, A2 and A3. Idea from GreenNaugahyde's Android fork.
+- **Controllers: setup, Jump buttons and per-controller buttons.** A new controller gets a short setup (face buttons
+  by position or by label, three layouts, a try-it screen), and each controller can keep its own buttons
+  (Controls → Bindings for). Controller details shows what the system knows about a pad and explains a missing
+  Android driver for DualSense or Nintendo pads. Jump anywhere and the moon jump have buttons of their own (L1 / Q by
+  default; on Android also on-screen Jump and Moon buttons). In play, L no longer turns the GamePad page unless
+  "L turns the GamePad page" is on. Android: Rumble on can also use this device or both, and the gyro has an
+  Automatic source. Idea from GreenNaugahyde's Android fork.
+- **HUD fades (optional).** Display → Screen (HUD) can fade the hearts, rupees and magic meter while nothing changes:
+  hearts come back with the sword out, while locked on, after a life change and when life is low; rupees on a change
+  and in shops; magic after it changes. All off by default.
+- **Graphics: torches no longer have a flickering outline.** Lit objects next to torches and other point lights had
+  a thin edge that lit up and went dark from frame to frame, even when nothing moved, because the game lights them in
+  a half-size buffer. The new Graphics option **Full-size torchlight** gives that buffer full size, so every pixel
+  gets its own light (in the Mac Graphics menu and the settings overlay's Graphics tab; `WWHD_FULL_LIGHT=0|1`). It is
+  on by default, and off on Android, where the phone's GPU is the limit in heavy views; in scenes with point lights
+  it costs about 3% GPU time at 1x and 17% at 3x. Off keeps the original look. (#318, thanks @itsarahtonin)
+- **Faster, lighter shader preparation in setup.** The shader template that ships with the game is now distilled:
+  one entry per distinct shader instead of every recorded state (447 KB instead of 8 MB). Setup's "Resolving
+  shaders from your game files" step takes about 12 seconds instead of a minute on a Mac (more saved on phones)
+  and needs far less memory; the shaders and pipelines it prepares are exactly the same. Idea from SwitchWakerHD
+  (thanks @Pulpparty and @depende3000).
+- **Settings in the game's own pause menu.** The common settings now have a page in the item menu, drawn like the
+  game's own menus (its paper, font, arrows and menu sounds, read from your copy of the game). Open it with the new
+  arrow left of the items, by pressing Left from the leftmost item column, or by swiping. Tabs: Camera, Controls,
+  Screen, Game (the built-in gameplay options, applied at once) and Mods, where a mod can show its own options. It
+  works with a controller, keyboard, mouse (also on the TV picture in Pro Controller mode) and touch, and follows the
+  game's language in English, French, German, Italian and Spanish. The full Settings window (Esc, F1 or holding
+  Select) stays for everything else; both change the same settings. `WWHD_GAME_SETTINGS=0` hides the page. Players'
+  and mod authors' notes: [docs/settings-page.md](docs/settings-page.md). Idea from GreenNaugahyde's Android fork.
+- **Sound: waves, wind and other looping ambience no longer cut out.** The game's sound engine stops a sound channel
+  when its audio work runs late, which on the Wii U meant an overloaded sound chip. On a computer or phone a single
+  slow frame looked like that, so looping sounds went silent until the game started them again. That check is now off
+  (also after loading a save state); `WWHD_DSP_KILL=1` restores the game's own behaviour. In a test with a short stall
+  every two seconds, 33 sounds were cut before and none now. Ideas from GreenNaugahyde's Android fork and SwitchWakerHD
+  (thanks @Pulpparty).
+- **Diagnostics: a hang watchdog and a main-thread profile.** When no new frame arrives for 3 seconds, the log now
+  gets a dump of the render thread and every game thread (what each waits for and where), repeated a few times, and a
+  note when frames resume; `WWHD_NO_WATCHDOG=1` turns it off. `WWHD_MAIN_SAMPLER=1` (also in Android's `env.txt`) logs
+  every 5 seconds where the game's main thread spends its time. The Vulkan memory log (`WWHD_VK_MEMORY_LOG_FRAMES`)
+  now also lists pipeline counts, the warm pool and the recipe database. Idea from SwitchWakerHD (thanks @Pulpparty
+  and @depende3000).
+- **Shader translation: cube-map helper shaders translate again** (Vulkan and Metal). Some library shaders set a
+  cube-map layer index on a texture slot that, in some states, holds an ordinary texture; the translator then used an
+  undeclared variable and the shader failed. Shader preparation now finishes with no failed shaders (11 on Vulkan and
+  18 on Metal before).
+- **Vulkan: shader preparation no longer stops at a shader it can't translate.** One untranslatable shader used to
+  end the preparation, leaving every shader and pipeline after it unprepared. Now that shader is skipped and logged,
+  and the rest are prepared.
+- **Vulkan: pipelines made from Metal recipes compile in a low-priority background queue** instead of the start queue.
+  They no longer compete with the game's own compiles during play; pipelines the game actually uses move to the start
+  queue from the next start. On a Snapdragon 8 Gen 3 phone, play and start-up are unchanged, since all of them finish
+  before play. The queue matters with larger recipe sets. `WWHD_VK_METAL_QUEUE=start` restores the old behaviour.
+- **HDR output on Linux, and HDR10 for displays without scRGB** (Vulkan; #311, thanks @mkopec). Settings → Graphics → HDR output now also
+  works on Linux under Wayland. Where the system offers no scRGB output (Mesa drivers on Wayland), the game presents
+  HDR10 (BT.2020 with the PQ curve) instead, with the same paper white, peak and exposure settings; the overlay shows
+  which one is used. On compositors where SDL picks XWayland (such as sway), choosing HDR makes the game start on
+  Wayland from the next start, since X11 windows can't show HDR. Under gamescope (Steam Deck),
+  which gives XWayland HDR itself, the game stays on XWayland. Windows is unchanged.
+- **World editor: fixes for full rooms and model changes** (#281, thanks @KelpyCode). When a room's memory was full,
+  the game could crash while loading a placed object's archive. Now an object whose archive doesn't fit is not created
+  (the editor says why) and is tried again on the next room load. Kit models and island buildings were checked against
+  the whole room budget for buildings (32 MiB free) instead of their own size, so a watched model's new version could be
+  refused until something was moved; the check now asks for the model's own size plus a small reserve, and the new
+  version shows up right away. Changing a placement's kit or static model now also brings that model's own collision,
+  live in the running game.
+- **Bloom is smooth again at higher internal resolutions** (#307, #308, thanks @itsarahtonin). At 2x and 3x the glow around lit windows,
+  doors, torches and Bokoblin eyes broke up into blocks and streaks, and small bright things such as rupees glowed
+  only at some angles. The game makes its bloom from small copies of the picture, which were made at the higher
+  resolution too: the pass that reads the picture skipped pixels, and the blur's lumps, which the console's final
+  upscale blends away, got pixels of their own. The small copies now keep the console's size and read the picture
+  as the Wii U does, so the glow looks as it does at 1x. 1x is unchanged.
+- **macOS: move and resize the GamePad picture with the mouse** (#305, thanks @shaneoreilly). In the TV window, drag the
+  picture-in-picture GamePad with the right mouse button (or with Option held) to move it, drag from its bottom-right
+  corner or use the scroll wheel over it to resize it (5–100%). The placement becomes Custom and is saved. A plain left
+  click on it is still a GamePad touch; menus and the editor keep their own mouse handling.
+- **Torchlight on objects is sharp at higher internal resolutions** (#313, thanks @itsarahtonin). Torches and other
+  point lights are lit through a half-size light buffer that lit objects read back with a depth-aware upsample. At 2x
+  and 3x that upsample still worked on the console's grid, so the light along the edges of lit objects came out in
+  blocks the size of console pixels. It now uses the larger buffer's own grid. 1x is unchanged.
+- **Linux on Mali (panvk): no more flickering shapes in the sky** (#310, thanks @mkopec). Parts of the clouds and haze on
+  the title screen and at sea flickered away in hard-edged chunks as the camera moved, because Mali drops pixels just
+  past the far plane. On the panvk driver the game now clamps depth instead (`WWHD_VK_DEPTH_CLAMP_ALL=0` turns this off).
+- **Linux: the installed game is about 10× smaller** (#314, thanks @missionfloyd). Setup now builds the game code without
+  debug information and strips debug data when linking, so the Linux game shrinks from over 500 MB to well under
+  100 MB, and setup compiles faster. Developers can keep debug information with `--debug-info` or
+  `WWHD_SETUP_DEBUG_INFO=1`.
+- **World editor: easier Claude / MCP setup** (#296, thanks @KelpyCode). `--editor --mcp` turns Claude / MCP access on at
+  start (`--editor` alone keeps it off). The access token is now kept across restarts (Settings → Editor → Claude / MCP
+  shows it, with Copy and New token), the Allow window has **Allow for this session**, and **Copy config for Claude
+  Desktop** gives a ready entry for the Claude desktop app (through the `mcp-remote` bridge, needs Node.js 18+). See the
+  editor docs.
+- **World editor: exact joins and marked faces** (#281, thanks @KelpyCode). New ground whose join vertices sit exactly on
+  an island's own vertices now counts as joined, so no small offset is needed any more (geometry that only touches, within
+  0.25 units, is not overlapping). When a model is refused, the faces that cause the conflict are tinted pink in the editor,
+  and `placement_conflicts` over MCP lists them. A part that only rests on the island's ground no longer counts as a
+  conflict.
+- **Metal: the shader cache keeps track of versions.** Its file now records the cache format, the macOS version and the
+  GPU; entries from another version are dropped and repeated rows are pruned when it is rewritten
+  (`WWHD_SHADER_CACHE_VERSIONING=0` turns this off).
+- **Vulkan: new opt-in switches**, all off by default (ideas from aurora's GX layer, MIT):
+  - `WWHD_VK_TEXTURE_STAGING=ring` (and `WWHD_MTL_TEXTURE_STAGING=pool` on Metal) stage texture uploads through the
+    frame's upload memory; on the test phone this shortens the worst frames at area loads a little.
+  - `WWHD_VK_METAL_RECIPES=1` lets the setup's Vulkan preparation also build pipelines from the head start's Metal
+    recipes: fewer pipelines are compiled during play and first-visit hitches are shorter, but on phones the larger
+    preparation can still be compiling while you play, so it stays opt-in for now.
+  - `WWHD_VK_TEXTURE_BUDGET=1` keeps texture memory within a budget, releasing least-recently-used textures and
+    reloading them when needed (for low-memory devices).
+  - `WWHD_ARTISTIC_MIPS=1` gives textures with hand-drawn mip levels a resolution-aware level-of-detail bias.
+- **Performance report:** new lines for the texture cache and the GPU timeline (GPU busy time per frame and the gaps
+  between command buffers; on Vulkan with `WWHD_VK_GPU_TIMESTAMPS=1`).
+- **World editor: island extensions can join an island's ground** (#281, thanks @KelpyCode). New ground that meets an
+  island's ground at the same height (up to the 30-unit step Link and villagers walk over) counts as joined instead of
+  overlapping, and an extension's sides may go into the cliff under its top; walls, raised parts and roofs still count.
+  Villagers, start points and routes only count what rises into the space they need, and Windfall's kids, Tott and the
+  pirates are recognised as villagers. The boat route around Windfall keeps the shop ship's real size clear.
+- **World editor: placing a large model of your own live no longer crashes the game** (#281). With `add_actor`, a big
+  model could be left out (its archive was being prepared again at that moment) and removing the failed actor then
+  crashed the game. The model now appears as it does from the manifest, and an actor whose model can't be loaded is
+  reported in the editor instead of crashing.
+- **Mac: textures are as sharp as on the Wii U.** The game gives most textures a level-of-detail bias (usually one
+  level sharper); Apple's samplers can't apply it, so on the Mac (Metal and Vulkan) textures were drawn one level
+  blurrier. The bias is now applied in the shaders, so ground, walls and effects such as the glow under the Triforce
+  chests look as intended. Windows, Linux and Android were already correct.
+- **One mod that can't start no longer stops all the others.** A mod whose requirement can't be met (for example a
+  GameCube game for mods that was moved or deleted) is now skipped on its own, along with any mods that need it, with
+  a message in the log, in Settings → Mods and over the game saying what's missing and how to fix it. Before, it
+  stopped every code mod from starting, including the Story Notebook and the sky island.
+- **The glow under Triforce Shard and Chart chests no longer shows a blocky checkerboard** (#297, thanks
+  @aaronlink127). The glow's texture has mipmap levels, and the second level was read from slightly the wrong address,
+  so it showed scrambled blocks once the game sampled it (at high resolutions, where the game sharpens it by one
+  level). Both renderers now find every level the way the Wii U does.
+- **Performance report: the "uniforms" time is split into its parts** (#178): stage setup, packing, the game's
+  own blocks and the support upload, so a report shows where that time goes on your device.
+- **The camera is smooth again in the Boating Course minigame with frame interpolation** (#299, thanks
+  @aaronlink127). The Boating Course draws two cameras at once, and after a few stage changes the two took each
+  other's history slot on every frame, so the camera moved at the game's 30 steps per second while Link and the boat
+  were smoothed, which made them seem to vibrate. Each camera now keeps its own history. This affected 40, 60 and
+  120 fps and true 60; game logic and 30 fps are unchanged.
+- **Android: setup now prepares model shaders by default, for far fewer stutters.** "Prepare model shaders
+  (recommended)" is ticked on Android. After setup, the game draws every model, room and placed character once and
+  visits every stage, hidden behind the setup's progress screen, so the shaders are ready before you play. On a
+  Xiaomi 14 this cut shader waits on a 25-place test route from about 1,000 to about 35. It takes about 40 minutes
+  on a recent phone (longer on older ones); you can untick it, and Cancel keeps what was prepared. Desktop setup is
+  unchanged. Also fixed: on a fresh setup, the shaders prepared during setup's warm-up were not kept (Android and
+  desktop Vulkan), and a chosen step that cannot run now says why instead of being skipped silently.
+- **Mac (Metal): the distant sea at the horizon no longer flickers between runs.** Metal drew some objects straight
+  from the game's memory while the game was already writing the next frame's positions into it. Vertex data the game
+  rewrites is now copied when a draw is recorded, as on Vulkan. This also fixes a rare case where Metal could reuse
+  overwritten settings from a recycled upload buffer. Shader settings outside display lists get the same treatment.
+- **The distant sea and grass at Outset's cliff no longer change colour from run to run** (#178). The game shares
+  one "current fog" between two CPU cores: while one core briefly switches it to the sea's fog, the other could copy it
+  into the scene settings, so some frames picked up the sea fog. The copy now always takes the scene's normal fog,
+  which is what the Wii U's timing gives. The same race in the other direction (the sea's waves picking up the normal
+  fog, visible as a changing band at the horizon) is fixed too: every fog copy now reads the fog its own thread set.
+  Sea and background fog are unchanged, and there is no speed cost.
+- **World editor: kit models are easier to work with** (#281, thanks @KelpyCode). Replace from file and Watch file
+  no longer fail with "invalid model declaration" on a model that uses the game's own materials, and they no longer
+  refuse a new file that has a collision mesh. An object the game left out at start-up because something was in
+  its way now appears as soon as you move it to a clear spot. You can keep a preview picture on a game material in
+  Blender: the import removes it from the package by itself and says so. Placement now checks an object by its own
+  shape instead of a box around it, so a large L-shaped piece no longer "hits" villagers, start points or routes
+  that sit in the open space of its corner; anything its shape really reaches still blocks it. The route around
+  Windfall at sea level is now named as the boat route it is.
+- **Fixed: choosing Continue after a Game Over froze the game with frame interpolation on** (#295, thanks
+  @aaronlink127). The Game Over screen's logic runs from a drawing step, so the extra in-between frames moved it
+  forward before the save question was open, and the game picked "To Title" by itself. That logic now advances once
+  per game step, as at 30 fps. Continue, Quit to Title and Save/Cancel work at 30, 40, 60, 120 and 240 fps.
+- **Scenes look the same every run, like on the Wii U.** The game rewrites some per-frame scene settings while the
+  renderer is still drawing the previous frame's display lists, so a few draws could pick up the next frame's values
+  and some pixels (the distant sea at Outset's cliff, the Forbidden Woods canopy) changed from run to run. Display
+  lists now draw with the settings as they were when the game submitted them, as the console's GPU does (Vulkan and
+  Metal). Cost on an Android phone: about 2% render time in the heaviest scene tested, none measurable elsewhere.
+- **Floating-point values are now loaded and stored exactly like on the Wii U.** The game's float loads and stores
+  now move the bits the way the console's CPU does: special values (signalling NaNs) are no longer changed on the way,
+  and a value that doesn't fit single precision is stored the way the console stores it. In our test runs the game
+  plays exactly the same as before, with no measurable speed cost (measured on an Android phone). The decompiled
+  game code is now checked against the same exact behaviour.
+- **Fixed: building code mods could fail on Windows with "Access Denied"** (#282, thanks @Eggtooth). While setup
+  builds code mods, the game reads the build's progress file for the progress bar. Windows refused to replace that
+  file while the game had it open, so the build stopped at a random point. Setup now replaces it the way Windows 10
+  and later allow for open files, and a progress update that still can't get through is skipped instead of failing
+  the build.
+- **Quit button on the file select screen** (#278, thanks @Tamryell and @CaptainLibrary). The save-slot screen has a
+  **Quit** button at the bottom in the game's own style: press **X** (or click it) and confirm with Yes (No is
+  selected first). Handy with a controller, on the couch or with remote play. Settings → Controls can hide it.
+  The button and its Yes/No question use the game's own lettering, button plates and selection highlight, read from
+  your game files, so they look like the game's Return/Erase/Copy/Start buttons.
+- **Shader preparation's models step is steadier.** Four crashes in the step are fixed (a title-screen button
+  pressed twice, an area requested before the previous one was released, and two cases where it released files the
+  game was still using). Four characters that always stopped the step are now skipped from the start instead of after
+  a restart. The step records the same shaders as before.
+- **Controllers can keep playing while the game isn't focused** (#267, thanks @Linken17). Settings → Controls →
+  **Controller input when the game isn't focused** (off by default): for a second screen, streaming or remote play.
+  Only controllers: keyboard and mouse still work only while the game window is active, and a controller press in
+  the background never opens Settings. Not on Android. On macOS it needs macOS 11.3 or later.
+- **Fixed: Android said "Not available for this version of the game" for every code mod in Mods > Community**
+  (ZeldaWWHDMods#6, thanks @alexander-beepx). An old rule from before Android supported code mods still blocked them in
+  the Community list. They can now be installed on Android like on desktop (Code-mod support must be on).
+
+- **Fixed: Link stayed invisible after some conversations with frame interpolation on** (#283, thanks @aaronlink127
+  and @Omaley360 for the report, save state and confirmation). Some conversation shots hide Link for a moment; with
+  interpolation at 60 fps and above he could stay hidden for a long while afterwards (the cabana door on Private
+  Oasis, residents on Windfall). He now reappears exactly when he does at 30 fps.
+- **Fixed: shader preparation failed when the game is on a network share (NAS)** (#290). Setup created its shader
+  folder with "only this user" permissions that many network shares can't apply, so even setup itself couldn't write
+  into it. The folder now gets the same permissions as the rest of the game folder. Also, "Setup in a console window"
+  no longer warns that network paths are not supported.
+- **Less shader stutter on Windows, Linux and Mac (Vulkan)**: after setup's models step, the game now builds every
+  recorded shader pipeline in the background while you play, on low-priority threads, starting once the game is in
+  play so the boot isn't slowed. In our tests over 19 places, pipelines built mid-play dropped from about 2,100 to 9.
+  The models step now also visits every room with a player start, every sea island and each particle effect once,
+  and a stage whose name matched a skip entry is no longer left out (the whole sea was skipped before).
+- **World editor: use the game's materials without MCP** (#280, for mod makers). The model import has a new option
+  **Use the game's materials (kit)**: pick the room (Link's by default), copy its material names for Blender, and the
+  dialog shows which of your materials draw with the game's own textures, with a picker to map your own names onto
+  the room's materials.
+- **World editor: replace, watch and remove imported models** (#287). **Replace from file…** re-imports a model under
+  the same name, and everything placed with it updates, collision included. **Watch file** re-imports it whenever
+  you save it from Blender. **Remove** lists anything still placed with the model and asks first; Undo brings it all
+  back. Also fixed: a removed object no longer counts as ground for the editor's own checks.
+- **Fixed: characters didn't show up in a scene's Demo step** (#285, for mod makers). Link now starts at his first
+  position key instead of walking there from wherever he stood, and game characters created for a demo (a pig, for
+  example) follow their keys instead of their own routes. The editor warns in yellow when an actor's keys never come
+  into the demo camera's view, and a first position key is placed at Link instead of far out at sea.
+- **Fixed: Fast Forward's 3x and 4x ran only as fast as 2x** (#268). On a 60 Hz display the game waited for the screen
+  after every step, which capped it at twice the normal speed. While Fast Forward is held, the game no longer waits
+  for the screen, so 3x and 4x really run three and four times as fast, with or without frame interpolation and
+  in True 60. Normal pacing comes back cleanly when you let go.
+- **Experimental setup step: "Preparing shaders: models"** (off by default). When switched on in setup, it draws every
+  object model, every stage's rooms and the characters and objects they place, the sky and weather at different times of
+  day, plants and the file select once with the game's own code, so their shaders are ready before you play: in our test
+  route, shaders compiled during play dropped from 277 to 33. It takes about 8 to 10 minutes on a Mac.
+- **Smaller, faster shader caches:** each shader is now stored once in the pipeline recipes and the SPIR-V cache (the
+  SPIR-V cache had stopped growing at its size limit), and shaders of an object's models are prepared as soon as the
+  game loads that object.
+- **Frame interpolation no longer changes the game** (40, 60, 120 and 240 fps). Extra frames drawn between the game's
+  steps used up random numbers and decided what was visible with the blended camera, so enemies, effects and sounds
+  could play out slightly differently than at 30 fps. The game now plays exactly as at 30 fps (at 40 fps also while
+  Z-targeting); only the picture is smoother.
+- **40 fps without judder** (#254): every frame now shows the game at its exact point in time (¾ of a step apart),
+  instead of half, half, one and one step in turn. Camera turns are even.
+- **Even more moves smoothly** with frame interpolation: camera shake, the sky's clouds, eye movements, lava, scene
+  wipes, chains, the Swift Sail and boost blur, debris, Valoo, light beams and searchlights.
+- **Fixed: fade-ins and fade-outs flickered** with frame interpolation (#273). Fades between scenes are smooth again
+  at 40, 60 and 120 fps, including fades to white (for example leaving the Forbidden Woods). Wipes in cutscenes keep
+  the same length at every frame rate.
+- **More moves smoothly** with frame interpolation: boss hit flashes, sand floors, cloth and flags, water masks, shadows
+  and mod HUDs. Objects at the screen edge no longer pop in or out between the game's steps.
+- **Mods can use the game's own HUD art** (for mod makers): a guest mod can draw any texture or pane of the game's
+  2D layouts (map frames, icons, markers) from the player's own game files, check whether one exists first, and
+  ask for it enlarged smoothly and sharpened.
+- **Fixed on Android: the "too warm" pause during setup could flash on and off in a loop** (#277) on some handhelds
+  (AYANEO Pocket EVO and Pocket S). A heat pause now needs a real temperature to confirm it and always waits for you:
+  **Continue anyway** works at any time, and **Continue** appears once the device has cooled down. Setup never goes on
+  by itself after a heat pause, also when the app was in the background.
+- **Fixed: some effects were drawn in the wrong place at aspect ratios other than 16:9** (#275): the elemental arrow
+  glow and rupee sparkles now sit where they belong at every aspect ratio, also after switching it while playing or
+  loading a save state.
+- **Fixed: a possible crash at 40 and 120 fps when the scene changes** (a door, warp or loading zone while the camera
+  moves), in development builds since the frame interpolation logic changes. Also: archive loads and the camera now
+  follow the game's steps exactly at every frame rate, so scene changes and distant islands play the same as at 30 fps.
+- **Fixed: the mouse camera's up/down was inverted in some interiors** (#274), for example Grandma's house and the
+  Pictograph shop. Mouse and right stick now look up and down the same way everywhere, with and without "Invert camera
+  up/down", and switching that setting while playing no longer leaves the camera inverted until a restart.
+- **World editor: custom items** (#269, #270, for mod makers): opening a chest with a custom item no longer crashes,
+  and the item's own icon is held up over Link's head. New items and icon changes now work while the game runs (a chest
+  with a new item appears at once); changes that still need a restart are marked "Takes effect after a restart", and
+  "Restart and return here" restarts the game and brings you back to the same spot.
+- **World editor: own 3D models** (#280, for mod makers): own models now work in the Windows release (their converter
+  could not start there before). A model built on an exported island stands exactly where it was modelled, the editor
+  says why a model can't be shown instead of asking for a restart, and the import fixes common Blender exports by itself
+  (several objects, quads, vertex colours, blended materials, large textures) with a note for each fix. A model with
+  its own `_col` collision meshes now gets that collision when added as **Your model**, so Link walks on it and its
+  walls stop him, and the import warns when a mesh's normals point inward (the model then looks dark where it is lit).
+  The editor docs explain how to use the game's own materials and textures for a model. All of the game's model tools
+  also start correctly under the Windows release's Python (no more "No module named …").
+- **New setting: Shader compile** (Settings → Graphics). **Off** (the default) draws everything exactly and waits for
+  shaders that aren't ready yet, as before. **Fast** keeps playing while new shaders compile and may leave out a few
+  objects for a frame or two, for fewer stutters on first visits.
+- **Fixed: the sun's glare could make the game behave slightly differently from run to run.** The game's check whether
+  the sun is hidden got its answer whenever the GPU finished; it now arrives at a fixed point, so the game behaves the
+  same regardless of timing (the glare reacts one game step later than on the Wii U; no cost).
+- **The Goron merchants for mods** (for mod makers): the three Goron traders can be placed on a mod island and talk
+  with your own text. Also new in the catalogue: torches, flames, fire jets and lava bubbles, Dragon Roost's bomb flower,
+  the dungeons' stone block, rocks, boulders and blocks that break (and stay broken until the room loads again), more of
+  Dragon Roost's and Fire Mountain's rocks, and Zunari's stall in three sizes.
+- **Mod islands are seen from farther away** (for mod makers): island grounds, kit models and distant views stay visible
+  across their square and into the next ones, with the game's haze. A stage entry can be a hole Link falls into, and a
+  scene's area trigger can play again once Link has left the area.
+- **Fixed on Android: false "too hot" warnings on some handhelds** (#254). Some devices report Android's highest heat
+  level while they are cool (e.g. the AYANEO Pocket EVO at a 30 °C battery). Setup, the heat guard and the performance
+  report now believe that only together with a real high temperature (battery 40 °C or more, or processor 90 °C or more).
+- **Smoother frame interpolation** (40, 60, 120 and 240 fps). More things now move smoothly between the game's
+  steps: the letterbox bars in cutscenes, the sword trail, the hookshot chain, the boomerang trail, the cannon's aiming
+  arc, hair, strings and ropes, the sun, moon, lens flare and sea spray, the ship's hull, grass, trees and flowers when
+  hit, and fallen trees as they fade out. Stage fades no longer run faster at higher frame rates, and the camera no
+  longer jumps when it moves closer to Link, except when a wall pushes it in (#251).
+- **The performance report shows the screen's refresh rate**: the rate the screen actually runs at, the rate the game
+  asked for on Android, and whether the chosen frame rate is shown evenly on it (e.g. 40 fps needs a 40, 80 or 120 Hz
+  screen) (#254).
+- **Fixed: the game only started through the launcher** (#266). Started directly (e.g. `bin/wwhd` or `wwhd.exe`) from
+  another folder, it couldn't find the game files. It now always works in its data folder; `--data-dir <folder>`
+  chooses one explicitly.
+- **A clear message when the mod compiler is missing** (#266). Code mods such as the Story Notebook need it; the game
+  now says so over the game and in the Mods tab, with how to restore it (setup → Repair). Content mods (signs, stages,
+  models) no longer need it.
+- **Fixed: `"Wind Waker HD.exe" --editor` started the game without the world editor** (#266). The launcher now passes
+  game options such as `--editor` on to the game on Windows, macOS (`open "Wind Waker HD.app" --args --editor`) and
+  Linux (`wind-waker-hd --editor`).
+- **Calm water around mod islands** (for mod makers). An island on the open sea can set a calm-water zone, so the
+  waves fade out around it the way they do near the game's own islands, and the boat can land at a low pier without
+  Link being washed off. Set it in the manifest or in the world editor's Inspector. See [world objects](docs/world-objects.md).
+- **Lava for mods** (for mod makers). A `col_lava` ground burns Link exactly like the game's lava (he jumps, loses half
+  a heart and is sent back) and makes bombs explode, in mod stages, world objects, island grounds and models with
+  several materials. Mod stages and the world editor can place the game's moving lava floor and Dragon Roost's heat
+  shimmer; on the sea the water tool can make a lava pool (e.g. in Fire Mountain's crater) that glows and flows like
+  Fire Mountain's own lava. See [mod stages](docs/mod-stages.md).
+- **Fixed: water in mod stages was not swimmable.** Its surface sat one level too deep for the game's water check, so
+  Link stood on it; it now works like the game's own water.
+- **Game materials on your own sea models** (for mod makers). A model placed on the sea can name the game's own
+  materials (rock, ash, planks, …) instead of bringing textures; they are built from your game files and lit like
+  the islands' own buildings at every time of day. Materials with your own small textures can sit next to them in
+  the same model, and such a model can also be a distant view. Collision bodies can now have up to 8192 triangles,
+  and the parts of one composition are placed together. See [world objects](docs/world-objects.md).
+- **Bigger islands for mods** (for mod makers). One collision body on the sea can now be as large as a whole sea
+  square (1 km instead of 200 m), like the game's own islands, so a big island no longer has to be split into
+  sections with seams. The editor's focus frames objects that size.
+- **Detailed performance profiling is now a setting, off by default** (#261, thanks @pancreations). The detailed
+  per-draw profiler and the periodic performance lines in the log no longer run unless you want them: Settings →
+  Graphics → Overlay → Detailed performance profiling turns them on at once, without a restart. Then play a few
+  seconds and use "Copy performance report" for the detailed sections; with it off, the report says so.
+- **Fixed: Link's fist could float off his arm with frame interpolation** after the Triforce cutscene, e.g. in
+  Hyrule Castle (#255). A part of a model that did not move no longer makes the whole model skip smoothing.
+- **Fixed: the game could hang after previewing a scene in the world editor.** A scene that creates an actor
+  made the game draw it twice, and its models looped in the draw list. Scene actors are now created like the game's
+  own, and a model entered twice is drawn once instead of looping.
+- **Fixed: the world editor crashed when jumping into a mod's own stage** (e.g. to a quest step there). Every editor
+  jump now uses the stage's game name and checks the room, and the game refuses a jump to a place it can't load.
+- **Meta Quest: a floating theater** (#259, thanks @pancreations). On a Quest the game shows on a flat or
+  curved screen in your room, with controls for 2D/3D, size, distance, passthrough and recentering; the controllers
+  work the toolbar and the name keyboard, a gamepad plays the game. If the VR display stops during play, a "VR display
+  stopped" panel says so instead of a black view. Other Android devices are unchanged.
+## v0.4.0
+
+- **Fixed: switches and doors waited for a restart in the world editor.** With all of the editor's live kinds
+  installed, the table for the port's own actor types was full, so switches and doors fell back to "after a restart".
+  They now appear at once like the other actors, and a failure names its cause in the log.
+- **Mod stages: the light of a place of the game, the game's trees, joined rooms** (for mod makers). A mod stage
+  can take its light from another place, e.g. `"light": {"stage": "sea", "room": 44}` for Outset's daylight that
+  follows the game's clock; it can place the game's own trees (small, bushy, large with a scale, palm) as room
+  actors; and rooms joined by an open passage are now drawn together. The editor accepts parameters of two types
+  (such as a kit given by number or by stage and room). See [mod stages](docs/mod-stages.md).
+- **Dynamic resolution** (all platforms, off by default; idea from the GreenNaugahyde Android fork). Settings →
+  Graphics → Dynamic resolution lowers the internal resolution in small steps (down to 75% or 50%) while the
+  graphics chip holds the game back, and raises it again when there is room. The picture keeps its size and is scaled
+  smoothly, and a change of level causes no stutter. It helps on devices where the graphics chip, not the processor,
+  is the limit; it costs some extra graphics memory (about 35 MB on a phone). See the Android and Vulkan docs.
+- **Fewer shader variants on Metal (macOS)** (idea from the GreenNaugahyde Android fork). Metal now keys shaders on
+  the same narrow state as the Vulkan renderer, so the same scenes need far fewer shaders and pipelines (in our Outset
+  test about 500 instead of 3,500 shaders); existing shader caches keep working. Pictures are unchanged.
+- **Crash logs and performance reports list the renderer's live shaders, pipelines and memory mappings**, which helps
+  us find out-of-memory crashes.
+- **Less GPU work on Vulkan** (idea and first versions from the GreenNaugahyde Android fork). Shaders use the slower
+  exact multiply only where a value may be infinite, and rendered mip chains are built only as deep as the game samples
+  them, starting from the first changed level. On our test phone the GPU time per frame fell by about 8–9%; pictures
+  match the previous version (a few pixels differ in the lowest bits).
+- **Export the game's islands for Blender** (for mod makers). The editor's new `export_glb` command (and
+  `tools/story_mods/export_glb.py`) writes a game room, e.g. Outset or Windfall, or one building as a GLB file with
+  textures, the game's material names and optionally collision by ground type and actor markers. It is a reference
+  for scale, style and material names when building your own islands; the files are your own copy of the game's
+  content and must not be shared or put into mods. See [world objects](docs/world-objects.md).
+- **Fixed: mod stages in release builds.** The stage builder was missing from release packages, so mod stages,
+  `list_kit_materials` and the stage templates failed there; development builds were not affected.
+- **Mod stages and scenes: quests through stages, cutscene clips, carrying Link** (for mod makers). Chests,
+  defeated Darknuts and warps in a mod stage can move a quest on (`then`), quest places can point into the mod's own
+  stage, scenes can use clips from the game's cutscene archives that play once and hold, Link's face animations and
+  blending, a smooth `blend` when attaching one actor to another (e.g. the Helmaroc King grabbing and carrying Link with
+  the game's own capture animation), and a scene spawn that drops Link in from above.
+
+- **Fixed: Continue last session after quitting inside a dungeon, cave or house.** Starting the game with
+  **At start → Continue last session** (or a save state chosen to load at start) put Link at the save file's start
+  point on Outset and then left the screen black. Link now arrives where you left off; loading states during play is
+  unchanged.
+- **Mod SDK: mod dungeon maps for HUD mods** (for mod makers). A guest mod can read the current room's map of a mod
+  dungeon (rooms, visited rooms, Link's position, and with the compass the chests), so minimap mods can show mod
+  dungeons too.
+- **Vulkan stereo (3D) improvements** (#257, thanks @pancreations). Formats that can't be scaled fall back to
+  full-size eyes instead of drawing into a cleared image, and stereo modes reuse their image memory between frames.
+  Nothing changes with stereo off.
+
+- **Less render-thread work on graphics register writes** (all platforms; idea from the GreenNaugahyde Android fork).
+  Register writes look up what they affect in a table instead of walking ranges, shader constants take a fast path,
+  and the hot paths no longer use per-thread variables: about 0.3–0.5 ms less render-thread time per frame in our tests.
+- **Shadows on GPUs without depth clamp** (older Mali and PowerVR phones; idea from the GreenNaugahyde Android fork).
+  Such GPUs used to fail on the game's shadow draws; the port now clamps depth in the shader instead.
+
+- **Fixed: the Pirate's Charm shook without ringing at 60 fps and above** (#262). With frame interpolation the
+  game's on-screen interface logic also ran on the in-between frames, where sounds are skipped so nothing plays twice,
+  and the charm's ring always landed there. It now runs once per game step at every frame rate, as at 30 fps; this
+  also brings the interface's other small animations back to their original speed.
+
+- **Scenes and kit materials for mod makers.** A demo actor can ask for its own copy with `"spawn": "always"` (for
+  example the Helmaroc King, while the room's own one waits hidden for its story moment). A room without a material
+  mapping now uses the kit's main material instead of an arbitrary one, which fixes streaked or black ground. Scenes
+  without text, sounds or story actions no longer need the Story Notebook. New editor and MCP commands:
+  `list_kit_materials`, `edit_demo_actor`, `set_package_info`, and `focus` with an eye point.
+
+- **Mod dungeons: sky islands and boss rooms** (for mod makers). A stage can borrow the sky of a game stage (day
+  sky, stars or dusk) over your own models; `list_stage_templates` in the editor and MCP lists which stages have a
+  sky, a boss door and music to borrow, and the Stages tab can filter for skies. New entry style: an updraft that
+  lifts Link into the stage. A big chest can hold a heart container, and a warp can wait until a chest is opened.
+  Talks and scene ends can take Link into a stage. A stage can bring its own shader template so it doesn't stutter
+  on the first visit (installed after setup: run setup's Repair). Game Over in a mod stage restarts at the stage's
+  start.
+- **World editor: scenes play right away, and easier demo steps** (for mod makers). A new scene can be played with
+  Play scene or Play step without saving and restarting first. In the Scenes window the step row no longer hides its
+  buttons on narrow panels; the buttons say "Duplicate scene" / "Remove scene…" and "Duplicate step" / "Remove step",
+  a step can be removed with right-click or Delete, and Undo brings back a removed scene. A demo step's actors and events
+  are now picked from lists instead of typed as JSON: game characters, models and your mod's characters; sounds (with a
+  Play button) and particles by name; joints, animations, Link's modes, time, rain and messages. The JSON stays under
+  "Advanced". Full save states made by an older build in editor mode can't be loaded by this one.
+- **Water tool: new ponds are swimmable, and pond surfaces always appear.** A new pond's level now defaults to its
+  depth above the shore, so Link can swim in it right away; banks stay compact, and nothing reaches down to the sea
+  floor. Some pond outlines left the visible water out because its surface model couldn't be prepared; that is fixed,
+  and the editor names the reason if a model ever can't be prepared. Such a model no longer stops the game at start.
+- **Less render-thread work on the Vulkan renderer** (#178). Shader programs are fingerprinted again only after the
+  game writes to them, and texture invalidation now looks only at the textures it can reach. On a Snapdragon phone this
+  cut the render thread's CPU time by about 11% in Windfall; the picture is unchanged.
+
+- **Eighteen more islands to place** (for mod makers). Shark, Horseshoe, Rock Spire, Thorned Fairy, Seven-Star,
+  Overlook, Stone Watcher, Cliff Plateau, Angular, Boating Course, Gale, Headstone, Greatfish, Cyclops Reef,
+  Two-Eye Reef, Diamond Steppe, Mother & Child and Fire Mountain join the island grounds, built from your own game
+  files. Diamond Steppe and Mother & Child keep their own moving water. Pits, holes and doorways send Link back to
+  the restart point. Fire Mountain comes without its lava for now, and Bird's Peak is too large to offer.
+
+- **World editor: building mod levels, also with an AI assistant** (for mod makers, preview). A new Stages tab creates
+  a level from your room models (import, add, build, warp in), adds rooms, places entries, exits, doors with locks,
+  chests, enemies, pots and return warps where Link stands, and moves them with handles in the picture. Check lists
+  unreachable rooms, keys behind their own doors and room models without UVs or named materials. Every step is also an
+  MCP command, so an assistant such as Claude Code can model rooms in Blender and build and look at the level in the
+  game; see the new guide "Building a dungeon with an AI assistant".
+
+- **Fixed: ponds on a mod's own island** (water tool). A pond drawn on a terrace of the mod's own island model no
+  longer turns into a column down to the sea floor and is no longer refused as "in the way": the water's level follows
+  the ground at its shore, the island's own surfaces count as ground, and only what really rises through the water (a
+  wall, a pillar, a house) blocks it. Messages now name the game place that blocks a spot and where it is.
+
+- **Mod SDK: a dungeon map for mod dungeons** (for mod makers, preview). A mod dungeon with a map shows it on the
+  GamePad's map page (and on the TV's map tab with the Pro Controller): rooms seen from above, made from the rooms'
+  floors, the rooms Link has visited, where he stands, and with the dungeon map every room; with the compass also the
+  chests (open or not) and the boss door. Only Link's floor is shown for now.
+
+- **40 fps mode.** A new frame rate next to 30, 60, 120 and 240 fps: three game steps over four frames, at full game
+  speed. It suits screens that run at 40, 80 or 120 Hz, such as the Steam Deck LCD at 40 Hz or the OLED at 80 Hz, where
+  every frame is shown for the same time. On Android the app asks for a matching screen rate; some phones choose the
+  rate themselves, and on a 60 Hz screen 40 fps runs unevenly (Settings says so). Keep game speed works as at 60 fps.
+
+- **Mod SDK: dungeons in mod levels** (for mod makers, preview). A mod level can now be a small dungeon: rooms taken
+  from any game room or the mod's own models, small-key, boss and shutter doors, chests with a small key, map, compass
+  or boss key, enemies (ChuChus, Bokoblins, Keese, Darknuts), pots and a return warp. Each mod dungeon keeps its own
+  keys, opened chests and switches; the game's save still only stores a normal entrance. See the example
+  "mod-stage-dungeon".
+
+- **Mod SDK: new levels of their own** (for mod makers, preview). A mod can add a new cave or dungeon level with its
+  own rooms, reached from a box in a game level and left through a floor exit. The level is built from the player's
+  own game files when the game starts, with the look and music of a game level the mod names; doors between its rooms
+  work. Saving inside it is safe: the game's save always keeps a normal entrance, so the save still loads with the mod
+  removed, and with the mod the Quest Log continues inside. Save states made in a mod level ask for its mod. The editor
+  lists mod levels for warping. See the example "mod-stage-cave".
+
+- **Automatic picture-in-picture shows the Wind Waker's song list** (#256). With the GamePad screen set to Automatic
+  picture-in-picture, the GamePad picture now also appears while Link conducts with the Wind Waker, with the song list
+  and the conducting guide, and goes away again when he stops.
+
+- **Fixed: Link's fist no longer flies in from elsewhere with frame interpolation** (#255). When Link's hand pose
+  changed (for example from standing to running, or after targeting), a hand pose could appear for one in-between
+  frame at the spot where it was last used and fly to his hand, most visibly at 120 fps and above. A part of a model
+  that comes back after being hidden is now drawn where it is, without blending; everything else blends as before.
+
+- **Mod SDK v3 and the editor: Kargarocs with riders and Wizzrobe summoners** (for mod makers). A Kargaroc can carry a
+  Moblin or Bokoblin along a mod path and drop it at the path's release point. A Wizzrobe summoner teleports between the
+  points of one path and calls waves of enemies at the points of the next, in the game's own wave sizes (up to 20);
+  summoned enemies give no drops. The editor sets up both paths when a summoner is placed.
+
+- **World editor: a water tool for ponds, rivers and waterfalls** (for mod makers, preview). Under Add > Water, click
+  points on an island's ground: a pond gets a level handle, a river a band with flow arrows, shallow parts to wade and
+  a reverse button, and a waterfall forms at a river's step or from two points. Link swims, wades and falls as in the
+  game. Banks slope into the island's own grass and sand, the water is the game's own, and foam shows only at the
+  shores. Check marks problems in red in the picture. The same is available as MCP commands. On the sea only; a pond
+  can't be dug into the ground, so on a slope it sits in a grassy mound.
+
+- **Fixed: the world editor no longer crashes at start when code mods are off.** With Code-mod support turned off
+  (and in the decomp version), `--editor` now starts; live editing is off and the editor says so, and edits are still
+  saved.
+
+- **Mod SDK v3 and the editor: paths, the wall cannon, warship routes and wandering Floormasters** (for mod makers).
+  A mod can draw lines and areas in a room (up to 16 per mod) and its enemies can use them. The game's wall cannon can
+  be placed with an area as its firing range: it turns to Link and fires while he is inside, and a bomb destroys it,
+  with the mod's own defeat flag and drops. An enemy warship can sail a route back and forth, firing at Link, and a
+  Floormaster can glide along a line. The editor draws and edits paths in the picture, and its Check warns when a
+  ship's route runs over land or a Floormaster's line leaves the floor; the same is available as MCP commands.
+
+- **Mod SDK v3 and the editor: every placeable villager can walk a route** (for mod makers). The Windfall villagers
+  without a walk of their own (the old women, the young women and the large sailors) now walk their routes with
+  another villager's walk, fitted to their own bodies when the game starts, from the player's own files. Feet stay on
+  the ground at any walking speed. Full save states made with the editor before this update can't be loaded.
+
+- **Keep game speed at 60 fps holds full speed on devices just under 60 fps** (#254). With Keep game speed on, a
+  device that draws a little under 60 fps (for example a phone at 57-58 fps) no longer runs the game slightly slow, and
+  a short hitch no longer costs game time: the game skips exactly as many in-between frames as it needs, without
+  waiting after a skip. A slow device that takes 20-25 ms per frame now shows a third to two thirds of its in-between
+  frames instead of almost none, at full game speed. 30 fps, 120/240 fps and Keep game speed off are unchanged.
+
+- **Mod SDK v3 and the editor: sea and dungeon enemies** (for mod makers). The Kargaroc (flying or perched, without
+  riders), the red Wizzrobe with its fireballs, the enemy warship (at sea only; its cannonballs hit only Link and his
+  boat), groups of one to five Gyorgs (they appear once Link has the boomerang), the Floormaster (it grabs Link and lets
+  go again, it never takes him away) and the Big Octo as a target whose eyes are shot out (no swallowing, no whirlpool)
+  can be placed, each with the mod's own defeat flag, drops and defeat switch. Defeating them by a mod doesn't count
+  toward the game's sea kills.
+
+- **Fixed: things can now be placed on top of a mod's island** (houses, signs, villagers, enemies and other world
+  objects); the island no longer counts as "in the way". Objects only block each other where their shapes really
+  overlap, so turned buildings next to each other are no longer refused. In the editor, clicking the open sea now
+  places an island (or anything else) on the water surface.
+
+- **Mod SDK v3 and the editor: more native enemies** (for mod makers). Stalfos, Redead, Mothula (on the ground or
+  winged), Morth, Magtail, Poe, Armos and Armos Knight can be placed, each with the mod's own defeat flag, drops and
+  defeat switch, live in the editor. What holds Link (a Redead's scream and bite, a Poe's possession, clinging Morths)
+  lets go when the enemy is removed, its room changes or a state is loaded. A placed Stalfos does not split in two under
+  a spin attack, and a placed Mothula does not release Morths; place Morths next to it instead.
+
+- **Animated mod models can have several materials too** (for mod makers): up to 16 per model, each with its own
+  texture, opaque or cut-out (for leaves, fences, hair) and optionally double-sided, with the same texture budget as
+  static models. They work in scenes and demo steps, with save states and in the editor. An example walker is included.
+
+- **Mod SDK v3 and the editor: demo steps, cutscenes played by the game's own cutscene system** (for mod makers, preview).
+  A scene can now play a demo: keyframed camera, actors flying or walking along curves (game characters, villagers the
+  mod placed, the mod's own actors, and Link in his cutscene poses), messages that wait for A, sounds and effects, one
+  actor carried on another's joint (for example the Helmaroc King carrying someone), and time of day and rain that come
+  back afterwards. Characters a demo needs but the room lacks are created for it. Demos can be skipped, follow each other
+  directly, and a choice between two demo steps picks which one plays. A time change in a demo never starts a new day.
+  In the editor, a demo step's lanes appear on the Scenes timeline with keys, clips, messages and carry markers, a
+  preview at the cursor and curve handles in the picture; the same is available as MCP commands. Nothing changes for
+  players or mods that don't use demo steps.
+
+- **Mod SDK v3 and the editor: more native enemies** (for mod makers). Boko Babas, red and blue Bubbles, Fire Keese,
+  Octoroks and Seahats can be placed, each with the mod's own defeat flag, drops and defeat switch. A Boko Baba bites but
+  never grabs Link and leaves no flying head behind; a Seahat or Octorok defeated by a mod does not count toward the
+  game's sea kills. (The game has no Ice Keese.)
+- **Fixed: Link's boomerang, arrows and bombs now hit mod enemies.** Thrown, fired and exploding ones were ignored
+  before, also by the Bokoblins, Moblins, Peahats and ChuChus placed by mods.
+
+- **Mod SDK v3 and the editor: island grounds** (for mod makers). Six islands without their buildings can be placed as
+  ground for a mod's own island: Crescent Moon, Triangle, Five-Star, Star, Bomb and a fairy island, in the editor's new
+  **Islands** list. Each is made from your own game files the first time a mod uses it, has its own collision, shows on
+  the horizon from the neighbouring squares, and the ship stops at its shore. Holes drop Link back to the room's start.
+- **Mod collision: water to swim in, shallow water, waterfalls, ice and void surfaces**, and a water material for ponds
+  (`"material": "water"`). A pond placed above the room's height range is not found as water; the docs explain this.
+- **Fixed: mod collision marked as metal hurt Link** (it was read as a damage surface, e.g. on the buoy example). Full
+  save states made before this update keep their objects; their old collision is used until the room is next loaded.
+
+- **Mod SDK v3 and the editor: island parts** (for mod makers). Smaller pieces of other islands can be placed like the
+  island buildings: Dragon Roost's shrine, torii, walkways, rope posts and sea rocks, Windfall's windmill cap, and two
+  Forsaken Fortress shipwrecks. They are made from your own game files the first time a mod uses them, have their own
+  collision and take the light of the room they stand in. Island pieces now check the textures they are built from, so
+  existing piece caches are rebuilt once.
+- **Fixed: the mod actor heap diagnostic** (`WWHD_MOD_ACTOR_HEAPS`) no longer crashes when a game heap isn't set up.
+- **Mod SDK v3 and the editor: rat holes and patrolling Moblins** (for mod makers). A rat hole lets out three rats (or
+  bomb rats, or a mix) one after another while Link is near; each defeated rat gives the hole's drops, and the hole
+  closes once all three are beaten (its `defeat_switch` is set then). A bomb rat's bomb only hurts Link and the mod's own
+  enemies. Placed Moblins can patrol a route like Bokoblins.
+- **Fixed: a mod enemy, prop, switch or door that the game refuses to create no longer stops the game** later.
+
+- **Island buildings and world objects: only real conflicts refuse a place now** (doors, start points, villagers and
+  their walks, chests, event triggers); pots, signs, rupees, message and hint areas and the sea's surface no longer
+  count. In the editor a building can be placed anywhere: on a red spot it shows as an outline with what is in the way
+  drawn in, and it appears in the game once dragged to a green spot.
+
+- **Mod SDK v3 and the editor: the Darknut** (for mod makers), plain, with a shield, with a helmet, or the Mighty Darknut
+  with its cape. Its sword and cape stay its own and go with it, it writes no game switch, and its defeat can open a
+  mod door (`defeat_switch`).
+
+- **Mod models can have up to 16 materials** (for mod makers), each with its own texture, so mod islands can mix sand,
+  grass, rock and wood like the game's own islands; cut-out materials (glTF alpha clip) for leaves, fences and foliage
+  cards, and double-sided faces lit correctly on both sides. New example `world-objects-w5`.
+- **Fixed: island buildings in released builds.** The release packages lacked the converter the island buildings
+  need.
+- **Quick-use locked items** (Mods > Built-in, off by default; #196, thanks @mhbxyz): while locked onto an enemy, one
+  item-button press equips and uses the bow (including fire, ice and light arrows), boomerang, hookshot or grappling
+  rope; bombs are readied and thrown, and equipping the hammer completes one strike. A **Quick-use animation speed**
+  of 1x, 1.25x or 1.5x speeds up the supported equip animations.
+- **Camera-directed items** (Mods > Built-in, off by default; #203, thanks @mhbxyz): Link turns once to face where
+  the camera looks when you use the bow, boomerang, hookshot, grappling hook, bombs, hammer or an empty bottle, and
+  Leaf gusts blow in the camera's direction. Aiming and lock-on work as before.
+
+- **Keep game speed now holds the game's speed at 60 fps when the graphics can't keep up** (#178, e.g. Steam Deck):
+  in-between frames that don't fit are skipped instead of slowing the game to 21–25 logic steps a second. The
+  performance overlay's slow-motion warning now appears below 29 logic steps a second (was 26) and no longer flickers.
+- **Mod SDK v3: more enemies and enemy switches** (for mod makers). The Peahat and a black ChuChu can be placed;
+  enemies can open doors through a mod switch once all of them are defeated (`defeat_switch`, also in the editor's
+  Inspector); Bokoblins can patrol a route of the mod's own.
+- **World objects: island protection now works on the sea** (for mod makers). Placement used to read sea rooms at the
+  wrong coordinates and protected nothing there, and dungeon rooms with a turned map were checked turned. World objects
+  now keep clear of what the island needs (villagers and their routes, doors, chests, items, switches, cutscene areas
+  and the places where Link arrives) by their real size instead of wide 100 m zones, and may stand over grass and trees.
+  A world object that can't stand where it is placed is left out with a log line instead of stopping the game; the
+  editor shows its footprint in red with the reasons.
+- **Mod SDK v3 and the world editor: island buildings** (for mod makers). Mods can place some of the islands' own
+  buildings as `"actor": "piece:<id>"`: four Outset houses (their windows light up at night), Outset's lookout tower
+  and well shelter, the Flight Control Platform, the Private Oasis cabana and Tingle's tower. They are made once from
+  your own game files, lit by the island's light at every time of day and in all weather, and Link can walk on them;
+  their doors lead nowhere. A building must keep clear of the island's villagers and their routes, chests, doors,
+  items and cutscene areas (the editor shows what is in the way), and a room's buildings share 24 MiB. In the editor
+  they are in the Game objects palette.
+- **Performance report: it says whether Keep game speed is on** (and at which interpolation rate), and the log records
+  its value and where it came from at start and on every change.
+- **Controller rumble no longer stops by mistake:** the safety stop for a stalled game could switch off a rumble that had
+  just been started. The game's list of villager names (for mod makers) is now kept in the mod manager's folder; it is
+  built once more after the update.
+- **Mod SDK v3: placed villagers can walk a route.** Uo1, Uo2, Uo3, Um1 and Um2 walk up to 15 points with their own
+  walk: once, in a loop or back and forth, at their own pace or yours, with optional strolling pauses. They still stop
+  to look at Link and talk as usual, and a walker that runs into a wall or walks off an edge is caught. Your own
+  models' routes can also go back and forth, pause now and then, and name their walk and idle clips.
+- **World editor: a Route section in the Inspector** for walking villagers and your skinned models. Add points at Link
+  or the camera, drag them in the picture, reorder or remove them, and set speed, mode and pauses; the route shows in
+  green, and stretches without walkable ground in red. New route commands for MCP clients.
+- **Mods and the world editor can place the game's own objects by name** (`game:palm`, trees, tables, shelves, lamps,
+  plant pots, flowers, nests, the Rito and sea flags, the sea lookout tower, grass, flowers and small trees): they load
+  from your own game files, never from the mod. In the editor: Add > Game objects, with Variant, Turn and Scale in the
+  Inspector; `list_game_objects` over MCP.
+- **Mod SDK v3: thirteen more Windfall villagers can be placed** (residents uo1, uo3, ub1–ub4, uw1, uw2, um2,
+  sa1–sa4); um3, sa5, ug1 and ug2 are refused with the reason.
+- **Mod SDK v3: more enemies** — red, blue and yellow ChuChus (`parameters.variant`), the Miniblin, and Bokoblins with
+  a shield or a machete, each with the mod's defeat flag and drops. The editor picks a villager or an enemy variant
+  from a list in Add and in the Inspector.
+- **World editor: the Inspector no longer says an enemy's changes wait for a restart** when they apply at once.
+- **World editor: story changes while the game runs.** Quests, quest talks (also those for the game's villagers),
+  letters and charts change in the running game at the next calm moment, with every edit, Undo and Redo; an item's
+  name, description, amount and use change at once. A new item, its icon, held model and hold_up, and removed charts
+  still wait for a restart, and the status bar says which. The Quest Log is never touched: saves and save states
+  always play with the current story, and the status bar says when a renumbered step moved a loaded quest.
+- **World editor: New mod…** starts a new, empty mod of your own from inside the editor (also `new_mod` over MCP):
+  its own package, turned on in your mod profile and opened at once.
+- **World editor: quest talks for the game's villagers.** The game's own villagers show their names in the picture;
+  click one to give it a quest talk in your mod, as a new quest, a new step or a step's talk (also `list_villagers`,
+  `pick_villager` and `add_villager_talk`). The villager's own dialogue and save flags are never changed.
+- **World editor: placing and dragging fixed.** Clicks find the ground under the mouse again (piers, roofs and grass
+  were missed or hit the sea floor); residents, enemies and props appear at once also in a mod that had no actors at
+  start-up; a dragged enemy or resident now moves with the drag instead of staying at its old spot; and a resident's
+  type is chosen in Add and in the Inspector.
+- **Story mods: Bokoblins see Link.** Bokoblins placed by a mod stood blind and never attacked; they now notice Link
+  at the game's usual range and fight. (A save state with such a Bokoblin from before puts it aside.)
+- **World editor: the docked panels react to the mouse again.** Since the dockable panels arrived, the full-screen
+  picture could sit in front of the docked panels, so they got no hover or clicks on any renderer; the picture now
+  always stays behind them.
+- **Android: handhelds with a fan keep 60 fps longer** (#247). Their heat guard now pauses 60 fps at a thermal headroom of
+  1.00 instead of 0.90 (Relaxed: 1.10); the AYANEO EVO and KONKR Pocket FIT Elite ran 60 fps well around 0.90-0.96.
+  Phones keep their limit.
+- **World editor: native scene previews after loading a save state.** A scene's native version now also plays in the
+  preview after a save state was loaded or after a preview fell back to the scene's steps, and the editor says why
+  when it can't restore the world after a preview.
+
+- **Without mods and without `--editor`, the world editor and the Mod SDK v3 stay completely off.** Nothing of
+  theirs runs or reserves game memory then, so full save states made without mods by builds from before 17 October
+  load again.
+
+- **Story mods: more of a quest without code** (for mod makers). Content packages may hold only letters, charts,
+  items or quests; letters can wait for a quest or flag and a number of game days (`when`, `after_days`); characters and
+  scenes can give a treasure chart; items with `hold_up` are held over Link's head when he gets them; placed chests can
+  hold more rupees, a heart piece or container, or the mod's own items (with a "Chest holds" picker in the editor); and
+  `reset_quest` also clears the quest's charts and items.
+- **World editor: letters, treasure charts and items** (`--editor` and its MCP tools, for mod makers). A new Story tab
+  and commands create, change and remove letters on their own, treasure charts (with the X placed at Link or the
+  camera) and items (with icon import). Removing something still in use is refused with the list of its uses.
+- **Android: heat guard for handhelds with a fan** (#247). AYANEO, KONKR, AYN and Retroid handhelds now keep 60 fps
+  until they are much hotter than phones, and the new **Settings → Graphics → Heat guard** (Normal / Relaxed / Off)
+  sets how early 60 fps pauses when the device gets hot. Phones keep their current limit by default.
+- **Android: even frame pacing at 60 fps.** A frame that is ready early now waits a few milliseconds, so each frame
+  stays on screen equally long. With **Record graphics on a second thread** on, a third of the frames on a 120 Hz phone
+  screen used to stay for one or three refreshes instead of two (a slight judder); now almost all stay for two. The
+  game's speed is unchanged. On by default on Android.
+- **World editor: scene editor, live actors and smooth dragging** (`--editor`, for mod makers). A new Scenes window
+  edits a scene's steps, takes camera keys from the fly camera, shows a timeline to scrub and retime, and sets choices,
+  walking paths, triggers and the native version; scenes preview in the game with Skip and Stop. Pots, barrels, crates,
+  switches, doors and enemies now appear and change live in the room, and dragging an actor moves it smoothly in place
+  (one undo step). The editor and its MCP tools also cover the new quest forms: talks, flag and multi-quest conditions,
+  finishing a quest and places inside buildings.
+- **Mod SDK v3 preview: world objects** (for mod makers). Mods can place solid scenery and walkable islands in the sea,
+  with collision from the model and wood, sand or grass ground; objects that bob on the waves or drift and can be
+  ridden; surfaces Link can climb, hookshot and grapple; islands that are visible from neighbouring sea squares, get
+  a ring on the sea chart and an arrival notice; and animated coast foam that uses the game's own foam look.
+
+- **GamePad picture-in-picture: simpler settings** (#221). Settings → Display → Picture-in-picture now has one slider each
+  for size (5–100 %) and opacity (10–100 %). Dragging the picture places it freely, and clicking one of the nine circles
+  in the diagram snaps it to that spot.
+- **Mod quests: finishing, flags and places inside buildings** (for mod makers). A character's dialogue or a scene's end
+  can now finish a quest (the reward is given once), characters and quest steps can react to the mod's own flags or to
+  several quests at once, a character can offer step-specific conversations, and a quest step can point into a
+  building, cave or dungeon (the notebook shows where, and the sea chart marks the island).
+- **Graphics: toon clouds, horizon haze and cloud shadows** (Settings → Graphics → Effects, all optional).
+  **Cloud style** adds *Toon clouds (Lite / High)*: puffy, cel-shaded clouds that follow the game's own clouds, weather
+  and time of day (Original stays the default; Lite is the lighter one for weaker devices). **Horizon haze** (100 % =
+  original) gives a clearer, deeper blue sky when lowered together with Bloom strength. **Cloud shadows** (off by
+  default) let the drifting clouds cast soft shadows on the sea, islands and characters. Stereo 3D keeps the original
+  clouds for now.
+- **Mod SDK v3 preview: native scenes** (for mod makers). A scene can include an optional native `turn_camera`
+  version that the game's own event system plays: two residents turning toward each other and a camera move. It can be
+  skipped with Plus and survives save states, and the scene's normal steps play whenever the native version can't run.
+- **Android/Vulkan: texture decoder self-test.** Phones that decode compressed (BC) textures in a compute shader now
+  check that decoder at start-up and switch to the CPU decoder if the graphics driver gets it wrong (Qualcomm's driver
+  762 miscompiled it, leaving speckled edges on the HUD hearts and streaks on water when that path was used). One rare
+  case in signed BC4/BC5 textures also decodes correctly now.
+- **Mouse camera: smooth while sailing** (#237). Turning the camera with the mouse on the boat (sailing, paddling,
+  salvage) now follows the mouse directly at the same sensitivity as on foot, instead of turning in jerky steps.
+
+- **Settings dialogs and phone text size.** Every dialog in Settings now has a close button in its title bar and also
+  closes with a tap outside it, Esc, B or Back; long dialogs such as Gyro aiming keep Close on screen. On phones,
+  Settings uses smaller text so more fits at once, while buttons stay at least 7 mm tall to tap. Tablets, handhelds
+  and PCs look as before, and the UI size setting still wins.
+- **Android: code mods** (such as the story quests). Turn on **Code mods** in the setup app (or Settings → Mods): your
+  device builds the game again with mod support, and builds each code mod itself the first time it's used. Uses the
+  compiler and Python the setup already has; the download grows by only a few KB.
+- **Record graphics on a second thread** (Graphics → Advanced, off by default). The render thread hands recording and
+  submitting the Vulkan commands to a second CPU thread. On a Xiaomi 14 it makes typical frames a little faster (about
+  20% less render-thread time) but adds short hitches (the slowest 1% of frames about 3 ms slower), so it stays opt-in
+  everywhere for now. **Steam Deck owners:** please try it on and off in the same spot and tell us the fps, the 1% lows
+  and whether the Deck runs warmer.
+- **Shader cache saved more often:** pipelines built while playing are now saved every few minutes and when the Android
+  app goes to the background, so fewer are rebuilt after a crash or after Android closes the game.
+
+- **World editor (preview, for mod makers):** start the game with `--editor` for a dedicated editor mode: after the
+  title screen and file select it opens a free camera with its own panels (toolbar, outliner, inspector, problems &
+  export, log). Place new actors by clicking into the picture, move and turn them with handles (grid and angle
+  snapping), import `.glb` models with clear limit checks, write dialogue with a live preview in the game's message box
+  and choose what happens after it, change everything with undo/redo, warp to any island, room or quest place, check
+  the package with a clickable problem list and export it. **Play / Stop** lets you test as Link in a test mode that
+  never touches your real save, and Stop puts the world back. New enemies, pots, switches and doors appear after a
+  restart. Saving writes only your mod's own package. See docs/mod-editor.md.
+
+- **World editor: Claude and other MCP clients** (for mod makers). In `--editor` mode, Settings → Editor → **Claude /
+  MCP access** lets Claude Code (or another MCP client) use the editor's commands: place and change actors, write
+  dialogue, warp, take screenshots and check the package. It is off at every start, only reachable from your own
+  computer with a new token each session, and removing, replacing or exporting asks you to **Allow** in the game first.
+  See docs/mod-editor.md.
+
+- **World editor: visual quest editor** (for mod makers). Build a quest as a graph: steps are nodes, and dragging
+  from one step to the next chooses who moves the quest on; branches, unreachable steps and other problems show on
+  the nodes. **Start at this step** jumps straight into a test of any step (test mode, only your mod's own progress
+  is set), the quest step and your mod's flags show live while you play, and you can search, select several actors
+  and copy/paste actors and steps, also into another room.
+
+- **World editor: live handles, docking panels, Esc** (for mod makers). Dragging a move or turn handle now moves the
+  actor (or the whole selection) live in the game, still as one Undo step. The editor's panels dock to the screen edges
+  and into each other as tabs, with a default layout and **Reset layout**. While placing, dragging or connecting quest
+  steps, the first Esc cancels that; Esc with nothing to cancel opens Settings.
+
+- **Mod SDK v3 preview: enemies, props, switches and effects** (for mod makers). Mods can now place the game's own
+  residents, breakable props, switches and doors, and enemies with their own state; original mod enemies take damage,
+  react to hits, can be targeted, defeated and drop items; mod props can be carried and thrown, and original item models
+  can sit in Link's hand; plus a curated set of the game's particle effects, simple mod effects and custom textures on
+  placed props. New original example: a patrolling enemy.
+
+- **Android two-screen handhelds:** with GamePad screen set to Off, the game no longer takes the lower screen for a moment when it starts (#222).
+- **PowerVR phones (e.g. Pixel 10): no more stretched spikes** (#207). On PowerVR GPUs the game now converts vertex
+  data on the CPU automatically, because their drivers decode some of it wrongly in the shader. Only the one kind of
+  data they get wrong is converted (found with a tester's help), so it costs much less speed than converting all of it;
+  **Graphics → Advanced → Convert vertices on the CPU** switches it off (Automatic restores it).
+- **Shortcuts: remapping works, Esc opens Settings** (#220). Remapped shortcuts take effect again (the Controls tab was
+  catching the input first). Every binding clears the same way in Controls and Shortcuts (right-click, or Delete /
+  Backspace / X on a focused binding); extra controller buttons (Capture/Share, rear paddles, touchpad click) can be
+  bound; Home is listed under Settings. **Esc** now opens Settings (with a captured mouse the first Esc frees it), F1
+  keeps working for now, and on macOS Cmd+, still opens Settings from the app menu.
+
+- **Steam Deck Gaming Mode: sharp picture by default** (#214). In Gaming Mode the game now starts in full screen with the
+  GamePad picture as picture-in-picture, because Gaming Mode shows one window at a time and a separate GamePad window
+  made the picture blurry. Also with the Windows build through Proton. Your own saved choices and launch options still
+  win; the old launch-option workaround is no longer needed.
+
+- **Sploosh Kaboom: no more doubled hit and miss markers at higher frame rates** (#179). The board's markers are moved
+  between cells once per game step; the in-between frames no longer blend a marker from its old cell to its new one.
+
+- **Option to turn off the letterbox bars while targeting** (#114). Settings → Mods → Built-in → Camera →
+  **Letterbox while targeting** (on by default). Switched off, normal Z-targeting no longer shows the black bars;
+  cutscenes, scripted cameras, minigames and item aiming keep theirs.
+
+- **Run/swim speed: boost bar options and "Roll, then hold A"** (#233). New **Show boost bar** switch; with Boost time
+  set to no limit the bar no longer appears; the boost bar and the climbing stamina wheel now hide while menus, cutscenes
+  and conversations are on screen. New boost button **Roll, then hold A**: roll while running and keep A held to boost
+  until you let go (on land).
+- **Android: big update for phones and handhelds** (most ideas from GreenNaugahyde's Android fork):
+  - **Fewer stutters after Android closes the game:** the shader cache is now also saved every few minutes and when the
+    app goes to the background, so the next start doesn't rebuild what you already had (desktop benefits after a crash
+    too).
+  - **Display refresh rate:** the game asks Android for the rate it draws (60, or 120 with 120 fps interpolation). Some
+    phones (for example Xiaomi with HyperOS) still limit games to 60 Hz on their own.
+  - **If the graphics driver crashes,** the game offers another driver on the next start; **crash reports** now also
+    cover times Android closed the game itself, and include more detail.
+  - **Older Qualcomm (Adreno) drivers:** shader pipelines are built one at a time there, which avoids crashes on those
+    drivers.
+  - **Less memory:** shaders keep less data after compiling, and save states are written and read in small pieces
+    instead of all at once (all platforms).
+  - **Gyro with the phone's own sensors:** Controls → Gyro… → Source: **Device gyro**.
+  - **Phone vibration** follows the game's rumble while you use touch controls (Settings → Controls → **Phone
+    vibration**: Off, Touch only, or also when no rumble controller is connected).
+  - **Touch layout editor:** hold the on-screen controller button to move and resize the touch controls.
+- **Save states: Last session and auto saves** (all platforms). A **Last session** state is kept when you quit (on
+  Android also when the app goes to the background); **At start → Continue last session** in the Saves tab picks up
+  right where you left off. **Auto save** every 2, 5 or 10 minutes (off by default) into three rotating slots. These are
+  save states, separate from the game's own save file (#234).
+- **New built-in mods** (Settings → Mods → Built-in, off by default): **Faster ivy climbing**, **Faster ledge hanging**,
+  and **Jump anywhere** (L by default, optional double jump). **Cheats** gain infinite rupees, infinite bait and spoils,
+  infinite swimming and "Fill the bags".
+
+  **Please help test these:** we've checked the basics on our own phone, but these need real players and other
+  devices. If something doesn't work, open an issue with your device and the log (Settings → Graphics → Bug reports →
+  **Share log** on Android):
+  - auto saves and **Continue last session** after quitting or switching apps;
+  - **Device gyro** aiming and **Phone vibration**;
+  - the **touch layout editor**;
+  - **Jump anywhere**, faster climbing/ledge hanging and the new cheats;
+  - phones with **older Adreno** or other GPUs, and whether 120 fps reaches your display.
+- **True 60: no more crash at Orca's sword training** (#223). Talking to Orca and choosing "yes" stopped the game in True 60
+  mode; event commands now only run on full game steps.
+
+- **GamePad sounds through the main speakers** (#218). Sounds the Wii U plays only on the GamePad's own speaker (switching
+  items, saving and other GamePad menu sounds) are now heard during TV play too. Settings → Audio has the switch (on by
+  default) and its own volume; sounds already on the TV aren't doubled, and Off-TV Play is unchanged.
+- **Linux AppImage: code mods work again** (#230). Turning on a code mod such as the story quests failed with "Guest mod
+  build tools are missing". Setups made with an earlier start of the AppImage are repaired automatically, without running
+  setup again.
+
+- **Settings: Quit Game** (#231). A button at the bottom right of every Settings tab, with a confirmation (Cancel is
+  preselected), so you can quit with just a controller, e.g. on a Steam Deck in Gaming Mode or an Android handheld. On
+  Android the game also leaves the recent apps list.
+- **Graphics → Advanced, diagnostic options for broken 3D geometry** (e.g. PowerVR GPUs, #207): "Convert vertices on
+  the CPU", "Full precision in shaders" and "No vertex reuse", each off by default and applied after a restart. They help
+  us find the cause on GPUs we can't test ourselves; the first one is slow and only meant for testing.
+- **Mod SDK v3 preview: animated characters and scenes.** Mods can add animated characters (a rigged glTF model
+  with idle, walk, talk and extra clips) that look at Link, walk paths or to quest places, block Link and react to
+  sword hits; mod code can drive them through a small C API. Scenes gain eased camera paths, follow shots, music,
+  and the game's choice box with branches. Two original examples: a tide sprite on Windfall and a wandering creature
+  (preview, for mod makers).
+- **Mod SDK v3 preview: static mod models.** A quest mod can now place its own static model (a glTF `.glb` from
+  Blender) in the world, lit and shadowed like the game's objects, with collision, L-targeting and a Check/Talk
+  prompt. The model is converted on your own machine using a material from your own game, so packages never contain
+  game files. The Windfall example gained an original carved post (preview, for mod makers).
+
+- **Android handhelds** (thanks @almost-drowned-rat):
+  - **Full screen** now hides the system bars on Android 11 and newer too, so they no longer cover the top and bottom
+    of the picture (based on GreenNaugahyde's Android fork; #212, #225).
+  - The app's **files folder** (saves, settings, mods) appears in the system Files app and file picker; the prepared
+    game and shader caches are read-only there and console keys are never shown (#213, #226).
+  - The system **Back** button or gesture opens and closes Settings, like F1 on desktop (#215, #227).
+- **Meta Quest: "Add the game icon" works** (#249, thanks @rhemfur): on Quest the button now pins a shortcut in the
+  Library, and it says so when no icon can be added.
+
+- **Render-thread fast path** (Vulkan): a draw reuses the previous draw's prepared state when only pointers or
+  arithmetic values change, about 6–9% less render-thread CPU in tests (most on devices where the render thread limits
+  the frame rate, like the Steam Deck), with identical pictures. On by default; `WWHD_VK_FASTPATH=0` turns it off if
+  you see wrong textures or blending, and please report it (#178).
+
+- **Android two-screen handhelds: GamePad screen Off frees the lower screen** (#222). With the GamePad screen switched off,
+  the lower screen is released to the launcher and other apps (e.g. a video on an AYN Thor); switching it back on takes it
+  again with picture and touch.
+- **Mods on Windows:** a mod's preparation tool can now load its own helper files there too (the port's Python on
+  Windows didn't look next to the tool). This stopped the GC minimap from installing on Windows; gc-minimap 0.2.2
+  also fixes it on its own for v0.3.0 (#224).
+
+- **Settings → Shortcuts:** remap the app's shortcuts (Settings, full screen, screenshot, save and load states, the
+  graphics toggles), each with a key, a second key and a controller combination such as Select + D-pad Up. New
+  actions (GamePad picture-in-picture, performance overlay, mute, volume) start unbound, and **F6** now loads state
+  slot 1. The defaults stay as they were (#220).
+- **macOS setup:** when macOS points to another developer folder than the installed Command Line Tools (a removed
+  Xcode, or one whose license hasn't been accepted), setup now uses the installed tools directly instead of waiting
+  forever, and says what to do if they still can't be used (#219).
+
+- **Android, two screens (AYN Thor and similar):** choosing GamePad screen **Off** (or hiding it) while the second
+  screen is connected now turns that screen black and ignores its touches while the game plays on the main screen;
+  the choice is remembered. Without that choice the second screen shows the GamePad as before (#222).
+
+- **GamePad picture-in-picture placement:** nine positions (corners, edge centres, centre) plus a custom one,
+  exact size (10–50%) and opacity (20–100%), and a small screen diagram in Settings → Display where you tap or drag
+  the GamePad picture into place; while that section is open the game shows a live, draggable preview. The default
+  bottom-right position now sits above the rupee counter instead of covering it (#221).
+- **Mod SDK v3 preview (opt-in, for mod makers):** mods can place a small set of the game's own actors (chests,
+  signs, a Windfall resident) with talk actions, and play short scenes: camera shots, dialogue, fades and the game's
+  letterbox bars, skippable with Plus/Start. Placed chests and signs keep their state in the mod's own part of the
+  save. Nothing changes without such a mod. See docs/mod-sdk-v3.md and the sdk-v3-windfall example.
+
+- **Android: "Share log"** in the setup app and in Graphics → Bug reports: it shares the latest game logs through
+  Android's share sheet, with your user paths removed (as in crash reports). Android now writes a log by default
+  (at most 64 MB per run), so there is one to share after a problem. The log also lists more about the GPU (driver,
+  vertex formats, limits), and Graphics → Advanced has **Force RGB vertex fallback** for testing GPUs like PowerVR
+  (#207).
+- **Intel graphics on Windows:** drivers older than 101.5000 now use the classic render-pass mode automatically,
+  which fixes the crash at start on driver 101.3111 (Iris Xe) without setting anything (#204).
+
+## v0.3.0
+
+- **Controls: Xbox and PlayStation button prompts also with "By position"** (issue #209, thanks @jamescastells):
+  with the Nintendo button layout on an Xbox or PlayStation controller, the game's button icons now show the button
+  that is physically in that place (for example the roll as a red B and the sword as a green A on an Xbox pad).
+  Custom face-button mappings show the buttons they are bound to. The settings' help texts now explain the two
+  options more clearly. "By label" and "Original" look as before.
+
+- **Vulkan: a fallback for GPUs without 3-part vertex formats** (issue #207, Pixel 10 Pro with a PowerVR GPU): some
+  GPUs can't read three-component vertex data directly, which showed as "exploded" shapes and a black screen. The
+  game now checks this at start and reads such data in two parts on those GPUs. Every other GPU keeps exactly the
+  same shaders and caches as before.
+
+- **Fixed: loading a save state switched the controller back** to the one the state was made with (for example a
+  GamePad state loaded while playing with a Pro Controller). Save states now keep your current controller, and the
+  game follows it right away, without any menus: after loading a full state, or after switching the controller in
+  the Input menu during play, Link moves with the controller you use and the button prompts match.
+- **Fixed: after loading a save state, story mod pages fell back to their plain look** (for example the Story
+  Notebook's page). Their layouts are now built again right after the load.
+
+- **Fixed: a story mod's treasure chart showed its X outside the map.** The chart view shows a small window of the
+  sea square; a mod chart now uses the window that contains its treasure spot, so the X sits on the map at the spot,
+  on the TV and the GamePad.
+
+- **Linux: sharp picture with desktop scaling on Wayland** (issue #201, thanks @findel77): the game window now
+  uses the screen's real pixel size, so with display scaling (for example 4K at 250%) the picture and the
+  settings overlay are no longer rendered small and stretched. On older versions, `SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY=1`
+  works around it.
+
+- **Mods: development builds can install packages for the next release.** A development build counts as the next
+  version for the mod catalogue (for example v0.2.14 plus newer changes counts as 0.2.15), so packages that need
+  the coming release, like the Story Notebook 0.6.1, install on it. Releases are unchanged.
+
+- **Extended enemy lock-on** (#192, PR #193, thanks @mhbxyz): Mods → Extended enemy lock-on, off by default. The
+  enemy lock-on range can be raised to 1x–3x (saved per profile), and R3 while locked on to an enemy switches to the
+  next eligible enemy, wrapping around. The game's own targeting still decides who can be targeted; talking
+  distances to characters are unchanged.
+
+- **For porters: more overlay switches** (PR #205, thanks @Pulpparty): a port to another platform can now turn off
+  code mods, mod downloads, the Speakers choice and the keyboard hints in the settings menu (`overlay::ext::Features`).
+  Nothing changes on Windows, macOS, Linux or Android.
+
+- **Fixed: ropes jittered with frame interpolation** (issue #202, thanks @floysh and @JulianSK1999): the grappling
+  hook's rope in Link's hand and rope bridges (for example on Outset Island in the title scene) were drawn at the exact
+  game step while everything around them was drawn in between, so they jumped back and forth at 60, 120 or 240 fps.
+  They now move smoothly with the rest of the picture. 30 fps and true 60 are unchanged.
+
+- **Cheats: moon jump** (idea from the GreenNaugahyde Android fork): in Gameplay → Cheats, off by default. Hold L
+  to rise; the left stick steers relative to the camera. **No fall damage after moon jump** is a separate option.
+  Works at 30 fps, with frame interpolation and in true 60; loading a state ends a flight.
+
+- **Vulkan: textures a graphics driver cannot filter smoothly** (some Android GPUs) are now sampled sharply
+  instead of breaking Vulkan's rules. Every other device keeps the same filtering as before.
+
+- **Fixed: leftover memory in the save file's empty Quest Logs.** With story mods on, saving could copy leftover
+  bytes into unused padding of the empty Quest Log slots. Those bytes are now always zero; the game never reads
+  them, and the active Quest Log is unchanged.
+
+- **Mod SDK v2: items and treasure charts for story mods** (for mod makers; nothing changes without such a mod):
+  - **Mod items:** mods can declare their own items with names, descriptions, icons in the game's item pictures
+    and stacks. Link keeps them in the Delivery Bag on extra pages, can put them in the bag's own places, and can
+    put them, or the story notebook, on X, Y or R to use them. While Link has mod items, R in the Delivery Bag
+    turns to the extra pages (L/R turn pages) instead of putting an item on R; X and Y still assign items.
+  - **Treasure charts:** a mod's treasure chart now works like the game's own: the light ring at its spot, the
+    crane, the chest and its item (a game item or a mod item), then the chart counts as finished.
+  - **Saves:** mod items and charts are kept in the story mods' own part of the save, and turning the mods off
+    shows the game's inventory exactly as before.
+
+- **Story Notebook: a new look for mod quests** (Mod SDK v2): the notebook's list and quest pages are now drawn
+  as real game layouts, on the TV and the GamePad, with a mini sea chart on each quest page, the open book in the
+  Delivery Bag and the game's own fonts. A quest's page says "Not started yet" with its first place, "Finished"
+  when done, and offers "Show on chart" only for a step with a place on the sea chart. For mod makers: mods can
+  give their items their own icons in the game's item pictures (built from your own game files on your machine).
+
 - **Android: system game modes** (idea from the GreenNaugahyde Android fork): the game declares Android's
   performance and battery-saving game modes, and the system no longer downscales the picture or overrides the
   frame rate, so the port's own resolution and frame pacing stay in charge.

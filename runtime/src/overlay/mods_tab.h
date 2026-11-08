@@ -14,19 +14,24 @@
 #include "../mods/required.h"
 #include "../mods/mods.h"
 #include "../build_info.h"
+#include "../menu_i18n.h"
 #include <thread>
 #include "experimental_ui.h"
 #include "graphics_switch.h"
 #include "hostui.h"
 #include "mods_model.h"
 #include "setup_flow.h"
+#include "startup_notices.h"
 #include "setup_test.h"
 #include "text_entry.h"
 #include "../mods/code_mods.h"
+#include "../mods/compiler_notice.h"
 #include "../mods/manager.h"
 #include "../mods/packages.h"
+#include "../mods/picked_source.h"
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "popup.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -42,10 +47,12 @@
 namespace overlay::modsui {
 namespace fs = std::filesystem;
 using namespace modsmodel;
+using menu_i18n::tr;
 
 // ---------------------------------------------------------------- what the host supplies
 struct Host {
     std::function<void(bool folder, std::function<void(std::string)>)> choose_game_source, choose_mod_source;
+    mods::picked::CopyDocument copy_document;     // Android: a picked content:// document to a temporary file
     mods::catalogue::Fetch fetch;                 // HTTPS transport (empty: local catalogues only)
     std::function<bool()> can_restart;            // the game can relaunch itself
     std::function<void(bool code_build)> restart; // relaunch now
@@ -54,11 +61,10 @@ struct Host {
     mods::catalogue::Version port_version;
     std::string build_name = "USA";
     bool android = false;
-    // (this fork) the Switch: no code mods, no downloads (the catalogue, the Story Notebook) and no file choosers
-    // (overlay.cpp mods_host)
-    bool console = false;
     std::function<void()> builtin_code_mods;  // (this fork) the Switch NRO's code mods (guest_builtin_ui.h)
     bool file_picker = true; // the host has file and folder choosers (overlay/extensions.h Features)
+    bool code_mods = true;      // code mods can run here (Features::code_mods)
+    bool mod_downloads = true;  // the online mod list (Features::mod_downloads)
     bool back = false;       // controller B this frame
     bool b_used = false;     // out: B answered something here (it must not also close the menu)
     bool test = false;       // isolated headless run: WWHD_TEST_* aids apply
@@ -173,7 +179,9 @@ inline bool selectable(const char* label, bool selected = false, ImGuiSelectable
 inline bool g_expand_all = false;
 inline bool section(const char* label) {
     if (g_expand_all) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
-    return ImGui::CollapsingHeader(label);
+    const bool open = ImGui::CollapsingHeader(label);
+    state().rects[label] = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+    return open;
 }
 inline bool tree(const char* label) {
     if (g_expand_all) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
@@ -212,11 +220,11 @@ inline ImVec4 status_colour(Status s) {
     }
 }
 inline std::string kind_words(const std::string& kind) {
-    if (kind == "guest") return "Code mod";
-    if (kind == "native") return "Program for your computer";
-    if (kind == "cemu") return "Graphics pack";
-    if (kind == "content") return "Replacement models, textures or text";
-    return "Settings preset";
+    if (kind == "guest") return tr("Code mod");
+    if (kind == "native") return tr("Program for your computer");
+    if (kind == "cemu") return tr("Graphics pack");
+    if (kind == "content") return tr("Replacement models, textures or text");
+    return tr("Settings preset");
 }
 inline constexpr const char* kRunsCode =
     "Contains code that runs on your computer with the game's permissions. Install only mods from people you trust.";
@@ -247,7 +255,7 @@ inline void open_catalogue(const Host& h) {
     auto work = catalogue_work();
     if (work.empty()) return;
     auto& s = state();
-    s.loader.open(catalogue_url(), work, h.fetch, ImGui::GetTime(), s.auto_check && !h.console);
+    s.loader.open(catalogue_url(), work, h.fetch, ImGui::GetTime(), s.auto_check && h.mod_downloads);
 }
 inline const mods::catalogue::Entry* catalogue_entry(const CatalogueLoader::Snapshot& snap, const std::string& id) {
     for (const auto& e : snap.catalogue.index.entries) if (e.id == id) return &e;
@@ -286,7 +294,7 @@ inline bool flow_downloading() {
     return f.phase == Phase::Working && c < f.steps.size() &&
            (f.steps[c].kind == StepKind::Download || f.steps[c].kind == StepKind::Check);
 }
-inline const char* flow_verb() { return flow_downloading() ? "Installing" : "Setting up"; }
+inline const char* flow_verb() { return flow_downloading() ? tr("Installing") : tr("Setting up"); }
 inline Facts facts(const mods::packages::View& v, bool update) {
     Facts f;
     f.enabled = v.enabled;
@@ -420,13 +428,13 @@ inline void notify(const std::string& text) {
 }
 inline std::string plain_failure(StepKind k) {
     switch (k) {
-    case StepKind::Download: return "The download failed. Check your internet connection and try again.";
-    case StepKind::Check: return "The downloaded mod didn't pass the check. Try again later.";
-    case StepKind::Backup: return "Your saves couldn't be backed up, so the mod stays off.";
-    case StepKind::Prepare: return "Preparing the mod's files failed.";
-    case StepKind::Support: return "Adding code-mod support failed.";
-    case StepKind::Build: return "Building the code mod failed.";
-    default: return "The mod couldn't be switched on.";
+    case StepKind::Download: return tr("The download failed. Check your internet connection and try again.");
+    case StepKind::Check: return tr("The downloaded mod didn't pass the check. Try again later.");
+    case StepKind::Backup: return tr("Your saves couldn't be backed up, so the mod stays off.");
+    case StepKind::Prepare: return tr("Preparing the mod's files failed.");
+    case StepKind::Support: return tr("Adding code-mod support failed.");
+    case StepKind::Build: return tr("Building the code mod failed.");
+    default: return tr("The mod couldn't be switched on.");
     }
 }
 inline void start_download(const Host& h) {
@@ -585,12 +593,43 @@ inline void keep_off_steps(Flow& f, const mods::packages::View& v, double now) {
     j.finished_at = now;
     fprintf(stderr, "[mods] %s updated; it stays off\n", f.id.c_str());
 }
+// Once per start, over the game: start-up notices from before the overlay (startup_notices.h), the
+// code mods that couldn't start because the mod compiler is missing (mods/compiler_notice.h) and the
+// mods skipped because a requirement can't be met (packages.h
+// startup_problems); the Mods tab says each next to its mod. Read at the overlay's first frames, after
+// the mods started; pending until shown, so the overlay draws a frame for it.
+struct StartupNotice {
+    bool read = false, shown = false;
+    std::string text;
+};
+inline StartupNotice& startup_notice() {
+    static StartupNotice n;
+    if (!n.read) {
+        n.read = true;
+        n.text = startup_notices::text();  // the renderer's (a GPU fallback, for example)
+        const std::string compiler = guestmods::compiler_notice_for(mods::packages::list());
+        if (!compiler.empty()) n.text += (n.text.empty() ? "" : "\n") + compiler;
+        for (const auto& line : mods::packages::startup_problems()) n.text += (n.text.empty() ? "" : "\n") + line;
+    }
+    return n;
+}
+inline bool startup_notice_pending() {
+    const auto& n = startup_notice();
+    return !n.shown && !n.text.empty();
+}
 inline void tick(const Host& h, bool menu_open) {
     using namespace mods::packages;
     auto& s = state();
     auto& j = s.job;
     auto& f = j.flow;
     const double now = ImGui::GetTime();
+    for (const auto& t : mods::packages::take_toasts()) notify(t);
+    if (startup_notice_pending() && !menu_open) {
+        auto& n = startup_notice();
+        n.shown = true;
+        s.toast = n.text;
+        s.toast_until = now + 12;  // a long line: read twice
+    }
     adopt_resumed_run(now);
     if (f.phase != Phase::Working) return;
     f.tick(now);
@@ -636,7 +675,7 @@ inline void tick(const Host& h, bool menu_open) {
     auto list = mods::packages::list();
     const auto* view = find_view(list, f.id);
     if (!view) {
-        if (!j.accepted.from_catalogue) { f.fail("The mod is no longer installed.", ""); }
+        if (!j.accepted.from_catalogue) { f.fail(tr("The mod is no longer installed."), ""); }
         return;
     }
     if (f.keep_off) { keep_off_steps(f, *view, now); return; }
@@ -651,12 +690,12 @@ inline void tick(const Host& h, bool menu_open) {
         });
         if (!unacknowledged_experimental(f.id).empty()) {
             if (!backup_step) {  // the package turned out experimental, but the review didn't say so
-                f.fail("This mod is experimental. Switch it on again to read the warning first.", "");
+                f.fail(tr("This mod is experimental. Switch it on again to read the warning first."), "");
                 return;
             }
             if (!acknowledge_experimental(f.id, error)) {
                 // the reason itself (disk full, ...), which also says the mod was not turned on
-                f.fail("Your saves couldn't be backed up: " + error, error);
+                f.fail(textf(tr("Your saves couldn't be backed up: %s"), error.c_str()), error);
                 return;
             }
         }
@@ -682,7 +721,7 @@ inline void tick(const Host& h, bool menu_open) {
             f.finish(restart, now);
             j.finished_at = now;
             fprintf(stderr, "[mods] %s is on%s\n", f.id.c_str(), restart ? " after a restart" : "");
-            if (!menu_open) notify(f.name + (restart ? " is ready. Restart the game to switch it on." : " is on."));
+            if (!menu_open) notify(textf(restart ? tr("%s is ready. Restart the game to switch it on.") : tr("%s is on."), f.name.c_str()));
         } else f.cancel();
         return;
     }
@@ -722,7 +761,7 @@ inline void retry(const Host& h) {
     }
     std::string error;
     if (run.profile != mods::packages::current_profile() || run.identity != mods::packages::setup_identity(run.id)) {
-        f.error = "The mod or the profile changed. Cancel and start again.";
+        f.error = tr("The mod or the profile changed. Cancel and start again.");
         return;
     }
     if (!mods::packages::save_setup_run(run.id, true, error)) { f.error = error; return; }
@@ -752,16 +791,17 @@ inline void progress_view(const Host& h, bool android) {
     const double now = ImGui::GetTime();
     ImGui::PushID("progress");
     if (f.phase == Phase::Done) {
-        colored(kGood, std::string(check_mark()) + " " + f.name +
-                           (f.keep_off ? " is updated. It stays off." : f.restart_needed ? " is ready." : " is on."));
+        colored(kGood, std::string(check_mark()) + " " +
+                           textf(f.keep_off ? tr("%s is updated. It stays off.") : f.restart_needed ? tr("%s is ready.") : tr("%s is on."),
+                                 f.name.c_str()));
         if (f.restart_needed) {
             if (android) text("Close and reopen the app to switch it on.");
             else if (h.can_restart && h.can_restart()) {
-                text("Restart the game to switch it on. Progress since your last save is lost.");
-                if (button("Restart now##flow")) { auto code = mods::code::status(); if (h.restart) h.restart(code.ready); }
-                same_line_if_fits("Later");
-                if (button("Later##flow")) f.cancel();
-            } else text("Restart the game to switch it on.");
+                text(tr("Restart the game to switch it on. Progress since your last save is lost."));
+                if (button(tr("Restart now##flow"))) { auto code = mods::code::status(); if (h.restart) h.restart(code.ready); }
+                same_line_if_fits(tr("Later"));
+                if (button(tr("Later##flow"))) f.cancel();
+            } else text(tr("Restart the game to switch it on."));
             if (android || !(h.can_restart && h.can_restart())) { if (button("OK##flow")) f.cancel(); }
         } else if (button("OK##flow")) f.cancel();
         ImGui::PopID();
@@ -785,22 +825,22 @@ inline void progress_view(const Host& h, bool android) {
         if (st.state == StepState::Working) ImGui::ProgressBar(float(st.fraction), ImVec2(-FLT_MIN, 4), "");
     }
     if (f.phase == Phase::Working) {
-        muted(elapsed_text(f.elapsed(now)) + " so far · " + duration_text(f.remaining(now)) + " left");
-        muted("You can close the menu and keep playing.");
-        if (button("Cancel##flow")) cancel_flow();
+        muted(textf(tr("%s so far · %s left"), elapsed_text(f.elapsed(now)).c_str(), duration_text(f.remaining(now)).c_str()));
+        muted(tr("You can close the menu and keep playing."));
+        if (button(tr("Cancel##flow"))) cancel_flow();
     } else if (f.phase == Phase::Failed) {
         colored(kBad, f.error);
-        if (!f.details.empty() && tree("Show details")) {
+        if (!f.details.empty() && tree(tr("Show details"))) {
             ImGui::PushTextWrapPos(0);
             ImGui::TextUnformatted(f.details.c_str());
             ImGui::PopTextWrapPos();
-            if (small_button("Copy details")) ImGui::SetClipboardText(f.details.c_str());
+            if (small_button(tr("Copy details"))) ImGui::SetClipboardText(f.details.c_str());
             ImGui::TreePop();
         }
-        if (button("Try again##flow")) retry(h);
-        same_line_if_fits("Cancel");
-        if (button("Cancel##flow")) cancel_flow();
-        muted("Steps already done are kept.");
+        if (button(tr("Try again##flow"))) retry(h);
+        same_line_if_fits(tr("Cancel"));
+        if (button(tr("Cancel##flow"))) cancel_flow();
+        muted(tr("Steps already done are kept."));
     }
     ImGui::PopID();
 }
@@ -824,7 +864,7 @@ inline void game_source_picker(const Host& h, const std::string& game) {
         ImGui::AlignTextToFramePadding();
         colored(src.valid ? kGood : kBad, std::string(src.valid ? check_mark() : cross_mark()) + "  " + file_name(src.path));
         tooltip(src.path);
-        if (!src.valid) muted(src.result.empty() ? "This isn't a supported GameCube Wind Waker disc or folder." : src.result);
+        if (!src.valid) muted(src.result.empty() ? tr("This isn't a supported GameCube Wind Waker disc or folder.") : src.result);
         if (h.file_picker) {
             if (button("Change##source")) choose(false);
             same_line_if_fits("Choose folder…");
@@ -836,8 +876,8 @@ inline void game_source_picker(const Host& h, const std::string& game) {
         same_line_if_fits("Choose folder…");
         if (button("Choose folder…##source")) choose(true);
     } else {
-        text("Some mods need your GameCube Wind Waker (a disc image or an extracted folder); it can't be chosen here: "
-             "this system has no file chooser.");
+        text(tr("Some mods need your GameCube Wind Waker (a disc image or an extracted folder); it can't be chosen here: "
+                "this system has no file chooser."));
     }
     std::lock_guard g(s.picker_mutex);
     if (!s.source_error.empty()) colored(kBad, s.source_error);
@@ -846,19 +886,23 @@ inline void review_popup(Host& h) {
     auto& s = state();
     auto& r = s.review;
     const char* id = "###mods_review";
-    std::string title = (r.mode == Review::Install ? "Install " : r.mode == Review::Update ? "Update " : "Switch on ") + r.name + id;
-    if (r.request) { ImGui::OpenPopup(id); r.request = false; }
+    std::string title = textf(r.mode == Review::Install ? tr("Install %s") : r.mode == Review::Update ? tr("Update %s") : tr("Switch on %s"),
+                              r.name.c_str()) + id;
+    (void)id;  // the dialog's ID whatever the title says
+    const bool open = r.request;
+    r.request = false;
+    if (!popup::begin(title.c_str(), open, ImGui::GetFontSize() * 22)) return;
     const ImVec2 vp = ImGui::GetMainViewport()->Size;
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(std::min(vp.x * 0.92f, ImGui::GetFontSize() * 22), 0), ImVec2(vp.x * 0.94f, vp.y * 0.9f));
-    if (!ImGui::BeginPopupModal(title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) return;
-    ImGui::PushTextWrapPos(std::min(ImGui::GetFontSize() * 30, vp.x * 0.85f));
+    bool ready = source_ready(r);
+    bool busy = state().job.flow.phase == Phase::Working;
+    popup::body_begin(!ready || busy ? 2 : 1);  // the buttons (and why Install waits) stay below the scrolling text
+    ImGui::PushTextWrapPos(popup::wrap_pos(30));
     if (!r.description.empty()) text(first_sentence(r.description, 240));
     ImGui::Spacing();
     // what it needs, all at once
-    if (r.experimental) colored(kWarn, kExperimentalShort);
+    if (r.experimental) colored(kWarn, tr(kExperimentalShort));
     if (!r.source_game.empty()) {
-        ImGui::SeparatorText("Your GameCube game");
+        ImGui::SeparatorText(tr("Your GameCube game"));
         game_source_picker(h, r.source_game);
     }
     for (const auto& step : r.choices) {
@@ -879,47 +923,45 @@ inline void review_popup(Host& h) {
     }
     bool code = !r.code_names.empty();
     if (code || r.plan.support || r.plan.restart || r.plan.keep_off || r.plan.switch_off || !r.confirms.empty())
-        ImGui::SeparatorText("Good to know");
+        ImGui::SeparatorText(tr("Good to know"));
     for (const auto& step : r.confirms) {
         text(step.title);
         if (!step.explanation.empty()) muted(step.explanation);
     }
-    if (code) text(kRunsCode);
+    if (code) text(tr(kRunsCode));
     if (r.plan.support)
-        text("This mod needs code-mod support. It is added once: the game code is rebuilt (about 5 minutes, it can cost "
-             "a little performance) and the game restarts by itself.");
-    else if (r.plan.restart) text("It starts working after a restart.");
-    if (r.plan.keep_off) text("It stays off. Switch it on when you want to use it.");
-    if (r.plan.switch_off) text("It is switched off for the update and on again afterwards.");
+        text(tr("This mod needs code-mod support. It is added once: the game code is rebuilt (about 5 minutes, it can cost "
+                "a little performance) and the game restarts by itself."));
+    else if (r.plan.restart) text(tr("It starts working after a restart."));
+    if (r.plan.keep_off) text(tr("It stays off. Switch it on when you want to use it."));
+    if (r.plan.switch_off) text(tr("It is switched off for the update and on again afterwards."));
     ImGui::Spacing();
     Flow preview = Flow::make(r.id, r.name, r.plan);
     std::string summary;
-    if (r.plan.download) summary = "Download " + size_text(r.plan.download_bytes) + " · ";
-    summary += "takes " + duration_text(preview.total_expected());
+    if (r.plan.download) summary = textf(tr("Download %s · "), size_text(r.plan.download_bytes).c_str());
+    summary += textf(tr("takes %s"), duration_text(preview.total_expected()).c_str());
     muted(summary);
     ImGui::PopTextWrapPos();
-    ImGui::Spacing();
-    bool ready = source_ready(r);
-    bool busy = state().job.flow.phase == Phase::Working;
-    const char* go = r.mode == Review::Install ? "Install##review" : r.mode == Review::Update ? "Update##review" : "Switch on##review";
+    popup::body_end();
+    const char* go = r.mode == Review::Install ? tr("Install##review") : r.mode == Review::Update ? tr("Update##review") : tr("Switch on##review");
     ImGui::BeginDisabled(!ready || busy);
     bool accept = button(go, ImVec2(ImGui::GetFontSize() * 7, 0));
     ImGui::EndDisabled();
-    same_line_if_fits("Cancel");
-    bool cancel = button("Cancel##review", ImVec2(ImGui::GetFontSize() * 7, 0));
+    same_line_if_fits(tr("Cancel"));
+    bool cancel = button(tr("Cancel##review"), ImVec2(ImGui::GetFontSize() * 7, 0));
     ImGui::SetItemDefaultFocus();  // keyboard and controller start on Cancel
-    if (!ready) muted("Choose your GameCube game first.");
-    else if (busy) muted("Wait until " + state().job.flow.name + " has finished.");
+    if (!ready) muted(tr("Choose your GameCube game first."));
+    else if (busy) muted(textf(tr("Wait until %s has finished."), state().job.flow.name.c_str()));
     // headless runs: a test that switches a mod on (WWHD_TEST_MOD_SETUP / _MOD_ENABLE / _CATALOGUE_INSTALL) accepts its review
     if (h.test && ready && !busy)
         for (const char* key : {"WWHD_TEST_MOD_SETUP", "WWHD_TEST_MOD_ENABLE", "WWHD_TEST_CATALOGUE_INSTALL"})
             if (const char* t = getenv(key); t && r.id == t) accept = true;
-    if (h.back || ImGui::IsKeyPressed(ImGuiKey_Escape)) { cancel = true; accept = false; h.b_used = h.b_used || h.back; }
+    if (popup::dismissed(h.back)) { cancel = true; accept = false; h.b_used = h.b_used || h.back; }  // the X, a tap outside, Esc or B
     if (accept && ready && !busy) {
         begin(h, ImGui::GetTime());
         ImGui::CloseCurrentPopup();
     } else if (cancel) ImGui::CloseCurrentPopup();
-    ImGui::EndPopup();
+    popup::end();
 }
 
 // ---------------------------------------------------------------- the story system's required package
@@ -938,7 +980,7 @@ inline void switch_package(const mods::packages::View& v, bool on, const Host* h
         std::any_of(v.dependencies.begin(), v.dependencies.end(), [](const std::string& d) { return d.rfind(mods::required::kStoryNotebook + ">=", 0) == 0; }) &&
         !find_view(mods::packages::list(), mods::required::kStoryNotebook)) {
         install_story_notebook(*h);
-        s.error = "This mod needs the Story Notebook: it is being installed; switch this mod on again afterwards.";
+        s.error = tr("This mod needs the Story Notebook: it is being installed; switch this mod on again afterwards.");
         return;
     }
     if (!on) {
@@ -973,7 +1015,7 @@ inline void row_line(const std::string& id, const std::string& name, const Row& 
     std::string label = name + "  " + glyph(0x203A, "\xE2\x80\xBA", ">") + "##open_" + id;
     if (selectable(label.c_str())) open_page(id, builtin);
     state().rects["open_" + id] = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
-    if (experimental) badge("Experimental", experimental::kBadgeColour);
+    if (experimental) badge(tr("Experimental"), experimental::kBadgeColour);
     std::string status = r.text + (note.empty() ? "" : " · " + note);
     colored(status_colour(r.status), status);
     if (!r.switch_enabled && !r.switch_reason.empty()) muted(r.switch_reason);
@@ -987,23 +1029,31 @@ inline bool begin_list(const char* id) {
 }
 // Why a catalogue mod can't be switched on here ("" when it can).
 inline std::string unavailable_reason(const Host& h, const mods::catalogue::Entry& e) {
-    if (e.kind == "guest" && h.android) return "Code mods don't work on Android yet.";
+    if (e.kind == "guest" && !h.code_mods) return "Code mods don't work on this platform.";
     bool compatible = false;
     try { compatible = e.compatible(h.port_version, h.build_name, mods::packages::platform_key()); } catch (...) {}
     return compatible ? "" : "Not available for this version of the game.";
 }
 // Built-in: the mods compiled into the game, each with its switch.
+// the camera mods are switched on Settings > Controls, not in the Built-in list
+inline bool on_controls_tab(std::string_view id) {
+    return id == "mouse-camera" || id == "direct-camera" || id == "first-person";
+}
+
 inline void builtin_list(Host& h) {
-    muted(kAreaCaptions[kBuiltin]);
+    muted(tr(kAreaCaptions[kBuiltin]));
     if (!begin_list("builtin")) return;
     for (const auto& e : mods::manager::entries()) {
-        if (h.console && e.id == "story-system") continue;  // (this fork) it needs the Story Notebook's download
+        if (on_controls_tab(e.id)) continue;
+        // the story system needs the Story Notebook package, which only the mod list provides
+        if (e.id == "story-system" && !h.mod_downloads && !find_view(mods::packages::list(), mods::required::kStoryNotebook))
+            continue;
         Facts fx;
         fx.builtin = true;
         fx.enabled = e.enabled();
         Row r = row(fx);
         std::string id = e.id;
-        row_line(id, e.name, r, e.restart_required ? "applies after a restart" : "", false, true,
+        row_line(id, tr(e.name), r, e.restart_required ? tr("applies after a restart") : "", false, true,
                  [id, &h](bool on) {
                      hostui::post([id, on] { mods::manager::set_enabled(id, on); });
                      // the story system comes with its required package: switching it on installs that
@@ -1019,8 +1069,7 @@ inline void builtin_list(Host& h) {
 inline void community_list(Host& h) {
     using namespace mods::packages;
     auto& s = state();
-    if (h.console) muted("Mods you add to the mods folder (More > Mods folder).");  // (this fork) no downloads
-    else muted(kAreaCaptions[kCommunity]);
+    muted(h.mod_downloads ? kAreaCaptions[kCommunity] : tr("Mods you add to the mods folder (More > Mods folder)."));
     auto list = mods::packages::list();
     auto snap = s.loader.snapshot();
     static const char* test_install = h.test ? getenv("WWHD_TEST_CATALOGUE_INSTALL") : nullptr;
@@ -1048,8 +1097,8 @@ inline void community_list(Host& h) {
             std::string note;
             if (v.id == mods::required::kStoryNotebook && mods::story_system()) {  // part of the story system: locked
                 r.switch_enabled = false;
-                r.switch_reason = "Part of the story system: turn off the story system (Built-in) to turn it off.";
-                note = "Part of the story system";
+                r.switch_reason = tr("Part of the story system: turn off the story system (Built-in) to turn it off.");
+                note = tr("Part of the story system");
             }
             const Host* host = &h;
             row_line(v.id, v.name, r, note, v.experimental, false, [view, host](bool on) { switch_package(view, on, host); });
@@ -1059,13 +1108,13 @@ inline void community_list(Host& h) {
     // the story system's required package (mods/required.h): its status, Install while it is missing
     if (const auto required = mods::required::status(); !required.text.empty()) {
         colored(required.working || required.restart ? kMuted : kWarn, required.text);
-        if (!h.console && !required.working && !find_view(list, mods::required::kStoryNotebook) && mods::story_system()) {
+        if (h.mod_downloads && !required.working && !find_view(list, mods::required::kStoryNotebook) && mods::story_system()) {
             ImGui::SameLine();
             if (small_button("Install##story_notebook")) install_story_notebook(h);
         }
     }
     // available to download
-    if (h.console) return;  // (this fork)
+    if (!h.mod_downloads) return;
     ImGui::SeparatorText("Available to download");
     auto line = catalogue_line(snap.have_list, snap.checking, snap.failed, s.auto_check);
     if (!line.text.empty()) {
@@ -1116,7 +1165,7 @@ inline void option_controls(const mods::packages::View& v, bool locked) {
     for (const auto& o : v.options) {
         auto os = option_state(setup_options.contains(o.id), locked, v.restart_required);
         if (!os.shown) continue;
-        if (!any) { ImGui::SeparatorText("Options"); any = true; }
+        if (!any) { ImGui::SeparatorText(tr("Options")); any = true; }
         ImGui::PushID(o.id.c_str());
         std::string error;
         ImGui::SetNextItemWidth(std::min(ImGui::GetFontSize() * 14, ImGui::GetContentRegionAvail().x * 0.6f));
@@ -1143,17 +1192,17 @@ inline void option_controls(const mods::packages::View& v, bool locked) {
         if (!error.empty()) colored(kBad, error);
         ImGui::PopID();
     }
-    if (any && v.restart_required) muted("Changes apply after a restart.");
+    if (any && v.restart_required) muted(tr("Changes apply after a restart."));
 }
 inline void lock_line(const Host& h, const Page& p) {
     if (p.lock_line.empty()) return;
     colored(kWarn, p.lock_line);
-    if (p.offer_restart && button("Restart now##page")) { if (h.restart) h.restart(mods::code::status().ready); }
+    if (p.offer_restart && button(tr("Restart now##page"))) { if (h.restart) h.restart(mods::code::status().ready); }
     if (!p.restart_hint.empty()) muted(p.restart_hint);
 }
 inline void troubleshooting(const Host& h, const mods::packages::View& v, const Page& p) {
     using namespace mods::packages;
-    if (!section("Troubleshooting")) return;
+    if (!section(tr("Troubleshooting"))) return;
     ImGui::Indent();
     auto steps = setup_steps(v.id);
     bool busy = false;
@@ -1164,7 +1213,7 @@ inline void troubleshooting(const Host& h, const mods::packages::View& v, const 
     }
     busy = busy || !setupflow::setup_run.id.empty() || state().job.flow.phase == Phase::Working;
     if (!steps.empty()) {
-        ImGui::SeparatorText("Setup");
+        ImGui::SeparatorText(tr("Setup"));
         if (!p.offer_run_again) lock_line(h, p);
         for (const auto& st : steps) {
             ImGui::PushID(st.step.id.c_str());
@@ -1177,11 +1226,11 @@ inline void troubleshooting(const Host& h, const mods::packages::View& v, const 
             colored(ss == StepState::Done ? kGood : ss == StepState::Failed ? kBad : kMuted, line);
             if (st.step.type == "game_path" && st.step.game.starts_with("gc_")) {
                 auto src = game_source();
-                if (!src.path.empty()) { muted("Uses " + file_name(src.path)); tooltip(src.path); }
+                if (!src.path.empty()) { muted(textf(tr("Uses %s"), file_name(src.path).c_str())); tooltip(src.path); }
             }
             bool runnable = st.step.type == "run_tool" || st.step.type == "build_guest_mod";
             if (runnable && p.offer_run_again && !busy && v.game_source_warning.empty()) {
-                if (small_button("Run again")) {
+                if (small_button(tr("Run again"))) {
                     if (!unconfirmed_native(v.id).empty() || (st.step.type == "build_guest_mod" && needs_code_mod_support(v.id)))
                         open_review_for_installed(v);  // the review asks what is missing first
                     else setupflow::start_setup(v.id, st.step);
@@ -1196,41 +1245,40 @@ inline void troubleshooting(const Host& h, const mods::packages::View& v, const 
             if (w.id == v.id) { failure = w.error; output = w.output; }
         }
         if (!failure.empty()) { colored(kBad, failure); if (!output.empty()) muted(output); }
-        if (busy) muted("A setup is running. Run again is available when it has finished.");
+        if (busy) muted(tr("A setup is running. Run again is available when it has finished."));
     }
-    if (!v.status.empty()) { ImGui::SeparatorText("Status"); muted(v.status); }
+    if (!v.status.empty()) { ImGui::SeparatorText(tr("Status")); muted(v.status); }
     if (!v.reason.empty() && v.reason != v.game_source_warning) colored(kBad, v.reason);
     for (const auto& [path, hash] : v.content_hashes) muted("SHA-256 " + path + ": " + hash);
     ImGui::Unindent();
 }
-inline void remove_popup(const Host& h) {
+inline void remove_popup(Host& h) {
     auto& s = state();
-    const char* id = "Remove mod##mods_remove";
-    if (s.remove_request) { ImGui::OpenPopup(id); s.remove_request = false; }
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (!ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) return;
+    const bool open = s.remove_request;
+    s.remove_request = false;
+    if (!popup::begin(tr("Remove mod##mods_remove"), open)) return;
     std::string name = s.remove_id;
     for (const auto& v : mods::packages::list()) if (v.id == s.remove_id) name = v.name;
-    ImGui::PushTextWrapPos(std::min(ImGui::GetFontSize() * 26, ImGui::GetMainViewport()->Size.x * 0.85f));
-    text("Remove " + name + "?");
-    text("This deletes the mod and the files it prepared (" + size_text(s.remove_bytes) + "). Your saves are not touched.");
+    ImGui::PushTextWrapPos(popup::wrap_pos(26));
+    text(textf(tr("Remove %s?"), name.c_str()));
+    text(textf(tr("This deletes the mod and the files it prepared (%s). Your saves are not touched."), size_text(s.remove_bytes).c_str()));
     ImGui::PopTextWrapPos();
-    bool accept = button("Remove##confirm", ImVec2(ImGui::GetFontSize() * 6, 0));
-    same_line_if_fits("Cancel");
-    bool cancel = button("Cancel##remove", ImVec2(ImGui::GetFontSize() * 6, 0));
+    bool accept = button(tr("Remove##confirm"), ImVec2(ImGui::GetFontSize() * 6, 0));
+    same_line_if_fits(tr("Cancel"));
+    bool cancel = button(tr("Cancel##remove"), ImVec2(ImGui::GetFontSize() * 6, 0));
     ImGui::SetItemDefaultFocus();
     if (h.test) if (const char* t = getenv("WWHD_TEST_MOD_REMOVE"); t && s.remove_id == t) accept = true;
-    if (h.back || ImGui::IsKeyPressed(ImGuiKey_Escape)) { cancel = true; accept = false; }
+    if (popup::dismissed(h.back)) { cancel = true; accept = false; h.b_used = h.b_used || h.back; }  // the X, a tap outside, Esc or B
     if (accept) {
         std::string error;
         if (mods::packages::remove(s.remove_id, error)) {
-            s.message = name + " was removed.";
+            s.message = textf(tr("%s was removed."), name.c_str());
             s.page.clear();
             fprintf(stderr, "[mods] removed %s\n", s.remove_id.c_str());
         } else s.error = error;
     }
     if (accept || cancel) { s.remove_id.clear(); ImGui::CloseCurrentPopup(); }
-    ImGui::EndPopup();
+    popup::end();
 }
 inline void package_page(Host& h, const mods::packages::View& v) {
     using namespace mods::packages;
@@ -1252,7 +1300,7 @@ inline void package_page(Host& h, const mods::packages::View& v) {
     Row r = row(facts(v, update));
     // name, switch and status
     ImGui::TextUnformatted(v.name.c_str());
-    if (v.experimental) badge("Experimental", experimental::kBadgeColour);
+    if (v.experimental) badge(tr("Experimental"), experimental::kBadgeColour);
     bool on = r.switch_on;
     ImGui::BeginDisabled(!r.switch_enabled);
     if (on_switch("##on_page", &on)) switch_package(v, on);
@@ -1261,12 +1309,12 @@ inline void package_page(Host& h, const mods::packages::View& v) {
     colored(status_colour(r.status), r.text);
     if (!r.switch_enabled && !r.switch_reason.empty()) muted(r.switch_reason);
     if (!v.description.empty()) text(v.description);
-    if (v.experimental) colored(kWarn, kExperimentalShort);
-    if (!v.reason.empty() && v.reason != v.game_source_warning) colored(kBad, "This mod has a problem: " + v.reason);
+    if (v.experimental) colored(kWarn, tr(kExperimentalShort));
+    if (!v.reason.empty() && v.reason != v.game_source_warning) colored(kBad, textf(tr("This mod has a problem: %s"), v.reason.c_str()));
     const bool flow_shown = flow_for(v.id);
     if (flow_shown) {
         const auto& f = s.job.flow;
-        if (f.phase != Phase::Done) ImGui::SeparatorText(f.phase == Phase::Failed ? "Stopped" : flow_verb());
+        if (f.phase != Phase::Done) ImGui::SeparatorText(f.phase == Phase::Failed ? tr("Stopped") : flow_verb());
         else ImGui::Separator();
         progress_view(h, h.android);
         ImGui::Separator();
@@ -1279,7 +1327,7 @@ inline void package_page(Host& h, const mods::packages::View& v) {
             Flow preview = Flow::make(v.id, v.name, plan);
             colored(kWarn, p.setup_summary + " — " + duration_text(preview.total_expected()));
             // the switch is the one way in: switching it on asks what is needed and sets it up
-            if (p.offer_set_up) muted("Switch it on to set it up.");
+            if (p.offer_set_up) muted(tr("Switch it on to set it up."));
         }
     }
     if (!flow_shown) lock_line(h, p);  // the progress view says what happens next
@@ -1293,30 +1341,30 @@ inline void package_page(Host& h, const mods::packages::View& v) {
         } else if (!p.update_line.empty() && p.update_line != p.lock_line) muted(p.update_line);
     }
     if (p.offer_remove && !flow_shown) {
-        if (button("Remove##page")) { s.remove_id = v.id; s.remove_bytes = disk_use(v.id); s.remove_request = true; }
+        if (button(tr("Remove##page"))) { s.remove_id = v.id; s.remove_bytes = disk_use(v.id); s.remove_request = true; }
     } else if (!flow_shown && !p.remove_line.empty() && p.remove_line != p.lock_line) muted(p.remove_line);
     if (h.test) if (const char* t = getenv("WWHD_TEST_MOD_REMOVE"); t && v.id == t && p.offer_remove && s.remove_id.empty()) {
         s.remove_id = v.id; s.remove_bytes = disk_use(v.id); s.remove_request = true;
     }
     // details
-    if (section("Details")) {
+    if (section(tr("Details"))) {
         ImGui::Indent();
-        muted("Version " + v.version);
-        if (!v.author.empty()) muted("By " + v.author);
+        muted(textf(tr("Version %s"), v.version.c_str()));
+        if (!v.author.empty()) muted(textf(tr("By %s"), v.author.c_str()));
         muted(kind_words(v.kind));
         if (v.kind == "native" || v.kind == "guest" || !v.setup_tools.empty())
-            muted(v.native_confirmed ? "Contains code that runs on your computer. You allowed this version."
-                                     : "Contains code that runs on your computer. Switching it on asks you first.");
+            muted(v.native_confirmed ? tr("Contains code that runs on your computer. You allowed this version.")
+                                     : tr("Contains code that runs on your computer. Switching it on asks you first."));
         if (entry) for (const auto& l : entry->licences) muted("Licence: " + l);
-        for (const auto& d : v.dependencies) muted("Needs " + d);
-        for (const auto& c : v.conflicts) muted("Can't be used with " + c);
-        for (const auto& c : v.graphics_conflicts) muted("Can't be used with " + c.name + " (" + c.reason + ")");
+        for (const auto& d : v.dependencies) muted(textf(tr("Needs %s"), d.c_str()));
+        for (const auto& c : v.conflicts) muted(textf(tr("Can't be used with %s"), c.c_str()));
+        for (const auto& c : v.graphics_conflicts) muted(textf(tr("Can't be used with %s (%s)"), c.name.c_str(), c.reason.c_str()));
         ImGui::Unindent();
     }
     troubleshooting(h, v, p);
 }
 inline void builtin_page(Host& h, const mods::manager::Entry& e) {
-    ImGui::TextUnformatted(e.name);
+    ImGui::TextUnformatted(tr(e.name));
     bool on = e.enabled();
     std::string id = e.id;
     if (on_switch("##on_builtin", &on)) {
@@ -1324,25 +1372,25 @@ inline void builtin_page(Host& h, const mods::manager::Entry& e) {
         if (id == "story-system" && on && !find_view(mods::packages::list(), mods::required::kStoryNotebook)) install_story_notebook(h);
     }
     ImGui::SameLine();
-    colored(on ? kGood : kMuted, on ? "On" : "Off");
-    text(e.description);
-    if (e.restart_required) muted("Changes apply after a restart.");
+    colored(on ? kGood : kMuted, on ? tr("On") : tr("Off"));
+    text(tr(e.description));
+    if (e.restart_required) muted(tr("Changes apply after a restart."));
     if (const char* o = getenv(e.startup_env)) muted(std::string(e.startup_env) + "=" + o + " overrides the saved choice at startup.");
     if (h.builtin_options) h.builtin_options(e.id);
-    muted("Built into the game. Your choices are saved in the current profile.");
+    muted(tr("Built into the game. Your choices are saved in the current profile."));
 }
 inline void installing_page(Host& h) {
     auto& f = state().job.flow;
     ImGui::TextUnformatted(f.name.c_str());
-    if (state().job.accepted.experimental) badge("Experimental", experimental::kBadgeColour);
+    if (state().job.accepted.experimental) badge(tr("Experimental"), experimental::kBadgeColour);
     if (!state().job.accepted.description.empty()) text(first_sentence(state().job.accepted.description, 240));
-    ImGui::SeparatorText(f.phase == Phase::Failed ? "Stopped" : flow_verb());
+    ImGui::SeparatorText(f.phase == Phase::Failed ? tr("Stopped") : flow_verb());
     progress_view(h, h.android);
 }
 inline void available_page(Host& h, const mods::catalogue::Entry& e, const fs::path& fixtures);
 inline void mod_page(Host& h) {
     auto& s = state();
-    if (button((std::string(glyph(0x2039, "\xE2\x80\xB9", "<")) + " " + kAreaNames[s.area] + "##back").c_str()) || (h.back && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))) {
+    if (button((std::string(glyph(0x2039, "\xE2\x80\xB9", "<")) + " " + tr(kAreaNames[s.area]) + "##back").c_str()) || (h.back && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))) {
         if (h.back) h.b_used = true;
         s.page.clear();
         return;
@@ -1403,7 +1451,11 @@ inline void install_picked(Host& h) {
     if (test_local) { picked = test_local; test_local = nullptr; }
     if (!picked.empty()) {
         std::string id, error;
-        if (install(picked, error, &id)) {
+        mods::picked::Local local;  // Android: a copy of the picked document, removed once it is installed
+        if (!mods::picked::resolve(picked, h.copy_document, local, error)) { s.error = error; return; }
+        const bool installed = install(local.path, error, &id);
+        mods::picked::release(local);
+        if (installed) {
             s.error.clear();
             for (const auto& v : list()) if (v.id == id) {
                 s.message = v.name + " was installed.";
@@ -1421,26 +1473,26 @@ inline void install_picked(Host& h) {
 inline void more(Host& h) {
     using namespace mods::packages;
     auto& s = state();
-    if (button("Switch all mods off")) hostui::post([] { mods::packages::disable_all(); });
-    muted("Switches off every mod, built-in ones included, in the current profile.");
+    if (button(tr("Switch all mods off"))) hostui::post([] { mods::packages::disable_all(); });
+    muted(tr("Switches off every mod, built-in ones included, in the current profile."));
     bool busy = !setupflow::setup_run.id.empty() || s.job.flow.phase == Phase::Working;
-    if (section("Profiles")) {
+    if (section(tr("Profiles"))) {
         ImGui::Indent();
-        muted("A profile remembers which mods are on and their options.");
-        if (busy) muted("Profiles can be changed when the current setup has finished.");
+        muted(tr("A profile remembers which mods are on and their options."));
+        if (busy) muted(tr("Profiles can be changed when the current setup has finished."));
         ImGui::BeginDisabled(busy);
         auto current = current_profile();
         ImGui::SetNextItemWidth(std::min(ImGui::GetFontSize() * 14, ImGui::GetContentRegionAvail().x));
-        if (ImGui::BeginCombo("Profile", current.c_str())) {
+        if (ImGui::BeginCombo(tr("Profile"), current.c_str())) {
             for (const auto& name : profiles())
                 if (selectable(name.c_str(), name == current)) select_profile(name, s.error);
             ImGui::EndCombo();
         }
         ImGui::SetNextItemWidth(std::min(ImGui::GetFontSize() * 14, ImGui::GetContentRegionAvail().x));
-        text_entry::field("##new_profile", s.profile_name, sizeof s.profile_name, 0, "New profile name");
-        same_line_if_fits("Copy current");
+        text_entry::field("##new_profile", s.profile_name, sizeof s.profile_name, 0, tr("New profile name"));
+        same_line_if_fits(tr("Copy current"));
         ImGui::BeginDisabled(!s.profile_name[0]);
-        if (button("Copy current") && create_profile(s.profile_name, s.error)) s.profile_name[0] = 0;
+        if (button(tr("Copy current")) && create_profile(s.profile_name, s.error)) s.profile_name[0] = 0;
         ImGui::EndDisabled();
         for (const auto& name : profiles()) {
             if (name == current) continue;
@@ -1448,15 +1500,17 @@ inline void more(Host& h) {
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted(name.c_str());
             ImGui::SameLine();
-            if (small_button("Delete")) delete_profile(name, s.error);
+            if (small_button(tr("Delete"))) delete_profile(name, s.error);
             ImGui::PopID();
         }
         ImGui::EndDisabled();
         ImGui::Unindent();
     }
-    if (h.file_picker && section("Install from a file or folder")) {
+    if (h.file_picker && section(h.android ? "Install from a file" : "Install from a file or folder")) {
         ImGui::Indent();
-        muted("A mod package (.wwhdmod or ZIP), a mod folder, or a replacement .pack file.");
+        // Android's chooser has no folders (SDL answers a folder request with nothing)
+        if (h.android) muted("A mod package (.wwhdmod or ZIP) or a replacement .pack file.");
+        else muted("A mod package (.wwhdmod or ZIP), a mod folder, or a replacement .pack file.");
         auto pick = [&h](bool folder) {
             if (!h.choose_mod_source) return;
             h.choose_mod_source(folder, [](std::string path) {
@@ -1465,11 +1519,13 @@ inline void more(Host& h) {
             });
         };
         if (button("Choose file…##package")) pick(false);
-        same_line_if_fits("Choose folder…");
-        if (button("Choose folder…##package")) pick(true);
+        if (!h.android) {
+            same_line_if_fits("Choose folder…");
+            if (button("Choose folder…##package")) pick(true);
+        }
         ImGui::Unindent();
     }
-    if (!h.console && section("GameCube game for mods")) {  // (this fork: a file chooser)
+    if (h.file_picker && section("GameCube game for mods")) {  // (chosen with a file picker)
         ImGui::Indent();
         muted("Some mods use files from the GameCube version of the game. They stay on your computer.");
         game_source_picker(h, "gc_wind_waker");
@@ -1477,21 +1533,21 @@ inline void more(Host& h) {
         if (!src.path.empty() && small_button("Forget it")) { std::string e; set_game_source("gc_wind_waker", "", e); }
         ImGui::Unindent();
     }
-    if (!h.console && section("Code-mod support")) {  // (this fork: no rebuild on the console)
+    if (h.code_mods && section("Code-mod support")) {
         ImGui::Indent();
         bool code = mods::code::enabled();
         // not the section's own label: two items with one ID
         if (ImGui::Checkbox("Use code mods##code_mods_switch", &code)) mods::code::request(code);
-        muted("Code mods need the game code rebuilt with mod support (about 5 minutes) and a restart. Installing a "
-              "code mod turns this on by itself.");
+        muted((std::string("Code mods need the game code rebuilt with mod support (") + mods::code::rebuild_duration() +
+               ") and a restart. Installing a code mod turns this on by itself.").c_str());
         ImGui::Unindent();
     }
-    if (section("Save backups")) {
+    if (section(tr("Save backups"))) {
         ImGui::Indent();
         if (experimental::backups_section(h.back)) h.b_used = true;
         ImGui::Unindent();
     }
-    if (!h.console && section("Mod list")) {  // (this fork: no downloads)
+    if (h.mod_downloads && section("Mod list")) {
         ImGui::Indent();
         if (ImGui::Checkbox("Check for new mods automatically", &s.auto_check))
             hostui::post([on = s.auto_check] { hostui::set("mod.catalogue.auto", on ? "1" : "0"); });
@@ -1520,17 +1576,17 @@ inline void more(Host& h) {
         if (snap.failed && !snap.error.empty()) muted("Last check: " + snap.error);
         ImGui::Unindent();
     }
-    if (h.cheats && section("Cheats")) {
+    if (h.cheats && section(tr("Cheats"))) {
         ImGui::Indent();
         h.cheats();
         ImGui::Unindent();
     }
-    if (section("Mods folder")) {
+    if (section(tr("Mods folder"))) {
         ImGui::Indent();
         auto dir = directory();
         if (!dir.empty()) { muted(dir); tooltip(dir); }
-        if (small_button("Look for changes")) refresh(s.error);
-        muted("After adding or changing mod folders by hand while all mods are off.");
+        if (small_button(tr("Look for changes"))) refresh(s.error);
+        muted(tr("After adding or changing mod folders by hand while all mods are off."));
         ImGui::Unindent();
     }
 }
@@ -1595,12 +1651,12 @@ inline void test_switches(Host& h) {
 }
 inline void restart_bar(const Host& h, const std::string& summary) {
     if (summary.empty()) return;
-    colored(kWarn, "Restart to apply: " + summary + ".");
+    colored(kWarn, textf(tr("Restart to apply: %s."), summary.c_str()));
     if (h.android) muted("Close and reopen the app to apply.");
     else if (h.can_restart && h.can_restart()) {
         ImGui::SameLine();
-        if (small_button("Restart now##bar") && h.restart) h.restart(mods::code::status().ready);
-    } else muted("Restart the game to apply.");
+        if (small_button(tr("Restart now##bar")) && h.restart) h.restart(mods::code::status().ready);
+    } else muted(tr("Restart the game to apply."));
 }
 // The whole tab. restart_summary: what a restart would apply (restart_notice.h summary), "" for nothing.
 inline void draw(Host& h, const std::string& restart_summary) {
@@ -1636,7 +1692,7 @@ inline void draw(Host& h, const std::string& restart_summary) {
     if (ImGui::BeginTabBar("mods_areas", ImGuiTabBarFlags_FittingPolicyShrink)) {
         for (int i = 0; i < kAreas; i++) {
             ImGuiTabItemFlags f = s.select_area == i ? ImGuiTabItemFlags_SetSelected : 0;
-            if (ImGui::BeginTabItem(kAreaNames[i], nullptr, f)) {
+            if (ImGui::BeginTabItem(tr(kAreaNames[i]), nullptr, f)) {
                 if (s.area != i && s.select_area < 0) { s.area = i; s.page.clear(); }  // clicked
                 ImGui::EndTabItem();
             }

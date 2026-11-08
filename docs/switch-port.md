@@ -13,7 +13,7 @@ latest rounds and what they taught: "Round 48", "Round 47", "Round 46", "Round 4
 | Build | Works: `tools/switch/build.sh` → `build/switch-dk/wwhd.nro` (~39 MB) |
 | Boot on hardware | Works: picture, sound and controller input (as the Wii U GamePad in Off-TV Play since 2026-10-10: the game on one screen, the touch screen as the GamePad's; was the Pro Controller, still a Debug choice) |
 | Performance on hardware | Stock clocks (CPU 1020, GPU 307, memory 1331 MHz), round 45: Outset ~30 fps (~29 in its heaviest view, 7,300 draws; limit: the render thread); sailing near Dragon Roost and the volcano 26-29 fps (limit: the game's main thread, ~90% game code); at CPU 1122 MHz 30 fps there. Shader variants of earlier sessions skip the decompiler (translation records); new textures ~1.7 ms each |
-| Settings | In-game menu (Minus held half a second): GPU profile (default: stock, GPU 307 MHz, since 2026-10-08; was 460.8 MHz + memory 1600), no CPU clock option (the 1020-1785 MHz steps and GPU 614 MHz, set through clkrst, were removed 2026-10-13: with the CPU at 1224 MHz an Erista did not wake from sleep, #33; sys-clk instead), picture adjustments, edge smoothing (FXAA, off by default; #21), frame-rate counter, controller, gyro, save states, warp, mods, language. Saved in `settings.ini`; `env.txt` values win at start. Switch tab, Debug: A/B switches, log diagnostics and the frame-rate test (not saved; rule: test options always go in the menu) |
+| Settings | In-game menu (Minus held half a second): no GPU profile choice (always GPU 384 MHz in handheld since 2026-10-23, from `perf_test.py gpu-profile`; the menu offered Nintendo's handheld profiles until then, with stock 307 MHz the default from 2026-10-08 and 460.8 MHz + memory 1600 before; tests only: `WWHD_TEST_GPU_PROFILE` in `[dev]`), no CPU clock option (the 1020-1785 MHz steps and GPU 614 MHz, set through clkrst, were removed 2026-10-13: with the CPU at 1224 MHz an Erista did not wake from sleep, #33; sys-clk instead), picture adjustments, edge smoothing (FXAA, off by default; #21), frame-rate counter, controller, gyro, save states, warp, mods, language. Saved in `settings.ini`; `env.txt` values win at start. Dev tab (its content hidden until its "Show developer options" checkbox, saved as `switchDevOptions`, off by default): A/B switches and log diagnostics (not saved; rule: test options always go in the menu). The 60 fps modes (interpolation, true 60) are under Picture tab > Experimental features, with a warning, not saved. A `switchGpuProfile` saved by an older version is not applied and is set to `384` at start (log `[switch] gpu profile ... is no longer a choice`); other clocks are sys-clk's job. Tabs: Saves, Picture, Controls, Audio, Mods, Warp (behind a tick-box with a warning), Dev (behind a tick-box), Language / About |
 | On-screen FPS counter | Top-left corner; menu (Switch tab) |
 | Developer variables | `[dev]` section at the end of `sdmc:/switch/wwhd/settings.ini`, read before the static initialisers (2026-10-08; replaces `env.txt`, which is converted once and renamed `env.txt.old`; docs/debug-server.md) |
 | Desktop reproduction | deko3d does not run on the desktop; shared code (GX2 command stream, game code) is A/B-tested and profiled on the desktop Vulkan build (round 45). The headless OpenGL build is in git history (`main` 207349b) |
@@ -27,7 +27,7 @@ latest rounds and what they taught: "Round 48", "Round 47", "Round 46", "Round 4
 ## Rule for test builds: options in the menu, not [dev] variables
 
 Every option, A/B switch or diagnostic that a hardware test asks the player to turn on goes into the in-game
-settings menu (Switch tab; diagnostics and A/B switches in its Debug section), switchable while the game runs and
+settings menu (player options in the Picture and Controls tabs; diagnostics and A/B switches in the Dev tab, behind its "Show developer options" checkbox), switchable while the game runs and
 logged with the frame it changed at. Test instructions name the menu entry. The `[dev]` section of `settings.ini`
 (developer variables, read at start) is for scripted runs, never the only way to reach a test option; a variable
 the menu has a setting for is ignored there. (2026-10-08: round 45's first instructions asked for two `env.txt`
@@ -285,7 +285,7 @@ The fix below was confirmed by `logs-switch/graphics_works_but_slow`: the log sh
 | Shaders shared by GLSL source; programs keyed by the (vertex, pixel) source hashes | Many GPU states produce identical GLSL. Headless title screen: about 950 states needed only 285 compiles |
 | Persistent shader cache `sdmc:/switch/wwhd/shadercache_gl.bin` (zlib GLSL plus linked pairs), compiled at startup with a progress bar | switch-mesa reports 0 program binary formats, so sources are cached and compiled at boot (like Cemu's GL cache). On hardware the render thread spent about 990 ms/s compiling during new scenes. Headless second run: 0 compiles in game |
 | Decompiler GLSL text freed after compiling | Tens of KB per variant were kept forever |
-| Heap use from `mallinfo` in the stats line | The kernel's used-memory figure counts the whole pre-reserved heap (3185/3189 MiB from the start) |
+| Heap use from `mallinfo` on request (debug server `malloc`; the stats line has the heap's never-used top, O(1)) | The kernel's used-memory figure counts the whole pre-reserved heap (3185/3189 MiB from the start); `mallinfo` walks every free chunk under malloc's lock, ~9 ms after a 10 min warp tour (41,000 free chunks), too slow for the render thread's 5 s line |
 | Per-frame reuse of guest vertex/uniform uploads (`stream_guest`; `WWHD_GL_NO_DEDUP=1` turns it off) | Gameplay reaches 4,000–5,400 draws per frame, and each draw copied its whole vertex buffer and uniform blocks. An address is now uploaded once per frame, until `GX2Invalidate` (attribute/uniform), `GX2DrawDone` or a stream-buffer wrap. Headless title screen: streamed data fell from 335 to 158 MB/s with the same picture |
 | Host service threads at Horizon priority 0x2C (`host::raise_thread_priority`): GX2 render, audout, AX frame, alarms, scheduler tick | libnx creates all pthreads at 59, the only priority Horizon time-slices (10 ms) on cores 0–2, so the render thread waited behind busy guest threads |
 | `GX2DrawDone` → `glFlush` instead of `glFinish` | The GL renderer never writes GPU results back to guest memory; waiting for the GPU serialized the game, the render thread and the GPU |
@@ -671,6 +671,7 @@ is rendered; the `[gx2]` line's "late frames flipped at once" now counts the fli
 - **Service threads off core 1.** `host::raise_thread_priority` (audio output, AX frame, scheduler tick every 0.5 ms, watchdog, the threads `host::start_thread` creates) and the log writer now also keep to cores 0 and 2 with `WWHD_CORE_LAYOUT`, and so does the boot thread.
 - **One wake per core release.** Every time a thread gave up its emulated core (the main thread does at each wait, many times a frame), all threads waiting for that core were woken (`notify_all`) to find it was not their turn; with the core layout they all sat on the main thread's host core. Each thread now waits on its own condition variable, and a release wakes only the thread that runs next (the 2 s timeout stays as a safety net). Gameplay and title runs: no thread waiting >10 s, no audio gaps.
 - **Experiment: small hot leaves inlined (`WWHD_RECOMP_INLINE=1` when recompiling, off by default).** recomp.py emits an always-inline copy (`fi_X`, `inline_leaves.h`) of each hot leaf of at most 24 instructions that ends in a plain return (437), and the hot callers use it (1,886 call sites). It removes the call overhead and lets GCC forward the register traffic between caller and callee, but the hot code grows from 4.5 to 5.2 MB; on the desktop the main thread did not change. Shipped as a second build, `wwhd_inline.nro`, for a comparison on the Switch. The log's `[boot] recompiled code:` line names the recompiler options.
+  **On by default since 2026-10-22 (#63)**, with leaves of up to 64 instructions (`WWHD_RECOMP_INLINE_MAX`) and `hot_functions.txt` extended with the 759 functions hot on the Switch that the desktop profiles missed (7.6% of the console's game code samples): 766 leaves inlined, `.text` +0.7 MB. Console A/B against main (ABCCBA x2, 900 frames): lava +0.53 ±0.37 fps, Windfall +0.74 ±0.47, Dragon Roost +0.21 ±0.20; main thread -0.3 to -0.9 ms. Limits 24 and 160 measured too (160 inlines few more leaves and was no faster); without the Switch functions the gain was about half. `WWHD_RECOMP_INLINE=0` turns it off.
 
 #### Hardware test of round 11 (`logs-switch/wwhd.log`, 2026-10-04, default build, GPU at 921 MHz)
 
@@ -1722,3 +1723,40 @@ warp: all OK (log `logs-switch/wwhd_2026-10-09_21-36-50_EU.log`). USA game, same
 29.9 fps in the session's reports), save states, a warp and the sun at sea (peekZ falls back to the game's function,
 no hang): all OK (`logs-switch/wwhd_2026-10-09_22-22-57_USA_r48.log`).
 
+
+### Round 49: CPU at the stock 1020 MHz: frame-free leaves, hidden symbols, write-back elision, profile-guided build (PR #87, hardware-tested)
+
+Goal: hold 30 fps at the stock CPU where 1200 MHz runs fine. Measured on a console at stock clocks (CPU 1020, GPU 307,
+memory 1331 MHz), `perf_test.py ab`, 4 boots per build, 900 frames per scene. Details, every measurement and the dead ends:
+[pgo-progress.md](pgo-progress.md); how to make a profile: [pgo.md](pgo.md).
+
+| Change | What it does | Evidence |
+|---|---|---|
+| Frame-free leaf functions (`PPC_ENTER_FN`) | the cold yield path of the entry check is a tail call, so a function with no other call has no stack frame | framed functions 35,648 -> 24,696 |
+| Hidden symbol visibility | `-fPIC` loaded `ppc_dispatch` through the GOT at every indirect call (26,203 sites) | GOT loads at call sites -> 0 |
+| Write-back elision before direct calls (`tools/recomp/calleeregs.py`) | callee read/write sets over the call graph: a store before a call stays only if the callee reads the register or the caller needs it afterwards | stores per call 7.0 -> 5.3, hot code -1.9% instructions; lockstep identical (70,430 process executions) |
+| PGO (`-DWWHD_PGO=GEN/USE`) | GCC profile of 26 scenes on the console, game code **and** runtime (render thread, GX2 path) | below |
+
+| Scene | main (113fa63) | + frame-free, hidden, elision | + PGO (game + runtime profile) |
+|---|---|---|---|
+| lava | 27.94 fps, main thread 34.2 ms | 28.36 | **29.28**, 31.7 ms |
+| windfall | 28.52 | 29.22 | **29.97** (the cap) |
+| dragonroost | 28.61 | 28.98 | **29.92** |
+| outset_village | 25.35, 37.7 ms | 26.04 | **27.98**, 34.3 ms |
+| outset_lookout / grass | 20.7 / 23.4 | GPU-bound, fps unchanged | main thread -3.2% / -2.0% |
+
+The PGO step alone is +3.3% / +2.6% / +3.2% / +7.5% fps (lava, windfall, dragonroost, village), all beyond the 95% interval, on
+scenes the profile was not made on. The runtime half of the profile is what moves the Outset village (+1.95 fps; the game-code
+profile alone gave +0.11). The PGO build is also steadier from boot to boot (sd 0.00-0.03 fps against 0.1-0.5).
+
+What we learned (so it is not repeated):
+1. **Check the clocks before any timing.** The first console numbers of this work were taken with sys-clk on and the game's GPU
+   profile at 460 MHz: the scenes sat at the 30 fps cap and the same changes looked "inside the noise". At stock clocks the
+   baseline reproduced the maintainer's reference (lava 27.9 fps). `[dk] clocks:` in the log header says what ran.
+2. **A guess about the ABI is not a measurement.** The game was compiled with Green Hills, which allocates registers across
+   calls; the elision therefore uses the callees' real read/write sets and treats everything unknown as "reads everything".
+3. **PGO traps:** libgcov's value profiling reads `tpidr_el0` (0 on Horizon) and crashes the first indirect call; stale objects
+   keep the old flags; GCC's default `-fprofile-use` options inflate the hot code 29%; the profile is found by the object's
+   relative path. See pgo.md.
+4. A profile fits the exact generated code it was made from: remake it after a recompiler or profiled-runtime change. A release
+   build with PGO needs its own profile; for now PGO stays off by default and releases are not profiled (issue #90).

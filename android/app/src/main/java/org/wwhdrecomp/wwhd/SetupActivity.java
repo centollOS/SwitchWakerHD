@@ -36,10 +36,20 @@ public class SetupActivity extends Activity {
     private Button disc;
     private Button common;
     private Button restore;
+    private android.widget.CheckBox codeMods;
+    private TextView codeModsDetail;
+    private android.widget.CheckBox models;
+    private TextView modelsDetail;
+    private Button cancelModels;
+    private long screenResumed;
     private final ArrayList<Button> pickers = new ArrayList<>();
     private boolean phoneSetup;
+    private boolean launchingGame;
     private String actionMessage;
     private TextView keysHint;
+    private TextView folderHint;
+    /** A chosen folder is being checked for the game (off the UI thread). */
+    private volatile boolean checkingFolder;
     private String pickerJob;
     private String shaderWarmJob;
     private static final int FOLDER = 10, ARCHIVE = 11, IMAGE = 12, DISC = 13, COMMON = 14, RESTORE = 15;
@@ -69,6 +79,7 @@ public class SetupActivity extends Activity {
     private void offerShortcut() {
         if (shortcutChecked || !hasWindowFocus()) return;
         shortcutChecked = true;
+        if (!GameShortcut.supported(this)) return;
         if (!phoneSetup) {  // the PC route: its game folder, once
             File external = getExternalFilesDir(null);
             File game = external == null ? null : new File(external, "game");
@@ -100,7 +111,8 @@ public class SetupActivity extends Activity {
                 if (game == null) android.widget.Toast.makeText(this, R.string.game_icon_none, android.widget.Toast.LENGTH_SHORT).show();
                 else if (widget) android.widget.Toast.makeText(this, R.string.game_icon_present, android.widget.Toast.LENGTH_LONG).show();
                 else if (shortcut) android.widget.Toast.makeText(this, R.string.game_icon_present_shortcut, android.widget.Toast.LENGTH_LONG).show();
-                else GameShortcut.offer(this, game);
+                else if (!GameShortcut.offer(this, game))
+                    android.widget.Toast.makeText(this, R.string.game_icon_unsupported, android.widget.Toast.LENGTH_LONG).show();
             });
         }, "wwhd-game-icon").start();
     }
@@ -112,14 +124,20 @@ public class SetupActivity extends Activity {
              java.io.InputStream compiler = getAssets().open("toolchain-apk.json");
              java.io.InputStream sdk = getAssets().open("runtime-sdk.json")) { phoneSetup = true; }
         catch (Exception unavailable) { phoneSetup = false; }
+        if (phoneSetup && state == null) cleanJobs();  // failed or abandoned imports left by an earlier run
         // the app icon starts the game once there is one to play; the launcher's "Game setup"
         // shortcut (and an update that needs a rebuild, or a setup still running) opens this screen
-        if (state == null && Intent.ACTION_MAIN.equals(getIntent().getAction()) &&
-                !getIntent().getBooleanExtra(EXTRA_SHOW_SETUP, false) && readyToPlay()) {
-            startActivity(new Intent(this, WwhdActivity.class));
-            finish();
+        if ((state != null && state.getBoolean("launching_game", false)) ||
+                (state == null && Intent.ACTION_MAIN.equals(getIntent().getAction()) &&
+                !getIntent().getBooleanExtra(EXTRA_SHOW_SETUP, false) && readyToPlay())) {
+            launchingGame = true;
+            CrashReports.offer(this, () -> {
+                startActivity(QuestActivity.gameIntent(this));
+                finish();
+            });
             return;
         }
+        CrashReports.offer(this);
         android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
         int padding = (int)(24 * metrics.density), gap = (int)(12 * metrics.density);
         LinearLayout layout = new LinearLayout(this);
@@ -150,7 +168,8 @@ public class SetupActivity extends Activity {
         detail.setPadding(0, gap / 2, 0, gap);
         layout.addView(detail);
         // Play first: once a game is ready it is the main action
-        play = button(layout, getString(R.string.setup_play), () -> startActivity(new Intent(this, WwhdActivity.class)));
+        play = button(layout, getString(R.string.setup_play), () -> startActivity(QuestActivity.gameIntent(this)));
+        button(layout, "Share log", () -> LogShare.share(this));
         play.setTextSize(20);
         play.setTextColor(0xFFFFFFFF);
         play.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFF0D5C8A));
@@ -159,6 +178,10 @@ public class SetupActivity extends Activity {
         // one button for the three kinds of dump; the activity results are the same as before
         choose = button(layout, getString(R.string.setup_choose), this::chooseKind);
         pickers.add(choose);
+        folderHint = new TextView(this);
+        folderHint.setText(R.string.setup_folder_hint);
+        folderHint.setPadding(0, 0, 0, gap);
+        layout.addView(folderHint);
         restore = button(layout, getString(R.string.setup_restore), () -> pick(RESTORE));
         keysHint = new TextView(this);
         keysHint.setText(R.string.setup_keys_detail);
@@ -169,6 +192,31 @@ public class SetupActivity extends Activity {
         pause = button(layout, getString(R.string.setup_pause), () -> control(SetupService.PAUSE));
         continueAnyway = button(layout, getString(R.string.setup_continue_anyway), () -> { if (continueAction != null) control(continueAction); });
         continueAnyway.setVisibility(android.view.View.GONE);
+        // setup's models step: Cancel stops it and keeps what was prepared
+        cancelModels = button(layout, getString(R.string.setup_cancel), this::cancelModels);
+        cancelModels.setVisibility(android.view.View.GONE);
+        // the desktop setup's "code mods" choice: the game code with mod support for guest mods
+        codeMods = new android.widget.CheckBox(this);
+        codeMods.setText(R.string.setup_code_mods);
+        codeMods.setTextSize(16);
+        codeMods.setChecked(AndroidGame.codeModsChosen(this));
+        codeMods.setOnCheckedChangeListener((view, checked) -> chooseCodeMods(checked));
+        layout.addView(codeMods);
+        codeModsDetail = new TextView(this);
+        codeModsDetail.setText(R.string.setup_code_mods_detail);
+        codeModsDetail.setPadding(0, 0, 0, gap);
+        layout.addView(codeModsDetail);
+        // the desktop setup's optional "Preparing shaders: models" step
+        models = new android.widget.CheckBox(this);
+        models.setText(R.string.setup_models);
+        models.setTextSize(16);
+        models.setChecked(AndroidGame.modelsChosen(this));
+        models.setOnCheckedChangeListener((view, checked) -> chooseModels(checked));
+        layout.addView(models);
+        modelsDetail = new TextView(this);
+        modelsDetail.setText(R.string.setup_models_detail);
+        modelsDetail.setPadding(0, 0, 0, gap);
+        layout.addView(modelsDetail);
         details = new Button(this, null, android.R.attr.borderlessButtonStyle);
         details.setText(R.string.setup_details_show);
         layout.addView(details);
@@ -184,6 +232,89 @@ public class SetupActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.addView(layout);
         setContentView(scroll);
+    }
+
+    /** The Code mods switch: remembered for the next build; a finished setup builds again now (the
+     *  current build stays playable until the new one is ready). */
+    private void chooseCodeMods(boolean enabled) {
+        new Thread(() -> {
+            try {
+                AndroidGame.chooseCodeMods(this, enabled);
+                File job = SetupStore.current(this);
+                File host = job == null ? null : new File(job, "host.json");
+                if (host != null && host.isFile() && SetupStore.read(host).optString("state").equals("complete") &&
+                        AndroidGame.needsRebuild(this))
+                    runOnUiThread(() -> {
+                        try { SetupService.start(this, null); }
+                        catch (Exception failure) { status.setText("Tap Resume to continue setup: " + failure.getMessage()); }
+                    });
+            } catch (Exception failure) {
+                runOnUiThread(() -> status.setText("Cannot save the code-mod choice: " + failure.getMessage()));
+            }
+        }, "wwhd-code-mods").start();
+    }
+
+    /** The models step switch: remembered for the next setup; ticked on a ready game, the step runs now. */
+    private void chooseModels(boolean enabled) {
+        new Thread(() -> {
+            try {
+                AndroidGame.chooseModels(this, enabled);
+                File job = SetupStore.current(this);
+                File host = job == null ? null : new File(job, "host.json");
+                if (enabled && !WwhdActivity.gameLoaded() && host != null && host.isFile() &&
+                        SetupStore.read(host).optString("state").equals("complete") &&
+                        new File(AndroidGame.storage(this), "active.json").isFile() && !AndroidGame.needsRebuild(this))
+                    runOnUiThread(() -> control(SetupService.RUN_MODELS));
+            } catch (Exception failure) {
+                runOnUiThread(() -> status.setText("Cannot save the models choice: " + failure.getMessage()));
+            }
+        }, "wwhd-models-choice").start();
+    }
+
+    /** Cancel of the models step: it stops in order and keeps what was prepared. */
+    private void cancelModels() {
+        cancelModels.setEnabled(false);
+        new Thread(() -> {
+            try {
+                File job = SetupStore.current(this);
+                if (job != null) SetupStore.write(new File(job, ModelsStep.CANCEL), new JSONObject().put("schema", 1));
+            } catch (Exception failure) {
+                runOnUiThread(() -> status.setText("Cannot cancel: " + failure.getMessage()));
+            }
+        }, "wwhd-models-cancel").start();
+    }
+
+    /** The models step's attempts: each requested one is started once, over this screen, without animation. */
+    private void routeModels(File job, String hostName) throws Exception {
+        boolean step = hostName.equals(ModelsStep.STATE);
+        JSONObject host = new File(job, "host.json").isFile() ? SetupStore.read(new File(job, "host.json")) : null;
+        boolean screenPause = hostName.equals("paused") && host != null && ModelsStep.SCREEN_REASON.equals(host.optString("reason"));
+        // the game draws in landscape, as in play: this screen turns with it so the step shows one screen
+        int orientation = step || screenPause ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE :
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+        if (getRequestedOrientation() != orientation) setRequestedOrientation(orientation);
+        // the step draws only with the screen on: between two attempts this screen keeps it on too
+        if (step) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        // setup is on the screen again: the step goes on (not while the game itself runs in this app, in the
+        // background: two games must not write the shader caches)
+        if (screenPause && !WwhdActivity.gameLoaded() && android.os.SystemClock.elapsedRealtime() - screenResumed > 5000) {
+            screenResumed = android.os.SystemClock.elapsedRealtime();
+            new Thread(() -> {
+                try {
+                    SetupStore.remove(new File(job, ModelsStep.SCREEN));
+                    runOnUiThread(() -> control(null));
+                } catch (Exception failure) { android.util.Log.w("wwhd-setup", "models step not resumed", failure); }
+            }, "wwhd-models-resume").start();
+        }
+        if (!step) return;
+        File requestFile = new File(job, ModelsStep.ATTEMPT), launchedFile = new File(job, ModelsStep.LAUNCHED);
+        String requested = requestFile.isFile() ? SetupStore.read(requestFile).optString("id") : null;
+        String launched = launchedFile.isFile() ? SetupStore.read(launchedFile).optString("id") : null;
+        if (!ModelsStep.launch(requested, launched) || !hasWindowFocus()) return;
+        SetupStore.write(launchedFile, new JSONObject().put("schema", 1).put("id", requested));
+        startActivity(ModelPrepareActivity.intent(this, job, requested));
+        overridePendingTransition(0, 0);
     }
 
     /** "Choose your game": a folder, a Cemu .wua archive or a .wud/.wux disc image. */
@@ -223,6 +354,7 @@ public class SetupActivity extends Activity {
             actionMessage = null;
             File job = SetupStore.current(this);
             if (!replaceable(job)) throw new Exception("Pause setup and wait for its checkpoint before changing input");
+            if (checkingFolder) throw new Exception("Still checking the chosen folder");
             pickerJob = job == null ? null : job.getName();
             boolean folder = request == FOLDER;
             if (request == RESTORE) {
@@ -231,6 +363,12 @@ public class SetupActivity extends Activity {
             }
             Intent intent = new Intent(folder ? Intent.ACTION_OPEN_DOCUMENT_TREE : Intent.ACTION_OPEN_DOCUMENT);
             if (!folder) intent.addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+            // start in Download (Android refuses Download itself as a folder, not a folder inside it) and
+            // ask for the internal storage among the picker's places
+            for (java.util.Map.Entry<String, Object> extra : SetupPicker.extras(folder).entrySet()) {
+                if (extra.getValue() instanceof Boolean) intent.putExtra(extra.getKey(), (Boolean)extra.getValue());
+                else intent.putExtra(extra.getKey(), Uri.parse((String)extra.getValue()));
+            }
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
             startActivityForResult(intent, request);
         } catch (Exception failure) { actionMessage = "Cannot choose input: " + failure.getMessage(); }
@@ -262,22 +400,92 @@ public class SetupActivity extends Activity {
                 SetupImport.selectKey(this, current, request == DISC ? "disc" : "common", uri);
                 if (new File(current, "job.json").isFile())
                     actionMessage = "Replacement key file selected. Tap Start / resume to read it and retry. Your dump copy is retained.";
-            } else if (request == FOLDER || request == ARCHIVE || request == IMAGE) {
+            } else if (request == FOLDER) checkFolder(uri);
+            else if (request == ARCHIVE || request == IMAGE) {
                 getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                String id = UUID.randomUUID().toString().replace("-", "");
-                File job = SetupStore.job(this, id);
-                SetupStore.write(new File(job, "source.json"), new JSONObject().put("schema", 1)
-                    .put("kind", request == FOLDER ? "folder" : request == ARCHIVE ? "archive" : "image").put("uri", uri.toString()));
-                SetupStore.write(new File(job, "manual-pause.json"), new JSONObject().put("schema", 1));
-                SetupStore.write(new File(job, "host.json"), new JSONObject().put("schema", 1).put("state", "selected"));
-                SetupStore.select(this, id);
+                newJob(this, request == ARCHIVE ? "archive" : "image", uri, null);
+                cleanJobs();
             }
         } catch (Exception failure) { actionMessage = "Cannot keep selected input: " + failure.getMessage(); }
         finally { pickerJob = null; }
     }
 
+    /** A new setup job for the chosen game becomes the selected one. */
+    private static void newJob(android.content.Context context, String kind, Uri uri, String document) throws Exception {
+        synchronized (SetupJobCleanup.CREATION) {
+            String id = UUID.randomUUID().toString().replace("-", "");
+            File job = SetupStore.job(context, id);
+            JSONObject source = new JSONObject().put("schema", 1).put("kind", kind).put("uri", uri.toString());
+            if (document != null) source.put("document", document);
+            SetupStore.write(new File(job, "source.json"), source);
+            SetupStore.write(new File(job, "manual-pause.json"), new JSONObject().put("schema", 1));
+            SetupStore.write(new File(job, "host.json"), new JSONObject().put("schema", 1).put("state", "selected"));
+            SetupStore.select(context, id);
+        }
+    }
+
+    /** Removes the private copies of games no longer chosen (never the selected game, the installed build
+     *  or a job the setup service holds), off the UI thread. */
+    private void cleanJobs() {
+        android.content.Context context = getApplicationContext();
+        new Thread(() -> {
+            SetupJobCleanup.Report report = SetupJobCleanup.clean(AndroidGame.storage(context));
+            if (!report.removed.isEmpty() || !report.failed.isEmpty() || report.skipped != null)
+                android.util.Log.i("wwhd-setup", report.summary());
+        }, "wwhd-setup-cleanup").start();
+    }
+
+    /** Checks the chosen folder for the game before anything is copied; a wrong folder is refused with a
+     *  message that says which folder to choose, and nothing is kept of it. */
+    private void checkFolder(Uri uri) {
+        checkingFolder = true;
+        android.content.Context context = getApplicationContext();
+        new Thread(() -> {
+            String message = null, refusal = null;
+            try {
+                SetupFolderCheck.Result found = SetupImport.checkFolder(context,
+                    uri, android.provider.DocumentsContract.getTreeDocumentId(uri));
+                android.util.Log.i("wwhd-setup", "chosen folder: " + found.kind + " " + found.path);
+                if (!found.usable()) refusal = folderMessage(found);
+                else {
+                    if (!replaceable(SetupStore.current(context))) throw new Exception("Pause setup before changing input");
+                    context.getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    newJob(context, "folder", uri, found.kind == SetupFolderCheck.Kind.SUBFOLDER ? found.document : null);
+                    if (found.kind == SetupFolderCheck.Kind.SUBFOLDER) message = folderMessage(found);
+                    SetupJobCleanup.Report report = SetupJobCleanup.clean(AndroidGame.storage(context));
+                    android.util.Log.i("wwhd-setup", report.summary());
+                }
+            } catch (Exception failure) {
+                refusal = getString(R.string.setup_folder_unreadable, String.valueOf(failure.getMessage()));
+            }
+            final String chosen = message, refused = refusal;
+            runOnUiThread(() -> {
+                checkingFolder = false;
+                actionMessage = refused != null ? refused : chosen;
+                if (refused == null && chosen != null)  // the game was found in a folder inside the chosen one
+                    android.widget.Toast.makeText(this, chosen, android.widget.Toast.LENGTH_LONG).show();
+                if (refused != null && !isFinishing() && !isDestroyed())
+                    new android.app.AlertDialog.Builder(this).setTitle(R.string.setup_folder_wrong)
+                        .setMessage(refused).setPositiveButton(R.string.setup_folder_again, (dialog, which) -> pick(FOLDER))
+                        .setNegativeButton(android.R.string.cancel, null).show();
+            });
+        }, "wwhd-setup-folder-check").start();
+    }
+
+    private String folderMessage(SetupFolderCheck.Result found) {
+        switch (found.kind) {
+            case SUBFOLDER: return getString(R.string.setup_folder_subfolder, found.path);
+            case INSIDE_GAME: return getString(R.string.setup_folder_inside, found.path);
+            case NOT_THIS_GAME: return found.path.isEmpty() ? getString(R.string.setup_folder_not_game_here) :
+                getString(R.string.setup_folder_not_game, found.path);
+            case SEVERAL: return getString(R.string.setup_folder_several, found.path);
+            default: return getString(R.string.setup_folder_none);
+        }
+    }
+
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putString("picker_job", pickerJob);
+        state.putBoolean("launching_game", launchingGame);
         super.onSaveInstanceState(state);
     }
 
@@ -317,10 +525,11 @@ public class SetupActivity extends Activity {
         return grants.contains(source.optString(key + "_uri"));
     }
 
-    private static final String CHECKPOINTS = "Setup keeps a private copy of your input. Leave room for that copy, extracted files, compiled output and at least 1 GiB working reserve. Selected key files are read only. Earlier private key copies are retained until setup completes.\n\nYou can close this screen while setup runs. Import resumes from verified complete files; an interrupted file copy or extraction restarts. Python and compiler resource preparation pause during unpacking and restart the incomplete stage. Checksum validation and translation respond to pause requests; an interrupted translation restarts. Compilation and linking also respond to pause requests. An interrupted command restarts; verified objects are kept. Saves stay in their current folder.\n\nThe optional PC route still uses the game folder copied over USB.";
+    private static final String CHECKPOINTS = "Setup keeps a private copy of your input. Leave room for that copy, extracted files, compiled output and at least 1 GiB working reserve. Selected key files are read only. Earlier private key copies are retained until setup completes. Choosing a different game deletes the private copy of the earlier choice; the game you can already play is kept.\n\nYou can close this screen while setup runs. Import resumes from verified complete files; an interrupted file copy or extraction restarts. Python and compiler resource preparation pause during unpacking and restart the incomplete stage. Checksum validation and translation respond to pause requests; an interrupted translation restarts. Compilation and linking also respond to pause requests. An interrupted command restarts; verified objects are kept. Saves stay in their current folder.\n\nThe optional PC route still uses the game folder copied over USB.";
 
     /** The top of the screen: one plain sentence, a detail line and the bar. */
     private void plainPhase(File job, JSONObject host, String state, boolean needsKeys, boolean canStart) throws Exception {
+        if (checkingFolder) { phase(getString(R.string.setup_folder_checking), null, -1); return; }
         if (!phoneSetup) { phase(getString(play.isEnabled() ? R.string.setup_ready : R.string.setup_pc_route), null, -2); return; }
         if (job == null) {
             phase(getString(play.isEnabled() ? R.string.setup_ready : R.string.setup_welcome), getString(R.string.setup_welcome_detail), -2);
@@ -362,15 +571,37 @@ public class SetupActivity extends Activity {
             }
             case "paused": {
                 String reason = host == null ? "" : host.optString("reason");
-                int text = reason.equals("heat") ? R.string.setup_paused_heat :
-                    reason.equals("battery") || reason.equals("battery_unknown") ? R.string.setup_paused_battery : R.string.setup_paused;
+                if (reason.equals(ModelsStep.SCREEN_REASON)) {
+                    phase(getString(R.string.setup_paused_screen), getString(WwhdActivity.gameLoaded() ?
+                        R.string.setup_models_game_open : R.string.setup_paused_screen_detail), -2);
+                    return;
+                }
+                if (reason.equals("heat")) {
+                    // A heat pause waits for the user (#277): Continue anyway at any time, Continue once cooled.
+                    boolean cooled = host.optBoolean("cooled");
+                    phase(getString(cooled ? R.string.setup_paused : R.string.setup_paused_heat),
+                        getString(cooled ? R.string.setup_paused_heat_cooled : R.string.setup_paused_heat_detail), -2);
+                    return;
+                }
+                int text = reason.equals("battery") || reason.equals("battery_unknown") ? R.string.setup_paused_battery : R.string.setup_paused;
                 phase(getString(text), getString(reason.equals("manual") || reason.isEmpty() ?
                     R.string.setup_paused_detail : R.string.setup_paused_auto_detail), -2);
                 return;
             }
             case "warming shaders": phase(getString(R.string.setup_shaders), getString(R.string.setup_shaders_detail), -1); return;
+            case ModelsStep.STATE: {
+                File record = new File(job, ModelsStep.PROGRESS);
+                JSONObject progress = record.isFile() ? SetupStore.read(record) : new JSONObject();
+                phase(getString(R.string.setup_models_running), ModelPrepareActivity.texts(this, progress)[0],
+                    ModelsStep.bar(progress.optDouble("fraction", Double.NaN)));
+                return;
+            }
             case "failed": phase(getString(R.string.setup_failed), getString(R.string.setup_failed_detail), -2); return;
-            case "complete": phase(getString(R.string.setup_ready), getString(R.string.setup_ready_detail), 1000); return;
+            case "complete": {  // with what setup left out (for example the models step), said plainly
+                String note = host == null ? "" : host.optString("error");
+                phase(getString(R.string.setup_ready), getString(R.string.setup_ready_detail) + (note.isEmpty() ? "" : "\n" + note), 1000);
+                return;
+            }
             default: phase(getString(R.string.setup_working), null, -1);
         }
     }
@@ -421,23 +652,51 @@ public class SetupActivity extends Activity {
                 common.setEnabled(needsKeys && replaceable(job));
                 resume.setEnabled(phoneSetup && job != null && (!needsKeys || (discReady && commonReady)));
                 pause.setEnabled(phoneSetup && job != null);
-                for (Button picker : pickers) picker.setEnabled(phoneSetup && replaceable(job));
+                for (Button picker : pickers) picker.setEnabled(phoneSetup && replaceable(job) && !checkingFolder);
                 File external = getExternalFilesDir(null);
                 play.setEnabled(new File(AndroidGame.storage(SetupActivity.this), "active.json").isFile() ||
                     (external != null && new File(external, "game/code/cking.rpx").isFile()));
                 String hostName = hostState == null ? (job == null ? "" : "selected") : hostState.optString("state");
                 if (!hostName.equals("warming shaders")) shaderWarmJob = null;
+                // the models step waiting for this screen: it goes on here, not while the game plays
+                boolean modelsWaiting = hostName.equals("paused") && hostState != null &&
+                    ModelsStep.SCREEN_REASON.equals(hostState.optString("reason"));
                 boolean working = hostName.equals("activating") || hostName.equals("importing") || hostName.equals("preparing") || hostName.equals("running") ||
-                    hostName.equals("warming shaders");
-                show(play, play.isEnabled() && !working);
+                    hostName.equals("warming shaders") || hostName.equals(ModelsStep.STATE);
+                show(play, play.isEnabled() && !working && !modelsWaiting);
                 show(choose, phoneSetup && !working);
+                show(folderHint, phoneSetup && !working);
                 setTextIfChanged(choose, getString(job == null ? R.string.setup_choose : R.string.setup_choose_other));
-                show(pause, phoneSetup && working);
-                show(resume, phoneSetup && job != null && !working && !hostName.equals("complete"));
+                show(pause, phoneSetup && working && !hostName.equals(ModelsStep.STATE));
+                show(cancelModels, phoneSetup && hostName.equals(ModelsStep.STATE));
+                if (!hostName.equals(ModelsStep.STATE)) cancelModels.setEnabled(true);
+                show(models, phoneSetup);
+                show(modelsDetail, phoneSetup);
+                models.setEnabled(!working);
+                if (!working && models.isChecked() != AndroidGame.modelsChosen(SetupActivity.this)) {
+                    // a Cancel turned the step off (ticking it again continues it)
+                    models.setOnCheckedChangeListener(null);
+                    models.setChecked(!models.isChecked());
+                    models.setOnCheckedChangeListener((view, checked) -> chooseModels(checked));
+                }
+                if (phoneSetup && job != null) routeModels(job, hostName);
+                show(codeMods, phoneSetup);
+                show(codeModsDetail, phoneSetup);
+                codeMods.setEnabled(!working);
+                if (!working && codeMods.isChecked() != AndroidGame.codeModsChosen(SetupActivity.this)) {
+                    // changed in the game's Settings > Mods meanwhile
+                    codeMods.setOnCheckedChangeListener(null);
+                    codeMods.setChecked(!codeMods.isChecked());
+                    codeMods.setOnCheckedChangeListener((view, checked) -> chooseCodeMods(checked));
+                }
+                // a heat pause offers Continue only once the device has cooled down (#277)
+                boolean heatHot = hostName.equals("paused") && hostState != null &&
+                    hostState.optString("reason").equals("heat") && !hostState.optBoolean("cooled");
+                show(resume, phoneSetup && job != null && !working && !hostName.equals("complete") && !heatHot && !modelsWaiting);
                 setTextIfChanged(resume, getString(hostName.equals("selected") ? R.string.setup_start : R.string.setup_continue));
                 show(updateStatus, hostState != null && SetupPresentation.showUpdate(hostState.optBoolean("updating"), hostName));
                 plainPhase(job, hostState, hostName, needsKeys, resume.isEnabled());
-                show(addIcon, play.isEnabled() && !working);
+                show(addIcon, play.isEnabled() && !working && !modelsWaiting && GameShortcut.supported(SetupActivity.this));
                 String text;
                 if (!phoneSetup) {
                     text = "This APK supports the PC build route. Android device setup needs an APK containing Python and the compiler.";
@@ -459,12 +718,16 @@ public class SetupActivity extends Activity {
                             .putExtra("result", new File(job, "shader-warm-result.json").getAbsolutePath()));
                     }
                     String reason = value.optString("state").equals("paused") ? value.optString("reason", null) : null;
+                    boolean cooled = "heat".equals(reason) && value.optBoolean("cooled");
                     if (value.has("reason")) {
                         int[] sensors = sensorReadings();
-                        text += "\n" + SetupPolicy.description(value.getString("reason"), sensors[0], sensors[1]);
+                        text += "\n" + SetupPolicy.description(value.getString("reason"), sensors[0], sensors[1],
+                            SetupPolicy.hottestCoreSensor(new File("/sys")), cooled);
                     }
-                    if ("heat".equals(reason))
-                        text += "\nIf the Android device does not feel hot, tap Continue anyway. Setup then ignores heat until this run ends; Android's critical heat level still pauses it.";
+                    if (cooled)
+                        text += "\nTap Continue to go on. Setup pauses again if the Android device gets too warm.";
+                    else if ("heat".equals(reason))
+                        text += "\nSetup waits for you. If the Android device does not feel hot, tap Continue anyway. Setup then ignores heat until this run ends; Android's critical heat level still pauses it.";
                     else if (SetupPolicy.overridable(reason))
                         text += "\nTap Continue anyway to run on battery until this run ends.";
                     continueAction = !SetupPolicy.overridable(reason) ? null :
@@ -508,6 +771,7 @@ public class SetupActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        if (status == null) return; // launcher is waiting for the crash-share decision
         refresh.run();
         new Thread(() -> {
             try {

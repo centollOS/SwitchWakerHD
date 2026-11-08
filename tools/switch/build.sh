@@ -52,7 +52,9 @@ if [[ $native == 1 ]] && ! command -v cmake >/dev/null; then
     echo "cmake is missing: install it with: pacman -Syu, then pacman -S --needed cmake make (devkitPro's MSYS2 on Windows)" >&2
     exit 1
 fi
-image=docker.io/devkitpro/devkita64:latest
+# the devkitpro/devkita64 image by digest (devkitA64 r29.2): the versions tools/toolchain/lock.json pins for the
+# players' build, so this build and theirs are the same (docs/pinned-toolchain-plan.md); WWHD_DOCKER_IMAGE for another
+image=${WWHD_DOCKER_IMAGE:-docker.io/devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282}
 # MSYS2 (devkitPro's bash on Windows) rewrites /src-like arguments of native programs such as docker.exe into
 # C:/devkitPro/msys2/src (issue #22): keep the container paths as they are and give Docker Windows host paths.
 # Only for the container: the native build needs that conversion, or the Windows gcc gets /home/... paths.
@@ -72,7 +74,7 @@ for link in build/gen; do
         mounts+=(-v "$target":"$target":ro)
     fi
 done
-dir=build/switch-dk
+dir=${WWHD_BUILD_DIR:-build/switch-dk}  # (this fork) another folder for a second build next to the usual one (PGO: docs/pgo.md)
 # deko3d's release library unless WWHD_DEKO3D_DEBUG_LIB=ON (checks every call, readable errors)
 debuglib=${WWHD_DEKO3D_DEBUG_LIB:-OFF}
 out=wwhd.nro
@@ -83,6 +85,12 @@ options="-DWWHD_RENDERER=DEKO3D -DWWHD_DEKO3D_DEBUG_LIB=$debuglib -DWWHD_SWITCH_
 # (this fork) WWHD_HEAP_CENSUS=ON: a diagnostics build that counts malloc by call site (the debug server's heap
 # command); passed every time, so the next build without it is a normal one again
 options="$options -DWWHD_HEAP_CENSUS=${WWHD_HEAP_CENSUS:-OFF}"
+# (this fork) profile-guided optimisation, docs/pgo.md: WWHD_PGO=GEN (training build) or USE (with WWHD_PGO_DIR, the .gcda
+# files); passed every time like the options above
+options="$options -DWWHD_PGO=${WWHD_PGO:-OFF}"
+[[ -n ${WWHD_PGO_SCOPE:-} ]] && options="$options -DWWHD_PGO_SCOPE=$WWHD_PGO_SCOPE"
+[[ -n ${WWHD_PGO_DIR:-} ]] && options="$options -DWWHD_PGO_DIR=$WWHD_PGO_DIR"
+[[ -n ${WWHD_PGO_USE_FLAGS:-} ]] && options="$options \"-DWWHD_PGO_USE_FLAGS=$WWHD_PGO_USE_FLAGS\""
 # The NRO's icon is made here, on the host, as make_sd.py and the forwarder scripts do: the container has no
 # Pillow, so CMake gets a finished JPEG. Icon: --icon (any path), else made from the game's files (make_icon.py:
 # the title-screen logo, or meta/iconTex.tga) of WWHD_GAME_DIR (the extracted game, make_sd.py), else of build/sd,
@@ -125,6 +133,14 @@ if [[ $native == 1 && -n ${WWHD_PYTHON:-} ]]; then
     nro_opts+=("-DPython3_EXECUTABLE=$nacp_py")
 fi
 nro_opts_q=$(printf '%q ' "${nro_opts[@]}")
+# how this build ran, for the NRO's toolchain line (cmake/SwitchToolchainInfo.cmake)
+if [[ $native == 1 ]]; then
+    export WWHD_BUILD_ENV="native"
+else
+    image_id=$("$engine" image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)
+    image_id=${image_id#sha256:}
+    export WWHD_BUILD_ENV="$(basename "$engine") ${image_id:0:12}, host $(uname -s)"
+fi
 if [[ $native == 1 ]]; then
     export DEVKITA64=${DEVKITA64:-$DEVKITPRO/devkitA64}
     export PATH="$DEVKITPRO/tools/bin:$DEVKITA64/bin:$PATH"
@@ -140,7 +156,7 @@ if [[ $native == 1 ]]; then
     mkdir -p "$dir/dksh"  # uam writes there but nothing creates it with Makefiles
     cmake --build "$dir" -j $jobs
 else
-"$engine" run --rm "${mounts[@]}" -w /src "$image" bash -c "
+"$engine" run --rm "${mounts[@]}" -e WWHD_BUILD_ENV -w /src "$image" bash -c "
     # git refuses a repository owned by another user (the container runs as root; issue fixed by #36). From /:
     # in a git worktree /src/.git points outside the mount, and git run inside /src would stop the build
     git -C / config --global --add safe.directory /src &&

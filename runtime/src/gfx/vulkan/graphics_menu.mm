@@ -40,7 +40,7 @@ static constexpr float scales[]={1,1.5f,2,3};
             action:@selector(load:) keyEquivalent:@""];
         item.target=self;item.tag=slot;
         item.enabled=slots[slot].used&&slots[slot].compatible;
-        item.toolTip=slot==1?@"In game: F1 opens the settings overlay (Saves)":[NSString stringWithFormat:@"Shortcut in game: F%d",slot];
+        item.toolTip=slot==1?@"In game: Esc or F1 opens the settings overlay (Saves)":[NSString stringWithFormat:@"Shortcut in game: F%d",slot];
     }
     [menu addItem:NSMenuItem.separatorItem];  // full save states (savestate.h): off by default, for debugging
     NSMenuItem* fs=[menu addItemWithTitle:@"Full Save States (large, contain game data, don't share)"
@@ -119,6 +119,7 @@ void install_graphics_menu(SDL_Window* window) {
     add(@"Scaling: Sharp",@selector(filter:),1);
     add(@"Scaling: Integer",@selector(filter:),2);
     [menu addItem:NSMenuItem.separatorItem];
+    add(@"40 FPS interpolation",@selector(interpolation:),40);
     add(@"60 FPS interpolation — 6",@selector(interpolation:),60);
     add(@"120 FPS interpolation",@selector(interpolation:),120);
     add(@"240 FPS interpolation",@selector(interpolation:),240);

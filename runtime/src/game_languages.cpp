@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 
+#include "fan_translation.h"  // (this fork)
 #include "runtime.h"
 
 namespace game_lang {
@@ -113,7 +114,10 @@ std::string g_redirect_to;
 
 }  // namespace
 
-const char* name(int language) { return language >= 0 && language < kLanguages ? kNames[language] : "?"; }
+const char* name(int language) {
+    if (language == fan_translation::kLanguage && fan_translation::present()) return fan_translation::kName;  // (this fork)
+    return language >= 0 && language < kLanguages ? kNames[language] : "?";
+}
 
 const char* region_code(int region) {
     return region == kJapan ? "jp" : region == kUsa ? "us" : region == kEurope ? "eu" : "";
@@ -133,6 +137,7 @@ const std::vector<int>& available() { return found().languages; }
 const std::string& region() { return found().region; }
 
 bool is_available(int language) {
+    if (language == fan_translation::kLanguage && fan_translation::present()) return true;  // (this fork)
     const auto& a = available();
     return a.empty() || std::find(a.begin(), a.end(), language) != a.end();
 }

@@ -60,10 +60,13 @@ extern "C" void site_023FD39C(Cpu* c) {
     mods::move_start_effect(c, link);
     mods::move_trail_effect(c, link);
     mods::move_swim_effect(c, link);
-    if (!half && factor == 1.f) return; // preserve the stock path and all FP bits when off
+    float moon_x = 0, moon_z = 0;
+    const bool moon = mods::moon_jump_move(link, moon_x, moon_z);
+    if (!half && factor == 1.f && !moon) return; // preserve the stock path and all FP bits when off
     const float dt = half ? true60::dt() : 1.f;
     uint32_t sp = c->r[4];  // &speed
     float vx = u32_as_f32(ld32(sp)), vy = u32_as_f32(ld32(sp + 4)), vz = u32_as_f32(ld32(sp + 8));
+    if (moon) { vx = moon_x; vz = moon_z; }
     float dv = half ? vy - (float)c->f[31].ps0 : 0.f;
     uint32_t v = scratch_vec();
     st32(v, f32_as_u32(vx * dt * factor));
@@ -200,6 +203,12 @@ extern "C" void hook_023FBCEC(Cpu* c) {
         if (true60::enabled() && true60::preview()) { ret; return; }\
         f_##addr##_orig(c);                                         \
     }
+// Event commands can replace the item heap (setSwordModel -> setItemHeap ->
+// setAnimeHeap/freeAll). A preview must not do this: restoring Link afterwards
+// restores the heap selector, while its draw leaves the new model packets listed.
+// The next full step would free those listed packets (#223). Consume event
+// commands once, on the full step, just like procedure changes below.
+T60_FENCE_LINK(023F22FC, (void)0)      // daPy_lk_c::setDemoData
 T60_FENCE_LINK(023F695C, c->r[3] = 0)  // daPy_lk_c::changeDemoProc
 T60_FENCE_LINK(023F7820, c->r[3] = 0)  // daPy_lk_c::changeDeadProc
 T60_FENCE_LINK(023F81A4, c->r[3] = 0)  // daPy_lk_c::changeAutoJumpProc

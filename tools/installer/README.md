@@ -23,7 +23,11 @@ A release folder contains `portable.txt`. Then everything stays in `<release>/da
 Guest builds use `data/guest-sdk.json`: setup's compiler argument vector, Python, translator
 and runtime headers. Version 2 stores paths inside the portable release relative to the config
 file, so moving the release folder preserves them; external/system tools remain absolute.
-The Zig global cache also stays in the selected toolchain directory. Version 1 configs remain
+The Zig global cache also stays in the selected toolchain directory. Version 3 (current) adds
+`$RELEASE/<path>` for paths inside an AppImage: its mount point (`/tmp/.mount_XXXXXX`) changes on
+every start, so the game resolves them against the running image's `$APPDIR`. A version 2 config
+written from an AppImage holds an earlier mount's absolute paths; the game maps those onto the
+running image too, and `--repair-guest-python` rewrites them as `$RELEASE/`. Versions 1 and 2 remain
 readable. Removing the downloaded compiler is optional, but guest builds then require running
 setup again to restore it. No environment secrets are persisted in this file.
 
@@ -66,6 +70,12 @@ On start, when `data/install.json` says the game is prepared for this release (s
 shows no window of its own (macOS, Linux: `exec`, so the Dock keeps "Wind Waker HD"; Windows: starts
 the game without a console window and exits). Otherwise, or with Shift held at start (macOS,
 Windows) or `--setup`, it shows the setup.
+
+Game options given to the program are passed on to the game: `--editor` (the [world
+editor](../../docs/mod-editor.md)), `--trace`, `--warm-shaders`, `--renderer NAME`, and everything after
+`--`. For example `"Wind Waker HD.exe" --editor`, `open "Wind Waker HD.app" --args --editor` or
+`./wind-waker-hd --editor`. All other options are for the setup. The terminal setup (`setup.py`) passes game
+options on in the same way when it starts the game.
 
 The setup is only a front end: it runs the release's terminal setup with `--gui-protocol` as a child
 process (so Python is found or fetched exactly as in the terminal setup; on Windows it starts
@@ -136,6 +146,11 @@ as on Android): many arm64 kernels (Raspberry Pi OS and other 4K-page configurat
 only a 39-bit (512 GiB) address space. Plain `char` is built signed there (`-fsigned-char`, also
 for the player-compiled game code), as on x86-64 and Apple arm64.
 
+The game code is compiled without debug information (`-g0`, on every platform): zig writes it by
+default, which made the Linux game about 500 MB. Function names stay in the symbol table, so crash
+reports still name them. Developers keep the debug information with `--debug-info` or
+`WWHD_SETUP_DEBUG_INFO=1` (also for the decomp version's units).
+
 Options: arguments it does not know are passed to `setup.py` (`--data-dir DIR`, `--app-dir DIR`,
 `--jobs N`). For tests: `--self-test` (start setup.py, wait for its hello, render the first screen,
 exit 0), `--automate SCRIPT.json` (scripted clicks, see the comment in `setup_gui.cpp`) and
@@ -148,7 +163,7 @@ One JSON object per line. Events on stdout all have `"event"`:
 
 | event | fields |
 |---|---|
-| `hello` | `version`, `platform`, `data_dir`, `app_dir`, `log`, `portable`, `package`, `installed` (state or null), `game_files`, `game_dir`, `save_exists`, `legacy` (an earlier installation to copy from), `free_bytes`, `language_sources` (as the `language_sources` reply), `toolchain`, `code_mods`, `decomp_offered` (the decomp version can be built: macOS development builds), `decomp` (its option), `decomp_text`, `decomp_docs` |
+| `hello` | `version`, `platform`, `data_dir`, `app_dir`, `log`, `portable`, `package`, `installed` (state or null), `game_files`, `game_dir`, `save_exists`, `legacy` (an earlier installation to copy from), `free_bytes`, `language_sources` (as the `language_sources` reply), `toolchain`, `code_mods`, `model_sweep` (the experimental step "Preparing shaders: models", off by default; the last choice), `model_sweep_text`, `decomp_offered` (the decomp version can be built: macOS development builds), `decomp` (its option), `decomp_text`, `decomp_docs` |
 | `log` | `text` (also written to `setup.log`) |
 | `plan` | `steps`: `[{id, title}]` of the installation that starts |
 | `step` | `n`, `total`, `title`, `id` (`keys`, `archive`, `folder`, `compiler`, `extract`, `copy`, `translate`, `compile`, `app`, `shaders`, `decomp`) |
@@ -162,7 +177,7 @@ Requests on stdin: `{"cmd": ..., "id": n, ...}`
 |---|---|---|
 | `probe` | `path` | `kind` (`image`/`archive`/`folder`), `disc_key` (found next to the image), `common_key` (where one was found); for a folder `in_place`, `bytes`; for an archive `title`, `folder`, `bytes`, `message` (which title is used and why); problem `wrong_title` when the archive has no usable game |
 | `check_keys` | `image`, optional `disc_key_file`, `common_key_file` or `common_key_hex` | `title_id`, `files`, `bytes`; problems `disc_key_wrong`, `common_key_wrong`, `wrong_title`, ... |
-| `install` | `source` (`image`/`archive`/`folder`/`installed`), `path`, optional `jobs`, `code_mods`, `decomp` (also build the decomp version, [docs/decomp-build.md](../../docs/decomp-build.md); remembered) | streams `plan`/`step`/`progress`/`log`, then `app`, `exe`, `data_dir`, `game_dir`, `toolchain_bytes`, `decomp_exe` (empty when not built), `decomp_error` (why it failed; the normal game is installed) |
+| `install` | `source` (`image`/`archive`/`folder`/`installed`), `path`, optional `jobs`, `code_mods`, `model_sweep` (also prepare model shaders, experimental; remembered), `decomp` (also build the decomp version, [docs/decomp-build.md](../../docs/decomp-build.md); remembered) | streams `plan`/`step`/`progress`/`log`, then `app`, `exe`, `data_dir`, `game_dir`, `toolchain_bytes`, `decomp_exe` (empty when not built), `decomp_error` (why it failed; the normal game is installed) |
 | `import_save` | `kind` (`hd`/`gc`), `path`, optional `replace` | `message`; problem `exists` when a save is installed and `replace` is not set (with `replace`, the old save is moved to `save/user.backup-<time>` first) |
 | `import_existing` | optional `path` (another release folder; none: the earlier per-user installation), `replace` | `message` (saves and settings copied, never moved; problem `exists` as above) |
 | `language_sources` | | `sources`: `[{region (EU/JP), title_id, source, packs: [{file, language, bytes, sha256}]}]` (experimental, [docs/language-packs.md](../../docs/language-packs.md)) |

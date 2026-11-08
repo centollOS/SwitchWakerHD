@@ -1,4 +1,5 @@
 #include "guest_hud.h"
+#include "../file_select_quit.h"
 #include "../mods/guest_hud.h"
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -18,6 +19,8 @@ struct CloneDelete {void operator()(ImDrawList* list)const {IM_DELETE(list);}};
 std::unique_ptr<ImDrawList,CloneDelete> scaled_gamepad;
 ImDrawData gamepad_data;
 ImU32 color(uint32_t rgba) {return IM_COL32(rgba>>24,(rgba>>16)&255,(rgba>>8)&255,rgba&255);}
+// where the TV layer goes: the game's picture (gfx::game_picture_box), which is the GamePad picture in One screen
+// mode's Off-TV Play, so drawings sit where the mod's touches land (game_picture_hit)
 float tv_x=0,tv_y=0,tv_width=0,tv_height=0;
 float gamepad_pixels=0;  // the largest GamePad presentation this frame (pixels per GamePad unit)
 bool tv_visible=true;
@@ -63,14 +66,17 @@ void draw(const std::vector<std::shared_ptr<const List>>& lists,ImDrawList* outp
 void blend_callback(const ImDrawList*,const ImDrawCmd*) {}
 bool image_texture(uint64_t id) {
     if(id==uint64_t(ImTextureID_Invalid))return false;
+    if(file_select_quit::image_texture(id))return true;
     for(const auto& [image,texture]:textures)if(uint64_t(texture->data.GetTexID())==id)return true;
     return false;
 }
-void set_tv_region(float x,float y,float width,float height,bool visible) {
+void set_regions(float tx,float ty,float tw,float th,bool tv_shown,float x,float y,float width,float height,bool visible) {
+    file_select_quit::set_tv_region(tx,ty,tw,th,tv_shown);
     tv_x=x;tv_y=y;tv_width=width;tv_height=height;tv_visible=visible;
-    if(visible&&height>0)store().note_pixels(0,height/720.f);
+    if(visible&&height>0&&active())store().note_pixels(0,height/720.f);
 }
 void backend_destroyed() {
+    file_select_quit::backend_destroyed();
     if(ImGui::GetCurrentContext())for(auto& [image,texture]:textures) {
         ImGui::GetPlatformIO().Textures.find_erase(&texture->data);
         ImGui::UnregisterUserTexture(&texture->data);
@@ -112,7 +118,7 @@ void frame() {
     // Presentation regions are physical pixels; ImGui vertices use logical points.
     float sx=io.DisplayFramebufferScale.x>0?io.DisplayFramebufferScale.x:1;
     float sy=io.DisplayFramebufferScale.y>0?io.DisplayFramebufferScale.y:1;
-    if(tv_visible)draw(tv,ImGui::GetBackgroundDrawList(),tv_width>0?tv_width/sx:io.DisplaySize.x,
+    if(tv_visible)draw(tv,ImGui::GetBackgroundDrawList(ImGui::GetMainViewport()),tv_width>0?tv_width/sx:io.DisplaySize.x,
         tv_height>0?tv_height/sy:io.DisplaySize.y,tv_x/sx,tv_y/sy);
     if(!gamepad)gamepad=std::make_unique<ImDrawList>(ImGui::GetDrawListSharedData());
     gamepad->_ResetForNewFrame();

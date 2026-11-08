@@ -7,6 +7,9 @@ else()
   set(WWHD_SWITCH OFF)
 endif()
 
+# (this fork) profile-guided optimisation: WWHD_PGO=GEN|USE (docs/pgo.md); off by default
+include(${CMAKE_SOURCE_DIR}/cmake/SwitchPgo.cmake)
+
 if(WWHD_SWITCH)
   # DEKO3D: deko3d (the Switch's own GPU API, docs/deko3d-plan.md) with the libnx host, the only renderer
   # there (the OpenGL renderer it replaced was removed after dev 207349b). Upstream's renderer choice is skipped.
@@ -69,18 +72,24 @@ macro(switch_port_sources)
   if(WWHD_SWITCH)
     # desktop crash logs (module names through dladdr); the Switch has its own handler in main.cpp
     list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "runtime/src/crash_addr\\.cpp$")
+    # (upstream sync bfd7dd6) upstream's one screen mode (mods/one_screen.cpp, from this fork's #5) hooks the same game
+    # functions as the Switch's own single-screen mode (screen_mode.cpp, its settings and the Dev tab's controller
+    # choice): the Switch keeps its own until it moves to upstream's
+    list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "runtime/src/mods/one_screen\\.cpp$")
   endif()
   if(WWHD_HAS_DEKO3D)
     # deko3d renderer and the libnx host
     file(GLOB DEKO3D_SOURCES CONFIGURE_DEPENDS runtime/src/gfx/deko/*.cpp)
-    list(APPEND GFX_SOURCES ${DEKO3D_SOURCES} runtime/src/platform/input_switch.cpp runtime/src/platform/hostui_switch.cpp
+    list(APPEND GFX_SOURCES ${DEKO3D_SOURCES} runtime/src/platform/input_switch.cpp runtime/src/platform/hostui_switch.cpp runtime/src/platform/mic_switch.cpp runtime/src/platform/one_screen_switch.cpp
                             runtime/src/platform/settings_switch.cpp runtime/src/platform/settings_ini.cpp
+                            runtime/src/platform/video_clips_switch.cpp
                             runtime/src/platform/debug_server.cpp
                             runtime/src/platform/debug_switch.cpp runtime/src/platform/posix_stubs_switch.cpp
-                            runtime/src/platform/startup_checks_switch.cpp runtime/src/platform/prepare_graphics_switch.cpp runtime/src/platform/audio_guard_switch.cpp
+                            runtime/src/platform/startup_checks_switch.cpp runtime/src/platform/prepare_graphics_switch.cpp runtime/src/platform/audio_guard_switch.cpp runtime/src/platform/thread_heap_switch.cpp runtime/src/platform/shader_wait_switch.cpp runtime/src/platform/thread_sampler_switch.cpp runtime/src/platform/saltynx_switch.cpp
                             runtime/src/platform/prepare_graphics_ui_switch.cpp runtime/src/platform/ui_text_switch.cpp runtime/src/platform/shader_scan_switch.cpp runtime/src/platform/shader_list_switch.cpp
                             runtime/src/platform/background_shaders_switch.cpp runtime/src/platform/main_switch.cpp runtime/src/platform/core_switch.cpp runtime/src/platform/audio_out_switch.cpp runtime/src/platform/overlay_switch.cpp
-                            runtime/src/platform/upstream_stubs_switch.cpp runtime/src/platform/bench_switch.cpp)
+                            runtime/src/platform/upstream_stubs_switch.cpp runtime/src/platform/bench_switch.cpp
+                            runtime/src/platform/update_notice_switch.cpp)
   endif()
 endmacro()
 
@@ -94,6 +103,26 @@ macro(switch_port_executable)
     target_compile_definitions(gamecode PRIVATE PPC_BASE_REG=1)
     target_compile_options(wwhd PRIVATE -ffixed-x28)
     target_compile_definitions(wwhd PRIVATE PPC_BASE_REG=1)
+  endif()
+  # (this fork) the runtime's extern symbols hidden: devkitPro's toolchain is -fPIC, which loads every extern symbol
+  # with default visibility through the GOT (runtime/include/switch_visibility.h); the game code gets the same
+  # from switch_code_align.h. WWHD_SWITCH_HIDDEN=OFF for a build without it.
+  option(WWHD_SWITCH_HIDDEN "Switch: hidden symbol visibility in the runtime (no GOT loads of extern symbols)" ON)
+  if(WWHD_SWITCH AND WWHD_SWITCH_HIDDEN)
+    target_compile_options(wwhd PRIVATE -fvisibility=hidden
+                           "SHELL:-include \"${CMAKE_SOURCE_DIR}/runtime/include/switch_visibility.h\"")
+  endif()
+  # the toolchain that built the NRO, for the log and crash reports (switch_toolchain.h; docs/pinned-toolchain-plan.md)
+  if(WWHD_SWITCH)
+    set(WWHD_TOOLCHAIN_INFO ${CMAKE_BINARY_DIR}/generated/switch_toolchain.cpp)
+    add_custom_target(wwhd_toolchain_info
+      COMMAND ${CMAKE_COMMAND} -DOUT=${WWHD_TOOLCHAIN_INFO} -DCC=${CMAKE_C_COMPILER} -DDEVKITPRO=${DEVKITPRO}
+              -DUAM=${NX_UAM_EXE} -DHOST=${CMAKE_HOST_SYSTEM_NAME}
+              -P ${CMAKE_SOURCE_DIR}/cmake/SwitchToolchainInfo.cmake
+      BYPRODUCTS ${WWHD_TOOLCHAIN_INFO}
+      COMMENT "Toolchain info" VERBATIM)
+    target_sources(wwhd PRIVATE ${WWHD_TOOLCHAIN_INFO})
+    add_dependencies(wwhd wwhd_toolchain_info)
   endif()
   # guest mods built into the NRO (tools/switch/guest_mods.py, docs/guest-mods-switch-plan.md): their modules are
   # compiled as game code (same flags, x28); without build/guest-mods/registry.c the NRO has none
@@ -138,9 +167,41 @@ macro(switch_port_executable)
     endif()
     # uam on the console: the game shaders that no DKSH cache has (gfx/deko/shaders_dk.cpp, its worker thread)
     target_link_libraries(wwhd PRIVATE uamlib)
+    # zstd for upstream's full-state codec (full_state_stream.h; full states stay off on the Switch, the code links):
+    # the pinned source (cmake/Zstd.cmake), devkitPro has no zstd port
+    set(WWHD_BUNDLED_ZSTD ON CACHE BOOL "" FORCE)
+    # (this fork) only lib/ and LICENSE of the release tarball: its tests/ has symlinks, which MSYS2's cmake cannot
+    # create on Windows ("Can't create 'zstd-1.5.7/tests/cli-tests/bin/unzstd'", the installer's native build)
+    if(NOT FETCHCONTENT_SOURCE_DIR_ZSTD)
+      set(_wwhd_zstd_dir ${CMAKE_BINARY_DIR}/_deps/zstd-lib-only)
+      if(NOT EXISTS ${_wwhd_zstd_dir}/zstd-1.5.7/lib/zstd.h)
+        file(DOWNLOAD https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+             ${CMAKE_BINARY_DIR}/_deps/zstd-1.5.7.tar.gz
+             EXPECTED_HASH SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3 TLS_VERIFY ON)
+        file(ARCHIVE_EXTRACT INPUT ${CMAKE_BINARY_DIR}/_deps/zstd-1.5.7.tar.gz DESTINATION ${_wwhd_zstd_dir}
+             PATTERNS zstd-1.5.7/lib zstd-1.5.7/LICENSE)
+      endif()
+      set(FETCHCONTENT_SOURCE_DIR_ZSTD ${_wwhd_zstd_dir}/zstd-1.5.7)
+    endif()
+    include(${CMAKE_SOURCE_DIR}/cmake/Zstd.cmake)
+    target_link_libraries(wwhd PRIVATE wwhd_zstd)
     # threads created without attributes get a large stack, newlib's C11 thrd_create results are fixed
     # (core.cpp), and abort() logs its caller first (main.cpp)
     target_link_options(wwhd PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=thrd_create -Wl,--wrap=abort)
+    # (this fork) the frame threads' hot functions together at the start of .text (tools/switch/hot_order.py, from
+    # thread sampler profiles); WWHD_HOT_ORDER=OFF links in the default order
+    option(WWHD_HOT_ORDER "Switch: link the profiled hot functions together (tools/switch/hot_sections.ld)" ON)
+    if(WWHD_HOT_ORDER AND EXISTS ${CMAKE_SOURCE_DIR}/tools/switch/hot_sections.ld)
+      target_link_options(wwhd PRIVATE -Wl,--section-ordering-file=${CMAKE_SOURCE_DIR}/tools/switch/hot_sections.ld)
+      set_property(TARGET wwhd APPEND PROPERTY LINK_DEPENDS ${CMAKE_SOURCE_DIR}/tools/switch/hot_sections.ld)
+    endif()
+    # (this fork) the shader compile threads' own heaps (platform/thread_heap_switch.cpp); not with the heap census,
+    # which wraps malloc itself
+    if(NOT WWHD_HEAP_CENSUS)
+      foreach(f malloc free calloc realloc memalign aligned_alloc posix_memalign _free_r _realloc_r)
+        target_link_options(wwhd PRIVATE -Wl,--wrap=${f})
+      endforeach()
+    endif()
     # (this fork, memory round 2) diagnostics only, never a release: malloc counted by call site, the debug
     # server's `heap` command (platform/heap_census_switch.cpp)
     option(WWHD_HEAP_CENSUS "Switch: count malloc by call site (debug server: heap mark / diff / top)" OFF)
@@ -202,8 +263,35 @@ macro(switch_port_executable)
       if(WWHD_DEKO3D_DEBUG_LIB OR CMAKE_BUILD_TYPE STREQUAL "Debug")
         string(APPEND _nacp_name " (deko3d debug)")
       endif()
-      message(WARNING "no Python for tools/switch/forwarder/make_nacp.py: the NRO's NACP from nx_generate_nacp (version 0.1.0)")
-      nx_generate_nacp(OUTPUT "${WWHD_NACP_FILE}" NAME "${_nacp_name}" AUTHOR "centollOS/SwitchWakerHD" VERSION "0.1.0")
+      # the display version as make_nacp.py makes it (git describe, else cmake/version.txt in a release zip,
+      # without the leading v, at most 15 bytes with the -g<hash> part dropped first), here at configure time
+      set(_nacp_version "")
+      find_package(Git QUIET)
+      if(GIT_FOUND)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" describe --tags --always --dirty WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                        OUTPUT_VARIABLE _nacp_version OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+          set(_nacp_version "")
+        endif()
+      endif()
+      if(_nacp_version STREQUAL "" AND EXISTS "${CMAKE_SOURCE_DIR}/cmake/version.txt")
+        file(STRINGS "${CMAKE_SOURCE_DIR}/cmake/version.txt" _line LIMIT_COUNT 1)
+        if(_line AND NOT _line MATCHES "Format:")
+          string(STRIP "${_line}" _nacp_version)
+        endif()
+      endif()
+      string(REGEX REPLACE "^v" "" _nacp_version "${_nacp_version}")
+      string(LENGTH "${_nacp_version}" _len)
+      if(_len GREATER 15)
+        string(REGEX REPLACE "^(.*)-g.*$" "\\1" _nacp_version "${_nacp_version}")
+        string(SUBSTRING "${_nacp_version}" 0 15 _nacp_version)
+      endif()
+      if(_nacp_version STREQUAL "")
+        set(_nacp_version "0.1.0")
+      endif()
+      message(WARNING "no Python for tools/switch/forwarder/make_nacp.py: the NRO's NACP from nx_generate_nacp "
+                      "(version ${_nacp_version}, set when CMake configures; run cmake again after a new commit)")
+      nx_generate_nacp(OUTPUT "${WWHD_NACP_FILE}" NAME "${_nacp_name}" AUTHOR "centollOS/SwitchWakerHD" VERSION "${_nacp_version}")
     endif()
 
     # The icon: a finished 256x256 JPEG that tools/switch/build.sh made on the host (-DWWHD_NRO_ICON); without it
@@ -215,4 +303,5 @@ macro(switch_port_executable)
 
     nx_create_nro(wwhd NACP "${WWHD_NACP_FILE}" ${WWHD_ICON_ARG} OUTPUT ${WWHD_NRO_OUTPUT})
   endif()
+  switch_pgo_configure()  # (this fork) cmake/SwitchPgo.cmake: after all the target's sources are known
 endmacro()

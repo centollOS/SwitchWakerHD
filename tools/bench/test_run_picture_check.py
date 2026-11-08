@@ -8,7 +8,7 @@ import run_picture_check as pictures
 
 
 class CaptureEvidenceTest(unittest.TestCase):
-    def run_fake(self, complete=True, correct_step=True, name='baseline_1', prepared=False):
+    def run_fake(self, complete=True, correct_step=True, name='baseline_1', prepared=False, fallback=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'save').mkdir(); (root / 'states').mkdir(); (root / 'out').mkdir()
@@ -16,7 +16,8 @@ class CaptureEvidenceTest(unittest.TestCase):
             (root / 'states/slot3.bin').write_bytes(b'synthetic state fixture')
             args = types.SimpleNamespace(out=root / 'out', save=root / 'save', state_dir=root / 'states',
                 game=root / 'game', scene='outset', slot=3, load_frame=450, origin_load_steps=180,
-                seconds=2, capture_load_step=200, validation=True, timeout=1)
+                seconds=2, capture_load_step=200, validation=True, timeout=1,
+                candidate_vertex_fallback=fallback)
             if prepared:
                 seed = root / 'generation'
                 (seed / 'vulkan-shaders').mkdir(parents=True)
@@ -49,6 +50,14 @@ class CaptureEvidenceTest(unittest.TestCase):
             if prepared:
                 self.assertEqual({str(p.relative_to(seed)): p.read_bytes() for p in seed.rglob('*') if p.is_file()}, original)
             return result, launched[0]
+
+    def test_vertex_fallback_only_affects_candidate(self):
+        _, baseline = self.run_fake(fallback=True)
+        self.assertNotIn('WWHD_VK_VERTEX_FALLBACK', baseline)
+        _, candidate = self.run_fake(name='candidate_1', fallback=True)
+        self.assertEqual(candidate['WWHD_VK_VERTEX_FALLBACK'], '1')
+        _, normal = self.run_fake(name='candidate_1')
+        self.assertNotIn('WWHD_VK_VERTEX_FALLBACK', normal)
 
     def test_requires_completed_endpoint_and_exact_checkpoint(self):
         with self.assertRaises(RuntimeError): self.run_fake(complete=False)

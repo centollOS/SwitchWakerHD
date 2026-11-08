@@ -248,11 +248,35 @@ HLE(coreinit, MEMGetBaseHeapHandle) {
     ret(c, arena == 0 ? g_mem1_heap : arena == 1 ? g_default_heap : arena == 8 ? g_fg_heap : 0);
 }
 
+#ifdef WWHD_WRITE_WATCH
+#include <functional>
+void wwhd_ww_block(const char* name, uint32_t lr, uint32_t dst, uint32_t n, const std::function<void()>& op);  // guest_write_watch.cpp
+#endif
+#ifdef WWHD_WRITE_WATCH
+HLE(coreinit, OSBlockMove) { wwhd_ww_block("OSBlockMove", c->lr, arg(c, 0), arg(c, 2), [&] { memmove(mem::ptr(arg(c, 0)), mem::ptr(arg(c, 1)), arg(c, 2)); }); ret(c, arg(c, 0)); }
+#else
 HLE(coreinit, OSBlockMove) { memmove(mem::ptr(arg(c, 0)), mem::ptr(arg(c, 1)), arg(c, 2)); ret(c, arg(c, 0)); }
+#endif
+#ifdef WWHD_WRITE_WATCH
+HLE(coreinit, OSBlockSet) { wwhd_ww_block("OSBlockSet", c->lr, arg(c, 0), arg(c, 2), [&] { memset(mem::ptr(arg(c, 0)), (int)arg(c, 1), arg(c, 2)); }); ret(c, arg(c, 0)); }
+#else
 HLE(coreinit, OSBlockSet) { memset(mem::ptr(arg(c, 0)), (int)arg(c, 1), arg(c, 2)); ret(c, arg(c, 0)); }
+#endif
+#ifdef WWHD_WRITE_WATCH
+HLE(coreinit, memcpy) { wwhd_ww_block("memcpy", c->lr, arg(c, 0), arg(c, 2), [&] { memcpy(mem::ptr(arg(c, 0)), mem::ptr(arg(c, 1)), arg(c, 2)); }); ret(c, arg(c, 0)); }
+#else
 HLE(coreinit, memcpy) { memcpy(mem::ptr(arg(c, 0)), mem::ptr(arg(c, 1)), arg(c, 2)); ret(c, arg(c, 0)); }
+#endif
+#ifdef WWHD_WRITE_WATCH
+HLE(coreinit, memmove) { wwhd_ww_block("memmove", c->lr, arg(c, 0), arg(c, 2), [&] { memmove(mem::ptr(arg(c, 0)), mem::ptr(arg(c, 1)), arg(c, 2)); }); ret(c, arg(c, 0)); }
+#else
 HLE(coreinit, memmove) { memmove(mem::ptr(arg(c, 0)), mem::ptr(arg(c, 1)), arg(c, 2)); ret(c, arg(c, 0)); }
+#endif
+#ifdef WWHD_WRITE_WATCH
+HLE(coreinit, memset) { wwhd_ww_block("memset", c->lr, arg(c, 0), arg(c, 2), [&] { memset(mem::ptr(arg(c, 0)), (int)arg(c, 1), arg(c, 2)); }); ret(c, arg(c, 0)); }
+#else
 HLE(coreinit, memset) { memset(mem::ptr(arg(c, 0)), (int)arg(c, 1), arg(c, 2)); ret(c, arg(c, 0)); }
+#endif
 
 // caches are coherent on the host. Flushes and stores are the game saying "the GPU will read what I
 // wrote here": a hint for the Vulkan buffer cache (write_watch.h; a no-op unless it is on).
@@ -269,6 +293,7 @@ HLE(coreinit, OSIsAddressRangeDCValid) { ret(c, 1); }
 #include <vector>
 
 #include "../savestate.h"
+#include "state_metadata_validation.h"
 void mem_ss_save(ss::Writer& w) {
     std::lock_guard<std::mutex> lk(g_mem_mutex);
     w.u32(g_default_heap);
@@ -300,7 +325,14 @@ void mem_ss_save(ss::Writer& w) {
     }
 }
 
+bool mem_ss_validate(ss::Reader r, std::string& why) {
+    static_assert(sizeof(FrmHeap)==4*sizeof(uint32_t),"update full-state heap preflight for a new frame-heap schema");
+    if (!ss::metadata::heaps(r)) { why = "corrupt mem section"; return false; }
+    return true;
+}
+
 bool mem_ss_check(ss::Reader r, std::string& why) {
+    if (!mem_ss_validate(r,why)) return false;
     std::lock_guard<std::mutex> lk(g_mem_mutex);
     uint32_t d = r.u32(), m1 = r.u32(), fg = r.u32();
     if (d != g_default_heap || m1 != g_mem1_heap || fg != g_fg_heap) { why = "the base heaps differ (different game build?)"; return false; }

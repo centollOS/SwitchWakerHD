@@ -1,8 +1,10 @@
-// uam_api.h on top of uam's DekoCompiler (one thread only, see the header)
+// uam_api.h on top of uam's DekoCompiler (threads: see the header)
 #include "uam_api.h"
 
 #include "compiler_iface.h"
 #include "uam_log.h"
+
+extern bool uam_dual_issue;  // mesa-imported/codegen/nv50_ir_emit_gm107.cpp
 
 namespace uam {
 namespace {
@@ -32,6 +34,8 @@ void init(bool resident_frontend) {
     g_resident = resident_frontend;
     DekoCompiler::SetFrontendResident(resident_frontend);
 }
+
+void set_dual_issue(bool on) { uam_dual_issue = on; }
 
 void shutdown() {
     if (g_resident) glsl_frontend_exit();

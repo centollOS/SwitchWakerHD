@@ -22,7 +22,9 @@ repository; their instructions are in the upstream README, kept as
   versions at startup.
 - **This repository contains no game code, assets, keys or data.** The NRO you build contains the
   game's code recompiled from your dump, and the shader caches are made from the game's shaders:
-  they are for your own use only; do not share them.
+  they are for your own use only; do not share them. Releases attach `shader-template.sealed`, the game's
+  shader *states* without any game code, encrypted with a key made from the game's own files (so it opens only with
+  a copy of the game); setup compiles the shader cache from it on your computer (issue #88, below).
 - **No release binaries are provided** for the Switch, precisely because they carry the
   recompiled game.
 
@@ -61,14 +63,26 @@ console, in a background thread; until then its draws are skipped, so on a first
 stay black for a while) and keeps the result in `shadercache_dksh_local.bin`, so a shader is compiled
 once per console. A `shadercache_dksh.bin` next to the NRO is loaded whole at start-up.
 
-**The first start** (docs/background-shaders-plan.md) prepares about three quarters of the game's shaders behind a
+**The first start** asks (#49): A, **Prepare graphics** (below) once a Quest Log is loaded, or B, the background list
+(docs/background-shaders-plan.md), which prepares about three quarters of the game's shaders behind a
 loading screen, with no computer and nothing shipped: the title screen runs hidden and records its GPU states into
 `shader_manifest.bin`, the console reads its own game files' shader programs (`platform/shader_scan_switch.cpp`,
 upstream shaderprep's extractor in C++), speculates variants by family (`shader_list_switch.cpp`) and translates
 them the way a draw would (`gfx/deko translate_listed`); the worker compiles them at full speed behind the card
 (about 19 minutes on a stock console: 73.6% of a whole-game harvest's shader pairs), or gently in the background
-after B (core 0 only, a 50% duty cycle: the game keeps ~30 fps). **Prepare graphics** (settings menu, Switch tab;
-docs/prepare-graphics-plan.md) warps through every place for the rest; experimental.
+after B (core 0 only, a 50% duty cycle: the game keeps ~30 fps). **Prepare graphics** (settings menu, Picture tab, at the top;
+docs/prepare-graphics-plan.md) warps through every place (about 93% of the pairs); experimental. After it, the
+background list runs gently at the next starts for what the warps did not draw.
+
+**Prepared at setup (issue #88).** Each release attaches `shader-template.sealed`: one recorded state per distinct
+shader of a whole-game recording on a test console (program hashes, register values, vertex fetch attributes as
+typed fields; upstream's code-free WWHT0003 format, checked by `tools/release/guard.py` and for game bytes), sealed with
+a key made from the dump's own shader archives. The installers (and `make_sd.py --shaders shader-template.sealed`)
+open it with the player's dump and build `shadercache_dksh.bin` on the computer (about 23,000 shaders, a few
+minutes); the console then has no first-start screen and compiles almost nothing. It lives in the private repository
+`centollOS/SwitchWakerHD-shader-manifest`, pinned by `tools/switch/shader_template.ref`; maintainers update it from
+the test console with `tools/switch/update_shader_template.sh` and attach it with `attach_shader_template.sh`.
+Plan, measurements and safeguards: [docs/shader-manifest-release-plan.md](docs/shader-manifest-release-plan.md).
 
 For developers, the console also writes `shader_manifest.bin` as it plays: for each shader variant, the program's hash and
 size, the GPU registers and the vertex fetch layout it was translated with (identifiers, no game code).
@@ -77,7 +91,8 @@ programs come from the player's own dump (every shader archive, with upstream's 
 extractor), `tools/switch/dksh_cache translate` runs the same Latte decompiler as the runtime (the result
 is byte-identical to the console's), and speculative variants (programs of the same family with the
 recorded states) cover places not visited yet. Details and measurements:
-[docs/shader-cache-from-dump-plan.md](docs/shader-cache-from-dump-plan.md). Neither file is ever shipped.
+[docs/shader-cache-from-dump-plan.md](docs/shader-cache-from-dump-plan.md). A console's manifest and the shader caches
+are never shipped; only the distilled, sealed template above is.
 
 ```sh
 tools/switch/dksh_cache/build.sh build <shadercache_gl.bin> build/shadercache_dksh.bin   # a GLSL list, as before
@@ -88,8 +103,8 @@ tools/switch/dksh_cache/build.sh build <shadercache_gl.bin> build/shadercache_dk
 For development there is a debug server: from the computer, over the local network, you can
 deploy a new build and restart the game without touching the console, follow the log as it is
 written, take screenshots, press buttons and warp. It is **off by default**: players never need it
-and the game opens no network port unless it is turned on in the options menu (**Switch** tab,
-**Debug** section, *Debug server (network)*; it starts at the next start). It has no password, so use
+and the game opens no network port unless it is turned on in the options menu (**Dev** tab, *Show developer options*, then
+**Dev** tab, *Debug server (network)*; it starts at the next start). It has no password, so use
 it only on your own network.
 
 ```sh
@@ -148,7 +163,7 @@ and copy the files.
 - Save states: `sdmc:/switch/wwhd/states/`.
 - Settings from the options menu: `settings.ini`. An `env.txt` from an earlier build is converted into
   it at the first start and renamed `env.txt.old`.
-- To update, replace `wwhd.nro` (and `shadercache_dksh.bin` if you rebuilt it). Saves, settings and
+- To update, replace `wwhd.nro` (and `shadercache_dksh.bin`, made again with the new release's template). Saves, settings and
   caches stay.
 - Logs, if something goes wrong: `logs/`, one `wwhd_<date>_<time>.log` per session (the newest is this
   run); the 10 most recent are kept.
@@ -164,9 +179,11 @@ and comes back at the next start.
 | Tab | What you'll find there |
 |---|---|
 | **Saves** | Five save-state slots: save where you stand, come back to that spot in seconds |
-| **Switch** | Resolution, picture, performance, frame-rate counter, rumble and gyro aiming |
-| **Warp** | Travel straight to any island, dungeon or room |
+| **Picture** | Resolution, colours, frame-rate counter, 60 fps modes, Prepare graphics |
+| **Controls** | Rumble and gyro aiming |
 | **Mods** | Built-in gameplay and camera mods, and cheats |
+| **Warp** | Travel straight to any island, dungeon or room |
+| **Dev** | Update check; developer options behind *Show developer options* |
 | **Language / About** | The game's language, version information |
 
 ### Controls and gyro aiming
@@ -205,9 +222,10 @@ and comes back at the next start.
 
 ### Performance
 
-The game is **perfectly playable at the console's stock clocks**, which are the default (CPU
-1020 MHz, GPU 307 MHz in handheld): 30 fps on the opening island, a smooth 26-29 fps in the busiest
-scenes. Nintendo's other handheld GPU profiles are in the Switch tab. The game no longer sets a CPU
+The game runs the console's stock CPU clock (1020 MHz) and, in handheld, **Nintendo's 384 MHz GPU
+profile**, one of the profiles Nintendo offers its own games: in Outset's tall grass it is ~5 fps faster
+than the stock 307 MHz (21.9 -> 26.7 fps), while 460 MHz adds only ~0.5 fps more there. It is not a menu
+choice (a GPU profile saved by an older version is reset to 384). The game no longer sets a CPU
 or GPU overclock itself (the CPU steps and GPU 614 MHz were removed: with the CPU raised that way the
 console did not wake from sleep, #33). If you want the busiest scenes at a steady 30, a mild CPU
 clock of 1224 MHz does it: set it with [sys-clk](https://github.com/retronx-team/sys-clk), which
@@ -252,17 +270,25 @@ The game speaks the console language you choose, from the languages your copy of
 Boots and plays on a Switch in handheld mode, with sound, controllers, saves, **working save
 states**, the options menu and mods. Played by hand mostly on the opening island, Dragon Roost and the sea
 around it, and areas reached with the Warp tab. **It is perfectly playable at the console's stock
-clocks** (CPU 1020 MHz, GPU 307 MHz): 30 fps on the opening island, and a smooth 26-29 fps in the
-busiest scenes, such as sailing near Dragon Roost and the volcano island. A CPU at about 1.2 GHz
-(1224 MHz, set with sys-clk) holds a steady 30 there. The game runs the CPU and GPU at their stock
-clocks and sets no overclock itself.
+clocks** (CPU 1020 MHz) with Nintendo's 384 MHz handheld GPU profile (the default): 30 fps on the
+opening island, and a smooth 26-29 fps in the busiest scenes, such as sailing near Dragon Roost and the
+volcano island. A CPU at about 1.2 GHz (1224 MHz, set with sys-clk) holds a steady 30 there. The game
+sets no overclock itself.
 Shader and texture stutters on first use are much reduced, and shaders seen in an earlier session
-no longer stutter. Docked it renders at 1080p (picture profile per mode in the Switch tab: handheld
+no longer stutter. Docked it renders at 1080p (picture profile per mode in the Picture tab: handheld
 1x, docked 1.5x, with dynamic resolution), tested on a TV at a median of 29.9 fps. Known issues and
 open work: [docs/switch-port.md](docs/switch-port.md) (latest: "Round 47") and
 [docs/deko3d-plan.md](docs/deko3d-plan.md).
 
 ## Changelog
+
+### 2026-10-23: GPU 384 MHz in handheld
+
+- The handheld GPU profile is now always **Nintendo's 384 MHz** (was the stock 307 MHz). In Outset's tall
+  grass the GPU was the limit: 21.9 -> 26.7 fps (4 boots each). 460 MHz gives only ~0.5 fps more there, because the
+  game's main thread is then the limit. The menu no longer offers GPU profiles: one saved by an earlier version is
+  reset to 384 at start. For other clocks, use sys-clk.
+- For developers: `tools/switch/perf_test.py gpu-profile` compares GPU profiles between boots (docs/perf-test.md).
 
 ### 2026-10-10: native experience (GamePad mode)
 
@@ -382,6 +408,22 @@ Switch.
 - **[nx-hbloader](https://github.com/switchbrew/nx-hbloader)**,
   **[hacBrewPack](https://github.com/TooTallNate/hacBrewPack)** and
   **[hactool](https://github.com/SciresM/hactool)**: the HOME-menu forwarder.
+- **[SaltyNX](https://github.com/masagrator/SaltyNX)** and
+  **[Status Monitor Overlay](https://github.com/masagrator/Status-Monitor-Overlay)** (masagrator):
+  the shared-memory block this port fills so the overlay shows its frame rate and resolutions.
+
+Ideas and findings from other Switch ports (no code taken; each written up in the docs named):
+
+- **[NFSMW-NX](https://github.com/StevensND/nfsmw-nx)** (Stevens): a sampling profiler turned on
+  by a file on the SD card that records what the threads did in the slow frames
+  ([docs/hitch-profiler-plan.md](docs/hitch-profiler-plan.md)), and writing SaltyNX's block from a
+  homebrew program ([docs/saltynx-plan.md](docs/saltynx-plan.md)).
+- **[renut-nx](https://github.com/ChanseyIsTheBest/renut-nx)** (ChanseyIsTheBest): core 3 through
+  the forwarder's NPDM ([docs/core3-plan.md](docs/core3-plan.md)), and the cost of calling
+  `mallinfo` on a fragmented heap. Its sister ports
+  **[bejeweled3-nx](https://github.com/ChanseyIsTheBest/bejeweled3-nx)** and
+  **[sa2-nx](https://github.com/ChanseyIsTheBest/sa2-nx)**: inlining the hottest leaf functions
+  (#63) and the profiling ideas in #64-#69.
 
 If you enjoy this port, the projects above are where the credit belongs. Every component and its
 license: [THIRD_PARTY.md](THIRD_PARTY.md).
@@ -415,8 +457,8 @@ Be aware of this before you use or build on this repository:
 ## Code signing policy
 
 Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
-[SignPath Foundation](https://signpath.org), for the Windows installer (applied for in October 2026; unsigned
-until accepted). Team roles, what is signed and the privacy policy:
+[SignPath Foundation](https://signpath.org), for the Windows installer (accepted in October 2026; unsigned
+until the first release signed with the production certificate). Team roles, what is signed and the privacy policy:
 [INSTALL.md, Code signing policy](INSTALL.md#code-signing-policy).
 
 ## Disclaimer

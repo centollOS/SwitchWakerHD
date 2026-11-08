@@ -23,6 +23,8 @@ Rules:
 | A3v | The SD card copy check (a card reader, each installer that ran in A3) | The log says "Copy checked: all N files on the card match"; a file changed on the card is copied again (#48) |
 | A3g | `make_sd.py` step 2 with the USA and EUR dumps | `content/: every file as in the USA/EU list: OK` (#48) |
 | A4 | The tag is new | Never re-publish or move a tag: bump the version (the installer caches zips by tag) |
+| A5 | Shader template (#88): `tools/switch/update_shader_template.sh GAME_DIR` after the test console's last play, and `tools/switch/shader_template.ref` at the private repository's newest template (`attach_shader_template.sh pin`) | "nothing new", or a new template pushed and pinned in the release commit |
+| A6 | Prepared graphics: an installer run with the release's template (seed it as `shader-template-vX.Y.Z.sealed` in the work folder before publishing), then the console with that SD card | The log says "Plantilla de gráficos lista" and "Preparando los gráficos", no "No se pudieron preparar"; `switch/wwhd/shadercache_dksh.bin` on the card; the first start has no first-start screen |
 
 ## B. Boot, screens and system
 
@@ -73,7 +75,8 @@ Use the save states in `sdmc:/switch/wwhd/states/` (`docs/portable-save-states.m
 
 ## F. Memory (every release)
 
-The tour (memory round 2, `docs/memory-round2-plan.md`): 40 warps (every third of `warps`; all 136 hit the game's
+The tour (memory round 2, `docs/memory-round2-plan.md`; `tools/switch/memory_tour.py --out
+perf/results/<release>-memory.txt`, kept in the repo with the release's record, docs/perf-results.md): 40 warps (every third of `warps`; all 136 hit the game's
 own assert at M_DaiB, #18), 25 s each, **two laps (~35 min)**, the `[mem]` lines kept. One lap visits every place
 once, so the second lap only revisits: what still grows then is a leak. (The deko3d leak of round 2 showed as
 +21 MiB in a 14-minute tour; the image heap reaches its 4 chunks in ~3 minutes.)
@@ -90,18 +93,61 @@ free memory (texture/shader eviction, the image heap, deko3d patches): then the 
 
 ## G. Performance (renderer, CPU-side or recompiler changes)
 
-The perf test (kept out of the repo: `perf/benchmark` branch, `~/Documents/SwitchWakerHD-perf-test`):
-`perf_test.py ab` of the release against the last release's NRO, at least 4 interleaved boots
-(`--order ABCCBA --repeat 2`).
+The perf test (docs/perf-test.md): the release's NRO against the last release, rebuilt by the test, 4 interleaved
+boots each, with the last release's record as a sanity check:
+
+```sh
+tools/switch/perf_test.py compare-to <last release> --nro <the release's wwhd.nro> --label <release> \
+    --scenes lava,windfall,dragonroost,outset_grass_us,outset_lookout_us \
+    --expect perf/results/<last release>-vs-<the one before>.json
+```
+
+Run it charging, near the router (a Wi-Fi drop on battery stopped a v1.0.0 run), with the player's settings. Then
+copy the result's `.json` and `.csv` from `build/perf/` to `perf/results/<release>-vs-<last release>.*` (no local
+paths or console address in `meta`) and add the release's section to docs/perf-results.md, F included, in the
+release's commit or just after the tag.
 
 | # | Check | Expected |
 |---|---|---|
-| G1 | lava (`M_NewD2 2`), windfall, dragonroost | No scene slower by more than 0.3 fps |
+| G1 | lava (`M_NewD2 2`), windfall, dragonroost, the two Outset spots | No scene slower by more than 0.3 fps (the verdict) |
 | G2 | Frame pacing in those scenes | No new hitches; frametime even (#23) |
+| G3 | `--expect`: the last release's record | No scene "BELOW the record"; if one is, read `meta.boots` (mode, charge, clocks, settings) before blaming the build |
 
 ## H. Publish
 
 1. Tag, package (`package_release.sh vX.Y.Z`), publish with the `.zip` and `.sha256`.
+   Then `tools/switch/attach_shader_template.sh vX.Y.Z GAME_DIR`: the pinned shader template and its `.sha256` as
+   release assets (#88; the installers download them).
+   Then the PGO profile of each region the console can train (#90, docs/pgo-release-plan.md), from the tagged commit,
+   charging, stock clocks or not (training never judges speed):
+   ```sh
+   # the players' generated code (#130: never a plain recomp.py, which keeps hooks the players' build leaves out)
+   python3 -I tools/switch/players_gen.py GAME_DIR/code/cking.rpx build/gen
+   # the players' compiler (the pinned toolchain); the build folder must be a folder of build/
+   WWHD_BUILD_DIR=build/switch-pgo-gen WWHD_PGO=GEN python3.14 tools/switch/build_switch.py
+   tools/switch/pgo_train.py clean && tools/switch/pgo_train.py train --plan all --nro build/switch-pgo-gen/wwhd.nro --out build/pgo
+   tools/switch/pgo_pack.py pack --region USA   # (EU: below)
+   gh release upload vX.Y.Z build/pgo-profile-USA.zip build/pgo-profile-USA.zip.sha256
+   ```
+   EU: put the USA `build/gen` aside, recompile the EU `cking.rpx` into `build/gen` with `players_gen.py` as above (the
+   same folder name: the profile's names come from it), `WWHD_BUILD_DIR=build/switch-pgo-gen-eu` for the training build, and on the console the EU
+   game through settings.ini's `[dev]` (`WWHD_GAME_DIR=game-eu`, `WWHD_STATE_DIR=sdmc:/switch/wwhd/states-eu`). The
+   trainer needs a Quest Log in slot 1: the console's `save-eu` has none, so copy the USA `save/user/` files into a
+   new folder (`save-pgo-eu`, the EU game loads them) and set `WWHD_SAVE_DIR=save-pgo-eu`; never write into `save` or
+   `save-eu`. Afterwards: settings.ini back from its copy (compare it), `save-pgo-eu` removed, the USA `build/gen` back.
+   `pgo_pack.py pack --region EU --gcda build/pgo-eu --build-dir build/switch-pgo-gen-eu`. If the console's Wi-Fi
+   drops during training, the game keeps running: dump the scene by hand (`pgo reset`, 30 s, `pgo dump`), then
+   `pgo_train.py fetch`.
+   `pgo_pack.py pack` refuses a training build whose generated code is not the players' (the GEN build's configure
+   already warns).
+   Check: an installer run says "PGO profile of vX.Y.Z for the USA game", and the NRO's boot log
+   `[boot] pgo: profile USA <commit>`. A region without a profile gets a normal build.
+   Check, each region: the packed profile's `hot_sha256` (`unzip -p build/pgo-profile-EU.zip manifest.json`) is the
+   fingerprint of a `make_sd.py` build of that region (`players_gen.py --fingerprint build/gen` after it), and that
+   build does not print "the generated code differs from the profile's" (#130). v1.2.2: USA `7922171a…`, EU `36c5ab2f…`.
+   Check on Windows (the pinned Windows toolchain, the test PC) with the profile trained from the Mac's build: an
+   installer run builds with it, and the profiled files recompiled with `-Wcoverage-mismatch` give no mismatch
+   (`docs/pgo-release-plan.md`, the step 5 check; never measured across host systems before #90).
 2. Close every issue of the milestone with a link to the release, remove `fixed on main`, close the milestone and
    create the next one.
 
@@ -109,9 +155,10 @@ The perf test (kept out of the repo: `perf/benchmark` branch, `~/Documents/Switc
 
 ```
 Release vX.Y.Z  commit ...  tested YYYY-MM-DD  console: Erista/Mariko, firmware, Atmosphère
-A1 ok  A2 ok  A3 ok/skipped (why)  A4 ok
+A1 ok  A2 ok  A3 ok/skipped (why)  A4 ok  A5 ok  A6 ok
 B1 ok  B2 ok  B3 ok  B4 ok  B5 ok
 C1 ok  C2 ok  C3 ok  C4 ok  C5 ok  C6 ok
 D1 ..  E1 ..  F: malloc lap 1 N MiB, lap 2 +N MiB, chunks N  G: lava ±N, windfall ±N, dragonroost ±N fps
+F + G files: perf/results/vX.Y.Z-*, docs/perf-results.md
 Known open, not blocking: #..
 ```

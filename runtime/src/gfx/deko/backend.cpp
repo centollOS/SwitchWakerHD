@@ -2,7 +2,6 @@
 // Every GX2 swap presents the game's TV picture (present_source, dk_surfaces.h) with the picture adjustments,
 // the FPS counter and the settings overlay (hold Minus); black until the game has copied a picture to the TV
 // scan buffer. Also here: submits, the statistics, hitch log and trace.
-#include <malloc.h>
 #include <unistd.h>
 extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into (sbrk)
 #include "platform/bench_switch.h"  // (this fork) the performance test
@@ -17,6 +16,8 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "dk_sync.h"
 #include "frame_pacing.h"  // (this fork, #23) vblank statistics and pacing modes
 #include "../../platform/background_shaders_switch.h"  // (this fork) the counter's shader line
+#include "../../platform/thread_sampler.h"  // (this fork) the sampler's hitch mode
+#include "../../platform/saltynx_switch.h"  // (this fork) the overlays' frame rate
 
 #include <algorithm>
 #include <atomic>
@@ -499,13 +500,24 @@ gfxsw::PictureGrade picture_grade() {
 // the picture adjustments and, for an sRGB TV format, sRGB encoding (as gfx/gl present)
 struct PresentUbo {  // present_fsh.glsl, std140
     float grade[4];
-    int32_t encode[4];  // x: encode as sRGB (sRGB TV format); y: the image is sRGB (sampling decoded it)
+    int32_t encode[4];  // x: encode as sRGB (sRGB TV format); y: the image is sRGB (sampling decoded it); z: FSR 1 (1 EASU, 2 RCAS)
 };
 // where the picture went in the window (GamePad touch, gfxsw::gamepad_touch): x, y, w, h; w 0 while the
 // GamePad picture is not the one shown
 std::atomic<int> g_padRect[4] = {0, 0, 0, 0};
 std::atomic<bool> g_gamepadView{true};  // the GamePad picture (the controller acts as the GamePad by default)
+std::atomic<bool> g_fsr{false};  // FSR 1's EASU for a picture smaller than the window (gfxsw::fsr)
 std::atomic<bool> g_gamepadPip{false};  // the GamePad picture in a corner of the TV's (gfxsw::gamepad_pip)
+// FSR's taps expect values in 0..1 and the exposure after them (present_fsh.glsl): UNORM and sRGB pictures only.
+// (FormatInfo::FLOAT is the type the shader sees: UNORM, SNORM and float formats alike)
+bool unorm_picture(const Surface& s) {
+    if (s.fmt.kind != FormatInfo::FLOAT || (s.format & 0x200)) return false;  // integer, or SNORM (GX2 flag 0x200)
+    switch (s.fmt.image) {
+    case DkImageFormat_R16_Float: case DkImageFormat_R32_Float: case DkImageFormat_RG16_Float: case DkImageFormat_RG32_Float:
+    case DkImageFormat_RG11B10_Float: case DkImageFormat_RGBA16_Float: case DkImageFormat_RGBA32_Float: return false;
+    default: return true;
+    }
+}
 // `corner`: the picture in the window's bottom right corner, a third of its width (the GamePad picture-in-picture)
 bool draw_picture(const PresentSource& src, bool capture, bool corner = false) {
     if (!g_presentOk || !src.surface || !src.width || !src.height) return false;
@@ -528,7 +540,21 @@ bool draw_picture(const PresentSource& src, bool capture, bool corner = false) {
     if (!u) return false;
     const gfxsw::PictureGrade g = picture_grade();
     const bool encode = R.tvSrgb.load(std::memory_order_relaxed);
-    PresentUbo p{{g.exposure, g.contrast, g.saturation, g.gamma}, {encode ? 1 : 0, src.srgb ? 1 : 0, 0, 0}};
+    // a picture of the window's size is copied pixel for pixel; others are filtered (or, with FSR, upscaled by EASU
+    // when the picture is smaller than its place in the window)
+    const bool exact = src.pw == uint32_t(w) && src.ph == uint32_t(h);
+    const bool unorm = unorm_picture(*src.surface);
+    const int fsr = g_fsr.load(std::memory_order_relaxed) && unorm
+                        ? (src.pw < uint32_t(w) && src.ph < uint32_t(h) ? 1 : exact ? 2 : 0)  // EASU, or RCAS alone at the window's size
+                        : 0;
+    static int fsrLogged = -1;
+    if (!corner && fsr != fsrLogged) {
+        fsrLogged = fsr;
+        LOG("[dk] present: FSR 1 %s (%s picture %ux%u%s in %dx%d)",
+            fsr == 1 ? "EASU upscale" : fsr == 2 ? "RCAS sharpening" : "not applied", pad ? "GamePad" : "TV", src.pw, src.ph,
+            unorm ? "" : ", not UNORM", w, h);
+    }
+    PresentUbo p{{g.exposure, g.contrast, g.saturation, g.gamma}, {encode ? 1 : 0, src.srgb ? 1 : 0, fsr, 0}};
     memcpy(u.cpu, &p, sizeof p);
     static int encoded = -1;
     if (!pad && int(encode) * 2 + int(src.srgb) != encoded) {
@@ -536,8 +562,6 @@ bool draw_picture(const PresentSource& src, bool capture, bool corner = false) {
         LOG("[dk] presenting the game's picture (%ux%u, GX2 format %03X%s) with %s", src.width, src.height,
             src.surface->format, src.srgb ? ", sRGB" : "", encode ? "sRGB encoding (sRGB TV format)" : "no encoding");
     }
-    // a picture of the window's size is copied pixel for pixel; others are filtered
-    const bool exact = src.pw == uint32_t(w) && src.ph == uint32_t(h);
     const bool integer = src.surface->fmt.kind != FormatInfo::FLOAT;
     const DkResHandle tex =
         dkMakeTextureHandle(src.imageId, exact || integer ? kPresentNearestSamplerId : kPresentLinearSamplerId);
@@ -1053,13 +1077,16 @@ void frame_stats() {
             (unsigned long long)p.poolHits, rescale_pool_bytes() >> 20, 100.0 * perFrame(p.hudSwitches),
             fxaa_enabled() ? "on" : "off", 100.0 * perFrame(p.fxaaPasses));
         {  // (this fork, #37) what grows over a long session: malloc in use against its arena, and the containers
-            const struct mallinfo mi = mallinfo();
+            // (this fork) no mallinfo here: it walks every free chunk with malloc's lock held, stalling every
+            // allocating thread, and the heap fragments as the game plays (console, 10 min warp tour: 2,300 ->
+            // 41,000 free chunks, 0.3 -> 8.9 ms a call, on the render thread every 5 s). The debug server's
+            // "malloc" asks for it (memory_tour.py); the line keeps the heap's top (O(1))
             const ShaderMemory sm = shader_memory();
             const ImageHeapFigures ih = image_heap_figures();
-            LOG("[mem] malloc %zu MiB in use of %zu MiB taken (heap never used %zu MiB); shader variants %zu (%zu freed), GLSL %zu, "
+            LOG("[mem] heap never used %zu MiB; shader variants %zu (%zu freed), GLSL %zu, "
                 "programs %zu, translation records %zu (%zu KiB); surfaces %zu (with evicted ones); image heap %llu "
                 "chunks, %llu MiB, %.1f MiB free, largest free %.1f MiB",
-                size_t(mi.uordblks) >> 20, size_t(mi.arena) >> 20, heap_never_used_mib(), sm.variants, sm.evicted, sm.codes,
+                heap_never_used_mib(), sm.variants, sm.evicted, sm.codes,
                 sm.programs, sm.storedRecords, sm.storedBytes >> 10, surface_structs(), (unsigned long long)ih.chunks,
                 (unsigned long long)(ih.total >> 20), double(ih.free) / 1048576.0, double(ih.largestFree) / 1048576.0);
             image_trace_flush();
@@ -1236,6 +1263,21 @@ void present() {
             frame_pacing::set_interval(want);
         }
     }
+    // (this fork, #49) a frame drawn while draws wait, with shaders still compiling: they are compiled now (all at
+    // once), the frame's passes are submitted (render targets the next frame reads), and it is not shown: the window
+    // keeps the last whole picture, and the next frame draws with every shader
+    if (finish_held_frame()) {
+        S.scanSrc = nullptr;
+        if (S.tvSource) S.tvSource->hudFull = false;
+        gpuPasses.frame_end();
+        frame_pacing::on_present(R.cmd, frame);
+        frame_end();
+        check_queue("the submit (frame held)", frame);
+        dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(R.cmd));
+        frame_stats();
+        latch_res_scale();
+        return;
+    }
     const uint64_t t1 = now_ns();
     int slot;
     {
@@ -1317,6 +1359,8 @@ void present() {
         check_queue("the present", frame);
         dkQueuePresentImage(R.queue, g_swapchain, slot);
     }
+    // (this fork) the frame rate for the console's overlays (SaltyNX's block; the game's picture is 720p x the scale)
+    saltynx::frame(uint32_t(1280.0f * res_scale() + 0.5f), uint32_t(720.0f * res_scale() + 0.5f), g_winW, g_winH);
     const uint64_t t4 = now_ns();
     if (capture) LOG("[dk] capture frame %llu: recorded in %.2f ms, submitted and presented in %.2f ms", (unsigned long long)frame,
                      double(t3 - t2) / 1e6, double(t4 - t3) / 1e6);
@@ -1351,6 +1395,8 @@ void check_hitch(uint64_t now) {
     static uint64_t lastSwap = 0, lastDraws = 0, lastSkipped = 0, lastRenderWait = 0;
     static int logged = 0;
     const uint64_t renderWait = gx2::render_thread_wait_ns();
+    // (this fork) hitch mode of the sampler: a slow frame's samples to logs/hitch_*.samples (now_ns: ticks * 625 / 12)
+    if (lastSwap) thread_sampler::mark_frame(lastSwap * 12 / 625, now * 12 / 625, R.frame);
     if (lastSwap && now - lastSwap > 55'000'000ull) {
         g_hitches++;
         if (logged < 300) {
@@ -1380,6 +1426,7 @@ void check_hitch(uint64_t now) {
 void swap() {
     const uint64_t start = now_ns();
     check_hitch(start);
+    if (R.frame == 120) thread_sampler::start_flagged();  // (this fork) logs/hitch_profile.flag: the hitch mode
     present();
     R.perf.presentNs += now_ns() - start;
     g_times.presentNs += now_ns() - start;
@@ -1482,10 +1529,11 @@ void init() {
         "negate y)", dm.flags);
     DkQueueMaker qm;
     dkQueueMakerDefaults(&qm, R.device);
-    // zcull: off by default (dk.h, R.zcull); WWHD_DK_ZCULL=1 gives the queue zcull again (the behaviour before)
+    // zcull: on by default, with the invalidate before depth-biased draws (draw.cpp, WWHD_DK_ZCULL_BIAS_FIX);
+    // WWHD_DK_ZCULL=0 gives the queue DisableZcull (the behaviour of 2026-10-07 to 10-22; dk.h, R.zcull)
     R.zcull = [] {
         const char* e = getenv("WWHD_DK_ZCULL");
-        return e && *e && *e != '0';
+        return !(e && *e && *e == '0');
     }();
     qm.flags = DkQueueFlags_Graphics | DkQueueFlags_MediumPrio |
                (R.zcull ? DkQueueFlags_EnableZcull : DkQueueFlags_DisableZcull);
@@ -1495,8 +1543,9 @@ void init() {
     log_flush();
     R.queue = dkQueueCreate(&qm);
     LOG("[dk] queue created: graphics, command memory %u KiB", qm.commandMemorySize >> 10);
-    LOG("[dk] zcull: %s (WWHD_DK_ZCULL=1 turns it on: with it, depth-biased ground decals such as Outset's grass "
-        "lose whole 4x8-pixel tiles; gfx/gl's driver never uses zcull)", R.zcull ? "ON (queue)" : "off, as gfx/gl");
+    LOG("[dk] zcull: %s (WWHD_DK_ZCULL=0 turns it off: without the invalidate before depth-biased draws, ground "
+        "decals such as Outset's grass lost whole 4x8-pixel tiles; gfx/gl's driver never uses zcull)",
+        R.zcull ? "ON (queue)" : "off, as gfx/gl");
     memory_init();
     load_shaders();
     text_self_test();
@@ -1530,7 +1579,13 @@ const DkShader* shader(ShaderId id) { return g_shaderOk[id] ? &g_shaders[id] : n
 }  // namespace gfxdk
 
 // ---- gfx/switch_renderer.h
+namespace gfxdk {  // shaders_dk.cpp
+int shader_compile_threads();
+void set_shader_compile_threads(int n);
+}  // namespace gfxdk
 namespace gfxsw {
+int shader_compile_threads() { return gfxdk::shader_compile_threads(); }
+void set_shader_compile_threads(int n) { gfxdk::set_shader_compile_threads(n); }
 PictureGrade picture_grade_now() { return gfxdk::picture_grade(); }
 void set_picture_grade(const PictureGrade& g) {
     std::lock_guard<std::mutex> lk(gfxdk::g_gradeMu);
@@ -1542,6 +1597,10 @@ bool gamepad_picture_drawn() { return !input::pro_controller() || gfxdk::g_gamep
 bool gamepad_view() { return gfxdk::g_gamepadView.load(std::memory_order_relaxed); }
 void set_gamepad_view(bool on) {
     if (gfxdk::g_gamepadView.exchange(on) != on) LOG("[dk] window: %s picture asked for", on ? "GamePad" : "TV");
+}
+bool fsr() { return gfxdk::g_fsr.load(std::memory_order_relaxed); }
+void set_fsr(bool on) {
+    if (gfxdk::g_fsr.exchange(on) != on) LOG("[dk] present: FSR 1 %s", on ? "on" : "off");
 }
 bool gamepad_pip() { return gfxdk::g_gamepadPip.load(std::memory_order_relaxed); }
 void set_gamepad_pip(bool on) {
@@ -1557,8 +1616,16 @@ bool gamepad_touch(float x, float y, float& tx, float& ty) {
 }
 int fps_overlay_mode() { return gfxdk::overlay_mode(); }
 void set_fps_overlay_mode(int mode) { gfxdk::g_fpsMode = std::clamp(mode, 0, 2); }
+bool skip_ao() { return gfxdk::g_skipAo.load(std::memory_order_relaxed); }
+void set_skip_ao(bool on) {
+    if (gfxdk::g_skipAo.exchange(on) != on) LOG("[dk] skip ambient occlusion %s (frame %llu)", on ? "on" : "off", (unsigned long long)gfxdk::R.frame);
+}
+float shadow_scale() { return gfxdk::shadow_scale(); }
+void set_shadow_scale(float s) { gfxdk::set_shadow_scale(s); }
 bool aniso() { return gfxdk::aniso_enabled(); }
 void set_aniso(bool on) { gfxdk::set_aniso(on); }
+int aniso_level() { return gfxdk::aniso_level(); }
+void set_aniso_level(int n) { gfxdk::set_aniso_level(n); }
 bool fxaa() { return gfxdk::fxaa_enabled(); }
 void set_fxaa(bool on) { gfxdk::set_fxaa(on); }
 bool bloom() { return gfxdk::bloom_enabled(); }
@@ -1578,6 +1645,9 @@ bool draw_opt(int which) {
     case kOptPrefetch: return g_prefetch.load(std::memory_order_relaxed);
     case kOptRegGens: return g_regGens.load(std::memory_order_relaxed);
     case kOptSkipTv: return g_skipTv.load(std::memory_order_relaxed);
+    case kOptTargetMemo2: return g_targetMemo2.load(std::memory_order_relaxed);
+    case kOptFixedMemo: return g_fixedMemo.load(std::memory_order_relaxed);
+    case kOptVtxIdentity: return g_vtxIdentity.load(std::memory_order_relaxed);
     default: return false;
     }
 }
@@ -1592,7 +1662,9 @@ void set_draw_opt(int which, bool on) {
         "a submit every 1024 draws instead of 256 (WWHD_DK_SUBMIT_DRAWS)", "render-thread profiler (WWHD_PROFILE)",
         "shader data prefetched at each draw (WWHD_DK_PREFETCH)",
         "targets, fixed state and viewport skipped while their registers are unchanged (WWHD_DK_REG_GENS)",
-        "the TV picture not drawn while the window shows the GamePad's (WWHD_DK_SKIP_TV)"};
+        "the TV picture not drawn while the window shows the GamePad's (WWHD_DK_SKIP_TV)",
+        "target memo by state words, same-frame target checks skipped (WWHD_DK_TARGET_MEMO2)",
+        "fixed state in three memos (WWHD_DK_FIXED_MEMO)", "vertex states by layout identity (WWHD_DK_VTX_IDENTITY)"};
     switch (which) {
     case kOptFixedSkip: g_fixedSkip = on; break;
     case kOptDepthOnly: g_depthOnly = on; break;
@@ -1606,6 +1678,9 @@ void set_draw_opt(int which, bool on) {
     case kOptPrefetch: g_prefetch = on; break;
     case kOptRegGens: g_regGens = on; break;
     case kOptSkipTv: g_skipTv = on; break;
+    case kOptTargetMemo2: g_targetMemo2 = on; break;
+    case kOptFixedMemo: g_fixedMemo = on; break;
+    case kOptVtxIdentity: g_vtxIdentity = on; break;
     }
     LOG("[dk] A/B: %s %s from frame %llu (menu)", names[which], on ? "ON" : "OFF", (unsigned long long)R.frame + 1);
 }
@@ -1644,6 +1719,7 @@ const Backend& deko3d_backend() {
         b.api = Api::Platform;  // registered through renderer_ext.h (register_deko3d below)
         b.init = gfxdk::init;
         b.run_main_loop = gfxdk::run_main_loop;
+        b.peek_z = gfxdk::peek_z;  // (this fork, #94) the sun's corona and lens flare
         // GX2 render thread: the draw path (dk_draw.h) and the surfaces (dk_surfaces.h)
         b.draw = [](const uint32_t* regs, uint32_t prim, uint32_t count, uint32_t indexType, uint32_t indexAddr,
                     uint32_t baseVertex, uint32_t instances) {

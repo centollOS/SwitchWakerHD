@@ -46,12 +46,27 @@ TOOL_FILES = [
     "tools/recomp/analyze.py",
     "tools/recomp/ppc2c.py",
     "tools/recomp/builds.py",
+    "tools/recomp/randomizer_compat.py",
+    "tools/recomp/randomizer-usa.json",
     "tools/recomp/crlive.py",
     "tools/recomp/leaflocal.py",
+    "tools/recomp/rawstore.py",
     "tools/guestmod/build_guest_mod.py",
     "tools/guestmod/guestmod.py",
     "tools/story_mods/npc_catalogue.py",  # the NPC catalogue from the player's game files (story_npc_catalogue.h)
-    "tools/story_mods/notebook_model.py",  # the story notebook's model from the Story Notebook package
+    "tools/story_mods/notebook_model.py",  # shared player-local BFRES template patching
+    "tools/story_mods/collision_mesh.py",  # original static collision geometry
+    "tools/story_mods/shoreline_model.py",  # player-local animated coast material
+    "tools/story_mods/actor_model.py",  # original static GLB models using the player's own materials
+    "tools/story_mods/multi_material.py",  # several materials and cut-outs for original static GLB models
+    "tools/story_mods/game_piece_model.py",  # island buildings from the player's own room archives (material copier)
+    "tools/story_mods/island_texture.py",  # a water body's banks painted with the island's own ground texture
+    "tools/story_mods/kit_materials.py",  # kit materials (a game room's materials by name) for mod stages and world objects
+    "tools/story_mods/kit_model.py",  # kit models: own GLBs drawn with a game room's materials (the editor's import_model with kit)
+    "tools/story_mods/stage_builder.py",  # mod stages, list_kit_materials and stage templates from the player's own files
+    "tools/story_mods/export_glb.py",  # the editor's export_glb: a game room or piece as a GLB in the player's own exports folder
+    "tools/story_mods/skinned_actor_model.py",  # original rigged GLB and player-local skin material
+    "tools/story_mods/actor_animation.py",  # original skeletal clips in the native format
     "tools/savegame/gc2hd.py",
     "tools/savegame/wwsave.py",
     "tools/savegame/README.md",
@@ -61,6 +76,9 @@ INSTALLER_FILES = [
     "tools/installer/code_mods.py",
     "tools/installer/decomp_setup.py",
     "tools/installer/shader_prebuild.py",
+    "tools/installer/model_sweep.py",
+    "tools/installer/sweep_merge.py",
+    "tools/installer/model_sweep_skip.txt",
     "tools/installer/toolchains.json",
     "tools/installer/README.md",
 ]
@@ -93,6 +111,7 @@ MAC_SETUP_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
   <key>CFBundleVersion</key><string>%s</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Only when you turn on a code mod's singing option: the sound is analysed for its pitch while you play and never stored or sent.</string>
 </dict></plist>
 """
 LINUX_SETUP_DESKTOP = """[Desktop Entry]
@@ -132,6 +151,7 @@ VENDORED_LICENSES = {
     "Cemu (MPL-2.0)": "runtime/third_party/cemu/LICENSE.txt",
     "Dear ImGui (MIT)": "runtime/third_party/imgui/LICENSE.txt",
     "fmt (MIT)": "runtime/third_party/fmt/LICENSE",
+    "ImGuizmo (MIT)": "runtime/third_party/imguizmo/LICENSE",
     "metal-cpp (Apache-2.0)": "runtime/third_party/metal-cpp/LICENSE.txt",
     "xxHash (BSD-2-Clause)": "runtime/third_party/xxhash/LICENSE",
 }
@@ -526,6 +546,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--toolchain", required=True, help="toolchain id from tools/installer/toolchains.json")
     ap.add_argument("--license", action="append", default=[], help="NAME=PATH of a dependency's license")
+    ap.add_argument("--license-source", action="append", default=[],
+                    help="NAME=TEXT: version and source location of a --license dependency (shown in the index)")
     ap.add_argument("--runtime-file", action="append", default=[], help="file to install next to the executable")
     ap.add_argument("--linkonly-lib", action="append", default=[], help="system library to ship for linking only")
     ap.add_argument("--setup-gui", help="the built graphical installer (wwhd-setup) to include")
@@ -583,7 +605,7 @@ def main():
         copy(os.path.join(ROOT, rel), os.path.join(pkg, rel))
     copy_shader_template(ROOT, pkg)
     for hp in sorted(os.listdir(os.path.join(ROOT, "tools", "recomp"))):
-        if re.match(r"hooks.*\.txt$", hp):
+        if re.match(r"(decomp_only_)?hooks.*\.txt$", hp):  # decomp_only_*: the decomp build's setup
             copy(os.path.join(ROOT, "tools", "recomp", hp), os.path.join(pkg, "tools", "recomp", hp))
     # the address maps of the builds the port can be made from (tools/recomp/builds.py, docs/builds.md)
     for bp in sorted(os.listdir(os.path.join(ROOT, "tools", "recomp", "builds"))):
@@ -645,6 +667,10 @@ def main():
     for spec in a.license:
         k, _, v = spec.partition("=")
         entries[k] = v
+    sources = dict(spec.partition("=")[::2] for spec in a.license_source)
+    for k in sources:
+        if k not in entries:
+            sys.exit("--license-source for %s has no matching --license" % k)
     index = ["Third-party software in this package and its license files:\n"]
     for k, v in sorted(entries.items()):
         src = v if os.path.isabs(v) else os.path.join(ROOT, v)
@@ -653,6 +679,8 @@ def main():
         fn = re.sub(r"[^A-Za-z0-9]+", "-", k.split(" (")[0]).strip("-") + ".txt"
         copy(src, os.path.join(licdir, fn))
         index.append("  %-28s %s\n" % (k, fn))
+        if k in sources:
+            index.append("  %-28s %s\n" % ("", sources[k]))
     with open(os.path.join(licdir, "README.txt"), "w") as f:
         f.writelines(index)
     with open(os.path.join(pkg, "VERSION.txt"), "w") as f:

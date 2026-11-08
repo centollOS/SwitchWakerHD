@@ -33,6 +33,7 @@
 #include "story_mail.h"
 #include "story_mail_book.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <map>
@@ -126,6 +127,30 @@ struct Showing {
 } g_show;
 Override g_notebook_text;  // armed while the notebook is handed out
 Override g_npc_text;       // armed while a resident says a quest's line (say)
+uint32_t g_say_restore_record=0;
+SayOwner g_say_owner;
+bool g_say_restore_pending=false;
+constexpr uint32_t kSayMagic=0x53545931,kSayRecordBytes=128,kSayPrefixOffset=40,kSayChecksumOffset=104;
+bool snapshot_range(uint32_t address,uint32_t size){
+    const uint64_t end=uint64_t(address)+size;
+    return (address>=mem::kMem2Start&&end<=mem::kMem2End)||(address>=mem::kRuntimeStart&&end<=mem::kHostStart);
+}
+uint32_t say_checksum(){uint32_t value=2166136261u;for(uint32_t i=4;i<kSayChecksumOffset;++i)value=(value^ld8(g_say_restore_record+i))*16777619u;return value;}
+void clear_say_record(){if(g_say_restore_record)st32(g_say_restore_record,0);g_say_owner={};}
+bool read_say_record(uint32_t number,SayOwner& owner){
+    if(!g_say_restore_record||ld32(g_say_restore_record)!=kSayMagic||ld32(g_say_restore_record+4)!=1||ld32(g_say_restore_record+8)!=number||!ld32(g_say_restore_record+12)||(ld32(g_say_restore_record+36)>kPrefixRoom||(ld32(g_say_restore_record+36)&1))||ld32(g_say_restore_record+kSayChecksumOffset)!=say_checksum())return false;
+    owner={ld32(g_say_restore_record+20),ld32(g_say_restore_record+24),ld32(g_say_restore_record+28),ld32(g_say_restore_record+32)};
+    return owner.actor>=mem::kMem2Start&&uint64_t(owner.actor)+0xA24<=mem::kMem2End&&owner.token>0&&owner.token<=128;
+}
+void capture_say_record(const Override& text,uint32_t prefix){
+    if(!g_say_restore_record||!g_say_owner.actor||prefix>kPrefixRoom)return;
+    std::memset(mem::ptr(g_say_restore_record),0,kSayRecordBytes);
+    st32(g_say_restore_record+4,1);st32(g_say_restore_record+8,text.number);st32(g_say_restore_record+12,text.msbt);st32(g_say_restore_record+16,text.index);
+    st32(g_say_restore_record+20,g_say_owner.actor);st32(g_say_restore_record+24,g_say_owner.pid);st32(g_say_restore_record+28,g_say_owner.token);st32(g_say_restore_record+32,g_say_owner.partner);st32(g_say_restore_record+36,prefix);
+    std::memcpy(mem::ptr(g_say_restore_record+kSayPrefixOffset),mem::ptr(text.buffer),prefix);
+    st32(g_say_restore_record+kSayChecksumOffset,say_checksum());st32(g_say_restore_record,kSayMagic);
+}
+
 Override g_caption_text;   // armed while the game sets a caption from a message (caption)
 const std::u16string g_notebook_body = kNotebookGetText;
 
@@ -242,6 +267,19 @@ int32_t send(const std::string& mod, const std::string& letter, const std::strin
     return kResultWaiting;
 }
 
+void reload(const std::string& mod, const std::vector<LetterText>& texts, const std::vector<std::string>& forget) {
+    std::lock_guard lock(g_mu);
+    for (const LetterText& t : texts)
+        for (Letter& l : g_letters)
+            if (l.mod == mod && l.id == t.id) {
+                std::u16string body = compose(t.sender, t.text);
+                if (!body.empty()) l.sender = t.sender, l.text = std::move(body);
+            }
+    std::erase_if(g_letters, [&](const Letter& l) { return l.mod == mod && std::find(forget.begin(), forget.end(), l.id) != forget.end(); });
+}
+
+bool busy() { return g_show.key || g_npc_text.text || g_caption_text.text || g_notebook_pending.load(); }
+
 int32_t state(const std::string& mod, const std::string& letter) {
     if (!valid_id(letter)) return kResultInvalid;
     if (!have_save()) return kResultNone;
@@ -261,6 +299,11 @@ uint16_t g_notebook_letter = 0;  // the key of the letter that brings the notebo
 void set_notebook_letter(const std::string& mod, const std::string& letter) { g_notebook_letter = letter_key(mod, letter); }
 
 bool notebook_owned() { return have_save() && book().get(kRecordItem, kItemNotebook) == 1; }
+bool own_notebook_for_test() {
+    if (!have_save() || !book().set(kRecordItem, kItemNotebook, 1)) return false;
+    LOG("[mail] the story notebook is in this save file (the editor's test mode)");
+    return true;
+}
 
 std::u16string notebook_page() {
     std::u16string page = u"Story notebook\n\n";
@@ -304,13 +347,36 @@ void set_text_buffers(uint32_t guest, uint32_t bytes) { g_buffers = bytes >= 4 *
 
 // A resident's line replaced while one talk shows it (story_notebook's takeovers)
 void say(uint32_t number, const std::u16string* text) {
+    g_say_restore_pending=false;clear_say_record();
     g_npc_text = text && g_buffers ? Override{number, g_buffers + 2 * kSlotBytes, text} : Override{};
 }
-void unsay() { g_npc_text = {}; }
+void unsay() { if(!g_say_restore_pending)clear_say_record();else g_say_owner={};g_npc_text = {}; }
+void set_say_restore_record(uint32_t guest,uint32_t bytes){g_say_restore_record=bytes>=kSayRecordBytes&&!(guest&3)&&snapshot_range(guest,kSayRecordBytes)?guest:0;clear_say_record();}
+void say_owned(uint32_t number,const std::u16string* text,SayOwner owner){if(text&&text->size()>kMaxUnits)text=nullptr;say(number,text);if(g_npc_text.text)g_say_owner=owner;}
+bool restore_say_owner(uint32_t number,SayOwner& owner){g_say_restore_pending=false;return read_say_record(number,owner);}
+bool resume_say(uint32_t number,const std::u16string* text,SayOwner owner){
+    g_say_restore_pending=false;SayOwner saved;
+    if(!text||text->size()>kMaxUnits||!g_buffers||!read_say_record(number,saved)||saved!=owner)return false;
+    const uint32_t prefix=ld32(g_say_restore_record+36),buffer=g_buffers+2*kSlotBytes;
+    std::memcpy(mem::ptr(buffer),mem::ptr(g_say_restore_record+kSayPrefixOffset),prefix);
+    for(size_t i=0;i<text->size();++i)st16(buffer+prefix+uint32_t(2*i),(*text)[i]);
+    st16(buffer+prefix+uint32_t(2*text->size()),0);
+    g_npc_text={number,buffer,text,ld32(g_say_restore_record+12),ld32(g_say_restore_record+16),true};g_say_owner=owner;return true;
+}
 void caption(uint32_t number, const std::u16string* text) {
     g_caption_text = text && g_buffers && g_installed ? Override{number, g_buffers + 3 * kSlotBytes, text} : Override{};
 }
 void uncaption() { g_caption_text = {}; }
+bool item_get_text(uint32_t number, const std::u16string* text) {
+    if (g_notebook_pending) return false;
+    if (!text) {
+        g_notebook_text = {};
+        return true;
+    }
+    if (!g_installed || !g_buffers) return false;
+    g_notebook_text = Override{number, g_buffers + kSlotBytes, text};
+    return true;
+}
 bool said() { return g_npc_text.text && g_npc_text.keyed; }
 bool can_say() { return g_installed && g_buffers != 0; }
 
@@ -347,8 +413,9 @@ void install(const std::function<std::string(uint32_t)>& replaced_by, const std:
 }
 
 void state_loaded() {
+    g_say_restore_pending=true; // Old host owners may unsay while the remaining state callbacks drain.
     g_show = {};
-    g_npc_text = {};
+    g_npc_text = {};g_say_owner={}; // Restored snapshot provenance is deliberately preserved.
     g_caption_text = {};
     g_notebook_pending = false;
     g_notebook_text = {};
@@ -396,6 +463,10 @@ void symbol(Cpu* c) {
     }
 }
 
+}  // namespace hooks
+void (*g_item_get_next)(Cpu*) = nullptr;
+void set_item_get_next(void (*next)(Cpu*)) { g_item_get_next = next; }
+namespace hooks {
 // execItemGet(itemNo): the notebook's stand-in item goes to the story record, not the Delivery Bag
 void item_get(Cpu* c) {
     if (g_notebook_pending && (c->r[3] & 0xFF) == g_notebook_model) {
@@ -405,6 +476,7 @@ void item_get(Cpu* c) {
         LOG("[mail] the story notebook is in this save file");
         return;
     }
+    if (g_item_get_next) return g_item_get_next(c);
     g_original(c, kExecItemGet);
 }
 
@@ -511,6 +583,7 @@ void get_message(Cpu* c) {
         const std::u16string& t = *o->text;
         for (size_t i = 0; i < t.size(); i++) st16(o->buffer + prefix + uint32_t(2 * i), t[i]);
         st16(o->buffer + prefix + uint32_t(2 * t.size()), 0);
+        if(o==&g_npc_text)capture_say_record(*o,prefix);
         if (trace()) LOG("[mail] message %X: text replaced (MSBT %08X entry %u, %u bytes of codes kept)", o->number, o->msbt, o->index, prefix);
     }
 }

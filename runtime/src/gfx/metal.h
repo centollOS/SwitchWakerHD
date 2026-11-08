@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "formats.h"
+#include "target_size.h"
 
 namespace gfx {
 void peek_z(const uint32_t*, uint32_t);
@@ -29,6 +30,7 @@ struct Surface {
     bool isDepth = false;
     bool gpuWritten = false;   // contents produced by the GPU; never reload from guest memory
     uint64_t writeSeq = 0;     // when the GPU last wrote it (several surfaces can alias one address)
+    gfx::SizeClaim sizeClaim;     // a size other than the internal resolution, claimed by a pass (target_scale, gfx/target_size.h)
     bool formatViews = false;     // another surface at this address has the same texel bits in another format (adopt_newer_alias)
     uint64_t writtenBackSeq = 0;  // writeSeq when last written back to guest memory (linear surfaces)
     uint64_t contentHash = 0;  // hash of all guest bytes (every level) at the last check
@@ -47,11 +49,19 @@ struct Surface {
     float scale = 1.0f;        // the resolution factor the texture was made for
     float ax = 1.0f, ay = 1.0f;  // ... and the aspect-ratio factors (screen-shaped targets, metal_surfaces.mm)
     float sx = 1.0f, sy = 1.0f;
+    // dynamic resolution (dynres.h): the factor of the internal resolution the texture was made at (1: off),
+    // and textures of other recent scales kept for the next change (metal_surfaces.mm rescale)
+    float dyn = 1.0f;
+    bool artisticMips = false;  // hand-drawn mip levels (artistic_mips.h): resolution-aware bias, no forced anisotropy
+    struct Kept { id<MTLTexture> tex; float scale, dyn, ax, ay, sx, sy; };
+    std::vector<Kept> spares;
 };
 
 // A display output: the TV or the GamePad screen, each in its own window.
 struct Screen {
     id<MTLTexture> tex = nil;          // last image copied to the scan buffer
+    float dyn = 1.0f;                  // dynamic resolution factor of that image (the layout uses tex / dyn)
+    std::vector<id<MTLTexture>> scanSpares;  // dynamic resolution: scan textures of other sizes
     CAMetalLayer* layer = nil;
     std::atomic<bool> srgb{false};     // scan buffer is sRGB: the display applies the encoding
     std::atomic<bool> visible{true};   // nextDrawable blocks while the window is covered
@@ -107,16 +117,21 @@ struct SurfaceDesc {
     uint32_t addr = 0, mipAddr = 0, width = 0, height = 0, slices = 1, pitch = 0, mips = 1;
     uint32_t format = 0, dim = 1, tileMode = 0, swizzle = 0;
     bool isDepth = false;
+    gfx::SizeRequest sizeRequest;  // from the drawing pass (Surface::sizeClaim)
 };
 Surface* find_or_create_surface(const SurfaceDesc& d, bool forRendering);
 // render targets; `slice` receives the array slice the view renders to
-Surface* color_target(const uint32_t* regs, int index, uint32_t* slice = nullptr);  // from CB_COLOR* registers
+// (claim: what the drawing pass asks of its size, gfx::size_request)
+Surface* color_target(const uint32_t* regs, int index, uint32_t* slice = nullptr,
+                      gfx::SizeRequest claim = {});  // from CB_COLOR* registers
 Surface* depth_target(const uint32_t* regs, uint32_t* slice = nullptr);             // from DB_DEPTH_* registers
 // from GX2ColorBuffer / GX2DepthBuffer structs; optional: the view's slice range
 Surface* surface_from_color_buffer(uint32_t gx2ColorBuffer, uint32_t* firstSlice = nullptr, uint32_t* numSlices = nullptr);
 Surface* surface_from_depth_buffer(uint32_t gx2DepthBuffer, uint32_t* firstSlice = nullptr, uint32_t* numSlices = nullptr);
 Surface* sampled_texture(const uint32_t* texWords, bool isDepthSampler);  // from SQ_TEX_RESOURCE words
 void upload_surface(Surface* s);
+// texture staging through the upload pool (metal_draw.mm; WWHD_MTL_TEXTURE_STAGING=pool): false = use an own buffer
+bool texture_staging(const void* data, size_t size, id<MTLBuffer>* buf, NSUInteger* offset);
 
 // internal resolution (Graphics menu / R / WWHD_RES_SCALE): render targets are allocated at this
 // multiple of their guest size; a change takes effect at the next frame (targets are resized on next use)

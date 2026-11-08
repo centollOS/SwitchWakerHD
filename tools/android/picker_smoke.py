@@ -13,6 +13,41 @@ from urllib.parse import unquote
 import xml.etree.ElementTree as ET
 
 
+def wait_for_feedback(fragment, read_nodes, expand_details, scroll_forward, rewind,
+                      *, clock=time.monotonic, timeout=60):
+    """Search the scrollable setup screen, including its collapsed technical record.
+
+    A hierarchy dump can take seconds on the CI emulator. Do not spend the entire
+    feedback timeout dumping every page twice and repeatedly returning to the top.
+    Inspect each post-scroll snapshot on the next iteration. Two bounded passes
+    allow a refresh/window transition without an unbounded scrolling retry loop.
+    """
+    deadline = clock() + timeout
+    seen = []
+    for _ in range(2):
+        previous = None
+        for _ in range(12):
+            if clock() >= deadline:
+                break
+            nodes = read_nodes()
+            seen = [node.get("text", "") for node in nodes if node.get("text")]
+            if any(fragment in text for text in seen):
+                rewind()
+                return
+            if any(node.get("text") == "Details" for node in nodes):
+                expand_details()
+                previous = None
+                continue
+            current = [(node.get("text"), node.get("bounds")) for node in nodes]
+            if current == previous or not scroll_forward(nodes):
+                break
+            previous = current
+        if clock() >= deadline:
+            break
+        rewind()
+    raise AssertionError("Missing feedback: " + fragment + "; text on the last screen: " + repr(seen))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--adb", default="adb")
@@ -73,6 +108,34 @@ def main():
         return next((node for node in (ui() if nodes is None else nodes)
                      if node.get(attribute) == label and (resource is None or node.get("resource-id") == resource)), None)
 
+    def swipe(nodes, forward=True):
+        """Scroll the largest scrollable view one step; False if there is none."""
+        containers = []
+        for candidate in nodes:
+            if candidate.get("scrollable") != "true": continue
+            x1, y1, x2, y2 = map(int, re.findall(r"\d+", candidate.get("bounds")))
+            if y2 - y1 > 300 and x2 - x1 > 150:
+                containers.append((x1, y1, x2, y2))
+        if not containers: return False
+        x1, y1, x2, y2 = max(containers, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+        x = str((x1 + x2) // 2)
+        low, high = str(y2 - (y2-y1)//8), str(y1 + (y2-y1)//4)
+        shell("input", "swipe", x, *((low, x, high) if forward else (high, x, low)), "250")
+        return True
+
+    def screen(nodes):
+        return [(node.get("text"), node.get("bounds")) for node in nodes]
+
+    def to_top():
+        """The setup screen scrolled back to its start, where the smoke's controls are."""
+        nodes = ui()
+        for _ in range(8):
+            if not swipe(nodes, forward=False): return
+            after = ui()
+            if screen(after) == screen(nodes): return
+            nodes = after
+        raise AssertionError("Setup screen did not scroll back to its start")
+
     def tap(label, attribute="text", resource=None, scroll=False):
         deadline = time.monotonic() + 20
         nodes = []
@@ -85,18 +148,8 @@ def main():
                 x1, y1, x2, y2 = map(int, re.findall(r"\d+", node.get("bounds")))
                 shell("input", "tap", str((x1 + x2) // 2), str((y1 + y2) // 2))
                 return
-            if scroll and swipes < 4:
-                containers = []
-                for candidate in nodes:
-                    if candidate.get("scrollable") != "true": continue
-                    x1, y1, x2, y2 = map(int, re.findall(r"\d+", candidate.get("bounds")))
-                    if y2 - y1 > 300 and x2 - x1 > 150:
-                        containers.append((x1, y1, x2, y2))
-                if containers:
-                    x1, y1, x2, y2 = max(containers, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
-                    x = str((x1 + x2) // 2)
-                    shell("input", "swipe", x, str(y2 - (y2-y1)//8), x, str(y1 + (y2-y1)//4), "250")
-                    swipes += 1
+            if scroll and swipes < 4 and swipe(nodes):
+                swipes += 1
         raise AssertionError("Missing control: " + label + "; visible controls: " + repr([
             (n.get("text"), n.get("resource-id")) for n in nodes if n.get("text")]))
 
@@ -201,12 +254,7 @@ def main():
         raise AssertionError("Picker grant observation timed out")
 
     def wait_text(fragment):
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            nodes = ui()
-            if any(fragment in node.get("text", "") for node in nodes): return
-            if find("Details", nodes=nodes) is not None: tap("Details")  # the technical record
-        raise AssertionError("Missing feedback: " + fragment + "; visible text: " + repr([node.get("text", "") for node in ui() if node.get("text")]))
+        wait_for_feedback(fragment, ui, lambda: tap("Details"), swipe, to_top)
 
     def preservation(identity):
         root = "no_backup/ondevice/jobs/" + identity

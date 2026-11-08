@@ -64,14 +64,28 @@ for few runs; it includes the boot-to-boot spread below):
 
 More boots narrow the interval: `--repeat 3` (6 boots each, ~50 minutes).
 
+## Defaults that change the numbers
+
+The shadow maps are drawn at the game's own size by default. A player who chose Picture tab > Shadow maps > Fast
+(`switchShadowScale=0.5`: +5-7% fps in the Outset grass and lookout views, wavier shadow edges) measures more than a
+baseline built before that option: for a like-for-like comparison leave `switchShadowScale` out of the settings.ini
+(or `raw shadowscale 1` in a toggle).
+
 ## Rules for agents
+
+- **Check the clocks first.** Read the `[dk] clocks:` line of the session log (debug server `raw logtext`): it must say CPU 1020 MHz
+  and the GPU profile of the build under test (307 MHz before 2026-10-23, 384 MHz default since PR #85). sys-clk or a saved
+  460 MHz GPU profile makes the scenes sit at the 30 fps cap and hides real differences (2026-10-23: the same changes read
+  "inside the noise" at 1224/460 and +2% to +7% at stock). The lava room at stock should be near 27.9 fps (reference below).
 
 - Check first that the console answers and runs the USA game (`tools/switch/wwhd_debug.py info`).
 - Tell the user before the first deploy (the game restarts) and say how long it will take. If the console does not
   answer, ask them to start the game with the debug server on; do not guess.
 - Report the verdict lines and the table; never a single boot per build as a comparison, never a difference inside
   the interval as a gain or a loss.
-- The test never changes `settings.ini`, never saves the game, never writes the save slots or the `states/` folder,
+- The test never changes `settings.ini` (except `gpu-profile`, which writes `WWHD_TEST_GPU_PROFILE` in `[dev]` for each boot and puts
+  the player's file back at the end, also after Ctrl+C or an error; a copy stays in `build/perf/settings.ini.backup_*`),
+  never saves the game, never writes the save slots or the `states/` folder,
   and keeps the player's clocks: do not "fix" noise by changing any of those.
 - A change that can be switched live (a debug-server command of the test build) is measured better inside one boot:
   `toggle` below (~15-20 minutes, no boot-to-boot spread).
@@ -89,19 +103,26 @@ tools/switch/perf_test.py ab base.nro new.nro --labels base,new --order ABBA --r
 # a live switch inside one boot (no boot-to-boot spread): ABBA x 3 recordings per scene
 tools/switch/perf_test.py toggle --nro some.nro --cmd-a "mycmd 0" --cmd-b "mycmd 1" --scenes lava,windfall --frames 900
 
+# one build, the handheld GPU profile alternated between boots (stock 307 MHz against 384): ABBA twice, the tall grass
+tools/switch/perf_test.py gpu-profile --profiles 307,384
+tools/switch/perf_test.py gpu-profile --profiles 384,460
+
 # tables of saved results
 tools/switch/perf_test.py show build/perf/mybuild_YYYYMMDD_HHMMSS.json
 tools/switch/perf_test.py compare build/perf/a.json build/perf/b.json
 ```
 
-Options: `--scenes a,b` (default: the 7 standard ones; `all` adds the extras; `compare-to`: lava, windfall,
+Options: `--scenes a,b` (default: the 7 standard ones; `demanding` the four Outset stress spots; `all` adds the extras and those; `compare-to`: lava, windfall,
 dragonroost), `--frames N` (default 1800 = 60 s at 30 fps; `compare-to`: 900), `--settle S` (default 20 s after
 arriving), `--time T` (time of day held, default 200 degrees: the afternoon), `--no-boot` (the game is already in a
-Quest Log: no reload), `--quest-log N`.
+Quest Log: no reload), `--quest-log N`, `--expect perf/results/<file>.json` (after the table: each scene of your
+build against that release's record, "BELOW the record" when lower by more than `--expect-tolerance`, default
+0.5 fps; a check across sessions, not a verdict: see [perf-results.md](perf-results.md)).
 
 Each `run` / `ab` writes `build/perf/<label>_<time>.json` (summary per scene and run), `.csv` (the same) and
 `_frames.json` (every recorded frame). `ab` also saves a `_partial` file after every build so an interrupted
-session keeps its results.
+session keeps its results. Their `meta.boots` lists each boot's conditions: version, console mode and charge, the
+clocks the game logged and the settings that change the load.
 
 How a run gets to gameplay: it reloads, presses A on the title screen and the file select until a Quest Log is
 being played with the player in control. Then, for each scene: `bench clock freeze 200` → `bench load NAME` → waits
@@ -128,6 +149,26 @@ cutscene and no dialogue. Link stands still, the camera is behind him, and the t
 | `sea_totg` | the open sea on the boat before the Tower of the Gods (warp 8) | waves, light load (~960 draws) |
 | `hyrule` (extra) | Hyrule Castle (warp 12) | ~1700 draws, at the cap; not in the default set |
 
+**The demanding set** (`--scenes demanding`; `all` includes it): four spots of Outset where a player saw the frame
+rate drop most, saved from a late-game file. They are the views to watch for render-thread and GPU regressions: at
+stock clocks they run below 30 fps on main (2026-10-22, main f1f3132: about 28.3 / 24.7 / 29.0 / 30 fps).
+
+| State | Place | What it stresses |
+|---|---|---|
+| `outset_grass` | Outset, Link standing in the tall grass | ~6900 draws: render thread and GPU |
+| `outset_village` | Outset, by Sue-Belle's house, the pirate ship and the lookout in view | ~6400 draws: render thread, GPU and main thread all over 33 ms |
+| `outset_lookout` | Outset, in the grass facing the lookout tower | ~3000 draws: main thread |
+| `outset_cliff` | Outset, the cliff above the sea and the pirate ship | ~2250 draws: GPU |
+
+The same build varies by up to ~2 fps from one boot to the next at these views: compare builds with `ab`
+(alternating boots), never with single runs.
+
+These four were saved with the European game. Builds since the v0.4.0 upstream sync load a benchmark state of the
+other region; v0.4.7 does not ("Portable state: made with another game", the scene times out). The same spots saved
+with the USA game (loaded on main and saved again with `bench save`, same position) are `outset_grass_us`,
+`outset_village_us`, `outset_lookout_us` and `outset_cliff_us`: use them against v0.4.7 with a USA game, e.g.
+`--scenes lava,windfall,dragonroost,outset_grass_us,outset_village_us,outset_lookout_us,outset_cliff_us`.
+
 Considered and left out: Quest Log 1 ("Pulpo", early game) as the progress, because warps from it start story events
 (warp 3 started a dialogue). Windfall's other spawn points face a house or the sea. A boss room was left out because
 the fight is random. Full save states (exact snapshots) do not work on the Switch (`savestate.cpp`), so the scenes
@@ -137,6 +178,40 @@ position and heading, the camera, the progress, the date and the time of day are
 To make a new scene: play to the place (any Quest Log; the state takes its progress), stand still with control,
 then `wwhd_debug.py raw bench save NAME`, `wwhd_debug.py get bench/NAME.wwstate tools/switch/perf_states/`, and add
 it to `SCENES` in `perf_test.py`.
+
+## GPU profiles: is a view GPU-bound?
+
+`gpu-profile` measures one build (the one on the console; no deploy) with apm's handheld GPU profiles
+(`WWHD_TEST_GPU_PROFILE` in `settings.ini`'s `[dev]` section: `307` = the system's stock, `384` (what the game always
+runs at since 2026-10-23), `460`, `1600` = 460 MHz with memory at 1600 MHz; builds from that day on, older ones read
+the menu's `switchGpuProfile` instead) alternated between boots, ABBA twice by default (4 boots per profile). The profile is read at
+start, so each boot writes `settings.ini` and reloads; after each boot the `[dk] clocks` line must show the profile's
+GPU and memory clocks, or the test stops (sys-clk on, or the game started from hbmenu, where apm is skipped). It
+also records the last `[cpu] cores busy` line of each boot: when the CPU cores sit well below 90% at a low profile
+and fill up at a higher one, the CPU threads were waiting for the GPU.
+
+Its scene, `outset_tallgrass`, is Outset's tall grass as the sea stage loads it (room 44, time of day 150, ~5200
+draws; saved with the European game on 2026-10-23, so a USA game needs a twin saved with `bench save`). It is the
+view where the GPU profile matters most. Any other scene works with `--scenes` (and `--time`).
+
+Results on console 1 (2026-10-23, v0.4.7+194, CPU 1020 MHz, dynamic resolution off, 60 s per boot):
+
+| GPU profile | boots | fps (sd) | 1 s windows, p5 | frame p95 ms | render thread busy ms | main thread CPU ms | GPU ms | cores 0 / 1 / 2 busy |
+|---|---:|---|---:|---:|---:|---:|---:|---|
+| stock 307 MHz | 4 | 21.96 (0.14) | 21.7 | 47.6 | 42.5 | 34.7 | 45.1 | 34 / 77 / 76% |
+| 384 MHz | 4 | **26.70** (0.10) | 26.5 | 39.4 | 34.0 | 35.2 | 36.9 | 39 / 94 / 92% |
+| 384 MHz (second session) | 4 | 26.69 (0.13) | 26.5 | 39.4 | 34.0 | 34.6 | 37.0 | 38 / 92 / 91% |
+| 460 MHz (second session) | 4 | 27.23 (0.26) | 27.0 | 37.9 | 33.2 | 35.4 | 36.6 | 41 / 96 / 95% |
+
+384 against 307: **+4.74 fps (+-0.22 at 95%, +21.6%)**. The GPU was still busy with the previous frame at every
+present (`behind` 100%) at both clocks. At 307 the cores were idle about a quarter of the time: the render thread
+waited for the GPU (its "busy" time counts those waits), so the view is GPU-bound. At 384 the main thread takes 35.2
+ms of a 37.5 ms frame, so it becomes the next limit: 460 against 384 is only **+0.54 fps (+-0.40, +2.0%)**. At 460 the GPU is done
+before every present (`behind` 0%) and the cores are 95-96% busy. 384 MHz takes ~90% of what 460 MHz gains over
+stock with a 17% lower GPU clock, which is why every player now runs at it.
+
+Rules: a clock is not a fix (AGENTS.md, "Clocks"): the game stays at stock CPU and 384 MHz GPU; use this to tell
+whether a view is GPU-bound and so what a GPU-side change (render passes, shaders, bandwidth) can gain there.
 
 ## What is measured (per presented frame, on the console)
 
@@ -192,6 +267,9 @@ Anything that samples or traces the game while it runs (a profiler, a trace opti
 main-thread PC sampler took the lava room from ~28 to ~26-27 fps. Measure fps with such options off.
 
 ## Reference numbers
+
+Each release's own record (conditions, table against the previous release, memory tour) is in
+[perf-results.md](perf-results.md); the files in `perf/results/` are what `--expect` reads.
 
 The maintainer's console (handheld, charging, stock 1020 MHz CPU and GPU profile, the player's settings with
 dynamic resolution on), v0.4.7 with the bench command, mean of 4 boots, 60 s per scene (2026-10-16):

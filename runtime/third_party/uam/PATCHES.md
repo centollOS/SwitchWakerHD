@@ -9,8 +9,7 @@ Docker image) after editing a `.yy`, `.ll`, `.y`, `.l` or `ir_expression_operati
 Every change to upstream files is marked `SwitchWakerHD patch N`.
 
 1. **Real mutexes** (`mesa-imported/c11/threads.h`). Upstream's header is a single-threaded stub; it
-   now maps to pthread mutexes. uam is still NOT reentrant (static `gl_context` in
-   `source/glsl_frontend.cpp`; three threads crash even with these mutexes): compile on one thread.
+   now maps to pthread mutexes. (Not reentrant with this alone: patch 10.)
 2. **DKSH in memory**: `DekoCompiler::WriteDksh(std::vector<uint8_t>&)` next to `OutputDksh`, same
    bytes without a file (`source/compiler_iface.*`).
 3. **Log callback** (`source/uam_log.h`, `source/mini-os.c`): the frontend's and the compiler
@@ -70,3 +69,13 @@ Every change to upstream files is marked `SwitchWakerHD patch N`.
 Check: `uam_dksh_test` (`-DWWHD_UAM_TEST=ON`) compiles a directory of GLSL files in one process and
 compares the DKSH bytes with reference files written by the `uam` tool (target `uam_tool`), one
 process per shader.
+
+10. **Reentrant** (`source/glsl_frontend.cpp`, `source/mini-os.c`, `source/uam_log.h`): the `gl_context` that
+    every compile re-initialises is one per thread (on the heap, made on the thread's first compile), and the log
+    callback and the fatal-error jump are thread-local. With the resident frontend (patch 5, `uam::init(true)`)
+    the shared parts, Mesa's type tables and built-in function library, are built under patch 1's mutexes and
+    only read afterwards, so several threads may compile at once (one `uam::compile` per thread at a time).
+    Checked with `tools/switch/dksh_cache stress` on 24,417 of the game's GLSL sources (macOS, arm64): 3 threads
+    give the same DKSH bytes as one, 2.5x as fast; ThreadSanitizer: 0 reports on 1,000 sources with 3 threads,
+    against 46 reports and an abort without this patch (the shared `gl_context`'s initialisation and the log
+    callback).

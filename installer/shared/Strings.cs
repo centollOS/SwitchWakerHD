@@ -3,10 +3,25 @@ using System.Globalization;
 
 namespace SwitchWakerHD.Installer;
 
-// Spanish / English. Starts in the system language; the welcome page can switch it.
-static class Str
+// Spanish / English / Brazilian Portuguese (StringsPt.cs). Starts in the system language; the welcome page's button
+// switches to the next one.
+enum Lang { Es, En, Pt }
+
+static partial class Str
 {
-    public static bool Es = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "es";
+    public static Lang Current = FromCode(CultureInfo.CurrentUICulture.TwoLetterISOLanguageName);
+    public static bool Es => Current == Lang.Es;
+    public static bool Pt => Current == Lang.Pt;
+
+    // "es", "pt-BR", "en_US.UTF-8"... -> the language; anything else is English
+    public static Lang FromCode(string code) =>
+        code.StartsWith("es", System.StringComparison.OrdinalIgnoreCase) ? Lang.Es :
+        code.StartsWith("pt", System.StringComparison.OrdinalIgnoreCase) ? Lang.Pt : Lang.En;
+
+    // the welcome page's button: it names the language it switches to
+    static Lang NextLang => Current == Lang.Es ? Lang.En : Current == Lang.En ? Lang.Pt : Lang.Es;
+    public static string NextLanguageName => NextLang == Lang.Es ? "Español" : NextLang == Lang.En ? "English" : "Português";
+    public static void SwitchLanguage() => Current = NextLang;
 
     static readonly Dictionary<string, (string es, string en)> Table = new()
     {
@@ -23,8 +38,16 @@ static class Str
         ["welcome_need"]   = ("Necesitas: tu dump personal de Wind Waker HD (USA o EUR, versión 0), conexión a internet y unos 10 GB libres.",
                                "You need: your personal dump of Wind Waker HD (USA or EUR, version 0), an internet connection and about 10 GB free."),
         ["welcome_dir"]    = ("Carpeta de trabajo: {0}",                             "Working folder: {0}"),
-        ["lang"]           = ("English",                                             "Español"),
         ["btn_start"]      = ("Comenzar",                                            "Get started"),
+        // Welcome page: an update with the last build's choices (#110, SavedChoices.cs)
+        ["upd_h"]          = ("Ya está la {0}",                                      "{0} is out"),
+        ["upd_body"]       = ("La última vez construiste la {0} con:",               "Last time you built {0} with:"),
+        ["upd_body_new"]   = ("Ya construiste el juego con:",                        "You built the game with:"),
+        ["upd_same"]       = ("El instalador puede construir la {0} con el mismo juego y las mismas opciones. Luego copia los archivos a la tarjeta como siempre: tus partidas, tus ajustes y los gráficos compilados se conservan.",
+                               "The installer can build {0} with the same game and options. Then copy the files to the card as always: your saves, settings and compiled graphics stay."),
+        ["upd_missing"]    = ("Ya no está: {0}. Pulsa Comenzar y elígelo otra vez.", "This is no longer there: {0}. Press Get started and choose it again."),
+        ["btn_update"]     = ("Actualizar a la {0}",                                 "Update to {0}"),
+        ["choices_not_saved"] = ("No se pudieron guardar tus opciones para la próxima vez ({0}).", "Your choices could not be saved for next time ({0})."),
         ["btn_back"]       = ("Atrás",                                               "Back"),
         ["btn_install"]    = ("Instalar",                                            "Install"),
         ["btn_browse"]     = ("Examinar...",                                         "Browse..."),
@@ -73,15 +96,54 @@ static class Str
         ["mm_dlg_title"]   = ("Selecciona tu Wind Waker de GameCube",                 "Select your GameCube Wind Waker"),
         ["mm_dlg_folder"]  = ("Selecciona la carpeta extraída de tu Wind Waker de GameCube", "Select the extracted folder of your GameCube Wind Waker"),
         ["mm_dlg_filter"]  = ("Disco de GameCube (*.iso;*.gcm;*.rvz)|*.iso;*.gcm;*.rvz|Todos (*.*)|*.*", "GameCube disc (*.iso;*.gcm;*.rvz)|*.iso;*.gcm;*.rvz|All files (*.*)|*.*"),
-        ["mm_rvz_note"]    = ("Un .rvz de Dolphin necesita Python 3.14 para leerse: el instalador lo añade junto al otro Python.",
-                               "A Dolphin .rvz needs Python 3.14 to be read: the installer adds it next to the other Python."),
         ["mm_pre"]         = ("Minimapa: Wind Waker de GameCube en {0}",              "Minimap: GameCube Wind Waker at {0}"),
         ["mm_no_game"]     = ("No se encuentra el Wind Waker de GameCube elegido para el minimapa: {0}. Elígelo otra vez o quítalo.",
                                "The GameCube Wind Waker chosen for the minimap is not there: {0}. Choose it again or remove it."),
-        ["mm_py_installing"] = ("Instalando Python 3.14 (para leer el .rvz del minimapa)...", "Installing Python 3.14 (to read the minimap's .rvz)..."),
-        ["mm_py_ok"]       = ("Python 3.14 listo para el .rvz del minimapa.",         "Python 3.14 ready for the minimap's .rvz."),
-        ["mm_py_fail"]     = ("No se pudo instalar Python 3.14, que hace falta para leer un .rvz de Dolphin. Instálalo desde python.org, o convierte el disco a .iso en Dolphin (clic derecho en el juego > Convertir archivo..., formato ISO) y elige ese.",
-                               "Could not install Python 3.14, which is needed to read a Dolphin .rvz. Install it from python.org, or turn the disc into an .iso in Dolphin (right-click the game > Convert File..., format ISO) and choose that."),
+        // Brazilian Portuguese: Triforce-Heroes' fan translation, downloaded by the player (make_sd.py --ptbr,
+        // docs/ptbr-translation-plan.md)
+        ["ptbr_h"]         = ("Traducción al portugués de Brasil (opcional)",          "Brazilian Portuguese translation (optional)"),
+        ["ptbr_d"]         = ("Pone el juego en portugués de Brasil con la traducción hecha por fans de Triforce-Heroes. No viene con el instalador: descárgala tú de su página (la versión «Emulador») y elige aquí el archivo descargado (.rar) o la carpeta donde lo extrajiste. Se aplica sobre tu propio juego original.",
+                               "Plays the game in Brazilian Portuguese with Triforce-Heroes' fan translation. It does not come with the installer: download it yourself from their page (the \"Emulador\" version) and choose the downloaded file (.rar) here, or the folder you extracted it to. It is applied on your own original game."),
+        ["ptbr_link"]      = ("Abrir la página de Triforce-Heroes",                     "Open Triforce-Heroes' page"),
+        ["ptbr_none"]      = ("Sin traducción",                                         "No translation"),
+        ["ptbr_pick"]      = ("Elegir descarga...",                                     "Choose download..."),
+        ["ptbr_folder"]    = ("Carpeta...",                                             "Folder..."),
+        ["ptbr_dlg_title"] = ("Selecciona la traducción descargada de Triforce-Heroes", "Select the translation downloaded from Triforce-Heroes"),
+        ["ptbr_dlg_folder"] = ("Selecciona la carpeta donde extrajiste la traducción",  "Select the folder you extracted the translation to"),
+        ["ptbr_dlg_filter"] = ("Traducción (*.rar;*.zip;*.7z;*.pack)|*.rar;*.zip;*.7z;*.pack|Todos (*.*)|*.*", "Translation (*.rar;*.zip;*.7z;*.pack)|*.rar;*.zip;*.7z;*.pack|All files (*.*)|*.*"),
+        ["ptbr_type"]      = ("Traducción (.rar, .zip, .7z, .pack)",                    "Translation (.rar, .zip, .7z, .pack)"),
+        ["ptbr_pre"]       = ("Portugués de Brasil: la traducción de {0}",              "Brazilian Portuguese: the translation from {0}"),
+        ["ptbr_no_file"]   = ("No se encuentra la traducción elegida: {0}. Elígela otra vez o quítala.",
+                               "The chosen translation is not there: {0}. Choose it again or remove it."),
+        ["ptbr_old_release"] = ("Esta versión de SwitchWakerHD todavía no admite la traducción al portugués: se instala sin ella.",
+                               "This SwitchWakerHD release does not support the Portuguese translation yet: it is installed without it."),
+        ["ptbr_building"]  = ("Aplicando la traducción al portugués sobre tu juego...", "Applying the Portuguese translation to your game..."),
+        ["ptbr_done"]      = ("Portugués de Brasil: el juego empieza en portugués (si antes elegiste otro idioma en el juego, elige Português (Brasil) en Menos > Language). Para cambiar de idioma: mantén Menos > Language, elige otro y reinicia el juego.",
+                               "Brazilian Portuguese: the game starts in Portuguese (if you chose another language in the game before, choose Português (Brasil) in Minus > Language). To change the language: hold Minus > Language, choose another one and restart the game."),
+
+        // Prepared graphics (issue #88: the release's shader template, make_sd.py --shaders)
+        ["sh_h"]           = ("Preparar los gráficos ahora",                          "Prepare the graphics now"),
+        ["sh_d"]           = ("Compila en este ordenador los gráficos del juego a partir de tus propios archivos, para que la consola no tenga que hacerlo la primera vez: sin pantalla de carga ni lugares en negro. Tarda unos minutos más.",
+                               "Compiles the game's graphics on this computer from your own files, so the console does not have to the first time: no loading screen and no black places. It takes a few more minutes."),
+        // Older builds (#120: removed after a successful build, shared/OldBuilds.cs)
+        ["old_h"]          = ("Borrar las versiones anteriores",                      "Remove older builds"),
+        ["old_d"]          = ("Cuando la nueva versión termine bien, borra las carpetas de las versiones anteriores que este instalador dejó en {0} (de 5 a 10 GB cada una). Tus archivos del juego y la tarjeta SD no se tocan.",
+                               "When the new build finishes, removes the folders of earlier versions this installer left in {0} (5 to 10 GB each). Your game files and the SD card are not touched."),
+        ["old_removing"]   = ("Borrando las versiones anteriores...",                 "Removing older builds..."),
+        ["old_removed"]    = ("Versiones anteriores borradas: {0} ({1} GB libres más).", "Older builds removed: {0} ({1} GB freed)."),
+        ["old_toolchains"] = ("herramientas de versiones anteriores",                 "tools of earlier versions"),
+        ["old_kept"]       = ("Se deja {0}: contiene archivos que elegiste para esta instalación.",
+                               "Keeping {0}: it holds files you picked for this build."),
+        ["old_fail"]       = ("No se pudo borrar {0} ({1}); puedes borrarlo a mano.",  "Could not remove {0} ({1}); you can delete it by hand."),
+        ["shaders_downloading"] = ("Descargando la plantilla de gráficos...",          "Downloading the graphics template..."),
+        ["shaders_ready"]  = ("Plantilla de gráficos lista.",                         "Graphics template ready."),
+        ["shaders_none"]   = ("Esta versión no trae plantilla de gráficos: la consola los compilará la primera vez, como siempre.",
+                               "This release has no graphics template: the console will compile them the first time, as always."),
+        ["shaders_tools_fail"] = ("No se pudieron instalar las herramientas para preparar los gráficos (gcc, ninja, zlib de MSYS2): el juego se instala igual, y la consola los compilará la primera vez.",
+                               "The tools to prepare the graphics (MSYS2's gcc, ninja, zlib) could not be installed: the game is installed anyway, and the console will compile them the first time."),
+        ["shaders_preparing"] = ("Preparando los gráficos (unos minutos)...",          "Preparing the graphics (a few minutes)..."),
+        ["shaders_failed"] = ("No se pudieron preparar los gráficos: el juego funciona igual, y la consola los compilará la primera vez.",
+                               "The graphics could not be prepared: the game works the same, and the console will compile them the first time."),
         ["mm_building"]    = ("Preparando el minimapa a partir de tu Wind Waker de GameCube...", "Preparing the minimap from your GameCube Wind Waker..."),
         ["mm_done"]        = ("Minimapa: sale en el mar, en las zonas con carta. Sus opciones (posición, tamaño, opacidad, estilo) están en el juego: mantén Menos > Mods > Built-in, al final.",
                                "Minimap: it shows on the sea, in the sectors with a chart. Its options (position, size, opacity, style) are in the game: hold Minus > Mods > Built-in, at the end."),
@@ -107,8 +169,13 @@ static class Str
         // Progress page
         ["prog_h"]         = ("Instalando",                                          "Installing"),
         ["prog_body"]      = ("Puedes dejar el PC trabajando. El build tarda entre 10 y 30 minutos.", "You can leave the PC working. The build takes 10 to 30 minutes."),
-        ["step_python"]    = ("Python 3",                                            "Python 3"),
+        ["step_python"]    = ("Python 3.14",                                          "Python 3.14"),
         ["step_devkit"]    = ("devkitPro (herramientas de Switch)",                  "devkitPro (Switch tools)"),
+        ["tc_fetching"]    = ("Descargando las herramientas de Switch fijadas (devkitPro, ~130 MB la primera vez)...",
+                              "Downloading the pinned Switch tools (devkitPro, ~130 MB the first time)..."),
+        ["tc_ready"]       = ("Herramientas de Switch listas: {0}",                    "Switch tools ready: {0}"),
+        ["tc_fail"]        = ("No se pudieron descargar las herramientas de Switch fijadas (mira el registro). Pulsa Reintentar: lo ya descargado se conserva.",
+                              "The pinned Switch tools could not be downloaded (see the log). Press Retry: what was already downloaded is kept."),
         ["step_release"]   = ("Descargar SwitchWakerHD",                             "Download SwitchWakerHD"),
         ["step_build"]     = ("Construir el juego",                                  "Build the game"),
         ["elapsed"]        = ("Tiempo: {0}",                                         "Elapsed: {0}"),
@@ -117,13 +184,11 @@ static class Str
         ["cancelled"]      = ("Instalación cancelada.",                              "Installation cancelled."),
 
         // Engine messages
+        ["py_desk_arch"]    = ("Este equipo ({0}) no es ARM64 ni x86-64.", "This computer ({0}) is neither ARM64 nor x86-64."),
+        ["py_desk_downloading"] = ("Descargando Python {0}...",                        "Downloading Python {0}..."),
+        ["py_desk_unpacking"] = ("Preparando Python...",                               "Setting up Python..."),
+        ["py_desk_fail"]    = ("Python no arranca desde {0}. Borra esa carpeta y pulsa Reintentar.", "Python does not start from {0}. Delete that folder and press Retry."),
         ["py_found"]       = ("Python encontrado: {0}",                              "Python found: {0}"),
-        ["py_unsuitable"]  = ("No sirve: {0} (hace falta Python 3.8 o posterior, de 64 bits).", "Not usable: {0} (Python 3.8 or newer, 64-bit, is needed)."),
-        ["py_installing"]  = ("Instalando Python 3.12...",                           "Installing Python 3.12..."),
-        ["py_fail"]        = ("No se pudo instalar Python automáticamente. Instala Python 3 desde python.org (marca \"Add python.exe to PATH\") y vuelve a intentarlo.",
-                               "Could not install Python automatically. Install Python 3 from python.org (tick \"Add python.exe to PATH\") and try again."),
-        ["py_no_winget"]   = ("No se pudo instalar Python automáticamente: este Windows no tiene winget (el Instalador de aplicaciones). Instala Python 3 desde python.org (marca \"Add python.exe to PATH\") y vuelve a intentarlo.",
-                               "Could not install Python automatically: this Windows has no winget (App Installer). Install Python 3 from python.org (tick \"Add python.exe to PATH\") and try again."),
         ["py_pkgs"]        = ("Instalando dependencias de Python...",                "Installing Python dependencies..."),
         ["dkp_searching"]  = ("Buscando devkitPro...",                               "Looking for devkitPro..."),
         ["dkp_found_at"]   = ("devkitPro encontrado: {0}",                           "devkitPro found: {0}"),
@@ -238,8 +303,8 @@ static class Str
         ["hint_path_space"]= ("La ruta de la carpeta de trabajo tiene un espacio, y esta versión del juego no lo admite.", "The working folder's path has a space in it, which this version of the game does not support."),
         ["hint_broken_obj"]= ("Un build anterior se interrumpió y dejó archivos a medias; ya se han borrado. Pulsa Reintentar: se compila de nuevo.",
                                "An earlier build was interrupted and left half-written files; they have been deleted. Press Retry to compile again."),
-        ["hint_tool_missing"] = ("Falta una herramienta de devkitPro. Pulsa Reintentar; si vuelve a fallar, en Inicio > devkitPro > MSYS2 ejecuta: pacman -Syu (dos veces si te pide cerrar la ventana) y después pacman -S --needed switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make",
-                               "A devkitPro tool is missing. Press Retry; if it fails again, in Start > devkitPro > MSYS2 run: pacman -Syu (twice if it asks you to close the window), then pacman -S --needed switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make"),
+        ["hint_tool_missing"] = ("Falta una herramienta de devkitPro. Pulsa Reintentar; si vuelve a fallar, en Inicio > devkitPro > MSYS2 ejecuta: pacman -Syu (dos veces si te pide cerrar la ventana) y después pacman -S --needed devkitA64 switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make",
+                               "A devkitPro tool is missing. Press Retry; if it fails again, in Start > devkitPro > MSYS2 run: pacman -Syu (twice if it asks you to close the window), then pacman -S --needed devkitA64 switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake cmake make"),
         ["hint_av"]        = ("Windows denegó el acceso a un archivo. Suele ser un antivirus o el \"acceso controlado a carpetas\" de Windows: añade C:\\devkitPro y la carpeta de trabajo a sus exclusiones y pulsa Reintentar.",
                                "Windows denied access to a file. This is usually an antivirus or Windows' \"Controlled folder access\": add C:\\devkitPro and the working folder to its exclusions and press Retry."),
         ["hint_silent"]    = ("El build se detuvo sin mensaje: una herramienta de devkitPro no llegó a arrancar (suele faltarle una biblioteca tras una actualización a medias de MSYS2, o la bloquea un antivirus). En Inicio > devkitPro > MSYS2 ejecuta pacman -Syu (dos veces si lo pide) y pulsa Reintentar.",
@@ -252,31 +317,12 @@ static class Str
         ["done_h"]         = ("¡Listo!",                                              "All done!"),
         ["done_body"]      = ("SwitchWakerHD está construido. ¿Cómo quieres pasarlo a tu Switch?", "SwitchWakerHD is built. How do you want to move it to your Switch?"),
         ["xfer_size"]      = ("Son {0} archivos ({1} GB).",                          "That is {0} files ({1} GB)."),
-        ["xfer_mtp"]       = ("Por cable USB, con DBI",                              "Over a USB cable, with DBI"),
-        ["xfer_mtp_d"]     = ("Sin sacar la tarjeta: DBI comparte la SD de la Switch por USB (MTP).", "No need to take the card out: DBI shares the Switch's SD card over USB (MTP)."),
         ["xfer_sd"]        = ("Con la microSD en el PC",                             "With the microSD card in the PC"),
-        ["xfer_sd_d"]      = ("Con un lector de tarjetas, o con hekate en modo USB (UMS).", "With a card reader, or with hekate in USB mode (UMS)."),
+        ["xfer_sd_d"]      = ("Con un lector de tarjetas, o sin él: hekate deja ver la tarjeta por el cable USB.", "With a card reader, or without one: hekate shares the card over the USB cable."),
         ["xfer_manual"]    = ("Lo copio yo",                                         "I'll copy it myself"),
         ["xfer_manual_d"]  = ("Abre la carpeta y cópiala a la SD a mano.",           "Open the folder and copy it to the SD card by hand."),
-        ["mtp_steps"]      = ("1. En la Switch, abre DBI.\n2. Elige \"Run MTP responder\".\n3. Conecta la Switch al PC con un cable USB.",
-                               "1. On the Switch, open DBI.\n2. Choose \"Run MTP responder\".\n3. Connect the Switch to the PC with a USB cable."),
-        ["mtp_label"]      = ("Switch conectada:",                                   "Connected Switch:"),
-        ["mtp_none"]       = ("Todavía no se detecta. Comprueba que DBI muestra el MTP responder y que el cable transmite datos (no solo carga).",
-                               "Not detected yet. Check that DBI shows the MTP responder and that the cable carries data (not only charge)."),
-        ["mtp_replace"]    = ("Si Windows pregunta si quieres reemplazar archivos, elige Reemplazar.", "If Windows asks whether to replace files, choose Replace."),
-        ["btn_copy_mtp"]   = ("Copiar por USB",                                      "Copy over USB"),
-        ["mtp_starting"]   = ("Copiando a {0}...",                                   "Copying to {0}..."),
-        ["mtp_progress"]   = ("{0} de {1} archivos · {2} de {3} MB",                 "{0} of {1} files · {2} of {3} MB"),
-        ["mtp_done"]       = ("Copiado a la Switch. Ya puedes cerrar DBI y desconectar el cable.", "Copied to the Switch. You can close DBI and unplug the cable."),
-        ["mtp_lost"]       = ("No se encuentra la Switch. Vuelve a abrir el MTP responder en DBI y pulsa Copiar por USB.",
-                               "The Switch is not there any more. Start DBI's MTP responder again and press Copy over USB."),
-        ["mtp_mkdir_fail"] = ("No se pudo crear la carpeta {0} en la Switch.",       "Could not create the folder {0} on the Switch."),
-        ["mtp_copy_fail"]  = ("La copia de {0} no terminó. Pulsa Copiar por USB otra vez: sigue donde se quedó.",
-                               "Copying {0} did not finish. Press Copy over USB again: it resumes where it stopped."),
-        ["mtp_error"]      = ("La copia por USB falló: {0}. Pulsa Copiar por USB otra vez: sigue donde se quedó.",
-                               "The USB copy failed: {0}. Press Copy over USB again: it resumes where it stopped."),
-        ["sd_hint"]        = ("Pon la microSD en un lector de tarjetas, o en la Switch abre hekate > USB Tools > SD Card.",
-                               "Put the microSD card in a card reader, or on the Switch open hekate > USB Tools > SD Card."),
+        ["sd_hint"]        = ("Pon la microSD en un lector de tarjetas. ¿No tienes lector? En la Switch abre hekate > Tools > USB Tools > SD Card y conecta el cable USB: la tarjeta aparece aquí como una unidad.",
+                               "Put the microSD card in a card reader. No card reader? On the Switch open hekate > Tools > USB Tools > SD Card and plug in the USB cable: the card shows up here as a drive."),
         ["sd_label"]       = ("Tarjeta SD:",                                         "SD card:"),
         ["sd_none"]        = ("Todavía no se detecta ninguna tarjeta SD.",           "No SD card detected yet."),
         ["sd_copying"]     = ("Copiando a {0}...",                                   "Copying to {0}..."),
@@ -290,13 +336,12 @@ static class Str
         ["sd_fail"]        = ("La copia falló (robocopy {0}): comprueba que la tarjeta sigue conectada y no está protegida contra escritura, y vuelve a copiar; o cópiala a mano.",
                                "The copy failed (robocopy {0}): check that the card is still connected and not write-protected, and copy again; or copy the folder by hand."),
         ["sd_no_space"]    = ("No cabe en {0}: hay {1} GB libres y hacen falta {2} GB.", "It does not fit on {0}: {1} GB free, {2} GB needed."),
-        ["sd_fat32"]       = ("{0} está en FAT32, que no admite archivos de más de 4 GB. Formatea la tarjeta en exFAT (con hekate o el formateador oficial de la SD Association) o cópiala por USB con DBI.",
-                               "{0} is FAT32, which cannot hold files over 4 GB. Format the card as exFAT (with hekate or the SD Association's formatter) or copy over USB with DBI."),
+        ["sd_fat32"]       = ("{0} está en FAT32, que no admite archivos de más de 4 GB. Formatea la tarjeta en exFAT (con hekate o el formateador oficial de la SD Association).",
+                               "{0} is FAT32, which cannot hold files over 4 GB. Format the card as exFAT (with hekate or the SD Association's formatter)."),
         ["sd_no_atmo"]     = ("{0} no tiene la carpeta atmosphere: ¿es la tarjeta SD de tu Switch?", "{0} has no atmosphere folder: is it your Switch's SD card?"),
         ["manual_body"]    = ("Copia el contenido de esta carpeta (la carpeta switch) a la raíz de la microSD. Si pregunta, reemplaza los archivos.",
                                "Copy the contents of this folder (the switch folder) to the root of the microSD card. If asked, replace the files."),
         ["next_h"]         = ("En tu Nintendo Switch:",                              "On your Nintendo Switch:"),
-        ["next_1_mtp"]     = ("1. Cierra DBI.",                                      "1. Close DBI."),
         ["next_1"]         = ("1. Inserta la SD con los archivos copiados.",         "1. Insert the SD card with the copied files."),
         ["next_2"]         = ("2. Abre el Homebrew Menu (mantén R al abrir cualquier juego).", "2. Open the Homebrew Menu (hold R while starting any game)."),
         ["next_3"]         = ("3. Elige SwitchWakerHD.",                             "3. Choose SwitchWakerHD."),
@@ -306,15 +351,34 @@ static class Str
                                "This installer needs administrator rights. Right-click the .exe and choose \"Run as administrator\"."),
     };
 
-    // Another system's wording (the macOS installer: desktop/MacStrings.cs): its keys win over Table's.
+    // Another system's wording (the macOS installer: desktop/MacStrings.cs): its keys win over Table's (and its
+    // Portuguese ones over PtTable's).
     static Dictionary<string, (string es, string en)>? overrides;
-    public static void Override(Dictionary<string, (string es, string en)> table) => overrides = table;
+    static Dictionary<string, string>? overridesPt;
+    public static void Override(Dictionary<string, (string es, string en)> table, Dictionary<string, string>? pt = null)
+    {
+        overrides = table;
+        overridesPt = pt;
+    }
 
     public static string Get(string key, params object[] args)
     {
-        if ((overrides == null || !overrides.TryGetValue(key, out var pair)) && !Table.TryGetValue(key, out pair))
-            return $"[{key}]";
-        var s = Es ? pair.es : pair.en;
+        bool own = overrides != null && overrides.ContainsKey(key);
+        if (!own && !Table.ContainsKey(key)) return $"[{key}]";
+        var pair = own ? overrides![key] : Table[key];
+        string s;
+        if (Current == Lang.Pt)  // a key without Portuguese is the English one
+            s = own ? (overridesPt != null && overridesPt.TryGetValue(key, out var p) ? p : pair.en)
+                    : (PtTable.TryGetValue(key, out var q) ? q : pair.en);
+        else
+            s = Current == Lang.Es ? pair.es : pair.en;
         return args.Length > 0 ? string.Format(s, args) : s;
+    }
+
+    // the keys of a language table that lack Portuguese (tests and the builds' check)
+    public static IEnumerable<string> MissingPortuguese()
+    {
+        foreach (var k in Table.Keys) if (!PtTable.ContainsKey(k) && !(overrides?.ContainsKey(k) ?? false)) yield return k;
+        if (overrides != null) foreach (var k in overrides.Keys) if (!(overridesPt?.ContainsKey(k) ?? false)) yield return k;
     }
 }

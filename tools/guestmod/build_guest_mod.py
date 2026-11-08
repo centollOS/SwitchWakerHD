@@ -45,6 +45,13 @@ def default_cc():
     if os.environ.get("CC"):
         return shlex.split(os.environ["CC"])
     if platform.system() == "Darwin":
+        # macOS can point to another developer folder than the installed Command Line Tools (a removed Xcode,
+        # or one whose license hasn't been accepted; issue #219): use the installed tools directly then
+        clt = "/Library/Developer/CommandLineTools"
+        if not os.environ.get("DEVELOPER_DIR") and os.path.exists(clt + "/usr/bin/clang"):
+            found = subprocess.run(["xcrun", "--find", "clang"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if found.returncode != 0:
+                os.environ["DEVELOPER_DIR"] = clt
         return ["xcrun", "clang"]
     return ["clang"]
 

@@ -31,9 +31,17 @@ public class SetupService extends Service {
     /** "Continue anyway": skip heat (or battery) pauses for the rest of this setup run. */
     public static final String CONTINUE_HEAT = "org.wwhdrecomp.wwhd.SETUP_CONTINUE_HEAT";
     public static final String CONTINUE_BATTERY = "org.wwhdrecomp.wwhd.SETUP_CONTINUE_BATTERY";
+    /** Setup's optional models step for the ready game (the player ticked it after setup; ModelsStep). */
+    public static final String RUN_MODELS = "org.wwhdrecomp.wwhd.SETUP_RUN_MODELS";
     /** Job-dir records of the user's choice; kept across service restarts, cleared when the run ends. */
     public static final String HEAT_OVERRIDE = "continue-heat.json";
     public static final String BATTERY_OVERRIDE = "continue-battery.json";
+    /**
+     * Job-dir record of a heat pause that waits for the user (#277): it survives service restarts
+     * (screen off, app in the background, process killed) and goes with Continue, Continue anyway
+     * or the end of the run. host.json then carries "cooled" once Continue may end it.
+     */
+    public static final String HEAT_WAIT = "heat-pause.json";
     private static final int NOTIFICATION = 41;
     private static final String CHANNEL = "setup";
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -42,11 +50,18 @@ public class SetupService extends Service {
     private PowerManager power;
     private PowerManager.WakeLock wake;
     private File job;
+    /** The job whose recorded heat pause {@link #policy} holds. */
+    private File heatJob;
+    /** This service's lock on {@link #job}: old-job cleanup leaves a held job alone. */
+    private SetupJobCleanup.Hold hold;
     private boolean running;
     private boolean updating;
     private volatile boolean destroyed;
     private int thermal;
     private int temperature = -1;
+    /** Hottest CPU/GPU sensor in °C (SetupPolicy.hottestCoreSensor), NaN while unknown. */
+    private volatile float hottestCore = Float.NaN;
+    private Boolean loggedUnreliable;
     private int battery = -1;
     private boolean charging;
     private String reason;
@@ -102,7 +117,28 @@ public class SetupService extends Service {
             File selected = SetupStore.current(this);
             if (selected == null) throw new IOException("Choose a game dump before starting setup");
             if (running && !selected.equals(job)) throw new IOException("Another setup job is still running");
+            String action = intent == null ? null : intent.getAction();
+            // An automatic start (the setup screen's recovery check, an update) sent while a run was ending: the
+            // run has finished meanwhile (the setup screen saw "preparing models" as the models step's last
+            // attempt closed). A finished setup with nothing to rebuild starts nothing.
+            File selectedHost = new File(selected, "host.json");
+            String finished = action == null && !running && selectedHost.isFile() ?
+                SetupStore.read(selectedHost).optString("state") : null;
+            if (SetupRecoveryPolicy.automaticStartIsIdle(action, running, finished,
+                    "complete".equals(finished) && AndroidGame.needsRebuild(this))) {
+                Log.i("wwhd-setup", "setup complete; nothing to start");
+                job = selected;
+                updateNotification();
+                stopForeground(STOP_FOREGROUND_DETACH);
+                stopSelf();
+                return START_NOT_STICKY;
+            }
             job = selected;
+            if (hold == null || !hold.job.equals(job)) {
+                if (hold != null) { hold.close(); hold = null; }
+                hold = SetupJobCleanup.hold(job);
+                if (hold == null) throw new IOException("The chosen setup job is in use");
+            }
             File previousHost = new File(job, "host.json");
             if (!running) updating = false;
             if (!running && previousHost.isFile()) {
@@ -110,14 +146,30 @@ public class SetupService extends Service {
                 updating = previous.optString("state").equals("complete") ? AndroidGame.needsRebuild(this) :
                     previous.optBoolean("updating");
             }
-            String action = intent == null ? null : intent.getAction();
+            if (!job.equals(heatJob)) {
+                policy.restoreHeatWait(new File(job, HEAT_WAIT).isFile());
+                heatJob = job;
+                if (policy.heatWaiting()) Log.i("wwhd-setup", "heat pause restored: waiting for the user");
+            }
             if (PAUSE.equals(action)) SetupStore.write(new File(job, "manual-pause.json"), new JSONObject().put("schema", 1));
-            if (RESUME.equals(action)) SetupStore.remove(new File(job, "manual-pause.json"));
+            if (RESUME.equals(action)) {
+                SetupStore.remove(new File(job, "manual-pause.json"));
+                // Continue on a heat pause: only once the device has cooled down (#277)
+                if (policy.continueAfterCooling()) {
+                    SetupStore.remove(new File(job, HEAT_WAIT));
+                    Log.i("wwhd-setup", "continue after cooling down (" +
+                        SetupPolicy.readings(thermal, temperature, hottestCore) + ")");
+                }
+            }
+            if (RUN_MODELS.equals(action) && !running) {
+                SetupStore.write(new File(job, ModelsStep.STEP), new JSONObject().put("schema", 1));
+                SetupStore.remove(new File(job, ModelsStep.SCREEN));
+            }
             if (CONTINUE_HEAT.equals(action) || CONTINUE_BATTERY.equals(action)) {
                 SetupStore.write(new File(job, CONTINUE_HEAT.equals(action) ? HEAT_OVERRIDE : BATTERY_OVERRIDE),
                     new JSONObject().put("schema", 1).put("since", System.currentTimeMillis()));
                 Log.i("wwhd-setup", "continue anyway: " + (CONTINUE_HEAT.equals(action) ? "heat" : "battery") +
-                    " pauses skipped for this setup run (" + SetupPolicy.readings(thermal, temperature) +
+                    " pauses skipped for this setup run (" + SetupPolicy.readings(thermal, temperature, hottestCore) +
                     ", battery " + battery + "%, charging " + charging + ")");
             }
             main.removeCallbacks(tick);
@@ -136,14 +188,29 @@ public class SetupService extends Service {
             try {
                 boolean heatOverride = new File(job, HEAT_OVERRIDE).exists();
                 boolean batteryOverride = new File(job, BATTERY_OVERRIDE).exists();
-                reason = policy.update(thermal, temperature, battery, charging,
-                    new File(job, "manual-pause.json").exists(), heatOverride, batteryOverride);
+                hottestCore = SetupPolicy.hottestCoreSensor(new File("/sys"));
+                // A SEVERE status no temperature backs up is ignored (issue #254, SetupPolicy).
+                boolean unreliable = SetupPolicy.thermalStatusUnreliable(thermal, temperature, hottestCore);
+                if (!Boolean.valueOf(unreliable).equals(loggedUnreliable)) {
+                    if (unreliable || loggedUnreliable != null)
+                        Log.i("wwhd-setup", "thermal status " + (unreliable ? "looks unreliable, ignored" : "believed") +
+                            " (" + SetupPolicy.readings(thermal, temperature, hottestCore) + ")");
+                    loggedUnreliable = unreliable;
+                }
+                reason = policy.update(thermal, temperature, hottestCore, battery, charging,
+                    new File(job, "manual-pause.json").exists(), heatOverride, batteryOverride, android.os.SystemClock.elapsedRealtime());
+                // the models step waits for the setup screen (the game can only draw with the screen in front)
+                if (reason == null && new File(job, ModelsStep.SCREEN).exists()) reason = ModelsStep.SCREEN_REASON;
                 if (!java.util.Objects.equals(reason, loggedReason)) {
                     Log.i("wwhd-setup", (reason == null ? "resume" : "pause: " + reason) + " (" +
-                        SetupPolicy.readings(thermal, temperature) + ", battery " + battery + "%, charging " + charging +
+                        SetupPolicy.readings(thermal, temperature, hottestCore) + ", battery " + battery + "%, charging " + charging +
                         ", continue anyway: heat " + heatOverride + ", battery " + batteryOverride + ")");
                     loggedReason = reason;
                 }
+                File heatWait = new File(job, HEAT_WAIT);
+                if (policy.heatWaiting() && !heatWait.isFile())
+                    SetupStore.write(heatWait, new JSONObject().put("schema", 1).put("since", System.currentTimeMillis()));
+                else if (!policy.heatWaiting() && heatWait.exists()) SetupStore.remove(heatWait);
                 File pause = new File(job, "pause.json");
                 if (reason == null) {
                     if (pause.exists()) SetupStore.remove(pause);
@@ -179,6 +246,11 @@ public class SetupService extends Service {
             Exception error = null;
             try {
                 checkPause(active);
+                if (new File(active, ModelsStep.STEP).isFile() && modelsReady()) {
+                    // the build is ready and active: only the models step is left (it continues where it stopped)
+                    host("complete", null, runModels(active));
+                    throw new Finished();
+                }
                 if (!new File(active, "job.json").isFile()) host("importing", null, null);
                 JSONObject configuration = SetupImport.prepare(this, active, new SetupImport.Control() {
                     @Override public void checkpoint() throws Exception { checkPause(active); }
@@ -197,6 +269,9 @@ public class SetupService extends Service {
                 // the APK's native Yaz0 decoder for shader preparation (shaderprep.py; android/build_native.sh)
                 File yaz0 = new File(getApplicationInfo().nativeLibraryDir, "libyaz0.so");
                 if (yaz0.isFile()) configuration.put("yaz0", yaz0.getAbsolutePath());
+                // the setup's Code mods switch: game code with mod support (read at every start, so a
+                // changed choice rebuilds)
+                configuration.put("code_mods", AndroidGame.codeModsChosen(this));
                 configuration.put("port_revision", revision).put("jobs", compileJobs())
                     .put("shader_cache_root", AndroidUserDirectories.shaderPrebuild(getExternalFilesDir(null)).getAbsolutePath());
                 SetupStore.write(new File(active, "job.json"), configuration);
@@ -209,13 +284,17 @@ public class SetupService extends Service {
                 if (!status.getString("state").equals("ready_to_activate")) throw new IOException("Setup did not finish building");
                 JSONObject ready = SetupStore.read(new File(active, "ready.json"));
                 if (ready.getInt("schema") != 1 || !ready.getString("port_revision").equals(revision) ||
-                    !ready.getString("compiler_identity").equals(configuration.getJSONObject("compiler").getString("identity")))
+                    !ready.getString("compiler_identity").equals(configuration.getJSONObject("compiler").getString("identity")) ||
+                    ready.optBoolean("code_mods", false) != configuration.getBoolean("code_mods"))
                     throw new IOException("Completed build belongs to different setup inputs");
                 if (!active.equals(SetupStore.current(this))) throw new IOException("The selected setup job changed");
                 host("activating", null, null);
                 checkPause(active);
-                AndroidGame.activate(this, new File(ready.getString("library")), new File(ready.getString("game")));
+                AndroidGame.activate(this, new File(ready.getString("library")), new File(ready.getString("game")),
+                    configuration.getBoolean("code_mods"));
                 JSONObject shaders = ready.optJSONObject("shader_prebuild");
+                String message = null;
+                boolean prepared = shaders != null && shaders.optString("status").equals("ready");
                 if (shaders != null && shaders.optString("status").equals("warm_pending")) {
                     File result = new File(active, "shader-warm-result.json");
                     if (result.isFile() && !result.delete()) throw new IOException("Cannot replace shader preparation result");
@@ -225,12 +304,25 @@ public class SetupService extends Service {
                         checkPause(active);
                         Thread.sleep(200);
                     }
-                    if (!result.isFile() || !SetupStore.read(result).optString("status").equals("ready")) {
-                        host("complete", null, "Shader preparation skipped or failed; shaders will compile during play.");
-                    } else host("complete", null, null);
-                } else host("complete", null, null);
+                    prepared = result.isFile() && SetupStore.read(result).optString("status").equals("ready");
+                    if (!prepared) message = "Shader preparation skipped or failed; shaders will compile during play.";
+                }
+                // the optional models step: the game draws its models hidden behind setup's progress screen; without
+                // prepared shaders (no template, the warm failed) it cannot run, and setup says so
+                if (AndroidGame.modelsChosen(this)) {
+                    if (prepared) {
+                        SetupStore.write(new File(active, ModelsStep.STEP), new JSONObject().put("schema", 1));
+                        String models = runModels(active);
+                        if (models != null) message = models;
+                    } else {
+                        message = ModelsStep.skipped(message != null ? message :
+                            shaders == null ? null : shaders.optString("message", null));
+                    }
+                }
+                host("complete", null, message);
                 SetupKeyAccess.cleanupCompleted(active);
-            } catch (Pause requested) { paused = true; }
+            } catch (Finished done) { /* only the models step ran */ }
+            catch (Pause requested) { paused = true; }
             catch (Exception failure) {
                 error = failure;
                 try {
@@ -246,6 +338,63 @@ public class SetupService extends Service {
     }
 
     private static final class Pause extends Exception { }
+    private static final class Finished extends Exception { }
+
+    /** The active build is the one this setup made and needs no rebuild: the models step can draw with it. */
+    private boolean modelsReady() {
+        return new File(AndroidGame.storage(this), "active.json").isFile() && !AndroidGame.needsRebuild(this);
+    }
+
+    /**
+     * Setup's optional models step (ModelsStep; tools/android/android_models.py). Returns the message for the
+     * setup screen (null: done), or pauses (heat, battery, Pause, the setup screen left: Pause).
+     */
+    private String runModels(File active) throws Exception {
+        // the request of an attempt that ended with the app (closed, stopped) goes first: with only its "launched"
+        // mark removed, the setup screen would start that old attempt once more (it refuses to run, after seconds)
+        for (String name : new String[] {ModelsStep.ATTEMPT, ModelsStep.CANCEL, ModelsStep.RESULT, ModelsStep.SCREEN,
+                ModelsStep.LAUNCHED})
+            SetupStore.remove(new File(active, name));
+        checkPause(active);
+        AndroidGame.Selection selection = AndroidGame.selected(this);
+        if (selection == null || selection.game == null) {
+            SetupStore.remove(new File(active, ModelsStep.STEP));
+            return "Model preparation needs the game set up on this device.";
+        }
+        host(ModelsStep.STATE, null, null);
+        JSONArray arguments = new JSONArray().put("--job").put(active.getAbsolutePath())
+            .put("--game").put(selection.game.getAbsolutePath())
+            .put("--cache-root").put(AndroidUserDirectories.shaderPrebuild(getExternalFilesDir(null)).getAbsolutePath());
+        try {
+            EmbeddedPython.execute(this, "android_models", arguments.toString(), () -> checkPause(active));
+        } catch (Pause requested) {
+            throw requested;
+        } catch (Exception failure) {  // the game and its prepared shaders stay usable
+            Log.e("wwhd-setup", "models step failed", failure);
+        }
+        JSONObject result = new File(active, ModelsStep.RESULT).isFile() ? SetupStore.read(new File(active, ModelsStep.RESULT)) : new JSONObject();
+        ModelsStep.Outcome outcome = ModelsStep.outcome(result.optString("status"), result.optString("reason"));
+        Log.i("wwhd-setup", "models step: " + outcome + " (" + result + ")");
+        switch (outcome) {
+            case WAIT_FOR_SCREEN:
+                SetupStore.write(new File(active, ModelsStep.SCREEN), new JSONObject().put("schema", 1)
+                    .put("reason", result.optString("reason")));
+                throw new Pause();
+            case PAUSED:
+                throw new Pause();
+            case CANCELLED:
+                // what was prepared is kept; ticking the step again continues it
+                SetupStore.remove(new File(active, ModelsStep.STEP));
+                AndroidGame.chooseModels(this, false);
+                return "Model preparation stopped. What it prepared is kept; tick \u201cPrepare model shaders\u201d to continue.";
+            case DONE:
+                SetupStore.remove(new File(active, ModelsStep.STEP));
+                return null;
+            default:
+                SetupStore.remove(new File(active, ModelsStep.STEP));
+                return "Model preparation stopped early; the game is ready and compiles those shaders during play.";
+        }
+    }
     /** The release service always invokes the validating production entry point. */
     protected void executeBuild(File configuration) throws Exception {
         executePythonBuild("ondevice_setup", configuration);
@@ -277,10 +426,12 @@ public class SetupService extends Service {
         boolean lowRam = true;
         if (activities != null) { activities.getMemoryInfo(memory); lowRam = activities.isLowRamDevice(); }
         PowerManager power = (PowerManager) getSystemService(Context.POWER_SERVICE);
-        int thermal = power != null && Build.VERSION.SDK_INT >= 29 ? power.getCurrentThermalStatus() : 0;
+        int reported = power != null && Build.VERSION.SDK_INT >= 29 ? power.getCurrentThermalStatus() : 0;
+        int thermal = SetupPolicy.trustedThermal(reported, temperature, hottestCore);
         int jobs = SetupPolicy.compileJobs(Runtime.getRuntime().availableProcessors(), memory.availMem, lowRam, thermal);
         Log.i("wwhd-setup", "compile workers " + jobs + " (cores " + Runtime.getRuntime().availableProcessors() +
-            ", free memory " + (memory.availMem >> 20) + " MB, low-RAM " + lowRam + ", thermal " + thermal + ")");
+            ", free memory " + (memory.availMem >> 20) + " MB, low-RAM " + lowRam + ", thermal " + reported +
+            (thermal != reported ? " (looks unreliable, ignored)" : "") + ")");
         return jobs;
     }
 
@@ -294,7 +445,8 @@ public class SetupService extends Service {
         if (destroyed) return;
         try {
             if (paused) {
-                host("paused", reason == null ? "checkpoint" : reason, null);
+                host("paused", reason != null ? reason : new File(job, ModelsStep.SCREEN).exists() ?
+                    ModelsStep.SCREEN_REASON : "checkpoint", null);
                 updateNotification();
                 return; // Sensor changes or a notification action can resume.
             }
@@ -302,6 +454,9 @@ public class SetupService extends Service {
             // The run ended: a later run asks again before skipping heat or battery pauses.
             SetupStore.remove(new File(job, HEAT_OVERRIDE));
             SetupStore.remove(new File(job, BATTERY_OVERRIDE));
+            SetupStore.remove(new File(job, HEAT_WAIT));
+            SetupStore.remove(new File(job, ModelsStep.SCREEN));
+            policy.restoreHeatWait(false);
             main.removeCallbacks(tick);
             updateNotification();
             stopForeground(STOP_FOREGROUND_DETACH);
@@ -318,6 +473,7 @@ public class SetupService extends Service {
             .put("updated", System.currentTimeMillis());
         value.put("updating", updating);
         if (pause != null) value.put("reason", pause);
+        if ("heat".equals(pause)) value.put("cooled", policy.heatCooled());
         if (error != null) value.put("error", error.substring(0, Math.min(error.length(), 2048)));
         SetupStore.write(new File(job, "host.json"), value);
     }
@@ -326,7 +482,8 @@ public class SetupService extends Service {
         JSONObject status = SetupStore.read(new File(job, "host.json"));
         String state = status.getString("state");
         String text = state;
-        if (reason != null) text = running ? "Pausing at the next safe checkpoint" : SetupPolicy.description(reason, thermal, temperature);
+        if (reason != null) text = running ? "Pausing at the next safe checkpoint" :
+            SetupPolicy.description(reason, thermal, temperature, hottestCore, "heat".equals(reason) && policy.heatCooled());
         else if (state.equals("running")) {
             File progress = new File(job, "state.json");
             if (progress.isFile()) {
@@ -334,6 +491,14 @@ public class SetupService extends Service {
                 if (event != null) text = SetupPresentation.stageLabel(event.optString("stage", "setup"));
             }
         } else if (state.equals("warming shaders")) text = "Tap to prepare shaders for this device";
+        else if (state.equals(ModelsStep.STATE)) {
+            text = "Preparing shaders: models";
+            File progress = new File(job, ModelsStep.PROGRESS);
+            if (progress.isFile()) {
+                int bar = ModelsStep.bar(SetupStore.read(progress).optDouble("fraction", Double.NaN));
+                if (bar >= 0) text += " · " + bar / 10 + "%";
+            }
+        }
         else if (state.equals("complete")) text = "Setup complete — ready to play";
         else if (state.equals("failed")) text = "Setup failed — open setup to retry";
         if (SetupPresentation.showUpdate(updating, state))
@@ -356,10 +521,11 @@ public class SetupService extends Service {
             .setStyle(new Notification.BigTextStyle().bigText(text)).setContentIntent(open)
             .setOnlyAlertOnce(true).setOngoing(!finished);
         if (!finished) {
-            String action = reason != null && reason.equals("manual") ? RESUME : PAUSE;
+            boolean cooled = !running && "heat".equals(reason) && policy.heatCooled();
+            String action = (reason != null && reason.equals("manual")) || cooled ? RESUME : PAUSE;
             PendingIntent control = PendingIntent.getForegroundService(this, action.equals(PAUSE) ? 1 : 2,
                 new Intent(this, getClass()).setAction(action), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-            result.addAction(new Notification.Action.Builder(null, action.equals(PAUSE) ? "Pause" : "Resume", control).build());
+            result.addAction(new Notification.Action.Builder(null, action.equals(PAUSE) ? "Pause" : cooled ? "Continue" : "Resume", control).build());
             if (!running && SetupPolicy.overridable(reason)) {
                 String skip = reason.equals("heat") ? CONTINUE_HEAT : CONTINUE_BATTERY;
                 PendingIntent anyway = PendingIntent.getForegroundService(this, skip.equals(CONTINUE_HEAT) ? 3 : 4,
@@ -382,6 +548,11 @@ public class SetupService extends Service {
         }
         if (wake.isHeld()) wake.release();
         worker.shutdown();
+        if (hold != null && !running) {
+            try { hold.close(); }
+            catch (IOException failure) { Log.w("wwhd-setup", "Cannot release the setup job", failure); }
+            hold = null;
+        }
         super.onDestroy();
     }
 }

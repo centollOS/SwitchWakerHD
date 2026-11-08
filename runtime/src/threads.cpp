@@ -1,5 +1,6 @@
 #include "game_clock.h"
 #include "mods/fast_forward.h"
+#include "mods/story_native_stage_owner.h"
 // Guest threads run on host pthreads. OS synchronization objects live in guest
 // memory (the game allocates them) and are backed by host objects keyed by
 // their guest address.
@@ -11,6 +12,9 @@
 #endif
 #include "platform/host.h"
 #include "platform/sleep.h"
+#ifdef __SWITCH__
+#include "platform/cores_switch.h"  // (this fork) guest threads on core 3 (docs/guest-core3-plan.md)
+#endif
 #ifdef __APPLE__
 #include <pthread/qos.h>
 #endif
@@ -21,6 +25,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -29,9 +34,15 @@
 #include <vector>
 
 #include "runtime.h"
+#include "native_quiescence.h"
+#include "native_quiescence_audit.h"
 #include "savestate.h"
+#include "state_metadata_validation.h"
 #include "scheduler_tick.h"
+#include "rendezvous.h"
 #include "render_prof.h"
+#include "hle/os_time.h"
+#include "fixed_seed.h"
 #include "platform/perf_hint.h"
 #include "platform/thread_sampler.h"
 
@@ -86,16 +97,20 @@ enum State : uint8_t { NONE = 0, READY = 1, RUNNING = 2, WAITING = 4, MORIBUND =
 struct HostThread {
     uint32_t guest = 0;  // OSThread*
     Cpu cpu{};
+    // Captured once at create_thread, separate from mutable guest OSThread
+    // fields. threads_ss_load leaves these invalid for recreated threads.
+    uint32_t stack_bottom = 0, stack_top = 0;
+    bool stack_bounds_valid = false;
     std::mutex m;
     std::condition_variable cv;
     // waiting for its emulated core (core_acquire, with the core's mutex): a release wakes only the
     // thread that runs next, not every waiter (they all sat on the main thread's host core, each
     // waking for nothing at every release)
     std::condition_variable sched_cv;
-    bool is_main = false;  // the game's main thread (run_main)
     int suspend = 1;
-    bool started = false;
-    bool exited = false;
+    std::atomic<bool> initialized{false};
+    std::atomic<bool> started{false};
+    std::atomic<bool> exited{false};
     uint32_t exit_value = 0;
     uint32_t entry = 0, argc = 0, argv = 0;
     uint32_t core = 1;  // emulated core this thread is bound to (for OSGetCoreId)
@@ -114,6 +129,7 @@ struct HostThread {
     // statistics
     std::chrono::steady_clock::time_point acquired;
     std::atomic<uint64_t> held_ns{0}, wait_ns{0};
+    bool is_main = false;      // the game's main thread (run_main; main_profile.h)
 #ifdef __APPLE__
     mach_port_t mach = 0;     // for CPU time statistics
     uint64_t last_cpu_us = 0;
@@ -154,6 +170,19 @@ namespace threads {
 Cpu* current() { return t_cpu; }
 uint32_t current_thread() { return t_self ? t_self->guest : 0; }
 int current_core() { return t_self ? int(t_self->core) : -1; }
+bool current_stack_bounds(const Cpu* c, uint32_t& bottom, uint32_t& top) {
+    bottom=top=0;
+    HostThread* const t=t_self;
+    if(!c||!t||t_cpu!=c||c!=&t->cpu||c->thread!=t||!t->guest||
+       !t->stack_bounds_valid)return false;
+    const uint32_t sp=c->r[1];
+    // Native callers can reserve frames such as 0x18; stack ownership is a
+    // read-only query. Invocation adapters enforce their own alignment.
+    if((sp&7)||uint64_t(sp)<uint64_t(t->stack_bottom)+0x40||
+       sp>t->stack_top)return false;
+    bottom=t->stack_bottom;top=t->stack_top;
+    return true;
+}
 }  // namespace threads
 namespace gx2 { void publish_staged(); }
 
@@ -185,6 +214,7 @@ static void mem_watch_thread();
 
 static void core_acquire(HostThread* t) {
     if (!g_sched_on || t->holds_core) return;
+    mainprof::Mark main_mark(&t->cpu, "core wait");
     static std::once_flag tick;
     std::call_once(tick, [] {
         std::thread(sched_tick_thread).detach();
@@ -222,6 +252,9 @@ static void core_acquire(HostThread* t) {
     t->cpu.core = core;
     HostThread* next = best_ready(k);
     t->cpu.preempt = next && next->prio < t->prio;
+#ifdef __SWITCH__
+    if (host::core_layout_on()) cores::place_guest_thread(core);  // (this fork) docs/guest-core3-plan.md
+#endif
 }
 
 static void core_release(HostThread* t) {
@@ -235,7 +268,9 @@ static void core_release(HostThread* t) {
         std::lock_guard<std::mutex> lk(k.m);
         if (k.owner == t) k.owner = nullptr;
         t->holds_core = false;
-        t->held_ns += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t->acquired).count();
+        const uint64_t held = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t->acquired).count();
+        t->held_ns += held;
+        if (mainprof::on(&t->cpu)) mainprof::note_release(held);
         t->cpu.preempt = 0;
         next = best_ready(k);
     }
@@ -275,6 +310,25 @@ extern "C" void ppc_preempt(Cpu* c) {
     core_release(t);
     core_acquire(t);
 }
+
+#ifdef __SWITCH__
+// (this fork) The slow path of PPC_ENTER_FN (ppc.h): yield as ppc_preempt does, then run the function from the top
+// (the function entered here has done nothing yet: the check is its first statement). Called as a tail call, so
+// the function itself needs no stack frame for this.
+extern "C" void ppc_preempt_again(Cpu* c, PpcFunc self) {
+    ppc_preempt(c);
+    if (__builtin_expect(c->preempt, 0)) {
+        // ppc_preempt kept the request (interrupts disabled, or no core held): the function would stop here again
+        // and again. Before, it went on, and every call inside it asked again and returned at once; so it runs with
+        // the flag lowered and the request goes back up behind it (a request made meanwhile is not lost).
+        const uint8_t kept = __atomic_exchange_n(&c->preempt, 0, __ATOMIC_RELAXED);
+        self(c);
+        __atomic_fetch_or(&c->preempt, kept, __ATOMIC_RELAXED);
+        return;
+    }
+    self(c);
+}
+#endif
 
 // scheduler tick: requests time-slice / starvation preemption on cores that need it
 namespace threads { void report_sched(); }
@@ -491,6 +545,11 @@ static std::mutex g_frz_m;
 static std::condition_variable g_frz_cv;
 static bool g_frozen = false;
 static HostThread* g_frz_owner = nullptr;
+static threads::detail::FreezeOwnership g_freeze_ownership;
+static bool g_freeze_success=false;
+static thread_local std::vector<threads::detail::FreezeClaim> legacy_freeze_attempts;
+static const void* freeze_owner_tag(){return t_self?static_cast<const void*>(t_self):static_cast<const void*>(&t_cpu);}
+
 
 static void park_gate(HostThread* t) {
     std::unique_lock<std::mutex> l(g_frz_m);
@@ -508,6 +567,10 @@ static bool park_wait(std::unique_lock<std::mutex>& lk, std::condition_variable&
         const bool virtual_wait = simulation_deadline && (mods::fast_forward() || game_clock::shifted());
         if (virtual_wait ? timebase::simulation_now() >= *simulation_deadline :
             deadline && std::chrono::steady_clock::now() >= *deadline) return false;
+        static const char* const kWaitNames[] = {"wait", "wait: mutex", "wait: event", "wait: message send",
+                                                 "wait: message receive", "wait: sleep queue", "wait: join", "wait: rendezvous",
+                                                 "wait: sleep", "wait: service", "wait: entry"};
+        mainprof::Mark main_mark(t ? &t->cpu : nullptr, kind < 11 ? kWaitNames[kind] : "wait");
         if (t) {
             t->wait_kind = kind;
             t->wait_obj = obj;
@@ -520,8 +583,12 @@ static bool park_wait(std::unique_lock<std::mutex>& lk, std::condition_variable&
             threads::SchedulerTick::TimedWait timed(g_tick);
             if (virtual_wait) {
                 const auto now = timebase::simulation_now();
-                const auto left = now < *simulation_deadline ? ticks_to_ns(*simulation_deadline - now) / game_clock::rate() : std::chrono::nanoseconds(0);
-                cv.wait_for(lk, std::min(left, std::chrono::nanoseconds(1000000)), pred);
+                const unsigned rate = game_clock::rate();
+                const auto left = now < *simulation_deadline ? ticks_to_ns(*simulation_deadline - now) / rate : std::chrono::nanoseconds(0);
+                // (this fork) at rate 1 the whole wait: a rate change wakes the event (wake_timed_events). The 1 ms
+                // slices woke every timed event wait of every thread a thousand times a second whenever the fast
+                // forward mod was enabled, used or not
+                cv.wait_for(lk, rate > 1 ? std::min(left, std::chrono::nanoseconds(1000000)) : left, pred);
             } else if (simulation_deadline) {
                 cv.wait_until(lk, *deadline, [&] { return pred() || game_clock::shifted(); });
             } else cv.wait_until(lk, *deadline, pred);
@@ -810,14 +877,28 @@ static void* thread_main(void* p) {
     {
         // the game's main thread (the first, unnamed one) builds every frame's GX2 commands
         static std::atomic<bool> hinted{false};
-        if (name.empty() && !hinted.exchange(true)) perf_hint::add_current_thread(), thread_sampler::add_current_thread("game");
+        if (name.empty() && !hinted.exchange(true)) {
+            perf_hint::add_current_thread();
+            thread_sampler::add_current_thread("game");
+#ifdef __SWITCH__
+            thread_sampler::set_guest_stack(&ht->cpu.r[1]);
+#endif
+        }
     }
+#ifdef __SWITCH__
+    // (this fork) the threads the main thread hands work to ("update_ubo") in the profiles too
+    if (boosted_thread(name)) {
+        thread_sampler::add_current_thread(name.c_str());
+        thread_sampler::set_guest_stack(&ht->cpu.r[1]);
+    }
+#endif
 #ifdef __APPLE__
     ht->mach = pthread_mach_thread_np(pthread_self());
 #endif
 #ifdef __SWITCH__
     ht->nx = threadGetCurHandle();
 #endif
+    if (ht->is_main) mainprof::start(&ht->cpu);
     // keep guest threads on performance cores (see host::boost_thread_priority): the default QoS
     // let macOS park them on efficiency cores, which showed up as the main thread holding its core
     // without getting CPU time
@@ -825,6 +906,10 @@ static void* thread_main(void* p) {
     LOG("[thread] start \"%s\" core %d prio %d affinity %X", name.c_str(), ht->core, (int)ld32(ht->guest + osthread::kBasePrio),
         ld32(ht->guest + osthread::kAffinity));
     uint32_t rv = 0;
+    // A thread resumed while another owner holds an authenticated freeze must
+    // not execute its first guest instruction before passing the same gate.
+    ht->wst.store(kParked);
+    park_gate(ht);
     core_acquire(ht);
     try {
         rv = guest_call(&ht->cpu, ht->entry, {ht->argc, ht->argv});
@@ -834,10 +919,11 @@ static void* thread_main(void* p) {
     core_release(ht);
     {
         std::lock_guard<std::mutex> lk(ht->m);
-        ht->exited = true;
         ht->exit_value = rv;
         st32(ht->guest + osthread::kExitValue, rv);
         st8(ht->guest + osthread::kState, osthread::MORIBUND);
+        // Publish quiescence only after the final guest-memory writes.
+        ht->exited.store(true, std::memory_order_release);
     }
     ht->cv.notify_all();
     TRACE("[thread] %s exited with %08X", name.c_str(), rv);
@@ -860,8 +946,10 @@ static void start_host_thread(HostThread* ht) {
 #else
     pthread_attr_setstacksize(&attr, 64 << 20);  // deep guest call chains recurse on the host stack
 #endif
-    pthread_create(&ht->pt, &attr, thread_main, ht);
+    const int rc = pthread_create(&ht->pt, &attr, thread_main, ht);
     pthread_attr_destroy(&attr);
+    // (this fork) a failed create left ht->pt unset: run_main's join then read a null thread (a data abort at start)
+    if (rc) fatal("cannot create guest thread (error=%d: %s)", rc, strerror(rc));
 #endif
 }
 
@@ -879,9 +967,17 @@ static void init_cpu(Cpu& c, uint32_t stack_top) {
 }
 
 static HostThread* create_thread(uint32_t t, uint32_t entry, uint32_t argc, uint32_t argv, uint32_t stack_top,
-                                 uint32_t stack_size, int prio, uint32_t attr) {
+                                 uint32_t stack_size, int prio, uint32_t attr, bool service = false) {
     auto* ht = new HostThread();
-    ht->guest = t;
+    ht->guest = t;ht->service=service;
+    const uint64_t bottom=uint64_t(stack_top)-stack_size;
+    const bool mem2=stack_size&&bottom>=mem::kMem2Start&&stack_top<=mem::kMem2End;
+    const bool runtime=stack_size&&bottom>=mem::kRuntimeStart&&stack_top<=mem::kHostStart;
+    if((mem2||runtime)&&bottom<stack_top){
+        ht->stack_bottom=uint32_t(bottom);
+        ht->stack_top=stack_top;
+        ht->stack_bounds_valid=true;
+    }
     ht->entry = entry;
     ht->argc = argc;
     ht->argv = argv;
@@ -903,6 +999,9 @@ static HostThread* create_thread(uint32_t t, uint32_t entry, uint32_t argc, uint
     ht->core = core_from_affinity(attr, t_self ? t_self->core : 1);
     ht->cpu.core = ht->core;
     ht->prio = prio;
+    // Publish normal construction before insertion. Service initialization
+    // continues in make_service_cpu and remains visibly incomplete meanwhile.
+    ht->initialized.store(!service, std::memory_order_release);
     std::lock_guard<std::mutex> lk(g_threads_mutex);
     g_threads[t] = ht;
     return ht;
@@ -925,6 +1024,7 @@ void run_main(const LoadedModule& m, int argc, uint32_t argv) {
     uint32_t stack = mem::runtime_alloc(stack_size, 0x100);
     uint32_t t = mem::runtime_alloc(osthread::kSize, 8);
     HostThread* ht = create_thread(t, m.entry, argc, argv, stack + stack_size, stack_size, 16, 0x2 /* core 1 */);
+    ht->is_main = true;
     mem::write_cstr(mem::runtime_alloc(16), "{ Main thread }", 16);
     ht->is_main = true;
     ht->suspend = 0;
@@ -941,17 +1041,17 @@ Cpu* make_service_cpu(const char* name, uint32_t stack_size) {
     // host-only memory: service threads start at different times in different sessions
     uint32_t stack = mem::host_alloc(stack_size, 0x100);
     uint32_t t = mem::host_alloc(osthread::kSize, 8);
-    HostThread* ht = create_thread(t, 0, 0, 0, stack + stack_size, stack_size, 0, 0x7);
+    HostThread* ht = create_thread(t, 0, 0, 0, stack + stack_size, stack_size, 0, 0x7, true);
     ht->prio = -1;  // interrupt-like: preempts guest threads
-    ht->service = true;
     uint32_t nm = mem::host_alloc((uint32_t)strlen(name) + 1);
     mem::write_cstr(nm, name, (uint32_t)strlen(name) + 1);
     st32(t + osthread::kName, nm);
     t_self = ht;
     t_cpu = &ht->cpu;
-    ht->started = true;
     ht->wait_kind = W_SERVICE;
     ht->wst.store(kParked);  // idle until service_begin
+    ht->started.store(true, std::memory_order_relaxed);
+    ht->initialized.store(true, std::memory_order_release);
     host::boost_thread_priority();
     return &ht->cpu;
 }
@@ -995,7 +1095,7 @@ HLE(coreinit, OSJoinThread) {
     if (!ht) { ret(c, 0); return; }
     {
         std::unique_lock<std::mutex> lk(ht->m);
-        park_wait(lk, ht->cv, [&] { return ht->exited; }, W_JOIN, arg(c, 0));
+        park_wait(lk, ht->cv, [&] { return ht->exited.load(); }, W_JOIN, arg(c, 0));
     }
     if (arg(c, 1)) st32(arg(c, 1), ht->exit_value);
     ret(c, 1);
@@ -1017,8 +1117,13 @@ HLE(coreinit, OSSleepTicks) {
     for (;;) {
         const auto now = timebase::simulation_now();
         if (now >= end) break;
-        const auto left = ticks_to_ns(end - now) / game_clock::rate();
-        threads::park_sleep_until(std::chrono::steady_clock::now() + std::min(left, std::chrono::nanoseconds(1000000)));
+        const unsigned rate = game_clock::rate();
+        const auto left = ticks_to_ns(end - now) / rate;
+        // (this fork) 1 ms slices only while the clock runs faster (a rate change is not woken here): at rate 1 a
+        // sleep is up to 16 ms at a time (fast forward starts at most that late); every sleep of every guest thread
+        // woke each 1 ms whenever the mod was enabled
+        const auto slice = rate > 1 ? std::chrono::nanoseconds(1000000) : std::chrono::nanoseconds(16000000);
+        threads::park_sleep_until(std::chrono::steady_clock::now() + std::min(left, slice));
     }
 }
 HLE(coreinit, OSSetThreadName) { st32(arg(c, 0) + osthread::kName, arg(c, 1)); }
@@ -1408,6 +1513,8 @@ HLE(coreinit, OSSendMessage) {
         const uint64_t lockStart = stats ? mono_ns() : 0;
         const bool contended = lock_spinning(q->m);
         std::unique_lock<std::mutex> lk(q->m, std::adopt_lock);
+        const bool profiled = mainprof::on(c);  // (upstream's main-thread profile)
+        if (profiled) mainprof::bump(mainprof::g_sends);
         if (stats && contended) {
             add_stat(g_send_stats.contended, 1);
             add_stat(g_send_stats.contendedNs, mono_ns() - lockStart);
@@ -1422,10 +1529,14 @@ HLE(coreinit, OSSendMessage) {
                 ret(c, 0);
                 return;
             }
-            const uint64_t fullStart = stats ? mono_ns() : 0;
+            const uint64_t fullStart = stats || profiled ? mono_ns() : 0;
             q->senders++;
             park_wait(lk, q->notFull, [&] { return !q->msgs.full(); }, W_MSG_SEND, arg(c, 0));
             q->senders--;
+            if (profiled) {
+                mainprof::bump(mainprof::g_send_full);
+                mainprof::bump(mainprof::g_send_full_ns, mono_ns() - fullStart);
+            }
             if (stats) {
                 add_stat(g_send_stats.full, 1);
                 add_stat(g_send_stats.fullNs, mono_ns() - fullStart);
@@ -1530,27 +1641,54 @@ void os_wakeup_thread_queue(uint32_t queue) {
     if (wake) q->cv.notify_all();
 }
 
-// OSRendezvous
+// OSRendezvous: one arrival flag per core (rendezvous.h). A waiter marks the core it runs on (the
+// core OSGetCoreId reports) and waits until every core in its mask has arrived. WWHD's sound
+// start-up depends on it: the main thread (core 1) starts a thread on core 0 and waits with mask 1
+// until that thread has finished its set-up; the started thread waits with mask 3.
+// WWHD_TRACE_RDV=1 logs every wait (caller core, mask, arrived cores, time waited).
 struct HRendezvous {
     std::mutex m;
     std::condition_variable cv;
-    uint32_t arrived = 0;
+    threads::RendezvousCores cores;
 };
 static ObjTable<HRendezvous> g_rdv;
+static const bool g_trace_rdv = getenv("WWHD_TRACE_RDV") != nullptr;
 HLE(coreinit, OSInitRendezvous) {
     HRendezvous* r = g_rdv.get(arg(c, 0));
     std::lock_guard<std::mutex> lk(r->m);
-    r->arrived = 0;
+    r->cores.reset();
+}
+// timeout_ns < 0: no timeout. False on timeout (the caller's core stays marked, as on Cafe OS).
+static bool rendezvous_wait(Cpu* c, uint32_t addr, uint32_t mask, int64_t timeout_ns) {
+    HRendezvous* r = g_rdv.get(addr);
+    const uint32_t core = t_self ? t_self->core : 1u;  // as OSGetCoreId
+    const auto t0 = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lk(r->m);
+    if (g_trace_rdv) LOG("[rdv] wait %08X core %u mask %X arrived %X lr %08X", addr, core, mask, r->cores.arrived, c->lr);
+    r->cores.arrive(core);
+    r->cv.notify_all();
+    auto done = [&] { return r->cores.complete(mask); };
+    bool ok;
+    if (timeout_ns < 0) ok = park_wait(lk, r->cv, done, W_RDV, addr);
+    else {
+        const auto deadline = t0 + std::chrono::nanoseconds(timeout_ns);
+        const uint64_t simulation_deadline =
+            timebase::simulation_now() + (uint64_t)((unsigned __int128)timeout_ns * timebase::kTicksPerSec / 1000000000ull);
+        ok = park_wait(lk, r->cv, done, W_RDV, addr, &deadline, &simulation_deadline);
+    }
+    if (g_trace_rdv)
+        LOG("[rdv] %s %08X core %u mask %X arrived %X after %.3f ms lr %08X", ok ? "pass" : "timeout", addr, core, mask, r->cores.arrived,
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), c->lr);
+    return ok;
 }
 HLE(coreinit, OSWaitRendezvous) {
-    // arg1 is a core mask; we treat each set bit as one participant
-    HRendezvous* r = g_rdv.get(arg(c, 0));
-    uint32_t need = __builtin_popcount(arg(c, 1) & 7);
-    std::unique_lock<std::mutex> lk(r->m);
-    r->arrived++;
-    r->cv.notify_all();
-    park_wait(lk, r->cv, [&] { return r->arrived >= need; }, W_RDV, arg(c, 0));
+    rendezvous_wait(c, arg(c, 0), arg(c, 1), -1);
     ret(c, 1);
+}
+// OSWaitRendezvousWithTimeout(rendezvous, coreMask, OSTimeNanoseconds timeout); -1 waits forever
+HLE(coreinit, OSWaitRendezvousWithTimeout) {
+    const int64_t timeout = (int64_t)arg64(c, 5);
+    ret(c, rendezvous_wait(c, arg(c, 0), arg(c, 1), timeout == -1 ? -1 : std::max<int64_t>(timeout, 0)) ? 1 : 0);
 }
 
 // ---------------------------------------------------------------- alarms
@@ -1658,7 +1796,8 @@ HLE(coreinit, OSSetAlarm) {
 }
 HLE(coreinit, OSSetPeriodicAlarm) {
     uint32_t alarm = arg(c, 0), cb = c->r[9];
-    uint64_t start = timebase::to_host(arg64(c, 5)), period = arg64(c, 7);
+    // the start is an OSTime (the game passes OSGetTime() + ..., JUTXfb 028A22D8)
+    uint64_t start = timebase::to_host(os_time::to_guest(arg64(c, 5))), period = arg64(c, 7);
     st32(alarm + 0x0C, cb);
     uint64_t now = timebase::simulation_now();
     uint64_t when = start;
@@ -1677,32 +1816,59 @@ HLE(coreinit, OSSetAlarmUserData) { st32(arg(c, 0) + 0x38, arg(c, 1)); }
 HLE(coreinit, OSGetAlarmUserData) { ret(c, ld32(arg(c, 0) + 0x38)); }
 
 // ---------------------------------------------------------------- time API
-HLE(coreinit, OSGetTime) { ret64(c, timebase::guest_now()); }
+// OSGetTime is the calendar clock (os_time.h): the guest timebase plus a bias (os_time::start_bias), as on the
+// console (and Cemu), where OSGetSystemTime/OSGetTick/mftb count from the start. Earlier builds
+// returned the time since the start here and showed the host's current date for every
+// OSTicksToCalendarTime, so every Quest Log showed "now" (#322).
+namespace os_time {
+static std::atomic<int64_t> g_bias{0};
+static std::once_flag g_bias_once;
+static void init_bias() {
+    std::call_once(g_bias_once, [] {
+        const char* why = nullptr;
+        g_bias = start_bias(getenv("WWHD_OS_TIME"), fixed_seed::enabled(), host_now(), timebase::guest_now(), &why);
+        if (why) LOG("[time] %s", why);
+        const Calendar t = to_calendar(g_bias.load() + (int64_t)timebase::guest_now());
+        LOG("[time] calendar clock (OSGetTime): %04d-%02d-%02d %02d:%02d:%02d (%s)", t.year, t.mon + 1, t.mday, t.hour, t.min,
+            t.sec, getenv("WWHD_OS_TIME") && *getenv("WWHD_OS_TIME") ? "WWHD_OS_TIME" : fixed_seed::enabled() ? "fixed: WWHD_TEST_FIXED_SEED" : "host clock");
+    });
+}
+int64_t bias() {
+    init_bias();
+    return g_bias.load(std::memory_order_relaxed);
+}
+void set_bias(int64_t b) {
+    init_bias();
+    const int64_t before = g_bias.exchange(b, std::memory_order_relaxed);
+    if (b != before) LOG("[time] save state: the calendar clock continues %+.0f s from this run's", double(b - before) / kTicksPerSec);
+}
+uint64_t now() { return timebase::guest_now() + (uint64_t)bias(); }
+uint64_t to_guest(uint64_t os_ticks) {
+    // a time from OSGetSystemTime (far below the bias) is already guest time
+    return os_ticks >= (uint64_t)bias() ? os_ticks - (uint64_t)bias() : os_ticks;
+}
+}  // namespace os_time
+
+HLE(coreinit, OSGetTime) { ret64(c, os_time::now()); }
 HLE(coreinit, OSGetSystemTime) { ret64(c, timebase::guest_now()); }
 HLE(coreinit, OSGetTick) { ret(c, (uint32_t)timebase::guest_now()); }
 
 HLE(coreinit, OSTicksToCalendarTime) {
     // OSCalendarTime: sec, min, hour, mday, mon, year, wday, yday, msec, usec (int32 each)
-    uint64_t ticks = arg64(c, 3);
-    uint32_t out = arg(c, 2);
-    // guest epoch is 2000-01-01; report the host's wall clock instead of time since boot
-    (void)ticks;
-    time_t t = time(nullptr);
-    struct tm tmv;
-#ifdef _WIN32
-    localtime_s(&tmv,&t);
-#else
-    localtime_r(&t, &tmv);
-#endif
-    uint32_t v[10] = {(uint32_t)tmv.tm_sec, (uint32_t)tmv.tm_min, (uint32_t)tmv.tm_hour, (uint32_t)tmv.tm_mday,
-                      (uint32_t)tmv.tm_mon, (uint32_t)(tmv.tm_year + 1900), (uint32_t)tmv.tm_wday,
-                      (uint32_t)tmv.tm_yday, 0, 0};
-    for (int i = 0; i < 10; i++) st32(out + 4 * i, v[i]);
+    const int64_t ticks = (int64_t)arg64(c, 3);
+    const uint32_t out = arg(c, 2);
+    const os_time::Calendar t = os_time::to_calendar(ticks);
+    const int32_t v[10] = {t.sec, t.min, t.hour, t.mday, t.mon, t.year, t.wday, t.yday, t.msec, t.usec};
+    for (int i = 0; i < 10; i++) st32(out + 4 * i, (uint32_t)v[i]);
 }
 
 // ---------------------------------------------------------------- save states
 
 namespace threads {
+uint32_t diagnostic_count() {
+    std::lock_guard<std::mutex> lock(g_threads_mutex);
+    return uint32_t(g_threads.size());
+}
 static std::string thread_name(HostThread* t) {
     uint32_t n = ld32(t->guest + osthread::kName);
     std::string s = n >= 0x10000 ? mem::read_cstr(n) : "";
@@ -1713,9 +1879,14 @@ static std::string thread_name(HostThread* t) {
 
 bool quiesce(int timeout_ms, std::string& busy, int entry_mode, int entry_after_ms) {
     HostThread* me = t_self;
+    legacy_freeze_attempts.emplace_back();
     {
         std::lock_guard<std::mutex> l(g_frz_m);
-        g_frozen = true;
+        auto&claim=legacy_freeze_attempts.back();
+        if(g_frozen||!g_freeze_ownership.claim(detail::FreezeKind::Legacy,freeze_owner_tag(),claim)){
+            busy="another freeze already owns the requester";return false;
+        }
+        g_frozen = true;g_freeze_success=false;
         g_frz_owner = me;
     }
     if (me) me->wst.store(kRequester);
@@ -1742,17 +1913,20 @@ bool quiesce(int timeout_ms, std::string& busy, int entry_mode, int entry_after_
                 }
             }
         }
-        if (busy.empty()) { g_entry_parks = 0; return true; }
+        if (busy.empty()) { g_entry_parks = 0;std::lock_guard lock(g_frz_m);g_freeze_success=g_freeze_ownership.current(legacy_freeze_attempts.back());return g_freeze_success; }
         if (std::chrono::steady_clock::now() > end) { g_entry_parks = 0; return false; }
         std::this_thread::sleep_for(std::chrono::microseconds(200));
     }
 }
 
 void thaw() {
-    g_entry_parks = 0;
+    if(legacy_freeze_attempts.empty())return;
+    const auto claim=legacy_freeze_attempts.back();legacy_freeze_attempts.pop_back();
+    if(!claim.epoch)return; // a rejected nested/conflicting attempt owns nothing
     {
         std::lock_guard<std::mutex> l(g_frz_m);
-        g_frozen = false;
+        if(!g_freeze_ownership.release(claim))return;
+        g_entry_parks = 0;g_frozen = false;g_freeze_success=false;
         g_frz_owner = nullptr;
     }
     g_frz_cv.notify_all();
@@ -1760,6 +1934,118 @@ void thaw() {
     block_end();
     if (me) me->wst.store(kRunning);
 }
+
+namespace {
+struct ParkedThread {
+ uint32_t guest;HostThread*thread;bool initialized,started,exited;int state;
+ bool operator==(const ParkedThread&)const=default;
+};
+std::vector<ParkedThread> parked_set(HostThread*owner,bool&parked){
+ std::vector<ParkedThread>result;parked=true;
+ for(const auto&[guest,t]:g_threads){
+  const bool initialized=t->initialized.load(std::memory_order_acquire),started=t->started.load(),exited=t->exited.load();const int state=t->wst.load();
+  if(!initialized)parked=false;
+  if(t!=owner&&started&&!exited&&state!=kParked)parked=false;
+  result.push_back({guest,t,initialized,started,exited,t==owner?kRequester:state});
+ }
+ std::sort(result.begin(),result.end(),[](const auto&a,const auto&b){return a.guest<b.guest;});return result;
+}
+bool owns_core(HostThread*t,uint32_t core){
+ if(!g_sched_on||core>=3||!t->holds_core||t->held_core!=core||t->core!=core||t->cpu.core!=core)return false;
+ std::lock_guard lock(g_sched[core].m);return g_sched[core].owner==t;
+}
+// True only while this host owns the real registry lock in a borrowed read window.
+thread_local bool borrowed_registry_held=false;
+struct NativeFreezeState {
+ HostThread*owner=nullptr;Cpu*cpu=nullptr;story_native_event_game_thread::Ticket ticket{};
+ detail::FreezeClaim claim{};uint32_t core=0;int previous_state=kRunning;bool active=false;
+ std::thread::id host=std::this_thread::get_id();
+ std::unique_lock<std::mutex>registry;
+ std::vector<ParkedThread>set;
+ bool current(const Cpu*c)const{
+  if(!active||host!=std::this_thread::get_id()||t_self!=owner||t_cpu!=cpu||c!=cpu||cpu->thread!=owner||!registry.owns_lock()||owner->wst.load()!=kRequester||!story_native_event_game_thread::verify(cpu,ticket)||!owns_core(owner,core))return false;
+  std::lock_guard freeze(g_frz_m);
+  if(!g_frozen||g_frz_owner!=owner||!g_freeze_success||!g_freeze_ownership.current(claim)||g_entry_parks.load())return false;
+  bool parked=false;return parked_set(owner,parked)==set&&parked;
+ }
+ void release(){
+  if(!active)return;if(host!=std::this_thread::get_id()||t_self!=owner||t_cpu!=cpu)std::terminate();
+  // Regain the original core before opening gates, including every timeout.
+  core_acquire(owner);
+  if(registry.owns_lock())registry.unlock();
+  {std::lock_guard freeze(g_frz_m);if(!g_freeze_ownership.release(claim))std::terminate();g_frozen=false;g_frz_owner=nullptr;g_freeze_success=false;g_entry_parks=0;}
+  active=false;owner->wst.store(previous_state);g_frz_cv.notify_all();
+ }
+ ~NativeFreezeState(){release();}
+};
+}
+struct BorrowedNativeReadState {
+ HostThread*owner;Cpu*cpu;story_native_event_game_thread::Ticket ticket;detail::FreezeClaim claim;
+ std::thread::id host=std::this_thread::get_id();std::unique_lock<std::mutex>registry;
+ std::vector<ParkedThread>set;bool active=false;
+ bool current(const Cpu*c)const{
+  if(!active||host!=std::this_thread::get_id()||!borrowed_registry_held||!registry.owns_lock()||t_self!=owner||t_cpu!=cpu||c!=cpu||cpu->thread!=owner||!story_native_event_game_thread::verify(cpu,ticket)||legacy_freeze_attempts.empty()||legacy_freeze_attempts.back()!=claim)return false;
+  std::lock_guard freeze(g_frz_m);bool parked=false;return g_frozen&&g_frz_owner==owner&&g_freeze_success&&g_freeze_ownership.current(claim)&&owner->wst.load()==kRequester&&!g_entry_parks.load()&&parked_set(owner,parked)==set&&parked;
+ }
+ void release(){if(!active)return;if(host!=std::this_thread::get_id())std::terminate();active=false;borrowed_registry_held=false;registry.unlock();}
+ ~BorrowedNativeReadState(){release();}
+};
+class NativeQuiescenceIssuer {
+public:
+ static std::optional<NativeQuiescence>borrow(Cpu*c,story_native_event_game_thread::Ticket ticket,const QuiescenceWitness&w,std::string&why){
+  why.clear();HostThread*me=t_self;uint32_t bottom=0,top=0;
+  if(borrowed_registry_held||current_thread_holds_native_quiescence()||!c||!me||t_cpu!=c||c!=&me->cpu||c->thread!=me||me->service||!me->initialized.load(std::memory_order_acquire)||!me->started.load()||me->exited.load()||me->wst.load()!=kRequester||me->irq_off||!story_native_event_game_thread::verify(c,ticket)||!current_stack_bounds(c,bottom,top)){why="borrowed legacy requester";return {};}
+  if(story_native_stage_owner::current_thread_holds_lifetime_pin()){why="Stage lifetime pin held before borrowed read";return {};}
+  if(!w.current(c)){why="not current legacy park";return {};}
+  try{
+   auto state=std::make_shared<BorrowedNativeReadState>();state->owner=me;state->cpu=c;state->ticket=ticket;state->claim=legacy_freeze_attempts.back();state->registry=std::unique_lock<std::mutex>(g_threads_mutex);bool parked=false;state->set=parked_set(me,parked);if(!parked){why="legacy registry not parked";return {};}
+   borrowed_registry_held=true;state->active=true;if(!w.current(c)||!state->current(c)){why="legacy park changed";return {};}
+   return NativeQuiescence([state](const Cpu*p){return state->current(p);},[state]{state->release();},true);
+  }catch(...){why="borrowed legacy capture failed";return {};}
+ }
+
+ static std::optional<NativeQuiescence> acquire(Cpu*c,story_native_event_game_thread::Ticket ticket,int timeout_ms,std::string&why){
+  why.clear();HostThread*me=t_self;uint32_t bottom=0,top=0;
+  if(timeout_ms<1||timeout_ms>250||!c||!me||t_cpu!=c||c!=&me->cpu||c->thread!=me||me->service||!me->initialized.load(std::memory_order_acquire)||!me->started.load()||me->exited.load()||me->wst.load()!=kRunning||me->irq_off||!story_native_event_game_thread::verify(c,ticket)||!current_stack_bounds(c,bottom,top)||!owns_core(me,me->core)){why="native requester";return {};}
+  if(story_native_stage_owner::current_thread_holds_lifetime_pin()){why="Stage lifetime pin held before native freeze";return {};}
+  const Cpu saved=*c;auto state=std::make_shared<NativeFreezeState>();state->owner=me;state->cpu=c;state->ticket=ticket;state->core=me->core;state->previous_state=me->wst.load();
+  {std::lock_guard freeze(g_frz_m);if(g_frozen||g_entry_parks.load()||!g_freeze_ownership.claim(detail::FreezeKind::Native,me,state->claim)){why="freeze already owned";return {};}g_frozen=true;g_frz_owner=me;g_freeze_success=false;state->active=true;}
+  me->wst.store(kRequester);core_release(me);
+  const auto start=std::chrono::steady_clock::now();const auto deadline=start+std::chrono::milliseconds(timeout_ms);
+  try{for(;;){
+   std::unique_lock registry(g_threads_mutex);bool parked=false;auto set=parked_set(me,parked);
+   if(parked){
+    state->registry=std::move(registry);state->set=std::move(set);
+    {std::lock_guard freeze(g_frz_m);if(!g_freeze_ownership.current(state->claim)){why="freeze revoked";break;}g_freeze_success=true;g_entry_parks=0;}
+    core_acquire(me);
+    if(std::memcmp(c,&saved,sizeof(Cpu))||!state->current(c)){why="requester changed";break;}
+    return NativeQuiescence([state](const Cpu*cpu){return state->current(cpu);},[state]{state->release();});
+   }
+   registry.unlock();const auto now=std::chrono::steady_clock::now();
+   if(now>=deadline){why="guest threads not parked";break;}
+   if(now-start>=std::chrono::milliseconds(std::min(10,timeout_ms/2))){g_entry_parks=1;for(int k=0;k<3;++k){std::lock_guard<std::mutex> lk(g_sched[k].m);if(g_sched[k].owner)g_sched[k].owner->cpu.preempt=1;}}  // (this fork: Cpu::preempt)
+   std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }}catch(...){why="quiescence capture failed";}
+  state->release();std::memcpy(c,&saved,sizeof(Cpu));return {};
+ }
+ static std::optional<QuiescenceWitness> legacy(Cpu*c){
+  HostThread*me=t_self;const auto host=std::this_thread::get_id();if(!c||!me||t_cpu!=c||c!=&me->cpu||c->thread!=me||legacy_freeze_attempts.empty())return {};
+  const auto claim=legacy_freeze_attempts.back();
+  const auto owns=[me,claim]{return claim.kind==detail::FreezeKind::Legacy&&g_frozen&&g_frz_owner==me&&g_freeze_success&&g_freeze_ownership.current(claim)&&me->wst.load()==kRequester;};
+  {std::lock_guard freeze(g_frz_m);if(!owns())return {};}
+  std::unique_lock registry(g_threads_mutex,std::defer_lock);if(!borrowed_registry_held)registry.lock();bool parked=false;const auto set=parked_set(me,parked);if(!parked)return {};
+  return QuiescenceWitness([c,me,host,claim,set](const Cpu*cpu){
+   if(host!=std::this_thread::get_id()||cpu!=c||t_cpu!=c||t_self!=me||c->thread!=me||legacy_freeze_attempts.empty()||legacy_freeze_attempts.back()!=claim)return false;
+   {std::lock_guard freeze(g_frz_m);if(!g_frozen||g_frz_owner!=me||!g_freeze_success||!g_freeze_ownership.current(claim)||me->wst.load()!=kRequester)return false;}
+   std::unique_lock registry(g_threads_mutex,std::defer_lock);if(!borrowed_registry_held)registry.lock();std::lock_guard freeze(g_frz_m);bool parked=false;
+   return g_frozen&&g_frz_owner==me&&g_freeze_success&&g_freeze_ownership.current(claim)&&parked_set(me,parked)==set&&parked;
+  });
+ }
+};
+std::optional<NativeQuiescence>try_native_quiescence(Cpu*c,story_native_event_game_thread::Ticket ticket,int timeout_ms,std::string&why){return NativeQuiescenceIssuer::acquire(c,ticket,timeout_ms,why);}
+std::optional<NativeQuiescence>borrow_native_read_quiescence(Cpu*c,story_native_event_game_thread::Ticket t,const QuiescenceWitness&w,std::string&why){return NativeQuiescenceIssuer::borrow(c,t,w,why);}
+std::optional<QuiescenceWitness>current_quiescence(Cpu*c){return NativeQuiescenceIssuer::legacy(c);}
+
 }  // namespace threads
 
 namespace {
@@ -1887,7 +2173,7 @@ bool threads_ss_save(ss::Writer& w, std::string& why) {
     for (auto& [a, r] : rv) {
         std::lock_guard<std::mutex> l(r->m);
         w.u32(a);
-        w.u32(r->arrived);
+        w.u32(r->cores.arrived);  // core mask (bit n = core n arrived)
     }
     {
         std::lock_guard<std::mutex> l(g_alarm_mutex);
@@ -1912,7 +2198,13 @@ bool threads_ss_save(ss::Writer& w, std::string& why) {
 }
 
 // can the threads of this snapshot be put back into the current process? (all threads parked)
+bool threads_ss_validate(ss::Reader r, std::string& why) {
+    if (!ss::metadata::threads<ThreadRec>(r)) { why = "corrupt threads section"; return false; }
+    return true;
+}
+
 bool threads_ss_check(ss::Reader r, std::string& why) {
+    if (!threads_ss_validate(r,why)) return false;
     uint32_t n = r.u32();
     std::vector<ThreadRec> recs(n);
     for (auto& t : recs) r.bytes(&t, sizeof t);
@@ -1996,13 +2288,14 @@ void threads_ss_load(ss::Reader& r) {
             void* self = t->cpu.thread;
             t->cpu = s.cpu;
             t->cpu.thread = t;
-            t->cpu.main_thread = t->is_main;
+            t->cpu.main_thread = t->is_main ? 1 : 0;  // (not the saved byte)
             t->cpu.core = t->holds_core ? t->held_core : s.core;
             t->suspend = s.suspend;
             t->prio = s.prio;
             t->core = s.core;
             t->exit_value = s.exit_value;
             t->woken = s.woken;
+            t->initialized.store(true, std::memory_order_release);
             (void)self;
         }
     }
@@ -2078,13 +2371,13 @@ void threads_ss_load(ss::Reader& r) {
     cnt = r.u32();
     for (auto& [a, x] : sorted<HRendezvous>(g_rdv)) {
         std::lock_guard<std::mutex> l(x->m);
-        x->arrived = 0;
+        x->cores.reset();
     }
     for (uint32_t i = 0; i < cnt; i++) {
         uint32_t a = r.u32(), arrived = r.u32();
         HRendezvous* x = g_rdv.get(a);
         std::lock_guard<std::mutex> l(x->m);
-        x->arrived = arrived;
+        x->cores.arrived = arrived & threads::RendezvousCores::kCoreMask;
     }
     // alarms; the guest clock continues from the saved time
     uint64_t saved_now;
@@ -2144,6 +2437,9 @@ void threads_ss_load(ss::Reader& r) {
         t->cv.notify_all();
     }
 }
+
+namespace threads {
+}  // namespace threads
 
 static void thread_dump_loop(int secs) {
     host::set_thread_name("thread dump");

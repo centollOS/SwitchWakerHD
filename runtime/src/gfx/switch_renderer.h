@@ -15,12 +15,25 @@ void set_picture_grade(const PictureGrade& g);
 // the counter in the top-left corner: 0 off, 1 frame rate, 2 with render-thread load and draws (WWHD_FPS)
 int fps_overlay_mode();
 void set_fps_overlay_mode(int mode);
+// tests (Developer options; off / 1 by default, not saved): the ambient-occlusion pass replaced by "no occlusion", and
+// the shadow maps' scale (0.5, 1, 2 x their 1024x1024); any thread, from the next frame
+bool skip_ao();
+void set_skip_ao(bool on);
+float shadow_scale();
+void set_shadow_scale(float scale);
 // 16x anisotropic filtering on the game's mipmapped linear samplers (WWHD_ANISO): any thread, from the next frame
 bool aniso();
-void set_aniso(bool on);
+void set_aniso(bool on);   // on: 16x
+int aniso_level();         // 1 (off), 2, 4, 8 or 16
+void set_aniso_level(int level);
 // edge smoothing (FXAA, issue #21) on the 3D picture before the HUD (WWHD_FXAA): any thread, from the next frame
 bool fxaa();
 void set_fxaa(bool on);
+// FSR 1 in the present pass when the game's picture is smaller than the window (EASU: docked 720p -> 1080p, or
+// dynamic resolution below 1.0) or the same size (RCAS sharpening only): any thread, from the next frame. Test
+// option, off by default
+bool fsr();
+void set_fsr(bool on);
 // the bloom and the distance blur (issue #15): the game samples its bloom chain and its half-size picture with more
 // levels than the render targets have; gfx/deko mip_chain makes those levels. On by default (WWHD_BLOOM=0,
 // WWHD_DISTANCE_BLUR=0 off at start); any thread
@@ -45,8 +58,17 @@ enum DrawOpt : int {
     kOptFixedSkip, kOptDepthOnly, kOptTexSharedCache, kOptVtxLayoutCache, kOptBigSubmits, kOptProfiler, kOptPrefetch,
     kOptRegGens,  // round 41: targets, fixed state and viewport skipped while their registers are unchanged
     kOptSkipTv,   // the TV picture not drawn while the window shows the GamePad's (Off-TV Play; WWHD_DK_SKIP_TV)
+    // the draw-memo round (gfx/deko dk_draw.h): the target memo by state words and its same-frame skip
+    // (WWHD_DK_TARGET_MEMO2), the fixed state in three memos (WWHD_DK_FIXED_MEMO), vertex states by layout identity
+    // (WWHD_DK_VTX_IDENTITY)
+    kOptTargetMemo2, kOptFixedMemo, kOptVtxIdentity,
     kDrawOpts
 };
+// shader compile threads for the shaders draws ask for (gfx/deko/shaders_dk.cpp helper_main): 0 auto (the default:
+// three while draws wait for their shaders, one otherwise), 1 (as before) to 3; any thread (the Switch tab's Debug
+// section, debug server "shaderthreads")
+int shader_compile_threads();
+void set_shader_compile_threads(int n);
 bool draw_opt(int which);
 void set_draw_opt(int which, bool on);
 // texture eviction (gfx/deko/surfaces.cpp, issue #11): frames a texture may stay unused before it leaves the image

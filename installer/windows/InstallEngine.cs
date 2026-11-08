@@ -66,74 +66,14 @@ sealed class InstallEngine : EngineBase
     ProcessJob? currentJob;   // the running process and all it started; KillCurrent stops them
 
     // ── Python ───────────────────────────────────────────────────────────────
-    protected override void Python()
-    {
-        if (!FindPython())
-        {
-            Say(Str.Get("py_installing"));
-            // PrependPath: winget's own silent switches leave python.exe off PATH.
-            // -1: winget did not start (older Windows 10, or its App Execution Alias turned off).
-            var rc = Exec("winget", "install --id Python.Python.3.12 --source winget --accept-package-agreements " +
-                                    "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1\"",
-                          check: false);
-            RefreshPath();
-            if (!FindPython()) throw new InstallException(Str.Get(rc == -1 ? "py_no_winget" : "py_fail"));
-        }
-        Say(Str.Get("py_pkgs"));
-        var pkgs = "zstandard pycryptodome" + (ForwarderKeys != null ? " pillow" : "");
-        if (Exec(pythonCmd, "-m pip install --disable-pip-version-check " + pkgs, check: false) != 0)
-            throw new InstallException(Str.Get("py_pkgs_fail", pkgs));
-        if (MinimapGame != null && IsZstdRvz(MinimapGame)) Python314();
-    }
+    // cmake and ninja: the pinned build (tools/switch/build_switch.py) runs the ones next to this Python
+    protected override void Python() => PinnedPython("zstandard", "pycryptodome", "pillow", "cmake", "ninja");
 
-    bool HasZstdPython()
-    {
-        foreach (var (cmd, args) in new[] { ("py", "-3.14 "), ("py", "-3 "), (pythonCmd, "") })
-            if (Capture(cmd, args + "-c \"import compression.zstd;print('ZSTD')\"").output.Contains("ZSTD")) return true;
-        return false;
-    }
-
-    void Python314()
-    {
-        if (HasZstdPython()) return;
-        Say(Str.Get("mm_py_installing"));
-        var rc = Exec("winget", "install --id Python.Python.3.14 --source winget --accept-package-agreements " +
-                                "--accept-source-agreements --silent --override \"/quiet InstallAllUsers=1 PrependPath=0 Include_launcher=1\"",
-                      check: false);
-        RefreshPath();
-        if (!HasZstdPython()) throw new InstallException(Str.Get(rc == -1 ? "py_no_winget" : "mm_py_fail"));
-        Ok(Str.Get("mm_py_ok"));
-    }
-
-    bool FindPython()
-    {
-        var candidates = new List<string> { "python", "py", "python3" };
-        foreach (var root in new[] {
-                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-                     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Python") })
-        {
-            if (!Directory.Exists(root)) continue;
-            candidates.AddRange(Directory.GetDirectories(root, "Python3*")
-                .OrderByDescending(d => d)
-                .Select(d => Path.Combine(d, "python.exe"))
-                .Where(File.Exists));
-        }
-        // 3.8 or newer (older ones get no pip wheels for zstandard and pycryptodome) and 64-bit (translating the
-        // game code needs more memory than a 32-bit process has). The Microsoft Store's "python" stub prints nothing.
-        foreach (var cmd in candidates)
-        {
-            var (code, output) = Capture(cmd, "-c \"import sys,struct;print('PY',sys.version_info[0],sys.version_info[1],struct.calcsize('P')*8)\"");
-            var m = Regex.Match(output, @"PY (\d+) (\d+) (\d+)");
-            if (code != 0 || !m.Success) continue;
-            int major = int.Parse(m.Groups[1].Value), minor = int.Parse(m.Groups[2].Value), bits = int.Parse(m.Groups[3].Value);
-            var desc = $"Python {major}.{minor} ({bits}-bit, {cmd})";
-            if (major != 3 || minor < 8 || bits != 64) { Info(Str.Get("py_unsuitable", desc)); continue; }
-            pythonCmd = cmd;
-            Ok(Str.Get("py_found", desc));
-            return true;
-        }
-        return false;
-    }
+    // System32's tar.exe (Windows 10 1803 and newer), by its full path: an MSYS2 or Git tar on PATH reads C:\ paths
+    // as relative ones
+    protected override void Untar(string archive, string intoDir) =>
+        Exec(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe"),
+             $"-xzf {Quote(archive)} -C {Quote(intoDir)}");
 
     // ── devkitPro ────────────────────────────────────────────────────────────
     protected override void Toolchain() => DevkitPro();
@@ -186,12 +126,19 @@ sealed class InstallEngine : EngineBase
         ClearStalePacmanLock();
         // cmake and make (MSYS2's): build.sh runs them, and no devkitPro package brings them (issue #28).
         // gcc (MSYS2's, for the PC): the forwarder script compiles hacBrewPack, the NSP packer, with it.
+        // gcc, ninja and zlib-devel (MSYS2's): the prepared graphics (PrepareShaders, issue #88) build
+        // tools/switch/dksh_cache with them; MSYS2's mirrors serve them, not pkg.devkitpro.org.
         // Only when missing: --needed still upgrades an installed one to the package list's version, without its
         // libraries (cmake 4.0.2 -> 4.4.4 without msys-jsoncpp-27.dll, so cmake no longer started). A partial
         // update of MSYS2 (RepairMsys mends one when the tools then don't start).
-        var packages = "switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
-        foreach (var tool in ForwarderKeys != null ? new[] { "cmake", "make", "gcc" } : new[] { "cmake", "make" })
-            if (!File.Exists(Path.Combine(DevkitRoot, @"msys2\usr\bin", tool + ".exe"))) packages += " " + tool;
+        // devkitA64 by name: now a metapackage over devkita64-gcc, -binutils and -newlib. An older one owns those
+        // files itself, and installing -binutils (switch-dev) without its upgrade stopped with "conflicting files" (#28).
+        var packages = "devkitA64 switch-dev deko3d uam switch-lz4 switch-zlib switch-cmake";
+        var msysTools = new List<(string package, string file)> { ("cmake", @"usr\bin\cmake.exe"), ("make", @"usr\bin\make.exe") };
+        if (ForwarderKeys != null || PrepareShaders) msysTools.Add(("gcc", @"usr\bin\gcc.exe"));
+        if (PrepareShaders) msysTools.AddRange(new[] { ("ninja", @"usr\bin\ninja.exe"), ("zlib-devel", @"usr\include\zlib.h") });
+        foreach (var (package, file) in msysTools)
+            if (!File.Exists(Path.Combine(DevkitRoot, "msys2", file))) packages += " " + package;
         var output = new List<string>();
         string? reason = null;
         for (int attempt = 1; ; attempt++)
@@ -205,7 +152,8 @@ sealed class InstallEngine : EngineBase
             for (int i = 0; i < 10; i++) { ct.ThrowIfCancellationRequested(); Thread.Sleep(1000); }
             ClearStalePacmanLock();
         }
-        if (reason == "dkp_why_403")
+        var throughPython = reason == "dkp_why_403";
+        if (throughPython)
         {
             Warn(Str.Get("dkp_403_xfer"));
             ClearStalePacmanLock();
@@ -218,9 +166,11 @@ sealed class InstallEngine : EngineBase
             // pkg.devkitpro.org often answers 403 (Cloudflare, devkitPro/pacman#63) and the whole -Sy gives up
             // without installing anything. The package lists it did refresh, and the ones from earlier runs,
             // are still on disk: install from those.
+            // After a 403 the packages come through Python too: pacman's own download gets the same 403 (#28).
             Warn(Str.Get("dkp_pkg_warn") + " " + Str.Get(reason));
             ClearStalePacmanLock();
-            Exec(pacman, "-S --needed --noconfirm " + packages, check: false);
+            if (throughPython) PacmanThroughPython("-S --needed --noconfirm " + packages, new List<string>());
+            else Exec(pacman, "-S --needed --noconfirm " + packages, check: false);
         }
         CheckDevkitTools(reason);
     }
@@ -267,6 +217,13 @@ sealed class InstallEngine : EngineBase
         {
             Warn(Str.Get("fwd_gcc_fail"));
             ForwarderKeys = null;
+        }
+        // the prepared graphics (issue #88) without their tools: the game is built anyway, the console compiles them
+        if (PrepareShaders && new[] { @"usr\bin\gcc.exe", @"usr\bin\ninja.exe", @"usr\include\zlib.h" }
+                .Any(f => !File.Exists(Path.Combine(DevkitRoot, "msys2", f))))
+        {
+            Warn(Str.Get("shaders_tools_fail"));
+            PrepareShaders = false;
         }
         Ok(Str.Get("dkp_tools_ok"));
     }

@@ -5,11 +5,20 @@ on:
     types: [published]
   # By hand on any branch, to try an installer change before a release: the .exe, the Mac zips and the Linux archives are run artifacts
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Test installer: the release (tag) it builds instead of the latest, e.g. v1.0.1-test.3"
+        required: false
+        default: ""
 
 permissions:
   contents: write
   # SignPath reads the unsigned .exe from this run's artifacts
   actions: read
+
+# A pre-release's installers build that pre-release (its own SwitchWakerHD-<tag>.zip), not the latest release
+env:
+  WWHD_RELEASE: ${{ github.event_name == 'release' && github.event.release.prerelease && github.ref_name || inputs.release || '' }}
 
 jobs:
   build-installer:
@@ -37,6 +46,7 @@ jobs:
           dotnet publish installer/windows/SwitchWakerHD.Installer.csproj `
             --configuration Release `
             -p:Version=${{ steps.version.outputs.value }} `
+            -p:WwhdRelease="${{ env.WWHD_RELEASE }}" `
             --output installer/bin `
             --nologo
 

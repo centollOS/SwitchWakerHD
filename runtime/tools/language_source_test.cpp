@@ -1,3 +1,18 @@
+#include <algorithm>
+#include <cassert>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <initializer_list>
+#include <iostream>
+#include <iterator>
+#include <map>
+#include <string>
+#include <vector>
 // Language sources (game_languages.h, docs/language-packs.md) on a SYNTHETIC game folder: dummy files
 // named like the game's language packs (a "SARC" tag and a few made-up bytes; no game data). Checks the
 // packs found in data/game-lang/<region>/content/Common/Pack, the start chosen for a language and a
@@ -7,14 +22,6 @@
 #include "runtime.h"
 #include "savestate.h"
 
-#include <cassert>
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <map>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -22,6 +29,8 @@
 #endif
 // hle/fs.cpp reports opened language packs to the right-to-left text support (not under test)
 namespace rtl_text { void language_pack_opened(const std::string&) {} }
+namespace game_layouts { void note_open(const std::string&, const std::string&) {} }
+namespace link_poses { void note_open(const std::string&, const std::string&) {} }
 namespace fs = std::filesystem;
 namespace {
 std::map<std::string, PpcFunc>& functions() {
@@ -86,7 +95,7 @@ int main() {
 #ifdef _WIN32
     auto memory = VirtualAlloc(address, memory_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
-    auto memory = mmap(address, memory_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    auto memory = mmap(address, memory_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
 #endif
     assert(memory == address);
     const fs::path root = fs::temp_directory_path() /

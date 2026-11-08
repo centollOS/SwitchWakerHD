@@ -64,6 +64,8 @@ FILE *g_dump = nullptr;
 std::mutex g_dump_mutex;
 bool g_dump_enabled = false;
 uint32_t g_dump_frames = 0;
+std::atomic<bool> g_gamepad_sounds{true};
+std::atomic<float> g_gamepad_gain{1};
 std::atomic<float> g_gain{1};  // master volume (issue #124), read by the producer mix
 std::atomic<int> g_channels{2};
 std::atomic<bool> g_requested{false}, g_fallback{false}, g_device_changed{false};
@@ -217,6 +219,22 @@ void init() {
                 gain = std::isfinite(env) ? std::clamp(env, 0.0f, 1.0f) : 1.0f;
             }
             g_gain = gain;
+        }
+        {
+            std::string saved;
+            if (hostui::get("audioGamepadSounds", saved)) g_gamepad_sounds = saved != "0";
+            if (hostui::get("audioGamepadVolume", saved)) {
+                char* end = nullptr;
+                float percent = std::strtof(saved.c_str(), &end);
+                if (end != saved.c_str() && std::isfinite(percent))
+                    g_gamepad_gain = std::clamp(percent, 0.0f, 100.0f) / 100.0f;
+            }
+            if (const char* e = getenv("WWHD_AUDIO_GAMEPAD_SOUNDS")) g_gamepad_sounds = strcmp(e, "0") != 0;
+            if (const char* e = getenv("WWHD_AUDIO_GAMEPAD_VOLUME")) {
+                char* end = nullptr;
+                float gain = std::strtof(e, &end);
+                g_gamepad_gain = end != e && std::isfinite(gain) ? std::clamp(gain, 0.0f, 1.0f) : 1.0f;
+            }
         }
         if (getenv("WWHD_NO_AUDIO")) {
             open_dump();
@@ -506,6 +524,19 @@ void set_master_volume(float gain, bool save) {
     // like the graphics options: a value WWHD_AUDIO_VOLUME chose for this start is not saved
     if (save && !master_volume_from_env())
         hostui::set("audioVolume", std::to_string(int(std::lround(g_gain.load() * 100.0f))));
+}
+bool gamepad_sounds() { return g_gamepad_sounds.load(); }
+float gamepad_sounds_volume() { return g_gamepad_gain.load(); }
+bool gamepad_sounds_from_env() { return getenv("WWHD_AUDIO_GAMEPAD_SOUNDS") != nullptr; }
+bool gamepad_sounds_volume_from_env() { return getenv("WWHD_AUDIO_GAMEPAD_VOLUME") != nullptr; }
+void set_gamepad_sounds(bool enabled) {
+    g_gamepad_sounds = enabled;
+    if (!gamepad_sounds_from_env()) hostui::set("audioGamepadSounds", enabled ? "1" : "0");
+}
+void set_gamepad_sounds_volume(float gain, bool save) {
+    g_gamepad_gain = std::isfinite(gain) ? std::clamp(gain, 0.0f, 1.0f) : 1.0f;
+    if (save && !gamepad_sounds_volume_from_env())
+        hostui::set("audioGamepadVolume", std::to_string(int(std::lround(g_gamepad_gain.load() * 100.0f))));
 }
 bool surround_fallback() {
     return g_fallback;

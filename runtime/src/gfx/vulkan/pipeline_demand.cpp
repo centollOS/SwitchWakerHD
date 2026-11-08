@@ -13,6 +13,7 @@
 #include <string>
 #include <limits>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 
 namespace gfxvk {
@@ -54,11 +55,15 @@ struct Compiler {
   VkPipelineCache cache = VK_NULL_HANDLE;
   std::vector<uint8_t> seed;
   std::mutex mutex;
+  // the driver cache's lifetime and merges: exclusive; compiles into it (the demand compiler's and the warm-up
+  // worker's, compile_in_demand_cache) shared, as a VkPipelineCache is internally synchronized
+  std::shared_mutex cacheMutex;
   std::condition_variable wake;
   std::deque<std::shared_ptr<Job>> queue;
   std::thread thread;
   std::atomic<unsigned> active{0};
-  bool stopped = false, changed = false;
+  bool stopped = false;
+  std::atomic<bool> changed{false};
   ~Compiler() {
     { std::lock_guard lock(mutex); stopped = true; }
     wake.notify_all();
@@ -69,18 +74,20 @@ struct Compiler {
 Compiler& compiler() { static Compiler value; return value; }
 void run(Compiler& c) {
   host::set_thread_name("Vulkan demand");
-  // Only this thread ever creates/modifies this cache. The main thread reads
-  // or merges it only after joining us under the renderer execution lock.
+  // Live checkpoints take cacheMutex; queue admission never holds it.
   VkResult cacheResult = VK_SUCCESS;
-  if (!c.cache) {
-    VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
-    info.initialDataSize = c.seed.size(); info.pInitialData = c.seed.data();
-    cacheResult = vkCreatePipelineCache(c.device, &info, nullptr, &c.cache);
-    if (cacheResult != VK_SUCCESS && !c.seed.empty()) {
-      info.initialDataSize = 0; info.pInitialData = nullptr;
+  {
+    std::lock_guard cacheLock(c.cacheMutex);
+    if (!c.cache) {
+      VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+      info.initialDataSize = c.seed.size(); info.pInitialData = c.seed.data();
       cacheResult = vkCreatePipelineCache(c.device, &info, nullptr, &c.cache);
+      if (cacheResult != VK_SUCCESS && !c.seed.empty()) {
+        info.initialDataSize = 0; info.pInitialData = nullptr;
+        cacheResult = vkCreatePipelineCache(c.device, &info, nullptr, &c.cache);
+      }
+      std::vector<uint8_t>().swap(c.seed);
     }
-    std::vector<uint8_t>().swap(c.seed);
   }
   for (;;) {
     std::shared_ptr<Job> job;
@@ -105,9 +112,13 @@ void run(Compiler& c) {
       }
       const auto cpuStart = stutter::trace().enabled() ? stutter::thread_cpu_now() : 0;
       const auto started = stutter::now();
-      result.result = cacheResult == VK_SUCCESS
-          ? vkCreateGraphicsPipelines(c.device, c.cache, 1, job->state.get(), nullptr, &result.pipeline)
-          : cacheResult;
+      {
+        std::shared_lock cacheLock(c.cacheMutex);
+        result.result = cacheResult == VK_SUCCESS
+            ? vkCreateGraphicsPipelines(c.device, c.cache, 1, job->state.get(), nullptr, &result.pipeline)
+            : cacheResult;
+        if (result.result == VK_SUCCESS) c.changed = true;
+      }
       const auto ended = stutter::now();
       result.compileNs = ended - started;
       if (stutter::trace().enabled()) trace_event(job->kind.c_str(), job->frame, job->key, started, ended, int(result.result), stutter::cpu_elapsed(cpuStart));
@@ -115,7 +126,6 @@ void run(Compiler& c) {
         vkDestroyPipeline(c.device, result.pipeline, nullptr);
         result.pipeline = VK_NULL_HANDLE;
       }
-      c.changed |= result.result == VK_SUCCESS;
       { std::lock_guard lock(job->mutex); job->result = result; job->ready = true; }
       result.pipeline = VK_NULL_HANDLE; // Ownership transferred to the job.
     } catch (...) {
@@ -171,6 +181,16 @@ std::optional<PipelineBuildResult> PipelineDemandTicket::wait_for(uint64_t budge
         stutter::now(), int(VK_ERROR_UNKNOWN));
     throw;
   }
+}
+void PipelineDemandTicket::prioritize() {
+  if (!state_) return;
+  auto& c = compiler();
+  std::lock_guard lock(c.mutex);
+  for (auto it = c.queue.begin(); it != c.queue.end(); ++it)
+    if (*it == state_) {
+      if (it != c.queue.begin()) { auto job = std::move(*it); c.queue.erase(it); c.queue.push_front(std::move(job)); }
+      return;
+    }
 }
 PipelineBuildResult PipelineDemandTicket::wait(const std::function<void()>& presentWhilePending) {
   if (!state_) throw std::logic_error("empty pipeline demand ticket");
@@ -277,7 +297,22 @@ bool finish_pipeline_demand(VkPipelineCache target) {
   { std::lock_guard lock(c.mutex); c.stopped = true; }
   c.wake.notify_all();
   if (c.thread.joinable()) c.thread.join();
-  if (!target || !c.cache || !c.changed) return false;
+  return merge_pipeline_demand_cache(target, true);
+}
+VkResult compile_in_demand_cache(VkDevice device, const VkGraphicsPipelineCreateInfo& info, VkPipeline* out) {
+  auto& c = compiler();
+  std::shared_lock lock(c.cacheMutex);
+  if (!c.cache || c.device != device) return VK_INCOMPLETE;
+  const VkResult result = vkCreateGraphicsPipelines(device, c.cache, 1, &info, nullptr, out);
+  if (result == VK_SUCCESS) c.changed = true;
+  return result;
+}
+bool merge_pipeline_demand_cache(VkPipelineCache target, bool wait) {
+  auto& c = compiler();
+  std::unique_lock lock(c.cacheMutex, std::defer_lock);
+  if (wait) lock.lock();
+  else if (!lock.try_lock()) return false;
+  if (!target || !c.cache || !c.changed.load()) return false;
   const auto result = vkMergePipelineCaches(c.device, target, 1, &c.cache);
   if (result != VK_SUCCESS) return false;
   c.changed = false;

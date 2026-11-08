@@ -23,6 +23,7 @@
 #include "guest_addr.h"
 #include "../audio_out.h"
 #include "../audio_channels.h"
+#include "../dsp_overload_guard.h"
 #include "../runtime.h"
 
 namespace interp { const char* phase_name(); }
@@ -228,6 +229,9 @@ void apply_lpf(Voice& v, float* s) {
 // ------------------------------------------------------------------ mixing
 float g_tv_bus[kBuses][kTvChannels][kSamples];
 float g_drc_bus[kBuses][kDrcChannels][kSamples];
+// Host-only scratch, deliberately outside Voice/DrcState and save-state serialization.
+float g_gamepad_only[2][kSamples];
+float g_gamepad_only_hist[2] = {};
 double g_sfx_energy = 0;   // stats: output of non-stream voices
 uint32_t g_sfx_started = 0;
 
@@ -276,6 +280,9 @@ void process_voices() {
     log_stats();
     memset(g_tv_bus, 0, sizeof g_tv_bus);
     memset(g_drc_bus, 0, sizeof g_drc_bus);
+    memset(g_gamepad_only, 0, sizeof g_gamepad_only);
+    static uint64_t block = 0;
+    const uint64_t trace_block = block++;
     float buf[kSamples];
     for (Voice& v : g_voices) {
         if (!v.acquired || v.state != 1) continue;
@@ -289,6 +296,27 @@ void process_voices() {
             for (int i = 0; i < kSamples; i++) g_sfx_energy += std::fabs(buf[i] / 256.0f) * tv;
         }
         auto& drc = g_drc.mix[&v - g_voices];
+        const bool pad_only = audio::gamepad_only_voice(v.tv, drc);
+        if (pad_only) {
+            // Copy the ramp: the real device mix below advances it exactly once.
+            // Menu effects use the dry main L/R bus; do not replay stream final-mix callbacks.
+            for (int ch = 0; ch < 2; ++ch) {
+                ChMix mix = drc[ch][0];
+                mix_into(buf, g_gamepad_only[ch], mix);
+            }
+        }
+        // Opt-in diagnostic: inspect every channel/bus before mix_into advances deltas.
+        static const bool trace_pad = getenv("WWHD_AX_GAMEPAD_TRACE") != nullptr;
+        if (trace_pad && g_output.play_tv && !g_output.play_drc) {
+            if (pad_only) {
+                LOG("[ax-pad] block=%llu time=%llu voice=%d format=%u samples=%08X envelope=%u/%d",
+                    (unsigned long long)trace_block, (unsigned long long)timebase::now(), int(&v - g_voices), v.format, v.samples, v.ve_vol, v.ve_delta);
+                for (int ch = 0; ch < kDrcChannels; ++ch)
+                    for (int bus = 0; bus < kBuses; ++bus)
+                        if (drc[ch][bus].vol || drc[ch][bus].delta)
+                            LOG("[ax-pad] ch=%d bus=%d vol=%u delta=%d", ch, bus, drc[ch][bus].vol, drc[ch][bus].delta);
+            }
+        }
         for (int c = 0; c < kTvChannels; c++)
             for (int b = 0; b < kBuses; b++)
                 if (v.tv[c][b].vol || v.tv[c][b].delta) mix_into(buf, g_tv_bus[b][c], v.tv[c][b]);
@@ -365,6 +393,13 @@ void update_output_mode() {
     bool ok = read_game_faders(tv, drc);
     bool before = g_output.play_drc;
     g_output.update(ok, tv, drc);
+    static const bool trace_pad = getenv("WWHD_AX_GAMEPAD_TRACE") != nullptr;
+    static float last_tv = -1, last_drc = -1;
+    if (trace_pad && ok && (tv.value != last_tv || drc.value != last_drc)) {
+        LOG("[ax-pad-mode] TV=%.3f->%.3f GamePad=%.3f->%.3f selected=%d final=%08X/%08X",
+            tv.value, tv.goal(), drc.value, drc.goal(), g_output.play_gamepad_only, g_final_mix_cb[0], g_final_mix_cb[1]);
+        last_tv = tv.value; last_drc = drc.value;
+    }
     static bool stats = getenv("WWHD_AX_STATS") != nullptr;
     if (stats && g_output.play_drc != before)
         LOG("[ax] host output: %s (TV fader %.2f -> %.2f, GamePad fader %.2f -> %.2f)",
@@ -517,13 +552,36 @@ void output_frame(Cpu* c) {
     int32_t tv_lr[kTvChannels][kSamples48], drc_lr[2][kSamples48], lr[2][kSamples48];
     final_mix_lr(G.tv48, n_tv, g_post_hist[0], tv_lr, channels);
     final_mix_lr(G.drc48, n_drc, g_post_hist[1], drc_lr);
+    int32_t pad_lr[2][kSamples48];
+    // Keep a separate resampling history even while disabled: toggling cannot leak a stale tail.
+    for (int ch = 0; ch < 2; ++ch) {
+        int32_t input[kSamples];
+        for (int i = 0; i < kSamples; ++i)
+            input[i] = (int32_t)std::clamp(g_gamepad_only[ch][i], -2147483648.0f, 2147483520.0f);
+        upsample(input, pad_lr[ch], g_gamepad_only_hist[ch], 8);
+    }
+    const float pad_gain = g_output.play_gamepad_only && audio::gamepad_sounds() ? audio::gamepad_sounds_volume() : 0.f;
+    static const bool trace_pad = getenv("WWHD_AX_GAMEPAD_TRACE") != nullptr;
+    static uint64_t output_block = 0;
+    if (trace_pad) {
+        double energy = 0; int32_t peak = 0;
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < kSamples48; ++i) {
+                const int32_t sample = pad_lr[ch][i];
+                energy += double(sample) * sample;
+                peak = std::max(peak, std::abs(sample));
+            }
+        if (peak) LOG("[ax-pad-level] block=%llu rms=%.3f peak=%d gain=%.3f", (unsigned long long)output_block,
+                      std::sqrt(energy / (2 * kSamples48)), peak, pad_gain);
+    }
+    ++output_block;
     int16_t pcm[kSamples48 * kTvChannels];
     if (channels == 2) {
         // Preserve the original stereo path, including its rounding and fader rules.
         g_output.mix(tv_lr[0], tv_lr[1], drc_lr[0], drc_lr[1], kSamples48, lr[0], lr[1]);
         for (int i = 0; i < kSamples48; ++i)
             for (int ch = 0; ch < 2; ++ch)
-                pcm[i * 2 + ch] = int16_t(std::clamp(lr[ch][i], -32768, 32767));
+                pcm[i * 2 + ch] = int16_t(std::clamp<int64_t>(int64_t(lr[ch][i]) + int64_t(pad_lr[ch][i] * pad_gain), -32768, 32767));
     } else {
         for (int i = 0; i < kSamples48; ++i) {
             int32_t ax[kTvChannels];
@@ -531,10 +589,32 @@ void output_frame(Cpu* c) {
                 ax[ch] = tv_lr[ch][i];
             for (int ch = 0; ch < kTvChannels; ++ch)
                 pcm[i * kTvChannels + ch] =
-                    audio::tv_sample(ax, ch, g_output.play_tv, ch < 2 ? drc_lr[ch][i] : 0, g_output.play_drc);
+                    audio::tv_sample(ax, ch, g_output.play_tv,
+                                     ch < 2 ? (g_output.play_drc ? drc_lr[ch][i] : 0) + int32_t(pad_lr[ch][i] * pad_gain) : 0,
+                                     g_output.play_drc || pad_gain > 0);
         }
     }
     audio::push(pcm, kSamples48);
+}
+
+// The game's DSP overload check off (dsp_overload_guard.h): looping ambience no longer cuts out
+// after a late audio frame. Checked every frame: a save state load brings the game's value back.
+void keep_dsp_channels() {
+    static const bool game_check = [] {
+        const char* e = getenv("WWHD_DSP_KILL");
+        bool on = e && *e && strcmp(e, "0") != 0;
+        if (on) LOG("[ax] WWHD_DSP_KILL: the game's DSP overload check stays on");
+        return on;
+    }();
+    static const uint32_t addr = GD(0x10170030);  // the 1.1 updateDSP reads (dsp_overload_guard.h)
+    static bool logged = false;
+    uint32_t word;
+    if (!dsp_guard::replacement(ld32(addr), game_check, word)) return;
+    st32(addr, word);
+    if (!logged) {
+        logged = true;
+        LOG("[ax] DSP overload check off (ratio at %08X; WWHD_DSP_KILL=1 keeps it)", addr);
+    }
 }
 
 void frame_thread() {
@@ -549,6 +629,7 @@ void frame_thread() {
         double stretch = 1.0 + std::clamp(level * 0.15, -0.15, 0.05);
         next += std::chrono::microseconds((int64_t)(3000 * stretch / game_clock::rate()));
         threads::service_begin();  // a save state waits until the frame is done (voices, callbacks)
+        keep_dsp_channels();
         {
             std::lock_guard<std::mutex> lk(g_ax_mutex);
             process_voices();
@@ -650,6 +731,8 @@ void ax_ss_load(ss::Reader& r) {
     memset(g_up_hist, 0, sizeof g_up_hist);
     memset(g_drc_up_hist, 0, sizeof g_drc_up_hist);
     memset(g_post_hist, 0, sizeof g_post_hist);
+    memset(g_gamepad_only_hist, 0, sizeof g_gamepad_only_hist);
+    memset(g_gamepad_only, 0, sizeof g_gamepad_only);
     memset(g_drc_aux_idle, 0, sizeof g_drc_aux_idle);
     audio::flush();
 }

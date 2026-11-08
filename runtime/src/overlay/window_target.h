@@ -1,7 +1,6 @@
 #pragma once
 #include <atomic>
-#include <cstdlib>
-#include <string_view>
+#include "../platform/gaming_mode.h"
 
 struct ImDrawData;
 
@@ -9,19 +8,7 @@ namespace overlay::window_target {
 enum class Window { None, TV, GamePad };
 // Published by the SDL main thread; consumed by input transitions and the render thread.
 inline std::atomic<Window> selected{Window::TV};
-inline bool gamescope_session() {
-#if !defined(__linux__) && !defined(WWHD_TEST_GAMESCOPE)
-    return false;
-#else
-    auto contains = [](const char* name) {
-        const char* value = std::getenv(name);
-        return value && std::string_view(value).find("gamescope") != std::string_view::npos;
-    };
-    // SteamDeck=1 alone also occurs on the desktop: it must not change desktop behavior.
-    return contains("XDG_CURRENT_DESKTOP") || contains("WAYLAND_DISPLAY") ||
-           std::getenv("GAMESCOPE_WAYLAND_DISPLAY") != nullptr;
-#endif
-}
+inline bool gamescope_session() { return gaming_mode::active(); }
 inline Window choose(bool follow_focus, bool two_windows, Window focus, bool tv_visible, bool drc_visible) {
     if (!follow_focus || !two_windows) return Window::TV;
     if (focus == Window::TV && tv_visible) return Window::TV;

@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from display_smoke import primary_preview_clear, capture_timeout_evidence, capture_metric_trend
+from display_smoke import primary_preview_clear, capture_timeout_evidence, capture_metric_trend, app_windows_on_display, startup_acquisitions
 
 
 def dispatcher(region, transform='IDENTITY', rows='', flags='NOT_FOCUSABLE', display=0):
@@ -18,6 +18,58 @@ def dispatcher(region, transform='IDENTITY', rows='', flags='NOT_FOCUSABLE', dis
 {rows}    Windows:
       0: name=authored Overlay #1: 800x480, 160 dpi, id=1, displayId={display}, inputConfig={flags}, frame=[0,0][0,0], touchableRegion={region}, ownerPid=1
 '''
+
+
+class ReleasedDisplayTests(unittest.TestCase):
+    def test_primary_mirrors_do_not_count_as_owned_secondary_windows(self):
+        dump = """Input Dispatcher State:
+  Display: 0
+    Windows:
+      0: name=game/MainActivity, displayId=0, inputConfig=0x0,
+  Display: 2
+    Windows:
+      0: name=game/MainActivity, displayId=2, inputConfig=CLONE,
+"""
+        self.assertEqual(len(app_windows_on_display(dump, 0, 'game')), 1)
+        self.assertEqual(app_windows_on_display(dump, 2, 'game'), [])
+        self.assertEqual(app_windows_on_display(dump, 3, 'game'), [])
+
+    def test_real_presentation_counts_even_when_nonfocusable_or_nontouchable(self):
+        for flag in ('NOT_FOCUSABLE', 'NOT_TOUCHABLE', '0x0'):
+            dump = f"      0: name='game', displayId=2, inputConfig={flag},\n"
+            self.assertEqual(len(app_windows_on_display(dump, 2, 'game')), 1)
+            self.assertEqual(app_windows_on_display(dump, 20, 'game'), [])
+
+    def test_missing_inventory_cannot_prove_release(self):
+        with self.assertRaisesRegex(AssertionError, 'inventory'):
+            app_windows_on_display('unrecognized dump', 2, 'game')
+
+
+class SavedOffLaunchTests(unittest.TestCase):
+    released = "10-17 12:00:01.000  1  2 I wwhd-display: secondary released (GamePad screen off)\n"
+    primary_only = """Input Dispatcher State:
+  Display: 0
+    Windows:
+      0: name=game/MainActivity, displayId=0, inputConfig=0x0,
+  Display: 2
+    Windows:
+      0: name=game/MainActivity, displayId=2, inputConfig=CLONE,
+"""
+
+    def test_released_launch_has_no_evidence(self):
+        samples = [{"dual": False, "secondary_presented": 0, "touch": False}]
+        self.assertEqual(startup_acquisitions(self.released, ["", self.primary_only], samples, 2, 'game'), [])
+
+    def test_momentary_presentation_counts(self):
+        log = "I wwhd-display: secondary display=2\n" + self.released
+        self.assertEqual(len(startup_acquisitions(log, [], [], 2, 'game')), 1)
+        self.assertEqual(len(startup_acquisitions("I wwhd-display: fold panes=[0, 0]\n", [], [], 2, 'game')), 1)
+        window = self.primary_only + "      1: name='game', displayId=2, inputConfig=NOT_FOCUSABLE,\n"
+        self.assertEqual(len(startup_acquisitions(self.released, [self.primary_only, window], [], 2, 'game')), 1)
+
+    def test_secondary_picture_or_surface_counts(self):
+        for sample in ({"dual": True}, {"secondary_presented": 3}, {"touch": True}):
+            self.assertEqual(len(startup_acquisitions('', [], [sample], 2, 'game')), 1)
 
 
 class TimeoutEvidenceTests(unittest.TestCase):

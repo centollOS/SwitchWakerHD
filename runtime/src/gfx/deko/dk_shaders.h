@@ -206,6 +206,9 @@ struct ShaderStats {
 };
 ShaderStats shader_stats_take();  // counts since the last call; pendingNow and codeBytes as they are
 uint64_t shaders_pending();        // shaders queued for or held by the worker right now (any thread)
+// (this fork, #49) present(): true when the frame was drawn with shaders still compiling while draws wait; they are
+// compiled and loaded when it returns, and the frame is not shown (render thread)
+bool finish_held_frame();
 uint64_t shaders_skipped_draws();  // draws skipped for a shader not ready yet, since start-up (any thread)
 // (this fork) docs/background-shaders-plan.md: a variant no draw has made yet, translated the way a draw would
 // (the program and fetch shader copied to guest memory, the same decompile and fetch builders); regs: a full

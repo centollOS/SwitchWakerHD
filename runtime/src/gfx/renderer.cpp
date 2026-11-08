@@ -4,6 +4,8 @@
 #include "renderer_ext.h"
 #include "../screenshot.h"
 #include "../audio_out.h"
+#include "../mods/save_folder_writes.h"
+#include "../sky_frame.h"
 
 #include <atomic>
 #include <algorithm>
@@ -55,6 +57,39 @@ std::atomic<float> g_bloom{[] {
     const float v = e ? std::strtof(e, nullptr) : 1.0f;
     return std::isfinite(v) ? std::clamp(v, 0.0f, 2.0f) : 1.0f;
 }()};
+// horizon haze (the sky's haze band): 1 = the original game, 0 = removed; WWHD_HORIZON_HAZE, or the
+// research name WWHD_SKY_HAZE (the amount removed, 0..1)
+std::atomic<float> g_haze{sky::haze_from_env(std::getenv("WWHD_HORIZON_HAZE"), std::getenv("WWHD_SKY_HAZE"))};
+}  // namespace
+std::atomic<bool> g_cloud_shadows{[] {
+    const char* e = std::getenv("WWHD_CLOUD_SHADOWS");
+    return e && *e && std::strcmp(e, "0") != 0;
+}()};
+std::atomic<int> g_cloud_style{[] {
+    const char* e = std::getenv("WWHD_CLOUD_STYLE");
+    return e ? std::clamp(std::atoi(e), 0, 2) : 0;
+}()};
+int cloud_style() { return g_cloud_style.load(std::memory_order_relaxed); }
+void set_cloud_style(int style) { g_cloud_style.store(std::clamp(style, 0, 2), std::memory_order_relaxed); }
+bool cloud_shadows() { return g_cloud_shadows.load(std::memory_order_relaxed); }
+// Full-size torchlight: on by default, off on Android like full-size occlusion depth, where the phone GPU is the
+// limit in heavy views (issue #56); a saved choice or WWHD_FULL_LIGHT wins
+std::atomic<bool> g_full_light{[] {
+#ifdef __ANDROID__
+    constexpr bool kDefault = false;
+#else
+    constexpr bool kDefault = true;
+#endif
+    const char* e = std::getenv("WWHD_FULL_LIGHT");
+    return e ? std::strcmp(e, "0") != 0 : kDefault;
+}()};
+bool full_light() { return g_full_light.load(std::memory_order_relaxed); }
+void set_full_light(bool on) { g_full_light.store(on, std::memory_order_relaxed); }
+void set_cloud_shadows(bool on) { g_cloud_shadows.store(on, std::memory_order_relaxed); }
+float horizon_haze() { return g_haze.load(std::memory_order_relaxed); }
+void set_horizon_haze(float v) {
+    if (!std::isfinite(v)) v = 1.0f;
+    g_haze.store(std::clamp(v, 0.0f, 1.0f), std::memory_order_relaxed);
 }
 float bloom_strength() { return g_bloom.load(std::memory_order_relaxed); }
 void set_bloom_strength(float v) {
@@ -221,6 +256,9 @@ void init() {
     const Backend* b = backend_for(g_requested);
     select_decompiler_api(b->api);
     g_backend = b;
+#ifdef __ANDROID__
+    if(b->api==Api::Vulkan)gfxvk::drivers::offer_after_device_loss();
+#endif
     try {
         b->init();
         LOG("[gfx] %s renderer started", api_name(b->api));
@@ -293,6 +331,7 @@ void shutdown() {
     if (g_shut.exchange(true) || !g_backend || !g_backend->shutdown) return;
     audio::finish_dump();  // hosts exit with _Exit, which bypasses atexit handlers
     screenshot::finish();  // the screenshots taken are written first (the render thread keeps going)
+    save_folder::release_lock();  // a chosen save folder's lock: this computer stops playing
     g_backend->shutdown();
 }
 

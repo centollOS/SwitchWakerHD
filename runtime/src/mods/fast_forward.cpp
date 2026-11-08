@@ -26,15 +26,18 @@ std::atomic<uint32_t> button{[] { auto n = env("WWHD_MOD_FF_BUTTON", 0x40); retu
 std::atomic<bool> mute{env("WWHD_MOD_FF_MUTE", 1) != 0};
 std::atomic<bool> active{false}, release_required{false};
 std::atomic<uint32_t> held{0};
+std::atomic<bool> hold_request{false};  // fast_forward_hold
 const uint32_t play = GD(0x1046F0B0);
-bool eligible(uint32_t buttons) {
+bool eligible_as(bool enabled, uint32_t buttons, uint32_t button) {
     const char* stage = reinterpret_cast<const char*>(mem::ptr(play + 0x5134));
     const bool gameplay = *stage && std::strncmp(stage, "sea_T", 8) && std::strncmp(stage, "Name", 8) && std::strncmp(stage, "ENDumi", 8);
     // Same HD event mode as savestate.cpp's kEventRun. Exclude menus and scene transitions.
-    return fast_forward_gate(fast_forward(), ld8(play + 0x5292),
+    return fast_forward_gate(enabled, ld8(play + 0x5292),
         gameplay && ld32(play + 0x5B34) != 0 && !ld8(play + 0x5140 + 12) && !ld32(GD(0x101F36CC)),
-        ld8(GD(0x101EA069)) != 0, overlay::blocks_input(), buttons, fast_forward_button());
+        ld8(GD(0x101EA069)) != 0, overlay::blocks_input(), buttons, button);
 }
+bool eligible(uint32_t buttons) { return eligible_as(fast_forward(), buttons, fast_forward_button()); }
+bool hold_eligible() { return hold_request.load() && eligible_as(true, 1, 1); }
 }
 bool fast_forward() { return enabled.load(); }
 void set_fast_forward(bool on) { enabled = on; if (!on) fast_forward_reset(); }
@@ -60,9 +63,10 @@ void fast_forward_input(uint32_t& buttons) {
     if (!(buttons & fast_forward_button())) release_required = false;
     if (eligible(buttons)) buttons &= ~fast_forward_button();
 }
+void fast_forward_hold(bool on) { hold_request.store(on, std::memory_order_relaxed); }
 void fast_forward_service() {
-    if (!fast_forward() && !active.load()) return;
-    const bool on = !release_required.load() && eligible(held.load());
+    if (!fast_forward() && !active.load() && !hold_request.load()) return;
+    const bool on = (!release_required.load() && eligible(held.load())) || hold_eligible();
     if (active.exchange(on) != on) {
         audio::flush(); // discard queued output at the boundary, never guest audio callbacks
         trace("fast forward %s (%ux)", on ? "on" : "off", fast_forward_rate());

@@ -50,6 +50,36 @@ names the reason (`[savestate] slot N: portable state refused: ...`). This cover
 and Shift+F1–F5. Full save states and Crash Recovery's automatic states can be made at any time.
 Loading is not affected.
 
+A state saved while crawling loads with Link still crawling, so loading inside a low tunnel
+no longer puts him standing in its ceiling. This works with existing portable states too.
+Standing and boat states load as before.
+
+## Last session, auto saves and At start
+
+The Saves tab's **Last session and auto saves** section holds portable states in their own slots;
+slots 1–5 and Crash Recovery's automatic states are not touched.
+
+- **Last session** is taken when you quit the game, and on Android also when the app goes to the
+  background. If a cutscene or dialogue is running at that moment, the previous last session stays.
+  It is stored as `last_session.wwstate` in the states folder.
+- **Auto save every** Off, 2, 5 (default) or 10 minutes writes Auto save 1 to 3 in turn
+  (`autosave/autosave1.wwstate` ...), the oldest first, like Breath of the Wild. It also saves
+  shortly after Link enters a new area (a stage change), at most once a minute so going in and out
+  of doors doesn't use up the three slots. Either way it waits until you have had control of Link
+  for about 3 seconds (90 frames in a row), so nothing is saved during a cutscene or dialogue or the
+  moment Link arrives; a save the game refuses is tried again 15 seconds later. Auto saves are
+  quiet by default; **Show "Autosaved" when it saves** shows that message briefly. Auto saves never
+  write `cking.sav`: after a crash, load the newest one, then save in game to keep it. The choices
+  are kept in `save_options.cfg` (`autosave=off` for Off; the `autosave=0` older versions always
+  wrote counts as the default; `autosave_notice=on|off`).
+- **At start**: *Intro as usual* (default), *Continue last session* or a slot. The state is loaded
+  as soon as you continue a Quest Log on the title screen, like any portable state. An empty slot
+  starts the game as usual.
+
+Test switches: `WWHD_LAST_SESSION=0|1` (scripted runs with `WWHD_NO_HOST_INPUT` take no last
+session unless it is 1), `WWHD_AUTO_SAVE=0|2|5|10` (scripted runs have no auto save unless it asks
+for one), `WWHD_AT_START=intro|last|slotN` for one start.
+
 ## Bug reports
 
 The Saves tab's **Copy save for bug report** copies the paths of the newest portable state and of
@@ -137,4 +167,30 @@ load, Link is on the boat and the boat at its place and heading; with gametest `
 save while the King of Red Lions talks is refused and writes nothing, a full save at the same
 moment works, a portable save after the dialogue works. Last, full save states still save and load.
 
-Controller metadata: format 1 accepts optional `controller = 1` (GamePad) or `controller = 2` (Pro Controller). Loading restores that host input mode. Missing metadata or `0` leaves the current mode unchanged. Unknown values are refused; the existing field and total-size guards still apply.
+## Repeatable comparison runs
+
+Two runs of the same build do not end up in the same game state, even from the same save state:
+the game's two random generators (`cM_rnd`'s seeds and the particle system's emitter seed) carry
+over from before a load, and `g_Counter.mCounter0`, which also counts loading-screen frames and
+which the game reads (wind lines, tree sway), depends on how many frames the boot took on that
+computer. Scripted input timed in TV frames also lands at other game moments when the boot is
+shorter or longer, and what happened before a load (wind lines in the sky, for example) carries
+into the new stage. Clouds, wind and other random effects then differ, as they would on the console.
+
+For side-by-side tests (renderer against renderer, build A against build B), set
+`WWHD_TEST_FIXED_SEED=1`:
+
+- the seeds are set to fixed values and `mCounter0` to `mTimer` plus a fixed offset at the first
+  gameplay frame after boot, right after a full state load, and twice for a portable state (when the
+  old stage is gone and the new one is about to be created, and at the new stage's first frame);
+- the TV-frame test aids (`WWHD_PRESS`, `WWHD_KEYS`, `WWHD_STICK`, `WWHD_RSTICK`, `WWHD_TEST_ORIGIN`,
+  `WWHD_STATE_SAVE_AT`/`LOAD_AT`, `WWHD_PORTABLE_SAVE_AT`/`LOAD_AT`, `WWHD_DUMP_FRAMES`) count from
+  the first gameplay frame, which counts as frame 96; `WWHD_EXIT_AT_FRAME` stays a TV frame.
+
+The log says `[test] WWHD_TEST_FIXED_SEED: ...` each time (`runtime/src/fixed_seed.h`). Unset, the
+game and the test aids are untouched. `WWHD_DTRACE=<file>` writes one line per frame with both
+counters, the seeds, the time of day, the wind lines, the particle count and a digest of the sky
+clouds, to find the first frame where two runs differ. `runtime/tools/fixed_seed_test.cpp` tests
+what is written and when.
+
+Controller metadata: format 1 accepts optional `controller = 1` (GamePad) or `controller = 2` (Pro Controller). It is shown in the slot label only: loading never changes the controller the player has chosen (Input menu / Controls). After any load, full or progress, the game itself is switched to that controller if it is in the other mode, through its own Options controller change (see `runtime/src/controller_reapply.h`). Missing metadata or `0` is accepted. Unknown values are refused; the existing field and total-size guards still apply.

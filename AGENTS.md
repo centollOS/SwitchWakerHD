@@ -3,7 +3,7 @@
 ## Reaching the Switch: the debug server
 
 The console runs a TCP debug server (port 6543) when **Debug server (network)** is ticked in the settings
-menu (Minus, **Switch** tab, **Debug** section); it starts at the next start of the game. Full reference:
+menu (Minus, **Dev** tab: tick **Show developer options**, then **Debug server**); it starts at the next start of the game. Full reference:
 [docs/debug-server.md](docs/debug-server.md).
 
 - The console's address: `build/switch_host.txt` (first line), else `export WWHD_SWITCH_HOST=<ip>`, else
@@ -34,7 +34,7 @@ tools/switch/wwhd_debug.py get settings.ini build/settings.ini   # SD files, rel
 After a crash the server is gone with the game: ask the user to start it again, then
 `tools/switch/wwhd_debug.py lastlog` and `tools/switch/wwhd_debug.py crashes --fetch build/crashes`.
 
-Options and A/B switches for a test go into the in-game menu (Switch tab, Debug section), not into
+Options and A/B switches for a test go into the in-game menu (Dev tab, behind its "Show developer options" checkbox), not into
 `settings.ini`'s `[dev]` section; `[dev]` is for developer variables read at start (docs/switch-port.md,
 "Rule for test builds").
 
@@ -58,16 +58,44 @@ lines as they are, and never call a difference inside the printed interval a gai
 ## Defaults are for the player
 
 A fresh install (no `settings.ini`) must start with player defaults: debug server off, frame-rate counter
-and every diagnostic, perf or capture option off, stock clocks, mods off, no `[dev]` section. A new
-diagnostic or test option ships off and goes in the Switch tab's Debug section. Check the fresh-install
+and every diagnostic, perf or capture option off, stock CPU clock and the fixed GPU profile (384 MHz), mods off, no `[dev]` section. A new
+diagnostic or test option ships off and goes in the Dev tab (its content is hidden until "Show developer options"; that checkbox is off by default). Check the fresh-install
 defaults again whenever the settings code changes; a player's saved `settings.ini` keeps what they chose.
 
 ## Clocks
 
-The defaults are the stock CPU 1020 MHz and the stock GPU profile (docs/switch-port.md, "Settings"). The
-higher CPU steps (up to 1785) and GPU profiles are opt-in menu choices for players who want them; do not
-make one the default or propose an overclock as a fix: speed comes from the code. The target is 720p
+The game runs at the stock CPU 1020 MHz and, in handheld, always at Nintendo's 384 MHz GPU profile, one of its
+handheld profiles for games (the owner's choice, 2026-10-23, from `perf_test.py gpu-profile`: at Outset's tall grass
+307 -> 384 MHz is +4.7 fps, 384 -> 460 MHz +0.5 fps; docs/perf-test.md, docs/switch-port.md "Settings"). It is the
+same for every player: the menu offers no clock or GPU profile choice (a profile saved by an older version is reset
+to 384 at start); only tests set another (`WWHD_TEST_GPU_PROFILE` in `[dev]`). The port sets no overclock (no CPU
+above 1020, no GPU above Nintendo's profiles; sys-clk is the player's own): do not propose one as a fix; speed comes
+from the code. Performance tests state the GPU profile they ran at, and check the `[dk] clocks` lines: sys-clk
+overrides the port's clocks. The target is 720p
 (1280x720 internal) at 30 fps.
+
+## The shader template (issue #88)
+
+Releases attach `shader-template.sealed` from the private repository `centollOS/SwitchWakerHD-shader-manifest`,
+pinned by `tools/switch/shader_template.ref`. After the test console has played, `tools/switch/update_shader_template.sh
+GAME_DIR` says whether its recording adds shaders (and makes the new sealed template); `attach_shader_template.sh pin`
+/ `TAG` pin and attach it. Never commit the sealed or an unsealed template, a console's `shader_manifest.bin` or any
+`shadercache_*.bin` to this repository (`guard.py` refuses them). A change to the shader translation (the Latte
+decompiler, translation keys) means distilling the recordings again. [docs/shader-manifest-release-plan.md](docs/shader-manifest-release-plan.md).
+
+## Faster builds: PGO and the recompiler passes
+
+Optional profile-guided optimisation (`-DWWHD_PGO=GEN` to train, `USE` to build; [docs/pgo.md](docs/pgo.md)), **off by
+default**: a normal build and every release are not profiled (turning it on for players: issue #90). Results and dead ends in
+[docs/pgo-progress.md](docs/pgo-progress.md). A profile fits the exact
+code it was made from: remake it after a recompile with a changed recompiler or a change to a profiled runtime file. Never
+judge speed on a training build (several times slower), and never deploy one to a console nobody can restart: a crashing
+start-up needs the NRO put back by hand (FTP :5000 works when the game is not running). The write-back elision
+(`tools/recomp/calleeregs.py`, `python3 tools/recomp/test_calleeregs.py`) assumes function hooks read only argument
+registers; the recompiler checks that against the runtime's sources.
+
+Before any timing, check the log's `[dk] clocks:` line: sys-clk or a saved GPU profile other than the build's default makes
+numbers meaningless (docs/perf-test.md).
 
 ## The SD card without the debug server
 

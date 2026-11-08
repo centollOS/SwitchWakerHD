@@ -15,6 +15,11 @@ void stop();             // stops after the current destination, then restarts t
 bool running();
 std::string status();    // one line for the screen and the debug server ("" when not running)
 void startup();          // main.cpp, once: puts the Quest Log back if a sweep was cut (the game closed during it)
+// the first start's choice (#49): the sweep begins by itself once a Quest Log is loaded, also after later starts
+// until it has begun (resume.txt)
+void start_when_loaded();
+bool waiting();          // a sweep waits for a Quest Log to be loaded
+void cancel_wait();      // ... no longer (the menu)
 // players updating from a version without Prepare graphics: offer it once (never completed, never offered); the
 // offer is remembered when made
 bool offer_to_update();

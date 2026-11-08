@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "../fan_translation.h"
 #include "../overlay/hostui.h"
 #include "../runtime.h"
 
@@ -20,10 +21,12 @@ const Texts kEnglish = {
     "prepares each graphics effect the first time it is drawn. It gets better as you play, and what is prepared is "
     "kept for the next starts.",
     "Prepare graphics now",
-    "The game visits every place by itself behind a loading screen (about 30-40 minutes, best docked), then "
-    "restarts at the title screen, ready. Your saves are not touched.",
+    "Next, choose your Quest Log (or start a new game you do not save): the game then visits every place by itself "
+    "behind a loading screen (about 30-40 minutes, best docked) and restarts at the title screen, ready. Your saves "
+    "are not touched.",
     "Play now",
-    "You can prepare the graphics later: hold Minus (-) in the game for the settings menu, Switch tab.",
+    "The console prepares the most common graphics first behind a loading screen (about 20 minutes; B there to play "
+    "at once). Prepare graphics stays in the settings menu: hold Minus (-) in the game, Picture tab.",
 
     "SwitchWakerHD: new in this version",
     "Prepare graphics: the console can now prepare the graphics of the whole game at once, so that places you have "
@@ -33,7 +36,7 @@ const Texts kEnglish = {
     "faster.",
     "Later",
     "This message does not show again. Prepare graphics stays in the settings menu: hold Minus (-) in the game, "
-    "Switch tab.",
+    "Picture tab.",
 
     "SwitchWakerHD: the game's files were not found",
     "SwitchWakerHD needs your own copy of the game in %s/ (the folders code/, content/ and meta/), as "
@@ -83,6 +86,10 @@ const Texts kEnglish = {
     "Reading the game's graphics...",
     "%zu of %zu",
     "B: play now (what is left goes on in the background)",
+    "Removes the black shadows and missing effects that appear the first time a place is drawn, because the "
+    "console has no shader cache yet, and prepares the Switch for much smoother play afterwards. It visits the "
+    "whole game once by itself (30-40 minutes, best docked). Over 90% of the shaders can be prepared; a few "
+    "cannot be compiled.",
 };
 
 const Texts kSpanish = {
@@ -92,11 +99,13 @@ const Texts kSpanish = {
     "de retraso: la consola prepara cada efecto gráfico la primera vez que se dibuja. Mejora a medida que juegas, y "
     "lo preparado se guarda para los siguientes arranques.",
     "Preparar los gráficos ahora",
-    "El juego visita cada lugar por sí solo detrás de una pantalla de carga (unos 30-40 minutos, mejor con la "
-    "consola en la base) y después vuelve a la pantalla de título, listo. Tus partidas no se tocan.",
+    "Después elige tu diario (o empieza una partida nueva que no guardes): el juego visita entonces cada lugar por "
+    "sí solo detrás de una pantalla de carga (unos 30-40 minutos, mejor con la consola en la base) y vuelve a la "
+    "pantalla de título, listo. Tus partidas no se tocan.",
     "Jugar ahora",
-    "Puedes preparar los gráficos más tarde: mantén pulsado Menos (-) en el juego para abrir los ajustes, pestaña "
-    "Switch.",
+    "La consola prepara primero los gráficos más comunes detrás de una pantalla de carga (unos 20 minutos; B allí "
+    "para jugar enseguida). Preparar gráficos sigue en los ajustes: mantén pulsado Menos (-) en el juego, pestaña "
+    "Imagen.",
 
     "SwitchWakerHD: novedad en esta versión",
     "Preparar gráficos: la consola ya puede preparar de una vez los gráficos de todo el juego, para que los lugares "
@@ -106,7 +115,7 @@ const Texts kSpanish = {
     "consola ya tiene preparado va más rápido.",
     "Más tarde",
     "Este mensaje no volverá a aparecer. Preparar gráficos sigue en los ajustes: mantén pulsado Menos (-) en el "
-    "juego, pestaña Switch.",
+    "juego, pestaña Imagen.",
 
     "SwitchWakerHD: no se encuentran los archivos del juego",
     "SwitchWakerHD necesita tu propia copia del juego en %s/ (las carpetas code/, content/ y meta/), tal como la "
@@ -157,6 +166,10 @@ const Texts kSpanish = {
     "Leyendo los gráficos del juego...",
     "%zu de %zu",
     "B: jugar ya (lo que falte sigue en segundo plano)",
+    "Quita las sombras negras y los efectos que faltan la primera vez que se dibuja un lugar, porque la consola "
+    "aún no tiene los shaders en caché, y hace que después el juego vaya mucho más fluido. Visita todo el juego "
+    "una vez por sí solo (30-40 minutos, mejor con la consola en la base). Se puede preparar más del 90% de los "
+    "shaders; unos pocos no se pueden compilar.",
 };
 
 const Texts kFrench = {
@@ -166,11 +179,13 @@ const Texts kFrench = {
     "un léger retard : la console prépare chaque effet graphique la première fois qu'il est dessiné. Cela s'améliore "
     "en jouant, et ce qui est préparé est conservé pour les démarrages suivants.",
     "Préparer les graphismes maintenant",
-    "Le jeu visite chaque lieu tout seul derrière un écran de chargement (environ 30-40 minutes, de préférence sur la "
-    "station d'accueil), puis revient à l'écran titre, prêt. Vos sauvegardes ne sont pas touchées.",
+    "Choisissez ensuite votre journal (ou une nouvelle partie non sauvegardée) : le jeu visite alors chaque lieu tout "
+    "seul derrière un écran de chargement (environ 30-40 minutes, de préférence sur la station d'accueil), puis "
+    "revient à l'écran titre, prêt. Vos sauvegardes ne sont pas touchées.",
     "Jouer maintenant",
-    "Vous pourrez préparer les graphismes plus tard : maintenez Moins (-) en jeu pour ouvrir les réglages, onglet "
-    "Switch.",
+    "La console prépare d'abord les graphismes les plus courants derrière un écran de chargement (environ 20 "
+    "minutes ; B pour jouer tout de suite). Préparer les graphismes reste dans les réglages : maintenez Moins (-) en "
+    "jeu, onglet Image.",
 
     "SwitchWakerHD : nouveau dans cette version",
     "Préparer les graphismes : la console peut maintenant préparer en une fois les graphismes de tout le jeu, pour "
@@ -180,7 +195,7 @@ const Texts kFrench = {
     "préparé sur cette console va plus vite.",
     "Plus tard",
     "Ce message ne s'affichera plus. Préparer les graphismes reste dans les réglages : maintenez Moins (-) en jeu, "
-    "onglet Switch.",
+    "onglet Image.",
 
     "SwitchWakerHD : fichiers du jeu introuvables",
     "SwitchWakerHD a besoin de votre propre copie du jeu dans %s/ (les dossiers code/, content/ et meta/), telle que "
@@ -231,6 +246,10 @@ const Texts kFrench = {
     "Lecture des graphismes du jeu...",
     "%zu sur %zu",
     "B : jouer maintenant (le reste continue en arrière-plan)",
+    "Supprime les ombres noires et les effets manquants qui apparaissent la première fois qu'un lieu est dessiné, "
+    "car la console n'a pas encore de shaders en cache, et rend le jeu bien plus fluide ensuite. Le jeu visite "
+    "tout seul chaque lieu une fois (30-40 minutes, de préférence sur la station d'accueil). Plus de 90 % des "
+    "shaders peuvent être préparés ; quelques-uns ne peuvent pas être compilés.",
 };
 
 const Texts kGerman = {
@@ -240,10 +259,12 @@ const Texts kGerman = {
     "Konsole bereitet jeden Grafikeffekt vor, wenn er zum ersten Mal gezeichnet wird. Das wird beim Spielen besser, "
     "und Vorbereitetes bleibt für die nächsten Starts erhalten.",
     "Grafik jetzt vorbereiten",
-    "Das Spiel besucht hinter einem Ladebildschirm jeden Ort von selbst (etwa 30-40 Minuten, am besten in der "
-    "Station) und startet dann fertig im Titelbildschirm neu. Deine Spielstände werden nicht verändert.",
+    "Wähle danach deinen Spielstand (oder starte ein neues Spiel, das du nicht speicherst): Das Spiel besucht dann "
+    "hinter einem Ladebildschirm jeden Ort von selbst (etwa 30-40 Minuten, am besten in der Station) und startet "
+    "fertig im Titelbildschirm neu. Deine Spielstände werden nicht verändert.",
     "Jetzt spielen",
-    "Du kannst die Grafik später vorbereiten: Halte im Spiel Minus (-) für das Einstellungsmenü, Reiter Switch.",
+    "Die Konsole bereitet zuerst die häufigsten Grafiken hinter einem Ladebildschirm vor (etwa 20 Minuten; B dort, "
+    "um sofort zu spielen). Grafik vorbereiten bleibt im Einstellungsmenü: Halte im Spiel Minus (-), Reiter Bild.",
 
     "SwitchWakerHD: neu in dieser Version",
     "Grafik vorbereiten: Die Konsole kann jetzt die Grafik des ganzen Spiels auf einmal vorbereiten, damit noch nicht "
@@ -253,7 +274,7 @@ const Texts kGerman = {
     "dieser Konsole schon vorbereitet ist, geht schneller.",
     "Später",
     "Diese Meldung erscheint nicht wieder. Grafik vorbereiten bleibt im Einstellungsmenü: Halte im Spiel Minus (-), "
-    "Reiter Switch.",
+    "Reiter Bild.",
 
     "SwitchWakerHD: Spieldateien nicht gefunden",
     "SwitchWakerHD braucht deine eigene Kopie des Spiels in %s/ (die Ordner code/, content/ und meta/), so wie "
@@ -305,6 +326,10 @@ const Texts kGerman = {
     "Grafik des Spiels wird gelesen...",
     "%zu von %zu",
     "B: jetzt spielen (der Rest läuft im Hintergrund weiter)",
+    "Entfernt die schwarzen Schatten und fehlenden Effekte, die erscheinen, wenn ein Ort zum ersten Mal "
+    "gezeichnet wird, weil die Konsole die Shader noch nicht im Cache hat, und sorgt danach für ein viel "
+    "flüssigeres Spiel. Das Spiel besucht jeden Ort einmal von selbst (30-40 Minuten, am besten in der Station). "
+    "Über 90 % der Shader lassen sich vorbereiten; einige wenige können nicht kompiliert werden.",
 };
 
 const Texts kItalian = {
@@ -314,11 +339,12 @@ const Texts kItalian = {
     "ritardo: la console prepara ogni effetto grafico la prima volta che viene disegnato. Migliora man mano che "
     "giochi, e ciò che è pronto viene conservato per gli avvii successivi.",
     "Prepara la grafica ora",
-    "Il gioco visita da solo ogni luogo dietro una schermata di caricamento (circa 30-40 minuti, meglio con la "
-    "console nella base) e poi riparte dalla schermata del titolo, pronto. I tuoi salvataggi non vengono toccati.",
+    "Poi scegli il tuo diario (o inizia una nuova partita che non salvi): il gioco visita da solo ogni luogo dietro "
+    "una schermata di caricamento (circa 30-40 minuti, meglio con la console nella base) e riparte dalla schermata "
+    "del titolo, pronto. I tuoi salvataggi non vengono toccati.",
     "Gioca ora",
-    "Puoi preparare la grafica più tardi: tieni premuto Meno (-) nel gioco per il menu delle impostazioni, scheda "
-    "Switch.",
+    "La console prepara prima la grafica più comune dietro una schermata di caricamento (circa 20 minuti; B lì per "
+    "giocare subito). Prepara la grafica resta nelle impostazioni: tieni premuto Meno (-) nel gioco, scheda Immagine.",
 
     "SwitchWakerHD: novità in questa versione",
     "Prepara la grafica: ora la console può preparare in una volta la grafica di tutto il gioco, così i luoghi non "
@@ -328,7 +354,7 @@ const Texts kItalian = {
     "Ciò che è già pronto su questa console va più veloce.",
     "Più tardi",
     "Questo messaggio non apparirà più. Prepara la grafica resta nelle impostazioni: tieni premuto Meno (-) nel "
-    "gioco, scheda Switch.",
+    "gioco, scheda Immagine.",
 
     "SwitchWakerHD: file del gioco non trovati",
     "SwitchWakerHD ha bisogno della tua copia del gioco in %s/ (le cartelle code/, content/ e meta/), come la "
@@ -379,13 +405,1107 @@ const Texts kItalian = {
     "Lettura della grafica del gioco...",
     "%zu di %zu",
     "B: gioca ora (il resto continua in background)",
+    "Elimina le ombre nere e gli effetti mancanti che compaiono la prima volta che un luogo viene disegnato, "
+    "perché la console non ha ancora gli shader in cache, e poi rende il gioco molto più fluido. Il gioco visita "
+    "da solo ogni luogo una volta (30-40 minuti, meglio con la console nella base). Si può preparare oltre il 90% "
+    "degli shader; alcuni non si possono compilare.",
+};
+
+const Texts kPortuguese = {
+    "SwitchWakerHD: primeira inicialização",
+    "Os gráficos ainda não foram preparados neste console.",
+    "Nesta primeira inicialização algumas texturas podem ficar pretas e alguns objetos podem aparecer com um "
+    "instante de atraso: o console prepara cada efeito gráfico na primeira vez que ele é desenhado. Isso melhora "
+    "conforme você joga, e o que foi preparado fica guardado para as próximas inicializações.",
+    "Preparar os gráficos agora",
+    "Em seguida, escolha seu Quest Log (ou comece um jogo novo que você não vai salvar): o jogo então visita cada "
+    "lugar sozinho por trás de uma tela de carregamento (cerca de 30-40 minutos, de preferência no modo TV) e volta "
+    "à tela de título, pronto. Seus salvamentos não são alterados.",
+    "Jogar agora",
+    "O console prepara primeiro os gráficos mais comuns por trás de uma tela de carregamento (cerca de 20 minutos; B "
+    "ali para jogar na hora). Preparar gráficos continua no menu de configurações: segure Menos (-) no jogo, aba "
+    "Imagem.",
+
+    "SwitchWakerHD: novidade nesta versão",
+    "Preparar gráficos: agora o console pode preparar de uma vez os gráficos do jogo inteiro, para que os lugares "
+    "que você ainda não visitou não fiquem pretos nem atrasados na primeira vez.",
+    "O jogo visita cada lugar sozinho por trás de uma tela de carregamento (cerca de 30-40 minutos, de preferência "
+    "no modo TV) e depois volta à tela de título, pronto. Seus salvamentos não são alterados. O que já foi preparado "
+    "neste console vai mais rápido.",
+    "Mais tarde",
+    "Esta mensagem não aparecerá de novo. Preparar gráficos continua no menu de configurações: segure Menos (-) no "
+    "jogo, aba Imagem.",
+
+    "SwitchWakerHD: os arquivos do jogo não foram encontrados",
+    "O SwitchWakerHD precisa da sua própria cópia do jogo em %s/ (as pastas code/, content/ e meta/), do jeito que "
+    "o tools/switch/make_sd.py a organiza a partir do seu dump (INSTALL.md).",
+    "Faltando: %s",
+    "Copie a pasta build/sd/ criada pelo make_sd.py para a raiz do cartão SD e abra o jogo de novo.",
+    "Pressione + para fechar.",
+
+    "Preparando os gráficos",
+    "%zu de %zu",
+    "iniciando",
+    "Cerca de %d min restantes",
+    "Calculando o tempo restante...",
+    "O jogo está visitando cada lugar sozinho para preparar os gráficos, sem som e sem vibração. Ao terminar, ele "
+    "volta à tela de título. Seus salvamentos não são alterados.",
+    "Parando depois deste lugar... O que foi feito fica guardado.",
+    "Continue segurando B para parar",
+    "Segure B para parar. O que foi feito fica guardado, e na próxima vez Preparar gráficos continua daqui.",
+
+    "Preparar gráficos (experimental)",
+    "Parar a preparação",
+    "O que foi preparado até agora fica guardado; na próxima vez Preparar gráficos continua daqui.",
+    "O console prepara cada efeito gráfico na primeira vez que ele é desenhado, então lugares novos podem ficar "
+    "pretos ou mostrar objetos com atraso por alguns segundos. Preparar gráficos faz isso para o jogo inteiro de uma "
+    "vez: o jogo visita cada lugar sozinho (30-40 minutos, de preferência no modo TV) e depois volta à tela de "
+    "título. Seus salvamentos não são alterados.",
+    "A bateria está em %u%%: conecte o carregador ou coloque o console na base primeiro.",
+    "Continuar a preparar os gráficos (%zu de %zu prontos)",
+    "Preparar os gráficos de novo",
+    "Preparar os gráficos",
+    "Pronto neste console. Repetir só é útil depois de uma atualização que tenha mudado os gráficos.",
+
+    "Gráficos prontos: o jogo inteiro foi preparado neste console.",
+    "Preparando os gráficos: %zu de %zu (%s)%s. Para parar: segure B.",
+    ", cerca de %d min restantes",
+    "Preparando os gráficos: %s. O jogo vai reiniciar.",
+    "concluído",
+    "parado (inicie de novo para continuar)",
+    "um lugar não carregou; inicie de novo para continuar",
+    "Preparação concluída. Feche o jogo e abra-o de novo (seus salvamentos estão como estavam).",
+    "já está em andamento",
+    "comece um jogo primeiro (seu Quest Log, ou um jogo novo que você não vai salvar)",
+    "não foi possível copiar os arquivos do Quest Log (o cartão SD está cheio?)",
+    "Preparar gráficos: escolha seu Quest Log (ou comece um jogo novo que você não vai salvar) e começa sozinho.",
+    "Preparando os gráficos",
+    "Primeira inicialização: o console prepara uma vez os gráficos do jogo, para que os lugares não fiquem pretos nem atrasados na primeira vez. Leva cerca de 20 minutos, de preferência no modo TV.",
+    "Iniciando o jogo...",
+    "Lendo os gráficos do jogo...",
+    "%zu de %zu",
+    "B: jogar agora (o que falta continua em segundo plano)",
+    "Remove as sombras pretas e os efeitos ausentes que aparecem na primeira vez que um lugar é desenhado, porque o "
+    "console ainda não tem os shaders em cache, e deixa o jogo muito mais fluido depois. Ele visita o jogo inteiro "
+    "uma vez sozinho (30-40 minutos, de preferência no modo TV). Mais de 90% dos shaders podem ser preparados; "
+    "alguns não podem ser compilados.",
 };
 
 // the game's "language" setting (Wii U codes, hle/coreinit_misc.cpp), else the console's language
-const Texts* choose() {
+const MenuTexts kMenuEnglish = {
+    // Warp tab
+    .warpWarning = "Warning: warping can break the story. Going somewhere before the game gets there can leave events in "
+        "that place stuck or out of order, and the game may save it. Try it on a copy of your save.",
+    .warpUnlock = "I understand, show the warp destinations",
+    .warpNowIn = "Now in: %.8s%s",
+    .warpPending = "   (a warp is waiting for a loaded file or the current scene change)",
+    .warpMain = "Main places",
+    .warpAll = "Every stage",
+    .warpRoomPoint = "%s  (room %d, point %d)",
+    // Picture tab: resolution
+    .resolution = "Resolution",
+    .handheld = "Handheld",
+    .docked = "Docked",
+    .active = "  (active)",
+    .modeHelp = "Each mode keeps its own internal resolution and dynamic resolution;\n"
+        "they apply by themselves when the console is docked or undocked.",
+    .dynamicRes = "Dynamic resolution",
+    .dynamicResHelp = "Lowers the internal resolution while the GPU cannot hold 30 fps, and raises it again when it can.",
+    .appliesDocked = "Applies when the console is docked.",
+    .appliesHandheld = "Applies when the console is in handheld mode.",
+    .resNow = "Internal resolution now: %.2f.",
+    // Picture tab: colours and effects
+    .colours = "Colours and effects",
+    .exposure = "Exposure",
+    .exposureHelp = "Below 1 tames bright areas (sky, sea)",
+    .contrast = "Contrast",
+    .saturation = "Saturation",
+    .gamma = "Gamma",
+    .gammaHelp = "Above 1 deepens mid-tones and shadows, below 1 lifts them",
+    .originalColours = "Original colours",
+    .vivid = "Vivid",
+    .anisoLabel = "Anisotropic filtering",
+    .anisoOffTip = "Off, as the game draws it. Default.",
+    .anisoTip = "Sharpens textures seen at an angle (the ground ahead, walls along a path) instead of letting them\n"
+        "blur. It costs GPU time, which can lower the frame rate in the busiest views (Outset's tall\n"
+        "grass, the lookout): measured about 5% at 2x, 15% at 4x and 30% at 16x there; the village\n"
+        "and the sea are not affected. Default: 1x (off).",
+    .shadowLabel = "Shadow maps",
+    .shadowFast = "Fast",
+    .shadowOriginal = "Original (default)",
+    .shadowHigh = "High",
+    .shadowFastTip = "Draws the shadow maps at half the size: about 5-7% more frames per second in the busiest views\n"
+        "(Outset's tall grass, the lookout), but straight shadow edges look wavier.",
+    .shadowOriginalTip = "The game's own shadow map size, as on the Wii U. Default.",
+    .shadowHighTip = "Draws the shadow maps at twice the size: sharper shadows, but about 17-20% slower in the busiest "
+        "views\n"
+        "(Outset's tall grass, the lookout) and more memory.",
+    .ao = "Ambient occlusion",
+    .aoHelp = "The soft dark corners and creases the game adds where surfaces meet. Off draws them flat and is "
+        "about 1%\n"
+        "faster in the busiest views (Outset's tall grass, the lookout); the real shadows stay. Default: on.",
+    .fxaa = "Edge smoothing (FXAA)",
+    .fxaaHelp = "Smoother edges in the 3D world; the HUD stays sharp.\n"
+        "Costs a little GPU time (about 2 ms a frame).",
+    .bloom = "Bloom",
+    .bloomHelp = "The glow around the sky and bright places, as on the Wii U.\n"
+        "Costs a little GPU time.",
+    .blur = "Distance blur",
+    .blurHelp = "Far places softly out of focus, as on the Wii U.\n"
+        "Costs a little GPU time.",
+    .fsr = "FSR 1 upscale and sharpening",
+    .fsrHelp = "Sharper picture and cleaner upscaling (AMD FSR 1). Below the window size (docked 720p on 1080p,\n"
+        "or dynamic resolution) it upscales along edges; at window size it only sharpens. Costs GPU time.",
+    // Picture tab: frame rate counter
+    .fpsHeading = "Frame rate counter",
+    .fpsOff = "Off",
+    .fpsRate = "Frame rate",
+    .fpsLoad = "Frame rate and load",
+    .fpsOffTip = "No counter.",
+    .fpsRateTip = "Frames per second, top left.",
+    .fpsLoadTip = "Frames per second plus the render thread's load, draws and GPU lag.",
+    .fpsHelp = "Shows the frames per second in the top left corner of the picture.",
+    .clipsHeading = "Video clips",
+    .clips = "Record clips with the Capture button",
+    .clipsHelp = "Hold the Capture button to save the last 30 seconds as a video in the console's album.\nUses 96 MiB of the game's memory while it is on. Off by default.",
+    .clipsNotApplication = "Only when the game is started from its icon on the HOME menu, not from the Homebrew Menu.",
+    .clipsOtherTitle = "Started through another game: video clips follow that game's setting.",
+    .clipsUnsupported = "This console does not support video recording.",
+    .clipsFailed = "The console did not accept the video buffer: clips are off (details in the log).",
+    .clipsKeptUntilRestart = "Off from the next start: until then clips still work and the 96 MiB stay in use.",
+    // Picture tab: experimental features
+    .experimental = "Experimental features",
+    .experimentalWarn = "Unfinished: 60 fps needs a big overclock (sys-clk or similar) to hold. Not saved.",
+    .fps30 = "30 fps (original)",
+    .fps30Tip = "The game as it was: 30 logic steps and 30 drawn frames a second.",
+    .fpsInterp = "60 fps interpolation",
+    .fpsInterpTip = "The game logic keeps 30 steps a second and a blended frame is drawn between them:\n"
+        "doubles the drawing work, so it also needs a big overclock to hold 60 fps.",
+    .fpsTrue60 = "True 60 (experimental)",
+    .fpsTrue60Tip = "Runs the game logic at 60 steps a second. Needs a big CPU and GPU overclock (sys-clk) to hold 60 "
+        "fps.",
+    .fpsModesHelp = "Frame rate modes the game was not made for (the screen is 60 Hz). Not saved: 30 fps at the next "
+        "start.",
+    .keepSpeed = "Keep game speed",
+    .keepSpeedHelp = "When the console cannot draw 60 frames a second, skip in-between frames instead of slowing\n"
+        "the whole game down: the game logic keeps its 30 steps a second. Off: every in-between frame\n"
+        "is drawn and the game runs slower than real time. Not saved: off at the next start.",
+    .drawnLately = "In-between frames drawn lately: %.0f%%",
+    // Controls tab
+    .rumbleHeading = "Rumble",
+    .rumble = "Rumble",
+    .rumbleHelp = "The Joy-Con or the Pro Controller vibrates when the game asks for it, as the Wii U\n"
+        "controllers did. Off keeps the motors still.",
+    .gyroHeading = "Gyro aiming",
+    .gyroAim = "Aim with the controller's gyro",
+    .gyroAimHelp = "First-person aiming (bow, hookshot, boomerang, telescope, Picto Box, grappling hook) follows\n"
+        "the Joy-Con, the Pro Controller or the console in handheld mode, as with the Wii U GamePad.\n"
+        "The game's own Options > Gyro switch still applies, and the game ignores the motion while\n"
+        "the right stick is pushed.",
+    .turnBy = "Turn left/right by",
+    .axisPlayer = "Player space",
+    .axisYaw = "Yaw",
+    .axisRoll = "Roll",
+    .axisHelp = "Player space: turning the controller left or right about the real vertical, however you hold it\n"
+        "(recommended). Yaw: turning it about its own vertical axis (as if it lay flat). Roll: tilting it "
+        "to\n"
+        "the side like a steering wheel. Tilting its top up or down always looks up or down.",
+    .sensX = "Sensitivity left/right",
+    .sensY = "Sensitivity up/down",
+    .invert = "Invert",
+    .defaultSens = "Default sensitivity",
+    .recalibrate = "Recalibrate now",
+    .recalibrateHelp = "Recalibrate if the view drifts while the controller rests, then put it down for a second:\n"
+        "the gyro's offset is learnt anew.",
+    .gyroReceiving = "Receiving motion.",
+    .gyroCalibrating = "Receiving motion; calibrating (rest the controller for a second).",
+    .gyroNoMotion = "A controller with a gyro is connected, no motion yet.",
+    .gyroNone = "No connected controller has a gyro.",
+    .gyroOff = "Gyro off.",
+    .gyroStick = " The right stick is pushed: the game ignores the gyro until it is released.",
+    .menuHeading = "Menu",
+    .menuNote = "Minus held half a second opens this menu (a short Minus goes to the game); B or Minus closes it.\n"
+        "L / R change tabs.",
+    // Dev tab: what a player sees before ticking the box
+    .devWarn = "Tests and diagnostics for developers. Nothing here is needed to play.",
+    .devShow = "Show developer options",
+    .devShowHelp = "Shows the tests and diagnostics below (debug server, A/B switches, captures). Off by default.\n"
+        "A debug server that is already running keeps running whether this is ticked or not.",
+    // Dev tab > Updates (update_notice_switch.h)
+    .updateHeading = "Updates",
+    .updateCheck = "Check for updates at start",
+    .updateCheckHelp = "At start, asks GitHub whether a new SwitchWakerHD version is out and says so for a few seconds "
+        "(needs the internet; it never delays the game). Nothing is downloaded: you update with the "
+        "installer.",
+    .updateNotice = "SwitchWakerHD %s is out (you have %s): run the installer and choose Update; your saves stay.",
+    .updateNewer = "%s is out (you have %s). Run the installer and choose Update (or build it and copy wwhd.nro, INSTALL.md "
+        "\"Updating\"): your saves, settings and compiled graphics stay.",
+    .updateCurrent = "Up to date (%s).",
+    .updateChecking = "Checking...",
+    .updateFailed = "Could not check: %s.",
+    .updateDevBuild = "A development build: it does not check for updates.",
+    .updateOff = "Off.",
+};
+
+const MenuTexts kMenuSpanish = {
+    // Warp tab
+    .warpWarning = "Atención: viajar puede romper la historia. Ir a un lugar antes de que el juego llegue allí puede "
+        "dejar sus eventos atascados o desordenados, y el juego puede guardarlo. Pruébalo con una copia de tu "
+        "partida.",
+    .warpUnlock = "Entendido, mostrar los destinos",
+    .warpNowIn = "Ahora en: %.8s%s",
+    .warpPending = "   (un viaje espera a que se cargue una partida o termine el cambio de escena)",
+    .warpMain = "Lugares principales",
+    .warpAll = "Todas las zonas",
+    .warpRoomPoint = "%s  (sala %d, punto %d)",
+    // Picture tab: resolution
+    .resolution = "Resolución",
+    .handheld = "Portátil",
+    .docked = "En la base",
+    .active = "  (activo)",
+    .modeHelp = "Cada modo guarda su propia resolución interna y su resolución dinámica;\n"
+        "se aplican solas al poner o quitar la consola de la base.",
+    .dynamicRes = "Resolución dinámica",
+    .dynamicResHelp = "Baja la resolución interna mientras la GPU no puede mantener 30 fps, y la vuelve a subir cuando "
+        "puede.",
+    .appliesDocked = "Se aplica cuando la consola está en la base.",
+    .appliesHandheld = "Se aplica cuando la consola está en modo portátil.",
+    .resNow = "Resolución interna ahora: %.2f.",
+    // Picture tab: colours and effects
+    .colours = "Colores y efectos",
+    .exposure = "Exposición",
+    .exposureHelp = "Por debajo de 1 suaviza las zonas brillantes (cielo, mar)",
+    .contrast = "Contraste",
+    .saturation = "Saturación",
+    .gamma = "Gamma",
+    .gammaHelp = "Por encima de 1 oscurece los tonos medios y las sombras; por debajo de 1 los aclara",
+    .originalColours = "Colores originales",
+    .vivid = "Vivos",
+    .anisoLabel = "Filtrado anisotrópico",
+    .anisoOffTip = "Desactivado, como lo dibuja el juego. Por defecto.",
+    .anisoTip = "Hace más nítidas las texturas vistas en ángulo (el suelo de delante, las paredes de un camino) en "
+        "vez de\n"
+        "dejarlas borrosas. Cuesta tiempo de GPU, que puede bajar los fps en las vistas más cargadas (la "
+        "hierba alta\n"
+        "de Isla Initia, el mirador): medido, un 5% a 2x, un 15% a 4x y un 30% a 16x allí; el pueblo y el "
+        "mar\n"
+        "no se ven afectados. Por defecto: 1x (desactivado).",
+    .shadowLabel = "Mapas de sombras",
+    .shadowFast = "Rápido",
+    .shadowOriginal = "Original (por defecto)",
+    .shadowHigh = "Alto",
+    .shadowFastTip = "Dibuja los mapas de sombras a la mitad de tamaño: un 5-7% más de fps en las vistas más cargadas\n"
+        "(la hierba alta de Isla Initia, el mirador), pero los bordes rectos de las sombras se ven más "
+        "ondulados.",
+    .shadowOriginalTip = "El tamaño de mapas de sombras del propio juego, como en Wii U. Por defecto.",
+    .shadowHighTip = "Dibuja los mapas de sombras al doble de tamaño: sombras más nítidas, pero un 17-20% más lento en las "
+        "vistas\n"
+        "más cargadas (la hierba alta de Isla Initia, el mirador) y más memoria.",
+    .ao = "Oclusión ambiental",
+    .aoHelp = "Las esquinas y pliegues suavemente oscuros que el juego añade donde se juntan superficies. "
+        "Desactivada, se dibujan\n"
+        "planos y va un 1% más rápido en las vistas más cargadas (la hierba alta de Isla Initia, el mirador); "
+        "las sombras\n"
+        "reales se quedan. Por defecto: activada.",
+    .fxaa = "Suavizado de bordes (FXAA)",
+    .fxaaHelp = "Bordes más suaves en el mundo 3D; el HUD sigue nítido.\n"
+        "Cuesta un poco de GPU (unos 2 ms por fotograma).",
+    .bloom = "Resplandor (bloom)",
+    .bloomHelp = "El brillo alrededor del cielo y de los lugares luminosos, como en Wii U.\n"
+        "Cuesta un poco de GPU.",
+    .blur = "Desenfoque lejano",
+    .blurHelp = "Los lugares lejanos, ligeramente desenfocados, como en Wii U.\n"
+        "Cuesta un poco de GPU.",
+    .fsr = "Escalado y nitidez FSR 1",
+    .fsrHelp = "Imagen más nítida y mejor escalada (AMD FSR 1). Por debajo del tamaño de la ventana (720p en base\n"
+        "con 1080p, o resolución dinámica) escala siguiendo los bordes; a tamaño completo solo afina. Cuesta tiempo de GPU.",
+    // Picture tab: frame rate counter
+    .fpsHeading = "Contador de fps",
+    .fpsOff = "No",
+    .fpsRate = "Fps",
+    .fpsLoad = "Fps y carga",
+    .fpsOffTip = "Sin contador.",
+    .fpsRateTip = "Fotogramas por segundo, arriba a la izquierda.",
+    .fpsLoadTip = "Fotogramas por segundo más la carga del hilo de render, las llamadas de dibujo y el retraso de la "
+        "GPU.",
+    .fpsHelp = "Muestra los fotogramas por segundo en la esquina superior izquierda de la imagen.",
+    .clipsHeading = "Clips de vídeo",
+    .clips = "Grabar clips con el botón de captura",
+    .clipsHelp = "Mantén pulsado el botón de captura para guardar los últimos 30 segundos como vídeo en el álbum de la consola.\nUsa 96 MiB de la memoria del juego mientras está activado. Desactivado por defecto.",
+    .clipsNotApplication = "Solo si el juego se inicia desde su icono en el menú HOME, no desde el Homebrew Menu.",
+    .clipsOtherTitle = "Iniciado a través de otro juego: los clips de vídeo siguen el ajuste de ese juego.",
+    .clipsUnsupported = "Esta consola no admite la grabación de vídeo.",
+    .clipsFailed = "La consola no aceptó el búfer de vídeo: los clips están desactivados (detalles en el log).",
+    .clipsKeptUntilRestart = "Desactivado desde el próximo arranque: hasta entonces los clips siguen funcionando y los 96 MiB siguen en uso.",
+    // Picture tab: experimental features
+    .experimental = "Funciones experimentales",
+    .experimentalWarn = "Sin terminar: mantener 60 fps necesita un gran overclock (sys-clk o similar). No se guarda.",
+    .fps30 = "30 fps (original)",
+    .fps30Tip = "El juego tal como era: 30 pasos de lógica y 30 fotogramas dibujados por segundo.",
+    .fpsInterp = "Interpolación a 60 fps",
+    .fpsInterpTip = "La lógica del juego sigue a 30 pasos por segundo y se dibuja un fotograma mezclado entre ellos:\n"
+        "duplica el trabajo de dibujo, así que también necesita un gran overclock para mantener 60 fps.",
+    .fpsTrue60 = "60 reales (experimental)",
+    .fpsTrue60Tip = "Ejecuta la lógica del juego a 60 pasos por segundo. Necesita un gran overclock de CPU y GPU "
+        "(sys-clk) para mantener 60 fps.",
+    .fpsModesHelp = "Modos de fps para los que el juego no se hizo (la pantalla va a 60 Hz). No se guarda: 30 fps en el "
+        "siguiente arranque.",
+    .keepSpeed = "Mantener la velocidad del juego",
+    .keepSpeedHelp = "Cuando la consola no puede dibujar 60 fotogramas por segundo, se saltan fotogramas intermedios en "
+        "vez de\n"
+        "ralentizar todo el juego: la lógica mantiene sus 30 pasos por segundo. Desactivado: se dibujan todos "
+        "los\n"
+        "intermedios y el juego va más lento que el tiempo real. No se guarda: desactivado en el siguiente "
+        "arranque.",
+    .drawnLately = "Fotogramas intermedios dibujados últimamente: %.0f%%",
+    // Controls tab
+    .rumbleHeading = "Vibración",
+    .rumble = "Vibración",
+    .rumbleHelp = "Los Joy-Con o el mando Pro vibran cuando el juego lo pide, como los mandos de Wii U.\n"
+        "Desactivado, los motores no se mueven.",
+    .gyroHeading = "Apuntado con giroscopio",
+    .gyroAim = "Apuntar con el giroscopio del mando",
+    .gyroAimHelp = "El apuntado en primera persona (arco, gancho, bumerán, catalejo, Pictógrafo, garfio) sigue\n"
+        "a los Joy-Con, al mando Pro o a la consola en modo portátil, como con el GamePad de Wii U.\n"
+        "La opción Giroscopio del propio juego sigue contando, y el juego ignora el movimiento mientras\n"
+        "se empuja el stick derecho.",
+    .turnBy = "Girar a izquierda/derecha con",
+    .axisPlayer = "Espacio del jugador",
+    .axisYaw = "Guiñada",
+    .axisRoll = "Alabeo",
+    .axisHelp = "Espacio del jugador: girar el mando a izquierda o derecha sobre la vertical real, lo sujetes como lo "
+        "sujetes\n"
+        "(recomendado). Guiñada: girarlo sobre su propio eje vertical (como si estuviera tumbado). Alabeo: "
+        "inclinarlo\n"
+        "hacia un lado como un volante. Inclinar la parte de arriba hacia arriba o abajo siempre mira arriba "
+        "o abajo.",
+    .sensX = "Sensibilidad izquierda/derecha",
+    .sensY = "Sensibilidad arriba/abajo",
+    .invert = "Invertir",
+    .defaultSens = "Sensibilidad por defecto",
+    .recalibrate = "Recalibrar ahora",
+    .recalibrateHelp = "Recalibra si la vista se desplaza con el mando quieto, y luego déjalo apoyado un segundo:\n"
+        "el giroscopio vuelve a aprender su desviación.",
+    .gyroReceiving = "Recibiendo movimiento.",
+    .gyroCalibrating = "Recibiendo movimiento; calibrando (deja el mando quieto un segundo).",
+    .gyroNoMotion = "Hay un mando con giroscopio conectado; aún no llega movimiento.",
+    .gyroNone = "Ningún mando conectado tiene giroscopio.",
+    .gyroOff = "Giroscopio desactivado.",
+    .gyroStick = " El stick derecho está empujado: el juego ignora el giroscopio hasta que lo sueltes.",
+    .menuHeading = "Menú",
+    .menuNote = "Mantener Menos medio segundo abre este menú (una pulsación corta de Menos va al juego); B o Menos lo "
+        "cierran.\n"
+        "L / R cambian de pestaña.",
+    // Dev tab: what a player sees before ticking the box
+    .devWarn = "Pruebas y diagnósticos para desarrolladores. Nada de aquí hace falta para jugar.",
+    .devShow = "Mostrar opciones de desarrollador",
+    .devShowHelp = "Muestra debajo las pruebas y diagnósticos (servidor de depuración, interruptores A/B, capturas). "
+        "Desactivado por defecto.\n"
+        "Un servidor de depuración que ya esté en marcha sigue funcionando, esté marcado o no.",
+    // Dev tab > Updates (update_notice_switch.h)
+    .updateHeading = "Actualizaciones",
+    .updateCheck = "Buscar actualizaciones al arrancar",
+    .updateCheckHelp = "Al arrancar pregunta a GitHub si hay una versión nueva de SwitchWakerHD y lo avisa unos segundos "
+        "(necesita internet; nunca retrasa el juego). No descarga nada: se actualiza con el instalador.",
+    .updateNotice = "Ya está SwitchWakerHD %s (tienes la %s): abre el instalador y elige Actualizar; tus partidas se conservan.",
+    .updateNewer = "Ya está la %s (tienes la %s). Abre el instalador y elige Actualizar (o compílala y copia wwhd.nro, "
+        "INSTALL.md, \"Updating\"): partidas, ajustes y gráficos compilados se conservan.",
+    .updateCurrent = "Al día (%s).",
+    .updateChecking = "Buscando...",
+    .updateFailed = "No se pudo comprobar: %s.",
+    .updateDevBuild = "Versión de desarrollo: no busca actualizaciones.",
+    .updateOff = "Desactivado.",
+};
+
+const MenuTexts kMenuFrench = {
+    // Warp tab
+    .warpWarning = "Attention : se téléporter peut casser l'histoire. Aller dans un lieu avant que le jeu n'y arrive "
+        "peut bloquer ses événements ou les mélanger, et le jeu peut l'enregistrer. Essayez-le sur une copie "
+        "de votre sauvegarde.",
+    .warpUnlock = "J'ai compris, afficher les destinations",
+    .warpNowIn = "Lieu actuel : %.8s%s",
+    .warpPending = "   (une téléportation attend une partie chargée ou la fin du changement de scène)",
+    .warpMain = "Lieux principaux",
+    .warpAll = "Toutes les zones",
+    .warpRoomPoint = "%s  (salle %d, point %d)",
+    // Picture tab: resolution
+    .resolution = "Résolution",
+    .handheld = "Portable",
+    .docked = "Sur la station",
+    .active = "  (actif)",
+    .modeHelp = "Chaque mode garde sa propre résolution interne et sa résolution dynamique ;\n"
+        "elles s'appliquent d'elles-mêmes quand la console est posée sur la station ou retirée.",
+    .dynamicRes = "Résolution dynamique",
+    .dynamicResHelp = "Baisse la résolution interne tant que le GPU ne tient pas 30 fps, et la remonte quand il le peut.",
+    .appliesDocked = "S'applique quand la console est sur la station.",
+    .appliesHandheld = "S'applique quand la console est en mode portable.",
+    .resNow = "Résolution interne actuelle : %.2f.",
+    // Picture tab: colours and effects
+    .colours = "Couleurs et effets",
+    .exposure = "Exposition",
+    .exposureHelp = "En dessous de 1, adoucit les zones claires (ciel, mer)",
+    .contrast = "Contraste",
+    .saturation = "Saturation",
+    .gamma = "Gamma",
+    .gammaHelp = "Au-dessus de 1, assombrit les tons moyens et les ombres ; en dessous de 1, les éclaircit",
+    .originalColours = "Couleurs d'origine",
+    .vivid = "Vives",
+    .anisoLabel = "Filtrage anisotrope",
+    .anisoOffTip = "Désactivé, comme le jeu le dessine. Par défaut.",
+    .anisoTip = "Rend plus nettes les textures vues de biais (le sol devant, les murs le long d'un chemin) au lieu "
+        "de\n"
+        "les laisser floues. Cela coûte du temps GPU, ce qui peut baisser les fps dans les vues les plus "
+        "chargées\n"
+        "(les hautes herbes de l'île de l'Aurore, la tour de guet) : mesuré, environ 5 % à 2x, 15 % à 4x et "
+        "30 % à 16x\n"
+        "là-bas ; le village et la mer ne sont pas touchés. Par défaut : 1x (désactivé).",
+    .shadowLabel = "Cartes d'ombres",
+    .shadowFast = "Rapide",
+    .shadowOriginal = "D'origine (par défaut)",
+    .shadowHigh = "Élevé",
+    .shadowFastTip = "Dessine les cartes d'ombres à moitié taille : environ 5-7 % de fps en plus dans les vues les plus "
+        "chargées\n"
+        "(les hautes herbes de l'île de l'Aurore, la tour de guet), mais les bords droits des ombres sont "
+        "plus ondulés.",
+    .shadowOriginalTip = "La taille d'origine des cartes d'ombres, comme sur Wii U. Par défaut.",
+    .shadowHighTip = "Dessine les cartes d'ombres à double taille : ombres plus nettes, mais environ 17-20 % plus lent "
+        "dans les vues\n"
+        "les plus chargées (les hautes herbes de l'île de l'Aurore, la tour de guet) et plus de mémoire.",
+    .ao = "Occlusion ambiante",
+    .aoHelp = "Les coins et plis légèrement sombres que le jeu ajoute là où les surfaces se rejoignent. Désactivée, "
+        "ils sont\n"
+        "plats et c'est environ 1 % plus rapide dans les vues les plus chargées (les hautes herbes de l'île "
+        "de l'Aurore,\n"
+        "la tour de guet) ; les vraies ombres restent. Par défaut : activée.",
+    .fxaa = "Lissage des contours (FXAA)",
+    .fxaaHelp = "Contours plus doux dans le monde 3D ; l'interface reste nette.\n"
+        "Coûte un peu de temps GPU (environ 2 ms par image).",
+    .bloom = "Halo lumineux (bloom)",
+    .bloomHelp = "La lueur autour du ciel et des endroits lumineux, comme sur Wii U.\n"
+        "Coûte un peu de temps GPU.",
+    .blur = "Flou de distance",
+    .blurHelp = "Les lieux lointains légèrement flous, comme sur Wii U.\n"
+        "Coûte un peu de temps GPU.",
+    .fsr = "Upscaling et netteté FSR 1",
+    .fsrHelp = "Image plus nette et mise à l'échelle plus propre (AMD FSR 1). Sous la taille de la fenêtre (720p sur\n"
+        "1080p en dock, ou résolution dynamique) elle suit les contours ; à taille de fenêtre elle ne fait que\n"
+        "rendre l'image plus nette. Coûte du temps GPU.",
+    // Picture tab: frame rate counter
+    .fpsHeading = "Compteur de fps",
+    .fpsOff = "Non",
+    .fpsRate = "Fps",
+    .fpsLoad = "Fps et charge",
+    .fpsOffTip = "Pas de compteur.",
+    .fpsRateTip = "Images par seconde, en haut à gauche.",
+    .fpsLoadTip = "Images par seconde, plus la charge du thread de rendu, les appels de dessin et le retard du GPU.",
+    .fpsHelp = "Affiche les images par seconde dans le coin supérieur gauche de l'image.",
+    .clipsHeading = "Clips vidéo",
+    .clips = "Enregistrer des clips avec le bouton de capture",
+    .clipsHelp = "Maintenez le bouton de capture pour enregistrer les 30 dernières secondes en vidéo dans l'album de la console.\nUtilise 96 Mio de la mémoire du jeu tant que c'est activé. Désactivé par défaut.",
+    .clipsNotApplication = "Seulement si le jeu est lancé depuis son icône du menu HOME, pas depuis le Homebrew Menu.",
+    .clipsOtherTitle = "Lancé via un autre jeu : les clips vidéo suivent le réglage de ce jeu.",
+    .clipsUnsupported = "Cette console ne prend pas en charge l'enregistrement vidéo.",
+    .clipsFailed = "La console n'a pas accepté la mémoire vidéo : les clips sont désactivés (détails dans le journal).",
+    .clipsKeptUntilRestart = "Désactivé au prochain démarrage : d'ici là, les clips fonctionnent encore et les 96 Mio restent utilisés.",
+    // Picture tab: experimental features
+    .experimental = "Fonctions expérimentales",
+    .experimentalWarn = "Inachevé : tenir 60 fps demande un fort overclock (sys-clk ou équivalent). Non enregistré.",
+    .fps30 = "30 fps (d'origine)",
+    .fps30Tip = "Le jeu tel qu'il était : 30 étapes de logique et 30 images dessinées par seconde.",
+    .fpsInterp = "Interpolation à 60 fps",
+    .fpsInterpTip = "La logique du jeu garde 30 étapes par seconde et une image intermédiaire est dessinée entre elles "
+        ":\n"
+        "le travail de dessin double, il faut donc aussi un fort overclock pour tenir 60 fps.",
+    .fpsTrue60 = "60 réels (expérimental)",
+    .fpsTrue60Tip = "Fait tourner la logique du jeu à 60 étapes par seconde. Demande un fort overclock du CPU et du GPU "
+        "(sys-clk) pour tenir 60 fps.",
+    .fpsModesHelp = "Modes de fps pour lesquels le jeu n'a pas été conçu (l'écran est à 60 Hz). Non enregistré : 30 fps "
+        "au prochain démarrage.",
+    .keepSpeed = "Garder la vitesse du jeu",
+    .keepSpeedHelp = "Quand la console ne peut pas dessiner 60 images par seconde, des images intermédiaires sont sautées "
+        "au lieu de\n"
+        "ralentir tout le jeu : la logique garde ses 30 étapes par seconde. Désactivé : chaque image "
+        "intermédiaire\n"
+        "est dessinée et le jeu tourne plus lentement que le temps réel. Non enregistré : désactivé au "
+        "prochain démarrage.",
+    .drawnLately = "Images intermédiaires dessinées récemment : %.0f%%",
+    // Controls tab
+    .rumbleHeading = "Vibrations",
+    .rumble = "Vibrations",
+    .rumbleHelp = "Les Joy-Con ou la manette Pro vibrent quand le jeu le demande, comme les manettes\n"
+        "Wii U. Désactivé, les moteurs restent immobiles.",
+    .gyroHeading = "Visée gyroscopique",
+    .gyroAim = "Viser avec le gyroscope de la manette",
+    .gyroAimHelp = "La visée à la première personne (arc, grappin, boomerang, longue-vue, Picto-box, crochet) suit\n"
+        "les Joy-Con, la manette Pro ou la console en mode portable, comme avec le GamePad Wii U.\n"
+        "L'option Gyroscope du jeu s'applique toujours, et le jeu ignore le mouvement tant que\n"
+        "le stick droit est poussé.",
+    .turnBy = "Tourner à gauche/droite par",
+    .axisPlayer = "Espace du joueur",
+    .axisYaw = "Lacet",
+    .axisRoll = "Roulis",
+    .axisHelp = "Espace du joueur : tourner la manette à gauche ou à droite autour de la verticale réelle, quelle que "
+        "soit la prise\n"
+        "(recommandé). Lacet : la tourner autour de son propre axe vertical (comme posée à plat). Roulis : "
+        "l'incliner\n"
+        "sur le côté comme un volant. Incliner le haut vers le haut ou le bas regarde toujours en haut ou en "
+        "bas.",
+    .sensX = "Sensibilité gauche/droite",
+    .sensY = "Sensibilité haut/bas",
+    .invert = "Inverser",
+    .defaultSens = "Sensibilité par défaut",
+    .recalibrate = "Recalibrer maintenant",
+    .recalibrateHelp = "Recalibrez si la vue dérive manette immobile, puis posez-la une seconde :\n"
+        "le décalage du gyroscope est réappris.",
+    .gyroReceiving = "Mouvement reçu.",
+    .gyroCalibrating = "Mouvement reçu ; calibrage (laissez la manette immobile une seconde).",
+    .gyroNoMotion = "Une manette avec gyroscope est connectée, pas encore de mouvement.",
+    .gyroNone = "Aucune manette connectée n'a de gyroscope.",
+    .gyroOff = "Gyroscope désactivé.",
+    .gyroStick = " Le stick droit est poussé : le jeu ignore le gyroscope jusqu'à ce qu'il soit relâché.",
+    .menuHeading = "Menu",
+    .menuNote = "Maintenir Moins une demi-seconde ouvre ce menu (un appui court sur Moins va au jeu) ; B ou Moins le "
+        "ferme.\n"
+        "L / R changent d'onglet.",
+    // Dev tab: what a player sees before ticking the box
+    .devWarn = "Tests et diagnostics pour les développeurs. Rien ici n'est nécessaire pour jouer.",
+    .devShow = "Afficher les options développeur",
+    .devShowHelp = "Affiche ci-dessous les tests et diagnostics (serveur de débogage, interrupteurs A/B, captures). "
+        "Désactivé par défaut.\n"
+        "Un serveur de débogage déjà lancé continue de tourner, que la case soit cochée ou non.",
+    // Dev tab > Updates (update_notice_switch.h)
+    .updateHeading = "Mises à jour",
+    .updateCheck = "Rechercher les mises à jour au démarrage",
+    .updateCheckHelp = "Au démarrage, demande à GitHub si une nouvelle version de SwitchWakerHD est sortie et l'indique "
+        "quelques secondes (il faut Internet ; le jeu n'attend jamais). Rien n'est téléchargé : la mise à "
+        "jour se fait avec l'installateur.",
+    .updateNotice = "SwitchWakerHD %s est sortie (vous avez la %s) : lancez l'installateur et choisissez Update ; vos sauvegardes "
+        "sont conservées.",
+    .updateNewer = "La %s est sortie (vous avez la %s). Lancez l'installateur et choisissez Update (ou compilez-la et copiez "
+        "wwhd.nro, INSTALL.md « Updating ») : sauvegardes, réglages et graphismes compilés sont conservés.",
+    .updateCurrent = "À jour (%s).",
+    .updateChecking = "Recherche...",
+    .updateFailed = "Vérification impossible : %s.",
+    .updateDevBuild = "Version de développement : pas de recherche de mises à jour.",
+    .updateOff = "Désactivé.",
+};
+
+const MenuTexts kMenuGerman = {
+    // Warp tab
+    .warpWarning = "Achtung: Teleportieren kann die Geschichte kaputt machen. Wer einen Ort erreicht, bevor das Spiel "
+        "dort ankommt, kann dessen Ereignisse blockieren oder durcheinanderbringen, und das Spiel kann das "
+        "speichern. Probiere es mit einer Kopie deines Spielstands.",
+    .warpUnlock = "Verstanden, Ziele anzeigen",
+    .warpNowIn = "Jetzt in: %.8s%s",
+    .warpPending = "   (ein Teleport wartet auf einen geladenen Spielstand oder den laufenden Szenenwechsel)",
+    .warpMain = "Wichtige Orte",
+    .warpAll = "Alle Bereiche",
+    .warpRoomPoint = "%s  (Raum %d, Punkt %d)",
+    // Picture tab: resolution
+    .resolution = "Auflösung",
+    .handheld = "Handheld",
+    .docked = "In der Station",
+    .active = "  (aktiv)",
+    .modeHelp = "Jeder Modus behält seine eigene interne und dynamische Auflösung;\n"
+        "sie gelten von selbst, wenn die Konsole in die Station gestellt oder herausgenommen wird.",
+    .dynamicRes = "Dynamische Auflösung",
+    .dynamicResHelp = "Senkt die interne Auflösung, solange die GPU keine 30 fps halten kann, und hebt sie wieder an, "
+        "sobald sie es kann.",
+    .appliesDocked = "Gilt, wenn die Konsole in der Station steht.",
+    .appliesHandheld = "Gilt, wenn die Konsole im Handheld-Modus ist.",
+    .resNow = "Interne Auflösung jetzt: %.2f.",
+    // Picture tab: colours and effects
+    .colours = "Farben und Effekte",
+    .exposure = "Belichtung",
+    .exposureHelp = "Unter 1 dämpft helle Bereiche (Himmel, Meer)",
+    .contrast = "Kontrast",
+    .saturation = "Sättigung",
+    .gamma = "Gamma",
+    .gammaHelp = "Über 1 vertieft Mitteltöne und Schatten, unter 1 hellt sie auf",
+    .originalColours = "Originalfarben",
+    .vivid = "Kräftig",
+    .anisoLabel = "Anisotrope Filterung",
+    .anisoOffTip = "Aus, wie das Spiel es zeichnet. Standard.",
+    .anisoTip = "Macht schräg gesehene Texturen (der Boden vor dir, Wände entlang eines Weges) scharf, statt sie\n"
+        "verschwimmen zu lassen. Kostet GPU-Zeit und kann die Bildrate in den anspruchsvollsten Ansichten "
+        "senken\n"
+        "(das hohe Gras der Insel Präludien, der Ausguck): gemessen etwa 5 % bei 2x, 15 % bei 4x und 30 % bei "
+        "16x;\n"
+        "das Dorf und das Meer sind nicht betroffen. Standard: 1x (aus).",
+    .shadowLabel = "Schattenkarten",
+    .shadowFast = "Schnell",
+    .shadowOriginal = "Original (Standard)",
+    .shadowHigh = "Hoch",
+    .shadowFastTip = "Zeichnet die Schattenkarten in halber Größe: etwa 5-7 % mehr Bilder pro Sekunde in den "
+        "anspruchsvollsten\n"
+        "Ansichten (das hohe Gras der Insel Präludien, der Ausguck), aber gerade Schattenkanten wirken "
+        "welliger.",
+    .shadowOriginalTip = "Die Originalgröße der Schattenkarten, wie auf der Wii U. Standard.",
+    .shadowHighTip = "Zeichnet die Schattenkarten in doppelter Größe: schärfere Schatten, aber etwa 17-20 % langsamer in "
+        "den\n"
+        "anspruchsvollsten Ansichten (das hohe Gras der Insel Präludien, der Ausguck) und mehr Speicher.",
+    .ao = "Umgebungsverdeckung",
+    .aoHelp = "Die weichen dunklen Ecken und Falten, die das Spiel dort hinzufügt, wo Flächen aufeinandertreffen. "
+        "Aus: flach\n"
+        "gezeichnet und etwa 1 % schneller in den anspruchsvollsten Ansichten (das hohe Gras der Insel "
+        "Präludien, der\n"
+        "Ausguck); die echten Schatten bleiben. Standard: an.",
+    .fxaa = "Kantenglättung (FXAA)",
+    .fxaaHelp = "Weichere Kanten in der 3D-Welt; die Anzeige bleibt scharf.\n"
+        "Kostet etwas GPU-Zeit (etwa 2 ms pro Bild).",
+    .bloom = "Leuchten (Bloom)",
+    .bloomHelp = "Das Leuchten um den Himmel und helle Orte, wie auf der Wii U.\n"
+        "Kostet etwas GPU-Zeit.",
+    .blur = "Ferne Unschärfe",
+    .blurHelp = "Ferne Orte leicht unscharf, wie auf der Wii U.\n"
+        "Kostet etwas GPU-Zeit.",
+    .fsr = "FSR-1-Hochskalierung und Schärfe",
+    .fsrHelp = "Schärferes Bild und sauberere Hochskalierung (AMD FSR 1). Unter der Fenstergröße (720p am Dock auf\n"
+        "1080p oder dynamische Auflösung) entlang der Kanten; in Fenstergröße nur Schärfen. Kostet GPU-Zeit.",
+    // Picture tab: frame rate counter
+    .fpsHeading = "Bildratenanzeige",
+    .fpsOff = "Aus",
+    .fpsRate = "Bildrate",
+    .fpsLoad = "Bildrate und Last",
+    .fpsOffTip = "Keine Anzeige.",
+    .fpsRateTip = "Bilder pro Sekunde, oben links.",
+    .fpsLoadTip = "Bilder pro Sekunde plus Last des Render-Threads, Zeichenaufrufe und GPU-Verzögerung.",
+    .fpsHelp = "Zeigt die Bilder pro Sekunde in der oberen linken Ecke des Bildes.",
+    .clipsHeading = "Videoclips",
+    .clips = "Clips mit der Aufnahmetaste aufnehmen",
+    .clipsHelp = "Halte die Aufnahmetaste gedrückt, um die letzten 30 Sekunden als Video im Album der Konsole zu speichern.\nBelegt 96 MiB des Spielspeichers, solange es an ist. Standardmäßig aus.",
+    .clipsNotApplication = "Nur wenn das Spiel über sein Symbol im HOME-Menü gestartet wird, nicht über das Homebrew-Menü.",
+    .clipsOtherTitle = "Über ein anderes Spiel gestartet: Videoclips folgen der Einstellung dieses Spiels.",
+    .clipsUnsupported = "Diese Konsole unterstützt keine Videoaufnahme.",
+    .clipsFailed = "Die Konsole hat den Videopuffer nicht angenommen: Clips sind aus (Details im Log).",
+    .clipsKeptUntilRestart = "Aus ab dem nächsten Start: bis dahin funktionieren Clips weiter und die 96 MiB bleiben belegt.",
+    // Picture tab: experimental features
+    .experimental = "Experimentelle Funktionen",
+    .experimentalWarn = "Unfertig: 60 fps zu halten braucht starkes Übertakten (sys-clk o. Ä.). Wird nicht gespeichert.",
+    .fps30 = "30 fps (original)",
+    .fps30Tip = "Das Spiel wie es war: 30 Logikschritte und 30 gezeichnete Bilder pro Sekunde.",
+    .fpsInterp = "60-fps-Interpolation",
+    .fpsInterpTip = "Die Spiellogik bleibt bei 30 Schritten pro Sekunde, dazwischen wird ein gemischtes Bild "
+        "gezeichnet:\n"
+        "das verdoppelt die Zeichenarbeit, daher braucht es ebenfalls starkes Übertakten für 60 fps.",
+    .fpsTrue60 = "Echte 60 (experimentell)",
+    .fpsTrue60Tip = "Lässt die Spiellogik mit 60 Schritten pro Sekunde laufen. Braucht starkes CPU- und GPU-Übertakten "
+        "(sys-clk), um 60 fps zu halten.",
+    .fpsModesHelp = "Bildratenmodi, für die das Spiel nicht gemacht wurde (der Bildschirm hat 60 Hz). Nicht gespeichert: "
+        "30 fps beim nächsten Start.",
+    .keepSpeed = "Spieltempo halten",
+    .keepSpeedHelp = "Wenn die Konsole keine 60 Bilder pro Sekunde zeichnen kann, werden Zwischenbilder übersprungen, "
+        "statt das\n"
+        "ganze Spiel zu verlangsamen: Die Logik behält ihre 30 Schritte pro Sekunde. Aus: Jedes Zwischenbild "
+        "wird\n"
+        "gezeichnet und das Spiel läuft langsamer als Echtzeit. Nicht gespeichert: aus beim nächsten Start.",
+    .drawnLately = "Zuletzt gezeichnete Zwischenbilder: %.0f%%",
+    // Controls tab
+    .rumbleHeading = "Vibration",
+    .rumble = "Vibration",
+    .rumbleHelp = "Die Joy-Con oder der Pro Controller vibrieren, wenn das Spiel es verlangt, wie die\n"
+        "Wii-U-Controller. Aus: Die Motoren bleiben still.",
+    .gyroHeading = "Gyro-Zielen",
+    .gyroAim = "Mit dem Gyroskop des Controllers zielen",
+    .gyroAimHelp = "Das Zielen in der Ich-Perspektive (Bogen, Enterhaken, Bumerang, Fernrohr, Piktobox, Greifhaken)\n"
+        "folgt den Joy-Con, dem Pro Controller oder der Konsole im Handheld-Modus, wie mit dem Wii U "
+        "GamePad.\n"
+        "Die Gyro-Option des Spiels gilt weiterhin, und das Spiel ignoriert die Bewegung, solange der\n"
+        "rechte Stick gedrückt wird.",
+    .turnBy = "Links/rechts drehen per",
+    .axisPlayer = "Spielerraum",
+    .axisYaw = "Gieren",
+    .axisRoll = "Rollen",
+    .axisHelp = "Spielerraum: den Controller um die echte Senkrechte nach links oder rechts drehen, egal wie du ihn "
+        "hältst\n"
+        "(empfohlen). Gieren: ihn um seine eigene Hochachse drehen (als läge er flach). Rollen: ihn wie ein "
+        "Lenkrad\n"
+        "zur Seite neigen. Die Oberseite nach oben oder unten kippen schaut immer nach oben oder unten.",
+    .sensX = "Empfindlichkeit links/rechts",
+    .sensY = "Empfindlichkeit oben/unten",
+    .invert = "Umkehren",
+    .defaultSens = "Standardempfindlichkeit",
+    .recalibrate = "Jetzt neu kalibrieren",
+    .recalibrateHelp = "Neu kalibrieren, wenn die Ansicht wandert, obwohl der Controller ruht, dann ihn eine Sekunde "
+        "ablegen:\n"
+        "Der Versatz des Gyroskops wird neu gelernt.",
+    .gyroReceiving = "Bewegung wird empfangen.",
+    .gyroCalibrating = "Bewegung wird empfangen; Kalibrierung (lege den Controller eine Sekunde ab).",
+    .gyroNoMotion = "Ein Controller mit Gyroskop ist verbunden, noch keine Bewegung.",
+    .gyroNone = "Kein verbundener Controller hat ein Gyroskop.",
+    .gyroOff = "Gyroskop aus.",
+    .gyroStick = " Der rechte Stick ist gedrückt: Das Spiel ignoriert das Gyroskop, bis er losgelassen wird.",
+    .menuHeading = "Menü",
+    .menuNote = "Minus eine halbe Sekunde halten öffnet dieses Menü (kurz Minus geht ans Spiel); B oder Minus "
+        "schließt es.\n"
+        "L / R wechseln den Reiter.",
+    // Dev tab: what a player sees before ticking the box
+    .devWarn = "Tests und Diagnosen für Entwickler. Nichts hier wird zum Spielen gebraucht.",
+    .devShow = "Entwickleroptionen anzeigen",
+    .devShowHelp = "Zeigt unten die Tests und Diagnosen (Debug-Server, A/B-Schalter, Aufnahmen). Standardmäßig aus.\n"
+        "Ein bereits laufender Debug-Server läuft weiter, ob dies angehakt ist oder nicht.",
+    // Dev tab > Updates (update_notice_switch.h)
+    .updateHeading = "Updates",
+    .updateCheck = "Beim Start nach Updates suchen",
+    .updateCheckHelp = "Fragt beim Start bei GitHub nach, ob eine neue SwitchWakerHD-Version erschienen ist, und zeigt es "
+        "ein paar Sekunden an (braucht Internet; das Spiel wartet nie). Es wird nichts heruntergeladen: "
+        "Aktualisiert wird mit dem Installer.",
+    .updateNotice = "SwitchWakerHD %s ist erschienen (du hast %s): starte den Installer und wähle Update; deine Spielstände "
+        "bleiben.",
+    .updateNewer = "%s ist erschienen (du hast %s). Starte den Installer und wähle Update (oder baue sie und kopiere wwhd.nro, "
+        "INSTALL.md \"Updating\"): Spielstände, Einstellungen und kompilierte Grafik bleiben.",
+    .updateCurrent = "Aktuell (%s).",
+    .updateChecking = "Suche...",
+    .updateFailed = "Prüfung fehlgeschlagen: %s.",
+    .updateDevBuild = "Entwicklerversion: sucht nicht nach Updates.",
+    .updateOff = "Aus.",
+};
+
+const MenuTexts kMenuItalian = {
+    // Warp tab
+    .warpWarning = "Attenzione: teletrasportarsi può rompere la storia. Andare in un luogo prima che il gioco ci arrivi "
+        "può bloccarne gli eventi o metterli in disordine, e il gioco può salvarlo. Provalo su una copia del "
+        "tuo salvataggio.",
+    .warpUnlock = "Ho capito, mostra le destinazioni",
+    .warpNowIn = "Ora in: %.8s%s",
+    .warpPending = "   (un teletrasporto attende un salvataggio caricato o il cambio di scena in corso)",
+    .warpMain = "Luoghi principali",
+    .warpAll = "Tutte le zone",
+    .warpRoomPoint = "%s  (stanza %d, punto %d)",
+    // Picture tab: resolution
+    .resolution = "Risoluzione",
+    .handheld = "Portatile",
+    .docked = "Nella base",
+    .active = "  (attivo)",
+    .modeHelp = "Ogni modalità conserva la propria risoluzione interna e dinamica;\n"
+        "si applicano da sole quando la console viene messa nella base o tolta.",
+    .dynamicRes = "Risoluzione dinamica",
+    .dynamicResHelp = "Abbassa la risoluzione interna finché la GPU non riesce a tenere 30 fps, e la rialza quando ci "
+        "riesce.",
+    .appliesDocked = "Si applica quando la console è nella base.",
+    .appliesHandheld = "Si applica quando la console è in modalità portatile.",
+    .resNow = "Risoluzione interna ora: %.2f.",
+    // Picture tab: colours and effects
+    .colours = "Colori ed effetti",
+    .exposure = "Esposizione",
+    .exposureHelp = "Sotto 1 attenua le zone luminose (cielo, mare)",
+    .contrast = "Contrasto",
+    .saturation = "Saturazione",
+    .gamma = "Gamma",
+    .gammaHelp = "Sopra 1 scurisce i toni medi e le ombre, sotto 1 li schiarisce",
+    .originalColours = "Colori originali",
+    .vivid = "Vivaci",
+    .anisoLabel = "Filtro anisotropico",
+    .anisoOffTip = "Disattivato, come lo disegna il gioco. Predefinito.",
+    .anisoTip = "Rende più nitide le texture viste di sbieco (il terreno davanti, i muri lungo un sentiero) invece "
+        "di\n"
+        "lasciarle sfocate. Costa tempo di GPU e può abbassare gli fps nelle visuali più pesanti (l'erba "
+        "alta\n"
+        "dell'Isola Primula, la torre di vedetta): misurato circa il 5% a 2x, il 15% a 4x e il 30% a 16x "
+        "lì;\n"
+        "il villaggio e il mare non ne risentono. Predefinito: 1x (disattivato).",
+    .shadowLabel = "Mappe delle ombre",
+    .shadowFast = "Veloce",
+    .shadowOriginal = "Originale (predefinito)",
+    .shadowHigh = "Alto",
+    .shadowFastTip = "Disegna le mappe delle ombre a metà dimensione: circa il 5-7% di fps in più nelle visuali più "
+        "pesanti\n"
+        "(l'erba alta dell'Isola Primula, la torre di vedetta), ma i bordi dritti delle ombre sono più "
+        "ondulati.",
+    .shadowOriginalTip = "La dimensione originale delle mappe delle ombre, come su Wii U. Predefinito.",
+    .shadowHighTip = "Disegna le mappe delle ombre al doppio della dimensione: ombre più nitide, ma circa il 17-20% più "
+        "lento nelle\n"
+        "visuali più pesanti (l'erba alta dell'Isola Primula, la torre di vedetta) e più memoria.",
+    .ao = "Occlusione ambientale",
+    .aoHelp = "Gli angoli e le pieghe leggermente scuri che il gioco aggiunge dove le superfici si incontrano. "
+        "Disattivata, sono\n"
+        "piatti ed è circa l'1% più veloce nelle visuali più pesanti (l'erba alta dell'Isola Primula, la "
+        "torre di\n"
+        "vedetta); le ombre vere restano. Predefinito: attivata.",
+    .fxaa = "Smussatura dei bordi (FXAA)",
+    .fxaaHelp = "Bordi più morbidi nel mondo 3D; l'interfaccia resta nitida.\n"
+        "Costa un po' di tempo di GPU (circa 2 ms per fotogramma).",
+    .bloom = "Bagliore (bloom)",
+    .bloomHelp = "Il bagliore intorno al cielo e ai luoghi luminosi, come su Wii U.\n"
+        "Costa un po' di tempo di GPU.",
+    .blur = "Sfocatura in lontananza",
+    .blurHelp = "I luoghi lontani leggermente sfocati, come su Wii U.\n"
+        "Costa un po' di tempo di GPU.",
+    .fsr = "Upscaling e nitidezza FSR 1",
+    .fsrHelp = "Immagine più nitida e ridimensionamento più pulito (AMD FSR 1). Sotto la dimensione della finestra (720p\n"
+        "in dock su 1080p, o risoluzione dinamica) segue i bordi; a dimensione piena rende solo più nitido. Costa tempo di GPU.",
+    // Picture tab: frame rate counter
+    .fpsHeading = "Contatore di fps",
+    .fpsOff = "No",
+    .fpsRate = "Fps",
+    .fpsLoad = "Fps e carico",
+    .fpsOffTip = "Nessun contatore.",
+    .fpsRateTip = "Fotogrammi al secondo, in alto a sinistra.",
+    .fpsLoadTip = "Fotogrammi al secondo più il carico del thread di rendering, le chiamate di disegno e il ritardo "
+        "della GPU.",
+    .fpsHelp = "Mostra i fotogrammi al secondo nell'angolo in alto a sinistra dell'immagine.",
+    .clipsHeading = "Clip video",
+    .clips = "Registra clip con il tasto di cattura",
+    .clipsHelp = "Tieni premuto il tasto di cattura per salvare gli ultimi 30 secondi come video nell'album della console.\nUsa 96 MiB della memoria del gioco finché è attivo. Disattivato per impostazione predefinita.",
+    .clipsNotApplication = "Solo se il gioco viene avviato dalla sua icona nel menu HOME, non dall'Homebrew Menu.",
+    .clipsOtherTitle = "Avviato tramite un altro gioco: le clip video seguono l'impostazione di quel gioco.",
+    .clipsUnsupported = "Questa console non supporta la registrazione video.",
+    .clipsFailed = "La console non ha accettato il buffer video: le clip sono disattivate (dettagli nel log).",
+    .clipsKeptUntilRestart = "Disattivato dal prossimo avvio: fino ad allora le clip funzionano ancora e i 96 MiB restano in uso.",
+    // Picture tab: experimental features
+    .experimental = "Funzioni sperimentali",
+    .experimentalWarn = "Incompleto: tenere 60 fps richiede un forte overclock (sys-clk o simili). Non viene salvato.",
+    .fps30 = "30 fps (originale)",
+    .fps30Tip = "Il gioco com'era: 30 passi di logica e 30 fotogrammi disegnati al secondo.",
+    .fpsInterp = "Interpolazione a 60 fps",
+    .fpsInterpTip = "La logica del gioco resta a 30 passi al secondo e tra un passo e l'altro si disegna un fotogramma "
+        "fuso:\n"
+        "raddoppia il lavoro di disegno, quindi serve anche un forte overclock per tenere 60 fps.",
+    .fpsTrue60 = "60 reali (sperimentale)",
+    .fpsTrue60Tip = "Esegue la logica del gioco a 60 passi al secondo. Serve un forte overclock di CPU e GPU (sys-clk) "
+        "per tenere 60 fps.",
+    .fpsModesHelp = "Modalità di fps per cui il gioco non è stato fatto (lo schermo è a 60 Hz). Non salvato: 30 fps al "
+        "prossimo avvio.",
+    .keepSpeed = "Mantieni la velocità del gioco",
+    .keepSpeedHelp = "Quando la console non riesce a disegnare 60 fotogrammi al secondo, salta i fotogrammi intermedi "
+        "invece di\n"
+        "rallentare tutto il gioco: la logica mantiene i suoi 30 passi al secondo. Disattivato: ogni "
+        "fotogramma intermedio\n"
+        "viene disegnato e il gioco va più lento del tempo reale. Non salvato: disattivato al prossimo avvio.",
+    .drawnLately = "Fotogrammi intermedi disegnati di recente: %.0f%%",
+    // Controls tab
+    .rumbleHeading = "Vibrazione",
+    .rumble = "Vibrazione",
+    .rumbleHelp = "I Joy-Con o il controller Pro vibrano quando il gioco lo chiede, come i controller\n"
+        "Wii U. Disattivato, i motori restano fermi.",
+    .gyroHeading = "Mira giroscopica",
+    .gyroAim = "Mira con il giroscopio del controller",
+    .gyroAimHelp = "La mira in prima persona (arco, rampino, boomerang, cannocchiale, Pictobox, uncino) segue\n"
+        "i Joy-Con, il controller Pro o la console in modalità portatile, come con il GamePad Wii U.\n"
+        "L'opzione Giroscopio del gioco vale ancora, e il gioco ignora il movimento mentre\n"
+        "lo stick destro è spinto.",
+    .turnBy = "Girare a sinistra/destra con",
+    .axisPlayer = "Spazio del giocatore",
+    .axisYaw = "Imbardata",
+    .axisRoll = "Rollio",
+    .axisHelp = "Spazio del giocatore: girare il controller a sinistra o a destra attorno alla verticale reale, "
+        "comunque lo tieni\n"
+        "(consigliato). Imbardata: girarlo attorno al proprio asse verticale (come se fosse appoggiato). "
+        "Rollio: inclinarlo\n"
+        "de lato come un volante. Inclinare la parte alta in su o in giù guarda sempre in su o in giù.",
+    .sensX = "Sensibilità sinistra/destra",
+    .sensY = "Sensibilità su/giù",
+    .invert = "Inverti",
+    .defaultSens = "Sensibilità predefinita",
+    .recalibrate = "Ricalibra ora",
+    .recalibrateHelp = "Ricalibra se la visuale scorre con il controller fermo, poi appoggialo per un secondo:\n"
+        "lo scostamento del giroscopio viene appreso di nuovo.",
+    .gyroReceiving = "Movimento ricevuto.",
+    .gyroCalibrating = "Movimento ricevuto; calibrazione (tieni fermo il controller per un secondo).",
+    .gyroNoMotion = "Un controller con giroscopio è collegato, ancora nessun movimento.",
+    .gyroNone = "Nessun controller collegato ha un giroscopio.",
+    .gyroOff = "Giroscopio disattivato.",
+    .gyroStick = " Lo stick destro è spinto: il gioco ignora il giroscopio finché non viene rilasciato.",
+    .menuHeading = "Menu",
+    .menuNote = "Tenere premuto Meno per mezzo secondo apre questo menu (una pressione breve di Meno va al gioco); B "
+        "o Meno lo chiude.\n"
+        "L / R cambiano scheda.",
+    // Dev tab: what a player sees before ticking the box
+    .devWarn = "Test e diagnostica per sviluppatori. Niente qui serve per giocare.",
+    .devShow = "Mostra le opzioni sviluppatore",
+    .devShowHelp = "Mostra qui sotto test e diagnostica (server di debug, interruttori A/B, catture). Disattivato per "
+        "impostazione predefinita.\n"
+        "Un server di debug già avviato continua a funzionare, che la casella sia spuntata o no.",
+    // Dev tab > Updates (update_notice_switch.h)
+    .updateHeading = "Aggiornamenti",
+    .updateCheck = "Cerca aggiornamenti all'avvio",
+    .updateCheckHelp = "All'avvio chiede a GitHub se è uscita una nuova versione di SwitchWakerHD e lo segnala per qualche "
+        "secondo (serve Internet; il gioco non aspetta mai). Non scarica nulla: si aggiorna con l'installer.",
+    .updateNotice = "È uscito SwitchWakerHD %s (hai la %s): apri l'installer e scegli Update; i salvataggi restano.",
+    .updateNewer = "È uscita la %s (hai la %s). Apri l'installer e scegli Update (o compilala e copia wwhd.nro, INSTALL.md "
+        "\"Updating\"): salvataggi, impostazioni e grafica compilata restano.",
+    .updateCurrent = "Aggiornato (%s).",
+    .updateChecking = "Ricerca...",
+    .updateFailed = "Impossibile controllare: %s.",
+    .updateDevBuild = "Versione di sviluppo: non cerca aggiornamenti.",
+    .updateOff = "Disattivato.",
+};
+
+const MenuTexts kMenuPortuguese = {
+    // Warp tab
+    .warpWarning = "Atenção: viajar pode quebrar a história. Ir a um lugar antes de o jogo chegar lá pode deixar os "
+        "eventos desse lugar travados ou fora de ordem, e o jogo pode salvar isso. Teste com uma cópia do seu "
+        "salvamento.",
+    .warpUnlock = "Entendi, mostrar os destinos",
+    .warpNowIn = "Agora em: %.8s%s",
+    .warpPending = "   (uma viagem espera um salvamento carregado ou o fim da troca de cena atual)",
+    .warpMain = "Lugares principais",
+    .warpAll = "Todas as áreas",
+    .warpRoomPoint = "%s  (sala %d, ponto %d)",
+    // Picture tab: resolution
+    .resolution = "Resolução",
+    .handheld = "Portátil",
+    .docked = "Modo TV",
+    .active = "  (ativo)",
+    .modeHelp = "Cada modo guarda sua própria resolução interna e sua resolução dinâmica;\n"
+        "elas são aplicadas sozinhas quando o console é colocado na base ou retirado dela.",
+    .dynamicRes = "Resolução dinâmica",
+    .dynamicResHelp = "Reduz a resolução interna enquanto a GPU não consegue manter 30 fps, e aumenta de novo quando "
+        "consegue.",
+    .appliesDocked = "Aplicada quando o console está na base (modo TV).",
+    .appliesHandheld = "Aplicada quando o console está no modo portátil.",
+    .resNow = "Resolução interna agora: %.2f.",
+    // Picture tab: colours and effects
+    .colours = "Cores e efeitos",
+    .exposure = "Exposição",
+    .exposureHelp = "Abaixo de 1 suaviza as áreas claras (céu, mar)",
+    .contrast = "Contraste",
+    .saturation = "Saturação",
+    .gamma = "Gama",
+    .gammaHelp = "Acima de 1 escurece os tons médios e as sombras; abaixo de 1 os clareia",
+    .originalColours = "Cores originais",
+    .vivid = "Vívidas",
+    .anisoLabel = "Filtragem anisotrópica",
+    .anisoOffTip = "Desativada, como o jogo desenha. Padrão.",
+    .anisoTip = "Deixa mais nítidas as texturas vistas em ângulo (o chão à frente, as paredes ao longo de um caminho) "
+        "em vez de\n"
+        "deixá-las borradas. Custa tempo de GPU, o que pode baixar os fps nas cenas mais pesadas (o capim alto\n"
+        "de Outset, o mirante): medido cerca de 5% em 2x, 15% em 4x e 30% em 16x ali; a vila\n"
+        "e o mar não são afetados. Padrão: 1x (desativada).",
+    .shadowLabel = "Mapas de sombra",
+    .shadowFast = "Rápido",
+    .shadowOriginal = "Original (padrão)",
+    .shadowHigh = "Alto",
+    .shadowFastTip = "Desenha os mapas de sombra com metade do tamanho: cerca de 5-7% mais fps nas cenas mais pesadas\n"
+        "(o capim alto de Outset, o mirante), mas as bordas retas das sombras ficam mais onduladas.",
+    .shadowOriginalTip = "O tamanho de mapa de sombra do próprio jogo, como no Wii U. Padrão.",
+    .shadowHighTip = "Desenha os mapas de sombra com o dobro do tamanho: sombras mais nítidas, mas cerca de 17-20% mais "
+        "lento nas cenas\n"
+        "mais pesadas (o capim alto de Outset, o mirante) e mais memória.",
+    .ao = "Oclusão de ambiente",
+    .aoHelp = "Os cantos e dobras suavemente escuros que o jogo adiciona onde as superfícies se encontram. Desativada, "
+        "desenha tudo plano e fica cerca de 1%\n"
+        "mais rápido nas cenas mais pesadas (o capim alto de Outset, o mirante); as sombras reais continuam. "
+        "Padrão: ativada.",
+    .fxaa = "Suavização de bordas (FXAA)",
+    .fxaaHelp = "Bordas mais suaves no mundo 3D; o HUD continua nítido.\n"
+        "Custa um pouco de tempo de GPU (cerca de 2 ms por quadro).",
+    .bloom = "Brilho (bloom)",
+    .bloomHelp = "O brilho em volta do céu e dos lugares claros, como no Wii U.\n"
+        "Custa um pouco de tempo de GPU.",
+    .blur = "Desfoque à distância",
+    .blurHelp = "Lugares distantes levemente fora de foco, como no Wii U.\n"
+        "Custa um pouco de tempo de GPU.",
+    .fsr = "Upscale e nitidez FSR 1",
+    .fsrHelp = "Imagem mais nítida e upscale mais limpo (AMD FSR 1). Abaixo do tamanho da janela (720p no modo TV em "
+        "1080p,\n"
+        "ou resolução dinâmica) faz o upscale seguindo as bordas; no tamanho da janela só aumenta a nitidez. "
+        "Custa tempo de GPU.",
+    // Picture tab: frame rate counter
+    .fpsHeading = "Contador de fps",
+    .fpsOff = "Desligado",
+    .fpsRate = "Fps",
+    .fpsLoad = "Fps e carga",
+    .fpsOffTip = "Sem contador.",
+    .fpsRateTip = "Quadros por segundo, no canto superior esquerdo.",
+    .fpsLoadTip = "Quadros por segundo mais a carga da thread de renderização, as chamadas de desenho e o atraso da "
+        "GPU.",
+    .fpsHelp = "Mostra os quadros por segundo no canto superior esquerdo da imagem.",
+    .clipsHeading = "Clipes de vídeo",
+    .clips = "Gravar clipes com o botão Capturar",
+    .clipsHelp = "Segure o botão Capturar para salvar os últimos 30 segundos como vídeo no álbum do console.\nUsa 96 MiB da memória do jogo enquanto está ativado. Desativado por padrão.",
+    .clipsNotApplication = "Só quando o jogo é aberto pelo ícone no menu HOME, não pelo Homebrew Menu.",
+    .clipsOtherTitle = "Aberto por meio de outro jogo: os clipes de vídeo seguem a configuração desse jogo.",
+    .clipsUnsupported = "Este console não suporta gravação de vídeo.",
+    .clipsFailed = "O console não aceitou o buffer de vídeo: os clipes estão desativados (detalhes no log).",
+    .clipsKeptUntilRestart = "Desativado a partir da próxima inicialização: até lá os clipes continuam funcionando e os 96 MiB continuam em uso.",
+    // Picture tab: experimental features
+    .experimental = "Recursos experimentais",
+    .experimentalWarn = "Inacabado: manter 60 fps exige um grande overclock (sys-clk ou similar). Não é salvo.",
+    .fps30 = "30 fps (original)",
+    .fps30Tip = "O jogo como era: 30 passos de lógica e 30 quadros desenhados por segundo.",
+    .fpsInterp = "Interpolação a 60 fps",
+    .fpsInterpTip = "A lógica do jogo continua a 30 passos por segundo e um quadro mesclado é desenhado entre eles:\n"
+        "dobra o trabalho de desenho, então também exige um grande overclock para manter 60 fps.",
+    .fpsTrue60 = "60 reais (experimental)",
+    .fpsTrue60Tip = "Roda a lógica do jogo a 60 passos por segundo. Exige um grande overclock de CPU e GPU (sys-clk) "
+        "para manter 60 fps.",
+    .fpsModesHelp = "Modos de fps para os quais o jogo não foi feito (a tela é de 60 Hz). Não é salvo: 30 fps na próxima "
+        "inicialização.",
+    .keepSpeed = "Manter a velocidade do jogo",
+    .keepSpeedHelp = "Quando o console não consegue desenhar 60 quadros por segundo, pula quadros intermediários em vez "
+        "de deixar\n"
+        "o jogo inteiro mais lento: a lógica mantém seus 30 passos por segundo. Desativado: todos os quadros\n"
+        "intermediários são desenhados e o jogo fica mais lento que o tempo real. Não é salvo: desativado na "
+        "próxima inicialização.",
+    .drawnLately = "Quadros intermediários desenhados recentemente: %.0f%%",
+    // Controls tab
+    .rumbleHeading = "Vibração",
+    .rumble = "Vibração",
+    .rumbleHelp = "Os Joy-Con ou o Pro Controller vibram quando o jogo pede, como os controles do Wii U.\n"
+        "Desativada, os motores ficam parados.",
+    .gyroHeading = "Mira por giroscópio",
+    .gyroAim = "Mirar com o giroscópio do controle",
+    .gyroAimHelp = "A mira em primeira pessoa (arco, hookshot, bumerangue, luneta, Picto Box, gancho) acompanha\n"
+        "os Joy-Con, o Pro Controller ou o console no modo portátil, como com o Wii U GamePad.\n"
+        "A opção Options > Gyro do próprio jogo continua valendo, e o jogo ignora o movimento enquanto\n"
+        "o direcional analógico direito estiver inclinado.",
+    .turnBy = "Virar para esquerda/direita por",
+    .axisPlayer = "Espaço do jogador",
+    .axisYaw = "Guinada",
+    .axisRoll = "Rolagem",
+    .axisHelp = "Espaço do jogador: girar o controle para a esquerda ou direita em torno da vertical real, não importa "
+        "como você o segure\n"
+        "(recomendado). Guinada: girá-lo em torno do próprio eixo vertical (como se estivesse deitado). "
+        "Rolagem: incliná-lo\n"
+        "para o lado como um volante. Inclinar a parte de cima para cima ou para baixo sempre olha para cima "
+        "ou para baixo.",
+    .sensX = "Sensibilidade esquerda/direita",
+    .sensY = "Sensibilidade cima/baixo",
+    .invert = "Inverter",
+    .defaultSens = "Sensibilidade padrão",
+    .recalibrate = "Recalibrar agora",
+    .recalibrateHelp = "Recalibre se a visão se desloca com o controle parado, depois deixe-o apoiado por um segundo:\n"
+        "o giroscópio aprende de novo o seu desvio.",
+    .gyroReceiving = "Recebendo movimento.",
+    .gyroCalibrating = "Recebendo movimento; calibrando (deixe o controle parado por um segundo).",
+    .gyroNoMotion = "Um controle com giroscópio está conectado; ainda sem movimento.",
+    .gyroNone = "Nenhum controle conectado tem giroscópio.",
+    .gyroOff = "Giroscópio desativado.",
+    .gyroStick = " O direcional analógico direito está inclinado: o jogo ignora o giroscópio até você soltá-lo.",
+    .menuHeading = "Menu",
+    .menuNote = "Segurar Menos por meio segundo abre este menu (um toque curto em Menos vai para o jogo); B ou Menos o "
+        "fecham.\n"
+        "L / R trocam de aba.",
+    // Dev tab: what a player sees before ticking the box
+    .devWarn = "Testes e diagnósticos para desenvolvedores. Nada aqui é necessário para jogar.",
+    .devShow = "Mostrar opções de desenvolvedor",
+    .devShowHelp = "Mostra os testes e diagnósticos abaixo (servidor de depuração, chaves A/B, capturas). Desativado por "
+        "padrão.\n"
+        "Um servidor de depuração que já esteja rodando continua rodando, marcado ou não.",
+    // Dev tab > Updates (update_notice_switch.h)
+    .updateHeading = "Atualizações",
+    .updateCheck = "Procurar atualizações ao iniciar",
+    .updateCheckHelp = "Ao iniciar, pergunta ao GitHub se saiu uma versão nova do SwitchWakerHD e avisa por alguns "
+        "segundos (precisa de internet; nunca atrasa o jogo). Nada é baixado: a atualização é feita com o "
+        "instalador.",
+    .updateNotice = "Saiu o SwitchWakerHD %s (você tem a %s): abra o instalador e escolha Atualizar; seus salvamentos ficam.",
+    .updateNewer = "Saiu a %s (você tem a %s). Abra o instalador e escolha Atualizar (ou compile e copie o wwhd.nro, INSTALL.md, "
+        "\"Updating\"): seus salvamentos, configurações e gráficos compilados ficam.",
+    .updateCurrent = "Atualizado (%s).",
+    .updateChecking = "Procurando...",
+    .updateFailed = "Não foi possível verificar: %s.",
+    .updateDevBuild = "Versão de desenvolvimento: não procura atualizações.",
+    .updateOff = "Desativado.",
+};
+
+// the game's language code (1 en, 2 fr, 3 de, 4 it, 5 es, 9 Brazilian Portuguese with its fan translation installed
+// (fan_translation.h); others as English)
+long language() {
     std::string saved;
     long code = -1;
     if (hostui::get("language", saved) && !saved.empty()) code = strtol(saved.c_str(), nullptr, 10);
+    if (code < 0 && fan_translation::present()) code = fan_translation::kLanguage;  // chosen in the installer
     if (code < 0) {
         u64 lc = 0;
         SetLanguage lang = SetLanguage_ENUS;
@@ -402,20 +1522,51 @@ const Texts* choose() {
             setExit();
         }
     }
-    switch (code) {
+    return code;
+}
+
+const Texts* choose() {
+    switch (language()) {
     case 2: return &kFrench;
     case 3: return &kGerman;
     case 4: return &kItalian;
     case 5: return &kSpanish;
+    case fan_translation::kLanguage: return fan_translation::present() ? &kPortuguese : &kEnglish;
     default: return &kEnglish;
+    }
+}
+const MenuTexts* choose_menu() {
+    switch (language()) {
+    case 2: return &kMenuFrench;
+    case 3: return &kMenuGerman;
+    case 4: return &kMenuItalian;
+    case 5: return &kMenuSpanish;
+    case fan_translation::kLanguage: return fan_translation::present() ? &kMenuPortuguese : &kMenuEnglish;
+    default: return &kMenuEnglish;
     }
 }
 
 }  // namespace
 
+long language_code() { return language(); }
+
 const Texts& tx() {
     static const Texts* t = choose();
     return *t;
+}
+
+const MenuTexts& menu() {
+    // every field is a const char*: one a language leaves out (nullptr) is the English one
+    static_assert(sizeof(MenuTexts) % sizeof(const char*) == 0, "MenuTexts holds only const char* fields");
+    static const MenuTexts m = [] {
+        MenuTexts out = *choose_menu();
+        auto* dst = reinterpret_cast<const char**>(&out);
+        auto* en = reinterpret_cast<const char* const*>(&kMenuEnglish);
+        for (size_t i = 0; i < sizeof out / sizeof(const char*); i++)
+            if (!dst[i]) dst[i] = en[i];
+        return out;
+    }();
+    return m;
 }
 
 std::string to_console(const std::string& s) {
@@ -428,6 +1579,9 @@ std::string to_console(const std::string& s) {
         {0xFB, char(0x96)}, {0xE4, char(0x84)}, {0xC4, char(0x8E)}, {0xF6, char(0x94)}, {0xD6, char(0x99)},
         {0xDF, char(0xE1)}, {0xEB, char(0x89)}, {0xEF, char(0x8B)}, {0xC9, char(0x90)}, {0xBF, char(0xA8)},
         {0xA1, char(0xAD)}, {0xAB, char(0xAE)}, {0xBB, char(0xAF)}, {0xC0, 'A'}, {0xC8, 'E'}, {0xCA, 'E'},
+        // Portuguese letters the code page lacks: their base letter
+        {0xE3, 'a'}, {0xF5, 'o'}, {0xC3, 'A'}, {0xD5, 'O'}, {0xC1, 'A'}, {0xC2, 'A'}, {0xCD, 'I'}, {0xD3, 'O'},
+        {0xD4, 'O'}, {0xDA, 'U'},
     };
     std::string out;
     for (size_t i = 0; i < s.size();) {

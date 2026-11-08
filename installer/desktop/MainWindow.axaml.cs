@@ -1,5 +1,5 @@
 // The installer's window on macOS and Linux (Avalonia): the Windows installer's four pages (windows/MainWindow.xaml.cs),
-// with each system's ways to the SD card (DBI over MTP on Linux only: a Mac has no MTP).
+// with each system's way to the SD card.
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -67,6 +67,7 @@ public partial class MainWindow : Window
         OptWua.IsChecked = true;
         ShowPage(Page.Welcome);
         ApplyLanguage();
+        LoadSaved();
     }
 
     static void Ui(Action a) => Dispatcher.UIThread.Post(a);
@@ -108,7 +109,7 @@ public partial class MainWindow : Window
     {
         Title             = Str.Get("title");
         TxtSubtitle.Text  = Str.Get("subtitle");
-        BtnLang.Content   = Str.Get("lang");
+        BtnLang.Content   = Str.NextLanguageName;
 
         TxtWelcomeH.Text     = Str.Get("welcome_h");
         TxtWelcomeBody.Text  = Str.Get("welcome_body");
@@ -132,12 +133,23 @@ public partial class MainWindow : Window
         BtnFwdPick.Content = Str.Get("fwd_pick");
         BtnFwdClear.Content = Str.Get("fwd_clear");
         ShowKeys();
+        TxtShH.Text = Str.Get("sh_h");
+        TxtShD.Text = Str.Get("sh_d");
+        TxtOldH.Text = Str.Get("old_h");
+        TxtOldD.Text = Str.Get("old_d", DesktopEngine.WorkDir);
         TxtMmH.Text = Str.Get("mm_h");
         TxtMmD.Text = Str.Get("mm_d");
         BtnMmPick.Content = Str.Get("mm_pick");
         BtnMmFolder.Content = Str.Get("mm_folder");
         BtnMmClear.Content = Str.Get("fwd_clear");
         ShowMinimap();
+        TxtPtH.Text = Str.Get("ptbr_h");
+        TxtPtD.Text = Str.Get("ptbr_d");
+        BtnPtLink.Content = Str.Get("ptbr_link");
+        BtnPtPick.Content = Str.Get("ptbr_pick");
+        BtnPtFolder.Content = Str.Get("ptbr_folder");
+        BtnPtClear.Content = Str.Get("fwd_clear");
+        ShowPtbr();
 
         TxtProgH.Text    = Str.Get("prog_h");
         TxtProgBody.Text = Str.Get("prog_body");
@@ -148,14 +160,7 @@ public partial class MainWindow : Window
 
         TxtDoneH.Text     = Str.Get("done_h");
         TxtDoneBody.Text  = Str.Get("done_body");
-        TxtXferMtp.Text = Str.Get("xfer_mtp");       TxtXferMtpD.Text = Str.Get("xfer_mtp_d");
         TxtXferSd.Text  = Str.Get("xfer_sd");        TxtXferSdD.Text  = Str.Get("xfer_sd_d");
-        TxtMtpSteps.Text  = Str.Get("mtp_steps");
-        TxtMtpLabel.Text  = Str.Get("mtp_label");
-        TxtMtpNone.Text   = Str.Get("mtp_none");
-        TxtMtpReplace.Text = Str.Get("mtp_replace");
-        BtnCopyMtp.Content = Str.Get("btn_copy_mtp");
-        BtnMtpRefresh.Content = Str.Get("btn_refresh");
         TxtXferManual.Text = Str.Get("xfer_manual"); TxtXferManualD.Text = Str.Get("xfer_manual_d");
         TxtSdHint.Text    = Str.Get("sd_hint");
         TxtSdLabel.Text   = Str.Get("sd_label");
@@ -165,17 +170,18 @@ public partial class MainWindow : Window
         TxtManual.Text    = Str.Get("manual_body");
         BtnOpenOut.Content = Str.Get("btn_open_out");
         TxtNextH.Text = Str.Get("next_h");
-        TxtNext1.Text = Str.Get(XferMtp.IsChecked == true ? "next_1_mtp" : "next_1"); TxtNext2.Text = Str.Get("next_2");
+        TxtNext1.Text = Str.Get("next_1"); TxtNext2.Text = Str.Get("next_2");
         TxtNext3.Text = Str.Get("next_3"); TxtNext4.Text = Str.Get("next_4");
         BtnConfirmYes.Content = Str.Get("btn_yes_cancel");
         BtnConfirmNo.Content  = Str.Get("btn_no");
 
+        ShowUpdate();
         UpdateFooter();
     }
 
     void BtnLang_Click(object? sender, RoutedEventArgs e)
     {
-        Str.Es = !Str.Es;
+        Str.SwitchLanguage();
         ApplyLanguage();
     }
 
@@ -318,9 +324,6 @@ public partial class MainWindow : Window
         TxtMmGame.Text = minimapGame ?? Str.Get("mm_none");
         TxtMmGame.Foreground = Res(minimapGame == null ? "FgDim" : "Fg");
         BtnMmClear.IsVisible = minimapGame != null;
-        var rvz = minimapGame != null && EngineBase.IsZstdRvz(minimapGame);
-        TxtMmNote.Text = rvz ? Str.Get("mm_rvz_note") : "";
-        TxtMmNote.IsVisible = rvz;
     }
 
     async void BtnMmPick_Click(object? sender, RoutedEventArgs e)
@@ -343,6 +346,42 @@ public partial class MainWindow : Window
         ShowMinimap();
     }
 
+    // ── Optional Brazilian Portuguese: the player's download of Triforce-Heroes' translation ─────
+    string? ptbrDownload;
+
+    void ShowPtbr()
+    {
+        TxtPtFile.Text = ptbrDownload ?? Str.Get("ptbr_none");
+        TxtPtFile.Foreground = Res(ptbrDownload == null ? "FgDim" : "Fg");
+        BtnPtClear.IsVisible = ptbrDownload != null;
+    }
+
+    async void BtnPtLink_Click(object? sender, RoutedEventArgs e)
+    {
+        try { await Launcher.LaunchUriAsync(new Uri(EngineBase.PtbrPage)); }
+        catch (Exception) { }
+    }
+
+    async void BtnPtPick_Click(object? sender, RoutedEventArgs e)
+    {
+        var p = await PickFile("ptbr_dlg_title", "ptbr_type", "rar", "zip", "7z", "pack");
+        if (p != null) ptbrDownload = p;
+        ShowPtbr();
+    }
+
+    async void BtnPtFolder_Click(object? sender, RoutedEventArgs e)
+    {
+        var p = await PickFolder("ptbr_dlg_folder");
+        if (p != null) ptbrDownload = p;
+        ShowPtbr();
+    }
+
+    void BtnPtClear_Click(object? sender, RoutedEventArgs e)
+    {
+        ptbrDownload = null;
+        ShowPtbr();
+    }
+
     // Dropping the game file or folder on the window picks it and its format.
     void Window_Drop(object? sender, DragEventArgs e)
     {
@@ -362,6 +401,71 @@ public partial class MainWindow : Window
         ValidateGame();
     }
 
+    // ── The last build's choices (#110, SavedChoices.cs) ────────────────────
+    // At start the pages get the choices of the last build that worked; when a newer release is out, the welcome
+    // page offers it with them in one click. A saved path that is gone is named there, and the normal pages pick it.
+    readonly SavedChoices? saved = SavedChoices.Load(DesktopEngine.WorkDir);
+    string offered = "";   // the release the welcome page offers ("": none)
+
+    void LoadSaved()
+    {
+        if (saved == null) return;
+        ApplySaved(saved);
+        CheckForUpdate();
+    }
+
+    void ApplySaved(SavedChoices c)
+    {
+        (c.GameArg == "--image" ? OptImg : c.GameArg == "--wua" ? OptWua : OptDir).IsChecked = true;
+        gamePath = c.GamePath;
+        keysPath = c.ForwarderKeys;
+        minimapGame = c.MinimapGame;
+        ptbrDownload = c.PtbrDownload;
+        ChkShaders.IsChecked = c.PrepareShaders;
+        ChkOldBuilds.IsChecked = c.RemoveOldBuilds;
+        ValidateGame();
+        ShowKeys();
+        ShowMinimap();
+        ShowPtbr();
+    }
+
+    async void CheckForUpdate()
+    {
+        string tag;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            tag = await Task.Run(() => EngineBase.ReleaseToOffer(timeout.Token));
+        }
+        catch (Exception) { return; }   // offline: the normal pages, filled in
+        if (saved == null || !SavedChoices.IsNewer(tag, saved.Release)) return;
+        offered = tag;
+        ShowUpdate();
+    }
+
+    void ShowUpdate()
+    {
+        if (offered == "" || saved == null) { UpdatePanel.IsVisible = false; return; }
+        TxtUpdH.Text = Str.Get("upd_h", offered);
+        TxtUpdBody.Text = saved.Release != "" ? Str.Get("upd_body", saved.Release) : Str.Get("upd_body_new");
+        TxtUpdChoices.Text = saved.Describe();
+        TxtUpdSame.Text = Str.Get("upd_same", offered);
+        var missing = saved.Missing();
+        TxtUpdMissing.Text = missing == null ? "" : Str.Get("upd_missing", missing);
+        TxtUpdMissing.IsVisible = missing != null;
+        BtnUpdate.Content = Str.Get("btn_update", offered);
+        BtnUpdate.IsVisible = missing == null;
+        UpdatePanel.IsVisible = true;
+    }
+
+    void BtnUpdate_Click(object? sender, RoutedEventArgs e)
+    {
+        if (saved == null || running) return;
+        ApplySaved(saved);   // (the game page may have been changed since)
+        if (saved.Missing() != null || !GameReady()) { ShowPage(Page.Game); return; }
+        StartInstall();
+    }
+
     // ── Install ──────────────────────────────────────────────────────────────
     async void StartInstall()
     {
@@ -369,6 +473,9 @@ public partial class MainWindow : Window
         engine.GameArg  = GameArg();
         engine.ForwarderKeys = keysPath != null && File.Exists(keysPath) ? keysPath : null;
         engine.MinimapGame = minimapGame;
+        engine.PtbrDownload = ptbrDownload;
+        engine.PrepareShaders = ChkShaders.IsChecked == true;
+        engine.RemoveOldBuilds = ChkOldBuilds.IsChecked == true;
         running = true; failed = false;
         cts = new CancellationTokenSource();
         for (int i = 0; i < stepStates.Length; i++) SetStep(i, StepState.Pending);
@@ -612,12 +719,12 @@ public partial class MainWindow : Window
     void BtnLogOpen_Click(object? sender, RoutedEventArgs e) => engine.Open(LogPath, text: true);
 
     // ── Done page: moving the files to the Switch ────────────────────────────
-    // DBI's MTP responder over USB (Linux, through gio), the microSD mounted on the computer (a card reader, or
-    // hekate's USB mass storage), or by hand. The lists refresh themselves while the page is open.
+    // The microSD mounted on the computer (a card reader, or hekate's USB mass storage), or by hand. The card list
+    // refreshes itself while the page is open. (No copy over DBI's MTP: it could not be read back.)
     readonly DispatcherTimer devicePoll = new() { Interval = TimeSpan.FromSeconds(3) };
-    bool xferBusy, sdScanning, mtpScanning, pollHooked;
+    bool xferBusy, sdScanning, pollHooked;
     string? copiedTo;   // after a copy, the button ejects that card
-    string[] sdKeys = Array.Empty<string>(), mtpKeys = Array.Empty<string>();
+    string[] sdKeys = Array.Empty<string>();
 
     void EnterDone()
     {
@@ -630,6 +737,8 @@ public partial class MainWindow : Window
         TxtFwdDone.Foreground = Res(nspFresh ? "Fg" : "Warn");
         TxtMmDone.IsVisible = minimapGame != null;
         TxtMmDone.Text = Str.Get("mm_done");
+        TxtPtDone.IsVisible = ptbrDownload != null;
+        TxtPtDone.Text = Str.Get("ptbr_done");
         TxtGameFilesDone.IsVisible = engine.BadGameFiles > 0;
         TxtGameFilesDone.Text = Str.Get("game_files_done", engine.BadGameFiles, string.Join("\n", engine.BadGameFileLines.Take(3)));
         TxtGameFilesDone.Foreground = Res("Warn");
@@ -639,9 +748,7 @@ public partial class MainWindow : Window
             TxtXferSize.Text = Str.Get("xfer_size", files.Length, (files.Sum(f => new FileInfo(f).Length) / 1e9).ToString("0.0"));
         }
         catch { TxtXferSize.Text = ""; }
-        XferMtp.IsVisible = engine.HasMtp;
-        if (XferMtp.IsChecked != true && XferSd.IsChecked != true && XferManual.IsChecked != true)
-            (engine.HasMtp ? XferMtp : XferSd).IsChecked = true;
+        if (XferSd.IsChecked != true && XferManual.IsChecked != true) XferSd.IsChecked = true;
         ShowPage(Page.Done);
         UpdatePanels();
         RefreshDevices();
@@ -662,12 +769,10 @@ public partial class MainWindow : Window
 
     void UpdatePanels()
     {
-        PanelMtp.IsVisible    = XferMtp.IsChecked == true;
         PanelSd.IsVisible     = XferSd.IsChecked == true;
         PanelManual.IsVisible = XferManual.IsChecked == true;
         TxtXferStatus.IsVisible = false;
-        TxtNext1.Text = Str.Get(XferMtp.IsChecked == true ? "next_1_mtp" : "next_1");
-        var panel = PanelMtp.IsVisible ? PanelMtp : PanelSd.IsVisible ? PanelSd : (Control)PanelManual;
+        var panel = PanelSd.IsVisible ? PanelSd : (Control)PanelManual;
         Dispatcher.UIThread.Post(() => panel.BringIntoView(), DispatcherPriority.Background);
     }
 
@@ -676,20 +781,6 @@ public partial class MainWindow : Window
     void RefreshDevices()
     {
         if (XferSd.IsChecked == true) RefreshDrives();
-        if (XferMtp.IsChecked == true) RefreshMtp();
-    }
-
-    async void RefreshMtp()
-    {
-        if (mtpScanning) return;
-        mtpScanning = true;
-        System.Collections.Generic.List<MtpStorage> found;
-        try { found = await Task.Run(GioMtp.FindSdStorages); }
-        catch { found = new(); }
-        finally { mtpScanning = false; }
-        FillList(MtpList, ref mtpKeys, found.Select(m => ("mtp" + Math.Abs(m.Uri.GetHashCode()), m.Device, m.Name, (object)m)).ToArray());
-        TxtMtpNone.IsVisible = found.Count == 0;
-        BtnCopyMtp.IsEnabled = found.Count > 0 && !xferBusy;
     }
 
     // Rebuilds the list of card choices only when what is mounted changed, so the selection stays.
@@ -754,9 +845,8 @@ public partial class MainWindow : Window
     {
         xferBusy = busy;
         running = busy;   // closing the window asks first
-        foreach (var c in new Control[] { XferMtp, XferSd, XferManual, MtpList, SdList, BtnMtpRefresh, BtnSdRefresh })
+        foreach (var c in new Control[] { XferSd, XferManual, SdList, BtnSdRefresh })
             c.IsEnabled = !busy;
-        BtnCopyMtp.IsEnabled = !busy && MtpList.Children.Count > 0;
         XferBar.IsVisible = busy;
         UpdateCopyButton();
         UpdateFooter();
@@ -804,39 +894,6 @@ public partial class MainWindow : Window
             XferStatus(msg, "Bad");
             EnqueueLog(msg, LogKind.Error);
             if (!(ex is InstallException || ex is OperationCanceledException)) EnqueueLog(ex.ToString(), LogKind.Error);
-        }
-        finally { SetXferBusy(false); }
-    }
-
-    async void BtnCopyMtp_Click(object? sender, RoutedEventArgs e)
-    {
-        var target = MtpList.Children.OfType<RadioButton>().FirstOrDefault(r => r.IsChecked == true)?.Tag as MtpStorage;
-        if (target == null) return;
-        SetXferBusy(true);
-        XferBar.IsIndeterminate = false;
-        XferBar.Value = 0;
-        XferStatus(Str.Get("mtp_starting", target.Device), "Fg");
-        EnqueueLog(Str.Get("mtp_starting", target.Device) + $" ({target.Uri})", LogKind.Info);
-        cts = new CancellationTokenSource();
-        var token = cts.Token;
-        var src = engine.SdOut;
-        try
-        {
-            await Task.Run(() => GioMtp.Copy(src, target, (fd, ft, bd, bt, name) => Ui(() =>
-            {
-                XferBar.Value = bt > 0 ? bd * 100.0 / bt : 0;
-                TxtXferStatus.Text = Str.Get("mtp_progress", fd, ft, bd / 1048576, bt / 1048576);
-            }), line => EnqueueLog(line, LogKind.Output), token));
-            XferStatus(Str.Get("mtp_done"), "Good");
-            EnqueueLog(Str.Get("mtp_done"), LogKind.Ok);
-        }
-        catch (Exception ex)
-        {
-            var msg = ex is OperationCanceledException ? Str.Get("cancelled")
-                    : ex is InstallException ? ex.Message
-                    : Str.Get("mtp_error", ex.Message);
-            XferStatus(msg, "Bad");
-            EnqueueLog(msg, LogKind.Error);
         }
         finally { SetXferBusy(false); }
     }

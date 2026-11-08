@@ -17,10 +17,14 @@ supported.
 - [Hooks and replacements](#hooks-and-replacements)
 - [Game functions, data and objects](#game-functions-data-and-objects)
 - [Host services](#host-services)
+- [Live options, input filters and touches](#live-options-input-filters-and-touches)
 - [Port settings](#port-settings)
-- [Drawing on screen (HUD API v1)](#drawing-on-screen-hud-api-v1)
+- [Drawing on screen (HUD API v2)](#drawing-on-screen-hud-api-v2)
 - [Letters](#letters)
+- [Native boat compass lease](#native-boat-compass-lease)
+- [Native GamePad chart selection](#native-gamepad-chart-selection)
 - [Charts and markers](#charts-and-markers)
+- [Items](#items)
 - [The story notebook](#the-story-notebook)
 - [Packages with content and images](#packages-with-content-and-images)
 - [Trust](#trust)
@@ -135,14 +139,35 @@ package's details in the Mods tab.
 Options, dependencies and conflicts use the normal manifest schema
 ([mod-manager.md](mod-manager.md)); read options with `wwhd_config_*`. To update a mod,
 disable it, restart and install the new version with the same ID; its settings stay.
+
+**Options on the item menu's Settings page.** An option with `"menu": true` also shows in the
+**Mods** tab of the Settings page in the game's item menu (press + and go left of the items), so
+players can switch it without leaving the game. Switches (`bool`), choices (`enum`) and numbers
+(`number`, with its `min`, `max` and `step`) are shown; other types stay in the Mods tab of the
+Settings window. Optional fields:
+
+- `"section"`: a group name shown with the option (`"Songs"`); options are listed by section.
+- `"live": true`: your mod follows a change while the game runs. Without it the page says that the
+  change applies at the next start, because `wwhd_config_*` values are read at startup.
+
+The page and the Settings window change the same value, saved in the player's mod profile.
+
+```json
+"options": [
+  {"id": "replay", "type": "enum", "name": "Replay conducted songs", "choices": ["Off", "Once", "Always"],
+   "default": "Off", "menu": true, "section": "Songs"}
+]
+```
 Distribute only your manifest, your ELF and resources you are allowed to share, never game
 files.
+
+The hooks example [`heart-ticker`](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods/tree/main/heart-ticker) is in the
+mod repository: entry and return hooks on Link's per-step function, calling a game function.
 
 The examples in [`examples/guest-mods`](../examples/guest-mods) are complete mods:
 
 | Example | Shows |
 | --- | --- |
-| `heart-ticker` | entry and return hooks on Link's per-step function, calling a game function |
 | `addcalc-replace` | replacing a game function (`cLib_addCalc2`) and calling the original |
 | `hud-demo` | HUD drawing with package artwork and text, texture reload after a state load |
 | `button-icons` | reading port settings, following the game's button panes |
@@ -166,8 +191,11 @@ with their content:
 | `WWHD_GAME_ORIGINAL(...)` | the game's own code, below all mod hooks |
 
 - Every game function can be hooked, including calls through function pointers.
-- Hooks can't change the arguments or the result. To change them, replace the function and
-  call the original yourself.
+- Observer hooks preserve the game's register state, including scratch registers, paired
+  floating-point values and condition bits. Return hooks receive the original argument
+  registers, while the game's result (including nonstandard assembly returns) is kept.
+  Memory writes through pointers remain visible. To change arguments or results, replace
+  the function and call the original yourself.
 - Only one mod may replace a function; a second one is an error naming both mods. Any number
   of mods may hook one.
 - Entry hooks run in load order, return hooks in reverse order.
@@ -205,9 +233,14 @@ use object fields that are the same in both versions.
 | Service | What it does |
 | --- | --- |
 | `wwhd_log`, `_int`, `_hex`, `_float` | Log lines tagged with your mod's ID |
-| `wwhd_config_int`, `_bool`, `_float`, `_string` | Your mod's options (values from startup; fallback on missing or wrong type; strings copy into your buffer) |
+| `wwhd_config_int`, `_bool`, `_float`, `_string` | Your mod's options (values from startup, or as they are now for `"live"` options; fallback on missing or wrong type; strings copy into your buffer) |
+| `wwhd_config_changed` | A live option's revision, below |
 | `wwhd_malloc`, `wwhd_free` | Per-mod heap, 16-byte aligned; size from `guest.heap_size` (default 256 KiB, max 8 MiB); null when full |
 | `wwhd_input_read` | Buttons, sticks and touch (read-only) |
+| `wwhd_input_filter_register` | Change the controller state the game reads, below |
+| `wwhd_touch_register`, `wwhd_touch_claim` | Touches (or mouse clicks) on parts of the TV picture your mod claims, and pinches there, below |
+| `wwhd_screen_point` | Where the drawn camera shows a point of the world, in the touches' layout units, below |
+| `wwhd_mic_open`, `_close`, `_state`, `_pitch` | The microphone's pitch, for an option the player turned on (asks for permission then), below |
 | `wwhd_file_read`, `wwhd_file_write` | Flat file names in your mod's own data folder, at most 1 MiB per call; write replaces the file; return bytes or -1 |
 | `wwhd_logic_dt`, `wwhd_logic_step` | Length of the current logic step in seconds (60 fps modes included) and the step counter |
 | `wwhd_setting_get`, `wwhd_setting_changed` | Read-only port settings, below |
@@ -219,6 +252,86 @@ use object fields that are the same in both versions.
 | `memcpy`, `memmove`, `memset` | As usual |
 
 Your mod can also call any game function. Original synthesized audio can use the PCM stream service below.
+
+## Live options, input filters and touches
+
+These let one package hold several small features that the player switches while playing (the QoL
+package in the mod repository is built this way).
+
+**Live options.** Mark an option `"live": true` in the manifest. `wwhd_config_*` then return its value as it is
+now, and `wwhd_config_changed(id)` returns its revision: 1 at start, one more each time the player changes it
+in Settings or on the item menu's page (0 for an option your mod doesn't have). Compare it with the last
+revision you saw, once per logic step, and read the value again when it changed. Keep your hooks installed and
+return early while a feature is off. Options without `"live"` keep their start value.
+
+```c
+static unsigned long long seen;
+void step(void) {
+    unsigned long long r = wwhd_config_changed("clothes");
+    if (r != seen) { seen = r; clothes_on = wwhd_config_bool("clothes", 0); }
+}
+```
+
+**Input filters.** `wwhd_input_filter_register(fn)` calls `fn(state)` on each of the game's controller reads
+(full logic steps, also at 60 fps), after the port's own rules (the touch controls, talks by touch) and before
+the game sees it. Change `buttons` and the sticks; the touch fields are read only. Filters of several mods run
+in their load order. One filter per mod; register 0 to remove it. The function must be your mod's own.
+
+**Touches on the TV picture.** Register a callback with `wwhd_touch_register(fn)`, then claim rectangles with
+`wwhd_touch_claim(slot, x0, y0, x1, y1)`: layout units, 1280 x 720 around the picture's centre with +y up (a
+wider picture extends x), up to 8 slots. A finger (on Android with the on-screen controls shown or hidden) or a
+mouse click on the desktop that lands in a claim goes
+to your callback as `WWHD_TOUCH_DOWN`, `_MOVE`, `_UP` or `_CANCEL` with its position, and to nothing else: no
+on-screen stick, no talk by touch. It stays yours until it lifts, even outside the rectangle. Where claims
+overlap the newest wins. Claim only while your feature shows something to touch, and remove the claim (an
+empty rectangle, x1 <= x0) when it doesn't, so the player's thumbs work the game again. Events arrive at the
+next controller read, before the input filters, so a touch can become a button in the same read.
+
+**Pinches.** A second finger next to your mod's finger (Android, with the on-screen controls shown or hidden), or the
+mouse wheel over one of your claims (desktop), comes as `WWHD_TOUCH_PINCH` with `x` = the spread now divided by the
+spread when the pinch began (above 1: the fingers moved apart, or the wheel turned away from the player; each notch is
+15 % more or less), then `WWHD_TOUCH_PINCH_END` (on the desktop 0.3 s after the last notch). The finger itself keeps
+its own events: its moves pause while the pinch lasts, and its `WWHD_TOUCH_UP` comes when it lifts. Hosts from before
+pinches never send them.
+
+**Points of the world on the picture.** `wwhd_screen_point(world, out)` takes a point of the current room (`world`:
+x, y, z) and writes where the drawn camera shows it into `out[0]`, `out[1]`, in the same layout units as touches,
+with the picture's shape and field of view as drawn (wider screens, the field-of-view setting). It returns 1, or 0
+when the point is behind the camera or no camera is drawn. Compare touches with it on the logic step you use it:
+the camera moves.
+
+```c
+f32 square[3] = {x, y, z}, at[2];
+if (wwhd_screen_point(square, at) && (e->x - at[0]) * (e->x - at[0]) + (e->y - at[1]) * (e->y - at[1]) < 40 * 40) {
+    /* the finger is on the square */
+}
+```
+
+**The microphone.** For features like singing the songs. A mod may open the microphone only through an option
+the player turns on: mark a bool option `"permission": "microphone"` in the manifest, and call `wwhd_mic_open()`
+while it is on (the port refuses it otherwise). Nothing asks for the microphone before that: the first open asks
+the system (Android's runtime permission, the macOS prompt; Windows and Linux open the default recording device).
+If the player declines, the state becomes `WWHD_MIC_DENIED` and the port turns the option off again with a notice
+over the game; the player can allow the microphone in the system settings and turn the option on again. Call
+`wwhd_mic_close()` when you no longer listen (the port also closes it when the option goes off). Keep it closed
+when nothing listens: the QoL package opens it once when the option is turned on (for the question), then only
+while Link conducts.
+
+```json
+{"id": "sing", "type": "bool", "name": "Sing the songs", "default": false, "live": true, "permission": "microphone"}
+```
+
+The port analyses the sound for its pitch and drops it: a mod never gets samples, and nothing keeps, writes, logs
+or sends the sound. `wwhd_mic_pitch(out)` writes the newest analysed window's (about 21 ms, every 1024 samples at
+48 kHz) pitch in Hz to `out[0]` (0 when there is none: silence, noise), its loudness (RMS, 0..1) to `out[1]` and its
+clarity (0..1, how clean a tone it is) to `out[2]`, and returns how many windows were analysed so far; a new value
+means a new window. `wwhd_mic_state()` is one of `WWHD_MIC_CLOSED`, `_ASKING`, `_OPEN`, `_DENIED`, `_UNAVAILABLE`.
+Test aids for scripted runs: `WWHD_TEST_MIC=from-to:hz,...` (TV frames) feeds tones instead of a device without
+asking; `WWHD_TEST_MIC_DENY=1` answers the question with "declined".
+
+Hosts with these calls (and `wwhd_screen_point`, pinches and `"permission"`) have mod manager version 1.6.0: set
+`"minimum_manager_version": "1.6.0"` in a manifest that uses them, so older ports refuse the package up front ("needs
+a newer version of the game"). A module built for services the port doesn't have says which one when it fails to load.
 
 ## Port settings
 
@@ -238,6 +351,7 @@ settings once per logic step.
 | `display.aspect` | F64 | Aspect ratio of the current frame |
 | `render.interp_fps` | U32 | Frame rate shown: 30, the interpolation rate, or 60 in true 60 mode |
 | `render.true60` | BOOL | 0 or 1 |
+| `settings.<id>` | BOOL, U32 or F64 | A setting of the item menu's Settings page by its ID: switches are BOOL, choices U32 (the choice's index), numbers F64. For example `settings.camera.invert-y`, `settings.direct-camera.speed`, `settings.screen.fov` |
 
 ```c
 static char layout[16];
@@ -307,6 +421,158 @@ It draws on Metal and Vulkan, in the TV picture and the GamePad screen (window o
 picture-in-picture); the settings overlay stays on top. Positions are not interpolated
 between logic steps.
 
+### Native boat compass lease
+
+`WWHD_MAP_HUD_API_VERSION` is 1; module ABI and `guest.api_version` remain 1.
+Read the unsigned capability setting `hud.boat-compasses.version`: missing or 0
+means use the existing above-compasses position. The C helpers use the existing
+optional `wwhd_setting_get` transport (fixed 36-byte versioned request, query type
+7, key `native-map-hud.v1`); older hosts return -1 without performing an action,
+including when an older installer translates the ELF. No installer upgrade is
+needed for the fallback. Direct service imports are also available for bindings:
+define `WWHD_MAP_HUD_DIRECT_IMPORTS` and use translator 0.3 or newer to get optional
+imports; older translators treat those direct imports as mandatory.
+
+`s32 wwhd_hud_boat_compasses(u32 replace)` is a per-mod lease, called from actor
+logic. `(1)` renews for this logic step; 1 means active, 0 means no eligible boat
+HUD. Errors are `WWHD_MAP_HUD_UNSUPPORTED` (-1), `INVALID` (-2, bad argument),
+`BUSY` (-3, another owner including its release delay), and `PHASE` (-4, outside
+actor logic or during drawing). First successful caller owns the lease; load
+order does not let a later mod steal it.
+
+Renew through the minimap's entry, display and 250ms exit, then call `(0)` once.
+The host delays normal return by 200ms. Repeated `(0)` does not restart that delay;
+`(1)` during it cancels release immediately. Keep your own map tween's displayed
+fraction when reversing. A missed renewal without explicit release revokes
+immediately. Disable/unload (currently restart), HUD unregister, state load,
+stage/UI/HUD/layout replacement, a failed HUD callback/list, or loss of boat
+eligibility revokes without delay.
+Hidden-to-hidden handoffs should request no lease.
+
+Native visibility/menu/first-person/cutscene gates still apply. Native compass
+updates, animations and cannon/grappling-hook controls continue; only this exact
+native compass layout's draw is suppressed. Revocation reveals the current native state,
+without saved transforms or pane reparenting. No pane pointers cross the API.
+
+`s32 wwhd_hud_boat_compasses_rect(wwhd_boat_compasses_rect* out)` reports the
+owner's current live rectangle: initialize `size=24`, `version=1`. Return 1 means
+x/y/w/h are filled (TV 1280x720 HUD units, top-left origin, y down; use
+`WWHD_HUD_CENTER` anchoring). Return 0 means no current owned rectangle; -1 means
+unsupported, -2 means a bad output buffer/structure, -4 means an unbound thread. The output must be in static mod storage or its SDK heap, as for other HUD
+services. The rectangle encloses the native compass/clock pictures and follows their layout animations. Read it in logic for placement, and check it again in your draw callback to
+confirm ownership survived any intervening lifecycle change. Do not draw replacement
+contents after lease loss.
+
+```c
+static int replacing;
+static wwhd_boat_compasses_rect where = {24, 1};
+void map_step(int visible_or_exiting, int exit_just_completed) {
+    static u32 version;
+    wwhd_setting_get("hud.boat-compasses.version", WWHD_SETTING_U32, &version, 4);
+    replacing = version && visible_or_exiting && wwhd_hud_boat_compasses(1) == 1;
+    if (replacing) replacing = wwhd_hud_boat_compasses_rect(&where) == 1;
+    if (version && exit_just_completed) wwhd_hud_boat_compasses(0);
+    /* Draw at where only while replacing; otherwise retain the fallback. */
+}
+```
+
+### Native GamePad chart selection
+
+Read unsigned capability `map.chart-selection.version` (1 supported, missing/0
+unsupported). The C helpers use the same optional query transport and older-host
+fallback as the compass lease.
+All three calls require actor logic and reject drawing with `PHASE` (-4).
+
+- `s32 wwhd_map_chart_selected(void)`: current native index 0..60; -1 unsupported,
+  -2 missing/invalid native MenuMap, -4 wrong phase. Cache this for drawing.
+- `s32 wwhd_map_chart_select(u32 native_chart_index)`: 1 queued, 0 already selected;
+  -1 unsupported, -2 invalid/unowned/unopened/undeciphered/wrong-kind chart or
+  unavailable native menu, -3 another mod's pending request, -4 wrong phase.
+  Accepted targets are native treasure-chart indices 0..48, as used by MenuMap,
+  rather than printed chart numbers or raw archive indices.
+- `s32 wwhd_map_chart_cancel(void)`: 1 cancelled this mod's pending request,
+  0 nothing pending; -1 unsupported, -3 another pending owner, -4 wrong phase.
+
+A request binds to the current menu instance and stage generation. At the normal
+native event boundary, real GamePad input runs first. A changed native selection
+cancels the pending request. Otherwise, when the carousel is idle, the host
+commits its outgoing/selected/direction event and lets the native carousel update
+caption/art and finish processing. Busy animations are never reset. A newer
+request from the same mod replaces the uncommitted target; other mods get BUSY.
+If the map screen is inactive the request waits for its native display event path.
+
+Cancel, disable/unload, state load or stage/UI/menu/layout destruction/replacement
+cancels uncommitted requests and leaves native selection unchanged. After commit,
+the choice is an ordinary player choice: later GamePad input changes it, and
+unloading restores nothing. Ownership/deciphering are checked again at commit.
+
+```c
+void choose_chart(u32 native_index) { /* a chart edge in a logic hook */
+    static u32 version;
+    wwhd_setting_get("map.chart-selection.version", WWHD_SETTING_U32, &version, 4);
+    if (version) {
+        s32 result = wwhd_map_chart_select(native_index);
+        /* 1: pending; selected() reports the index once committed. */
+        (void)result;
+    }
+}
+void cancel_choice(void) { wwhd_map_chart_cancel(); }
+```
+
+[Native integration and minimap note](mod-sdk-map-hud.md) records the addresses,
+identification, lifecycle and exact fallback rules.
+
+### Current-room maps for mod dungeons
+
+`wwhd_dungeon_room_get(&room, cached_revision)` returns the current mod-stage
+room's existing map pixels as an owned HUD image and its world X/Z bounds. Call it
+from a HUD callback. It returns 0 when the stage has no map, the room has no image,
+or the host predates this service. Stock dungeon images remain the mod's responsibility.
+
+`wwhd_dungeon_room` is an 808-byte guest structure: version (1), image handle,
+revision, signed floor, four float bounds (min X/Z, max X/Z), marker count, reserved
+zero, then up to 64 `(float x, float z, u32 kind)` markers. Kinds are 1 (unopened
+chest) and 2 (boss door). The port filters markers by current room and compass
+ownership, using the same save record and map pixels as its map page. This does
+not reveal neighboring rooms or change save flags.
+
+Pass cached revision 0 on first use and after `wwhd_hud_epoch()` changes. A new
+revision supplies a new image; release the preceding handle. An unchanged revision
+returns image 0 and the caller retains its existing handle. Geometry and markers
+are refreshed every call, including chest opening; rebuilding a room changes its
+revision. Never pass a nonzero revision after releasing its image.
+
+The helper uses the existing `wwhd_setting_get` query transport with key
+`mod-stage.current-room-map` and structured type 5. Older hosts return 0 for this
+unknown key/type, so the guest keeps working with no new import or translator
+requirement. Querying a null buffer with zero capacity reports 808 on hosts that
+support the query. The guest module ABI remains unchanged.
+
+### The game's layout art
+
+A mod can draw with the game's own 2D art without shipping it. The port reads that art from the
+player's installed 2D pack, in the language the game uses, while the game runs:
+
+- `wwhd_hud_texture(WWHD_HUD_GAME, "<Layout>/<texture>")` loads a texture of one of the game's layout
+  archives as an owned HUD image (for example `"Map_00/MapShip_00^t"`). Add `#<material>`
+  (`"BtnMapBalloon_00/r2c_b^t#P_DummyMapBig_00"`) to colour it with that material's black and white
+  colours, the way the game draws it. End the name with `@2`, `@3` or `@4`
+  (`"BtnMapBalloon_00/r2c_b^t#P_DummyMapBig_00@3"`) to get the picture enlarged that many times with
+  Lanczos-3 resampling (premultiplied alpha) and sharpened (an alpha-weighted unsharp mask on the colour,
+  a steeper alpha ramp at outlines), crisper than the HUD's own scaling when small soft art is drawn
+  large. Images count towards the usual per-mod limits; release them as usual.
+- `wwhd_game_pane_get("layout-pane:<Layout>/<pane>", &pane)` reads a pane of such a layout. It gives
+  the centre and size in the layout's root coordinates, with +y up and the parents' translation and
+  scale applied. It also gives the pane's own rotation and alpha, whether it and its parents are
+  visible, and, for a picture pane, its texture's name. The result is a 64-byte `wwhd_game_pane`.
+  The key `layout-texture:<Layout>/<texture>` checks that a texture exists, without loading it. It
+  sets flag 4 and returns the texture's size in `w` and `h`.
+
+Names may contain letters, digits and `_ ^ + - .` only. A missing layout, texture or pane returns 0,
+with the reason in the Mods tab. Older hosts return 0 for both: the texture source and the query key
+are unknown to them, and nothing new is imported. Only the names belong in your mod; never copy the
+pictures or layout data into a package. The example is `hd-minimap` in the mod repository.
+
 ## Letters
 
 A story mod (a mod that adds a quest) can announce itself the way Wind Waker does: with a
@@ -359,6 +625,51 @@ own letters still wait for the pearl). A letter from a mod needs no postage. Lik
 letters it comes with an enclosure, which Link takes after reading: the Story Notebook package's
 letter encloses the **story notebook**, every other one a green rupee. Several waiting letters are
 handed out one after another.
+
+**Letters in the manifest.** A letter needs no code: declare it in `manifest.json` and the port
+sends it while your mod is on. Once Link has read it, he has what it encloses: your charts
+(`"chart:<id>"`, see [Charts and markers](#charts-and-markers)) and items (`"item:<id>"`, see
+[Items](#items)), each given once. Such a letter makes no entry in the story notebook; for a letter
+that starts a quest, use the quest's own `"letter"` (see [Quests in the manifest](#quests-in-the-manifest)).
+
+```json
+"letters": [
+  {"id": "map-letter", "sender": "A sailor",
+   "text": "Dear Link,\nI found this old map in a bottle.\nMaybe you can find what it marks.",
+   "encloses": ["chart:old-map"]}
+]
+```
+
+Up to 8 letters per mod; the same rules for ID, sender and text as above. Every chart and item a
+letter encloses must be declared in the manifest, and a letter's ID must not be a quest letter's.
+
+**A letter that waits.** A letter can wait for your story to get somewhere (`"when"`) and then for
+some days of the game's calendar (`"after_days"`), for example a thank-you letter that arrives two
+days after a quest is done:
+
+```json
+"letters": [
+  {"id": "thanks", "sender": "The lighthouse keeper",
+   "text": "Dear Link,\nsince you brought the light back,\nthe ships come safely home.",
+   "when": {"quest": "lighthouse", "done": true}, "after_days": 2}
+]
+```
+
+- **when** (optional): every condition in it must hold before the letter is sent.
+  - `"quest"` with `"step": 2`: that quest of your manifest has reached step 2 or gone past it.
+  - `"quest"` with `"done": true`: that quest is done.
+  - `"quests"`: a list of up to 8 such conditions, `[{"quest": "a", "step": 2}, {"quest": "b", "done": true}]`.
+  - `"flag"` / `"not_flag"`: one of your mod's flags is set / is not set (the same flags actors
+    and scenes use, see [Actors and scenes](mod-sdk-v3.md)).
+- **after_days** (optional): 1 to 255 days. The game's calendar moves on one day each time its
+  clock passes midnight (also with the Song of Passing). The days count from the day `when` first
+  held (without `when`, from the first day your mod is on). Once the count has started, it goes on
+  even if the condition stops holding.
+- Without `when` and `after_days` the letter is sent as before, as soon as your mod is on.
+
+Once due, the letter waits in the postbox like any other. The day the count started is kept in the
+save file's story record, so it survives saving and loading and save states; it is freed when the
+letter is sent. The quests, steps and flags `when` names must be your manifest's own.
 
 **The story notebook** is the port's journal for story mods (see [The story notebook](#the-story-notebook)).
 Link keeps it in the Delivery Bag. Receiving it writes nothing to the inventory: it is kept in the
@@ -462,8 +773,10 @@ once the chart is finished, its red circle).
 - **Declaring:** `id`, `name` (up to 40 bytes, the list's caption), `description` (up to 200 bytes)
   and `place` (the X). Up to 8 per mod.
 - **Getting it:** a letter that encloses `"chart:<id>"` gives it when it is read; a resident's talk
-  with `"then": {"give": "chart:<id>"}`; the quest's reward (`"reward": {"chart": "chart:<id>"}`, when
-  the quest is done); or your code (`wwhd_chart_give`). A chart the quests name must be declared.
+  with `"then": {"give": "chart:<id>"}`; a placed actor's dialogue, a talk or a scene's end with the
+  action `{"action": "give", "id": "chart:<id>"}` (see [Dialogue and actions](mod-sdk-v3.md#dialogue-and-actions));
+  the quest's reward (`"reward": {"chart": "chart:<id>"}`, when the quest is done); or your code
+  (`wwhd_chart_give`). Each way gives it once. A chart the manifest names must be declared.
 - **Finishing it:** a step with `"find": "chart:<id>"` finishes the chart once the quest is past that
   step (your code reports the step, a condition or a talk moves the quest on); or your code calls
   `wwhd_chart_finish`. Finished: the red circle on the sea chart and in the chart view.
@@ -473,6 +786,30 @@ once the chart is finished, its red circle).
   game's chart bits are neither read nor written for it, and opening it in the list is kept in
   the chart's record. With every treasure chart owned there is no room in the list; the chart
   still works (the notebook, the red circle).
+
+**A treasure chart on its own.** A chart that is just a treasure to find needs no quest and no
+notebook entry. Declare it and send it in a letter; that is all. The Old map example:
+
+```json
+"charts": [
+  {"id": "old-map", "name": "Old map", "description": "An old map. An X marks the top of the lighthouse.",
+   "place": {"x": 1759, "z": -202572}}
+],
+"letters": [
+  {"id": "map-letter", "sender": "A sailor",
+   "text": "Dear Link,\nI found this old map in a bottle.\nMaybe you can find what it marks.",
+   "encloses": ["chart:old-map"]}
+]
+```
+
+Link gets the letter at the next Rito postbox; after reading it he owns the Old map, and the MAP
+screen's chart list shows it with its X. Such a mod needs no code and no game files: a content
+package (`"kind": "content"`) with only `charts` and `letters` (or items, or quests) is enough, and
+it needs no `content_dir` (see [the mod manager](mod-manager.md)). A chart's `"item"` says what its treasure chest holds: one of your items
+(`"item:<id>"`, see [Items](#items)) or a game item (`"game:purple_rupee"`, `"game:orange_rupee"`,
+`"game:silver_rupee"`, `"game:heart_piece"`, `"game:heart_container"`); without it, an orange rupee. A quest whose only step is to find a chart gets a warning in
+the log: make it a chart with a letter instead. A chart to find as one step of a longer quest is
+fine (`"find": "chart:<id>"`, see [Quests in the manifest](#quests-in-the-manifest)).
 
 **Saving.** Whether Link owns a chart, and whether it is finished, is stored in the save file in
 the same record as the letters (it stays unused by the game itself; letters and charts of all mods
@@ -490,6 +827,70 @@ log says so.
 the markers the sea chart shows now, with their world place, icon and label, so a minimap can draw
 them in its own style.
 
+## Items
+
+A story mod can give Link its own items. They are kept in the Delivery Bag like the game's
+delivery items, but they never take one of the bag's eight places unless the player puts one
+there: the bag gets extra pages for them. An item is declared in the manifest; Link gets it from
+the mod's quests (a letter, a talk, a reward) or from the mod's code.
+
+```json
+"items": [
+  {"id": "old-key", "name": "Old key", "description": "A rusty key. It smells of the sea.",
+   "icon": "assets/old_key.png"},
+  {"id": "lamp", "name": "Storm lamp", "description": "Shows the way in the dark.",
+   "icon": "assets/lamp.png", "stack": 3, "use": {"action": "show"}}
+]
+```
+
+- **id:** 1..32 of `a-z 0-9 - _ .`, unique within the mod.
+- **name** (up to 40 bytes) and **description** (up to 200 bytes, line breaks allowed): what the
+  item's Info box shows.
+- **icon:** a PNG in your package, best 128 × 128 with transparency.
+- **stack:** how many Link can carry, 1..254 (default 1). A give beyond it keeps the maximum.
+- **use** (optional): what using the item does. Only an item with a use can go on X, Y or R.
+  - `{"action": "show"}`: shows its Info box.
+  - `{"action": "open_notebook"}`: opens the story notebook.
+  - `{"action": "quest_step", "quest": "<quest id>", "step": 2}`: that quest of your manifest
+    reaches the step.
+  - `{"action": "event"}`: your code is told (`wwhd_item_used`).
+
+**Giving items from the manifest.** A quest's letter can enclose an item
+(`"encloses": ["item:old-key"]`), a resident's talk can give one (`"then": {"give": "item:old-key"}`)
+and a quest's reward can be one (`"reward": {"item": "item:old-key"}`, given once when the quest is
+done). Every item a quest names must be declared in `"items"`.
+
+**Holding it up.** An item with a model of your own (`"held_model"`) and `"hold_up": true` is shown
+like the game's own items when Link gets it: he holds the model up over his head with the game's get
+message, instead of the small caption. See
+[Original item models in Link's hand](mod-sdk-v3.md#original-item-models-in-links-hand-preview).
+
+**From code:**
+
+```c
+#include "wwhd_guest.h"
+s32 n = wwhd_item_give("lamp", 1);      /* the count now, or WWHD_ITEM_INVALID / WWHD_ITEM_NO_ROOM */
+if (wwhd_item_count("old-key") > 0) wwhd_item_take("old-key", 1);  /* WWHD_ITEM_NOT_ENOUGH if fewer */
+if (wwhd_item_used("token") > 0) { /* the player used it since the last call */ }
+```
+
+When Link gets an item, its name and description show with the game's small get jingle. If the
+bag's pages are full (4 pages of 8 by default), the item is kept and gets a place as soon as one is
+free; the caption says so.
+
+**In the bag.** In the Delivery Bag window, R (or a tap on the page dots above the window) turns to
+the extra pages and L back; B returns to the game's eight places. A on an item offers Info, Use and
+a move into an empty place of the game's eight; A on an empty place there brings a mod item back.
+X or Y puts an item with a use on that button. New items fill 4 pages by default (`WWHD_BAG_PAGES=1..16`);
+when they are full, new items wait and the page says how many.
+
+**Saving.** How many of each item Link has, where it sits in the bag and which button it is on are
+stored in the save file's story area (see [Where story progress is saved](#where-story-progress-is-saved)),
+never in the game's own item data. A save file without your mod is a normal save: the bag shows the
+game's items only, and the buttons keep the game's items. Turning your mod on again brings its items
+back. To draw an item in the game's own places and buttons, the port lends it one of the game's
+unused item numbers for that save file; the game's data never refers to these numbers.
+
 ## The story notebook
 
 With several story mods on, the player needs to know what each of them asks for. Wind Waker has
@@ -502,8 +903,10 @@ the mod repository, **`story-notebook`**: its letter brings the notebook (its ma
 the notebook's look (`"icon"`: a PNG, `"model"`: a binary glTF the port turns into the game model on
 the player's machine), and it holds a first small quest. The mod manager downloads it from the mod
 catalogue by itself, confirms it like the port's own code and keeps it enabled while the story
-system is on; it can't be switched off or removed on its own. Every quest mod depends on it (a
-manifest with `quests` or `charts` gets the dependency even if it doesn't declare it). While it
+system is on; it can't be switched off or removed on its own. Every story mod depends on it (a
+manifest with `quests`, `charts`, `letters`, `items`, `models`, `actors` or `scenes` gets the
+dependency even if it doesn't declare it; a package of [mod stages](mod-stages.md#a-quest-through-the-stage)
+can declare it `"optional": true` instead and plays without its story content then). While it
 isn't installed (offline, download failed), the story system is inactive: no letters, takeovers,
 chart marks or notebook; quest mods wait with "Needs the Story Notebook quest", the game is untouched
 and no save is changed; the next start tries again.
@@ -679,6 +1082,48 @@ only it may enclose the notebook; your letters enclose `letter:...` or `chart:..
 - A declaration the port doesn't accept (an invalid field, an NPC its catalogue doesn't know, or
   an `npc_catalogue` version newer than the port's) keeps the mod from being enabled; the Mods tab
   shows the reason ("Story quests: ...").
+
+### Mod flags and places inside buildings
+
+A step's `available` can also use `flag` and `not_flag`. Each accepts a string
+or a list of up to eight flag IDs, and every condition must hold:
+
+```json
+"available": {"flag":["notice-read","door-open"], "not_flag":"reward-taken",
+              "text":"Read the notice and open the door first."}
+```
+
+These are the mod's own actor flags, not game event bits. Each flag must have a
+producer in the same manifest: an actor's read/open, switch, break or defeat
+flag, or a `flag` action, including a talk or scene end. Naming a flag in a
+condition does not declare it. The existing `event` / `not_event` conditions
+remain read-only checks of game events. The notebook and resident talks
+re-evaluate mod-flag conditions as quest availability changes.
+
+A sea place keeps its existing `{"x":100,"z":-201500}` form. For a building,
+cave or dungeon, give its stage and room together with the sea entrance hint:
+
+```json
+"place": {"stage":"Pnezumi", "room":0,
+          "sea":{"x":0,"z":-200000}, "point":0}
+```
+
+`room` is 0–63 and `point` is a spawn number from 0–255. Omit `point` to use the room's normal entrance,
+or replace it with all three room coordinates: `"x":10,"y":0,"z":20`.
+For one of the package's own [mod stages](mod-stages.md#a-quest-through-the-stage), `stage` is
+`"stage:<its id>"`. Coordinates must be finite and within ±350000. Do not combine `point` and
+coordinates. The explicit `sea` hint is required:
+a stage can have several entrances, so a stage name does not uniquely identify
+the island to mark. The notebook shows the step's `where` text, and the sea
+chart's ring stays at the hint even if the step also names a resident. There is
+no interior minimap or world-space quest ring. The editor's Quest warp list
+uses the stage/room and spawn or coordinates to enter the destination.
+
+Placed actors can finish a declared quest with
+`{"action":"quest_done","id":"lantern"}` in their dialogue actions or a
+scene's final `end.then`. The reward is given once; a repeated completion does
+nothing. See the SDK v3 dialogue section for flag-gated actors, multiple quest
+conditions and ordered talks.
 
 ### Talking to residents
 
@@ -858,10 +1303,18 @@ Full save states include the mods' memory and heaps. Both state formats record w
 continues. Loading a state never installs, enables or disables mods. Files a mod writes
 itself are not part of save states.
 
+Mod features reserve guest memory only when a loaded mod uses them (native particles, held item
+models, world actors and scenes, story progress). A start without mods reserves none, so its full
+save states keep the layout of the game without mods: full states made without mods by builds
+from before 2026-10-17 load again.
+
 ## Limits
 
-- Desktop only (macOS, Windows, Linux). Android doesn't support code mods yet.
-- Changing enabled mods or their options needs a restart.
+- macOS, Windows, Linux and Android. On Android the setup app builds the game code with code-mod
+  support (its **Code mods** switch, see [setup-code-mods.md](setup-code-mods.md)), and each mod is built
+  on the device with the app's own compiler. Mod preparation tools written in Python run there too;
+  other programs in a mod package don't run on Android.
+- Changing enabled mods or their options needs a restart, except options the manifest marks `"live": true`.
 - Mods live in a 16 MiB region of game memory (`0x7F000000`–`0x80000000`); each mod gets its
   own 64 KiB-aligned part.
 - No events or exports between mods yet. Audio streams support 48 kHz mono/stereo PCM.

@@ -72,8 +72,8 @@ static class MacStrings
 
         // Done page
         ["xfer_sd"]        = ("Con la microSD en el Mac",                             "With the microSD card in the Mac"),
-        ["sd_hint"]        = ("Pon la microSD en un lector de tarjetas, o en la Switch abre hekate > Tools > USB Tools > SD Card y conecta el cable USB: la tarjeta aparece en el Finder.",
-                               "Put the microSD card in a card reader, or on the Switch open hekate > Tools > USB Tools > SD Card and plug in the USB cable: the card shows up in the Finder."),
+        ["sd_hint"]        = ("Pon la microSD en un lector de tarjetas. ¿No tienes lector? En la Switch abre hekate > Tools > USB Tools > SD Card y conecta el cable USB: la tarjeta aparece en el Finder y aquí.",
+                               "Put the microSD card in a card reader. No card reader? On the Switch open hekate > Tools > USB Tools > SD Card and plug in the USB cable: the card shows up in the Finder and here."),
         ["sd_copied"]      = ("Copiado a {0}. Expulsa la tarjeta antes de sacarla.",  "Copied to {0}. Eject the card before removing it."),
         ["sd_fat32"]       = ("{0} está en FAT32, que no admite archivos de más de 4 GB. Formatea la tarjeta en exFAT (con hekate o el formateador oficial de la SD Association).",
                                "{0} is FAT32, which cannot hold files over 4 GB. Format the card as exFAT (with hekate or the SD Association's official formatter)."),

@@ -16,9 +16,18 @@ inline constexpr const char* kLegacyGameId="wwhd-usa";
 inline bool game_id_supported(const std::string& id){return id==kGameId||id==kLegacyGameId;}
 // The game ID native mods (SDK v1) receive in their host table: unchanged, so libraries comparing it keep working.
 inline constexpr const char* kNativeHostGameId="wwhd-usa";
-inline constexpr const char* kManagerVersion="1.5.0"; // 1.4: "experimental" flag; 1.5: game_id "wwhd"
+inline constexpr const char* kManagerVersion="1.6.0"; // 1.4: "experimental" flag; 1.5: game_id "wwhd"; 1.6: Mod SDK wwhd_screen_point, touch pinches, the microphone (wwhd_mic_*, option "permission")
 struct Option {
     std::string id,name,description,type;
+    // The item menu's settings page (game_settings.h): "menu": true shows the option there, in the Mods tab
+    // under its mod (and its "section", when it has one); "live": true says the mod follows a change while the
+    // game runs (otherwise the page says it applies at the next start): wwhd_config_* then return the value as it
+    // is now and wwhd_config_changed(id) its revision (Mod SDK, QoL M0; guest_live.h). Optional.
+    std::string section;
+    bool menu=false,live=false;
+    // "permission": "microphone" (bool options): turning it on lets the mod ask for the microphone (mic.h); declined,
+    // the port turns it off again. Optional.
+    std::string permission;
     json::Value value,default_value;
     double minimum=0,maximum=1,step=1;
     std::vector<std::string> choices;
@@ -42,8 +51,15 @@ bool has_code_mod_support(); // this executable was built with code-mod support
 bool needs_code_mod_support(const std::string& id); // includes package dependencies
 void initialize(); // metadata only; before the game starts
 std::string directory();
+std::string package_data_directory(const std::string& id); // configured manager Data/id, empty for unknown packages
+// The configured manager's story/ folder (WWHD_MOD_MANAGER_DIR, else the user folder's ModManager): what the
+// story packages build from the player's game files (the NPC catalogue). Empty before initialize().
+std::string story_cache_directory();
 std::vector<View> list();
 bool install(const std::string& source,std::string& error,std::string* installed_id=nullptr); // directory or ZIP/.wwhdmod
+// install() for a new package only (the world editor's new mod): refused when a package of that ID is
+// installed or its folder exists, so an existing package is never replaced.
+bool install_new(const std::string& source,std::string& error,std::string* installed_id=nullptr);
 bool remove(const std::string& id,std::string& error); // also deletes the files its setup prepared
 // Bytes on disk: the package and the files its setup prepared (what Remove frees).
 uint64_t disk_use(const std::string& id);
@@ -68,6 +84,11 @@ bool acknowledge_experimental(const std::string& id,std::string& error);
 // Catalogue installs record the catalogue's flag (a package built before its manifest had it).
 void mark_experimental(const std::string& id,bool on);
 bool configure(const std::string& id,const std::string& option,const json::Value& value,std::string& error);
+bool configure_option(const std::string& id,const std::string& option,const json::Value& value,std::string& error,bool& live);
+// After a successful configure: the mod, the option, its new value and whether the manifest marks it "live"
+// (guest_mods.cpp passes live changes on to the running mod: wwhd_config_*, wwhd_config_changed). Main thread.
+using OptionObserver=std::function<void(const std::string& mod,const std::string& option,const json::Value& value,bool live)>;
+void set_option_observer(OptionObserver observer);
 struct SetupView {catalogue::Step step;bool satisfied=false;};
 std::vector<SetupView> setup_steps(const std::string& id);
 // Snapshot shown by the setup dialog. Acceptance atomically saves trust, choices and run intent.
@@ -84,8 +105,16 @@ std::string game_source_warning(const catalogue::Entry& entry,const catalogue::I
 bool set_game_source(const std::string& game,const std::string& path,std::string& error);
 // Run on a worker thread after native confirmation; never holds the manager lock while running.
 bool run_setup_tool(const std::string& id,const std::string& step,std::string& error,std::string& last_output);
+// The enabled mods that don't start because a requirement can't be met (the GameCube game for mods is gone,
+// a dependency is missing, off or itself skipped), one message each saying what is missing and how to fix
+// it; the rest of the mods start. The same message is each mod's reason in list(). Logged once per start
+// (main.cpp) and shown once over the game (overlay/mods_tab.h startup_notice).
+std::vector<std::string> startup_problems();
 // Notices are consumed once by the Mods tab.
 std::vector<std::string> take_notices();
+// One-line notices over the game (overlay/mods_tab.h shows each for a few seconds): any thread.
+void post_toast(const std::string& text);
+std::vector<std::string> take_toasts();
 void disable_all();
 std::vector<std::string> profiles();
 std::string current_profile();
@@ -104,6 +133,7 @@ struct GuestPackage {
     json::Value options;
     uint32_t heap_size=256*1024;
     std::string name;  // the manifest's display name (the story notebook names the quest's mod)
+    std::vector<std::pair<std::string,std::string>> mic_options;  // {option id, option name} with "permission": "microphone"
 };
 using GuestInspect = std::function<uint32_t(const GuestPackage&)>; // reserved bytes, 64 KiB aligned
 using GuestLoad = std::function<void(const GuestPackage&, uint32_t base)>;

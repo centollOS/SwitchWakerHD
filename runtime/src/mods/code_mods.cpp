@@ -1,13 +1,20 @@
 #include "../exception_report.h"
 #include "code_mods.h"
+#include "code_mods_io.h"
 #include "guest_build.h"
 #include "packages.h"
 #include "../overlay/hostui.h"
 #include "../platform/host.h"
+#include <atomic>
 #include <mutex>
 #include <thread>
 #include <cstdio>
 #include <cstdlib>
+#ifdef __ANDROID__
+#include "guest_mods.h"
+#include "../platform/android_code_mods.h"
+#include <chrono>
+#endif
 
 namespace mods::code {
 namespace {
@@ -18,14 +25,12 @@ std::string pending_mod;
 std::vector<std::string> launch_args;
 fs::path install_dir;
 fs::path status_path,cancel_path;
+std::atomic<bool> stopping{false};  // the process exits: a follower of the phone's setup stops polling
 struct Worker {
     std::thread thread;
-    ~Worker(){if(thread.joinable()){if(!cancel_path.empty())std::ofstream(cancel_path)<<"cancel";thread.join();}}
+    ~Worker(){if(thread.joinable()){stopping=true;if(!cancel_path.empty())std::ofstream(cancel_path)<<"cancel";thread.join();}}
 } worker;
-json::Value read(const fs::path& path) {
-    if(!fs::is_regular_file(path)||fs::file_size(path)>1024*1024)exception_report::raise("Code-mod build configuration is unavailable; run setup again from a complete release folder");
-    std::ifstream f(path);return json::parse(std::string{std::istreambuf_iterator<char>(f),{}});
-}
+json::Value read(const fs::path& path) { return read_build_json(path); }
 }
 namespace {
 bool g_fixed_build=false;  // startup(..., true): the decomp version
@@ -87,8 +92,22 @@ void startup(int argc,char** argv,bool fixed_build){
         std::string error;if(!replace(exe.string(),error))fprintf(stderr,"[code mods] %s; retaining previous build\n",error.c_str());
     }catch(const std::exception& e){fprintf(stderr,"[code mods] %s; retaining previous build\n",e.what());}
 }
+bool relaunch(std::string& error){
+#ifdef __ANDROID__
+    error="Close and reopen the app";return false;
+#else
+    if(launch_args.empty()){error="Restart command is unavailable";return false;}
+    const auto exe=fs::path(host::exe_dir())/fs::path(launch_args[0]).filename();
+    if(!fs::is_regular_file(exe)){error="The game's executable was not found";return false;}
+    return replace(exe.string(),error);
+#endif
+}
 bool restart(std::string& error){
     auto failed=[&]{std::lock_guard guard(mutex);state.error=error;return false;};
+#ifdef __ANDROID__
+    // the app loads the new build when it starts again (WwhdActivity); it cannot relaunch itself
+    error="Close and reopen the app to use the rebuilt game code";return failed();
+#endif
     if(g_fixed_build){error="The decomp version has no code-mod support; start the normal game for code mods";return failed();}
     // The relaunched game uses the support the player just built: an explicit WWHD_CODE_MODS from the
     // launch (automated runs) would otherwise select the other build and stop a setup that resumes there.
@@ -97,7 +116,18 @@ bool restart(std::string& error){
     catch(const std::exception& e){error=e.what();return failed();}
 }
 
+const char* rebuild_duration(){
+#ifdef __ANDROID__
+    return "about as long as the first setup";
+#else
+    return "about 5 minutes";
+#endif
+}
 bool enabled(){
+#ifdef __ANDROID__
+    // the phone's build is the choice: the setup builds the game code with or without mod support
+    return guestmods::hooks_built();
+#endif
     if(const char* value=std::getenv("WWHD_CODE_MODS"))return std::string(value)=="1";
     std::string value;return hostui::get("code-mods",value)&&value=="1";
 }
@@ -105,23 +135,66 @@ void request(bool on,const std::string& mod){std::lock_guard guard(mutex);if(sta
 void dismiss(){std::lock_guard guard(mutex);state.requested=false;}
 Status status(){
     std::lock_guard guard(mutex);
-    if(state.building&&!status_path.empty())try {
-        auto v=read(status_path);state.stage=v.get("stage").string();
-        state.done=unsigned(v.get("done").number);state.total=unsigned(v.get("total").number);
-    }catch(...){} // atomic status may not have been published yet
+    // setup publishes the status atomically; before its first publication a poll finds nothing
+    if(state.building&&!status_path.empty())if(auto v=poll_build_json(status_path))try {
+        state.stage=v->get("stage").string();
+        state.done=unsigned(v->get("done").number);state.total=unsigned(v->get("total").number);
+    }catch(...){}
     return state;
 }
-void cancel(){std::lock_guard guard(mutex);if(state.building&&!cancel_path.empty())std::ofstream(cancel_path)<<"cancel";}
+void cancel(){
+    std::lock_guard guard(mutex);
+#ifdef __ANDROID__
+    state.building=false;return;  // stop following: the setup itself goes on (its screen can pause it)
+#endif
+    if(state.building&&!cancel_path.empty())std::ofstream(cancel_path)<<"cancel";
+}
+#ifdef __ANDROID__
+// The phone's setup builds the game code (SetupService, its own process) while the game runs; this
+// follows its progress until the new build is active, for the next start of the app.
+void begin_android(){
+    auto error=host::android::request_code_mod_build(state.target);
+    if(!error.empty()){state.error=error;return;}
+    state.building=true;state.error.clear();state.ready=false;state.stage="Starting setup";
+    fprintf(stderr,"[code mods] setup rebuild requested: support %s\n",state.target?"on":"off");
+    worker.thread=std::thread([target=state.target,mod=pending_mod]{
+        while(!stopping) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            json::Value report;
+            try{report=json::parse(host::android::code_mod_build_status());}catch(...){continue;}
+            std::lock_guard lock(mutex);
+            if(!state.building)return;  // dismissed
+            const auto phase=report.get("state").string();
+            state.stage=report.get("stage").string(state.stage);
+            state.done=unsigned(report.get("done").number);state.total=unsigned(report.get("total").number);
+            if(phase=="failed"){state.building=false;state.error=report.get("error").string("Setup failed; open setup for details");return;}
+            if(phase!="ready")continue;
+            state.building=false;state.ready=true;
+            fprintf(stderr,"[code mods] setup rebuild ready (support %s); restart the app\n",target?"on":"off");
+            if(!mod.empty()) {
+                std::string why;
+                if(!packages::enable_after_code_rebuild(mod,why))state.error="Game code rebuilt, but the mod could not be queued: "+why;
+            }
+            return;
+        }
+    });
+}
+#endif
 void begin(){
     std::lock_guard guard(mutex);if(state.building||!state.requested)return;
     if(worker.thread.joinable())worker.thread.join();
+#ifdef __ANDROID__
+    begin_android();return;
+#endif
     try {
         const char* override=std::getenv("WWHD_GUEST_BUILD_CONFIG");
         fs::path config=override?fs::path(override):fs::path("guest-sdk.json");
         auto cfg=read(config);auto base=fs::absolute(config).parent_path();
-        auto resolve=[&](const std::string& name){fs::path p(cfg.get(name.c_str()).string());if(p.empty())exception_report::raise("Code-mod setup tools are missing; run setup again");return p.is_absolute()?p:base/p;};
+        // the same rules as the guest build bridge: $RELEASE/ (AppImage), relative paths, stale AppImage mounts
+        const auto release=guestmods::release_root();
+        auto resolve=[&](const std::string& name){auto p=guestmods::resolve_path(cfg.get(name.c_str()).string(),base,release);if(p.empty())exception_report::raise("Code-mod setup tools are missing; run setup again");return fs::path(p);};
         auto python=guestmods::BuildBridge::arguments(cfg.get("python"));
-        fs::path executable(python.front());if(executable.is_relative()&&executable.has_parent_path())python.front()=(base/executable).lexically_normal().string();
+        python.front()=guestmods::resolve_path(python.front(),base,release,true);
         auto data=resolve("data_dir");auto setup=resolve("setup");
         status_path=data/"code-mods-status.json";cancel_path=data/"code-mods-cancel";
         std::error_code ec;fs::remove(status_path,ec);fs::remove(cancel_path,ec);

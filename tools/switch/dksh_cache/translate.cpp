@@ -4,18 +4,26 @@
 // then compiles. The programs come from the player's own dump (tools/switch/shader_manifest.py programs).
 //
 //     dksh_cache translate <shader_manifest.bin> <programs.bin> <shadercache_gl.bin> [<reference shadercache_dksh.bin>]
+//                          [--map <file>]
 //
 // programs.bin (WSP1): u32 count, then {u64 hash, u32 size, bytes}: each program's bytes as the GPU gets them.
 // With a reference WDK1 file (a console's cache), it also counts how many of the GLSL hashes it has: the GLSL
 // matches the console's exactly only when the translation is the same.
+// A variant's fetch shader: the GX2 microcode (compact flag 0, as the console records it), the runtime's compact
+// description (1, "WWFS") or semantic attributes (2, "WWFA0001": the code-free form a shipped manifest holds, issue
+// #88; decoded by the runtime's own gx2/fetch_attributes.cpp).
+// --map: one line per variant, in the manifest's order: "<index> <v|p> <GLSL hash>" (16 hex digits; 0 when it was not
+// translated), for tools/switch/shader_manifest.py distill.
 #include <zlib.h>
 
 #include <algorithm>
+#include <functional>
 #include <cstdio>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <set>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -27,6 +35,7 @@
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
 #include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
+#include "fetch_attributes.h"
 #include "shader_files.h"
 #include "util/helpers/StringBuf.h"
 
@@ -139,7 +148,7 @@ struct Variant {
     bool vertex = false;
     uint64_t programHash = 0;
     uint32_t programSize = 0;
-    bool fetchCompact = false;
+    uint8_t fetchCompact = 0;  // 0 GX2 microcode, 1 WWFS, 2 WWFA0001
     std::vector<uint8_t> fetch;
     std::vector<std::pair<uint16_t, uint32_t>> regs;
 };
@@ -192,7 +201,8 @@ bool read_programs(const char* path, std::map<std::pair<uint64_t, uint32_t>, std
 
 }  // namespace
 
-int translate(const char* manifestPath, const char* programsPath, const char* outPath, const char* referencePath) {
+int translate(const char* manifestPath, const char* programsPath, const char* outPath, const char* referencePath,
+              const char* mapPath) {
     std::vector<Variant> variants;
     if (!read_manifest(manifestPath, variants)) {
         fprintf(stderr, "%s: not a shader manifest (WSM1)\n", manifestPath);
@@ -222,10 +232,26 @@ int translate(const char* manifestPath, const char* programsPath, const char* ou
         return 1;
     }
     fwrite("WGS1", 1, 4, out);
+    FILE* map = mapPath ? fopen(mapPath, "w") : nullptr;
+    if (mapPath && !map) {
+        fprintf(stderr, "cannot write %s\n", mapPath);
+        fclose(out);
+        return 1;
+    }
+    size_t index = 0;
+    auto mapLine = [&](const Variant& v, uint64_t hash) {
+        if (map) fprintf(map, "%zu %c %016llx\n", index, v.vertex ? 'v' : 'p', (unsigned long long)hash);
+    };
     std::unordered_set<uint64_t> written;
     size_t noProgram = 0, failed = 0, translated = 0, inReference = 0, cubeFixed = 0;
     std::vector<uint32_t> regs(kNumRegs);
     for (Variant& v : variants) {
+        struct Next {  // the map's line for this variant (0 unless translated), then the next index
+            std::function<void()> f;
+            ~Next() { f(); }
+        };
+        uint64_t mapped = 0;
+        Next next{[&] { mapLine(v, mapped); index++; }};
         auto it = programs.find({v.programHash, v.programSize});
         if (it == programs.end()) {
             noProgram++;
@@ -236,9 +262,10 @@ int translate(const char* manifestPath, const char* programsPath, const char* ou
         LatteFetchShader* fetch = nullptr;
         if (v.vertex) {
             std::vector<uint8_t> fb = v.fetch;
-            fetch = v.fetchCompact ? compact_fetch_shader(fb)
-                                   : LatteShaderRecompiler_createFetchShader(0, regs.data(), reinterpret_cast<uint32*>(fb.data()),
-                                                                            uint32_t(fb.size()));
+            fetch = v.fetchCompact == 2 ? gx2::decode_fetch_attributes_bytes(std::span<const uint8_t>(fb.data(), fb.size()))
+                    : v.fetchCompact    ? compact_fetch_shader(fb)
+                                        : LatteShaderRecompiler_createFetchShader(0, regs.data(), reinterpret_cast<uint32*>(fb.data()),
+                                                                                 uint32_t(fb.size()));
             if (!fetch) {
                 failed++;
                 continue;
@@ -292,6 +319,7 @@ int translate(const char* manifestPath, const char* programsPath, const char* ou
         }
         const uint64_t hash = hash_bytes(glsl.data(), glsl.size(), v.vertex ? 0x1111 : 0x2222);
         translated++;
+        mapped = hash;
         if (!written.insert(hash).second) continue;
         if (reference.count(hash)) inReference++;
         // record 1 of shadercache_gl.bin (gfx/deko shaders_dk.cpp cache_gl_source)
@@ -306,6 +334,7 @@ int translate(const char* manifestPath, const char* programsPath, const char* ou
         fwrite(record.data(), 1, 18 + packed, out);
     }
     fclose(out);
+    if (map) fclose(map);
     printf("%zu variants: %zu translated (%zu distinct GLSL sources written to %s), %zu without their program in the "
            "dump, %zu failed; %zu guessed with a cube map unit\n",
            variants.size(), translated, written.size(), outPath, noProgram, failed, cubeFixed);

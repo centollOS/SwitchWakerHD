@@ -1,4 +1,5 @@
 <resources>
+    <string name="touch_tap_to_start">Tap to start</string>
     <string name="app_name">Wind Waker HD</string>
     <string name="game_setup">Game setup</string>
     <string name="game_widget">The game, with its own icon</string>
@@ -9,6 +10,7 @@
     <string name="save_exported">Save exported to Downloads</string>
     <string name="save_export_failed">Could not export the save: %1$s</string>
     <string name="save_not_a_save">This zip has no Wind Waker HD save (user/cking.sav)</string>
+    <string name="save_imported_new">Save imported</string>
     <string name="save_imported">Save imported (the previous one is in %1$s)</string>
     <string name="save_import_failed">Could not import the save: %1$s</string>
     <string name="setup_welcome">Set up your game</string>
@@ -19,6 +21,17 @@
     <string name="setup_kind_folder">Extracted game folder</string>
     <string name="setup_kind_wua">Cemu archive (.wua)</string>
     <string name="setup_kind_image">Disc image (.wud / .wux) with keys</string>
+    <string name="setup_folder_hint">Put the game in a folder of its own (for example Download/WindWakerHD) and choose that folder. Android doesn\'t allow choosing Download itself. A .wua archive or a .wud/.wux disc image is a single file and can be chosen from any folder.</string>
+    <string name="setup_folder_checking">Checking the chosen folder…</string>
+    <string name="setup_folder_wrong">Choose another folder</string>
+    <string name="setup_folder_again">Choose a folder</string>
+    <string name="setup_folder_subfolder">Using the game folder “%1$s” inside the folder you chose.</string>
+    <string name="setup_folder_inside">This is the game\'s %1$s folder. Choose the folder one level up: the one that contains code, content and meta.</string>
+    <string name="setup_folder_not_game">The folder “%1$s” has code, content and meta, but not the files of The Wind Waker HD (code/cking.rpx and meta/meta.xml). Check that your copy of the game is complete.</string>
+    <string name="setup_folder_not_game_here">This folder has code, content and meta, but not the files of The Wind Waker HD (code/cking.rpx and meta/meta.xml). Check that your copy of the game is complete.</string>
+    <string name="setup_folder_several">This folder contains more than one game folder (%1$s). Choose the one you want.</string>
+    <string name="setup_folder_none">This folder doesn\'t contain the game. Choose the folder that contains code, content and meta.</string>
+    <string name="setup_folder_unreadable">Cannot read the chosen folder: %1$s</string>
     <string name="setup_restore">Allow access to the chosen game again</string>
     <string name="setup_disc_key">Choose the disc key file</string>
     <string name="setup_disc_key_ready">Disc key chosen (change)</string>
@@ -50,6 +63,8 @@
     <string name="setup_paused_battery">Paused: the battery is low</string>
     <string name="setup_paused_detail">Tap Continue when you want to go on.</string>
     <string name="setup_paused_auto_detail">Setup continues by itself when the Android device is ready.</string>
+    <string name="setup_paused_heat_detail">Setup waits for you. Tap Continue anyway to go on now.</string>
+    <string name="setup_paused_heat_cooled">The device has cooled down. Tap Continue to go on.</string>
     <string name="setup_failed">Setup stopped</string>
     <string name="setup_failed_detail">Tap Details to see why. You can choose your game again or tap Continue.</string>
     <string name="setup_ready">Your game is ready</string>
@@ -65,6 +80,70 @@
     <string name="game_icon_present">The icon is already on the home screen. Hold it and open its settings.</string>
     <string name="game_icon_present_shortcut">The icon is already on the home screen. Hold it for the saves and setup.</string>
     <string name="game_icon_none">Set up the game first</string>
-    <string name="controller_settings_hint">Hold Select/− to open Settings</string>
-    <string name="controller_settings_hint_home">Hold Select/− or press Home to open Settings</string>
+    <string name="touch_layout_access">Touch controls. Hold the controller button to edit the layout.</string>
+    <string name="touch_layout_hint">Drag a control to move it. Select one, then change its size.</string>
+    <string name="touch_layout_smaller">Size −</string>
+    <string name="touch_layout_larger">Size +</string>
+    <string name="touch_layout_reset">Reset</string>
+    <string name="touch_layout_done">Done</string>
+    <string name="touch_layout_shape">Shape</string>
+    <string name="touch_layout_opacity">Opacity</string>
+    <string name="touch_layout_fill">Fill</string>
+    <string name="touch_layout_grid">Grid</string>
+    <string name="touch_layout_presets">Layouts…</string>
+    <string name="touch_layout_classic">Classic layout</string>
+    <string name="touch_layout_flexible">Flexible layout: the sticks appear under your thumbs, so only their size and look count here.</string>
+    <string name="touch_layout_flexible_title">Flexible layout</string>
+    <string name="touch_layout_status">%1$s: size %2$d%%, %3$s, opacity %4$d%%, %5$s</string>
+    <string-array name="touch_layout_shapes">
+        <item>circle</item>
+        <item>rounded square</item>
+        <item>square</item>
+        <item>diamond</item>
+        <item>hexagon</item>
+        <item>octagon</item>
+    </string-array>
+    <string name="touch_layout_filled">filled</string>
+    <string name="touch_layout_outline">outline</string>
+    <string name="touch_layout_left_stick">Left stick</string>
+    <string name="touch_layout_right_stick">Right stick</string>
+    <string name="touch_layout_default">Default layout</string>
+    <string name="touch_layout_arc">Arc layout</string>
+    <string name="touch_layout_save">Save this layout…</string>
+    <string name="touch_layout_delete">Delete a saved layout…</string>
+    <string name="touch_layout_export">Export layouts…</string>
+    <string name="touch_layout_import">Import layouts…</string>
+    <string name="touch_layout_name">Name of the layout</string>
+    <string name="touch_layout_saved">Layout saved</string>
+    <string name="touch_layout_save_failed">Not saved: give it a name (at most 16 layouts per style)</string>
+    <string name="touch_layout_exported">Layouts exported</string>
+    <string name="touch_layout_imported">%d saved layouts imported</string>
+    <string name="touch_layout_import_failed">This is not a touch layouts file</string>
+    <string name="touch_layout_file_failed">The file could not be read or written</string>
+    <string name="touch_layout_before_import">Before import</string>
+    <string name="touch_layout_context_shows">Context buttons: in play it shows only when it does something.</string>
+    <string name="touch_layout_context_hidden">Context buttons: hidden in play.</string>
+    <string name="setup_code_mods">Code mods</string>
+    <string name="setup_code_mods_detail">Lets you turn on code mods (for example the story quests) in Settings › Mods. The game code is built again with mod support, which takes about as long as the first setup, and the game runs a little slower. You can keep playing the current build meanwhile.</string>
+    <string name="game_icon_unsupported">This launcher cannot add app icons.</string>
+    <string name="setup_models">Prepare model shaders (recommended)</string>
+    <string name="setup_models_detail">Far fewer stutters the first time you see a place. Takes about 40 minutes after setup on a recent phone, behind a progress screen; keep the screen on. Untick to skip it; Cancel keeps what was prepared (tick again to continue).</string>
+    <string name="setup_models_running">Preparing shaders: models</string>
+    <string name="setup_models_hidden">The game draws its models behind this screen. Keep the screen on; leaving pauses this step until setup is on the screen again. Cancel stops it and keeps what was prepared.</string>
+    <string name="setup_models_stopping">Stopping… (what was prepared is kept)</string>
+    <string name="setup_models_estimating">\u0020· estimating the time left</string>
+    <string name="setup_models_phase_starting">Starting the game</string>
+    <string name="setup_models_phase_objects">Object models</string>
+    <string name="setup_models_phase_rooms">Rooms</string>
+    <string name="setup_models_phase_environment">Sky and weather</string>
+    <string name="setup_models_phase_actors">Placed actors</string>
+    <string name="setup_models_phase_plants">Plants</string>
+    <string name="setup_models_phase_particles">Effects</string>
+    <string name="setup_models_phase_visits">Stage visits</string>
+    <string name="setup_models_phase_visit">Stage visits: %1$s</string>
+    <string name="setup_models_phase_file_select">File select</string>
+    <string name="setup_cancel">Cancel</string>
+    <string name="setup_paused_screen">Paused: preparing model shaders needs this screen</string>
+    <string name="setup_paused_screen_detail">It goes on by itself while setup is on the screen.</string>
+    <string name="setup_models_game_open">Close the game first (Settings › Quit Game); preparing model shaders then goes on here.</string>
 </resources>

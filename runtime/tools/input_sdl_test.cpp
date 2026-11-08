@@ -5,6 +5,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <tuple>
 #include "input.h"
@@ -25,7 +26,8 @@ static int savedSlot=0, loadedSlot=0, saveRequests=0, loadRequests=0;
 namespace ss { void request_save(int slot){savedSlot=slot;++saveRequests;} void request_load(int slot){loadedSlot=slot;++loadRequests;} }
 static int graphicsRequests=0; static char graphicsKey=0;
 namespace render { uint64_t frame_count(){return 0;} Api active(){return Api::Vulkan;} }
-namespace gx2 { void checkpoint_vulkan_caches(){} }
+namespace dsweep { uint32_t pad_buttons(uint64_t){return 0;} }
+namespace gx2 { void checkpoint_vulkan_caches(){} void checkpoint_present_observer(){} }
 namespace gfxvk { bool graphics_hotkey(char key,bool activate){if(activate){++graphicsRequests;graphicsKey=key;}return true;} }
 namespace gfx { bool drc_window_wanted(){return true;} int plusPresses=0; void display_plus_pressed(){++plusPresses;} }  // display_modes.cpp: GamePad screen while paused
 static bool mouseCamera=false, wheelOption=false;
@@ -34,12 +36,18 @@ namespace interp { void set_mode(int){} uint64_t logic_steps(){return 0;} }
 namespace timebase { uint64_t now(){return 0;} }
 namespace true60 { uint64_t link_steps(){return 0;} bool state_loaded(){return false;} }  // test scenario clock (input_sdl.cpp)
 namespace true60_test { void set_origin_step(uint64_t){} void tick(double,bool){} }
-namespace mods { void fast_forward_reset(){} }  // fast forward (mods/fast_forward.cpp): releases the hold on focus loss
+static int lockOnResets=0,quickUseResets=0,quickUseFilters=0;static bool quickUsePending=false;
+static input::PadState quickUseSample{};
+namespace mods {
+ void lock_on_reset(){++lockOnResets;}
+ void quick_use_reset(){++quickUseResets;quickUsePending=false;}
+ void quick_use_filter_pad(input::PadState& s){++quickUseFilters;quickUseSample=s;if(quickUsePending){s.buttons|=input::kX;quickUsePending=false;}}
+ void fast_forward_reset(){} }  // mods: release required on focus loss
 void log_msg(const char*,...){}
 // settings overlay: closed (keys reach the game and its shortcuts as before); the game's text prompt
 // (overlay/text_entry.h) shows while promptShown: overlay::key takes every key then, as the real one does
 static bool promptShown=false;static int promptKeys=0;static std::string promptText;
-static bool overlayOpen=false;
+static bool overlayOpen=false;static int escapeKeys=0;
 // Matrix: real SDL routing and shared production guard; the overlay API is a lightweight model
 // (no renderer/game). MENU112_BASELINE pairs the pre-fix router with its original F1 semantics.
 static bool menuMatrix=false; static double keyClock=0; static overlay::ToggleGuard keyGuard;
@@ -50,7 +58,8 @@ static double shortcutClock=0;
 // a port's controller shortcut (overlay/extensions.h) when platformShortcut: LB + RB + Select, once per
 // press; the overlay keeps the inputs it took from the settings shortcut and reports the poll as taken
 static bool platformShortcut=false,shortcutTook=false;static int platformShortcuts=0;
-namespace overlay { void set_open(bool open,OpenReason,KeyOrigin){overlayOpen=open;} void focus_lost(){}
+namespace screenshot { bool key_down(int); }
+namespace overlay { void offer_controller_setup(const std::string&,const std::string&){} bool pointer_shortcut(int,bool){return false;} void set_open(bool open,OpenReason,KeyOrigin){overlayOpen=open;} void focus_lost(){}
  void poll_controller_shortcuts(const float* v){static SettingsShortcut sc;static bool latched=false;
   using namespace input_map;bool select=v[kPadOptions]>0.5f;
   if(platformShortcut&&v[kPadLB]>0.5f&&v[kPadRB]>0.5f&&select){if(!latched){latched=true;shortcutTook=true;++platformShortcuts;}}
@@ -58,8 +67,22 @@ namespace overlay { void set_open(bool open,OpenReason,KeyOrigin){overlayOpen=op
   const auto a=sc.poll(shortcutClock,select,v[input_map::kPadHome]>0.5f,overlayOpen);if(a!=SettingsShortcut::None)overlayOpen=a==SettingsShortcut::Open;}
  bool shortcut_took_input(){const bool took=shortcutTook;shortcutTook=false;return took;}
  bool key(int code,bool down,bool repeat,int mods,KeyOrigin){
+  if(code==kVK_Escape)++escapeKeys;
   if(promptShown){++promptKeys;return true;}
-  if(!menuMatrix)return false;
+  if(!menuMatrix || (!overlayOpen && (code != kVK_F1 || mods))) {
+   const int a = input_map::shortcut_for_key(input_map::current(), code, mods);
+   if (a < 0) return false;
+   if (down && !repeat) {
+    if (a >= input_map::kSave1 && a <= input_map::kSave5) ss::request_save(a-input_map::kSave1+1);
+    else if (a >= input_map::kLoad1 && a <= input_map::kLoad5) ss::request_load(a-input_map::kLoad1+1);
+    else if (a == input_map::kPhoto) screenshot::key_down(code);
+    else if (a >= input_map::kResolution && a <= input_map::kFXAA) {
+     const char keys[] = {'R','O','M','N','6','7','8'};
+     gfxvk::graphics_hotkey(keys[a-input_map::kResolution],true);
+    }
+   }
+   return true;
+  }
 #ifdef MENU112_BASELINE
   const bool press=down&&!repeat;
 #else
@@ -138,8 +161,159 @@ static int menu_matrix(){
  key(drc,true,1,SDL_KMOD_SHIFT);key(drc,true,2);assert(saveRequests==saved&&loadRequests==loaded);promptShown=false;
  SDL_DestroyWindow(drc);SDL_DestroyWindow(tv);SDL_Quit();return 0;
 }
+// Issue #267: "Controller input when the game isn't focused". A hidden dummy-driver window never gets the
+// keyboard focus, so SDL's own focus filter is live here: a background controller press reaches the game
+// only with the option on. Keyboard and mouse are released on focus loss either way.
+static int background_controllers(){
+ // a scratch user folder: input::init() reads controls.json from it, never the player's
+ const auto userDir=std::filesystem::temp_directory_path()/"wwhd-input-sdl-test-267";
+ std::filesystem::create_directories(userDir);set_env("WWHD_USER_DIR",userDir.string().c_str());
+ SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy");assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS));
+ assert(!input_map::Mapping::defaults().background_controllers);  // off by default
+ input::init();input_map::set_current(input_map::Mapping::defaults(),false);
+ auto* tv=SDL_CreateWindow("TV",32,32,SDL_WINDOW_HIDDEN);assert(tv);input::set_prompt_window(tv);
+ assert(SDL_GetKeyboardFocus()==nullptr);  // the game is in the background
+ input::update();
+ auto hint=[]{return std::string(SDL_GetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS)?SDL_GetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS):"(unset)");};
+ assert(!input::background_controllers()&&hint()=="0");
+ static std::atomic<Uint16> motor{0};
+ SDL_VirtualJoystickDesc d;SDL_INIT_INTERFACE(&d);
+ d.type=SDL_JOYSTICK_TYPE_GAMEPAD;d.naxes=SDL_GAMEPAD_AXIS_COUNT;d.nbuttons=SDL_GAMEPAD_BUTTON_COUNT;d.name="background #267 pad";
+ d.Rumble=[](void*,Uint16 low,Uint16){motor=low;return true;};
+ const SDL_JoystickID id=SDL_AttachVirtualJoystick(&d);assert(id);
+ for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);
+ auto* pad=SDL_OpenJoystick(id);assert(pad);
+ auto poll=[&](){SDL_UpdateJoysticks();for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);input::update();return input::read();};
+ auto south=[&](bool down){assert(SDL_SetJoystickVirtualButton(pad,SDL_GAMEPAD_BUTTON_SOUTH,down));return poll();};
+ auto pressed=[&]{float v[input_map::kPadCount];input::controller_values(v);return v[input_map::kPadA]>0.5f;};
+ auto focusLost=[&]{SDL_Event e{};e.type=SDL_EVENT_WINDOW_FOCUS_LOST;e.window.windowID=SDL_GetWindowID(tv);input::handle_event(e);};
+ auto key=[&](bool down){SDL_Event e{};e.type=down?SDL_EVENT_KEY_DOWN:SDL_EVENT_KEY_UP;e.key.windowID=SDL_GetWindowID(tv);e.key.scancode=SDL_SCANCODE_K;input::handle_event(e);};
+ // keyboard (K = A) and the mouse camera's capture: released on focus loss, the option off and on alike
+ mods::mouse_init(tv);mouseCamera=true;
+ auto click=[&](bool down){SDL_Event e{};e.type=down?SDL_EVENT_MOUSE_BUTTON_DOWN:SDL_EVENT_MOUSE_BUTTON_UP;e.button.windowID=SDL_GetWindowID(tv);e.button.which=1;e.button.button=SDL_BUTTON_LEFT;input::handle_event(e);};
+ auto keyboardAndMouseReleased=[&]{
+  key(true);assert(input::read().buttons&input::kA);
+  click(true);click(false);assert(mods::mouse_captured());
+  focusLost();bool held[256];input::held_keys(held);
+  assert(!held[input_map::key_from_id("K")]&&!(input::read().buttons&input::kA)&&!mods::mouse_captured());
+  key(false);
+ };
+ keyboardAndMouseReleased();
+ // option off: SDL drops the background press, and no rumble there
+ assert(!pressed());south(true);assert(!pressed()&&poll().buttons==0);south(false);
+ const uint8_t on[15]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+ rumble::set_enabled(true);rumble::gamepad_pattern(0,on,120);input::update();assert(motor==0);
+ // option on (saved with the controls): the hint follows at once, at run time
+ auto m=input_map::Mapping::defaults();m.background_controllers=true;input_map::set_current(m,false);
+ assert(input::background_controllers());
+ input::update();assert(hint()=="1");
+ auto p=south(true);assert(pressed()&&p.buttons!=0);
+ printf("#267 background press with the option on: buttons=%08X (focus window: %s)\n",p.buttons,SDL_GetKeyboardFocus()?"yes":"none");
+ focusLost();p=poll();assert(pressed()&&p.buttons!=0);  // focus loss leaves the controller alone
+ input::update();assert(motor==0xFFFF);  // rumble keeps running in the background
+ keyboardAndMouseReleased();assert(pressed());  // keyboard and mouse: unchanged
+ south(false);assert(!pressed());
+ // Settings never opens from a background controller press with the option on (overlay.cpp)
+ assert(!overlay::controller_may_open_settings(false,true));
+ assert(overlay::controller_may_open_settings(false,false)&&overlay::controller_may_open_settings(true,true));
+ // off again: the hint and the drop come back
+ input_map::set_current(input_map::Mapping::defaults(),false);input::update();assert(hint()=="0");
+ south(true);assert(!pressed());south(false);
+ input::update();assert(motor==0);
+ mouseCamera=false;rumble::gamepad_stop(0);
+ SDL_CloseJoystick(pad);SDL_DetachVirtualJoystick(id);input::set_prompt_window(nullptr);SDL_DestroyWindow(tv);
+ SDL_Quit();puts("input_sdl_test --background: hint follows the option (default off), background controller presses and rumble only with it on, keyboard and mouse released on focus loss either way: passed");
+ return 0;
+}
+static int gamecube_preset() {
+ SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy");
+ SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
+ assert(SDL_Init(SDL_INIT_EVENTS|SDL_INIT_VIDEO));input::init();input::release_keys();
+ auto m=input_map::Mapping::defaults();input_map::apply_gamecube(m);input_map::set_current(m,false);
+ SDL_VirtualJoystickDesc d;SDL_INIT_INTERFACE(&d);
+ d.type=SDL_JOYSTICK_TYPE_GAMEPAD;d.naxes=6;d.nbuttons=12;d.vendor_id=0x057e;d.product_id=0x0337;
+ d.name="GameCube WUP-028 synthetic";
+ auto id=SDL_AttachVirtualJoystick(&d);assert(id);
+ char guid[33]{};SDL_GUIDToString(SDL_GetGamepadGUIDForID(id),guid,sizeof guid);
+ // SDL HIDAPI WUP-028 physical button order, independent of printed button labels.
+ std::string mapping=std::string(guid)+",GC fixture,a:b0,b:b2,x:b1,y:b3,dpleft:b4,dpright:b5,dpdown:b6,dpup:b7,start:b8,rightshoulder:b9,misc3:b11,misc4:b10,leftx:a0,lefty:a1~,rightx:a2,righty:a3~,lefttrigger:a4,righttrigger:a5,type:gamecube,hint:!SDL_GAMECONTROLLER_USE_GAMECUBE_LABELS:=1,";
+ assert(SDL_AddGamepadMapping(mapping.c_str())>=0);
+ for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);
+ auto* joy=SDL_OpenJoystick(id);assert(joy);
+ auto poll=[&](){SDL_UpdateJoysticks();for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);input::update();return input::read();};
+ SDL_SetJoystickVirtualAxis(joy,4,-32768);SDL_SetJoystickVirtualAxis(joy,5,-32768);poll();
+ const int buttons[]={0,1,2,3,9,11,10};
+ const uint32_t bits[]={input::kA,input::kB,input::kX,input::kY,input::kR,input::kZL,input::kZR};
+ for(int i=0;i<7;++i){SDL_SetJoystickVirtualButton(joy,buttons[i],true);assert(poll().buttons==bits[i]);SDL_SetJoystickVirtualButton(joy,buttons[i],false);assert(poll().buttons==0);}
+ // The settings keyboard and menu use the exact same physical A/B as gameplay.
+ assert(input_map::face_input(input_map::kA)==input_map::kPadA);
+ assert(input_map::face_input(input_map::kB)==input_map::kPadX);
+ SDL_SetJoystickVirtualAxis(joy,4,-17000);assert(!(poll().buttons&input::kZL));
+ SDL_SetJoystickVirtualAxis(joy,4,-15000);assert(poll().buttons==input::kZL);
+ SDL_SetJoystickVirtualAxis(joy,4,-32768);poll();
+ SDL_SetJoystickVirtualAxis(joy,2,32767);assert(poll().rx>.99f);
+ SDL_SetJoystickVirtualAxis(joy,2,0);poll();
+ SDL_SetJoystickVirtualButton(joy,8,true);assert(poll().buttons==0);
+ SDL_SetJoystickVirtualButton(joy,8,false);assert(poll().buttons==input::kPlus);SDL_Delay(110);assert(poll().buttons==0);
+ SDL_SetJoystickVirtualButton(joy,8,true);poll();SDL_SetJoystickVirtualButton(joy,7,true);
+ assert(poll().buttons==input::kStickR);
+ SDL_SetJoystickVirtualButton(joy,8,false);assert(poll().buttons==0);
+ SDL_SetJoystickVirtualButton(joy,7,false);assert(poll().buttons==0);
+ // Home reaches the host shortcut before gameplay evaluation, even on a pad without Home.
+ SDL_SetJoystickVirtualButton(joy,8,true);poll();SDL_SetJoystickVirtualButton(joy,5,true);
+ poll();assert(overlayOpen);
+ SDL_SetJoystickVirtualButton(joy,8,false);SDL_SetJoystickVirtualButton(joy,5,false);poll();overlayOpen=false;poll();
+ assert(input::read().buttons==0);
+ // Per-pad custom bindings survive polling / Automatic; shared GameCube mapping stays separate.
+ m=input_map::current();int index=input_map::ensure_profile(m,guid,d.name);
+ auto view=input_map::view_for(m,index);input_map::set_pad_binding(view,input_map::kA,input_map::kPadY);
+ input_map::store_view(m,view,index);input_map::set_current(m,false);
+ SDL_SetJoystickVirtualButton(joy,3,true);assert(poll().buttons&input::kA);
+ SDL_SetJoystickVirtualButton(joy,3,false);poll();
+ std::puts("GameCube SDL physical faces, Z, dual triggers, camera, Start/chords, Settings, confirm/back and custom profile passed");
+ return 0;
+}
+
+static int gamecube_auto_prompts() {
+ SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy");
+ SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
+ assert(SDL_Init(SDL_INIT_EVENTS|SDL_INIT_VIDEO));input::init();input::release_keys();
+ auto m=input_map::Mapping::defaults();input_map::set_face_auto(m,true);input_map::set_current(m,false);
+ assert(!input_map::gamecube_pad());
+ set_env("WWHD_TEST_VIRTUAL_GAMEPAD_DETECTION","1");
+ SDL_VirtualJoystickDesc d;SDL_INIT_INTERFACE(&d);
+ d.type=SDL_JOYSTICK_TYPE_GAMEPAD;d.naxes=6;d.nbuttons=12;d.vendor_id=0x057e;d.product_id=0x0337;
+ d.name="GameCube WUP-028 automatic fixture";
+ auto id=SDL_AttachVirtualJoystick(&d);assert(id);
+ char guid[33]{};SDL_GUIDToString(SDL_GetGamepadGUIDForID(id),guid,sizeof guid);
+ std::string mapping=std::string(guid)+",GC automatic fixture,a:b0,b:b2,x:b1,y:b3,dpleft:b4,dpright:b5,dpdown:b6,dpup:b7,start:b8,rightshoulder:b9,misc3:b11,misc4:b10,leftx:a0,lefty:a1~,rightx:a2,righty:a3~,lefttrigger:a4,righttrigger:a5,type:gamecube,hint:!SDL_GAMECONTROLLER_USE_GAMECUBE_LABELS:=1,";
+ assert(SDL_AddGamepadMapping(mapping.c_str())>=0);
+ for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);
+ assert(input_map::gamecube_pad());
+ auto current=input_map::current();
+ assert(current.prompts==input_map::Mapping::Prompts::kAuto&&current.controllers.size()==1);
+ const int profile=input_map::profile_index(current,guid,d.name);assert(profile>=0);
+ const auto view=input_map::view_for(current,profile);
+ assert(view.preset.gamecube);
+ assert(view.pad[input_map::kA]==input_map::kPadA);
+ assert(view.pad[input_map::kB]==input_map::kPadX);
+ assert(view.pad[input_map::kX]==input_map::kPadB);
+ assert(input_map::prompt_style(view,input_map::PadFamily::kNintendo).face==input_map::FaceStyle::kGameCube);
+ SDL_DetachVirtualJoystick(id);
+ for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);
+ set_env("WWHD_TEST_VIRTUAL_GAMEPAD_DETECTION",nullptr);
+ assert(!input_map::gamecube_pad());
+ assert(input_map::prompt_style(input_map::Mapping::defaults(),input_map::PadFamily::kXbox).face==input_map::FaceStyle::kXbox);
+ SDL_Quit();
+ std::puts("SDL GameCube detection selects GameCube prompts under Automatic and creates the matching per-pad layout profile: passed");
+ return 0;
+}
+
 int main(int argc,char** argv){
+ if(argc>1&&std::string(argv[1])=="--gamecube")return gamecube_preset();
+ if(argc>1&&std::string(argv[1])=="--gamecube-auto")return gamecube_auto_prompts();
  if(argc>1&&std::string(argv[1])=="--menu-matrix")return menu_matrix();
+ if(argc>1&&std::string(argv[1])=="--background")return background_controllers();
  SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy");
  assert(SDL_Init(SDL_INIT_EVENTS|SDL_INIT_VIDEO));
  SDL_Event device{};device.type=SDL_EVENT_AUDIO_DEVICE_REMOVED;device.adevice.recording=false;
@@ -153,13 +327,28 @@ int main(int argc,char** argv){
  key(SDL_SCANCODE_W,true);assert(input::read().ly==1);
  key(SDL_SCANCODE_D,true);assert(input::read().lx>0.7f&&input::read().lx<0.71f);
  key(SDL_SCANCODE_LSHIFT,true);assert(input::read().buttons&input::kZL);
+ const int resetsBeforeFocus=lockOnResets;
+ quickUsePending=true;const int focusResets=quickUseResets;
  SDL_Event focus{};focus.type=SDL_EVENT_WINDOW_FOCUS_LOST;input::handle_event(focus);assert(input::read().buttons==0&&input::read().lx==0);
+ assert(lockOnResets==resetsBeforeFocus+1);
+ assert(quickUseResets>focusResets&&!quickUsePending);
  auto map=input_map::Mapping::defaults();map.keys[input_map::kA]={input_map::key_from_id("J"),input_map::kNoKey};map.keys[input_map::kB]={input_map::kNoKey,input_map::kNoKey};input_map::set_current(map,false);
  key(SDL_SCANCODE_J,true);assert(input::read().buttons==input::kA);
  input::set_touch(true,0.25f,0.75f);auto pad=input::read();assert(pad.touch&&pad.tx==0.25f&&pad.ty==0.75f);
  input::set_pro_controller(true);assert(input::pro_controller());input::set_pro_controller(false);
  bool held[256];input::held_keys(held);assert(held[input_map::key_from_id("J")]);
+ quickUsePending=true;const int releaseResets=quickUseResets;
  input::release_keys();input::held_keys(held);assert(!held[input_map::key_from_id("J")]);
+ assert(quickUseResets>releaseResets&&!quickUsePending);
+ // The quick-use filter sees the final mapped pad and can synthesize a button only for gameplay.
+ key(SDL_SCANCODE_J,true);quickUsePending=true;auto quickPad=input::read();
+ assert(quickUseSample.buttons==input::kA&&(quickPad.buttons&(input::kA|input::kX))==(input::kA|input::kX));
+ int filters=quickUseFilters,resets=quickUseResets;quickUsePending=true;overlayOpen=true;
+ assert(input::read().buttons==0&&quickUseFilters==filters&&quickUseResets>resets&&!quickUsePending);
+ overlayOpen=false;assert(!(input::read().buttons&input::kX));
+ quickUsePending=true;filters=quickUseFilters;resets=quickUseResets;promptShown=true;
+ assert(input::read().buttons==0&&quickUseFilters==filters&&quickUseResets>resets&&!quickUsePending);
+ promptShown=false;assert(!(input::read().buttons&input::kX));input::release_keys();
  input::update();float values[input_map::kPadCount];input::controller_values(values);assert(values[input_map::kPadA]==0);
  // Hidden dummy-driver windows exercise routing without a renderer or GPU.
  auto* game=SDL_CreateWindow("Game",32,32,SDL_WINDOW_HIDDEN);
@@ -193,6 +382,16 @@ int main(int argc,char** argv){
  promptShown=false;assert(input::read().buttons==0);click(game,SDL_BUTTON_LEFT,false);
  mods::mouse_release();mods::update_mouse();assert(!mods::mouse_captured());
  click(game,SDL_BUTTON_X1,true);assert(input::read().buttons==0);click(game,SDL_BUTTON_X1,false);
+ // Esc with the mouse captured only frees it (mouse_sdl.cpp, before the overlay sees keys); the next Esc
+ // reaches the overlay, where it is the default Settings key.
+ auto escape=[&](bool down){SDL_Event e{};e.type=down?SDL_EVENT_KEY_DOWN:SDL_EVENT_KEY_UP;e.key.windowID=SDL_GetWindowID(game);
+  e.key.scancode=SDL_SCANCODE_ESCAPE;e.key.down=down;input::handle_event(e);};
+ assert(input_map::shortcut_for_key(input_map::current(),kVK_Escape,0)==input_map::kSettings);
+ click(game,SDL_BUTTON_LEFT,true);click(game,SDL_BUTTON_LEFT,false);assert(mods::mouse_captured());
+ const int escapesBefore=escapeKeys;
+ escape(true);assert(!mods::mouse_captured()&&escapeKeys==escapesBefore);
+ escape(false);escape(true);assert(escapeKeys==escapesBefore+2);escape(false);
+ {bool held[256];input::held_keys(held);assert(!held[kVK_Escape]);}
  mouseCamera=false;input_map::set_current(map,false);SDL_DestroyWindow(drc);input::set_gamepad_window(nullptr);
  // Touch-emulated pointers keep their source through the overlay boundary; a real mouse restores hover.
  overlayOpen=true;
@@ -211,14 +410,14 @@ int main(int argc,char** argv){
   e.key.windowID=SDL_GetWindowID(window?window:game);e.key.mod=mod;e.key.repeat=repeat;input::handle_event(e);
  };
  for(int slot=1;slot<=5;++slot){
-  stateKey(slot,SDL_KMOD_NONE);assert(loadedSlot==slot&&loadRequests==slot);
+  if(slot>1){stateKey(slot,SDL_KMOD_NONE);assert(loadedSlot==slot&&loadRequests==slot-1);}
   stateKey(slot,SDL_KMOD_LSHIFT);assert(savedSlot==slot&&saveRequests==2*slot-1);
   stateKey(slot,SDL_KMOD_RSHIFT);assert(savedSlot==slot&&saveRequests==2*slot);
  }
  const int saves=saveRequests,loads=loadRequests;
  stateKey(1,SDL_KMOD_LSHIFT,true);stateKey(1,SDL_KMOD_NONE,false,controls);
  stateKey(1,SDL_KMOD_LSHIFT,false,nullptr,SDL_EVENT_KEY_UP);
- stateKey(6,SDL_KMOD_NONE);input::set_prompt_window(nullptr);stateKey(1,SDL_KMOD_NONE);
+ input::set_prompt_window(nullptr);stateKey(1,SDL_KMOD_NONE);
  assert(saveRequests==saves&&loadRequests==loads);
  input::set_prompt_window(game);input::release_keys();
  for(int slot=1;slot<=5;++slot)stateKey(slot,SDL_KMOD_NONE,true);
@@ -271,7 +470,10 @@ int main(int argc,char** argv){
   SDL_HideWindow(game);for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);
   if(!SDL_GetKeyboardFocus()){input::update();assert(motorLow==0);SDL_ShowWindow(game);for(SDL_Event e;SDL_PollEvent(&e);)input::handle_event(e);}
   input::update();assert(motorLow==0xFFFF);
-  SDL_Delay(600);assert(motorLow==0);  // no update for a while (main loop stalled): the watchdog stops it
+  // no update for a while (main loop stalled): the watchdog stops it, after kRumbleStallMs (300 ms) on its
+  // 100 ms tick; waited for with a bound, not a fixed sleep, so a busy runner that delays the thread can't fail it
+  {const Uint64 stalled=SDL_GetTicks();while(motorLow!=0&&SDL_GetTicks()-stalled<5000)SDL_Delay(10);
+   assert(motorLow==0&&SDL_GetTicks()-stalled>=250);}
   rumble::pro_motor(0,true);input::update();assert(motorLow==0xFFFF);  // (the game sends it every frame)
   SDL_Event quit{};quit.type=SDL_EVENT_QUIT;SDL_PushEvent(&quit);assert(motorLow==0);  // the app ends now
   input::update();assert(motorLow==0);
@@ -311,6 +513,20 @@ int main(int argc,char** argv){
      assert(SDL_SetJoystickVirtualAxis(joystick,axis,0));p=poll();assert(p.lx==0&&p.ly==0&&p.rx==0&&p.ry==0);
     }
    }
+  }
+  // Every additional SDL button reaches the same raw mapping and can drive a game input.
+  const std::pair<SDL_GamepadButton,int> extra[] = {
+   {SDL_GAMEPAD_BUTTON_MISC1,input_map::kPadCapture},
+   {SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1,input_map::kPadRightPaddle1}, {SDL_GAMEPAD_BUTTON_LEFT_PADDLE1,input_map::kPadLeftPaddle1},
+   {SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2,input_map::kPadRightPaddle2}, {SDL_GAMEPAD_BUTTON_LEFT_PADDLE2,input_map::kPadLeftPaddle2},
+   {SDL_GAMEPAD_BUTTON_TOUCHPAD,input_map::kPadTouchpad}, {SDL_GAMEPAD_BUTTON_MISC2,input_map::kPadMisc2},
+   {SDL_GAMEPAD_BUTTON_MISC3,input_map::kPadMisc3}, {SDL_GAMEPAD_BUTTON_MISC4,input_map::kPadMisc4},
+   {SDL_GAMEPAD_BUTTON_MISC5,input_map::kPadMisc5}, {SDL_GAMEPAD_BUTTON_MISC6,input_map::kPadMisc6}};
+  for (auto [button,bind] : extra) {
+   auto m=input_map::Mapping::defaults();m.pad[input_map::kZR]=bind;input_map::set_current(m,false);
+   assert(SDL_SetJoystickVirtualButton(joystick,button,true));assert(poll().buttons==input::kZR);
+   float values[input_map::kPadCount]{};input::host_controller_values(values);assert(values[bind]>0.5f);
+   assert(SDL_SetJoystickVirtualButton(joystick,button,false));assert(poll().buttons==0);
   }
   // Binding edits must also reach the game: route D-pad down to stick-down.
   auto rebound=input_map::Mapping::defaults();rebound.pad[input_map::kDDown]=input_map::kPadNone;

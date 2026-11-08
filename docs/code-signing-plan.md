@@ -83,3 +83,7 @@ Repository settings once accepted (Settings > Secrets and variables > Actions):
 - 2026-10-21: plan, csproj and workflow on this branch (signing off until the variables exist); org 2FA required.
 - 2026-10-21: code signing policy on main (716f4afd); application sent to SignPath Foundation (no official review time:
   1-2 weeks to ~2 months by other projects' reports). Check mid-November; if refused, Certum Open Source.
+- 2026-10-23: accepted by SignPath Foundation; the secret and the three variables set, the docs' "applied for" notes
+  dropped on main (0a7de8d). Steps 1-2 of "On acceptance" done.
+- 2026-11-08: this branch rebased onto main (v1.2.2 and v1.3.0's work; the workflow keeps main's `WwhdRelease` for
+  pre-releases); test-signing run by hand (Testing, step 2).

@@ -12,6 +12,7 @@
 #pragma once
 #include <cstdint>
 #include <initializer_list>
+#include <string>
 
 namespace gx2 {
 
@@ -41,15 +42,41 @@ enum Op : uint32_t {
     OP_LAYOUT_ROOT,     // nw::lyt root pane: drawn into the target bound now (which screen it goes to)
     OP_PEEK_Z,          // signed x/y in 640x480 space, guest result address (triples)
     OP_LAYOUT_CONTENT,  // DrawSelf scope: clip TV menu content to the native layout region
+    // cloud research prototype (cloud_proto.cpp): brackets drawVrkumo's draws; payload: snapshot seq
+    OP_CLOUDS_BEGIN,
+    OP_CLOUDS_END,
+    // debug (WWHD_VK_PIPELINE_WHO): the drawing code's context id for the next draws (host-only, never recorded)
+    OP_DEBUG_CONTEXT,
+    // host-only, never recorded: the uniform blocks of the next display-list call as submitted
+    // (submitted_uniforms.h; payload: Snapshot* as two words, 0: none from here on)
+    OP_SUBMITTED_UNIFORMS,
     // (this fork, round 45) single-register writes merged by the staging buffer: register, value, register,
     // value... (after upstream's ops, which keep their numbers)
     OP_SET_REG_PAIRS,
     OP_COUNT
 };
 
+// debug draw provenance (WWHD_VK_PIPELINE_WHO): a provider (set by dsweep.cpp) describes the guest code issuing a
+// draw or display-list call; the render thread knows the description of the draw it executes
+extern std::string (*g_draw_context_provider)();
+std::string current_draw_context();
 // emit a command (records into the active display list, or executes now)
 void emit(Op op, const uint32_t* payload, uint32_t n);
 inline void emit(Op op, std::initializer_list<uint32_t> payload) { emit(op, payload.begin(), (uint32_t)payload.size()); }
+// Producer-thread state: recorded commands may be replayed after a mode change.
+bool recording_display_list();
+
+// a uniform block bound by GX2Set*UniformBlock (noted for the display list being recorded)
+void note_uniform_block_on(uint32_t addr, uint32_t size);
+// (this fork) asked at every uniform-block bind: the call only while submitted uniforms are on (gx2_core.cpp)
+extern int g_submitted_uniforms;  // -1 not decided yet, 0 off, 1 on
+inline void note_uniform_block(uint32_t addr, uint32_t size) {
+    if (g_submitted_uniforms != 0) note_uniform_block_on(addr, size);
+}
+// render thread: the bytes the block at addr held when the display list being executed was submitted
+// (submitted_uniforms.h); nullptr: read guest memory. id: changes with every submission (0: none).
+const uint8_t* submitted_uniform_block(uint32_t addr, uint32_t size);
+uint64_t submitted_uniforms_id();
 
 // register writes
 void set_reg(uint32_t reg, uint32_t value);

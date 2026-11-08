@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 
+#include "cores_switch.h"  // (this fork) core 3
 #include "../mods/mods.h"
 #include "../runtime.h"
 #include "debug_server.h"
@@ -347,7 +348,9 @@ std::string start_thread(bool firstStart) {
     g_firstStart = firstStart;
     // the lowest priority the app has (0x3B, as the shader worker), on core 0 (the game's main thread has core 1, the
     // renderer core 2); 4 MiB of stack for the decompiler
-    Result rc = threadCreate(&g_thread, thread_main, nullptr, nullptr, 4 * 1024 * 1024, 0x3B, 0);
+    // (this fork, docs/core3-plan.md) core 3 when the process has it: no game thread runs there
+    Result rc = threadCreate(&g_thread, thread_main, nullptr, nullptr, 4 * 1024 * 1024, 0x3B, cores::core3() ? 3 : 0);
+    if (R_SUCCEEDED(rc)) LOG("[bg-shaders] the list's thread on core %d", cores::core3() ? 3 : 0);
     if (R_SUCCEEDED(rc)) rc = threadStart(&g_thread);
     if (R_FAILED(rc)) {
         g_running = false;
@@ -370,6 +373,21 @@ void first_start() {
 void later_start() {
     if (access((dir() + "/done.txt").c_str(), F_OK) == 0) return;  // the list was made and translated once
     if (access("shader_manifest.bin", F_OK) != 0) return;
+    // (#102) graphics prepared on a computer (the installer, make_sd.py --shaders: shadercache_dksh.bin, the release's
+    // template and its speculation, ~23,400 shaders): the list adds nothing. Measured on the computer against the
+    // console's own recording: of the 9,525 shaders it drew in all its play, 340 were not in that cache (compiled when
+    // first drawn, so already in its local cache), and the list made after a first session compiled 2,015 more, none of
+    // them ever drawn. It cost a second start 1.4 GB of SD reads and ~19,000 translations during play. "bgshaders start"
+    // (debug server) still runs it.
+    {
+        const char* e = getenv("WWHD_DK_SHADER_CACHE_DIR");
+        const std::string cache = (e && *e ? std::string(e) + "/" : std::string()) + "shadercache_dksh.bin";
+        struct stat st;
+        if (stat(cache.c_str(), &st) == 0 && st.st_size > 0) {
+            LOG("[bg-shaders] graphics prepared on a computer (%s): no background list", cache.c_str());
+            return;
+        }
+    }
     LOG("[bg-shaders] an unfinished list: made again and translated gently in the background");
     start_thread(false);
 }

@@ -4,7 +4,13 @@
 //   /vol/meta/...     -> <game>/meta/...
 //   /vol/save/...     -> <save dir>/...
 #include "../mods/story_mail.h"
+#include "../mods/actor_model_cache.h"
+#include "../mods/game_layouts.h"
+#include "../mods/link_poses.h"
+#include "../mods/item_icons.h"
+#include "../mods/story_lyt_screen.h"
 #include "../mods/story_store.h"
+#include "../mods/save_folder_writes.h"
 #include "../platform/filesystem.h"
 
 #include <atomic>
@@ -14,16 +20,41 @@
 #ifndef _WIN32
 #include <strings.h>
 #endif
+#include <chrono>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <unordered_map>
 
 #include "../runtime.h"
 #include "../write_watch.h"
 #include "../mods/content.h"
+#include "../mods/mod_stages_files.h"
+#include "../fan_translation.h"  // (this fork)
 #include "../game_languages.h"
 #include "../rtl_text.h"
 #include "fs_problems.h"  // (this fork, #47)
+#include "save_root.h"
+#include "os_time.h"
+#include "picto_quest.h"
+
+namespace hle_fs {
+namespace {
+std::mutex g_save_root_mutex;
+std::string g_save_root;
+std::atomic<bool> g_save_root_set{false};  // an override is set (the world editor's test mode): only then the lock
+}  // namespace
+void set_save_root(const std::string& dir) {
+    std::lock_guard<std::mutex> lk(g_save_root_mutex);
+    g_save_root = dir;
+    g_save_root_set.store(!dir.empty(), std::memory_order_release);
+}
+std::string save_root() {
+    if (!g_save_root_set.load(std::memory_order_acquire)) return config::save_dir;
+    std::lock_guard<std::mutex> lk(g_save_root_mutex);
+    return g_save_root.empty() ? config::save_dir : g_save_root;
+}
+}  // namespace hle_fs
 
 namespace {
 
@@ -44,6 +75,8 @@ struct OpenFile {
     uint64_t limit = UINT64_MAX;  // the game's part of a save file with the story block (story_store.h)
     bool story = false;           // a save file that carries the story block
     std::string host;
+    std::string final_host;       // written through `host`, a temporary file renamed over this one when closed
+    bool failed = false;          // a write failed: the temporary file never replaces final_host
 };
 struct OpenDir {
     DIR* d;
@@ -88,7 +121,7 @@ std::string host_path_exact(const std::string& guest) {
     if (map("/vol/content", config::game_dir + "/content")) return p;
     if (map("/vol/code", config::game_dir + "/code")) return p;
     if (map("/vol/meta", config::game_dir + "/meta")) return p;
-    if (map("/vol/save", config::save_dir)) return p;
+    if (map("/vol/save", hle_fs::save_root())) return p;
     if (!p.empty() && p[0] != '/') return config::game_dir + "/content/" + p;  // relative to cwd (/vol/content)
     return config::game_dir + p;
 }
@@ -146,11 +179,21 @@ std::string host_path(const std::string& guest) {
 // the pack of the active language source (game_languages.h: the European or Japanese pack the player
 // chose, read under the name the game asks for), then the installed game.
 std::string read_path(const std::string& guest,const std::string& mode="rb") {
+    if(const char* trace=std::getenv("WWHD_MOD_ACTOR_HEAPS");trace&&std::string(trace)=="1"&&guest.find("/mod")!=std::string::npos)LOG("[mod_actor_fs] %s mode=%s override=%s",guest.c_str(),mode.c_str(),actor_model_cache::archive_for(guest).c_str());
+    if(mode=="r"||mode=="rb")if(auto model=actor_model_cache::archive_for(guest);!model.empty())return model;
     if(mode=="r"||mode=="rb")if(auto model=story_mail::model_override(guest);!model.empty())return model;  // the story notebook's model
+    if(mode=="r"||mode=="rb")if(auto lyt=story_lyt_screen::archive_for(guest);!lyt.empty())return lyt;  // a story layout (story_lyt_screen.h)
+    if(mode=="r"||mode=="rb")if(auto stage=mod_stages::archive_for(guest);!stage.empty())return stage;  // a mod stage (mod_stages.h)
     auto override=mods::content::replacement(guest,mode);
     if(!override.empty())if(const char* trace=std::getenv("WWHD_TEST_CONTENT_TRACE");trace&&std::string(trace)=="1")LOG("[content-mod] read %s -> %s",guest.c_str(),override.c_str());
     if(override.empty()&&(mode=="r"||mode=="rb"))override=game_lang::redirect(guest);
-    return override.empty()?host_path(guest):override;
+    if(override.empty()&&(mode=="r"||mode=="rb"))override=fan_translation::redirect(guest);  // (this fork) the PT-BR translation
+    const std::string path=override.empty()?host_path(guest):override;
+    if(mode=="r"||mode=="rb")game_layouts::note_open(guest,path);  // the game's layout art for mods (game_layouts.h)
+    if(mode=="r"||mode=="rb")link_poses::note_open(guest,path);    // Link's model for the touch buttons' poses (link_poses.h)
+    // the 2D language pack with the mod items' icons (item_icons.h), built from the file the game would read
+    if(mode=="r"||mode=="rb")if(auto icons=item_icons::pack_for(guest,path);!icons.empty())return icons;
+    return path;
 }
 
 void make_parent_dirs(const std::string& path) {
@@ -166,6 +209,27 @@ void fill_stat(uint32_t out, const struct stat& st, uint64_t size = UINT64_MAX) 
     st32(out + 0x10, dir ? 0 : (uint32_t)size);
     st32(out + 0x14, dir ? 0 : (uint32_t)size);
 }
+// Quest Logs that earlier builds stamped with the time since the start instead of the date (#322,
+// os_time.h) get the file's last-modified time as their date when the game reads them, and
+// converted GameCube files stuck in Lenzo's Picto Box test get the Deluxe Picto Box (#306,
+// picto_quest.h); the game writes the result back with its next save.
+void repair_save_stamps(FILE* f, uint64_t start, uint32_t dst, size_t n) {
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0) return;
+    const int64_t stamp = os_time::from_unix((int64_t)st.st_mtime);
+    for (uint32_t k = 0; k < 3; k++) {
+        const uint64_t block = (uint64_t)k * os_time::kSaveBlock;
+        if (block < start || block + os_time::kSaveBlock > start + n) continue;
+        uint8_t* data = mem::ptr(dst + (uint32_t)(block - start));
+        if (os_time::repair_save_stamp(data, stamp))
+            LOG("[save] Quest Log %u had no save date (earlier builds): using the file's date", k + 1);
+        // a GameCube file converted while Lenzo waited for the Forest Firefly (#306, picto_quest.h)
+        if (picto_quest::repair(data))
+            LOG("[save] Quest Log %u (converted GameCube save): Lenzo's test passed without the Deluxe Picto Box, "
+                "given now as in HD", k + 1);
+    }
+}
+
 // the size the game sees: a save file's story block is not part of it
 uint64_t game_size(const std::string& gpath, const std::string& hp, const struct stat& st) {
     return !S_ISDIR(st.st_mode) && story_store::is_save_file(gpath) ? story_store::game_size(hp, (uint64_t)st.st_size)
@@ -177,10 +241,19 @@ int32_t open_file(const std::string& gpath, const std::string& mode, uint32_t ou
     if (mode.find_first_of("wa") != std::string::npos) make_parent_dirs(hp);
     std::string m = mode;
     if (m.find('b') == std::string::npos) m += "b";
+    // a chosen save folder (save_folder.h, often a cloud folder): the game writes a temporary file,
+    // renamed over the save when it is closed, so a cloud app never uploads half a save
+    std::string final_host;
+    if (save_folder::writes_through_temporary() && mode.find_first_of("wa+") != std::string::npos && gpath.rfind("/vol/save/", 0) == 0) {
+        final_host = hp;
+        hp += ".wwhd-part";
+        // updates and appends start from the save's contents; a failed copy fails the open
+        if (!save_folder::prepare_written(final_host, mode[0] != 'w')) return FS_ACCESS_ERROR;
+    }
     FILE* f;
     int err;
     {
-        HostFsCall call;
+        HostFsCall call;  // (this fork)
         f = fopen(hp.c_str(), m.c_str());
         err = errno;
     }
@@ -200,7 +273,7 @@ int32_t open_file(const std::string& gpath, const std::string& mode, uint32_t ou
     }
     std::lock_guard<std::mutex> lk(g_fs_mutex);
     uint32_t h = g_next_handle++;
-    g_files[h] = {f, gpath, m, limit, story, hp};
+    g_files[h] = {f, gpath, m, limit, story, hp, final_host};
     st32(out_handle, h);
     return FS_OK;
 }
@@ -264,17 +337,29 @@ HLE(coreinit, FSOpenFile) {
 }
 
 HLE(coreinit, FSCloseFile) {
-    std::string written_guest, written_host;
+    std::string written_guest, written_host, final_host;
+    bool written = false, complete = true;
     {
         std::lock_guard<std::mutex> lk(g_fs_mutex);
         auto it = g_files.find(arg(c, 2));
         if (it != g_files.end()) {
-            fclose(it->second.f);
-            if (it->second.story && it->second.mode.find_first_of("wa+") != std::string::npos)
-                written_guest = it->second.path, written_host = it->second.host;
+            // a temporary file is on the disk, whole, before it can replace the save
+            if (!it->second.final_host.empty()) complete = !it->second.failed && host::flush_file(it->second.f);
+            if (fclose(it->second.f) != 0) complete = false;
+            written = it->second.story && it->second.mode.find_first_of("wa+") != std::string::npos;
+            written_guest = it->second.path, written_host = it->second.host, final_host = it->second.final_host;
             g_files.erase(it);
         }
     }
+    // a chosen save folder: the temporary file becomes the save (retried while a cloud app holds it;
+    // kept for the next start if that never works), outside the lock
+    if (!final_host.empty()) {
+        BlockingScope b;
+        if (!complete) save_folder::discard_written(final_host);
+        else if (save_folder::commit_written(final_host)) written_host = final_host;
+        if (!complete) written = false;  // the save is unchanged: its story block stays as it is
+    }
+    if (!written) written_guest.clear();
     // a save file the game wrote: the story block goes after it again (story_store.h)
     if (!written_guest.empty()) {
         BlockingScope b;
@@ -288,11 +373,13 @@ HLE(coreinit, FSReadFile) {
     FILE* f = file(arg(c, 5));
     if (!f || size == 0) { ret(c, 0); return; }
     uint64_t limit = UINT64_MAX;
+    bool save_file = false;
     {
         std::lock_guard<std::mutex> lk(g_fs_mutex);
         auto it = g_files.find(arg(c, 5));
-        if (it != g_files.end()) limit = it->second.limit;
+        if (it != g_files.end()) limit = it->second.limit, save_file = it->second.story;
     }
+    const int64_t start = save_file ? host::file_tell(f) : -1;
     if (limit != UINT64_MAX) {  // a save file's reads end at the game's part
         const int64_t pos = host::file_tell(f);
         const uint64_t left = pos < 0 || (uint64_t)pos >= limit ? 0 : limit - (uint64_t)pos;
@@ -306,7 +393,12 @@ HLE(coreinit, FSReadFile) {
         // (EFAULT) instead of faulting into the write tracker (write_watch.h)
         wwatch::HostWrite w(dst, (uint32_t)std::min<uint64_t>((uint64_t)size * count, 0x100000000ull - dst));
         n = fread(mem::ptr(dst), 1, (size_t)size * count, f);
+        // test only: WWHD_TEST_FS_MBPS=x reads at x MB/s (slow or cold storage, e.g. a phone's first
+        // start; used for the ResMgr boot race, runtime/src/resmgr_sync.cpp)
+        static const double mbps = getenv("WWHD_TEST_FS_MBPS") ? atof(getenv("WWHD_TEST_FS_MBPS")) : 0;
+        if (mbps > 0) std::this_thread::sleep_for(std::chrono::microseconds((int64_t)(n / mbps)));
     }
+    if (start >= 0) repair_save_stamps(f, (uint64_t)start, dst, n);
     ret(c, (uint32_t)(n / size));
 }
 
@@ -318,7 +410,12 @@ HLE(coreinit, FSWriteFile) {
     {
         HostFsCall call;
         n = fwrite(mem::ptr(src), 1, (size_t)size * count, f);
-        fflush(f);
+        const bool flushed = fflush(f) == 0;
+        if (n != (size_t)size * count || !flushed) {  // a full disk or an I/O error
+            std::lock_guard<std::mutex> lk(g_fs_mutex);
+            auto it = g_files.find(arg(c, 5));
+            if (it != g_files.end()) it->second.failed = true;
+        }
     }
     ret(c, (uint32_t)(n / size));
 }
@@ -408,6 +505,7 @@ HLE(nn_save, SAVEOpenDir) {
 #include <vector>
 
 #include "../savestate.h"
+#include "../state_file_section.h"
 void fs_ss_save(ss::Writer& w) {
     std::lock_guard<std::mutex> lk(g_fs_mutex);
     w.u32(g_next_handle);
@@ -432,6 +530,8 @@ void fs_ss_save(ss::Writer& w) {
         w.u32(g_dirs[h].read);
     }
 }
+
+bool fs_ss_check(ss::Reader r,std::string& why) {return ss::check_file_section(r,why);}
 
 void fs_ss_load(ss::Reader& r) {
     std::lock_guard<std::mutex> lk(g_fs_mutex);

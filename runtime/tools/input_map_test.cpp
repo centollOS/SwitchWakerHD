@@ -1,18 +1,23 @@
 // Unit tests for the controls mapping (runtime/src/input_map.cpp).
 //   make -C build/cmake input_map_test && ./build/cmake/input_map_test
 #include "platform/keycodes.h"
+#include <array>
 #include <filesystem>
 #include <chrono>
+#include <barrier>
+#include <thread>
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 
 #include "input_map.h"
 #include "mouse_bindings.h"
 #include "camera_invert.h"
 #include "controller_selection.h"
+#include "file_select_quit.h"
 #include "platform/touch_face.h"
 #include "overlay/settings_shortcut.h"
 #include "overlay/binding_capture.h"
@@ -109,12 +114,16 @@ static void test_defaults() {
     CHECK(m.keys[kScreenshot][0] == kVK_F10 && m.pad[kScreenshot] == kPadNone);
     CHECK(press(m, {kVK_F10}).buttons == 0 && press(m, {kVK_F10}).lx == 0);
     CHECK(action_bit(kScreenshot) == 0 && action_from_id("Screenshot") == kScreenshot);
-    // no default key is reserved; no key is used twice
+    // no default key is reserved; no key is used twice, except Q / L1 by L, Jump and the moon jump
+    // (virtual inputs share the Wii U's L: in play L leaves, play_buttons)
     for (int a = 0; a < kActionCount; a++)
         for (int k : m.keys[a]) {
             CHECK(k == kNoKey || !reserved_key(k));
-            CHECK(k == kNoKey || key_users(m, k, a).empty());
+            CHECK(k == kNoKey || key_users(m, k, a).empty() || (k == kVK_ANSI_Q && (a == kL || is_virtual(a))));
+            CHECK(!has_conflict(m, a));
         }
+    CHECK(conflict_count(m) == 0);
+    CHECK(key_users(m, kVK_ANSI_Q).size() == 3 && pad_users(m, kPadLB).size() == 3);
 
     // controllers by position: Xbox A (bottom) = Wii U B, Xbox B (right) = Wii U A
     float v[kPadCount] = {};
@@ -428,11 +437,73 @@ static void test_prompts() {
     CHECK(pad_family_from_labels(none) == PadFamily::kUnknown);
 
     Mapping m = Mapping::defaults();
-    CHECK(m.prompts == Mapping::Prompts::kAuto && m.shoulder_names == Mapping::ShoulderNames::kAuto && m.prompt_colours);
-    // by position: the game's own prompts, whatever the pad
-    for (PadFamily f : {PadFamily::kUnknown, PadFamily::kXbox, PadFamily::kPlayStation, PadFamily::kNintendo}) {
-        const PromptStyle s = prompt_style(m, f);
-        CHECK(!s.active() && !s.positions && !s.colours);
+    CHECK(m.prompts == Mapping::Prompts::kAuto && m.shoulder_names == Mapping::ShoulderNames::kAuto && m.prompt_colours && m.prompt_text_colours);
+    // Full layout x appearance x family matrix. Automatic layout is resolved from labels.
+    for (int layout = 0; layout < 4; ++layout)
+        for (auto prompts : {Mapping::Prompts::kAuto, Mapping::Prompts::kOriginal,
+                             Mapping::Prompts::kXbox, Mapping::Prompts::kPlayStation, Mapping::Prompts::kGameCube})
+            for (auto family : {PadFamily::kXbox, PadFamily::kPlayStation, PadFamily::kNintendo, PadFamily::kUnknown}) {
+                Mapping candidate = Mapping::defaults();
+                if (layout == 1) apply_face_layout(candidate, FaceLayout::kLabels);
+                if (layout == 2) {
+                    note_face_labels(family == PadFamily::kXbox ? xbox : family == PadFamily::kPlayStation ? ps
+                                     : family == PadFamily::kNintendo ? nintendo : none);
+                    set_face_auto(candidate, true);
+                }
+                if (layout == 3) {
+                    candidate.pad[kA] = kPadX; candidate.pad[kB] = kPadY;
+                    candidate.pad[kX] = kPadA; candidate.pad[kY] = kPadB;
+                }
+                candidate.prompts = prompts;
+                const bool labels = face_layout(candidate) == FaceLayout::kLabels;
+                const FaceStyle expected = prompts == Mapping::Prompts::kOriginal ? FaceStyle::kOriginal
+                    : prompts == Mapping::Prompts::kXbox ? FaceStyle::kXbox
+                    : prompts == Mapping::Prompts::kPlayStation ? FaceStyle::kPlayStation
+                    : prompts == Mapping::Prompts::kGameCube ? FaceStyle::kGameCube
+                    : family == PadFamily::kPlayStation ? FaceStyle::kPlayStation
+                    : labels || family == PadFamily::kXbox ? FaceStyle::kXbox : FaceStyle::kOriginal;
+                const auto actual = prompt_style(candidate, family);
+                CHECK(actual.face == expected);
+                CHECK(actual.positions == (labels && expected != FaceStyle::kOriginal));
+                CHECK(actual.colours == (expected != FaceStyle::kOriginal));
+                for (int i = 0; i < 4; ++i) {
+                    CHECK(actual.buttons[i] == (expected == FaceStyle::kOriginal || expected == FaceStyle::kGameCube ? i : candidate.pad[kA+i] - kPadA));
+                    // the HUD cluster: by label swaps each pair, by position stays, any other
+                    // face set puts each button on its pad button's spot
+                    CHECK(actual.spots[i] == (expected == FaceStyle::kOriginal || expected == FaceStyle::kGameCube ? i : (candidate.pad[kA+i] - kPadA) ^ 1));
+                    if (labels && expected != FaceStyle::kOriginal && expected != FaceStyle::kGameCube) CHECK(actual.spots[i] == (i ^ 1));
+                }
+                // Every invalid/ambiguous face set falls back together.
+                for (int invalid : {int(kPadNone), int(kPadLB), candidate.pad[kB]}) {
+                    auto bad = candidate; bad.pad[kA] = invalid;
+                    CHECK(prompt_style(bad, family).face == FaceStyle::kOriginal);
+                }
+            }
+    // hud_spots: the game draws A east, B south, X north, Y west
+    {
+        using Spots = std::array<int, 4>;
+        Mapping h = Mapping::defaults();
+        apply_face_layout(h, FaceLayout::kPosition);
+        CHECK(hud_spots(h) == (Spots{0, 1, 2, 3}));
+        apply_face_layout(h, FaceLayout::kLabels);
+        CHECK(hud_spots(h) == (Spots{1, 0, 3, 2}));
+        // Xbox A does A (south), X sword (west), Y item X (north), B item Y (east)
+        h.pad[kA] = kPadA; h.pad[kB] = kPadX; h.pad[kX] = kPadY; h.pad[kY] = kPadB;
+        CHECK(hud_spots(h) == (Spots{1, 3, 2, 0}));
+        // Y on RB: its own spot (west) is the sword's, so it takes the free east spot
+        h.pad[kY] = kPadRB;
+        CHECK(hud_spots(h) == (Spots{1, 3, 2, 0}));
+        // two off the face buttons: X keeps its free own spot, Y takes the last one
+        h.pad[kX] = kPadLB;
+        CHECK(hud_spots(h) == (Spots{1, 3, 2, 0}));
+        h.pad[kB] = kPadRT;  // only A on a face button: the rest keep their own free spots, then fill
+        CHECK(hud_spots(h) == (Spots{1, 0, 2, 3}));
+        // the same face button twice: the first action takes its spot, the second a free one
+        apply_face_layout(h, FaceLayout::kPosition);
+        h.pad[kY] = h.pad[kX];  // both on Xbox Y (north): X there, Y keeps its own free west spot
+        CHECK(hud_spots(h) == (Spots{0, 1, 2, 3}));
+        h.pad[kA] = h.pad[kB];  // both on Xbox A (south): A there, B to the free east spot
+        CHECK(hud_spots(h) == (Spots{1, 0, 2, 3}));
     }
     // by label, automatic: Xbox look (LB/RB/LT/RT) unless the pad is a PlayStation one (L1/R1/L2/R2)
     apply_face_layout(m, FaceLayout::kLabels);
@@ -464,7 +535,7 @@ static void test_prompts() {
     apply_face_layout(m, FaceLayout::kPosition);
     m.shoulder_names = Mapping::ShoulderNames::kXbox;
     s = prompt_style(m, PadFamily::kXbox);
-    CHECK(s.face == FaceStyle::kOriginal && !s.positions && s.shoulders == ShoulderStyle::kXbox && s.active());
+    CHECK(s.face == FaceStyle::kXbox && !s.positions && s.shoulders == ShoulderStyle::kXbox && s.active());
     // custom face bindings: the game's face prompts
     apply_face_layout(m, FaceLayout::kLabels);
     m.pad[kX] = kPadLB;
@@ -474,15 +545,21 @@ static void test_prompts() {
     const Mapping d = Mapping::defaults();
     const std::string plain = to_json(d);
     CHECK(plain.find("button_prompts") == std::string::npos && plain.find("shoulder_names") == std::string::npos &&
-          plain.find("button_colours") == std::string::npos);
-    for (auto p : {Mapping::Prompts::kAuto, Mapping::Prompts::kOriginal, Mapping::Prompts::kXbox, Mapping::Prompts::kPlayStation})
+          plain.find("button_colours") == std::string::npos && plain.find("button_text_colours") == std::string::npos);
+    for (auto p : {Mapping::Prompts::kAuto, Mapping::Prompts::kOriginal, Mapping::Prompts::kXbox, Mapping::Prompts::kPlayStation, Mapping::Prompts::kGameCube})
         for (auto n : {Mapping::ShoulderNames::kAuto, Mapping::ShoulderNames::kNintendo, Mapping::ShoulderNames::kNumbered,
                        Mapping::ShoulderNames::kXbox})
-            for (bool c : {true, false}) {
+            for (bool c : {true, false}) for (bool text : {true, false}) {
                 Mapping w = d, r;
                 w.prompts = p;
                 w.shoulder_names = n;
                 w.prompt_colours = c;
+                w.prompt_text_colours = text;
+                const auto style = prompt_style(w, PadFamily::kXbox);
+                // Original prompts keep the game's words whatever the setting, and stay inactive.
+                CHECK(style.text_colours == (text && style.face != FaceStyle::kOriginal));
+                if (style.face == FaceStyle::kOriginal)
+                    CHECK(style.active() == (style.shoulders != ShoulderStyle::kOriginal));
                 std::string err;
                 CHECK(from_json(to_json(w), r, &err) && err.empty() && r == w);
             }
@@ -490,6 +567,19 @@ static void test_prompts() {
     std::string err;
     CHECK(from_json("{\"options\": {\"button_prompts\": \"sega\", \"shoulder_names\": 3}}", r, &err));
     CHECK(r.prompts == Mapping::Prompts::kAuto && r.shoulder_names == Mapping::ShoulderNames::kAuto);
+    note_gamecube(false);
+    const uint32_t no_change = generation();
+    note_gamecube(false);
+    CHECK(generation() == no_change);
+    note_gamecube(true);
+    const uint32_t detected = generation();
+    CHECK(detected != no_change);
+    note_gamecube(true);
+    CHECK(generation() == detected);
+    CHECK(prompt_style(d, PadFamily::kXbox).face == FaceStyle::kGameCube);
+    note_gamecube(false);
+    CHECK(generation() != detected);
+    CHECK(prompt_style(d, PadFamily::kXbox).face == FaceStyle::kXbox);
     CHECK(err.find("button_prompts") != std::string::npos);
 
     // a new pad family is a new generation: the prompts follow the pad that was plugged in
@@ -549,8 +639,7 @@ static void test_names() {
 }
 
 static void test_reserved() {
-    for (int k : std::initializer_list<int>{kVK_ANSI_O, kVK_ANSI_M, kVK_ANSI_N, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9, kVK_ANSI_P,
-                  kVK_ANSI_R, kVK_F12, kVK_Escape})
+    for (int k : std::initializer_list<int>{kVK_ANSI_9, kVK_ANSI_P, kVK_F12})
         CHECK(reserved_key(k) != nullptr);
     CHECK(reserved_key(kVK_ANSI_K) == nullptr);
     CHECK(reserved_key(kVK_ANSI_5) == nullptr);
@@ -618,7 +707,7 @@ static void test_json_partial_and_bad() {
     // unknown names and app shortcuts are dropped with a warning, the rest still loads
     CHECK(from_json(R"({"keyboard": {"A": ["R", "K"], "Jump": ["J"], "B": ["Bogus"]}, "options": {"stick_deadzone": 5}})", r, &err));
     CHECK(!err.empty());
-    CHECK(r.keys[kA][0] == kVK_ANSI_K && r.keys[kA][1] == kNoKey);
+    CHECK(r.keys[kA][0] == kVK_ANSI_R && r.keys[kA][1] == kVK_ANSI_K);
     CHECK(r.keys[kB][0] == kNoKey);
     CHECK(r.deadzone == 0.9f);  // clamped
     // syntax errors fail and leave the output alone
@@ -707,6 +796,58 @@ static void test_camera_invert() {
         CHECK(camera_invert::inverts(site.use) == (site.use == Use::kCamera));
     }
     CHECK(camera == 5 && baton == 1);
+    // The guest helper flips its delta for descending endpoints. Both input paths
+    // must have the same final direction, independent of the live style order.
+    const Mapping previous_mapping = current();
+    for (bool inv : {false, true, false, true}) {
+        m.invert_camera_y = inv;
+        set_current(m, false);
+        CHECK(invert_camera_y() == inv);  // Controls changes publish immediately
+        for (double direction : {-1.0, 1.0}) {
+            for (bool descending : {false, true}) {
+                const double first = descending ? 10.0 : -10.0;
+                const double second = -first;
+                const double mouse = direction * camera_invert::mouse_pitch_sign(inv);
+                const double stick = -camera_invert::stick_y(float(-direction), inv, Use::kCamera);
+                for (double input : {mouse, stick}) {
+                    double delta = camera_invert::manual_pitch_delta(input, first, second);
+                    if (descending) delta = -delta;  // guest limited_range_addition
+                    CHECK(delta == direction * (inv ? -1.0 : 1.0));
+                }
+            }
+        }
+    }
+    set_current(previous_mapping, false);
+    CHECK(!std::signbit(camera_invert::manual_pitch_delta(0.0, 10.0, -10.0)));
+    CHECK(std::signbit(camera_invert::manual_pitch_delta(-0.0, 10.0, -10.0)));
+    CHECK(camera_invert::manual_pitch_delta(1.0, 5.0, 5.0) == 1.0);
+}
+
+// Concurrent mapping writers must leave the camera and Controls in agreement.
+// Check only while both workers are parked: a read across an active update may
+// legitimately observe different generations, but a settled disagreement is stale.
+static void test_live_camera_invert_publication() {
+    const Mapping previous = current();
+    auto on = Mapping::defaults(), off = on;
+    on.invert_camera_y = true;
+    constexpr unsigned rounds = 2048;
+    std::barrier phase(3);
+    auto writer = [&](Mapping m) {
+        for (unsigned round = 0; round < rounds; ++round) {
+            phase.arrive_and_wait();
+            for (unsigned update = 0; update < 8; ++update) set_current(m, false);
+            phase.arrive_and_wait();
+        }
+    };
+    std::thread first(writer, on), second(writer, off);
+    for (unsigned round = 0; round < rounds; ++round) {
+        phase.arrive_and_wait();
+        phase.arrive_and_wait();
+        CHECK(current().invert_camera_y == invert_camera_y());
+    }
+    first.join();
+    second.join();
+    set_current(previous, false);
 }
 
 // issue #40: per-stick range, applied radially after the dead zone
@@ -905,7 +1046,551 @@ static void test_settings_shortcut() {
     CHECK(opened == 0.5);
 }
 
+static void test_shortcuts() {
+    auto m = Mapping::defaults();
+    CHECK(shortcut_for_key(m, kVK_F6, 0) == kLoad1);
+    CHECK(shortcut_for_key(m, kVK_F1, 0) == kSettings);
+    CHECK(shortcut_for_key(m, kVK_Escape, 0) == kSettings);
+    CHECK(shortcut_for_key(m, kVK_F1, kModShift) == kSave1);
+    CHECK(shortcut_for_key(m, kVK_F10, 0) == kPhoto);
+    for (int a = 0; a < kShortcutCount; ++a) {
+        CHECK(*shortcut_info(a).id && *shortcut_info(a).name && *shortcut_info(a).group);
+        CHECK(!shortcut_conflict(m, a));
+        for (int b = a + 1; b < kShortcutCount; ++b) CHECK(std::string(shortcut_info(a).id) != shortcut_info(b).id);
+    }
+    for (int a = kPiP; a < kShortcutCount; ++a) {
+        CHECK(m.shortcuts[a].keys[0].code == kNoKey);
+        CHECK(m.shortcuts[a].keys[1].code == kNoKey);
+        CHECK(!m.shortcuts[a].hold && !m.shortcuts[a].button);
+    }
+    CHECK(m.shortcuts[kSettings].button==kPadHome && !m.shortcuts[kSettings].hold);
+    CHECK(!reserved_key(kVK_Escape));
+    // Settings: Esc first, F1 as the alternate, Home on a controller.
+    CHECK(m.shortcuts[kSettings].keys[0] == ShortcutKey{kVK_Escape} && m.shortcuts[kSettings].keys[1] == ShortcutKey{kVK_F1});
+    CHECK(shortcut_for_key(m, kVK_Escape, 0) == kSettings && settings_reachable(m, false));
+    {
+        // Files written before Esc opened Settings: only the untouched default moves to Esc + F1.
+        auto legacy = [](std::array<ShortcutKey, 2> keys, int escGameInput = -1) {
+            Mapping old = Mapping::defaults();
+            old.shortcuts[kSettings].keys = keys;
+            if (escGameInput >= 0) old.keys[escGameInput][1] = kVK_Escape;
+            std::string text = to_json(old);
+            const std::string now = "\"shortcuts_version\": " + std::to_string(kShortcutsVersion);
+            const size_t at = text.find(now);
+            CHECK(at != std::string::npos);
+            return std::pair{text.replace(at, now.size(), "\"shortcuts_version\": 2"), old};
+        };
+        const auto defaults = shortcut_defaults()[kSettings].keys;
+        Mapping loaded;
+        for (auto keys : {std::array<ShortcutKey, 2>{{{kVK_F1}, {}}}, std::array<ShortcutKey, 2>{{{kVK_F1}, {kVK_ANSI_Comma, kModSuper}}}}) {
+            auto [text, old] = legacy(keys);
+            CHECK(from_json(text, loaded) && loaded.shortcuts[kSettings].keys == defaults);
+            CHECK(loaded.shortcuts[kSettings].button == kPadHome);
+            loaded.shortcuts[kSettings].keys = old.shortcuts[kSettings].keys; CHECK(loaded == old); // nothing else changes
+        }
+        // Saved custom bindings are kept, as is F1 when a game input already uses Esc.
+        for (auto keys : {std::array<ShortcutKey, 2>{{{kVK_F9}, {kVK_F1}}}, std::array<ShortcutKey, 2>{{{kVK_F1}, {kVK_F8, kModAlt}}},
+                          std::array<ShortcutKey, 2>{{{}, {kVK_F1}}}, std::array<ShortcutKey, 2>{{{kVK_F1, kModCtrl}, {}}}}) {
+            auto [text, old] = legacy(keys);
+            CHECK(from_json(text, loaded) && loaded == old);
+        }
+        auto [text, old] = legacy({{{kVK_F1}, {}}}, kB);
+        CHECK(from_json(text, loaded) && loaded == old && loaded.shortcuts[kSettings].keys[0] == ShortcutKey{kVK_F1});
+        // A current file is never migrated: a player who removed Esc keeps F1 alone.
+        Mapping f1Only = Mapping::defaults(); f1Only.shortcuts[kSettings].keys = {{{kVK_F1}, {}}};
+        CHECK(to_json(f1Only).find("\"shortcuts_version\": 3") != std::string::npos);
+        CHECK(from_json(to_json(f1Only), loaded) && loaded == f1Only);
+        // A file without shortcuts gets the current defaults.
+        CHECK(from_json(R"({"keyboard":{"A":["K"]}})", loaded) && loaded.shortcuts[kSettings].keys == defaults);
+    }
+    for (int p=kPadCapture;p<kPadCount;++p) {
+        CHECK(*pad_id(p) && *pad_label(p) && *pad_short_label(p));
+        m.pad[kZR]=p; Mapping round; CHECK(from_json(to_json(m),round)); CHECK(round==m);
+        float raw[kPadCount]{};raw[p]=1;CHECK(controller_state(m,raw).buttons&input::kZR);
+    }
+    m=Mapping::defaults();
+    CHECK(from_json(R"({"shortcuts":{"Settings":{"keys":[{"key":"F9","modifiers":0}],"hold":"","button":""}}})",m));
+    CHECK(m.shortcuts[kSettings].keys[0].code==kVK_F9 && m.shortcuts[kSettings].button==kPadHome);
+    m.shortcuts[kSettings].button=0;
+    Mapping round;CHECK(from_json(to_json(m),round));CHECK(!round.shortcuts[kSettings].button);
+    m=Mapping::defaults();
+    m.shortcuts[kPhoto].keys[1] = {kVK_ANSI_K, kModCtrl};
+    CHECK(!shortcut_conflict(m, kPhoto)); // a Ctrl/Alt/Cmd shortcut takes its key press before the game
+    m.shortcuts[kPhoto].keys[1] = {kVK_ANSI_K, kModShift};
+    CHECK(shortcut_conflict(m, kPhoto) && has_conflict(m, kA)); // plain or Shift keys share the game's K
+    m.shortcuts[kPhoto].keys[1] = {kVK_ANSI_K, 0};
+    CHECK(shortcut_conflict(m, kPhoto));
+    m.shortcuts[kPhoto].keys[1] = m.shortcuts[kSettings].keys[0];
+    CHECK(shortcut_conflict(m, kPhoto) && shortcut_conflict(m, kSettings));
+    m.shortcuts[kSettings] = {};
+    CHECK(settings_reachable(m)); // immutable Home / Select fallback
+    CHECK(!settings_reachable(m, false));
+    m.shortcuts[kSettings].keys[1] = {kVK_F9, kModAlt};
+    CHECK(settings_reachable(m, false));
+    m.shortcuts[kPhoto].keys = {{{kVK_F9, kModShift | kModCtrl}, {kVK_F8, kModAlt}}};
+    m.shortcuts[kPhoto].hold = kPadOptions; m.shortcuts[kPhoto].button = kPadDUp;
+    CHECK(shortcut_for_key(m, kVK_F9, kModShift | kModCtrl) == kPhoto);
+    CHECK(shortcut_for_key(m, kVK_F10, 0) == -1);
+    Mapping out; CHECK(from_json(to_json(m), out)); CHECK(out == m);
+    CHECK(from_json(R"({"keyboard":{"Screenshot":["F9","F8"]},"controller":{"Screenshot":"RightStickButton"}})", out));
+    CHECK(out.shortcuts[kPhoto].keys[0].code == kVK_F9 && out.shortcuts[kPhoto].keys[1].code == kVK_F8);
+    CHECK(out.pad[kScreenshot] == kPadR3);
+    CHECK(from_json(R"({"keyboard":{"Screenshot":["Mouse4"]}})", out));
+    CHECK(out.shortcuts[kPhoto].keys[0].code == kMouse4);
+    CHECK(from_json(to_json(out), m)); CHECK(out == m);
+    m = Mapping::defaults();
+    m.shortcuts[kPhoto].hold = kPadOptions; m.shortcuts[kPhoto].button = kPadDUp;
+    float raw[kPadCount]{}, game[kPadCount]{}; ShortcutPoll poll;
+    raw[kPadOptions] = 1; std::copy(std::begin(raw), std::end(raw), game);
+    CHECK(poll.poll(m, raw, game).empty()); CHECK(game[kPadOptions] == 1);
+    raw[kPadDUp] = 1; raw[kPadA] = 1; std::copy(std::begin(raw), std::end(raw), game);
+    CHECK(poll.poll(m, raw, game) == std::vector<int>{kPhoto});
+    CHECK(game[kPadOptions] == 0 && game[kPadDUp] == 0 && game[kPadA] == 1);
+    CHECK(poll.poll(m, raw, game).empty());
+    raw[kPadDUp] = 0; std::copy(std::begin(raw), std::end(raw), game);
+    CHECK(poll.poll(m, raw, game).empty()); CHECK(game[kPadOptions] == 1);
+    raw[kPadDUp] = 1; CHECK(poll.poll(m, raw, game) == std::vector<int>{kPhoto});
+    m.shortcuts[kMute].hold = kPadDUp; m.shortcuts[kMute].button = kPadOptions;
+    CHECK(shortcut_conflict(m, kPhoto) && shortcut_conflict(m, kMute));
+}
+
+// Settings sizes by screen (mobile_ui.h): phones a compact layout, tablets and handhelds as before, desktop as before
+static void test_screen_layouts() {
+    struct Screen { const char* name; float w, h, dpi; bool phone; };
+    const Screen screens[] = {
+        {"OnePlus 8 Pro 6.78\" at 1080p", 2400, 1080, 388, true},
+        {"OnePlus 8 Pro portrait", 1080, 2400, 388, true},
+        {"OnePlus 8 Pro at 1440p", 3168, 1440, 513, true},
+        {"Galaxy S25 6.2\"", 2340, 1080, 416, true},
+        {"Galaxy S25 portrait", 1080, 2340, 416, true},
+        {"Pixel 2 XL 18:9 6\"", 2880, 1440, 538, true},
+        {"Retroid Pocket 5 5.5\" 16:9", 1920, 1080, 401, false},
+        {"AYN Thor / Odin 2 6\" 16:9", 1920, 1080, 367, false},
+        {"Odin 2 Portal 7\" 16:9", 1920, 1080, 315, false},
+        {"Retroid Pocket Mini 3.9\" 4:3-ish", 1240, 1080, 420, false},
+        {"tablet 11\" 16:10", 2560, 1600, 274, false},
+        {"foldable inner 7.6\"", 2208, 1768, 373, false},
+        {"a long tablet 10\" 21:9 (too large for a phone)", 2560, 1080, 278, false},
+    };
+    for (const Screen& s : screens) {
+        const mobile_ui::Layout a = mobile_ui::layout(s.dpi, s.dpi / 160, mobile_ui::kAutomatic, s.w, s.h);
+        CHECK(a.phone == s.phone);
+        const float classic = mobile_ui::scale(s.dpi, s.dpi / 160, 0);  // today's size
+        if (s.phone) {
+            // smaller text than before (2.2 mm instead of 2.8), controls still 48 dp = 7.6 mm to tap
+            CHECK(std::fabs(a.control_mm(s.dpi) - 7.62f) < 0.01f);
+            CHECK(std::fabs(a.text_mm(s.dpi) - 2.20f) < 0.02f);
+            CHECK(a.scale < classic * 0.81f);
+            // the player's choice decides: Small < Automatic < Medium < Large, every control at least 7 mm
+            const float mm[] = {0, 7, 8, 9};
+            float last = 0;
+            for (int p : {1, 0, 2, 3}) {
+                const mobile_ui::Layout l = mobile_ui::layout(s.dpi, s.dpi / 160, p, s.w, s.h);
+                CHECK(l.phone && l.scale > last && l.control_mm(s.dpi) >= 7.0f - 0.01f);
+                if (p) CHECK(std::fabs(l.control_mm(s.dpi) - mm[p]) < 0.01f);
+                last = l.scale;
+            }
+        } else {
+            // tablets and handhelds: today's size and padding, 8 mm controls, for every UI size
+            for (int p = 0; p < 4; ++p) {
+                const mobile_ui::Layout l = mobile_ui::layout(s.dpi, s.dpi / 160, p, s.w, s.h);
+                CHECK(!l.phone && l.pad_y == 16 && l.scale == mobile_ui::scale(s.dpi, s.dpi / 160, p));
+            }
+            CHECK(std::fabs(a.control_mm(s.dpi) - 8.0f) < 0.01f);
+        }
+        std::printf("  %-48s %s: scale %.2f (was %.2f), control %.1f mm, text %.1f mm, %4.0fx%-4.0f layout px\n", s.name,
+                    a.phone ? "phone   " : "handheld", a.scale, classic, a.control_mm(s.dpi), a.text_mm(s.dpi), s.w / a.scale, s.h / a.scale);
+    }
+    // an unknown screen shape keeps the tablet layout
+    CHECK(!mobile_ui::layout(400, 2.5f, 0).phone);
+    // desktop: unchanged (backing scale, larger on tall windows)
+    CHECK(mobile_ui::desktop_scale(1, 752) == 1.0f && mobile_ui::desktop_scale(2, 1504) == 2.0f);
+    CHECK(std::fabs(mobile_ui::desktop_scale(1, 2160) - 2160 / 820.0f) < 1e-5f);
+}
+
+
+// ---- P6: virtual inputs, per-controller bindings, the move / take-off rule, L and d-pad down in play
+
+static void test_virtual_actions() {
+    Mapping m = Mapping::defaults();
+    CHECK(is_virtual(kJump) && is_virtual(kMoonJump) && !is_virtual(kL) && !is_virtual(kScreenshot));
+    CHECK(action_bit(kJump) == 0 && action_bit(kMoonJump) == 0);
+    CHECK(action_virtual(kJump) == input::kVirtJump && action_virtual(kMoonJump) == input::kVirtMoonJump);
+    CHECK(action_from_id("Jump") == kJump && action_from_id("MoonJump") == kMoonJump);
+    // Q and L1 press the Wii U's L and both virtual inputs; the virtual ones never set a game button
+    auto k = press(m, {kVK_ANSI_Q});
+    CHECK(k.buttons == input::kL && k.virt == (input::kVirtJump | input::kVirtMoonJump));
+    float v[kPadCount] = {};
+    v[kPadLB] = 1;
+    auto c = controller_state(m, v);
+    CHECK(c.buttons == input::kL && c.virt == (input::kVirtJump | input::kVirtMoonJump));
+    // a virtual action alone on a face button: the game gets nothing from that button
+    CHECK(bind_virtual(m, kJump, kPadR3, Displace::kTakeOff));
+    v[kPadLB] = 0; v[kPadR3] = 1;
+    c = controller_state(m, v);
+    CHECK(c.buttons == 0 && c.virt == input::kVirtJump);
+    // combine: buttons and virtual bits add up, sticks follow the furthest
+    input::PadState a, b;
+    a.buttons = input::kA; a.lx = .2f; b.virt = input::kVirtJump; b.lx = -.9f; b.ry = .5f;
+    auto s = combine(a, b);
+    CHECK(s.buttons == input::kA && s.virt == input::kVirtJump && s.lx == -.9f && s.ry == .5f);
+}
+
+static void test_play_buttons() {
+    Mapping m = Mapping::defaults();
+    // L leaves the game in play (option off), stays in menus; with the option it always reaches it
+    CHECK(play_buttons(m, input::kL | input::kA, true) == input::kA);
+    CHECK(play_buttons(m, input::kL | input::kA, false) == (input::kL | input::kA));
+    m.l_turns_page = true;
+    CHECK(play_buttons(m, input::kL, true) == input::kL);
+    m.l_turns_page = false;
+    // an item button moved to d-pad down: the item in play, d-pad down in menus
+    CHECK(bind_virtual(m, kJump, m.pad[kY], Displace::kMoveToDDown));
+    CHECK(m.pad[kY] == kPadDDown && m.pad[kDDown] == kPadDDown && !has_conflict(m, kY) && !has_conflict(m, kDDown));
+    float v[kPadCount] = {};
+    v[kPadDDown] = 1;
+    const uint32_t both = controller_state(m, v).buttons;
+    CHECK(both == (input::kY | input::kDown));
+    CHECK(play_buttons(m, both, true) == input::kY);
+    CHECK(play_buttons(m, both, false) == input::kDown);
+    // d-pad down pressed on its own (another input of the same bindings is not shared): kept
+    CHECK(play_buttons(m, input::kDown, true) == input::kDown);
+    // unrelated buttons held together are not filtered
+    Mapping d = Mapping::defaults();
+    CHECK(play_buttons(d, input::kDown | input::kY, true) == (input::kDown | input::kY));
+}
+
+static void test_displace_rules() {
+    // Move (L1 first): the face button that was B moves to L1, which then no longer presses L
+    Mapping m = Mapping::defaults();
+    const int bottom = m.pad[kB];  // by position: the bottom face button is the Wii U's B
+    CHECK(displaced_by(m, bottom) == std::vector<int>{kB});
+    CHECK(displaced_by(m, kPadLB).empty());  // L (unused in play) does not count
+    CHECK(move_target(m, kB) == kPadLB);
+    CHECK(bind_virtual(m, kJump, bottom, Displace::kMove));
+    CHECK(m.pad[kJump] == bottom && m.pad[kB] == kPadLB && m.pad[kL] == kPadNone);
+    CHECK(!has_conflict(m, kB) && !has_conflict(m, kJump));
+    // the moon jump, which sat on L1 with Jump, comes along (on one input the moon jump wins)
+    CHECK(m.pad[kMoonJump] == bottom && !has_conflict(m, kMoonJump));
+    // L1 is taken now: the next Move goes to d-pad down
+    CHECK(move_target(m, kX) == kPadDDown);
+    const int left = m.pad[kY];
+    CHECK(bind_virtual(m, kMoonJump, left, Displace::kMove));
+    CHECK(m.pad[kY] == kPadDDown && m.pad[kMoonJump] == left);
+    // nowhere left to move to: Move and Move to L1 / d-pad down refuse and change nothing
+    Mapping before = m;
+    CHECK(move_target(m, kA) == kPadNone);
+    CHECK(!bind_virtual(m, kJump, m.pad[kA], Displace::kMove));
+    CHECK(!bind_virtual(m, kJump, m.pad[kA], Displace::kMoveToL1));
+    CHECK(!bind_virtual(m, kJump, m.pad[kA], Displace::kMoveToDDown));
+    CHECK(m == before);
+    // Take off: the item button can't be pressed from the controller any more
+    Mapping t = Mapping::defaults();
+    const int top = t.pad[kX];
+    CHECK(bind_virtual(t, kJump, top, Displace::kTakeOff));
+    CHECK(t.pad[kX] == kPadNone && t.pad[kJump] == top && t.pad[kL] == kPadLB);
+    float v[kPadCount] = {};
+    v[top] = 1;
+    CHECK(controller_state(t, v).buttons == 0 && controller_state(t, v).virt == input::kVirtJump);
+    // Move to L1 for an item button: its item goes there (by its Wii U button), L leaves L1
+    Mapping l = Mapping::defaults();
+    CHECK(bind_virtual(l, kJump, l.pad[kR], Displace::kMoveToL1));
+    CHECK(l.pad[kR] == kPadLB && l.pad[kL] == kPadNone && l.pad[kJump] == kPadRB);
+    // a free input (L1 / unbound): bound at once, nothing displaced, whatever is chosen
+    Mapping f = Mapping::defaults();
+    CHECK(bind_virtual(f, kJump, kPadLB, Displace::kTakeOff) && f.pad[kL] == kPadLB);
+    CHECK(bind_virtual(f, kJump, kPadMisc2, Displace::kMove) && f.pad[kJump] == kPadMisc2);
+    // only virtual actions and real inputs
+    CHECK(!bind_virtual(f, kA, kPadMisc3, Displace::kMove));
+    CHECK(!bind_virtual(f, kJump, kPadNone, Displace::kMove));
+    // a face button moved by hand is no preset any more
+    Mapping a = Mapping::defaults();
+    a.face_auto = true;
+    CHECK(bind_virtual(a, kJump, a.pad[kA], Displace::kMove) && !a.face_auto);
+}
+
+static void test_profiles() {
+    Mapping m = Mapping::defaults();
+    const std::string xg = "030000005e0400008e02000014010000", xn = "Xbox 360 Controller";
+    const std::string pg = "050000004c050000e60c000000810000", pn = "DualSense Wireless Controller";
+    // no profile: the shared bindings
+    CHECK(profile_index(m, xg, xn) == -1 && &pads_for(m, xg, xn) == &m.pad);
+    CHECK(setup_offer_due(m, xg, xn, false));
+    CHECK(!setup_offer_due(m, xg, xn, true));  // the on-screen controls / a test pad: never offered
+    CHECK(!setup_offer_due(m, "", "", false));
+    // its own bindings: a copy of the shared ones, then by letters for the Xbox pad only
+    const int xi = ensure_profile(m, xg, xn);
+    CHECK(xi == 0 && ensure_profile(m, xg, xn) == 0 && m.controllers.size() == 1);
+    CHECK(m.controllers[0].pad == m.pad && !setup_offer_due(m, xg, xn, false));
+    Mapping view = view_for(m, xi);
+    apply_face_layout(view, FaceLayout::kLabels);
+    store_view(m, view, xi);
+    CHECK(face_layout(m) == FaceLayout::kPosition);  // the shared ones are untouched
+    float v[kPadCount] = {};
+    v[kPadA] = 1;  // the bottom button
+    CHECK(controller_state(m, v, pads_for(m, xg, xn)).buttons == input::kA);  // the Xbox pad: by letters
+    CHECK(controller_state(m, v, pads_for(m, pg, pn)).buttons == input::kB);  // others: by position
+    // the fallbacks: the same GUID with another name, then the same name (another bus, or AppKit)
+    CHECK(profile_index(m, xg, "Xbox Wireless") == xi);
+    CHECK(profile_index(m, "", xn) == xi);
+    CHECK(profile_index(m, "0300000000000000000000000000ffff", xn) == xi);
+    CHECK(profile_index(m, "0300000000000000000000000000ffff", "Other") == -1);
+    // an exact match beats a GUID-only one
+    const int pi = ensure_profile(m, pg, pn);
+    const int pi2 = ensure_profile(m, pg, pn + " (USB)");
+    CHECK(pi == 1 && pi2 == 2);
+    m.controllers[pi2].pad[kZR] = kPadNone;
+    CHECK(profile_index(m, pg, pn + " (USB)") == pi2 && profile_index(m, pg, pn) == pi);
+    // a shared-view edit keeps the profiles; the profile view keeps the keyboard edits shared
+    Mapping sv = view_for(m, -1);
+    sv.keys[kA] = {kVK_ANSI_Z, kNoKey};
+    sv.pad[kZL] = kPadNone;
+    store_view(m, sv, -1);
+    CHECK(m.controllers.size() == 3 && m.pad[kZL] == kPadNone && m.controllers[xi].pad[kZL] == kPadLT);
+    Mapping pv = view_for(m, pi);
+    pv.keys[kB] = {kVK_ANSI_O, kNoKey};
+    pv.pad[kR] = kPadNone;
+    store_view(m, pv, pi);
+    CHECK(m.keys[kB][0] == kVK_ANSI_O && m.pad[kR] == kPadRB && m.controllers[pi].pad[kR] == kPadNone);
+    // "Don't ask again", and a profile clears it
+    m.setup_declined.push_back(controller_key("aa", "Pad"));
+    CHECK(!setup_offer_due(m, "aa", "Pad", false) && setup_offer_due(m, "bb", "Pad", false));
+    // JSON round trip (format 2), names with quotes, backslashes and control characters
+    m.controllers[pi].name = "Odd \"pad\" \\ \x01";
+    m.l_turns_page = true;
+    std::string err;
+    const std::string j = to_json(m);
+    CHECK(j.find("\"version\": 2") != std::string::npos && json_version(j) == 2);
+    CHECK(j.find("\"l_turns_gamepad_page\": true") != std::string::npos);
+    Mapping r;
+    CHECK(from_json(j, r, &err) && err.empty());
+    if (!err.empty()) fprintf(stderr, "%s\n%s\n", err.c_str(), j.c_str());
+    CHECK(r == m);
+    remove_profile(m, xi);
+    CHECK(m.controllers.size() == 2 && profile_index(m, xg, xn) == -1);
+    // the option is written only when on
+    CHECK(to_json(Mapping::defaults()).find("l_turns_gamepad_page") == std::string::npos);
+    // a profile missing inputs takes the shared ones; bad entries are skipped with a warning
+    CHECK(from_json(R"({"version":2,"controller":{"ZR":null},"controllers":[{"guid":"g","name":"n","controller":{"A":"Y","Bogus":"A"}},{"name":"no guid"}]})", r, &err));
+    CHECK(r.controllers.size() == 1 && r.controllers[0].pad[kA] == kPadY && r.controllers[0].pad[kZR] == kPadNone);
+    CHECK(r.controllers[0].pad[kB] == r.pad[kB] && !err.empty());
+}
+
+// The game's prompts follow the bindings of the controller in use: its own profile's, else the
+// shared ones (no controller in use: keyboard only). A switch bumps generation() so cached styles
+// (button_glyphs::style) re-read; the same controller again does not.
+static void test_active_prompts() {
+    const Mapping previous = current();
+    Mapping m = Mapping::defaults();
+    apply_face_layout(m, FaceLayout::kLabels);  // shared: by label (A south, B east, X west, Y north)
+    m.prompts = Mapping::Prompts::kXbox;
+    Mapping::Controller one, two;
+    one.guid = "03000000000000000000000000000001";
+    one.name = "Pad One";
+    one.pad = m.pad;
+    std::swap(one.pad[kA], one.pad[kB]);  // Wii U A on the east button, B on the south one
+    two.guid = "03000000000000000000000000000002";
+    two.name = "Pad Two";
+    two.pad = m.pad;
+    std::swap(two.pad[kX], two.pad[kY]);
+    m.controllers = {one, two};
+    set_current(m, false);
+    const PromptStyle shared = prompt_style(m, pad_family());
+    CHECK(shared.face == FaceStyle::kXbox && shared.buttons == (std::array<int, 4>{0, 1, 2, 3}));
+
+    set_active_controller("", "");
+    CHECK(active_prompt_style() == shared);  // keyboard only: the shared bindings
+
+    uint32_t gen = generation();
+    set_active_controller(one.guid, one.name);
+    CHECK(generation() != gen);
+    const PromptStyle a = active_prompt_style();
+    CHECK(a.face == FaceStyle::kXbox && a.buttons == (std::array<int, 4>{1, 0, 2, 3}));
+    CHECK(a.spots == hud_spots(view_for(m, 0)) && a.spots != shared.spots);
+    gen = generation();
+    set_active_controller(one.guid, one.name);  // the same controller pressing again: no re-read
+    CHECK(generation() == gen);
+
+    set_active_controller(two.guid, two.name);
+    CHECK(generation() != gen);
+    const PromptStyle b = active_prompt_style();
+    CHECK(b.buttons == (std::array<int, 4>{0, 1, 3, 2}) && b.spots == hud_spots(view_for(m, 1)));
+
+    // the same model on another bus (GUID match) uses that profile; a controller without one, the shared
+    set_active_controller(one.guid, "Pad One (USB)");
+    CHECK(active_prompt_style().buttons == a.buttons);
+    set_active_controller("03000000000000000000000000000003", "Pad Three");
+    CHECK(active_prompt_style() == shared);
+    CHECK(active_view(m).pad == m.pad);
+
+    set_active_controller("", "");
+    set_current(previous, false);
+}
+
+static void test_v1_migration() {
+    // a format 1 file: no profiles; Jump and the moon jump on whatever pressed the Wii U's L
+    const char* v1 = R"({"version":1,"keyboard":{"L":["U"]},"controller":{"L":"LeftTrigger","ZL":"LeftShoulder"},"options":{"format":2}})";
+    Mapping r;
+    std::string err;
+    CHECK(json_version(v1) == 1 && json_version("{}") == 1 && json_version("nonsense") == 1);
+    CHECK(from_json(v1, r, &err) && err.empty());
+    CHECK(r.controllers.empty() && r.setup_declined.empty() && !r.l_turns_page);
+    CHECK(r.pad[kJump] == kPadLT && r.pad[kMoonJump] == kPadLT);
+    CHECK(r.keys[kJump][0] == kVK_ANSI_U && r.keys[kMoonJump][0] == kVK_ANSI_U);
+    // the default format 1 file reads as today's defaults
+    std::string old = to_json(Mapping::defaults());
+    const size_t at = old.find("\"version\": 2");
+    old.replace(at, 12, "\"version\": 1");
+    CHECK(from_json(old, r, &err) && r == Mapping::defaults());
+    // a format 2 file keeps its own Jump bindings, also where L moved
+    Mapping m = Mapping::defaults();
+    m.pad[kL] = kPadMisc2;
+    CHECK(from_json(to_json(m), r) && r.pad[kJump] == kPadLB);
+    // the old Jump anywhere button choice: Jump on that button's inputs, which keep their own use
+    Mapping j = Mapping::defaults();
+    jump_from_legacy(j, input::kStickR);
+    CHECK(j.pad[kJump] == kPadR3 && j.keys[kJump][0] == kVK_ANSI_V && j.pad[kStickRClick] == kPadR3);
+    CHECK(j.pad[kMoonJump] == kPadLB);
+    jump_from_legacy(j, 0x12345);  // not a button: nothing
+    CHECK(j.pad[kJump] == kPadR3);
+}
+
+static void test_gamecube() {
+    auto m = Mapping::defaults(), original = m;
+    apply_gamecube(m);
+    CHECK(m.preset.gamecube && !m.face_auto && m.preset.saved);
+    const std::array<int,kActionCount> expected = {
+        kPadA,kPadX,kPadB,kPadY,kPadStartLeft,kPadRB,kPadGCL,kPadGCR,
+        kPadMenu,kPadStartDown,kPadStartRight,kPadDUp,kPadDDown,kPadDLeft,kPadDRight,
+        kPadNone,kPadStartUp,kPadLSUp,kPadLSDown,kPadLSLeft,kPadLSRight,
+        kPadRSUp,kPadRSDown,kPadRSLeft,kPadRSRight,kPadNone,kPadNone,kPadNone};
+    CHECK(m.pad == expected); CHECK(m.keys == original.keys); CHECK(m.shortcuts == original.shortcuts);
+    for (int p=kPadGCL;p<kPadCount;++p) {
+        CHECK(pad_from_id(pad_id(p))==p); CHECK(pad_label(p)[0]); CHECK(pad_short_label(p)[0]);
+    }
+    float v[kPadCount]{};
+    for (int a=0;a<4;++a) {
+        std::fill_n(v,kPadCount,0.f);v[expected[a]]=1;
+        CHECK(controller_state(m,v).buttons==action_bit(a));
+    }
+    std::fill_n(v,kPadCount,0.f);v[kPadRB]=1;
+    CHECK(controller_state(m,v).buttons==input::kR);
+    std::fill_n(v,kPadCount,0.f);v[kPadLT]=.249f;v[kPadRT]=.249f;
+    CHECK(controller_state(m,v).buttons==0);
+    v[kPadLT]=.25f;CHECK(controller_state(m,v).buttons==input::kZL);
+    v[kPadRT]=.25f;CHECK(controller_state(m,v).buttons==(input::kZL|input::kZR));
+    v[kPadLT]=v[kPadRT]=0;v[kPadMisc3]=v[kPadMisc4]=1;
+    CHECK(controller_state(m,v).buttons==(input::kZL|input::kZR));
+    std::fill_n(v,kPadCount,0.f);v[kPadRSRight]=1;v[kPadLSUp]=1;
+    CHECK(controller_state(m,v).rx==1 && controller_state(m,v).ly==1);
+    StartGate gate;double tick=0;
+    auto read_gate=[&] { tick+=.2;return gate.read(m,v,tick); };
+    std::fill_n(v,kPadCount,0.f);v[kPadMenu]=1;
+    CHECK(read_gate().buttons==0);
+    v[kPadMenu]=0;CHECK(read_gate().buttons==input::kPlus);
+    CHECK(read_gate().buttons==0);
+    v[kPadMenu]=1;gate.read(m,v,10);v[kPadMenu]=0;
+    CHECK(gate.read(m,v,10.01).buttons==input::kPlus);
+    CHECK(gate.read(m,v,10.05).buttons==input::kPlus);
+    CHECK(gate.read(m,v,10.12).buttons==0);gate={};
+    const uint32_t chords[]={input::kStickR,input::kMinus,input::kL,input::kHome};
+    for(int c=0;c<4;++c) {
+        v[kPadMenu]=1;CHECK(read_gate().buttons==0);
+        v[kPadDUp+c]=1;CHECK(read_gate().buttons==chords[c]);
+        v[kPadDUp+c]=0;CHECK(read_gate().buttons==0);
+        v[kPadMenu]=0;CHECK(read_gate().buttons==0);
+    }
+    Mapping loaded;CHECK(from_json(to_json(m),loaded)); CHECK(loaded==m);
+    CHECK(restore_pad_preset(loaded));CHECK(loaded==original);CHECK(!restore_pad_preset(loaded));
+    apply_gamecube(m);CHECK(m.preset.previous==original.pad); // repeated click keeps original
+    for(auto [vendor,product] : {std::pair{0x057e,0x0337},{0x057e,0x2073},{0x0079,0x1843},{0x0079,0x1844},{0x0079,0x1846},{0x0926,0x8888},{0x1a34,0xf705},{0x05e3,0x0681},{0x20d6,0xa711},{0x0e6f,0x0185}})
+        CHECK(is_gamecube(false,vendor,product));
+    CHECK(is_gamecube(true,0,0));CHECK(!is_gamecube(false,0x057e,0x2009));
+    CHECK(!is_gamecube(false,0x2dc8,0x3106)); // 8BitDo is not a device identity
+    CHECK(!is_gamecube(false,0x045e,0x02ea));
+    m=original;CHECK(!auto_gamecube(m,"gc","GC",true)); // manual preset is a choice
+    m.face_auto=true;auto shared=m;
+    CHECK(auto_gamecube(m,"gc","GC",true));CHECK(m.pad==shared.pad && m.face_auto);
+    CHECK(m.controllers.size()==1);auto view=view_for(m,0);CHECK(view.preset.gamecube);
+    CHECK(!auto_gamecube(m,"gc","GC",true));CHECK(!auto_gamecube(m,"x","Xbox",false));
+    set_pad_binding(view,kA,kPadDDown);store_view(m,view,0);
+    CHECK(!auto_gamecube(m,"gc","GC",true));CHECK(m.controllers[0].pad[kA]==kPadDDown);
+    CHECK(from_json(to_json(m),loaded));CHECK(loaded==m);
+    view=view_for(loaded,0);CHECK(restore_pad_preset(view));store_view(loaded,view,0);
+    CHECK(loaded.pad==shared.pad);CHECK(loaded.controllers[0].pad==shared.pad);
+    m=shared;m.pad[kZL]=kPadRB;CHECK(!auto_gamecube(m,"gc","GC",true));
+    m=shared;ensure_profile(m,"gc","GC");CHECK(!auto_gamecube(m,"gc","GC",true));
+    input::ControllerInfo legacy;legacy.vendor=0x0079;legacy.product=0x1844;
+    CHECK(legacy_gamecube_faces(legacy));legacy.type="gamecube";CHECK(!legacy_gamecube_faces(legacy));
+    legacy.type="";legacy.vendor=0x057e;legacy.product=0x0337;CHECK(!legacy_gamecube_faces(legacy));
+    legacy.vendor=0x045e;legacy.product=0x02ea;CHECK(!legacy_gamecube_faces(legacy));
+    legacy.type="gamecube-apple";CHECK(legacy_gamecube_faces(legacy));
+    auto gc=original;apply_gamecube(gc);
+    CHECK(prompt_style(gc,PadFamily::kXbox).face==FaceStyle::kOriginal);
+    gc.shoulder_names=Mapping::ShoulderNames::kNumbered;
+    CHECK(prompt_style(gc,PadFamily::kXbox).shoulders==ShoulderStyle::kNumbered);
+    auto switcher=original;apply_gamecube(switcher);
+    apply_face_layout(switcher,FaceLayout::kLabels);
+    CHECK(switcher.preset.saved && !switcher.preset.gamecube);
+    CHECK(restore_pad_preset(switcher) && switcher==original);
+    m=original;apply_gamecube(m,true);CHECK(m.pad[kB]==kPadB && m.pad[kX]==kPadX);
+    set_current(m,false);set_active_controller("","");
+    CHECK(face_input(kA)==kPadA && face_input(kB)==kPadB);
+    set_current(original,false);
+}
+
 int main() {
+    {
+        auto m = Mapping::defaults();
+        m.prompts = Mapping::Prompts::kKeyboard;
+        m.pad[kA] = kPadNone; // keyboard appearance does not depend on controller bindings
+        CHECK(prompt_style(m, PadFamily::kXbox).face == FaceStyle::kKeyboard);
+        CHECK(!prompt_style(m, PadFamily::kXbox).positions);
+        m.keys[kA] = {key_from_id("Tab"), key_from_id("M")};
+        CHECK(prompt_key_label(m,kA) == "Tab");
+        m.keys[kA] = {kNoKey,key_from_id("M")};
+        CHECK(prompt_key_label(m,kA) == "M");
+        m.keys[kX] = {kMouse5,kNoKey}; CHECK(prompt_key_label(m,kX) == "M5");
+        m.keys[kY] = {kWheelDown,kNoKey}; CHECK(prompt_key_label(m,kY) == "Wh-");
+        m.keys[kR] = {kNoKey,kNoKey}; CHECK(prompt_key_label(m,kR) == "None");
+        Mapping loaded;
+        CHECK(from_json(to_json(m),loaded));
+        CHECK(loaded.prompts == Mapping::Prompts::kKeyboard);
+        CHECK(prompt_key_label(loaded,kA) == "M");
+    }
+    test_gamecube();
+    // Old controls files default to showing Quit; an explicit choice round-trips.
+    {
+        auto mapping = input_map::Mapping::defaults();
+        CHECK(mapping.file_select_quit);
+        mapping.file_select_quit = false;
+        input_map::Mapping loaded;
+        CHECK(input_map::from_json(input_map::to_json(mapping), loaded));
+        CHECK(!loaded.file_select_quit);
+    }
+    // Quit consumes the mapped Wii U X action. Its displayed host identity is
+    // resolved from the same face preset as the game's existing prompt glyphs.
+    for (auto layout : {FaceLayout::kPosition, FaceLayout::kLabels}) {
+        auto mapping = Mapping::defaults();
+        apply_face_layout(mapping, layout);
+        float physical[kPadCount]{};
+        const int button = mapping.pad[kX];
+        physical[button] = 1;
+        const auto delivered = controller_state(mapping, physical);
+        CHECK(delivered.buttons == input::kX);
+        for (bool shown : {false, true}) {
+            file_select_quit::Routing routing;
+            auto filtered = delivered;
+            CHECK(routing.filter(filtered, shown) == shown);
+            CHECK(filtered.buttons == (shown ? 0u : input::kX));
+        }
+        for (auto prompts : {Mapping::Prompts::kXbox, Mapping::Prompts::kPlayStation}) {
+            mapping.prompts = prompts;
+            const auto look = prompt_style(mapping, PadFamily::kUnknown);
+            CHECK(look.buttons[2] == button - kPadA);
+        }
+    }
+    test_shortcuts();
     for (int mode : {touch_buttons::Automatic, touch_buttons::AlwaysShow, touch_buttons::Hide})
         for (bool controller : {false, true}) {
             CHECK(touch_buttons::visible(mode, controller, false) ==
@@ -920,6 +1605,7 @@ int main() {
         CHECK(mobile_ui::scale(dpi, 1, 3) > automatic);
     }
     CHECK(std::isfinite(mobile_ui::scale(NAN, NAN, 0)));
+    test_screen_layouts();
     test_settings_shortcut();
     test_android_odin_mapping();
     test_binding_capture_faces();
@@ -940,6 +1626,7 @@ int main() {
     test_deadzone();
     test_stick_range();
     test_camera_invert();
+    test_live_camera_invert_publication();
     using controller_selection::decision;
     CHECK(decision(true, true, 0, true, true) == 0);
     CHECK(decision(true, true, 1, true, true) == 1);
@@ -960,7 +1647,35 @@ int main() {
     CHECK(!skip_controller_selection());
     set_current(Mapping::defaults(), false);
     CHECK(skip_controller_selection());
+    Mapping pause = Mapping::defaults();
+    CHECK(pause.settings_pause_page && settings_pause_page());
+    CHECK(from_json("{\"options\":{}}", parsed) && parsed.settings_pause_page);
+    pause.settings_pause_page = false;
+    CHECK(from_json(to_json(pause), parsed) && parsed == pause);
+    set_current(pause, false);
+    CHECK(!settings_pause_page());
+    set_current(Mapping::defaults(), false);
+    CHECK(settings_pause_page());
+    // issue #267: controller input in the background, off by default, saved only when on
+    Mapping background = Mapping::defaults();
+    CHECK(!background.background_controllers && !background_controllers());
+    CHECK(to_json(background).find("background_controllers") == std::string::npos);
+    CHECK(from_json("{\"options\":{}}", parsed) && !parsed.background_controllers);
+    background.background_controllers = true;
+    CHECK(to_json(background).find("\"background_controllers\": true") != std::string::npos);
+    CHECK(from_json(to_json(background), parsed));
+    CHECK(parsed == background);
+    set_current(background, false);
+    CHECK(background_controllers());
+    set_current(Mapping::defaults(), false);
+    CHECK(!background_controllers());
     test_files();
+    test_virtual_actions();
+    test_play_buttons();
+    test_displace_rules();
+    test_profiles();
+    test_active_prompts();
+    test_v1_migration();
     printf("input_map_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
