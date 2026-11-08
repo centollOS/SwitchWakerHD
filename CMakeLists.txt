@@ -548,7 +548,7 @@ target_include_directories(language_source_test PRIVATE runtime/src runtime/incl
 target_compile_options(language_source_test PRIVATE -UNDEBUG)
 target_link_libraries(language_source_test PRIVATE ZLIB::ZLIB Threads::Threads)
 # (this fork) the PT-BR fan translation read through the guest file system (fan_translation.h)
-add_executable(fan_translation_test runtime/tools/fan_translation_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/fan_translation.cpp runtime/src/guest_addr_identity.c runtime/src/hle/os_time.cpp)
+add_executable(fan_translation_test runtime/tools/fan_translation_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/fs_problems.cpp runtime/src/mods/save_folder.cpp runtime/tools/fork_test_stubs.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/fan_translation.cpp runtime/src/guest_addr_identity.c runtime/src/hle/os_time.cpp)
 target_include_directories(fan_translation_test PRIVATE runtime/src runtime/include)
 target_compile_options(fan_translation_test PRIVATE -UNDEBUG)
 target_link_libraries(fan_translation_test PRIVATE ZLIB::ZLIB Threads::Threads)
