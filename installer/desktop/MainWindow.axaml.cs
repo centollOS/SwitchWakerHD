@@ -274,15 +274,18 @@ public partial class MainWindow : Window
         var dir = DesktopEngine.WorkDir;
         TxtWelcomeDir.Text = Str.Get("welcome_dir", dir);
         ToolTip.SetTip(TxtWelcomeDir, dir);
-        workDirProblem = BuildFolder.Problem(dir, DesktopEngine.LinksAndPrograms);
+        // a folder the player picked is refused; the installer's own folder is only warned about, and the install
+        // goes ahead as it always did there
+        var problem = BuildFolder.Problem(dir, DesktopEngine.LinksAndPrograms);
+        workDirProblem = BuildFolder.IsDefault(dir) ? null : problem;
         TxtWelcomeSpace.Text = BuildFolder.SpaceLine(dir, out var low);
         TxtWelcomeSpace.Foreground = Res(low ? "Warn" : "FgDim");
-        var warn = workDirProblem ?? (BuildFolder.SavedGone != null ? Str.Get("dir_saved_gone", BuildFolder.SavedGone) : null);
+        var warn = problem ?? (BuildFolder.SavedGone != null ? Str.Get("dir_saved_gone", BuildFolder.SavedGone) : null);
         TxtWelcomeDirWarn.Text = warn ?? "";
         TxtWelcomeDirWarn.IsVisible = warn != null;
         var notes = new List<string>();
-        if (workDirProblem == null && BuildFolder.FatFormat(dir) is string fat) notes.Add(Str.Get("dir_fat", fat));
-        if (workDirProblem == null && BuildFolder.IsRemovable(dir)) notes.Add(Str.Get("dir_removable", BuildFolder.NeedGb(dir) + 2));
+        if (problem == null && BuildFolder.FatFormat(dir) is string fat) notes.Add(Str.Get("dir_fat", fat));
+        if (problem == null && BuildFolder.IsRemovable(dir)) notes.Add(Str.Get("dir_removable", BuildFolder.NeedGb(dir) + 2));
         TxtWelcomeDirNote.Text = string.Join("\n\n", notes);
         TxtWelcomeDirNote.IsVisible = notes.Count > 0;
         BtnWorkDirDefault.IsVisible = !BuildFolder.IsDefault(dir);

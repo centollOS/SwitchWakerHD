@@ -29,6 +29,9 @@ fetch copies the archive's links instead of making them (tools/toolchain/fetch.p
 
 Not enough free space is a warning there (Preflight still stops the install, as now).
 
+The installer's own folder (no pick) is never refused, only warned about: a player who does not choose a folder
+gets the install exactly as before #59.
+
 On a removable drive (Windows `DriveType.Removable`; Mac/Linux under `/Volumes`, `/media`, `/run/media`, `/mnt`)
 a note: slower build, keep it connected, and when it is the Switch's own card it needs room for the work folder
 and the finished game, and the work folder stays on the card (user, 2026-10-21: keep it, the next update reuses
@@ -62,7 +65,8 @@ disk plugged in again), and *Update to vX* stays off while the folder is refused
 
 ## Tests
 
-- Mac, done (2026-11-08, through the built assembly): a path with a space and a read-only folder refused; FAT32
+- Mac, done (2026-11-08, again after the rebase onto #135/#136; through the built assembly): #120's older-build
+  selection in a chosen folder on an exFAT image, and its free-space number from that volume; a path with a space and a read-only folder refused; FAT32
   and exFAT disk images accepted with both notes and their own free space; the pointer file written, read, gone
   after *Use the default folder*; a remembered folder on a missing volume falls back with the warning.
 - Mac, to do on screen: pick an exFAT disk image, a path with a space (refused), a read-only folder
