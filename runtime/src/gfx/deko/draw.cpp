@@ -53,10 +53,18 @@ std::atomic<bool> g_hudMarks{true};  // (Dev tab, A/B) off: the guess alone, as 
 bool hud_marks_trusted() { return g_hudMarkUsed != ~0ull && R.frame - g_hudMarkUsed <= 1; }
 }  // namespace
 
+// Only a mark after the post-processing read the buffer this frame: the game also draws a layout into the shown
+// buffer in the middle of the 3D (console, Outset, 2026-11-08: 4 draws right after the sky and sea pass, before the
+// main 972-draw pass and the bloom), which as a HUD start smoothed only the sky and left the HUD to the upscale
 void hud_mark(const uint32_t* regs) {
     if (!g_hudMarks.load(std::memory_order_relaxed) || !fxaa_enabled()) return;
     const Surface* s = shown_source();
-    if (s && regs[mmCB_COLOR0_BASE] && regs[mmCB_COLOR0_BASE] == s->addr) g_hudMarkFrame = R.frame;
+    if (s && regs[mmCB_COLOR0_BASE] && regs[mmCB_COLOR0_BASE] == s->addr && s->readFrame == R.frame) {
+        g_hudMarkFrame = R.frame;
+        if (g_traceFrame) trace_event("HUD mark (a layout into %s)", trace_name(s).c_str());
+    } else if (g_traceFrame && s && regs[mmCB_COLOR0_BASE] == s->addr) {
+        trace_event("HUD mark ignored: %s not read yet this frame", trace_name(s).c_str());
+    }
 }
 bool hud_marks_on() { return g_hudMarks.load(std::memory_order_relaxed); }
 void set_hud_marks(bool on) {
