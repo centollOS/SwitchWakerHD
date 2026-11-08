@@ -8,6 +8,7 @@ usage: python3 -I tools/switch/dksh_cache/build.py [--devkitpro DIR] [ARGS for d
        e.g. build build/shader-harvest/shadercache_gl.bin build/shader-harvest/shadercache_dksh.bin
 """
 import os
+import platform
 import subprocess
 import sys
 
@@ -18,11 +19,20 @@ import build_switch  # noqa: E402  (its pinned toolchain, python tools and clean
 WINDOWS = os.name == "nt"
 
 
+def macos_target():
+    """macOS: an explicit target (zig's lowest macOS) instead of the native one. With the native target zig builds
+    its libc++ for this Mac's macOS version and SDK, and on macOS 27 that fails (#129: INFINITY undeclared in
+    __random/clamp_to_integral.h). With an explicit one it builds, and the program runs on any macOS from 13 on."""
+    arch = {"arm64": "aarch64", "aarch64": "aarch64", "x86_64": "x86_64"}.get(platform.machine().lower())
+    return " -target %s-macos" % arch if arch else ""
+
+
 def wrappers(zig, out):
     """zig's cc, c++, ar and ranlib as programs CMake can be given (it takes no "zig cc" with a space)"""
     os.makedirs(out, exist_ok=True)
     paths = {}
-    for name, sub in (("cc", "cc"), ("c++", "c++"), ("ar", "ar"), ("ranlib", "ranlib")):
+    target = macos_target() if sys.platform == "darwin" else ""
+    for name, sub in (("cc", "cc" + target), ("c++", "c++" + target), ("ar", "ar"), ("ranlib", "ranlib")):
         if WINDOWS:
             p = os.path.join(out, "zig-%s.cmd" % name)
             text = '@"%s" %s %%*\r\n' % (zig, sub)
