@@ -62,6 +62,13 @@ abstract partial class EngineBase
         try
         {
             entries = OlderBuildEntries(Work, releaseVer);
+            // never what holds a file the player picked (their game, keys, GameCube game or translation inside an
+            // older release's folder): that entry stays, and the log says why
+            foreach (var path in entries.Where(e => PlayerFiles().Any(f => Holds(e, f))).ToList())
+            {
+                entries.Remove(path);
+                Info(Str.Get("old_kept", path));
+            }
             // the toolchains only together with older releases (the one in use is kept)
             if (entries.Count > 0) entries.AddRange(UnusedToolchains());
         }
@@ -76,7 +83,7 @@ abstract partial class EngineBase
         var removed = new List<string>();
         foreach (var path in entries)
         {
-            ct.ThrowIfCancellationRequested();
+            if (ct.IsCancellationRequested) break;   // (the build already succeeded: stop removing, never "cancelled")
             try
             {
                 DeleteEntry(path);
@@ -93,6 +100,20 @@ abstract partial class EngineBase
         Ok(Str.Get("old_removed", string.Join(", ", removed.Where(n => !Regex.IsMatch(n, "^[0-9a-f]{12}$"))
                                                          .DefaultIfEmpty(Str.Get("old_toolchains"))),
                    freed.ToString("0.0")));
+    }
+
+    // The files the player picked for this build.
+    IEnumerable<string> PlayerFiles() =>
+        new[] { GamePath, ForwarderKeys, MinimapGame, PtbrDownload }.Where(p => !string.IsNullOrEmpty(p)).Select(p => p!);
+
+    // Whether `path` is `entry` or inside it (case-insensitive: Windows and the default macOS file system).
+    internal static bool Holds(string entry, string path)
+    {
+        var e = Path.GetFullPath(entry).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var p = Path.GetFullPath(path);
+        return string.Equals(p, e, StringComparison.OrdinalIgnoreCase) ||
+               p.StartsWith(e + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+               p.StartsWith(e + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     long FreeBytes()

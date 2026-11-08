@@ -98,6 +98,7 @@ static partial class Str
         ["old_removing"]   = "Apagando as versões anteriores...",
         ["old_removed"]    = "Versões anteriores apagadas: {0} ({1} GB liberados).",
         ["old_toolchains"] = "ferramentas de versões anteriores",
+        ["old_kept"]       = "Mantendo {0}: contém arquivos que você escolheu para esta instalação.",
         ["old_fail"]       = "Não foi possível apagar {0} ({1}); você pode apagá-lo manualmente.",
         ["shaders_downloading"] = "Baixando o modelo de gráficos...",
         ["shaders_ready"]  = "Modelo de gráficos pronto.",

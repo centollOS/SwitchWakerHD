@@ -132,6 +132,8 @@ static partial class Str
         ["old_removing"]   = ("Borrando las versiones anteriores...",                 "Removing older builds..."),
         ["old_removed"]    = ("Versiones anteriores borradas: {0} ({1} GB libres más).", "Older builds removed: {0} ({1} GB freed)."),
         ["old_toolchains"] = ("herramientas de versiones anteriores",                 "tools of earlier versions"),
+        ["old_kept"]       = ("Se deja {0}: contiene archivos que elegiste para esta instalación.",
+                               "Keeping {0}: it holds files you picked for this build."),
         ["old_fail"]       = ("No se pudo borrar {0} ({1}); puedes borrarlo a mano.",  "Could not remove {0} ({1}); you can delete it by hand."),
         ["shaders_downloading"] = ("Descargando la plantilla de gráficos...",          "Downloading the graphics template..."),
         ["shaders_ready"]  = ("Plantilla de gráficos lista.",                         "Graphics template ready."),
