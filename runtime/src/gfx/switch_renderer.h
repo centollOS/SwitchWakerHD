@@ -29,6 +29,10 @@ void set_aniso_level(int level);
 // edge smoothing (FXAA, issue #21) on the 3D picture before the HUD (WWHD_FXAA): any thread, from the next frame
 bool fxaa();
 void set_fxaa(bool on);
+// (issue #58, A/B test in the Dev tab, not saved) FXAA at the HUD's start as the game marks it (on, the default) or
+// at the per-draw guess alone (off, as before)
+bool fxaa_hud_marks();
+void set_fxaa_hud_marks(bool on);
 // FSR 1 in the present pass when the game's picture is smaller than the window (EASU: docked 720p -> 1080p, or
 // dynamic resolution below 1.0) or the same size (RCAS sharpening only): any thread, from the next frame. Test
 // option, off by default

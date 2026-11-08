@@ -85,6 +85,9 @@ struct Backend {
     // optional: the game starts drawing its sky clouds (drawVrkumo, cloud_proto.cpp) into the sky
     // buffer, whose pass is the open one; `seq` names the cloud snapshot. Draws the horizon-haze grade.
     void (*sky_clouds_begin)(const uint32_t* regs, uint32_t seq);
+    // optional, render thread (issue #58): the game begins drawing a layout (its HUD / 2D layer) into the target
+    // `regs` bind (OP_LAYOUT_ROOT, OP_HUD_MARK): deko3d's edge smoothing runs there, before the HUD
+    void (*hud_mark)(const uint32_t* regs);
 };
 enum Feature : int { kFeatureAO, kFeatureAOHires, kFeatureAniso, kFeatureFXAA, kFeatureScaleFilter, kFeatureCapture,
                      kFeatureShaderHeadStart };

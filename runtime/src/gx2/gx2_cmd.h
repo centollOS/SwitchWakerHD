@@ -53,6 +53,9 @@ enum Op : uint32_t {
     // (this fork, round 45) single-register writes merged by the staging buffer: register, value, register,
     // value... (after upstream's ops, which keep their numbers)
     OP_SET_REG_PAIRS,
+    // (this fork, issue #58) a layout's root pane is drawn (aspect.cpp Pane::Draw) while edge smoothing is on: the
+    // game begins its HUD / 2D layer in the target bound now (backend hud_mark); no payload. OP_LAYOUT_ROOT counts too
+    OP_HUD_MARK,
     OP_COUNT
 };
 

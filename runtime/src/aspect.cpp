@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "gx2/gx2_cmd.h"
+#include "gfx/renderer.h"
 #include "runtime.h"
 #include "screen_mode.h"
 #include "guest_addr.h"
@@ -612,7 +613,14 @@ extern "C" void hook_02877100(Cpu* c) {
             if (root != pane && root_on_tv(root)) return;
         }
     }
-    if (original()) { button_glyphs::draw_pane(c, f_02877100_orig); return; }
+    if (original()) {
+        // (issue #58) a layout's root: the game begins its HUD / 2D layer in the target bound now, where deko3d's
+        // edge smoothing runs (OP_LAYOUT_ROOT below says the same at other aspects). Only for a renderer that wants
+        // it, with FXAA on: otherwise the command stream is as before
+        if (!ld32(pane + kPaneParent) && render::g_backend->hud_mark && render::fxaa()) gx2::emit(gx2::OP_HUD_MARK, nullptr, 0);
+        button_glyphs::draw_pane(c, f_02877100_orig);
+        return;
+    }
     uint32_t parent = ld32(pane + kPaneParent);
     if (!parent) {
         gx2::emit(gx2::OP_LAYOUT_ROOT, {pane});

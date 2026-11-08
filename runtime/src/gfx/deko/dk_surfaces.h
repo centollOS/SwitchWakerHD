@@ -220,6 +220,11 @@ void scan_flush();
 // the buffer of the picture the window shows: the GamePad's while it is the one presented (Off-TV Play, the default),
 // else the TV's. Its HUD is where FXAA and the full-resolution HUD switch apply (draw.cpp)
 Surface* shown_source();
+// (issue #58, draw.cpp) the game begins a layout into the target `regs` bind (render thread, backend hud_mark); the
+// Dev tab's A/B switch: off, FXAA's HUD start is the per-draw guess alone
+void hud_mark(const uint32_t* regs);
+bool hud_marks_on();
+void set_hud_marks(bool on);
 void copy_scan(Surface* src, std::unique_ptr<Surface>& scan);  // src into a scan copy (made to fit)
 inline void before_write(const Surface* s) {
     if (s && s == S.scanSrc) scan_flush();

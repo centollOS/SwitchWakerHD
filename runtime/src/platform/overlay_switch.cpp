@@ -556,6 +556,15 @@ void tab_developer() {
         help("Issue #49: what a draw does while its shader compiles. Saved. The log's [shader-wait] lines say how\n"
              "long it waited.");
     }
+    heading("Edge smoothing (test)");
+    {
+        // (issue #58) not saved: on again at the next start (debug server: hudmark)
+        bool v;
+        if (check("FXAA at the game's HUD start", gfxsw::fxaa_hud_marks(), &v)) gfxsw::set_fxaa_hud_marks(v);
+        help("With Edge smoothing (FXAA) on: the picture is smoothed where the game begins drawing its HUD and menus.\n"
+             "Off: where the renderer guesses it from the draws (as before), which a fade or a 2D pass before the HUD\n"
+             "can start too early. Nothing changes with FXAA off. Not saved: on again at the next start.");
+    }
     heading("Performance tests");
     {
         // not saved: off at the next start (debug server: miiverse; shadowscale and noao are in the Picture tab)

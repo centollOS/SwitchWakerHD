@@ -1072,10 +1072,12 @@ void frame_stats() {
             (unsigned long long)ds.samplerWrites, (unsigned long long)ds.samplerHits,
             (unsigned long long)ds.samplerEvictions, (unsigned long long)g_hitches);
         LOG("[dk] internal resolution %.2f (requested %.2f; dynamic %s); %llu render targets resampled, %llu from kept "
-            "images (%zu MiB kept); HUD at full resolution in %.0f%% of frames; FXAA %s, in %.0f%% of frames",
+            "images (%zu MiB kept); HUD at full resolution in %.0f%% of frames; FXAA %s, in %.0f%% of frames (at the "
+            "game's HUD start in %.0f%%%s)",
             double(res_scale()), double(requested_res_scale()), dynamicRes.on ? "on" : "off", (unsigned long long)p.rescales,
             (unsigned long long)p.poolHits, rescale_pool_bytes() >> 20, 100.0 * perFrame(p.hudSwitches),
-            fxaa_enabled() ? "on" : "off", 100.0 * perFrame(p.fxaaPasses));
+            fxaa_enabled() ? "on" : "off", 100.0 * perFrame(p.fxaaPasses), 100.0 * perFrame(p.hudMarks),
+            hud_marks_on() ? "" : ", marks off");
         {  // (this fork, #37) what grows over a long session: malloc in use against its arena, and the containers
             // (this fork) no mallinfo here: it walks every free chunk with malloc's lock held, stalling every
             // allocating thread, and the heap fragments as the game plays (console, 10 min warp tour: 2,300 ->
@@ -1628,6 +1630,8 @@ int aniso_level() { return gfxdk::aniso_level(); }
 void set_aniso_level(int n) { gfxdk::set_aniso_level(n); }
 bool fxaa() { return gfxdk::fxaa_enabled(); }
 void set_fxaa(bool on) { gfxdk::set_fxaa(on); }
+bool fxaa_hud_marks() { return gfxdk::hud_marks_on(); }
+void set_fxaa_hud_marks(bool on) { gfxdk::set_hud_marks(on); }
 bool bloom() { return gfxdk::bloom_enabled(); }
 void set_bloom(bool on) { gfxdk::set_bloom(on); }
 bool distance_blur() { return gfxdk::blur_enabled(); }
@@ -1807,6 +1811,7 @@ const Backend& deko3d_backend() {
         b.set_aniso = gfxdk::set_aniso;
         b.fxaa = gfxdk::fxaa_enabled;
         b.set_fxaa = gfxdk::set_fxaa;
+        b.hud_mark = [](const uint32_t* regs) { gfxdk::hud_mark(regs); };
         b.feature_available = [](int f) { return f == render::kFeatureAniso || f == render::kFeatureFXAA; };
         return b;
     }();
