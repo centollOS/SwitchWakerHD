@@ -135,6 +135,8 @@ public partial class MainWindow : Window
         TxtOldD.Text = Str.Get("old_d", InstallEngine.WorkDir);
         TxtMmH.Text = Str.Get("mm_h");
         TxtMmD.Text = Str.Get("mm_d");
+        TxtHmH.Text = Str.Get("hm_h");
+        TxtHmD.Text = Str.Get("hm_d");
         BtnMmPick.Content = Str.Get("mm_pick");
         BtnMmFolder.Content = Str.Get("mm_folder");
         BtnMmClear.Content = Str.Get("fwd_clear");
@@ -387,6 +389,7 @@ public partial class MainWindow : Window
         ptbrDownload = c.PtbrDownload;
         ChkShaders.IsChecked = c.PrepareShaders;
         ChkOldBuilds.IsChecked = c.RemoveOldBuilds;
+        ChkHdMinimap.IsChecked = c.HdMinimap;
         ValidateGame();
         ShowKeys();
         ShowMinimap();
@@ -437,6 +440,7 @@ public partial class MainWindow : Window
         engine.GameArg  = GameArg();
         engine.ForwarderKeys = keysPath != null && File.Exists(keysPath) ? keysPath : null;
         engine.MinimapGame = minimapGame;
+        engine.HdMinimap = ChkHdMinimap.IsChecked == true;
         engine.PtbrDownload = ptbrDownload;
         engine.PrepareShaders = ChkShaders.IsChecked == true;
         engine.RemoveOldBuilds = ChkOldBuilds.IsChecked == true;
@@ -690,6 +694,8 @@ public partial class MainWindow : Window
         TxtFwdDone.Foreground = (Brush)FindResource(nspFresh ? "Fg" : "Warn");
         TxtMmDone.Visibility = minimapGame != null ? Visibility.Visible : Visibility.Collapsed;
         TxtMmDone.Text = Str.Get("mm_done");
+        TxtHmDone.Visibility = ChkHdMinimap.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        TxtHmDone.Text = Str.Get("hm_done");
         TxtPtDone.Visibility = ptbrDownload != null ? Visibility.Visible : Visibility.Collapsed;
         TxtPtDone.Text = Str.Get("ptbr_done");
         TxtGameFilesDone.Visibility = engine.BadGameFiles > 0 ? Visibility.Visible : Visibility.Collapsed;

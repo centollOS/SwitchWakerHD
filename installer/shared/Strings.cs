@@ -99,6 +99,10 @@ static partial class Str
         ["mm_pre"]         = ("Minimapa: Wind Waker de GameCube en {0}",              "Minimap: GameCube Wind Waker at {0}"),
         ["mm_no_game"]     = ("No se encuentra el Wind Waker de GameCube elegido para el minimapa: {0}. Elígelo otra vez o quítalo.",
                                "The GameCube Wind Waker chosen for the minimap is not there: {0}. Choose it again or remove it."),
+        // The HD minimap (#121: a code mod built into the game, make_sd.py --guest-mod hd-minimap; off by default)
+        ["hm_h"]           = ("Minimapa HD (opcional)",                               "HD minimap (optional)"),
+        ["hm_d"]           = ("Añade un minimapa en una esquina de la pantalla con los mapas del propio juego HD (los del GamePad): islas, plantas de las mazmorras y cartas del tesoro mientras navegas. Basado en Minimap HD de Chironeyes. No necesita nada más: el mod se descarga del catálogo de mods.",
+                               "Adds a minimap in a corner of the screen with the HD game's own maps (the GamePad's): islands, dungeon floors and treasure charts while sailing. Based on Minimap HD by Chironeyes. It needs nothing else: the mod is downloaded from the mod catalogue."),
         // Brazilian Portuguese: Triforce-Heroes' fan translation, downloaded by the player (make_sd.py --ptbr,
         // docs/ptbr-translation-plan.md)
         ["ptbr_h"]         = ("Traducción al portugués de Brasil (opcional)",          "Brazilian Portuguese translation (optional)"),
@@ -147,6 +151,8 @@ static partial class Str
         ["mm_building"]    = ("Preparando el minimapa a partir de tu Wind Waker de GameCube...", "Preparing the minimap from your GameCube Wind Waker..."),
         ["mm_done"]        = ("Minimapa: sale en el mar, en las zonas con carta. Sus opciones (posición, tamaño, opacidad, estilo) están en el juego: mantén Menos > Mods > Built-in, al final.",
                                "Minimap: it shows on the sea, in the sectors with a chart. Its options (position, size, opacity, style) are in the game: hold Minus > Mods > Built-in, at the end."),
+        ["hm_done"]        = ("Minimapa HD: la cruceta a la izquierda lo muestra u oculta, a la derecha cambia su tamaño. Sus opciones (posición, tamaños, opacidad, botones) están en el juego: mantén Menos > Mods > Built-in, al final.",
+                               "HD minimap: D-pad left shows or hides it, right changes its size. Its options (position, sizes, opacity, buttons) are in the game: hold Minus > Mods > Built-in, at the end."),
         ["hint_minimap"]   = ("Lo que falló es el minimapa (la línea guest_mods de arriba). Para instalar sin él: cierra el instalador, ábrelo otra vez y deja el minimapa sin elegir (lo ya descargado se aprovecha).",
                                "What failed is the minimap (the guest_mods line above). To install without it: close the installer, open it again and leave the minimap unchosen (what was downloaded is kept)."),
         ["fwd_h"]          = ("Icono en el menú HOME (opcional)",                    "HOME-screen icon (optional)"),

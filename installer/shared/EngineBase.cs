@@ -53,6 +53,10 @@ abstract partial class EngineBase
     // downloads the mod from the mod catalogue and builds it into the game (INSTALL.md, "Optional: code mods").
     public string? MinimapGame;
     public const string MinimapMod = "gc-minimap";
+    // Optional: the HD minimap (issue #121), a code mod drawn with the HD game's own GamePad map art, so it needs no
+    // other game: make_sd.py --guest-mod hd-minimap (INSTALL.md, "Optional: code mods"). Off unless the player ticks it.
+    public bool HdMinimap;
+    public const string HdMinimapMod = "hd-minimap";
     // Optional: Triforce-Heroes' Brazilian Portuguese fan translation as the player downloaded it (.rar, its folder or
     // its .pack): make_sd.py --ptbr rebuilds it on the player's own English pack (docs/ptbr-translation-plan.md).
     public string? PtbrDownload;
@@ -503,7 +507,8 @@ abstract partial class EngineBase
         if (pinnedToolchain != null) env["WWHD_TOOLCHAIN_DIR"] = ToolchainDir;
         var tail = new Queue<string>();
         var forwarder = ForwarderKeys != null ? " --keys " + Quote(ForwarderKeys) : " --no-forwarder";
-        var minimap = MinimapGame != null ? $" --guest-mod {MinimapMod} --gc-game {Quote(MinimapGame)}" : "";
+        var minimap = (MinimapGame != null ? $" --guest-mod {MinimapMod} --gc-game {Quote(MinimapGame)}" : "")
+                    + (HdMinimap ? $" --guest-mod {HdMinimapMod}" : "");
         // the Portuguese translation, with a release whose make_sd.py knows it (an older one: installed without it)
         var ptbr = "";
         if (PtbrDownload != null)

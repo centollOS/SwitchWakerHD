@@ -130,3 +130,41 @@ D (installer build; a Windows run by the user).
   not on PATH) when no Python has `compression.zstd`; a `guest_mods:` line goes into the error box with its hint; the
   done page says where the options are. Built on macOS with the .NET 8 SDK (`EnableWindowsTargeting`): no warnings or
   errors; `IsZstdRvz` run against the test headers and the ISO. Not run on Windows (the user's test).
+
+## The HD minimap (issue #121, 2026-11-08)
+
+`hd-minimap` 0.2.5 from the catalogue (upstream's code-mod port of Chironeyes' Minimap HD Cemu pack): no setup step,
+no GameCube disc; it draws the HD game's own GamePad map art through the layout-art services (`WWHD_HUD_GAME`,
+`layout-pane:` / `layout-texture:`, game_layouts.cpp) and the map/HUD bridge (docs/mod-sdk-map-hud.md).
+
+- **Build.** `make_sd.py --guest-mod hd-minimap` needs no change: 29 functions, 2 return hooks (`0240EBB0`
+  daPy_Execute and `02699094`, EU `0240EBB4` / `02699798`), module 81,536 bytes + 256 KiB heap at `7F000000-7F060000`.
+  USA and EU NROs build and link (native devkitA64 GCC 16.1).
+- **Console (EU, handheld, CPU 1020 / GPU 384 MHz, the `[dk] clocks` line checked; on battery).** The log:
+  `loaded hd-minimap (built into the NRO) (translator guestmod-0.3)`, no HUD or texture errors. Windfall: the island
+  map with Link and the wind arrow, the D-pad icons beside the HUD's D-pad; D-pad left hides it. Forbidden Woods and
+  Dragon Roost Cavern: the floor plan with Link, the floor-change markers. Great Sea at the Tower of the Gods: the
+  game's compasses (no map buttons in that sector, as the mod's README says). Pause menu: hidden. Sailing into the Tower
+  (stage change, its cutscene): no error. Not checked: a treasure chart while sailing (no other sector reached by boat
+  in that session).
+- **Cost.** The user chose a single deploy (no `perf_test.py ab`), so it was measured inside the boot: a throwaway
+  patch timed the hook chains (`ppc_mod_run`), the HUD callback (`draw_frame`) and the overlay's guest HUD
+  (`overlay::guesthud::frame`) with `armGetSystemTick`, printed every 300 logic steps, during `perf_test.py run`
+  (900 frames a scene, a build without PGO: the release profile is for GCC 15.2).
+
+  | Scene | hooks µs/step | HUD callback µs | overlay µs | main ms (whole frame) |
+  |---|---|---|---|---|
+  | windfall (island map) | 105 | 120-135 | 33 | 33.1 |
+  | sea_totg (compasses) | 103 | 40-46 | 0 | 18.7 |
+  | forbidden (dungeon plan) | 85 | 177-185 | 62-68 | 17.2 |
+  | lava (dungeon plan) | 85 | 188-204 | 71-74 | 33.2 |
+
+  At most ~0.36 ms of a 33 ms main thread (~1%, about 0.3 fps where the main thread is the limit). The largest single
+  step after a state load was 110-285 ms in the HUD callback: the first load of a map picture (decoding the 2D pack's
+  texture, Lanczos-3 enlargement for the smooth island maps) runs on the game thread; in the recordings themselves no
+  step went over 1 ms.
+- **Installers.** An "HD minimap (optional)" box on the game page (off by default; saved with the other choices),
+  `--guest-mod hd-minimap`; strings in Spanish, English and Portuguese.
+- **With gc-minimap.** Both hook daPy_Execute's return (chained) and get consecutive guest regions, but both default
+  to the bottom-left corner (gc-minimap 0.3.1: x 6, y 18, size 225; hd-minimap: x 12, y 20, size 190) and both draw
+  on the sea and in dungeons: on together they overlap unless one is moved in the options.

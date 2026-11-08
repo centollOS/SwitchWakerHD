@@ -25,7 +25,9 @@ the PC.
    DBI (*Browse SD card > NSP > wwhd_forwarder.nsp > Install*; it needs current Atmosphère sigpatches).
    Optional, the **GameCube sea minimap**: choose your own GameCube Wind Waker (`.iso`, `.gcm`, `.rvz` or its
    folder); the installer downloads the mod and builds it into the game
-   ([details](#optional-code-mods-the-gamecube-sea-minimap)).
+   ([details](#optional-code-mods-the-minimaps)).
+   Optional, the **HD minimap**: tick its box; it needs nothing else
+   ([details](#optional-code-mods-the-minimaps)).
    Optional, **Brazilian Portuguese**: download Triforce-Heroes' fan translation yourself from
    [their page](https://triforce-heroes.com.br/traducoes/the-legend-of-zelda-the-wind-waker-hd) (the *Emulador*
    version) and choose the downloaded `.rar` (or the folder you extracted it to)
@@ -230,9 +232,31 @@ build/sd/switch/wwhd/
 └── game/                 your game's files
 ```
 
-### Optional: code mods (the GameCube sea minimap)
+### Optional: code mods (the minimaps)
 
-The GameCube sea minimap draws a GameCube-style chart of the Great Sea in a corner of the screen. It needs **two
+Two minimaps from the mod catalogue can be built into the game. Both are off unless you choose them.
+
+**The HD minimap** (`hd-minimap`, based on [Minimap HD](https://github.com/Chironeyes/The.Wind.Waker.HD-Minimap.HD) by
+Chironeyes) draws a minimap in the bottom-left corner with the HD game's own GamePad maps: the island of the sea square
+you are in, the floor plan of a dungeon once you have its map, and while sailing (D-pad down) a treasure chart you own.
+It reads the maps from your own game while it runs, so it needs nothing besides your Wind Waker HD. In the
+[Easy Installer](#windows-easy-installer-recommended), tick *HD minimap*; with `make_sd.py`:
+
+```sh
+python3 tools/switch/make_sd.py --game-dir /path/to/10143500 --guest-mod hd-minimap
+```
+
+- On foot, D-pad left shows or hides it and D-pad right makes it bigger or smaller; in a dungeon, D-pad down zooms.
+  On the boat, D-pad left and right stay the cannon and the grappling hook, and D-pad down switches between the
+  compasses, the minimap and the minimap with a chart. It hides in menus, cutscenes and first person.
+- Its options (position, both sizes, opacity, fading, the buttons) are in the game: hold **Minus** > **Mods** >
+  **Built-in**, at the bottom; then close the game and start it again. Or `--mod-option hd-minimap.size=220` when
+  you build.
+- Cost on the console (EU, handheld, stock 1020 MHz CPU, 2026-11-08): about 0.15-0.4 ms of the main thread's
+  33 ms per frame, and a pause of a few tenths of a second when a new map picture is first loaded (a new island or
+  floor, mostly while the screen fades).
+
+**The GameCube sea minimap** draws a GameCube-style chart of the Great Sea in a corner of the screen. It needs **two
 things besides your Wind Waker HD**:
 
 - **Your own GameCube Wind Waker** (USA, Europe or Japan): a disc image (`.iso`, `.gcm`, `.rvz`) or its extracted

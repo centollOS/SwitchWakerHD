@@ -123,6 +123,16 @@
               </StackPanel>
             </Border>
 
+            <!-- Optional: the HD minimap (#121, a code mod built into the game; off unless ticked) -->
+            <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
+              <StackPanel>
+                <CheckBox x:Name="ChkHdMinimap" IsChecked="False" Margin="0,0,0,4">
+                  <TextBlock x:Name="TxtHmH" FontWeight="SemiBold"/>
+                </CheckBox>
+                <TextBlock x:Name="TxtHmD" Classes="dim" FontSize="13" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
+
             <!-- Optional: Brazilian Portuguese (the player's own download of Triforce-Heroes' fan translation) -->
             <Border Background="{StaticResource Card}" CornerRadius="8" Padding="16,12" Margin="0,22,0,0">
               <StackPanel>
@@ -269,6 +279,7 @@
                 <TextBlock x:Name="TxtNext4" Classes="dim"/>
                 <TextBlock x:Name="TxtFwdDone" Margin="0,4,0,0" IsVisible="False"/>
                 <TextBlock x:Name="TxtMmDone" Margin="0,4,0,0" IsVisible="False"/>
+                <TextBlock x:Name="TxtHmDone" Margin="0,4,0,0" IsVisible="False"/>
                 <TextBlock x:Name="TxtPtDone" Margin="0,4,0,0" IsVisible="False"/>
                 <TextBlock x:Name="TxtGameFilesDone" Margin="0,4,0,0" TextWrapping="Wrap" IsVisible="False"/>
               </StackPanel>
