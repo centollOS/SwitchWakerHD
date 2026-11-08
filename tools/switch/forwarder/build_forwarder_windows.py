@@ -160,7 +160,7 @@ def main():
         tool_env = build_switch.clean_env(dkp)
     need = {} if pinned else {"devkitA64": DKP + "/devkitA64/bin/aarch64-none-elf-gcc" + EXE, "libnx": DKP + "/libnx/lib/libnx.a",
             "npdmtool (switch-tools)": DKP + "/tools/bin/npdmtool" + EXE}
-    if WINDOWS:
+    if WINDOWS and not pinned:  # (the pinned build runs no MSYS2: #122)
         need.update({"devkitPro MSYS2": DKP + "/msys2/usr/bin/bash.exe", "gcc in MSYS2 (pacman -S gcc)": DKP + "/msys2/usr/bin/gcc.exe"})
     missing = [n for n, p in need.items() if not os.path.exists(p)]
     if not WINDOWS and not pinned:
