@@ -135,6 +135,8 @@ public partial class MainWindow : Window
         ShowKeys();
         TxtShH.Text = Str.Get("sh_h");
         TxtShD.Text = Str.Get("sh_d");
+        TxtOldH.Text = Str.Get("old_h");
+        TxtOldD.Text = Str.Get("old_d", DesktopEngine.WorkDir);
         TxtMmH.Text = Str.Get("mm_h");
         TxtMmD.Text = Str.Get("mm_d");
         BtnMmPick.Content = Str.Get("mm_pick");
@@ -420,6 +422,7 @@ public partial class MainWindow : Window
         minimapGame = c.MinimapGame;
         ptbrDownload = c.PtbrDownload;
         ChkShaders.IsChecked = c.PrepareShaders;
+        ChkOldBuilds.IsChecked = c.RemoveOldBuilds;
         ValidateGame();
         ShowKeys();
         ShowMinimap();
@@ -472,6 +475,7 @@ public partial class MainWindow : Window
         engine.MinimapGame = minimapGame;
         engine.PtbrDownload = ptbrDownload;
         engine.PrepareShaders = ChkShaders.IsChecked == true;
+        engine.RemoveOldBuilds = ChkOldBuilds.IsChecked == true;
         running = true; failed = false;
         cts = new CancellationTokenSource();
         for (int i = 0; i < stepStates.Length; i++) SetStep(i, StepState.Pending);

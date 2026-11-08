@@ -92,6 +92,14 @@ static partial class Str
         // Prepared graphics (issue #88: the release's shader template, make_sd.py --shaders)
         ["sh_h"]           = "Preparar os gráficos agora",
         ["sh_d"]           = "Compila os gráficos do jogo neste computador a partir dos seus próprios arquivos, para que o console não precise fazer isso na primeira vez: sem tela de carregamento e sem lugares pretos. Leva alguns minutos a mais.",
+        // Older builds (#120)
+        ["old_h"]          = "Apagar as versões anteriores",
+        ["old_d"]          = "Quando a nova versão terminar bem, apaga as pastas das versões anteriores que este instalador deixou em {0} (de 5 a 10 GB cada uma). Seus arquivos do jogo e o cartão SD não são tocados.",
+        ["old_removing"]   = "Apagando as versões anteriores...",
+        ["old_removed"]    = "Versões anteriores apagadas: {0} ({1} GB liberados).",
+        ["old_toolchains"] = "ferramentas de versões anteriores",
+        ["old_kept"]       = "Mantendo {0}: contém arquivos que você escolheu para esta instalação.",
+        ["old_fail"]       = "Não foi possível apagar {0} ({1}); você pode apagá-lo manualmente.",
         ["shaders_downloading"] = "Baixando o modelo de gráficos...",
         ["shaders_ready"]  = "Modelo de gráficos pronto.",
         ["shaders_none"]   = "Esta versão não traz modelo de gráficos: o console vai compilá-los na primeira vez, como sempre.",

@@ -19,6 +19,7 @@ sealed class SavedChoices
     public string? MinimapGame;
     public string? PtbrDownload;
     public bool PrepareShaders = true;
+    public bool RemoveOldBuilds = true;   // (#120)
     public string Release = "";           // the release that build made
 
     public const string FileName = "installer-choices.txt";
@@ -43,6 +44,7 @@ sealed class SavedChoices
                     case "minimap_game": c.MinimapGame = v == "" ? null : v; break;
                     case "ptbr_download": c.PtbrDownload = v == "" ? null : v; break;
                     case "prepare_shaders": c.PrepareShaders = v == "1"; break;
+                    case "remove_old_builds": c.RemoveOldBuilds = v == "1"; break;
                     case "release": c.Release = v; break;
                 }
             }
@@ -62,6 +64,7 @@ sealed class SavedChoices
         Put("minimap_game", MinimapGame);
         Put("ptbr_download", PtbrDownload);
         Put("prepare_shaders", PrepareShaders ? "1" : "0");
+        Put("remove_old_builds", RemoveOldBuilds ? "1" : "0");
         Put("release", Release);
         var path = Path.Combine(work, FileName);
         File.WriteAllText(path + ".part", sb.ToString(), new UTF8Encoding(false));
@@ -131,7 +134,8 @@ abstract partial class EngineBase
             new SavedChoices
             {
                 GamePath = GamePath, GameArg = GameArg, ForwarderKeys = ForwarderKeys, MinimapGame = MinimapGame,
-                PtbrDownload = PtbrDownload, PrepareShaders = PrepareShaders, Release = releaseVer,
+                PtbrDownload = PtbrDownload, PrepareShaders = PrepareShaders, RemoveOldBuilds = RemoveOldBuilds,
+                Release = releaseVer,
             }.Save(Work);
         }
         catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
