@@ -160,9 +160,18 @@ no GameCube disc; it draws the HD game's own GamePad map art through the layout-
   | lava (dungeon plan) | 85 | 188-204 | 71-74 | 33.2 |
 
   At most ~0.36 ms of a 33 ms main thread (~1%, about 0.3 fps where the main thread is the limit). The largest single
-  step after a state load was 110-285 ms in the HUD callback: the first load of a map picture (decoding the 2D pack's
-  texture, Lanczos-3 enlargement for the smooth island maps) runs on the game thread; in the recordings themselves no
-  step went over 1 ms.
+  step after a state load was 110-285 ms in the HUD callback: the island map's enlargement (below, fixed); in the
+  recordings themselves no step went over 1 ms.
+- **Stutters (the owner's report: "a stutter until it's drawn", and when the game starts).** Timed on the console
+  (`[layouts-timing]`, a throwaway patch in game_layouts.cpp), all on the game's main thread in the port's layout-art
+  loader, none in the mod: the first use read the whole 12 MB 2D pack through an `istreambuf_iterator` and copied every
+  member (2313 ms, at the file select, for the port's own file-select quit button art); each island map's 3x Lanczos
+  enlargement took 236-238 ms, again every time the mod showed the map (it releases the picture when hidden). Fixed in
+  `game_layouts.cpp` (marked fork changes): only the pack's index is read (then each member from the file), the six
+  Lanczos taps are computed once per phase and the sharpening blur is a running sum (the same picture within one level
+  of rounding: 193 of 6.5 million bytes differ, by 1), and the finished pictures are kept (up to 4 MiB). On the console:
+  pack index 1.3 ms, the file-select art ~65 ms in all, an island map 35.9 ms the first time (one 94 ms frame) and
+  0.2 ms after; textures from the real EU pack are byte-identical to before except the enlarged ones.
 - **Installers.** An "HD minimap (optional)" box on the game page (off by default; saved with the other choices),
   `--guest-mod hd-minimap`; strings in Spanish, English and Portuguese.
 - **With gc-minimap.** Both hook daPy_Execute's return (chained) and get consecutive guest regions, but both default

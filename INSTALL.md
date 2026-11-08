@@ -255,8 +255,7 @@ python3 tools/switch/make_sd.py --game-dir /path/to/10143500 --guest-mod hd-mini
   **Built-in**, at the bottom; then close the game and start it again. Or `--mod-option hd-minimap.size=220` when
   you build.
 - Cost on the console (EU, handheld, stock 1020 MHz CPU, 2026-11-08): about 0.15-0.4 ms of the main thread's
-  33 ms per frame, and a pause of a few tenths of a second when a new map picture is first loaded (a new island or
-  floor, mostly while the screen fades).
+  33 ms per frame, and one longer frame (under 0.1 s) the first time an island's map is shown in a session.
 
 **The GameCube sea minimap** draws a GameCube-style chart of the Great Sea in a corner of the screen. It needs **two
 things besides your Wind Waker HD**:
