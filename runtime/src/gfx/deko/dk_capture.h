@@ -64,6 +64,12 @@ void capture_present(const DkImage& window, uint32_t ww, uint32_t wh, const Pres
 // any thread: the frame of the last capture whose files are all written or failed (0: none yet)
 uint64_t capture_done_frame();
 
+// (this fork, #67) lockstep frame hashes (lockstep.h), render thread after a present's submit: the stored bytes of
+// s's level 0 layer 0 copied back (waits for the GPU) and hashed; false: no image or no readback
+bool capture_hash_image(Surface* s, uint64_t& hash, uint16_t* tiles = nullptr);  // tiles: 8x8 grid (lockstep::kTiles)
+// the hash's readback block freed (the run is over)
+void capture_hash_release();
+
 // surfaces.cpp: level 0, layer 0 of s's guest data as upload_surface stages it (detiled and converted to
 // s->fmt.image's layout, rows of blocks without padding); changed: the guest data no longer hashes as it
 // did at the last upload (the GPU holds older data). False for a GPU-written surface or one without image.
