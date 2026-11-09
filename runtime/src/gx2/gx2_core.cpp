@@ -53,6 +53,7 @@
 #include "platform/perf_hint.h"
 #include "platform/thread_sampler.h"
 #include "render_prof.h"
+#include "lockstep.h"
 
 using namespace Latte;
 
@@ -1224,6 +1225,7 @@ static void execute_op(Op op, const uint32* p, uint32 n) {
         g_q_done_cv.notify_all();
         break;
     }
+    case OP_LOCKSTEP: lockstep::render_tag(p, n); break;  // (this fork, #67)
     default: break;
     }
 }
@@ -1789,6 +1791,11 @@ HLE(gx2, GX2SwapScanBuffers) {
             LOG("[test] capture at loaded %s +%llu (game counter %08X), full pass",
                 captureStep ? "logic step" : "game counter",(unsigned long long)offset,counter);
         }
+    }
+    // (this fork, #67) lockstep frame hashes: this logic step's picture is hashed (the tag goes before its swap)
+    if (!hold && lockstep::armed()) {
+        uint32_t t[lockstep::kTagWords];
+        if (lockstep::game_swap(steps, t)) emit_host(OP_LOCKSTEP, {t[0], t[1], t[2], t[3], t[4], t[5]});
     }
     static const bool observeSwap = present_observer::enabled();
     uint64_t observedSwap = 0;

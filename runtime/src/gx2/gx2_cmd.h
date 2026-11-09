@@ -53,6 +53,9 @@ enum Op : uint32_t {
     // (this fork, round 45) single-register writes merged by the staging buffer: register, value, register,
     // value... (after upstream's ops, which keep their numbers)
     OP_SET_REG_PAIRS,
+    // (this fork, #67) host-only, never recorded: lockstep frame hashes (lockstep.h), the tag of the swap that
+    // follows (logic step after the seeded arrival, mTimer, cM_rnd's seeds, run); sent only while a run is armed
+    OP_LOCKSTEP,
     OP_COUNT
 };
 

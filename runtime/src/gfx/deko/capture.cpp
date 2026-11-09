@@ -25,6 +25,8 @@
 #include "dk_capture.h"
 #include "dk_draw.h"
 #include "dk_surfaces.h"
+#include "lockstep.h"
+#include "platform/host.h"
 #include "runtime.h"
 
 Latte::E_GX2SURFFMT LatteTexture_ReconstructGX2Format(const Latte::LATTE_SQ_TEX_RESOURCE_WORD1_N&,
@@ -950,5 +952,82 @@ void capture_present(const DkImage& window, uint32_t ww, uint32_t wh, const Pres
 }
 
 uint64_t capture_done_frame() { return g_doneFrame.load(std::memory_order_acquire); }
+
+// ---------------------------------------------------------------- lockstep frame hashes (lockstep.h)
+namespace {
+ReadbackBlock g_hashBlock;  // kept from the first hashed frame to capture_hash_release
+}
+
+bool capture_hash_image(Surface* s, uint64_t& hash, uint16_t* tiles) {
+    hash = 0;
+    if (!s || !s->img.valid) return false;
+    const size_t n = linear_bytes(s->fmt.image, s->img.pw, s->img.ph);
+    if (!n || n > ReadbackBlock::kSize) {
+        static int logged = 0;
+        if (logged++ < 4)
+            LOG("[lockstep] the TV picture (%ux%u %s) cannot be read back: not hashed", s->img.pw, s->img.ph,
+                dk_name(s->fmt.image).c_str());
+        return false;
+    }
+    if (!g_hashBlock.storage && !g_hashBlock.create()) return false;
+    if (dkQueueIsInErrorState(R.queue)) return false;
+    ReadbackBlock& rb = g_hashBlock;
+    dkCmdBufClear(rb.cmd);
+    dkCmdBufAddMemory(rb.cmd, rb.cmdMem, 0, ReadbackBlock::kCmdSize);
+    dkCmdBufBarrier(rb.cmd, DkBarrier_Full, DkInvalidateFlags_Image);
+    DkImageView v;
+    dkImageViewDefaults(&v, &s->img.image);
+    const DkImageRect rect = {0, 0, 0, s->img.pw, s->img.ph, 1};
+    const DkCopyBuf dst = {dkMemBlockGetGpuAddr(rb.mem), 0, 0};
+    dkCmdBufCopyImageToBuffer(rb.cmd, &v, &rect, &dst, 0);
+    dkCmdBufBarrier(rb.cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
+    {
+        Stage stage("deko3d: lockstep readback");
+        dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(rb.cmd));
+        dkQueueWaitIdle(R.queue);
+    }
+    if (dkQueueIsInErrorState(R.queue)) return false;
+    dkMemBlockFlushCpuCache(rb.mem, 0, uint32_t(n));
+    const uint8_t* cpu = static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(rb.mem));
+    hash = lockstep::hash_bytes(cpu, n, (uint64_t(s->img.pw) << 32) | s->img.ph);
+    const bool rgb10 = s->fmt.image == DkImageFormat_RGB10A2_Unorm;
+    if (tiles && (rgb10 || s->fmt.image == DkImageFormat_RGBA8_Unorm) && n == size_t(s->img.pw) * s->img.ph * 4) {
+        static uint32_t dumped = 0;  // (diagnostic, "bench hash ... mem") the first hashed picture of each run, as a PNG
+        if (lockstep::dump_wanted()) {
+            std::vector<uint8_t> rgba(cpu, cpu + n);
+            for (size_t i = 0; i < n; i += 4) {
+                if (rgb10) {
+                    uint32_t v;
+                    memcpy(&v, cpu + i, 4);
+                    rgba[i] = uint8_t((v & 0x3FF) >> 2), rgba[i + 1] = uint8_t(((v >> 10) & 0x3FF) >> 2);
+                    rgba[i + 2] = uint8_t(((v >> 20) & 0x3FF) >> 2);
+                }
+                rgba[i + 3] = 255;
+            }
+            const std::string path = host::config_dir() + "/lockstep_" + std::to_string(dumped++ % 4) + ".png";
+            LOG("[lockstep] the picture to %s: %s", path.c_str(), write_png(path, s->img.pw, s->img.ph, rgba) ? "written" : "failed");
+        }
+    }
+    if (tiles) {  // (diagnostic) where in the picture: a small hash per tile of an 8x8 grid, rows of n / ph bytes
+        const size_t pitch = n / s->img.ph;
+        for (uint32_t ty = 0; ty < 8; ty++)
+            for (uint32_t tx = 0; tx < 8; tx++) {
+                const uint32_t y0 = s->img.ph * ty / 8, y1 = s->img.ph * (ty + 1) / 8;
+                const size_t x0 = pitch * tx / 8, x1 = pitch * (tx + 1) / 8;
+                uint64_t h = 0;
+                for (uint32_t y = y0; y < y1; y++) h = lockstep::hash_bytes(cpu + y * pitch + x0, x1 - x0, h);
+                tiles[ty * 8 + tx] = uint16_t(h ^ (h >> 16) ^ (h >> 32) ^ (h >> 48));
+            }
+    }
+    forget_state();  // (another command buffer ran on the queue)
+    return true;
+}
+
+void capture_hash_release() {
+    if (!g_hashBlock.storage) return;
+    dkQueueWaitIdle(R.queue);
+    g_hashBlock.destroy();
+    LOG("[lockstep] readback block freed");
+}
 
 }  // namespace gfxdk
