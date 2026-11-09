@@ -332,6 +332,14 @@ void update() {
         axis(-s.ly, kPadLSUp, kPadLSDown);  // stick up is +y on the Switch
         axis(s.rx, kPadRSLeft, kPadRSRight);
         axis(-s.ry, kPadRSUp, kPadRSDown);
+        // the virtual inputs (Jump anywhere, the moon jump: input::kVirt*) on their inputs of the mapping, L by
+        // default (Mapping::defaults), as the desktop hosts' controller_state gives them. The mods read only these
+        // bits since the upstream sync (daf1a05), never the game's L; without them neither ever started on the
+        // console (issue #141)
+        static Mapping map = current();
+        static uint32_t gen = generation();
+        if (const uint32_t g = generation(); g != gen) map = current(), gen = g;
+        s.virt = controller_state(map, v).virt;
     }
     // the console's touch screen (1280x720 panel) is the GamePad's while the window shows the GamePad picture
     if (gfxsw::gamepad_view()) {
