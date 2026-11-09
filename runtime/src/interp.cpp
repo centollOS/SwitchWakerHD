@@ -68,6 +68,8 @@ namespace interp {class NativeResumeBoundaryIssuer {public:static void after_ser
 #include "true60_steps.h"
 #include "gx2/gx2.h"
 #include "gfx/renderer.h"
+#include "mods/link_appearance.h"
+#include "mods/link_masks.h"
 
 
 extern "C" {
@@ -2036,6 +2038,7 @@ extern "C" void hook_0203593C(Cpu* c) {
     shader_wait::frame();  // (this fork) draws wait for their shaders while an item is shown (#49)
 #endif
     mods::shop_ship_service();  // the ships' way back to the sea (mods/shop_ship.h)
+    link_appearance::service();  // Link's colours for the save file played, nothing when none are chosen (mods/link_appearance.h)
     // the item ring: its equip, the game's pace while open (full logic passes, and true 60's half passes,
     // which also run Link), the ring drawn
     mods::item_ring_service(c, !enabled() || !g_hold_next, enabled() && g_hold_next && true60::enabled());
@@ -2434,7 +2437,9 @@ extern "C" void hook_025DE788(Cpu* c) {
     if (!interp::g_hold_frame) mods::instant_text_step();
     mods::after_execute(c, execute_fn);  // quick doors / fast scene changes: extra steps (full passes only)
     if (!interp::g_hold_frame) {guestmods::frame(interp::g_logic_steps);guestmods::logic_service(c);editor::logic_service(c);mods::packages::frame(interp::g_logic_steps);}
+    if (!interp::g_hold_frame) link_masks::frame();  // the WWHD_LINK_COLOURS test aid (mods/link_masks.h)
     editor::camera_service(c, !interp::g_hold_frame);  // the fly camera: every logic pass, and true 60's 60 Hz passes
+    link_appearance::logic_service(c, !interp::g_hold_frame);  // the colour page's close camera (mods/link_appearance.h)
     if(!interp::g_hold_frame)guestmods::maphud::finish_logic();
     guestmods::draw_frame(c,interp::executed_steps());
     g_in_execute = false;
