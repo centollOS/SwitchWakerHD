@@ -1213,10 +1213,11 @@ static void execute_op(Op op, const uint32* p, uint32 n) {
     case OP_LAYOUT_ROOT: {
         float kx, ky;
         aspect::layout_root_target(p[0], render::target_aspect_factors(g_regs[mmCB_COLOR0_TILE] & 0xFFFF, g_regs[mmCB_COLOR0_FRAG], kx, ky));
+        // (this fork, #58) a layout begins in the bound target: the renderer's HUD start (deko3d's FXAA)
         if (render::g_backend->hud_mark) render::g_backend->hud_mark(g_regs);
         break;
     }
-    case OP_HUD_MARK:
+    case OP_HUD_MARK:  // (this fork, #58) the same, emitted at 16:9 while FXAA is on (aspect.cpp)
         if (render::g_backend->hud_mark) render::g_backend->hud_mark(g_regs);
         break;
     case OP_SETUP_CONTEXT:

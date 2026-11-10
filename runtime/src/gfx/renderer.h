@@ -157,6 +157,10 @@ inline void gpu_idle() { if (g_backend->gpu_idle) g_backend->gpu_idle(); else g_
 inline void write_back() { if (g_backend->write_back) g_backend->write_back(); }
 inline void ss_reset() { g_backend->ss_reset(); }
 uint64_t frame_count();  // 0 before the renderer started
+// (this fork, #58) the renderer takes the game's HUD marks (Backend::hud_mark) and FXAA is on: the layout hook
+// (aspect.cpp) emits OP_HUD_MARK only then. A function, so tests that link aspect.cpp without renderer.cpp take
+// fork_test_stubs.cpp's (false)
+bool hud_marks_wanted();
 inline void request_tv_dump(const std::string& path, int frames_ahead) { g_backend->request_tv_dump(path, frames_ahead); }
 inline void request_capture() { g_backend->request_capture(); }
 void shutdown();         // once, on the way out (Quit, window closed, WWHD_EXIT_AT_FRAME)
