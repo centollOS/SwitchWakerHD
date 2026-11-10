@@ -4,8 +4,10 @@
 // memory_init (main thread, before the render thread starts).
 #include "dk.h"
 #include "render_prof.h"
+#include "../../platform/cores_switch.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -305,7 +307,150 @@ FrameTable<UploadEntry> g_uploads;
 
 // Guest vertex and uniform data may not change between GX2Invalidate calls (or GX2DrawDone) while a
 // frame's draws can still read it, so an address uploaded once this frame is reused (gfx/gl)
-StreamSlice stream_guest(uint32_t addr, uint32_t size, uint32_t alignment, uint32_t zeroTail) {
+// ---- (issue #145) the copy thread. At the Outset village the render thread copies ~3 MB of guest vertex data a frame
+// into the stream (~1.6 ms of its ~39 ms in memcpy, on core 2 at 96%) while core 3 has room. A ring of
+// jobs written by the render thread alone; the copy thread and the render thread (at a finish) claim them one at a
+// time and count them done after their bytes are out (dsb st: the GPU reads the CPU-uncached stream memory after a
+// later submit). The copy thread spins a few microseconds for the next job, then sleeps; the render thread wakes it
+// only when it sleeps (the flag and the head are seq_cst on both sides, so no job is left behind a sleeping thread).
+// On where the process has core 3 (the HOME-menu forwarder's NPDM, cores_switch.h; the thread goes there): the
+// in-boot A/B there (2026-11-10, handheld, stock clocks) gave outset_village +0.34 fps (+-0.16), lava, Windfall, Dragon
+// Roost and the lookout unchanged. On core 0 (hbmenu, or WWHD_CORE3=0) it gained nothing (the copy thread waits
+// behind the host service threads there): off. WWHD_DK_ASYNC_COPY=0/1 ([dev]) decides instead.
+std::atomic<bool> g_asyncCopy{[] {
+    const char* e = getenv("WWHD_DK_ASYNC_COPY");
+    if (e && *e) return atoi(e) != 0;
+    return cores::core3();
+}()};
+namespace {
+struct CopyJob {
+    void* dst;
+    const void* src;
+    uint32_t size;
+};
+constexpr uint32_t kCopyJobs = 4096;      // (a power of two)
+constexpr uint32_t kAsyncMinBytes = 512;  // smaller copies stay on the render thread (the job costs more)
+CopyJob g_copyJobs[kCopyJobs];
+alignas(64) std::atomic<uint64_t> g_copyHead{0};   // jobs queued (render thread)
+alignas(64) std::atomic<uint64_t> g_copyClaim{0};  // jobs taken (copy thread, render thread)
+alignas(64) std::atomic<uint64_t> g_copyDone{0};   // jobs whose bytes are written
+alignas(64) std::atomic<bool> g_copySleeping{false};
+LEvent g_copyEvent;
+uint64_t g_copyFinished = 0;  // the head at the last finish (render thread)
+bool g_copyGaveUp = false;    // a finish timed out: the copy thread is not used again this session
+AsyncCopyStats g_copyStats;   // (render thread)
+
+void run_job(const CopyJob& j) {
+    memcpy(j.dst, j.src, j.size);
+    __asm__ volatile("dsb st" ::: "memory");
+}
+
+// claims and makes one job; false when there was none
+bool copy_one() {
+    uint64_t c = g_copyClaim.load(std::memory_order_relaxed);
+    while (c < g_copyHead.load(std::memory_order_acquire)) {
+        if (g_copyClaim.compare_exchange_weak(c, c + 1, std::memory_order_acquire, std::memory_order_relaxed)) {
+            run_job(g_copyJobs[c & (kCopyJobs - 1)]);
+            g_copyDone.fetch_add(1, std::memory_order_release);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool jobs_waiting() { return g_copyClaim.load(std::memory_order_seq_cst) < g_copyHead.load(std::memory_order_seq_cst); }
+
+void copy_thread_main(void*) {
+    const uint64_t spinTicks = armNsToTicks(3000);
+    for (;;) {
+        while (copy_one()) {}
+        const uint64_t until = armGetSystemTick() + spinTicks;
+        bool more = false;
+        while (!more && armGetSystemTick() < until) {
+            __asm__ volatile("yield");
+            more = jobs_waiting();
+        }
+        if (more) continue;
+        g_copySleeping.store(true, std::memory_order_seq_cst);
+        if (!jobs_waiting()) leventWait(&g_copyEvent, 50'000'000);  // (a timeout: never long asleep by mistake)
+        // libnx's leventWait returns at once, and does not clear an autoclear event, when the event is already
+        // signalled on entry (a signal sent while this thread was still spinning): cleared here, or every later wait
+        // returns at once and the thread spins at 0x2C (the first version hung the console that way on core 3).
+        // A signal lost by the clear is harmless: its job is visible to the copies below.
+        leventClear(&g_copyEvent);
+        g_copySleeping.store(false, std::memory_order_seq_cst);
+    }
+}
+
+bool copy_thread_start() {
+    static Thread thread;
+    leventInit(&g_copyEvent, false, true);
+    const char* e = getenv("WWHD_DK_ASYNC_COPY_CORE");  // (a test: another core)
+    const int core = e && *e ? std::clamp(atoi(e), 0, cores::allowed() ? 3 : 2) : cores::core3() ? 3 : 0;
+    // 0x2C, as the render thread (which waits for it at a finish); it runs while the render thread copies
+    const Result rc = threadCreate(&thread, copy_thread_main, nullptr, nullptr, 0x4000, 0x2C, core);
+    if (R_FAILED(rc) || R_FAILED(threadStart(&thread))) {
+        LOG("[dk] async copies: no copy thread (rc 0x%X): the render thread copies", rc);
+        return false;
+    }
+    LOG("[dk] async copies: copy thread on core %d (WWHD_DK_ASYNC_COPY)", core);
+    return true;
+}
+
+// a copy for the copy thread; false: the caller makes it (no thread, gave up, ring full)
+bool queue_copy(void* dst, const void* src, uint32_t size) {
+    if (g_copyGaveUp) return false;
+    static const bool up = copy_thread_start();
+    if (!up) return false;
+    const uint64_t head = g_copyHead.load(std::memory_order_relaxed);
+    // (the ring keeps every job since the last finish: a finish that times out makes them again)
+    if (head - g_copyFinished >= kCopyJobs) return false;
+    g_copyJobs[head & (kCopyJobs - 1)] = {dst, src, size};
+    g_copyHead.store(head + 1, std::memory_order_seq_cst);
+    g_copyStats.jobs++;
+    g_copyStats.bytes += size;
+    if (g_copySleeping.load(std::memory_order_seq_cst)) {
+        g_copyStats.wakes++;
+        leventSignal(&g_copyEvent);
+    }
+    return true;
+}
+}  // namespace
+
+void stream_copies_finish() {
+    const uint64_t head = g_copyHead.load(std::memory_order_relaxed);
+    if (g_copyGaveUp || g_copyDone.load(std::memory_order_acquire) == head) {
+        g_copyFinished = head;
+        return;
+    }
+    const uint64_t t0 = armGetSystemTick();
+    g_copyStats.finishes++;
+    while (copy_one()) g_copyStats.helped++;
+    const uint64_t deadline = t0 + armNsToTicks(20'000'000);
+    while (g_copyDone.load(std::memory_order_acquire) != head) {
+        if (armGetSystemTick() > deadline) {
+            // the copy thread did not finish its job in 20 ms: every job since the last finish again, here
+            for (uint64_t j = g_copyFinished; j < head; j++) run_job(g_copyJobs[j & (kCopyJobs - 1)]);
+            g_copyGaveUp = true;
+            g_asyncCopy = false;
+            LOG("[dk] async copies: the copy thread did not finish a copy within 20 ms; copies made here, async copies "
+                "off for this session");
+            break;
+        }
+        __asm__ volatile("yield");
+    }
+    g_copyFinished = head;
+    g_copyStats.waitNs += armTicksToNs(armGetSystemTick() - t0);
+}
+
+AsyncCopyStats async_copy_stats_take() {
+    const AsyncCopyStats s = g_copyStats;
+    g_copyStats = {};
+    return s;
+}
+
+namespace {
+StreamSlice guest_upload(uint32_t addr, uint32_t size, uint32_t alignment, uint32_t zeroTail, bool async) {
     const uint64_t key = uint64_t(addr) | uint64_t(alignment) << 32 | uint64_t(zeroTail) << 48;
     const uint64_t stamp = R.frame + 1;  // the frame being recorded
     const UploadEntry* e = g_uploads.find(key, stamp);
@@ -314,9 +459,27 @@ StreamSlice stream_guest(uint32_t addr, uint32_t size, uint32_t alignment, uint3
         return e->slice;
     }
     rprof::guest_read(rprof::Upload(rprof::g_upload_kind), addr, size);  // unique guest bytes (sampled frames)
-    const StreamSlice slice = stream_upload(mem::ptr(addr), size, alignment, zeroTail);
+    StreamSlice slice;
+    if (async && size >= kAsyncMinBytes && g_asyncCopy.load(std::memory_order_relaxed)) {
+        // (issue #145) as stream_upload, the copy by the copy thread
+        if (const StreamAlloc a = stream_alloc(size, alignment)) {
+            if (!queue_copy(a.cpu, mem::ptr(addr), size)) memcpy(a.cpu, mem::ptr(addr), size);
+            R.perf.streamBytes += size;
+            if (rprof::enabled()) rprof::add_upload(size);
+            slice = {a.gpu, size};
+        }
+    } else
+        slice = stream_upload(mem::ptr(addr), size, alignment, zeroTail);
     if (slice) g_uploads.put({key, stamp, R.streamGen, size, slice});
     return slice;
+}
+}  // namespace
+
+StreamSlice stream_guest(uint32_t addr, uint32_t size, uint32_t alignment, uint32_t zeroTail) {
+    return guest_upload(addr, size, alignment, zeroTail, false);
+}
+StreamSlice stream_guest_vertices(uint32_t addr, uint32_t size, uint32_t alignment) {
+    return guest_upload(addr, size, alignment, 0, true);
 }
 
 void image_tile_size_fix(DkImageLayoutMaker& m, uint32_t rows) {

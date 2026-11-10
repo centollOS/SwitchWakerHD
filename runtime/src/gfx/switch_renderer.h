@@ -62,6 +62,7 @@ enum DrawOpt : int {
     // (WWHD_DK_TARGET_MEMO2), the fixed state in three memos (WWHD_DK_FIXED_MEMO), vertex states by layout identity
     // (WWHD_DK_VTX_IDENTITY)
     kOptTargetMemo2, kOptFixedMemo, kOptVtxIdentity,
+    kOptAsyncCopy,  // (issue #145) the draws' vertex copies on a copy thread (WWHD_DK_ASYNC_COPY; on with core 3)
     kDrawOpts
 };
 // shader compile threads for the shaders draws ask for (gfx/deko/shaders_dk.cpp helper_main): 0 auto (the default:

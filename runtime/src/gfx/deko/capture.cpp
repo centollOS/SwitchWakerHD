@@ -683,6 +683,7 @@ bool run_batch(ReadbackBlock& rb, std::vector<Readback*>& batch, uint64_t& bytes
     dkCmdBufBarrier(rb.cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
     {
         Stage stage("deko3d: capture readback");
+        stream_copies_finish();  // (issue #145) the copy thread's bytes before the GPU can read them
         dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(rb.cmd));
         dkQueueWaitIdle(R.queue);
     }
@@ -983,6 +984,7 @@ bool capture_hash_image(Surface* s, uint64_t& hash, uint16_t* tiles) {
     dkCmdBufBarrier(rb.cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
     {
         Stage stage("deko3d: lockstep readback");
+        stream_copies_finish();  // (issue #145) the copy thread's bytes before the GPU can read them
         dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(rb.cmd));
         dkQueueWaitIdle(R.queue);
     }

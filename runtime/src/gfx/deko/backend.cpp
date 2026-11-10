@@ -861,6 +861,7 @@ struct GpuPasses {
         // sent now: the GPU writes it when it is done with the previous frame's work, not when the first pass
         // is submitted (what lies between is the GPU idle at the frame's start)
         check_queue("the GPU pass sampling's frame start", frame);
+        stream_copies_finish();  // (issue #145) the copy thread's bytes before the GPU can read them
         dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(R.cmd));
         dkQueueFlush(R.queue);
     }
@@ -1108,6 +1109,13 @@ void frame_stats() {
     LOG("[dk] pacing: %s", frame_pacing::report().c_str());  // (this fork, #23)
     if (std::string passes = gpuPasses.report(); !passes.empty()) LOG("[dk] GPU passes: %s", passes.c_str());
     if (std::string sync = sync_report(frames); !sync.empty()) LOG("[dk] GPU sync %s", sync.c_str());
+    {  // (issue #145) the vertex copies on the copy thread
+        const AsyncCopyStats a = async_copy_stats_take();
+        if (a.jobs)
+            LOG("[dk] async copies per frame: %.0f (%.0f KiB), %.1f made by the render thread at %.1f finishes (%.2f ms), "
+                "%.1f wake-ups", perFrame(a.jobs), perFrame(a.bytes) / 1024.0, perFrame(a.helped), perFrame(a.finishes),
+                perFrame(a.waitNs) / 1e6, perFrame(a.wakes));
+    }
     if (std::string clocks = clock_report(); !clocks.empty()) LOG("[dk] clocks: %s", clocks.c_str());
     if (std::string cores = core_report(); !cores.empty())
         LOG("[cpu] cores busy (since the last report): %s; the game's main thread has core 1, the render thread "
@@ -1233,6 +1241,7 @@ void submit_commands(const char* why) {
     {
         Stage stage("deko3d: submitting commands");
         check_queue(why, R.frame + 1);
+        stream_copies_finish();  // (issue #145) the copy thread's bytes before the GPU can read them
         dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(R.cmd));
         dkQueueFlush(R.queue);
     }
@@ -1324,6 +1333,7 @@ void present() {
         frame_pacing::on_present(R.cmd, frame);
         frame_end();
         check_queue("the submit (frame held)", frame);
+        stream_copies_finish();  // (issue #145) the copy thread's bytes before the GPU can read them
         dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(R.cmd));
         lockstep_present(heldPicture, true);  // (this fork, #67)
         frame_stats();
@@ -1408,6 +1418,7 @@ void present() {
     frame_end();
     const uint64_t t3 = now_ns();
     check_queue("the submit", frame);
+    stream_copies_finish();  // (issue #145) the copy thread's bytes before the GPU can read them
     dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(R.cmd));
     {
         Stage stage("deko3d: present");
@@ -1560,6 +1571,7 @@ void shader_cache_progress(size_t done, size_t total) {
     fill(sx(240), sy(344), sx(800), sy(32), 0.2f);
     const uint32_t w = uint32_t(sx(800) * done / std::max<size_t>(total, 1));
     if (w) fill(sx(240), sy(344), std::min<uint32_t>(w, sx(800)), sy(32), 0.9f);
+    stream_copies_finish();  // (issue #145) the copy thread's bytes before the GPU can read them
     dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(cmd));
     dkQueuePresentImage(R.queue, g_swapchain, slot);
     dkQueueWaitIdle(R.queue);  // (the command memory is reused by the next bar)
@@ -1704,6 +1716,7 @@ bool draw_opt(int which) {
     case kOptTargetMemo2: return g_targetMemo2.load(std::memory_order_relaxed);
     case kOptFixedMemo: return g_fixedMemo.load(std::memory_order_relaxed);
     case kOptVtxIdentity: return g_vtxIdentity.load(std::memory_order_relaxed);
+    case kOptAsyncCopy: return g_asyncCopy.load(std::memory_order_relaxed);
     default: return false;
     }
 }
@@ -1720,7 +1733,8 @@ void set_draw_opt(int which, bool on) {
         "targets, fixed state and viewport skipped while their registers are unchanged (WWHD_DK_REG_GENS)",
         "the TV picture not drawn while the window shows the GamePad's (WWHD_DK_SKIP_TV)",
         "target memo by state words, same-frame target checks skipped (WWHD_DK_TARGET_MEMO2)",
-        "fixed state in three memos (WWHD_DK_FIXED_MEMO)", "vertex states by layout identity (WWHD_DK_VTX_IDENTITY)"};
+        "fixed state in three memos (WWHD_DK_FIXED_MEMO)", "vertex states by layout identity (WWHD_DK_VTX_IDENTITY)",
+        "vertex copies on the copy thread (WWHD_DK_ASYNC_COPY)"};
     switch (which) {
     case kOptFixedSkip: g_fixedSkip = on; break;
     case kOptDepthOnly: g_depthOnly = on; break;
@@ -1737,6 +1751,7 @@ void set_draw_opt(int which, bool on) {
     case kOptTargetMemo2: g_targetMemo2 = on; break;
     case kOptFixedMemo: g_fixedMemo = on; break;
     case kOptVtxIdentity: g_vtxIdentity = on; break;
+    case kOptAsyncCopy: g_asyncCopy = on; break;
     }
     LOG("[dk] A/B: %s %s from frame %llu (menu)", names[which], on ? "ON" : "OFF", (unsigned long long)R.frame + 1);
 }

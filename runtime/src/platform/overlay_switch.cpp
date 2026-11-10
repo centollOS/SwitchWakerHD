@@ -490,7 +490,8 @@ void tab_developer() {
                                             "Submit every 1024 draws", "Render profiler (slower)",
                                             "Prefetch shader data", "Skip unchanged target/state registers",
                                             "Skip the TV picture (Off-TV Play)", "Target memo by state words",
-                                            "Fixed state in three parts", "Vertex states by layout"};
+                                            "Fixed state in three parts", "Vertex states by layout",
+                                            "Vertex copies on a copy thread"};
         static_assert(sizeof names / sizeof names[0] == gfxsw::kDrawOpts, "a name per switch");
         static const char* const what[] = {
             "Skips setting the GPU's fixed state (blend, depth, culling) again when a draw's is the same as the last.",
@@ -506,6 +507,7 @@ void tab_developer() {
             "Remembers the render target of a draw by the words of its state and skips repeats in the same frame.",
             "Keeps the fixed state in three separate remembered parts instead of one.",
             "Remembers vertex states by the identity of their layout.",
+            "A helper thread on core 3 copies the game's vertex data for the GPU while the render thread goes on.",
         };
         static_assert(sizeof what / sizeof what[0] == gfxsw::kDrawOpts, "a text per switch");
         bool on;

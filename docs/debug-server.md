@@ -82,6 +82,7 @@ WWHD_STATE_DIR=sdmc:/switch/wwhd/states-eu
 | `raw aniso [1\|2\|4\|8\|16]`, `raw shadowscale [0.5\|1\|2]`, `raw noao [0\|1]`, `raw miiverse [0\|1]` | live and not saved (the Picture tab's aniso level, shadow maps and ambient occlusion, which the menu saves; and the Dev tab's Miiverse switch): anisotropic filtering level, the shadow maps' scale, the ambient-occlusion pass skipped, the Miiverse thread (`0` parks it); with `perf_test.py toggle` |
 | `raw fxaa [0\|1]` | live and not saved (the Picture tab's edge smoothing, which the menu saves); no argument reports the state; a known picture change for `lockstep.py toggle` |
 | `raw fsr [0\|1]` | live and not saved (the Picture tab's FSR 1 upscale and sharpening, which the menu saves); no argument reports the state; with `perf_test.py toggle` |
+| `raw asynccopy [0\|1]` | live and not saved (the Dev tab's "Vertex copies on a copy thread"): the draws' vertex copies made by a copy thread on core 3 instead of the render thread (issue #145; on by default where the process has core 3); with `perf_test.py toggle` |
 | `wait`, `quit`, `reload`, `ping`, `help`, `raw CMD ...` | `raw logtext` prints the kept log text |
 
 Button names: `A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LS RS`. Presses go in where the controller is

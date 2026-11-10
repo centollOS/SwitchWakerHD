@@ -247,6 +247,8 @@ debugsrv::Reply draw_opt_reply(const char* name, int opt, const debugsrv::Args& 
 debugsrv::Reply targetmemo2(const debugsrv::Args& a) { return draw_opt_reply("targetmemo2", gfxsw::kOptTargetMemo2, a); }
 debugsrv::Reply fixedmemo(const debugsrv::Args& a) { return draw_opt_reply("fixedmemo", gfxsw::kOptFixedMemo, a); }
 debugsrv::Reply vtxident(const debugsrv::Args& a) { return draw_opt_reply("vtxident", gfxsw::kOptVtxIdentity, a); }
+// "asynccopy [0|1]" (issue #145): the draws' vertex copies on the copy thread; on with core 3, not saved
+debugsrv::Reply asynccopy(const debugsrv::Args& a) { return draw_opt_reply("asynccopy", gfxsw::kOptAsyncCopy, a); }
 
 // "rtcores [preferred mask]" (test): the render thread's cores (svcSetThreadCoreMask; mask bit n = core n), and which
 // core it was last seen on (a context read)
@@ -513,6 +515,7 @@ void start() {
     debugsrv::add_command("targetmemo2", "targetmemo2 [0|1]      target memo by state words + same-frame skip", targetmemo2);
     debugsrv::add_command("fixedmemo", "fixedmemo [0|1]        fixed state in three memos", fixedmemo);
     debugsrv::add_command("vtxident", "vtxident [0|1]         vertex states by layout identity", vtxident);
+    debugsrv::add_command("asynccopy", "asynccopy [0|1]        vertex copies on a copy thread (core 3)", asynccopy);
     debugsrv::add_command("rtcores", "rtcores [pref mask]    (test) the render thread's preferred core and core mask", rtcores);
     debugsrv::add_command("malloc", "malloc                 heap use (mallinfo; stalls allocations for ms)", malloc_info);
     debugsrv::add_command("coreprobe", "coreprobe [core] [s] [prio]  how much of a core a spinning thread gets (test)", coreprobe);

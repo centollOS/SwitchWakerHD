@@ -181,6 +181,19 @@ the records). A queue between them, one frame's worth of records at most. The de
 Measure: the render thread's ms/s and fps at Outset; latency: at most one extra stage per frame, inside the same
 frame. Only worth doing if phase 0 confirms the render thread still limits Outset after phases 1-2.
 
+2026-11-10, issue #145, a first piece: **the draws' vertex copies on a copy thread** (`WWHD_DK_ASYNC_COPY`,
+`gfx/deko/memory.cpp`). At the Outset village (render thread ~39 ms a frame, its core 96% busy) the render thread
+copied ~3 MB of guest vertex data a frame into the stream (~1.6 ms in memcpy). Now `stream_guest_vertices` allocates
+the slice and queues the copy; a thread on core 3 makes it, and before every `dkQueueSubmitCommands` the render
+thread makes the copies not taken yet and waits for the one in progress (`stream_copies_finish`). Uniform blocks stay
+on the render thread. In-boot A/B (`perf_test.py toggle`, handheld, stock clocks): outset_village **+0.34 fps
+(+-0.16, +1.3%)**; lava, Windfall, Dragon Roost and outset_lookout_us unchanged. On core 0 it gained nothing (the copy
+thread waits there behind the host service threads at 0x2C), so it is on only where the process has core 3.
+Pitfall found on the way: libnx's `leventWait` returns at once, without clearing an autoclear event, when the event
+is already signalled on entry; a thread that waits in a loop must `leventClear` after each wake, or it spins (at
+0x2C on core 3 that starved the system: black screen, hard reboot). The render-thread profile behind it (where the
+39 ms go) is in the issue.
+
 ## Phase 5: #49's root cause (shader coverage)
 
 Prepare graphics with an **item gallery**: after its warps, the sweep shows each item-get model once in one place,

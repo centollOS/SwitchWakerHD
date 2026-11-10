@@ -1772,6 +1772,7 @@ void guest_writeback() {
     dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
     {
         Stage stage("deko3d: CPU-read surfaces' writeback");
+        stream_copies_finish();  // (issue #145) the copy thread's bytes before the GPU can read them
         dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(cmd));
         dkQueueWaitIdle(R.queue);
     }

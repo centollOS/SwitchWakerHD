@@ -2191,7 +2191,7 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
         const uint64_t skipBytes = g.instance ? 0 : uint64_t(trim) * g.stride;
         rprof::UploadKind kind(rprof::kUpVertex);
         const StreamSlice slice =
-            stream_guest(g.addr + uint32_t(skipBytes), uint32_t(std::max<uint64_t>(g.copied - skipBytes, 4)), 16);
+            stream_guest_vertices(g.addr + uint32_t(skipBytes), uint32_t(std::max<uint64_t>(g.copied - skipBytes, 4)), 16);
         if (!slice) {
             R.perf.streamFullSkips++;
             skip(g_drawSkips.streamFull);
