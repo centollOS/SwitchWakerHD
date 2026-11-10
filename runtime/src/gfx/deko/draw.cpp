@@ -73,8 +73,9 @@ void hud_mark_missed(Surface* shown) {
     if (!fxaa_enabled() || !g_hudMarks.load(std::memory_order_relaxed) || g_hudMarkUsed == R.frame ||
         !hud_marks_trusted() || shown->readFrame != R.frame)
         return;
-    if (fxaa_scene(shown) && g_traceFrame)
-        trace_event("HUD start: no mark this frame, FXAA at its end (%s)", trace_name(shown).c_str());
+    if (!fxaa_scene(shown)) return;
+    R.perf.hudMarkMissed++;
+    if (g_traceFrame) trace_event("HUD start: no mark this frame, FXAA at its end (%s)", trace_name(shown).c_str());
 }
 bool hud_marks_on() { return g_hudMarks.load(std::memory_order_relaxed); }
 void set_hud_marks(bool on) {

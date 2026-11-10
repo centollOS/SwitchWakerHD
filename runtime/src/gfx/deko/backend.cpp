@@ -1085,11 +1085,11 @@ void frame_stats() {
             (unsigned long long)ds.samplerEvictions, (unsigned long long)g_hitches);
         LOG("[dk] internal resolution %.2f (requested %.2f; dynamic %s); %llu render targets resampled, %llu from kept "
             "images (%zu MiB kept); HUD at full resolution in %.0f%% of frames; FXAA %s, in %.0f%% of frames (at the "
-            "game's HUD start in %.0f%%%s)",
+            "game's HUD start in %.0f%%, at the frame's end in %.0f%%%s)",
             double(res_scale()), double(requested_res_scale()), dynamicRes.on ? "on" : "off", (unsigned long long)p.rescales,
             (unsigned long long)p.poolHits, rescale_pool_bytes() >> 20, 100.0 * perFrame(p.hudSwitches),
             fxaa_enabled() ? "on" : "off", 100.0 * perFrame(p.fxaaPasses), 100.0 * perFrame(p.hudMarks),
-            hud_marks_on() ? "" : ", marks off");
+            100.0 * perFrame(p.hudMarkMissed), hud_marks_on() ? "" : ", marks off");
         {  // (this fork, #37) what grows over a long session: malloc in use against its arena, and the containers
             // (this fork) no mallinfo here: it walks every free chunk with malloc's lock held, stalling every
             // allocating thread, and the heap fragments as the game plays (console, 10 min warp tour: 2,300 ->
