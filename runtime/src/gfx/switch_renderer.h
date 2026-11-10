@@ -34,6 +34,9 @@ void set_fxaa(bool on);
 // option, off by default
 bool fsr();
 void set_fsr(bool on);
+// (issue #145) the vertex copy thread's spin for the next job before it sleeps, in microseconds (test; not saved)
+int async_copy_spin_us();
+void set_async_copy_spin_us(int us);
 // the bloom and the distance blur (issue #15): the game samples its bloom chain and its half-size picture with more
 // levels than the render targets have; gfx/deko mip_chain makes those levels. On by default (WWHD_BLOOM=0,
 // WWHD_DISTANCE_BLUR=0 off at start); any thread

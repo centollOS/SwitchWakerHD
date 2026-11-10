@@ -311,7 +311,7 @@ FrameTable<UploadEntry> g_uploads;
 // into the stream (~1.6 ms of its ~39 ms in memcpy, on core 2 at 96%) while core 3 has room. A ring of
 // jobs written by the render thread alone; the copy thread and the render thread (at a finish) claim them one at a
 // time and count them done after their bytes are out (dsb st: the GPU reads the CPU-uncached stream memory after a
-// later submit). The copy thread spins a few microseconds for the next job, then sleeps; the render thread wakes it
+// later submit). The copy thread spins up to g_copySpinUs for the next job, then sleeps; the render thread wakes it
 // only when it sleeps (the flag and the head are seq_cst on both sides, so no job is left behind a sleeping thread).
 // On where the process has core 3 (the HOME-menu forwarder's NPDM, cores_switch.h; the thread goes there): the
 // in-boot A/B there (2026-11-10, handheld, stock clocks) gave outset_village +0.34 fps (+-0.16), lava, Windfall, Dragon
@@ -321,6 +321,15 @@ std::atomic<bool> g_asyncCopy{[] {
     const char* e = getenv("WWHD_DK_ASYNC_COPY");
     if (e && *e) return atoi(e) != 0;
     return cores::core3();
+}()};
+// how long the copy thread waits for the next job (spinning) before it sleeps; a wake-up costs the render thread a
+// kernel call, and a sleeping thread leaves the next copies to the render thread's finish (WWHD_DK_ASYNC_COPY_SPIN_US,
+// the debug server's "asynccopyspin"). 300 us (2026-11-10, outset_village, against 3 us): wake-ups 188 -> 113 a
+// frame, copies left to the render thread 60 -> 37, +0.18 fps (+-0.10); lava, Windfall, Dragon Roost and the lookout
+// unchanged. Longer spins barely change the wake-ups (the copies come in bursts).
+std::atomic<uint32_t> g_copySpinUs{[] {
+    const char* e = getenv("WWHD_DK_ASYNC_COPY_SPIN_US");
+    return e && *e ? uint32_t(std::clamp(atoi(e), 0, 2000)) : 300u;
 }()};
 namespace {
 struct CopyJob {
@@ -361,10 +370,9 @@ bool copy_one() {
 bool jobs_waiting() { return g_copyClaim.load(std::memory_order_seq_cst) < g_copyHead.load(std::memory_order_seq_cst); }
 
 void copy_thread_main(void*) {
-    const uint64_t spinTicks = armNsToTicks(3000);
     for (;;) {
         while (copy_one()) {}
-        const uint64_t until = armGetSystemTick() + spinTicks;
+        const uint64_t until = armGetSystemTick() + armNsToTicks(g_copySpinUs.load(std::memory_order_relaxed) * 1000ull);
         bool more = false;
         while (!more && armGetSystemTick() < until) {
             __asm__ volatile("yield");

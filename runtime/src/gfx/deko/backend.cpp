@@ -1667,6 +1667,11 @@ void set_gamepad_view(bool on) {
     if (gfxdk::g_gamepadView.exchange(on) != on) LOG("[dk] window: %s picture asked for", on ? "GamePad" : "TV");
 }
 bool fsr() { return gfxdk::g_fsr.load(std::memory_order_relaxed); }
+int async_copy_spin_us() { return int(gfxdk::g_copySpinUs.load(std::memory_order_relaxed)); }
+void set_async_copy_spin_us(int us) {
+    gfxdk::g_copySpinUs = uint32_t(std::clamp(us, 0, 2000));
+    LOG("[dk] A/B: async copy spin %d us from frame %llu", async_copy_spin_us(), (unsigned long long)gfxdk::R.frame + 1);
+}
 void set_fsr(bool on) {
     if (gfxdk::g_fsr.exchange(on) != on) LOG("[dk] present: FSR 1 %s", on ? "on" : "off");
 }

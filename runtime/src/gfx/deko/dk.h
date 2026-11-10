@@ -121,6 +121,7 @@ StreamSlice stream_guest(uint32_t addr, uint32_t size, uint32_t alignment, uint3
 // instead, and the Switch tab and the debug server's "asynccopy" switch it while the game runs.
 StreamSlice stream_guest_vertices(uint32_t addr, uint32_t size, uint32_t alignment);
 extern std::atomic<bool> g_asyncCopy;
+extern std::atomic<uint32_t> g_copySpinUs;  // the copy thread's spin before it sleeps, in us
 void stream_copies_finish();
 struct AsyncCopyStats {
     uint64_t jobs = 0, bytes = 0;      // copies queued, their bytes

@@ -189,6 +189,9 @@ thread makes the copies not taken yet and waits for the one in progress (`stream
 on the render thread. In-boot A/B (`perf_test.py toggle`, handheld, stock clocks): outset_village **+0.34 fps
 (+-0.16, +1.3%)**; lava, Windfall, Dragon Roost and outset_lookout_us unchanged. On core 0 it gained nothing (the copy
 thread waits there behind the host service threads at 0x2C), so it is on only where the process has core 3.
+Tuning: the copy thread spins 300 us for the next job before it sleeps (`WWHD_DK_ASYNC_COPY_SPIN_US`, the debug
+server's `asynccopyspin`): against 3 us, wake-ups 188 -> 113 a frame, copies left to the render thread 60 -> 37,
+outset_village **+0.18 fps (+-0.10)** more; lava, Windfall, Dragon Roost and the lookout unchanged.
 Pitfall found on the way: libnx's `leventWait` returns at once, without clearing an autoclear event, when the event
 is already signalled on entry; a thread that waits in a loop must `leventClear` after each wake, or it spins (at
 0x2C on core 3 that starved the system: black screen, hard reboot). The render-thread profile behind it (where the
