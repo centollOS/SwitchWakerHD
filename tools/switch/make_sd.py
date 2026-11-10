@@ -124,6 +124,21 @@ def release_tag():
     return m.group(0) if m else ""
 
 
+def guest_mod_id(package):
+    """a --guest-mod's id: a catalogue id as it is, a .zip's or folder's from its manifest.json"""
+    import zipfile
+    try:
+        if os.path.isdir(package):
+            with open(os.path.join(package, "manifest.json"), encoding="utf-8") as f:
+                return json.load(f).get("id", package)
+        if os.path.isfile(package) and zipfile.is_zipfile(package):
+            with zipfile.ZipFile(package) as z:
+                return json.loads(z.read("manifest.json")).get("id", package)
+    except (OSError, KeyError, ValueError):
+        pass
+    return package
+
+
 def release_template():
     """this release's shader template (issue #88): shader-template.sealed of its GitHub release, checked against its
     .sha256 and kept in build/; None (with a note) when there is none or it cannot be downloaded: the console then
@@ -385,6 +400,10 @@ def main():
             (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []))
     elif args.mod_option or args.gc_game or args.guest_mod_off:
         fail("--mod-option, --gc-game and --guest-mod-off go with --guest-mod")
+    if args.guest_mod_off:  # (#121) each one a --guest-mod, checked before the slow steps
+        unknown = sorted(set(args.guest_mod_off) - {guest_mod_id(p) for p in args.guest_mod})
+        if unknown:
+            fail("--guest-mod-off %s: not among the --guest-mod mods" % ", ".join(unknown))
     if args.ptbr:  # the translation's download, checked before the slow steps (the wrong file picked, say)
         args.ptbr = os.path.abspath(args.ptbr)
         ptbr(["--check", args.ptbr])

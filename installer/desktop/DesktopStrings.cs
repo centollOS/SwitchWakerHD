@@ -31,8 +31,6 @@ static class DesktopStrings
         ["btn_eject"]      = ("Expulsar tarjeta",                                     "Eject card"),
         ["btn_yes_cancel"] = ("Sí, cancelar",                                         "Yes, cancel"),
         ["btn_no"]         = ("No",                                                   "No"),
-        ["mm_rvz_note"]    = ("Un .rvz de Dolphin se lee con Python 3.14, que es el que usa este instalador.",
-                               "A Dolphin .rvz is read with Python 3.14, the one this installer uses."),
         ["rel_no_script"]  = ("La versión descargada no contiene tools/switch/make_sd.py.", "The downloaded release has no tools/switch/make_sd.py."),
         ["step_python"]    = ("Python 3.14",                                          "Python 3.14"),
     };

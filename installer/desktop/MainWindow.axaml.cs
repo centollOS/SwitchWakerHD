@@ -382,12 +382,14 @@ public partial class MainWindow : Window
         CheckForUpdate();
     }
 
+    string? oldGcMinimap;   // (#121) the GameCube minimap's disc of a previous install: no longer added
     void ApplySaved(SavedChoices c)
     {
         (c.GameArg == "--image" ? OptImg : c.GameArg == "--wua" ? OptWua : OptDir).IsChecked = true;
         gamePath = c.GamePath;
         keysPath = c.ForwarderKeys;
         ptbrDownload = c.PtbrDownload;
+        oldGcMinimap = c.OldGameCubeMinimap;   // (#121)
         ChkShaders.IsChecked = c.PrepareShaders;
         ChkOldBuilds.IsChecked = c.RemoveOldBuilds;
         ChkHdMinimap.IsChecked = c.HdMinimap;
@@ -441,6 +443,7 @@ public partial class MainWindow : Window
         engine.ForwarderKeys = keysPath != null && File.Exists(keysPath) ? keysPath : null;
         engine.HdMinimap = ChkHdMinimap.IsChecked == true;
         engine.PtbrDownload = ptbrDownload;
+        engine.OldGameCubeMinimap = oldGcMinimap;
         engine.PrepareShaders = ChkShaders.IsChecked == true;
         engine.RemoveOldBuilds = ChkOldBuilds.IsChecked == true;
         running = true; failed = false;
@@ -703,7 +706,8 @@ public partial class MainWindow : Window
         TxtFwdDone.Text = Str.Get(nspFresh ? "fwd_done" : "fwd_missing");
         TxtFwdDone.Foreground = Res(nspFresh ? "Fg" : "Warn");
         TxtHmDone.IsVisible = true;   // (#121: always built in; on or off)
-        TxtHmDone.Text = Str.Get(ChkHdMinimap.IsChecked == true ? "hm_done" : "hm_done_off");
+        TxtHmDone.Text = Str.Get(!engine.HdMinimapIncluded ? "hm_done_missing" : ChkHdMinimap.IsChecked == true ? "hm_done" : "hm_done_off")
+                       + (oldGcMinimap != null ? "\n" + Str.Get("mm_dropped_done") : "");
         TxtPtDone.IsVisible = ptbrDownload != null;
         TxtPtDone.Text = Str.Get("ptbr_done");
         TxtGameFilesDone.IsVisible = engine.BadGameFiles > 0;

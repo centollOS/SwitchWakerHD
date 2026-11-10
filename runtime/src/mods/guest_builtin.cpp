@@ -57,8 +57,10 @@ static const WWHDGuestBuiltin* find(const std::string& id) {
 static std::string settings_path(const std::string& id) { return mods_dir() + "/" + id + "-options.json"; }
 struct Settings {
     bool enabled = true;
+    bool build_enabled = true;  // the switch of the build that wrote the file (the installer's "Turn it on now")
     mods::json::Value options;
 };
+static bool build_enabled(const WWHDGuestBuiltin& b);
 static const WWHDGuestBuiltin* find(const std::string& id);
 static mods::json::Value parse_or_null(const std::string& text) {
     try {
@@ -72,6 +74,7 @@ static bool write_settings(const std::string& id, const Settings& s, std::string
     std::filesystem::create_directories(mods_dir(), ec);
     mods::json::Value all;
     all["enabled"] = mods::json::Value(s.enabled);
+    all["build_enabled"] = mods::json::Value(s.build_enabled);
     all["options"] = s.options;
     if (s.options.type != mods::json::Value::Object) all["options"].type = mods::json::Value::Object;
     const std::string path = settings_path(id), tmp = path + ".tmp";
@@ -90,28 +93,48 @@ static bool write_settings(const std::string& id, const Settings& s, std::string
     }
     return true;
 }
+// the build's switch: on unless built with --guest-mod-off (the installer's "Turn it on now" unticked)
+static bool build_enabled(const WWHDGuestBuiltin& b) {
+    const mods::json::Value defaults = parse_or_null(b.defaults ? b.defaults : "");
+    return defaults.get("enabled").type != mods::json::Value::Bool || defaults.get("enabled").boolean;
+}
+// The switch: the player's (the Mods tab), except when this build's switch differs from the one of the build that
+// wrote the file: the installer's box was changed, and that choice wins (PR 142 review). An earlier build's folder
+// (mods/<id>/options.json, enabled) is taken over once; its mod was running unless its enabled file said 0.
 static Settings read_settings(const WWHDGuestBuiltin& b) {
     const mods::json::Value defaults = parse_or_null(b.defaults ? b.defaults : "");
     Settings s;
-    s.enabled = defaults.get("enabled").type != mods::json::Value::Bool || defaults.get("enabled").boolean;
+    s.build_enabled = s.enabled = build_enabled(b);
     s.options = defaults.get("options");
     if (s.options.type != mods::json::Value::Object) s.options.type = mods::json::Value::Object;
     const mods::json::Value saved = parse_or_null(read_file(settings_path(b.id)));
+    std::string why;
     if (saved.type == mods::json::Value::Object) {
-        if (saved.get("enabled").type == mods::json::Value::Bool) s.enabled = saved.get("enabled").boolean;
         for (const auto& [k, v] : saved.get("options").object) s.options[k] = v;
-        return s;
+        const mods::json::Value& on = saved.get("enabled");
+        const mods::json::Value& last = saved.get("build_enabled");
+        if (on.type == mods::json::Value::Bool) s.enabled = on.boolean;
+        if (last.type == mods::json::Value::Bool && last.boolean == s.build_enabled) return s;  // the player's choice
+        if (last.type == mods::json::Value::Bool) {
+            s.enabled = s.build_enabled;  // the installer's box changed since the build that wrote the file
+            why = s.enabled ? "this build switches it on" : "this build switches it off";
+        } else {
+            why = "the build's switch recorded";  // a file of a build before the record: the player's switch kept
+        }
+    } else {
+        // the first start of this build: an earlier build's settings, else the defaults
+        const std::string old = mod_dir(b.id);
+        const mods::json::Value old_options = parse_or_null(read_file(old + "/options.json"));
+        for (const auto& [k, v] : old_options.object) s.options[k] = v;
+        const std::string old_switch = read_file(old + "/enabled");
+        if (!old_switch.empty()) s.enabled = old_switch[0] != '0';
+        else if (old_options.type == mods::json::Value::Object) s.enabled = true;  // it was running (main had no switch)
+        why = old_options.type == mods::json::Value::Object ? "taken over from the earlier build's folder" : "the defaults";
     }
-    // the first start of this build: an earlier build's settings, else the defaults; written either way
-    const std::string old = mod_dir(b.id);
-    const mods::json::Value old_options = parse_or_null(read_file(old + "/options.json"));
-    for (const auto& [k, v] : old_options.object) s.options[k] = v;
-    const std::string old_switch = read_file(old + "/enabled");
-    if (!old_switch.empty()) s.enabled = old_switch[0] != '0';
     std::string error;
     if (!write_settings(b.id, s, error)) LOG("[guestmods] %s: %s", b.id, error.c_str());
-    else LOG("[guestmods] %s: settings written to %s (%s)", b.id, settings_path(b.id).c_str(),
-             old_options.type == mods::json::Value::Object ? "taken over from the earlier build's folder" : "the defaults");
+    else LOG("[guestmods] %s: settings written to %s (%s; %s)", b.id, settings_path(b.id).c_str(), why.c_str(),
+             s.enabled ? "on" : "off");
     return s;
 }
 // the package's files built into the NRO, under the package path "builtin:<id>" (load()); false for another path
@@ -243,6 +266,7 @@ bool set_option(Mod& mod, Option& option, const mods::json::Value& value, bool s
     if (!save) return true;
     Settings st;
     st.enabled = mod.enabled;
+    if (const WWHDGuestBuiltin* b = find(mod.id)) st.build_enabled = build_enabled(*b);
     st.options.type = mods::json::Value::Object;
     for (const auto& o : mod.options)
         if (o.value.type != mods::json::Value::Null) st.options[o.id] = o.value;
@@ -254,6 +278,7 @@ bool set_option(Mod& mod, Option& option, const mods::json::Value& value, bool s
 bool set_enabled(Mod& mod, bool on, std::string& error) {
     Settings st;
     st.enabled = on;
+    if (const WWHDGuestBuiltin* b = find(mod.id)) st.build_enabled = build_enabled(*b);
     st.options.type = mods::json::Value::Object;
     for (const auto& o : mod.options)
         if (o.value.type != mods::json::Value::Null) st.options[o.id] = o.value;

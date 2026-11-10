@@ -13,6 +13,7 @@
 
 #include "item_icons.h"
 #include "lyt_build.h"
+#include "game_layouts_fork.h"  // (this fork, #121) the faster pack, enlargement and picture cache
 
 namespace game_layouts {
 namespace {
@@ -298,19 +299,6 @@ Image upscale(const Image& in, uint32_t factor) {
         const double px = 3.14159265358979323846 * x;
         return 3 * std::sin(px) * std::sin(px / 3) / (px * px);
     };
-    // (fork, #121) the six Lanczos-3 taps depend only on an output texel's phase (i % factor): computed once per phase
-    // and normalised, instead of two sin() per tap and texel (238 ms for a 100 x 100 island map at 3x on the Switch's
-    // main thread)
-    struct Taps { int first; float wgt[6]; };
-    Taps taps[4];
-    for (uint32_t ph = 0; ph < factor; ph++) {
-        const double off = (ph + 0.5) / factor - 0.5;  // the centre's offset from the source texel i / factor
-        const int base = int(std::floor(off)) - 2;
-        double wgt[6], sum = 0;
-        for (int j = 0; j < 6; j++) sum += wgt[j] = lanczos(off - (base + j));
-        taps[ph].first = base;
-        for (int j = 0; j < 6; j++) taps[ph].wgt[j] = float(wgt[j] / sum);
-    }
     // premultiplied, linear floats; edges clamped
     std::vector<float> src(size_t(in.width) * in.height * 4);
     for (size_t i = 0; i < src.size(); i += 4) {
@@ -320,26 +308,24 @@ Image upscale(const Image& in, uint32_t factor) {
     }
     auto pass = [&](const std::vector<float>& from, uint32_t fw, uint32_t fh, bool horizontal) {
         const uint32_t tw = horizontal ? fw * factor : fw, th = horizontal ? fh : fh * factor;
-        const int n = int(horizontal ? fw : fh);
+        const uint32_t n = horizontal ? fw : fh;
         std::vector<float> to(size_t(tw) * th * 4, 0.0f);
         const uint32_t outer = horizontal ? th : tw, inner = horizontal ? tw : th;
-        for (uint32_t i = 0; i < inner; i++) {
-            const Taps& t = taps[i % factor];
-            const int first = int(i / factor) + t.first;
-            size_t at[6];
-            for (int j = 0; j < 6; j++) {
-                const size_t kk = size_t(std::clamp(first + j, 0, n - 1));
-                at[j] = horizontal ? kk * 4 : kk * fw * 4;
-            }
-            for (uint32_t o = 0; o < outer; o++) {
-                const size_t line = horizontal ? size_t(o) * fw * 4 : size_t(o) * 4;
-                float acc[4] = {0, 0, 0, 0};
-                for (int j = 0; j < 6; j++)
-                    for (int c = 0; c < 4; c++) acc[c] += t.wgt[j] * from[line + at[j] + c];
+        for (uint32_t o = 0; o < outer; o++)
+            for (uint32_t i = 0; i < inner; i++) {
+                const double centre = (i + 0.5) / factor - 0.5;
+                const int first = int(std::floor(centre)) - 2;
+                double acc[4] = {0, 0, 0, 0}, sum = 0;
+                for (int k = first; k < first + 6; k++) {
+                    const double wgt = lanczos(centre - k);
+                    const uint32_t kk = uint32_t(std::clamp(k, 0, int(n) - 1));
+                    const size_t at = horizontal ? (size_t(o) * fw + kk) * 4 : (size_t(kk) * fw + o) * 4;
+                    for (int c = 0; c < 4; c++) acc[c] += wgt * from[at + c];
+                    sum += wgt;
+                }
                 const size_t out = horizontal ? (size_t(o) * tw + i) * 4 : (size_t(i) * tw + o) * 4;
-                for (int c = 0; c < 4; c++) to[out + c] = acc[c];
+                for (int c = 0; c < 4; c++) to[out + c] = float(acc[c] / sum);
             }
-        }
         return to;
     };
     const std::vector<float> wide = pass(src, in.width, in.height, true);
@@ -361,22 +347,21 @@ Image upscale(const Image& in, uint32_t factor) {
         blur[p * 4 + 3] = alpha[p];
     }
     const int r = int(factor);
-    const float inv = 1.0f / float(2 * r + 1);
-    // a box of 2r+1 texels with clamped edges, as a running sum along one line (stride: texels between neighbours)
-    auto box = [&](const float* from, float* to, int count, size_t stride) {
-        for (int c = 0; c < 4; c++) {
-            float sum = 0;
-            for (int k = -r; k <= r; k++) sum += from[size_t(std::clamp(k, 0, count - 1)) * stride * 4 + c];
-            for (int x = 0; x < count; x++) {
-                to[size_t(x) * stride * 4 + c] = sum * inv;
-                sum += from[size_t(std::min(x + r + 1, count - 1)) * stride * 4 + c] -
-                       from[size_t(std::max(x - r, 0)) * stride * 4 + c];
-            }
-        }
-    };
     for (int round = 0; round < 2; round++) {
-        for (uint32_t y = 0; y < h; y++) box(&blur[size_t(y) * w * 4], &tmp[size_t(y) * w * 4], int(w), 1);
-        for (uint32_t x = 0; x < w; x++) box(&tmp[size_t(x) * 4], &blur[size_t(x) * 4], int(h), w);
+        for (uint32_t y = 0; y < h; y++)
+            for (uint32_t x = 0; x < w; x++)
+                for (int c = 0; c < 4; c++) {
+                    float sum = 0;
+                    for (int k = -r; k <= r; k++) sum += blur[(size_t(y) * w + uint32_t(std::clamp(int(x) + k, 0, int(w) - 1))) * 4 + c];
+                    tmp[(size_t(y) * w + x) * 4 + c] = sum / float(2 * r + 1);
+                }
+        for (uint32_t y = 0; y < h; y++)
+            for (uint32_t x = 0; x < w; x++)
+                for (int c = 0; c < 4; c++) {
+                    float sum = 0;
+                    for (int k = -r; k <= r; k++) sum += tmp[(size_t(std::clamp(int(y) + k, 0, int(h) - 1)) * w + x) * 4 + c];
+                    blur[(size_t(y) * w + x) * 4 + c] = sum / float(2 * r + 1);
+                }
     }
     Image out;
     out.width = w, out.height = h, out.srgb = in.srgb;
@@ -423,17 +408,8 @@ bool split_spec(const std::string& spec, std::string& layout, std::string& item,
 namespace {
 std::mutex g_mu;
 std::string g_pack_path;
-// (fork, #121) the pack's index only (member name -> offset and size in the file), read once; a member is read from
-// the file when an archive needs it. Reading the whole 12 MB pack at first use stalled the game for 2.3 s on the Switch.
-struct PackEntry { uint64_t offset = 0; uint32_t size = 0; };
-std::map<std::string, PackEntry> g_pack;
+std::map<std::string, Bytes> g_pack;  // the pack's members, read once
 bool g_pack_read = false;
-// (fork, #121) the finished pictures texture() made (decoded, material applied, enlarged), most recently used first:
-// a mod that releases and asks again for the same picture (a minimap shown again) gets it without the work
-struct Picture { std::string spec; Image image; };
-std::list<Picture> g_pictures;
-size_t g_picture_bytes = 0;
-constexpr size_t kMaxPictureBytes = 4u << 20;
 struct Archive { std::string name; std::map<std::string, Bytes> files; Layout layout; bool has_layout = false; };
 std::list<Archive> g_archives;  // most recently used first, at most 8
 constexpr size_t kMaxArchives = 8;
@@ -456,43 +432,13 @@ Archive* archive(const std::string& layout, std::string& error) {
         return nullptr;
     }
     try {
-        std::ifstream f(g_pack_path, std::ios::binary);
-        if (!f) fail("can't read the game's 2D pack");
-        auto read_at = [&f](uint64_t offset, size_t size) {
-            Bytes data(size);
-            f.seekg(std::streamoff(offset));
-            if (size && !f.read(reinterpret_cast<char*>(data.data()), std::streamsize(size))) fail("can't read the game's 2D pack");
-            return data;
-        };
-        if (!g_pack_read) {
-            // SARC (big-endian): header, SFAT (16 bytes an entry), SFNT names; the members' data starts at the
-            // header's data offset, so everything before it is the index
-            const Bytes head = read_at(0, 0x14);
-            if (memcmp(head.data(), "SARC", 4)) fail("the game's 2D pack is not a SARC");
-            const uint32_t start = be32(head, 12);
-            if (start < 0x20 || start > (16u << 20)) fail("bad SARC header");
-            const Bytes d = read_at(0, start);
-            const uint32_t hs = be16(d, 4);
-            if (size_t(hs) + 12 > d.size()) fail("bad SARC header");
-            const uint32_t n = be16(d, hs + 6);
-            const size_t names = hs + 12 + 16 * size_t(n) + 8;
-            if (names > d.size()) fail("bad SARC table");
-            std::map<std::string, PackEntry> index;
-            for (uint32_t i = 0; i < n; i++) {
-                const size_t e = hs + 12 + 16 * size_t(i);
-                const uint32_t attr = be32(d, e + 4), b = be32(d, e + 8), en = be32(d, e + 12);
-                const size_t name_at = names + size_t(attr & 0xFFFF) * 4;
-                if (en < b || name_at >= d.size()) fail("bad SARC entry");
-                index[cstr(d, name_at, d.size() - name_at)] = {uint64_t(start) + b, en - b};
-            }
-            g_pack = std::move(index);
-            g_pack_read = true;
-        }
-        const auto it = g_pack.find(layout + ".szs");
-        if (it == g_pack.end()) fail("no layout " + layout);
+        // (this fork, #121) the pack's index and this member only (game_layouts_fork.h), not the whole pack
+        Bytes member;
+        std::string why;
+        if (!fork::pack_member(g_pack_path, layout + ".szs", member, why)) fail(why);
         Archive a;
         a.name = layout;
-        a.files = item_icons::read_sarc(item_icons::yaz0_decode(read_at(it->second.offset, it->second.size)));
+        a.files = item_icons::read_sarc(item_icons::yaz0_decode(member));
         if (const auto l = a.files.find("blyt/" + layout + ".bflyt"); l != a.files.end()) a.layout = parse_bflyt(l->second), a.has_layout = true;
         g_archives.push_front(std::move(a));
         if (g_archives.size() > kMaxArchives) g_archives.pop_back();
@@ -511,7 +457,7 @@ void note_open(const std::string& guest_path, const std::string& host_path) {
     std::lock_guard lock(g_mu);
     if (host_path == g_pack_path) return;
     g_pack_path = host_path, g_pack.clear(), g_pack_read = false, g_archives.clear();
-    g_pictures.clear(), g_picture_bytes = 0;
+    fork::clear();  // (this fork, #121)
 }
 
 bool texture(const std::string& spec, Image& out, std::string& error) {
@@ -522,12 +468,7 @@ bool texture(const std::string& spec, Image& out, std::string& error) {
         return false;
     }
     std::lock_guard lock(g_mu);
-    for (auto p = g_pictures.begin(); p != g_pictures.end(); ++p)
-        if (p->spec == spec) {
-            g_pictures.splice(g_pictures.begin(), g_pictures, p);
-            out = p->image;
-            return true;
-        }
+    if (fork::cached(spec, out)) return true;  // (this fork, #121) made before
     Archive* a = archive(layout, error);
     if (!a) return false;
     const auto it = a->files.find("timg/" + item + ".bflim");
@@ -545,19 +486,12 @@ bool texture(const std::string& spec, Image& out, std::string& error) {
             }
             apply_material(out, m->second);
         }
-        out = upscale(out, factor);
+        out = fork::upscale(out, factor);  // (this fork, #121) the same picture, faster
     } catch (const std::exception& e) {
         error = e.what();
         return false;
     }
-    if (out.rgba.size() <= kMaxPictureBytes / 4) {
-        g_pictures.push_front({spec, out});
-        g_picture_bytes += out.rgba.size();
-        while (g_picture_bytes > kMaxPictureBytes) {
-            g_picture_bytes -= g_pictures.back().image.rgba.size();
-            g_pictures.pop_back();
-        }
-    }
+    fork::remember(spec, out);  // (this fork, #121)
     return true;
 }
 

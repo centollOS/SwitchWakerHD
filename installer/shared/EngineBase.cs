@@ -54,6 +54,10 @@ abstract partial class EngineBase
     // off (--guest-mod-off) for the game's menu (Mods > Built-in) to switch on later (INSTALL.md, "Optional: code mods").
     public bool HdMinimap;
     public const string HdMinimapMod = "hd-minimap";
+    // whether the build really includes it (a release that can't build it in switched off, or the fallback without it)
+    public bool HdMinimapIncluded { get; private set; }
+    // the GameCube sea minimap's disc of a previous install (SavedChoices): no longer added; the player is told so
+    public string? OldGameCubeMinimap;
     // Optional: Triforce-Heroes' Brazilian Portuguese fan translation as the player downloaded it (.rar, its folder or
     // its .pack): make_sd.py --ptbr rebuilds it on the player's own English pack (docs/ptbr-translation-plan.md).
     public string? PtbrDownload;
@@ -174,6 +178,7 @@ abstract partial class EngineBase
         if (GameArg == "--image" && CheckImageKeys(GamePath) is string keys)
             throw new InstallException(keys);
 
+        if (OldGameCubeMinimap != null) Warn(Str.Get("mm_dropped", OldGameCubeMinimap));   // (#121)
         if (PtbrDownload != null)
         {
             Info(Str.Get("ptbr_pre", PtbrDownload));
@@ -502,6 +507,8 @@ abstract partial class EngineBase
         // gets it only when the player chose it
         var minimap = HdMinimap ? $" --guest-mod {HdMinimapMod}"
                     : File.ReadAllText(MakeSd(ReleaseDir)).Contains("--guest-mod-off") ? $" --guest-mod {HdMinimapMod} --guest-mod-off {HdMinimapMod}" : "";
+        if (minimap == "") Info(Str.Get("hm_old_release"));
+        HdMinimapIncluded = minimap != "";
         // the Portuguese translation, with a release whose make_sd.py knows it (an older one: installed without it)
         var ptbr = "";
         if (PtbrDownload != null)
@@ -520,6 +527,7 @@ abstract partial class EngineBase
         if (rc != 0 && !HdMinimap && minimap != "" && tail.Any(l => l.TrimStart().StartsWith("guest_mods: ")))
         {
             Warn(Str.Get("hm_skipped"));
+            HdMinimapIncluded = false;
             tail.Clear();
             rc = Exec(pythonCmd, $"{Quote(MakeSd(ReleaseDir))} {GameArg} {Quote(GamePath)}{forwarder}{ptbr}{shaders}", ReleaseDir, check: false,
                       onLine: line => { OnLine(line); tail.Enqueue(line); if (tail.Count > 300) tail.Dequeue(); }, env: env);
