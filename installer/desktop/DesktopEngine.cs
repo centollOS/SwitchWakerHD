@@ -21,8 +21,25 @@ abstract class DesktopEngine : EngineBase
     public static string WorkDir = BuildFolder.Load(() => DefaultWorkDir);
     protected override string Work => WorkDir;
 
-    // BuildFolder.Problem's check here: the private Python is a tarball with symbolic links, and the build runs the
-    // programs it makes. Linux FAT and exFAT drives hold neither (macOS FAT and exFAT do); tried in the folder.
+    // The files run as root (the root step's script, devkitPro's pkg, the download script pacman runs) go in a folder
+    // only this user can write, never in the work folder: that can be a card or USB disk with no owners (FAT,
+    // exFAT; macOS ignores ownership on external disks), where anyone could swap them before the root step runs.
+    // ~/Library/Caches or ~/.cache, no spaces (the scripts and pacman.conf quote paths, but the fewer the better).
+    protected static string RootFilesDir()
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var dir = OperatingSystem.IsMacOS() ? Path.Combine(home, "Library", "Caches", "SwitchWakerHD-Installer")
+                                            : Path.Combine(home, ".cache", "SwitchWakerHD-Installer");
+        const UnixFileMode Owner = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+        if (OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();   // (Mac and Linux only)
+        Directory.CreateDirectory(dir, Owner);
+        File.SetUnixFileMode(dir, Owner);   // (made before with other modes)
+        return dir;
+    }
+
+    // BuildFolder.Describe's check here: the private Python is a tarball with symbolic links, and the build runs the
+    // programs it makes. Linux FAT and exFAT drives hold neither (macOS FAT and exFAT do); tried in the folder. The
+    // string key of the problem, or null.
     public static string? LinksAndPrograms(string dir)
     {
         if (OperatingSystem.IsWindows()) return null;
@@ -30,6 +47,7 @@ abstract class DesktopEngine : EngineBase
         var prog = Path.Combine(dir, ".prog-test");
         try
         {
+            File.Delete(link);   // left by a check that was cut short: CreateSymbolicLink fails on an existing file
             File.WriteAllText(prog, "#!/bin/sh\necho PROGOK\n");
             File.SetUnixFileMode(prog, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             File.CreateSymbolicLink(link, ".prog-test");
@@ -41,7 +59,7 @@ abstract class DesktopEngine : EngineBase
             try { File.Delete(link); File.Delete(prog); }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
         }
-        return Str.Get("dir_no_links", dir);
+        return "dir_no_links";
     }
 
     public static DesktopEngine Create() => OperatingSystem.IsMacOS() ? new MacEngine() : new LinuxEngine();
@@ -82,7 +100,7 @@ abstract class DesktopEngine : EngineBase
     // the script makes then (on a new install the file only appears in the same script).
     protected string PacmanXferFunction(string pacman)
     {
-        var xfer = $"XferCommand = \"{PyExe}\" \"{WritePacmanFetch()}\" / %u %o";
+        var xfer = $"XferCommand = \"{PyExe}\" \"{WritePacmanFetch(RootFilesDir())}\" / %u %o";
         return "dkp_xfer() {\n" +
                "  echo '== retry with the downloads through the installer'\"'\"'s Python'\n" +
                "  c=$(mktemp) || return 1\n" +

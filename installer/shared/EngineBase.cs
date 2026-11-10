@@ -201,7 +201,7 @@ abstract partial class EngineBase
             Info(Str.Get("pre_space", drive.Name, freeGb.ToString("0.0")));
             if (freeGb < needGb) throw new InstallException(Str.Get("pre_no_space", drive.Name, freeGb.ToString("0.0"), needGb));
         }
-        catch (ArgumentException) { }   // a drive DriveInfo cannot describe (network share): no check
+        catch (Exception e) when (e is ArgumentException || e is IOException) { }   // a drive DriveInfo cannot describe (network share), or not ready: no check
     }
 
     const FileAttributes RecallOnDataAccess = (FileAttributes)0x400000;
@@ -694,10 +694,11 @@ abstract partial class EngineBase
         sys.exit(0)
         """;
 
-    // Writes the script to the work folder; returns its path.
-    protected string WritePacmanFetch()
+    // Writes the script to the work folder, or to dir (Mac/Linux: pacman runs it as root, DesktopEngine.RootFilesDir);
+    // returns its path.
+    protected string WritePacmanFetch(string? dir = null)
     {
-        var path = Path.Combine(Work, "pacman-fetch.py");
+        var path = Path.Combine(dir ?? Work, "pacman-fetch.py");
         File.WriteAllText(path, PacmanFetchScript.Replace("\r\n", "\n") + "\n");
         return path;
     }

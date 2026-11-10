@@ -55,7 +55,7 @@ Tests (2026-10-19, containers on this Mac, arm64; a console harness running the 
   apt.devkitpro.org/install-devkitpro-pacman got **403 from Cloudflare** (this network is blocked for every client
   and user agent, as pkg.devkitpro.org was for players in #28): now explained as dkp_why_403 (wget -nv, "ERROR 403").
   The devkitPro apt install itself is therefore not tested here.
-- Ubuntu 24.04 as a user without a password window: the notice with `sudo sh '~/SwitchWakerHD-Build/root-step.sh'`.
+- Ubuntu 24.04 as a user without a password window: the notice with `sudo sh '~/SwitchWakerHD-Build/root-step.sh'` (now `~/.cache/SwitchWakerHD-Installer/root-step.sh`, #59).
 - Fedora 41 as root: Podman route, `dnf install -y podman` completes; podman cannot start inside an unprivileged
   container (expected here), so the build is not reached.
 - The window: the linux-arm64 single file under Xvfb (Debian 12 + libice6/libsm6/fontconfig), Spanish from LANG.

@@ -269,27 +269,23 @@ public partial class MainWindow : Window
     // ── Welcome page: the work folder (#59) ─────────────────────────────────
     string? workDirProblem;
 
-    void ShowWorkDir()
+    // recheck: try the folder again (a pick); else what was found there is reused (a language switch, Back)
+    void ShowWorkDir(bool recheck = false)
     {
-        var dir = DesktopEngine.WorkDir;
-        TxtWelcomeDir.Text = Str.Get("welcome_dir", dir);
-        ToolTip.SetTip(TxtWelcomeDir, dir);
         // a folder the player picked is refused; the installer's own folder is only warned about, and the install
-        // goes ahead as it always did there
-        var problem = BuildFolder.Problem(dir, DesktopEngine.LinksAndPrograms);
-        workDirProblem = BuildFolder.IsDefault(dir) ? null : problem;
-        TxtWelcomeSpace.Text = BuildFolder.SpaceLine(dir, out var low);
-        TxtWelcomeSpace.Foreground = Res(low ? "Warn" : "FgDim");
-        var warn = problem ?? (BuildFolder.SavedGone != null ? Str.Get("dir_saved_gone", BuildFolder.SavedGone) : null);
-        TxtWelcomeDirWarn.Text = warn ?? "";
-        TxtWelcomeDirWarn.IsVisible = warn != null;
-        var notes = new List<string>();
-        if (problem == null && BuildFolder.FatFormat(dir) is string fat) notes.Add(Str.Get("dir_fat", fat));
-        if (problem == null && BuildFolder.IsRemovable(dir)) notes.Add(Str.Get("dir_removable", BuildFolder.NeedGb(dir) + 2));
-        TxtWelcomeDirNote.Text = string.Join("\n\n", notes);
-        TxtWelcomeDirNote.IsVisible = notes.Count > 0;
-        BtnWorkDirDefault.IsVisible = !BuildFolder.IsDefault(dir);
-        TxtOldD.Text = Str.Get("old_d", dir);
+        // goes ahead as it always did there (BuildFolder.State.Blocking)
+        var s = BuildFolder.Describe(DesktopEngine.WorkDir, DesktopEngine.LinksAndPrograms, recheck);
+        workDirProblem = s.Blocking;
+        TxtWelcomeDir.Text = Str.Get("welcome_dir", s.Dir);
+        ToolTip.SetTip(TxtWelcomeDir, s.Dir);
+        TxtWelcomeSpace.Text = s.Space;
+        TxtWelcomeSpace.Foreground = Res(s.Low ? "Warn" : "FgDim");
+        TxtWelcomeDirWarn.Text = s.Warn ?? "";
+        TxtWelcomeDirWarn.IsVisible = s.Warn != null;
+        TxtWelcomeDirNote.Text = s.Notes;
+        TxtWelcomeDirNote.IsVisible = s.Notes != "";
+        BtnWorkDirDefault.IsVisible = !s.IsDefault;
+        TxtOldD.Text = Str.Get("old_d", s.Dir);
         ShowUpdate();   // (its button needs a folder the build can use)
         if (page == Page.Welcome) UpdateFooter();
     }
@@ -314,7 +310,7 @@ public partial class MainWindow : Window
         saved = SavedChoices.Load(DesktopEngine.WorkDir);
         offered = "";
         if (saved != null) ApplySaved(saved);
-        ShowWorkDir();
+        ShowWorkDir(recheck: true);
         if (saved != null) CheckForUpdate();
     }
 
@@ -460,7 +456,7 @@ public partial class MainWindow : Window
     // page offers it with them in one click. A saved path that is gone is named there, and the normal pages pick it.
     SavedChoices? saved = SavedChoices.Load(DesktopEngine.WorkDir);   // (another folder's on a pick: WorkDirChanged)
     string offered = "";   // the release the welcome page offers ("": none)
-    string? latestTag;     // the release an update would build, once looked up (the same for every folder)
+    Task<string>? latest;  // the release an update would build: looked up once, for every folder (and every pick)
 
     void LoadSaved()
     {
@@ -486,17 +482,16 @@ public partial class MainWindow : Window
 
     async void CheckForUpdate()
     {
-        if (latestTag == null)
+        latest ??= Task.Run(() =>
         {
-            try
-            {
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-                latestTag = await Task.Run(() => EngineBase.ReleaseToOffer(timeout.Token));
-            }
-            catch (Exception) { return; }   // offline: the normal pages, filled in
-        }
-        if (saved == null || !SavedChoices.IsNewer(latestTag, saved.Release)) return;
-        offered = latestTag;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            return EngineBase.ReleaseToOffer(timeout.Token);
+        });
+        string tag;
+        try { tag = await latest; }
+        catch (Exception) { return; }   // offline: the normal pages, filled in
+        if (saved == null || !SavedChoices.IsNewer(tag, saved.Release)) return;
+        offered = tag;
         ShowUpdate();
     }
 

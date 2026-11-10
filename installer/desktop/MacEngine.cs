@@ -62,7 +62,13 @@ sealed class MacEngine : DesktopEngine
         string? pkg = null;
         if (!File.Exists(Dkp + "/pacman/bin/pacman") || !File.Exists(DkpPacman))
         {
-            pkg = Path.Combine(WorkDir, "devkitpro-pacman-installer.pkg");
+            // kept for a re-run, and checked again each time: root installs it
+            pkg = Path.Combine(RootFilesDir(), "devkitpro-pacman-installer.pkg");
+            if (File.Exists(pkg))
+            {
+                try { VerifySha256(pkg, DkpPkgSha); }
+                catch (InstallException) { }   // (deleted: downloaded again)
+            }
             if (!File.Exists(pkg))
             {
                 Say(Str.Get("dkp_downloading"));
@@ -80,8 +86,8 @@ sealed class MacEngine : DesktopEngine
     // is still missing after it.
     void InstallDevkit(string? pkg)
     {
-        var log = Path.Combine(WorkDir, "devkitpro-root.log");
-        var script = Path.Combine(WorkDir, "devkitpro-root.sh");
+        var log = Path.Combine(RootFilesDir(), "devkitpro-root.log");
+        var script = Path.Combine(RootFilesDir(), "devkitpro-root.sh");
         var sb = new StringBuilder();
         sb.Append("#!/bin/sh\n# SwitchWakerHD installer: devkitPro and its Switch packages (run once as root)\ncd /\n");
         sb.Append($"exec > {ShQuote(log)} 2>&1\n");
@@ -98,7 +104,7 @@ sealed class MacEngine : DesktopEngine
         Say(Str.Get("dkp_mac_password"));
         // The AppleScript goes in a file: on a command line its quotes would not survive
         var prompt = Str.Get("dkp_mac_prompt").Replace("\\", "\\\\").Replace("\"", "\\\"");
-        var apple = Path.Combine(WorkDir, "devkitpro-root.applescript");
+        var apple = Path.Combine(RootFilesDir(), "devkitpro-root.applescript");
         File.WriteAllText(apple, $"do shell script \"/bin/sh '{script.Replace("'", "'\\\\''")}'\" " +
                                  $"with administrator privileges with prompt \"{prompt}\"\n");
         var output = new List<string>();

@@ -7,9 +7,13 @@ the Mac/Linux installer in `~/SwitchWakerHD-Build`.
 ## What the player sees
 
 The welcome page shows the work folder, the free space on its drive against what the build needs, and a
-**Change folder...** button. Picking a folder uses it as is when it is already a work folder (named
-`SwitchWakerHD-Build`, or holding `installer.log`; not a folder with a release unzipped by hand, like Downloads); otherwise a `SwitchWakerHD-Build` folder goes
-inside it (picking `D:\` builds in `D:\SwitchWakerHD-Build`).
+**Change folder...** button. Picking a folder uses it as is only when it already is a work folder: named
+`SwitchWakerHD-Build`, or holding what only a build leaves (`installer-choices.txt` and a `toolchain/` or
+`python/` folder). Otherwise a `SwitchWakerHD-Build` folder goes inside it (picking `D:\` builds in
+`D:\SwitchWakerHD-Build`), and always for a drive root, a mounted volume's root or the home folder itself. Not
+by an `installer.log` (other programs write one, players keep copies of ours) or a `SwitchWakerHD-v*` (a release
+unzipped by hand in Downloads): the first run replaces `python/`, and "Remove older builds" deletes releases, in
+the work folder (review on PR #144).
 
 A folder that cannot work is refused on the welcome page, with the reason, and **Get started** stays off:
 
@@ -32,7 +36,8 @@ Not enough free space is a warning there (Preflight still stops the install, as 
 The installer's own folder (no pick) is never refused, only warned about: a player who does not choose a folder
 gets the install exactly as before #59.
 
-On a removable drive (Windows `DriveType.Removable`; Mac/Linux under `/Volumes`, `/media`, `/run/media`, `/mnt`)
+On a removable drive (Windows `DriveType.Removable`; Mac/Linux a disk mounted under `/Volumes`, `/media` or
+`/run/media`; not `/mnt`, where internal disks go)
 a note: slower build, keep it connected, and when it is the Switch's own card it needs room for the work folder
 and the finished game, and the work folder stays on the card (user, 2026-10-21: keep it, the next update reuses
 it; the player can delete it).
@@ -41,7 +46,18 @@ The choice is remembered in `SwitchWakerHD-Installer/build-folder.txt` under the
 (`%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS, `~/.local/share` on Linux), written when
 the install starts. Only a folder the player picked: the default is worked out again on every start (it can
 change, #30). **Use the default folder** (shown while another one is chosen) goes back, and the file goes at the
-next install. When the remembered folder's drive is gone, the default is used and the welcome page says so.
+next install, as when the default folder is picked in the dialog. The file holds the folder and the root of the
+drive it was on (the mount point on Mac/Linux): when that drive is gone, or the folder now resolves to another
+drive (an empty `/mnt/data` or a `/Volumes/X` left after an unclean eject, on the system disk), the default is
+used and the welcome page says so.
+
+The files run as root or elevated never go in the work folder, which can be a card or USB disk with no owners
+(FAT, exFAT; macOS ignores ownership on external disks): devkitPro's `devkitProInstaller.exe` goes in
+`%LOCALAPPDATA%\SwitchWakerHD-Installer` (on the system drive, which also covers `subst` and mapped letters the
+administrator does not see), and the Mac/Linux root step's script, its log, devkitPro's pkg (hash checked again
+before each use) and `pacman-fetch.py` in `~/Library/Caches/SwitchWakerHD-Installer` or
+`~/.cache/SwitchWakerHD-Installer` (mode 700). Not moved: the pinned Python that pacman's download fallback
+(`dkp_xfer`, after a 403) runs as root is still the one in the work folder.
 
 Update mode (#110): `installer-choices.txt` stays in the work folder, so the update offer is the chosen folder's.
 Picking another folder loads that folder's last choices and offer when it has them (an older work folder on a
@@ -54,8 +70,9 @@ disk plugged in again), and *Update to vX* stays off while the folder is refused
 
 ## Code
 
-- `installer/shared/BuildFolder.cs`: remembered folder, folder for a pick, problems, drive and free space,
-  removable check.
+- `installer/shared/BuildFolder.cs`: remembered folder, folder for a pick, and `Describe`: what the welcome page
+  shows (problem, space, notes) from one drive lookup; the write and links test is redone only for another folder
+  or a new pick, not on a language switch or Back.
 - Engines: `WorkDir` settable (Windows default stays `ChooseWorkDir`); Preflight's space check uses the drive
   the folder is on (Mac/Linux: the mount point, not `/`).
 - Both welcome pages: folder, space, notes (FAT, removable), *Change folder...*, *Use the default folder*. The log
@@ -69,6 +86,11 @@ disk plugged in again), and *Update to vX* stays off while the folder is refused
   selection in a chosen folder on an exFAT image, and its free-space number from that volume; a path with a space and a read-only folder refused; FAT32
   and exFAT disk images accepted with both notes and their own free space; the pointer file written, read, gone
   after *Use the default folder*; a remembered folder on a missing volume falls back with the warning.
+- Mac, done (2026-11-10, after the review fixes; through the built assembly): a folder with `installer.log` and
+  `python/` gets a `SwitchWakerHD-Build` inside, as do a volume root, `/` and the home folder; one with
+  `installer-choices.txt` and `toolchain/` is used as is; the default picked in the dialog is not remembered; the
+  remembered file holds the drive root, and an empty mount point falls back to the default; a stale `.link-test`
+  no longer refuses a folder; an unreadable folder does not throw; the root files folder is mode 700.
 - Mac, to do on screen: pick an exFAT disk image, a path with a space (refused), a read-only folder
   (refused); install end to end from a folder on another volume; remembered on the next start.
 - Linux (UTM VM): a FAT USB stick is refused (symlink check); an ext4 folder works.
