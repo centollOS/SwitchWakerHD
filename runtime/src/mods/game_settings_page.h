@@ -433,5 +433,6 @@ private:
 void pad(input::PadState& p, Cpu* c);
 void mute(input::PadState& p);
 bool page_open();  // the entry focus stop, page or slide out has the controller
+bool arrow_pane(uint32_t p);  // p is the entry arrow's cursor pane (a menu element's cursor override points at it)
 
 }  // namespace game_settings_page

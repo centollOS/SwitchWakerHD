@@ -461,6 +461,7 @@ bool test_tv_pointer(tv_pointer::State& s) {
 }  // namespace
 
 bool page_open() { return g_has_controller.load(std::memory_order_relaxed); }
+bool arrow_pane(uint32_t p) { return our_pane(p); }
 
 // The Pro Controller's reads (KPADReadEx) are muted on the strength of the last GamePad read (VPADRead, pad()),
 // which is where the arrow and the page see the buttons that give the controller back. Should the GamePad
