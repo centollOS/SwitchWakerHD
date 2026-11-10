@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "../gx2/gx2.h"
+#include "../lockstep.h"
 #include "../mods/mods.h"
 #include "../runtime.h"
 #include "../savestate.h"
@@ -93,7 +94,80 @@ std::string status_text() {
     return b;
 }
 
-// "bench status | save NAME | load NAME | clock [freeze [T] | run] | rec N"
+// (this fork, #67) "bench hash NAME N [SKIP]": lockstep frame hashes (lockstep.h, docs/lockstep.md). Loads the
+// portable state bench/NAME.wwstate with the fixed seeds, skips SKIP logic steps after its first gameplay frame
+// (default 60), hashes the picture the window shows (the GamePad's in GamePad play) for the next N and replies with one line per frame. No input is injected:
+// whatever the controller does goes in, so nobody touches the console during a run.
+debugsrv::Reply hash_command(const debugsrv::Args& a) {
+    if (a.size() < 3 || !valid_name(a[1])) return debugsrv::err("usage: bench hash NAME N [SKIP] (N 1..5000, SKIP 0..3000)");
+    const int n = atoi(a[2].c_str()), skip = a.size() >= 4 ? atoi(a[3].c_str()) : 60;
+    if (n < 1 || n > 5000 || skip < 0 || skip > 3000) return debugsrv::err("usage: bench hash NAME N [SKIP] (N 1..5000, SKIP 0..3000)");
+    const std::string path = bench_dir() + "/" + a[1] + ".wwstate";
+    struct stat st{};
+    if (stat(path.c_str(), &st) != 0) return debugsrv::err("no " + path);
+    const bool mem = a.size() >= 5 && a[4] == "mem";
+    if (!lockstep::arm(uint32_t(n), uint32_t(skip))) return debugsrv::err("a lockstep run is going on");
+    if (mem) lockstep::memsnap_next();
+    struct Wait {
+        std::mutex m;
+        bool done = false, ok = false;
+        std::string why;
+    };
+    auto w = std::make_shared<Wait>();
+    LOG("[bench] lockstep: loading %s, hashing %d frames after %d", path.c_str(), n, skip);
+    ss::request_load_portable_file(path, [w](bool ok, const std::string& why) {
+        std::lock_guard<std::mutex> lk(w->m);
+        w->done = true, w->ok = ok, w->why = why;
+    }, true);
+    auto failed = [&](const std::string& why) {
+        lockstep::disarm();
+        LOG("[bench] lockstep: %s", why.c_str());
+        return debugsrv::err(why);
+    };
+    auto until = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    while (!lockstep::arrived()) {
+        {
+            std::lock_guard<std::mutex> lk(w->m);
+            if (w->done && !w->ok) return failed("the state did not load: " + w->why);
+        }
+        if (std::chrono::steady_clock::now() > until) return failed("no seeded arrival within 90 s");
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    // the hashed frames are slower (each waits for the GPU and is read back): 5 frames a second at least
+    until = std::chrono::steady_clock::now() + std::chrono::seconds((skip + n) / 5 + 60);
+    while (!lockstep::done()) {
+        if (std::chrono::steady_clock::now() > until) return failed("the frames were not all hashed in time");
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    lockstep::disarm();
+    const std::vector<lockstep::Record> rs = lockstep::records();
+    std::string out;
+    char line[200];
+    snprintf(line, sizeof line, "# lockstep %s frames %d skip %d stage %s clock %s %.2f\n", a[1].c_str(), n, skip,
+             mods::current_stage().c_str(), g_frozen.load() ? "frozen" : "running", double(g_time.load()));
+    out += line;
+    out += "# step timer rnd0 rnd1 rnd2 hash w h format draws held\n";
+    for (const lockstep::Record& r : rs) {
+        snprintf(line, sizeof line, "%u %08X %08X %08X %08X %016llX %u %u %u %u %u\n", r.step, r.timer, r.rnd[0], r.rnd[1],
+                 r.rnd[2], (unsigned long long)r.hash, r.w, r.h, r.format, r.draws, r.held ? 1 : 0);
+        out += line;
+    }
+    LOG("[bench] lockstep: %zu frames hashed", rs.size());
+    if (mem) {
+        for (const lockstep::Record& r : rs) {
+            std::string t = "t " + std::to_string(r.step);
+            for (uint16_t v : r.tiles) {
+                snprintf(line, sizeof line, " %04X", v);
+                t += line;
+            }
+            out += t + "\n";
+        }
+        out += lockstep::memdiff();
+    }
+    return debugsrv::ok(out);
+}
+
+// "bench status | save NAME | load NAME | clock [freeze [T] | run] | rec N | hash NAME N [SKIP]"
 debugsrv::Reply command(const debugsrv::Args& a) {
     const std::string what = a.empty() ? "status" : a[0];
     if (what == "status") return debugsrv::ok(status_text());
@@ -175,7 +249,8 @@ debugsrv::Reply command(const debugsrv::Args& a) {
         g_armed = false;
         return debugsrv::ok(out);
     }
-    return debugsrv::err("usage: bench status | save NAME | load NAME | clock [freeze [T] | run] | rec N");
+    if (what == "hash") return hash_command(a);
+    return debugsrv::err("usage: bench status | save NAME | load NAME | clock [freeze [T] | run] | rec N | hash NAME N [SKIP]");
 }
 
 }  // namespace
@@ -230,7 +305,7 @@ void present(uint64_t nowNs, bool gpuBehind, double gpuBusyMs, uint64_t gpuSampl
 }
 
 void register_commands() {
-    debugsrv::add_command("bench", "bench status|save NAME|load NAME|clock [freeze [T]|run]|rec N   performance test",
+    debugsrv::add_command("bench", "bench status|save NAME|load NAME|clock [freeze [T]|run]|rec N|hash NAME N [SKIP]   performance and lockstep tests",
                           command);
 }
 

@@ -48,6 +48,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "platform/input_switch.h"
 #include "platform/settings_switch.h"
 #include "runtime.h"
+#include "lockstep.h"  // (this fork, #67)
 
 // the renderer's own shaders, compiled by uam at build time (CMakeLists.txt, gfx/deko/shaders)
 #include "depth_fsh_dksh.h"
@@ -690,6 +691,17 @@ struct DynamicRes {
     void frame(uint64_t now, bool gpuBehind, double idleMs, double busyMs, uint64_t passFrames) {
         if (!ready) setup();
         take_profile();
+        // (this fork, #67) a lockstep run (lockstep.h): the profile's factor, whatever the GPU's time
+        if (lockstep::armed()) {
+            if (scale != hi) {
+                LOG("[dk] dynamic resolution held at %.2f for a lockstep run", hi);
+                scale = hi;
+                set_res_scale(hi);
+                settle = true;
+            }
+            windowStart = frames = behind = 0;
+            return;
+        }
         if (!on) return;
         if (!windowStart) windowStart = now;
         frames++;
@@ -1236,6 +1248,36 @@ void submit_commands(const char* why) {
 
 namespace {
 
+// (this fork, #67) lockstep frame hashes (lockstep.h): a tagged frame's shown picture (the GamePad's in GamePad play,
+// else the TV's) hashed after its submit (the readback waits for the GPU); the frame's draws counted for every present
+void lockstep_present(Surface* picture, bool held) {
+    static uint64_t lastDraws = 0;
+    static bool used = false;
+    const uint64_t draws = R.drawCount - lastDraws;
+    lastDraws = R.drawCount;
+    lockstep::Record r;
+    if (!lockstep::take_tag(r)) {
+        if (used && !lockstep::armed()) {
+            capture_hash_release();
+            used = false;
+        }
+        return;
+    }
+    if (!used)
+        LOG("[lockstep] hashing the %s picture: buffer %08X, %ux%u",
+            !picture ? "(no)" : picture == S.tvSource || picture == S.tvScan.get() ? "TV" : "GamePad", picture ? picture->addr : 0,
+            picture ? picture->img.pw : 0, picture ? picture->img.ph : 0);
+    used = true;
+    r.held = held;
+    r.draws = uint32_t(std::min<uint64_t>(draws, UINT32_MAX));
+    if (picture && capture_hash_image(picture, r.hash, r.tiles)) {
+        r.w = picture->img.pw;
+        r.h = picture->img.ph;
+        r.format = uint32_t(picture->fmt.image);
+    }
+    lockstep::record(r);
+}
+
 // GX2 swap: the present pass into the next swapchain image
 void present() {
     const uint64_t frame = R.frame + 1;
@@ -1269,6 +1311,15 @@ void present() {
     // once), the frame's passes are submitted (render targets the next frame reads), and it is not shown: the window
     // keeps the last whole picture, and the next frame draws with every shader
     if (finish_held_frame()) {
+        // (this fork, #67) the picture the window would show: the GamePad's copy when the window shows it (as
+        // gamepad_source decides, without its descriptor write), else the TV's (as present_source)
+        Surface* heldPicture = nullptr;
+        if (lockstep::armed()) {
+            Surface* const pad = S.drcScan.get();
+            const bool padShown = g_gamepadView.load(std::memory_order_relaxed) && gfxsw::gamepad_picture_drawn() && pad &&
+                                  pad->img.valid && pad->drcCopyFrame && R.frame - pad->drcCopyFrame <= 30;
+            heldPicture = padShown ? pad : S.scanSrc ? S.scanSrc : S.tvScan.get();
+        }
         S.scanSrc = nullptr;
         if (S.tvSource) S.tvSource->hudFull = false;
         gpuPasses.frame_end();
@@ -1276,6 +1327,7 @@ void present() {
         frame_end();
         check_queue("the submit (frame held)", frame);
         dkQueueSubmitCommands(R.queue, dkCmdBufFinishList(R.cmd));
+        lockstep_present(heldPicture, true);  // (this fork, #67)
         frame_stats();
         latch_res_scale();
         return;
@@ -1321,8 +1373,11 @@ void present() {
         LOG("[dk] frame %llu: the window shows the %s picture", (unsigned long long)frame, padShown ? "GamePad" : "TV");
     }
     if (!pad.surface) g_padRect[2] = 0;
+    Surface* shownPicture = nullptr;  // (this fork, #67) what the window shows: hashed by a lockstep run
     if (pad.surface && draw_picture(pad, capture)) {
+        shownPicture = pad.surface;
     } else if (draw_picture(src, capture)) {
+        shownPicture = src.surface;
         if (shown != 1) LOG("[dk] frame %llu: presenting the game's TV picture", (unsigned long long)frame);
         shown = 1;
         // the GamePad picture in the corner, over the TV's (its touch area: g_padRect, set by draw_picture)
@@ -1368,6 +1423,7 @@ void present() {
                      double(t3 - t2) / 1e6, double(t4 - t3) / 1e6);
     // the frame's pictures to PNG files (both sticks, WWHD_DUMP_*): waits for the GPU, copies its images back
     if (g_capture) capture_present(g_swapImages[slot], g_winW, g_winH, src);
+    lockstep_present(shownPicture, false);  // (this fork, #67)
     g_times.acquireNs += t2 - t1;
     g_times.submitNs += t4 - t3;
     frame_stats();

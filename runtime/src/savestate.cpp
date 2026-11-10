@@ -92,6 +92,7 @@ namespace ss {class NativeRestorePipelineIssuer {public:
 #include "portable_state.h"
 #include "portable_restart.h"
 #include "fixed_seed.h"
+#include "lockstep.h"
 #include "hle/os_time.h"
 #include "state_memory.h"
 #include "state_file_section.h"
@@ -1414,8 +1415,11 @@ void do_portable_save(Cpu* c, int slot) {
 const bool g_fixed_seed = fixed_seed::enabled();
 fixed_seed::BootGate g_fixed_seed_boot;
 fixed_seed::LoadGate g_fixed_seed_load;
+// (this fork, #67) also for the portable load of a lockstep run (lockstep.h), armed from the debug server
+bool g_fixed_seed_lockstep = false;  // (game thread) the load being followed is the lockstep run's
+bool fixed_seed_load_on() { return g_fixed_seed || g_fixed_seed_lockstep; }
 void apply_fixed_seed(const char* when) {
-    if (!g_fixed_seed) return;
+    if (!fixed_seed_load_on()) return;
     g_fixed_seed_boot.mark();
     const auto a = fixed_seed::apply([](uint32_t ea) { return ld32(ea); }, [](uint32_t ea, uint32_t v) { st32(ea, v); },
                                      GD(0x101FF9D4), GD(0x104B5730), GD(0x101FF558),
@@ -1450,7 +1454,8 @@ void service_portable_load(Cpu* c) {
     } else {
         LOG("[savestate] %s: portable state applied: entering %s room %d layer %d at %.1f %.1f %.1f", portable_label(p.slot).c_str(),
             p.s->stage.c_str(), p.s->room, p.s->layer, p.s->pos[0], p.s->pos[1], p.s->pos[2]);
-        if (g_fixed_seed) {
+        g_fixed_seed_lockstep = lockstep::seed_wanted();  // (this fork, #67)
+        if (fixed_seed_load_on()) {
             g_fixed_seed_boot.mark();
             g_fixed_seed_load.start(ld32(GD(0x101FF560)));  // written once the old stage is gone (service)
         }
@@ -2164,17 +2169,35 @@ void service(Cpu* c) {
     service_warp(c);       // world editor
     service_file_save(c);  // world editor test states
     if (int slot = g_psave_req.exchange(0)) do_portable_save(c, slot);
-    if (g_fixed_seed) {  // (before service_portable_load: a load applied now is followed from the next boundary on)
+    if (fixed_seed_load_on()) {  // (before service_portable_load: a load applied now is followed from the next boundary on)
         switch (g_fixed_seed_load.step(ld32(GD(0x101FF560)))) {
-        case fixed_seed::LoadGate::kLoading: apply_fixed_seed("portable state: loading the new stage"); break;
+        case fixed_seed::LoadGate::kLoading:
+            // (this fork, #67) a lockstep run also fixes g_Counter.mTimer and mCounter1: they count frames since the
+            // boot and go on across loads, and the stages' looping animations and light take their phase from them,
+            // so two loads of the same state show other pictures from the first frame. The old stage is gone and the
+            // new one not created yet; the gate follows the written mTimer.
+            if (g_fixed_seed_lockstep) {
+                st32(GD(0x101FF560), lockstep::kTimer);
+                st32(GD(0x101FF55C), lockstep::kCounter1);
+                g_fixed_seed_load.last = lockstep::kTimer;
+            }
+            apply_fixed_seed("portable state: loading the new stage");
+            break;
         case fixed_seed::LoadGate::kArrived:
             apply_fixed_seed("portable state: first frame in the new stage");
+            // (#67) mCounter1 also counts the loading frames, whose number varies: set again, as mCounter0 is
+            if (g_fixed_seed_lockstep) st32(GD(0x101FF55C), lockstep::kCounter1 + 1);
             // the load-relative capture's start after a portable load (WWHD_TEST_CAPTURE_LOAD_STEP; gx2_core.cpp)
             g_seeded_arrival_step = interp::logic_steps();
             g_seeded_arrival_counter = ld32(GD(0x101FF560));
             g_seeded_arrival_frame = render::frame_count();
+            if (g_fixed_seed_lockstep) lockstep::seeded_arrival(interp::logic_steps());  // (this fork, #67)
+            g_fixed_seed_lockstep = false;
             break;
-        case fixed_seed::LoadGate::kTimedOut: LOG("[test] WWHD_TEST_FIXED_SEED: portable state: no stage change seen"); break;
+        case fixed_seed::LoadGate::kTimedOut:
+            LOG("[test] WWHD_TEST_FIXED_SEED: portable state: no stage change seen");
+            g_fixed_seed_lockstep = false;
+            break;
         default: break;
         }
     }

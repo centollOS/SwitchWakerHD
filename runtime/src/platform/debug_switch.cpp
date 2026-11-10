@@ -209,11 +209,6 @@ debugsrv::Reply bgshaders(const debugsrv::Args& a) {
                                                                                        : background_shaders::status()));
 }
 
-// "fxaa [0|1]": the Picture tab's Edge smoothing (gfxsw::set_fxaa), not saved
-debugsrv::Reply fxaa(const debugsrv::Args& a) {
-    if (!a.empty()) gfxsw::set_fxaa(a[0] != "0");
-    return debugsrv::ok(std::string("fxaa ") + (gfxsw::fxaa() ? "on" : "off"));
-}
 // "hudmark [0|1]": the Dev tab's "FXAA at the game's HUD start" (issue #58), not saved
 debugsrv::Reply hudmark(const debugsrv::Args& a) {
     if (!a.empty()) gfxsw::set_fxaa_hud_marks(a[0] != "0");
@@ -229,6 +224,11 @@ debugsrv::Reply bloom(const debugsrv::Args& a) {
 debugsrv::Reply fsr(const debugsrv::Args& a) {
     if (!a.empty()) gfxsw::set_fsr(a[0] != "0");
     return debugsrv::ok(std::string("fsr ") + (gfxsw::fsr() ? "on" : "off"));
+}
+// "fxaa [0|1]": the Picture tab's edge smoothing (gfxsw::set_fxaa), not saved (a known picture change for lockstep.py)
+debugsrv::Reply fxaa(const debugsrv::Args& a) {
+    if (!a.empty()) gfxsw::set_fxaa(a[0] != "0");
+    return debugsrv::ok(std::string("fxaa ") + (gfxsw::fxaa() ? "on" : "off"));
 }
 debugsrv::Reply blur(const debugsrv::Args& a) {
     if (!a.empty()) gfxsw::set_distance_blur(a[0] != "0");
@@ -525,11 +525,11 @@ void start() {
     debugsrv::add_command("core3", "core3 [0|1]            background shader compiles on core 3 (test)", core3);
     debugsrv::add_command("guestcore3", "guestcore3 [0|1]       guest threads of cores 0/2 also on core 3 (test)", guestcore3);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
-    debugsrv::add_command("fxaa", "fxaa [0|1]             the Picture tab's Edge smoothing (FXAA; not saved)", fxaa);
     debugsrv::add_command("hudmark", "hudmark [0|1]          FXAA at the game's HUD start, 0 the guess alone (not saved)", hudmark);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
     debugsrv::add_command("blur", "blur [0|1]             the Switch tab's Distance blur (not saved)", blur);
     debugsrv::add_command("fsr", "fsr [0|1]              FSR 1 in the present pass (not saved)", fsr);
+    debugsrv::add_command("fxaa", "fxaa [0|1]             edge smoothing (FXAA, not saved)", fxaa);
     debugsrv::add_command("stall", "stall <ms> [core] [n] [gap]  spin above the game threads (audio guard tests)", stall);
     debugsrv::add_command("evict", "evict [now | idle <n>] texture eviction: now, or after n unused frames", evict);
     debugsrv::add_command("bgshaders", "bgshaders [start]      background shaders: start / status", bgshaders);
