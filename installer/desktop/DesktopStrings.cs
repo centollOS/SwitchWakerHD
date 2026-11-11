@@ -33,5 +33,10 @@ static class DesktopStrings
         ["btn_no"]         = ("No",                                                   "No"),
         ["rel_no_script"]  = ("La versión descargada no contiene tools/switch/make_sd.py.", "The downloaded release has no tools/switch/make_sd.py."),
         ["step_python"]    = ("Python 3.14",                                          "Python 3.14"),
+        ["dir_no_links"]   = ("La unidad de {0} no admite enlaces simbólicos ni programas (suele ser FAT o exFAT), y el juego no se puede construir ahí. Elige una carpeta en otro disco.",
+                               "The drive of {0} cannot hold symbolic links or programs (usually FAT or exFAT), so the game cannot be built there. Choose a folder on another disk."),
+        // a disk's name is part of the path on a Mac or Linux (/Volumes/SWITCH SD)
+        ["dir_bad_chars"]  = ("La ruta {0} tiene espacios, acentos u otros caracteres que las herramientas de compilación no admiten. Elige una carpeta cuya ruta solo tenga letras sin acento, números, - y _. En un disco cuyo nombre tiene espacios (/Volumes/SWITCH SD), cambia antes el nombre del disco.",
+                               "The path {0} has spaces, accents or other characters the build tools cannot take. Choose a folder whose path has only plain letters, digits, - and _. On a disk whose name has spaces (/Volumes/SWITCH SD), rename the disk first."),
     };
 }

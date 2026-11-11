@@ -118,7 +118,8 @@ abstract partial class EngineBase
 
     long FreeBytes()
     {
-        try { return new DriveInfo(Path.GetPathRoot(Path.GetFullPath(Work))!).AvailableFreeSpace; }
+        // the work folder's own drive (#59: on Mac/Linux an external disk's mount point, not "/")
+        try { return BuildFolder.DriveOf(Path.GetFullPath(Work))?.AvailableFreeSpace ?? -1; }
         catch (Exception e) when (e is ArgumentException || e is IOException || e is UnauthorizedAccessException) { return -1; }
     }
 

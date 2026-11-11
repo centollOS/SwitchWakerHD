@@ -143,7 +143,7 @@ sealed class LinuxEngine : DesktopEngine
     // session can ask for the password, else the user runs it with sudo in a terminal (the notice shows the command).
     void RunAsRoot(string what, string script)
     {
-        var path = Path.Combine(WorkDir, "root-step.sh");
+        var path = Path.Combine(RootFilesDir(), "root-step.sh");
         File.WriteAllText(path, "#!/bin/sh\n# SwitchWakerHD installer: " + what + "\n" + script);
         OnLog(script.Trim(), LogKind.Output);
 

@@ -9,7 +9,6 @@ using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace SwitchWakerHD.Installer;
@@ -18,18 +17,18 @@ sealed class InstallEngine : EngineBase
 {
     protected override string Work => WorkDir;
 
-    public static readonly string WorkDir = ChooseWorkDir();
+    // The player's pick on the welcome page, remembered from the last run (BuildFolder), or ChooseWorkDir's
+    public static string WorkDir = BuildFolder.Load(ChooseWorkDir);
 
     // %USERPROFILE%\SwitchWakerHD-Build, unless the user name has a space or a non-ASCII letter ("JAM Visuals",
     // issue #30): the build tools do not all cope with those, so then a folder at the root of the system drive
     // (C:\SwitchWakerHD-Build), which standard users may create. Back to the profile if that cannot be created.
     // Also there when the profile path is long: the release is unpacked two folders down and the deepest object
     // file adds ~160 characters, and devkitPro's gcc cannot open paths over 260 (MAX_PATH).
-    const int MaxWorkDirLength = 45;
     static string ChooseWorkDir()
     {
         var inProfile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SwitchWakerHD-Build");
-        if (Regex.IsMatch(inProfile, @"^[A-Za-z0-9_.:\\-]+$") && inProfile.Length <= MaxWorkDirLength)
+        if (BuildFolder.CharsOk(inProfile) && inProfile.Length <= BuildFolder.MaxWindowsLength)
             return inProfile;
         var atRoot = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", "SwitchWakerHD-Build");
         try
@@ -85,7 +84,12 @@ sealed class InstallEngine : EngineBase
 
         if (pacman == "")
         {
-            var installer = Path.Combine(WorkDir, "devkitProInstaller.exe");
+            // In the user's own app-data folder on the system drive, not the work folder: it runs elevated, and the
+            // administrator does not see a subst or mapped letter, while a card or USB drive (FAT, no ACLs) lets
+            // anyone swap it after the hash check.
+            var ownDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SwitchWakerHD-Installer");
+            Directory.CreateDirectory(ownDir);
+            var installer = Path.Combine(ownDir, "devkitProInstaller.exe");
             Say(Str.Get("dkp_downloading"));
             Download("https://github.com/devkitPro/installer/releases/download/v3.0.3/devkitProUpdater-3.0.3.exe", installer);
             Say(Str.Get("dkp_verifying"));

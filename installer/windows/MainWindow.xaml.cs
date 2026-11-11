@@ -38,7 +38,7 @@ public partial class MainWindow : Window
     readonly object logFileLock = new();
     StreamWriter? logFile;
     const int LogBoxMaxChars = 400_000;
-    static readonly string LogPath = System.IO.Path.Combine(InstallEngine.WorkDir, "installer.log");
+    static string LogPath => System.IO.Path.Combine(InstallEngine.WorkDir, "installer.log");
 
     readonly (Ellipse ring, TextBlock glyph, TextBlock label)[] stepRows = new (Ellipse, TextBlock, TextBlock)[4];
     readonly StepState[] stepStates = new StepState[4];
@@ -92,7 +92,7 @@ public partial class MainWindow : Window
         }
         switch (page)
         {
-            case Page.Welcome:  Set(BtnSecondary, null);         Set(BtnPrimary, "btn_start"); break;
+            case Page.Welcome:  Set(BtnSecondary, null);         Set(BtnPrimary, "btn_start", workDirProblem == null); break;
             case Page.Game:     Set(BtnSecondary, "btn_back");   Set(BtnPrimary, "btn_install", GameReady()); break;
             case Page.Progress:
                 if (running) { Set(BtnSecondary, "btn_cancel"); Set(BtnPrimary, null); }
@@ -115,7 +115,9 @@ public partial class MainWindow : Window
         TxtWelcomeLi2.Text   = "•  " + Str.Get("welcome_li2");
         TxtWelcomeLi3.Text   = "•  " + Str.Get("welcome_li3");
         TxtWelcomeNeed.Text  = Str.Get("welcome_need");
-        TxtWelcomeDir.Text   = Str.Get("welcome_dir", InstallEngine.WorkDir);
+        BtnWorkDir.Content   = Str.Get("btn_change_dir");
+        BtnWorkDirDefault.Content = Str.Get("btn_default_dir");
+        ShowWorkDir();
 
         TxtGameH.Text    = Str.Get("game_h");
         TxtGameBody.Text = Str.Get("game_body");
@@ -132,7 +134,6 @@ public partial class MainWindow : Window
         TxtShH.Text = Str.Get("sh_h");
         TxtShD.Text = Str.Get("sh_d");
         TxtOldH.Text = Str.Get("old_h");
-        TxtOldD.Text = Str.Get("old_d", InstallEngine.WorkDir);
         TxtHmH.Text = Str.Get("hm_h");
         TxtHmNew.Text = Str.Get("hm_new");
         TxtHmD.Text = Str.Get("hm_d");
@@ -181,7 +182,7 @@ public partial class MainWindow : Window
     {
         switch (page)
         {
-            case Page.Welcome:  ShowPage(Page.Game); break;
+            case Page.Welcome:  if (workDirProblem == null) ShowPage(Page.Game); break;
             case Page.Game:     StartInstall(); break;
             case Page.Progress: if (!running && failed) StartInstall(); break;
             case Page.Done:     Close(); break;
@@ -192,9 +193,59 @@ public partial class MainWindow : Window
     {
         switch (page)
         {
-            case Page.Game:     ShowPage(Page.Welcome); break;
+            case Page.Game:     ShowPage(Page.Welcome); ShowWorkDir(); break;
             case Page.Progress: if (running) AskCancel(); else Close(); break;
         }
+    }
+
+    // ── Welcome page: the work folder (#59) ─────────────────────────────────
+    string? workDirProblem;
+
+    // recheck: try the folder again (a pick); else what was found there is reused (a language switch, Back)
+    void ShowWorkDir(bool recheck = false)
+    {
+        // a folder the player picked is refused; the installer's own folder is only warned about, and the install
+        // goes ahead as it always did there (BuildFolder.State.Blocking)
+        var s = BuildFolder.Describe(InstallEngine.WorkDir, recheck: recheck);
+        workDirProblem = s.Blocking;
+        TxtWelcomeDir.Text = Str.Get("welcome_dir", s.Dir);
+        TxtWelcomeDir.ToolTip = s.Dir;
+        TxtWelcomeSpace.Text = s.Space;
+        TxtWelcomeSpace.Foreground = (Brush)FindResource(s.Low ? "Warn" : "FgDim");
+        TxtWelcomeDirWarn.Text = s.Warn ?? "";
+        TxtWelcomeDirWarn.Visibility = s.Warn == null ? Visibility.Collapsed : Visibility.Visible;
+        TxtWelcomeDirNote.Text = s.Notes;
+        TxtWelcomeDirNote.Visibility = s.Notes != "" ? Visibility.Visible : Visibility.Collapsed;
+        BtnWorkDirDefault.Visibility = s.IsDefault ? Visibility.Collapsed : Visibility.Visible;
+        TxtOldD.Text = Str.Get("old_d", s.Dir);
+        ShowUpdate();   // (its button needs a folder the build can use)
+        if (page == Page.Welcome) UpdateFooter();
+    }
+
+    void BtnWorkDir_Click(object sender, RoutedEventArgs e)
+    {
+        using var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = Str.Get("dlg_build_dir"), ShowNewFolderButton = true };
+        var parent = System.IO.Path.GetDirectoryName(InstallEngine.WorkDir);
+        if (parent != null && Directory.Exists(parent)) dlg.SelectedPath = parent;
+        if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+        InstallEngine.WorkDir = BuildFolder.ForPick(dlg.SelectedPath);
+        WorkDirChanged();
+    }
+
+    void BtnWorkDirDefault_Click(object sender, RoutedEventArgs e)
+    {
+        InstallEngine.WorkDir = BuildFolder.UseDefault();
+        WorkDirChanged();
+    }
+
+    // Another folder: its own last build's choices and update offer (#110), when it has them; else the pages as they are
+    void WorkDirChanged()
+    {
+        saved = SavedChoices.Load(InstallEngine.WorkDir);
+        offered = "";
+        if (saved != null) ApplySaved(saved);
+        ShowWorkDir(recheck: true);
+        if (saved != null) CheckForUpdate();
     }
 
     // ── Game page ────────────────────────────────────────────────────────────
@@ -335,8 +386,9 @@ public partial class MainWindow : Window
     // ── The last build's choices (#110, SavedChoices.cs) ────────────────────
     // At start the pages get the choices of the last build that worked; when a newer release is out, the welcome
     // page offers it with them in one click. A saved path that is gone is named there, and the normal pages pick it.
-    readonly SavedChoices? saved = SavedChoices.Load(InstallEngine.WorkDir);
+    SavedChoices? saved = SavedChoices.Load(InstallEngine.WorkDir);   // (another folder's on a pick: WorkDirChanged)
     string offered = "";   // the release the welcome page offers ("": none)
+    Task<string>? latest;  // the release an update would build: looked up once, for every folder (and every pick)
 
     void LoadSaved()
     {
@@ -363,12 +415,13 @@ public partial class MainWindow : Window
 
     async void CheckForUpdate()
     {
-        string tag;
-        try
+        latest ??= Task.Run(() =>
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            tag = await Task.Run(() => EngineBase.ReleaseToOffer(timeout.Token));
-        }
+            return EngineBase.ReleaseToOffer(timeout.Token);
+        });
+        string tag;
+        try { tag = await latest; }
         catch (Exception) { return; }   // offline: the normal pages, filled in
         if (saved == null || !SavedChoices.IsNewer(tag, saved.Release)) return;
         offered = tag;
@@ -386,13 +439,14 @@ public partial class MainWindow : Window
         TxtUpdMissing.Text = missing == null ? "" : Str.Get("upd_missing", missing);
         TxtUpdMissing.Visibility = missing == null ? Visibility.Collapsed : Visibility.Visible;
         BtnUpdate.Content = Str.Get("btn_update", offered);
+        BtnUpdate.IsEnabled = workDirProblem == null;
         BtnUpdate.Visibility = missing == null ? Visibility.Visible : Visibility.Collapsed;
         UpdatePanel.Visibility = Visibility.Visible;
     }
 
     void BtnUpdate_Click(object sender, RoutedEventArgs e)
     {
-        if (saved == null || running) return;
+        if (saved == null || running || workDirProblem != null) return;
         ApplySaved(saved);   // (the game page may have been changed since)
         if (saved.Missing() != null || !GameReady()) { ShowPage(Page.Game); return; }
         StartInstall();
@@ -409,6 +463,8 @@ public partial class MainWindow : Window
         engine.OldGameCubeMinimap = oldGcMinimap;
         engine.PrepareShaders = ChkShaders.IsChecked == true;
         engine.RemoveOldBuilds = ChkOldBuilds.IsChecked == true;
+        BuildFolder.Save(InstallEngine.WorkDir);
+        TxtLogPath.Text = Str.Get("log_at", LogPath);
         running = true; failed = false;
         cts = new CancellationTokenSource();
         for (int i = 0; i < stepStates.Length; i++) SetStep(i, StepState.Pending);
