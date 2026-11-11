@@ -99,6 +99,45 @@ void show_keyboard() {
     if (max_len >= 0 && text.size() > (size_t)max_len) text.resize((size_t)max_len);
     done(ok, text);
 }
+// ---- the controller the gyro and rumble follow (issue #138): the attached Joy-Cons (handheld) or player 1 (a Pro
+// Controller, or Joy-Cons held apart), whichever was used last: a new press, or a stick past half way. Player 1 while
+// neither has been used (a player who connected a Pro Controller holds it), the other when the one in use goes.
+// Buttons and sticks still come from both together (update's combined pad).
+enum Source { kNone = -1, kHandheld = 0, kPlayer1 = 1 };
+int g_source = kNone;
+bool g_source_used = false;  // the source was chosen by a press, not by the start's default
+
+bool pad_used(const ::PadState& p) {
+    // the sticks' emulated directions are left to the stick test
+    constexpr u64 kStickDirs = HidNpadButton_StickLLeft | HidNpadButton_StickLUp | HidNpadButton_StickLRight |
+                               HidNpadButton_StickLDown | HidNpadButton_StickRLeft | HidNpadButton_StickRUp |
+                               HidNpadButton_StickRRight | HidNpadButton_StickRDown;
+    if (padGetButtonsDown(&p) & ~kStickDirs) return true;
+    constexpr s32 kHalf = JOYSTICK_MAX / 2;
+    for (unsigned i = 0; i < 2; i++) {
+        const HidAnalogStickState st = padGetStickPos(&p, i);
+        if (st.x > kHalf || st.x < -kHalf || st.y > kHalf || st.y < -kHalf) return true;
+    }
+    return false;
+}
+
+void update_source(const ::PadState& hh, const ::PadState& p1) {
+    const bool hh_on = padIsConnected(&hh) && (padGetStyleSet(&hh) & HidNpadStyleTag_NpadHandheld);
+    const bool p1_on = padIsConnected(&p1) &&
+                       (padGetStyleSet(&p1) & (HidNpadStyleTag_NpadFullKey | HidNpadStyleTag_NpadJoyDual));
+    int src = g_source;
+    if (hh_on && p1_on) {
+        const bool hh_used = pad_used(hh), p1_used = pad_used(p1);
+        if (hh_used != p1_used) src = hh_used ? kHandheld : kPlayer1, g_source_used = true;
+        else if (!g_source_used) src = kPlayer1;
+        else if (src == kNone) src = kPlayer1;
+    } else
+        src = hh_on ? kHandheld : p1_on ? kPlayer1 : kNone;  // the one connected (also the fallback)
+    if (src == g_source) return;
+    g_source = src;
+    if (src != kNone) LOG("[gyro] controller: %s", src == kHandheld ? "handheld" : "player 1");
+}
+
 // ---- gyro: the controller's six-axis sensor feeds motion.h (the virtual GamePad's motion) while the
 // controller source is chosen (Settings > Switch > Gyro aiming); the sensors run only then
 struct Gyro {
@@ -138,14 +177,16 @@ void gyro_sample(int device, const HidSixAxisSensorState& st) {
     motion::controller_sample(0x5357000 + device, g_gyro.t_ns, gyro, accel);
 }
 
-void update_gyro(::PadState& pad) {
+void update_gyro(const ::PadState& p1) {
     gyro_start(motion::wants_controller_sensors());
-    const u32 style = padGetStyleSet(&pad);
     int which = -1;
-    if (style & HidNpadStyleTag_NpadHandheld) which = 0;
-    else if (style & HidNpadStyleTag_NpadFullKey) which = 1;
-    else if (style & HidNpadStyleTag_NpadJoyDual)  // the right Joy-Con when there is one (it aims)
-        which = (padGetAttributes(&pad) & HidNpadAttribute_IsRightConnected) ? 3 : 2;
+    if (g_source == kHandheld) which = 0;
+    else if (g_source == kPlayer1) {
+        const u32 style = padGetStyleSet(&p1);  // player 1's own style, not the combined pad's
+        if (style & HidNpadStyleTag_NpadFullKey) which = 1;
+        else if (style & HidNpadStyleTag_NpadJoyDual)  // the right Joy-Con when there is one (it aims)
+            which = (padGetAttributes(&p1) & HidNpadAttribute_IsRightConnected) ? 3 : 2;
+    }
     static int controllers = -1;
     if (const int n = which >= 0; n != controllers) motion::set_gyro_controllers(controllers = n);
     if (!g_gyro.started || which < 0) return;
@@ -197,7 +238,7 @@ void rumble_send(int device, float level) {
     hidSendVibrationValues(g_rumble.handles[device], v, 2);
 }
 
-void update_rumble(::PadState& pad) {
+void update_rumble(const ::PadState& p1) {
     if (!g_rumble.init) {
         g_rumble.init = true;
         static const struct { HidNpadIdType id; HidNpadStyleTag style; } kDevices[3] = {
@@ -211,8 +252,11 @@ void update_rumble(::PadState& pad) {
             if (!g_rumble.ok[i]) LOG("[rumble] vibration device %d: rc 0x%x", i, rc);
         }
     }
-    const u32 style = padGetStyleSet(&pad);
-    const int device = style & HidNpadStyleTag_NpadHandheld ? 0 : style & HidNpadStyleTag_NpadFullKey ? 1
+    // the gyro's controller (update_source); for player 1 its own style
+    const u32 style = padGetStyleSet(&p1);
+    const int device = g_source == kHandheld ? 0
+                       : g_source != kPlayer1 ? -1
+                       : style & HidNpadStyleTag_NpadFullKey ? 1
                        : style & HidNpadStyleTag_NpadJoyDual ? 2 : -1;
     const u64 now = armTicksToNs(armGetSystemTick());
     static u64 last = 0;
@@ -247,12 +291,21 @@ void init() {
 }
 
 void update() {
-    static ::PadState pad;
-    static const bool initialized = [] { padInitializeDefault(&pad); return true; }();
+    // pad: both together (buttons, sticks); hh and p1 apart, for the controller the gyro and rumble follow
+    static ::PadState pad, hh, p1;
+    static const bool initialized = [] {
+        padInitializeDefault(&pad);
+        padInitialize(&hh, HidNpadIdType_Handheld);
+        padInitialize(&p1, HidNpadIdType_No1);
+        return true;
+    }();
     (void)initialized;
     padUpdate(&pad);
-    update_gyro(pad);
-    update_rumble(pad);
+    padUpdate(&hh);
+    padUpdate(&p1);
+    update_source(hh, p1);
+    update_gyro(p1);
+    update_rumble(p1);
     u64 held = padGetButtons(&pad);
     // presses from the debug server (platform/debug_server.h): as if on the controller, the settings menu included
     const debugsrv::Injected injected = debugsrv::running() ? debugsrv::injected() : debugsrv::Injected{};
