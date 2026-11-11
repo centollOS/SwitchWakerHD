@@ -38,6 +38,9 @@ void set_fxaa_hud_marks(bool on);
 // option, off by default
 bool fsr();
 void set_fsr(bool on);
+// (issue #145) the vertex copy thread's spin for the next job before it sleeps, in microseconds (test; not saved)
+int async_copy_spin_us();
+void set_async_copy_spin_us(int us);
 // the bloom and the distance blur (issue #15): the game samples its bloom chain and its half-size picture with more
 // levels than the render targets have; gfx/deko mip_chain makes those levels. On by default (WWHD_BLOOM=0,
 // WWHD_DISTANCE_BLUR=0 off at start); any thread
@@ -66,6 +69,7 @@ enum DrawOpt : int {
     // (WWHD_DK_TARGET_MEMO2), the fixed state in three memos (WWHD_DK_FIXED_MEMO), vertex states by layout identity
     // (WWHD_DK_VTX_IDENTITY)
     kOptTargetMemo2, kOptFixedMemo, kOptVtxIdentity,
+    kOptAsyncCopy,  // (issue #145) the draws' vertex copies on a copy thread (WWHD_DK_ASYNC_COPY; on with core 3)
     kDrawOpts
 };
 // shader compile threads for the shaders draws ask for (gfx/deko/shaders_dk.cpp helper_main): 0 auto (the default:

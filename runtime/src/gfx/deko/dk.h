@@ -112,6 +112,23 @@ struct StreamSlice {
 StreamSlice stream_upload(const void* data, uint32_t size, uint32_t alignment, uint32_t zeroTail = 0);
 // guest memory, uploaded once per frame per (address, alignment, zero tail) while R.streamGen is unchanged
 StreamSlice stream_guest(uint32_t addr, uint32_t size, uint32_t alignment, uint32_t zeroTail = 0);
+// (issue #145, WWHD_DK_ASYNC_COPY) stream_guest for a draw's vertex streams: while g_asyncCopy, a copy of 512 bytes or
+// more is made by a copy thread (core 3, else 0; WWHD_DK_ASYNC_COPY_CORE) while the render thread goes on. The slice's address
+// is known at once; its bytes are written before the GPU can read them: stream_copies_finish(), called before every
+// dkQueueSubmitCommands, makes the copies not taken yet on the calling thread and waits for the one in progress (at
+// most 20 ms: then it makes them again itself and turns the copy thread off). Only vertex streams: uniform blocks
+// stay on the render thread. On where the process has core 3, else off; WWHD_DK_ASYNC_COPY=0/1 ([dev]) decides
+// instead, and the Switch tab and the debug server's "asynccopy" switch it while the game runs.
+StreamSlice stream_guest_vertices(uint32_t addr, uint32_t size, uint32_t alignment);
+extern std::atomic<bool> g_asyncCopy;
+extern std::atomic<uint32_t> g_copySpinUs;  // the copy thread's spin before it sleeps, in us
+void stream_copies_finish();
+struct AsyncCopyStats {
+    uint64_t jobs = 0, bytes = 0;      // copies queued, their bytes
+    uint64_t helped = 0, waitNs = 0;   // ... made by the render thread at a finish; its time in finishes
+    uint64_t finishes = 0, wakes = 0;  // finishes with copies pending; signals to the sleeping copy thread
+};
+AsyncCopyStats async_copy_stats_take();
 
 // ---- the device (backend.cpp)
 struct Renderer {
