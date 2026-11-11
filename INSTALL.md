@@ -23,9 +23,8 @@ the PC.
    Git and MSYS2's gcc and builds
    the forwarder `.nsp` ([details](tools/switch/forwarder/INSTALL.md)); it travels in `NSP\` with the rest: install it with
    DBI (*Browse SD card > NSP > wwhd_forwarder.nsp > Install*; it needs current Atmosphère sigpatches).
-   Optional, the **GameCube sea minimap**: choose your own GameCube Wind Waker (`.iso`, `.gcm`, `.rvz` or its
-   folder); the installer downloads the mod and builds it into the game
-   ([details](#optional-code-mods-the-gamecube-sea-minimap)).
+   The **HD minimap** (new) is always built into the game: tick *Turn it on now* to have it from the first start,
+   or turn it on later in the game's menu ([details](#optional-code-mods-the-minimaps)).
    Optional, **Brazilian Portuguese**: download Triforce-Heroes' fan translation yourself from
    [their page](https://triforce-heroes.com.br/traducoes/the-legend-of-zelda-the-wind-waker-hd) (the *Emulador*
    version) and choose the downloaded `.rar` (or the folder you extracted it to)
@@ -230,15 +229,46 @@ build/sd/switch/wwhd/
 └── game/                 your game's files
 ```
 
-### Optional: code mods (the GameCube sea minimap)
+### Optional: code mods (the minimaps)
 
-The GameCube sea minimap draws a GameCube-style chart of the Great Sea in a corner of the screen. It needs **two
+Two minimaps from the mod catalogue can be built into the game. The installers build in the HD minimap; the GameCube
+sea minimap is built only with `make_sd.py` by hand. Use one of them: they use the same corner of the screen.
+
+**The HD minimap** (`hd-minimap`, based on **Minimap HD by Chironeyes**, the Cemu mod on
+[GameBanana](https://gamebanana.com/mods/727687) and [GitHub](https://github.com/Chironeyes/The.Wind.Waker.HD-Minimap.HD)) draws a minimap in the bottom-left corner with the HD game's own GamePad maps: the island of the sea square
+you are in, the floor plan of a dungeon once you have its map, and while sailing (D-pad down) a treasure chart you own.
+It reads the maps from your own game while it runs, so it needs nothing besides your Wind Waker HD. The
+[Easy Installer](#windows-easy-installer-recommended) always builds it into the game: tick *Turn it on now* to have it
+from the first start; otherwise it is there switched off. With `make_sd.py`:
+
+```sh
+python3 tools/switch/make_sd.py --game-dir /path/to/10143500 --guest-mod hd-minimap
+```
+
+(add `--guest-mod-off hd-minimap` to build it in switched off.)
+
+- **On or off** in the game: hold **Minus** > **Mods** > **Built-in**, its switch at the top (*HD minimap*); it
+  applies when you start the game again. Switched off it is not loaded at all.
+
+- On foot, D-pad left shows or hides it and D-pad right makes it bigger or smaller; in a dungeon, D-pad down zooms.
+  On the boat, D-pad left and right stay the cannon and the grappling hook, and D-pad down switches between the
+  compasses, the minimap and the minimap with a chart. It hides in menus, cutscenes and first person.
+- Its options (position, both sizes, opacity, fading, the buttons) are in the game: hold **Minus** > **Mods** >
+  **Built-in**, at the top, *HD minimap*; then close the game and start it again. Or `--mod-option hd-minimap.size=220` when
+  you build (that sets the first start's values).
+- Everything it needs is inside `wwhd.nro` (its images, with their MIT notice: the frame, wind arrow and D-pad icons
+  are Chironeyes' artwork; the maps are read from your own game). Your choices are kept in
+  `switch/wwhd/mods/hd-minimap-options.json`, which the game writes the first time: a new build or update keeps them.
+- Cost on the console (EU, handheld, stock 1020 MHz CPU, 2026-11-08): about 0.15-0.4 ms of the main thread's
+  33 ms per frame, and one longer frame (under 0.1 s) the first time an island's map is shown in a session.
+
+**The GameCube sea minimap** draws a GameCube-style chart of the Great Sea in a corner of the screen. It needs **two
 things besides your Wind Waker HD**:
 
 - **Your own GameCube Wind Waker** (USA, Europe or Japan): a disc image (`.iso`, `.gcm`, `.rvz`) or its extracted
   folder. The mod draws its maps from it, on your computer.
-On Windows, the [Easy Installer](#windows-easy-installer-recommended) has a box for it: choose your GameCube disc
-there. With `make_sd.py`, add the mod and the disc to the command:
+The installers no longer offer it (since the HD minimap, issue #121); with `make_sd.py`, add the mod and the disc to
+the command:
 
 ```sh
 python3 tools/switch/make_sd.py --game-dir /path/to/10143500 \
@@ -255,13 +285,14 @@ The Switch cannot build code mods (Mod SDK v2, "guest" mods) itself, so they go 
   [python.org](https://www.python.org/downloads/), or make an `.iso` in Dolphin (right-click the game, *Convert
   File...*, format *ISO*) and give that. An `.iso`, a `.gcm` or a folder works with any Python 3.
 - **Its options** (position, size, opacity, map style) are changed on the console: hold **Minus** > **Mods** >
-  **Built-in**, at the bottom, *Code mods in this build*; then close the game and start it again. Or set them when you
+  **Built-in**, at the top, *GameCube minimap*; then close the game and start it again. Or set them when you
   build: `--mod-option gc-minimap.size=260` (`x`, `y`, `size`, `opacity`, `style` = `vector` or `original`).
 - The maps it prepares are kept in your user folder (macOS: `~/Library/Application Support/SwitchWakerHD/guest-mods`,
   Windows: `%LOCALAPPDATA%\SwitchWakerHD\guest-mods`, Linux: `~/.local/share/SwitchWakerHD/guest-mods`), and
-  copied to `build/sd/switch/wwhd/mods/`.
-- To add or remove a mod, run `make_sd.py` again (without `--guest-mod`: no mods) and copy `wwhd.nro` and `mods/`
-  again.
+  copied to `build/sd/switch/wwhd/mods/gc-minimap/data/`: copy that folder to the SD card with `wwhd.nro`.
+- A code mod's code, images and default settings are inside `wwhd.nro`; its settings on the console are
+  `switch/wwhd/mods/<id>-options.json` (kept by new builds). To add or remove a mod, run `make_sd.py` again (without
+  `--guest-mod`: no mods) and copy `wwhd.nro` again.
 - Mods that replace game functions are not supported on the Switch; `make_sd.py` says so.
 
 ### Optional: Brazilian Portuguese (fan translation)

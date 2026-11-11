@@ -130,3 +130,75 @@ D (installer build; a Windows run by the user).
   not on PATH) when no Python has `compression.zstd`; a `guest_mods:` line goes into the error box with its hint; the
   done page says where the options are. Built on macOS with the .NET 8 SDK (`EnableWindowsTargeting`): no warnings or
   errors; `IsZstdRvz` run against the test headers and the ISO. Not run on Windows (the user's test).
+
+## The HD minimap (issue #121, 2026-11-08)
+
+`hd-minimap` 0.2.5 from the catalogue (upstream's code-mod port of Chironeyes' Minimap HD Cemu pack, [GameBanana](https://gamebanana.com/mods/727687), MIT; credited in INSTALL.md, the installers' box and the mod's page in the Mods tab): no setup step,
+no GameCube disc; it draws the HD game's own GamePad map art through the layout-art services (`WWHD_HUD_GAME`,
+`layout-pane:` / `layout-texture:`, game_layouts.cpp) and the map/HUD bridge (docs/mod-sdk-map-hud.md).
+
+- **Build.** `make_sd.py --guest-mod hd-minimap` needs no change: 29 functions, 2 return hooks (`0240EBB0`
+  daPy_Execute and `02699094`, EU `0240EBB4` / `02699798`), module 81,536 bytes + 256 KiB heap at `7F000000-7F060000`.
+  USA and EU NROs build and link (native devkitA64 GCC 16.1).
+- **Console (EU, handheld, CPU 1020 / GPU 384 MHz, the `[dk] clocks` line checked; on battery).** The log:
+  `loaded hd-minimap (built into the NRO) (translator guestmod-0.3)`, no HUD or texture errors. Windfall: the island
+  map with Link and the wind arrow, the D-pad icons beside the HUD's D-pad; D-pad left hides it. Forbidden Woods and
+  Dragon Roost Cavern: the floor plan with Link, the floor-change markers. Great Sea at the Tower of the Gods: the
+  game's compasses (no map buttons in that sector, as the mod's README says). Pause menu: hidden. Sailing into the Tower
+  (stage change, its cutscene): no error. Not checked: a treasure chart while sailing (no other sector reached by boat
+  in that session).
+- **Cost.** The user chose a single deploy (no `perf_test.py ab`), so it was measured inside the boot: a throwaway
+  patch timed the hook chains (`ppc_mod_run`), the HUD callback (`draw_frame`) and the overlay's guest HUD
+  (`overlay::guesthud::frame`) with `armGetSystemTick`, printed every 300 logic steps, during `perf_test.py run`
+  (900 frames a scene, a build without PGO: the release profile is for GCC 15.2).
+
+  | Scene | hooks µs/step | HUD callback µs | overlay µs | main ms (whole frame) |
+  |---|---|---|---|---|
+  | windfall (island map) | 105 | 120-135 | 33 | 33.1 |
+  | sea_totg (compasses) | 103 | 40-46 | 0 | 18.7 |
+  | forbidden (dungeon plan) | 85 | 177-185 | 62-68 | 17.2 |
+  | lava (dungeon plan) | 85 | 188-204 | 71-74 | 33.2 |
+
+  At most ~0.36 ms of a 33 ms main thread (~1%, about 0.3 fps where the main thread is the limit). The largest single
+  step after a state load was 110-285 ms in the HUD callback: the island map's enlargement (below, fixed); in the
+  recordings themselves no step went over 1 ms.
+- **Stutters (the owner's report: "a stutter until it's drawn", and when the game starts).** Timed on the console
+  (`[layouts-timing]`, a throwaway patch in game_layouts.cpp), all on the game's main thread in the port's layout-art
+  loader, none in the mod: the first use read the whole 12 MB 2D pack through an `istreambuf_iterator` and copied every
+  member (2313 ms, at the file select, for the port's own file-select quit button art); each island map's 3x Lanczos
+  enlargement took 236-238 ms, again every time the mod showed the map (it releases the picture when hidden). Fixed in
+  `game_layouts.cpp` (marked fork changes): only the pack's index is read (then each member from the file), the six
+  Lanczos taps are computed once per phase and the sharpening blur is a running sum (the same picture within one level
+  of rounding: 193 of 6.5 million bytes differ, by 1), and the finished pictures are kept (up to 4 MiB). On the console:
+  pack index 1.3 ms, the file-select art ~65 ms in all, an island map 35.9 ms the first time (one 94 ms frame) and
+  0.2 ms after; textures from the real EU pack are byte-identical to before except the enlarged ones.
+- **Picture quality (the owner's report: "so low res").** Every island picture in the 2D pack is 100 x 100
+  (`rXX_b`, the GamePad's `rXX_Full`, the treasure charts' `rXX_col_N`); dungeon plans are larger (up to 780 x 780).
+  Compared on the console at Windfall: a smaller panel (150, 130) hid the steps but was too small for the owner; the
+  mod's "Smooth island maps" (the port's 3x Lanczos with sharpening and a steeper alpha ramp) is what made the outline
+  stair-stepped. The overlay draws mod pictures with a linear, clamped sampler (deko3d sampler 0), so with the option
+  off the art keeps the game's soft outline: `guest_mods.py` writes `smooth: false` into hd-minimap's `options.json`
+  (`SWITCH_DEFAULTS`; `--mod-option` still wins), sizes as the manifest (190 / 300).
+- **Always built in, a switch in the game (the owner's choice).** The installers offer only the HD minimap (the
+  GameCube card is gone; `make_sd.py --guest-mod gc-minimap` still works by hand) and always build it in: "Turn it on
+  now" (off by default) or switched off (`make_sd.py --guest-mod-off ID`, `guest_mods.py --off ID`: `mods/<id>/enabled`
+  is `0`). The Mods tab's row and page have a working switch (`guestbuiltin::set_enabled`); a switched-off mod is not
+  loaded at the next start (its hook checks stay in the game code: nothing runs). No `enabled` file is on (installs
+  from before). If the mod's step fails (the catalogue unreachable) and the player left it off, the installer builds
+  the game again without it. A release whose `make_sd.py` has no `--guest-mod-off` gets it only when ticked.
+- **The package inside the NRO (the owner's choice).** Copying only `wwhd.nro` is enough: `guest_mods.py` writes each
+  mod's package files (the manifest, the image folders, the top-level licence/notice files: the HD minimap's images
+  are Chironeyes' MIT artwork, whose notice must travel with them) and its default settings into `mod_<id>.c`
+  (`WWHDGuestBuiltinFile`, registry fields `files`/`defaults`); its package path is `builtin:<id>` and
+  `guestbuiltin::package_file` answers the HUD's package images and the manifest read. The settings are one file,
+  `mods/<id>-options.json` (`{"enabled", "options"}`), written by the game the first time from the NRO's defaults (an
+  earlier build's `mods/<id>/options.json` and `enabled` are taken over once), so a new build keeps the player's
+  choices; options the file lacks take the NRO's defaults. Only a setup's output still goes to the SD card
+  (`mods/<id>/data/`, gc-minimap's maps). The mod's page shows "Artwork: (c) 2026 Chironeyes, MIT".
+- **Installers.** An "HD minimap (optional)" box on the game page (off by default; saved with the other choices),
+  `--guest-mod hd-minimap`; strings in Spanish, English and Portuguese.
+- **With gc-minimap.** Both hook daPy_Execute's return (chained) and get consecutive guest regions, but both default
+  to the bottom-left corner (gc-minimap 0.3.1: x 6, y 18, size 225; hd-minimap: x 12, y 20, size 190) and both draw
+  on the sea and in dungeons: on together they overlap unless one is moved in the options.
+  The owner's choice (2026-11-08): one at a time. The installers clear the GameCube disc when the HD box is ticked and
+  untick it when a disc is chosen; INSTALL.md says to give `make_sd.py` only one of them.

@@ -61,7 +61,9 @@ struct Host {
     mods::catalogue::Version port_version;
     std::string build_name = "USA";
     bool android = false;
-    std::function<void()> builtin_code_mods;  // (this fork) the Switch NRO's code mods (guest_builtin_ui.h)
+    std::function<void()> builtin_code_mods;  // (this fork) the Switch NRO's code mods: rows of the Built-in list (guest_builtin_ui.h)
+    // (this fork, #121) a code mod's page in place of the Built-in list: false when none is open (guest_builtin_ui.h)
+    std::function<bool(bool back, bool& back_used)> builtin_code_mod_page;
     bool file_picker = true; // the host has file and folder choosers (overlay/extensions.h Features)
     bool code_mods = true;      // code mods can run here (Features::code_mods)
     bool mod_downloads = true;  // the online mod list (Features::mod_downloads)
@@ -1010,15 +1012,26 @@ inline void row_line(const std::string& id, const std::string& name, const Row& 
     ImGui::BeginDisabled(!r.switch_enabled);
     if (on_switch(("##on_" + id).c_str(), &on)) toggle(on);
     ImGui::EndDisabled();
+    // (this fork, #121) the controller's focus moved onto this row's switch or name this frame
+    bool nav_here = ImGui::GetCurrentContext()->NavJustMovedToId == ImGui::GetItemID();
+    const float row_top = ImGui::GetItemRectMin().y;
     tooltip(r.switch_reason);
     ImGui::TableNextColumn();
     std::string label = name + "  " + glyph(0x203A, "\xE2\x80\xBA", ">") + "##open_" + id;
     if (selectable(label.c_str())) open_page(id, builtin);
+    nav_here = nav_here || ImGui::GetCurrentContext()->NavJustMovedToId == ImGui::GetItemID();
     state().rects["open_" + id] = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
     if (experimental) badge(tr("Experimental"), experimental::kBadgeColour);
     std::string status = r.text + (note.empty() ? "" : " · " + note);
     colored(status_colour(r.status), status);
     if (!r.switch_enabled && !r.switch_reason.empty()) muted(r.switch_reason);
+    // (this fork, #121) the whole row into view, its status lines too: the controller's scrolling shows only the
+    // focused item (the switch or the name), which left the last row's status under the list's bottom edge
+    if (nav_here) {
+        ImGuiWindow* w = ImGui::GetCurrentWindow();
+        ImGui::ScrollToRect(w, ImRect(w->InnerRect.Min.x, row_top, w->InnerRect.Max.x, ImGui::GetCursorScreenPos().y),
+                            ImGuiScrollFlags_KeepVisibleEdgeY);
+    }
     ImGui::PopID();
 }
 inline bool begin_list(const char* id) {
@@ -1041,8 +1054,15 @@ inline bool on_controls_tab(std::string_view id) {
 }
 
 inline void builtin_list(Host& h) {
+    if (h.builtin_code_mod_page) {  // (this fork, #121)
+        bool used = false;
+        const bool open = h.builtin_code_mod_page(h.back, used);
+        h.b_used = h.b_used || used;
+        if (open || used) return;
+    }
     muted(tr(kAreaCaptions[kBuiltin]));
     if (!begin_list("builtin")) return;
+    if (h.builtin_code_mods) h.builtin_code_mods();  // (this fork, #121) the code mods built into this game, first
     for (const auto& e : mods::manager::entries()) {
         if (on_controls_tab(e.id)) continue;
         // the story system needs the Story Notebook package, which only the mod list provides
@@ -1061,7 +1081,7 @@ inline void builtin_list(Host& h) {
                  });
     }
     ImGui::EndTable();
-    if (h.builtin_code_mods) h.builtin_code_mods();  // (this fork)
+    ImGui::Dummy(ImVec2(0, ImGui::GetTextLineHeightWithSpacing()));  // (this fork, #121) room under the last row
 }
 // Community: the installed packages (catalogue, file, graphics packs), then the catalogue's mods that aren't
 // downloaded yet. Every row has the same switch: switching on a mod that isn't downloaded yet downloads,

@@ -104,7 +104,7 @@ abstract partial class EngineBase
 
     // The files the player picked for this build.
     IEnumerable<string> PlayerFiles() =>
-        new[] { GamePath, ForwarderKeys, MinimapGame, PtbrDownload }.Where(p => !string.IsNullOrEmpty(p)).Select(p => p!);
+        new[] { GamePath, ForwarderKeys, PtbrDownload }.Where(p => !string.IsNullOrEmpty(p)).Select(p => p!);
 
     // Whether `path` is `entry` or inside it (case-insensitive: Windows and the default macOS file system).
     internal static bool Holds(string entry, string path)

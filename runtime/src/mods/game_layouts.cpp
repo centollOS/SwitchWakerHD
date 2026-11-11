@@ -13,6 +13,7 @@
 
 #include "item_icons.h"
 #include "lyt_build.h"
+#include "game_layouts_fork.h"  // (this fork, #121) the faster pack, enlargement and picture cache
 
 namespace game_layouts {
 namespace {
@@ -431,18 +432,13 @@ Archive* archive(const std::string& layout, std::string& error) {
         return nullptr;
     }
     try {
-        if (!g_pack_read) {
-            std::ifstream f(g_pack_path, std::ios::binary);
-            Bytes data((std::istreambuf_iterator<char>(f)), {});
-            if (data.empty()) fail("can't read the game's 2D pack");
-            g_pack = item_icons::read_sarc(data);
-            g_pack_read = true;
-        }
-        const auto it = g_pack.find(layout + ".szs");
-        if (it == g_pack.end()) fail("no layout " + layout);
+        // (this fork, #121) the pack's index and this member only (game_layouts_fork.h), not the whole pack
+        Bytes member;
+        std::string why;
+        if (!fork::pack_member(g_pack_path, layout + ".szs", member, why)) fail(why);
         Archive a;
         a.name = layout;
-        a.files = item_icons::read_sarc(item_icons::yaz0_decode(it->second));
+        a.files = item_icons::read_sarc(item_icons::yaz0_decode(member));
         if (const auto l = a.files.find("blyt/" + layout + ".bflyt"); l != a.files.end()) a.layout = parse_bflyt(l->second), a.has_layout = true;
         g_archives.push_front(std::move(a));
         if (g_archives.size() > kMaxArchives) g_archives.pop_back();
@@ -461,6 +457,7 @@ void note_open(const std::string& guest_path, const std::string& host_path) {
     std::lock_guard lock(g_mu);
     if (host_path == g_pack_path) return;
     g_pack_path = host_path, g_pack.clear(), g_pack_read = false, g_archives.clear();
+    fork::clear();  // (this fork, #121)
 }
 
 bool texture(const std::string& spec, Image& out, std::string& error) {
@@ -471,6 +468,7 @@ bool texture(const std::string& spec, Image& out, std::string& error) {
         return false;
     }
     std::lock_guard lock(g_mu);
+    if (fork::cached(spec, out)) return true;  // (this fork, #121) made before
     Archive* a = archive(layout, error);
     if (!a) return false;
     const auto it = a->files.find("timg/" + item + ".bflim");
@@ -488,11 +486,12 @@ bool texture(const std::string& spec, Image& out, std::string& error) {
             }
             apply_material(out, m->second);
         }
-        out = upscale(out, factor);
+        out = fork::upscale(out, factor);  // (this fork, #121) the same picture, faster
     } catch (const std::exception& e) {
         error = e.what();
         return false;
     }
+    fork::remember(spec, out);  // (this fork, #121)
     return true;
 }
 

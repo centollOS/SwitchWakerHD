@@ -137,12 +137,10 @@ public partial class MainWindow : Window
         TxtShD.Text = Str.Get("sh_d");
         TxtOldH.Text = Str.Get("old_h");
         TxtOldD.Text = Str.Get("old_d", DesktopEngine.WorkDir);
-        TxtMmH.Text = Str.Get("mm_h");
-        TxtMmD.Text = Str.Get("mm_d");
-        BtnMmPick.Content = Str.Get("mm_pick");
-        BtnMmFolder.Content = Str.Get("mm_folder");
-        BtnMmClear.Content = Str.Get("fwd_clear");
-        ShowMinimap();
+        TxtHmH.Text = Str.Get("hm_h");
+        TxtHmNew.Text = Str.Get("hm_new");
+        TxtHmD.Text = Str.Get("hm_d");
+        TxtHmOn.Text = Str.Get("hm_on");
         TxtPtH.Text = Str.Get("ptbr_h");
         TxtPtD.Text = Str.Get("ptbr_d");
         BtnPtLink.Content = Str.Get("ptbr_link");
@@ -316,36 +314,6 @@ public partial class MainWindow : Window
         ShowKeys();
     }
 
-    // ── Optional GameCube sea minimap: the player's GameCube Wind Waker ─────
-    string? minimapGame;
-
-    void ShowMinimap()
-    {
-        TxtMmGame.Text = minimapGame ?? Str.Get("mm_none");
-        TxtMmGame.Foreground = Res(minimapGame == null ? "FgDim" : "Fg");
-        BtnMmClear.IsVisible = minimapGame != null;
-    }
-
-    async void BtnMmPick_Click(object? sender, RoutedEventArgs e)
-    {
-        var p = await PickFile("mm_dlg_title", "mm_h", "iso", "gcm", "rvz");
-        if (p != null) minimapGame = p;
-        ShowMinimap();
-    }
-
-    async void BtnMmFolder_Click(object? sender, RoutedEventArgs e)
-    {
-        var p = await PickFolder("mm_dlg_folder");
-        if (p != null) minimapGame = p;
-        ShowMinimap();
-    }
-
-    void BtnMmClear_Click(object? sender, RoutedEventArgs e)
-    {
-        minimapGame = null;
-        ShowMinimap();
-    }
-
     // ── Optional Brazilian Portuguese: the player's download of Triforce-Heroes' translation ─────
     string? ptbrDownload;
 
@@ -414,18 +382,19 @@ public partial class MainWindow : Window
         CheckForUpdate();
     }
 
+    string? oldGcMinimap;   // (#121) the GameCube minimap's disc of a previous install: no longer added
     void ApplySaved(SavedChoices c)
     {
         (c.GameArg == "--image" ? OptImg : c.GameArg == "--wua" ? OptWua : OptDir).IsChecked = true;
         gamePath = c.GamePath;
         keysPath = c.ForwarderKeys;
-        minimapGame = c.MinimapGame;
         ptbrDownload = c.PtbrDownload;
+        oldGcMinimap = c.OldGameCubeMinimap;   // (#121)
         ChkShaders.IsChecked = c.PrepareShaders;
         ChkOldBuilds.IsChecked = c.RemoveOldBuilds;
+        ChkHdMinimap.IsChecked = c.HdMinimap;
         ValidateGame();
         ShowKeys();
-        ShowMinimap();
         ShowPtbr();
     }
 
@@ -472,8 +441,9 @@ public partial class MainWindow : Window
         engine.GamePath = gamePath;
         engine.GameArg  = GameArg();
         engine.ForwarderKeys = keysPath != null && File.Exists(keysPath) ? keysPath : null;
-        engine.MinimapGame = minimapGame;
+        engine.HdMinimap = ChkHdMinimap.IsChecked == true;
         engine.PtbrDownload = ptbrDownload;
+        engine.OldGameCubeMinimap = oldGcMinimap;
         engine.PrepareShaders = ChkShaders.IsChecked == true;
         engine.RemoveOldBuilds = ChkOldBuilds.IsChecked == true;
         running = true; failed = false;
@@ -735,8 +705,9 @@ public partial class MainWindow : Window
         TxtFwdDone.IsVisible = keysPath != null;
         TxtFwdDone.Text = Str.Get(nspFresh ? "fwd_done" : "fwd_missing");
         TxtFwdDone.Foreground = Res(nspFresh ? "Fg" : "Warn");
-        TxtMmDone.IsVisible = minimapGame != null;
-        TxtMmDone.Text = Str.Get("mm_done");
+        TxtHmDone.IsVisible = true;   // (#121: always built in; on or off)
+        TxtHmDone.Text = Str.Get(!engine.HdMinimapIncluded ? "hm_done_missing" : ChkHdMinimap.IsChecked == true ? "hm_done" : "hm_done_off")
+                       + (oldGcMinimap != null ? "\n" + Str.Get("mm_dropped_done") : "");
         TxtPtDone.IsVisible = ptbrDownload != null;
         TxtPtDone.Text = Str.Get("ptbr_done");
         TxtGameFilesDone.IsVisible = engine.BadGameFiles > 0;

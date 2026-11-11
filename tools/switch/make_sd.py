@@ -41,6 +41,8 @@ usage:
            --gc-game PATH                     your GameCube Wind Waker (.iso/.gcm/.rvz or extracted), for mods
                                               whose setup reads it (the GameCube sea minimap)
            --mod-option ID.KEY=VALUE          a mod's option (e.g. gc-minimap.size=260); repeat for more
+           --guest-mod-off ID                 a --guest-mod built in switched off: the player turns it on in the
+                                              game's menu (Mods > Built-in) when they want it (issue #121)
            --ptbr DOWNLOAD                    Brazilian Portuguese: Triforce-Heroes' fan translation as downloaded
                                               from their page (the .rar, its extracted folder or its .pack), rebuilt
                                               on your own English pack (tools/switch/ptbr_pack.py) into
@@ -120,6 +122,21 @@ def release_tag():
             line = ""
     m = re.match(r"v\d+\.\d+\.\d+", line)
     return m.group(0) if m else ""
+
+
+def guest_mod_id(package):
+    """a --guest-mod's id: a catalogue id as it is, a .zip's or folder's from its manifest.json"""
+    import zipfile
+    try:
+        if os.path.isdir(package):
+            with open(os.path.join(package, "manifest.json"), encoding="utf-8") as f:
+                return json.load(f).get("id", package)
+        if os.path.isfile(package) and zipfile.is_zipfile(package):
+            with zipfile.ZipFile(package) as z:
+                return json.loads(z.read("manifest.json")).get("id", package)
+    except (OSError, KeyError, ValueError):
+        pass
+    return package
 
 
 def release_template():
@@ -344,6 +361,8 @@ def main():
     ap.add_argument("--guest-mod", action="append", default=[], help="a code mod built into the NRO (catalogue id, .zip or folder)")
     ap.add_argument("--gc-game", help="your GameCube Wind Waker, for mods whose setup reads it")
     ap.add_argument("--mod-option", action="append", default=[], help="a mod's option: ID.KEY=VALUE")
+    ap.add_argument("--guest-mod-off", action="append", default=[], metavar="ID",
+                    help="a --guest-mod built in switched off (the game's menu turns it on)")
     ptbr_arg = ap.add_mutually_exclusive_group()
     ptbr_arg.add_argument("--ptbr", help="Triforce-Heroes' PT-BR translation download (.rar, folder or .pack)")
     ptbr_arg.add_argument("--no-ptbr", action="store_true", help="remove an earlier PT-BR translation from OUT")
@@ -379,8 +398,12 @@ def main():
         run([sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "guest_mods.py"), "--check"] +
             mods +
             (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []))
-    elif args.mod_option or args.gc_game:
-        fail("--mod-option and --gc-game go with --guest-mod")
+    elif args.mod_option or args.gc_game or args.guest_mod_off:
+        fail("--mod-option, --gc-game and --guest-mod-off go with --guest-mod")
+    if args.guest_mod_off:  # (#121) each one a --guest-mod, checked before the slow steps
+        unknown = sorted(set(args.guest_mod_off) - {guest_mod_id(p) for p in args.guest_mod})
+        if unknown:
+            fail("--guest-mod-off %s: not among the --guest-mod mods" % ", ".join(unknown))
     if args.ptbr:  # the translation's download, checked before the slow steps (the wrong file picked, say)
         args.ptbr = os.path.abspath(args.ptbr)
         ptbr(["--check", args.ptbr])
@@ -447,7 +470,8 @@ def main():
     if args.guest_mod:
         run(tool + mods + ["--build", build.name] +
             (["--gc-game", os.path.abspath(args.gc_game)] if args.gc_game else []) +
-            sum((["--option", o] for o in args.mod_option), []))
+            sum((["--option", o] for o in args.mod_option), []) +
+            sum((["--off", m] for m in args.guest_mod_off), []))
         renv["WWHD_RECOMP_MOD_HOOKS_ONLY"] = os.path.join(mods_dir, "hooks.txt")
     else:
         run(tool + ["--clear"])
@@ -509,13 +533,14 @@ def main():
     shutil.copyfile(nro, os.path.join(wwhd, "wwhd.nro"))
     if dksh:
         shutil.copyfile(dksh, os.path.join(wwhd, "shadercache_dksh.bin"))
-    if args.guest_mod:  # sdmc:/switch/wwhd/mods/<id>/: each mod's images and options, and its prepared data
+    if args.guest_mod:  # (#121) the code mods' package files and settings are in the NRO (the game writes the settings
+        # to sdmc:/switch/wwhd/mods/<id>-options.json); only a mod's prepared data goes to mods/<id>/data/
         with open(os.path.join(mods_dir, "guest-mods.json")) as f:
             for m in json.load(f)["mods"]:
-                dst = os.path.join(wwhd, "mods", m["id"])
-                shutil.rmtree(dst, ignore_errors=True)
-                shutil.copytree(os.path.join(mods_dir, "sd", m["id"]), dst)
-                shutil.copytree(m["data"], os.path.join(dst, "data"))
+                if os.path.isdir(m["data"]) and os.listdir(m["data"]):
+                    dst = os.path.join(wwhd, "mods", m["id"], "data")
+                    shutil.rmtree(dst, ignore_errors=True)
+                    shutil.copytree(m["data"], dst)
     ptbr_dst = os.path.join(wwhd, "translation", "pt-BR")  # read by runtime/src/fan_translation.cpp
     if ptbr_pack:
         shutil.rmtree(ptbr_dst, ignore_errors=True)

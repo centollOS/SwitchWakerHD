@@ -26,6 +26,7 @@ build recompiles the game from the player's own dump.
 
 | Component | Pin | Used for | License |
 |---|---|---|---|
+| [hd-minimap](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDMods) code mod (when built in: `make_sd.py --guest-mod hd-minimap`, the installers) | the mod catalogue's release (SHA-256 checked) | the HD minimap, its code and package built into the NRO | MPL-2.0 (the mod); its images are [Minimap HD](https://github.com/Chironeyes/The.Wind.Waker.HD-Minimap.HD) artwork by Chironeyes, MIT, whose notice (`assets/ASSETS.md`, `LICENSE`) is built in with them |
 | [devkitA64](https://devkitpro.org), [libnx](https://github.com/switchbrew/libnx) | `devkitpro/devkita64:latest` image (libnx 4.12.0) | Switch toolchain and runtime | ISC (libnx); toolchain runtime libraries under their own licenses |
 | [deko3d](https://github.com/devkitPro/deko3d) | the devkitPro image's (0.5.0) | Switch GPU API | Zlib |
 | [nx-hbloader](https://github.com/switchbrew/nx-hbloader) | v2.4.5 (`82b9512`) | HOME-menu forwarder (optional) | ISC |

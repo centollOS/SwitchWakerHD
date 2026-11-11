@@ -408,6 +408,11 @@ Switch.
 - **[nx-hbloader](https://github.com/switchbrew/nx-hbloader)**,
   **[hacBrewPack](https://github.com/TooTallNate/hacBrewPack)** and
   **[hactool](https://github.com/SciresM/hactool)**: the HOME-menu forwarder.
+- **[Minimap HD](https://github.com/Chironeyes/The.Wind.Waker.HD-Minimap.HD)** by @Chironeyes
+  ([GameBanana](https://gamebanana.com/mods/727687)): the Cemu mod the HD minimap is based on, through upstream's
+  `hd-minimap` code mod. Its context rules, timings and floor logic, and its frame, wind arrow and shortcut icons
+  (MIT), are his work. Thank you, @Chironeyes, for the mod and for releasing it under a licence that lets it reach
+  the Switch.
 - **[SaltyNX](https://github.com/masagrator/SaltyNX)** and
   **[Status Monitor Overlay](https://github.com/masagrator/Status-Monitor-Overlay)** (masagrator):
   the shared-memory block this port fills so the overlay shows its frame rate and resolutions.
