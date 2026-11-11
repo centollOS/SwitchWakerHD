@@ -3,9 +3,13 @@
 match it: the PGO training build above all (#130: v1.2.1's EU profile was trained on code made by a plain recomp.py,
 which keeps the frame-interpolation hooks the Switch build leaves out, so no player's EU build could use it).
 
-  python3 -I tools/switch/players_gen.py RPX OUT
+  python3 -I tools/switch/players_gen.py [--guest-mod ID --build USA|EU ...] RPX OUT
         runs tools/recomp/recomp.py RPX OUT with the players' options (WWHD_RECOMP_SWITCH_SKIP=1), then prints the hot
-        files' fingerprint
+        files' fingerprint. --guest-mod: a code mod built into the NRO, as make_sd.py --guest-mod prepares it
+        (tools/switch/guest_mods.py into build/guest-mods, its hooks for recomp.py): the installers build every
+        player's NRO with the HD minimap since v1.3.0 (#121), and a mod's hooks change the generated code, so the
+        PGO training build needs it too (--build: the RPX's region, for the mod). Without --guest-mod an earlier
+        build/guest-mods is removed, as make_sd.py does, so the training build has no mod either.
   python3 -I tools/switch/players_gen.py --fingerprint DIR
         prints DIR's fingerprint as cmake/SwitchPgo.cmake computes it (a release profile's manifest.json has it as
         hot_sha256) and whether DIR is the players' code
@@ -58,14 +62,37 @@ def report(gen):
         "NOT the players' code: made without WWHD_RECOMP_SWITCH_SKIP=1 (a PGO profile trained on it fits no player)"))
 
 
+def guest_mods(mods, build, env):
+    """make_sd.py step 3's code mods: prepared into build/guest-mods (the NRO's build picks them up there) and their
+    hooks given to recomp.py through env; none: build/guest-mods removed. The return code of guest_mods.py."""
+    mods_dir = os.path.join(ROOT, "build", "guest-mods")
+    tool = [sys.executable, "-I", os.path.join(ROOT, "tools", "switch", "guest_mods.py"), "--out", mods_dir]
+    if not mods:
+        return subprocess.call(tool + ["--clear"])
+    rc = subprocess.call(tool + mods + ["--build", build])
+    if rc == 0:
+        env["WWHD_RECOMP_MOD_HOOKS_ONLY"] = os.path.join(mods_dir, "hooks.txt")
+    return rc
+
+
 def main(argv):
     if len(argv) == 2 and argv[0] == "--fingerprint":
         report(argv[1])
         return 0
-    if len(argv) != 2 or argv[0].startswith("-"):
+    mods, build = [], None
+    while len(argv) > 2 and argv[0] in ("--guest-mod", "--build"):
+        if argv[0] == "--guest-mod":
+            mods.append(argv[1])
+        else:
+            build = argv[1]
+        argv = argv[2:]
+    if len(argv) != 2 or argv[0].startswith("-") or (mods and build not in ("USA", "EU")):
         sys.exit(__doc__)
     rpx, out = argv
     env = players_env()
+    rc = guest_mods(mods, build, env)
+    if rc != 0:
+        return rc
     if env["WWHD_RECOMP_SWITCH_SKIP"] != "1":
         print("players_gen: warning: WWHD_RECOMP_SWITCH_SKIP=%s from the environment: not the players' code"
               % env["WWHD_RECOMP_SWITCH_SKIP"], flush=True)

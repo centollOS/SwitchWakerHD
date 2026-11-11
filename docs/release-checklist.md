@@ -121,15 +121,17 @@ release's commit or just after the tag.
    Then the PGO profile of each region the console can train (#90, docs/pgo-release-plan.md), from the tagged commit,
    charging, stock clocks or not (training never judges speed):
    ```sh
-   # the players' generated code (#130: never a plain recomp.py, which keeps hooks the players' build leaves out)
-   python3 -I tools/switch/players_gen.py GAME_DIR/code/cking.rpx build/gen
+   # the players' generated code (#130: never a plain recomp.py, which keeps hooks the players' build leaves out),
+   # with the code mods the installers build into every NRO: the HD minimap since v1.3.0 (#121; its hooks change the
+   # generated code, and a profile trained without it loses the changed functions in every player's build)
+   python3 -I tools/switch/players_gen.py --guest-mod hd-minimap --build USA GAME_DIR/code/cking.rpx build/gen
    # the players' compiler (the pinned toolchain); the build folder must be a folder of build/
    WWHD_BUILD_DIR=build/switch-pgo-gen WWHD_PGO=GEN python3.14 tools/switch/build_switch.py
    tools/switch/pgo_train.py clean && tools/switch/pgo_train.py train --plan all --nro build/switch-pgo-gen/wwhd.nro --out build/pgo
    tools/switch/pgo_pack.py pack --region USA   # (EU: below)
    gh release upload vX.Y.Z build/pgo-profile-USA.zip build/pgo-profile-USA.zip.sha256
    ```
-   EU: put the USA `build/gen` aside, recompile the EU `cking.rpx` into `build/gen` with `players_gen.py` as above (the
+   EU: put the USA `build/gen` aside, recompile the EU `cking.rpx` into `build/gen` with `players_gen.py` as above (`--build EU`; the
    same folder name: the profile's names come from it), `WWHD_BUILD_DIR=build/switch-pgo-gen-eu` for the training build, and on the console the EU
    game through settings.ini's `[dev]` (`WWHD_GAME_DIR=game-eu`, `WWHD_STATE_DIR=sdmc:/switch/wwhd/states-eu`). The
    trainer needs a Quest Log in slot 1: the console's `save-eu` has none, so copy the USA `save/user/` files into a
@@ -143,8 +145,9 @@ release's commit or just after the tag.
    Check: an installer run says "PGO profile of vX.Y.Z for the USA game", and the NRO's boot log
    `[boot] pgo: profile USA <commit>`. A region without a profile gets a normal build.
    Check, each region: the packed profile's `hot_sha256` (`unzip -p build/pgo-profile-EU.zip manifest.json`) is the
-   fingerprint of a `make_sd.py` build of that region (`players_gen.py --fingerprint build/gen` after it), and that
-   build does not print "the generated code differs from the profile's" (#130). v1.2.2: USA `7922171a…`, EU `36c5ab2f…`.
+   fingerprint of an installer build of that region (`make_sd.py --guest-mod hd-minimap`, then `players_gen.py
+   --fingerprint build/gen`), and that build does not print "the generated code differs from the profile's" (#130).
+   v1.2.2 (trained without the minimap): USA `7922171a…`, EU `36c5ab2f…`; with hd-minimap 0.2.6, USA `7bf68afe…`.
    Check on Windows (the pinned Windows toolchain, the test PC) with the profile trained from the Mac's build: an
    installer run builds with it, and the profiled files recompiled with `-Wcoverage-mismatch` give no mismatch
    (`docs/pgo-release-plan.md`, the step 5 check; never measured across host systems before #90).
