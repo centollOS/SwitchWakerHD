@@ -85,6 +85,9 @@ struct Backend {
     // optional: the game starts drawing its sky clouds (drawVrkumo, cloud_proto.cpp) into the sky
     // buffer, whose pass is the open one; `seq` names the cloud snapshot. Draws the horizon-haze grade.
     void (*sky_clouds_begin)(const uint32_t* regs, uint32_t seq);
+    // optional, render thread (issue #58): the game begins drawing a layout (its HUD / 2D layer) into the target
+    // `regs` bind (OP_LAYOUT_ROOT, OP_HUD_MARK): deko3d's edge smoothing runs there, before the HUD
+    void (*hud_mark)(const uint32_t* regs);
 };
 enum Feature : int { kFeatureAO, kFeatureAOHires, kFeatureAniso, kFeatureFXAA, kFeatureScaleFilter, kFeatureCapture,
                      kFeatureShaderHeadStart };
@@ -154,6 +157,10 @@ inline void gpu_idle() { if (g_backend->gpu_idle) g_backend->gpu_idle(); else g_
 inline void write_back() { if (g_backend->write_back) g_backend->write_back(); }
 inline void ss_reset() { g_backend->ss_reset(); }
 uint64_t frame_count();  // 0 before the renderer started
+// (this fork, #58) the renderer takes the game's HUD marks (Backend::hud_mark) and FXAA is on: the layout hook
+// (aspect.cpp) emits OP_HUD_MARK only then. A function, so tests that link aspect.cpp without renderer.cpp take
+// fork_test_stubs.cpp's (false)
+bool hud_marks_wanted();
 inline void request_tv_dump(const std::string& path, int frames_ahead) { g_backend->request_tv_dump(path, frames_ahead); }
 inline void request_capture() { g_backend->request_capture(); }
 void shutdown();         // once, on the way out (Quit, window closed, WWHD_EXIT_AT_FRAME)

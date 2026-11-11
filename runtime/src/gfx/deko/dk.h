@@ -162,6 +162,8 @@ struct Renderer {
         uint64_t poolHits = 0;     // rescales that reused a kept image (internal resolution)
         uint64_t hudSwitches = 0;  // frames whose HUD went to the TV buffer's full-resolution image (draw.cpp)
         uint64_t fxaaPasses = 0;   // frames whose scene went through FXAA before the HUD (fxaa_scene)
+        uint64_t hudMarks = 0;     // ... whose HUD start was the game's mark, not the guess (draw.cpp, #58)
+        uint64_t hudMarkMissed = 0;  // ... at the frame's end: its mark did not come (draw.cpp hud_mark_missed)
         // shader lane (shaders_dk.cpp; the worker's own figures are in ShaderStats)
         uint64_t shaderNs = 0, shaders = 0, dkshLoads = 0, uniformPackNs = 0;
     } perf;

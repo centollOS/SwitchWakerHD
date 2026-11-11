@@ -40,6 +40,51 @@ namespace gfxdk {
 
 bool g_traceFrame = false, g_captureDraws = false;
 
+// ---- the HUD's start from the game (issue #58), for edge smoothing (FXAA): the render thread's OP_LAYOUT_ROOT /
+// OP_HUD_MARK (aspect.cpp, Pane::Draw of a layout's root, emitted only while FXAA is on) say that the game begins a
+// layout (its HUD, menus, messages, the map, the screen wipes) in the target bound now. One into the picture shown
+// is the HUD's start: the draw.cpp HUD switch runs FXAA there. The per-draw guess stays for frames whose previous
+// frame had no mark (the first frames with FXAA, scenes without layouts, a HUD drawn otherwise)
+namespace {
+uint64_t g_hudMarkFrame = ~0ull;  // the frame in which a layout began in the shown buffer
+uint64_t g_hudMarkUsed = ~0ull;   // the last frame whose HUD switch a mark made
+std::atomic<bool> g_hudMarks{true};  // (Dev tab, A/B) off: the guess alone, as before #58
+// the previous frame's HUD start was a mark: this one waits for its own (no guess)
+bool hud_marks_trusted() { return g_hudMarkUsed != ~0ull && R.frame - g_hudMarkUsed <= 1; }
+}  // namespace
+
+// Only a mark after the post-processing read the buffer this frame: the game also draws a layout into the shown
+// buffer in the middle of the 3D (console, Outset, 2026-11-08: 4 draws right after the sky and sea pass, before the
+// main 972-draw pass and the bloom), which as a HUD start smoothed only the sky and left the HUD to the upscale
+void hud_mark(const uint32_t* regs) {
+    if (!g_hudMarks.load(std::memory_order_relaxed) || !fxaa_enabled()) return;
+    const Surface* s = shown_source();
+    if (s && regs[mmCB_COLOR0_BASE] && regs[mmCB_COLOR0_BASE] == s->addr && s->readFrame == R.frame) {
+        g_hudMarkFrame = R.frame;
+        if (g_traceFrame) trace_event("HUD mark (a layout into %s)", trace_name(s).c_str());
+    } else if (g_traceFrame && s && regs[mmCB_COLOR0_BASE] == s->addr) {
+        trace_event("HUD mark ignored: %s not read yet this frame", trace_name(s).c_str());
+    }
+}
+// A frame after one whose HUD start was a mark, that had none itself (the layouts ended: a menu closed, a cutscene
+// without them): its guess was held back for the mark, so FXAA runs at its end, on the finished picture before it
+// is copied for showing (surfaces.cpp copy_to_scan). That frame has no HUD layouts; 2D drawn otherwise is smoothed too
+void hud_mark_missed(Surface* shown) {
+    if (!fxaa_enabled() || !g_hudMarks.load(std::memory_order_relaxed) || g_hudMarkUsed == R.frame ||
+        !hud_marks_trusted() || shown->readFrame != R.frame)
+        return;
+    if (!fxaa_scene(shown)) return;
+    R.perf.hudMarkMissed++;
+    if (g_traceFrame) trace_event("HUD start: no mark this frame, FXAA at its end (%s)", trace_name(shown).c_str());
+}
+bool hud_marks_on() { return g_hudMarks.load(std::memory_order_relaxed); }
+void set_hud_marks(bool on) {
+    // (turned off: the marks stop, so the frame after the last one has neither and the guess takes over)
+    if (g_hudMarks.exchange(on) != on)
+        LOG("[dk] FXAA at the game's HUD start %s (frame %llu)", on ? "on" : "off (the per-draw guess alone)",
+            (unsigned long long)R.frame);
+}
+
 namespace {
 float f32(uint32_t v) {
     float f;
@@ -1750,16 +1795,29 @@ void draw_impl(const uint32_t* r, uint32_t prim, uint32_t count, uint32_t indexT
     // own textures (nothing rendered) switches that buffer to its full-size image, the scene scaled up into it;
     // the next frame's clear (or 3D drawing) switches back. With edge smoothing on (issue #21), the scene goes
     // through FXAA there, at any internal resolution (fxaa_scene), so the HUD drawn after it stays sharp
-    // (FXAA's setting read only for the draws that can be the HUD switch: it was read on every draw)
+    // (FXAA's setting read only for the draws that can be the HUD switch: it was read on every draw).
+    // With FXAA on, the game says where its HUD begins (issue #58, hud_mark): the first such draw after a layout's
+    // root was drawn into this buffer once the post-processing read it this frame. The per-draw guess is the
+    // fallback, for frames whose previous frame had no mark (hud_mark_missed: one that had, and this one none): a 2D
+    // draw before the HUD (a fade quad, a pass with only game textures after the bloom's read) no longer starts FXAA
+    // early once the marks come. (A mark needs the read too: the read alone gates both.)
     if (!depth && colors[0] == target && target->readFrame == R.frame && !g_drawSamplesRendered &&
         (target->scale < 1.0f || fxaa_enabled()) && target == shown_source()) {
         const bool smooth = fxaa_enabled();
-        bool single = true;
+        const bool marked = smooth && g_hudMarkFrame == R.frame;
+        const bool guessed = !(smooth && hud_marks_trusted());
+        bool single = marked || guessed;
         for (int i = 1; i < 8; i++)
             if (colors[i]) single = false;
         if (single) {
             const bool scaled = target->scale < 1.0f;
-            if (!(smooth && fxaa_scene(target)) && target->scale < 1.0f) {
+            if (marked) g_hudMarkUsed = R.frame;  // (the next frame waits for its mark too)
+            const bool smoothed = smooth && fxaa_scene(target);
+            if (smoothed && marked) {
+                R.perf.hudMarks++;
+                if (g_traceFrame) trace_event("HUD start: the game's mark (%s)", trace_name(target).c_str());
+            }
+            if (!smoothed && target->scale < 1.0f) {
                 target->hudFull = true;
                 fit_scale(target, true, true);
             }

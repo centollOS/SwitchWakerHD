@@ -56,6 +56,9 @@ enum Op : uint32_t {
     // (this fork, #67) host-only, never recorded: lockstep frame hashes (lockstep.h), the tag of the swap that
     // follows (logic step after the seeded arrival, mTimer, cM_rnd's seeds, run); sent only while a run is armed
     OP_LOCKSTEP,
+    // (this fork, issue #58) a layout's root pane is drawn (aspect.cpp Pane::Draw) while edge smoothing is on: the
+    // game begins its HUD / 2D layer in the target bound now (backend hud_mark); no payload. OP_LAYOUT_ROOT counts too
+    OP_HUD_MARK,
     OP_COUNT
 };
 

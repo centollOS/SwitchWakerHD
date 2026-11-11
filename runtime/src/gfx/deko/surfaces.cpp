@@ -2005,6 +2005,9 @@ void copy_to_scan(uint32_t cb, uint32_t target) {
     R.perf.scans++;
     R.counts.scans++;
     Surface* src = surface_from_color_buffer(cb);
+    // (this fork, #58) the picture shown, finished: FXAA here when this frame's HUD mark did not come
+    if (src && !src->fmt.depth && src->img.valid && (g_padShown.load(std::memory_order_relaxed) ? target != 1 : target == 1))
+        hud_mark_missed(src);
     if (g_traceFrame && target != 1) trace_event("GamePad scan copy of %s", trace_name(src).c_str());
     if (src && target != 1) {  // the GamePad picture: copied while it is drawn (gfxsw::gamepad_picture_drawn)
         if (src->drcScanFrame == ~0ull)

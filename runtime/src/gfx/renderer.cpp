@@ -194,6 +194,8 @@ Api active() { return g_backend ? g_backend->api : g_requested; }
 Api requested() { return g_requested; }
 std::string fallback_reason() { return g_reason; }
 uint64_t frame_count() { return g_backend ? g_backend->frame_count() : 0; }
+// (this fork, #58) the layout hook's question (aspect.cpp): a renderer that takes HUD marks, with FXAA on
+bool hud_marks_wanted() { return g_backend && g_backend->hud_mark && g_backend->fxaa(); }
 
 Api preferred() {
     Api a = default_api();

@@ -81,6 +81,7 @@ WWHD_STATE_DIR=sdmc:/switch/wwhd/states-eu
 | `raw bench hash NAME N [SKIP] [mem]` | lockstep frame hashes: loads `bench/NAME.wwstate` with the fixed seeds and counters and hashes the picture the window shows (the GamePad's in GamePad play) for N frames after SKIP logic steps; `mem` adds the diagnostic (tile hashes, a memory diff against the run before, the first picture as `lockstep_N.png`); use `tools/switch/lockstep.py` ([lockstep.md](lockstep.md)) |
 | `raw aniso [1\|2\|4\|8\|16]`, `raw shadowscale [0.5\|1\|2]`, `raw noao [0\|1]`, `raw miiverse [0\|1]` | live and not saved (the Picture tab's aniso level, shadow maps and ambient occlusion, which the menu saves; and the Dev tab's Miiverse switch): anisotropic filtering level, the shadow maps' scale, the ambient-occlusion pass skipped, the Miiverse thread (`0` parks it); with `perf_test.py toggle` |
 | `raw fxaa [0\|1]` | live and not saved (the Picture tab's edge smoothing, which the menu saves); no argument reports the state; a known picture change for `lockstep.py toggle` |
+| `raw hudmark [0\|1]` | live and not saved: the Dev tab's "FXAA at the game's HUD start" (`0`: the per-draw guess alone, issue #58); no argument reports the state |
 | `raw fsr [0\|1]` | live and not saved (the Picture tab's FSR 1 upscale and sharpening, which the menu saves); no argument reports the state; with `perf_test.py toggle` |
 | `wait`, `quit`, `reload`, `ping`, `help`, `raw CMD ...` | `raw logtext` prints the kept log text |
 
