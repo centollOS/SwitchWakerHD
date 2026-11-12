@@ -104,9 +104,8 @@ static void report(const std::string& s) {
 
 // Console language for UCReadSysConfig("cafe.language"): WWHD_LANGUAGE=<Wii U code> (0 ja, 1 en,
 // 2 fr, 3 de, 4 it, 5 es, 6 zh, 7 ko, 8 nl, 9 pt, 10 ru, 11 zh-TW), else the setting saved by the
-// settings overlay (Language tab, hostui "language"; read once at start). Unset: the fan translation when
-// installed, else (this fork, #152) the Switch's system language when the game has it, else English
-// (default_console_language()). Out of range or not a number: English. A language the disc has no pack for (game_languages.h) becomes English (or the
+// settings overlay (Language tab, hostui "language"; read once at start). Unset, out of range or not
+// a number: English. A language the disc has no pack for (game_languages.h) becomes English (or the
 // disc's first language without English), as the USA game itself does with one it doesn't know.
 // WWHD_LANGUAGE_REGION=eu|jp (else the saved "language_region") takes the language from a language
 // source of that region (game_lang::source_packs(), docs/language-packs.md) when it has that
@@ -120,14 +119,7 @@ uint32_t console_language() {
             e = saved.c_str();
             why = "saved setting";
         }
-        // (this fork) the PT-BR translation when installed, else the Switch's own language (#152)
-        long v = fan_translation::default_language(default_console_language());
-        if ((!e || !*e) && !fan_translation::present()) {
-            const int sys = system_language();
-            if (sys >= 0)
-                LOG("[config] console language %ld (the Switch's language, %s%s)", v, game_lang::name(sys),
-                    v == sys ? "" : ", not in this game");
-        }
+        long v = fan_translation::default_language(1);  // (this fork) the PT-BR translation when installed
         if (e && *e) {
             char* end = nullptr;
             v = strtol(e, &end, 10);
@@ -361,7 +353,7 @@ HLE(coreinit, UCReadSysConfig) {
         std::string name = mem::read_cstr(e);
         uint32_t size = ld32(e + 0x4C), data = ld32(e + 0x50);
         uint32_t value = 0;
-        if (name == "cafe.language") value = console_language();  // WWHD_LANGUAGE or saved, default the Switch's
+        if (name == "cafe.language") value = console_language();  // WWHD_LANGUAGE or saved, default English
         else if (name == "cafe.cntry_reg") value = 49;   // USA
         else if (name == "cafe.eula_agree") value = 1;
         else if (name == "cafe.initial_launch") value = 2;

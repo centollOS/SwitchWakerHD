@@ -93,9 +93,7 @@ address where a regional build happens to allocate them.
 ## Languages
 
 The European build has English, French, German, Italian and Spanish itself and chooses between them
-by the console language, which the port's settings decide (`F1` → Language, or `WWHD_LANGUAGE`). On the
-Switch, until the player picks one there (hold Minus → Language / About), it is the Switch's own system
-language when the game has it, else English (`runtime/src/console_language_default.cpp`, issue #152).
+by the console language, which the port's settings decide (`F1` → Language, or `WWHD_LANGUAGE`).
 Its five `permanent_2d_Eu*.pack` files are part of that game, so a **language source**
 ([language-packs.md](language-packs.md)) is neither needed nor accepted on that build: it exists to
 lend a European or Japanese game's text to the USA code.
