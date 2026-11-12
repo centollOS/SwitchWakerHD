@@ -74,6 +74,7 @@
 #include "../fan_translation.h"  // (this fork)
 #include "../menu_i18n.h"  // (this fork) the menu's texts in the game's language (menu_i18n.h)
 #include "../game_languages.h"
+#include "../console_language.h"  // (this fork) default_console_language (#152)
 #include "../gfx/renderer.h"
 #ifdef __ANDROID__
 #include "../gfx/vulkan/android_driver.h"
@@ -3056,7 +3057,8 @@ int saved_language() {
         int l = atoi(v.c_str());
         if (l >= 0 && l < game_lang::kLanguages) return l;
     }
-    return fan_translation::default_language(1);  // (this fork) the PT-BR translation when installed
+    // (this fork) the PT-BR translation when installed, else the Switch's own language (#152)
+    return fan_translation::default_language(default_console_language());
 }
 
 // the region of the saved language when it comes from a language source (game_lang::kNoRegion: the game's own)

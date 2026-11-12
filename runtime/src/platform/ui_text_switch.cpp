@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "../console_language.h"  // system_language (#152)
 #include "../fan_translation.h"
 #include "../overlay/hostui.h"
 #include "../runtime.h"
@@ -1507,20 +1508,9 @@ long language() {
     if (hostui::get("language", saved) && !saved.empty()) code = strtol(saved.c_str(), nullptr, 10);
     if (code < 0 && fan_translation::present()) code = fan_translation::kLanguage;  // chosen in the installer
     if (code < 0) {
-        u64 lc = 0;
-        SetLanguage lang = SetLanguage_ENUS;
-        if (R_SUCCEEDED(setInitialize())) {
-            if (R_SUCCEEDED(setGetSystemLanguage(&lc)) && R_SUCCEEDED(setMakeLanguage(lc, &lang))) {
-                switch (lang) {
-                case SetLanguage_FR: case SetLanguage_FRCA: code = 2; break;
-                case SetLanguage_DE: code = 3; break;
-                case SetLanguage_IT: code = 4; break;
-                case SetLanguage_ES: case SetLanguage_ES419: code = 5; break;
-                default: code = 1; break;
-                }
-            }
-            setExit();
-        }
+        // the console's language (console_language.h): these texts have French, German, Italian, Spanish, else English
+        const int sys = system_language();
+        code = sys >= 2 && sys <= 5 ? sys : sys < 0 ? -1 : 1;
     }
     return code;
 }
