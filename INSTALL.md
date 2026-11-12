@@ -361,7 +361,12 @@ menu's Controls tab.
 
 Picture: internal resolution per mode (dynamic resolution), picture adjustments, frame-rate counter.
 Controls: rumble, gyro aiming. The game runs at the console's stock CPU clock and, in handheld, Nintendo's 384 MHz GPU
-profile (not a menu choice; one saved by an older version is reset to 384); for more, use sys-clk. Other tabs: Saves (save states), Warp (go to any place), Mods, About.
+profile (not a menu choice; one saved by an older version is reset to 384); for more, use sys-clk. Other tabs: Saves (save states), Warp (go to any place), Mods, Language / About.
+
+The game's language follows the Switch's own (System Settings > System > Language) when your game has it: the
+European game has English, French, German, Italian and Spanish, the USA game English, French and Spanish;
+others get English. To play in another one, choose it in the menu's **Language / About** tab and restart the
+game; that choice then stays until you change it there.
 
 ## The first start: preparing the graphics
 
@@ -399,6 +404,7 @@ it). Saves (`save/`), settings (`settings.ini`) and the compiled graphics stay.
 | `Docker or Podman is needed ... or a native devkitPro` | Only with `--toolchain devkitpro` or `docker`: leave the option out to build with the pinned Switch tools |
 | `the pinned toolchain needs Python 3.14 or newer` / `cmake is missing next to this Python` | Install Python 3.14 from python.org, then `python -m pip install cmake ninja` (with that Python) |
 | The game closes at once or says it is out of memory | Start it in title mode (hold R), not from the album |
+| The game is in English, not in your language | Choose it in the menu (Minus held) > **Language / About** and restart the game. Before v1.3.0 the game started in English unless a language was chosen there; it now follows the Switch's language when your game has it |
 | No button works | The game's controller setting differs from the menu's Dev tab (*Show developer options*): set both to the same |
 | Something else | `sdmc:/switch/wwhd/wwhd.log` and `logs/` say what happened; include them in a report (they contain no game data) |
 
