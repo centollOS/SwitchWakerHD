@@ -122,6 +122,7 @@ HLE(vpad, VPADRead) {
     input::PadState p = repeat ? last_p : crashrec::read(0);  // live input, recorded/replayed by crash recovery
     if (!repeat) mods::one_screen_pad(p);  // One screen: Minus pauses as Plus (Off-TV Play has no TV to switch to)
     if (!repeat) mods::pad_play_rules(p);  // L and d-pad down by whether Link plays (input_map::play_buttons)
+    mods::guest_gamepad_touch(p, repeat);  // a finger on a code mod's GamePad claim is the mod's only
     uint32_t live_virt = p.virt;  // the virtual inputs (Jump, moon jump) as read now: not on a stale repeat
     bool live = !repeat;
     if (repeat && interp::fresh_sticks()) {  // true 60: sticks every pass, buttons on full passes
