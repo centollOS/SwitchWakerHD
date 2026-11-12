@@ -1,0 +1,88 @@
+# checklist F, v1.2.2+56 (be843560 = 62c6fe35 + auto save map info fix), USA game, built with make_sd --guest-mod hd-minimap (no PGO training yet), 2026-11-12: 40 warps x 25 s, two laps
+# first run on 62c6fe35 (2026-11-11) stopped at lap 1 warp 90 (PShip2): auto save on entering it hit the game's assert d_com_inf_game.cpp:2680 mapInfo != 0 (setGameStartStage); fixed in be843560
+     25s lap 1 warp   0 stage sea
+     50s lap 1 warp   3 stage sea
+     75s lap 1 warp   6 stage Omori
+    100s lap 1 warp   9 stage Siren
+    125s lap 1 warp  12 stage Hyrule
+    151s lap 1 warp  15 stage sea
+    176s lap 1 warp  18 stage A_mori
+    201s lap 1 warp  21 stage Abesso
+    226s lap 1 warp  24 stage Asoko
+    251s lap 1 warp  27 stage Cave02
+    276s lap 1 warp  30 stage Cave05
+    301s lap 1 warp  33 stage Cave09
+    326s lap 1 warp  36 stage Comori
+    351s lap 1 warp  39 stage Edaichi
+    376s lap 1 warp  42 stage Fairy02
+    401s lap 1 warp  45 stage Fairy05
+    427s lap 1 warp  48 stage GanonA
+    452s lap 1 warp  51 stage GanonD
+    477s lap 1 warp  54 stage GanonL
+    502s lap 1 warp  57 stage Hyroom
+    527s lap 1 warp  60 stage ITest62
+    552s lap 1 warp  63 stage LinkRM
+    577s lap 1 warp  66 stage M_Dai
+    602s lap 1 warp  69 stage M_Dra09
+    627s lap 1 warp  72 stage MajyuE
+    652s lap 1 warp  75 stage Mukao
+    677s lap 1 warp  78 stage Obshop
+    703s lap 1 warp  81 stage Ocrogh
+    728s lap 1 warp  84 stage Omasao
+    753s lap 1 warp  87 stage Opub
+    778s lap 1 warp  90 stage PShip2
+    803s lap 1 warp  93 stage Pfigure
+    828s lap 1 warp  96 stage ShipD
+    853s lap 1 warp  99 stage SirenMB
+    878s lap 1 warp 102 stage SubD44
+    903s lap 1 warp 105 stage TF_01
+    928s lap 1 warp 108 stage TF_04
+    953s lap 1 warp 111 stage WarpD
+    978s lap 1 warp 114 stage Xboss2
+   1004s lap 1 warp 117 stage figureB
+--- end of lap 1: 1004 s
+    [mem] malloc 2509 MiB in use of 2577 MiB taken (heap never used 645 MiB), 45624 free chunks, mallinfo 7.67 ms
+    [mem] heap never used 645 MiB; shader variants 1277 (5756 freed), GLSL 24466, programs 33955, translation records 10945 (7897 KiB); surfaces 1441 (with evicted ones); image heap 3 chunks, 192 MiB, 11.0 MiB free, largest free 5.3 MiB
+   1029s lap 2 warp   0 stage sea
+   1054s lap 2 warp   3 stage sea
+   1080s lap 2 warp   6 stage Omori
+   1105s lap 2 warp   9 stage Siren
+   1130s lap 2 warp  12 stage Hyrule
+   1155s lap 2 warp  15 stage sea
+   1180s lap 2 warp  18 stage A_mori
+   1205s lap 2 warp  21 stage Abesso
+   1230s lap 2 warp  24 stage Asoko
+   1255s lap 2 warp  27 stage Cave02
+   1280s lap 2 warp  30 stage Cave05
+   1305s lap 2 warp  33 stage Cave09
+   1330s lap 2 warp  36 stage Comori
+   1356s lap 2 warp  39 stage Edaichi
+   1381s lap 2 warp  42 stage Fairy02
+   1406s lap 2 warp  45 stage Fairy05
+   1431s lap 2 warp  48 stage GanonA
+   1456s lap 2 warp  51 stage GanonD
+   1481s lap 2 warp  54 stage GanonL
+   1506s lap 2 warp  57 stage Hyroom
+   1531s lap 2 warp  60 stage ITest62
+   1556s lap 2 warp  63 stage LinkRM
+   1581s lap 2 warp  66 stage M_Dai
+   1607s lap 2 warp  69 stage M_Dra09
+   1632s lap 2 warp  72 stage MajyuE
+   1657s lap 2 warp  75 stage Mukao
+   1682s lap 2 warp  78 stage Obshop
+   1707s lap 2 warp  81 stage Ocrogh
+   1732s lap 2 warp  84 stage Omasao
+   1757s lap 2 warp  87 stage Opub
+   1782s lap 2 warp  90 stage PShip2
+   1808s lap 2 warp  93 stage Pfigure
+   1833s lap 2 warp  96 stage ShipD
+   1858s lap 2 warp  99 stage SirenMB
+   1883s lap 2 warp 102 stage SubD44
+   1908s lap 2 warp 105 stage TF_01
+   1933s lap 2 warp 108 stage TF_04
+   1958s lap 2 warp 111 stage WarpD
+   1983s lap 2 warp 114 stage Xboss2
+   2008s lap 2 warp 117 stage figureB
+--- end of lap 2: 2008 s
+    [mem] malloc 2509 MiB in use of 2581 MiB taken (heap never used 641 MiB), 47835 free chunks, mallinfo 8.04 ms
+    [mem] heap never used 641 MiB; shader variants 1283 (12286 freed), GLSL 24466, programs 35634, translation records 10945 (7897 KiB); surfaces 1529 (with evicted ones); image heap 3 chunks, 192 MiB, 4.5 MiB free, largest free 2.6 MiB

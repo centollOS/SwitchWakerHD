@@ -17,6 +17,49 @@ which on the same console means something got slower, or the console's condition
 From v1.0.1 on, `perf_test.py` keeps the conditions of each boot in the result file (`meta.boots`: the version, the
 console mode and charge, the clocks the game logged, the picture settings that change the load).
 
+## v1.3.0, 2026-11-12
+
+Renderer and runtime changes (#147: vertex copies on a copy thread on core 3; #139: FXAA at the game's HUD start;
+#142: the built-in HD minimap), so F and G were run. Console: the maintainers' second Switch, handheld, charging,
+the console's own settings (FSR on; FXAA off), CPU 1020 MHz, GPU 384 MHz in every boot. The release candidate
+be843560 (62c6fe35 + the auto save fix below), USA, built from the release zip with `make_sd.py --guest-mod
+hd-minimap` as a player gets it: v1.2.2's profile only where the generated code is unchanged (v1.3.0's own profiles
+are trained after the tag).
+
+### G. Performance: v1.3.0 against v1.2.2
+
+`perf_test.py compare-to v1.2.2 --nro <candidate> --label v1.3.0 --scenes lava,windfall,dragonroost,outset_grass_us,outset_lookout_us
+--expect perf/results/v1.2.2-vs-v1.2.1.json` (900 frames per scene): 4 boots of each, interleaved, time of day held
+at 200. v1.2.2 rebuilt by the test (container build, without PGO). File:
+[`perf/results/v1.3.0-vs-v1.2.2.json`](../perf/results/v1.3.0-vs-v1.2.2.json).
+
+| Scene | v1.2.2 fps | v1.3.0 fps | Change (95% interval) | Main thread |
+|---|---|---|---|---|
+| lava (`M_NewD2` 2) | 29.13 | 29.28 | +0.14 (+-0.14) | 33.00 -> 32.34 ms (-2.0%) |
+| windfall | 29.16 | 29.81 | +0.66 (+-0.59) | 33.55 -> 32.54 ms (-3.0%) |
+| dragonroost | 28.84 | 29.00 | +0.15 (+-0.34) | 33.78 -> 33.38 ms (-1.2%) |
+| outset_grass_us | 29.60 | 29.97 | +0.37 (+-0.51) | 20.36 -> 20.31 ms (-0.3%) |
+| outset_lookout_us | 29.65 | 29.97 | +0.31 (+-0.40) | 32.91 -> 32.29 ms (-1.9%) |
+
+No scene slower. Part of the gain is the baseline built without PGO (the candidate had v1.2.2's profile where its
+code is unchanged); the render thread is 3-4 ms lighter a frame in every scene (#147). `--expect`: dragonroost 0.75
+fps below v1.2.2's record, the rest as recorded; the same run's v1.2.2 is low there too (28.84), so the conditions
+(FSR on, 900 frames), not the build.
+
+### F. Memory
+
+Two laps of the 40-warp tour on the USA game (`perf/results/v1.3.0-memory.txt`), no crash:
+
+| | End of lap 1 | End of lap 2 |
+|---|---|---|
+| malloc in use | 2509 MiB | 2509 MiB (+0) |
+| Image heap | 3 chunks, 192 MiB (11.0 MiB free) | 3 chunks, 192 MiB (4.5 MiB free) |
+| Shader variants alive | 1277 (5756 freed) | 1283 (12286 freed) |
+
+Nothing grew in lap 2. The first run, on 62c6fe35, stopped at lap 1's warp to `PShip2`: the auto save on entering
+it hit the game's assert in `dComIfGs_setGameStartStage` (`d_com_inf_game.cpp:2680 mapInfo != 0`; the code was the
+same in v1.2.2). Fixed in be843560: the capture leaves the start stage as it is where the game has no map info.
+
 ## v1.2.2, 2026-11-07
 
 Hotfix (#126: Puppet Ganon's cutscene; #127: an RGBA8 texture read by a shadow sampler, and PGO builds without
