@@ -969,6 +969,15 @@ int current_stage_no(Cpu* c) {
     return (ld8(stag + 9) >> 1) & 0x7F;
 }
 
+// (this fork) dComIfGs_setGameStartStage asserts the stage's map info (dStage_stageDt_c getMapInfo, vtable +0x74)
+// for save tables 11-13. Some of those stages have none (PShip2, reached by a warp): the game never saves
+// there, but an auto save on entering it would stop the game (d_com_inf_game.cpp:2680 mapInfo != 0)
+bool start_stage_settable(Cpu* c, int stage_no) {
+    if (stage_no < 11 || stage_no > 13) return true;
+    uint32_t vt = ld32(kStageData);
+    return in_mem2(vt) && guest_call(c, ld32(vt + 0x74), {kStageData}) != 0;
+}
+
 // a Quest Log is being played (not the title screen or file select) and nothing is changing stage
 bool gameplay_ready(std::string& why, bool& retry) {
     retry = false;
@@ -1092,7 +1101,8 @@ bool capture_portable(Cpu* c, pstate::State& s, std::string& why) {
         memcpy(entry, mem::ptr(sv + kMemoryTable + stage_no * 0x24), sizeof entry);
         guest_call(c, fn_putSave, {info, (uint32_t)stage_no});
     }
-    if (stage != "PShip") guest_call(c, fn_setGameStartStage);  // (PShip would also set the next time of day)
+    if (stage != "PShip" && start_stage_settable(c, stage_no))  // (PShip would also set the next time of day)
+        guest_call(c, fn_setGameStartStage);
     memset(mem::ptr(buf), 0, pstate::kSaveDataSize);
     int32_t r;
     {
