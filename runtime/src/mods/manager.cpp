@@ -86,6 +86,10 @@ const Entry catalogue[] = {
     {"no-text-pauses", "No pauses in texts", "Gameplay",
      "Leaves out the short pauses written into some texts, so the rest of the line follows at once.",
      "WWHD_MOD_NO_TEXT_PAUSES", no_text_pauses, set_no_text_pauses},
+    {"fix-game-bugs", "Fix original game bugs", "Game",
+     "Fixes bugs that are in the original game, such as the pause menu losing its selection cursor after a door "
+     "when the map's chart was zoomed in. Off, the game behaves exactly as the original.",
+     "WWHD_MOD_FIX_GAME_BUGS", fix_game_bugs, set_fix_game_bugs, false, true},
 };
 std::string key(const Entry& entry) { return std::string("mod.")+entry.id+".enabled"; }
 bool player_preferences() { return !std::getenv("WWHD_NO_HOST_INPUT"); }

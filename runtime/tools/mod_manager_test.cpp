@@ -75,6 +75,8 @@ bool fast_scenes() { return state[5]; } void set_fast_scenes(bool b) { state[5]=
 static bool instant = false, no_pauses = false;
 bool instant_text() { return instant; } void set_instant_text(bool b) { instant=b; }
 bool no_text_pauses() { return no_pauses; } void set_no_text_pauses(bool b) { no_pauses=b; }
+static bool fix_bugs = true;
+bool fix_game_bugs() { return fix_bugs; } void set_fix_game_bugs(bool b) { fix_bugs=b; }
 bool quick_use() { return state[6]; } void set_quick_use(bool b) { state[6]=b; }
 static float quick_speed = 1.f;
 float quick_use_speed() { return quick_speed; }
@@ -107,8 +109,17 @@ int main() {
     for(const auto& entry:entries()) env(entry.startup_env,nullptr);
     env("WWHD_MOD_CAMERA_SPEED",nullptr);env("WWHD_MOD_MOUSE_SENS",nullptr);
     env("WWHD_MOD_MOVE_FACTOR",nullptr);env("WWHD_MOD_MOVE_SWIM",nullptr);env("WWHD_MOD_MOVE_STAMINA",nullptr);
-    assert(entries().size()==22);  // with camera-directed-items (#203), quick-use (#196), instant-text and no-text-pauses
+    assert(entries().size()==23);  // with camera-directed-items (#203), quick-use (#196), instant-text, no-text-pauses and fix-game-bugs (#336)
     assert(find("instant-text") && !find("instant-text")->default_enabled && find("no-text-pauses"));
+    // Fix original game bugs (#336): on by default, saved like the others, the start-up switch wins
+    assert(find("fix-game-bugs") && std::string(find("fix-game-bugs")->category)=="Game" && find("fix-game-bugs")->default_enabled);
+    assert(mods::fix_game_bugs());
+    load_saved(); assert(mods::fix_game_bugs());
+    assert(set_enabled("fix-game-bugs",false) && !mods::fix_game_bugs() && preferences["mod.fix-game-bugs.enabled"]=="0");
+    mods::set_fix_game_bugs(true);  // (a new start: the switch starts on and reads the settings)
+    load_saved(); assert(!mods::fix_game_bugs());
+    assert(set_enabled("fix-game-bugs",true) && mods::fix_game_bugs() && preferences["mod.fix-game-bugs.enabled"]=="1");
+    preferences.erase("mod.fix-game-bugs.enabled");
     assert(find("camera-directed-items") && find("quick-use"));
     for(const auto& option:traversal_options()) env(option.startup_env,nullptr);
     env("WWHD_MOD_LOCK_ON_RANGE",nullptr);env("WWHD_MOD_LOCK_ON_CYCLING",nullptr);
