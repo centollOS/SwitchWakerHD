@@ -148,7 +148,7 @@ void write_sample(FILE* out, const Sample& s) {
 }
 
 FILE* open_samples(const char* kind, int n, char* path, size_t pathSize) {
-    snprintf(path, pathSize, "logs/%s_%llu.samples", kind, (unsigned long long)(armGetSystemTick() / 19200000));
+    snprintf(path, pathSize, "logs/%s_%llu.samples", kind, (unsigned long long)(armGetSystemTick() / armGetSystemTickFreq()));
     FILE* out = fopen(path, "wb");
     if (!out) return nullptr;
     fprintf(out, "WWHDSAMP1 %d\n", n);

@@ -208,7 +208,11 @@ const DkShader* shader(ShaderId id);  // null if it did not load (logged)
 inline uint64_t now_ns() {
     uint64_t ticks;
     asm volatile("mrs %0, cntpct_el0" : "=r"(ticks));
+#ifdef __SWITCH2__
+    return ticks * 32;
+#else
     return ticks * 625 / 12;  // 19.2 MHz
+#endif
 }
 // names a blocking step for the hang watchdog (gx2::g_render_stage)
 struct Stage {

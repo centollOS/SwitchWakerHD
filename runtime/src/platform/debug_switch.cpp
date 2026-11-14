@@ -309,7 +309,7 @@ debugsrv::Reply coreprobe(const debugsrv::Args& a) {
     Thread t;
     Result rc = threadCreate(&t, [](void* arg) {
         Probe& p = *static_cast<Probe*>(arg);
-        const uint64_t start = armGetSystemTick(), end = start + uint64_t(p.seconds * 19'200'000.0);
+        const uint64_t start = armGetSystemTick(), end = start + uint64_t(p.seconds * double(armGetSystemTickFreq()));
         uint64_t last = start;
         for (;;) {
             const uint64_t now = armGetSystemTick();

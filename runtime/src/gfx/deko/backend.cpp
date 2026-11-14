@@ -762,7 +762,11 @@ struct DynamicRes {
 struct GpuClock {
     bool have = false;
     uint64_t cpu0 = 0, gpu0 = 0;
+#ifdef __SWITCH2__
+    double factor = 1.0;
+#else
     double factor = 31.25 / 19.2;
+#endif
     bool logged = false;
     void sample(uint64_t cpuNs, uint64_t gpuTs) {
         if (!have) {
@@ -1464,8 +1468,7 @@ void check_hitch(uint64_t now) {
     static uint64_t lastSwap = 0, lastDraws = 0, lastSkipped = 0, lastRenderWait = 0;
     static int logged = 0;
     const uint64_t renderWait = gx2::render_thread_wait_ns();
-    // (this fork) hitch mode of the sampler: a slow frame's samples to logs/hitch_*.samples (now_ns: ticks * 625 / 12)
-    if (lastSwap) thread_sampler::mark_frame(lastSwap * 12 / 625, now * 12 / 625, R.frame);
+    if (lastSwap) thread_sampler::mark_frame(armNsToTicks(lastSwap), armNsToTicks(now), R.frame);
     if (lastSwap && now - lastSwap > 55'000'000ull) {
         g_hitches++;
         if (logged < 300) {
