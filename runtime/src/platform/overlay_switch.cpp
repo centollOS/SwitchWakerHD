@@ -342,20 +342,28 @@ void tab_picture() {
     heading(tx.experimental);
     warn("%s", tx.experimentalWarn);
     {
-        // the upstream 60 fps modes (the screen is 60 Hz: 60 fps only)
+        // the upstream 60 fps modes (the Switch 1's screen is 60 Hz: 60 fps only)
+        //  the Switch 2 also offers 120hz (and 240hz for fun) interpolation.
         const int m = interp::mode();
-        auto choose = [](int mode) {
-            hostui::post([mode] {
-                if (mode == 1) interp::set_fps(60);
+        auto choose = [](int mode, int fps = 60) {
+            hostui::post([mode, fps] {
+                if (mode == 1) interp::set_fps(fps);
                 interp::set_mode(mode);
                 LOG("[interp] frame rate mode from the Switch tab: %s (not saved)", interp::mode_name());
             });
         };
         if (radio_tip(lbl(tx.fps30, "interp0").c_str(), m == 0, tx.fps30Tip)) choose(0);
         ImGui::SameLine();
-        if (radio_tip(lbl(tx.fpsInterp, "interp1").c_str(), m == 1, tx.fpsInterpTip)) choose(1);
+        if (radio_tip(lbl(tx.fpsInterp, "interp1").c_str(), m == 1 && interp::fps() == 60, tx.fpsInterpTip)) choose(1);
         ImGui::SameLine();
         if (radio_tip(lbl(tx.fpsTrue60, "interp2").c_str(), m == 2, tx.fpsTrue60Tip)) choose(2);
+#ifdef __SWITCH2__
+        if (radio_tip("120 fps##interp120", m == 1 && interp::fps() == 120,
+                      "Frame interpolation at 120 fps.")) choose(1, 120);
+        ImGui::SameLine();
+        if (radio_tip("240 fps##interp240", m == 1 && interp::fps() == 240,
+                      "Frame interpolation at 240 fps (drawn without waiting for the screen).")) choose(1, 240);
+#endif
         help(tx.fpsModesHelp);
         if (m == 1) {
             bool paced;
