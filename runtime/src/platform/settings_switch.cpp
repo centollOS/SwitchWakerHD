@@ -77,6 +77,9 @@ bool apm_ready() {
     if (g_apm_ready) return true;
     if (g_apm_failed) return false;
     g_apm_failed = true;
+#ifdef __SWITCH2__
+    return false;
+#endif
     AppletType applet = appletGetAppletType();
     if (applet != AppletType_Application && applet != AppletType_SystemApplication) {
         LOG("[switch] gpu profile skipped: apm needs title mode (application)");
