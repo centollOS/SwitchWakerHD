@@ -11,6 +11,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "../runtime.h"
 #include "../mods/guest_builtin.h"  // (this fork) guest mods built into the NRO: their guest memory
@@ -93,6 +94,7 @@ void log_crash_write(const char* text, size_t n) {
 // the heap malloc has never grown into, in MiB (libnx's heap end against malloc's break; no lock).
 // Freed blocks inside the used part come on top of it.
 extern "C" char* fake_heap_end;
+extern "C" char* fake_heap_start;
 size_t heap_never_used_mib() {
     char* top = static_cast<char*>(sbrk(0));
     if (!fake_heap_end || !top || top == reinterpret_cast<char*>(-1)) return 0;
@@ -148,10 +150,101 @@ constexpr GuestRange kGuestRanges[] = {
     {mem::kMem1, mem::kMem1Size},
 };
 }  // namespace
+static u64 find_unmapped(u64 lo, u64 span, u64 size, u64 align) {
+    u64 addr = lo;
+    const u64 end = lo + span;
+    while (addr < end) {
+        MemoryInfo mi{};
+        u32 pi = 0;
+        if (R_FAILED(svcQueryMemory(&mi, &pi, addr))) return 0;
+        const u64 bEnd = mi.addr + mi.size;
+        if (mi.type == MemType_Unmapped) {
+            const u64 start = (std::max<u64>(mi.addr, lo) + align - 1) & ~(align - 1);
+            if (start + size <= std::min(bEnd, end) && start + size > start) return start;
+        }
+        if (bEnd <= addr) return 0;
+        addr = bEnd;
+    }
+    return 0;
+}
+
+static bool init_memory_physical(const GuestRange* ranges, size_t n) {
+    if (!envIsSyscallHinted(0x2C)) {
+        LOG("[mem] no svcMapPhysicalMemory");
+        return false;
+    }
+    u64 aliasAddr = 0, aliasSize = 0;
+    svcGetInfo(&aliasAddr, InfoType_AliasRegionAddress, CUR_PROCESS_HANDLE, 0);
+    svcGetInfo(&aliasSize, InfoType_AliasRegionSize, CUR_PROCESS_HANDLE, 0);
+    virtmemLock();
+    const u64 window = find_unmapped(aliasAddr, aliasSize, 0x100000000ull, 0x200000);
+    if (!window || !virtmemAddReservation((void*)window, 0x100000000ull)) {
+        virtmemUnlock();
+        LOG("[mem] no free 4 GiB in the alias region");
+        return false;
+    }
+    virtmemUnlock();
+    uint64_t need = 0;
+    for (size_t i = 0; i < n; i++) need += ranges[i].size;
+    need = (need + (64u << 20) + 0x1FFFFF) & ~0x1FFFFFull;
+    static uint64_t s_heapSize = 0;
+    static uintptr_t s_window = 0;
+    static std::vector<GuestRange> s_mapped;
+    char* const heapStart = fake_heap_start;
+    const uint64_t heapSize = uint64_t(fake_heap_end - heapStart);
+    const uint64_t inUse = (uint64_t((char*)sbrk(0) - heapStart) + (256u << 20) + 0x1FFFFF) & ~0x1FFFFFull;
+    if (heapSize < need + inUse) {
+        LOG("[mem] the heap is too small to give the guest its memory");
+        return false;
+    }
+    u64 heapBase = 0;
+    svcGetInfo(&heapBase, InfoType_HeapRegionAddress, CUR_PROCESS_HANDLE, 0);
+    const uint64_t procHeap = uint64_t(uintptr_t(fake_heap_end) - heapBase);  // the process's heap now
+    const uint64_t newHeap = (procHeap - need) & ~0x1FFFFFull;
+    void* addr = nullptr;
+    Result rc = svcSetHeapSize(&addr, newHeap);
+    if (R_FAILED(rc) || uintptr_t(addr) != heapBase) {
+        LOG("[mem] svcSetHeapSize %llu MiB (process heap %llu MiB from %#llx) failed (0x%X)",
+            (unsigned long long)(newHeap >> 20), (unsigned long long)(procHeap >> 20), (unsigned long long)heapBase, rc);
+        return false;
+    }
+    fake_heap_end = (char*)(heapBase + newHeap);
+    s_heapSize = procHeap;
+    s_window = uintptr_t(window);
+    static uint64_t s_heapBase = heapBase;
+    atexit([] {
+        for (const GuestRange& r : s_mapped) svcUnmapPhysicalMemory((void*)(s_window + r.start), r.size);
+        void* a = nullptr;
+        if (R_SUCCEEDED(svcSetHeapSize(&a, s_heapSize))) fake_heap_end = (char*)(s_heapBase + s_heapSize);
+    });
+    uint64_t total = 0;
+    for (size_t i = 0; i < n; i++) {
+        const GuestRange& r = ranges[i];
+        rc = svcMapPhysicalMemory((void*)(window + r.start), r.size);
+        if (R_SUCCEEDED(rc)) s_mapped.push_back(r);
+        if (R_FAILED(rc)) {
+            LOG("[mem] svcMapPhysicalMemory %08X (+%X) failed (0x%X)", r.start, r.size, rc);
+            return false;
+        }
+        total += r.size;
+    }
+    ppc_mem_base_var = (uint8_t*)window;
+    LOG("[mem] guest window at %p (alias region, svcMapPhysicalMemory), %llu MiB backed", (void*)window,
+        (unsigned long long)(total >> 20));
+    log_heap("after the guest memory");
+    return true;
+}
+
 void core_switch::init_memory() {
-    if (!envIsSyscallHinted(0x77) || !envIsSyscallHinted(0x73))
-        fatal("guest memory needs svcMapProcessCodeMemory/svcSetProcessMemoryPermission (run from hbmenu over a game, "
-              "not the album applet)");
+    if (!envIsSyscallHinted(0x77) || !envIsSyscallHinted(0x73)) {
+        GuestRange ranges[std::size(kGuestRanges) + 1];
+        size_t n = 0;
+        for (const auto& r : kGuestRanges) ranges[n++] = r;
+        if (const guestbuiltin::Region mods = guestbuiltin::memory(); mods.size) ranges[n++] = {mods.start, mods.size};
+        if (init_memory_physical(ranges, n)) return;
+        fatal("guest memory needs svcMapProcessCodeMemory/svcSetProcessMemoryPermission or svcMapPhysicalMemory (run from "
+              "hbmenu over a game, not the album applet)");
+    }
     Handle self = envGetOwnProcessHandle();
     virtmemLock();
     void* window = virtmemFindCodeMemory(0x100000000ull, 0x10000);
