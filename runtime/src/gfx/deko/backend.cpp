@@ -15,6 +15,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "dk_surfaces.h"
 #include "dk_sync.h"
 #include "frame_pacing.h"  // (this fork, #23) vblank statistics and pacing modes
+namespace interp { int output_fps(); bool interp_on(); }
 #include "../../platform/background_shaders_switch.h"  // (this fork) the counter's shader line
 #include "../../platform/thread_sampler.h"  // (this fork) the sampler's hitch mode
 #include "../../platform/saltynx_switch.h"  // (this fork) the overlays' frame rate
@@ -154,6 +155,14 @@ void debug_message(void*, const char* context, DkResult result, const char* mess
     if (result != DkResult_Success)  // a trap follows: the error ends the process here, readably
         fatal("[dk] deko3d error in %s: result %d: %s (frame %llu)", context ? context : "?", int(result),
               message ? message : "", (unsigned long long)R.frame + 1);
+    // GPU queue error reporting
+    static std::atomic<int> errorReportLines{0};
+    if (message && strstr(message, "entered error state")) errorReportLines.store(400);
+    if (errorReportLines.load() > 0) {
+        errorReportLines.fetch_sub(1);
+        LOG("[dk] deko3d %s: %s", context ? context : "?", message);
+        return;
+    }
     const int n = g_debugMessages.fetch_add(1);
     if (n < 200) LOG("[dk] deko3d %s: %s", context ? context : "?", message ? message : "");
     else if (n == 200) LOG("[dk] deko3d: more messages, not logged");
@@ -1311,12 +1320,27 @@ void present() {
         // (this fork, #23) the swap interval of the pacing mode (frame_pacing.h): 1, or the game's
         static DkSwapchain set = nullptr;
         static uint32_t interval = 1;
+        static bool hz120 = false;
         const uint32_t want = frame_pacing::swap_interval();
-        if (set != g_swapchain || want != interval) {
-            dkSwapchainSetSwapInterval(g_swapchain, want);
-            if (want != interval) LOG("[dk] frame %llu: swap interval %u", (unsigned long long)frame, want);
+#ifdef __SWITCH2__
+        const bool want120 = want == 1 && interp::interp_on() && interp::output_fps() == 120;
+#else
+        const bool want120 = false;
+#endif
+        if (set != g_swapchain || want != interval || want120 != hz120) {
+#ifdef __SWITCH2__
+            if (want120) {
+                const Result rc = nwindowSetFrameRates(nwindowGetDefault(), 0, 0, true);
+                LOG("[dk] frame %llu: every refresh at the highest rate: rc 0x%x", (unsigned long long)frame, rc);
+            } else
+#endif
+            {
+                dkSwapchainSetSwapInterval(g_swapchain, want);
+                if (want != interval || want120 != hz120) LOG("[dk] frame %llu: swap interval %u", (unsigned long long)frame, want);
+            }
             set = g_swapchain;
             interval = want;
+            hz120 = want120;
             frame_pacing::set_interval(want);
         }
     }
