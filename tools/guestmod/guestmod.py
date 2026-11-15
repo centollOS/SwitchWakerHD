@@ -181,10 +181,34 @@ class Translator:
         (the play accessor, or a game data address inside the object) on a build that moved members."""
         if self.new_game_info or not self.moves_game_info():
             return
-        if (kind in ("game", "orig") and address == PLAY_GET) or \
-                (kind == "gdata" and GAME_INFO <= address < GAME_INFO + GAME_INFO_SIZE):
-            raise ModError("Mod uses an older SDK whose play object offsets are USA offsets, which the %s build "
-                           "moved; ask its author to rebuild with the current SDK" % self.build.name)
+        if kind in ("game", "orig") and address == PLAY_GET:
+            self.refuse_old_play_offsets("it uses dComIfGp_get")
+        if kind == "gdata" and GAME_INFO <= address < GAME_INFO + GAME_INFO_SIZE:
+            self.refuse_old_play_offsets("it uses g_dComIfG_gameInfo+0x%X" % (address - GAME_INFO))
+
+    def check_old_play_displacements(self):
+        """The play pointer can come from wwhd_play_get(), a hook's argument or another object, and even a mod built
+        with the current SDK can write a raw USA offset by hand instead of WWHD_GAME_INFO_OFFSET(0x...). Every such
+        access to a member that moved still has its unrelocated USA offset in the code (whereas a __wwhd_ginfo_* or
+        address relocation is in relocated_halves), so refuse any mod whose instructions add a raw constant in the
+        moved range (a displacement, or an addi/li)."""
+        if not self.moves_game_info():
+            return
+        lo = min(int(o, 16) for l in self.build.layouts if l["name"] == "g_dComIfG_gameInfo"
+                 for o, _ in l["field_steps"])
+        for start, end in self.text:
+            for a in range(start, end, 4):
+                w = self.word(a)
+                if a in self.imports or a + 2 in self.relocated_halves or w >> 26 not in PLAY_DISPLACEMENT_OPS:
+                    continue
+                d = sext(w & 0xFFFF, 16)
+                if lo <= d < GAME_INFO_SIZE:
+                    what = ("the instruction at mod +0x%X adds 0x%X, an offset of a play object member that moved"
+                            % (a - self.base, d))
+                    if not self.new_game_info:
+                        self.refuse_old_play_offsets(what)
+                    raise ModError("Mod has a raw play object offset on %s (%s); use WWHD_GAME_INFO_OFFSET(0x%X)"
+                                   % (self.build.name, what, d))
 
     def symbol_value(self, sym):
         """(kind, value): kind 'addr' for a guest address, else an import kind."""
