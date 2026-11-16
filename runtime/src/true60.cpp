@@ -846,7 +846,9 @@ extern "C" void hook_025DF940(Cpu* c) {
 // re-implementations of the GameCube source with fractional smoothing and split steps.
 
 // f32 cLib_addCalc(f32* v, f32 target, f32 scale, f32 maxStep, f32 minStep)
-namespace interp { bool zoom_ease(Cpu* c, void (*orig)(Cpu*)); void fx_actor_draw(uint32_t proc, uint32_t exec, bool begin); }
+namespace interp { bool zoom_ease(Cpu* c, void (*orig)(Cpu*)); void fx_actor_draw(uint32_t proc, uint32_t exec, bool begin);
+void kankyo_draw(uint32_t proc, bool begin);  // interp_kankyo.cpp: the environment's draw-time state
+}
 extern "C" void hook_0200ECD4(Cpu* c) {
     // camera_draw's ease of the HD projection zoom: once per logic step with frame interpolation (interp.cpp)
     static const uint32_t zoom_call = GC(0x0250018C);
@@ -1212,8 +1214,13 @@ extern "C" void hook_025DF904(Cpu* c) {
     // frame interpolation: actor draws that advance their own state, once per logic step (interp_fx.cpp;
     // the logic pass's draws too: replayed draws and fields blended between the steps)
     const uint32_t keep_exec = interp::enabled() && !true60::enabled() ? actor_execute_fn(proc) : 0;
+    // (upstream 12a10d5a, interp_kankyo.cpp) the environment's draw advances once per logic step; this fork keeps
+    // true 60, whose half passes keep their draws' state themselves, so only with frame interpolation
+    const bool ky = !true60::enabled();
     if (keep_exec) interp::fx_actor_draw(proc, keep_exec, true);
+    if (ky) interp::kankyo_draw(proc, true);
     f_025DF904_orig(c);
+    if (ky) interp::kankyo_draw(proc, false);
     if (keep_exec) interp::fx_actor_draw(proc, keep_exec, false);
     if (dw) {
         static std::unordered_map<uint32_t, int> cnt;
