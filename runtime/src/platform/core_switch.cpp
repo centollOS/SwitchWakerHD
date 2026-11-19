@@ -194,7 +194,8 @@ static bool init_memory_physical(const GuestRange* ranges, size_t n) {
     const uint64_t heapSize = uint64_t(fake_heap_end - heapStart);
     const uint64_t inUse = (uint64_t((char*)sbrk(0) - heapStart) + (256u << 20) + 0x1FFFFF) & ~0x1FFFFFull;
     if (heapSize < need + inUse) {
-        LOG("[mem] the heap is too small to give the guest its memory");
+        LOG("[mem] the heap is too small to give the guest its memory",
+            (unsigned long long)(heapSize >> 20), (unsigned long long)(inUse >> 20), (unsigned long long)(need >> 20));
         return false;
     }
     u64 heapBase = 0;
