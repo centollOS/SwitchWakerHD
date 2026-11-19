@@ -77,6 +77,11 @@ static bool self_test() {
            !b.error.empty();
     good = good && gfxdk::glsl_to_deko("#version 430\nint offset = 1;\nvoid main(){}\n", false, &b) ==
                        "#version 460\nint offset = 1;\nvoid main(){}\n";
+    const std::string vk = "#version 430\n#ifdef VULKAN\n#define gl_VertexID gl_VertexIndex\n#else\n#endif\n"
+                           "void main(){}\n";
+    good = good && gfxdk::glsl_to_deko(vk, false, &b) == "#version 460\nvoid main(){}\n" &&
+           gfxdk::glsl_to_deko(vk, false, &b, gfxdk::DekoGlsl::Vulkan) ==
+               "#version 460\n#define gl_VertexID gl_VertexIndex\nvoid main(){}\n";
     printf("self test: %s\n", good ? "ok" : "FAILED");
     return good;
 }

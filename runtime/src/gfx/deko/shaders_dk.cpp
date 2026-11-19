@@ -684,7 +684,11 @@ void compile_job(Job& job, JobResult& r) {
             return;
         }
     }
+#ifdef __SWITCH2__
+    const std::string glsl = glsl_to_deko(job.glsl, job.vertex, &r.bindings, DekoGlsl::Vulkan);
+#else
     const std::string glsl = glsl_to_deko(job.glsl, job.vertex, &r.bindings);
+#endif
     const uint64_t t1 = now_ns();
     r.convertNs = t1 - t0;
     if (glsl.empty()) {

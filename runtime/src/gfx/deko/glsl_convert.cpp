@@ -51,6 +51,7 @@ struct Scan {
 struct Converter {
     bool vertex;
     ConvertedBindings* out;
+    DekoGlsl dialect;
     int set = -1;  // the stage's Vulkan descriptor set (Cemu: 0 vertex, 1 pixel)
 
     bool fail(const std::string& why) {
@@ -158,7 +159,8 @@ struct Converter {
             if (branch == VulkanBranch) {
                 // the Vulkan built-in names (uam's GL frontend knows gl_VertexID/gl_InstanceID) and the
                 // layout macros, expanded below with deko3d slots
-                if (t == "#define gl_VertexID gl_VertexIndex" || t == "#define gl_InstanceID gl_InstanceIndex" ||
+                if (((t == "#define gl_VertexID gl_VertexIndex" || t == "#define gl_InstanceID gl_InstanceIndex") &&
+                     dialect == DekoGlsl::Gl) ||
                     starts_with(t, "#define UNIFORM_BUFFER_LAYOUT(") || starts_with(t, "#define TEXTURE_LAYOUT("))
                     continue;
                 // deko3d's clip-space y points up (dk.h): the position is given y-down as in Vulkan, negated
@@ -185,7 +187,8 @@ struct Converter {
         if (vertex && res.find("invariant gl_Position;") == std::string::npos) { fail("no void main()"); return {}; }
         if (vertex && !out->negatedY) { fail("no SET_POSITION in the #ifdef VULKAN block"); return {}; }
         // the renames dropped above must not be needed by anything that is left
-        if (res.find("gl_VertexIndex") != std::string::npos || res.find("gl_InstanceIndex") != std::string::npos) {
+        if (dialect == DekoGlsl::Gl &&
+            (res.find("gl_VertexIndex") != std::string::npos || res.find("gl_InstanceIndex") != std::string::npos)) {
             fail("gl_VertexIndex/gl_InstanceIndex left after the conversion");
             return {};
         }
@@ -194,11 +197,11 @@ struct Converter {
 };
 }  // namespace
 
-std::string glsl_to_deko(const std::string& cemuGlsl, bool vertex, ConvertedBindings* out) {
+std::string glsl_to_deko(const std::string& cemuGlsl, bool vertex, ConvertedBindings* out, DekoGlsl dialect) {
     ConvertedBindings scratch;
     if (!out) out = &scratch;
     out->clear();
-    Converter c{vertex, out};
+    Converter c{vertex, out, dialect};
     std::string res = c.run(cemuGlsl);
     if (res.empty() && out->error.empty()) out->error = "empty shader";
     return res;
