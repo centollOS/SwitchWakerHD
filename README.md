@@ -9,7 +9,7 @@ fork of [ZeldaWWHDRecomp](https://github.com/ZeldaWWHDRecomp/ZeldaWWHDRecomp).
 
 You need:
 - A legally obtained US or EU copy of the game
-- drako3d (alongside uam2 and drakotools)
+- drako3d (alongside uam2, libuam2rt, and drakotools)
 - libounce
 
 ## Building and installation
@@ -79,8 +79,7 @@ license: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 Note that while the port to Switch 2 was done by a human, the initial Switch port (and the initial recomp)
 were entirely written by AI. I don't condone AI use (and I do feel the result would be much better done by
-a human), but I just needed a test for drako3d that didn't need jit-compiled shaders and this worked. Maybe
-one day I'll come back to this and make it run better.
+a human), but I just needed a test for drako3d. Maybe one day I'll come back to this and make it run better.
 
 ## License
 
