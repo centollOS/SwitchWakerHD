@@ -20,6 +20,7 @@
 #include "../gfx/switch_renderer.h"
 #include "../gfx/deko/frame_pacing.h"
 #include "../game_clock.h"
+#include "../interp.h"
 namespace gx2 { extern uint32_t g_render_thread_handle; }  // (gx2_core.cpp: rtcores)
 #include "../mods/mods.h"
 #include "../mods/warps.h"
@@ -358,6 +359,22 @@ debugsrv::Reply guestcore3(const debugsrv::Args& a) {
                         (cores::allowed() ? "" : " (the process has no core 3: the forwarder's NPDM)"));
 }
 
+// "interp [0|1|2] [fps]" (perf tooling, lschaupp fork): the Picture tab's frame rate mode (0 30 fps, 1 interpolation
+// at fps 60/120/240, 2 true 60), not saved; for perf_test runs at the 60 fps the player uses
+debugsrv::Reply interp_cmd(const debugsrv::Args& a) {
+    if (!a.empty()) {
+        const int m = atoi(a[0].c_str()), f = a.size() > 1 ? atoi(a[1].c_str()) : 60;
+        hostui::post([m, f] {
+            if (m == 1) interp::set_fps(f);
+            interp::set_mode(m);
+            LOG("[interp] frame rate mode from the debug server: %s (not saved)", interp::mode_name());
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    return debugsrv::ok(std::string("interp ") + std::to_string(interp::mode()) + " " + std::to_string(interp::fps()) + ": " +
+                        interp::mode_name());
+}
+
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
     return debugsrv::ok("pacing " + std::to_string(frame_pacing::mode()) + ": swap interval " +
@@ -533,6 +550,7 @@ void start() {
     debugsrv::add_command("coreprobe", "coreprobe [core] [s] [prio]  how much of a core a spinning thread gets (test)", coreprobe);
     debugsrv::add_command("core3", "core3 [0|1]            background shader compiles on core 3 (test)", core3);
     debugsrv::add_command("guestcore3", "guestcore3 [0|1]       guest threads of cores 0/2 also on core 3 (test)", guestcore3);
+    debugsrv::add_command("interp", "interp [0|1|2] [fps]   frame rate mode: 0 30 fps, 1 interpolation at fps, 2 true 60", interp_cmd);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("hudmark", "hudmark [0|1]          FXAA at the game's HUD start, 0 the guess alone (not saved)", hudmark);
     debugsrv::add_command("bloom", "bloom [0|1]            the Switch tab's Bloom (not saved)", bloom);
