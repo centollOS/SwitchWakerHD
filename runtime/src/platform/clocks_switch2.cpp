@@ -497,7 +497,7 @@ void set_choice(int c, bool save) {
 }
 u32 cpu_hz() {
     std::lock_guard<std::timed_mutex> lk(g_ipc);
-    return read_rate(Cpu);
+    return read_rate(Clock(0));  // (Cpu: also a name in libounce)
 }
 const char* env_override() {
     if (getenv("WWHD_S2_CPU_MHZ")) return "WWHD_S2_CPU_MHZ";
