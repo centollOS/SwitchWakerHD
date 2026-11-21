@@ -247,6 +247,7 @@ void measure_boost() {
         g_envBoost ? "WWHD_S2_CPU_BOOST" : "the official boost rate (measured)", rc, cpuBoost / 1e6, gpuBefore / 1e6,
         gpuBoost / 1e6);
     if (R_FAILED(rc) || !cpuBoost) {
+        if (g_boostOn && !g_envBoost && R_SUCCEEDED(appletSetCpuBoostMode(ApmCpuBoostMode_Normal))) g_boostOn = false;
         // (this fork) refused, e.g. from hbmenu: the console's own boost rate as measured on the Switch 2 under
         // FastLoad (ZeldaWWHDRecomp 9p, 2026-11-20), only when it lies in the reported CPU range
         if (!g_envBoost && g_cpuRates.type == PcvClockRatesListType_Range && g_cpuRates.count >= 2 &&
