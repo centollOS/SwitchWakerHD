@@ -830,11 +830,15 @@ bool sched_stats() { return g_sched_stats.load(std::memory_order_relaxed); }
 
 #ifdef __SWITCH__
 // guest threads (by name) that run above the render thread on the host like the audio threads:
-// WWHD_BOOST_THREADS, comma-separated, default "update_ubo"; empty turns it off
+// WWHD_BOOST_THREADS, comma-separated, default "update_ubo,WorkerMgr/Worker*" (a trailing * matches a prefix);
+// empty turns it off. (lschaupp fork, perf/workers, from ZeldaWWHDRecomp's sched_switch2.cpp step C: the game's
+// main thread waits in drainWorkerQueues (02759564) for the sead WorkerMgr workers' jobs (particles,
+// RenderDisplay draw / calcGPU) every step; at the guest threads' priority the render, service and shader
+// threads time-sliced them)
 static bool boosted_thread(const std::string& name) {
     static const std::vector<std::string> names = [] {
         const char* e = getenv("WWHD_BOOST_THREADS");
-        std::string list = e ? e : "update_ubo";
+        std::string list = e ? e : "update_ubo,WorkerMgr/Worker*";
         std::vector<std::string> out;
         for (size_t start = 0; start <= list.size();) {
             size_t end = list.find(',', start);
@@ -844,7 +848,12 @@ static bool boosted_thread(const std::string& name) {
         }
         return out;
     }();
-    return !name.empty() && std::find(names.begin(), names.end(), name) != names.end();
+    if (name.empty()) return false;
+    for (const std::string& n : names) {
+        if (!n.empty() && n.back() == '*' ? name.compare(0, n.size() - 1, n, 0, n.size() - 1) == 0 : name == n)
+            return true;
+    }
+    return false;
 }
 #endif
 
