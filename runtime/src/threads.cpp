@@ -857,6 +857,29 @@ static bool boosted_thread(const std::string& name) {
 }
 #endif
 
+#ifdef __SWITCH__
+// (lschaupp fork, perf/workers) the boosted threads other than update_ubo, switchable live for A/B runs
+// (debug server "workerboost [0|1]", not saved): handle and the host priority they started with
+static std::mutex g_worker_boost_mu;
+static std::vector<std::pair<Handle, s32>> g_worker_boost;
+static std::atomic<bool> g_worker_boost_on{true};
+static void note_boosted_worker(Handle h) {
+    s32 prio = 0;
+    svcGetThreadPriority(&prio, h);
+    std::lock_guard<std::mutex> lk(g_worker_boost_mu);
+    g_worker_boost.push_back({h, prio});
+}
+extern "C" int wwhd_worker_boost(int on) {  // -1: query; returns the number of threads switched (or known)
+    std::lock_guard<std::mutex> lk(g_worker_boost_mu);
+    if (on >= 0) {
+        g_worker_boost_on = on != 0;
+        for (auto& [h, prio] : g_worker_boost) svcSetThreadPriority(h, on ? 0x2B : prio);
+        LOG("[thread] worker boost %s for %zu threads (debug server)", on ? "on" : "off", g_worker_boost.size());
+    }
+    return int(g_worker_boost.size()) * (g_worker_boost_on.load() ? 1 : -1);
+}
+#endif
+
 static void* thread_main(void* p) {
     HostThread* ht = (HostThread*)p;
     t_self = ht;
@@ -879,7 +902,8 @@ static void* thread_main(void* p) {
     // main thread then waited with its core: OSSendMessage 12-23% of its time), and when the queue
     // was full the main thread ran the job itself.
     if (host::core_layout_on() && (ht->prio <= 8 || boosted_thread(name))) {
-        svcSetThreadPriority(threadGetCurHandle(), 0x2B);
+        if (ht->prio > 8 && name != "update_ubo") note_boosted_worker(threadGetCurHandle());  // (perf/workers)
+        if (ht->prio <= 8 || name == "update_ubo" || g_worker_boost_on.load()) svcSetThreadPriority(threadGetCurHandle(), 0x2B);
         if (ht->prio > 8) LOG("[thread] \"%s\" runs above the render thread (WWHD_BOOST_THREADS)", name.c_str());
     }
 #endif

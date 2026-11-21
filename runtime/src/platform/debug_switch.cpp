@@ -393,6 +393,13 @@ debugsrv::Reply s2clock(const debugsrv::Args& a) {
 }
 #endif
 
+// "workerboost [0|1]" (lschaupp fork, perf/workers): the sead WorkerMgr workers above the render thread, live, not saved
+extern "C" int wwhd_worker_boost(int on);
+debugsrv::Reply workerboost(const debugsrv::Args& a) {
+    const int n = wwhd_worker_boost(a.empty() ? -1 : a[0] != "0");
+    return debugsrv::ok(std::string("workerboost ") + (n >= 0 ? "1" : "0") + " (" + std::to_string(n < 0 ? -n : n) + " threads)");
+}
+
 debugsrv::Reply pacing(const debugsrv::Args& a) {
     if (!a.empty()) frame_pacing::set_mode(atoi(a[0].c_str()));
     return debugsrv::ok("pacing " + std::to_string(frame_pacing::mode()) + ": swap interval " +
@@ -571,6 +578,7 @@ void start() {
 #ifdef __SWITCH2__
     debugsrv::add_command("s2clock", "s2clock [normal|boost|max]  the CPU clock setting for this start (not saved)", s2clock);
 #endif
+    debugsrv::add_command("workerboost", "workerboost [0|1]      (test) sead WorkerMgr workers above the render thread", workerboost);
     debugsrv::add_command("interp", "interp [0|1|2] [fps]   frame rate mode: 0 30 fps, 1 interpolation at fps, 2 true 60", interp_cmd);
     debugsrv::add_command("pacing", "pacing [0|1]           frame pacing: 1 swap interval the game's, 0 always 1", pacing);
     debugsrv::add_command("hudmark", "hudmark [0|1]          FXAA at the game's HUD start, 0 the guess alone (not saved)", hudmark);
