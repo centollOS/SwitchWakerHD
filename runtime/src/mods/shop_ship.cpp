@@ -19,7 +19,7 @@ constexpr uint32_t kShipRoom = 0x5D16;       // s8: the sea room of the ship ent
 constexpr uint32_t kShipId = 0x5D17;         // u8: that ship's id in its room
 constexpr uint32_t kShipX = 0x5D18, kShipZ = 0x5D20;  // f32: the ship's position when entered
 
-std::string current_stage() {
+std::string ship_start_stage() {
     std::string s;
     for (unsigned i = 0; i < 8; ++i) {
         const uint8_t ch = ld8(kPlay + kStartStage + i);
@@ -32,7 +32,7 @@ std::string current_stage() {
 
 // game main thread, frame start (interp.cpp): exact guest values, the other threads idle
 void shop_ship_service() {
-    const std::string stage = current_stage();
+    const std::string stage = ship_start_stage();
     if (!shop_ship::ship_stage(stage)) return;
     // test aid: WWHD_TEST_SHIP=room[:id[:x:z]] stands for the ship entered from the sea (its sea room, its id in that
     // room, its position), once per stay in a ship (a shop reached by WWHD_TEST_WARP_AT has none); room -1 is the
