@@ -48,6 +48,9 @@ namespace interp { int output_fps(); bool interp_on(); }
 #include "platform/host.h"
 #include "platform/input_switch.h"
 #include "platform/settings_switch.h"
+#ifdef __SWITCH2__
+#include "platform/s2_resolution_switch2.h"  // (s2/resolution)
+#endif
 #include "runtime.h"
 #include "lockstep.h"  // (this fork, #67)
 
@@ -79,6 +82,13 @@ std::atomic<int> g_opMode{-1};
 // 1920x1080) forces that size in both modes, for A/B tests in handheld. The game renders its picture at the
 // internal resolution of the mode's picture profile (settings_switch.h; docked 1.5x = 1920x1080 by default, lower
 // while dynamic resolution needs it): the present pass scales it into the window.
+// (s2/resolution) Switch 2: the window follows the Switch 2 tab's output choice instead (s2_resolution_switch2.h; auto:
+// 1920x1080 handheld, the TV's resolution docked, up to 3840x2160), WWHD_DK_WINDOW up to 3840x2160.
+#ifdef __SWITCH2__
+constexpr uint32_t kMaxWinW = 3840, kMaxWinH = 2160;  // (s2/resolution) up to 4K
+#else
+constexpr uint32_t kMaxWinW = 1920, kMaxWinH = 1080;
+#endif
 struct WindowConfig {
     int mode = 1;  // 0 always 1280x720, 1 by the operation mode, 2 forced
     uint32_t w = 0, h = 0;
@@ -88,20 +98,26 @@ const WindowConfig& window_config() {
         WindowConfig c;
         if (const char* e = getenv("WWHD_DK_WINDOW"); e && *e) {
             unsigned w = 0, h = 0;
-            if (sscanf(e, "%ux%u", &w, &h) == 2 && w >= 320 && h >= 180 && w <= 1920 && h <= 1080) {
+            if (sscanf(e, "%ux%u", &w, &h) == 2 && w >= 320 && h >= 180 && w <= kMaxWinW && h <= kMaxWinH) {
                 c.mode = 2;
                 c.w = w;
                 c.h = h;
             } else
-                LOG("[dk] WWHD_DK_WINDOW=%s ignored: WxH from 320x180 to 1920x1080", e);
+                LOG("[dk] WWHD_DK_WINDOW=%s ignored: WxH from 320x180 to %ux%u", e, kMaxWinW, kMaxWinH);
         }
         if (c.mode != 2)
             if (const char* e = getenv("WWHD_DK_DOCKED_1080"); e && *e == '0') c.mode = 0;
         if (c.mode == 2)
             LOG("[dk] window: %ux%u in both modes (WWHD_DK_WINDOW); the game's 1280x720 picture is scaled into it", c.w, c.h);
+#ifdef __SWITCH2__
+        else if (c.mode == 1)
+            LOG("[dk] window: by the Switch 2 tab's output choice (s2Output; auto: 1920x1080 handheld, the TV's resolution "
+                "docked), the swapchain recreated when the mode or the choice changes; the game's picture is scaled into it");
+#else
         else if (c.mode == 1)
             LOG("[dk] window: docked 1920x1080, handheld 1280x720, the swapchain recreated when the mode changes; the game's "
                 "1280x720 picture is scaled into it (WWHD_DK_DOCKED_1080=0: 1280x720 always, the old path)");
+#endif
         else
             LOG("[dk] window: 1280x720 in both modes (WWHD_DK_DOCKED_1080=0, the old path; docked the system scales it)");
         return c;
@@ -115,6 +131,9 @@ void window_wanted(uint32_t& w, uint32_t& h) {
         h = c.h;
         return;
     }
+#ifdef __SWITCH2__
+    if (c.mode == 1) return s2res::output_size(g_opMode.load(std::memory_order_relaxed) == 1, w, h);  // (s2/resolution)
+#endif
     const bool big = c.mode == 1 && g_opMode.load(std::memory_order_relaxed) == 1;
     w = big ? 1920 : 1280;
     h = big ? 1080 : 720;
@@ -430,7 +449,12 @@ struct OverlayStats {
 
 void draw_fps() {
     const int mode = overlay_mode();
-    if (mode <= 0) return;
+#ifdef __SWITCH2__
+    const bool sizeLine = s2res::show_size();  // (s2/resolution) the render and output sizes
+#else
+    const bool sizeLine = false;
+#endif
+    if (mode <= 0 && !sizeLine) return;
     static uint64_t windowStart = now_ns(), windowFrame = R.frame;
     static double fps = 0;
     const uint64_t now = now_ns();
@@ -443,6 +467,12 @@ void draw_fps() {
     char b[32];
     snprintf(b, sizeof b, "%.1f FPS", fps);
     lines.push_back(b);
+    if (sizeLine) {
+        char r[48];
+        snprintf(r, sizeof r, "RES %uX%u > %uX%u", unsigned(1280.0f * res_scale() + 0.5f), unsigned(720.0f * res_scale() + 0.5f),
+                 g_winW, g_winH);
+        lines.push_back(r);
+    }
     if (mode >= 2) {
         auto& s = overlayStats;
         if (s.renderBusy >= 0) {
@@ -684,7 +714,7 @@ struct DynamicRes {
         const uint32_t seq = g_profileSeq.load(std::memory_order_acquire);
         if (seq == profileSeen) return;
         profileSeen = seq;
-        hi = std::clamp(g_profileScale.load(std::memory_order_relaxed), 0.5f, 2.0f);
+        hi = std::clamp(g_profileScale.load(std::memory_order_relaxed), 0.5f, kMaxResScale);  // (s2/resolution: up to 3)
         on = g_profileDynamic.load(std::memory_order_relaxed);
         lo = std::min(loAsked, hi);
         LOG("[dk] resolution profile: internal resolution %.2f, dynamic resolution %s (%.2f to %.2f)", hi,

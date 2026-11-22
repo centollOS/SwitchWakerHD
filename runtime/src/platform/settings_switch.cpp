@@ -25,6 +25,7 @@
 #include "shader_wait_switch.h"
 #ifdef __SWITCH2__
 #include "s2_tab_switch2.h"  // (s2/*)
+#include "s2_resolution_switch2.h"  // (s2/resolution)
 #endif
 
 #include <switch.h>
@@ -65,6 +66,15 @@ bool docked() { return appletGetOperationMode() == AppletOperationMode_Console; 
 void apply_res_profile(const char* why) {
     g_res_mode = docked() ? kDocked : kHandheld;
     const ResProfile& p = g_res[g_res_mode];
+#ifdef __SWITCH2__
+    // (s2/resolution) a fixed render resolution (Switch 2 tab) instead of the profile, dynamic resolution off
+    if (float s = 0; s2res::render_scale(g_res_mode == kDocked, s)) {
+        gfxsw::set_resolution_profile(s, false);
+        LOG("[switch] picture profile %s (%s): render resolution %ux%u (Switch 2 tab, s2Render), dynamic resolution off",
+            kModeIds[g_res_mode], why, unsigned(1280 * s + 0.5f), unsigned(720 * s + 0.5f));
+        return;
+    }
+#endif
     gfxsw::set_resolution_profile(p.scale, p.dynamic);
     LOG("[switch] picture profile %s (%s): internal resolution %.2f, dynamic resolution %s", kModeIds[g_res_mode], why,
         p.scale, p.dynamic ? "on" : "off");
@@ -162,7 +172,22 @@ void tick() {
     if (now - last < 1'000'000'000ull) return;
     last = now;
     std::lock_guard<std::mutex> lk(g_mu);
+#ifdef __SWITCH2__
+    // (s2/resolution) the TV's resolution while docked: a native render size follows the output
+    const bool tvChanged = s2res::tick(docked());
+#else
+    const bool tvChanged = false;
+#endif
     if (g_res_mode != (docked() ? kDocked : kHandheld)) apply_res_profile("mode changed");
+#ifdef __SWITCH2__
+    else if (tvChanged && s2res::render() == s2res::kRenderNative) apply_res_profile("TV resolution changed");
+#else
+    (void)tvChanged;
+#endif
+}
+void reapply_res_profile(const char* why) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    apply_res_profile(why);
 }
 
 const char* mode_label(int m) { return m >= 0 && m < kModes ? kModeLabels[m] : "?"; }
