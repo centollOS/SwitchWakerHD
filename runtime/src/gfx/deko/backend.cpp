@@ -586,14 +586,18 @@ bool draw_picture(const PresentSource& src, bool capture, bool corner = false) {
     // when the picture is smaller than its place in the window)
     const bool exact = src.pw == uint32_t(w) && src.ph == uint32_t(h);
     const bool unorm = unorm_picture(*src.surface);
+    const bool integer = src.surface->fmt.kind != FormatInfo::FLOAT;
+    // (s2/render4k) a picture larger than its place (a 4K render in the handheld 1080p window): the shader's 4-tap
+    // box downscale instead of one bilinear tap (filtered formats only: integer pictures use the nearest sampler)
+    const bool down = !exact && !integer && (src.pw > uint32_t(w) || src.ph > uint32_t(h));
     const int fsr = g_fsr.load(std::memory_order_relaxed) && unorm
-                        ? (src.pw < uint32_t(w) && src.ph < uint32_t(h) ? 1 : exact ? 2 : 0)  // EASU, or RCAS alone at the window's size
-                        : 0;
+                        ? (src.pw < uint32_t(w) && src.ph < uint32_t(h) ? 1 : exact ? 2 : down ? 3 : 0)  // EASU, or RCAS alone at the window's size
+                        : down ? 3 : 0;
     static int fsrLogged = -1;
     if (!corner && fsr != fsrLogged) {
         fsrLogged = fsr;
-        LOG("[dk] present: FSR 1 %s (%s picture %ux%u%s in %dx%d)",
-            fsr == 1 ? "EASU upscale" : fsr == 2 ? "RCAS sharpening" : "not applied", pad ? "GamePad" : "TV", src.pw, src.ph,
+        LOG("[dk] present: %s (%s picture %ux%u%s in %dx%d)",
+            fsr == 1 ? "FSR 1 EASU upscale" : fsr == 2 ? "FSR 1 RCAS sharpening" : fsr == 3 ? "box downscale (4 bilinear taps)" : "bilinear / nearest (FSR 1 not applied)", pad ? "GamePad" : "TV", src.pw, src.ph,
             unorm ? "" : ", not UNORM", w, h);
     }
     PresentUbo p{{g.exposure, g.contrast, g.saturation, g.gamma}, {encode ? 1 : 0, src.srgb ? 1 : 0, fsr, 0}};
@@ -604,7 +608,6 @@ bool draw_picture(const PresentSource& src, bool capture, bool corner = false) {
         LOG("[dk] presenting the game's picture (%ux%u, GX2 format %03X%s) with %s", src.width, src.height,
             src.surface->format, src.srgb ? ", sRGB" : "", encode ? "sRGB encoding (sRGB TV format)" : "no encoding");
     }
-    const bool integer = src.surface->fmt.kind != FormatInfo::FLOAT;
     const DkResHandle tex =
         dkMakeTextureHandle(src.imageId, exact || integer ? kPresentNearestSamplerId : kPresentLinearSamplerId);
     bind_pass_state(false, false);
