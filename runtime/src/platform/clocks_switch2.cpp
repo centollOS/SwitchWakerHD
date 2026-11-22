@@ -441,6 +441,12 @@ void probe_thread() {
         if (!g_restored && g_envBoost) measure_boost();
     }
     int nextLog = g_secs > 0 ? g_secs : -1;
+    // (combo/all) no clock service (clkrst and pcv refused, e.g. rc 0x1015 under kaiHEN): the setting stays in the menu
+    // with "Not available", nothing is changed or restored, and the 10 s probe line (all "?") is left out
+    if (g_backend == None) {
+        nextLog = -1;
+        LOG("[switch2 clocks] no clock service: the CPU clock setting has no effect this run; probe lines off");
+    }
     const auto loopStart = clock::now();  // (the start-up calls above take a while: no catching up after them)
     for (int tick = 1; !g_stop; ++tick) {
         const auto due = loopStart + std::chrono::milliseconds(tick * 50);

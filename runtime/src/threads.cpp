@@ -896,10 +896,10 @@ static bool boosted_thread(const std::string& name) {
 
 #ifdef __SWITCH__
 // (lschaupp fork, perf/workers) the boosted threads other than update_ubo, switchable live for A/B runs
-// (debug server "workerboost [0|1]", not saved): handle and the host priority they started with
+// (debug server "workerboost [0|1]", not saved; off by default in combo/all): handle and the host priority they started with
 static std::mutex g_worker_boost_mu;
 static std::vector<std::pair<Handle, s32>> g_worker_boost;
-static std::atomic<bool> g_worker_boost_on{true};
+static std::atomic<bool> g_worker_boost_on{false};  // (combo/all) off by default: no gain in the timing round
 static void note_boosted_worker(Handle h) {
     s32 prio = 0;
     svcGetThreadPriority(&prio, h);
@@ -941,7 +941,9 @@ static void* thread_main(void* p) {
     if (host::core_layout_on() && (ht->prio <= 8 || boosted_thread(name))) {
         if (ht->prio > 8 && name != "update_ubo") note_boosted_worker(threadGetCurHandle());  // (perf/workers)
         if (ht->prio <= 8 || name == "update_ubo" || g_worker_boost_on.load()) svcSetThreadPriority(threadGetCurHandle(), 0x2B);
-        if (ht->prio > 8) LOG("[thread] \"%s\" runs above the render thread (WWHD_BOOST_THREADS)", name.c_str());
+        if (ht->prio > 8 && (name == "update_ubo" || g_worker_boost_on.load()))
+            LOG("[thread] \"%s\" runs above the render thread (WWHD_BOOST_THREADS)", name.c_str());
+        else if (ht->prio > 8) LOG("[thread] \"%s\": worker boost off (debug server workerboost 1 to turn it on)", name.c_str());
     }
 #endif
     {
