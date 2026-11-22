@@ -239,7 +239,11 @@ void register_controls() {
     {
         Item it;
         it.id = "controls.settings-pause-page", it.tab = "controls", it.label = "Settings page in the pause menu", it.kind = Kind::Toggle;
+#ifdef __SWITCH__
+        it.help = "Show the settings page arrow in the pause menu. Holding - still opens Settings.";  // (this fork)
+#else
         it.help = "Show the settings page arrow in the pause menu. Esc / hold Select still opens Settings.";
+#endif
         it.get = [] { return input_map::settings_pause_page() ? 1.0f : 0.0f; };
         it.set = [](float v) { change_mapping([v](M& m) { m.settings_pause_page = v >= 0.5f; }); };
         add(std::move(it));

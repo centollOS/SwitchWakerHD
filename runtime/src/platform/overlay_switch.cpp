@@ -431,6 +431,18 @@ void tab_controller() {
     }
     heading(tx.menuHeading);
     note("%s", tx.menuNote);
+    // the game's own settings page in the pause menu (mods/game_settings_page.cpp; upstream's Controls tab, hidden
+    // here, has this switch): turned off there, it can only come back from this menu
+    {
+        const input_map::Mapping cur = input_map::current();
+        bool v;
+        if (check(menu_i18n::tr("Settings page in the pause menu"), cur.settings_pause_page, &v)) {
+            input_map::Mapping m = cur;
+            m.settings_pause_page = v;
+            input_map::set_current(m);
+        }
+        help(menu_i18n::tr("Show the settings page arrow in the pause menu (left of the items). Holding - still opens this menu."));
+    }
 }
 
 // Developer: tests and diagnostics, none of it for normal play

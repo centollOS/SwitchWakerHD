@@ -28,6 +28,9 @@ inline const std::unordered_map<std::string, Line>& table() {
         {"More in Settings (Esc / hold Select)",
          {"Plus dans les paramètres (Échap / maintenir Select)", "Mehr in den Einstellungen (Esc / Select halten)",
           "Altro nelle impostazioni (Esc / tieni premuto Select)", "Más en los ajustes (Esc / mantén Select)"}},
+        {"More in Settings (hold -)",  // (this fork) the Switch's menu opens by holding Minus
+         {"Plus dans les paramètres (maintenir -)", "Mehr in den Einstellungen (- halten)",
+          "Altro nelle impostazioni (tieni premuto -)", "Más en los ajustes (mantén -)"}},
         {"On", {"Oui", "An", "Sì", "Sí"}},
         {"Off", {"Non", "Aus", "No", "No"}},
         {"(applies at the next start)", {"(au prochain démarrage)", "(ab dem nächsten Start)", "(dal prossimo avvio)", "(en el próximo inicio)"}},
@@ -37,6 +40,11 @@ inline const std::unordered_map<std::string, Line>& table() {
           "Einstellungspfeil im Pausenmenü anzeigen. Esc / Select halten öffnet weiterhin die Einstellungen.",
           "Mostra la freccia delle impostazioni nel menu di pausa. Esc / tieni premuto Select apre sempre le impostazioni.",
           "Muestra la flecha de ajustes en el menú de pausa. Esc / mantener Select sigue abriendo los ajustes."}},
+        {"Show the settings page arrow in the pause menu. Holding - still opens Settings.",  // (this fork, Switch)
+         {"Afficher la flèche des paramètres dans le menu pause. Maintenir - ouvre toujours les paramètres.",
+          "Einstellungspfeil im Pausenmenü anzeigen. - halten öffnet weiterhin die Einstellungen.",
+          "Mostra la freccia delle impostazioni nel menu di pausa. Tenere premuto - apre sempre le impostazioni.",
+          "Muestra la flecha de ajustes en el menú de pausa. Mantener - sigue abriendo los ajustes."}},
         // camera
         {"Invert camera up/down", {"Inverser la caméra (haut/bas)", "Kamera oben/unten umkehren", "Inverti telecamera su/giù", "Invertir cámara arriba/abajo"}},
         {"The camera, first person and aiming turn the other way up and down.",

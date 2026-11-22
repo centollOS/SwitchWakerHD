@@ -534,13 +534,9 @@ void mute(input::PadState& p) {
 }
 
 void pad(input::PadState& p, Cpu* c) {
-#ifdef __SWITCH__
-    // (this fork) off unless WWHD_GAME_SETTINGS=1: not tried on the console yet (the Switch has its own menu), and it
-    // reads the game's menu and allocates at every VPADRead
-    static bool disabled = !(getenv("WWHD_GAME_SETTINGS") && *getenv("WWHD_GAME_SETTINGS") == '1');
-#else
+    // on everywhere, the Switch too (WWHD_GAME_SETTINGS=0: off). Free in play: outside the pause menu the read below
+    // stops at the game's UI state, and the rest (tabs, labels, drawing) is skipped once nothing of the page is left
     static bool disabled = getenv("WWHD_GAME_SETTINGS") && *getenv("WWHD_GAME_SETTINGS") == '0';
-#endif
     if (disabled) return;
     if (g_swallow_x.load(std::memory_order_relaxed)) {
         if (std::fabs(p.lx) <= 0.5f) g_swallow_x.store(false, std::memory_order_relaxed);
@@ -597,11 +593,28 @@ void pad(input::PadState& p, Cpu* c) {
         static std::string last;
         if (last != state) LOG("[game-settings] %s", state.c_str()), last = state;
     }
+    // Idle (gameplay): no pause menu, nothing of the page or its entry arrow on screen, no input held back. The first
+    // idle read still runs the whole path below (it publishes the empty draw list, lets the TV pointer go, clears the
+    // controller claim); later ones return here, before the tab list, the labels and the texts are built: no
+    // allocation per VPADRead while playing.
+    {
+        static bool idle_before = false;
+        const bool idle = !m.items_page && m.descriptor != kStateMenu && !g_page.shown() && !g_page.swiping() &&
+                          !g_entry.focused() && !g_swallow.load(std::memory_order_relaxed) &&
+                          !g_swallow_x.load(std::memory_order_relaxed) && !g_pad_lost.load(std::memory_order_relaxed);
+        if (idle && idle_before) return;
+        idle_before = idle;
+    }
     const bool other_page = story_notebook::page_open();
     const std::vector<std::string> tabs = game_settings::tabs();
     std::vector<std::string> labels;
     for (const std::string& t : tabs) labels.push_back(tr(game_settings::tab_label(t)));
-    g_page.texts = {tr("Settings"), tr("Change"), tr("Back"), tr("L / R: tabs"), tr("More in Settings (Esc / hold Select)")};
+#ifdef __SWITCH__
+    static const char* const kMore = "More in Settings (hold -)";  // (this fork) the menu opens by holding Minus
+#else
+    static const char* const kMore = "More in Settings (Esc / hold Select)";
+#endif
+    g_page.texts = {tr("Settings"), tr("Change"), tr("Back"), tr("L / R: tabs"), tr(kMore)};
     Input in;
     in.buttons = p.buttons, in.lx = p.lx, in.ly = p.ly, in.touch = p.touch, in.dt = dt;
     in.x = p.tx * 1280.0f, in.y = p.ty * 720.0f;  // the GamePad picture as the page's 1280 x 720
