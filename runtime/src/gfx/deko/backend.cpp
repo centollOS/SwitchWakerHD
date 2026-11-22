@@ -15,6 +15,7 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "dk_surfaces.h"
 #include "dk_sync.h"
 #include "frame_pacing.h"  // (this fork, #23) vblank statistics and pacing modes
+namespace interp { int output_fps(); bool interp_on(); }
 #include "../../platform/background_shaders_switch.h"  // (this fork) the counter's shader line
 #include "../../platform/thread_sampler.h"  // (this fork) the sampler's hitch mode
 #include "../../platform/saltynx_switch.h"  // (this fork) the overlays' frame rate
@@ -41,12 +42,18 @@ extern "C" char* fake_heap_end;  // libnx: the end of the heap malloc grows into
 #include "gx2/gx2.h"
 #include "imgui.h"
 #include "input.h"
+#include "overlay/guest_hud.h"
 #include "overlay/hostui.h"
 #include "overlay/overlay.h"
 #include "platform/debug_switch.h"
 #include "platform/host.h"
 #include "platform/input_switch.h"
 #include "platform/settings_switch.h"
+#ifdef __SWITCH2__
+#include "platform/s2_resolution_switch2.h"  // (s2/resolution)
+#include "platform/s2_display_switch2.h"  // (s2/hdr-info)
+#include "platform/s2_vrr_switch2.h"  // (s2/vrr)
+#endif
 #include "runtime.h"
 #include "lockstep.h"  // (this fork, #67)
 
@@ -78,6 +85,13 @@ std::atomic<int> g_opMode{-1};
 // 1920x1080) forces that size in both modes, for A/B tests in handheld. The game renders its picture at the
 // internal resolution of the mode's picture profile (settings_switch.h; docked 1.5x = 1920x1080 by default, lower
 // while dynamic resolution needs it): the present pass scales it into the window.
+// (s2/resolution) Switch 2: the window follows the Switch 2 tab's output choice instead (s2_resolution_switch2.h; auto:
+// 1920x1080 handheld, the TV's resolution docked, up to 3840x2160), WWHD_DK_WINDOW up to 3840x2160.
+#ifdef __SWITCH2__
+constexpr uint32_t kMaxWinW = 3840, kMaxWinH = 2160;  // (s2/resolution) up to 4K
+#else
+constexpr uint32_t kMaxWinW = 1920, kMaxWinH = 1080;
+#endif
 struct WindowConfig {
     int mode = 1;  // 0 always 1280x720, 1 by the operation mode, 2 forced
     uint32_t w = 0, h = 0;
@@ -87,20 +101,26 @@ const WindowConfig& window_config() {
         WindowConfig c;
         if (const char* e = getenv("WWHD_DK_WINDOW"); e && *e) {
             unsigned w = 0, h = 0;
-            if (sscanf(e, "%ux%u", &w, &h) == 2 && w >= 320 && h >= 180 && w <= 1920 && h <= 1080) {
+            if (sscanf(e, "%ux%u", &w, &h) == 2 && w >= 320 && h >= 180 && w <= kMaxWinW && h <= kMaxWinH) {
                 c.mode = 2;
                 c.w = w;
                 c.h = h;
             } else
-                LOG("[dk] WWHD_DK_WINDOW=%s ignored: WxH from 320x180 to 1920x1080", e);
+                LOG("[dk] WWHD_DK_WINDOW=%s ignored: WxH from 320x180 to %ux%u", e, kMaxWinW, kMaxWinH);
         }
         if (c.mode != 2)
             if (const char* e = getenv("WWHD_DK_DOCKED_1080"); e && *e == '0') c.mode = 0;
         if (c.mode == 2)
             LOG("[dk] window: %ux%u in both modes (WWHD_DK_WINDOW); the game's 1280x720 picture is scaled into it", c.w, c.h);
+#ifdef __SWITCH2__
+        else if (c.mode == 1)
+            LOG("[dk] window: by the Switch 2 tab's output choice (s2Output; auto: 1920x1080 handheld, the TV's resolution "
+                "docked), the swapchain recreated when the mode or the choice changes; the game's picture is scaled into it");
+#else
         else if (c.mode == 1)
             LOG("[dk] window: docked 1920x1080, handheld 1280x720, the swapchain recreated when the mode changes; the game's "
                 "1280x720 picture is scaled into it (WWHD_DK_DOCKED_1080=0: 1280x720 always, the old path)");
+#endif
         else
             LOG("[dk] window: 1280x720 in both modes (WWHD_DK_DOCKED_1080=0, the old path; docked the system scales it)");
         return c;
@@ -114,6 +134,9 @@ void window_wanted(uint32_t& w, uint32_t& h) {
         h = c.h;
         return;
     }
+#ifdef __SWITCH2__
+    if (c.mode == 1) return s2res::output_size(g_opMode.load(std::memory_order_relaxed) == 1, w, h);  // (s2/resolution)
+#endif
     const bool big = c.mode == 1 && g_opMode.load(std::memory_order_relaxed) == 1;
     w = big ? 1920 : 1280;
     h = big ? 1080 : 720;
@@ -154,6 +177,14 @@ void debug_message(void*, const char* context, DkResult result, const char* mess
     if (result != DkResult_Success)  // a trap follows: the error ends the process here, readably
         fatal("[dk] deko3d error in %s: result %d: %s (frame %llu)", context ? context : "?", int(result),
               message ? message : "", (unsigned long long)R.frame + 1);
+    // GPU queue error reporting
+    static std::atomic<int> errorReportLines{0};
+    if (message && strstr(message, "entered error state")) errorReportLines.store(400);
+    if (errorReportLines.load() > 0) {
+        errorReportLines.fetch_sub(1);
+        LOG("[dk] deko3d %s: %s", context ? context : "?", message);
+        return;
+    }
     const int n = g_debugMessages.fetch_add(1);
     if (n < 200) LOG("[dk] deko3d %s: %s", context ? context : "?", message ? message : "");
     else if (n == 200) LOG("[dk] deko3d: more messages, not logged");
@@ -421,7 +452,12 @@ struct OverlayStats {
 
 void draw_fps() {
     const int mode = overlay_mode();
-    if (mode <= 0) return;
+#ifdef __SWITCH2__
+    const bool sizeLine = s2res::show_size();  // (s2/resolution) the render and output sizes
+#else
+    const bool sizeLine = false;
+#endif
+    if (mode <= 0 && !sizeLine) return;
     static uint64_t windowStart = now_ns(), windowFrame = R.frame;
     static double fps = 0;
     const uint64_t now = now_ns();
@@ -434,6 +470,12 @@ void draw_fps() {
     char b[32];
     snprintf(b, sizeof b, "%.1f FPS", fps);
     lines.push_back(b);
+    if (sizeLine) {
+        char r[48];
+        snprintf(r, sizeof r, "RES %uX%u > %uX%u", unsigned(1280.0f * res_scale() + 0.5f), unsigned(720.0f * res_scale() + 0.5f),
+                 g_winW, g_winH);
+        lines.push_back(r);
+    }
     if (mode >= 2) {
         auto& s = overlayStats;
         if (s.renderBusy >= 0) {
@@ -545,14 +587,18 @@ bool draw_picture(const PresentSource& src, bool capture, bool corner = false) {
     // when the picture is smaller than its place in the window)
     const bool exact = src.pw == uint32_t(w) && src.ph == uint32_t(h);
     const bool unorm = unorm_picture(*src.surface);
+    const bool integer = src.surface->fmt.kind != FormatInfo::FLOAT;
+    // (s2/render4k) a picture larger than its place (a 4K render in the handheld 1080p window): the shader's 4-tap
+    // box downscale instead of one bilinear tap (filtered formats only: integer pictures use the nearest sampler)
+    const bool down = !exact && !integer && (src.pw > uint32_t(w) || src.ph > uint32_t(h));
     const int fsr = g_fsr.load(std::memory_order_relaxed) && unorm
-                        ? (src.pw < uint32_t(w) && src.ph < uint32_t(h) ? 1 : exact ? 2 : 0)  // EASU, or RCAS alone at the window's size
-                        : 0;
+                        ? (src.pw < uint32_t(w) && src.ph < uint32_t(h) ? 1 : exact ? 2 : down ? 3 : 0)  // EASU, or RCAS alone at the window's size
+                        : down ? 3 : 0;
     static int fsrLogged = -1;
     if (!corner && fsr != fsrLogged) {
         fsrLogged = fsr;
-        LOG("[dk] present: FSR 1 %s (%s picture %ux%u%s in %dx%d)",
-            fsr == 1 ? "EASU upscale" : fsr == 2 ? "RCAS sharpening" : "not applied", pad ? "GamePad" : "TV", src.pw, src.ph,
+        LOG("[dk] present: %s (%s picture %ux%u%s in %dx%d)",
+            fsr == 1 ? "FSR 1 EASU upscale" : fsr == 2 ? "FSR 1 RCAS sharpening" : fsr == 3 ? "box downscale (4 bilinear taps)" : "bilinear / nearest (FSR 1 not applied)", pad ? "GamePad" : "TV", src.pw, src.ph,
             unorm ? "" : ", not UNORM", w, h);
     }
     PresentUbo p{{g.exposure, g.contrast, g.saturation, g.gamma}, {encode ? 1 : 0, src.srgb ? 1 : 0, fsr, 0}};
@@ -563,7 +609,6 @@ bool draw_picture(const PresentSource& src, bool capture, bool corner = false) {
         LOG("[dk] presenting the game's picture (%ux%u, GX2 format %03X%s) with %s", src.width, src.height,
             src.surface->format, src.srgb ? ", sRGB" : "", encode ? "sRGB encoding (sRGB TV format)" : "no encoding");
     }
-    const bool integer = src.surface->fmt.kind != FormatInfo::FLOAT;
     const DkResHandle tex =
         dkMakeTextureHandle(src.imageId, exact || integer ? kPresentNearestSamplerId : kPresentLinearSamplerId);
     bind_pass_state(false, false);
@@ -675,7 +720,7 @@ struct DynamicRes {
         const uint32_t seq = g_profileSeq.load(std::memory_order_acquire);
         if (seq == profileSeen) return;
         profileSeen = seq;
-        hi = std::clamp(g_profileScale.load(std::memory_order_relaxed), 0.5f, 2.0f);
+        hi = std::clamp(g_profileScale.load(std::memory_order_relaxed), 0.5f, kMaxResScale);  // (s2/resolution: up to 3)
         on = g_profileDynamic.load(std::memory_order_relaxed);
         lo = std::min(loAsked, hi);
         LOG("[dk] resolution profile: internal resolution %.2f, dynamic resolution %s (%.2f to %.2f)", hi,
@@ -762,7 +807,11 @@ struct DynamicRes {
 struct GpuClock {
     bool have = false;
     uint64_t cpu0 = 0, gpu0 = 0;
+#ifdef __SWITCH2__
+    double factor = 1.0;
+#else
     double factor = 31.25 / 19.2;
+#endif
     bool logged = false;
     void sample(uint64_t cpuNs, uint64_t gpuTs) {
         if (!have) {
@@ -1295,6 +1344,9 @@ void present() {
     g_times.presents++;
     const bool gpuBehind = !frame_done(R.frame);  // the GPU is still on the previous frame (dynamic resolution)
     begin_commands();  // (already open when a GX2 command recorded in this frame)
+#ifdef __SWITCH2__
+    s2display::poll(frame, g_opMode.load(std::memory_order_relaxed) == 1);  // (s2/hdr-info) the display's capabilities
+#endif
     {
         uint32_t ww, wh;
         window_wanted(ww, wh);
@@ -1307,13 +1359,35 @@ void present() {
         // (this fork, #23) the swap interval of the pacing mode (frame_pacing.h): 1, or the game's
         static DkSwapchain set = nullptr;
         static uint32_t interval = 1;
+        static bool hz120 = false;
+        static bool vrrSet = false;
         const uint32_t want = frame_pacing::swap_interval();
-        if (set != g_swapchain || want != interval) {
-            dkSwapchainSetSwapInterval(g_swapchain, want);
-            if (want != interval) LOG("[dk] frame %llu: swap interval %u", (unsigned long long)frame, want);
+#ifdef __SWITCH2__
+        const bool want120 = want == 1 && interp::interp_on() && interp::output_fps() == 120;
+        // (s2/vrr) present when ready: every refresh at the highest rate with VRR, instead of the game's interval
+        const bool wantVrr = want >= 1 && !want120 && s2vrr::on();
+        if (wantVrr) s2vrr::poll();
+#else
+        const bool want120 = false, wantVrr = false;
+#endif
+        if (set != g_swapchain || want != interval || want120 != hz120 || wantVrr != vrrSet) {
+#ifdef __SWITCH2__
+            if (want120 || wantVrr) {
+                const Result rc = nwindowSetFrameRates(nwindowGetDefault(), 0, 0, true);
+                LOG("[dk] frame %llu: every refresh at the highest rate%s: rc 0x%x", (unsigned long long)frame,
+                    wantVrr ? " with VRR (s2Vrr, present when ready)" : "", rc);
+            } else
+#endif
+            {
+                dkSwapchainSetSwapInterval(g_swapchain, want);
+                if (want != interval || want120 != hz120 || wantVrr != vrrSet)
+                    LOG("[dk] frame %llu: swap interval %u", (unsigned long long)frame, want);
+            }
             set = g_swapchain;
             interval = want;
-            frame_pacing::set_interval(want);
+            hz120 = want120;
+            vrrSet = wantVrr;
+            frame_pacing::set_interval(wantVrr ? 1 : want);
         }
     }
     // (this fork, #49) a frame drawn while draws wait, with shaders still compiling: they are compiled now (all at
@@ -1384,8 +1458,10 @@ void present() {
     }
     if (!pad.surface) g_padRect[2] = 0;
     Surface* shownPicture = nullptr;  // (this fork, #67) what the window shows: hashed by a lockstep run
+    bool padOnScreen = false;  // the GamePad picture is in the window (full or in the corner): at g_padRect
     if (pad.surface && draw_picture(pad, capture)) {
         shownPicture = pad.surface;
+        padOnScreen = true;
     } else if (draw_picture(src, capture)) {
         shownPicture = src.surface;
         if (shown != 1) LOG("[dk] frame %llu: presenting the game's TV picture", (unsigned long long)frame);
@@ -1394,6 +1470,7 @@ void present() {
         static int pipShown = -1;
         const PresentSource corner = g_gamepadPip.load(std::memory_order_relaxed) ? gamepad_source() : PresentSource{};
         const bool pip = corner.surface && draw_picture(corner, capture, true);
+        padOnScreen = pip;
         if (int(pip) != pipShown) {
             pipShown = pip;
             LOG("[dk] frame %llu: GamePad picture in the corner %s", (unsigned long long)frame, pip ? "shown" : "not shown");
@@ -1411,10 +1488,19 @@ void present() {
     S.scanSrc = nullptr;
     if (S.tvSource) S.tvSource->hudFull = false;
     if (S.drcSource) S.drcSource->hudFull = false;
+    // the settings overlay's frame (Minus held, overlay/overlay.h; the window's real size: the UI grows with it,
+    // overlay.cpp), built before the HUD below: its guesthud::frame() lays out this frame's GamePad HUD lists
+    ImDrawData* const ui = overlay::frame(float(g_winW), float(g_winH), overlay_renderer_init);
+    // (this fork) the port's GamePad-screen HUD (guest_hud.h screen 1: the pause menu's settings page, the story
+    // notebook, mods' GamePad HUDs) over the GamePad picture wherever the window shows it (full, or in the corner),
+    // as the Vulkan and Metal presentations do (gamepad_region); the TV's lists are in `ui`'s background list
+    if (const int pw = g_padRect[2].load(std::memory_order_relaxed); padOnScreen && pw > 0)
+        if (ImDrawData* hud = overlay::guesthud::gamepad_region(float(g_winW), float(g_winH), float(g_padRect[0].load()),
+                                                                float(g_padRect[1].load()), float(pw), float(g_padRect[3].load()), 1.0f))
+            overlay_draw(hud, int(g_winW), int(g_winH));
     draw_fps();
-    // the settings overlay (Minus held, overlay/overlay.h), over the picture and the FPS counter
-    // (the window's real size: the UI grows with it, overlay.cpp)
-    if (ImDrawData* ui = overlay::frame(float(g_winW), float(g_winH), overlay_renderer_init)) overlay_draw(ui, int(g_winW), int(g_winH));
+    // the settings overlay over the picture and the FPS counter
+    if (ui) overlay_draw(ui, int(g_winW), int(g_winH));
     gpuPasses.frame_end();
     frame_pacing::on_present(R.cmd, frame);  // (this fork, #23) the GPU writes the frame number when done
     frame_end();
@@ -1464,8 +1550,7 @@ void check_hitch(uint64_t now) {
     static uint64_t lastSwap = 0, lastDraws = 0, lastSkipped = 0, lastRenderWait = 0;
     static int logged = 0;
     const uint64_t renderWait = gx2::render_thread_wait_ns();
-    // (this fork) hitch mode of the sampler: a slow frame's samples to logs/hitch_*.samples (now_ns: ticks * 625 / 12)
-    if (lastSwap) thread_sampler::mark_frame(lastSwap * 12 / 625, now * 12 / 625, R.frame);
+    if (lastSwap) thread_sampler::mark_frame(armNsToTicks(lastSwap), armNsToTicks(now), R.frame);
     if (lastSwap && now - lastSwap > 55'000'000ull) {
         g_hitches++;
         if (logged < 300) {

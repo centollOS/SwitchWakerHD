@@ -6,6 +6,7 @@
 #   tools/switch/build.sh --icon PATH            custom icon, any path (TGA, PNG, JPG, or a game folder; default: the title-screen logo
 #                                                from the game's files, make_icon.py; needs python3 with Pillow here)
 #   tools/switch/build.sh --name NAME            custom NRO display name (default: Wind Waker HD)
+#   tools/switch/build.sh --switch2              Switch 2 and its assorted libraries
 # The console also needs sdmc:/switch/wwhd/shadercache_dksh.bin (tools/switch/dksh_cache, docs/deko3d-plan.md).
 # Needs podman or docker (or the native devkitPro of WWHD_NATIVE below), and build/gen from
 # tools/recomp/recomp.py (generated from your own game dump).
@@ -17,12 +18,14 @@ trap 'rc=$?; echo "build.sh: line $LINENO: \"$BASH_COMMAND\" failed (exit code $
 cd "$(dirname "$0")/../.."
 
 icon_src="${WWHD_ICON:-}"
+switch2=${WWHD_SWITCH2:-0}
 name_src="${WWHD_NACP_NAME:-}"
 while [[ $# -gt 0 ]]; do
     case $1 in
         --icon) icon_src=$2; shift 2 ;;
         --name) name_src=$2; shift 2 ;;
-        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+        --switch2) switch2=1; shift ;;
+        -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
         *) echo "build.sh: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -40,6 +43,7 @@ engine=$(command -v podman || command -v docker || true)
 # (DEVKITPRO set, e.g. /opt/devkitpro in devkitPro's MSYS2 on Windows) with switch-dev, deko3d, uam,
 # switch-lz4 and switch-zlib.
 native=${WWHD_NATIVE:-0}
+[[ $switch2 == 1 ]] && native=1
 if [[ -z "$engine" || $native == 1 ]]; then
     if [[ -z "${DEVKITPRO:-}" || ! -f "$DEVKITPRO/cmake/Switch.cmake" ]]; then
         echo "podman or docker is required, or a native devkitPro with the Switch toolchain (DEVKITPRO)" >&2
@@ -74,7 +78,16 @@ for link in build/gen; do
         mounts+=(-v "$target":"$target":ro)
     fi
 done
-dir=${WWHD_BUILD_DIR:-build/switch-dk}  # (this fork) another folder for a second build next to the usual one (PGO: docs/pgo.md)
+dir=${WWHD_BUILD_DIR:-build/switch-dk}
+toolchain_file="$DEVKITPRO/cmake/Switch.cmake"
+if [[ $switch2 == 1 ]]; then
+    dir=${WWHD_BUILD_DIR:-build/switch2-dk}
+    toolchain_file="$PWD/cmake/Switch2.cmake"
+    if [[ ! -f "$DEVKITPRO/libounce/switch2_rules" ]]; then
+        echo "build.sh --switch2: libounce is not installed in $DEVKITPRO/libounce" >&2
+        exit 1
+    fi
+fi  # (this fork) another folder for a second build next to the usual one (PGO: docs/pgo.md)
 # deko3d's release library unless WWHD_DEKO3D_DEBUG_LIB=ON (checks every call, readable errors)
 debuglib=${WWHD_DEKO3D_DEBUG_LIB:-OFF}
 out=wwhd.nro
@@ -151,7 +164,7 @@ if [[ $native == 1 ]]; then
         rm -rf "$dir/CMakeCache.txt" "$dir/CMakeFiles"
     fi
     cmake -S . -B "$dir" -G "Unix Makefiles" -DCMAKE_DEPENDS_USE_COMPILER=OFF \
-          -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
+          -DCMAKE_TOOLCHAIN_FILE="$toolchain_file" \
           -DCMAKE_BUILD_TYPE=${WWHD_BUILD_TYPE:-Release} $options "${nro_opts[@]}"
     mkdir -p "$dir/dksh"  # uam writes there but nothing creates it with Makefiles
     cmake --build "$dir" -j $jobs

@@ -10,14 +10,22 @@
 //           own arrow to the right page). A tap / click, or A / Left once focused, slides the page in.
 //   Open    the tabs (L / R), one row per setting (Up / Down, the left stick too, with repeat), Left /
 //           Right change the value (a toggle follows the direction, a number steps), A toggles or steps
-//           up, B, + or a tap on the right page arrow slide the page back out to the items. Touch:
-//           a tap on a row selects it, a tap on its value changes it (left half of a number: down).
+//           up, B, + or a tap on the right page arrow slide the page back out to the items. Touch
+//           (the GamePad screen: the Switch's touch screen where the GamePad picture is drawn, or the
+//           mouse on the TV with the Pro Controller): a tap on a row selects it, a tap on the selected
+//           row or on any row's value changes it (on a number's or choice's plate: its left half steps
+//           down, its right half up; elsewhere on the selected row: up, as A), a tap on a tab shows it,
+//           a drag up / down over the list (or along its scroll bar) scrolls it, a tap on Back, the
+//           arrow back to the items or anywhere outside the window closes the page as B does.
 // Coordinates: a 1280 x 720 page (fit_to_screen scales it to the GamePad's 854 x 480).
 #pragma once
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "guest_hud.h"
@@ -81,6 +89,22 @@ struct Action {
 inline float ease_out(float t) { t = std::clamp(t, 0.0f, 1.0f); return 1 - (1 - t) * (1 - t) * (1 - t); }
 inline bool inside(float x, float y, float bx, float by, float bw, float bh) { return x >= bx && x < bx + bw && y >= by && y < by + bh; }
 inline bool near(float x, float y, float cx, float cy, float r) { return (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r; }
+inline bool in_window(float x, float y) { return inside(x, y, kWinX, kWinY, kWinW, kWinH); }
+
+
+// A tap outside the window (kWinX..: the settings page's and its row pages' window) closes it, as B: the
+// driver's for the row pages (Detail), whose own touch handles what is inside
+struct OutsideTap {
+    bool touch = false;
+    float down_x = 0, down_y = 0, x = 0, y = 0;
+    bool step(const Input& in) {
+        if (in.touch && !touch) down_x = in.x, down_y = in.y;
+        if (in.touch) x = in.x, y = in.y;
+        const bool tap = !in.touch && touch && near(x, y, down_x, down_y, kTapSlop);
+        touch = in.touch;
+        return tap && !in_window(down_x, down_y) && !in_window(x, y);
+    }
+};
 
 class Page {
 public:
@@ -103,9 +127,12 @@ public:
 
     void show(int tabs) {
         open_ = true, tab_ = std::clamp(tab_, 0, std::max(0, tabs - 1)), held_ = ~0u;  // a button held now acts only after its release
-        touch_ = false;
+        touch_ = false, drag_ = Drag::None;
     }
     void hide() { open_ = false; }
+    void set_tab(int tab) { tab_ = tab, selected_ = 0, top_ = 0; }
+    // buttons held now act only after their release (a page opened from a row closed with them)
+    void hold_buttons() { held_ = ~0u; }
 
     // A / Left on the focused arrow turns the page. Reaching it is handled by EntryFocus,
     // after the game has received Left. Touch and swipes keep their existing behaviour.
@@ -176,13 +203,43 @@ public:
         else if ((fire & (kPadLeft | kPadRight)) && count && !rows[selected_].action)  // (an action takes A only)
             change(act, rows[selected_], (fire & kPadLeft) ? -1 : +1);
         else if ((pressed & kPadA) && count) change(act, rows[selected_], rows[selected_].stepped() ? +1 : 0);
-        if (selected_ < int(top_)) top_ = unsigned(selected_);
-        if (selected_ >= int(top_ + kRowsShown)) top_ = unsigned(selected_) - kRowsShown + 1;
-        // touch: a tap (released near where it began)
+        // the list follows the selection when the controller acts (a drag may have scrolled it away)
+        const unsigned last = count > int(kRowsShown) ? unsigned(count) - kRowsShown : 0;
+        if (fire || pressed) {
+            if (selected_ < int(top_)) top_ = unsigned(selected_);
+            if (selected_ >= int(top_ + kRowsShown)) top_ = unsigned(selected_) - kRowsShown + 1;
+        }
+        top_ = std::min(top_, last);
+        // touch: a tap (released near where it began), or a drag over the list / its scroll bar
+        const bool began = in.touch && !touch_;
         bool tap = false;
         track_touch(in, tap);
+        if (began) {
+            drag_ = Drag::None, drag_top_ = top_;
+            if (last && inside(in_x_, in_y_, kRowX - 20, kRowY - 16, kRowW + 40, kRowH * kRowsShown + 30))
+                drag_ = in_x_ >= kRowX + kRowW - 4 ? Drag::Bar : Drag::Maybe;  // (the bar: the list's right edge)
+        }
+        if (in.touch && drag_ != Drag::None && last) {
+            if (drag_ == Drag::Maybe && std::fabs(in_y_ - down_y_) > kTapSlop) drag_ = Drag::List;
+            float t = float(drag_top_);
+            if (drag_ == Drag::List) t += (down_y_ - in_y_) / kRowH;  // the rows follow the finger
+            if (drag_ == Drag::Bar) t = (in_y_ - kRowY) / (kRowH * kRowsShown) * float(last + 1) - 0.5f;
+            const unsigned next = unsigned(std::clamp(int(std::lround(t)), 0, int(last)));
+            if (next != top_ && drag_ != Drag::Maybe) top_ = next, act.sound = Sound::Cursor;
+        }
+        if (!in.touch && drag_ != Drag::None) {
+            const bool dragged = drag_ == Drag::List || drag_ == Drag::Bar;
+            drag_ = Drag::None;
+            if (dragged) return act;  // (a drag is not a tap)
+        }
         if (tap) {
             if (on_arrow(in_x_, in_y_, false)) return close(act);
+            // the tabs (where draw put them)
+            for (int i = 0; i < tabs && i < int(tab_places_.size()); i++)
+                if (inside(in_x_, in_y_, tab_places_[size_t(i)].first, kWinY + 30, tab_places_[size_t(i)].second, 50)) {
+                    if (i != tab_) tab_ = i, selected_ = 0, top_ = 0, turn_ = 0, act.sound = Sound::Tab;
+                    return act;
+                }
             // the prompts can be tapped too (touch and mouse players): Back closes, Change acts as A
             const Prompts pr = prompt_places();
             const float py = kWinY + kWinH - 66 - 10, ph = 56;
@@ -199,10 +256,13 @@ public:
                 if (!was_selected) glide_from_ = row_y(selected_), glide_ = 0, selected_ = index, act.sound = Sound::Cursor;
                 if (on_value || was_selected) {
                     const Row& r = rows[index];
-                    change(act, r, r.stepped() ? (in_x_ < kValueX + kValueW / 2 ? -1 : +1) : 0);
+                    // a number's or choice's plate: its left half (the left chevron) down, its right half up;
+                    // the selected row's label: up, as A
+                    change(act, r, !r.stepped() ? 0 : on_value && in_x_ < kValueX + kValueW / 2 ? -1 : +1);
                 }
-                break;
+                return act;
             }
+            if (!in_window(in_x_, in_y_) && !in_window(down_x_, down_y_)) return close(act);  // outside the window: as B
         }
         return act;
     }
@@ -235,9 +295,11 @@ public:
         // the tabs right of the title: as wide as their names (at least 110), narrower when many
         const float room = kWinW - 112 - width(bold(texts.title), 42) - 24;
         const float most = tab_labels.empty() ? room : room / float(tab_labels.size()) - 10;
+        tab_places_.assign(tab_labels.size(), {0.0f, 0.0f});
         for (int i = int(tab_labels.size()) - 1; i >= 0; i--) {
             const float w = std::min(most, std::max(110.0f, width(bold(tab_labels[i]), 26) + 40));
             tx -= w;
+            tab_places_[size_t(i)] = {tx, w};
             const bool on = i == tab_;
             out.push_back(box(on ? "nb:tab-on" : "nb:tab", tx, kWinY + 30, w, 50));
             out.push_back(text(tx + (w - width(bold(tab_labels[i]), 26)) / 2, kWinY + 42, 26, on ? kInk : kInkSoft, bold(tab_labels[i])));
@@ -264,7 +326,9 @@ public:
                 chevron(out, kValueX + kValueW - 26, y + kRowH / 2, 9, true, kInk);
             }
         }
-        if (!rows.empty()) {  // the cursor: the game's four brackets around the selected row, gliding there
+        if (!rows.empty() && selected_ >= int(top_) && selected_ < int(top_ + kRowsShown)) {
+            // the cursor: the game's four brackets around the selected row, gliding there (not while a drag
+            // has scrolled it out of the list)
             float y = row_y(selected_);
             if (glide_ < 1.0f) y = glide_from_ + (y - glide_from_) * ease_out(glide_);
             const float b = 4 + 2.0f + 2.0f * std::sin(time_ * 6.2831853f * 0.9f);
@@ -304,6 +368,9 @@ private:
     uint32_t prev_ = 0, held_ = 0, dirs_ = 0;
     float repeat_ = 0, time_ = 0, slide_ = 0, glide_ = 1, glide_from_ = 0, bump_ = 1, turn_ = 1;
     bool touch_ = false, swipe_ = false;
+    enum class Drag : uint8_t { None, Maybe, List, Bar } drag_ = Drag::None;  // a touch begun over the list
+    unsigned drag_top_ = 0;
+    mutable std::vector<std::pair<float, float>> tab_places_;  // the tabs' x and width as last drawn (page units)
     float swipe_dx_ = 0, swipe_v_ = 0;
     float down_x_ = 0, down_y_ = 0, in_x_ = 0, in_y_ = 0;
 
@@ -400,6 +467,9 @@ private:
         chevron(out, cx + (left ? -2.0f : 2.0f), cy, r * 0.42f, !left, kWhite, r * 0.22f);
         for (size_t i = from; i < out.size(); i++) out[i].text = "gs:drawn";
     }
+
+public:
+    // the page's drawing pieces (also for the pages opened from a row: Detail below)
     static Command rect(float x, float y, float w, float h, uint32_t rgba) {
         Command c;
         c.kind = Command::Rect, c.x = x, c.y = y, c.w = w, c.h = h, c.rgba = rgba;
@@ -428,10 +498,30 @@ private:
     }
 };
 
+// A page of its own opened from an Action row (Game progress, Achievements): it takes the page's place in the
+// same window until it closes (B), then the rows come back. Pure (input in, draw commands out), like Page.
+class Detail {
+public:
+    virtual ~Detail() = default;
+    // act.closed: back to the rows
+    virtual Action input(const Input& in) = 0;
+    virtual void tick(float dt) { (void)dt; }
+    // in page units; `measure` is the game's font when loaded
+    virtual std::vector<Command> draw(float (*measure)(const std::string&, float)) const = 0;
+};
+// A row's page: open_detail(id) from the row's set() (any thread) opens the page that make() builds at the
+// driver's next read (game thread). make() returns null when there is nothing to show (no file loaded).
+void register_detail(const std::string& id, std::function<std::unique_ptr<Detail>()> make);
+void open_detail(const std::string& id);
+// A picture sheet the pages draw parts of: a picture command whose text is "gs:sheet:<name>" with its UVs (any
+// thread; null removes it). The driver makes its image in the HUD store when it is first drawn.
+void set_sheet(const std::string& name, std::shared_ptr<const guestmods::hud::Image> image);
+
 // The driver (game_settings_page.cpp): pad() runs once per GamePad read (VPADRead, game thread, `c` the
 // reading thread for the game's fonts and sounds); mute() on the Pro Controller's reads
 void pad(input::PadState& p, Cpu* c);
 void mute(input::PadState& p);
 bool page_open();  // the entry focus stop, page or slide out has the controller
+bool arrow_pane(uint32_t p);  // p is the entry arrow's cursor pane (a menu element's cursor override points at it)
 
 }  // namespace game_settings_page

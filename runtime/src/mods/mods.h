@@ -3,11 +3,14 @@
 //   lock_on.cpp optional enemy range and R3 cycling through the native eligible list
 //   mouse.mm    mouse capture in the game window (macOS events)
 //   turbo.cpp   quick doors and fast scene changes (extra logic steps while they run)
+//   walk_doors.cpp  Quick doors' walk-through mode (doors open as Link comes near, no door scene)
+//   instant_text.cpp instant text, no pauses in texts
 //   cheats.cpp  items, sword/shield, stats, infinite health/magic/ammo, songs, Triforce, dungeon items
 // Test/start-up switches: WWHD_MOD_<NAME>=1 (see mods.cpp).
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "move_speed.h"  // MoveMode (the run/swim speed mod's public vocabulary)
 #include "fast_forward.h"
@@ -22,6 +25,8 @@ namespace mods {
 bool camera_directed_items();
 void set_camera_directed_items(bool on);
 bool direct_camera();
+int targeting_letterbox_mode(); // 0: On, 1: Off with enemies, 2: Always off during targeting
+void set_targeting_letterbox_mode(int mode);
 bool letterbox_while_targeting();
 void set_letterbox_while_targeting(bool on);
 void set_direct_camera(bool on);
@@ -43,11 +48,52 @@ void set_quick_use_speed(float factor);
 // Authored rates are restored before returning; crossing predicates are never altered.
 void quick_use_animation_call(Cpu* c, void (*native)(Cpu*), bool advance = true);
 void quick_use_filter_pad(input::PadState& s);
+// Source-owned item handlers preserve the local ready-trigger rule without
+// publishing synthetic pad input or changing the caller CPU registers.
+void ship_normal_sail_wind(Cpu* c, uint32_t ship);
+float ship_sail_target(float stock);
+void quick_use_item_action_dispatch(Cpu* c, uint32_t link, uint32_t item);
+uint32_t quick_use_ready_item_trigger(Cpu* c, uint32_t link, uint32_t native_trigger);
 void quick_use_reset();  // drop transient/pending input on capture, focus loss and savestates
 bool quick_doors();
 void set_quick_doors(bool on);
+// Quick doors' mode: Faster (door scenes run four times as fast) or Walk through (walk_doors.cpp: dungeon
+// shutters and house doors open as Link comes near, he walks through himself, no door scene; the door scenes
+// that still run, such as locked doors, run fast as in Faster)
+enum DoorMode { kDoorFaster = 0, kDoorWalk = 1 };
+DoorMode door_mode();
+void set_door_mode(DoorMode m);
+bool walk_doors();                // quick_doors() and door_mode() == kDoorWalk
+bool walk_doors_by_a();           // walk-through doors open with A (the game's "Open" prompt), not on coming near
+void set_walk_doors_by_a(bool on);
+bool walk_door_exit();            // walk_doors.cpp: Link went into the doorway of a house door: its scene change runs fast
+void walk_doors_reset();          // game thread after a save state load
+// fpcM_Execute's per-process gate (true60.cpp): a door's execute runs walk_doors.cpp's for this call
+class DoorExecuteWrap {
+public:
+    explicit DoorExecuteWrap(uint32_t proc);
+    ~DoorExecuteWrap();
+    DoorExecuteWrap(const DoorExecuteWrap&) = delete;
+    DoorExecuteWrap& operator=(const DoorExecuteWrap&) = delete;
+private:
+    uint32_t slot_ = 0, game_ = 0;
+};
+// fpcM_Execute's hook (game_hooks.cpp): true = this process waits this step (walk_doors.cpp: the new actors of a room
+// a walk-through door just showed wait as in the door scene)
+bool walk_doors_hold(uint32_t proc);
 bool fast_scenes();
 void set_fast_scenes(bool on);
+// Instant text and No pauses in texts (instant_text.cpp): message boxes show their whole text at once; the
+// waits written into texts are left out. instant_text_step: interp.cpp, around the processes' execute.
+bool instant_text();
+void set_instant_text(bool on);
+bool no_text_pauses();
+void set_no_text_pauses(bool on);
+void instant_text_step();
+// Fix original game bugs (game_fixes.cpp): fixes of the original game's own bugs, on by default; off, the game
+// behaves exactly as the original.
+bool fix_game_bugs();
+void set_fix_game_bugs(bool on);
 
 // Optional enemy targeting assistance. Off preserves the game's targeting unchanged.
 bool extended_lock_on();
@@ -108,6 +154,9 @@ void set_sail_speed_normal_factor(float factor);
 float sail_speed_swift_factor();          // the HD Swift Sail
 void set_sail_speed_swift_factor(float factor);
 bool auto_wind();                         // the wind follows the boat with the normal sail too
+// ---- speedrun (speedrun.cpp; Settings > Mods > More > Speedrun) ----
+bool classic_wind_waker();                // HD's two Wind Waker checks off: the dive and dry storage work again
+void set_classic_wind_waker(bool on);
 // ---- jump anywhere (jump.cpp; settings in traversal_settings.cpp) ----
 bool jump_anywhere();                     // the jump button jumps from standing or running
 void set_jump_anywhere(bool on);
@@ -126,6 +175,13 @@ inline bool valid_jump_button(uint32_t b) {
 void jump_input(uint32_t virt);                     // the virtual inputs (input::kVirt*) of every VPAD/KPAD read
 void jump_step(Cpu* c, uint32_t link, bool before); // around daPy_lk_c::execute (climb.cpp)
 void jump_reset();                                  // game thread after a state load
+// Deku Leaf: wave to rise (jump.cpp, leaf_lift.h; settings in traversal_settings.cpp)
+bool leaf_rise();                         // while gliding, each wave of the leaf lifts Link
+void set_leaf_rise(bool on);
+float leaf_rise_height();                 // percent of the default lift's height (25..400, default 100)
+void set_leaf_rise_height(float percent);
+void leaf_step(Cpu* c, uint32_t link);    // after daPy_lk_c::execute (climb.cpp)
+void leaf_filter_pad(input::PadState& s); // the held button waves on (camera.cpp filter_pad)
 // controller_play.cpp: L and d-pad down by whether Link plays (VPAD/KPAD full reads), and which
 // on-screen Jump / Moon jump buttons show (input::kVirt* bits)
 void pad_play_rules(input::PadState& p);
@@ -176,6 +232,8 @@ void touch_talk_reset();  // a state load
 // code mods (guest_mods.cpp, guest_live.h): the touches their claims got and their input filters, on the game's
 // controller reads after the port's own filters
 void guest_pad_filter(Cpu* c, input::PadState& p, bool repeat);
+// ... and before everything else that reads the GamePad's finger: the code mods' GamePad claims take theirs
+void guest_gamepad_touch(input::PadState& p, bool repeat);
 // a finger on the TV picture (Finger::Kind: 0 down, 1 move, 2 up, 3 cancel), layout units (centre, +y up)
 void touch_talk_finger(int kind, float x, float y);
 bool touch_talk_claims();  // a finger landing on the picture is the talk's now
@@ -244,7 +302,7 @@ MoveHud move_hud();
 // ---- the gameplay HUDs and the game's own screens (hud_gate.cpp) ----
 // once per frame on the game thread (interp.cpp, frame start): reads whether a game menu, an event
 // or a message is up and advances the HUDs' fade over it
-void hud_service();
+void hud_service(Cpu* c);
 // what the game shows over gameplay now: an event, a message, a menu (hud_visibility.h GameUi); game thread
 struct GameUi;
 GameUi game_ui_now();
@@ -286,6 +344,9 @@ enum Cheat {
     kCheatFigurines = 256,  // every Nintendo Gallery figurine (Carlov then leaves, as in the game's ending)
 };
 void request_cheat(int which);  // any thread
+// the cheats that pause Achievements now, as the menus name them: the infinite ones that are on, and the one-shot
+// cheats and story-item grants used in this run (any thread)
+std::vector<std::string> cheats_pausing();
 // Explicit, one-shot inventory grants. The first request needs consent; no grant precedes a backup.
 enum StoryItem { kStoryNayru = 1, kStoryDin = 2, kStoryFarore = 4, kStorySword = 8 };
 bool story_item_confirmation_needed();
@@ -308,6 +369,9 @@ void cheats_service();          // game main thread, frame start (interp.cpp)
 void request_warp(const char* stage, int room, int point);  // any thread
 bool warp_pending();
 std::string current_stage();  // the stage the game is in ("sea", "LinkRM"...; any thread, "" before the game data)
+// Beedle's Shop Ship and the other ships entered from the sea: the sea room their way out sails back to is made sure
+// of (mods/shop_ship.h); game main thread, frame start (interp.cpp)
+void shop_ship_service();
 
 // shared helpers (mods.cpp)
 uint64_t step();    // full logic steps so far (interp::logic_steps)

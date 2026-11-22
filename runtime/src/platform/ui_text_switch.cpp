@@ -15,6 +15,14 @@
 namespace ui_text {
 namespace {
 
+// the Switch 2's defaults differ from the Switch 1's: 16x anisotropic filtering (settings_switch.h kDefaultAnisoLevel)
+// and Keep game speed on (interp.cpp)
+#ifdef __SWITCH2__
+#define S2_OR_S1(s2, s1) s2
+#else
+#define S2_OR_S1(s2, s1) s1
+#endif
+
 const Texts kEnglish = {
     "SwitchWakerHD: first start",
     "The graphics have not been prepared on this console yet.",
@@ -526,11 +534,11 @@ const MenuTexts kMenuEnglish = {
     .originalColours = "Original colours",
     .vivid = "Vivid",
     .anisoLabel = "Anisotropic filtering",
-    .anisoOffTip = "Off, as the game draws it. Default.",
+    .anisoOffTip = S2_OR_S1("Off, as the game draws it.", "Off, as the game draws it. Default."),
     .anisoTip = "Sharpens textures seen at an angle (the ground ahead, walls along a path) instead of letting them\n"
         "blur. It costs GPU time, which can lower the frame rate in the busiest views (Outset's tall\n"
         "grass, the lookout): measured about 5% at 2x, 15% at 4x and 30% at 16x there; the village\n"
-        "and the sea are not affected. Default: 1x (off).",
+        "and the sea are not affected. " S2_OR_S1("Default: 16x.", "Default: 1x (off)."),
     .shadowLabel = "Shadow maps",
     .shadowFast = "Fast",
     .shadowOriginal = "Original (default)",
@@ -590,7 +598,7 @@ const MenuTexts kMenuEnglish = {
     .keepSpeed = "Keep game speed",
     .keepSpeedHelp = "When the console cannot draw 60 frames a second, skip in-between frames instead of slowing\n"
         "the whole game down: the game logic keeps its 30 steps a second. Off: every in-between frame\n"
-        "is drawn and the game runs slower than real time. Not saved: off at the next start.",
+        "is drawn and the game runs slower than real time. " S2_OR_S1("Not saved: on at the next start.", "Not saved: off at the next start."),
     .drawnLately = "In-between frames drawn lately: %.0f%%",
     // Controls tab
     .rumbleHeading = "Rumble",
@@ -683,14 +691,14 @@ const MenuTexts kMenuSpanish = {
     .originalColours = "Colores originales",
     .vivid = "Vivos",
     .anisoLabel = "Filtrado anisotrópico",
-    .anisoOffTip = "Desactivado, como lo dibuja el juego. Por defecto.",
+    .anisoOffTip = S2_OR_S1("Desactivado, como lo dibuja el juego.", "Desactivado, como lo dibuja el juego. Por defecto."),
     .anisoTip = "Hace más nítidas las texturas vistas en ángulo (el suelo de delante, las paredes de un camino) en "
         "vez de\n"
         "dejarlas borrosas. Cuesta tiempo de GPU, que puede bajar los fps en las vistas más cargadas (la "
         "hierba alta\n"
         "de Isla Initia, el mirador): medido, un 5% a 2x, un 15% a 4x y un 30% a 16x allí; el pueblo y el "
         "mar\n"
-        "no se ven afectados. Por defecto: 1x (desactivado).",
+        "no se ven afectados. " S2_OR_S1("Por defecto: 16x.", "Por defecto: 1x (desactivado)."),
     .shadowLabel = "Mapas de sombras",
     .shadowFast = "Rápido",
     .shadowOriginal = "Original (por defecto)",
@@ -756,8 +764,8 @@ const MenuTexts kMenuSpanish = {
         "vez de\n"
         "ralentizar todo el juego: la lógica mantiene sus 30 pasos por segundo. Desactivado: se dibujan todos "
         "los\n"
-        "intermedios y el juego va más lento que el tiempo real. No se guarda: desactivado en el siguiente "
-        "arranque.",
+        "intermedios y el juego va más lento que el tiempo real. "
+        S2_OR_S1("No se guarda: activado en el siguiente arranque.", "No se guarda: desactivado en el siguiente arranque."),
     .drawnLately = "Fotogramas intermedios dibujados últimamente: %.0f%%",
     // Controls tab
     .rumbleHeading = "Vibración",
@@ -852,14 +860,14 @@ const MenuTexts kMenuFrench = {
     .originalColours = "Couleurs d'origine",
     .vivid = "Vives",
     .anisoLabel = "Filtrage anisotrope",
-    .anisoOffTip = "Désactivé, comme le jeu le dessine. Par défaut.",
+    .anisoOffTip = S2_OR_S1("Désactivé, comme le jeu le dessine.", "Désactivé, comme le jeu le dessine. Par défaut."),
     .anisoTip = "Rend plus nettes les textures vues de biais (le sol devant, les murs le long d'un chemin) au lieu "
         "de\n"
         "les laisser floues. Cela coûte du temps GPU, ce qui peut baisser les fps dans les vues les plus "
         "chargées\n"
         "(les hautes herbes de l'île de l'Aurore, la tour de guet) : mesuré, environ 5 % à 2x, 15 % à 4x et "
         "30 % à 16x\n"
-        "là-bas ; le village et la mer ne sont pas touchés. Par défaut : 1x (désactivé).",
+        "là-bas ; le village et la mer ne sont pas touchés. " S2_OR_S1("Par défaut : 16x.", "Par défaut : 1x (désactivé)."),
     .shadowLabel = "Cartes d'ombres",
     .shadowFast = "Rapide",
     .shadowOriginal = "D'origine (par défaut)",
@@ -927,8 +935,8 @@ const MenuTexts kMenuFrench = {
         "au lieu de\n"
         "ralentir tout le jeu : la logique garde ses 30 étapes par seconde. Désactivé : chaque image "
         "intermédiaire\n"
-        "est dessinée et le jeu tourne plus lentement que le temps réel. Non enregistré : désactivé au "
-        "prochain démarrage.",
+        "est dessinée et le jeu tourne plus lentement que le temps réel. "
+        S2_OR_S1("Non enregistré : activé au prochain démarrage.", "Non enregistré : désactivé au prochain démarrage."),
     .drawnLately = "Images intermédiaires dessinées récemment : %.0f%%",
     // Controls tab
     .rumbleHeading = "Vibrations",
@@ -1026,13 +1034,13 @@ const MenuTexts kMenuGerman = {
     .originalColours = "Originalfarben",
     .vivid = "Kräftig",
     .anisoLabel = "Anisotrope Filterung",
-    .anisoOffTip = "Aus, wie das Spiel es zeichnet. Standard.",
+    .anisoOffTip = S2_OR_S1("Aus, wie das Spiel es zeichnet.", "Aus, wie das Spiel es zeichnet. Standard."),
     .anisoTip = "Macht schräg gesehene Texturen (der Boden vor dir, Wände entlang eines Weges) scharf, statt sie\n"
         "verschwimmen zu lassen. Kostet GPU-Zeit und kann die Bildrate in den anspruchsvollsten Ansichten "
         "senken\n"
         "(das hohe Gras der Insel Präludien, der Ausguck): gemessen etwa 5 % bei 2x, 15 % bei 4x und 30 % bei "
         "16x;\n"
-        "das Dorf und das Meer sind nicht betroffen. Standard: 1x (aus).",
+        "das Dorf und das Meer sind nicht betroffen. " S2_OR_S1("Standard: 16x.", "Standard: 1x (aus)."),
     .shadowLabel = "Schattenkarten",
     .shadowFast = "Schnell",
     .shadowOriginal = "Original (Standard)",
@@ -1099,7 +1107,8 @@ const MenuTexts kMenuGerman = {
         "statt das\n"
         "ganze Spiel zu verlangsamen: Die Logik behält ihre 30 Schritte pro Sekunde. Aus: Jedes Zwischenbild "
         "wird\n"
-        "gezeichnet und das Spiel läuft langsamer als Echtzeit. Nicht gespeichert: aus beim nächsten Start.",
+        "gezeichnet und das Spiel läuft langsamer als Echtzeit. "
+        S2_OR_S1("Nicht gespeichert: an beim nächsten Start.", "Nicht gespeichert: aus beim nächsten Start."),
     .drawnLately = "Zuletzt gezeichnete Zwischenbilder: %.0f%%",
     // Controls tab
     .rumbleHeading = "Vibration",
@@ -1197,14 +1206,14 @@ const MenuTexts kMenuItalian = {
     .originalColours = "Colori originali",
     .vivid = "Vivaci",
     .anisoLabel = "Filtro anisotropico",
-    .anisoOffTip = "Disattivato, come lo disegna il gioco. Predefinito.",
+    .anisoOffTip = S2_OR_S1("Disattivato, come lo disegna il gioco.", "Disattivato, come lo disegna il gioco. Predefinito."),
     .anisoTip = "Rende più nitide le texture viste di sbieco (il terreno davanti, i muri lungo un sentiero) invece "
         "di\n"
         "lasciarle sfocate. Costa tempo di GPU e può abbassare gli fps nelle visuali più pesanti (l'erba "
         "alta\n"
         "dell'Isola Primula, la torre di vedetta): misurato circa il 5% a 2x, il 15% a 4x e il 30% a 16x "
         "lì;\n"
-        "il villaggio e il mare non ne risentono. Predefinito: 1x (disattivato).",
+        "il villaggio e il mare non ne risentono. " S2_OR_S1("Predefinito: 16x.", "Predefinito: 1x (disattivato)."),
     .shadowLabel = "Mappe delle ombre",
     .shadowFast = "Veloce",
     .shadowOriginal = "Originale (predefinito)",
@@ -1272,7 +1281,8 @@ const MenuTexts kMenuItalian = {
         "invece di\n"
         "rallentare tutto il gioco: la logica mantiene i suoi 30 passi al secondo. Disattivato: ogni "
         "fotogramma intermedio\n"
-        "viene disegnato e il gioco va più lento del tempo reale. Non salvato: disattivato al prossimo avvio.",
+        "viene disegnato e il gioco va più lento del tempo reale. "
+        S2_OR_S1("Non salvato: attivato al prossimo avvio.", "Non salvato: disattivato al prossimo avvio."),
     .drawnLately = "Fotogrammi intermedi disegnati di recente: %.0f%%",
     // Controls tab
     .rumbleHeading = "Vibrazione",
@@ -1367,12 +1377,12 @@ const MenuTexts kMenuPortuguese = {
     .originalColours = "Cores originais",
     .vivid = "Vívidas",
     .anisoLabel = "Filtragem anisotrópica",
-    .anisoOffTip = "Desativada, como o jogo desenha. Padrão.",
+    .anisoOffTip = S2_OR_S1("Desativada, como o jogo desenha.", "Desativada, como o jogo desenha. Padrão."),
     .anisoTip = "Deixa mais nítidas as texturas vistas em ângulo (o chão à frente, as paredes ao longo de um caminho) "
         "em vez de\n"
         "deixá-las borradas. Custa tempo de GPU, o que pode baixar os fps nas cenas mais pesadas (o capim alto\n"
         "de Outset, o mirante): medido cerca de 5% em 2x, 15% em 4x e 30% em 16x ali; a vila\n"
-        "e o mar não são afetados. Padrão: 1x (desativada).",
+        "e o mar não são afetados. " S2_OR_S1("Padrão: 16x.", "Padrão: 1x (desativada)."),
     .shadowLabel = "Mapas de sombra",
     .shadowFast = "Rápido",
     .shadowOriginal = "Original (padrão)",
@@ -1437,8 +1447,8 @@ const MenuTexts kMenuPortuguese = {
     .keepSpeedHelp = "Quando o console não consegue desenhar 60 quadros por segundo, pula quadros intermediários em vez "
         "de deixar\n"
         "o jogo inteiro mais lento: a lógica mantém seus 30 passos por segundo. Desativado: todos os quadros\n"
-        "intermediários são desenhados e o jogo fica mais lento que o tempo real. Não é salvo: desativado na "
-        "próxima inicialização.",
+        "intermediários são desenhados e o jogo fica mais lento que o tempo real. "
+        S2_OR_S1("Não é salvo: ativado na próxima inicialização.", "Não é salvo: desativado na próxima inicialização."),
     .drawnLately = "Quadros intermediários desenhados recentemente: %.0f%%",
     // Controls tab
     .rumbleHeading = "Vibração",

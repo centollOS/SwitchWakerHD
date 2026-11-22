@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <functional>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -276,6 +277,8 @@ int translate(const char* manifestPath, const char* programsPath, const char* ou
         auto decompile = [&](std::string& glsl) {
             LatteShader_UpdatePSInputs(regs.data());
             LatteDecompilerOptions options;
+            // as the console's runtime (gfx/deko/shaders_dk.cpp nan_guard): on unless WWHD_NAN_GUARD=0
+            options.finiteColorOutputs = !getenv("WWHD_NAN_GUARD") || strcmp(getenv("WWHD_NAN_GUARD"), "0");
             LatteDecompilerOutput_t output{};
             if (v.vertex)
                 LatteDecompiler_DecompileVertexShader(base, regs.data(), program.data(), v.programSize, fetch, options,

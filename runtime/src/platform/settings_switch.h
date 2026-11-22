@@ -28,6 +28,7 @@ struct ResProfile {
 };
 ResProfile res_profile(int m);
 void set_res_profile(int m, ResProfile p);  // saves it; applies it now when m is the active mode
+void reapply_res_profile(const char* why);  // (s2/resolution) the active mode's profile again (a render choice changed)
 
 // host loop, often: once a second, the active mode's picture profile (dock / undock)
 void tick();
@@ -46,7 +47,14 @@ constexpr const char* kKeyFpsCounter = "switchFpsCounter";
 constexpr const char* kKeyCaptureCombo = "switchCaptureCombo";
 constexpr const char* kKeyShadowScale = "switchShadowScale";  // shadow map scale: "0.5" (Fast), "1" (Original, the default), "2" (High)
 constexpr const char* kKeyAmbientOcclusion = "switchAmbientOcclusion";  // "1" on (the default), "0" off (gfxsw::skip_ao)
-constexpr const char* kKeyAnisoLevel = "switchAnisoLevel";  // anisotropic filtering: 1 (off, the default), 2, 4, 8, 16
+constexpr const char* kKeyAnisoLevel = "switchAnisoLevel";  // anisotropic filtering: 1 (off), 2, 4, 8, 16
+// the anisotropic level without a saved choice (no switchAnisoLevel nor switchAniso): 16x on the Switch 2, off (1x) on
+// the Switch 1; a saved level stays as the player set it
+#ifdef __SWITCH2__
+constexpr int kDefaultAnisoLevel = 16;
+#else
+constexpr int kDefaultAnisoLevel = 1;
+#endif
 constexpr const char* kKeyAniso = "switchAniso";  // the old on/off key: read only when switchAnisoLevel is absent ("1" = 16x), never written
 constexpr const char* kKeyFxaa = "switchFxaa";                   // gfxsw::fxaa (issue #21), off by default
 constexpr const char* kKeyFsr = "switchFsr";  // FSR 1 in the present pass (gfxsw::fsr), a developer option, off by default
@@ -67,7 +75,8 @@ constexpr const char* kKeyShaderWait = "switchShaderWait";
 // per mode: <key>.handheld / <key>.docked
 constexpr const char* kKeyResScale = "switchResScale";
 constexpr const char* kKeyDynamicRes = "switchDynamicRes";
-// the saved anisotropic level: switchAnisoLevel, else the old switchAniso ("1" meant 16x, "0" off), else 1 (off)
+// the saved anisotropic level: switchAnisoLevel, else the old switchAniso ("1" meant 16x, "0" off), else
+// kDefaultAnisoLevel (settings_ini::aniso_level)
 int saved_aniso_level();
 const char* aniso_level_setting(int level);  // "1", "2", "4", "8" or "16": what switchAnisoLevel holds
 void save_picture();       // the current picture adjustments into settings.ini

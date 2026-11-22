@@ -53,4 +53,9 @@ struct Migration {
 };
 Migration migrate_env_txt(const std::string& envText, File& f);
 
+// the anisotropic filtering level the saved values stand for (each nullptr when its key is absent or empty):
+// switchAnisoLevel (rounded down to 1, 2, 4, 8 or 16), else the old on/off switchAniso ("1" = 16x, else 1x), else
+// defaultLevel (no saved choice: switch_settings::kDefaultAnisoLevel, 16 on the Switch 2, 1 on the Switch 1)
+int aniso_level(const std::string* level, const std::string* oldOnOff, int defaultLevel);
+
 }  // namespace settings_ini

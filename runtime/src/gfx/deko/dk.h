@@ -30,6 +30,11 @@ constexpr uint32_t kStreamSliceSize = 32u << 20;   // per frame: vertices, indic
 constexpr uint32_t kCmdSliceSize = 4u << 20;       // per frame: command memory
 constexpr uint32_t kCmdChunk = 64u << 10;          // fed to the command buffer at frame_begin, then as it asks
 constexpr uint32_t kImageChunkSize = 64u << 20;    // image heap chunks
+#ifdef __SWITCH2__
+constexpr float kMaxResScale = 3.0f;  // (s2/resolution) the internal resolution up to 3x 1280x720 = 3840x2160
+#else
+constexpr float kMaxResScale = 2.0f;
+#endif
 constexpr uint32_t kCodeSize = 64u << 20;          // shader code (DKSH), bump allocated (a cache made with
                                                    // make_sd.py --shaders takes up to 40 MiB: tools/switch/make_sd.py)
 constexpr uint32_t kImageDescriptors = 8192, kSamplerDescriptors = 1024;
@@ -208,7 +213,11 @@ const DkShader* shader(ShaderId id);  // null if it did not load (logged)
 inline uint64_t now_ns() {
     uint64_t ticks;
     asm volatile("mrs %0, cntpct_el0" : "=r"(ticks));
+#ifdef __SWITCH2__
+    return ticks * 32;
+#else
     return ticks * 625 / 12;  // 19.2 MHz
+#endif
 }
 // names a blocking step for the hang watchdog (gx2::g_render_stage)
 struct Stage {

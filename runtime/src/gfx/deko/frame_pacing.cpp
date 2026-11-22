@@ -23,7 +23,7 @@
 #include "dk.h"
 #include "runtime.h"
 
-namespace interp { uint32_t effective_swap_interval(uint32_t game); uint32_t vsync_granule_ticks(); }
+namespace interp { uint32_t effective_swap_interval(uint32_t game); uint32_t vsync_granule_ticks(); int output_fps(); bool interp_on(); }
 
 namespace frame_pacing {
 using gfxdk::now_ns;
@@ -116,7 +116,7 @@ void vblank_thread(void* arg) {
             }
             g_cur = shown;
             // GPU ticks: 614.4 MHz (32 x the CPU's 19.2 MHz counter: the same clock as now_ns, it seems)
-            const int64_t lead = int64_t(t) - int64_t(gpuTs * 625 / 384);
+            const int64_t lead = int64_t(t) - int64_t(dkTimestampToNs(gpuTs));
             g_s.leadMin = std::min(g_s.leadMin, lead);
             g_s.leadMax = std::max(g_s.leadMax, lead);
             g_s.leadSum += lead;
@@ -211,6 +211,12 @@ void on_present(DkCmdBuf cmd, uint64_t frame) {
 // (GX2SetSwapInterval) in every log so far (530 of 530 '[gx2] ... swap interval' lines, title and gameplay).
 constexpr uint32_t kGameSwapInterval = 2;
 uint32_t swap_interval() {
+#ifdef __SWITCH2__
+    // (Switch 2) 240 fps frame interpolation, a GPU test: no screen shows it, so present without waiting for a
+    // refresh (interval 0, three swap images); the drawn rate is the GPU's. 120 fps keeps interval 1 and
+    // asks for the 120 Hz screen (backend.cpp present).
+    if (mode() && interp::interp_on() && interp::output_fps() >= 240) return 0;
+#endif
     if (!mode() || interp::vsync_granule_ticks() <= 2) return 1;
     return std::clamp<uint32_t>(interp::effective_swap_interval(kGameSwapInterval), 1, 2);
 }

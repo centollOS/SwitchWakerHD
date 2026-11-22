@@ -77,6 +77,7 @@
 0252A684  # dDoor_info_c::getDemoAction: a door event cut is running
 021C0078  # daMbdoor_c::getDemoAction
 025DC86C  # fopScnM_ChangeReq: scene change trigger (traces)
+025D7710  # fopAcM_orderDoorEvent(Link, door): A on a door's "Open" prompt (Quick doors' walk-through mode, opening with A)
 023DE788  # daPy_lk_c::setFrameCtrl: the run/swim boost scales the animation rate (mods.cpp)
 023DE7E8  # daPy_lk_c::setActAnimeUpper: identify scoped quick-use animation generations
 @023FB49C # native boomerang launch: optional trace observation only
@@ -99,3 +100,7 @@
 @026D5D84 # Options values loaded (+0x104..+0x109), before the rows are filled: into the new order
 026D6DD4  # Options values saved (fixed offsets): the game's order around it
 026D87D0  # Options Controller item callback (its value +0x107): the game's order around it
+# Pause menu: the map tab's chart grid moves the menu's focus only among its own squares (selection follows Link)
+# (issue #336; mods/hud_gate.cpp, rule in mods/menu_cursor.h)
+026828B4  # hdSeaChartGrid_c::transferPendingFocus
+@02682930 # transferPendingFocus: setModeDefault(sEventMgr, Link's square's element)

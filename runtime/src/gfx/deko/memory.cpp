@@ -183,9 +183,27 @@ void memory_init() {
     LOG("[dk] creating the command buffer");
     log_flush();
     R.cmd = dkCmdBufCreate(&cm);
-    g_cmdMem = make_block(kFrames * kCmdSliceSize, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached,
+    // On Switch 2 the command ring must be uncached.
+    // This is probably also true on Switch 1 but I can't be arsed.
+    auto env = [](const char* name, bool def) {
+        const char* e = getenv(name);
+        return e && *e ? *e != '0' : def;
+    };
+#ifdef __SWITCH2__
+    constexpr bool kCmdUncachedDefault = true;
+#else
+    constexpr bool kCmdUncachedDefault = false;
+#endif
+    const bool cmdUncached = env("WWHD_DK_CMD_UNCACHED", kCmdUncachedDefault);
+    const bool streamUncached = env("WWHD_DK_STREAM_UNCACHED", false);
+    if (cmdUncached != kCmdUncachedDefault || streamUncached)
+        LOG("[dk] rings: command ring GPU %s, stream ring GPU %s (WWHD_DK_CMD_UNCACHED=%d, WWHD_DK_STREAM_UNCACHED=%d, a test)",
+            cmdUncached ? "uncached" : "cached", streamUncached ? "uncached" : "cached", int(cmdUncached), int(streamUncached));
+    g_cmdMem = make_block(kFrames * kCmdSliceSize,
+                          DkMemBlockFlags_CpuUncached | (cmdUncached ? DkMemBlockFlags_GpuUncached : DkMemBlockFlags_GpuCached),
                           "command memory ring (4 frames)");
-    g_stream = make_block(kFrames * kStreamSliceSize, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached,
+    g_stream = make_block(kFrames * kStreamSliceSize,
+                          DkMemBlockFlags_CpuUncached | (streamUncached ? DkMemBlockFlags_GpuUncached : DkMemBlockFlags_GpuCached),
                           "stream ring (4 frames: vertices, indices, uniforms, uploads)");
     g_streamCpu = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(g_stream));
     g_streamGpu = dkMemBlockGetGpuAddr(g_stream);

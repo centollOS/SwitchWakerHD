@@ -103,7 +103,7 @@ std::atomic<bool> g_marking{false}, g_positions{false};
 void marking_refresh() {
 #ifdef __SWITCH__
     // (this fork) the system tick (a register read) in 8 ms windows: render::frame_count is a call into the backend
-    const uint64_t now = armGetSystemTick() / (19200000 / 125);
+    const uint64_t now = armTicksToNs(armGetSystemTick()) / 8000000;
 #else
     const uint64_t now = render::frame_count();
 #endif

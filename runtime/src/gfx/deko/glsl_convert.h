@@ -35,5 +35,7 @@ constexpr char kNegateY[] = "; gl_Position.y = -gl_Position.y";
 // uam's GL frontend does not know; layout macros expanded without `set =`; bindings renumbered (out); `#version 460`; vertex
 // shaders get `invariant gl_Position;` as in gfx/gl. Line ends are kept (Cemu writes \r\n). Returns "" with
 // out->error set when the source has an unexpected shape or needs more slots than deko3d has.
-std::string glsl_to_deko(const std::string& cemuGlsl, bool vertex, ConvertedBindings* out);
+enum class DekoGlsl { Gl, Vulkan };
+std::string glsl_to_deko(const std::string& cemuGlsl, bool vertex, ConvertedBindings* out,
+                         DekoGlsl dialect = DekoGlsl::Gl);
 }  // namespace gfxdk

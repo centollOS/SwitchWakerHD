@@ -231,4 +231,13 @@ Migration migrate_env_txt(const std::string& envText, File& f) {
     return m;
 }
 
+int aniso_level(const std::string* level, const std::string* oldOnOff, int defaultLevel) {
+    if (level && !level->empty()) {
+        const int n = atoi(level->c_str());
+        return n >= 16 ? 16 : n >= 8 ? 8 : n >= 4 ? 4 : n >= 2 ? 2 : 1;
+    }
+    if (oldOnOff && !oldOnOff->empty()) return atoi(oldOnOff->c_str()) != 0 ? 16 : 1;
+    return defaultLevel;
+}
+
 }  // namespace settings_ini

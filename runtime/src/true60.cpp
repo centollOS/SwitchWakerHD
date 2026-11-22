@@ -1,4 +1,5 @@
 #include "mods/mods.h"
+#include "mods/native_actor_profiles.h"
 // True 60 fps: game logic at 60 steps per second (not interpolation).
 //
 // Pass structure (shared with interp.cpp): the per-frame function runs every vsync. Passes alternate:
@@ -154,7 +155,8 @@ uint64_t g_link_steps = 0;  // Link's full-pass executes since the last save-sta
 
 uint32_t actor_execute_fn(uint32_t proc) {
     uint32_t sub = ld32(proc + kSubMethod);
-    if (sub < 0x10000000 || sub >= 0x50000000) return 0;
+    if (sub < 0x10000000 || sub >= 0x50000000)
+        return native_actor_profiles::guest_execute_method(ld16(proc+0xE),sub);
     return ld32(sub + 8);
 }
 
@@ -677,6 +679,11 @@ static void rx_log(uint32_t proc, uint32_t s0) {
 }
 extern "C" void hook_025DF940(Cpu* c) {
     uint32_t proc = c->r[3];
+    mods::DoorExecuteWrap door_wrap{proc};  // Quick doors' walk-through mode (mods/walk_doors.cpp)
+    if (mods::walk_doors_hold(proc)) {  // a new actor of a room a walk-through door just showed: it waits (#529)
+        c->r[3] = 1;
+        return;
+    }
     uint32_t rx_s0 = ld32(kRndSeeds);
     struct WatchGuard { uint32_t p, v; ~WatchGuard() { watch_link("execute", p, v); } } watch_guard{proc, watch_val()};
     struct RxLog { uint32_t p, s; ~RxLog() { rx_log(p, s); } } rx_guard{proc, rx_s0};
@@ -846,7 +853,9 @@ extern "C" void hook_025DF940(Cpu* c) {
 // re-implementations of the GameCube source with fractional smoothing and split steps.
 
 // f32 cLib_addCalc(f32* v, f32 target, f32 scale, f32 maxStep, f32 minStep)
-namespace interp { bool zoom_ease(Cpu* c, void (*orig)(Cpu*)); void fx_actor_draw(uint32_t proc, uint32_t exec, bool begin); }
+namespace interp { bool zoom_ease(Cpu* c, void (*orig)(Cpu*)); void fx_actor_draw(uint32_t proc, uint32_t exec, bool begin);
+void kankyo_draw(uint32_t proc, bool begin);  // interp_kankyo.cpp: the environment's draw-time state
+}
 extern "C" void hook_0200ECD4(Cpu* c) {
     // camera_draw's ease of the HD projection zoom: once per logic step with frame interpolation (interp.cpp)
     static const uint32_t zoom_call = GC(0x0250018C);
@@ -1212,8 +1221,13 @@ extern "C" void hook_025DF904(Cpu* c) {
     // frame interpolation: actor draws that advance their own state, once per logic step (interp_fx.cpp;
     // the logic pass's draws too: replayed draws and fields blended between the steps)
     const uint32_t keep_exec = interp::enabled() && !true60::enabled() ? actor_execute_fn(proc) : 0;
+    // (upstream 12a10d5a, interp_kankyo.cpp) the environment's draw advances once per logic step; this fork keeps
+    // true 60, whose half passes keep their draws' state themselves, so only with frame interpolation
+    const bool ky = !true60::enabled();
     if (keep_exec) interp::fx_actor_draw(proc, keep_exec, true);
+    if (ky) interp::kankyo_draw(proc, true);
     f_025DF904_orig(c);
+    if (ky) interp::kankyo_draw(proc, false);
     if (keep_exec) interp::fx_actor_draw(proc, keep_exec, false);
     if (dw) {
         static std::unordered_map<uint32_t, int> cnt;

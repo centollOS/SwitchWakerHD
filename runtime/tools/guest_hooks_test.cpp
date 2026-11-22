@@ -30,6 +30,40 @@
 #define WWHD_GUEST_HOOKS_STARTUP_FIXTURE 1
 // This entire harness constructs synthetic startup registries; production has no unseal.
 #include "mods/guest_mods.cpp"
+// These hook-runner fixtures have no native actor-profile lookup entries and
+// never import the actor-profile service. The real registry has its own
+// guest_actor_profiles_test; only its empty-state lifecycle belongs here.
+namespace native_actor_profiles {
+static unsigned configure_calls=0,install_calls=0,register_calls=0,restore_calls=0;
+void configure(void(*)(Cpu*,uint32_t),uint32_t(*)(Cpu*,uint32_t,std::initializer_list<uint32_t>)) {
+    ++configure_calls;
+    assert(false && "hook fixture unexpectedly configured native actor profiles");
+}
+bool install_guest(const Allocate&,const Owner&,const Replace&,std::string* why) {
+    ++install_calls;
+    assert(false && "hook fixture unexpectedly installed native actor profiles");
+    if(why)*why="synthetic hook fixture has no native profile lookup";
+    return false;
+}
+int32_t register_guest(const std::string&,const std::string&,uint32_t,const OwnRange&,const OwnFunction&,std::string*) {
+    ++register_calls;
+    assert(false && "hook fixture unexpectedly called actor-profile registration");
+    return -4; // unavailable, never pretend that a profile was admitted
+}
+void restore_guest_snapshots() {
+    ++restore_calls;
+    // Restoring an unconfigured, empty registry has no guest-memory effects.
+    assert(!configure_calls&&!install_calls&&!register_calls&&!guestmods::g_actor_profile_import);
+}
+}
+namespace mods {
+// Service dispatch must link on every platform even though these tests exercise
+// hooks, not traversal/quick-use gameplay. Any unexpected invocation is a failure.
+void ship_normal_sail_wind(Cpu*,uint32_t) {assert(false && "unexpected sail-wind service in hook fixture");}
+float ship_sail_target(float stock) {assert(false && "unexpected sail-target service in hook fixture");return stock;}
+void quick_use_item_action_dispatch(Cpu*,uint32_t,uint32_t) {assert(false && "unexpected item-action service in hook fixture");}
+uint32_t quick_use_ready_item_trigger(Cpu*,uint32_t,uint32_t trigger) {assert(false && "unexpected item-trigger service in hook fixture");return trigger;}
+}
 namespace story_native_wait_runtime {
 static unsigned startups=0;
 void startup(bool,LogicStep) {++startups;assert(story_native_scene_request::startup_window_current());}
@@ -126,6 +160,7 @@ std::optional<Value> read(const std::string& key) {
 namespace input {PadState read() {return {};}}
 // live options and scripted test options (QoL M0): the fixtures run no renderer or host UI
 namespace render {uint64_t frame_count() {return 0;}}
+namespace link_appearance { bool request_page(std::string& why) {why="not in this test";return false;} }  // the colour page (not under test)
 namespace hostui {void post(std::function<void()> fn) {fn();}}
 namespace true60 {float dt() {return 0.5f;}}
 namespace interp { uint32_t last_camera() { return 0; } }  // screen points (QoL M2): no camera here
@@ -279,6 +314,7 @@ void set_game_calls(void (*)(Cpu*,uint32_t),uint32_t (*)(Cpu*,uint32_t,std::init
 void set_scratch_memory(uint32_t){}
 void set_scene_start(std::function<bool(const std::string&,const std::string&)>){}
 void set_stage_enter(std::function<bool(const std::string&,const std::string&,unsigned,unsigned)>){}
+void set_appearance_open(std::function<bool(const std::string&)>){}
 // like the real install: claims a game function, which marks its byte in the hook-flag table
 static unsigned installs=0;
 void install(const std::function<std::string(uint32_t)>&,const std::function<void(uint32_t,void(*)(Cpu*))>& replace){++installs;replace(0x02000000,[](Cpu*){});}
@@ -447,6 +483,13 @@ namespace game_layouts {
 bool texture(const std::string&,Image&,std::string& error) {error="no game layouts in this test";return false;}
 bool texture_size(const std::string&,uint32_t&,uint32_t&) {return false;}
 bool pane(const std::string&,Pane&) {return false;}
+// one label in two sizes, a text at the size limit, everything else missing
+bool message(const std::string& spec,std::string& out) {
+    if(spec=="DungeonMapUp_00/T_FloorU_00_2F"){out="P1";return true;}
+    if(spec=="Big_00/T_Long"){out.assign(kMaxMessageBytes,'x');return true;}
+    if(spec=="Big_00/T_Edge"){out.assign(kMaxMessageBytes-1,'y');return true;}
+    return false;
+}
 }
 namespace story_mail { void set_item_get_next(void (*)(Cpu*)) {} }
 namespace story_notebook {
@@ -905,6 +948,7 @@ int main() {
 #endif
     guestmods::init();
     assert(mods::packages::inspected);       // the package start still ran (a guest package is refused, not run)
+    assert(!native_actor_profiles::configure_calls&&!native_actor_profiles::install_calls&&!native_actor_profiles::register_calls&&!native_actor_profiles::restore_calls);
     assert(story_actors::installs==0);        // no port service claimed a game function
     assert(story_actors::live_kinds==0);      // so the editor has no live kinds
     assert(!g_mod_hook_flags&&guestmods::g_chains.empty()&&!guestmods::hooks_built());
@@ -928,6 +972,7 @@ int main() {
     setenv("WWHD_GUEST_BUILD_CONFIG",missing,1);
 #endif
     guestmods::init();
+    assert(!native_actor_profiles::configure_calls&&!native_actor_profiles::install_calls&&!native_actor_profiles::register_calls&&!native_actor_profiles::restore_calls);
     assert(story_scenes::scene_editor);                 // editor previews on
     assert(story_scenes::scene_scratch!=0);             // with the scene player's scratch
     assert(story_scenes::scene_installs==2);            // the declared-scenes install, then the editor's
@@ -955,6 +1000,7 @@ int main() {
     guestmods::init();
     assert(!story_native_scene_request::startup_window_current());
     assert(mods::packages::inspected);
+    assert(!native_actor_profiles::configure_calls&&!native_actor_profiles::install_calls&&!native_actor_profiles::register_calls&&!native_actor_profiles::restore_calls);
     // Inert without mods: no guest runtime memory (the save-state layout of a start without mods), no
     // particle or held-model setup, no native scene startup, no game-thread binding and no package observer.
     assert(mem::fixture_runtime_allocs==0&&story_particles::configured==0&&story_item_models::configured==0);
@@ -1048,6 +1094,26 @@ int main() {
     assert(guestmods::hud::store().release("first",first_corner_image));
     assert(guestmods::hud::store().release("first",ld32(target+4)));
     mod_stages::fixture_has_corner_map=false;corner={};
+    // HUD v3 capabilities and the game's layout texts: string type only, exact sizes, a short or foreign buffer
+    // left unchanged, a text at the limit refused, nothing but the named label reaches the mod.
+    assert(read_setting("hud.mirrored-images.version",3,0,0)==4);
+    assert(read_setting("hud.mirrored-images.version",3,target,4)==4&&ld32(target)==1);
+    assert(read_setting("layout-message.version",3,target,4)==4&&ld32(target)==1);
+    assert(read_setting("layout-message.version",1,target,4)==0&&read_setting("layout-message.version",3,target,3)==0);
+    assert(read_setting("hud.mirrored-images.version",3,data_base+0xFFFE,4)==0);
+    assert(read_setting("layout-message:DungeonMapUp_00/T_FloorU_00_2F",1,0,0)==3);
+    std::memset(mem::ptr(target),0x5A,8);
+    assert(read_setting("layout-message:DungeonMapUp_00/T_FloorU_00_2F",1,target,2)==0&&ld8(target)==0x5A);
+    assert(read_setting("layout-message:DungeonMapUp_00/T_FloorU_00_2F",3,target,8)==0&&ld8(target)==0x5A);
+    assert(read_setting("layout-message:DungeonMapUp_00/T_FloorU_00_2F",1,data_base+0xFFFE,8)==0);
+    assert(read_setting("layout-message:DungeonMapUp_00/T_FloorU_00_2F",1,0x10000000,8)==0);
+    assert(read_setting("layout-message:DungeonMapUp_00/T_FloorU_00_2F",1,target,8)==3);
+    assert(std::string(reinterpret_cast<char*>(mem::ptr(target)))=="P1"&&ld8(target+3)==0x5A);
+    assert(read_setting("layout-message:DungeonMapUp_00/T_Missing",1,target,8)==0);
+    assert(read_setting("layout-message:Big_00/T_Long",1,0,0)==0);
+    assert(read_setting("layout-message:Big_00/T_Edge",1,0,0)==game_layouts::kMaxMessageBytes);
+    assert(read_setting("layout-message:Big_00/T_Edge",1,target,game_layouts::kMaxMessageBytes)==game_layouts::kMaxMessageBytes);
+    assert(ld8(target)=='y'&&ld8(target+game_layouts::kMaxMessageBytes-1)==0);
     std::strcpy(reinterpret_cast<char*>(mem::ptr(data_base+0x400)),"input.face_layout");
     c.r[3]=data_base+0x400;guestmods::svc_setting_changed(&c);assert(c.r[3]==0&&c.r[4]==7);
     WWHDGuestModuleV1 second{};second.mem_base=0x7F010000;second.mem_size=4096;
@@ -1076,7 +1142,9 @@ int main() {
     assert(tv[0]->commands[0].rgba==0x12345678&&tv[0]->commands[0].w==20);
     guestmods::draw_frame(&c,4);assert(hud_calls==1);
     guestmods::draw_frame(&c,5);assert(hud_calls==2);
-    auto epoch=guestmods::hud::store().state_generation();guestmods::state_loaded();
+    auto epoch=guestmods::hud::store().state_generation();
+    const auto empty_profile_restores=native_actor_profiles::restore_calls;guestmods::state_loaded();
+    assert(native_actor_profiles::restore_calls==empty_profile_restores+1);
     assert(!guestmods::hud::store().active()&&guestmods::hud::store().state_generation()!=epoch);
     guestmods::draw_frame(&c,5);assert(hud_calls==3); // rebuilt even if restored clock repeats
     c.r[3]=0;c.r[4]=2;guestmods::svc_hud_register(&c);assert(c.r[3]==1);

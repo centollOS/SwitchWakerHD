@@ -3,6 +3,7 @@
 #include "platform/r5_slow_render.h"
 #include "gfx/display_modes.h"
 #include "../game_clock.h"
+#include "../no_destroy.h"
 #include "vsync_pacing.h"
 #include "../mods/fast_forward.h"
 #include "../mods/mod_actor_shadow_proof.h"
@@ -44,6 +45,7 @@
 #include "gfx/vulkan/background_checkpoint.h"
 #endif
 #include "runtime.h"
+#include "hot_wait.h"
 #include "savestate.h"
 #include "state_metadata_validation.h"
 #include "guest_addr.h"
@@ -530,9 +532,16 @@ static void set_active_snapshot(submitted::Snapshot* s) {  // render thread
 // Like the real GPU, command execution runs asynchronously to the game: GX2 calls append to a
 // queue that a render thread turns into Metal work. WWHD_NO_RENDER_THREAD=1 executes inline.
 static const bool g_render_thread = getenv("WWHD_NO_RENDER_THREAD") == nullptr;
-static std::mutex g_q_mutex;
-static std::condition_variable g_q_cv, g_q_done_cv;
-static std::vector<uint32> g_q_pending, g_q_work;
+// never destroyed (no_destroy.h): the detached render thread waits on g_q_cv (with no timeout while idle) and uses the
+// queue until the process ends, also when it leaves through std::exit (the game's exit(), its main thread returning)
+static NoDestroy<std::mutex> g_q_mutex_store;
+static std::mutex& g_q_mutex = g_q_mutex_store.value;
+static NoDestroy<std::condition_variable> g_q_cv_store, g_q_done_cv_store;
+static std::condition_variable& g_q_cv = g_q_cv_store.value;
+static std::condition_variable& g_q_done_cv = g_q_done_cv_store.value;
+static NoDestroy<std::vector<uint32>> g_q_pending_store, g_q_work_store;
+static std::vector<uint32>& g_q_pending = g_q_pending_store.value;
+static std::vector<uint32>& g_q_work = g_q_work_store.value;
 static bool g_q_waiting = false;
 static uint64_t g_fence_issued = 0, g_fence_done = 0;
 static std::atomic<uint64_t> g_render_wait_ns{0};
@@ -1471,6 +1480,30 @@ static bool late_flip_pending() {  // g_flip_mutex held
     const auto& front = g_pending_flips.front();
     return flip_due(front) <= vsync_index() && render::frames_completed() < front.swap;
 }
+// GX2WaitForVsync's sleeps: hot_wait.h (WWHD_VSYNC_HOT_WAIT_US) spins the short ones
+static uint64_t g_hot_waits = 0, g_hot_wait_ns = 0, g_cold_waits = 0;
+// (END: the end of the whole wait, which decides; the late-flip polling parks in 250 us steps towards its deadline)
+static void vsync_park(std::chrono::steady_clock::time_point tp, std::chrono::steady_clock::time_point end,
+                       bool precise = false, void (*before_resume)() = nullptr) {
+    const int64_t hot = threads::hot_wait_us();
+    if (!hot) return threads::park_sleep_until(tp, precise, before_resume);
+    const auto now = std::chrono::steady_clock::now();
+    if (end - now > std::chrono::microseconds(hot)) {
+        ++g_cold_waits;
+        return threads::park_sleep_until(tp, precise, before_resume);
+    }
+    threads::park_spin_until(tp, before_resume);
+    ++g_hot_waits;
+    if (tp > now) g_hot_wait_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(tp - now).count());
+    static auto last = now;
+    if (now - last >= std::chrono::seconds(30)) {
+        LOG("[gx2] hot vsync waits: %llu spun (%.1f ms), %llu slept (longer than WWHD_VSYNC_HOT_WAIT_US) in %.0f s",
+            (unsigned long long)g_hot_waits, g_hot_wait_ns / 1e6, (unsigned long long)g_cold_waits,
+            std::chrono::duration<double>(now - last).count());
+        g_hot_waits = g_hot_wait_ns = g_cold_waits = 0;
+        last = now;
+    }
+}
 static bool wait_for_late_flip(std::chrono::steady_clock::time_point deadline) {
     uint64_t flips;
     {
@@ -1482,7 +1515,7 @@ static bool wait_for_late_flip(std::chrono::steady_clock::time_point deadline) {
     }
     constexpr auto kStep = std::chrono::microseconds(250);
     for (auto now = std::chrono::steady_clock::now(); now < deadline; now = std::chrono::steady_clock::now()) {
-        threads::park_sleep_until(std::min(deadline, now + kStep));
+        vsync_park(std::min(deadline, now + kStep), deadline);
         std::lock_guard<std::mutex> lk(g_flip_mutex);
         update_flips();
         if (g_flip_count != flips) return true;
@@ -1938,10 +1971,10 @@ HLE(gx2, GX2WaitForVsync) {
         const char* value = getenv("WWHD_VK_READY_FLIP_PARK");
         return render::vulkan() && value && !strcmp(value, "1");
     }();
-    threads::park_sleep_until(deadline, preciseSleep,
+    vsync_park(deadline, deadline, preciseSleep,
         readyFlipPark ? ready_flip_before_resume : nullptr);
 #else
-    threads::park_sleep_until(deadline, preciseSleep);
+    vsync_park(deadline, deadline, preciseSleep);
 #endif
     std::lock_guard<std::mutex> lk(g_flip_mutex);
     update_flips();

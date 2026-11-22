@@ -34,17 +34,21 @@
 #include <vector>
 
 #include "runtime.h"
+#include "hot_wait.h"
 #include "native_quiescence.h"
 #include "native_quiescence_audit.h"
 #include "savestate.h"
 #include "state_metadata_validation.h"
 #include "scheduler_tick.h"
+#include "no_destroy.h"
 #include "rendezvous.h"
 #include "render_prof.h"
 #include "hle/os_time.h"
 #include "fixed_seed.h"
 #include "platform/perf_hint.h"
 #include "platform/thread_sampler.h"
+#include "guest_addr.h"
+#include "thread_chain.h"
 
 static void wake_timed_events();
 
@@ -198,8 +202,11 @@ struct CoreSched {
     HostThread* owner = nullptr;
     std::deque<HostThread*> ready;  // FIFO among equal priorities
 };
-static CoreSched g_sched[3];
-static threads::SchedulerTick g_tick;
+// never destroyed (no_destroy.h): the tick thread and guest threads waiting for a core may still wait on them at exit
+static NoDestroy<CoreSched[3]> g_sched_store;
+static CoreSched (&g_sched)[3] = g_sched_store.value;
+static NoDestroy<threads::SchedulerTick> g_tick_store;
+static threads::SchedulerTick& g_tick = g_tick_store.value;
 
 static HostThread* best_ready(CoreSched& k) {  // k.m held
     HostThread* b = nullptr;
@@ -541,8 +548,11 @@ static HostThread* host_thread(uint32_t t) {
 // whose outcome is decided only by HLE objects (re-checked after waking), or idle (service threads).
 // A parked thread that wakes while frozen stops at the gate before it consumes anything, so the HLE
 // objects and guest memory fully describe where it will continue.
-static std::mutex g_frz_m;
-static std::condition_variable g_frz_cv;
+// never destroyed (no_destroy.h): a thread may wait at the gate when the process exits
+static NoDestroy<std::mutex> g_frz_m_store;
+static std::mutex& g_frz_m = g_frz_m_store.value;
+static NoDestroy<std::condition_variable> g_frz_cv_store;
+static std::condition_variable& g_frz_cv = g_frz_cv_store.value;
 static bool g_frozen = false;
 static HostThread* g_frz_owner = nullptr;
 static threads::detail::FreezeOwnership g_freeze_ownership;
@@ -732,6 +742,33 @@ void park_sleep_until(std::chrono::steady_clock::time_point tp, bool precise,
     if (before_resume) before_resume();
     block_end();
 }
+// hot_wait.h
+int64_t hot_wait_us() {
+    static const int64_t value = [] {
+        const char* e = getenv("WWHD_VSYNC_HOT_WAIT_US");
+        const int64_t v = e && *e ? std::max<int64_t>(0, atoll(e)) : 0;
+        if (v) LOG("[threads] hot vsync waits: GX2WaitForVsync waits up to %lld us spin instead of sleeping "
+                   "(WWHD_VSYNC_HOT_WAIT_US)", (long long)v);
+        return v;
+    }();
+    return value;
+}
+void park_spin_until(std::chrono::steady_clock::time_point tp, void (*before_resume)()) {
+    HostThread* t = t_self;
+    if (t) {
+        t->wait_kind = W_SLEEP;
+        t->wait_obj = 0;
+        t->wst.store(kParked);
+    }
+    block_begin();
+    {
+        SchedulerTick::TimedWait timed(g_tick);
+        while (std::chrono::steady_clock::now() < tp) std::this_thread::yield();
+    }
+    if (t) park_gate(t);
+    if (before_resume) before_resume();
+    block_end();
+}
 void service_begin() {
     if (!t_self) return;
     park_gate(t_self);  // waits while frozen; marks the thread busy
@@ -830,11 +867,15 @@ bool sched_stats() { return g_sched_stats.load(std::memory_order_relaxed); }
 
 #ifdef __SWITCH__
 // guest threads (by name) that run above the render thread on the host like the audio threads:
-// WWHD_BOOST_THREADS, comma-separated, default "update_ubo"; empty turns it off
+// WWHD_BOOST_THREADS, comma-separated, default "update_ubo,WorkerMgr/Worker*" (a trailing * matches a prefix);
+// empty turns it off. (perf/workers, from ZeldaWWHDRecomp's sched_switch2.cpp step C: the game's
+// main thread waits in drainWorkerQueues (02759564) for the sead WorkerMgr workers' jobs (particles,
+// RenderDisplay draw / calcGPU) every step; at the guest threads' priority the render, service and shader
+// threads time-sliced them)
 static bool boosted_thread(const std::string& name) {
     static const std::vector<std::string> names = [] {
         const char* e = getenv("WWHD_BOOST_THREADS");
-        std::string list = e ? e : "update_ubo";
+        std::string list = e ? e : "update_ubo,WorkerMgr/Worker*";
         std::vector<std::string> out;
         for (size_t start = 0; start <= list.size();) {
             size_t end = list.find(',', start);
@@ -844,7 +885,35 @@ static bool boosted_thread(const std::string& name) {
         }
         return out;
     }();
-    return !name.empty() && std::find(names.begin(), names.end(), name) != names.end();
+    if (name.empty()) return false;
+    for (const std::string& n : names) {
+        if (!n.empty() && n.back() == '*' ? name.compare(0, n.size() - 1, n, 0, n.size() - 1) == 0 : name == n)
+            return true;
+    }
+    return false;
+}
+#endif
+
+#ifdef __SWITCH__
+// (perf/workers) the boosted threads other than update_ubo, switchable live for A/B runs
+// (debug server "workerboost [0|1]", not saved; off by default in combo/all): handle and the host priority they started with
+static std::mutex g_worker_boost_mu;
+static std::vector<std::pair<Handle, s32>> g_worker_boost;
+static std::atomic<bool> g_worker_boost_on{false};  // (combo/all) off by default: no gain in the timing round
+static void note_boosted_worker(Handle h) {
+    s32 prio = 0;
+    svcGetThreadPriority(&prio, h);
+    std::lock_guard<std::mutex> lk(g_worker_boost_mu);
+    g_worker_boost.push_back({h, prio});
+}
+extern "C" int wwhd_worker_boost(int on) {  // -1: query; returns the number of threads switched (or known)
+    std::lock_guard<std::mutex> lk(g_worker_boost_mu);
+    if (on >= 0) {
+        g_worker_boost_on = on != 0;
+        for (auto& [h, prio] : g_worker_boost) svcSetThreadPriority(h, on ? 0x2B : prio);
+        LOG("[thread] worker boost %s for %zu threads (debug server)", on ? "on" : "off", g_worker_boost.size());
+    }
+    return int(g_worker_boost.size()) * (g_worker_boost_on.load() ? 1 : -1);
 }
 #endif
 
@@ -870,8 +939,11 @@ static void* thread_main(void* p) {
     // main thread then waited with its core: OSSendMessage 12-23% of its time), and when the queue
     // was full the main thread ran the job itself.
     if (host::core_layout_on() && (ht->prio <= 8 || boosted_thread(name))) {
-        svcSetThreadPriority(threadGetCurHandle(), 0x2B);
-        if (ht->prio > 8) LOG("[thread] \"%s\" runs above the render thread (WWHD_BOOST_THREADS)", name.c_str());
+        if (ht->prio > 8 && name != "update_ubo") note_boosted_worker(threadGetCurHandle());  // (perf/workers)
+        if (ht->prio <= 8 || name == "update_ubo" || g_worker_boost_on.load()) svcSetThreadPriority(threadGetCurHandle(), 0x2B);
+        if (ht->prio > 8 && (name == "update_ubo" || g_worker_boost_on.load()))
+            LOG("[thread] \"%s\" runs above the render thread (WWHD_BOOST_THREADS)", name.c_str());
+        else if (ht->prio > 8) LOG("[thread] \"%s\": worker boost off (debug server workerboost 1 to turn it on)", name.c_str());
     }
 #endif
     {
@@ -1701,10 +1773,16 @@ struct Alarm {
     uint32_t callback;
     uint64_t serial;
 };
-static std::mutex g_alarm_mutex;
-static std::condition_variable g_alarm_cv;
-static std::multimap<uint64_t, Alarm> g_alarm_queue;
-static std::unordered_map<uint32_t, uint64_t> g_alarm_serial;  // alarm -> active serial (0 = cancelled)
+// never destroyed (no_destroy.h): the detached alarm thread waits on g_alarm_cv (with no timeout while no alarm is set)
+// and reads the queue until the process ends
+static NoDestroy<std::mutex> g_alarm_mutex_store;
+static std::mutex& g_alarm_mutex = g_alarm_mutex_store.value;
+static NoDestroy<std::condition_variable> g_alarm_cv_store;
+static std::condition_variable& g_alarm_cv = g_alarm_cv_store.value;
+static NoDestroy<std::multimap<uint64_t, Alarm>> g_alarm_queue_store;
+static std::multimap<uint64_t, Alarm>& g_alarm_queue = g_alarm_queue_store.value;
+static NoDestroy<std::unordered_map<uint32_t, uint64_t>> g_alarm_serial_store;
+static std::unordered_map<uint32_t, uint64_t>& g_alarm_serial = g_alarm_serial_store.value;  // alarm -> active serial (0 = cancelled)
 static uint64_t g_next_serial = 1;
 static bool g_alarm_thread_started = false;
 
@@ -2057,19 +2135,36 @@ struct ThreadRec {
     Cpu cpu;
 };
 
+// Equivalent continuations (thread_chain.h): pairs of return addresses after two calls of the same
+// callee in one function whose following code is the same up to dead scratch registers.
+// - sead::Thread::run (0275FFCC): every sead worker thread (JpegEncodeMgrThread, ...) waits for its
+//   next message in MessageQueue::pop (02760374), called once before the message loop (returns to
+//   0275FFEC: lwz r10,0x78(r31); cmplw r3,r10; bne 0275FFFC; b 0276002C) and once at its end (returns to
+//   02760020: lwz r0,0x78(r31); cmplw r3,r0; bne 0275FFFC; fall through to 0276002C). Both compare the
+//   message with mQuitMessage and branch to the same two places, which write r0 before reading it and
+//   never read r10. A thread waits in the first pop until its first message (for JpegEncodeMgrThread:
+//   until a picto is taken or the pictograph list decodes one) and in the loop pop ever after, so
+//   without this pair a full state saved before the first message could not be loaded after it, or
+//   the other way round, although both resume the same way.
+bool equivalent_return(uint32_t a, uint32_t b) {
+    static const std::array<std::array<uint32_t, 2>, 1> pairs = [] {
+        std::array<std::array<uint32_t, 2>, 1> v{};
+        // only when the whole function keeps its layout in this build
+        const uint32_t lo = GC_OPTIONAL(0x0275FFCC), hi = GC_OPTIONAL(0x0276003C);
+        if (lo && hi && hi - lo == 0x70) v[0] = {GC(0x0275FFEC), GC(0x02760020)};
+        return v;
+    }();
+    for (auto& p : pairs)
+        if (p[0] && p[1] && ((a == p[0] && b == p[1]) || (a == p[1] && b == p[0]))) return true;
+    return false;
+}
+
 // guest call chain of a parked thread: stack pointer, return address and the back chain of saved
-// return addresses must be identical, so its host call stack is the same as the saved one
-bool same_chain(const Cpu& cur, const Cpu& saved) {
-    if (cur.r[1] != saved.r[1] || cur.lr != saved.lr) return false;
-    uint32_t a = cur.r[1];
-    for (int i = 0; i < 512; i++) {
-        uint32_t na = ld32(a), nb = ss::snap_ld32(a);
-        if (na != nb) return false;
-        if (!na || na <= a || na - a > 0x100000) break;
-        if (ld32(na + 4) != ss::snap_ld32(na + 4)) return false;
-        a = na;
-    }
-    return true;
+// return addresses must be identical (or equivalent continuations), so its host call stack is the same
+// as the saved one
+thread_chain::Diff same_chain(const Cpu& cur, const Cpu& saved) {
+    return thread_chain::compare(cur.r[1], cur.lr, saved.r[1], saved.lr, [](uint32_t a) { return ld32(a); },
+                                 [](uint32_t a) { return ss::snap_ld32(a); }, equivalent_return);
 }
 
 uint32_t owner_guest(const void* o, bool& ok) {
@@ -2245,10 +2340,8 @@ bool threads_ss_check(ss::Reader r, std::string& why) {
             why = buf;
             return false;
         }
-        if (!same_chain(t->cpu, s.cpu)) {
-            snprintf(buf, sizeof buf, "thread %s is at a different place (lr %08X sp %08X, saved lr %08X sp %08X)",
-                     threads::thread_name(t).c_str(), t->cpu.lr, t->cpu.r[1], s.cpu.lr, s.cpu.r[1]);
-            why = buf;
+        if (const auto d = same_chain(t->cpu, s.cpu); !d.same()) {
+            why = thread_chain::describe(threads::thread_name(t), d);
             return false;
         }
     }

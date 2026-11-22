@@ -37,6 +37,9 @@
 #include "debug_switch.h"
 #include "prepare_graphics_switch.h"
 #include "settings_switch.h"
+#ifdef __SWITCH2__
+#include "s2_tab_switch2.h"  // (s2/*)
+#endif
 #include "shader_wait_switch.h"
 #include "../menu_i18n.h"
 #include "ui_text_switch.h"
@@ -238,7 +241,8 @@ void tab_picture() {
     }
     if (done) hostui::post([] { save_picture(); });
     {
-        // texture sharpness at an angle: 1x (off, the default) to 16x; saved as switchAnisoLevel
+        // texture sharpness at an angle: 1x (off) to 16x (kDefaultAnisoLevel: 16x on the Switch 2, 1x on the Switch 1);
+        // saved as switchAnisoLevel
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(tx.anisoLabel);
         const int cur = gfxsw::aniso_level();
@@ -342,26 +346,35 @@ void tab_picture() {
     heading(tx.experimental);
     warn("%s", tx.experimentalWarn);
     {
-        // the upstream 60 fps modes (the screen is 60 Hz: 60 fps only)
+        // the upstream 60 fps modes (the Switch 1's screen is 60 Hz: 60 fps only)
+        //  the Switch 2 also offers 120hz (and 240hz for fun) interpolation.
         const int m = interp::mode();
-        auto choose = [](int mode) {
-            hostui::post([mode] {
-                if (mode == 1) interp::set_fps(60);
+        auto choose = [](int mode, int fps = 60) {
+            hostui::post([mode, fps] {
+                if (mode == 1) interp::set_fps(fps);
                 interp::set_mode(mode);
                 LOG("[interp] frame rate mode from the Switch tab: %s (not saved)", interp::mode_name());
             });
         };
         if (radio_tip(lbl(tx.fps30, "interp0").c_str(), m == 0, tx.fps30Tip)) choose(0);
         ImGui::SameLine();
-        if (radio_tip(lbl(tx.fpsInterp, "interp1").c_str(), m == 1, tx.fpsInterpTip)) choose(1);
+        if (radio_tip(lbl(tx.fpsInterp, "interp1").c_str(), m == 1 && interp::fps() == 60, tx.fpsInterpTip)) choose(1);
         ImGui::SameLine();
         if (radio_tip(lbl(tx.fpsTrue60, "interp2").c_str(), m == 2, tx.fpsTrue60Tip)) choose(2);
+#ifdef __SWITCH2__
+        if (radio_tip("120 fps##interp120", m == 1 && interp::fps() == 120,
+                      "Frame interpolation at 120 fps.")) choose(1, 120);
+        ImGui::SameLine();
+        if (radio_tip("240 fps##interp240", m == 1 && interp::fps() == 240,
+                      "Frame interpolation at 240 fps (drawn without waiting for the screen).")) choose(1, 240);
+#endif
         help(tx.fpsModesHelp);
         if (m == 1) {
             bool paced;
             if (check(lbl(tx.keepSpeed, "paced").c_str(), interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))
                 hostui::post([paced] {
                     interp::set_paced_interpolation(paced);
+                    // not saved: the next start has the default again (on on the Switch 2, off on the Switch 1)
                     LOG("[interp] keep game speed from the Switch tab: %s (not saved)", paced ? "on" : "off");
                 });
             help(tx.keepSpeedHelp);
@@ -423,6 +436,18 @@ void tab_controller() {
     }
     heading(tx.menuHeading);
     note("%s", tx.menuNote);
+    // the game's own settings page in the pause menu (mods/game_settings_page.cpp; upstream's Controls tab, hidden
+    // here, has this switch): turned off there, it can only come back from this menu
+    {
+        const input_map::Mapping cur = input_map::current();
+        bool v;
+        if (check(menu_i18n::tr("Settings page in the pause menu"), cur.settings_pause_page, &v)) {
+            input_map::Mapping m = cur;
+            m.settings_pause_page = v;
+            input_map::set_current(m);
+        }
+        help(menu_i18n::tr("Show the settings page arrow in the pause menu (left of the items). Holding - still opens this menu."));
+    }
 }
 
 // Developer: tests and diagnostics, none of it for normal play
@@ -732,6 +757,9 @@ void register_ext() {
     // Language / About
     ext::add_tab({"picture", "Picture", tab_picture, nullptr}, "audio");
     ext::add_tab({"controller", "Controls", tab_controller, nullptr}, "audio");
+#ifdef __SWITCH2__
+    ext::add_tab({"switch2", "Switch 2", s2tab::tab, nullptr}, "audio");  // (s2/*) s2_tab_switch2.h
+#endif
     ext::add_tab({"warp", "Warp", tab_warp, nullptr});
     ext::add_tab({"developer", "Dev", tab_developer, nullptr});
     // Shortcuts: keyboard keys and desktop actions (full screen, screenshot); the controller column is unbound but for Home
