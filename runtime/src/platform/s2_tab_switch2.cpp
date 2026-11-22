@@ -11,6 +11,7 @@ namespace s2tab {
 __attribute__((weak)) void section_display() {}
 __attribute__((weak)) void section_resolution() {}
 __attribute__((weak)) void section_vrr() {}
+__attribute__((weak)) void section_clock() {}
 __attribute__((weak)) void section_cores() {}
 __attribute__((weak)) void start_display() {}
 __attribute__((weak)) void start_resolution() {}
@@ -53,6 +54,7 @@ void tab() {
     section_display();
     section_resolution();
     section_vrr();
+    section_clock();
     section_cores();
 }
 

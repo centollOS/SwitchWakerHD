@@ -45,9 +45,6 @@
 #include "ui_text_switch.h"
 #include "update_notice_switch.h"
 #include "video_clips_switch.h"
-#ifdef __SWITCH2__
-#include "clocks_switch2.h"  // (lschaupp fork, perf/clocks)
-#endif
 
 namespace overlay_switch {
 namespace {
@@ -371,29 +368,6 @@ void tab_picture() {
                       "Frame interpolation at 240 fps (drawn without waiting for the screen).")) choose(1, 240);
 #endif
         help(tx.fpsModesHelp);
-#ifdef __SWITCH2__
-        // (lschaupp fork, perf/clocks) the CPU clock (platform/clocks_switch2.cpp; saved as "s2CpuClock", default Boost)
-        {
-            const int cc = switch2_clocks::choice();
-            const char* fixedBy = switch2_clocks::env_override();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("CPU clock (Switch 2)");
-            static const char* const ccNames[] = {"Normal##s2cpu", "Boost 1523 MHz##s2cpu",
-                                                  "Maximum 1702 MHz (experimental)##s2cpu"};
-            for (int i = 0; i < 3; i++) {
-                ImGui::SameLine();
-                if (radio(ccNames[i], cc == i, !fixedBy)) hostui::post([i] { switch2_clocks::set_choice(i); });
-            }
-            help("Boost (the default) runs the processor at the console's own boost rate, 1523 MHz instead of about\n"
-                 "1100 MHz: the game logic needs about a fifth less time, the graphics chip keeps its normal rate.\n"
-                 "Uses more power, so the battery lasts a little less in handheld mode. Normal: the console's rate.\n"
-                 "Maximum (experimental): the highest rate the console reports, 1702 MHz; if the console does not keep\n"
-                 "it, the game goes back to the boost rate and says so here. Applies at once; the console's own rate\n"
-                 "comes back when the game ends.");
-            if (fixedBy) note("Set by %s for this start.", fixedBy);
-            else note("%s", switch2_clocks::status().c_str());
-        }
-#endif
         if (m == 1) {
             bool paced;
             if (check(lbl(tx.keepSpeed, "paced").c_str(), interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))

@@ -4,7 +4,7 @@
 // Switch 2: the CPU clock setting and the clock probe. Ported to OunceWakerHD (lschaupp private fork, perf/clocks,
 // 2026-11-21) from ZeldaWWHDRecomp's Switch 2 runtime (platform/switch2/clocks_switch2.cpp, decomp 9m/9p); changes:
 // no apm calls (this fork never initialises apm on the Switch 2: settings_switch.cpp apm_ready), so no
-// WWHD_S2_PERFCONF and no apm fields in the log line; the menu entry is in the Picture tab (overlay_switch.cpp);
+// WWHD_S2_PERFCONF and no apm fields in the log line; the menu entry is in the Switch 2 tab (s2_clock_switch2.cpp);
 // a debug-server command "s2clock" (not saved); the boost rate falls back to the console's known 1523.2 MHz when
 // the FastLoad measurement is refused (hbmenu applet).
 // Original description: the clock probe (decomp 9p). Every 10 s (WWHD_S2_CLOCK_LOG=<s>, 0 = off) a line with the real clock

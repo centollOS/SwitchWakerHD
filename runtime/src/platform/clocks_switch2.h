@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of
 // the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
-// Switch 2: the CPU clock setting (clocks_switch2.cpp): Picture tab > "CPU clock (Switch 2)". Ported from
+// Switch 2: the CPU clock setting (clocks_switch2.cpp): Switch 2 tab > "CPU clock" (s2_clock_switch2.cpp). Ported from
 // ZeldaWWHDRecomp (lschaupp private fork, perf/clocks, 2026-11-21).
 #pragma once
 #include <string>
