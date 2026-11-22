@@ -2148,6 +2148,7 @@ modsui::Host& mods_host() {
 #endif
         h.test = g_no_host && getenv("WWHD_MOD_MANAGER_DIR");
         h.file_picker = ext::features().file_picker;
+        h.clipboard = ext::features().clipboard;
         h.code_mods = ext::features().code_mods;
         h.mod_downloads = ext::features().mod_downloads;
         return h;

@@ -65,6 +65,7 @@ struct Host {
     // (this fork, #121) a code mod's page in place of the Built-in list: false when none is open (guest_builtin_ui.h)
     std::function<bool(bool back, bool& back_used)> builtin_code_mod_page;
     bool file_picker = true; // the host has file and folder choosers (overlay/extensions.h Features)
+    bool clipboard = true;   // the host has a clipboard (Features::clipboard); without: texts are shown, not copied
     bool code_mods = true;      // code mods can run here (Features::code_mods)
     bool mod_downloads = true;  // the online mod list (Features::mod_downloads)
     bool back = false;       // controller B this frame
@@ -840,7 +841,7 @@ inline void progress_view(const Host& h, bool android) {
             ImGui::PushTextWrapPos(0);
             ImGui::TextUnformatted(f.details.c_str());
             ImGui::PopTextWrapPos();
-            if (small_button(tr("Copy details"))) ImGui::SetClipboardText(f.details.c_str());
+            if (h.clipboard && small_button(tr("Copy details"))) ImGui::SetClipboardText(f.details.c_str());  // (shown above)
             ImGui::TreePop();
         }
         if (button(tr("Try again##flow"))) retry(h);
