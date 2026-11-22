@@ -349,8 +349,11 @@ std::string start_thread(bool firstStart) {
     // the lowest priority the app has (0x3B, as the shader worker), on core 0 (the game's main thread has core 1, the
     // renderer core 2); 4 MiB of stack for the decompiler
     // (this fork, docs/core3-plan.md) core 3 when the process has it: no game thread runs there
-    Result rc = threadCreate(&g_thread, thread_main, nullptr, nullptr, 4 * 1024 * 1024, 0x3B, cores::core3() ? 3 : 0);
-    if (R_SUCCEEDED(rc)) LOG("[bg-shaders] the list's thread on core %d", cores::core3() ? 3 : 0);
+    // (s2/cores) on cores 4-5 when the option has them (read at start)
+    const uint32_t extra = cores::extra_mask();
+    const int core = extra ? __builtin_ctz(extra) : cores::core3() ? 3 : 0;
+    Result rc = threadCreate(&g_thread, thread_main, nullptr, nullptr, 4 * 1024 * 1024, 0x3B, core);
+    if (R_SUCCEEDED(rc)) LOG("[bg-shaders] the list's thread on core %d", core);
     if (R_SUCCEEDED(rc)) rc = threadStart(&g_thread);
     if (R_FAILED(rc)) {
         g_running = false;
