@@ -50,6 +50,7 @@ namespace interp { int output_fps(); bool interp_on(); }
 #include "platform/settings_switch.h"
 #ifdef __SWITCH2__
 #include "platform/s2_resolution_switch2.h"  // (s2/resolution)
+#include "platform/s2_display_switch2.h"  // (s2/hdr-info)
 #endif
 #include "runtime.h"
 #include "lockstep.h"  // (this fork, #67)
@@ -1338,6 +1339,9 @@ void present() {
     g_times.presents++;
     const bool gpuBehind = !frame_done(R.frame);  // the GPU is still on the previous frame (dynamic resolution)
     begin_commands();  // (already open when a GX2 command recorded in this frame)
+#ifdef __SWITCH2__
+    s2display::poll(frame, g_opMode.load(std::memory_order_relaxed) == 1);  // (s2/hdr-info) the display's capabilities
+#endif
     {
         uint32_t ww, wh;
         window_wanted(ww, wh);
