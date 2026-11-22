@@ -23,6 +23,9 @@
 // becomes 1600 (the same apm configuration without the raised GPU clock).
 #include "settings_switch.h"
 #include "shader_wait_switch.h"
+#ifdef __SWITCH2__
+#include "s2_tab_switch2.h"  // (s2/*)
+#endif
 
 #include <switch.h>
 
@@ -291,6 +294,9 @@ void apply_at_start() {
         std::string v;
         if (hostui::get(kKeyGamepadPip, v)) gfxsw::set_gamepad_pip(v == "1");
     }
+#ifdef __SWITCH2__
+    s2tab::apply_at_start();  // (s2/*) the Switch 2 tab's saved options
+#endif
     video_clips::apply_at_start();  // (#38) the saved video clips option: the 96 MiB buffer early, while the heap is free
     // the saved controller choice, before the game starts (screen_mode.cpp decides the first title screen's mode from
     // it): controllerMode single (the default: the GamePad, single screen), gamepad or pro (the Wii U's own GamePad /
