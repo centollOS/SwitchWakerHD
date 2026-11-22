@@ -65,6 +65,7 @@ struct Host {
     // (this fork, #121) a code mod's page in place of the Built-in list: false when none is open (guest_builtin_ui.h)
     std::function<bool(bool back, bool& back_used)> builtin_code_mod_page;
     bool file_picker = true; // the host has file and folder choosers (overlay/extensions.h Features)
+    bool clipboard = true;   // the host has a clipboard (Features::clipboard); without: texts are shown, not copied
     bool code_mods = true;      // code mods can run here (Features::code_mods)
     bool mod_downloads = true;  // the online mod list (Features::mod_downloads)
     bool back = false;       // controller B this frame
@@ -96,6 +97,7 @@ struct Review {
     std::map<std::string, std::string> chosen;
     std::vector<std::string> code_names;  // code that runs on the computer (native, guest, setup tools)
     bool experimental = false;
+    bool isolated_save_profile = false;
     std::string error;
 };
 
@@ -179,8 +181,9 @@ inline bool selectable(const char* label, bool selected = false, ImGuiSelectable
 }
 // A collapsed section (tests can open them all: Host::expand_all)
 inline bool g_expand_all = false;
+inline std::string g_open_section;  // tests (WWHD_TEST_MODS_VIEW=more:<label>): this section drawn open
 inline bool section(const char* label) {
-    if (g_expand_all) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+    if (g_expand_all || g_open_section == label) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
     const bool open = ImGui::CollapsingHeader(label);
     state().rects[label] = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
     return open;
@@ -374,6 +377,7 @@ inline void open_review_for_entry(const mods::catalogue::Entry& e, const fs::pat
     r.entry = e;
     r.fixtures = fixtures;
     r.plan = update && installed ? plan_for_update(e, *installed) : plan_for_entry(e);
+    r.isolated_save_profile = installed && installed->isolated_save_profile;
     r.experimental = e.experimental && !r.plan.keep_off;  // the warning is for switching it on
     for (const auto& s : e.setup) {
         if (s.optional) continue;
@@ -394,6 +398,7 @@ inline void open_review_for_installed(const mods::packages::View& v) {
     r.name = v.name;
     r.description = v.description;
     r.plan = plan_for_installed(v);
+    r.isolated_save_profile = v.isolated_save_profile;
     r.experimental = !unacknowledged_experimental(v.id).empty();
     for (const auto& s : setup_steps(v.id)) {
         if (s.step.optional || s.satisfied) continue;
@@ -836,7 +841,7 @@ inline void progress_view(const Host& h, bool android) {
             ImGui::PushTextWrapPos(0);
             ImGui::TextUnformatted(f.details.c_str());
             ImGui::PopTextWrapPos();
-            if (small_button(tr("Copy details"))) ImGui::SetClipboardText(f.details.c_str());
+            if (h.clipboard && small_button(tr("Copy details"))) ImGui::SetClipboardText(f.details.c_str());  // (shown above)
             ImGui::TreePop();
         }
         if (button(tr("Try again##flow"))) retry(h);
@@ -903,6 +908,8 @@ inline void review_popup(Host& h) {
     ImGui::Spacing();
     // what it needs, all at once
     if (r.experimental) colored(kWarn, tr(kExperimentalShort));
+    if (h.android && r.isolated_save_profile)
+        colored(kWarn, "This mod uses separate saves. Android cannot import or export them yet. Uninstalling the app deletes them.");
     if (!r.source_game.empty()) {
         ImGui::SeparatorText(tr("Your GameCube game"));
         game_source_picker(h, r.source_game);
@@ -1010,7 +1017,9 @@ inline void row_line(const std::string& id, const std::string& name, const Row& 
     ImGui::TableNextColumn();
     bool on = r.switch_on;
     ImGui::BeginDisabled(!r.switch_enabled);
-    if (on_switch(("##on_" + id).c_str(), &on)) toggle(on);
+    if (id == "target-letterbox" && builtin) {
+        if (ImGui::SmallButton("Choose")) open_page(id, true);
+    } else if (on_switch(("##on_" + id).c_str(), &on)) toggle(on);
     ImGui::EndDisabled();
     // (this fork, #121) the controller's focus moved onto this row's switch or name this frame
     bool nav_here = ImGui::GetCurrentContext()->NavJustMovedToId == ImGui::GetItemID();
@@ -1052,6 +1061,8 @@ inline std::string unavailable_reason(const Host& h, const mods::catalogue::Entr
 inline bool on_controls_tab(std::string_view id) {
     return id == "mouse-camera" || id == "direct-camera" || id == "first-person";
 }
+// built-in switches drawn in a section of More instead of the built-in list
+inline bool in_more_section(std::string_view id) { return id == "classic-wind-waker"; }
 
 inline void builtin_list(Host& h) {
     if (h.builtin_code_mod_page) {  // (this fork, #121)
@@ -1064,7 +1075,7 @@ inline void builtin_list(Host& h) {
     if (!begin_list("builtin")) return;
     if (h.builtin_code_mods) h.builtin_code_mods();  // (this fork, #121) the code mods built into this game, first
     for (const auto& e : mods::manager::entries()) {
-        if (on_controls_tab(e.id)) continue;
+        if (on_controls_tab(e.id) || in_more_section(e.id)) continue;
         // the story system needs the Story Notebook package, which only the mod list provides
         if (e.id == "story-system" && !h.mod_downloads && !find_view(mods::packages::list(), mods::required::kStoryNotebook))
             continue;
@@ -1072,6 +1083,10 @@ inline void builtin_list(Host& h) {
         fx.builtin = true;
         fx.enabled = e.enabled();
         Row r = row(fx);
+        if (std::string_view(e.id) == "target-letterbox") {
+            constexpr const char* labels[] = {"On", "Off with enemies", "Always off"};
+            r.text = labels[mods::targeting_letterbox_mode()];
+        }
         std::string id = e.id;
         row_line(id, tr(e.name), r, e.restart_required ? tr("applies after a restart") : "", false, true,
                  [id, &h](bool on) {
@@ -1330,6 +1345,8 @@ inline void package_page(Host& h, const mods::packages::View& v) {
     if (!r.switch_enabled && !r.switch_reason.empty()) muted(r.switch_reason);
     if (!v.description.empty()) text(v.description);
     if (v.experimental) colored(kWarn, tr(kExperimentalShort));
+    if (h.android && v.isolated_save_profile)
+        colored(kWarn, "Separate mod saves cannot be imported or exported on Android yet. Uninstalling the app deletes them.");
     if (!v.reason.empty() && v.reason != v.game_source_warning) colored(kBad, textf(tr("This mod has a problem: %s"), v.reason.c_str()));
     const bool flow_shown = flow_for(v.id);
     if (flow_shown) {
@@ -1387,9 +1404,13 @@ inline void builtin_page(Host& h, const mods::manager::Entry& e) {
     ImGui::TextUnformatted(tr(e.name));
     bool on = e.enabled();
     std::string id = e.id;
-    if (on_switch("##on_builtin", &on)) {
-        hostui::post([id, on] { mods::manager::set_enabled(id, on); });
-        if (id == "story-system" && on && !find_view(mods::packages::list(), mods::required::kStoryNotebook)) install_story_notebook(h);
+    if (id != "target-letterbox") {
+        if (on_switch("##on_builtin", &on)) {
+            hostui::post([id, on] { mods::manager::set_enabled(id, on); });
+            if (id == "story-system" && on && !find_view(mods::packages::list(), mods::required::kStoryNotebook)) install_story_notebook(h);
+        }
+        ImGui::SameLine();
+        colored(on ? kGood : kMuted, on ? "On" : "Off");
     }
     ImGui::SameLine();
     colored(on ? kGood : kMuted, on ? tr("On") : tr("Off"));
@@ -1596,6 +1617,17 @@ inline void more(Host& h) {
         if (snap.failed && !snap.error.empty()) muted("Last check: " + snap.error);
         ImGui::Unindent();
     }
+    if (section(tr("Speedrun"))) {
+        ImGui::Indent();
+        // a built-in mod (mods/manager.cpp: saved, in profiles, off with "Switch all mods off"), shown only here
+        if (const auto* e = mods::manager::find("classic-wind-waker")) {
+            bool on = e->enabled();
+            if (ImGui::Checkbox(e->name, &on)) hostui::post([on] { mods::manager::set_enabled("classic-wind-waker", on); });
+            muted(e->description);
+            if (const char* o = getenv(e->startup_env)) muted(std::string(e->startup_env) + "=" + o + " overrides the saved choice at startup.");
+        }
+        ImGui::Unindent();
+    }
     if (h.cheats && section(tr("Cheats"))) {
         ImGui::Indent();
         h.cheats();
@@ -1625,10 +1657,11 @@ inline void apply_test_view(Host& h) {
     static bool done = false;
     if (done || !h.test) return;
     done = true;
-    const char* v = getenv("WWHD_TEST_MODS_VIEW");  // mods | more | page:<id>
+    const char* v = getenv("WWHD_TEST_MODS_VIEW");  // mods | more | more:<section> | page:<id>
     if (!v) return;
     std::string view = v;
     if (view == "more") go_area(kMore);
+    else if (view.starts_with("more:")) { go_area(kMore); g_open_section = view.substr(5); }
     else if (view == "community") go_area(kCommunity);
     else if (view.starts_with("page:")) {
         bool builtin = mods::manager::find(view.substr(5)) != nullptr;

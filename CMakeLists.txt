@@ -439,15 +439,16 @@ if(WWHD_SETUP_GUI)
 endif()
 
 # recomp mod-manager preferences and catalogue (standalone host stubs)
-add_executable(mod_manager_test runtime/tools/mod_manager_test.cpp runtime/src/mods/manager.cpp runtime/src/mods/traversal_settings.cpp)
-target_include_directories(mod_manager_test PRIVATE runtime/src)
+add_executable(mod_manager_test runtime/tools/mod_manager_test.cpp runtime/src/mods/manager.cpp runtime/src/mods/traversal_settings.cpp
+               runtime/src/mods/speedrun.cpp)
+target_include_directories(mod_manager_test PRIVATE runtime/src runtime/include)
 target_compile_options(mod_manager_test PRIVATE -UNDEBUG)
 
 # External native package fixture and isolated lifecycle/integration tests.
 add_library(mod_fixture MODULE runtime/tools/mod_fixture.cpp)
 target_include_directories(mod_fixture PRIVATE runtime/include)
-add_executable(mod_package_test runtime/tools/mod_package_test.cpp runtime/src/mods/required.cpp runtime/src/mods/manager.cpp runtime/src/mods/traversal_settings.cpp runtime/src/mods/packages.cpp ${WWHD_NPC_CATALOGUE} runtime/src/mods/guest_png.cpp runtime/src/mods/mod_archive.cpp runtime/src/mods/content.cpp runtime/src/mods/cemu_pack.cpp runtime/src/guest_addr_identity.c)
-target_include_directories(mod_package_test PRIVATE runtime/src runtime/include)
+add_executable(mod_package_test runtime/tools/mod_package_test.cpp runtime/src/mods/required.cpp runtime/src/mods/manager.cpp runtime/src/mods/speedrun.cpp runtime/src/mods/traversal_settings.cpp runtime/src/mods/packages.cpp ${WWHD_NPC_CATALOGUE} runtime/src/mods/guest_png.cpp runtime/src/mods/mod_archive.cpp runtime/src/mods/content.cpp runtime/src/mods/cemu_pack.cpp runtime/src/guest_addr_identity.c)
+target_include_directories(mod_package_test PRIVATE runtime/src runtime/include runtime/tools)
 target_compile_options(mod_package_test PRIVATE -UNDEBUG)
 target_link_libraries(mod_package_test PRIVATE ZLIB::ZLIB Threads::Threads ${CMAKE_DL_LIBS})
 # World editor command layer (runtime/src/editor): commands, warp list, test-mode record reset, saving.
@@ -537,13 +538,13 @@ target_link_libraries(guest_png_test PRIVATE ZLIB::ZLIB)
 add_test(NAME guest_png COMMAND guest_png_test "${CMAKE_SOURCE_DIR}/examples/guest-mods")
 
 # Synthetic integration tests call the real guest filesystem HLE handlers.
-add_executable(mod_content_fs_test runtime/tools/mod_content_fs_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/os_time.cpp runtime/src/mods/save_folder.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/fan_translation.cpp)
+add_executable(mod_content_fs_test runtime/tools/mod_content_fs_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/os_time.cpp runtime/src/mods/save_folder.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/long_name.cpp runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/fan_translation.cpp)
 target_include_directories(mod_content_fs_test PRIVATE runtime/src runtime/include)
 target_compile_options(mod_content_fs_test PRIVATE -UNDEBUG)
 target_link_libraries(mod_content_fs_test PRIVATE ZLIB::ZLIB Threads::Threads)
 
 # language sources: synthetic European/Japanese packs read through the guest file system (game_languages.h)
-add_executable(language_source_test runtime/tools/language_source_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/os_time.cpp runtime/src/mods/save_folder.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/fan_translation.cpp)
+add_executable(language_source_test runtime/tools/language_source_test.cpp runtime/src/hle/fs.cpp runtime/src/hle/os_time.cpp runtime/src/mods/save_folder.cpp runtime/src/mods/mod_stages_files.cpp runtime/src/mods/actor_model_cache.cpp runtime/tools/fs_story_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/long_name.cpp runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp runtime/src/mods/content.cpp runtime/src/mods/mod_archive.cpp runtime/src/game_languages.cpp runtime/src/guest_addr_identity.c runtime/src/hle/fs_problems.cpp runtime/tools/fork_test_stubs.cpp runtime/src/fan_translation.cpp)
 target_include_directories(language_source_test PRIVATE runtime/src runtime/include)
 target_compile_options(language_source_test PRIVATE -UNDEBUG)
 target_link_libraries(language_source_test PRIVATE ZLIB::ZLIB Threads::Threads)
@@ -707,6 +708,11 @@ add_executable(game_settings_page_test runtime/tools/game_settings_page_test.cpp
 target_include_directories(game_settings_page_test PRIVATE runtime/include runtime/src runtime/src/mods)
 target_compile_options(game_settings_page_test PRIVATE -UNDEBUG)
 add_test(NAME game_settings_page COMMAND game_settings_page_test)
+# the item menu's selection cursor watch (issue #336, runtime/src/mods/menu_cursor.h)
+add_executable(menu_cursor_test runtime/tools/menu_cursor_test.cpp)
+target_include_directories(menu_cursor_test PRIVATE runtime/src)
+target_compile_options(menu_cursor_test PRIVATE -UNDEBUG)
+add_test(NAME menu_cursor COMMAND menu_cursor_test)
 # the port's layout writer (runtime/src/mods/lyt_build.cpp); tools/story_mods/test_lyt.py compares its
 # output with the reference generator's
 add_executable(lyt_build_test runtime/tools/lyt_build_test.cpp runtime/src/mods/lyt_build.cpp runtime/src/mods/guest_png.cpp
@@ -731,6 +737,49 @@ target_include_directories(link_poses_test PRIVATE runtime/include runtime/src r
 target_compile_options(link_poses_test PRIVATE -UNDEBUG)
 target_link_libraries(link_poses_test PRIVATE ZLIB::ZLIB)
 add_test(NAME link_poses COMMAND link_poses_test)
+# Link's colour masks (runtime/src/mods/link_masks.h): classification, endpoint labels, tint and the cache format on
+# synthetic textures made in the test; with WWHD_GAME_DIR set it also makes the masks of the player's own Link
+add_executable(link_masks_test runtime/tools/link_masks_test.cpp runtime/src/mods/link_masks.cpp runtime/src/mods/game_layouts.cpp
+               runtime/src/mods/item_icons.cpp runtime/src/mods/lyt_build.cpp runtime/src/mods/guest_png.cpp runtime/src/mods/mod_archive.cpp)
+target_include_directories(link_masks_test PRIVATE runtime/include runtime/src runtime/src/mods)
+target_compile_options(link_masks_test PRIVATE -UNDEBUG)
+target_link_libraries(link_masks_test PRIVATE ZLIB::ZLIB)
+add_test(NAME link_masks COMMAND link_masks_test)
+# Link's appearance (runtime/src/mods/link_appearance.h): the record, presets, the save's story block records, each
+# save file's look (load, change, save, new game, preview), the colour page's input, the irises' endpoint labels
+add_executable(link_appearance_test runtime/tools/link_appearance_test.cpp runtime/src/mods/link_appearance.cpp
+               runtime/src/mods/link_appearance_store.cpp runtime/src/mods/link_masks.cpp runtime/src/mods/game_layouts.cpp
+               runtime/src/mods/item_icons.cpp runtime/src/mods/lyt_build.cpp runtime/src/mods/guest_png.cpp runtime/src/mods/mod_archive.cpp)
+target_include_directories(link_appearance_test PRIVATE runtime/include runtime/src runtime/src/mods)
+target_compile_options(link_appearance_test PRIVATE -UNDEBUG)
+target_link_libraries(link_appearance_test PRIVATE ZLIB::ZLIB)
+add_test(NAME link_appearance COMMAND link_appearance_test)
+# Game progress (runtime/src/mods/game_progress.h): the count of a save in ten parts, on byte images built in the
+# test; WWHD_PROGRESS_SAVES=<cking.sav,...> also prints the count of real Quest Logs
+add_executable(game_progress_test runtime/tools/game_progress_test.cpp)
+target_include_directories(game_progress_test PRIVATE runtime/src)
+target_compile_options(game_progress_test PRIVATE -UNDEBUG)
+add_test(NAME game_progress COMMAND game_progress_test)
+# the Game progress page (game_progress_page.h) and its names (game_progress_names.h)
+add_executable(game_progress_page_test runtime/tools/game_progress_page_test.cpp)
+target_include_directories(game_progress_page_test PRIVATE runtime/include runtime/src runtime/src/mods)
+target_compile_options(game_progress_page_test PRIVATE -UNDEBUG)
+add_test(NAME game_progress_page COMMAND game_progress_page_test)
+# Achievements (achievements_goals.h, achievements_store.h): the goals, the record, the two-read rule, the pause;
+# WWHD_PROGRESS_SAVES=<cking.sav,...> prints the goals real Quest Logs meet
+add_executable(achievements_test runtime/tools/achievements_test.cpp)
+target_include_directories(achievements_test PRIVATE runtime/src runtime/src/mods)
+target_compile_options(achievements_test PRIVATE -UNDEBUG)
+add_test(NAME achievements COMMAND achievements_test)
+add_executable(achievements_page_test runtime/tools/achievements_page_test.cpp)
+target_include_directories(achievements_page_test PRIVATE runtime/include runtime/src runtime/src/mods)
+target_compile_options(achievements_page_test PRIVATE -UNDEBUG)
+add_test(NAME achievements_page COMMAND achievements_page_test)
+# the sound archive reader (nw_sound_archive.h: the Achievements fanfare); WWHD_GAME_DIR reads the real one
+add_executable(nw_sound_archive_test runtime/tools/nw_sound_archive_test.cpp)
+target_include_directories(nw_sound_archive_test PRIVATE runtime/src)
+target_compile_options(nw_sound_archive_test PRIVATE -UNDEBUG)
+add_test(NAME nw_sound_archive COMMAND nw_sound_archive_test)
 # the world editor's live item icons (#270): spare frames, and the textures written into the game's archive
 add_executable(item_icons_live_test runtime/tools/item_icons_live_test.cpp runtime/src/mods/item_icons.cpp runtime/src/mods/item_icons_game.cpp
                runtime/src/mods/lyt_build.cpp runtime/src/mods/guest_png.cpp runtime/src/mods/mod_archive.cpp runtime/src/guest_addr_identity.c)
@@ -840,6 +889,12 @@ endif()
 # quick doors: extra logic steps against the game's process deletion (runtime/src/mods/turbo_steps.h)
 add_executable(turbo_steps_test runtime/tools/turbo_steps_test.cpp)
 target_compile_options(turbo_steps_test PRIVATE -UNDEBUG)
+add_executable(long_name_test runtime/tools/long_name_test.cpp)
+target_compile_options(long_name_test PRIVATE -UNDEBUG)
+add_executable(leaf_lift_test runtime/tools/leaf_lift_test.cpp)
+target_compile_options(leaf_lift_test PRIVATE -UNDEBUG)
+add_executable(msbt_waits_test runtime/tools/msbt_waits_test.cpp)
+target_compile_options(msbt_waits_test PRIVATE -UNDEBUG)
 add_executable(true60_steps_test runtime/tools/true60_steps_test.cpp)
 target_include_directories(true60_steps_test PRIVATE runtime/src)
 target_compile_options(true60_steps_test PRIVATE -UNDEBUG)
@@ -1128,6 +1183,11 @@ if(WWHD_SDL_HOST)
   target_compile_options(overlay_scroll_test PRIVATE -UNDEBUG)
   target_link_libraries(overlay_scroll_test PRIVATE imgui SDL3::SDL3)
   add_test(NAME overlay_scroll COMMAND overlay_scroll_test)
+  add_executable(popup_pad_test runtime/tools/popup_pad_test.cpp)
+  target_include_directories(popup_pad_test PRIVATE runtime/src)
+  target_compile_options(popup_pad_test PRIVATE -UNDEBUG)
+  target_link_libraries(popup_pad_test PRIVATE imgui SDL3::SDL3)
+  add_test(NAME popup_pad COMMAND popup_pad_test)
   add_test(NAME overlay_trace COMMAND overlay_scroll_test)
   set_tests_properties(overlay_trace PROPERTIES ENVIRONMENT "WWHD_NO_AUDIO=1;WWHD_OVERLAY_TRACE=1;WWHD_OVERLAY_MOUSE_HANDOFF=1")
   add_test(NAME overlay_trace_session COMMAND overlay_scroll_test --trace-session)
@@ -1496,6 +1556,9 @@ add_test(NAME interp_pacing COMMAND interp_pacing_test)
 add_test(NAME vsync_pacing COMMAND vsync_pacing_test)
 add_test(NAME fixed_seed COMMAND fixed_seed_test)
 add_test(NAME turbo_steps COMMAND turbo_steps_test)
+add_test(NAME long_name COMMAND long_name_test)
+add_test(NAME leaf_lift COMMAND leaf_lift_test)
+add_test(NAME msbt_waits COMMAND msbt_waits_test)
 add_test(NAME hidden_presentation COMMAND hidden_presentation_test)
 add_test(NAME quit_prompt COMMAND quit_prompt_test)
 add_test(NAME write_watch COMMAND write_watch_test)
@@ -1608,8 +1671,9 @@ add_executable(targeting_letterbox_test runtime/tools/targeting_letterbox_test.c
 target_include_directories(targeting_letterbox_test PRIVATE runtime/src runtime/include)
 target_compile_options(targeting_letterbox_test PRIVATE -UNDEBUG)
 add_test(NAME targeting_letterbox COMMAND targeting_letterbox_test)
-add_test(NAME targeting_letterbox_startup_off COMMAND ${CMAKE_COMMAND} -E env WWHD_TARGET_LETTERBOX=0 $<TARGET_FILE:targeting_letterbox_test> 0)
-add_test(NAME targeting_letterbox_startup_on COMMAND ${CMAKE_COMMAND} -E env WWHD_TARGET_LETTERBOX=1 $<TARGET_FILE:targeting_letterbox_test> 1)
+add_test(NAME targeting_letterbox_startup_off COMMAND ${CMAKE_COMMAND} -E env WWHD_TARGET_LETTERBOX=0 $<TARGET_FILE:targeting_letterbox_test> 1)
+add_test(NAME targeting_letterbox_startup_on COMMAND ${CMAKE_COMMAND} -E env WWHD_TARGET_LETTERBOX=1 $<TARGET_FILE:targeting_letterbox_test> 0)
+add_test(NAME targeting_letterbox_startup_always_off COMMAND ${CMAKE_COMMAND} -E env WWHD_TARGET_LETTERBOX=1 WWHD_TARGET_LETTERBOX_MODE=2 $<TARGET_FILE:targeting_letterbox_test> 2)
 target_include_directories(lock_on_runtime_test PRIVATE runtime/src runtime/include)
 target_compile_options(lock_on_runtime_test PRIVATE -UNDEBUG)
 add_test(NAME lock_on_runtime COMMAND lock_on_runtime_test)
@@ -1741,6 +1805,11 @@ target_include_directories(moon_jump_movement_test PRIVATE runtime/src runtime/i
 target_compile_options(moon_jump_movement_test PRIVATE -UNDEBUG)
 add_test(NAME moon_jump_movement COMMAND moon_jump_movement_test)
 add_test(NAME true60_event_fence COMMAND moon_jump_movement_test --event-fence)
+# Classic Wind Waker (Speedrun, issue #405): the two sites against the TWWHD Randomizer's Classic-mode words
+add_executable(classic_tact_test runtime/tools/classic_tact_test.cpp runtime/src/mods/speedrun.cpp)
+target_include_directories(classic_tact_test PRIVATE runtime/src runtime/include)
+target_compile_options(classic_tact_test PRIVATE -UNDEBUG)
+add_test(NAME classic_tact COMMAND classic_tact_test)
 if(Python3_Interpreter_FOUND)
   add_test(NAME repair_medli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/savegame/repair_medli_test.py")
   add_test(NAME medli_scenario_evidence COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/runtime/tools/medli_scenario_test.py")
@@ -1892,6 +1961,14 @@ add_test(NAME story_actor_switch_door_contract COMMAND story_actors_runtime_test
 add_test(NAME story_actor_enemy_contract COMMAND story_actors_runtime_test --enemies)
 add_test(NAME story_actor_enemy_variant_contract COMMAND story_actors_runtime_test --enemy-variant)
 add_test(NAME story_actor_four_enemy_lifecycle_contract COMMAND story_actors_runtime_test --enemies-four)
+add_executable(guest_actor_profiles_test runtime/tools/guest_actor_profiles_test.cpp runtime/src/mods/native_actor_profiles.cpp runtime/src/guest_addr_identity.c)
+target_include_directories(guest_actor_profiles_test PRIVATE runtime/include runtime/src)
+target_compile_options(guest_actor_profiles_test PRIVATE -UNDEBUG)
+add_test(NAME guest_actor_profiles COMMAND guest_actor_profiles_test)
+add_executable(guest_actor_profiles_region_test runtime/tools/guest_actor_profiles_test.cpp runtime/tools/guest_actor_profiles_region.c runtime/src/mods/native_actor_profiles.cpp)
+target_include_directories(guest_actor_profiles_region_test PRIVATE runtime/include runtime/src)
+target_compile_options(guest_actor_profiles_region_test PRIVATE -UNDEBUG)
+add_test(NAME guest_actor_profiles_region COMMAND guest_actor_profiles_region_test)
 add_executable(native_actor_profiles_test runtime/tools/native_actor_profiles_test.cpp runtime/src/mods/native_actor_profiles.cpp runtime/src/guest_addr_identity.c)
 target_include_directories(native_actor_profiles_test PRIVATE runtime/include runtime/src)
 target_compile_options(native_actor_profiles_test PRIVATE -UNDEBUG)
@@ -1992,30 +2069,30 @@ target_compile_options(guest_hooks_test PRIVATE -UNDEBUG)
 target_link_libraries(guest_hooks_test PRIVATE ZLIB::ZLIB ${CMAKE_DL_LIBS} Threads::Threads)
 add_test(NAME guest_hooks COMMAND guest_hooks_test)
 # letters from story mods: save record, text, services and postbox hooks on synthetic guest objects
-add_executable(story_mail_test runtime/tools/story_mail_test.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/guest_addr_identity.c)
+add_executable(story_mail_test runtime/tools/story_mail_test.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/long_name.cpp runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp runtime/src/guest_addr_identity.c)
 target_include_directories(story_mail_test PRIVATE runtime/include runtime/src)
 target_compile_options(story_mail_test PRIVATE -UNDEBUG)
 add_test(NAME story_mail COMMAND story_mail_test)
 # mod charts: shared save record, services and sea chart menu hooks on synthetic guest objects
-add_executable(story_chart_test runtime/tools/story_chart_test.cpp runtime/src/mods/story_chart.cpp runtime/src/mods/story_store.cpp runtime/src/guest_addr_identity.c)
+add_executable(story_chart_test runtime/tools/story_chart_test.cpp runtime/src/mods/story_chart.cpp runtime/src/mods/story_store.cpp runtime/src/mods/long_name.cpp runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp runtime/src/guest_addr_identity.c)
 target_include_directories(story_chart_test PRIVATE runtime/include runtime/src)
 target_compile_options(story_chart_test PRIVATE -UNDEBUG)
 add_test(NAME story_chart COMMAND story_chart_test)
 # mod treasure charts (a): reserved save numbers, salvage points, spawn and registration on a synthetic registry
 add_executable(story_treasure_salvage_test runtime/tools/story_treasure_salvage_test.cpp runtime/src/mods/story_treasure_salvage.cpp
-               runtime/src/mods/story_chart.cpp runtime/src/mods/story_store.cpp runtime/src/guest_addr_identity.c)
+               runtime/src/mods/story_chart.cpp runtime/src/mods/story_store.cpp runtime/src/mods/long_name.cpp runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp runtime/src/guest_addr_identity.c)
 target_include_directories(story_treasure_salvage_test PRIVATE runtime/include runtime/src)
 target_compile_options(story_treasure_salvage_test PRIVATE -UNDEBUG)
 add_test(NAME story_treasure_salvage COMMAND story_treasure_salvage_test)
 # mod treasure charts, chart state: the salvage code's collect-map questions for reserved save numbers
 add_executable(story_treasure_state_test runtime/tools/story_treasure_state_test.cpp runtime/src/mods/story_treasure_state.cpp
-               runtime/src/mods/story_chart.cpp runtime/src/mods/story_store.cpp runtime/src/guest_addr_identity.c)
+               runtime/src/mods/story_chart.cpp runtime/src/mods/story_store.cpp runtime/src/mods/long_name.cpp runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp runtime/src/guest_addr_identity.c)
 target_include_directories(story_treasure_state_test PRIVATE runtime/include runtime/src)
 target_compile_options(story_treasure_state_test PRIVATE -UNDEBUG)
 add_test(NAME story_treasure_state COMMAND story_treasure_state_test)
 # the story notebook: quest list, save record, page navigation, services and item menu hooks
 add_executable(story_notebook_test runtime/tools/story_notebook_test.cpp runtime/src/mods/story_notebook.cpp runtime/src/mods/game_look.cpp
-               runtime/tools/story_notebook_layout_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp
+               runtime/tools/story_notebook_layout_stub.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/long_name.cpp runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp
                runtime/src/mods/story_chart.cpp runtime/src/mods/story_items.cpp runtime/src/mods/story_item_buttons.cpp runtime/src/mods/guest_png.cpp runtime/src/mods/mod_archive.cpp runtime/src/guest_addr_identity.c
                ${WWHD_NPC_CATALOGUE})
 target_include_directories(story_notebook_test PRIVATE runtime/include runtime/src runtime/src/mods)
@@ -2023,7 +2100,7 @@ target_compile_options(story_notebook_test PRIVATE -UNDEBUG)
 target_link_libraries(story_notebook_test PRIVATE ZLIB::ZLIB)
 add_test(NAME story_notebook COMMAND story_notebook_test)
 # mod items: save record, manifest items, registry, services, bag actions and the item table hooks
-add_executable(story_items_test runtime/tools/story_items_test.cpp runtime/src/mods/story_items.cpp runtime/src/mods/story_store.cpp runtime/src/guest_addr_identity.c ${WWHD_NPC_CATALOGUE})
+add_executable(story_items_test runtime/tools/story_items_test.cpp runtime/src/mods/story_items.cpp runtime/src/mods/story_store.cpp runtime/src/mods/long_name.cpp runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp runtime/src/guest_addr_identity.c ${WWHD_NPC_CATALOGUE})
 target_include_directories(story_items_test PRIVATE runtime/include runtime/src runtime/src/mods)
 target_compile_options(story_items_test PRIVATE -UNDEBUG)
 add_test(NAME story_items COMMAND story_items_test)
@@ -2031,14 +2108,14 @@ add_executable(story_prop_rewards_test runtime/tools/story_prop_rewards_test.cpp
 target_include_directories(story_prop_rewards_test PRIVATE runtime/src)
 target_compile_options(story_prop_rewards_test PRIVATE -UNDEBUG)
 add_test(NAME story_prop_rewards COMMAND story_prop_rewards_test)
-add_executable(story_prop_rewards_runtime_test runtime/tools/story_prop_rewards_test.cpp runtime/src/mods/story_items.cpp runtime/src/mods/story_store.cpp runtime/src/guest_addr_identity.c ${WWHD_NPC_CATALOGUE})
+add_executable(story_prop_rewards_runtime_test runtime/tools/story_prop_rewards_test.cpp runtime/src/mods/story_items.cpp runtime/src/mods/story_store.cpp runtime/src/mods/long_name.cpp runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp runtime/src/guest_addr_identity.c ${WWHD_NPC_CATALOGUE})
 target_include_directories(story_prop_rewards_runtime_test PRIVATE runtime/include runtime/src runtime/src/mods)
 target_compile_options(story_prop_rewards_runtime_test PRIVATE -UNDEBUG)
 target_compile_definitions(story_prop_rewards_runtime_test PRIVATE STORY_PROP_REWARDS_RUNTIME_TEST)
 add_test(NAME story_prop_rewards_runtime COMMAND story_prop_rewards_runtime_test)
 # mod items and the notebook on X/Y/R: the decisions, the menu assignment, the game's reads and the item use
 add_executable(story_item_buttons_test runtime/tools/story_item_buttons_test.cpp runtime/src/mods/story_item_buttons.cpp runtime/src/mods/story_notebook.cpp runtime/src/mods/game_look.cpp runtime/tools/story_notebook_layout_stub.cpp
-               runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/story_chart.cpp runtime/src/mods/story_items.cpp
+               runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/long_name.cpp runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp runtime/src/mods/story_chart.cpp runtime/src/mods/story_items.cpp
                runtime/src/mods/guest_png.cpp runtime/src/mods/mod_archive.cpp runtime/src/guest_addr_identity.c ${WWHD_NPC_CATALOGUE})
 target_include_directories(story_item_buttons_test PRIVATE runtime/include runtime/src runtime/src/mods)
 target_compile_options(story_item_buttons_test PRIVATE -UNDEBUG)
@@ -2046,7 +2123,7 @@ target_link_libraries(story_item_buttons_test PRIVATE ZLIB::ZLIB)
 add_test(NAME story_item_buttons COMMAND story_item_buttons_test)
 # mod treasure charts, the chest's item: game items, the mod item's stand-in and its get, on a synthetic save
 add_executable(story_treasure_chest_test runtime/tools/story_treasure_chest_test.cpp runtime/src/mods/story_treasure_chest.cpp
-               runtime/src/mods/story_items.cpp runtime/src/mods/story_chart.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp
+               runtime/src/mods/story_items.cpp runtime/src/mods/story_chart.cpp runtime/src/mods/story_mail.cpp runtime/src/mods/story_store.cpp runtime/src/mods/long_name.cpp runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp
                runtime/src/guest_addr_identity.c ${WWHD_NPC_CATALOGUE})
 target_include_directories(story_treasure_chest_test PRIVATE runtime/include runtime/src runtime/src/mods)
 target_compile_options(story_treasure_chest_test PRIVATE -UNDEBUG)
@@ -2323,6 +2400,10 @@ add_executable(fast_forward_test runtime/tools/fast_forward_test.cpp)
 target_include_directories(fast_forward_test PRIVATE runtime/src)
 target_compile_options(fast_forward_test PRIVATE -UNDEBUG)
 add_test(NAME fast_forward COMMAND fast_forward_test)
+add_executable(walk_doors_hold_test runtime/tools/walk_doors_hold_test.cpp)
+target_include_directories(walk_doors_hold_test PRIVATE runtime/src)
+target_compile_options(walk_doors_hold_test PRIVATE -UNDEBUG)
+add_test(NAME walk_doors_hold COMMAND walk_doors_hold_test)
 add_executable(fast_forward_present_test runtime/tools/fast_forward_present_test.cpp runtime/src/gfx/vulkan/settings.cpp)
 target_include_directories(fast_forward_present_test PRIVATE runtime/src runtime/include
     ${CEMU_DIR} runtime/third_party/fmt/include)
@@ -2556,7 +2637,7 @@ endif()
 if(NOT ANDROID AND SDL3_FOUND AND Python3_Interpreter_FOUND)
   add_executable(mod_oneclick_flow_test runtime/tools/mod_oneclick_flow_test.cpp runtime/src/menu_i18n.cpp runtime/src/menu_i18n_table.cpp
     runtime/third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp runtime/src/mods/code_mods.cpp
-    runtime/src/mods/manager.cpp runtime/src/mods/traversal_settings.cpp runtime/src/mods/packages.cpp ${WWHD_NPC_CATALOGUE} runtime/src/mods/guest_png.cpp
+    runtime/src/mods/manager.cpp runtime/src/mods/speedrun.cpp runtime/src/mods/traversal_settings.cpp runtime/src/mods/packages.cpp ${WWHD_NPC_CATALOGUE} runtime/src/mods/guest_png.cpp
     runtime/src/mods/mod_archive.cpp runtime/src/mods/content.cpp runtime/src/mods/cemu_pack.cpp runtime/src/guest_addr_identity.c
     runtime/src/overlay/extensions.cpp runtime/src/overlay/text_field.cpp runtime/src/mods/required.cpp ${WWHD_BUILD_INFO})
   target_include_directories(mod_oneclick_flow_test PRIVATE runtime/src runtime/include)
@@ -2568,7 +2649,7 @@ endif()
 add_test(NAME mod_setup_acceptance COMMAND mod_package_test --setup-acceptance)
 
 # Experimental mods: flag, list filter, save backup before enabling, retention, staged restore.
-add_executable(mod_experimental_test runtime/tools/mod_experimental_test.cpp runtime/src/mods/manager.cpp runtime/src/mods/traversal_settings.cpp runtime/src/mods/packages.cpp ${WWHD_NPC_CATALOGUE} runtime/src/mods/guest_png.cpp runtime/src/mods/mod_archive.cpp runtime/src/mods/content.cpp runtime/src/mods/cemu_pack.cpp runtime/src/guest_addr_identity.c)
+add_executable(mod_experimental_test runtime/tools/mod_experimental_test.cpp runtime/src/mods/manager.cpp runtime/src/mods/speedrun.cpp runtime/src/mods/traversal_settings.cpp runtime/src/mods/packages.cpp ${WWHD_NPC_CATALOGUE} runtime/src/mods/guest_png.cpp runtime/src/mods/mod_archive.cpp runtime/src/mods/content.cpp runtime/src/mods/cemu_pack.cpp runtime/src/guest_addr_identity.c)
 target_include_directories(mod_experimental_test PRIVATE runtime/src runtime/include)
 target_compile_options(mod_experimental_test PRIVATE -UNDEBUG)
 target_link_libraries(mod_experimental_test PRIVATE ZLIB::ZLIB Threads::Threads ${CMAKE_DL_LIBS})
@@ -4076,6 +4157,8 @@ add_test(NAME state_load_result COMMAND state_load_result_test)
 # off): the hook-flag table stays null and an --editor start must still come up (last: after every source
 # the targets above add to guest_hooks_test).
 target_sources(guest_hooks_test PRIVATE runtime/src/mods/map_hud.cpp)
+# Link's look: the save's records and the record format behind wwhd_appearance_* (the colour page is stubbed in the test)
+target_sources(guest_hooks_test PRIVATE runtime/src/mods/link_appearance.cpp runtime/src/mods/link_appearance_store.cpp)
 get_target_property(GUEST_HOOKS_TEST_SOURCES guest_hooks_test SOURCES)
 add_executable(guest_mods_no_hooks_test ${GUEST_HOOKS_TEST_SOURCES} runtime/tools/fork_test_stubs.cpp runtime/src/mods/guest_builtin.cpp)
 target_compile_definitions(guest_mods_no_hooks_test PRIVATE GUEST_HOOKS_TEST_NO_HOOKS=1)
@@ -4134,3 +4217,29 @@ add_executable(map_hud_native_test runtime/tools/map_hud_native_test.cpp runtime
 target_include_directories(map_hud_native_test PRIVATE runtime/include runtime/src)
 target_compile_options(map_hud_native_test PRIVATE -UNDEBUG)
 add_test(NAME map_hud_native COMMAND map_hud_native_test)
+
+add_executable(mod_build_constraint_test runtime/tools/mod_build_constraint_test.cpp)
+target_include_directories(mod_build_constraint_test PRIVATE runtime/src runtime/include)
+target_compile_options(mod_build_constraint_test PRIVATE -UNDEBUG)
+add_test(NAME mod_build_constraint COMMAND mod_build_constraint_test)
+# Declarative guest save ownership: native filesystem/cloud and state guards.
+add_executable(save_profile_test runtime/tools/save_profile_test.cpp)
+target_include_directories(save_profile_test PRIVATE runtime/src runtime/include)
+target_compile_options(save_profile_test PRIVATE -UNDEBUG)
+target_link_libraries(save_profile_test PRIVATE Threads::Threads)
+add_test(NAME save_profile COMMAND save_profile_test)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME save_namespace_startup_order COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/runtime/tools/test_save_namespace_startup.py)
+endif()
+
+foreach(mode success malformed conflict disabled untrusted code-off unsupported native-failure compiler-failure graphics-failure changed ordinary-conflict session)
+  add_test(NAME save_profile_startup_${mode} COMMAND mod_package_test --save-profile-startup ${mode} $<TARGET_FILE:mod_fixture>)
+endforeach()
+
+
+foreach(mode format damaged shape size)
+  add_test(NAME mod_profile_read_failure_${mode} COMMAND mod_package_test --profile-read-failure ${mode})
+endforeach()
+
+add_test(NAME mod_game_build_constraint COMMAND mod_package_test --game-build-constraint)

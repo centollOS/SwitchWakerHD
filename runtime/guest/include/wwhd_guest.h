@@ -16,6 +16,8 @@
 
 /* Old SDKs embedded data pointers without relocations and cannot safely run on EU. */
 static const unsigned int wwhd_address_format __attribute__((used, section(".wwhd_addresses"))) = 1;
+/* Old SDKs compiled the play object's member offsets as USA numbers, which the Japanese build moved. */
+static const unsigned int wwhd_game_info_format __attribute__((used, section(".wwhd_game_info"))) = 1;
 
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -70,6 +72,15 @@ typedef struct { u32 kind, target; void* func; u32 flags; } wwhd_hook_desc;
     extern u8 WWHD__CAT(wwhd_game_data_, addr)[] __asm__("__wwhd_gdata_" WWHD__STR(addr)); \
     (type volatile*)WWHD__CAT(wwhd_game_data_, addr); }))
 
+/* The offset of a member of the play object (wwhd_play_get(), g_dComIfG_gameInfo) at USA offset `off`. Builds
+ * that moved members (the Japanese one) get theirs: the translator resolves it when the mod is installed. Declare
+ * the member once at file scope (the SDK's WWHD_PLAY_*_OFFSET members are declared):
+ *   WWHD_GAME_INFO_MEMBER(0x5B2C);  ...  wwhd_play_get() + WWHD_GAME_INFO_OFFSET(0x5B2C)
+ * The value is fixed when the mod is linked, not when it is compiled: it can initialize a variable, but is no
+ * integer constant expression (no case labels, array sizes or static asserts). */
+#define WWHD_GAME_INFO_MEMBER(off) extern u8 WWHD__CAT(wwhd_game_info_, off)[] __asm__("__wwhd_ginfo_" WWHD__STR(off))
+#define WWHD_GAME_INFO_OFFSET(off) ((u32)WWHD__CAT(wwhd_game_info_, off))
+
 /* ---- host services (resolved by name on install; missing ones are an install error) ---- */
 void wwhd_log(const char* message);
 void wwhd_log_int(const char* label, int value);
@@ -105,6 +116,20 @@ void wwhd_input_read(wwhd_input_state* state);
  * The callback must be this mod's own function. Returns 1 when registered. */
 typedef void (*wwhd_input_filter_fn)(wwhd_input_state* state);
 int wwhd_input_filter_register(wwhd_input_filter_fn filter);
+/* After the native ready-item trigger query, preserve the port's accepted
+ * quick-use intent. Returns only a local predicate; no pad/equipment writes.
+ * Pass the current Link actor and the unmodified native query result. */
+u32 wwhd_item_ready_trigger(u32 actor, u32 native_trigger);
+/* Immediately before the native ready hookshot (2F), rope (25), or boomerang
+ * (2D) action call, preserve the port's quick-use dispatch bookkeeping. Call
+ * only after the original eligibility checks. Other item IDs are ignored. */
+void wwhd_item_action_dispatch(u32 actor, u32 item);
+/* Source-level sailing composition: call wind only on the normal-sail branch,
+ * before reading its transition flag. Scale the completed native wind target
+ * before obstacle/acceleration callbacks. Keep a local original/written pair
+ * and restore only an unchanged scaled target before jump checks. */
+void wwhd_ship_normal_sail_wind(u32 actor);
+f32 wwhd_ship_sail_target(f32 stock);
 /* Touches on the TV picture (the device's touch screen, or the mouse on the desktop): the mod claims rectangles
  * in layout units (1280 x 720 around the picture's centre, +y up; a wider picture extends x) with
  * wwhd_touch_claim; a finger landing in one goes to `callback` (down, moves, up or cancel) and to nothing else
@@ -128,6 +153,13 @@ typedef struct {
 typedef void (*wwhd_touch_fn)(const wwhd_touch_event* event);
 int wwhd_touch_register(wwhd_touch_fn callback);
 int wwhd_touch_claim(u32 slot, f32 x0, f32 y0, f32 x1, f32 y1);
+/* Touches on the GamePad picture (mod manager 1.12.0): wwhd_touch_claim(WWHD_TOUCH_GAMEPAD | slot, ...) claims a
+ * rectangle in the GamePad's touch coordinates (854 x 480 from the top left, +y down), wherever the GamePad shows
+ * (its window, a phone, One screen mode), with the same rules: a finger landing in one goes to `callback` and to
+ * nothing else (not the game, not the port's GamePad pages, not the input filters) until it lifts. Its events have
+ * WWHD_TOUCH_GAMEPAD in `kind` (WWHD_TOUCH_GAMEPAD | WWHD_TOUCH_DOWN, ...). Slots 0..7, apart from the TV picture's.
+ * Older hosts return 0 for such a claim: fall back then. */
+#define WWHD_TOUCH_GAMEPAD 0x100
 /* Where the drawn camera shows a point of the world (x, y, z of the current room): out[0], out[1] in the same layout
  * units as touches, with the picture's shape and field of view as drawn. Returns 1, or 0 when the point is behind the
  * camera or no camera is drawn (out unchanged). Read it on the logic step you use it (the camera moves). */
@@ -191,6 +223,22 @@ typedef struct {
     u32 flags;
     char animation[36];
 } wwhd_actor_state_v1; /* size=80, version=1 */
+// Low-level native ACTR profile registration, startup only. Call from a
+// GameMain (028EA120) entry hook before any native process allocation. The
+// runtime copies the profile, five callbacks and name; the module stays loaded.
+// profile points to the 0x30-byte native actor profile, whose method table has
+// five caller-owned functions (create, delete, execute, isDelete, draw).
+// Native base method pointers may be zero (filled by the runtime).
+// IDs 01E4..7FCF only, no remapping/unregister; names 1..8 ASCII alnum/_ bytes.
+// Returns ID, or -1 invalid, -2 collision, -3 closed, -4 unavailable, -5 full.
+typedef struct {
+    u32 size,version; // sizeof(...), 1
+    const void* profile;
+    char name[8];
+    s32 argument; // -1..127
+    u32 gba_name; // 0..255
+} wwhd_native_actor_profile_v1;
+s32 wwhd_native_actor_profile_register(const wwhd_native_actor_profile_v1*);
 u32 wwhd_actor_register(const char* actor_id,const wwhd_actor_behavior_v1* behavior);
 wwhd_actor_handle wwhd_actor_find(const char* actor_id); /* zero until create dispatch */
 u32 wwhd_actor_get(wwhd_actor_handle,wwhd_actor_state_v1* state);
@@ -265,7 +313,7 @@ unsigned long long wwhd_setting_changed(const char* key);
  * per logic step. Its immutable output is held for every presentation until the next
  * step. TV=0 (1280x720), DRC=1 (854x480), both=2 (TV coordinates scaled to each screen).
  * Element/text/path buffers must be static or allocated in this mod's heap. */
-#define WWHD_HUD_API_VERSION 2
+#define WWHD_HUD_API_VERSION 3
 enum { WWHD_HUD_TV=0,WWHD_HUD_DRC=1,WWHD_HUD_BOTH=2 };
 enum { WWHD_HUD_RECT=0,WWHD_HUD_TEXT=1,WWHD_HUD_IMAGE=2,WWHD_HUD_RECT_OUTLINE=3,
        WWHD_HUD_CIRCLE=4,WWHD_HUD_CIRCLE_OUTLINE=5,WWHD_HUD_LINE=6,WWHD_HUD_CLIP_PUSH=7,WWHD_HUD_CLIP_POP=8 };
@@ -283,7 +331,14 @@ typedef struct {
 } wwhd_hud_element;
 /* x/y is the top-left except circles (center). w/h is extent, or signed line delta.
  * size is circle radius / text height. Rotation is radians about image center.
- * UVs are normalized subrect coordinates. rgba is RRGGBBAA. Set thickness>0. */
+ * UVs are normalized subrect coordinates. rgba is RRGGBBAA. Set thickness>0.
+ * v3: an image with u1 < u0 (or v1 < v0) is drawn mirrored on that axis (u0 = 1, u1 = 0: flipped left to
+ * right), as the game mirrors half art. All four stay within 0..1. Older hosts drop the whole list for such an
+ * element: draw mirrored only when wwhd_hud_mirrored_images() is nonzero. */
+static inline u32 wwhd_hud_mirrored_images(void) {
+    static u32 version;
+    return wwhd_setting_get("hud.mirrored-images.version", WWHD_SETTING_U32, &version, 4) == 4 ? version : 0;
+}
 u32 wwhd_hud_register(void (*callback)(u32 list),u32 screen);
 u32 wwhd_hud_emit(u32 list,const wwhd_hud_element* element);
 /* v2: record CLIP_PUSH/CLIP_POP only through this service. PUSH uses x/y/w/h
@@ -336,6 +391,32 @@ unsigned long long wwhd_audio_epoch(void);
 #define WWHD_MAIL_NO_ROOM (-2)  /* no save loaded, or its story record is full (19 entries) */
 s32 wwhd_mail_send(const char* letter_id, const char* sender, const char* text);
 s32 wwhd_mail_state(const char* letter_id);
+
+/* Link's appearance v1: the colours of Link's hair, skin, eyes, tunic and its details in the save file played
+ * (kept in that file's save when the game saves). A look is a record of 3..27 bytes:
+ *   [1][slots: u16 big-endian, bit per slot][R G B for each slot set, in slot order]
+ * slots: 0 hair, 1 skin, 2 eyes, 3 tunic and hat (also the island shirt), 4 undershirt, 5 trousers, 6 boots,
+ * 7 belt buckle; a slot not set has the game's own colour, {1, 0, 0} is Link as the game has him.
+ * get: copies the record into `out` (size at least WWHD_APPEARANCE_MAX) and returns its length.
+ * set: takes a record; 0 done. open: asks for the port's colour page (Link in a close camera, the player
+ * chooses each area's colour from presets with a live preview); it opens once Link can stand still (after a
+ * talk has ended) and returns 0 when asked. All: WWHD_APPEARANCE_INVALID (-1) for a bad record or buffer,
+ * WWHD_APPEARANCE_NOT_NOW (-2) with no save file played (or the page already open). */
+#define WWHD_APPEARANCE_API_VERSION 1
+#define WWHD_APPEARANCE_MAX 27
+#define WWHD_APPEARANCE_INVALID (-1)
+#define WWHD_APPEARANCE_NOT_NOW (-2)
+#define WWHD_APPEARANCE_HAIR 0
+#define WWHD_APPEARANCE_SKIN 1
+#define WWHD_APPEARANCE_EYES 2
+#define WWHD_APPEARANCE_TUNIC 3
+#define WWHD_APPEARANCE_UNDERSHIRT 4
+#define WWHD_APPEARANCE_TROUSERS 5
+#define WWHD_APPEARANCE_BOOTS 6
+#define WWHD_APPEARANCE_BUCKLE 7
+s32 wwhd_appearance_get(u8* out, u32 size);
+s32 wwhd_appearance_set(const u8* record, u32 size);
+s32 wwhd_appearance_open(void);
 
 /* Charts and markers v1: a chart from the mod with marked places, treated like the game's treasure
  * charts. The save file records whether Link owns the chart (give) and whether it is finished
@@ -438,6 +519,19 @@ _Static_assert(sizeof(wwhd_game_pane) == 64, "wwhd_game_pane layout");
  * flags 4, w/h its size. */
 static inline u32 wwhd_game_pane_get(const char* key, wwhd_game_pane* pane) {
     return wwhd_setting_get(key, 6, pane, sizeof(*pane)) == sizeof(*pane);
+}
+/* The game's own text of a layout (v3): key "layout-message:<Layout>/<label>" (at most 63 bytes), a label of the
+ * layout's message file, e.g. "layout-message:DungeonMapUp_00/T_FloorU_00_2F", in the language the game runs in.
+ * UTF-8 with its NUL; the game's control codes (colours, icons) left out, line breaks kept as '\n'. Returns the
+ * bytes written with the NUL, or 0 (missing label, a text of 4 KiB or more, a buffer too small: then it is unchanged;
+ * older hosts). A null buffer with capacity 0 gives the size. The text doesn't change while the game runs: read
+ * it once and keep it. wwhd_game_messages() is nonzero on hosts with this query. */
+static inline u32 wwhd_game_message_get(const char* key, char* buffer, u32 capacity) {
+    return wwhd_setting_get(key, WWHD_SETTING_STRING, buffer, capacity);
+}
+static inline u32 wwhd_game_messages(void) {
+    static u32 version;
+    return wwhd_setting_get("layout-message.version", WWHD_SETTING_U32, &version, 4) == 4 ? version : 0;
 }
 
 /* Optional current-room map from a mod stage. Returns 1 with a 808-byte output,

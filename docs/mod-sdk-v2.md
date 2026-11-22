@@ -26,6 +26,7 @@ supported.
 - [Charts and markers](#charts-and-markers)
 - [Items](#items)
 - [The story notebook](#the-story-notebook)
+- [Link's appearance](#links-appearance)
 - [Packages with content and images](#packages-with-content-and-images)
 - [Trust](#trust)
 - [Save states](#save-states)
@@ -102,7 +103,7 @@ WWHD_HOOK(WWHD_ADDR_daPy_Execute, on_link_step, (void* link)) {
 ### Build
 
 ```sh
-clang --target=powerpc-unknown-eabi -mcpu=750 -O2 -ffreestanding \
+clang --target=powerpc-unknown-eabi -mcpu=750 -mstackrealign -O2 -ffreestanding \
   -fno-builtin -nostdlib -fno-jump-tables -ffunction-sections -fdata-sections \
   -I<sdk>/include -c mod.c -o mod.o
 ld.lld -m elf32ppc -r mod.o -o mod.elf
@@ -112,6 +113,18 @@ ld.lld -m elf32ppc -r mod.o -o mod.elf
 source checkout. `-mcpu=750` keeps to the game CPU's instructions. Link with `-r` only: the
 ELF must stay relocatable (the port picks its address). `-m elf32ppc` is needed on Windows,
 where MSYS2's lld defaults to PE. The same `mod.elf` works on every desktop platform.
+
+`-mstackrealign` is required for every PowerPC guest translation unit, including
+separately compiled helpers. Native game callers can supply an 8-byte-aligned
+stack, while Clang normally assumes 16-byte alignment. Realigning the guest
+callee's frame preserves its local storage and stack-passed arguments at either
+entry alignment. This flag belongs to the PowerPC compile, not the host compiler
+that later builds the translated module.
+
+Recompile and relink existing guest ELFs with this flag. Installing a newer
+runtime or translating an old ELF again cannot add the missing realignment
+prologue. Stack alignment must be supplied by the guest compiler; a runtime ABI
+bridge cannot repair precompiled guest code.
 
 ### Package and install
 
@@ -235,6 +248,8 @@ and target the USA game version; mods work on EU installs too (see below).
 - `wwhd/data.h`: named save/resource pointers, matrix stack and item tables.
 - `actor.h`, `link.h`, `camera.h`, `items.h`, `messages.h`, `save.h`: partial views of game
   objects with checked field offsets; unknown parts are reachable as bytes.
+- `wwhd/save_flags.h`: checked access to native save event bits and masked byte registers,
+  using the game's own methods and the region-mapped save pointer.
 - Functions not in the public decomp can still be hooked by address with
   `WWHD_GAME_FUNC(address, ret, name, (args))`; game variables with
   `WWHD_GAME_DATA(address, type)`.
@@ -245,6 +260,48 @@ references to the EU build. Functions that differ or don't exist in EU are refus
 error naming them. Don't cast integers to pointers (that hard-codes a USA address), and only
 use object fields that are the same in both versions.
 
+**Japanese installs.** The same translation applies. The Japanese build also moved some members of
+the play object (`wwhd_play_get()`, `g_dComIfG_gameInfo`), so the SDK's `WWHD_PLAY_*_OFFSET` values
+are resolved for the build when the mod is installed. For a member the SDK doesn't name, declare it
+once at file scope and use its USA offset:
+
+```c
+WWHD_GAME_INFO_MEMBER(0x5B2C);
+u8* slot = wwhd_play_get() + WWHD_GAME_INFO_OFFSET(0x5B2C);
+```
+
+These offsets are fixed when the mod is linked, so they can initialize variables but can't be case
+labels, array sizes or static asserts. A mod built with an older SDK (plain USA numbers) is refused
+on the Japanese build if it reads the play object; ask its author to rebuild.
+
+### Native save event flags
+
+Include `wwhd/save_flags.h` to access the game's persistent event array. These are
+the game's story flags, separate from a mod's `wwhd_quest_flag` values. Changing
+them can alter story order; take a save backup before applying changes to an
+existing file. The helpers do not run cutscenes or save to disk themselves.
+
+Call on the game thread after save allocation, from an appropriate initialization
+or gameplay hook. A non-null save allocation can also exist before the player has
+selected a file; these helpers do not determine which file should be changed.
+
+| Helper | Result |
+| --- | --- |
+| `wwhd_save_event_test(flag)` | 0 or 1; the selector must have exactly one mask bit. |
+| `wwhd_save_event_set(flag, enabled)` | 0 on success; zero clears the bit, other values set it. |
+| `wwhd_save_event_read(selector)` | The masked byte, without shifting. |
+| `wwhd_save_event_write(selector, bits)` | 0 on success; values outside the mask are rejected. |
+
+All return `WWHD_SAVE_FLAGS_INVALID` (-1) for invalid arguments or
+`WWHD_SAVE_FLAGS_NOT_READY` (-2) if the save allocation is unavailable. A selector
+is a 16-bit value: its high byte indexes the event array and its low byte is a
+nonzero mask. For example, mask `0xF0` uses values `0x00`, `0x10`, … `0xF0`,
+without shifting them down to 0–15. Out-of-mask writes are rejected before calling
+the native setter, which otherwise ORs its value into adjacent flags.
+
+These are header-only adapters over existing game bindings. They add no host
+service requirement and do not change how ordinary saves are loaded.
+
 ## Host services
 
 | Service | What it does |
@@ -254,8 +311,12 @@ use object fields that are the same in both versions.
 | `wwhd_config_changed` | A live option's revision, below |
 | `wwhd_malloc`, `wwhd_free` | Per-mod heap, 16-byte aligned; size from `guest.heap_size` (default 256 KiB, max 8 MiB); null when full |
 | `wwhd_input_read` | Buttons, sticks and touch (read-only) |
+| `wwhd_ship_normal_sail_wind` | Compose the port’s optional normal-sail wind callback before the sail transition flag is read; takes ship actor, preserves CPU context |
+| `wwhd_ship_sail_target` | Scale a completed native wind target using the live sail/settings; caller retains local original/written target and conditionally restores it before jump checks |
+| `wwhd_item_action_dispatch` | Preserve quick-use bookkeeping immediately before an eligible native ready hookshot, rope or boomerang action; takes Link and item ID, preserves CPU context and writes no global input/equipment |
+| `wwhd_item_ready_trigger` | Preserve the port’s local quick-use predicate after a native ready-item query; takes Link and the original result, changes no global pad input |
 | `wwhd_input_filter_register` | Change the controller state the game reads, below |
-| `wwhd_touch_register`, `wwhd_touch_claim` | Touches (or mouse clicks) on parts of the TV picture your mod claims, and pinches there, below |
+| `wwhd_touch_register`, `wwhd_touch_claim` | Touches (or mouse clicks) on parts of the TV or GamePad picture your mod claims, and pinches on the TV picture, below |
 | `wwhd_screen_point` | Where the drawn camera shows a point of the world, in the touches' layout units, below |
 | `wwhd_mic_open`, `_close`, `_state`, `_pitch` | The microphone's pitch, for an option the player turned on (asks for permission then), below |
 | `wwhd_file_read`, `wwhd_file_write` | Flat file names in your mod's own data folder, at most 1 MiB per call; write replaces the file; return bytes or -1 |
@@ -266,6 +327,7 @@ use object fields that are the same in both versions.
 | `wwhd_mail_send`, `wwhd_mail_state` | A letter from your mod, delivered by the Rito postbox, below |
 | `wwhd_chart_*` | A chart from your mod that marks places on Link's sea chart, below |
 | `wwhd_quest_*` | Your mod's quests in the story notebook, below |
+| `wwhd_appearance_get`, `_set`, `_open` | Link's look in the save file played, and the port's colour page, below |
 | `memcpy`, `memmove`, `memset` | As usual |
 
 Your mod can also call any game function. Original synthesized audio can use the PCM stream service below.
@@ -303,6 +365,27 @@ on-screen stick, no talk by touch. It stays yours until it lifts, even outside t
 overlap the newest wins. Claim only while your feature shows something to touch, and remove the claim (an
 empty rectangle, x1 <= x0) when it doesn't, so the player's thumbs work the game again. Events arrive at the
 next controller read, before the input filters, so a touch can become a button in the same read.
+
+**Touches on the GamePad picture.** `wwhd_touch_claim(WWHD_TOUCH_GAMEPAD | slot, x0, y0, x1, y1)` claims a
+rectangle of the GamePad picture in its touch coordinates: 854 x 480 from the top left, +y down. It works wherever the GamePad
+shows: a GamePad window, a phone, or One screen mode. The rules are the TV picture's: register the callback
+first; a finger that lands in a claim goes only to your callback until it lifts, even outside the rectangle;
+the newest claim wins where claims overlap; remove a claim with an empty rectangle. The game and the port's own
+GamePad pages don't see that finger, and neither do the input filters (`touch` stays 0). Its events have
+`WWHD_TOUCH_GAMEPAD` added to `kind` (`WWHD_TOUCH_GAMEPAD | WWHD_TOUCH_DOWN`, and so on), so one callback can
+tell the pictures apart. The GamePad's 8 slots are separate from the TV picture's. There are no pinches on the
+GamePad picture. Hosts from before mod manager 1.12.0 refuse such a slot and return 0, so the return value is
+the feature test: fall back to something else there, or set `"minimum_manager_version": "1.12.0"`.
+
+```c
+static void touched(const wwhd_touch_event* e) {
+    if (e->kind == (WWHD_TOUCH_GAMEPAD | WWHD_TOUCH_UP)) answer(e->x, e->y);  /* a tap on our button */
+}
+/* while the prompt is up (0 on older hosts: fall back): */
+claimed = wwhd_touch_claim(WWHD_TOUCH_GAMEPAD | 0, 190, 300, 680, 370);
+/* when it closes: */
+wwhd_touch_claim(WWHD_TOUCH_GAMEPAD | 0, 0, 0, 0, 0);
+```
 
 **Pinches.** A second finger next to your mod's finger (Android, with the on-screen controls shown or hidden), or the
 mouse wheel over one of your claims (desktop), comes as `WWHD_TOUCH_PINCH` with `x` = the spread now divided by the
@@ -428,11 +511,33 @@ an unbalanced callback drops the entire list. Clips belong to one recording list
 and cannot affect another mod. Send ordinary drawing elements through
 `wwhd_hud_emit`; that service rejects clip commands.
 
-`WWHD_HUD_API_VERSION` is 2; the guest module ABI and manifest `guest.api_version`
-remain 1. Importing `wwhd_hud_clip` is the runtime capability check: older hosts
+Importing `wwhd_hud_clip` is the runtime capability check for clips: older hosts
 lack that service and refuse the module during loading. Existing HUD v1 mods
 continue to load without it. Do not emulate clipping by moving or shrinking the
 image, since that changes registration at a map boundary.
+
+**Mirrored images (HUD v3).** An image element whose `u1` is smaller than `u0` is drawn
+mirrored left to right over that part of the picture; `v1` smaller than `v0` mirrors it top
+to bottom. All four values stay within 0..1. The game draws some of its art this way: half
+of a symmetric picture, mirrored into the whole one (the floor-change arrow
+`DungeonMapUp_00/MapFloorUpDown_00^t` is one half of it). Draw such art as two images side by
+side, the second with `u0 = 1, u1 = 0`:
+
+```c
+image.u0 = 0; image.u1 = 1; image.x = x;         wwhd_hud_emit(list, &image);  /* the half as it is */
+image.u0 = 1; image.u1 = 0; image.x = x + half;  wwhd_hud_emit(list, &image);  /* its mirror image */
+```
+
+Older hosts refuse reversed UVs and drop the whole list, so check first:
+`wwhd_hud_mirrored_images()` (the unsigned setting `hud.mirrored-images.version`) is 1 on
+hosts that draw them and 0 before. Rotation, tint, blending and clips work as for any image.
+Other element kinds keep the old rule (`u1 >= u0`, `v1 >= v0`).
+
+`WWHD_HUD_API_VERSION` is 3 (v3: mirrored images and the game's layout texts, see
+[The game's layout art](#the-games-layout-art)); the 72-byte element, the guest module ABI
+and manifest `guest.api_version` stay as they are, and v3 imports no new host service. Hosts
+with v3 have mod manager 1.9.0: give `"minimum_manager_version": "1.9.0"` to refuse older
+ports up front, or check the capability settings at run time and keep a fallback.
 
 It draws on Metal and Vulkan, in the TV picture and the GamePad screen (window or
 picture-in-picture); the settings overlay stays on top. Positions are not interpolated
@@ -584,6 +689,20 @@ player's installed 2D pack, in the language the game uses, while the game runs:
   visible, and, for a picture pane, its texture's name. The result is a 64-byte `wwhd_game_pane`.
   The key `layout-texture:<Layout>/<texture>` checks that a texture exists, without loading it. It
   sets flag 4 and returns the texture's size in `w` and `h`.
+- `wwhd_game_message_get("layout-message:<Layout>/<label>", buffer, capacity)` (HUD v3) copies the
+  game's own text of a label of the layout's message file, in the language the game runs in, so a mod
+  can label its drawing as the game does without carrying translations. For example
+  `"layout-message:DungeonMapUp_00/T_FloorU_00_2F"` is `2F` in English and `P1` in Spanish. The text is
+  UTF-8 with its NUL; the game's control codes (colours, icons, sizes) are left out and line breaks
+  stay `\n`. The call returns the bytes written including the NUL, or 0: a missing layout or label, a
+  text of 4 KiB or more, or a buffer too small (it stays unchanged). A null buffer with capacity 0
+  gives the size. The key is at most 63 bytes. The texts don't change while the game runs: read each
+  once and keep it. `wwhd_game_messages()` (the unsigned setting `layout-message.version`) is 1 on
+  hosts with this query and 0 before.
+
+  The port reads these texts from the message files of the player's installed 2D pack, never from
+  game memory: the key names a layout and a label, nothing else, and the text is copied whole into the
+  mod's own memory or not at all.
 
 Names may contain letters, digits and `_ ^ + - .` only. A missing layout, texture or pane returns 0,
 with the reason in the Mods tab. Older hosts return 0 for both: the texture source and the query key
@@ -1293,6 +1412,29 @@ save on Windfall: letter, notebook, page, tracking and the sea chart, and checks
 `wwhd_quest_*`. If another mod replaces one of them, the notebook is not in the item menu that
 session and the log says so.
 
+## Link's appearance
+
+The player's choice of colours for Link (hair, skin, eyes, tunic and hat, undershirt, trousers, boots, belt
+buckle) belongs to each save file and is kept in it when the game saves (manager version 1.11.0). Only colours
+change: the port recolours Link's own textures from the player's game in memory; nothing is shipped or stored
+but the colours. A mod reads or sets the look as a record of 3 to 27 bytes (`wwhd_guest.h` has the layout and
+the slot numbers), or opens the port's colour page:
+
+```c
+u8 look[WWHD_APPEARANCE_MAX];
+s32 n = wwhd_appearance_get(look, sizeof look);           /* 3..27, or -2 with no save file played */
+static const u8 red_tunic[] = {1, 0x00, 0x08, 0xE5, 0x2B, 0x36};  /* slot 3 (tunic) set */
+wwhd_appearance_set(red_tunic, sizeof red_tunic);          /* 0, -1 a bad record, -2 no save file */
+wwhd_appearance_open();                                   /* the colour page, once Link can stand still */
+```
+
+The colour page holds Link still in a close camera with the page on the right of the screen; the player
+steps through each area's colours (the first is "Original", the game's own) and sees them on Link at once,
+turns the camera around him with the right stick or L / R, and keeps the look with Done or puts it back with B.
+A character's talk can open it with no code: the story action `{"action": "appearance"}` in a talk's `then`
+([SDK v3](mod-sdk-v3.md#dialogue-and-actions)). Buffers must be in your module's memory. Declare
+`"minimum_manager_version": "1.11.0"` in a mod that uses these.
+
 ## Packages with content and images
 
 A code mod may also contain content replacements in `content/` (or a `content_dir` named in
@@ -1495,3 +1637,52 @@ those of the existing output backend.
 
 For bounded service-call diagnostics, `WWHD_AUDIO_STREAM_TRACE=1` logs open/submit/close
 results and epochs, never sample payloads. Leave it unset for normal operation.
+
+### Native ACTR profiles (startup only)
+
+`wwhd_native_actor_profile_register` adds a native actor process and an eight-byte
+stage ACTR name without replacing `fpcPf_Get` or the stage name lookup functions.
+It shares the port's profile registry with the higher-level `wwhd_actor_register`
+API; that existing manifest/behavior API is unchanged.
+
+Call this API from a `WWHD_HOOK(0x028EA120, ..., (void))` GameMain entry hook.
+Registration from other hooks is refused. The window also closes before the
+first native process allocation, including an allocation triggered by another
+entry hook. Register all profiles before creating any actor. Modules and their
+callbacks remain resident until the game exits. There is no hot unregister or
+callback unloading; changing the enabled code-mod set requires restarting.
+
+Set the descriptor's `size` to `sizeof(wwhd_native_actor_profile_v1)` and `version`
+to 1. `profile` points to a module-owned 0x30-byte native actor profile, with a
+module-owned five-word create/delete/execute/isDelete/draw method table at
+profile offset 0x24. Each callback must be an exact function entry in the calling
+module. The native process and actor base-method pointers at offsets 0x0C and
+0x1C can be zero: the runtime fills these from its region's retail actor template.
+Nonzero values must match that template. Actor class size must be at least
+0x3AC; class size plus extra allocation must not exceed 1 MiB.
+
+The runtime copies the profile, method table and name into its snapshot-owned
+pool (64 registrations). Later changes to the source descriptor do not change
+registration. Unused native profile padding is zeroed for deterministic snapshots. Requested IDs are 0x01E4 through 0x7FCF. Retail IDs and the port's
+0x7FD0–0x7FFE reservation cannot be claimed, even if currently unused. A duplicate
+ID or name is refused rather than remapped. Choose a unique name of one to eight
+ASCII letters, digits or underscores; zero-pad shorter names. `argument` is -1
+through 127 and `gba_name` is 0 through 255. Name lookup and reverse lookup use
+the copied entry; reverse lookup retains the native same-process fallback when
+the requested subtype differs. The retail tables remain immutable. All native
+code/data addresses pass through the regional address maps; an unexpected retail
+profile-table boundary disables this bridge.
+
+Success returns the requested positive process ID. Negative results are invalid
+input (-1), collision (-2), registration closed/outside GameMain entry (-3),
+bridge unavailable (-4), and capacity exhausted (-5). Refusals are logged with
+the caller and cause. Check the result before requesting actor creation.
+
+Full save states contain a bounded exact identity of the registered snapshots,
+owner IDs and owning ELF SHA-256 fingerprints. A different callback/profile/name
+or changed ELF refuses a full-state restore before memory is changed, even when
+the package version is unchanged. Legacy full states are accepted only when no
+guest profiles are registered. Restoring a compatible full state republishes the
+immutable snapshots. Portable states retain the existing mod-set warning and
+rebuild actors from the current modules; use those to transfer progress across
+code changes.

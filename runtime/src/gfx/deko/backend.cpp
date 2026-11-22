@@ -42,6 +42,7 @@ namespace interp { int output_fps(); bool interp_on(); }
 #include "gx2/gx2.h"
 #include "imgui.h"
 #include "input.h"
+#include "overlay/guest_hud.h"
 #include "overlay/hostui.h"
 #include "overlay/overlay.h"
 #include "platform/debug_switch.h"
@@ -1457,8 +1458,10 @@ void present() {
     }
     if (!pad.surface) g_padRect[2] = 0;
     Surface* shownPicture = nullptr;  // (this fork, #67) what the window shows: hashed by a lockstep run
+    bool padOnScreen = false;  // the GamePad picture is in the window (full or in the corner): at g_padRect
     if (pad.surface && draw_picture(pad, capture)) {
         shownPicture = pad.surface;
+        padOnScreen = true;
     } else if (draw_picture(src, capture)) {
         shownPicture = src.surface;
         if (shown != 1) LOG("[dk] frame %llu: presenting the game's TV picture", (unsigned long long)frame);
@@ -1467,6 +1470,7 @@ void present() {
         static int pipShown = -1;
         const PresentSource corner = g_gamepadPip.load(std::memory_order_relaxed) ? gamepad_source() : PresentSource{};
         const bool pip = corner.surface && draw_picture(corner, capture, true);
+        padOnScreen = pip;
         if (int(pip) != pipShown) {
             pipShown = pip;
             LOG("[dk] frame %llu: GamePad picture in the corner %s", (unsigned long long)frame, pip ? "shown" : "not shown");
@@ -1484,10 +1488,19 @@ void present() {
     S.scanSrc = nullptr;
     if (S.tvSource) S.tvSource->hudFull = false;
     if (S.drcSource) S.drcSource->hudFull = false;
+    // the settings overlay's frame (Minus held, overlay/overlay.h; the window's real size: the UI grows with it,
+    // overlay.cpp), built before the HUD below: its guesthud::frame() lays out this frame's GamePad HUD lists
+    ImDrawData* const ui = overlay::frame(float(g_winW), float(g_winH), overlay_renderer_init);
+    // (this fork) the port's GamePad-screen HUD (guest_hud.h screen 1: the pause menu's settings page, the story
+    // notebook, mods' GamePad HUDs) over the GamePad picture wherever the window shows it (full, or in the corner),
+    // as the Vulkan and Metal presentations do (gamepad_region); the TV's lists are in `ui`'s background list
+    if (const int pw = g_padRect[2].load(std::memory_order_relaxed); padOnScreen && pw > 0)
+        if (ImDrawData* hud = overlay::guesthud::gamepad_region(float(g_winW), float(g_winH), float(g_padRect[0].load()),
+                                                                float(g_padRect[1].load()), float(pw), float(g_padRect[3].load()), 1.0f))
+            overlay_draw(hud, int(g_winW), int(g_winH));
     draw_fps();
-    // the settings overlay (Minus held, overlay/overlay.h), over the picture and the FPS counter
-    // (the window's real size: the UI grows with it, overlay.cpp)
-    if (ImDrawData* ui = overlay::frame(float(g_winW), float(g_winH), overlay_renderer_init)) overlay_draw(ui, int(g_winW), int(g_winH));
+    // the settings overlay over the picture and the FPS counter
+    if (ui) overlay_draw(ui, int(g_winW), int(g_winH));
     gpuPasses.frame_end();
     frame_pacing::on_present(R.cmd, frame);  // (this fork, #23) the GPU writes the frame number when done
     frame_end();

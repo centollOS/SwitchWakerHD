@@ -15,11 +15,15 @@
 // start of every game function body (PPC_MOD_HOOK in ppc.h).
 //
 // The mod manager builds and loads its frozen, trusted guest set before guest code runs.
+#include "link_appearance.h"
 #include "../editor/editor_game.h"
 #include "story_native_canonical_code_id.h"
 #include "../exception_report.h"
 #include "guest_mods.h"
 #include "../guest_module_entry.h"
+#include "mods.h"
+#include "native_actor_profiles.h"
+#include "native_actor_profile_startup.h"
 #include "../model_probe.h"
 #include "story_native_refresh_dispatch_audit.h"
 #include "story_native_manager_cancel_dispatch_audit.h"
@@ -175,7 +179,7 @@ struct Chain {
 };
 std::unordered_map<uint32_t, Chain> g_chains;  // built before the game starts, read-only afterwards
 struct Loaded {
-    std::string path,id,version,package_path,data_path,name;
+    std::string path,id,version,package_path,data_path,name,elf_fingerprint;
     uint32_t hud_callback=0,hud_screen=0;
     uint64_t hud_step=0;
     bool hud_called=false;
@@ -192,6 +196,8 @@ std::atomic<uint64_t> g_logic_step{0};
 std::atomic<bool> g_hud_callbacks{false};
 bool g_world_scenes=false;
 bool g_native_scenes=false;  // native scene playback can run (set once in init): the game-thread binding
+bool g_actor_profile_import=false;
+thread_local bool g_actor_profile_entry=false;
 bool g_particle_import=false;  // a loaded code mod imports wwhd_actor_particle or wwhd_particle_at
 std::mutex g_hud_mutex;
 thread_local bool g_map_hud_draw=false;
@@ -637,8 +643,9 @@ void svc_memset(Cpu* c) { memset(mem::ptr(c->r[3]), (int)(c->r[4] & 0xFF), c->r[
 // ---- live options, input filters, touches (guest_live.h; QoL track M0)
 std::mutex g_options_mutex;  // Loaded::options (the main thread changes live ones), g_revisions
 guestlive::Revisions g_revisions;
-std::mutex g_touch_mutex;    // g_touch, g_touch_queue
+std::mutex g_touch_mutex;    // g_touch, g_gamepad_touch, g_touch_queue
 guestlive::Touch g_touch;
+guestlive::Touch g_gamepad_touch;  // claims on the GamePad picture (854 x 480 from the top left)
 std::vector<std::pair<int,guestlive::Event>> g_touch_queue;  // (mod index, event) for the next pad read
 mods::json::Value option(Cpu* c) {std::lock_guard lock(g_options_mutex);return owner(c).options.get(cstr(c->r[3]));}
 void svc_config_changed(Cpu* c) {
@@ -654,6 +661,18 @@ bool exchange_area(Loaded& mod) {
     if(!mod.scratch)mod.scratch=mod.heap->allocate(32);
     return mod.scratch!=0;
 }
+void svc_ship_normal_sail_wind(Cpu* c) {
+    mods::ship_normal_sail_wind(c, c->r[3]);
+}
+void svc_ship_sail_target(Cpu* c) {
+    c->f[1].ps0 = c->f[1].ps1 = mods::ship_sail_target((float)c->f[1].ps0);
+}
+void svc_item_action_dispatch(Cpu* c) {
+    mods::quick_use_item_action_dispatch(c, c->r[3], c->r[4]);
+}
+void svc_item_ready_trigger(Cpu* c) {
+    c->r[3] = mods::quick_use_ready_item_trigger(c, c->r[3], c->r[4]);
+}
 void svc_input_filter_register(Cpu* c) {
     auto& mod=owner(c);uint32_t fn=c->r[3];c->r[3]=0;
     if(fn&&(!own_function(mod,fn)||!exchange_area(mod))){LOG("[guestmod:%s] input filter refused: the callback must be the mod's own",mod.id.c_str());return;}
@@ -663,15 +682,16 @@ void svc_touch_register(Cpu* c) {
     auto& mod=owner(c);uint32_t fn=c->r[3];c->r[3]=0;
     if(fn&&(!own_function(mod,fn)||!exchange_area(mod))){LOG("[guestmod:%s] touch callback refused: the callback must be the mod's own",mod.id.c_str());return;}
     mod.touch_callback=fn;
-    if(!fn){std::lock_guard lock(g_touch_mutex);g_touch.drop(int(&mod-g_loaded.data()));}
+    if(!fn){std::lock_guard lock(g_touch_mutex);g_touch.drop(int(&mod-g_loaded.data()));g_gamepad_touch.drop(int(&mod-g_loaded.data()));}
     c->r[3]=1;
 }
+// slot | guestlive::kGamepadFlag: a claim on the GamePad picture (older hosts refuse that slot: the mod's feature test)
 void svc_touch_claim(Cpu* c) {
-    auto& mod=owner(c);const int slot=int32_t(c->r[3]);c->r[3]=0;
+    auto& mod=owner(c);const bool gamepad=c->r[3]&guestlive::kGamepadFlag;const int slot=int32_t(c->r[3]&~guestlive::kGamepadFlag);c->r[3]=0;
     if(!mod.touch_callback||slot<0||slot>=guestlive::kSlots)return;
     const guestlive::Rect r{float(c->f[1].ps0),float(c->f[2].ps0),float(c->f[3].ps0),float(c->f[4].ps0)};
     std::lock_guard lock(g_touch_mutex);
-    g_touch.claim(int(&mod-g_loaded.data()),slot,r);c->r[3]=1;
+    (gamepad?g_gamepad_touch:g_touch).claim(int(&mod-g_loaded.data()),slot,r);c->r[3]=1;
 }
 // wwhd_screen_point(world xyz, out xy): a point of the world where the drawn camera shows it, in layout units (guest_live.h);
 // the camera_draw camera (interp::last_camera: eye +0xDC, center +0xE8, up +0xF4, fovy +0xD4) and the picture's aspect
@@ -815,6 +835,24 @@ void svc_setting_get(Cpu* c) {
         if(!destination&&!capacity){c->r[3]=4;return;}
         if(capacity<4||!setting_buffer(mod,destination,4))return;
         st32(destination,maphud::capability());c->r[3]=4;return;
+    }
+    if(key=="hud.mirrored-images.version"||key=="layout-message.version"){  // HUD v3 (wwhd_guest.h)
+        c->r[3]=0;if(expected!=settings::Unsigned)return;
+        if(!destination&&!capacity){c->r[3]=4;return;}
+        if(capacity<4||!setting_buffer(mod,destination,4))return;
+        st32(destination,key[0]=='h'?hud::kMirroredImagesVersion:game_layouts::kMessageVersion);c->r[3]=4;return;
+    }
+    // "layout-message:<Layout>/<label>": the game's own text of a label of a layout's message file, in the
+    // language the game runs in (game_layouts::message). Only names reach the pack reader; the text is copied
+    // whole (with its NUL) into the mod's own memory or not at all.
+    if(key.rfind("layout-message:",0)==0){
+        c->r[3]=0;if(expected!=settings::String)return;
+        std::string text;
+        if(!game_layouts::message(key.substr(15),text)||text.size()>=game_layouts::kMaxMessageBytes)return;
+        const uint32_t bytes=uint32_t(text.size()+1);
+        if(!destination&&!capacity){c->r[3]=bytes;return;}
+        if(capacity<bytes||!setting_buffer(mod,destination,bytes))return;
+        memcpy(mem::ptr(destination),text.c_str(),bytes);c->r[3]=bytes;return;
     }
     auto value=settings::read(key);c->r[3]=0;
     if(!value||value->type()!=expected)return;
@@ -1098,7 +1136,41 @@ void svc_item_used(Cpu* c) {
     c->r[3]=uint32_t(mod_string(mod,c->r[3],story_mail::kMaxIdBytes,id)?story_items::used(mod.id,id):story_items::kResultInvalid);
 }
 #include "guest_actor_services.inc"
+void svc_native_actor_profile_register(Cpu*c){
+    if(!g_actor_profile_entry){c->r[3]=uint32_t(-3);LOG("[guestmods] native actor profiles register only from a GameMain entry hook");return;}
+    auto& mod=owner(c);std::string why;
+    const int32_t result=native_actor_profiles::register_guest(mod.id,mod.elf_fingerprint,c->r[3],
+        [&](uint32_t a,uint32_t n){return setting_buffer(mod,a,n);},
+        [&](uint32_t fn){return own_function(mod,fn);},&why);
+    if(result<0)LOG("[guestmods] %s: native actor profile refused: %s",mod.id.c_str(),why.c_str());
+    else LOG("[guestmods] %s: registered native actor profile %04X from GameMain entry",mod.id.c_str(),unsigned(result));
+    c->r[3]=uint32_t(result);
+}
+// Link's appearance v1 (link_appearance.h): the look of the save file played as its record (3..27 bytes)
+void svc_appearance_get(Cpu* c) {
+    auto& mod=owner(c);const uint32_t a=c->r[3],n=c->r[4];
+    if(link_appearance::current_file()<0){c->r[3]=uint32_t(-2);return;}
+    const std::vector<uint8_t> r=link_appearance::encode(link_appearance::current());
+    if(!a||n<r.size()||!setting_buffer(mod,a,uint32_t(r.size()))){c->r[3]=UINT32_MAX;return;}
+    memcpy(mem::ptr(a),r.data(),r.size());c->r[3]=uint32_t(r.size());
+}
+void svc_appearance_set(Cpu* c) {
+    auto& mod=owner(c);const uint32_t a=c->r[3],n=c->r[4];
+    link_appearance::Look l;
+    if(!a||n>link_appearance::kMaxRecord||!setting_buffer(mod,a,n)||!link_appearance::decode(mem::ptr(a),n,l)){c->r[3]=UINT32_MAX;return;}
+    std::string why;
+    if(!link_appearance::set_current(l,why)){c->r[3]=uint32_t(-2);return;}
+    LOG("[guestmods] %s: Link's look %s",mod.id.c_str(),l.empty()?"back to his own colours":link_appearance::to_text(l).c_str());
+    c->r[3]=0;
+}
+void svc_appearance_open(Cpu* c) {
+    auto& mod=owner(c);std::string why;
+    if(!link_appearance::request_page(why)){LOG("[guestmods] %s: colour page not asked for: %s",mod.id.c_str(),why.c_str());c->r[3]=uint32_t(-2);return;}
+    LOG("[guestmods] %s: colour page asked for",mod.id.c_str());c->r[3]=0;
+}
 const std::unordered_map<std::string, PpcFunc> kServices = {
+    {"wwhd_appearance_get",svc_appearance_get},{"wwhd_appearance_set",svc_appearance_set},{"wwhd_appearance_open",svc_appearance_open},
+    {"wwhd_native_actor_profile_register",svc_native_actor_profile_register},
     {"wwhd_actor_register",svc_actor_register},{"wwhd_actor_find",svc_actor_find},{"wwhd_actor_get",svc_actor_get},
     {"wwhd_actor_combat_get",svc_actor_combat_get},{"wwhd_actor_attack_begin",svc_actor_attack_begin},{"wwhd_actor_attack_cancel",svc_actor_attack_cancel},
     {"wwhd_actor_userdata",svc_actor_userdata},{"wwhd_actor_set_position",svc_actor_set_position},{"wwhd_actor_set_rotation",svc_actor_set_rotation},
@@ -1111,7 +1183,7 @@ const std::unordered_map<std::string, PpcFunc> kServices = {
     {"wwhd_log", svc_log},       {"wwhd_log_int", svc_log_int}, {"wwhd_log_hex", svc_log_hex},
     {"wwhd_log_float", svc_log_float}, {"wwhd_config_int", svc_config_int},
     {"wwhd_config_bool",svc_config_bool},{"wwhd_config_changed",svc_config_changed},
-    {"wwhd_input_filter_register",svc_input_filter_register},{"wwhd_touch_register",svc_touch_register},{"wwhd_touch_claim",svc_touch_claim},{"wwhd_screen_point",svc_project},{"wwhd_mic_open",svc_mic_open},{"wwhd_mic_close",svc_mic_close},{"wwhd_mic_state",svc_mic_state},{"wwhd_mic_pitch",svc_mic_pitch},{"wwhd_config_float",svc_config_float},{"wwhd_config_string",svc_config_string},
+    {"wwhd_ship_normal_sail_wind",svc_ship_normal_sail_wind},{"wwhd_ship_sail_target",svc_ship_sail_target},{"wwhd_item_action_dispatch",svc_item_action_dispatch},{"wwhd_item_ready_trigger",svc_item_ready_trigger},{"wwhd_input_filter_register",svc_input_filter_register},{"wwhd_touch_register",svc_touch_register},{"wwhd_touch_claim",svc_touch_claim},{"wwhd_screen_point",svc_project},{"wwhd_mic_open",svc_mic_open},{"wwhd_mic_close",svc_mic_close},{"wwhd_mic_state",svc_mic_state},{"wwhd_mic_pitch",svc_mic_pitch},{"wwhd_config_float",svc_config_float},{"wwhd_config_string",svc_config_string},
     {"wwhd_malloc",svc_malloc},{"wwhd_free",svc_free},{"wwhd_input_read",svc_input},
     {"wwhd_file_read",svc_file_read},{"wwhd_file_write",svc_file_write},
     {"wwhd_hud_boat_compasses",svc_boat_compasses},{"wwhd_hud_boat_compasses_rect",svc_boat_compasses_rect},
@@ -1139,6 +1211,7 @@ PpcFunc service(const char* name) {
         if (g_missing_service.empty()) g_missing_service = name ? name : "?";
         return nullptr;
     }
+    if (!strcmp(name,"wwhd_native_actor_profile_register")) g_actor_profile_import=true;
     if (!strcmp(name, "wwhd_actor_particle") || !strcmp(name, "wwhd_particle_at")) g_particle_import = true;  // particle scratch
     if (!strncmp(name, "wwhd_mail_", 10)) story_mail::note_import();  // the postbox hooks are needed
     if (!strncmp(name, "wwhd_chart_", 11)) {  // the sea chart hooks are needed, and the chart list's captions
@@ -1230,6 +1303,7 @@ std::string notebook_model(const std::filesystem::path& glb,const std::string& d
 // (this fork) `builtin`: a module built into the NRO (guest_builtin.h), installed without a library
 bool load_one(const std::string& path, std::string& err,const mods::packages::GuestPackage& pkg,uint32_t base,uint32_t reserved,
               WWHDGuestInitV1 builtin = nullptr) {
+    native_actor_profiles::startup::ImportAttempt profile_import(g_actor_profile_import);
 #if WWHD_FORK_NO_NATIVE_GUEST_MODS
     if (!builtin) {
         err = "native guest mods are not supported by this port (they are built for upstream's game code)";
@@ -1285,7 +1359,7 @@ bool load_one(const std::string& path, std::string& err,const mods::packages::Gu
             return false;
         }
     Loaded loaded;
-    loaded.path=path;loaded.package_path=pkg.path;loaded.data_path=pkg.data_path;loaded.id=pkg.id;loaded.name=pkg.name;loaded.version=pkg.version;loaded.m=m;loaded.region_size=reserved;loaded.options=pkg.options;loaded.mic_options=pkg.mic_options;
+    loaded.elf_fingerprint=pkg.fingerprint;loaded.path=path;loaded.package_path=pkg.path;loaded.data_path=pkg.data_path;loaded.id=pkg.id;loaded.name=pkg.name;loaded.version=pkg.version;loaded.m=m;loaded.region_size=reserved;loaded.options=pkg.options;loaded.mic_options=pkg.mic_options;
     {std::lock_guard lock(g_options_mutex);for(const auto& [key,value]:pkg.options.object)g_revisions.declare(pkg.id,key);}
     loaded.files=std::make_unique<Files>(pkg.data_path);
     uint32_t heap_base=(m->mem_base+m->mem_size+15)&~15u;
@@ -1350,6 +1424,7 @@ bool load_one(const std::string& path, std::string& err,const mods::packages::Gu
     } catch(const std::exception& e) {LOG("[guestmods] %s: manifest quests not read: %s",loaded.id.c_str(),e.what());}
     g_loaded.push_back(std::move(loaded));
     guard.handle = nullptr; // module functions remain resident for the process lifetime
+    profile_import.accept();
     LOG("[guestmods] loaded %s (translator %s): %u functions, %u hooks, guest memory %08X-%08X", path.c_str(),
         m->translator, m->func_count, m->hook_count, m->mem_base, m->mem_base + m->mem_size);
     return true;
@@ -1703,6 +1778,9 @@ void init() {
            else LOG("[actors] borrowed walk %s: %s's %s on %s, %u frames, stride %.1f, %zu bytes",w.name,w.lender,w.clip,w.target,clip.frames,clip.stride,clip.fska.size());}}}
         story_actors::set_scene_start(story_scenes::request);
         story_actors::set_stage_enter(mod_stages::enter_stage);
+        story_actors::set_appearance_open([](const std::string& mod){std::string why;
+            if(!link_appearance::request_page(why)){LOG("[actors] %s: the colour page can't open: %s",mod.c_str(),why.c_str());return false;}
+            LOG("[actors] %s: the colour page of Link's look asked for",mod.c_str());return true;});
         mod_stages::set_story_actions(story_actors::actions);
         if(editor::launch_mode())story_actors::editor_live_kinds();  // --editor: native props, switches, doors and enemies placed live
         story_actors::install([](uint32_t addr) {
@@ -1875,6 +1953,18 @@ void init() {
         int ordinal=ordinal_of(fn);auto& ch=g_chains[fn];ch.addr=fn;ch.ordinal=uint32_t(ordinal);
         ch.replace=hook;ch.replace_mod="the port's map/HUD bridge";g_mod_hook_flags[ordinal]=1;
     });
+    // Existing port actor services configure their before-delete listeners
+    // before the central registry becomes immutable. Extend its lookup only
+    // after those services and every guest module have finished installation.
+    if(g_actor_profile_import){
+        native_actor_profiles::configure(call_original,[](Cpu*c,uint32_t f,std::initializer_list<uint32_t>a){return guest_call(c,f,a);});
+        std::string why;
+        const bool ok=native_actor_profiles::install_guest([]{return mem::runtime_alloc(native_actor_profiles::kGuestCapacity*native_actor_profiles::kGuestSlotBytes,16);},
+            [](uint32_t a){auto it=g_chains.find(a);return it==g_chains.end()?std::string():it->second.replace_mod;},
+            [](uint32_t a,PpcFunc fn){const int ordinal=ordinal_of(a);if(ordinal<0)fatal("[guestmods] native actor profile hook missing: %08X",a);
+                auto&ch=g_chains[a];ch.addr=a;ch.ordinal=uint32_t(ordinal);ch.replace=fn;ch.replace_mod="the port's native actor profiles";g_mod_hook_flags[ordinal]=1;},&why);
+        if(!ok)LOG("[guestmods] native actor profiles unavailable: %s",why.c_str());
+    }
     seal_startup();
 }
 
@@ -2018,6 +2108,15 @@ int touch_pinch(uint32_t kind,float scale,float x,float y) {
     return owner;
 }
 bool touch_claimed_at(float x,float y) {std::lock_guard lock(g_touch_mutex);return g_touch.owner_at(x,y)>=0;}
+void gamepad_touch(input::PadState& p,bool repeat) {
+    static guestlive::PadFinger finger;  // the game's controller reads come from one thread
+    if(repeat||g_loaded.empty())return;
+    std::lock_guard lock(g_touch_mutex);
+    int owner;guestlive::Event e;
+    const bool hide=finger.step(g_gamepad_touch,p.touch,p.tx,p.ty,owner,e);
+    if(owner>=0&&size_t(owner)<g_loaded.size()&&g_touch_queue.size()<64)g_touch_queue.push_back({owner,e});
+    if(hide)p.touch=false,p.tx=p.ty=0;
+}
 bool touch_claims() {std::lock_guard lock(g_touch_mutex);return g_touch.any();}
 // test aid: WWHD_TEST_MOD_OPTION=frame:mod:option:json,... changes a mod's option at that (scripted) TV frame, as the
 // Settings window would (packages::configure on the main thread: a live option reaches the mod)
@@ -2143,6 +2242,7 @@ void logic_service(Cpu* c) {
 }
 void service(Cpu* c) { story_lyt_screen::service(c); }
 void state_loaded() {
+    native_actor_profiles::restore_guest_snapshots();
     maphud::state_loaded();
     story_native_event_game_thread::state_loaded();
     story_native_wait_runtime::state_loaded();
@@ -2167,6 +2267,7 @@ void state_loaded() {
 }  // namespace guestmods
 namespace mods {
 void guest_pad_filter(Cpu* c, input::PadState& p, bool repeat) { guestmods::pad_filter(c, p, repeat); }
+void guest_gamepad_touch(input::PadState& p, bool repeat) { guestmods::gamepad_touch(p, repeat); }
 bool guest_touch_claimed_at(float x, float y) { return guestmods::touch_claimed_at(x, y); }
 }  // namespace mods
 
@@ -2186,6 +2287,7 @@ extern "C" void ppc_mod_run(Cpu* c) {
     Args a;
     a.save(c);
     for (PpcFunc h : ch.entry) {
+        native_actor_profiles::startup::EntryScope profile_entry(g_actor_profile_entry,addr==GC(0x028EA120));
         ObserverRegisters preserve(c);
         guestmods::invoke_module_entry(c, h);
     }

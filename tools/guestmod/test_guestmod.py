@@ -23,7 +23,7 @@ import build_guest_mod as builder  # noqa: E402
 
 CLANG = os.environ.get("WWHD_PPC_CLANG") or shutil.which("clang")
 LLD = os.environ.get("WWHD_PPC_LLD") or shutil.which("ld.lld")
-FLAGS = ["--target=powerpc-unknown-eabi", "-mcpu=750", "-O2", "-ffreestanding", "-fno-builtin", "-nostdlib",
+FLAGS = ["--target=powerpc-unknown-eabi", "-mcpu=750", "-mstackrealign", "-O2", "-ffreestanding", "-fno-builtin", "-nostdlib",
          "-fno-jump-tables", "-ffunction-sections", "-fdata-sections",
          "-I", os.path.join(REPO, "runtime", "guest", "include")]
 
@@ -31,7 +31,7 @@ FLAGS = ["--target=powerpc-unknown-eabi", "-mcpu=750", "-O2", "-ffreestanding", 
 def ppc_ok():
     if not CLANG or not LLD or not shutil.which(CLANG) or not shutil.which(LLD):
         return False
-    p = subprocess.run([CLANG, "--target=powerpc-unknown-eabi", "-x", "c", "-c", "-o", os.devnull, "-"],
+    p = subprocess.run([CLANG, "--target=powerpc-unknown-eabi", "-mstackrealign", "-x", "c", "-c", "-o", os.devnull, "-"],
                        input="int x;", capture_output=True, text=True)
     if p.returncode:
         print("PowerPC compiler probe failed:", p.stderr, file=sys.stderr)
@@ -104,6 +104,65 @@ WWHD_HOOK(0x0240EBB0, mapped, (void* actor)) {
             with self.assertRaisesRegex(guestmod.ModError, 'older SDK'):
                 builder.translator_for(elf, 0x7F000000, by_name("EU"))
 
+    def test_japanese_play_offsets_follow_the_build(self):
+        from builds import by_name
+        src = r'''
+#include "wwhd/data.h"
+#include "wwhd/objects.h"
+u32 link_slot(void) { return *(volatile u32*)(wwhd_play_get() + WWHD_PLAY_PLAYER_OFFSET + 8); }
+u32 status0(void) { return *(volatile u32*)(wwhd_play_get() + WWHD_PLAY_PLAYER_STATUS0_OFFSET); }
+u8 event_running(void) { return *(volatile u8*)(wwhd_play_get() + WWHD_PLAY_EVENT_RUNNING_OFFSET); }
+volatile u32 offsets[] = {WWHD_PLAY_PLAYER_OFFSET, WWHD_PLAY_METRONOME_OFFSET};
+'''
+        with tempfile.TemporaryDirectory() as d:
+            elf = Path(self.build_elf(src, d)).read_bytes()
+            images = {name: builder.translator_for(elf, 0x7F000000, by_name(name)).image for name in ("USA", "EU", "JP")}
+            usa, jp = images["USA"], images["JP"]
+            halves = lambda image: {int.from_bytes(image[i:i + 2], "big") for i in range(0, len(image), 2)}
+            self.assertIn(0x5B2C, halves(images["EU"]))  # the European build keeps every member
+            for canonical, moved in ((0x5B2C, 0x5B28), (0x5CD8, 0x5CD4)):
+                self.assertIn(canonical, halves(usa))
+                self.assertIn(moved, halves(jp))
+                self.assertNotIn(canonical, halves(jp))
+            self.assertIn(0x5292, halves(jp))  # a member the Japanese build did not move
+            for canonical, moved in ((0x5B2C, 0x5B28), (0x5BD1, 0x5BCD)):
+                self.assertIn(canonical.to_bytes(4, "big"), usa)
+                self.assertIn(moved.to_bytes(4, "big"), jp)
+
+    def test_japanese_old_sdk_play_access_refused(self):
+        from builds import by_name
+        old = '__asm__(".section .wwhd_addresses,\\"a\\"\\n.long 1\\n.text\\n");\n'  # the European-compatible SDK
+        play = old + 'unsigned char* play(void) __asm__("__wwhd_game_0x025200D4");\n' \
+                     'unsigned int link(void) { return *(volatile unsigned int*)(play() + 0x5B34); }\n'
+        data = old + 'extern unsigned char info[] __asm__("__wwhd_gdata_0x1046F0B0");\n' \
+                     'unsigned int link(void) { return *(volatile unsigned int*)(info + 0x5B34); }\n'
+        other = old + 'extern unsigned char save[] __asm__("__wwhd_gdata_0x101F84DC");\n' \
+                      'unsigned int first(void) { return *(volatile unsigned int*)save; }\n'
+        with tempfile.TemporaryDirectory() as d:
+            for name, src in (("accessor", play), ("data", data)):
+                with self.subTest(name):
+                    elf = Path(self.build_elf(src, d)).read_bytes()
+                    builder.translator_for(elf, 0x7F000000, by_name("EU"))
+                    with self.assertRaisesRegex(guestmod.ModError, 'older SDK whose play object offsets.*JP'):
+                        builder.translator_for(elf, 0x7F000000, by_name("JP"))
+            builder.translator_for(Path(self.build_elf(other, d)).read_bytes(), 0x7F000000, by_name("JP"))
+            # A current-SDK mod (.wwhd_game_info present) that still writes a raw moved offset by hand is also refused.
+            raw_new = '#include "wwhd/data.h"\nu32 link(void) { return *(volatile u32*)(wwhd_play_get() + 0x5B34); }\n'
+            elf = Path(self.build_elf(raw_new, d)).read_bytes()
+            builder.translator_for(elf, 0x7F000000, by_name("EU"))
+            with self.assertRaisesRegex(guestmod.ModError, r'raw play object offset on JP.*WWHD_GAME_INFO_OFFSET\(0x5B34\)'):
+                builder.translator_for(elf, 0x7F000000, by_name("JP"))
+            # Relocated halfwords (e.g. a gdata address whose low 16 bits fall in 0x5AB0..0x62F7) are not raw offsets.
+            relocated = '#include "wwhd/objects.h"\nu8 flying(void) { return WWHD_GAME_DATA(WWHD_ADDR_Medli_flying, u8); }\n'
+            builder.translator_for(Path(self.build_elf(relocated, d)).read_bytes(), 0x7F000000, by_name("JP"))
+
+    def test_play_offset_outside_the_object_refused(self):
+        src = '#include "wwhd_guest.h"\nWWHD_GAME_INFO_MEMBER(0x7000);\nu32 far(void) { return WWHD_GAME_INFO_OFFSET(0x7000); }\n'
+        with tempfile.TemporaryDirectory() as d:
+            elf = Path(self.build_elf(src, d)).read_bytes()
+            with self.assertRaisesRegex(guestmod.ModError, 'outside the play object'):
+                builder.translator_for(elf, 0x7F000000)
+
     def test_public_headers_c_and_cpp(self):
         headers = ("bindings", "actor", "link", "camera", "items", "save", "messages", "data")
         source = "".join('#include "wwhd/%s.h"\n' % name for name in headers)
@@ -173,7 +232,7 @@ WWHD_REPLACE(0x02005678, void, repl, (void)) { ptr = helper; orig_fn(); wwhd_log
         src = r'''
 #include "wwhd_guest.h"
 _Static_assert(sizeof(wwhd_hud_element)==72, "HUD wire ABI");
-_Static_assert(WWHD_HUD_API_VERSION==2, "HUD capability version");
+_Static_assert(WWHD_HUD_API_VERSION==3, "HUD capability version");
 static void draw(u32 list) {
     static wwhd_hud_element element = {.kind=WWHD_HUD_RECT,.w=10,.h=20,.thickness=1,.u1=1,.v1=1,.rgba=0xFFFFFFFF};
     wwhd_hud_emit(list,&element);
@@ -189,6 +248,9 @@ WWHD_HOOK(0x02000000, all_services, (void)) {
     u32 image=wwhd_hud_texture(WWHD_HUD_PACKAGE,"assets/original.png");
     wwhd_hud_release(image);
     wwhd_log_int("hud epoch",(int)wwhd_hud_epoch());
+    wwhd_log_int("mirrored",(int)wwhd_hud_mirrored_images());
+    static char label[16];
+    if (wwhd_game_messages()) wwhd_game_message_get("layout-message:DungeonMapUp_00/T_FloorU_00_2F",label,sizeof label);
     char* p = wwhd_malloc(64);
     wwhd_setting_get("input.face_layout",WWHD_SETTING_STRING,p,64);
     wwhd_log_int("settings revision",(int)wwhd_setting_changed("input.face_layout"));
@@ -441,7 +503,8 @@ int main(int argc,char** argv) {
             subprocess.run([str(executable),result['module']],check=True)
 
     def test_register_pair_module_executes(self):
-        # Leaf guest functions need no guest RAM: this executes the actual translated module.
+        # Execute the actual translated module with a valid guest stack.
+        # Stack realignment may give even a leaf function a stack frame.
         src = r'''
 #include "wwhd/bindings.h"
 WWHD_REPLACE(0x02000000, wwhd_gpr_pair, pair_result, (void)) {
@@ -460,6 +523,7 @@ WWHD_REPLACE(0x02000004, u32, pair_low, (wwhd_gpr_pair value)) {
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <sys/mman.h>
 #endif
 int main(int argc, char** argv) {
     assert(argc == 2);
@@ -475,7 +539,18 @@ int main(int argc, char** argv) {
     WWHDGuestHostV1 host = {0}; host.size = sizeof(host);
     host.abi_version = WWHD_GUEST_ABI_VERSION; host.core_preempt = preempt;
     const WWHDGuestModuleV1* module = init(&host); assert(module && module->hook_count == 2);
+#ifdef _WIN32
+    void* stack = VirtualAlloc(ppc_ptr(0x20000000), 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    assert(stack == ppc_ptr(0x20000000));
+#else
+    void* stack = mmap(ppc_ptr(0x20000000), 0x10000, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    assert(stack == ppc_ptr(0x20000000));
+#endif
+    for (unsigned alignment = 0; alignment < 2; ++alignment) {
     Cpu cpu = {0}; int pairs = 0, lows = 0;
+    const uint32_t sp = 0x20008000 + alignment * 8;
+    cpu.r[1] = sp;
     for (uint32_t i = 0; i < module->hook_count; ++i) if (module->hooks[i].target == 0x02000000) {
         ++pairs; module->hooks[i].fn(&cpu);
         assert(cpu.r[3] == 0x11223344 && cpu.r[4] == 0x55667788);
@@ -485,9 +560,13 @@ int main(int argc, char** argv) {
         ++lows; module->hooks[i].fn(&cpu); assert(cpu.r[3] == 0x12345678);
     }
     assert(pairs == 1 && lows == 1);
+    assert(cpu.r[1] == sp);
+    }
 #ifdef _WIN32
+    assert(VirtualFree(stack, 0, MEM_RELEASE));
     FreeLibrary(library);
 #else
+    assert(munmap(stack, 0x10000) == 0);
     dlclose(library);
 #endif
     return 0;
@@ -504,6 +583,34 @@ int main(int argc, char** argv) {
                 command.append('-ldl')
             subprocess.run(command, check=True)
             subprocess.run([str(executable), result['module']], check=True)
+
+    def test_native_entry_stack_realignment(self):
+        # Reduced from the real #117 heap-frame failure, without its game
+        # consumer: preserve the same align16 local-frame/callback pattern.
+        fixtures=Path(HERE, 'fixtures')
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            executable=root/('driver.exe' if os.name=='nt' else 'driver')
+            command=cxx_command(builder.default_cc())+['-std=c++17','-O2','-Wall','-Wextra','-Werror',
+                '-I',str(Path(REPO,'runtime/include')),str(fixtures/'stack_realign.cpp'),'-o',str(executable)]
+            if sys.platform.startswith('linux'):
+                command.append('-ldl')
+            subprocess.run(command,check=True)
+            # Run identical ordinary C with and without the required producer
+            # flag. The negative control must expose all 64 SP8 entries.
+            for realign in (False, True):
+                with self.subTest(realign=realign):
+                    directory=root/('aligned' if realign else 'flagless');directory.mkdir()
+                    flags=FLAGS if realign else [flag for flag in FLAGS if flag!='-mstackrealign']
+                    subprocess.run([CLANG,*flags,'-c',str(fixtures/'stack_realign.c'),
+                                    '-o',str(directory/'mod.o')],check=True)
+                    subprocess.run([LLD,'-m','elf32ppc','-r',str(directory/'mod.o'),
+                                    '-o',str(directory/'mod.elf')],check=True)
+                    (directory/'manifest.json').write_text(json.dumps({'kind':'guest','id':'stack-entry',
+                        'guest':{'api_version':1}}))
+                    result=builder.build(str(directory),str(root/'cache'),0x7F000000,
+                        builder.default_cc(),str(Path(REPO,'runtime/include')))
+                    subprocess.run([str(executable),result['module'],'0' if realign else '64'],check=True)
 
     def test_nonvolatile_paired_single_module_boundaries(self):
         # Eighteen scalar float values force ordinary Clang C to use f14..f31.

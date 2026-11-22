@@ -1,4 +1,6 @@
 #include "mods/map_hud.h"
+#include "mods/game_progress_host.h"
+#include "mods/achievements_host.h"
 #include "interp.h"
 #include "interp_prerun_cams.h"
 #include "dsweep.h"
@@ -66,6 +68,8 @@ namespace interp {class NativeResumeBoundaryIssuer {public:static void after_ser
 #include "true60_steps.h"
 #include "gx2/gx2.h"
 #include "gfx/renderer.h"
+#include "mods/link_appearance.h"
+#include "mods/link_masks.h"
 
 
 extern "C" {
@@ -1518,6 +1522,7 @@ void reticle_reset();
 void ss_reset() {
     mods::moon_jump_reset();
     mods::jump_reset();
+    mods::walk_doors_reset();
     countdown::reset();
     for (auto& p : g_prev) p = Prev{};
     g_models.clear();
@@ -2033,11 +2038,13 @@ extern "C" void hook_0203593C(Cpu* c) {
     shader_wait::frame();  // (this fork) draws wait for their shaders while an item is shown (#49)
 #endif
     mods::shop_ship_service();  // the ships' way back to the sea (mods/shop_ship.h)
+    link_appearance::service();  // Link's colours for the save file played, nothing when none are chosen (mods/link_appearance.h)
     // the item ring: its equip, the game's pace while open (full logic passes, and true 60's half passes,
     // which also run Link), the ring drawn
     mods::item_ring_service(c, !enabled() || !g_hold_next, enabled() && g_hold_next && true60::enabled());
     mods::context_touch_service();  // tests: the context buttons' assets export (WWHD_CONTEXT_ASSETS)
-    mods::hud_service();  // the boost bar and climb wheel fade out over the game's menus, events, messages
+    mods::hud_service(c);  // the boost bar and climb wheel fade out over the game's menus, events, messages; the
+                           // item menu's focus watch and #336 stop-gap (hud_gate.cpp)
     const bool was_fast_forward = mods::fast_forward_active();
     mods::fast_forward_service();
     const bool ff_transition = was_fast_forward != mods::fast_forward_active();
@@ -2070,6 +2077,8 @@ extern "C" void hook_0203593C(Cpu* c) {
         g_logic_steps++;
         true60_test::logic_step(g_logic_steps);
         mods::play_context_step();  // once per full logic step (the context buttons' reading)
+        game_progress::service(c);  // built-in Game progress: the count of the save in play (off: nothing read)
+        achievements::service(c);   // built-in Achievements: the check once a second, the pop-up (off: nothing read)
     }
     if (!enabled()) {
         g_hold_next = false;
@@ -2421,12 +2430,16 @@ extern "C" void hook_025DE788(Cpu* c) {
     g_in_execute = true;
     uint32_t execute_fn = c->r[3];
     if(!interp::g_hold_frame)guestmods::maphud::begin_logic(c,double(true60::dt())/30.0);
+    if (!interp::g_hold_frame) mods::instant_text_step();  // instant text (mods/instant_text.cpp)
     dsweep::before_execute(c);  // the setup's actor sweep (WWHD_DSWEEP): its actors do not run their logic
     f_025DE788_orig(c);
     dsweep::after_execute(c);
+    if (!interp::g_hold_frame) mods::instant_text_step();
     mods::after_execute(c, execute_fn);  // quick doors / fast scene changes: extra steps (full passes only)
     if (!interp::g_hold_frame) {guestmods::frame(interp::g_logic_steps);guestmods::logic_service(c);editor::logic_service(c);mods::packages::frame(interp::g_logic_steps);}
+    if (!interp::g_hold_frame) link_masks::frame();  // the WWHD_LINK_COLOURS test aid (mods/link_masks.h)
     editor::camera_service(c, !interp::g_hold_frame);  // the fly camera: every logic pass, and true 60's 60 Hz passes
+    link_appearance::logic_service(c, !interp::g_hold_frame);  // the colour page's close camera (mods/link_appearance.h)
     if(!interp::g_hold_frame)guestmods::maphud::finish_logic();
     guestmods::draw_frame(c,interp::executed_steps());
     g_in_execute = false;
