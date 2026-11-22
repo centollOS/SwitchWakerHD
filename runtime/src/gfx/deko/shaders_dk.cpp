@@ -998,6 +998,14 @@ std::mutex g_listedMutex;
 std::vector<Listed> g_listed;
 
 // ---- translation
+// Pixel colour outputs without NaN or infinity (upstream d53b3923, LatteDecompiler.h finiteColorOutputs): a few NaN
+// pixels, spread by the bloom and blur passes, blacked out the 3D picture in a storm on phones. On by default as
+// upstream's Vulkan renderer; WWHD_NAN_GUARD=0 translates as before (the GLSL, and so its hash, differs: the
+// shader caches keyed by it, shadercache_dksh.bin from tools/switch/dksh_cache translate, must be made the same way).
+bool nan_guard() {
+    static const bool on = !getenv("WWHD_NAN_GUARD") || strcmp(getenv("WWHD_NAN_GUARD"), "0");
+    return on;
+}
 // null, or why the program cannot be translated
 const char* decompile(const uint32_t* regs, bool vertex, LatteFetchShader* fetch, uint64_t base, uint32_t address,
                       uint32_t size, LatteDecompilerOutput_t& output) {
@@ -1005,6 +1013,7 @@ const char* decompile(const uint32_t* regs, bool vertex, LatteFetchShader* fetch
     if (vertex && !fetch) return "vertex shader has no fetch program";
     LatteShader_UpdatePSInputs(const_cast<uint32_t*>(regs));
     LatteDecompilerOptions options;
+    options.finiteColorOutputs = nan_guard();  // (upstream d53b3923) pixel colours without NaN / infinity
     if (vertex)
         LatteDecompiler_DecompileVertexShader(base, const_cast<uint32_t*>(regs), ppc_ptr(address), size, fetch, options,
                                               &output);
