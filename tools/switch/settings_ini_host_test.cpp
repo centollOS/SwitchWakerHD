@@ -97,6 +97,19 @@ int main() {
         CHECK(m.log.size() == 10);
         CHECK(format(f).find("\n\n[dev]\nWWHD_DK_TRACE_FRAMES=100,200\nWWHD_SCHED_STATS=2\n") != std::string::npos);
     }
+    // the anisotropic level: a saved switchAnisoLevel as set, else the old switchAniso, else the build's default
+    // (16x on the Switch 2, 1x on the Switch 1: kDefaultAnisoLevel)
+    {
+        const std::string s1 = "1", s2 = "2", s8 = "8", s16 = "16", s3 = "3", s32 = "32", empty, on = "1", off = "0";
+        CHECK(aniso_level(nullptr, nullptr, 16) == 16);  // first start on the Switch 2
+        CHECK(aniso_level(nullptr, nullptr, 1) == 1);    // first start on the Switch 1
+        CHECK(aniso_level(&empty, &empty, 16) == 16);    // empty values are no choice
+        CHECK(aniso_level(&s1, nullptr, 16) == 1);       // the player's 1x (off) stays off
+        CHECK(aniso_level(&s2, nullptr, 16) == 2 && aniso_level(&s8, nullptr, 1) == 8 && aniso_level(&s16, nullptr, 1) == 16);
+        CHECK(aniso_level(&s3, nullptr, 16) == 2 && aniso_level(&s32, nullptr, 1) == 16);  // rounded down
+        CHECK(aniso_level(nullptr, &off, 16) == 1 && aniso_level(nullptr, &on, 1) == 16);  // the old on/off key
+        CHECK(aniso_level(&s2, &on, 1) == 2);    // switchAnisoLevel wins over the old key
+    }
     if (g_failed) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failed);
         return 1;

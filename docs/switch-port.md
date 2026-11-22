@@ -1525,7 +1525,8 @@ Switch tab: ...`), not saved. Off (30 fps) by default, as before: no Switch buil
 hold, swaps/s = logic steps/s` in the round 40 log).
 Under 60 fps interpolation, a "Keep game speed" check box (paced interpolation, `interp_pacing.h`) keeps the logic at
 30 steps a second and drops in-between frames that do not fit; off (the desktop's 60 fps default), every in-between
-frame is drawn and the game slows down below 60 fps. Not saved, off at the next start; `WWHD_INTERP_PACED` in `[dev]`
+frame is drawn and the game slows down below 60 fps. Not saved: the next start has the default again, on on the
+Switch 2 (as at 120/240 fps) and off on the Switch 1; `WWHD_INTERP_PACED` in `[dev]`
 wins over it (the box is then greyed out).
 
 ## Rendering resolution

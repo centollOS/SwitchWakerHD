@@ -1539,7 +1539,7 @@ void ss_reset() {
     reticle_reset();
     true60::ss_reset();
 }
-// Paced interpolation (WWHD_INTERP_PACED=1, the default on Android, Windows on ARM64 and at 120/240
+// Paced interpolation (WWHD_INTERP_PACED=1, the default on Android, Windows on ARM64, Switch 2 and at 120/240
 // fps): an in-between pass is drawn only when it fits before the next logic step is due (33.3 ms
 // after the last one, measured with the passes' recent durations); otherwise the rest of the step's
 // in-between passes are dropped and the next step waits for its time. The game then always advances
@@ -1558,9 +1558,10 @@ void ss_reset() {
 static const char* const g_env_paced = getenv("WWHD_INTERP_PACED");
 // Windows on ARM64 (Snapdragon X) draws 60 fps only where the Adreno driver's per-draw CPU cost
 // allows: unpaced, the Outset save-state benchmark ran 16 logic steps a second (half speed, and the
-// audio, which follows the game's speed, crackled)
+// audio, which follows the game's speed, crackled). The Switch 2 also keeps the game's speed by default
+// (the Switch 1 does not; neither saves the choice, overlay_switch.cpp).
 static std::atomic<bool> g_paced{[] {
-#if defined(__ANDROID__) || (defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__)))
+#if defined(__ANDROID__) || defined(__SWITCH2__) || (defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__)))
     return !g_env_paced || atoi(g_env_paced) != 0;
 #else
     return g_env_paced && atoi(g_env_paced) != 0;

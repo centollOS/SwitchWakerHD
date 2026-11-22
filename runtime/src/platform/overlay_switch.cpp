@@ -241,7 +241,8 @@ void tab_picture() {
     }
     if (done) hostui::post([] { save_picture(); });
     {
-        // texture sharpness at an angle: 1x (off, the default) to 16x; saved as switchAnisoLevel
+        // texture sharpness at an angle: 1x (off) to 16x (kDefaultAnisoLevel: 16x on the Switch 2, 1x on the Switch 1);
+        // saved as switchAnisoLevel
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(tx.anisoLabel);
         const int cur = gfxsw::aniso_level();
@@ -373,6 +374,7 @@ void tab_picture() {
             if (check(lbl(tx.keepSpeed, "paced").c_str(), interp::paced_interpolation(), &paced, !getenv("WWHD_INTERP_PACED")))
                 hostui::post([paced] {
                     interp::set_paced_interpolation(paced);
+                    // not saved: the next start has the default again (on on the Switch 2, off on the Switch 1)
                     LOG("[interp] keep game speed from the Switch tab: %s (not saved)", paced ? "on" : "off");
                 });
             help(tx.keepSpeedHelp);

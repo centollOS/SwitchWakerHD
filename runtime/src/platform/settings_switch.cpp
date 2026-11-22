@@ -22,6 +22,7 @@
 // (appletHook) did not help: the program was suspended before the hook ran. Overclocks are left to sys-clk. A saved switchCpuClock is ignored (logged); a saved GPU profile 614
 // becomes 1600 (the same apm configuration without the raised GPU clock).
 #include "settings_switch.h"
+#include "settings_ini.h"  // aniso_level
 #include "shader_wait_switch.h"
 #ifdef __SWITCH2__
 #include "s2_tab_switch2.h"  // (s2/*)
@@ -236,13 +237,9 @@ void set_gamepad_pip(bool on) {
 }
 
 int saved_aniso_level() {
-    std::string v;
-    if (hostui::get(kKeyAnisoLevel, v) && !v.empty()) {
-        const int n = atoi(v.c_str());
-        return n >= 16 ? 16 : n >= 8 ? 8 : n >= 4 ? 4 : n >= 2 ? 2 : 1;
-    }
-    if (hostui::get(kKeyAniso, v) && !v.empty()) return atoi(v.c_str()) != 0 ? 16 : 1;  // the old on/off choice
-    return 1;
+    std::string level, old;
+    const bool hasLevel = hostui::get(kKeyAnisoLevel, level), hasOld = hostui::get(kKeyAniso, old);
+    return settings_ini::aniso_level(hasLevel ? &level : nullptr, hasOld ? &old : nullptr, kDefaultAnisoLevel);
 }
 const char* aniso_level_setting(int level) {
     return level >= 16 ? "16" : level >= 8 ? "8" : level >= 4 ? "4" : level >= 2 ? "2" : "1";
