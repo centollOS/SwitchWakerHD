@@ -867,11 +867,15 @@ bool sched_stats() { return g_sched_stats.load(std::memory_order_relaxed); }
 
 #ifdef __SWITCH__
 // guest threads (by name) that run above the render thread on the host like the audio threads:
-// WWHD_BOOST_THREADS, comma-separated, default "update_ubo"; empty turns it off
+// WWHD_BOOST_THREADS, comma-separated, default "update_ubo,WorkerMgr/Worker*" (a trailing * matches a prefix);
+// empty turns it off. (lschaupp fork, perf/workers, from ZeldaWWHDRecomp's sched_switch2.cpp step C: the game's
+// main thread waits in drainWorkerQueues (02759564) for the sead WorkerMgr workers' jobs (particles,
+// RenderDisplay draw / calcGPU) every step; at the guest threads' priority the render, service and shader
+// threads time-sliced them)
 static bool boosted_thread(const std::string& name) {
     static const std::vector<std::string> names = [] {
         const char* e = getenv("WWHD_BOOST_THREADS");
-        std::string list = e ? e : "update_ubo";
+        std::string list = e ? e : "update_ubo,WorkerMgr/Worker*";
         std::vector<std::string> out;
         for (size_t start = 0; start <= list.size();) {
             size_t end = list.find(',', start);
@@ -881,7 +885,35 @@ static bool boosted_thread(const std::string& name) {
         }
         return out;
     }();
-    return !name.empty() && std::find(names.begin(), names.end(), name) != names.end();
+    if (name.empty()) return false;
+    for (const std::string& n : names) {
+        if (!n.empty() && n.back() == '*' ? name.compare(0, n.size() - 1, n, 0, n.size() - 1) == 0 : name == n)
+            return true;
+    }
+    return false;
+}
+#endif
+
+#ifdef __SWITCH__
+// (lschaupp fork, perf/workers) the boosted threads other than update_ubo, switchable live for A/B runs
+// (debug server "workerboost [0|1]", not saved): handle and the host priority they started with
+static std::mutex g_worker_boost_mu;
+static std::vector<std::pair<Handle, s32>> g_worker_boost;
+static std::atomic<bool> g_worker_boost_on{true};
+static void note_boosted_worker(Handle h) {
+    s32 prio = 0;
+    svcGetThreadPriority(&prio, h);
+    std::lock_guard<std::mutex> lk(g_worker_boost_mu);
+    g_worker_boost.push_back({h, prio});
+}
+extern "C" int wwhd_worker_boost(int on) {  // -1: query; returns the number of threads switched (or known)
+    std::lock_guard<std::mutex> lk(g_worker_boost_mu);
+    if (on >= 0) {
+        g_worker_boost_on = on != 0;
+        for (auto& [h, prio] : g_worker_boost) svcSetThreadPriority(h, on ? 0x2B : prio);
+        LOG("[thread] worker boost %s for %zu threads (debug server)", on ? "on" : "off", g_worker_boost.size());
+    }
+    return int(g_worker_boost.size()) * (g_worker_boost_on.load() ? 1 : -1);
 }
 #endif
 
@@ -907,7 +939,8 @@ static void* thread_main(void* p) {
     // main thread then waited with its core: OSSendMessage 12-23% of its time), and when the queue
     // was full the main thread ran the job itself.
     if (host::core_layout_on() && (ht->prio <= 8 || boosted_thread(name))) {
-        svcSetThreadPriority(threadGetCurHandle(), 0x2B);
+        if (ht->prio > 8 && name != "update_ubo") note_boosted_worker(threadGetCurHandle());  // (perf/workers)
+        if (ht->prio <= 8 || name == "update_ubo" || g_worker_boost_on.load()) svcSetThreadPriority(threadGetCurHandle(), 0x2B);
         if (ht->prio > 8) LOG("[thread] \"%s\" runs above the render thread (WWHD_BOOST_THREADS)", name.c_str());
     }
 #endif
