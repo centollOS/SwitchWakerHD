@@ -15,7 +15,7 @@
 #include "update_notice_switch.h"
 #include "saltynx_switch.h"
 #ifdef __SWITCH2__
-#include "clocks_switch2.h"  // (lschaupp fork, perf/clocks)
+#include "clocks_switch2.h"  // (perf/clocks)
 #endif
 #include <sys/stat.h>
 #include <dirent.h>
@@ -129,7 +129,7 @@ static void crash_report(const char* kind, uint64_t pc, uint64_t lr, uint64_t sp
     put("[crash] toolchain: %s\n", switch_toolchain::info());
     log_crash_write(buf, n);
 #ifdef __SWITCH2__
-    switch2_clocks_restore_quiet();  // (lschaupp fork, perf/clocks) the console's CPU rate back before the process ends
+    switch2_clocks_restore_quiet();  // (perf/clocks) the console's CPU rate back before the process ends
 #endif
 }
 void __libnx_exception_handler(ThreadExceptionDump* ctx) {
@@ -331,7 +331,7 @@ void main_switch::start() {
 #endif
     switch_settings::apply_at_start();  // GPU profile, saved picture options (platform/settings_switch.h)
 #ifdef __SWITCH2__
-    switch2_clocks_start();  // (lschaupp fork, perf/clocks) the CPU clock setting, default Boost (platform/clocks_switch2.h)
+    switch2_clocks_start();  // (perf/clocks) the CPU clock setting, default Boost (platform/clocks_switch2.h)
 #endif
     update_notice::start();  // asks GitHub for a newer release in the background (platform/update_notice_switch.h)
     saltynx::start();  // the frame rate for the console's overlays, when SaltyNX runs (platform/saltynx_switch.h)

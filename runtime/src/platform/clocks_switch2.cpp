@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of
 // the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
-// Switch 2: the CPU clock setting and the clock probe. Ported to OunceWakerHD (lschaupp private fork, perf/clocks,
+// Switch 2: the CPU clock setting and the clock probe. Ported to OunceWakerHD (perf/clocks,
 // 2026-11-21) from ZeldaWWHDRecomp's Switch 2 runtime (platform/switch2/clocks_switch2.cpp, decomp 9m/9p); changes:
 // no apm calls (this fork never initialises apm on the Switch 2: settings_switch.cpp apm_ready), so no
 // WWHD_S2_PERFCONF and no apm fields in the log line; the menu entry is in the Switch 2 tab (s2_clock_switch2.cpp);
@@ -116,7 +116,7 @@ u32 read_rate(Clock c) {
 
 // (clk2) The NRO's __appInit (sm_session_switch2.c replaceSmSession) swaps the loader's sm session for a fresh one
 // registered with this process's own access list; that list has no clkrst / pcv, so GetService answers 0x1015
-// (sm NotAllowed) under kaiHEN, while the loader's session (what libnx keeps, and what ZeldaWWHDRecomp uses) may
+// (sm NotAllowed) under some homebrew loaders, while the loader's session (what libnx keeps, and what ZeldaWWHDRecomp uses) may
 // open them. replaceSmSession leaves that session's handle in the override table: ask it for the service and add
 // the handle as an override, so clkrstInitialize / pcvInitialize (smGetServiceWrapper) take it.
 constexpr Result kSmNotAllowed = 0x1015;

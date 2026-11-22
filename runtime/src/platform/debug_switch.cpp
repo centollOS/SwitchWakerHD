@@ -22,7 +22,7 @@
 #include "../game_clock.h"
 #include "../interp.h"
 #ifdef __SWITCH2__
-#include "clocks_switch2.h"  // (lschaupp fork, perf/clocks)
+#include "clocks_switch2.h"  // (perf/clocks)
 #endif
 namespace gx2 { extern uint32_t g_render_thread_handle; }  // (gx2_core.cpp: rtcores)
 #include "../mods/mods.h"
@@ -362,7 +362,7 @@ debugsrv::Reply guestcore3(const debugsrv::Args& a) {
                         (cores::allowed() ? "" : " (the process has no core 3: the forwarder's NPDM)"));
 }
 
-// "interp [0|1|2] [fps]" (perf tooling, lschaupp fork): the Picture tab's frame rate mode (0 30 fps, 1 interpolation
+// "interp [0|1|2] [fps]" (perf tooling): the Picture tab's frame rate mode (0 30 fps, 1 interpolation
 // at fps 60/120/240, 2 true 60), not saved; for perf_test runs at the 60 fps the player uses
 debugsrv::Reply interp_cmd(const debugsrv::Args& a) {
     if (!a.empty()) {
@@ -379,7 +379,7 @@ debugsrv::Reply interp_cmd(const debugsrv::Args& a) {
 }
 
 #ifdef __SWITCH2__
-// "s2clock [normal|boost|max]" (lschaupp fork, perf/clocks): the CPU clock setting for this start, not saved
+// "s2clock [normal|boost|max]" (perf/clocks): the CPU clock setting for this start, not saved
 debugsrv::Reply s2clock(const debugsrv::Args& a) {
     if (!a.empty()) {
         const int c = a[0] == "normal" || a[0] == "0" ? 0 : a[0] == "max" || a[0] == "2" ? 2 : 1;
@@ -393,7 +393,7 @@ debugsrv::Reply s2clock(const debugsrv::Args& a) {
 }
 #endif
 
-// "workerboost [0|1]" (lschaupp fork, perf/workers): the sead WorkerMgr workers above the render thread, live, not saved
+// "workerboost [0|1]" (perf/workers): the sead WorkerMgr workers above the render thread, live, not saved
 extern "C" int wwhd_worker_boost(int on);
 debugsrv::Reply workerboost(const debugsrv::Args& a) {
     const int n = wwhd_worker_boost(a.empty() ? -1 : a[0] != "0");

@@ -868,7 +868,7 @@ bool sched_stats() { return g_sched_stats.load(std::memory_order_relaxed); }
 #ifdef __SWITCH__
 // guest threads (by name) that run above the render thread on the host like the audio threads:
 // WWHD_BOOST_THREADS, comma-separated, default "update_ubo,WorkerMgr/Worker*" (a trailing * matches a prefix);
-// empty turns it off. (lschaupp fork, perf/workers, from ZeldaWWHDRecomp's sched_switch2.cpp step C: the game's
+// empty turns it off. (perf/workers, from ZeldaWWHDRecomp's sched_switch2.cpp step C: the game's
 // main thread waits in drainWorkerQueues (02759564) for the sead WorkerMgr workers' jobs (particles,
 // RenderDisplay draw / calcGPU) every step; at the guest threads' priority the render, service and shader
 // threads time-sliced them)
@@ -895,7 +895,7 @@ static bool boosted_thread(const std::string& name) {
 #endif
 
 #ifdef __SWITCH__
-// (lschaupp fork, perf/workers) the boosted threads other than update_ubo, switchable live for A/B runs
+// (perf/workers) the boosted threads other than update_ubo, switchable live for A/B runs
 // (debug server "workerboost [0|1]", not saved; off by default in combo/all): handle and the host priority they started with
 static std::mutex g_worker_boost_mu;
 static std::vector<std::pair<Handle, s32>> g_worker_boost;
