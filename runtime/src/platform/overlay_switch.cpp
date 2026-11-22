@@ -37,6 +37,9 @@
 #include "debug_switch.h"
 #include "prepare_graphics_switch.h"
 #include "settings_switch.h"
+#ifdef __SWITCH2__
+#include "s2_tab_switch2.h"  // (s2/*)
+#endif
 #include "shader_wait_switch.h"
 #include "../menu_i18n.h"
 #include "ui_text_switch.h"
@@ -766,6 +769,9 @@ void register_ext() {
     // Language / About
     ext::add_tab({"picture", "Picture", tab_picture, nullptr}, "audio");
     ext::add_tab({"controller", "Controls", tab_controller, nullptr}, "audio");
+#ifdef __SWITCH2__
+    ext::add_tab({"switch2", "Switch 2", s2tab::tab, nullptr}, "audio");  // (s2/*) s2_tab_switch2.h
+#endif
     ext::add_tab({"warp", "Warp", tab_warp, nullptr});
     ext::add_tab({"developer", "Dev", tab_developer, nullptr});
     // Shortcuts: keyboard keys and desktop actions (full screen, screenshot); the controller column is unbound but for Home

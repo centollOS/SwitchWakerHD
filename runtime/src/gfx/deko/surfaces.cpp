@@ -755,7 +755,7 @@ namespace {
 std::atomic<float> g_resRequested{[] {
     const char* e = getenv("WWHD_RES_SCALE");
     float f = e ? float(atof(e)) : 1.0f;
-    return f > 0 ? std::clamp(f, 0.5f, 2.0f) : 1.0f;
+    return f > 0 ? std::clamp(f, 0.5f, kMaxResScale) : 1.0f;
 }()};
 std::atomic<float> g_shadowRequested{[] {
     // the default is the game's own size (1): half size gives +5-7% fps in the busiest views, but straight shadow
@@ -891,7 +891,7 @@ void set_shadow_scale(float scale) {
     const float f = std::clamp(scale, 0.5f, 2.0f);
     if (g_shadowRequested.exchange(f) != f) LOG("[dk] shadow map scale %.2f (from the next frame)", double(f));
 }
-void set_res_scale(float scale) { g_resRequested.store(std::clamp(scale, 0.5f, 2.0f), std::memory_order_relaxed); }
+void set_res_scale(float scale) { g_resRequested.store(std::clamp(scale, 0.5f, kMaxResScale), std::memory_order_relaxed); }
 size_t rescale_pool_bytes() { return g_poolBytes; }
 
 void latch_res_scale() {

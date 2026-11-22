@@ -28,6 +28,7 @@ struct ResProfile {
 };
 ResProfile res_profile(int m);
 void set_res_profile(int m, ResProfile p);  // saves it; applies it now when m is the active mode
+void reapply_res_profile(const char* why);  // (s2/resolution) the active mode's profile again (a render choice changed)
 
 // host loop, often: once a second, the active mode's picture profile (dock / undock)
 void tick();

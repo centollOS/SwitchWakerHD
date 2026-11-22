@@ -112,6 +112,10 @@ macro(switch_port_sources)
                             runtime/src/platform/background_shaders_switch.cpp runtime/src/platform/main_switch.cpp runtime/src/platform/core_switch.cpp runtime/src/platform/audio_out_switch.cpp runtime/src/platform/overlay_switch.cpp
                             runtime/src/platform/upstream_stubs_switch.cpp runtime/src/platform/bench_switch.cpp
                             runtime/src/platform/update_notice_switch.cpp)
+    if(WWHD_SWITCH2)  # (s2/*) the settings overlay's Switch 2 tab and its sections
+      file(GLOB S2_SOURCES CONFIGURE_DEPENDS runtime/src/platform/s2_*_switch2.cpp)
+      list(APPEND GFX_SOURCES ${S2_SOURCES})
+    endif()
   endif()
 endmacro()
 

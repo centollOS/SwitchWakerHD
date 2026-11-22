@@ -708,7 +708,7 @@ void compile_job(Job& job, JobResult& r) {
 
 // (this fork) the cores a compile a draw waits for may use: 0 and 2 (core 1 runs the main thread and the guest
 // threads placed there, WWHD_CORE_LAYOUT), and 3 when the process has it (platform/cores_switch.h)
-int foreground_mask() { return cores::core3() ? 0xD : 0x5; }
+int foreground_mask() { return (cores::core3() ? 0xD : 0x5) | int(cores::extra_mask()); }  // (s2/cores: + 4-5)
 
 void worker_main(void*) {
     svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, foreground_mask());
@@ -760,9 +760,15 @@ void worker_main(void*) {
         // (this fork, docs/core3-plan.md) with core 3: background jobs there, nothing else of the game's runs on it
         static int mask = foreground_mask();
         const bool fast = g_bgFast.load(std::memory_order_relaxed);
-        const int bgMask = cores::core3() ? 0x8 : 0x1;
+        // (s2/cores) with cores 4-5: background jobs there
+        const int extra = int(cores::extra_mask());
+        const int bgMask = extra ? extra : cores::core3() ? 0x8 : 0x1;
         const int want = job.background && !fast ? bgMask : foreground_mask();
-        if (want != mask) svcSetThreadCoreMask(CUR_THREAD_HANDLE, want == bgMask ? (bgMask == 0x8 ? 3 : 0) : -1, mask = want);
+        if (want != mask) {
+            // the preferred core must be in the new mask: core 2 when cores 4-5 are or were in play, else kept (-1)
+            const int preferred = want == bgMask ? __builtin_ctz(unsigned(bgMask)) : (extra || (mask & 0x30)) ? 2 : -1;
+            svcSetThreadCoreMask(CUR_THREAD_HANDLE, preferred, mask = want);
+        }
         const uint64_t c0 = now_ns();
         compile_job(job, r);
         const uint64_t took = now_ns() - c0;

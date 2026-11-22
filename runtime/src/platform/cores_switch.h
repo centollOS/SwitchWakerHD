@@ -28,6 +28,25 @@ inline std::atomic<bool>& wanted() {
 // true when background work goes to core 3 now
 inline bool core3() { return allowed() && wanted().load(std::memory_order_relaxed); }
 
+// (s2/cores) Switch 2: cores 4 and 5, when the process's core mask has them (s2_cores_switch2.cpp, settings.ini
+// s2Cores45, off by default). On: the game's worker threads (emulated cores 0 and 2, place_guest_thread) and the
+// shader compiles may also run there, and background shader work goes there instead of core 3 / 0.
+inline uint64_t process_mask() {
+    static const uint64_t m = [] {
+        u64 mask = 0;
+        return R_SUCCEEDED(svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) ? uint64_t(mask) : uint64_t(0x7);
+    }();
+    return m;
+}
+inline std::atomic<bool>& extra_wanted() {
+    static std::atomic<bool> w{false};
+    return w;
+}
+// the cores 4-5 the threads above may add now (0: none, the option off or the process without them)
+inline uint32_t extra_mask() {
+    return extra_wanted().load(std::memory_order_relaxed) ? uint32_t(process_mask() & 0x30) : 0u;
+}
+
 // The game's threads of emulated cores 0 and 2 (WorkerMgr, update_ubo, resource and audio threads) on host cores 0, 2
 // and 3 instead of 0 and 2, where the render thread and the host service threads preempt them; the main thread, alone
 // on core 1, waits for their jobs (docs/guest-core3-plan.md: +1.9% fps at the Outset village with PGO). On when the
@@ -45,9 +64,10 @@ inline std::atomic<bool>& guest_wanted() {
 inline void place_guest_thread(uint32_t core) {
     if (core % 3 == 1) return;  // the main thread's core keeps its own placement
     thread_local int applied = -1;
-    const int want = int(core % 3) * 2 + (allowed() && guest_wanted().load(std::memory_order_relaxed) ? 1 : 0);
+    const uint32_t extra = extra_mask();  // (s2/cores)
+    const int want = int(core % 3) * 2 + (allowed() && guest_wanted().load(std::memory_order_relaxed) ? 1 : 0) + int(extra << 4);
     if (want == applied) return;
     applied = want;
-    svcSetThreadCoreMask(threadGetCurHandle(), s32(core % 3), (want & 1) ? 0xD : 0x5);
+    svcSetThreadCoreMask(threadGetCurHandle(), s32(core % 3), ((want & 1) ? 0xD : 0x5) | extra);
 }
 }  // namespace cores

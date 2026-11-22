@@ -7,7 +7,8 @@ layout(binding = 0) uniform sampler2D scan;
 layout(std140, binding = 0) uniform Present {
     vec4 grade;    // exposure, contrast, saturation, gamma
     ivec4 encode;  // x: encode as sRGB; y: the picture's image has an sRGB format (sampling decoded it);
-                   // z: FSR 1: 1 EASU upscale (the picture is smaller than the window), 2 RCAS sharpening (same size)
+                   // z: FSR 1: 1 EASU upscale (the picture is smaller than the window), 2 RCAS sharpening (same size);
+                   //    3 (s2/render4k) a box downscale (the picture is larger than its place in the window)
 };
 vec3 srgb_encode(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c)); }
 vec4 srgb_encode(vec4 c) { return mix(c * 12.92, 1.055 * pow(c, vec4(1.0 / 2.4)) - 0.055, step(vec4(0.0031308), c)); }
@@ -123,9 +124,25 @@ vec3 rcas() {
     return clamp((lobe * (b + d + h + f) + e) / (4.0 * lobe + 1.0), 0.0, 1.0);
 }
 
+// (s2/render4k) a picture larger than its place (a 3840x2160 render in the handheld 1920x1080 window): four bilinear
+// taps a quarter of an output pixel off its centre, each the average of the 2x2 texels around it. At exactly 2x
+// they sit on texel centres: the output pixel is the mean of its 2x2 texels, a box filter; at other ratios
+// (1.33x, 1.67x) they cover the pixel's footprint closely enough not to drop texels as one bilinear tap would.
+// The sampler is linear (draw_picture), so an sRGB image averages decoded values.
+vec3 box_down() {
+    vec2 d = vec2(dFdx(uv.x), dFdy(uv.y)) * 0.25;  // (the quad's uv is linear in the window: exact per pixel)
+    return 0.25 * (texture(scan, uv + vec2(-d.x, -d.y)).rgb + texture(scan, uv + vec2(d.x, -d.y)).rgb +
+                   texture(scan, uv + vec2(-d.x, d.y)).rgb + texture(scan, uv + vec2(d.x, d.y)).rgb);
+}
+
 void main() {
     vec3 c;
-    if (encode.z != 0) {
+    if (encode.z == 3) {
+        c = box_down();
+        if (encode.y != 0) c = srgb_encode(clamp(c, 0.0, 1.0));
+        c = clamp(c * grade.x, 0.0, 1.0);
+        if (encode.x != 0) c = srgb_encode(c);
+    } else if (encode.z != 0) {
         // EASU returns the picture as it would be after the encoding steps below (perceptual values)
         c = encode.z == 2 ? rcas() : easu();
         if (encode.x != 0) c = srgb_encode(clamp(c * c * grade.x, 0.0, 1.0));  // (exposure scales the linear picture)
