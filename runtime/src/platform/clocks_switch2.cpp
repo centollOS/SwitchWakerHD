@@ -114,8 +114,42 @@ u32 read_rate(Clock c) {
     return hz;
 }
 
+// (clk2) The NRO's __appInit (sm_session_switch2.c replaceSmSession) swaps the loader's sm session for a fresh one
+// registered with this process's own access list; that list has no clkrst / pcv, so GetService answers 0x1015
+// (sm NotAllowed) under kaiHEN, while the loader's session (what libnx keeps, and what ZeldaWWHDRecomp uses) may
+// open them. replaceSmSession leaves that session's handle in the override table: ask it for the service and add
+// the handle as an override, so clkrstInitialize / pcvInitialize (smGetServiceWrapper) take it.
+constexpr Result kSmNotAllowed = 0x1015;
+Result via_loader_sm(const char* svc) {
+    const SmServiceName name = smEncodeName(svc);
+    if (smGetServiceOverride(name) != INVALID_HANDLE) return MAKERESULT(Module_Libnx, LibnxError_AlreadyInitialized);
+    const Handle smh = smGetServiceOverride(smEncodeName("sm:"));
+    if (smh == INVALID_HANDLE) return MAKERESULT(Module_Libnx, LibnxError_NotFound);  // (no loader session)
+    Service sm;
+    serviceCreate(&sm, smh);  // (borrowed: never closed here)
+    Handle h = INVALID_HANDLE;
+    const Result rc = serviceDispatchIn(&sm, 1, name, .out_handle_attrs = {SfOutHandleAttr_HipcMove}, .out_handles = &h);
+    if (R_SUCCEEDED(rc)) smAddOverrideHandle(name, h);
+    return rc;
+}
+// the service's init; on sm NotAllowed once more through the loader's sm session (logged)
+template <class Init>
+Result init_service(const char* svc, Init init) {
+    Result rc = init();
+    if (rc != kSmNotAllowed) return rc;
+    const Result g = via_loader_sm(svc);
+    if (R_FAILED(g)) {
+        LOG("[switch2 clocks] %s: sm refused it (rc 0x%x); through the loader's sm session: rc 0x%x", svc, rc, g);
+        return rc;
+    }
+    const Result rc2 = init();
+    LOG("[switch2 clocks] %s: sm refused it (rc 0x%x); through the loader's sm session: %s (rc 0x%x)", svc, rc,
+        R_SUCCEEDED(rc2) ? "open" : "still failed", rc2);
+    return rc2;
+}
+
 void open_backend() {
-    const Result rc = clkrstInitialize();
+    const Result rc = init_service("clkrst", [] { return clkrstInitialize(); });
     if (R_SUCCEEDED(rc)) {
         g_backend = Clkrst;
         int open = 0;
@@ -135,7 +169,7 @@ void open_backend() {
     } else {
         LOG("[switch2 clocks] clkrstInitialize failed: rc 0x%x; trying pcv", rc);
     }
-    const Result p = pcvInitialize();
+    const Result p = init_service("pcv", [] { return pcvInitialize(); });
     if (R_SUCCEEDED(p)) {
         g_backend = Pcv;
         u32 hz = 0;
@@ -342,12 +376,33 @@ const char* const kChoiceName[3] = {"Normal", "Boost", "Maximum"};
 // the setting (or WWHD_S2_CPU_MHZ) applied; on the probe thread
 void apply_cpu() {
     char s[200];
-    if (g_backend != Clkrst || !g_sessionOpen[Cpu]) {
-        set_status("Not available: the console's clock service did not answer (see the log).");
-        return;
-    }
     if (g_envBoost) {
         set_status("Set by WWHD_S2_CPU_BOOST for this start (the boost mode; GPU at its minimum).");
+        return;
+    }
+    if (g_backend != Clkrst || !g_sessionOpen[Cpu]) {
+        // (clk2) no clkrst CPU session: Boost / Maximum through the console's boost mode (applet; FastLoad, the GPU
+        // at its minimum meanwhile, the rate the console's 1523 MHz), Normal turns it off again; logged
+        const int c = g_choice.load();
+        const bool want = c != 0;
+        if (want != g_boostOn) {
+            const Result rc = appletSetCpuBoostMode(want ? ApmCpuBoostMode_FastLoad : ApmCpuBoostMode_Normal);
+            if (R_SUCCEEDED(rc)) {
+                g_boostOn = want;
+                if (want) append_changed("CPU boost FastLoad");
+            }
+            settle();
+            const u32 now = read_rate(Cpu);
+            char rate[32] = "rate not readable";
+            if (now) snprintf(rate, sizeof rate, "CPU %.1f MHz", now / 1e6);
+            LOG("[switch2 clocks] setting %s without clkrst: appletSetCpuBoostMode(%s) rc 0x%x: %s%s", kChoiceName[c],
+                want ? "FastLoad" : "Normal", rc, rate, want && c == 2 ? " (Maximum needs clkrst: the boost rate)" : "");
+        }
+        if (!g_boostOn && want) snprintf(s, sizeof s, "Not available: the console refused the boost mode (see the log).");
+        else if (g_boostOn) snprintf(s, sizeof s, "Boost mode on (the console's boost rate, 1523 MHz; GPU at its minimum)%s.",
+                                     c == 2 ? "; Maximum needs the clock service" : "");
+        else snprintf(s, sizeof s, "Now: the console's rate.");
+        set_status(s);
         return;
     }
     if (g_envCpu) {
@@ -441,11 +496,11 @@ void probe_thread() {
         if (!g_restored && g_envBoost) measure_boost();
     }
     int nextLog = g_secs > 0 ? g_secs : -1;
-    // (combo/all) no clock service (clkrst and pcv refused, e.g. rc 0x1015 under kaiHEN): the setting stays in the menu
-    // with "Not available", nothing is changed or restored, and the 10 s probe line (all "?") is left out
+    // (combo/all) no clock service (clkrst and pcv refused): the 10 s probe line (all "?") is left out; the setting
+    // still works through the boost mode (apply_cpu, logged there)
     if (g_backend == None) {
         nextLog = -1;
-        LOG("[switch2 clocks] no clock service: the CPU clock setting has no effect this run; probe lines off");
+        LOG("[switch2 clocks] no clock rates this run: probe lines off; Boost / Maximum through the boost mode only");
     }
     const auto loopStart = clock::now();  // (the start-up calls above take a while: no catching up after them)
     for (int tick = 1; !g_stop; ++tick) {
