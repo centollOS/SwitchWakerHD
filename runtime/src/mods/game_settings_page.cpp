@@ -466,6 +466,7 @@ std::mutex g_detail_mu;
 std::map<std::string, std::function<std::unique_ptr<Detail>()>> g_detail_makers;
 std::string g_detail_wanted;
 std::unique_ptr<Detail> g_detail;
+OutsideTap g_detail_outside;  // a tap outside a row's page closes it, as B
 int g_test_detail = -1;  // reads until WWHD_TEST_SETTINGS_DETAIL's page opens (test aid)
 
 // the sheets (set_sheet): their images, and the handles made of them in the store (game thread)
@@ -617,7 +618,11 @@ void pad(input::PadState& p, Cpu* c) {
     g_page.texts = {tr("Settings"), tr("Change"), tr("Back"), tr("L / R: tabs"), tr(kMore)};
     Input in;
     in.buttons = p.buttons, in.lx = p.lx, in.ly = p.ly, in.touch = p.touch, in.dt = dt;
-    in.x = p.tx * 1280.0f, in.y = p.ty * 720.0f;  // the GamePad picture as the page's 1280 x 720
+    // the GamePad picture as the page's 1280 x 720: p.tx / p.ty are already 0..1 of the GamePad picture as the
+    // window draws it (on the Switch, gfxsw::gamepad_touch maps the touch screen through the picture's rect, full
+    // size or in the corner: where the HUD lists, this page's too, are drawn), and fit_to_screen scales the page
+    // to the GamePad's 854 x 480 by the same factor on both axes
+    in.x = p.tx * 1280.0f, in.y = p.ty * 720.0f;
     // With the Pro Controller the menu (and the page) are on the TV: the mouse on the TV picture is the
     // page's touch (tv_pointer.h), wanted while the page or its entry arrow is there
     const bool enabled = input_map::settings_pause_page();
@@ -781,6 +786,7 @@ void pad(input::PadState& p, Cpu* c) {
         }
         if (make && g_page.open()) {
             g_detail = make();
+            g_detail_outside = {};
             if (g_detail) {
                 play(c, Sound::Open);
                 LOG("[game-settings] a row's page opened");
@@ -789,7 +795,8 @@ void pad(input::PadState& p, Cpu* c) {
         }
     }
     if (g_detail && g_page.open()) {  // that page has the controller until B closes it
-        const Action act = g_detail->input(in);
+        Action act = g_detail->input(in);
+        if (g_detail_outside.step(in) && !act.closed) act.closed = true, act.sound = Sound::Close;
         g_detail->tick(dt);
         g_page.tick(dt);
         play(c, act.sound);

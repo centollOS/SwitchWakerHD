@@ -2,6 +2,7 @@
 // touch and closing, without the game.
 #include <cassert>
 #include <cstdio>
+#include <string>
 
 #include "mods/game_settings_graphics.h"
 #include "mods/game_settings_page.h"
@@ -194,6 +195,105 @@ int main() {
                     i += n;
                 }
             }
+    }
+    // touch, the rest of it (the Switch's touch screen and the TV mouse alike)
+    {
+        auto tap = [](Page& pg, float x, float y, const std::vector<Row>& r, int tabs) {
+            pg.input(touch(true, x, y), r, tabs);
+            return pg.input(touch(false, x, y), r, tabs);
+        };
+        std::vector<Row> many(12);
+        for (size_t i = 0; i < many.size(); i++) many[i].id = "r" + std::to_string(i), many[i].number = true, many[i].label = "Row";
+        many[1].toggle = true, many[1].number = false;
+        Page tp;
+        tp.show(3);
+        for (int i = 0; i < 20; i++) tp.tick(1.0f / 30);
+        tp.input(pad(0), many, 3);
+        const auto drawn = tp.draw(many, {"One", "Two", "Three"});  // (the tabs' places come from the drawing)
+        // a tap on a tab shows it; on the shown one nothing happens
+        auto is_tab = [](const Command& k) { return k.kind == Command::Picture && k.text.rfind("nb:tab", 0) == 0 && k.y == kWinY + 30; };
+        float first_x = -1;
+        for (const Command& k : drawn)
+            if (is_tab(k)) first_x = k.x + k.w / 2;  // (drawn last: the first tab)
+        Action ta = tap(tp, first_x, kWinY + 55, many, 3);
+        assert(tp.tab() == 0 && ta.sound == Sound::None);
+        float tab_x[3];
+        int n = 0;
+        for (const Command& k : drawn)
+            if (is_tab(k) && n < 3) tab_x[n++] = k.x + k.w / 2;
+        assert(n == 3);  // drawn from the last tab to the first
+        ta = tap(tp, tab_x[0], kWinY + 55, many, 3);
+        assert(tp.tab() == 2 && ta.sound == Sound::Tab && ta.id.empty() && !ta.closed);
+        ta = tap(tp, tab_x[1], kWinY + 55, many, 3);
+        assert(tp.tab() == 1 && ta.sound == Sound::Tab);
+        // a tap on a row selects it, a second tap (on its label) changes it: a number up, a toggle toggles
+        const float y0 = kRowY + kRowH / 2;
+        ta = tap(tp, kRowX + 40, y0 + 2 * kRowH, many, 3);
+        assert(tp.selected() == 2 && ta.id.empty() && ta.sound == Sound::Cursor);
+        ta = tap(tp, kRowX + 40, y0 + 2 * kRowH, many, 3);
+        assert(ta.id == "r2" && ta.direction == +1);
+        ta = tap(tp, kRowX + 40, y0 + kRowH, many, 3);
+        ta = tap(tp, kRowX + 40, y0 + kRowH, many, 3);
+        assert(ta.id == "r1" && ta.direction == 0);
+        // the chevrons: a number's plate's left / right ends
+        ta = tap(tp, kValueX + 26, y0 + 3 * kRowH, many, 3);
+        assert(ta.id == "r3" && ta.direction == -1 && tp.selected() == 3);
+        ta = tap(tp, kValueX + kValueW - 26, y0 + 3 * kRowH, many, 3);
+        assert(ta.id == "r3" && ta.direction == +1);
+        // a drag up over the list scrolls it (12 rows, 7 shown) and is not a tap; the selection stays
+        tp.input(touch(true, kRowX + 40, y0 + 5 * kRowH), many, 3);
+        tp.input(touch(true, kRowX + 40, y0 + 3 * kRowH), many, 3);
+        ta = tp.input(touch(true, kRowX + 40, y0 + 2 * kRowH), many, 3);
+        ta = tp.input(touch(false, kRowX + 40, y0 + 2 * kRowH), many, 3);
+        assert(ta.id.empty() && !ta.closed && tp.selected() == 3);
+        // now the first row shown is row 3
+        ta = tap(tp, kValueX + kValueW - 26, y0, many, 3);
+        assert(ta.id == "r3" && ta.direction == +1);
+        // dragged further than the list goes: it stops at its end (row 11 the last shown)
+        tp.input(touch(true, kRowX + 40, y0 + 6 * kRowH), many, 3);
+        tp.input(touch(true, kRowX + 40, y0 - 4 * kRowH), many, 3);
+        tp.input(touch(false, kRowX + 40, y0 - 4 * kRowH), many, 3);
+        ta = tap(tp, kValueX + kValueW - 26, y0 + 6 * kRowH, many, 3);
+        assert(ta.id == "r11" && tp.selected() == 11);
+        // the scroll bar: its top is the list's top
+        tp.input(touch(true, kRowX + kRowW + 10, kRowY + 4), many, 3);
+        tp.input(touch(false, kRowX + kRowW + 10, kRowY + 4), many, 3);
+        ta = tap(tp, kValueX + kValueW - 26, y0, many, 3);
+        assert(ta.id == "r0");
+        // scrolled away from the selection, the controller brings it back into view
+        tp.input(touch(true, kRowX + 40, y0 + 6 * kRowH), many, 3);
+        tp.input(touch(true, kRowX + 40, y0 - 4 * kRowH), many, 3);
+        tp.input(touch(false, kRowX + 40, y0 - 4 * kRowH), many, 3);  // rows 5..11 shown, row 0 selected
+        tp.input(pad(kPadDown), many, 3);
+        tp.input(pad(0), many, 3);
+        assert(tp.selected() == 1);
+        ta = tap(tp, kValueX + kValueW - 26, y0, many, 3);  // row 1 is the first shown now
+        assert(ta.id == "r1" && ta.direction == 0);
+        // a tap inside the window but on nothing does nothing; outside it, the page closes as B
+        ta = tap(tp, kWinX + 30, kWinY + kWinH - 120, many, 3);
+        assert(!ta.closed && ta.id.empty());
+        ta = tap(tp, kWinX / 2, 400, many, 3);
+        assert(ta.closed && ta.sound == Sound::Close && !tp.open());
+        tp.show(3);
+        tp.input(pad(0), many, 3);
+        ta = tap(tp, 640, kWinY + kWinH + 15, many, 3);
+        assert(ta.closed);
+        // a drag that begins outside and ends inside is not a tap outside
+        tp.show(3);
+        tp.input(pad(0), many, 3);
+        tp.input(touch(true, 640, kWinY + kWinH + 15), many, 3);
+        tp.input(touch(true, 640, kWinY + kWinH - 40), many, 3);
+        ta = tp.input(touch(false, 640, kWinY + kWinH - 40), many, 3);
+        assert(!ta.closed && tp.open());
+        // the controller still works after touch
+        tp.input(pad(kPadB), many, 3);
+        assert(!tp.open());
+        // the row pages (Detail): a tap outside their window closes them; inside, or a drag out of it, does not
+        OutsideTap o;
+        assert(!o.step(touch(true, 30, 300)) && o.step(touch(false, 30, 300)));
+        assert(!o.step(touch(true, 640, 300)) && !o.step(touch(false, 640, 300)));
+        assert(!o.step(touch(true, 640, 300)) && !o.step(touch(true, 30, 300)) && !o.step(touch(false, 30, 300)));
+        assert(!o.step(pad(kPadB)));
     }
     // the Graphics tab's choices map onto the Settings window's options (game_settings_graphics.h)
     {

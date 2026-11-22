@@ -394,8 +394,10 @@ void update() {
         if (const uint32_t g = generation(); g != gen) map = current(), gen = g;
         s.virt = controller_state(map, v).virt;
     }
-    // the console's touch screen (1280x720 panel) is the GamePad's while the window shows the GamePad picture
-    if (gfxsw::gamepad_view()) {
+    // the console's touch screen (1280x720 panel) is the GamePad's while the window shows the GamePad picture: full
+    // size, or (this fork) in the corner of the TV picture while the controller acts as the GamePad, inside that
+    // corner only (gamepad_touch maps through the rect the picture and its HUD lists are drawn in)
+    if (gfxsw::gamepad_view() || (gfxsw::gamepad_pip() && !g_pro.load(std::memory_order_relaxed))) {
         HidTouchScreenState ts = {};
         if (hidGetTouchScreenStates(&ts, 1) && ts.count > 0)
             s.touch = gfxsw::gamepad_touch(ts.touches[0].x / 1280.0f, ts.touches[0].y / 720.0f, s.tx, s.ty);
