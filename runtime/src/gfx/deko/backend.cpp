@@ -51,6 +51,7 @@ namespace interp { int output_fps(); bool interp_on(); }
 #ifdef __SWITCH2__
 #include "platform/s2_resolution_switch2.h"  // (s2/resolution)
 #include "platform/s2_display_switch2.h"  // (s2/hdr-info)
+#include "platform/s2_vrr_switch2.h"  // (s2/vrr)
 #endif
 #include "runtime.h"
 #include "lockstep.h"  // (this fork, #67)
@@ -1355,27 +1356,34 @@ void present() {
         static DkSwapchain set = nullptr;
         static uint32_t interval = 1;
         static bool hz120 = false;
+        static bool vrrSet = false;
         const uint32_t want = frame_pacing::swap_interval();
 #ifdef __SWITCH2__
         const bool want120 = want == 1 && interp::interp_on() && interp::output_fps() == 120;
+        // (s2/vrr) present when ready: every refresh at the highest rate with VRR, instead of the game's interval
+        const bool wantVrr = want >= 1 && !want120 && s2vrr::on();
+        if (wantVrr) s2vrr::poll();
 #else
-        const bool want120 = false;
+        const bool want120 = false, wantVrr = false;
 #endif
-        if (set != g_swapchain || want != interval || want120 != hz120) {
+        if (set != g_swapchain || want != interval || want120 != hz120 || wantVrr != vrrSet) {
 #ifdef __SWITCH2__
-            if (want120) {
+            if (want120 || wantVrr) {
                 const Result rc = nwindowSetFrameRates(nwindowGetDefault(), 0, 0, true);
-                LOG("[dk] frame %llu: every refresh at the highest rate: rc 0x%x", (unsigned long long)frame, rc);
+                LOG("[dk] frame %llu: every refresh at the highest rate%s: rc 0x%x", (unsigned long long)frame,
+                    wantVrr ? " with VRR (s2Vrr, present when ready)" : "", rc);
             } else
 #endif
             {
                 dkSwapchainSetSwapInterval(g_swapchain, want);
-                if (want != interval || want120 != hz120) LOG("[dk] frame %llu: swap interval %u", (unsigned long long)frame, want);
+                if (want != interval || want120 != hz120 || wantVrr != vrrSet)
+                    LOG("[dk] frame %llu: swap interval %u", (unsigned long long)frame, want);
             }
             set = g_swapchain;
             interval = want;
             hz120 = want120;
-            frame_pacing::set_interval(want);
+            vrrSet = wantVrr;
+            frame_pacing::set_interval(wantVrr ? 1 : want);
         }
     }
     // (this fork, #49) a frame drawn while draws wait, with shaders still compiling: they are compiled now (all at
